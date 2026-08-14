@@ -81,9 +81,11 @@ global_asm!(
 .text
 .global el0_demo_task_template
 el0_demo_task_template:
-mov x8, #0    // syscall 0
-mov x0, #42   // arg0
-svc #0
+mov x8, #1    // syscall 1: double
+mov x0, #21   // arg0
+svc #0        // x0 <- 42, threaded into the next call below
+mov x8, #0    // syscall 0: print
+svc #0        // proves the returned x0 survived the trampoline intact
 1:
 wfe
 b 1b
@@ -185,11 +187,24 @@ pub unsafe fn enter() -> ! {
 /// EL1 with the kernel's own stack and every privilege EL0 lacks - the
 /// entire reason this indirection exists. Its return value becomes EL0's
 /// new x0 after `eret`.
+///
+/// Two syscalls, not one - proving this is a real dispatch table rather
+/// than a single hardcoded path. The demo task chains them deliberately
+/// (`double(21)`, then `print` on whatever came back): that only prints
+/// the right value if both distinct table entries fire correctly *and*
+/// the returned x0 from the first `svc` survives fully intact through the
+/// trampoline's save/restore/eret and back into the second call's
+/// argument - a stronger check than either syscall alone would be.
 pub extern "C" fn dispatch(number: u64, arg0: u64) -> u64 {
     match number {
         0 => {
-            console::println!("Ouroboros kernel: syscall from EL0 (number={number}, arg0={arg0:#x})");
+            console::println!("Ouroboros kernel: syscall from EL0: print(arg0={arg0:#x})");
             0
+        }
+        1 => {
+            let result = arg0.wrapping_mul(2);
+            console::println!("Ouroboros kernel: syscall from EL0: double(arg0={arg0:#x}) = {result:#x}");
+            result
         }
         _ => {
             console::println!("Ouroboros kernel: syscall from EL0: unknown number={number}");
