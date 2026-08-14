@@ -45,29 +45,44 @@ permanently leaves the UEFI environment. Everything before that call may use
 the UEFI logger and global allocator are boot-services-backed and will
 panic/misbehave if touched post-exit. Console output after that point goes
 through `kernel/src/uart.rs`, a polling PL011 driver taking a runtime base
-address — no longer hardcoded, see below.
+address — no fallback address, see below.
 
-### Console discovery: devicetree, with a known gap
+### Console discovery: devicetree doesn't work here — confirmed on both platforms
 
 `kernel/src/devicetree.rs` tries to discover the console UART from the
 devicetree UEFI publishes (`EFI_DTB_TABLE_GUID` in the UEFI configuration
-table), falling back to `uart::QEMU_VIRT_PL011_BASE` when that fails —
-`main.rs` prints which happened and, on failure, exactly which step failed
-(`devicetree::DiscoveryError`), rather than silently guessing either way.
+table). **Tested on both platforms, not a hunch: neither publishes one.**
+QEMU's bundled firmware (Homebrew's `edk2-stable202408-prebuilt.qemu.org`)
+and Parallels' own firmware both report `DiscoveryError::NoDtb` — both are
+ACPI-oriented. So the devicetree path is real and exercised (it correctly
+detects and reports the absence rather than crashing or hanging), but has
+never actually found a console on anything this project targets. The real
+next step for a discovered console — on either platform — is ACPI table
+parsing (specifically the SPCR table, which plays the same role as DTB's
+`/chosen/stdout`), not devicetree. Devicetree discovery is left in place in
+case it's ever useful on other hardware, but don't expect it to start
+working on QEMU or Parallels without SPCR support being added alongside it.
 
-**Tested finding, not a hunch:** on this repo's actual dev setup (Homebrew
-`qemu`'s bundled `edk2-stable202408-prebuilt.qemu.org` aarch64 firmware),
-discovery reports `NoDtb` — that firmware build doesn't publish a devicetree
-via the UEFI config table at all (it's ACPI-oriented). So the QEMU dev loop
-is, in practice, still running on the hardcoded fallback address today; the
-devicetree path is implemented and exercised (it correctly detects and
-reports the absence rather than crashing), but hasn't yet been observed to
-actually find a console anywhere. Whether Parallels' firmware behaves the
-same way (ACPI-first, no DTB config table entry) or actually publishes one
-is unknown — nobody's booted this on Parallels yet. If discovery reports
-`NoDtb` there too, the real next step for Parallels support is ACPI table
-parsing (specifically the SPCR table, which describes the boot console UART
-the same way DTB's `/chosen/stdout` does), not devicetree.
+`find_dtb`/`discover_pl011` both run **before** `exit_boot_services`, even
+though parsing the blob itself doesn't need boot services — so the result
+gets logged through the UEFI console (works on any platform) before any raw
+MMIO is touched. Keep new discovery mechanisms (ACPI/SPCR included) on this
+side of the `exit_boot_services` call for the same reason: whatever address
+you find, you want to have already reported it before you risk writing to it.
+
+### There is no fallback UART address, and there should not be one again
+
+There used to be one — `uart::QEMU_VIRT_PL011_BASE`, written to whenever
+devicetree discovery failed. It was removed after direct confirmation that
+it hard-crashes real Parallels hardware: nothing is mapped at QEMU's PL011
+address on Parallels' virtual chipset, so the write faults, and with no
+exception vectors installed yet, that fault has nowhere to go and takes the
+whole VM down. `main.rs` now only ever constructs a `Uart` when
+`discover_pl011` actually returned an address (`if let Ok(base) = discovery`
+in `main()`) — no confirmed address means no post-exit console output, not
+a guess. Don't reintroduce a hardcoded fallback address without also
+building exception vectors first, so a bad guess degrades to a caught fault
+instead of a VM crash.
 
 ### Parallels disk attachment: a real trap, not a hunch
 
@@ -100,13 +115,24 @@ attachment mechanism was wrong.
 
 ### Next milestone
 
-Depends on what the Parallels boot (`make parallels-hdd`, see Commands)
-actually reports once it boots. If `NoDtb` there too: pivot console
-discovery to ACPI/SPCR instead of devicetree. If a DTB does turn up: verify
-`discover_pl011` actually resolves it correctly. Either way, once console
-discovery is settled: MMU/paging setup, exception vectors, a timer-driven
-preemption tick, then the first steps toward the microkernel/syscall
-boundary.
+Two viable candidates, not yet decided between:
+
+- **ACPI/SPCR console discovery** — the actual path to getting console
+  output back on both QEMU and Parallels, now that devicetree is confirmed
+  to be a dead end for both.
+- **Exception vectors** — independently overdue: right now any bad memory
+  access anywhere in the kernel is an unrecoverable platform-level crash
+  (exactly what just happened), with zero diagnostic beyond "the VM
+  stopped." Having even a minimal synchronous-exception handler that could
+  report `ESR_EL2`/`FAR_EL2` before halting would make every future bug in
+  this codebase dramatically faster to debug than the process this session
+  just went through (crash → guess → re-test → repeat).
+
+Either could reasonably come first; exception vectors arguably pay for
+themselves immediately by making the next round of hardware-discovery work
+safer to iterate on. After whichever comes first: MMU/paging setup, a
+timer-driven preemption tick, then the first steps toward the
+microkernel/syscall boundary.
 
 ## Commands
 

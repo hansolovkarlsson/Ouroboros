@@ -1,14 +1,13 @@
 //! Minimal polling driver for a PL011 UART at a runtime-supplied base
-//! address. The base address is meant to come from devicetree discovery
-//! (see `devicetree.rs`); [`QEMU_VIRT_PL011_BASE`] exists only as the
-//! fallback for platforms where that discovery doesn't find one.
+//! address. The base address must come from actual hardware discovery (see
+//! `devicetree.rs`) — there is deliberately no hardcoded fallback address
+//! here. There used to be one (QEMU's `virt`-machine PL011 base); it was
+//! removed after confirming that blindly writing to it on Parallels, where
+//! nothing is mapped there, hard-crashes the VM. No confirmed address means
+//! no console, not a guess.
 
 use core::fmt;
 use core::ptr::{read_volatile, write_volatile};
-
-/// QEMU's `virt` machine has a PL011 fixed at this MMIO base regardless of
-/// devicetree contents, so it's a safe fallback when discovery fails.
-pub const QEMU_VIRT_PL011_BASE: usize = 0x0900_0000;
 
 const DR_OFFSET: usize = 0x00;
 const FR_OFFSET: usize = 0x18;
