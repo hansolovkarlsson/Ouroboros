@@ -7,12 +7,51 @@ mod acpi;
 mod console;
 mod devicetree;
 mod exceptions;
+mod pci;
 mod uart;
+mod uart16550;
 
 use uefi::boot;
 use uefi::prelude::*;
 
+use console::Console;
 use uart::Uart;
+use uart16550::Uart16550;
+
+/// Which register layout a discovered console needs — devicetree/ACPI SPCR
+/// only ever identify a PL011; PCI enumeration only ever identifies a
+/// 16550-family device (that's what PCI class 0x07/0x00 means). See
+/// `pci.rs` for why these are genuinely different hardware, not just a
+/// different address for the same driver.
+enum ConsoleKind {
+    Pl011,
+    Uart16550,
+}
+
+/// Tries devicetree, then ACPI/SPCR, then PCI enumeration, logging why each
+/// failed before trying the next. Must run before `exit_boot_services`:
+/// devicetree/ACPI need the UEFI config table to find their blob pointers,
+/// and PCI enumeration is entirely boot-services-based throughout (no
+/// find-pointer-then-parse-memory split like the other two — there's
+/// nothing to defer).
+fn discover_console(
+    dtb: Option<*const u8>,
+    rsdp: Option<*const u8>,
+) -> Option<(usize, ConsoleKind, &'static str)> {
+    match unsafe { devicetree::discover_pl011(dtb) } {
+        Ok(base) => return Some((base, ConsoleKind::Pl011, "devicetree")),
+        Err(e) => log::warn!("Ouroboros kernel: devicetree console discovery failed ({e:?})"),
+    }
+    match unsafe { acpi::discover_pl011(rsdp) } {
+        Ok(base) => return Some((base, ConsoleKind::Pl011, "ACPI SPCR")),
+        Err(e) => log::warn!("Ouroboros kernel: ACPI SPCR console discovery failed ({e:?})"),
+    }
+    match pci::discover_uart16550() {
+        Ok(base) => return Some((base, ConsoleKind::Uart16550, "PCI 16550")),
+        Err(e) => log::warn!("Ouroboros kernel: PCI 16550 console discovery failed ({e:?})"),
+    }
+    None
+}
 
 #[entry]
 fn main() -> Status {
@@ -20,14 +59,14 @@ fn main() -> Status {
 
     log::info!("Ouroboros kernel: UEFI stage alive");
 
-    // Must happen before exit_boot_services: both the devicetree and ACPI
-    // RSDP pointers live in the UEFI configuration table, only reachable
-    // via boot services.
+    // Must happen before exit_boot_services: the devicetree/ACPI pointers
+    // live in the UEFI configuration table, and PCI enumeration needs boot
+    // services throughout - see discover_console's doc comment.
     let dtb = devicetree::find_dtb();
     let rsdp = acpi::find_rsdp();
 
-    // Deliberately still before exit_boot_services, even though parsing
-    // either blob doesn't itself need boot services: logging the result
+    // Deliberately still before exit_boot_services, even though some of
+    // this parsing doesn't itself need boot services: logging the result
     // here goes through the UEFI console, which works on any platform, so
     // we get a trustworthy diagnostic before ever touching raw MMIO —
     // which, without a confirmed address, might not be mapped to anything
@@ -36,32 +75,15 @@ fn main() -> Status {
     // hard-crashed real Parallels hardware where that address wasn't
     // mapped. So there is no fallback anymore — no confirmed address means
     // no post-exit console, full stop.
-    //
-    // Devicetree tried first, ACPI/SPCR as the fallback mechanism (not a
-    // fallback *address* — a different, legitimate discovery method): both
-    // QEMU's and Parallels' firmware are confirmed ACPI-oriented and never
-    // publish a devicetree, so in practice this always falls through to
-    // SPCR today. Devicetree is kept first in case it's ever useful on
-    // other hardware.
-    let discovery = match unsafe { devicetree::discover_pl011(dtb) } {
-        Ok(base) => Ok((base, "devicetree")),
-        Err(dt_err) => {
-            log::warn!("Ouroboros kernel: devicetree console discovery failed ({dt_err:?})");
-            unsafe { acpi::discover_pl011(rsdp) }
-                .map(|base| (base, "ACPI SPCR"))
-                .map_err(|acpi_err| {
-                    log::warn!("Ouroboros kernel: ACPI SPCR console discovery failed ({acpi_err:?})");
-                })
-        }
-    };
-    if let Ok((base, source)) = discovery {
+    let discovery = discover_console(dtb, rsdp);
+    if let Some((base, _kind, source)) = &discovery {
         log::info!("Ouroboros kernel: console @ {base:#x} (via {source})");
     }
 
     // SAFETY: no boot-services protocol references (console, allocator, or
     // otherwise) are held past this call. Nothing below this point may use
-    // log::*, alloc, or UEFI protocols — only the raw PL011 MMIO in `uart`,
-    // and only when `discovery` gave us an address to trust.
+    // log::*, alloc, or UEFI protocols — only the raw MMIO in `uart`/
+    // `uart16550`, and only when `discovery` gave us an address to trust.
     let _memory_map = unsafe { boot::exit_boot_services(None) };
 
     // First thing after exit, before anything else gets a chance to fault:
@@ -72,11 +94,14 @@ fn main() -> Status {
     // untested address once did on Parallels.
     exceptions::install();
 
-    if let Ok((base, _source)) = discovery {
-        // SAFETY: `base` came from the platform's own devicetree or ACPI
-        // tables.
-        let uart = unsafe { Uart::new(base) };
-        console::install(uart);
+    if let Some((base, kind, _source)) = discovery {
+        // SAFETY: `base` came from the platform's own devicetree, ACPI
+        // tables, or PCI configuration space.
+        let console = match kind {
+            ConsoleKind::Pl011 => Console::Pl011(unsafe { Uart::new(base) }),
+            ConsoleKind::Uart16550 => Console::Uart16550(unsafe { Uart16550::new(base) }),
+        };
+        console::install(console);
         console::println!("Ouroboros kernel: boot services exited, console live");
     }
 

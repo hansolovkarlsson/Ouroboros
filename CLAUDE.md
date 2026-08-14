@@ -47,35 +47,55 @@ panic/misbehave if touched post-exit. Console output after that point goes
 through `kernel/src/uart.rs`, a polling PL011 driver taking a runtime base
 address — no fallback address, see below.
 
-### Console discovery: devicetree is a dead end here; ACPI/SPCR is the real mechanism, and it works
+### Console discovery: three mechanisms tried in order, each a real, tested dead end on Parallels so far
 
-`kernel/src/devicetree.rs` tries to discover the console UART from the
-devicetree UEFI publishes (`EFI_DTB_TABLE_GUID` in the UEFI configuration
-table). **Tested on both platforms, not a hunch: neither publishes one.**
-QEMU's bundled firmware (Homebrew's `edk2-stable202408-prebuilt.qemu.org`)
-and Parallels' own firmware both report `DiscoveryError::NoDtb` — both are
-ACPI-oriented. Devicetree discovery is kept in place (tried first) in case
-it's ever useful on other hardware, but don't expect it to start working on
-QEMU or Parallels.
+Three modules, tried in this order by `discover_console()` in `main.rs`,
+each logging why it failed before the next is tried:
 
-`kernel/src/acpi.rs` is the mechanism that actually works: hand-rolled RSDP
-→ XSDT → SPCR table parsing (not the `acpi` crate — SPCR discovery only
-needs a handful of fixed-offset struct reads, nothing like devicetree's
-variable-length format that justified pulling in `fdt`). **Confirmed
-working on QEMU**, first try: resolves the same PL011 address
-(`0x0900_0000`) that used to be hardcoded, except now via genuine discovery
-— and the post-exit UART write to that discovered address succeeds
-(`boot services exited, console live` actually prints), the first time
-that's happened in this project through anything other than a hardcoded
-guess. Not yet confirmed on Parallels — that's the next thing to test (see
-Next milestone).
+1. **`kernel/src/devicetree.rs`** — `EFI_DTB_TABLE_GUID` in the UEFI config
+   table. **Confirmed dead on both platforms**: QEMU's bundled firmware
+   (Homebrew's `edk2-stable202408-prebuilt.qemu.org`) and Parallels' own
+   firmware both report `DiscoveryError::NoDtb` — both are ACPI-oriented.
+   Kept tried first in case it's ever useful on other hardware.
+2. **`kernel/src/acpi.rs`** — hand-rolled RSDP → XSDT → SPCR table parsing
+   (not the `acpi` crate — this only needs a handful of fixed-offset struct
+   reads, nothing like devicetree's variable-length format that justified
+   pulling in `fdt`). **Confirmed working on QEMU**, first try: resolves the
+   same PL011 address (`0x0900_0000`) that used to be hardcoded, except now
+   via genuine discovery, and the post-exit UART write to it succeeds
+   (`boot services exited, console live` actually prints) — the first time
+   that's happened in this project through anything other than a hardcoded
+   guess. **Confirmed dead on Parallels**, and not from a parsing bug: RSDP
+   and XSDT both parse fine there (so ACPI itself is present and readable),
+   but there is no SPCR table entry at all among Parallels' ACPI tables —
+   `DiscoveryError::NoSpcr`. Tested with *and without* a serial port device
+   added to the VM's hardware settings — same result either way, so this
+   isn't "no device configured," it's "Parallels doesn't describe its
+   console via SPCR regardless."
+3. **`kernel/src/pci.rs`** — enumerates PCI devices via the boot-services
+   `PciRootBridgeIo` protocol, looking for a PCI class 0x07 subclass 0x00
+   ("Serial controller") device — the 8250/16450/16550 family, per the PCI
+   Code and ID Assignment spec, *never* how a PL011 would be identified over
+   PCI. A match here is a genuinely different piece of hardware from what
+   the other two modules look for, hence `kernel/src/uart16550.rs` (a
+   completely different register layout: THR/LSR, not PL011's DR/FR) and
+   `console::Console`'s two variants. Verified end-to-end on QEMU (which has
+   no such device on the default `virt` machine, so this correctly reports
+   `NoSerialDevice` there rather than erroring out on the protocol calls
+   themselves) — **not yet tested on Parallels**, where it might actually
+   find something (see Next milestone). `uart16550.rs`'s register stride
+   (4 bytes) is a guess, not a confirmed fact like `uart.rs`'s PL011
+   offsets — nothing has exercised it against a real device yet.
 
-`find_dtb`/`find_rsdp` (need the UEFI config table) and each module's
-`discover_pl011` (pure memory parsing, no boot service) all run **before**
+`find_dtb`/`find_rsdp` (need the UEFI config table) and each PL011 module's
+`discover_pl011` (pure memory parsing, no boot service) run **before**
 `exit_boot_services`, even though the parsing halves don't themselves need
 boot services — so the result gets logged through the UEFI console (works
-on any platform) before any raw MMIO is touched. Keep any future discovery
-mechanism on this side of the `exit_boot_services` call for the same
+on any platform) before any raw MMIO is touched. `pci.rs`'s
+`discover_uart16550` has no such split — PCI enumeration is entirely
+boot-services-based throughout, so the whole thing runs before exit, no
+part of it could run after even if it wanted to. Keep any future discovery
+mechanism on this same side of the `exit_boot_services` call for the same
 reason: whatever address you find, you want to have already reported it
 before you risk writing to it.
 
@@ -100,12 +120,15 @@ real address for.
 right after `exit_boot_services`, before anything else gets a chance to
 fault. On any synchronous exception, IRQ, FIQ, or SError, it reports
 `ESR_EL1`/`FAR_EL1`/`ELR_EL1` and the vector index through the global
-console (`kernel/src/console.rs` — a `Sync`-wrapped `UnsafeCell<Option<Uart>>`
-shared between `main()` and the exception handler, since a fault needs
-somewhere to report through too) and halts, rather than leaving a bad access
-to run into whatever an unconfigured VBAR_EL1 does. This kernel has only
-ever been observed at EL1 (typical for a UEFI OS loader) — not verified at
-any other EL.
+console (`kernel/src/console.rs` — a `Sync`-wrapped
+`UnsafeCell<Option<Console>>` shared between `main()` and the exception
+handler, since a fault needs somewhere to report through too; `Console` is
+a plain enum over `Uart`/`Uart16550`, not `Box<dyn fmt::Write>` — a trait
+object would need to allocate, and the console is only ever installed after
+`exit_boot_services`, where the global allocator is boot-services-backed
+and no longer usable) and halts, rather than leaving a bad access to run
+into whatever an unconfigured VBAR_EL1 does. This kernel has only ever been
+observed at EL1 (typical for a UEFI OS loader) — not verified at any other EL.
 
 **A real gotcha hit and fixed while building this, worth not repeating:**
 the vector table was first placed in a custom section (`.section
@@ -165,12 +188,20 @@ attachment mechanism was wrong.
 
 ### Next milestone
 
-**Confirm ACPI/SPCR discovery on Parallels** (`make parallels-hdd`, see
-Commands) — it's confirmed working on QEMU (previous section) but untested
-there. Should be safe to try even if it resolves a bad address: exception
-vectors mean a bad write now degrades to a caught, reported fault instead of
-another blind VM crash. If it works: console output on Parallels for the
-first time in this project. After that: MMU/paging setup, a timer-driven
+**Test PCI console discovery on Parallels** (`make parallels-hdd`, see
+Commands) — devicetree and ACPI/SPCR are both confirmed dead ends there
+(previous section); PCI enumeration is the third and only remaining
+mechanism tried, verified end-to-end on QEMU but never against real
+hardware. Should be safe to try regardless of outcome: exception vectors
+mean a bad write now degrades to a caught, reported fault instead of
+another blind VM crash. Three possible outcomes, each pointing somewhere
+different: `NoSerialDevice` (no PCI serial controller either — console
+discovery may be exhausted short of full ACPI DSDT/AML parsing, deferred
+during this work as a much larger subsystem); a found device whose
+characters don't show up (device found, but `uart16550.rs`'s 4-byte stride
+guess is wrong — worth trying other strides); or it actually works (console
+output on Parallels for the first time in this project). After console
+discovery is resolved one way or another: MMU/paging setup, a timer-driven
 preemption tick, then the first steps toward the microkernel/syscall
 boundary.
 
@@ -208,9 +239,11 @@ root already target the right platform.
 kernel/
   src/main.rs        #[entry] point: UEFI init, ExitBootServices, exceptions::install(), then halt()
   src/uart.rs        raw PL011 console driver, used only after ExitBootServices
+  src/uart16550.rs   raw 16550-compatible console driver (PCI-discovered consoles; different hardware, different driver)
   src/devicetree.rs  console UART discovery via the UEFI-provided devicetree (dead end on QEMU/Parallels)
-  src/acpi.rs        console UART discovery via ACPI RSDP -> XSDT -> SPCR (the one that actually works)
-  src/console.rs     global console handle, shared between main() and the exception handler
+  src/acpi.rs        console UART discovery via ACPI RSDP -> XSDT -> SPCR (works on QEMU, dead end on Parallels)
+  src/pci.rs         console UART discovery via PCI enumeration for a class 0x07/0x00 serial controller
+  src/console.rs     global console handle (Console enum: Pl011 | Uart16550), shared between main() and the exception handler
   src/exceptions.rs  AArch64 exception vector table (VBAR_EL1) + fault reporting
 ```
 
