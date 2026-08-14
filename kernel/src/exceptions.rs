@@ -19,12 +19,32 @@
 //! has its own VBAR_EL1 that its boot-services internals may depend on;
 //! clobbering it while boot services are still active would be touching
 //! state we don't own yet.
+//!
+//! ## The IRQ vector is different from the other 15
+//!
+//! Every vector except IRQ-at-EL1h (index 5, the only source of interrupts
+//! so far — see `gic.rs`/`timer.rs`) shares one path: capture ESR/FAR/ELR,
+//! report, halt. That path never returns, so it never needs to preserve
+//! anything. IRQ is the first exception this kernel needs to *resume from*
+//! — the interrupted code (currently just `halt()`'s `wfe` loop) has to
+//! keep running afterward — so its vector slot does a full general-purpose
+//! register + ELR_EL1/SPSR_EL1 save, calls into Rust normally (`bl`, not a
+//! diverging `b`), restores everything, and `eret`s back.
+//!
+//! Floating-point/SIMD (Q0-Q31) registers are deliberately *not* saved
+//! here. Nothing running today uses them, and the interrupted context is
+//! only ever `halt()`'s trivial spin loop — this stops being safe the
+//! moment there's real interruptible work with FP/SIMD state, which is a
+//! problem for whenever actual task switching exists, not this milestone.
 
 use core::arch::global_asm;
 use core::ffi::c_void;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::console;
+use crate::gic;
 use crate::halt;
+use crate::timer;
 
 global_asm!(
     r#"
@@ -49,8 +69,8 @@ b   1f
 mov x3, #4
 b   1f
 .balign 0x80
-mov x3, #5
-b   1f
+// slot 5: IRQ, Current EL with SP_ELx - the resumable path, see below.
+b   2f
 .balign 0x80
 mov x3, #6
 b   1f
@@ -87,8 +107,53 @@ mrs x0, esr_el1
 mrs x1, far_el1
 mrs x2, elr_el1
 b   {rust_handler}
+
+2:
+sub sp, sp, #272
+stp x0, x1, [sp, #0]
+stp x2, x3, [sp, #16]
+stp x4, x5, [sp, #32]
+stp x6, x7, [sp, #48]
+stp x8, x9, [sp, #64]
+stp x10, x11, [sp, #80]
+stp x12, x13, [sp, #96]
+stp x14, x15, [sp, #112]
+stp x16, x17, [sp, #128]
+stp x18, x19, [sp, #144]
+stp x20, x21, [sp, #160]
+stp x22, x23, [sp, #176]
+stp x24, x25, [sp, #192]
+stp x26, x27, [sp, #208]
+stp x28, x29, [sp, #224]
+str x30, [sp, #240]
+mrs x0, elr_el1
+mrs x1, spsr_el1
+stp x0, x1, [sp, #248]
+bl  {rust_irq_handler}
+ldp x0, x1, [sp, #248]
+msr elr_el1, x0
+msr spsr_el1, x1
+ldp x0, x1, [sp, #0]
+ldp x2, x3, [sp, #16]
+ldp x4, x5, [sp, #32]
+ldp x6, x7, [sp, #48]
+ldp x8, x9, [sp, #64]
+ldp x10, x11, [sp, #80]
+ldp x12, x13, [sp, #96]
+ldp x14, x15, [sp, #112]
+ldp x16, x17, [sp, #128]
+ldp x18, x19, [sp, #144]
+ldp x20, x21, [sp, #160]
+ldp x22, x23, [sp, #176]
+ldp x24, x25, [sp, #192]
+ldp x26, x27, [sp, #208]
+ldp x28, x29, [sp, #224]
+ldr x30, [sp, #240]
+add sp, sp, #272
+eret
 "#,
     rust_handler = sym rust_exception_handler,
+    rust_irq_handler = sym rust_irq_handler,
 );
 
 unsafe extern "C" {
@@ -118,4 +183,26 @@ extern "C" fn rust_exception_handler(esr: u64, far: u64, elr: u64, vector: u64) 
         "Ouroboros kernel: EXCEPTION vector={vector} esr_el1={esr:#x} far_el1={far:#x} elr_el1={elr:#x}"
     );
     halt()
+}
+
+static TICKS: AtomicU64 = AtomicU64::new(0);
+
+const SPURIOUS_INTID: u32 = 1023;
+const TICK_INTERVAL_MS: u64 = 1000;
+
+/// Runs on every IRQ, called from the vector table's slot 5 trampoline.
+/// Must return normally (the trampoline `eret`s back to whatever was
+/// interrupted) — never halt or diverge from here.
+extern "C" fn rust_irq_handler() {
+    let intid = unsafe { gic::acknowledge() };
+
+    if intid == timer::INTID {
+        let ticks = TICKS.fetch_add(1, Ordering::Relaxed) + 1;
+        console::println!("Ouroboros kernel: tick {ticks}");
+        timer::arm(TICK_INTERVAL_MS);
+    }
+
+    if intid != SPURIOUS_INTID {
+        unsafe { gic::end_of_interrupt(intid) };
+    }
 }

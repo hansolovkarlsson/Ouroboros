@@ -225,6 +225,53 @@ correctly *after* the switch, under our own tables, not just under
 firmware's — different code path than the exception-vector verification
 above, worth re-testing again if this module changes.
 
+### Timer-driven preemption tick: GICv2 + ARM generic timer, real IRQ round-trips
+
+`kernel/src/gic.rs` (GICv2 distributor + CPU interface) and
+`kernel/src/timer.rs` (ARM generic non-secure EL1 physical timer, PPI 14 →
+GIC INTID 30) give the kernel a periodic 1-second tick, delivered as a real
+IRQ that interrupts `halt()`'s `wfe` loop and resumes it afterward — the
+first exception this kernel needs to *return from* rather than report-and-
+halt (see below).
+
+Addresses/GIC version are a QEMU-shaped convention like `mmu.rs`'s device
+region, but not guessed from memory this time: confirmed for *this* QEMU
+install by dumping its internal devicetree
+(`qemu-system-aarch64 -machine virt,dumpdtb=...` — QEMU always builds this
+internally regardless of whether firmware exposes it to the guest; nothing
+our own kernel reads at boot) and inspecting it with `dtc`. That's how the
+GICv2 addresses (GICD 0x08000000, GICC 0x08010000) and the timer PPI number
+were pinned down, not assumption. Register-bit-level details (GICD/GICC
+offsets, generic timer CTL bits) were cross-checked against Linux headers,
+same discipline as `mmu.rs`.
+
+**The IRQ vector had to become fundamentally different from the other 15.**
+Every other vector in `exceptions.rs` shares one path: capture ESR/FAR/ELR,
+report, halt — it never returns, so it never needed to preserve anything.
+IRQ is the first one that has to *resume* the interrupted code, so its
+vector slot (index 5, IRQ at EL1h) got its own trampoline: full x0-x30 +
+ELR_EL1/SPSR_EL1 save to the stack, a normal `bl` into Rust (not the
+diverging `b` the other 15 use), full restore, `eret`. FP/SIMD (Q0-Q31)
+registers are deliberately *not* saved — nothing running today uses them,
+and the only interrupted context that exists is `halt()`'s trivial spin
+loop. That stops being safe the moment real interruptible work with FP/SIMD
+state exists, which matters for whenever actual task switching is
+built, not this milestone.
+
+**Verified as sustained, not just "it prints once":** ran under QEMU for
+20+ seconds, confirmed 14 consecutive ticks at the correct ~1-second
+spacing, no corruption, no drift, no crash — meaningful because a save/
+restore bug wouldn't necessarily show up on the *first* round-trip, only
+after several. Cross-checked against QEMU's own `-d int` exception trace
+for the same run: zero aborts across the entire session, confirming
+nothing is silently faulting alongside the visible tick output.
+
+Worked correctly on the first real boot attempt — a contrast worth noting
+against the MMU work, where every value was *also* verified correct ahead
+of time and it still took real debugging to find the actual bug. Getting it
+right on paper isn't a substitute for booting it, but it isn't worthless
+either.
+
 ### Parallels disk attachment: a real trap, not a hunch
 
 Getting `esp.img` to actually boot in Parallels took a few wrong turns worth
@@ -267,9 +314,14 @@ transport, feature negotiation, one virtqueue) — see the previous section
 for the reasoning behind that lead.
 
 **In the meantime, kernel development continues against QEMU**, which has a
-fully working console via ACPI/SPCR. MMU/identity-paging is now done (see
-above) — next up: a timer-driven preemption tick, then the first steps
-toward the microkernel/syscall boundary.
+fully working console via ACPI/SPCR. MMU/identity-paging and the
+timer-driven preemption tick are both done now (see above) — next up: the
+first steps toward the microkernel/syscall boundary. There's no scheduler
+or tasks yet, so "preemption" so far means exactly one thing: the tick IRQ
+correctly interrupts and resumes `halt()`'s spin loop. Actual preemptive
+task switching needs the tick handler to eventually save/restore full task
+context (including FP/SIMD, deliberately skipped so far — see above) and
+somewhere to switch *to*, neither of which exist yet.
 
 ## Commands
 
@@ -303,7 +355,7 @@ root already target the right platform.
 
 ```
 kernel/
-  src/main.rs        #[entry] point: UEFI init, ExitBootServices, exceptions::install(), mmu::install_identity_map(), then halt()
+  src/main.rs        #[entry] point: UEFI init, ExitBootServices, exceptions::install(), mmu::install_identity_map(), gic+timer init, then halt()
   src/uart.rs        raw PL011 console driver, used only after ExitBootServices
   src/uart16550.rs   raw 16550-compatible console driver (PCI-discovered consoles; different hardware, different driver)
   src/devicetree.rs  console UART discovery via the UEFI-provided devicetree (dead end on QEMU/Parallels)
@@ -312,6 +364,8 @@ kernel/
   src/console.rs     global console handle (Console enum: Pl011 | Uart16550), shared between main() and the exception handler
   src/exceptions.rs  AArch64 exception vector table (VBAR_EL1) + fault reporting
   src/mmu.rs         replaces firmware's translation tables with our own identity map (L0->L1, 1GB blocks)
+  src/gic.rs         GICv2 driver (QEMU virt addresses, confirmed via devicetree dump)
+  src/timer.rs       ARM generic timer (non-secure EL1 physical timer, PPI 14 / GIC INTID 30)
 ```
 
 Single-crate workspace for now (`Cargo.toml` at the root is a workspace with

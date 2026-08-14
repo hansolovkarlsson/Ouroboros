@@ -7,8 +7,10 @@ mod acpi;
 mod console;
 mod devicetree;
 mod exceptions;
+mod gic;
 mod mmu;
 mod pci;
+mod timer;
 mod uart;
 mod uart16550;
 
@@ -112,6 +114,21 @@ fn main() -> Status {
     // call returned.
     unsafe { mmu::install_identity_map(&memory_map) };
     console::println!("Ouroboros kernel: identity map installed, MMU running on our own tables");
+
+    // SAFETY: GICD/GICC are mapped by the identity map just installed
+    // above (both fall within the low-1GB device block).
+    unsafe {
+        gic::init();
+        gic::enable_interrupt(timer::INTID);
+    }
+    timer::arm(1000);
+
+    // Unmasked last, right before parking: nothing before this point
+    // expects to be interrupted, and everything after (just halt()'s wfe
+    // loop) is fine being woken by the tick.
+    unsafe {
+        core::arch::asm!("msr daifclr, #2", options(nostack, preserves_flags));
+    }
 
     halt()
 }
