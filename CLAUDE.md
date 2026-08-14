@@ -272,47 +272,49 @@ of time and it still took real debugging to find the actual bug. Getting it
 right on paper isn't a substitute for booting it, but it isn't worthless
 either.
 
-### Syscall boundary: EL0 entry and the svc trap both work; EL0 has nowhere to run yet
+### Syscall boundary: EL0 entry, the svc trap, and EL0 actually running code — all confirmed working
 
 `kernel/src/syscall.rs` drops to EL0 (`enter`) and provides an `svc`-based
 syscall path back to EL1 (`dispatch`, called number-in-x8/arg0-in-x0,
 return-in-x0, Linux's convention, chosen as reasonable for a "POSIX-ish"
 project — not Linux-ABI-compatible, just a familiar shape). `exceptions.rs`
-grew a second resumable vector path for this (`3:`): slot 8 (Synchronous,
+has a second resumable vector path for this (`3:`): slot 8 (Synchronous,
 lower EL AArch64) checks ESR_EL1's EC field first, since EL0 faults land in
 the same slot as `svc` — only EC=0x15 takes the syscall trampoline, anything
 else falls through to the ordinary diverging report-and-halt path shared
-with every other vector. Slot 9 (IRQ, lower EL AArch64) was also fixed to
-reuse the exact same resumable IRQ trampoline as slot 5 — a tick firing
-*while EL0 runs* lands in a different vector slot than one firing at EL1h,
-easy to miss and would have silently broken tick delivery the moment EL0
-started running.
+with every other vector. Slot 9 (IRQ, lower EL AArch64) reuses the exact
+same resumable IRQ trampoline as slot 5 — a tick firing *while EL0 runs*
+lands in a different vector slot than one firing at EL1h, easy to miss and
+would have silently broken tick delivery the moment EL0 started running.
 
-**What's verified working, concretely:** `enter`'s `eret` to EL0 succeeds,
-and when EL0 code faults, the fault correctly routes back through the
-lower-EL vector and reports through the console — a real, confirmed round
-trip through the privilege boundary in both directions. The `svc` dispatch
-path and the IRQ-during-EL0 path are implemented and structurally sound
-(mirror the already-proven slot 5 trampoline almost exactly) but **not yet
-exercised**, because of the blocker below.
+**The real blocker (first attempt): EL0 had no memory it was allowed to
+execute from.** Sharing `mmu.rs`'s single EL1-only RAM block between EL0
+and actively-executing kernel code, then trying to just flip its
+permissions to also allow EL0, hard-faulted for reasons a first,
+extensive investigation could not resolve (see git history around the
+"second unresolved mystery" commit if the detail ever matters again).
 
-**What's not working: EL0 has no memory it's allowed to execute from.**
-`mmu.rs`'s RAM block is EL1-only (`AP[2:1] = 00`), so `syscall.rs`'s
-`demo_task` (which needs to live in that same RAM to run at all — no
-separate user region exists) cannot actually execute; `enter` correctly
-drops to EL0 and EL0 correctly, immediately faults trying to fetch its
-first instruction. Making that same RAM block EL0-accessible was tried
-(`AP[2:1] = 01`) and hit a genuine, unresolved wall: seemingly-identical
-symptom to the earlier MMU starting-level bug (permission fault on the very
-first instruction fetch after the table switch, looping forever), but this
-time the cause was **not found** despite an extensive, methodical search —
-see `mmu.rs`'s module doc comment ("RAM is EL1-only... a second unresolved
-mystery") for the full list of what was ruled out (bit position triple
--verified, UXN, PAN/EPAN — confirmed unimplemented on this CPU by trying to
-touch it directly, shareability, `ic ialluis`, and block granularity —
-tested down to 2MB blocks, identical failure). This is the point where
-continued unstructured trial-and-error stopped being a good use of time;
-picked back up deliberately, with a plan, not more guessing.
+**Resolution: give EL0 a genuinely separate, isolated region instead.**
+`syscall.rs` now reserves one dedicated 8KB slot (not the originally-planned
+2MB — see `syscall.rs`'s module doc comment for the precisely-bisected
+`rustc`/PE-COFF hard limit, a real compiler crash bug, not a design choice,
+that forced 8KB) holding only the EL0 demo task and its stack; `mmu.rs`
+grew a fourth translation table level (L3, 4KB pages) to give *only that
+region's own pages* EL0 access, while every other page/block in RAM —
+including all the kernel code that keeps running immediately after the
+table switch — stays on the already-proven-safe EL1-only permissions. This
+worked, and one more real bug turned up immediately once it did: EL0's own
+`wfe` traps to EL1 by default (`SCTLR_EL1.nTWE`/`nTWI`, unrelated to the
+mapping work), diagnosed directly from the exception's EC value and fixed
+in `syscall.rs`.
+
+**Confirmed working end to end, not just "boots":** the EL0 demo task's
+real `svc` round-trip succeeds (`syscall from EL0 (number=0, arg0=0x2a)`),
+and 14 consecutive timer ticks fired correctly afterward with no repeated
+faults — EL0 reached and stayed in its post-syscall idle loop, correctly
+preempted and resumed by the tick each time. Cross-checked against QEMU's
+own `-d int` trace: exactly one `[SVC]` exception, zero aborts across the
+whole run.
 
 ### Parallels disk attachment: a real trap, not a hunch
 
@@ -364,20 +366,24 @@ switching needs the tick handler to eventually save/restore full task
 context (including FP/SIMD, deliberately skipped so far — see above) and
 somewhere to switch *to*, neither of which exist yet.
 
-**The syscall boundary is half-blocked** (see previous section): EL0 entry
-and the `svc`/IRQ trap paths back to EL1 are built and structurally sound,
-but EL0 has no memory it's actually allowed to execute from — making the
-RAM block EL0-accessible hard-faults for reasons a thorough investigation
-did not resolve. Candidates for whoever picks this up next, roughly in
-order of how likely they seem to actually reveal something new: (1) a
-genuinely separate EL0 region instead of reusing kernel RAM — untried, and
-different enough from everything that failed that it might dodge whatever
-the real cause is rather than needing to understand it; (2) compare against
-a different QEMU CPU model (`-cpu max`, or a newer core) to check whether
-this is specific to the cortex-a72 TCG model; (3) if it reproduces
-elsewhere too, it's likely worth a QEMU bug report at that point, with the
-full ruled-out list from `mmu.rs`'s module doc comment as the starting
-evidence.
+**The syscall boundary is done and confirmed working** (see previous
+section) — EL0 entry, a real `svc` round-trip, and sustained post-syscall
+execution (preempted and resumed by the tick, repeatedly) are all verified,
+not just structurally plausible. What's still coarse and worth knowing
+about before building on it: EL0's 8KB region has no internal W^X (code and
+stack share one region, both executable), there's only one EL0 region total
+(no per-process isolation, no way yet to run more than one piece of EL0
+code), and the 8KB ceiling itself is an external constraint (see
+`syscall.rs`) that any future "give a task more memory" design has to work
+within or around.
+
+Reasonable next steps from here: a second, real syscall (not just the
+number-0 demo) to prove the dispatch table generalizes; a minimal task
+struct so the tick handler has something to actually switch *between*
+(real preemptive multitasking, not just "the tick resumes whatever was
+running"); or finally circling back to Parallels virtio-console now that
+the kernel has enough infrastructure (MMU, exceptions, EL0) to make that
+work meaningfully once it lands.
 
 ## Commands
 
@@ -419,10 +425,10 @@ kernel/
   src/pci.rs         console UART discovery via PCI enumeration for a class 0x07/0x00 serial controller
   src/console.rs     global console handle (Console enum: Pl011 | Uart16550), shared between main() and the exception handler
   src/exceptions.rs  AArch64 exception vector table (VBAR_EL1) + fault reporting
-  src/mmu.rs         replaces firmware's translation tables with our own identity map (L0->L1, 1GB blocks)
+  src/mmu.rs         replaces firmware's translation tables with our own identity map (L0->L1->L2->L3 as needed)
   src/gic.rs         GICv2 driver (QEMU virt addresses, confirmed via devicetree dump)
   src/timer.rs       ARM generic timer (non-secure EL1 physical timer, PPI 14 / GIC INTID 30)
-  src/syscall.rs     EL0 entry + svc syscall dispatch (EL0 entry/exit works; EL0 has no executable memory yet, see above)
+  src/syscall.rs     EL0 entry + svc syscall dispatch - confirmed working end to end, see above
 ```
 
 Single-crate workspace for now (`Cargo.toml` at the root is a workspace with
