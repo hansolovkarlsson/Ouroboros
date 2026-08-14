@@ -35,6 +35,26 @@ As the kernel outgrows what's reasonable to run under UEFI boot services,
 expect a split into a thin UEFI bootloader stage that loads and hands off to
 a separate kernel binary. That split hasn't happened yet.
 
+`main()` never returns `Status::SUCCESS` — it logs a boot message and parks
+the core in a `wfe` spin loop (`halt()` in `kernel/src/main.rs`) instead.
+Returning to firmware is a dead end for kernel code; the loop is the current
+stand-in for "the kernel takes over," pending the next milestone below.
+
+### Next milestone: ExitBootServices
+
+Still running entirely inside UEFI boot services (console, allocator, etc.
+all still firmware-provided) — `ExitBootServices` hasn't been called yet.
+That's the next real architectural step: take the final memory map and
+permanently exit the UEFI environment. The moment that happens, UEFI's
+`log`/console output stops working, so a replacement is needed at the same
+time. Decided plan: hardcode QEMU's `virt`-machine PL011 UART (fixed MMIO
+address `0x09000000`) as the first post-exit console. This is known and
+accepted to *not* work on Parallels (different virtual hardware, address
+unknown) — proper hardware discovery (most likely parsing the device tree
+UEFI hands off) is deferred until there's a reason to make Parallels boot
+past this point too. Don't be surprised that QEMU and Parallels diverge in
+capability right after this milestone; that's the accepted tradeoff, not a bug.
+
 ## Commands
 
 ```sh

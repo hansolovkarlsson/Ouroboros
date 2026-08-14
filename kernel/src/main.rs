@@ -3,9 +3,7 @@
 
 extern crate alloc;
 
-use core::time::Duration;
 use uefi::prelude::*;
-use uefi::boot;
 
 #[entry]
 fn main() -> Status {
@@ -13,7 +11,15 @@ fn main() -> Status {
 
     log::info!("Ouroboros kernel: UEFI stage alive");
 
-    boot::stall(Duration::from_secs(3));
+    halt()
+}
 
-    Status::SUCCESS
+/// Parks the core forever instead of returning to firmware. `wfe` is a
+/// low-power spin (wait-for-event) rather than a busy loop.
+fn halt() -> ! {
+    loop {
+        unsafe {
+            core::arch::asm!("wfe", options(nomem, nostack, preserves_flags));
+        }
+    }
 }
