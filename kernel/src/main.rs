@@ -3,6 +3,7 @@
 
 extern crate alloc;
 
+mod acpi;
 mod console;
 mod devicetree;
 mod exceptions;
@@ -19,28 +20,42 @@ fn main() -> Status {
 
     log::info!("Ouroboros kernel: UEFI stage alive");
 
-    // Must happen before exit_boot_services: the devicetree pointer lives in
-    // the UEFI configuration table, which is only reachable via boot services.
+    // Must happen before exit_boot_services: both the devicetree and ACPI
+    // RSDP pointers live in the UEFI configuration table, only reachable
+    // via boot services.
     let dtb = devicetree::find_dtb();
+    let rsdp = acpi::find_rsdp();
 
-    // Deliberately still before exit_boot_services, even though parsing the
-    // blob itself doesn't need boot services: logging the result here goes
-    // through the UEFI console, which works on any platform, so we get a
-    // trustworthy diagnostic before ever touching raw MMIO — which, without
-    // a confirmed address, might not be mapped to anything at all and fault
-    // instead of printing. Confirmed the hard way: writing to the QEMU virt
-    // PL011 address unconditionally, as a "fallback" whenever discovery
-    // failed, hard-crashed real Parallels hardware where that address isn't
+    // Deliberately still before exit_boot_services, even though parsing
+    // either blob doesn't itself need boot services: logging the result
+    // here goes through the UEFI console, which works on any platform, so
+    // we get a trustworthy diagnostic before ever touching raw MMIO —
+    // which, without a confirmed address, might not be mapped to anything
+    // at all and fault instead of printing. Confirmed the hard way: writing
+    // to a hardcoded "fallback" address whenever discovery failed
+    // hard-crashed real Parallels hardware where that address wasn't
     // mapped. So there is no fallback anymore — no confirmed address means
-    // no post-exit console, full stop, until real hardware discovery (ACPI
-    // SPCR is the likely next candidate, since neither QEMU's nor Parallels'
-    // firmware publishes a devicetree) gives us one to trust.
-    let discovery = unsafe { devicetree::discover_pl011(dtb) };
-    match discovery {
-        Ok(base) => log::info!("Ouroboros kernel: devicetree console @ {base:#x}"),
-        Err(reason) => {
-            log::warn!("Ouroboros kernel: devicetree console discovery failed ({reason:?})")
+    // no post-exit console, full stop.
+    //
+    // Devicetree tried first, ACPI/SPCR as the fallback mechanism (not a
+    // fallback *address* — a different, legitimate discovery method): both
+    // QEMU's and Parallels' firmware are confirmed ACPI-oriented and never
+    // publish a devicetree, so in practice this always falls through to
+    // SPCR today. Devicetree is kept first in case it's ever useful on
+    // other hardware.
+    let discovery = match unsafe { devicetree::discover_pl011(dtb) } {
+        Ok(base) => Ok((base, "devicetree")),
+        Err(dt_err) => {
+            log::warn!("Ouroboros kernel: devicetree console discovery failed ({dt_err:?})");
+            unsafe { acpi::discover_pl011(rsdp) }
+                .map(|base| (base, "ACPI SPCR"))
+                .map_err(|acpi_err| {
+                    log::warn!("Ouroboros kernel: ACPI SPCR console discovery failed ({acpi_err:?})");
+                })
         }
+    };
+    if let Ok((base, source)) = discovery {
+        log::info!("Ouroboros kernel: console @ {base:#x} (via {source})");
     }
 
     // SAFETY: no boot-services protocol references (console, allocator, or
@@ -53,12 +68,13 @@ fn main() -> Status {
     // a bad access is still possible (e.g. the UART write below, if
     // `discovery` ever resolves an address that isn't actually valid on
     // some untested platform), but it now reports through the exception
-    // handler and halts, instead of taking the whole VM down the way the
-    // last untested address did on Parallels.
+    // handler and halts, instead of taking the whole VM down the way an
+    // untested address once did on Parallels.
     exceptions::install();
 
-    if let Ok(base) = discovery {
-        // SAFETY: `base` came from the platform's own devicetree.
+    if let Ok((base, _source)) = discovery {
+        // SAFETY: `base` came from the platform's own devicetree or ACPI
+        // tables.
         let uart = unsafe { Uart::new(base) };
         console::install(uart);
         console::println!("Ouroboros kernel: boot services exited, console live");

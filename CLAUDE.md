@@ -47,28 +47,37 @@ panic/misbehave if touched post-exit. Console output after that point goes
 through `kernel/src/uart.rs`, a polling PL011 driver taking a runtime base
 address — no fallback address, see below.
 
-### Console discovery: devicetree doesn't work here — confirmed on both platforms
+### Console discovery: devicetree is a dead end here; ACPI/SPCR is the real mechanism, and it works
 
 `kernel/src/devicetree.rs` tries to discover the console UART from the
 devicetree UEFI publishes (`EFI_DTB_TABLE_GUID` in the UEFI configuration
 table). **Tested on both platforms, not a hunch: neither publishes one.**
 QEMU's bundled firmware (Homebrew's `edk2-stable202408-prebuilt.qemu.org`)
 and Parallels' own firmware both report `DiscoveryError::NoDtb` — both are
-ACPI-oriented. So the devicetree path is real and exercised (it correctly
-detects and reports the absence rather than crashing or hanging), but has
-never actually found a console on anything this project targets. The real
-next step for a discovered console — on either platform — is ACPI table
-parsing (specifically the SPCR table, which plays the same role as DTB's
-`/chosen/stdout`), not devicetree. Devicetree discovery is left in place in
-case it's ever useful on other hardware, but don't expect it to start
-working on QEMU or Parallels without SPCR support being added alongside it.
+ACPI-oriented. Devicetree discovery is kept in place (tried first) in case
+it's ever useful on other hardware, but don't expect it to start working on
+QEMU or Parallels.
 
-`find_dtb`/`discover_pl011` both run **before** `exit_boot_services`, even
-though parsing the blob itself doesn't need boot services — so the result
-gets logged through the UEFI console (works on any platform) before any raw
-MMIO is touched. Keep new discovery mechanisms (ACPI/SPCR included) on this
-side of the `exit_boot_services` call for the same reason: whatever address
-you find, you want to have already reported it before you risk writing to it.
+`kernel/src/acpi.rs` is the mechanism that actually works: hand-rolled RSDP
+→ XSDT → SPCR table parsing (not the `acpi` crate — SPCR discovery only
+needs a handful of fixed-offset struct reads, nothing like devicetree's
+variable-length format that justified pulling in `fdt`). **Confirmed
+working on QEMU**, first try: resolves the same PL011 address
+(`0x0900_0000`) that used to be hardcoded, except now via genuine discovery
+— and the post-exit UART write to that discovered address succeeds
+(`boot services exited, console live` actually prints), the first time
+that's happened in this project through anything other than a hardcoded
+guess. Not yet confirmed on Parallels — that's the next thing to test (see
+Next milestone).
+
+`find_dtb`/`find_rsdp` (need the UEFI config table) and each module's
+`discover_pl011` (pure memory parsing, no boot service) all run **before**
+`exit_boot_services`, even though the parsing halves don't themselves need
+boot services — so the result gets logged through the UEFI console (works
+on any platform) before any raw MMIO is touched. Keep any future discovery
+mechanism on this side of the `exit_boot_services` call for the same
+reason: whatever address you find, you want to have already reported it
+before you risk writing to it.
 
 ### There is no fallback UART address, and there should not be one again
 
@@ -156,13 +165,14 @@ attachment mechanism was wrong.
 
 ### Next milestone
 
-**ACPI/SPCR console discovery** — the actual path to getting console output
-back on both QEMU and Parallels, now that devicetree is confirmed to be a
-dead end for both, and now that exception vectors exist to make iterating
-on address-guessing-adjacent work (parsing more firmware tables, poking more
-MMIO) survivable instead of another blind-crash risk. After that: MMU/paging
-setup, a timer-driven preemption tick, then the first steps toward the
-microkernel/syscall boundary.
+**Confirm ACPI/SPCR discovery on Parallels** (`make parallels-hdd`, see
+Commands) — it's confirmed working on QEMU (previous section) but untested
+there. Should be safe to try even if it resolves a bad address: exception
+vectors mean a bad write now degrades to a caught, reported fault instead of
+another blind VM crash. If it works: console output on Parallels for the
+first time in this project. After that: MMU/paging setup, a timer-driven
+preemption tick, then the first steps toward the microkernel/syscall
+boundary.
 
 ## Commands
 
@@ -198,7 +208,8 @@ root already target the right platform.
 kernel/
   src/main.rs        #[entry] point: UEFI init, ExitBootServices, exceptions::install(), then halt()
   src/uart.rs        raw PL011 console driver, used only after ExitBootServices
-  src/devicetree.rs  console UART discovery via the UEFI-provided devicetree
+  src/devicetree.rs  console UART discovery via the UEFI-provided devicetree (dead end on QEMU/Parallels)
+  src/acpi.rs        console UART discovery via ACPI RSDP -> XSDT -> SPCR (the one that actually works)
   src/console.rs     global console handle, shared between main() and the exception handler
   src/exceptions.rs  AArch64 exception vector table (VBAR_EL1) + fault reporting
 ```
