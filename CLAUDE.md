@@ -75,14 +75,55 @@ you find, you want to have already reported it before you risk writing to it.
 There used to be one — `uart::QEMU_VIRT_PL011_BASE`, written to whenever
 devicetree discovery failed. It was removed after direct confirmation that
 it hard-crashes real Parallels hardware: nothing is mapped at QEMU's PL011
-address on Parallels' virtual chipset, so the write faults, and with no
-exception vectors installed yet, that fault has nowhere to go and takes the
-whole VM down. `main.rs` now only ever constructs a `Uart` when
+address on Parallels' virtual chipset, so the write faults, and (at the
+time) with no exception vectors installed, that fault had nowhere to go and
+took the whole VM down. `main.rs` now only ever constructs a `Uart` when
 `discover_pl011` actually returned an address (`if let Ok(base) = discovery`
 in `main()`) — no confirmed address means no post-exit console output, not
-a guess. Don't reintroduce a hardcoded fallback address without also
-building exception vectors first, so a bad guess degrades to a caught fault
-instead of a VM crash.
+a guess. Exception vectors exist now (below), so a bad guess would at least
+be survivable if this were reintroduced — but there's still no reason to
+guess when the alternative is just not writing to memory you don't have a
+real address for.
+
+### Exception vectors: implemented and verified working, not just compiling
+
+`kernel/src/exceptions.rs` installs a minimal AArch64 vector table (VBAR_EL1)
+right after `exit_boot_services`, before anything else gets a chance to
+fault. On any synchronous exception, IRQ, FIQ, or SError, it reports
+`ESR_EL1`/`FAR_EL1`/`ELR_EL1` and the vector index through the global
+console (`kernel/src/console.rs` — a `Sync`-wrapped `UnsafeCell<Option<Uart>>`
+shared between `main()` and the exception handler, since a fault needs
+somewhere to report through too) and halts, rather than leaving a bad access
+to run into whatever an unconfigured VBAR_EL1 does. This kernel has only
+ever been observed at EL1 (typical for a UEFI OS loader) — not verified at
+any other EL.
+
+**A real gotcha hit and fixed while building this, worth not repeating:**
+the vector table was first placed in a custom section (`.section
+.text.exceptions`). It linked fine and `VBAR_EL1` pointed at the right
+address, but jumping to it faulted immediately — `ESR_EL1` decoded to EC
+0x21 (Instruction Abort, same EL) with IFSC `0x0F` (Permission Fault, level
+3): the page existed but wasn't executable. The PE/COFF backend apparently
+doesn't infer executable-section characteristics for an unrecognized custom
+section name the way it does for plain `.text`. Fixed by using `.text`
+directly in the `global_asm!` block instead of a custom section name.
+
+**How this was actually verified**, since "it compiles" proves nothing for
+assembly wired up this way: temporarily forced a console onto QEMU's known
+real PL011 address (`0x0900_0000`, confirmed valid all session) right after
+`exceptions::install()`, then deliberately did `write_volatile(0 as *mut
+u8, 0xAB)` — 0x0 being unmapped in QEMU's `virt` memory map (RAM starts at
+0x40000000) — and ran QEMU with `-d int -D <logfile>` to get its own
+internal exception trace independent of anything our kernel prints. First
+attempt (the custom-section version) showed the initial Data Abort dispatch
+correctly, immediately followed by an endless identical `Prefetch Abort` at
+the vector table's own address — a fault loop, the same failure shape that
+made Parallels report a crash. After the `.text` fix: exactly one Data
+Abort, our own handler's line printed (`EXCEPTION vector=4
+esr_el1=0x96000047 far_el1=0x0 elr_el1=0x...`), and the trace showed no
+further exceptions — a clean, stable halt. That temporary test code (forced
+console + deliberate fault) was removed after confirming this; don't expect
+to find it in `main()`.
 
 ### Parallels disk attachment: a real trap, not a hunch
 
@@ -115,23 +156,12 @@ attachment mechanism was wrong.
 
 ### Next milestone
 
-Two viable candidates, not yet decided between:
-
-- **ACPI/SPCR console discovery** — the actual path to getting console
-  output back on both QEMU and Parallels, now that devicetree is confirmed
-  to be a dead end for both.
-- **Exception vectors** — independently overdue: right now any bad memory
-  access anywhere in the kernel is an unrecoverable platform-level crash
-  (exactly what just happened), with zero diagnostic beyond "the VM
-  stopped." Having even a minimal synchronous-exception handler that could
-  report `ESR_EL2`/`FAR_EL2` before halting would make every future bug in
-  this codebase dramatically faster to debug than the process this session
-  just went through (crash → guess → re-test → repeat).
-
-Either could reasonably come first; exception vectors arguably pay for
-themselves immediately by making the next round of hardware-discovery work
-safer to iterate on. After whichever comes first: MMU/paging setup, a
-timer-driven preemption tick, then the first steps toward the
+**ACPI/SPCR console discovery** — the actual path to getting console output
+back on both QEMU and Parallels, now that devicetree is confirmed to be a
+dead end for both, and now that exception vectors exist to make iterating
+on address-guessing-adjacent work (parsing more firmware tables, poking more
+MMIO) survivable instead of another blind-crash risk. After that: MMU/paging
+setup, a timer-driven preemption tick, then the first steps toward the
 microkernel/syscall boundary.
 
 ## Commands
@@ -166,9 +196,11 @@ root already target the right platform.
 
 ```
 kernel/
-  src/main.rs        #[entry] point: UEFI init, ExitBootServices, then halt()
+  src/main.rs        #[entry] point: UEFI init, ExitBootServices, exceptions::install(), then halt()
   src/uart.rs        raw PL011 console driver, used only after ExitBootServices
   src/devicetree.rs  console UART discovery via the UEFI-provided devicetree
+  src/console.rs     global console handle, shared between main() and the exception handler
+  src/exceptions.rs  AArch64 exception vector table (VBAR_EL1) + fault reporting
 ```
 
 Single-crate workspace for now (`Cargo.toml` at the root is a workspace with

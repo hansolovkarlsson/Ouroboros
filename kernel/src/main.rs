@@ -3,10 +3,11 @@
 
 extern crate alloc;
 
+mod console;
 mod devicetree;
+mod exceptions;
 mod uart;
 
-use core::fmt::Write;
 use uefi::boot;
 use uefi::prelude::*;
 
@@ -48,10 +49,19 @@ fn main() -> Status {
     // and only when `discovery` gave us an address to trust.
     let _memory_map = unsafe { boot::exit_boot_services(None) };
 
+    // First thing after exit, before anything else gets a chance to fault:
+    // a bad access is still possible (e.g. the UART write below, if
+    // `discovery` ever resolves an address that isn't actually valid on
+    // some untested platform), but it now reports through the exception
+    // handler and halts, instead of taking the whole VM down the way the
+    // last untested address did on Parallels.
+    exceptions::install();
+
     if let Ok(base) = discovery {
         // SAFETY: `base` came from the platform's own devicetree.
-        let mut uart = unsafe { Uart::new(base) };
-        let _ = writeln!(uart, "Ouroboros kernel: boot services exited, console live");
+        let uart = unsafe { Uart::new(base) };
+        console::install(uart);
+        console::println!("Ouroboros kernel: boot services exited, console live");
     }
 
     halt()
