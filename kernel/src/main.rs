@@ -10,6 +10,7 @@ mod exceptions;
 mod gic;
 mod mmu;
 mod pci;
+mod syscall;
 mod timer;
 mod uart;
 mod uart16550;
@@ -123,14 +124,17 @@ fn main() -> Status {
     }
     timer::arm(1000);
 
-    // Unmasked last, right before parking: nothing before this point
-    // expects to be interrupted, and everything after (just halt()'s wfe
-    // loop) is fine being woken by the tick.
+    // Unmasked last, right before dropping to EL0: nothing before this
+    // point expects to be interrupted, and everything after (EL0's demo
+    // task, or halt()'s wfe loop if it ever somehow got back here) is fine
+    // being woken by the tick.
     unsafe {
         core::arch::asm!("msr daifclr, #2", options(nostack, preserves_flags));
     }
 
-    halt()
+    // SAFETY: syscall::demo_task lives in this same identity-mapped,
+    // EL0-accessible RAM block (see mmu.rs's normal_block).
+    unsafe { syscall::enter(syscall::demo_task) }
 }
 
 /// Parks the core forever instead of returning to firmware. `wfe` is a

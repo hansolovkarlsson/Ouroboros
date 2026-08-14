@@ -19,7 +19,7 @@
 //!   descriptor (everything except MMIO/MMIO_PORT_SPACE/RESERVED/
 //!   UNACCEPTED — that includes our own currently-executing LOADER_CODE/
 //!   LOADER_DATA image and stack, not just CONVENTIONAL) gets mapped
-//!   Normal, cacheable, executable.
+//!   Normal, cacheable, executable, EL1-only.
 //! - Device: the low 1GB (0x0-0x3FFF_FFFF), hardcoded as Device-nGnRnE,
 //!   non-executable. This one *is* still a QEMU-shaped convention (low
 //!   memory = MMIO, matching every console address discovered so far on
@@ -51,6 +51,52 @@
 //! matching L0->L1 structure) changed is the entire diff between hard fault
 //! and clean boot. Don't collapse this back to a single L1 table without
 //! re-verifying against a real fault trace first.
+//!
+//! ## RAM is EL1-only, not EL0-accessible — a second unresolved mystery
+//!
+//! `syscall.rs` needs EL0 to be able to read/write/execute its demo task
+//! and stack, both of which live in this same RAM block. The obvious fix
+//! (`AP[2:1] = 01`, EL1+EL0 R/W, on `normal_block`) was tried and
+//! extensively tested — and it hard-faults, in exactly the same shape as
+//! the starting-level bug above: the very first instruction fetch after
+//! the table switch takes a Permission fault and loops forever. Unlike
+//! that bug, **this one was not resolved.** What was ruled out, each by a
+//! direct, repeatable test, not by assumption:
+//! - Wrong AP bit position — cross-checked bit-for-bit against Linux's
+//!   `pgtable-hwdef.h` three separate times, including a from-scratch
+//!   Python re-derivation of the actual runtime descriptor value. Correct
+//!   every time.
+//! - UXN — removing it entirely (on top of the AP change) changed nothing.
+//! - PAN/EPAN (ARMv8.1, would plausibly block EL1 executing EL0-accessible
+//!   memory) — cortex-a72 is ARMv8.0 and doesn't implement it; confirmed
+//!   directly by trying to clear PSTATE.PAN via its raw system-register
+//!   encoding (`S3_0_C4_C2_3`, since the assembler doesn't even recognize
+//!   the named `PAN` mnemonic here) and getting an EC=0 "Unknown reason"
+//!   trap — the register access itself is undefined on this CPU.
+//! - `AP[2:1] = 10` (EL1 read-only, still no EL0) was also tried as a
+//!   control: it correctly produces a *Data* Abort (denied write) instead
+//!   of an *Instruction* Abort — proof the AP bit positions and their
+//!   general effect are being interpreted correctly. Only the *specific*
+//!   combination of "AP grants EL1 exec" + "AP != 00" faults on execute,
+//!   which shouldn't be possible per the architecture (AP doesn't gate
+//!   execute at all; only PXN/UXN do).
+//! - Shareability (SH_INNER vs none) and `ic ialluis` (removed entirely) —
+//!   both changed nothing.
+//! - Granularity — rebuilt the RAM block as an L2 sub-table (2MB blocks,
+//!   same AP=01 permissions) instead of a single L1 1GB block: identical
+//!   failure. Not a huge-page-specific issue.
+//!
+//! Net result: reverted to AP=EL1-only (below) — proven working, including
+//! through a full EL0 entry/exit round trip (`syscall.rs`'s `enter`
+//! correctly drops to EL0 and correctly gets an Instruction Abort reported
+//! back through the lower-EL vector when EL0 can't execute its own demo
+//! task, exactly as expected with no EL0 access granted). The syscall/EL0
+//! mechanism itself is verified sound; only "give EL0 some actual memory to
+//! run from" remains unsolved. Next things worth trying, not yet attempted:
+//! a genuinely separate (non-identity, non-kernel-image) EL0 region rather
+//! than reusing kernel RAM; comparing against `-cpu max` or a different
+//! QEMU CPU model in case this is cortex-a72-model-specific; or reporting
+//! upstream to QEMU if it keeps reproducing on unrelated configurations.
 
 use core::arch::asm;
 use core::cell::UnsafeCell;
@@ -107,13 +153,17 @@ fn device_block(base: u64) -> u64 {
 }
 
 fn normal_block(base: u64) -> u64 {
+    // AP_EL1_RW_ONLY, UXN: EL0-accessible RAM is not yet possible - see
+    // the module doc comment above ("RAM is EL1-only... a second
+    // unresolved mystery"). `syscall.rs`'s EL0 demo task currently cannot
+    // execute for exactly that reason.
     (base & !(GIB - 1))
         | DESC_VALID
         | (MAIR_IDX_NORMAL_WB << ATTRINDX_SHIFT)
         | AP_EL1_RW_ONLY
         | SH_INNER
         | AF
-        | UXN // no EL0 yet; harmless and future-proof. PXN stays 0: kernel code lives here.
+        | UXN
 }
 
 fn is_general_ram(ty: MemoryType) -> bool {
@@ -208,9 +258,8 @@ pub unsafe fn install_identity_map(memory_map: &MemoryMapOwned) {
     // switch below, code is still running under firmware's *old* tables
     // but *new* attribute-index semantics - a narrow, correctly-barriered
     // window, but not one worth letting an interrupt land in for free.
-    // Nothing after this point in the current boot sequence needs
-    // interrupts unmasked; that's for the timer/preemption milestone to
-    // deliberately undo when it's ready.
+    // (main.rs deliberately re-unmasks IRQ later, right before dropping to
+    // EL0 - this masking is only about surviving this specific transition.)
     unsafe {
         asm!(
             "msr daifset, #0xf",      // mask D, A, I, F

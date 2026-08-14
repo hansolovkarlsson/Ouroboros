@@ -272,6 +272,48 @@ of time and it still took real debugging to find the actual bug. Getting it
 right on paper isn't a substitute for booting it, but it isn't worthless
 either.
 
+### Syscall boundary: EL0 entry and the svc trap both work; EL0 has nowhere to run yet
+
+`kernel/src/syscall.rs` drops to EL0 (`enter`) and provides an `svc`-based
+syscall path back to EL1 (`dispatch`, called number-in-x8/arg0-in-x0,
+return-in-x0, Linux's convention, chosen as reasonable for a "POSIX-ish"
+project — not Linux-ABI-compatible, just a familiar shape). `exceptions.rs`
+grew a second resumable vector path for this (`3:`): slot 8 (Synchronous,
+lower EL AArch64) checks ESR_EL1's EC field first, since EL0 faults land in
+the same slot as `svc` — only EC=0x15 takes the syscall trampoline, anything
+else falls through to the ordinary diverging report-and-halt path shared
+with every other vector. Slot 9 (IRQ, lower EL AArch64) was also fixed to
+reuse the exact same resumable IRQ trampoline as slot 5 — a tick firing
+*while EL0 runs* lands in a different vector slot than one firing at EL1h,
+easy to miss and would have silently broken tick delivery the moment EL0
+started running.
+
+**What's verified working, concretely:** `enter`'s `eret` to EL0 succeeds,
+and when EL0 code faults, the fault correctly routes back through the
+lower-EL vector and reports through the console — a real, confirmed round
+trip through the privilege boundary in both directions. The `svc` dispatch
+path and the IRQ-during-EL0 path are implemented and structurally sound
+(mirror the already-proven slot 5 trampoline almost exactly) but **not yet
+exercised**, because of the blocker below.
+
+**What's not working: EL0 has no memory it's allowed to execute from.**
+`mmu.rs`'s RAM block is EL1-only (`AP[2:1] = 00`), so `syscall.rs`'s
+`demo_task` (which needs to live in that same RAM to run at all — no
+separate user region exists) cannot actually execute; `enter` correctly
+drops to EL0 and EL0 correctly, immediately faults trying to fetch its
+first instruction. Making that same RAM block EL0-accessible was tried
+(`AP[2:1] = 01`) and hit a genuine, unresolved wall: seemingly-identical
+symptom to the earlier MMU starting-level bug (permission fault on the very
+first instruction fetch after the table switch, looping forever), but this
+time the cause was **not found** despite an extensive, methodical search —
+see `mmu.rs`'s module doc comment ("RAM is EL1-only... a second unresolved
+mystery") for the full list of what was ruled out (bit position triple
+-verified, UXN, PAN/EPAN — confirmed unimplemented on this CPU by trying to
+touch it directly, shareability, `ic ialluis`, and block granularity —
+tested down to 2MB blocks, identical failure). This is the point where
+continued unstructured trial-and-error stopped being a good use of time;
+picked back up deliberately, with a plan, not more guessing.
+
 ### Parallels disk attachment: a real trap, not a hunch
 
 Getting `esp.img` to actually boot in Parallels took a few wrong turns worth
@@ -315,13 +357,27 @@ for the reasoning behind that lead.
 
 **In the meantime, kernel development continues against QEMU**, which has a
 fully working console via ACPI/SPCR. MMU/identity-paging and the
-timer-driven preemption tick are both done now (see above) — next up: the
-first steps toward the microkernel/syscall boundary. There's no scheduler
-or tasks yet, so "preemption" so far means exactly one thing: the tick IRQ
-correctly interrupts and resumes `halt()`'s spin loop. Actual preemptive
-task switching needs the tick handler to eventually save/restore full task
+timer-driven preemption tick are both done. There's no scheduler or tasks
+yet, so "preemption" so far means exactly one thing: the tick IRQ correctly
+interrupts and resumes `halt()`'s spin loop. Actual preemptive task
+switching needs the tick handler to eventually save/restore full task
 context (including FP/SIMD, deliberately skipped so far — see above) and
 somewhere to switch *to*, neither of which exist yet.
+
+**The syscall boundary is half-blocked** (see previous section): EL0 entry
+and the `svc`/IRQ trap paths back to EL1 are built and structurally sound,
+but EL0 has no memory it's actually allowed to execute from — making the
+RAM block EL0-accessible hard-faults for reasons a thorough investigation
+did not resolve. Candidates for whoever picks this up next, roughly in
+order of how likely they seem to actually reveal something new: (1) a
+genuinely separate EL0 region instead of reusing kernel RAM — untried, and
+different enough from everything that failed that it might dodge whatever
+the real cause is rather than needing to understand it; (2) compare against
+a different QEMU CPU model (`-cpu max`, or a newer core) to check whether
+this is specific to the cortex-a72 TCG model; (3) if it reproduces
+elsewhere too, it's likely worth a QEMU bug report at that point, with the
+full ruled-out list from `mmu.rs`'s module doc comment as the starting
+evidence.
 
 ## Commands
 
@@ -355,7 +411,7 @@ root already target the right platform.
 
 ```
 kernel/
-  src/main.rs        #[entry] point: UEFI init, ExitBootServices, exceptions::install(), mmu::install_identity_map(), gic+timer init, then halt()
+  src/main.rs        #[entry] point: UEFI init, ExitBootServices, exceptions::install(), mmu::install_identity_map(), gic+timer init, then syscall::enter()
   src/uart.rs        raw PL011 console driver, used only after ExitBootServices
   src/uart16550.rs   raw 16550-compatible console driver (PCI-discovered consoles; different hardware, different driver)
   src/devicetree.rs  console UART discovery via the UEFI-provided devicetree (dead end on QEMU/Parallels)
@@ -366,6 +422,7 @@ kernel/
   src/mmu.rs         replaces firmware's translation tables with our own identity map (L0->L1, 1GB blocks)
   src/gic.rs         GICv2 driver (QEMU virt addresses, confirmed via devicetree dump)
   src/timer.rs       ARM generic timer (non-secure EL1 physical timer, PPI 14 / GIC INTID 30)
+  src/syscall.rs     EL0 entry + svc syscall dispatch (EL0 entry/exit works; EL0 has no executable memory yet, see above)
 ```
 
 Single-crate workspace for now (`Cargo.toml` at the root is a workspace with

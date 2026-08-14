@@ -33,9 +33,28 @@
 //!
 //! Floating-point/SIMD (Q0-Q31) registers are deliberately *not* saved
 //! here. Nothing running today uses them, and the interrupted context is
-//! only ever `halt()`'s trivial spin loop — this stops being safe the
-//! moment there's real interruptible work with FP/SIMD state, which is a
-//! problem for whenever actual task switching exists, not this milestone.
+//! only ever `halt()`'s trivial spin loop or `syscall.rs`'s EL0 demo task
+//! — this stops being safe the moment there's real interruptible work with
+//! FP/SIMD state, which is a problem for whenever actual task switching
+//! exists, not this milestone.
+//!
+//! ## Two vector groups now use the resumable path, not one
+//!
+//! Once `syscall.rs` can drop to EL0, a timer IRQ firing *while EL0 code is
+//! running* lands in a different vector slot than one firing at EL1 — the
+//! table is grouped by [current EL w/ SP_EL0][current EL w/ SP_ELx][lower
+//! EL AArch64][lower EL AArch32], so "IRQ at EL1h" (slot 5, our own
+//! kernel code, `halt()`'s `wfe` loop) and "IRQ from lower EL AArch64"
+//! (slot 9, EL0 code) are different entries entirely. Both share the exact
+//! same resumable trampoline (`2:` below) — GIC ack/EOI and the timer
+//! rearm don't care which EL got interrupted, and `eret` resumes the right
+//! one automatically from the saved SPSR_EL1 regardless. Slot 8
+//! (Synchronous, lower EL AArch64) is where EL0's `svc` lands — but that
+//! same slot is also where an EL0 *fault* would land (bad memory access,
+//! etc.), so it isn't unconditionally treated as a syscall: it checks
+//! ESR_EL1's EC field first and only takes the resumable syscall path
+//! (`3:`) for EC=0x15 (SVC64), falling through to the ordinary diverging
+//! report-and-halt path otherwise.
 
 use core::arch::global_asm;
 use core::ffi::c_void;
@@ -44,6 +63,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use crate::console;
 use crate::gic;
 use crate::halt;
+use crate::syscall;
 use crate::timer;
 
 global_asm!(
@@ -78,11 +98,18 @@ b   1f
 mov x3, #7
 b   1f
 .balign 0x80
+// slot 8: Synchronous, lower EL AArch64 - EL0's svc lands here, but so
+// would an EL0 fault. Check EC before committing to the resumable path.
+mrs x9, esr_el1
+lsr x9, x9, #26
+cmp x9, #0x15
+b.eq 3f
 mov x3, #8
 b   1f
 .balign 0x80
-mov x3, #9
-b   1f
+// slot 9: IRQ, lower EL AArch64 - a tick firing while EL0 runs. Same
+// resumable path as slot 5; see module doc comment.
+b   2f
 .balign 0x80
 mov x3, #10
 b   1f
@@ -151,9 +178,60 @@ ldp x28, x29, [sp, #224]
 ldr x30, [sp, #240]
 add sp, sp, #272
 eret
+
+3:
+sub sp, sp, #272
+stp x0, x1, [sp, #0]
+stp x2, x3, [sp, #16]
+stp x4, x5, [sp, #32]
+stp x6, x7, [sp, #48]
+stp x8, x9, [sp, #64]
+stp x10, x11, [sp, #80]
+stp x12, x13, [sp, #96]
+stp x14, x15, [sp, #112]
+stp x16, x17, [sp, #128]
+stp x18, x19, [sp, #144]
+stp x20, x21, [sp, #160]
+stp x22, x23, [sp, #176]
+stp x24, x25, [sp, #192]
+stp x26, x27, [sp, #208]
+stp x28, x29, [sp, #224]
+str x30, [sp, #240]
+// ELR/SPSR saved via x2/x3 (not x0/x1): x0 (syscall arg0) and x8
+// (syscall number) must survive intact to become the dispatcher's
+// call arguments below.
+mrs x2, elr_el1
+mrs x3, spsr_el1
+stp x2, x3, [sp, #248]
+mov x1, x0   // arg0 (was x0) -> dispatch()'s 2nd argument
+mov x0, x8   // syscall number (was x8) -> dispatch()'s 1st argument
+bl  {rust_syscall_handler}
+str x0, [sp, #0]   // dispatch()'s return value becomes EL0's new x0
+ldp x2, x3, [sp, #248]
+msr elr_el1, x2
+msr spsr_el1, x3
+ldp x0, x1, [sp, #0]
+ldp x2, x3, [sp, #16]
+ldp x4, x5, [sp, #32]
+ldp x6, x7, [sp, #48]
+ldp x8, x9, [sp, #64]
+ldp x10, x11, [sp, #80]
+ldp x12, x13, [sp, #96]
+ldp x14, x15, [sp, #112]
+ldp x16, x17, [sp, #128]
+ldp x18, x19, [sp, #144]
+ldp x20, x21, [sp, #160]
+ldp x22, x23, [sp, #176]
+ldp x24, x25, [sp, #192]
+ldp x26, x27, [sp, #208]
+ldp x28, x29, [sp, #224]
+ldr x30, [sp, #240]
+add sp, sp, #272
+eret
 "#,
     rust_handler = sym rust_exception_handler,
     rust_irq_handler = sym rust_irq_handler,
+    rust_syscall_handler = sym syscall::dispatch,
 );
 
 unsafe extern "C" {
