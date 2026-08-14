@@ -316,6 +316,69 @@ preempted and resumed by the tick each time. Cross-checked against QEMU's
 own `-d int` trace: exactly one `[SVC]` exception, zero aborts across the
 whole run.
 
+### Preemptive task switching: a real task struct, two EL0 tasks, confirmed alternating
+
+`kernel/src/tasks.rs` is the first real scheduler this kernel has had. Before
+this milestone, "preemption" meant exactly one thing: the tick IRQ correctly
+interrupted and resumed whatever was running (`halt()`'s spin loop, or the
+syscall-boundary milestone's single EL0 demo task) — there was never more
+than one thing to switch *between*. Now there are two independent EL0 tasks,
+and the tick is what alternates them.
+
+**Design, built directly on the syscall-boundary milestone's isolation
+approach**, not a rework of it: one EL0-accessible region, still the 8KB
+ceiling forced by the `rustc`/PE-COFF alignment bug (see the syscall-boundary
+section above and `tasks.rs`'s own module doc comment) — but now split into
+two 4KB slots, one task each, since 4KB is `mmu.rs`'s finest page granularity
+anyway. Each task is a tiny hand-written `global_asm!` loop (report in via a
+new syscall, `wfe`, repeat) differing from the other only in a hardcoded task
+ID. There's no cooperative yielding anywhere — the tick catching a task
+mid-`wfe` and swapping its saved context for the other task's is the *only*
+thing that ever moves execution from one to the other.
+
+**`exceptions.rs`'s resumable IRQ trampoline (`2:`) needed one real change to
+make this possible, not just a new caller.** Previously it saved/restored
+`x0`-`x30`/`ELR_EL1`/`SPSR_EL1` and discarded them once the interrupted code
+resumed — fine when there was only ever one context to return to. Task
+switching requires handing that saved frame to Rust *as data*, not just
+scratch space: `SP_EL0` was added to the saved set (it never needed to be
+before — one context never needs to remember its own stack pointer), and the
+whole frame's address is now passed to `rust_irq_handler` as an argument
+(`mov x0, sp` before the `bl`). On a timer tick, `tasks::on_tick` overwrites
+that frame in place — the interrupted task's registers copied out to its own
+saved `Context`, the next task's saved `Context` copied in — and the
+trampoline's restore-and-`eret` doesn't know or care that the frame now holds
+different values than it saved a moment ago. That's the entire scheduler:
+strict round-robin between exactly two tasks, no priorities, no blocking, no
+queue, implemented as a struct-copy inside an existing IRQ path rather than
+any new control-flow mechanism.
+
+A new syscall (`report`, number 2) proves it's real: each task's loop calls
+it with its own task ID as `arg0`; `syscall.rs` keeps one counter per task
+(`TASK_REPORTS`) and prints `task {id} report #{count}`. This is also what
+confirmed the earlier "second syscall" milestone's dispatch table actually
+generalizes — three syscalls now (`print`, `double`, `report`), not one.
+
+**Confirmed working, sustained, cross-checked, not just "boots":** a 20-second
+QEMU run produced clean strict alternation — `task 0 report #1`, `tick 1`,
+`task 1 report #1`, `tick 2`, `task 0 report #2`, ... — through at least 15
+ticks with no skips, repeats, or out-of-order reports. Cross-checked against
+QEMU's own `-d int` trace for the same kind of run: exactly 16 `[SVC]`
+exceptions for 16 report lines (8 per task), 538 `[IRQ]` exceptions (the
+tick, firing roughly every ~37ms of wall time under TCG emulation — not
+literally 1000ms per `timer.rs`'s nominal interval, expected under emulation
+and not itself a bug), and zero aborts across the whole run.
+
+**Still coarse, worth knowing before building on it:** exactly two tasks,
+hardcoded, no task creation/destruction API; no priorities or blocking, just
+round-robin; FP/SIMD state still isn't part of `Context` (inherited
+limitation from `exceptions.rs`, see its module doc comment) — fine since
+neither task's hand-written code touches it, but a real limitation for
+whatever runs here next; and both tasks still share the one 8KB region's W^X
+weakness noted in the syscall-boundary section (code and stack are both
+executable, no separation) — now doubled, since it's true per-task rather
+than a one-off.
+
 ### Parallels disk attachment: a real trap, not a hunch
 
 Getting `esp.img` to actually boot in Parallels took a few wrong turns worth
@@ -358,32 +421,29 @@ transport, feature negotiation, one virtqueue) — see the previous section
 for the reasoning behind that lead.
 
 **In the meantime, kernel development continues against QEMU**, which has a
-fully working console via ACPI/SPCR. MMU/identity-paging and the
-timer-driven preemption tick are both done. There's no scheduler or tasks
-yet, so "preemption" so far means exactly one thing: the tick IRQ correctly
-interrupts and resumes `halt()`'s spin loop. Actual preemptive task
-switching needs the tick handler to eventually save/restore full task
-context (including FP/SIMD, deliberately skipped so far — see above) and
-somewhere to switch *to*, neither of which exist yet.
+fully working console via ACPI/SPCR. MMU/identity-paging, the timer-driven
+preemption tick, the syscall boundary, and now real preemptive task
+switching between two EL0 tasks (see "Preemptive task switching" above) are
+all done and confirmed working, not just structurally plausible.
 
-**The syscall boundary is done and confirmed working** (see previous
-section) — EL0 entry, a real `svc` round-trip, and sustained post-syscall
-execution (preempted and resumed by the tick, repeatedly) are all verified,
-not just structurally plausible. What's still coarse and worth knowing
-about before building on it: EL0's 8KB region has no internal W^X (code and
-stack share one region, both executable), there's only one EL0 region total
-(no per-process isolation, no way yet to run more than one piece of EL0
-code), and the 8KB ceiling itself is an external constraint (see
-`syscall.rs`) that any future "give a task more memory" design has to work
-within or around.
+What's still coarse and worth knowing about before building on it: exactly
+two hardcoded tasks with no creation/destruction API; strict round-robin
+only, no priorities or blocking; FP/SIMD state still isn't saved anywhere
+(`exceptions.rs`'s `Context`, inherited by `tasks.rs`); EL0's 8KB region (now
+split two ways, one per task) has no internal W^X, and there's still only
+one EL0 region total, an external constraint (the `rustc`/PE-COFF alignment
+bug — see `syscall.rs`'s module doc comment) that any future "give a task
+more memory, or more than two tasks" design has to work within or around.
 
-Reasonable next steps from here: a second, real syscall (not just the
-number-0 demo) to prove the dispatch table generalizes; a minimal task
-struct so the tick handler has something to actually switch *between*
-(real preemptive multitasking, not just "the tick resumes whatever was
-running"); or finally circling back to Parallels virtio-console now that
-the kernel has enough infrastructure (MMU, exceptions, EL0) to make that
-work meaningfully once it lands.
+Reasonable next steps from here: real per-task memory (more than two
+hardcoded 4KB slots — needs a way past the 8KB ceiling, or a design that
+works within it deliberately); blocking/waiting primitives so tasks can do
+more than an unconditional round-robin `wfe` loop; a minimal notion of
+address spaces or processes, if this project wants to go there before
+Parallels console output; or finally circling back to Parallels
+virtio-console now that the kernel has enough infrastructure (MMU,
+exceptions, EL0, real task switching) to make that work meaningfully once it
+lands.
 
 ## Commands
 
@@ -417,7 +477,7 @@ root already target the right platform.
 
 ```
 kernel/
-  src/main.rs        #[entry] point: UEFI init, ExitBootServices, exceptions::install(), mmu::install_identity_map(), gic+timer init, then syscall::enter()
+  src/main.rs        #[entry] point: UEFI init, ExitBootServices, exceptions::install(), mmu::install_identity_map(), gic+timer init, tasks::init(), then tasks::start()
   src/uart.rs        raw PL011 console driver, used only after ExitBootServices
   src/uart16550.rs   raw 16550-compatible console driver (PCI-discovered consoles; different hardware, different driver)
   src/devicetree.rs  console UART discovery via the UEFI-provided devicetree (dead end on QEMU/Parallels)
@@ -428,7 +488,8 @@ kernel/
   src/mmu.rs         replaces firmware's translation tables with our own identity map (L0->L1->L2->L3 as needed)
   src/gic.rs         GICv2 driver (QEMU virt addresses, confirmed via devicetree dump)
   src/timer.rs       ARM generic timer (non-secure EL1 physical timer, PPI 14 / GIC INTID 30)
-  src/syscall.rs     EL0 entry + svc syscall dispatch - confirmed working end to end, see above
+  src/syscall.rs     svc syscall dispatch table (print/double/report) - confirmed working end to end, see above
+  src/tasks.rs       two EL0 tasks + the round-robin scheduler (Context save/restore in the tick path) - confirmed alternating, see above
 ```
 
 Single-crate workspace for now (`Cargo.toml` at the root is a workspace with

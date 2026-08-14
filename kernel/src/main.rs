@@ -11,6 +11,7 @@ mod gic;
 mod mmu;
 mod pci;
 mod syscall;
+mod tasks;
 mod timer;
 mod uart;
 mod uart16550;
@@ -113,7 +114,7 @@ fn main() -> Status {
 
     // SAFETY: called after exit_boot_services, with the memory map that
     // call returned.
-    unsafe { mmu::install_identity_map(&memory_map, syscall::el0_region()) };
+    unsafe { mmu::install_identity_map(&memory_map, tasks::el0_region()) };
     console::println!("Ouroboros kernel: identity map installed, MMU running on our own tables");
 
     // SAFETY: GICD/GICC are mapped by the identity map just installed
@@ -124,17 +125,21 @@ fn main() -> Status {
     }
     timer::arm(1000);
 
+    // SAFETY: the EL0 region (tasks::el0_region()) was just mapped
+    // EL0-accessible above.
+    unsafe { tasks::init() };
+
     // Unmasked last, right before dropping to EL0: nothing before this
-    // point expects to be interrupted, and everything after (EL0's demo
-    // task, or halt()'s wfe loop if it ever somehow got back here) is fine
-    // being woken by the tick.
+    // point expects to be interrupted, and everything after (task 0, or
+    // halt()'s wfe loop if it ever somehow got back here) is fine being
+    // woken by the tick - which, from here on, is also what drives every
+    // further task switch (`tasks::on_tick`).
     unsafe {
         core::arch::asm!("msr daifclr, #2", options(nostack, preserves_flags));
     }
 
-    // SAFETY: the EL0 region (syscall::el0_region()) was just mapped
-    // EL0-accessible above.
-    unsafe { syscall::enter() }
+    // SAFETY: called after tasks::init().
+    unsafe { tasks::start() }
 }
 
 /// Parks the core forever instead of returning to firmware. `wfe` is a

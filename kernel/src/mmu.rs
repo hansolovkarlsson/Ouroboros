@@ -20,7 +20,7 @@
 //!   UNACCEPTED — that includes our own currently-executing LOADER_CODE/
 //!   LOADER_DATA image and stack, not just CONVENTIONAL) gets mapped
 //!   Normal, cacheable, executable, EL1-only — except one small carved-out
-//!   region for `syscall.rs`'s EL0 code, see below.
+//!   region for `tasks.rs`'s EL0 code, see below.
 //! - Device: the low 1GB (0x0-0x3FFF_FFFF), hardcoded as Device-nGnRnE,
 //!   non-executable. This one *is* still a QEMU-shaped convention (low
 //!   memory = MMIO, matching every console address discovered so far on
@@ -55,7 +55,7 @@
 //!
 //! ## RAM is EL1-only, not EL0-accessible — a second mystery (resolved below)
 //!
-//! `syscall.rs` needs EL0 to be able to read/write/execute its demo task
+//! `tasks.rs` needs EL0 to be able to read/write/execute its demo task
 //! and stack, both of which live in this same RAM block. The obvious fix
 //! (`AP[2:1] = 01`, EL1+EL0 R/W, on `normal_block`) was tried and
 //! extensively tested — and it hard-faults, in exactly the same shape as
@@ -95,10 +95,10 @@
 //! The fix was the first candidate listed above: give EL0 access to a
 //! *separate* region instead of the same RAM block containing the kernel
 //! code that's actively executing right after the table switch.
-//! `syscall.rs` carves out one dedicated 8KB slot (`el0_region()`) holding
-//! only its EL0 demo task and stack — nothing else from the kernel shares
-//! it. 8KB, not something rounder like 2MB, because 2MB alignment turned
-//! out to be unachievable at all on this target — see `syscall.rs`'s
+//! `tasks.rs` carves out one dedicated 8KB slot (`el0_region()`) holding
+//! its two EL0 tasks and their stacks — nothing else from the kernel
+//! shares it. 8KB, not something rounder like 2MB, because 2MB alignment
+//! turned out to be unachievable at all on this target — see `tasks.rs`'s
 //! module doc comment for the precisely-bisected `rustc`/PE-COFF limit
 //! that forced this. Because 8KB is far smaller than this module's L2
 //! (2MB) block granularity, giving *only* the EL0 region EL0 access
@@ -119,9 +119,9 @@
 //! Cross-checked against QEMU's own `-d int` trace for the same kind of
 //! run: exactly one `[SVC]` exception (the single syscall the demo task
 //! makes) and zero aborts across the whole session. (Getting a clean idle
-//! loop also needed one more fix, in `syscall.rs`: EL0's own `wfe` traps
-//! to EL1 by default — `SCTLR_EL1.nTWE`/`nTWI`, unrelated to the mapping
-//! work here.)
+//! loop also needed one more fix, now in `tasks.rs`: EL0's own `wfe`
+//! traps to EL1 by default — `SCTLR_EL1.nTWE`/`nTWI`, unrelated to the
+//! mapping work here.)
 
 use core::arch::asm;
 use core::cell::UnsafeCell;
@@ -144,10 +144,10 @@ static L0_TABLE: Table = Table(UnsafeCell::new([0; ENTRIES_PER_TABLE]));
 static L1_TABLE: Table = Table(UnsafeCell::new([0; ENTRIES_PER_TABLE]));
 
 // L2 sub-tables, used only for the 1GB block(s) that overlap
-// `syscall::el0_region()` - everywhere else stays plain L1 blocks. Two is
+// `tasks::el0_region()` - everywhere else stays plain L1 blocks. Two is
 // generous: the region is a single 8KB slot, so it overlaps at most one
 // 1GB block in practice (two only if it happened to straddle a boundary,
-// which `syscall.rs`'s alignment prevents anyway).
+// which `tasks.rs`'s alignment prevents anyway).
 const MAX_EL0_L2_TABLES: usize = 2;
 static EL0_L2_TABLES: [Table; MAX_EL0_L2_TABLES] = [
     Table(UnsafeCell::new([0; ENTRIES_PER_TABLE])),
@@ -155,7 +155,7 @@ static EL0_L2_TABLES: [Table; MAX_EL0_L2_TABLES] = [
 ];
 
 // L3 table (4KB pages), for the single 2MB L2 slot that overlaps
-// `syscall::el0_region()` - see the module doc comment ("8KB, not 2MB")
+// `tasks::el0_region()` - see the module doc comment ("8KB, not 2MB")
 // for why an L2 block alone isn't fine-grained enough. Only one is ever
 // needed: the region is 8KB (two 4KB pages), entirely within one 2MB slot.
 static EL0_L3_TABLE: Table = Table(UnsafeCell::new([0; ENTRIES_PER_TABLE]));
@@ -197,7 +197,7 @@ fn device_block(base: u64) -> u64 {
 }
 
 /// Plain 1GB block, EL1-only: used for every RAM block that doesn't
-/// overlap `syscall::el0_region()`.
+/// overlap `tasks::el0_region()`.
 fn normal_block(base: u64) -> u64 {
     (base & !(GIB - 1))
         | DESC_VALID
@@ -223,7 +223,7 @@ fn kernel_block_2m(base: u64) -> u64 {
 
 /// 4KB page, EL1-only - same permissions as `kernel_block_2m`, just at L3
 /// granularity. Used for every page in the one L2 slot that gets split for
-/// `syscall::el0_region()`, except the page(s) the region itself occupies.
+/// `tasks::el0_region()`, except the page(s) the region itself occupies.
 /// Valid L3 entries always have bits[1:0] = 0b11 - the same bit pattern
 /// `DESC_TABLE` uses at L0-L2 to mean "table", reinterpreted by hardware
 /// as "page" at the last level. Reusing the constant here is intentional,
@@ -240,7 +240,7 @@ fn kernel_page_4k(base: u64) -> u64 {
 }
 
 /// 4KB page, EL1+EL0 R/W and executable - used for exactly the page(s)
-/// `syscall::el0_region()` occupies.
+/// `tasks::el0_region()` occupies.
 fn el0_page_4k(base: u64) -> u64 {
     (base & !0xfff)
         | DESC_VALID
@@ -268,7 +268,7 @@ fn is_general_ram(ty: MemoryType) -> bool {
 /// returned. The discovered RAM span must actually cover the code
 /// currently executing and its stack — true for any UEFI-loaded image,
 /// since firmware reports it as LOADER_CODE/LOADER_DATA in the same map.
-/// `el0_region` (start, size) must be `syscall::el0_region()` — the one
+/// `el0_region` (start, size) must be `tasks::el0_region()` — the one
 /// slot that gets EL0 access; everything else in RAM stays EL1-only.
 pub unsafe fn install_identity_map(memory_map: &MemoryMapOwned, el0_region: (u64, u64)) {
     let l1 = unsafe { &mut *L1_TABLE.0.get() };

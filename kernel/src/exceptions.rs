@@ -33,28 +33,44 @@
 //!
 //! Floating-point/SIMD (Q0-Q31) registers are deliberately *not* saved
 //! here. Nothing running today uses them, and the interrupted context is
-//! only ever `halt()`'s trivial spin loop or `syscall.rs`'s EL0 demo task
+//! only ever `halt()`'s trivial spin loop or one of `tasks.rs`'s EL0 tasks
 //! — this stops being safe the moment there's real interruptible work with
-//! FP/SIMD state, which is a problem for whenever actual task switching
-//! exists, not this milestone.
+//! FP/SIMD state.
 //!
 //! ## Two vector groups now use the resumable path, not one
 //!
-//! Once `syscall.rs` can drop to EL0, a timer IRQ firing *while EL0 code is
-//! running* lands in a different vector slot than one firing at EL1 — the
-//! table is grouped by [current EL w/ SP_EL0][current EL w/ SP_ELx][lower
-//! EL AArch64][lower EL AArch32], so "IRQ at EL1h" (slot 5, our own
-//! kernel code, `halt()`'s `wfe` loop) and "IRQ from lower EL AArch64"
-//! (slot 9, EL0 code) are different entries entirely. Both share the exact
-//! same resumable trampoline (`2:` below) — GIC ack/EOI and the timer
-//! rearm don't care which EL got interrupted, and `eret` resumes the right
-//! one automatically from the saved SPSR_EL1 regardless. Slot 8
-//! (Synchronous, lower EL AArch64) is where EL0's `svc` lands — but that
-//! same slot is also where an EL0 *fault* would land (bad memory access,
-//! etc.), so it isn't unconditionally treated as a syscall: it checks
-//! ESR_EL1's EC field first and only takes the resumable syscall path
-//! (`3:`) for EC=0x15 (SVC64), falling through to the ordinary diverging
-//! report-and-halt path otherwise.
+//! A timer IRQ firing *while EL0 code is running* lands in a different
+//! vector slot than one firing at EL1 — the table is grouped by [current EL
+//! w/ SP_EL0][current EL w/ SP_ELx][lower EL AArch64][lower EL AArch32], so
+//! "IRQ at EL1h" (slot 5, our own kernel code, `halt()`'s `wfe` loop) and
+//! "IRQ from lower EL AArch64" (slot 9, EL0 tasks) are different entries
+//! entirely. Both share the exact same resumable trampoline (`2:` below) —
+//! GIC ack/EOI, the timer rearm, and now the task switch itself
+//! (`tasks::on_tick`) don't care which EL got interrupted, and `eret`
+//! resumes the right one automatically from the saved SPSR_EL1 regardless.
+//! Slot 8 (Synchronous, lower EL AArch64) is where EL0's `svc` lands — but
+//! that same slot is also where an EL0 *fault* would land (bad memory
+//! access, etc.), so it isn't unconditionally treated as a syscall: it
+//! checks ESR_EL1's EC field first and only takes the resumable syscall
+//! path (`3:`) for EC=0x15 (SVC64), falling through to the ordinary
+//! diverging report-and-halt path otherwise.
+//!
+//! ## The IRQ trampoline hands its saved frame to Rust — this is what
+//! ## makes real task switching possible
+//!
+//! The frame `2:` builds (`x0`-`x30`, `SP_EL0`, `ELR_EL1`, `SPSR_EL1` — see
+//! [`Context`], which mirrors this layout exactly) isn't just scratch space
+//! to preserve-and-discard anymore: its address is passed as
+//! `rust_irq_handler`'s argument (`mov x0, sp` right before the `bl`), and
+//! on a timer tick `tasks::on_tick` overwrites it in place — copying the
+//! *interrupted* task's registers out to its saved [`Context`], then
+//! copying the *next* task's saved [`Context`] in. The trampoline's own
+//! restore-and-`eret` afterward doesn't know or care that the frame now
+//! holds different values than it saved a moment ago; it resumes whatever
+//! is there, which is the whole mechanism. `SP_EL0` specifically had to be
+//! added here for this to work — the pre-tasks.rs version of this
+//! trampoline never saved it, because there was only ever one EL0 context
+//! and it never needed to move.
 
 use core::arch::global_asm;
 use core::ffi::c_void;
@@ -64,7 +80,31 @@ use crate::console;
 use crate::gic;
 use crate::halt;
 use crate::syscall;
+use crate::tasks;
 use crate::timer;
+
+/// The register state a resumable exception (`2:`/`3:` below) saves and
+/// restores — `x0`-`x30`, `SP_EL0`, `ELR_EL1`, `SPSR_EL1`, in exactly this
+/// field order, matching the trampoline's stack offsets byte for byte
+/// (`gpr[30]` i.e. `x30` at offset 240, `sp_el0` at 248, `elr_el1`/
+/// `spsr_el1` at 256/264 — 272 bytes total, matching `sub sp, sp, #272`).
+/// This is also a full task's saved context (`tasks.rs`) — a suspended
+/// task *is* exactly this much state, nothing more, since nothing here
+/// saves FP/SIMD (see module doc comment).
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct Context {
+    pub gpr: [u64; 31],
+    pub sp_el0: u64,
+    pub elr_el1: u64,
+    pub spsr_el1: u64,
+}
+
+impl Context {
+    pub const fn zeroed() -> Self {
+        Context { gpr: [0; 31], sp_el0: 0, elr_el1: 0, spsr_el1: 0 }
+    }
+}
 
 global_asm!(
     r#"
@@ -153,11 +193,16 @@ stp x24, x25, [sp, #192]
 stp x26, x27, [sp, #208]
 stp x28, x29, [sp, #224]
 str x30, [sp, #240]
+mrs x0, sp_el0
+str x0, [sp, #248]
 mrs x0, elr_el1
 mrs x1, spsr_el1
-stp x0, x1, [sp, #248]
+stp x0, x1, [sp, #256]
+mov x0, sp   // frame pointer -> rust_irq_handler's argument
 bl  {rust_irq_handler}
-ldp x0, x1, [sp, #248]
+ldr x0, [sp, #248]
+msr sp_el0, x0
+ldp x0, x1, [sp, #256]
 msr elr_el1, x0
 msr spsr_el1, x1
 ldp x0, x1, [sp, #0]
@@ -268,16 +313,19 @@ static TICKS: AtomicU64 = AtomicU64::new(0);
 const SPURIOUS_INTID: u32 = 1023;
 const TICK_INTERVAL_MS: u64 = 1000;
 
-/// Runs on every IRQ, called from the vector table's slot 5 trampoline.
-/// Must return normally (the trampoline `eret`s back to whatever was
-/// interrupted) — never halt or diverge from here.
-extern "C" fn rust_irq_handler() {
+/// Runs on every IRQ, called from the vector table's slots 5/9 trampoline
+/// with a pointer to its saved [`Context`] — `frame` *is* whatever was
+/// interrupted; overwriting it (as `tasks::on_tick` does) is how a task
+/// switch happens. Must return normally (the trampoline restores from
+/// `frame` and `eret`s back) — never halt or diverge from here.
+extern "C" fn rust_irq_handler(frame: *mut Context) {
     let intid = unsafe { gic::acknowledge() };
 
     if intid == timer::INTID {
         let ticks = TICKS.fetch_add(1, Ordering::Relaxed) + 1;
         console::println!("Ouroboros kernel: tick {ticks}");
         timer::arm(TICK_INTERVAL_MS);
+        unsafe { tasks::on_tick(frame) };
     }
 
     if intid != SPURIOUS_INTID {
