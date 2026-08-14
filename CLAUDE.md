@@ -47,7 +47,16 @@ panic/misbehave if touched post-exit. Console output after that point goes
 through `kernel/src/uart.rs`, a polling PL011 driver taking a runtime base
 address — no fallback address, see below.
 
-### Console discovery: three mechanisms tried in order, each a real, tested dead end on Parallels so far
+### Console discovery: three mechanisms tried, all confirmed dead ends on Parallels — deferred, see below for the real lead
+
+**Status: deferred as of this writing.** All three mechanisms below are
+confirmed not to work on Parallels. There's a real, promising lead for what
+actually would (virtio-console, at the end of this section) — but
+implementing it is a genuinely different, smaller-than-AML subsystem
+(virtio device discovery, feature negotiation, a transmit virtqueue), not a
+quick follow-up, so it was deliberately not started this session. Kernel
+development continues against QEMU (which has a fully working console via
+mechanism 2 below) in the meantime.
 
 Three modules, tried in this order by `discover_console()` in `main.rs`,
 each logging why it failed before the next is tried:
@@ -82,10 +91,29 @@ each logging why it failed before the next is tried:
    `console::Console`'s two variants. Verified end-to-end on QEMU (which has
    no such device on the default `virt` machine, so this correctly reports
    `NoSerialDevice` there rather than erroring out on the protocol calls
-   themselves) — **not yet tested on Parallels**, where it might actually
-   find something (see Next milestone). `uart16550.rs`'s register stride
-   (4 bytes) is a guess, not a confirmed fact like `uart.rs`'s PL011
-   offsets — nothing has exercised it against a real device yet.
+   themselves). **Confirmed dead on Parallels too**: `DiscoveryError::NoSerialDevice`
+   — no PCI serial controller there either. `uart16550.rs`'s register stride
+   (4 bytes) was a guess for this attempt, never actually exercised against
+   real hardware.
+
+All three failing cleanly, on real hardware, without crashing the VM — that
+itself is a real (if less exciting) confirmation that removing the hardcoded
+fallback address and adding exception vectors did what they were meant to:
+three wrong guesses in a row, and Parallels just stays up.
+
+**The real lead: virtio-console, not a classic UART at all.** Search
+research (not yet verified against this project's own code) turned up that
+Parallels' Apple Silicon virtualization is built on macOS's Virtualization
+framework, which exposes devices — network, storage, entropy, *and serial
+port* — via virtio, and that `console=hvc0` (`hvc` = "hypervisor console",
+Linux's virtio-console driver name) is the standard console parameter for
+this class of VM. That would cleanly explain all three dead ends above:
+none of them were ever going to find a virtio device, because virtio
+consoles don't work like a UART — no simple MMIO byte registers, just
+virtqueues (descriptor rings in memory), feature negotiation, and a
+transport (virtio-mmio or virtio-pci). Implementing this is the next real
+step for Parallels console output, whenever this gets picked back up — see
+Next milestone.
 
 `find_dtb`/`find_rsdp` (need the UEFI config table) and each PL011 module's
 `discover_pl011` (pure memory parsing, no boot service) run **before**
@@ -95,9 +123,9 @@ on any platform) before any raw MMIO is touched. `pci.rs`'s
 `discover_uart16550` has no such split — PCI enumeration is entirely
 boot-services-based throughout, so the whole thing runs before exit, no
 part of it could run after even if it wanted to. Keep any future discovery
-mechanism on this same side of the `exit_boot_services` call for the same
-reason: whatever address you find, you want to have already reported it
-before you risk writing to it.
+mechanism (virtio-console included) on this same side of the
+`exit_boot_services` call for the same reason: whatever address you find,
+you want to have already reported it before you risk writing to it.
 
 ### There is no fallback UART address, and there should not be one again
 
@@ -188,22 +216,20 @@ attachment mechanism was wrong.
 
 ### Next milestone
 
-**Test PCI console discovery on Parallels** (`make parallels-hdd`, see
-Commands) — devicetree and ACPI/SPCR are both confirmed dead ends there
-(previous section); PCI enumeration is the third and only remaining
-mechanism tried, verified end-to-end on QEMU but never against real
-hardware. Should be safe to try regardless of outcome: exception vectors
-mean a bad write now degrades to a caught, reported fault instead of
-another blind VM crash. Three possible outcomes, each pointing somewhere
-different: `NoSerialDevice` (no PCI serial controller either — console
-discovery may be exhausted short of full ACPI DSDT/AML parsing, deferred
-during this work as a much larger subsystem); a found device whose
-characters don't show up (device found, but `uart16550.rs`'s 4-byte stride
-guess is wrong — worth trying other strides); or it actually works (console
-output on Parallels for the first time in this project). After console
-discovery is resolved one way or another: MMU/paging setup, a timer-driven
-preemption tick, then the first steps toward the microkernel/syscall
-boundary.
+**Parallels console output is deliberately paused, not abandoned.** All
+three UART discovery mechanisms are confirmed dead ends there (devicetree,
+ACPI/SPCR, PCI 16550 — see previous section), and the real lead
+(virtio-console) is a genuinely different, smaller-than-AML subsystem that
+was a deliberate stopping point for this session rather than a quick
+follow-up. When this gets picked back up: implement virtio-console
+discovery and a minimal transmit-only driver (virtio-mmio or virtio-pci
+transport, feature negotiation, one virtqueue) — see the previous section
+for the reasoning behind that lead.
+
+**In the meantime, kernel development continues against QEMU**, which has a
+fully working console via ACPI/SPCR. Next up: MMU/paging setup, a
+timer-driven preemption tick, then the first steps toward the
+microkernel/syscall boundary.
 
 ## Commands
 
