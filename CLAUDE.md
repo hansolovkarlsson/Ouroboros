@@ -44,22 +44,39 @@ permanently leaves the UEFI environment. Everything before that call may use
 `log::*`, `alloc`, and UEFI protocols as normal; everything after may not —
 the UEFI logger and global allocator are boot-services-backed and will
 panic/misbehave if touched post-exit. Console output after that point goes
-through `kernel/src/uart.rs`, a polling driver hardcoded to QEMU's
-`virt`-machine PL011 MMIO base (`0x09000000`). This is known and accepted to
-*not* work on Parallels (different virtual hardware, address unknown) —
-proper hardware discovery (most likely parsing the device tree UEFI hands
-off) is deferred until there's a reason to make Parallels boot past this
-point too. Don't be surprised that QEMU and Parallels diverge in capability
-right after `exit_boot_services`; that's the accepted tradeoff, not a bug.
+through `kernel/src/uart.rs`, a polling PL011 driver taking a runtime base
+address — no longer hardcoded, see below.
+
+### Console discovery: devicetree, with a known gap
+
+`kernel/src/devicetree.rs` tries to discover the console UART from the
+devicetree UEFI publishes (`EFI_DTB_TABLE_GUID` in the UEFI configuration
+table), falling back to `uart::QEMU_VIRT_PL011_BASE` when that fails —
+`main.rs` prints which happened and, on failure, exactly which step failed
+(`devicetree::DiscoveryError`), rather than silently guessing either way.
+
+**Tested finding, not a hunch:** on this repo's actual dev setup (Homebrew
+`qemu`'s bundled `edk2-stable202408-prebuilt.qemu.org` aarch64 firmware),
+discovery reports `NoDtb` — that firmware build doesn't publish a devicetree
+via the UEFI config table at all (it's ACPI-oriented). So the QEMU dev loop
+is, in practice, still running on the hardcoded fallback address today; the
+devicetree path is implemented and exercised (it correctly detects and
+reports the absence rather than crashing), but hasn't yet been observed to
+actually find a console anywhere. Whether Parallels' firmware behaves the
+same way (ACPI-first, no DTB config table entry) or actually publishes one
+is unknown — nobody's booted this on Parallels yet. If discovery reports
+`NoDtb` there too, the real next step for Parallels support is ACPI table
+parsing (specifically the SPCR table, which describes the boot console UART
+the same way DTB's `/chosen/stdout` does), not devicetree.
 
 ### Next milestone
 
-Nothing decided yet. Candidates in rough dependency order: MMU/paging setup,
-exception vectors, a timer-driven preemption tick, then the first steps
-toward the microkernel/syscall boundary. Device-tree-based hardware
-discovery (needed to make Parallels boot past `exit_boot_services`) is the
-prerequisite for anything that needs to work on Parallels rather than just
-QEMU — see the note above.
+Depends on what the Parallels boot (`make image`, see Commands) actually
+reports. If `NoDtb` there too: pivot console discovery to ACPI/SPCR instead
+of devicetree. If a DTB does turn up: verify `discover_pl011` actually
+resolves it correctly. Either way, once console discovery is settled:
+MMU/paging setup, exception vectors, a timer-driven preemption tick, then
+the first steps toward the microkernel/syscall boundary.
 
 ## Commands
 
@@ -91,8 +108,9 @@ root already target the right platform.
 
 ```
 kernel/
-  src/main.rs   #[entry] point: UEFI init, ExitBootServices, then halt()
-  src/uart.rs   raw PL011 console driver, used only after ExitBootServices
+  src/main.rs        #[entry] point: UEFI init, ExitBootServices, then halt()
+  src/uart.rs        raw PL011 console driver, used only after ExitBootServices
+  src/devicetree.rs  console UART discovery via the UEFI-provided devicetree
 ```
 
 Single-crate workspace for now (`Cargo.toml` at the root is a workspace with
