@@ -53,13 +53,29 @@ aarch64 OVMF firmware.
 ## Testing in Parallels
 
 ```sh
-make image
+make parallels-hdd
 ```
 
-Produces `esp.img`, a FAT32 disk image with the same `EFI/BOOT/BOOTAA64.EFI`
-layout. Create a new Parallels VM of type "Other" / generic ARM64 with no
-installed OS, attach `esp.img` as its boot disk, and start it — UEFI firmware
-will pick up `BOOTAA64.EFI` automatically.
+Produces `esp.hdd`, a Parallels-native virtual hard disk with the kernel at
+`EFI/BOOT/BOOTAA64.EFI`. Create a new Parallels VM of type "Other" with no
+installed OS, and in its Hardware settings attach `esp.hdd` as the **Hard
+Disk** device specifically:
+
+- Not `esp.img` directly — Parallels' Hard Disk device only accepts its own
+  `.hdd` format, not a raw disk image.
+- Not the CD/DVD device — that expects an ISO9660 optical filesystem, and
+  `esp.img`/`esp.hdd` is an MBR+FAT32 hard disk image. Attaching it there
+  makes firmware see a block device but find no filesystem on it.
+
+`esp.hdd` is a thin wrapper that points at `esp.dmg`'s absolute path rather
+than embedding its data — keep both files together; `make clean` removes
+them as a pair.
+
+`make parallels-hdd` requires Parallels Desktop to be installed (it shells
+out to `prl_disk_tool`, bundled with the app).
+
+Start the VM once attached — UEFI firmware should pick up `BOOTAA64.EFI`
+from the disk automatically, the same way it does in QEMU.
 
 ## Layout
 

@@ -69,14 +69,44 @@ is unknown — nobody's booted this on Parallels yet. If discovery reports
 parsing (specifically the SPCR table, which describes the boot console UART
 the same way DTB's `/chosen/stdout` does), not devicetree.
 
+### Parallels disk attachment: a real trap, not a hunch
+
+Getting `esp.img` to actually boot in Parallels took a few wrong turns worth
+recording so they don't get re-discovered:
+
+- Parallels' Hard Disk device rejects a raw `.img` outright — it only takes
+  its own `.hdd` container format.
+- Attaching the raw image to the **CD/DVD** device instead *looks* like it
+  works (Parallels accepts arbitrary files there) but doesn't: the optical
+  driver expects an ISO9660 filesystem, and `esp.img` is MBR+FAT32 (a hard
+  disk layout). Symptom was firmware seeing a `BLK` device in the EFI Shell
+  but resolving zero `FS` mappings — the device was visible, the content
+  just wasn't recognized as anything the CD-ROM driver understands.
+- The actual path: `make parallels-hdd` converts `esp.img` → `esp.dmg` (via
+  `hdiutil convert`) → `esp.hdd` (via `prl_disk_tool create --hdd ... --dmg
+  ...`, `prl_disk_tool`'s only documented way to build a `.hdd` from an
+  existing raw image). `prl_disk_tool` silently fails ("Unable to open the
+  disk image") if given relative paths — always pass absolute ones. Attach
+  the resulting `esp.hdd` as the Hard Disk device, not `esp.img` and not
+  CD/DVD.
+- `esp.hdd` stores a pointer to `esp.dmg`'s absolute path rather than a copy
+  of its data — the two files must stay together.
+
+This was all confirmed by directly booting `esp.img` in QEMU with a real
+`-drive format=raw` (not the `vvfat` passthrough `make run` uses) before
+touching Parallels at all, to first rule out `make image` producing a
+malformed disk. It didn't — the image was always fine; only the Parallels
+attachment mechanism was wrong.
+
 ### Next milestone
 
-Depends on what the Parallels boot (`make image`, see Commands) actually
-reports. If `NoDtb` there too: pivot console discovery to ACPI/SPCR instead
-of devicetree. If a DTB does turn up: verify `discover_pl011` actually
-resolves it correctly. Either way, once console discovery is settled:
-MMU/paging setup, exception vectors, a timer-driven preemption tick, then
-the first steps toward the microkernel/syscall boundary.
+Depends on what the Parallels boot (`make parallels-hdd`, see Commands)
+actually reports once it boots. If `NoDtb` there too: pivot console
+discovery to ACPI/SPCR instead of devicetree. If a DTB does turn up: verify
+`discover_pl011` actually resolves it correctly. Either way, once console
+discovery is settled: MMU/paging setup, exception vectors, a timer-driven
+preemption tick, then the first steps toward the microkernel/syscall
+boundary.
 
 ## Commands
 
@@ -84,13 +114,15 @@ the first steps toward the microkernel/syscall boundary.
 make build                  # cargo build (debug)
 make build PROFILE=release  # release profile
 make run                    # stage ESP dir + boot in QEMU (aarch64 virt machine, OVMF firmware)
-make image                  # build esp.img, a FAT32 disk image for use as a Parallels boot disk
+make image                  # build esp.img, a raw MBR+FAT32 disk image (not directly usable by Parallels - see below)
+make parallels-hdd          # wrap esp.img into esp.hdd, a Parallels-native virtual hard disk
 make clean
 ```
 
 `make run` requires QEMU (`brew install qemu`, which also provides the
 aarch64 OVMF firmware `make run` points at). `make image` requires macOS's
-`hdiutil` (used to produce the FAT32 image).
+`hdiutil`. `make parallels-hdd` additionally requires Parallels Desktop
+installed (uses its bundled `prl_disk_tool`).
 
 There is no test suite yet — this is pre-alpha kernel code that only proves
 it boots.
