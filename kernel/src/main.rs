@@ -113,7 +113,7 @@ fn main() -> Status {
 
     // SAFETY: called after exit_boot_services, with the memory map that
     // call returned.
-    unsafe { mmu::install_identity_map(&memory_map) };
+    unsafe { mmu::install_identity_map(&memory_map, syscall::el0_region()) };
     console::println!("Ouroboros kernel: identity map installed, MMU running on our own tables");
 
     // SAFETY: GICD/GICC are mapped by the identity map just installed
@@ -132,9 +132,9 @@ fn main() -> Status {
         core::arch::asm!("msr daifclr, #2", options(nostack, preserves_flags));
     }
 
-    // SAFETY: syscall::demo_task lives in this same identity-mapped,
-    // EL0-accessible RAM block (see mmu.rs's normal_block).
-    unsafe { syscall::enter(syscall::demo_task) }
+    // SAFETY: the EL0 region (syscall::el0_region()) was just mapped
+    // EL0-accessible above.
+    unsafe { syscall::enter() }
 }
 
 /// Parks the core forever instead of returning to firmware. `wfe` is a
