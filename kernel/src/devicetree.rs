@@ -4,12 +4,15 @@
 //! UEFI+devicetree platform) instead of only working on QEMU's `virt`
 //! machine.
 //!
-//! Two-phase, split across the `exit_boot_services` call in `main.rs`:
 //! `find_dtb` reads the UEFI configuration table for the devicetree blob
-//! pointer *before* exiting boot services (it's UEFI table data, gone once
-//! boot services are torn down); `discover_pl011` parses that blob (via the
-//! `fdt` crate) and resolves the console node *after* exiting, since parsing
-//! doesn't touch any firmware service.
+//! pointer, so it must run before `exit_boot_services` (it's UEFI table
+//! data, gone once boot services are torn down). `discover_pl011` parses
+//! that blob (via the `fdt` crate) and doesn't touch any firmware service,
+//! so it works either side of `exit_boot_services` — `main.rs` deliberately
+//! calls it *before*, so the result can be logged through the UEFI console
+//! (safe on any platform) rather than only via the raw MMIO UART this module
+//! resolves an address for, which isn't validated until it's actually
+//! written to.
 
 use fdt::Fdt;
 use uefi::{guid, Guid};
@@ -52,8 +55,9 @@ pub enum DiscoveryError {
 /// Parses `dtb` (if present) and resolves it to a PL011 UART base address.
 /// Only understands PL011: if the platform's console is some other UART
 /// type, this returns `Err` rather than guess at a register layout our
-/// driver doesn't implement. Must be called after `exit_boot_services` —
-/// this only touches the blob itself, not any UEFI service.
+/// driver doesn't implement. Safe to call either side of
+/// `exit_boot_services` — this only touches the blob itself, not any UEFI
+/// service.
 ///
 /// # Safety
 /// `dtb`, if `Some`, must point to a valid devicetree blob that remains
