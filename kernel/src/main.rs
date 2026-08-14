@@ -3,13 +3,27 @@
 
 extern crate alloc;
 
+mod uart;
+
+use core::fmt::Write;
+use uefi::boot;
 use uefi::prelude::*;
+
+use uart::Uart;
 
 #[entry]
 fn main() -> Status {
     uefi::helpers::init().unwrap();
 
     log::info!("Ouroboros kernel: UEFI stage alive");
+
+    // SAFETY: no boot-services protocol references (console, allocator, or
+    // otherwise) are held past this call. Nothing below this point may use
+    // log::*, alloc, or UEFI protocols — only the raw PL011 MMIO in `uart`.
+    let _memory_map = unsafe { boot::exit_boot_services(None) };
+
+    let mut uart = Uart::new();
+    let _ = writeln!(uart, "Ouroboros kernel: boot services exited, running bare-metal");
 
     halt()
 }

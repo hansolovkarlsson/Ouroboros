@@ -37,23 +37,29 @@ a separate kernel binary. That split hasn't happened yet.
 
 `main()` never returns `Status::SUCCESS` — it logs a boot message and parks
 the core in a `wfe` spin loop (`halt()` in `kernel/src/main.rs`) instead.
-Returning to firmware is a dead end for kernel code; the loop is the current
-stand-in for "the kernel takes over," pending the next milestone below.
+Returning to firmware is a dead end for kernel code.
 
-### Next milestone: ExitBootServices
+`main()` now calls `boot::exit_boot_services(None)` partway through and
+permanently leaves the UEFI environment. Everything before that call may use
+`log::*`, `alloc`, and UEFI protocols as normal; everything after may not —
+the UEFI logger and global allocator are boot-services-backed and will
+panic/misbehave if touched post-exit. Console output after that point goes
+through `kernel/src/uart.rs`, a polling driver hardcoded to QEMU's
+`virt`-machine PL011 MMIO base (`0x09000000`). This is known and accepted to
+*not* work on Parallels (different virtual hardware, address unknown) —
+proper hardware discovery (most likely parsing the device tree UEFI hands
+off) is deferred until there's a reason to make Parallels boot past this
+point too. Don't be surprised that QEMU and Parallels diverge in capability
+right after `exit_boot_services`; that's the accepted tradeoff, not a bug.
 
-Still running entirely inside UEFI boot services (console, allocator, etc.
-all still firmware-provided) — `ExitBootServices` hasn't been called yet.
-That's the next real architectural step: take the final memory map and
-permanently exit the UEFI environment. The moment that happens, UEFI's
-`log`/console output stops working, so a replacement is needed at the same
-time. Decided plan: hardcode QEMU's `virt`-machine PL011 UART (fixed MMIO
-address `0x09000000`) as the first post-exit console. This is known and
-accepted to *not* work on Parallels (different virtual hardware, address
-unknown) — proper hardware discovery (most likely parsing the device tree
-UEFI hands off) is deferred until there's a reason to make Parallels boot
-past this point too. Don't be surprised that QEMU and Parallels diverge in
-capability right after this milestone; that's the accepted tradeoff, not a bug.
+### Next milestone
+
+Nothing decided yet. Candidates in rough dependency order: MMU/paging setup,
+exception vectors, a timer-driven preemption tick, then the first steps
+toward the microkernel/syscall boundary. Device-tree-based hardware
+discovery (needed to make Parallels boot past `exit_boot_services`) is the
+prerequisite for anything that needs to work on Parallels rather than just
+QEMU — see the note above.
 
 ## Commands
 
@@ -84,7 +90,9 @@ root already target the right platform.
 ## Structure
 
 ```
-kernel/     the kernel itself, currently the entire UEFI application (src/main.rs is the #[entry] point)
+kernel/
+  src/main.rs   #[entry] point: UEFI init, ExitBootServices, then halt()
+  src/uart.rs   raw PL011 console driver, used only after ExitBootServices
 ```
 
 Single-crate workspace for now (`Cargo.toml` at the root is a workspace with
