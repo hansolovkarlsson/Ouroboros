@@ -7,6 +7,7 @@ mod acpi;
 mod console;
 mod devicetree;
 mod exceptions;
+mod mmu;
 mod pci;
 mod uart;
 mod uart16550;
@@ -84,7 +85,9 @@ fn main() -> Status {
     // otherwise) are held past this call. Nothing below this point may use
     // log::*, alloc, or UEFI protocols — only the raw MMIO in `uart`/
     // `uart16550`, and only when `discovery` gave us an address to trust.
-    let _memory_map = unsafe { boot::exit_boot_services(None) };
+    // The returned memory map is kept, not discarded: mmu.rs uses it to
+    // identity-map real discovered RAM instead of a hardcoded address.
+    let memory_map = unsafe { boot::exit_boot_services(None) };
 
     // First thing after exit, before anything else gets a chance to fault:
     // a bad access is still possible (e.g. the UART write below, if
@@ -104,6 +107,11 @@ fn main() -> Status {
         console::install(console);
         console::println!("Ouroboros kernel: boot services exited, console live");
     }
+
+    // SAFETY: called after exit_boot_services, with the memory map that
+    // call returned.
+    unsafe { mmu::install_identity_map(&memory_map) };
+    console::println!("Ouroboros kernel: identity map installed, MMU running on our own tables");
 
     halt()
 }

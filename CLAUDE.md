@@ -45,7 +45,8 @@ permanently leaves the UEFI environment. Everything before that call may use
 the UEFI logger and global allocator are boot-services-backed and will
 panic/misbehave if touched post-exit. Console output after that point goes
 through `kernel/src/uart.rs`, a polling PL011 driver taking a runtime base
-address — no fallback address, see below.
+address — no fallback address, see below. The returned memory map is kept
+(not discarded) — `mmu.rs` uses it to identity-map real discovered RAM.
 
 ### Console discovery: three mechanisms tried, all confirmed dead ends on Parallels — deferred, see below for the real lead
 
@@ -185,6 +186,45 @@ further exceptions — a clean, stable halt. That temporary test code (forced
 console + deliberate fault) was removed after confirming this; don't expect
 to find it in `main()`.
 
+### MMU: identity-mapped on our own tables, not firmware's — a real starting-level bug, worth reading before touching this again
+
+`kernel/src/mmu.rs` replaces firmware's translation tables with our own
+right after `exit_boot_services` + `exceptions::install()`. Firmware runs
+with paging already on; this doesn't turn the MMU on, it swaps which tables
+`TTBR0_EL1` points at while it stays continuously enabled — same MAIR_EL1/
+TCR_EL1/TTBR0_EL1 write sequence, barriered with `dsb`/`isb`/`tlbi vmalle1`/
+`ic ialluis` throughout. Deliberately coarse: two 1GB block mappings, one
+Device (fixed low 1GB, a QEMU-shaped convention like the console addresses)
+and one Normal WB executable RAM block — but the RAM range comes from the
+*real* UEFI memory map (`exit_boot_services`'s return value, no longer
+discarded), not a hardcoded address. Same lesson as the UART fallback:
+hardcoding a QEMU-specific address here would risk the identical failure
+mode on Parallels.
+
+**A real bug, not a style choice: the walk starts at L0 (`T0SZ=20`,
+matching firmware's own config, read back and verified at runtime), via a
+2-level L0→L1 table, not a single L1 table with `T0SZ=25`.** The single-table
+version was tried first — architecturally legal, every table entry and
+every TCR_EL1/MAIR_EL1 bit hand-verified correct against authoritative
+bit-layout references (Linux's `pgtable-hwdef.h`, `arch/arm64/tools/sysreg`)
+and independently re-derived with a throwaway Python decode of the actual
+runtime register values — and it hard-faulted anyway: a Permission fault at
+translation level 2 on the very next instruction after the switch, then an
+identical fault on the exception vector table itself, looping forever. PXN/
+UXN weren't it (removing both entirely changed nothing). What fixed it,
+confirmed by direct A/B test with everything else held constant, was
+matching firmware's *starting level* rather than switching to a different
+one. Full write-up of the debugging path is in `mmu.rs`'s module doc
+comment — read it before ever "simplifying" this back to one table.
+
+Verified two ways, not just "it prints a confirmation line": the informational
+log line reports the real discovered RAM span and block range, and a
+temporary deliberate fault at an address genuinely unmapped by the new
+tables (block index 2) confirmed the exception handler still works
+correctly *after* the switch, under our own tables, not just under
+firmware's — different code path than the exception-vector verification
+above, worth re-testing again if this module changes.
+
 ### Parallels disk attachment: a real trap, not a hunch
 
 Getting `esp.img` to actually boot in Parallels took a few wrong turns worth
@@ -227,9 +267,9 @@ transport, feature negotiation, one virtqueue) — see the previous section
 for the reasoning behind that lead.
 
 **In the meantime, kernel development continues against QEMU**, which has a
-fully working console via ACPI/SPCR. Next up: MMU/paging setup, a
-timer-driven preemption tick, then the first steps toward the
-microkernel/syscall boundary.
+fully working console via ACPI/SPCR. MMU/identity-paging is now done (see
+above) — next up: a timer-driven preemption tick, then the first steps
+toward the microkernel/syscall boundary.
 
 ## Commands
 
@@ -263,7 +303,7 @@ root already target the right platform.
 
 ```
 kernel/
-  src/main.rs        #[entry] point: UEFI init, ExitBootServices, exceptions::install(), then halt()
+  src/main.rs        #[entry] point: UEFI init, ExitBootServices, exceptions::install(), mmu::install_identity_map(), then halt()
   src/uart.rs        raw PL011 console driver, used only after ExitBootServices
   src/uart16550.rs   raw 16550-compatible console driver (PCI-discovered consoles; different hardware, different driver)
   src/devicetree.rs  console UART discovery via the UEFI-provided devicetree (dead end on QEMU/Parallels)
@@ -271,6 +311,7 @@ kernel/
   src/pci.rs         console UART discovery via PCI enumeration for a class 0x07/0x00 serial controller
   src/console.rs     global console handle (Console enum: Pl011 | Uart16550), shared between main() and the exception handler
   src/exceptions.rs  AArch64 exception vector table (VBAR_EL1) + fault reporting
+  src/mmu.rs         replaces firmware's translation tables with our own identity map (L0->L1, 1GB blocks)
 ```
 
 Single-crate workspace for now (`Cargo.toml` at the root is a workspace with
