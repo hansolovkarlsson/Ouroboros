@@ -3,7 +3,10 @@
 How Ouroboros gets a userland program from a file on disk into a running
 EL0 task, why it works the way it does, and what's involved in writing a
 replacement for the default shell. Reference documentation for the current
-design — see `CLAUDE.md` for the reasoning trail and what was tried first.
+design — see `CLAUDE.md` for the reasoning trail and what was tried first,
+and [`roadmap.md`](roadmap.md) for where this is headed (phase 3's runtime
+storage stack in particular will change several of the constraints noted
+below).
 
 ## Motivation
 

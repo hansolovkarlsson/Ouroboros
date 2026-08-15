@@ -707,9 +707,13 @@ all done and confirmed working, not just structurally plausible.
 
 **Both phases of the original "get to a shell" plan are done.** Phase 1
 (accept input, echo it back) and phase 2 (real commands, one backed by
-real kernel state via a new syscall) are both confirmed working. What
-comes next isn't dictated by that original plan anymore - it's an open
-choice among the gaps below.
+real kernel state via a new syscall) are both confirmed working. Phase 3
+(disk commands - `ls`/`cat`/`cd`/`pwd`, and the runtime storage stack they
+need) is planned but not started - see `docs/roadmap.md` for the full
+breakdown, including the open decisions (virtio transport confirmation,
+hand-rolled-vs-crate FAT32) worth resolving before writing code. This
+section (and the "gaps" paragraph below it) still tracks what's true right
+now; `docs/roadmap.md` is the one to check for what's next and why.
 
 What's still coarse and worth knowing about before building on any of
 this — kept current in `docs/processes.md`'s "known rough edges" rather
@@ -784,6 +788,7 @@ already target `kernel` correctly; building `shell` needs the explicit
 docs/
   architecture.md    reference doc: boot flow, privilege model, memory layout, exceptions, process model, syscall ABI, console
   processes.md       reference doc: process loading/config mechanism, memory model, binary format, writing a replacement program
+  roadmap.md         forward-looking plan: what's done, phase 3 (disk commands) breakdown, parking lot of known future work
 
 kernel/
   src/main.rs        #[entry] point: UEFI init, console discovery, loader::load(), ExitBootServices, exceptions::install(), mmu::install_identity_map(), gic+timer init, tasks::init(), then tasks::start()
