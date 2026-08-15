@@ -22,7 +22,7 @@ ifeq ($(PROFILE),release)
 CARGO_FLAGS += --release
 endif
 
-.PHONY: build shell-bin esp run image parallels-hdd clean
+.PHONY: build shell-bin esp run image run-image parallels-hdd clean
 
 build:
 	cargo build $(CARGO_FLAGS)
@@ -81,6 +81,29 @@ image: esp
 	rm -f $(ESP_DIR).img
 	hdiutil create -size 64m -fs FAT32 -volname OUROBOROS -srcfolder $(ESP_DIR) -format UDTO -ov $(ESP_DIR).cdr
 	mv $(ESP_DIR).cdr $(ESP_DIR).img
+
+# Boots the real esp.img (genuine FAT32) instead of `run`'s vvfat
+# passthrough - needed for anything that reads the filesystem at runtime
+# (fat32.rs and up), not just the fast kernel-dev loop `run` is for.
+# **`run`'s vvfat is FAT16, not FAT32** - confirmed by decoding its BPB
+# directly (BS_FilSysType literally reads "FAT16   ", and RootEntryCount/
+# FATSz16 are both nonzero, which real FAT32 requires to be zero): QEMU's
+# vvfat driver apparently can't produce FAT32 at all. esp.img (built by
+# `hdiutil -fs FAT32`, what Parallels ultimately boots from too via
+# `parallels-hdd`) is genuinely FAT32 - confirmed the same way, decoding
+# its BPB directly with `xxd` before writing any parser code. Use this
+# target, not `run`, whenever the on-disk filesystem format actually
+# matters.
+run-image: image
+	qemu-system-aarch64 \
+		-machine virt \
+		-cpu cortex-a72 \
+		-m 512M \
+		-bios $(OVMF) \
+		-drive file=$(ESP_DIR).img,format=raw,if=none,id=hd0 \
+		-device virtio-blk-device,drive=hd0 \
+		-global virtio-mmio.force-legacy=false \
+		-nographic
 
 # Wraps esp.img into esp.hdd, a Parallels-native virtual hard disk, via
 # prl_disk_tool's `--dmg` import (its only documented way to build a .hdd

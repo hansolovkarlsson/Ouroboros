@@ -82,23 +82,45 @@ phase is really three dependent stages:
   disk commands working at all. Revisit once there's more than one
   reason to want driver isolation; virtio itself doesn't require it.
 
-### 3b. A filesystem reader
+### 3b. A filesystem reader — done
 
-- **Target format: FAT32.** Not a new choice — it's already the format
-  `make image` produces and the ESP is formatted as, so targeting it means
-  runtime reads and the boot-time ESP share one format story instead of
-  two. Revisit only if a real reason to support something else shows up.
-- **Open question, worth deciding before writing code:** hand-roll a
-  minimal FAT32 reader (directory entries + cluster-chain traversal — more
-  involved than ACPI/SPCR's fixed-offset struct reads, but the same spirit)
-  or pull in an existing `no_std`-compatible crate (e.g. `fatfs`). The
-  project has hand-rolled every parser so far specifically to avoid
-  depending on more than the data actually needs (see `acpi.rs`'s doc
-  comment on why it isn't the `acpi` crate) — but FAT32 is enough more
-  complex than SPCR that a well-tested crate might be the better call here.
-  Flagging this explicitly rather than deciding it unilaterally.
+- **Target format: FAT32, as planned** — matches `make image`'s
+  `hdiutil -fs FAT32` output, what Parallels ultimately boots from too.
+  Real surprise along the way: `make run`'s fast dev-loop disk
+  (`fat:rw:esp`, QEMU's `vvfat`) turned out to be **FAT16**, confirmed by
+  decoding its BPB by hand before writing any parser code (`BS_FilSysType`
+  literally reads `"FAT16   "`) — `make run-image` (new Makefile target)
+  boots the real `esp.img` instead, since `run`'s disk can never satisfy
+  a FAT32 mount. See `CLAUDE.md`'s "Phase 3b" section for the full story.
+- **Decided: hand-rolled, not a crate** — the open question this section
+  used to flag. Turned out to be more than a style preference: this
+  reader runs after `exit_boot_services`, where the global allocator is
+  no longer valid, and every `no_std` FAT crate surveyed assumes an
+  allocator is reachable somewhere in its stack. A hard constraint, not
+  just precedent.
+- **A second real surprise:** this project's own `\EFI\OUROBOROS\`
+  directory name doesn't fit FAT's 8.3 short-name limit (9 characters) —
+  real FAT32 formatters handle that with a long-filename (LFN) entry this
+  reader doesn't parse yet. Left as a documented gap rather than fixed
+  preemptively; see `kernel/src/fat32.rs`'s module doc comment and the
+  "reasonable next steps" note below on what to do about it before 3c
+  needs to navigate there.
+- Confirmed working end to end: lists `\EFI\BOOT`, reads `BOOTAA64.EFI`
+  back (a real multi-cluster file, not a single-block special case) and
+  checks its exact size and PE header magic against the real built
+  binary. See `kernel/src/fat32.rs`.
 
 ### 3c. New syscalls + the commands themselves
+
+**One thing to resolve before this starts:** `\EFI\OUROBOROS\` (holding
+the shell binary and `INIT.CFG`) won't be reachable by name once `cd`/`ls`
+are real, since `fat32.rs` doesn't parse the long-filename entry real FAT32
+formatters write for a 9-character name — it only sees the mangled 8.3
+alias (`OUROBO~2`). Two ways out: rename the directory to fit 8.3 (cheap,
+this project controls the name, but touches an already-documented,
+widely-referenced path), or implement LFN parsing (more general, more
+code, benefits any future file with a long name, not just this one).
+Worth deciding with 3c's actual UX in mind, not before.
 
 File I/O needs to go through the kernel the same way console I/O does —
 userland has no direct hardware access. Reasonable syscall shape:

@@ -745,6 +745,73 @@ in this kernel so far), and not yet verified against anything but QEMU
 (Parallels' own virtio implementation, if it has one, is unconfirmed -
 same open question already on record for virtio-console).
 
+### Phase 3b: a hand-rolled FAT32 reader, and `make run`'s dev loop turned out to be the wrong disk format
+
+`kernel/src/fat32.rs`: read-only FAT32 (MBR partition lookup, BPB parsing,
+FAT cluster-chain traversal, 8.3-only directory entries) built directly
+over `virtio_blk::Device`, no crate. Phase 3b of `docs/roadmap.md`.
+
+**Hand-rolled wasn't just precedent this time - it's a hard constraint.**
+Every parser before this (ACPI, devicetree, virtio) was hand-rolled by
+choice. FAT32 has a real reason beyond that: this reader runs after
+`exit_boot_services`, where the global allocator is no longer valid (it
+was boot-services-backed). Every `no_std` FAT crate surveyed assumes an
+allocator is reachable somewhere in its stack (directory listings as
+`Vec`, path handling as `String`) - reworking one to run with zero heap
+would likely be more effort than writing exactly the subset needed by
+hand. Confirms the call `docs/roadmap.md` flagged as an open question
+rather than deciding unilaterally.
+
+**A real, confirmed surprise: `make run`'s fast dev-loop disk isn't
+FAT32.** Before writing any parser code, sector 0 and the partition's
+BPB were dumped through a temporary boot-time hex print (same discipline
+as phase 3a's `xp/1xw` monitor peeks) and decoded by hand. `make run`'s
+`fat:rw:esp` (QEMU's `vvfat` driver) turned out to produce **FAT16**, not
+FAT32 - `BS_FilSysType` literally reads `"FAT16   "`, and `RootEntryCount`/
+`FATSz16` are both nonzero, fields that real FAT32 requires to be zero.
+`esp.img` (built by `hdiutil -fs FAT32`, what `make image`/
+`parallels-hdd` and therefore Parallels itself ultimately boot from) is
+genuinely FAT32, confirmed the same way. The Makefile gained a new
+`run-image` target (boots `esp.img` directly with the same virtio-mmio
+setup as `run`) specifically because `run`'s vvfat can never satisfy
+`fat32.rs::Fs::mount` - not a bug in the reader, a real format mismatch
+between the fast QEMU loop and everything else.
+
+**A second real surprise, found by testing against real content, not by
+inspection: this project's own `\EFI\OUROBOROS\` directory name doesn't
+fit FAT's 8.3 short-name limit.** `OUROBOROS` is 9 characters. Real FAT32
+formatters (macOS's `hdiutil`/`newfs_msdos` included) handle this by
+writing a long-filename (LFN) entry holding the real name plus a mangled
+8.3 alias (`OUROBO~2`) for compatibility - and this reader deliberately
+doesn't parse LFN entries yet (every file this project creates was
+*assumed* to fit 8.3; that assumption was simply wrong for one of its own
+directories). Rather than either implementing LFN parsing now or renaming
+an established, widely-referenced path before phase 3c's shell/UX needs
+are known, this was left as a documented, confirmed gap - verification
+instead used `\EFI\BOOT\BOOTAA64.EFI`, where every path component already
+fits 8.3 cleanly.
+
+**Confirmed working end to end against real content, not just "mount
+succeeded":** listing `\EFI\BOOT` correctly showed `.`, `..`, and
+`BOOTAA64.EFI` with its exact real size; reading `BOOTAA64.EFI` back
+(346,624 bytes at the time, spanning roughly 677 clusters at this image's
+512-byte cluster size - a real multi-cluster chain traversal, not a
+single-block special case) produced that same size and the correct PE
+header magic (`4D 5A`, "MZ") - values nothing but a genuine, correct
+multi-sector read could produce, independently checked against `ls -la`
+on the built binary rather than hardcoded (a hardcoded expected size
+would have been self-referentially wrong the moment this very code
+changed the kernel binary's own size). Interactive shell use immediately
+after in the same boot confirmed nothing regressed. Zero aborts in a
+`-d int` cross-check.
+
+**Still coarse, worth knowing before building on it:** no long filenames
+(see above); read-only; no `.`/`..` special-casing beyond what falls out
+of walking them like any other entry; only the first FAT32-typed MBR
+partition is considered (no GPT, no multi-partition disks); FAT12/16 are
+explicitly rejected rather than supported (`Error::NotFat32`), matching
+this phase's FAT32-only scope.
+
 ### Parallels disk attachment: a real trap, not a hunch
 
 Getting `esp.img` to actually boot in Parallels took a few wrong turns worth
@@ -791,21 +858,22 @@ fully working console via ACPI/SPCR. MMU/identity-paging, the timer-driven
 preemption tick, the syscall boundary, real preemptive task switching, a
 working interactive echo shell, a shell that's a real disk-loaded,
 configuration-selected userland program, real commands (`help`, `echo`,
-`uptime`, `clear`), and now a working runtime virtio-blk driver (see
-"Phase 3a" above, and `docs/architecture.md`/`docs/processes.md`/
-`docs/roadmap.md` for the reference write-up) are all done and confirmed
-working, not just structurally plausible.
+`uptime`, `clear`), a working runtime virtio-blk driver, and now a working
+runtime FAT32 reader (see "Phase 3a"/"Phase 3b" above, and
+`docs/architecture.md`/`docs/processes.md`/`docs/roadmap.md` for the
+reference write-up) are all done and confirmed working, not just
+structurally plausible.
 
 **Both phases of the original "get to a shell" plan are done, and phase 3
-is underway.** Phase 1 (accept input, echo it back) and phase 2 (real
-commands, one backed by real kernel state via a new syscall) are both
-confirmed working. Of phase 3 (disk commands - `ls`/`cat`/`cd`/`pwd`, and
-the runtime storage stack they need - see `docs/roadmap.md`), stage 3a (a
-real block device driver) is done; 3b (a FAT32 reader — still an open
-decision, hand-rolled vs. a crate like `fatfs`, per the roadmap) and 3c
-(new syscalls + the commands themselves) haven't started. This section
-(and the "gaps" paragraph below it) still tracks what's true right now;
-`docs/roadmap.md` is the one to check for what's next and why.
+is most of the way there.** Phase 1 (accept input, echo it back) and phase
+2 (real commands, one backed by real kernel state via a new syscall) are
+both confirmed working. Of phase 3 (disk commands - `ls`/`cat`/`cd`/`pwd`,
+and the runtime storage stack they need - see `docs/roadmap.md`), stages
+3a (a real block device driver) and 3b (a FAT32 reader) are both done; 3c
+(new syscalls + the commands themselves, wiring `fat32.rs` into the
+loaded shell) hasn't started. This section (and the "gaps" paragraph below
+it) still tracks what's true right now; `docs/roadmap.md` is the one to
+check for what's next and why.
 
 What's still coarse and worth knowing about before building on any of
 this — kept current in `docs/processes.md`'s "known rough edges" rather
@@ -818,23 +886,29 @@ program, loaded once, at boot, with no `exec()`; a fixed 2-task scheduler
 static mutable state at all; a fixed, unguarded 8KB stack per program; no
 ELF, no relocations, no dynamic linking (the `core::fmt` gap and the
 lack of ELF/relocations are the same underlying limitation, not two
-separate ones). Also still true from before this milestone: strict
-round-robin only, no priorities or blocking; FP/SIMD state still isn't
-saved anywhere (`exceptions.rs`'s `Context`).
+separate ones); `fat32.rs` has no long-filename support (this project's
+own `\EFI\OUROBOROS\` doesn't fit 8.3 - see "Phase 3b" above), is
+read-only, and only looks at the first FAT32-typed MBR partition. Also
+still true from before this milestone: strict round-robin only, no
+priorities or blocking; FP/SIMD state still isn't saved anywhere
+(`exceptions.rs`'s `Context`).
 
-Reasonable next steps from here: a shared syscall-ABI crate, now that
-there are two independent call sites to keep in sync by hand; more
-commands/builtins, now that the dispatch pattern (tokenize, match, call a
-syscall for real state if needed) is established; a real relocating
-loader (ELF + relocation processing), which would also lift the
-`core::fmt` restriction; blocking/waiting primitives so tasks can do more
-than an unconditional round-robin `wfe` loop; a real runtime storage stack
-(virtio-blk + a filesystem), needed for `exec()`-style dynamic loading and
-for Parallels to ever run programs it can't compile in ahead of time; or
-finally circling back to Parallels virtio-console now that the kernel has
-enough infrastructure (MMU, exceptions, EL0, real task switching, real
-input, disk-loaded userland) to make that work meaningfully once it
-lands.
+Reasonable next steps from here: phase 3c (new syscalls for file I/O, and
+the `ls`/`cat`/`cd`/`pwd` commands themselves - the roadmap's own
+suggested syscall shape is a reasonable starting point); deciding what to
+do about `fat32.rs`'s LFN gap before 3c needs to navigate into
+`\EFI\OUROBOROS\` specifically (rename the directory, since this project
+controls it, vs. implementing LFN parsing); a shared syscall-ABI crate,
+now that there are two independent call sites to keep in sync by hand;
+more commands/builtins, now that the dispatch pattern (tokenize, match,
+call a syscall for real state if needed) is established; a real
+relocating loader (ELF + relocation processing), which would also lift
+the `core::fmt` restriction; blocking/waiting primitives so tasks can do
+more than an unconditional round-robin `wfe` loop; or finally circling
+back to Parallels virtio-console now that the kernel has enough
+infrastructure (MMU, exceptions, EL0, real task switching, real input,
+disk-loaded userland, real runtime storage) to make that work
+meaningfully once it lands.
 
 ## Commands
 
@@ -842,19 +916,20 @@ lands.
 make build                  # cargo build (debug) - kernel only, see below
 make build PROFILE=release  # release profile
 make shell-bin               # build shell/ for aarch64-unknown-none + objcopy to a raw .bin
-make run                    # stage ESP dir (kernel + shell binary + config) + boot in QEMU with a virtio-mmio block device attached
+make run                    # stage ESP dir (kernel + shell binary + config) + boot in QEMU with a virtio-mmio block device attached (fast dev loop - vvfat backing, FAT16, not FAT32 - see "Phase 3b")
 make image                  # build esp.img, a raw MBR+FAT32 disk image (not directly usable by Parallels - see below)
+make run-image               # boot esp.img (genuine FAT32) instead of run's vvfat - needed for anything that reads the filesystem at runtime (fat32.rs and up)
 make parallels-hdd          # wrap esp.img into esp.hdd, a Parallels-native virtual hard disk
 make clean
 ```
 
-`make run` requires QEMU (`brew install qemu`, which also provides the
-aarch64 OVMF firmware `make run` points at). `make image` requires macOS's
-`hdiutil`. `make parallels-hdd` additionally requires Parallels Desktop
-installed (uses its bundled `prl_disk_tool`). `make shell-bin` (and
-therefore `make esp`/`make run`) needs `rustup component add llvm-tools`
-for `llvm-objcopy` - see the Makefile's `OBJCOPY` comment for why it isn't
-just on `PATH`.
+`make run`/`make run-image` require QEMU (`brew install qemu`, which also
+provides the aarch64 OVMF firmware they point at). `make image` requires
+macOS's `hdiutil`. `make parallels-hdd` additionally requires Parallels
+Desktop installed (uses its bundled `prl_disk_tool`). `make shell-bin`
+(and therefore `make esp`/`make run`) needs `rustup component add
+llvm-tools` for `llvm-objcopy` - see the Makefile's `OBJCOPY` comment for
+why it isn't just on `PATH`.
 
 There is no test suite yet — this is pre-alpha kernel code that only proves
 it boots.
@@ -900,6 +975,7 @@ kernel/
   src/tasks.rs       task 0 (loaded program) + task 1 (idle) + the round-robin scheduler (Context save/restore in the tick path) - confirmed alternating, see above
   src/virtio_mmio.rs virtio-mmio transport: 32-slot device discovery, modern (non-legacy) register layout, addresses confirmed via devicetree dump
   src/virtio_blk.rs  runtime virtio-blk driver: feature negotiation, one virtqueue, synchronous polling sector reads - phase 3a, confirmed working, see above
+  src/fat32.rs       hand-rolled read-only FAT32 reader over virtio_blk::Device: MBR, BPB, FAT cluster chains, 8.3-only directory entries - phase 3b, confirmed working, see above
 
 shell/               userland default shell - a separate crate, built for aarch64-unknown-none, loaded from disk (not compiled into the kernel)
   linker.ld          flat-binary linker script: entry at offset 0, no .bss/.data (see docs/processes.md)

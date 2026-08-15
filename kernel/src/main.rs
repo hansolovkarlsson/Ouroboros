@@ -7,6 +7,7 @@ mod acpi;
 mod console;
 mod devicetree;
 mod exceptions;
+mod fat32;
 mod gic;
 mod loader;
 mod mmu;
@@ -199,7 +200,62 @@ fn probe_virtio_blk() {
                 if signature == 0xaa55 { "valid MBR" } else { "unexpected" }
             );
         }
-        Err(e) => console::println!("Ouroboros kernel: virtio-blk read failed ({e})"),
+        Err(e) => {
+            console::println!("Ouroboros kernel: virtio-blk read failed ({e})");
+            return;
+        }
+    }
+
+    probe_fat32(device);
+}
+
+/// Phase 3b (docs/roadmap.md): mounts the FAT32 partition on `device`,
+/// lists `\EFI\BOOT`, and reads `BOOTAA64.EFI` back - proof the reader
+/// actually walks real directory/FAT/cluster-chain structures, not just
+/// that mounting didn't error. `\EFI\BOOT\BOOTAA64.EFI` specifically
+/// (not `\EFI\OUROBOROS\...`) because every path component fits an 8.3
+/// short name cleanly - `OUROBOROS` itself doesn't (9 characters), so it
+/// gets a mangled short name (`OUROBO~2`) with the real name stored in
+/// long-filename (LFN) entries this reader deliberately doesn't parse
+/// yet (see fat32.rs's module doc comment) - a real, confirmed gap this
+/// probe sidesteps rather than hides. Only works when booted via
+/// `make run-image` (real FAT32) - see fat32.rs's module doc comment for
+/// why `make run`'s vvfat (FAT16) can't satisfy this.
+fn probe_fat32(device: virtio_blk::Device) {
+    let mut fs = match fat32::Fs::mount(device) {
+        Ok(fs) => fs,
+        Err(e) => {
+            console::println!("Ouroboros kernel: FAT32 mount failed ({e})");
+            return;
+        }
+    };
+    console::println!("Ouroboros kernel: FAT32 mounted");
+
+    let list_result = fs.list_dir("/EFI/BOOT", |name, is_dir, size| {
+        console::println!("Ouroboros kernel:   {name}{} ({size} bytes)", if is_dir { "/" } else { "" });
+    });
+    if let Err(e) = list_result {
+        console::println!("Ouroboros kernel: FAT32 list /EFI/BOOT failed ({e})");
+        return;
+    }
+
+    // Independently checkable at test time against `ls -la` on the built
+    // BOOTAA64.efi (not hardcoded here - its size is this same kernel
+    // binary's own size, which would make a hardcoded expected value
+    // self-referential and wrong the moment this very code changes it)
+    // and its PE header magic ("MZ") - properties of the actual file
+    // contents, not something a buggy reader could produce by accident.
+    let mut buf = [0u8; 128];
+    match fs.read_file("/EFI/BOOT/BOOTAA64.EFI", &mut buf) {
+        Ok(size) => {
+            console::println!(
+                "Ouroboros kernel: FAT32 read BOOTAA64.EFI, size {size} bytes, magic {:02x} {:02x} ({})",
+                buf[0],
+                buf[1],
+                if &buf[0..2] == b"MZ" { "valid PE magic" } else { "unexpected magic" }
+            );
+        }
+        Err(e) => console::println!("Ouroboros kernel: FAT32 read BOOTAA64.EFI failed ({e})"),
     }
 }
 
