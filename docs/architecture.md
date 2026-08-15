@@ -140,7 +140,9 @@ value in `x0` — chosen to match Linux's shape (a reasonable default for a
 1 argument to 4 for phase 3c's file-I/O syscalls, which need a path
 pointer/length and a buffer pointer/length at once — see
 `exceptions.rs`'s module doc comment for how the SVC trampoline marshals
-them.
+them. `fs_mkdir`/`fs_rmdir` (9/10, phase 4) are the first syscalls this
+kernel exposes that actually write to disk — see `fat32.rs`/
+`virtio_blk.rs` for the write path underneath them.
 
 | Number | Name | Arguments | Returns | Notes |
 |---|---|---|---|---|
@@ -153,6 +155,8 @@ them.
 | 6 | `get_ticks` | ignored | preemption tick count since boot | Added for phase 2's `uptime` builtin — the first syscall added specifically so a loaded program could read real kernel state, not just I/O |
 | 7 | `fs_list_dir` | path ptr, path len, buf ptr, buf len | bytes written, or `u64::MAX` | Formats each entry as `name\n`/`name/\n`, truncating rather than erroring if `buf` is too small |
 | 8 | `fs_read_file` | path ptr, path len, buf ptr, buf len | the file's real size (may exceed `buf`'s length — compare to detect truncation), or `u64::MAX` | |
+| 9 | `fs_mkdir` | path ptr, path len | `0`, or `u64::MAX` | Creates an empty directory. Every failure reason (already exists, invalid name, parent missing, disk full, ...) collapses to the same `u64::MAX` |
+| 10 | `fs_rmdir` | path ptr, path len | `0`, or `u64::MAX` | Removes an empty directory. Same collapsed-error contract as `fs_mkdir` |
 | other | — | — | `u64::MAX` | Logged as unknown |
 
 There is no shared ABI crate yet — these numbers are duplicated by hand in

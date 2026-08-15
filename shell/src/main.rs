@@ -83,6 +83,8 @@ const SYS_PUTC: u64 = 4;
 const SYS_GET_TICKS: u64 = 6;
 const SYS_FS_LIST_DIR: u64 = 7;
 const SYS_FS_READ_FILE: u64 = 8;
+const SYS_FS_MKDIR: u64 = 9;
+const SYS_FS_RMDIR: u64 = 10;
 
 /// Placed first in `.text` by `linker.ld` (`KEEP(*(.text.start))`) so it
 /// lands at file/VA offset 0 - `tasks.rs` sets a loaded program's
@@ -167,7 +169,7 @@ fn run_line(line: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize) {
     let arg = words.next().unwrap_or("");
 
     match command {
-        "help" => print_line("commands: help, echo, uptime, clear, ls, cat, cd, pwd"),
+        "help" => print_line("commands: help, echo, uptime, clear, ls, cat, cd, pwd, mkdir, rmdir"),
         "echo" => {
             let mut first = true;
             for word in line.split_whitespace().skip(1) {
@@ -198,6 +200,8 @@ fn run_line(line: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize) {
         "ls" => cmd_ls(arg, cwd, *cwd_len),
         "cat" => cmd_cat(arg, cwd, *cwd_len),
         "cd" => cmd_cd(arg, cwd, cwd_len),
+        "mkdir" => cmd_mkdir(arg, cwd, *cwd_len),
+        "rmdir" => cmd_rmdir(arg, cwd, *cwd_len),
         _ => {
             print_str("unknown command: ");
             print_line(command);
@@ -428,6 +432,46 @@ fn cmd_cd(arg: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize) {
     *cwd_len = path_len;
 }
 
+fn cmd_mkdir(arg: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize) {
+    if arg.is_empty() {
+        print_line("mkdir: missing directory argument");
+        return;
+    }
+    let mut path_buf = [0u8; PATH_SIZE];
+    let Some(path_len) = resolve_path(cwd_str(cwd, cwd_len), arg, &mut path_buf) else {
+        print_line("mkdir: path too long");
+        return;
+    };
+    let Ok(path) = core::str::from_utf8(&path_buf[..path_len]) else {
+        print_line("mkdir: path too long");
+        return;
+    };
+
+    if !fs_mkdir(path) {
+        print_line("mkdir: failed (already exists, bad name, parent missing, or disk full)");
+    }
+}
+
+fn cmd_rmdir(arg: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize) {
+    if arg.is_empty() {
+        print_line("rmdir: missing directory argument");
+        return;
+    }
+    let mut path_buf = [0u8; PATH_SIZE];
+    let Some(path_len) = resolve_path(cwd_str(cwd, cwd_len), arg, &mut path_buf) else {
+        print_line("rmdir: path too long");
+        return;
+    };
+    let Ok(path) = core::str::from_utf8(&path_buf[..path_len]) else {
+        print_line("rmdir: path too long");
+        return;
+    };
+
+    if !fs_rmdir(path) {
+        print_line("rmdir: failed (no such directory, not empty, or is root)");
+    }
+}
+
 fn print_str(s: &str) {
     for b in s.bytes() {
         putc(b);
@@ -500,6 +544,20 @@ fn fs_read_file(path: &str, buf: &mut [u8]) -> Option<u64> {
     } else {
         Some(ret)
     }
+}
+
+/// Creates an empty directory at `path`. `false` on any failure (already
+/// exists, invalid 8.3 name, parent missing, disk full, ...) - the kernel
+/// collapses all of those to one sentinel (see
+/// `syscall.rs::fs_mkdir`), so this program can't yet report *why*.
+fn fs_mkdir(path: &str) -> bool {
+    syscall4(SYS_FS_MKDIR, path.as_ptr() as u64, path.len() as u64, 0, 0) != FS_ERROR
+}
+
+/// Removes the empty directory at `path`. Same `false`-on-any-failure
+/// contract as [`fs_mkdir`].
+fn fs_rmdir(path: &str) -> bool {
+    syscall4(SYS_FS_RMDIR, path.as_ptr() as u64, path.len() as u64, 0, 0) != FS_ERROR
 }
 
 /// The 1-argument syscalls this program used before phase 3c - a thin

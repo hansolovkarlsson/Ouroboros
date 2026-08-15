@@ -171,7 +171,11 @@ way. `fs_list_dir`/`fs_read_file` (7/8, added for phase 3c's disk
 commands) are the first syscalls needing more than one argument — a path
 pointer/length and a buffer pointer/length at once — which is why the
 syscall ABI itself supports up to 4 arguments (`x0`-`x3`), not just one.
-A userland program makes these directly via `svc`:
+`fs_mkdir`/`fs_rmdir` (9/10, added for phase 4) are the first syscalls
+that write to disk — each takes just a path pointer/length, no output
+buffer, and collapses every failure reason to `u64::MAX` (a program
+can't yet tell "already exists" from "disk full" — see `CLAUDE.md`'s
+"Phase 4" section). A userland program makes these directly via `svc`:
 
 ```rust
 #[inline(always)]
@@ -271,8 +275,17 @@ Worth knowing before building further on this:
   for what actually goes wrong and why. Goes away once there's a real
   relocating loader.
 - **Disk-command pointer/length arguments are trusted, not validated.**
-  `fs_list_dir`/`fs_read_file` dereference the caller's `(pointer,
-  length)` pairs directly, checked only against a minimal sanity bound
-  (`syscall.rs::valid_user_range`) — not against the calling program's
-  actual mapped region. Fine with exactly one, currently-trusted userland
-  program; a real gap once that stops being true.
+  `fs_list_dir`/`fs_read_file`/`fs_mkdir`/`fs_rmdir` dereference the
+  caller's `(pointer, length)` pairs directly, checked only against a
+  minimal sanity bound (`syscall.rs::valid_user_range`) — not against the
+  calling program's actual mapped region. Fine with exactly one,
+  currently-trusted userland program; a real gap once that stops being
+  true.
+- **Write support (phase 4) covers only empty-directory `mkdir`/`rmdir`,
+  deliberately.** No file creation/deletion, no `cp`/`mv`, no output
+  redirection. `mkdir` also can't grow a parent directory that's out of
+  free entry slots — it fails rather than allocating another cluster for
+  the parent. `fs_mkdir`/`fs_rmdir` collapse every failure reason to one
+  `u64::MAX` sentinel, so a program can't yet distinguish "already
+  exists" from "disk full" from "bad name". See `CLAUDE.md`'s "Phase 4"
+  section.

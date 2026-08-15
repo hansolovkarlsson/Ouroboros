@@ -119,13 +119,42 @@ fn fs_read_file(path: &str, buf: &mut [u8]) -> u64 {
     }
 }
 
+/// Creates an empty directory at `path`. `0` on success, `u64::MAX` if
+/// there's no mounted filesystem or [`fat32::Fs::mkdir`] itself failed
+/// (already exists, invalid name, parent missing, disk full, ...) - every
+/// distinct `fat32::Error` collapses to the same sentinel here, same as
+/// `fs_list_dir`/`fs_read_file` already do; a userland program that needs
+/// to know *why* has no way to yet (a real gap, not new to this syscall).
+fn fs_mkdir(path: &str) -> u64 {
+    let Some(fs) = (unsafe { &mut *FS.0.get() }) else {
+        return u64::MAX;
+    };
+    match fs.mkdir(path) {
+        Ok(()) => 0,
+        Err(_) => u64::MAX,
+    }
+}
+
+/// Removes the empty directory at `path`. Same success/error contract as
+/// [`fs_mkdir`].
+fn fs_rmdir(path: &str) -> u64 {
+    let Some(fs) = (unsafe { &mut *FS.0.get() }) else {
+        return u64::MAX;
+    };
+    match fs.rmdir(path) {
+        Ok(()) => 0,
+        Err(_) => u64::MAX,
+    }
+}
+
 /// Called from the exception vector's SVC trampoline (`exceptions.rs`)
 /// with the syscall number (from x8) and up to 4 arguments (from x0-x3),
 /// running at EL1 with the kernel's own stack and every privilege EL0
 /// lacks - the entire reason this indirection exists. Its return value
 /// becomes EL0's new x0 after `eret`.
 ///
-/// Eight syscalls now (`shell_input`, a ninth, was removed - see below).
+/// Ten syscalls now (`shell_input`, an eleventh by original numbering, was
+/// removed - see below).
 /// `double`/`print` were deliberately chained by the original single-task
 /// demo (double's return value fed straight into print's argument) to
 /// prove a return value survives the trampoline intact; `report` is what
@@ -148,7 +177,9 @@ fn fs_read_file(path: &str, buf: &mut [u8]) -> u64 {
 /// code used to. `fs_list_dir`/`fs_read_file` (7/8) are phase 3c's - the
 /// first syscalls needing more than one argument, which is why `dispatch`
 /// grew from 1 argument to 4 (see this module's doc comment and
-/// `exceptions.rs`'s).
+/// `exceptions.rs`'s). `fs_mkdir`/`fs_rmdir` (9/10) are the first write
+/// support this kernel has ever exposed to userland - see
+/// `fat32.rs`/`virtio_blk.rs` for the on-disk write path underneath them.
 pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64) -> u64 {
     match number {
         0 => {
@@ -200,6 +231,25 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
             let Ok(path) = core::str::from_utf8(path) else { return u64::MAX };
             let buf = unsafe { core::slice::from_raw_parts_mut(arg2 as *mut u8, arg3 as usize) };
             fs_read_file(path, buf)
+        }
+        9 => {
+            if !valid_user_range(arg0, arg1) {
+                return u64::MAX;
+            }
+            // SAFETY: bounds sanity-checked above; see the module doc
+            // comment's note on what that check does and doesn't cover.
+            let path = unsafe { core::slice::from_raw_parts(arg0 as *const u8, arg1 as usize) };
+            let Ok(path) = core::str::from_utf8(path) else { return u64::MAX };
+            fs_mkdir(path)
+        }
+        10 => {
+            if !valid_user_range(arg0, arg1) {
+                return u64::MAX;
+            }
+            // SAFETY: same as syscall 9.
+            let path = unsafe { core::slice::from_raw_parts(arg0 as *const u8, arg1 as usize) };
+            let Ok(path) = core::str::from_utf8(path) else { return u64::MAX };
+            fs_rmdir(path)
         }
         _ => {
             console::println!("Ouroboros kernel: syscall from EL0: unknown number={number}");

@@ -59,6 +59,12 @@ pub enum Error {
     NotFound,
     NotAFile,
     NotADirectory,
+    InvalidName,
+    AlreadyExists,
+    DirectoryNotEmpty,
+    CannotRemoveRoot,
+    DiskFull,
+    DirectoryFull,
 }
 
 impl From<virtio_blk::Error> for Error {
@@ -77,6 +83,12 @@ impl core::fmt::Display for Error {
             Error::NotFound => write!(f, "not found"),
             Error::NotAFile => write!(f, "not a file"),
             Error::NotADirectory => write!(f, "not a directory"),
+            Error::InvalidName => write!(f, "name doesn't fit an 8.3 short name (no long-filename support - see the module doc comment)"),
+            Error::AlreadyExists => write!(f, "already exists"),
+            Error::DirectoryNotEmpty => write!(f, "directory not empty"),
+            Error::CannotRemoveRoot => write!(f, "cannot remove the root directory"),
+            Error::DiskFull => write!(f, "no free cluster available"),
+            Error::DirectoryFull => write!(f, "directory has no free entry slot (no directory-extension support yet)"),
         }
     }
 }
@@ -142,6 +154,15 @@ pub struct Fs {
     fat_start_lba: u32,
     data_start_lba: u32,
     root_cluster: u32,
+    /// How many copies of the FAT the volume has (almost always 2) - only
+    /// needed for writes ([`write_fat_entry`](Self::write_fat_entry)),
+    /// which keep every copy in sync rather than just the first, per
+    /// spec. Reads only ever consult the first copy.
+    num_fats: u32,
+    /// One FAT copy's size, in sectors - needed to locate the *other*
+    /// copies (`fat_start_lba + i * fat_size_32`) and to bound
+    /// [`find_free_cluster`](Self::find_free_cluster)'s scan.
+    fat_size_32: u32,
 }
 
 impl Fs {
@@ -201,7 +222,7 @@ impl Fs {
         let fat_start_lba = partition_lba + reserved_sectors;
         let data_start_lba = fat_start_lba + num_fats * fat_size_32;
 
-        Ok(Fs { device, sectors_per_cluster, fat_start_lba, data_start_lba, root_cluster })
+        Ok(Fs { device, sectors_per_cluster, fat_start_lba, data_start_lba, root_cluster, num_fats, fat_size_32 })
     }
 
     fn cluster_to_lba(&self, cluster: u32) -> u32 {
@@ -228,10 +249,91 @@ impl Fs {
         }
     }
 
+    /// Writes one FAT entry, in every copy of the FAT the volume has (per
+    /// spec - real FAT32 drivers only ever read the first copy, but keep
+    /// every copy in sync on write so a driver that *does* trust a backup
+    /// copy never sees a stale value). Preserves the existing entry's top
+    /// 4 reserved bits, masking `value` to the low 28 - same split
+    /// `next_cluster` already reads.
+    fn write_fat_entry(&mut self, cluster: u32, value: u32) -> Result<(), Error> {
+        let fat_byte_offset = cluster * 4;
+        let sector_offset = fat_byte_offset / SECTOR_SIZE as u32;
+        let offset = (fat_byte_offset % SECTOR_SIZE as u32) as usize;
+        for i in 0..self.num_fats {
+            let sector = self.fat_start_lba + i * self.fat_size_32 + sector_offset;
+            let mut buf = [0u8; SECTOR_SIZE];
+            // SAFETY: `self.device` was initialized before `mount` returned.
+            unsafe { self.device.read_sector(sector as u64, &mut buf) }?;
+            let existing = u32::from_le_bytes([buf[offset], buf[offset + 1], buf[offset + 2], buf[offset + 3]]);
+            let new = (existing & 0xf000_0000) | (value & 0x0fff_ffff);
+            buf[offset..offset + 4].copy_from_slice(&new.to_le_bytes());
+            // SAFETY: same as above.
+            unsafe { self.device.write_sector(sector as u64, &buf) }?;
+        }
+        Ok(())
+    }
+
+    /// Scans the first FAT copy for a free (`0`) cluster, starting at 2
+    /// (0 and 1 are reserved, real clusters start at 2 - same convention
+    /// [`cluster_to_lba`](Self::cluster_to_lba) already assumes). Bounded
+    /// by the FAT's own size, so a full disk returns
+    /// [`Error::DiskFull`](Error::DiskFull) rather than looping forever.
+    fn find_free_cluster(&mut self) -> Result<u32, Error> {
+        let total_clusters = self.fat_size_32 * (SECTOR_SIZE as u32 / 4);
+        let mut cluster = 2u32;
+        let mut current_sector = u32::MAX;
+        let mut buf = [0u8; SECTOR_SIZE];
+        while cluster < total_clusters {
+            let fat_byte_offset = cluster * 4;
+            let sector = self.fat_start_lba + fat_byte_offset / SECTOR_SIZE as u32;
+            if sector != current_sector {
+                // SAFETY: `self.device` was initialized before `mount` returned.
+                unsafe { self.device.read_sector(sector as u64, &mut buf) }?;
+                current_sector = sector;
+            }
+            let offset = (fat_byte_offset % SECTOR_SIZE as u32) as usize;
+            let value = u32::from_le_bytes([buf[offset], buf[offset + 1], buf[offset + 2], buf[offset + 3]]) & 0x0fff_ffff;
+            if value == 0 {
+                return Ok(cluster);
+            }
+            cluster += 1;
+        }
+        Err(Error::DiskFull)
+    }
+
+    /// Zeroes every sector of one cluster - used to give a freshly
+    /// allocated directory cluster a clean slate (all-zero bytes read
+    /// back as [`DIR_ENTRY_END`], so an empty new directory correctly
+    /// looks "no more entries" to [`walk_dir`](Self::walk_dir)) before
+    /// writing its real `.`/`..` entries into the first sector.
+    fn zero_cluster(&mut self, cluster: u32) -> Result<(), Error> {
+        let lba = self.cluster_to_lba(cluster);
+        let zero = [0u8; SECTOR_SIZE];
+        for s in 0..self.sectors_per_cluster {
+            // SAFETY: `self.device` was initialized before `mount` returned.
+            unsafe { self.device.write_sector((lba + s) as u64, &zero) }?;
+        }
+        Ok(())
+    }
+
     /// Calls `f` for every real entry (LFN/free/volume-ID entries are
     /// skipped) in the directory starting at `start_cluster`, stopping
     /// early the first time `f` returns `true`.
     fn walk_dir(&mut self, start_cluster: u32, mut f: impl FnMut(&DirEntry) -> bool) -> Result<(), Error> {
+        self.walk_dir_with_location(start_cluster, |entry, _lba, _offset| f(entry))
+    }
+
+    /// Same as [`walk_dir`](Self::walk_dir), but `f` also receives the
+    /// entry's exact on-disk location (sector LBA, byte offset within
+    /// that sector) - needed by [`mkdir`](Self::mkdir)/
+    /// [`rmdir`](Self::rmdir) to patch an existing entry in place rather
+    /// than re-deriving where it lives. `walk_dir` is a thin wrapper over
+    /// this that just ignores the location.
+    fn walk_dir_with_location(
+        &mut self,
+        start_cluster: u32,
+        mut f: impl FnMut(&DirEntry, u64, usize) -> bool,
+    ) -> Result<(), Error> {
         let mut cluster = start_cluster;
         loop {
             let lba = self.cluster_to_lba(cluster);
@@ -239,7 +341,7 @@ impl Fs {
                 let mut buf = [0u8; SECTOR_SIZE];
                 // SAFETY: same as `next_cluster`.
                 unsafe { self.device.read_sector((lba + s) as u64, &mut buf) }?;
-                for raw in buf.chunks_exact(DIR_ENTRY_SIZE) {
+                for (i, raw) in buf.chunks_exact(DIR_ENTRY_SIZE).enumerate() {
                     match raw[0] {
                         DIR_ENTRY_END => return Ok(()),
                         DIR_ENTRY_FREE => continue,
@@ -249,7 +351,7 @@ impl Fs {
                     if attr == ATTR_LFN || attr & ATTR_VOLUME_ID != 0 {
                         continue;
                     }
-                    if f(&DirEntry::parse(raw)) {
+                    if f(&DirEntry::parse(raw), (lba + s) as u64, i * DIR_ENTRY_SIZE) {
                         return Ok(());
                     }
                 }
@@ -358,4 +460,230 @@ impl Fs {
         }
         Ok(file.size)
     }
+
+    /// Creates an empty subdirectory at `path` (must not already exist;
+    /// its parent must already exist and be a directory).
+    ///
+    /// First write-capable command this filesystem has ever had - see
+    /// `CLAUDE.md`'s mkdir/rmdir section for the full design rationale.
+    /// Deliberately narrow: no directory-extension support (a parent
+    /// directory whose existing clusters have no free entry slot fails
+    /// with [`Error::DirectoryFull`](Error::DirectoryFull) rather than
+    /// growing), matching this module's existing no-LFN, 8.3-only
+    /// limitations rather than trying to fix everything at once.
+    pub fn mkdir(&mut self, path: &str) -> Result<(), Error> {
+        let (parent_path, name) = split_parent(path).ok_or(Error::InvalidName)?;
+        let short_name = make_short_name(name).ok_or(Error::InvalidName)?;
+
+        let parent = self.find(parent_path)?;
+        if !parent.is_dir {
+            return Err(Error::NotADirectory);
+        }
+
+        let mut exists = false;
+        self.walk_dir(parent.cluster, |entry| {
+            if entry.name().eq_ignore_ascii_case(name) {
+                exists = true;
+                true
+            } else {
+                false
+            }
+        })?;
+        if exists {
+            return Err(Error::AlreadyExists);
+        }
+
+        let new_cluster = self.find_free_cluster()?;
+        // Mark it used immediately - `zero_cluster`/the `.`/`..` writes
+        // below don't touch the FAT, and a failure partway through should
+        // still leave this cluster claimed rather than reusable by a
+        // concurrent-looking future call (this kernel has no concurrency
+        // yet, but "claim before you use" is the correct order regardless).
+        self.write_fat_entry(new_cluster, END_OF_CHAIN_MIN)?;
+        self.zero_cluster(new_cluster)?;
+
+        let dotdot_cluster = if parent.cluster == self.root_cluster { 0 } else { parent.cluster };
+        let mut first_sector = [0u8; SECTOR_SIZE];
+        write_raw_entry(&mut first_sector[0..DIR_ENTRY_SIZE], &dot_name(), ATTR_DIRECTORY, new_cluster, 0);
+        write_raw_entry(&mut first_sector[DIR_ENTRY_SIZE..2 * DIR_ENTRY_SIZE], &dotdot_name(), ATTR_DIRECTORY, dotdot_cluster, 0);
+        let lba = self.cluster_to_lba(new_cluster);
+        // SAFETY: `self.device` was initialized before `mount` returned.
+        unsafe { self.device.write_sector(lba as u64, &first_sector) }?;
+
+        self.insert_dir_entry(parent.cluster, &short_name, ATTR_DIRECTORY, new_cluster, 0)
+    }
+
+    /// Removes the empty subdirectory at `path`. Fails with
+    /// [`Error::DirectoryNotEmpty`](Error::DirectoryNotEmpty) unless every
+    /// entry in it is `.`/`..`, and with
+    /// [`Error::CannotRemoveRoot`](Error::CannotRemoveRoot) for `/` itself.
+    /// Both are checked before anything on disk is touched, so a rejected
+    /// `rmdir` never partially applies.
+    pub fn rmdir(&mut self, path: &str) -> Result<(), Error> {
+        let (parent_path, name) = split_parent(path).ok_or(Error::InvalidName)?;
+        let target = self.find(path)?;
+        if !target.is_dir {
+            return Err(Error::NotADirectory);
+        }
+        if target.cluster == self.root_cluster || target.cluster == 0 {
+            return Err(Error::CannotRemoveRoot);
+        }
+
+        let mut empty = true;
+        self.walk_dir(target.cluster, |entry| {
+            if !is_dot_or_dotdot(entry.name()) {
+                empty = false;
+                true
+            } else {
+                false
+            }
+        })?;
+        if !empty {
+            return Err(Error::DirectoryNotEmpty);
+        }
+
+        self.write_fat_entry(target.cluster, 0)?;
+
+        let parent = self.find(parent_path)?;
+        let mut location: Option<(u64, usize)> = None;
+        self.walk_dir_with_location(parent.cluster, |entry, lba, offset| {
+            if entry.name().eq_ignore_ascii_case(name) {
+                location = Some((lba, offset));
+                true
+            } else {
+                false
+            }
+        })?;
+        let (lba, offset) = location.ok_or(Error::NotFound)?;
+
+        let mut sector = [0u8; SECTOR_SIZE];
+        // SAFETY: `self.device` was initialized before `mount` returned.
+        unsafe { self.device.read_sector(lba, &mut sector) }?;
+        sector[offset] = DIR_ENTRY_FREE;
+        // SAFETY: same as above.
+        unsafe { self.device.write_sector(lba, &sector) }?;
+        Ok(())
+    }
+
+    /// Finds a free (end-of-directory or previously-deleted) 32-byte slot
+    /// in the directory starting at `start_cluster` and writes a new entry
+    /// there. No directory-extension support: if every existing cluster in
+    /// the chain is full, this returns
+    /// [`Error::DirectoryFull`](Error::DirectoryFull) rather than
+    /// allocating a new cluster and linking it in - a deliberate first-cut
+    /// limitation, see the module doc comment.
+    fn insert_dir_entry(&mut self, start_cluster: u32, short_name: &[u8; 11], attr: u8, cluster: u32, size: u32) -> Result<(), Error> {
+        let mut current = start_cluster;
+        loop {
+            let lba = self.cluster_to_lba(current);
+            for s in 0..self.sectors_per_cluster {
+                let mut buf = [0u8; SECTOR_SIZE];
+                // SAFETY: `self.device` was initialized before `mount` returned.
+                unsafe { self.device.read_sector((lba + s) as u64, &mut buf) }?;
+                for (i, raw) in buf.chunks_exact(DIR_ENTRY_SIZE).enumerate() {
+                    if raw[0] == DIR_ENTRY_FREE || raw[0] == DIR_ENTRY_END {
+                        write_raw_entry(&mut buf[i * DIR_ENTRY_SIZE..(i + 1) * DIR_ENTRY_SIZE], short_name, attr, cluster, size);
+                        // SAFETY: same as above.
+                        unsafe { self.device.write_sector((lba + s) as u64, &buf) }?;
+                        return Ok(());
+                    }
+                }
+            }
+            match self.next_cluster(current)? {
+                Some(next) => current = next,
+                None => return Err(Error::DirectoryFull),
+            }
+        }
+    }
+}
+
+/// Writes one 32-byte on-disk directory entry into `dst`. No RTC on this
+/// kernel, so timestamps/NTRes are left zeroed rather than faked.
+fn write_raw_entry(dst: &mut [u8], short_name: &[u8; 11], attr: u8, cluster: u32, size: u32) {
+    dst[0..11].copy_from_slice(short_name);
+    dst[11] = attr;
+    dst[12..20].fill(0); // NTRes, creation time/date, last access date
+    dst[20..22].copy_from_slice(&((cluster >> 16) as u16).to_le_bytes());
+    dst[22..26].fill(0); // write time/date
+    dst[26..28].copy_from_slice(&(cluster as u16).to_le_bytes());
+    dst[28..32].copy_from_slice(&size.to_le_bytes());
+}
+
+/// Builds the `.` short-name field (`". "` space-padded to 11 bytes)
+/// programmatically rather than via a hand-counted byte-string literal.
+fn dot_name() -> [u8; 11] {
+    let mut name = [b' '; 11];
+    name[0] = b'.';
+    name
+}
+
+/// Builds the `..` short-name field, same reasoning as [`dot_name`].
+fn dotdot_name() -> [u8; 11] {
+    let mut name = [b' '; 11];
+    name[0] = b'.';
+    name[1] = b'.';
+    name
+}
+
+fn is_dot_or_dotdot(name: &str) -> bool {
+    name == "." || name == ".."
+}
+
+/// Splits an absolute path into `(parent_path, name)` - e.g.
+/// `/EFI/NEWDIR` -> `("/EFI", "NEWDIR")`, `/NEWDIR` -> `("/", "NEWDIR")`.
+/// Returns `None` for `/` itself or a name-less path (nothing to split).
+fn split_parent(path: &str) -> Option<(&str, &str)> {
+    let trimmed = path.trim_end_matches('/');
+    if trimmed.is_empty() {
+        return None;
+    }
+    let slash = trimmed.rfind('/')?;
+    let name = &trimmed[slash + 1..];
+    if name.is_empty() {
+        return None;
+    }
+    let parent = if slash == 0 { "/" } else { &trimmed[..slash] };
+    Some((parent, name))
+}
+
+/// Encodes `name` as an 11-byte 8.3 short-name field, or `None` if it
+/// can't be represented that way. Deliberately conservative rather than
+/// implementing FAT's full legal short-name character set: only ASCII
+/// alphanumerics, `_`, and `-` are accepted, one optional `.` separating
+/// an up-to-8-character base from an up-to-3-character extension. A name
+/// this rejects can still exist on disk (created by a real FAT
+/// formatter/OS) and [`Fs::find`]/[`walk_dir`](Fs::walk_dir) will read it
+/// back fine - this limitation only applies to names *this kernel*
+/// creates via `mkdir`.
+fn make_short_name(name: &str) -> Option<[u8; 11]> {
+    if name.is_empty() || name.len() > MAX_NAME_LEN {
+        return None;
+    }
+    let (base, ext) = match name.match_indices('.').count() {
+        0 => (name, ""),
+        1 => {
+            let dot = name.find('.')?;
+            (&name[..dot], &name[dot + 1..])
+        }
+        _ => return None,
+    };
+    if base.is_empty() || base.len() > 8 || ext.len() > 3 {
+        return None;
+    }
+    if !base.bytes().all(is_valid_short_name_byte) || !ext.bytes().all(is_valid_short_name_byte) {
+        return None;
+    }
+
+    let mut short = [b' '; 11];
+    for (i, b) in base.bytes().enumerate() {
+        short[i] = b.to_ascii_uppercase();
+    }
+    for (i, b) in ext.bytes().enumerate() {
+        short[8 + i] = b.to_ascii_uppercase();
+    }
+    Some(short)
+}
+
+fn is_valid_short_name_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_' || b == b'-'
 }

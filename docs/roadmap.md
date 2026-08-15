@@ -35,6 +35,10 @@ describes where it's going.
   testing (a relocation bug extending beyond `core::fmt` to slice/string
   literal comparisons, and a FAT32 `..`-entry cluster-`0` convention that
   hung the whole system before it was handled).
+- **Phase 4 — first filesystem write support.** `mkdir`/`rmdir`,
+  deliberately narrow (empty directories only, no directory-extension,
+  no file writes) — crosses the write-support line phase 3 explicitly
+  deferred. See the breakdown below and `CLAUDE.md`'s "Phase 4" section.
 
 ## Phase 3 — a fully functional shell with disk commands (done)
 
@@ -161,7 +165,8 @@ phase is really three dependent stages:
   bigger risk than reading (FAT table updates, cluster allocation, the
   chance of actually corrupting the disk image on a bug) and doesn't
   block anything read-only commands need. Get reads solid and tested
-  first.
+  first. **Update: `mkdir`/`rmdir` are now done — see phase 4 below.**
+  The rest (`rm`/`touch`/`cp`/`mv`/redirection) is still out of scope.
 - `stat`/`file`, `find`, `tree` — nice-to-haves, not core to "the shell
   can browse the disk," easy to add once `ls`/`cat` exist.
 - Wiring `loader.rs` itself to use this new runtime driver instead of
@@ -170,11 +175,46 @@ phase is really three dependent stages:
   useful" with "refactor a working subsystem" would slow phase 3 down for
   no user-visible benefit.
 
+## Phase 4 — first filesystem write support: `mkdir`/`rmdir` (done)
+
+**The goal:** cross the write-support line phase 3 deliberately drew, for
+the narrowest useful case — creating and removing empty directories — not
+the full write surface (`rm`/`touch`/`cp`/`mv`/redirection) at once.
+
+- `virtio_blk::Device` gained `write_sector`, sharing a `submit_request`
+  helper with `read_sector` (the only real difference between the two
+  requests is the data descriptor's write-flag direction and the
+  request-type field).
+- `fat32.rs` gained `write_fat_entry` (keeps every FAT copy in sync, not
+  just the first — reads only ever needed the first), `find_free_cluster`,
+  `zero_cluster`, and `write_raw_entry`, plus `Fs::mkdir`/`Fs::rmdir`
+  themselves.
+- Two new syscalls, `fs_mkdir`/`fs_rmdir` (9/10, path pointer/length
+  only), and matching `mkdir`/`rmdir` shell builtins.
+- **Deliberately narrow, not a full write implementation:** no
+  directory-extension (a full parent directory makes `mkdir` fail rather
+  than growing it), no file creation/deletion, no `cp`/`mv`, and a
+  conservative 8.3 short-name character set (ASCII alphanumerics plus
+  `_`/`-` only) for names this kernel creates.
+- Confirmed working end to end against the real `esp.img`, including a
+  genuine reboot-and-remount persistence check (not just a live
+  in-memory one), root-removal and already-exists rejection, and
+  no corruption of pre-existing files. See `CLAUDE.md`'s "Phase 4"
+  section for the full story, including the on-disk write ordering each
+  operation follows and why it's ordered that way (claim-before-use for
+  `mkdir`'s cluster allocation, check-everything-before-writing-anything
+  for `rmdir`).
+
 ## Parking lot (known future work, not yet sequenced)
 
 Pulled from `docs/processes.md`'s "known rough edges" and `CLAUDE.md`'s
 running "next milestone" notes — real gaps, just not phase 3's problem:
 
+- **The rest of write support** — `touch`/`rm` (file creation/deletion),
+  `cp`/`mv`, output redirection (`>`/`>>`), and lifting `mkdir`'s
+  no-directory-extension limitation (a full parent directory currently
+  makes `mkdir` fail rather than growing it). Phase 4 deliberately did
+  the narrowest useful slice (empty-directory `mkdir`/`rmdir`) first.
 - A shared syscall-ABI crate (numbers currently hand-duplicated between
   `kernel/src/syscall.rs` and every userland program).
 - A real relocating loader (ELF + relocation processing) — would also

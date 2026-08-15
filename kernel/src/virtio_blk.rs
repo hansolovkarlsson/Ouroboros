@@ -1,12 +1,16 @@
-//! virtio-blk: synchronous sector reads over `virtio_mmio`'s transport.
-//! Phase 3a of `docs/roadmap.md` - the first piece of the runtime storage
-//! stack disk commands need. Write support is deliberately out of scope
-//! (see the roadmap); so is interrupt-driven completion - this polls the
-//! used ring rather than wiring the device's IRQ, matching every other
-//! driver in this kernel so far (`uart.rs`/`uart16550.rs` poll too) and
-//! avoiding a dependency on confirming this specific device's INTID,
-//! which - unlike GICv2/the timer's fixed addresses - depends on *which*
-//! of the 32 virtio-mmio slots QEMU happens to populate.
+//! virtio-blk: synchronous sector reads and writes over `virtio_mmio`'s
+//! transport. Phase 3a of `docs/roadmap.md` built the read path; write
+//! support (`write_sector`) was added later, for `mkdir`/`rmdir`
+//! (`fat32.rs`) - both share the same request machinery
+//! ([`Device::submit_request`]), since a virtio-blk write is a read
+//! request with one flag flipped (see that function's doc comment).
+//! Interrupt-driven completion is still deliberately out of scope - this
+//! polls the used ring rather than wiring the device's IRQ, matching
+//! every other driver in this kernel so far (`uart.rs`/`uart16550.rs`
+//! poll too) and avoiding a dependency on confirming this specific
+//! device's INTID, which - unlike GICv2/the timer's fixed addresses -
+//! depends on *which* of the 32 virtio-mmio slots QEMU happens to
+//! populate.
 //!
 //! ## Why cache maintenance isn't needed here, unlike `tasks.rs`'s EL0 code
 //!
@@ -39,6 +43,7 @@ const VIRTQ_DESC_F_NEXT: u16 = 1;
 const VIRTQ_DESC_F_WRITE: u16 = 2;
 
 const BLK_T_IN: u32 = 0; // read
+const BLK_T_OUT: u32 = 1; // write
 const BLK_S_OK: u8 = 0;
 
 #[derive(Debug)]
@@ -266,18 +271,46 @@ impl Device {
         }
     }
 
-    /// Reads one 512-byte sector. Synchronous: builds a 3-descriptor
-    /// chain (header, data, status - the standard virtio-blk request
-    /// shape), notifies the device, and polls the used ring until it
-    /// completes. Only one request is ever in flight, so there's no
-    /// bookkeeping across calls - each call owns the whole queue for its
-    /// duration.
+    /// Reads one 512-byte sector.
     ///
     /// # Safety
     /// Must be called after [`init`](Self::init).
     pub unsafe fn read_sector(&mut self, sector: u64, buf: &mut [u8; 512]) -> Result<(), Error> {
+        // Device-writable (VIRTQ_DESC_F_WRITE) - the device fills this
+        // buffer for us.
+        unsafe { self.submit_request(BLK_T_IN, sector, buf.as_mut_ptr(), VIRTQ_DESC_F_WRITE | VIRTQ_DESC_F_NEXT) }
+    }
+
+    /// Writes one 512-byte sector. The only difference from
+    /// [`read_sector`](Self::read_sector) is which way the data
+    /// descriptor's `VIRTQ_DESC_F_WRITE` flag points: here the *device*
+    /// reads from `buf` (device-readable, no `F_WRITE`), the reverse of a
+    /// read request. First write support this kernel has ever had -
+    /// added for phase 4's `mkdir`/`rmdir`, see `fat32.rs`.
+    ///
+    /// # Safety
+    /// Must be called after [`init`](Self::init).
+    pub unsafe fn write_sector(&mut self, sector: u64, buf: &[u8; 512]) -> Result<(), Error> {
+        unsafe { self.submit_request(BLK_T_OUT, sector, buf.as_ptr() as *mut u8, VIRTQ_DESC_F_NEXT) }
+    }
+
+    /// Shared machinery for both requests above: builds the standard
+    /// 3-descriptor virtio-blk request (header, data, status), notifies
+    /// the device, and polls the used ring until it completes. Only one
+    /// request is ever in flight, so there's no bookkeeping across calls;
+    /// each call owns the whole queue for its duration. `data_flags` is
+    /// the one real difference between a read and a write: whether the
+    /// data descriptor is device-writable or device-readable. The
+    /// request-type field in the header and the direction data actually
+    /// flows are otherwise the only distinction.
+    ///
+    /// # Safety
+    /// Must be called after [`init`](Self::init). `data` must be valid
+    /// for 512 bytes, readable if `data_flags` omits `VIRTQ_DESC_F_WRITE`
+    /// (a write request) or writable if it's set (a read request).
+    unsafe fn submit_request(&mut self, req_type: u32, sector: u64, data: *mut u8, data_flags: u16) -> Result<(), Error> {
         let header = unsafe { &mut *REQ_HEADER.0.get() };
-        header.req_type = BLK_T_IN;
+        header.req_type = req_type;
         header.reserved = 0;
         header.sector = sector;
 
@@ -291,12 +324,7 @@ impl Device {
             flags: VIRTQ_DESC_F_NEXT,
             next: 1,
         };
-        desc[1] = Desc {
-            addr: buf.as_mut_ptr() as u64,
-            len: buf.len() as u32,
-            flags: VIRTQ_DESC_F_WRITE | VIRTQ_DESC_F_NEXT,
-            next: 2,
-        };
+        desc[1] = Desc { addr: data as u64, len: 512, flags: data_flags, next: 2 };
         desc[2] = Desc { addr: status_byte as u64, len: 1, flags: VIRTQ_DESC_F_WRITE, next: 0 };
 
         let avail = unsafe { &mut *AVAIL_RING.0.get() };
