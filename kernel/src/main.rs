@@ -136,12 +136,11 @@ fn main() -> Status {
     unsafe { mmu::install_identity_map(&memory_map, [(program.base, program.size), tasks::idle_region()]) };
     console::println!("Ouroboros kernel: identity map installed, MMU running on our own tables");
 
-    // Phase 3a (docs/roadmap.md): the first piece of a runtime storage
-    // stack, proven end to end by reading back a sector and checking it
-    // against a value nothing but a real disk read could produce. Not
-    // fatal if it fails - nothing else depends on this driver yet, unlike
-    // `program` above.
-    probe_virtio_blk();
+    // The runtime storage stack (docs/roadmap.md phases 3a/3b): virtio-blk
+    // + FAT32, installed globally for fs_list_dir/fs_read_file
+    // (syscall.rs) to use. Not fatal if it fails - see init_storage's doc
+    // comment.
+    init_storage();
 
     // SAFETY: GICD/GICC are mapped by the identity map just installed
     // above (both fall within the low-1GB device block).
@@ -169,15 +168,18 @@ fn main() -> Status {
     unsafe { tasks::start() }
 }
 
-/// Discovers and initializes the virtio-blk device, then reads sector 0
-/// back and checks it for the MBR boot signature (`0x55 0xAA` at bytes
-/// 510-511) - proof the whole pipeline (discovery, feature negotiation,
-/// virtqueue setup, a real request round-trip) actually moved bytes off
-/// the disk, not just that no error was returned. `esp.img`'s first
-/// sector is a real MBR (see the Makefile/`README`), so this signature
-/// is a property of the actual disk contents, not something this code
-/// could produce by accident.
-fn probe_virtio_blk() {
+/// Discovers and initializes the virtio-blk device, reads sector 0 back
+/// as a sanity check (the MBR boot signature, `0x55 0xAA` at bytes
+/// 510-511 - a property of the actual disk contents, not something this
+/// code could produce by accident), then mounts a FAT32 filesystem on it
+/// if there is one and installs it (`syscall::install_fs`) so
+/// `fs_list_dir`/`fs_read_file` - and therefore the shell's `ls`/`cat`/
+/// `cd` - have something to operate on. Not fatal if any step fails -
+/// nothing else depends on storage existing, unlike `program` above; the
+/// shell just won't have working disk commands (expected, not a bug, when
+/// booted via `make run`'s vvfat disk - FAT16, not FAT32, see
+/// `fat32.rs`'s module doc comment).
+fn init_storage() {
     let mut device = match unsafe { virtio_blk::Device::discover() } {
         Ok(device) => device,
         Err(e) => {
@@ -192,85 +194,24 @@ fn probe_virtio_blk() {
     console::println!("Ouroboros kernel: virtio-blk ready, capacity {} sectors", device.capacity_sectors());
 
     let mut sector = [0u8; 512];
-    match unsafe { device.read_sector(0, &mut sector) } {
-        Ok(()) => {
-            let signature = (sector[511] as u16) << 8 | sector[510] as u16;
-            console::println!(
-                "Ouroboros kernel: virtio-blk read sector 0, boot signature {signature:#06x} ({})",
-                if signature == 0xaa55 { "valid MBR" } else { "unexpected" }
-            );
-        }
-        Err(e) => {
-            console::println!("Ouroboros kernel: virtio-blk read failed ({e})");
-            return;
-        }
+    if let Err(e) = unsafe { device.read_sector(0, &mut sector) } {
+        console::println!("Ouroboros kernel: virtio-blk read failed ({e})");
+        return;
     }
-
-    probe_fat32(device);
-}
-
-/// Phase 3b (docs/roadmap.md): mounts the FAT32 partition on `device`,
-/// lists `\EFI\BOOT`, and reads `BOOTAA64.EFI` and
-/// `\EFI\OUROBORO\INIT.CFG` back - proof the reader actually walks real
-/// directory/FAT/cluster-chain structures, not just that mounting didn't
-/// error. `OUROBORO`, not `OUROBOROS` (see `loader.rs`'s `CONFIG_PATH`
-/// doc comment): every path component used here fits an 8.3 short name
-/// cleanly, which matters because this reader doesn't parse long-filename
-/// (LFN) entries yet (see fat32.rs's module doc comment) - a real,
-/// confirmed gap this project sidestepped by renaming its own directory
-/// rather than parsing around it. Only works when booted via
-/// `make run-image` (real FAT32) - see fat32.rs's module doc comment for
-/// why `make run`'s vvfat (FAT16) can't satisfy this.
-fn probe_fat32(device: virtio_blk::Device) {
-    let mut fs = match fat32::Fs::mount(device) {
-        Ok(fs) => fs,
-        Err(e) => {
-            console::println!("Ouroboros kernel: FAT32 mount failed ({e})");
-            return;
-        }
-    };
-    console::println!("Ouroboros kernel: FAT32 mounted");
-
-    let list_result = fs.list_dir("/EFI/BOOT", |name, is_dir, size| {
-        console::println!("Ouroboros kernel:   {name}{} ({size} bytes)", if is_dir { "/" } else { "" });
-    });
-    if let Err(e) = list_result {
-        console::println!("Ouroboros kernel: FAT32 list /EFI/BOOT failed ({e})");
+    let signature = (sector[511] as u16) << 8 | sector[510] as u16;
+    if signature != 0xaa55 {
+        console::println!(
+            "Ouroboros kernel: virtio-blk sector 0 has no MBR signature ({signature:#06x}) - not attempting a FAT32 mount"
+        );
         return;
     }
 
-    // Independently checkable at test time against `ls -la` on the built
-    // BOOTAA64.efi (not hardcoded here - its size is this same kernel
-    // binary's own size, which would make a hardcoded expected value
-    // self-referential and wrong the moment this very code changes it)
-    // and its PE header magic ("MZ") - properties of the actual file
-    // contents, not something a buggy reader could produce by accident.
-    let mut buf = [0u8; 128];
-    match fs.read_file("/EFI/BOOT/BOOTAA64.EFI", &mut buf) {
-        Ok(size) => {
-            console::println!(
-                "Ouroboros kernel: FAT32 read BOOTAA64.EFI, size {size} bytes, magic {:02x} {:02x} ({})",
-                buf[0],
-                buf[1],
-                if &buf[0..2] == b"MZ" { "valid PE magic" } else { "unexpected magic" }
-            );
+    match fat32::Fs::mount(device) {
+        Ok(fs) => {
+            console::println!("Ouroboros kernel: FAT32 mounted, disk commands available");
+            syscall::install_fs(fs);
         }
-        Err(e) => console::println!("Ouroboros kernel: FAT32 read BOOTAA64.EFI failed ({e})"),
-    }
-
-    // The same file loader.rs read via UEFI boot services earlier this
-    // boot (see the "loaded shell program" log line above) - reading it
-    // again here, independently, via the runtime driver instead, and
-    // getting the same content back is a real cross-check, not a
-    // duplicate demo.
-    let mut cfg = [0u8; 64];
-    match fs.read_file("/EFI/OUROBORO/INIT.CFG", &mut cfg) {
-        Ok(size) => {
-            let n = (size as usize).min(cfg.len());
-            let text = core::str::from_utf8(&cfg[..n]).unwrap_or("<not utf8>");
-            console::println!("Ouroboros kernel: FAT32 read INIT.CFG ({size} bytes): {text}");
-        }
-        Err(e) => console::println!("Ouroboros kernel: FAT32 read INIT.CFG failed ({e})"),
+        Err(e) => console::println!("Ouroboros kernel: FAT32 mount failed ({e}) - disk commands won't work this boot"),
     }
 }
 

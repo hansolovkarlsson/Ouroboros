@@ -55,6 +55,19 @@
 //! path (`3:`) for EC=0x15 (SVC64), falling through to the ordinary
 //! diverging report-and-halt path otherwise.
 //!
+//! **The SVC trampoline (`3:`) passes up to 4 syscall arguments, not
+//! just 1** — added for phase 3c's file-I/O syscalls (`fs_list_dir`/
+//! `fs_read_file`, `syscall.rs`), which need a path pointer, path
+//! length, output buffer pointer, and output buffer length all at once.
+//! `x0`-`x3` at the moment of the `svc` become `dispatch`'s `arg0`-`arg3`
+//! (AAPCS64: syscall number in `x0`, then `arg0` in `x1` through `arg3`
+//! in `x4`). Implemented by reloading the original `x0`-`x3`/`x8` fresh
+//! from the stack frame the initial `stp` sequence already saved, rather
+//! than juggling them through live registers around the `mrs
+//! elr_el1`/`spsr_el1` reads (which need `x9`/`x10` as scratch instead,
+//! specifically to avoid clobbering the argument registers before
+//! they're consumed).
+//!
 //! ## The IRQ trampoline hands its saved frame to Rust — this is what
 //! ## makes real task switching possible
 //!
@@ -242,14 +255,20 @@ stp x24, x25, [sp, #192]
 stp x26, x27, [sp, #208]
 stp x28, x29, [sp, #224]
 str x30, [sp, #240]
-// ELR/SPSR saved via x2/x3 (not x0/x1): x0 (syscall arg0) and x8
-// (syscall number) must survive intact to become the dispatcher's
-// call arguments below.
-mrs x2, elr_el1
-mrs x3, spsr_el1
-stp x2, x3, [sp, #248]
-mov x1, x0   // arg0 (was x0) -> dispatch()'s 2nd argument
-mov x0, x8   // syscall number (was x8) -> dispatch()'s 1st argument
+// ELR/SPSR read into x9/x10 (not x0-x3) precisely so the original
+// x0-x3 - already safely on the stack from the stp sequence above,
+// untouched by anything since - can be reloaded fresh below rather than
+// juggled through live registers.
+mrs x9, elr_el1
+mrs x10, spsr_el1
+stp x9, x10, [sp, #248]
+// dispatch()'s AAPCS64 argument registers: syscall number in x0 (from
+// the original x8), up to 4 syscall arguments in x1-x4 (from the
+// original x0-x3) - reloaded from the stack rather than shuffled live,
+// since every register needed is already sitting there untouched.
+ldr x0, [sp, #64]
+ldp x1, x2, [sp, #0]
+ldp x3, x4, [sp, #16]
 bl  {rust_syscall_handler}
 str x0, [sp, #0]   // dispatch()'s return value becomes EL0's new x0
 ldp x2, x3, [sp, #248]

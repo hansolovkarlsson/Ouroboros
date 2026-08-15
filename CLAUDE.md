@@ -818,11 +818,97 @@ after in the same boot confirmed nothing regressed. Zero aborts in a
 `-d int` cross-check.
 
 **Still coarse, worth knowing before building on it:** no long filenames
-(see above); read-only; no `.`/`..` special-casing beyond what falls out
-of walking them like any other entry; only the first FAT32-typed MBR
-partition is considered (no GPT, no multi-partition disks); FAT12/16 are
-explicitly rejected rather than supported (`Error::NotFat32`), matching
-this phase's FAT32-only scope.
+(see above); read-only; only the first FAT32-typed MBR partition is
+considered (no GPT, no multi-partition disks); FAT12/16 are explicitly
+rejected rather than supported (`Error::NotFat32`), matching this phase's
+FAT32-only scope. (One thing this originally said - "no `.`/`..`
+special-casing beyond what falls out of walking them like any other
+entry" - turned out to be wrong in a way that hung the whole system;
+see "Phase 3c" below.)
+
+### Phase 3c: real disk commands, and two genuinely new classes of bug found by testing, not inspection
+
+`ls`/`cat`/`cd`/`pwd` are real now - phase 3 (`docs/roadmap.md`) is
+complete. The syscall ABI grew from 1 argument to 4 (`fs_list_dir`/
+`fs_read_file` need a path pointer/length and a buffer pointer/length at
+once - `exceptions.rs`'s SVC trampoline now reloads `x0`-`x3` fresh from
+its saved stack frame rather than juggling live registers, and
+`syscall.rs` persists a global mounted `fat32::Fs` for both syscalls to
+share). `shell/src/main.rs` gained a `cwd` buffer, a `resolve_path`/
+`normalize_path` pair, and four command handlers - all still no-heap,
+stack-local state, same discipline as everything else in that crate.
+
+**A second, confirmed instance of the `core::fmt`-class relocation bug —
+this time in ordinary comparison code, not formatting.** `cd`'s path
+resolution needs to know whether the current directory is already root
+(`cwd_bytes != b"/"`, comparing a `[u8]` slice against a byte-string
+literal) - and that single comparison crashed, `ELR_EL1` inside the
+shell's own code, `FAR_EL1` a small, code-layout-dependent address that
+shifted between builds as debug prints were added/removed - exactly the
+signature of a data reference computed for this binary's link-time base
+of `0x0`, wrong once loaded anywhere else (the same root cause
+`print_u64_decimal`'s doc comment already documents for `core::fmt`).
+Bisected by binary-searching temporary `print_line` calls through
+`resolve_path` until the exact crashing statement was isolated - not
+guessed. Fixed by replacing every slice/string comparison against a
+literal (`!= b"/"`, and the `.`/`..` checks `normalize_path` needed) with
+scalar comparisons instead (`len() == 1 && bytes[0] == b'/'`), which
+never trip this. **The practical rule this adds to "no `core::fmt`" for
+anyone writing a loaded program:** avoid comparing a slice/string against
+a literal too, for the identical reason - direct calls and scalar
+(integer/byte) comparisons are fine; anything that needs a *reference* to
+literal data baked into `.rodata` isn't.
+
+**A second, unrelated real bug, found only by testing actual navigation,
+not by inspecting the code:** `cd ..` twice in a row (e.g.
+`/EFI/BOOT` → `..` → `..`) hung the *entire system* - zero console
+output, zero reported exceptions, nothing. Root cause: a FAT32
+subdirectory's `..` entry conventionally stores cluster `0` to mean "the
+root directory," not root's own real cluster number - a real on-disk
+convention, not a hypothetical. `fat32.rs::Fs::find` didn't know this, so
+that `0` flowed straight into `cluster_to_lba`'s `cluster - 2`, an
+unsigned underflow that wrapped to a huge, garbage sector number. The
+resulting read didn't fault (no exception was ever reported) because
+there was nothing to preempt it: this all runs inside a syscall, and
+exception entry masks IRQs until the next `eret` - the timer tick that
+would ordinarily rescue a runaway loop never got a chance to fire. Fixed
+in `find`: substitute `self.root_cluster` whenever a resolved entry's
+cluster is `0`. Confirmed via piped-stdin QEMU testing, isolating the
+exact step: a single `cd ..` (`/EFI/BOOT` → `/EFI/BOOT/..`) worked fine;
+a second one on top of it hung every time, before the fix, deterministically.
+
+**A related shell-side cleanup, motivated by the same testing, not just
+cosmetics:** `resolve_path` now normalizes (`normalize_path`) after
+concatenating, collapsing `.`/`..` instead of leaving them in `cwd`
+literally. Without it, `cwd` accumulated an ever-growing literal `../..`
+suffix on every `cd ..` rather than shrinking back toward root - which,
+beyond just looking wrong in `pwd`, meant every subsequent lookup
+re-walked the same already-visited directories for no reason, and made
+the cluster-`0` bug above easier to hit twice in a row instead of once.
+
+**Confirmed working end to end, both fixes verified together:**
+`cd EFI` → `cd OUROBORO` → `pwd` (correctly `/EFI/OUROBORO`) → `ls`
+(correct real entries) → `cat INIT.CFG` (correct real content) →
+`cat SH.BIN` (binary content printed raw, plus a correct truncation
+notice - the file is bigger than the shell's 256-byte read buffer);
+separately, `cd ..` twice from `/EFI/BOOT` now lands cleanly back at `/`
+with no hang; `cd`/`cat` to nonexistent paths report clean errors instead
+of crashing. `make run` (FAT16, no filesystem mounted) still degrades
+gracefully - `ls`/`cat`/`cd` report errors, `pwd` still works, boot
+proceeds normally. Zero aborts in a `-d int` cross-check across every
+scenario above.
+
+**Still coarse, worth knowing before building on it:** no multi-word
+arguments (`cd "a b"` isn't supported, no quoting - matches `echo`'s
+existing limitation); `cd ..` past root silently stays at root rather
+than erroring; paths are capped at a small fixed depth
+(`MAX_COMPONENTS`, 16) and length (`PATH_SIZE`, 128) with no graceful
+"path too complex" message beyond a bare "path too long"; `cat`'s read
+buffer is a fixed 256 bytes, so any file bigger than that is genuinely
+truncated, not paged; the pointer/length arguments `fs_list_dir`/
+`fs_read_file` take are trusted, not validated against the calling
+program's actual mapped region (fine with exactly one, currently-trusted
+userland program - see `syscall.rs`'s module doc comment).
 
 ### Parallels disk attachment: a real trap, not a hunch
 
@@ -869,55 +955,58 @@ for the reasoning behind that lead.
 fully working console via ACPI/SPCR. MMU/identity-paging, the timer-driven
 preemption tick, the syscall boundary, real preemptive task switching, a
 working interactive echo shell, a shell that's a real disk-loaded,
-configuration-selected userland program, real commands (`help`, `echo`,
-`uptime`, `clear`), a working runtime virtio-blk driver, and now a working
-runtime FAT32 reader (see "Phase 3a"/"Phase 3b" above, and
-`docs/architecture.md`/`docs/processes.md`/`docs/roadmap.md` for the
-reference write-up) are all done and confirmed working, not just
-structurally plausible.
+configuration-selected userland program, a working runtime virtio-blk
+driver, a working runtime FAT32 reader, and now real disk commands
+(`ls`/`cat`/`cd`/`pwd`, alongside the earlier `help`/`echo`/`uptime`/
+`clear` - see "Phase 3c" above, and `docs/architecture.md`/
+`docs/processes.md`/`docs/roadmap.md` for the reference write-up) are all
+done and confirmed working, not just structurally plausible.
 
-**Both phases of the original "get to a shell" plan are done, and phase 3
-is most of the way there.** Phase 1 (accept input, echo it back) and phase
-2 (real commands, one backed by real kernel state via a new syscall) are
-both confirmed working. Of phase 3 (disk commands - `ls`/`cat`/`cd`/`pwd`,
-and the runtime storage stack they need - see `docs/roadmap.md`), stages
-3a (a real block device driver) and 3b (a FAT32 reader) are both done; 3c
-(new syscalls + the commands themselves, wiring `fat32.rs` into the
-loaded shell) hasn't started. This section (and the "gaps" paragraph below
-it) still tracks what's true right now; `docs/roadmap.md` is the one to
-check for what's next and why.
+**Phase 3, and the entire original "get to a shell" plan, are done.**
+Phase 1 (accept input, echo it back), phase 2 (real commands backed by
+real kernel state), and phase 3 (disk commands - `ls`/`cat`/`cd`/`pwd`,
+and the full runtime storage stack underneath them: virtio-blk, FAT32,
+new syscalls) are all confirmed working end to end. There is no more
+numbered phase queued up - what comes next is an open choice among the
+gaps below, not a predetermined next step. This section (and the "gaps"
+paragraph below it) still tracks what's true right now; `docs/roadmap.md`
+is the one to check for a longer-range view.
 
 What's still coarse and worth knowing about before building on any of
 this — kept current in `docs/processes.md`'s "known rough edges" rather
-than duplicated here, since that's the document meant to track it as these
-get addressed: no shared syscall-ABI crate (numbers duplicated by hand
-between `syscall.rs` and `shell/`); no `core::fmt`/`write!` usable in any
-loaded program (crashes - see "Phase 2" above for why); exactly one
-program, loaded once, at boot, with no `exec()`; a fixed 2-task scheduler
-(no dynamic task creation); no heap or `.bss` for userland programs, so no
-static mutable state at all; a fixed, unguarded 8KB stack per program; no
-ELF, no relocations, no dynamic linking (the `core::fmt` gap and the
-lack of ELF/relocations are the same underlying limitation, not two
-separate ones); `fat32.rs` has no long-filename support in general (this
-project's own ESP directory was renamed - `\EFI\OUROBORO\`, 8 characters,
-not `\EFI\OUROBOROS\` - specifically to stay reachable without needing
-it, but any *other* 9+ character name still isn't), is read-only, and
-only looks at the first FAT32-typed MBR partition. Also still true from
-before this milestone: strict round-robin only, no priorities or
+than duplicated here, since that's the document meant to track it as
+these get addressed: no shared syscall-ABI crate (numbers duplicated by
+hand between `syscall.rs` and `shell/`); no `core::fmt`/`write!` usable
+in any loaded program, and (a real, separately-confirmed extension of
+that same gap - see "Phase 3c" above) **no slice/string comparison
+against a literal either** - both crash for the identical reason (a data
+reference computed for this binary's link-time base of `0x0`); exactly
+one program, loaded once, at boot, with no `exec()`; a fixed 2-task
+scheduler (no dynamic task creation); no heap or `.bss` for userland
+programs, so no static mutable state at all; a fixed, unguarded 8KB stack
+per program; no ELF, no relocations, no dynamic linking (all of the
+above - `core::fmt`, literal comparisons, and the lack of ELF/relocations
+- are the same underlying limitation, not separate ones); `fat32.rs` has
+no long-filename support in general (this project's own ESP directory was
+renamed - `\EFI\OUROBORO\`, 8 characters, not `\EFI\OUROBOROS\` -
+specifically to stay reachable without needing it, but any *other* 9+
+character name still isn't), is read-only, and only looks at the first
+FAT32-typed MBR partition; disk-command pointer/length arguments are
+trusted, not validated against the caller's actual mapped region (fine
+with exactly one, currently-trusted userland program). Also still true
+from before this milestone: strict round-robin only, no priorities or
 blocking; FP/SIMD state still isn't saved anywhere (`exceptions.rs`'s
 `Context`).
 
-Reasonable next steps from here: phase 3c (new syscalls for file I/O, and
-the `ls`/`cat`/`cd`/`pwd` commands themselves - the roadmap's own
-suggested syscall shape is a reasonable starting point); a shared
-syscall-ABI crate, now that there are two independent call sites to keep
-in sync by hand; more commands/builtins, now that the dispatch pattern
-(tokenize, match, call a syscall for real state if needed) is
-established; a real relocating loader (ELF + relocation processing),
-which would also lift the `core::fmt` restriction; blocking/waiting
-primitives so tasks can do more than an unconditional round-robin `wfe`
-loop; or finally circling back to Parallels virtio-console now that the
-kernel has enough infrastructure (MMU, exceptions, EL0, real task
+Reasonable next steps from here: a shared syscall-ABI crate, now that
+there are three independent call sites to keep in sync by hand; more
+commands/builtins (write support - `mkdir`/`rm`/`cp`/redirection -
+deliberately deferred past phase 3, see `docs/roadmap.md`); a real
+relocating loader (ELF + relocation processing), which would also lift
+both the `core::fmt` and literal-comparison restrictions; blocking/
+waiting primitives so tasks can do more than an unconditional round-robin
+`wfe` loop; or finally circling back to Parallels virtio-console now that
+the kernel has enough infrastructure (MMU, exceptions, EL0, real task
 switching, real input, disk-loaded userland, real runtime storage) to
 make that work meaningfully once it lands.
 
@@ -982,7 +1071,7 @@ kernel/
   src/gic.rs         GICv2 driver (QEMU virt addresses, confirmed via devicetree dump)
   src/timer.rs       ARM generic timer (non-secure EL1 physical timer, PPI 14 / GIC INTID 30), TICK_INTERVAL_MS
   src/loader.rs      reads INIT.CFG + a program off the ESP during boot services, into a 2MB-aligned EL0-accessible region - see docs/processes.md
-  src/syscall.rs     svc syscall dispatch table (print/double/report/try_read_char/putc/get_ticks, gap at 5) - confirmed working end to end, see above
+  src/syscall.rs     svc syscall dispatch table (print/double/report/try_read_char/putc/get_ticks/fs_list_dir/fs_read_file, gap at 5) - confirmed working end to end, see above
   src/tasks.rs       task 0 (loaded program) + task 1 (idle) + the round-robin scheduler (Context save/restore in the tick path) - confirmed alternating, see above
   src/virtio_mmio.rs virtio-mmio transport: 32-slot device discovery, modern (non-legacy) register layout, addresses confirmed via devicetree dump
   src/virtio_blk.rs  runtime virtio-blk driver: feature negotiation, one virtqueue, synchronous polling sector reads - phase 3a, confirmed working, see above
@@ -990,7 +1079,7 @@ kernel/
 
 shell/               userland default shell - a separate crate, built for aarch64-unknown-none, loaded from disk (not compiled into the kernel)
   linker.ld          flat-binary linker script: entry at offset 0, no .bss/.data (see docs/processes.md)
-  src/main.rs        line editor + command dispatch (help/echo/uptime/clear), running as real EL0 userland code - see docs/processes.md
+  src/main.rs        line editor + command dispatch (help/echo/uptime/clear/ls/cat/cd/pwd), running as real EL0 userland code - see docs/processes.md
 ```
 
 Two-crate workspace (`kernel` and `shell`), with `shell` deliberately

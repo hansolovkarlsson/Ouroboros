@@ -24,13 +24,22 @@ describes where it's going.
 - **Phase 2 — real commands.** `help`, `echo`, `uptime`, `clear`, with
   `uptime` backed by a real new syscall (`get_ticks`) rather than being
   another echo demo.
-- **Phase 3a — a real virtio-blk driver.** Runtime (post-boot-services)
+- **Phase 3 — a fully functional shell with disk commands.** All three
+  stages done: 3a (a real virtio-blk driver — runtime, post-boot-services
   block I/O, proven by reading sector 0 back and checking the real MBR
-  boot signature. Read-only, synchronous, polling — see `CLAUDE.md`'s
-  "Phase 3a" section for how the transport (virtio-mmio, not
-  virtio-blk-pci) got decided and verified.
+  boot signature), 3b (a hand-rolled read-only FAT32 reader), and 3c
+  (`ls`/`cat`/`cd`/`pwd`, backed by two new syscalls and a persisted
+  kernel-side mount). See the breakdown below for what each stage
+  actually involved and `CLAUDE.md`'s "Phase 3a"/"Phase 3b"/"Phase 3c"
+  sections for the full story, including two real bugs found only by
+  testing (a relocation bug extending beyond `core::fmt` to slice/string
+  literal comparisons, and a FAT32 `..`-entry cluster-`0` convention that
+  hung the whole system before it was handled).
 
-## Phase 3 — a fully functional shell with disk commands
+## Phase 3 — a fully functional shell with disk commands (done)
+
+The full breakdown below is kept as reference for *how* this was built,
+not as a plan still in progress.
 
 **The goal:** `ls`, `cat`, `cd`, `pwd` — a shell that can actually browse
 and read the filesystem it's running from, not just talk to the console.
@@ -112,27 +121,37 @@ phase is really three dependent stages:
   checks its exact size and PE header magic against the real built
   binary. See `kernel/src/fat32.rs`.
 
-### 3c. New syscalls + the commands themselves
+### 3c. New syscalls + the commands themselves — done
 
-File I/O needs to go through the kernel the same way console I/O does —
-userland has no direct hardware access. Reasonable syscall shape:
-`open_dir`/`read_dir` (or a single "list this path" call, simpler for a
-first cut), `open_file`/`read_file`/`close`. Exact shape is an
-implementation detail to settle once 3a/3b exist, not before.
+- **Syscall shape, as built:** `fs_list_dir`/`fs_read_file` (7/8), each
+  taking `(path ptr, path len, buf ptr, buf len)` and writing into the
+  caller's buffer directly, rather than the originally-sketched
+  `open_dir`/`read_dir`/`open_file`/`read_file`/`close` handle-based
+  shape — simpler, and sufficient since nothing here needs a persistent
+  open handle across multiple calls. This is also what pushed the
+  syscall ABI itself from 1 argument to 4 (`x0`-`x3`) — see `CLAUDE.md`'s
+  "Phase 3c" section.
+- **All four commands built, all read-only, matching the original
+  target:**
 
-**Commands, ranked by how directly they build on 3a/3b and how much they're
-worth to a "browse the filesystem" experience:**
-
-| Command | What it needs | Priority |
+| Command | What it needs | Status |
 |---|---|---|
-| `ls [path]` | directory listing | Core — the first thing to prove the stack works |
-| `cat <file>` | file read | Core — proves file content, not just names |
-| `pwd` | shell-local state only (no new syscall) | Core — trivial once `cd` exists |
-| `cd <path>` | shell-local state + validating the path exists (a directory listing or stat call) | Core — makes `ls`/`cat` usable with relative paths |
+| `ls [path]` | `fs_list_dir` | Done |
+| `cat <file>` | `fs_read_file` | Done |
+| `pwd` | shell-local `cwd` state, no syscall | Done |
+| `cd <path>` | shell-local state + `fs_list_dir` for validation (no dedicated "exists" syscall) | Done |
 
-That's the phase-3 target: four commands, all read-only, all directly
-exercising the new storage stack. Deliberately not more than that — see
-below.
+- **Two real bugs found by testing the actual commands, not by
+  inspection** - see `CLAUDE.md`'s "Phase 3c" section for the full
+  writeup: a slice/string-vs-literal comparison (`cwd_bytes != b"/"`)
+  crashed for the same underlying reason `core::fmt` does (a data
+  reference computed for link-time base `0x0`), and a FAT32 `..`-entry
+  convention (cluster `0` means "root," not root's real cluster number)
+  that wasn't handled hung the *entire system* - masked-IRQ syscall
+  context, nothing left to preempt a runaway computation. Both fixed;
+  `shell/src/main.rs` also gained path normalization (`normalize_path`)
+  as a direct result, collapsing `.`/`..` instead of letting `cwd`
+  accumulate them literally.
 
 **Deliberately out of scope for phase 3** (candidates for a phase 4, once
 3a-3c are proven):

@@ -146,25 +146,44 @@ Consequences of "flat binary, no loader smarts":
   is the replacement: a hand-rolled decimal formatter using only direct
   calls. Any future program needs to avoid `core::fmt` for the same reason,
   until this gets a real relocating loader.
+- **Comparing a slice/string against a literal is unsafe too, for the
+  identical reason - a second, separately confirmed instance, not a
+  hypothetical extension.** Phase 3c's `cd` needed to check whether the
+  current directory was already root (`cwd_bytes != b"/"`) and crashed the
+  same way `write!` did - `ELR_EL1` inside the shell's own code,
+  `FAR_EL1` a small, build-layout-dependent address. Bisected with
+  temporary `print_line` calls until the exact statement was isolated.
+  The fix is the same shape as `core::fmt`'s: don't reference the literal
+  at all, just compare scalars (`bytes.len() == 1 && bytes[0] == b'/'`
+  instead of `bytes != b"/"`; `shell/src/main.rs`'s `is_root`/`is_dot`/
+  `is_dotdot` are the pattern to copy). Direct calls and individual
+  `u8`/`usize` comparisons are fine; anything needing a *reference* to
+  literal data in `.rodata` isn't.
 
 ## Syscall ABI available to a program
 
-See `docs/architecture.md`'s syscall table for the full list. The three
-that matter for an interactive command shell: `try_read_char` (3,
-non-blocking, returns `syscall::NO_CHAR` when nothing is waiting), `putc`
-(4, one raw byte, no newline translation), and `get_ticks` (6, added for
-phase 2's `uptime` builtin — the pattern to follow whenever a command
-needs real kernel state it can't get any other way). A userland program
-makes these directly via `svc`:
+See `docs/architecture.md`'s syscall table for the full list. `try_read_char`
+(3, non-blocking, returns `syscall::NO_CHAR` when nothing is waiting) and
+`putc` (4, one raw byte, no newline translation) cover interactive I/O;
+`get_ticks` (6, added for phase 2's `uptime` builtin) is the pattern to
+follow whenever a command needs real kernel state it can't get any other
+way. `fs_list_dir`/`fs_read_file` (7/8, added for phase 3c's disk
+commands) are the first syscalls needing more than one argument — a path
+pointer/length and a buffer pointer/length at once — which is why the
+syscall ABI itself supports up to 4 arguments (`x0`-`x3`), not just one.
+A userland program makes these directly via `svc`:
 
 ```rust
 #[inline(always)]
-fn syscall(number: u64, arg0: u64) -> u64 {
+fn syscall4(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64) -> u64 {
     let ret: u64;
     unsafe {
         core::arch::asm!(
             "svc #0",
             inout("x0") arg0 => ret,
+            in("x1") arg1,
+            in("x2") arg2,
+            in("x3") arg3,
             in("x8") number,
             options(nostack),
         );
@@ -205,10 +224,13 @@ write your own:
    passed down through your call stack instead (see `shell/src/main.rs`'s
    `on_byte` for the pattern: buffer and length live in `main`'s frame,
    passed by `&mut` reference).
-6. **No `core::fmt` (`write!`, `{}`)** — see "Binary format" above for why
-   it crashes. Format numbers by hand (`shell/src/main.rs`'s
-   `print_u64_decimal` is a ready-made example) and build strings out of
-   byte/`&str` loops through `putc`.
+6. **No `core::fmt` (`write!`, `{}`), and no comparing a slice/string
+   against a literal either** — see "Binary format" above for why both
+   crash (the same root cause). Format numbers by hand (`shell/src/main.rs`'s
+   `print_u64_decimal` is a ready-made example), build strings out of
+   byte/`&str` loops through `putc`, and write comparisons like
+   `shell/src/main.rs`'s `is_root`/`is_dot`/`is_dotdot` (scalar `len()`/
+   indexed-byte checks) instead of `slice == b"literal"`.
 7. **A `#[panic_handler]`** — there's no `std`, and no `uefi` crate's
    panic handling either (that only exists on the boot-services side).
    Looping on `wfe` forever is a reasonable minimum.
@@ -243,7 +265,14 @@ Worth knowing before building further on this:
   position-dependent blob built specifically for wherever `loader.rs`'s
   allocator happens to place it that boot (which happens to always work
   today, but isn't a guarantee anything currently enforces).
-- **No `core::fmt`.** A direct consequence of the above, but easy to hit
-  by accident (any `write!`/`{}` use compiles fine and only fails at
-  runtime) — see "Binary format"'s callout for what actually goes wrong
-  and why. Goes away once there's a real relocating loader.
+- **No `core::fmt`, and no comparing a slice/string against a literal.**
+  A direct consequence of the above, but easy to hit by accident (both
+  compile fine and only fail at runtime) — see "Binary format"'s callout
+  for what actually goes wrong and why. Goes away once there's a real
+  relocating loader.
+- **Disk-command pointer/length arguments are trusted, not validated.**
+  `fs_list_dir`/`fs_read_file` dereference the caller's `(pointer,
+  length)` pairs directly, checked only against a minimal sanity bound
+  (`syscall.rs::valid_user_range`) — not against the calling program's
+  actual mapped region. Fine with exactly one, currently-trusted userland
+  program; a real gap once that stops being true.

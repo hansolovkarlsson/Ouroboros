@@ -4,16 +4,32 @@
 //!
 //! Calling convention (chosen to match Linux's, a reasonable default for a
 //! "POSIX-ish" OS per this project's stated goals, not because anything
-//! here is Linux-ABI-compatible): syscall number in x8, first argument in
-//! x0, return value in x0. `exceptions.rs`'s slot-8 trampoline is what
-//! actually marshals registers into and out of [`dispatch`]'s call
-//! signature — see its module doc comment for why that trampoline exists
-//! and how it differs from every other vector.
+//! here is Linux-ABI-compatible): syscall number in x8, up to 4 arguments
+//! in x0-x3, return value in x0. `exceptions.rs`'s slot-8 trampoline is
+//! what actually marshals registers into and out of [`dispatch`]'s call
+//! signature — see its module doc comment for why that trampoline exists,
+//! how it differs from every other vector, and why it grew from 1 argument
+//! to 4 for phase 3c's file-I/O syscalls.
+//!
+//! ## Pointer arguments trust the caller - a real, known simplification
+//!
+//! `fs_list_dir`/`fs_read_file` take raw `(pointer, length)` pairs for
+//! paths and output buffers - valid to dereference directly from EL1
+//! because this kernel has exactly one address space (no per-process
+//! virtual memory yet), so an EL0-valid pointer from the one loaded
+//! program is automatically EL1-valid too. What isn't done: verifying the
+//! pointer/length actually falls within that program's own mapped region
+//! before touching it. Fine while there's exactly one, currently-trusted
+//! userland program and no isolation guarantee promised yet - a real gap
+//! once that stops being true. `valid_user_range` below is a minimal
+//! sanity bound (non-null, non-zero, capped length), not a real
+//! memory-safety check.
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::console;
 use crate::exceptions;
+use crate::fat32;
 
 /// Two independent counters (one per `tasks.rs` task), proof — alongside
 /// `double`/`print` below — that syscalls arriving from *different*,
@@ -27,13 +43,89 @@ static TASK_REPORTS: [AtomicU64; crate::tasks::NUM_TASKS] = [AtomicU64::new(0), 
 /// apart with a single comparison.
 pub const NO_CHAR: u64 = u64::MAX;
 
-/// Called from the exception vector's SVC trampoline (`exceptions.rs`) with
-/// the syscall number (from x8) and first argument (from x0), running at
-/// EL1 with the kernel's own stack and every privilege EL0 lacks - the
-/// entire reason this indirection exists. Its return value becomes EL0's
-/// new x0 after `eret`.
+/// The mounted FAT32 filesystem (if any) `fs_list_dir`/`fs_read_file`
+/// operate on - `None` is a valid, expected state (e.g. `make run`'s
+/// vvfat disk is FAT16, not FAT32 - see `fat32.rs`), not a bug; both
+/// syscalls just report an error to userland rather than the kernel
+/// refusing to boot without one.
+struct FsCell(core::cell::UnsafeCell<Option<fat32::Fs>>);
+// SAFETY: single-core; only ever touched from syscall dispatch, which by
+// construction can't run re-entrantly (taking an exception masks further
+// exceptions until the next `eret`) - same reasoning as every other
+// single-instance global in this project.
+unsafe impl Sync for FsCell {}
+static FS: FsCell = FsCell(core::cell::UnsafeCell::new(None));
+
+/// Installs the filesystem `fs_list_dir`/`fs_read_file` operate on. Called
+/// once at boot (`main.rs`), after a successful `fat32::Fs::mount` - never
+/// called again, so no locking beyond `FsCell`'s existing single-core
+/// reasoning is needed.
+pub fn install_fs(fs: fat32::Fs) {
+    unsafe { *FS.0.get() = Some(fs) };
+}
+
+/// Minimal sanity bound for a userland `(pointer, length)` argument pair -
+/// see the module doc comment's note on what this isn't.
+const MAX_USER_LEN: u64 = 512;
+
+fn valid_user_range(ptr: u64, len: u64) -> bool {
+    ptr != 0 && len != 0 && len <= MAX_USER_LEN
+}
+
+/// Formats `path`'s directory entries into `buf` as `name\n` (`name/\n`
+/// for subdirectories), stopping before an entry would overflow `buf`
+/// rather than erroring - a truncated listing is more useful to a caller
+/// than none at all, same spirit as `read_file`'s own truncation
+/// behavior. Returns the number of bytes written, or `u64::MAX` if there
+/// is no mounted filesystem or `path` doesn't resolve to a directory.
+fn fs_list_dir(path: &str, buf: &mut [u8]) -> u64 {
+    let Some(fs) = (unsafe { &mut *FS.0.get() }) else {
+        return u64::MAX;
+    };
+    // `list_dir`'s callback can't signal "stop early" (unlike
+    // `walk_dir`'s internal one - see fat32.rs), so once `buf` is full
+    // this just stops *writing*, not iterating: wasted work on a huge
+    // directory, harmless and simple for the small ones this project
+    // deals with.
+    let mut written = 0usize;
+    let result = fs.list_dir(path, |name, is_dir, _size| {
+        let suffix: &[u8] = if is_dir { b"/\n" } else { b"\n" };
+        let entry_len = name.len() + suffix.len();
+        if written + entry_len > buf.len() {
+            return;
+        }
+        buf[written..written + name.len()].copy_from_slice(name.as_bytes());
+        written += name.len();
+        buf[written..written + suffix.len()].copy_from_slice(suffix);
+        written += suffix.len();
+    });
+    match result {
+        Ok(()) => written as u64,
+        Err(_) => u64::MAX,
+    }
+}
+
+/// Reads `path`'s contents into `buf`, same truncation contract as
+/// `fat32::Fs::read_file` (returns the file's real size, which may exceed
+/// `buf.len()` - compare to detect truncation). `u64::MAX` if there's no
+/// mounted filesystem or `path` doesn't resolve to a file.
+fn fs_read_file(path: &str, buf: &mut [u8]) -> u64 {
+    let Some(fs) = (unsafe { &mut *FS.0.get() }) else {
+        return u64::MAX;
+    };
+    match fs.read_file(path, buf) {
+        Ok(size) => size as u64,
+        Err(_) => u64::MAX,
+    }
+}
+
+/// Called from the exception vector's SVC trampoline (`exceptions.rs`)
+/// with the syscall number (from x8) and up to 4 arguments (from x0-x3),
+/// running at EL1 with the kernel's own stack and every privilege EL0
+/// lacks - the entire reason this indirection exists. Its return value
+/// becomes EL0's new x0 after `eret`.
 ///
-/// Six syscalls now (`shell_input`, a seventh, was removed - see below).
+/// Eight syscalls now (`shell_input`, a ninth, was removed - see below).
 /// `double`/`print` were deliberately chained by the original single-task
 /// demo (double's return value fed straight into print's argument) to
 /// prove a return value survives the trampoline intact; `report` is what
@@ -53,8 +145,11 @@ pub const NO_CHAR: u64 = u64::MAX;
 /// first syscall added for phase 2 (commands) - the shell's `uptime`
 /// builtin needs *some* real kernel state to report, now that it can't
 /// just read `exceptions.rs`'s statics directly the way kernel-resident
-/// code used to.
-pub extern "C" fn dispatch(number: u64, arg0: u64) -> u64 {
+/// code used to. `fs_list_dir`/`fs_read_file` (7/8) are phase 3c's - the
+/// first syscalls needing more than one argument, which is why `dispatch`
+/// grew from 1 argument to 4 (see this module's doc comment and
+/// `exceptions.rs`'s).
+pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64) -> u64 {
     match number {
         0 => {
             console::println!("Ouroboros kernel: syscall from EL0: print(arg0={arg0:#x})");
@@ -85,6 +180,27 @@ pub extern "C" fn dispatch(number: u64, arg0: u64) -> u64 {
             0
         }
         6 => exceptions::ticks(),
+        7 => {
+            if !valid_user_range(arg0, arg1) || !valid_user_range(arg2, arg3) {
+                return u64::MAX;
+            }
+            // SAFETY: bounds sanity-checked above; see the module doc
+            // comment's note on what that check does and doesn't cover.
+            let path = unsafe { core::slice::from_raw_parts(arg0 as *const u8, arg1 as usize) };
+            let Ok(path) = core::str::from_utf8(path) else { return u64::MAX };
+            let buf = unsafe { core::slice::from_raw_parts_mut(arg2 as *mut u8, arg3 as usize) };
+            fs_list_dir(path, buf)
+        }
+        8 => {
+            if !valid_user_range(arg0, arg1) || !valid_user_range(arg2, arg3) {
+                return u64::MAX;
+            }
+            // SAFETY: same as syscall 7.
+            let path = unsafe { core::slice::from_raw_parts(arg0 as *const u8, arg1 as usize) };
+            let Ok(path) = core::str::from_utf8(path) else { return u64::MAX };
+            let buf = unsafe { core::slice::from_raw_parts_mut(arg2 as *mut u8, arg3 as usize) };
+            fs_read_file(path, buf)
+        }
         _ => {
             console::println!("Ouroboros kernel: syscall from EL0: unknown number={number}");
             u64::MAX

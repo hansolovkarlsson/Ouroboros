@@ -265,6 +265,25 @@ impl Fs {
     /// `/EFI/OUROBORO/SH.BIN`) to its directory entry, walking one
     /// directory per path component. Matching is case-insensitive, same
     /// as FAT itself.
+    ///
+    /// **A real, confirmed bug found while testing `cd ..` from a
+    /// subdirectory whose parent is the root:** a directory's `..` entry
+    /// conventionally stores cluster `0` to mean "the root directory",
+    /// not the root's own (real, nonzero) cluster number - not a
+    /// hypothetical, this is the actual on-disk value FAT32 formatters
+    /// write, confirmed while diagnosing the hang below. Without the
+    /// substitution here, that `0` flowed straight into
+    /// [`cluster_to_lba`](Self::cluster_to_lba)'s `cluster - 2`, an
+    /// unsigned underflow that wrapped to a huge, garbage sector number.
+    /// The resulting read didn't fault (no exception was ever reported) -
+    /// it hung the *entire* system indefinitely, because this all runs
+    /// inside a syscall, and exception entry masks IRQs until the next
+    /// `eret` - there was no tick left to preempt anything with. Confirmed
+    /// via piped-stdin QEMU testing: `cd EFI`, `cd BOOT`, `cd ..`, `cd ..`
+    /// (the second `..` - from `/EFI` back to root - is what actually
+    /// walks a `..` entry whose value is `0`) hung with zero console
+    /// output and zero reported exceptions, exactly matching a masked-IRQ
+    /// infinite operation rather than a crash.
     fn find(&mut self, path: &str) -> Result<DirEntry, Error> {
         let mut current = DirEntry::root(self.root_cluster);
         for component in path.split('/').filter(|c| !c.is_empty()) {
@@ -281,6 +300,9 @@ impl Fs {
                 }
             })?;
             current = found.ok_or(Error::NotFound)?;
+            if current.cluster == 0 {
+                current.cluster = self.root_cluster;
+            }
         }
         Ok(current)
     }

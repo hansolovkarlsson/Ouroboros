@@ -134,11 +134,15 @@ unconditional round-robin scheduling would predict.
 
 ## Syscall ABI
 
-Convention: syscall number in `x8`, first argument in `x0`, return value
-in `x0` — chosen to match Linux's shape (a reasonable default for a
-"POSIX-ish" project), not for ABI compatibility with anything.
+Convention: syscall number in `x8`, up to 4 arguments in `x0`-`x3`, return
+value in `x0` — chosen to match Linux's shape (a reasonable default for a
+"POSIX-ish" project), not for ABI compatibility with anything. Grew from
+1 argument to 4 for phase 3c's file-I/O syscalls, which need a path
+pointer/length and a buffer pointer/length at once — see
+`exceptions.rs`'s module doc comment for how the SVC trampoline marshals
+them.
 
-| Number | Name | `arg0` | Returns | Notes |
+| Number | Name | Arguments | Returns | Notes |
 |---|---|---|---|---|
 | 0 | `print` | value to log | `0` | Debug/demo only — logs through the kernel console with a fixed prefix, not a general write primitive |
 | 1 | `double` | a number | `arg0 * 2` | Demo only — proves a return value survives the trampoline |
@@ -147,6 +151,8 @@ in `x0` — chosen to match Linux's shape (a reasonable default for a
 | 4 | `putc` | a byte | `0` | Raw single-byte console write, no newline translation |
 | *5* | *(gap)* | | | `shell_input` used to live here; removed when line editing moved into userland. Left unfilled rather than renumbered — see `syscall.rs`'s module doc comment |
 | 6 | `get_ticks` | ignored | preemption tick count since boot | Added for phase 2's `uptime` builtin — the first syscall added specifically so a loaded program could read real kernel state, not just I/O |
+| 7 | `fs_list_dir` | path ptr, path len, buf ptr, buf len | bytes written, or `u64::MAX` | Formats each entry as `name\n`/`name/\n`, truncating rather than erroring if `buf` is too small |
+| 8 | `fs_read_file` | path ptr, path len, buf ptr, buf len | the file's real size (may exceed `buf`'s length — compare to detect truncation), or `u64::MAX` | |
 | other | — | — | `u64::MAX` | Logged as unknown |
 
 There is no shared ABI crate yet — these numbers are duplicated by hand in
