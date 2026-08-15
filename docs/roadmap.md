@@ -54,6 +54,16 @@ phase is really three dependent stages:
   out of scope for this phase — see "Deliberately out of scope" below).
 - This is genuinely comparable in size to the still-deferred
   Parallels virtio-console work — a real subsystem, not an afternoon.
+- **Kernel-resident, not a user-space driver process — a deliberate,
+  explicit choice, not an oversight.** `docs/research-minix-boot.md`
+  raised a real fork here: writing virtio-blk (and eventually
+  virtio-console) as an isolated EL0 driver process would be a concrete
+  step toward this project's stated microkernel goal, using the driver as
+  the forcing function for dynamic task creation and real IPC. Decided
+  against, for now — that would pull the process-model/IPC work (parking
+  lot, below) into phase 3's critical path, and phase 3's actual goal is
+  disk commands working at all. Revisit once there's more than one
+  reason to want driver isolation; virtio itself doesn't require it.
 
 ### 3b. A filesystem reader
 
@@ -125,3 +135,9 @@ running "next milestone" notes — real gaps, just not phase 3's problem:
   program, or reloading one without a reboot.
 - Parallels virtio-console (console output on Parallels is still
   deliberately paused).
+- **Actual microkernel-style driver isolation** — moving drivers
+  (starting with virtio-blk/console once they exist) out of the EL1
+  kernel and into supervised EL0 processes, per
+  `docs/research-minix-boot.md`'s comparison. Explicitly deferred past
+  phase 3 (see 3a's note above) rather than decided by drift: it needs
+  dynamic task creation and real IPC first, not just a virtio driver.
