@@ -162,7 +162,7 @@ fn run_line(line: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize) {
     let arg = words.next().unwrap_or("");
 
     match command {
-        "help" => print_line("commands: help, echo, uptime, clear, ls, cat, cd, pwd, mkdir, rmdir"),
+        "help" => print_line("commands: help, echo, uptime, clear, ls, cat, cd, pwd, mkdir, rmdir, touch, rm"),
         "echo" => {
             let mut first = true;
             for word in line.split_whitespace().skip(1) {
@@ -195,6 +195,8 @@ fn run_line(line: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize) {
         "cd" => cmd_cd(arg, cwd, cwd_len),
         "mkdir" => cmd_mkdir(arg, cwd, *cwd_len),
         "rmdir" => cmd_rmdir(arg, cwd, *cwd_len),
+        "touch" => cmd_touch(arg, cwd, *cwd_len),
+        "rm" => cmd_rm(arg, cwd, *cwd_len),
         _ => {
             print_str("unknown command: ");
             print_line(command);
@@ -491,6 +493,50 @@ fn cmd_rmdir(arg: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize) {
     }
 }
 
+fn cmd_touch(arg: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize) {
+    if arg.is_empty() {
+        print_line("touch: missing file argument");
+        return;
+    }
+    let mut path_buf = [0u8; PATH_SIZE];
+    let Some(path_len) = resolve_path(cwd_str(cwd, cwd_len), arg, &mut path_buf) else {
+        print_line("touch: path too long");
+        return;
+    };
+    let Ok(path) = core::str::from_utf8(&path_buf[..path_len]) else {
+        print_line("touch: path too long");
+        return;
+    };
+
+    match fs_touch(path) {
+        NO_FS => print_no_fs(),
+        FS_ERROR => print_line("touch: failed (bad name, parent missing, or path is a directory)"),
+        _ => {}
+    }
+}
+
+fn cmd_rm(arg: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize) {
+    if arg.is_empty() {
+        print_line("rm: missing file argument");
+        return;
+    }
+    let mut path_buf = [0u8; PATH_SIZE];
+    let Some(path_len) = resolve_path(cwd_str(cwd, cwd_len), arg, &mut path_buf) else {
+        print_line("rm: path too long");
+        return;
+    };
+    let Ok(path) = core::str::from_utf8(&path_buf[..path_len]) else {
+        print_line("rm: path too long");
+        return;
+    };
+
+    match fs_rm(path) {
+        NO_FS => print_no_fs(),
+        FS_ERROR => print_line("rm: failed (no such file, or path is a directory)"),
+        _ => {}
+    }
+}
+
 fn print_str(s: &str) {
     for b in s.bytes() {
         putc(b);
@@ -573,6 +619,17 @@ fn fs_mkdir(path: &str) -> u64 {
 /// [`fs_mkdir`].
 fn fs_rmdir(path: &str) -> u64 {
     syscall4(syscall_abi::FS_RMDIR, path.as_ptr() as u64, path.len() as u64, 0, 0)
+}
+
+/// Creates an empty file at `path`, or succeeds as a no-op if a file
+/// already exists there. Same return contract as [`fs_mkdir`].
+fn fs_touch(path: &str) -> u64 {
+    syscall4(syscall_abi::FS_TOUCH, path.as_ptr() as u64, path.len() as u64, 0, 0)
+}
+
+/// Removes the file at `path`. Same return contract as [`fs_mkdir`].
+fn fs_rm(path: &str) -> u64 {
+    syscall4(syscall_abi::FS_RM, path.as_ptr() as u64, path.len() as u64, 0, 0)
 }
 
 /// The 1-argument syscalls this program used before phase 3c - a thin

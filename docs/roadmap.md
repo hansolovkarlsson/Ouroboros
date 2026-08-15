@@ -39,6 +39,13 @@ describes where it's going.
   deliberately narrow (empty directories only, no directory-extension,
   no file writes) — crosses the write-support line phase 3 explicitly
   deferred. See the breakdown below and `CLAUDE.md`'s "Phase 4" section.
+- **Phase 5 — file lifecycle.** `touch`/`rm`, rounding out phase 4's
+  directory-only write support with files - still no way to write actual
+  *content* into a file (every created file is zero bytes), just
+  create/delete. Caught and fixed a latent bug in `Fs::find` before it
+  could be hit by testing (a cluster-`0` substitution meant for `..`
+  directory entries would have wrongly applied to a zero-byte file's
+  legitimate cluster-`0` state too). See `CLAUDE.md`'s "Phase 5" section.
 
 ## Phase 3 — a fully functional shell with disk commands (done)
 
@@ -205,16 +212,52 @@ the full write surface (`rm`/`touch`/`cp`/`mv`/redirection) at once.
   `mkdir`'s cluster allocation, check-everything-before-writing-anything
   for `rmdir`).
 
+## Phase 5 — file lifecycle: `touch`/`rm` (done)
+
+**The goal:** round out phase 4's directory-only write support with the
+file equivalent — create and remove files, not just directories.
+
+- `Fs::touch` turned out simpler than `Fs::mkdir`: a real FAT32 empty
+  file needs no allocated cluster at all (a directory entry with
+  starting cluster `0` and size `0` is a valid empty file per spec), so
+  it's just one `insert_dir_entry` call, no `find_free_cluster`/
+  `zero_cluster`/`.`/`..` writes. Succeeds as a no-op if the file already
+  exists (no RTC to update a modification time with, so "no-op" is the
+  honest approximation of real `touch`'s behavior there).
+- `Fs::rm` mirrors `Fs::rmdir`'s shape, plus one thing `rmdir` never
+  needed: freeing the target's entire cluster chain (a loop over
+  `next_cluster`/`write_fat_entry`) before freeing its directory entry -
+  a no-op for an empty file, but real for anything with content once a
+  future "write file contents" syscall exists.
+- Two new syscalls, `fs_touch`/`fs_rm` (11/12, path pointer/length only),
+  and matching `touch`/`rm` shell builtins.
+- **A latent bug caught by reasoning, not by testing:** `Fs::find`'s
+  cluster-`0`-means-root substitution (from phase 3c) applied to *every*
+  resolved entry, not just directories - harmless before this milestone
+  (nothing but a `..` entry ever had cluster `0`), but `touch` was about
+  to make "cluster `0`, and it's a file" common. Fixed by gating the
+  substitution on `is_dir` before writing any test that could have hit
+  it. See `CLAUDE.md`'s "Phase 5" section for the full story.
+- **Still no way to write content into a file** - `touch` only ever
+  produces zero-byte files. `cp`/output redirection need a real
+  "write file contents" syscall this project doesn't have yet.
+- Confirmed working end to end against the real `esp.img`, including the
+  same reboot-and-remount persistence check as phase 4, `rm`/`rmdir`
+  correctly refusing each other's target (a directory vs. a file), and
+  no corruption of pre-existing files.
+
 ## Parking lot (known future work, not yet sequenced)
 
 Pulled from `docs/processes.md`'s "known rough edges" and `CLAUDE.md`'s
 running "next milestone" notes — real gaps, just not phase 3's problem:
 
-- **The rest of write support** — `touch`/`rm` (file creation/deletion),
-  `cp`/`mv`, output redirection (`>`/`>>`), and lifting `mkdir`'s
-  no-directory-extension limitation (a full parent directory currently
-  makes `mkdir` fail rather than growing it). Phase 4 deliberately did
-  the narrowest useful slice (empty-directory `mkdir`/`rmdir`) first.
+- **A "write file contents" syscall** - the actual blocker for `cp`,
+  output redirection (`>`/`>>`), and anything else that needs a file to
+  hold more than zero bytes. Every file this kernel can create (`touch`,
+  phase 5) is permanently empty without this.
+- **Lifting `mkdir`'s no-directory-extension limitation** - a full
+  parent directory currently makes `mkdir` fail rather than growing it.
+- `mv`/rename support.
 - ~~A shared syscall-ABI crate~~ — done (`syscall-abi/`, depended on by
   both `kernel/src/syscall.rs` and every userland program).
 - A real relocating loader (ELF + relocation processing) — would also

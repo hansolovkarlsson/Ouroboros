@@ -162,9 +162,11 @@ the way hand-duplicated numbers did before this crate existed.
 | 8 | `fs_read_file` | path ptr, path len, buf ptr, buf len | the file's real size (may exceed `buf`'s length — compare to detect truncation), `NO_FS`, or `FS_ERROR` | |
 | 9 | `fs_mkdir` | path ptr, path len | `0`, `NO_FS`, or `FS_ERROR` | Creates an empty directory. Every non-`NO_FS` failure reason (already exists, invalid name, parent missing, disk full, ...) still collapses to the same `FS_ERROR` |
 | 10 | `fs_rmdir` | path ptr, path len | `0`, `NO_FS`, or `FS_ERROR` | Removes an empty directory. Same collapsed-error contract as `fs_mkdir` |
+| 11 | `fs_touch` | path ptr, path len | `0`, `NO_FS`, or `FS_ERROR` | Creates an empty (zero-byte) file, or succeeds as a no-op if one already exists there. Same collapsed-error contract as `fs_mkdir` |
+| 12 | `fs_rm` | path ptr, path len | `0`, `NO_FS`, or `FS_ERROR` | Removes a file (not a directory — use `fs_rmdir` for those). Same collapsed-error contract as `fs_mkdir` |
 | other | — | — | `u64::MAX` | Logged as unknown |
 
-All four `fs_*` syscalls share two distinct failure sentinels, not one:
+All six `fs_*` syscalls share two distinct failure sentinels, not one:
 `FS_ERROR` (`u64::MAX`) for "the filesystem is mounted but this operation
 failed" (not found, already exists, bad name, disk full, ...), and `NO_FS`
 (`u64::MAX - 1`) specifically for "there's no mounted filesystem at all"
@@ -173,12 +175,12 @@ Added after real user confusion: without the split, every disk command
 failing on `make run` looked identical to a genuinely broken path, and the
 actual cause was only ever visible in the kernel's own boot log, never to
 the shell itself. `shell/src/main.rs`'s `cmd_ls`/`cmd_cat`/`cmd_cd`/
-`cmd_mkdir`/`cmd_rmdir` all match on the raw return value against both
-sentinels so they can print "no filesystem mounted" instead of a
-command-specific "not found"/"failed" message when that's the real cause.
-Safe to keep numerically distinct from any real success value: byte
-counts and file sizes returned on success are always far below
-`u64::MAX - 1`.
+`cmd_mkdir`/`cmd_rmdir`/`cmd_touch`/`cmd_rm` all match on the raw return
+value against both sentinels so they can print "no filesystem mounted"
+instead of a command-specific "not found"/"failed" message when that's
+the real cause. Safe to keep numerically distinct from any real success
+value: byte counts and file sizes returned on success are always far
+below `u64::MAX - 1`.
 
 The `syscall-abi` crate only covers the numbers/sentinels themselves, not
 argument validation or per-error-reason detail — see

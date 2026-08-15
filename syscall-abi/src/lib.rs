@@ -71,6 +71,17 @@ pub const FS_MKDIR: u64 = 9;
 /// Removes an empty directory.
 pub const FS_RMDIR: u64 = 10;
 
+/// `(path ptr, path len)` -> `0` on success, [`NO_FS`], or [`FS_ERROR`].
+/// Creates an empty (zero-byte) file, or succeeds as a no-op if a file
+/// already exists there (there's no RTC to update a modification time
+/// with, so "no-op" is the closest honest approximation of real
+/// `touch`'s behavior on an existing file).
+pub const FS_TOUCH: u64 = 11;
+
+/// `(path ptr, path len)` -> `0` on success, [`NO_FS`], or [`FS_ERROR`].
+/// Removes a file (not a directory - use [`FS_RMDIR`] for those).
+pub const FS_RM: u64 = 12;
+
 /// Sentinel `try_read_char` returns when no byte is waiting - out of
 /// range for any real byte (0-255), so callers can tell the two apart
 /// with a single comparison.

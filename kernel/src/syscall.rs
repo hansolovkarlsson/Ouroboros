@@ -153,14 +153,39 @@ fn fs_rmdir(path: &str) -> u64 {
     }
 }
 
+/// Creates an empty file at `path`, or succeeds as a no-op if a file
+/// already exists there (see [`fat32::Fs::touch`]). Same `NO_FS`/
+/// `FS_ERROR` contract as [`fs_mkdir`].
+fn fs_touch(path: &str) -> u64 {
+    let Some(fs) = (unsafe { &mut *FS.0.get() }) else {
+        return NO_FS;
+    };
+    match fs.touch(path) {
+        Ok(()) => 0,
+        Err(_) => FS_ERROR,
+    }
+}
+
+/// Removes the file at `path`. Same `NO_FS`/`FS_ERROR` contract as
+/// [`fs_mkdir`].
+fn fs_rm(path: &str) -> u64 {
+    let Some(fs) = (unsafe { &mut *FS.0.get() }) else {
+        return NO_FS;
+    };
+    match fs.rm(path) {
+        Ok(()) => 0,
+        Err(_) => FS_ERROR,
+    }
+}
+
 /// Called from the exception vector's SVC trampoline (`exceptions.rs`)
 /// with the syscall number (from x8) and up to 4 arguments (from x0-x3),
 /// running at EL1 with the kernel's own stack and every privilege EL0
 /// lacks - the entire reason this indirection exists. Its return value
 /// becomes EL0's new x0 after `eret`.
 ///
-/// Ten syscalls now (`shell_input`, an eleventh by original numbering, was
-/// removed - see below).
+/// Twelve syscalls now (`shell_input`, a thirteenth by original
+/// numbering, was removed - see below).
 /// `double`/`print` were deliberately chained by the original single-task
 /// demo (double's return value fed straight into print's argument) to
 /// prove a return value survives the trampoline intact; `report` is what
@@ -186,6 +211,8 @@ fn fs_rmdir(path: &str) -> u64 {
 /// `exceptions.rs`'s). `fs_mkdir`/`fs_rmdir` (9/10) are the first write
 /// support this kernel has ever exposed to userland - see
 /// `fat32.rs`/`virtio_blk.rs` for the on-disk write path underneath them.
+/// `fs_touch`/`fs_rm` (11/12) round out phase 5's file create/delete,
+/// reusing the same on-disk write primitives `fs_mkdir`/`fs_rmdir` do.
 /// Match arms below use the `syscall_abi` constants rather than bare
 /// numbers, so this table and the userland caller can never silently
 /// disagree about what number means what.
@@ -262,6 +289,24 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
             let path = unsafe { core::slice::from_raw_parts(arg0 as *const u8, arg1 as usize) };
             let Ok(path) = core::str::from_utf8(path) else { return FS_ERROR };
             fs_rmdir(path)
+        }
+        syscall_abi::FS_TOUCH => {
+            if !valid_user_range(arg0, arg1) {
+                return FS_ERROR;
+            }
+            // SAFETY: same as FS_MKDIR.
+            let path = unsafe { core::slice::from_raw_parts(arg0 as *const u8, arg1 as usize) };
+            let Ok(path) = core::str::from_utf8(path) else { return FS_ERROR };
+            fs_touch(path)
+        }
+        syscall_abi::FS_RM => {
+            if !valid_user_range(arg0, arg1) {
+                return FS_ERROR;
+            }
+            // SAFETY: same as FS_MKDIR.
+            let path = unsafe { core::slice::from_raw_parts(arg0 as *const u8, arg1 as usize) };
+            let Ok(path) = core::str::from_utf8(path) else { return FS_ERROR };
+            fs_rm(path)
         }
         _ => {
             console::println!("Ouroboros kernel: syscall from EL0: unknown number={number}");

@@ -1106,6 +1106,88 @@ refactor, with zero aborts in a `-d int` cross-check - this was a pure
 internal restructuring, and testing confirmed it changed no observable
 behavior.
 
+### Phase 5: `touch`/`rm`, and a latent bug the new feature would have hit immediately
+
+`mkdir`/`rmdir` (phase 4) proved directory write support; this milestone
+rounds out file lifecycle with `touch` (create an empty file, or no-op if
+one already exists) and `rm` (remove a file). Deliberately still narrow -
+no way to *write content* into a file, since that needs a syscall this
+project doesn't have yet (an `fs_write_file`/append primitive) - so every
+file this kernel can create is, and stays, zero bytes until that lands.
+
+**`touch` turned out to be simpler than `mkdir`, not harder.** A real
+FAT32 empty file needs no cluster allocated at all - a directory entry
+with starting cluster `0` and size `0` *is* a valid empty file, per spec.
+So `Fs::touch` skips every step `mkdir` needs beyond the last one: no
+`find_free_cluster`, no `zero_cluster`, no `.`/`..` writes - just one
+`insert_dir_entry` call with cluster `0`, size `0`, and attribute byte
+`0` (no directory bit). `Fs::rm` mirrors `Fs::rmdir`'s shape (walk to the
+target, then to its parent to locate and free its own entry), with one
+addition `rmdir` never needed: freeing a file's *entire* cluster chain
+first (a loop over `next_cluster`/`write_fat_entry`, a no-op for an
+empty file whose cluster is `0`) rather than just one cluster.
+
+**A latent bug in `Fs::find`, caught by reasoning through `touch` before
+writing any test, not by a crash:** the cluster-`0`-means-root
+substitution from phase 3c (see that section above) applied to *every*
+resolved path component, not just directories. That was harmless before
+this milestone, because nothing this kernel had ever created could
+legitimately have cluster `0` other than a `..` entry pointing at root -
+but `touch` was about to make "cluster `0`, and it's a *file*, not
+root" a real, common case. Without a fix, resolving a path to a freshly
+`touch`ed empty file would have silently rewritten its cluster to
+`self.root_cluster`, and `rm`-ing it would have tried to free *root's*
+cluster in the FAT - corrupting the entire filesystem's root directory,
+not just failing cleanly. Fixed by gating the substitution on
+`current.is_dir`: every `..` entry is definitionally a directory, so the
+original `cd ..` fix is unaffected, while a file's legitimate cluster-`0`
+now passes through unmodified. This was caught during design, before any
+test could have hit it - included here specifically so it isn't
+mistaken for something "confirmed by testing" the way every other bug in
+this file is; it wasn't, it was caught by tracing through what `find`
+would do to a value it had never had to handle before.
+
+**Two new syscalls, `fs_touch`/`fs_rm` (11/12)**, continuing past the
+mkdir/rmdir pair with no gap - the gap-at-5 discipline only applies to
+the one syscall (`shell_input`) that was actually removed, not to every
+future addition. Both take just a path pointer/length, same shape as
+`fs_mkdir`/`fs_rmdir`, and share the same `NO_FS`/`FS_ERROR` sentinel
+split. `shell/src/main.rs` gained `cmd_touch`/`cmd_rm` following the
+exact shape of `cmd_mkdir`/`cmd_rmdir`.
+
+**Confirmed working end to end via the same piped-stdin QEMU technique
+as every prior interactive milestone, against the real `esp.img`:**
+`touch newfile` → `ls` (shows `NEWFILE`, 0 bytes) → `cat newfile` (empty,
+as expected) → `touch newfile` again (silent no-op, not an error) →
+`rm newfile` → `ls` (gone) → `rm newfile` again (correctly `no such
+file`); `touch EFI` and `rm EFI` (an existing directory) both correctly
+rejected rather than corrupting anything; `touch /nope/newfile` (missing
+parent) correctly rejected; `touch`/`rm` inside a subdirectory
+(`mkdir sub` → `touch sub/inner` → `cat sub/inner` → `rm sub/inner`)
+round-tripped correctly, including confirming `rm` refuses a directory
+(`rm sub` failed, `rmdir sub` succeeded once actually empty) - proving
+`rm`/`rmdir` stay properly distinct rather than one silently accepting
+the other's target. **Persistence confirmed by an actual reboot, not
+just a live check**: `touch persist`, killed QEMU, booted a fresh
+instance against the same `esp.img`, `persist` was still there via `ls`,
+removed it, confirmed gone. Pre-existing files (`INIT.CFG`,
+`BOOTAA64.EFI`, `SH.BIN`) re-read afterward and unchanged. `make run`
+(FAT16, no mount) still degrades gracefully: `touch`/`rm` report the
+shared "no filesystem mounted" message rather than crashing. Zero aborts
+(`Data Abort`/`Prefetch Abort`/`Undefined Instruction`) in `-d int`
+cross-checks across all four QEMU sessions (the main sequence, the
+pre-existing-file check, the reboot-persistence check, and the FAT16
+degradation check).
+
+**Still coarse, worth knowing before building on this:** no way to write
+actual content into a file - `touch` only ever produces zero-byte files,
+and there's no `cp`/output redirection to change that; `rm`'s
+per-failure detail collapses to the same one `FS_ERROR` sentinel every
+other `fs_*` syscall does (can't tell "not found" from "is a directory"
+without matching error text); the conservative 8.3 short-name character
+set (from `mkdir`) applies here too, so some technically-valid names
+still can't be created by this kernel.
+
 ### Parallels disk attachment: a real trap, not a hunch
 
 Getting `esp.img` to actually boot in Parallels took a few wrong turns worth
@@ -1154,24 +1236,26 @@ working interactive echo shell, a shell that's a real disk-loaded,
 configuration-selected userland program, a working runtime virtio-blk
 driver (read and write), a working runtime FAT32 reader, real disk
 commands (`ls`/`cat`/`cd`/`pwd`), and now real filesystem write support
-(`mkdir`/`rmdir` - see "Phase 4" above, alongside the earlier `help`/
-`echo`/`uptime`/`clear` - and `docs/architecture.md`/`docs/processes.md`/
+for both directories and files (`mkdir`/`rmdir`/`touch`/`rm` - see
+"Phase 4"/"Phase 5" above, alongside the earlier `help`/`echo`/`uptime`/
+`clear` - and `docs/architecture.md`/`docs/processes.md`/
 `docs/roadmap.md` for the reference write-up) are all done and confirmed
 working, not just structurally plausible.
 
 **Phase 3, and the entire original "get to a shell" plan, are done - and
-phase 4 (write support) has since gone further than that plan called
+phases 4/5 (write support) have since gone further than that plan called
 for.** Phase 1 (accept input, echo it back), phase 2 (real commands backed
 by real kernel state), and phase 3 (disk commands - `ls`/`cat`/`cd`/`pwd`,
 and the full runtime storage stack underneath them: virtio-blk, FAT32, new
-syscalls) are all confirmed working end to end - and `mkdir`/`rmdir` (see
-"Phase 4" above) crossed the write-support line `docs/roadmap.md` had
-deliberately drawn at the end of phase 3, for the narrowest useful case
-(empty directories only). There is no more numbered phase queued up - what
-comes next is an open choice among the gaps below, not a predetermined
-next step. This section (and the "gaps" paragraph below it) still tracks
-what's true right now; `docs/roadmap.md` is the one to check for a
-longer-range view.
+syscalls) are all confirmed working end to end - and `mkdir`/`rmdir`
+(phase 4) then `touch`/`rm` (phase 5, see above) crossed and then
+extended the write-support line `docs/roadmap.md` had deliberately
+drawn at the end of phase 3, for the narrowest useful cases each time
+(empty directories, then zero-byte files). There is no more numbered
+phase queued up - what comes next is an open choice among the gaps
+below, not a predetermined next step. This section (and the "gaps"
+paragraph below it) still tracks what's true right now; `docs/roadmap.md`
+is the one to check for a longer-range view.
 
 What's still coarse and worth knowing about before building on any of
 this — kept current in `docs/processes.md`'s "known rough edges" rather
@@ -1193,22 +1277,24 @@ no long-filename support in general (this project's own ESP directory was
 renamed - `\EFI\OUROBORO\`, 8 characters, not `\EFI\OUROBOROS\` -
 specifically to stay reachable without needing it, but any *other* 9+
 character name still isn't), only looks at the first FAT32-typed MBR
-partition, and can now only create/remove *directories* - no file
-creation/deletion (`touch`/`rm`), no `cp`/`mv`, no directory-extension
-(a full parent directory makes `mkdir` fail rather than growing it), and
-every write-path error collapses to one sentinel at the syscall boundary
-so userland can't distinguish *why* an `mkdir`/`rmdir` failed (see "Phase
-4" above); disk-command pointer/length arguments are trusted, not
-validated against the caller's actual mapped region (fine with exactly
-one, currently-trusted userland program). Also still true from before
-this milestone: strict round-robin only, no priorities or blocking;
-FP/SIMD state still isn't saved anywhere (`exceptions.rs`'s `Context`).
+partition, and can now create/remove both directories and files but
+still has no way to *write content into a file* - `touch` only ever
+produces zero-byte files, so there's no `cp` or output redirection yet,
+no `mv`, no directory-extension (a full parent directory makes `mkdir`
+fail rather than growing it), and every write-path error collapses to
+one sentinel at the syscall boundary so userland can't distinguish *why*
+an operation failed (see "Phase 4"/"Phase 5" above); disk-command
+pointer/length arguments are trusted, not validated against the caller's
+actual mapped region (fine with exactly one, currently-trusted userland
+program). Also still true from before this milestone: strict round-robin
+only, no priorities or blocking; FP/SIMD state still isn't saved
+anywhere (`exceptions.rs`'s `Context`).
 
-Reasonable next steps from here: more write support (`touch`/`rm`/`cp`/
-output redirection, and lifting `mkdir`'s no-directory-extension
-limitation); a real relocating loader (ELF + relocation processing),
-which would also lift both the `core::fmt` and literal-comparison
-restrictions; blocking/waiting
+Reasonable next steps from here: a real "write file contents" syscall
+(needed before `cp`/output redirection can mean anything - right now
+every file this kernel creates is permanently zero bytes); a real
+relocating loader (ELF + relocation processing), which would also lift
+both the `core::fmt` and literal-comparison restrictions; blocking/waiting
 primitives so tasks can do more than an unconditional round-robin `wfe`
 loop; or finally circling back to Parallels virtio-console now that the
 kernel has enough infrastructure (MMU, exceptions, EL0, real task
@@ -1276,15 +1362,15 @@ kernel/
   src/gic.rs         GICv2 driver (QEMU virt addresses, confirmed via devicetree dump)
   src/timer.rs       ARM generic timer (non-secure EL1 physical timer, PPI 14 / GIC INTID 30), TICK_INTERVAL_MS
   src/loader.rs      reads INIT.CFG + a program off the ESP during boot services, into a 2MB-aligned EL0-accessible region - see docs/processes.md
-  src/syscall.rs     svc syscall dispatch table (print/double/report/try_read_char/putc/get_ticks/fs_list_dir/fs_read_file/fs_mkdir/fs_rmdir, gap at 5) - confirmed working end to end, see above
+  src/syscall.rs     svc syscall dispatch table (print/double/report/try_read_char/putc/get_ticks/fs_list_dir/fs_read_file/fs_mkdir/fs_rmdir/fs_touch/fs_rm, gap at 5) - confirmed working end to end, see above
   src/tasks.rs       task 0 (loaded program) + task 1 (idle) + the round-robin scheduler (Context save/restore in the tick path) - confirmed alternating, see above
   src/virtio_mmio.rs virtio-mmio transport: 32-slot device discovery, modern (non-legacy) register layout, addresses confirmed via devicetree dump
   src/virtio_blk.rs  runtime virtio-blk driver: feature negotiation, one virtqueue, synchronous polling sector reads and writes - phase 3a (reads)/phase 4 (writes), confirmed working, see above
-  src/fat32.rs       hand-rolled FAT32 over virtio_blk::Device: MBR, BPB, FAT cluster chains, 8.3-only directory entries, mkdir/rmdir write support - phase 3b (reads)/phase 4 (writes), confirmed working, see above
+  src/fat32.rs       hand-rolled FAT32 over virtio_blk::Device: MBR, BPB, FAT cluster chains, 8.3-only directory entries, mkdir/rmdir/touch/rm write support - phase 3b (reads)/phase 4-5 (writes), confirmed working, see above
 
 shell/               userland default shell - a separate crate, built for aarch64-unknown-none, loaded from disk (not compiled into the kernel)
   linker.ld          flat-binary linker script: entry at offset 0, no .bss/.data (see docs/processes.md)
-  src/main.rs        line editor + command dispatch (help/echo/uptime/clear/ls/cat/cd/pwd/mkdir/rmdir), running as real EL0 userland code - see docs/processes.md
+  src/main.rs        line editor + command dispatch (help/echo/uptime/clear/ls/cat/cd/pwd/mkdir/rmdir/touch/rm), running as real EL0 userland code - see docs/processes.md
 
 syscall-abi/         shared syscall ABI crate - syscall numbers + sentinel values (NO_CHAR/FS_ERROR/NO_FS), depended on directly by both kernel and shell, no more hand-duplicated numbers - see docs/processes.md
   src/lib.rs         #![no_std], no logic, just pub consts - safe under either target since every value is a scalar inlined at the use site, not a pointer needing relocation

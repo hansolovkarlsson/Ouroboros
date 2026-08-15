@@ -402,7 +402,14 @@ impl Fs {
                 }
             })?;
             current = found.ok_or(Error::NotFound)?;
-            if current.cluster == 0 {
+            // Only a *directory* entry's cluster `0` means "this is
+            // root" (see this function's doc comment above) - an empty
+            // *file* (phase 5's `touch`) legitimately has cluster `0`
+            // too, meaning "no clusters allocated," and must not be
+            // rewritten to point at root's cluster instead. Gating on
+            // `is_dir` doesn't change the `..`-resolution fix above:
+            // every `..` entry is, definitionally, a directory.
+            if current.is_dir && current.cluster == 0 {
                 current.cluster = self.root_cluster;
             }
         }
@@ -543,6 +550,101 @@ impl Fs {
         }
 
         self.write_fat_entry(target.cluster, 0)?;
+
+        let parent = self.find(parent_path)?;
+        let mut location: Option<(u64, usize)> = None;
+        self.walk_dir_with_location(parent.cluster, |entry, lba, offset| {
+            if entry.name().eq_ignore_ascii_case(name) {
+                location = Some((lba, offset));
+                true
+            } else {
+                false
+            }
+        })?;
+        let (lba, offset) = location.ok_or(Error::NotFound)?;
+
+        let mut sector = [0u8; SECTOR_SIZE];
+        // SAFETY: `self.device` was initialized before `mount` returned.
+        unsafe { self.device.read_sector(lba, &mut sector) }?;
+        sector[offset] = DIR_ENTRY_FREE;
+        // SAFETY: same as above.
+        unsafe { self.device.write_sector(lba, &sector) }?;
+        Ok(())
+    }
+
+    /// Creates an empty (zero-byte) file at `path`, or - unlike
+    /// [`mkdir`](Self::mkdir) - succeeds as a no-op if a file already
+    /// exists there. Real `touch` normally updates a file's modification
+    /// time on an existing file; this kernel has no RTC (see
+    /// `write_raw_entry`'s doc comment) and nothing to update, so
+    /// "succeed without changing anything" is the closest honest
+    /// approximation. Touching an existing *directory* is rejected
+    /// (`Error::NotAFile`) rather than silently doing nothing, since
+    /// unlike a real timestamp update there's no way to interpret that
+    /// as harmless.
+    ///
+    /// A zero-byte file needs no cluster allocated at all - real FAT32
+    /// represents "empty file" as a directory entry with starting
+    /// cluster `0` and size `0`, which is why this is simpler than
+    /// `mkdir`: no `find_free_cluster`/`zero_cluster`/`.`/`..` writes,
+    /// just one new directory entry. [`Fs::find`] has a matching fix
+    /// (see its doc comment) so a cluster-`0` *file* isn't confused with
+    /// the cluster-`0`-means-root convention that applies only to
+    /// directories.
+    pub fn touch(&mut self, path: &str) -> Result<(), Error> {
+        let (parent_path, name) = split_parent(path).ok_or(Error::InvalidName)?;
+        let short_name = make_short_name(name).ok_or(Error::InvalidName)?;
+
+        let parent = self.find(parent_path)?;
+        if !parent.is_dir {
+            return Err(Error::NotADirectory);
+        }
+
+        let mut existing: Option<DirEntry> = None;
+        self.walk_dir(parent.cluster, |entry| {
+            if entry.name().eq_ignore_ascii_case(name) {
+                existing = Some(*entry);
+                true
+            } else {
+                false
+            }
+        })?;
+        if let Some(entry) = existing {
+            return if entry.is_dir { Err(Error::NotAFile) } else { Ok(()) };
+        }
+
+        // Attribute byte `0` - no directory bit, no volume-ID bit, just
+        // an ordinary file (see `parse`'s `ATTR_DIRECTORY` check: this
+        // makes `is_dir` false, which is all that matters here).
+        self.insert_dir_entry(parent.cluster, &short_name, 0, 0, 0)
+    }
+
+    /// Removes the file at `path`. Rejects directories with
+    /// [`Error::NotAFile`](Error::NotAFile), matching `read_file`'s
+    /// existing convention that this error means "a directory where a
+    /// file was expected" - use [`rmdir`](Self::rmdir) for those
+    /// instead. Frees the file's entire
+    /// cluster chain in the FAT (a no-op for an empty, `touch`-created
+    /// file, which never had one), then marks its own directory entry
+    /// [`DIR_ENTRY_FREE`].
+    pub fn rm(&mut self, path: &str) -> Result<(), Error> {
+        let (parent_path, name) = split_parent(path).ok_or(Error::InvalidName)?;
+        let target = self.find(path)?;
+        if target.is_dir {
+            return Err(Error::NotAFile);
+        }
+
+        if target.cluster != 0 {
+            let mut cluster = target.cluster;
+            loop {
+                let next = self.next_cluster(cluster)?;
+                self.write_fat_entry(cluster, 0)?;
+                match next {
+                    Some(n) => cluster = n,
+                    None => break,
+                }
+            }
+        }
 
         let parent = self.find(parent_path)?;
         let mut location: Option<(u64, usize)> = None;
