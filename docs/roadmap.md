@@ -98,29 +98,21 @@ phase is really three dependent stages:
   no longer valid, and every `no_std` FAT crate surveyed assumes an
   allocator is reachable somewhere in its stack. A hard constraint, not
   just precedent.
-- **A second real surprise:** this project's own `\EFI\OUROBOROS\`
-  directory name doesn't fit FAT's 8.3 short-name limit (9 characters) —
-  real FAT32 formatters handle that with a long-filename (LFN) entry this
-  reader doesn't parse yet. Left as a documented gap rather than fixed
-  preemptively; see `kernel/src/fat32.rs`'s module doc comment and the
-  "reasonable next steps" note below on what to do about it before 3c
-  needs to navigate there.
+- **A second real surprise, since resolved:** this project's own
+  `\EFI\OUROBOROS\` directory name didn't fit FAT's 8.3 short-name limit
+  (9 characters) — real FAT32 formatters handle that with a long-filename
+  (LFN) entry this reader doesn't parse. Resolved at the start of 3c by
+  renaming the directory to `\EFI\OUROBORO\` (8 characters) rather than
+  implementing LFN parsing — this project controls the name, so once 3c's
+  actual need (the shell navigating there) was concrete, renaming was the
+  cheaper, more honest fix. `fat32.rs` still has no LFN support in
+  general; any *other* 9+ character name is still unreachable.
 - Confirmed working end to end: lists `\EFI\BOOT`, reads `BOOTAA64.EFI`
   back (a real multi-cluster file, not a single-block special case) and
   checks its exact size and PE header magic against the real built
   binary. See `kernel/src/fat32.rs`.
 
 ### 3c. New syscalls + the commands themselves
-
-**One thing to resolve before this starts:** `\EFI\OUROBOROS\` (holding
-the shell binary and `INIT.CFG`) won't be reachable by name once `cd`/`ls`
-are real, since `fat32.rs` doesn't parse the long-filename entry real FAT32
-formatters write for a 9-character name — it only sees the mangled 8.3
-alias (`OUROBO~2`). Two ways out: rename the directory to fit 8.3 (cheap,
-this project controls the name, but touches an already-documented,
-widely-referenced path), or implement LFN parsing (more general, more
-code, benefits any future file with a long name, not just this one).
-Worth deciding with 3c's actual UX in mind, not before.
 
 File I/O needs to go through the kernel the same way console I/O does —
 userland has no direct hardware access. Reasonable syscall shape:

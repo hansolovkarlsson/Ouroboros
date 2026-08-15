@@ -210,15 +210,15 @@ fn probe_virtio_blk() {
 }
 
 /// Phase 3b (docs/roadmap.md): mounts the FAT32 partition on `device`,
-/// lists `\EFI\BOOT`, and reads `BOOTAA64.EFI` back - proof the reader
-/// actually walks real directory/FAT/cluster-chain structures, not just
-/// that mounting didn't error. `\EFI\BOOT\BOOTAA64.EFI` specifically
-/// (not `\EFI\OUROBOROS\...`) because every path component fits an 8.3
-/// short name cleanly - `OUROBOROS` itself doesn't (9 characters), so it
-/// gets a mangled short name (`OUROBO~2`) with the real name stored in
-/// long-filename (LFN) entries this reader deliberately doesn't parse
-/// yet (see fat32.rs's module doc comment) - a real, confirmed gap this
-/// probe sidesteps rather than hides. Only works when booted via
+/// lists `\EFI\BOOT`, and reads `BOOTAA64.EFI` and
+/// `\EFI\OUROBORO\INIT.CFG` back - proof the reader actually walks real
+/// directory/FAT/cluster-chain structures, not just that mounting didn't
+/// error. `OUROBORO`, not `OUROBOROS` (see `loader.rs`'s `CONFIG_PATH`
+/// doc comment): every path component used here fits an 8.3 short name
+/// cleanly, which matters because this reader doesn't parse long-filename
+/// (LFN) entries yet (see fat32.rs's module doc comment) - a real,
+/// confirmed gap this project sidestepped by renaming its own directory
+/// rather than parsing around it. Only works when booted via
 /// `make run-image` (real FAT32) - see fat32.rs's module doc comment for
 /// why `make run`'s vvfat (FAT16) can't satisfy this.
 fn probe_fat32(device: virtio_blk::Device) {
@@ -256,6 +256,21 @@ fn probe_fat32(device: virtio_blk::Device) {
             );
         }
         Err(e) => console::println!("Ouroboros kernel: FAT32 read BOOTAA64.EFI failed ({e})"),
+    }
+
+    // The same file loader.rs read via UEFI boot services earlier this
+    // boot (see the "loaded shell program" log line above) - reading it
+    // again here, independently, via the runtime driver instead, and
+    // getting the same content back is a real cross-check, not a
+    // duplicate demo.
+    let mut cfg = [0u8; 64];
+    match fs.read_file("/EFI/OUROBORO/INIT.CFG", &mut cfg) {
+        Ok(size) => {
+            let n = (size as usize).min(cfg.len());
+            let text = core::str::from_utf8(&cfg[..n]).unwrap_or("<not utf8>");
+            console::println!("Ouroboros kernel: FAT32 read INIT.CFG ({size} bytes): {text}");
+        }
+        Err(e) => console::println!("Ouroboros kernel: FAT32 read INIT.CFG failed ({e})"),
     }
 }
 

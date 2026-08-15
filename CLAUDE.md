@@ -791,6 +791,18 @@ are known, this was left as a documented, confirmed gap - verification
 instead used `\EFI\BOOT\BOOTAA64.EFI`, where every path component already
 fits 8.3 cleanly.
 
+**Resolved at the start of phase 3c: renamed, not parsed around.**
+`\EFI\OUROBOROS\` became `\EFI\OUROBORO\` (8 characters) - `loader.rs`'s
+`CONFIG_PATH`, the Makefile's `esp` target, and every doc reference
+updated together. This project controls the name, so once phase 3c's
+actual need (the shell's own `cd`/`ls` navigating there) was concrete,
+renaming was clearly cheaper and more honest than implementing LFN
+parsing to accommodate one avoidable 9-letter directory. Confirmed
+working: the runtime FAT32 reader now reads `\EFI\OUROBORO\INIT.CFG`
+successfully and gets back the same content `loader.rs` read via UEFI
+boot services earlier the same boot - two independent code paths, same
+file, same bytes.
+
 **Confirmed working end to end against real content, not just "mount
 succeeded":** listing `\EFI\BOOT` correctly showed `.`, `..`, and
 `BOOTAA64.EFI` with its exact real size; reading `BOOTAA64.EFI` back
@@ -886,29 +898,28 @@ program, loaded once, at boot, with no `exec()`; a fixed 2-task scheduler
 static mutable state at all; a fixed, unguarded 8KB stack per program; no
 ELF, no relocations, no dynamic linking (the `core::fmt` gap and the
 lack of ELF/relocations are the same underlying limitation, not two
-separate ones); `fat32.rs` has no long-filename support (this project's
-own `\EFI\OUROBOROS\` doesn't fit 8.3 - see "Phase 3b" above), is
-read-only, and only looks at the first FAT32-typed MBR partition. Also
-still true from before this milestone: strict round-robin only, no
-priorities or blocking; FP/SIMD state still isn't saved anywhere
-(`exceptions.rs`'s `Context`).
+separate ones); `fat32.rs` has no long-filename support in general (this
+project's own ESP directory was renamed - `\EFI\OUROBORO\`, 8 characters,
+not `\EFI\OUROBOROS\` - specifically to stay reachable without needing
+it, but any *other* 9+ character name still isn't), is read-only, and
+only looks at the first FAT32-typed MBR partition. Also still true from
+before this milestone: strict round-robin only, no priorities or
+blocking; FP/SIMD state still isn't saved anywhere (`exceptions.rs`'s
+`Context`).
 
 Reasonable next steps from here: phase 3c (new syscalls for file I/O, and
 the `ls`/`cat`/`cd`/`pwd` commands themselves - the roadmap's own
-suggested syscall shape is a reasonable starting point); deciding what to
-do about `fat32.rs`'s LFN gap before 3c needs to navigate into
-`\EFI\OUROBOROS\` specifically (rename the directory, since this project
-controls it, vs. implementing LFN parsing); a shared syscall-ABI crate,
-now that there are two independent call sites to keep in sync by hand;
-more commands/builtins, now that the dispatch pattern (tokenize, match,
-call a syscall for real state if needed) is established; a real
-relocating loader (ELF + relocation processing), which would also lift
-the `core::fmt` restriction; blocking/waiting primitives so tasks can do
-more than an unconditional round-robin `wfe` loop; or finally circling
-back to Parallels virtio-console now that the kernel has enough
-infrastructure (MMU, exceptions, EL0, real task switching, real input,
-disk-loaded userland, real runtime storage) to make that work
-meaningfully once it lands.
+suggested syscall shape is a reasonable starting point); a shared
+syscall-ABI crate, now that there are two independent call sites to keep
+in sync by hand; more commands/builtins, now that the dispatch pattern
+(tokenize, match, call a syscall for real state if needed) is
+established; a real relocating loader (ELF + relocation processing),
+which would also lift the `core::fmt` restriction; blocking/waiting
+primitives so tasks can do more than an unconditional round-robin `wfe`
+loop; or finally circling back to Parallels virtio-console now that the
+kernel has enough infrastructure (MMU, exceptions, EL0, real task
+switching, real input, disk-loaded userland, real runtime storage) to
+make that work meaningfully once it lands.
 
 ## Commands
 

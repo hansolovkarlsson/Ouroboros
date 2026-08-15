@@ -262,7 +262,7 @@ impl Fs {
     }
 
     /// Resolves an absolute, `/`-separated path (e.g.
-    /// `/EFI/OUROBOROS/SH.BIN`) to its directory entry, walking one
+    /// `/EFI/OUROBORO/SH.BIN`) to its directory entry, walking one
     /// directory per path component. Matching is case-insensitive, same
     /// as FAT itself.
     fn find(&mut self, path: &str) -> Result<DirEntry, Error> {
