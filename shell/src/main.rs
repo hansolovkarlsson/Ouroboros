@@ -164,7 +164,7 @@ fn run_line(line: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize) {
     let arg = words.next().unwrap_or("");
 
     match command {
-        "help" => print_line("commands: help, echo, uptime, clear, ls, cat, cd, pwd, mkdir, rmdir, touch, rm, write"),
+        "help" => print_line("commands: help, echo, uptime, clear, ls, cat, cd, pwd, mkdir, rmdir, touch, rm, write, cp"),
         "echo" => {
             let mut first = true;
             for word in line.split_whitespace().skip(1) {
@@ -200,6 +200,7 @@ fn run_line(line: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize) {
         "touch" => cmd_touch(arg, cwd, *cwd_len),
         "rm" => cmd_rm(arg, cwd, *cwd_len),
         "write" => cmd_write(line, cwd, *cwd_len),
+        "cp" => cmd_cp(line, cwd, *cwd_len),
         _ => {
             print_str("unknown command: ");
             print_line(command);
@@ -585,6 +586,76 @@ fn cmd_write(line: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize) {
     match fs_write_file(path, &content[..len]) {
         NO_FS => print_no_fs(),
         FS_ERROR => print_line("write: failed (bad name, parent missing, path is a directory, or disk full)"),
+        _ => {}
+    }
+}
+
+/// `cp <src> <dst>` - reads `src`'s entire content into a local buffer,
+/// then writes it to `dst` via [`fs_write_file`] (creating `dst` if it
+/// doesn't exist, replacing it if it does - same semantics as `write`).
+/// Needs no new syscall: this is pure shell-side plumbing over the two
+/// that already exist (`fs_read_file`/`fs_write_file`). The read
+/// completes in full, into this shell's own stack buffer, before the
+/// write ever starts - copying a file onto itself is therefore safe by
+/// construction, not a special case this handles explicitly.
+fn cmd_cp(line: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize) {
+    let mut words = line.split_whitespace();
+    words.next(); // "cp" itself
+    let Some(src_arg) = words.next() else {
+        print_line("cp: missing source file argument");
+        return;
+    };
+    let Some(dst_arg) = words.next() else {
+        print_line("cp: missing destination file argument");
+        return;
+    };
+
+    let mut src_path_buf = [0u8; PATH_SIZE];
+    let Some(src_path_len) = resolve_path(cwd_str(cwd, cwd_len), src_arg, &mut src_path_buf) else {
+        print_line("cp: path too long");
+        return;
+    };
+    let Ok(src_path) = core::str::from_utf8(&src_path_buf[..src_path_len]) else {
+        print_line("cp: path too long");
+        return;
+    };
+
+    let mut content = [0u8; CAT_BUFFER_SIZE];
+    let size = match fs_read_file(src_path, &mut content) {
+        NO_FS => {
+            print_no_fs();
+            return;
+        }
+        FS_ERROR => {
+            print_line("cp: no such source file");
+            return;
+        }
+        n => n,
+    };
+    // Same truncation contract fs_read_file/cat already document: `size`
+    // is the file's *real* size, which may exceed the buffer. Refusing
+    // outright here (rather than silently copying a truncated prefix,
+    // the way `cat` prints one with a notice) matches `cp`'s own
+    // correctness expectation - a partial copy is a wrong copy, not
+    // just an incomplete display.
+    if size as usize > content.len() {
+        print_line("cp: source file too large to copy (exceeds this shell's buffer)");
+        return;
+    }
+
+    let mut dst_path_buf = [0u8; PATH_SIZE];
+    let Some(dst_path_len) = resolve_path(cwd_str(cwd, cwd_len), dst_arg, &mut dst_path_buf) else {
+        print_line("cp: path too long");
+        return;
+    };
+    let Ok(dst_path) = core::str::from_utf8(&dst_path_buf[..dst_path_len]) else {
+        print_line("cp: path too long");
+        return;
+    };
+
+    match fs_write_file(dst_path, &content[..size as usize]) {
+        NO_FS => print_no_fs(),
+        FS_ERROR => print_line("cp: failed (bad name, parent missing, destination is a directory, or disk full)"),
         _ => {}
     }
 }

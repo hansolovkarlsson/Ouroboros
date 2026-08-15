@@ -1249,11 +1249,46 @@ input line, so nothing it creates can ever span more than one FAT32
 cluster on this test image - which means **phase 5's `rm` cluster-chain
 -freeing loop is still logically implemented and reasoned through, but
 still not exercised by an actual multi-cluster test**, since nothing in
-this kernel can yet create a file large enough to need one. No `cp`, no
-output redirection (`>`/`>>`) - both need shell-level plumbing this
-syscall alone doesn't provide (parsing `cmd > file`, or reading one
-file's content back out to hand to another `write_file` call) - see
-`docs/roadmap.md`'s parking lot.
+this kernel can yet create a file large enough to need one. No output
+redirection (`>`/`>>`) yet - needs shell-level parsing this syscall
+alone doesn't provide (splitting `cmd > file` into a command and a
+target) - see `docs/roadmap.md`'s parking lot. (`cp` turned out not to
+need a new syscall at all - see "Phase 7" below.)
+
+### Phase 7: `cp`, pure shell-side plumbing over existing syscalls
+
+`cp <src> <dst>` needed no new syscall and no kernel changes at all -
+the two primitives it composes, `fs_read_file` (already `cat`'s) and
+`fs_write_file` (phase 6), were already there. `cmd_cp` reads `src`'s
+entire content into a local stack buffer, then writes that buffer to
+`dst` - creating it if it doesn't exist, replacing it if it does, same
+semantics as `write`. The one thing worth being precise about: the read
+completes in full before the write ever starts, so copying a file onto
+itself is safe by construction, not something that needed a special
+case.
+
+**A genuinely different judgment call than `cat`'s, made deliberately:**
+`cat` truncates a too-large file and prints a notice, since an
+incomplete *display* is still useful. `cp` refuses outright instead -
+an incomplete *copy* is a wrong copy, not a lesser one, so there's no
+version of "truncate and warn" that's the right default here.
+
+**Confirmed working end to end via the same piped-stdin QEMU technique
+as every prior interactive milestone, against the real `esp.img`:** copy
+to a new destination and to an existing one (overwrite), copy a file
+onto itself (content unchanged, confirming the safe-by-construction
+ordering), copy a real pre-existing file (`INIT.CFG`) to a new name,
+copy into a subdirectory, and the usual error set (missing source,
+destination is a directory, missing destination parent) all correctly
+handled. `make run` (FAT16, no mount) still degrades gracefully. Zero
+aborts in `-d int` cross-checks. No separate reboot-persistence check
+this time - `cp` adds no new on-disk code path, only a new caller of
+`fs_read_file`/`fs_write_file`, both already reboot-tested in their own
+milestones.
+
+**Still coarse:** copy size bounded by the shell's 256-byte read buffer
+(same as `cat`'s); no recursive directory copy, no flags of any kind; no
+`mv`.
 
 ### Parallels disk attachment: a real trap, not a hunch
 
@@ -1303,29 +1338,30 @@ working interactive echo shell, a shell that's a real disk-loaded,
 configuration-selected userland program, a working runtime virtio-blk
 driver (read and write), a working runtime FAT32 reader, real disk
 commands (`ls`/`cat`/`cd`/`pwd`), real filesystem write support for
-directories and files (`mkdir`/`rmdir`/`touch`/`rm`), and now a way to
-put real content into a file (`write` - see "Phase 6" above, alongside
-the earlier `help`/`echo`/`uptime`/`clear` - and
-`docs/architecture.md`/`docs/processes.md`/`docs/CHANGELOG.md` for the
-reference write-up) are all done and confirmed working, not just
-structurally plausible.
+directories and files (`mkdir`/`rmdir`/`touch`/`rm`/`write`), and now
+`cp` (see "Phase 7" above, alongside the earlier `help`/`echo`/`uptime`/
+`clear` - and `docs/architecture.md`/`docs/processes.md`/
+`docs/CHANGELOG.md` for the reference write-up) are all done and
+confirmed working, not just structurally plausible.
 
 **Phase 3, and the entire original "get to a shell" plan, are done - and
-phases 4/5/6 (write support) have since gone further than that plan
+phases 4/5/6/7 (write support) have since gone further than that plan
 called for.** Phase 1 (accept input, echo it back), phase 2 (real
 commands backed by real kernel state), and phase 3 (disk commands -
 `ls`/`cat`/`cd`/`pwd`, and the full runtime storage stack underneath
 them: virtio-blk, FAT32, new syscalls) are all confirmed working end to
-end - and `mkdir`/`rmdir` (phase 4), `touch`/`rm` (phase 5), then
-`write` (phase 6, see above) crossed and then repeatedly extended the
-write-support line phase 3 had deliberately drawn (see
+end - and `mkdir`/`rmdir` (phase 4), `touch`/`rm` (phase 5), `write`
+(phase 6), then `cp` (phase 7, see above - no new syscall needed, pure
+composition of two that already existed) crossed and then repeatedly
+extended the write-support line phase 3 had deliberately drawn (see
 `docs/CHANGELOG.md`'s "Phase 3" entry), for the narrowest useful case
-each time (empty directories, then zero-byte files, then real content).
-There is no more numbered phase queued up - what comes next is an open
-choice among the gaps below, not a predetermined next step. This
-section (and the "gaps" paragraph below it) still tracks what's true
-right now; `docs/roadmap.md` is the one to check for what's next,
-`docs/CHANGELOG.md` for the full history of what's already done.
+each time (empty directories, then zero-byte files, then real content,
+then copying it). There is no more numbered phase queued up - what
+comes next is an open choice among the gaps below, not a predetermined
+next step. This section (and the "gaps" paragraph below it) still
+tracks what's true right now; `docs/roadmap.md` is the one to check for
+what's next, `docs/CHANGELOG.md` for the full history of what's already
+done.
 
 What's still coarse and worth knowing about before building on any of
 this — kept current in `docs/processes.md`'s "known rough edges" rather
@@ -1347,32 +1383,33 @@ no long-filename support in general (this project's own ESP directory was
 renamed - `\EFI\OUROBORO\`, 8 characters, not `\EFI\OUROBOROS\` -
 specifically to stay reachable without needing it, but any *other* 9+
 character name still isn't), only looks at the first FAT32-typed MBR
-partition, and while a file can now hold real content, every write is a
-full replace (no append, no partial/offset writes), there's still no
-`cp` or output redirection (both need shell-level plumbing `write_file`
-alone doesn't provide), no `mv`, no directory-extension (a full parent
-directory makes `mkdir` fail rather than growing it), `rm`'s
-multi-cluster cluster-chain-freeing path (phase 5) remains untested by
-an actual multi-cluster file (nothing yet can create one that large -
-see "Phase 6" above), and every write-path error collapses to one
-sentinel at the syscall boundary so userland can't distinguish *why* an
-operation failed (see "Phase 4"/"Phase 5"/"Phase 6" above); disk-command
-pointer/length arguments are trusted, not validated against the caller's
-actual mapped region (fine with exactly one, currently-trusted userland
-program). Also still true from before this milestone: strict round-robin
-only, no priorities or blocking; FP/SIMD state still isn't saved
-anywhere (`exceptions.rs`'s `Context`).
+partition, and while a file can now hold real content and be copied,
+every write is still a full replace (no append, no partial/offset
+writes), there's still no output redirection (needs shell-level parsing
+this project doesn't have yet), no `mv`, no recursive `cp`, no
+directory-extension (a full parent directory makes `mkdir` fail rather
+than growing it), `rm`'s multi-cluster cluster-chain-freeing path
+(phase 5) remains untested by an actual multi-cluster file (nothing yet
+can create one that large - see "Phase 6" above), and every write-path
+error collapses to one sentinel at the syscall boundary so userland
+can't distinguish *why* an operation failed (see "Phase
+4"/"Phase 5"/"Phase 6" above); disk-command pointer/length arguments are
+trusted, not validated against the caller's actual mapped region (fine
+with exactly one, currently-trusted userland program). Also still true
+from before this milestone: strict round-robin only, no priorities or
+blocking; FP/SIMD state still isn't saved anywhere (`exceptions.rs`'s
+`Context`).
 
-Reasonable next steps from here: `cp`/output redirection, now that
-`write_file` gives them something real to build on (see
-`docs/roadmap.md`'s parking lot for what each still needs); a real
-relocating loader (ELF + relocation processing), which would also lift
-both the `core::fmt` and literal-comparison restrictions; blocking/waiting
-primitives so tasks can do more than an unconditional round-robin `wfe`
-loop; or finally circling back to Parallels virtio-console now that the
-kernel has enough infrastructure (MMU, exceptions, EL0, real task
-switching, real input, disk-loaded userland, real read/write runtime
-storage) to make that work meaningfully once it lands.
+Reasonable next steps from here: output redirection (`>`/`>>`), now that
+`write_file`/`cp` give it something real to build on but shell-side
+command-line parsing still doesn't exist; a real relocating loader (ELF
++ relocation processing), which would also lift both the `core::fmt`
+and literal-comparison restrictions; blocking/waiting primitives so
+tasks can do more than an unconditional round-robin `wfe` loop; or
+finally circling back to Parallels virtio-console now that the kernel
+has enough infrastructure (MMU, exceptions, EL0, real task switching,
+real input, disk-loaded userland, real read/write runtime storage) to
+make that work meaningfully once it lands.
 
 ## Commands
 
@@ -1446,7 +1483,7 @@ kernel/
 
 shell/               userland default shell - a separate crate, built for aarch64-unknown-none, loaded from disk (not compiled into the kernel)
   linker.ld          flat-binary linker script: entry at offset 0, no .bss/.data (see docs/processes.md)
-  src/main.rs        line editor + command dispatch (help/echo/uptime/clear/ls/cat/cd/pwd/mkdir/rmdir/touch/rm/write), running as real EL0 userland code - see docs/processes.md
+  src/main.rs        line editor + command dispatch (help/echo/uptime/clear/ls/cat/cd/pwd/mkdir/rmdir/touch/rm/write/cp), running as real EL0 userland code - see docs/processes.md
 
 syscall-abi/         shared syscall ABI crate - syscall numbers + sentinel values (NO_CHAR/FS_ERROR/NO_FS), depended on directly by both kernel and shell, no more hand-duplicated numbers - see docs/processes.md
   src/lib.rs         #![no_std], no logic, just pub consts - safe under either target since every value is a scalar inlined at the use site, not a pointer needing relocation

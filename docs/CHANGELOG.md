@@ -7,6 +7,44 @@ what broke, how it was diagnosed), see `CLAUDE.md`; for *how* something
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## Phase 7 — `cp`, pure shell-side plumbing over existing syscalls
+
+**The goal:** `cp <src> <dst>`, the next item phase 6's own changelog
+entry and the roadmap parking lot both flagged as newly buildable now
+that files can hold real content.
+
+- **No new syscall, no kernel changes at all.** `cmd_cp` reads `src`'s
+  entire content into a local stack buffer via the existing
+  `fs_read_file` (the same syscall `cat` already uses), then writes
+  that buffer to `dst` via the existing `fs_write_file` (phase 6) -
+  creating `dst` if it doesn't exist, replacing it if it does, same
+  semantics as `write`. Pure shell-side composition of two primitives
+  that were already there.
+- **Copying a file onto itself is safe by construction, not a special
+  case.** The read completes in full, into the shell's own buffer,
+  before the write ever starts - there's no window where a partial
+  write could clobber a read still in progress.
+- **Refuses rather than silently truncates when a source file is too
+  large for the shell's read buffer** — a genuinely different judgment
+  call than `cat`'s, which prints a truncated prefix with a notice.
+  `cat` displaying an incomplete file is merely incomplete; `cp`
+  producing an incomplete copy would be a *wrong* copy, so it errors
+  outright instead.
+- Confirmed working end to end against the real `esp.img`: copy to a
+  new destination and to an existing one (overwrite), copy a file onto
+  itself (content unchanged), copy a real pre-existing file
+  (`INIT.CFG`) to a new name, copy into a subdirectory, and the usual
+  error set (missing source, destination is a directory, missing
+  destination parent) all correctly handled. `make run` (FAT16, no
+  mount) still degrades gracefully. Zero aborts in `-d int`
+  cross-checks. No new persistence check needed beyond what phase 6
+  already established for `fs_read_file`/`fs_write_file` themselves -
+  `cp` adds no new on-disk code path, only a new caller of two already
+  reboot-tested ones.
+- **Still coarse:** copy size is bounded by the shell's read buffer
+  (256 bytes, same as `cat`'s); no recursive directory copy, no `-r`
+  flag or any flags at all; no `mv`.
+
 ## Phase 6 — `write`, the first way to put real content into a file
 
 **The goal:** close the gap phase 5 left open — every file this kernel

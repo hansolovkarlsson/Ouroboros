@@ -312,16 +312,18 @@ Worth knowing before building further on this:
   calling program's actual mapped region. Fine with exactly one,
   currently-trusted userland program; a real gap once that stops being
   true.
-- **Write support (phases 4-6) covers directories, and files with real
-  content, but every write fully replaces a file rather than appending
-  or writing at an offset.** No `cp`/`mv`, no output redirection yet —
-  both need shell-level plumbing `fs_write_file` alone doesn't provide
-  (parsing `cmd > file`, or reading one file's content back out to hand
-  to another `write_file` call). `mkdir` also can't grow a parent
-  directory that's out of free entry slots — it fails rather than
-  allocating another cluster for the parent. Every `fs_*` syscall
-  distinguishes "no filesystem mounted" (`NO_FS`) from everything else,
-  but every *other* failure reason still collapses to one `FS_ERROR`
-  sentinel, so a program can't yet tell "already exists" from "disk
-  full" from "bad name". See `CLAUDE.md`'s "Phase 4"/"Phase 5"/"Phase 6"
-  sections.
+- **Write support (phases 4-7) covers directories, files with real
+  content, and copying them, but every write fully replaces a file
+  rather than appending or writing at an offset.** No `mv`, no
+  recursive `cp`, no output redirection yet — redirection needs
+  shell-level parsing this project doesn't have (splitting `cmd > file`
+  into a command and a target); `cp` itself needed no new syscall,
+  since it's pure shell-side composition of `fs_read_file`/
+  `fs_write_file` (see `CLAUDE.md`'s "Phase 7" section). `mkdir` also
+  can't grow a parent directory that's out of free entry slots — it
+  fails rather than allocating another cluster for the parent. Every
+  `fs_*` syscall distinguishes "no filesystem mounted" (`NO_FS`) from
+  everything else, but every *other* failure reason still collapses to
+  one `FS_ERROR` sentinel, so a program can't yet tell "already exists"
+  from "disk full" from "bad name". See `CLAUDE.md`'s "Phase
+  4"/"Phase 5"/"Phase 6"/"Phase 7" sections.
