@@ -122,6 +122,23 @@
 //! loop also needed one more fix, now in `tasks.rs`: EL0's own `wfe`
 //! traps to EL1 by default — `SCTLR_EL1.nTWE`/`nTWI`, unrelated to the
 //! mapping work here.)
+//!
+//! ## Since generalized to two independent regions, not one shared 8KB slot
+//!
+//! The paragraphs above describe the original shape: one 8KB compile-time
+//! static, holding both EL0 tasks, isolated via one L2/L3 split. Once task
+//! 0 became a program loaded from disk at a runtime-determined address
+//! (`loader.rs`) instead of a compile-time constant, that stopped fitting
+//! the "one region" model — task 0's region and task 1's small idle region
+//! (`tasks.rs::IdleRegion`) are now unrelated allocations that could
+//! easily land in different 1GB blocks or 2MB slots. [`install_identity_map`]
+//! takes an array of regions instead of one tuple, and `EL0_L2_TABLES`/
+//! `EL0_L3_TABLES` are both sized for up to [`MAX_EL0_REGIONS`] independent
+//! splits rather than one. The underlying technique (walk down to L3 only
+//! for the slot(s) that need it, everything else stays a coarse block) is
+//! unchanged — see `MAX_EL0_REGIONS`'s own doc comment for the alignment
+//! invariant that keeps this from needing to handle a *single* region
+//! spanning multiple slots, which would be a bigger change.
 
 use core::arch::asm;
 use core::cell::UnsafeCell;
@@ -143,22 +160,32 @@ unsafe impl Sync for Table {}
 static L0_TABLE: Table = Table(UnsafeCell::new([0; ENTRIES_PER_TABLE]));
 static L1_TABLE: Table = Table(UnsafeCell::new([0; ENTRIES_PER_TABLE]));
 
-// L2 sub-tables, used only for the 1GB block(s) that overlap
-// `tasks::el0_region()` - everywhere else stays plain L1 blocks. Two is
-// generous: the region is a single 8KB slot, so it overlaps at most one
-// 1GB block in practice (two only if it happened to straddle a boundary,
-// which `tasks.rs`'s alignment prevents anyway).
+// Two independent EL0 regions now, not one shared region split in half:
+// task 0's loaded-program region (loader.rs, arbitrary size, 2MB-aligned
+// by construction - see its module doc comment) and task 1's small fixed
+// idle region (tasks.rs). Each is independently guaranteed to fit within
+// one 2MB slot, so at most 2 slots (and therefore at most 2 1GB blocks,
+// and at most 2 L3 splits) can ever need EL0 handling - the same
+// "generous, two only if it straddles a boundary" reasoning as before,
+// just now covering "two independent small regions" instead of "one
+// region that might straddle". If either count is ever exceeded (it
+// shouldn't be, with exactly two regions each pre-aligned not to
+// straddle), the affected slot fails safe to EL1-only rather than
+// corrupting a table - see the WARNING branches in
+// `install_identity_map`.
+const MAX_EL0_REGIONS: usize = 2;
 const MAX_EL0_L2_TABLES: usize = 2;
+const MAX_EL0_L3_TABLES: usize = 2;
+
 static EL0_L2_TABLES: [Table; MAX_EL0_L2_TABLES] = [
     Table(UnsafeCell::new([0; ENTRIES_PER_TABLE])),
     Table(UnsafeCell::new([0; ENTRIES_PER_TABLE])),
 ];
 
-// L3 table (4KB pages), for the single 2MB L2 slot that overlaps
-// `tasks::el0_region()` - see the module doc comment ("8KB, not 2MB")
-// for why an L2 block alone isn't fine-grained enough. Only one is ever
-// needed: the region is 8KB (two 4KB pages), entirely within one 2MB slot.
-static EL0_L3_TABLE: Table = Table(UnsafeCell::new([0; ENTRIES_PER_TABLE]));
+static EL0_L3_TABLES: [Table; MAX_EL0_L3_TABLES] = [
+    Table(UnsafeCell::new([0; ENTRIES_PER_TABLE])),
+    Table(UnsafeCell::new([0; ENTRIES_PER_TABLE])),
+];
 
 // Stage-1 descriptor bit positions (VMSAv8-64, 4KB granule), cross-checked
 // against Linux's arch/arm64/include/asm/pgtable-hwdef.h rather than
@@ -258,6 +285,13 @@ fn is_general_ram(ty: MemoryType) -> bool {
     )
 }
 
+fn overlaps_any(regions: &[(u64, u64); MAX_EL0_REGIONS], start: u64, end: u64) -> bool {
+    regions.iter().any(|&(region_start, region_size)| {
+        let region_end = region_start + region_size;
+        region_start < end && region_end > start
+    })
+}
+
 /// Builds the identity map and switches TTBR0_EL1 to it. The MMU stays
 /// enabled throughout — no SCTLR_EL1.M toggle, just barriers around each
 /// step so the table walker and TLB never see a half-updated config.
@@ -268,12 +302,16 @@ fn is_general_ram(ty: MemoryType) -> bool {
 /// returned. The discovered RAM span must actually cover the code
 /// currently executing and its stack — true for any UEFI-loaded image,
 /// since firmware reports it as LOADER_CODE/LOADER_DATA in the same map.
-/// `el0_region` (start, size) must be `tasks::el0_region()` — the one
-/// slot that gets EL0 access; everything else in RAM stays EL1-only.
-pub unsafe fn install_identity_map(memory_map: &MemoryMapOwned, el0_region: (u64, u64)) {
+/// `el0_regions` are the (start, size) pairs that get EL0 access -
+/// everything else in RAM stays EL1-only. Each must independently fit
+/// within one 2MB-aligned slot (true by construction: `loader.rs`
+/// over-allocates and trims to guarantee this for task 0's loaded
+/// program, and `tasks.rs`'s `IdleRegion` is a single 4KB page, which can
+/// never straddle a 2MB boundary regardless of where it lands) - see
+/// `MAX_EL0_REGIONS`'s doc comment for what happens if that's ever
+/// violated.
+pub unsafe fn install_identity_map(memory_map: &MemoryMapOwned, el0_regions: [(u64, u64); MAX_EL0_REGIONS]) {
     let l1 = unsafe { &mut *L1_TABLE.0.get() };
-    let (el0_start, el0_size) = el0_region;
-    let el0_end = el0_start + el0_size;
 
     // Device: fixed low 1GB. See module doc comment for why this one stays
     // a hardcoded convention rather than discovered.
@@ -292,6 +330,7 @@ pub unsafe fn install_identity_map(memory_map: &MemoryMapOwned, el0_region: (u64
         let first_block = min_addr / GIB;
         let last_block = (max_addr - 1) / GIB;
         let mut next_el0_l2_table = 0usize;
+        let mut next_el0_l3_table = 0usize;
         for block in first_block..=last_block {
             let idx = block as usize;
             if idx >= ENTRIES_PER_TABLE {
@@ -299,40 +338,52 @@ pub unsafe fn install_identity_map(memory_map: &MemoryMapOwned, el0_region: (u64
             }
             let block_start = block * GIB;
             let block_end = block_start + GIB;
-            let overlaps_el0 = el0_start < block_end && el0_end > block_start;
+            let overlaps_el0 = overlaps_any(&el0_regions, block_start, block_end);
 
             if overlaps_el0 && next_el0_l2_table < MAX_EL0_L2_TABLES {
                 let l2 = unsafe { &mut *EL0_L2_TABLES[next_el0_l2_table].0.get() };
                 for (i, entry) in l2.iter_mut().enumerate() {
                     let sub_base = block_start + (i as u64) * MIB2;
                     let sub_end = sub_base + MIB2;
-                    let is_el0_slot = el0_start < sub_end && el0_end > sub_base;
-                    if is_el0_slot {
-                        // This one 2MB slot contains the (much smaller)
-                        // EL0 region - split it further into 4KB pages so
-                        // only the region's own pages get EL0 access, not
-                        // the other ~2MB of kernel code/data that happens
-                        // to share this slot.
-                        let l3 = unsafe { &mut *EL0_L3_TABLE.0.get() };
+                    let is_el0_slot = overlaps_any(&el0_regions, sub_base, sub_end);
+                    if is_el0_slot && next_el0_l3_table < MAX_EL0_L3_TABLES {
+                        // This one 2MB slot contains an (much smaller) EL0
+                        // region - split it further into 4KB pages so only
+                        // the region's own pages get EL0 access, not the
+                        // other ~2MB of kernel code/data (or the other EL0
+                        // region, if it happens to share this slot) that
+                        // shares it.
+                        let l3 = unsafe { &mut *EL0_L3_TABLES[next_el0_l3_table].0.get() };
                         for (j, page) in l3.iter_mut().enumerate() {
                             let page_base = sub_base + (j as u64) * 4096;
                             let page_end = page_base + 4096;
-                            let is_el0_page = el0_start < page_end && el0_end > page_base;
+                            let is_el0_page = overlaps_any(&el0_regions, page_base, page_end);
                             *page = if is_el0_page { el0_page_4k(page_base) } else { kernel_page_4k(page_base) };
                         }
-                        *entry = table_desc(EL0_L3_TABLE.0.get() as u64);
+                        *entry = table_desc(EL0_L3_TABLES[next_el0_l3_table].0.get() as u64);
+                        next_el0_l3_table += 1;
                     } else {
+                        if is_el0_slot {
+                            crate::console::println!(
+                                "Ouroboros kernel: WARNING: out of EL0 L3 tables, denying EL0 access to 2MB slot {sub_base:#x}"
+                            );
+                        }
                         *entry = kernel_block_2m(sub_base);
                     }
                 }
                 l1[idx] = table_desc(EL0_L2_TABLES[next_el0_l2_table].0.get() as u64);
                 next_el0_l2_table += 1;
             } else {
+                if overlaps_el0 {
+                    crate::console::println!(
+                        "Ouroboros kernel: WARNING: out of EL0 L2 tables, denying EL0 access to 1GB block {block_start:#x}"
+                    );
+                }
                 l1[idx] = normal_block(block_start);
             }
         }
         crate::console::println!(
-            "Ouroboros kernel: identity map RAM {min_addr:#x}-{max_addr:#x} (1GB blocks {first_block}..={last_block}), device 0x0-{:#x}, EL0 region {el0_start:#x}-{el0_end:#x}",
+            "Ouroboros kernel: identity map RAM {min_addr:#x}-{max_addr:#x} (1GB blocks {first_block}..={last_block}), device 0x0-{:#x}, EL0 regions {el0_regions:x?}",
             GIB - 1
         );
     }

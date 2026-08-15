@@ -491,6 +491,120 @@ the suspected code path directly — a whole-run exception count silently
 includes several seconds of firmware activity that has nothing to do with
 the kernel being tested.
 
+### The shell becomes a real disk-loaded process, not kernel code
+
+User-directed architecture shift: the shell (line editor and all) used to
+be permanently compiled into the kernel binary — EL0-capable in theory,
+but not in any way that let it be replaced without rebuilding the kernel.
+That doesn't match how any real Unix-like system works, so this milestone
+made it a genuine separate program, loaded from disk, selected by
+configuration — see `docs/processes.md` for the full reference (design,
+memory model, binary format, and a guide to writing a replacement) and
+`docs/architecture.md` for how this fits the rest of the system. Only a
+summary of what changed and what was learned lives here.
+
+**Scope decision, made explicitly before writing any code:** "loaded from
+disk" did not have to mean a real runtime block-device driver. UEFI's own
+FAT32 driver on the ESP (`SimpleFileSystem` protocol) already reads files
+just fine during the boot-services window — the same window the kernel's
+own binary gets loaded in. `loader.rs` reads a config file and a program
+binary that way, entirely before `exit_boot_services`, and a real
+virtio-blk-plus-filesystem stack (needed eventually for runtime `exec()`)
+stays deferred, on the same footing as the already-deferred Parallels
+virtio-console work. This was an explicit user choice between two
+presented options, not a default assumed unilaterally.
+
+**New crate, new target, new toolchain wrinkle.** `shell/` is a second
+workspace member, built for `aarch64-unknown-none` (not
+`aarch64-unknown-uefi`) with its own linker script
+(`shell/linker.ld`) placing `_start` at file/VA offset 0. Building it
+uncovered two real build-system issues, both fixed:
+- A plain `cargo build`/`cargo clippy` at the repo root tried to build
+  `shell` too (it's a workspace member) using the workspace-default target
+  (`aarch64-unknown-uefi`, from `.cargo/config.toml`) — which fails to
+  link, since `shell` isn't a UEFI application. Fixed with
+  `default-members = ["kernel"]` in the root `Cargo.toml`: `shell` stays a
+  real workspace member (shared `Cargo.lock`, `cargo build -p shell
+  --target aarch64-unknown-none` works) but is never implicitly pulled
+  into a bare `cargo build`.
+- Producing a raw flat binary from the linked ELF needs `objcopy`, which
+  doesn't ship with Xcode's toolchain on macOS. `rustup component add
+  llvm-tools` provides `llvm-objcopy`, but — unlike `rustc`/`cargo`
+  themselves — it isn't proxied by `rustup which` or put on `PATH`; only
+  `cargo-binutils`' `cargo objcopy` subcommand knows to find it that way,
+  and pulling in a whole extra cargo subcommand for one invocation felt
+  like more dependency than this needed. The Makefile instead computes its
+  fixed, real location directly: `$(rustc --print sysroot)/lib/rustlib/
+  $(host-triple)/bin/llvm-objcopy`.
+
+**A genuinely nice accident: this kills the rustc/PE-COFF 8KB alignment
+ceiling** that shaped the previous two milestones (`tasks.rs`'s original
+8KB-static EL0 region, `syscall.rs`'s module doc comment). That ceiling
+only ever existed because EL0 code had to be a `#[repr(align(N))]` static
+*compiled into the kernel image itself*, and PE/COFF can't represent a
+section alignment above 8KB. A disk-loaded program doesn't need any
+compile-time-aligned static at all — `loader.rs` asks UEFI's
+`boot::allocate_pages` for however many runtime-determined pages a program
+needs, which has no such ceiling. The ceiling doesn't disappear from the
+codebase (`tasks.rs`'s now-tiny idle-task region is still a compile-time
+static, just small enough it was never affected), but it stops being a
+constraint on "how big can a real program be."
+
+**A new alignment problem took its place, solved differently.**
+`boot::allocate_pages` only guarantees 4KB alignment, not the 2MB
+`mmu.rs`'s L2/L3-splitting logic implicitly relied on (the old compile-time
+static's `#[repr(align(0x2000))]` made straddling a 2MB boundary
+impossible by construction; a runtime multi-page allocation has no such
+guarantee). Rather than teaching `mmu.rs` to split a region across
+multiple L2 slots, `loader.rs` over-allocates by one 2MB slot's worth of
+pages and frees whatever falls outside the first 2MB-aligned address in
+that range (`boot::free_pages` accepts freeing any page-aligned sub-range
+of a prior allocation, confirmed against the UEFI spec's own description
+of `FreePages`, not assumed) — recovering the same non-straddling
+guarantee the old static got for free, just at runtime instead of compile
+time. `mmu.rs` itself only needed a smaller, mechanical generalization on
+top of that: `EL0_L3_TABLES` grew from one static to a
+`MAX_EL0_REGIONS`-sized array, since two independent regions (task 0's
+loaded program, task 1's small idle stub) can now legitimately need two
+separate L3 splits instead of one.
+
+**Cache maintenance got a real correctness fix, not just a rename.** The
+previous milestones' `dc cvau` (clean D-cache line to point of unification,
+required before invalidating I-cache for self-modifying code) was called
+exactly once per task regardless of that task's code size — never actually
+wrong on QEMU (TCG doesn't model real cache incoherency, so this was
+untested against hardware that would notice), but a program loaded from
+disk can legitimately be larger than one 64-byte cache line, so `tasks.rs`
+now loops `dc cvau` over the whole loaded region before the usual single
+`ic ialluis`+barrier sequence.
+
+**`shell_input` (syscall 5) is gone.** Line editing moved out of the
+kernel (`shell.rs`, deleted) and into the userland program itself
+(`shell/src/main.rs`, real compiled Rust calling `try_read_char`/`putc`
+directly) — the actual architectural change "the shell is a separate
+process" was about, not just relocating where its bytes live. The syscall
+dispatch table has a deliberate gap at number 5 rather than renumbering
+anything after it.
+
+**Confirmed working end to end via the same piped-stdin QEMU technique as
+the earlier echo-shell milestone:** boot log shows `loader.rs` reading the
+config file and program, `mmu.rs` mapping both EL0 regions
+(`[(0x5c600000, 0x4000), (0x5c766000, 0x1000)]` in one observed run), and
+the loaded program itself printing its own startup banner
+("`Ouroboros userland shell`") and prompt — output that only exists
+because *userland code*, not kernel code, produced it. A full interactive
+sequence (type `hi`, backspace, type ` there`, Enter) round-tripped
+correctly through the disk-loaded binary's own line editor, ending in the
+expected `h there` and a fresh prompt. Zero aborts in a `-d int`
+cross-check across the run.
+
+**Still coarse, worth knowing about before building on it:** see
+`docs/processes.md`'s "known rough edges" section (no shared syscall-ABI
+crate, one program loaded once at boot with no `exec()`, fixed 2-task
+scheduler, no heap/`.bss` for userland programs, fixed unguarded 8KB
+stack, no ELF/relocations) rather than repeating it here — that document
+is the one to keep current as these get addressed.
+
 ### Parallels disk attachment: a real trap, not a hunch
 
 Getting `esp.img` to actually boot in Parallels took a few wrong turns worth
@@ -534,47 +648,55 @@ for the reasoning behind that lead.
 
 **In the meantime, kernel development continues against QEMU**, which has a
 fully working console via ACPI/SPCR. MMU/identity-paging, the timer-driven
-preemption tick, the syscall boundary, real preemptive task switching, and
-now a working interactive echo shell (see "Interactive echo shell" above)
-are all done and confirmed working, not just structurally plausible.
+preemption tick, the syscall boundary, real preemptive task switching, a
+working interactive echo shell, and now a shell that's a real disk-loaded,
+configuration-selected userland program (see "The shell becomes a real
+disk-loaded process" above, and `docs/architecture.md`/`docs/processes.md`
+for the reference write-up) are all done and confirmed working, not just
+structurally plausible.
 
-**Phase 1 of "get to a shell" (user-defined: a terminal that accepts input
-and echoes it back) is done.** Phase 2, per the same plan, is commands:
-replace `shell.rs`'s "echo the completed line" step with real tokenizing
-and a dispatch table of builtins (the existing syscall dispatch table in
-`syscall.rs` is a reasonable model to follow — number/name → handler,
-already proven to generalize across six entries). Natural first builtins:
-something that reads kernel state already tracked somewhere (`exceptions.rs`'s
-`TICKS`, `tasks.rs`'s `CURRENT`) so a command's output means something real
-rather than being another demo.
+**Phase 1 of "get to a shell" (a terminal that accepts input and echoes it
+back) is done, and so is the disk-loading milestone that followed it before
+phase 2 started.** Phase 2, per the original plan, is commands: replace
+the loaded shell's (`shell/src/main.rs`'s) "echo the completed line" step
+with real tokenizing and a dispatch table of builtins. Natural first
+builtins: something that reads kernel state already tracked somewhere
+(`exceptions.rs`'s `TICKS`, `tasks.rs`'s `CURRENT`) so a command's output
+means something real rather than being another demo — but note these
+would need a *new* syscall to expose that state to userland, since the
+shell can no longer just read kernel statics directly now that it's a
+separate program.
 
-What's still coarse and worth knowing about before building on either
-front: exactly two hardcoded tasks with no creation/destruction API; strict
-round-robin only, no priorities or blocking; FP/SIMD state still isn't
-saved anywhere (`exceptions.rs`'s `Context`, inherited by `tasks.rs`); EL0's
-8KB region (split two ways, one per task) has no internal W^X; there's
-still only one EL0 region total, an external constraint (the `rustc`/
-PE-COFF alignment bug — see `syscall.rs`'s module doc comment) that any
-future "give a task more memory, or more than two tasks" design has to work
-within or around; and the shell has no prompt, no cursor/history editing,
-and silently drops input past its 128-byte buffer.
+What's still coarse and worth knowing about before building on any of
+this — kept current in `docs/processes.md`'s "known rough edges" rather
+than duplicated here, since that's the document meant to track it as these
+get addressed: no shared syscall-ABI crate (numbers duplicated by hand
+between `syscall.rs` and `shell/`); exactly one program, loaded once, at
+boot, with no `exec()`; a fixed 2-task scheduler (no dynamic task
+creation); no heap or `.bss` for userland programs, so no static mutable
+state at all; a fixed, unguarded 8KB stack per program; no ELF, no
+relocations, no dynamic linking. Also still true from before this
+milestone: strict round-robin only, no priorities or blocking; FP/SIMD
+state still isn't saved anywhere (`exceptions.rs`'s `Context`).
 
-Reasonable next steps from here: phase 2 (command parsing/dispatch, above);
-real per-task memory (more than two hardcoded 4KB slots — needs a way past
-the 8KB ceiling, or a design that works within it deliberately); blocking/
-waiting primitives so tasks can do more than an unconditional round-robin
-`wfe` loop; a minimal notion of address spaces or processes, if this
-project wants to go there before Parallels console output; or finally
+Reasonable next steps from here: phase 2 (command parsing/dispatch,
+above, plus whatever new syscalls it needs); a shared syscall-ABI crate,
+now that there are two independent call sites to keep in sync by hand;
+blocking/waiting primitives so tasks can do more than an unconditional
+round-robin `wfe` loop; a real runtime storage stack (virtio-blk + a
+filesystem), needed for `exec()`-style dynamic loading and for Parallels
+to ever run programs it can't compile in ahead of time; or finally
 circling back to Parallels virtio-console now that the kernel has enough
-infrastructure (MMU, exceptions, EL0, real task switching, real input) to
-make that work meaningfully once it lands.
+infrastructure (MMU, exceptions, EL0, real task switching, real input,
+disk-loaded userland) to make that work meaningfully once it lands.
 
 ## Commands
 
 ```sh
-make build                  # cargo build (debug)
+make build                  # cargo build (debug) - kernel only, see below
 make build PROFILE=release  # release profile
-make run                    # stage ESP dir + boot in QEMU (aarch64 virt machine, OVMF firmware)
+make shell-bin               # build shell/ for aarch64-unknown-none + objcopy to a raw .bin
+make run                    # stage ESP dir (kernel + shell binary + config) + boot in QEMU
 make image                  # build esp.img, a raw MBR+FAT32 disk image (not directly usable by Parallels - see below)
 make parallels-hdd          # wrap esp.img into esp.hdd, a Parallels-native virtual hard disk
 make clean
@@ -583,25 +705,38 @@ make clean
 `make run` requires QEMU (`brew install qemu`, which also provides the
 aarch64 OVMF firmware `make run` points at). `make image` requires macOS's
 `hdiutil`. `make parallels-hdd` additionally requires Parallels Desktop
-installed (uses its bundled `prl_disk_tool`).
+installed (uses its bundled `prl_disk_tool`). `make shell-bin` (and
+therefore `make esp`/`make run`) needs `rustup component add llvm-tools`
+for `llvm-objcopy` - see the Makefile's `OBJCOPY` comment for why it isn't
+just on `PATH`.
 
 There is no test suite yet — this is pre-alpha kernel code that only proves
 it boots.
 
 ## Toolchain
 
-Pinned via `rust-toolchain.toml` (stable channel, `aarch64-unknown-uefi`
-target — installs automatically on first `cargo build`). The target ships
-prebuilt `core`/`alloc` on stable, so no nightly toolchain or
-`-Z build-std` is needed. `.cargo/config.toml` defaults the build target to
-`aarch64-unknown-uefi`, so plain `cargo build`/`cargo clippy` at the repo
-root already target the right platform.
+Pinned via `rust-toolchain.toml` (stable channel, targets
+`aarch64-unknown-uefi` and `aarch64-unknown-none` — both install
+automatically on first build). Both targets ship prebuilt `core`/`alloc`
+on stable, so no nightly toolchain or `-Z build-std` is needed.
+`.cargo/config.toml` defaults the build target to `aarch64-unknown-uefi`
+(for `kernel`, the workspace's only default member - see `Cargo.toml`'s
+`default-members` comment for why `shell` is deliberately excluded from
+that default) and separately configures `[target.aarch64-unknown-none]`
+(for `shell`, always built explicitly with `--target aarch64-unknown-none`
+- see the Makefile). Plain `cargo build`/`cargo clippy` at the repo root
+already target `kernel` correctly; building `shell` needs the explicit
+`-p shell --target aarch64-unknown-none` (or just `make shell-bin`).
 
 ## Structure
 
 ```
+docs/
+  architecture.md    reference doc: boot flow, privilege model, memory layout, exceptions, process model, syscall ABI, console
+  processes.md       reference doc: process loading/config mechanism, memory model, binary format, writing a replacement program
+
 kernel/
-  src/main.rs        #[entry] point: UEFI init, ExitBootServices, exceptions::install(), mmu::install_identity_map(), gic+timer init, tasks::init(), then tasks::start()
+  src/main.rs        #[entry] point: UEFI init, console discovery, loader::load(), ExitBootServices, exceptions::install(), mmu::install_identity_map(), gic+timer init, tasks::init(), then tasks::start()
   src/uart.rs        raw PL011 console driver (read + write), used only after ExitBootServices
   src/uart16550.rs   raw 16550-compatible console driver (read + write; PCI-discovered consoles; different hardware, different driver)
   src/devicetree.rs  console UART discovery via the UEFI-provided devicetree (dead end on QEMU/Parallels)
@@ -609,14 +744,20 @@ kernel/
   src/pci.rs         console UART discovery via PCI enumeration for a class 0x07/0x00 serial controller
   src/console.rs     global console handle (Console enum: Pl011 | Uart16550), shared between main() and the exception handler
   src/exceptions.rs  AArch64 exception vector table (VBAR_EL1) + fault reporting
-  src/mmu.rs         replaces firmware's translation tables with our own identity map (L0->L1->L2->L3 as needed)
+  src/mmu.rs         replaces firmware's translation tables with our own identity map (L0->L1->L2->L3 as needed), up to MAX_EL0_REGIONS independent EL0 regions
   src/gic.rs         GICv2 driver (QEMU virt addresses, confirmed via devicetree dump)
-  src/timer.rs       ARM generic timer (non-secure EL1 physical timer, PPI 14 / GIC INTID 30)
-  src/syscall.rs     svc syscall dispatch table (print/double/report/try_read_char/putc/shell_input) - confirmed working end to end, see above
-  src/tasks.rs       two EL0 tasks (task 0: shell poll loop, task 1: idle) + the round-robin scheduler (Context save/restore in the tick path) - confirmed alternating, see above
-  src/shell.rs       EL1-resident line editor for the interactive shell (buffer, backspace/DEL, Enter) - confirmed working via piped-stdin QEMU testing, see above
+  src/timer.rs       ARM generic timer (non-secure EL1 physical timer, PPI 14 / GIC INTID 30), TICK_INTERVAL_MS
+  src/loader.rs      reads INIT.CFG + a program off the ESP during boot services, into a 2MB-aligned EL0-accessible region - see docs/processes.md
+  src/syscall.rs     svc syscall dispatch table (print/double/report/try_read_char/putc, gap at 5) - confirmed working end to end, see above
+  src/tasks.rs       task 0 (loaded program) + task 1 (idle) + the round-robin scheduler (Context save/restore in the tick path) - confirmed alternating, see above
+
+shell/               userland default shell - a separate crate, built for aarch64-unknown-none, loaded from disk (not compiled into the kernel)
+  linker.ld          flat-binary linker script: entry at offset 0, no .bss/.data (see docs/processes.md)
+  src/main.rs        the interactive line editor, now running as real EL0 userland code - see docs/processes.md
 ```
 
-Single-crate workspace for now (`Cargo.toml` at the root is a workspace with
-one member). Expect this to grow into more crates as the bootloader/kernel
-split happens and shared code (e.g. a syscall ABI crate) emerges.
+Two-crate workspace (`kernel` and `shell`), with `shell` deliberately
+excluded from the workspace's `default-members` (see `Cargo.toml`) since
+it needs a different `--target` than `kernel`. Expect further growth as
+shared code (a syscall ABI crate - see `docs/processes.md`'s "known rough
+edges") and any future userland programs emerge.

@@ -1,2 +1,10 @@
 [build]
 target = "aarch64-unknown-uefi"
+
+# Used only by the `shell` crate, built explicitly with
+# `--target aarch64-unknown-none` (see the Makefile) - the workspace-wide
+# default above stays aarch64-unknown-uefi for `kernel`. Flat, position-
+# dependent binary: no PIC/GOT indirection, entry placed at offset 0 by
+# linker.ld (see that file's own doc comment for why).
+[target.aarch64-unknown-none]
+rustflags = ["-C", "link-arg=-Tshell/linker.ld", "-C", "relocation-model=static"]

@@ -8,9 +8,9 @@ mod console;
 mod devicetree;
 mod exceptions;
 mod gic;
+mod loader;
 mod mmu;
 mod pci;
-mod shell;
 mod syscall;
 mod tasks;
 mod timer;
@@ -86,6 +86,21 @@ fn main() -> Status {
         log::info!("Ouroboros kernel: console @ {base:#x} (via {source})");
     }
 
+    // Also boot-services-only (a filesystem read and a page allocation) -
+    // see loader.rs's module doc comment for why this happens now rather
+    // than after a real runtime disk driver exists. A failure here means
+    // there is nothing to run, so it's fatal - same fail-fast posture as
+    // uefi::helpers::init()'s unwrap() above.
+    let program = match loader::load() {
+        Ok(program) => program,
+        Err(e) => panic!("Ouroboros kernel: failed to load shell program: {e}"),
+    };
+    log::info!(
+        "Ouroboros kernel: loaded shell program, region {:#x}-{:#x}",
+        program.base,
+        program.base + program.size
+    );
+
     // SAFETY: no boot-services protocol references (console, allocator, or
     // otherwise) are held past this call. Nothing below this point may use
     // log::*, alloc, or UEFI protocols — only the raw MMIO in `uart`/
@@ -115,7 +130,7 @@ fn main() -> Status {
 
     // SAFETY: called after exit_boot_services, with the memory map that
     // call returned.
-    unsafe { mmu::install_identity_map(&memory_map, tasks::el0_region()) };
+    unsafe { mmu::install_identity_map(&memory_map, [(program.base, program.size), tasks::idle_region()]) };
     console::println!("Ouroboros kernel: identity map installed, MMU running on our own tables");
 
     // SAFETY: GICD/GICC are mapped by the identity map just installed
@@ -126,9 +141,8 @@ fn main() -> Status {
     }
     timer::arm(timer::TICK_INTERVAL_MS);
 
-    // SAFETY: the EL0 region (tasks::el0_region()) was just mapped
-    // EL0-accessible above.
-    unsafe { tasks::init() };
+    // SAFETY: both EL0 regions were just mapped EL0-accessible above.
+    unsafe { tasks::init(&program) };
 
     console::println!("Ouroboros kernel: shell ready - type and press Enter");
 

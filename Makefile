@@ -1,25 +1,52 @@
-TARGET   := aarch64-unknown-uefi
-PROFILE  ?= debug
-KERNEL   := target/$(TARGET)/$(PROFILE)/BOOTAA64.efi
-ESP_DIR  := esp
-OVMF     := $(shell brew --prefix qemu 2>/dev/null)/share/qemu/edk2-aarch64-code.fd
-PDT      := /Applications/Parallels Desktop.app/Contents/MacOS/prl_disk_tool
+TARGET       := aarch64-unknown-uefi
+USER_TARGET  := aarch64-unknown-none
+PROFILE      ?= debug
+KERNEL       := target/$(TARGET)/$(PROFILE)/BOOTAA64.efi
+SHELL_ELF    := target/$(USER_TARGET)/$(PROFILE)/shell
+SHELL_BIN    := target/$(USER_TARGET)/$(PROFILE)/shell.bin
+ESP_DIR      := esp
+OVMF         := $(shell brew --prefix qemu 2>/dev/null)/share/qemu/edk2-aarch64-code.fd
+PDT          := /Applications/Parallels Desktop.app/Contents/MacOS/prl_disk_tool
+
+# llvm-objcopy ships with the `llvm-tools` rustup component (added via
+# rust-toolchain.toml), but unlike cargo/rustc itself it isn't on PATH or
+# reachable via `rustup which` - only cargo-binutils' `cargo objcopy`
+# subcommand knows to find it that way, and pulling in cargo-binutils for
+# one call felt like more dependency than this needs. Its real location is
+# a fixed, discoverable path under the toolchain's own sysroot instead.
+HOST_TRIPLE  := $(shell rustc -vV | sed -n 's/^host: //p')
+OBJCOPY      := $(shell rustc --print sysroot)/lib/rustlib/$(HOST_TRIPLE)/bin/llvm-objcopy
 
 CARGO_FLAGS :=
 ifeq ($(PROFILE),release)
 CARGO_FLAGS += --release
 endif
 
-.PHONY: build esp run image parallels-hdd clean
+.PHONY: build shell-bin esp run image parallels-hdd clean
 
 build:
 	cargo build $(CARGO_FLAGS)
 
+# Built separately from `build`: a different target (aarch64-unknown-none,
+# not the workspace-default aarch64-unknown-uefi - see Cargo.toml's
+# default-members comment) and a raw-binary conversion step, since this is
+# a flat position-dependent binary loaded directly by the kernel
+# (loader.rs/tasks.rs), not a UEFI application.
+shell-bin:
+	cargo build -p shell --target $(USER_TARGET) $(CARGO_FLAGS)
+	"$(OBJCOPY)" -O binary --strip-all $(SHELL_ELF) $(SHELL_BIN)
+
 # Stage the EFI System Partition layout QEMU/Parallels expect: a removable
-# UEFI drive boots \EFI\BOOT\BOOTAA64.EFI automatically, no boot manager entry needed.
-esp: build
-	mkdir -p $(ESP_DIR)/EFI/BOOT
+# UEFI drive boots \EFI\BOOT\BOOTAA64.EFI automatically, no boot manager
+# entry needed. \EFI\OUROBOROS\ holds everything that isn't the kernel
+# itself: the default shell binary and the config file (loader.rs's
+# CONFIG_PATH) naming which program to load - edit INIT.CFG and rebuild
+# just that program to swap it out, no kernel rebuild required.
+esp: build shell-bin
+	mkdir -p $(ESP_DIR)/EFI/BOOT $(ESP_DIR)/EFI/OUROBOROS
 	cp $(KERNEL) $(ESP_DIR)/EFI/BOOT/BOOTAA64.EFI
+	cp $(SHELL_BIN) $(ESP_DIR)/EFI/OUROBOROS/SH.BIN
+	printf '\\EFI\\OUROBOROS\\SH.BIN' > $(ESP_DIR)/EFI/OUROBOROS/INIT.CFG
 
 # Boots the ESP directory directly in QEMU (no disk image needed) against
 # the aarch64 OVMF firmware installed by `brew install qemu`.

@@ -1,6 +1,12 @@
 [workspace]
 resolver = "2"
-members = ["kernel"]
+members = ["kernel", "shell"]
+# `shell` is built explicitly with `--target aarch64-unknown-none` (see the
+# Makefile) - it must never be pulled into a plain `cargo build`/`clippy` at
+# the repo root, which would try to build it for the workspace-wide default
+# target (aarch64-unknown-uefi, from .cargo/config.toml) and fail to link,
+# since it isn't a UEFI application.
+default-members = ["kernel"]
 
 [profile.dev]
 panic = "abort"

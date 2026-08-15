@@ -2,15 +2,27 @@
 //! switching, not just resuming whatever the tick happened to interrupt
 //! (all `exceptions.rs`'s IRQ path could do before this).
 //!
-//! Reuses `syscall.rs`'s EL0 isolation approach directly: one dedicated
-//! 8KB region (`EL0_REGION`), the largest size/alignment that doesn't
-//! crash `rustc` on this target (see `syscall.rs`'s module doc comment for
-//! the full story). Rather than adding a second 8KB region — which would
-//! need `mmu.rs` to isolate a *second* L2 slot, doubling that complexity —
-//! this splits the one region into two 4KB halves, one task each. 4KB is
-//! also the finest granularity `mmu.rs`'s page tables support (L3), so
-//! this is already as tight as the isolation gets without going smaller
-//! than a full page, which the architecture doesn't allow anyway.
+//! **Task 0 is a real userland program, loaded from disk** (`loader.rs`,
+//! before `exit_boot_services`) rather than compiled into the kernel image
+//! — see `docs/processes.md` for the full design. By the time [`init`]
+//! runs, `loader.rs` has already copied the program's bytes into an
+//! EL0-accessible region and `mmu.rs` has mapped it; there's nothing left
+//! to copy here, just cache maintenance (see [`clean_dcache_range`]) and a
+//! [`Context`] pointing at it. The default program is `shell` (a separate
+//! crate, `shell/`) — the interactive line editor that used to live at EL1
+//! in this kernel's own (now-deleted) `shell.rs`, driven by a dedicated
+//! `shell_input` syscall. That syscall is gone: a loaded program just
+//! calls `try_read_char`/`putc` directly and does its own line editing, in
+//! its own separately-compiled code. Which program loads is a config file
+//! on the ESP, not a kernel constant — replacing the shell means replacing
+//! a file, not rebuilding the kernel.
+//!
+//! **Task 1 is a genuine idle task** — bare `wfe` loop, still a small
+//! compiled-in `global_asm!` blob like every EL0 task before this
+//! milestone, since there's nothing to load for "do nothing forever" and
+//! its region is tiny (4KB) enough that the alignment ceiling below never
+//! applied to it in the first place (that ceiling was specifically about
+//! *large* alignments — see `IDLE_REGION`'s doc comment).
 //!
 //! There's no cooperative yielding anywhere — the *only* thing that ever
 //! moves execution from one task to the other is the timer tick catching
@@ -18,26 +30,9 @@
 //! That swap is the entire scheduler: strict round-robin between exactly
 //! two tasks, no priorities, no blocking, no queue.
 //!
-//! **Task 0 is the interactive shell's poll loop** (phase 1 of "get to a
-//! shell", per the project's current milestone): `try_read_char` (syscall
-//! 3), and if a byte came back, hand it straight to `shell.rs`'s line
-//! editor via `shell_input` (syscall 5) — the byte is already sitting in
-//! x0 from `try_read_char`'s return, so the two syscalls chain with no
-//! extra register shuffling. Deliberately dumb: all the actual line-
-//! editing logic (buffering, backspace, echo) lives in ordinary Rust at
-//! EL1, in `shell.rs` — writing that as hand-assembled EL0 code would be
-//! painful, and there's no way yet to get compiled Rust into the isolated
-//! EL0 region (see `syscall.rs`'s module doc comment on the `rustc`/
-//! PE-COFF alignment ceiling that forces this region to stay hand-written
-//! assembly). **Task 1 is a genuine idle task** — bare `wfe` loop, no
-//! syscalls at all — rather than the old report-and-loop demo: once task 0
-//! is doing real interactive I/O, task 1 chattering to the same console
-//! every time it gets scheduled would corrupt the terminal output.
-//!
 //! FP/SIMD state still isn't part of a task's [`Context`] (see
 //! `exceptions.rs`'s module doc comment) — fine for these tasks, since
-//! their hand-written code never touches it, but a real limitation for
-//! whatever runs here next.
+//! neither touches it, but a real limitation for whatever runs here next.
 
 use core::arch::{asm, global_asm};
 use core::cell::UnsafeCell;
@@ -45,66 +40,45 @@ use core::ffi::c_void;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::exceptions::Context;
+use crate::loader::LoadedProgram;
 
 pub const NUM_TASKS: usize = 2;
 
-// 8KB: the largest alignment/size that doesn't crash rustc for this target
-// (see syscall.rs's module doc comment) - not chosen for any other reason.
-// Split evenly: one 4KB slot per task, code copied to the bottom of each,
-// stack growing down from the top.
-const EL0_REGION_SIZE: usize = 0x2000;
-const TASK_SLOT_SIZE: u64 = 0x1000;
+const IDLE_REGION_SIZE: usize = 0x1000;
 
-#[repr(align(0x2000))]
-struct El0Region(UnsafeCell<[u8; EL0_REGION_SIZE]>);
+/// 4KB, well under the ~8KB rustc/PE-COFF alignment ceiling that forced
+/// `loader.rs` to load task 0's program at runtime instead of compiling it
+/// in (see that module's doc comment) — that ceiling only bites at large
+/// alignments; a single page was always fine, which is why the idle task
+/// alone never needed to move off this compile-time-static approach.
+#[repr(align(0x1000))]
+struct IdleRegion(UnsafeCell<[u8; IDLE_REGION_SIZE]>);
 
 // SAFETY: single-core; written once by `init` before either task ever
-// runs, and only EL0 (per-task, isolated to its own 4KB slot by `mmu.rs`)
-// touches it after that.
-unsafe impl Sync for El0Region {}
+// runs, and only EL0 (isolated to this one region by `mmu.rs`) touches it
+// after that.
+unsafe impl Sync for IdleRegion {}
 
-static EL0_REGION: El0Region = El0Region(UnsafeCell::new([0; EL0_REGION_SIZE]));
+static IDLE_REGION: IdleRegion = IdleRegion(UnsafeCell::new([0; IDLE_REGION_SIZE]));
 
-// Each task's machine code, at its ordinary (small, unpadded) link
-// address - `init` copies each into its own 4KB slot in EL0_REGION rather
-// than executing it here directly, since here isn't EL0-accessible.
 global_asm!(
     r#"
 .text
-.global el0_task0_template
-el0_task0_template:
-1:
-mov x8, #3      // syscall 3: try_read_char
-svc #0
-mov x9, #-1     // NO_CHAR sentinel (syscall.rs::NO_CHAR, u64::MAX)
-cmp x0, x9
-b.eq 2f
-mov x8, #5      // syscall 5: shell_input - arg0 (x0) is already the byte
-svc #0
-b 1b
-2:
-wfe
-b 1b
-.global el0_task0_template_end
-el0_task0_template_end:
-
-.global el0_task1_template
-el0_task1_template:
+.global el0_idle_template
+el0_idle_template:
 1:
 wfe
 b 1b
-.global el0_task1_template_end
-el0_task1_template_end:
+.global el0_idle_template_end
+el0_idle_template_end:
 "#
 );
 
 unsafe extern "C" {
-    /// Opaque - only used for their addresses, to find and size each
-    /// template to copy.
-    static el0_task0_template: c_void;
-    static el0_task0_template_end: c_void;
-    static el0_task1_template: c_void;
-    static el0_task1_template_end: c_void;
+    /// Opaque - only used for its address, to find and size the template
+    /// to copy.
+    static el0_idle_template: c_void;
+    static el0_idle_template_end: c_void;
 }
 
 struct TaskSlot(UnsafeCell<Context>);
@@ -120,55 +94,58 @@ static TASKS: [TaskSlot; NUM_TASKS] =
 
 static CURRENT: AtomicUsize = AtomicUsize::new(0);
 
-/// The isolated EL0 region's (start, size) — `mmu.rs` uses this to decide
-/// which pages get EL0 access. Both tasks live inside this one region;
-/// `mmu.rs` doesn't need to know there are two of them.
-pub fn el0_region() -> (u64, u64) {
-    (EL0_REGION.0.get() as u64, EL0_REGION_SIZE as u64)
+/// Task 1's (the idle task's) small dedicated EL0 region — `mmu.rs` maps
+/// this alongside whatever `loader.rs` loaded for task 0. Two independent
+/// regions, not one shared region split in half like before this
+/// milestone: task 0's is sized to whatever program got loaded, not a
+/// fixed slot.
+pub fn idle_region() -> (u64, u64) {
+    (IDLE_REGION.0.get() as u64, IDLE_REGION_SIZE as u64)
 }
 
-/// Copies both tasks' code into their own 4KB slot in `EL0_REGION`, builds
-/// each task's initial [`Context`] (entry at the slot's start, stack at
-/// the slot's top, `SPSR_EL1` selecting EL0t with everything unmasked),
-/// and disables the EL0 `wfe`/`wfi` trap both tasks' idle loops rely on.
-/// Does not itself start anything — see [`start`].
+/// Builds task 0's [`Context`] from an already-loaded program — `loader.rs`
+/// copied its bytes into an EL0-accessible region during boot services, so
+/// there's nothing left to copy here, just cache maintenance — copies task
+/// 1's idle loop into its own small region, and disables the EL0
+/// `wfe`/`wfi` trap both tasks' idle loops rely on. Does not itself start
+/// anything — see [`start`].
 ///
 /// # Safety
-/// Must run after `mmu.rs` has mapped `el0_region()` EL0-accessible, and
-/// before either task could possibly run.
-pub unsafe fn init() {
-    let region_start = EL0_REGION.0.get() as *mut u8;
+/// Must run after `mmu.rs` has mapped both `program`'s region and
+/// [`idle_region`] EL0-accessible, and before either task could possibly
+/// run.
+pub unsafe fn init(program: &LoadedProgram) {
+    // Task 0: entry is exactly the load base - shell/linker.ld places
+    // `_start` at file/VA offset 0, and loader.rs's region has no header
+    // or padding before the program's own bytes. Stack at the top of the
+    // loaded region, growing down, same shape every EL0 task has used.
+    *unsafe { &mut *TASKS[0].0.get() } = Context {
+        gpr: [0; 31],
+        sp_el0: program.base + program.size,
+        elr_el1: program.base,
+        // M[3:0]=0000 selects EL0t (the only mode EL0 has), DAIF all
+        // clear (every exception class unmasked - the timer tick must be
+        // able to preempt), NZCV cleared.
+        spsr_el1: 0,
+    };
+    clean_dcache_range(program.base, program.size);
 
-    let templates: [(*const u8, *const u8); NUM_TASKS] = [
-        (&raw const el0_task0_template as *const u8, &raw const el0_task0_template_end as *const u8),
-        (&raw const el0_task1_template as *const u8, &raw const el0_task1_template_end as *const u8),
-    ];
+    // Task 1: idle loop, copied into its own small static region exactly
+    // like every EL0 task before this milestone.
+    let idle_start = IDLE_REGION.0.get() as *mut u8;
+    let start = &raw const el0_idle_template as *const u8;
+    let end = &raw const el0_idle_template_end as *const u8;
+    let len = unsafe { end.offset_from(start) } as usize;
+    unsafe { core::ptr::copy_nonoverlapping(start, idle_start, len) };
 
-    for (i, (start, end)) in templates.into_iter().enumerate() {
-        let slot_start = unsafe { region_start.add(i * TASK_SLOT_SIZE as usize) };
-        let len = unsafe { end.offset_from(start) } as usize;
-        unsafe { core::ptr::copy_nonoverlapping(start, slot_start, len) };
-
-        // Standard ARM self-modifying-code sequence: the copy above went
-        // through the D-cache (Normal WB memory), which isn't
-        // automatically coherent with the I-side fetch path on ARM -
-        // clean the written line to the point of unification before the
-        // shared I-cache invalidate below.
-        unsafe {
-            asm!("dc cvau, {addr}", addr = in(reg) slot_start, options(nostack));
-        }
-
-        let slot_addr = slot_start as u64;
-        *unsafe { &mut *TASKS[i].0.get() } = Context {
-            gpr: [0; 31],
-            sp_el0: slot_addr + TASK_SLOT_SIZE,
-            elr_el1: slot_addr,
-            // M[3:0]=0000 selects EL0t (the only mode EL0 has), DAIF all
-            // clear (every exception class unmasked - the timer tick must
-            // be able to preempt), NZCV cleared.
-            spsr_el1: 0,
-        };
-    }
+    let idle_addr = idle_start as u64;
+    *unsafe { &mut *TASKS[1].0.get() } = Context {
+        gpr: [0; 31],
+        sp_el0: idle_addr + IDLE_REGION_SIZE as u64,
+        elr_el1: idle_addr,
+        spsr_el1: 0,
+    };
+    clean_dcache_range(idle_addr, IDLE_REGION_SIZE as u64);
 
     unsafe {
         asm!("dsb ish", "ic ialluis", "dsb ish", "isb", options(nostack));
@@ -189,6 +166,30 @@ pub unsafe fn init() {
             bits = in(reg) (1u64 << 18) | (1u64 << 16),
             options(nostack),
         );
+    }
+}
+
+/// Standard ARM self-modifying-code sequence (clean D-cache, invalidate
+/// I-cache, before anything executes what was just written) - the
+/// invalidate half is one call for the whole address space
+/// (`ic ialluis`, done once by the caller after every region is cleaned),
+/// but `dc cvau` only cleans a single cache line (64 bytes on cortex-a72 -
+/// not queried from `CTR_EL0`, just assumed, same as the rest of this
+/// project's QEMU-shaped conventions) at a time, so a range bigger than
+/// that needs one call per line to actually be correct. The version this
+/// replaced called `dc cvau` exactly once regardless of region size - not
+/// wrong on QEMU (TCG doesn't model real cache incoherency, so this has
+/// never actually been exercised against hardware that would notice), but
+/// an unverified simplification that stopped being safe to carry forward
+/// once task 0's code could be bigger than one cache line.
+fn clean_dcache_range(addr: u64, len: u64) {
+    const CACHE_LINE: u64 = 64;
+    let mut offset = 0;
+    while offset < len {
+        unsafe {
+            asm!("dc cvau, {addr}", addr = in(reg) addr + offset, options(nostack));
+        }
+        offset += CACHE_LINE;
     }
 }
 

@@ -13,7 +13,6 @@
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::console;
-use crate::shell;
 
 /// Two independent counters (one per `tasks.rs` task), proof — alongside
 /// `double`/`print` below — that syscalls arriving from *different*,
@@ -33,17 +32,23 @@ pub const NO_CHAR: u64 = u64::MAX;
 /// entire reason this indirection exists. Its return value becomes EL0's
 /// new x0 after `eret`.
 ///
-/// Six syscalls now. `double`/`print` were deliberately chained by the
-/// original single-task demo (double's return value fed straight into
-/// print's argument) to prove a return value survives the trampoline
-/// intact; `report` is what `tasks.rs`'s original two demo tasks called,
-/// each with its own task ID as `arg0` (task 1 has since become a plain
-/// idle loop that calls nothing - see `tasks.rs`). `try_read_char`/`putc`/
-/// `shell_input` are the real input/output primitives the interactive
-/// shell (`shell.rs`) is built on: task 0's poll loop chains the first two
-/// directly (a byte `try_read_char` returns becomes `shell_input`'s `arg0`
-/// with no extra register shuffling), and all the actual line-editing
-/// logic lives in `shell.rs`, not here or in EL0 code.
+/// Five syscalls now (`shell_input`, a sixth, was removed - see below).
+/// `double`/`print` were deliberately chained by the original single-task
+/// demo (double's return value fed straight into print's argument) to
+/// prove a return value survives the trampoline intact; `report` is what
+/// `tasks.rs`'s original two demo tasks called, each with its own task ID
+/// as `arg0` (task 1 has since become a plain idle loop that calls
+/// nothing - see `tasks.rs`). `try_read_char`/`putc` are the real
+/// input/output primitives userland programs are built on - task 0 is now
+/// a real loaded program (`loader.rs`/`shell/`) that calls these directly
+/// and does its own line editing in its own code, which is what made
+/// `shell_input` (previously: hand these bytes to the kernel's own
+/// EL1-resident line editor in a now-deleted `shell.rs`) unnecessary.
+/// Deliberately left a gap at number 5 rather than renumbering `putc`'s
+/// neighbors - a stable ABI matters more than a dense one, and this is a
+/// preview of exactly the kind of churn a shared syscall-ABI crate should
+/// prevent once EL0 code isn't only ever built in this same repo (see
+/// `docs/processes.md`'s "known rough edges").
 pub extern "C" fn dispatch(number: u64, arg0: u64) -> u64 {
     match number {
         0 => {
@@ -72,10 +77,6 @@ pub extern "C" fn dispatch(number: u64, arg0: u64) -> u64 {
         },
         4 => {
             console::putc(arg0 as u8);
-            0
-        }
-        5 => {
-            shell::on_byte(arg0 as u8);
             0
         }
         _ => {
