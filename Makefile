@@ -50,13 +50,26 @@ esp: build shell-bin
 
 # Boots the ESP directory directly in QEMU (no disk image needed) against
 # the aarch64 OVMF firmware installed by `brew install qemu`.
+#
+# The drive is explicitly attached as a virtio-mmio block device
+# (if=none + -device virtio-blk-device), not left to QEMU's own default -
+# a plain `-drive ...,media=disk` on this machine type auto-attaches as
+# virtio-blk-*pci* instead, which firmware boots from just as well but
+# would need this kernel's own runtime driver to walk PCI/ECAM config
+# space to find (a real subsystem on its own - see virtio_mmio.rs's
+# module doc comment). virtio-mmio.force-legacy=false selects the modern
+# (non-legacy) register interface - QEMU defaults virtio-mmio to legacy
+# mode, confirmed via `-device virtio-mmio,help`'s printed default, kept
+# only for old-guest compatibility this project has no need to imitate.
 run: esp
 	qemu-system-aarch64 \
 		-machine virt \
 		-cpu cortex-a72 \
 		-m 512M \
 		-bios $(OVMF) \
-		-drive file=fat:rw:$(ESP_DIR),format=raw,media=disk \
+		-drive file=fat:rw:$(ESP_DIR),format=raw,media=disk,if=none,id=hd0 \
+		-device virtio-blk-device,drive=hd0 \
+		-global virtio-mmio.force-legacy=false \
 		-nographic
 
 # Builds a real MBR+FAT32 .img (a valid raw UEFI-bootable disk - verified by

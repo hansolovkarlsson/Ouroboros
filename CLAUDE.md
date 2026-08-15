@@ -655,6 +655,96 @@ empty line all produced exactly the expected output, including `clear`'s
 raw ANSI escape sequence reaching the console. Zero aborts in a `-d int`
 cross-check across the whole sequence.
 
+### Phase 3a: a real virtio-blk driver, and a transport choice made by measurement
+
+First runtime (post-`exit_boot_services`) disk I/O this kernel has ever
+done — everything before this read files only during UEFI boot services
+(`loader.rs`), a one-shot window. `docs/roadmap.md`'s phase 3a: a
+synchronous, polling virtio-blk driver, proven by reading sector 0 back
+and checking it against a value nothing but a real disk read could
+produce (the MBR boot signature, `0x55 0xAA` at bytes 510-511).
+
+**The transport choice (virtio-mmio vs. virtio-blk-pci) was settled by
+directly inspecting what QEMU actually does, not by assumption.** Two
+real, confirmed findings from `info qtree` (via the QEMU monitor) shaped
+this:
+
+- Plain `-drive ...,media=disk` with no `if=`/`-device` — the Makefile's
+  `run` target until this milestone — auto-attaches as **virtio-blk-pci**,
+  not virtio-mmio. First diagnosed backwards: an early `info qtree` query
+  appeared to show no block device *anywhere*, which would have meant the
+  ESP was never reachable by anything — obviously wrong, since the kernel
+  demonstrably boots from it every session. Root cause was a monitor-read
+  bug in the diagnostic script, not QEMU: reading the socket with a single
+  fixed sleep before going non-blocking cut the response off partway
+  through (consistently at the same byte count, which is what made it look
+  like real data rather than truncation at first) — the PCIe section,
+  further down, was never actually read. Fixed by polling with an idle
+  timeout instead of a fixed sleep; the full response showed
+  `virtio-blk-pci` at PCI address `02.0` all along.
+- Reaching a PCI-attached device at runtime (as opposed to via UEFI boot
+  services, which already had `pci.rs` for a different purpose) needs a
+  driver-owned ECAM/config-space walk this project doesn't have — a real
+  subsystem on its own, comparable in shape to writing PCI enumeration
+  twice. **Decision: attach the drive as virtio-mmio explicitly instead**
+  (`-device virtio-blk-device` + `if=none`), avoiding that subsystem
+  entirely — `virtio_mmio.rs`'s 32-slot scan (addresses confirmed via the
+  same devicetree-dump technique as `gic.rs`/`timer.rs`) needs no bus
+  enumeration protocol at all.
+
+**Modern (non-legacy) register interface, also a deliberate, verified
+choice.** QEMU's `virtio-mmio` transport defaults to `force-legacy=true`
+(confirmed via `-device virtio-mmio,help`'s printed default) — an older,
+more complex register interface (page-frame-number/alignment-based queue
+setup instead of explicit 64-bit desc/avail/used addresses). The Makefile
+now passes `-global virtio-mmio.force-legacy=false`; the resulting
+register layout was verified directly via the QEMU monitor's `xp/1xw`
+(examine physical memory) before any driver code was written — reading
+`MagicValue=0x74726976`, `Version=2`, `DeviceID=2`, `VendorID=0x554d4551`
+("QEMU") straight out of guest physical memory, not inferred from the spec
+alone.
+
+**A genuinely surprising finding, traced to its actual cause rather than
+left as a curiosity:** peeking the block device's Status register the
+same way, *before* our kernel had run at all, showed `0xf`
+(`ACKNOWLEDGE|DRIVER|FEATURES_OK|DRIVER_OK`) already set — a device that
+looked fully initialized despite no driver of ours ever touching it. Cause,
+once traced through: EDK2 firmware bundles its own virtio-blk driver, and
+that driver is *how firmware itself* finds and loads this kernel and reads
+`loader.rs`'s config/program files during boot services — the same device,
+initialized by someone else first. `Device::init` therefore resets the
+device (`Status = 0`) unconditionally as its first step, per the virtio
+spec's requirement for a driver taking ownership of a device, rather than
+assuming a clean slate.
+
+**Cache coherence for the virtqueue needed no extra work, confirmed rather
+than assumed dangerous:** the devicetree dump that confirmed the transport
+addresses also showed `dma-coherent;` on every `virtio_mmio` node — QEMU
+stating outright that virtio DMA on this platform is cache-coherent, unlike
+the genuinely-needed cache maintenance around `tasks.rs`'s self-modifying
+EL0 code. Ordinary memory barriers (`dsb sy` before the notify doorbell,
+`dmb sy` inside the completion poll) are still used, for ordering, not
+coherence — a different concern the "dma-coherent" property doesn't cover.
+
+**Confirmed working end to end, not just "no error returned":** one QEMU
+boot produced `virtio-blk ready, capacity 1032192 sectors` followed by
+`virtio-blk read sector 0, boot signature 0xaa55 (valid MBR)` — a specific,
+independently-verifiable value (vvfat's synthesized FAT volume really does
+carry a valid MBR at sector 0) that this code could not produce by
+accident. Interactive shell use (`uptime`, `help`) immediately afterward in
+the same boot confirmed nothing about the existing boot sequence regressed.
+Zero aborts in a `-d int` cross-check.
+
+**Still coarse, worth knowing before building on it:** read-only (no
+write support, matching `docs/roadmap.md`'s explicit phase-3 scope), one
+request in flight at a time (no queuing/batching), polling completion
+rather than interrupt-driven (this device's IRQ line is real - GIC INTID
+depends on which of the 32 slots QEMU happens to populate - but wiring it
+was deliberately skipped for this first cut, matching every other driver
+in this kernel so far), and not yet verified against anything but QEMU
+(Parallels' own virtio implementation, if it has one, is unconfirmed -
+same open question already on record for virtio-console).
+
 ### Parallels disk attachment: a real trap, not a hunch
 
 Getting `esp.img` to actually boot in Parallels took a few wrong turns worth
@@ -700,20 +790,22 @@ for the reasoning behind that lead.
 fully working console via ACPI/SPCR. MMU/identity-paging, the timer-driven
 preemption tick, the syscall boundary, real preemptive task switching, a
 working interactive echo shell, a shell that's a real disk-loaded,
-configuration-selected userland program, and now real commands (`help`,
-`echo`, `uptime`, `clear` - see "Phase 2" above, and
-`docs/architecture.md`/`docs/processes.md` for the reference write-up) are
-all done and confirmed working, not just structurally plausible.
+configuration-selected userland program, real commands (`help`, `echo`,
+`uptime`, `clear`), and now a working runtime virtio-blk driver (see
+"Phase 3a" above, and `docs/architecture.md`/`docs/processes.md`/
+`docs/roadmap.md` for the reference write-up) are all done and confirmed
+working, not just structurally plausible.
 
-**Both phases of the original "get to a shell" plan are done.** Phase 1
-(accept input, echo it back) and phase 2 (real commands, one backed by
-real kernel state via a new syscall) are both confirmed working. Phase 3
-(disk commands - `ls`/`cat`/`cd`/`pwd`, and the runtime storage stack they
-need) is planned but not started - see `docs/roadmap.md` for the full
-breakdown, including the open decisions (virtio transport confirmation,
-hand-rolled-vs-crate FAT32) worth resolving before writing code. This
-section (and the "gaps" paragraph below it) still tracks what's true right
-now; `docs/roadmap.md` is the one to check for what's next and why.
+**Both phases of the original "get to a shell" plan are done, and phase 3
+is underway.** Phase 1 (accept input, echo it back) and phase 2 (real
+commands, one backed by real kernel state via a new syscall) are both
+confirmed working. Of phase 3 (disk commands - `ls`/`cat`/`cd`/`pwd`, and
+the runtime storage stack they need - see `docs/roadmap.md`), stage 3a (a
+real block device driver) is done; 3b (a FAT32 reader — still an open
+decision, hand-rolled vs. a crate like `fatfs`, per the roadmap) and 3c
+(new syscalls + the commands themselves) haven't started. This section
+(and the "gaps" paragraph below it) still tracks what's true right now;
+`docs/roadmap.md` is the one to check for what's next and why.
 
 What's still coarse and worth knowing about before building on any of
 this — kept current in `docs/processes.md`'s "known rough edges" rather
@@ -750,7 +842,7 @@ lands.
 make build                  # cargo build (debug) - kernel only, see below
 make build PROFILE=release  # release profile
 make shell-bin               # build shell/ for aarch64-unknown-none + objcopy to a raw .bin
-make run                    # stage ESP dir (kernel + shell binary + config) + boot in QEMU
+make run                    # stage ESP dir (kernel + shell binary + config) + boot in QEMU with a virtio-mmio block device attached
 make image                  # build esp.img, a raw MBR+FAT32 disk image (not directly usable by Parallels - see below)
 make parallels-hdd          # wrap esp.img into esp.hdd, a Parallels-native virtual hard disk
 make clean
@@ -806,6 +898,8 @@ kernel/
   src/loader.rs      reads INIT.CFG + a program off the ESP during boot services, into a 2MB-aligned EL0-accessible region - see docs/processes.md
   src/syscall.rs     svc syscall dispatch table (print/double/report/try_read_char/putc/get_ticks, gap at 5) - confirmed working end to end, see above
   src/tasks.rs       task 0 (loaded program) + task 1 (idle) + the round-robin scheduler (Context save/restore in the tick path) - confirmed alternating, see above
+  src/virtio_mmio.rs virtio-mmio transport: 32-slot device discovery, modern (non-legacy) register layout, addresses confirmed via devicetree dump
+  src/virtio_blk.rs  runtime virtio-blk driver: feature negotiation, one virtqueue, synchronous polling sector reads - phase 3a, confirmed working, see above
 
 shell/               userland default shell - a separate crate, built for aarch64-unknown-none, loaded from disk (not compiled into the kernel)
   linker.ld          flat-binary linker script: entry at offset 0, no .bss/.data (see docs/processes.md)

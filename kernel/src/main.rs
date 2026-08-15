@@ -16,6 +16,8 @@ mod tasks;
 mod timer;
 mod uart;
 mod uart16550;
+mod virtio_blk;
+mod virtio_mmio;
 
 use uefi::boot;
 use uefi::prelude::*;
@@ -133,6 +135,13 @@ fn main() -> Status {
     unsafe { mmu::install_identity_map(&memory_map, [(program.base, program.size), tasks::idle_region()]) };
     console::println!("Ouroboros kernel: identity map installed, MMU running on our own tables");
 
+    // Phase 3a (docs/roadmap.md): the first piece of a runtime storage
+    // stack, proven end to end by reading back a sector and checking it
+    // against a value nothing but a real disk read could produce. Not
+    // fatal if it fails - nothing else depends on this driver yet, unlike
+    // `program` above.
+    probe_virtio_blk();
+
     // SAFETY: GICD/GICC are mapped by the identity map just installed
     // above (both fall within the low-1GB device block).
     unsafe {
@@ -157,6 +166,41 @@ fn main() -> Status {
 
     // SAFETY: called after tasks::init().
     unsafe { tasks::start() }
+}
+
+/// Discovers and initializes the virtio-blk device, then reads sector 0
+/// back and checks it for the MBR boot signature (`0x55 0xAA` at bytes
+/// 510-511) - proof the whole pipeline (discovery, feature negotiation,
+/// virtqueue setup, a real request round-trip) actually moved bytes off
+/// the disk, not just that no error was returned. `esp.img`'s first
+/// sector is a real MBR (see the Makefile/`README`), so this signature
+/// is a property of the actual disk contents, not something this code
+/// could produce by accident.
+fn probe_virtio_blk() {
+    let mut device = match unsafe { virtio_blk::Device::discover() } {
+        Ok(device) => device,
+        Err(e) => {
+            console::println!("Ouroboros kernel: virtio-blk discovery failed ({e})");
+            return;
+        }
+    };
+    if let Err(e) = unsafe { device.init() } {
+        console::println!("Ouroboros kernel: virtio-blk init failed ({e})");
+        return;
+    }
+    console::println!("Ouroboros kernel: virtio-blk ready, capacity {} sectors", device.capacity_sectors());
+
+    let mut sector = [0u8; 512];
+    match unsafe { device.read_sector(0, &mut sector) } {
+        Ok(()) => {
+            let signature = (sector[511] as u16) << 8 | sector[510] as u16;
+            console::println!(
+                "Ouroboros kernel: virtio-blk read sector 0, boot signature {signature:#06x} ({})",
+                if signature == 0xaa55 { "valid MBR" } else { "unexpected" }
+            );
+        }
+        Err(e) => console::println!("Ouroboros kernel: virtio-blk read failed ({e})"),
+    }
 }
 
 /// Parks the core forever instead of returning to firmware. `wfe` is a

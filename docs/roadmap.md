@@ -24,6 +24,11 @@ describes where it's going.
 - **Phase 2 — real commands.** `help`, `echo`, `uptime`, `clear`, with
   `uptime` backed by a real new syscall (`get_ticks`) rather than being
   another echo demo.
+- **Phase 3a — a real virtio-blk driver.** Runtime (post-boot-services)
+  block I/O, proven by reading sector 0 back and checking the real MBR
+  boot signature. Read-only, synchronous, polling — see `CLAUDE.md`'s
+  "Phase 3a" section for how the transport (virtio-mmio, not
+  virtio-blk-pci) got decided and verified.
 
 ## Phase 3 — a fully functional shell with disk commands
 
@@ -40,20 +45,32 @@ deferred twice already (once in the phase-1 shell milestone, again in the
 disk-loading milestone) rather than a shortcut on top of what exists. This
 phase is really three dependent stages:
 
-### 3a. A real block device driver
+### 3a. A real block device driver — done
 
-- **Transport:** virtio-mmio almost certainly, matching QEMU's `virt`
-  machine (same reasoning already used for GICv2/the timer — confirmed via
-  devicetree dump, not assumed) and plausibly Parallels too, per the
-  virtio-console lead already recorded in `CLAUDE.md` (Parallels'
-  Virtualization framework exposes storage over virtio as well as serial).
-  Needs its own confirmation pass the same way GICv2's addresses were
-  pinned down, not reused by assumption.
-- **Driver scope:** device discovery, feature negotiation, one virtqueue,
-  synchronous block read requests to start (write support is explicitly
-  out of scope for this phase — see "Deliberately out of scope" below).
-- This is genuinely comparable in size to the still-deferred
-  Parallels virtio-console work — a real subsystem, not an afternoon.
+- **Transport: virtio-mmio, confirmed and deliberately chosen over
+  QEMU's own default.** Addresses confirmed via the same devicetree-dump
+  technique as GICv2/the timer (32 slots, `0xa000000`, `0x200` apart).
+  Worth recording since it wasn't the obvious path: a plain
+  `-drive ...,media=disk` with no `if=`/`-device` actually auto-attaches
+  as **virtio-blk-pci**, not virtio-mmio — reaching that at runtime would
+  need this kernel's own PCI/ECAM config-space walk (a real subsystem on
+  its own, comparable to writing PCI enumeration a second time, since the
+  existing `pci.rs` is boot-services-only). The Makefile now attaches the
+  drive as virtio-mmio explicitly instead, sidestepping that entirely.
+  Modern (non-legacy) register interface, also deliberately chosen and
+  verified via direct QEMU-monitor memory peeks before any driver code
+  was written — see `CLAUDE.md`'s "Phase 3a" section for the full story,
+  including a real bug in the diagnostic process itself (a truncated
+  monitor read that briefly looked like "no block device exists at all").
+  Parallels' own virtio-mmio behavior is still unconfirmed — same open
+  question already on record for virtio-console.
+- **Driver scope, as built:** device discovery, feature negotiation (just
+  `VIRTIO_F_VERSION_1`), one virtqueue, synchronous polling block reads.
+  Write support stayed out of scope, as planned (see "Deliberately out of
+  scope" below).
+- Confirmed working end to end: reads sector 0 back and checks the real
+  MBR boot signature, not just "no error returned." See
+  `kernel/src/virtio_mmio.rs`/`kernel/src/virtio_blk.rs`.
 - **Kernel-resident, not a user-space driver process — a deliberate,
   explicit choice, not an oversight.** `docs/research-minix-boot.md`
   raised a real fork here: writing virtio-blk (and eventually
