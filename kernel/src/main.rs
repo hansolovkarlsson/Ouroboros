@@ -124,7 +124,7 @@ fn main() -> Status {
         gic::init();
         gic::enable_interrupt(timer::INTID);
     }
-    timer::arm(1000);
+    timer::arm(timer::TICK_INTERVAL_MS);
 
     // SAFETY: the EL0 region (tasks::el0_region()) was just mapped
     // EL0-accessible above.

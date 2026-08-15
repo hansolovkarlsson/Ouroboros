@@ -449,6 +449,48 @@ literally all Enter does right now — phase 2 (commands) is specifically
 about replacing that one step with real parsing/dispatch, and nothing else
 in `shell.rs` should need to change shape for it.
 
+### Input lag fix: the round-robin tick period, and a real `-d int` measurement trap
+
+Shortly after the echo shell above, real usage surfaced a genuine bug: typed
+characters took up to about a second to echo. Root cause, confirmed by
+direct investigation rather than guessed: `tasks.rs`'s round-robin swaps
+tasks **unconditionally on every tick**, whether or not either task has
+anything to do. With `TICK_INTERVAL_MS = 1000` (its value since the
+timer-tick milestone), a keystroke arriving while task 1 (the idle task)
+happened to be scheduled would sit untouched in the UART RX FIFO for up to
+one full tick period — task 0 (the shell) simply wasn't running to poll for
+it — before the next tick swapped back. Fix: `timer.rs` now owns
+`TICK_INTERVAL_MS` as a single shared constant (previously duplicated
+between `main.rs`'s initial `arm()` call and a private copy in
+`exceptions.rs`, a real drift risk on its own), lowered to 20ms. Worst-case
+latency drops to ~20ms, imperceptible; re-verified via the same piped-stdin
+QEMU testing as the shell milestone, with a fresh `-d int` cross-check
+still showing zero aborts at the higher tick rate.
+
+**A real measurement trap surfaced while diagnosing this, worth not
+repeating:** the very first attempt to characterize the actual tick rate
+used `-d int`'s raw exception count over an entire QEMU run (boot included)
+and concluded the tick was firing every ~20-40ms even *before* this fix —
+which would have meant the 1-second lag theory was wrong. That number was
+an artifact: UEFI firmware's own boot-time code (DXE dispatch, PCI
+enumeration, etc. — still resident and executing at EL1 for the first
+several seconds of every run, well before our kernel installs its own
+`VBAR_EL1`) takes real IRQ exceptions of its own, at a much higher rate
+than our kernel ever will. In one measured 10-second window, 500 of 527
+total `[IRQ]` exceptions traced back to a single non-kernel EL1 address
+(firmware's own code, well outside our image's address range) — almost all
+boot noise, not ticks. A temporary debug print directly inside `timer::arm`
+(counting real re-arm calls, immune to this contamination since `arm` is
+never called by firmware) gave the true number: ticks roughly 1 second
+apart, exactly matching the configured value and confirming `arm`'s
+frequency-to-ticks math (`cntfrq_el0 / 1000 * interval_ms`) was never
+actually buggy. Lesson for next time: any `-d int` rate measurement must
+either start counting only after a known post-boot log line (as the
+piped-stdin shell tests already did for a different reason) or instrument
+the suspected code path directly — a whole-run exception count silently
+includes several seconds of firmware activity that has nothing to do with
+the kernel being tested.
+
 ### Parallels disk attachment: a real trap, not a hunch
 
 Getting `esp.img` to actually boot in Parallels took a few wrong turns worth

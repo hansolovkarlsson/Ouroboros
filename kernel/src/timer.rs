@@ -15,6 +15,18 @@ use core::arch::asm;
 
 pub const INTID: u32 = 30;
 
+/// The preemption tick's period. Single source of truth for both the
+/// initial arm in `main.rs` and every re-arm in `exceptions.rs`'s IRQ
+/// handler - was 1000 (once/sec) through the task-switching milestone,
+/// which turned out to be the actual cause of a real, user-visible bug:
+/// `tasks.rs`'s round-robin swaps unconditionally on every tick regardless
+/// of whether there's anything to do, so a keystroke arriving while the
+/// idle task happens to be scheduled sits in the UART FIFO for up to one
+/// full tick period before the shell task gets a turn again - one second,
+/// worst case, easily perceived as input lag. 20ms keeps that worst case
+/// low enough to feel instant without materially increasing tick overhead.
+pub const TICK_INTERVAL_MS: u64 = 20;
+
 // Enabled (bit0=1), not masked (bit1=0 - IMASK omitted, not written).
 const CTL_ENABLE: u64 = 1 << 0;
 

@@ -311,7 +311,6 @@ extern "C" fn rust_exception_handler(esr: u64, far: u64, elr: u64, vector: u64) 
 static TICKS: AtomicU64 = AtomicU64::new(0);
 
 const SPURIOUS_INTID: u32 = 1023;
-const TICK_INTERVAL_MS: u64 = 1000;
 
 /// Runs on every IRQ, called from the vector table's slots 5/9 trampoline
 /// with a pointer to its saved [`Context`] — `frame` *is* whatever was
@@ -323,12 +322,14 @@ extern "C" fn rust_irq_handler(frame: *mut Context) {
 
     if intid == timer::INTID {
         // No longer logged every tick (used to print "tick N" here): now
-        // that task 0 is a real interactive shell (tasks.rs/shell.rs),
-        // a debug line firing ~27 times/sec would constantly interleave
-        // with and corrupt whatever the user is typing. TICKS is kept for
-        // whenever something wants an uptime/tick-count query.
+        // that task 0 is a real interactive shell (tasks.rs/shell.rs), a
+        // debug line firing this often (timer::TICK_INTERVAL_MS - shortened
+        // to 20ms specifically to fix round-robin input lag, see its doc
+        // comment) would constantly interleave with and corrupt whatever
+        // the user is typing. TICKS is kept for whenever something wants an
+        // uptime/tick-count query.
         TICKS.fetch_add(1, Ordering::Relaxed);
-        timer::arm(TICK_INTERVAL_MS);
+        timer::arm(timer::TICK_INTERVAL_MS);
         unsafe { tasks::on_tick(frame) };
     }
 
