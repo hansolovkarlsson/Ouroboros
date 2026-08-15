@@ -238,9 +238,22 @@ mechanisms in order, logging why each failed before trying the next:
    end on QEMU: discovery, feature negotiation, transmitq0 setup, and
    real data reaching the host. Transmit-only — no receive virtqueue
    exists yet, so `Console::Virtio`'s read always returns `None`.
-   Parallels itself is unconfirmed: whether it exposes its console via
-   virtio-mmio at all (vs. virtio-pci), and if so at the same address
-   range this driver assumes, needs a real boot on real hardware to know.
+   **Confirmed dead on Parallels**, with real evidence, not just an
+   untested guess: a full PCI device inventory taken on real hardware
+   (via `pci::log_all_devices`, a diagnostic run whenever the three
+   mechanisms above all fail) shows virtio's real vendor ID present only
+   for networking, no virtio-console device ID over PCI at all, and no
+   direct evidence of one over MMIO either. Parallels' actual serial
+   port is very likely a proprietary device (PCI vendor `0x1ab8`, class
+   `0xff`/unclassified) with no public specification — see `CLAUDE.md`'s
+   "virtio-console" section for the full device inventory and reasoning.
+
+When all three of devicetree/ACPI/PCI 16550 fail, `pci::log_all_devices`
+(`pci.rs`) logs every PCI device's vendor:device and class:subclass
+through the still-working boot-services console — a general-purpose
+diagnostic, not specific to virtio, kept as a real tool for whatever the
+next "why can't this platform's hardware be found" question turns out
+to be.
 
 There is deliberately no hardcoded fallback address for any driver: one
 existed early in this project and was removed after confirming it

@@ -1355,7 +1355,7 @@ support arc phase 3 explicitly deferred (mkdir/rmdir/touch/rm/write/cp/
 mv, phases 4-8) - what's left in `docs/roadmap.md`'s parking lot from
 here is genuinely bigger work, not more cheap wins in this vein.
 
-### virtio-console: a real, working transmit-only driver, confirmed on QEMU - Parallels itself still unconfirmed
+### virtio-console: a real, working transmit-only driver, confirmed on QEMU - and confirmed *not applicable to Parallels*, with real evidence
 
 The real lead flagged (and deliberately deferred) in the "Console
 discovery" section above, finally built: `kernel/src/virtio_console.rs`,
@@ -1451,17 +1451,90 @@ negotiated - none needed for one fixed-size default port. `write_byte`
 per keystroke, unlike `write_str`'s batched sends - real overhead
 compared to a raw UART's direct MMIO write, accepted for a first cut.
 
-**Parallels itself remains genuinely unconfirmed - this environment has
-no way to test it.** Everything above is QEMU-verified; whether real
-Parallels-on-Apple-Silicon virtualization exposes its virtio-console at
-the same `0xa000000`-based, 32-slot-stride address range this driver
-scans (confirmed QEMU-specific, per `virtio_mmio.rs`'s own module doc
-comment - "Parallels' own virtio-mmio behavior is still unconfirmed",
-already flagged before this milestone and still true after it), or even
-uses virtio-mmio transport at all rather than virtio-pci, is exactly the
-kind of thing this project's own discipline says not to assume - it
-needs a real boot on real Parallels hardware to know, which only the
-user can do from here.
+**Parallels itself: tested on real hardware by the user, and the answer
+is a confirmed no - not "still unconfirmed" anymore, a real negative
+result with real evidence behind it.** Booting the actual `esp.hdd` on
+real Parallels-on-Apple-Silicon hardware (not this environment, which
+has no way to do that itself) showed all three of devicetree/ACPI/PCI
+16550 failing exactly as already documented, and - critically - showed
+no visible output at all afterward, from `virtio-console` or anything
+else. That alone couldn't distinguish "the driver ran and found nothing"
+from "the driver ran and hung": the UEFI graphics console visible in the
+boot screenshot only ever renders during boot services, so anything that
+happens after `exit_boot_services` - working or not - is invisible on
+that same screen regardless. Getting past that ambiguity took one more
+diagnostic round-trip.
+
+**First, the user's own separately reported "Serial Port" hardware
+device (configured in Parallels, output redirected to a file) turned
+out to receive *nothing at all*, not even boot-firmware noise - unlike
+QEMU, where EDK2's own pre-exit debug output gets opportunistically
+mirrored onto any attached virtio-serial chardev regardless of what our
+own kernel does. That absence was itself inconclusive (this specific
+Parallels firmware build might just not do that mirroring trick), so it
+ruled nothing in or out on its own.**
+
+**What actually settled it: a new, permanent diagnostic,
+`pci::log_all_devices` (`kernel/src/pci.rs`), reusing the same
+boot-services `PciRootBridgeIo` walk `discover_uart16550` already proved
+safe on this exact hardware** (that function reaching
+`DiscoveryError::NoSerialDevice` there, rather than `NoRootBridge`, was
+already proof PCI enumeration itself works on Parallels - this just logs
+every device found instead of filtering for one class). Wired into
+`main.rs` to run automatically, logged through the still-working
+pre-exit UEFI console, whenever all three normal mechanisms fail - cheap,
+safe (read-only PCI config-space reads, no writes), and adds zero noise
+to the normal QEMU boot path where ACPI already succeeds.
+
+**The real Parallels PCI device inventory this produced, decoded:**
+
+| Vendor | Device | Class:Subclass | What it is |
+|---|---|---|---|
+| `0x8086` (Intel) | `0x293e` | `0x04:0x03` | HD Audio controller |
+| `0x8086` (Intel) | `0x265c` | `0x0c:0x03` | USB2 EHCI controller |
+| `0x1033` (NEC) | `0x0194` | `0x0c:0x03` | USB3 xHCI controller |
+| `0x1af4` (**virtio**) | `0x1000` | `0x02:0x00` | **virtio-net** - not console |
+| `0x1ab8` (**Parallels**) | `0x4000` | `0xff:0x00` | Parallels' own proprietary device |
+
+virtio's real vendor ID (`0x1af4`) genuinely does appear on the bus -
+but only for networking (device ID `0x1000`). A virtio-console device
+would show up as device ID `0x1003` (legacy/transitional) or `0x1043`
+(modern-only, per the virtio spec's PCI device ID scheme) - neither is
+present. **This rules out virtio-console over PCI, on top of the
+already-empty result from virtio-console over MMIO** (no direct
+evidence virtio-mmio *specifically* failed on this exact boot - nothing
+can print post-exit either way - but the complete absence of any PCI
+virtio-console device, combined with Parallels choosing not to expose
+one via the transport this driver already scans, makes an MMIO-only
+virtio-console existing somewhere else a real stretch, not a live
+possibility worth chasing further without new evidence).
+
+**The actual conclusion: Parallels' serial port almost certainly isn't
+virtio-console at all - it's something proprietary.** The one
+unexplained device left, vendor `0x1ab8` (Parallels' own registered PCI
+vendor ID) device `0x4000`, class `0xff` ("vendor-specific,
+unclassified" - not a standard PCI device class at all), is the
+strongest remaining candidate for what the configured Serial Port
+device actually *is* on the guest side. There's no public specification
+for it the way there is for virtio - reaching it would mean blind
+register/BAR probing against an undocumented protocol, not implementing
+a known spec the way this entire driver was built. **Explicitly decided
+not to pursue that here** - a real, open-ended reverse-engineering
+task with no guaranteed payoff, categorically different in kind from
+"implement a documented protocol," and a call the user made deliberately
+rather than one assumed. Recorded as a confirmed dead end with real
+evidence behind it, the same treatment the original three UART
+mechanisms got - not a soft "still unconfirmed" the way it read before
+this exchange.
+
+**A second, smaller finding from the same testing round: the earlier
+"opens as a folder" `esp.hdd` attachment concern (see "Parallels disk
+attachment" below) was never a real problem.** The user's Parallels
+version simply labels the file-open dialog's action button "Open"
+rather than "Choose" - once that was clear, attaching and booting
+worked correctly, confirmed by the same boot log showing
+`loaded shell program` after successfully reading `INIT.CFG`/the shell
+binary off the real `esp.hdd`/`esp.dmg` on genuine Parallels hardware.
 
 ### Parallels disk attachment: a real trap, not a hunch
 
@@ -1494,21 +1567,19 @@ attachment mechanism was wrong.
 
 ### Next milestone
 
-**Parallels console output has a real, working driver now (see
-"virtio-console" above) - but Parallels itself is still unconfirmed,
-not because of a deliberate pause anymore, just because this
-environment has no way to boot real Parallels hardware.** The QEMU-side
-implementation is done and verified end to end: discovery, feature
-negotiation, virtqueue setup, and real bytes reaching the host, all
-confirmed. What's left is squarely the user's to do: boot `esp.hdd` on
-real Parallels (`make parallels-hdd`, same as every prior Parallels
-milestone) and report back whether `try_virtio_console` actually finds
-a device there, and at the address range this driver assumes
-(`virtio_mmio.rs`'s `SLOT_BASE`/`SLOT_STRIDE`, confirmed QEMU-specific
-only). If it doesn't, the two live open questions are: does Parallels
-even use virtio-mmio transport for its console, or virtio-pci instead;
-and does it place virtio-mmio slots at the same addresses QEMU does.
-Neither can be answered from here.
+**Parallels console output is now a confirmed dead end for
+virtio-console specifically, tested on real hardware, not a pause or an
+open question anymore.** The QEMU-side driver is done and verified end
+to end (discovery, feature negotiation, virtqueue setup, real bytes
+reaching the host) - but a real Parallels boot, plus a full PCI device
+inventory taken directly from that hardware (see "virtio-console"
+above), showed no virtio-console device over PCI (virtio's own vendor
+ID appears only for networking) and no direct evidence of one over MMIO
+either. The actual serial port is very likely a proprietary Parallels
+device (vendor `0x1ab8`, no public spec) - reverse-engineering it was
+considered and explicitly declined as an open-ended task with no
+guaranteed payoff, a deliberate choice, not a default. Revisit only if
+real documentation or driver source for that device ever surfaces.
 
 **In the meantime, kernel development continues against QEMU**, which has a
 fully working console via ACPI/SPCR (and, as of this milestone, a second,
@@ -1581,26 +1652,27 @@ can't distinguish *why* an operation failed (see "Phase 4" through
 "Phase 8" above); disk-command pointer/length arguments are trusted, not
 validated against the caller's actual mapped region (fine with exactly
 one, currently-trusted userland program); and `virtio_console.rs` is
-transmit-only - no receive path, so Parallels console output (once
-confirmed working there) still can't accept typed input this phase, and
-its whole-message-per-virtqueue-round-trip `write_byte` path would make
-character-echo noticeably heavier than a raw UART's once RX exists to
-need it. Also still true from before this milestone: strict round-robin
-only, no priorities or blocking; FP/SIMD state still isn't saved
-anywhere (`exceptions.rs`'s `Context`).
+transmit-only - no receive path, and now confirmed not to matter for
+Parallels specifically (see "virtio-console" above: real hardware
+testing found no virtio-console device there at all, over either
+transport this project can drive) - a receive virtqueue is still a real
+gap for any *other* platform that does expose console via virtio-mmio/
+virtio-pci, just not Parallels. Also still true from before this
+milestone: strict round-robin only, no priorities or blocking; FP/SIMD
+state still isn't saved anywhere (`exceptions.rs`'s `Context`).
 
-Reasonable next steps from here: the user testing this milestone's real
-open question - does `try_virtio_console` actually find and drive a
-device on real Parallels hardware, or does that platform need a
-different transport/address assumption than this QEMU-confirmed one;
-adding a receive virtqueue to `virtio_console.rs` so a
-Parallels-via-virtio-console boot can actually be typed into, not just
-watched; a real relocating loader (ELF + relocation processing), which
+Reasonable next steps from here: `pci::log_all_devices` (new this
+milestone) is a real, reusable diagnostic worth remembering for any
+future "why can't this platform's hardware be found" question, not just
+this one; a real relocating loader (ELF + relocation processing), which
 would lift both the `core::fmt` and literal-comparison restrictions;
 blocking/waiting primitives so tasks can do more than an unconditional
 round-robin `wfe` loop; or output redirection (`>`/`>>`), now that
 `write_file`/`cp` give it something real to build on but shell-side
-command-line parsing still doesn't exist.
+command-line parsing still doesn't exist. Parallels console output
+itself stays a confirmed dead end for virtio-console unless real
+documentation for its proprietary serial device (vendor `0x1ab8`)
+someday surfaces - not something to keep chasing without that.
 
 ## Commands
 
@@ -1660,7 +1732,7 @@ kernel/
   src/uart16550.rs   raw 16550-compatible console driver (read + write; PCI-discovered consoles; different hardware, different driver)
   src/devicetree.rs  console UART discovery via the UEFI-provided devicetree (dead end on QEMU/Parallels)
   src/acpi.rs        console UART discovery via ACPI RSDP -> XSDT -> SPCR (works on QEMU, dead end on Parallels)
-  src/pci.rs         console UART discovery via PCI enumeration for a class 0x07/0x00 serial controller
+  src/pci.rs         console UART discovery via PCI enumeration for a class 0x07/0x00 serial controller, plus log_all_devices - a reusable full-bus diagnostic dump, see "virtio-console" above
   src/console.rs     global console handle (Console enum: Pl011 | Uart16550 | Virtio), shared between main() and the exception handler
   src/exceptions.rs  AArch64 exception vector table (VBAR_EL1) + fault reporting
   src/mmu.rs         replaces firmware's translation tables with our own identity map (L0->L1->L2->L3 as needed), up to MAX_EL0_REGIONS independent EL0 regions
@@ -1671,7 +1743,7 @@ kernel/
   src/tasks.rs       task 0 (loaded program) + task 1 (idle) + the round-robin scheduler (Context save/restore in the tick path) - confirmed alternating, see above
   src/virtio_mmio.rs virtio-mmio transport: 32-slot device discovery, modern (non-legacy) register layout, addresses confirmed via devicetree dump
   src/virtio_blk.rs  runtime virtio-blk driver: feature negotiation, one virtqueue, synchronous polling sector reads and writes - phase 3a (reads)/phase 4 (writes), confirmed working, see above
-  src/virtio_console.rs  transmit-only virtio-console driver over the same transport - device discovery, feature negotiation, transmitq0 - the real lead for Parallels console output, confirmed working on QEMU (Parallels itself unconfirmed), see "virtio-console" above
+  src/virtio_console.rs  transmit-only virtio-console driver over the same transport - device discovery, feature negotiation, transmitq0 - confirmed working on QEMU; confirmed *not* what Parallels' serial port actually is, see "virtio-console" above
   src/fat32.rs       hand-rolled FAT32 over virtio_blk::Device: MBR, BPB, FAT cluster chains, 8.3-only directory entries, mkdir/rmdir/touch/rm/write_file/mv write support - phase 3b (reads)/phase 4-8 (writes), confirmed working, see above
 
 shell/               userland default shell - a separate crate, built for aarch64-unknown-none, loaded from disk (not compiled into the kernel)

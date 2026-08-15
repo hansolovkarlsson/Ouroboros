@@ -79,6 +79,62 @@ pub fn discover_uart16550() -> Result<usize, DiscoveryError> {
     Err(DiscoveryError::NoSerialDevice)
 }
 
+/// Diagnostic only, not used for discovery: logs every PCI device's
+/// vendor:device and class:subclass, for cases where none of the three
+/// normal console-discovery mechanisms found anything and it's not
+/// obvious why. Added specifically to answer a real open question on
+/// Parallels: does it expose its console (or anything) as a virtio-pci
+/// device (vendor `0x1af4`) at all, when `virtio_mmio.rs`'s address-range
+/// scan also comes up empty post-exit? A successful walk that finds
+/// nothing (as opposed to [`DiscoveryError::NoRootBridge`]) already
+/// proves PCI enumeration itself works on this platform - see
+/// `discover_uart16550`, which already reaches `NoSerialDevice` there,
+/// not `NoRootBridge`.
+///
+/// Must be called before `exit_boot_services`, same as
+/// `discover_uart16550` - entirely boot-services-based.
+pub fn log_all_devices() {
+    let Ok(handles) = uefi::boot::find_handles::<PciRootBridgeIo>() else {
+        log::warn!("Ouroboros kernel: PCI device dump: no root bridge found");
+        return;
+    };
+
+    let mut found_any = false;
+    for handle in handles {
+        let Ok(mut root_bridge) = uefi::boot::open_protocol_exclusive::<PciRootBridgeIo>(handle)
+        else {
+            continue;
+        };
+        let Ok(tree) = root_bridge.enumerate() else {
+            continue;
+        };
+
+        for addr in tree.iter() {
+            let Ok(vendor_device) = root_bridge.pci().read_one::<u32>(addr.with_register(0)) else {
+                continue;
+            };
+            let Ok(class_reg) = root_bridge
+                .pci()
+                .read_one::<u32>(addr.with_register(CLASS_REGISTER))
+            else {
+                continue;
+            };
+            let vendor = vendor_device as u16;
+            let device = (vendor_device >> 16) as u16;
+            let class = (class_reg >> 24) as u8;
+            let subclass = (class_reg >> 16) as u8;
+            log::info!(
+                "Ouroboros kernel: PCI device: vendor={vendor:#06x} device={device:#06x} class={class:#04x} subclass={subclass:#04x}"
+            );
+            found_any = true;
+        }
+    }
+
+    if !found_any {
+        log::info!("Ouroboros kernel: PCI device dump: root bridge(s) found, but zero devices enumerated");
+    }
+}
+
 fn read_bar0_address(
     root_bridge: &mut PciRootBridgeIo,
     addr: uefi::proto::pci::PciIoAddress,

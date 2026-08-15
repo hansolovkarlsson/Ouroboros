@@ -7,6 +7,57 @@ what broke, how it was diagnosed), see `CLAUDE.md`; for *how* something
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## Parallels console: virtio-console confirmed not applicable, with real hardware evidence
+
+**The goal:** resolve the one open question the virtio-console milestone
+(below) left for the user - does `try_virtio_console` actually find and
+drive a device on real Parallels hardware. The user booted the real
+`esp.hdd` on real Parallels-on-Apple-Silicon hardware and reported back;
+this entry covers what that testing found and the diagnostic built to
+make sense of it.
+
+- Real Parallels boot confirmed devicetree/ACPI/PCI 16550 all fail
+  exactly as already documented, and showed no visible output at all
+  afterward - inherently ambiguous on its own, since the UEFI graphics
+  console only renders during boot services, so "the driver ran and
+  found nothing" and "the driver ran and hung" look identical on that
+  screen.
+- The user's separately configured Parallels "Serial Port" device
+  (output to a file) received nothing at all, not even boot-firmware
+  noise - unlike QEMU, where EDK2 opportunistically mirrors its own
+  debug output onto any attached virtio-serial chardev. Inconclusive on
+  its own (this firmware build might just not do that), so it ruled
+  nothing in or out.
+- **New permanent diagnostic: `pci::log_all_devices`
+  (`kernel/src/pci.rs`)**, reusing the same boot-services
+  `PciRootBridgeIo` walk `discover_uart16550` already proved safe on
+  this hardware (reaching `NoSerialDevice` there, not `NoRootBridge`,
+  was already proof the walk itself works). Logs every PCI device's
+  vendor:device and class:subclass through the still-working pre-exit
+  UEFI console, whenever all three normal console-discovery mechanisms
+  fail - cheap, read-only, and adds no noise to the normal QEMU boot
+  path.
+- **The real Parallels PCI inventory this produced**: an Intel HD Audio
+  controller, an Intel USB2 controller, an NEC USB3 controller, a
+  virtio device (vendor `0x1af4`) with device ID `0x1000` -
+  **virtio-net, not virtio-console** (which would be device ID `0x1003`
+  or `0x1043`, neither present) - and one unclassified device under
+  Parallels' own PCI vendor ID (`0x1ab8`, device `0x4000`, class
+  `0xff`).
+- **Conclusion: Parallels' serial port is very likely a proprietary
+  Parallels device, not virtio-console at all** - no public
+  specification exists for it. Reverse-engineering it (blind
+  register/BAR probing against an undocumented protocol) was considered
+  and explicitly declined - an open-ended task with no guaranteed
+  payoff, categorically different from implementing a documented spec.
+  A deliberate stopping point, not an assumption.
+- A second, smaller finding from the same round of testing: the
+  `esp.hdd` "opens as a folder" attachment concern that prompted this
+  investigation was never a real problem - the user's Parallels version
+  just labels the file-open dialog's button "Open" instead of "Choose."
+  Confirmed by the same boot log successfully reading `INIT.CFG`/the
+  shell binary off the real disk.
+
 ## virtio-console — a real transmit-only driver, confirmed on QEMU
 
 **The goal:** the real lead flagged (and deliberately deferred) for

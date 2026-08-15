@@ -88,6 +88,13 @@ fn main() -> Status {
     let discovery = discover_console(dtb, rsdp);
     if let Some((base, _kind, source)) = &discovery {
         log::info!("Ouroboros kernel: console @ {base:#x} (via {source})");
+    } else {
+        // Diagnostic only - see pci::log_all_devices's doc comment. Cheap,
+        // and specifically useful on a platform (Parallels) where the
+        // normal three mechanisms all fail and it isn't obvious why: this
+        // answers "is there a virtio-pci device on the bus at all" while
+        // we still have a working boot-services console to log through.
+        pci::log_all_devices();
     }
     let found_console_early = discovery.is_some();
 

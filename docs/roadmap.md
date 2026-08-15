@@ -15,21 +15,18 @@ Pulled from `docs/processes.md`'s "known rough edges" and `CLAUDE.md`'s
 running "next milestone" notes — real gaps, not yet a committed next
 phase:
 
-- **Confirm virtio-console on real Parallels hardware.** The driver
-  (`kernel/src/virtio_console.rs`) is built and verified end to end on
-  QEMU, but this environment can't boot real Parallels - the user needs
-  to boot `esp.hdd` (`make parallels-hdd`) and report whether
-  `try_virtio_console` finds a device there, and at the address range
-  this driver assumes. If it doesn't, the open questions are whether
-  Parallels even uses virtio-mmio transport for its console (vs.
-  virtio-pci) and whether it places virtio-mmio slots at the same
-  addresses QEMU does.
-- **A receive virtqueue for `virtio_console.rs`** - transmit-only right
-  now, so a Parallels boot using this fallback (once confirmed working)
-  can be *watched* but not *typed into*. Symmetrically simpler than the
-  transmit path already built: post device-writable buffers to
-  receiveq0 (queue 0, currently left unconfigured), poll the used ring
-  for arrivals.
+- ~~Confirm virtio-console on real Parallels hardware~~ — done, and the
+  answer is no. Tested on real hardware: a full PCI device inventory
+  (`pci::log_all_devices`, kept as a permanent diagnostic) shows no
+  virtio-console device over PCI, and no direct evidence of one over
+  MMIO either. Parallels' actual serial port is very likely a
+  proprietary device (PCI vendor `0x1ab8`, no public spec) - see
+  `CLAUDE.md`'s "virtio-console" section. Reverse-engineering that
+  device was considered and explicitly declined (open-ended, no
+  guaranteed payoff); revisit only if real documentation or driver
+  source for it ever surfaces. The virtio-console *driver* itself stays
+  in the tree, confirmed working on QEMU - just not the answer for
+  Parallels.
 - **Output redirection (`>`/`>>`)** — needs shell-level parsing this
   project doesn't have yet (splitting `cmd > file` into a command and a
   target). `cp` is done (see below); redirection is the one piece of
