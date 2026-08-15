@@ -55,7 +55,9 @@
 //! `cd ..` from `/` fails with "no such directory" rather than silently
 //! staying put, a minor, acceptable rough edge for this phase.
 //!
-//! See `docs/processes.md` for the full syscall table.
+//! See `docs/processes.md` for the full syscall table, and
+//! `docs/shell-commands.md` for a user-facing reference of every builtin
+//! command below (syntax, behavior, known limitations).
 
 #![no_std]
 #![no_main]

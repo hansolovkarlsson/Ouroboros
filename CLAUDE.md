@@ -1346,6 +1346,7 @@ already target `kernel` correctly; building `shell` needs the explicit
 docs/
   architecture.md    reference doc: boot flow, privilege model, memory layout, exceptions, process model, syscall ABI, console
   processes.md       reference doc: process loading/config mechanism, memory model, binary format, writing a replacement program
+  shell-commands.md  reference doc: the default shell's builtin commands - syntax, behavior, known limitations
   roadmap.md         forward-looking plan: what's done, phase 3 (disk commands) breakdown, parking lot of known future work
   research-minix-boot.md   research note: how MINIX boots (x86 boot monitor + boot image, ARM's U-Boot chain) vs Ouroboros's UEFI-native boot, sourced from MINIX's own docs
 
