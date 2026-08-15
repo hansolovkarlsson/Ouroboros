@@ -789,6 +789,7 @@ docs/
   architecture.md    reference doc: boot flow, privilege model, memory layout, exceptions, process model, syscall ABI, console
   processes.md       reference doc: process loading/config mechanism, memory model, binary format, writing a replacement program
   roadmap.md         forward-looking plan: what's done, phase 3 (disk commands) breakdown, parking lot of known future work
+  research-minix-boot.md   research note: how MINIX boots (x86 boot monitor + boot image, ARM's U-Boot chain) vs Ouroboros's UEFI-native boot, sourced from MINIX's own docs
 
 kernel/
   src/main.rs        #[entry] point: UEFI init, console discovery, loader::load(), ExitBootServices, exceptions::install(), mmu::install_identity_map(), gic+timer init, tasks::init(), then tasks::start()

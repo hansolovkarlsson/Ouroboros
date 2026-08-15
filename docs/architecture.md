@@ -9,7 +9,9 @@ and describes the result.
 For the process-loading/userland-program model specifically (the newest
 subsystem, and the one most likely to change next), see
 [`processes.md`](processes.md). For what's planned next and why, see
-[`roadmap.md`](roadmap.md).
+[`roadmap.md`](roadmap.md). For how this boot flow compares to a mature
+microkernel's (MINIX), see
+[`research-minix-boot.md`](research-minix-boot.md).
 
 ## Design goals
 
