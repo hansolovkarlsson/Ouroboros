@@ -43,6 +43,27 @@ static TASK_REPORTS: [AtomicU64; crate::tasks::NUM_TASKS] = [AtomicU64::new(0), 
 /// apart with a single comparison.
 pub const NO_CHAR: u64 = u64::MAX;
 
+/// Generic failure sentinel for the `fs_*` syscalls (not found, not a
+/// directory, already exists, disk full, ...) - every distinct
+/// `fat32::Error` still collapses to this one value; a userland program
+/// that needs to know *why* still can't (a real gap, unchanged by
+/// [`NO_FS`] below).
+const FS_ERROR: u64 = u64::MAX;
+
+/// A second, distinguishable sentinel the `fs_*` syscalls return
+/// specifically when there's no mounted filesystem at all (e.g. `make
+/// run`'s vvfat disk is FAT16, not FAT32 - see `fat32.rs`), rather than
+/// collapsing into the same generic [`FS_ERROR`] every other failure
+/// uses. Added after real user confusion: without this, `ls`/`mkdir`
+/// failing on `make run` looked identical to a genuinely broken path or
+/// a corrupt disk, and the actual cause (no FAT32 partition found at
+/// boot) was only ever visible in the kernel's own boot log, not to the
+/// shell. Safe to keep numerically distinct from any real return value:
+/// `fs_list_dir`/`fs_read_file` only ever return small byte counts/file
+/// sizes (bounded by `MAX_USER_LEN`/a `u32` file size), nowhere near
+/// `u64::MAX - 1`.
+pub const NO_FS: u64 = u64::MAX - 1;
+
 /// The mounted FAT32 filesystem (if any) `fs_list_dir`/`fs_read_file`
 /// operate on - `None` is a valid, expected state (e.g. `make run`'s
 /// vvfat disk is FAT16, not FAT32 - see `fat32.rs`), not a bug; both
@@ -76,11 +97,12 @@ fn valid_user_range(ptr: u64, len: u64) -> bool {
 /// for subdirectories), stopping before an entry would overflow `buf`
 /// rather than erroring - a truncated listing is more useful to a caller
 /// than none at all, same spirit as `read_file`'s own truncation
-/// behavior. Returns the number of bytes written, or `u64::MAX` if there
-/// is no mounted filesystem or `path` doesn't resolve to a directory.
+/// behavior. Returns the number of bytes written, [`NO_FS`] if there's no
+/// mounted filesystem, or [`FS_ERROR`] if `path` doesn't resolve to a
+/// directory.
 fn fs_list_dir(path: &str, buf: &mut [u8]) -> u64 {
     let Some(fs) = (unsafe { &mut *FS.0.get() }) else {
-        return u64::MAX;
+        return NO_FS;
     };
     // `list_dir`'s callback can't signal "stop early" (unlike
     // `walk_dir`'s internal one - see fat32.rs), so once `buf` is full
@@ -101,37 +123,38 @@ fn fs_list_dir(path: &str, buf: &mut [u8]) -> u64 {
     });
     match result {
         Ok(()) => written as u64,
-        Err(_) => u64::MAX,
+        Err(_) => FS_ERROR,
     }
 }
 
 /// Reads `path`'s contents into `buf`, same truncation contract as
 /// `fat32::Fs::read_file` (returns the file's real size, which may exceed
-/// `buf.len()` - compare to detect truncation). `u64::MAX` if there's no
-/// mounted filesystem or `path` doesn't resolve to a file.
+/// `buf.len()` - compare to detect truncation). [`NO_FS`] if there's no
+/// mounted filesystem, [`FS_ERROR`] if `path` doesn't resolve to a file.
 fn fs_read_file(path: &str, buf: &mut [u8]) -> u64 {
     let Some(fs) = (unsafe { &mut *FS.0.get() }) else {
-        return u64::MAX;
+        return NO_FS;
     };
     match fs.read_file(path, buf) {
         Ok(size) => size as u64,
-        Err(_) => u64::MAX,
+        Err(_) => FS_ERROR,
     }
 }
 
-/// Creates an empty directory at `path`. `0` on success, `u64::MAX` if
-/// there's no mounted filesystem or [`fat32::Fs::mkdir`] itself failed
-/// (already exists, invalid name, parent missing, disk full, ...) - every
-/// distinct `fat32::Error` collapses to the same sentinel here, same as
-/// `fs_list_dir`/`fs_read_file` already do; a userland program that needs
-/// to know *why* has no way to yet (a real gap, not new to this syscall).
+/// Creates an empty directory at `path`. `0` on success, [`NO_FS`] if
+/// there's no mounted filesystem, [`FS_ERROR`] if [`fat32::Fs::mkdir`]
+/// itself failed (already exists, invalid name, parent missing, disk
+/// full, ...) - every distinct `fat32::Error` still collapses to that one
+/// sentinel, same as `fs_list_dir`/`fs_read_file` already do; a userland
+/// program that needs to know *why* still has no way to (a real gap, not
+/// new to this syscall).
 fn fs_mkdir(path: &str) -> u64 {
     let Some(fs) = (unsafe { &mut *FS.0.get() }) else {
-        return u64::MAX;
+        return NO_FS;
     };
     match fs.mkdir(path) {
         Ok(()) => 0,
-        Err(_) => u64::MAX,
+        Err(_) => FS_ERROR,
     }
 }
 
@@ -139,11 +162,11 @@ fn fs_mkdir(path: &str) -> u64 {
 /// [`fs_mkdir`].
 fn fs_rmdir(path: &str) -> u64 {
     let Some(fs) = (unsafe { &mut *FS.0.get() }) else {
-        return u64::MAX;
+        return NO_FS;
     };
     match fs.rmdir(path) {
         Ok(()) => 0,
-        Err(_) => u64::MAX,
+        Err(_) => FS_ERROR,
     }
 }
 

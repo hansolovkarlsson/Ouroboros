@@ -153,11 +153,27 @@ kernel exposes that actually write to disk — see `fat32.rs`/
 | 4 | `putc` | a byte | `0` | Raw single-byte console write, no newline translation |
 | *5* | *(gap)* | | | `shell_input` used to live here; removed when line editing moved into userland. Left unfilled rather than renumbered — see `syscall.rs`'s module doc comment |
 | 6 | `get_ticks` | ignored | preemption tick count since boot | Added for phase 2's `uptime` builtin — the first syscall added specifically so a loaded program could read real kernel state, not just I/O |
-| 7 | `fs_list_dir` | path ptr, path len, buf ptr, buf len | bytes written, or `u64::MAX` | Formats each entry as `name\n`/`name/\n`, truncating rather than erroring if `buf` is too small |
-| 8 | `fs_read_file` | path ptr, path len, buf ptr, buf len | the file's real size (may exceed `buf`'s length — compare to detect truncation), or `u64::MAX` | |
-| 9 | `fs_mkdir` | path ptr, path len | `0`, or `u64::MAX` | Creates an empty directory. Every failure reason (already exists, invalid name, parent missing, disk full, ...) collapses to the same `u64::MAX` |
-| 10 | `fs_rmdir` | path ptr, path len | `0`, or `u64::MAX` | Removes an empty directory. Same collapsed-error contract as `fs_mkdir` |
+| 7 | `fs_list_dir` | path ptr, path len, buf ptr, buf len | bytes written, `NO_FS`, or `FS_ERROR` | Formats each entry as `name\n`/`name/\n`, truncating rather than erroring if `buf` is too small |
+| 8 | `fs_read_file` | path ptr, path len, buf ptr, buf len | the file's real size (may exceed `buf`'s length — compare to detect truncation), `NO_FS`, or `FS_ERROR` | |
+| 9 | `fs_mkdir` | path ptr, path len | `0`, `NO_FS`, or `FS_ERROR` | Creates an empty directory. Every non-`NO_FS` failure reason (already exists, invalid name, parent missing, disk full, ...) still collapses to the same `FS_ERROR` |
+| 10 | `fs_rmdir` | path ptr, path len | `0`, `NO_FS`, or `FS_ERROR` | Removes an empty directory. Same collapsed-error contract as `fs_mkdir` |
 | other | — | — | `u64::MAX` | Logged as unknown |
+
+All four `fs_*` syscalls share two distinct failure sentinels, not one:
+`FS_ERROR` (`u64::MAX`) for "the filesystem is mounted but this operation
+failed" (not found, already exists, bad name, disk full, ...), and `NO_FS`
+(`u64::MAX - 1`) specifically for "there's no mounted filesystem at all"
+(e.g. `make run`'s vvfat disk is FAT16, not FAT32 — see `fat32.rs`).
+Added after real user confusion: without the split, every disk command
+failing on `make run` looked identical to a genuinely broken path, and the
+actual cause was only ever visible in the kernel's own boot log, never to
+the shell itself. `shell/src/main.rs`'s `cmd_ls`/`cmd_cat`/`cmd_cd`/
+`cmd_mkdir`/`cmd_rmdir` all match on the raw return value against both
+sentinels so they can print "no filesystem mounted" instead of a
+command-specific "not found"/"failed" message when that's the real cause.
+Safe to keep numerically distinct from any real success value: byte
+counts and file sizes returned on success are always far below
+`u64::MAX - 1`.
 
 There is no shared ABI crate yet — these numbers are duplicated by hand in
 `kernel/src/syscall.rs` (the dispatch table) and `shell/src/main.rs` (the

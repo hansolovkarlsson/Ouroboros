@@ -77,6 +77,7 @@ const LF: u8 = b'\n';
 // (no shared ABI crate yet; see docs/processes.md's "known rough edges").
 const NO_CHAR: u64 = u64::MAX;
 const FS_ERROR: u64 = u64::MAX;
+const NO_FS: u64 = u64::MAX - 1;
 
 const SYS_TRY_READ_CHAR: u64 = 3;
 const SYS_PUTC: u64 = 4;
@@ -348,6 +349,19 @@ fn normalize_path(path: &str, out: &mut [u8; PATH_SIZE]) -> Option<usize> {
     Some(len)
 }
 
+/// Printed by every disk command whenever the kernel reports [`NO_FS`] -
+/// distinct from a command-specific "not found"/"failed" message, since
+/// no mounted filesystem means *no* path could ever resolve this boot,
+/// not that this particular one was wrong. Added after real user
+/// confusion testing `make run` (vvfat's disk is FAT16, not FAT32 - see
+/// `fat32.rs`): every disk command failed with a generic error that read
+/// exactly like a broken path or a corrupt disk, and the actual cause
+/// (no FAT32 partition found at boot) was only ever visible in the
+/// kernel's own boot log, never in the shell itself.
+fn print_no_fs() {
+    print_line("no filesystem mounted this boot (see the kernel boot log - `make run`'s disk is FAT16, not FAT32; use `make run-image` for disk commands)");
+}
+
 fn cmd_ls(arg: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize) {
     let mut path_buf = [0u8; PATH_SIZE];
     let Some(path_len) = resolve_path(cwd_str(cwd, cwd_len), arg, &mut path_buf) else {
@@ -361,12 +375,13 @@ fn cmd_ls(arg: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize) {
 
     let mut listing = [0u8; LIST_BUFFER_SIZE];
     match fs_list_dir(path, &mut listing) {
-        Some(n) => {
-            for &b in &listing[..n] {
+        NO_FS => print_no_fs(),
+        FS_ERROR => print_line("ls: no such directory"),
+        n => {
+            for &b in &listing[..n as usize] {
                 putc(b);
             }
         }
-        None => print_line("ls: no such directory"),
     }
 }
 
@@ -387,7 +402,9 @@ fn cmd_cat(arg: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize) {
 
     let mut file_buf = [0u8; CAT_BUFFER_SIZE];
     match fs_read_file(path, &mut file_buf) {
-        Some(size) => {
+        NO_FS => print_no_fs(),
+        FS_ERROR => print_line("cat: no such file"),
+        size => {
             let n = (size as usize).min(file_buf.len());
             for &b in &file_buf[..n] {
                 putc(b);
@@ -400,7 +417,6 @@ fn cmd_cat(arg: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize) {
                 print_line("cat: (truncated - file is larger than this shell's read buffer)");
             }
         }
-        None => print_line("cat: no such file"),
     }
 }
 
@@ -420,9 +436,16 @@ fn cmd_cd(arg: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize) {
     // confirms it's a directory, reusing fs_list_dir rather than adding a
     // syscall just for this.
     let mut scratch = [0u8; 8];
-    if fs_list_dir(path, &mut scratch).is_none() {
-        print_line("cd: no such directory");
-        return;
+    match fs_list_dir(path, &mut scratch) {
+        NO_FS => {
+            print_no_fs();
+            return;
+        }
+        FS_ERROR => {
+            print_line("cd: no such directory");
+            return;
+        }
+        _ => {}
     }
     if path_len > cwd.len() {
         print_line("cd: path too long");
@@ -447,8 +470,10 @@ fn cmd_mkdir(arg: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize) {
         return;
     };
 
-    if !fs_mkdir(path) {
-        print_line("mkdir: failed (already exists, bad name, parent missing, or disk full)");
+    match fs_mkdir(path) {
+        NO_FS => print_no_fs(),
+        FS_ERROR => print_line("mkdir: failed (already exists, bad name, parent missing, or disk full)"),
+        _ => {}
     }
 }
 
@@ -467,8 +492,10 @@ fn cmd_rmdir(arg: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize) {
         return;
     };
 
-    if !fs_rmdir(path) {
-        print_line("rmdir: failed (no such directory, not empty, or is root)");
+    match fs_rmdir(path) {
+        NO_FS => print_no_fs(),
+        FS_ERROR => print_line("rmdir: failed (no such directory, not empty, or is root)"),
+        _ => {}
     }
 }
 
@@ -522,42 +549,38 @@ fn get_ticks() -> u64 {
 
 /// Lists `path`'s directory entries into `buf` as `name\n`/`name/\n` -
 /// see `syscall.rs::fs_list_dir` for the exact format and truncation
-/// behavior. `None` on error (no filesystem mounted, or `path` isn't a
-/// directory).
-fn fs_list_dir(path: &str, buf: &mut [u8]) -> Option<usize> {
-    let ret = syscall4(SYS_FS_LIST_DIR, path.as_ptr() as u64, path.len() as u64, buf.as_mut_ptr() as u64, buf.len() as u64);
-    if ret == FS_ERROR {
-        None
-    } else {
-        Some(ret as usize)
-    }
+/// behavior. Returns the raw syscall result: a byte count on success,
+/// [`NO_FS`] if there's no mounted filesystem, or [`FS_ERROR`] if `path`
+/// isn't a directory - callers match on this directly (see [`cmd_ls`])
+/// rather than collapsing the two failure cases into one, so `ls`/`cd`
+/// can tell "nothing's mounted" apart from "that path doesn't exist".
+fn fs_list_dir(path: &str, buf: &mut [u8]) -> u64 {
+    syscall4(SYS_FS_LIST_DIR, path.as_ptr() as u64, path.len() as u64, buf.as_mut_ptr() as u64, buf.len() as u64)
 }
 
-/// Reads `path`'s contents into `buf`, returning the file's *real* size
-/// (which may exceed `buf.len()` - compare to detect truncation, same
-/// contract as `fat32::Fs::read_file`/`syscall.rs::fs_read_file`). `None`
-/// on error (no filesystem mounted, or `path` isn't a file).
-fn fs_read_file(path: &str, buf: &mut [u8]) -> Option<u64> {
-    let ret = syscall4(SYS_FS_READ_FILE, path.as_ptr() as u64, path.len() as u64, buf.as_mut_ptr() as u64, buf.len() as u64);
-    if ret == FS_ERROR {
-        None
-    } else {
-        Some(ret)
-    }
+/// Reads `path`'s contents into `buf`. Returns the raw syscall result:
+/// the file's *real* size on success (which may exceed `buf.len()` -
+/// compare to detect truncation, same contract as
+/// `fat32::Fs::read_file`/`syscall.rs::fs_read_file`), [`NO_FS`], or
+/// [`FS_ERROR`] - same reasoning as [`fs_list_dir`].
+fn fs_read_file(path: &str, buf: &mut [u8]) -> u64 {
+    syscall4(SYS_FS_READ_FILE, path.as_ptr() as u64, path.len() as u64, buf.as_mut_ptr() as u64, buf.len() as u64)
 }
 
-/// Creates an empty directory at `path`. `false` on any failure (already
-/// exists, invalid 8.3 name, parent missing, disk full, ...) - the kernel
-/// collapses all of those to one sentinel (see
-/// `syscall.rs::fs_mkdir`), so this program can't yet report *why*.
-fn fs_mkdir(path: &str) -> bool {
-    syscall4(SYS_FS_MKDIR, path.as_ptr() as u64, path.len() as u64, 0, 0) != FS_ERROR
+/// Creates an empty directory at `path`. Returns the raw syscall result:
+/// `0` on success, [`NO_FS`], or [`FS_ERROR`] - the kernel still
+/// collapses every *non-`NO_FS`* failure reason (already exists, invalid
+/// 8.3 name, parent missing, disk full, ...) into that one `FS_ERROR`
+/// sentinel (see `syscall.rs::fs_mkdir`), so this program can't yet
+/// report *why* beyond "no filesystem" vs. "some other failure".
+fn fs_mkdir(path: &str) -> u64 {
+    syscall4(SYS_FS_MKDIR, path.as_ptr() as u64, path.len() as u64, 0, 0)
 }
 
-/// Removes the empty directory at `path`. Same `false`-on-any-failure
-/// contract as [`fs_mkdir`].
-fn fs_rmdir(path: &str) -> bool {
-    syscall4(SYS_FS_RMDIR, path.as_ptr() as u64, path.len() as u64, 0, 0) != FS_ERROR
+/// Removes the empty directory at `path`. Same return contract as
+/// [`fs_mkdir`].
+fn fs_rmdir(path: &str) -> u64 {
+    syscall4(SYS_FS_RMDIR, path.as_ptr() as u64, path.len() as u64, 0, 0)
 }
 
 /// The 1-argument syscalls this program used before phase 3c - a thin

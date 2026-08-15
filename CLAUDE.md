@@ -1021,6 +1021,39 @@ conservative short-name character set means some technically-valid 8.3
 names (e.g. containing spaces) can't be created by this kernel even though
 they could be read if another tool created them.
 
+**A real UX bug found immediately by the user testing this milestone,
+not by inspection: every disk command failing on `make run` was
+indistinguishable from a genuinely broken path.** Booting `make run`
+(FAT16 vvfat - see phase 3b) and typing `ls` produced `ls: no such
+directory`; `mkdir test` produced `mkdir: failed (already exists, bad
+name, parent missing, or disk full)` - both technically true (there is
+no mounted filesystem to have a directory in) but actively misleading,
+since the *actual* cause (`FAT32 mount failed (no FAT32 partition...)`)
+was logged once at boot and never surfaced to the shell again. Every
+`fs_*` syscall was collapsing two genuinely different failure classes -
+"no filesystem is mounted this boot" and "the filesystem is mounted but
+this specific operation failed" - into the exact same `u64::MAX`
+sentinel, so the shell had no way to tell them apart even if it wanted
+to. **Fixed by splitting the sentinel, not by adding more text-matching
+logic:** `syscall.rs` gained a second, numerically distinct sentinel,
+`NO_FS` (`u64::MAX - 1`), returned by all four `fs_*` syscalls
+specifically when `FsCell` is empty, while every other failure still
+returns the original `FS_ERROR` (`u64::MAX`) - safe to keep distinct
+from any real success value, since byte counts/file sizes never
+approach `u64::MAX - 1`. `shell/src/main.rs`'s five disk commands now
+`match` the raw syscall return against both sentinels (a plain integer
+`match`, not a slice/string literal comparison - doesn't trigger the
+relocation-class bug documented elsewhere in this file) and print a
+shared, explicit `no filesystem mounted this boot (...)` message instead
+of their normal command-specific error whenever `NO_FS` comes back.
+Confirmed via the same piped-stdin QEMU technique as every other
+milestone: all five commands (`ls`/`cat`/`cd`/`mkdir`/`rmdir`) now print
+the new message on `make run`'s FAT16 disk, while a fresh `make
+run-image` boot still produces the normal, unchanged success/error
+output (`ls` lists real entries, `mkdir`/`cat`/`cd` report their usual
+specific errors for bad paths). Zero aborts in `-d int` cross-checks on
+both boots.
+
 ### Parallels disk attachment: a real trap, not a hunch
 
 Getting `esp.img` to actually boot in Parallels took a few wrong turns worth

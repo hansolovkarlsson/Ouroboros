@@ -173,9 +173,15 @@ pointer/length and a buffer pointer/length at once — which is why the
 syscall ABI itself supports up to 4 arguments (`x0`-`x3`), not just one.
 `fs_mkdir`/`fs_rmdir` (9/10, added for phase 4) are the first syscalls
 that write to disk — each takes just a path pointer/length, no output
-buffer, and collapses every failure reason to `u64::MAX` (a program
-can't yet tell "already exists" from "disk full" — see `CLAUDE.md`'s
-"Phase 4" section). A userland program makes these directly via `svc`:
+buffer. All four `fs_*` syscalls (7/8/9/10) share two distinct failure
+sentinels: `syscall::FS_ERROR` (`u64::MAX`) for "mounted, but this
+operation failed" (a program still can't tell "already exists" from
+"disk full" within that — see `CLAUDE.md`'s "Phase 4" section) and
+`syscall::NO_FS` (`u64::MAX - 1`) specifically for "no filesystem is
+mounted this boot" — added after real testing showed every disk command
+failing identically on `make run` (FAT16) looked like a broken path
+rather than "nothing's mounted," with the real cause visible only in the
+kernel's own boot log. A userland program makes these directly via `svc`:
 
 ```rust
 #[inline(always)]
@@ -285,7 +291,8 @@ Worth knowing before building further on this:
   deliberately.** No file creation/deletion, no `cp`/`mv`, no output
   redirection. `mkdir` also can't grow a parent directory that's out of
   free entry slots — it fails rather than allocating another cluster for
-  the parent. `fs_mkdir`/`fs_rmdir` collapse every failure reason to one
-  `u64::MAX` sentinel, so a program can't yet distinguish "already
-  exists" from "disk full" from "bad name". See `CLAUDE.md`'s "Phase 4"
-  section.
+  the parent. `fs_mkdir`/`fs_rmdir` (and `fs_list_dir`/`fs_read_file`)
+  distinguish "no filesystem mounted" (`NO_FS`) from everything else, but
+  every *other* failure reason still collapses to one `FS_ERROR`
+  sentinel, so a program can't yet tell "already exists" from "disk
+  full" from "bad name". See `CLAUDE.md`'s "Phase 4" section.
