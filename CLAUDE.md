@@ -605,6 +605,56 @@ scheduler, no heap/`.bss` for userland programs, fixed unguarded 8KB
 stack, no ELF/relocations) rather than repeating it here — that document
 is the one to keep current as these get addressed.
 
+### Phase 2: real commands, and a genuine PIC/relocation gotcha found the hard way
+
+Replaced the loaded shell's "echo the completed line" step
+(`shell/src/main.rs`) with real tokenizing (`str::split_whitespace`, no
+quoting) and a small builtin dispatch: `help`, `echo`, `uptime`, `clear`,
+and an "unknown command" fallback for anything else. An empty line (bare
+Enter, or all-whitespace) does nothing, matching a real shell.
+
+**`uptime` needed a new syscall, not just new shell logic** — the whole
+point, per the plan going in, was a command whose output means something
+real rather than being another demo. `get_ticks` (6) exposes
+`exceptions.rs`'s `TICKS` counter (already tracked, previously only used
+internally) to userland; `exceptions.rs` grew a `pub fn ticks()` accessor
+for `syscall.rs` to call. This is also the pattern for whatever a future
+builtin needs from the kernel: add the accessor, add the syscall, keep the
+gap-at-5 numbering discipline (see the syscall boundary/disk-loading
+sections above).
+
+**A real bug, found immediately, not by inspection: `write!`/`core::fmt`
+crashes any loaded program that uses it.** `uptime`'s first implementation
+used `write!(writer, "{ticks} ticks")` to format the tick count — and
+crashed on the very first call, `ELR_EL1` landing on a tiny near-zero
+address instead of real code (`Instruction Abort`, confirmed via the
+exception handler's own report, not guessed). Root cause: `core::fmt`
+builds its argument-formatting dispatch out of *data* — an array of
+function pointers, one per formatted argument, baked into `.rodata` at
+compile time for a binary linked at base `0x0`. Direct function calls
+compile to PC-relative `bl` and stay correct wherever the binary actually
+loads (which is never `0x0` — see the disk-loading section above); a
+pointer *value* stored as data has no such self-correcting property, and
+with `relocation-model=static` and no relocation processing in
+`loader.rs`, nothing ever fixes it up for the real load address. Every
+prior use of `putc`/direct calls in the shell had simply never exercised
+this path. Fixed by hand-rolling decimal formatting
+(`print_u64_decimal` in `shell/src/main.rs`) instead of going through
+`core::fmt` at all — the only viable fix short of writing a real
+relocating loader, which stays out of scope for now. Documented prominently
+in `docs/processes.md` (both the "Binary format" section and the
+"Writing a replacement program" guide) since this is exactly the kind of
+thing a future program author would hit by surprise, silently-at-compile-time,
+loudly-at-runtime.
+
+**Confirmed working via the same piped-stdin QEMU technique as every prior
+interactive milestone:** `help`, `echo hello world`, `uptime` (twice, with
+other commands and a delay in between, showing the tick count actually
+increases - 78 then 160 in one observed run), an unknown command, and an
+empty line all produced exactly the expected output, including `clear`'s
+raw ANSI escape sequence reaching the console. Zero aborts in a `-d int`
+cross-check across the whole sequence.
+
 ### Parallels disk attachment: a real trap, not a hunch
 
 Getting `esp.img` to actually boot in Parallels took a few wrong turns worth
@@ -649,46 +699,46 @@ for the reasoning behind that lead.
 **In the meantime, kernel development continues against QEMU**, which has a
 fully working console via ACPI/SPCR. MMU/identity-paging, the timer-driven
 preemption tick, the syscall boundary, real preemptive task switching, a
-working interactive echo shell, and now a shell that's a real disk-loaded,
-configuration-selected userland program (see "The shell becomes a real
-disk-loaded process" above, and `docs/architecture.md`/`docs/processes.md`
-for the reference write-up) are all done and confirmed working, not just
-structurally plausible.
+working interactive echo shell, a shell that's a real disk-loaded,
+configuration-selected userland program, and now real commands (`help`,
+`echo`, `uptime`, `clear` - see "Phase 2" above, and
+`docs/architecture.md`/`docs/processes.md` for the reference write-up) are
+all done and confirmed working, not just structurally plausible.
 
-**Phase 1 of "get to a shell" (a terminal that accepts input and echoes it
-back) is done, and so is the disk-loading milestone that followed it before
-phase 2 started.** Phase 2, per the original plan, is commands: replace
-the loaded shell's (`shell/src/main.rs`'s) "echo the completed line" step
-with real tokenizing and a dispatch table of builtins. Natural first
-builtins: something that reads kernel state already tracked somewhere
-(`exceptions.rs`'s `TICKS`, `tasks.rs`'s `CURRENT`) so a command's output
-means something real rather than being another demo — but note these
-would need a *new* syscall to expose that state to userland, since the
-shell can no longer just read kernel statics directly now that it's a
-separate program.
+**Both phases of the original "get to a shell" plan are done.** Phase 1
+(accept input, echo it back) and phase 2 (real commands, one backed by
+real kernel state via a new syscall) are both confirmed working. What
+comes next isn't dictated by that original plan anymore - it's an open
+choice among the gaps below.
 
 What's still coarse and worth knowing about before building on any of
 this — kept current in `docs/processes.md`'s "known rough edges" rather
 than duplicated here, since that's the document meant to track it as these
 get addressed: no shared syscall-ABI crate (numbers duplicated by hand
-between `syscall.rs` and `shell/`); exactly one program, loaded once, at
-boot, with no `exec()`; a fixed 2-task scheduler (no dynamic task
-creation); no heap or `.bss` for userland programs, so no static mutable
-state at all; a fixed, unguarded 8KB stack per program; no ELF, no
-relocations, no dynamic linking. Also still true from before this
-milestone: strict round-robin only, no priorities or blocking; FP/SIMD
-state still isn't saved anywhere (`exceptions.rs`'s `Context`).
+between `syscall.rs` and `shell/`); no `core::fmt`/`write!` usable in any
+loaded program (crashes - see "Phase 2" above for why); exactly one
+program, loaded once, at boot, with no `exec()`; a fixed 2-task scheduler
+(no dynamic task creation); no heap or `.bss` for userland programs, so no
+static mutable state at all; a fixed, unguarded 8KB stack per program; no
+ELF, no relocations, no dynamic linking (the `core::fmt` gap and the
+lack of ELF/relocations are the same underlying limitation, not two
+separate ones). Also still true from before this milestone: strict
+round-robin only, no priorities or blocking; FP/SIMD state still isn't
+saved anywhere (`exceptions.rs`'s `Context`).
 
-Reasonable next steps from here: phase 2 (command parsing/dispatch,
-above, plus whatever new syscalls it needs); a shared syscall-ABI crate,
-now that there are two independent call sites to keep in sync by hand;
-blocking/waiting primitives so tasks can do more than an unconditional
-round-robin `wfe` loop; a real runtime storage stack (virtio-blk + a
-filesystem), needed for `exec()`-style dynamic loading and for Parallels
-to ever run programs it can't compile in ahead of time; or finally
-circling back to Parallels virtio-console now that the kernel has enough
-infrastructure (MMU, exceptions, EL0, real task switching, real input,
-disk-loaded userland) to make that work meaningfully once it lands.
+Reasonable next steps from here: a shared syscall-ABI crate, now that
+there are two independent call sites to keep in sync by hand; more
+commands/builtins, now that the dispatch pattern (tokenize, match, call a
+syscall for real state if needed) is established; a real relocating
+loader (ELF + relocation processing), which would also lift the
+`core::fmt` restriction; blocking/waiting primitives so tasks can do more
+than an unconditional round-robin `wfe` loop; a real runtime storage stack
+(virtio-blk + a filesystem), needed for `exec()`-style dynamic loading and
+for Parallels to ever run programs it can't compile in ahead of time; or
+finally circling back to Parallels virtio-console now that the kernel has
+enough infrastructure (MMU, exceptions, EL0, real task switching, real
+input, disk-loaded userland) to make that work meaningfully once it
+lands.
 
 ## Commands
 
@@ -748,12 +798,12 @@ kernel/
   src/gic.rs         GICv2 driver (QEMU virt addresses, confirmed via devicetree dump)
   src/timer.rs       ARM generic timer (non-secure EL1 physical timer, PPI 14 / GIC INTID 30), TICK_INTERVAL_MS
   src/loader.rs      reads INIT.CFG + a program off the ESP during boot services, into a 2MB-aligned EL0-accessible region - see docs/processes.md
-  src/syscall.rs     svc syscall dispatch table (print/double/report/try_read_char/putc, gap at 5) - confirmed working end to end, see above
+  src/syscall.rs     svc syscall dispatch table (print/double/report/try_read_char/putc/get_ticks, gap at 5) - confirmed working end to end, see above
   src/tasks.rs       task 0 (loaded program) + task 1 (idle) + the round-robin scheduler (Context save/restore in the tick path) - confirmed alternating, see above
 
 shell/               userland default shell - a separate crate, built for aarch64-unknown-none, loaded from disk (not compiled into the kernel)
   linker.ld          flat-binary linker script: entry at offset 0, no .bss/.data (see docs/processes.md)
-  src/main.rs        the interactive line editor, now running as real EL0 userland code - see docs/processes.md
+  src/main.rs        line editor + command dispatch (help/echo/uptime/clear), running as real EL0 userland code - see docs/processes.md
 ```
 
 Two-crate workspace (`kernel` and `shell`), with `shell` deliberately

@@ -22,6 +22,17 @@
 //! entirely. Fine for now (a line buffer plus a length counter is all this
 //! program needs); a future program that wants real global state needs
 //! that crt0 written first.
+//!
+//! ## Phase 2: commands
+//!
+//! [`on_byte`] no longer just echoes the completed line - [`run_line`]
+//! tokenizes it (whitespace-split, no quoting) and dispatches to a small
+//! builtin table. `uptime` is the first builtin that needs real kernel
+//! state (`get_ticks`, syscall 6) rather than being another echo demo -
+//! this program can no longer just read `exceptions.rs`'s statics
+//! directly the way the kernel-resident line editor it replaced could, so
+//! exposing that state needed a new syscall. See `docs/processes.md` for
+//! the full syscall table.
 
 #![no_std]
 #![no_main]
@@ -41,6 +52,7 @@ const NO_CHAR: u64 = u64::MAX;
 
 const SYS_TRY_READ_CHAR: u64 = 3;
 const SYS_PUTC: u64 = 4;
+const SYS_GET_TICKS: u64 = 6;
 
 /// Placed first in `.text` by `linker.ld` (`KEEP(*(.text.start))`) so it
 /// lands at file/VA offset 0 - `tasks.rs` sets a loaded program's
@@ -73,20 +85,23 @@ fn print_prompt() {
 }
 
 /// Same shape as the kernel's old `shell.rs::on_byte`: CR/LF submits the
-/// line (echoed back, then a fresh prompt), backspace/DEL erases via the
-/// standard destructive-backspace sequence, anything else is appended and
-/// echoed immediately. Phase 2 (commands) replaces "echo the line" with
-/// real parsing - nothing else here should need to change shape for that.
+/// line (parsed and dispatched via [`run_line`], then a fresh prompt),
+/// backspace/DEL erases via the standard destructive-backspace sequence,
+/// anything else is appended and echoed immediately.
 fn on_byte(byte: u8, buf: &mut [u8; BUFFER_SIZE], len: &mut usize) {
     match byte {
         CR | LF => {
             putc(CR);
             putc(LF);
-            for &b in &buf[..*len] {
-                putc(b);
+            // buf[..*len] is whatever bytes try_read_char returned,
+            // completely unfiltered (see the `byte` arm below) - not
+            // guaranteed valid UTF-8 (e.g. a pasted multi-byte sequence
+            // split across separate reads, or a stray high byte), so this
+            // has to be checked, not assumed.
+            match core::str::from_utf8(&buf[..*len]) {
+                Ok(line) => run_line(line),
+                Err(_) => print_line("input wasn't valid UTF-8"),
             }
-            putc(CR);
-            putc(LF);
             *len = 0;
             print_prompt();
         }
@@ -107,6 +122,96 @@ fn on_byte(byte: u8, buf: &mut [u8; BUFFER_SIZE], len: &mut usize) {
             // Buffer full: silently drop further bytes, same as before.
         }
     }
+}
+
+/// Tokenizes on whitespace (no quoting - `echo "a b"` sees two words, not
+/// one) and dispatches to a builtin by name. An empty line (just Enter,
+/// or a line of only spaces) does nothing, same as a real shell.
+fn run_line(line: &str) {
+    let mut words = line.split_whitespace();
+    let Some(command) = words.next() else { return };
+
+    match command {
+        "help" => print_line("commands: help, echo, uptime, clear"),
+        "echo" => {
+            let mut first = true;
+            for word in words {
+                if !first {
+                    putc(b' ');
+                }
+                for b in word.bytes() {
+                    putc(b);
+                }
+                first = false;
+            }
+            putc(CR);
+            putc(LF);
+        }
+        "uptime" => {
+            print_u64_decimal(get_ticks());
+            print_line(" ticks since boot");
+        }
+        "clear" => {
+            // ANSI clear-screen + cursor-home - the shell's own escape
+            // sequence, not a syscall; the console itself has no notion
+            // of a screen, just a byte stream.
+            for &b in b"\x1b[2J\x1b[H" {
+                putc(b);
+            }
+        }
+        _ => {
+            print_str("unknown command: ");
+            print_line(command);
+        }
+    }
+}
+
+fn print_str(s: &str) {
+    for b in s.bytes() {
+        putc(b);
+    }
+}
+
+fn print_line(s: &str) {
+    print_str(s);
+    putc(CR);
+    putc(LF);
+}
+
+/// Hand-rolled rather than `write!`/`core::fmt::Arguments`: that machinery
+/// builds its per-argument dispatch out of *data* (an array of function
+/// pointers, one per formatted argument) rather than direct `bl` calls -
+/// fine under a real relocating loader, but this one applies none (see
+/// `linker.ld`'s doc comment and `docs/processes.md`). A binary linked for
+/// base `0x0` but loaded somewhere else (always, in practice - see
+/// `loader.rs`) has no way to know those embedded pointer values need
+/// correcting, so they point at whatever the link-time address `0x0`
+/// would have meant - resulting in exactly the crash this replaced
+/// (`ELR_EL1` landing on a tiny near-null address instead of real code,
+/// confirmed directly by trying `write!` here first). Direct calls
+/// (`putc`, `print_str`, this function) compile to PC-relative `bl` and
+/// have no such problem - so the fix is avoiding `core::fmt` entirely for
+/// anything a loaded program formats, not just here.
+fn print_u64_decimal(mut n: u64) {
+    if n == 0 {
+        putc(b'0');
+        return;
+    }
+    let mut digits = [0u8; 20]; // u64::MAX has 20 decimal digits
+    let mut count = 0;
+    while n > 0 {
+        digits[count] = b'0' + (n % 10) as u8;
+        n /= 10;
+        count += 1;
+    }
+    while count > 0 {
+        count -= 1;
+        putc(digits[count]);
+    }
+}
+
+fn get_ticks() -> u64 {
+    syscall(SYS_GET_TICKS, 0)
 }
 
 #[inline(always)]

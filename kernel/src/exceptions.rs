@@ -310,6 +310,14 @@ extern "C" fn rust_exception_handler(esr: u64, far: u64, elr: u64, vector: u64) 
 
 static TICKS: AtomicU64 = AtomicU64::new(0);
 
+/// The number of preemption ticks since boot - `syscall.rs`'s `get_ticks`
+/// (6) is what actually exposes this to userland; a real "uptime" needs
+/// `timer::TICK_INTERVAL_MS` to convert this into a duration, since a tick
+/// count alone doesn't say how much wall-clock time it represents.
+pub fn ticks() -> u64 {
+    TICKS.load(Ordering::Relaxed)
+}
+
 const SPURIOUS_INTID: u32 = 1023;
 
 /// Runs on every IRQ, called from the vector table's slots 5/9 trampoline

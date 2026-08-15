@@ -143,6 +143,7 @@ in `x0` — chosen to match Linux's shape (a reasonable default for a
 | 3 | `try_read_char` | ignored | a byte, or `NO_CHAR` (`u64::MAX`) if none waiting | Non-blocking |
 | 4 | `putc` | a byte | `0` | Raw single-byte console write, no newline translation |
 | *5* | *(gap)* | | | `shell_input` used to live here; removed when line editing moved into userland. Left unfilled rather than renumbered — see `syscall.rs`'s module doc comment |
+| 6 | `get_ticks` | ignored | preemption tick count since boot | Added for phase 2's `uptime` builtin — the first syscall added specifically so a loaded program could read real kernel state, not just I/O |
 | other | — | — | `u64::MAX` | Logged as unknown |
 
 There is no shared ABI crate yet — these numbers are duplicated by hand in

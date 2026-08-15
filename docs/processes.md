@@ -124,14 +124,32 @@ Consequences of "flat binary, no loader smarts":
   a program must not embed absolute addresses of its own symbols — the
   shell doesn't, since its "global state" (the input buffer) is a local
   variable in `main`'s stack frame, not a static.
+- **`core::fmt` (`write!`, `{}` formatting) is unsafe to use, and will
+  crash.** Discovered directly, not by inspection: the shell's first
+  `uptime` implementation used `write!` to format a tick count and
+  immediately crashed on the very first call (`Instruction Abort`, `ELR_EL1`
+  landing on a tiny near-zero address rather than real code). Root cause:
+  `core::fmt::Arguments` builds its per-argument dispatch out of *data* — an
+  array of function pointers, one per formatted value — rather than direct
+  `bl` calls. A direct call compiles to a PC-relative branch and stays
+  correct no matter where the binary ends up loaded; a function pointer
+  baked into `.rodata` at compile time for a program linked at base `0x0`
+  is only correct if the program actually runs at `0x0` — which it never
+  does (see "Memory model" above). There is no relocation processing to fix
+  such a pointer up at load time. `shell/src/main.rs`'s `print_u64_decimal`
+  is the replacement: a hand-rolled decimal formatter using only direct
+  calls. Any future program needs to avoid `core::fmt` for the same reason,
+  until this gets a real relocating loader.
 
 ## Syscall ABI available to a program
 
-See `docs/architecture.md`'s syscall table for the full list. The two that
-matter for anything interactive: `try_read_char` (3, non-blocking, returns
-`syscall::NO_CHAR` when nothing is waiting) and `putc` (4, one raw byte,
-no newline translation). A userland program makes these directly via
-`svc`:
+See `docs/architecture.md`'s syscall table for the full list. The three
+that matter for an interactive command shell: `try_read_char` (3,
+non-blocking, returns `syscall::NO_CHAR` when nothing is waiting), `putc`
+(4, one raw byte, no newline translation), and `get_ticks` (6, added for
+phase 2's `uptime` builtin — the pattern to follow whenever a command
+needs real kernel state it can't get any other way). A userland program
+makes these directly via `svc`:
 
 ```rust
 #[inline(always)]
@@ -181,10 +199,14 @@ write your own:
    passed down through your call stack instead (see `shell/src/main.rs`'s
    `on_byte` for the pattern: buffer and length live in `main`'s frame,
    passed by `&mut` reference).
-6. **A `#[panic_handler]`** — there's no `std`, and no `uefi` crate's
+6. **No `core::fmt` (`write!`, `{}`)** — see "Binary format" above for why
+   it crashes. Format numbers by hand (`shell/src/main.rs`'s
+   `print_u64_decimal` is a ready-made example) and build strings out of
+   byte/`&str` loops through `putc`.
+7. **A `#[panic_handler]`** — there's no `std`, and no `uefi` crate's
    panic handling either (that only exists on the boot-services side).
    Looping on `wfe` forever is a reasonable minimum.
-7. **Build and stage it**: `cargo build -p <crate> --target aarch64-unknown-none`,
+8. **Build and stage it**: `cargo build -p <crate> --target aarch64-unknown-none`,
    then `llvm-objcopy -O binary --strip-all <elf> <name>.bin` (see the
    Makefile's `shell-bin` target for the exact invocation, including where
    to find `llvm-objcopy` — it isn't on `PATH` by default). Copy the `.bin`
@@ -215,3 +237,7 @@ Worth knowing before building further on this:
   position-dependent blob built specifically for wherever `loader.rs`'s
   allocator happens to place it that boot (which happens to always work
   today, but isn't a guarantee anything currently enforces).
+- **No `core::fmt`.** A direct consequence of the above, but easy to hit
+  by accident (any `write!`/`{}` use compiles fine and only fails at
+  runtime) — see "Binary format"'s callout for what actually goes wrong
+  and why. Goes away once there's a real relocating loader.

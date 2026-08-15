@@ -13,6 +13,7 @@
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::console;
+use crate::exceptions;
 
 /// Two independent counters (one per `tasks.rs` task), proof — alongside
 /// `double`/`print` below — that syscalls arriving from *different*,
@@ -32,7 +33,7 @@ pub const NO_CHAR: u64 = u64::MAX;
 /// entire reason this indirection exists. Its return value becomes EL0's
 /// new x0 after `eret`.
 ///
-/// Five syscalls now (`shell_input`, a sixth, was removed - see below).
+/// Six syscalls now (`shell_input`, a seventh, was removed - see below).
 /// `double`/`print` were deliberately chained by the original single-task
 /// demo (double's return value fed straight into print's argument) to
 /// prove a return value survives the trampoline intact; `report` is what
@@ -48,7 +49,11 @@ pub const NO_CHAR: u64 = u64::MAX;
 /// neighbors - a stable ABI matters more than a dense one, and this is a
 /// preview of exactly the kind of churn a shared syscall-ABI crate should
 /// prevent once EL0 code isn't only ever built in this same repo (see
-/// `docs/processes.md`'s "known rough edges").
+/// `docs/processes.md`'s "known rough edges"). `get_ticks` (6) is the
+/// first syscall added for phase 2 (commands) - the shell's `uptime`
+/// builtin needs *some* real kernel state to report, now that it can't
+/// just read `exceptions.rs`'s statics directly the way kernel-resident
+/// code used to.
 pub extern "C" fn dispatch(number: u64, arg0: u64) -> u64 {
     match number {
         0 => {
@@ -79,6 +84,7 @@ pub extern "C" fn dispatch(number: u64, arg0: u64) -> u64 {
             console::putc(arg0 as u8);
             0
         }
+        6 => exceptions::ticks(),
         _ => {
             console::println!("Ouroboros kernel: syscall from EL0: unknown number={number}");
             u64::MAX
