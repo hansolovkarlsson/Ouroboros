@@ -7,6 +7,64 @@ what broke, how it was diagnosed), see `CLAUDE.md`; for *how* something
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## Phase 6 — `write`, the first way to put real content into a file
+
+**The goal:** close the gap phase 5 left open — every file this kernel
+could create was permanently zero bytes, since `touch` only ever
+produces empty files. `write_file` is the "actual blocker for `cp`,
+output redirection, and anything else that needs a file to hold more
+than zero bytes" that phase 5's changelog entry and the roadmap parking
+lot both flagged.
+
+- `Fs::write_file` creates a file with exactly the given content, or
+  fully replaces (not appends to) an existing file's content. Ordering
+  matters: the new cluster chain is allocated and written *before*
+  anything about an existing file is touched (freeing its old chain,
+  patching its directory entry), so a failure partway through never
+  frees or unlinks a file that was already there.
+- Two new private helpers: `write_chain` (allocates and writes a fresh
+  cluster chain for arbitrary-length data, linking each cluster to the
+  next via `write_fat_entry` as it goes) and
+  `patch_entry_cluster_size` (rewrites just an existing entry's cluster
+  and size fields in place, leaving name/attribute/timestamps alone —
+  what makes overwriting different from creating).
+- One new syscall, `fs_write_file` (13, `(path ptr, path len, data ptr,
+  data len)`), and a new `write <file> <words...>` shell builtin that
+  joins the remaining words with spaces (same style as `echo`) and
+  writes the result as the file's entire content.
+- **A real bug found immediately by testing, not by inspection:**
+  `write <file>` with no content words (a legitimate "truncate to
+  empty" case, exactly matching `touch`'s own empty-file semantics)
+  failed with a generic disk error instead of succeeding. Root cause:
+  the syscall's argument-sanity check (`valid_user_range`) rejected any
+  zero-length buffer, correct for `fs_list_dir`/`fs_read_file`'s output
+  buffers (a zero-length destination is pointless there) but wrong for
+  `fs_write_file`'s *input* data, where empty is a real, meaningful
+  value. Fixed with a second check, `valid_user_range_allow_empty`,
+  used only for the data argument (the path argument still can't be
+  empty).
+- Confirmed working end to end against the real `esp.img`: create a
+  file with content, `cat` shows it exactly; overwrite with shorter
+  content, `cat` shows only the new content (no stale trailing bytes
+  from the longer original); the empty-write fix specifically
+  re-tested and confirmed fixed; writing to an existing directory or a
+  missing parent both correctly rejected; a genuine reboot-and-remount
+  persistence check (write, reboot, `cat` still shows the content); no
+  corruption of pre-existing files; `make run` (FAT16, no mount) still
+  degrades gracefully. Zero aborts in `-d int` cross-checks across
+  every session.
+- **Still coarse:** every write is a full replace, no append and no
+  partial/offset writes; content is bounded by whatever the caller can
+  fit in one buffer (the shell's `write` command specifically is capped
+  by its 128-byte input line, so it can only ever produce a single
+  FAT32 cluster's worth of content on this test image — `rm`'s
+  multi-cluster cluster-chain-freeing loop, added in phase 5, remains
+  logically implemented and reasoned-through but still not exercised by
+  an end-to-end test, since nothing in this kernel can yet create a
+  file spanning more than one cluster). No `cp`, no output redirection
+  yet — those need shell-side plumbing this syscall alone doesn't
+  provide (see `roadmap.md`'s parking lot).
+
 ## Phase 5 — file lifecycle: `touch`/`rm`
 
 **The goal:** round out phase 4's directory-only write support with the

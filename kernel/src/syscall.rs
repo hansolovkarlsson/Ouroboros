@@ -76,6 +76,19 @@ fn valid_user_range(ptr: u64, len: u64) -> bool {
     ptr != 0 && len != 0 && len <= MAX_USER_LEN
 }
 
+/// Same bound as [`valid_user_range`], except a zero length is
+/// accepted (with a still-non-null pointer) rather than rejected -
+/// needed for `fs_write_file`'s data argument, where empty input is a
+/// real, meaningful case (writing/truncating a file to zero bytes),
+/// unlike every other `(pointer, length)` pair this module validates
+/// (a path can't be empty, an output buffer with zero length is
+/// pointless). A real bug caught by testing `write <file>` with no
+/// content words: without this, an empty write was indistinguishable
+/// from a rejected one.
+fn valid_user_range_allow_empty(ptr: u64, len: u64) -> bool {
+    if len == 0 { ptr != 0 } else { valid_user_range(ptr, len) }
+}
+
 /// Formats `path`'s directory entries into `buf` as `name\n` (`name/\n`
 /// for subdirectories), stopping before an entry would overflow `buf`
 /// rather than erroring - a truncated listing is more useful to a caller
@@ -178,13 +191,26 @@ fn fs_rm(path: &str) -> u64 {
     }
 }
 
+/// Creates or fully overwrites the file at `path` with `data`. Same
+/// `NO_FS`/`FS_ERROR` contract as [`fs_mkdir`] - the first syscall able
+/// to give a file more than zero bytes (see [`fat32::Fs::write_file`]).
+fn fs_write_file(path: &str, data: &[u8]) -> u64 {
+    let Some(fs) = (unsafe { &mut *FS.0.get() }) else {
+        return NO_FS;
+    };
+    match fs.write_file(path, data) {
+        Ok(()) => 0,
+        Err(_) => FS_ERROR,
+    }
+}
+
 /// Called from the exception vector's SVC trampoline (`exceptions.rs`)
 /// with the syscall number (from x8) and up to 4 arguments (from x0-x3),
 /// running at EL1 with the kernel's own stack and every privilege EL0
 /// lacks - the entire reason this indirection exists. Its return value
 /// becomes EL0's new x0 after `eret`.
 ///
-/// Twelve syscalls now (`shell_input`, a thirteenth by original
+/// Thirteen syscalls now (`shell_input`, a fourteenth by original
 /// numbering, was removed - see below).
 /// `double`/`print` were deliberately chained by the original single-task
 /// demo (double's return value fed straight into print's argument) to
@@ -213,6 +239,9 @@ fn fs_rm(path: &str) -> u64 {
 /// `fat32.rs`/`virtio_blk.rs` for the on-disk write path underneath them.
 /// `fs_touch`/`fs_rm` (11/12) round out phase 5's file create/delete,
 /// reusing the same on-disk write primitives `fs_mkdir`/`fs_rmdir` do.
+/// `fs_write_file` (13) is the first syscall able to give a file more
+/// than zero bytes - without it, `fs_touch` was the only way to create
+/// one, and it only ever produces empty files.
 /// Match arms below use the `syscall_abi` constants rather than bare
 /// numbers, so this table and the userland caller can never silently
 /// disagree about what number means what.
@@ -307,6 +336,19 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
             let path = unsafe { core::slice::from_raw_parts(arg0 as *const u8, arg1 as usize) };
             let Ok(path) = core::str::from_utf8(path) else { return FS_ERROR };
             fs_rm(path)
+        }
+        syscall_abi::FS_WRITE_FILE => {
+            // `data`'s length is allowed to be zero (see
+            // valid_user_range_allow_empty's doc comment) - the path
+            // never is.
+            if !valid_user_range(arg0, arg1) || !valid_user_range_allow_empty(arg2, arg3) {
+                return FS_ERROR;
+            }
+            // SAFETY: same as FS_LIST_DIR/FS_READ_FILE.
+            let path = unsafe { core::slice::from_raw_parts(arg0 as *const u8, arg1 as usize) };
+            let Ok(path) = core::str::from_utf8(path) else { return FS_ERROR };
+            let data = unsafe { core::slice::from_raw_parts(arg2 as *const u8, arg3 as usize) };
+            fs_write_file(path, data)
         }
         _ => {
             console::println!("Ouroboros kernel: syscall from EL0: unknown number={number}");

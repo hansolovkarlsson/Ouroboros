@@ -82,6 +82,14 @@ pub const FS_TOUCH: u64 = 11;
 /// Removes a file (not a directory - use [`FS_RMDIR`] for those).
 pub const FS_RM: u64 = 12;
 
+/// `(path ptr, path len, data ptr, data len)` -> `0` on success, [`NO_FS`],
+/// or [`FS_ERROR`]. Creates a file with exactly `data`'s contents, or
+/// fully overwrites (not appends to) an existing file's contents. The
+/// first syscall able to give a file more than zero bytes - without
+/// this, [`FS_TOUCH`] was the only way to create a file, and it only
+/// ever produces empty ones.
+pub const FS_WRITE_FILE: u64 = 13;
+
 /// Sentinel `try_read_char` returns when no byte is waiting - out of
 /// range for any real byte (0-255), so callers can tell the two apart
 /// with a single comparison.

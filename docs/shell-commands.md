@@ -20,9 +20,9 @@ implement a completely different command set.
   further typed characters rather than erroring.
 - **Tokenization: whitespace-split, no quoting.** `echo "a b"` sees the
   literal words `"a` and `b"`, not one quoted argument — there is no
-  quote-stripping. Every command except `echo` only ever looks at the
-  *first* word after the command name; any further words are ignored
-  (`mkdir a b c` creates `a` and says nothing about `b`/`c`).
+  quote-stripping. Every command except `echo`/`write` only ever looks
+  at the *first* word after the command name; any further words are
+  ignored (`mkdir a b c` creates `a` and says nothing about `b`/`c`).
 - **No pipes, redirection, globbing, `;`/`&&` chaining, environment
   variables, command history, or tab completion.** One command per line,
   typed in full, every time.
@@ -67,16 +67,20 @@ implement a completely different command set.
 | `rmdir` | `rmdir <dir>` | Removes an *empty* subdirectory. | Fails if it doesn't exist, isn't empty, or is root. |
 | `touch` | `touch <file>` | Creates an empty (zero-byte) file, or succeeds silently if one already exists there. | There's no RTC on this kernel, so unlike real `touch`, an existing file's "timestamp" isn't updated — nothing happens, successfully. Fails if the target is a directory. |
 | `rm` | `rm <file>` | Removes a file. | Fails if it doesn't exist or is a directory — use `rmdir` for those. |
+| `write` | `write <file> [words...]` | Joins every word after the filename with a single space (same style as `echo`) and writes the result as the file's *entire* contents, replacing whatever was there. Creates the file if it doesn't exist. | `write <file>` with no words truncates the file to empty (a real, valid case, not an error). Fails if the target is an existing directory or the parent is missing. |
 
 Any other input prints `unknown command: <word>`. A blank line (just
 Enter, or only whitespace) does nothing.
 
 ## Known limitations
 
-- **No way to write content into a file.** `touch` only ever produces
-  zero-byte files — there's no `cp`, no output redirection (`>`/`>>`),
-  and no editor. A real "write file contents" syscall would be needed
-  first (see `docs/roadmap.md`'s parking lot).
+- **`write` always fully replaces a file's contents — no append, no
+  partial/offset writes, and no `cp`/output redirection (`>`/`>>`)
+  yet.** Both would need shell-level plumbing this kernel doesn't have
+  (parsing `cmd > file`, or reading one file's content back out to hand
+  to another `write`) — see `docs/roadmap.md`'s parking lot. `write`
+  content is also bounded by the 128-byte input line, so nothing typed
+  at the shell can ever exceed one FAT32 cluster's worth of content.
 - **No `mv`/rename.**
 - **Every filesystem error beyond "no mounted filesystem" collapses to
   one generic message per command** (e.g. `mkdir`'s "already exists, bad

@@ -15,10 +15,13 @@ Pulled from `docs/processes.md`'s "known rough edges" and `CLAUDE.md`'s
 running "next milestone" notes — real gaps, not yet a committed next
 phase:
 
-- **A "write file contents" syscall** - the actual blocker for `cp`,
-  output redirection (`>`/`>>`), and anything else that needs a file to
-  hold more than zero bytes. Every file this kernel can create (`touch`)
-  is permanently empty without this.
+- **Output redirection (`>`/`>>`) and `cp`**, now that `write_file`
+  (phase 6) gives a file real content - redirection needs shell-level
+  parsing this project doesn't have yet (splitting `cmd > file` into a
+  command and a target), and `cp` needs a way to read one file's
+  content into a buffer small enough to pass back to `write_file` (the
+  read side already exists via `cat`'s machinery, just not wired
+  together yet).
 - **Lifting `mkdir`'s no-directory-extension limitation** - a full
   parent directory currently makes `mkdir` fail rather than growing it.
 - `mv`/rename support.

@@ -177,15 +177,24 @@ commands) are the first syscalls needing more than one argument — a path
 pointer/length and a buffer pointer/length at once — which is why the
 syscall ABI itself supports up to 4 arguments (`x0`-`x3`), not just one.
 `fs_mkdir`/`fs_rmdir` (`FS_MKDIR`/`FS_RMDIR`, added for phase 4) are the
-first syscalls that write to disk, and `fs_touch`/`fs_rm`
+first syscalls that write to disk, `fs_touch`/`fs_rm`
 (`FS_TOUCH`/`FS_RM`, added for phase 5) round out file lifecycle the
 same way — each of these four takes just a path pointer/length, no
-output buffer. All six `fs_*` syscalls share two distinct failure
-sentinels: `FS_ERROR` (`u64::MAX`) for "mounted, but this operation
-failed" (a program still can't tell "already exists" from "disk full"
-within that — see `CLAUDE.md`'s "Phase 4"/"Phase 5" sections) and
-`NO_FS` (`u64::MAX - 1`) specifically for "no filesystem is mounted this
-boot" — added after real testing showed every disk command failing
+output buffer — and `fs_write_file` (`FS_WRITE_FILE`, added for phase 6)
+is the first syscall able to give a file more than zero bytes, taking a
+second pointer/length pair (`data ptr`, `data len`) the same shape as
+`fs_list_dir`/`fs_read_file`'s buffer argument, except as *input* rather
+than output. Its `data len` may legitimately be `0` (truncating a file
+to empty) — the one `(pointer, length)` pair in this whole ABI where a
+zero length is valid rather than rejected; see
+`architecture.md`'s syscall table for `valid_user_range_allow_empty`,
+the real bug this required fixing. All seven `fs_*` syscalls share two
+distinct failure sentinels: `FS_ERROR` (`u64::MAX`) for "mounted, but
+this operation failed" (a program still can't tell "already exists"
+from "disk full" within that — see `CLAUDE.md`'s "Phase 4"/"Phase
+5"/"Phase 6" sections) and `NO_FS` (`u64::MAX - 1`) specifically for "no
+filesystem is mounted this boot" — added after real testing showed every
+disk command failing
 identically on `make run` (FAT16) looked like a broken path rather than
 "nothing's mounted," with the real cause visible only in the kernel's
 own boot log. A userland program makes these directly via `svc`:
@@ -295,21 +304,24 @@ Worth knowing before building further on this:
   for what actually goes wrong and why. Goes away once there's a real
   relocating loader.
 - **Disk-command pointer/length arguments are trusted, not validated.**
-  `fs_list_dir`/`fs_read_file`/`fs_mkdir`/`fs_rmdir`/`fs_touch`/`fs_rm`
-  dereference the caller's `(pointer, length)` pairs directly, checked
-  only against a minimal sanity bound (`syscall.rs::valid_user_range`) —
-  not against the calling program's actual mapped region. Fine with
-  exactly one, currently-trusted userland program; a real gap once that
-  stops being true.
-- **Write support (phases 4-5) covers empty directories and zero-byte
-  files only, deliberately.** No `cp`/`mv`, no output redirection, and
-  no way to write actual *content* into a file — `touch` only ever
-  produces zero-byte files, so a real "write file contents" syscall is
-  the actual blocker for anything beyond create/delete. `mkdir` also
-  can't grow a parent directory that's out of free entry slots — it
-  fails rather than allocating another cluster for the parent. Every
-  `fs_*` syscall distinguishes "no filesystem mounted" (`NO_FS`) from
-  everything else, but every *other* failure reason still collapses to
-  one `FS_ERROR` sentinel, so a program can't yet tell "already exists"
-  from "disk full" from "bad name". See `CLAUDE.md`'s "Phase 4"/"Phase 5"
+  `fs_list_dir`/`fs_read_file`/`fs_mkdir`/`fs_rmdir`/`fs_touch`/`fs_rm`/
+  `fs_write_file` dereference the caller's `(pointer, length)` pairs
+  directly, checked only against a minimal sanity bound
+  (`syscall.rs::valid_user_range`, or `valid_user_range_allow_empty` for
+  `fs_write_file`'s data argument specifically) — not against the
+  calling program's actual mapped region. Fine with exactly one,
+  currently-trusted userland program; a real gap once that stops being
+  true.
+- **Write support (phases 4-6) covers directories, and files with real
+  content, but every write fully replaces a file rather than appending
+  or writing at an offset.** No `cp`/`mv`, no output redirection yet —
+  both need shell-level plumbing `fs_write_file` alone doesn't provide
+  (parsing `cmd > file`, or reading one file's content back out to hand
+  to another `write_file` call). `mkdir` also can't grow a parent
+  directory that's out of free entry slots — it fails rather than
+  allocating another cluster for the parent. Every `fs_*` syscall
+  distinguishes "no filesystem mounted" (`NO_FS`) from everything else,
+  but every *other* failure reason still collapses to one `FS_ERROR`
+  sentinel, so a program can't yet tell "already exists" from "disk
+  full" from "bad name". See `CLAUDE.md`'s "Phase 4"/"Phase 5"/"Phase 6"
   sections.

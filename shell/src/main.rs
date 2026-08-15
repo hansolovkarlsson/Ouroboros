@@ -164,7 +164,7 @@ fn run_line(line: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize) {
     let arg = words.next().unwrap_or("");
 
     match command {
-        "help" => print_line("commands: help, echo, uptime, clear, ls, cat, cd, pwd, mkdir, rmdir, touch, rm"),
+        "help" => print_line("commands: help, echo, uptime, clear, ls, cat, cd, pwd, mkdir, rmdir, touch, rm, write"),
         "echo" => {
             let mut first = true;
             for word in line.split_whitespace().skip(1) {
@@ -199,6 +199,7 @@ fn run_line(line: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize) {
         "rmdir" => cmd_rmdir(arg, cwd, *cwd_len),
         "touch" => cmd_touch(arg, cwd, *cwd_len),
         "rm" => cmd_rm(arg, cwd, *cwd_len),
+        "write" => cmd_write(line, cwd, *cwd_len),
         _ => {
             print_str("unknown command: ");
             print_line(command);
@@ -539,6 +540,55 @@ fn cmd_rm(arg: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize) {
     }
 }
 
+/// `write <file> <words...>` - joins every word after the filename with a
+/// single space (same join style as `echo`) and writes the result as the
+/// file's *entire* contents, replacing whatever was there. Takes `line`
+/// (not just the first argument, unlike every other command here) because
+/// it needs both the filename and the rest of the line as separate
+/// pieces - `run_line` already tokenized `arg` down to one word, which
+/// isn't enough here.
+fn cmd_write(line: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize) {
+    let mut words = line.split_whitespace();
+    words.next(); // "write" itself
+    let Some(filename) = words.next() else {
+        print_line("write: missing file argument");
+        return;
+    };
+
+    let mut content = [0u8; BUFFER_SIZE];
+    let mut len = 0usize;
+    let mut first = true;
+    for word in words {
+        if !first && len < content.len() {
+            content[len] = b' ';
+            len += 1;
+        }
+        for b in word.bytes() {
+            if len < content.len() {
+                content[len] = b;
+                len += 1;
+            }
+        }
+        first = false;
+    }
+
+    let mut path_buf = [0u8; PATH_SIZE];
+    let Some(path_len) = resolve_path(cwd_str(cwd, cwd_len), filename, &mut path_buf) else {
+        print_line("write: path too long");
+        return;
+    };
+    let Ok(path) = core::str::from_utf8(&path_buf[..path_len]) else {
+        print_line("write: path too long");
+        return;
+    };
+
+    match fs_write_file(path, &content[..len]) {
+        NO_FS => print_no_fs(),
+        FS_ERROR => print_line("write: failed (bad name, parent missing, path is a directory, or disk full)"),
+        _ => {}
+    }
+}
+
 fn print_str(s: &str) {
     for b in s.bytes() {
         putc(b);
@@ -632,6 +682,12 @@ fn fs_touch(path: &str) -> u64 {
 /// Removes the file at `path`. Same return contract as [`fs_mkdir`].
 fn fs_rm(path: &str) -> u64 {
     syscall4(syscall_abi::FS_RM, path.as_ptr() as u64, path.len() as u64, 0, 0)
+}
+
+/// Creates or fully overwrites the file at `path` with `data`. Same
+/// return contract as [`fs_mkdir`].
+fn fs_write_file(path: &str, data: &[u8]) -> u64 {
+    syscall4(syscall_abi::FS_WRITE_FILE, path.as_ptr() as u64, path.len() as u64, data.as_ptr() as u64, data.len() as u64)
 }
 
 /// The 1-argument syscalls this program used before phase 3c - a thin

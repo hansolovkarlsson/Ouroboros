@@ -667,6 +667,131 @@ impl Fs {
         Ok(())
     }
 
+    /// Creates a file at `path` with exactly `data`'s contents, or
+    /// overwrites an existing file's contents (fully replacing them, not
+    /// appending). The one primitive `touch`/`cat` were missing: without
+    /// this, every file this kernel could create was permanently
+    /// zero bytes.
+    ///
+    /// **Ordering, and why it's ordered this way:** the new cluster
+    /// chain is allocated and written *before* anything about an
+    /// existing file is touched - both the invalid-name check (for a
+    /// brand-new file) and the new chain's writes happen first, so a
+    /// failure partway through never frees or unlinks a file that was
+    /// already there. Only once the new content is safely on disk does
+    /// this free the old chain (a no-op if the old file was empty) and
+    /// patch the directory entry to point at it.
+    pub fn write_file(&mut self, path: &str, data: &[u8]) -> Result<(), Error> {
+        let (parent_path, name) = split_parent(path).ok_or(Error::InvalidName)?;
+        let parent = self.find(parent_path)?;
+        if !parent.is_dir {
+            return Err(Error::NotADirectory);
+        }
+
+        let mut existing: Option<(u64, usize, u32)> = None;
+        let mut found_dir = false;
+        self.walk_dir_with_location(parent.cluster, |entry, lba, offset| {
+            if entry.name().eq_ignore_ascii_case(name) {
+                if entry.is_dir {
+                    found_dir = true;
+                } else {
+                    existing = Some((lba, offset, entry.cluster));
+                }
+                true
+            } else {
+                false
+            }
+        })?;
+        if found_dir {
+            return Err(Error::NotAFile);
+        }
+
+        // Validated up front, before any cluster is allocated - an
+        // invalid name for a brand-new file should never leave orphaned,
+        // unlinked clusters behind. Not needed when overwriting an
+        // existing file: whatever name is already on disk is already
+        // valid by construction, and might not even fit this kernel's
+        // own (conservative) creation charset if another tool wrote it.
+        let short_name = if existing.is_none() { Some(make_short_name(name).ok_or(Error::InvalidName)?) } else { None };
+
+        let new_cluster = self.write_chain(data)?;
+
+        if let Some((lba, offset, old_cluster)) = existing {
+            if old_cluster != 0 {
+                let mut cluster = old_cluster;
+                loop {
+                    let next = self.next_cluster(cluster)?;
+                    self.write_fat_entry(cluster, 0)?;
+                    match next {
+                        Some(n) => cluster = n,
+                        None => break,
+                    }
+                }
+            }
+            self.patch_entry_cluster_size(lba, offset, new_cluster, data.len() as u32)
+        } else {
+            self.insert_dir_entry(parent.cluster, &short_name.unwrap(), 0, new_cluster, data.len() as u32)
+        }
+    }
+
+    /// Allocates and writes a fresh cluster chain holding `data`, linking
+    /// each cluster to the next via [`write_fat_entry`](Self::write_fat_entry)
+    /// as it goes (so a fresh `find_free_cluster` call never picks a
+    /// cluster this same call already claimed). Returns the chain's first
+    /// cluster, or `0` for empty `data` - the same "no cluster allocated"
+    /// convention [`touch`](Self::touch) already relies on.
+    fn write_chain(&mut self, data: &[u8]) -> Result<u32, Error> {
+        if data.is_empty() {
+            return Ok(0);
+        }
+        let cluster_bytes = self.sectors_per_cluster as usize * SECTOR_SIZE;
+        let num_clusters = data.len().div_ceil(cluster_bytes);
+        let mut first_cluster = 0u32;
+        let mut prev_cluster = 0u32;
+        let mut written = 0usize;
+        for i in 0..num_clusters {
+            let cluster = self.find_free_cluster()?;
+            self.write_fat_entry(cluster, END_OF_CHAIN_MIN)?;
+            if i == 0 {
+                first_cluster = cluster;
+            } else {
+                self.write_fat_entry(prev_cluster, cluster)?;
+            }
+
+            let lba = self.cluster_to_lba(cluster);
+            for s in 0..self.sectors_per_cluster {
+                let mut sector_buf = [0u8; SECTOR_SIZE];
+                let start = written;
+                let end = (written + SECTOR_SIZE).min(data.len());
+                if start < end {
+                    sector_buf[..end - start].copy_from_slice(&data[start..end]);
+                }
+                // SAFETY: `self.device` was initialized before `mount` returned.
+                unsafe { self.device.write_sector((lba + s) as u64, &sector_buf) }?;
+                written += SECTOR_SIZE;
+            }
+            prev_cluster = cluster;
+        }
+        Ok(first_cluster)
+    }
+
+    /// Rewrites just an existing directory entry's cluster and size
+    /// fields in place, leaving its name/attribute/timestamps untouched -
+    /// what [`write_file`](Self::write_file) uses to point an
+    /// already-existing entry at a freshly written replacement chain,
+    /// without re-deriving or re-validating its short name.
+    fn patch_entry_cluster_size(&mut self, lba: u64, offset: usize, cluster: u32, size: u32) -> Result<(), Error> {
+        let mut sector = [0u8; SECTOR_SIZE];
+        // SAFETY: `self.device` was initialized before `mount` returned.
+        unsafe { self.device.read_sector(lba, &mut sector) }?;
+        sector[offset + 20..offset + 22].copy_from_slice(&((cluster >> 16) as u16).to_le_bytes());
+        sector[offset + 26..offset + 28].copy_from_slice(&(cluster as u16).to_le_bytes());
+        sector[offset + 28..offset + 32].copy_from_slice(&size.to_le_bytes());
+        // SAFETY: same as above.
+        unsafe { self.device.write_sector(lba, &sector) }?;
+        Ok(())
+    }
+
     /// Finds a free (end-of-directory or previously-deleted) 32-byte slot
     /// in the directory starting at `start_cluster` and writes a new entry
     /// there. No directory-extension support: if every existing cluster in

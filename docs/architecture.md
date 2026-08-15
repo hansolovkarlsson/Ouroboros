@@ -165,9 +165,10 @@ the way hand-duplicated numbers did before this crate existed.
 | 10 | `fs_rmdir` | path ptr, path len | `0`, `NO_FS`, or `FS_ERROR` | Removes an empty directory. Same collapsed-error contract as `fs_mkdir` |
 | 11 | `fs_touch` | path ptr, path len | `0`, `NO_FS`, or `FS_ERROR` | Creates an empty (zero-byte) file, or succeeds as a no-op if one already exists there. Same collapsed-error contract as `fs_mkdir` |
 | 12 | `fs_rm` | path ptr, path len | `0`, `NO_FS`, or `FS_ERROR` | Removes a file (not a directory — use `fs_rmdir` for those). Same collapsed-error contract as `fs_mkdir` |
+| 13 | `fs_write_file` | path ptr, path len, data ptr, data len | `0`, `NO_FS`, or `FS_ERROR` | Creates a file with exactly `data`'s contents, or fully overwrites (not appends to) an existing file's contents. `data len` may legitimately be `0` (truncate to empty) — the one `fs_*` argument pair where a zero length is valid rather than rejected, see below |
 | other | — | — | `u64::MAX` | Logged as unknown |
 
-All six `fs_*` syscalls share two distinct failure sentinels, not one:
+All seven `fs_*` syscalls share two distinct failure sentinels, not one:
 `FS_ERROR` (`u64::MAX`) for "the filesystem is mounted but this operation
 failed" (not found, already exists, bad name, disk full, ...), and `NO_FS`
 (`u64::MAX - 1`) specifically for "there's no mounted filesystem at all"
@@ -176,12 +177,25 @@ Added after real user confusion: without the split, every disk command
 failing on `make run` looked identical to a genuinely broken path, and the
 actual cause was only ever visible in the kernel's own boot log, never to
 the shell itself. `shell/src/main.rs`'s `cmd_ls`/`cmd_cat`/`cmd_cd`/
-`cmd_mkdir`/`cmd_rmdir`/`cmd_touch`/`cmd_rm` all match on the raw return
-value against both sentinels so they can print "no filesystem mounted"
-instead of a command-specific "not found"/"failed" message when that's
-the real cause. Safe to keep numerically distinct from any real success
-value: byte counts and file sizes returned on success are always far
-below `u64::MAX - 1`.
+`cmd_mkdir`/`cmd_rmdir`/`cmd_touch`/`cmd_rm`/`cmd_write` all match on the
+raw return value against both sentinels so they can print "no filesystem
+mounted" instead of a command-specific "not found"/"failed" message when
+that's the real cause. Safe to keep numerically distinct from any real
+success value: byte counts and file sizes returned on success are always
+far below `u64::MAX - 1`.
+
+`fs_write_file`'s `data` argument needed a genuine second validation
+rule, not just reused `valid_user_range` logic: `syscall.rs`'s argument
+sanity check normally rejects any zero-length `(pointer, length)` pair,
+correct for `fs_list_dir`/`fs_read_file`'s output buffers (a zero-length
+destination is pointless) but wrong here, where empty data is a real,
+meaningful case (truncating a file to zero bytes, exactly matching
+`fs_touch`'s own empty-file semantics) — caught immediately by testing
+`write <file>` with no content. `valid_user_range_allow_empty` covers
+this: same bound, but a zero length passes as long as the pointer is
+still non-null. Only `fs_write_file`'s data argument uses it; every path
+argument, including this syscall's own, still uses the stricter
+`valid_user_range`.
 
 The `syscall-abi` crate only covers the numbers/sentinels themselves, not
 argument validation or per-error-reason detail — see
