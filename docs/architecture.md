@@ -53,11 +53,14 @@ in `kernel/src/main.rs` runs the following, in order:
    (`console::println!`).
 7. **`mmu::install_identity_map`**. Replaces firmware's translation tables
    with the kernel's own (see "Memory layout" below).
-8. **GIC + timer init** (`gic.rs`, `timer.rs`). Arms the periodic
+8. **virtio-console fallback** (`try_virtio_console`), tried only if step
+   2's three mechanisms all failed. Has to run here, after step 7, not
+   alongside step 6 — see "Console" below for why.
+9. **GIC + timer init** (`gic.rs`, `timer.rs`). Arms the periodic
    preemption tick.
-9. **`tasks::init`**. Builds both EL0 tasks' initial `Context` (see
-   "Process model" below).
-10. **IRQs unmasked**, then **`tasks::start`** drops to EL0 and never
+10. **`tasks::init`**. Builds both EL0 tasks' initial `Context` (see
+    "Process model" below).
+11. **IRQs unmasked**, then **`tasks::start`** drops to EL0 and never
     returns — every further transition back to EL1 goes through the
     exception vector table.
 
@@ -208,25 +211,37 @@ on this crate when writing a new userland program.
 
 ## Console
 
-`console.rs` holds a global `Console` handle (`Pl011` or `Uart16550`),
-installed once after `exit_boot_services` and shared between `main()` and
-the exception handler (a fault needs somewhere to report through too).
-Both drivers are polling, not interrupt-driven, and now support both read
-and write (`uart.rs`, `uart16550.rs`).
+`console.rs` holds a global `Console` handle (`Pl011`, `Uart16550`, or
+`Virtio`), installed once after `exit_boot_services` and shared between
+`main()` and the exception handler (a fault needs somewhere to report
+through too). All three drivers support read and write, though `Virtio`'s
+read always returns nothing — see below.
 
-Which driver, and at what address, is determined by
-`discover_console`, trying three mechanisms in order and logging why each
-failed before trying the next:
+Which driver, and at what address, is determined by trying up to four
+mechanisms in order, logging why each failed before trying the next:
 
-1. **Devicetree** (`devicetree.rs`) — confirmed dead on both QEMU and
-   Parallels; both platforms are ACPI-oriented.
+1. **Devicetree** (`devicetree.rs`) — confirmed dead on both QEMU (default
+   `acpi=on` config) and Parallels; both are ACPI-oriented. (A later,
+   incidental finding: QEMU's bundled firmware switches to advertising a
+   devicetree blob instead when booted with `acpi=off` — an artifact of
+   that specific, non-default configuration, not a change to this
+   mechanism's normal QEMU/Parallels behavior.)
 2. **ACPI RSDP → XSDT → SPCR** (`acpi.rs`) — works on QEMU, confirmed dead
    on Parallels (no SPCR table entry at all).
 3. **PCI enumeration for a class 0x07/0x00 serial controller** (`pci.rs`)
    — confirmed dead on both (neither platform exposes a PCI 16550).
+4. **virtio-mmio for a console device** (`virtio_console.rs`, device ID
+   3) — tried only if all three above fail, and only *after*
+   `mmu::install_identity_map` rather than alongside the other three (see
+   `virtio_console.rs`'s module doc comment for the real MMU-mapping
+   constraint that forces this later placement). Confirmed working end to
+   end on QEMU: discovery, feature negotiation, transmitq0 setup, and
+   real data reaching the host. Transmit-only — no receive virtqueue
+   exists yet, so `Console::Virtio`'s read always returns `None`.
+   Parallels itself is unconfirmed: whether it exposes its console via
+   virtio-mmio at all (vs. virtio-pci), and if so at the same address
+   range this driver assumes, needs a real boot on real hardware to know.
 
-Console output on Parallels is a known, deliberately paused gap — see
-`CLAUDE.md` for the virtio-console lead that's the likely next step there.
 There is deliberately no hardcoded fallback address for any driver: one
 existed early in this project and was removed after confirming it
 hard-crashes real Parallels hardware.

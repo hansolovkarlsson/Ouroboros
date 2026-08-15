@@ -31,8 +31,8 @@ This is a deliberate scope decision, not a placeholder: a real
 post-boot storage stack (a virtio-blk driver, feature negotiation, a
 request queue, plus a filesystem reader) is a genuinely separate,
 much larger subsystem — comparable in scope to the virtio-console work
-that's separately deferred for Parallels console output — and was
-explicitly *not* what this milestone needed. It gets real once something
+later built for Parallels console output (`kernel/src/virtio_console.rs`,
+see `CLAUDE.md`) — and was explicitly *not* what this milestone needed. It gets real once something
 needs to load a program *after* boot (dynamic `exec()`-style spawning);
 until then, everything that will ever run has to be known and loadable at
 boot time.

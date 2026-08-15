@@ -7,6 +7,56 @@ what broke, how it was diagnosed), see `CLAUDE.md`; for *how* something
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## virtio-console — a real transmit-only driver, confirmed on QEMU
+
+**The goal:** the real lead flagged (and deliberately deferred) for
+Parallels console output — `kernel/src/virtio_console.rs`, a fourth
+console-discovery mechanism reusing `virtio_mmio.rs`'s existing
+transport, modeled directly on `virtio_blk.rs`'s discover/init/one-
+virtqueue/poll-based-completion shape.
+
+- Discovery, feature negotiation (`VIRTIO_F_VERSION_1` only), and
+  transmitq0 (queue 1) setup, mirroring `virtio_blk.rs` closely.
+  Receiveq0 (queue 0) deliberately left unconfigured - transmit-only,
+  matching the plan this milestone started from.
+- New `Console::Virtio` variant: `write_str` batches through a local
+  buffer with `\n`->`\r\n` translation and sends chunked virtqueue
+  transfers (a full virtqueue round trip per `Device::write` call makes
+  per-byte sends too expensive for whole log lines); `write_byte` sends
+  one byte per call (used for the userland shell's character-at-a-time
+  output); `read_byte` always returns `None` - no receive path exists.
+- **A real placement constraint found while building this, not assumed
+  going in:** unlike devicetree/ACPI/PCI (which install their console
+  immediately after `exit_boot_services`), virtio-mmio discovery needs
+  the device region mapped under this kernel's *own* translation tables,
+  which only happens after `mmu::install_identity_map`. `try_virtio_console`
+  in `main.rs` therefore runs later than the other three - a real,
+  accepted consequence: boot messages between `exit_boot_services` and
+  there are lost on a virtio-console-only platform.
+- **Verified end to end on QEMU**, using the same kind of temporary,
+  documented source-level force this project used to originally verify
+  `exceptions.rs` (QEMU's default ACPI-first boot never organically
+  reaches this fallback): discovery, feature negotiation, virtqueue
+  setup, and real bytes reaching the host chardev all confirmed, `\r\n`
+  bytes verified in the raw output via `xxd`, and the normal (unforced)
+  boot path re-confirmed unaffected afterward. New `make
+  run-virtio-console` Makefile target for future testing. Zero aborts in
+  `-d int` cross-checks.
+- **A genuine surprise along the way:** `-machine virt,acpi=off`, tried
+  first as a way to organically force all three existing mechanisms to
+  fail, instead made *devicetree* discovery succeed (this OVMF build
+  apparently advertises a DTB when ACPI is disabled) - a real, useful
+  finding about this specific firmware configuration, not the forcing
+  mechanism actually needed here.
+- **Parallels itself remains unconfirmed** - this environment has no way
+  to boot real Parallels hardware. Whether Parallels exposes its
+  console via virtio-mmio at all (vs. virtio-pci), and at the same
+  address range this QEMU-confirmed driver assumes, is a real open
+  question only a real Parallels boot can answer.
+- **Still transmit-only, no RX**, deliberately - a receive virtqueue
+  (symmetrically simpler than transmit) is the natural next step once
+  Parallels itself is confirmed reachable this way.
+
 ## Phase 8 — `mv`, and the last real correctness risk in the write-support arc
 
 **The goal:** `mv <src> <dst>`, the last cheap command-level win left in

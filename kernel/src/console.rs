@@ -7,6 +7,7 @@ use core::fmt;
 
 use crate::uart::Uart;
 use crate::uart16550::Uart16550;
+use crate::virtio_console;
 
 /// Either driver a discovered console might turn out to need. A plain enum,
 /// not `Box<dyn fmt::Write>`: constructing a trait object would allocate,
@@ -15,6 +16,11 @@ use crate::uart16550::Uart16550;
 pub enum Console {
     Pl011(Uart),
     Uart16550(Uart16550),
+    /// The real lead for Parallels console output - see
+    /// `virtio_console.rs`'s module doc comment. Transmit-only: this
+    /// variant's `read_byte` always returns `None`, a real, documented
+    /// limitation, not a bug (no receive virtqueue exists yet).
+    Virtio(virtio_console::Device),
 }
 
 impl fmt::Write for Console {
@@ -22,8 +28,47 @@ impl fmt::Write for Console {
         match self {
             Console::Pl011(uart) => uart.write_str(s),
             Console::Uart16550(uart) => uart.write_str(s),
+            Console::Virtio(dev) => write_str_virtio(dev, s),
         }
     }
+}
+
+/// `\n` -> `\r\n` translation, same as `Uart`/`Uart16550`'s `write_str`,
+/// but batched through a local buffer and sent as chunked virtqueue
+/// transfers rather than one MMIO write per byte - a raw UART write is
+/// cheap enough per-byte that batching wouldn't matter, but each
+/// `virtio_console::Device::write` call is a full virtqueue round trip
+/// (notify + poll the used ring), so sending a whole log line as one (or
+/// a few) transfers instead of dozens matters here in a way it doesn't
+/// for the other drivers.
+fn write_str_virtio(dev: &mut virtio_console::Device, s: &str) -> fmt::Result {
+    const CHUNK: usize = 256;
+    let mut buf = [0u8; CHUNK];
+    let mut len = 0usize;
+
+    // SAFETY, both `write` calls below: `dev` was only ever constructed
+    // after a successful `init()` - see `main.rs`'s console-discovery
+    // sequence.
+    for byte in s.bytes() {
+        if byte == b'\n' {
+            if len == buf.len() {
+                let _ = unsafe { dev.write(&buf[..len]) };
+                len = 0;
+            }
+            buf[len] = b'\r';
+            len += 1;
+        }
+        if len == buf.len() {
+            let _ = unsafe { dev.write(&buf[..len]) };
+            len = 0;
+        }
+        buf[len] = byte;
+        len += 1;
+    }
+    if len > 0 {
+        let _ = unsafe { dev.write(&buf[..len]) };
+    }
+    Ok(())
 }
 
 impl Console {
@@ -35,14 +80,21 @@ impl Console {
         match self {
             Console::Pl011(uart) => uart.write_byte(byte),
             Console::Uart16550(uart) => uart.write_byte(byte),
+            // SAFETY: same as write_str_virtio's.
+            Console::Virtio(dev) => {
+                let _ = unsafe { dev.write(&[byte]) };
+            }
         }
     }
 
-    /// Non-blocking: `None` if no byte is waiting.
+    /// Non-blocking: `None` if no byte is waiting - always, for
+    /// `Virtio`, since this driver has no receive path yet (see
+    /// `virtio_console.rs`'s module doc comment).
     fn read_byte(&mut self) -> Option<u8> {
         match self {
             Console::Pl011(uart) => uart.read_byte(),
             Console::Uart16550(uart) => uart.read_byte(),
+            Console::Virtio(_) => None,
         }
     }
 }

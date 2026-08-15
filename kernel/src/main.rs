@@ -18,6 +18,7 @@ mod timer;
 mod uart;
 mod uart16550;
 mod virtio_blk;
+mod virtio_console;
 mod virtio_mmio;
 
 use uefi::boot;
@@ -88,6 +89,7 @@ fn main() -> Status {
     if let Some((base, _kind, source)) = &discovery {
         log::info!("Ouroboros kernel: console @ {base:#x} (via {source})");
     }
+    let found_console_early = discovery.is_some();
 
     // Also boot-services-only (a filesystem read and a page allocation) -
     // see loader.rs's module doc comment for why this happens now rather
@@ -136,6 +138,15 @@ fn main() -> Status {
     unsafe { mmu::install_identity_map(&memory_map, [(program.base, program.size), tasks::idle_region()]) };
     console::println!("Ouroboros kernel: identity map installed, MMU running on our own tables");
 
+    // A fourth console-discovery fallback, tried only if devicetree/ACPI/
+    // PCI all failed above - the real lead for Parallels console output,
+    // see `virtio_console.rs`'s module doc comment and `try_virtio_console`'s
+    // own for why this one has to run here rather than alongside the other
+    // three.
+    if !found_console_early {
+        try_virtio_console();
+    }
+
     // The runtime storage stack (docs/CHANGELOG.md phases 3a/3b): virtio-blk
     // + FAT32, installed globally for fs_list_dir/fs_read_file
     // (syscall.rs) to use. Not fatal if it fails - see init_storage's doc
@@ -166,6 +177,41 @@ fn main() -> Status {
 
     // SAFETY: called after tasks::init().
     unsafe { tasks::start() }
+}
+
+/// Tries virtio-mmio for a console device - the real lead for Parallels
+/// console output (see `virtio_console.rs`'s module doc comment), tried
+/// only once `devicetree.rs`/`acpi.rs`/`pci.rs` have all failed.
+///
+/// **Runs here, after `mmu::install_identity_map`, unlike the other
+/// three mechanisms - a real constraint, not an arbitrary placement
+/// choice.** `virtio_mmio::find_device`'s scan needs the low-1GB device
+/// region mapped under *this kernel's own* translation tables (see its
+/// safety comment) - `virtio_blk::Device::discover` (`init_storage`,
+/// below) already only ever runs at this same point in boot, for the
+/// same reason. A real consequence, not just a technicality: every boot
+/// message between `exit_boot_services` and here (`exceptions::install`,
+/// `mmu::install_identity_map`'s own confirmation line) is lost on a
+/// virtio-console-only platform, since there is nothing to print through
+/// yet - unlike devicetree/ACPI/PCI, which install their console
+/// immediately after `exit_boot_services`, before any of that. Revisit
+/// if a real platform ever needs those earlier messages badly enough to
+/// justify confirming (rather than assuming) that firmware's own
+/// pre-`mmu::install_identity_map` tables already map this region too.
+fn try_virtio_console() {
+    let mut device = match unsafe { virtio_console::Device::discover() } {
+        Ok(device) => device,
+        Err(e) => {
+            console::println!("Ouroboros kernel: virtio-console discovery failed ({e})");
+            return;
+        }
+    };
+    if let Err(e) = unsafe { device.init() } {
+        console::println!("Ouroboros kernel: virtio-console init failed ({e})");
+        return;
+    }
+    console::install(Console::Virtio(device));
+    console::println!("Ouroboros kernel: virtio-console live (fallback - devicetree/ACPI/PCI all failed)");
 }
 
 /// Discovers and initializes the virtio-blk device, reads sector 0 back

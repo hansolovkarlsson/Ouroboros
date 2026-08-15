@@ -48,14 +48,16 @@ through `kernel/src/uart.rs`, a polling PL011 driver taking a runtime base
 address — no fallback address, see below. The returned memory map is kept
 (not discarded) — `mmu.rs` uses it to identity-map real discovered RAM.
 
-### Console discovery: three mechanisms tried, all confirmed dead ends on Parallels — deferred, see below for the real lead
+### Console discovery: three mechanisms tried, all confirmed dead ends on Parallels — the real lead is now built, see "virtio-console" below
 
-**Status: deferred as of this writing.** All three mechanisms below are
-confirmed not to work on Parallels. There's a real, promising lead for what
-actually would (virtio-console, at the end of this section) — but
-implementing it is a genuinely different, smaller-than-AML subsystem
-(virtio device discovery, feature negotiation, a transmit virtqueue), not a
-quick follow-up, so it was deliberately not started this session. Kernel
+**Status as of this writing (historical - see the "virtio-console"
+section further below for what actually got built and where it
+stands):** all three mechanisms below are confirmed not to work on
+Parallels. There's a real, promising lead for what actually would
+(virtio-console, at the end of this section) — but implementing it is a
+genuinely different, smaller-than-AML subsystem (virtio device
+discovery, feature negotiation, a transmit virtqueue), not a quick
+follow-up, so it was deliberately not started this session. Kernel
 development continues against QEMU (which has a fully working console via
 mechanism 2 below) in the meantime.
 
@@ -112,9 +114,12 @@ this class of VM. That would cleanly explain all three dead ends above:
 none of them were ever going to find a virtio device, because virtio
 consoles don't work like a UART — no simple MMIO byte registers, just
 virtqueues (descriptor rings in memory), feature negotiation, and a
-transport (virtio-mmio or virtio-pci). Implementing this is the next real
-step for Parallels console output, whenever this gets picked back up — see
-Next milestone.
+transport (virtio-mmio or virtio-pci). **Update: implemented — see the
+"virtio-console" section further below.** It turned out this couldn't
+land on the boot-services side of `exit_boot_services` the way the
+paragraph below originally called for; see that section for the real
+constraint (device-region mapping under this kernel's own MMU tables,
+not firmware's) that forced a later placement instead.
 
 `find_dtb`/`find_rsdp` (need the UEFI config table) and each PL011 module's
 `discover_pl011` (pure memory parsing, no boot service) run **before**
@@ -123,10 +128,12 @@ boot services — so the result gets logged through the UEFI console (works
 on any platform) before any raw MMIO is touched. `pci.rs`'s
 `discover_uart16550` has no such split — PCI enumeration is entirely
 boot-services-based throughout, so the whole thing runs before exit, no
-part of it could run after even if it wanted to. Keep any future discovery
-mechanism (virtio-console included) on this same side of the
-`exit_boot_services` call for the same reason: whatever address you find,
-you want to have already reported it before you risk writing to it.
+part of it could run after even if it wanted to. **This paragraph
+originally continued: "keep any future discovery mechanism (virtio-console
+included) on this same side of the `exit_boot_services` call" — turned out
+not to be possible for virtio-console specifically; see the
+"virtio-console" section below for why, kept here rather than silently
+edited away since it was the real plan going in, not a mistake to erase.**
 
 ### There is no fallback UART address, and there should not be one again
 
@@ -1348,6 +1355,114 @@ support arc phase 3 explicitly deferred (mkdir/rmdir/touch/rm/write/cp/
 mv, phases 4-8) - what's left in `docs/roadmap.md`'s parking lot from
 here is genuinely bigger work, not more cheap wins in this vein.
 
+### virtio-console: a real, working transmit-only driver, confirmed on QEMU - Parallels itself still unconfirmed
+
+The real lead flagged (and deliberately deferred) in the "Console
+discovery" section above, finally built: `kernel/src/virtio_console.rs`,
+a fourth console-discovery mechanism reusing `virtio_mmio.rs`'s existing
+transport - the same one `virtio_blk.rs` already proved out for disk
+I/O - rather than a new one. Modeled directly on `virtio_blk.rs`'s
+discover/init/single-virtqueue/poll-based-completion shape, since the
+two devices' basic operation is structurally identical (feature
+negotiation, one virtqueue, synchronous completion) even though what
+flows through the queue is completely different (one variable-length
+message descriptor instead of a fixed 3-part block request).
+
+**A real placement constraint discovered while building this, not
+assumed going in: this can't run at the same point in boot as
+devicetree/ACPI/PCI do.** Those three install their console immediately
+after `exit_boot_services`, before `mmu::install_identity_map` - fine
+for them, since none of their discovery touches raw MMIO at all
+(devicetree/ACPI parse boot-services-supplied pointers; PCI enumeration
+is entirely boot-services-based). `virtio_mmio::find_device`'s scan is
+raw MMIO reads, and its own safety contract requires the low-1GB device
+region mapped under *this kernel's own* translation tables - true only
+after `mmu::install_identity_map` runs (the same reason
+`virtio_blk::Device::discover` in `init_storage` already only ever runs
+at that point, not earlier). `try_virtio_console` in `main.rs` therefore
+runs right after the identity-map confirmation line, not alongside the
+other three - a real, accepted consequence: every boot message between
+`exit_boot_services` and there is silently lost on a virtio-console-only
+platform, since there's nothing to print through yet. Untested whether
+firmware's own pre-MMU-swap tables would have covered this region too
+(which would have allowed the earlier placement) - not assumed, just
+left as a real open question for later, per this project's usual
+discipline of confirming rather than guessing.
+
+**Verified end to end on QEMU, not just "it compiles" - the whole
+chain confirmed working, from discovery through a real byte reaching
+the host.** QEMU's default `virt`+OVMF combination always resolves a
+console via ACPI/SPCR before virtio-console ever gets a chance to run,
+so proving this driver actually works needed the same kind of temporary,
+documented force this project has used before (see `exceptions.rs`'s
+original verification): `main.rs`'s `if !found_console_early` was
+temporarily changed to `if true`, a `virtio-serial-device`/`virtconsole`
+device pair was attached via a new `make run-virtio-console` target
+(writing to a separate chardev file, `vcon.log`), and the kernel was
+booted normally. Confirmed, precisely:
+
+- Discovery found the device, version 2 (modern interface) as expected.
+- Feature negotiation succeeded (`VIRTIO_F_VERSION_1` offered and
+  accepted, `FEATURES_OK` came back set).
+- Transmitq0 (queue 1) setup succeeded and `DRIVER_OK` was reached.
+- `console::install`'s own confirmation line
+  ("`virtio-console live (fallback...)`") and every subsequent kernel
+  boot message (`virtio-blk ready`, `FAT32 mount failed`, `shell ready`,
+  the userland shell's own banner and prompt) all appeared in `vcon.log`
+  - meaning `write_str`'s batched, chunked sends and `write_byte`'s
+  single-byte sends (the userland shell's prompt `$ ` specifically) both
+  really round-tripped through the transmit virtqueue to the host,
+  not just queued locally. `xxd` on the raw bytes confirmed genuine
+  `0d 0a` (`\r\n`) sequences, not just terminal rendering that happened
+  to look right.
+- The **normal**, unforced boot path was separately re-confirmed
+  afterward (temporary force reverted) with the same virtio-console
+  device still attached but idle: ACPI/SPCR still won as before,
+  the interactive shell still worked normally (typed `help`/`echo`
+  round-tripped correctly), and `run-image`'s real-FAT32 boot was
+  unaffected too - the new device sitting unused doesn't perturb the
+  existing, working path.
+- Zero aborts (`Data Abort`/`Prefetch Abort`/`Undefined Instruction`) in
+  `-d int` cross-checks across every session above (the forced test, the
+  normal-boot regression check, and the `run-image` regression check).
+
+**A genuine surprise along the way, worth recording so it isn't
+re-discovered:** the first attempt to organically force *all three*
+existing mechanisms to fail (rather than editing source) was
+`-machine virt,acpi=off`, on the theory that no ACPI tables would mean
+no SPCR, no RSDP-derived console. Instead, this OVMF build apparently
+switches to advertising a devicetree blob when ACPI is disabled -
+devicetree discovery, "confirmed dead on both platforms" under every
+*previous* test in this project (always run with the default `acpi=on`),
+*succeeded* under this specific configuration. A real, useful data point
+about this firmware build's behavior, not a path to what was actually
+needed here - hence the source-level force instead.
+
+**Still coarse, worth knowing before building on this - transmit-only is
+the headline limitation, not an oversight:** no receive/input path at
+all (`Console::Virtio`'s `read_byte` always returns `None`) - a
+Parallels boot using this fallback would let you *see* the shell, not
+type into it, until a receive virtqueue is added (symmetrically simpler
+than transmit: post device-writable buffers to receiveq0/queue 0,
+deliberately left unconfigured this phase, and poll the used ring for
+arrivals). No `VIRTIO_CONSOLE_F_SIZE`/`F_MULTIPORT`/`F_EMERG_WRITE`
+negotiated - none needed for one fixed-size default port. `write_byte`
+(character echo, if RX existed) would pay a full virtqueue round trip
+per keystroke, unlike `write_str`'s batched sends - real overhead
+compared to a raw UART's direct MMIO write, accepted for a first cut.
+
+**Parallels itself remains genuinely unconfirmed - this environment has
+no way to test it.** Everything above is QEMU-verified; whether real
+Parallels-on-Apple-Silicon virtualization exposes its virtio-console at
+the same `0xa000000`-based, 32-slot-stride address range this driver
+scans (confirmed QEMU-specific, per `virtio_mmio.rs`'s own module doc
+comment - "Parallels' own virtio-mmio behavior is still unconfirmed",
+already flagged before this milestone and still true after it), or even
+uses virtio-mmio transport at all rather than virtio-pci, is exactly the
+kind of thing this project's own discipline says not to assume - it
+needs a real boot on real Parallels hardware to know, which only the
+user can do from here.
+
 ### Parallels disk attachment: a real trap, not a hunch
 
 Getting `esp.img` to actually boot in Parallels took a few wrong turns worth
@@ -1379,18 +1494,27 @@ attachment mechanism was wrong.
 
 ### Next milestone
 
-**Parallels console output is deliberately paused, not abandoned.** All
-three UART discovery mechanisms are confirmed dead ends there (devicetree,
-ACPI/SPCR, PCI 16550 — see previous section), and the real lead
-(virtio-console) is a genuinely different, smaller-than-AML subsystem that
-was a deliberate stopping point for this session rather than a quick
-follow-up. When this gets picked back up: implement virtio-console
-discovery and a minimal transmit-only driver (virtio-mmio or virtio-pci
-transport, feature negotiation, one virtqueue) — see the previous section
-for the reasoning behind that lead.
+**Parallels console output has a real, working driver now (see
+"virtio-console" above) - but Parallels itself is still unconfirmed,
+not because of a deliberate pause anymore, just because this
+environment has no way to boot real Parallels hardware.** The QEMU-side
+implementation is done and verified end to end: discovery, feature
+negotiation, virtqueue setup, and real bytes reaching the host, all
+confirmed. What's left is squarely the user's to do: boot `esp.hdd` on
+real Parallels (`make parallels-hdd`, same as every prior Parallels
+milestone) and report back whether `try_virtio_console` actually finds
+a device there, and at the address range this driver assumes
+(`virtio_mmio.rs`'s `SLOT_BASE`/`SLOT_STRIDE`, confirmed QEMU-specific
+only). If it doesn't, the two live open questions are: does Parallels
+even use virtio-mmio transport for its console, or virtio-pci instead;
+and does it place virtio-mmio slots at the same addresses QEMU does.
+Neither can be answered from here.
 
 **In the meantime, kernel development continues against QEMU**, which has a
-fully working console via ACPI/SPCR. MMU/identity-paging, the timer-driven
+fully working console via ACPI/SPCR (and, as of this milestone, a second,
+confirmed-working path via virtio-console, currently only reachable as a
+fallback or by the same temporary force used to verify it — see
+"virtio-console" above). MMU/identity-paging, the timer-driven
 preemption tick, the syscall boundary, real preemptive task switching, a
 working interactive echo shell, a shell that's a real disk-loaded,
 configuration-selected userland program, a working runtime virtio-blk
@@ -1414,13 +1538,15 @@ then `mv` (phase 8, see above - the last one with a genuine correctness
 risk, not just a thin wrapper) crossed and then repeatedly extended the
 write-support line phase 3 had deliberately drawn (see
 `docs/CHANGELOG.md`'s "Phase 3" entry), for the narrowest useful case
-each time. **This closes the "easy cheap-win commands" arc deliberately**
-- what's left in the gaps below and `docs/roadmap.md`'s parking lot is
-genuinely bigger work (a relocating loader, blocking primitives,
-Parallels console, driver isolation), not more small commands in this
-vein. This section (and the "gaps" paragraph below it) still tracks
-what's true right now; `docs/roadmap.md` is the one to check for what's
-next, `docs/CHANGELOG.md` for the full history of what's already done.
+each time. **This closed the "easy cheap-win commands" arc deliberately,
+and the next real step after it (Parallels virtio-console, see above) is
+now done too**, at least on the QEMU side - what's left in the gaps
+below and `docs/roadmap.md`'s parking lot is genuinely bigger work (a
+relocating loader, blocking primitives, virtio-console RX, driver
+isolation), not more small commands in this vein. This section (and the
+"gaps" paragraph below it) still tracks what's true right now;
+`docs/roadmap.md` is the one to check for what's next, `docs/CHANGELOG.md`
+for the full history of what's already done.
 
 What's still coarse and worth knowing about before building on any of
 this — kept current in `docs/processes.md`'s "known rough edges" rather
@@ -1454,22 +1580,27 @@ error collapses to one sentinel at the syscall boundary so userland
 can't distinguish *why* an operation failed (see "Phase 4" through
 "Phase 8" above); disk-command pointer/length arguments are trusted, not
 validated against the caller's actual mapped region (fine with exactly
-one, currently-trusted userland program). Also still true from before
-this milestone: strict round-robin only, no priorities or blocking;
-FP/SIMD state still isn't saved anywhere (`exceptions.rs`'s `Context`).
+one, currently-trusted userland program); and `virtio_console.rs` is
+transmit-only - no receive path, so Parallels console output (once
+confirmed working there) still can't accept typed input this phase, and
+its whole-message-per-virtqueue-round-trip `write_byte` path would make
+character-echo noticeably heavier than a raw UART's once RX exists to
+need it. Also still true from before this milestone: strict round-robin
+only, no priorities or blocking; FP/SIMD state still isn't saved
+anywhere (`exceptions.rs`'s `Context`).
 
-Reasonable next steps from here, now that the shell's command surface is
-genuinely rounded out: circling back to Parallels virtio-console, since
-there's now enough real, interactive functionality (disk-loaded
-userland, a full file-management command set, real read/write runtime
-storage) to make testing on the actual primary hardware target
-meaningful rather than a bare console-output demo; a real relocating
-loader (ELF + relocation processing), which would lift both the
-`core::fmt` and literal-comparison restrictions; blocking/waiting
-primitives so tasks can do more than an unconditional round-robin `wfe`
-loop; or output redirection (`>`/`>>`), now that `write_file`/`cp` give
-it something real to build on but shell-side command-line parsing still
-doesn't exist.
+Reasonable next steps from here: the user testing this milestone's real
+open question - does `try_virtio_console` actually find and drive a
+device on real Parallels hardware, or does that platform need a
+different transport/address assumption than this QEMU-confirmed one;
+adding a receive virtqueue to `virtio_console.rs` so a
+Parallels-via-virtio-console boot can actually be typed into, not just
+watched; a real relocating loader (ELF + relocation processing), which
+would lift both the `core::fmt` and literal-comparison restrictions;
+blocking/waiting primitives so tasks can do more than an unconditional
+round-robin `wfe` loop; or output redirection (`>`/`>>`), now that
+`write_file`/`cp` give it something real to build on but shell-side
+command-line parsing still doesn't exist.
 
 ## Commands
 
@@ -1478,6 +1609,7 @@ make build                  # cargo build (debug) - kernel only, see below
 make build PROFILE=release  # release profile
 make shell-bin               # build shell/ for aarch64-unknown-none + objcopy to a raw .bin
 make run                    # stage ESP dir (kernel + shell binary + config) + boot in QEMU with a virtio-mmio block device attached (fast dev loop - vvfat backing, FAT16, not FAT32 - see "Phase 3b")
+make run-virtio-console      # same as `run`, plus a virtio-mmio console device attached (for testing virtio_console.rs - see "virtio-console" above for why this alone doesn't organically trigger the fallback)
 make image                  # build esp.img, a raw MBR+FAT32 disk image (not directly usable by Parallels - see below)
 make run-image               # boot esp.img (genuine FAT32) instead of run's vvfat - needed for anything that reads the filesystem at runtime (fat32.rs and up)
 make parallels-hdd          # wrap esp.img into esp.hdd, a Parallels-native virtual hard disk
@@ -1529,7 +1661,7 @@ kernel/
   src/devicetree.rs  console UART discovery via the UEFI-provided devicetree (dead end on QEMU/Parallels)
   src/acpi.rs        console UART discovery via ACPI RSDP -> XSDT -> SPCR (works on QEMU, dead end on Parallels)
   src/pci.rs         console UART discovery via PCI enumeration for a class 0x07/0x00 serial controller
-  src/console.rs     global console handle (Console enum: Pl011 | Uart16550), shared between main() and the exception handler
+  src/console.rs     global console handle (Console enum: Pl011 | Uart16550 | Virtio), shared between main() and the exception handler
   src/exceptions.rs  AArch64 exception vector table (VBAR_EL1) + fault reporting
   src/mmu.rs         replaces firmware's translation tables with our own identity map (L0->L1->L2->L3 as needed), up to MAX_EL0_REGIONS independent EL0 regions
   src/gic.rs         GICv2 driver (QEMU virt addresses, confirmed via devicetree dump)
@@ -1539,6 +1671,7 @@ kernel/
   src/tasks.rs       task 0 (loaded program) + task 1 (idle) + the round-robin scheduler (Context save/restore in the tick path) - confirmed alternating, see above
   src/virtio_mmio.rs virtio-mmio transport: 32-slot device discovery, modern (non-legacy) register layout, addresses confirmed via devicetree dump
   src/virtio_blk.rs  runtime virtio-blk driver: feature negotiation, one virtqueue, synchronous polling sector reads and writes - phase 3a (reads)/phase 4 (writes), confirmed working, see above
+  src/virtio_console.rs  transmit-only virtio-console driver over the same transport - device discovery, feature negotiation, transmitq0 - the real lead for Parallels console output, confirmed working on QEMU (Parallels itself unconfirmed), see "virtio-console" above
   src/fat32.rs       hand-rolled FAT32 over virtio_blk::Device: MBR, BPB, FAT cluster chains, 8.3-only directory entries, mkdir/rmdir/touch/rm/write_file/mv write support - phase 3b (reads)/phase 4-8 (writes), confirmed working, see above
 
 shell/               userland default shell - a separate crate, built for aarch64-unknown-none, loaded from disk (not compiled into the kernel)
