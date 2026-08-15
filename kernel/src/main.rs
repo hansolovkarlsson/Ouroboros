@@ -10,6 +10,7 @@ mod exceptions;
 mod gic;
 mod mmu;
 mod pci;
+mod shell;
 mod syscall;
 mod tasks;
 mod timer;
@@ -128,6 +129,8 @@ fn main() -> Status {
     // SAFETY: the EL0 region (tasks::el0_region()) was just mapped
     // EL0-accessible above.
     unsafe { tasks::init() };
+
+    console::println!("Ouroboros kernel: shell ready - type and press Enter");
 
     // Unmasked last, right before dropping to EL0: nothing before this
     // point expects to be interrupted, and everything after (task 0, or

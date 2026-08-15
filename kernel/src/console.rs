@@ -26,6 +26,27 @@ impl fmt::Write for Console {
     }
 }
 
+impl Console {
+    /// Raw single-byte write, no `\n` -> `\r\n` translation (unlike
+    /// `write_str`) - callers that need a newline send `\r\n` themselves.
+    /// Used for echoing input verbatim, where a translated `\n` would be
+    /// wrong for e.g. a literal byte the line editor is about to erase.
+    fn write_byte(&mut self, byte: u8) {
+        match self {
+            Console::Pl011(uart) => uart.write_byte(byte),
+            Console::Uart16550(uart) => uart.write_byte(byte),
+        }
+    }
+
+    /// Non-blocking: `None` if no byte is waiting.
+    fn read_byte(&mut self) -> Option<u8> {
+        match self {
+            Console::Pl011(uart) => uart.read_byte(),
+            Console::Uart16550(uart) => uart.read_byte(),
+        }
+    }
+}
+
 struct ConsoleCell(UnsafeCell<Option<Console>>);
 
 // SAFETY: single-core, no preemption, no interrupts unmasked yet - nothing
@@ -58,3 +79,17 @@ macro_rules! println {
 }
 
 pub(crate) use println;
+
+/// Writes one raw byte to the global console if one has been installed;
+/// silently does nothing otherwise, same as [`print`].
+pub fn putc(byte: u8) {
+    if let Some(console) = unsafe { (*CONSOLE.0.get()).as_mut() } {
+        console.write_byte(byte);
+    }
+}
+
+/// Non-blocking read of one byte from the global console. `None` if there
+/// is no console installed yet, or there is one but nothing is waiting.
+pub fn read_byte() -> Option<u8> {
+    unsafe { (*CONSOLE.0.get()).as_mut() }.and_then(Console::read_byte)
+}

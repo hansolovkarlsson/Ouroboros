@@ -17,8 +17,10 @@ use core::ptr::{read_volatile, write_volatile};
 
 const STRIDE: usize = 4;
 const THR_OFFSET: usize = 0;
+const RBR_OFFSET: usize = 0; // same address as THR - direction (read vs write) disambiguates
 const LSR_OFFSET: usize = 5 * STRIDE;
 const LSR_THRE: u8 = 1 << 5;
+const LSR_DR: u8 = 1 << 0;
 
 pub struct Uart16550 {
     base: usize,
@@ -32,13 +34,29 @@ impl Uart16550 {
         Uart16550 { base }
     }
 
-    fn write_byte(&mut self, byte: u8) {
+    pub(crate) fn write_byte(&mut self, byte: u8) {
         unsafe {
             let lsr = (self.base + LSR_OFFSET) as *const u8;
             while read_volatile(lsr) & LSR_THRE == 0 {}
 
             let thr = (self.base + THR_OFFSET) as *mut u8;
             write_volatile(thr, byte);
+        }
+    }
+
+    /// Non-blocking: `None` if LSR's Data Ready bit isn't set. Untested
+    /// against real hardware, same caveat as this whole module (see the
+    /// module doc comment) — stride/offsets are the first thing to question
+    /// if this doesn't behave once a PCI 16550 console is actually live.
+    pub(crate) fn read_byte(&mut self) -> Option<u8> {
+        unsafe {
+            let lsr = (self.base + LSR_OFFSET) as *const u8;
+            if read_volatile(lsr) & LSR_DR == 0 {
+                return None;
+            }
+
+            let rbr = (self.base + RBR_OFFSET) as *const u8;
+            Some(read_volatile(rbr))
         }
     }
 }

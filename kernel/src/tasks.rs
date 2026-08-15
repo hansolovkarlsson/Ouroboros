@@ -12,13 +12,27 @@
 //! this is already as tight as the isolation gets without going smaller
 //! than a full page, which the architecture doesn't allow anyway.
 //!
-//! Each task is a tiny hand-written loop (`global_asm!`, two nearly
-//! identical blocks differing only in a hardcoded task ID): report in via
-//! a syscall, then `wfe`. There's no cooperative yielding — the *only*
-//! thing that ever moves execution from one task to the other is the timer
-//! tick catching it mid-`wfe` and swapping its saved [`Context`] for the
-//! other task's. That swap is the entire scheduler: strict round-robin
-//! between exactly two tasks, no priorities, no blocking, no queue.
+//! There's no cooperative yielding anywhere — the *only* thing that ever
+//! moves execution from one task to the other is the timer tick catching
+//! one mid-`wfe` and swapping its saved [`Context`] for the other task's.
+//! That swap is the entire scheduler: strict round-robin between exactly
+//! two tasks, no priorities, no blocking, no queue.
+//!
+//! **Task 0 is the interactive shell's poll loop** (phase 1 of "get to a
+//! shell", per the project's current milestone): `try_read_char` (syscall
+//! 3), and if a byte came back, hand it straight to `shell.rs`'s line
+//! editor via `shell_input` (syscall 5) — the byte is already sitting in
+//! x0 from `try_read_char`'s return, so the two syscalls chain with no
+//! extra register shuffling. Deliberately dumb: all the actual line-
+//! editing logic (buffering, backspace, echo) lives in ordinary Rust at
+//! EL1, in `shell.rs` — writing that as hand-assembled EL0 code would be
+//! painful, and there's no way yet to get compiled Rust into the isolated
+//! EL0 region (see `syscall.rs`'s module doc comment on the `rustc`/
+//! PE-COFF alignment ceiling that forces this region to stay hand-written
+//! assembly). **Task 1 is a genuine idle task** — bare `wfe` loop, no
+//! syscalls at all — rather than the old report-and-loop demo: once task 0
+//! is doing real interactive I/O, task 1 chattering to the same console
+//! every time it gets scheduled would corrupt the terminal output.
 //!
 //! FP/SIMD state still isn't part of a task's [`Context`] (see
 //! `exceptions.rs`'s module doc comment) — fine for these tasks, since
@@ -53,36 +67,31 @@ static EL0_REGION: El0Region = El0Region(UnsafeCell::new([0; EL0_REGION_SIZE]));
 
 // Each task's machine code, at its ordinary (small, unpadded) link
 // address - `init` copies each into its own 4KB slot in EL0_REGION rather
-// than executing it here directly, since here isn't EL0-accessible. The
-// two blocks are identical but for the hardcoded task ID (x0 on syscall
-// 2) - not worth a runtime patching scheme for two constants.
+// than executing it here directly, since here isn't EL0-accessible.
 global_asm!(
     r#"
 .text
 .global el0_task0_template
 el0_task0_template:
-mov x8, #2    // syscall 2: report
-mov x0, #0    // task id 0
-svc #0
 1:
-wfe
-mov x8, #2
-mov x0, #0
+mov x8, #3      // syscall 3: try_read_char
 svc #0
+mov x9, #-1     // NO_CHAR sentinel (syscall.rs::NO_CHAR, u64::MAX)
+cmp x0, x9
+b.eq 2f
+mov x8, #5      // syscall 5: shell_input - arg0 (x0) is already the byte
+svc #0
+b 1b
+2:
+wfe
 b 1b
 .global el0_task0_template_end
 el0_task0_template_end:
 
 .global el0_task1_template
 el0_task1_template:
-mov x8, #2    // syscall 2: report
-mov x0, #1    // task id 1
-svc #0
 1:
 wfe
-mov x8, #2
-mov x0, #1
-svc #0
 b 1b
 .global el0_task1_template_end
 el0_task1_template_end:

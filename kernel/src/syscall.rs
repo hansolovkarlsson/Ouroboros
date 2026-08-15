@@ -13,6 +13,7 @@
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::console;
+use crate::shell;
 
 /// Two independent counters (one per `tasks.rs` task), proof — alongside
 /// `double`/`print` below — that syscalls arriving from *different*,
@@ -21,17 +22,28 @@ use crate::console;
 /// than one entry.
 static TASK_REPORTS: [AtomicU64; crate::tasks::NUM_TASKS] = [AtomicU64::new(0), AtomicU64::new(0)];
 
+/// Sentinel `try_read_char` returns in x0 when no byte is waiting -
+/// out of range for any real byte (0-255), so callers can tell the two
+/// apart with a single comparison.
+pub const NO_CHAR: u64 = u64::MAX;
+
 /// Called from the exception vector's SVC trampoline (`exceptions.rs`) with
 /// the syscall number (from x8) and first argument (from x0), running at
 /// EL1 with the kernel's own stack and every privilege EL0 lacks - the
 /// entire reason this indirection exists. Its return value becomes EL0's
 /// new x0 after `eret`.
 ///
-/// Three syscalls, not one - a real dispatch table. `double`/`print` were
-/// deliberately chained by the original single-task demo (double's return
-/// value fed straight into print's argument) to prove a return value
-/// survives the trampoline intact; `report` is what `tasks.rs`'s two tasks
-/// actually call, each with its own task ID as `arg0`.
+/// Six syscalls now. `double`/`print` were deliberately chained by the
+/// original single-task demo (double's return value fed straight into
+/// print's argument) to prove a return value survives the trampoline
+/// intact; `report` is what `tasks.rs`'s original two demo tasks called,
+/// each with its own task ID as `arg0` (task 1 has since become a plain
+/// idle loop that calls nothing - see `tasks.rs`). `try_read_char`/`putc`/
+/// `shell_input` are the real input/output primitives the interactive
+/// shell (`shell.rs`) is built on: task 0's poll loop chains the first two
+/// directly (a byte `try_read_char` returns becomes `shell_input`'s `arg0`
+/// with no extra register shuffling), and all the actual line-editing
+/// logic lives in `shell.rs`, not here or in EL0 code.
 pub extern "C" fn dispatch(number: u64, arg0: u64) -> u64 {
     match number {
         0 => {
@@ -53,6 +65,18 @@ pub extern "C" fn dispatch(number: u64, arg0: u64) -> u64 {
                 }
                 None => u64::MAX,
             }
+        }
+        3 => match console::read_byte() {
+            Some(byte) => byte as u64,
+            None => NO_CHAR,
+        },
+        4 => {
+            console::putc(arg0 as u8);
+            0
+        }
+        5 => {
+            shell::on_byte(arg0 as u8);
+            0
         }
         _ => {
             console::println!("Ouroboros kernel: syscall from EL0: unknown number={number}");

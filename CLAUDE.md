@@ -379,6 +379,76 @@ weakness noted in the syscall-boundary section (code and stack are both
 executable, no separation) — now doubled, since it's true per-task rather
 than a one-off.
 
+### Interactive echo shell (phase 1 of "get to a shell"): real UART input, a line editor, confirmed by piped-stdin testing
+
+First real input path this kernel has had — every console driver before this
+was write-only. Goal for this phase (user-defined): a terminal that accepts
+typed input and echoes it back, as the foundation phase 2 will build command
+parsing on top of.
+
+**UART RX added to both console drivers**, `uart.rs` (PL011: poll `FR`'s
+RXFE bit, read `DR` masked to the low byte — the upper bits are framing/
+parity/break/overrun error flags, deliberately ignored for now, not checked)
+and `uart16550.rs` (poll `LSR`'s Data Ready bit, read `RBR` at the same
+offset as `THR` — direction disambiguates). Both non-blocking: `None` if
+nothing is waiting, never spins. `console.rs` grew matching `read_byte()`/
+`putc()` (raw single-byte write, no `\n`→`\r\n` translation — unlike
+`write_str`, callers that want a newline send `\r\n` themselves) alongside
+the existing `write_str`-based path.
+
+**Two new syscalls exposed the UART to EL0**: `try_read_char` (3, returns a
+byte or `syscall::NO_CHAR` — `u64::MAX`, out of any real byte's range so
+one comparison tells them apart) and `putc` (4, arg0 = the byte). A third,
+`shell_input` (5, arg0 = the byte), is the actual interactive primitive —
+see below.
+
+**Design call: keep EL0 code trivial, put the line editor at EL1.** Writing
+a buffering/backspace-handling line editor as hand-assembled `global_asm!`
+(the only way to run logic in the isolated EL0 region — see `syscall.rs`'s
+module doc comment on the `rustc`/PE-COFF alignment ceiling that forces
+this) would be painful and fragile. Instead `tasks.rs`'s task 0 became a
+poll loop — `try_read_char`, and if a byte came back (it's already sitting
+in x0), chain straight into `shell_input` with no register shuffling — and
+all the real logic (buffer, backspace/DEL erase via the standard `\b`,
+space, `\b` sequence, Enter → echo the completed line) lives in ordinary
+Rust in the new `shell.rs`, called from `syscall.rs`'s dispatch arm for
+syscall 5. **Task 1 changed too**: its old "report and loop" demo body was
+replaced with a bare `wfe` loop — a genuine idle task — because once task 0
+does real interactive I/O, task 1 periodically printing to the same console
+mid-round-robin would corrupt the terminal output. For the same reason, the
+per-tick `tick N` debug log in `exceptions.rs`'s IRQ handler was removed
+(the tick counter itself, `TICKS`, is kept, just no longer printed) — at
+roughly 27 ticks/sec, it would otherwise interleave with every keystroke.
+
+**Confirmed working via piped-stdin QEMU testing, not just "compiles and
+boots":** since driving a real interactive terminal isn't scriptable, QEMU
+was run with its stdin attached to a FIFO (`mkfifo` + `exec 3<>fifo` to hold
+the write end open without EOF), letting bytes be injected on a timer after
+polling the console log for the `shell ready` banner. That polling step
+turned out to matter: an early attempt that just slept a fixed 3 seconds
+before sending input produced *no* echoed output at all — the likely cause
+is UEFI's own boot-time console input handling (hotkey polling, etc.)
+draining or discarding whatever sits in the PL011 RX FIFO before the kernel
+ever starts. Waiting for the kernel's own "shell ready" line before sending
+anything fixed it completely.
+
+Three lines exercised end to end: `hi`, backspace, ` there` → buffer
+correctly ends up `h there` (proving append and erase both work, not just
+raw echo); a second full line typed and submitted normally; and
+`backspace all` followed by 4× DEL + 3× backspace (7 erases against a
+13-byte buffer) → buffer correctly ends up `backsp`. All three produced the
+expected `you typed: ...` line. Cross-checked against QEMU's own `-d int`
+trace for the same run: 89 `[SVC]` exceptions (three `try_read_char` +
+`shell_input` pairs per typed byte, plus the erase bytes — consistent with
+the byte counts above), 527 `[IRQ]`s, and zero aborts.
+
+**Still coarse, worth knowing before building on it:** no prompt character,
+no cursor/arrow-key handling, no history, buffer overflow is silently
+dropped rather than reported, and "echo the completed line back" is
+literally all Enter does right now — phase 2 (commands) is specifically
+about replacing that one step with real parsing/dispatch, and nothing else
+in `shell.rs` should need to change shape for it.
+
 ### Parallels disk attachment: a real trap, not a hunch
 
 Getting `esp.img` to actually boot in Parallels took a few wrong turns worth
@@ -422,28 +492,40 @@ for the reasoning behind that lead.
 
 **In the meantime, kernel development continues against QEMU**, which has a
 fully working console via ACPI/SPCR. MMU/identity-paging, the timer-driven
-preemption tick, the syscall boundary, and now real preemptive task
-switching between two EL0 tasks (see "Preemptive task switching" above) are
-all done and confirmed working, not just structurally plausible.
+preemption tick, the syscall boundary, real preemptive task switching, and
+now a working interactive echo shell (see "Interactive echo shell" above)
+are all done and confirmed working, not just structurally plausible.
 
-What's still coarse and worth knowing about before building on it: exactly
-two hardcoded tasks with no creation/destruction API; strict round-robin
-only, no priorities or blocking; FP/SIMD state still isn't saved anywhere
-(`exceptions.rs`'s `Context`, inherited by `tasks.rs`); EL0's 8KB region (now
-split two ways, one per task) has no internal W^X, and there's still only
-one EL0 region total, an external constraint (the `rustc`/PE-COFF alignment
-bug — see `syscall.rs`'s module doc comment) that any future "give a task
-more memory, or more than two tasks" design has to work within or around.
+**Phase 1 of "get to a shell" (user-defined: a terminal that accepts input
+and echoes it back) is done.** Phase 2, per the same plan, is commands:
+replace `shell.rs`'s "echo the completed line" step with real tokenizing
+and a dispatch table of builtins (the existing syscall dispatch table in
+`syscall.rs` is a reasonable model to follow — number/name → handler,
+already proven to generalize across six entries). Natural first builtins:
+something that reads kernel state already tracked somewhere (`exceptions.rs`'s
+`TICKS`, `tasks.rs`'s `CURRENT`) so a command's output means something real
+rather than being another demo.
 
-Reasonable next steps from here: real per-task memory (more than two
-hardcoded 4KB slots — needs a way past the 8KB ceiling, or a design that
-works within it deliberately); blocking/waiting primitives so tasks can do
-more than an unconditional round-robin `wfe` loop; a minimal notion of
-address spaces or processes, if this project wants to go there before
-Parallels console output; or finally circling back to Parallels
-virtio-console now that the kernel has enough infrastructure (MMU,
-exceptions, EL0, real task switching) to make that work meaningfully once it
-lands.
+What's still coarse and worth knowing about before building on either
+front: exactly two hardcoded tasks with no creation/destruction API; strict
+round-robin only, no priorities or blocking; FP/SIMD state still isn't
+saved anywhere (`exceptions.rs`'s `Context`, inherited by `tasks.rs`); EL0's
+8KB region (split two ways, one per task) has no internal W^X; there's
+still only one EL0 region total, an external constraint (the `rustc`/
+PE-COFF alignment bug — see `syscall.rs`'s module doc comment) that any
+future "give a task more memory, or more than two tasks" design has to work
+within or around; and the shell has no prompt, no cursor/history editing,
+and silently drops input past its 128-byte buffer.
+
+Reasonable next steps from here: phase 2 (command parsing/dispatch, above);
+real per-task memory (more than two hardcoded 4KB slots — needs a way past
+the 8KB ceiling, or a design that works within it deliberately); blocking/
+waiting primitives so tasks can do more than an unconditional round-robin
+`wfe` loop; a minimal notion of address spaces or processes, if this
+project wants to go there before Parallels console output; or finally
+circling back to Parallels virtio-console now that the kernel has enough
+infrastructure (MMU, exceptions, EL0, real task switching, real input) to
+make that work meaningfully once it lands.
 
 ## Commands
 
@@ -478,8 +560,8 @@ root already target the right platform.
 ```
 kernel/
   src/main.rs        #[entry] point: UEFI init, ExitBootServices, exceptions::install(), mmu::install_identity_map(), gic+timer init, tasks::init(), then tasks::start()
-  src/uart.rs        raw PL011 console driver, used only after ExitBootServices
-  src/uart16550.rs   raw 16550-compatible console driver (PCI-discovered consoles; different hardware, different driver)
+  src/uart.rs        raw PL011 console driver (read + write), used only after ExitBootServices
+  src/uart16550.rs   raw 16550-compatible console driver (read + write; PCI-discovered consoles; different hardware, different driver)
   src/devicetree.rs  console UART discovery via the UEFI-provided devicetree (dead end on QEMU/Parallels)
   src/acpi.rs        console UART discovery via ACPI RSDP -> XSDT -> SPCR (works on QEMU, dead end on Parallels)
   src/pci.rs         console UART discovery via PCI enumeration for a class 0x07/0x00 serial controller
@@ -488,8 +570,9 @@ kernel/
   src/mmu.rs         replaces firmware's translation tables with our own identity map (L0->L1->L2->L3 as needed)
   src/gic.rs         GICv2 driver (QEMU virt addresses, confirmed via devicetree dump)
   src/timer.rs       ARM generic timer (non-secure EL1 physical timer, PPI 14 / GIC INTID 30)
-  src/syscall.rs     svc syscall dispatch table (print/double/report) - confirmed working end to end, see above
-  src/tasks.rs       two EL0 tasks + the round-robin scheduler (Context save/restore in the tick path) - confirmed alternating, see above
+  src/syscall.rs     svc syscall dispatch table (print/double/report/try_read_char/putc/shell_input) - confirmed working end to end, see above
+  src/tasks.rs       two EL0 tasks (task 0: shell poll loop, task 1: idle) + the round-robin scheduler (Context save/restore in the tick path) - confirmed alternating, see above
+  src/shell.rs       EL1-resident line editor for the interactive shell (buffer, backspace/DEL, Enter) - confirmed working via piped-stdin QEMU testing, see above
 ```
 
 Single-crate workspace for now (`Cargo.toml` at the root is a workspace with

@@ -322,8 +322,12 @@ extern "C" fn rust_irq_handler(frame: *mut Context) {
     let intid = unsafe { gic::acknowledge() };
 
     if intid == timer::INTID {
-        let ticks = TICKS.fetch_add(1, Ordering::Relaxed) + 1;
-        console::println!("Ouroboros kernel: tick {ticks}");
+        // No longer logged every tick (used to print "tick N" here): now
+        // that task 0 is a real interactive shell (tasks.rs/shell.rs),
+        // a debug line firing ~27 times/sec would constantly interleave
+        // with and corrupt whatever the user is typing. TICKS is kept for
+        // whenever something wants an uptime/tick-count query.
+        TICKS.fetch_add(1, Ordering::Relaxed);
         timer::arm(TICK_INTERVAL_MS);
         unsafe { tasks::on_tick(frame) };
     }
