@@ -1,5 +1,5 @@
 //! virtio-blk: synchronous sector reads and writes over `virtio_mmio`'s
-//! transport. Phase 3a of `docs/roadmap.md` built the read path; write
+//! transport. Phase 3a of `docs/CHANGELOG.md` built the read path; write
 //! support (`write_sector`) was added later, for `mkdir`/`rmdir`
 //! (`fat32.rs`) - both share the same request machinery
 //! ([`Device::submit_request`]), since a virtio-blk write is a read

@@ -1239,8 +1239,8 @@ commands (`ls`/`cat`/`cd`/`pwd`), and now real filesystem write support
 for both directories and files (`mkdir`/`rmdir`/`touch`/`rm` - see
 "Phase 4"/"Phase 5" above, alongside the earlier `help`/`echo`/`uptime`/
 `clear` - and `docs/architecture.md`/`docs/processes.md`/
-`docs/roadmap.md` for the reference write-up) are all done and confirmed
-working, not just structurally plausible.
+`docs/CHANGELOG.md` for the reference write-up) are all done and
+confirmed working, not just structurally plausible.
 
 **Phase 3, and the entire original "get to a shell" plan, are done - and
 phases 4/5 (write support) have since gone further than that plan called
@@ -1249,13 +1249,14 @@ by real kernel state), and phase 3 (disk commands - `ls`/`cat`/`cd`/`pwd`,
 and the full runtime storage stack underneath them: virtio-blk, FAT32, new
 syscalls) are all confirmed working end to end - and `mkdir`/`rmdir`
 (phase 4) then `touch`/`rm` (phase 5, see above) crossed and then
-extended the write-support line `docs/roadmap.md` had deliberately
-drawn at the end of phase 3, for the narrowest useful cases each time
-(empty directories, then zero-byte files). There is no more numbered
-phase queued up - what comes next is an open choice among the gaps
-below, not a predetermined next step. This section (and the "gaps"
+extended the write-support line phase 3 had deliberately drawn (see
+`docs/CHANGELOG.md`'s "Phase 3" entry), for the narrowest useful cases
+each time (empty directories, then zero-byte files). There is no more
+numbered phase queued up - what comes next is an open choice among the
+gaps below, not a predetermined next step. This section (and the "gaps"
 paragraph below it) still tracks what's true right now; `docs/roadmap.md`
-is the one to check for a longer-range view.
+is the one to check for what's next, `docs/CHANGELOG.md` for the full
+history of what's already done.
 
 What's still coarse and worth knowing about before building on any of
 this — kept current in `docs/processes.md`'s "known rough edges" rather
@@ -1347,7 +1348,8 @@ docs/
   architecture.md    reference doc: boot flow, privilege model, memory layout, exceptions, process model, syscall ABI, console
   processes.md       reference doc: process loading/config mechanism, memory model, binary format, writing a replacement program
   shell-commands.md  reference doc: the default shell's builtin commands - syntax, behavior, known limitations
-  roadmap.md         forward-looking plan: what's done, phase 3 (disk commands) breakdown, parking lot of known future work
+  CHANGELOG.md       historical record of completed milestones (phase 0 through the most recent), newest first
+  roadmap.md         forward-looking plan: parking lot of known future work, not yet sequenced
   research-minix-boot.md   research note: how MINIX boots (x86 boot monitor + boot image, ARM's U-Boot chain) vs Ouroboros's UEFI-native boot, sourced from MINIX's own docs
 
 kernel/

@@ -1,5 +1,5 @@
 //! Minimal read-only FAT32 reader over `virtio_blk::Device`. Phase 3b of
-//! `docs/roadmap.md`.
+//! `docs/CHANGELOG.md`.
 //!
 //! ## Hand-rolled, not a crate - a real constraint, not just precedent
 //!

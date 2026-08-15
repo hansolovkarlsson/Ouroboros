@@ -136,7 +136,7 @@ fn main() -> Status {
     unsafe { mmu::install_identity_map(&memory_map, [(program.base, program.size), tasks::idle_region()]) };
     console::println!("Ouroboros kernel: identity map installed, MMU running on our own tables");
 
-    // The runtime storage stack (docs/roadmap.md phases 3a/3b): virtio-blk
+    // The runtime storage stack (docs/CHANGELOG.md phases 3a/3b): virtio-blk
     // + FAT32, installed globally for fs_list_dir/fs_read_file
     // (syscall.rs) to use. Not fatal if it fails - see init_storage's doc
     // comment.
