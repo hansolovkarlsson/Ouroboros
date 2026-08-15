@@ -1054,6 +1054,58 @@ output (`ls` lists real entries, `mkdir`/`cat`/`cd` report their usual
 specific errors for bad paths). Zero aborts in `-d int` cross-checks on
 both boots.
 
+### A shared syscall-ABI crate, closing a long-tracked gap
+
+Every "known rough edges"/"next milestone" note since phase 3c had
+flagged the same thing: syscall numbers and sentinel values were
+hand-duplicated between `kernel/src/syscall.rs`'s dispatch table and
+`shell/src/main.rs`'s caller, kept in sync only by convention. By this
+point there were ten syscalls and three sentinel constants (`NO_CHAR`,
+`FS_ERROR`, `NO_FS` - the last one added just one milestone ago) - a
+real, growing risk, not a hypothetical one anymore.
+
+**Fixed with a third workspace member, `syscall-abi/`** - a plain
+`#![no_std]` library crate holding nothing but `pub const` syscall
+numbers and sentinel values, no logic. Both `kernel` and `shell` now
+depend on it via a path dependency (`syscall-abi = { path =
+"../syscall-abi" }`) and reference constants directly
+(`syscall_abi::FS_MKDIR`, etc.) instead of local, independently-numbered
+consts. `kernel/src/syscall.rs`'s `dispatch` match arms now match on
+`syscall_abi::PRINT`/`syscall_abi::TRY_READ_CHAR`/etc. rather than bare
+integer literals, so a future syscall added on one side with the wrong
+number literally fails to compile on the other rather than silently
+misbehaving at runtime.
+
+**Confirmed safe against this project's specific relocation risk, not
+just "it's simple so it's probably fine."** Every value in `syscall-abi`
+is a scalar `u64` const - the compiler inlines these as immediate
+operands at the use site in both `kernel` (target
+`aarch64-unknown-uefi`) and `shell` (target `aarch64-unknown-none`),
+the same way a local `const` always did. This is fundamentally different
+from the `core::fmt`/slice-literal-comparison bug documented in the
+phase 2/3c sections above, which is specifically about *pointers* to
+literal data in `.rodata` computed for a link-time base of `0x0` - a
+plain integer has no such pointer, so depending on a cross-crate numeric
+constant from the unrelocated `shell` binary carries none of that risk.
+`shell/src/main.rs`'s `cmd_ls`/etc. still `match` raw syscall return
+values against `NO_FS`/`FS_ERROR` exactly as before (see the previous
+section) - those are still plain integer comparisons, just imported from
+`syscall-abi` now instead of being local consts.
+
+**Confirmed working end to end, not just "it compiles":** both `cargo
+build`/`cargo clippy -- -D warnings` (kernel) and `cargo build -p shell
+--target aarch64-unknown-none`/`cargo clippy -p shell --target
+aarch64-unknown-none -- -D warnings` (shell) stayed clean throughout -
+`syscall-abi` itself needed no target-specific configuration or
+`default-members` entry, since `kernel` pulling it in as a dependency is
+enough for a bare `cargo build` at the repo root to build it too. A full
+piped-stdin QEMU regression pass against a fresh `esp.img` (`help`,
+`uptime`, `ls`, `mkdir`/`cd`/`pwd`/`rmdir`, `cat` on both a real file and
+a nonexistent one) produced byte-identical output to before this
+refactor, with zero aborts in a `-d int` cross-check - this was a pure
+internal restructuring, and testing confirmed it changed no observable
+behavior.
+
 ### Parallels disk attachment: a real trap, not a hunch
 
 Getting `esp.img` to actually boot in Parallels took a few wrong turns worth
@@ -1124,8 +1176,9 @@ longer-range view.
 What's still coarse and worth knowing about before building on any of
 this — kept current in `docs/processes.md`'s "known rough edges" rather
 than duplicated here, since that's the document meant to track it as
-these get addressed: no shared syscall-ABI crate (numbers duplicated by
-hand between `syscall.rs` and `shell/`); no `core::fmt`/`write!` usable
+these get addressed (the shared syscall-ABI crate that used to be listed
+here first is done - see "A shared syscall-ABI crate" above): no
+`core::fmt`/`write!` usable
 in any loaded program, and (a real, separately-confirmed extension of
 that same gap - see "Phase 3c" above) **no slice/string comparison
 against a literal either** - both crash for the identical reason (a data
@@ -1151,14 +1204,11 @@ one, currently-trusted userland program). Also still true from before
 this milestone: strict round-robin only, no priorities or blocking;
 FP/SIMD state still isn't saved anywhere (`exceptions.rs`'s `Context`).
 
-Reasonable next steps from here: a shared syscall-ABI crate, now that
-there are five independent syscalls added since the original 1-argument
-demo set and three independent call sites (`syscall.rs`, `shell/`, and
-whatever userland program comes next) to keep in sync by hand; more
-write support (`touch`/`rm`/`cp`/output redirection, and lifting
-`mkdir`'s no-directory-extension limitation); a real relocating loader
-(ELF + relocation processing), which would also lift both the
-`core::fmt` and literal-comparison restrictions; blocking/waiting
+Reasonable next steps from here: more write support (`touch`/`rm`/`cp`/
+output redirection, and lifting `mkdir`'s no-directory-extension
+limitation); a real relocating loader (ELF + relocation processing),
+which would also lift both the `core::fmt` and literal-comparison
+restrictions; blocking/waiting
 primitives so tasks can do more than an unconditional round-robin `wfe`
 loop; or finally circling back to Parallels virtio-console now that the
 kernel has enough infrastructure (MMU, exceptions, EL0, real task
@@ -1235,10 +1285,15 @@ kernel/
 shell/               userland default shell - a separate crate, built for aarch64-unknown-none, loaded from disk (not compiled into the kernel)
   linker.ld          flat-binary linker script: entry at offset 0, no .bss/.data (see docs/processes.md)
   src/main.rs        line editor + command dispatch (help/echo/uptime/clear/ls/cat/cd/pwd/mkdir/rmdir), running as real EL0 userland code - see docs/processes.md
+
+syscall-abi/         shared syscall ABI crate - syscall numbers + sentinel values (NO_CHAR/FS_ERROR/NO_FS), depended on directly by both kernel and shell, no more hand-duplicated numbers - see docs/processes.md
+  src/lib.rs         #![no_std], no logic, just pub consts - safe under either target since every value is a scalar inlined at the use site, not a pointer needing relocation
 ```
 
-Two-crate workspace (`kernel` and `shell`), with `shell` deliberately
-excluded from the workspace's `default-members` (see `Cargo.toml`) since
-it needs a different `--target` than `kernel`. Expect further growth as
-shared code (a syscall ABI crate - see `docs/processes.md`'s "known rough
-edges") and any future userland programs emerge.
+Three-crate workspace (`kernel`, `shell`, `syscall-abi`), with `shell`
+deliberately excluded from the workspace's `default-members` (see
+`Cargo.toml`) since it needs a different `--target` than `kernel`;
+`syscall-abi` needs no such exclusion (a plain lib, no `[[bin]]` to
+conflict with a target) and gets built automatically as `kernel`'s path
+dependency. Expect further growth as more userland programs emerge, each
+depending on `syscall-abi` the same way `shell` does.

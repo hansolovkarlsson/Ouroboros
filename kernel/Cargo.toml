@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 fdt = "0.1.5"
 log = "0.4.33"
+syscall-abi = { path = "../syscall-abi" }
 uefi = { version = "0.39", features = ["alloc", "global_allocator", "logger", "panic_handler"] }
 
 [[bin]]

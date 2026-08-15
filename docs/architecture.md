@@ -142,7 +142,12 @@ pointer/length and a buffer pointer/length at once — see
 `exceptions.rs`'s module doc comment for how the SVC trampoline marshals
 them. `fs_mkdir`/`fs_rmdir` (9/10, phase 4) are the first syscalls this
 kernel exposes that actually write to disk — see `fat32.rs`/
-`virtio_blk.rs` for the write path underneath them.
+`virtio_blk.rs` for the write path underneath them. Every number and
+sentinel in the table below is a constant in the `syscall-abi` crate
+(`syscall-abi/src/lib.rs`), not a bare literal — both
+`kernel/src/syscall.rs`'s dispatch table and `shell/src/main.rs` depend
+on it directly, so the two sides of this ABI can't silently drift apart
+the way hand-duplicated numbers did before this crate existed.
 
 | Number | Name | Arguments | Returns | Notes |
 |---|---|---|---|---|
@@ -175,10 +180,13 @@ Safe to keep numerically distinct from any real success value: byte
 counts and file sizes returned on success are always far below
 `u64::MAX - 1`.
 
-There is no shared ABI crate yet — these numbers are duplicated by hand in
-`kernel/src/syscall.rs` (the dispatch table) and `shell/src/main.rs` (the
-caller). See [`processes.md`](processes.md)'s "known rough edges" for why
-that's a real gap once more than one userland program exists.
+The `syscall-abi` crate only covers the numbers/sentinels themselves, not
+argument validation or per-error-reason detail — see
+[`processes.md`](processes.md)'s "known rough edges" for what's still a
+real gap (pointer/length arguments are trusted, not checked against the
+caller's actual mapped region; every `fs_*` failure beyond "no filesystem
+mounted" still collapses to one `FS_ERROR` value) and for how to depend
+on this crate when writing a new userland program.
 
 ## Console
 

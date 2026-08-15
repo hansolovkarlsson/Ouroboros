@@ -162,26 +162,32 @@ Consequences of "flat binary, no loader smarts":
 
 ## Syscall ABI available to a program
 
-See `docs/architecture.md`'s syscall table for the full list. `try_read_char`
-(3, non-blocking, returns `syscall::NO_CHAR` when nothing is waiting) and
-`putc` (4, one raw byte, no newline translation) cover interactive I/O;
-`get_ticks` (6, added for phase 2's `uptime` builtin) is the pattern to
-follow whenever a command needs real kernel state it can't get any other
-way. `fs_list_dir`/`fs_read_file` (7/8, added for phase 3c's disk
+Every syscall number and sentinel value below lives in the `syscall-abi`
+crate (`syscall-abi/src/lib.rs`), a third workspace member both the
+kernel and any userland program depend on directly - add it as a
+dependency in your program's `Cargo.toml` (see the default shell's for an
+example) and use `syscall_abi::FS_MKDIR` etc. rather than hand-copying
+numbers. See `docs/architecture.md`'s syscall table for the full list.
+`try_read_char` (`TRY_READ_CHAR`, non-blocking, returns `NO_CHAR` when
+nothing is waiting) and `putc` (`PUTC`, one raw byte, no newline
+translation) cover interactive I/O; `get_ticks` (`GET_TICKS`, added for
+phase 2's `uptime` builtin) is the pattern to follow whenever a command
+needs real kernel state it can't get any other way. `fs_list_dir`/
+`fs_read_file` (`FS_LIST_DIR`/`FS_READ_FILE`, added for phase 3c's disk
 commands) are the first syscalls needing more than one argument — a path
 pointer/length and a buffer pointer/length at once — which is why the
 syscall ABI itself supports up to 4 arguments (`x0`-`x3`), not just one.
-`fs_mkdir`/`fs_rmdir` (9/10, added for phase 4) are the first syscalls
-that write to disk — each takes just a path pointer/length, no output
-buffer. All four `fs_*` syscalls (7/8/9/10) share two distinct failure
-sentinels: `syscall::FS_ERROR` (`u64::MAX`) for "mounted, but this
+`fs_mkdir`/`fs_rmdir` (`FS_MKDIR`/`FS_RMDIR`, added for phase 4) are the
+first syscalls that write to disk — each takes just a path pointer/
+length, no output buffer. All four `fs_*` syscalls share two distinct
+failure sentinels: `FS_ERROR` (`u64::MAX`) for "mounted, but this
 operation failed" (a program still can't tell "already exists" from
 "disk full" within that — see `CLAUDE.md`'s "Phase 4" section) and
-`syscall::NO_FS` (`u64::MAX - 1`) specifically for "no filesystem is
-mounted this boot" — added after real testing showed every disk command
-failing identically on `make run` (FAT16) looked like a broken path
-rather than "nothing's mounted," with the real cause visible only in the
-kernel's own boot log. A userland program makes these directly via `svc`:
+`NO_FS` (`u64::MAX - 1`) specifically for "no filesystem is mounted this
+boot" — added after real testing showed every disk command failing
+identically on `make run` (FAT16) looked like a broken path rather than
+"nothing's mounted," with the real cause visible only in the kernel's
+own boot log. A userland program makes these directly via `svc`:
 
 ```rust
 #[inline(always)]
@@ -202,9 +208,10 @@ fn syscall4(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64) -> u64 {
 }
 ```
 
-There is no shared ABI crate defining these numbers/constants once —
-`kernel/src/syscall.rs` and `shell/src/main.rs` each hardcode them by
-hand, kept in sync only by convention. See "Known rough edges" below.
+The numbers/constants themselves come from `syscall-abi` (see above), not
+hardcoded separately in `kernel/src/syscall.rs` and `shell/src/main.rs` -
+see "Known rough edges" below for what this still doesn't cover (pointer/
+length validation, per-error-reason detail).
 
 ## Writing a replacement program
 
@@ -254,12 +261,18 @@ write your own:
 
 Worth knowing before building further on this:
 
-- **No shared syscall-ABI crate.** Numbers and the `NO_CHAR` sentinel are
-  duplicated by hand between `kernel/src/syscall.rs` and any userland
-  program. Fine with one program; a real problem the moment there are
-  several, or programs built outside this repository. A `#![no_std]`
-  crate of just constants (no logic) is the obvious fix, deferred because
-  nothing has needed it badly enough yet.
+- **~~No shared syscall-ABI crate~~ - fixed.** Syscall numbers and every
+  sentinel (`NO_CHAR`, `FS_ERROR`, `NO_FS`) now live in `syscall-abi/`, a
+  third workspace member both `kernel/src/syscall.rs` and any userland
+  program depend on directly (`syscall-abi::FS_MKDIR`, etc.), rather than
+  hand-duplicated local consts kept in sync only by convention. It's a
+  plain `#![no_std]` lib with no logic - safe to depend on from either
+  target this project builds for, since every value is a scalar integer
+  inlined at the use site, not a pointer needing relocation (so it
+  doesn't run into the "no comparing a slice/string against a literal"
+  restriction below). Still only useful within this repository - a
+  program built elsewhere would need to either depend on this crate too
+  or re-derive the same numbers by hand.
 - **One program, loaded once, at boot.** No `exec()`, no spawning a second
   process, no way to reload a program without rebooting.
 - **Fixed 2-task scheduler.** `tasks.rs` has exactly two slots; a second

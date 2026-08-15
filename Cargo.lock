@@ -38,6 +38,7 @@ version = "0.1.0"
 dependencies = [
  "fdt",
  "log",
+ "syscall-abi",
  "uefi",
 ]
 
@@ -82,6 +83,9 @@ dependencies = [
 [[package]]
 name = "shell"
 version = "0.1.0"
+dependencies = [
+ "syscall-abi",
+]
 
 [[package]]
 name = "syn"
@@ -104,6 +108,10 @@ dependencies = [
  "quote",
  "unicode-ident",
 ]
+
+[[package]]
+name = "syscall-abi"
+version = "0.1.0"
 
 [[package]]
 name = "ucs2"

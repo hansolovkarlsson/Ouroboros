@@ -215,8 +215,8 @@ running "next milestone" notes — real gaps, just not phase 3's problem:
   no-directory-extension limitation (a full parent directory currently
   makes `mkdir` fail rather than growing it). Phase 4 deliberately did
   the narrowest useful slice (empty-directory `mkdir`/`rmdir`) first.
-- A shared syscall-ABI crate (numbers currently hand-duplicated between
-  `kernel/src/syscall.rs` and every userland program).
+- ~~A shared syscall-ABI crate~~ — done (`syscall-abi/`, depended on by
+  both `kernel/src/syscall.rs` and every userland program).
 - A real relocating loader (ELF + relocation processing) — would also
   lift the current `core::fmt`/`write!` restriction in userland programs.
 - Blocking/waiting primitives, so tasks aren't limited to unconditional

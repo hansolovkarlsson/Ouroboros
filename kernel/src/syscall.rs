@@ -11,6 +11,13 @@
 //! how it differs from every other vector, and why it grew from 1 argument
 //! to 4 for phase 3c's file-I/O syscalls.
 //!
+//! Syscall numbers and sentinel return values live in the `syscall-abi`
+//! crate now, not as local consts here - shared with every userland
+//! program (`shell/`) that calls `svc`, so the two sides can't drift
+//! silently apart the way hand-duplicated numbers did before. See
+//! `syscall-abi/src/lib.rs` for the full list and `docs/processes.md`'s
+//! "known rough edges" for why this crate exists.
+//!
 //! ## Pointer arguments trust the caller - a real, known simplification
 //!
 //! `fs_list_dir`/`fs_read_file` take raw `(pointer, length)` pairs for
@@ -27,6 +34,8 @@
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
+use syscall_abi::{FS_ERROR, NO_CHAR, NO_FS};
+
 use crate::console;
 use crate::exceptions;
 use crate::fat32;
@@ -37,32 +46,6 @@ use crate::fat32;
 /// the right per-caller state, not just that the dispatch table has more
 /// than one entry.
 static TASK_REPORTS: [AtomicU64; crate::tasks::NUM_TASKS] = [AtomicU64::new(0), AtomicU64::new(0)];
-
-/// Sentinel `try_read_char` returns in x0 when no byte is waiting -
-/// out of range for any real byte (0-255), so callers can tell the two
-/// apart with a single comparison.
-pub const NO_CHAR: u64 = u64::MAX;
-
-/// Generic failure sentinel for the `fs_*` syscalls (not found, not a
-/// directory, already exists, disk full, ...) - every distinct
-/// `fat32::Error` still collapses to this one value; a userland program
-/// that needs to know *why* still can't (a real gap, unchanged by
-/// [`NO_FS`] below).
-const FS_ERROR: u64 = u64::MAX;
-
-/// A second, distinguishable sentinel the `fs_*` syscalls return
-/// specifically when there's no mounted filesystem at all (e.g. `make
-/// run`'s vvfat disk is FAT16, not FAT32 - see `fat32.rs`), rather than
-/// collapsing into the same generic [`FS_ERROR`] every other failure
-/// uses. Added after real user confusion: without this, `ls`/`mkdir`
-/// failing on `make run` looked identical to a genuinely broken path or
-/// a corrupt disk, and the actual cause (no FAT32 partition found at
-/// boot) was only ever visible in the kernel's own boot log, not to the
-/// shell. Safe to keep numerically distinct from any real return value:
-/// `fs_list_dir`/`fs_read_file` only ever return small byte counts/file
-/// sizes (bounded by `MAX_USER_LEN`/a `u32` file size), nowhere near
-/// `u64::MAX - 1`.
-pub const NO_FS: u64 = u64::MAX - 1;
 
 /// The mounted FAT32 filesystem (if any) `fs_list_dir`/`fs_read_file`
 /// operate on - `None` is a valid, expected state (e.g. `make run`'s
@@ -190,10 +173,10 @@ fn fs_rmdir(path: &str) -> u64 {
 /// `shell_input` (previously: hand these bytes to the kernel's own
 /// EL1-resident line editor in a now-deleted `shell.rs`) unnecessary.
 /// Deliberately left a gap at number 5 rather than renumbering `putc`'s
-/// neighbors - a stable ABI matters more than a dense one, and this is a
-/// preview of exactly the kind of churn a shared syscall-ABI crate should
-/// prevent once EL0 code isn't only ever built in this same repo (see
-/// `docs/processes.md`'s "known rough edges"). `get_ticks` (6) is the
+/// neighbors - a stable ABI matters more than a dense one, and this is
+/// exactly the kind of churn the `syscall-abi` crate (see this module's
+/// doc comment) now exists to prevent from drifting silently between the
+/// kernel and userland sides. `get_ticks` (6) is the
 /// first syscall added for phase 2 (commands) - the shell's `uptime`
 /// builtin needs *some* real kernel state to report, now that it can't
 /// just read `exceptions.rs`'s statics directly the way kernel-resident
@@ -203,18 +186,21 @@ fn fs_rmdir(path: &str) -> u64 {
 /// `exceptions.rs`'s). `fs_mkdir`/`fs_rmdir` (9/10) are the first write
 /// support this kernel has ever exposed to userland - see
 /// `fat32.rs`/`virtio_blk.rs` for the on-disk write path underneath them.
+/// Match arms below use the `syscall_abi` constants rather than bare
+/// numbers, so this table and the userland caller can never silently
+/// disagree about what number means what.
 pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64) -> u64 {
     match number {
-        0 => {
+        syscall_abi::PRINT => {
             console::println!("Ouroboros kernel: syscall from EL0: print(arg0={arg0:#x})");
             0
         }
-        1 => {
+        syscall_abi::DOUBLE => {
             let result = arg0.wrapping_mul(2);
             console::println!("Ouroboros kernel: syscall from EL0: double(arg0={arg0:#x}) = {result:#x}");
             result
         }
-        2 => {
+        syscall_abi::REPORT => {
             let task_id = arg0 as usize;
             match TASK_REPORTS.get(task_id) {
                 Some(counter) => {
@@ -222,56 +208,59 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
                     console::println!("Ouroboros kernel: task {task_id} report #{count}");
                     0
                 }
+                // Not an `fs_*` syscall - u64::MAX here just means "bad
+                // task ID", reusing the same bit pattern as FS_ERROR
+                // without borrowing its name for an unrelated failure.
                 None => u64::MAX,
             }
         }
-        3 => match console::read_byte() {
+        syscall_abi::TRY_READ_CHAR => match console::read_byte() {
             Some(byte) => byte as u64,
             None => NO_CHAR,
         },
-        4 => {
+        syscall_abi::PUTC => {
             console::putc(arg0 as u8);
             0
         }
-        6 => exceptions::ticks(),
-        7 => {
+        syscall_abi::GET_TICKS => exceptions::ticks(),
+        syscall_abi::FS_LIST_DIR => {
             if !valid_user_range(arg0, arg1) || !valid_user_range(arg2, arg3) {
-                return u64::MAX;
+                return FS_ERROR;
             }
             // SAFETY: bounds sanity-checked above; see the module doc
             // comment's note on what that check does and doesn't cover.
             let path = unsafe { core::slice::from_raw_parts(arg0 as *const u8, arg1 as usize) };
-            let Ok(path) = core::str::from_utf8(path) else { return u64::MAX };
+            let Ok(path) = core::str::from_utf8(path) else { return FS_ERROR };
             let buf = unsafe { core::slice::from_raw_parts_mut(arg2 as *mut u8, arg3 as usize) };
             fs_list_dir(path, buf)
         }
-        8 => {
+        syscall_abi::FS_READ_FILE => {
             if !valid_user_range(arg0, arg1) || !valid_user_range(arg2, arg3) {
-                return u64::MAX;
+                return FS_ERROR;
             }
-            // SAFETY: same as syscall 7.
+            // SAFETY: same as FS_LIST_DIR.
             let path = unsafe { core::slice::from_raw_parts(arg0 as *const u8, arg1 as usize) };
-            let Ok(path) = core::str::from_utf8(path) else { return u64::MAX };
+            let Ok(path) = core::str::from_utf8(path) else { return FS_ERROR };
             let buf = unsafe { core::slice::from_raw_parts_mut(arg2 as *mut u8, arg3 as usize) };
             fs_read_file(path, buf)
         }
-        9 => {
+        syscall_abi::FS_MKDIR => {
             if !valid_user_range(arg0, arg1) {
-                return u64::MAX;
+                return FS_ERROR;
             }
             // SAFETY: bounds sanity-checked above; see the module doc
             // comment's note on what that check does and doesn't cover.
             let path = unsafe { core::slice::from_raw_parts(arg0 as *const u8, arg1 as usize) };
-            let Ok(path) = core::str::from_utf8(path) else { return u64::MAX };
+            let Ok(path) = core::str::from_utf8(path) else { return FS_ERROR };
             fs_mkdir(path)
         }
-        10 => {
+        syscall_abi::FS_RMDIR => {
             if !valid_user_range(arg0, arg1) {
-                return u64::MAX;
+                return FS_ERROR;
             }
-            // SAFETY: same as syscall 9.
+            // SAFETY: same as FS_MKDIR.
             let path = unsafe { core::slice::from_raw_parts(arg0 as *const u8, arg1 as usize) };
-            let Ok(path) = core::str::from_utf8(path) else { return u64::MAX };
+            let Ok(path) = core::str::from_utf8(path) else { return FS_ERROR };
             fs_rmdir(path)
         }
         _ => {

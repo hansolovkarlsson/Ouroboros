@@ -26,10 +26,11 @@
 //! [`on_byte`] no longer just echoes the completed line - [`run_line`]
 //! tokenizes it (whitespace-split, no quoting) and dispatches to a small
 //! builtin table. `uptime` is the first builtin that needs real kernel
-//! state (`get_ticks`, syscall 6) rather than being another echo demo -
-//! this program can no longer just read `exceptions.rs`'s statics
-//! directly the way the kernel-resident line editor it replaced could, so
-//! exposing that state needed a new syscall.
+//! state (`get_ticks`, `syscall_abi::GET_TICKS`) rather than being
+//! another echo demo - this program can no longer just read
+//! `exceptions.rs`'s statics directly the way the kernel-resident line
+//! editor it replaced could, so exposing that state needed a new
+//! syscall.
 //!
 //! ## Phase 3c: disk commands, and why path resolution needed no ".."/"."
 //! ## special-casing
@@ -73,19 +74,10 @@ const DEL: u8 = 0x7f;
 const CR: u8 = b'\r';
 const LF: u8 = b'\n';
 
-// Mirrors syscall.rs's constants exactly - kept in sync by hand for now
-// (no shared ABI crate yet; see docs/processes.md's "known rough edges").
-const NO_CHAR: u64 = u64::MAX;
-const FS_ERROR: u64 = u64::MAX;
-const NO_FS: u64 = u64::MAX - 1;
-
-const SYS_TRY_READ_CHAR: u64 = 3;
-const SYS_PUTC: u64 = 4;
-const SYS_GET_TICKS: u64 = 6;
-const SYS_FS_LIST_DIR: u64 = 7;
-const SYS_FS_READ_FILE: u64 = 8;
-const SYS_FS_MKDIR: u64 = 9;
-const SYS_FS_RMDIR: u64 = 10;
+// Syscall numbers and sentinel values come from the shared `syscall-abi`
+// crate now, not hand-duplicated local consts - see its doc comment and
+// `kernel/src/syscall.rs`'s dispatch table, the other side of this ABI.
+use syscall_abi::{FS_ERROR, NO_CHAR, NO_FS};
 
 /// Placed first in `.text` by `linker.ld` (`KEEP(*(.text.start))`) so it
 /// lands at file/VA offset 0 - `tasks.rs` sets a loaded program's
@@ -544,7 +536,7 @@ fn print_u64_decimal(mut n: u64) {
 }
 
 fn get_ticks() -> u64 {
-    syscall(SYS_GET_TICKS, 0)
+    syscall(syscall_abi::GET_TICKS, 0)
 }
 
 /// Lists `path`'s directory entries into `buf` as `name\n`/`name/\n` -
@@ -555,7 +547,7 @@ fn get_ticks() -> u64 {
 /// rather than collapsing the two failure cases into one, so `ls`/`cd`
 /// can tell "nothing's mounted" apart from "that path doesn't exist".
 fn fs_list_dir(path: &str, buf: &mut [u8]) -> u64 {
-    syscall4(SYS_FS_LIST_DIR, path.as_ptr() as u64, path.len() as u64, buf.as_mut_ptr() as u64, buf.len() as u64)
+    syscall4(syscall_abi::FS_LIST_DIR, path.as_ptr() as u64, path.len() as u64, buf.as_mut_ptr() as u64, buf.len() as u64)
 }
 
 /// Reads `path`'s contents into `buf`. Returns the raw syscall result:
@@ -564,7 +556,7 @@ fn fs_list_dir(path: &str, buf: &mut [u8]) -> u64 {
 /// `fat32::Fs::read_file`/`syscall.rs::fs_read_file`), [`NO_FS`], or
 /// [`FS_ERROR`] - same reasoning as [`fs_list_dir`].
 fn fs_read_file(path: &str, buf: &mut [u8]) -> u64 {
-    syscall4(SYS_FS_READ_FILE, path.as_ptr() as u64, path.len() as u64, buf.as_mut_ptr() as u64, buf.len() as u64)
+    syscall4(syscall_abi::FS_READ_FILE, path.as_ptr() as u64, path.len() as u64, buf.as_mut_ptr() as u64, buf.len() as u64)
 }
 
 /// Creates an empty directory at `path`. Returns the raw syscall result:
@@ -574,13 +566,13 @@ fn fs_read_file(path: &str, buf: &mut [u8]) -> u64 {
 /// sentinel (see `syscall.rs::fs_mkdir`), so this program can't yet
 /// report *why* beyond "no filesystem" vs. "some other failure".
 fn fs_mkdir(path: &str) -> u64 {
-    syscall4(SYS_FS_MKDIR, path.as_ptr() as u64, path.len() as u64, 0, 0)
+    syscall4(syscall_abi::FS_MKDIR, path.as_ptr() as u64, path.len() as u64, 0, 0)
 }
 
 /// Removes the empty directory at `path`. Same return contract as
 /// [`fs_mkdir`].
 fn fs_rmdir(path: &str) -> u64 {
-    syscall4(SYS_FS_RMDIR, path.as_ptr() as u64, path.len() as u64, 0, 0)
+    syscall4(syscall_abi::FS_RMDIR, path.as_ptr() as u64, path.len() as u64, 0, 0)
 }
 
 /// The 1-argument syscalls this program used before phase 3c - a thin
@@ -608,14 +600,14 @@ fn syscall4(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64) -> u64 {
 }
 
 fn try_read_char() -> Option<u8> {
-    match syscall(SYS_TRY_READ_CHAR, 0) {
+    match syscall(syscall_abi::TRY_READ_CHAR, 0) {
         NO_CHAR => None,
         byte => Some(byte as u8),
     }
 }
 
 fn putc(byte: u8) {
-    syscall(SYS_PUTC, byte as u64);
+    syscall(syscall_abi::PUTC, byte as u64);
 }
 
 fn wfe() {
