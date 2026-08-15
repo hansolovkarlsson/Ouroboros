@@ -20,9 +20,11 @@ implement a completely different command set.
   further typed characters rather than erroring.
 - **Tokenization: whitespace-split, no quoting.** `echo "a b"` sees the
   literal words `"a` and `b"`, not one quoted argument — there is no
-  quote-stripping. Every command except `echo`/`write`/`cp` only ever
-  looks at the *first* word after the command name; any further words
-  are ignored (`mkdir a b c` creates `a` and says nothing about `b`/`c`).
+  quote-stripping. Every command except `echo`/`write` only ever looks
+  at its *first one or two* words after the command name (`cp`/`mv`
+  take exactly two paths; every other command just one); any further
+  words are ignored (`mkdir a b c` creates `a` and says nothing about
+  `b`/`c`).
 - **No pipes, redirection, globbing, `;`/`&&` chaining, environment
   variables, command history, or tab completion.** One command per line,
   typed in full, every time.
@@ -69,6 +71,7 @@ implement a completely different command set.
 | `rm` | `rm <file>` | Removes a file. | Fails if it doesn't exist or is a directory — use `rmdir` for those. |
 | `write` | `write <file> [words...]` | Joins every word after the filename with a single space (same style as `echo`) and writes the result as the file's *entire* contents, replacing whatever was there. Creates the file if it doesn't exist. | `write <file>` with no words truncates the file to empty (a real, valid case, not an error). Fails if the target is an existing directory or the parent is missing. |
 | `cp` | `cp <src> <dst>` | Copies `src`'s contents to `dst`, creating `dst` if it doesn't exist or replacing it if it does. | Reads `src` fully into a 256-byte buffer before writing anything to `dst`, so copying a file onto itself is safe. Refuses (rather than truncating) if `src` is larger than that buffer. No recursive directory copy. |
+| `mv` | `mv <src> <dst>` | Renames or moves a file or directory to `dst`. | `dst` must not already exist — fails rather than overwriting it or moving `src` inside it if `dst` happens to be a directory. Moving a directory to a different parent correctly updates its own `..` entry, so `cd ..` inside it still resolves to the *new* parent afterward. |
 
 Any other input prints `unknown command: <word>`. A blank line (just
 Enter, or only whitespace) does nothing.
@@ -83,7 +86,10 @@ Enter, or only whitespace) does nothing.
   the 128-byte input line, so nothing typed at the shell can ever
   exceed one FAT32 cluster's worth of content; `cp` is bounded by its
   own 256-byte read buffer instead.
-- **No `mv`/rename.**
+- **`mv` has no move-into-an-existing-directory-keeping-basename
+  shortcut** (real `mv`'s most common everyday case beyond a plain
+  rename) and no cycle detection (moving a directory into its own
+  descendant isn't guarded against).
 - **Every filesystem error beyond "no mounted filesystem" collapses to
   one generic message per command** (e.g. `mkdir`'s "already exists, bad
   name, parent missing, or disk full" covers four genuinely different

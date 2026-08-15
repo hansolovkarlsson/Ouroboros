@@ -22,7 +22,6 @@ phase:
   needs a file to hold more than zero bytes" item still open.
 - **Lifting `mkdir`'s no-directory-extension limitation** - a full
   parent directory currently makes `mkdir` fail rather than growing it.
-- `mv`/rename support.
 - A real relocating loader (ELF + relocation processing) — would also
   lift the current `core::fmt`/`write!` restriction in userland programs.
 - Blocking/waiting primitives, so tasks aren't limited to unconditional

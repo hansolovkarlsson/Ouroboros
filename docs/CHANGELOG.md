@@ -7,6 +7,55 @@ what broke, how it was diagnosed), see `CLAUDE.md`; for *how* something
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## Phase 8 — `mv`, and the last real correctness risk in the write-support arc
+
+**The goal:** `mv <src> <dst>`, the last cheap command-level win left in
+the "close up the easy write-support commands" arc (phases 4-7) before
+moving on to bigger work.
+
+- `Fs::mv` reuses the file/directory's *existing* cluster chain rather
+  than reading and rewriting content: locate `src`'s entry, insert a new
+  entry for `dst` with the same cluster/size/kind, then free `src`'s old
+  entry - same "write the new thing before touching the old one"
+  ordering as `write_file`'s overwrite path, so a failure partway
+  through (most likely `Error::DirectoryFull` on `dst`'s parent) never
+  leaves `src` half-deleted. `dst` must not already exist - `mv` refuses
+  rather than overwriting it or moving `src` inside it if `dst` happens
+  to be an existing directory, narrower than a real `mv`'s full
+  semantics.
+- **The one real correctness risk, caught by design rather than by a
+  crash:** when a *directory* moves to a *different* parent, its own
+  `..` entry has to be patched to point at the new parent (or cluster
+  `0`, root's convention, if the new parent is root) - otherwise a
+  moved directory's `cd ..` would keep resolving to its *old* parent
+  forever, silently. This is the identical cluster-`0`-means-root
+  convention from phase 3c's `Fs::find`, reapplied on a write path
+  rather than reintroduced as a new bug. Reused `patch_entry_cluster_size`
+  (phase 6) to make the fix, rather than writing a new low-level sector
+  patcher for it.
+- One new syscall, `fs_mv` (14, `(src ptr, src len, dst ptr, dst len)`),
+  and a new `mv <src> <dst>` shell builtin - the cheapest of the write
+  commands to add on the shell side, since it's a single syscall call
+  with no buffer/content handling at all, unlike `cp`.
+- **Confirmed working end to end, with the `..`-fixup specifically
+  exercised, not just reasoned about:** a same-directory rename; a
+  cross-directory move of a plain file; a cross-directory move of a
+  *directory* containing its own subdirectory, followed immediately by
+  `cd`-ing into the moved directory and back out with `cd ..` - which
+  correctly landed at the *new* parent, not the old one; renaming a
+  directory in place (same parent) and confirming a doubly-moved nested
+  directory's own `..` still resolved correctly afterward; destination-
+  already-exists, missing-source, and missing-destination-parent all
+  correctly rejected with the source left untouched. Persistence
+  confirmed by an actual reboot - all of the above state, including the
+  moved/renamed directory tree, was still correct on a fresh mount.
+  `make run` (FAT16, no mount) still degrades gracefully. Zero aborts in
+  `-d int` cross-checks across every session.
+- **Still coarse:** no move-into-an-existing-directory-keeping-basename
+  semantics (real `mv`'s most common shortcut); no cycle detection (`mv`
+  a directory into its own descendant isn't guarded against); same
+  8.3-short-name constraints as `mkdir`/`touch` apply to `dst`'s name.
+
 ## Phase 7 — `cp`, pure shell-side plumbing over existing syscalls
 
 **The goal:** `cp <src> <dst>`, the next item phase 6's own changelog

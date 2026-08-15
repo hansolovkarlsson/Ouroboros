@@ -792,6 +792,96 @@ impl Fs {
         Ok(())
     }
 
+    /// Renames or moves the file or directory at `src` to `dst`. `dst`
+    /// must not already exist - `mv` refuses rather than overwriting it
+    /// or (if `dst` happens to be an existing directory) moving `src`
+    /// inside it keeping its old name, narrower than a real `mv`'s full
+    /// semantics.
+    ///
+    /// Implemented uniformly for a same-directory rename and a
+    /// cross-directory move alike, rather than special-casing the
+    /// same-parent case as a cheaper in-place short-name rewrite: locate
+    /// `src`'s own entry and read its cluster/size/kind, insert a new
+    /// entry for `dst` with those same values, then free `src`'s old
+    /// entry only once the new one is safely linked in - same "write the
+    /// new thing before touching the old one" ordering as
+    /// [`write_file`](Self::write_file)'s overwrite path, so a failure
+    /// partway through (most likely
+    /// [`Error::DirectoryFull`](Error::DirectoryFull) on `dst`'s parent)
+    /// never leaves `src` half-deleted.
+    ///
+    /// **The one step this can't skip: when a *directory* moves to a
+    /// *different* parent, its own `..` entry has to be patched to point
+    /// at the new parent** (or cluster `0`, root's own convention, if
+    /// the new parent is root) - otherwise a moved directory's `cd ..`
+    /// would keep resolving to its old parent forever, silently. This is
+    /// the same cluster-`0`-means-root convention documented in
+    /// [`find`](Self::find)'s doc comment, reintroduced by a different
+    /// code path here rather than a new bug class.
+    pub fn mv(&mut self, src: &str, dst: &str) -> Result<(), Error> {
+        let (src_parent_path, src_name) = split_parent(src).ok_or(Error::InvalidName)?;
+        let (dst_parent_path, dst_name) = split_parent(dst).ok_or(Error::InvalidName)?;
+        let short_name = make_short_name(dst_name).ok_or(Error::InvalidName)?;
+
+        let src_parent = self.find(src_parent_path)?;
+        if !src_parent.is_dir {
+            return Err(Error::NotADirectory);
+        }
+        let dst_parent = self.find(dst_parent_path)?;
+        if !dst_parent.is_dir {
+            return Err(Error::NotADirectory);
+        }
+
+        let mut src_location: Option<(u64, usize)> = None;
+        let mut src_entry: Option<DirEntry> = None;
+        self.walk_dir_with_location(src_parent.cluster, |entry, lba, offset| {
+            if entry.name().eq_ignore_ascii_case(src_name) {
+                src_location = Some((lba, offset));
+                src_entry = Some(*entry);
+                true
+            } else {
+                false
+            }
+        })?;
+        let (src_lba, src_offset) = src_location.ok_or(Error::NotFound)?;
+        let src_entry = src_entry.ok_or(Error::NotFound)?;
+
+        let mut dst_exists = false;
+        self.walk_dir(dst_parent.cluster, |entry| {
+            if entry.name().eq_ignore_ascii_case(dst_name) {
+                dst_exists = true;
+                true
+            } else {
+                false
+            }
+        })?;
+        if dst_exists {
+            return Err(Error::AlreadyExists);
+        }
+
+        let attr = if src_entry.is_dir { ATTR_DIRECTORY } else { 0 };
+        self.insert_dir_entry(dst_parent.cluster, &short_name, attr, src_entry.cluster, src_entry.size)?;
+
+        let mut sector = [0u8; SECTOR_SIZE];
+        // SAFETY: `self.device` was initialized before `mount` returned.
+        unsafe { self.device.read_sector(src_lba, &mut sector) }?;
+        sector[src_offset] = DIR_ENTRY_FREE;
+        // SAFETY: same as above.
+        unsafe { self.device.write_sector(src_lba, &sector) }?;
+
+        if src_entry.is_dir && src_parent.cluster != dst_parent.cluster {
+            let dotdot_cluster = if dst_parent.cluster == self.root_cluster { 0 } else { dst_parent.cluster };
+            let moved_lba = self.cluster_to_lba(src_entry.cluster);
+            // The `..` entry is always the second 32-byte entry in a
+            // directory's first sector - `mkdir` writes it there
+            // unconditionally, so every directory this kernel (or any
+            // real FAT32 formatter) created has it at that fixed offset.
+            self.patch_entry_cluster_size(moved_lba as u64, DIR_ENTRY_SIZE, dotdot_cluster, 0)?;
+        }
+
+        Ok(())
+    }
+
     /// Finds a free (end-of-directory or previously-deleted) 32-byte slot
     /// in the directory starting at `start_cluster` and writes a new entry
     /// there. No directory-extension support: if every existing cluster in

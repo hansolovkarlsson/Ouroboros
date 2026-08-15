@@ -1290,6 +1290,64 @@ milestones.
 (same as `cat`'s); no recursive directory copy, no flags of any kind; no
 `mv`.
 
+### Phase 8: `mv`, and the last real correctness risk in the write-support arc
+
+`mv <src> <dst>` closes out the "easy cheap-win commands" arc (phases
+4-7) with the last genuine correctness risk in it, not just another
+thin wrapper over existing primitives the way `cp` was.
+
+**`Fs::mv` reuses the existing cluster chain rather than reading and
+rewriting content** - locate `src`'s entry, insert a new entry for
+`dst` with the same cluster/size/kind, free `src`'s old entry only once
+the new one is safely linked in (same "write the new thing first"
+ordering `write_file`'s overwrite path already established). `dst` must
+not already exist; `mv` refuses rather than overwriting it or moving
+`src` inside it if `dst` happens to already be a directory - narrower
+than a real `mv`, deliberately.
+
+**The real risk, caught by tracing through the design before writing
+any test, the same way phase 5's `touch`/`Fs::find` bug was:** moving a
+*directory* to a *different* parent means its own `..` entry now points
+at the wrong place unless something fixes it - the identical
+cluster-`0`-means-root convention documented in `find`'s doc comment
+since phase 3c, this time on a write path instead of a read one.
+Skipping this would have reintroduced the *exact* class of bug that
+already cost real debugging time once (the original `cd ..` hang) - just
+via `mv` instead of a bare `..` traversal. Fixed by patching the moved
+directory's `..` entry (reusing `patch_entry_cluster_size` from phase 6,
+not a new low-level sector patcher) to point at the new parent's
+cluster, or `0` if the new parent is root.
+
+**Confirmed working end to end, with the `..`-fixup specifically
+exercised in QEMU, not just reasoned through on paper:** a same-directory
+rename; a cross-directory move of a plain file; a cross-directory move
+of a directory that itself contains a subdirectory, followed
+*immediately* by `cd`-ing into the moved directory and back out with
+`cd ..` - landing correctly at the *new* parent, confirmed via `pwd`,
+not the old one; renaming a directory in place (same parent, so no
+`..`-patch needed) and then confirming a previously-cross-parent-moved
+nested subdirectory's own `..` still resolved correctly through *that*
+rename too (its parent's cluster number didn't change, only the
+parent's own name did); destination-already-exists, missing-source, and
+missing-destination-parent all correctly rejected with the source
+completely untouched (re-`cat`'d afterward to confirm). **Persistence
+confirmed by an actual reboot**, same as every prior write milestone -
+killed QEMU, booted fresh against the same `esp.img`, the entire moved/
+renamed tree (including the twice-relocated nested subdirectory) still
+resolved correctly. `make run` (FAT16, no mount) still degrades
+gracefully. Zero aborts in `-d int` cross-checks across every session
+(the main sequence, the rejection-case check, the reboot-persistence
+check, and the FAT16 degradation check).
+
+**Still coarse:** no move-into-an-existing-directory-keeping-basename
+shortcut (real `mv`'s most common everyday case beyond a plain rename);
+no cycle detection (nothing stops moving a directory into its own
+descendant); `dst`'s name is still bound by the same conservative 8.3
+character set `mkdir`/`touch` already impose. This closes the write-
+support arc phase 3 explicitly deferred (mkdir/rmdir/touch/rm/write/cp/
+mv, phases 4-8) - what's left in `docs/roadmap.md`'s parking lot from
+here is genuinely bigger work, not more cheap wins in this vein.
+
 ### Parallels disk attachment: a real trap, not a hunch
 
 Getting `esp.img` to actually boot in Parallels took a few wrong turns worth
@@ -1336,32 +1394,33 @@ fully working console via ACPI/SPCR. MMU/identity-paging, the timer-driven
 preemption tick, the syscall boundary, real preemptive task switching, a
 working interactive echo shell, a shell that's a real disk-loaded,
 configuration-selected userland program, a working runtime virtio-blk
-driver (read and write), a working runtime FAT32 reader, real disk
-commands (`ls`/`cat`/`cd`/`pwd`), real filesystem write support for
-directories and files (`mkdir`/`rmdir`/`touch`/`rm`/`write`), and now
-`cp` (see "Phase 7" above, alongside the earlier `help`/`echo`/`uptime`/
+driver (read and write), a working runtime FAT32 reader, and real disk
+commands covering the full read/write file-management surface
+(`ls`/`cat`/`cd`/`pwd`/`mkdir`/`rmdir`/`touch`/`rm`/`write`/`cp`/`mv` -
+see "Phase 8" above, alongside the earlier `help`/`echo`/`uptime`/
 `clear` - and `docs/architecture.md`/`docs/processes.md`/
 `docs/CHANGELOG.md` for the reference write-up) are all done and
 confirmed working, not just structurally plausible.
 
 **Phase 3, and the entire original "get to a shell" plan, are done - and
-phases 4/5/6/7 (write support) have since gone further than that plan
-called for.** Phase 1 (accept input, echo it back), phase 2 (real
-commands backed by real kernel state), and phase 3 (disk commands -
-`ls`/`cat`/`cd`/`pwd`, and the full runtime storage stack underneath
-them: virtio-blk, FAT32, new syscalls) are all confirmed working end to
-end - and `mkdir`/`rmdir` (phase 4), `touch`/`rm` (phase 5), `write`
-(phase 6), then `cp` (phase 7, see above - no new syscall needed, pure
-composition of two that already existed) crossed and then repeatedly
-extended the write-support line phase 3 had deliberately drawn (see
+phases 4 through 8 (write support) have since taken that further than
+the original plan called for, and have now closed out.** Phase 1
+(accept input, echo it back), phase 2 (real commands backed by real
+kernel state), and phase 3 (disk commands - `ls`/`cat`/`cd`/`pwd`, and
+the full runtime storage stack underneath them: virtio-blk, FAT32, new
+syscalls) are all confirmed working end to end - and `mkdir`/`rmdir`
+(phase 4), `touch`/`rm` (phase 5), `write` (phase 6), `cp` (phase 7),
+then `mv` (phase 8, see above - the last one with a genuine correctness
+risk, not just a thin wrapper) crossed and then repeatedly extended the
+write-support line phase 3 had deliberately drawn (see
 `docs/CHANGELOG.md`'s "Phase 3" entry), for the narrowest useful case
-each time (empty directories, then zero-byte files, then real content,
-then copying it). There is no more numbered phase queued up - what
-comes next is an open choice among the gaps below, not a predetermined
-next step. This section (and the "gaps" paragraph below it) still
-tracks what's true right now; `docs/roadmap.md` is the one to check for
-what's next, `docs/CHANGELOG.md` for the full history of what's already
-done.
+each time. **This closes the "easy cheap-win commands" arc deliberately**
+- what's left in the gaps below and `docs/roadmap.md`'s parking lot is
+genuinely bigger work (a relocating loader, blocking primitives,
+Parallels console, driver isolation), not more small commands in this
+vein. This section (and the "gaps" paragraph below it) still tracks
+what's true right now; `docs/roadmap.md` is the one to check for what's
+next, `docs/CHANGELOG.md` for the full history of what's already done.
 
 What's still coarse and worth knowing about before building on any of
 this — kept current in `docs/processes.md`'s "known rough edges" rather
@@ -1383,33 +1442,34 @@ no long-filename support in general (this project's own ESP directory was
 renamed - `\EFI\OUROBORO\`, 8 characters, not `\EFI\OUROBOROS\` -
 specifically to stay reachable without needing it, but any *other* 9+
 character name still isn't), only looks at the first FAT32-typed MBR
-partition, and while a file can now hold real content and be copied,
-every write is still a full replace (no append, no partial/offset
-writes), there's still no output redirection (needs shell-level parsing
-this project doesn't have yet), no `mv`, no recursive `cp`, no
-directory-extension (a full parent directory makes `mkdir` fail rather
-than growing it), `rm`'s multi-cluster cluster-chain-freeing path
+partition, and while a file can now hold real content, be copied, and be
+renamed/moved, every write is still a full replace (no append, no
+partial/offset writes), there's still no output redirection (needs
+shell-level parsing this project doesn't have yet), no recursive `cp`,
+no directory-extension (a full parent directory makes `mkdir` fail
+rather than growing it), `rm`'s multi-cluster cluster-chain-freeing path
 (phase 5) remains untested by an actual multi-cluster file (nothing yet
 can create one that large - see "Phase 6" above), and every write-path
 error collapses to one sentinel at the syscall boundary so userland
-can't distinguish *why* an operation failed (see "Phase
-4"/"Phase 5"/"Phase 6" above); disk-command pointer/length arguments are
-trusted, not validated against the caller's actual mapped region (fine
-with exactly one, currently-trusted userland program). Also still true
-from before this milestone: strict round-robin only, no priorities or
-blocking; FP/SIMD state still isn't saved anywhere (`exceptions.rs`'s
-`Context`).
+can't distinguish *why* an operation failed (see "Phase 4" through
+"Phase 8" above); disk-command pointer/length arguments are trusted, not
+validated against the caller's actual mapped region (fine with exactly
+one, currently-trusted userland program). Also still true from before
+this milestone: strict round-robin only, no priorities or blocking;
+FP/SIMD state still isn't saved anywhere (`exceptions.rs`'s `Context`).
 
-Reasonable next steps from here: output redirection (`>`/`>>`), now that
-`write_file`/`cp` give it something real to build on but shell-side
-command-line parsing still doesn't exist; a real relocating loader (ELF
-+ relocation processing), which would also lift both the `core::fmt`
-and literal-comparison restrictions; blocking/waiting primitives so
-tasks can do more than an unconditional round-robin `wfe` loop; or
-finally circling back to Parallels virtio-console now that the kernel
-has enough infrastructure (MMU, exceptions, EL0, real task switching,
-real input, disk-loaded userland, real read/write runtime storage) to
-make that work meaningfully once it lands.
+Reasonable next steps from here, now that the shell's command surface is
+genuinely rounded out: circling back to Parallels virtio-console, since
+there's now enough real, interactive functionality (disk-loaded
+userland, a full file-management command set, real read/write runtime
+storage) to make testing on the actual primary hardware target
+meaningful rather than a bare console-output demo; a real relocating
+loader (ELF + relocation processing), which would lift both the
+`core::fmt` and literal-comparison restrictions; blocking/waiting
+primitives so tasks can do more than an unconditional round-robin `wfe`
+loop; or output redirection (`>`/`>>`), now that `write_file`/`cp` give
+it something real to build on but shell-side command-line parsing still
+doesn't exist.
 
 ## Commands
 
@@ -1475,15 +1535,15 @@ kernel/
   src/gic.rs         GICv2 driver (QEMU virt addresses, confirmed via devicetree dump)
   src/timer.rs       ARM generic timer (non-secure EL1 physical timer, PPI 14 / GIC INTID 30), TICK_INTERVAL_MS
   src/loader.rs      reads INIT.CFG + a program off the ESP during boot services, into a 2MB-aligned EL0-accessible region - see docs/processes.md
-  src/syscall.rs     svc syscall dispatch table (print/double/report/try_read_char/putc/get_ticks/fs_list_dir/fs_read_file/fs_mkdir/fs_rmdir/fs_touch/fs_rm/fs_write_file, gap at 5) - confirmed working end to end, see above
+  src/syscall.rs     svc syscall dispatch table (print/double/report/try_read_char/putc/get_ticks/fs_list_dir/fs_read_file/fs_mkdir/fs_rmdir/fs_touch/fs_rm/fs_write_file/fs_mv, gap at 5) - confirmed working end to end, see above
   src/tasks.rs       task 0 (loaded program) + task 1 (idle) + the round-robin scheduler (Context save/restore in the tick path) - confirmed alternating, see above
   src/virtio_mmio.rs virtio-mmio transport: 32-slot device discovery, modern (non-legacy) register layout, addresses confirmed via devicetree dump
   src/virtio_blk.rs  runtime virtio-blk driver: feature negotiation, one virtqueue, synchronous polling sector reads and writes - phase 3a (reads)/phase 4 (writes), confirmed working, see above
-  src/fat32.rs       hand-rolled FAT32 over virtio_blk::Device: MBR, BPB, FAT cluster chains, 8.3-only directory entries, mkdir/rmdir/touch/rm/write_file write support - phase 3b (reads)/phase 4-6 (writes), confirmed working, see above
+  src/fat32.rs       hand-rolled FAT32 over virtio_blk::Device: MBR, BPB, FAT cluster chains, 8.3-only directory entries, mkdir/rmdir/touch/rm/write_file/mv write support - phase 3b (reads)/phase 4-8 (writes), confirmed working, see above
 
 shell/               userland default shell - a separate crate, built for aarch64-unknown-none, loaded from disk (not compiled into the kernel)
   linker.ld          flat-binary linker script: entry at offset 0, no .bss/.data (see docs/processes.md)
-  src/main.rs        line editor + command dispatch (help/echo/uptime/clear/ls/cat/cd/pwd/mkdir/rmdir/touch/rm/write/cp), running as real EL0 userland code - see docs/processes.md
+  src/main.rs        line editor + command dispatch (help/echo/uptime/clear/ls/cat/cd/pwd/mkdir/rmdir/touch/rm/write/cp/mv), running as real EL0 userland code - see docs/processes.md
 
 syscall-abi/         shared syscall ABI crate - syscall numbers + sentinel values (NO_CHAR/FS_ERROR/NO_FS), depended on directly by both kernel and shell, no more hand-duplicated numbers - see docs/processes.md
   src/lib.rs         #![no_std], no logic, just pub consts - safe under either target since every value is a scalar inlined at the use site, not a pointer needing relocation

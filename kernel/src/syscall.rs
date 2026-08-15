@@ -204,13 +204,26 @@ fn fs_write_file(path: &str, data: &[u8]) -> u64 {
     }
 }
 
+/// Renames or moves the file or directory at `src` to `dst`. Same
+/// `NO_FS`/`FS_ERROR` contract as [`fs_mkdir`] (see
+/// [`fat32::Fs::mv`]).
+fn fs_mv(src: &str, dst: &str) -> u64 {
+    let Some(fs) = (unsafe { &mut *FS.0.get() }) else {
+        return NO_FS;
+    };
+    match fs.mv(src, dst) {
+        Ok(()) => 0,
+        Err(_) => FS_ERROR,
+    }
+}
+
 /// Called from the exception vector's SVC trampoline (`exceptions.rs`)
 /// with the syscall number (from x8) and up to 4 arguments (from x0-x3),
 /// running at EL1 with the kernel's own stack and every privilege EL0
 /// lacks - the entire reason this indirection exists. Its return value
 /// becomes EL0's new x0 after `eret`.
 ///
-/// Thirteen syscalls now (`shell_input`, a fourteenth by original
+/// Fourteen syscalls now (`shell_input`, a fifteenth by original
 /// numbering, was removed - see below).
 /// `double`/`print` were deliberately chained by the original single-task
 /// demo (double's return value fed straight into print's argument) to
@@ -241,7 +254,9 @@ fn fs_write_file(path: &str, data: &[u8]) -> u64 {
 /// reusing the same on-disk write primitives `fs_mkdir`/`fs_rmdir` do.
 /// `fs_write_file` (13) is the first syscall able to give a file more
 /// than zero bytes - without it, `fs_touch` was the only way to create
-/// one, and it only ever produces empty files.
+/// one, and it only ever produces empty files. `fs_mv` (14) renames or
+/// moves a file or directory, reusing its existing cluster chain rather
+/// than reading and rewriting its content.
 /// Match arms below use the `syscall_abi` constants rather than bare
 /// numbers, so this table and the userland caller can never silently
 /// disagree about what number means what.
@@ -349,6 +364,20 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
             let Ok(path) = core::str::from_utf8(path) else { return FS_ERROR };
             let data = unsafe { core::slice::from_raw_parts(arg2 as *const u8, arg3 as usize) };
             fs_write_file(path, data)
+        }
+        syscall_abi::FS_MV => {
+            // Both `src` and `dst` are paths - neither can legitimately
+            // be empty, so this uses the stricter valid_user_range for
+            // both, unlike FS_WRITE_FILE's data argument.
+            if !valid_user_range(arg0, arg1) || !valid_user_range(arg2, arg3) {
+                return FS_ERROR;
+            }
+            // SAFETY: same as FS_LIST_DIR/FS_READ_FILE.
+            let src = unsafe { core::slice::from_raw_parts(arg0 as *const u8, arg1 as usize) };
+            let Ok(src) = core::str::from_utf8(src) else { return FS_ERROR };
+            let dst = unsafe { core::slice::from_raw_parts(arg2 as *const u8, arg3 as usize) };
+            let Ok(dst) = core::str::from_utf8(dst) else { return FS_ERROR };
+            fs_mv(src, dst)
         }
         _ => {
             console::println!("Ouroboros kernel: syscall from EL0: unknown number={number}");

@@ -164,7 +164,7 @@ fn run_line(line: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize) {
     let arg = words.next().unwrap_or("");
 
     match command {
-        "help" => print_line("commands: help, echo, uptime, clear, ls, cat, cd, pwd, mkdir, rmdir, touch, rm, write, cp"),
+        "help" => print_line("commands: help, echo, uptime, clear, ls, cat, cd, pwd, mkdir, rmdir, touch, rm, write, cp, mv"),
         "echo" => {
             let mut first = true;
             for word in line.split_whitespace().skip(1) {
@@ -201,6 +201,7 @@ fn run_line(line: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize) {
         "rm" => cmd_rm(arg, cwd, *cwd_len),
         "write" => cmd_write(line, cwd, *cwd_len),
         "cp" => cmd_cp(line, cwd, *cwd_len),
+        "mv" => cmd_mv(line, cwd, *cwd_len),
         _ => {
             print_str("unknown command: ");
             print_line(command);
@@ -660,6 +661,49 @@ fn cmd_cp(line: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize) {
     }
 }
 
+/// `mv <src> <dst>` - renames or moves a file or directory. Needs no new
+/// buffer or content handling, unlike `cp`: it's a single syscall taking
+/// two paths, since the kernel side just relinks the existing entry
+/// rather than reading and rewriting any content.
+fn cmd_mv(line: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize) {
+    let mut words = line.split_whitespace();
+    words.next(); // "mv" itself
+    let Some(src_arg) = words.next() else {
+        print_line("mv: missing source argument");
+        return;
+    };
+    let Some(dst_arg) = words.next() else {
+        print_line("mv: missing destination argument");
+        return;
+    };
+
+    let mut src_path_buf = [0u8; PATH_SIZE];
+    let Some(src_path_len) = resolve_path(cwd_str(cwd, cwd_len), src_arg, &mut src_path_buf) else {
+        print_line("mv: path too long");
+        return;
+    };
+    let Ok(src_path) = core::str::from_utf8(&src_path_buf[..src_path_len]) else {
+        print_line("mv: path too long");
+        return;
+    };
+
+    let mut dst_path_buf = [0u8; PATH_SIZE];
+    let Some(dst_path_len) = resolve_path(cwd_str(cwd, cwd_len), dst_arg, &mut dst_path_buf) else {
+        print_line("mv: path too long");
+        return;
+    };
+    let Ok(dst_path) = core::str::from_utf8(&dst_path_buf[..dst_path_len]) else {
+        print_line("mv: path too long");
+        return;
+    };
+
+    match fs_mv(src_path, dst_path) {
+        NO_FS => print_no_fs(),
+        FS_ERROR => print_line("mv: failed (no such source, destination already exists, bad name, or parent missing)"),
+        _ => {}
+    }
+}
+
 fn print_str(s: &str) {
     for b in s.bytes() {
         putc(b);
@@ -759,6 +803,12 @@ fn fs_rm(path: &str) -> u64 {
 /// return contract as [`fs_mkdir`].
 fn fs_write_file(path: &str, data: &[u8]) -> u64 {
     syscall4(syscall_abi::FS_WRITE_FILE, path.as_ptr() as u64, path.len() as u64, data.as_ptr() as u64, data.len() as u64)
+}
+
+/// Renames or moves the file or directory at `src` to `dst`. Same
+/// return contract as [`fs_mkdir`].
+fn fs_mv(src: &str, dst: &str) -> u64 {
+    syscall4(syscall_abi::FS_MV, src.as_ptr() as u64, src.len() as u64, dst.as_ptr() as u64, dst.len() as u64)
 }
 
 /// The 1-argument syscalls this program used before phase 3c - a thin

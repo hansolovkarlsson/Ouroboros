@@ -188,7 +188,10 @@ than output. Its `data len` may legitimately be `0` (truncating a file
 to empty) — the one `(pointer, length)` pair in this whole ABI where a
 zero length is valid rather than rejected; see
 `architecture.md`'s syscall table for `valid_user_range_allow_empty`,
-the real bug this required fixing. All seven `fs_*` syscalls share two
+the real bug this required fixing. `fs_mv` (`FS_MV`, added for phase 8)
+takes two path pointer/length pairs (`src`, `dst`) and reuses the moved
+item's existing cluster chain rather than reading and rewriting its
+content. All eight `fs_*` syscalls share two
 distinct failure sentinels: `FS_ERROR` (`u64::MAX`) for "mounted, but
 this operation failed" (a program still can't tell "already exists"
 from "disk full" within that — see `CLAUDE.md`'s "Phase 4"/"Phase
@@ -305,25 +308,29 @@ Worth knowing before building further on this:
   relocating loader.
 - **Disk-command pointer/length arguments are trusted, not validated.**
   `fs_list_dir`/`fs_read_file`/`fs_mkdir`/`fs_rmdir`/`fs_touch`/`fs_rm`/
-  `fs_write_file` dereference the caller's `(pointer, length)` pairs
-  directly, checked only against a minimal sanity bound
+  `fs_write_file`/`fs_mv` dereference the caller's `(pointer, length)`
+  pairs directly, checked only against a minimal sanity bound
   (`syscall.rs::valid_user_range`, or `valid_user_range_allow_empty` for
   `fs_write_file`'s data argument specifically) — not against the
   calling program's actual mapped region. Fine with exactly one,
   currently-trusted userland program; a real gap once that stops being
   true.
-- **Write support (phases 4-7) covers directories, files with real
-  content, and copying them, but every write fully replaces a file
-  rather than appending or writing at an offset.** No `mv`, no
-  recursive `cp`, no output redirection yet — redirection needs
+- **Write support (phases 4-8) covers directories, files with real
+  content, copying, and renaming/moving, but every write fully replaces
+  a file rather than appending or writing at an offset.** No recursive
+  `cp`, no move-into-an-existing-directory-keeping-basename shortcut for
+  `mv`, no cycle detection (`mv` a directory into its own descendant
+  isn't guarded against), no output redirection yet — redirection needs
   shell-level parsing this project doesn't have (splitting `cmd > file`
-  into a command and a target); `cp` itself needed no new syscall,
-  since it's pure shell-side composition of `fs_read_file`/
-  `fs_write_file` (see `CLAUDE.md`'s "Phase 7" section). `mkdir` also
-  can't grow a parent directory that's out of free entry slots — it
-  fails rather than allocating another cluster for the parent. Every
-  `fs_*` syscall distinguishes "no filesystem mounted" (`NO_FS`) from
-  everything else, but every *other* failure reason still collapses to
-  one `FS_ERROR` sentinel, so a program can't yet tell "already exists"
-  from "disk full" from "bad name". See `CLAUDE.md`'s "Phase
-  4"/"Phase 5"/"Phase 6"/"Phase 7" sections.
+  into a command and a target); `cp`/`mv` themselves needed no new
+  read/write primitives beyond what already existed (see `CLAUDE.md`'s
+  "Phase 7"/"Phase 8" sections). `mkdir` also can't grow a parent
+  directory that's out of free entry slots — it fails rather than
+  allocating another cluster for the parent. Every `fs_*` syscall
+  distinguishes "no filesystem mounted" (`NO_FS`) from everything else,
+  but every *other* failure reason still collapses to one `FS_ERROR`
+  sentinel, so a program can't yet tell "already exists" from "disk
+  full" from "bad name". See `CLAUDE.md`'s "Phase 4" through "Phase 8"
+  sections. **This closes the write-support arc phase 3 deliberately
+  deferred** - what's left in the parking lot from here is genuinely
+  bigger work, not more commands of this shape.

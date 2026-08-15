@@ -90,6 +90,12 @@ pub const FS_RM: u64 = 12;
 /// ever produces empty ones.
 pub const FS_WRITE_FILE: u64 = 13;
 
+/// `(src ptr, src len, dst ptr, dst len)` -> `0` on success, [`NO_FS`],
+/// or [`FS_ERROR`]. Renames or moves the file or directory at `src` to
+/// `dst`. `dst` must not already exist - this refuses rather than
+/// overwriting it or moving `src` inside it.
+pub const FS_MV: u64 = 14;
+
 /// Sentinel `try_read_char` returns when no byte is waiting - out of
 /// range for any real byte (0-255), so callers can tell the two apart
 /// with a single comparison.
