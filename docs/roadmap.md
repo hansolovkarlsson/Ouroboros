@@ -33,6 +33,10 @@ phase:
 - **Actual microkernel-style driver isolation** — moving drivers
   (starting with virtio-blk/console once they exist) out of the EL1
   kernel and into supervised EL0 processes, per
-  `docs/research-minix-boot.md`'s comparison. Explicitly deferred until
-  there's more than one reason to want it: it needs dynamic task
+  `docs/research-minix-boot.md`'s comparison (process-boundary isolation,
+  MINIX's answer) and `docs/research-helix-os.md`'s (a trait-based
+  mechanism/policy split inside one address space, a different real
+  answer to the same question — see that note's "what this says about
+  Ouroboros's current shape"). Explicitly deferred until there's more
+  than one reason to want it: it needs dynamic task
   creation and real IPC first, not just a virtio driver.

@@ -1351,6 +1351,7 @@ docs/
   CHANGELOG.md       historical record of completed milestones (phase 0 through the most recent), newest first
   roadmap.md         forward-looking plan: parking lot of known future work, not yet sequenced
   research-minix-boot.md   research note: how MINIX boots (x86 boot monitor + boot image, ARM's U-Boot chain) vs Ouroboros's UEFI-native boot, sourced from MINIX's own docs
+  research-helix-os.md     research note: Helix OS's layered, trait-based kernel design and hot-reload/self-healing fault tolerance, sourced from the HelixOS-Org/helix repo and docs
 
 kernel/
   src/main.rs        #[entry] point: UEFI init, console discovery, loader::load(), ExitBootServices, exceptions::install(), mmu::install_identity_map(), gic+timer init, tasks::init(), then tasks::start()
