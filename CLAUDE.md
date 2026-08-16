@@ -2536,20 +2536,34 @@ already busy-waits) - see `tasks.rs`'s `el0_idle_template` doc comment
 for the full writeup, kept there rather than only here since that's
 where a future reader is most likely to encounter it.
 
-**A real, secondary, non-fatal finding along the way, not yet
-investigated further:** an occasional dropped keystroke was observed
-twice during real-hardware testing with task switching active (e.g.
-`uptime` arriving at the shell as `uptme` or `uptie` - one character
-short, even though the xHCI driver's own debug log confirmed all the
-expected HID reports, including the missing character's, were actually
-received). Never reproduced in the final confirmation run, and never
-anything worse than one dropped character - not a hang, not a crash.
-Plausible cause, not confirmed: `xhci.rs`'s interrupt endpoint keeps
-only one outstanding report buffer at a time (`repost_interrupt_buffer`,
-re-armed after each read) - now that task 0 only runs in alternating
-20ms slices instead of continuously, a report arriving faster than the
-buffer gets re-armed has less slack than it used to. Left as a known,
-minor, real limitation rather than chased further this session.
+**A real, secondary, non-fatal finding along the way - root-caused and
+fixed the same session, not left as a guess.** An occasional dropped
+keystroke was observed twice during real-hardware testing with task
+switching active (e.g. `uptime` arriving at the shell as `uptme` or
+`uptie` - one character short, even though the xHCI driver's own debug
+log confirmed all the expected HID reports, including the missing
+character's, were actually received). The "single outstanding report
+buffer" theory considered at the time turned out to be wrong - the real
+bug was in `xhci.rs::Device::poll_key` itself, a genuine logic error
+independent of any hypervisor timing quirk: a single polled report can
+legitimately contain *more than one* newly-pressed keycode at once
+(most likely when a poll gets skipped - this task preempted between two
+hardware samples, missing an intermediate report, a real new
+possibility once preemption started working at all - but not
+exclusively; two keys pressed within one poll interval can do it too,
+preemption or not). The original code returned on the *first* qualifying
+keycode in a report after already recording that whole report as
+`last_report` - so any second new keycode in the same report was
+silently gone forever, since `last_report` already included it and it
+could never look "new" again. Fixed by draining every qualifying
+keycode from a report into a small `pending` buffer (`[u8; 5]` - a
+report's `buf[2..8]` holds at most 6 simultaneous keycodes, and the
+first match is always returned immediately rather than queued, so at
+most 5 can ever need to wait) instead of discarding everything past the
+first. Confirmed fixed on real Parallels hardware: ten consecutive
+`uptime` invocations, back to back, all recognized correctly with zero
+drops - a real contrast against the intermittent failures observed
+before the fix.
 
 **Scripted real-hardware testing (`make test-parallels`,
 `scripts/test-parallels.sh`) was what made this entire investigation
@@ -2570,8 +2584,10 @@ writeup.
 `wfe` -> busy-spin swap is a confirmed-working fix, not a confirmed
 root cause - if task switching on some *other* future platform ever
 hangs the same way, don't assume it's automatically the same bug
-without re-confirming; the occasional dropped-keystroke finding above
-is real but unchased further; the MADT parser only reads the first
+without re-confirming; the dropped-keystroke bug above is fixed, but
+`xhci.rs`'s `pending` buffer assumes boot-protocol's fixed 6-simultaneous-
+keycode report shape, same as every other assumption this driver
+already makes about that format; the MADT parser only reads the first
 GICD/GICC/GICR structures it finds (spec requires exactly one GICD, but
 a real multi-cluster system could have several GICR structures this
 parser doesn't yet merge/choose between); `gicv3.rs`'s

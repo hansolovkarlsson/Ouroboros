@@ -57,10 +57,16 @@ unconditionally enabled on every platform - preemptive multitasking
 works on real Parallels hardware for the first time ever, with zero
 change to QEMU's behavior (retested end to end there too, both GIC
 versions, no regressions). A real, secondary, minor finding along the
-way, left uninvestigated further: an occasional dropped keystroke under
-active task switching, never worse than one character, never
-reproduced in the final confirmation run. Full writeup in `CLAUDE.md`'s
-"MADT/GICv3" section.
+way - also root-caused and fixed the same day: an occasional dropped
+keystroke under active task switching, traced to a genuine logic bug in
+`xhci.rs::Device::poll_key` (not a hypervisor timing quirk) - a single
+polled report can legitimately carry more than one newly-pressed
+keycode at once, and the original code only ever translated and
+returned the first one, silently discarding any second forever. Fixed
+with a small `pending` buffer draining every qualifying keycode from a
+report. Confirmed fixed on real Parallels hardware: ten consecutive
+`uptime` invocations back to back, zero drops. Full writeup in
+`CLAUDE.md`'s "MADT/GICv3" section.
 
 **Made practical by a new discovery the same day:** Parallels Desktop's
 own CLI, `prlctl`, can script an entire real-hardware test round trip

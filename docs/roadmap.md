@@ -54,11 +54,16 @@ phase:
   unconditionally enabled again (the temporary `TASK_SWITCH_ENABLED`
   gate was removed entirely) — preemptive multitasking works on real
   Parallels hardware for the first time ever. A real, secondary, minor
-  finding along the way, not yet chased further: an occasional dropped
-  keystroke under active task switching (plausibly `xhci.rs`'s
-  single-outstanding-interrupt-buffer having less slack now that task 0
-  only runs in alternating time slices) — never reproduced in the final
-  confirmation run, never worse than one dropped character, not a hang.
+  finding along the way, also root-caused and fixed the same day: an
+  occasional dropped keystroke under active task switching, traced to a
+  genuine logic bug in `xhci.rs::Device::poll_key` (not a hypervisor
+  timing quirk) - a single polled report can legitimately carry more
+  than one newly-pressed keycode at once, and the original code only
+  ever translated and returned the first one, silently discarding any
+  second one forever. Fixed with a small `pending` buffer draining every
+  qualifying keycode from a report instead of just the first. Confirmed
+  fixed on real Parallels hardware: ten consecutive `uptime` invocations
+  back to back, zero drops.
 - ~~Confirm virtio-console on real Parallels hardware~~ — done, and the
   answer is no. Tested on real hardware: a full PCI device inventory
   (`pci::log_all_devices`, kept as a permanent diagnostic) shows no

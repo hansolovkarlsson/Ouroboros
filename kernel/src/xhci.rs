@@ -419,6 +419,15 @@ struct Device {
     /// keeps a persistent-failure run from flooding the screen the same
     /// way an earlier, unconditional per-poll diagnostic once did.
     had_error: bool,
+    /// Newly-pressed keycodes from the most recently processed report,
+    /// translated to ASCII, beyond the first one already returned from
+    /// that report - see `poll_key`'s doc comment for the real,
+    /// confirmed dropped-keystroke bug this fixes. Sized 5 (not 6):
+    /// `buf[2..8]` holds at most 6 simultaneous keycodes, and the first
+    /// qualifying one is always returned immediately rather than queued,
+    /// so at most 5 can ever need to wait here.
+    pending: [u8; 5],
+    pending_len: usize,
 }
 
 impl Device {
@@ -682,7 +691,35 @@ impl Device {
     /// appears should ever produce a keystroke - no auto-repeat) and
     /// returns the ASCII translation of the first newly-pressed, mapped
     /// key, if any.
+    ///
+    /// **A real, confirmed bug lived here: a single report can legitimately
+    /// contain more than one newly-pressed keycode at once** - most likely
+    /// when a poll gets skipped (this task preempted between two hardware
+    /// samples, missing an intermediate report - a real, new possibility
+    /// once real preemption started working on Parallels, see CLAUDE.md's
+    /// "MADT/GICv3" section), but not exclusively: two keys genuinely
+    /// pressed within one poll interval can do it too, preemption or not.
+    /// The original version of this function returned on the *first*
+    /// qualifying keycode in `buf[2..8]` after already recording the whole
+    /// report as `last_report` - so any second new keycode in that same
+    /// report was silently gone forever: it would never be "new" again on
+    /// a later poll, since `last_report` already included it. Confirmed on
+    /// real Parallels hardware: `uptime` typed via a scripted test
+    /// occasionally arrived at the shell one character short (e.g.
+    /// `uptme`), even though the xHCI debug log below showed every
+    /// expected report, including the dropped character's own. Fixed by
+    /// draining every qualifying keycode from a report into `pending`
+    /// (bounded at 5 - `buf[2..8]` has at most 6 slots, and the first
+    /// match is always returned immediately rather than queued) instead of
+    /// discarding everything past the first.
     fn poll_key(&mut self) -> Option<u8> {
+        if self.pending_len > 0 {
+            let ascii = self.pending[0];
+            self.pending.copy_within(1..self.pending_len, 0);
+            self.pending_len -= 1;
+            return Some(ascii);
+        }
+
         let event = self.event_ring_pop()?;
         let trb_type = (event[3] >> 10) & 0x3f;
         if trb_type == TRB_TYPE_PORT_STATUS_CHANGE_EVENT {
@@ -729,6 +766,7 @@ impl Device {
         console::println!("Ouroboros kernel: xhci: report {buf:02x?}");
 
         let shift = buf[0] & (MOD_LSHIFT | MOD_RSHIFT) != 0;
+        let mut result = None;
         for &keycode in &buf[2..8] {
             if keycode == 0 || keycode < 4 {
                 continue; // no key, or error rollover (1-3)
@@ -736,11 +774,19 @@ impl Device {
             if previous[2..8].contains(&keycode) {
                 continue; // already down last poll - not a new press
             }
-            if let Some(ascii) = keycode_to_ascii(keycode, shift) {
-                return Some(ascii);
+            let Some(ascii) = keycode_to_ascii(keycode, shift) else {
+                continue;
+            };
+            if result.is_none() {
+                result = Some(ascii);
+            } else {
+                // Can't overflow: at most 6 keycodes total in buf[2..8],
+                // one already consumed by `result`, `pending` sized 5.
+                self.pending[self.pending_len] = ascii;
+                self.pending_len += 1;
             }
         }
-        None
+        result
     }
 }
 
@@ -869,6 +915,8 @@ unsafe fn init_inner(bar_base: u64) -> Result<(), Error> {
         evt_cycle: true,
         last_report: [0; 8],
         had_error: false,
+        pending: [0; 5],
+        pending_len: 0,
     };
 
     // Port scan: wait for at least one port to report a connected device.
