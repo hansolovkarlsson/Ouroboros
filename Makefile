@@ -22,7 +22,12 @@ ifeq ($(PROFILE),release)
 CARGO_FLAGS += --release
 endif
 
-.PHONY: build shell-bin esp run run-virtio-console run-usb-kbd image run-image parallels-hdd clean
+.PHONY: build shell-bin esp run run-virtio-console run-usb-kbd image run-image parallels-hdd test-parallels clean
+
+# Overridable by `make test-parallels VM_NAME=... CMDS=... BOOT_WAIT=...`.
+VM_NAME     ?= Ouroboros
+CMDS        ?= help
+BOOT_WAIT   ?= 12
 
 build:
 	cargo build $(CARGO_FLAGS)
@@ -168,6 +173,29 @@ parallels-hdd: image
 	hdiutil convert $(ESP_DIR).img -format UDZO -o $(ESP_DIR).dmg
 	rm -rf $(ESP_DIR).hdd
 	"$(PDT)" create --hdd "$(CURDIR)/$(ESP_DIR).hdd" --dmg "$(CURDIR)/$(ESP_DIR).dmg"
+
+# Scripted real-hardware test loop against Parallels - the manual "boot,
+# watch the screen, type on a keyboard, report back" round trip every
+# postmortem in docs/ paid wall-clock time for, now driven headlessly via
+# prlctl (Parallels Desktop's own CLI - `man prlctl`): rebuilds esp.hdd,
+# boots the registered VM named $(VM_NAME), types each ;-separated
+# command in $(CMDS) through Parallels' own virtual keyboard
+# (`prlctl send-key-event`, confirmed to land on the same
+# xhci::poll_key interrupt-endpoint path a real physical USB keyboard
+# does - see docs/xhci-keyboard-postmortem.md), and saves a screenshot
+# after each step instead of needing a human watching live. See
+# scripts/test-parallels.sh for the full mechanics.
+#
+# Needs the VM already registered in Parallels with its Hard Disk device
+# pointed at this repo's esp.hdd (see `parallels-hdd`'s own doc comment
+# above for how that gets built and attached in the first place - this
+# target only rebuilds the disk image, it doesn't create/register a VM).
+#
+#   make test-parallels
+#   make test-parallels CMDS="help;echo hi;uptime"
+#   make test-parallels VM_NAME="Ouroboros" BOOT_WAIT=15
+test-parallels:
+	VM_NAME="$(VM_NAME)" CMDS="$(CMDS)" BOOT_WAIT="$(BOOT_WAIT)" ./scripts/test-parallels.sh
 
 clean:
 	cargo clean

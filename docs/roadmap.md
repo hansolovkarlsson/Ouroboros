@@ -9,6 +9,33 @@ behind each decision, see `CLAUDE.md`. This document is the one to
 update first when direction changes; the others describe what exists,
 this one describes where it's going.
 
+## Testing infrastructure: scripted real-hardware round trips
+
+Every real-hardware bug in `xhci-keyboard-postmortem.md` and
+`boot-bringup-postmortem.md` cost a manual round trip: rebuild, re-image,
+boot Parallels, watch the screen, type on a physical keyboard, report
+back. `make test-parallels` (`scripts/test-parallels.sh`) closes that gap
+using `prlctl`, Parallels Desktop's own CLI (`man prlctl`) — discovered
+2026-08-16, not something this project had used before. It rebuilds
+`esp.hdd`, boots the registered VM headlessly, types a `;`-separated list
+of shell commands via `prlctl send-key-event` (real decimal PS/2 Set-1
+scancodes — `prlctl` rejects hex), and saves a screenshot
+(`prlctl capture`) after each one, all with no human watching the VM
+live. Confirmed working end to end: `help`/`echo hi`/`uptime` all
+produced correct, readable output in the captured screenshots, including
+the `xhci::report` debug lines showing genuine HID reports reaching the
+same interrupt-endpoint code path the physical-keyboard postmortem is
+about (`send-key-event` drives Parallels' own synthetic keyboard device,
+not that specific physical one — a real distinction, though the code
+path it exercises is the same one).
+
+This doesn't replace real-physical-hardware confirmation for anything
+USB-passthrough-specific (the xHCI postmortem's bugs 1-5 needed the real
+device), but for everything else — does a shell command still work after
+a change, did a fix regress the boot sequence — this turns what used to
+be a human-paced manual check into something that can run unattended and
+be reviewed after the fact from the saved screenshots.
+
 ## Parking lot (known future work, not yet sequenced)
 
 Pulled from `docs/processes.md`'s "known rough edges" and `CLAUDE.md`'s

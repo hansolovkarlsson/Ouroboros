@@ -2349,6 +2349,7 @@ make run-virtio-console      # same as `run`, plus a virtio-mmio console device 
 make image                  # build esp.img, a raw MBR+FAT32 disk image (not directly usable by Parallels - see below)
 make run-image               # boot esp.img (genuine FAT32) instead of run's vvfat - needed for anything that reads the filesystem at runtime (fat32.rs and up)
 make parallels-hdd          # wrap esp.img into esp.hdd, a Parallels-native virtual hard disk
+make test-parallels          # scripted real-hardware round trip via prlctl - see below
 make clean
 ```
 
@@ -2360,8 +2361,26 @@ Desktop installed (uses its bundled `prl_disk_tool`). `make shell-bin`
 llvm-tools` for `llvm-objcopy` - see the Makefile's `OBJCOPY` comment for
 why it isn't just on `PATH`.
 
-There is no test suite yet — this is pre-alpha kernel code that only proves
-it boots.
+There is no unit test suite — this is pre-alpha kernel code that mostly
+proves it boots. There is, as of 2026-08-16, a scripted real-hardware
+*smoke* test: `make test-parallels` (`scripts/test-parallels.sh`) rebuilds
+`esp.hdd`, boots the registered Parallels VM headlessly via `prlctl`
+(Parallels Desktop's own CLI, `man prlctl` - discovered this session, not
+previously known to this project), types a `;`-separated list of shell
+commands through `prlctl send-key-event` (real decimal PS/2 Set-1
+scancodes - `prlctl` rejects hex), and saves a `prlctl capture`
+screenshot after each one, e.g. `make test-parallels CMDS="help;ls;uptime"`.
+No human needs to watch the VM live or type on a physical keyboard.
+Confirmed working end to end: `help`/`echo hi`/`uptime` all produced
+correct output in the captured screenshots, including the driver's own
+`xhci::report` debug lines showing genuine HID reports arriving through
+the same interrupt-endpoint code path the USB keyboard postmortem is
+about. One real caveat: `send-key-event` drives Parallels' own synthetic
+keyboard device, not the specific physical USB keyboard from that
+postmortem - a legitimate stand-in for scripted regression checks, but
+not a substitute for real-physical-hardware confirmation of anything
+USB-passthrough-specific. See `docs/roadmap.md`'s "Testing infrastructure"
+section for more.
 
 ## Toolchain
 
@@ -2423,6 +2442,9 @@ shell/               userland default shell - a separate crate, built for aarch6
 
 syscall-abi/         shared syscall ABI crate - syscall numbers + sentinel values (NO_CHAR/FS_ERROR/NO_FS), depended on directly by both kernel and shell, no more hand-duplicated numbers - see docs/processes.md
   src/lib.rs         #![no_std], no logic, just pub consts - safe under either target since every value is a scalar inlined at the use site, not a pointer needing relocation
+
+scripts/
+  test-parallels.sh  scripted real-hardware smoke test via prlctl (start/type/capture/stop) - invoked by `make test-parallels`, see "## Commands" above and docs/roadmap.md's "Testing infrastructure" section
 ```
 
 Three-crate workspace (`kernel`, `shell`, `syscall-abi`), with `shell`

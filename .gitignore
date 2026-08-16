@@ -6,5 +6,6 @@
 /esp.hdd
 /vcon.log
 /parallels/
+/parallels-test-*/
 /Parallels Error Reports/
 .DS_Store
