@@ -76,7 +76,7 @@
     </p>
 
     <p>
-      Six real, confirmed bugs, each found by direct evidence — register
+      Seven real, confirmed bugs, each found by direct evidence — register
       dumps, decoded exception registers, byte-for-byte comparisons —
       rather than guessing. In order: a PCI Command register bit that
       looked like a platform quirk until it wasn't; real PCIe firmware
@@ -84,10 +84,11 @@
       silently; a physical PCI address landing outside a simplifying
       assumption baked into our own page tables; a whole class of USB
       request silently going nowhere; a working driver reading the
-      wrong physical device; and — found weeks later, once a separate
-      milestone gave this platform real preemptive multitasking for the
-      first time — a driver that quietly dropped a keystroke the moment
-      it had something new to be interrupted by.
+      wrong physical device; a driver that quietly dropped a keystroke
+      the moment real preemptive multitasking gave it something new to
+      be interrupted by; and — found not by this project's own testing
+      at all, but by a person just trying to use the thing normally — a
+      fixed iteration count standing in for a real timeout.
     </p>
 
     <h2>Why this was hard to see coming</h2>
@@ -604,6 +605,115 @@ for &keycode in &buf[2..8] {
       </p>
     </div>
 
+    <h2>Bug 7 — an iteration count standing in for a timeout, found by a user, not a script</h2>
+
+    <p>
+      The first six bugs in this document were all found through
+      deliberate, scripted, one-variable-at-a-time testing. This one was
+      found by a person just trying to use the thing normally — a useful
+      reminder that scripted testing, however thorough, only ever
+      exercises the scenarios someone thought to script.
+    </p>
+
+    <p>
+      <strong>Symptom:</strong> booting the real disk image normally in
+      Parallels — a manually-launched VM, with a live window actually
+      being watched, not this project's own headless scripted test loop
+      — occasionally produced
+      <code class="inline">xhci: keyboard not available (Command ring:
+      timed out waiting for a completion event)</code>. The keyboard
+      driver failed outright, something none of this project's own
+      real-hardware testing had ever hit, across many prior runs.
+    </p>
+
+    <p>
+      <strong>The key clue was asking for a second attempt and getting a
+      different failure point.</strong> The first report failed almost
+      immediately in port setup — most likely one of the very first
+      command-ring operations. A second attempt, on request, got much
+      further: through slot addressing, configuration, and
+      interrupt-endpoint descriptor discovery, before failing on what's
+      almost certainly the final command that arms the interrupt
+      endpoint. Two <em>different</em> commands timing out on two
+      different boots is a strong signal that the wait mechanism itself
+      is the problem, not any one command's own logic — the same shape
+      of reasoning that turned "one bus fault at one address" into "the
+      entire fixed-address convention is unsafe" in the companion
+      bring-up postmortem, once a second, differently-addressed fault
+      showed up there.
+    </p>
+
+    <p>
+      <strong>Root cause:</strong> every busy-wait in this driver — a
+      command completing, a transfer completing, a port reporting a
+      connection — was bounded by a fixed iteration count, on the
+      reasoning (true when it was written) that no interrupts or timer
+      are available yet at this point in boot. The gap: a fixed
+      iteration count is only a valid stand-in for real elapsed time if
+      the host never preempts the guest's virtual CPU for any real
+      duration while it spins. A real hypervisor doesn't guarantee that.
+      The one concrete difference between this project's own testing
+      (headless, no VM window ever rendered) and the user's manual run
+      (a real, live window, being watched) is exactly the kind of thing
+      that competes for real host CPU/GPU time — stalling the guest's
+      virtual CPU mid-poll for a real, unpredictable duration costs it
+      zero "iterations" while real wall-clock time that should have
+      counted toward the timeout quietly passes.
+    </p>
+
+    <p>
+      <strong>Fix:</strong> replace the fixed iteration count with a
+      genuine wall-clock deadline, using the ARM generic timer's
+      free-running physical counter — a pure system-register read
+      needing no interrupt controller and no timer <em>interrupt</em> at
+      all, the identical "safe on any core, no dependencies" property
+      this project's own timer-tick driver already relied on for a
+      different reason.
+    </p>
+
+    <div class="panel">
+      <div class="panel-tab"><span>xhci.rs</span><span>after</span></div>
+      <pre><code>fn poll_deadline() -> u64 {
+    now_ticks() + frequency_hz() / 1000 * POLL_TIMEOUT_MS
+}
+
+fn wait_command_completion(&mut self, cmd_ptr: u64) -> Result&lt;Trb, Error&gt; {
+    let deadline = poll_deadline();
+    while now_ticks() &lt; deadline {
+        <span class="dim">// ... unchanged: pop an event, check its type, check it matches ...</span>
+    }
+    Err(Error::CommandTimeout)
+}</code></pre>
+    </div>
+
+    <p>
+      <strong>Confirmed fixed by the user directly, on the exact
+      real-world scenario that had originally failed</strong> — not a
+      script standing in for it. Also regression-tested on the software
+      emulator this project otherwise develops against, and through this
+      project's own scripted real-hardware test loop — neither of which
+      had ever reproduced the original bug, but both confirm the fix
+      doesn't cost anything on the already-working path.
+    </p>
+
+    <div class="lesson">
+      <span class="lesson-label">Lesson</span>
+      <p>
+        "No interrupts available yet, so this has to be
+        iteration-bounded" was a true, reasonable constraint when it was
+        first written — and stopped being the only option the moment a
+        free-running hardware counter, needing no interrupt controller
+        at all, was already sitting right there for a different
+        subsystem's use. Worth checking, any time a past design
+        constraint gets cited as a reason something can't be improved,
+        whether the thing that originally motivated it is still actually
+        true. And: a bug only a human, watching a real, live-rendered VM
+        window, could ever trigger — never a script driving the
+        identical VM headlessly — is a real, useful data point about
+        where a bug lives, not just an unlucky report.
+      </p>
+    </div>
+
     <h2>Techniques that generalized well</h2>
 
     <ul class="techniques">
@@ -623,12 +733,16 @@ for &keycode in &buf[2..8] {
       no prior USB support at all — full round trip confirmed: individual
       keystrokes, backspace, Enter submitting a real command line, with
       every keystroke landing correctly even under real preemptive
-      multitasking. Getting there took a from-scratch xHCI driver and six
-      real, independently-confirmed hardware bugs — five found in the
-      initial one-day push, none of them visible on the software emulator
-      this project otherwise develops against day to day, and a sixth
-      found weeks later, exposed only once a separate milestone gave this
-      platform real preemption for the first time.
+      multitasking, and the driver itself now reliably reaching a
+      working keyboard on a real, manually-launched VM, not just under
+      scripted testing. Getting there took a from-scratch xHCI driver
+      and seven real, independently-confirmed hardware bugs — five found
+      in the initial one-day push, none of them visible on the software
+      emulator this project otherwise develops against day to day; a
+      sixth found weeks later, exposed only once a separate milestone
+      gave this platform real preemption for the first time; and a
+      seventh found not by this project's own testing at all, but by a
+      person just trying to use the thing normally.
     </p>
 
     <p>

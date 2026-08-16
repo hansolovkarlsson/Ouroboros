@@ -117,6 +117,9 @@
         <dt id="tlb">TLB <span class="term-full">Translation Lookaside Buffer</span></dt>
         <dd>A cache of recent virtual-to-physical address translations. Has to be explicitly invalidated (<code class="inline">tlbi</code>) whenever the page tables change, or the CPU may keep using stale mappings.</dd>
 
+        <dt id="cntpct">CNTPCT_EL0</dt>
+        <dd>The ARM generic timer's free-running physical counter — a system register that just keeps counting up in real time, readable with a plain <code class="inline">mrs</code> instruction, no interrupt controller or timer interrupt required. Used to fix a real bug: the USB keyboard driver's busy-waits were originally bounded by a fixed loop-iteration count instead of real elapsed time, which is only a safe stand-in for a timeout if the host never stalls the guest for any real duration mid-loop — untrue under a real hypervisor. Comparing this counter (divided by <code class="inline">CNTFRQ_EL0</code>, its tick rate) against a real millisecond budget fixed it.</dd>
+
         <dt id="wfe">WFE <span class="term-full">Wait For Event</span></dt>
         <dd>An ARM instruction that parks the CPU in a low-power idle state until woken by an event or interrupt. Bit Ouroboros twice, at two different privilege boundaries: once early on, where it turned out to trap to EL1 by default instead of executing directly at EL0 (a kernel-controlled register bit, fixed once and for all); and again much later, where enabling real task-switching on real Parallels hardware hung the system the first time an idle task's <code class="inline">wfe</code> loop ever ran there for real — a bug one level higher than the kernel's own control, not yet fully explained, worked around by having that idle loop busy-spin instead.</dd>
 

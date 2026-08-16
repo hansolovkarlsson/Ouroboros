@@ -20,7 +20,7 @@ covers everything between that bare prompt and a real, disk-backed
 userland shell, which is what this document's driver finally had
 something to type into.
 
-Six real, confirmed bugs, each found by direct evidence (register
+Seven real, confirmed bugs, each found by direct evidence (register
 dumps, decoded exception registers, byte-for-byte comparisons) rather
 than guessing. In order:
 
@@ -37,6 +37,11 @@ than guessing. In order:
    it something new to be interrupted by — found weeks later, in a
    separate milestone, but it belongs here with the rest of this
    driver's history.
+7. A fixed iteration count standing in for a real timeout — safe on an
+   idle host, not safe once anything on the host could stall the guest
+   for a real, unpredictable duration. Found by a user directly, on the
+   one real-world scenario none of this project's own testing ever
+   exercised.
 
 ## Background: why this was hard to see coming
 
@@ -480,6 +485,98 @@ simply never been exercised under those conditions before — this
 report-coalescing possibility had presumably always existed, it just
 needed a poll gap wide enough to matter.
 
+## Bug 7: an iteration count standing in for a timeout, found by a user, not a script
+
+The first six bugs in this document were all found through deliberate,
+scripted, one-variable-at-a-time testing. This one was found by a
+person just trying to use the thing normally, and it's a useful
+reminder that scripted testing — however thorough — only ever exercises
+the scenarios someone thought to script.
+
+**Symptom:** booting the real disk image normally in Parallels — a
+manually-launched VM, with a live window actually being watched, not
+this project's own headless scripted test loop — occasionally produced
+`xhci: keyboard not available (Command ring: timed out waiting for a
+completion event)`. The keyboard driver failed outright, something none
+of this project's own real-hardware testing (built specifically to make
+real-hardware round trips cheap — see the "background" section above)
+had ever hit, across many prior runs.
+
+**The key clue was asking for a second attempt and getting a different
+failure point.** The first report failed almost immediately in port
+setup — most likely one of the very first command-ring operations
+(enabling the device's slot, or addressing it). A second attempt, on
+request, got much further: through slot addressing, configuration, and
+interrupt-endpoint descriptor discovery, before failing on what's
+almost certainly the final command that arms the interrupt endpoint.
+Two *different* commands timing out on two different boots is a strong
+signal that the wait mechanism itself is the problem, not any one
+command's own logic — the same shape of reasoning that earlier, in a
+companion piece to this document, turned "one bus fault at one address"
+into "the entire fixed-address convention is unsafe" once a second,
+differently-addressed fault showed up.
+
+**Root cause:** every busy-wait in this driver — waiting for a command
+to complete, waiting for a transfer, waiting for a port to report a
+connection — was bounded by a fixed iteration count, on the reasoning
+(true at the time it was written) that no interrupts or timer are
+available yet at this point in boot. The gap: a fixed iteration count
+is only a valid stand-in for real elapsed time if the host never
+preempts the guest's virtual CPU for any real duration while it spins.
+A real hypervisor doesn't guarantee that. The one concrete difference
+between this project's own testing (headless — no VM window ever
+actually rendered on screen) and the user's manual run (a real, live
+window, being watched) is exactly the kind of thing that competes for
+real host CPU/GPU time — and stalling the guest's virtual CPU mid-poll
+for a real, unpredictable duration costs it zero "iterations" while
+real wall-clock time that should have counted toward the timeout
+quietly passes.
+
+**Fix:** replace the fixed iteration count with a genuine wall-clock
+deadline, using the ARM generic timer's free-running physical counter —
+a pure system-register read needing no interrupt controller and no
+timer *interrupt* at all, the identical "safe on any core, no
+dependencies" property this project's own timer-tick driver already
+relied on for a different reason. Every busy-wait in the driver now
+compares real elapsed time against a real millisecond budget instead of
+counting loop spins.
+
+```rust
+fn poll_deadline() -> u64 {
+    now_ticks() + frequency_hz() / 1000 * POLL_TIMEOUT_MS
+}
+
+fn wait_command_completion(&mut self, cmd_ptr: u64) -> Result<Trb, Error> {
+    let deadline = poll_deadline();
+    while now_ticks() < deadline {
+        // ... unchanged: pop an event, check its type, check it matches ...
+    }
+    Err(Error::CommandTimeout)
+}
+```
+
+**Confirmed fixed by the user directly, on the exact real-world
+scenario that had originally failed** — not a script standing in for
+it. Also regression-tested on the software emulator this project
+otherwise develops against, and through this project's own scripted
+real-hardware test loop — neither of which had ever reproduced the
+original bug, but both confirm the fix doesn't cost anything on the
+already-working path.
+
+**Lesson:** "no interrupts available yet, so this has to be
+iteration-bounded" was a true, reasonable constraint when it was first
+written — and stopped being the *only* option the moment a free-running
+hardware counter, needing no interrupt controller at all, was already
+sitting right there for a different subsystem's use. Worth checking,
+any time a past design constraint gets cited as a reason something
+can't be improved, whether the thing that originally motivated it is
+still actually true. And: a bug that only a human, watching a real,
+live-rendered VM window, could ever trigger — never a script driving
+the identical VM headlessly — is a real, useful data point about where
+a bug lives, not just an unlucky report. If your own test automation
+can't reproduce something a real user hit, ask what's structurally
+different about how they're using it, before assuming it's a fluke.
+
 ## Debugging techniques that generalized well
 
 A few things that were reused across more than one bug above, worth
@@ -526,15 +623,19 @@ A real, physical USB keyboard, on real Parallels-on-Apple-Silicon
 hardware, typing into a shell running on a from-scratch kernel with no
 prior USB support at all — full round trip confirmed: individual
 keystrokes, backspace, Enter submitting a real command line, with every
-keystroke landing correctly even under real preemptive multitasking.
-Getting there took a from-scratch xHCI driver (capability/operational
-register programming, command ring, event ring, device slot enumeration,
-control transfers, and finally a real interrupt-endpoint transfer ring)
-and six real, independently-confirmed hardware bugs along the way — five
+keystroke landing correctly even under real preemptive multitasking,
+and the driver itself now reliably reaching a working keyboard on a
+real, manually-launched VM, not just under scripted testing. Getting
+there took a from-scratch xHCI driver (capability/operational register
+programming, command ring, event ring, device slot enumeration, control
+transfers, and finally a real interrupt-endpoint transfer ring) and
+seven real, independently-confirmed hardware bugs along the way — five
 found in the initial one-day push, none of them visible on the software
-emulator this project otherwise develops against day to day, and a
-sixth found weeks later, exposed only once a separate milestone gave
-this platform real preemption for the first time.
+emulator this project otherwise develops against day to day; a sixth
+found weeks later, exposed only once a separate milestone gave this
+platform real preemption for the first time; and a seventh found not by
+this project's own testing at all, but by a person just trying to use
+the thing normally.
 
 If you're doing the equivalent work for your own kernel: budget for the
 fact that "works on QEMU" and "works on a real hypervisor" are

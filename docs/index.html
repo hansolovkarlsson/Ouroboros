@@ -112,7 +112,7 @@
       </li>
       <li class="done">
         <span class="tl-title">USB HID keyboard input</span>
-        <p>A from-scratch xHCI driver, six independently-confirmed real-hardware bugs (five found in the initial push, a sixth — dropped keystrokes under real preemption — found and fixed weeks later), ending in a real physical keyboard typing into the shell on real Parallels hardware — full round trip, letters, backspace, Enter.</p>
+        <p>A from-scratch xHCI driver, seven independently-confirmed real-hardware bugs (five found in the initial push; a sixth — dropped keystrokes under real preemption — and a seventh — an iteration-bounded timeout that should have been time-bounded, found by a user just booting the thing normally — both found and fixed weeks later), ending in a real physical keyboard typing into the shell on real Parallels hardware — full round trip, letters, backspace, Enter.</p>
       </li>
       <li class="done">
         <span class="tl-title">Real interrupt-controller discovery, and full preemption on Parallels</span>
@@ -147,7 +147,7 @@
       <a class="pm-card" href="postmortem-xhci-keyboard.html">
         <span class="pm-eyebrow">Part 3 · xHCI keyboard</span>
         <h3>Getting a USB keyboard working on Parallels</h3>
-        <p>Six real, confirmed hardware bugs bringing keyboard input to the kernel — a PCI Command register bit, a real UEFI firmware panic, a page-table assumption, a silently-dropped USB request class, a driver reading the wrong device, and — found weeks later — dropped keystrokes under real preemption.</p>
+        <p>Seven real, confirmed hardware bugs bringing keyboard input to the kernel — a PCI Command register bit, a real UEFI firmware panic, a page-table assumption, a silently-dropped USB request class, a driver reading the wrong device, dropped keystrokes under real preemption, and a timeout that was iteration-bounded instead of time-bounded — the last two found weeks later, one of them by a user, not a script.</p>
       </a>
     </div>
 
