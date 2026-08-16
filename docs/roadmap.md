@@ -50,6 +50,33 @@ phase:
   specifically), and no preemption there either (needs real
   interrupt-controller discovery - ACPI MADT, likely GICv3 - a separate,
   substantial follow-up).
+- **A USB HID keyboard driver — the clear next step for Parallels
+  specifically, now that the console works but has no input path.**
+  Research (two independent sources, not just one search result taken
+  at face value) confirmed this is a well-grounded target, not a repeat
+  of virtio-console's proprietary dead end: a real Parallels forum
+  thread about Linux ARM64 guests shows actual `xhci_hcd` errors tied
+  to the keyboard/mouse, on the exact same xHCI PCI device
+  (`0x1033:0x0194`) `pci::log_all_devices` already found present on
+  this hardware; and an independent USB-ID database confirms `VID_203A`
+  ("PARALLELS Virtual Keyboard" in real guest `lsusb` output) is a
+  genuine USB-IF-registered vendor ID belonging to Parallels itself -
+  i.e. a standard, spec-compliant USB HID device over a standard
+  controller, discoverable by any conformant driver, not an
+  undocumented channel. **Genuinely large scope, larger than anything
+  built so far** - xHCI controller init (capability/operational
+  registers, device context array, command ring, event ring), device
+  slot/address enumeration over control transfers, then HID
+  boot-protocol keyboard reports on top, all polling-based rather than
+  interrupt-driven (matches this project's existing driver style, and
+  necessary anyway since Parallels has no working GIC yet - see above).
+  Explicitly not started - the user chose to pause here after the
+  console milestone rather than begin immediately given the size.
+  Narrowest useful first slice, when picked back up: minimal xHCI init
+  + one device enumerated + polling boot-protocol reports, no hot-plug,
+  no EHCI, no full HID report-descriptor parsing - enough to type one
+  character into the shell, same discipline as every driver in this
+  project so far.
 - **Output redirection (`>`/`>>`)** — needs shell-level parsing this
   project doesn't have yet (splitting `cmd > file` into a command and a
   target). `cp` is done (see below); redirection is the one piece of
