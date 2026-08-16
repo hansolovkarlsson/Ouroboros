@@ -22,7 +22,7 @@ ifeq ($(PROFILE),release)
 CARGO_FLAGS += --release
 endif
 
-.PHONY: build shell-bin esp run run-virtio-console run-usb-kbd image run-image parallels-hdd test-parallels clean
+.PHONY: build shell-bin esp run run-virtio-console run-usb-kbd run-gicv3 image run-image parallels-hdd test-parallels clean
 
 # Overridable by `make test-parallels VM_NAME=... CMDS=... BOOT_WAIT=...`.
 VM_NAME     ?= Ouroboros
@@ -124,6 +124,28 @@ run-usb-kbd: esp
 		-device qemu-xhci,id=xhci0 \
 		-device usb-kbd,bus=xhci0.0 \
 		-monitor unix:qemu-monitor.sock,server,nowait \
+		-nographic
+
+# Same as `run`, but forces QEMU's virt machine onto GICv3 instead of its
+# default GICv2 (`-machine virt,help` confirms `gic-version` accepts
+# 2/3/4/x-5/host/max - real, checked, not assumed). For exercising
+# kernel/src/gicv3.rs and kernel/src/madt.rs's GICv3 discovery path without
+# needing real Parallels hardware for every iteration - see CLAUDE.md's
+# MADT/GICv3 scoping notes. Confirmed via a devicetree dump
+# (`qemu-system-aarch64 -machine virt,gic-version=3,dumpdtb=...`) that this
+# QEMU build describes GICv3 as one contiguous GICR region (GICD @
+# 0x08000000, GICR @ 0x080a0000 size 0xf60000), not per-CPU GICC.GICR
+# fields - madt.rs's parser confirmed independently to report the exact
+# same addresses from the real ACPI MADT, not just the devicetree.
+run-gicv3: esp
+	qemu-system-aarch64 \
+		-machine virt,gic-version=3 \
+		-cpu cortex-a72 \
+		-m 512M \
+		-bios $(OVMF) \
+		-drive file=fat:rw:$(ESP_DIR),format=raw,media=disk,if=none,id=hd0 \
+		-device virtio-blk-device,drive=hd0 \
+		-global virtio-mmio.force-legacy=false \
 		-nographic
 
 # Builds a real MBR+FAT32 .img (a valid raw UEFI-bootable disk - verified by

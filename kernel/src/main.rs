@@ -12,7 +12,10 @@ mod fbconsole;
 mod font;
 mod framebuffer;
 mod gic;
+mod gicv2;
+mod gicv3;
 mod loader;
+mod madt;
 mod mmu;
 mod pci;
 mod syscall;
@@ -109,27 +112,25 @@ fn main() -> Status {
     // doc comment and CLAUDE.md's "GOP framebuffer console, take four".
     // With that scan skipped, a *second*, differently-addressed instance
     // of the identical fault signature showed up next, this time with
-    // `FAR_EL1` matching `gic.rs`'s `GICD_BASE` exactly - see
-    // CLAUDE.md's "take five". Both addresses are the same kind of thing:
-    // a fixed, QEMU-shaped convention for where a device sits in the low
-    // 1GB, confirmed only via a QEMU devicetree dump, never discovered on
-    // Parallels. Neither `find_device`'s scan nor `gic::init`'s writes
-    // have any way to fail soft from a real bus fault (this kernel has no
-    // resumable EL1 synchronous-fault path, only the diverging
-    // report-and-halt one - see `exceptions.rs`), so the only safe thing
-    // to do on a platform where a byte-stream console couldn't be found
-    // the normal way is to not touch any of these QEMU-specific
-    // low-1GB addresses at all: virtio-console (`try_virtio_console`),
-    // virtio-blk (`init_storage`), *and* the GIC/timer-tick setup below -
-    // `timer.rs` itself is exempt, being pure system-register access
-    // (`cntfrq_el0` etc.), architecturally safe on any ARMv8 CPU
-    // regardless of platform device layout. This is a heuristic, not a
-    // proof (a platform could in principle have no early console yet
-    // still safely expose these), but it's grounded in the one real data
-    // point this project has - QEMU, the only platform any of this has
-    // ever been confirmed safe on, also always has a working ACPI/SPCR
-    // console - and it directly prevents a repeat of either crash.
-    let qemu_device_region_safe = discovery.is_some();
+    // `FAR_EL1` matching the old hardcoded `gic.rs`'s `GICD_BASE` exactly
+    // - see CLAUDE.md's "take five". That second crash is what the
+    // MADT/GICv3 work (`madt.rs`, `gicv3.rs`, `gic_confirmed` below) fixed
+    // properly - GIC/timer setup no longer depends on this heuristic at
+    // all, it depends on a real MADT parse. **This flag now only gates
+    // virtio-console/virtio-blk** (renamed from the old `qemu_device_region_safe`
+    // to reflect that): `virtio_mmio::find_device`'s scan still has no
+    // MADT-equivalent real-discovery mechanism of its own (MADT describes
+    // interrupt controllers, not virtio transports), and Parallels'
+    // own PCI device inventory (`pci::log_all_devices`, see CLAUDE.md's
+    // "virtio-console" section) shows no virtio-blk/virtio-console device
+    // there at all regardless - so this heuristic is still the only thing
+    // standing between `find_device`'s scan and a repeat of that first
+    // crash. This is still a heuristic, not a proof (a platform could in
+    // principle have no early console yet still safely expose virtio-mmio),
+    // but it's grounded in the one real data point this project has - QEMU,
+    // the only platform this scan has ever been confirmed safe on, also
+    // always has a working ACPI/SPCR console.
+    let virtio_mmio_probe_safe = discovery.is_some();
 
     // GOP framebuffer discovery - also boot-services-only (see
     // framebuffer.rs's module doc comment), so it has to happen here
@@ -159,11 +160,11 @@ fn main() -> Status {
 
     // xHCI controller discovery (kernel/src/xhci.rs) - also boot-services-only
     // (PCI config-space reads via PciRootBridgeIo), so has to happen here
-    // too. Unlike virtio-mmio/GIC's fixed QEMU-shaped addresses, this one
+    // too. Unlike virtio-mmio's fixed QEMU-shaped addresses, this one
     // is genuinely discovered (a PCI BAR, read directly out of the
     // controller's own configuration space) rather than guessed - see
     // xhci.rs's module doc comment for why that makes it safe to actually
-    // use later regardless of `qemu_device_region_safe`.
+    // use later regardless of `virtio_mmio_probe_safe`.
     let xhci_info = match pci::discover_xhci() {
         Ok(info) => {
             log::info!(
@@ -176,6 +177,34 @@ fn main() -> Status {
         }
         Err(e) => {
             log::warn!("Ouroboros kernel: xHCI discovery failed ({e})");
+            None
+        }
+    };
+
+    // MADT (GIC version/address) discovery - see madt.rs's module doc
+    // comment for why this replaces `qemu_device_region_safe` for GIC/timer
+    // setup specifically, rather than continuing to rely on the "an early
+    // console was found" heuristic. Only reads plain memory (like
+    // acpi::discover_pl011), so it's boot-services-safe, and logging it
+    // here means the result is visible even on a platform where every
+    // console mechanism otherwise fails.
+    let gic_info = match unsafe { madt::discover(rsdp) } {
+        Ok(info) => {
+            log::info!(
+                "Ouroboros kernel: MADT: GIC {:?}, GICD @ {:#x}, GICC/GICR @ {:#x} (size {:#x})",
+                info.version,
+                info.gicd_base,
+                if info.version == madt::GicVersion::V2 {
+                    info.gicc_base
+                } else {
+                    info.gicr_base
+                },
+                info.gicr_size
+            );
+            Some(info)
+        }
+        Err(e) => {
+            log::warn!("Ouroboros kernel: MADT/GIC discovery failed ({e:?})");
             None
         }
     };
@@ -223,8 +252,15 @@ fn main() -> Status {
     }
 
     // SAFETY: called after exit_boot_services, with the memory map that
-    // call returned.
-    let mut extra_devices = [(0u64, 0u64); 2];
+    // call returned. Sized for 4, not 2 (framebuffer + xHCI BAR), as of
+    // the MADT/GICv3 work: GICD/GICR are genuinely discovered addresses
+    // now (madt.rs), not assumed to live in the fixed low-1GB device
+    // block the way gic.rs's old QEMU-devicetree-derived addresses did -
+    // real Parallels hardware could put them anywhere, the same way its
+    // xHCI BAR turned out not to respect that assumption either. See
+    // `mmu.rs`'s `MAX_EXTRA_L1_TABLES` doc comment for the matching bump
+    // on that side.
+    let mut extra_devices = [(0u64, 0u64); 4];
     let mut extra_device_count = 0;
     if let Some(info) = fb_info {
         extra_devices[extra_device_count] = (info.base, info.size as u64);
@@ -237,6 +273,16 @@ fn main() -> Status {
         // region isn't empty, and maps a whole 1GB block regardless, same
         // as the framebuffer fallback).
         extra_devices[extra_device_count] = (info.base, 0x10000);
+        extra_device_count += 1;
+    }
+    if let Some(info) = gic_info {
+        extra_devices[extra_device_count] = (info.gicd_base, 0x10000);
+        extra_device_count += 1;
+        let (secondary_base, secondary_size) = match info.version {
+            madt::GicVersion::V2 => (info.gicc_base, 0x10000),
+            madt::GicVersion::V3 => (info.gicr_base, info.gicr_size),
+        };
+        extra_devices[extra_device_count] = (secondary_base, secondary_size);
         extra_device_count += 1;
     }
     unsafe {
@@ -272,20 +318,20 @@ fn main() -> Status {
 
     // A fifth and final fallback, tried only if every mechanism above -
     // including the framebuffer console - has failed, *and* only if
-    // `qemu_device_region_safe` says the underlying scan isn't known to be
+    // `virtio_mmio_probe_safe` says the underlying scan isn't known to be
     // dangerous here. Confirmed dead on Parallels specifically (no such
     // PCI device, see CLAUDE.md's "virtio-console" section) and now
     // confirmed to crash outright there too, not just fail to find
-    // anything (see `qemu_device_region_safe`'s own comment above) - kept
+    // anything (see `virtio_mmio_probe_safe`'s own comment above) - kept
     // only for a hypothetical future platform with no GOP but a real,
     // safely-probeable virtio-mmio console device.
-    if qemu_device_region_safe && !console::is_installed() {
+    if virtio_mmio_probe_safe && !console::is_installed() {
         try_virtio_console();
     }
 
     // USB HID keyboard (kernel/src/xhci.rs) - the first keyboard input
     // path this kernel has ever had. Deliberately NOT gated on
-    // `qemu_device_region_safe`: unlike virtio-mmio/GIC, the xHCI BAR is a
+    // `virtio_mmio_probe_safe`: unlike virtio-mmio, the xHCI BAR is a
     // genuinely discovered address (PCI config space), not a guessed
     // QEMU-shaped convention - see xhci.rs's module doc comment. Not
     // fatal if it fails (no controller found, no device connected, ...) -
@@ -312,49 +358,107 @@ fn main() -> Status {
     // The runtime storage stack (docs/CHANGELOG.md phases 3a/3b): virtio-blk
     // + FAT32, installed globally for fs_list_dir/fs_read_file
     // (syscall.rs) to use. Not fatal if it fails - see init_storage's doc
-    // comment. Gated on the same `qemu_device_region_safe` flag as
+    // comment. Gated on the same `virtio_mmio_probe_safe` flag as
     // virtio-console above - virtio_blk::Device::discover() goes through
     // the identical `virtio_mmio::find_device` scan that's now confirmed
     // to crash on real Parallels hardware, so this is skipped there for
-    // the same reason, not a separate decision.
-    if qemu_device_region_safe {
+    // the same reason, not a separate decision. **Not** helped by the
+    // MADT/GICv3 work below - MADT describes interrupt controllers, not
+    // virtio transports, and Parallels' own PCI inventory
+    // (`pci::log_all_devices`) shows no virtio-blk device there at all
+    // regardless of whether the scan itself would be safe.
+    if virtio_mmio_probe_safe {
         init_storage();
     } else {
         console::println!("Ouroboros kernel: skipping virtio-blk (unconfirmed-safe virtio-mmio scan on this platform) - disk commands won't work this boot");
     }
 
-    // Gated on `qemu_device_region_safe` - GICD/GICC sit at the same kind
-    // of fixed, QEMU-shaped low-1GB address as virtio-mmio, and real
+    // GIC/timer setup - gated on `gic_info` being `Some` (real MADT
+    // discovery, `madt.rs`), not the console-discovery heuristic this used to share
+    // with virtio-mmio above. The old shared gate existed because real
     // Parallels hardware directly confirmed (a decoded Synchronous
-    // External Abort, `FAR_EL1` matching `GICD_BASE` exactly) that
-    // writing there crashes just as hard - see `qemu_device_region_safe`'s
-    // own comment above and CLAUDE.md's "take five". Skipping this
-    // entirely means no preemption this boot (no tick ever fires, so
-    // `tasks.rs`'s round-robin never switches away from task 0) - a real,
-    // known limitation, not silently swallowed: `tasks::start` below
-    // does a straight `eret` into task 0 with no dependency on any of
-    // this having run, so the interactive shell still works, just
-    // without ever preempting - task 0 simply keeps running forever,
-    // which is fine for a single always-runnable interactive task.
-    // `timer::arm` is deliberately not called at all in this branch: it's
-    // harmless either way (pure system-register access, see
-    // `timer.rs`'s module doc comment), but arming a timer whose
+    // External Abort, `FAR_EL1` matching the old hardcoded `GICD_BASE`
+    // exactly) that writing to `gic.rs`'s QEMU-devicetree-derived
+    // addresses crashes just as hard as virtio-mmio's did - see
+    // CLAUDE.md's "take five". `madt.rs`/`gicv2.rs`/`gicv3.rs` fix that
+    // properly: the addresses used below now come from the platform's own
+    // ACPI MADT, confirmed real for *this* boot, not a QEMU-shaped
+    // convention borrowed from a devicetree dump - see `madt.rs`'s module
+    // doc comment. Skipping this (when MADT parsing itself fails - a real,
+    // live possibility on a platform whose MADT doesn't describe an
+    // interrupt controller the way Parallels' SPCR doesn't describe a
+    // console, still unconfirmed either way) means no preemption this
+    // boot (no tick ever fires, so `tasks.rs`'s round-robin never switches
+    // away from task 0) - a real, known limitation, not silently
+    // swallowed: `tasks::start` below does a straight `eret` into task 0
+    // with no dependency on any of this having run, so the interactive
+    // shell still works, just without ever preempting - task 0 simply
+    // keeps running forever, which is fine for a single always-runnable
+    // interactive task. `timer::arm` is deliberately not called at all in
+    // that case: it's harmless either way (pure system-register access,
+    // see `timer.rs`'s module doc comment), but arming a timer whose
     // interrupt will never be forwarded anywhere is just dead work.
-    if qemu_device_region_safe {
-        // SAFETY: GICD/GICC are mapped by the identity map just installed
-        // above (both fall within the low-1GB device block) - and, on
-        // this branch, confirmed to be genuinely backed by a device,
-        // not just mapped.
+    if let Some(info) = gic_info {
+        // Re-printed through whatever console is live now, same reason
+        // xhci_info's diagnostic is re-printed below - the boot-services-only
+        // log::info! this was first reported through is long gone by the
+        // time the framebuffer console (the only one on Parallels) clears
+        // the screen and takes over. Confirmed real and correct on real
+        // Parallels hardware, not just QEMU: `GIC V3, GICD @ 0x2410000,
+        // GICC/GICR @ 0x2500000 (size 0x40000)` - genuinely different
+        // addresses from QEMU's, and MADT parsing itself never crashed or
+        // hung there, resolving the biggest open risk in the MADT/GICv3
+        // scoping plan (whether Parallels' MADT describes an interrupt
+        // controller at all - it does).
+        console::println!(
+            "Ouroboros kernel: MADT: GIC {:?}, GICD @ {:#x}, GICC/GICR @ {:#x} (size {:#x})",
+            info.version,
+            info.gicd_base,
+            if info.version == madt::GicVersion::V2 {
+                info.gicc_base
+            } else {
+                info.gicr_base
+            },
+            info.gicr_size
+        );
+        // SAFETY: GICD/GICC/GICR (whichever this version needs) are
+        // mapped by the identity map just installed above - either inside
+        // the fixed low-1GB device block (QEMU) or via `extra_devices`
+        // (any address outside it, same mechanism the xHCI BAR already
+        // relies on) - and, on this branch, confirmed to be genuinely
+        // backed by a real interrupt controller, not just a mapped-but-
+        // empty guess. Also confirmed on real Parallels hardware
+        // specifically, not just QEMU: with task switching separately
+        // disabled for isolation (see `exceptions.rs`'s
+        // `TASK_SWITCH_ENABLED` doc comment), `uptime` reported a real,
+        // correctly-incrementing tick count there (e.g. 566 -> 687 ticks)
+        // with the shell staying fully responsive - GIC/timer IRQ
+        // delivery itself is solid on real hardware, not just emulated.
         unsafe {
+            gic::configure(info);
             gic::init();
             gic::enable_interrupt(timer::INTID);
         }
         timer::arm(timer::TICK_INTERVAL_MS);
     } else {
         console::println!(
-            "Ouroboros kernel: skipping GIC/timer init (unconfirmed-safe device region on this platform) - no preemption this boot"
+            "Ouroboros kernel: skipping GIC/timer init (no MADT-confirmed interrupt controller on this platform) - no preemption this boot"
         );
     }
+
+    // See `exceptions.rs`'s `TASK_SWITCH_ENABLED` doc comment for the real,
+    // still-not-fully-understood bug this works around: the actual task
+    // switch hangs the very first time it runs on real Parallels hardware,
+    // even though GIC/timer IRQ delivery itself (confirmed separately,
+    // see above) is solid there. Reuses `virtio_mmio_probe_safe`'s same
+    // "an early console was found" heuristic as its proxy for "is this
+    // the one platform (QEMU) task switching has ever been confirmed
+    // working on" - the same underlying signal as that flag, for an
+    // unrelated reason, which is why this isn't just named the same
+    // thing: task-switching's QEMU-only confirmation has nothing to do
+    // with virtio-mmio scan safety, they just happen to share the one
+    // real data point this project has so far.
+    exceptions::set_task_switch_enabled(virtio_mmio_probe_safe);
 
     // SAFETY: both EL0 regions were just mapped EL0-accessible above.
     unsafe { tasks::init(&program) };
@@ -379,7 +483,7 @@ fn main() -> Status {
 /// comment), now confirmed both nonexistent there *and* built on a scan
 /// (`virtio_mmio::find_device`) that's confirmed to crash real Parallels
 /// hardware outright - see `virtio_mmio.rs`'s module doc comment for the
-/// decoded exception. Only reached at all when `qemu_device_region_safe`
+/// decoded exception. Only reached at all when `virtio_mmio_probe_safe`
 /// (`main`'s caller) is true, and even then only after the framebuffer
 /// console has had its chance.
 ///
@@ -447,7 +551,7 @@ fn try_framebuffer_console(fb_info: Option<framebuffer::Info>) {
 /// booted via `make run`'s vvfat disk - FAT16, not FAT32, see
 /// `fat32.rs`'s module doc comment).
 ///
-/// Only ever called when `main`'s `qemu_device_region_safe` is true -
+/// Only ever called when `main`'s `virtio_mmio_probe_safe` is true -
 /// `virtio_blk::Device::discover` goes through the same
 /// `virtio_mmio::find_device` scan confirmed to crash real Parallels
 /// hardware (see that module's doc comment), so this whole function is

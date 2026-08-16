@@ -234,6 +234,13 @@ above, worth re-testing again if this module changes.
 
 ### Timer-driven preemption tick: GICv2 + ARM generic timer, real IRQ round-trips
 
+**Superseded for anything platform/address-related by the "MADT/GICv3"
+section much further below - kept here as accurate history of this
+milestone, not silently rewritten.** `gic.rs` is now a version-dispatch
+facade (`gicv2.rs`/`gicv3.rs` backends), and its addresses come from a
+real ACPI MADT parse (`madt.rs`), not the QEMU devicetree dump described
+in this section.
+
 `kernel/src/gic.rs` (GICv2 distributor + CPU interface) and
 `kernel/src/timer.rs` (ARM generic non-secure EL1 physical timer, PPI 14 →
 GIC INTID 30) give the kernel a periodic 1-second tick, delivered as a real
@@ -2083,12 +2090,16 @@ keyboard input - is now done too.** See "USB HID keyboard driver"
 further below: a real, physical USB keyboard now types into this same
 shell on this same real Parallels hardware, full round trip (letters,
 backspace, Enter). Preemptive multitasking still isn't available on
-Parallels (`qemu_device_region_safe` disables GIC/timer setup there -
-see "take five"), which needs real interrupt-controller discovery (ACPI
-MADT, likely GICv3) to fix - separately tracked, not blocking the
-keyboard work, which turned out not to need it (the interrupt endpoint
-this driver uses is polled the same iteration-bounded way everything
-else in this kernel is, not IRQ-driven).
+Parallels - not blocking the keyboard work, which turned out not to
+need it (the interrupt endpoint this driver uses is polled the same
+iteration-bounded way everything else in this kernel is, not
+IRQ-driven). **Update: real interrupt-controller discovery (ACPI MADT,
+GICv3) is now done - see "MADT/GICv3" further below.** GIC/timer IRQ
+delivery itself is confirmed solid on real Parallels hardware (a real,
+correctly-incrementing `uptime`); the actual task switch hit a separate,
+new, still-unresolved real-hardware bug and stays disabled there for
+now, so preemptive multitasking specifically is still not available on
+Parallels, just for a different, better-understood reason than before.
 
 **In the meantime, kernel development continues against QEMU**, which has a
 fully working console via ACPI/SPCR (plus confirmed-working fallback paths
@@ -2189,7 +2200,11 @@ instead of memory-mapped, redistributors instead of a single
 distributor for SGI/PPI routing) would lift the "no preemption on
 Parallels" limitation from "take five" above - a real, substantial
 follow-up, not a quick fix, deliberately not attempted in the same pass
-that found the crash. `pci::log_all_devices` is a real, reusable
+that found the crash. **Update: done, see "MADT/GICv3" further below -
+GICv3 was indeed the right guess, and it lifted the crash risk and
+confirmed real IRQ delivery works, but preemption itself surfaced a
+separate, new, still-unresolved real-hardware bug in the task switch,
+so it's not fully lifted yet either.** `pci::log_all_devices` is a real, reusable
 diagnostic worth remembering for any future "why can't this platform's
 hardware be found" question; a real relocating loader (ELF + relocation
 processing), which would lift both the `core::fmt` and
@@ -2338,6 +2353,213 @@ needed - the interrupt endpoint is polled the same
 iteration-bounded busy-poll way every other wait in this kernel is, not
 IRQ-driven).
 
+## MADT/GICv3: real interrupt-controller discovery for Parallels - real IRQ delivery confirmed, task switching itself hit a new, real mystery
+
+The "preemption on Parallels" gap flagged at the end of the USB HID
+keyboard milestone above is now half-closed: real ACPI MADT parsing
+replaces the old `qemu_device_region_safe` heuristic for GIC/timer setup
+specifically, a GICv3 driver was built and confirmed working end to end
+on real Parallels hardware (a genuinely, correctly incrementing `uptime`
+- the first time that's ever been true there), and a second, separate,
+real bug was found in the process: the actual task switch hangs the
+first time it runs on real hardware, root cause not yet found. Shipped
+in the safe state - GIC/timer fully enabled (real tick counting), task
+switching still disabled on Parallels (unchanged single-task behavior,
+just with an honest `uptime` now instead of one permanently stuck at 0).
+
+**Why MADT, not another QEMU devicetree dump.** `gic.rs`'s old addresses
+(`0x0800_0000`/`0x0801_0000`) were GICv2-only and confirmed only via a
+QEMU-internal devicetree dump - the exact same kind of QEMU-shaped
+convention that already crashed real Parallels hardware once (a decoded
+Synchronous External Abort with `FAR_EL1` matching `GICD_BASE` exactly -
+see "take five" above), which is why GIC/timer setup got folded into
+`qemu_device_region_safe`'s blanket skip in the first place. ACPI's MADT
+table (`"APIC"` signature - the spec's own historical x86 name for it,
+not `"MADT"`) is the platform's genuine, portable way of describing its
+interrupt controller, the same role SPCR plays for the console. New
+module `kernel/src/madt.rs` reuses `acpi.rs`'s RSDP -> XSDT walk
+(refactored into a shared `find_table(rsdp, signature)` helper once a
+second real caller needed it, not speculatively) and parses the MADT's
+GICD (Type 0x0C - carries a `GIC Version` byte: 2, 3, or 4, the
+authoritative way to pick a driver, not a guess), GICC (Type 0x0B - a
+GICv3 system may describe each CPU's redistributor via this structure's
+own `GICR Base Address` field instead of a separate structure), and GICR
+(Type 0x0E - a contiguous redistributor region) structures. Struct field
+layouts cross-checked against Linux's `include/acpi/actbl2.h`
+(`acpi_madt_generic_interrupt`/`_distributor`/`_redistributor`), same
+discipline `gic.rs`/`mmu.rs` already hold their register-bit sourcing to.
+Every field read is bounds-checked against the structure's own declared
+`length` first - a real, live concern, not paranoia: the GICC structure
+specifically has grown across ACPI revisions, and blindly reading a
+newer field out of an older/shorter table entry would be reading
+garbage.
+
+**Confirmed on QEMU two independent ways before ever touching
+Parallels**, per the scoping plan's staged, QEMU-first testing approach.
+First, against QEMU's *default* GICv2 config: `madt::discover` reported
+`GIC V2, GICD @ 0x8000000, GICC/GICR @ 0x8010000` - an exact match for
+the already-known-correct devicetree-derived values, confirming the
+parser without touching any new driver code. Second, QEMU's `virt`
+machine can be forced onto GICv3 (`-machine virt,gic-version=3` -
+confirmed via `-machine virt,help`, not assumed; a new `make run-gicv3`
+Makefile target wraps this). A devicetree dump under that flag
+independently confirmed `GICD @ 0x08000000` (size `0x10000`) and a
+*single contiguous* GICR region at `0x080a0000` (size `0xf60000`, sized
+for many possible CPUs, `#redistributor-regions = <1>`) - and
+`madt::discover`, parsing the real ACPI MADT (a completely independent
+code path from the devicetree dump), reported the exact same addresses
+and size. Two independent sources agreeing is what "confirmed," not
+"probably right," means throughout this project.
+
+**The GICv3 driver (`kernel/src/gicv3.rs`) and the version-dispatch
+facade.** `gic.rs`'s original GICv2 content moved unchanged into
+`gicv2.rs` (now taking its addresses as parameters instead of hardcoded
+constants); `gic.rs` itself became a thin facade holding whichever
+`madt::GicInfo` was actually discovered and dispatching all four calls
+(`init`/`enable_interrupt`/`acknowledge`/`end_of_interrupt`) to the
+right backend - `exceptions.rs`'s two call sites don't change at all,
+`main.rs` gains one `gic::configure(info)` call ahead of the existing
+pair. GICv3 is architecturally different enough from GICv2 that this
+was a real driver, not a find-and-replace: the CPU interface is
+system-register-based (`ICC_SRE_EL1`/`ICC_PMR_EL1`/`ICC_IGRPEN1_EL1`/
+`ICC_IAR1_EL1`/`ICC_EOIR1_EL1`), not memory-mapped at all; PPI enable
+moves from the distributor to a per-CPU **Redistributor** region
+(`GICR_ISENABLER0`), which first needs waking (`GICR_WAKER.ProcessorSleep`
+cleared, then polled until `ChildrenAsleep` clears - no GICv2 equivalent
+at all); and finding *this* CPU's own redistributor frame within a
+region that may describe several needs a real walk (`GICR_TYPER`'s
+Affinity field compared against this CPU's own `MPIDR_EL1`, stopping at
+a match or the "Last" bit, with the frame stride depending on
+`GICR_TYPER.VLPIS`) rather than assuming frame 0, matching this
+project's standing discipline of discovering rather than assuming (the
+same reasoning `xhci.rs` scanning every port instead of trusting the
+first device found already established). `mmu.rs`'s `extra_devices`
+mechanism (already generalized for the xHCI BAR) needed no new
+mapping logic, just a size bump (`MAX_EXTRA_L1_TABLES` 2 -> 4,
+`main.rs`'s `extra_devices` array 2 -> 4 entries) since real Parallels
+GIC addresses were completely unconfirmed going in and nothing ruled out
+them needing their own top-level table entries the way the xHCI BAR did
+(in the event, both GICD and GICR turned out to land inside the
+already-mapped low regions on both QEMU and Parallels - but the
+generalization exists for whenever that stops being true).
+
+**Two real GICv3 bugs found on QEMU, before ever risking a Parallels
+round trip on them - exactly what the staged testing approach was
+for.** First attempt: `uptime` stuck at 0 forever under forced GICv3,
+no crash, no fault - the tick simply never reached this kernel's
+handler. Root cause, cross-checked against Linux's own `gic_cpu_init`
+(`irq-gic-v3.c`): a PPI defaults to Group 0 (FIQ) unless a redistributor
+register (`GICR_IGROUPR0`) explicitly reassigns it to Group 1 (IRQ,
+the group `ICC_IGRPEN1_EL1` actually enables) - fixed by writing
+`0xffff_ffff` there, matching Linux's own value exactly. Second attempt,
+same symptom persisting: `GICD_CTLR`'s enable bit isn't a single bit the
+way GICv2's was - bit 0 alone only enables Group 0 at the distributor
+level too, regardless of the redistributor's own per-interrupt group
+assignment; needs `ENABLE_G1 | ENABLE_G1A | ARE_NS` together (values
+`0x1`/`0x2`/`0x10`, same Linux cross-check), plus waiting for
+`GICD_CTLR.RWP` to clear before proceeding - both fixes confirmed by a
+full round trip afterward: `uptime` correctly incrementing (`6` -> `46`
+-> `170` ticks across three checks), then a sustained 20-second gap
+(`88` -> `876` ticks, consistent with the TCG timing variance already
+documented for the GICv2 case), zero aborts in a `-d int` cross-check
+across every run.
+
+**Real Parallels hardware, using `make test-parallels` (see below) for
+the first time to drive the actual round trips - itself a first for
+this project.** Staged exactly per the scoping plan: MADT discovery was
+shipped and tested *before* the real GICv3 register sequence ever ran
+there (a temporary, source-level "log the discovery, skip
+`gic::init()`" flag, the same "temporarily force, test, revert"
+discipline the console-discovery saga established) - confirmed clean,
+resolving the biggest open risk going in (whether Parallels' MADT
+describes an interrupt controller at all, the same open question its
+absent SPCR had already raised doubt about - it does: `GIC V3, GICD @
+0x2410000, GICC/GICR @ 0x2500000 (size 0x40000)`, genuinely different
+addresses from QEMU's, no crash, no hang). Only then was the real
+`gic::init()`/`gic::enable_interrupt()` sequence enabled for a second
+round trip.
+
+**That second round trip hit a new, real, currently-unresolved bug -
+and it isn't the MADT/GICv3 work itself.** With GIC/timer fully
+enabled, the framebuffer console (Parallels' only console) went
+completely silent the instant the first tick fired: no exception
+reported, no further output, keystrokes stopped being echoed at all -
+indistinguishable, from the screen alone, between "hung" and "still
+running but not listening." A single-variable diagnostic (temporarily
+skipping just `tasks::on_tick`'s actual context swap, in
+`exceptions.rs`'s `rust_irq_handler`, while leaving everything else -
+GIC init, interrupt enable, acknowledge, end-of-interrupt, `TICKS`
+counting - fully active) isolated it precisely: with the switch
+skipped, `uptime` reported a real, correctly-incrementing tick count on
+real Parallels hardware (`533` -> `752` in one observed run) and the
+shell stayed completely responsive; with it enabled, the very first
+switch hangs the system outright. **GIC/timer IRQ delivery itself is
+now conclusively confirmed solid on real Parallels hardware** - the bug
+is specifically in the task switch, which had never run on real
+hardware before this session (Parallels had no working GIC/timer at all
+until now, so this exact interrupt-delivery-plus-context-swap
+combination was simply never exercised there). `tasks::on_tick` itself
+is unchanged and still fully exercised on QEMU (GICv2 and forced GICv3
+both retested end to end after this was found, zero regressions).
+
+**Shipped as an honestly unresolved mystery, same treatment as the
+EL0/RAM-permission bug in the boot-bringup arc, not silently patched
+over.** `exceptions.rs` gained `TASK_SWITCH_ENABLED` (an `AtomicBool`,
+default `true`), set once from `main.rs` via
+`exceptions::set_task_switch_enabled(virtio_mmio_probe_safe)` - reusing
+the exact same "an early console was found" heuristic
+`virtio_mmio_probe_safe` already uses as its own QEMU-vs-Parallels
+proxy, for an unrelated reason (task-switching's QEMU-only confirmation
+has nothing to do with virtio-mmio scan safety; they just happen to
+share the one real data point this project has so far, hence the
+distinct name rather than reusing the flag itself). A leading
+hypothesis, not yet confirmed: real hardware's `WFE` may be
+trapped/emulated by the host hypervisor (Apple's own virtualization
+layer, one level above this guest kernel) in a way QEMU/TCG's `WFE`
+never is - this kernel's `nTWE`/`nTWI` bits only ever controlled
+whether EL0's own `wfe` traps *to EL1*, a decision this kernel owns
+completely; whatever EL2 does to EL1's or EL0's `WFE` above that is
+outside this kernel's control or visibility entirely, and this project
+has no way to inspect or influence it. Not yet tested. Net result,
+shipped: `uptime` now works correctly on Parallels (a real, incrementing
+tick count, not stuck at 0) with zero regression risk - task switching
+stays off there, exactly the same single-task behavior Parallels has
+always had, just no longer silently wrong about how much time has
+passed.
+
+**Scripted real-hardware testing (`make test-parallels`,
+`scripts/test-parallels.sh`) was what made this entire investigation
+practical in a single session** - discovered via Parallels Desktop's
+own CLI, `prlctl` (`man prlctl`), on 2026-08-16, the same day as this
+milestone. Every real-hardware round trip above (discovery-only,
+full-GIC-enabled, the task-switch isolation diagnostic, the final
+shipped-state confirmation) went through it: rebuild `esp.hdd`, boot
+the registered VM headlessly, type commands via `prlctl send-key-event`
+(real decimal PS/2 Set-1 scancodes - `prlctl` rejects hex), and
+screenshot via `prlctl capture` after each one - no human watching the
+VM live, no physical keyboard, the exact manual loop every earlier
+postmortem in `docs/` paid wall-clock time for, now driven headlessly.
+See `docs/roadmap.md`'s "Testing infrastructure" section for the full
+writeup.
+
+**Still coarse, worth knowing before building on this:** task switching
+on Parallels is a real, known regression risk if re-enabled without
+first understanding the WFE/hypervisor hypothesis above - don't flip
+`virtio_mmio_probe_safe`'s value into `set_task_switch_enabled` assuming
+it'll just work, that's exactly the untested assumption that hangs the
+system right now; the MADT parser only reads the first GICD/GICC/GICR
+structures it finds (spec requires exactly one GICD, but a real
+multi-cluster system could have several GICR structures this parser
+doesn't yet merge/choose between); `gicv3.rs`'s redistributor-frame walk
+is real discovery logic but has only ever been exercised against
+single-CPU configurations (QEMU with default `-smp` and Parallels' own
+single-vCPU test VM) - never tested against a genuinely multi-core
+guest; and virtio-blk/virtio-mmio on Parallels remain completely
+unaddressed by this work (a real device that, per the existing PCI
+inventory, simply isn't present there over any transport this project
+can drive - a different, harder problem than the interrupt-controller
+one this milestone solved).
+
 ## Commands
 
 ```sh
@@ -2413,11 +2635,12 @@ docs/
   shell-and-filesystem-postmortem.md   debugging postmortem: the relocation-class bug family (core::fmt, then literal comparisons), the disk-loaded userland shell, virtio-blk/FAT32 bring-up, the cluster-0 hang bug, and write support - the middle piece, between boot-bringup-postmortem.md and xhci-keyboard-postmortem.md
 
 kernel/
-  src/main.rs        #[entry] point: UEFI init, console discovery, loader::load(), ExitBootServices, exceptions::install(), mmu::install_identity_map(), xhci::init(), gic+timer init, tasks::init(), then tasks::start()
+  src/main.rs        #[entry] point: UEFI init, console discovery, madt::discover(), loader::load(), ExitBootServices, exceptions::install(), mmu::install_identity_map(), xhci::init(), gic+timer init, tasks::init(), then tasks::start()
   src/uart.rs        raw PL011 console driver (read + write), used only after ExitBootServices
   src/uart16550.rs   raw 16550-compatible console driver (read + write; PCI-discovered consoles; different hardware, different driver)
   src/devicetree.rs  console UART discovery via the UEFI-provided devicetree (dead end on QEMU/Parallels)
-  src/acpi.rs        console UART discovery via ACPI RSDP -> XSDT -> SPCR (works on QEMU, dead end on Parallels)
+  src/acpi.rs        console UART discovery via ACPI RSDP -> XSDT -> SPCR (works on QEMU, dead end on Parallels), plus the shared find_table(rsdp, signature) walk madt.rs also uses
+  src/madt.rs        real GIC version/address discovery via the ACPI MADT (GICD/GICC/GICR structures) - replaces the old QEMU-devicetree-derived gic.rs addresses, see "MADT/GICv3" above
   src/pci.rs         console UART discovery via PCI enumeration for a class 0x07/0x00 serial controller, plus log_all_devices (a reusable full-bus diagnostic dump, see "virtio-console" above) and discover_xhci (class 0x0c/0x03/0x30, read-only - see "USB HID keyboard driver" above)
   src/console.rs     global console handle (Console enum: Pl011 | Uart16550 | Virtio | Framebuffer), shared between main() and the exception handler
   src/framebuffer.rs GOP (EFI_GRAPHICS_OUTPUT_PROTOCOL) discovery: resolution/stride/pixel format + framebuffer physical base/size - the real lead for Parallels, see "GOP framebuffer console" above
@@ -2425,7 +2648,9 @@ kernel/
   src/fbconsole.rs   text console rendered directly into the GOP framebuffer: glyph drawing, cursor, ptr::copy-based scroll - write-only, no ANSI parsing, see "GOP framebuffer console" above
   src/exceptions.rs  AArch64 exception vector table (VBAR_EL1) + fault reporting
   src/mmu.rs         replaces firmware's translation tables with our own identity map (L0->L1->L2->L3 as needed), up to MAX_EL0_REGIONS independent EL0 regions, plus an optional framebuffer device-block fallback
-  src/gic.rs         GICv2 driver (QEMU virt addresses, confirmed via devicetree dump)
+  src/gic.rs         version-dispatching facade over gicv2.rs/gicv3.rs, selected by madt.rs's real discovery - see "MADT/GICv3" above
+  src/gicv2.rs       GICv2 backend (distributor + memory-mapped CPU interface), addresses now passed in from madt::GicInfo instead of hardcoded
+  src/gicv3.rs       GICv3 backend (redistributor wake/discovery, ICC_* system-register CPU interface) - confirmed working on QEMU and real Parallels hardware, see "MADT/GICv3" above
   src/timer.rs       ARM generic timer (non-secure EL1 physical timer, PPI 14 / GIC INTID 30), TICK_INTERVAL_MS
   src/loader.rs      reads INIT.CFG + a program off the ESP during boot services, into a 2MB-aligned EL0-accessible region - see docs/processes.md
   src/syscall.rs     svc syscall dispatch table (print/double/report/try_read_char/putc/get_ticks/fs_list_dir/fs_read_file/fs_mkdir/fs_rmdir/fs_touch/fs_rm/fs_write_file/fs_mv, gap at 5) - confirmed working end to end, see above

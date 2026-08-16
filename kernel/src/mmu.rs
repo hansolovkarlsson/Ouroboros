@@ -177,9 +177,24 @@ static L1_TABLE: Table = Table(UnsafeCell::new([0; ENTRIES_PER_TABLE]));
 // this existed: a Translation fault at level 0, `FAR_EL1` matching the
 // BAR address exactly, on the very first read of an xHCI capability
 // register).
-const MAX_EXTRA_L1_TABLES: usize = 2;
-static EXTRA_L1_TABLES: [Table; MAX_EXTRA_L1_TABLES] =
-    [Table(UnsafeCell::new([0; ENTRIES_PER_TABLE])), Table(UnsafeCell::new([0; ENTRIES_PER_TABLE]))];
+// Bumped from 2 to 4 for the MADT/GICv3 work (see `madt.rs`/`gicv3.rs`):
+// `main.rs`'s `extra_devices` can now carry up to four entries
+// (framebuffer, xHCI BAR, GICD, GICR) instead of two, and unlike the
+// framebuffer/xHCI addresses seen on QEMU so far, real Parallels
+// hardware's GIC addresses are completely unconfirmed - nothing rules out
+// GICD and GICR needing two more distinct L0 indices on top of whatever
+// xHCI's BAR needs, and running out of slots here would silently leave a
+// device unmapped, then hard-fault the moment `gic.rs` touches it (this
+// kernel has no resumable EL1 synchronous-fault path - see
+// `exceptions.rs`'s module doc comment). Cheap to size generously: each
+// slot is one 4KB table.
+const MAX_EXTRA_L1_TABLES: usize = 4;
+static EXTRA_L1_TABLES: [Table; MAX_EXTRA_L1_TABLES] = [
+    Table(UnsafeCell::new([0; ENTRIES_PER_TABLE])),
+    Table(UnsafeCell::new([0; ENTRIES_PER_TABLE])),
+    Table(UnsafeCell::new([0; ENTRIES_PER_TABLE])),
+    Table(UnsafeCell::new([0; ENTRIES_PER_TABLE])),
+];
 
 // Two independent EL0 regions now, not one shared region split in half:
 // task 0's loaded-program region (loader.rs, arbitrary size, 2MB-aligned

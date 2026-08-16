@@ -42,6 +42,22 @@ Pulled from `docs/processes.md`'s "known rough edges" and `CLAUDE.md`'s
 running "next milestone" notes — real gaps, not yet a committed next
 phase:
 
+- **Diagnose the real-Parallels task-switch hang** — new, found while
+  closing the "Preemption on Parallels" item below. GIC/timer IRQ
+  delivery is conclusively confirmed working on real Parallels hardware
+  (a real, correctly-incrementing `uptime`, isolated via a
+  single-variable diagnostic - see `CLAUDE.md`'s "MADT/GICv3" section),
+  but the actual task switch (`tasks::on_tick`'s `Context` swap) hangs
+  the system outright the very first time it runs there - no exception
+  reported, keystrokes stop being echoed, indistinguishable from a dead
+  machine from the framebuffer console's write-only view. Currently
+  shipped disabled there (`exceptions.rs`'s `TASK_SWITCH_ENABLED`,
+  gated the same way `virtio_mmio_probe_safe` is). Leading unconfirmed
+  hypothesis: real hardware's `WFE` may be trapped/emulated by the host
+  hypervisor above this guest kernel in a way QEMU/TCG's never is - this
+  kernel's `nTWE`/`nTWI` bits only ever controlled the EL0->EL1 trap it
+  owns itself. Not yet tested; needs real hardware round trips to
+  investigate further.
 - ~~Confirm virtio-console on real Parallels hardware~~ — done, and the
   answer is no. Tested on real hardware: a full PCI device inventory
   (`pci::log_all_devices`, kept as a permanent diagnostic) shows no
@@ -115,16 +131,27 @@ phase:
   parsing (boot-protocol's fixed 8-byte layout assumed directly), no
   stall recovery on the interrupt endpoint specifically, only the first
   interrupt IN endpoint on a matching interface is ever configured.
-- **Preemption on Parallels** — `qemu_device_region_safe` disables
-  GIC/timer setup entirely there (see `CLAUDE.md`'s "take five"), since
-  the fixed low-1GB GICv2 addresses this project has only ever confirmed
-  via a QEMU devicetree dump are a different, real, confirmed-unsafe
-  QEMU-shaped convention on real hardware. Needs real interrupt-controller
-  discovery (ACPI MADT parsing, most likely) - Parallels almost certainly
-  uses GICv3, a materially different register interface from `gic.rs`'s
-  current GICv2 code (system-register-based CPU interface, redistributors
-  instead of a single distributor). A separate, substantial follow-up,
-  not yet started.
+- ~~Preemption on Parallels~~ — **half done.** Real ACPI MADT discovery
+  (`kernel/src/madt.rs`) replaced the old heuristic for GIC/timer setup,
+  and a GICv3 driver (`kernel/src/gicv3.rs`) is confirmed working on
+  real Parallels hardware - a genuine, correctly-incrementing `uptime`
+  there for the first time ever. But the *task switch* itself hangs the
+  first time it runs on real hardware (a new, separate, unresolved bug -
+  GIC/timer IRQ delivery is conclusively confirmed fine, isolated via a
+  single-variable diagnostic), so preemptive multitasking specifically
+  is still off on Parallels, gated behind `exceptions.rs`'s
+  `TASK_SWITCH_ENABLED`. Leading unconfirmed hypothesis: real hardware's
+  `WFE` may be trapped/emulated by the host hypervisor (Apple's own
+  virtualization layer, above this guest kernel entirely) in a way
+  QEMU/TCG's `WFE` never is - this kernel's `nTWE`/`nTWI` bits only ever
+  controlled the EL0->EL1 trap it owns, not whatever EL2 does above
+  that. See `CLAUDE.md`'s "MADT/GICv3" section for the full writeup,
+  including the two real GICv3 bugs found and fixed on QEMU first
+  (`GICR_IGROUPR0` Group-1 assignment, `GICD_CTLR`'s multi-bit enable)
+  before ever risking a Parallels round trip on them. Real next step:
+  diagnose the task-switch hang specifically - a genuinely new,
+  real-hardware-only mystery, not a continuation of this item's original
+  scope.
 - **Output redirection (`>`/`>>`)** — needs shell-level parsing this
   project doesn't have yet (splitting `cmd > file` into a command and a
   target). `cp` is done (see below); redirection is the one piece of

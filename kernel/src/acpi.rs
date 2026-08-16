@@ -49,6 +49,10 @@ pub enum DiscoveryError {
     BadXsdtSignature,
     /// Walked every XSDT entry; none had the SPCR signature.
     NoSpcr,
+    /// `find_table` walked every XSDT entry; none matched the requested
+    /// signature. `discover_pl011` maps this back to `NoSpcr` at its own
+    /// call site so its public error shape doesn't change.
+    TableNotFound,
     /// SPCR exists, but its console isn't in system memory (e.g. I/O port
     /// or PCI config space) — this driver only speaks memory-mapped PL011.
     UnsupportedAddressSpace,
@@ -71,9 +75,9 @@ struct Rsdp {
 }
 
 #[repr(C, packed)]
-struct SdtHeader {
-    signature: [u8; 4],
-    length: u32,
+pub(crate) struct SdtHeader {
+    pub(crate) signature: [u8; 4],
+    pub(crate) length: u32,
     revision: u8,
     checksum: u8,
     oem_id: [u8; 6],
@@ -111,16 +115,25 @@ const INTERFACE_TYPE_ARM_PL011: u8 = 0x03;
 const INTERFACE_TYPE_ARM_SBSA_GENERIC_UART: u8 = 0x0e;
 const INTERFACE_TYPE_ARM_SBSA_GENERIC_UART_2X: u8 = 0x0a;
 
-/// Parses the ACPI tables reachable from `rsdp` (if present) and resolves
-/// the SPCR table to a PL011-compatible UART base address. Safe to call
-/// either side of `exit_boot_services` — only reads plain memory, no UEFI
-/// service. Does not verify any ACPI checksum; trusts the firmware-provided
-/// pointer the same way devicetree discovery trusts the DTB pointer.
+/// Walks RSDP -> XSDT looking for a table whose header signature matches
+/// `signature` (e.g. `b"SPCR"`, `b"APIC"` — MADT's signature is `"APIC"`,
+/// its historical x86 name, not `"MADT"`). Returns a pointer to that
+/// table's own header (callers cast/parse from there). Shared by
+/// `discover_pl011` (SPCR) and `madt::discover` (MADT) — pulled out once a
+/// second real caller needed the identical walk, not speculatively.
+///
+/// Safe to call either side of `exit_boot_services` — only reads plain
+/// memory, no UEFI service. Does not verify any ACPI checksum; trusts the
+/// firmware-provided pointer the same way devicetree discovery trusts the
+/// DTB pointer.
 ///
 /// # Safety
 /// `rsdp`, if `Some`, must point to a valid ACPI RSDP that remains mapped
 /// for the lifetime of this call (true for the pointer `find_rsdp` returns).
-pub unsafe fn discover_pl011(rsdp: Option<*const u8>) -> Result<usize, DiscoveryError> {
+pub unsafe fn find_table(
+    rsdp: Option<*const u8>,
+    signature: &[u8; 4],
+) -> Result<*const u8, DiscoveryError> {
     let rsdp_ptr = rsdp.ok_or(DiscoveryError::NoRsdp)?;
     let rsdp = unsafe { ptr::read_unaligned(rsdp_ptr.cast::<Rsdp>()) };
     if &rsdp.signature != b"RSD PTR " {
@@ -142,21 +155,36 @@ pub unsafe fn discover_pl011(rsdp: Option<*const u8>) -> Result<usize, Discovery
     for i in 0..entry_count {
         let table_addr = unsafe { ptr::read_unaligned(entries_ptr.add(i)) } as *const u8;
         let header = unsafe { ptr::read_unaligned(table_addr.cast::<SdtHeader>()) };
-        if &header.signature != b"SPCR" {
-            continue;
+        if &header.signature == signature {
+            return Ok(table_addr);
         }
-
-        let spcr = unsafe { ptr::read_unaligned(table_addr.cast::<Spcr>()) };
-        if spcr.base_address.address_space_id != ACPI_ADDRESS_SPACE_SYSTEM_MEMORY {
-            return Err(DiscoveryError::UnsupportedAddressSpace);
-        }
-        return match spcr.interface_type {
-            INTERFACE_TYPE_ARM_PL011
-            | INTERFACE_TYPE_ARM_SBSA_GENERIC_UART
-            | INTERFACE_TYPE_ARM_SBSA_GENERIC_UART_2X => Ok(spcr.base_address.address as usize),
-            _ => Err(DiscoveryError::UnsupportedInterface),
-        };
     }
 
-    Err(DiscoveryError::NoSpcr)
+    Err(DiscoveryError::TableNotFound)
+}
+
+/// Parses the ACPI tables reachable from `rsdp` (if present) and resolves
+/// the SPCR table to a PL011-compatible UART base address. Safe to call
+/// either side of `exit_boot_services` — only reads plain memory, no UEFI
+/// service.
+///
+/// # Safety
+/// Same as [`find_table`].
+pub unsafe fn discover_pl011(rsdp: Option<*const u8>) -> Result<usize, DiscoveryError> {
+    let table_addr = match unsafe { find_table(rsdp, b"SPCR") } {
+        Ok(addr) => addr,
+        Err(DiscoveryError::TableNotFound) => return Err(DiscoveryError::NoSpcr),
+        Err(e) => return Err(e),
+    };
+
+    let spcr = unsafe { ptr::read_unaligned(table_addr.cast::<Spcr>()) };
+    if spcr.base_address.address_space_id != ACPI_ADDRESS_SPACE_SYSTEM_MEMORY {
+        return Err(DiscoveryError::UnsupportedAddressSpace);
+    }
+    match spcr.interface_type {
+        INTERFACE_TYPE_ARM_PL011
+        | INTERFACE_TYPE_ARM_SBSA_GENERIC_UART
+        | INTERFACE_TYPE_ARM_SBSA_GENERIC_UART_2X => Ok(spcr.base_address.address as usize),
+        _ => Err(DiscoveryError::UnsupportedInterface),
+    }
 }

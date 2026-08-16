@@ -7,6 +7,63 @@ what broke, how it was diagnosed), see `CLAUDE.md`; for *how* something
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## MADT/GICv3: real interrupt-controller discovery for Parallels - real IRQ delivery confirmed, task switching hit a new mystery
+
+**The goal:** replace `gic.rs`'s old QEMU-devicetree-derived GICv2
+addresses (already confirmed unsafe on real Parallels hardware, see
+"take five" in `CLAUDE.md`) with real ACPI MADT discovery, and add a
+GICv3 driver so Parallels - which almost certainly runs GICv3, not
+GICv2 - can actually reach it.
+
+**Delivered:** new `kernel/src/madt.rs` (MADT parsing: GICD/GICC/GICR
+structures, cross-checked against Linux's `actbl2.h`), `kernel/src/gicv3.rs`
+(a real GICv3 backend - system-register CPU interface, per-CPU
+redistributor discovery and wake-up), and `kernel/src/gic.rs` turned
+into a version-dispatch facade over `gicv2.rs`/`gicv3.rs` so `main.rs`/
+`exceptions.rs`'s call sites barely changed. Confirmed on QEMU two
+independent ways (a devicetree dump and the real MADT parse agreeing
+exactly, both for default GICv2 and a newly forced `-machine
+virt,gic-version=3`, `make run-gicv3`) before ever risking real
+hardware. Two real GICv3 bugs found and fixed on QEMU first - a PPI
+defaulting to Group 0 (FIQ) instead of Group 1 (IRQ) without an
+explicit `GICR_IGROUPR0` write, and `GICD_CTLR` needing more than
+GICv2's single enable bit - both cross-checked against Linux's own
+`gic_cpu_init`/`gic_dist_init`.
+
+**On real Parallels hardware:** MADT discovery confirmed clean and safe
+(`GIC V3, GICD @ 0x2410000, GICC/GICR @ 0x2500000`, genuinely different
+addresses from QEMU's - resolving whether Parallels' MADT describes an
+interrupt controller at all, previously an open question given its
+absent SPCR). GIC/timer IRQ delivery itself is conclusively confirmed
+working there too - a real, correctly-incrementing `uptime`
+(`533` -> `752` ticks in one observed run), isolated via a
+single-variable diagnostic (temporarily skipping just the task-switch
+call while leaving GIC/timer otherwise fully active).
+
+**A second, separate, real bug found in the process, not yet
+resolved:** the actual task switch (`tasks::on_tick`) hangs the system
+outright the first time it runs on real hardware - this exact
+interrupt-delivery-plus-context-swap combination had never executed on
+real hardware before (Parallels had no working GIC/timer at all until
+this milestone). Shipped in the safe state: GIC/timer fully enabled
+(real tick counting), task switching disabled on Parallels via a new
+`exceptions.rs` flag (`TASK_SWITCH_ENABLED`) - a strict improvement
+over before (`uptime` now genuinely counts instead of being stuck at 0)
+with zero regression risk, and zero change to QEMU's behavior (task
+switching retested end to end there, both GIC versions, no regressions).
+Full writeup, including the diagnostic technique and the leading
+unconfirmed hypothesis (real hardware's `WFE` possibly trapped by the
+host hypervisor in a way QEMU/TCG's never is), in `CLAUDE.md`'s
+"MADT/GICv3" section.
+
+**Made practical by a new discovery the same day:** Parallels Desktop's
+own CLI, `prlctl`, can script an entire real-hardware test round trip
+(boot, type via `send-key-event`, screenshot via `capture`) with no
+human watching the VM live - now `make test-parallels`
+(`scripts/test-parallels.sh`). Every real-hardware round trip in this
+milestone went through it. See `roadmap.md`'s "Testing infrastructure"
+section.
+
 ## USB HID keyboard driver: confirmed - real, physical keyboard input on real Parallels hardware, first time ever
 
 **The goal:** a real input path for Parallels, closing the gap the GOP

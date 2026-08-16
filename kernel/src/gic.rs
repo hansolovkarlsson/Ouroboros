@@ -1,80 +1,85 @@
-//! Minimal GICv2 (Generic Interrupt Controller) driver — just enough to
-//! enable one PPI (the timer tick, see `timer.rs`) and acknowledge/complete
-//! interrupts as they arrive.
-//!
-//! Addresses and GIC version are QEMU-shaped conventions, not discovered —
-//! same tradeoff already accepted for `mmu.rs`'s device region and every
-//! console address found so far this session (all QEMU-only, Parallels
-//! deferred). Confirmed for *this* QEMU install by dumping its internal
-//! devicetree (`qemu-system-aarch64 -machine virt,dumpdtb=...`, not
-//! anything our own kernel reads at boot) rather than assumed from memory:
-//! `intc@8000000 { compatible = "arm,cortex-a15-gic"; reg = <... 0x8000000
-//! ... 0x8010000 ...> }` — GICv2 (the `cortex-a15-gic` compatible string),
-//! distributor at 0x08000000, CPU interface at 0x08010000.
-//!
-//! Register offsets cross-checked against Linux's
-//! include/linux/irqchip/arm-gic.h rather than transcribed from memory,
-//! same discipline as `mmu.rs`'s descriptor bits.
+//! Version-dispatching facade over `gicv2.rs` (GICv2) and `gicv3.rs`
+//! (GICv3) — the real GIC version is now discovered at boot via
+//! `madt.rs`, not assumed, so this module exists to keep `main.rs`'s and
+//! `exceptions.rs`'s call sites (`init`/`enable_interrupt`/`acknowledge`/
+//! `end_of_interrupt`) exactly the same shape they were when this file
+//! *was* the GICv2 driver directly. `exceptions.rs`'s two call sites
+//! (`acknowledge`/`end_of_interrupt`, both inside the resumable IRQ path)
+//! don't change at all; `main.rs` gains one `configure` call ahead of the
+//! existing `init`/`enable_interrupt` pair — see CLAUDE.md's MADT/GICv3
+//! scoping notes for why a facade was chosen over matching
+//! `madt::GicVersion` at every call site instead (more churn for no real
+//! benefit, since every call site would need the match anyway).
 
-use core::ptr::{read_volatile, write_volatile};
+use core::cell::Cell;
 
-const GICD_BASE: usize = 0x0800_0000;
-const GICC_BASE: usize = 0x0801_0000;
+use crate::madt::{GicInfo, GicVersion};
+use crate::{gicv2, gicv3};
 
-const GICD_CTLR: usize = 0x000;
-const GICD_ISENABLER: usize = 0x100; // + 4 * (intid / 32)
+struct GicCell(Cell<Option<GicInfo>>);
 
-const GICC_CTLR: usize = 0x000;
-const GICC_PMR: usize = 0x004;
-const GICC_IAR: usize = 0x00c;
-const GICC_EOIR: usize = 0x010;
+// SAFETY: single-core, no preemption, no interrupts unmasked until after
+// `init` has run - same reasoning `console.rs`'s `ConsoleCell` already
+// documents for the identical pattern.
+unsafe impl Sync for GicCell {}
 
-const GICD_CTLR_ENABLE: u32 = 1 << 0;
-const GICC_CTLR_ENABLE: u32 = 1 << 0;
-const GICC_PMR_ALLOW_ALL: u32 = 0xff; // accept every priority
+static INFO: GicCell = GicCell(Cell::new(None));
 
-unsafe fn write_reg(base: usize, offset: usize, value: u32) {
-    unsafe { write_volatile((base + offset) as *mut u32, value) };
+/// Records which GIC this platform actually has, from `madt::discover`'s
+/// real MADT parse. Must be called once, before [`init`].
+pub fn configure(info: GicInfo) {
+    INFO.0.set(Some(info));
 }
 
-unsafe fn read_reg(base: usize, offset: usize) -> u32 {
-    unsafe { read_volatile((base + offset) as *const u32) }
+fn info() -> GicInfo {
+    INFO.0
+        .get()
+        .expect("gic:: called before gic::configure - main.rs should only reach this after a successful madt::discover")
 }
 
-/// Enables the distributor and this CPU's interface, with the priority
-/// mask wide open (every priority accepted) since nothing here juggles
-/// interrupt priorities yet.
+/// Enables the distributor and this CPU's interface. See
+/// `gicv2::init`/`gicv3::init` for what that means on each version.
 ///
 /// # Safety
-/// Must run after `mmu.rs`'s identity map is installed (GICD_BASE/
-/// GICC_BASE must be mapped) and before unmasking IRQ in DAIF.
+/// [`configure`] must have already been called with a real discovered
+/// `GicInfo`. Must run after `mmu.rs`'s identity map is installed (the
+/// discovered GICD/GICC/GICR addresses must be mapped) and before
+/// unmasking IRQ in DAIF.
 pub unsafe fn init() {
-    unsafe {
-        write_reg(GICD_BASE, GICD_CTLR, GICD_CTLR_ENABLE);
-        write_reg(GICC_BASE, GICC_PMR, GICC_PMR_ALLOW_ALL);
-        write_reg(GICC_BASE, GICC_CTLR, GICC_CTLR_ENABLE);
+    let info = info();
+    match info.version {
+        GicVersion::V2 => unsafe { gicv2::init(info.gicd_base as usize, info.gicc_base as usize) },
+        GicVersion::V3 => unsafe {
+            gicv3::init(
+                info.gicd_base as usize,
+                info.gicr_base as usize,
+                info.gicr_size as usize,
+            )
+        },
     }
 }
 
-/// Enables forwarding of `intid` (e.g. the timer PPI, 30) from the
-/// distributor to CPU interfaces.
+/// Enables forwarding of `intid` (e.g. the timer PPI, 30).
 ///
 /// # Safety
 /// Must run after [`init`].
 pub unsafe fn enable_interrupt(intid: u32) {
-    let reg_offset = GICD_ISENABLER + 4 * ((intid / 32) as usize);
-    let bit = 1u32 << (intid % 32);
-    unsafe { write_reg(GICD_BASE, reg_offset, bit) };
+    let info = info();
+    match info.version {
+        GicVersion::V2 => unsafe { gicv2::enable_interrupt(info.gicd_base as usize, intid) },
+        GicVersion::V3 => unsafe { gicv3::enable_interrupt(intid) },
+    }
 }
 
-/// Reads the highest-priority pending interrupt ID and acknowledges it
-/// (removing it from the pending set) — must be paired with [`end_of_interrupt`]
-/// once handled, or the GIC will never consider it complete.
+/// Reads the highest-priority pending interrupt ID and acknowledges it.
 ///
 /// # Safety
 /// Must run after [`init`], from IRQ-handling context.
 pub unsafe fn acknowledge() -> u32 {
-    unsafe { read_reg(GICC_BASE, GICC_IAR) }
+    match info().version {
+        GicVersion::V2 => unsafe { gicv2::acknowledge(info().gicc_base as usize) },
+        GicVersion::V3 => unsafe { gicv3::acknowledge() },
+    }
 }
 
 /// Signals that the interrupt `intid` (as returned by [`acknowledge`]) has
@@ -84,5 +89,8 @@ pub unsafe fn acknowledge() -> u32 {
 /// Must run after [`init`], with `intid` from a matching [`acknowledge`]
 /// call.
 pub unsafe fn end_of_interrupt(intid: u32) {
-    unsafe { write_reg(GICC_BASE, GICC_EOIR, intid) };
+    match info().version {
+        GicVersion::V2 => unsafe { gicv2::end_of_interrupt(info().gicc_base as usize, intid) },
+        GicVersion::V3 => unsafe { gicv3::end_of_interrupt(intid) },
+    }
 }
