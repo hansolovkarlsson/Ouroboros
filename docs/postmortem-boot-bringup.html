@@ -1,0 +1,603 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Boot Bring-Up Postmortem — Ouroboros</title>
+<meta name="description" content="Exception vectors, an MMU switch, GIC/timer bring-up, the EL0/syscall boundary, and a console-discovery saga on the way to a real ARM64 kernel on real Parallels hardware.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🖥️</text></svg>">
+<link rel="stylesheet" href="assets/site.css">
+</head>
+<body>
+
+<nav class="sitenav">
+  <div class="sitenav-inner">
+    <a class="sitenav-mark" href="index.html">ouroboros</a>
+    <div class="sitenav-links">
+      <a href="index.html">Home</a>
+      <a href="postmortem-boot-bringup.html" class="current">Boot bring-up</a>
+      <a href="postmortem-shell-filesystem.html">Shell &amp; filesystem</a>
+      <a href="postmortem-xhci-keyboard.html">xHCI keyboard</a>
+      <a href="https://github.com/hansolovkarlsson/Ouroboros">GitHub ↗</a>
+    </div>
+  </div>
+</nav>
+
+<div class="page">
+
+  <div class="kicker">Debugging postmortem · Ouroboros · part 1 of 3</div>
+
+  <h1 class="title small">From "it doesn't boot" to a real console: an ARM64 kernel bring-up postmortem</h1>
+  <p class="dek">
+    Exception vectors, an MMU switch, an interrupt controller, a real
+    EL0 boundary, and a console-discovery saga that tried and killed
+    three mechanisms and one whole driver before finding the one that
+    actually worked on real hardware.
+  </p>
+
+  <div class="bitstrip" role="img" aria-label="ESR_EL1 decoded: Exception Class 0x21 (Instruction Abort, same EL), fault status code 0x0F (Permission Fault, level 3)">
+    <div class="bit"><span class="val">31</span></div>
+    <div class="bit on"><span class="val">EC</span></div>
+    <div class="bit on"><span class="val">0x21</span></div>
+    <div class="bit"><span class="val">…</span></div>
+    <div class="bit"><span class="val">…</span></div>
+    <div class="bit on"><span class="val">IFSC</span></div>
+    <div class="bit on"><span class="val">0x0F</span></div>
+    <div class="bit"><span class="val">0</span></div>
+  </div>
+  <p class="bitstrip-caption">the exception-vector table's own first fault, decoded by hand — page mapped, just not executable</p>
+
+  <nav class="trilogy">
+    <a href="#" class="current" aria-current="page">1 · Boot bring-up</a>
+    <a href="postmortem-shell-filesystem.html">2 · Shell &amp; filesystem</a>
+    <a href="postmortem-xhci-keyboard.html">3 · xHCI keyboard</a>
+  </nav>
+
+  <div class="companion">
+    <span class="companion-icon">⌨️</span>
+    <span>This is the first of three companion pieces — <a href="postmortem-shell-filesystem.html">the shell &amp; filesystem postmortem</a> covers the disk-backed userland shell built on top of this arc, and <a href="postmortem-xhci-keyboard.html">the xHCI keyboard postmortem</a> covers the USB input driver built on top of both.</span>
+  </div>
+
+  <article>
+
+    <p>
+      This is a write-up of the earlier stretch of work getting
+      <a href="https://github.com/hansolovkarlsson/Ouroboros">Ouroboros</a>,
+      a from-scratch ARM64 microkernel, from "UEFI hands us control" to a
+      genuinely stable, interactive foundation: exception handling that
+      survives a real fault, an MMU running on the kernel's own page
+      tables instead of firmware's, a timer-driven preemption tick, a
+      real EL0/syscall boundary, and — the part that took the most
+      real-hardware round trips — an actual console on real
+      Parallels-on-Apple-Silicon hardware, after three separate
+      discovery mechanisms and one whole driver turned out to be dead
+      ends.
+    </p>
+
+    <p>
+      Like the companion pieces above, this is kept separate from the
+      project's own internal history because most of what's here isn't
+      really Ouroboros-specific. If you're bringing up your own
+      bare-metal ARM64 kernel and something works fine under an emulator
+      but not on real hardware, or your exception vector table faults
+      the instant you jump to it, or your MMU switch hangs forever right
+      after you flip the translation table base register — there's a
+      real chance one of these is your bug too.
+    </p>
+
+    <h2>The recurring shape of these bugs</h2>
+
+    <p>Almost everything below falls into one of two buckets:</p>
+
+    <ul>
+      <li>
+        <strong>"It compiles and it should work" wasn't good enough.</strong>
+        Several of these were verified correct by hand, cross-checked
+        against Linux's own kernel headers, and still didn't work —
+        because the actual bug was one level below where the reasoning
+        was happening: a linker section attribute, a compiler's
+        alignment ceiling, a hypervisor's device emulation policy.
+      </li>
+      <li>
+        <strong>An emulator is a permissive host; real hardware is not.</strong>
+        A hardcoded address that's merely wrong on an emulator quietly
+        does nothing. The same wrong address on real hardware can take
+        an entire VM down. More than one fix below exists specifically
+        because "confirmed on the emulator" turned out not to mean
+        "confirmed."
+      </li>
+    </ul>
+
+    <h2>Exception vectors: a linker section name that silently wasn't executable</h2>
+
+    <p>
+      <strong>Symptom:</strong> a minimal AArch64 exception vector
+      table, installed right after leaving UEFI boot services, faulted
+      the instant any exception tried to reach it — including the
+      deliberate test fault used to verify it worked at all.
+    </p>
+
+    <p>
+      Everything <em>looked</em> right: the table linked without error,
+      the vector base register read back exactly the address it was set
+      to, the assembly itself was correct. And yet:
+    </p>
+
+    <div class="panel">
+      <div class="panel-tab"><span>exceptions.rs</span><span>first real fault</span></div>
+      <pre><code>ESR_EL1 decoded: EC <span class="hl">0x21</span> (Instruction Abort, same EL)
+                 IFSC <span class="hl">0x0F</span> (Permission Fault, level 3)</code></pre>
+    </div>
+
+    <p>
+      The page the vector table lived on existed and was mapped — just
+      not executable, which is a permissions fault a page-not-present
+      bug would never produce, and easy to misread as "my MMU setup is
+      wrong" rather than "my linker script is wrong."
+    </p>
+
+    <p>
+      <strong>Root cause:</strong> the vector table's assembly lived in
+      a custom section name, on the reasonable assumption that a name
+      starting with the standard code-section prefix would inherit the
+      usual executable treatment. It doesn't, at least not reliably on
+      this project's PE/COFF-targeting toolchain: the backend infers
+      executable-section characteristics from <em>exact</em>, recognized
+      section names, not prefixes. An unrecognized custom name gets
+      emitted as a plain, non-executable data section — readable,
+      present at the right address, and unusable as code.
+    </p>
+
+    <p>
+      <strong>Fix:</strong> use the literal standard section name
+      directly, not a custom one.
+    </p>
+
+    <p>
+      <strong>How this was actually verified,</strong> not just
+      "believed fixed": a deliberate fault at a known-unmapped address,
+      cross-referenced against the emulator's own internal interrupt
+      trace. Before the fix, the trace showed the correct initial
+      dispatch into the vector table, immediately followed by an endless
+      identical fault at the vector table's own address — a fault loop,
+      since jumping into a non-executable handler immediately re-faults.
+      That's the same failure shape separately observed taking down real
+      hardware entirely (see below) — a genuinely useful pattern: an
+      infinite tight fault loop, rather than one reported fault, often
+      means the <em>handler itself</em> is unreachable.
+    </p>
+
+    <div class="lesson">
+      <span class="lesson-label">Lesson</span>
+      <p>
+        When a linker/section-attribute question is in play, don't
+        trust "it links without error." Verify the actual runtime
+        property you need — executable, in this case — by deliberately
+        exercising it, not by inspecting the successful build output.
+      </p>
+    </div>
+
+    <h2>The MMU switch: matching firmware's own translation-table starting level</h2>
+
+    <p>
+      <strong>Symptom:</strong> replacing firmware's translation tables
+      with the kernel's own — same technique either way, just swapping
+      which tables the base register points at while the MMU stays
+      continuously enabled — hard-faulted immediately after the switch:
+      a permission fault at translation level 2 on the very next
+      instruction, then an identical fault on the exception vector table
+      itself, looping forever.
+    </p>
+
+    <p>
+      The first version used a single top-level table sized for a
+      39-bit input address space — architecturally legal, and every
+      table entry and every relevant attribute bit was hand-verified
+      against Linux's own page-table headers, independently re-derived
+      from the real runtime register values with a throwaway decode
+      script. Removing execute-permission bits entirely changed nothing.
+      All the reasoning checked out; the kernel still faulted the
+      instant it ran under its own tables.
+    </p>
+
+    <p>
+      <strong>Root cause, confirmed by direct A/B test with everything
+      else held constant:</strong> firmware had configured its own
+      tables for a larger, 44-bit input address space, which requires an
+      extra table level before the one this kernel had built. Switching
+      to a table hierarchy of a <em>different depth</em> than firmware's
+      own — while the MMU stayed continuously enabled the whole time, no
+      disable/re-enable step in between — appears not to be tolerated,
+      at least on this CPU model, even when every individual attribute
+      bit is correct.
+    </p>
+
+    <p>
+      <strong>Fix:</strong> match firmware's starting level exactly,
+      rather than simplifying to a smaller, "sufficient" hierarchy. The
+      rest of the original reasoning had been right all along.
+    </p>
+
+    <div class="lesson">
+      <span class="lesson-label">Lesson</span>
+      <p>
+        A live base-register switch, with the MMU never actually
+        disabled, may be far less forgiving about <em>structural</em>
+        changes — starting level, table depth — than about attribute
+        changes, even though both are "just a table walk" on paper. Read
+        back and match firmware's own starting configuration before
+        assuming a cleaner, smaller table structure will work.
+      </p>
+    </div>
+
+    <h2>An honestly unresolved mystery: EL0 couldn't share a page with running EL1 code</h2>
+
+    <p>
+      Not every bug in this arc got a clean root cause — and that's
+      worth recording too, since routing around an unexplained failure
+      is sometimes the right call, not a failure of diagnosis.
+    </p>
+
+    <p>
+      <strong>The goal:</strong> let user-mode code execute out of the
+      same RAM block the kernel's own privileged code was actively
+      running from, just with the page permissions widened to allow
+      user-mode access too.
+    </p>
+
+    <p>
+      <strong>What happened:</strong> an immediate, identical-looking
+      hard fault — a permission fault on the very first instruction
+      fetch after the table switch, in exactly the same shape as the bug
+      above.
+    </p>
+
+    <p>
+      <strong>What was ruled out</strong>, each by a direct, repeatable
+      test, not assumption: the permission bit's exact position
+      (cross-checked three separate ways); an execute-never bit (removing
+      it entirely changed nothing); a newer architectural protection
+      feature (this CPU is too old to implement it at all — confirmed
+      directly by attempting the raw register access and getting an
+      "unknown instruction" trap, not a permission effect); shareability
+      attributes and instruction-cache invalidation; and page
+      granularity (rebuilding the same region at a finer block size
+      changed nothing). A read-only control case correctly produced a
+      <em>data</em> abort instead of an <em>instruction</em> abort —
+      solid evidence the permission bits were being interpreted
+      correctly in general; only this one specific combination faulted,
+      which architecturally shouldn't be possible at all.
+    </p>
+
+    <p>
+      <strong>Resolution, not explanation:</strong> user-mode code was
+      moved into a genuinely <em>separate</em>, dedicated memory region,
+      isolated from any actively-executing privileged code, with its own
+      page-table entries. That worked immediately and has been reliable
+      ever since. The underlying "why" was never found.
+    </p>
+
+    <div class="lesson mystery">
+      <span class="lesson-label">Lesson — an honest one</span>
+      <p>
+        When a change that should be architecturally legal keeps
+        producing an architecturally-shouldn't-be-possible fault, and
+        you've ruled out every documented cause you can find, changing
+        the <em>shape</em> of what you're doing — isolate instead of
+        widen — can be the right call even without a root cause. Write
+        the mystery down as a mystery, rather than implying it was
+        understood.
+      </p>
+    </div>
+
+    <h2>GIC and the timer tick: confirmed addresses, not textbook ones</h2>
+
+    <p>
+      Bringing up a periodic preemption tick needed real hardware
+      addresses for the interrupt controller. Rather than use
+      commonly-quoted addresses from memory or documentation, the actual
+      values were pinned down by dumping the specific emulator build's
+      own internal hardware description and decoding it directly — the
+      same discipline that turned out to matter enormously for the
+      console-discovery work below. An address "everyone knows" for one
+      specific emulator build is still a guess, not a fact, the moment
+      you're not on that exact build or that exact hardware.
+    </p>
+
+    <p>
+      The interrupt path itself needed a real architectural change, not
+      just new addresses: every exception vector before this one only
+      ever needed to <em>report and halt</em> — diverge, never return. A
+      periodic tick has to <em>resume</em> whatever it interrupted,
+      which meant a full register-save/restore trampoline and a normal
+      function call into the handler instead of a diverging jump.
+      Verified as genuinely sustained, not just "printed once": a
+      20-plus-second run producing correctly-spaced ticks with no drift
+      or corruption, cross-checked against the emulator's own internal
+      exception trace showing zero aborts across the entire run.
+    </p>
+
+    <h2>A compiler/toolchain ceiling, found by bisection: 8KB, not 2MB</h2>
+
+    <p>
+      Giving user-mode code its own isolated region meant that region
+      needed to be a compile-time-aligned static — and the original plan
+      was a comfortable, round 2MB alignment. That triggered a genuine
+      compiler crash on this specific PE/COFF-targeting toolchain.
+      Rather than accept "2MB doesn't work" as the final answer, the
+      actual limit was found by bisection: section alignment tops out at
+      exactly 8KB — not a round number, not documented anywhere obvious,
+      just the real ceiling. The isolated region was sized to fit under
+      it.
+    </p>
+
+    <p>
+      (This ceiling later disappeared on its own, as a side effect of an
+      unrelated design change — once user programs were loaded from disk
+      at runtime instead of compiled into the kernel image, they no
+      longer needed a compile-time-aligned static at all. A small
+      reminder that a hard-won constraint can become moot for reasons
+      that have nothing to do with solving it directly.)
+    </p>
+
+    <h2>A quieter bug: idle-wait traps back to the kernel by default</h2>
+
+    <p>
+      Once user-mode code could actually run, its idle loop immediately
+      trapped back into privileged mode instead of actually idling. Root
+      cause: a control register default that makes a lower-privilege
+      idle-wait instruction trap up, rather than execute directly — a
+      control completely unrelated to page tables or the isolation work
+      happening at the same time, easy to miss if you assume every
+      user-mode fault must be a permissions issue. Diagnosed directly
+      from the trapped exception's own cause code, and fixed by clearing
+      the relevant control bits before ever dropping to user mode.
+    </p>
+
+    <h2>Console discovery: three real mechanisms, three confirmed dead ends, in order</h2>
+
+    <p>
+      With the kernel itself stable, the next real problem was output:
+      how do you find a serial console on hardware you don't control the
+      description of? Three standard discovery mechanisms were tried, in
+      order, each logging exactly why it failed before the next was
+      attempted — genuinely useful discipline, since "no console found"
+      alone tells you nothing about which of several possible causes is
+      real.
+    </p>
+
+    <ol>
+      <li>
+        <strong>A devicetree blob</strong>, looked up via the standard
+        UEFI configuration table. Confirmed dead on <em>both</em> the
+        emulator and real hardware — both report none at all, because
+        both platforms describe their hardware via ACPI instead.
+      </li>
+      <li>
+        <strong>ACPI's serial port console table</strong> (a hand-rolled
+        parser — not a full ACPI library, since this only needs a
+        handful of fixed-offset struct reads). Confirmed
+        <em>working</em> on the emulator, first try — real discovery,
+        resolving the exact address a hardcoded fallback used to
+        assume. Confirmed <em>dead</em> on real hardware, and not from a
+        parsing bug: the higher-level ACPI tables both parsed
+        successfully there too (so ACPI itself is present and
+        well-formed), there is simply no console table entry among the
+        platform's own tables at all — tested with and without a serial
+        port explicitly configured in the VM's own settings, no
+        difference either way.
+      </li>
+      <li>
+        <strong>PCI enumeration</strong> for a classic UART-family
+        serial controller — a completely different piece of hardware
+        from what the other two mechanisms look for. Confirmed dead on
+        both platforms too.
+      </li>
+    </ol>
+
+    <p>
+      <strong>A real, hard-earned lesson living inside this
+      discipline:</strong> there used to be a hardcoded fallback
+      address, used whenever discovery failed, on the theory that a
+      wrong guess beats no console at all. It was removed after direct
+      confirmation that it hard-crashes real hardware — nothing is
+      mapped at that emulator-shaped address on the real platform's
+      virtual chipset, so the write faults, and with no exception
+      vectors installed yet at the point this ran, that fault had
+      nowhere to go and took the entire VM down.
+    </p>
+
+    <div class="lesson">
+      <span class="lesson-label">Lesson</span>
+      <p>
+        No confirmed address means no console output, full stop, never
+        a guess. All three discovery failures above being reported
+        cleanly, without crashing anything, is itself a genuine
+        confirmation that this discipline was working as intended.
+      </p>
+    </div>
+
+    <h2>virtio-console: a real, working driver — confirmed not to be the answer here</h2>
+
+    <p>
+      Research suggested this class of Apple Silicon virtualization
+      exposes its devices via the same convention a common open-source
+      emulator uses, and that a guest should expect a virtio-based
+      console rather than a classic UART. A full driver was built
+      against this lead and confirmed working end-to-end on the
+      emulator — every boot message reaching a real host-side output,
+      confirmed byte-for-byte.
+    </p>
+
+    <p>
+      <strong>Confirmed, directly, not to be what real hardware
+      uses.</strong> A permanent bus-enumeration diagnostic was built
+      specifically to answer this on real hardware, and it found real
+      virtio devices present — but only for networking, never anything
+      matching a virtio-console device over either transport this
+      project can drive. The one remaining unexplained device on the bus
+      carries the platform vendor's own PCI vendor ID with an
+      unclassified device class — almost certainly the real serial
+      mechanism, and almost certainly proprietary and undocumented.
+      Reverse-engineering an undocumented device was considered and
+      explicitly declined as open-ended with no guaranteed payoff — a
+      real, deliberate scope decision, not an oversight.
+    </p>
+
+    <h2>The framebuffer console: the real answer, and four more real hardware bugs</h2>
+
+    <p>
+      With every byte-stream mechanism confirmed dead, the fallback that
+      actually worked was a standard, fully-specified graphics protocol
+      needing no address guessing at all — query the current display
+      mode and write text directly into the framebuffer. Getting this
+      working on real hardware took five real-hardware test rounds and
+      found four more real, independently-confirmed bugs.
+    </p>
+
+    <h3>Bug: opening the display protocol exclusively silently disconnects firmware's own console</h3>
+
+    <p>
+      <strong>Symptom:</strong> on the first real-hardware test, boot
+      progressed normally right up through device enumeration — and then
+      simply stopped. No crash, no further output, not even this
+      module's own unconditional success/failure log line.
+    </p>
+
+    <p>
+      <strong>Root cause:</strong> the graphics protocol was being
+      opened in exclusive mode, which — per the protocol's own
+      documented semantics — forcibly disconnects any other driver
+      currently holding it. Firmware's own boot-time text console was
+      still holding that exact protocol to render the very screen the
+      test was being watched on, so the instant this code ran, it
+      silently disconnected the visible console before a single further
+      line could print. An emulator-based test never caught this,
+      because that test ran fully headless — there was no console driver
+      attached in the first place, so nothing to disconnect.
+    </p>
+
+    <p>
+      <strong>Fix:</strong> open the protocol read-only, non-exclusive —
+      this code only ever needs to query the current mode and
+      framebuffer address once.
+    </p>
+
+    <h3>Bug: a later discovery step froze the boot before any console existed to report through</h3>
+
+    <p>
+      Once the bug above was fixed, discovery and mapping worked — but
+      the boot froze solid before reaching anything visibly working.
+      Reordering the fallback chain (try the now-proven framebuffer path
+      before a still-unproven one) didn't just work around this — it got
+      a console installed <em>before</em> the freeze, which meant the
+      next attempt could finally see what was actually happening.
+    </p>
+
+    <h3>Bug: a confirmed real bus fault reading a fixed, unconfirmed device address</h3>
+
+    <p>With a console now live to report through, the exact failure became visible directly:</p>
+
+    <div class="panel">
+      <div class="panel-tab"><span>exceptions.rs</span><span>real hardware</span></div>
+      <pre><code>ESR_EL1 decoded: EC   <span class="hl">0x25</span>  (Data Abort, same EL)
+                 DFSC <span class="hl">0x10</span>  (Synchronous External abort —
+                            a real bus fault, not permission/mapping)
+FAR_EL1: matched a fixed device-discovery scan address exactly</code></pre>
+    </div>
+
+    <p>
+      <strong>Root cause:</strong> a device-discovery scan reads a fixed
+      set of addresses looking for a "magic value" marking a populated
+      device slot — a convention confirmed correct on the emulator by
+      directly peeking those addresses through its own monitor interface
+      before any driver code was written. What had never been verified
+      was what an <em>unpopulated</em> slot does on hardware that isn't
+      the emulator: the working assumption — never actually tested — was
+      "reads back as zero." On real hardware, the very first probe
+      address instead produced a genuine external bus abort. Real
+      hardware objects loudly to a read targeting nothing, where the
+      emulator's software model just returns a pattern as a courtesy.
+    </p>
+
+    <p>
+      <strong>Fix:</strong> gate every caller of this scan behind a
+      heuristic — only attempt it on platforms where a byte-stream
+      console was already found through one of the confirmed-safe
+      discovery mechanisms above, the only platform shape this scan has
+      ever actually been proven safe on.
+    </p>
+
+    <h3>Bug: the identical fault, at a different address — a structural finding, not a second instance</h3>
+
+    <p>
+      Once the scan above was gated off, the boot progressed further and
+      hit a <em>second</em>, differently-addressed instance of the exact
+      same fault signature — this time matching the interrupt
+      controller's own fixed, "well-known for this emulator" base
+      address.
+    </p>
+
+    <p>
+      <strong>The real significance:</strong> this wasn't just a second
+      bug to patch — it was proof that the entire convention of trusting
+      a fixed, low-address, emulator-shaped location for
+      <em>any</em> device is unsafe on real hardware, not just the one
+      device that happened to be tried first. The timer itself turned
+      out to be architecturally exempt — it's accessed purely through
+      CPU registers, never memory-mapped I/O at all — but the interrupt
+      controller depended on the same unconfirmed convention.
+    </p>
+
+    <p>
+      <strong>Fix:</strong> broadened the same safety gate to cover
+      interrupt-controller and timer setup as well, accepting no
+      preemptive multitasking on this platform as a real, known,
+      documented consequence.
+    </p>
+
+    <p>
+      <strong>The payoff:</strong> the very next real-hardware test
+      reached the actual goal of this entire arc — a live, rendering,
+      prompt-displaying shell on real hardware, for the first time in
+      the project's history.
+    </p>
+
+    <h2>Techniques that generalized well</h2>
+
+    <ul class="techniques">
+      <li><strong>When a fault is a permission fault, not a translation fault, look one level up the stack</strong> — a linker section attribute, a page permission bit, something about the mapping rather than whether it exists at all.</li>
+      <li><strong>A fault loop usually means the handler itself is unreachable</strong>, not that the underlying condition is unusual — worth recognizing as its own distinct failure shape.</li>
+      <li><strong>Re-derive register values independently before trusting them</strong>, even ones already checked once — a second, differently-sourced derivation catches transcription mistakes a single careful read-through won't.</li>
+      <li><strong>Don't trust an address "everyone knows" for one specific emulator build.</strong> Dumping and decoding that exact build's own hardware description, every time, is what actually made the addresses reliable.</li>
+      <li><strong>A permissive host and a strict one will disagree specifically about invalid accesses.</strong> Treat "confirmed on the emulator" as real but incomplete, not final.</li>
+      <li><strong>When you genuinely exhaust the documented explanations, changing the shape of the problem is a legitimate resolution</strong> — and worth writing down as an unresolved mystery rather than quietly implying it was understood.</li>
+    </ul>
+
+    <h2>Where this ended up</h2>
+
+    <p>
+      A kernel that survives a real fault and reports it usefully
+      instead of just disappearing; an MMU running on its own tables,
+      matching real discovered RAM rather than a hardcoded range; a
+      genuine preemption tick; a real user-mode/syscall boundary; and,
+      after three dead-end discovery mechanisms and one dead-end driver,
+      a real, live, interactive console on real
+      Parallels-on-Apple-Silicon hardware — the actual foundation
+      everything in the later work was built on top of: turning that
+      bare prompt into a <a href="postmortem-shell-filesystem.html">real,
+      disk-backed userland shell</a>, and eventually,
+      <a href="postmortem-xhci-keyboard.html">real keyboard input</a>
+      reaching it.
+    </p>
+
+  </article>
+
+  <footer class="site-footer">
+    <span>Ouroboros — an ARM64 microkernel, written from scratch in Rust</span>
+    <a href="https://github.com/hansolovkarlsson/Ouroboros">github.com/hansolovkarlsson/Ouroboros</a>
+  </footer>
+
+</div>
+</body>
+</html>

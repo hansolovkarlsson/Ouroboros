@@ -1,0 +1,506 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>xHCI Keyboard Postmortem — Ouroboros</title>
+<meta name="description" content="Five real, confirmed hardware bugs found bringing USB keyboard input to a from-scratch ARM64 kernel on real Parallels-on-Apple-Silicon hardware.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>⌨️</text></svg>">
+<link rel="stylesheet" href="assets/site.css">
+</head>
+<body>
+
+<nav class="sitenav">
+  <div class="sitenav-inner">
+    <a class="sitenav-mark" href="index.html">ouroboros</a>
+    <div class="sitenav-links">
+      <a href="index.html">Home</a>
+      <a href="postmortem-boot-bringup.html">Boot bring-up</a>
+      <a href="postmortem-shell-filesystem.html">Shell &amp; filesystem</a>
+      <a href="postmortem-xhci-keyboard.html" class="current">xHCI keyboard</a>
+      <a href="https://github.com/hansolovkarlsson/Ouroboros">GitHub ↗</a>
+    </div>
+  </div>
+</nav>
+
+<div class="page">
+
+  <div class="kicker">Debugging postmortem · Ouroboros · part 3 of 3</div>
+
+  <h1 class="title">Getting a USB keyboard working on Parallels (Apple&nbsp;Silicon)</h1>
+  <p class="dek">
+    Five real, confirmed hardware bugs found bringing keyboard input to a
+    from-scratch ARM64 kernel — none of them visible on the software
+    emulator this project develops against every day.
+  </p>
+
+  <div class="bitstrip" role="img" aria-label="ESR_EL1 = 0x96000004, decoded: Exception Class 0x25 (Data Abort), fault status code 0x04 (Translation fault, level 0)">
+    <div class="bit"><span class="val">31</span></div>
+    <div class="bit on"><span class="val">EC</span></div>
+    <div class="bit on"><span class="val">0x25</span></div>
+    <div class="bit"><span class="val">…</span></div>
+    <div class="bit"><span class="val">…</span></div>
+    <div class="bit on"><span class="val">DFSC</span></div>
+    <div class="bit on"><span class="val">0x04</span></div>
+    <div class="bit"><span class="val">0</span></div>
+  </div>
+  <p class="bitstrip-caption">ESR_EL1 = 0x96000004 — one of several exceptions decoded by hand along the way</p>
+
+  <nav class="trilogy">
+    <a href="postmortem-boot-bringup.html">1 · Boot bring-up</a>
+    <a href="postmortem-shell-filesystem.html">2 · Shell &amp; filesystem</a>
+    <a href="#" class="current" aria-current="page">3 · xHCI keyboard</a>
+  </nav>
+
+  <div class="companion">
+    <span class="companion-icon">🖥️</span>
+    <span>This is the last of three companion pieces — <a href="postmortem-boot-bringup.html">the boot bring-up postmortem</a> covers the exception vectors, MMU, and console-discovery work everything here sits on top of, and <a href="postmortem-shell-filesystem.html">the shell &amp; filesystem postmortem</a> covers the disk-backed userland shell this driver's keystrokes actually reach.</span>
+  </div>
+
+  <article>
+
+    <p>
+      This is a write-up of one day's work getting a real, physical USB
+      keyboard talking to <a href="https://github.com/hansolovkarlsson/Ouroboros">Ouroboros</a>,
+      a from-scratch ARM64 microkernel, running on Parallels Desktop on
+      Apple Silicon. It's kept separate from this project's own historical
+      record because the bugs here aren't really Ouroboros-specific —
+      they're the kind of thing anyone writing a bare-metal USB/xHCI
+      driver and testing it against a real hypervisor is likely to run
+      into, and there wasn't an existing write-up covering them. If
+      you're building your own OS and your keyboard driver "sort of"
+      works — enumerates fine, sends what look like correct commands, but
+      you get garbage or silence back — some of this may save you a day
+      of your own.
+    </p>
+
+    <p>
+      Five real, confirmed bugs, each found by direct evidence — register
+      dumps, decoded exception registers, byte-for-byte comparisons —
+      rather than guessing. In order: a PCI Command register bit that
+      looked like a platform quirk until it wasn't; real PCIe firmware
+      panicking on a config-space write a software emulator tolerated
+      silently; a physical PCI address landing outside a simplifying
+      assumption baked into our own page tables; a whole class of USB
+      request silently going nowhere; and a working driver reading the
+      wrong physical device.
+    </p>
+
+    <h2>Why this was hard to see coming</h2>
+
+    <p>
+      Ouroboros develops primarily against QEMU, because it's fast to
+      iterate against and fully scriptable. Real hardware testing — in
+      this case, Parallels Desktop running the guest on Apple Silicon —
+      happens periodically, by a human, and each round trip costs real
+      wall-clock time: rebuild, re-image a disk, boot the VM, look at the
+      screen, report back. That asymmetry matters: QEMU is where you can
+      iterate fast and be wrong nine times before breakfast; real
+      hardware is where you find out that some of your "confirmed" fixes
+      were confirmed against the wrong thing.
+    </p>
+
+    <p>
+      Every one of the five bugs below is invisible on QEMU. Four of them
+      worked correctly there on the first try — which is exactly the
+      trap: a driver that passes its only automated-feeling test can
+      still be wrong in ways that only real, spec-compliant (or
+      spec-<em>non</em>-compliant) hardware will show you.
+    </p>
+
+    <blockquote class="aside">
+      <span class="aside-label">Aside — why there's no serial log for any of this</span>
+      <p>
+        If you're used to <code class="inline">dmesg</code>-driving your
+        bring-up, the biggest practical obstacle here isn't any single
+        bug — it's that this guest has no working byte-stream console on
+        Parallels at all. The only console that works post-boot-services
+        is a raw framebuffer text console: write-only, and the only thing
+        there is to look at. Every diagnostic technique below is shaped
+        by that constraint — nothing printed during UEFI boot services is
+        ever visible again once the framebuffer console clears the screen
+        and takes over, so anything you want visible <em>after</em> a
+        crash has to be re-printed through the post-boot console, not
+        just logged once during discovery. More than one debugging round
+        in this project was extended by a day purely because a useful
+        line had already scrolled off-screen by the time a crash happened.
+      </p>
+    </blockquote>
+
+    <h2>Bug 1 — the Command register bit that wasn't where we thought</h2>
+
+    <p>
+      <strong>Symptom:</strong> after discovering the xHCI controller's
+      PCI BAR and writing what we believed was "enable Memory Space + Bus
+      Master" to its PCI Command register, every register read through
+      that BAR came back as <code class="inline">0xffffffff</code> — the
+      standard PCI "nothing responds here" pattern — on both QEMU and
+      real Parallels hardware.
+    </p>
+
+    <p>
+      <strong>The trap:</strong> this presents as a platform problem, not
+      a code problem. On QEMU specifically, the controller's BAR really
+      was completely unassigned by firmware, so we built and shipped a
+      whole BAR-self-assignment routine before ever suspecting the
+      <em>enable</em> bit itself was wrong. Wrong write width, wrong
+      access granularity — both got tested and ruled out first, because
+      they sounded more plausible than "you transcribed a bit position
+      wrong."
+    </p>
+
+    <p>
+      <strong>How it was found:</strong> a diagnostic printing the
+      Command register's value before and after our own write, re-printed
+      through the post-boot console specifically. One real test produced:
+    </p>
+
+    <div class="panel">
+      <div class="panel-tab"><span>xhci diagnostic</span><span>Parallels · real hardware</span></div>
+      <pre><code>PCI command register <span class="dim">0x0010</span> -&gt; <span class="hl">0x0015</span></code></pre>
+    </div>
+
+    <p>
+      <code class="inline">0x0010</code> = bit 4 set (an unrelated bit,
+      firmware's own default). <code class="inline">0x0015</code> =
+      <code class="inline">0b10101</code> — bits 0, 2, and 4. Bit 2 is
+      Bus Master Enable, correctly set. But bit 0 is
+      <strong>I/O Space Enable</strong> — Memory Space Enable is bit
+      <strong>1</strong>. The constant in our driver:
+    </p>
+
+    <div class="panel">
+      <div class="panel-tab"><span>pci.rs</span><span>before</span></div>
+      <pre><code><span class="dim">// WRONG — this is I/O Space Enable, not Memory Space Enable</span>
+const CMD_MEMORY_SPACE: u16 = 1 &lt;&lt; <span class="hl">0</span>;
+const CMD_BUS_MASTER:   u16 = 1 &lt;&lt; 2; <span class="dim">// correct</span></code></pre>
+    </div>
+
+    <p>
+      An off-by-one, in the literal sense — bit 0 vs. bit 1 — sitting in
+      a constant that had been reasoned about half a dozen times without
+      anyone re-deriving it from the PCI spec's actual bit table. An
+      xHCI controller has no I/O-space BAR to enable at all, so this bit
+      was, from the device's perspective, meaningless — we were never
+      enabling the one bit that would let a memory-mapped BAR respond to
+      anything.
+    </p>
+
+    <div class="lesson">
+      <span class="lesson-label">Lesson</span>
+      <p>
+        When a register write "succeeds" — no error, readback matches
+        what you wrote — but has no observable effect, re-derive the bit
+        positions you're relying on from the spec table directly, by
+        hand, before looking anywhere else. A successful write of the
+        <em>wrong bit</em> looks, from software, exactly like every other
+        kind of "nothing happened."
+      </p>
+    </div>
+
+    <h2>Bug 2 — real firmware panics where emulation just shrugs</h2>
+
+    <p>
+      <strong>Symptom:</strong> an early version of the driver, on real
+      Parallels hardware, didn't produce a kernel crash or exception
+      report — the whole VM aborted, with a hypervisor-level crash dialog.
+    </p>
+
+    <p>The crash report, from Parallels' own hypervisor log:</p>
+
+    <div class="panel">
+      <div class="panel-tab"><span>libMonitorArm.dylib</span><span>crash log</span></div>
+      <pre><code>mon.abort.message = <span class="hl">PANIC@11.28 UEFI-exception-ArmPciCpuIo2Dxe.dll</span></code></pre>
+    </div>
+
+    <p>
+      <code class="inline">ArmPciCpuIo2Dxe.dll</code> is the EDK2
+      firmware driver implementing low-level CPU I/O access
+      <em>for PCI config space itself</em> — underneath the higher-level
+      protocol our own driver calls into. A panic there happens during
+      UEFI boot services, before our kernel's own exception vectors even
+      exist, so there was no way for our code to catch or report it — the
+      VM just stops.
+    </p>
+
+    <p>
+      <strong>Root cause:</strong> a BAR-reassignment probe — the
+      classic "write <code class="inline">0xFFFFFFFF</code>, read back
+      the size mask, write a real address" technique, needed because
+      QEMU's firmware build leaves this controller's BAR completely
+      unassigned. Textbook, and QEMU's own PCI emulation tolerates it
+      without complaint. Real PCIe firmware, apparently, does not —
+      whatever internal state that sequence disturbed on a real, in-use
+      device was enough to make firmware's own PCI layer panic outright.
+    </p>
+
+    <p>
+      <strong>Fix:</strong> stopped touching PCI config space with
+      anything but reads, plus one narrow, conditional Command-register
+      write. If a real BAR comes back genuinely unassigned on real
+      hardware, the honest answer is "this driver can't safely fix
+      that," not "let's try writing to it and see."
+    </p>
+
+    <div class="lesson">
+      <span class="lesson-label">A side rabbit hole worth flagging</span>
+      <p>
+        The self-assignment logic existed at all only to work around
+        QEMU's own firmware leaving an unclaimed device's BAR at
+        <code class="inline">0</code> — a real, confirmed, build-specific
+        quirk, not representative of production firmware (Parallels'
+        real firmware had already assigned a sane address without any
+        help). If you build a workaround for one dev-loop's laziness,
+        gate it as narrowly as possible — it's exactly what triggered the
+        firmware panic above.
+      </p>
+    </div>
+
+    <h2>Bug 3 — a real BAR doesn't respect your simplifying assumptions</h2>
+
+    <p>
+      <strong>Symptom:</strong> even after the address-space bugs above
+      were sorted, the very first register read through the discovered
+      BAR took a genuine CPU exception.
+    </p>
+
+    <div class="panel">
+      <div class="panel-tab"><span>exceptions.rs</span><span>decoded</span></div>
+      <pre><code>ESR_EL1 = <span class="hl">0x96000004</span>
+  EC   (bits 31:26) = 0x25   <span class="dim">Data Abort</span>
+  DFSC (bits  5: 0) = 0x04   <span class="dim">Translation fault, level 0</span></code></pre>
+    </div>
+
+    <p>
+      Not a permissions problem — a genuine <em>nothing is mapped here</em>
+      fault, at the top-level table walk.
+    </p>
+
+    <p>
+      <strong>Root cause:</strong> our own page tables. This kernel's
+      identity-map setup assumed all RAM and every device region it would
+      ever need lived within the first 512GB of address space — one
+      top-level page-table entry's worth. Reasonable at the time: RAM
+      addresses are always low, and the one device region this project
+      had ever hardcoded was too. A discovered PCI BAR is under no such
+      obligation — this controller's BAR resolved to exactly 512GB on
+      the QEMU dev loop, squarely outside that one entry.
+    </p>
+
+    <p>
+      <strong>Fix:</strong> generalized the identity-map builder to
+      allocate additional top-level table entries on demand, for
+      whichever address range a discovered device actually needs.
+    </p>
+
+    <div class="lesson">
+      <span class="lesson-label">Lesson</span>
+      <p>
+        A value that's "always true" for every address you've picked
+        yourself stops being true the moment you start reading addresses
+        that hardware, or firmware, picked instead.
+      </p>
+    </div>
+
+    <h2>Bug 4 — an entire request class silently going nowhere</h2>
+
+    <p>
+      The deepest and most surprising finding of the day.
+    </p>
+
+    <p>
+      <strong>Symptom:</strong> once the controller was enumerating the
+      keyboard correctly, polling it via the standard USB HID mechanism —
+      repeated <code class="inline">GET_REPORT</code> requests to the
+      control endpoint — never returned anything resembling keyboard
+      data. It came back, variously, as:
+    </p>
+
+    <ul>
+      <li>
+        This driver's <em>own</em> <code class="inline">GET_REPORT</code>
+        Setup packet, echoed straight back — confirmed by decoding the
+        returned bytes against the exact request sent
+        (<code class="inline">bmRequestType</code>,
+        <code class="inline">bRequest</code>, <code class="inline">wValue</code>,
+        <code class="inline">wIndex</code>, <code class="inline">wLength</code>,
+        all present, in order — including a changed
+        <code class="inline">wLength</code> tracking exactly across two
+        separate test builds).
+      </li>
+      <li>
+        In one test, a chunk of what decoded cleanly as a completely
+        different descriptor — real, structured data, just not what was
+        asked for and not a live report either.
+      </li>
+    </ul>
+
+    <p>
+      Neither of those is "the device sent nothing." Both are "the
+      response buffer contains <em>something structured</em>," which is
+      a much more confusing failure than a clean timeout — it looks like
+      success from a distance.
+    </p>
+
+    <h3>Ruling out the obvious explanations, each with direct evidence</h3>
+
+    <ul>
+      <li>
+        <strong>Matching the wrong completion event?</strong> Printed
+        every transfer-completion event's own pointer field next to the
+        address of the TRB we expected. They matched, every time. Not this.
+      </li>
+      <li>
+        <strong>A buffer-size coincidence?</strong> Widened the requested
+        length from 8 bytes to 64 across two separate real-hardware test
+        rounds. The garbage tracked the <em>new</em> length exactly. Not
+        a fixed-size aliasing bug — whatever's happening adapts to what
+        we send, in real time.
+      </li>
+      <li>
+        <strong>Is the DMA target even written to?</strong> Filled the
+        destination buffer with a distinctive, otherwise-impossible byte
+        pattern (<code class="inline">0xEE</code> repeated) immediately
+        before ringing the transfer doorbell. The poison did not survive
+        — the buffer was genuinely overwritten. The transfer mechanism
+        itself was working correctly; the <em>content</em> being
+        delivered simply wasn't real device data.
+      </li>
+    </ul>
+
+    <p>The test that actually settled it: a completely different,
+    <em>standard</em> request — <code class="inline">GET_DESCRIPTOR(Device)</code>
+    — issued right next to a failing <code class="inline">GET_REPORT</code>.
+    It came back perfectly:</p>
+
+    <div class="panel">
+      <div class="panel-tab"><span>GET_DESCRIPTOR(Device)</span><span>real device response</span></div>
+      <pre><code>[12, 01, 00, 02, 00, 00, 00, 40, <span class="hl">27, 06</span>, 01, 00, 00, 00, 01, 04, 0b, 01]
+ ^^  ^^                          ^^^^^^^^
+ bLength=18   bDescriptorType=1  idVendor (a later test: 0x203a — Parallels' own real, registered vendor ID)</code></pre>
+    </div>
+
+    <p>
+      Unambiguously live, correct, real device data.
+    </p>
+
+    <p>
+      <strong>The conclusion:</strong> <em>standard</em> USB control
+      requests reach the real device correctly through Parallels' USB
+      passthrough. <em>Class-specific</em> HID requests — the two
+      mechanisms this driver had been built around —
+      do not get forwarded at all. A real gap in the passthrough
+      implementation, not a bug in any driver talking to it — and easy
+      to misdiagnose as "my request encoding must be subtly wrong,"
+      because the bytes we were sending were correct the entire time.
+    </p>
+
+    <p>
+      <strong>The fix:</strong> stop polling via
+      <code class="inline">GET_REPORT</code> entirely. Use the mechanism
+      every production USB HID driver actually uses at runtime: the
+      device's <strong>interrupt IN endpoint</strong>. Configured via
+      <code class="inline">Configure Endpoint</code> — a standard xHCI
+      <em>command</em>, not a USB class <em>request</em> — the host
+      controller then polls the device on its own schedule and delivers
+      new reports with zero further request/response round trips for
+      software to get wrong.
+    </p>
+
+    <div class="lesson">
+      <span class="lesson-label">Lesson</span>
+      <p>
+        If a request "succeeds" but its content looks <em>wrong in a
+        structured way</em> — not zeroed, not noise, but shaped like
+        something else you recognize — consider whether the platform
+        underneath you might be substituting or misrouting that specific
+        request, before assuming your own encoding is wrong. And when a
+        "simpler" mechanism and a "more standard" one are both available,
+        the passthrough layer beneath you may only have been built and
+        tested against the one real operating systems actually use.
+      </p>
+    </div>
+
+    <h2>Bug 5 — a perfectly working driver, reading the wrong device</h2>
+
+    <p>
+      <strong>Symptom:</strong> once the interrupt endpoint was fully
+      armed, real live data started flowing — continuously, and changing.
+      That was the tell: moving the mouse over the VM's window produced a
+      steady stream of changing report data. It was the
+      <strong>mouse</strong>, not the keyboard.
+    </p>
+
+    <p>
+      A real Parallels VM exposes at least a virtual mouse/tablet on the
+      same xHCI controller as the keyboard, and this driver's port-scan
+      logic — take the first port reporting a connected device — had no
+      way to tell them apart. It grabbed whichever device enumerated on
+      the lower-numbered port.
+    </p>
+
+    <p>
+      <strong>Fix:</strong> walk every connected port, and for each one,
+      fetch its Configuration descriptor and check the HID interface's
+      declared class and protocol —
+      <code class="inline">bInterfaceClass = 3</code> (HID),
+      <code class="inline">bInterfaceProtocol = 1</code> specifically for
+      Boot-Protocol Keyboard (<code class="inline">2</code> is Mouse) —
+      before committing to configuring its interrupt endpoint.
+    </p>
+
+    <div class="lesson">
+      <span class="lesson-label">Lesson</span>
+      <p>
+        In a virtualized, multi-device environment, "the first thing
+        that responds" is never a substitute for checking you've found
+        the specific thing you're looking for — even, especially, once
+        everything else is finally working. This bug only became visible
+        because the rest of the driver was finally right; it had been
+        silently waiting behind the other four the whole time.
+      </p>
+    </div>
+
+    <h2>Techniques that generalized well</h2>
+
+    <ul class="techniques">
+      <li><strong>Poison your DMA buffers.</strong> Fill a transfer's destination with a fixed, distinctive, otherwise-impossible pattern before triggering it. Whether — and how much of — the poison survives tells you directly whether a write happened at all.</li>
+      <li><strong>Widen a request to break a suspicious coincidence.</strong> If a buggy result's shape matches some other value in your system, deliberately change that value. If the bug's shape changes with it, you've confirmed a real dependency, not ruled one out.</li>
+      <li><strong>Reach for the most boring request you can, as a control.</strong> When one request type misbehaves, test the most basic, universal request in the same family right next to it.</li>
+      <li><strong>Decode raw exception registers by hand, every time.</strong> Exception class, fault status, faulting address — the difference between "the VM crashed" and "a Data Abort at exactly this address, for exactly this documented reason."</li>
+      <li><strong>Route diagnostics through whatever survives a crash</strong>, not just whatever's convenient to log through at the time.</li>
+      <li><strong>Fix one variable per real-hardware round trip</strong>, and predict the outcome before you spend it. Every round trip here targeted one falsifiable hypothesis — which is what made five real bugs findable in a single day.</li>
+    </ul>
+
+    <h2>Where this ended up</h2>
+
+    <p>
+      A real, physical USB keyboard, on real Parallels-on-Apple-Silicon
+      hardware, typing into a shell running on a from-scratch kernel with
+      no prior USB support at all — full round trip confirmed: individual
+      keystrokes, backspace, Enter submitting a real command line.
+      Getting there took a from-scratch xHCI driver and five real,
+      independently-confirmed hardware bugs, none of which were visible
+      on the software emulator this project otherwise develops against
+      day to day.
+    </p>
+
+    <p>
+      If you're doing the equivalent work for your own kernel: budget for
+      the fact that "works on QEMU" and "works on a real hypervisor" are
+      genuinely different claims, that a firmware or passthrough layer's
+      rough edges won't announce themselves as errors, and that the most
+      confusing failures are the ones that come back looking like
+      <em>something</em>, not nothing.
+    </p>
+
+  </article>
+
+  <footer class="site-footer">
+    <span>Ouroboros — an ARM64 microkernel, written from scratch in Rust</span>
+    <a href="https://github.com/hansolovkarlsson/Ouroboros">github.com/hansolovkarlsson/Ouroboros</a>
+  </footer>
+
+</div>
+</body>
+</html>

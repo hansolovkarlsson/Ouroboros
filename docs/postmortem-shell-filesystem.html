@@ -1,0 +1,403 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Shell &amp; Filesystem Postmortem — Ouroboros</title>
+<meta name="description" content="The middle chapter of the Ouroboros OS debugging trilogy: turning a bare shell prompt into a real disk-backed userland process, and the bugs found doing it.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>💾</text></svg>">
+<link rel="stylesheet" href="assets/site.css">
+</head>
+<body>
+
+<nav class="sitenav">
+  <div class="sitenav-inner">
+    <a class="sitenav-mark" href="index.html">ouroboros</a>
+    <div class="sitenav-links">
+      <a href="index.html">Home</a>
+      <a href="postmortem-boot-bringup.html">Boot bring-up</a>
+      <a href="postmortem-shell-filesystem.html" class="current">Shell &amp; filesystem</a>
+      <a href="postmortem-xhci-keyboard.html">xHCI keyboard</a>
+      <a href="https://github.com/hansolovkarlsson/Ouroboros">GitHub ↗</a>
+    </div>
+  </div>
+</nav>
+
+<div class="page">
+
+  <div class="kicker">Debugging postmortem · Ouroboros · part 2 of 3</div>
+
+  <h1 class="title small">From a bare shell prompt to a real, disk-backed OS</h1>
+  <p class="dek">
+    One bug family found twice before its real shape was understood, a
+    hang with zero diagnostic output, and a disk that quietly lied about
+    its own filesystem format.
+  </p>
+
+  <nav class="trilogy">
+    <a href="postmortem-boot-bringup.html">1 · Boot bring-up</a>
+    <a href="#" class="current" aria-current="page">2 · Shell &amp; filesystem</a>
+    <a href="postmortem-xhci-keyboard.html">3 · xHCI keyboard</a>
+  </nav>
+
+  <div class="companion">
+    <span class="companion-icon">📖</span>
+    <span>This is the middle of three companion pieces — <a href="postmortem-boot-bringup.html">the boot bring-up postmortem</a> covers everything below it sits on top of, and <a href="postmortem-xhci-keyboard.html">the xHCI keyboard postmortem</a> covers the USB input driver built on top of both.</span>
+  </div>
+
+  <article>
+
+    <p>
+      This is the middle piece of a three-part debugging history for
+      <a href="https://github.com/hansolovkarlsson/Ouroboros">Ouroboros</a>,
+      a from-scratch ARM64 microkernel. Part one covers getting from
+      "UEFI hands us control" to a live, working console on real
+      hardware. Part three covers getting real keyboard input into that
+      console. This one covers everything in between: turning a bare
+      shell prompt into a real, disk-loaded userland process with real
+      commands, a real filesystem underneath it, and real write support
+      — and the bugs found doing it, several of which are genuinely
+      reusable lessons for anyone else writing a small freestanding
+      kernel.
+    </p>
+
+    <p>
+      One theme dominates this stretch more than any single bug: a whole
+      family of crashes that all trace back to the same root cause,
+      found three separate times before the underlying pattern was
+      fully understood. That's worth reading as its own throughline, not
+      just unrelated war stories.
+    </p>
+
+    <h2>The recurring bug: pointers baked into your binary don't know where they'll actually load</h2>
+
+    <p>
+      Ouroboros's userland programs are loaded as flat,
+      position-<em>dependent</em> binaries — no ELF, no relocation
+      processing, linked with a fixed base address of zero, then copied
+      byte-for-byte to wherever the loader actually placed them in
+      memory. Direct function calls are fine: AArch64 compiles a call as
+      a PC-relative branch, correct no matter where the code ends up.
+      The problem is anything that isn't a direct call — any
+      <em>pointer stored as data</em>, computed once at compile time and
+      baked into the binary's read-only section. That pointer was
+      computed against the link-time base of zero. Nothing ever adjusts
+      it for the real load address, because there's no relocation step
+      at all. This bit twice, in two completely different-looking ways,
+      before the general shape of the problem was understood.
+    </p>
+
+    <h3>First bite: formatting macros crash any loaded program</h3>
+
+    <p>
+      <strong>Symptom:</strong> a new command's first implementation
+      used an ordinary formatting macro to print a number — and crashed
+      immediately, the program counter landing on a tiny, near-zero
+      address instead of any real code.
+    </p>
+
+    <p>
+      <strong>Root cause:</strong> Rust's formatting machinery doesn't
+      dispatch argument formatting through direct calls — it builds an
+      array of function pointers, one per formatted argument, as
+      <em>data</em>, baked into the binary's read-only section at
+      compile time. For a normal, properly relocated executable this is
+      invisible. For a binary linked at base zero and loaded somewhere
+      else with zero relocation processing, those pointer values are
+      simply wrong wherever the code actually runs.
+    </p>
+
+    <p>
+      <strong>Fix:</strong> hand-roll the one piece of formatting
+      actually needed instead of going through the standard machinery at
+      all. Not elegant, but the only viable fix short of writing a real
+      relocating loader.
+    </p>
+
+    <h3>Second bite: even a plain comparison against a literal can crash</h3>
+
+    <p>
+      <strong>Symptom, much later, in completely unrelated code:</strong>
+      a path-resolution routine needed to check whether the current
+      directory was already root — a plain comparison of a byte slice
+      against a string literal. It crashed with the exact same
+      signature: the program counter landed inside the program's own
+      code at a small, garbage, code-layout-dependent address that
+      shifted between builds.
+    </p>
+
+    <p>
+      <strong>Root cause:</strong> the identical underlying problem, in
+      a form much easier to miss than a formatting macro. Comparing a
+      slice against a literal needs a <em>reference</em> to that
+      literal's bytes somewhere in memory — exactly the kind of thing
+      computed once, at compile time, relative to the link-time base.
+    </p>
+
+    <div class="panel">
+      <div class="panel-tab"><span>the fix</span><span>shell/src/main.rs</span></div>
+      <pre><code><span class="bad">// crashes: needs a reference to literal data in .rodata</span>
+<span class="bad">if cwd_bytes != b"/" { ... }</span>
+
+<span class="good">// fine: only scalar comparisons, no reference to anything</span>
+<span class="good">if !(cwd_bytes.len() == 1 && cwd_bytes[0] == b'/') { ... }</span></code></pre>
+    </div>
+
+    <p>
+      <strong>How this one was actually found:</strong> by bisection,
+      not inspection — binary-searching temporary print statements
+      through the path-resolution function until the exact crashing line
+      was isolated. The symptom looked nothing like its cause until that
+      isolation was done.
+    </p>
+
+    <div class="lesson">
+      <span class="lesson-label">The generalized rule</span>
+      <p>
+        No formatting macros, and no slice/string comparison against a
+        literal, in any loaded program — both crash for the identical
+        reason: a data reference computed for a link-time base that's
+        never actually where the code runs. Direct calls and
+        comparisons against scalar values are fine. If you're loading
+        position-dependent code with no relocation step, audit for
+        <em>any</em> pointer to compile-time data — format strings,
+        literal comparisons, function-pointer tables, vtables — not just
+        the one macro that happened to crash first.
+      </p>
+    </div>
+
+    <h2>Turning the shell into a real userland process</h2>
+
+    <p>
+      Before any of the above, the shell was just kernel code running at
+      a low privilege level, compiled directly into the kernel image. A
+      deliberate architecture change made it a genuine, separate
+      program: loaded from disk, selected by a small config file,
+      replaceable without rebuilding the kernel at all — using UEFI's
+      own filesystem driver during boot services, rather than building a
+      real runtime block-device driver just for this, an explicit scope
+      decision rather than an oversight.
+    </p>
+
+    <p>
+      A genuinely nice side effect: this killed an earlier, hard-won
+      compiler alignment ceiling entirely (see part one) — a disk-loaded
+      program doesn't need a compile-time-aligned static at all, since
+      the loader can just ask for however many runtime-determined pages
+      a program needs. A new alignment problem immediately took its
+      place — the page allocator only guarantees a coarser granularity
+      than the identity-map builder's block-splitting logic implicitly
+      relied on — solved by deliberately over-allocating and freeing the
+      excess, recovering the same guarantee at runtime instead of
+      compile time.
+    </p>
+
+    <h2>A measurement trap: why the "actual" tick rate was a lie for ten seconds</h2>
+
+    <p>
+      Making the shell feel responsive surfaced a real bug: typed
+      characters could take up to a full second to echo, because the
+      kernel's round-robin task switch fires unconditionally on every
+      timer tick, whether or not either task has anything to do.
+      Lowering the tick interval fixed the practical symptom.
+    </p>
+
+    <p>
+      The interesting part is how the diagnosis nearly went sideways.
+      The first attempt to measure the real tick rate used a whole-run
+      exception count from the emulator's own internal trace — and
+      concluded the tick was already firing far faster than expected,
+      even <em>before</em> the fix, which would have meant the entire
+      latency theory was wrong. That number was an artifact: firmware's
+      own boot-time code is still resident and executing for the first
+      several seconds of every run, taking real interrupt exceptions of
+      its own at a much higher rate than the kernel ever will. A
+      targeted debug print placed directly inside the timer re-arm
+      function — immune to this contamination — gave the true number,
+      matching the configured interval exactly.
+    </p>
+
+    <div class="lesson">
+      <span class="lesson-label">Lesson</span>
+      <p>
+        A whole-run exception or event count from a shared trace
+        facility silently includes activity that has nothing to do with
+        the code you're testing. Either start counting only after a
+        known post-boot marker, or instrument the specific code path you
+        actually suspect, directly.
+      </p>
+    </div>
+
+    <h2>The disk that lied about its own format</h2>
+
+    <p>
+      Bringing up runtime disk I/O needed a virtio block driver and a
+      hand-rolled FAT32 reader, and surfaced two more genuinely
+      confusing mistakes.
+    </p>
+
+    <p>
+      <strong>A misleading diagnostic tool, not a misleading
+      device.</strong> Figuring out which transport a block device had
+      attached over needed inspecting the emulator's own internal
+      device tree — and the first attempt appeared to show no block
+      device at all, obviously wrong since the kernel demonstrably boots
+      from it every run. The real bug was in the diagnostic script:
+      reading the monitor's response with one fixed sleep before
+      switching to non-blocking reads cut the response off partway
+      through, consistently at the same byte count — exactly what makes
+      a truncation bug look like real, complete data.
+    </p>
+
+    <p>
+      <strong>The fast development disk format isn't what production
+      images use.</strong> The emulator's own convenience
+      disk-passthrough driver, used for the fast day-to-day development
+      loop, turned out to produce FAT16, not FAT32 — confirmed by
+      decoding the on-disk header fields by hand rather than trusting
+      the tool's name. The real production disk image, the same path
+      real testing hardware ultimately boots from, is genuinely FAT32. A
+      separate boot target using the real image was added specifically
+      because the fast loop's disk can never satisfy a genuine FAT32
+      reader.
+    </p>
+
+    <p>
+      <strong>The project's own directory name didn't fit the
+      filesystem's own naming limit.</strong> FAT's short-name
+      convention caps a path component at eight characters plus a
+      three-character extension; this project's own boot-configuration
+      directory name was nine. Rather than implement long-filename
+      parsing (a real feature, on a hand-rolled, no-allocator reader) to
+      accommodate one avoidable name the project itself controlled, the
+      directory was simply renamed to fit.
+    </p>
+
+    <h2>The hang with zero output</h2>
+
+    <p>
+      This is the single most instructive bug in this whole stretch,
+      because of <em>how</em> it failed, not just why.
+    </p>
+
+    <p>
+      <strong>Symptom:</strong> navigating up two directory levels in a
+      row hung the entire system. Not a crash, not an error message, not
+      a reported exception. Nothing. The whole machine simply stopped
+      responding, forever.
+    </p>
+
+    <p>
+      <strong>Root cause:</strong> a real, on-disk FAT32 convention this
+      reader hadn't accounted for. A subdirectory's own "parent
+      directory" entry conventionally stores cluster number zero to mean
+      "the root directory," rather than root's own actual cluster
+      number. That zero flowed directly into a sector-address
+      calculation that subtracts a small constant from the cluster
+      number — zero minus that constant, in unsigned arithmetic, wraps
+      around to an enormous, nonsensical sector number instead of a
+      negative one, and the resulting disk read against that garbage
+      address simply never completed.
+    </p>
+
+    <p>
+      <strong>Why this produced silence, not a crash:</strong> the read
+      happens inside a system call, and taking any exception — including
+      the timer interrupt that drives this kernel's entire preemptive
+      scheduler — is masked from the moment a system call is entered
+      until it returns. A runaway operation that would ordinarily
+      eventually get preempted had nothing that could ever interrupt it.
+      The one mechanism that could have surfaced the problem was, by
+      design, exactly the thing turned off for the duration.
+    </p>
+
+    <p>
+      <strong>Fix:</strong> substitute the real root cluster number
+      wherever a resolved directory entry's cluster number comes back as
+      zero. <strong>How the trigger was isolated:</strong> direct,
+      deterministic testing — a single "up one level" from a two-level-deep
+      path worked fine every time; a second one immediately after it hung
+      every time, before the fix, with no variance.
+    </p>
+
+    <div class="lesson">
+      <span class="lesson-label">Lesson</span>
+      <p>
+        A bug inside any code path that runs with interrupts (or your
+        only preemption mechanism) masked doesn't just risk a hang — it
+        risks a hang with <em>zero diagnostic signal</em>, because the
+        mechanism you'd normally rely on to keep observing the system is
+        unavailable for exactly as long as the bug is active. Treat
+        unsigned-arithmetic-adjacent, disk-derived values with real
+        suspicion in any code path that runs this way.
+      </p>
+    </div>
+
+    <h2>Adding real write support, one narrow case at a time</h2>
+
+    <p>
+      With reads working, the project crossed into real filesystem
+      writes, each added as the narrowest useful case, in a consistent
+      discipline worth naming explicitly: <strong>claim a resource
+      before using it, and check every precondition before writing
+      anything.</strong> Creating a directory claims its cluster in the
+      file table before anything else touches disk, so a failure
+      partway through leaves it correctly claimed rather than silently
+      reusable; removing one checks it's a directory, isn't root, and is
+      genuinely empty before freeing anything, so a rejected request
+      never partially applies.
+    </p>
+
+    <p>
+      Two more real bugs surfaced here — both caught by
+      <strong>reasoning through the design before writing any
+      test</strong>, a genuinely different discipline from the
+      hardware-confirmed debugging that dominates the rest of this
+      project's history. The cluster-zero-means-root substitution from
+      the hang bug above had been applied to <em>every</em> resolved
+      path component, not just directories — harmless until empty-file
+      support was about to make "cluster zero, and it's a real file, not
+      root" a common case; without a fix, deleting a fresh empty file
+      would have tried to free root's own cluster, corrupting the entire
+      filesystem on first use. And moving a directory to a different
+      parent needed the identical convention applied on a
+      <em>write</em> path this time — caught the same way, by tracing
+      through what the operation needed before implementing it.
+    </p>
+
+    <h2>Techniques that generalized well</h2>
+
+    <ul class="techniques">
+      <li><strong>When two bugs share an exact crash signature in unrelated code, suspect a shared root cause</strong> before debugging either one from scratch.</li>
+      <li><strong>Bisect with temporary print statements</strong> when a crash's location and its cause are far apart.</li>
+      <li><strong>A tool that reads a live process's own diagnostic interface can lie just as easily as the process itself.</strong> The truncation bug was in the test harness, not the thing under test.</li>
+      <li><strong>Decode a foreign on-disk format's header fields by hand</strong> before trusting what a tool calls it.</li>
+      <li><strong>A bug inside a no-preemption code path can hang with zero signal.</strong> That changes how suspicious you should be of unsigned arithmetic and externally-sourced values in exactly that code.</li>
+      <li><strong>Not every bug needs a crash to be found.</strong> Tracing through a design's own logic before writing a test caught two real, serious bugs before they ever had a chance to corrupt anything.</li>
+    </ul>
+
+    <h2>Where this ended up</h2>
+
+    <p>
+      A real, disk-loaded userland shell — not kernel code — with real
+      tokenized commands, a real hand-rolled FAT32 filesystem
+      underneath it, and a full read/write file-management surface:
+      listing, reading, creating and removing both directories and
+      files, writing real content, copying, and moving. Everything in
+      <a href="postmortem-xhci-keyboard.html">part three</a> that
+      follows this was built on top of a shell that, by the end of this
+      arc, was already a genuinely real program running on genuinely
+      real storage — just still waiting for anything to reach it besides
+      a piped test harness.
+    </p>
+
+  </article>
+
+  <footer class="site-footer">
+    <span>Ouroboros — an ARM64 microkernel, written from scratch in Rust</span>
+    <a href="https://github.com/hansolovkarlsson/Ouroboros">github.com/hansolovkarlsson/Ouroboros</a>
+  </footer>
+
+</div>
+</body>
+</html>

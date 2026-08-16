@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ouroboros — an ARM64 microkernel written from scratch</title>
+<meta name="description" content="A microkernel-style ARM64 (aarch64) operating system written in Rust, booted via UEFI, developed and tested against real Parallels-on-Apple-Silicon hardware.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🐍</text></svg>">
+<link rel="stylesheet" href="assets/site.css">
+</head>
+<body>
+
+<nav class="sitenav">
+  <div class="sitenav-inner">
+    <a class="sitenav-mark" href="index.html">ouroboros</a>
+    <div class="sitenav-links">
+      <a href="index.html" class="current">Home</a>
+      <a href="postmortem-boot-bringup.html">Boot bring-up</a>
+      <a href="postmortem-shell-filesystem.html">Shell &amp; filesystem</a>
+      <a href="postmortem-xhci-keyboard.html">xHCI keyboard</a>
+      <a href="https://github.com/hansolovkarlsson/Ouroboros">GitHub ↗</a>
+    </div>
+  </div>
+</nav>
+
+<div class="page">
+
+  <div class="kicker">ARM64 microkernel · Rust · UEFI</div>
+
+  <h1 class="title">Ouroboros</h1>
+  <p class="dek">
+    A microkernel-style operating system for aarch64, written from
+    scratch in Rust, still in its earliest stages. Booted entirely
+    through UEFI — no bootloader stage, no emulator-only shortcuts —
+    developed against QEMU day to day and proven, repeatedly, against
+    real Parallels-on-Apple-Silicon hardware.
+  </p>
+
+  <div class="hero-links">
+    <a class="primary" href="https://github.com/hansolovkarlsson/Ouroboros">View the source →</a>
+    <a href="#postmortems">Read the postmortems</a>
+    <a href="#status">Current status</a>
+  </div>
+
+  <div class="stat-row">
+    <div class="stat"><span class="stat-num">aarch64</span><span class="stat-label">Architecture</span></div>
+    <div class="stat"><span class="stat-num">UEFI</span><span class="stat-label">Boot path</span></div>
+    <div class="stat"><span class="stat-num">3</span><span class="stat-label">Workspace crates</span></div>
+    <div class="stat"><span class="stat-num">3</span><span class="stat-label">Postmortems</span></div>
+  </div>
+
+  <article>
+
+    <h2>What this is</h2>
+
+    <p>
+      Ouroboros draws its design ideas from Linux, Minix, and Plan 9:
+      a microkernel architecture, POSIX-ish system calls, preemptive
+      multitasking, and a filesystem story that started with "research
+      needed" and has since grown into a real, hand-rolled FAT32
+      read/write stack. It's built and tested primarily against
+      Parallels Desktop on Apple Silicon rather than an emulator alone
+      — a deliberate choice, since Parallels boots ARM VMs exclusively
+      through UEFI firmware with no direct-kernel-boot shortcut, and
+      real hardware has repeatedly disagreed with what "worked" on the
+      emulator.
+    </p>
+
+    <p>
+      Every driver in this kernel — the console, the disk controller,
+      the filesystem, the USB host controller — is hand-rolled directly
+      against the relevant specification, with no external hardware
+      crate. That's not a purity rule; it's mostly a consequence of
+      running with no heap after boot services exit, and it's produced
+      a genuinely large amount of real, documented, hard-hat debugging
+      along the way — see the postmortems below.
+    </p>
+
+    <h2 id="status">Where things stand</h2>
+
+    <p>
+      The short version: there is a real, disk-loaded userland shell,
+      with a working command surface over a real filesystem, running on
+      real Parallels hardware — with a live display and a real, physical
+      USB keyboard typing into it. Preemptive multitasking still only
+      works under QEMU; Parallels' interrupt controller hasn't been
+      discovered yet (see "what's next" below).
+    </p>
+
+    <ol class="timeline">
+      <li class="done">
+        <span class="tl-title">Boot &amp; bring-up</span>
+        <p>UEFI entry, exception vectors, an MMU running on the kernel's own identity-mapped tables, a GICv2 + generic-timer preemption tick, and a real EL0/syscall boundary — all confirmed working, not just compiling.</p>
+      </li>
+      <li class="done">
+        <span class="tl-title">Preemptive task switching</span>
+        <p>A real (if still coarse — two hardcoded tasks, strict round-robin) scheduler, alternating two EL0 tasks off the timer tick.</p>
+      </li>
+      <li class="done">
+        <span class="tl-title">An interactive shell</span>
+        <p>First UART input, then a disk-loaded, config-selected userland shell — a genuinely separate program, not kernel code, with real tokenized command dispatch.</p>
+      </li>
+      <li class="done">
+        <span class="tl-title">Runtime storage: virtio-blk + hand-rolled FAT32</span>
+        <p>Synchronous polling block I/O and a from-scratch FAT32 reader/writer, growing over several milestones into a full command surface: <code class="inline">ls</code>, <code class="inline">cat</code>, <code class="inline">cd</code>, <code class="inline">pwd</code>, <code class="inline">mkdir</code>, <code class="inline">rmdir</code>, <code class="inline">touch</code>, <code class="inline">rm</code>, <code class="inline">write</code>, <code class="inline">cp</code>, <code class="inline">mv</code>.</p>
+      </li>
+      <li class="done">
+        <span class="tl-title">The console-discovery saga</span>
+        <p>Devicetree, ACPI/SPCR, and PCI-serial console discovery all confirmed dead ends on real Parallels hardware; a transmit-only virtio-console driver confirmed working on QEMU but confirmed <em>not</em> what Parallels actually exposes; a GOP framebuffer console — five real-hardware round trips, four real bugs — finally reaching a live, rendering shell prompt on real hardware.</p>
+      </li>
+      <li class="done">
+        <span class="tl-title">USB HID keyboard input</span>
+        <p>A from-scratch xHCI driver, five independently-confirmed real-hardware bugs, ending in a real physical keyboard typing into the shell on real Parallels hardware — full round trip, letters, backspace, Enter.</p>
+      </li>
+      <li>
+        <span class="tl-title">What's next</span>
+        <p>Real interrupt-controller discovery (ACPI MADT, likely GICv3) to lift the "no preemption on Parallels" limitation; a relocating loader to remove the current no-<code class="inline">core::fmt</code>/no-literal-comparison restriction on userland programs; blocking/waiting primitives; output redirection.</p>
+      </li>
+    </ol>
+
+    <h2 id="postmortems">The postmortems</h2>
+
+    <p>
+      Every real bug found along the way — the ones that mattered, not
+      the routine typos — is written up in detail: symptom, root cause,
+      how it was actually confirmed, and the generalizable lesson. Three
+      pieces, in chronological order, each usable on its own.
+    </p>
+
+    <div class="postmortem-cards">
+      <a class="pm-card" href="postmortem-boot-bringup.html">
+        <span class="pm-eyebrow">Part 1 · Boot bring-up</span>
+        <h3>From "it doesn't boot" to a real console</h3>
+        <p>Exception vectors, the MMU switch, GIC/timer bring-up, the EL0/syscall boundary, and a console-discovery saga that killed three mechanisms and one whole driver before finding the one that worked on real hardware.</p>
+      </a>
+      <a class="pm-card" href="postmortem-shell-filesystem.html">
+        <span class="pm-eyebrow">Part 2 · Shell &amp; filesystem</span>
+        <h3>From a bare prompt to a real, disk-backed OS</h3>
+        <p>A relocation bug found twice before its real shape was understood, a hang with zero diagnostic output, a disk that lied about its own filesystem format, and the write-support arc built on top.</p>
+      </a>
+      <a class="pm-card" href="postmortem-xhci-keyboard.html">
+        <span class="pm-eyebrow">Part 3 · xHCI keyboard</span>
+        <h3>Getting a USB keyboard working on Parallels</h3>
+        <p>Five real, confirmed hardware bugs bringing keyboard input to the kernel — a PCI Command register bit, a real UEFI firmware panic, a page-table assumption, a silently-dropped USB request class, and a driver reading the wrong device.</p>
+      </a>
+    </div>
+
+    <h2>Following along</h2>
+
+    <p>
+      The full, unfiltered history — every milestone, in order, with the
+      same level of detail as the postmortems above — lives in the
+      repository itself: <a href="https://github.com/hansolovkarlsson/Ouroboros/blob/main/docs/CHANGELOG.md">CHANGELOG.md</a>
+      for what's done, <a href="https://github.com/hansolovkarlsson/Ouroboros/blob/main/docs/roadmap.md">roadmap.md</a>
+      for what's next, and <a href="https://github.com/hansolovkarlsson/Ouroboros/blob/main/CLAUDE.md">CLAUDE.md</a>
+      for the single, continuously-updated document tracking the whole
+      project's architecture and reasoning in real time.
+    </p>
+
+  </article>
+
+  <footer class="site-footer">
+    <span>Ouroboros — an ARM64 microkernel, written from scratch in Rust</span>
+    <a href="https://github.com/hansolovkarlsson/Ouroboros">github.com/hansolovkarlsson/Ouroboros</a>
+  </footer>
+
+</div>
+</body>
+</html>
