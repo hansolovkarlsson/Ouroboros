@@ -5,6 +5,7 @@
 use core::cell::UnsafeCell;
 use core::fmt;
 
+use crate::fbconsole::FbConsole;
 use crate::uart::Uart;
 use crate::uart16550::Uart16550;
 use crate::virtio_console;
@@ -21,6 +22,12 @@ pub enum Console {
     /// variant's `read_byte` always returns `None`, a real, documented
     /// limitation, not a bug (no receive virtqueue exists yet).
     Virtio(virtio_console::Device),
+    /// The GOP-framebuffer console - the real lead for Parallels, since
+    /// `Virtio` above is a confirmed dead end there. See
+    /// `framebuffer.rs`/`fbconsole.rs`'s module doc comments. Write-only,
+    /// same limitation as `Virtio`, for a different reason (no keyboard
+    /// driver exists at all, not just no receive virtqueue).
+    Framebuffer(FbConsole),
 }
 
 impl fmt::Write for Console {
@@ -29,6 +36,7 @@ impl fmt::Write for Console {
             Console::Pl011(uart) => uart.write_str(s),
             Console::Uart16550(uart) => uart.write_str(s),
             Console::Virtio(dev) => write_str_virtio(dev, s),
+            Console::Framebuffer(fb) => fb.write_str(s),
         }
     }
 }
@@ -84,6 +92,7 @@ impl Console {
             Console::Virtio(dev) => {
                 let _ = unsafe { dev.write(&[byte]) };
             }
+            Console::Framebuffer(fb) => fb.put_char(byte),
         }
     }
 
@@ -95,6 +104,7 @@ impl Console {
             Console::Pl011(uart) => uart.read_byte(),
             Console::Uart16550(uart) => uart.read_byte(),
             Console::Virtio(_) => None,
+            Console::Framebuffer(_) => None,
         }
     }
 }
@@ -144,4 +154,11 @@ pub fn putc(byte: u8) {
 /// is no console installed yet, or there is one but nothing is waiting.
 pub fn read_byte() -> Option<u8> {
     unsafe { (*CONSOLE.0.get()).as_mut() }.and_then(Console::read_byte)
+}
+
+/// Whether a console has been installed yet - used by `main.rs` to decide
+/// whether a later fallback mechanism (virtio-console, then the
+/// framebuffer console) still needs to try.
+pub fn is_installed() -> bool {
+    unsafe { (*CONSOLE.0.get()).is_some() }
 }

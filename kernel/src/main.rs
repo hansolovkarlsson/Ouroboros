@@ -8,6 +8,9 @@ mod console;
 mod devicetree;
 mod exceptions;
 mod fat32;
+mod fbconsole;
+mod font;
+mod framebuffer;
 mod gic;
 mod loader;
 mod mmu;
@@ -98,6 +101,32 @@ fn main() -> Status {
     }
     let found_console_early = discovery.is_some();
 
+    // GOP framebuffer discovery - also boot-services-only (see
+    // framebuffer.rs's module doc comment), so it has to happen here
+    // regardless of whether a byte-stream console was already found: the
+    // framebuffer console is only tried as a last-resort fallback (see
+    // `try_framebuffer_console` below), but discovering it, and folding
+    // its address into the identity map, both have to happen now or not
+    // at all.
+    let fb_info = match framebuffer::discover() {
+        Ok(info) => {
+            log::info!(
+                "Ouroboros kernel: GOP framebuffer @ {:#x}, size={:#x}, {}x{}, stride={}, format={:?}",
+                info.base,
+                info.size,
+                info.width,
+                info.height,
+                info.stride,
+                info.format
+            );
+            Some(info)
+        }
+        Err(e) => {
+            log::warn!("Ouroboros kernel: GOP framebuffer discovery failed ({e})");
+            None
+        }
+    };
+
     // Also boot-services-only (a filesystem read and a page allocation) -
     // see loader.rs's module doc comment for why this happens now rather
     // than after a real runtime disk driver exists. A failure here means
@@ -142,16 +171,34 @@ fn main() -> Status {
 
     // SAFETY: called after exit_boot_services, with the memory map that
     // call returned.
-    unsafe { mmu::install_identity_map(&memory_map, [(program.base, program.size), tasks::idle_region()]) };
+    unsafe {
+        mmu::install_identity_map(
+            &memory_map,
+            [(program.base, program.size), tasks::idle_region()],
+            fb_info.map(|info| (info.base, info.size as u64)),
+        )
+    };
     console::println!("Ouroboros kernel: identity map installed, MMU running on our own tables");
 
     // A fourth console-discovery fallback, tried only if devicetree/ACPI/
     // PCI all failed above - the real lead for Parallels console output,
     // see `virtio_console.rs`'s module doc comment and `try_virtio_console`'s
     // own for why this one has to run here rather than alongside the other
-    // three.
+    // three. Confirmed dead on Parallels (see CLAUDE.md) but kept as the
+    // first fallback tried, ahead of the framebuffer console, since a
+    // real byte-stream console (input included) is strictly more capable
+    // than the framebuffer's write-only text grid whenever one turns out
+    // to exist.
     if !found_console_early {
         try_virtio_console();
+    }
+
+    // A fifth and final fallback: the GOP framebuffer, if one was found
+    // above. Tried only once every byte-stream mechanism (including
+    // virtio-console) has had its chance - see `try_framebuffer_console`'s
+    // own doc comment for why this is the real answer for Parallels.
+    if !console::is_installed() {
+        try_framebuffer_console(fb_info);
     }
 
     // The runtime storage stack (docs/CHANGELOG.md phases 3a/3b): virtio-blk
@@ -219,6 +266,34 @@ fn try_virtio_console() {
     }
     console::install(Console::Virtio(device));
     console::println!("Ouroboros kernel: virtio-console live (fallback - devicetree/ACPI/PCI all failed)");
+}
+
+/// Installs the GOP framebuffer console - the real answer for Parallels
+/// (see `framebuffer.rs`/`fbconsole.rs`'s module doc comments), tried last,
+/// only once every byte-stream mechanism above has had its chance.
+///
+/// Note what's already lost by the time this can run, for the same reason
+/// `try_virtio_console` above loses early messages: `fb_info` had to be
+/// discovered before `exit_boot_services` (boot-services-only protocol),
+/// but the console itself can't be *installed* until after
+/// `mmu::install_identity_map` has run with this framebuffer's address
+/// folded in (`FbConsole::new`'s safety requirement) - so every boot
+/// message between `exit_boot_services` and here only ever reached a
+/// byte-stream console, if one existed at all. On a framebuffer-only
+/// platform, the first thing that will ever actually appear on screen is
+/// whatever's printed right after this call.
+fn try_framebuffer_console(fb_info: Option<framebuffer::Info>) {
+    let Some(info) = fb_info else {
+        console::println!("Ouroboros kernel: no GOP framebuffer was discovered, no console available");
+        return;
+    };
+    // SAFETY: `mmu::install_identity_map` was just called above with
+    // `(info.base, info.size)` folded into its `framebuffer` argument -
+    // either it already fell inside the discovered RAM span, or it got its
+    // own device-block mapping. Either way it's mapped and writable now.
+    let fb = unsafe { fbconsole::FbConsole::new(&info) };
+    console::install(Console::Framebuffer(fb));
+    console::println!("Ouroboros kernel: framebuffer console live (fallback - every byte-stream mechanism failed)");
 }
 
 /// Discovers and initializes the virtio-blk device, reads sector 0 back

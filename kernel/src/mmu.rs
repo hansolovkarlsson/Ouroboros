@@ -310,7 +310,25 @@ fn overlaps_any(regions: &[(u64, u64); MAX_EL0_REGIONS], start: u64, end: u64) -
 /// never straddle a 2MB boundary regardless of where it lands) - see
 /// `MAX_EL0_REGIONS`'s doc comment for what happens if that's ever
 /// violated.
-pub unsafe fn install_identity_map(memory_map: &MemoryMapOwned, el0_regions: [(u64, u64); MAX_EL0_REGIONS]) {
+///
+/// `framebuffer`, if `Some((base, size))`, is a GOP framebuffer
+/// (`framebuffer::discover`) that needs to stay mapped and writable after
+/// this switch too (`fbconsole.rs`). Most of the time this needs no extra
+/// work at all: on QEMU's `ramfb`, the framebuffer address already falls
+/// inside the discovered-RAM span below, so the ordinary RAM loop already
+/// covers it (Normal WB, EL1-only - fine, nothing but this kernel's own
+/// EL1 code ever touches it). Only if its containing 1GB block is *still*
+/// unmapped after that loop - real hardware might genuinely have a
+/// framebuffer outside the RAM span reported by the memory map, unverified
+/// either way since this has only run against QEMU so far - does this add
+/// one more Device-nGnRnE block for it, the same convention as the fixed
+/// low-1GB device block above just at whatever address the framebuffer
+/// actually reports.
+pub unsafe fn install_identity_map(
+    memory_map: &MemoryMapOwned,
+    el0_regions: [(u64, u64); MAX_EL0_REGIONS],
+    framebuffer: Option<(u64, u64)>,
+) {
     let l1 = unsafe { &mut *L1_TABLE.0.get() };
 
     // Device: fixed low 1GB. See module doc comment for why this one stays
@@ -386,6 +404,21 @@ pub unsafe fn install_identity_map(memory_map: &MemoryMapOwned, el0_regions: [(u
             "Ouroboros kernel: identity map RAM {min_addr:#x}-{max_addr:#x} (1GB blocks {first_block}..={last_block}), device 0x0-{:#x}, EL0 regions {el0_regions:x?}",
             GIB - 1
         );
+    }
+
+    // Framebuffer fallback - see this function's doc comment. Only fires
+    // if the RAM loop above (and the fixed low-1GB device block) left the
+    // framebuffer's own 1GB block unmapped.
+    if let Some((fb_base, fb_size)) = framebuffer {
+        if fb_size > 0 {
+            let idx = (fb_base / GIB) as usize;
+            if idx < ENTRIES_PER_TABLE && l1[idx] == 0 {
+                l1[idx] = device_block(fb_base);
+                crate::console::println!(
+                    "Ouroboros kernel: framebuffer {fb_base:#x} (size {fb_size:#x}) outside RAM span, mapped as its own device block"
+                );
+            }
+        }
     }
 
     // L0[0] covers VA [0, 512GB) - everything this module ever maps fits

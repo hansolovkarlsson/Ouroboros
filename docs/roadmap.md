@@ -27,6 +27,14 @@ phase:
   source for it ever surfaces. The virtio-console *driver* itself stays
   in the tree, confirmed working on QEMU - just not the answer for
   Parallels.
+- ~~Build a GOP framebuffer console (the real lead after virtio-console)~~
+  — done and confirmed working on QEMU (`framebuffer.rs`/`font.rs`/
+  `fbconsole.rs`, see `CLAUDE.md`/`CHANGELOG.md`). **Still needs
+  confirmation on real Parallels hardware** - this environment can't test
+  Parallels directly, so that step is on the user: boot the current
+  `esp.hdd` there and confirm text actually renders on screen after boot
+  services exit, the way the earlier boot-services-only screenshots
+  already showed static UEFI output working.
 - **Output redirection (`>`/`>>`)** — needs shell-level parsing this
   project doesn't have yet (splitting `cmd > file` into a command and a
   target). `cp` is done (see below); redirection is the one piece of

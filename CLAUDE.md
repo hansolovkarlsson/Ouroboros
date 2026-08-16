@@ -1536,6 +1536,158 @@ worked correctly, confirmed by the same boot log showing
 `loaded shell program` after successfully reading `INIT.CFG`/the shell
 binary off the real `esp.hdd`/`esp.dmg` on genuine Parallels hardware.
 
+### GOP framebuffer console: a fifth, better-grounded lead - built and confirmed on QEMU, real-hardware confirmation still pending
+
+With virtio-console confirmed dead on Parallels (above), the user asked
+for deeper research into how other OSes get a console on Parallels ARM64
+at all, given that Linux is known to run there. A forked research
+subagent's findings were independently re-verified rather than trusted
+outright - one specific claim (a PCI device ID for Parallels'
+proprietary "ToolGate" mechanism) turned out to be unsourced by its own
+citation and was discarded, but a second held up: a real FreeBSD forum
+thread with a boot log from that exact platform
+(https://forums.freebsd.org/threads/parallels-on-macos-apple-silicon-freebsd-14-stuck-on-virtio_gpu.96762/)
+shows `VT: Replacing driver 'efifb' with new 'virtio_gpu'` - direct
+evidence that a generic UEFI GOP framebuffer drives early console output
+on Parallels ARM64, before any GPU-specific driver even loads. That
+thread's screenshots of Parallels' own VM settings also show only two
+"video type" options (a proprietary Parallels GPU or VirtIO GPU) and no
+serial option at all - consistent with every dead end already confirmed
+above, and consistent with this project's own Parallels boot
+screenshots, which already show UEFI graphics output working right up
+until boot services exit.
+
+**Unlike every previous console mechanism here, GOP needs no address
+guessing or platform convention at all** - `EFI_GRAPHICS_OUTPUT_PROTOCOL`
+is a standard, fully-specified UEFI protocol, queried identically on any
+platform that implements it. New module `kernel/src/framebuffer.rs`
+queries it during boot services (`uefi::boot::open_protocol_exclusive`,
+the same access pattern `pci.rs` already established) for the current
+mode's resolution, stride, and pixel format, and the framebuffer's
+physical base address and size. Only `PixelFormat::Rgb`/`Bgr` (4
+bytes/pixel, a fixed, known byte layout) are accepted -
+`Bitmask`/`BltOnly` are rejected outright, `BltOnly` specifically because
+it has no direct-memory-access path at all, only boot-services-only
+`Blt()` calls that can't survive `exit_boot_services`.
+
+**A real bitmap font had to come from somewhere, and got the same
+transcription-safety treatment virtio-console's register-bit values
+got.** `kernel/src/font.rs` embeds `dhepper/font8x8`'s public-domain 8x8
+font (itself based on Marcel Sondaar/IBM's public-domain VGA fonts),
+downloaded verbatim via `curl` rather than through a summarizing fetch -
+deliberately, since hex glyph-data transcription errors are exactly the
+kind of mistake that wouldn't show up until a specific character
+rendered wrong on screen, hard to notice and harder to trace back. A
+small Python script sliced the 95 printable-ASCII glyphs (0x20-0x7E) out
+of the downloaded header and generated the Rust `const` array
+mechanically, not by hand.
+
+**New module `kernel/src/fbconsole.rs`** implements `core::fmt::Write`
+directly over the raw framebuffer pointer: draws glyphs on a fixed
+character-cell grid (`width`/`height` divided by 8), tracks a cursor,
+and - deliberately no text buffer anywhere, matching this kernel's
+zero-heap, no-persistent-buffer discipline for anything that isn't
+already a small fixed-size global - scrolls by `core::ptr::copy`-ing
+pixel rows within the framebuffer itself and blanking the newly-exposed
+bottom row. No colour, no ANSI escape parsing (the shell's `clear`
+command's escape sequence just draws whatever blank glyph `font.rs`
+returns for a non-printable byte, rather than actually clearing the
+screen) - a real, documented limitation, not an oversight. Write-only:
+`read_byte` always returns `None`, for a different reason than
+`virtio_console.rs`'s same limitation - there is no keyboard driver of
+any kind in this kernel yet, independent of this console entirely.
+
+**`console.rs` gained a `Framebuffer` variant and an `is_installed()`
+accessor**, so `main.rs` can gate this as a genuine last resort: tried
+only after devicetree/ACPI/PCI *and* virtio-console have all failed,
+since a real byte-stream console (which also gets input) is strictly
+more capable than a write-only text grid whenever one actually exists.
+GOP discovery itself still has to run unconditionally before
+`exit_boot_services`, regardless of whether a byte-stream console was
+already found - it's boot-services-only, same constraint devicetree/ACPI
+parsing and PCI enumeration already have.
+
+**`mmu.rs::install_identity_map` gained an optional `framebuffer`
+argument, generalizing the existing block-mapping abstraction rather
+than adding a separate one.** Confirmed via the identity-map's own log
+line: on QEMU's `ramfb` device, the framebuffer's physical address
+(`0x5c7a0000`) already falls inside the discovered RAM span
+(`0x40000000`-`0x60000000`), so the ordinary RAM loop covers it for free
+- no new mapping needed, and no separate log line fires for that case.
+Only if a framebuffer's containing 1GB block is *still* unmapped after
+that loop does this add one more Device-nGnRnE block for it, at whatever
+address the framebuffer actually reports (the same convention the fixed
+low-1GB device block already uses, just no longer hardcoded to block
+0) - a real, reasoned-through possibility for hardware where the
+framebuffer lives outside normal RAM, but **not yet exercised against
+anything but QEMU's RAM-backed `ramfb`**, so this fallback path's
+correctness (particularly the `ptr::copy` scroll doing a bulk memmove
+against Device-nGnRnE memory, which has stricter access-ordering rules
+than Normal memory) is reasoned about, not confirmed.
+
+**QEMU testing needed a real display device, and this project's existing
+`-nographic` dev loop doesn't provide one at all** - confirmed by direct
+testing (`framebuffer::discover()` returns `NoGop`, not an address).
+`-device ramfb -display none -serial file:...` (dropping `-nographic`
+entirely, since it conflicts with an explicit `-serial`) gives QEMU's
+purpose-built headless framebuffer device - RAM-backed, direct-access,
+confirmed `800x600`/`Bgr`/stride `800`. `-device virtio-gpu-pci -display
+none` was also tried, specifically to see `BltOnly` actually get
+rejected rather than assume it would - confirmed: `discover()` correctly
+returned `UnsupportedPixelFormat(BltOnly)`, no crash. **A genuinely new
+verification technique for this project**, since every prior console
+driver could be checked through its own text output alone: QEMU's QMP
+`screendump` command (sent over a Unix-socket QMP connection, not the
+serial console at all) captures the actual rendered framebuffer contents
+to a `.ppm` image, which can then be visually inspected directly -
+necessary here because there's no other way to confirm pixel-level
+rendering actually happened correctly, as opposed to just "didn't
+crash."
+
+**Confirmed working, not just "produced no fault," via two separate
+screendumps, each with a temporary override reverted afterward - the
+same "temporarily force" technique already established for testing
+virtio-console** (`if !console::is_installed()` forced to `if true`,
+since QEMU's own ACPI console would otherwise always win first and the
+framebuffer fallback would never get a chance to run):
+- **First screendump**: correctly rendered kernel boot messages
+  (`framebuffer console live`, `virtio-blk ready`, the FAT32-mount
+  failure message expected on `make run`'s non-FAT32 vvfat disk, `shell
+  ready`) followed by the loaded shell program's own startup banner
+  (`Ouroboros userland shell`) and prompt - proving both
+  `console::println!` (kernel-side) and the shell's userland `putc`
+  syscall (a completely different code path, going through the syscall
+  boundary) both correctly reach the framebuffer, not just kernel text.
+- **Second screendump**, with a temporary 90-line print loop added
+  specifically to overflow one screen (a `75`-row grid at this
+  resolution) and force the scroll path: showed a clean, correctly
+  ordered, non-corrupted scrolled view (lines 21 through 88, plus the
+  shell's own banner/prompt still intact below them) - confirming the
+  `ptr::copy` memmove-based scroll works correctly on real framebuffer
+  memory, not just in isolation.
+- Both runs cross-checked against QEMU's own `-d int` trace: zero
+  aborts.
+- **A full regression pass on the normal QEMU dev-loop config**
+  (`-nographic`, real ACPI/PL011 console, piped-stdin `help`/`uptime`)
+  confirmed no behavior change when a byte-stream console already
+  exists: GOP is still discovered and logged (`GOP framebuffer @
+  0x5c7a0000...`), but the framebuffer console never installs, and the
+  shell's interactive echo/command handling is byte-for-byte the same as
+  before this milestone. Zero aborts.
+
+**Still coarse, and real-hardware confirmation is still pending, worth
+knowing before treating this as "done":** no colour, no ANSI escape
+parsing, no keyboard input (independent gap, not something this
+milestone could fix on its own), and the MMU's device-block fallback
+path for a framebuffer outside the discovered RAM span has never been
+tested against anything but QEMU's RAM-backed `ramfb` - real Parallels
+hardware might exercise a genuinely different path through that code
+than anything verified so far. **This environment cannot boot Parallels
+directly** - confirming this actually renders text on a real Parallels
+screen after boot services exit (not just during boot, which already
+worked before this milestone) is the next real step, and is on the user
+to test with the current `esp.hdd`.
+
 ### Parallels disk attachment: a real trap, not a hunch
 
 Getting `esp.img` to actually boot in Parallels took a few wrong turns worth
@@ -1567,25 +1719,29 @@ attachment mechanism was wrong.
 
 ### Next milestone
 
-**Parallels console output is now a confirmed dead end for
-virtio-console specifically, tested on real hardware, not a pause or an
-open question anymore.** The QEMU-side driver is done and verified end
-to end (discovery, feature negotiation, virtqueue setup, real bytes
-reaching the host) - but a real Parallels boot, plus a full PCI device
-inventory taken directly from that hardware (see "virtio-console"
-above), showed no virtio-console device over PCI (virtio's own vendor
-ID appears only for networking) and no direct evidence of one over MMIO
-either. The actual serial port is very likely a proprietary Parallels
-device (vendor `0x1ab8`, no public spec) - reverse-engineering it was
-considered and explicitly declined as an open-ended task with no
-guaranteed payoff, a deliberate choice, not a default. Revisit only if
-real documentation or driver source for that device ever surfaces.
+**Parallels console output has a real, better-grounded answer now: the
+GOP framebuffer console (see "GOP framebuffer console" above), built and
+confirmed working on QEMU, with real-Parallels-hardware confirmation the
+one remaining open step.** virtio-console remains a confirmed dead end
+on Parallels specifically (tested on real hardware, not a pause or an
+open question) - a full PCI device inventory taken directly from that
+hardware showed no virtio-console device over PCI and no direct evidence
+of one over MMIO either; the actual serial port is very likely a
+proprietary Parallels device (vendor `0x1ab8`, no public spec), and
+reverse-engineering it was considered and explicitly declined. The
+framebuffer console doesn't depend on any of that - GOP is a standard
+UEFI protocol, needs no address guessing, and this project's own
+Parallels boot screenshots already show it rendering correctly during
+boot services. **What's not yet confirmed: whether it keeps working
+after `exit_boot_services`, on real Parallels hardware specifically** -
+everything about this milestone has only been verified against QEMU's
+`ramfb` device so far.
 
 **In the meantime, kernel development continues against QEMU**, which has a
-fully working console via ACPI/SPCR (and, as of this milestone, a second,
-confirmed-working path via virtio-console, currently only reachable as a
-fallback or by the same temporary force used to verify it — see
-"virtio-console" above). MMU/identity-paging, the timer-driven
+fully working console via ACPI/SPCR (plus confirmed-working fallback paths
+via virtio-console and, now, the GOP framebuffer console - both currently
+only reachable as a fallback or via the same temporary-force technique
+used to verify each). MMU/identity-paging, the timer-driven
 preemption tick, the syscall boundary, real preemptive task switching, a
 working interactive echo shell, a shell that's a real disk-loaded,
 configuration-selected userland program, a working runtime virtio-blk
@@ -1657,21 +1813,34 @@ Parallels specifically (see "virtio-console" above: real hardware
 testing found no virtio-console device there at all, over either
 transport this project can drive) - a receive virtqueue is still a real
 gap for any *other* platform that does expose console via virtio-mmio/
-virtio-pci, just not Parallels. Also still true from before this
-milestone: strict round-robin only, no priorities or blocking; FP/SIMD
-state still isn't saved anywhere (`exceptions.rs`'s `Context`).
+virtio-pci, just not Parallels. `fbconsole.rs` (the GOP framebuffer
+console, see above) is also write-only, for an unrelated reason - no
+keyboard driver exists in this kernel at all, so even a platform where
+the framebuffer console is the only option has no way to type into it
+yet; has no colour or ANSI escape parsing; and its MMU device-block
+fallback mapping (for a framebuffer outside the discovered RAM span) is
+unverified against anything but QEMU's RAM-backed `ramfb`. Also still
+true from before this milestone: strict round-robin only, no priorities
+or blocking; FP/SIMD state still isn't saved anywhere (`exceptions.rs`'s
+`Context`).
 
-Reasonable next steps from here: `pci::log_all_devices` (new this
-milestone) is a real, reusable diagnostic worth remembering for any
-future "why can't this platform's hardware be found" question, not just
-this one; a real relocating loader (ELF + relocation processing), which
-would lift both the `core::fmt` and literal-comparison restrictions;
-blocking/waiting primitives so tasks can do more than an unconditional
-round-robin `wfe` loop; or output redirection (`>`/`>>`), now that
-`write_file`/`cp` give it something real to build on but shell-side
-command-line parsing still doesn't exist. Parallels console output
-itself stays a confirmed dead end for virtio-console unless real
-documentation for its proprietary serial device (vendor `0x1ab8`)
+Reasonable next steps from here: **confirming the GOP framebuffer
+console on real Parallels hardware is the most immediate one** - the
+rest of this list is unblocked work available regardless of that
+outcome. `pci::log_all_devices` is a real, reusable diagnostic worth
+remembering for any future "why can't this platform's hardware be
+found" question; a real relocating loader (ELF + relocation
+processing), which would lift both the `core::fmt` and
+literal-comparison restrictions; blocking/waiting primitives so tasks
+can do more than an unconditional round-robin `wfe` loop; a keyboard
+driver (USB HID over UEFI, most likely), which would give the
+framebuffer console a real input path for the first time and matter for
+any future platform where it's the only console available; or output
+redirection (`>`/`>>`), now that `write_file`/`cp` give it something
+real to build on but shell-side command-line parsing still doesn't
+exist. Parallels' *byte-stream* console output stays a confirmed dead
+end for virtio-console unless real documentation for its proprietary
+serial device (vendor `0x1ab8`)
 someday surfaces - not something to keep chasing without that.
 
 ## Commands
@@ -1733,9 +1902,12 @@ kernel/
   src/devicetree.rs  console UART discovery via the UEFI-provided devicetree (dead end on QEMU/Parallels)
   src/acpi.rs        console UART discovery via ACPI RSDP -> XSDT -> SPCR (works on QEMU, dead end on Parallels)
   src/pci.rs         console UART discovery via PCI enumeration for a class 0x07/0x00 serial controller, plus log_all_devices - a reusable full-bus diagnostic dump, see "virtio-console" above
-  src/console.rs     global console handle (Console enum: Pl011 | Uart16550 | Virtio), shared between main() and the exception handler
+  src/console.rs     global console handle (Console enum: Pl011 | Uart16550 | Virtio | Framebuffer), shared between main() and the exception handler
+  src/framebuffer.rs GOP (EFI_GRAPHICS_OUTPUT_PROTOCOL) discovery: resolution/stride/pixel format + framebuffer physical base/size - the real lead for Parallels, see "GOP framebuffer console" above
+  src/font.rs        embedded public-domain 8x8 bitmap font (dhepper/font8x8), printable ASCII 0x20-0x7E only
+  src/fbconsole.rs   text console rendered directly into the GOP framebuffer: glyph drawing, cursor, ptr::copy-based scroll - write-only, no ANSI parsing, see "GOP framebuffer console" above
   src/exceptions.rs  AArch64 exception vector table (VBAR_EL1) + fault reporting
-  src/mmu.rs         replaces firmware's translation tables with our own identity map (L0->L1->L2->L3 as needed), up to MAX_EL0_REGIONS independent EL0 regions
+  src/mmu.rs         replaces firmware's translation tables with our own identity map (L0->L1->L2->L3 as needed), up to MAX_EL0_REGIONS independent EL0 regions, plus an optional framebuffer device-block fallback
   src/gic.rs         GICv2 driver (QEMU virt addresses, confirmed via devicetree dump)
   src/timer.rs       ARM generic timer (non-secure EL1 physical timer, PPI 14 / GIC INTID 30), TICK_INTERVAL_MS
   src/loader.rs      reads INIT.CFG + a program off the ESP during boot services, into a 2MB-aligned EL0-accessible region - see docs/processes.md
