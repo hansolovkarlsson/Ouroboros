@@ -20,7 +20,7 @@ covers everything between that bare prompt and a real, disk-backed
 userland shell, which is what this document's driver finally had
 something to type into.
 
-Five real, confirmed bugs, each found by direct evidence (register
+Six real, confirmed bugs, each found by direct evidence (register
 dumps, decoded exception registers, byte-for-byte comparisons) rather
 than guessing. In order:
 
@@ -33,6 +33,10 @@ than guessing. In order:
 4. Parallels' USB passthrough silently not forwarding an entire class of
    USB request to the physical device.
 5. A working driver reading the wrong physical device.
+6. A driver that quietly dropped a keystroke once real preemption gave
+   it something new to be interrupted by — found weeks later, in a
+   separate milestone, but it belongs here with the rest of this
+   driver's history.
 
 ## Background: why this was hard to see coming
 
@@ -357,6 +361,125 @@ everything else about your driver is working correctly. This bug only
 became visible *because* the rest of the driver was finally right; it
 had been silently waiting behind four other bugs the whole time.
 
+## Bug 6: a driver that assumed one report never contains two keystrokes
+
+This one didn't surface the same day as the other five — it took a
+later, separate milestone (real ACPI-based interrupt-controller
+discovery, giving this platform working preemptive multitasking for the
+first time) to expose it, because that milestone changed something this
+driver had always quietly relied on: how often it actually gets to run.
+
+**Symptom:** once preemptive task-switching started working on real
+hardware, typed input occasionally arrived at the shell one character
+short — `uptime` typed correctly would sometimes show up as `uptme` or
+`uptie`. Not a hang, not a crash, not even consistent: it happened
+roughly once every several commands, never reproduced identically twice,
+and — the detail that made it genuinely confusing — the driver's own
+debug log showed every expected HID report arriving, *including* the
+one for the character that went missing.
+
+**The trap:** that last detail pointed straight at the wrong culprit.
+The obvious-looking explanation was a hardware/timing race — this
+driver only ever keeps one interrupt-transfer buffer posted to the
+device at a time, re-arming it fresh after each read, and once the
+consuming task only runs in alternating time slices instead of
+continuously, a report arriving before that re-arm completes has less
+slack than it used to. That's a real, entirely plausible failure mode
+for polled USB HID input in general — it just wasn't what was actually
+happening here, and assuming it was would have sent the fix in the
+wrong direction (retry/backoff logic, or a second buffer) instead of at
+the real bug.
+
+**Root cause, found by actually reading the code path the log line
+lived in rather than trusting the log line's implication:** a single
+polled HID report can legitimately contain more than one newly-pressed
+keycode at once. USB HID's boot-protocol keyboard report format reports
+*currently held* keys, up to six at a time, not a queue of press/release
+events — so if this driver's own poll happens to land after two
+separate keys have both transitioned to pressed since the last poll
+(most likely when a poll gets skipped because this task was preempted
+between two hardware samples, but not exclusively — two real keys
+pressed within one poll interval can do it too, preemption or not), both
+show up together in the very next report it reads. The driver's report
+handler looked like this:
+
+```rust
+let previous = self.last_report;
+self.last_report = buf;                    // recorded before scanning
+console::println!("xhci: report {buf:02x?}");
+
+for &keycode in &buf[2..8] {
+    if keycode == 0 || keycode < 4 { continue; }
+    if previous[2..8].contains(&keycode) { continue; }
+    if let Some(ascii) = keycode_to_ascii(keycode, shift) {
+        return Some(ascii);                 // returns on the FIRST match
+    }
+}
+```
+
+`self.last_report = buf` runs — recording this entire report as "already
+seen" — *before* the scan loop that looks for newly-pressed keys, and
+the loop itself returns on the first qualifying keycode it finds. If a
+report contains two new keycodes, the first is correctly translated and
+returned; the second is gone forever, not just delayed — the very next
+poll compares against `last_report`, which already includes it, so it
+can never look "new" again. The debug print a few lines above the loop
+explains exactly why the log showed the "missing" character's report:
+that line runs unconditionally for every accepted report, whether the
+scan loop below it manages to return all of that report's new keys or
+only some of them.
+
+**Fix:** stop discarding everything past the first match. Drain *every*
+qualifying keycode from a report into a small fixed-size pending buffer
+(5 slots — a report holds at most 6 simultaneous keycodes, and the
+first one found is always returned immediately rather than queued, so
+at most 5 can ever need to wait), and drain that buffer on subsequent
+polls before ever touching the event ring again:
+
+```rust
+fn poll_key(&mut self) -> Option<u8> {
+    if self.pending_len > 0 {
+        let ascii = self.pending[0];
+        self.pending.copy_within(1..self.pending_len, 0);
+        self.pending_len -= 1;
+        return Some(ascii);
+    }
+    // ... unchanged: pop an event, read the report, re-arm, edge-detect ...
+    let mut result = None;
+    for &keycode in &buf[2..8] {
+        if keycode == 0 || keycode < 4 { continue; }
+        if previous[2..8].contains(&keycode) { continue; }
+        let Some(ascii) = keycode_to_ascii(keycode, shift) else { continue };
+        if result.is_none() {
+            result = Some(ascii);
+        } else {
+            self.pending[self.pending_len] = ascii;
+            self.pending_len += 1;
+        }
+    }
+    result
+}
+```
+
+**Confirmed fixed on real hardware, not just reasoned through:** ten
+consecutive `uptime` invocations typed back-to-back, all recognized
+correctly with zero drops — a clear, direct contrast against the
+intermittent failures observed before the fix, on the exact platform
+and exact input pattern that had triggered it.
+
+**Lesson:** a debug log line that runs unconditionally, positioned
+*before* the logic that determines the actual outcome, can make a bug
+look like it's in a completely different layer of the system than it
+actually is. "The log shows the data arrived" and "the log shows the
+data was correctly handled" are different claims, and it's worth being
+precise about which one a given print statement is actually proving
+before trusting it to rule anything out. It's also a reminder that a
+platform change elsewhere in the system (here: real preemption finally
+working) can expose a latent bug in completely unrelated code that had
+simply never been exercised under those conditions before — this
+report-coalescing possibility had presumably always existed, it just
+needed a poll gap wide enough to matter.
+
 ## Debugging techniques that generalized well
 
 A few things that were reused across more than one bug above, worth
@@ -402,13 +525,16 @@ calling out on their own:
 A real, physical USB keyboard, on real Parallels-on-Apple-Silicon
 hardware, typing into a shell running on a from-scratch kernel with no
 prior USB support at all — full round trip confirmed: individual
-keystrokes, backspace, Enter submitting a real command line. Getting
-there took a from-scratch xHCI driver (capability/operational register
-programming, command ring, event ring, device slot enumeration, control
-transfers, and finally a real interrupt-endpoint transfer ring) and five
-real, independently-confirmed hardware bugs along the way, none of which
-were visible on the software emulator this project otherwise develops
-against day to day.
+keystrokes, backspace, Enter submitting a real command line, with every
+keystroke landing correctly even under real preemptive multitasking.
+Getting there took a from-scratch xHCI driver (capability/operational
+register programming, command ring, event ring, device slot enumeration,
+control transfers, and finally a real interrupt-endpoint transfer ring)
+and six real, independently-confirmed hardware bugs along the way — five
+found in the initial one-day push, none of them visible on the software
+emulator this project otherwise develops against day to day, and a
+sixth found weeks later, exposed only once a separate milestone gave
+this platform real preemption for the first time.
 
 If you're doing the equivalent work for your own kernel: budget for the
 fact that "works on QEMU" and "works on a real hypervisor" are

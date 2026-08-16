@@ -405,6 +405,119 @@ having run).
 goal of this entire arc - a live, rendering, prompt-displaying shell on
 real hardware, for the first time in the project's history.
 
+## Closing the preemption gap: real ACPI interrupt-controller discovery, and `wfe` strikes again
+
+The paragraph just above accepted "no preemptive multitasking on this
+platform" as a real, documented consequence of gating the interrupt
+controller off entirely. That gap got closed in a later session - and
+closing it needed one more real driver, plus a second, independent
+encounter with the exact same instruction (`wfe`) that already caused
+trouble once in this document, in a completely different way the
+second time.
+
+**Why the old GIC address could never be the real fix.** The interrupt
+controller addresses this project had been using were pinned down by
+dumping one specific emulator's own internal hardware description -
+exactly the same technique this document's "GIC and the timer tick"
+section used, and exactly the same category of QEMU-shaped convention
+that a real hardware bus fault (decoded above) already proved unsafe on
+real hardware. Guessing better addresses wasn't the fix; discovering
+them genuinely was. ACPI has a standard table for exactly this - the
+"MADT" (the historical, still-current name for a table whose actual
+on-disk signature is `"APIC"`) - the same portable-discovery role this
+document's ACPI SPCR parser already plays for the console. A new parser
+walks the MADT's own interrupt-controller structures and reads the
+platform's *real* interrupt-controller version and addresses directly,
+no emulator-specific dump required.
+
+**A second real complication: the two platforms don't even run the
+same interrupt controller generation.** The GIC version already in use
+(GICv2) is memory-mapped throughout - a distributor, a CPU interface,
+done. Real Apple Silicon virtualization almost certainly runs GICv3
+instead, which is architecturally different enough to need a genuinely
+separate driver, not new addresses for the old one: the CPU interface
+moves entirely into CPU system registers (no memory-mapped access at
+all), per-interrupt enable for the timer's own interrupt line moves
+from the shared distributor to a **per-CPU redistributor** region that
+has to be located and explicitly woken up first, and even finding which
+redistributor belongs to *this* CPU needs a real discovery walk rather
+than assuming the first one found is the right one - the same
+"discover, don't assume" discipline this project had already learned
+the hard way once, when an earlier driver's "trust the first port that
+responds" logic turned out to be reading the wrong physical device
+entirely.
+
+**Two real bugs, both found on the safe, fast, iterable platform before
+ever spending a real-hardware round trip on them.** Forcing the
+emulator itself into the newer interrupt-controller generation (a
+one-line configuration flag it already supports) let both of these get
+found and fixed cheaply:
+
+- The newer controller's global enable register needs more than the one
+  bit its predecessor used - enabling only that one bit silently routes
+  interrupts to the *wrong* internal delivery group, one this kernel's
+  own CPU-interface setup was never listening on. No fault, no crash -
+  the timer just silently never reached the handler at all, isolated
+  only by noticing a supposedly-live tick counter had stayed frozen at
+  zero.
+- Each interrupt line also needs an explicit per-line assignment to
+  that same delivery group, at the newly-relevant per-CPU redistributor
+  level this generation introduces - a register with no equivalent at
+  all in the older generation, easy to not know exists until a
+  cross-check against a real, independent reference implementation's
+  own bring-up sequence turns it up.
+
+Both fixed and reverified with the same sustained-tick discipline this
+document's earlier GIC section already established - not just "it
+printed once," a real run showing a correctly, continuously
+incrementing count with zero faults in an independent exception trace.
+
+**On real hardware, the interrupt-controller discovery itself worked
+cleanly, first try** - a genuinely different, platform-specific address
+from the emulator's, no crash, no hang. That resolved the single
+biggest open question going in (whether this platform's ACPI tables
+described an interrupt controller at all, given that its own console
+description table had already turned out to be silently absent). Timer
+interrupts reaching the CPU and being correctly acknowledged was
+separately, conclusively confirmed too - a real, live, continuously
+increasing tick count, verified by deliberately disabling just the
+*next* piece and confirming the count kept climbing on its own.
+
+**Then the second `wfe` bug showed up - not the same one as before, a
+new instance, one level deeper.** This document's own earlier section
+("A quieter EL0 bug") already covered `wfe` trapping to the wrong
+exception level by default on this architecture - a config-register fix
+inside this kernel's own control. This time, enabling the actual
+task-switch (not just the interrupt delivery that drives it) hung the
+system completely, on real hardware only, the very first time that
+exact code path had ever run there - no exception, no crash report, just
+silence. A single-variable check (temporarily leaving interrupt
+delivery fully active while skipping only the switch itself) proved the
+interrupt path was completely fine on its own; the hang was
+specifically in resuming a second, previously-idle task. That idle
+task's own loop was, again, `wfe` - and this time the fix wasn't a
+register bit this kernel controls at all. The leading explanation,
+still not fully proven: a real hypervisor sitting *above* this guest
+kernel may intercept or emulate `wfe` in a way that never faithfully
+reproduces on the software emulator this project develops against day
+to day - a decision this kernel has no visibility into and no way to
+influence, one exception level higher than the register this document's
+earlier `wfe` fix ever had to touch. Swapping that one idle loop for a
+plain busy-wait - giving up a small, previously-unneeded amount of
+power efficiency for correctness - made the hang disappear completely,
+confirmed by a sustained, multi-command interactive session with a
+correctly climbing tick count throughout, not a single lucky pass.
+
+**Lesson:** the same instruction can bite a kernel twice, in
+architecturally unrelated ways, at two different privilege boundaries -
+"we already found the `wfe` bug" is a trap in itself if it stops you
+from looking closely the second time something built around the same
+instruction misbehaves somewhere else. And a platform capability
+gained specifically to fix one problem (interrupt delivery, here) can
+immediately expose a second, completely unrelated one (the task switch)
+that was always latent but had simply never had the chance to run
+before.
+
 ## Techniques that generalized well
 
 - **When a fault is a permission fault, not a translation fault, look
@@ -445,5 +558,7 @@ mechanisms and one dead-end driver, a real, live, interactive console on
 real Parallels-on-Apple-Silicon hardware - the actual foundation
 everything after it was built on top of: turning that bare prompt into
 a [real, disk-backed userland shell](shell-and-filesystem-postmortem.md),
-and eventually, [real keyboard input](xhci-keyboard-postmortem.md)
-reaching it.
+[real keyboard input](xhci-keyboard-postmortem.md) reaching it, and -
+the last major piece, closed in a later session covered in this same
+document above - real, preemptive multitasking on that same real
+hardware, not just the emulator.

@@ -118,7 +118,7 @@
         <dd>A cache of recent virtual-to-physical address translations. Has to be explicitly invalidated (<code class="inline">tlbi</code>) whenever the page tables change, or the CPU may keep using stale mappings.</dd>
 
         <dt id="wfe">WFE <span class="term-full">Wait For Event</span></dt>
-        <dd>An ARM instruction that parks the CPU in a low-power idle state until woken by an event or interrupt. Used for both the kernel's own halt loop and (with a real gotcha — it traps to EL1 by default rather than executing directly) EL0's idle loop.</dd>
+        <dd>An ARM instruction that parks the CPU in a low-power idle state until woken by an event or interrupt. Bit Ouroboros twice, at two different privilege boundaries: once early on, where it turned out to trap to EL1 by default instead of executing directly at EL0 (a kernel-controlled register bit, fixed once and for all); and again much later, where enabling real task-switching on real Parallels hardware hung the system the first time an idle task's <code class="inline">wfe</code> loop ever ran there for real — a bug one level higher than the kernel's own control, not yet fully explained, worked around by having that idle loop busy-spin instead.</dd>
 
         <dt id="svc">SVC <span class="term-full">Supervisor Call</span></dt>
         <dd>The instruction userland code uses to deliberately trap into the kernel — the actual mechanism behind every syscall. EL0 code puts a syscall number in a register and executes <code class="inline">svc</code>; the kernel's exception handler recognizes this specific case and dispatches it, rather than treating it as an error.</dd>
@@ -134,10 +134,10 @@
       <dl class="terms">
 
         <dt id="gic">GIC <span class="term-full">Generic Interrupt Controller</span></dt>
-        <dd>The ARM hardware block that routes interrupts (like the timer tick) to the CPU. Ouroboros uses GICv2, at addresses confirmed by dumping QEMU's own internal devicetree — addresses later confirmed, via a real bus fault, to not exist at all on real Parallels hardware.</dd>
+        <dd>The ARM hardware block that routes interrupts (like the timer tick) to the CPU. Ouroboros originally used GICv2 at addresses confirmed only by dumping QEMU's own internal devicetree — addresses later confirmed, via a real bus fault, to not exist at all on real Parallels hardware. Real ACPI MADT parsing (see below) replaced that guess with genuine platform discovery, and a GICv3 backend was added alongside the original GICv2 one, dispatched by whichever version the real hardware reports.</dd>
 
         <dt id="gicv3">GICv3</dt>
-        <dd>A newer, architecturally different GIC generation — system-register-based rather than memory-mapped, with per-CPU "redistributors" instead of one shared distributor. The likely real interrupt controller on Parallels, and the reason preemption doesn't yet work there: this hasn't been implemented.</dd>
+        <dd>A newer, architecturally different GIC generation — system-register-based CPU interface rather than memory-mapped, with per-CPU "redistributors" instead of one shared distributor for enabling a given CPU's own interrupts. Confirmed to be the real interrupt controller on Parallels via MADT discovery, and a real driver for it now works there — including real preemptive task-switching, after a separate, unrelated bug (see WFE, below) was found and fixed.</dd>
 
         <dt id="ppi">PPI <span class="term-full">Private Peripheral Interrupt</span></dt>
         <dd>A GIC interrupt category for sources private to one CPU core, rather than shared across all of them — the generic timer's interrupt is a PPI.</dd>
@@ -146,7 +146,10 @@
         <dd>The numeric identifier the GIC uses for a specific interrupt source — the timer tick is INTID 30 on this hardware.</dd>
 
         <dt id="madt">MADT <span class="term-full">Multiple APIC Description Table</span></dt>
-        <dd>The ACPI table that describes a platform's interrupt controller(s) and CPU topology. Not yet parsed by Ouroboros — doing so is the planned way to discover Parallels' real interrupt controller instead of guessing.</dd>
+        <dd>The ACPI table that describes a platform's interrupt controller(s) and CPU topology — its on-disk signature is literally <code class="inline">"APIC"</code>, the table's older x86 name, not <code class="inline">"MADT"</code>. Now parsed by Ouroboros (<code class="inline">madt.rs</code>) as the genuine, portable way to discover a platform's real interrupt controller instead of guessing — confirmed working on both QEMU and real Parallels hardware, reporting completely different, correct addresses on each.</dd>
+
+        <dt id="redistributor">Redistributor <span class="term-full">GICR</span></dt>
+        <dd>A GICv3-specific, per-CPU memory region (distinct from the older, shared distributor) where that CPU's own private interrupts — like its own timer tick — get enabled and where the CPU must be explicitly "woken" before it will deliver anything. Finding the redistributor belonging to a specific CPU, when several may be described together, needs its own discovery walk rather than assuming the first one found is the right one.</dd>
 
       </dl>
     </section>

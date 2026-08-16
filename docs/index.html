@@ -82,10 +82,11 @@
     <p>
       The short version: there is a real, disk-loaded userland shell,
       with a working command surface over a real filesystem, running on
-      real Parallels hardware — with a live display and a real, physical
-      USB keyboard typing into it. Preemptive multitasking still only
-      works under QEMU; Parallels' interrupt controller hasn't been
-      discovered yet (see "what's next" below).
+      real Parallels hardware — with a live display, a real, physical
+      USB keyboard typing into it, and, as of the latest milestone, real
+      preemptive multitasking. Disk commands still don't work on
+      Parallels specifically — no virtio-blk device exists there over
+      any transport this project can drive (see "what's next" below).
     </p>
 
     <ol class="timeline">
@@ -111,11 +112,15 @@
       </li>
       <li class="done">
         <span class="tl-title">USB HID keyboard input</span>
-        <p>A from-scratch xHCI driver, five independently-confirmed real-hardware bugs, ending in a real physical keyboard typing into the shell on real Parallels hardware — full round trip, letters, backspace, Enter.</p>
+        <p>A from-scratch xHCI driver, six independently-confirmed real-hardware bugs (five found in the initial push, a sixth — dropped keystrokes under real preemption — found and fixed weeks later), ending in a real physical keyboard typing into the shell on real Parallels hardware — full round trip, letters, backspace, Enter.</p>
+      </li>
+      <li class="done">
+        <span class="tl-title">Real interrupt-controller discovery, and full preemption on Parallels</span>
+        <p>Real ACPI MADT parsing replaced the old QEMU-devicetree-derived GIC address; a new GICv3 driver reaches real hardware for the first time. A second real-hardware-only bug (the task switch hanging via <code class="inline">wfe</code>, likely trapped by the host hypervisor) was root-caused and fixed the same session. Preemptive, two-task multitasking now works end to end on real Parallels hardware.</p>
       </li>
       <li>
         <span class="tl-title">What's next</span>
-        <p>Real interrupt-controller discovery (ACPI MADT, likely GICv3) to lift the "no preemption on Parallels" limitation; a relocating loader to remove the current no-<code class="inline">core::fmt</code>/no-literal-comparison restriction on userland programs; blocking/waiting primitives; output redirection.</p>
+        <p>A relocating loader to remove the current no-<code class="inline">core::fmt</code>/no-literal-comparison restriction on userland programs; blocking/waiting primitives; output redirection; virtio-blk/virtio-mmio on Parallels remain unaddressed (no such device present there over any transport this project can drive).</p>
       </li>
     </ol>
 
@@ -142,7 +147,7 @@
       <a class="pm-card" href="postmortem-xhci-keyboard.html">
         <span class="pm-eyebrow">Part 3 · xHCI keyboard</span>
         <h3>Getting a USB keyboard working on Parallels</h3>
-        <p>Five real, confirmed hardware bugs bringing keyboard input to the kernel — a PCI Command register bit, a real UEFI firmware panic, a page-table assumption, a silently-dropped USB request class, and a driver reading the wrong device.</p>
+        <p>Six real, confirmed hardware bugs bringing keyboard input to the kernel — a PCI Command register bit, a real UEFI firmware panic, a page-table assumption, a silently-dropped USB request class, a driver reading the wrong device, and — found weeks later — dropped keystrokes under real preemption.</p>
       </a>
     </div>
 
