@@ -99,6 +99,27 @@ fn main() -> Status {
         // we still have a working boot-services console to log through.
         pci::log_all_devices();
     }
+    // A real, hardware-confirmed reason for this flag, not a hedge: real
+    // Parallels hardware took a genuine Synchronous External Abort
+    // (ESR_EL1 EC=0x25, DFSC=0x10 - a real bus fault, not a permission/
+    // translation issue) reading virtio_mmio's very first scan address
+    // (`FAR_EL1` matched `virtio_mmio::SLOT_BASE` exactly) - see
+    // `virtio_mmio.rs`'s module doc comment and CLAUDE.md's "GOP
+    // framebuffer console, take four". `find_device`'s scan has no way to
+    // fail soft from a real bus fault (this kernel has no resumable EL1
+    // synchronous-fault path, only the diverging report-and-halt one -
+    // see `exceptions.rs`), so the only safe thing to do on a platform
+    // where a byte-stream console couldn't be found the normal way is to
+    // not run that scan at all, for *any* caller - virtio-console
+    // (`try_virtio_console`) and virtio-blk (`init_storage`) alike, both
+    // built on the identical `virtio_mmio::find_device`. This is a
+    // heuristic, not a proof (a platform could in principle have no
+    // early console yet still safely support virtio-mmio), but it's
+    // grounded in the one real data point this project has - QEMU, the
+    // only platform virtio-mmio has ever been confirmed safe on, also
+    // always has a working ACPI/SPCR console - and it directly prevents
+    // a repeat of this exact crash.
+    let virtio_mmio_probe_safe = discovery.is_some();
 
     // GOP framebuffer discovery - also boot-services-only (see
     // framebuffer.rs's module doc comment), so it has to happen here
@@ -202,21 +223,31 @@ fn main() -> Status {
     }
 
     // A fifth and final fallback, tried only if every mechanism above -
-    // including the framebuffer console - has failed. Confirmed dead on
-    // Parallels specifically (no such PCI device, see CLAUDE.md's
-    // "virtio-console" section) and now suspected of being actively
-    // unsafe there too (see `try_virtio_console`'s doc comment) - kept
-    // only for a hypothetical future platform with no GOP but a real
-    // virtio-mmio console device.
-    if !console::is_installed() {
+    // including the framebuffer console - has failed, *and* only if
+    // `virtio_mmio_probe_safe` says the underlying scan isn't known to be
+    // dangerous here. Confirmed dead on Parallels specifically (no such
+    // PCI device, see CLAUDE.md's "virtio-console" section) and now
+    // confirmed to crash outright there too, not just fail to find
+    // anything (see `virtio_mmio_probe_safe`'s own comment above) - kept
+    // only for a hypothetical future platform with no GOP but a real,
+    // safely-probeable virtio-mmio console device.
+    if virtio_mmio_probe_safe && !console::is_installed() {
         try_virtio_console();
     }
 
     // The runtime storage stack (docs/CHANGELOG.md phases 3a/3b): virtio-blk
     // + FAT32, installed globally for fs_list_dir/fs_read_file
     // (syscall.rs) to use. Not fatal if it fails - see init_storage's doc
-    // comment.
-    init_storage();
+    // comment. Gated on the same `virtio_mmio_probe_safe` flag as
+    // virtio-console above - virtio_blk::Device::discover() goes through
+    // the identical `virtio_mmio::find_device` scan that's now confirmed
+    // to crash on real Parallels hardware, so this is skipped there for
+    // the same reason, not a separate decision.
+    if virtio_mmio_probe_safe {
+        init_storage();
+    } else {
+        console::println!("Ouroboros kernel: skipping virtio-blk (unconfirmed-safe virtio-mmio scan on this platform) - disk commands won't work this boot");
+    }
 
     // SAFETY: GICD/GICC are mapped by the identity map just installed
     // above (both fall within the low-1GB device block).
@@ -246,9 +277,12 @@ fn main() -> Status {
 
 /// Tries virtio-mmio for a console device - originally "the real lead for
 /// Parallels console output" (see `virtio_console.rs`'s module doc
-/// comment), now confirmed both nonexistent *and* possibly unsafe to even
-/// probe for there - see below - which is why this runs last, after the
-/// framebuffer console, not first.
+/// comment), now confirmed both nonexistent there *and* built on a scan
+/// (`virtio_mmio::find_device`) that's confirmed to crash real Parallels
+/// hardware outright - see `virtio_mmio.rs`'s module doc comment for the
+/// decoded exception. Only reached at all when `virtio_mmio_probe_safe`
+/// (`main`'s caller) is true, and even then only after the framebuffer
+/// console has had its chance.
 ///
 /// **Runs here, after `mmu::install_identity_map`, unlike devicetree/ACPI/
 /// PCI - a real constraint, not an arbitrary placement choice.**
@@ -257,28 +291,6 @@ fn main() -> Status {
 /// comment) - `virtio_blk::Device::discover` (`init_storage`, below)
 /// already only ever runs at this same point in boot, for the same
 /// reason.
-///
-/// **A real, unconfirmed assumption lives inside `find_device`'s scan,
-/// and real-Parallels-hardware testing points at it being wrong there.**
-/// The scan reads a magic-value register at 32 fixed, QEMU-specific
-/// addresses, and `virtio_mmio.rs`'s own comment says an unpopulated slot
-/// "reads as 0, not the magic value" on real hardware - stated as fact,
-/// but never actually confirmed the way this project's other platform
-/// conventions have been. A real bus fabric commonly raises an external
-/// abort for a read to genuinely unbacked device-memory space instead of
-/// QEMU's lenient software-emulated bus, which just returns a fixed
-/// pattern as a courtesy. This is now the prime suspect for a real
-/// symptom: a temporary raw-framebuffer-fill diagnostic confirmed the
-/// framebuffer mapping and display update both work correctly on real
-/// Parallels hardware (see CLAUDE.md's "GOP framebuffer console, take
-/// three"), yet the boot still froze solid at that exact point in the
-/// old ordering, which ran this function immediately afterward with no
-/// console yet installed to report a fault through - a silent freeze
-/// looks identical to "the scan just found nothing." Reordered so the
-/// now-validated framebuffer console goes first: Parallels gets a working
-/// console before this unconfirmed scan ever runs, and if it does fault
-/// on some future platform, there will finally be a console to report it
-/// through instead of nothing.
 fn try_virtio_console() {
     let mut device = match unsafe { virtio_console::Device::discover() } {
         Ok(device) => device,
@@ -335,6 +347,14 @@ fn try_framebuffer_console(fb_info: Option<framebuffer::Info>) {
 /// shell just won't have working disk commands (expected, not a bug, when
 /// booted via `make run`'s vvfat disk - FAT16, not FAT32, see
 /// `fat32.rs`'s module doc comment).
+///
+/// Only ever called when `main`'s `virtio_mmio_probe_safe` is true -
+/// `virtio_blk::Device::discover` goes through the same
+/// `virtio_mmio::find_device` scan confirmed to crash real Parallels
+/// hardware (see that module's doc comment), so this whole function is
+/// skipped there rather than "not fatal if it fails" the way every other
+/// failure mode here is - a crash isn't a failure this function could
+/// recover from and report.
 fn init_storage() {
     let mut device = match unsafe { virtio_blk::Device::discover() } {
         Ok(device) => device,

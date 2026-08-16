@@ -7,6 +7,43 @@ what broke, how it was diagnosed), see `CLAUDE.md`; for *how* something
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## GOP framebuffer console, round three: it renders real text on Parallels, and directly confirmed the virtio_mmio crash
+
+**The goal:** with the console-fallback reorder in place, the user
+tested a third time. Real progress - genuinely readable kernel text
+rendered live on real Parallels hardware after `exit_boot_services`, a
+first for this project - but the boot still halted, this time with an
+exception report as the last thing printed.
+
+- The rendered exception (`EXCEPTION vector=4 esr_el1=0x96000010
+  far_el1=0xa000000 elr_el1=0xbba94c68`) decodes to EC `0x25` (Data
+  Abort, same EL) with DFSC `0x10` (Synchronous External abort - a real
+  bus fault) at `FAR_EL1 = virtio_mmio::SLOT_BASE` exactly - direct,
+  decoded proof (not just a strong suspicion) that the virtio-mmio
+  magic-value scan crashes real Parallels hardware on its very first
+  read.
+- The freeze this time was total, not just a lost console: `init_storage()`
+  runs unconditionally after the console fallback chain, and
+  `virtio_blk::Device::discover()` goes through the identical
+  `virtio_mmio::find_device` scan - so the console reorder alone wasn't
+  enough, the disk driver's own use of the same unsafe scan was always
+  going to hit the same wall moments later.
+- **Fix:** a new `virtio_mmio_probe_safe` flag (`true` only when a
+  byte-stream console was found via devicetree/ACPI/PCI - the one
+  platform this scan has ever been confirmed safe on) now gates *every*
+  caller of `virtio_mmio::find_device`, both `try_virtio_console` and
+  virtio-blk discovery. `virtio_mmio.rs`'s doc comments were corrected -
+  the old claim that unbacked reads "read as 0" on real hardware was
+  never confirmed, and is now confirmed wrong.
+- Re-verified on QEMU across three scenarios: the normal ACPI-console
+  regression pass (virtio-blk still initializes normally, confirmed
+  against both FAT16 vvfat and a real FAT32 image with working `ls`/
+  `cat`), and a forced `discovery=None` + `ramfb` test simulating the
+  actual Parallels shape end to end - framebuffer console live, a clean
+  "skipping virtio-blk" message, and a fully working interactive shell
+  prompt. Zero aborts across all three. Not yet re-confirmed on real
+  Parallels hardware.
+
 ## GOP framebuffer console, round two: display-write visibility confirmed, virtio-console MMIO scan reordered out of the way
 
 **The goal:** with the `open_protocol_exclusive` fix in place, the user

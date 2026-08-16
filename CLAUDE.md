@@ -1821,6 +1821,88 @@ reasoned from the fill diagnostic's result plus the `virtio_mmio.rs`
 comment's unconfirmed assumption, not from a third round of
 real-hardware testing yet.
 
+### GOP framebuffer console, take four: it works - real text, rendered live on Parallels, and it directly confirmed the `virtio_mmio` crash
+
+With the reorder from "take three" in place, the user tested a third
+time. **Success, and a first for this project: readable kernel text,
+rendered live on real Parallels hardware, after `exit_boot_services`.**
+The screenshot showed two real lines - `framebuffer console live
+(fallback - every byte-stream mechanism failed)`, then a second line the
+exception handler produced on its own. Both genuinely rendered through
+`fbconsole.rs`'s font/glyph/cursor logic, not just the raw fill from
+"take three" - the reorder fix worked exactly as designed.
+
+**The second line was a real exception report, and decoding it turned
+the previous section's suspicion into direct proof.** `EXCEPTION
+vector=4 esr_el1=0x96000010 far_el1=0xa000000 elr_el1=0xbba94c68`:
+`ESR_EL1` bits 31:26 (EC) = `0x25` (Data Abort, same exception level -
+EL1, matching vector 4's "Synchronous, Current EL, SPx" slot exactly);
+bits 5:0 (DFSC) = `0x10` (Synchronous External abort, not a
+translation-table-walk fault - a real bus fault, not a permission or
+mapping bug, ruling out an `mmu.rs` mistake). `FAR_EL1 = 0xa000000`
+matches `virtio_mmio::SLOT_BASE` exactly - the very first read, of the
+very first scan slot. Not "very likely" anymore: this is a directly
+observed, fully decoded real bus fault at the exact address the
+previous section's reasoning pointed at.
+
+**But the freeze this time was worse than "take three"'s, in a way the
+reorder alone didn't fix: this was the last thing ever printed, meaning
+the whole boot halted right there** - the interactive shell never
+started. Tracing why: `init_storage()` runs unconditionally right after
+the console fallback chain (regardless of which console, if any,
+installed), and `virtio_blk::Device::discover()` goes through the exact
+same `virtio_mmio::find_device` scan that just crashed for
+virtio-console - so even with the console-fallback reorder working
+correctly, the *disk* driver's own use of the identical unsafe scan was
+always going to hit the same wall moments later. The reorder fixed the
+console race but not the underlying problem: this scan is unsafe for
+*any* caller on this hardware.
+
+**Fix: a new `virtio_mmio_probe_safe` flag, computed once in `main`
+right after `discover_console` returns, gating every caller of
+`virtio_mmio::find_device` - both `try_virtio_console` and
+`init_storage`'s virtio-blk discovery - not just reordering them.**
+`true` only when a byte-stream console was actually found via
+devicetree/ACPI/PCI - the one platform shape (QEMU) this scan has ever
+been confirmed safe on. This is a heuristic, documented as one, not a
+proof (a platform could in principle lack an early console yet still
+safely support virtio-mmio) - but it's grounded in the one real data
+point available, and it directly prevents a repeat of this exact,
+now-decoded crash. The deeper, principled fix would be a resumable EL1
+synchronous-fault path so a probe read could fail soft instead of
+halting the kernel - a real gap (`exceptions.rs` only supports IRQ and
+the EL0-SVC path as resumable; every other synchronous fault is a
+diverging report-and-halt) - but that's meaningfully bigger work than
+this specific crash needed to unblock Parallels, so it's recorded as a
+real future improvement (see "Next milestone" below) rather than done
+here.
+
+`virtio_mmio.rs`'s module doc comment and its inline "unpopulated slot"
+comment were both corrected - the old claim that real hardware "reads
+as 0" was never actually confirmed, and is now confirmed *wrong*, not
+just unconfirmed.
+
+**Re-verified on QEMU after the gate, including the actual disk path,
+not just the console:** the normal `-nographic` ACPI-console regression
+pass (`help`/`uptime`) is unchanged, `virtio_mmio_probe_safe` correctly
+comes back `true` there so virtio-blk still initializes exactly as
+before - confirmed against *both* `make run`'s FAT16 vvfat (graceful
+"no FAT32 partition" message, matching every prior session) *and* a real
+FAT32 `esp.img` (`FAT32 mounted, disk commands available`, then real
+`ls`/`cat` output matching actual disk content) - not just the console
+half of the fix. A third test, forcing `discovery` to `None` while still
+using `ramfb` (simulating the actual Parallels-shaped "no early console,
+GOP present" case end to end), showed the complete intended sequence:
+`framebuffer console live` → a clean `skipping virtio-blk
+(unconfirmed-safe virtio-mmio scan on this platform)` message → `shell
+ready` → the userland shell's own banner and prompt, all rendered
+correctly - no crash, no fault, a real usable shell. Zero aborts across
+all three `-d int` cross-checks. **Still not re-confirmed on real
+Parallels hardware** - the previous two "fixed, needs a real-hardware
+recheck" cycles make that the obvious next step again, but this is the
+first version where reasoning through the evidence gives real confidence
+it'll actually reach a working shell, not just a further diagnostic.
+
 ### Parallels disk attachment: a real trap, not a hunch
 
 Getting `esp.img` to actually boot in Parallels took a few wrong turns worth
@@ -1853,24 +1935,30 @@ attachment mechanism was wrong.
 ### Next milestone
 
 **Parallels console output has a real, better-grounded answer now: the
-GOP framebuffer console (see "GOP framebuffer console" above), built and
-confirmed working on QEMU, with real-Parallels-hardware confirmation the
-one remaining open step.** Two real-hardware attempts so far, each
-surfacing and fixing a genuine bug: `open_protocol_exclusive` was
-silently disconnecting firmware's own console driver from GOP (see
-"take two"), and after that fix, `try_virtio_console`'s unconfirmed
-MMIO-scan assumption was very likely faulting silently before the
-framebuffer console ever got a chance to install (see "take three") -
-fixed by reordering the fallback chain so the now-hardware-validated
-framebuffer console goes first. **The load-bearing assumption behind
-this whole approach - that a direct write to the GOP framebuffer's
-physical memory is actually visible on the display, no explicit flush
-needed - is now confirmed on real Parallels hardware**, via a temporary
-raw-fill diagnostic that turned the whole screen solid white. What's
-still unconfirmed is whether the *current* code (with both fixes and the
-reorder) actually renders readable text there - the version tested so
-far only had the first fix, not the second. virtio-console remains a
-confirmed dead end
+GOP framebuffer console (see "GOP framebuffer console" above) - and as
+of "take four," it has actually rendered readable text live on real
+Parallels hardware, a first for this project.** Three real-hardware
+attempts so far, each surfacing and fixing a genuine bug:
+`open_protocol_exclusive` was silently disconnecting firmware's own
+console driver from GOP ("take two"); `try_virtio_console`'s MMIO scan
+then froze the boot with no console yet installed to report through
+("take three"'s reorder got the console installed, but not the fix
+"take four" needed); and decoding the resulting exception (a genuine
+Synchronous External Abort, `FAR_EL1` matching `virtio_mmio::SLOT_BASE`
+exactly) directly confirmed `virtio_mmio::find_device`'s scan crashes
+real Parallels hardware outright, not just fails to find anything -
+fixed with a `virtio_mmio_probe_safe` gate covering *every* caller of
+that scan (`try_virtio_console` and `init_storage`'s virtio-blk
+discovery both), not just a reorder. **The load-bearing assumption
+behind this whole approach - that a direct write to the GOP
+framebuffer's physical memory is actually visible on the display, no
+explicit flush needed - is confirmed on real Parallels hardware**, and
+so is the font/glyph/scroll rendering itself, via the real exception
+text that rendered on screen in "take four." What's still unconfirmed:
+whether the *current* code (all three fixes together) reaches a working
+interactive shell there - every version tested on real hardware so far
+was missing at least one of them. virtio-console remains a confirmed
+dead end
 on Parallels specifically (tested on real hardware, not a pause or an
 open question) - a full PCI device inventory taken directly from that
 hardware showed no virtio-console device over PCI and no direct evidence

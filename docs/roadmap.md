@@ -28,21 +28,23 @@ phase:
   in the tree, confirmed working on QEMU - just not the answer for
   Parallels.
 - ~~Build a GOP framebuffer console (the real lead after virtio-console)~~
-  — done and confirmed working on QEMU (`framebuffer.rs`/`font.rs`/
-  `fbconsole.rs`, see `CLAUDE.md`/`CHANGELOG.md`). Two real-Parallels
-  test rounds so far, each finding and fixing a real bug:
-  `open_protocol_exclusive` was silently disconnecting firmware's own
-  boot console from GOP ("take two"), and after that fix,
-  `try_virtio_console`'s unconfirmed MMIO-scan assumption was very
-  likely faulting silently before the framebuffer console could install
-  - fixed by reordering the fallback chain ("take three"). The
-  load-bearing assumption (direct framebuffer writes are actually
-  visible on Parallels' real display, no flush needed) is now confirmed
-  via a temporary raw-fill diagnostic. **Still needs confirmation that
-  the current code (both fixes plus the reorder) actually renders
-  readable text** - only tested on QEMU so far. Next step is on the
-  user: boot the current `esp.hdd` and confirm text renders on screen
-  after boot services exit.
+  — done, and as of "take four" it has actually rendered readable text
+  live on real Parallels hardware (`framebuffer.rs`/`font.rs`/
+  `fbconsole.rs`, see `CLAUDE.md`/`CHANGELOG.md`). Three real-Parallels
+  test rounds, each finding and fixing a real bug: `open_protocol_exclusive`
+  disconnecting firmware's own boot console from GOP ("take two");
+  `try_virtio_console`'s MMIO scan freezing the boot with no console
+  installed to report through ("take three"'s reorder got a console
+  installed, and that console then rendered the exception that led to
+  the real fix); and, decoded directly from that rendered exception
+  (`FAR_EL1` matching `virtio_mmio::SLOT_BASE` exactly), a genuine bus
+  fault in `virtio_mmio::find_device`'s scan - fixed with a
+  `virtio_mmio_probe_safe` gate covering every caller of that scan, not
+  just a reorder ("take four"). **Still needs confirmation that the
+  current code (all three fixes together) reaches a working interactive
+  shell there** - every real-hardware test so far was missing at least
+  one fix. Next step is on the user: `make parallels-hdd` and boot
+  again.
 - **Output redirection (`>`/`>>`)** — needs shell-level parsing this
   project doesn't have yet (splitting `cmd > file` into a command and a
   target). `cp` is done (see below); redirection is the one piece of

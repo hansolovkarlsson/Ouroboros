@@ -22,6 +22,28 @@
 //! `Version=2`, `DeviceID=2`, `VendorID=0x554d4551` ("QEMU") - exactly
 //! the modern (non-legacy) register layout below.
 //!
+//! **This scan is now confirmed unsafe to run on real Parallels
+//! hardware - not "unconfirmed," a direct, decoded crash.** An earlier
+//! version of this comment asserted an unpopulated slot "reads as 0, not
+//! the magic value" on real hardware - stated as fact, but never
+//! actually confirmed. It was wrong. Real-Parallels-hardware testing hit
+//! a genuine Synchronous External Abort on the very first read of the
+//! very first slot: `ESR_EL1 = 0x96000010` decodes to EC `0x25` (Data
+//! Abort, same exception level) with DFSC `0x10` (Synchronous External
+//! abort, not a translation-table-walk fault - i.e. a real bus fault,
+//! not a permission or mapping bug), and `FAR_EL1` matched [`SLOT_BASE`]
+//! exactly. See CLAUDE.md's "GOP framebuffer console, take four" for the
+//! full account. `main.rs` now gates every caller of [`find_device`]
+//! (`virtio_console`'s discovery and `virtio_blk`'s, the only two) behind
+//! a `virtio_mmio_probe_safe` heuristic - true only when a byte-stream
+//! console was already found via devicetree/ACPI/PCI, the one platform
+//! shape (QEMU) this scan has ever actually been confirmed safe on. This
+//! kernel has no resumable EL1 synchronous-fault path (see
+//! `exceptions.rs`), so there is currently no way for `find_device`
+//! itself to fail soft from a real bus fault - avoiding the scan
+//! entirely on unconfirmed platforms is the only mitigation available
+//! today.
+//!
 //! **Modern, not legacy - a deliberate choice, not a default.** QEMU's
 //! `virtio-mmio` transport defaults to `force-legacy=true` (confirmed via
 //! `-device virtio-mmio,help`'s printed default), which uses an older,
@@ -99,7 +121,7 @@ pub unsafe fn find_device(device_id: u32) -> Option<u64> {
         // SAFETY: within the always-mapped low-1GB device region.
         let magic = unsafe { read_reg(base, REG_MAGIC_VALUE) } as u64;
         if magic != MAGIC_VALUE {
-            continue; // Unpopulated slot - real hardware reads as 0, not the magic value.
+            continue; // Unpopulated slot on QEMU - see module doc comment for why this doesn't hold on all hardware.
         }
         // SAFETY: same as above.
         let id = unsafe { read_reg(base, REG_DEVICE_ID) };
