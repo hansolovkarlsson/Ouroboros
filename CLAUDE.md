@@ -1688,6 +1688,57 @@ screen after boot services exit (not just during boot, which already
 worked before this milestone) is the next real step, and is on the user
 to test with the current `esp.hdd`.
 
+### GOP framebuffer console, take two: `open_protocol_exclusive` was silently killing the boot console on real Parallels hardware
+
+The user tested the framebuffer console (above) on real Parallels
+hardware and reported it still didn't work - a screenshot showed
+devicetree/ACPI/PCI discovery and the `pci::log_all_devices` dump
+rendering exactly as before, then **nothing**: no GOP discovery log
+line, no `loaded shell program` line, nothing - even though
+`framebuffer::discover()`'s very next statement in `main.rs`
+unconditionally logs either success or failure. Not a hang and not a
+crash: a self-inflicted console death.
+
+**Root cause, found by reading the `uefi` crate's own doc comment for
+`open_protocol_exclusive` rather than guessing:** exclusive-mode opens
+are specified to forcibly disconnect any driver holding the protocol
+`ByDriver` - the doc comment's own example is "opening the
+SERIAL_IO_PROTOCOL exclusively will disconnect the console driver from
+it." `framebuffer::discover()` opened `GraphicsOutput` with exactly that
+attribute. On real Parallels hardware, firmware's own text console (the
+same one every boot screenshot in this project shows rendering) holds
+GOP `ByDriver` to draw it - so the instant `discover()` ran, it silently
+disconnected the console from the screen, before a single further log
+line could print. **QEMU's `ramfb` test never caught this** because that
+test always ran with `-display none`: no console driver was ever
+attached to GOP in the first place, so there was nothing to disconnect -
+the exact same shape of gap that let the original virtio-console driver
+look confirmed-on-QEMU while being wrong for Parallels' actual transport.
+
+**Fix: switch to `OpenProtocolAttributes::GetProtocol`** (via the
+`unsafe` generic `uefi::boot::open_protocol`, since the convenience
+`open_protocol_exclusive` wrapper only ever offers the exclusive
+attribute) - a read-only, non-owning open that doesn't touch driver
+ownership at all. Safe for this module's actual usage: `discover()`
+reads `ModeInfo`/`FrameBuffer` exactly once, synchronously, and never
+touches the `GraphicsOutput` object again after returning (the raw
+framebuffer pointer is what crosses into post-exit code, not the
+protocol object itself - see `fbconsole.rs`'s safety note).
+
+**Re-verified on QEMU after the fix, not just "compiles":** the full
+`ramfb`/screendump verification from the original milestone was re-run
+end to end - GOP discovery still succeeds identically
+(`GOP framebuffer @ 0x5c7a0000...`), the forced-fallback screendump
+still shows boot messages and the shell's own banner/prompt rendering
+correctly, and a full regression pass on the normal `-nographic`
+ACPI-console dev loop (`help`/`uptime` via piped stdin) still works
+byte-for-byte as before. Zero aborts in `-d int` cross-checks on every
+run. **Still not re-confirmed on real Parallels hardware** - that
+remains on the user, same as before; this fix is reasoned from the
+`uefi` crate's documented `open_protocol_exclusive` behavior plus the
+exact symptom shown in the reported screenshot, not from a second round
+of real-hardware testing.
+
 ### Parallels disk attachment: a real trap, not a hunch
 
 Getting `esp.img` to actually boot in Parallels took a few wrong turns worth
@@ -1722,7 +1773,13 @@ attachment mechanism was wrong.
 **Parallels console output has a real, better-grounded answer now: the
 GOP framebuffer console (see "GOP framebuffer console" above), built and
 confirmed working on QEMU, with real-Parallels-hardware confirmation the
-one remaining open step.** virtio-console remains a confirmed dead end
+one remaining open step.** A first real-hardware attempt already
+surfaced and fixed one genuine bug along the way - `open_protocol_exclusive`
+was silently disconnecting firmware's own console driver from GOP before
+a single post-discovery log line could print (see "GOP framebuffer
+console, take two" above) - so the *current* code has never itself been
+tested on Parallels yet; only the version with that bug has. virtio-console
+remains a confirmed dead end
 on Parallels specifically (tested on real hardware, not a pause or an
 open question) - a full PCI device inventory taken directly from that
 hardware showed no virtio-console device over PCI and no direct evidence

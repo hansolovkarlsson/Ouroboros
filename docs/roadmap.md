@@ -29,12 +29,15 @@ phase:
   Parallels.
 - ~~Build a GOP framebuffer console (the real lead after virtio-console)~~
   — done and confirmed working on QEMU (`framebuffer.rs`/`font.rs`/
-  `fbconsole.rs`, see `CLAUDE.md`/`CHANGELOG.md`). **Still needs
-  confirmation on real Parallels hardware** - this environment can't test
-  Parallels directly, so that step is on the user: boot the current
-  `esp.hdd` there and confirm text actually renders on screen after boot
-  services exit, the way the earlier boot-services-only screenshots
-  already showed static UEFI output working.
+  `fbconsole.rs`, see `CLAUDE.md`/`CHANGELOG.md`). A first real-Parallels
+  test found and fixed a real bug (`open_protocol_exclusive` was
+  silently disconnecting firmware's own boot console from GOP - see
+  `CLAUDE.md`'s "GOP framebuffer console, take two"). **Still needs
+  confirmation on real Parallels hardware with the fix applied** - the
+  version that was actually tested there had the bug; only the fixed
+  version has been verified since, and only on QEMU. Next step is on the
+  user: boot the current `esp.hdd` there and confirm text actually
+  renders on screen after boot services exit.
 - **Output redirection (`>`/`>>`)** — needs shell-level parsing this
   project doesn't have yet (splitting `cmd > file` into a command and a
   target). `cp` is done (see below); redirection is the one piece of

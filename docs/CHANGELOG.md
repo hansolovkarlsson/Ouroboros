@@ -7,6 +7,36 @@ what broke, how it was diagnosed), see `CLAUDE.md`; for *how* something
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## GOP framebuffer console fix: `open_protocol_exclusive` was disconnecting Parallels' own boot console
+
+**The goal:** the user tested the framebuffer console (below) on real
+Parallels hardware and it still didn't work - a screenshot showed
+devicetree/ACPI/PCI discovery and the PCI device dump rendering
+normally, then nothing further, not even `framebuffer::discover()`'s own
+unconditional success/failure log line.
+
+- Root cause, found by reading the `uefi` crate's own doc comment rather
+  than guessing: `framebuffer.rs` opened `GraphicsOutput` with
+  `open_protocol_exclusive`, which is specified to forcibly disconnect
+  any driver holding the protocol `ByDriver` (the crate's own example:
+  "opening the SERIAL_IO_PROTOCOL exclusively will disconnect the
+  console driver from it"). On real Parallels hardware, firmware's own
+  text console holds GOP `ByDriver` to render the boot screen - so the
+  very first call into `discover()` silently killed the visible console
+  before anything else could print. QEMU's `ramfb` test never caught
+  this because it always ran with `-display none`, so there was no
+  console driver attached to GOP to disconnect.
+- **Fix:** switched to `OpenProtocolAttributes::GetProtocol` via the
+  `unsafe` generic `uefi::boot::open_protocol` - a read-only, non-owning
+  open, safe here since `discover()` only reads `ModeInfo`/`FrameBuffer`
+  once and never touches the `GraphicsOutput` object again.
+- Re-verified end to end on QEMU after the fix: GOP discovery still
+  succeeds identically, the forced-fallback screendump still renders
+  boot messages and the shell's banner/prompt correctly, and a full
+  regression pass on the normal ACPI-console dev loop is unchanged. Zero
+  aborts. **Not yet re-confirmed on real Parallels hardware** - that
+  remains the next step.
+
 ## GOP framebuffer console: a fifth, better-grounded lead for Parallels output
 
 **The goal:** find a real answer for Parallels console output after
