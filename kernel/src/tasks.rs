@@ -17,16 +17,44 @@
 //! on the ESP, not a kernel constant — replacing the shell means replacing
 //! a file, not rebuilding the kernel.
 //!
-//! **Task 1 is a genuine idle task** — bare `wfe` loop, still a small
-//! compiled-in `global_asm!` blob like every EL0 task before this
-//! milestone, since there's nothing to load for "do nothing forever" and
-//! its region is tiny (4KB) enough that the alignment ceiling below never
-//! applied to it in the first place (that ceiling was specifically about
-//! *large* alignments — see `IDLE_REGION`'s doc comment).
+//! **Task 1 is a genuine idle task** — a busy-spin loop (`nop; b 1b`),
+//! still a small compiled-in `global_asm!` blob like every EL0 task
+//! before this milestone, since there's nothing to load for "do nothing
+//! forever" and its region is tiny (4KB) enough that the alignment
+//! ceiling below never applied to it in the first place (that ceiling
+//! was specifically about *large* alignments — see `IDLE_REGION`'s doc
+//! comment).
+//!
+//! **This was `wfe` (wait-for-event, the architecturally "correct",
+//! power-efficient choice) until a real, confirmed bug on real Parallels
+//! hardware forced it to change - worth knowing before reverting this.**
+//! The very first real task switch on real Parallels hardware (the
+//! MADT/GICv3 milestone - see `CLAUDE.md` - finally made GIC/timer IRQs
+//! work there at all) hung the whole system outright: no exception
+//! reported, keystrokes stopped being echoed, indistinguishable from a
+//! dead machine. A single-variable diagnostic (temporarily skip just the
+//! task-switch call, leave GIC/timer otherwise fully active) proved
+//! IRQ delivery itself was solid there - `uptime` kept incrementing
+//! correctly. That isolated the hang to *this loop specifically*, and
+//! swapping `wfe` for a busy-spin (with task switching left fully
+//! enabled) fixed it completely, confirmed by a sustained real-hardware
+//! test across several interactive commands with no hang. **Root cause
+//! not fully confirmed, only worked around** - the leading hypothesis is
+//! that real hardware's `wfe` is trapped/emulated by the host hypervisor
+//! (Apple's own virtualization layer, one level above this guest kernel
+//! entirely) in a way QEMU/TCG's `wfe` never is: this kernel's
+//! `nTWE`/`nTWI` bits (see [`init`]) only ever controlled whether EL0's
+//! own `wfe` traps *to EL1*, a decision this kernel owns completely;
+//! whatever EL2 does to `wfe` above that is outside this kernel's
+//! control or visibility. Not yet tested further. The practical
+//! consequence of the fix is just power efficiency (this task now spins
+//! instead of actually idling) - correctness-wise it's indistinguishable
+//! from `wfe`, and this kernel doesn't optimize for idle power anywhere
+//! else either (task 0's own I/O polling already busy-waits).
 //!
 //! There's no cooperative yielding anywhere — the *only* thing that ever
 //! moves execution from one task to the other is the timer tick catching
-//! one mid-`wfe` and swapping its saved [`Context`] for the other task's.
+//! one mid-loop and swapping its saved [`Context`] for the other task's.
 //! That swap is the entire scheduler: strict round-robin between exactly
 //! two tasks, no priorities, no blocking, no queue.
 //!
@@ -67,7 +95,7 @@ global_asm!(
 .global el0_idle_template
 el0_idle_template:
 1:
-wfe
+nop
 b 1b
 .global el0_idle_template_end
 el0_idle_template_end:

@@ -2094,12 +2094,13 @@ Parallels - not blocking the keyboard work, which turned out not to
 need it (the interrupt endpoint this driver uses is polled the same
 iteration-bounded way everything else in this kernel is, not
 IRQ-driven). **Update: real interrupt-controller discovery (ACPI MADT,
-GICv3) is now done - see "MADT/GICv3" further below.** GIC/timer IRQ
-delivery itself is confirmed solid on real Parallels hardware (a real,
-correctly-incrementing `uptime`); the actual task switch hit a separate,
-new, still-unresolved real-hardware bug and stays disabled there for
-now, so preemptive multitasking specifically is still not available on
-Parallels, just for a different, better-understood reason than before.
+GICv3) is now done, and so is preemptive multitasking on Parallels - see
+"MADT/GICv3" further below.** GIC/timer IRQ delivery, and the task
+switch itself (after root-causing and fixing a real hang - task 1's
+idle loop needed a busy-spin instead of `wfe` on real hardware), are
+both confirmed working end to end on real Parallels hardware, with a
+sustained interactive test showing a correctly, continuously
+incrementing `uptime`.
 
 **In the meantime, kernel development continues against QEMU**, which has a
 fully working console via ACPI/SPCR (plus confirmed-working fallback paths
@@ -2353,19 +2354,20 @@ needed - the interrupt endpoint is polled the same
 iteration-bounded busy-poll way every other wait in this kernel is, not
 IRQ-driven).
 
-## MADT/GICv3: real interrupt-controller discovery for Parallels - real IRQ delivery confirmed, task switching itself hit a new, real mystery
+## MADT/GICv3: real interrupt-controller discovery for Parallels - and full preemptive multitasking, confirmed working end to end on real hardware
 
 The "preemption on Parallels" gap flagged at the end of the USB HID
-keyboard milestone above is now half-closed: real ACPI MADT parsing
-replaces the old `qemu_device_region_safe` heuristic for GIC/timer setup
-specifically, a GICv3 driver was built and confirmed working end to end
-on real Parallels hardware (a genuinely, correctly incrementing `uptime`
-- the first time that's ever been true there), and a second, separate,
-real bug was found in the process: the actual task switch hangs the
-first time it runs on real hardware, root cause not yet found. Shipped
-in the safe state - GIC/timer fully enabled (real tick counting), task
-switching still disabled on Parallels (unchanged single-task behavior,
-just with an honest `uptime` now instead of one permanently stuck at 0).
+keyboard milestone above is now **fully closed**: real ACPI MADT
+parsing replaces the old `qemu_device_region_safe` heuristic for
+GIC/timer setup specifically, a GICv3 driver was built and confirmed
+working end to end on real Parallels hardware, and a second, separate
+real bug found in the process - the actual task switch hanging the
+first time it ever ran on real hardware - was root-caused (well enough
+to fix, if not fully explained) and fixed the same session. Real,
+preemptive, two-task round-robin multitasking now works on real
+Parallels hardware for the first time ever, confirmed by a sustained
+interactive test with a genuinely, correctly incrementing `uptime`
+throughout.
 
 **Why MADT, not another QEMU devicetree dump.** `gic.rs`'s old addresses
 (`0x0800_0000`/`0x0801_0000`) were GICv2-only and confirmed only via a
@@ -2502,30 +2504,52 @@ combination was simply never exercised there). `tasks::on_tick` itself
 is unchanged and still fully exercised on QEMU (GICv2 and forced GICv3
 both retested end to end after this was found, zero regressions).
 
-**Shipped as an honestly unresolved mystery, same treatment as the
-EL0/RAM-permission bug in the boot-bringup arc, not silently patched
-over.** `exceptions.rs` gained `TASK_SWITCH_ENABLED` (an `AtomicBool`,
-default `true`), set once from `main.rs` via
-`exceptions::set_task_switch_enabled(virtio_mmio_probe_safe)` - reusing
-the exact same "an early console was found" heuristic
-`virtio_mmio_probe_safe` already uses as its own QEMU-vs-Parallels
-proxy, for an unrelated reason (task-switching's QEMU-only confirmation
-has nothing to do with virtio-mmio scan safety; they just happen to
-share the one real data point this project has so far, hence the
-distinct name rather than reusing the flag itself). A leading
-hypothesis, not yet confirmed: real hardware's `WFE` may be
-trapped/emulated by the host hypervisor (Apple's own virtualization
-layer, one level above this guest kernel) in a way QEMU/TCG's `WFE`
-never is - this kernel's `nTWE`/`nTWI` bits only ever controlled
-whether EL0's own `wfe` traps *to EL1*, a decision this kernel owns
-completely; whatever EL2 does to EL1's or EL0's `WFE` above that is
-outside this kernel's control or visibility entirely, and this project
-has no way to inspect or influence it. Not yet tested. Net result,
-shipped: `uptime` now works correctly on Parallels (a real, incrementing
-tick count, not stuck at 0) with zero regression risk - task switching
-stays off there, exactly the same single-task behavior Parallels has
-always had, just no longer silently wrong about how much time has
-passed.
+**Take two, same session: root-caused well enough to fix, task switching
+now fully enabled everywhere.** Initially shipped disabled on Parallels
+(`exceptions.rs` gained a temporary `TASK_SWITCH_ENABLED` flag,
+defaulted off there) as an honestly unresolved mystery, same treatment
+as the EL0/RAM-permission bug in the boot-bringup arc - but a real
+lead was still on the table (task 1's idle loop uses `wfe`, and real
+hardware's `wfe` semantics under a hypervisor were the leading
+suspect), so it was tested directly rather than left there: swapped
+`tasks.rs`'s idle-task `wfe` for a plain busy-spin (`nop; b 1b`), left
+task switching fully enabled, and re-tested on real Parallels hardware.
+**The hang was completely gone.** A sustained interactive test - several
+commands in sequence, real typed input via `prlctl send-key-event`, not
+just a bare `uptime` poll - showed a correctly, continuously
+incrementing tick count throughout (`644` -> `1210` in one observed
+run) with no hang, confirming this is the real fix, not a fluke.
+`TASK_SWITCH_ENABLED` and its setter were removed entirely -
+`exceptions.rs`'s IRQ handler calls `tasks::on_tick` unconditionally
+again, exactly like every version of this code before Parallels ever
+had a working GIC/timer at all. **Root cause still not fully proven,
+only worked around** - the leading hypothesis remains that real
+hardware's `wfe` is trapped/emulated by the host hypervisor (Apple's
+own virtualization layer, one level above this guest kernel) in a way
+QEMU/TCG's `wfe` never is; this kernel's `nTWE`/`nTWI` bits only ever
+controlled whether EL0's own `wfe` traps *to EL1*, a decision this
+kernel owns completely, and whatever EL2 does to `wfe` above that is
+outside this kernel's control or visibility entirely. The busy-spin
+fix's only real cost is idle power efficiency, not a concern this
+kernel has optimized for anywhere else (task 0's own I/O polling
+already busy-waits) - see `tasks.rs`'s `el0_idle_template` doc comment
+for the full writeup, kept there rather than only here since that's
+where a future reader is most likely to encounter it.
+
+**A real, secondary, non-fatal finding along the way, not yet
+investigated further:** an occasional dropped keystroke was observed
+twice during real-hardware testing with task switching active (e.g.
+`uptime` arriving at the shell as `uptme` or `uptie` - one character
+short, even though the xHCI driver's own debug log confirmed all the
+expected HID reports, including the missing character's, were actually
+received). Never reproduced in the final confirmation run, and never
+anything worse than one dropped character - not a hang, not a crash.
+Plausible cause, not confirmed: `xhci.rs`'s interrupt endpoint keeps
+only one outstanding report buffer at a time (`repost_interrupt_buffer`,
+re-armed after each read) - now that task 0 only runs in alternating
+20ms slices instead of continuously, a report arriving faster than the
+buffer gets re-armed has less slack than it used to. Left as a known,
+minor, real limitation rather than chased further this session.
 
 **Scripted real-hardware testing (`make test-parallels`,
 `scripts/test-parallels.sh`) was what made this entire investigation
@@ -2542,23 +2566,23 @@ postmortem in `docs/` paid wall-clock time for, now driven headlessly.
 See `docs/roadmap.md`'s "Testing infrastructure" section for the full
 writeup.
 
-**Still coarse, worth knowing before building on this:** task switching
-on Parallels is a real, known regression risk if re-enabled without
-first understanding the WFE/hypervisor hypothesis above - don't flip
-`virtio_mmio_probe_safe`'s value into `set_task_switch_enabled` assuming
-it'll just work, that's exactly the untested assumption that hangs the
-system right now; the MADT parser only reads the first GICD/GICC/GICR
-structures it finds (spec requires exactly one GICD, but a real
-multi-cluster system could have several GICR structures this parser
-doesn't yet merge/choose between); `gicv3.rs`'s redistributor-frame walk
-is real discovery logic but has only ever been exercised against
-single-CPU configurations (QEMU with default `-smp` and Parallels' own
-single-vCPU test VM) - never tested against a genuinely multi-core
-guest; and virtio-blk/virtio-mmio on Parallels remain completely
-unaddressed by this work (a real device that, per the existing PCI
-inventory, simply isn't present there over any transport this project
-can drive - a different, harder problem than the interrupt-controller
-one this milestone solved).
+**Still coarse, worth knowing before building on this:** the idle task's
+`wfe` -> busy-spin swap is a confirmed-working fix, not a confirmed
+root cause - if task switching on some *other* future platform ever
+hangs the same way, don't assume it's automatically the same bug
+without re-confirming; the occasional dropped-keystroke finding above
+is real but unchased further; the MADT parser only reads the first
+GICD/GICC/GICR structures it finds (spec requires exactly one GICD, but
+a real multi-cluster system could have several GICR structures this
+parser doesn't yet merge/choose between); `gicv3.rs`'s
+redistributor-frame walk is real discovery logic but has only ever been
+exercised against single-CPU configurations (QEMU with default `-smp`
+and Parallels' own single-vCPU test VM) - never tested against a
+genuinely multi-core guest; and virtio-blk/virtio-mmio on Parallels
+remain completely unaddressed by this work (a real device that, per the
+existing PCI inventory, simply isn't present there over any transport
+this project can drive - a different, harder problem than the
+interrupt-controller one this milestone solved).
 
 ## Commands
 

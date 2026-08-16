@@ -329,25 +329,6 @@ extern "C" fn rust_exception_handler(esr: u64, far: u64, elr: u64, vector: u64) 
 
 static TICKS: AtomicU64 = AtomicU64::new(0);
 
-/// Whether `on_tick`'s actual task switch should run at all, set once from
-/// `main.rs` before IRQ is unmasked (`AtomicBool`, same idiom
-/// `exceptions.rs`'s own `TICKS` already uses for kernel-global state).
-/// `false` on real Parallels hardware specifically — see this static's
-/// doc-comment-adjacent note in `rust_irq_handler` for what's actually
-/// confirmed vs. still a mystery: GIC/timer IRQ delivery itself is fully
-/// confirmed working there (a real, correctly-incrementing tick count,
-/// isolated by temporarily disabling exactly this), but the task switch
-/// specifically hangs the very first time it runs on real hardware,
-/// root cause not yet found. Defaults to `true` (task switching runs
-/// normally) so nothing changes on QEMU, where this has always worked.
-static TASK_SWITCH_ENABLED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(true);
-
-/// Enables or disables the actual task switch in [`rust_irq_handler`] -
-/// see [`TASK_SWITCH_ENABLED`]'s doc comment.
-pub fn set_task_switch_enabled(enabled: bool) {
-    TASK_SWITCH_ENABLED.store(enabled, Ordering::Relaxed);
-}
-
 /// The number of preemption ticks since boot - `syscall.rs`'s `get_ticks`
 /// (6) is what actually exposes this to userland; a real "uptime" needs
 /// `timer::TICK_INTERVAL_MS` to convert this into a duration, since a tick
@@ -376,37 +357,21 @@ extern "C" fn rust_irq_handler(frame: *mut Context) {
         // uptime/tick-count query.
         TICKS.fetch_add(1, Ordering::Relaxed);
         timer::arm(timer::TICK_INTERVAL_MS);
-        // Gated on TASK_SWITCH_ENABLED - a real, confirmed, still-not-
-        // fully-understood real-Parallels-hardware bug, found via a
-        // single-variable diagnostic (temporarily skipping just this call
-        // while leaving GIC/timer otherwise fully enabled): with the
-        // switch skipped, `uptime` reported a real, correctly-incrementing
-        // tick count on real Parallels hardware (e.g. 566 -> 687 ticks)
-        // and the shell stayed fully responsive - confirming GIC/timer
-        // IRQ delivery itself is solid there. With the switch enabled,
-        // the very first tick hangs the system outright: no exception
-        // reported (so not a fault this kernel's own handler can see),
-        // keystrokes stop being echoed at all, indistinguishable from a
-        // dead machine from the framebuffer console's write-only view.
-        // This exact interrupt-delivery-plus-task-switch combination had
-        // never run on real hardware before this session (Parallels had
-        // no working GIC/timer at all until the MADT/GICv3 work), so
-        // this is newly-discovered territory, not a regression from
-        // anything previously confirmed working there. `tasks::on_tick`
-        // itself is unchanged and still fully exercised on QEMU (GICv2
-        // and forced GICv3 both retested end to end after this gate was
-        // added, zero regressions) - the "honestly unresolved mystery"
-        // treatment applies here the same way it did for the EL0/RAM
-        // permission bug in the boot-bringup arc: real evidence
-        // collected, real hypotheses considered (a leading one: real
-        // hardware's WFE may be trapped/emulated by the host hypervisor
-        // in a way TCG's WFE never is, and `nTWE`/`nTWI` only ever
-        // controlled the EL0->EL1 trap this kernel itself owns, not
-        // whatever EL2 does above it), but not yet confirmed, so this
-        // stays disabled on Parallels rather than shipping a hang.
-        if TASK_SWITCH_ENABLED.load(Ordering::Relaxed) {
-            unsafe { tasks::on_tick(frame) };
-        }
+        // Unconditional again - see tasks.rs's `el0_idle_template` doc
+        // comment for the real, found-and-fixed bug this used to work
+        // around: the task switch itself hung the very first time it ran
+        // on real Parallels hardware, isolated (via a single-variable
+        // diagnostic - temporarily skipping just this call) to prove
+        // GIC/timer IRQ delivery was solid and the bug was specifically
+        // here. Root cause traced to task 1's idle loop using `wfe` -
+        // confirmed by swapping it for a busy-spin and re-testing on real
+        // hardware: task switching, including the real interrupt-
+        // delivery-plus-context-swap combination that never once ran on
+        // real hardware before this session, now works correctly there
+        // (a sustained real-hardware test showed a real, correctly-
+        // incrementing tick count - e.g. 1526 -> 1976 - across multiple
+        // interactive commands, no hang).
+        unsafe { tasks::on_tick(frame) };
     }
 
     if intid != SPURIOUS_INTID {

@@ -7,7 +7,7 @@ what broke, how it was diagnosed), see `CLAUDE.md`; for *how* something
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
-## MADT/GICv3: real interrupt-controller discovery for Parallels - real IRQ delivery confirmed, task switching hit a new mystery
+## MADT/GICv3: real interrupt-controller discovery for Parallels - full preemptive multitasking confirmed working end to end
 
 **The goal:** replace `gic.rs`'s old QEMU-devicetree-derived GICv2
 addresses (already confirmed unsafe on real Parallels hardware, see
@@ -40,20 +40,26 @@ working there too - a real, correctly-incrementing `uptime`
 single-variable diagnostic (temporarily skipping just the task-switch
 call while leaving GIC/timer otherwise fully active).
 
-**A second, separate, real bug found in the process, not yet
-resolved:** the actual task switch (`tasks::on_tick`) hangs the system
-outright the first time it runs on real hardware - this exact
-interrupt-delivery-plus-context-swap combination had never executed on
-real hardware before (Parallels had no working GIC/timer at all until
-this milestone). Shipped in the safe state: GIC/timer fully enabled
-(real tick counting), task switching disabled on Parallels via a new
-`exceptions.rs` flag (`TASK_SWITCH_ENABLED`) - a strict improvement
-over before (`uptime` now genuinely counts instead of being stuck at 0)
-with zero regression risk, and zero change to QEMU's behavior (task
-switching retested end to end there, both GIC versions, no regressions).
-Full writeup, including the diagnostic technique and the leading
-unconfirmed hypothesis (real hardware's `WFE` possibly trapped by the
-host hypervisor in a way QEMU/TCG's never is), in `CLAUDE.md`'s
+**A second, separate, real bug found in the process - root-caused and
+fixed the same session.** The actual task switch (`tasks::on_tick`)
+hung the system outright the first time it ran on real hardware - this
+exact interrupt-delivery-plus-context-swap combination had never
+executed on real hardware before (Parallels had no working GIC/timer at
+all until this milestone). A single-variable diagnostic isolated it to
+the task switch specifically, not GIC/timer delivery (confirmed solid
+on its own). Leading suspect: task 1's idle loop, `wfe` - real
+hardware's `wfe` may be trapped/emulated by the host hypervisor in a
+way QEMU/TCG's never is. Swapping the idle loop for a plain busy-spin
+and re-testing confirmed it: the hang was completely gone, verified by
+a sustained interactive test with a correctly, continuously
+incrementing tick count throughout. Task switching is now
+unconditionally enabled on every platform - preemptive multitasking
+works on real Parallels hardware for the first time ever, with zero
+change to QEMU's behavior (retested end to end there too, both GIC
+versions, no regressions). A real, secondary, minor finding along the
+way, left uninvestigated further: an occasional dropped keystroke under
+active task switching, never worse than one character, never
+reproduced in the final confirmation run. Full writeup in `CLAUDE.md`'s
 "MADT/GICv3" section.
 
 **Made practical by a new discovery the same day:** Parallels Desktop's

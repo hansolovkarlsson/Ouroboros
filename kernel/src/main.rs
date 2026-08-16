@@ -446,20 +446,6 @@ fn main() -> Status {
         );
     }
 
-    // See `exceptions.rs`'s `TASK_SWITCH_ENABLED` doc comment for the real,
-    // still-not-fully-understood bug this works around: the actual task
-    // switch hangs the very first time it runs on real Parallels hardware,
-    // even though GIC/timer IRQ delivery itself (confirmed separately,
-    // see above) is solid there. Reuses `virtio_mmio_probe_safe`'s same
-    // "an early console was found" heuristic as its proxy for "is this
-    // the one platform (QEMU) task switching has ever been confirmed
-    // working on" - the same underlying signal as that flag, for an
-    // unrelated reason, which is why this isn't just named the same
-    // thing: task-switching's QEMU-only confirmation has nothing to do
-    // with virtio-mmio scan safety, they just happen to share the one
-    // real data point this project has so far.
-    exceptions::set_task_switch_enabled(virtio_mmio_probe_safe);
-
     // SAFETY: both EL0 regions were just mapped EL0-accessible above.
     unsafe { tasks::init(&program) };
 

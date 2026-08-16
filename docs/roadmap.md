@@ -42,22 +42,23 @@ Pulled from `docs/processes.md`'s "known rough edges" and `CLAUDE.md`'s
 running "next milestone" notes — real gaps, not yet a committed next
 phase:
 
-- **Diagnose the real-Parallels task-switch hang** — new, found while
-  closing the "Preemption on Parallels" item below. GIC/timer IRQ
-  delivery is conclusively confirmed working on real Parallels hardware
-  (a real, correctly-incrementing `uptime`, isolated via a
-  single-variable diagnostic - see `CLAUDE.md`'s "MADT/GICv3" section),
-  but the actual task switch (`tasks::on_tick`'s `Context` swap) hangs
-  the system outright the very first time it runs there - no exception
-  reported, keystrokes stop being echoed, indistinguishable from a dead
-  machine from the framebuffer console's write-only view. Currently
-  shipped disabled there (`exceptions.rs`'s `TASK_SWITCH_ENABLED`,
-  gated the same way `virtio_mmio_probe_safe` is). Leading unconfirmed
-  hypothesis: real hardware's `WFE` may be trapped/emulated by the host
-  hypervisor above this guest kernel in a way QEMU/TCG's never is - this
-  kernel's `nTWE`/`nTWI` bits only ever controlled the EL0->EL1 trap it
-  owns itself. Not yet tested; needs real hardware round trips to
-  investigate further.
+- ~~Diagnose the real-Parallels task-switch hang~~ — **done, same day it
+  was found.** Root cause traced (well enough to fix) to task 1's idle
+  loop using `wfe` — real hardware's `wfe` semantics under Apple's
+  virtualization layer are the leading (still not fully proven)
+  explanation. Confirmed fixed by swapping the idle loop for a plain
+  busy-spin (`nop; b 1b`, see `tasks.rs`'s `el0_idle_template` doc
+  comment) and re-testing: a sustained real-hardware interactive session
+  showed a correctly, continuously incrementing tick count (`644` ->
+  `1210` in one observed run) with no hang. Task switching is now
+  unconditionally enabled again (the temporary `TASK_SWITCH_ENABLED`
+  gate was removed entirely) — preemptive multitasking works on real
+  Parallels hardware for the first time ever. A real, secondary, minor
+  finding along the way, not yet chased further: an occasional dropped
+  keystroke under active task switching (plausibly `xhci.rs`'s
+  single-outstanding-interrupt-buffer having less slack now that task 0
+  only runs in alternating time slices) — never reproduced in the final
+  confirmation run, never worse than one dropped character, not a hang.
 - ~~Confirm virtio-console on real Parallels hardware~~ — done, and the
   answer is no. Tested on real hardware: a full PCI device inventory
   (`pci::log_all_devices`, kept as a permanent diagnostic) shows no
@@ -87,10 +88,9 @@ phase:
   unsafe on Parallels, fixed by broadening the same gate
   (`qemu_device_region_safe`) to cover GIC/timer setup too. **This is
   now done** - and the console's write-only limitation is also now done
-  (see the USB HID keyboard driver item below). What's left from this
-  era: no preemption on Parallels (needs real interrupt-controller
-  discovery - ACPI MADT, likely GICv3 - a separate, substantial
-  follow-up, tracked below).
+  (see the USB HID keyboard driver item below). What was left from this
+  era - no preemption on Parallels - is also now done, see the
+  "Preemption on Parallels" item below.
 - ~~A USB HID keyboard driver~~ — **done, and confirmed with a real,
   physical keyboard typing a full command line (with backspace) into the
   shell on real Parallels-on-Apple-Silicon hardware.** A genuinely large
@@ -131,27 +131,21 @@ phase:
   parsing (boot-protocol's fixed 8-byte layout assumed directly), no
   stall recovery on the interrupt endpoint specifically, only the first
   interrupt IN endpoint on a matching interface is ever configured.
-- ~~Preemption on Parallels~~ — **half done.** Real ACPI MADT discovery
+- ~~Preemption on Parallels~~ — **fully done.** Real ACPI MADT discovery
   (`kernel/src/madt.rs`) replaced the old heuristic for GIC/timer setup,
-  and a GICv3 driver (`kernel/src/gicv3.rs`) is confirmed working on
-  real Parallels hardware - a genuine, correctly-incrementing `uptime`
-  there for the first time ever. But the *task switch* itself hangs the
-  first time it runs on real hardware (a new, separate, unresolved bug -
-  GIC/timer IRQ delivery is conclusively confirmed fine, isolated via a
-  single-variable diagnostic), so preemptive multitasking specifically
-  is still off on Parallels, gated behind `exceptions.rs`'s
-  `TASK_SWITCH_ENABLED`. Leading unconfirmed hypothesis: real hardware's
-  `WFE` may be trapped/emulated by the host hypervisor (Apple's own
-  virtualization layer, above this guest kernel entirely) in a way
-  QEMU/TCG's `WFE` never is - this kernel's `nTWE`/`nTWI` bits only ever
-  controlled the EL0->EL1 trap it owns, not whatever EL2 does above
-  that. See `CLAUDE.md`'s "MADT/GICv3" section for the full writeup,
-  including the two real GICv3 bugs found and fixed on QEMU first
-  (`GICR_IGROUPR0` Group-1 assignment, `GICD_CTLR`'s multi-bit enable)
-  before ever risking a Parallels round trip on them. Real next step:
-  diagnose the task-switch hang specifically - a genuinely new,
-  real-hardware-only mystery, not a continuation of this item's original
-  scope.
+  a GICv3 driver (`kernel/src/gicv3.rs`) is confirmed working on real
+  Parallels hardware, and the task-switch hang found in the process
+  (see the parking-lot item above) is fixed too - real, preemptive,
+  two-task round-robin multitasking now works end to end on real
+  Parallels hardware, confirmed by a sustained interactive test with a
+  genuinely, correctly incrementing `uptime` throughout. See
+  `CLAUDE.md`'s "MADT/GICv3" section for the full writeup, including the
+  two real GICv3 bugs found and fixed on QEMU first (`GICR_IGROUPR0`
+  Group-1 assignment, `GICD_CTLR`'s multi-bit enable) before ever
+  risking a Parallels round trip on them, and the task-switch fix
+  itself (idle task `wfe` -> busy-spin) - root-caused well enough to
+  fix, not fully proven why real hardware's `wfe` didn't work as
+  expected.
 - **Output redirection (`>`/`>>`)** — needs shell-level parsing this
   project doesn't have yet (splitting `cmd > file` into a command and a
   target). `cp` is done (see below); redirection is the one piece of
