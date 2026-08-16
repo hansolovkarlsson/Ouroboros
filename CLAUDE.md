@@ -1739,6 +1739,88 @@ remains on the user, same as before; this fix is reasoned from the
 exact symptom shown in the reported screenshot, not from a second round
 of real-hardware testing.
 
+### GOP framebuffer console, take three: the mapping and display update both work - the freeze was `try_virtio_console`'s unconfirmed MMIO-scan assumption
+
+With the `open_protocol_exclusive` fix in place (above), the user tested
+again on real Parallels hardware. Progress, but still not working: GOP
+discovery now succeeds (`GOP framebuffer @ 0x20000000, size=0x300000,
+1024x768, stride=1024, format=Bgr`) and boot reaches `loaded shell
+program` - further than before - but the screen still froze there, with
+nothing rendered afterward.
+
+**Disambiguated with a minimal, unambiguous probe: a temporary raw
+full-framebuffer fill (`0xff` to every byte), placed immediately after
+the MMU switch and bypassing `fbconsole.rs`/`font.rs` entirely.** The
+question this was built to answer: does a direct write to this exact
+physical address, mapped by this exact identity map, actually reach the
+display at all - given that unlike QEMU's `ramfb` (a device
+purpose-built to be a dumb, always-scanned-out memory region), a real
+GPU might need an explicit flush/present step that only firmware's own
+driver knows how to issue, which would make every future fbconsole fix
+invisible regardless of correctness. Verified visible on QEMU's `ramfb`
+first (solid white via QMP screendump) to confirm the technique itself
+before spending a real-hardware round trip on it.
+
+**Result: the user saw a solid white screen** - confirming both the MMU
+mapping and direct-write display visibility work correctly on real
+Parallels hardware, with no explicit flush needed. This is the load-
+bearing assumption the entire framebuffer-console approach depends on,
+and it holds. But the screen **stayed** solid white, frozen, exactly
+like the previous failure - meaning execution never reached the actual
+`FbConsole`-based rendering at all. Confirmed by asking the user
+directly (not assumed): the white screen never changed further, no
+black-background text ever appeared.
+
+**Root cause: `try_virtio_console()` ran immediately after the fill, and
+its own scan carries an unconfirmed assumption.** `virtio_mmio.rs`'s
+`find_device` reads a magic-value register at 32 fixed, QEMU-specific
+addresses, with a comment stating "real hardware reads as 0, not the
+magic value" - asserted, never actually confirmed the way this
+project's other platform conventions have been (each cross-checked via
+a devicetree dump or a monitor peek before being trusted). A real bus
+fabric commonly raises an external abort for a read to genuinely
+unbacked device-memory space, unlike QEMU's lenient software-emulated
+bus, which just returns a fixed pattern as a courtesy. Since no console
+exists yet at that point on Parallels (devicetree/ACPI/PCI have all
+already failed), a fault there is completely silent - indistinguishable
+from "the scan just found nothing," which is exactly the ambiguity that
+already made the *original* virtio-console real-hardware test
+inconclusive, before this whole framebuffer-console effort even started.
+Independent supporting evidence, not just plausibility: `pci.rs`'s
+device inventory (see "virtio-console" above) already proved no
+virtio-console device exists on Parallels over PCI at all - so this scan
+was never going to find anything real there regardless of whether it's
+also unsafe to run.
+
+**Fix: reordered the console fallback chain so the framebuffer console
+is tried before `try_virtio_console`, not after.** The original ordering
+was deliberately byte-stream-console-first ("more capable whenever one
+exists") - reasonable in the abstract, but wrong now that virtio-console
+is confirmed both nonexistent and possibly actively unsafe to probe for
+on this specific, real platform, while the framebuffer console's core
+mechanism is now hardware-validated. `main.rs`'s two fallback blocks
+were swapped, and `try_virtio_console`'s gate changed from
+`!found_console_early` to `!console::is_installed()` (the `found_console_early`
+binding was removed, now unused) - so it only runs if the framebuffer
+console *also* failed to install, not unconditionally whenever
+devicetree/ACPI/PCI failed. Zero behavior change on any platform where a
+byte-stream console already exists (QEMU's normal dev loop: ACPI always
+wins, so neither fallback ever runs, confirmed by a full regression
+pass) or where GOP doesn't exist either (both fallbacks still get their
+chance, same as before). A real side benefit beyond just avoiding the
+crash: if virtio-mmio scanning does fault on some future platform, there
+will finally be a console installed to report the exception through,
+instead of a silent freeze like this one.
+
+**Re-verified on QEMU after the reorder:** the forced-fallback `ramfb`
+screendump test still renders identically, and the normal `-nographic`
+ACPI-console regression pass (`help`/`uptime` via piped stdin) is
+byte-for-byte unchanged. Zero aborts in `-d int` cross-checks on both.
+**Still not re-confirmed on real Parallels hardware** - this reorder is
+reasoned from the fill diagnostic's result plus the `virtio_mmio.rs`
+comment's unconfirmed assumption, not from a third round of
+real-hardware testing yet.
+
 ### Parallels disk attachment: a real trap, not a hunch
 
 Getting `esp.img` to actually boot in Parallels took a few wrong turns worth
@@ -1773,13 +1855,22 @@ attachment mechanism was wrong.
 **Parallels console output has a real, better-grounded answer now: the
 GOP framebuffer console (see "GOP framebuffer console" above), built and
 confirmed working on QEMU, with real-Parallels-hardware confirmation the
-one remaining open step.** A first real-hardware attempt already
-surfaced and fixed one genuine bug along the way - `open_protocol_exclusive`
-was silently disconnecting firmware's own console driver from GOP before
-a single post-discovery log line could print (see "GOP framebuffer
-console, take two" above) - so the *current* code has never itself been
-tested on Parallels yet; only the version with that bug has. virtio-console
-remains a confirmed dead end
+one remaining open step.** Two real-hardware attempts so far, each
+surfacing and fixing a genuine bug: `open_protocol_exclusive` was
+silently disconnecting firmware's own console driver from GOP (see
+"take two"), and after that fix, `try_virtio_console`'s unconfirmed
+MMIO-scan assumption was very likely faulting silently before the
+framebuffer console ever got a chance to install (see "take three") -
+fixed by reordering the fallback chain so the now-hardware-validated
+framebuffer console goes first. **The load-bearing assumption behind
+this whole approach - that a direct write to the GOP framebuffer's
+physical memory is actually visible on the display, no explicit flush
+needed - is now confirmed on real Parallels hardware**, via a temporary
+raw-fill diagnostic that turned the whole screen solid white. What's
+still unconfirmed is whether the *current* code (with both fixes and the
+reorder) actually renders readable text there - the version tested so
+far only had the first fix, not the second. virtio-console remains a
+confirmed dead end
 on Parallels specifically (tested on real hardware, not a pause or an
 open question) - a full PCI device inventory taken directly from that
 hardware showed no virtio-console device over PCI and no direct evidence

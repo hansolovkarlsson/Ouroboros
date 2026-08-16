@@ -99,7 +99,6 @@ fn main() -> Status {
         // we still have a working boot-services console to log through.
         pci::log_all_devices();
     }
-    let found_console_early = discovery.is_some();
 
     // GOP framebuffer discovery - also boot-services-only (see
     // framebuffer.rs's module doc comment), so it has to happen here
@@ -180,48 +179,37 @@ fn main() -> Status {
     };
     console::println!("Ouroboros kernel: identity map installed, MMU running on our own tables");
 
-    // TEMP diagnostic for real-Parallels-hardware testing - a raw
-    // full-framebuffer fill, bypassing fbconsole.rs/font.rs entirely. No
-    // console exists yet at this point on a platform where devicetree/
-    // ACPI/PCI all failed (true on Parallels), so a fault here would be
-    // completely silent - indistinguishable from "nothing happens" the
-    // way a real bug here would look. This isolates that specific
-    // ambiguity: if the whole screen turns solid white, the MMU mapping
-    // of this address is correct AND direct writes are actually visible
-    // on this display (no explicit flush needed) - meaning any remaining
-    // bug is in fbconsole.rs's font/scroll logic, not the fundamentals.
-    // If the screen does NOT change at all, the bug (or a real platform
-    // limitation) is somewhere before or in this exact write. No-ops on
-    // any platform where GOP wasn't found (fb_info is None) - including
-    // this project's normal QEMU dev loop, which has no GOP at all under
-    // -nographic - so this is safe to leave in for now. Remove once
-    // real-hardware confirmation is in.
-    if let Some(info) = fb_info {
-        let base = info.base as *mut u8;
-        for i in 0..info.size {
-            unsafe { base.add(i).write_volatile(0xff) };
-        }
-    }
-
-    // A fourth console-discovery fallback, tried only if devicetree/ACPI/
-    // PCI all failed above - the real lead for Parallels console output,
-    // see `virtio_console.rs`'s module doc comment and `try_virtio_console`'s
-    // own for why this one has to run here rather than alongside the other
-    // three. Confirmed dead on Parallels (see CLAUDE.md) but kept as the
-    // first fallback tried, ahead of the framebuffer console, since a
-    // real byte-stream console (input included) is strictly more capable
-    // than the framebuffer's write-only text grid whenever one turns out
-    // to exist.
-    if !found_console_early {
-        try_virtio_console();
-    }
-
-    // A fifth and final fallback: the GOP framebuffer, if one was found
-    // above. Tried only once every byte-stream mechanism (including
-    // virtio-console) has had its chance - see `try_framebuffer_console`'s
-    // own doc comment for why this is the real answer for Parallels.
+    // A fourth console-discovery fallback: the GOP framebuffer, tried
+    // right after devicetree/ACPI/PCI - ahead of virtio-console below,
+    // not after it. This ordering is deliberate, not the original design
+    // (which tried virtio-console first): a real-Parallels-hardware test
+    // confirmed the framebuffer mapping and direct-write visibility both
+    // work correctly here (a temporary raw full-screen fill diagnostic
+    // turned the whole display solid white, then was removed once that
+    // was confirmed - see CLAUDE.md's "GOP framebuffer console, take
+    // three"), while that same test then froze solid, before reaching
+    // this point, while still inside try_virtio_console() below - see
+    // that function's own doc comment for why its virtio-mmio scan is
+    // now the prime suspect for an unconfirmed, possibly platform-unsafe
+    // assumption. Trying the now-hardware-validated framebuffer console
+    // first means Parallels gets a working console before that riskier
+    // scan ever runs, and - as a real side benefit - if virtio-mmio
+    // scanning does fault on some future platform, there will finally be
+    // a console installed to report the exception through instead of a
+    // silent freeze.
     if !console::is_installed() {
         try_framebuffer_console(fb_info);
+    }
+
+    // A fifth and final fallback, tried only if every mechanism above -
+    // including the framebuffer console - has failed. Confirmed dead on
+    // Parallels specifically (no such PCI device, see CLAUDE.md's
+    // "virtio-console" section) and now suspected of being actively
+    // unsafe there too (see `try_virtio_console`'s doc comment) - kept
+    // only for a hypothetical future platform with no GOP but a real
+    // virtio-mmio console device.
+    if !console::is_installed() {
+        try_virtio_console();
     }
 
     // The runtime storage stack (docs/CHANGELOG.md phases 3a/3b): virtio-blk
@@ -256,25 +244,41 @@ fn main() -> Status {
     unsafe { tasks::start() }
 }
 
-/// Tries virtio-mmio for a console device - the real lead for Parallels
-/// console output (see `virtio_console.rs`'s module doc comment), tried
-/// only once `devicetree.rs`/`acpi.rs`/`pci.rs` have all failed.
+/// Tries virtio-mmio for a console device - originally "the real lead for
+/// Parallels console output" (see `virtio_console.rs`'s module doc
+/// comment), now confirmed both nonexistent *and* possibly unsafe to even
+/// probe for there - see below - which is why this runs last, after the
+/// framebuffer console, not first.
 ///
-/// **Runs here, after `mmu::install_identity_map`, unlike the other
-/// three mechanisms - a real constraint, not an arbitrary placement
-/// choice.** `virtio_mmio::find_device`'s scan needs the low-1GB device
-/// region mapped under *this kernel's own* translation tables (see its
-/// safety comment) - `virtio_blk::Device::discover` (`init_storage`,
-/// below) already only ever runs at this same point in boot, for the
-/// same reason. A real consequence, not just a technicality: every boot
-/// message between `exit_boot_services` and here (`exceptions::install`,
-/// `mmu::install_identity_map`'s own confirmation line) is lost on a
-/// virtio-console-only platform, since there is nothing to print through
-/// yet - unlike devicetree/ACPI/PCI, which install their console
-/// immediately after `exit_boot_services`, before any of that. Revisit
-/// if a real platform ever needs those earlier messages badly enough to
-/// justify confirming (rather than assuming) that firmware's own
-/// pre-`mmu::install_identity_map` tables already map this region too.
+/// **Runs here, after `mmu::install_identity_map`, unlike devicetree/ACPI/
+/// PCI - a real constraint, not an arbitrary placement choice.**
+/// `virtio_mmio::find_device`'s scan needs the low-1GB device region
+/// mapped under *this kernel's own* translation tables (see its safety
+/// comment) - `virtio_blk::Device::discover` (`init_storage`, below)
+/// already only ever runs at this same point in boot, for the same
+/// reason.
+///
+/// **A real, unconfirmed assumption lives inside `find_device`'s scan,
+/// and real-Parallels-hardware testing points at it being wrong there.**
+/// The scan reads a magic-value register at 32 fixed, QEMU-specific
+/// addresses, and `virtio_mmio.rs`'s own comment says an unpopulated slot
+/// "reads as 0, not the magic value" on real hardware - stated as fact,
+/// but never actually confirmed the way this project's other platform
+/// conventions have been. A real bus fabric commonly raises an external
+/// abort for a read to genuinely unbacked device-memory space instead of
+/// QEMU's lenient software-emulated bus, which just returns a fixed
+/// pattern as a courtesy. This is now the prime suspect for a real
+/// symptom: a temporary raw-framebuffer-fill diagnostic confirmed the
+/// framebuffer mapping and display update both work correctly on real
+/// Parallels hardware (see CLAUDE.md's "GOP framebuffer console, take
+/// three"), yet the boot still froze solid at that exact point in the
+/// old ordering, which ran this function immediately afterward with no
+/// console yet installed to report a fault through - a silent freeze
+/// looks identical to "the scan just found nothing." Reordered so the
+/// now-validated framebuffer console goes first: Parallels gets a working
+/// console before this unconfirmed scan ever runs, and if it does fault
+/// on some future platform, there will finally be a console to report it
+/// through instead of nothing.
 fn try_virtio_console() {
     let mut device = match unsafe { virtio_console::Device::discover() } {
         Ok(device) => device,
@@ -288,15 +292,16 @@ fn try_virtio_console() {
         return;
     }
     console::install(Console::Virtio(device));
-    console::println!("Ouroboros kernel: virtio-console live (fallback - devicetree/ACPI/PCI all failed)");
+    console::println!("Ouroboros kernel: virtio-console live (fallback - every other mechanism failed)");
 }
 
 /// Installs the GOP framebuffer console - the real answer for Parallels
-/// (see `framebuffer.rs`/`fbconsole.rs`'s module doc comments), tried last,
-/// only once every byte-stream mechanism above has had its chance.
+/// (see `framebuffer.rs`/`fbconsole.rs`'s module doc comments), tried
+/// right after devicetree/ACPI/PCI, ahead of virtio-console - see
+/// `try_virtio_console`'s doc comment for why that's now deliberately
+/// last rather than first.
 ///
-/// Note what's already lost by the time this can run, for the same reason
-/// `try_virtio_console` above loses early messages: `fb_info` had to be
+/// Note what's already lost by the time this can run: `fb_info` had to be
 /// discovered before `exit_boot_services` (boot-services-only protocol),
 /// but the console itself can't be *installed* until after
 /// `mmu::install_identity_map` has run with this framebuffer's address

@@ -29,15 +29,20 @@ phase:
   Parallels.
 - ~~Build a GOP framebuffer console (the real lead after virtio-console)~~
   — done and confirmed working on QEMU (`framebuffer.rs`/`font.rs`/
-  `fbconsole.rs`, see `CLAUDE.md`/`CHANGELOG.md`). A first real-Parallels
-  test found and fixed a real bug (`open_protocol_exclusive` was
-  silently disconnecting firmware's own boot console from GOP - see
-  `CLAUDE.md`'s "GOP framebuffer console, take two"). **Still needs
-  confirmation on real Parallels hardware with the fix applied** - the
-  version that was actually tested there had the bug; only the fixed
-  version has been verified since, and only on QEMU. Next step is on the
-  user: boot the current `esp.hdd` there and confirm text actually
-  renders on screen after boot services exit.
+  `fbconsole.rs`, see `CLAUDE.md`/`CHANGELOG.md`). Two real-Parallels
+  test rounds so far, each finding and fixing a real bug:
+  `open_protocol_exclusive` was silently disconnecting firmware's own
+  boot console from GOP ("take two"), and after that fix,
+  `try_virtio_console`'s unconfirmed MMIO-scan assumption was very
+  likely faulting silently before the framebuffer console could install
+  - fixed by reordering the fallback chain ("take three"). The
+  load-bearing assumption (direct framebuffer writes are actually
+  visible on Parallels' real display, no flush needed) is now confirmed
+  via a temporary raw-fill diagnostic. **Still needs confirmation that
+  the current code (both fixes plus the reorder) actually renders
+  readable text** - only tested on QEMU so far. Next step is on the
+  user: boot the current `esp.hdd` and confirm text renders on screen
+  after boot services exit.
 - **Output redirection (`>`/`>>`)** — needs shell-level parsing this
   project doesn't have yet (splitting `cmd > file` into a command and a
   target). `cp` is done (see below); redirection is the one piece of
