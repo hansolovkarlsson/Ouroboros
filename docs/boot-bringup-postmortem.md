@@ -443,5 +443,7 @@ discovered RAM rather than a hardcoded range; a genuine preemption tick;
 a real EL0/syscall boundary; and, after three dead-end discovery
 mechanisms and one dead-end driver, a real, live, interactive console on
 real Parallels-on-Apple-Silicon hardware - the actual foundation
-everything in [the later keyboard-input work](xhci-keyboard-postmortem.md)
-was eventually built on top of.
+everything after it was built on top of: turning that bare prompt into
+a [real, disk-backed userland shell](shell-and-filesystem-postmortem.md),
+and eventually, [real keyboard input](xhci-keyboard-postmortem.md)
+reaching it.
