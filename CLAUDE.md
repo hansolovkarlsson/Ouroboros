@@ -2078,22 +2078,17 @@ MMU identity map surviving real hardware's own memory layout; and
 `tasks::start()`'s EL0 entry reaching and running the loaded shell
 program end to end, with a live `$` prompt on screen.
 
-**What's not working, and it's the real next gap, not a mystery:
-keyboard input.** The framebuffer console is write-only by design (no
-receive path was ever built for it - a different, independent
-limitation from `virtio_console.rs`'s missing receive virtqueue), and
-this kernel has no keyboard driver of any kind. The shell is genuinely
-running and the prompt is real, but nothing typed at a physical
-keyboard reaches it yet. A real input path needs a keyboard driver
-(USB HID over UEFI, most likely, since Parallels' virtual USB
-controllers already showed up in `pci::log_all_devices`'s inventory -
-an Intel EHCI and an NEC xHCI, both real, both already confirmed
-present on this exact hardware) - genuinely new driver work, not a
-quick follow-up to this session's fixes. Preemptive multitasking also
-isn't available on Parallels yet (`qemu_device_region_safe` disables
-GIC/timer setup there - see "take five"), which needs real
-interrupt-controller discovery (ACPI MADT, likely GICv3) to fix -
-separately tracked, not blocking the console work.
+**What was the real next gap at the time this section was written -
+keyboard input - is now done too.** See "USB HID keyboard driver"
+further below: a real, physical USB keyboard now types into this same
+shell on this same real Parallels hardware, full round trip (letters,
+backspace, Enter). Preemptive multitasking still isn't available on
+Parallels (`qemu_device_region_safe` disables GIC/timer setup there -
+see "take five"), which needs real interrupt-controller discovery (ACPI
+MADT, likely GICv3) to fix - separately tracked, not blocking the
+keyboard work, which turned out not to need it (the interrupt endpoint
+this driver uses is polled the same iteration-bounded way everything
+else in this kernel is, not IRQ-driven).
 
 **In the meantime, kernel development continues against QEMU**, which has a
 fully working console via ACPI/SPCR (plus confirmed-working fallback paths
@@ -2182,10 +2177,11 @@ true from before this milestone: strict round-robin only, no priorities
 or blocking; FP/SIMD state still isn't saved anywhere (`exceptions.rs`'s
 `Context`).
 
-Reasonable next steps from here: **confirming the GOP framebuffer
-console on real Parallels hardware is the most immediate one** - the
-rest of this list is unblocked work available regardless of that
-outcome. Real interrupt-controller discovery (ACPI MADT parsing, most
+Reasonable next steps from here (this paragraph predates the USB HID
+keyboard driver milestone further below, which closed the item it used
+to list first - kept as-is except for that, rather than silently
+rewritten, per this file's own discipline of recording what was true at
+the time): real interrupt-controller discovery (ACPI MADT parsing, most
 likely - the standard way firmware exposes this, and Parallels almost
 certainly uses GICv3, a materially different register interface from
 `gic.rs`'s current GICv2 code: system-register-based CPU interface
@@ -2198,16 +2194,149 @@ diagnostic worth remembering for any future "why can't this platform's
 hardware be found" question; a real relocating loader (ELF + relocation
 processing), which would lift both the `core::fmt` and
 literal-comparison restrictions; blocking/waiting primitives so tasks
-can do more than an unconditional round-robin `wfe` loop; a keyboard
-driver (USB HID over UEFI, most likely), which would give the
-framebuffer console a real input path for the first time and matter for
-any future platform where it's the only console available; or output
+can do more than an unconditional round-robin `wfe` loop; or output
 redirection (`>`/`>>`), now that `write_file`/`cp` give it something
 real to build on but shell-side command-line parsing still doesn't
 exist. Parallels' *byte-stream* console output stays a confirmed dead
 end for virtio-console unless real documentation for its proprietary
 serial device (vendor `0x1ab8`)
 someday surfaces - not something to keep chasing without that.
+
+## USB HID keyboard driver: confirmed - real, physical keyboard input on real Parallels hardware, first time ever
+
+The gap the GOP framebuffer console milestone left open (write-only, no
+keyboard driver at all) is now closed: a real, physical USB keyboard
+types into the userland shell, on real Parallels-on-Apple-Silicon
+hardware, full round trip confirmed - individual letters, backspace,
+Enter submitting a real command line and getting the shell's genuine
+`unknown command` response back. **A full technical postmortem, with
+decoded register values, byte-level evidence, and the debugging
+techniques that found each bug, lives in
+[`docs/xhci-keyboard-postmortem.md`](docs/xhci-keyboard-postmortem.md)**
+- written deliberately to be useful to other bare-metal-OS developers
+hitting the same class of problem, not just as this project's own
+history. This section is the shorter version, for this file's own
+narrative record.
+
+New module, `kernel/src/xhci.rs`: a from-scratch xHCI (USB3 host
+controller) driver - capability/operational register bring-up, a
+command ring, an event ring, device slot enable/address over control
+transfers, and - the mechanism that turned out to actually be required,
+see below - a real interrupt IN transfer ring. Discovered via a
+generalized `pci.rs` (class 0x0c/subclass 0x03/prog-if 0x30, the
+standard xHCI class code) rather than a fixed address, on the same
+reasoning as the GOP framebuffer's own address: genuinely *discovered*,
+not a QEMU-shaped guess, so - unlike `virtio_mmio.rs`/`gic.rs` -
+deliberately *not* gated behind `qemu_device_region_safe`.
+
+**Five independently-confirmed real-hardware bugs, none visible on
+QEMU, each found by direct evidence rather than guessing:**
+
+1. **A PCI Command register bit-position error.** `CMD_MEMORY_SPACE`
+   was defined as `1 << 0` - which is actually I/O Space Enable, not
+   Memory Space Enable (bit 1). Found by a diagnostic printing the
+   Command register's value before/after this driver's own write,
+   re-printed through the post-exit console specifically (boot-services
+   `log::info!` output is lost the moment `fbconsole.rs` clears the
+   screen for its own use - a real, recurring constraint on debugging
+   anything that might crash later in boot on this platform, see the
+   postmortem's "why is there no serial log" aside for the full reason).
+   One real test showed `0x0010 -> 0x0015` - bits 0 and 2 set (I/O Space,
+   Bus Master), never bit 1 (Memory Space). This explained every earlier
+   "register reads 0xffffffff" symptom on *both* QEMU and Parallels at
+   once - Memory Space had never actually been enabled by any prior
+   version of this code, on any platform, despite the write "succeeding"
+   every time.
+2. **A genuine UEFI firmware panic on real hardware**, not a kernel
+   crash - Parallels' own hypervisor log (`libMonitorArm.dylib`)
+   recorded `mon.abort.message = PANIC@11.28
+   UEFI-exception-ArmPciCpuIo2Dxe.dll`, a fault inside firmware's own PCI
+   config-space I/O driver, before this kernel's own exception vectors
+   even exist. Root cause: a BAR-reassignment probe (`write 0xFFFFFFFF`,
+   read back the size mask, write a real address) - a completely
+   standard technique, needed because QEMU's specific OVMF build leaves
+   this device's BAR totally unassigned (confirmed via `info pci`/
+   `info mtree` in the QEMU monitor: nothing binds a driver to this xHCI
+   controller during a boot that loads its kernel over virtio-mmio, so
+   firmware never bothers). QEMU's own PCI emulation tolerates this
+   probe without complaint; real PCIe firmware does not. Fixed by never
+   writing PCI config space beyond the one narrow, conditional
+   Command-register enable - `pci.rs::discover_xhci` is read-only again,
+   the same discipline `discover_uart16550`/`log_all_devices` already
+   established safely on this exact hardware.
+3. **The discovered BAR landed outside `mmu.rs`'s original
+   single-L0-table-entry span** - `0x8000004000` on the QEMU dev loop,
+   exactly 512GB, squarely outside the first (and, until now, only)
+   top-level page-table entry this kernel's identity map ever set up.
+   A real, if quiet, assumption from early in this project (every RAM
+   address and the one hardcoded device region are always low) that a
+   genuinely *discovered* PCI BAR has no obligation to respect. Fixed by
+   generalizing `install_identity_map` to allocate further top-level
+   (L0) table entries on demand, keyed by whatever address a discovered
+   device's BAR actually needs, rather than assuming everything fits in
+   the first 512GB.
+4. **The deepest finding: Parallels' USB passthrough doesn't forward
+   HID *class* requests to the real device at all.** `SET_PROTOCOL`/
+   `GET_REPORT` (the two mechanisms this driver was originally built
+   around, polling the keyboard the same way real BIOS/UEFI keyboard
+   drivers traditionally do) kept coming back as either this driver's
+   own `GET_REPORT` Setup packet, echoed back byte-for-byte (confirmed
+   by decoding the returned bytes against the exact request sent,
+   including a `wLength` field that tracked a deliberately-changed
+   request size exactly across two separate real-hardware test rounds -
+   ruling out a fixed-size buffer-aliasing coincidence), or, in one
+   test, a block of what decoded cleanly as unrelated Interface/HID/
+   Endpoint descriptor bytes. A poisoned-buffer test (fill the DMA
+   target with `0xee` immediately before ringing the doorbell) confirmed
+   the data stage genuinely executes and genuinely overwrites the
+   buffer - not a stuck or skipped transfer, just never real device
+   data. The test that actually settled it: a *standard* request,
+   `GET_DESCRIPTOR(Device)`, issued right next to a failing
+   `GET_REPORT`, came back as a perfectly valid device descriptor -
+   `bLength=0x12`, `bDescriptorType=0x01`, and (once tested against the
+   real keyboard specifically) `idVendor=0x203a`, Parallels' own real,
+   registered USB vendor ID for this exact virtual keyboard. Standard
+   requests reach the real device correctly; class requests do not get
+   forwarded at all - a genuine gap in Parallels' USB passthrough
+   implementation for this device class, confirmed with hardware
+   evidence, not assumed. Fixed by abandoning `GET_REPORT` polling
+   entirely and using a real **interrupt endpoint** instead - armed via
+   `Configure Endpoint`, a standard xHCI *command*, not a class
+   *request* at all, and once armed, delivering real reports with zero
+   further request/response round trips of any kind for this class of
+   bug to hide in. This is also, not incidentally, the same mechanism
+   every production USB HID driver actually uses at runtime; `GET_REPORT`
+   is more of a one-shot query mechanism, evidently less
+   thoroughly implemented in this specific passthrough layer.
+5. **Once the interrupt endpoint was delivering real, live, changing
+   data, it turned out to be reading Parallels' virtual mouse, not the
+   keyboard.** This driver's port scan had just grabbed the first
+   connected device - confirmed by the report bytes changing
+   continuously as the mouse moved over the VM's window, not by any
+   error. A real Parallels VM exposes at least a virtual mouse/tablet on
+   the same xHCI controller as the keyboard, and nothing before this had
+   ever needed to tell them apart. Fixed by scanning every connected
+   port and parsing each device's actual Configuration descriptor for a
+   genuine HID Boot-Protocol-Keyboard interface (`bInterfaceClass=3`,
+   `bInterfaceProtocol=1` - `2` is Mouse) before committing to
+   configuring its interrupt endpoint, rather than treating "found *a*
+   HID device" as "found *the* keyboard."
+
+**Still coarse, worth knowing before building on this:** one port, one
+device, one slot, no hot-plug, no hubs (route string always 0), no real
+HID report-descriptor parsing (boot-protocol's fixed 8-byte layout is
+assumed directly - and since `SET_PROTOCOL` almost certainly still isn't
+reaching the device either per finding 4 above, this only works because
+the real keyboard happens to use the same simple layout regardless of
+which protocol is nominally active); no stall recovery on the interrupt
+endpoint specifically (EP0's own setup-time control transfers do recover
+from a Stall - see `recover_from_stall` - the interrupt endpoint just
+logs and re-arms); only the first matching interrupt IN endpoint found
+is ever configured. Preemptive multitasking is still unavailable on
+Parallels (a separate, already-tracked gap, not something this milestone
+needed - the interrupt endpoint is polled the same
+iteration-bounded busy-poll way every other wait in this kernel is, not
+IRQ-driven).
 
 ## Commands
 
@@ -2260,14 +2389,15 @@ docs/
   roadmap.md         forward-looking plan: parking lot of known future work, not yet sequenced
   research-minix-boot.md   research note: how MINIX boots (x86 boot monitor + boot image, ARM's U-Boot chain) vs Ouroboros's UEFI-native boot, sourced from MINIX's own docs
   research-helix-os.md     research note: Helix OS's layered, trait-based kernel design and hot-reload/self-healing fault tolerance, sourced from the HelixOS-Org/helix repo and docs
+  xhci-keyboard-postmortem.md   debugging postmortem: the five real-hardware bugs found bringing up USB keyboard input on Parallels, written for other bare-metal-OS developers - see "USB HID keyboard driver" above
 
 kernel/
-  src/main.rs        #[entry] point: UEFI init, console discovery, loader::load(), ExitBootServices, exceptions::install(), mmu::install_identity_map(), gic+timer init, tasks::init(), then tasks::start()
+  src/main.rs        #[entry] point: UEFI init, console discovery, loader::load(), ExitBootServices, exceptions::install(), mmu::install_identity_map(), xhci::init(), gic+timer init, tasks::init(), then tasks::start()
   src/uart.rs        raw PL011 console driver (read + write), used only after ExitBootServices
   src/uart16550.rs   raw 16550-compatible console driver (read + write; PCI-discovered consoles; different hardware, different driver)
   src/devicetree.rs  console UART discovery via the UEFI-provided devicetree (dead end on QEMU/Parallels)
   src/acpi.rs        console UART discovery via ACPI RSDP -> XSDT -> SPCR (works on QEMU, dead end on Parallels)
-  src/pci.rs         console UART discovery via PCI enumeration for a class 0x07/0x00 serial controller, plus log_all_devices - a reusable full-bus diagnostic dump, see "virtio-console" above
+  src/pci.rs         console UART discovery via PCI enumeration for a class 0x07/0x00 serial controller, plus log_all_devices (a reusable full-bus diagnostic dump, see "virtio-console" above) and discover_xhci (class 0x0c/0x03/0x30, read-only - see "USB HID keyboard driver" above)
   src/console.rs     global console handle (Console enum: Pl011 | Uart16550 | Virtio | Framebuffer), shared between main() and the exception handler
   src/framebuffer.rs GOP (EFI_GRAPHICS_OUTPUT_PROTOCOL) discovery: resolution/stride/pixel format + framebuffer physical base/size - the real lead for Parallels, see "GOP framebuffer console" above
   src/font.rs        embedded public-domain 8x8 bitmap font (dhepper/font8x8), printable ASCII 0x20-0x7E only
@@ -2283,6 +2413,7 @@ kernel/
   src/virtio_blk.rs  runtime virtio-blk driver: feature negotiation, one virtqueue, synchronous polling sector reads and writes - phase 3a (reads)/phase 4 (writes), confirmed working, see above
   src/virtio_console.rs  transmit-only virtio-console driver over the same transport - device discovery, feature negotiation, transmitq0 - confirmed working on QEMU; confirmed *not* what Parallels' serial port actually is, see "virtio-console" above
   src/fat32.rs       hand-rolled FAT32 over virtio_blk::Device: MBR, BPB, FAT cluster chains, 8.3-only directory entries, mkdir/rmdir/touch/rm/write_file/mv write support - phase 3b (reads)/phase 4-8 (writes), confirmed working, see above
+  src/xhci.rs        from-scratch xHCI (USB3 host controller) driver: command/event/interrupt rings, device slot enable/address, a real interrupt endpoint for HID reports - confirmed working end to end with a real keyboard on real Parallels hardware, see "USB HID keyboard driver" above and docs/xhci-keyboard-postmortem.md
 
 shell/               userland default shell - a separate crate, built for aarch64-unknown-none, loaded from disk (not compiled into the kernel)
   linker.ld          flat-binary linker script: entry at offset 0, no .bss/.data (see docs/processes.md)

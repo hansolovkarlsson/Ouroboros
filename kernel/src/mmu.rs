@@ -160,6 +160,27 @@ unsafe impl Sync for Table {}
 static L0_TABLE: Table = Table(UnsafeCell::new([0; ENTRIES_PER_TABLE]));
 static L1_TABLE: Table = Table(UnsafeCell::new([0; ENTRIES_PER_TABLE]));
 
+// One L0 entry (`L1_TABLE` above, always L0 index 0) covers the first
+// 512GB of VA space (512 entries * 1GB each) - enough for every RAM
+// span, the fixed low-1GB device block, and the framebuffer this project
+// has ever seen. A real PCI 64-bit BAR doesn't respect that: QEMU's
+// `virt` machine places its high MMIO window for 64-bit BARs starting
+// exactly at 512GB (confirmed directly - the xHCI controller's BAR, from
+// `pci::discover_xhci`, came back as `0x8000004000`, i.e. L0 index 1),
+// and real hardware's own PCI resource allocator could in principle put
+// a 64-bit BAR anywhere. `extra_devices` regions therefore aren't
+// guaranteed to land in `L1_TABLE`'s span the way every other region
+// this module maps is - these two spare L1 tables, allocated into
+// whichever L0 index(es) an `extra_devices` entry actually needs, are
+// what let `install_identity_map` reach those addresses instead of
+// silently leaving them unmapped (which is exactly what happened before
+// this existed: a Translation fault at level 0, `FAR_EL1` matching the
+// BAR address exactly, on the very first read of an xHCI capability
+// register).
+const MAX_EXTRA_L1_TABLES: usize = 2;
+static EXTRA_L1_TABLES: [Table; MAX_EXTRA_L1_TABLES] =
+    [Table(UnsafeCell::new([0; ENTRIES_PER_TABLE])), Table(UnsafeCell::new([0; ENTRIES_PER_TABLE]))];
+
 // Two independent EL0 regions now, not one shared region split in half:
 // task 0's loaded-program region (loader.rs, arbitrary size, 2MB-aligned
 // by construction - see its module doc comment) and task 1's small fixed
@@ -311,23 +332,29 @@ fn overlaps_any(regions: &[(u64, u64); MAX_EL0_REGIONS], start: u64, end: u64) -
 /// `MAX_EL0_REGIONS`'s doc comment for what happens if that's ever
 /// violated.
 ///
-/// `framebuffer`, if `Some((base, size))`, is a GOP framebuffer
-/// (`framebuffer::discover`) that needs to stay mapped and writable after
-/// this switch too (`fbconsole.rs`). Most of the time this needs no extra
-/// work at all: on QEMU's `ramfb`, the framebuffer address already falls
-/// inside the discovered-RAM span below, so the ordinary RAM loop already
-/// covers it (Normal WB, EL1-only - fine, nothing but this kernel's own
-/// EL1 code ever touches it). Only if its containing 1GB block is *still*
-/// unmapped after that loop - real hardware might genuinely have a
-/// framebuffer outside the RAM span reported by the memory map, unverified
-/// either way since this has only run against QEMU so far - does this add
-/// one more Device-nGnRnE block for it, the same convention as the fixed
-/// low-1GB device block above just at whatever address the framebuffer
-/// actually reports.
+/// `extra_devices` are additional discovered device regions (`(base,
+/// size)`) that need to stay mapped and accessible after this switch, on
+/// top of the fixed low-1GB device block above - currently the GOP
+/// framebuffer (`framebuffer::discover`, needed by `fbconsole.rs`) and the
+/// xHCI controller's PCI BAR (`pci::discover_xhci`, needed by `xhci.rs`).
+/// Most of the time a given region needs no extra work at all: on QEMU's
+/// `ramfb`, the framebuffer address already falls inside the
+/// discovered-RAM span below, so the ordinary RAM loop already covers it
+/// (Normal WB, EL1-only - fine, nothing but this kernel's own EL1 code
+/// ever touches it). Only if a region's containing 1GB block is *still*
+/// unmapped after that loop - real hardware might genuinely have a device
+/// outside the RAM span reported by the memory map - does this add one
+/// more Device-nGnRnE block for it, the same convention as the fixed
+/// low-1GB device block above just at whatever address the device
+/// actually reports. Unlike the fixed low-1GB block (a QEMU-shaped
+/// convention, confirmed unsafe to *assume* present on Parallels - see
+/// `virtio_mmio.rs`), every address in `extra_devices` is independently
+/// discovered (GOP protocol query, PCI config-space BAR read), not
+/// guessed, so mapping it carries none of that risk regardless of platform.
 pub unsafe fn install_identity_map(
     memory_map: &MemoryMapOwned,
     el0_regions: [(u64, u64); MAX_EL0_REGIONS],
-    framebuffer: Option<(u64, u64)>,
+    extra_devices: &[(u64, u64)],
 ) {
     let l1 = unsafe { &mut *L1_TABLE.0.get() };
 
@@ -406,24 +433,63 @@ pub unsafe fn install_identity_map(
         );
     }
 
-    // Framebuffer fallback - see this function's doc comment. Only fires
-    // if the RAM loop above (and the fixed low-1GB device block) left the
-    // framebuffer's own 1GB block unmapped.
-    if let Some((fb_base, fb_size)) = framebuffer {
-        if fb_size > 0 {
-            let idx = (fb_base / GIB) as usize;
-            if idx < ENTRIES_PER_TABLE && l1[idx] == 0 {
-                l1[idx] = device_block(fb_base);
-                crate::console::println!(
-                    "Ouroboros kernel: framebuffer {fb_base:#x} (size {fb_size:#x}) outside RAM span, mapped as its own device block"
-                );
-            }
+    // Extra discovered device regions - see this function's doc comment
+    // and `MAX_EXTRA_L1_TABLES`'s. Only fires per-region if the RAM loop
+    // above (and the fixed low-1GB device block) left that region's own
+    // 1GB block unmapped. Handles landing outside `L1_TABLE`'s span
+    // (L0 index != 0) by allocating from `EXTRA_L1_TABLES`, reusing an
+    // already-allocated one if a previous region needed the same L0
+    // index.
+    const L0_ENTRY_SIZE: u64 = GIB * ENTRIES_PER_TABLE as u64; // 512GB
+    let l0 = unsafe { &mut *L0_TABLE.0.get() };
+    let mut extra_l1_owners = [usize::MAX; MAX_EXTRA_L1_TABLES]; // L0 index each pool slot belongs to
+    let mut next_extra_l1_table = 0usize;
+    for &(base, size) in extra_devices {
+        if size == 0 {
+            continue;
+        }
+        let l0_idx = (base / L0_ENTRY_SIZE) as usize;
+        let l1_idx = ((base / GIB) % ENTRIES_PER_TABLE as u64) as usize;
+        if l0_idx >= ENTRIES_PER_TABLE {
+            crate::console::println!("Ouroboros kernel: WARNING: device region {base:#x} is out of range for this identity map, leaving unmapped");
+            continue;
+        }
+
+        let target_l1: &mut [u64; ENTRIES_PER_TABLE] = if l0_idx == 0 {
+            l1
+        } else {
+            let existing = extra_l1_owners.iter().position(|&owner| owner == l0_idx);
+            let slot = match existing {
+                Some(slot) => slot,
+                None => {
+                    if next_extra_l1_table >= MAX_EXTRA_L1_TABLES {
+                        crate::console::println!(
+                            "Ouroboros kernel: WARNING: out of extra L1 tables, leaving device region {base:#x} unmapped"
+                        );
+                        continue;
+                    }
+                    let slot = next_extra_l1_table;
+                    next_extra_l1_table += 1;
+                    extra_l1_owners[slot] = l0_idx;
+                    l0[l0_idx] = table_desc(EXTRA_L1_TABLES[slot].0.get() as u64);
+                    slot
+                }
+            };
+            unsafe { &mut *EXTRA_L1_TABLES[slot].0.get() }
+        };
+
+        if target_l1[l1_idx] == 0 {
+            target_l1[l1_idx] = device_block(base);
+            crate::console::println!(
+                "Ouroboros kernel: device region {base:#x} (size {size:#x}) outside RAM span, mapped as its own device block (L0 index {l0_idx})"
+            );
         }
     }
 
-    // L0[0] covers VA [0, 512GB) - everything this module ever maps fits
-    // inside it, so it's the only L0 entry that needs to be valid.
-    let l0 = unsafe { &mut *L0_TABLE.0.get() };
+    // L0[0] covers VA [0, 512GB) - RAM, the fixed low-1GB device block,
+    // and the framebuffer all fit inside it. Any further L0 entries
+    // needed for an out-of-range `extra_devices` region (see above) were
+    // already wired in by that loop.
     l0[0] = table_desc(L1_TABLE.0.get() as u64);
 
     let mair_el1: u64 =

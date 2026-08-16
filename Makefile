@@ -22,7 +22,7 @@ ifeq ($(PROFILE),release)
 CARGO_FLAGS += --release
 endif
 
-.PHONY: build shell-bin esp run run-virtio-console image run-image parallels-hdd clean
+.PHONY: build shell-bin esp run run-virtio-console run-usb-kbd image run-image parallels-hdd clean
 
 build:
 	cargo build $(CARGO_FLAGS)
@@ -99,6 +99,28 @@ run-virtio-console: esp
 		-chardev file,id=vcon0,path=vcon.log \
 		-nographic
 
+# Same as `run`, plus a real xHCI (USB3) host controller with a virtual
+# USB HID keyboard attached (kernel/src/xhci.rs) and a QEMU HMP monitor
+# socket for injecting keystrokes with `sendkey` (there's no way to type
+# into an emulated USB keyboard via piped stdin the way the PL011 console
+# tests inject bytes - this is genuinely different hardware). Unlike
+# `run-virtio-console`, no source-level force is needed to exercise this:
+# the xHCI driver isn't gated behind console discovery at all (see
+# xhci.rs's module doc comment), so it always runs on this target.
+run-usb-kbd: esp
+	qemu-system-aarch64 \
+		-machine virt \
+		-cpu cortex-a72 \
+		-m 512M \
+		-bios $(OVMF) \
+		-drive file=fat:rw:$(ESP_DIR),format=raw,media=disk,if=none,id=hd0 \
+		-device virtio-blk-device,drive=hd0 \
+		-global virtio-mmio.force-legacy=false \
+		-device qemu-xhci,id=xhci0 \
+		-device usb-kbd,bus=xhci0.0 \
+		-monitor unix:qemu-monitor.sock,server,nowait \
+		-nographic
+
 # Builds a real MBR+FAT32 .img (a valid raw UEFI-bootable disk - verified by
 # booting it directly in QEMU with -drive format=raw, not just the vvfat
 # passthrough `run` uses). This is NOT directly attachable in Parallels: its
@@ -149,4 +171,4 @@ parallels-hdd: image
 
 clean:
 	cargo clean
-	rm -rf $(ESP_DIR) $(ESP_DIR).img $(ESP_DIR).dmg $(ESP_DIR).hdd vcon.log
+	rm -rf $(ESP_DIR) $(ESP_DIR).img $(ESP_DIR).dmg $(ESP_DIR).hdd vcon.log qemu-monitor.sock

@@ -7,6 +7,79 @@ what broke, how it was diagnosed), see `CLAUDE.md`; for *how* something
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## USB HID keyboard driver: confirmed - real, physical keyboard input on real Parallels hardware, first time ever
+
+**The goal:** a real input path for Parallels, closing the gap the GOP
+framebuffer console milestone left open (write-only, no keyboard driver
+at all). A from-scratch xHCI driver (`kernel/src/xhci.rs`): capability/
+operational register bring-up, command ring, event ring, device slot
+enable/address over control transfers, and - the mechanism that turned
+out to actually be required - a real interrupt IN transfer ring.
+
+**Five independently-confirmed real-hardware bugs, none visible on
+QEMU**, each found by direct evidence rather than guessing:
+
+1. A PCI Command register bit-position error - `CMD_MEMORY_SPACE` was
+   `1 << 0` (I/O Space Enable) instead of `1 << 1` (Memory Space Enable),
+   found by decoding an observed before/after register dump
+   (`0x0010 -> 0x0015`) that showed I/O Space + Bus Master set, never
+   Memory Space. Explained every earlier "nothing responds" symptom on
+   both QEMU and real hardware at once.
+2. A genuine firmware panic on real hardware -
+   `PANIC@11.28 UEFI-exception-ArmPciCpuIo2Dxe.dll`, decoded from
+   Parallels' own hypervisor crash log - from a PCI config-space
+   BAR-reassignment write (a standard technique, needed to work around
+   QEMU's own OVMF build leaving this device's BAR completely
+   unassigned) that real PCIe firmware doesn't tolerate the way QEMU's
+   software model does. Fixed by never writing to PCI config space
+   beyond the one narrow Command-register enable.
+3. The discovered BAR (`0x8000004000` on QEMU) landed outside the
+   identity map's original single-L0-table-entry span (a real
+   simplifying assumption from early in this project, never revisited
+   until a real PCI BAR needed an address outside the first 512GB).
+   Fixed by generalizing `mmu.rs` to allocate further top-level table
+   entries on demand.
+4. The deepest finding: Parallels' USB passthrough doesn't forward HID
+   *class* requests (`SET_PROTOCOL`, `GET_REPORT`) to the real device at
+   all - confirmed by a live, correct `GET_DESCRIPTOR` *standard*
+   request returning Parallels' own real registered USB vendor ID
+   (`0x203a`) right next to a `GET_REPORT` that kept echoing this
+   driver's own Setup packet back (byte-for-byte, tracked exactly across
+   a changed request length - not a coincidence). Fixed by switching to
+   a real interrupt endpoint, armed via the standard `Configure Endpoint`
+   xHCI *command* (not a class request), the same mechanism every
+   production USB HID driver actually uses at runtime.
+5. Once the interrupt endpoint was delivering real live data, it turned
+   out to be reading Parallels' virtual *mouse*, not the keyboard - this
+   driver's port scan had just grabbed the first connected device.
+   Fixed by scanning every connected port and checking each device's
+   actual HID interface protocol (`bInterfaceProtocol=1`, Keyboard)
+   before configuring it.
+
+**Confirmed working end to end on real Parallels hardware, not just
+QEMU:** typed a full command line (`abc`), used backspace, pressed
+Enter, got the shell's real `unknown command` response - the complete
+keyboard-to-shell round trip, on a real physical USB keyboard.
+
+Full technical write-up - including the debugging techniques that found
+each bug (poisoned DMA buffers, widening a request to break a suspicious
+size coincidence, using a known-good standard request as a control,
+decoding raw exception registers by hand) - in
+[`xhci-keyboard-postmortem.md`](xhci-keyboard-postmortem.md), written to
+be useful to other bare-metal-OS developers hitting the same class of
+problem, not just as this project's own history.
+
+**Still coarse, worth knowing before building on this:** one port, one
+device, one slot, no hot-plug, no hubs, no real HID report-descriptor
+parsing (boot-protocol's fixed 8-byte layout assumed directly, and
+`SET_PROTOCOL` almost certainly still isn't reaching the device either -
+this only works because the real keyboard happens to use the same
+simple layout regardless), no stall recovery on the interrupt endpoint
+specifically (EP0's setup-time control transfers do recover from a
+Stall), only the first matching interrupt IN endpoint is ever
+configured. Preemptive multitasking is still unavailable on Parallels
+(a separate, already-tracked gap - see `roadmap.md`).
+
 ## GOP framebuffer console: confirmed - a real, working shell prompt on real Parallels hardware, first time ever
 
 **The goal:** with the broadened `qemu_device_region_safe` gate in

@@ -43,40 +43,61 @@ phase:
   low-1GB QEMU-shaped device-region convention (not just virtio-mmio) is
   unsafe on Parallels, fixed by broadening the same gate
   (`qemu_device_region_safe`) to cover GIC/timer setup too. **This is
-  now done** - what's left is two separate, already-known gaps, not more
-  console debugging: no keyboard input on Parallels (the console is
-  write-only, and this kernel has no keyboard driver at all - see the
-  keyboard-driver item below, now the clear next step for Parallels
-  specifically), and no preemption there either (needs real
-  interrupt-controller discovery - ACPI MADT, likely GICv3 - a separate,
-  substantial follow-up).
-- **A USB HID keyboard driver — the clear next step for Parallels
-  specifically, now that the console works but has no input path.**
-  Research (two independent sources, not just one search result taken
-  at face value) confirmed this is a well-grounded target, not a repeat
-  of virtio-console's proprietary dead end: a real Parallels forum
-  thread about Linux ARM64 guests shows actual `xhci_hcd` errors tied
-  to the keyboard/mouse, on the exact same xHCI PCI device
-  (`0x1033:0x0194`) `pci::log_all_devices` already found present on
-  this hardware; and an independent USB-ID database confirms `VID_203A`
-  ("PARALLELS Virtual Keyboard" in real guest `lsusb` output) is a
-  genuine USB-IF-registered vendor ID belonging to Parallels itself -
-  i.e. a standard, spec-compliant USB HID device over a standard
-  controller, discoverable by any conformant driver, not an
-  undocumented channel. **Genuinely large scope, larger than anything
-  built so far** - xHCI controller init (capability/operational
-  registers, device context array, command ring, event ring), device
-  slot/address enumeration over control transfers, then HID
-  boot-protocol keyboard reports on top, all polling-based rather than
-  interrupt-driven (matches this project's existing driver style, and
-  necessary anyway since Parallels has no working GIC yet - see above).
-  Explicitly not started - the user chose to pause here after the
-  console milestone rather than begin immediately given the size.
-  Narrowest useful first slice, when picked back up: minimal xHCI init
-  + one device enumerated + polling boot-protocol reports, no hot-plug,
-  no EHCI, no full HID report-descriptor parsing - enough to type one
-  character into the shell, same discipline as every driver in this
-  project so far.
+  now done** - and the console's write-only limitation is also now done
+  (see the USB HID keyboard driver item below). What's left from this
+  era: no preemption on Parallels (needs real interrupt-controller
+  discovery - ACPI MADT, likely GICv3 - a separate, substantial
+  follow-up, tracked below).
+- ~~A USB HID keyboard driver~~ — **done, and confirmed with a real,
+  physical keyboard typing a full command line (with backspace) into the
+  shell on real Parallels-on-Apple-Silicon hardware.** A genuinely large
+  addition, as flagged when this was scoped: a from-scratch xHCI driver
+  (`kernel/src/xhci.rs`) covering capability/operational register
+  programming, the command ring, the event ring, device slot enable/
+  address, control transfers, and - the mechanism that turned out to
+  actually be required, see below - a real interrupt IN transfer ring.
+  Five independently-confirmed real-hardware bugs along the way, none
+  visible on QEMU: a PCI Command register bit-position error (Memory
+  Space Enable is bit 1, not bit 0 - explained both the QEMU dev-loop
+  quirk below and the real-hardware failure); a firmware panic
+  (`PANIC@11.28 UEFI-exception-ArmPciCpuIo2Dxe.dll`, decoded from
+  Parallels' own hypervisor crash log) from a PCI config-space
+  BAR-reassignment write that real firmware doesn't tolerate the way
+  QEMU's does; the discovered BAR landing outside the identity map's
+  original single-L0-table-entry span, fixed by generalizing
+  `mmu.rs` to allocate further top-level table entries on demand; the
+  deepest finding, that Parallels' USB passthrough doesn't forward HID
+  *class* requests (`SET_PROTOCOL`, `GET_REPORT`) to the real device at
+  all (confirmed via a live, correct `GET_DESCRIPTOR` *standard* request
+  returning Parallels' own real registered USB vendor ID, `0x203a`,
+  right next to a `GET_REPORT` that kept echoing this driver's own Setup
+  packet back) - fixed by using a real interrupt endpoint (armed via the
+  standard `Configure Endpoint` xHCI *command*, not a class request) the
+  way every production USB HID driver actually works at runtime, instead
+  of polling `GET_REPORT`; and, once that interrupt endpoint was
+  delivering real live data, discovering it was reading Parallels'
+  virtual *mouse*, not the keyboard - fixed by scanning every connected
+  port and checking each device's actual HID interface protocol
+  (`bInterfaceProtocol=1`, Keyboard) before configuring it. Full
+  technical write-up, including the debugging techniques that found each
+  bug, in [`xhci-keyboard-postmortem.md`](xhci-keyboard-postmortem.md) -
+  written to be useful to other bare-metal-OS developers hitting the
+  same class of problem, not just this project's own history.
+  **Still coarse, worth knowing before building on this:** one port, one
+  device, one slot, no hot-plug, no hubs, no real HID report-descriptor
+  parsing (boot-protocol's fixed 8-byte layout assumed directly), no
+  stall recovery on the interrupt endpoint specifically, only the first
+  interrupt IN endpoint on a matching interface is ever configured.
+- **Preemption on Parallels** — `qemu_device_region_safe` disables
+  GIC/timer setup entirely there (see `CLAUDE.md`'s "take five"), since
+  the fixed low-1GB GICv2 addresses this project has only ever confirmed
+  via a QEMU devicetree dump are a different, real, confirmed-unsafe
+  QEMU-shaped convention on real hardware. Needs real interrupt-controller
+  discovery (ACPI MADT parsing, most likely) - Parallels almost certainly
+  uses GICv3, a materially different register interface from `gic.rs`'s
+  current GICv2 code (system-register-based CPU interface, redistributors
+  instead of a single distributor). A separate, substantial follow-up,
+  not yet started.
 - **Output redirection (`>`/`>>`)** — needs shell-level parsing this
   project doesn't have yet (splitting `cmd > file` into a command and a
   target). `cp` is done (see below); redirection is the one piece of

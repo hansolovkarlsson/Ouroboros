@@ -103,9 +103,28 @@ fn main() -> ! {
 
     print_prompt();
     loop {
-        match try_read_char() {
-            Some(byte) => on_byte(byte, &mut buf, &mut len, &mut cwd, &mut cwd_len),
-            None => wfe(),
+        // Deliberately busy-polls rather than `wfe()`-ing between bytes -
+        // a real correctness requirement, not just a style choice, once
+        // keyboard input (kernel/src/xhci.rs) entered the picture. `wfe`
+        // architecturally only resumes on an event (SEV, a pending
+        // IRQ/FIQ regardless of masking, a debug event, or an
+        // implementation-defined wakeup) - on QEMU that's covered for
+        // free by the timer tick's IRQ firing every ~20ms regardless of
+        // whether this task is the one it wakes. On real Parallels
+        // hardware, `qemu_device_region_safe` (see main.rs) disables the
+        // GIC/timer entirely, so there is no periodic interrupt at all -
+        // an idle `wfe` there has nothing architecturally guaranteed to
+        // ever wake it again, which would make every syscall this loop
+        // depends on (including polling the USB keyboard, which has no
+        // interrupt path of its own either - see xhci.rs) permanently
+        // unreachable after the very first empty poll. There is no
+        // syscall today for userland to learn whether a tick source
+        // exists this boot, so busy-polling unconditionally is the only
+        // way to keep this loop correct on both platforms; the cost is
+        // spinning one vCPU's worth of host CPU while idle, accepted
+        // deliberately over a shell that can silently stop responding.
+        if let Some(byte) = try_read_char() {
+            on_byte(byte, &mut buf, &mut len, &mut cwd, &mut cwd_len);
         }
     }
 }

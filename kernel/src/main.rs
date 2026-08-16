@@ -23,6 +23,7 @@ mod uart16550;
 mod virtio_blk;
 mod virtio_console;
 mod virtio_mmio;
+mod xhci;
 
 use uefi::boot;
 use uefi::prelude::*;
@@ -156,6 +157,29 @@ fn main() -> Status {
         }
     };
 
+    // xHCI controller discovery (kernel/src/xhci.rs) - also boot-services-only
+    // (PCI config-space reads via PciRootBridgeIo), so has to happen here
+    // too. Unlike virtio-mmio/GIC's fixed QEMU-shaped addresses, this one
+    // is genuinely discovered (a PCI BAR, read directly out of the
+    // controller's own configuration space) rather than guessed - see
+    // xhci.rs's module doc comment for why that makes it safe to actually
+    // use later regardless of `qemu_device_region_safe`.
+    let xhci_info = match pci::discover_xhci() {
+        Ok(info) => {
+            log::info!(
+                "Ouroboros kernel: xHCI controller @ {:#x}, PCI command register {:#06x} -> {:#06x}",
+                info.base,
+                info.command_before,
+                info.command_after
+            );
+            Some(info)
+        }
+        Err(e) => {
+            log::warn!("Ouroboros kernel: xHCI discovery failed ({e})");
+            None
+        }
+    };
+
     // Also boot-services-only (a filesystem read and a page allocation) -
     // see loader.rs's module doc comment for why this happens now rather
     // than after a real runtime disk driver exists. A failure here means
@@ -200,11 +224,26 @@ fn main() -> Status {
 
     // SAFETY: called after exit_boot_services, with the memory map that
     // call returned.
+    let mut extra_devices = [(0u64, 0u64); 2];
+    let mut extra_device_count = 0;
+    if let Some(info) = fb_info {
+        extra_devices[extra_device_count] = (info.base, info.size as u64);
+        extra_device_count += 1;
+    }
+    if let Some(info) = xhci_info {
+        // Size is a coarse over-estimate (the real BAR size comes from a
+        // second PCI config-space read this driver doesn't bother doing -
+        // `install_identity_map` only needs a nonzero size to know the
+        // region isn't empty, and maps a whole 1GB block regardless, same
+        // as the framebuffer fallback).
+        extra_devices[extra_device_count] = (info.base, 0x10000);
+        extra_device_count += 1;
+    }
     unsafe {
         mmu::install_identity_map(
             &memory_map,
             [(program.base, program.size), tasks::idle_region()],
-            fb_info.map(|info| (info.base, info.size as u64)),
+            &extra_devices[..extra_device_count],
         )
     };
     console::println!("Ouroboros kernel: identity map installed, MMU running on our own tables");
@@ -242,6 +281,32 @@ fn main() -> Status {
     // safely-probeable virtio-mmio console device.
     if qemu_device_region_safe && !console::is_installed() {
         try_virtio_console();
+    }
+
+    // USB HID keyboard (kernel/src/xhci.rs) - the first keyboard input
+    // path this kernel has ever had. Deliberately NOT gated on
+    // `qemu_device_region_safe`: unlike virtio-mmio/GIC, the xHCI BAR is a
+    // genuinely discovered address (PCI config space), not a guessed
+    // QEMU-shaped convention - see xhci.rs's module doc comment. Not
+    // fatal if it fails (no controller found, no device connected, ...) -
+    // xhci::init logs and leaves the keyboard uninstalled, same
+    // best-effort posture as virtio-blk/virtio-console/the framebuffer
+    // console above.
+    if let Some(info) = xhci_info {
+        // Re-printed through whatever console is live now (unlike the
+        // boot-services-only log::info! this was first reported through
+        // in pci::discover_xhci) - see XhciInfo's doc comment for why:
+        // this is the only way to still have this diagnostic on screen if
+        // xhci::init below crashes, on a platform (Parallels, confirmed)
+        // whose only console is the write-only framebuffer this same
+        // boot already had to fall back to.
+        console::println!(
+            "Ouroboros kernel: xhci: BAR {:#x}, PCI command register {:#06x} -> {:#06x}",
+            info.base,
+            info.command_before,
+            info.command_after
+        );
+        unsafe { xhci::init(info.base) };
     }
 
     // The runtime storage stack (docs/CHANGELOG.md phases 3a/3b): virtio-blk

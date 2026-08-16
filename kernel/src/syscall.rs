@@ -285,7 +285,12 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
                 None => u64::MAX,
             }
         }
-        syscall_abi::TRY_READ_CHAR => match console::read_byte() {
+        // Falls back to the USB keyboard (xhci.rs) when the byte-stream
+        // console has nothing waiting - no shell/ABI changes needed to
+        // wire keyboard input in, since both sources feed the same
+        // syscall. crate::xhci::poll_key() is a no-op returning None
+        // immediately if no keyboard was ever found/installed this boot.
+        syscall_abi::TRY_READ_CHAR => match console::read_byte().or_else(crate::xhci::poll_key) {
             Some(byte) => byte as u64,
             None => NO_CHAR,
         },
