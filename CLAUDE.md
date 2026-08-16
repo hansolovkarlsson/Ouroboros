@@ -2012,8 +2012,11 @@ of everything fixed this session. The prompt on screen is real and the
 shell is genuinely running, but nothing typed at a physical keyboard
 currently reaches it. This was already flagged as a known limitation
 before any of this round's hardware testing began, not a new surprise -
-see "Next milestone" below for what a real input path would need (USB
-HID over UEFI, most likely).
+and the user directly confirmed it on the same real hardware: typing at
+the keyboard produced no visible change on screen, exactly as the
+design predicts, not a crash or a different symptom - see "Next
+milestone" below for what a real input path would need (USB HID over
+UEFI, most likely).
 
 ### Parallels disk attachment: a real trap, not a hunch
 
