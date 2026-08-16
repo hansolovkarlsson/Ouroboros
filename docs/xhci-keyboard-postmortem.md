@@ -10,7 +10,12 @@ against a real hypervisor is likely to run into, and there wasn't an
 existing write-up we could find that covered them. If you're building
 your own OS and your keyboard driver "sort of" works — enumerates fine,
 sends what look like correct commands, but you get garbage or silence
-back — some of this may save you a day of your own.
+back — some of this may save you a day of your own. (There's an earlier
+companion piece, too: [`boot-bringup-postmortem.md`](boot-bringup-postmortem.md)
+covers the more foundational bring-up work this all sits on top of -
+exception vectors, the MMU switch, and the console-discovery saga that
+found a working display before this document's driver ever had anything
+to type into.)
 
 Five real, confirmed bugs, each found by direct evidence (register
 dumps, decoded exception registers, byte-for-byte comparisons) rather

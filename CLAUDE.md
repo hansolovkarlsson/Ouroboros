@@ -2390,6 +2390,7 @@ docs/
   research-minix-boot.md   research note: how MINIX boots (x86 boot monitor + boot image, ARM's U-Boot chain) vs Ouroboros's UEFI-native boot, sourced from MINIX's own docs
   research-helix-os.md     research note: Helix OS's layered, trait-based kernel design and hot-reload/self-healing fault tolerance, sourced from the HelixOS-Org/helix repo and docs
   xhci-keyboard-postmortem.md   debugging postmortem: the five real-hardware bugs found bringing up USB keyboard input on Parallels, written for other bare-metal-OS developers - see "USB HID keyboard driver" above
+  boot-bringup-postmortem.md    debugging postmortem: exception vectors, the MMU switch, GIC/timer, the EL0/syscall boundary, and the console-discovery saga (devicetree/ACPI/PCI/virtio-console dead ends, then the GOP framebuffer console) - the earlier, foundational counterpart to xhci-keyboard-postmortem.md
 
 kernel/
   src/main.rs        #[entry] point: UEFI init, console discovery, loader::load(), ExitBootServices, exceptions::install(), mmu::install_identity_map(), xhci::init(), gic+timer init, tasks::init(), then tasks::start()
