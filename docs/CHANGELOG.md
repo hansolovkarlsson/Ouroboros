@@ -7,6 +7,34 @@ what broke, how it was diagnosed), see `CLAUDE.md`; for *how* something
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## GOP framebuffer console: confirmed - a real, working shell prompt on real Parallels hardware, first time ever
+
+**The goal:** with the broadened `qemu_device_region_safe` gate in
+place, the user tested a fifth time. Success - the complete predicted
+sequence reached on real hardware with no further issues:
+`framebuffer console live` → `skipping virtio-blk` → `skipping
+GIC/timer init` → `shell ready` → the userland shell's own banner and a
+live `$` prompt.
+
+This is the first time this project has ever reached a running,
+prompt-displaying shell on real Parallels hardware - the actual goal
+the whole console-discovery effort (devicetree/ACPI/PCI, then
+virtio-console, then five rounds of GOP-framebuffer-console hardware
+testing) was for. Confirmed working on real hardware, not just QEMU:
+GOP discovery/mapping, direct-write display visibility with no flush
+needed, `fbconsole.rs`'s actual text rendering, the exception handler
+reporting through it, the MMU identity map, and EL0 task entry.
+
+**What's not working: keyboard input, a separate, already-known gap.**
+The framebuffer console is write-only by design - this kernel has no
+keyboard driver at all. The shell is genuinely running, but nothing
+typed reaches it yet. A real input path needs a keyboard driver (USB
+HID over UEFI, most likely - Parallels' own PCI inventory already shows
+real USB controllers present). Preemptive multitasking also isn't
+available on Parallels yet (the safety gate disables GIC/timer setup
+there), needing real interrupt-controller discovery (ACPI MADT, likely
+GICv3) to fix - a separate, substantial follow-up.
+
 ## GOP framebuffer console, round four: the GIC crashes too - broadened the safety gate beyond virtio-mmio
 
 **The goal:** with the `virtio_mmio_probe_safe` gate in place, the user

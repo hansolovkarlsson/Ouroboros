@@ -1970,6 +1970,51 @@ gotten further than the last, and this is the first version reasoned
 through to actually reach a working shell rather than another
 diagnostic.
 
+### GOP framebuffer console, take six: confirmed - a real, working shell prompt on real Parallels hardware, first time ever
+
+The user tested a fifth time with the broadened `qemu_device_region_safe`
+gate in place. **Success - the complete predicted sequence, exactly as
+reasoned through in "take five," reached on real hardware:**
+`framebuffer console live` → `skipping virtio-blk (unconfirmed-safe
+virtio-mmio scan on this platform) - disk commands won't work this
+boot` → `skipping GIC/timer init (unconfirmed-safe device region on
+this platform) - no preemption this boot` → `shell ready - type and
+press Enter` → the loaded userland shell's own banner
+(`Ouroboros userland shell`) and a live `$` prompt. No crash, no
+exception, nothing further needed.
+
+This is the first time this project has ever reached a running,
+prompt-displaying shell on real Parallels hardware - the actual goal
+the whole "get a Parallels console" effort (virtio-console, then the
+GOP framebuffer console, across five hardware round trips) was for.
+Four real bugs found and fixed along the way, each confirmed by direct
+hardware evidence rather than guessed: `open_protocol_exclusive`
+disconnecting the boot console, `try_virtio_console`'s scan freezing
+the boot with nothing to report through, a decoded Synchronous External
+Abort proving `virtio_mmio::find_device` crashes outright, and a second
+decoded instance of the same fault proving the entire low-1GB
+QEMU-shaped device-region convention (not just virtio-mmio) is unsafe
+here.
+
+**What's confirmed working now, on real Parallels hardware, not just
+QEMU:** GOP discovery and mapping; direct framebuffer writes reaching
+the display with no explicit flush; the exception handler reporting
+through that display; `fbconsole.rs`'s actual font/glyph/cursor
+rendering (not just a raw fill); the MMU identity map surviving real
+hardware's own memory layout; and `tasks::start()`'s EL0 entry reaching
+and running the loaded shell program.
+
+**What's not confirmed yet, because it's a separate, already-known,
+already-documented gap: keyboard input.** The framebuffer console is
+write-only by design (`fbconsole.rs`'s `read_byte` always returns
+`None`) - this kernel has no keyboard driver of any kind, independent
+of everything fixed this session. The prompt on screen is real and the
+shell is genuinely running, but nothing typed at a physical keyboard
+currently reaches it. This was already flagged as a known limitation
+before any of this round's hardware testing began, not a new surprise -
+see "Next milestone" below for what a real input path would need (USB
+HID over UEFI, most likely).
+
 ### Parallels disk attachment: a real trap, not a hunch
 
 Getting `esp.img` to actually boot in Parallels took a few wrong turns worth
@@ -2001,48 +2046,51 @@ attachment mechanism was wrong.
 
 ### Next milestone
 
-**Parallels console output has a real, better-grounded answer now: the
-GOP framebuffer console (see "GOP framebuffer console" above) - and as
-of "take four," it has actually rendered readable text live on real
-Parallels hardware, a first for this project.** Four real-hardware
-attempts so far, each surfacing and fixing a genuine bug:
-`open_protocol_exclusive` was silently disconnecting firmware's own
-console driver from GOP ("take two"); `try_virtio_console`'s MMIO scan
-then froze the boot with no console yet installed to report through
-("take three"'s reorder got the console installed, and that console
-then rendered the exception that led to "take four"'s real fix - a
-`qemu_device_region_safe` gate, initially scoped to virtio-mmio,
-covering every caller of `virtio_mmio::find_device`); and a *second*,
-differently-addressed instance of the identical fault signature then
-showed up at `gic.rs`'s `GICD_BASE` ("take five") - not a new bug so
-much as proof the entire fixed low-1GB QEMU-shaped device-region
-convention is unsafe on Parallels, not just virtio-mmio specifically -
-fixed by broadening the same gate to also cover GIC/timer-tick setup
-(`timer.rs` itself is exempt, being pure system-register access, safe
-on any ARMv8 CPU). **The load-bearing assumption behind this whole
-approach - that a direct write to the GOP framebuffer's physical memory
-is actually visible on the display, no explicit flush needed - is
-confirmed on real Parallels hardware**, and so is the font/glyph/scroll
-rendering itself, via the real exception text that rendered on screen
-in "take four." What's still unconfirmed: whether the *current* code
-(all fixes together) reaches a working interactive shell there - every
-version tested on real hardware so far was missing at least one of
-them, and each successive test has gotten further than the last.
-virtio-console remains a confirmed
-dead end
-on Parallels specifically (tested on real hardware, not a pause or an
-open question) - a full PCI device inventory taken directly from that
-hardware showed no virtio-console device over PCI and no direct evidence
-of one over MMIO either; the actual serial port is very likely a
-proprietary Parallels device (vendor `0x1ab8`, no public spec), and
-reverse-engineering it was considered and explicitly declined. The
-framebuffer console doesn't depend on any of that - GOP is a standard
-UEFI protocol, needs no address guessing, and this project's own
-Parallels boot screenshots already show it rendering correctly during
-boot services. **What's not yet confirmed: whether it keeps working
-after `exit_boot_services`, on real Parallels hardware specifically** -
-everything about this milestone has only been verified against QEMU's
-`ramfb` device so far.
+**Parallels has a real, working console now - confirmed, not just
+reasoned through.** The GOP framebuffer console (see "GOP framebuffer
+console" above) reached a genuine milestone in "take six": a live,
+prompt-displaying shell running on real Parallels hardware, the actual
+goal the whole console-discovery effort (three console mechanisms tried
+and rejected, then virtio-console, then this) was for. Five real
+hardware round trips got there, each finding and fixing one genuine
+bug: `open_protocol_exclusive` disconnecting firmware's own console
+driver from GOP ("take two"); `try_virtio_console`'s MMIO scan freezing
+the boot with no console yet installed to report through ("take
+three"'s reorder got a console installed, and that console then
+rendered the exception that led to the real fix); a decoded Synchronous
+External Abort proving `virtio_mmio::find_device` crashes real hardware
+outright, fixed with a safety gate ("take four"); and a *second*,
+differently-addressed instance of the identical fault at `gic.rs`'s
+`GICD_BASE`, proving the entire fixed low-1GB QEMU-shaped device-region
+convention (not just virtio-mmio) is unsafe here, fixed by broadening
+the same gate to cover GIC/timer setup too ("take five") - followed by
+confirmation ("take six") that the complete fix, all four bugs
+addressed together, reaches a real shell prompt with no further issues.
+
+**What's confirmed working now, on real Parallels hardware:** GOP
+discovery and mapping; direct framebuffer writes reaching the display
+with no explicit flush; `fbconsole.rs`'s actual font/glyph/cursor
+rendering; the exception handler reporting through that display; the
+MMU identity map surviving real hardware's own memory layout; and
+`tasks::start()`'s EL0 entry reaching and running the loaded shell
+program end to end, with a live `$` prompt on screen.
+
+**What's not working, and it's the real next gap, not a mystery:
+keyboard input.** The framebuffer console is write-only by design (no
+receive path was ever built for it - a different, independent
+limitation from `virtio_console.rs`'s missing receive virtqueue), and
+this kernel has no keyboard driver of any kind. The shell is genuinely
+running and the prompt is real, but nothing typed at a physical
+keyboard reaches it yet. A real input path needs a keyboard driver
+(USB HID over UEFI, most likely, since Parallels' virtual USB
+controllers already showed up in `pci::log_all_devices`'s inventory -
+an Intel EHCI and an NEC xHCI, both real, both already confirmed
+present on this exact hardware) - genuinely new driver work, not a
+quick follow-up to this session's fixes. Preemptive multitasking also
+isn't available on Parallels yet (`qemu_device_region_safe` disables
+GIC/timer setup there - see "take five"), which needs real
+interrupt-controller discovery (ACPI MADT, likely GICv3) to fix -
+separately tracked, not blocking the console work.
 
 **In the meantime, kernel development continues against QEMU**, which has a
 fully working console via ACPI/SPCR (plus confirmed-working fallback paths
