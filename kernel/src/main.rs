@@ -99,27 +99,36 @@ fn main() -> Status {
         // we still have a working boot-services console to log through.
         pci::log_all_devices();
     }
-    // A real, hardware-confirmed reason for this flag, not a hedge: real
-    // Parallels hardware took a genuine Synchronous External Abort
-    // (ESR_EL1 EC=0x25, DFSC=0x10 - a real bus fault, not a permission/
-    // translation issue) reading virtio_mmio's very first scan address
-    // (`FAR_EL1` matched `virtio_mmio::SLOT_BASE` exactly) - see
-    // `virtio_mmio.rs`'s module doc comment and CLAUDE.md's "GOP
-    // framebuffer console, take four". `find_device`'s scan has no way to
-    // fail soft from a real bus fault (this kernel has no resumable EL1
-    // synchronous-fault path, only the diverging report-and-halt one -
-    // see `exceptions.rs`), so the only safe thing to do on a platform
-    // where a byte-stream console couldn't be found the normal way is to
-    // not run that scan at all, for *any* caller - virtio-console
-    // (`try_virtio_console`) and virtio-blk (`init_storage`) alike, both
-    // built on the identical `virtio_mmio::find_device`. This is a
-    // heuristic, not a proof (a platform could in principle have no
-    // early console yet still safely support virtio-mmio), but it's
-    // grounded in the one real data point this project has - QEMU, the
-    // only platform virtio-mmio has ever been confirmed safe on, also
-    // always has a working ACPI/SPCR console - and it directly prevents
-    // a repeat of this exact crash.
-    let virtio_mmio_probe_safe = discovery.is_some();
+    // A real, hardware-confirmed reason for this flag, not a hedge - and
+    // confirmed twice over now, not once. Real Parallels hardware took a
+    // genuine Synchronous External Abort (ESR_EL1 EC=0x25, DFSC=0x10 - a
+    // real bus fault, not a permission/translation issue) reading
+    // virtio_mmio's very first scan address (`FAR_EL1` matched
+    // `virtio_mmio::SLOT_BASE` exactly) - see `virtio_mmio.rs`'s module
+    // doc comment and CLAUDE.md's "GOP framebuffer console, take four".
+    // With that scan skipped, a *second*, differently-addressed instance
+    // of the identical fault signature showed up next, this time with
+    // `FAR_EL1` matching `gic.rs`'s `GICD_BASE` exactly - see
+    // CLAUDE.md's "take five". Both addresses are the same kind of thing:
+    // a fixed, QEMU-shaped convention for where a device sits in the low
+    // 1GB, confirmed only via a QEMU devicetree dump, never discovered on
+    // Parallels. Neither `find_device`'s scan nor `gic::init`'s writes
+    // have any way to fail soft from a real bus fault (this kernel has no
+    // resumable EL1 synchronous-fault path, only the diverging
+    // report-and-halt one - see `exceptions.rs`), so the only safe thing
+    // to do on a platform where a byte-stream console couldn't be found
+    // the normal way is to not touch any of these QEMU-specific
+    // low-1GB addresses at all: virtio-console (`try_virtio_console`),
+    // virtio-blk (`init_storage`), *and* the GIC/timer-tick setup below -
+    // `timer.rs` itself is exempt, being pure system-register access
+    // (`cntfrq_el0` etc.), architecturally safe on any ARMv8 CPU
+    // regardless of platform device layout. This is a heuristic, not a
+    // proof (a platform could in principle have no early console yet
+    // still safely expose these), but it's grounded in the one real data
+    // point this project has - QEMU, the only platform any of this has
+    // ever been confirmed safe on, also always has a working ACPI/SPCR
+    // console - and it directly prevents a repeat of either crash.
+    let qemu_device_region_safe = discovery.is_some();
 
     // GOP framebuffer discovery - also boot-services-only (see
     // framebuffer.rs's module doc comment), so it has to happen here
@@ -224,38 +233,63 @@ fn main() -> Status {
 
     // A fifth and final fallback, tried only if every mechanism above -
     // including the framebuffer console - has failed, *and* only if
-    // `virtio_mmio_probe_safe` says the underlying scan isn't known to be
+    // `qemu_device_region_safe` says the underlying scan isn't known to be
     // dangerous here. Confirmed dead on Parallels specifically (no such
     // PCI device, see CLAUDE.md's "virtio-console" section) and now
     // confirmed to crash outright there too, not just fail to find
-    // anything (see `virtio_mmio_probe_safe`'s own comment above) - kept
+    // anything (see `qemu_device_region_safe`'s own comment above) - kept
     // only for a hypothetical future platform with no GOP but a real,
     // safely-probeable virtio-mmio console device.
-    if virtio_mmio_probe_safe && !console::is_installed() {
+    if qemu_device_region_safe && !console::is_installed() {
         try_virtio_console();
     }
 
     // The runtime storage stack (docs/CHANGELOG.md phases 3a/3b): virtio-blk
     // + FAT32, installed globally for fs_list_dir/fs_read_file
     // (syscall.rs) to use. Not fatal if it fails - see init_storage's doc
-    // comment. Gated on the same `virtio_mmio_probe_safe` flag as
+    // comment. Gated on the same `qemu_device_region_safe` flag as
     // virtio-console above - virtio_blk::Device::discover() goes through
     // the identical `virtio_mmio::find_device` scan that's now confirmed
     // to crash on real Parallels hardware, so this is skipped there for
     // the same reason, not a separate decision.
-    if virtio_mmio_probe_safe {
+    if qemu_device_region_safe {
         init_storage();
     } else {
         console::println!("Ouroboros kernel: skipping virtio-blk (unconfirmed-safe virtio-mmio scan on this platform) - disk commands won't work this boot");
     }
 
-    // SAFETY: GICD/GICC are mapped by the identity map just installed
-    // above (both fall within the low-1GB device block).
-    unsafe {
-        gic::init();
-        gic::enable_interrupt(timer::INTID);
+    // Gated on `qemu_device_region_safe` - GICD/GICC sit at the same kind
+    // of fixed, QEMU-shaped low-1GB address as virtio-mmio, and real
+    // Parallels hardware directly confirmed (a decoded Synchronous
+    // External Abort, `FAR_EL1` matching `GICD_BASE` exactly) that
+    // writing there crashes just as hard - see `qemu_device_region_safe`'s
+    // own comment above and CLAUDE.md's "take five". Skipping this
+    // entirely means no preemption this boot (no tick ever fires, so
+    // `tasks.rs`'s round-robin never switches away from task 0) - a real,
+    // known limitation, not silently swallowed: `tasks::start` below
+    // does a straight `eret` into task 0 with no dependency on any of
+    // this having run, so the interactive shell still works, just
+    // without ever preempting - task 0 simply keeps running forever,
+    // which is fine for a single always-runnable interactive task.
+    // `timer::arm` is deliberately not called at all in this branch: it's
+    // harmless either way (pure system-register access, see
+    // `timer.rs`'s module doc comment), but arming a timer whose
+    // interrupt will never be forwarded anywhere is just dead work.
+    if qemu_device_region_safe {
+        // SAFETY: GICD/GICC are mapped by the identity map just installed
+        // above (both fall within the low-1GB device block) - and, on
+        // this branch, confirmed to be genuinely backed by a device,
+        // not just mapped.
+        unsafe {
+            gic::init();
+            gic::enable_interrupt(timer::INTID);
+        }
+        timer::arm(timer::TICK_INTERVAL_MS);
+    } else {
+        console::println!(
+            "Ouroboros kernel: skipping GIC/timer init (unconfirmed-safe device region on this platform) - no preemption this boot"
+        );
     }
-    timer::arm(timer::TICK_INTERVAL_MS);
 
     // SAFETY: both EL0 regions were just mapped EL0-accessible above.
     unsafe { tasks::init(&program) };
@@ -280,7 +314,7 @@ fn main() -> Status {
 /// comment), now confirmed both nonexistent there *and* built on a scan
 /// (`virtio_mmio::find_device`) that's confirmed to crash real Parallels
 /// hardware outright - see `virtio_mmio.rs`'s module doc comment for the
-/// decoded exception. Only reached at all when `virtio_mmio_probe_safe`
+/// decoded exception. Only reached at all when `qemu_device_region_safe`
 /// (`main`'s caller) is true, and even then only after the framebuffer
 /// console has had its chance.
 ///
@@ -348,7 +382,7 @@ fn try_framebuffer_console(fb_info: Option<framebuffer::Info>) {
 /// booted via `make run`'s vvfat disk - FAT16, not FAT32, see
 /// `fat32.rs`'s module doc comment).
 ///
-/// Only ever called when `main`'s `virtio_mmio_probe_safe` is true -
+/// Only ever called when `main`'s `qemu_device_region_safe` is true -
 /// `virtio_blk::Device::discover` goes through the same
 /// `virtio_mmio::find_device` scan confirmed to crash real Parallels
 /// hardware (see that module's doc comment), so this whole function is

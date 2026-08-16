@@ -30,21 +30,30 @@ phase:
 - ~~Build a GOP framebuffer console (the real lead after virtio-console)~~
   — done, and as of "take four" it has actually rendered readable text
   live on real Parallels hardware (`framebuffer.rs`/`font.rs`/
-  `fbconsole.rs`, see `CLAUDE.md`/`CHANGELOG.md`). Three real-Parallels
+  `fbconsole.rs`, see `CLAUDE.md`/`CHANGELOG.md`). Four real-Parallels
   test rounds, each finding and fixing a real bug: `open_protocol_exclusive`
   disconnecting firmware's own boot console from GOP ("take two");
   `try_virtio_console`'s MMIO scan freezing the boot with no console
   installed to report through ("take three"'s reorder got a console
   installed, and that console then rendered the exception that led to
-  the real fix); and, decoded directly from that rendered exception
-  (`FAR_EL1` matching `virtio_mmio::SLOT_BASE` exactly), a genuine bus
-  fault in `virtio_mmio::find_device`'s scan - fixed with a
-  `virtio_mmio_probe_safe` gate covering every caller of that scan, not
-  just a reorder ("take four"). **Still needs confirmation that the
-  current code (all three fixes together) reaches a working interactive
-  shell there** - every real-hardware test so far was missing at least
-  one fix. Next step is on the user: `make parallels-hdd` and boot
-  again.
+  the real fix); a genuine bus fault in `virtio_mmio::find_device`'s
+  scan, decoded directly from that rendered exception - fixed with a
+  safety gate covering every caller of that scan ("take four"); and a
+  *second*, differently-addressed instance of the identical fault
+  signature at `gic.rs`'s `GICD_BASE` - not a new bug so much as proof
+  the entire fixed low-1GB QEMU-shaped device-region convention is
+  unsafe on Parallels, not just virtio-mmio - fixed by broadening the
+  same gate (renamed `qemu_device_region_safe`) to cover GIC/timer setup
+  too ("take five"). **Still needs confirmation that the current code
+  (all fixes together) reaches a working interactive shell there** -
+  every real-hardware test so far was missing at least one fix, and each
+  has gotten further than the last. Next step is on the user: `make
+  parallels-hdd` and boot again. A real interrupt-controller discovery
+  mechanism (ACPI MADT, most likely - Parallels almost certainly uses
+  GICv3, a materially different register interface from `gic.rs`'s
+  current GICv2 code) would lift the resulting "no preemption on
+  Parallels" limitation - a real, separate, substantial follow-up, not
+  attempted in the same pass that found the crash.
 - **Output redirection (`>`/`>>`)** — needs shell-level parsing this
   project doesn't have yet (splitting `cmd > file` into a command and a
   target). `cp` is done (see below); redirection is the one piece of

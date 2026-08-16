@@ -7,6 +7,44 @@ what broke, how it was diagnosed), see `CLAUDE.md`; for *how* something
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## GOP framebuffer console, round four: the GIC crashes too - broadened the safety gate beyond virtio-mmio
+
+**The goal:** with the `virtio_mmio_probe_safe` gate in place, the user
+tested a fourth time. `skipping virtio-blk` printed cleanly - that fix
+worked - but the boot halted again with a second exception.
+
+- Decoded the same way as the previous crash: `esr_el1=0x96000050`
+  gives EC `0x25` (Data Abort, same EL) and DFSC `0x10` (Synchronous
+  External Abort - a real bus fault), same signature as before, but
+  `far_el1=0x8000000` this time - exactly `gic.rs`'s `GICD_BASE`,
+  specifically `gic::init()`'s very first write.
+- **A structural finding, not a second instance of the same bug:**
+  `gic.rs`'s addresses are the identical kind of QEMU-shaped convention
+  as `virtio_mmio.rs`'s - confirmed only via a QEMU devicetree dump,
+  never discovered on Parallels. Nothing in this project's fixed
+  low-1GB device-region convention has ever been confirmed safe on
+  Parallels, only on QEMU.
+- One real exception: `timer.rs` is pure system-register access
+  (`cntfrq_el0` etc.), architecturally safe on any ARMv8 CPU regardless
+  of platform device layout - only the GIC, needed to forward the
+  timer's interrupt, depends on the unconfirmed address.
+- **Fix:** renamed the gate `qemu_device_region_safe` (from
+  `virtio_mmio_probe_safe`) and broadened it to also cover
+  `gic::init()`/`gic::enable_interrupt()`, skipped together with
+  `timer::arm()` as one block when unsafe. Verified `tasks::start()`
+  has no dependency on GIC/timer having run (a straight `eret` into
+  task 0's saved context) before shipping this, not assumed - skipping
+  this block still reaches a working interactive shell, just without
+  preemption (`uptime` would report a static count in this mode, a
+  real, minor, documented limitation).
+- Re-verified on QEMU, now checking ticks genuinely increase (88 → 214
+  a few seconds later) to confirm the normal path still works, not just
+  "didn't crash." A forced `discovery=None` + `ramfb` test (the actual
+  Parallels shape) showed the complete intended sequence end to end:
+  framebuffer console live → clean virtio-blk skip → clean GIC/timer
+  skip → shell ready → a real working userland shell prompt. Zero
+  aborts. Not yet re-confirmed on real Parallels hardware.
+
 ## GOP framebuffer console, round three: it renders real text on Parallels, and directly confirmed the virtio_mmio crash
 
 **The goal:** with the console-fallback reorder in place, the user

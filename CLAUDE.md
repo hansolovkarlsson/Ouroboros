@@ -1903,6 +1903,73 @@ recheck" cycles make that the obvious next step again, but this is the
 first version where reasoning through the evidence gives real confidence
 it'll actually reach a working shell, not just a further diagnostic.
 
+### GOP framebuffer console, take five: the GICD crashes too - the whole low-1GB QEMU device convention is unsafe on Parallels, not just virtio-mmio
+
+The user tested a fourth time with the `virtio_mmio_probe_safe` gate in
+place. Real progress again - `skipping virtio-blk` printed cleanly,
+proving that fix worked exactly as designed - but the boot halted again
+with a second exception, decoded the same way as "take four":
+`EXCEPTION vector=4 esr_el1=0x96000050 far_el1=0x8000000
+elr_el1=0xbba95010`. Same EC (`0x25`, Data Abort at EL1) and same DFSC
+(`0x10`, Synchronous External Abort - a real bus fault), but a
+different `FAR_EL1` this time: `0x8000000`, which is exactly
+`gic.rs`'s `GICD_BASE` - specifically `gic::init()`'s very first write
+(`GICD_CTLR`, offset 0).
+
+**This is a structural finding, not just a second instance of the same
+bug: `gic.rs`'s addresses are the identical kind of thing as
+`virtio_mmio.rs`'s** - a fixed, QEMU-shaped convention (`0x08000000`
+distributor / `0x08010000` CPU interface, GICv2), confirmed only by
+dumping *QEMU's own* internal devicetree, never discovered on
+Parallels. Real Parallels hardware (Apple Silicon virtualization)
+almost certainly doesn't expose a GICv2 distributor at that address at
+all - it may not even be GICv2 there. The pattern across "take four"
+and "take five" together: *nothing* in this project's fixed low-1GB
+device-region convention has ever been confirmed safe on Parallels,
+only on QEMU - virtio-mmio and the GIC are just the first two things
+that happened to get touched and crash.
+
+**One real exception: `timer.rs` is architecturally safe regardless.**
+Unlike `virtio_mmio.rs`/`gic.rs`, the ARM generic timer is accessed
+purely through system registers (`mrs`/`msr` on `cntfrq_el0`,
+`cntp_tval_el0`, `cntp_ctl_el0`) - no memory-mapped I/O, no
+platform-specific address, safe on any ARMv8 CPU by construction. Only
+the *GIC* (needed to actually forward the timer's interrupt to the CPU)
+depends on the unconfirmed address.
+
+**Fix: broadened the same gate rather than inventing a second one.**
+The flag from "take four" was renamed `qemu_device_region_safe`
+(from `virtio_mmio_probe_safe`, since it's no longer just about
+virtio-mmio) and now also gates `gic::init()`/`gic::enable_interrupt()`
+- skipped together as one block, with `timer::arm()` skipped alongside
+them since arming a timer whose interrupt will never be forwarded
+anywhere is just dead work, not because `timer::arm()` itself is
+unsafe. **Checked this doesn't break EL0 entry before shipping it, not
+assumed:** `tasks::start()` does a straight `eret` into task 0's saved
+context with no dependency on the GIC or timer having run at all,
+so skipping this block entirely still reaches a working interactive
+shell - just without preemption (no tick ever fires, so `tasks.rs`'s
+round-robin never switches away from task 0, which is fine for a
+single always-runnable interactive task; `uptime` would report a
+static, never-increasing count in this mode, a real minor limitation
+worth knowing about, not a bug).
+
+**Re-verified on QEMU across the same three scenarios as "take four,"
+now including a check that ticks genuinely still increase:** the normal
+ACPI-console regression pass showed `uptime` reporting 88 ticks, then
+214 ticks a few seconds later - proof the GIC/timer path still
+initializes and fires normally when `qemu_device_region_safe` is true,
+not just "didn't crash." The forced `discovery=None` + `ramfb` test
+(the actual Parallels shape) showed the complete intended sequence:
+`framebuffer console live` → `skipping virtio-blk` → `skipping
+GIC/timer init` → `shell ready` → the userland shell's own banner and
+prompt - a real, working shell reached end to end, no crash, no fault.
+Zero aborts across both. **Still not re-confirmed on real Parallels
+hardware** - three "fixed, needs a recheck" cycles in, but each one has
+gotten further than the last, and this is the first version reasoned
+through to actually reach a working shell rather than another
+diagnostic.
+
 ### Parallels disk attachment: a real trap, not a hunch
 
 Getting `esp.img` to actually boot in Parallels took a few wrong turns worth
@@ -1937,27 +2004,31 @@ attachment mechanism was wrong.
 **Parallels console output has a real, better-grounded answer now: the
 GOP framebuffer console (see "GOP framebuffer console" above) - and as
 of "take four," it has actually rendered readable text live on real
-Parallels hardware, a first for this project.** Three real-hardware
+Parallels hardware, a first for this project.** Four real-hardware
 attempts so far, each surfacing and fixing a genuine bug:
 `open_protocol_exclusive` was silently disconnecting firmware's own
 console driver from GOP ("take two"); `try_virtio_console`'s MMIO scan
 then froze the boot with no console yet installed to report through
-("take three"'s reorder got the console installed, but not the fix
-"take four" needed); and decoding the resulting exception (a genuine
-Synchronous External Abort, `FAR_EL1` matching `virtio_mmio::SLOT_BASE`
-exactly) directly confirmed `virtio_mmio::find_device`'s scan crashes
-real Parallels hardware outright, not just fails to find anything -
-fixed with a `virtio_mmio_probe_safe` gate covering *every* caller of
-that scan (`try_virtio_console` and `init_storage`'s virtio-blk
-discovery both), not just a reorder. **The load-bearing assumption
-behind this whole approach - that a direct write to the GOP
-framebuffer's physical memory is actually visible on the display, no
-explicit flush needed - is confirmed on real Parallels hardware**, and
-so is the font/glyph/scroll rendering itself, via the real exception
-text that rendered on screen in "take four." What's still unconfirmed:
-whether the *current* code (all three fixes together) reaches a working
-interactive shell there - every version tested on real hardware so far
-was missing at least one of them. virtio-console remains a confirmed
+("take three"'s reorder got the console installed, and that console
+then rendered the exception that led to "take four"'s real fix - a
+`qemu_device_region_safe` gate, initially scoped to virtio-mmio,
+covering every caller of `virtio_mmio::find_device`); and a *second*,
+differently-addressed instance of the identical fault signature then
+showed up at `gic.rs`'s `GICD_BASE` ("take five") - not a new bug so
+much as proof the entire fixed low-1GB QEMU-shaped device-region
+convention is unsafe on Parallels, not just virtio-mmio specifically -
+fixed by broadening the same gate to also cover GIC/timer-tick setup
+(`timer.rs` itself is exempt, being pure system-register access, safe
+on any ARMv8 CPU). **The load-bearing assumption behind this whole
+approach - that a direct write to the GOP framebuffer's physical memory
+is actually visible on the display, no explicit flush needed - is
+confirmed on real Parallels hardware**, and so is the font/glyph/scroll
+rendering itself, via the real exception text that rendered on screen
+in "take four." What's still unconfirmed: whether the *current* code
+(all fixes together) reaches a working interactive shell there - every
+version tested on real hardware so far was missing at least one of
+them, and each successive test has gotten further than the last.
+virtio-console remains a confirmed
 dead end
 on Parallels specifically (tested on real hardware, not a pause or an
 open question) - a full PCI device inventory taken directly from that
@@ -2063,9 +2134,17 @@ or blocking; FP/SIMD state still isn't saved anywhere (`exceptions.rs`'s
 Reasonable next steps from here: **confirming the GOP framebuffer
 console on real Parallels hardware is the most immediate one** - the
 rest of this list is unblocked work available regardless of that
-outcome. `pci::log_all_devices` is a real, reusable diagnostic worth
-remembering for any future "why can't this platform's hardware be
-found" question; a real relocating loader (ELF + relocation
+outcome. Real interrupt-controller discovery (ACPI MADT parsing, most
+likely - the standard way firmware exposes this, and Parallels almost
+certainly uses GICv3, a materially different register interface from
+`gic.rs`'s current GICv2 code: system-register-based CPU interface
+instead of memory-mapped, redistributors instead of a single
+distributor for SGI/PPI routing) would lift the "no preemption on
+Parallels" limitation from "take five" above - a real, substantial
+follow-up, not a quick fix, deliberately not attempted in the same pass
+that found the crash. `pci::log_all_devices` is a real, reusable
+diagnostic worth remembering for any future "why can't this platform's
+hardware be found" question; a real relocating loader (ELF + relocation
 processing), which would lift both the `core::fmt` and
 literal-comparison restrictions; blocking/waiting primitives so tasks
 can do more than an unconditional round-robin `wfe` loop; a keyboard
