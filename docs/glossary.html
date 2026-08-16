@@ -1,0 +1,268 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Glossary — Ouroboros</title>
+<meta name="description" content="Plain-language explanations of the acronyms and technical terms used across the Ouroboros postmortems — UEFI, ACPI, xHCI, virtio, and the rest.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>📖</text></svg>">
+<link rel="stylesheet" href="assets/site.css">
+</head>
+<body>
+
+<nav class="sitenav">
+  <div class="sitenav-inner">
+    <a class="sitenav-mark" href="index.html">ouroboros</a>
+    <div class="sitenav-links">
+      <a href="index.html">Home</a>
+      <a href="postmortem-boot-bringup.html">Boot bring-up</a>
+      <a href="postmortem-shell-filesystem.html">Shell &amp; filesystem</a>
+      <a href="postmortem-xhci-keyboard.html">xHCI keyboard</a>
+      <a href="glossary.html" class="current">Glossary</a>
+      <a href="https://github.com/hansolovkarlsson/Ouroboros">GitHub ↗</a>
+    </div>
+  </div>
+</nav>
+
+<div class="page">
+
+  <div class="kicker">Reference · Ouroboros</div>
+
+  <h1 class="title small">Glossary</h1>
+  <p class="dek">
+    The postmortems lean on a lot of low-level acronyms without pausing
+    to explain them — reasonably, for the audience they were originally
+    written for. This is the missing dictionary: short, plain
+    explanations of every term used, grouped by the part of the system
+    it belongs to, written against what this project specifically ran
+    into rather than a generic textbook definition.
+  </p>
+
+  <div class="glossary-jump">
+    <a href="#firmware">Firmware &amp; boot</a>
+    <a href="#cpu">CPU, memory &amp; exceptions</a>
+    <a href="#interrupts">Interrupts &amp; timing</a>
+    <a href="#storage">Storage &amp; filesystem</a>
+    <a href="#usb">USB &amp; xHCI</a>
+    <a href="#software">Software &amp; toolchain</a>
+  </div>
+
+  <article>
+
+    <section class="glossary-group" id="firmware">
+      <h2>Firmware &amp; boot</h2>
+      <dl class="terms">
+
+        <dt id="uefi">UEFI <span class="term-full">Unified Extensible Firmware Interface</span></dt>
+        <dd>The firmware standard that hands control to Ouroboros at boot. The kernel itself is built as a UEFI application — there's no separate bootloader stage — because it's the one boot path that works both on QEMU and on real Parallels hardware, which only boots ARM VMs through UEFI.</dd>
+
+        <dt id="edk2">EDK2 / OVMF</dt>
+        <dd>EDK2 is the open-source reference implementation of UEFI firmware; OVMF is the specific build of it that QEMU boots. Several real bugs in this project trace back to EDK2's own internals — a firmware panic inside its PCI I/O driver, for instance — not to Ouroboros's code.</dd>
+
+        <dt id="esp">ESP <span class="term-full">EFI System Partition</span></dt>
+        <dd>The FAT-formatted disk partition UEFI firmware boots from. Ouroboros's kernel binary, its userland shell, and its boot config file all live here, at fixed paths like <code class="inline">\EFI\BOOT\BOOTAA64.EFI</code>.</dd>
+
+        <dt id="boot-services">Boot services / <code class="inline">ExitBootServices</code></dt>
+        <dd>UEFI firmware exposes a set of services (memory allocation, console I/O, filesystem access) before handing full control to the OS. Ouroboros calls <code class="inline">exit_boot_services()</code> partway through boot and permanently leaves that environment — after which the UEFI logger, global allocator, and every UEFI protocol stop being usable.</dd>
+
+        <dt id="devicetree">Devicetree / DTB <span class="term-full">Devicetree Blob</span></dt>
+        <dd>A data structure describing a system's hardware — CPUs, memory, devices — as a tree, common on embedded ARM platforms. One of three console-discovery mechanisms this project tried; confirmed to not be how either QEMU or Parallels describe their hardware (both use ACPI instead).</dd>
+
+        <dt id="acpi">ACPI <span class="term-full">Advanced Configuration and Power Interface</span></dt>
+        <dd>The other, more PC-style way to describe hardware to an OS, via a set of tables. QEMU and Parallels both use this instead of a devicetree. Ouroboros hand-parses a chain of these tables (RSDP → XSDT → SPCR) to find a serial console.</dd>
+
+        <dt id="rsdp-xsdt">RSDP / XSDT</dt>
+        <dd>Two of the ACPI tables in that chain — the Root System Description Pointer (the very first thing found, via a UEFI config table entry) and the Extended System Description Table it points to, which in turn lists every other ACPI table present.</dd>
+
+        <dt id="spcr">SPCR <span class="term-full">Serial Port Console Redirection table</span></dt>
+        <dd>The specific ACPI table that describes a platform's debug/console serial port. Present and correct on QEMU; confirmed genuinely absent from Parallels' own ACPI tables — not a parsing bug, Parallels just doesn't describe a console this way.</dd>
+
+        <dt id="gop">GOP <span class="term-full">Graphics Output Protocol</span></dt>
+        <dd>A standard, fully-specified UEFI protocol for querying a display's resolution, pixel format, and framebuffer address. This turned out to be the mechanism that actually works on real Parallels hardware, once every serial-style console option was confirmed dead — Ouroboros draws text directly into the framebuffer it reports.</dd>
+
+      </dl>
+    </section>
+
+    <section class="glossary-group" id="cpu">
+      <h2>CPU, memory &amp; exceptions (AArch64)</h2>
+      <dl class="terms">
+
+        <dt id="aarch64">AArch64 / ARM64</dt>
+        <dd>The 64-bit ARM instruction set and architecture Ouroboros targets — the same family Apple Silicon Macs use, which is why Parallels on Apple Silicon can run it without emulation.</dd>
+
+        <dt id="el">EL0 / EL1 <span class="term-full">Exception Level</span></dt>
+        <dd>ARM's privilege-level system. EL1 is the privileged level the kernel itself runs at; EL0 is unprivileged "userland," where the loaded shell program runs. Moving between them is what the syscall boundary (<code class="inline">svc</code>) exists for.</dd>
+
+        <dt id="mmu">MMU <span class="term-full">Memory Management Unit</span></dt>
+        <dd>The hardware that translates virtual addresses to physical ones via page tables. Ouroboros identity-maps everything (virtual address always equals physical address) but still needs real page tables — firmware's own tables get swapped out for the kernel's own right after boot services exit.</dd>
+
+        <dt id="ttbr-mair-tcr">TTBR0_EL1 / MAIR_EL1 / TCR_EL1</dt>
+        <dd>The system registers that configure the MMU: TTBR0_EL1 points at the top of the page-table tree, MAIR_EL1 defines the available memory types (Normal vs. Device), and TCR_EL1 controls the overall translation scheme, including how many address bits are used.</dd>
+
+        <dt id="t0sz">T0SZ</dt>
+        <dd>A field inside TCR_EL1 that determines how large a virtual address range the page tables cover, which in turn determines how many table levels a lookup needs. A real bug here: switching to a table hierarchy with a different depth than firmware's own tables — even with every other bit correct — hard-faulted, until it was made to match firmware's starting level exactly.</dd>
+
+        <dt id="vbar">VBAR_EL1 <span class="term-full">Vector Base Address Register, EL1</span></dt>
+        <dd>Points to the table of exception handlers. Ouroboros installs its own right after leaving boot services, so any fault from that point on is caught and reported instead of left to firmware's (no longer present) handlers.</dd>
+
+        <dt id="esr-far-elr">ESR_EL1 / FAR_EL1 / ELR_EL1</dt>
+        <dd>The three registers read to diagnose any exception. ESR_EL1 (Exception Syndrome Register) encodes what kind of fault happened; FAR_EL1 (Fault Address Register) holds the faulting address for memory faults; ELR_EL1 (Exception Link Register) holds the address execution was at when the exception fired.</dd>
+
+        <dt id="ec-dfsc-ifsc">EC / DFSC / IFSC</dt>
+        <dd>Sub-fields inside ESR_EL1. EC (Exception Class) is the top-level category — e.g. <code class="inline">0x25</code> for a Data Abort, <code class="inline">0x21</code> for an Instruction Abort. DFSC and IFSC (Data/Instruction Fault Status Code) narrow it further — e.g. "Permission Fault" vs. "Translation Fault" vs. "Synchronous External Abort" (a real bus fault, distinct from either).</dd>
+
+        <dt id="spsr">SPSR_EL1 <span class="term-full">Saved Program Status Register, EL1</span></dt>
+        <dd>Captures the processor's state (which exception level was running, interrupt masks, condition flags) at the moment an exception fires, so it can be restored on return. Part of the register set the timer-tick interrupt handler has to save and restore to correctly resume interrupted code.</dd>
+
+        <dt id="tlb">TLB <span class="term-full">Translation Lookaside Buffer</span></dt>
+        <dd>A cache of recent virtual-to-physical address translations. Has to be explicitly invalidated (<code class="inline">tlbi</code>) whenever the page tables change, or the CPU may keep using stale mappings.</dd>
+
+        <dt id="wfe">WFE <span class="term-full">Wait For Event</span></dt>
+        <dd>An ARM instruction that parks the CPU in a low-power idle state until woken by an event or interrupt. Used for both the kernel's own halt loop and (with a real gotcha — it traps to EL1 by default rather than executing directly) EL0's idle loop.</dd>
+
+        <dt id="svc">SVC <span class="term-full">Supervisor Call</span></dt>
+        <dd>The instruction userland code uses to deliberately trap into the kernel — the actual mechanism behind every syscall. EL0 code puts a syscall number in a register and executes <code class="inline">svc</code>; the kernel's exception handler recognizes this specific case and dispatches it, rather than treating it as an error.</dd>
+
+        <dt id="irq">IRQ <span class="term-full">Interrupt Request</span></dt>
+        <dd>An asynchronous signal from hardware (the timer, in this project) that interrupts whatever's running. Unlike every other exception this kernel handles — which report and halt — an IRQ has to save full context, run a handler, and resume exactly where it left off.</dd>
+
+      </dl>
+    </section>
+
+    <section class="glossary-group" id="interrupts">
+      <h2>Interrupts &amp; timing</h2>
+      <dl class="terms">
+
+        <dt id="gic">GIC <span class="term-full">Generic Interrupt Controller</span></dt>
+        <dd>The ARM hardware block that routes interrupts (like the timer tick) to the CPU. Ouroboros uses GICv2, at addresses confirmed by dumping QEMU's own internal devicetree — addresses later confirmed, via a real bus fault, to not exist at all on real Parallels hardware.</dd>
+
+        <dt id="gicv3">GICv3</dt>
+        <dd>A newer, architecturally different GIC generation — system-register-based rather than memory-mapped, with per-CPU "redistributors" instead of one shared distributor. The likely real interrupt controller on Parallels, and the reason preemption doesn't yet work there: this hasn't been implemented.</dd>
+
+        <dt id="ppi">PPI <span class="term-full">Private Peripheral Interrupt</span></dt>
+        <dd>A GIC interrupt category for sources private to one CPU core, rather than shared across all of them — the generic timer's interrupt is a PPI.</dd>
+
+        <dt id="intid">INTID <span class="term-full">Interrupt ID</span></dt>
+        <dd>The numeric identifier the GIC uses for a specific interrupt source — the timer tick is INTID 30 on this hardware.</dd>
+
+        <dt id="madt">MADT <span class="term-full">Multiple APIC Description Table</span></dt>
+        <dd>The ACPI table that describes a platform's interrupt controller(s) and CPU topology. Not yet parsed by Ouroboros — doing so is the planned way to discover Parallels' real interrupt controller instead of guessing.</dd>
+
+      </dl>
+    </section>
+
+    <section class="glossary-group" id="storage">
+      <h2>Storage &amp; filesystem</h2>
+      <dl class="terms">
+
+        <dt id="pci">PCI / PCIe <span class="term-full">Peripheral Component Interconnect (Express)</span></dt>
+        <dd>The standard bus most non-trivial hardware (disk controllers, USB controllers, network cards) attaches over. Ouroboros enumerates it two different ways: a boot-services protocol during firmware, and a from-scratch config-space walk for the USB controller at runtime.</dd>
+
+        <dt id="bar">BAR <span class="term-full">Base Address Register</span></dt>
+        <dd>A PCI device's own register that reports where its control registers are mapped in memory. A real bug here: a discovered BAR address landed outside a simplifying assumption Ouroboros's own page tables had made about where every address would live.</dd>
+
+        <dt id="dma">DMA <span class="term-full">Direct Memory Access</span></dt>
+        <dd>Hardware writing to or reading from memory directly, without the CPU shuttling every byte. Both the disk and USB drivers hand devices a memory buffer and let them fill it via DMA — one debugging technique here was "poisoning" such a buffer with a known pattern beforehand to confirm a DMA write genuinely happened.</dd>
+
+        <dt id="virtio">virtio</dt>
+        <dd>A standardized interface for paravirtualized devices — disk, network, console — designed for guests running under a hypervisor that knows it's virtualized. Ouroboros uses it for its disk driver; a virtio-console driver was also built but confirmed not to be what Parallels' console actually is.</dd>
+
+        <dt id="virtio-mmio">virtio-mmio</dt>
+        <dd>One of two transports virtio devices can use — plain memory-mapped registers, scanned at a set of fixed addresses. The QEMU-specific convention behind one of the project's more serious real-hardware bugs: an unpopulated scan slot returns a safe default on QEMU but triggers a genuine bus fault on Parallels.</dd>
+
+        <dt id="mbr-gpt">MBR / GPT</dt>
+        <dd>Two competing schemes for partitioning a disk. Ouroboros's FAT32 reader only understands the older MBR scheme, looking for the first FAT32-typed partition entry in it.</dd>
+
+        <dt id="fat32">FAT32 / FAT16</dt>
+        <dd>The on-disk filesystem format Ouroboros reads and writes, hand-rolled with no external crate (every no_std FAT implementation available assumed a heap, which isn't available after boot services exit). A real gotcha: QEMU's fast dev-loop disk driver actually formats as FAT16, not FAT32 — the two look similar but aren't the same format.</dd>
+
+        <dt id="lfn">LFN <span class="term-full">Long File Name</span></dt>
+        <dd>FAT's extension mechanism for filenames longer than the classic 8.3 limit. Ouroboros's reader doesn't parse these — the project's own boot-config directory had to be renamed to fit 8.3 rather than add LFN support for one avoidable case.</dd>
+
+        <dt id="8dot3">8.3 filename</dt>
+        <dd>The original FAT short-name format: up to 8 characters, a dot, up to 3 more (e.g. <code class="inline">BOOTAA64.EFI</code>). The only format Ouroboros's filesystem code can create or fully read.</dd>
+
+        <dt id="cluster-chain">Cluster / cluster chain</dt>
+        <dd>FAT32 allocates disk space in fixed-size clusters, and a file's contents are a linked chain of them recorded in the File Allocation Table. A real, silent-hang bug traced back to a FAT32 convention where cluster number zero, in a directory's ".." entry, means "the root directory" rather than a literal cluster — unhandled, it fed into an unsigned subtraction and wrapped to a garbage sector number.</dd>
+
+      </dl>
+    </section>
+
+    <section class="glossary-group" id="usb">
+      <h2>USB &amp; xHCI</h2>
+      <dl class="terms">
+
+        <dt id="xhci">xHCI <span class="term-full">eXtensible Host Controller Interface</span></dt>
+        <dd>The standard USB 3 host controller interface. Ouroboros's driver for it is the subject of the whole keyboard postmortem — command rings, an event ring, and eventually a real interrupt endpoint, all hand-rolled.</dd>
+
+        <dt id="usb-hid">USB HID <span class="term-full">Human Interface Device</span></dt>
+        <dd>The USB device class covering keyboards, mice, and similar input devices, with its own set of class-specific requests on top of standard USB ones. A major finding: Parallels' USB passthrough doesn't forward HID class requests to the real device at all, only standard ones.</dd>
+
+        <dt id="trb">TRB <span class="term-full">Transfer Request Block</span></dt>
+        <dd>The fixed-size unit of work xHCI rings are built from — commands, transfers, and events are all TRBs, submitted and completed via producer/consumer rings in memory shared with the controller.</dd>
+
+        <dt id="dcbaa">DCBAA <span class="term-full">Device Context Base Address Array</span></dt>
+        <dd>An array the xHCI controller reads to find each connected device's own context structure, indexed by device "slot." Part of the fixed DMA-visible memory layout the driver sets up during initialization.</dd>
+
+        <dt id="erst">ERST <span class="term-full">Event Ring Segment Table</span></dt>
+        <dd>Tells the xHCI controller where the driver's event ring lives in memory, so the controller knows where to write completion events for the driver to poll.</dd>
+
+        <dt id="configure-endpoint">Configure Endpoint</dt>
+        <dd>A standard xHCI <em>command</em> (as opposed to a USB <em>request</em> sent to the device) that arms one of a device's endpoints for transfers. Switching to this — configuring a real interrupt endpoint instead of polling via HID class requests — was the fix for Parallels silently dropping those class requests.</dd>
+
+        <dt id="interrupt-endpoint">Interrupt IN endpoint</dt>
+        <dd>A USB endpoint a device uses to push data to the host on its own schedule, rather than the host having to ask for it each time. The mechanism every production USB HID driver actually uses at runtime, and what Ouroboros switched to once class-request polling turned out not to work through Parallels' passthrough.</dd>
+
+        <dt id="setup-packet">Setup packet</dt>
+        <dd>The 8-byte header that begins any USB control transfer, encoding which request is being made (<code class="inline">bmRequestType</code>, <code class="inline">bRequest</code>, <code class="inline">wValue</code>, <code class="inline">wIndex</code>, <code class="inline">wLength</code>). One bug's diagnosis hinged on recognizing this exact structure echoed back instead of real device data.</dd>
+
+        <dt id="get-report-etc">GET_REPORT / SET_PROTOCOL / GET_DESCRIPTOR</dt>
+        <dd>Specific USB requests. GET_REPORT and SET_PROTOCOL are HID <em>class</em> requests (confirmed not forwarded by Parallels' passthrough); GET_DESCRIPTOR is a <em>standard</em> request every USB device must support (confirmed to work fine) — the contrast between the two is what proved the passthrough gap was real.</dd>
+
+        <dt id="binterface">bInterfaceClass / bInterfaceProtocol</dt>
+        <dd>Fields in a USB device's Interface descriptor identifying what kind of device it is. Class 3 is HID; protocol 1 within that is specifically Boot-Protocol Keyboard (protocol 2 is Mouse) — checking these is what let the driver tell a real keyboard apart from Parallels' virtual mouse on the same controller.</dd>
+
+        <dt id="boot-protocol">Boot Protocol</dt>
+        <dd>A simplified, fixed 8-byte HID report layout that keyboards and mice support for compatibility with simple BIOS/UEFI-era drivers, without needing to parse a full HID report descriptor. Ouroboros assumes this fixed layout directly rather than parsing report descriptors.</dd>
+
+      </dl>
+    </section>
+
+    <section class="glossary-group" id="software">
+      <h2>Software &amp; toolchain</h2>
+      <dl class="terms">
+
+        <dt id="pecoff">PE/COFF <span class="term-full">Portable Executable / Common Object File Format</span></dt>
+        <dd>The executable format UEFI applications use (yes, the same family as Windows <code class="inline">.exe</code> files). Ouroboros's kernel builds as one. A real toolchain quirk here: this backend only infers "executable" section characteristics for exactly-recognized section names, not custom ones with a matching prefix — the root cause of one exception-vector bug.</dd>
+
+        <dt id="elf">ELF <span class="term-full">Executable and Linkable Format</span></dt>
+        <dd>The executable format most Unix-like systems use, with built-in support for relocations. Ouroboros's userland programs are <em>not</em> ELF — they're flat binaries with no relocation processing, which is the direct cause of the project's most-repeated bug (see "relocation" below).</dd>
+
+        <dt id="relocation">Relocation</dt>
+        <dd>The process of adjusting a binary's internal addresses to match where it actually ends up in memory, since it was compiled assuming some fixed base address. Ouroboros's userland loader does none of this, which means any compiled-in <em>pointer</em> to data (a formatting-macro dispatch table, a string literal being compared against) is silently wrong once loaded — the single most repeated bug class across the shell/filesystem work.</dd>
+
+        <dt id="posix">POSIX</dt>
+        <dd>A family of standards for Unix-like operating system interfaces. Ouroboros's design goal is "POSIX-ish" system calls — familiar in shape, not a strict compatibility target.</dd>
+
+        <dt id="syscall-abi">Syscall ABI</dt>
+        <dd>The contract between kernel and userland for making system calls — which register holds the syscall number, which holds arguments, where the return value goes. Ouroboros uses Linux's general convention (number in a dedicated register, arguments following) without aiming for actual Linux binary compatibility; the numbers and sentinel values themselves live in a small shared crate both sides depend on.</dd>
+
+        <dt id="no-std">no_std</dt>
+        <dd>A Rust program built without the standard library — no heap-backed collections, no OS-provided I/O — because there's no OS underneath to provide them. Both the kernel and its userland shell are <code class="inline">no_std</code>; the kernel additionally loses even its (boot-services-backed) heap the moment it exits boot services.</dd>
+
+        <dt id="core-fmt">core::fmt / <code class="inline">write!</code></dt>
+        <dd>Rust's formatting machinery, still available under <code class="inline">no_std</code> — and the specific thing that turned out to crash any of Ouroboros's loaded userland programs, since it builds its argument-dispatch table as compiled-in pointer data, which relocation (see above) never fixes up.</dd>
+
+      </dl>
+    </section>
+
+  </article>
+
+  <footer class="site-footer">
+    <span>Ouroboros — an ARM64 microkernel, written from scratch in Rust</span>
+    <a href="https://github.com/hansolovkarlsson/Ouroboros">github.com/hansolovkarlsson/Ouroboros</a>
+  </footer>
+
+</div>
+</body>
+</html>

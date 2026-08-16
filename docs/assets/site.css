@@ -542,6 +542,54 @@ ol.bugs > li > strong.bug-title {
 }
 .timeline p { margin: 0; color: var(--ink-soft); font-size: 0.93rem; }
 
+/* ---------- glossary ---------- */
+
+.glossary-jump {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin: 0 0 2.6rem;
+}
+.glossary-jump a {
+  font-family: var(--font-mono);
+  font-size: 0.74rem;
+  text-decoration: none;
+  padding: 0.45rem 0.8rem;
+  border-radius: 999px;
+  border: 1px solid var(--wire);
+  color: var(--ink-soft);
+  background: var(--surface);
+}
+.glossary-jump a:hover { border-color: var(--amber); color: var(--amber); }
+
+.glossary-group h2 { margin-top: 3rem; }
+.glossary-group:first-of-type h2 { margin-top: 0; border-top: none; padding-top: 0; }
+
+dl.terms { margin: 0 0 1rem; }
+dl.terms dt {
+  font-family: var(--font-mono);
+  font-weight: 700;
+  font-size: 1rem;
+  color: var(--ink);
+  margin: 1.5rem 0 0.35rem;
+  scroll-margin-top: 5.5rem;
+}
+dl.terms dt:first-of-type { margin-top: 0; }
+dl.terms dt .term-full {
+  font-family: var(--font-serif);
+  font-weight: 400;
+  font-style: italic;
+  color: var(--ink-soft);
+  font-size: 0.82em;
+  margin-left: 0.55em;
+}
+dl.terms dd {
+  margin: 0 0 0;
+  color: var(--ink-soft);
+  font-size: 0.96rem;
+  max-width: 34em;
+}
+
 /* ---------- footer ---------- */
 
 footer.site-footer {
