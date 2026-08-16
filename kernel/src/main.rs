@@ -180,6 +180,29 @@ fn main() -> Status {
     };
     console::println!("Ouroboros kernel: identity map installed, MMU running on our own tables");
 
+    // TEMP diagnostic for real-Parallels-hardware testing - a raw
+    // full-framebuffer fill, bypassing fbconsole.rs/font.rs entirely. No
+    // console exists yet at this point on a platform where devicetree/
+    // ACPI/PCI all failed (true on Parallels), so a fault here would be
+    // completely silent - indistinguishable from "nothing happens" the
+    // way a real bug here would look. This isolates that specific
+    // ambiguity: if the whole screen turns solid white, the MMU mapping
+    // of this address is correct AND direct writes are actually visible
+    // on this display (no explicit flush needed) - meaning any remaining
+    // bug is in fbconsole.rs's font/scroll logic, not the fundamentals.
+    // If the screen does NOT change at all, the bug (or a real platform
+    // limitation) is somewhere before or in this exact write. No-ops on
+    // any platform where GOP wasn't found (fb_info is None) - including
+    // this project's normal QEMU dev loop, which has no GOP at all under
+    // -nographic - so this is safe to leave in for now. Remove once
+    // real-hardware confirmation is in.
+    if let Some(info) = fb_info {
+        let base = info.base as *mut u8;
+        for i in 0..info.size {
+            unsafe { base.add(i).write_volatile(0xff) };
+        }
+    }
+
     // A fourth console-discovery fallback, tried only if devicetree/ACPI/
     // PCI all failed above - the real lead for Parallels console output,
     // see `virtio_console.rs`'s module doc comment and `try_virtio_console`'s
