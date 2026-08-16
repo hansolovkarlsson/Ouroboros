@@ -7,6 +7,44 @@ what broke, how it was diagnosed), see `CLAUDE.md`; for *how* something
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## xHCI busy-waits switched from iteration-bounded to time-bounded - a real bug the user found, not this project's own testing
+
+**The goal:** none going in - this was a live bug report. Booting the
+real `esp.hdd` normally in Parallels (a manually-launched, live VM
+window - not `make test-parallels`, which drives Parallels' own
+synthetic keyboard headlessly) produced `xhci: keyboard not available
+(Command ring: timed out waiting for a completion event)`, something
+none of this project's own real-hardware testing had ever hit.
+
+**Delivered:** every busy-wait in `kernel/src/xhci.rs`
+(`wait_command_completion`, `wait_transfer_event`, the port-scan loop,
+`poll_until`) switched from a fixed iteration count (`POLL_ITERS`) to a
+genuine wall-clock deadline, using the ARM generic timer's free-running
+counter (`CNTPCT_EL0`/`CNTFRQ_EL0` - pure system-register reads,
+needing no GIC or interrupts, the same property `timer.rs` already
+relied on for its own timer setup). `timer.rs` gained a new
+`pub(crate) fn now_ticks()` for this reuse.
+
+**Root cause:** a fixed iteration count is only a valid stand-in for
+real elapsed time if the host never stalls the guest's vCPU for any
+real duration while it spins - untrue under a real hypervisor. The
+strongest evidence: reproducing the bug a second time showed a
+*different* xHCI command timing out than the first attempt (very early
+port setup, then much later at what's almost certainly the interrupt
+endpoint's `Configure Endpoint` command) - a pattern that indicts the
+wait mechanism itself, not any one command's logic. The most likely
+trigger: a live-rendered VM window competing for real host CPU/GPU
+time, something none of this project's own headless scripted testing
+ever does.
+
+**Confirmed fixed by the user directly**, on the exact real-world
+scenario that originally failed - not a scripted reproduction. Also
+regression-tested on QEMU and via this project's own `make
+test-parallels`, neither of which had ever reproduced the original bug
+but both confirm no regression to the already-working path. Full
+writeup in `CLAUDE.md`'s "xHCI's busy-waits were iteration-bounded"
+section.
+
 ## MADT/GICv3: real interrupt-controller discovery for Parallels - full preemptive multitasking confirmed working end to end
 
 **The goal:** replace `gic.rs`'s old QEMU-devicetree-derived GICv2

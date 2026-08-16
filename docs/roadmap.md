@@ -42,6 +42,24 @@ Pulled from `docs/processes.md`'s "known rough edges" and `CLAUDE.md`'s
 running "next milestone" notes — real gaps, not yet a committed next
 phase:
 
+- ~~xHCI keyboard failing outright on a real, manually-launched
+  Parallels VM~~ — **done, found and fixed the same day, by the user
+  directly** (not by any of this project's own scripted testing, which
+  never reproduced it — see `docs/roadmap.md`'s "Testing infrastructure"
+  section for why: `make test-parallels` drives Parallels' own synthetic
+  keyboard headlessly, with no live-rendered VM window competing for
+  host CPU/GPU time). Root cause: every busy-wait in `xhci.rs` was
+  bounded by a fixed iteration count, not real elapsed time — a real
+  hypervisor can stall the guest's vCPU for a genuine, unpredictable
+  duration (e.g. while actually rendering a live VM window on screen)
+  without an iteration count reflecting that at all. Fixed by switching
+  every wait to a genuine wall-clock deadline using the ARM generic
+  timer's free-running counter (`CNTPCT_EL0`/`CNTFRQ_EL0`, pure
+  system-register reads, no GIC or interrupts needed — the same
+  property `timer.rs` already relies on). Confirmed fixed by the user
+  on the exact real-world scenario that originally failed. See
+  `CLAUDE.md`'s "xHCI's busy-waits were iteration-bounded" section for
+  the full writeup.
 - ~~Diagnose the real-Parallels task-switch hang~~ — **done, same day it
   was found.** Root cause traced (well enough to fix) to task 1's idle
   loop using `wfe` — real hardware's `wfe` semantics under Apple's

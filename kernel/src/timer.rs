@@ -30,12 +30,35 @@ pub const TICK_INTERVAL_MS: u64 = 20;
 // Enabled (bit0=1), not masked (bit1=0 - IMASK omitted, not written).
 const CTL_ENABLE: u64 = 1 << 0;
 
-fn frequency_hz() -> u64 {
+pub(crate) fn frequency_hz() -> u64 {
     let freq: u64;
     unsafe {
         asm!("mrs {0}, cntfrq_el0", out(reg) freq, options(nomem, nostack, preserves_flags));
     }
     freq
+}
+
+/// Reads the free-running physical counter (`CNTPCT_EL0`) - a pure
+/// system-register access with the same "no GIC, no interrupts, safe on
+/// any ARMv8 CPU by construction" property `frequency_hz`/`arm` already
+/// have (see this module's own doc comment). Exposed (`pub(crate)`) for
+/// any module that needs to bound a busy-poll by real elapsed wall-clock
+/// time rather than a fixed iteration count - `xhci.rs` is the first
+/// caller, after a fixed iteration count there turned out not to be a
+/// safe proxy for real time under real virtualization: a real hypervisor
+/// can deschedule this guest's vCPU for an arbitrary real duration (e.g.
+/// while compositing a live VM window on the host) without the loop's
+/// own iteration count reflecting that at all - confirmed by a real,
+/// reproducible xHCI command-ring timeout on real Parallels hardware
+/// that a merely larger iteration budget wouldn't reliably fix, since
+/// the underlying problem is about elapsed *time*, not instruction
+/// count.
+pub(crate) fn now_ticks() -> u64 {
+    let ticks: u64;
+    unsafe {
+        asm!("mrs {0}, cntpct_el0", out(reg) ticks, options(nomem, nostack, preserves_flags));
+    }
+    ticks
 }
 
 /// Arms the timer to fire once, `interval_ms` milliseconds from now.

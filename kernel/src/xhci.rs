@@ -217,10 +217,36 @@ const EVENT_RING_SIZE: usize = 16;
 
 // Generous bound for every busy-poll in this module - real hardware/QEMU
 // responses are microsecond-scale, so this is meant to catch a genuine
-// stuck controller, not to be a tight budget. See module doc comment: no
-// interrupts, no timer dependency, so every wait is iteration-bounded
-// rather than time-bounded.
-const POLL_ITERS: u32 = 2_000_000;
+// stuck controller, not to be a tight budget.
+//
+// **Time-bounded (`CNTPCT_EL0`/`CNTFRQ_EL0`, via `timer::now_ticks`/
+// `timer::frequency_hz`), not iteration-bounded - a real, confirmed fix,
+// not a style choice.** This used to be a fixed iteration count
+// (`POLL_ITERS`), on the reasoning that no interrupts or timer are
+// available yet at this point in boot - true, but a fixed iteration
+// count is only a valid proxy for real elapsed time if the host never
+// preempts this vCPU for any real duration while it spins, which a real
+// hypervisor doesn't guarantee: confirmed by a real, reproducible xHCI
+// command-ring timeout on real Parallels hardware, observed failing on
+// two *different* commands across two different boots (once very early
+// - Enable Slot/Address Device - once much later - Configure Endpoint),
+// a pattern that points at the wait mechanism itself rather than any one
+// command's own logic. The ARM generic timer's `CNTPCT_EL0` counter
+// needs no GIC and no interrupts either - it's a pure system-register
+// read, the identical "safe on any ARMv8 CPU by construction" property
+// `timer.rs`'s own `frequency_hz`/`arm` already rely on - so switching
+// to it loses nothing this module's original no-interrupts-yet
+// constraint required.
+const POLL_TIMEOUT_MS: u64 = 1000;
+
+/// A deadline `POLL_TIMEOUT_MS` from now, in the same `CNTPCT_EL0` units
+/// `timer::now_ticks` returns - compare against `timer::now_ticks()` in
+/// a `while` loop instead of counting fixed iterations. See
+/// `POLL_TIMEOUT_MS`'s doc comment for why this replaced a fixed
+/// iteration count.
+fn poll_deadline() -> u64 {
+    crate::timer::now_ticks() + crate::timer::frequency_hz() / 1000 * POLL_TIMEOUT_MS
+}
 
 #[derive(Debug)]
 pub enum Error {
@@ -540,7 +566,8 @@ impl Device {
     /// else - a stray Port Status Change Event around the port-reset step
     /// is expected, not an error.
     fn wait_command_completion(&mut self, cmd_ptr: u64) -> Result<Trb, Error> {
-        for _ in 0..POLL_ITERS {
+        let deadline = poll_deadline();
+        while crate::timer::now_ticks() < deadline {
             let Some(trb) = self.event_ring_pop() else { continue };
             let trb_type = (trb[3] >> 10) & 0x3f;
             if trb_type != TRB_TYPE_CMD_COMPLETION_EVENT {
@@ -563,7 +590,8 @@ impl Device {
     }
 
     fn wait_transfer_event(&mut self) -> Result<Trb, Error> {
-        for _ in 0..POLL_ITERS {
+        let deadline = poll_deadline();
+        while crate::timer::now_ticks() < deadline {
             let Some(trb) = self.event_ring_pop() else { continue };
             let trb_type = (trb[3] >> 10) & 0x3f;
             if trb_type != TRB_TYPE_TRANSFER_EVENT {
@@ -923,7 +951,8 @@ unsafe fn init_inner(bar_base: u64) -> Result<(), Error> {
     // No hot-plug - every device this driver will ever consider must
     // already be attached by the time this loop finds it.
     let mut any_connected = false;
-    'wait: for _ in 0..POLL_ITERS / max_ports.max(1) {
+    let deadline = poll_deadline();
+    'wait: while crate::timer::now_ticks() < deadline {
         for port in 1..=max_ports {
             let portsc_addr = op_base + OP_PORTSC_BASE + ((port - 1) as u64) * 0x10;
             if unsafe { read32(portsc_addr) } & PORTSC_CCS != 0 {
@@ -1253,7 +1282,8 @@ fn find_keyboard_interrupt_endpoint(desc: &[u8]) -> Option<(u8, u16, u8)> {
 }
 
 unsafe fn poll_until(mut cond: impl FnMut() -> bool) -> bool {
-    for _ in 0..POLL_ITERS {
+    let deadline = poll_deadline();
+    while crate::timer::now_ticks() < deadline {
         if cond() {
             return true;
         }

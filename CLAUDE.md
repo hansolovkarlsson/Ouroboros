@@ -2600,6 +2600,75 @@ existing PCI inventory, simply isn't present there over any transport
 this project can drive - a different, harder problem than the
 interrupt-controller one this milestone solved).
 
+## xHCI's busy-waits were iteration-bounded, not time-bounded - a real, user-reported bug on real hardware
+
+Found by the user directly, not in any of this project's own scripted
+testing: booting the real `esp.hdd` normally in Parallels (not via
+`make test-parallels`, which drives Parallels' own synthetic keyboard
+headlessly) produced `xhci: keyboard not available (Command ring: timed
+out waiting for a completion event)` - the keyboard driver failed
+outright, on real hardware, in a way none of this session's own
+real-hardware testing had ever hit.
+
+**The key clue was reproducing it a second time and getting a
+different failure point.** The first report failed almost immediately
+in port setup (most likely Enable Slot or Address Device, the very
+first command-ring operations); a second attempt, on request, got all
+the way through slot addressing, configuration, and interrupt-endpoint
+descriptor discovery before failing on what's almost certainly the
+final `Configure Endpoint` command. Two different commands timing out
+on two different boots is a strong signal that the *wait mechanism
+itself* is the problem, not any one command's own logic - the same
+kind of pattern-over-single-instance reasoning this project has relied
+on throughout (see, e.g., the two differently-addressed
+`virtio_mmio`/`GICD_BASE` bus faults in "take four/five" above, which
+turned out to indict an entire addressing *convention*, not one
+address).
+
+**Root cause:** every busy-wait in `xhci.rs` (`wait_command_completion`,
+`wait_transfer_event`, the port-scan loop, `poll_until`) was bounded by
+a fixed iteration count (`POLL_ITERS`, 2,000,000), on the documented
+reasoning that no interrupts or timer are available yet at that point
+in boot. True, but a fixed iteration count is only a valid proxy for
+real elapsed time if the host never preempts this guest's vCPU for any
+real duration while it spins - and a real hypervisor doesn't guarantee
+that. The one real difference between this session's own successful
+testing (`make test-parallels`, headless, no live-rendered VM window)
+and the user's manual run (a live VM window, actually being watched) is
+exactly the kind of thing that would compete for real host CPU/GPU time
+and stall the guest's vCPU mid-poll for a real, unpredictable duration -
+consuming zero of the loop's "iterations" while real wall-clock time
+that should have counted toward the timeout quietly passed.
+
+**Fix:** replaced every `POLL_ITERS`-bounded loop with a genuine
+wall-clock deadline, using the ARM generic timer's free-running
+physical counter (`CNTPCT_EL0`) compared against a real millisecond
+budget (`POLL_TIMEOUT_MS`, 1000ms) derived from `CNTFRQ_EL0` - both
+pure system-register reads, the identical "no GIC, no interrupts, safe
+on any ARMv8 CPU by construction" property `timer.rs`'s own
+`frequency_hz`/`arm` already established and now exposes
+(`pub(crate) fn now_ticks()`) for exactly this kind of reuse elsewhere
+in the kernel.
+
+**Confirmed fixed by the user directly, on the exact real-world
+scenario that originally failed** - not a scripted test, a live,
+manually-launched VM window, the same way the bug was first hit. Also
+regression-tested on QEMU (`make run-usb-kbd`, real keystrokes via the
+QEMU monitor) and via this project's own `make test-parallels` -
+neither of which had ever reproduced the bug in the first place, but
+both confirm the change doesn't regress the fast, already-working path.
+
+**Lesson:** "no interrupts available yet, so this has to be
+iteration-bounded" was true when it was first written, but stopped
+being the *only* option the moment `timer.rs` proved the generic
+timer's counter registers need no interrupts either - worth
+remembering any time a past constraint gets cited as a reason a design
+can't be improved; check whether the constraint that motivated it is
+still actually the binding one. And a bug that only a human, watching a
+real, live-rendered VM window, could trigger - never a script driving
+the same VM headlessly - is itself a real, useful data point about
+where the bug lives, not just bad luck.
+
 ## Commands
 
 ```sh
