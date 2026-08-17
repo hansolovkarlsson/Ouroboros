@@ -401,9 +401,10 @@ Worth knowing before building further on this:
   real append/offset-write primitive at the syscall or FAT32 layer;
   `cp`/`mv`/redirection all needed no new read/write primitives beyond
   what already existed (see `CLAUDE.md`'s "Phase 7"/"Phase 8"/"Output
-  redirection" sections). `mkdir` also can't grow a parent
-  directory that's out of free entry slots — it fails rather than
-  allocating another cluster for the parent. Every `fs_*` syscall
+  redirection" sections). A parent directory that's out of free
+  entry slots is grown by a cluster automatically (`insert_dir_entry`'s
+  extension — directories never *shrink*, though: an emptied extension
+  cluster stays linked until the directory is removed). Every `fs_*` syscall
   distinguishes "no filesystem mounted" (`NO_FS`) from everything else,
   but every *other* failure reason still collapses to one `FS_ERROR`
   sentinel, so a program can't yet tell "already exists" from "disk

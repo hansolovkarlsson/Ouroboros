@@ -195,8 +195,22 @@ phase:
   `test-parallels.sh` extension typing `>` as a real held-Shift
   scancode chord). See `CLAUDE.md`'s "Output redirection" section and
   `docs/shell-commands.md`.
-- **Lifting `mkdir`'s no-directory-extension limitation** - a full
-  parent directory currently makes `mkdir` fail rather than growing it.
+- ~~**Lifting `mkdir`'s no-directory-extension limitation** - a full
+  parent directory currently makes `mkdir` fail rather than growing it.~~
+  **Done** — `insert_dir_entry` (the single choke point every
+  entry-creating operation goes through: `mkdir`/`touch`/`write`/`cp`/
+  `mv`) now grows a full directory by one cluster, claim-then-zero-then-
+  link ordering so a partial failure never corrupts the chain; the
+  `DirectoryFull` error is gone (unconstructable). The real correctness
+  piece this exposed: `rmdir` freed exactly one cluster — correct only
+  while directories were single-cluster by construction — and would have
+  leaked extension clusters; fixed with a shared `free_chain` helper
+  that also deduplicated `rm`'s and `write_file`'s identical existing
+  loops. Confirmed organically on QEMU (fill a subdirectory past its
+  512-byte cluster with 20 entries, write/cat on an extended-cluster
+  file, root-directory extension too, reboot persistence, rmdir on the
+  two-cluster directory, freed-cluster reuse, sibling integrity, zero
+  aborts) — see `CLAUDE.md`'s "Directory extension" section.
 - ~~A real relocating loader (ELF + relocation processing) — would also
   lift the current `core::fmt`/`write!` restriction in userland
   programs.~~ **Done** — real ELF64 parsing and `R_AARCH64_RELATIVE`

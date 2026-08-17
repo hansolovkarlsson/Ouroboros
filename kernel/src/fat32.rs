@@ -64,7 +64,6 @@ pub enum Error {
     DirectoryNotEmpty,
     CannotRemoveRoot,
     DiskFull,
-    DirectoryFull,
 }
 
 impl From<virtio_blk::Error> for Error {
@@ -88,7 +87,6 @@ impl core::fmt::Display for Error {
             Error::DirectoryNotEmpty => write!(f, "directory not empty"),
             Error::CannotRemoveRoot => write!(f, "cannot remove the root directory"),
             Error::DiskFull => write!(f, "no free cluster available"),
-            Error::DirectoryFull => write!(f, "directory has no free entry slot (no directory-extension support yet)"),
         }
     }
 }
@@ -316,6 +314,28 @@ impl Fs {
         Ok(())
     }
 
+    /// Frees `start`'s entire cluster chain in the FAT (each entry read
+    /// *before* it's zeroed, or the chain's own links would be destroyed
+    /// mid-walk). Shared by [`rm`](Self::rm), [`write_file`](Self::write_file)'s
+    /// overwrite path, and - since directories can span more than one
+    /// cluster via [`insert_dir_entry`](Self::insert_dir_entry)'s
+    /// extension - [`rmdir`](Self::rmdir), whose original
+    /// free-exactly-one-cluster code was correct only while every
+    /// directory was single-cluster by construction and would have
+    /// silently leaked extension clusters otherwise.
+    fn free_chain(&mut self, start: u32) -> Result<(), Error> {
+        let mut cluster = start;
+        loop {
+            let next = self.next_cluster(cluster)?;
+            self.write_fat_entry(cluster, 0)?;
+            match next {
+                Some(n) => cluster = n,
+                None => break,
+            }
+        }
+        Ok(())
+    }
+
     /// Calls `f` for every real entry (LFN/free/volume-ID entries are
     /// skipped) in the directory starting at `start_cluster`, stopping
     /// early the first time `f` returns `true`.
@@ -473,11 +493,10 @@ impl Fs {
     ///
     /// First write-capable command this filesystem has ever had - see
     /// `CLAUDE.md`'s mkdir/rmdir section for the full design rationale.
-    /// Deliberately narrow: no directory-extension support (a parent
-    /// directory whose existing clusters have no free entry slot fails
-    /// with [`Error::DirectoryFull`](Error::DirectoryFull) rather than
-    /// growing), matching this module's existing no-LFN, 8.3-only
-    /// limitations rather than trying to fix everything at once.
+    /// (Its original deliberately-narrow no-directory-extension
+    /// limitation is gone: a parent whose existing clusters have no free
+    /// entry slot now grows by a cluster - see
+    /// [`insert_dir_entry`](Self::insert_dir_entry).)
     pub fn mkdir(&mut self, path: &str) -> Result<(), Error> {
         let (parent_path, name) = split_parent(path).ok_or(Error::InvalidName)?;
         let short_name = make_short_name(name).ok_or(Error::InvalidName)?;
@@ -549,7 +568,11 @@ impl Fs {
             return Err(Error::DirectoryNotEmpty);
         }
 
-        self.write_fat_entry(target.cluster, 0)?;
+        // The whole chain, not just the first cluster - a directory that
+        // ever grew past one cluster (insert_dir_entry's extension) still
+        // owns its extension clusters even once emptied; see free_chain's
+        // doc comment.
+        self.free_chain(target.cluster)?;
 
         let parent = self.find(parent_path)?;
         let mut location: Option<(u64, usize)> = None;
@@ -635,15 +658,7 @@ impl Fs {
         }
 
         if target.cluster != 0 {
-            let mut cluster = target.cluster;
-            loop {
-                let next = self.next_cluster(cluster)?;
-                self.write_fat_entry(cluster, 0)?;
-                match next {
-                    Some(n) => cluster = n,
-                    None => break,
-                }
-            }
+            self.free_chain(target.cluster)?;
         }
 
         let parent = self.find(parent_path)?;
@@ -718,15 +733,7 @@ impl Fs {
 
         if let Some((lba, offset, old_cluster)) = existing {
             if old_cluster != 0 {
-                let mut cluster = old_cluster;
-                loop {
-                    let next = self.next_cluster(cluster)?;
-                    self.write_fat_entry(cluster, 0)?;
-                    match next {
-                        Some(n) => cluster = n,
-                        None => break,
-                    }
-                }
+                self.free_chain(old_cluster)?;
             }
             self.patch_entry_cluster_size(lba, offset, new_cluster, data.len() as u32)
         } else {
@@ -806,9 +813,8 @@ impl Fs {
     /// entry only once the new one is safely linked in - same "write the
     /// new thing before touching the old one" ordering as
     /// [`write_file`](Self::write_file)'s overwrite path, so a failure
-    /// partway through (most likely
-    /// [`Error::DirectoryFull`](Error::DirectoryFull) on `dst`'s parent)
-    /// never leaves `src` half-deleted.
+    /// partway through (e.g. a disk-full error inserting into `dst`'s
+    /// parent) never leaves `src` half-deleted.
     ///
     /// **The one step this can't skip: when a *directory* moves to a
     /// *different* parent, its own `..` entry has to be patched to point
@@ -884,11 +890,19 @@ impl Fs {
 
     /// Finds a free (end-of-directory or previously-deleted) 32-byte slot
     /// in the directory starting at `start_cluster` and writes a new entry
-    /// there. No directory-extension support: if every existing cluster in
-    /// the chain is full, this returns
-    /// [`Error::DirectoryFull`](Error::DirectoryFull) rather than
-    /// allocating a new cluster and linking it in - a deliberate first-cut
-    /// limitation, see the module doc comment.
+    /// there - **extending the directory by one cluster if every existing
+    /// slot is taken** (originally a deliberate first-cut gap that
+    /// returned a `DirectoryFull` error instead; the variant is gone now
+    /// that this is the only place it could ever have come from).
+    ///
+    /// Extension ordering matters, same discipline as `mkdir`'s
+    /// claim-before-use and `write_file`'s write-the-new-thing-first: the
+    /// fresh cluster is claimed end-of-chain in the FAT and zeroed (a
+    /// directory cluster must read back as "no entries" -
+    /// `DIR_ENTRY_END` is `0x00`, so an unzeroed cluster would present
+    /// garbage as entries) *before* the old last cluster is linked to
+    /// it - a failure partway leaves at worst a claimed-but-orphaned
+    /// cluster, never a directory chain pointing at garbage.
     fn insert_dir_entry(&mut self, start_cluster: u32, short_name: &[u8; 11], attr: u8, cluster: u32, size: u32) -> Result<(), Error> {
         let mut current = start_cluster;
         loop {
@@ -908,7 +922,18 @@ impl Fs {
             }
             match self.next_cluster(current)? {
                 Some(next) => current = next,
-                None => return Err(Error::DirectoryFull),
+                None => {
+                    // Every slot in the chain is taken - grow the
+                    // directory by one cluster (see doc comment for the
+                    // ordering reasoning), then let the loop's next
+                    // iteration find the first slot of the fresh,
+                    // all-zero cluster.
+                    let new = self.find_free_cluster()?;
+                    self.write_fat_entry(new, END_OF_CHAIN_MIN)?;
+                    self.zero_cluster(new)?;
+                    self.write_fat_entry(current, new)?;
+                    current = new;
+                }
             }
         }
     }

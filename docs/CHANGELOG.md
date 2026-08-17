@@ -7,6 +7,76 @@ what broke, how it was diagnosed), see `CLAUDE.md`; for *how* something
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## Directory extension - full directories grow by a cluster instead of failing
+
+`fat32.rs::insert_dir_entry` (the single choke point every
+entry-creating operation goes through - `mkdir`/`touch`/`write`/`cp`/
+`mv`) now extends a directory's cluster chain when every existing slot
+is taken, claim-then-zero-then-link ordering so a partial failure never
+corrupts the chain; `Error::DirectoryFull` is deleted (unconstructable).
+The real correctness piece: `rmdir` freed exactly one cluster - correct
+only while directories were single-cluster by construction - and would
+have silently leaked extension clusters; fixed with a shared
+`free_chain` helper that also deduplicated `rm`'s and `write_file`'s
+identical existing loops. Confirmed organically on QEMU (the test
+image's 512-byte clusters fill after 14 entries): 20 files in one
+subdirectory, root-directory extension, content round-trip on an
+extended-cluster entry, reboot persistence, `rmdir` of the two-cluster
+directory, and freed-cluster reuse - zero aborts. See `CLAUDE.md`'s
+"Directory extension" section.
+
+## ESP directory renamed to `\EFI\ORBS\`, and a project logo
+
+The ESP directory became `\EFI\ORBS\` (was `\EFI\OUROBORO\` - both
+exist because the full 9-character project name exceeds FAT's 8.3
+short-name limit and `fat32.rs` doesn't parse LFN entries; `ORBS` is
+the tidier abbreviation). `loader.rs`'s `CONFIG_PATH`, the Makefile's
+`esp` target, and current-state docs updated together; confirmed
+booting on QEMU (including a real `exec /EFI/ORBS/SH.BIN`) and real
+Parallels hardware. The project also gained a logo (`logo1.png`
+source at the repo root; resized copies on the website and README,
+plus a real favicon replacing the per-page emoji ones).
+
+## xHCI multi-device support - every connected device enumerated, classified, and kept addressed
+
+The keyboard driver's one-port/one-device/one-slot scope is lifted -
+the named prerequisite for the USB mass-storage milestone. The
+all-in-one `Device` struct split into controller-global state
+(`Xhci`), per-device slots with their own EP0 rings and Output Device
+Contexts from 4-entry pools (the two statics that were only safe
+while the old scan abandoned every non-keyboard), and `KeyboardState`.
+The scan enumerates every connected port, logs each device's
+interface class/subclass/protocol (with a mass-storage class-`0x08`
+callout), keeps non-keyboards addressed, activates the keyboard only
+after the scan completes, and routes transfer events by slot ID +
+endpoint DCI. Confirmed on a new QEMU three-device rig
+(`make run-usb-multi`: keyboard + tablet + storage - the storage
+stick classified exactly `0x08`/`0x06`/`0x50`, Bulk-Only Transport)
+and on real Parallels hardware (virtual mouse + keyboard concurrently
+addressed, typing clean). See `CLAUDE.md`'s "xHCI multi-device
+support" section.
+
+## Parallels disk diagnostic - no documented storage controller exists on this platform
+
+A diagnostic round (no driver written - that was the point) settled
+the Parallels disk question: with the VM's `sata:0` boot disk attached
+and bootable, the PCI bus shows no storage controller of any kind, and
+scratch disks deliberately attached as `scsi`/`lsi-sas` then
+`lsi-spi` are equally invisible (`buslogic` is rejected by Parallels
+itself as EFI-incompatible; `ide`/`scsi` are the only interfaces
+prlctl offers ARM64 EFI VMs). All storage flows through a proprietary
+non-PCI path - "implement a documented spec" is not available for any
+attached-image disk there. The one documented lead left: USB mass
+storage over the existing xHCI driver (a first check with a USB 2.0
+stick found Parallels routes USB 2.0 passthrough to the EHCI
+controller instead; a USB 3.x stick is the pending retry). A permanent
+diagnostic improvement fell out: `pci::log_all_devices` returns its
+inventory and `main.rs` re-prints it through the post-exit console,
+since boot reaches the shell ~2 seconds after power-on - far too fast
+to read the UEFI-console rendering. See `CLAUDE.md`'s "Parallels disk
+diagnostic" section and the roadmap's "Disk on real Parallels
+hardware" entry.
+
 ## Output redirection (`>`/`>>`) - pure shell-side, zero kernel changes
 
 `cmd > file` (create/overwrite) and `cmd >> file` (append) work for

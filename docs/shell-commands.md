@@ -66,7 +66,7 @@ implement a completely different command set.
 | `ls` | `ls [path]` | Lists a directory's entries, `name` for files and `name/` for subdirectories. Defaults to the current directory. | Truncates rather than erroring if the listing doesn't fit a 256-byte buffer. |
 | `cat` | `cat <file>` | Prints a file's contents. | Truncates at 256 bytes with a notice if the file is larger; a file argument is required. |
 | `cd` | `cd [path]` | Changes the current working directory. | Validates the target exists and is a directory first (via a listing call — there's no dedicated "does this exist" syscall). |
-| `mkdir` | `mkdir <dir>` | Creates an empty subdirectory. | Fails if the name already exists, is invalid, the parent is missing, or the disk is full — all four collapse to one error message. No directory-extension: fails rather than growing a full parent directory. |
+| `mkdir` | `mkdir <dir>` | Creates an empty subdirectory. | Fails if the name already exists, is invalid, the parent is missing, or the disk is full — all four collapse to one error message. Grows a full parent directory by a cluster automatically (as do `touch`/`write`/`cp`/`mv` when creating entries). |
 | `rmdir` | `rmdir <dir>` | Removes an *empty* subdirectory. | Fails if it doesn't exist, isn't empty, or is root. |
 | `touch` | `touch <file>` | Creates an empty (zero-byte) file, or succeeds silently if one already exists there. | There's no RTC on this kernel, so unlike real `touch`, an existing file's "timestamp" isn't updated — nothing happens, successfully. Fails if the target is a directory. |
 | `rm` | `rm <file>` | Removes a file. | Fails if it doesn't exist or is a directory — use `rmdir` for those. |

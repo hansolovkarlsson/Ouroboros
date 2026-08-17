@@ -982,7 +982,8 @@ support**: if the parent's existing allocated clusters have no free entry
 slot, `insert_dir_entry` returns `Error::DirectoryFull` rather than
 allocating and linking in a new cluster for the parent - a real, documented
 limitation, not an oversight, matching this module's existing "narrowest
-useful case first" discipline.
+useful case first" discipline. **(Update: lifted - see "Directory
+extension" further below; `DirectoryFull` no longer exists.)**
 
 **`rmdir` checks everything before writing anything**, so a rejected call
 never partially applies: must resolve to a directory, must not be root
@@ -2168,9 +2169,12 @@ renamed/moved, every write is still a full replace at the syscall/FAT32
 layer (no append/offset-write primitive - the shell's `>>` composes
 read-then-full-rewrite on top, bounded by the kernel's 512-byte
 per-syscall cap; see "Output redirection" below), no recursive `cp`,
-no directory-extension (a full parent directory makes `mkdir` fail
-rather than growing it), `rm`'s multi-cluster cluster-chain-freeing path
-(phase 5) remains untested by an actual multi-cluster file (nothing yet
+full directories now grow by a cluster automatically (see "Directory
+extension" below - directories never *shrink*, though; an emptied
+extension cluster stays linked until the directory is removed), the
+cluster-chain-freeing path (now shared as `free_chain`) is exercised by
+multi-cluster *directories* but still not by an actual multi-cluster
+*file* (nothing yet
 can create one that large - see "Phase 6" above), and every write-path
 error collapses to one sentinel at the syscall boundary so userland
 can't distinguish *why* an operation failed (see "Phase 4" through
@@ -3441,6 +3445,60 @@ only the first keyboard found is
 driven; addressed non-keyboard devices are inert - enumerated and held,
 with no driver to do anything with them yet (that's the next
 milestone); interrupt-endpoint stall recovery unchanged.
+
+## Directory extension: full directories grow instead of failing - and the rmdir leak it would have created, fixed in the same pass
+
+The last small FAT32 item from the parking lot, done as the deliberate
+light task while waiting on the USB 3.x stick. `fat32.rs`'s
+`insert_dir_entry` - the single choke point every entry-creating
+operation goes through (`mkdir`/`touch`/`write`/`cp`/`mv`) - now grows
+a directory by one cluster when every existing slot is taken, instead
+of returning `Error::DirectoryFull` (the variant is deleted outright -
+unconstructable code, not a deprecated path). Ordering follows the
+module's established discipline: the fresh cluster is claimed
+end-of-chain in the FAT and zeroed (an unzeroed directory cluster
+would present garbage as entries - `DIR_ENTRY_END` is `0x00`) *before*
+the old last cluster links to it, so a failure partway leaves at worst
+a claimed-but-orphaned cluster, never a chain pointing at garbage. All
+four building blocks (`find_free_cluster`/`write_fat_entry`/
+`zero_cluster`/the slot-search loop itself) already existed - this was
+ordering, not new machinery.
+
+**The real correctness piece was in `rmdir`, not `mkdir`: it freed
+exactly one cluster.** Correct while every directory was single-cluster
+*by construction* - a silent leak the moment an emptied-out
+multi-cluster directory got removed, which is exactly what
+filling-then-clearing a directory produces. Fixed by freeing the whole
+chain - and `rm` and `write_file`'s overwrite path already carried the
+identical chain-freeing loop, duplicated, so all three now share one
+`free_chain` helper (which reads each FAT entry *before* zeroing it,
+or the walk would destroy its own links).
+
+**Confirmed organically on QEMU against the real `esp.img` - the
+512-byte clusters make this genuinely reachable, not theoretical
+(16 entries per cluster, 2 taken by `.`/`..`):** filled a fresh
+subdirectory with 20 files (extension triggered at the 15th), `ls`
+shows all 20, `write`/`cat` round-tripped content on a file whose
+entry lives in the extension cluster, the *root* directory was
+extended the same way (18+ entries - root is an ordinary cluster
+chain, same code path), and `/EFI/ORBS/INIT.CFG` re-read byte-identical
+afterward. **Persistence and the rmdir fix confirmed across a real
+reboot:** all 20 files and the extended-cluster content survived a
+fresh boot; `rm` × 20 then `rmdir` succeeded on the now-empty
+two-cluster directory; a second directory then refilled to 18 entries
+cleanly - freed-cluster *reuse* being the observable consequence of
+the FAT entries actually getting zeroed - and everything cleaned back
+to a bare root. `make run`'s FAT16 still degrades to the shared
+no-filesystem message; a Parallels boot smoke (`uptime`, 1161 ticks)
+confirmed no kernel regression on real hardware (the fat32 path itself
+is unreachable there - no disk driver, the standard honest split).
+Zero aborts in `-d int` cross-checks across every session.
+
+**Still coarse:** directories never *shrink* - an emptied extension
+cluster stays linked until the directory is removed (FAT drivers
+generally don't shrink directories either); everything else about the
+module's scope (8.3-only, no LFN, first-FAT32-partition-only) is
+unchanged.
 
 ## Parallels disk diagnostic: no documented storage controller exists on this platform - confirmed with fresh evidence, not just the old inventory
 
