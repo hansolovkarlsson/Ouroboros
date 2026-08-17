@@ -2915,7 +2915,19 @@ Confirmed working end to end: `help`/`echo hi`/`uptime` all produced
 correct output in the captured screenshots, including the driver's own
 `xhci::report` debug lines showing genuine HID reports arriving through
 the same interrupt-endpoint code path the USB keyboard postmortem is
-about. One real caveat: `send-key-event` drives Parallels' own synthetic
+about. **Update: that `xhci::report` line is gone now** - it turned out
+to be a real usability bug, not just harmless noise: unconditionally
+printing every raw HID report (press *and* release) through the console
+meant that on Parallels, where the framebuffer console is the *only*
+console, ordinary interactive typing flooded the screen with report
+dumps interleaved with the shell's actual output - found by the user
+directly, using the real `esp.hdd` normally with a physical keyboard,
+not via `make test-parallels`. Removed outright (`xhci.rs::poll_key`)
+rather than gated behind a flag - it had already served its purpose
+confirming the driver end to end, and wasn't needed for normal
+operation. A future `test-parallels` screenshot won't show it anymore;
+that's expected, not a regression. One other real caveat about this
+testing method, unrelated to the above: `send-key-event` drives Parallels' own synthetic
 keyboard device, not the specific physical USB keyboard from that
 postmortem - a legitimate stand-in for scripted regression checks, but
 not a substitute for real-physical-hardware confirmation of anything

@@ -791,7 +791,6 @@ impl Device {
         }
         let previous = self.last_report;
         self.last_report = buf;
-        console::println!("Ouroboros kernel: xhci: report {buf:02x?}");
 
         let shift = buf[0] & (MOD_LSHIFT | MOD_RSHIFT) != 0;
         let mut result = None;
