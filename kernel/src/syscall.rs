@@ -588,7 +588,7 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
             tasks::revert_input_owner_if(current);
             // SAFETY: `frame` is the live trap frame of this very
             // syscall (dispatch's contract with the SVC trampoline).
-            let resumed_x0 = unsafe { tasks::exit_current_and_switch(frame) };
+            let resumed_x0 = unsafe { tasks::exit_current_and_switch(frame, arg0) };
             // SAFETY: same contract as spawn_program's rebuild - IRQs
             // are masked for the whole SVC dispatch, no EL0 code runs
             // mid-rebuild.
@@ -626,6 +626,28 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
             // spawn_program's and EXIT's rebuilds.
             unsafe { mmu::rebuild_with_el0_regions(tasks::el0_regions()) };
             0
+        }
+        syscall_abi::WAIT => {
+            let i = arg0 as usize;
+            if i <= 1 || i == tasks::current_task() {
+                // Waiting on task 0/1 (they never die) or on yourself
+                // is a guaranteed deadlock - refused up front.
+                return syscall_abi::TASK_ERR_PROTECTED;
+            }
+            if i >= tasks::NUM_TASKS {
+                return syscall_abi::TASK_ERR_NO_SUCH_TASK;
+            }
+            // Already a zombie: collect-and-reap immediately, no block.
+            if let Some(status) = tasks::try_reap(i) {
+                return status;
+            }
+            if !tasks::task_exists(i) {
+                return syscall_abi::TASK_ERR_NO_SUCH_TASK;
+            }
+            // Still alive: block until it dies (or Ctrl+C - see
+            // WaitReason::TaskExit's poll). Same pass-through-unmodified
+            // return contract as READ_CHAR's blocking path.
+            unsafe { tasks::block_current_and_switch(frame, tasks::WaitReason::TaskExit(i)) }
         }
         syscall_abi::FG => {
             let i = arg0 as usize;

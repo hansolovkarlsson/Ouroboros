@@ -345,10 +345,14 @@ phase:
   path). What was deliberately left for a job-control milestone is
   now done too - `kill <n>` and `fg <n>` (keyboard handoff with
   automatic revert on the owner's death; a spawned shell is a real
-  nested interactive session now) - leaving only `wait()`/reaping as
-  future work in this area (the Ctrl+C escape hatch landed the same
-  day - keyboard reclamation from a stranded foreground task, not a
-  signal mechanism). See `CLAUDE.md`'s "Task destruction" section.
+  nested interactive session now) - and `wait()`/reaping landed the
+  same day too: exit statuses are kept (`Zombie(status)` holds the
+  slot until a `wait <n>` collects it - `kill` reaps immediately),
+  `wait` blocks on the same machinery as `read_char`
+  (`WaitReason::TaskExit`), and Ctrl+C interrupts a wait so the
+  session can't be bricked. The task-lifecycle arc
+  (spawn/ps/exit/kill/fg/Ctrl+C/wait) is complete; nothing is left in
+  this area short of real signals/parent-child process trees. See `CLAUDE.md`'s "Task destruction" section.
 - **Actual microkernel-style driver isolation** — moving drivers
   (starting with virtio-blk/virtio-console) out of the EL1 kernel and
   into supervised EL0 processes, per `docs/research-minix-boot.md`'s

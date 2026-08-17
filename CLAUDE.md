@@ -3684,8 +3684,9 @@ error paths render correctly, typing unregressed - the success path
 needs a spawnable second program, which still needs a disk driver
 there (the standing gap).
 
-**Still coarse, worth knowing before building on this:** no
-`wait()`/reaping (exit codes still go nowhere but the log line); ~~no
+**Still coarse, worth knowing before building on this:** ~~no
+`wait()`/reaping (exit codes still go nowhere but the log line)~~
+**(closed the same day - see the wait/reaping paragraph below)**; ~~no
 interrupt key (the `fg`-a-non-reader strand above)~~ **(closed the
 same day - see the Ctrl+C paragraph below)**; `bg` doesn't exist
 because it isn't needed - non-owners run freely, background is the
@@ -3719,6 +3720,45 @@ hardware:** `echo one` / the `CTRL-C` chord / `echo two` typed cleanly
 with no stray `c` between them - direct proof the Ctrl modifier
 mapping produced `0x03` through the real xHCI path (a broken mapping
 would have typed a plain `c`) and the shell ignored it.
+
+**And the same day again: `wait()` and reaping - exit statuses are
+real now.** `exit` leaves `TaskState::Zombie(status)` (code masked to
+a byte, POSIX-style, so it can never collide with the ABI's error
+band) holding the *slot* - not memory, which is still freed at death
+exactly as before - until a `wait <n>` (syscall 21) collects the
+status, which is what reaps the slot back to spawnable. `kill` still
+reaps immediately, deliberately - the killer already knows the
+outcome, no POSIX reap-what-you-kill chore. `wait` on a live task
+blocks via `WaitReason::TaskExit(n)` - the blocking machinery's
+first second variant, generalizing exactly as the blocking-primitives
+milestone designed it to - waking with the status, or
+`TASK_KILLED_STATUS` (`0x100`, one past any real status) if the
+target was killed mid-wait, or `WAIT_INTERRUPTED` on Ctrl+C: the
+wake-check drains a keyboard byte when evaluating the *keyboard
+owner's* `TaskExit` wait specifically, because otherwise one `wait`
+on a never-exiting task would brick the whole session (the Ctrl+C
+hatch lives in the keyboard poll, which nothing else would be
+running) - any non-Ctrl+C byte typed during a wait is deliberately
+discarded, like typing at a busy foreground job in `sh`. Waiting on
+0/1/yourself is refused up front (guaranteed deadlock). `hello/`
+gained a deliberate ~100-tick delay loop between banner and exit -
+not filler: an instant exit would always be a zombie before `wait`
+could even be typed, so the *blocking* path would be organically
+untestable. **An honest behavior change:** un-waited exited tasks
+hold their slots (`ps` shows `` exited - `wait` to collect ``); three
+un-waited `exec HELLO.BIN`s exhaust the slots where they used to
+recycle silently - the price of statuses being collectable, verified
+deliberately. **Confirmed on QEMU:** the full blocking path (`wait 2`
+typed while hello ran → shell blocked → hello's goodbye → `task 2
+exited with code 0`, with `uptime` jumping 142→569 across the block -
+the waiter genuinely yielded); zombie-then-collect; the
+slots-held-by-zombies exhaustion and recovery; an interrupted wait on
+a never-exiting spawned shell (Ctrl+C → `wait: interrupted`, task
+still alive, `kill` + `wait` → no-such-task); the fg/exit keyboard
+revert still firing at *death* (typing returned to shell 0 while task
+2 was still an uncollected zombie); every error path; zero aborts.
+**Confirmed on real Parallels:** the error paths render, typing
+unregressed.
 
 ## Parallels disk diagnostic: no documented storage controller exists on this platform - confirmed with fresh evidence, not just the old inventory
 

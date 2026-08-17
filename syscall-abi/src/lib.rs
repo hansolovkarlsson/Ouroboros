@@ -120,9 +120,9 @@ pub const SPAWN: u64 = 16;
 /// the caller: [`EXIT_DENIED`], for the two tasks that are refused -
 /// task 0 (the boot shell; nothing would own the keyboard, see
 /// `tasks.rs`'s `INPUT_OWNER_TASK`) and task 1 (idle; it never makes
-/// syscalls anyway, refused for completeness). The exit code carries no
-/// meaning yet beyond the kernel's own `task N exited (code X)` log
-/// line - nothing waits on or reaps tasks.
+/// syscalls anyway, refused for completeness). The exit code is masked to a
+/// byte (`0..=255`, POSIX-style) and kept until collected by a
+/// [`WAIT`]er - see [`WAIT`] for the full reaping model.
 pub const EXIT: u64 = 17;
 
 /// [`EXIT`]'s only possible return value (a successful exit never
@@ -144,8 +144,12 @@ pub const TASK_STATE_UNUSED: u64 = 0;
 /// the two are indistinguishable to the caller, who is by definition
 /// the one running at the moment it asks).
 pub const TASK_STATE_RUNNABLE: u64 = 1;
-/// The task is blocked on a wait reason (today: keyboard input).
+/// The task is blocked on a wait reason (keyboard input, or another
+/// task's exit - see [`WAIT`]).
 pub const TASK_STATE_BLOCKED: u64 = 2;
+/// The task has exited but its status hasn't been collected yet - the
+/// slot is held (not spawnable) until someone [`WAIT`]s on it.
+pub const TASK_STATE_ZOMBIE: u64 = 3;
 /// [`TASK_STATE`]'s "no such slot" answer.
 pub const TASK_STATE_INVALID: u64 = u64::MAX;
 
@@ -169,6 +173,24 @@ pub const KILL: u64 = 19;
 /// delivered to or done to it; this is keyboard reclamation, not a
 /// signal). Index 0 is allowed as an explicit "give it back".
 pub const FG: u64 = 20;
+
+/// `(task index)` -> the task's exit status (`0..=255` - [`EXIT`] masks
+/// its argument to a byte, POSIX-style, so a status can never collide
+/// with this ABI's error band), [`TASK_KILLED_STATUS`] if the waited
+/// task was killed out from under the waiter, [`WAIT_INTERRUPTED`] if
+/// the user typed Ctrl+C during the wait (the target keeps running),
+/// [`TASK_ERR_PROTECTED`] (waiting on task 0/1 or on yourself is a
+/// guaranteed deadlock), or [`TASK_ERR_NO_SUCH_TASK`]. Blocks until the
+/// target dies if it's still alive; returns immediately with the status
+/// if it's already a zombie. **Collecting the status is what reaps**:
+/// the zombie's slot only becomes spawnable again once waited (or the
+/// task is `kill`ed, which reaps immediately - the killer already knows
+/// the outcome).
+pub const WAIT: u64 = 21;
+
+/// [`WAIT`]'s answer when the waited task was killed rather than
+/// exiting: `0x100`, one past the largest real exit status.
+pub const TASK_KILLED_STATUS: u64 = 0x100;
 
 /// Sentinel `try_read_char` returns when no byte is waiting - out of
 /// range for any real byte (0-255), so callers can tell the two apart
@@ -250,6 +272,11 @@ pub const TASK_ERR_NO_SUCH_TASK: u64 = u64::MAX - 14;
 /// Task 0 (the boot shell) and task 1 (idle) are permanent - they can't
 /// be killed, and idle can't be foregrounded.
 pub const TASK_ERR_PROTECTED: u64 = u64::MAX - 15;
+
+/// A [`WAIT`] cut short by Ctrl+C - the waited task keeps running,
+/// nothing was collected. In the reserved band like every other
+/// non-value result, though it's an outcome more than an error.
+pub const WAIT_INTERRUPTED: u64 = u64::MAX - 16;
 
 /// Floor of the reserved error band (with headroom for future codes):
 /// **any error-capable syscall's return value `>= FS_ERR_MIN` is an

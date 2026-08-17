@@ -31,6 +31,16 @@ pub extern "C" fn _start() -> ! {
 
 fn main() -> ! {
     print("Hello from a second program! (HELLO.BIN, running as its own task)\r\n");
+    // Run for ~2 seconds of real tick time before exiting - deliberate,
+    // not filler: it makes `wait`'s *blocking* path organically testable
+    // (an instant exit would always be a zombie before `wait` could
+    // even be typed), and demonstrates real concurrency - the ticks
+    // this loop watches only advance because the scheduler keeps
+    // running other tasks (and the waiter genuinely yields) meanwhile.
+    let start = get_ticks();
+    while get_ticks() < start + 100 {
+        core::hint::spin_loop();
+    }
     print("Goodbye - exiting now.\r\n");
     task_exit(0);
     // Unreachable for any task that's allowed to exit; a refused exit
@@ -48,6 +58,10 @@ fn print(s: &str) {
 
 fn task_exit(code: u64) {
     syscall(syscall_abi::EXIT, code);
+}
+
+fn get_ticks() -> u64 {
+    syscall(syscall_abi::GET_TICKS, 0)
 }
 
 #[inline(always)]

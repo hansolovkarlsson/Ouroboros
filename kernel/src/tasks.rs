@@ -241,6 +241,22 @@ pub(crate) fn task_state_code(i: usize) -> u64 {
         TaskState::Unused => syscall_abi::TASK_STATE_UNUSED,
         TaskState::Runnable => syscall_abi::TASK_STATE_RUNNABLE,
         TaskState::Blocked(_) => syscall_abi::TASK_STATE_BLOCKED,
+        TaskState::Zombie(_) => syscall_abi::TASK_STATE_ZOMBIE,
+    }
+}
+
+/// The `WAIT` syscall's non-blocking half: `Some(status)` if `target`
+/// is already a zombie (reaped here - see `WaitReason::TaskExit`),
+/// `None` if it's still alive and the caller should block on
+/// `WaitReason::TaskExit(target)`. Validation (range, protected,
+/// self-wait) is the syscall layer's job.
+pub(crate) fn try_reap(target: usize) -> Option<u64> {
+    match unsafe { *STATES[target].0.get() } {
+        TaskState::Zombie(status) => {
+            unsafe { *STATES[target].0.get() = TaskState::Unused };
+            Some(status)
+        }
+        _ => None,
     }
 }
 
@@ -306,17 +322,53 @@ pub(crate) fn interrupt_key_check(byte: u8) -> bool {
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) enum WaitReason {
     Keyboard,
+    /// Waiting for the task at this slot index to die (`WAIT` syscall).
+    /// Satisfied by the target reaching `Zombie` (the poll *reaps* it -
+    /// collecting the status is what frees the slot) or `Unused` (it
+    /// was killed out from under the waiter - `TASK_KILLED_STATUS`).
+    TaskExit(usize),
 }
 
 impl WaitReason {
     /// `Some(value)` if this reason is satisfied right now, consuming
     /// whatever made it so (e.g. the keyboard byte itself) - `None` means
-    /// keep waiting. Delegates to `syscall.rs` since that's already where
-    /// the console/xhci polling logic lives; `tasks.rs` doesn't otherwise
-    /// know anything about consoles or keyboards.
-    fn poll(self) -> Option<u64> {
+    /// keep waiting. Keyboard delegates to `syscall.rs` since that's
+    /// already where the console/xhci polling logic lives; `TaskExit`'s
+    /// logic is native to this module. `waiter` is which task this poll
+    /// is being evaluated for - `TaskExit` needs it for the Ctrl+C
+    /// interrupt check (see below).
+    fn poll(self, waiter: usize) -> Option<u64> {
         match self {
             WaitReason::Keyboard => crate::syscall::poll_keyboard_byte().map(u64::from),
+            WaitReason::TaskExit(target) => {
+                // A wait must stay interruptible or one `wait` on a
+                // never-exiting task bricks the whole session (the
+                // Ctrl+C hatch lives in the keyboard poll, which
+                // nothing would otherwise be running while the sole
+                // typist is blocked here). Scoped to exactly the
+                // dangerous case - the waiter that owns the keyboard:
+                // drain one byte if available; Ctrl+C interrupts the
+                // wait (the target keeps running); any other typed
+                // byte is deliberately discarded, same spirit as
+                // typing at a busy foreground job in `sh`.
+                if waiter == INPUT_OWNER.load(Ordering::Relaxed) {
+                    if let Some(byte) = crate::syscall::poll_keyboard_byte() {
+                        if byte == 0x03 {
+                            return Some(syscall_abi::WAIT_INTERRUPTED);
+                        }
+                    }
+                }
+                match unsafe { *STATES[target].0.get() } {
+                    TaskState::Zombie(status) => {
+                        // Collecting the status is the reap - the slot
+                        // becomes spawnable again here and only here.
+                        unsafe { *STATES[target].0.get() = TaskState::Unused };
+                        Some(status)
+                    }
+                    TaskState::Unused => Some(syscall_abi::TASK_KILLED_STATUS),
+                    _ => None,
+                }
+            }
         }
     }
 }
@@ -325,10 +377,16 @@ impl WaitReason {
 enum TaskState {
     /// No real task in this slot - `spawn`'s only candidate for a new
     /// one. Slots 0/1 (the loaded program, the idle task) never reach
-    /// this state; they're always one of the other two once `init` runs.
+    /// this state; they're always Runnable or Blocked once `init` runs.
     Unused,
     Runnable,
     Blocked(WaitReason),
+    /// Exited, status not yet collected - the slot is held (not
+    /// spawnable) until a `WAIT` reaps it. Holds *only* the status:
+    /// the task's memory was already freed and unmapped at death
+    /// (see `exit_current_and_switch`'s caller), so an un-waited
+    /// zombie costs a slot, not RAM.
+    Zombie(u64),
 }
 
 struct StateSlot(UnsafeCell<TaskState>);
@@ -427,10 +485,15 @@ pub(crate) unsafe fn block_current_and_switch(frame: *mut Context, reason: WaitR
 /// # Safety
 /// Same contract as [`block_current_and_switch`]: `frame` must be the
 /// live trap frame of the syscall currently being dispatched.
-pub(crate) unsafe fn exit_current_and_switch(frame: *mut Context) -> u64 {
+pub(crate) unsafe fn exit_current_and_switch(frame: *mut Context, status: u64) -> u64 {
     let frame = unsafe { &mut *frame };
     let current = CURRENT.load(Ordering::Relaxed);
-    unsafe { *STATES[current].0.get() = TaskState::Unused };
+    // Zombie, not Unused: the status (masked to a byte, POSIX-style, so
+    // it can never collide with the ABI's error band) is kept until a
+    // WAIT collects it - which is also what makes the slot spawnable
+    // again. The memory is still freed at death (the caller's job),
+    // not at reap.
+    unsafe { *STATES[current].0.get() = TaskState::Zombie(status & 0xff) };
     unsafe { *REGIONS[current].0.get() = (0, 0) };
     let next = next_runnable(current);
     *frame = unsafe { *TASKS[next].0.get() };
@@ -453,10 +516,17 @@ pub(crate) fn kill_task(i: usize) {
     unsafe { *REGIONS[i].0.get() = (0, 0) };
 }
 
-/// Whether slot `i` currently holds a task (`Runnable` or `Blocked`) -
-/// the `KILL`/`FG` syscalls' existence check.
+/// Whether slot `i` currently holds a *live* task (`Runnable` or
+/// `Blocked`) - the `KILL`/`FG`/`WAIT` syscalls' existence check.
+/// Zombies are deliberately not "live": `fg`/`kill` on one would
+/// target a task that no longer runs (`wait` is how a zombie is
+/// dealt with - `ps` says so).
 pub(crate) fn task_exists(i: usize) -> bool {
-    i < NUM_TASKS && unsafe { *STATES[i].0.get() } != TaskState::Unused
+    i < NUM_TASKS
+        && matches!(
+            unsafe { *STATES[i].0.get() },
+            TaskState::Runnable | TaskState::Blocked(_)
+        )
 }
 
 pub(crate) enum SpawnError {
@@ -669,7 +739,7 @@ pub unsafe fn on_tick(frame: *mut Context) {
         if reason == WaitReason::Keyboard && i != INPUT_OWNER.load(Ordering::Relaxed) {
             continue;
         }
-        if let Some(value) = reason.poll() {
+        if let Some(value) = reason.poll(i) {
             unsafe { (*TASKS[i].0.get()).gpr[0] = value };
             unsafe { *STATES[i].0.get() = TaskState::Runnable };
         }

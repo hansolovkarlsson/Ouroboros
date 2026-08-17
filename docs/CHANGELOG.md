@@ -7,6 +7,27 @@ what broke, how it was diagnosed), see `CLAUDE.md`; for *how* something
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## `wait()` and reaping - exit statuses become real
+
+The last job-control gap: exit codes went nowhere but a log line.
+`exit` now leaves a `Zombie(status)` (code masked to `0..=255`,
+POSIX-style) holding its slot until a `wait <n>` collects it - the
+collection is the reap; `kill` still reaps immediately (the killer
+knows the outcome). `wait` on a live task blocks on the same
+machinery as `read_char` (`WaitReason::TaskExit`, the wake-check
+generalizing exactly as designed), waking with the status - or
+`TASK_KILLED_STATUS` if the target was killed out from under it, or
+`WAIT_INTERRUPTED` on Ctrl+C (drained by the wake-check for a waiting
+keyboard owner, so one bad `wait` can't brick the session; other
+typing during a wait is discarded). `hello/` gained a deliberate
+~2-second tick-delay so the blocking path is organically testable.
+Honest behavior change: un-waited exited tasks hold their slots -
+`ps` shows them, `wait` clears them. Confirmed on QEMU (block → child
+exits → status collected, with ticks provably advancing during the
+block; zombie-then-collect; slots-exhausted-by-zombies; interrupted
+wait; fg/exit revert still firing at death not reap; all error paths)
+and real Parallels (error paths, typing unregressed).
+
 ## Ctrl+C: the `fg` escape hatch
 
 Job control's documented strand (fg a task that never reads input and

@@ -92,7 +92,7 @@ const LF: u8 = b'\n';
 // Syscall numbers and sentinel values come from the shared `syscall-abi`
 // crate now, not hand-duplicated local consts - see its doc comment and
 // `kernel/src/syscall.rs`'s dispatch table, the other side of this ABI.
-use syscall_abi::{EXIT_DENIED, FS_ERR_MIN, FS_ERR_NOT_FOUND, NO_FS, TASK_STATE_BLOCKED, TASK_STATE_INVALID, TASK_STATE_RUNNABLE, TASK_STATE_UNUSED};
+use syscall_abi::{EXIT_DENIED, FS_ERR_MIN, FS_ERR_NOT_FOUND, NO_FS, TASK_KILLED_STATUS, TASK_STATE_BLOCKED, TASK_STATE_INVALID, TASK_STATE_RUNNABLE, TASK_STATE_UNUSED, TASK_STATE_ZOMBIE, WAIT_INTERRUPTED};
 
 /// Placed first in `.text` by `linker.ld` (`KEEP(*(.text.start))`) so it
 /// lands at file/VA offset 0 - `tasks.rs` sets a loaded program's
@@ -377,7 +377,7 @@ fn dispatch_line(line: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize, out:
     let arg = words.next().unwrap_or("");
 
     match command {
-        "help" => out.put_line("commands: help, echo, uptime, clear, ls, cat, cd, pwd, mkdir, rmdir, touch, rm, write, cp, mv, exec, exit, ps, kill, fg, selftest (append `> file` or `>> file` to redirect output)"),
+        "help" => out.put_line("commands: help, echo, uptime, clear, ls, cat, cd, pwd, mkdir, rmdir, touch, rm, write, cp, mv, exec, exit, ps, kill, fg, wait, selftest (append `> file` or `>> file` to redirect output)"),
         "echo" => {
             let mut first = true;
             for word in line.split_whitespace().skip(1) {
@@ -422,6 +422,7 @@ fn dispatch_line(line: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize, out:
         "ps" => cmd_ps(out),
         "kill" => cmd_kill(arg),
         "fg" => cmd_fg(arg),
+        "wait" => cmd_wait(arg),
         "selftest" => cmd_selftest(out),
         _ => {
             print_str("unknown command: ");
@@ -1301,7 +1302,8 @@ fn cmd_ps(out: &mut Output) {
         out.put_line(match state {
             TASK_STATE_UNUSED => ": unused",
             TASK_STATE_RUNNABLE => ": runnable",
-            TASK_STATE_BLOCKED => ": blocked (waiting for input)",
+            TASK_STATE_BLOCKED => ": blocked (waiting)",
+            TASK_STATE_ZOMBIE => ": exited - `wait` to collect its status",
             _ => ": ?",
         });
         i += 1;
@@ -1355,6 +1357,42 @@ fn cmd_fg(arg: &str) {
         code if code >= FS_ERR_MIN => print_fs_error("fg", code),
         _ => {}
     }
+}
+
+/// `wait <n>` - blocks until task `n` dies, then reports its collected
+/// exit status (which is also what reaps it: an un-waited exited task
+/// holds its slot as a zombie - see `ps`). Ctrl+C interrupts the wait
+/// (the task keeps running); any other typing during a wait is
+/// discarded, same spirit as typing at a busy foreground job in `sh`.
+fn cmd_wait(arg: &str) {
+    let Some(n) = parse_u64(arg) else {
+        print_line("wait: usage: wait <task number> (see ps)");
+        return;
+    };
+    match syscall(syscall_abi::WAIT, n) {
+        WAIT_INTERRUPTED => print_line("wait: interrupted (the task keeps running)"),
+        TASK_KILLED_STATUS => {
+            print_str("task ");
+            print_u64(n);
+            print_line(" was killed");
+        }
+        code if code >= FS_ERR_MIN => print_fs_error("wait", code),
+        status => {
+            print_str("task ");
+            print_u64(n);
+            print_str(" exited with code ");
+            print_u64(status);
+            print_line("");
+        }
+    }
+}
+
+/// Console-side decimal print (the [`Output`] sink has its own
+/// `put_u64_decimal`; this is the same digit loop for the handful of
+/// console-only messages that need a number).
+fn print_u64(n: u64) {
+    let mut out = Output::Console;
+    out.put_u64_decimal(n);
 }
 
 /// `exit` builtin. This boot-loaded shell is task 0, which the kernel
