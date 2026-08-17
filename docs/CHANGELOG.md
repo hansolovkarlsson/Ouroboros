@@ -7,6 +7,19 @@ what broke, how it was diagnosed), see `CLAUDE.md`; for *how* something
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## `mv` into directories, and `SPAWN_ERROR` split
+
+Two small follow-ups the same day: `mv <src> <dir>` now moves *into* an
+existing directory keeping the basename (shell-side, probing the
+destination with the same `fs_list_dir` trick `cd` uses; the trivial
+self-move `mv x x` is refused, guarding the degenerate
+move-into-itself case). And `spawn`'s collapsed sentinel is split like
+`FS_ERROR` was: read failures return the ordinary `FS_ERR_*` code,
+plus `SPAWN_ERR_BAD_ELF`/`SPAWN_ERR_TOO_LARGE`/`SPAWN_ERR_NO_FREE_SLOT`
+- and a failed spawn now returns its allocated region to the runtime
+allocator (always the LIFO case). Confirmed on QEMU with organic
+triggers for every new path, zero aborts.
+
 ## The collapsed `FS_ERROR` sentinel split into specific error codes
 
 The gap flagged since phase 4: every `fs_*` failure collapsed to one

@@ -186,6 +186,22 @@ pub const FS_ERR_DISK_FULL: u64 = u64::MAX - 9;
 /// already-mounted filesystem, mapped here rather than omitted.
 pub const FS_ERR_IO: u64 = u64::MAX - 10;
 
+// [`SPAWN`]-specific failure codes, in the same reserved band - the
+// split of the old collapsed [`SPAWN_ERROR`], mirroring the `FS_ERR_*`
+// split. A spawn that fails *reading* the program file returns the
+// ordinary `FS_ERR_*` code for what went wrong (e.g.
+// [`FS_ERR_NOT_FOUND`]); these three cover the causes the filesystem
+// codes can't express.
+
+/// The file was read, but isn't a loadable program (bad ELF header,
+/// unsupported relocation, malformed program headers, ...).
+pub const SPAWN_ERR_BAD_ELF: u64 = u64::MAX - 11;
+/// The program is larger than the kernel's fixed staging buffer (or
+/// empty) - refused outright rather than loaded truncated.
+pub const SPAWN_ERR_TOO_LARGE: u64 = u64::MAX - 12;
+/// Every task slot already holds a live task.
+pub const SPAWN_ERR_NO_FREE_SLOT: u64 = u64::MAX - 13;
+
 /// Floor of the reserved error band (with headroom for future codes):
 /// **any `fs_*` return value `>= FS_ERR_MIN` is an error**, everything
 /// below is a real result. The predicate callers actually need, since

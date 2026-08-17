@@ -284,14 +284,17 @@ static SPAWN_STAGING: SpawnStagingCell = SpawnStagingCell(core::cell::UnsafeCell
 /// `populate_region` - the same ELF-loading core `loader.rs`'s
 /// boot-time path uses, just with a different memory source), add a
 /// new task for it (`tasks::spawn`), and make its region
-/// EL0-accessible (`mmu::rebuild_with_el0_regions`). Any failure at any
-/// step returns [`SPAWN_ERROR`] - nothing already-running is touched
-/// until the very last step, so there's no partial state to unwind on
-/// an early failure. One real, accepted cost of "no destruction yet"
-/// (see `tasks.rs`'s own module doc comment): a failure *after*
-/// `allocate_runtime_region` (a bad ELF, no free task slot) still
-/// permanently consumes that memory - the bump allocator has no way to
-/// give it back.
+/// EL0-accessible (`mmu::rebuild_with_el0_regions`). Failures return
+/// the specific code for what went wrong: the ordinary `FS_ERR_*` code
+/// for a read failure, or `SPAWN_ERR_TOO_LARGE`/`SPAWN_ERR_BAD_ELF`/
+/// `SPAWN_ERR_NO_FREE_SLOT` - the old collapsed [`SPAWN_ERROR`] is now
+/// only the dispatch arm's argument-validation fallback. Nothing
+/// already-running is touched until the very last step, so there's no
+/// partial state to unwind - and a failure *after*
+/// `allocate_runtime_region` (a bad ELF, no free slot) gives the
+/// memory back via `tasks::free_runtime_region`, which always succeeds
+/// here since a failed spawn's allocation is by construction the most
+/// recent one (the LIFO case).
 fn spawn_program(path: &str) -> u64 {
     let Some(fs) = (unsafe { &mut *FS.0.get() }) else {
         return NO_FS;
@@ -299,20 +302,23 @@ fn spawn_program(path: &str) -> u64 {
     let staging = unsafe { &mut *SPAWN_STAGING.0.get() };
     let size = match fs.read_file(path, staging) {
         Ok(size) => size as usize,
-        Err(_) => return SPAWN_ERROR,
+        // A read failure reports the ordinary FS_ERR_* code (not found,
+        // is-a-directory, I/O, ...) - the filesystem knows why better
+        // than a spawn-specific sentinel ever could.
+        Err(e) => return fs_error_code(&e),
     };
     // A file bigger than the staging buffer is refused outright, not
     // silently loaded truncated (matches `cp`'s own "a partial copy is a
     // wrong copy" reasoning, not `cat`'s "a truncated display is still
     // useful" one - a truncated *program* would just crash).
     if size == 0 || size > staging.len() {
-        return SPAWN_ERROR;
+        return syscall_abi::SPAWN_ERR_TOO_LARGE;
     }
     let program = &staging[..size];
 
     let (header, phdrs, region_size) = match loader::elf_region_size(program) {
         Ok(result) => result,
-        Err(_) => return SPAWN_ERROR,
+        Err(_) => return syscall_abi::SPAWN_ERR_BAD_ELF,
     };
     let region_base = tasks::allocate_runtime_region(region_size);
     // SAFETY: `region_base` was just handed out by
@@ -320,7 +326,10 @@ fn spawn_program(path: &str) -> u64 {
     // the same size `elf_region_size` computed for this exact program.
     let loaded = match unsafe { loader::populate_region(program, &header, phdrs.as_slice(), region_base, region_size) } {
         Ok(loaded) => loaded,
-        Err(_) => return SPAWN_ERROR,
+        Err(_) => {
+            tasks::free_runtime_region(region_base, region_size);
+            return syscall_abi::SPAWN_ERR_BAD_ELF;
+        }
     };
 
     let context = Context {
@@ -337,7 +346,10 @@ fn spawn_program(path: &str) -> u64 {
             unsafe { mmu::rebuild_with_el0_regions(tasks::el0_regions()) };
             0
         }
-        Err(_) => SPAWN_ERROR,
+        Err(_) => {
+            tasks::free_runtime_region(region_base, region_size);
+            syscall_abi::SPAWN_ERR_NO_FREE_SLOT
+        }
     }
 }
 

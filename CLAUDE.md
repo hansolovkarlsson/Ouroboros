@@ -1357,9 +1357,12 @@ gracefully. Zero aborts in `-d int` cross-checks across every session
 check, and the FAT16 degradation check).
 
 **Still coarse:** no move-into-an-existing-directory-keeping-basename
-shortcut (real `mv`'s most common everyday case beyond a plain rename);
+shortcut (real `mv`'s most common everyday case beyond a plain rename)
+**(Update: done - shell-side, probing the destination with the same
+`fs_list_dir` trick `cd` uses; `mv x x` is refused outright)**;
 no cycle detection (nothing stops moving a directory into its own
-descendant); `dst`'s name is still bound by the same conservative 8.3
+descendant - the trivial self-move is guarded now, deeper cycles still
+aren't); `dst`'s name is still bound by the same conservative 8.3
 character set `mkdir`/`touch` already impose. This closes the write-
 support arc phase 3 explicitly deferred (mkdir/rmdir/touch/rm/write/cp/
 mv, phases 4-8) - what's left in `docs/roadmap.md`'s parking lot from
@@ -3609,9 +3612,22 @@ directory" (after the fix above), `rm /EFI`/`touch /EFI`/`echo hi >>
 real-Parallels smoke (`ls` → the no-filesystem message, typing
 unregressed). Zero aborts in every `-d int` cross-check.
 
-**Still collapsed, deliberately:** `SPAWN_ERROR` (bad ELF / too large /
+**Still collapsed, deliberately:** ~~`SPAWN_ERROR` (bad ELF / too large /
 no free slot / disk error) - same pattern, separate small follow-up if
-ever needed.
+ever needed.~~ **Done, same day:** `spawn` returns the ordinary
+`FS_ERR_*` code for read failures and
+`SPAWN_ERR_BAD_ELF`/`SPAWN_ERR_TOO_LARGE`/`SPAWN_ERR_NO_FREE_SLOT`
+for the rest (all in the same `>= FS_ERR_MIN` band); a failed spawn now
+also gives its allocated region back (`free_runtime_region` - always
+the LIFO case, since a failed spawn's allocation is the most recent).
+And `mv` gained real `mv`'s move-into-directory shortcut, shell-side
+(destination probed with `cd`'s `fs_list_dir` trick, basename appended;
+`mv x x` refused). Both confirmed on QEMU: `mv f1 d1` → `ls d1` shows
+it, `mv d1/f1 /` back out, self-move refused for files and directories,
+`exec /nope` → "no such file or directory", `exec /EFI` → "is a
+directory", `exec INIT.CFG` → "not a loadable program (bad ELF)", two
+spawned shells then a third program → "no free task slot" - zero
+aborts.
 
 ## Parallels disk diagnostic: no documented storage controller exists on this platform - confirmed with fresh evidence, not just the old inventory
 

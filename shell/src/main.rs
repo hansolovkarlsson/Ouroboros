@@ -89,7 +89,7 @@ const LF: u8 = b'\n';
 // Syscall numbers and sentinel values come from the shared `syscall-abi`
 // crate now, not hand-duplicated local consts - see its doc comment and
 // `kernel/src/syscall.rs`'s dispatch table, the other side of this ABI.
-use syscall_abi::{EXIT_DENIED, FS_ERR_MIN, FS_ERR_NOT_FOUND, NO_FS, SPAWN_ERROR};
+use syscall_abi::{EXIT_DENIED, FS_ERR_MIN, FS_ERR_NOT_FOUND, NO_FS};
 
 /// Placed first in `.text` by `linker.ld` (`KEEP(*(.text.start))`) so it
 /// lands at file/VA offset 0 - `tasks.rs` sets a loaded program's
@@ -584,6 +584,9 @@ fn print_fs_error(cmd: &str, code: u64) {
         syscall_abi::FS_ERR_IS_ROOT => "can't remove the root directory",
         syscall_abi::FS_ERR_DISK_FULL => "disk full",
         syscall_abi::FS_ERR_IO => "device I/O error",
+        syscall_abi::SPAWN_ERR_BAD_ELF => "not a loadable program (bad ELF)",
+        syscall_abi::SPAWN_ERR_TOO_LARGE => "program too large for the kernel's staging buffer (or empty)",
+        syscall_abi::SPAWN_ERR_NO_FREE_SLOT => "no free task slot",
         _ => "failed",
     });
 }
@@ -732,7 +735,7 @@ fn cmd_exec(arg: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize) {
 
     match fs_spawn(path) {
         NO_FS => print_no_fs(),
-        SPAWN_ERROR => print_line("exec: failed (no such file, bad program, or no free task slot)"),
+        code if code >= FS_ERR_MIN => print_fs_error("exec", code),
         _ => {}
     }
 }
@@ -958,7 +961,62 @@ fn cmd_mv(line: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize) {
         return;
     };
 
-    match fs_mv(src_path, dst_path) {
+    // Trivial self-move guard (`mv a a`, however spelled after path
+    // resolution) - without it, the into-directory shortcut below would
+    // turn `mv somedir somedir` into "move somedir *inside itself*",
+    // the degenerate case of the known, documented no-cycle-detection
+    // limitation, now one typo closer than it used to be. Byte equality
+    // of two runtime buffers - not a comparison against a literal, so
+    // relocation-safe by the same reasoning `selftest` proves.
+    if src_path_buf[..src_path_len] == dst_path_buf[..dst_path_len] {
+        print_line("mv: source and destination are the same");
+        return;
+    }
+
+    // Real `mv`'s most common convenience beyond a plain rename:
+    // `mv file dir` moves *into* an existing directory, keeping the
+    // source's basename. Probed with the same fs_list_dir trick cmd_cd
+    // uses (there's still no dedicated "does this exist" syscall): a
+    // successful listing means dst is an existing directory, so the real
+    // destination becomes dst/<basename of the resolved source>; any
+    // error code just means "not a directory" and dst is used as-is.
+    let mut scratch = [0u8; 8];
+    let mut final_dst_buf = [0u8; PATH_SIZE];
+    final_dst_buf[..dst_path_len].copy_from_slice(&dst_path_buf[..dst_path_len]);
+    let mut final_dst_len = dst_path_len;
+    match fs_list_dir(dst_path, &mut scratch) {
+        NO_FS => {
+            print_no_fs();
+            return;
+        }
+        code if code >= FS_ERR_MIN => {}
+        _ => {
+            let src_bytes = &src_path_buf[..src_path_len];
+            let base_start = src_bytes.iter().rposition(|&b| b == b'/').map(|i| i + 1).unwrap_or(0);
+            let base = &src_bytes[base_start..];
+            // Root ("/") already ends in the separator - don't double it.
+            if !(final_dst_len == 1 && final_dst_buf[0] == b'/') {
+                if final_dst_len >= final_dst_buf.len() {
+                    print_line("mv: path too long");
+                    return;
+                }
+                final_dst_buf[final_dst_len] = b'/';
+                final_dst_len += 1;
+            }
+            if final_dst_len + base.len() > final_dst_buf.len() {
+                print_line("mv: path too long");
+                return;
+            }
+            final_dst_buf[final_dst_len..final_dst_len + base.len()].copy_from_slice(base);
+            final_dst_len += base.len();
+        }
+    }
+    let Ok(final_dst) = core::str::from_utf8(&final_dst_buf[..final_dst_len]) else {
+        print_line("mv: path too long");
+        return;
+    };
+
+    match fs_mv(src_path, final_dst) {
         NO_FS => print_no_fs(),
         code if code >= FS_ERR_MIN => print_fs_error("mv", code),
         _ => {}
@@ -1182,11 +1240,11 @@ fn fs_mv(src: &str, dst: &str) -> u64 {
     syscall4(syscall_abi::FS_MV, src.as_ptr() as u64, src.len() as u64, dst.as_ptr() as u64, dst.len() as u64)
 }
 
-/// Loads the program at `path` and starts it as a new task. Returns `0` on
-/// success, [`NO_FS`], or [`SPAWN_ERROR`] (bad ELF, file too large for the
-/// kernel's staging buffer, disk error, or no free task slot - all
-/// collapsed into one sentinel, same "can't distinguish why" limitation
-/// [`fs_mkdir`]'s doc comment already notes for the other `fs_*` syscalls).
+/// Loads the program at `path` and starts it as a new task. Returns `0`
+/// on success, [`NO_FS`], an ordinary `FS_ERR_*` code for a read failure
+/// (not found, is a directory, ...), or one of the spawn-specific codes
+/// (`SPAWN_ERR_BAD_ELF`/`SPAWN_ERR_TOO_LARGE`/`SPAWN_ERR_NO_FREE_SLOT`)
+/// - all in the same `>= FS_ERR_MIN` band [`print_fs_error`] decodes.
 fn fs_spawn(path: &str) -> u64 {
     syscall4(syscall_abi::SPAWN, path.as_ptr() as u64, path.len() as u64, 0, 0)
 }
