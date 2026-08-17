@@ -20,7 +20,7 @@ covers everything between that bare prompt and a real, disk-backed
 userland shell, which is what this document's driver finally had
 something to type into.
 
-Seven real, confirmed bugs, each found by direct evidence (register
+Eight real, confirmed bugs, each found by direct evidence (register
 dumps, decoded exception registers, byte-for-byte comparisons) rather
 than guessing. In order:
 
@@ -42,6 +42,10 @@ than guessing. In order:
    for a real, unpredictable duration. Found by a user directly, on the
    one real-world scenario none of this project's own testing ever
    exercised.
+8. A debug print left permanently unconditional, flooding the only
+   console this platform has with raw report dumps during ordinary
+   typing — also found by a user, not a script, and also a real
+   usability bug, not just noise.
 
 ## Background: why this was hard to see coming
 
@@ -577,6 +581,72 @@ a bug lives, not just an unlucky report. If your own test automation
 can't reproduce something a real user hit, ask what's structurally
 different about how they're using it, before assuming it's a fluke.
 
+## Bug 8: a debug print that outlived its usefulness, on a platform with only one console
+
+Not a failure in the driver's own logic at all — the keyboard worked
+correctly the whole time. This one is about what happens when a
+diagnostic that was genuinely useful during bring-up never gets
+removed once the thing it was diagnosing is confirmed working.
+
+**Symptom:** typing normally on the real, physical keyboard, on the
+real disk image, produced a screen full of lines like
+`Ouroboros kernel: xhci: report [00, 00, 16, 00, 00, 00, 00, 00]` -
+one per keystroke, interleaved with the shell's own prompt and output,
+making it hard to see what was actually typed or what the shell
+actually said back. Found by the user directly, using the real
+hardware normally - not by this project's own scripted testing (which
+does exercise real keystrokes, via `prlctl send-key-event`, but is
+built to capture and inspect screenshots after the fact, not to
+*notice* that a screen is unpleasant to read live).
+
+**Root cause:** `xhci.rs::Device::poll_key` unconditionally logged
+every new HID report - `console::println!("... xhci: report
+{buf:02x?}")` - every time the 8-byte report changed from the previous
+poll. That's not once per keystroke; it's *at least* twice (a key-down
+report, then a key-up report when it's released, since a released key
+changes the report back toward its rest state, which counts as "new"
+too), for a device that reports every currently-held key, so holding
+multiple keys or typing quickly could produce more. This was
+originally written to prove, during initial bring-up, that real HID
+reports were actually arriving through the interrupt-endpoint code
+path - genuinely useful at the time, and even called out favorably in
+this project's own scripted-testing writeup (`CLAUDE.md`) as evidence
+the driver was really working. It was just never gated or removed once
+that question was answered. On a platform where the framebuffer
+console (see the "why is there no serial log" aside) is the *only*
+console - there's no separate debug channel to route noise to - a print
+like this doesn't just clutter a log file somewhere; it's mixed
+directly into the same screen the user is trying to read and type
+into.
+
+**Fix:** deleted the print outright, rather than gating it behind a
+flag. It had already served its purpose; nothing about normal keyboard
+operation depends on it, and reintroducing it temporarily (the same
+"force, test, revert" pattern used throughout this project's own
+console-discovery work) is cheap enough the next time a real question
+about report contents comes up, without paying its cost on every
+normal boot in the meantime.
+
+**Confirmed fixed by the user directly**, on the same real hardware and
+the same physical keyboard that showed the problem: a follow-up
+scripted round trip (`make test-parallels`) showed clean, readable
+shell output - prompt, typed command, and response, nothing else - for
+several different commands in sequence, with none of the report-dump
+noise that filled the equivalent screenshot before the fix.
+
+**Lesson:** a diagnostic print's usefulness has a shelf life, and nobody
+schedules a reminder to revisit it once its original question is
+answered. This project had already learned a version of this lesson
+once, inside a single bug's own investigation (Bug 7's completion-code
+error print was deliberately written to log only on an *error
+transition*, specifically because an earlier, unconditional version of
+it "flooded the screen during earlier debugging" - see that code's own
+comment) - but a lesson learned locally, inside one function, doesn't
+automatically propagate to a different print, in a different function,
+written earlier. Worth treating "does this still need to run on every
+success, forever" as a real question for any diagnostic before calling
+a bug fixed, not just for the first one you write.
+
 ## Debugging techniques that generalized well
 
 A few things that were reused across more than one bug above, worth
@@ -629,13 +699,15 @@ real, manually-launched VM, not just under scripted testing. Getting
 there took a from-scratch xHCI driver (capability/operational register
 programming, command ring, event ring, device slot enumeration, control
 transfers, and finally a real interrupt-endpoint transfer ring) and
-seven real, independently-confirmed hardware bugs along the way — five
-found in the initial one-day push, none of them visible on the software
-emulator this project otherwise develops against day to day; a sixth
-found weeks later, exposed only once a separate milestone gave this
-platform real preemption for the first time; and a seventh found not by
+eight real, independently-confirmed bugs along the way — five found in
+the initial one-day push, none of them visible on the software emulator
+this project otherwise develops against day to day; a sixth found weeks
+later, exposed only once a separate milestone gave this platform real
+preemption for the first time; and a seventh and eighth found not by
 this project's own testing at all, but by a person just trying to use
-the thing normally.
+the thing normally - one a real functional failure (a timeout that
+should have been time-bounded and wasn't), the other a real usability
+defect (a diagnostic that never got retired once it had done its job).
 
 If you're doing the equivalent work for your own kernel: budget for the
 fact that "works on QEMU" and "works on a real hypervisor" are
