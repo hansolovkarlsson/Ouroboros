@@ -104,60 +104,95 @@ loud warning and a fail-safe EL1-only mapping, not silent corruption).
 
 ## Binary format
 
-Flat, position-dependent raw machine code — not ELF. The kernel doesn't
-parse program headers, process relocations, or understand any container
-format; it copies bytes to a fixed address and sets `ELR_EL1` to the very
-start of that address. This is deliberately the simplest thing that could
-work, not a permanent design constraint — a real ELF loader is a
-reasonable future step once something needs what only ELF provides
-(position independence, explicit segment permissions, symbol info).
+Real ELF64, self-relocating — not a flat binary anymore. `loader.rs`
+hand-rolls a small ELF64 parser (header, program headers, section
+headers, `Elf64_Rela` entries — no crate, matching this project's
+established discipline of hand-rolling formats simple enough to
+justify it, same as `acpi.rs`/`madt.rs`/`fat32.rs`): it walks `PT_LOAD`
+program headers to copy each segment's bytes to `region_base +
+p_vaddr` (zeroing `p_memsz - p_filesz` past that — a real `.bss` region
+falls out of this for free, see below), then finds `.rela.dyn` by name
+and applies every `R_AARCH64_RELATIVE` entry it contains against
+`region_base`, fixing up every absolute pointer the compiler needed to
+bake into data for wherever the program actually landed. See
+`CLAUDE.md`'s "A real relocating loader" section for the full history —
+this replaced a flat, position-*dependent* loader that copied raw bytes
+to a fixed address with no relocation step at all, which was this
+project's single most-repeated bug class.
 
-Consequences of "flat binary, no loader smarts":
+Consequences of "real ELF, real relocations, but still narrowly scoped
+— no dynamic linking, no imported symbols, no `exec()`":
 
-- **Entry must be the first byte.** A linker script (see
-  `shell/linker.ld`) sets the link address to `0x0` and places the entry
-  symbol first in `.text` via `KEEP(*(.text.start))`.
-- **No `.bss`.** There's no crt0 here to zero memory before your code
-  runs, and the loader only copies exactly the file's bytes — a
-  zero-initialized static's space wouldn't exist in the loaded region at
-  all. `shell/linker.ld` defines `.bss` and `.data` output sections but
-  `ASSERT`s they're empty, so a program that accidentally introduces
-  global mutable state fails to *link*, not to run correctly.
-- **No relocations, no PIC.** Built with `relocation-model=static`. Since
-  the load address isn't known at compile time in general (though it
-  currently always ends up being whatever `loader.rs`'s allocator picks),
-  a program must not embed absolute addresses of its own symbols — the
-  shell doesn't, since its "global state" (the input buffer) is a local
-  variable in `main`'s stack frame, not a static.
-- **`core::fmt` (`write!`, `{}` formatting) is unsafe to use, and will
-  crash.** Discovered directly, not by inspection: the shell's first
-  `uptime` implementation used `write!` to format a tick count and
-  immediately crashed on the very first call (`Instruction Abort`, `ELR_EL1`
-  landing on a tiny near-zero address rather than real code). Root cause:
-  `core::fmt::Arguments` builds its per-argument dispatch out of *data* — an
-  array of function pointers, one per formatted value — rather than direct
-  `bl` calls. A direct call compiles to a PC-relative branch and stays
-  correct no matter where the binary ends up loaded; a function pointer
-  baked into `.rodata` at compile time for a program linked at base `0x0`
-  is only correct if the program actually runs at `0x0` — which it never
-  does (see "Memory model" above). There is no relocation processing to fix
-  such a pointer up at load time. `shell/src/main.rs`'s `print_u64_decimal`
-  is the replacement: a hand-rolled decimal formatter using only direct
-  calls. Any future program needs to avoid `core::fmt` for the same reason,
-  until this gets a real relocating loader.
-- **Comparing a slice/string against a literal is unsafe too, for the
-  identical reason - a second, separately confirmed instance, not a
-  hypothetical extension.** Phase 3c's `cd` needed to check whether the
-  current directory was already root (`cwd_bytes != b"/"`) and crashed the
-  same way `write!` did - `ELR_EL1` inside the shell's own code,
-  `FAR_EL1` a small, build-layout-dependent address. Bisected with
-  temporary `print_line` calls until the exact statement was isolated.
-  The fix is the same shape as `core::fmt`'s: don't reference the literal
-  at all, just compare scalars (`bytes.len() == 1 && bytes[0] == b'/'`
-  instead of `bytes != b"/"`; `shell/src/main.rs`'s `is_root`/`is_dot`/
-  `is_dotdot` are the pattern to copy). Direct calls and individual
-  `u8`/`usize` comparisons are fine; anything needing a *reference* to
-  literal data in `.rodata` isn't.
+- **Entry must still be the first byte, by convention, not necessity.**
+  The linker script (`shell/linker.ld`) still sets the link address to
+  `0x0` and places the entry symbol first in `.text` via
+  `KEEP(*(.text.start))`, keeping `LoadedProgram::entry == ::base`
+  trivially true — but `loader.rs` computes `entry` as `base + e_entry`
+  from the real ELF header now, so a program's entry point doesn't
+  *have* to be its first byte the way it did under the old flat loader;
+  this project's own shell just still keeps it that way, out of
+  convenience, not obligation.
+- **Still no `.bss`/`.data` for genuine static mutable state.**
+  `loader.rs`'s segment-loading code is now generic enough to zero a
+  real `.bss` region (any `PT_LOAD` segment where `p_memsz > p_filesz`)
+  — but `shell/linker.ld` still `ASSERT`s `.bss`/`.data` are empty, a
+  deliberate, separate decision not to expand this capability just
+  because the loading mechanism could support it. A program's "global
+  state" still has to be a local variable in `main`'s stack frame, the
+  same as before.
+- **Build with `relocation-model=pic` + `-pie` + `--no-dynamic-linker`**
+  (`.cargo/config.toml`'s `[target.aarch64-unknown-none]`), not
+  `relocation-model=static` anymore. This makes the compiler emit
+  `R_AARCH64_RELATIVE` self-relocations for absolute data pointers it
+  can't express PC-relatively (`core::fmt`'s argument-dispatch tables,
+  literal references used in certain codegen shapes — see below),
+  instead of baking in raw base-`0x0` addresses with nothing to fix
+  them up. `-pie` specifically matters: `relocation-model=pic` *alone*
+  produces an ordinary static executable with GOT entries silently
+  resolved to base-`0x0` addresses at link time — the identical bug,
+  one level down. `--no-dynamic-linker` is correct because there
+  genuinely is none — no `PT_INTERP`, no imported symbols, nothing
+  `ld.so` would normally resolve.
+- **Must be built with `--release`, not debug — a hard, confirmed
+  toolchain constraint, not a style preference.** A debug build of a
+  userland program fails to *link* at all under this model:
+  `rust-lld` rejects an `R_AARCH64_ABS64` relocation inside the
+  prebuilt (not rebuilt-per-project — see `rust-toolchain.toml`)
+  `libcore.rlib`'s own `core::fmt::builders::PadAdapter` object code,
+  pulled in by ordinary debug-build panic/bounds-check formatting
+  machinery regardless of whether your own code calls
+  `write!`/`format!` at all. A release build's optimizer eliminates
+  enough of that unreachable-in-practice code that the poisoned object
+  never gets linked in. `make shell-bin` already does this — replicate
+  it (`cargo build -p <your-crate> --target aarch64-unknown-none
+  --release`) for any new program.
+- **`core::fmt` (`write!`, `{}` formatting) is safe now — confirmed,
+  not just reasoned about.** Historically unsafe here for the identical
+  reason the old flat loader made *any* absolute data pointer unsafe
+  (`core::fmt::Arguments` builds its per-argument dispatch out of a
+  function-pointer array in `.rodata`, not direct `bl` calls) — but
+  that mechanism is exactly what real relocation processing fixes. The
+  shell's `selftest` builtin (`shell/src/main.rs`) exercises `write!`
+  over a small `core::fmt::Write` wrapper around `putc` specifically to
+  prove this, and it works. `print_u64_decimal` is left as hand-rolled
+  decimal formatting anyway — not because it has to be, just because it
+  already existed and doesn't need `core::fmt`'s machinery for
+  something this simple.
+- **Comparing a slice/string against a literal is safe now too, same
+  reasoning, also confirmed via `selftest`.** The historical crash
+  (`cwd_bytes != b"/"` in `cd`'s old path-resolution code) was the
+  identical class of bug — a reference to literal `.rodata` data needing
+  a relocation that never happened under the old model. `resolve_path`'s
+  `is_root`/`is_dot`/`is_dotdot` helpers still use scalar comparisons
+  (not because it's still required, just because they were already
+  written that way and there was no reason to change working code as
+  part of this milestone).
+- **Still no dynamic linking, no imported symbols, no `exec()`.**
+  Exactly one relocation type is supported (`R_AARCH64_RELATIVE`) —
+  anything else is a hard loader error, not silently ignored, since
+  this project has no shared libraries and nothing else should ever
+  legitimately appear in `.rela.dyn`. Still exactly one program, loaded
+  once, at boot.
 
 ## Syscall ABI available to a program
 
@@ -234,8 +269,9 @@ write your own:
 1. **New crate**, `no_std` + `no_main`, built for `aarch64-unknown-none`
    (already an installed target — see `rust-toolchain.toml`).
 2. **Copy `shell/linker.ld`** as-is, or adapt it — the constraints above
-   (entry first, no `.bss`/`.data`) apply to any program loaded this way,
-   not just the shell.
+   (entry first, no `.bss`/`.data`, the `.rela.dyn`/`.dynsym`/`.dynamic`/
+   `.data.rel.ro` sections LLD needs for a well-formed self-relocating
+   `ET_DYN`) apply to any program loaded this way, not just the shell.
 3. **Add a target-specific `rustflags` entry** in the workspace's
    `.cargo/config.toml` if your linker script lives somewhere other than
    `shell/linker.ld` (the existing `[target.aarch64-unknown-none]` section
@@ -254,21 +290,23 @@ write your own:
    passed down through your call stack instead (see `shell/src/main.rs`'s
    `on_byte` for the pattern: buffer and length live in `main`'s frame,
    passed by `&mut` reference).
-6. **No `core::fmt` (`write!`, `{}`), and no comparing a slice/string
-   against a literal either** — see "Binary format" above for why both
-   crash (the same root cause). Format numbers by hand (`shell/src/main.rs`'s
-   `print_u64_decimal` is a ready-made example), build strings out of
-   byte/`&str` loops through `putc`, and write comparisons like
-   `shell/src/main.rs`'s `is_root`/`is_dot`/`is_dotdot` (scalar `len()`/
-   indexed-byte checks) instead of `slice == b"literal"`.
+6. **`core::fmt` and slice/string-vs-literal comparisons are both safe
+   now** — see "Binary format" above for why they used to crash and
+   what actually fixed it (real relocation processing, not a coding
+   convention). Ordinary Rust idioms are fine; `shell/src/main.rs`'s
+   `selftest` builtin is a working example of both.
 7. **A `#[panic_handler]`** — there's no `std`, and no `uefi` crate's
    panic handling either (that only exists on the boot-services side).
    Looping on `wfe` forever is a reasonable minimum.
-8. **Build and stage it**: `cargo build -p <crate> --target aarch64-unknown-none`,
-   then `llvm-objcopy -O binary --strip-all <elf> <name>.bin` (see the
-   Makefile's `shell-bin` target for the exact invocation, including where
-   to find `llvm-objcopy` — it isn't on `PATH` by default). Copy the `.bin`
-   onto the ESP and point `INIT.CFG` at it.
+8. **Build and stage it in release mode — required, not optional** (see
+   "Binary format" above for why debug builds fail to link at all):
+   `cargo build -p <crate> --target aarch64-unknown-none --release`,
+   then `llvm-objcopy --strip-all <elf> <name>.bin` (no `-O binary` —
+   the loader needs a real ELF, not a flat dump; see the Makefile's
+   `shell-bin` target for the exact invocation, including where to find
+   `llvm-objcopy` — it isn't on `PATH` by default). Copy the resulting
+   `.bin` (still a real, stripped ELF despite the extension) onto the
+   ESP and point `INIT.CFG` at it.
 
 ## Known rough edges
 
@@ -281,11 +319,10 @@ Worth knowing before building further on this:
   hand-duplicated local consts kept in sync only by convention. It's a
   plain `#![no_std]` lib with no logic - safe to depend on from either
   target this project builds for, since every value is a scalar integer
-  inlined at the use site, not a pointer needing relocation (so it
-  doesn't run into the "no comparing a slice/string against a literal"
-  restriction below). Still only useful within this repository - a
-  program built elsewhere would need to either depend on this crate too
-  or re-derive the same numbers by hand.
+  inlined at the use site, not a pointer needing relocation. Still only
+  useful within this repository - a program built elsewhere would need
+  to either depend on this crate too or re-derive the same numbers by
+  hand.
 - **One program, loaded once, at boot.** No `exec()`, no spawning a second
   process, no way to reload a program without rebooting.
 - **Fixed 2-task scheduler.** `tasks.rs` has exactly two slots; a second
@@ -297,15 +334,19 @@ Worth knowing before building further on this:
 - **Stack size is fixed** (2 pages, 8KB) regardless of what a program
   actually needs, and there's no guard page — a stack overflow silently
   corrupts whatever memory follows it rather than faulting.
-- **No ELF, no relocations, no dynamic linking.** Every program is a flat,
-  position-dependent blob built specifically for wherever `loader.rs`'s
-  allocator happens to place it that boot (which happens to always work
-  today, but isn't a guarantee anything currently enforces).
-- **No `core::fmt`, and no comparing a slice/string against a literal.**
-  A direct consequence of the above, but easy to hit by accident (both
-  compile fine and only fail at runtime) — see "Binary format"'s callout
-  for what actually goes wrong and why. Goes away once there's a real
-  relocating loader.
+- **Must be built in `--release`, not debug.** A real, confirmed
+  toolchain constraint (an `R_AARCH64_ABS64` relocation inside prebuilt
+  `libcore`'s own object code that only a release build's optimizer
+  eliminates), not a preference - see "Binary format" above.
+- **~~No ELF, no relocations, no dynamic linking~~ - real ELF and real
+  `R_AARCH64_RELATIVE` relocations, fixed.** See "Binary format" above
+  and `CLAUDE.md`'s "A real relocating loader" section. Still no
+  dynamic linking, no imported symbols, no `exec()` - deliberately out
+  of scope, not a remaining gap in what was attempted.
+- **~~No `core::fmt`, and no comparing a slice/string against a
+  literal~~ - both safe now, confirmed via the shell's `selftest`
+  builtin.** See "Binary format" above for what actually fixed this
+  (real relocation processing, not a coding convention to remember).
 - **Disk-command pointer/length arguments are trusted, not validated.**
   `fs_list_dir`/`fs_read_file`/`fs_mkdir`/`fs_rmdir`/`fs_touch`/`fs_rm`/
   `fs_write_file`/`fs_mv` dereference the caller's `(pointer, length)`

@@ -2,8 +2,25 @@ TARGET       := aarch64-unknown-uefi
 USER_TARGET  := aarch64-unknown-none
 PROFILE      ?= debug
 KERNEL       := target/$(TARGET)/$(PROFILE)/BOOTAA64.efi
-SHELL_ELF    := target/$(USER_TARGET)/$(PROFILE)/shell
-SHELL_BIN    := target/$(USER_TARGET)/$(PROFILE)/shell.bin
+# Userland programs (shell/) always build in release profile, regardless
+# of $(PROFILE) above - a hard requirement, not a style choice, since the
+# relocating loader work switched to position-independent linking
+# (.cargo/config.toml). Confirmed by direct experiment: a *debug* build
+# fails to link at all under that model - rust-lld rejects an
+# R_AARCH64_ABS64 relocation inside `core::fmt::builders::PadAdapter`,
+# pulled in from the prebuilt (not rebuilt-per-project) libcore.rlib by
+# ordinary debug-build panic/bounds-check formatting machinery, which
+# that prebuilt rlib was never compiled with -C relocation-model=pic
+# support for. A *release* build's optimizer eliminates enough of that
+# unreachable-in-practice panic-formatting code that the poisoned object
+# code never gets pulled into the link at all. See loader.rs's module
+# doc comment and docs/processes.md's "Binary format" section for the
+# full writeup - this is a real, hard-won toolchain constraint, not a
+# guess, and not something -Z build-std would be worth reintroducing a
+# nightly-toolchain dependency to work around (see rust-toolchain.toml's
+# own "no nightly, no -Z build-std needed" comment).
+SHELL_ELF    := target/$(USER_TARGET)/release/shell
+SHELL_BIN    := target/$(USER_TARGET)/release/shell.bin
 ESP_DIR      := esp
 OVMF         := $(shell brew --prefix qemu 2>/dev/null)/share/qemu/edk2-aarch64-code.fd
 PDT          := /Applications/Parallels Desktop.app/Contents/MacOS/prl_disk_tool
@@ -34,12 +51,19 @@ build:
 
 # Built separately from `build`: a different target (aarch64-unknown-none,
 # not the workspace-default aarch64-unknown-uefi - see Cargo.toml's
-# default-members comment) and a raw-binary conversion step, since this is
-# a flat position-dependent binary loaded directly by the kernel
-# (loader.rs/tasks.rs), not a UEFI application.
+# default-members comment), always --release (see SHELL_ELF's own comment
+# above for why), and staged as a real, if stripped, ELF file - not
+# `objcopy -O binary` anymore. `loader.rs` is a real (if narrowly-scoped)
+# ELF loader now: it needs the program header table and a `.rela.dyn`
+# section to actually load and relocate this correctly, both of which a
+# raw-binary conversion would have thrown away. `--strip-all` alone
+# (dropping `-O binary`) still shrinks the file by removing the symbol
+# table and debug info - confirmed by direct comparison to still leave
+# every section the loader actually reads (program headers, section
+# headers, `.rela.dyn`'s contents) fully intact.
 shell-bin:
-	cargo build -p shell --target $(USER_TARGET) $(CARGO_FLAGS)
-	"$(OBJCOPY)" -O binary --strip-all $(SHELL_ELF) $(SHELL_BIN)
+	cargo build -p shell --target $(USER_TARGET) --release
+	"$(OBJCOPY)" --strip-all $(SHELL_ELF) $(SHELL_BIN)
 
 # Stage the EFI System Partition layout QEMU/Parallels expect: a removable
 # UEFI drive boots \EFI\BOOT\BOOTAA64.EFI automatically, no boot manager

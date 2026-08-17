@@ -143,14 +143,16 @@ pub fn idle_region() -> (u64, u64) {
 /// [`idle_region`] EL0-accessible, and before either task could possibly
 /// run.
 pub unsafe fn init(program: &LoadedProgram) {
-    // Task 0: entry is exactly the load base - shell/linker.ld places
-    // `_start` at file/VA offset 0, and loader.rs's region has no header
-    // or padding before the program's own bytes. Stack at the top of the
+    // Task 0: entry is the program's real ELF entry point, not just its
+    // load base - loader.rs computes `entry = base + e_entry` (they
+    // happen to be equal today, since shell/linker.ld keeps `_start` at
+    // file/VA offset 0, but tasks.rs shouldn't assume that itself - see
+    // LoadedProgram::entry's own doc comment). Stack at the top of the
     // loaded region, growing down, same shape every EL0 task has used.
     *unsafe { &mut *TASKS[0].0.get() } = Context {
         gpr: [0; 31],
         sp_el0: program.base + program.size,
-        elr_el1: program.base,
+        elr_el1: program.entry,
         // M[3:0]=0000 selects EL0t (the only mode EL0 has), DAIF all
         // clear (every exception class unmasked - the timer tick must be
         // able to preempt), NZCV cleared.

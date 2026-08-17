@@ -176,8 +176,16 @@ phase:
   needs a file to hold more than zero bytes" item still open.
 - **Lifting `mkdir`'s no-directory-extension limitation** - a full
   parent directory currently makes `mkdir` fail rather than growing it.
-- A real relocating loader (ELF + relocation processing) — would also
-  lift the current `core::fmt`/`write!` restriction in userland programs.
+- ~~A real relocating loader (ELF + relocation processing) — would also
+  lift the current `core::fmt`/`write!` restriction in userland
+  programs.~~ **Done** — real ELF64 parsing and `R_AARCH64_RELATIVE`
+  relocation processing, confirmed on both QEMU and real Parallels
+  hardware (`core::fmt`/`write!` and slice/literal comparisons both work
+  correctly now, via the shell's `selftest` command, on both platforms),
+  plus a real pre-existing kernel bug this work surfaced and fixed (the
+  SVC trampoline losing `x9` across every syscall — also confirmed fixed
+  on real hardware via a genuinely multi-digit `uptime` value). See
+  `CLAUDE.md`'s "A real relocating loader" section for the full writeup.
 - Blocking/waiting primitives, so tasks aren't limited to unconditional
   round-robin `wfe` polling.
 - Dynamic task creation and `exec()` — running more than one loaded

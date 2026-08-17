@@ -63,6 +63,7 @@
 #![no_main]
 
 use core::arch::asm;
+use core::fmt::Write as _;
 use core::panic::PanicInfo;
 
 const BUFFER_SIZE: usize = 128;
@@ -183,7 +184,7 @@ fn run_line(line: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize) {
     let arg = words.next().unwrap_or("");
 
     match command {
-        "help" => print_line("commands: help, echo, uptime, clear, ls, cat, cd, pwd, mkdir, rmdir, touch, rm, write, cp, mv"),
+        "help" => print_line("commands: help, echo, uptime, clear, ls, cat, cd, pwd, mkdir, rmdir, touch, rm, write, cp, mv, selftest"),
         "echo" => {
             let mut first = true;
             for word in line.split_whitespace().skip(1) {
@@ -221,6 +222,7 @@ fn run_line(line: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize) {
         "write" => cmd_write(line, cwd, *cwd_len),
         "cp" => cmd_cp(line, cwd, *cwd_len),
         "mv" => cmd_mv(line, cwd, *cwd_len),
+        "selftest" => cmd_selftest(),
         _ => {
             print_str("unknown command: ");
             print_line(command);
@@ -735,20 +737,23 @@ fn print_line(s: &str) {
     putc(LF);
 }
 
-/// Hand-rolled rather than `write!`/`core::fmt::Arguments`: that machinery
-/// builds its per-argument dispatch out of *data* (an array of function
-/// pointers, one per formatted argument) rather than direct `bl` calls -
-/// fine under a real relocating loader, but this one applies none (see
-/// `linker.ld`'s doc comment and `docs/processes.md`). A binary linked for
-/// base `0x0` but loaded somewhere else (always, in practice - see
-/// `loader.rs`) has no way to know those embedded pointer values need
-/// correcting, so they point at whatever the link-time address `0x0`
-/// would have meant - resulting in exactly the crash this replaced
+/// Historical note, kept because it explains why [`cmd_selftest`] exists
+/// and why this function still hand-rolls rather than switching to
+/// `write!` itself: under the *old*, non-relocating flat-binary loader,
+/// `write!`/`core::fmt::Arguments` crashed here. That machinery builds its
+/// per-argument dispatch out of *data* (an array of function pointers, one
+/// per formatted argument) rather than direct `bl` calls - a binary linked
+/// for base `0x0` but loaded somewhere else (always, in practice) had no
+/// way to know those embedded pointer values needed correcting, so they
+/// pointed at whatever link-time address `0x0` would have meant
 /// (`ELR_EL1` landing on a tiny near-null address instead of real code,
-/// confirmed directly by trying `write!` here first). Direct calls
-/// (`putc`, `print_str`, this function) compile to PC-relative `bl` and
-/// have no such problem - so the fix is avoiding `core::fmt` entirely for
-/// anything a loaded program formats, not just here.
+/// confirmed directly by trying `write!` here first). **This is now fixed**,
+/// since `loader.rs` processes real `R_AARCH64_RELATIVE` relocations
+/// against the actual runtime load address (see CLAUDE.md's "relocating
+/// loader" milestone and [`cmd_selftest`], which proves it) - but this
+/// function itself is left as hand-rolled decimal formatting anyway,
+/// simply because it was already written, works, and doesn't need
+/// `core::fmt`'s machinery to do something this simple.
 fn print_u64_decimal(mut n: u64) {
     if n == 0 {
         putc(b'0');
@@ -765,6 +770,51 @@ fn print_u64_decimal(mut n: u64) {
         count -= 1;
         putc(digits[count]);
     }
+}
+
+/// A `core::fmt::Write` target over [`putc`] - lets [`cmd_selftest`] use
+/// real `write!`/`format_args!` without pulling in `alloc`.
+struct Writer;
+
+impl core::fmt::Write for Writer {
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        print_str(s);
+        Ok(())
+    }
+}
+
+/// Exercises the exact two patterns that used to crash under the old,
+/// non-relocating flat-binary loader (see [`print_u64_decimal`]'s doc
+/// comment and [`resolve_path`]'s) - `write!`/`core::fmt::Write`, and a
+/// slice/string comparison against a literal - and confirms both now
+/// produce correct output. Kept as a real, permanent regression check
+/// rather than a throwaway test: this is the actual acceptance criterion
+/// for the whole relocating-loader milestone (CLAUDE.md) - these patterns
+/// need to be ordinary, safe Rust again, not something a program author
+/// has to keep avoiding by hand-discipline.
+fn cmd_selftest() {
+    let mut w = Writer;
+
+    // write!/core::fmt: n is computed at runtime (not a compile-time
+    // constant folded away), so this genuinely exercises the formatting
+    // machinery's argument dispatch, not just a literal string.
+    let n = 6 * 7;
+    let _ = write!(w, "write!/core::fmt: {n} (expect 42)\r\n");
+
+    // Slice-vs-literal comparison: `probe` is a real runtime value (not
+    // itself a literal), compared against a b"..." literal with `==` -
+    // the exact shape that crashed as `cwd_bytes != b"/"` in cmd_cd's old
+    // path-resolution code (see resolve_path's doc comment).
+    let probe: [u8; 1] = *b"/";
+    let slice_ok = probe.as_slice() == b"/";
+    let _ = write!(w, "slice-vs-literal comparison: {slice_ok} (expect true)\r\n");
+
+    // &str-vs-literal comparison: same shape as the old `component == ".."`
+    // crash - `word` is built at runtime, not itself a literal.
+    let word_bytes = *b"hi";
+    let word = core::str::from_utf8(&word_bytes).unwrap_or("");
+    let str_ok = word == "hi";
+    let _ = write!(w, "str-vs-literal comparison: {str_ok} (expect true)\r\n");
 }
 
 fn get_ticks() -> u64 {

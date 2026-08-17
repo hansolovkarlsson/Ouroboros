@@ -7,6 +7,56 @@ what broke, how it was diagnosed), see `CLAUDE.md`; for *how* something
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## A real relocating loader - and a pre-existing SVC-trampoline bug it surfaced along the way
+
+**The goal:** replace the flat, position-*dependent* userland-program
+loader with a real ELF64 loader that parses `PT_LOAD` segments and
+processes `R_AARCH64_RELATIVE` self-relocations against wherever a
+program actually loads - the documented fix (`roadmap.md`) for this
+project's single most-repeated bug class: `core::fmt`'s argument-
+dispatch table and slice/literal comparisons both crashing for the
+identical reason (an absolute data pointer baked in for a link-time
+base of `0x0` that never matches the real runtime load address).
+
+**Delivered:** `kernel/src/loader.rs` now hand-rolls a real ELF64
+parser (header, program headers, section headers, `Elf64_Rela`
+entries) and applies every `R_AARCH64_RELATIVE` relocation it finds in
+`.rela.dyn` against the real load address; `LoadedProgram` gained a
+real `entry` field, used by `tasks.rs` instead of assuming it equals
+`base`. `shell`'s toolchain switched to `relocation-model=pic` + `-pie`
++ `--no-dynamic-linker` (`.cargo/config.toml`), `shell/linker.ld` gained
+`.rela.dyn`/`.dynsym`/`.dynamic`/`.data.rel.ro` output sections, and the
+Makefile's `shell-bin` target now hardcodes `--release` for userland
+program builds - a real, confirmed toolchain constraint, not a style
+choice (a debug build fails to *link* at all, due to an
+`R_AARCH64_ABS64` relocation inside prebuilt `libcore`'s own object
+code). The shell gained a permanent `selftest` builtin proving both
+previously-crashing patterns - `write!`/`core::fmt` and a slice-vs-
+literal comparison - now work correctly.
+
+**A second, genuinely important finding along the way:** a real,
+pre-existing bug in `exceptions.rs`'s SVC trampoline, latent since the
+syscall boundary was first built and never triggered before this
+milestone's different register allocation happened to expose it - the
+EC check at the top of the SVC vector slot clobbers `x9` *before* the
+trampoline's own save sequence gets a chance to preserve it, silently
+discarding whatever value userland had live in `x9` at the moment of
+`svc`. Root-caused via a direct register-survival probe (raw inline
+`asm!`, not guessed) and fixed by saving `x9` to a scratch stack slot
+before the EC check runs.
+
+**Confirmed working end to end** via the same piped-stdin QEMU
+technique as every prior milestone, against both `make run`'s FAT16
+vvfat and the real FAT32 `esp.img`: `selftest`'s three checks all pass;
+`help`/`echo`/`uptime` (a genuinely multi-digit tick count, the exact
+previously-crashing shape) all produce correct output; the full disk-
+command surface round-trips correctly. Zero aborts in `-d int`
+cross-checks. **Confirmed on real Parallels hardware too**, via `make
+test-parallels`: `selftest`'s three checks all passed identically, and
+`uptime` printed a genuine 4-digit tick count with no crash - direct
+real-hardware confirmation of the `x9` fix specifically. Full writeup
+in `CLAUDE.md`'s "A real relocating loader" section.
+
 ## xHCI busy-waits switched from iteration-bounded to time-bounded - a real bug the user found, not this project's own testing
 
 **The goal:** none going in - this was a live bug report. Booting the

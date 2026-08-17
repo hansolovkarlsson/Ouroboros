@@ -2209,7 +2209,13 @@ so it's not fully lifted yet either.** `pci::log_all_devices` is a real, reusabl
 diagnostic worth remembering for any future "why can't this platform's
 hardware be found" question; a real relocating loader (ELF + relocation
 processing), which would lift both the `core::fmt` and
-literal-comparison restrictions; blocking/waiting primitives so tasks
+literal-comparison restrictions. **Update: done - see "A real relocating
+loader" further below, confirmed on QEMU (both `core::fmt` and a
+slice/literal comparison now work correctly via the new `selftest`
+command), with real Parallels hardware confirmation still outstanding -
+and it surfaced a second, genuinely unrelated, real pre-existing kernel
+bug along the way (the SVC trampoline losing `x9` across every syscall),
+also fixed there.** Blocking/waiting primitives so tasks
 can do more than an unconditional round-robin `wfe` loop; or output
 redirection (`>`/`>>`), now that `write_file`/`cp` give it something
 real to build on but shell-side command-line parsing still doesn't
@@ -2669,6 +2675,209 @@ real, live-rendered VM window, could trigger - never a script driving
 the same VM headlessly - is itself a real, useful data point about
 where the bug lives, not just bad luck.
 
+## A real relocating loader - and a genuinely pre-existing kernel bug it surfaced, not a bug it introduced
+
+Every userland program used to be a flat, position-*dependent* binary:
+linked at a fixed base of `0x0`, `relocation-model=static`, copied
+byte-for-byte to wherever `boot::allocate_pages` happened to place it,
+with no relocation step to fix the mismatch between "compiled assuming
+base `0x0`" and "actually running somewhere else." That mismatch was
+this project's single most-repeated bug class - the `core::fmt`
+argument-dispatch-table crash and, separately, the slice/string-vs-
+literal comparison crash in `cd`'s old path logic, both root-caused to
+the identical mechanism (an absolute *data* pointer baked in for the
+wrong base address) and both previously avoided only by hand-discipline
+("don't use `write!`", "don't compare a slice to a literal"),
+documented in `docs/processes.md` rather than actually fixed.
+`docs/roadmap.md` had long flagged "a real relocating loader" as the
+actual fix. This is that.
+
+**`loader.rs` now parses real ELF64**, hand-rolled (matching this
+project's established discipline - `acpi.rs`/`madt.rs`/`fat32.rs` all
+hand-roll their formats rather than pull in a crate, and this module
+runs entirely before `exit_boot_services`, so `alloc` is fully available
+here unlike `fat32.rs`): header, program headers, section headers
+(kept - `objcopy --strip-all` removes the symbol table and debug info,
+confirmed by direct comparison not to touch section headers, program
+headers, or `.rela.dyn`'s contents), and `Elf64_Rela` entries, all
+small fixed-offset structs read via `read_unaligned` at checked
+offsets, the same discipline `acpi.rs` already established for external
+file data. `load_elf_into_el0_region` walks `PT_LOAD` segments (copying
+`p_filesz` bytes, zeroing the `p_memsz - p_filesz` remainder - a real
+`.bss` region, if a program ever has one, falls out of this for free,
+not a separate feature), computes the region size from `max(p_vaddr +
+p_memsz)` across them rather than the old flat loader's raw file
+length, then finds `.rela.dyn` by name (via the section header string
+table) and applies every `R_AARCH64_RELATIVE` entry - `value = base +
+addend` written at `base + offset` - against wherever the allocator
+actually placed the program. Any other relocation type is a hard
+`UnsupportedRelocation` error, not silently skipped: this project has
+no shared libraries and no imported symbols, so nothing else should
+ever legitimately appear. `LoadedProgram` gained a real `entry` field
+(`base + e_entry`, distinct from `base` even though the two happen to
+stay equal today thanks to `linker.ld`'s `KEEP(*(.text.start))`
+discipline) - `tasks.rs`'s `elr_el1` now uses it instead of assuming
+equality itself.
+
+**The toolchain side, confirmed by direct experiment before writing any
+loader code, not assumed from documentation.** `.cargo/config.toml`'s
+`[target.aarch64-unknown-none]` switched from `relocation-model=static`
+to `relocation-model=pic` plus `-pie`, `--no-dynamic-linker` (no
+dynamic linker of any kind exists here), and `-z max-page-size=4096`
+(LLD defaults `PT_LOAD` alignment to 64KB, needlessly inflating a
+few-KB program; 4KB matches `mmu.rs`'s own EL0 page granularity) - each
+flag's necessity verified with a throwaway scratch crate and
+`llvm-readobj -r`/`-l`/`-h`, not guessed. A real, non-obvious
+distinction found along the way: `relocation-model=pic` *alone*
+(without `-pie`) makes LLD silently resolve GOT entries to final,
+link-time (base-`0x0`) addresses in an ordinary *static* executable -
+reproducing the exact bug this whole effort is for, just one level
+down; `-pie` is what actually produces a genuine `ET_DYN` binary with a
+runtime-processable `.rela.dyn`. `shell/linker.ld` gained `.rela.dyn`,
+`.dynsym`/`.dynamic` (structurally required by LLD for a well-formed
+`ET_DYN`, never read by the loader), and - found necessary by direct
+experiment, not anticipated in the original plan - `.data.rel.ro`
+(routes compiler-generated relocated-but-logically-constant data, e.g.
+panic-location tracking for implicit bounds checks, out of the path
+that would otherwise sweep it into `.data` via the wildcard and
+spuriously trip the still-unchanged "no static mutable state" `ASSERT`
+- confirmed by inspecting `.data`'s address against `.rela.dyn`'s
+offsets before adding the fix). The `.bss`/`.data` `ASSERT`s themselves
+were deliberately left in place - lifting them would be a real,
+separate capability expansion (userland static mutable state), not a
+side effect of fixing relocation, and out of scope for this pass.
+
+**A real, hard toolchain constraint, found and confirmed empirically:
+userland programs must be built in `--release`, not debug.** A debug
+build of the real `shell` crate fails to *link* at all under the new
+model - `rust-lld: error: relocation R_AARCH64_ABS64 cannot be used
+against symbol '<core::fmt::builders::PadAdapter as
+core::fmt::Write>::write_str'; recompile with -fPIC`, originating
+entirely from the prebuilt (not rebuilt-per-project - see
+`rust-toolchain.toml`) `libcore.rlib`'s own object code, pulled in by
+ordinary debug-build panic/bounds-check formatting machinery regardless
+of whether `shell`'s own code calls `write!`/`format!` at all -
+confirmed via `llvm-nm` that none of `shell`'s own compilation units
+reference `PadAdapter` directly. A release build's optimizer eliminates
+enough of that unreachable-in-practice code that the poisoned object
+never gets pulled into the link - confirmed by testing a release build
+of the exact same crate, which linked with zero errors. Not something
+worth reintroducing `-Z build-std` (nightly-only) to work around -
+`rust-toolchain.toml`'s own comment already states none is needed, and
+this project has stayed on stable throughout. `Makefile`'s `shell-bin`
+target now hardcodes `--release` for `cargo build -p shell`, regardless
+of the overall `$(PROFILE)` used for the kernel, and stages a stripped
+*ELF* (`objcopy --strip-all`, no more `-O binary`) instead of the old
+raw flat binary.
+
+**The real acceptance test isn't "it boots" - it's that `write!` and a
+slice-vs-literal comparison, the exact two previously-crashing
+patterns, now work.** `shell/src/main.rs` gained a permanent `selftest`
+builtin (not a throwaway test, listed in `help`'s own output) that
+exercises both directly: a `core::fmt::Write` impl over `putc`,
+`write!`-formatting a runtime-computed (not constant-folded) value, and
+a slice/`&str` comparison against a `b"..."`/`"..."` literal using
+values built at runtime rather than borrowed from a literal themselves
+- the exact shape that crashed as `cwd_bytes != b"/"` in the old
+`resolve_path`. `print_u64_decimal` itself is left as hand-rolled
+decimal formatting anyway (it already worked and doesn't need
+`core::fmt` for something this simple) - its own doc comment now
+explains this is a historical note, not a live restriction.
+
+**A second, genuinely important thing this work found: a real,
+pre-existing bug in `exceptions.rs`'s SVC trampoline, latent since the
+syscall boundary was first built, never triggered until this milestone's
+different codegen happened to expose it.** First real-hardware... no,
+first real-QEMU symptom: `print_u64_decimal`, unmodified, crashed
+printing any *multi-digit* value through the new loader - single-digit
+values (and anything the compiler could constant-fold and inline)
+worked fine, but a genuine multi-iteration call - the digit-print loop,
+computing a base pointer once before the loop and reusing it across
+several `putc` syscalls - reliably faulted on the *second* iteration,
+`ELR_EL1` landing back inside that same loop, `FAR_EL1` a small,
+near-null address. Root-caused, not guessed: a `qemu_device_region_safe`-
+style test (forcing GIC/timer off entirely) ruled out a nested-IRQ-
+during-SVC theory outright - the crash persisted with the timer
+completely disabled. A direct, isolated register-survival probe (raw
+inline `asm!`: load a magic `u64` into `x9`, issue one `svc`, read `x9`
+back, compare) proved conclusively that **`x9` does not survive a
+syscall round-trip** - despite `exceptions.rs`'s SVC path (`3:`)
+appearing, on a first read, to save and restore it symmetrically
+around the `bl` into `dispatch()`. Disassembling the actual compiled
+vector table (not just the source) found the real bug: **the EC check
+at the very top of vector slot 8 - `mrs x9, esr_el1` - runs *before*
+the "3:" trampoline's own save sequence ever gets a chance to preserve
+`x9`, so whatever value userland had live in `x9` at the moment of
+`svc` is already gone by the time "3:" saves (and later "correctly"
+restores) it - saving and restoring *a* value, just the wrong one (the
+shifted `ESR_EL1`/EC field, which happens to equal `0x15` for an SVC -
+matching the small, near-`0x15`-ish `FAR_EL1` values observed exactly,
+since that clobbered value then got used as part of a pointer
+computation).** This was never about the relocating loader being wrong
+- every relocation and segment copy this milestone produces was
+independently confirmed correct (a temporary debug dump of every
+applied relocation matched `llvm-readobj -r`'s report exactly) before
+this detour even started. It's a real, general bug that could affect
+*any* userland code keeping a value live in `x9` across a syscall -
+simply never exercised before, since no prior build's register
+allocation happened to do that. **Fixed** by saving `x9` to a scratch
+stack slot immediately, before the EC check clobbers it, and having
+"3:" recover the real value from that slot before its own save sequence
+runs (the non-SVC/fault path restores and discards it just as fast,
+for symmetry, though correctness doesn't depend on that half - "1:"
+never returns to userland regardless). Confirmed fixed via the same
+register-survival probe (`x9 SURVIVED`, not `x9 CHANGED`) and then via
+the full `selftest`/regression pass below.
+
+**Confirmed working end to end, both fixes together, via the same
+piped-stdin QEMU technique as every prior interactive milestone - twice,
+once against `make run`'s FAT16 vvfat and once against the real FAT32
+`esp.img`:** `selftest` prints `write!/core::fmt: 42 (expect 42)`,
+`slice-vs-literal comparison: true (expect true)`, and `str-vs-literal
+comparison: true (expect true)` correctly; `help`, `echo`, and `uptime`
+(a genuinely multi-digit tick count, `126`, the exact previously-crashing
+shape) all produce correct output with no crash; the full disk-command
+surface (`ls`/`cat`/`mkdir`/`cd`/`pwd`/`touch`/`write`/`cat`/`cp`/`mv`/
+`ls`/`rm`×2/`cd ..`/`rmdir`/`ls`) round-tripped correctly against the
+real FAT32 image, ending back at a clean state; an unknown command
+(`bogus`) correctly reports `unknown command: bogus`, not garbage (the
+old symptom, before the `x9` fix, of the same underlying bug corrupting
+a string-print loop's own loop-carried pointer instead of a digit
+loop's). Zero aborts (`Data Abort`/`Prefetch Abort`/`Undefined
+Instruction`) in `-d int` cross-checks across both sessions.
+
+**Confirmed on real Parallels hardware too, via `make test-parallels`
+(`CMDS="selftest;help;echo hi;uptime"`), not just QEMU.** `selftest`
+produced the identical three correct lines
+(`write!/core::fmt: 42 (expect 42)`, `slice-vs-literal comparison: true
+(expect true)`, `str-vs-literal comparison: true (expect true)`) on
+real hardware - the actual acceptance test for the whole milestone,
+passing on the platform that matters most to this project.
+`uptime` reported `1226 ticks since boot` - a genuine 4-digit value,
+correctly printed via the exact multi-iteration `print_u64_decimal`
+loop that used to crash from the `x9` bug, real, direct confirmation
+that fix holds on real hardware too, not just under QEMU/TCG. `echo hi`
+round-tripped correctly. One unrelated, already-documented artifact
+showed up in the same test: `help` arrived at the shell as `hep` (a
+dropped keystroke via `prlctl send-key-event`'s synthetic keyboard
+timing - the same class of issue the MADT/GICv3 milestone's
+"dropped-keystroke bug" section already covers, not a regression from
+this work) - but the resulting `unknown command: hep` printed as clean
+text, not corrupted garbage, which is itself further confirmation that
+multi-character string printing (`print_str`'s own multi-`svc` loop)
+is unaffected by the `x9` fix, as expected. Zero visible corruption or
+crashes across the whole sequence.
+
+**Still coarse, worth knowing before building on this:** no dynamic
+linking, no `exec()`/multi-program support (still one program, loaded
+once, at boot); no W^X segment permission separation (still one
+combined RWX EL0 region - segment-level R-X/RW split was explicitly out
+of scope for this pass); no static mutable state for userland programs
+(the `.bss`/`.data` `ASSERT`s stay in place, deliberately); every
+userland program must now be built in release mode, a real, permanent
+constraint on anything written to replace `shell` (see
+`docs/processes.md`).
+
 ## Commands
 
 ```sh
@@ -2755,13 +2964,13 @@ kernel/
   src/framebuffer.rs GOP (EFI_GRAPHICS_OUTPUT_PROTOCOL) discovery: resolution/stride/pixel format + framebuffer physical base/size - the real lead for Parallels, see "GOP framebuffer console" above
   src/font.rs        embedded public-domain 8x8 bitmap font (dhepper/font8x8), printable ASCII 0x20-0x7E only
   src/fbconsole.rs   text console rendered directly into the GOP framebuffer: glyph drawing, cursor, ptr::copy-based scroll - write-only, no ANSI parsing, see "GOP framebuffer console" above
-  src/exceptions.rs  AArch64 exception vector table (VBAR_EL1) + fault reporting
+  src/exceptions.rs  AArch64 exception vector table (VBAR_EL1) + fault reporting; SVC path (slot 8/"3:") saves x9 to a scratch stack slot before the EC check clobbers it - see "A real relocating loader" above for the real bug this fixed
   src/mmu.rs         replaces firmware's translation tables with our own identity map (L0->L1->L2->L3 as needed), up to MAX_EL0_REGIONS independent EL0 regions, plus an optional framebuffer device-block fallback
   src/gic.rs         version-dispatching facade over gicv2.rs/gicv3.rs, selected by madt.rs's real discovery - see "MADT/GICv3" above
   src/gicv2.rs       GICv2 backend (distributor + memory-mapped CPU interface), addresses now passed in from madt::GicInfo instead of hardcoded
   src/gicv3.rs       GICv3 backend (redistributor wake/discovery, ICC_* system-register CPU interface) - confirmed working on QEMU and real Parallels hardware, see "MADT/GICv3" above
   src/timer.rs       ARM generic timer (non-secure EL1 physical timer, PPI 14 / GIC INTID 30), TICK_INTERVAL_MS
-  src/loader.rs      reads INIT.CFG + a program off the ESP during boot services, into a 2MB-aligned EL0-accessible region - see docs/processes.md
+  src/loader.rs      reads INIT.CFG + a program off the ESP during boot services, into a 2MB-aligned EL0-accessible region, real ELF64 parsing + R_AARCH64_RELATIVE relocation processing - see "A real relocating loader" above and docs/processes.md
   src/syscall.rs     svc syscall dispatch table (print/double/report/try_read_char/putc/get_ticks/fs_list_dir/fs_read_file/fs_mkdir/fs_rmdir/fs_touch/fs_rm/fs_write_file/fs_mv, gap at 5) - confirmed working end to end, see above
   src/tasks.rs       task 0 (loaded program) + task 1 (idle) + the round-robin scheduler (Context save/restore in the tick path) - confirmed alternating, see above
   src/virtio_mmio.rs virtio-mmio transport: 32-slot device discovery, modern (non-legacy) register layout, addresses confirmed via devicetree dump
@@ -2771,8 +2980,8 @@ kernel/
   src/xhci.rs        from-scratch xHCI (USB3 host controller) driver: command/event/interrupt rings, device slot enable/address, a real interrupt endpoint for HID reports - confirmed working end to end with a real keyboard on real Parallels hardware, see "USB HID keyboard driver" above and docs/xhci-keyboard-postmortem.md
 
 shell/               userland default shell - a separate crate, built for aarch64-unknown-none, loaded from disk (not compiled into the kernel)
-  linker.ld          flat-binary linker script: entry at offset 0, no .bss/.data (see docs/processes.md)
-  src/main.rs        line editor + command dispatch (help/echo/uptime/clear/ls/cat/cd/pwd/mkdir/rmdir/touch/rm/write/cp/mv), running as real EL0 userland code - see docs/processes.md
+  linker.ld          self-relocating (PIE) linker script: entry at offset 0, .rela.dyn/.dynsym/.dynamic/.data.rel.ro, no .bss/.data (see "A real relocating loader" above and docs/processes.md)
+  src/main.rs        line editor + command dispatch (help/echo/uptime/clear/ls/cat/cd/pwd/mkdir/rmdir/touch/rm/write/cp/mv/selftest), running as real EL0 userland code, built for real relocation (relocation-model=pic, --release only) - see docs/processes.md
 
 syscall-abi/         shared syscall ABI crate - syscall numbers + sentinel values (NO_CHAR/FS_ERROR/NO_FS), depended on directly by both kernel and shell, no more hand-duplicated numbers - see docs/processes.md
   src/lib.rs         #![no_std], no logic, just pub consts - safe under either target since every value is a scalar inlined at the use site, not a pointer needing relocation

@@ -3,8 +3,44 @@ target = "aarch64-unknown-uefi"
 
 # Used only by the `shell` crate, built explicitly with
 # `--target aarch64-unknown-none` (see the Makefile) - the workspace-wide
-# default above stays aarch64-unknown-uefi for `kernel`. Flat, position-
-# dependent binary: no PIC/GOT indirection, entry placed at offset 0 by
-# linker.ld (see that file's own doc comment for why).
+# default above stays aarch64-unknown-uefi for `kernel`.
+#
+# Position-independent, self-relocating executable (real relocations
+# processed by `loader.rs` at runtime), not the flat, position-dependent
+# binary this used to be - see `docs/processes.md`'s "Binary format"
+# section and CLAUDE.md's "relocating loader" milestone for why: a flat
+# binary linked at a fixed base of 0x0 but loaded somewhere else, with no
+# relocation step, was this project's single most-repeated bug class
+# (core::fmt's argument-dispatch table and slice/literal comparisons both
+# crashed for the identical reason - a data *pointer* baked in for the
+# wrong base address).
+#
+# Flag-by-flag, each confirmed necessary by direct experiment (build a
+# throwaway program, inspect the actual output with `llvm-readobj -r`),
+# not assumed from documentation alone:
+# - `relocation-model=pic` - makes the compiler emit GOT-relative
+#   addressing (and, for anything that genuinely needs an absolute
+#   pointer baked into data, an `R_AARCH64_RELATIVE` self-relocation)
+#   instead of raw base-0x0 addresses.
+# - `-pie` - without this, the linker still accepts `pic`-flavored object
+#   code but resolves it into a normal *static* executable (silently
+#   filling in the GOT with final base-0x0 addresses at link time - the
+#   exact same bug, just relocated one level down). This is what actually
+#   produces an `ET_DYN` binary with a real, runtime-processable
+#   `.rela.dyn`.
+# - `--no-dynamic-linker` - this project has no shared libraries and no
+#   dynamic linker of any kind; without this, the linker expects one
+#   (`PT_INTERP`) that will never exist.
+# - `-z max-page-size=4096` - LLD defaults `PT_LOAD` segment alignment to
+#   64KB, which would needlessly inflate a program that's normally only a
+#   few KB; 4KB matches this kernel's own EL0 mapping granularity
+#   (`mmu.rs`).
 [target.aarch64-unknown-none]
-rustflags = ["-C", "link-arg=-Tshell/linker.ld", "-C", "relocation-model=static"]
+rustflags = [
+    "-C", "link-arg=-Tshell/linker.ld",
+    "-C", "relocation-model=pic",
+    "-C", "link-arg=-pie",
+    "-C", "link-arg=--no-dynamic-linker",
+    "-C", "link-arg=-z",
+    "-C", "link-arg=max-page-size=4096",
+]

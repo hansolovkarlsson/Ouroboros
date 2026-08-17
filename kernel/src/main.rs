@@ -219,9 +219,10 @@ fn main() -> Status {
         Err(e) => panic!("Ouroboros kernel: failed to load shell program: {e}"),
     };
     log::info!(
-        "Ouroboros kernel: loaded shell program, region {:#x}-{:#x}",
+        "Ouroboros kernel: loaded shell program, region {:#x}-{:#x}, entry {:#x}",
         program.base,
-        program.base + program.size
+        program.base + program.size,
+        program.entry
     );
 
     // SAFETY: no boot-services protocol references (console, allocator, or

@@ -153,10 +153,27 @@ b   1f
 .balign 0x80
 // slot 8: Synchronous, lower EL AArch64 - EL0's svc lands here, but so
 // would an EL0 fault. Check EC before committing to the resumable path.
+// x9 is userland's, not ours, at this point - a real bug, found and
+// fixed during the relocating-loader milestone (CLAUDE.md): the old
+// version clobbered x9 with `mrs x9, esr_el1` before "3:"'s own save
+// sequence ever ran, permanently losing whatever value userland had
+// live in x9 at the moment of the `svc` - "3:" would faithfully
+// save/restore *a* x9, just the wrong one (the shifted ESR_EL1/EC value,
+// not userland's). Never actually observed before this milestone only
+// because no prior userland build happened to keep a value live in x9
+// across a syscall - PIC codegen's register allocation for a loop this
+// project already had (print_u64_decimal's digit-print loop) was the
+// first to do so, surfacing a bug that was always there. Fixed by
+// saving x9 to a scratch stack slot *before* the check, and having "3:"
+// recover it before its own save sequence runs.
+sub sp, sp, #16
+str x9, [sp]
 mrs x9, esr_el1
 lsr x9, x9, #26
 cmp x9, #0x15
 b.eq 3f
+ldr x9, [sp]
+add sp, sp, #16
 mov x3, #8
 b   1f
 .balign 0x80
@@ -238,6 +255,10 @@ add sp, sp, #272
 eret
 
 3:
+// Recover the real x9, saved to this scratch slot by the EC check above
+// before it clobbered the live register - see that check's own comment.
+ldr x9, [sp]
+add sp, sp, #16
 sub sp, sp, #272
 stp x0, x1, [sp, #0]
 stp x2, x3, [sp, #16]
