@@ -273,13 +273,24 @@ phase:
   needs a real passed-through USB storage device to even scope
   properly.
 - **USB mass storage over xHCI — the follow-up to the diagnostic
-  above, parked until it can be scoped against real hardware.** The
-  concrete first step needs no driver code at all: plug a USB stick
-  into the host, pass it through to the VM in Parallels' USB settings,
-  and boot (`make test-parallels CMDS="uptime"` is enough) — the xHCI
-  driver's existing port-scan log lines in the boot screenshot will
-  show whether the device enumerates and what its interface descriptors
-  look like, which is the whole scoping question. If it enumerates,
+  above, parked until it can be scoped against real hardware.**
+  **First enumeration check run (2026-08-17), with a real finding: a
+  USB 2.0 stick never appears on the xHCI controller at all.** A
+  SanDisk Cruzer Glide (high-speed/USB 2.0, per Parallels' own device
+  listing) was passed through via `prlsrvctl usb set` and confirmed
+  `Connected-To-Vm: YES` while the VM ran — yet a temporary in-kernel
+  diagnostic (dump every connected xHCI port at scan time, wait 6
+  wall-clock seconds, dump again; removed after the answer) showed
+  only the same two ports as always (virtual mouse, keyboard), before
+  *and* after the wait. Conclusion: Parallels routes USB 2.0
+  passthrough devices to the **EHCI (USB2) controller** — also on the
+  PCI bus, but a whole separate host-controller driver this kernel
+  doesn't have — not to xHCI. **Next concrete step: repeat the same
+  zero-code check with a USB 3.x stick**, which should land on the
+  xHCI root ports; only if that works does the driver plan below
+  apply as written (the alternative — an EHCI driver just to reach
+  USB 2.0 devices — is a second full HC bring-up, much worse value).
+  If a 3.x stick enumerates,
   the driver work is: recognize a Mass Storage interface
   (`bInterfaceClass=0x08`, subclass `0x06` SCSI-transparent, protocol
   `0x50` Bulk-Only Transport) during the port scan the same way the
