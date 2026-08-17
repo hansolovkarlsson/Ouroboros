@@ -2161,9 +2161,10 @@ renamed - `\EFI\OUROBORO\`, 8 characters, not `\EFI\OUROBOROS\` -
 specifically to stay reachable without needing it, but any *other* 9+
 character name still isn't), only looks at the first FAT32-typed MBR
 partition, and while a file can now hold real content, be copied, and be
-renamed/moved, every write is still a full replace (no append, no
-partial/offset writes), there's still no output redirection (needs
-shell-level parsing this project doesn't have yet), no recursive `cp`,
+renamed/moved, every write is still a full replace at the syscall/FAT32
+layer (no append/offset-write primitive - the shell's `>>` composes
+read-then-full-rewrite on top, bounded by the kernel's 512-byte
+per-syscall cap; see "Output redirection" below), no recursive `cp`,
 no directory-extension (a full parent directory makes `mkdir` fail
 rather than growing it), `rm`'s multi-cluster cluster-chain-freeing path
 (phase 5) remains untested by an actual multi-cluster file (nothing yet
@@ -2219,7 +2220,8 @@ also fixed there.** Blocking/waiting primitives so tasks
 can do more than an unconditional round-robin `wfe` loop; or output
 redirection (`>`/`>>`), now that `write_file`/`cp` give it something
 real to build on but shell-side command-line parsing still doesn't
-exist. Parallels' *byte-stream* console output stays a confirmed dead
+exist. **Update: both done - see "Blocking primitives" and "Output
+redirection" further below.** Parallels' *byte-stream* console output stays a confirmed dead
 end for virtio-console unless real documentation for its proprietary
 serial device (vendor `0x1ab8`)
 someday surfaces - not something to keep chasing without that.
@@ -3234,6 +3236,123 @@ no way to become the owner short of a future `fg`/job-control mechanism.
 Good enough for "a background task doesn't corrupt the foreground
 shell's input," not a real multi-program input model.
 
+## Output redirection (`>`/`>>`): pure shell-side, and a real bug found where the syscall ABI's buffer cap meets append
+
+The last open item from the original write-support arc
+(`docs/roadmap.md`'s parking lot): `cmd > file` (create/overwrite) and
+`cmd >> file` (append) now work for every builtin. Like `cp`, this is
+**zero kernel changes** - it composes the two syscalls that already
+exist (`fs_read_file`/`fs_write_file`), no `syscall-abi` change, no
+SVC-path/scheduler/page-table risk. Everything lives in
+`shell/src/main.rs`; `docs/shell-commands.md` has the user-facing
+reference (its new "Output redirection" section).
+
+**Design, in three pieces.** (1) `run_line` scans the line's whitespace
+tokens for the first standalone `>` or `>>` before dispatch
+(`parse_redirect` - the operator must be its own token, `echo hi>f` is
+one word, same no-quoting tokenization rule as everywhere else) and
+splits the line there, so `write`/`cp`/`mv` (which re-parse the raw
+line) never see the operator. (2) Command *output* goes through an
+explicit `Output` sink (`Console` or `Capture`) passed down to the
+handlers by `&mut`, exactly like `cwd` already is - a module-level
+"current sink" static is impossible in this program, which is
+deliberately built with no static mutable state at all (`linker.ld`
+asserts `.data`/`.bss` empty). Command *error* messages deliberately
+bypass the sink and keep printing to the console - the POSIX
+stdout/stderr split, without needing a second sink to represent stderr.
+Like `sh`, the target is created/truncated even if the command printed
+nothing (or errored): `> f.txt` with no command at all legitimately
+creates an empty file, which is also real reuse of
+`valid_user_range_allow_empty` - the empty-write case phase 6 already
+had to make valid. (3) After dispatch returns, `finish_redirect` writes
+the capture: full replace for `>`; for `>>`, read-concatenate-rewrite
+(the kernel has no append primitive - a known FAT32-layer gap this
+deliberately does *not* close, composing full-replace writes instead,
+same narrowest-useful-case discipline as everything else). Both
+overflow cases refuse outright and write *nothing* - `cp`'s "a partial
+copy is a wrong copy" reasoning, not `cat`'s truncate-and-note. One
+`cat`-specific call: its tidy-terminal trailing newline and its
+truncation notice are display niceties that stay console-only, so
+`cat a > b` copies `a`'s bytes exactly rather than appending bytes `a`
+never contained.
+
+**A real bug found immediately by testing, not review: the syscall
+ABI's per-buffer cap (`MAX_USER_LEN`, 512 bytes, `syscall.rs`) made
+append silently behave as overwrite.** The first cut used a 1024-byte
+combined buffer for `>>`'s read-back - and `valid_user_range` rejects
+any `(pointer, length)` pair longer than 512, returning the rejection
+as the same `FS_ERROR` sentinel a genuinely missing file produces. The
+append path treats "no such file" as "append to empty" (that's how
+`>> new.txt` creates files), so the existing content was silently
+discarded and every `>>` acted like `>` - caught because the very first
+QEMU append test showed `cat f.txt` returning only the appended line.
+Fixed by sizing the combined buffer *at* the kernel's cap
+(`APPEND_BUFFER_SIZE = 512`, with a doc comment naming the constraint);
+a bigger buffer could never have been written back anyway, since
+`fs_write_file`'s data argument is bounded by the same 512-byte check.
+The capture buffer (`CAPTURE_SIZE`) is 512 for the same reason -
+anything capturable is guaranteed writable.
+
+**A second, smaller toolchain instance of a known constraint, worth
+recording:** the first build failed to *link* - `R_AARCH64_ABS64
+cannot be used against local symbol` out of the prebuilt `libcore` -
+because `parse_redirect`'s `&line[..offset]` str-slicing pulls in
+`core::str::slice_error_fail`'s panic path, which formats the offending
+string with enough of `core::fmt` to drag non-PIC libcore objects into
+the link. Same root class as the documented "userland must build in
+release" constraint from the relocating-loader milestone, hit here
+*even in* release. Fixed with non-panicking `.get()` slicing (the
+offsets are guaranteed char boundaries anyway - the token is a
+whitespace-split subslice of the line), which pulls none of that in.
+
+**Confirmed working end to end via the same piped-stdin QEMU technique
+as every prior interactive milestone, against the real FAT32
+`esp.img`:** create (`echo hello > f.txt` → `cat` shows it), overwrite
+(only the new content remains), append (`hello`/`more`/`third line
+here` accumulating correctly across two `>>` calls), create-by-append
+(`>> new.txt`) and create-empty (`> empty.txt`, `ls` confirms both),
+`uptime > u.txt` and `ls > l.txt` (correct real contents), `cat f.txt >
+g.txt` (byte-exact copy), and every error case: missing target (`echo
+hi >`), extra token (`echo hi > a b`), missing parent (`ls > /nope/f`)
+- all clean, specific messages. **Both overflow refusals confirmed
+real, one organically:** six 100-character `echo ... >> big.txt`
+appends in a row - the first five legitimately fit (510 bytes ≤ 512),
+the sixth correctly refused with the file's content intact; the capture
+overflow (unreachable organically - no builtin can emit > 512 bytes)
+was verified with the established temporarily-force-then-revert
+technique (`CAPTURE_SIZE = 16`: `help > h.txt` refused, `h.txt`
+confirmed never created via `ls`, a small `echo short > s.txt` still
+worked, force reverted). **Persistence confirmed by an actual reboot**
+(`echo persisted content > keep.txt`, fresh QEMU boot, `cat` shows it).
+`make run`'s FAT16 (no mount) degrades to the shared "no filesystem
+mounted" message for both `>` and `>>`, with unredirected commands
+unaffected. Zero aborts (`Data Abort`/`Prefetch Abort`/`Undefined
+Instruction`) in `-d int` cross-checks across every session above.
+
+**Confirmed on real Parallels hardware too, via `make test-parallels` -
+which needed a real extension to type `>` at all:** the script's
+scancode table had no shifted characters, so `scripts/test-parallels.sh`
+gained a held-Shift chord (`--event press`/`--event release` around the
+base key's scancode - `prlctl`'s flagless form sends a full
+press+release for one key and can't express a chord). That round trip
+confirmed the whole input path for a chorded character end to end
+(synthetic keyboard → HID modifier byte → `xhci.rs`'s
+`keycode_to_ascii` shift mapping → the shell's parser), and redirection
+itself correctly hit the shared `NO_FS` message on real hardware
+(Parallels still has no disk driver of any kind - the pre-existing,
+unrelated gap every `fs_*` command already has there), with `uptime`
+advancing normally afterward. One dropped keystroke in the transcript
+(`f.xt` for `f.txt`) is the already-documented `send-key-event` timing
+artifact, not a regression.
+
+**Still coarse, worth knowing before building on this:** `>>` is
+bounded append (existing + new ≤ 512 bytes), not real append - a
+genuine append/offset-write syscall stays a known gap; capture is 512
+bytes, refuse-not-truncate; no `2>` (errors always go to the console,
+by design, but there's no way to redirect them); no pipes (`|` needs
+inter-task IPC, tracked separately in the roadmap), no input
+redirection (`<`), no quoting, no glued operators (`cmd>f`).
+
 ## Commands
 
 ```sh
@@ -3349,7 +3468,7 @@ kernel/
 
 shell/               userland default shell - a separate crate, built for aarch64-unknown-none, loaded from disk (not compiled into the kernel)
   linker.ld          self-relocating (PIE) linker script: entry at offset 0, .rela.dyn/.dynsym/.dynamic/.data.rel.ro, no .bss/.data (see "A real relocating loader" above and docs/processes.md)
-  src/main.rs        line editor + command dispatch (help/echo/uptime/clear/ls/cat/cd/pwd/mkdir/rmdir/touch/rm/write/cp/mv/selftest), running as real EL0 userland code, built for real relocation (relocation-model=pic, --release only) - main loop blocks on read_char (syscall 15) instead of busy-polling, see "Blocking primitives" above; see docs/processes.md
+  src/main.rs        line editor + command dispatch (help/echo/uptime/clear/ls/cat/cd/pwd/mkdir/rmdir/touch/rm/write/cp/mv/exec/selftest, plus `> file`/`>> file` output redirection on any of them - see "Output redirection" above), running as real EL0 userland code, built for real relocation (relocation-model=pic, --release only) - main loop blocks on read_char (syscall 15) instead of busy-polling, see "Blocking primitives" above; see docs/processes.md
 
 syscall-abi/         shared syscall ABI crate - syscall numbers + sentinel values (NO_CHAR/FS_ERROR/NO_FS), depended on directly by both kernel and shell, no more hand-duplicated numbers - see docs/processes.md
   src/lib.rs         #![no_std], no logic, just pub consts - safe under either target since every value is a scalar inlined at the use site, not a pointer needing relocation

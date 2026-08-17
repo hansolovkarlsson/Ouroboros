@@ -46,8 +46,9 @@ echo "==> screenshots and log will land in $OUT_DIR/"
 # Standard PC AT Set-1 make-code scancodes, decimal (prlctl rejects the
 # 0x.. form - confirmed the hard way). Covers what this project's shell
 # commands actually need: lowercase letters, digits, space, '/', '.',
-# '-', backspace, and enter. Anything outside this set is skipped with a
-# warning rather than failing the whole run.
+# '-', backspace, and enter, plus '>' as a real held-Shift chord (see
+# shifted_base/send_char below). Anything outside this set is skipped
+# with a warning rather than failing the whole run.
 scancode() {
 	case "$1" in
 	a) echo 30 ;; b) echo 48 ;; c) echo 46 ;; d) echo 32 ;; e) echo 18 ;;
@@ -66,16 +67,35 @@ scancode() {
 	esac
 }
 
+# Characters that need a held Shift: maps each to its *base* key's
+# scancode; send_char wraps it in explicit Shift press/release events
+# (prlctl's --event flag - the default, flagless form sends a full
+# press+release for the one key, which can't express a chord).
+shifted_base() {
+	case "$1" in
+	'>') echo 52 ;; # Shift + '.'
+	*) echo "" ;;
+	esac
+}
+
 # Sends one character's press+release, or backspace (BKSP)/enter (ENTER)
 # as pseudo-tokens, one scancode per call - prlctl has no "type a string"
 # primitive of its own.
 send_char() {
 	code=$(scancode "$1")
-	if [ -z "$code" ]; then
+	if [ -n "$code" ]; then
+		prlctl send-key-event "$VM_NAME" --scancode "$code" >/dev/null
+		sleep "$KEY_DELAY"
+		return
+	fi
+	base=$(shifted_base "$1")
+	if [ -z "$base" ]; then
 		echo "    (skipping unsupported character: '$1')" >&2
 		return
 	fi
-	prlctl send-key-event "$VM_NAME" --scancode "$code" >/dev/null
+	prlctl send-key-event "$VM_NAME" --scancode 42 --event press >/dev/null # left Shift down
+	prlctl send-key-event "$VM_NAME" --scancode "$base" >/dev/null
+	prlctl send-key-event "$VM_NAME" --scancode 42 --event release >/dev/null
 	sleep "$KEY_DELAY"
 }
 

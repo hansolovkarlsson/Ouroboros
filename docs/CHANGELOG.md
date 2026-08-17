@@ -7,6 +7,85 @@ what broke, how it was diagnosed), see `CLAUDE.md`; for *how* something
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## Output redirection (`>`/`>>`) - pure shell-side, zero kernel changes
+
+`cmd > file` (create/overwrite) and `cmd >> file` (append) work for
+every builtin, composed entirely from the existing `fs_read_file`/
+`fs_write_file` syscalls the same way `cp` was - no new syscall, no
+kernel changes. `run_line` (`shell/src/main.rs`) peels a trailing
+redirect off the line before dispatch; command output flows through an
+explicit `Output` sink passed down to handlers (error messages
+deliberately stay on the console - the POSIX stdout/stderr split);
+`>>` is shell-side read-concatenate-rewrite, bounded by the kernel's
+512-byte per-syscall buffer cap. That cap found a real bug in testing:
+a 1024-byte append buffer failed `valid_user_range` in a way
+indistinguishable from "no such file", silently turning append into
+overwrite - fixed by sizing the buffer at the cap. Confirmed on QEMU
+(overwrite/append/create-empty, reboot persistence, both overflow
+refusals - one organically, via six consecutive appends - and every
+error case, zero aborts) and on real Parallels hardware (the `NO_FS`
+path; typing `>` there needed a real `test-parallels.sh` extension - a
+held-Shift scancode chord via `prlctl`'s `--event press/release`).
+See `CLAUDE.md`'s "Output redirection" section and
+`shell-commands.md`'s user-facing reference.
+
+## Keyboard input routing: one designated owner task, not first-blocked-wins
+
+Found live by the user immediately after `exec` shipped: with two
+concurrent shells, keystrokes split unpredictably between them
+(`uptime` arriving as `ptime` + a stray `u`), because `on_tick`'s
+wake-check polled every `Blocked(Keyboard)` task in index order and
+the underlying poll destructively consumes a byte for whoever asks
+first. Fixed with `INPUT_OWNER_TASK` (hardcoded to task 0, the
+boot-loaded shell - always valid since no task destruction exists):
+the wake-check now skips keyboard polling for every other task, which
+simply stays blocked, a genuine background task rather than a second
+terminal racing the first. Confirmed by re-running the exact live QEMU
+scenario that exposed it, plus a real-Parallels regression pass (this
+wake-check is the only keyboard path there). See `CLAUDE.md`'s
+"Keyboard input routing" section.
+
+## Dynamic task creation and `exec` - a real `spawn` syscall
+
+A new `spawn` syscall (16) loads a program from disk at runtime and
+starts it as an independent task alongside the caller (deliberately
+spawn semantics, not POSIX exec-replaces-current-process, though the
+shell command is named `exec`). Needed: a runtime physical-page bump
+allocator (nothing could hand out RAM after boot services exited), a
+re-callable `mmu::install_identity_map` (stashed memory map +
+extra-device list, `rebuild_with_el0_regions`), the scheduler grown
+from 2 fixed slots to 4 (`TaskState::Unused`), and `loader.rs`'s ELF
+core split (`elf_region_size`/`populate_region`) so the same parsing
+serves boot-time and runtime loads. A real bug found by testing:
+`Vec`-based program-header parsing *hangs silently* when first reached
+from the runtime path - the global allocator is boot-services-backed
+and invalid after exit, and misuse doesn't fault, it just hangs -
+fixed with a fixed-capacity array. Confirmed on QEMU end to end (a
+second shell instance genuinely running concurrently); on real
+Parallels hardware only the error path is reachable (no disk driver
+exists there at all - pre-existing gap), confirmed clean. See
+`CLAUDE.md`'s "Dynamic task creation and exec()" section and
+`architecture.md`'s process-model section.
+
+## Blocking primitives - tasks can really wait, and a second SVC-frame bug
+
+`READ_CHAR` (15) is the first genuinely blocking syscall: instead of
+the shell busy-polling `try_read_char` every scheduler slice, the task
+is suspended (`TaskState::Blocked(WaitReason::Keyboard)`) and
+`on_tick`'s wake-check resumes it with the byte already in `x0` once
+one arrives. Deliberately never executes `wfe` anywhere (real
+Parallels hardware has a confirmed unresolved hang for EL0 `wfe`).
+Testing this immediately exposed a second real, pre-existing
+`exceptions.rs` bug (after the relocating-loader milestone's `x9`
+clobber): the SVC trampoline's saved frame didn't match `Context`'s
+real field layout and never saved `SP_EL0` at all - harmless while
+every syscall resumed its own caller, fatal the moment a blocking
+syscall loaded a *different* task's context through it. Fixed to match
+the IRQ trampoline's proven layout. Confirmed on QEMU (a real
+4-second block with zero wake events, then instant wake on input) and
+on real Parallels hardware. See `CLAUDE.md`'s "Blocking primitives"
+section.
+
 ## A real relocating loader - and a pre-existing SVC-trampoline bug it surfaced along the way
 
 **The goal:** replace the flat, position-*dependent* userland-program

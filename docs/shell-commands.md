@@ -25,9 +25,10 @@ implement a completely different command set.
   take exactly two paths; every other command just one); any further
   words are ignored (`mkdir a b c` creates `a` and says nothing about
   `b`/`c`).
-- **No pipes, redirection, globbing, `;`/`&&` chaining, environment
-  variables, command history, or tab completion.** One command per line,
-  typed in full, every time.
+- **Output redirection (`> file` / `>> file`) works** — see the
+  dedicated section below. **No pipes, input redirection (`<`),
+  globbing, `;`/`&&` chaining, environment variables, command history,
+  or tab completion.** One command per line, typed in full, every time.
 - **Path resolution** (`ls`, `cat`, `cd`, `mkdir`, `rmdir`, `touch`,
   `rm`): a leading `/` is an absolute path; anything else is resolved
   against the current working directory. `.` and `..` are collapsed
@@ -76,13 +77,57 @@ implement a completely different command set.
 Any other input prints `unknown command: <word>`. A blank line (just
 Enter, or only whitespace) does nothing.
 
+## Output redirection
+
+Append `> file` (create or fully replace) or `>> file` (append) to any
+command to send its output to a file instead of the screen:
+
+```
+echo hello > greeting.txt
+uptime >> boot.log
+ls > listing.txt
+cat a.txt > b.txt
+```
+
+Semantics, deliberately close to `sh` where the architecture allows:
+
+- **Only a command's output is redirected; error messages always stay
+  on the screen** — the POSIX stdout/stderr split, without a separate
+  `2>` mechanism to reroute the error half.
+- **The target file is created (or, for `>`, truncated) even if the
+  command produced nothing** — `> f.txt` on its own, with no command at
+  all, legitimately creates an empty file, same as `sh`. `>> f.txt` to
+  a missing file creates it.
+- **The operator must be its own whitespace-separated word.**
+  `echo hi>f` is a single token, not a redirect — the same no-quoting
+  tokenization rule as everywhere else. Exactly one word (the target
+  path) may follow the operator.
+- `cat`'s two display niceties stay off the captured bytes: the
+  tidy-terminal trailing newline and the truncation notice both go to
+  the screen only, so `cat a > b` copies `a`'s bytes exactly (bounded
+  by the same 256-byte read buffer as `cp` — a larger file's copy is
+  truncated the same way `cat`'s display is, notice on screen).
+
+Limits, all refuse-outright rather than write-something-wrong:
+
+- A command's redirected output is captured in a 512-byte buffer; a
+  command that emits more than that prints `output too large to
+  capture` and **nothing is written at all** (no current builtin can
+  exceed it in normal use).
+- `>>` is shell-side read-concatenate-rewrite (the kernel has no append
+  primitive — every `fs_write_file` is a full replace), bounded by the
+  kernel's own 512-byte per-syscall buffer cap (`MAX_USER_LEN`,
+  `kernel/src/syscall.rs`): appending where existing content plus new
+  output would exceed 512 bytes prints `file too large to append to`
+  and leaves the file untouched.
+
 ## Known limitations
 
-- **`write`/`cp` always fully replace a file's contents — no append, no
-  partial/offset writes, and no output redirection (`>`/`>>`) yet.**
-  Redirection would need shell-level parsing this kernel doesn't have
-  (splitting `cmd > file` into a command and a target) — see
-  `docs/roadmap.md`'s parking lot. `write` content is also bounded by
+- **`write`/`cp` always fully replace a file's contents — no append or
+  partial/offset writes at the syscall/FAT32 layer.** `>>` provides
+  *bounded* append purely shell-side (see "Output redirection" above) —
+  a real append primitive would need a new syscall and FAT32-layer
+  support that don't exist yet. `write` content is also bounded by
   the 128-byte input line, so nothing typed at the shell can ever
   exceed one FAT32 cluster's worth of content; `cp` is bounded by its
   own 256-byte read buffer instead.

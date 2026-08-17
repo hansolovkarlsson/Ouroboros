@@ -392,11 +392,14 @@ Worth knowing before building further on this:
   a file rather than appending or writing at an offset.** No recursive
   `cp`, no move-into-an-existing-directory-keeping-basename shortcut for
   `mv`, no cycle detection (`mv` a directory into its own descendant
-  isn't guarded against), no output redirection yet — redirection needs
-  shell-level parsing this project doesn't have (splitting `cmd > file`
-  into a command and a target); `cp`/`mv` themselves needed no new
-  read/write primitives beyond what already existed (see `CLAUDE.md`'s
-  "Phase 7"/"Phase 8" sections). `mkdir` also can't grow a parent
+  isn't guarded against). Output redirection (`>`/`>>`) exists now,
+  but entirely shell-side (see `docs/shell-commands.md`'s "Output
+  redirection" section) — `>>` composes read-then-full-rewrite under
+  the kernel's 512-byte per-syscall buffer cap, since there's still no
+  real append/offset-write primitive at the syscall or FAT32 layer;
+  `cp`/`mv`/redirection all needed no new read/write primitives beyond
+  what already existed (see `CLAUDE.md`'s "Phase 7"/"Phase 8"/"Output
+  redirection" sections). `mkdir` also can't grow a parent
   directory that's out of free entry slots — it fails rather than
   allocating another cluster for the parent. Every `fs_*` syscall
   distinguishes "no filesystem mounted" (`NO_FS`) from everything else,

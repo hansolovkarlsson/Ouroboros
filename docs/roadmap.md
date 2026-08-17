@@ -169,11 +169,29 @@ phase:
   itself (idle task `wfe` -> busy-spin) - root-caused well enough to
   fix, not fully proven why real hardware's `wfe` didn't work as
   expected.
-- **Output redirection (`>`/`>>`)** — needs shell-level parsing this
+- ~~**Output redirection (`>`/`>>`)** — needs shell-level parsing this
   project doesn't have yet (splitting `cmd > file` into a command and a
   target). `cp` is done (see below); redirection is the one piece of
   the original "output redirection (`>`/`>>`), and anything else that
-  needs a file to hold more than zero bytes" item still open.
+  needs a file to hold more than zero bytes" item still open.~~
+  **Done** — `> file` (create/overwrite) and `>> file` (append) work
+  for every builtin, entirely shell-side over the existing
+  `fs_read_file`/`fs_write_file` syscalls (zero kernel changes, same
+  compose-what-exists approach as `cp`): `run_line` peels a trailing
+  redirect off the line before dispatch, command output goes through an
+  explicit `Output` sink passed down to the handlers (a capture buffer
+  when redirecting; error messages deliberately stay on the console -
+  the POSIX stdout/stderr split), and `>>` is read-concatenate-rewrite
+  bounded by the kernel's 512-byte per-syscall cap. That cap found a
+  real bug during testing: a 1024-byte append buffer failed the
+  kernel's `valid_user_range` check in a way indistinguishable from
+  "no such file", silently turning append into overwrite. Confirmed on
+  QEMU (overwrite/append/create-empty/persistence-across-reboot/both
+  overflow refusals/error cases, zero aborts) and on real Parallels
+  hardware (the `NO_FS` path - no disk driver exists there - plus a
+  `test-parallels.sh` extension typing `>` as a real held-Shift
+  scancode chord). See `CLAUDE.md`'s "Output redirection" section and
+  `docs/shell-commands.md`.
 - **Lifting `mkdir`'s no-directory-extension limitation** - a full
   parent directory currently makes `mkdir` fail rather than growing it.
 - ~~A real relocating loader (ELF + relocation processing) — would also

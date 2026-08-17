@@ -71,6 +71,15 @@ const CWD_SIZE: usize = 128;
 const PATH_SIZE: usize = 128;
 const LIST_BUFFER_SIZE: usize = 256;
 const CAT_BUFFER_SIZE: usize = 256;
+/// Redirected-output capture buffer ([`Output::Capture`]). Sized to hold
+/// the largest output any single builtin can produce today with real
+/// margin: `cat`'s is the biggest, bounded by [`CAT_BUFFER_SIZE`] (256)
+/// plus a trailing newline - everything else (`ls` at
+/// [`LIST_BUFFER_SIZE`], `help`'s one line, `echo` at [`BUFFER_SIZE`]) is
+/// smaller. Kept deliberately modest because it lives on `run_line`'s
+/// stack frame and this program's stack is a fixed, unguarded 8KB (see
+/// `docs/processes.md`).
+const CAPTURE_SIZE: usize = 512;
 
 const BACKSPACE: u8 = 0x08;
 const DEL: u8 = 0x7f;
@@ -168,45 +177,218 @@ fn on_byte(byte: u8, buf: &mut [u8; BUFFER_SIZE], len: &mut usize, cwd: &mut [u8
     }
 }
 
+/// Entry point for a submitted line: peels off a trailing `> file` /
+/// `>> file` redirect if one is present (see [`parse_redirect`]), sets up
+/// the matching [`Output`] sink, dispatches the rest of the line via
+/// [`dispatch_line`], then - for a redirect - writes the captured output
+/// to the target file ([`finish_redirect`]).
+fn run_line(line: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize) {
+    match parse_redirect(line) {
+        RedirectParse::NoRedirect => {
+            let mut out = Output::Console;
+            dispatch_line(line, cwd, cwd_len, &mut out);
+        }
+        RedirectParse::Malformed(msg) => print_line(msg),
+        RedirectParse::Redirect { cmd, target, append } => {
+            let mut capture = [0u8; CAPTURE_SIZE];
+            let mut out = Output::Capture { buf: &mut capture, len: 0, overflowed: false };
+            dispatch_line(cmd, cwd, cwd_len, &mut out);
+            let (len, overflowed) = match out {
+                Output::Capture { len, overflowed, .. } => (len, overflowed),
+                // Never constructed on this path; written out rather than
+                // `unreachable!()` so a logic error here degrades to a
+                // silently-skipped write, not a panic-handler hang.
+                Output::Console => return,
+            };
+            finish_redirect(&capture[..len], overflowed, target, append, cwd, *cwd_len);
+        }
+    }
+}
+
+/// What [`parse_redirect`] found on a submitted line.
+enum RedirectParse<'a> {
+    /// No `>`/`>>` token anywhere - dispatch the whole line as-is.
+    NoRedirect,
+    /// A well-formed trailing redirect: dispatch `cmd` with a capture
+    /// sink, then write the capture to `target` (append on `>>`).
+    Redirect { cmd: &'a str, target: &'a str, append: bool },
+    /// An operator was present but the rest of the line was wrong;
+    /// the message says how. Nothing is dispatched.
+    Malformed(&'static str),
+}
+
+/// Scans the line's whitespace tokens for the first standalone `>` or
+/// `>>` and splits the line there. The operator must be its own token -
+/// `echo hi>f` is one token, not a redirect, the same no-quoting/
+/// no-glued-forms limitation the tokenizer already has everywhere else
+/// (documented in `docs/shell-commands.md`, not treated as a bug).
+///
+/// The offset arithmetic relies on `split_whitespace` yielding subslices
+/// of `line` itself, so `token.as_ptr() - line.as_ptr()` is the token's
+/// byte offset - guaranteed by `str::split_whitespace`'s contract, not
+/// an implementation accident. Operator detection uses scalar
+/// length/byte checks ([`is_dot`]/[`is_dotdot`] style) rather than
+/// `token == ">"` - literal comparisons are safe now that the loader
+/// relocates (see [`cmd_selftest`]), this just keeps the file on one
+/// idiom.
+fn parse_redirect(line: &str) -> RedirectParse<'_> {
+    for token in line.split_whitespace() {
+        let bytes = token.as_bytes();
+        let is_overwrite = bytes.len() == 1 && bytes[0] == b'>';
+        let is_append = bytes.len() == 2 && bytes[0] == b'>' && bytes[1] == b'>';
+        if !is_overwrite && !is_append {
+            continue;
+        }
+
+        let offset = token.as_ptr() as usize - line.as_ptr() as usize;
+        // `.get()` rather than `&line[..offset]`: both offsets are
+        // guaranteed char boundaries (the token is a whitespace-split
+        // subslice of `line`), but indexing's can't-happen failure path
+        // (`str::slice_error_fail`) formats the offending string with
+        // enough of `core::fmt` to drag prebuilt non-PIC libcore
+        // objects into the link, which fails outright under this
+        // crate's PIE model (the same "release-only builds" constraint
+        // documented in CLAUDE.md's relocating-loader section, hit here
+        // even in release). The Option path pulls none of that in.
+        let Some(cmd) = line.get(..offset) else { return RedirectParse::NoRedirect };
+        let Some(rest) = line.get(offset + token.len()..) else { return RedirectParse::NoRedirect };
+        let mut rest_words = rest.split_whitespace();
+        let Some(target) = rest_words.next() else {
+            return RedirectParse::Malformed("redirect: missing target file");
+        };
+        if rest_words.next().is_some() {
+            return RedirectParse::Malformed("redirect: unexpected token after target file");
+        }
+        return RedirectParse::Redirect { cmd, target, append: is_append };
+    }
+    RedirectParse::NoRedirect
+}
+
+/// Holds an existing file's content plus the new capture during a `>>`
+/// append ([`finish_redirect`]): the kernel's `fs_write_file` is
+/// full-replace only (no append/offset writes at the FAT32 layer - a
+/// known, documented gap), so append is read-everything, concatenate,
+/// write-everything-back, all shell-side - the same
+/// compose-two-existing-syscalls approach `cp` established. Anything
+/// that doesn't fit is refused outright rather than partially written.
+///
+/// **Must not exceed 512** - the kernel bounds every userland
+/// `(pointer, length)` syscall argument at `MAX_USER_LEN` (512,
+/// `kernel/src/syscall.rs`), and an over-long buffer isn't a partial
+/// success but a validation *failure* indistinguishable from
+/// `FS_ERROR`. Found by testing, not review: a first cut used 1024
+/// here, and the read-back's rejection looked exactly like
+/// "no such file" - so `>>` silently behaved like `>`, discarding the
+/// existing content instead of appending to it.
+const APPEND_BUFFER_SIZE: usize = 512;
+
+/// Writes `captured` (a command's redirected output) to `target` -
+/// full replace for `>`, read-concatenate-rewrite for `>>`. The read
+/// completes in full before the write starts, same
+/// safe-by-construction ordering as `cp`. Like `sh`, the target is
+/// still created/truncated even if the command itself printed nothing
+/// (or only printed errors, which never enter the capture - see
+/// [`Output`]); `> f` with no command at all legitimately creates an
+/// empty file.
+fn finish_redirect(captured: &[u8], overflowed: bool, target: &str, append: bool, cwd: &[u8; CWD_SIZE], cwd_len: usize) {
+    if overflowed {
+        print_line("redirect: output too large to capture - nothing written");
+        return;
+    }
+    let mut path_buf = [0u8; PATH_SIZE];
+    let Some(path_len) = resolve_path(cwd_str(cwd, cwd_len), target, &mut path_buf) else {
+        print_line("redirect: path too long");
+        return;
+    };
+    let Ok(path) = core::str::from_utf8(&path_buf[..path_len]) else {
+        print_line("redirect: path too long");
+        return;
+    };
+
+    let mut combined = [0u8; APPEND_BUFFER_SIZE];
+    let data: &[u8] = if append {
+        let existing = match fs_read_file(path, &mut combined) {
+            NO_FS => {
+                print_no_fs();
+                return;
+            }
+            // No such file: `>>` creates it, standard sh semantics.
+            // (This arm also covers "target is a directory" - existing
+            // stays 0 and the write below fails with its normal error.)
+            FS_ERROR => 0,
+            // fs_read_file returns the file's *real* size, which may
+            // exceed the buffer (the read was truncated at buffer
+            // length) - so this one check refuses both "existing
+            // content alone doesn't fit" and "existing + capture
+            // doesn't fit". captured.len() <= CAPTURE_SIZE ==
+            // APPEND_BUFFER_SIZE, so the subtraction can't underflow
+            // (it can legitimately reach 0, refusing any append to a
+            // nonempty file when the capture alone fills the buffer).
+            size => {
+                if size as usize > combined.len() - captured.len() {
+                    print_line("redirect: file too large to append to - nothing written");
+                    return;
+                }
+                size as usize
+            }
+        };
+        combined[existing..existing + captured.len()].copy_from_slice(captured);
+        &combined[..existing + captured.len()]
+    } else {
+        captured
+    };
+
+    match fs_write_file(path, data) {
+        NO_FS => print_no_fs(),
+        FS_ERROR => print_line("redirect: write failed (bad name, parent missing, target is a directory, or disk full)"),
+        _ => {}
+    }
+}
+
 /// Tokenizes on whitespace (no quoting - `echo "a b"` sees two words, not
 /// one) and dispatches to a builtin by name. An empty line (just Enter,
-/// or a line of only spaces) does nothing, same as a real shell.
-fn run_line(line: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize) {
+/// or a line of only spaces) does nothing, same as a real shell. Command
+/// *output* goes to `out` (so a redirect can capture it); command *error*
+/// messages go straight to the console via [`print_line`] regardless -
+/// see [`Output`]'s doc comment for the stdout/stderr reasoning.
+fn dispatch_line(line: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize, out: &mut Output) {
     let mut words = line.split_whitespace();
     let Some(command) = words.next() else { return };
     let arg = words.next().unwrap_or("");
 
     match command {
-        "help" => print_line("commands: help, echo, uptime, clear, ls, cat, cd, pwd, mkdir, rmdir, touch, rm, write, cp, mv, exec, selftest"),
+        "help" => out.put_line("commands: help, echo, uptime, clear, ls, cat, cd, pwd, mkdir, rmdir, touch, rm, write, cp, mv, exec, selftest (append `> file` or `>> file` to redirect output)"),
         "echo" => {
             let mut first = true;
             for word in line.split_whitespace().skip(1) {
                 if !first {
-                    putc(b' ');
+                    out.put(b' ');
                 }
                 for b in word.bytes() {
-                    putc(b);
+                    out.put(b);
                 }
                 first = false;
             }
-            putc(CR);
-            putc(LF);
+            out.put(CR);
+            out.put(LF);
         }
         "uptime" => {
-            print_u64_decimal(get_ticks());
-            print_line(" ticks since boot");
+            out.put_u64_decimal(get_ticks());
+            out.put_line(" ticks since boot");
         }
         "clear" => {
             // ANSI clear-screen + cursor-home - the shell's own escape
             // sequence, not a syscall; the console itself has no notion
-            // of a screen, just a byte stream.
+            // of a screen, just a byte stream. (Redirecting this writes
+            // the raw escape bytes to the file - pointless but harmless,
+            // not special-cased.)
             for &b in b"\x1b[2J\x1b[H" {
-                putc(b);
+                out.put(b);
             }
         }
-        "pwd" => print_line(cwd_str(cwd, *cwd_len)),
-        "ls" => cmd_ls(arg, cwd, *cwd_len),
-        "cat" => cmd_cat(arg, cwd, *cwd_len),
+        "pwd" => out.put_line(cwd_str(cwd, *cwd_len)),
+        "ls" => cmd_ls(arg, cwd, *cwd_len, out),
+        "cat" => cmd_cat(arg, cwd, *cwd_len, out),
         "cd" => cmd_cd(arg, cwd, cwd_len),
         "mkdir" => cmd_mkdir(arg, cwd, *cwd_len),
         "rmdir" => cmd_rmdir(arg, cwd, *cwd_len),
@@ -216,7 +398,7 @@ fn run_line(line: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize) {
         "cp" => cmd_cp(line, cwd, *cwd_len),
         "mv" => cmd_mv(line, cwd, *cwd_len),
         "exec" => cmd_exec(arg, cwd, *cwd_len),
-        "selftest" => cmd_selftest(),
+        "selftest" => cmd_selftest(out),
         _ => {
             print_str("unknown command: ");
             print_line(command);
@@ -376,7 +558,7 @@ fn print_no_fs() {
     print_line("no filesystem mounted this boot (see the kernel boot log - `make run`'s disk is FAT16, not FAT32; use `make run-image` for disk commands)");
 }
 
-fn cmd_ls(arg: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize) {
+fn cmd_ls(arg: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize, out: &mut Output) {
     let mut path_buf = [0u8; PATH_SIZE];
     let Some(path_len) = resolve_path(cwd_str(cwd, cwd_len), arg, &mut path_buf) else {
         print_line("ls: path too long");
@@ -393,13 +575,13 @@ fn cmd_ls(arg: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize) {
         FS_ERROR => print_line("ls: no such directory"),
         n => {
             for &b in &listing[..n as usize] {
-                putc(b);
+                out.put(b);
             }
         }
     }
 }
 
-fn cmd_cat(arg: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize) {
+fn cmd_cat(arg: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize, out: &mut Output) {
     if arg.is_empty() {
         print_line("cat: missing file argument");
         return;
@@ -421,12 +603,19 @@ fn cmd_cat(arg: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize) {
         size => {
             let n = (size as usize).min(file_buf.len());
             for &b in &file_buf[..n] {
-                putc(b);
+                out.put(b);
             }
-            if !file_buf[..n].ends_with(b"\n") {
-                putc(CR);
-                putc(LF);
+            // The tidy-terminal trailing newline is a display nicety,
+            // console-only: keeping it out of a capture means
+            // `cat a > b` copies a's bytes exactly (bounded by the read
+            // buffer), rather than appending bytes a never contained.
+            if out.is_console() && !file_buf[..n].ends_with(b"\n") {
+                out.put(CR);
+                out.put(LF);
             }
+            // The truncation notice is an error-ish diagnostic, not
+            // output - console always, never captured into the file
+            // (which would corrupt a redirected copy with notice text).
             if size as usize > file_buf.len() {
                 print_line("cat: (truncated - file is larger than this shell's read buffer)");
             }
@@ -746,6 +935,102 @@ fn cmd_mv(line: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize) {
     }
 }
 
+/// Where a command's *output* goes: the console (the only choice before
+/// output redirection existed) or a capture buffer that a `>`/`>>`
+/// redirect writes to a file once the command returns. Passed down to
+/// command handlers by `&mut` reference, exactly like `cwd` already is -
+/// a module-level "current sink" static is impossible here, since this
+/// program is deliberately built with no static mutable state at all
+/// (`linker.ld` asserts `.data`/`.bss` empty - see the module doc
+/// comment).
+///
+/// Only real output goes through this; **error messages deliberately
+/// don't** - they keep printing straight to the console via
+/// [`print_line`], the POSIX stdout/stderr split (a redirect takes
+/// stdout, errors stay visible on the terminal) without needing a second
+/// sink to represent stderr.
+enum Output<'a> {
+    Console,
+    /// Captured for a pending redirect. `len` counts stored bytes;
+    /// once the buffer is full, further bytes are discarded (not
+    /// wrapped) and `overflowed` is set so the redirect can refuse to
+    /// write a silently-incomplete file - `cp`'s "a partial copy is a
+    /// wrong copy" reasoning, not `cat`'s truncate-and-note.
+    Capture { buf: &'a mut [u8; CAPTURE_SIZE], len: usize, overflowed: bool },
+}
+
+impl Output<'_> {
+    fn put(&mut self, byte: u8) {
+        match self {
+            Output::Console => putc(byte),
+            Output::Capture { buf, len, overflowed } => {
+                if *len < buf.len() {
+                    buf[*len] = byte;
+                    *len += 1;
+                } else {
+                    *overflowed = true;
+                }
+            }
+        }
+    }
+
+    fn put_str(&mut self, s: &str) {
+        for b in s.bytes() {
+            self.put(b);
+        }
+    }
+
+    fn put_line(&mut self, s: &str) {
+        self.put_str(s);
+        self.put(CR);
+        self.put(LF);
+    }
+
+    /// Hand-rolled decimal formatting. Historical note, kept because it
+    /// explains why [`cmd_selftest`] exists and why this still
+    /// hand-rolls rather than switching to `write!` itself: under the
+    /// *old*, non-relocating flat-binary loader, `write!`/
+    /// `core::fmt::Arguments` crashed here. That machinery builds its
+    /// per-argument dispatch out of *data* (an array of function
+    /// pointers, one per formatted argument) rather than direct `bl`
+    /// calls - a binary linked for base `0x0` but loaded somewhere else
+    /// (always, in practice) had no way to know those embedded pointer
+    /// values needed correcting, so they pointed at whatever link-time
+    /// address `0x0` would have meant (`ELR_EL1` landing on a tiny
+    /// near-null address instead of real code, confirmed directly by
+    /// trying `write!` here first). **This is now fixed**, since
+    /// `loader.rs` processes real `R_AARCH64_RELATIVE` relocations
+    /// against the actual runtime load address (see CLAUDE.md's
+    /// "relocating loader" milestone and [`cmd_selftest`], which proves
+    /// it) - but this is left as hand-rolled decimal formatting anyway,
+    /// simply because it was already written, works, and doesn't need
+    /// `core::fmt`'s machinery to do something this simple.
+    fn put_u64_decimal(&mut self, mut n: u64) {
+        if n == 0 {
+            self.put(b'0');
+            return;
+        }
+        let mut digits = [0u8; 20]; // u64::MAX has 20 decimal digits
+        let mut count = 0;
+        while n > 0 {
+            digits[count] = b'0' + (n % 10) as u8;
+            n /= 10;
+            count += 1;
+        }
+        while count > 0 {
+            count -= 1;
+            self.put(digits[count]);
+        }
+    }
+
+    /// `cat` uses this to keep its display-only trailing-newline nicety
+    /// off the captured byte stream, so `cat a > b` copies `a`'s bytes
+    /// exactly (see [`cmd_cat`]).
+    fn is_console(&self) -> bool {
+        matches!(self, Output::Console)
+    }
+}
+
 fn print_str(s: &str) {
     for b in s.bytes() {
         putc(b);
@@ -758,48 +1043,15 @@ fn print_line(s: &str) {
     putc(LF);
 }
 
-/// Historical note, kept because it explains why [`cmd_selftest`] exists
-/// and why this function still hand-rolls rather than switching to
-/// `write!` itself: under the *old*, non-relocating flat-binary loader,
-/// `write!`/`core::fmt::Arguments` crashed here. That machinery builds its
-/// per-argument dispatch out of *data* (an array of function pointers, one
-/// per formatted argument) rather than direct `bl` calls - a binary linked
-/// for base `0x0` but loaded somewhere else (always, in practice) had no
-/// way to know those embedded pointer values needed correcting, so they
-/// pointed at whatever link-time address `0x0` would have meant
-/// (`ELR_EL1` landing on a tiny near-null address instead of real code,
-/// confirmed directly by trying `write!` here first). **This is now fixed**,
-/// since `loader.rs` processes real `R_AARCH64_RELATIVE` relocations
-/// against the actual runtime load address (see CLAUDE.md's "relocating
-/// loader" milestone and [`cmd_selftest`], which proves it) - but this
-/// function itself is left as hand-rolled decimal formatting anyway,
-/// simply because it was already written, works, and doesn't need
-/// `core::fmt`'s machinery to do something this simple.
-fn print_u64_decimal(mut n: u64) {
-    if n == 0 {
-        putc(b'0');
-        return;
-    }
-    let mut digits = [0u8; 20]; // u64::MAX has 20 decimal digits
-    let mut count = 0;
-    while n > 0 {
-        digits[count] = b'0' + (n % 10) as u8;
-        n /= 10;
-        count += 1;
-    }
-    while count > 0 {
-        count -= 1;
-        putc(digits[count]);
-    }
-}
+/// A `core::fmt::Write` target over an [`Output`] sink - lets
+/// [`cmd_selftest`] use real `write!`/`format_args!` without pulling in
+/// `alloc`, and lets its output participate in redirection like any
+/// other command's.
+struct Writer<'a, 'b>(&'a mut Output<'b>);
 
-/// A `core::fmt::Write` target over [`putc`] - lets [`cmd_selftest`] use
-/// real `write!`/`format_args!` without pulling in `alloc`.
-struct Writer;
-
-impl core::fmt::Write for Writer {
+impl core::fmt::Write for Writer<'_, '_> {
     fn write_str(&mut self, s: &str) -> core::fmt::Result {
-        print_str(s);
+        self.0.put_str(s);
         Ok(())
     }
 }
@@ -813,8 +1065,8 @@ impl core::fmt::Write for Writer {
 /// for the whole relocating-loader milestone (CLAUDE.md) - these patterns
 /// need to be ordinary, safe Rust again, not something a program author
 /// has to keep avoiding by hand-discipline.
-fn cmd_selftest() {
-    let mut w = Writer;
+fn cmd_selftest(out: &mut Output) {
+    let mut w = Writer(out);
 
     // write!/core::fmt: n is computed at runtime (not a compile-time
     // constant folded away), so this genuinely exercises the formatting
