@@ -119,6 +119,18 @@ a:focus-visible, button:focus-visible { outline: 2px solid var(--focus); outline
   body { font-size: 16.5px; }
 }
 
+/* The logo image carries its own dark navy ground, so it reads as a
+   deliberate badge on both themes - the border keeps its edge defined
+   against the dark theme's paper. */
+.hero-logo {
+  display: block;
+  width: 150px;
+  height: 150px;
+  border-radius: 18px;
+  border: 1px solid var(--wire);
+  margin-bottom: 1.4rem;
+}
+
 .kicker {
   font-family: var(--font-mono);
   font-size: 0.72rem;

@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/assets/logo.jpg" alt="Ouroboros logo — a neon circuit-board ouroboros serpent" width="260">
+</p>
+
 # Ouroboros
 
 A microkernel operating system for ARM64 (aarch64), written in Rust with some assembly.
