@@ -1,0 +1,75 @@
+//! The smallest real Ouroboros userland program, and the first one
+//! besides the default shell: prints a banner and exits. Exists for two
+//! reasons - as the living proof that "the shell is just a program"
+//! (see `docs/processes.md`; this crate is loaded, relocated, and run
+//! by exactly the same mechanism, `exec /EFI/ORBS/HELLO.BIN`), and as
+//! the natural exercise of the `EXIT` syscall: a spawned *shell* can
+//! never exit on its own (it blocks forever on keyboard input it will
+//! never receive - only task 0 owns the keyboard), so task destruction
+//! needed a program that runs to completion by itself.
+//!
+//! Built exactly like `shell/`: `aarch64-unknown-none`, release-only
+//! (the same hard PIE/libcore toolchain constraint - see
+//! `docs/processes.md`'s "Binary format" section), linked with the
+//! shared `shell/linker.ld` (the `-T` flag in `.cargo/config.toml` is
+//! workspace-relative and applies to every crate built for this
+//! target), staged by the Makefile as `\EFI\ORBS\HELLO.BIN`.
+
+#![no_std]
+#![no_main]
+
+use core::arch::asm;
+use core::panic::PanicInfo;
+
+/// Placed first in `.text` by the shared linker script
+/// (`KEEP(*(.text.start))`) - same contract as the shell's `_start`.
+#[no_mangle]
+#[link_section = ".text.start"]
+pub extern "C" fn _start() -> ! {
+    main()
+}
+
+fn main() -> ! {
+    print("Hello from a second program! (HELLO.BIN, running as its own task)\r\n");
+    print("Goodbye - exiting now.\r\n");
+    task_exit(0);
+    // Unreachable for any task that's allowed to exit; a refused exit
+    // (this program somehow running as task 0/1) just parks quietly.
+    loop {
+        core::hint::spin_loop();
+    }
+}
+
+fn print(s: &str) {
+    for b in s.bytes() {
+        syscall(syscall_abi::PUTC, b as u64);
+    }
+}
+
+fn task_exit(code: u64) {
+    syscall(syscall_abi::EXIT, code);
+}
+
+#[inline(always)]
+fn syscall(number: u64, arg0: u64) -> u64 {
+    let ret: u64;
+    unsafe {
+        asm!(
+            "svc #0",
+            inout("x0") arg0 => ret,
+            in("x1") 0u64,
+            in("x2") 0u64,
+            in("x3") 0u64,
+            in("x8") number,
+            options(nostack),
+        );
+    }
+    ret
+}
+
+#[panic_handler]
+fn panic(_info: &PanicInfo) -> ! {
+    loop {
+        core::hint::spin_loop();
+    }
+}

@@ -125,6 +125,26 @@ pub(crate) fn allocate_runtime_region(size: u64) -> u64 {
     NEXT_RUNTIME_REGION_TOP.fetch_sub(aligned_size, Ordering::Relaxed) - aligned_size
 }
 
+/// Gives a region back to the bump allocator **iff it was the most
+/// recent allocation** (the cursor still sits exactly at its base -
+/// LIFO order); anything else leaks, deliberately: this is a bump
+/// cursor, not a real allocator with a free list, and the common
+/// exec-then-exit pattern is exactly the LIFO case. `size` must be the
+/// same value the allocation was asked for (re-rounded to the same 2MB
+/// multiple here). Called from the `EXIT` syscall's teardown
+/// (`syscall.rs`), where a leak is a bounded, documented cost - a
+/// long-lived middle task exiting after a later allocation just means
+/// that one region stays unavailable for the rest of the boot.
+pub(crate) fn free_runtime_region(base: u64, size: u64) {
+    let aligned_size = size.next_multiple_of(RUNTIME_SLOT_ALIGN);
+    let _ = NEXT_RUNTIME_REGION_TOP.compare_exchange(
+        base,
+        base + aligned_size,
+        Ordering::Relaxed,
+        Ordering::Relaxed,
+    );
+}
+
 const IDLE_REGION_SIZE: usize = 0x1000;
 
 /// 4KB, well under the ~8KB rustc/PE-COFF alignment ceiling that forced
@@ -202,6 +222,18 @@ static REGIONS: [RegionSlot; NUM_TASKS] = [
 /// needs: every task slot's own region, `(0, 0)` for any `Unused` one
 /// (already treated as "no region" by `mmu.rs`'s `overlaps_any`, same
 /// convention `main.rs`'s own boot-time call already relies on).
+/// Which task is currently executing - `syscall.rs`'s `EXIT` arm uses
+/// this to refuse exits from tasks 0/1 and to know whose region to free.
+pub(crate) fn current_task() -> usize {
+    CURRENT.load(Ordering::Relaxed)
+}
+
+/// The `(base, size)` region recorded for task `i` at creation time
+/// (`(0, 0)` for the unused/never-created case).
+pub(crate) fn task_region(i: usize) -> (u64, u64) {
+    unsafe { *REGIONS[i].0.get() }
+}
+
 pub(crate) fn el0_regions() -> [(u64, u64); NUM_TASKS] {
     core::array::from_fn(|i| unsafe { *REGIONS[i].0.get() })
 }
@@ -318,6 +350,40 @@ pub(crate) unsafe fn block_current_and_switch(frame: *mut Context, reason: WaitR
     let current = CURRENT.load(Ordering::Relaxed);
     unsafe { *TASKS[current].0.get() = *frame };
     unsafe { *STATES[current].0.get() = TaskState::Blocked(reason) };
+    let next = next_runnable(current);
+    *frame = unsafe { *TASKS[next].0.get() };
+    CURRENT.store(next, Ordering::Relaxed);
+    frame.gpr[0]
+}
+
+/// Destroys the calling task (whichever one is live in `frame`) and
+/// switches to another runnable one - the `EXIT` syscall's mechanism,
+/// mirroring [`block_current_and_switch`]'s proven shape exactly, with
+/// one difference: the current task's context is *discarded* rather
+/// than saved (its slot goes `Unused`, its region record is cleared so
+/// the caller's `mmu::rebuild_with_el0_regions` drops the mapping - the
+/// `(0, 0)` entry the mmu region loop already tolerates). The same
+/// return-value contract applies: the caller must return this value
+/// unmodified, so the SVC trampoline's blind `x0` write is a no-op for
+/// the *resumed* task (see `block_current_and_switch`'s doc comment).
+///
+/// `next_runnable` can't hand back the now-`Unused` current task: its
+/// "stay put" fallback only fires if *nothing* is runnable, and task 1
+/// (idle) is always runnable - the same standing guarantee that
+/// fallback's own doc comment records.
+///
+/// The caller is responsible for refusing tasks 0/1 *before* calling
+/// this, and for the region free + mmu rebuild around it - see
+/// `syscall.rs`'s `EXIT` arm for the full teardown order.
+///
+/// # Safety
+/// Same contract as [`block_current_and_switch`]: `frame` must be the
+/// live trap frame of the syscall currently being dispatched.
+pub(crate) unsafe fn exit_current_and_switch(frame: *mut Context) -> u64 {
+    let frame = unsafe { &mut *frame };
+    let current = CURRENT.load(Ordering::Relaxed);
+    unsafe { *STATES[current].0.get() = TaskState::Unused };
+    unsafe { *REGIONS[current].0.get() = (0, 0) };
     let next = next_runnable(current);
     *frame = unsafe { *TASKS[next].0.get() };
     CURRENT.store(next, Ordering::Relaxed);

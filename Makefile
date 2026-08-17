@@ -21,6 +21,8 @@ KERNEL       := target/$(TARGET)/$(PROFILE)/BOOTAA64.efi
 # own "no nightly, no -Z build-std needed" comment).
 SHELL_ELF    := target/$(USER_TARGET)/release/shell
 SHELL_BIN    := target/$(USER_TARGET)/release/shell.bin
+HELLO_ELF    := target/$(USER_TARGET)/release/hello
+HELLO_BIN    := target/$(USER_TARGET)/release/hello.bin
 ESP_DIR      := esp
 OVMF         := $(shell brew --prefix qemu 2>/dev/null)/share/qemu/edk2-aarch64-code.fd
 PDT          := /Applications/Parallels Desktop.app/Contents/MacOS/prl_disk_tool
@@ -39,7 +41,7 @@ ifeq ($(PROFILE),release)
 CARGO_FLAGS += --release
 endif
 
-.PHONY: build shell-bin esp run run-virtio-console run-usb-kbd run-usb-multi run-gicv3 image run-image parallels-hdd test-parallels clean
+.PHONY: build shell-bin hello-bin esp run run-virtio-console run-usb-kbd run-usb-multi run-gicv3 image run-image parallels-hdd test-parallels clean
 
 # Overridable by `make test-parallels VM_NAME=... CMDS=... BOOT_WAIT=...`.
 VM_NAME     ?= Ouroboros
@@ -65,6 +67,13 @@ shell-bin:
 	cargo build -p shell --target $(USER_TARGET) --release
 	"$(OBJCOPY)" --strip-all $(SHELL_ELF) $(SHELL_BIN)
 
+# Same recipe as shell-bin for the second userland program (hello/) -
+# same target, same release-only constraint, same shared linker script
+# (the -T flag in .cargo/config.toml is workspace-relative).
+hello-bin:
+	cargo build -p hello --target $(USER_TARGET) --release
+	"$(OBJCOPY)" --strip-all $(HELLO_ELF) $(HELLO_BIN)
+
 # Stage the EFI System Partition layout QEMU/Parallels expect: a removable
 # UEFI drive boots \EFI\BOOT\BOOTAA64.EFI automatically, no boot manager
 # entry needed. \EFI\ORBS\ (must fit FAT's 8.3 short-name limit, which
@@ -73,10 +82,11 @@ shell-bin:
 # itself: the default shell binary and the config file (loader.rs's
 # CONFIG_PATH) naming which program to load - edit INIT.CFG and rebuild
 # just that program to swap it out, no kernel rebuild required.
-esp: build shell-bin
+esp: build shell-bin hello-bin
 	mkdir -p $(ESP_DIR)/EFI/BOOT $(ESP_DIR)/EFI/ORBS
 	cp $(KERNEL) $(ESP_DIR)/EFI/BOOT/BOOTAA64.EFI
 	cp $(SHELL_BIN) $(ESP_DIR)/EFI/ORBS/SH.BIN
+	cp $(HELLO_BIN) $(ESP_DIR)/EFI/ORBS/HELLO.BIN
 	printf '\\EFI\\ORBS\\SH.BIN' > $(ESP_DIR)/EFI/ORBS/INIT.CFG
 
 # Boots the ESP directory directly in QEMU (no disk image needed) against

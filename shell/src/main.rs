@@ -89,7 +89,7 @@ const LF: u8 = b'\n';
 // Syscall numbers and sentinel values come from the shared `syscall-abi`
 // crate now, not hand-duplicated local consts - see its doc comment and
 // `kernel/src/syscall.rs`'s dispatch table, the other side of this ABI.
-use syscall_abi::{FS_ERROR, NO_FS, SPAWN_ERROR};
+use syscall_abi::{EXIT_DENIED, FS_ERROR, NO_FS, SPAWN_ERROR};
 
 /// Placed first in `.text` by `linker.ld` (`KEEP(*(.text.start))`) so it
 /// lands at file/VA offset 0 - `tasks.rs` sets a loaded program's
@@ -357,7 +357,7 @@ fn dispatch_line(line: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize, out:
     let arg = words.next().unwrap_or("");
 
     match command {
-        "help" => out.put_line("commands: help, echo, uptime, clear, ls, cat, cd, pwd, mkdir, rmdir, touch, rm, write, cp, mv, exec, selftest (append `> file` or `>> file` to redirect output)"),
+        "help" => out.put_line("commands: help, echo, uptime, clear, ls, cat, cd, pwd, mkdir, rmdir, touch, rm, write, cp, mv, exec, exit, selftest (append `> file` or `>> file` to redirect output)"),
         "echo" => {
             let mut first = true;
             for word in line.split_whitespace().skip(1) {
@@ -398,6 +398,7 @@ fn dispatch_line(line: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize, out:
         "cp" => cmd_cp(line, cwd, *cwd_len),
         "mv" => cmd_mv(line, cwd, *cwd_len),
         "exec" => cmd_exec(arg, cwd, *cwd_len),
+        "exit" => cmd_exit(),
         "selftest" => cmd_selftest(out),
         _ => {
             print_str("unknown command: ");
@@ -1160,6 +1161,28 @@ fn fs_mv(src: &str, dst: &str) -> u64 {
 /// [`fs_mkdir`]'s doc comment already notes for the other `fs_*` syscalls).
 fn fs_spawn(path: &str) -> u64 {
     syscall4(syscall_abi::SPAWN, path.as_ptr() as u64, path.len() as u64, 0, 0)
+}
+
+/// Asks the kernel to destroy this task (`EXIT` syscall). Never returns
+/// for a task that's allowed to exit; for this shell - always task 0,
+/// the designated keyboard owner - it always comes back [`EXIT_DENIED`]
+/// instead (see [`cmd_exit`]).
+fn task_exit(code: u64) -> u64 {
+    syscall(syscall_abi::EXIT, code)
+}
+
+/// `exit` builtin. This boot-loaded shell is task 0, which the kernel
+/// refuses to let exit (it's the one task that ever receives keyboard
+/// input - if it died, nothing could type again this boot), so for this
+/// program the command always reports the refusal. The builtin exists
+/// anyway because a *replacement* program someone writes and spawns
+/// (see docs/processes.md) genuinely can exit - and the syscall wrapper
+/// here is the reference for how.
+fn cmd_exit() {
+    match task_exit(0) {
+        EXIT_DENIED => print_line("exit: refused - the boot shell can't exit (nothing would own the keyboard)"),
+        _ => print_line("exit: unexpected return"),
+    }
 }
 
 /// The 1-argument syscalls this program used before phase 3c - a thin

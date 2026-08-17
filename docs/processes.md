@@ -202,8 +202,13 @@ Consequences of "real ELF, real relocations, but still narrowly scoped
   See `docs/architecture.md`'s "Dynamic task creation" section and
   `CLAUDE.md`'s "Dynamic task creation and `exec()`" section for the
   full design and the real `Vec`/allocator hang bug found building it.
-  No task destruction yet, so this is still "loaded once per task slot,"
-  just with up to four slots instead of a fixed two.
+  A task can also *end*: the `exit` syscall (17) destroys the calling
+  task, frees its slot for a future `spawn`, unmaps its region, and
+  returns its RAM to the runtime allocator when LIFO order allows -
+  see `hello/`, the second real userland program, whose whole job is
+  printing a banner and exiting (the reference for how a program ends
+  itself; the boot shell, task 0, is refused - it's the sole keyboard
+  owner).
 
 ## Syscall ABI available to a program
 
@@ -351,11 +356,13 @@ Worth knowing before building further on this:
   above) can load and start a second, third, or fourth program at
   runtime, without a reboot - genuinely `tasks::spawn`, not
   exec-replaces-current-process, so the caller keeps running too. Still
-  real limits: no task destruction (a spawned task's slot and memory are
-  permanent for the rest of the boot), no way to reload an *already-
-  running* task's program in place, and the runtime page allocator
-  backing this never frees, so repeated spawning eventually exhausts the
-  region it grows into.
+  real limits: a task can end itself (`exit`, syscall 17 - slot freed,
+  region unmapped, RAM reclaimed in the common LIFO case) but nothing
+  can end *another* task (no `kill` - that belongs with job control),
+  no way to reload an *already-running* task's program in place, and
+  the runtime allocator's reclaim is LIFO-or-leak (a bump cursor, not
+  a free list), so pathological spawn/exit orderings can still strand
+  regions for the rest of the boot.
 - **Fixed 4-task scheduler.** `tasks.rs` now has four slots (up from
   two) - task 0 (the boot-loaded shell) and task 1 (idle) are permanent,
   slots 2 and 3 start `Unused` and are filled by `spawn`. Once all four

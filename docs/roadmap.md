@@ -333,6 +333,18 @@ phase:
   constraints going in: everything stays polled, matching the rest of
   the kernel; no hot-plug (the stick must be attached before boot);
   no hubs.
+- ~~Task destruction~~ — **done (2026-08-17).** The `EXIT` syscall (17)
+  lets a task end itself: slot freed for a future `spawn`, EL0 mapping
+  dropped, RAM reclaimed by the runtime allocator in the common LIFO
+  case (leak otherwise — a bump cursor, not a free list, deliberately).
+  Tasks 0 (boot shell/keyboard owner) and 1 (idle) are refused. Came
+  with `hello/`, the second real userland program (banner + exit), the
+  natural test vehicle since a spawned shell can never exit on its own.
+  Confirmed on QEMU (exec/exit cycles visibly reusing the same slot
+  *and* region base) and real Parallels (the typed-`exit` refusal
+  path). What's deliberately left for a future job-control milestone:
+  ending *another* task (`kill`), `wait()`/reaping, and reassigning
+  keyboard ownership. See `CLAUDE.md`'s "Task destruction" section.
 - **Actual microkernel-style driver isolation** — moving drivers
   (starting with virtio-blk/virtio-console) out of the EL1 kernel and
   into supervised EL0 processes, per `docs/research-minix-boot.md`'s

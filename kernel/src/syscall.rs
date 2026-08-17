@@ -516,6 +516,35 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
             let Ok(path) = core::str::from_utf8(path) else { return SPAWN_ERROR };
             spawn_program(path)
         }
+        syscall_abi::EXIT => {
+            let current = tasks::current_task();
+            if current <= 1 {
+                // Task 0 (the boot shell - nothing would own the
+                // keyboard, see tasks::INPUT_OWNER_TASK) and task 1
+                // (idle - never makes syscalls, refused for
+                // completeness) may not exit. The only case where EXIT
+                // returns to its caller.
+                return syscall_abi::EXIT_DENIED;
+            }
+            console::println!("Ouroboros kernel: task {current} exited (code {arg0})");
+            // Teardown order: reclaim the RAM (LIFO-or-leak, see
+            // free_runtime_region), discard the task and clear its
+            // region record, then rebuild the identity map so the
+            // cleared record actually drops the EL0 mapping - the same
+            // masked-IRQ rebuild spawn_program already proved safe.
+            // The return value must be passed through unmodified - see
+            // exit_current_and_switch's doc comment.
+            let (base, size) = tasks::task_region(current);
+            tasks::free_runtime_region(base, size);
+            // SAFETY: `frame` is the live trap frame of this very
+            // syscall (dispatch's contract with the SVC trampoline).
+            let resumed_x0 = unsafe { tasks::exit_current_and_switch(frame) };
+            // SAFETY: same contract as spawn_program's rebuild - IRQs
+            // are masked for the whole SVC dispatch, no EL0 code runs
+            // mid-rebuild.
+            unsafe { mmu::rebuild_with_el0_regions(tasks::el0_regions()) };
+            resumed_x0
+        }
         _ => {
             console::println!("Ouroboros kernel: syscall from EL0: unknown number={number}");
             u64::MAX

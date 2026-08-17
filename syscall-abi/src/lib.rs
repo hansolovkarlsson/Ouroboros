@@ -109,8 +109,25 @@ pub const READ_CHAR: u64 = 15;
 /// exec-replaces-current-process semantics; the calling task is
 /// completely untouched. See `tasks.rs`'s `spawn` for the mechanism and
 /// its real, deliberate limits (a small fixed number of extra task
-/// slots, no destruction once spawned).
+/// slots).
 pub const SPAWN: u64 = 16;
+
+/// `(exit code)` -> **does not return** on success: the calling task is
+/// destroyed (slot freed for a future [`SPAWN`], EL0 mapping removed,
+/// RAM reclaimed when the runtime allocator's LIFO order allows - see
+/// `tasks.rs`'s `free_runtime_region`) and another runnable task is
+/// switched to in its place. The one case where this *does* return to
+/// the caller: [`EXIT_DENIED`], for the two tasks that are refused -
+/// task 0 (the boot shell; nothing would own the keyboard, see
+/// `tasks.rs`'s `INPUT_OWNER_TASK`) and task 1 (idle; it never makes
+/// syscalls anyway, refused for completeness). The exit code carries no
+/// meaning yet beyond the kernel's own `task N exited (code X)` log
+/// line - nothing waits on or reaps tasks.
+pub const EXIT: u64 = 17;
+
+/// [`EXIT`]'s only possible return value (a successful exit never
+/// returns): the calling task is one of the two that may not exit.
+pub const EXIT_DENIED: u64 = u64::MAX;
 
 /// Sentinel `try_read_char` returns when no byte is waiting - out of
 /// range for any real byte (0-255), so callers can tell the two apart

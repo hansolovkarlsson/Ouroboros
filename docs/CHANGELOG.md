@@ -7,6 +7,26 @@ what broke, how it was diagnosed), see `CLAUDE.md`; for *how* something
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## Task destruction (`exit`) - and `hello/`, the second real userland program
+
+The `EXIT` syscall (17) destroys the calling task: slot freed for a
+future `spawn`, EL0 mapping dropped (the same masked-IRQ
+`mmu::rebuild_with_el0_regions` spawn proved safe), RAM returned to the
+runtime bump allocator when LIFO order allows (most-recent allocation
+only - anything else leaks, deliberately). Tasks 0 (boot shell, sole
+keyboard owner) and 1 (idle) are refused with `EXIT_DENIED`.
+`tasks::exit_current_and_switch` mirrors `block_current_and_switch`'s
+proven frame-overwrite shape, discarding the context instead of saving
+it. The test vehicle is a real deliverable: `hello/`, a ~70-line
+second userland program (banner + exit) proving both the exit path and
+"the shell is just a program" - zero new toolchain work, the
+`aarch64-unknown-none` PIE flags and shared linker script are
+workspace-wide. Confirmed on QEMU with the reclaim directly observable
+(three exec/exit cycles landing at the same region base, a long-lived
+spawned shell interleaved with slot-3 cycles) and on real Parallels
+hardware (the typed `exit` refusal - the one reachable path there).
+See `CLAUDE.md`'s "Task destruction" section.
+
 ## Directory extension - full directories grow by a cluster instead of failing
 
 `fat32.rs::insert_dir_entry` (the single choke point every

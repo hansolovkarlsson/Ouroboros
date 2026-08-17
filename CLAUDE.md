@@ -3181,7 +3181,9 @@ which continues to work correctly with no regression.
 
 **Still coarse, worth knowing before building on this:** no task
 destruction - a spawned task's slot and its allocated RAM are permanent
-for the rest of the boot, the bump allocator never frees; at most 4
+for the rest of the boot, the bump allocator never frees **(Update:
+fixed - see "Task destruction" further below; tasks can exit, slots
+free, and the allocator reclaims in LIFO order)**; at most 4
 total task slots, hardcoded; a spawned task gets the same fixed
 round-robin share as any other runnable task, no priorities. (Keyboard
 input routing, the one item this list used to name as unsolved, is
@@ -3207,8 +3209,10 @@ letter-by-letter split.
 **Fix: designate exactly one task, `INPUT_OWNER_TASK` (hardcoded to task
 0, the boot-loaded shell), as the only task whose `Blocked(Keyboard)` the
 wake-check will ever actually poll hardware for.** Hardcoded rather than
-a runtime-settable value deliberately - task 0 is never destroyed (no
-task destruction exists at all yet), so it's always a valid, permanent
+a runtime-settable value deliberately - task 0 is never destroyed (task
+destruction exists now - see "Task destruction" further below - but
+task 0 specifically is refused by the `EXIT` syscall for exactly this
+reason), so it's always a valid, permanent
 owner, and there's no job-control mechanism (`fg`/`bg`, a
 controlling-task handoff) that could ever legitimately reassign this
 today; a settable knob would just be unused. Needed no new buffering: a
@@ -3500,6 +3504,63 @@ generally don't shrink directories either); everything else about the
 module's scope (8.3-only, no LFN, first-FAT32-partition-only) is
 unchanged.
 
+## Task destruction: a real `exit` syscall, and a second real userland program to prove it
+
+The `exec` milestone's longest-standing "still coarse" item - a spawned
+task's slot and RAM were permanent for the rest of the boot - is
+closed: the `EXIT` syscall (17, `arg0` = exit code) destroys the
+calling task, its slot becomes spawnable again, its EL0 mapping is
+dropped (a fresh `mmu::rebuild_with_el0_regions`, the same masked-IRQ
+rebuild `spawn` already proved safe), and its RAM goes back to the
+runtime bump allocator when LIFO order allows
+(`tasks::free_runtime_region` - cursor restored iff the region was the
+most recent allocation; anything else leaks, deliberately - a bump
+cursor, not a free list). Tasks 0 (the boot shell - the sole keyboard
+owner, see `INPUT_OWNER_TASK`) and 1 (idle) are refused with
+`EXIT_DENIED`, the only case where `EXIT` ever returns to its caller.
+`tasks::exit_current_and_switch` mirrors `block_current_and_switch`'s
+proven frame-overwrite shape exactly - same trampoline contract, same
+return-`frame.gpr[0]` subtlety - with the one difference that the
+current context is discarded instead of saved.
+
+**The test vehicle is a real deliverable: `hello/`, the second userland
+program this project has ever had.** A spawned *shell* can never
+exercise `exit` (it blocks forever on keyboard input only task 0
+receives), so proving destruction needed a program that runs to
+completion by itself - and a second program is also the living proof of
+"the shell is just a program," loaded and relocated by the identical
+mechanism. Zero new toolchain work: `.cargo/config.toml`'s
+`aarch64-unknown-none` flags (PIE, the shared `shell/linker.ld` - the
+`-T` path is workspace-relative) apply to any crate on that target;
+`hello/` is ~70 lines, staged as `\EFI\ORBS\HELLO.BIN` by a `hello-bin`
+Makefile target mirroring `shell-bin` (same release-only constraint).
+The shell gained an `exit` builtin - always refused for the boot shell
+itself, with a clear message, but the reference for how a replacement
+program ends itself.
+
+**Confirmed working end to end on QEMU, with the reclaim directly
+observable, not inferred:** three consecutive `exec /EFI/ORBS/HELLO.BIN`
+runs each printed hello's banner, `task 2 exited (code 0)`, and - the
+LIFO reclaim made visible by the identity-map rebuild log - landed at
+the *same region base* (`0x5fe00000`) every time, with the region
+dropping to `(0, 0)` after each exit. A long-lived `exec SH.BIN` then
+held slot 2 while two more hello runs cycled through slot 3 at the next
+base down (`0x5fc00000`), also reclaimed and reused. `exit` at the boot
+shell printed the refusal and the shell kept running; `uptime`/
+`selftest` clean; zero aborts. **Confirmed on real Parallels hardware**
+via `make test-parallels`: the typed `exit` → the refusal message
+rendered on the real framebuffer console (the one reachable path there
+- no disk driver means no way to spawn an exitable program yet, the
+standard honest split), `uptime` advancing normally.
+
+**Still coarse, worth knowing before building on this:** exit is
+voluntary only - nothing can end *another* task (`kill` belongs with a
+future job-control mechanism); exit codes carry no meaning beyond the
+kernel's log line (no `wait()`/reaping - nothing waits on tasks);
+the allocator reclaim is LIFO-or-leak, so pathological spawn/exit
+orderings can still strand regions for the rest of the boot; tasks 0/1
+can never exit, by design.
+
 ## Parallels disk diagnostic: no documented storage controller exists on this platform - confirmed with fresh evidence, not just the old inventory
 
 A dedicated diagnostic round (2026-08-17, no driver written - that was
@@ -3666,8 +3727,8 @@ kernel/
   src/gicv3.rs       GICv3 backend (redistributor wake/discovery, ICC_* system-register CPU interface) - confirmed working on QEMU and real Parallels hardware, see "MADT/GICv3" above
   src/timer.rs       ARM generic timer (non-secure EL1 physical timer, PPI 14 / GIC INTID 30), TICK_INTERVAL_MS
   src/loader.rs      reads INIT.CFG + a program off the ESP during boot services, into a 2MB-aligned EL0-accessible region, real ELF64 parsing + R_AARCH64_RELATIVE relocation processing - see "A real relocating loader" above and docs/processes.md; elf_region_size/populate_region split so the same parsing/loading logic is reusable from the runtime spawn path too, see "Dynamic task creation and exec()" above
-  src/syscall.rs     svc syscall dispatch table (print/double/report/try_read_char/putc/get_ticks/fs_list_dir/fs_read_file/fs_mkdir/fs_rmdir/fs_touch/fs_rm/fs_write_file/fs_mv/read_char/spawn, gap at 5) - confirmed working end to end, see above, "Blocking primitives" above for read_char, and "Dynamic task creation and exec()" above for spawn
-  src/tasks.rs       up to 4 task slots (task 0 = loaded program, task 1 = idle, slots 2-3 Unused until spawn) + the round-robin scheduler over Runnable/Blocked/Unused task state (block_current_and_switch, on_tick's wake-check, tasks::spawn, allocate_runtime_region) - confirmed working, see "Blocking primitives" and "Dynamic task creation and exec()" above
+  src/syscall.rs     svc syscall dispatch table (print/double/report/try_read_char/putc/get_ticks/fs_list_dir/fs_read_file/fs_mkdir/fs_rmdir/fs_touch/fs_rm/fs_write_file/fs_mv/read_char/spawn/exit, gap at 5) - confirmed working end to end, see above, "Blocking primitives" above for read_char, and "Dynamic task creation and exec()" above for spawn
+  src/tasks.rs       up to 4 task slots (task 0 = loaded program, task 1 = idle, slots 2-3 spawn/exit-cycled) + the round-robin scheduler over Runnable/Blocked/Unused task state (block_current_and_switch, exit_current_and_switch, on_tick's wake-check, tasks::spawn, allocate_runtime_region/free_runtime_region) - confirmed working, see "Blocking primitives", "Dynamic task creation and exec()", and "Task destruction" above
   src/virtio_mmio.rs virtio-mmio transport: 32-slot device discovery, modern (non-legacy) register layout, addresses confirmed via devicetree dump
   src/virtio_blk.rs  runtime virtio-blk driver: feature negotiation, one virtqueue, synchronous polling sector reads and writes - phase 3a (reads)/phase 4 (writes), confirmed working, see above
   src/virtio_console.rs  transmit-only virtio-console driver over the same transport - device discovery, feature negotiation, transmitq0 - confirmed working on QEMU; confirmed *not* what Parallels' serial port actually is, see "virtio-console" above
@@ -3676,7 +3737,10 @@ kernel/
 
 shell/               userland default shell - a separate crate, built for aarch64-unknown-none, loaded from disk (not compiled into the kernel)
   linker.ld          self-relocating (PIE) linker script: entry at offset 0, .rela.dyn/.dynsym/.dynamic/.data.rel.ro, no .bss/.data (see "A real relocating loader" above and docs/processes.md)
-  src/main.rs        line editor + command dispatch (help/echo/uptime/clear/ls/cat/cd/pwd/mkdir/rmdir/touch/rm/write/cp/mv/exec/selftest, plus `> file`/`>> file` output redirection on any of them - see "Output redirection" above), running as real EL0 userland code, built for real relocation (relocation-model=pic, --release only) - main loop blocks on read_char (syscall 15) instead of busy-polling, see "Blocking primitives" above; see docs/processes.md
+  src/main.rs        line editor + command dispatch (help/echo/uptime/clear/ls/cat/cd/pwd/mkdir/rmdir/touch/rm/write/cp/mv/exec/exit/selftest, plus `> file`/`>> file` output redirection on any of them - see "Output redirection" above), running as real EL0 userland code, built for real relocation (relocation-model=pic, --release only) - main loop blocks on read_char (syscall 15) instead of busy-polling, see "Blocking primitives" above; see docs/processes.md
+
+hello/               second userland program: prints a banner and exits via the EXIT syscall - the living proof of "the shell is just a program" and the reference for how a program ends itself (see "Task destruction" above)
+  src/main.rs        ~70 lines: _start, a putc-loop print, the exit call
 
 syscall-abi/         shared syscall ABI crate - syscall numbers + sentinel values (NO_CHAR/FS_ERROR/NO_FS), depended on directly by both kernel and shell, no more hand-duplicated numbers - see docs/processes.md
   src/lib.rs         #![no_std], no logic, just pub consts - safe under either target since every value is a scalar inlined at the use site, not a pointer needing relocation
@@ -3685,9 +3749,9 @@ scripts/
   test-parallels.sh  scripted real-hardware smoke test via prlctl (start/type/capture/stop) - invoked by `make test-parallels`, see "## Commands" above and docs/roadmap.md's "Testing infrastructure" section
 ```
 
-Three-crate workspace (`kernel`, `shell`, `syscall-abi`), with `shell`
+Four-crate workspace (`kernel`, `shell`, `hello`, `syscall-abi`), with `shell`/`hello`
 deliberately excluded from the workspace's `default-members` (see
-`Cargo.toml`) since it needs a different `--target` than `kernel`;
+`Cargo.toml`) since they need a different `--target` than `kernel`;
 `syscall-abi` needs no such exclusion (a plain lib, no `[[bin]]` to
 conflict with a target) and gets built automatically as `kernel`'s path
 dependency. Expect further growth as more userland programs emerge, each
