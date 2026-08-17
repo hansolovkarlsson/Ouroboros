@@ -3147,7 +3147,8 @@ keystrokes get split unpredictably between whichever instance happens
 to be `Blocked(WaitReason::Keyboard)` at the tick a byte arrives -
 exactly the "routing keyboard input to a specific blocked task" gap
 already named out of scope for the blocking-primitives milestone, not
-something this feature was meant to fix.
+something this feature was meant to fix. **Update: fixed the same day -
+see "Keyboard input routing" immediately below.**
 
 **Confirmed on real Parallels hardware too, honestly split by what's
 actually reachable there.** `spawn`'s error paths are confirmed working
@@ -3170,10 +3171,68 @@ which continues to work correctly with no regression.
 destruction - a spawned task's slot and its allocated RAM are permanent
 for the rest of the boot, the bump allocator never frees; at most 4
 total task slots, hardcoded; a spawned task gets the same fixed
-round-robin share as any other runnable task, no priorities; and
-routing keyboard input to a specific blocked task (see above) remains
-unsolved - fine for this milestone's own testing, a real limitation for
-anything built on top of concurrent interactive programs next.
+round-robin share as any other runnable task, no priorities. (Keyboard
+input routing, the one item this list used to name as unsolved, is
+fixed - see immediately below.)
+
+## Keyboard input routing: a real bug in the wake-check, fixed the same day dynamic task creation shipped
+
+Reported directly by the user immediately after trying `exec` live:
+typing a command right after spawning a second interactive shell showed
+letters arriving split between the two - `uptime` typed once, one
+instance's prompt showing `ptime`, the other showing `unknown command:
+ptime` from a stray `u`. Root cause, found by reading `on_tick`'s
+wake-check loop (`tasks.rs`) rather than guessed: `WaitReason::Keyboard`
+polls `syscall::poll_keyboard_byte`, which *destructively* consumes one
+byte from the console/xHCI driver the instant anything asks for one - it
+has no notion of which task "should" get it. The wake-check polled every
+`Blocked` task's reason once per tick, in index order, so a single
+keystroke went to whichever task happened to still be `Blocked(Keyboard)`
+at that exact tick - and which task that is flips constantly as tasks
+trade being blocked and running, exactly matching the observed
+letter-by-letter split.
+
+**Fix: designate exactly one task, `INPUT_OWNER_TASK` (hardcoded to task
+0, the boot-loaded shell), as the only task whose `Blocked(Keyboard)` the
+wake-check will ever actually poll hardware for.** Hardcoded rather than
+a runtime-settable value deliberately - task 0 is never destroyed (no
+task destruction exists at all yet), so it's always a valid, permanent
+owner, and there's no job-control mechanism (`fg`/`bg`, a
+controlling-task handoff) that could ever legitimately reassign this
+today; a settable knob would just be unused. Needed no new buffering: a
+byte a non-owner task would have consumed instead now simply stays
+queued in the console/xHCI driver's own hardware buffer - untouched,
+since the wake-check now skips polling for it entirely - until the owner
+task's own wait is what asks. A task other than the owner that blocks on
+`Keyboard` just stays blocked, honestly, until this kernel ever grows
+real job control - it behaves like a genuine background task with no
+input, not a second terminal racing the first.
+
+**Confirmed fixed via the identical live QEMU test that surfaced the
+bug**, run twice - once with the bug present (transcript showed exactly
+the `ptime`/`u` split described above), once after the fix (`exec`, then
+`help`, `uptime`, `echo routing works now`, `uptime` again, all arriving
+completely clean, the second shell's own banner visible but not stealing
+any further input) - then a full disk-command regression pass
+(`selftest`/`ls`/`mkdir`/`write`/`cat`/`rm`/`rmdir`/unknown-command) with
+the second task still alive throughout, zero aborts in `-d int`
+cross-checks both times. **Confirmed on real Parallels hardware too**,
+via `make test-parallels` (`help`/`echo`/`uptime`) - this fix touches the
+same wake-check loop that's the *only* keyboard input path on real
+hardware (the xHCI driver), so a regression there would have broken
+ordinary single-task typing, not just the multi-task case; confirmed
+clean, `uptime` reporting a real, correctly incrementing value (1067
+ticks). The actual multi-task routing fix itself couldn't be re-exercised
+on real Parallels hardware, for the same pre-existing, unrelated reason
+`exec`'s success path couldn't be in the milestone above: no working
+virtio-blk driver there yet, so there's no way to `exec` a second program
+from disk on real hardware at all today.
+
+**Still a real limitation, not fully solved:** only one task can ever
+receive keyboard input - any other task blocked on it waits forever with
+no way to become the owner short of a future `fg`/job-control mechanism.
+Good enough for "a background task doesn't corrupt the foreground
+shell's input," not a real multi-program input model.
 
 ## Commands
 

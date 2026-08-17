@@ -206,6 +206,17 @@ pub(crate) fn el0_regions() -> [(u64, u64); NUM_TASKS] {
     core::array::from_fn(|i| unsafe { *REGIONS[i].0.get() })
 }
 
+/// The one task whose `Blocked(WaitReason::Keyboard)` the wake-check will
+/// ever actually poll hardware for - see `on_tick`'s doc comment for why
+/// this exists and what happens to every other task blocked the same way.
+/// Hardcoded to task 0 (the boot-loaded shell) rather than a runtime
+/// `AtomicUsize`: task 0 is never destroyed (no task destruction exists
+/// at all yet - see `spawn`'s doc comment), so it's always a valid,
+/// permanent owner, and there's no job-control mechanism yet (`fg`/`bg`,
+/// a controlling-task handoff) that could ever legitimately reassign
+/// this - a settable value would just be an unused knob today.
+const INPUT_OWNER_TASK: usize = 0;
+
 /// What a blocked task is waiting for. One variant today - a byte from
 /// the keyboard/console (`syscall_abi::READ_CHAR`, `syscall.rs`) - but
 /// deliberately a real enum, not a bool, since the mechanism below
@@ -489,6 +500,27 @@ pub unsafe fn start() -> ! {
 /// the same bound this kernel's keyboard input has always had, blocking
 /// or not.
 ///
+/// **Keyboard input is routed to exactly one task, [`INPUT_OWNER_TASK`],
+/// not to "whichever blocked task this loop reaches first" - a real bug,
+/// not a hypothetical.** `poll_keyboard_byte` (what `WaitReason::Keyboard`
+/// polls) destructively consumes a byte the instant *any* caller asks for
+/// one - it has no notion of which task "should" get it. Polling it once
+/// per blocked task, in index order, meant a single keystroke went to
+/// whichever task happened to still be `Blocked(Keyboard)` at that exact
+/// tick, which flips from tick to tick as tasks trade being blocked and
+/// running - confirmed by testing (`exec`ing a second interactive shell
+/// and watching keystrokes arrive split, letter by letter, between the
+/// two). Skipping the poll entirely for every non-owner task fixes this
+/// without needing any buffering of its own: an unconsumed byte simply
+/// stays queued in the console/xHCI driver's own hardware buffer -
+/// `poll_keyboard_byte` never touches it - until the owner task's own
+/// wait is what asks. A task other than the owner that blocks on
+/// `Keyboard` just stays blocked (this kernel has no `fg`/`bg` or
+/// controlling-task handoff to ever change that) - honest, not silently
+/// wrong, and it's what makes `exec`ing a second program that reads
+/// input behave like a real background task rather than a second
+/// terminal racing the first for every keystroke.
+///
 /// # Safety
 /// `frame` must be the live trap frame of the exception currently being
 /// handled (true when called from `exceptions.rs`'s `rust_irq_handler`,
@@ -499,6 +531,9 @@ pub unsafe fn on_tick(frame: *mut Context) {
 
     for i in 0..NUM_TASKS {
         let TaskState::Blocked(reason) = (unsafe { *STATES[i].0.get() }) else { continue };
+        if reason == WaitReason::Keyboard && i != INPUT_OWNER_TASK {
+            continue;
+        }
         if let Some(value) = reason.poll() {
             unsafe { (*TASKS[i].0.get()).gpr[0] = value };
             unsafe { *STATES[i].0.get() = TaskState::Runnable };

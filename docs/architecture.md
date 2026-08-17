@@ -197,15 +197,26 @@ MAX_PROGRAM_HEADERS]` (16) instead of a `Vec`, with a hard
 `TooManyProgramHeaders` error for the (currently unreachable) case of an
 ELF exceeding that bound.
 
-**Known limitation, confirmed by testing, not just reasoned through:**
-when more than one task is simultaneously `Blocked(WaitReason::Keyboard)`
-(e.g. two shell instances both idling on `read_char`), `on_tick`'s
-wake-check has no way to route a keystroke to a *specific* one of them —
-whichever blocked task the wake-check happens to reach first at the tick
-a byte arrives gets it. A second interactive program run this way will
-mostly just sit blocked while the first one keeps consuming input; this
-is expected, not a regression, and was already named as out of scope
-before this feature was built.
+**Keyboard input is routed to a single designated owner task, not
+whichever blocked task happens to ask first.** The first version of this
+feature had a real bug here, found immediately by testing: with more
+than one task simultaneously `Blocked(WaitReason::Keyboard)` (e.g. two
+shell instances both idling on `read_char`), `on_tick`'s wake-check
+polled every blocked task's wait reason once per tick in index order —
+since the underlying poll (`syscall::poll_keyboard_byte`) destructively
+consumes a byte the instant anything asks, a single keystroke went to
+whichever task happened to still be blocked at that exact tick, which
+flips from tick to tick as tasks trade being blocked and running.
+Fixed by introducing `tasks::INPUT_OWNER_TASK` (hardcoded to task 0, the
+boot-loaded shell — never destroyed, and there's no job-control
+mechanism yet that could legitimately reassign this): the wake-check now
+skips polling keyboard input entirely for every other task, so an
+unconsumed byte just stays queued in the console/xHCI driver's own
+hardware buffer until the owner task's own wait asks for it. A
+non-owner task blocked on `Keyboard` simply stays blocked — it behaves
+like a genuine background task with no input, not a second terminal
+racing the first, but it also has no way to *become* the owner without a
+future `fg`/job-control mechanism this kernel doesn't have yet.
 
 **Real Parallels hardware confirmation:** the `spawn` syscall's error
 paths (missing argument, bad path, `NO_FS`) are confirmed working on
