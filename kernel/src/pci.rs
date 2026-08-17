@@ -318,13 +318,27 @@ pub fn discover_xhci() -> Result<XhciInfo, XhciDiscoveryError> {
 ///
 /// Must be called before `exit_boot_services`, same as
 /// `discover_uart16550` - entirely boot-services-based.
-pub fn log_all_devices() {
+///
+/// Also *returns* what it logged, because the `log::info!` lines alone
+/// turned out to be unreadable on the one platform this diagnostic
+/// exists for: on real Parallels hardware the framebuffer console
+/// clears the screen the moment it installs, boot reaches the shell in
+/// about two seconds, and the UEFI-console rendering of these lines is
+/// gone long before a human (or `prlctl capture`) can catch it -
+/// confirmed by screenshotting a real boot at 0.4-second intervals and
+/// never seeing anything but the finished shell. `main.rs` re-prints
+/// the returned inventory through the post-exit console once one is
+/// installed, the same stash-and-reprint pattern the xHCI bring-up's
+/// diagnostics already needed for the identical reason.
+pub fn log_all_devices() -> ([PciDeviceId; MAX_LOGGED_DEVICES], usize) {
+    let mut devices = [PciDeviceId::default(); MAX_LOGGED_DEVICES];
+    let mut count = 0usize;
+
     let Ok(handles) = uefi::boot::find_handles::<PciRootBridgeIo>() else {
         log::warn!("Ouroboros kernel: PCI device dump: no root bridge found");
-        return;
+        return (devices, count);
     };
 
-    let mut found_any = false;
     for handle in handles {
         let Ok(mut root_bridge) = uefi::boot::open_protocol_exclusive::<PciRootBridgeIo>(handle)
         else {
@@ -344,21 +358,51 @@ pub fn log_all_devices() {
             else {
                 continue;
             };
-            let vendor = vendor_device as u16;
-            let device = (vendor_device >> 16) as u16;
-            let class = (class_reg >> 24) as u8;
-            let subclass = (class_reg >> 16) as u8;
+            let id = PciDeviceId {
+                vendor: vendor_device as u16,
+                device: (vendor_device >> 16) as u16,
+                class: (class_reg >> 24) as u8,
+                subclass: (class_reg >> 16) as u8,
+                prog_if: (class_reg >> 8) as u8,
+            };
+            let PciDeviceId { vendor, device, class, subclass, prog_if } = id;
             log::info!(
-                "Ouroboros kernel: PCI device: vendor={vendor:#06x} device={device:#06x} class={class:#04x} subclass={subclass:#04x}"
+                "Ouroboros kernel: PCI device: vendor={vendor:#06x} device={device:#06x} class={class:#04x} subclass={subclass:#04x} prog_if={prog_if:#04x}"
             );
-            found_any = true;
+            if count < devices.len() {
+                devices[count] = id;
+                count += 1;
+            }
         }
     }
 
-    if !found_any {
+    if count == 0 {
         log::info!("Ouroboros kernel: PCI device dump: root bridge(s) found, but zero devices enumerated");
     }
+    (devices, count)
 }
+
+/// One enumerated PCI function's identity, captured by
+/// [`log_all_devices`] so the inventory survives past
+/// `exit_boot_services` for re-printing (see that function's doc
+/// comment). `prog_if` is included because it's what distinguishes,
+/// e.g., an AHCI SATA controller (class `0x01`/`0x06`/prog-if `0x01`)
+/// or an xHCI controller (`0x0c`/`0x03`/`0x30`) from siblings sharing
+/// a class:subclass pair.
+#[derive(Clone, Copy, Default)]
+pub struct PciDeviceId {
+    pub vendor: u16,
+    pub device: u16,
+    pub class: u8,
+    pub subclass: u8,
+    pub prog_if: u8,
+}
+
+/// Upper bound on how many devices [`log_all_devices`] records -
+/// generous for the handful of devices a Parallels/QEMU VM exposes
+/// (five observed on real Parallels hardware), bounded because the
+/// result lives in a fixed array with no heap after boot services.
+pub const MAX_LOGGED_DEVICES: usize = 16;
 
 fn read_bar0_address(
     root_bridge: &mut PciRootBridgeIo,

@@ -246,6 +246,32 @@ phase:
   "Dynamic task creation and `exec()`" section and
   `docs/architecture.md`'s "Dynamic task creation" section for the full
   writeup.
+- **Disk on real Parallels hardware — diagnosed (2026-08-17), and the
+  answer rules out every documented PCI storage controller.** A
+  dedicated diagnostic round (see `CLAUDE.md`'s "Parallels disk
+  diagnostic" section) confirmed with fresh evidence, not the old
+  inventory alone: the VM's own boot disk is attached as `sata:0`, yet
+  the PCI bus shows **no storage controller of any kind** — the same
+  five devices as ever (audio, EHCI, xHCI, virtio-net, and Parallels'
+  proprietary vendor-`0x1ab8` device). Deliberately attaching a scratch
+  disk as `scsi` with subtype `lsi-sas`, then `lsi-spi` (`prlctl set
+  --device-add hdd --iface scsi --subtype ...` — the only interfaces
+  prlctl offers an ARM64 EFI VM are `ide` and `scsi`; `buslogic` is
+  rejected by Parallels itself as EFI-incompatible) changed nothing:
+  the inventory is byte-identical, the emulated controllers simply
+  don't exist on Apple Silicon. Conclusion: *all* storage on this
+  platform flows through a non-PCI/proprietary path (the `0x1ab8`
+  device is the only candidate), so "implement a documented spec"
+  is not available for any *attached-image* disk. **The one real
+  documented-spec lead left: USB mass storage.** The xHCI controller is
+  on the bus and this kernel already drives it end to end (the
+  keyboard); a USB storage device passed through to the VM would be
+  reachable via USB Mass Storage Bulk-Only Transport + SCSI commands
+  over that same driver — a genuinely documented protocol stack,
+  building on the project's own working xHCI code, at the cost of disk
+  content living on a real USB stick rather than `esp.hdd`. Untested;
+  needs a real passed-through USB storage device to even scope
+  properly.
 - **Actual microkernel-style driver isolation** — moving drivers
   (starting with virtio-blk/virtio-console) out of the EL1 kernel and
   into supervised EL0 processes, per `docs/research-minix-boot.md`'s

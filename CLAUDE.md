@@ -3353,6 +3353,65 @@ by design, but there's no way to redirect them); no pipes (`|` needs
 inter-task IPC, tracked separately in the roadmap), no input
 redirection (`<`), no quoting, no glued operators (`cmd>f`).
 
+## Parallels disk diagnostic: no documented storage controller exists on this platform - confirmed with fresh evidence, not just the old inventory
+
+A dedicated diagnostic round (2026-08-17, no driver written - that was
+the point) settled the "could Parallels expose a disk this kernel could
+drive?" question before any implementation effort got committed to it.
+
+**A permanent diagnostic improvement fell out first:
+`pci::log_all_devices` now returns its inventory, and `main.rs`
+re-prints it through the post-exit console.** The reason is itself a
+finding worth keeping: on real Parallels hardware, boot reaches the
+shell about **two seconds** after `prlctl start`, and the framebuffer
+console clears the screen the moment it installs - so the boot-services
+`log::info!` rendering of the PCI inventory is unreadable in practice.
+Confirmed empirically before writing any code: a capture loop
+screenshotting the booting VM at 0.4-second intervals never caught
+anything but the finished shell. The fix is the same stash-and-reprint
+pattern the xHCI bring-up's diagnostics already needed for the identical
+reason - capture during boot services (a fixed
+`[PciDeviceId; MAX_LOGGED_DEVICES]` array, no heap), print after a
+console installs. Only runs on the no-early-console path, so the normal
+QEMU dev loop is untouched (confirmed by regression: zero inventory
+lines, shell byte-identical, zero aborts). The dump also gained
+`prog_if` - it's what distinguishes storage-controller flavors (AHCI is
+class `0x01`/`0x06`/prog-if `0x01`) and was already load-bearing for
+xHCI discovery.
+
+**The experiment, then the findings.** Baseline: the VM's own boot disk
+is attached as `sata:0` (`prlctl list -i`), firmware demonstrably boots
+from it - and the PCI bus shows **no storage controller of any kind**,
+just the same five devices as the historical inventory (HD Audio, EHCI,
+xHCI, virtio-net, and Parallels' proprietary vendor-`0x1ab8` device).
+So "SATA" in Parallels' config does not mean an AHCI controller on the
+guest bus. Then, deliberately: `prlctl` offers an ARM64 EFI VM exactly
+two disk interfaces (`ide` and `scsi` - probed directly, not assumed);
+a scratch second disk attached as `scsi` subtype `lsi-sas`, then
+`lsi-spi` (real, documented Fusion-MPT hardware, which would have been
+an implementable spec), produced a **byte-identical inventory both
+times** - the emulated controllers simply don't exist on Apple Silicon,
+even when the config accepts them. `buslogic`, the third subtype, is
+rejected by Parallels itself ("cannot use both the BusLogic SCSI
+controller and EFI firmware"). The scratch disk and VM config were
+fully restored afterward.
+
+**Conclusion, recorded the same way the virtio-console dead end was:**
+all storage on Parallels Apple Silicon flows through a
+non-PCI/proprietary path - the `0x1ab8` device is the only remaining
+candidate, and driving it means reverse-engineering an undocumented
+protocol, the same category of work already explicitly declined for the
+serial port. "Implement a documented spec" is not available for any
+attached-image disk on this platform. **The one genuinely documented
+lead left is USB mass storage**: the xHCI controller is on the bus and
+this kernel already drives it end to end for the keyboard; a USB
+storage device passed through to the VM would be reachable via Bulk-Only
+Transport + SCSI commands over that same driver - a real spec, building
+on the project's own working code, at the cost of the disk being a real
+USB stick rather than `esp.hdd`. Untested, and needs a real
+passed-through device to scope - see `docs/roadmap.md`'s new
+"Disk on real Parallels hardware" parking-lot entry.
+
 ## Commands
 
 ```sh
@@ -3446,7 +3505,7 @@ kernel/
   src/devicetree.rs  console UART discovery via the UEFI-provided devicetree (dead end on QEMU/Parallels)
   src/acpi.rs        console UART discovery via ACPI RSDP -> XSDT -> SPCR (works on QEMU, dead end on Parallels), plus the shared find_table(rsdp, signature) walk madt.rs also uses
   src/madt.rs        real GIC version/address discovery via the ACPI MADT (GICD/GICC/GICR structures) - replaces the old QEMU-devicetree-derived gic.rs addresses, see "MADT/GICv3" above
-  src/pci.rs         console UART discovery via PCI enumeration for a class 0x07/0x00 serial controller, plus log_all_devices (a reusable full-bus diagnostic dump, see "virtio-console" above) and discover_xhci (class 0x0c/0x03/0x30, read-only - see "USB HID keyboard driver" above)
+  src/pci.rs         console UART discovery via PCI enumeration for a class 0x07/0x00 serial controller, plus log_all_devices (a reusable full-bus diagnostic dump that also *returns* the inventory so main.rs can re-print it through the post-exit console - see "Parallels disk diagnostic" above) and discover_xhci (class 0x0c/0x03/0x30, read-only - see "USB HID keyboard driver" above)
   src/console.rs     global console handle (Console enum: Pl011 | Uart16550 | Virtio | Framebuffer), shared between main() and the exception handler
   src/framebuffer.rs GOP (EFI_GRAPHICS_OUTPUT_PROTOCOL) discovery: resolution/stride/pixel format + framebuffer physical base/size - the real lead for Parallels, see "GOP framebuffer console" above
   src/font.rs        embedded public-domain 8x8 bitmap font (dhepper/font8x8), printable ASCII 0x20-0x7E only

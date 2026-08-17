@@ -93,6 +93,7 @@ fn main() -> Status {
     // mapped. So there is no fallback anymore — no confirmed address means
     // no post-exit console, full stop.
     let discovery = discover_console(dtb, rsdp);
+    let mut pci_inventory = None;
     if let Some((base, _kind, source)) = &discovery {
         log::info!("Ouroboros kernel: console @ {base:#x} (via {source})");
     } else {
@@ -101,7 +102,12 @@ fn main() -> Status {
         // normal three mechanisms all fail and it isn't obvious why: this
         // answers "is there a virtio-pci device on the bus at all" while
         // we still have a working boot-services console to log through.
-        pci::log_all_devices();
+        // The returned inventory is re-printed later, through whatever
+        // post-exit console installs - the UEFI-console rendering of
+        // these lines is unreadable in practice on real Parallels
+        // hardware (fbconsole clears the screen on install, ~2s after
+        // power-on - see log_all_devices's doc comment).
+        pci_inventory = Some(pci::log_all_devices());
     }
     // A real, hardware-confirmed reason for this flag, not a hedge - and
     // confirmed twice over now, not once. Real Parallels hardware took a
@@ -332,6 +338,24 @@ fn main() -> Status {
     // safely-probeable virtio-mmio console device.
     if virtio_mmio_probe_safe && !console::is_installed() {
         try_virtio_console();
+    }
+
+    // Re-print the boot-services PCI inventory (captured above, only on
+    // the no-early-console path) through the console that actually
+    // survives - see log_all_devices's doc comment for why the
+    // boot-services log::info! rendering of the same lines is
+    // effectively invisible on real Parallels hardware. Never runs on
+    // the normal QEMU dev loop (ACPI console found -> inventory never
+    // captured).
+    if let Some((devices, count)) = &pci_inventory {
+        if console::is_installed() {
+            for id in &devices[..*count] {
+                let pci::PciDeviceId { vendor, device, class, subclass, prog_if } = *id;
+                console::println!(
+                    "Ouroboros kernel: PCI device: vendor={vendor:#06x} device={device:#06x} class={class:#04x} subclass={subclass:#04x} prog_if={prog_if:#04x}"
+                );
+            }
+        }
     }
 
     // USB HID keyboard (kernel/src/xhci.rs) - the first keyboard input
