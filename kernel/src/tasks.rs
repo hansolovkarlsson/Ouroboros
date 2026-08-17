@@ -248,16 +248,33 @@ pub(crate) fn el0_regions() -> [(u64, u64); NUM_TASKS] {
     core::array::from_fn(|i| unsafe { *REGIONS[i].0.get() })
 }
 
-/// The one task whose `Blocked(WaitReason::Keyboard)` the wake-check will
-/// ever actually poll hardware for - see `on_tick`'s doc comment for why
-/// this exists and what happens to every other task blocked the same way.
-/// Hardcoded to task 0 (the boot-loaded shell) rather than a runtime
-/// `AtomicUsize`: task 0 is never destroyed (no task destruction exists
-/// at all yet - see `spawn`'s doc comment), so it's always a valid,
-/// permanent owner, and there's no job-control mechanism yet (`fg`/`bg`,
-/// a controlling-task handoff) that could ever legitimately reassign
-/// this - a settable value would just be an unused knob today.
-const INPUT_OWNER_TASK: usize = 0;
+/// The one task whose `Blocked(WaitReason::Keyboard)` the wake-check
+/// will ever actually poll hardware for - see `on_tick`'s doc comment
+/// for why exactly one owner exists and what happens to every other
+/// task blocked the same way. Runtime state now (it was a hardcoded
+/// `const 0` until job control existed): the `FG` syscall reassigns it
+/// ([`set_input_owner`]), and **any death of the current owner reverts
+/// it to task 0** ([`revert_input_owner_if`], wired into both the
+/// `EXIT` and `KILL` teardowns) - task 0 can never die (both refuse
+/// it), so the revert target is always valid, the same permanence
+/// argument the original hardcoding relied on, now load-bearing for
+/// the revert too.
+static INPUT_OWNER: AtomicUsize = AtomicUsize::new(0);
+
+/// `FG`'s effect: hand the keyboard to task `owner`. Validation (index
+/// in range, slot occupied, not idle) is the syscall layer's job -
+/// this just stores.
+pub(crate) fn set_input_owner(owner: usize) {
+    INPUT_OWNER.store(owner, Ordering::Relaxed);
+}
+
+/// If `dying` currently owns the keyboard, hand it back to task 0 -
+/// called from both task-death paths (`EXIT`'s teardown and `KILL`'s),
+/// so a foregrounded task's death always returns the terminal to the
+/// boot shell instead of leaving input routed at an empty slot.
+pub(crate) fn revert_input_owner_if(dying: usize) {
+    let _ = INPUT_OWNER.compare_exchange(dying, 0, Ordering::Relaxed, Ordering::Relaxed);
+}
 
 /// What a blocked task is waiting for. One variant today - a byte from
 /// the keyboard/console (`syscall_abi::READ_CHAR`, `syscall.rs`) - but
@@ -398,6 +415,27 @@ pub(crate) unsafe fn exit_current_and_switch(frame: *mut Context) -> u64 {
     *frame = unsafe { *TASKS[next].0.get() };
     CURRENT.store(next, Ordering::Relaxed);
     frame.gpr[0]
+}
+
+/// `KILL`'s teardown: destroys task `i` - which must not be the
+/// currently-running task (the syscall layer's validation guarantees
+/// this today: only tasks ≥ 2 can be killed, and the caller is always
+/// whichever task is running). Same bookkeeping as
+/// [`exit_current_and_switch`] minus the context switch - a
+/// non-current task isn't executing (single core, IRQs masked
+/// throughout SVC dispatch; it's parked at an `eret` boundary), so its
+/// saved context is simply discarded. The caller handles the
+/// region-free, owner-revert, and mmu rebuild around this, same as the
+/// `EXIT` arm does - see `syscall.rs`.
+pub(crate) fn kill_task(i: usize) {
+    unsafe { *STATES[i].0.get() = TaskState::Unused };
+    unsafe { *REGIONS[i].0.get() = (0, 0) };
+}
+
+/// Whether slot `i` currently holds a task (`Runnable` or `Blocked`) -
+/// the `KILL`/`FG` syscalls' existence check.
+pub(crate) fn task_exists(i: usize) -> bool {
+    i < NUM_TASKS && unsafe { *STATES[i].0.get() } != TaskState::Unused
 }
 
 pub(crate) enum SpawnError {
@@ -576,7 +614,7 @@ pub unsafe fn start() -> ! {
 /// the same bound this kernel's keyboard input has always had, blocking
 /// or not.
 ///
-/// **Keyboard input is routed to exactly one task, [`INPUT_OWNER_TASK`],
+/// **Keyboard input is routed to exactly one task, [`INPUT_OWNER`],
 /// not to "whichever blocked task this loop reaches first" - a real bug,
 /// not a hypothetical.** `poll_keyboard_byte` (what `WaitReason::Keyboard`
 /// polls) destructively consumes a byte the instant *any* caller asks for
@@ -607,7 +645,7 @@ pub unsafe fn on_tick(frame: *mut Context) {
 
     for i in 0..NUM_TASKS {
         let TaskState::Blocked(reason) = (unsafe { *STATES[i].0.get() }) else { continue };
-        if reason == WaitReason::Keyboard && i != INPUT_OWNER_TASK {
+        if reason == WaitReason::Keyboard && i != INPUT_OWNER.load(Ordering::Relaxed) {
             continue;
         }
         if let Some(value) = reason.poll() {

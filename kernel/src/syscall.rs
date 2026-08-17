@@ -573,6 +573,9 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
             // exit_current_and_switch's doc comment.
             let (base, size) = tasks::task_region(current);
             tasks::free_runtime_region(base, size);
+            // A foregrounded task's death hands the keyboard back to
+            // the boot shell - see tasks::revert_input_owner_if.
+            tasks::revert_input_owner_if(current);
             // SAFETY: `frame` is the live trap frame of this very
             // syscall (dispatch's contract with the SVC trampoline).
             let resumed_x0 = unsafe { tasks::exit_current_and_switch(frame) };
@@ -589,6 +592,45 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
             } else {
                 tasks::task_state_code(i)
             }
+        }
+        syscall_abi::KILL => {
+            let i = arg0 as usize;
+            if i <= 1 {
+                // The boot shell (the permanent keyboard owner) and
+                // idle are protected - same reasoning as EXIT's own
+                // refusal of them.
+                return syscall_abi::TASK_ERR_PROTECTED;
+            }
+            if !tasks::task_exists(i) {
+                return syscall_abi::TASK_ERR_NO_SUCH_TASK;
+            }
+            console::println!("Ouroboros kernel: task {i} killed");
+            // Same teardown order as EXIT's arm, minus the context
+            // switch (the killed task isn't the one running - see
+            // tasks::kill_task's doc comment).
+            let (base, size) = tasks::task_region(i);
+            tasks::free_runtime_region(base, size);
+            tasks::revert_input_owner_if(i);
+            tasks::kill_task(i);
+            // SAFETY: same masked-IRQ single-core contract as
+            // spawn_program's and EXIT's rebuilds.
+            unsafe { mmu::rebuild_with_el0_regions(tasks::el0_regions()) };
+            0
+        }
+        syscall_abi::FG => {
+            let i = arg0 as usize;
+            if i == 1 {
+                // Foregrounding idle would strand the keyboard on a
+                // task that never reads it, with nothing able to type
+                // the way back. Index 0 is allowed - an explicit
+                // "give it back".
+                return syscall_abi::TASK_ERR_PROTECTED;
+            }
+            if !tasks::task_exists(i) {
+                return syscall_abi::TASK_ERR_NO_SUCH_TASK;
+            }
+            tasks::set_input_owner(i);
+            0
         }
         _ => {
             console::println!("Ouroboros kernel: syscall from EL0: unknown number={number}");

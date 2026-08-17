@@ -7,6 +7,24 @@ what broke, how it was diagnosed), see `CLAUDE.md`; for *how* something
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## Job control: `kill <n>` and `fg <n>`
+
+The task-lifecycle arc completes: `kill` (syscall 19) destroys another
+task (exit's teardown minus the context switch - a non-current task
+isn't executing, its saved context is simply discarded), and `fg` (20)
+hands the keyboard to a spawned task - the input owner, hardcoded to
+task 0 since the keyboard-routing fix, is runtime state now, with an
+automatic revert to task 0 whenever the owner dies (task 0 itself can
+never die, so the revert target is always valid). `exec
+/EFI/ORBS/SH.BIN` + `fg 2` is a real nested interactive shell session;
+its `exit` hands the terminal back. Confirmed on QEMU (separate cwd
+state proving input genuinely moved, roles visibly flipped in `ps`,
+revert on exit, kill of a background task, all error paths) and real
+Parallels (the reachable error-path subset). Documented deliberate
+limitation: no interrupt key exists, so `fg` to a non-interactive task
+strands the keyboard until it exits - `fg` is for interactive
+programs; `kill` is the escape hatch for everything else.
+
 ## `ps`, and shell buffers at the syscall cap
 
 Two more small same-day items: a `ps` builtin backed by a new

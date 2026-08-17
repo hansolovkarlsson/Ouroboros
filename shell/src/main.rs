@@ -365,7 +365,7 @@ fn dispatch_line(line: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize, out:
     let arg = words.next().unwrap_or("");
 
     match command {
-        "help" => out.put_line("commands: help, echo, uptime, clear, ls, cat, cd, pwd, mkdir, rmdir, touch, rm, write, cp, mv, exec, exit, ps, selftest (append `> file` or `>> file` to redirect output)"),
+        "help" => out.put_line("commands: help, echo, uptime, clear, ls, cat, cd, pwd, mkdir, rmdir, touch, rm, write, cp, mv, exec, exit, ps, kill, fg, selftest (append `> file` or `>> file` to redirect output)"),
         "echo" => {
             let mut first = true;
             for word in line.split_whitespace().skip(1) {
@@ -408,6 +408,8 @@ fn dispatch_line(line: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize, out:
         "exec" => cmd_exec(arg, cwd, *cwd_len),
         "exit" => cmd_exit(),
         "ps" => cmd_ps(out),
+        "kill" => cmd_kill(arg),
+        "fg" => cmd_fg(arg),
         "selftest" => cmd_selftest(out),
         _ => {
             print_str("unknown command: ");
@@ -591,6 +593,8 @@ fn print_fs_error(cmd: &str, code: u64) {
         syscall_abi::SPAWN_ERR_BAD_ELF => "not a loadable program (bad ELF)",
         syscall_abi::SPAWN_ERR_TOO_LARGE => "program too large for the kernel's staging buffer (or empty)",
         syscall_abi::SPAWN_ERR_NO_FREE_SLOT => "no free task slot",
+        syscall_abi::TASK_ERR_NO_SUCH_TASK => "no such task (see ps)",
+        syscall_abi::TASK_ERR_PROTECTED => "that task is protected (the boot shell and idle are permanent)",
         _ => "failed",
     });
 }
@@ -1289,6 +1293,53 @@ fn cmd_ps(out: &mut Output) {
             _ => ": ?",
         });
         i += 1;
+    }
+}
+
+/// Hand-rolled decimal parse (the shell's first numeric argument) - a
+/// digit loop, no `core::fmt`, `None` for empty/non-digit input.
+fn parse_u64(s: &str) -> Option<u64> {
+    if s.is_empty() {
+        return None;
+    }
+    let mut n: u64 = 0;
+    for b in s.bytes() {
+        if !b.is_ascii_digit() {
+            return None;
+        }
+        n = n.checked_mul(10)?.checked_add((b - b'0') as u64)?;
+    }
+    Some(n)
+}
+
+/// `kill <n>` - destroys another task (the `KILL` syscall). The kernel
+/// refuses tasks 0/1 and empty slots; see [`print_fs_error`]'s task
+/// arms for the messages.
+fn cmd_kill(arg: &str) {
+    let Some(n) = parse_u64(arg) else {
+        print_line("kill: usage: kill <task number> (see ps)");
+        return;
+    };
+    match syscall(syscall_abi::KILL, n) {
+        code if code >= FS_ERR_MIN => print_fs_error("kill", code),
+        _ => {}
+    }
+}
+
+/// `fg <n>` - hands the keyboard to task `n` (the `FG` syscall). This
+/// shell's own next read then waits until that task exits or is killed
+/// (ownership reverts to task 0 automatically on the owner's death).
+/// Foregrounding a task that never reads input means the keyboard is
+/// unreachable until it exits on its own - there's no interrupt key in
+/// this kernel; `fg` is for interactive programs (a spawned shell).
+fn cmd_fg(arg: &str) {
+    let Some(n) = parse_u64(arg) else {
+        print_line("fg: usage: fg <task number> (see ps)");
+        return;
+    };
+    match syscall(syscall_abi::FG, n) {
+        code if code >= FS_ERR_MIN => print_fs_error("fg", code),
+        _ => {}
     }
 }
 

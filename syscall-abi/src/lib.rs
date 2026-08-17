@@ -149,6 +149,25 @@ pub const TASK_STATE_BLOCKED: u64 = 2;
 /// [`TASK_STATE`]'s "no such slot" answer.
 pub const TASK_STATE_INVALID: u64 = u64::MAX;
 
+/// `(task index)` -> `0` on success, [`TASK_ERR_PROTECTED`] (tasks 0/1
+/// are permanent), or [`TASK_ERR_NO_SUCH_TASK`]. Destroys *another*
+/// task - same teardown as a voluntary [`EXIT`] (slot freed, mapping
+/// removed, RAM reclaimed in the LIFO case), minus the context switch:
+/// the killed task isn't the one running. If the killed task held the
+/// keyboard (see [`FG`]), ownership reverts to task 0.
+pub const KILL: u64 = 19;
+
+/// `(task index)` -> `0` on success, [`TASK_ERR_PROTECTED`] (idle can't
+/// be foregrounded), or [`TASK_ERR_NO_SUCH_TASK`]. Hands keyboard
+/// ownership to the given task - the caller's own next blocking read
+/// then waits, unwoken, until the foregrounded task exits or is killed
+/// (ownership reverts to task 0 automatically on the owner's death).
+/// **Foreground a task that never reads input and the keyboard is
+/// unreachable until that task exits on its own** - there is no
+/// interrupt key in this kernel; `fg` is for interactive programs.
+/// Index 0 is allowed as an explicit "give it back".
+pub const FG: u64 = 20;
+
 /// Sentinel `try_read_char` returns when no byte is waiting - out of
 /// range for any real byte (0-255), so callers can tell the two apart
 /// with a single comparison.
@@ -222,12 +241,24 @@ pub const SPAWN_ERR_TOO_LARGE: u64 = u64::MAX - 12;
 /// Every task slot already holds a live task.
 pub const SPAWN_ERR_NO_FREE_SLOT: u64 = u64::MAX - 13;
 
+// Task-management failure codes ([`KILL`]/[`FG`]), same reserved band.
+
+/// The index is out of range or the slot holds no task.
+pub const TASK_ERR_NO_SUCH_TASK: u64 = u64::MAX - 14;
+/// Task 0 (the boot shell) and task 1 (idle) are permanent - they can't
+/// be killed, and idle can't be foregrounded.
+pub const TASK_ERR_PROTECTED: u64 = u64::MAX - 15;
+
 /// Floor of the reserved error band (with headroom for future codes):
-/// **any `fs_*` return value `>= FS_ERR_MIN` is an error**, everything
-/// below is a real result. The predicate callers actually need, since
-/// `fs_read_file`/`fs_list_dir` return arbitrary byte counts on success
-/// and can't enumerate every non-error value in a `match`.
-pub const FS_ERR_MIN: u64 = u64::MAX - 15;
+/// **any error-capable syscall's return value `>= FS_ERR_MIN` is an
+/// error**, everything below is a real result. The predicate callers
+/// actually need, since `fs_read_file`/`fs_list_dir` return arbitrary
+/// byte counts on success and can't enumerate every non-error value in
+/// a `match`. (Moved down from `MAX-15` when the `TASK_ERR_*` codes
+/// consumed the original headroom - safe, since both sides of the ABI
+/// import this from the same crate and no real success value
+/// approaches it either way.)
+pub const FS_ERR_MIN: u64 = u64::MAX - 31;
 
 /// Generic failure sentinel for [`SPAWN`] - same bit pattern as
 /// [`FS_ERROR`] (a bad ELF, no free task slot, and a disk read failure

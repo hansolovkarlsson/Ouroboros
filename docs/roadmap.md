@@ -342,9 +342,11 @@ phase:
   natural test vehicle since a spawned shell can never exit on its own.
   Confirmed on QEMU (exec/exit cycles visibly reusing the same slot
   *and* region base) and real Parallels (the typed-`exit` refusal
-  path). What's deliberately left for a future job-control milestone:
-  ending *another* task (`kill`), `wait()`/reaping, and reassigning
-  keyboard ownership. See `CLAUDE.md`'s "Task destruction" section.
+  path). What was deliberately left for a job-control milestone is
+  now done too - `kill <n>` and `fg <n>` (keyboard handoff with
+  automatic revert on the owner's death; a spawned shell is a real
+  nested interactive session now) - leaving only `wait()`/reaping and
+  an interrupt key (Ctrl+C) as future work in this area. See `CLAUDE.md`'s "Task destruction" section.
 - **Actual microkernel-style driver isolation** — moving drivers
   (starting with virtio-blk/virtio-console) out of the EL1 kernel and
   into supervised EL0 processes, per `docs/research-minix-boot.md`'s

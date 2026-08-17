@@ -3253,7 +3253,9 @@ from disk on real hardware at all today.
 receive keyboard input - any other task blocked on it waits forever with
 no way to become the owner short of a future `fg`/job-control mechanism.
 Good enough for "a background task doesn't corrupt the foreground
-shell's input," not a real multi-program input model.
+shell's input," not a real multi-program input model. **(Update: solved
+- see "Job control" further below; `fg <n>` reassigns ownership at
+runtime, with automatic revert to task 0 when the owner dies.)**
 
 ## Output redirection (`>`/`>>`): pure shell-side, and a real bug found where the syscall ABI's buffer cap meets append
 
@@ -3629,6 +3631,65 @@ directory", `exec INIT.CFG` → "not a loadable program (bad ELF)", two
 spawned shells then a third program → "no free task slot" - zero
 aborts.
 
+## Job control: `kill <n>` and `fg <n>` - a spawned shell is a real nested interactive session now
+
+The last piece of the task-lifecycle arc (spawn → observe → exit →
+destroy-another → hand over the terminal), and the milestone that turns
+`exec` from a demo into something usable: `exec /EFI/ORBS/SH.BIN` then
+`fg 2` is a genuine nested shell session - typing goes to the spawned
+shell (its own separate `cwd` state proves it: `pwd` there answers `/`
+while the outer shell sits in `/EFI`), and its `exit` (which *works*
+for tasks ≥ 2) hands the keyboard straight back to the boot shell.
+
+**The design center is one small state change with an invariant:**
+`INPUT_OWNER_TASK` (the keyboard-routing fix's hardcoded `const 0`)
+became a runtime `AtomicUsize` - the wake-check's single comparison
+reads it, `FG` (syscall 20) stores it, and **any death of the current
+owner reverts it to task 0** (`revert_input_owner_if`, wired into both
+the `EXIT` and `KILL` teardowns). Task 0 can never die - `EXIT` and
+`KILL` both refuse it - so the revert target is always valid: the same
+permanence argument the original hardcoding relied on, now load-bearing
+for the revert too. `KILL` (19) is `exit`'s teardown minus the context
+switch (a non-current task isn't executing - single core, IRQs masked
+during SVC; it's parked at an `eret` boundary, so its saved context is
+simply discarded): log, free region (LIFO-or-leak), revert owner if
+held, slot → `Unused`, one mmu rebuild. Both syscalls validate by
+index (`TASK_ERR_PROTECTED` for 0/1 - though `fg 0` is allowed as an
+explicit "give it back"; `TASK_ERR_NO_SUCH_TASK` otherwise), with the
+two codes joining the reserved error band (`FS_ERR_MIN` moved from
+`MAX-15` to `MAX-31` to restore headroom - safe, both ABI sides import
+the floor from the shared crate). Shell-side: `kill`/`fg` builtins and
+the shell's first numeric-argument parser (`parse_u64`, a hand-rolled
+digit loop).
+
+**A real, documented limitation, deliberate:** `fg` to a task that
+never reads keyboard input strands the keyboard until that task exits
+on its own - there is no interrupt key (no Ctrl+C/SIGINT concept
+anywhere in this kernel). `fg` is for interactive programs; the escape
+hatch for everything else is "don't fg it, kill it." Recorded in
+`docs/shell-commands.md` up front rather than discovered later.
+
+**Confirmed working on QEMU, the full story in one session:** `cd
+/EFI` in shell 0 → `exec SH.BIN` → `ps` (task 2 blocked) → `fg 2` →
+`pwd` answers `/` (shell 2's own cwd - proof input moved, not assumed)
+→ `ps` from *inside* shows task 0 blocked/task 2 runnable (the roles
+visibly flipped) → `echo` round-trips → `exit` → the kernel's `task 2
+exited` line → `pwd` answers `/EFI` again (ownership reverted) → `ps`
+shows slot 2 unused. Separately: `kill 2` on a background shell
+(logged, slot freed), and every error path (`kill 0`/`kill 1`/`fg 1` →
+protected; `kill 3`/`fg 9` → no such task; missing/non-numeric
+arguments → usage lines). Zero aborts. **Confirmed on real Parallels
+hardware** (`make test-parallels`): `ps` plus the protected/no-such-task
+error paths render correctly, typing unregressed - the success path
+needs a spawnable second program, which still needs a disk driver
+there (the standing gap).
+
+**Still coarse, worth knowing before building on this:** no
+`wait()`/reaping (exit codes still go nowhere but the log line); no
+interrupt key (the `fg`-a-non-reader strand above); `bg` doesn't exist
+because it isn't needed - non-owners run freely, background is the
+default state; one keyboard, one owner, no per-task terminals.
+
 ## Parallels disk diagnostic: no documented storage controller exists on this platform - confirmed with fresh evidence, not just the old inventory
 
 A dedicated diagnostic round (2026-08-17, no driver written - that was
@@ -3795,7 +3856,7 @@ kernel/
   src/gicv3.rs       GICv3 backend (redistributor wake/discovery, ICC_* system-register CPU interface) - confirmed working on QEMU and real Parallels hardware, see "MADT/GICv3" above
   src/timer.rs       ARM generic timer (non-secure EL1 physical timer, PPI 14 / GIC INTID 30), TICK_INTERVAL_MS
   src/loader.rs      reads INIT.CFG + a program off the ESP during boot services, into a 2MB-aligned EL0-accessible region, real ELF64 parsing + R_AARCH64_RELATIVE relocation processing - see "A real relocating loader" above and docs/processes.md; elf_region_size/populate_region split so the same parsing/loading logic is reusable from the runtime spawn path too, see "Dynamic task creation and exec()" above
-  src/syscall.rs     svc syscall dispatch table (print/double/report/try_read_char/putc/get_ticks/fs_list_dir/fs_read_file/fs_mkdir/fs_rmdir/fs_touch/fs_rm/fs_write_file/fs_mv/read_char/spawn/exit/task_state, gap at 5) - confirmed working end to end, see above, "Blocking primitives" above for read_char, and "Dynamic task creation and exec()" above for spawn
+  src/syscall.rs     svc syscall dispatch table (print/double/report/try_read_char/putc/get_ticks/fs_list_dir/fs_read_file/fs_mkdir/fs_rmdir/fs_touch/fs_rm/fs_write_file/fs_mv/read_char/spawn/exit/task_state/kill/fg, gap at 5) - confirmed working end to end, see above, "Blocking primitives" above for read_char, and "Dynamic task creation and exec()" above for spawn
   src/tasks.rs       up to 4 task slots (task 0 = loaded program, task 1 = idle, slots 2-3 spawn/exit-cycled) + the round-robin scheduler over Runnable/Blocked/Unused task state (block_current_and_switch, exit_current_and_switch, on_tick's wake-check, tasks::spawn, allocate_runtime_region/free_runtime_region) - confirmed working, see "Blocking primitives", "Dynamic task creation and exec()", and "Task destruction" above
   src/virtio_mmio.rs virtio-mmio transport: 32-slot device discovery, modern (non-legacy) register layout, addresses confirmed via devicetree dump
   src/virtio_blk.rs  runtime virtio-blk driver: feature negotiation, one virtqueue, synchronous polling sector reads and writes - phase 3a (reads)/phase 4 (writes), confirmed working, see above
@@ -3805,7 +3866,7 @@ kernel/
 
 shell/               userland default shell - a separate crate, built for aarch64-unknown-none, loaded from disk (not compiled into the kernel)
   linker.ld          self-relocating (PIE) linker script: entry at offset 0, .rela.dyn/.dynsym/.dynamic/.data.rel.ro, no .bss/.data (see "A real relocating loader" above and docs/processes.md)
-  src/main.rs        line editor + command dispatch (help/echo/uptime/clear/ls/cat/cd/pwd/mkdir/rmdir/touch/rm/write/cp/mv/exec/exit/ps/selftest, plus `> file`/`>> file` output redirection on any of them - see "Output redirection" above), running as real EL0 userland code, built for real relocation (relocation-model=pic, --release only) - main loop blocks on read_char (syscall 15) instead of busy-polling, see "Blocking primitives" above; see docs/processes.md
+  src/main.rs        line editor + command dispatch (help/echo/uptime/clear/ls/cat/cd/pwd/mkdir/rmdir/touch/rm/write/cp/mv/exec/exit/ps/kill/fg/selftest, plus `> file`/`>> file` output redirection on any of them - see "Output redirection" above), running as real EL0 userland code, built for real relocation (relocation-model=pic, --release only) - main loop blocks on read_char (syscall 15) instead of busy-polling, see "Blocking primitives" above; see docs/processes.md
 
 hello/               second userland program: prints a banner and exits via the EXIT syscall - the living proof of "the shell is just a program" and the reference for how a program ends itself (see "Task destruction" above)
   src/main.rs        ~70 lines: _start, a putc-loop print, the exit call

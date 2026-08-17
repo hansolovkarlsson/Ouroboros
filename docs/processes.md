@@ -357,8 +357,10 @@ Worth knowing before building further on this:
   runtime, without a reboot - genuinely `tasks::spawn`, not
   exec-replaces-current-process, so the caller keeps running too. Still
   real limits: a task can end itself (`exit`, syscall 17 - slot freed,
-  region unmapped, RAM reclaimed in the common LIFO case) but nothing
-  can end *another* task (no `kill` - that belongs with job control),
+  region unmapped, RAM reclaimed in the common LIFO case), another
+  task can be ended (`kill`, 19), and the keyboard can be handed to a
+  spawned task and back (`fg`, 20 - ownership reverts to task 0 when
+  the owner dies),
   no way to reload an *already-running* task's program in place, and
   the runtime allocator's reclaim is LIFO-or-leak (a bump cursor, not
   a free list), so pathological spawn/exit orderings can still strand
