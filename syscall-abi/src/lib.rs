@@ -162,10 +162,12 @@ pub const KILL: u64 = 19;
 /// ownership to the given task - the caller's own next blocking read
 /// then waits, unwoken, until the foregrounded task exits or is killed
 /// (ownership reverts to task 0 automatically on the owner's death).
-/// **Foreground a task that never reads input and the keyboard is
-/// unreachable until that task exits on its own** - there is no
-/// interrupt key in this kernel; `fg` is for interactive programs.
-/// Index 0 is allowed as an explicit "give it back".
+/// **Ctrl+C (`0x03`) is the escape hatch**: typed while a task other
+/// than the boot shell owns the keyboard, the kernel intercepts it,
+/// reverts ownership to task 0, and swallows the byte - the
+/// foregrounded task keeps running in the background (nothing is
+/// delivered to or done to it; this is keyboard reclamation, not a
+/// signal). Index 0 is allowed as an explicit "give it back".
 pub const FG: u64 = 20;
 
 /// Sentinel `try_read_char` returns when no byte is waiting - out of

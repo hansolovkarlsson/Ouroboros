@@ -3685,10 +3685,40 @@ needs a spawnable second program, which still needs a disk driver
 there (the standing gap).
 
 **Still coarse, worth knowing before building on this:** no
-`wait()`/reaping (exit codes still go nowhere but the log line); no
-interrupt key (the `fg`-a-non-reader strand above); `bg` doesn't exist
+`wait()`/reaping (exit codes still go nowhere but the log line); ~~no
+interrupt key (the `fg`-a-non-reader strand above)~~ **(closed the
+same day - see the Ctrl+C paragraph below)**; `bg` doesn't exist
 because it isn't needed - non-owners run freely, background is the
 default state; one keyboard, one owner, no per-task terminals.
+
+**Same-day follow-up: the Ctrl+C escape hatch.** The
+`fg`-a-non-reader strand is closed: Ctrl+C (`0x03`, ETX) typed while a
+non-boot-shell task owns the keyboard is intercepted at
+`syscall.rs::poll_keyboard_byte` - the single choke point every
+keyboard path funnels through (wake-check, `READ_CHAR`'s fast path,
+`TRY_READ_CHAR`) - reverting ownership to task 0 and swallowing the
+byte, with a kernel log line for feedback. Deliberately *reclamation,
+not a signal*: nothing is delivered to the foregrounded task, it keeps
+running in the background (`kill` it if it should die). Two supporting
+pieces: `xhci.rs`'s `keycode_to_ascii` gained the Ctrl modifier
+(Ctrl+A..Z map to the classic C0 control bytes - it only handled Shift
+before, so a real keyboard couldn't produce `0x03` at all), and the
+shell's line editor now ignores *all* unhandled control bytes instead
+of appending them invisibly to the buffer (so Ctrl+C while the boot
+shell owns the keyboard is a clean no-op, and stray control bytes
+can't silently corrupt a command line anymore).
+`scripts/test-parallels.sh` gained a `CTRL-C` pseudo-command (a real
+held-Ctrl chord via `--event press/release`, same technique as the `>`
+Shift chord). **Confirmed on QEMU end to end:** `fg 2` -> `pwd`
+answering `/` (input in the nested shell) -> a raw `0x03` -> the
+kernel's reclaim line -> `pwd` answering `/EFI` (input back in the
+boot shell) -> `ps` showing task 2 still alive in the background ->
+`kill 2`; a no-op Ctrl+C with task 0 owning printed nothing and left
+the next command clean; zero aborts. **Confirmed on real Parallels
+hardware:** `echo one` / the `CTRL-C` chord / `echo two` typed cleanly
+with no stray `c` between them - direct proof the Ctrl modifier
+mapping produced `0x03` through the real xHCI path (a broken mapping
+would have typed a plain `c`) and the shell ignored it.
 
 ## Parallels disk diagnostic: no documented storage controller exists on this platform - confirmed with fresh evidence, not just the old inventory
 

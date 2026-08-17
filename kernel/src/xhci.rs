@@ -421,15 +421,28 @@ fn portsc_preserve(current: u32) -> u32 {
 /// key usage IDs (0 = no key, per USB HID Usage Tables page 0x07).
 type Report = [u8; 8];
 
+const MOD_LCTRL: u8 = 1 << 0;
 const MOD_LSHIFT: u8 = 1 << 1;
+const MOD_RCTRL: u8 = 1 << 4;
 const MOD_RSHIFT: u8 = 1 << 5;
 
 /// USB HID keycode -> ASCII, boot-protocol Usage IDs 0x04-0x38 (letters,
 /// digits, and the punctuation/whitespace keys this shell's line editor
 /// cares about). `None` for anything unmapped (function keys, arrows,
 /// modifiers themselves, ...) - a real, documented gap, not a bug; see
-/// module doc comment.
-fn keycode_to_ascii(keycode: u8, shift: bool) -> Option<u8> {
+/// module doc comment. A held Ctrl maps letters to the classic C0
+/// control bytes (Ctrl+A = 0x01 ... Ctrl+Z = 0x1a) - added for the
+/// `fg` escape hatch specifically (Ctrl+C = 0x03, ETX, intercepted
+/// kernel-side to reclaim the keyboard - see
+/// `syscall.rs::poll_keyboard_byte`), general because the general
+/// mapping is the same three lines.
+fn keycode_to_ascii(keycode: u8, shift: bool, ctrl: bool) -> Option<u8> {
+    if ctrl {
+        return match keycode {
+            0x04..=0x1d => Some(1 + (keycode - 0x04)), // Ctrl+A..Ctrl+Z
+            _ => None,
+        };
+    }
     match keycode {
         0x04..=0x1d => Some(if shift { b'A' + (keycode - 0x04) } else { b'a' + (keycode - 0x04) }),
         0x1e..=0x26 => {
@@ -931,6 +944,7 @@ impl Xhci {
         kb.last_report = buf;
 
         let shift = buf[0] & (MOD_LSHIFT | MOD_RSHIFT) != 0;
+        let ctrl = buf[0] & (MOD_LCTRL | MOD_RCTRL) != 0;
         let mut result = None;
         for &keycode in &buf[2..8] {
             if keycode == 0 || keycode < 4 {
@@ -939,7 +953,7 @@ impl Xhci {
             if previous[2..8].contains(&keycode) {
                 continue; // already down last poll - not a new press
             }
-            let Some(ascii) = keycode_to_ascii(keycode, shift) else {
+            let Some(ascii) = keycode_to_ascii(keycode, shift, ctrl) else {
                 continue;
             };
             if result.is_none() {

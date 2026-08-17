@@ -345,8 +345,10 @@ phase:
   path). What was deliberately left for a job-control milestone is
   now done too - `kill <n>` and `fg <n>` (keyboard handoff with
   automatic revert on the owner's death; a spawned shell is a real
-  nested interactive session now) - leaving only `wait()`/reaping and
-  an interrupt key (Ctrl+C) as future work in this area. See `CLAUDE.md`'s "Task destruction" section.
+  nested interactive session now) - leaving only `wait()`/reaping as
+  future work in this area (the Ctrl+C escape hatch landed the same
+  day - keyboard reclamation from a stranded foreground task, not a
+  signal mechanism). See `CLAUDE.md`'s "Task destruction" section.
 - **Actual microkernel-style driver isolation** — moving drivers
   (starting with virtio-blk/virtio-console) out of the EL1 kernel and
   into supervised EL0 processes, per `docs/research-minix-boot.md`'s

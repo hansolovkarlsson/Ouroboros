@@ -7,6 +7,22 @@ what broke, how it was diagnosed), see `CLAUDE.md`; for *how* something
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## Ctrl+C: the `fg` escape hatch
+
+Job control's documented strand (fg a task that never reads input and
+the keyboard was unreachable until it exited) is closed: Ctrl+C typed
+while a non-boot-shell task owns the keyboard is intercepted at the
+single keyboard-poll choke point, reverting ownership to task 0 and
+swallowing the byte - reclamation, not a signal; the foregrounded task
+keeps running in the background. Supporting pieces: the xHCI keymap
+gained the Ctrl modifier (Ctrl+A..Z -> C0 control bytes; it only
+handled Shift before), the shell's line editor now ignores all
+unhandled control bytes, and test-parallels.sh gained a CTRL-C chord
+pseudo-command. Confirmed on QEMU (fg -> strand -> Ctrl+C -> keyboard
+back, nested task still alive) and real Parallels (the chord produced
+a genuine 0x03 through the real xHCI path - no stray 'c' - and the
+shell ignored it cleanly).
+
 ## Job control: `kill <n>` and `fg <n>`
 
 The task-lifecycle arc completes: `kill` (syscall 19) destroys another

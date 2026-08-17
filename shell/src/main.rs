@@ -170,6 +170,18 @@ fn on_byte(byte: u8, buf: &mut [u8; BUFFER_SIZE], len: &mut usize, cwd: &mut [u8
             }
         }
         byte => {
+            // Unhandled C0 control bytes (anything below space that
+            // isn't the CR/LF/backspace cases above) are ignored rather
+            // than appended - they'd sit invisibly in the buffer and
+            // corrupt the eventual command. The case that made this
+            // real: a Ctrl+C typed while *this* shell owns the keyboard
+            // arrives here as an ordinary 0x03 (the kernel only
+            // intercepts it to reclaim the keyboard from a
+            // *foregrounded* task - see `cmd_fg`), and should be a
+            // clean no-op, not a hidden byte.
+            if byte < 0x20 {
+                return;
+            }
             if *len < BUFFER_SIZE {
                 buf[*len] = byte;
                 *len += 1;
@@ -1329,9 +1341,11 @@ fn cmd_kill(arg: &str) {
 /// `fg <n>` - hands the keyboard to task `n` (the `FG` syscall). This
 /// shell's own next read then waits until that task exits or is killed
 /// (ownership reverts to task 0 automatically on the owner's death).
-/// Foregrounding a task that never reads input means the keyboard is
-/// unreachable until it exits on its own - there's no interrupt key in
-/// this kernel; `fg` is for interactive programs (a spawned shell).
+/// Ctrl+C is the escape hatch: the kernel intercepts it whenever a
+/// task other than the boot shell owns the keyboard, reverting
+/// ownership to task 0 (the foregrounded task keeps running in the
+/// background - nothing is delivered to it; `kill` it if it should
+/// die too).
 fn cmd_fg(arg: &str) {
     let Some(n) = parse_u64(arg) else {
         print_line("fg: usage: fg <task number> (see ps)");

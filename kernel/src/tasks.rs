@@ -276,6 +276,27 @@ pub(crate) fn revert_input_owner_if(dying: usize) {
     let _ = INPUT_OWNER.compare_exchange(dying, 0, Ordering::Relaxed, Ordering::Relaxed);
 }
 
+/// The `fg` escape hatch: if `byte` is Ctrl+C (`0x03`, ETX) *while a
+/// task other than the boot shell owns the keyboard*, ownership reverts
+/// to task 0 and the byte is swallowed (returns `true`) - the
+/// foregrounded task keeps running in the background, it just loses the
+/// terminal; `kill` it if it should die too. When task 0 already owns
+/// the keyboard, Ctrl+C is deliberately *not* special - it passes
+/// through as an ordinary byte (which the shell's line editor ignores,
+/// along with every other unhandled control byte), so this never
+/// surprises the normal single-shell case. Not a signal mechanism:
+/// nothing is delivered to the foregrounded task, it isn't interrupted
+/// or stopped - the narrowest thing that unsticks a stranded keyboard.
+pub(crate) fn interrupt_key_check(byte: u8) -> bool {
+    const ETX: u8 = 0x03; // Ctrl+C
+    byte == ETX
+        && INPUT_OWNER
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |owner| {
+                if owner != 0 { Some(0) } else { None }
+            })
+            .is_ok()
+}
+
 /// What a blocked task is waiting for. One variant today - a byte from
 /// the keyboard/console (`syscall_abi::READ_CHAR`, `syscall.rs`) - but
 /// deliberately a real enum, not a bool, since the mechanism below

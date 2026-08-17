@@ -85,7 +85,17 @@ pub fn install_fs(fs: fat32::Fs) {
 /// `WaitReason::Keyboard` for a blocked task - the same check either way,
 /// just a different caller deciding what to do with the result.
 pub(crate) fn poll_keyboard_byte() -> Option<u8> {
-    console::read_byte().or_else(crate::xhci::poll_key)
+    let byte = console::read_byte().or_else(crate::xhci::poll_key)?;
+    // The fg escape hatch - see tasks::interrupt_key_check's doc
+    // comment. Intercepted here, the single choke point every keyboard
+    // path funnels through (the wake-check, READ_CHAR's fast path, and
+    // TRY_READ_CHAR alike), so Ctrl+C reclaims the keyboard no matter
+    // which path would have consumed it.
+    if tasks::interrupt_key_check(byte) {
+        console::println!("Ouroboros kernel: Ctrl+C - keyboard returned to the boot shell");
+        return None;
+    }
+    Some(byte)
 }
 
 /// Minimal sanity bound for a userland `(pointer, length)` argument pair -

@@ -151,7 +151,17 @@ for cmd in $CMDS; do
 	cmd=$(printf '%s' "$cmd" | sed -e 's/^ *//' -e 's/ *$//')
 	[ -z "$cmd" ] && continue
 	echo "==> typing: $cmd"
-	type_line "$cmd"
+	if [ "$cmd" = "CTRL-C" ]; then
+		# Pseudo-command: a real held-Ctrl+C chord (no Enter), same
+		# --event press/release technique as the Shift chord above.
+		# LCtrl's Set-1 make code is 29.
+		prlctl send-key-event "$VM_NAME" --scancode 29 --event press >/dev/null
+		prlctl send-key-event "$VM_NAME" --scancode 46 >/dev/null # 'c'
+		prlctl send-key-event "$VM_NAME" --scancode 29 --event release >/dev/null
+		sleep "$KEY_DELAY"
+	else
+		type_line "$cmd"
+	fi
 	sleep "$CMD_SETTLE"
 	file="$OUT_DIR/$(printf '%02d' "$step")-$(slug "$cmd").png"
 	prlctl capture "$VM_NAME" --file "$file" >/dev/null
