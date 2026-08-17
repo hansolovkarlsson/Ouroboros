@@ -39,7 +39,7 @@ boot time.
 
 The sequence, all before `exit_boot_services`:
 
-1. Read `\EFI\OUROBORO\INIT.CFG` — a config file containing exactly one
+1. Read `\EFI\ORBS\INIT.CFG` — a config file containing exactly one
    line: the path of the program to load.
 2. Read that program's bytes.
 3. Allocate an EL0-accessible, 2MB-aligned region sized to fit it (see
@@ -52,16 +52,18 @@ answer.
 
 ## Configuration
 
-`\EFI\OUROBORO\INIT.CFG` is deliberately minimal: one line, no key/value
+`\EFI\ORBS\INIT.CFG` is deliberately minimal: one line, no key/value
 syntax, no comments, just a path (trimmed of surrounding whitespace). The
 Makefile's `esp` target writes it automatically, pointing at the built-in
-shell. Note the directory is `OUROBORO`, not `OUROBOROS` — deliberately 8
-characters: the runtime FAT32 reader (`fat32.rs`) doesn't parse long
-filenames, and a 9-character name would only be reachable through FAT's
-mangled 8.3 alias.
+shell. Note the directory is `ORBS`, not `OUROBOROS` — the full project
+name is 9 characters, one over FAT's 8.3 short-name limit: the runtime
+FAT32 reader (`fat32.rs`) doesn't parse long filenames, and a 9-character
+name would only be reachable through FAT's mangled 8.3 alias. (It was
+first truncated to `OUROBORO`, exactly 8 characters, then renamed to the
+tidier `ORBS`.)
 
 ```
-\EFI\OUROBORO\SH.BIN
+\EFI\ORBS\SH.BIN
 ```
 
 To run a different program at boot, either edit this file directly on the

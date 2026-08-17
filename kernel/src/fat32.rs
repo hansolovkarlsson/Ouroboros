@@ -364,7 +364,7 @@ impl Fs {
     }
 
     /// Resolves an absolute, `/`-separated path (e.g.
-    /// `/EFI/OUROBORO/SH.BIN`) to its directory entry, walking one
+    /// `/EFI/ORBS/SH.BIN`) to its directory entry, walking one
     /// directory per path component. Matching is case-insensitive, same
     /// as FAT itself.
     ///

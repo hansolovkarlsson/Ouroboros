@@ -94,15 +94,17 @@ use uefi::CString16;
 /// kernel knows to look without already having read a config file to find
 /// it. Everything downstream of this one path is configuration-driven.
 ///
-/// `OUROBORO`, not `OUROBOROS` - deliberately 8 characters, not 9. Real
-/// FAT32 formatters store any longer name in a long-filename (LFN) entry
-/// alongside a mangled 8.3 alias (`OUROBO~2`) for compatibility, and
-/// `fat32.rs`'s runtime reader doesn't parse LFN entries - so a 9-letter
-/// directory name here would make this same path unreachable by the
-/// shell's own `cd`/`ls` once phase 3c wires them up. This project
-/// controls the name, so it's the name that gives, not a parser feature
-/// added just to accommodate one avoidable 9-letter directory.
-const CONFIG_PATH: &str = "\\EFI\\OUROBORO\\INIT.CFG";
+/// `ORBS`, not `OUROBOROS` - the full project name is 9 characters, one
+/// over FAT's 8.3 short-name limit. Real FAT32 formatters store any
+/// longer name in a long-filename (LFN) entry alongside a mangled 8.3
+/// alias (`OUROBO~2`) for compatibility, and `fat32.rs`'s runtime reader
+/// doesn't parse LFN entries - so a 9-letter directory name here would
+/// make this same path unreachable by the shell's own `cd`/`ls`. This
+/// project controls the name, so it's the name that gives, not a parser
+/// feature added just to accommodate one avoidable 9-letter directory.
+/// (The truncation was first `OUROBORO` - exactly 8 characters - then
+/// renamed to the tidier `ORBS` abbreviation.)
+const CONFIG_PATH: &str = "\\EFI\\ORBS\\INIT.CFG";
 
 const STACK_PAGES: u64 = 2; // 8KB - headroom for an unoptimized debug build's stack frames.
 const SLOT_ALIGN: u64 = 0x20_0000; // 2MB - see module doc comment.

@@ -808,7 +808,9 @@ fits 8.3 cleanly.
 **Resolved at the start of phase 3c: renamed, not parsed around.**
 `\EFI\OUROBOROS\` became `\EFI\OUROBORO\` (8 characters) - `loader.rs`'s
 `CONFIG_PATH`, the Makefile's `esp` target, and every doc reference
-updated together. This project controls the name, so once phase 3c's
+updated together. **(Renamed again later, 2026-08-17, to `\EFI\ORBS\` -
+a tidier abbreviation the user preferred, same 8.3 reasoning; the
+transcripts below record the `OUROBORO` era as they happened.)** This project controls the name, so once phase 3c's
 actual need (the shell's own `cd`/`ls` navigating there) was concrete,
 renaming was clearly cheaper and more honest than implementing LFN
 parsing to accommodate one avoidable 9-letter directory. Confirmed
@@ -2157,8 +2159,9 @@ per program; no ELF, no relocations, no dynamic linking (all of the
 above - `core::fmt`, literal comparisons, and the lack of ELF/relocations
 - are the same underlying limitation, not separate ones); `fat32.rs` has
 no long-filename support in general (this project's own ESP directory was
-renamed - `\EFI\OUROBORO\`, 8 characters, not `\EFI\OUROBOROS\` -
-specifically to stay reachable without needing it, but any *other* 9+
+renamed - `\EFI\ORBS\`, well inside FAT's 8.3 limit, not the 9-character
+`\EFI\OUROBOROS\` - specifically to stay reachable without needing it,
+but any *other* 9+
 character name still isn't), only looks at the first FAT32-typed MBR
 partition, and while a file can now hold real content, be copied, and be
 renamed/moved, every write is still a full replace at the syscall/FAT32

@@ -67,16 +67,17 @@ shell-bin:
 
 # Stage the EFI System Partition layout QEMU/Parallels expect: a removable
 # UEFI drive boots \EFI\BOOT\BOOTAA64.EFI automatically, no boot manager
-# entry needed. \EFI\OUROBORO\ (8 characters, not 9 - see loader.rs's
+# entry needed. \EFI\ORBS\ (must fit FAT's 8.3 short-name limit, which
+# the full 9-character project name doesn't - see loader.rs's
 # CONFIG_PATH doc comment for why) holds everything that isn't the kernel
 # itself: the default shell binary and the config file (loader.rs's
 # CONFIG_PATH) naming which program to load - edit INIT.CFG and rebuild
 # just that program to swap it out, no kernel rebuild required.
 esp: build shell-bin
-	mkdir -p $(ESP_DIR)/EFI/BOOT $(ESP_DIR)/EFI/OUROBORO
+	mkdir -p $(ESP_DIR)/EFI/BOOT $(ESP_DIR)/EFI/ORBS
 	cp $(KERNEL) $(ESP_DIR)/EFI/BOOT/BOOTAA64.EFI
-	cp $(SHELL_BIN) $(ESP_DIR)/EFI/OUROBORO/SH.BIN
-	printf '\\EFI\\OUROBORO\\SH.BIN' > $(ESP_DIR)/EFI/OUROBORO/INIT.CFG
+	cp $(SHELL_BIN) $(ESP_DIR)/EFI/ORBS/SH.BIN
+	printf '\\EFI\\ORBS\\SH.BIN' > $(ESP_DIR)/EFI/ORBS/INIT.CFG
 
 # Boots the ESP directory directly in QEMU (no disk image needed) against
 # the aarch64 OVMF firmware installed by `brew install qemu`.
