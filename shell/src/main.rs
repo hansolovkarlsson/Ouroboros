@@ -69,16 +69,19 @@ use core::panic::PanicInfo;
 const BUFFER_SIZE: usize = 128;
 const CWD_SIZE: usize = 128;
 const PATH_SIZE: usize = 128;
-const LIST_BUFFER_SIZE: usize = 256;
-const CAT_BUFFER_SIZE: usize = 256;
-/// Redirected-output capture buffer ([`Output::Capture`]). Sized to hold
-/// the largest output any single builtin can produce today with real
-/// margin: `cat`'s is the biggest, bounded by [`CAT_BUFFER_SIZE`] (256)
-/// plus a trailing newline - everything else (`ls` at
-/// [`LIST_BUFFER_SIZE`], `help`'s one line, `echo` at [`BUFFER_SIZE`]) is
-/// smaller. Kept deliberately modest because it lives on `run_line`'s
-/// stack frame and this program's stack is a fixed, unguarded 8KB (see
-/// `docs/processes.md`).
+// Both sized to the kernel's per-syscall buffer cap (`MAX_USER_LEN`,
+// 512 - see kernel/src/syscall.rs): any larger buffer would be rejected
+// at the syscall boundary anyway, so this is the ceiling, not a choice.
+const LIST_BUFFER_SIZE: usize = 512;
+const CAT_BUFFER_SIZE: usize = 512;
+/// Redirected-output capture buffer ([`Output::Capture`]). Exactly
+/// [`CAT_BUFFER_SIZE`]/[`LIST_BUFFER_SIZE`] (512, the syscall cap) -
+/// the largest output any single builtin can produce fits with zero
+/// slack (`cat`'s display-only trailing newline and truncation notice
+/// deliberately bypass the capture, so a full 512-byte read captures
+/// exactly 512 bytes). Kept at the cap rather than larger because it
+/// lives on `run_line`'s stack frame and this program's stack is a
+/// fixed, unguarded 8KB (see `docs/processes.md`).
 const CAPTURE_SIZE: usize = 512;
 
 const BACKSPACE: u8 = 0x08;
@@ -89,7 +92,7 @@ const LF: u8 = b'\n';
 // Syscall numbers and sentinel values come from the shared `syscall-abi`
 // crate now, not hand-duplicated local consts - see its doc comment and
 // `kernel/src/syscall.rs`'s dispatch table, the other side of this ABI.
-use syscall_abi::{EXIT_DENIED, FS_ERR_MIN, FS_ERR_NOT_FOUND, NO_FS};
+use syscall_abi::{EXIT_DENIED, FS_ERR_MIN, FS_ERR_NOT_FOUND, NO_FS, TASK_STATE_BLOCKED, TASK_STATE_INVALID, TASK_STATE_RUNNABLE, TASK_STATE_UNUSED};
 
 /// Placed first in `.text` by `linker.ld` (`KEEP(*(.text.start))`) so it
 /// lands at file/VA offset 0 - `tasks.rs` sets a loaded program's
@@ -362,7 +365,7 @@ fn dispatch_line(line: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize, out:
     let arg = words.next().unwrap_or("");
 
     match command {
-        "help" => out.put_line("commands: help, echo, uptime, clear, ls, cat, cd, pwd, mkdir, rmdir, touch, rm, write, cp, mv, exec, exit, selftest (append `> file` or `>> file` to redirect output)"),
+        "help" => out.put_line("commands: help, echo, uptime, clear, ls, cat, cd, pwd, mkdir, rmdir, touch, rm, write, cp, mv, exec, exit, ps, selftest (append `> file` or `>> file` to redirect output)"),
         "echo" => {
             let mut first = true;
             for word in line.split_whitespace().skip(1) {
@@ -404,6 +407,7 @@ fn dispatch_line(line: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize, out:
         "mv" => cmd_mv(line, cwd, *cwd_len),
         "exec" => cmd_exec(arg, cwd, *cwd_len),
         "exit" => cmd_exit(),
+        "ps" => cmd_ps(out),
         "selftest" => cmd_selftest(out),
         _ => {
             print_str("unknown command: ");
@@ -1255,6 +1259,37 @@ fn fs_spawn(path: &str) -> u64 {
 /// instead (see [`cmd_exit`]).
 fn task_exit(code: u64) -> u64 {
     syscall(syscall_abi::EXIT, code)
+}
+
+/// Task `i`'s scheduler state (`TASK_STATE` syscall) - see [`cmd_ps`].
+fn task_state(i: u64) -> u64 {
+    syscall(syscall_abi::TASK_STATE, i)
+}
+
+/// `ps` builtin: one line per scheduler slot, probing indices upward
+/// until the kernel answers [`TASK_STATE_INVALID`] (how the slot count
+/// is discovered without it leaking into the ABI as a constant). The
+/// caller can't tell "running right now" from "runnable, waiting its
+/// turn" - it is, by definition, the one running at the moment it asks -
+/// so both print as "runnable". Real output, so it goes through the
+/// sink (redirectable like any other command's).
+fn cmd_ps(out: &mut Output) {
+    let mut i = 0u64;
+    loop {
+        let state = task_state(i);
+        if state == TASK_STATE_INVALID {
+            break;
+        }
+        out.put_str("task ");
+        out.put_u64_decimal(i);
+        out.put_line(match state {
+            TASK_STATE_UNUSED => ": unused",
+            TASK_STATE_RUNNABLE => ": runnable",
+            TASK_STATE_BLOCKED => ": blocked (waiting for input)",
+            _ => ": ?",
+        });
+        i += 1;
+    }
 }
 
 /// `exit` builtin. This boot-loaded shell is task 0, which the kernel

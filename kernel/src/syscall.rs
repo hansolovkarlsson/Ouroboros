@@ -582,6 +582,14 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
             unsafe { mmu::rebuild_with_el0_regions(tasks::el0_regions()) };
             resumed_x0
         }
+        syscall_abi::TASK_STATE => {
+            let i = arg0 as usize;
+            if i >= tasks::NUM_TASKS {
+                syscall_abi::TASK_STATE_INVALID
+            } else {
+                tasks::task_state_code(i)
+            }
+        }
         _ => {
             console::println!("Ouroboros kernel: syscall from EL0: unknown number={number}");
             u64::MAX

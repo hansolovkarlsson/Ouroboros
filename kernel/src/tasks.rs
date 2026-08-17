@@ -234,6 +234,16 @@ pub(crate) fn task_region(i: usize) -> (u64, u64) {
     unsafe { *REGIONS[i].0.get() }
 }
 
+/// Task `i`'s state as its ABI code (`syscall-abi`'s `TASK_STATE_*`) -
+/// the `TASK_STATE` syscall's whole implementation, bounds check aside.
+pub(crate) fn task_state_code(i: usize) -> u64 {
+    match unsafe { *STATES[i].0.get() } {
+        TaskState::Unused => syscall_abi::TASK_STATE_UNUSED,
+        TaskState::Runnable => syscall_abi::TASK_STATE_RUNNABLE,
+        TaskState::Blocked(_) => syscall_abi::TASK_STATE_BLOCKED,
+    }
+}
+
 pub(crate) fn el0_regions() -> [(u64, u64); NUM_TASKS] {
     core::array::from_fn(|i| unsafe { *REGIONS[i].0.get() })
 }

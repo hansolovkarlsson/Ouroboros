@@ -7,6 +7,20 @@ what broke, how it was diagnosed), see `CLAUDE.md`; for *how* something
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## `ps`, and shell buffers at the syscall cap
+
+Two more small same-day items: a `ps` builtin backed by a new
+read-only `task_state` syscall (18) - one line per scheduler slot
+(`unused`/`runnable`/`blocked`), the first way userland can see the
+spawn/exit lifecycle it now controls (a spawned shell visibly sits
+"blocked (waiting for input)"; an exited task's slot visibly returns
+to "unused"), with the slot count discovered by probing rather than
+leaking into the ABI as a constant. And the shell's `cat`/`ls`/`cp`
+buffers doubled from 256 bytes to 512 - the kernel's per-syscall cap
+(`MAX_USER_LEN`) and therefore the ceiling, not a choice - confirmed
+by cat'ing and cp'ing a 408-byte file untruncated that the old
+buffers would have cut off or refused.
+
 ## `mv` into directories, and `SPAWN_ERROR` split
 
 Two small follow-ups the same day: `mv <src> <dir>` now moves *into* an

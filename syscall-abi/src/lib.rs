@@ -129,6 +129,26 @@ pub const EXIT: u64 = 17;
 /// returns): the calling task is one of the two that may not exit.
 pub const EXIT_DENIED: u64 = u64::MAX;
 
+/// `(task index)` -> one of the `TASK_STATE_*` values below, or
+/// [`TASK_STATE_INVALID`] for an index past the scheduler's slot count -
+/// which is also how a caller discovers that count without a separate
+/// constant leaking into the ABI: probe indices upward until invalid
+/// comes back (see the shell's `ps` builtin). Read-only observability
+/// for the spawn/exit lifecycle - the first way userland can see what's
+/// actually running.
+pub const TASK_STATE: u64 = 18;
+
+/// The slot has no task (never spawned, or exited).
+pub const TASK_STATE_UNUSED: u64 = 0;
+/// The task is runnable (running or waiting for its round-robin turn -
+/// the two are indistinguishable to the caller, who is by definition
+/// the one running at the moment it asks).
+pub const TASK_STATE_RUNNABLE: u64 = 1;
+/// The task is blocked on a wait reason (today: keyboard input).
+pub const TASK_STATE_BLOCKED: u64 = 2;
+/// [`TASK_STATE`]'s "no such slot" answer.
+pub const TASK_STATE_INVALID: u64 = u64::MAX;
+
 /// Sentinel `try_read_char` returns when no byte is waiting - out of
 /// range for any real byte (0-255), so callers can tell the two apart
 /// with a single comparison.
