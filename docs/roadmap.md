@@ -272,6 +272,28 @@ phase:
   content living on a real USB stick rather than `esp.hdd`. Untested;
   needs a real passed-through USB storage device to even scope
   properly.
+- **USB mass storage over xHCI — the follow-up to the diagnostic
+  above, parked until it can be scoped against real hardware.** The
+  concrete first step needs no driver code at all: plug a USB stick
+  into the host, pass it through to the VM in Parallels' USB settings,
+  and boot (`make test-parallels CMDS="uptime"` is enough) — the xHCI
+  driver's existing port-scan log lines in the boot screenshot will
+  show whether the device enumerates and what its interface descriptors
+  look like, which is the whole scoping question. If it enumerates,
+  the driver work is: recognize a Mass Storage interface
+  (`bInterfaceClass=0x08`, subclass `0x06` SCSI-transparent, protocol
+  `0x50` Bulk-Only Transport) during the port scan the same way the
+  keyboard's HID interface is recognized today, configure its bulk
+  IN/OUT endpoint pair (the first non-interrupt endpoint type this
+  driver would ever drive), and implement BOT's CBW/CSW framing around
+  a minimal SCSI command set (`INQUIRY`, `READ CAPACITY(10)`,
+  `READ(10)`, `WRITE(10)`) — then adapt `fat32.rs` to sit on a second
+  block-device backend besides `virtio_blk::Device`. Known
+  constraints going in: the xHCI driver is currently
+  one-port/one-device/no-hubs (the keyboard and the stick must both
+  still be reachable — this likely forces lifting the
+  single-device-slot limitation first), and everything stays polled,
+  matching the rest of the kernel.
 - **Actual microkernel-style driver isolation** — moving drivers
   (starting with virtio-blk/virtio-console) out of the EL1 kernel and
   into supervised EL0 processes, per `docs/research-minix-boot.md`'s
