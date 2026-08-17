@@ -202,8 +202,32 @@ phase:
   interchangeable `Context`, but it directly corrupted the resumed
   task's `ELR_EL1` the first time one did. See `CLAUDE.md`'s "Blocking
   primitives" section for the full writeup.
-- Dynamic task creation and `exec()` — running more than one loaded
-  program, or reloading one without a reboot.
+- ~~Dynamic task creation and `exec()` — running more than one loaded
+  program, or reloading one without a reboot.~~ **Done** — a new `spawn`
+  syscall (16) loads a program from disk at runtime and starts it as a
+  genuinely new, independent task alongside whatever's already running
+  (`tasks::spawn`, not exec-replaces-current-process — the shell command
+  is named `exec` to match this item's original wording, but nothing
+  about the calling task is replaced). Needed a runtime physical-page
+  bump allocator (nothing before this handed out RAM after boot
+  services exited), `mmu::install_identity_map` made callable a second
+  time (reusing the exact "swap the whole table set while code keeps
+  running" mechanism already proven at boot, not a new incremental-remap
+  primitive), and the scheduler grown from a fixed 2 slots to 4 with an
+  `Unused` state for the two new ones. A real bug surfaced and fixed
+  along the way: the ELF parser's `Vec`-based program-header parsing
+  hung completely (no exception, no output) when called from this new
+  runtime path, since the global allocator is boot-services-backed and
+  invalid post-`exit_boot_services` — fixed with a fixed-capacity
+  `[ProgramHeader; 16]` instead. Confirmed on QEMU (two shell instances
+  alive concurrently, ticks still advancing, zero aborts) and on real
+  Parallels hardware for every piece except the actual disk-load success
+  path, which real hardware can't reach yet — a pre-existing,
+  already-tracked gap (no working virtio-blk on Parallels at all, see
+  below), not something this feature introduces. See `CLAUDE.md`'s
+  "Dynamic task creation and `exec()`" section and
+  `docs/architecture.md`'s "Dynamic task creation" section for the full
+  writeup.
 - **Actual microkernel-style driver isolation** — moving drivers
   (starting with virtio-blk/virtio-console) out of the EL1 kernel and
   into supervised EL0 processes, per `docs/research-minix-boot.md`'s
@@ -211,6 +235,5 @@ phase:
   `docs/research-helix-os.md`'s (a trait-based mechanism/policy split
   inside one address space, a different real answer to the same
   question — see that note's "what this says about Ouroboros's current
-  shape"). Explicitly deferred until there's more than one reason to
-  want it: it needs dynamic task creation and real IPC first, not just
-  a virtio driver.
+  shape"). Dynamic task creation (above) is done; real IPC is still
+  needed before this is worth starting.

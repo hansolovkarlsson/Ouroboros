@@ -83,7 +83,6 @@
 //! cared about the *total* region size, however that size gets derived.
 
 use alloc::string::String;
-use alloc::vec::Vec;
 use core::mem::size_of;
 use core::ptr::NonNull;
 
@@ -108,6 +107,23 @@ const CONFIG_PATH: &str = "\\EFI\\OUROBORO\\INIT.CFG";
 const STACK_PAGES: u64 = 2; // 8KB - headroom for an unoptimized debug build's stack frames.
 const SLOT_ALIGN: u64 = 0x20_0000; // 2MB - see module doc comment.
 
+/// Generous headroom, not a real limit this project has ever come close
+/// to: the default shell has 6 program headers (3 `PT_LOAD` plus
+/// `PT_DYNAMIC`/`PT_GNU_RELRO`/`PT_GNU_STACK`, confirmed directly via
+/// `llvm-readobj -l` during the relocating-loader milestone).
+///
+/// A fixed array, not `Vec` - `parse_program_headers` runs from both the
+/// boot-services-only path (`load()`, where `alloc` is fine) and the
+/// runtime `spawn` syscall path (`syscall.rs`, long after
+/// `exit_boot_services` has made the global allocator permanently
+/// invalid). This distinction is a real bug this project found by
+/// testing, not by review: the first real test of runtime `spawn` hung
+/// silently, no exception and no abort, isolated via temporary debug
+/// prints to a `Vec` allocation inside what's now this function - the
+/// boot-services-backed global allocator doesn't fail cleanly once boot
+/// services are gone, it just hangs.
+const MAX_PROGRAM_HEADERS: usize = 16;
+
 // ELF64 constants - cross-checked against the AArch64 ELF psABI and
 // generic ELF64 spec, not transcribed from memory alone: `e_machine`
 // EM_AARCH64 = 183 and `R_AARCH64_RELATIVE` = 1027 are the two most
@@ -124,7 +140,7 @@ const R_AARCH64_RELATIVE: u32 = 1027;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
-struct ElfHeader {
+pub(crate) struct ElfHeader {
     e_ident: [u8; 16],
     e_type: u16,
     e_machine: u16,
@@ -143,7 +159,7 @@ struct ElfHeader {
 
 #[repr(C)]
 #[derive(Clone, Copy)]
-struct ProgramHeader {
+pub(crate) struct ProgramHeader {
     p_type: u32,
     p_flags: u32,
     p_offset: u64,
@@ -201,6 +217,9 @@ pub enum LoaderError {
     /// toolchain settings.
     UnexpectedElfType(u16),
     WrongMachine(u16),
+    /// More program headers than [`MAX_PROGRAM_HEADERS`] - see its own
+    /// doc comment for why this is a fixed bound, not a `Vec`.
+    TooManyProgramHeaders,
     NoLoadSegments,
     /// A relocation type other than `R_AARCH64_RELATIVE` showed up - this
     /// project has no imported symbols to resolve, so nothing else should
@@ -226,6 +245,7 @@ impl core::fmt::Display for LoaderError {
             LoaderError::UnsupportedEndian(e) => write!(f, "unsupported ELF byte order {e} (expected little-endian)"),
             LoaderError::UnexpectedElfType(t) => write!(f, "unexpected ELF type {t} (expected ET_DYN - built with this project's own toolchain settings?)"),
             LoaderError::WrongMachine(m) => write!(f, "unexpected ELF machine {m} (expected EM_AARCH64)"),
+            LoaderError::TooManyProgramHeaders => write!(f, "program has more than {MAX_PROGRAM_HEADERS} program headers"),
             LoaderError::NoLoadSegments => write!(f, "program has no PT_LOAD segments"),
             LoaderError::UnsupportedRelocation(t) => write!(f, "unsupported relocation type {t} (only R_AARCH64_RELATIVE is supported - no dynamic linking)"),
         }
@@ -313,13 +333,35 @@ fn parse_elf_header(file: &[u8]) -> Result<ElfHeader, LoaderError> {
     Ok(header)
 }
 
-fn parse_program_headers(file: &[u8], header: &ElfHeader) -> Result<Vec<ProgramHeader>, LoaderError> {
-    let mut phdrs = Vec::with_capacity(header.e_phnum as usize);
-    for i in 0..header.e_phnum as usize {
-        let offset = header.e_phoff as usize + i * header.e_phentsize as usize;
-        phdrs.push(read_at::<ProgramHeader>(file, offset)?);
+/// A fixed-capacity stand-in for `Vec<ProgramHeader>` - see
+/// [`MAX_PROGRAM_HEADERS`]'s doc comment for why this can't be a real
+/// `Vec`. `Clone`/`Copy` since it's small (16 * 56 bytes) and both
+/// callers of [`parse_program_headers`] just want to pass the populated
+/// prefix around as a slice.
+#[derive(Clone, Copy)]
+pub(crate) struct ProgramHeaders {
+    headers: [ProgramHeader; MAX_PROGRAM_HEADERS],
+    count: usize,
+}
+
+impl ProgramHeaders {
+    pub(crate) fn as_slice(&self) -> &[ProgramHeader] {
+        &self.headers[..self.count]
     }
-    Ok(phdrs)
+}
+
+fn parse_program_headers(file: &[u8], header: &ElfHeader) -> Result<ProgramHeaders, LoaderError> {
+    let count = header.e_phnum as usize;
+    if count > MAX_PROGRAM_HEADERS {
+        return Err(LoaderError::TooManyProgramHeaders);
+    }
+    let zero = ProgramHeader { p_type: 0, p_flags: 0, p_offset: 0, p_vaddr: 0, p_paddr: 0, p_filesz: 0, p_memsz: 0, p_align: 0 };
+    let mut headers = [zero; MAX_PROGRAM_HEADERS];
+    for (i, slot) in headers.iter_mut().enumerate().take(count) {
+        let offset = header.e_phoff as usize + i * header.e_phentsize as usize;
+        *slot = read_at::<ProgramHeader>(file, offset)?;
+    }
+    Ok(ProgramHeaders { headers, count })
 }
 
 fn read_section_header(file: &[u8], header: &ElfHeader, index: u16) -> Result<SectionHeader, LoaderError> {
@@ -430,12 +472,23 @@ unsafe fn apply_relocations(file: &[u8], rela_shdr: &SectionHeader, region_base:
     Ok(())
 }
 
-fn load_elf_into_el0_region(program: &[u8]) -> Result<LoadedProgram, LoaderError> {
+/// Parses just enough of an ELF file to know how big an EL0 region it
+/// needs - no allocation, no copying. Split out from what used to be one
+/// monolithic `load_elf_into_el0_region` specifically so a *runtime*
+/// caller (the `spawn` syscall, `syscall.rs` - running long after
+/// `exit_boot_services` has made `boot::allocate_pages` permanently
+/// unavailable) can reuse this half without the boot-services-only
+/// allocation the other half needs: call this first to learn the size,
+/// allocate accordingly (`tasks::allocate_runtime_region`, not
+/// `boot::allocate_pages`), then call [`populate_region`] with the
+/// result, exactly the same two-step shape [`load_elf_into_el0_region`]
+/// uses internally, just with a different allocation source in between.
+pub(crate) fn elf_region_size(program: &[u8]) -> Result<(ElfHeader, ProgramHeaders, u64), LoaderError> {
     let header = parse_elf_header(program)?;
     let phdrs = parse_program_headers(program, &header)?;
 
     let mut max_end = 0u64;
-    for ph in &phdrs {
+    for ph in phdrs.as_slice() {
         if ph.p_type == PT_LOAD {
             let end = ph.p_vaddr.checked_add(ph.p_memsz).ok_or(LoaderError::Truncated)?;
             max_end = max_end.max(end);
@@ -450,9 +503,46 @@ fn load_elf_into_el0_region(program: &[u8]) -> Result<LoadedProgram, LoaderError
     let region_pages = code_pages + STACK_PAGES;
     let region_size = region_pages * page_size;
 
+    Ok((header, phdrs, region_size))
+}
+
+/// Copies `program`'s `PT_LOAD` segments into an *already-allocated*
+/// `region_base`/`region_size` region and applies its relocations -
+/// everything [`load_elf_into_el0_region`] used to do after obtaining
+/// memory, factored out so a runtime caller with its own way of getting a
+/// region (`tasks::allocate_runtime_region`, not `boot::allocate_pages`)
+/// can reuse it unchanged.
+///
+/// # Safety
+/// `region_base` must point to a freshly allocated, writable region of at
+/// least `region_size` bytes - the same requirement [`copy_segments`] and
+/// [`apply_relocations`] already documented individually.
+pub(crate) unsafe fn populate_region(
+    program: &[u8],
+    header: &ElfHeader,
+    phdrs: &[ProgramHeader],
+    region_base: u64,
+    region_size: u64,
+) -> Result<LoadedProgram, LoaderError> {
+    // SAFETY: forwarded from this function's own contract.
+    unsafe { copy_segments(program, phdrs, region_base)? };
+
+    if let Some(rela_shdr) = find_section_by_name(program, header, b".rela.dyn")? {
+        // SAFETY: segments were just copied into this same region above.
+        unsafe { apply_relocations(program, &rela_shdr, region_base)? };
+    }
+
+    Ok(LoadedProgram { base: region_base, size: region_size, entry: region_base + header.e_entry })
+}
+
+fn load_elf_into_el0_region(program: &[u8]) -> Result<LoadedProgram, LoaderError> {
+    let (header, phdrs, region_size) = elf_region_size(program)?;
+    let page_size = PAGE_SIZE as u64;
+
     // Over-allocate by one slot's worth of pages so there's guaranteed to
     // be a 2MB-aligned address somewhere inside the range, then trim the
     // slack off both ends - see module doc comment.
+    let region_pages = region_size / page_size;
     let padded_pages = region_pages + (SLOT_ALIGN / page_size);
     let raw = boot::allocate_pages(AllocateType::AnyPages, MemoryType::LOADER_DATA, padded_pages as usize)
         .map_err(LoaderError::Alloc)?;
@@ -478,14 +568,7 @@ fn load_elf_into_el0_region(program: &[u8]) -> Result<LoadedProgram, LoaderError
     }
 
     // SAFETY: `aligned_addr` is freshly allocated, page-aligned, and
-    // `region_size` was derived from the same PT_LOAD segments being
-    // copied here, so every segment fits.
-    unsafe { copy_segments(program, &phdrs, aligned_addr)? };
-
-    if let Some(rela_shdr) = find_section_by_name(program, &header, b".rela.dyn")? {
-        // SAFETY: segments were just copied into this same region above.
-        unsafe { apply_relocations(program, &rela_shdr, aligned_addr)? };
-    }
-
-    Ok(LoadedProgram { base: aligned_addr, size: region_size, entry: aligned_addr + header.e_entry })
+    // `region_size` was derived from the same PT_LOAD segments this
+    // populates.
+    unsafe { populate_region(program, &header, phdrs.as_slice(), aligned_addr, region_size) }
 }

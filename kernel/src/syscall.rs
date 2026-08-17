@@ -34,20 +34,26 @@
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use syscall_abi::{FS_ERROR, NO_CHAR, NO_FS};
+use syscall_abi::{FS_ERROR, NO_CHAR, NO_FS, SPAWN_ERROR};
 
 use crate::console;
 use crate::exceptions;
 use crate::exceptions::Context;
 use crate::fat32;
+use crate::loader;
+use crate::mmu;
 use crate::tasks;
 
-/// Two independent counters (one per `tasks.rs` task), proof — alongside
+/// One independent counter per `tasks.rs` slot, proof — alongside
 /// `double`/`print` below — that syscalls arriving from *different*,
 /// actually-switching contexts still land in the right dispatch arm with
 /// the right per-caller state, not just that the dispatch table has more
-/// than one entry.
-static TASK_REPORTS: [AtomicU64; crate::tasks::NUM_TASKS] = [AtomicU64::new(0), AtomicU64::new(0)];
+/// than one entry. Sized by `NUM_TASKS` like everything else in
+/// `tasks.rs` keyed per-slot - grew from 2 to 4 alongside it for dynamic
+/// task creation, even though only the original two tasks have ever
+/// actually called `report`.
+static TASK_REPORTS: [AtomicU64; crate::tasks::NUM_TASKS] =
+    [AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)];
 
 /// The mounted FAT32 filesystem (if any) `fs_list_dir`/`fs_read_file`
 /// operate on - `None` is a valid, expected state (e.g. `make run`'s
@@ -231,13 +237,92 @@ fn fs_mv(src: &str, dst: &str) -> u64 {
     }
 }
 
+/// Sized generously for a real userland program - the default shell is
+/// currently ~45KB. A fixed EL1 static, not a heap allocation: `alloc` is
+/// unavailable this deep into boot (see `loader.rs`'s own reasoning for
+/// why it's fine on the *boot-services* side but not here), and this
+/// matches this project's established "fixed static buffer, no heap"
+/// pattern for every other runtime buffer (`fat32.rs`'s callers,
+/// `shell/src/main.rs`'s own read buffers).
+const SPAWN_STAGING_SIZE: usize = 128 * 1024;
+
+struct SpawnStagingCell(core::cell::UnsafeCell<[u8; SPAWN_STAGING_SIZE]>);
+// SAFETY: single-core; only ever touched from within `spawn_program`,
+// which by construction can't run re-entrantly (same reasoning as `FS`).
+unsafe impl Sync for SpawnStagingCell {}
+static SPAWN_STAGING: SpawnStagingCell = SpawnStagingCell(core::cell::UnsafeCell::new([0; SPAWN_STAGING_SIZE]));
+
+/// `syscall_abi::SPAWN`'s real work: read the whole file into
+/// [`SPAWN_STAGING`] via the same shared `FS` instance every other
+/// `fs_*` syscall uses, parse+relocate it into a freshly allocated
+/// region (`tasks::allocate_runtime_region`, `loader::elf_region_size`/
+/// `populate_region` - the same ELF-loading core `loader.rs`'s
+/// boot-time path uses, just with a different memory source), add a
+/// new task for it (`tasks::spawn`), and make its region
+/// EL0-accessible (`mmu::rebuild_with_el0_regions`). Any failure at any
+/// step returns [`SPAWN_ERROR`] - nothing already-running is touched
+/// until the very last step, so there's no partial state to unwind on
+/// an early failure. One real, accepted cost of "no destruction yet"
+/// (see `tasks.rs`'s own module doc comment): a failure *after*
+/// `allocate_runtime_region` (a bad ELF, no free task slot) still
+/// permanently consumes that memory - the bump allocator has no way to
+/// give it back.
+fn spawn_program(path: &str) -> u64 {
+    let Some(fs) = (unsafe { &mut *FS.0.get() }) else {
+        return NO_FS;
+    };
+    let staging = unsafe { &mut *SPAWN_STAGING.0.get() };
+    let size = match fs.read_file(path, staging) {
+        Ok(size) => size as usize,
+        Err(_) => return SPAWN_ERROR,
+    };
+    // A file bigger than the staging buffer is refused outright, not
+    // silently loaded truncated (matches `cp`'s own "a partial copy is a
+    // wrong copy" reasoning, not `cat`'s "a truncated display is still
+    // useful" one - a truncated *program* would just crash).
+    if size == 0 || size > staging.len() {
+        return SPAWN_ERROR;
+    }
+    let program = &staging[..size];
+
+    let (header, phdrs, region_size) = match loader::elf_region_size(program) {
+        Ok(result) => result,
+        Err(_) => return SPAWN_ERROR,
+    };
+    let region_base = tasks::allocate_runtime_region(region_size);
+    // SAFETY: `region_base` was just handed out by
+    // `allocate_runtime_region`, fresh and at least `region_size` bytes -
+    // the same size `elf_region_size` computed for this exact program.
+    let loaded = match unsafe { loader::populate_region(program, &header, phdrs.as_slice(), region_base, region_size) } {
+        Ok(loaded) => loaded,
+        Err(_) => return SPAWN_ERROR,
+    };
+
+    let context = Context {
+        gpr: [0; 31],
+        sp_el0: loaded.base + loaded.size,
+        elr_el1: loaded.entry,
+        spsr_el1: 0,
+    };
+    match tasks::spawn(context, (loaded.base, loaded.size)) {
+        Ok(_slot) => {
+            // SAFETY: called from an SVC handler with interrupts masked
+            // throughout - single-core, so nothing else can observe the
+            // table set mid-rebuild.
+            unsafe { mmu::rebuild_with_el0_regions(tasks::el0_regions()) };
+            0
+        }
+        Err(_) => SPAWN_ERROR,
+    }
+}
+
 /// Called from the exception vector's SVC trampoline (`exceptions.rs`)
 /// with the syscall number (from x8) and up to 4 arguments (from x0-x3),
 /// running at EL1 with the kernel's own stack and every privilege EL0
 /// lacks - the entire reason this indirection exists. Its return value
 /// becomes EL0's new x0 after `eret`.
 ///
-/// Fourteen syscalls now (`shell_input`, a fifteenth by original
+/// Sixteen syscalls now (`shell_input`, a seventeenth by original
 /// numbering, was removed - see below).
 /// `double`/`print` were deliberately chained by the original single-task
 /// demo (double's return value fed straight into print's argument) to
@@ -270,7 +355,14 @@ fn fs_mv(src: &str, dst: &str) -> u64 {
 /// than zero bytes - without it, `fs_touch` was the only way to create
 /// one, and it only ever produces empty files. `fs_mv` (14) renames or
 /// moves a file or directory, reusing its existing cluster chain rather
-/// than reading and rewriting its content.
+/// than reading and rewriting its content. `read_char` (15) is
+/// `try_read_char`'s blocking counterpart - the first syscall able to
+/// suspend its own caller and switch to a different task mid-dispatch
+/// (`tasks::block_current_and_switch`), which is why `dispatch` grew a
+/// 6th parameter, the calling task's own trap frame (see
+/// `exceptions.rs`'s "3:" SVC path). `spawn` (16) is the first syscall
+/// able to add a *new* task rather than act on an existing one - see
+/// `spawn_program`'s own doc comment for the real work involved.
 /// Match arms below use the `syscall_abi` constants rather than bare
 /// numbers, so this table and the userland caller can never silently
 /// disagree about what number means what.
@@ -413,6 +505,16 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
             let dst = unsafe { core::slice::from_raw_parts(arg2 as *const u8, arg3 as usize) };
             let Ok(dst) = core::str::from_utf8(dst) else { return FS_ERROR };
             fs_mv(src, dst)
+        }
+        syscall_abi::SPAWN => {
+            if !valid_user_range(arg0, arg1) {
+                return SPAWN_ERROR;
+            }
+            // SAFETY: bounds sanity-checked above; see the module doc
+            // comment's note on what that check does and doesn't cover.
+            let path = unsafe { core::slice::from_raw_parts(arg0 as *const u8, arg1 as usize) };
+            let Ok(path) = core::str::from_utf8(path) else { return SPAWN_ERROR };
+            spawn_program(path)
         }
         _ => {
             console::println!("Ouroboros kernel: syscall from EL0: unknown number={number}");

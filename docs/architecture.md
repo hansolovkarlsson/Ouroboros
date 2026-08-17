@@ -120,15 +120,16 @@ running touches them), a real limitation for whatever runs next.
 
 ## Process model
 
-`tasks.rs` implements round-robin scheduling between exactly two EL0
-tasks — no priorities, no queue, no dynamic creation/destruction. Every
-task is either `Runnable` or `Blocked(reason)`; the scheduler only ever
-picks among the runnable ones. Two things move execution from one task
-to the other: the timer tick catching the current task mid-execution and
-switching to the next runnable one (`on_tick`), and a blocking syscall
-(currently just `read_char`, see the syscall table above) suspending its
-own caller immediately and switching away mid-syscall
-(`block_current_and_switch`) rather than waiting for the next tick.
+`tasks.rs` implements round-robin scheduling among up to `NUM_TASKS` (4)
+EL0 task slots — no priorities, no queue. Every task is either `Unused`,
+`Runnable`, or `Blocked(reason)`; the scheduler only ever picks among the
+runnable ones, and `Unused` slots are simply skipped. Two things move
+execution from one task to another: the timer tick catching the current
+task mid-execution and switching to the next runnable one (`on_tick`),
+and a blocking syscall (currently just `read_char`, see the syscall table
+above) suspending its own caller immediately and switching away
+mid-syscall (`block_current_and_switch`) rather than waiting for the next
+tick.
 
 - **Task 0** runs whatever program `loader.rs` loaded from disk — see
   [`processes.md`](processes.md).
@@ -138,6 +139,85 @@ own caller immediately and switching away mid-syscall
   module doc comment), so idling is a real spin, not an architectural
   `wfe` wait, and blocking syscalls are built the same way for the same
   reason (see below) rather than having a task call `wfe` itself.
+- **Task slots 2 and 3** start `Unused` and are filled by `tasks::spawn`
+  when the `spawn` syscall loads a further program from disk at runtime
+  (the shell's `exec <path>` command) — see "Dynamic task creation" below.
+
+### Dynamic task creation (`spawn`/`exec`)
+
+`exec <path>` in the shell loads a *second* (or third/fourth) program
+from disk and starts it running **alongside** whatever's already
+running — this is `tasks::spawn`, not POSIX exec-replaces-current-process
+semantics. The shell command is named `exec` to match
+`docs/roadmap.md`'s original wording for this item, but nothing about
+the calling task is replaced or stopped; it keeps running, and the new
+program becomes a new, independent task in whichever slot is `Unused`.
+
+The kernel-side pieces, in the order the `spawn` syscall (16) exercises
+them:
+
+1. **A runtime physical-page bump allocator** (`tasks::allocate_runtime_region`)
+   — `boot::allocate_pages` (what `loader.rs` uses for task 0 at boot) is
+   a UEFI boot-services API, long gone by the time a shell command can
+   run. `NEXT_RUNTIME_REGION_TOP` starts at the top of discovered RAM
+   (`mmu::ram_span()`) and grows downward, one 2MB-aligned slot per call.
+   Deliberately the simplest correct thing for a first version: no
+   destruction, no reuse, no free list.
+2. **The same ELF loading `loader.rs` already had**, split so its parsing
+   half (`elf_region_size`) and its copy/relocate half
+   (`populate_region`) can each be called independently of *how* the
+   destination region was obtained — boot-time `load()` still does its
+   own `boot::allocate_pages`/`free_pages` dance around them; the syscall
+   handler instead uses the bump allocator from step 1.
+3. **`mmu::install_identity_map` called a second time**, with the same
+   RAM span and every existing task's EL0 region plus the new one, to
+   make the new region EL0-accessible. Reuses the exact mechanism that
+   already replaced firmware's own tables at boot (swap the whole table
+   set under `TTBR0_EL1` while code keeps executing) rather than a new
+   incremental-remap primitive — the SVC handler holds IRQs masked
+   throughout, the same reasoning that already makes
+   `block_current_and_switch` safe. `mmu.rs` stashes the original boot
+   memory map and extra-device list (`STORED_MEMORY_MAP`/
+   `STORED_EXTRA_DEVICES`) specifically so this second call doesn't need
+   UEFI boot services to reconstruct them.
+4. **`tasks::spawn`** finds the first `Unused` slot, installs a fresh
+   `Context` (entry = the loaded program's real relocated entry point,
+   `sp_el0` = the top of its own region), and marks it `Runnable`.
+
+**A real bug found building this, not a hypothetical:** the first
+version hung completely — no exception, no output, `-d int` showed zero
+aborts — when `spawn`'s ELF parsing path (`elf_region_size` →
+`parse_program_headers`) used a `Vec` internally. That path runs both at
+boot (where `alloc` is fine, boot services are still up) and from this
+runtime syscall (where they aren't — `exit_boot_services` already made
+the global allocator boot-services-backed and invalid). The allocator
+doesn't panic or return an error in that state; it hangs. Fixed by
+giving `parse_program_headers` a fixed-capacity `[ProgramHeader;
+MAX_PROGRAM_HEADERS]` (16) instead of a `Vec`, with a hard
+`TooManyProgramHeaders` error for the (currently unreachable) case of an
+ELF exceeding that bound.
+
+**Known limitation, confirmed by testing, not just reasoned through:**
+when more than one task is simultaneously `Blocked(WaitReason::Keyboard)`
+(e.g. two shell instances both idling on `read_char`), `on_tick`'s
+wake-check has no way to route a keystroke to a *specific* one of them —
+whichever blocked task the wake-check happens to reach first at the tick
+a byte arrives gets it. A second interactive program run this way will
+mostly just sit blocked while the first one keeps consuming input; this
+is expected, not a regression, and was already named as out of scope
+before this feature was built.
+
+**Real Parallels hardware confirmation:** the `spawn` syscall's error
+paths (missing argument, bad path, `NO_FS`) are confirmed working on
+real hardware — but the actual *success* path (a second program loading
+and running) is not, because Parallels has no working disk driver at
+all yet (see "What's not here yet" below and `CLAUDE.md`'s "Next
+milestone" — virtio-blk simply isn't present on Parallels over any
+transport this project can drive). This is a pre-existing gap this
+feature inherits, not one it introduces; every other piece this feature
+touches (the `mmu.rs` generalization, the stashed memory map, the
+4-slot scheduler) is exercised on real hardware by ordinary boot and
+shell use, which continues to work correctly.
 
 **Blocking primitives.** A task that has nothing to do until some
 condition holds (today: a keyboard byte becoming available) can block
@@ -193,6 +273,7 @@ the way hand-duplicated numbers did before this crate existed.
 | 13 | `fs_write_file` | path ptr, path len, data ptr, data len | `0`, `NO_FS`, or `FS_ERROR` | Creates a file with exactly `data`'s contents, or fully overwrites (not appends to) an existing file's contents. `data len` may legitimately be `0` (truncate to empty) — the one `fs_*` argument pair where a zero length is valid rather than rejected, see below |
 | 14 | `fs_mv` | src ptr, src len, dst ptr, dst len | `0`, `NO_FS`, or `FS_ERROR` | Renames or moves the file or directory at `src` to `dst`, reusing its existing cluster chain rather than reading and rewriting content. `dst` must not already exist |
 | 15 | `read_char` | ignored | a byte | Blocking — if none is waiting, suspends the calling task and switches to another runnable one instead of returning `NO_CHAR`; resumes with the byte once available. See `tasks.rs`'s `block_current_and_switch` and the "Blocking primitives" section below |
+| 16 | `spawn` | path ptr, path len | `0`, `NO_FS`, or `SPAWN_ERROR` | Loads the program at `path` and starts it as a **new, independent task** alongside the caller — `tasks::spawn`, not exec-replaces-current-process. `SPAWN_ERROR` (`u64::MAX`, same bit pattern as `FS_ERROR` but its own named constant) covers bad ELF, a file too large for the kernel's staging buffer, a disk error, or no free task slot — all collapsed into one sentinel, same as every `fs_*` syscall's error contract. See "Dynamic task creation" above |
 | other | — | — | `u64::MAX` | Logged as unknown |
 
 All eight `fs_*` syscalls share two distinct failure sentinels, not one:

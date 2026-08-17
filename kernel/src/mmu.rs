@@ -160,6 +160,32 @@ unsafe impl Sync for Table {}
 static L0_TABLE: Table = Table(UnsafeCell::new([0; ENTRIES_PER_TABLE]));
 static L1_TABLE: Table = Table(UnsafeCell::new([0; ENTRIES_PER_TABLE]));
 
+/// The most `extra_devices` entries `install_identity_map` has ever been
+/// called with - matches `main.rs`'s own fixed-size staging array
+/// (framebuffer, xHCI BAR, GICD, GICR).
+const MAX_EXTRA_DEVICES: usize = 4;
+
+/// [`install_identity_map`]'s inputs, kept around after its first call so
+/// a later runtime caller (`rebuild_with_el0_regions`, for
+/// `tasks::spawn` - dynamic task creation) can rebuild the whole table
+/// set again without needing UEFI boot services, long gone by then, to
+/// reconstruct either of them. `MemoryMapOwned` isn't `Clone`, so this
+/// takes real ownership (moved out of `install_identity_map`'s own
+/// parameter) rather than copying - the caller only ever needs to supply
+/// it once.
+struct StoredMapCell(UnsafeCell<Option<MemoryMapOwned>>);
+struct StoredExtraDevicesCell(UnsafeCell<([(u64, u64); MAX_EXTRA_DEVICES], usize)>);
+
+// SAFETY: single-core; written once by `install_identity_map`'s first
+// call, before any code that could race it exists, and only ever read
+// (not mutated) afterward.
+unsafe impl Sync for StoredMapCell {}
+unsafe impl Sync for StoredExtraDevicesCell {}
+
+static STORED_MEMORY_MAP: StoredMapCell = StoredMapCell(UnsafeCell::new(None));
+static STORED_EXTRA_DEVICES: StoredExtraDevicesCell =
+    StoredExtraDevicesCell(UnsafeCell::new(([(0, 0); MAX_EXTRA_DEVICES], 0)));
+
 // One L0 entry (`L1_TABLE` above, always L0 index 0) covers the first
 // 512GB of VA space (512 entries * 1GB each) - enough for every RAM
 // span, the fixed low-1GB device block, and the framebuffer this project
@@ -196,29 +222,36 @@ static EXTRA_L1_TABLES: [Table; MAX_EXTRA_L1_TABLES] = [
     Table(UnsafeCell::new([0; ENTRIES_PER_TABLE])),
 ];
 
-// Two independent EL0 regions now, not one shared region split in half:
-// task 0's loaded-program region (loader.rs, arbitrary size, 2MB-aligned
-// by construction - see its module doc comment) and task 1's small fixed
-// idle region (tasks.rs). Each is independently guaranteed to fit within
-// one 2MB slot, so at most 2 slots (and therefore at most 2 1GB blocks,
-// and at most 2 L3 splits) can ever need EL0 handling - the same
-// "generous, two only if it straddles a boundary" reasoning as before,
-// just now covering "two independent small regions" instead of "one
-// region that might straddle". If either count is ever exceeded (it
-// shouldn't be, with exactly two regions each pre-aligned not to
+// Independent EL0 regions, not one shared region split in half: task 0's
+// loaded-program region (loader.rs, arbitrary size, 2MB-aligned by
+// construction - see its module doc comment), task 1's small fixed idle
+// region (tasks.rs), and - since the dynamic-task-creation milestone -
+// up to two more `tasks::spawn`ed programs's own regions
+// (`tasks::allocate_runtime_region`, 2MB-aligned by the identical
+// over-allocate-and-trim trick). Each region is independently guaranteed
+// to fit within one 2MB slot, so at most `MAX_EL0_REGIONS` slots (and
+// therefore at most that many 1GB blocks, and at most that many L3
+// splits) can ever need EL0 handling - "generous, one only if it
+// straddles a boundary" reasoning, just now sized for
+// `tasks::NUM_TASKS` instead of a hardcoded two. If any count is ever
+// exceeded (shouldn't be, with every region pre-aligned not to
 // straddle), the affected slot fails safe to EL1-only rather than
 // corrupting a table - see the WARNING branches in
 // `install_identity_map`.
-const MAX_EL0_REGIONS: usize = 2;
-const MAX_EL0_L2_TABLES: usize = 2;
-const MAX_EL0_L3_TABLES: usize = 2;
+const MAX_EL0_REGIONS: usize = 4;
+const MAX_EL0_L2_TABLES: usize = 4;
+const MAX_EL0_L3_TABLES: usize = 4;
 
 static EL0_L2_TABLES: [Table; MAX_EL0_L2_TABLES] = [
+    Table(UnsafeCell::new([0; ENTRIES_PER_TABLE])),
+    Table(UnsafeCell::new([0; ENTRIES_PER_TABLE])),
     Table(UnsafeCell::new([0; ENTRIES_PER_TABLE])),
     Table(UnsafeCell::new([0; ENTRIES_PER_TABLE])),
 ];
 
 static EL0_L3_TABLES: [Table; MAX_EL0_L3_TABLES] = [
+    Table(UnsafeCell::new([0; ENTRIES_PER_TABLE])),
+    Table(UnsafeCell::new([0; ENTRIES_PER_TABLE])),
     Table(UnsafeCell::new([0; ENTRIES_PER_TABLE])),
     Table(UnsafeCell::new([0; ENTRIES_PER_TABLE])),
 ];
@@ -366,11 +399,81 @@ fn overlaps_any(regions: &[(u64, u64); MAX_EL0_REGIONS], start: u64, end: u64) -
 /// `virtio_mmio.rs`), every address in `extra_devices` is independently
 /// discovered (GOP protocol query, PCI config-space BAR read), not
 /// guessed, so mapping it carries none of that risk regardless of platform.
+///
+/// Takes ownership of `memory_map` (not a reference) and keeps both it
+/// and `extra_devices` around afterward - see [`rebuild_with_el0_regions`],
+/// the counterpart this exists for: a later runtime caller (dynamic task
+/// creation's `spawn` syscall) needs to rebuild the whole table set again
+/// with one more `el0_regions` entry, long after UEFI boot services (and
+/// therefore any way to reconstruct `memory_map` from scratch) are gone.
 pub unsafe fn install_identity_map(
-    memory_map: &MemoryMapOwned,
+    memory_map: MemoryMapOwned,
     el0_regions: [(u64, u64); MAX_EL0_REGIONS],
     extra_devices: &[(u64, u64)],
 ) {
+    let mut stored = [(0u64, 0u64); MAX_EXTRA_DEVICES];
+    let count = extra_devices.len().min(MAX_EXTRA_DEVICES);
+    stored[..count].copy_from_slice(&extra_devices[..count]);
+    unsafe { *STORED_EXTRA_DEVICES.0.get() = (stored, count) };
+    unsafe { *STORED_MEMORY_MAP.0.get() = Some(memory_map) };
+    // Re-borrow from the stash rather than the original parameter (now
+    // moved) - the rest of this function is unchanged either way.
+    let memory_map = unsafe { (*STORED_MEMORY_MAP.0.get()).as_ref() }.unwrap();
+    unsafe { build_tables(memory_map, el0_regions, extra_devices) };
+}
+
+/// The runtime counterpart to [`install_identity_map`]: rebuilds the
+/// whole table set again, exactly the same operation, just with a
+/// different (larger) `el0_regions` array and reusing the `memory_map`/
+/// `extra_devices` [`install_identity_map`]'s first call already stashed.
+/// This is `tasks::spawn`'s only way to make a newly-allocated program's
+/// region EL0-accessible, since nothing after `exit_boot_services` can
+/// supply a fresh `MemoryMapOwned` to call `install_identity_map` with
+/// directly.
+/// Deliberately *not* a new, incremental "just add one more mapping"
+/// mechanism - this kernel already proved, at boot, that swapping
+/// `TTBR0_EL1` to an entirely new table set while code is *actively
+/// executing* under the old one is safe (that's how firmware's own
+/// tables got replaced in the first place); doing that same proven
+/// operation a second time, later, is lower-risk than inventing live
+/// break-before-make remapping for a first version of this.
+///
+/// # Safety
+/// `install_identity_map` must have already run at least once (its own
+/// safety requirements otherwise apply identically) - the same
+/// requirement `main.rs`'s single call site already satisfies for every
+/// caller of this function, since none can run before boot completes.
+/// Called from an SVC handler with interrupts masked throughout (true
+/// for `syscall.rs`'s `spawn`, its only caller) - single-core, so no
+/// other code can observe the table set mid-rebuild.
+pub(crate) unsafe fn rebuild_with_el0_regions(el0_regions: [(u64, u64); MAX_EL0_REGIONS]) {
+    let memory_map = unsafe { (*STORED_MEMORY_MAP.0.get()).as_ref() }
+        .expect("install_identity_map must run before rebuild_with_el0_regions");
+    let (extra_devices, count) = unsafe { *STORED_EXTRA_DEVICES.0.get() };
+    unsafe { build_tables(memory_map, el0_regions, &extra_devices[..count]) };
+}
+
+/// The discovered general-RAM span `(min_addr, max_addr)` - the same
+/// computation `build_tables` already does internally, exposed for
+/// `tasks::init_runtime_allocator` to pick a safe starting point for
+/// dynamically `spawn`ed programs' regions from. Requires
+/// `install_identity_map` to have already stashed a `memory_map`, same
+/// as `rebuild_with_el0_regions`.
+pub(crate) fn ram_span() -> (u64, u64) {
+    let memory_map =
+        unsafe { (*STORED_MEMORY_MAP.0.get()).as_ref() }.expect("install_identity_map must run before ram_span");
+    let mut min_addr = u64::MAX;
+    let mut max_addr = 0u64;
+    for desc in memory_map.entries().filter(|d| is_general_ram(d.ty)) {
+        let start = desc.phys_start;
+        let end = start + desc.page_count * 4096;
+        min_addr = min_addr.min(start);
+        max_addr = max_addr.max(end);
+    }
+    (min_addr, max_addr)
+}
+
+unsafe fn build_tables(memory_map: &MemoryMapOwned, el0_regions: [(u64, u64); MAX_EL0_REGIONS], extra_devices: &[(u64, u64)]) {
     let l1 = unsafe { &mut *L1_TABLE.0.get() };
 
     // Device: fixed low 1GB. See module doc comment for why this one stays

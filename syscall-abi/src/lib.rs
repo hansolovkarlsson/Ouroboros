@@ -103,6 +103,15 @@ pub const FS_MV: u64 = 14;
 /// `block_current_and_switch`), not a spin-wait on either side.
 pub const READ_CHAR: u64 = 15;
 
+/// `(path ptr, path len)` -> `0` on success, [`NO_FS`], or
+/// [`SPAWN_ERROR`]. Loads a second program from disk and starts it
+/// running *alongside* the caller - a real `spawn`, not POSIX
+/// exec-replaces-current-process semantics; the calling task is
+/// completely untouched. See `tasks.rs`'s `spawn` for the mechanism and
+/// its real, deliberate limits (a small fixed number of extra task
+/// slots, no destruction once spawned).
+pub const SPAWN: u64 = 16;
+
 /// Sentinel `try_read_char` returns when no byte is waiting - out of
 /// range for any real byte (0-255), so callers can tell the two apart
 /// with a single comparison.
@@ -127,3 +136,12 @@ pub const FS_ERROR: u64 = u64::MAX;
 /// real return value: `fs_list_dir`/`fs_read_file` only ever return
 /// small byte counts/file sizes, nowhere near `u64::MAX - 1`.
 pub const NO_FS: u64 = u64::MAX - 1;
+
+/// Generic failure sentinel for [`SPAWN`] - same bit pattern as
+/// [`FS_ERROR`] (a bad ELF, no free task slot, and a disk read failure
+/// all collapse to this one value, matching the `fs_*` syscalls' own
+/// "one generic failure sentinel" precedent), given its own name since
+/// it's a semantically distinct concept even though the value coincides.
+/// [`SPAWN`] returns [`NO_FS`] separately when there's no mounted
+/// filesystem at all, same as every `fs_*` syscall.
+pub const SPAWN_ERROR: u64 = u64::MAX;

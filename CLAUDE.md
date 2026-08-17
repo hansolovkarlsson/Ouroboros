@@ -3013,6 +3013,168 @@ architectural correctness and a real mechanism to build on, not a
 measurable performance win yet (this kernel doesn't optimize for idle
 power anywhere else either).
 
+## Dynamic task creation and `exec()`: a real `spawn` syscall, and a `Vec`/alloc hang found by testing
+
+Closes the last real item in `docs/roadmap.md`'s parking lot phrased as
+"running more than one loaded program, or reloading one without a
+reboot." Before this, `tasks.rs`'s scheduler had exactly two fixed,
+compile-time task slots (the loaded shell, and idle) - no way to start
+a second program without rebooting.
+
+**Naming, deliberately precise: this is `spawn`, not POSIX
+exec-replaces-current-process.** The roadmap's own wording said
+"exec()," so the shell command is named `exec`, but the mechanism
+underneath (`tasks::spawn`) adds a new task *alongside* the caller - it
+never replaces or stops it. `exec <path>` in the shell loads a program
+from disk and starts it running concurrently; the shell that ran the
+command keeps going right where it was.
+
+**Reused the boot-time table-swap mechanism a second time, rather than
+building a new incremental-remap primitive.** Making a freshly-allocated
+region EL0-accessible while the kernel is already running under its own
+tables sounds like it needs a new "add one mapping to the live table
+set" operation - but this kernel already proved, at boot, that swapping
+`TTBR0_EL1` to an entirely new table set while code is *actively
+executing* under the old one is safe (that's literally how firmware's
+own tables got replaced by this kernel's in the first place). Calling
+`mmu::install_identity_map` again, later, with the same RAM span and
+every existing task's EL0 region plus one new one appended, is the
+identical operation done twice - not a new mechanism to get right, with
+the new call's SVC handler holding IRQs masked throughout (same
+reasoning that already makes `block_current_and_switch` safe). This
+needed `install_identity_map` to take ownership of (and a new
+`rebuild_with_el0_regions` to reuse) a stashed copy of the original UEFI
+memory map and extra-device list (`mmu.rs`'s new `STORED_MEMORY_MAP`/
+`STORED_EXTRA_DEVICES`), since boot services - and therefore any way to
+reconstruct the memory map from scratch - are long gone by the time a
+shell command can run this. `MAX_EL0_REGIONS` (and the `EL0_L2_TABLES`/
+`EL0_L3_TABLES` pools sized from it) grew from a hardcoded 2 to 4 -
+`install_identity_map`'s own region-building logic didn't need to
+change at all, it already looped over however many entries the array
+held.
+
+**A runtime physical-page allocator, deliberately the simplest correct
+thing.** `loader.rs`'s existing allocation (`boot::allocate_pages`) is a
+UEFI boot-services API, gone the instant `exit_boot_services` returns -
+nothing before this milestone could hand out RAM at runtime at all.
+`tasks::allocate_runtime_region` is a bump cursor
+(`NEXT_RUNTIME_REGION_TOP`), initialized once from `mmu::ram_span()` to
+the top of discovered RAM and grown *downward*, one 2MB-aligned slot per
+call. No destruction, no reuse, no free list - explicitly out of scope,
+matching `mmu.rs`'s existing "each EL0 region must independently fit
+inside one 2MB slot" invariant by construction, the same way
+`loader.rs`'s original over-allocate-and-trim trick already guaranteed
+it for task 0.
+
+**`tasks.rs` grew past two fixed slots.** `NUM_TASKS` 2 → 4, `TaskState`
+gained `Unused` (slots 2/3 start there; 0/1 stay exactly as before - no
+change to `init()`), a new `REGIONS` array records each task's own
+`(base, size)` once at creation time (needed to rebuild the full
+`el0_regions` array for the `install_identity_map` call above), and a
+new `tasks::spawn(context, region)` finds the first `Unused` slot,
+installs the context and region, marks it `Runnable`, and returns its
+index (or `SpawnError::NoFreeSlot` if all four are taken).
+`next_runnable`'s existing wrap-around scan needed no change - it was
+already written to generalize to any `NUM_TASKS` during the blocking-
+primitives milestone, specifically so this would be true here.
+
+**`loader.rs` split so its ELF-parsing core is reusable independent of
+how the destination region was obtained** - `elf_region_size` (pure
+parsing) and `populate_region` (copy segments, apply
+`R_AARCH64_RELATIVE` relocations, compute the real entry point) used to
+be one function coupled to boot-time `boot::allocate_pages`. Boot-time
+`load()` now calls both explicitly around its own allocate/free dance,
+unchanged in behavior; the new `spawn` syscall calls the same two
+functions around `tasks::allocate_runtime_region` instead.
+
+**A new syscall, `spawn` (16, the next free number after
+`read_char`).** `syscall.rs`: reads the whole program file via the
+shared `FS` instance into a fixed 128KB EL1 staging buffer (no `alloc`
+at runtime, same "fixed static buffer" discipline as everything else in
+this kernel post-`exit_boot_services`), refuses anything larger than
+that outright rather than loading it truncated (matches `cp`'s "a
+partial copy is a wrong copy" reasoning, not `cat`'s "truncated display
+is still useful" one - a truncated *program* would just crash), then
+runs the `elf_region_size` → `allocate_runtime_region` →
+`populate_region` → `tasks::spawn` →
+`mmu::rebuild_with_el0_regions` sequence above. Any failure at any step
+(bad ELF, no free slot, disk error) returns `SPAWN_ERROR` - nothing
+already-running is touched until the very last step
+(`tasks::spawn`), so there's no partial state to unwind on failure.
+
+**A real, significant bug found by testing, not review: `Vec`-based
+program-header parsing hangs completely when called from this new
+runtime path - no exception, no output, `-d int` shows zero aborts.**
+`parse_program_headers` (called by `elf_region_size`) had always used
+`Vec::with_capacity`/`.push` - correct when `loader.rs` only ever ran
+during boot services, where the global allocator is fully valid, but
+this milestone is what first made `elf_region_size` reachable from a
+*runtime* syscall, long after `exit_boot_services` made that same
+allocator boot-services-backed and invalid. Unlike every other post-exit
+misuse this project has hit, this one doesn't panic, fault, or return an
+error - it just hangs, silently, with the rest of the system frozen too
+(this all runs inside an SVC handler with interrupts masked). Diagnosed
+by adding temporary step-boundary debug prints inside the new
+`spawn_program` and re-testing, isolating the freeze to the very next
+call after "read N bytes" succeeded. **Fixed** by giving
+`parse_program_headers` a fixed-capacity `ProgramHeaders` struct
+(`[ProgramHeader; MAX_PROGRAM_HEADERS]`, 16) instead of a `Vec`, with a
+real `LoaderError::TooManyProgramHeaders` for the (currently
+unreachable in practice) case of an ELF exceeding that bound, rather
+than silently truncating.
+
+**Confirmed working end to end on QEMU, staged the same way as every
+scheduler/SVC-path change since the `x9` bug - each stage independently
+regression-tested before the next depended on it:** the refactor stages
+(`loader.rs` split, runtime allocator + `mmu.rs` generalization,
+`tasks.rs`'s `Unused`/`spawn`) each produced byte-for-byte identical
+existing behavior before any of it was wired together; the `spawn`
+syscall itself, first exercised via a temporary throwaway shell command
+that spawned the shell binary against itself (removed once confirmed),
+showed the second `install_identity_map` rebuild logged, the newly
+spawned instance's own "Ouroboros userland shell" banner printing (real,
+independent task execution, not just "didn't crash"), and the original
+shell staying responsive throughout; the real, permanent `exec <path>`
+command then got a full regression pass - every existing command
+(`help`, `selftest`, `uptime`, the full `ls`/`cat`/`cd`/`mkdir`/`write`/
+`cp`/`mv`/`rm`/`rmdir` disk-command surface), `exec`'s own error cases
+(missing argument, nonexistent file), and a real successful `exec`
+leaving two tasks alive - `uptime` confirmed still advancing (269 → 509
+ticks) across the whole sequence with a second task running throughout,
+zero aborts in `-d int` cross-checks. **A known, expected artifact, not
+a new bug**, observed while two shell instances were alive at once:
+keystrokes get split unpredictably between whichever instance happens
+to be `Blocked(WaitReason::Keyboard)` at the tick a byte arrives -
+exactly the "routing keyboard input to a specific blocked task" gap
+already named out of scope for the blocking-primitives milestone, not
+something this feature was meant to fix.
+
+**Confirmed on real Parallels hardware too, honestly split by what's
+actually reachable there.** `spawn`'s error paths are confirmed working
+end to end via `make test-parallels`: `exec /efi/ouroboro/sh.bin`
+correctly reported "no filesystem mounted this boot" (the same shared
+message every `fs_*` command already gives there), with `uptime`
+continuing to advance normally afterward (1523 → 1960 ticks) and no
+crash. The actual **success** path - a second program really loading
+and running - could not be exercised on real hardware at all, for a
+reason that has nothing to do with this feature: Parallels has no
+working virtio-blk driver of any kind yet (a pre-existing, already-
+documented gap, see `CLAUDE.md`'s "Next milestone" section), so there's
+no filesystem to load a second program *from* there regardless. Every
+other piece this milestone touches - the `mmu.rs` region-count
+generalization, the stashed memory map, the 4-slot scheduler - is
+exercised by ordinary boot and interactive shell use on real hardware,
+which continues to work correctly with no regression.
+
+**Still coarse, worth knowing before building on this:** no task
+destruction - a spawned task's slot and its allocated RAM are permanent
+for the rest of the boot, the bump allocator never frees; at most 4
+total task slots, hardcoded; a spawned task gets the same fixed
+round-robin share as any other runnable task, no priorities; and
+routing keyboard input to a specific blocked task (see above) remains
+unsolved - fine for this milestone's own testing, a real limitation for
+anything built on top of concurrent interactive programs next.
+
 ## Commands
 
 ```sh
@@ -3112,14 +3274,14 @@ kernel/
   src/font.rs        embedded public-domain 8x8 bitmap font (dhepper/font8x8), printable ASCII 0x20-0x7E only
   src/fbconsole.rs   text console rendered directly into the GOP framebuffer: glyph drawing, cursor, ptr::copy-based scroll - write-only, no ANSI parsing, see "GOP framebuffer console" above
   src/exceptions.rs  AArch64 exception vector table (VBAR_EL1) + fault reporting; SVC path (slot 8/"3:") saves x9 to a scratch stack slot before the EC check clobbers it (see "A real relocating loader" above) and saves/restores SP_EL0 at Context's real offset alongside ELR/SPSR, passing dispatch() the frame pointer itself (see "Blocking primitives" above)
-  src/mmu.rs         replaces firmware's translation tables with our own identity map (L0->L1->L2->L3 as needed), up to MAX_EL0_REGIONS independent EL0 regions, plus an optional framebuffer device-block fallback
+  src/mmu.rs         replaces firmware's translation tables with our own identity map (L0->L1->L2->L3 as needed), up to MAX_EL0_REGIONS (4) independent EL0 regions, an optional framebuffer device-block fallback, and (since "Dynamic task creation") a stashed memory map/extra-device list plus rebuild_with_el0_regions so install_identity_map can be called a second time at runtime - see "Dynamic task creation and exec()" above
   src/gic.rs         version-dispatching facade over gicv2.rs/gicv3.rs, selected by madt.rs's real discovery - see "MADT/GICv3" above
   src/gicv2.rs       GICv2 backend (distributor + memory-mapped CPU interface), addresses now passed in from madt::GicInfo instead of hardcoded
   src/gicv3.rs       GICv3 backend (redistributor wake/discovery, ICC_* system-register CPU interface) - confirmed working on QEMU and real Parallels hardware, see "MADT/GICv3" above
   src/timer.rs       ARM generic timer (non-secure EL1 physical timer, PPI 14 / GIC INTID 30), TICK_INTERVAL_MS
-  src/loader.rs      reads INIT.CFG + a program off the ESP during boot services, into a 2MB-aligned EL0-accessible region, real ELF64 parsing + R_AARCH64_RELATIVE relocation processing - see "A real relocating loader" above and docs/processes.md
-  src/syscall.rs     svc syscall dispatch table (print/double/report/try_read_char/putc/get_ticks/fs_list_dir/fs_read_file/fs_mkdir/fs_rmdir/fs_touch/fs_rm/fs_write_file/fs_mv/read_char, gap at 5) - confirmed working end to end, see above and "Blocking primitives" above for read_char specifically
-  src/tasks.rs       task 0 (loaded program) + task 1 (idle) + the round-robin scheduler over Runnable/Blocked task state (block_current_and_switch, on_tick's wake-check) - confirmed working, see "Blocking primitives" above
+  src/loader.rs      reads INIT.CFG + a program off the ESP during boot services, into a 2MB-aligned EL0-accessible region, real ELF64 parsing + R_AARCH64_RELATIVE relocation processing - see "A real relocating loader" above and docs/processes.md; elf_region_size/populate_region split so the same parsing/loading logic is reusable from the runtime spawn path too, see "Dynamic task creation and exec()" above
+  src/syscall.rs     svc syscall dispatch table (print/double/report/try_read_char/putc/get_ticks/fs_list_dir/fs_read_file/fs_mkdir/fs_rmdir/fs_touch/fs_rm/fs_write_file/fs_mv/read_char/spawn, gap at 5) - confirmed working end to end, see above, "Blocking primitives" above for read_char, and "Dynamic task creation and exec()" above for spawn
+  src/tasks.rs       up to 4 task slots (task 0 = loaded program, task 1 = idle, slots 2-3 Unused until spawn) + the round-robin scheduler over Runnable/Blocked/Unused task state (block_current_and_switch, on_tick's wake-check, tasks::spawn, allocate_runtime_region) - confirmed working, see "Blocking primitives" and "Dynamic task creation and exec()" above
   src/virtio_mmio.rs virtio-mmio transport: 32-slot device discovery, modern (non-legacy) register layout, addresses confirmed via devicetree dump
   src/virtio_blk.rs  runtime virtio-blk driver: feature negotiation, one virtqueue, synchronous polling sector reads and writes - phase 3a (reads)/phase 4 (writes), confirmed working, see above
   src/virtio_console.rs  transmit-only virtio-console driver over the same transport - device discovery, feature negotiation, transmitq0 - confirmed working on QEMU; confirmed *not* what Parallels' serial port actually is, see "virtio-console" above

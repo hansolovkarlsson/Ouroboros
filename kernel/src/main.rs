@@ -288,12 +288,16 @@ fn main() -> Status {
     }
     unsafe {
         mmu::install_identity_map(
-            &memory_map,
-            [(program.base, program.size), tasks::idle_region()],
+            memory_map,
+            // Slots 2/3 are (0, 0) - unused - until `tasks::spawn` fills
+            // one in; `install_identity_map` already treats a zero-size
+            // region as "no region" (see `overlaps_any`).
+            [(program.base, program.size), tasks::idle_region(), (0, 0), (0, 0)],
             &extra_devices[..extra_device_count],
         )
     };
     console::println!("Ouroboros kernel: identity map installed, MMU running on our own tables");
+    tasks::init_runtime_allocator();
 
     // A fourth console-discovery fallback: the GOP framebuffer, tried
     // right after devicetree/ACPI/PCI - ahead of virtio-console below,

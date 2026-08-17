@@ -80,7 +80,7 @@ const LF: u8 = b'\n';
 // Syscall numbers and sentinel values come from the shared `syscall-abi`
 // crate now, not hand-duplicated local consts - see its doc comment and
 // `kernel/src/syscall.rs`'s dispatch table, the other side of this ABI.
-use syscall_abi::{FS_ERROR, NO_FS};
+use syscall_abi::{FS_ERROR, NO_FS, SPAWN_ERROR};
 
 /// Placed first in `.text` by `linker.ld` (`KEEP(*(.text.start))`) so it
 /// lands at file/VA offset 0 - `tasks.rs` sets a loaded program's
@@ -177,7 +177,7 @@ fn run_line(line: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize) {
     let arg = words.next().unwrap_or("");
 
     match command {
-        "help" => print_line("commands: help, echo, uptime, clear, ls, cat, cd, pwd, mkdir, rmdir, touch, rm, write, cp, mv, selftest"),
+        "help" => print_line("commands: help, echo, uptime, clear, ls, cat, cd, pwd, mkdir, rmdir, touch, rm, write, cp, mv, exec, selftest"),
         "echo" => {
             let mut first = true;
             for word in line.split_whitespace().skip(1) {
@@ -215,6 +215,7 @@ fn run_line(line: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize) {
         "write" => cmd_write(line, cwd, *cwd_len),
         "cp" => cmd_cp(line, cwd, *cwd_len),
         "mv" => cmd_mv(line, cwd, *cwd_len),
+        "exec" => cmd_exec(arg, cwd, *cwd_len),
         "selftest" => cmd_selftest(),
         _ => {
             print_str("unknown command: ");
@@ -486,6 +487,33 @@ fn cmd_mkdir(arg: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize) {
     match fs_mkdir(path) {
         NO_FS => print_no_fs(),
         FS_ERROR => print_line("mkdir: failed (already exists, bad name, parent missing, or disk full)"),
+        _ => {}
+    }
+}
+
+/// Loads and starts `arg` as a new, independent task alongside whatever is
+/// already running - a real `tasks::spawn`, not a POSIX exec-replaces-
+/// current-process. The new task keeps running after this command returns;
+/// there's no way yet to wait for it, stop it, or free its memory once
+/// started (see `tasks.rs`'s module doc comment).
+fn cmd_exec(arg: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize) {
+    if arg.is_empty() {
+        print_line("exec: missing program argument");
+        return;
+    }
+    let mut path_buf = [0u8; PATH_SIZE];
+    let Some(path_len) = resolve_path(cwd_str(cwd, cwd_len), arg, &mut path_buf) else {
+        print_line("exec: path too long");
+        return;
+    };
+    let Ok(path) = core::str::from_utf8(&path_buf[..path_len]) else {
+        print_line("exec: path too long");
+        return;
+    };
+
+    match fs_spawn(path) {
+        NO_FS => print_no_fs(),
+        SPAWN_ERROR => print_line("exec: failed (no such file, bad program, or no free task slot)"),
         _ => {}
     }
 }
@@ -871,6 +899,15 @@ fn fs_write_file(path: &str, data: &[u8]) -> u64 {
 /// return contract as [`fs_mkdir`].
 fn fs_mv(src: &str, dst: &str) -> u64 {
     syscall4(syscall_abi::FS_MV, src.as_ptr() as u64, src.len() as u64, dst.as_ptr() as u64, dst.len() as u64)
+}
+
+/// Loads the program at `path` and starts it as a new task. Returns `0` on
+/// success, [`NO_FS`], or [`SPAWN_ERROR`] (bad ELF, file too large for the
+/// kernel's staging buffer, disk error, or no free task slot - all
+/// collapsed into one sentinel, same "can't distinguish why" limitation
+/// [`fs_mkdir`]'s doc comment already notes for the other `fs_*` syscalls).
+fn fs_spawn(path: &str) -> u64 {
+    syscall4(syscall_abi::SPAWN, path.as_ptr() as u64, path.len() as u64, 0, 0)
 }
 
 /// The 1-argument syscalls this program used before phase 3c - a thin

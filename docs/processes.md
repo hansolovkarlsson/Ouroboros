@@ -187,12 +187,21 @@ Consequences of "real ELF, real relocations, but still narrowly scoped
   (not because it's still required, just because they were already
   written that way and there was no reason to change working code as
   part of this milestone).
-- **Still no dynamic linking, no imported symbols, no `exec()`.**
-  Exactly one relocation type is supported (`R_AARCH64_RELATIVE`) —
-  anything else is a hard loader error, not silently ignored, since
-  this project has no shared libraries and nothing else should ever
-  legitimately appear in `.rela.dyn`. Still exactly one program, loaded
-  once, at boot.
+- **Still no dynamic linking or imported symbols.** Exactly one
+  relocation type is supported (`R_AARCH64_RELATIVE`) — anything else is
+  a hard loader error, not silently ignored, since this project has no
+  shared libraries and nothing else should ever legitimately appear in
+  `.rela.dyn`.
+- **A second (and up to a fourth) program can now be loaded and started
+  at runtime, without a reboot** — the shell's `exec <path>` command,
+  backed by a new `spawn` syscall (`SPAWN`, 16). This is genuinely
+  `tasks::spawn` (adds a new, independent task alongside the caller),
+  not POSIX exec-replaces-current-process — the caller keeps running.
+  See `docs/architecture.md`'s "Dynamic task creation" section and
+  `CLAUDE.md`'s "Dynamic task creation and `exec()`" section for the
+  full design and the real `Vec`/allocator hang bug found building it.
+  No task destruction yet, so this is still "loaded once per task slot,"
+  just with up to four slots instead of a fixed two.
 
 ## Syscall ABI available to a program
 
@@ -230,7 +239,15 @@ zero length is valid rather than rejected; see
 the real bug this required fixing. `fs_mv` (`FS_MV`, added for phase 8)
 takes two path pointer/length pairs (`src`, `dst`) and reuses the moved
 item's existing cluster chain rather than reading and rewriting its
-content. All eight `fs_*` syscalls share two
+content. `spawn` (`SPAWN`, 16) takes a single path pointer/length pair
+(same shape as `fs_mkdir`/`fs_touch`) and loads that path as a new,
+independent task rather than doing anything with its file content
+directly — see `docs/architecture.md`'s "Dynamic task creation" section.
+It shares the `NO_FS` sentinel with the `fs_*` syscalls, but its own
+failure sentinel is a separate, named constant, `SPAWN_ERROR` (same bit
+pattern as `FS_ERROR`, `u64::MAX`, but named separately since spawning a
+program and reading/writing a file are different operations that just
+happen to fail the same collapsed way). All eight `fs_*` syscalls share two
 distinct failure sentinels: `FS_ERROR` (`u64::MAX`) for "mounted, but
 this operation failed" (a program still can't tell "already exists"
 from "disk full" within that — see `CLAUDE.md`'s "Phase 4"/"Phase
@@ -327,11 +344,21 @@ Worth knowing before building further on this:
   useful within this repository - a program built elsewhere would need
   to either depend on this crate too or re-derive the same numbers by
   hand.
-- **One program, loaded once, at boot.** No `exec()`, no spawning a second
-  process, no way to reload a program without rebooting.
-- **Fixed 2-task scheduler.** `tasks.rs` has exactly two slots; a second
-  *loaded* program has nowhere to run without displacing the idle task or
-  growing the scheduler into something that isn't just a fixed array.
+- **~~One program, loaded once, at boot~~ - partially fixed.** The
+  shell's `exec <path>` command (backed by the new `spawn` syscall, see
+  above) can load and start a second, third, or fourth program at
+  runtime, without a reboot - genuinely `tasks::spawn`, not
+  exec-replaces-current-process, so the caller keeps running too. Still
+  real limits: no task destruction (a spawned task's slot and memory are
+  permanent for the rest of the boot), no way to reload an *already-
+  running* task's program in place, and the runtime page allocator
+  backing this never frees, so repeated spawning eventually exhausts the
+  region it grows into.
+- **Fixed 4-task scheduler.** `tasks.rs` now has four slots (up from
+  two) - task 0 (the boot-loaded shell) and task 1 (idle) are permanent,
+  slots 2 and 3 start `Unused` and are filled by `spawn`. Once all four
+  are in use, a further `exec` fails with `SPAWN_ERROR` (no free slot)
+  rather than growing the scheduler further.
 - **No heap for userland programs**, and no `.bss`, so no static mutable
   state at all — every program is constrained to stack-local state, same
   as the shell.

@@ -65,12 +65,65 @@
 use core::arch::{asm, global_asm};
 use core::cell::UnsafeCell;
 use core::ffi::c_void;
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use crate::exceptions::Context;
 use crate::loader::LoadedProgram;
 
-pub const NUM_TASKS: usize = 2;
+/// Slots 0/1 are always the loaded program and the idle task (`init`);
+/// 2/3 start `Unused` and are only ever filled in by `spawn` (dynamic
+/// task creation). A small, fixed bound rather than anything growable -
+/// "generous but bounded," the same philosophy `mmu.rs`'s
+/// `MAX_EXTRA_L1_TABLES` already states for a similar "how many of these
+/// might we need" question - not a real limit this kernel has any way to
+/// raise gracefully yet (`spawn` just fails with `SpawnError::NoFreeSlot`
+/// past this).
+pub const NUM_TASKS: usize = 4;
+
+/// 2MB - matches `loader.rs`'s own `SLOT_ALIGN` (a plain numeric
+/// constant, not shared across modules - simplest to just duplicate the
+/// value rather than build a shared-constants module for one number).
+/// Every region [`allocate_runtime_region`] hands out is a multiple of
+/// this, satisfying `mmu.rs`'s "each EL0 region fits inside one 2MB slot"
+/// invariant the same way `loader.rs`'s own over-allocate-and-trim trick
+/// already does for task 0's boot-time-loaded program.
+const RUNTIME_SLOT_ALIGN: u64 = 0x20_0000;
+
+/// Bump allocator for dynamically `spawn`ed programs' EL0 regions -
+/// deliberately the simplest correct thing, not a real allocator: grows
+/// *downward* from the top of discovered RAM (`init_runtime_allocator`),
+/// never frees, never reuses an address. No destruction exists yet (see
+/// CLAUDE.md's "dynamic task creation" milestone for why that's a
+/// deliberate scope cut, not an oversight), so this can never be asked to
+/// hand back an address it already gave out. Growing *downward* from
+/// `mmu::ram_span`'s `max_addr` means this never needs to know where the
+/// kernel's own image, task 0's loaded program, or task 1's idle region
+/// actually sit - all three are guaranteed to be somewhere *below*
+/// wherever this starts, since `max_addr` is by definition past every
+/// general-RAM descriptor the UEFI memory map ever reported, including
+/// whichever ones cover them.
+static NEXT_RUNTIME_REGION_TOP: AtomicU64 = AtomicU64::new(0);
+
+/// Must be called once, after `mmu::install_identity_map`'s first call
+/// (needs `mmu::ram_span`, which needs a stashed `memory_map`) and before
+/// any `allocate_runtime_region` call.
+pub(crate) fn init_runtime_allocator() {
+    let (_, max_addr) = crate::mmu::ram_span();
+    NEXT_RUNTIME_REGION_TOP.store(max_addr & !(RUNTIME_SLOT_ALIGN - 1), Ordering::Relaxed);
+}
+
+/// Hands out `size` bytes (rounded up to a 2MB multiple) of fresh RAM,
+/// already identity-mapped EL1-accessible (all of discovered RAM is,
+/// unconditionally - see `mmu.rs`) but not yet EL0-accessible; the caller
+/// still has to fold the returned `(base, size)` into a fresh call to
+/// `mmu::rebuild_with_el0_regions` before any EL0 task can actually touch
+/// it. Never fails, never reuses an address - see this module's own doc
+/// comment for why that's an accepted, deliberate limit for now rather
+/// than a real allocator.
+pub(crate) fn allocate_runtime_region(size: u64) -> u64 {
+    let aligned_size = size.next_multiple_of(RUNTIME_SLOT_ALIGN);
+    NEXT_RUNTIME_REGION_TOP.fetch_sub(aligned_size, Ordering::Relaxed) - aligned_size
+}
 
 const IDLE_REGION_SIZE: usize = 0x1000;
 
@@ -117,10 +170,41 @@ struct TaskSlot(UnsafeCell<Context>);
 // an exception masks further IRQs until the next `eret`).
 unsafe impl Sync for TaskSlot {}
 
-static TASKS: [TaskSlot; NUM_TASKS] =
-    [TaskSlot(UnsafeCell::new(Context::zeroed())), TaskSlot(UnsafeCell::new(Context::zeroed()))];
+static TASKS: [TaskSlot; NUM_TASKS] = [
+    TaskSlot(UnsafeCell::new(Context::zeroed())),
+    TaskSlot(UnsafeCell::new(Context::zeroed())),
+    TaskSlot(UnsafeCell::new(Context::zeroed())),
+    TaskSlot(UnsafeCell::new(Context::zeroed())),
+];
 
 static CURRENT: AtomicUsize = AtomicUsize::new(0);
+
+/// Each task's own `(base, size)` EL0 region, recorded once at creation
+/// time (`init` for slots 0/1, `spawn` for any later slot) and never
+/// changed after - there's no task destruction yet, so a region, once
+/// assigned, is permanent for the rest of this boot. Needed so `spawn`
+/// can rebuild the *full* `el0_regions` array `mmu::rebuild_with_el0_regions`
+/// expects (every still-live task's region, not just the newly-added
+/// one) without walking anything else to reconstruct it.
+struct RegionSlot(UnsafeCell<(u64, u64)>);
+
+// SAFETY: same argument as `TaskSlot` above.
+unsafe impl Sync for RegionSlot {}
+
+static REGIONS: [RegionSlot; NUM_TASKS] = [
+    RegionSlot(UnsafeCell::new((0, 0))),
+    RegionSlot(UnsafeCell::new((0, 0))),
+    RegionSlot(UnsafeCell::new((0, 0))),
+    RegionSlot(UnsafeCell::new((0, 0))),
+];
+
+/// The `el0_regions` array every `mmu::rebuild_with_el0_regions` call
+/// needs: every task slot's own region, `(0, 0)` for any `Unused` one
+/// (already treated as "no region" by `mmu.rs`'s `overlaps_any`, same
+/// convention `main.rs`'s own boot-time call already relies on).
+pub(crate) fn el0_regions() -> [(u64, u64); NUM_TASKS] {
+    core::array::from_fn(|i| unsafe { *REGIONS[i].0.get() })
+}
 
 /// What a blocked task is waiting for. One variant today - a byte from
 /// the keyboard/console (`syscall_abi::READ_CHAR`, `syscall.rs`) - but
@@ -148,6 +232,10 @@ impl WaitReason {
 
 #[derive(Clone, Copy, PartialEq)]
 enum TaskState {
+    /// No real task in this slot - `spawn`'s only candidate for a new
+    /// one. Slots 0/1 (the loaded program, the idle task) never reach
+    /// this state; they're always one of the other two once `init` runs.
+    Unused,
     Runnable,
     Blocked(WaitReason),
 }
@@ -158,8 +246,12 @@ struct StateSlot(UnsafeCell<TaskState>);
 // from EL1 with IRQs masked.
 unsafe impl Sync for StateSlot {}
 
-static STATES: [StateSlot; NUM_TASKS] =
-    [StateSlot(UnsafeCell::new(TaskState::Runnable)), StateSlot(UnsafeCell::new(TaskState::Runnable))];
+static STATES: [StateSlot; NUM_TASKS] = [
+    StateSlot(UnsafeCell::new(TaskState::Runnable)),
+    StateSlot(UnsafeCell::new(TaskState::Runnable)),
+    StateSlot(UnsafeCell::new(TaskState::Unused)),
+    StateSlot(UnsafeCell::new(TaskState::Unused)),
+];
 
 /// Scans forward from `from` (exclusive), wrapping, for the next
 /// `Runnable` task - falls back to `from` itself if nothing else is
@@ -221,6 +313,36 @@ pub(crate) unsafe fn block_current_and_switch(frame: *mut Context, reason: WaitR
     frame.gpr[0]
 }
 
+pub(crate) enum SpawnError {
+    /// Every task slot already holds a real task - see `NUM_TASKS`'s own
+    /// doc comment for why this kernel doesn't grow past a small fixed
+    /// bound rather than trying to handle an unbounded number of tasks.
+    NoFreeSlot,
+}
+
+/// Adds a new task, running `context` (already pointed at the loaded
+/// program's real entry point and its own stack, same shape `init` gives
+/// task 0) in the first `Unused` slot found - `syscall.rs`'s `spawn`
+/// syscall's only caller, after it's already allocated the program's
+/// region (`allocate_runtime_region`), loaded it (`loader::populate_region`),
+/// and made that region EL0-accessible (`mmu::rebuild_with_el0_regions`,
+/// which needs `region` recorded here *before* it's called - see
+/// `el0_regions`). This kernel calls it *spawn*, not POSIX
+/// *exec*-replaces-current-process semantics: the calling task keeps
+/// running unchanged, a new one joins it. Never touches slots 0/1 (the
+/// loaded program and the idle task) - only scans from slot 2 onward.
+pub(crate) fn spawn(context: Context, region: (u64, u64)) -> Result<usize, SpawnError> {
+    for i in 2..NUM_TASKS {
+        if unsafe { *STATES[i].0.get() } == TaskState::Unused {
+            unsafe { *TASKS[i].0.get() = context };
+            unsafe { *REGIONS[i].0.get() = region };
+            unsafe { *STATES[i].0.get() = TaskState::Runnable };
+            return Ok(i);
+        }
+    }
+    Err(SpawnError::NoFreeSlot)
+}
+
 /// Task 1's (the idle task's) small dedicated EL0 region — `mmu.rs` maps
 /// this alongside whatever `loader.rs` loaded for task 0. Two independent
 /// regions, not one shared region split in half like before this
@@ -257,6 +379,7 @@ pub unsafe fn init(program: &LoadedProgram) {
         // able to preempt), NZCV cleared.
         spsr_el1: 0,
     };
+    unsafe { *REGIONS[0].0.get() = (program.base, program.size) };
     clean_dcache_range(program.base, program.size);
 
     // Task 1: idle loop, copied into its own small static region exactly
@@ -274,6 +397,7 @@ pub unsafe fn init(program: &LoadedProgram) {
         elr_el1: idle_addr,
         spsr_el1: 0,
     };
+    unsafe { *REGIONS[1].0.get() = (idle_addr, IDLE_REGION_SIZE as u64) };
     clean_dcache_range(idle_addr, IDLE_REGION_SIZE as u64);
 
     unsafe {
