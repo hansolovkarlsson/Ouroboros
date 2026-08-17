@@ -2878,6 +2878,141 @@ userland program must now be built in release mode, a real, permanent
 constraint on anything written to replace `shell` (see
 `docs/processes.md`).
 
+## Blocking primitives - real task blocking, and a second real bug the SVC path was hiding
+
+`tasks.rs`'s scheduler used to be a strict, unconditional round-robin
+between exactly two fixed tasks: the timer tick alternated them every
+20ms *regardless of whether task 0 (the shell) had anything to do* -
+its main loop busy-polled `try_read_char()` every iteration rather than
+actually waiting for a keystroke, because there was no way for a task
+to tell the scheduler "don't run me again until X happens." This was
+the last item in `docs/roadmap.md`'s parking lot phrased as "tasks
+aren't limited to unconditional round-robin `wfe` polling" - now done.
+
+**Why not just call `wfe` instead of busy-polling - the design
+question this milestone actually turned on.** The obvious-looking
+alternative (mark the task blocked, return immediately, let it call
+`wfe()` once) was rejected outright, not overlooked: real Parallels
+hardware has a confirmed, unresolved hang when an EL0 task executes
+`wfe` (see `tasks.rs`'s own module doc comment - task 1's idle loop had
+to become a busy-spin specifically because of this, root-caused well
+enough to work around but not fully explained). A task blocking via its
+own `wfe` call would almost certainly hit the identical hang. The
+design shipped here never executes `wfe` anywhere: a blocked task is
+suspended entirely by the scheduler and a different, already-runnable
+task's saved context is loaded in its place - exactly the same
+mechanism that already safely idles task 1 today, just triggered from
+a syscall instead of only from the tick.
+
+**Design, in four pieces.** `tasks.rs` gained real per-task state
+(`TaskState::Runnable`/`Blocked(WaitReason)`, one `WaitReason` variant
+today - `Keyboard`) and `block_current_and_switch(frame, reason)`:
+saves the calling task's context, marks it blocked, loads the next
+*runnable* task's context in its place, and returns
+`frame.gpr[0]` (that task's own `x0`, post-overwrite) as its own result
+- the one subtle piece, explained below. `on_tick` gained a wake-check,
+run before its normal scheduling decision: for each blocked task,
+evaluate its `WaitReason` (`syscall.rs`'s new `poll_keyboard_byte`,
+factored out of the existing `TRY_READ_CHAR` handler and shared by
+both), and if satisfied, stash the value into that task's *saved*
+`Context.gpr[0]` and mark it runnable - it resumes exactly where its
+blocking syscall left off, with the value already in `x0`,
+indistinguishable from the syscall having simply returned it.
+`syscall::dispatch` gained a 6th parameter, `frame: *mut Context` (AAPCS64
+places it in `x5`, following `number`/`arg0..arg3` in `x0..x4`) - the
+same pointer `rust_irq_handler` already gets via `mov x0, sp`, now
+available to the SVC path too via one new line,
+`mov x5, sp`, right before the existing `bl {rust_syscall_handler}` -
+every syscall except the new one ignores it. A new syscall,
+`READ_CHAR` (15): checks for a byte first (same non-blocking fast path
+`TRY_READ_CHAR` already had), and only calls
+`block_current_and_switch` if nothing's available yet.
+`TRY_READ_CHAR` stays exactly as it was - not deprecated, still useful
+for a caller that genuinely wants non-blocking semantics; the shell's
+main loop is just no longer one of them, and its byte-count-only
+comment explaining the old busy-poll (which cited
+`qemu_device_region_safe`, a heuristic the later MADT/GICv3 work
+already removed) is rewritten to describe the real mechanism instead.
+
+**Why `block_current_and_switch` has to return `frame.gpr[0]`, not
+just `0` or the byte: a real correctness subtlety, not a stylistic
+choice.** `exceptions.rs`'s SVC trampoline unconditionally writes
+`dispatch`'s return value into the frame's `x0` slot after the call
+(`str x0, [sp, #0]`) - fine for a syscall resuming its own caller, but
+`block_current_and_switch` just overwrote `*frame` with a *different*
+task's entire saved context. Returning that task's own `x0` (already
+sitting there post-overwrite) turns the trampoline's blind write into a
+harmless no-op instead of clobbering the resumed task's real value -
+the whole mechanism works without changing the trampoline's control
+flow at all.
+
+**A second real, pre-existing bug found by testing this, not
+introduced by it - found on the very first real-hardware-shaped test,
+on QEMU, before ever risking real Parallels hardware on it (same
+staged, QEMU-first discipline as every scheduler/SVC-path change in
+this project since the `x9` bug).** The very first `block_current_and_switch`
+test crashed: `EXCEPTION vector=8 esr_el1=0x8200000f far_el1=0x5c75a000
+elr_el1=0x5c75a000` - EC `0x20` (Instruction Abort, lower EL), IFSC
+`0x0f` (Permission fault, level 3), `FAR_EL1`/`ELR_EL1` both exactly
+task 1's `SP_EL0` value (its stack top), not anywhere inside its
+actual 8-byte idle loop. Root cause: `exceptions.rs`'s SVC trampoline
+("3:") was *never* designed to produce a frame that's a genuinely
+interchangeable `Context` the way the IRQ path's "2:" trampoline
+always has been - it saved `ELR_EL1`/`SPSR_EL1` at byte offset 248,
+but `Context`'s real field order (`gpr`, then `sp_el0`, then
+`elr_el1`, then `spsr_el1`) puts `sp_el0` there instead, with
+`elr_el1` at 256; worse, "3:" never saved or restored `SP_EL0` at all,
+since a synchronous SVC trap never needs it - hardware leaves EL0's own
+`SP_EL0` untouched across the trap, so no previous syscall, always
+resuming its own caller, ever needed to treat it as real state.
+Harmless for every syscall before this one; the instant a blocking
+syscall tried to load a *different* task's context through that
+mismatched layout, task 1's real `SP_EL0` value landed in `ELR_EL1`
+instead. **Fixed** by adding a genuine `SP_EL0` save/restore
+(`mrs`/`msr sp_el0`) at the correct offset (248) and moving `ELR_EL1`/
+`SPSR_EL1` to 256/264, exactly matching `Context`'s real layout and
+"2:"'s own already-proven shape.
+
+**Confirmed working, staged and re-verified at each step, the same
+discipline as the relocating-loader milestone's `x9` fix - not "changed
+it once and moved on":** (1) task-state scaffolding alone, both tasks
+always runnable, verified byte-for-byte identical shell behavior on
+QEMU; (2) the `frame` parameter wired through with nothing using it
+yet, same zero-behavior-change verification; (3) the real
+`block_current_and_switch`/wake-check, tested via a temporary
+`blockread` shell command with block/wake events logged - the exact
+crash above was found here, fixed, then re-verified: typing `blockread`
+produced `TEMP-DEBUG task 0 blocking` immediately, *zero* wake events
+during a real 4-second gap with no input (the direct proof this
+genuinely blocks, not just "looks the same from outside"), then
+`TEMP-DEBUG task 0 waking with value=0x78` and `got byte: 120` the
+instant a key was sent - and the temporary command/logging were
+removed once confirmed; (4) the shell's real main loop switched to
+`read_char`, full interactive regression (typing, backspace, every
+command, `selftest`) plus the full disk-command surface against a real
+FAT32 image, both zero aborts in `-d int` cross-checks, and a direct
+proof the idle task keeps running while the shell blocks: `uptime`
+advancing from `254` to `384` ticks across a 3-second gap with nothing
+typed. **Confirmed on real Parallels hardware too**, via
+`make test-parallels` (`CMDS="selftest;help;echo hello world;uptime"`):
+all four commands typed correctly through the new blocking path (every
+keystroke now goes through it - the busy-poll no longer exists to fall
+back to), zero corruption, correct multi-digit `uptime` (`1363` ticks).
+
+**Still coarse, worth knowing before building on this:** one wait
+reason (keyboard input) - the mechanism generalizes (`WaitReason` is a
+real enum, `STATES` is already sized by `NUM_TASKS`), but nothing else
+uses it yet; worst-case wake latency is still one tick period (20ms),
+unchanged from before - this fixes *what* the scheduler does while
+waiting, not *how fast* it notices, since keyboard input still has no
+real interrupt path of its own (`xhci.rs` is still polled); task 1
+never blocks and this doesn't change that; still no dynamic task
+creation, so "another runnable task to switch to" is always just "the
+idle task" today, not a real scheduling choice - the value here is
+architectural correctness and a real mechanism to build on, not a
+measurable performance win yet (this kernel doesn't optimize for idle
+power anywhere else either).
+
 ## Commands
 
 ```sh
@@ -2976,15 +3111,15 @@ kernel/
   src/framebuffer.rs GOP (EFI_GRAPHICS_OUTPUT_PROTOCOL) discovery: resolution/stride/pixel format + framebuffer physical base/size - the real lead for Parallels, see "GOP framebuffer console" above
   src/font.rs        embedded public-domain 8x8 bitmap font (dhepper/font8x8), printable ASCII 0x20-0x7E only
   src/fbconsole.rs   text console rendered directly into the GOP framebuffer: glyph drawing, cursor, ptr::copy-based scroll - write-only, no ANSI parsing, see "GOP framebuffer console" above
-  src/exceptions.rs  AArch64 exception vector table (VBAR_EL1) + fault reporting; SVC path (slot 8/"3:") saves x9 to a scratch stack slot before the EC check clobbers it - see "A real relocating loader" above for the real bug this fixed
+  src/exceptions.rs  AArch64 exception vector table (VBAR_EL1) + fault reporting; SVC path (slot 8/"3:") saves x9 to a scratch stack slot before the EC check clobbers it (see "A real relocating loader" above) and saves/restores SP_EL0 at Context's real offset alongside ELR/SPSR, passing dispatch() the frame pointer itself (see "Blocking primitives" above)
   src/mmu.rs         replaces firmware's translation tables with our own identity map (L0->L1->L2->L3 as needed), up to MAX_EL0_REGIONS independent EL0 regions, plus an optional framebuffer device-block fallback
   src/gic.rs         version-dispatching facade over gicv2.rs/gicv3.rs, selected by madt.rs's real discovery - see "MADT/GICv3" above
   src/gicv2.rs       GICv2 backend (distributor + memory-mapped CPU interface), addresses now passed in from madt::GicInfo instead of hardcoded
   src/gicv3.rs       GICv3 backend (redistributor wake/discovery, ICC_* system-register CPU interface) - confirmed working on QEMU and real Parallels hardware, see "MADT/GICv3" above
   src/timer.rs       ARM generic timer (non-secure EL1 physical timer, PPI 14 / GIC INTID 30), TICK_INTERVAL_MS
   src/loader.rs      reads INIT.CFG + a program off the ESP during boot services, into a 2MB-aligned EL0-accessible region, real ELF64 parsing + R_AARCH64_RELATIVE relocation processing - see "A real relocating loader" above and docs/processes.md
-  src/syscall.rs     svc syscall dispatch table (print/double/report/try_read_char/putc/get_ticks/fs_list_dir/fs_read_file/fs_mkdir/fs_rmdir/fs_touch/fs_rm/fs_write_file/fs_mv, gap at 5) - confirmed working end to end, see above
-  src/tasks.rs       task 0 (loaded program) + task 1 (idle) + the round-robin scheduler (Context save/restore in the tick path) - confirmed alternating, see above
+  src/syscall.rs     svc syscall dispatch table (print/double/report/try_read_char/putc/get_ticks/fs_list_dir/fs_read_file/fs_mkdir/fs_rmdir/fs_touch/fs_rm/fs_write_file/fs_mv/read_char, gap at 5) - confirmed working end to end, see above and "Blocking primitives" above for read_char specifically
+  src/tasks.rs       task 0 (loaded program) + task 1 (idle) + the round-robin scheduler over Runnable/Blocked task state (block_current_and_switch, on_tick's wake-check) - confirmed working, see "Blocking primitives" above
   src/virtio_mmio.rs virtio-mmio transport: 32-slot device discovery, modern (non-legacy) register layout, addresses confirmed via devicetree dump
   src/virtio_blk.rs  runtime virtio-blk driver: feature negotiation, one virtqueue, synchronous polling sector reads and writes - phase 3a (reads)/phase 4 (writes), confirmed working, see above
   src/virtio_console.rs  transmit-only virtio-console driver over the same transport - device discovery, feature negotiation, transmitq0 - confirmed working on QEMU; confirmed *not* what Parallels' serial port actually is, see "virtio-console" above
@@ -2993,7 +3128,7 @@ kernel/
 
 shell/               userland default shell - a separate crate, built for aarch64-unknown-none, loaded from disk (not compiled into the kernel)
   linker.ld          self-relocating (PIE) linker script: entry at offset 0, .rela.dyn/.dynsym/.dynamic/.data.rel.ro, no .bss/.data (see "A real relocating loader" above and docs/processes.md)
-  src/main.rs        line editor + command dispatch (help/echo/uptime/clear/ls/cat/cd/pwd/mkdir/rmdir/touch/rm/write/cp/mv/selftest), running as real EL0 userland code, built for real relocation (relocation-model=pic, --release only) - see docs/processes.md
+  src/main.rs        line editor + command dispatch (help/echo/uptime/clear/ls/cat/cd/pwd/mkdir/rmdir/touch/rm/write/cp/mv/selftest), running as real EL0 userland code, built for real relocation (relocation-model=pic, --release only) - main loop blocks on read_char (syscall 15) instead of busy-polling, see "Blocking primitives" above; see docs/processes.md
 
 syscall-abi/         shared syscall ABI crate - syscall numbers + sentinel values (NO_CHAR/FS_ERROR/NO_FS), depended on directly by both kernel and shell, no more hand-duplicated numbers - see docs/processes.md
   src/lib.rs         #![no_std], no logic, just pub consts - safe under either target since every value is a scalar inlined at the use site, not a pointer needing relocation

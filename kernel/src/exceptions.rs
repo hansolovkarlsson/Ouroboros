@@ -276,23 +276,44 @@ stp x24, x25, [sp, #192]
 stp x26, x27, [sp, #208]
 stp x28, x29, [sp, #224]
 str x30, [sp, #240]
-// ELR/SPSR read into x9/x10 (not x0-x3) precisely so the original
-// x0-x3 - already safely on the stack from the stp sequence above,
-// untouched by anything since - can be reloaded fresh below rather than
-// juggled through live registers.
+// SP_EL0/ELR/SPSR read into x9/x10 (not x0-x3) precisely so the
+// original x0-x3 - already safely on the stack from the stp sequence
+// above, untouched by anything since - can be reloaded fresh below
+// rather than juggled through live registers. Laid out at offsets
+// 248/256/264 to exactly match Context's own field order (gpr, then
+// sp_el0, then elr_el1, then spsr_el1) - this frame is no longer just
+// scratch space to save-and-blindly-restore the way it was before
+// blocking syscalls existed: tasks::block_current_and_switch treats it
+// as a real, interchangeable Context, the same way the IRQ path's "2:"
+// trampoline already does, and that only works if the byte layout
+// genuinely matches. SP_EL0 specifically didn't need saving before -
+// hardware leaves it untouched across a synchronous SVC trap - but a
+// *blocked* task can be resumed with a *different* task's SP_EL0 now,
+// so it has to be real saved/restored state, not an assumption.
+mrs x9, sp_el0
+str x9, [sp, #248]
 mrs x9, elr_el1
 mrs x10, spsr_el1
-stp x9, x10, [sp, #248]
+stp x9, x10, [sp, #256]
 // dispatch()'s AAPCS64 argument registers: syscall number in x0 (from
 // the original x8), up to 4 syscall arguments in x1-x4 (from the
 // original x0-x3) - reloaded from the stack rather than shuffled live,
-// since every register needed is already sitting there untouched.
+// since every register needed is already sitting there untouched. x5
+// gets the frame pointer itself (sp, at this exact point, already *is*
+// the frame's base address - the same fact the SP_EL0/ELR/SPSR
+// save/restore around this call already relies on) - a real blocking
+// syscall can hand this to tasks::block_current_and_switch to suspend
+// the caller and resume a different task instead of returning to this
+// one; every other syscall just ignores the extra argument.
 ldr x0, [sp, #64]
 ldp x1, x2, [sp, #0]
 ldp x3, x4, [sp, #16]
+mov x5, sp
 bl  {rust_syscall_handler}
 str x0, [sp, #0]   // dispatch()'s return value becomes EL0's new x0
-ldp x2, x3, [sp, #248]
+ldr x2, [sp, #248]
+msr sp_el0, x2
+ldp x2, x3, [sp, #256]
 msr elr_el1, x2
 msr spsr_el1, x3
 ldp x0, x1, [sp, #0]

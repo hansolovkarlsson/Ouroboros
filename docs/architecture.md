@@ -120,15 +120,37 @@ running touches them), a real limitation for whatever runs next.
 
 ## Process model
 
-`tasks.rs` implements strict round-robin scheduling between exactly two
-EL0 tasks — no priorities, no blocking, no queue, no dynamic
-creation/destruction. The *only* thing that ever moves execution from one
-task to the other is the timer tick catching one mid-execution and
-swapping its saved `Context` for the other's.
+`tasks.rs` implements round-robin scheduling between exactly two EL0
+tasks — no priorities, no queue, no dynamic creation/destruction. Every
+task is either `Runnable` or `Blocked(reason)`; the scheduler only ever
+picks among the runnable ones. Two things move execution from one task
+to the other: the timer tick catching the current task mid-execution and
+switching to the next runnable one (`on_tick`), and a blocking syscall
+(currently just `read_char`, see the syscall table above) suspending its
+own caller immediately and switching away mid-syscall
+(`block_current_and_switch`) rather than waiting for the next tick.
 
 - **Task 0** runs whatever program `loader.rs` loaded from disk — see
   [`processes.md`](processes.md).
-- **Task 1** is a genuine idle task: a bare `wfe` loop, nothing else.
+- **Task 1** is a genuine idle task: a busy-spin loop (`nop; b 1b`), never
+  blocked, always runnable — real Parallels hardware has a confirmed,
+  unresolved hang when an EL0 task executes `wfe` (see `tasks.rs`'s
+  module doc comment), so idling is a real spin, not an architectural
+  `wfe` wait, and blocking syscalls are built the same way for the same
+  reason (see below) rather than having a task call `wfe` itself.
+
+**Blocking primitives.** A task that has nothing to do until some
+condition holds (today: a keyboard byte becoming available) can block
+instead of busy-polling. `on_tick` runs a wake-check every tick before
+its normal scheduling decision: for each blocked task, it evaluates that
+task's wait reason, and if satisfied, stashes the resulting value into
+the task's saved context (`x0`) and marks it runnable again — the task
+resumes exactly where its blocking syscall left off, with the value
+already in hand, indistinguishable from the syscall having simply
+returned it. Worst-case wake latency is one tick period, the same bound
+this kernel's keyboard input has always had. The shell's main loop uses
+this (`read_char`) instead of the busy-poll it used before — see
+`shell/src/main.rs`'s `main` for the current shape.
 
 The tick period is 20ms (`timer::TICK_INTERVAL_MS`) — short specifically
 so that a task waiting its turn (e.g. the shell, when task 1 currently has
@@ -170,6 +192,7 @@ the way hand-duplicated numbers did before this crate existed.
 | 12 | `fs_rm` | path ptr, path len | `0`, `NO_FS`, or `FS_ERROR` | Removes a file (not a directory — use `fs_rmdir` for those). Same collapsed-error contract as `fs_mkdir` |
 | 13 | `fs_write_file` | path ptr, path len, data ptr, data len | `0`, `NO_FS`, or `FS_ERROR` | Creates a file with exactly `data`'s contents, or fully overwrites (not appends to) an existing file's contents. `data len` may legitimately be `0` (truncate to empty) — the one `fs_*` argument pair where a zero length is valid rather than rejected, see below |
 | 14 | `fs_mv` | src ptr, src len, dst ptr, dst len | `0`, `NO_FS`, or `FS_ERROR` | Renames or moves the file or directory at `src` to `dst`, reusing its existing cluster chain rather than reading and rewriting content. `dst` must not already exist |
+| 15 | `read_char` | ignored | a byte | Blocking — if none is waiting, suspends the calling task and switches to another runnable one instead of returning `NO_CHAR`; resumes with the byte once available. See `tasks.rs`'s `block_current_and_switch` and the "Blocking primitives" section below |
 | other | — | — | `u64::MAX` | Logged as unknown |
 
 All eight `fs_*` syscalls share two distinct failure sentinels, not one:

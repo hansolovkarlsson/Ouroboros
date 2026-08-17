@@ -38,7 +38,9 @@ use syscall_abi::{FS_ERROR, NO_CHAR, NO_FS};
 
 use crate::console;
 use crate::exceptions;
+use crate::exceptions::Context;
 use crate::fat32;
+use crate::tasks;
 
 /// Two independent counters (one per `tasks.rs` task), proof — alongside
 /// `double`/`print` below — that syscalls arriving from *different*,
@@ -66,6 +68,18 @@ static FS: FsCell = FsCell(core::cell::UnsafeCell::new(None));
 /// reasoning is needed.
 pub fn install_fs(fs: fat32::Fs) {
     unsafe { *FS.0.get() = Some(fs) };
+}
+
+/// Falls back to the USB keyboard (xhci.rs) when the byte-stream console
+/// has nothing waiting - no shell/ABI changes needed to wire keyboard
+/// input in, since both sources feed the same syscalls (`TRY_READ_CHAR`,
+/// `READ_CHAR`). `crate::xhci::poll_key()` is a no-op returning `None`
+/// immediately if no keyboard was ever found/installed this boot. Also
+/// called from `tasks.rs`'s `on_tick` wake-check, evaluating
+/// `WaitReason::Keyboard` for a blocked task - the same check either way,
+/// just a different caller deciding what to do with the result.
+pub(crate) fn poll_keyboard_byte() -> Option<u8> {
+    console::read_byte().or_else(crate::xhci::poll_key)
 }
 
 /// Minimal sanity bound for a userland `(pointer, length)` argument pair -
@@ -260,7 +274,19 @@ fn fs_mv(src: &str, dst: &str) -> u64 {
 /// Match arms below use the `syscall_abi` constants rather than bare
 /// numbers, so this table and the userland caller can never silently
 /// disagree about what number means what.
-pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64) -> u64 {
+///
+/// `frame` (`x5`, per AAPCS64 - `number`/`arg0..arg3` already fill
+/// `x0..x4`) is the calling task's full trap frame, the same pointer
+/// `rust_irq_handler` already gets via `mov x0, sp`; `exceptions.rs`'s
+/// "3:" SVC path passes it the identical way (`mov x5, sp` right before
+/// this call). Unused by every syscall today - a plain non-blocking
+/// dispatch table doesn't need it - but real blocking syscalls do: a
+/// syscall that has nothing to return yet can hand `frame` to
+/// `tasks::block_current_and_switch` to suspend the caller and switch to
+/// another task mid-syscall, instead of spinning inside the handler with
+/// interrupts masked (see that function's own doc comment for why this
+/// is the only safe way to block on this kernel).
+pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, frame: *mut Context) -> u64 {
     match number {
         syscall_abi::PRINT => {
             console::println!("Ouroboros kernel: syscall from EL0: print(arg0={arg0:#x})");
@@ -285,14 +311,18 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
                 None => u64::MAX,
             }
         }
-        // Falls back to the USB keyboard (xhci.rs) when the byte-stream
-        // console has nothing waiting - no shell/ABI changes needed to
-        // wire keyboard input in, since both sources feed the same
-        // syscall. crate::xhci::poll_key() is a no-op returning None
-        // immediately if no keyboard was ever found/installed this boot.
-        syscall_abi::TRY_READ_CHAR => match console::read_byte().or_else(crate::xhci::poll_key) {
+        syscall_abi::TRY_READ_CHAR => match poll_keyboard_byte() {
             Some(byte) => byte as u64,
             None => NO_CHAR,
+        },
+        // Blocks instead of returning NO_CHAR: if nothing's waiting yet,
+        // suspends this task and switches to another runnable one - see
+        // tasks::block_current_and_switch's own doc comment for why this
+        // is safe on real hardware where a task-side `wfe` isn't. `frame`
+        // is what makes that possible; every other arm above ignores it.
+        syscall_abi::READ_CHAR => match poll_keyboard_byte() {
+            Some(byte) => byte as u64,
+            None => unsafe { tasks::block_current_and_switch(frame, tasks::WaitReason::Keyboard) },
         },
         syscall_abi::PUTC => {
             console::putc(arg0 as u8);

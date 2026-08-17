@@ -80,7 +80,7 @@ const LF: u8 = b'\n';
 // Syscall numbers and sentinel values come from the shared `syscall-abi`
 // crate now, not hand-duplicated local consts - see its doc comment and
 // `kernel/src/syscall.rs`'s dispatch table, the other side of this ABI.
-use syscall_abi::{FS_ERROR, NO_CHAR, NO_FS};
+use syscall_abi::{FS_ERROR, NO_FS};
 
 /// Placed first in `.text` by `linker.ld` (`KEEP(*(.text.start))`) so it
 /// lands at file/VA offset 0 - `tasks.rs` sets a loaded program's
@@ -104,29 +104,22 @@ fn main() -> ! {
 
     print_prompt();
     loop {
-        // Deliberately busy-polls rather than `wfe()`-ing between bytes -
-        // a real correctness requirement, not just a style choice, once
-        // keyboard input (kernel/src/xhci.rs) entered the picture. `wfe`
-        // architecturally only resumes on an event (SEV, a pending
-        // IRQ/FIQ regardless of masking, a debug event, or an
-        // implementation-defined wakeup) - on QEMU that's covered for
-        // free by the timer tick's IRQ firing every ~20ms regardless of
-        // whether this task is the one it wakes. On real Parallels
-        // hardware, `qemu_device_region_safe` (see main.rs) disables the
-        // GIC/timer entirely, so there is no periodic interrupt at all -
-        // an idle `wfe` there has nothing architecturally guaranteed to
-        // ever wake it again, which would make every syscall this loop
-        // depends on (including polling the USB keyboard, which has no
-        // interrupt path of its own either - see xhci.rs) permanently
-        // unreachable after the very first empty poll. There is no
-        // syscall today for userland to learn whether a tick source
-        // exists this boot, so busy-polling unconditionally is the only
-        // way to keep this loop correct on both platforms; the cost is
-        // spinning one vCPU's worth of host CPU while idle, accepted
-        // deliberately over a shell that can silently stop responding.
-        if let Some(byte) = try_read_char() {
-            on_byte(byte, &mut buf, &mut len, &mut cwd, &mut cwd_len);
-        }
+        // Genuinely blocks now, rather than busy-polling `try_read_char`
+        // every iteration - `READ_CHAR` (kernel/src/syscall.rs) suspends
+        // this task at the scheduler level and switches to another
+        // runnable one (task 1's idle loop, today) until a byte is
+        // actually available, then resumes here with it already in hand.
+        // Not `wfe()`: real Parallels hardware has a confirmed,
+        // unresolved hang when an EL0 task executes `wfe` (see
+        // `tasks.rs`'s module doc comment) - this loop never does,
+        // deliberately, and never has to worry about whether a tick
+        // source exists this boot the way the old busy-poll comment here
+        // used to (before real MADT/GICv3 discovery made that concern
+        // moot anyway - see CLAUDE.md's "MADT/GICv3" section). The
+        // kernel-side blocking mechanism is what changed; this loop just
+        // calls a syscall that happens to take longer to return now.
+        let byte = read_char();
+        on_byte(byte, &mut buf, &mut len, &mut cwd, &mut cwd_len);
     }
 }
 
@@ -144,7 +137,7 @@ fn on_byte(byte: u8, buf: &mut [u8; BUFFER_SIZE], len: &mut usize, cwd: &mut [u8
         CR | LF => {
             putc(CR);
             putc(LF);
-            // buf[..*len] is whatever bytes try_read_char returned,
+            // buf[..*len] is whatever bytes read_char returned,
             // completely unfiltered (see the `byte` arm below) - not
             // guaranteed valid UTF-8 (e.g. a pasted multi-byte sequence
             // split across separate reads, or a stray high byte), so this
@@ -904,11 +897,12 @@ fn syscall4(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64) -> u64 {
     ret
 }
 
-fn try_read_char() -> Option<u8> {
-    match syscall(syscall_abi::TRY_READ_CHAR, 0) {
-        NO_CHAR => None,
-        byte => Some(byte as u8),
-    }
+/// Blocks until a byte is available - see `main`'s loop for why this
+/// replaced a busy-poll around the non-blocking `TRY_READ_CHAR` syscall
+/// (still available in `syscall-abi` for any caller that genuinely wants
+/// non-blocking semantics; this program just isn't one anymore).
+fn read_char() -> u8 {
+    syscall(syscall_abi::READ_CHAR, 0) as u8
 }
 
 fn putc(byte: u8) {

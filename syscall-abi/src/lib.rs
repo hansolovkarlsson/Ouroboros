@@ -96,6 +96,13 @@ pub const FS_WRITE_FILE: u64 = 13;
 /// overwriting it or moving `src` inside it.
 pub const FS_MV: u64 = 14;
 
+/// Blocking: waits until a byte is available and returns it, rather than
+/// returning [`NO_CHAR`] immediately like [`TRY_READ_CHAR`]. The caller
+/// simply doesn't run again until then - the kernel suspends it and
+/// schedules another task in its place (see `tasks.rs`'s
+/// `block_current_and_switch`), not a spin-wait on either side.
+pub const READ_CHAR: u64 = 15;
+
 /// Sentinel `try_read_char` returns when no byte is waiting - out of
 /// range for any real byte (0-255), so callers can tell the two apart
 /// with a single comparison.

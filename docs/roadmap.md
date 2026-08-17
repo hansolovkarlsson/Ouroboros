@@ -186,8 +186,22 @@ phase:
   SVC trampoline losing `x9` across every syscall — also confirmed fixed
   on real hardware via a genuinely multi-digit `uptime` value). See
   `CLAUDE.md`'s "A real relocating loader" section for the full writeup.
-- Blocking/waiting primitives, so tasks aren't limited to unconditional
-  round-robin `wfe` polling.
+- ~~Blocking/waiting primitives, so tasks aren't limited to unconditional
+  round-robin `wfe` polling.~~ **Done** — `tasks.rs` gained real
+  `Runnable`/`Blocked(reason)` task state, a `block_current_and_switch`
+  that suspends the calling task and switches to another runnable one
+  mid-syscall (not via `wfe` - real Parallels hardware has a confirmed,
+  unresolved hang when an EL0 task executes it, so this mechanism
+  deliberately never does), and a per-tick wake-check. The shell's main
+  loop now blocks on a real `read_char` syscall instead of busy-polling.
+  Confirmed on QEMU and real Parallels hardware. A real, if incidental,
+  bug surfaced and fixed along the way: the SVC trampoline's saved-frame
+  layout never matched `Context`'s real field order (no `SP_EL0` slot at
+  all, `ELR`/`SPSR` at the wrong offset) - harmless for every syscall
+  before this one, since none needed the frame to be a fully
+  interchangeable `Context`, but it directly corrupted the resumed
+  task's `ELR_EL1` the first time one did. See `CLAUDE.md`'s "Blocking
+  primitives" section for the full writeup.
 - Dynamic task creation and `exec()` — running more than one loaded
   program, or reloading one without a reboot.
 - **Actual microkernel-style driver isolation** — moving drivers

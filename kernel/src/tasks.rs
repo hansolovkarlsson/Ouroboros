@@ -122,6 +122,105 @@ static TASKS: [TaskSlot; NUM_TASKS] =
 
 static CURRENT: AtomicUsize = AtomicUsize::new(0);
 
+/// What a blocked task is waiting for. One variant today - a byte from
+/// the keyboard/console (`syscall_abi::READ_CHAR`, `syscall.rs`) - but
+/// deliberately a real enum, not a bool, since the mechanism below
+/// (`on_tick`'s wake-check, `block_current_and_switch`) doesn't care how
+/// many reasons exist, only that each one can be evaluated to
+/// `Option<u64>` (the value to hand back to the task once it's ready).
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) enum WaitReason {
+    Keyboard,
+}
+
+impl WaitReason {
+    /// `Some(value)` if this reason is satisfied right now, consuming
+    /// whatever made it so (e.g. the keyboard byte itself) - `None` means
+    /// keep waiting. Delegates to `syscall.rs` since that's already where
+    /// the console/xhci polling logic lives; `tasks.rs` doesn't otherwise
+    /// know anything about consoles or keyboards.
+    fn poll(self) -> Option<u64> {
+        match self {
+            WaitReason::Keyboard => crate::syscall::poll_keyboard_byte().map(u64::from),
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum TaskState {
+    Runnable,
+    Blocked(WaitReason),
+}
+
+struct StateSlot(UnsafeCell<TaskState>);
+
+// SAFETY: same argument as `TaskSlot` above - single-core, only touched
+// from EL1 with IRQs masked.
+unsafe impl Sync for StateSlot {}
+
+static STATES: [StateSlot; NUM_TASKS] =
+    [StateSlot(UnsafeCell::new(TaskState::Runnable)), StateSlot(UnsafeCell::new(TaskState::Runnable))];
+
+/// Scans forward from `from` (exclusive), wrapping, for the next
+/// `Runnable` task - falls back to `from` itself if nothing else is
+/// runnable. That fallback is unreachable today (task 1, the idle task,
+/// never blocks - see this module's doc comment for why it can't safely
+/// use `wfe` either, so it has to stay a real, always-runnable busy-spin),
+/// but a safe "stay put" is the right behavior if that ever stops being
+/// true, not a panic.
+fn next_runnable(from: usize) -> usize {
+    for offset in 1..=NUM_TASKS {
+        let candidate = (from + offset) % NUM_TASKS;
+        if unsafe { *STATES[candidate].0.get() } == TaskState::Runnable {
+            return candidate;
+        }
+    }
+    from
+}
+
+/// Suspends the calling task (whichever one is live in `frame` right now)
+/// until `reason` is satisfied, and switches to another runnable task
+/// immediately - called from `syscall.rs`'s dispatch table when a
+/// blocking syscall has nothing to return yet.
+///
+/// **Why this, and not just returning a "would block" sentinel and
+/// letting the caller `wfe`:** real Parallels hardware has a confirmed,
+/// unresolved hang when an EL0 task executes `wfe` (see this module's
+/// doc comment - task 1's idle loop had to become a busy-spin because of
+/// it). A task that blocked by calling `wfe` itself would almost
+/// certainly hit the same hang. This function never executes `wfe`
+/// anywhere: the calling task's context is saved exactly like a normal
+/// preemption, and a different task's already-saved context is loaded in
+/// its place - the blocked task simply doesn't run again until `on_tick`
+/// wakes it, the same mechanism that already safely idles task 1 today.
+///
+/// **The return value is not a normal function result - the caller
+/// (`syscall::dispatch`) must return it unmodified as its own return
+/// value.** `exceptions.rs`'s SVC trampoline unconditionally writes
+/// `dispatch`'s return value into `frame`'s `x0` slot after the call
+/// (`str x0, [sp, #0]`) - fine for a syscall that resumes its own
+/// caller, but this function just overwrote `*frame` with a *different*
+/// task's entire saved context. Returning `frame.gpr[0]` (that task's
+/// own `x0`, already sitting there after the overwrite) turns the
+/// trampoline's blind write into a harmless no-op instead of clobbering
+/// the resumed task's real return value - the whole mechanism works
+/// without changing the trampoline's control flow at all.
+///
+/// # Safety
+/// `frame` must be the live trap frame of the syscall currently being
+/// dispatched (true when called from `syscall::dispatch`, its only
+/// caller).
+pub(crate) unsafe fn block_current_and_switch(frame: *mut Context, reason: WaitReason) -> u64 {
+    let frame = unsafe { &mut *frame };
+    let current = CURRENT.load(Ordering::Relaxed);
+    unsafe { *TASKS[current].0.get() = *frame };
+    unsafe { *STATES[current].0.get() = TaskState::Blocked(reason) };
+    let next = next_runnable(current);
+    *frame = unsafe { *TASKS[next].0.get() };
+    CURRENT.store(next, Ordering::Relaxed);
+    frame.gpr[0]
+}
+
 /// Task 1's (the idle task's) small dedicated EL0 region — `mmu.rs` maps
 /// this alongside whatever `loader.rs` loaded for task 0. Two independent
 /// regions, not one shared region split in half like before this
@@ -246,11 +345,25 @@ pub unsafe fn start() -> ! {
     }
 }
 
-/// The entire scheduler: save whatever the tick just interrupted into its
-/// task's slot, load the other task's saved state into `frame` in its
-/// place. `exceptions.rs`'s trampoline does the rest — it doesn't know or
-/// need to know a switch happened, it just restores from `frame` and
-/// `eret`s, same as if nothing here had touched it.
+/// The entire scheduler: first, give every `Blocked` task a chance to
+/// wake (see the wake-check below); then save whatever the tick just
+/// interrupted into its task's slot, and load the next *runnable* task's
+/// saved state into `frame` in its place. `exceptions.rs`'s trampoline
+/// does the rest — it doesn't know or need to know a switch happened, it
+/// just restores from `frame` and `eret`s, same as if nothing here had
+/// touched it.
+///
+/// **Wake-check:** for every task currently `Blocked(reason)`, evaluate
+/// `reason` (`WaitReason::poll`) - if it's satisfied, stash the resulting
+/// value into that task's *saved* `Context.gpr[0]` (its `x0`) and mark it
+/// `Runnable`. When that task is later switched to (here or on a future
+/// tick), it resumes exactly where its blocking syscall left off, with
+/// `x0` already holding the value - indistinguishable, from the task's
+/// own point of view, from the syscall having simply returned it. This
+/// is the only place a blocked task's wait condition is ever checked -
+/// worst-case wake latency is one tick period (`timer::TICK_INTERVAL_MS`),
+/// the same bound this kernel's keyboard input has always had, blocking
+/// or not.
 ///
 /// # Safety
 /// `frame` must be the live trap frame of the exception currently being
@@ -259,8 +372,22 @@ pub unsafe fn start() -> ! {
 pub unsafe fn on_tick(frame: *mut Context) {
     let frame = unsafe { &mut *frame };
     let current = CURRENT.load(Ordering::Relaxed);
+
+    for i in 0..NUM_TASKS {
+        let TaskState::Blocked(reason) = (unsafe { *STATES[i].0.get() }) else { continue };
+        if let Some(value) = reason.poll() {
+            unsafe { (*TASKS[i].0.get()).gpr[0] = value };
+            unsafe { *STATES[i].0.get() = TaskState::Runnable };
+        }
+    }
+
+    let next = next_runnable(current);
+    if next == current {
+        // Nothing else runnable - stay put rather than pointlessly saving
+        // and reloading the same context.
+        return;
+    }
     unsafe { *TASKS[current].0.get() = *frame };
-    let next = (current + 1) % NUM_TASKS;
     *frame = unsafe { *TASKS[next].0.get() };
     CURRENT.store(next, Ordering::Relaxed);
 }

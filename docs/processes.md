@@ -203,7 +203,11 @@ dependency in your program's `Cargo.toml` (see the default shell's for an
 example) and use `syscall_abi::FS_MKDIR` etc. rather than hand-copying
 numbers. See `docs/architecture.md`'s syscall table for the full list.
 `try_read_char` (`TRY_READ_CHAR`, non-blocking, returns `NO_CHAR` when
-nothing is waiting) and `putc` (`PUTC`, one raw byte, no newline
+nothing is waiting), `read_char` (`READ_CHAR`, blocking - suspends the
+calling task and switches to another runnable one instead of returning
+immediately, resuming with the byte once one arrives; see
+`docs/architecture.md`'s "Process model" section for how blocking
+actually works), and `putc` (`PUTC`, one raw byte, no newline
 translation) cover interactive I/O; `get_ticks` (`GET_TICKS`, added for
 phase 2's `uptime` builtin) is the pattern to follow whenever a command
 needs real kernel state it can't get any other way. `fs_list_dir`/
