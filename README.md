@@ -8,6 +8,9 @@ A microkernel operating system for ARM64 (aarch64), written in Rust with some as
 
 **[Project site & debugging postmortems →](https://hansolovkarlsson.github.io/Ouroboros/)**
 
+**[User manual →](docs/manual.md)** — building, running (QEMU &
+Parallels), testing, shell usage, and the syscall ABI, in one place.
+
 ## Design goals
 
 - Microkernel architecture, POSIX-ish system calls
