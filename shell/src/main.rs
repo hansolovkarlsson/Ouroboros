@@ -89,7 +89,7 @@ const LF: u8 = b'\n';
 // Syscall numbers and sentinel values come from the shared `syscall-abi`
 // crate now, not hand-duplicated local consts - see its doc comment and
 // `kernel/src/syscall.rs`'s dispatch table, the other side of this ABI.
-use syscall_abi::{EXIT_DENIED, FS_ERROR, NO_FS, SPAWN_ERROR};
+use syscall_abi::{EXIT_DENIED, FS_ERR_MIN, FS_ERR_NOT_FOUND, NO_FS, SPAWN_ERROR};
 
 /// Placed first in `.text` by `linker.ld` (`KEEP(*(.text.start))`) so it
 /// lands at file/VA offset 0 - `tasks.rs` sets a loaded program's
@@ -313,9 +313,14 @@ fn finish_redirect(captured: &[u8], overflowed: bool, target: &str, append: bool
                 return;
             }
             // No such file: `>>` creates it, standard sh semantics.
-            // (This arm also covers "target is a directory" - existing
-            // stays 0 and the write below fails with its normal error.)
-            FS_ERROR => 0,
+            FS_ERR_NOT_FOUND => 0,
+            // Any other error (target is a directory, I/O failure, ...)
+            // is now distinguishable from "missing" and reported here,
+            // instead of limping into a write that would fail anyway.
+            code if code >= FS_ERR_MIN => {
+                print_fs_error("redirect", code);
+                return;
+            }
             // fs_read_file returns the file's *real* size, which may
             // exceed the buffer (the read was truncated at buffer
             // length) - so this one check refuses both "existing
@@ -340,7 +345,7 @@ fn finish_redirect(captured: &[u8], overflowed: bool, target: &str, append: bool
 
     match fs_write_file(path, data) {
         NO_FS => print_no_fs(),
-        FS_ERROR => print_line("redirect: write failed (bad name, parent missing, target is a directory, or disk full)"),
+        code if code >= FS_ERR_MIN => print_fs_error("redirect", code),
         _ => {}
     }
 }
@@ -559,6 +564,30 @@ fn print_no_fs() {
     print_line("no filesystem mounted this boot (see the kernel boot log - `make run`'s disk is FAT16, not FAT32; use `make run-image` for disk commands)");
 }
 
+/// Prints `"<cmd>: <one specific reason>"` for a kernel `FS_ERR_*` code -
+/// the payoff of splitting the old single collapsed `FS_ERROR` sentinel:
+/// no more guess-list error messages. Integer `match` plus `print_str`
+/// of literals only - the two long-established relocation-safe patterns
+/// (see [`resolve_path`]'s doc comment for the history; direct literal
+/// comparisons are safe too since the relocating loader, this just stays
+/// on one idiom).
+fn print_fs_error(cmd: &str, code: u64) {
+    print_str(cmd);
+    print_str(": ");
+    print_line(match code {
+        syscall_abi::FS_ERR_NOT_FOUND => "no such file or directory",
+        syscall_abi::FS_ERR_NOT_A_FILE => "is a directory",
+        syscall_abi::FS_ERR_NOT_A_DIRECTORY => "not a directory",
+        syscall_abi::FS_ERR_INVALID_NAME => "invalid name (must fit this kernel's 8.3 short-name subset)",
+        syscall_abi::FS_ERR_ALREADY_EXISTS => "already exists",
+        syscall_abi::FS_ERR_NOT_EMPTY => "directory not empty",
+        syscall_abi::FS_ERR_IS_ROOT => "can't remove the root directory",
+        syscall_abi::FS_ERR_DISK_FULL => "disk full",
+        syscall_abi::FS_ERR_IO => "device I/O error",
+        _ => "failed",
+    });
+}
+
 fn cmd_ls(arg: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize, out: &mut Output) {
     let mut path_buf = [0u8; PATH_SIZE];
     let Some(path_len) = resolve_path(cwd_str(cwd, cwd_len), arg, &mut path_buf) else {
@@ -573,7 +602,7 @@ fn cmd_ls(arg: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize, out: &mut Output) {
     let mut listing = [0u8; LIST_BUFFER_SIZE];
     match fs_list_dir(path, &mut listing) {
         NO_FS => print_no_fs(),
-        FS_ERROR => print_line("ls: no such directory"),
+        code if code >= FS_ERR_MIN => print_fs_error("ls", code),
         n => {
             for &b in &listing[..n as usize] {
                 out.put(b);
@@ -600,7 +629,7 @@ fn cmd_cat(arg: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize, out: &mut Output) {
     let mut file_buf = [0u8; CAT_BUFFER_SIZE];
     match fs_read_file(path, &mut file_buf) {
         NO_FS => print_no_fs(),
-        FS_ERROR => print_line("cat: no such file"),
+        code if code >= FS_ERR_MIN => print_fs_error("cat", code),
         size => {
             let n = (size as usize).min(file_buf.len());
             for &b in &file_buf[..n] {
@@ -645,8 +674,8 @@ fn cmd_cd(arg: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize) {
             print_no_fs();
             return;
         }
-        FS_ERROR => {
-            print_line("cd: no such directory");
+        code if code >= FS_ERR_MIN => {
+            print_fs_error("cd", code);
             return;
         }
         _ => {}
@@ -676,7 +705,7 @@ fn cmd_mkdir(arg: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize) {
 
     match fs_mkdir(path) {
         NO_FS => print_no_fs(),
-        FS_ERROR => print_line("mkdir: failed (already exists, bad name, parent missing, or disk full)"),
+        code if code >= FS_ERR_MIN => print_fs_error("mkdir", code),
         _ => {}
     }
 }
@@ -725,7 +754,7 @@ fn cmd_rmdir(arg: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize) {
 
     match fs_rmdir(path) {
         NO_FS => print_no_fs(),
-        FS_ERROR => print_line("rmdir: failed (no such directory, not empty, or is root)"),
+        code if code >= FS_ERR_MIN => print_fs_error("rmdir", code),
         _ => {}
     }
 }
@@ -747,7 +776,7 @@ fn cmd_touch(arg: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize) {
 
     match fs_touch(path) {
         NO_FS => print_no_fs(),
-        FS_ERROR => print_line("touch: failed (bad name, parent missing, or path is a directory)"),
+        code if code >= FS_ERR_MIN => print_fs_error("touch", code),
         _ => {}
     }
 }
@@ -769,7 +798,7 @@ fn cmd_rm(arg: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize) {
 
     match fs_rm(path) {
         NO_FS => print_no_fs(),
-        FS_ERROR => print_line("rm: failed (no such file, or path is a directory)"),
+        code if code >= FS_ERR_MIN => print_fs_error("rm", code),
         _ => {}
     }
 }
@@ -818,7 +847,7 @@ fn cmd_write(line: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize) {
 
     match fs_write_file(path, &content[..len]) {
         NO_FS => print_no_fs(),
-        FS_ERROR => print_line("write: failed (bad name, parent missing, path is a directory, or disk full)"),
+        code if code >= FS_ERR_MIN => print_fs_error("write", code),
         _ => {}
     }
 }
@@ -859,8 +888,8 @@ fn cmd_cp(line: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize) {
             print_no_fs();
             return;
         }
-        FS_ERROR => {
-            print_line("cp: no such source file");
+        code if code >= FS_ERR_MIN => {
+            print_fs_error("cp", code);
             return;
         }
         n => n,
@@ -888,7 +917,7 @@ fn cmd_cp(line: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize) {
 
     match fs_write_file(dst_path, &content[..size as usize]) {
         NO_FS => print_no_fs(),
-        FS_ERROR => print_line("cp: failed (bad name, parent missing, destination is a directory, or disk full)"),
+        code if code >= FS_ERR_MIN => print_fs_error("cp", code),
         _ => {}
     }
 }
@@ -931,7 +960,7 @@ fn cmd_mv(line: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize) {
 
     match fs_mv(src_path, dst_path) {
         NO_FS => print_no_fs(),
-        FS_ERROR => print_line("mv: failed (no such source, destination already exists, bad name, or parent missing)"),
+        code if code >= FS_ERR_MIN => print_fs_error("mv", code),
         _ => {}
     }
 }
@@ -1098,10 +1127,10 @@ fn get_ticks() -> u64 {
 /// Lists `path`'s directory entries into `buf` as `name\n`/`name/\n` -
 /// see `syscall.rs::fs_list_dir` for the exact format and truncation
 /// behavior. Returns the raw syscall result: a byte count on success,
-/// [`NO_FS`] if there's no mounted filesystem, or [`FS_ERROR`] if `path`
-/// isn't a directory - callers match on this directly (see [`cmd_ls`])
-/// rather than collapsing the two failure cases into one, so `ls`/`cd`
-/// can tell "nothing's mounted" apart from "that path doesn't exist".
+/// [`NO_FS`] if there's no mounted filesystem, or a specific `FS_ERR_*`
+/// code (anything `>= FS_ERR_MIN`) - callers match on this directly (see
+/// [`cmd_ls`] and [`print_fs_error`]), so every failure reason gets its
+/// own accurate message.
 fn fs_list_dir(path: &str, buf: &mut [u8]) -> u64 {
     syscall4(syscall_abi::FS_LIST_DIR, path.as_ptr() as u64, path.len() as u64, buf.as_mut_ptr() as u64, buf.len() as u64)
 }
@@ -1109,18 +1138,17 @@ fn fs_list_dir(path: &str, buf: &mut [u8]) -> u64 {
 /// Reads `path`'s contents into `buf`. Returns the raw syscall result:
 /// the file's *real* size on success (which may exceed `buf.len()` -
 /// compare to detect truncation, same contract as
-/// `fat32::Fs::read_file`/`syscall.rs::fs_read_file`), [`NO_FS`], or
-/// [`FS_ERROR`] - same reasoning as [`fs_list_dir`].
+/// `fat32::Fs::read_file`/`syscall.rs::fs_read_file`), [`NO_FS`], or a
+/// specific `FS_ERR_*` code - same reasoning as [`fs_list_dir`].
 fn fs_read_file(path: &str, buf: &mut [u8]) -> u64 {
     syscall4(syscall_abi::FS_READ_FILE, path.as_ptr() as u64, path.len() as u64, buf.as_mut_ptr() as u64, buf.len() as u64)
 }
 
 /// Creates an empty directory at `path`. Returns the raw syscall result:
-/// `0` on success, [`NO_FS`], or [`FS_ERROR`] - the kernel still
-/// collapses every *non-`NO_FS`* failure reason (already exists, invalid
-/// 8.3 name, parent missing, disk full, ...) into that one `FS_ERROR`
-/// sentinel (see `syscall.rs::fs_mkdir`), so this program can't yet
-/// report *why* beyond "no filesystem" vs. "some other failure".
+/// `0` on success, [`NO_FS`], or a specific `FS_ERR_*` code for the real
+/// failure reason (already exists, invalid 8.3 name, parent missing,
+/// disk full, ... - see `syscall.rs::fs_error_code` and
+/// [`print_fs_error`]); the old one-collapsed-sentinel gap is closed.
 fn fs_mkdir(path: &str) -> u64 {
     syscall4(syscall_abi::FS_MKDIR, path.as_ptr() as u64, path.len() as u64, 0, 0)
 }

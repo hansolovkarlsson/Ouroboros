@@ -134,12 +134,13 @@ pub const EXIT_DENIED: u64 = u64::MAX;
 /// with a single comparison.
 pub const NO_CHAR: u64 = u64::MAX;
 
-/// Generic failure sentinel for the `fs_*` syscalls: the filesystem is
-/// mounted, but this specific operation failed (not found, not a
-/// directory, already exists, disk full, ...). Every distinct
-/// `fat32::Error` still collapses to this one value - a userland program
-/// that needs to know *why* still can't (a real gap, unchanged by
-/// [`NO_FS`]).
+/// Generic/unknown failure for the `fs_*` syscalls - the fallback when
+/// no more specific `FS_ERR_*` code below applies (today that's exactly
+/// the argument-validation rejections: a bad `(pointer, length)` pair
+/// never reaches the filesystem at all). Every *filesystem* failure now
+/// returns one of the specific codes instead - the old
+/// "every distinct `fat32::Error` collapses to this one value" gap is
+/// closed.
 pub const FS_ERROR: u64 = u64::MAX;
 
 /// A second, distinguishable sentinel the `fs_*` syscalls return
@@ -153,6 +154,44 @@ pub const FS_ERROR: u64 = u64::MAX;
 /// real return value: `fs_list_dir`/`fs_read_file` only ever return
 /// small byte counts/file sizes, nowhere near `u64::MAX - 1`.
 pub const NO_FS: u64 = u64::MAX - 1;
+
+// Specific `fs_*` failure codes - the split of the old single collapsed
+// [`FS_ERROR`], one code per cause a caller can meaningfully act on,
+// mapped from `fat32::Error` by `kernel/src/syscall.rs::fs_error_code`.
+// All live in the same reserved top band as the sentinels above
+// (see [`FS_ERR_MIN`]), so every real success value (byte counts, file
+// sizes) stays valid - the same safety argument [`NO_FS`] already made.
+
+/// The path (or its parent) doesn't resolve.
+pub const FS_ERR_NOT_FOUND: u64 = u64::MAX - 2;
+/// The path resolves to a directory where a file was required
+/// (`cat`/`rm`/`write` on a directory).
+pub const FS_ERR_NOT_A_FILE: u64 = u64::MAX - 3;
+/// The path resolves to a file where a directory was required
+/// (`ls`/`cd`/`rmdir` on a file).
+pub const FS_ERR_NOT_A_DIRECTORY: u64 = u64::MAX - 4;
+/// The name doesn't fit this kernel's conservative 8.3 short-name
+/// subset (see `fat32.rs::make_short_name`).
+pub const FS_ERR_INVALID_NAME: u64 = u64::MAX - 5;
+/// An entry with this name already exists.
+pub const FS_ERR_ALREADY_EXISTS: u64 = u64::MAX - 6;
+/// `rmdir` on a directory that still has entries.
+pub const FS_ERR_NOT_EMPTY: u64 = u64::MAX - 7;
+/// `rmdir` on the root directory.
+pub const FS_ERR_IS_ROOT: u64 = u64::MAX - 8;
+/// No free cluster left on the volume.
+pub const FS_ERR_DISK_FULL: u64 = u64::MAX - 9;
+/// A device-level (virtio-blk) read/write failure - or one of the
+/// mount-shape errors that can't actually occur through an
+/// already-mounted filesystem, mapped here rather than omitted.
+pub const FS_ERR_IO: u64 = u64::MAX - 10;
+
+/// Floor of the reserved error band (with headroom for future codes):
+/// **any `fs_*` return value `>= FS_ERR_MIN` is an error**, everything
+/// below is a real result. The predicate callers actually need, since
+/// `fs_read_file`/`fs_list_dir` return arbitrary byte counts on success
+/// and can't enumerate every non-error value in a `match`.
+pub const FS_ERR_MIN: u64 = u64::MAX - 15;
 
 /// Generic failure sentinel for [`SPAWN`] - same bit pattern as
 /// [`FS_ERROR`] (a bad ELF, no free task slot, and a disk read failure

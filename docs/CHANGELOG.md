@@ -7,6 +7,24 @@ what broke, how it was diagnosed), see `CLAUDE.md`; for *how* something
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## The collapsed `FS_ERROR` sentinel split into specific error codes
+
+The gap flagged since phase 4: every `fs_*` failure collapsed to one
+sentinel, so the shell printed guess-lists. `syscall-abi` now reserves
+a top band of named codes (`FS_ERR_NOT_FOUND` through `FS_ERR_IO`,
+with `FS_ERR_MIN` as the is-any-error floor since read/list return
+arbitrary byte counts on success); the kernel maps `fat32::Error`
+variants via one `fs_error_code` function; the shell prints one
+accurate reason per failure via a shared `print_fs_error`. Backward
+compatible - `FS_ERROR`/`NO_FS` keep their values. The specific
+messages immediately surfaced a real mis-mapping the collapse had
+hidden (`rmdir /` reported "invalid name" - `split_parent` failed
+before the root check ran; fixed at the source), and the `>>` append
+path now only treats "not found" as create-the-file instead of every
+read failure. Confirmed on QEMU with one organic trigger per message,
+full happy-path regression, FAT16 degradation unchanged, and a real
+Parallels smoke. `SPAWN_ERROR` stays collapsed, deliberately.
+
 ## Task destruction (`exit`) - and `hello/`, the second real userland program
 
 The `EXIT` syscall (17) destroys the calling task: slot freed for a

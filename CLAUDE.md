@@ -2177,7 +2177,9 @@ multi-cluster *directories* but still not by an actual multi-cluster
 *file* (nothing yet
 can create one that large - see "Phase 6" above), and every write-path
 error collapses to one sentinel at the syscall boundary so userland
-can't distinguish *why* an operation failed (see "Phase 4" through
+can't distinguish *why* an operation failed **(Update: fixed - see
+"Splitting the collapsed FS_ERROR sentinel" further below; every
+`fs_*` failure now returns a specific `FS_ERR_*` code)** (see "Phase 4" through
 "Phase 8" above); disk-command pointer/length arguments are trusted, not
 validated against the caller's actual mapped region (fine with exactly
 one, currently-trusted userland program); and `virtio_console.rs` is
@@ -3560,6 +3562,56 @@ kernel's log line (no `wait()`/reaping - nothing waits on tasks);
 the allocator reclaim is LIFO-or-leak, so pathological spawn/exit
 orderings can still strand regions for the rest of the boot; tasks 0/1
 can never exit, by design.
+
+## Splitting the collapsed FS_ERROR sentinel: userland finally learns why an operation failed
+
+The gap flagged in every milestone since phase 4 - all `fs_*` syscall
+handlers mapped `Err(_)` to one `FS_ERROR` sentinel, so the shell
+printed guess-lists ("mkdir: failed (already exists, bad name, parent
+missing, or disk full)") - is closed. `syscall-abi` gained a reserved
+top band of named codes (`FS_ERR_NOT_FOUND`/`NOT_A_FILE`/
+`NOT_A_DIRECTORY`/`INVALID_NAME`/`ALREADY_EXISTS`/`NOT_EMPTY`/
+`IS_ROOT`/`DISK_FULL`/`IO`, continuing down from the existing
+`NO_FS = MAX-1`), plus the one derived predicate callers actually
+need: **any value `>= FS_ERR_MIN` (`MAX-15`, with headroom) is an
+error** - necessary because `fs_read_file`/`fs_list_dir` return
+arbitrary byte counts on success, so exact-match arms can't cover a
+multi-code error space. Backward compatible: `FS_ERROR` (`MAX`) stays,
+now only the generic fallback for argument-validation rejections.
+Kernel-side it's one mapping function (`syscall.rs::fs_error_code` -
+the can't-happen-post-mount mount-shape variants map to `FS_ERR_IO`
+rather than being omitted) and eight mechanical call sites; shell-side
+one shared `print_fs_error(cmd, code)` (integer match + literal
+`print_str`, the established relocation-safe idioms) replaced every
+guess-list message.
+
+**A real mis-mapping surfaced the moment the messages got specific -
+exactly the class of thing the collapsed sentinel had been hiding:**
+`rmdir /` reported "invalid name" instead of "can't remove the root
+directory", because `fat32::rmdir`'s `split_parent` call failed with
+`InvalidName` *before* the root check ever ran. Invisible for as long
+as both causes collapsed into the same vague message; fixed at the
+source (`split_parent` returning `None` in `rmdir` *means* the path is
+the root - an empty path can't get past the syscall boundary - so it
+maps to `CannotRemoveRoot` now). The redirect append path also got
+sharper for free: `>>` only treats `FS_ERR_NOT_FOUND` as
+"create the file", instead of treating *every* read failure that way.
+
+**Confirmed on QEMU with one organic trigger per message:** `mkdir
+/EFI` → "already exists", `mkdir /nope/x` → "no such file or
+directory", `mkdir waytoolongname` → "invalid name", `cat /EFI` → "is
+a directory", `cd /EFI/ORBS/INIT.CFG` → "not a directory", `rmdir
+/EFI` → "directory not empty", `rmdir /` → "can't remove the root
+directory" (after the fix above), `rm /EFI`/`touch /EFI`/`echo hi >>
+/EFI` → "is a directory" - plus a full happy-path regression
+(write/cat/cp/mv/ls/rm/rmdir round trip, `selftest`) byte-identical,
+`make run`'s FAT16 still printing the shared `NO_FS` message, and a
+real-Parallels smoke (`ls` → the no-filesystem message, typing
+unregressed). Zero aborts in every `-d int` cross-check.
+
+**Still collapsed, deliberately:** `SPAWN_ERROR` (bad ELF / too large /
+no free slot / disk error) - same pattern, separate small follow-up if
+ever needed.
 
 ## Parallels disk diagnostic: no documented storage controller exists on this platform - confirmed with fresh evidence, not just the old inventory
 

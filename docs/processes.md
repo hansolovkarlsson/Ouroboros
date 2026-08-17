@@ -412,10 +412,12 @@ Worth knowing before building further on this:
   entry slots is grown by a cluster automatically (`insert_dir_entry`'s
   extension — directories never *shrink*, though: an emptied extension
   cluster stays linked until the directory is removed). Every `fs_*` syscall
-  distinguishes "no filesystem mounted" (`NO_FS`) from everything else,
-  but every *other* failure reason still collapses to one `FS_ERROR`
-  sentinel, so a program can't yet tell "already exists" from "disk
-  full" from "bad name". See `CLAUDE.md`'s "Phase 4" through "Phase 8"
+  now returns a specific `FS_ERR_*` code for every failure reason
+  ("already exists", "disk full", "invalid name", ... — a reserved top
+  band `>= FS_ERR_MIN` in `syscall-abi`, mapped from `fat32::Error` by
+  `syscall.rs::fs_error_code`), alongside the existing `NO_FS`
+  distinction — the old one-collapsed-sentinel gap is closed. `spawn`'s
+  own sentinel remains collapsed (a separate, smaller gap). See `CLAUDE.md`'s "Phase 4" through "Phase 8"
   sections. **This closes the write-support arc phase 3 deliberately
   deferred** - what's left in the parking lot from here is genuinely
   bigger work, not more commands of this shape.

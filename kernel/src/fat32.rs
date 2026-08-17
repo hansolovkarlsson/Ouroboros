@@ -546,7 +546,15 @@ impl Fs {
     /// Both are checked before anything on disk is touched, so a rejected
     /// `rmdir` never partially applies.
     pub fn rmdir(&mut self, path: &str) -> Result<(), Error> {
-        let (parent_path, name) = split_parent(path).ok_or(Error::InvalidName)?;
+        // `split_parent` returning `None` here means the path has no
+        // final component to remove - i.e. it *is* the root (an empty
+        // path can't reach this far; the syscall boundary rejects
+        // zero-length paths). Report that as the root-removal refusal
+        // it actually is, not as an invalid name - a mis-mapping that
+        // was invisible while every error collapsed to one sentinel and
+        // surfaced the moment `rmdir /`'s specific message read
+        // "invalid name".
+        let (parent_path, name) = split_parent(path).ok_or(Error::CannotRemoveRoot)?;
         let target = self.find(path)?;
         if !target.is_dir {
             return Err(Error::NotADirectory);

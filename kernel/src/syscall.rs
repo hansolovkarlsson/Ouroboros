@@ -109,13 +109,38 @@ fn valid_user_range_allow_empty(ptr: u64, len: u64) -> bool {
     if len == 0 { ptr != 0 } else { valid_user_range(ptr, len) }
 }
 
+/// Maps a `fat32::Error` to its ABI error code (`syscall-abi`'s
+/// `FS_ERR_*` band) - the split of the old single collapsed `FS_ERROR`,
+/// so userland finally learns *why* an operation failed. The
+/// mount-shape variants (`NoFat32Partition`/`NotFat32`/
+/// `UnsupportedSectorSize`) can't occur through an already-mounted
+/// `Fs`, but are mapped (to `FS_ERR_IO`) rather than omitted or
+/// panicked on - an unreachable arm today isn't a proof it stays
+/// unreachable.
+fn fs_error_code(e: &fat32::Error) -> u64 {
+    match e {
+        fat32::Error::NotFound => syscall_abi::FS_ERR_NOT_FOUND,
+        fat32::Error::NotAFile => syscall_abi::FS_ERR_NOT_A_FILE,
+        fat32::Error::NotADirectory => syscall_abi::FS_ERR_NOT_A_DIRECTORY,
+        fat32::Error::InvalidName => syscall_abi::FS_ERR_INVALID_NAME,
+        fat32::Error::AlreadyExists => syscall_abi::FS_ERR_ALREADY_EXISTS,
+        fat32::Error::DirectoryNotEmpty => syscall_abi::FS_ERR_NOT_EMPTY,
+        fat32::Error::CannotRemoveRoot => syscall_abi::FS_ERR_IS_ROOT,
+        fat32::Error::DiskFull => syscall_abi::FS_ERR_DISK_FULL,
+        fat32::Error::Io(_)
+        | fat32::Error::NoFat32Partition
+        | fat32::Error::NotFat32
+        | fat32::Error::UnsupportedSectorSize(_) => syscall_abi::FS_ERR_IO,
+    }
+}
+
 /// Formats `path`'s directory entries into `buf` as `name\n` (`name/\n`
 /// for subdirectories), stopping before an entry would overflow `buf`
 /// rather than erroring - a truncated listing is more useful to a caller
 /// than none at all, same spirit as `read_file`'s own truncation
 /// behavior. Returns the number of bytes written, [`NO_FS`] if there's no
-/// mounted filesystem, or [`FS_ERROR`] if `path` doesn't resolve to a
-/// directory.
+/// mounted filesystem, or a specific `FS_ERR_*` code (see
+/// [`fs_error_code`]) if `path` doesn't resolve to a directory.
 fn fs_list_dir(path: &str, buf: &mut [u8]) -> u64 {
     let Some(fs) = (unsafe { &mut *FS.0.get() }) else {
         return NO_FS;
@@ -139,38 +164,38 @@ fn fs_list_dir(path: &str, buf: &mut [u8]) -> u64 {
     });
     match result {
         Ok(()) => written as u64,
-        Err(_) => FS_ERROR,
+        Err(e) => fs_error_code(&e),
     }
 }
 
 /// Reads `path`'s contents into `buf`, same truncation contract as
 /// `fat32::Fs::read_file` (returns the file's real size, which may exceed
 /// `buf.len()` - compare to detect truncation). [`NO_FS`] if there's no
-/// mounted filesystem, [`FS_ERROR`] if `path` doesn't resolve to a file.
+/// mounted filesystem, or a specific `FS_ERR_*` code (see
+/// [`fs_error_code`]) if `path` doesn't resolve to a file.
 fn fs_read_file(path: &str, buf: &mut [u8]) -> u64 {
     let Some(fs) = (unsafe { &mut *FS.0.get() }) else {
         return NO_FS;
     };
     match fs.read_file(path, buf) {
         Ok(size) => size as u64,
-        Err(_) => FS_ERROR,
+        Err(e) => fs_error_code(&e),
     }
 }
 
 /// Creates an empty directory at `path`. `0` on success, [`NO_FS`] if
-/// there's no mounted filesystem, [`FS_ERROR`] if [`fat32::Fs::mkdir`]
-/// itself failed (already exists, invalid name, parent missing, disk
-/// full, ...) - every distinct `fat32::Error` still collapses to that one
-/// sentinel, same as `fs_list_dir`/`fs_read_file` already do; a userland
-/// program that needs to know *why* still has no way to (a real gap, not
-/// new to this syscall).
+/// there's no mounted filesystem, or the specific `FS_ERR_*` code for
+/// whatever [`fat32::Fs::mkdir`] reported (already exists, invalid
+/// name, parent missing, disk full, ...) - the old
+/// "everything collapses to one sentinel" gap is closed, see
+/// [`fs_error_code`].
 fn fs_mkdir(path: &str) -> u64 {
     let Some(fs) = (unsafe { &mut *FS.0.get() }) else {
         return NO_FS;
     };
     match fs.mkdir(path) {
         Ok(()) => 0,
-        Err(_) => FS_ERROR,
+        Err(e) => fs_error_code(&e),
     }
 }
 
@@ -182,24 +207,24 @@ fn fs_rmdir(path: &str) -> u64 {
     };
     match fs.rmdir(path) {
         Ok(()) => 0,
-        Err(_) => FS_ERROR,
+        Err(e) => fs_error_code(&e),
     }
 }
 
 /// Creates an empty file at `path`, or succeeds as a no-op if a file
-/// already exists there (see [`fat32::Fs::touch`]). Same `NO_FS`/
-/// `FS_ERROR` contract as [`fs_mkdir`].
+/// already exists there (see [`fat32::Fs::touch`]). Same
+/// `NO_FS`/`FS_ERR_*` contract as [`fs_mkdir`].
 fn fs_touch(path: &str) -> u64 {
     let Some(fs) = (unsafe { &mut *FS.0.get() }) else {
         return NO_FS;
     };
     match fs.touch(path) {
         Ok(()) => 0,
-        Err(_) => FS_ERROR,
+        Err(e) => fs_error_code(&e),
     }
 }
 
-/// Removes the file at `path`. Same `NO_FS`/`FS_ERROR` contract as
+/// Removes the file at `path`. Same `NO_FS`/`FS_ERR_*` contract as
 /// [`fs_mkdir`].
 fn fs_rm(path: &str) -> u64 {
     let Some(fs) = (unsafe { &mut *FS.0.get() }) else {
@@ -207,12 +232,12 @@ fn fs_rm(path: &str) -> u64 {
     };
     match fs.rm(path) {
         Ok(()) => 0,
-        Err(_) => FS_ERROR,
+        Err(e) => fs_error_code(&e),
     }
 }
 
 /// Creates or fully overwrites the file at `path` with `data`. Same
-/// `NO_FS`/`FS_ERROR` contract as [`fs_mkdir`] - the first syscall able
+/// `NO_FS`/`FS_ERR_*` contract as [`fs_mkdir`] - the first syscall able
 /// to give a file more than zero bytes (see [`fat32::Fs::write_file`]).
 fn fs_write_file(path: &str, data: &[u8]) -> u64 {
     let Some(fs) = (unsafe { &mut *FS.0.get() }) else {
@@ -220,12 +245,12 @@ fn fs_write_file(path: &str, data: &[u8]) -> u64 {
     };
     match fs.write_file(path, data) {
         Ok(()) => 0,
-        Err(_) => FS_ERROR,
+        Err(e) => fs_error_code(&e),
     }
 }
 
 /// Renames or moves the file or directory at `src` to `dst`. Same
-/// `NO_FS`/`FS_ERROR` contract as [`fs_mkdir`] (see
+/// `NO_FS`/`FS_ERR_*` contract as [`fs_mkdir`] (see
 /// [`fat32::Fs::mv`]).
 fn fs_mv(src: &str, dst: &str) -> u64 {
     let Some(fs) = (unsafe { &mut *FS.0.get() }) else {
@@ -233,7 +258,7 @@ fn fs_mv(src: &str, dst: &str) -> u64 {
     };
     match fs.mv(src, dst) {
         Ok(()) => 0,
-        Err(_) => FS_ERROR,
+        Err(e) => fs_error_code(&e),
     }
 }
 
