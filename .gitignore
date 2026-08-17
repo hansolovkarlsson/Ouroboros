@@ -9,3 +9,5 @@
 /parallels-test-*/
 /Parallels Error Reports/
 .DS_Store
+/usbstick.img
+/qemu-monitor.sock

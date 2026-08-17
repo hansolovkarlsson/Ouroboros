@@ -39,7 +39,7 @@ ifeq ($(PROFILE),release)
 CARGO_FLAGS += --release
 endif
 
-.PHONY: build shell-bin esp run run-virtio-console run-usb-kbd run-gicv3 image run-image parallels-hdd test-parallels clean
+.PHONY: build shell-bin esp run run-virtio-console run-usb-kbd run-usb-multi run-gicv3 image run-image parallels-hdd test-parallels clean
 
 # Overridable by `make test-parallels VM_NAME=... CMDS=... BOOT_WAIT=...`.
 VM_NAME     ?= Ouroboros
@@ -150,6 +150,32 @@ run-usb-kbd: esp
 		-monitor unix:qemu-monitor.sock,server,nowait \
 		-nographic
 
+# Same as `run-usb-kbd`, plus two more USB devices on the same xHCI
+# controller: a usb-tablet (a stand-in for Parallels' virtual mouse - a
+# HID device that is *not* a keyboard) and a usb-storage stick backed by
+# a small scratch image (created on demand) - the three-device rig for
+# exercising xhci.rs's multi-device port scan. The storage device should
+# show up in the boot log as a recognized-but-not-driven mass storage
+# interface (class 0x08); the keyboard must still type normally via the
+# monitor's `sendkey`.
+run-usb-multi: esp
+	@[ -f usbstick.img ] || dd if=/dev/zero of=usbstick.img bs=1m count=8 2>/dev/null
+	qemu-system-aarch64 \
+		-machine virt \
+		-cpu cortex-a72 \
+		-m 512M \
+		-bios $(OVMF) \
+		-drive file=fat:rw:$(ESP_DIR),format=raw,media=disk,if=none,id=hd0 \
+		-device virtio-blk-device,drive=hd0 \
+		-global virtio-mmio.force-legacy=false \
+		-device qemu-xhci,id=xhci0 \
+		-device usb-kbd,bus=xhci0.0 \
+		-device usb-tablet,bus=xhci0.0 \
+		-drive file=usbstick.img,format=raw,if=none,id=usbstick \
+		-device usb-storage,drive=usbstick,bus=xhci0.0 \
+		-monitor unix:qemu-monitor.sock,server,nowait \
+		-nographic
+
 # Same as `run`, but forces QEMU's virt machine onto GICv3 instead of its
 # default GICv2 (`-machine virt,help` confirms `gic-version` accepts
 # 2/3/4/x-5/host/max - real, checked, not assumed). For exercising
@@ -245,4 +271,4 @@ test-parallels:
 
 clean:
 	cargo clean
-	rm -rf $(ESP_DIR) $(ESP_DIR).img $(ESP_DIR).dmg $(ESP_DIR).hdd vcon.log qemu-monitor.sock
+	rm -rf $(ESP_DIR) $(ESP_DIR).img $(ESP_DIR).dmg $(ESP_DIR).hdd vcon.log qemu-monitor.sock usbstick.img

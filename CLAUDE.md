@@ -2347,7 +2347,10 @@ QEMU, each found by direct evidence rather than guessing:**
    HID device" as "found *the* keyboard."
 
 **Still coarse, worth knowing before building on this:** one port, one
-device, one slot, no hot-plug, no hubs (route string always 0), no real
+device, one slot **(Update: lifted - see "xHCI multi-device support"
+further below; every connected device is now enumerated, classified,
+and kept concurrently addressed)**, no hot-plug, no hubs (route string
+always 0), no real
 HID report-descriptor parsing (boot-protocol's fixed 8-byte layout is
 assumed directly - and since `SET_PROTOCOL` almost certainly still isn't
 reaching the device either per finding 4 above, this only works because
@@ -3353,6 +3356,89 @@ by design, but there's no way to redirect them); no pipes (`|` needs
 inter-task IPC, tracked separately in the roadmap), no input
 redirection (`<`), no quoting, no glued operators (`cmd>f`).
 
+## xHCI multi-device support: every connected device enumerated, classified, and kept addressed - the groundwork the USB mass-storage milestone needs
+
+`xhci.rs`'s deliberate one-port/one-device/one-slot scope (see the USB
+HID keyboard milestone above) is lifted: the port scan now enumerates
+**every** connected device (bounded by a 4-entry pool), reads and logs
+each one's Device and Configuration descriptors - every interface's
+class/subclass/protocol printed, with an explicit callout for mass
+storage (class `0x08`) - and keeps every successfully-set-up device
+concurrently addressed in its own slot, instead of abandoning
+everything that isn't a boot-protocol keyboard. This is the prerequisite
+the USB-mass-storage roadmap item names (keyboard + storage stick must
+coexist on the controller), done while waiting on a USB 3.x stick for
+that milestone's own scoping check - which this also upgrades for free:
+a passed-through stick's boot log now shows its decoded interfaces (the
+whole storage-scoping answer), not just a connected port.
+
+**What actually had to change, found by reading the code rather than
+assumed:** two pieces of per-device DMA state were single statics that
+only ever worked *because* the old scan abandoned non-keyboards. The
+Output Device Context (the memory the xHC itself writes a device's
+state into, via its DCBAA entry) and the EP0 transfer ring (each
+device's Address Device command declares its own dequeue pointer; the
+old shared ring needed an explicit rewind dance per candidate, see the
+old `ep0_enqueue = 0` comment) both became 4-entry pools. The old
+all-in-one `Device` struct split into `Xhci` (controller-global:
+command/event ring state, `db_base`/`ir0_base`, `ctx_dwords`),
+`DeviceSlot` (per-device: port/speed/slot ID/EP0 ring position; pool
+index = which pool entries it owns), and `KeyboardState` (interrupt
+ring + report edge-detection state, at most one). Genuinely shared
+scratch (`INPUT_CONTEXT`, `CTRL_BUF`) stays shared - operations are
+strictly serialized, one command/transfer in flight ever.
+
+**Two ordering/routing decisions worth knowing the reasons for:**
+(1) the keyboard is *activated* (SET_CONFIGURATION, SET_PROTOCOL,
+Configure Endpoint, first buffer arm - all moved into a post-scan
+`activate_keyboard`) only after the whole scan finishes - once the
+interrupt endpoint is armed, a keystroke queues a Transfer Event at any
+moment, which must not interleave with a later device's setup-time
+waits. (2) Transfer-event handling now filters by slot ID and endpoint
+DCI (both carried in the event TRB): `wait_transfer_event` takes the
+expected slot and skips-and-logs mismatches, and `poll_key` only
+accepts events matching the keyboard's slot + DCI - with multiple live
+slots that's routing, not luck, and it's the shape bulk-transfer
+completions will need. Non-keyboards deliberately get no
+`SET_CONFIGURATION` (descriptors are fully readable in the addressed
+state - that's how any OS picks a configuration - and activating one
+belongs to whatever driver eventually drives the device). A failed
+port's pool entry is *sacrificed*, not reused: its Output Device
+Context may already be bound into hardware's DCBAA for an enabled slot,
+and handing the same context to the next device would be exactly the
+two-slots-one-context corruption the pools exist to prevent.
+
+**Confirmed working end to end, staged, on both platforms.** Stage 1
+(the pure state refactor, scan semantics unchanged) was regression-
+tested on QEMU before any scan change: `usb-kbd` keystrokes injected
+via the monitor's `sendkey` typed real commands correctly, zero aborts.
+Stage 2 (the full scan) got a new three-device rig, `make
+run-usb-multi` (`usb-kbd` + `usb-tablet` + `usb-storage` over a scratch
+image on one xHCI controller): the boot log showed all three enumerated
+and correctly classified - the storage stick as `class=0x08
+subclass=0x06 protocol=0x50` (SCSI-transparent, Bulk-Only Transport -
+exactly the interface the storage milestone will drive) with the
+callout line, the tablet as a non-keyboard HID device left addressed,
+the keyboard activated after the scan and typing `uptime`/`selftest`
+correctly. Single-device (`run-usb-kbd`) and no-USB (`make run`)
+regressions both clean, zero aborts everywhere. **Real Parallels
+hardware** (`make test-parallels`): the virtual mouse (vendor `0x203a`,
+HID protocol `0x02`) enumerated and left addressed, the keyboard
+classified and activated, and a full command set (`help`, `selftest`,
+`uptime`, `echo hi`) typed correctly with zero dropped keystrokes -
+the risk-class gate, since every xHCI bug so far has been
+real-hardware-only, passed on the first attempt.
+
+**Still coarse, worth knowing before building on this:** no hot-plug
+(the scan still runs exactly once at boot - a device attached *after*
+it is invisible until the next boot; not what hid the USB 2.0 stick,
+though - that was EHCI routing, see the diagnostic above, disproved as
+late-attach by its own 6-second recheck); no hubs; at most 4 devices;
+only the first keyboard found is
+driven; addressed non-keyboard devices are inert - enumerated and held,
+with no driver to do anything with them yet (that's the next
+milestone); interrupt-endpoint stall recovery unchanged.
+
 ## Parallels disk diagnostic: no documented storage controller exists on this platform - confirmed with fresh evidence, not just the old inventory
 
 A dedicated diagnostic round (2026-08-17, no driver written - that was
@@ -3420,6 +3506,8 @@ make build PROFILE=release  # release profile
 make shell-bin               # build shell/ for aarch64-unknown-none + objcopy to a raw .bin
 make run                    # stage ESP dir (kernel + shell binary + config) + boot in QEMU with a virtio-mmio block device attached (fast dev loop - vvfat backing, FAT16, not FAT32 - see "Phase 3b")
 make run-virtio-console      # same as `run`, plus a virtio-mmio console device attached (for testing virtio_console.rs - see "virtio-console" above for why this alone doesn't organically trigger the fallback)
+make run-usb-kbd             # same as `run`, plus an xHCI controller + USB keyboard + HMP monitor socket for sendkey keystroke injection (see "USB HID keyboard driver" above)
+make run-usb-multi           # same as `run-usb-kbd`, plus a usb-tablet and a usb-storage stick on the same controller - the three-device rig for xhci.rs's multi-device scan (see "xHCI multi-device support" above)
 make image                  # build esp.img, a raw MBR+FAT32 disk image (not directly usable by Parallels - see below)
 make run-image               # boot esp.img (genuine FAT32) instead of run's vvfat - needed for anything that reads the filesystem at runtime (fat32.rs and up)
 make parallels-hdd          # wrap esp.img into esp.hdd, a Parallels-native virtual hard disk
@@ -3523,7 +3611,7 @@ kernel/
   src/virtio_blk.rs  runtime virtio-blk driver: feature negotiation, one virtqueue, synchronous polling sector reads and writes - phase 3a (reads)/phase 4 (writes), confirmed working, see above
   src/virtio_console.rs  transmit-only virtio-console driver over the same transport - device discovery, feature negotiation, transmitq0 - confirmed working on QEMU; confirmed *not* what Parallels' serial port actually is, see "virtio-console" above
   src/fat32.rs       hand-rolled FAT32 over virtio_blk::Device: MBR, BPB, FAT cluster chains, 8.3-only directory entries, mkdir/rmdir/touch/rm/write_file/mv write support - phase 3b (reads)/phase 4-8 (writes), confirmed working, see above
-  src/xhci.rs        from-scratch xHCI (USB3 host controller) driver: command/event/interrupt rings, device slot enable/address, a real interrupt endpoint for HID reports - confirmed working end to end with a real keyboard on real Parallels hardware, see "USB HID keyboard driver" above and docs/xhci-keyboard-postmortem.md
+  src/xhci.rs        from-scratch xHCI (USB3 host controller) driver: command/event rings, multi-device port scan (every connected device enumerated, its interfaces logged, and kept concurrently addressed - up to 4, see "xHCI multi-device support" above), per-device EP0 rings/output contexts, and a real interrupt endpoint for HID keyboard reports - confirmed working end to end with a real keyboard on real Parallels hardware, see "USB HID keyboard driver" above and docs/xhci-keyboard-postmortem.md
 
 shell/               userland default shell - a separate crate, built for aarch64-unknown-none, loaded from disk (not compiled into the kernel)
   linker.ld          self-relocating (PIE) linker script: entry at offset 0, .rela.dyn/.dynsym/.dynamic/.data.rel.ro, no .bss/.data (see "A real relocating loader" above and docs/processes.md)

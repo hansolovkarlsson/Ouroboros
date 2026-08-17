@@ -150,10 +150,13 @@ phase:
   written to be useful to other bare-metal-OS developers hitting the
   same class of problem, not just this project's own history.
   **Still coarse, worth knowing before building on this:** one port, one
-  device, one slot, no hot-plug, no hubs, no real HID report-descriptor
-  parsing (boot-protocol's fixed 8-byte layout assumed directly), no
-  stall recovery on the interrupt endpoint specifically, only the first
-  interrupt IN endpoint on a matching interface is ever configured.
+  device, one slot (**update: lifted** - see the multi-device entry
+  further below; every connected device is now enumerated, classified,
+  and kept concurrently addressed), no hot-plug, no hubs, no real HID
+  report-descriptor parsing (boot-protocol's fixed 8-byte layout assumed
+  directly), no stall recovery on the interrupt endpoint specifically,
+  only the first interrupt IN endpoint on a matching interface is ever
+  configured.
 - ~~Preemption on Parallels~~ — **fully done.** Real ACPI MADT discovery
   (`kernel/src/madt.rs`) replaced the old heuristic for GIC/timer setup,
   a GICv3 driver (`kernel/src/gicv3.rs`) is confirmed working on real
@@ -299,12 +302,23 @@ phase:
   driver would ever drive), and implement BOT's CBW/CSW framing around
   a minimal SCSI command set (`INQUIRY`, `READ CAPACITY(10)`,
   `READ(10)`, `WRITE(10)`) — then adapt `fat32.rs` to sit on a second
-  block-device backend besides `virtio_blk::Device`. Known
-  constraints going in: the xHCI driver is currently
-  one-port/one-device/no-hubs (the keyboard and the stick must both
-  still be reachable — this likely forces lifting the
-  single-device-slot limitation first), and everything stays polled,
-  matching the rest of the kernel.
+  block-device backend besides `virtio_blk::Device`.
+  **Update (2026-08-17): the multi-device groundwork is done** — the
+  known constraint this item named (one-port/one-device, keyboard and
+  stick must coexist) is lifted: `xhci.rs`'s scan now enumerates every
+  connected device into its own slot with per-device EP0 rings/output
+  contexts, logs every interface's class/subclass/protocol (a
+  passed-through stick's boot log now directly shows the mass-storage
+  classification this item's scoping check needs, with an explicit
+  class-`0x08` callout - already proven against QEMU's `usb-storage`
+  via the new `make run-usb-multi` three-device rig, which showed
+  exactly `0x08`/`0x06`/`0x50`), and keeps non-keyboard devices
+  addressed, ready for a driver. Confirmed on real Parallels hardware
+  (mouse + keyboard concurrently addressed, typing unregressed). See
+  `CLAUDE.md`'s "xHCI multi-device support" section. Remaining
+  constraints going in: everything stays polled, matching the rest of
+  the kernel; no hot-plug (the stick must be attached before boot);
+  no hubs.
 - **Actual microkernel-style driver isolation** — moving drivers
   (starting with virtio-blk/virtio-console) out of the EL1 kernel and
   into supervised EL0 processes, per `docs/research-minix-boot.md`'s

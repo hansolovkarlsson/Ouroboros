@@ -215,6 +215,17 @@ const EP0_RING_SIZE: usize = 16;
 const INT_RING_SIZE: usize = 16;
 const EVENT_RING_SIZE: usize = 16;
 
+/// How many devices this driver can keep concurrently addressed - the
+/// bound on the per-device DMA pools (`EP0_RINGS`,
+/// `OUTPUT_DEVICE_CONTEXTS`) and the `Xhci::slots` array, *not* on the
+/// controller's own slot count (`MAX_SLOTS_ENABLED`, 8 - hardware
+/// assigns slot IDs from its own space; the pool index is this driver's
+/// own bookkeeping). 4 covers everything real hardware has shown so
+/// far (Parallels' virtual mouse + keyboard) plus a passed-through
+/// storage device and one spare. Ports beyond the pool are logged and
+/// skipped, not an error.
+const MAX_DEVICES: usize = 4;
+
 // Generous bound for every busy-poll in this module - real hardware/QEMU
 // responses are microsecond-scale, so this is meant to catch a genuine
 // stuck controller, not to be a tight budget.
@@ -253,6 +264,7 @@ pub enum Error {
     ResetTimeout,
     StartTimeout,
     NoPortConnected,
+    NoKeyboardFound,
     PortResetTimeout,
     UnsupportedSpeed(u32),
     TooManyScratchpadBuffers(u32),
@@ -268,6 +280,7 @@ impl core::fmt::Display for Error {
             Error::ResetTimeout => write!(f, "controller reset timed out"),
             Error::StartTimeout => write!(f, "controller failed to start (USBSTS.HCH stuck set)"),
             Error::NoPortConnected => write!(f, "no device connected on any root port"),
+            Error::NoKeyboardFound => write!(f, "devices found, but no boot-protocol keyboard among them"),
             Error::PortResetTimeout => write!(f, "port reset timed out"),
             Error::UnsupportedSpeed(speed) => write!(f, "unsupported port speed {speed} (only Low/Full/High/SuperSpeed/SuperSpeedPlus are implemented)"),
             Error::TooManyScratchpadBuffers(n) => write!(f, "controller wants {n} scratchpad buffers, only {MAX_SCRATCHPAD_BUFFERS} are supported"),
@@ -300,7 +313,21 @@ static SCRATCHPAD_PAGES: [Page; MAX_SCRATCHPAD_BUFFERS] = [
     Page(UnsafeCell::new([0; 4096])), Page(UnsafeCell::new([0; 4096])),
 ];
 static COMMAND_RING: Aligned64<[Trb; CMD_RING_SIZE]> = Aligned64(UnsafeCell::new([[0; 4]; CMD_RING_SIZE]));
-static EP0_RING: Aligned64<[Trb; EP0_RING_SIZE]> = Aligned64(UnsafeCell::new([[0; 4]; EP0_RING_SIZE]));
+// One EP0 transfer ring per concurrently-addressed device (pool index =
+// `Xhci::slots` index). Used to be a single shared ring, with a
+// per-candidate-device reset dance: each device's Address Device command
+// declares its own EP0 dequeue pointer, so a shared ring only ever
+// worked because every non-keyboard device was *abandoned* before the
+// next was tried - the ring's software position had to be rewound to
+// the base each time to keep matching what the new device's Address
+// Device declared. With devices staying concurrently addressed, each
+// needs its own ring memory outright.
+static EP0_RINGS: [Aligned64<[Trb; EP0_RING_SIZE]>; MAX_DEVICES] = [
+    Aligned64(UnsafeCell::new([[0; 4]; EP0_RING_SIZE])),
+    Aligned64(UnsafeCell::new([[0; 4]; EP0_RING_SIZE])),
+    Aligned64(UnsafeCell::new([[0; 4]; EP0_RING_SIZE])),
+    Aligned64(UnsafeCell::new([[0; 4]; EP0_RING_SIZE])),
+];
 // Transfer ring for the keyboard's interrupt IN endpoint - see
 // `Device::poll_key`'s doc comment for why this replaced GET_REPORT
 // control transfers entirely: real Parallels hardware testing showed
@@ -339,10 +366,21 @@ const CTX_DWORDS_MAX: usize = 16;
 // spec, even though this driver only ever populates the Slot and EP0
 // entries.
 static INPUT_CONTEXT: Aligned64<[u32; CTX_DWORDS_MAX * 33]> = Aligned64(UnsafeCell::new([0; CTX_DWORDS_MAX * 33]));
-// Output Device Context: same 32-entry shape, minus the Input Control
-// Context - this is what the xHC itself writes device state into. Sized
-// for exactly one device slot, matching this driver's one-device scope.
-static OUTPUT_DEVICE_CONTEXT: Aligned64<[u32; CTX_DWORDS_MAX * 32]> = Aligned64(UnsafeCell::new([0; CTX_DWORDS_MAX * 32]));
+// Output Device Contexts: same 32-entry shape as the Input Context,
+// minus the Input Control Context - this is what the xHC itself writes
+// each device's state into, via the DCBAA entry for that device's slot
+// ID. One per concurrently-addressed device (pool index = `Xhci::slots`
+// index): two live slots pointing their DCBAA entries at one shared
+// context would have hardware writing both devices' state into the same
+// memory - real corruption, not a bookkeeping nicety - which is why the
+// old single `OUTPUT_DEVICE_CONTEXT` only ever worked while this driver
+// abandoned every device but the keyboard.
+static OUTPUT_DEVICE_CONTEXTS: [Aligned64<[u32; CTX_DWORDS_MAX * 32]>; MAX_DEVICES] = [
+    Aligned64(UnsafeCell::new([0; CTX_DWORDS_MAX * 32])),
+    Aligned64(UnsafeCell::new([0; CTX_DWORDS_MAX * 32])),
+    Aligned64(UnsafeCell::new([0; CTX_DWORDS_MAX * 32])),
+    Aligned64(UnsafeCell::new([0; CTX_DWORDS_MAX * 32])),
+];
 
 /// Scratch buffer for control-transfer data stages. Sized 64, not 8 -
 /// real Parallels hardware testing showed `GET_REPORT`'s 8-byte data
@@ -421,24 +459,51 @@ fn keycode_to_ascii(keycode: u8, shift: bool) -> Option<u8> {
     }
 }
 
-struct Device {
+/// Controller-global driver state plus the pool of concurrently-
+/// addressed devices - split from the original all-in-one `Device`
+/// struct when multi-device support landed. Controller-owned things
+/// (command/event ring producer/consumer state, `db_base`/`ir0_base`,
+/// `ctx_dwords`) live here directly; everything per-device lives in a
+/// [`DeviceSlot`] (whose index into `slots` is also which entry of
+/// `EP0_RINGS`/`OUTPUT_DEVICE_CONTEXTS` that device owns); the
+/// keyboard-specific state (interrupt ring position, report
+/// edge-detection) lives in [`KeyboardState`], of which at most one
+/// exists - this driver still drives exactly one keyboard, it just no
+/// longer *abandons* every other device to do it.
+struct Xhci {
     db_base: u64,
     ir0_base: u64,
+    /// 8 or 16, from HCCPARAMS1.CSZ - see `CTX_DWORDS_MAX`'s doc comment.
+    ctx_dwords: usize,
+    cmd_enqueue: usize,
+    cmd_cycle: bool,
+    evt_dequeue: usize,
+    evt_cycle: bool,
+    slots: [Option<DeviceSlot>; MAX_DEVICES],
+    keyboard: Option<KeyboardState>,
+}
+
+/// One concurrently-addressed device: its root port, speed, the slot ID
+/// hardware assigned it, and this driver's producer position on its own
+/// EP0 transfer ring (`EP0_RINGS[pool index]`).
+struct DeviceSlot {
     port: u32,  // 1-based
     speed: u32, // PORTSC's PSIV value - needed again at Configure Endpoint time to rebuild the Slot Context
     slot_id: u32,
-    cmd_enqueue: usize,
-    cmd_cycle: bool,
     ep0_enqueue: usize,
     ep0_cycle: bool,
+}
+
+struct KeyboardState {
+    /// Pool index into `Xhci::slots` of the device this state belongs to.
+    slot: usize,
     /// Device Context Index of the interrupt IN endpoint, once configured
-    /// (see `configure_interrupt_endpoint`) - also the doorbell target
-    /// value for it, per the xHCI spec's doorbell register definition.
+    /// (see the Configure Endpoint step in `activate_keyboard`) - also
+    /// the doorbell target value for it, per the xHCI spec's doorbell
+    /// register definition.
     int_dci: u32,
     int_enqueue: usize,
     int_cycle: bool,
-    evt_dequeue: usize,
-    evt_cycle: bool,
     last_report: Report,
     /// Whether the *previous* `poll_key` call failed - logging only on
     /// the ok->error and error->ok transitions (not every occurrence)
@@ -456,7 +521,7 @@ struct Device {
     pending_len: usize,
 }
 
-impl Device {
+impl Xhci {
     /// Advances `enqueue`/`cycle` after writing `trb` into `ring` at the
     /// current producer position, wrapping through the ring's fixed Link
     /// TRB (the last slot) when it reaches the end. Returns the physical
@@ -499,40 +564,55 @@ impl Device {
         addr
     }
 
-    fn push_ep0(&mut self, trb: Trb) -> u64 {
-        let ring_ptr = EP0_RING.0.get().cast::<Trb>();
-        unsafe { Self::ring_push(ring_ptr, EP0_RING_SIZE, &mut self.ep0_enqueue, &mut self.ep0_cycle, trb) }
+    /// `idx` is the device's pool index - its own EP0 ring
+    /// (`EP0_RINGS[idx]`) and its own producer position
+    /// (`slots[idx].ep0_enqueue`/`ep0_cycle`). A `None` slot is an
+    /// internal caller bug; degrading to a no-op (returning a null
+    /// pointer no completion will ever match) beats a panic-handler
+    /// hang.
+    fn push_ep0(&mut self, idx: usize, trb: Trb) -> u64 {
+        let ring_ptr = EP0_RINGS[idx].0.get().cast::<Trb>();
+        let Some(slot) = self.slots[idx].as_mut() else { return 0 };
+        unsafe { Self::ring_push(ring_ptr, EP0_RING_SIZE, &mut slot.ep0_enqueue, &mut slot.ep0_cycle, trb) }
     }
 
-    fn ring_ep0_doorbell(&self) {
+    fn ring_ep0_doorbell(&self, idx: usize) {
+        let Some(slot) = self.slots[idx].as_ref() else { return };
         unsafe {
             core::arch::asm!("dsb sy", options(nostack, preserves_flags));
             // Doorbell target 1 = the default control endpoint (EP0).
-            write32(self.db_base + (self.slot_id as u64) * 4, 1);
+            write32(self.db_base + (slot.slot_id as u64) * 4, 1);
         }
     }
 
-    fn push_int(&mut self, trb: Trb) -> u64 {
-        let ring_ptr = INT_RING.0.get().cast::<Trb>();
-        unsafe { Self::ring_push(ring_ptr, INT_RING_SIZE, &mut self.int_enqueue, &mut self.int_cycle, trb) }
-    }
-
-    /// Posts one fresh Normal TRB targeting `INT_BUF` on the interrupt
-    /// ring and rings its doorbell - "arms" the endpoint for one more
-    /// incoming report. Called once during setup and again after every
-    /// report `poll_key` consumes, so the ring never runs dry: hardware
-    /// only has something to DMA a new report *into* if software keeps
-    /// posting fresh buffers ahead of it.
+    /// Posts one fresh Normal TRB targeting `INT_BUF` on the keyboard's
+    /// interrupt ring and rings its doorbell - "arms" the endpoint for
+    /// one more incoming report. Called once during setup and again
+    /// after every report `poll_key` consumes, so the ring never runs
+    /// dry: hardware only has something to DMA a new report *into* if
+    /// software keeps posting fresh buffers ahead of it. No-op if no
+    /// keyboard was ever activated.
     fn repost_interrupt_buffer(&mut self) {
+        // `self.keyboard` and `self.slots` are disjoint fields, so
+        // holding `kb` mutably while reading the slot below is fine.
+        let Some(kb) = self.keyboard.as_mut() else { return };
+        let Some(slot) = self.slots[kb.slot].as_ref() else { return };
         let buf_addr = INT_BUF.0.get() as u64;
-        self.push_int([buf_addr as u32, (buf_addr >> 32) as u32, 8, (1 << 5) | (TRB_TYPE_NORMAL << 10)]); // IOC
+        let ring_ptr = INT_RING.0.get().cast::<Trb>();
         unsafe {
+            Self::ring_push(
+                ring_ptr,
+                INT_RING_SIZE,
+                &mut kb.int_enqueue,
+                &mut kb.int_cycle,
+                [buf_addr as u32, (buf_addr >> 32) as u32, 8, (1 << 5) | (TRB_TYPE_NORMAL << 10)], // IOC
+            );
             core::arch::asm!("dsb sy", options(nostack, preserves_flags));
             // Doorbell target = the endpoint's own Device Context Index,
             // per the xHCI spec's doorbell register definition (target
             // values above 1 map 1:1 to DCI - see `db_base`'s other
             // caller, `ring_ep0_doorbell`, for the EP0/DCI=1 case).
-            write32(self.db_base + (self.slot_id as u64) * 4, self.int_dci);
+            write32(self.db_base + (slot.slot_id as u64) * 4, kb.int_dci);
         }
     }
 
@@ -589,7 +669,18 @@ impl Device {
         Err(Error::CommandTimeout)
     }
 
-    fn wait_transfer_event(&mut self) -> Result<Trb, Error> {
+    /// Waits for a Transfer Event *from `expected_slot_id`
+    /// specifically* - with more than one device concurrently addressed,
+    /// "the next transfer event" and "this device's transfer event" are
+    /// no longer the same thing, so an event carrying a different slot
+    /// ID (bits 31:24 of TRB word 3) is skipped and logged rather than
+    /// mistaken for the completion being waited on. (In practice no
+    /// other slot can produce transfer events *during setup* - the
+    /// keyboard's interrupt endpoint is deliberately armed only after
+    /// the whole port scan finishes, see `init_inner` - but the filter
+    /// is what makes that an ordering nicety instead of a correctness
+    /// dependency.)
+    fn wait_transfer_event(&mut self, expected_slot_id: u32) -> Result<Trb, Error> {
         let deadline = poll_deadline();
         while crate::timer::now_ticks() < deadline {
             let Some(trb) = self.event_ring_pop() else { continue };
@@ -598,6 +689,11 @@ impl Device {
                 if trb_type != TRB_TYPE_PORT_STATUS_CHANGE_EVENT {
                     console::println!("Ouroboros kernel: xhci: unexpected event type={trb_type} while waiting for a transfer event");
                 }
+                continue;
+            }
+            let event_slot = trb[3] >> 24;
+            if event_slot != expected_slot_id {
+                console::println!("Ouroboros kernel: xhci: transfer event for slot {event_slot} while waiting on slot {expected_slot_id}, skipping");
                 continue;
             }
             let code = trb[2] >> 24;
@@ -624,19 +720,22 @@ impl Device {
     /// doesn't expect. Best-effort: doesn't fail if either command times
     /// out, since giving up on recovery entirely would be worse than a
     /// best-effort attempt that might not fully succeed.
-    fn recover_from_stall(&mut self) {
+    fn recover_from_stall(&mut self, idx: usize) {
         console::println!("Ouroboros kernel: xhci: EP0 stalled, recovering");
-        let reset_ep = self.push_command([0, 0, 0, (TRB_TYPE_RESET_ENDPOINT_CMD << 10) | (1 << 16) | (self.slot_id << 24)]);
+        let Some(slot_id) = self.slots[idx].as_ref().map(|s| s.slot_id) else { return };
+        let reset_ep = self.push_command([0, 0, 0, (TRB_TYPE_RESET_ENDPOINT_CMD << 10) | (1 << 16) | (slot_id << 24)]);
         let _ = self.wait_command_completion(reset_ep);
 
-        self.ep0_enqueue = 0;
-        self.ep0_cycle = true;
-        let ep0_ring_addr = EP0_RING.0.get() as u64;
+        if let Some(slot) = self.slots[idx].as_mut() {
+            slot.ep0_enqueue = 0;
+            slot.ep0_cycle = true;
+        }
+        let ep0_ring_addr = EP0_RINGS[idx].0.get() as u64;
         let set_dequeue = self.push_command([
             (ep0_ring_addr as u32) | 1, // DCS=1, matching the software reset above
             (ep0_ring_addr >> 32) as u32,
             0,
-            (TRB_TYPE_SET_TR_DEQUEUE_CMD << 10) | (1 << 16) | (self.slot_id << 24),
+            (TRB_TYPE_SET_TR_DEQUEUE_CMD << 10) | (1 << 16) | (slot_id << 24),
         ]);
         let _ = self.wait_command_completion(set_dequeue);
     }
@@ -659,12 +758,20 @@ impl Device {
     /// this driver now (the interrupt endpoint, configured via a
     /// standard xHCI *command*, not a class *request* - unaffected by
     /// this gap).
-    fn control_transfer(&mut self, bm_request_type: u8, b_request: u8, w_value: u16, w_index: u16, data: &mut [u8], data_in: bool) -> Result<(), Error> {
+    // One over clippy's argument limit purely from the added pool
+    // index - the other seven mirror the USB Setup packet's own field
+    // structure plus the data buffer, and bundling them into a struct
+    // would just rename the same eight things.
+    #[allow(clippy::too_many_arguments)]
+    fn control_transfer(&mut self, idx: usize, bm_request_type: u8, b_request: u8, w_value: u16, w_index: u16, data: &mut [u8], data_in: bool) -> Result<(), Error> {
+        let Some(slot_id) = self.slots[idx].as_ref().map(|s| s.slot_id) else {
+            return Err(Error::TransferTimeout);
+        };
         let w_length = data.len() as u16;
         let trt: u32 = if w_length == 0 { 0 } else if data_in { 3 } else { 2 };
         let setup_param_lo = (bm_request_type as u32) | ((b_request as u32) << 8) | ((w_value as u32) << 16);
         let setup_param_hi = (w_index as u32) | ((w_length as u32) << 16);
-        self.push_ep0([
+        self.push_ep0(idx, [
             setup_param_lo,
             setup_param_hi,
             8, // TRB Transfer Length is always 8 - the setup packet itself, not wLength
@@ -673,7 +780,7 @@ impl Device {
 
         if w_length != 0 {
             let buf_addr = CTRL_BUF.0.get() as u64;
-            self.push_ep0([
+            self.push_ep0(idx, [
                 buf_addr as u32,
                 (buf_addr >> 32) as u32,
                 w_length as u32,
@@ -684,12 +791,12 @@ impl Device {
         // Status stage direction is the opposite of the data stage's; if
         // there was no data stage, it's always IN.
         let status_dir_in = if w_length == 0 { true } else { !data_in };
-        self.push_ep0([0, 0, 0, (1 << 5) | (TRB_TYPE_STATUS_STAGE << 10) | ((status_dir_in as u32) << 16)]); // IOC
+        self.push_ep0(idx, [0, 0, 0, (1 << 5) | (TRB_TYPE_STATUS_STAGE << 10) | ((status_dir_in as u32) << 16)]); // IOC
 
-        self.ring_ep0_doorbell();
-        if let Err(e) = self.wait_transfer_event() {
+        self.ring_ep0_doorbell(idx);
+        if let Err(e) = self.wait_transfer_event(slot_id) {
             if let Error::TransferFailed(COMPLETION_STALL_ERROR) = e {
-                self.recover_from_stall();
+                self.recover_from_stall(idx);
             }
             return Err(e);
         }
@@ -741,12 +848,22 @@ impl Device {
     /// match is always returned immediately rather than queued) instead of
     /// discarding everything past the first.
     fn poll_key(&mut self) -> Option<u8> {
-        if self.pending_len > 0 {
-            let ascii = self.pending[0];
-            self.pending.copy_within(1..self.pending_len, 0);
-            self.pending_len -= 1;
-            return Some(ascii);
+        // Drain any keycodes still queued from the last processed report
+        // before touching the event ring at all.
+        {
+            let kb = self.keyboard.as_mut()?;
+            if kb.pending_len > 0 {
+                let ascii = kb.pending[0];
+                kb.pending.copy_within(1..kb.pending_len, 0);
+                kb.pending_len -= 1;
+                return Some(ascii);
+            }
         }
+        let (kb_slot_id, kb_dci) = {
+            let kb = self.keyboard.as_ref()?;
+            let slot = self.slots[kb.slot].as_ref()?;
+            (slot.slot_id, kb.int_dci)
+        };
 
         let event = self.event_ring_pop()?;
         let trb_type = (event[3] >> 10) & 0x3f;
@@ -757,22 +874,42 @@ impl Device {
             console::println!("Ouroboros kernel: xhci: unexpected event type={trb_type} on interrupt poll");
             return None;
         }
+        // With more than one device concurrently addressed, a transfer
+        // event is only a keyboard report if its slot ID (word 3 bits
+        // 31:24) and endpoint DCI (bits 20:16) both match the keyboard's
+        // - routing, not luck. Nothing else generates transfer events
+        // today (no other endpoint is ever armed), so a mismatch is
+        // logged as genuinely unexpected rather than silently dropped.
+        let event_slot = event[3] >> 24;
+        let event_dci = (event[3] >> 16) & 0x1f;
+        if event_slot != kb_slot_id || event_dci != kb_dci {
+            console::println!("Ouroboros kernel: xhci: transfer event for slot {event_slot} DCI {event_dci} on interrupt poll (keyboard is slot {kb_slot_id} DCI {kb_dci}), ignoring");
+            return None;
+        }
 
         let code = event[2] >> 24;
         if code != COMPLETION_SUCCESS && code != COMPLETION_SHORT_PACKET {
             // Logged only on the ok->error transition - see `had_error`'s
             // doc comment for why (an unconditional per-event version of
             // this flooded the screen during earlier debugging).
-            if !self.had_error {
+            let newly_failed = {
+                let kb = self.keyboard.as_mut()?;
+                let newly = !kb.had_error;
+                kb.had_error = true;
+                newly
+            };
+            if newly_failed {
                 console::println!("Ouroboros kernel: xhci: interrupt endpoint error (completion code {code})");
-                self.had_error = true;
             }
             self.repost_interrupt_buffer(); // keep the ring armed even after an error
             return None;
         }
-        if self.had_error {
-            console::println!("Ouroboros kernel: xhci: interrupt endpoint recovered");
-            self.had_error = false;
+        {
+            let kb = self.keyboard.as_mut()?;
+            if kb.had_error {
+                console::println!("Ouroboros kernel: xhci: interrupt endpoint recovered");
+                kb.had_error = false;
+            }
         }
 
         let mut buf: Report = [0; 8];
@@ -786,11 +923,12 @@ impl Device {
         // receive the next report.
         self.repost_interrupt_buffer();
 
-        if buf == self.last_report {
+        let kb = self.keyboard.as_mut()?;
+        if buf == kb.last_report {
             return None;
         }
-        let previous = self.last_report;
-        self.last_report = buf;
+        let previous = kb.last_report;
+        kb.last_report = buf;
 
         let shift = buf[0] & (MOD_LSHIFT | MOD_RSHIFT) != 0;
         let mut result = None;
@@ -809,17 +947,17 @@ impl Device {
             } else {
                 // Can't overflow: at most 6 keycodes total in buf[2..8],
                 // one already consumed by `result`, `pending` sized 5.
-                self.pending[self.pending_len] = ascii;
-                self.pending_len += 1;
+                kb.pending[kb.pending_len] = ascii;
+                kb.pending_len += 1;
             }
         }
         result
     }
 }
 
-struct KeyboardCell(UnsafeCell<Option<Device>>);
-unsafe impl Sync for KeyboardCell {}
-static KEYBOARD: KeyboardCell = KeyboardCell(UnsafeCell::new(None));
+struct XhciCell(UnsafeCell<Option<Xhci>>);
+unsafe impl Sync for XhciCell {}
+static XHCI: XhciCell = XhciCell(UnsafeCell::new(None));
 
 /// Brings up the xHCI controller at `bar_base` (from `pci::discover_xhci`)
 /// and, if a device is already connected on some root port, enumerates it
@@ -902,12 +1040,9 @@ unsafe fn init_inner(bar_base: u64) -> Result<(), Error> {
     }
     unsafe { write64(op_base + OP_CRCR, (COMMAND_RING.0.get() as u64) | CRCR_RCS) };
 
-    // EP0 transfer ring - same shape, independent cycle state/ring.
-    {
-        let ring = unsafe { &mut *EP0_RING.0.get() };
-        let ring_addr = EP0_RING.0.get() as u64;
-        ring[EP0_RING_SIZE - 1] = [ring_addr as u32, (ring_addr >> 32) as u32, 0, (1 << 1) | (TRB_TYPE_LINK << 10) | 1];
-    }
+    // (Per-device EP0 transfer rings are initialized as each device
+    // claims its pool entry during the port scan - see
+    // `try_keyboard_on_port` - not up front here.)
 
     // Event ring: one segment, consumer cycle state starts at 1 too.
     {
@@ -925,25 +1060,16 @@ unsafe fn init_inner(bar_base: u64) -> Result<(), Error> {
         return Err(Error::StartTimeout);
     }
 
-    let mut dev = Device {
+    let mut xhci = Xhci {
         db_base,
         ir0_base,
-        port: 0,
-        speed: 0,
-        slot_id: 0,
+        ctx_dwords,
         cmd_enqueue: 0,
         cmd_cycle: true,
-        ep0_enqueue: 0,
-        ep0_cycle: true,
-        int_dci: 0,
-        int_enqueue: 0,
-        int_cycle: true,
         evt_dequeue: 0,
         evt_cycle: true,
-        last_report: [0; 8],
-        had_error: false,
-        pending: [0; 5],
-        pending_len: 0,
+        slots: [None, None, None, None],
+        keyboard: None,
     };
 
     // Port scan: wait for at least one port to report a connected device.
@@ -964,61 +1090,97 @@ unsafe fn init_inner(bar_base: u64) -> Result<(), Error> {
         return Err(Error::NoPortConnected);
     }
 
-    // Try every connected port in turn until one turns out to be a real
-    // boot-protocol keyboard - not just the first connected port, found
-    // the hard way: a real Parallels VM also exposes at least a virtual
-    // mouse/tablet over the same xHCI controller, and an earlier version
-    // of this driver assumed the first connected port it saw was the
-    // keyboard - it wasn't, and ended up driving a mouse's report stream
-    // (a continuous flood of moving-cursor reports) instead.
-    // `try_keyboard_on_port` distinguishes "this device genuinely isn't
-    // a keyboard" (`Ok(false)`, try the next port) from a real setup
-    // failure (`Err`, logged but *also* not fatal to the overall scan -
-    // one misbehaving device shouldn't stop this driver from trying the
-    // rest).
-    let mut last_error = Error::NoPortConnected;
+    // Enumerate *every* connected port (bounded by the device pool), not
+    // just until a keyboard turns up - the multi-device change. Each
+    // successfully-set-up device *stays* addressed in its own pool slot
+    // with its interfaces logged (the old scan abandoned everything that
+    // wasn't a boot-protocol keyboard; classifying rather than assuming
+    // was itself learned the hard way - a real Parallels VM exposes at
+    // least a virtual mouse/tablet over this same controller, and an
+    // early version of this driver drove the mouse's report stream
+    // believing it was the keyboard). Per-port failures are logged and
+    // skipped, not fatal to the scan - one misbehaving device shouldn't
+    // cost the keyboard. The keyboard itself is only *activated*
+    // (SET_CONFIGURATION through endpoint arming) after the whole scan
+    // finishes - see `activate_keyboard`'s doc comment for the real
+    // ordering constraint behind that.
+    let mut next_idx = 0usize;
+    let mut keyboard_candidate: Option<(usize, u8, u16, u8)> = None;
+    let mut last_error: Option<Error> = None;
     for port in 1..=max_ports {
         let portsc_addr = op_base + OP_PORTSC_BASE + ((port - 1) as u64) * 0x10;
         if unsafe { read32(portsc_addr) } & PORTSC_CCS == 0 {
             continue;
         }
-        match unsafe { try_keyboard_on_port(dcbaa, &mut dev, ctx_dwords, port, portsc_addr) } {
-            Ok(true) => {
-                unsafe { *KEYBOARD.0.get() = Some(dev) };
-                return Ok(());
-            }
-            Ok(false) => {
-                console::println!("Ouroboros kernel: xhci: port {port} device is not a boot-protocol keyboard, trying next port");
+        if next_idx >= MAX_DEVICES {
+            console::println!("Ouroboros kernel: xhci: more connected devices than the {MAX_DEVICES}-entry pool, skipping port {port}");
+            continue;
+        }
+        match unsafe { setup_device_on_port(&mut xhci, dcbaa, next_idx, port, portsc_addr) } {
+            Ok(candidate) => {
+                if let Some((ep, mps, bi)) = candidate {
+                    if keyboard_candidate.is_none() {
+                        console::println!("Ouroboros kernel: xhci: port {port}: boot-protocol keyboard - activating after the scan");
+                        keyboard_candidate = Some((next_idx, ep, mps, bi));
+                    } else {
+                        console::println!("Ouroboros kernel: xhci: port {port}: a second keyboard - left addressed, not driven (first one wins)");
+                    }
+                }
+                next_idx += 1;
             }
             Err(e) => {
-                console::println!("Ouroboros kernel: xhci: port {port} setup failed ({e}), trying next port");
-                last_error = e;
+                console::println!("Ouroboros kernel: xhci: port {port} setup failed ({e}), continuing with other ports");
+                // Discard the software state, but *sacrifice* the pool
+                // entry rather than reuse it: the failed setup may
+                // already have bound this entry's Output Device Context
+                // into hardware's DCBAA for an enabled slot, and handing
+                // the same context to the next device would be exactly
+                // the two-slots-one-context corruption the per-device
+                // pools exist to prevent.
+                xhci.slots[next_idx] = None;
+                next_idx += 1;
+                last_error = Some(e);
             }
         }
     }
-    Err(last_error)
+
+    let Some((kb_idx, ep, mps, bi)) = keyboard_candidate else {
+        return Err(last_error.unwrap_or(Error::NoKeyboardFound));
+    };
+    unsafe { activate_keyboard(&mut xhci, kb_idx, ep, mps, bi)? };
+
+    unsafe { *XHCI.0.get() = Some(xhci) };
+    Ok(())
 }
 
 /// Brings up whatever device is on `port` (Enable Slot through Address
 /// Device, both unconditional - every USB device needs them regardless
-/// of what it turns out to be) and, only if its Configuration descriptor
-/// shows a HID Boot-Protocol-Keyboard interface with an interrupt IN
-/// endpoint, finishes configuring that endpoint and arms it. Returns
-/// `Ok(true)` on a fully-configured keyboard, `Ok(false)` if this device
-/// genuinely isn't one (not an error - `init_inner`'s caller tries the
-/// next port), or `Err` for a real setup failure.
+/// of what it turns out to be) into pool entry `idx`, reads and logs its
+/// Device and Configuration descriptors (every interface's
+/// class/subclass/protocol - see [`log_interfaces`]), and classifies it.
+/// Returns `Ok(Some((bEndpointAddress, wMaxPacketSize, bInterval)))` of
+/// the interrupt IN endpoint if this is a boot-protocol keyboard
+/// (activation happens later, post-scan - see [`activate_keyboard`]),
+/// `Ok(None)` for any other device (which *stays addressed* in its
+/// slot - the multi-device point of this function), or `Err` for a real
+/// setup failure.
+///
+/// Deliberately does **not** send `SET_CONFIGURATION`: descriptors are
+/// fully readable in the addressed state (that's how any OS picks a
+/// configuration in the first place), and activating a configuration
+/// belongs to whatever driver actually drives the device - today only
+/// the keyboard's activation step does it.
 ///
 /// # Safety
 /// Same requirements as `init_inner` - must run after the controller has
 /// been reset and started.
-unsafe fn try_keyboard_on_port(
+unsafe fn setup_device_on_port(
+    xhci: &mut Xhci,
     dcbaa: &mut [u64; MAX_SLOTS_ENABLED + 1],
-    dev: &mut Device,
-    ctx_dwords: usize,
+    idx: usize,
     port: u32,
     portsc_addr: u64,
-) -> Result<bool, Error> {
-    dev.port = port;
+) -> Result<Option<(u8, u16, u8)>, Error> {
     console::println!("Ouroboros kernel: xhci: device connected on port {port}");
 
     // Reset the port, then clear the resulting Port Reset Change bit.
@@ -1031,7 +1193,6 @@ unsafe fn try_keyboard_on_port(
     unsafe { write32(portsc_addr, portsc_preserve(current) | PORTSC_PRC) };
 
     let speed = (current >> PORTSC_SPEED_SHIFT) & PORTSC_SPEED_MASK;
-    dev.speed = speed; // needed again at Configure Endpoint time, to rebuild the Slot Context
     // Default PSIV mapping (no Protocol Speed ID table override present -
     // true for every controller this has been tested against, QEMU's and
     // Parallels' real one alike): 1=Full, 2=Low, 3=High, 4=SuperSpeed,
@@ -1052,37 +1213,35 @@ unsafe fn try_keyboard_on_port(
     console::println!("Ouroboros kernel: xhci: port {port} reset, speed={speed}");
 
     // Enable Slot.
-    let cmd_ptr = dev.push_command([0, 0, 0, TRB_TYPE_ENABLE_SLOT_CMD << 10]);
-    let completion = dev.wait_command_completion(cmd_ptr)?;
+    let cmd_ptr = xhci.push_command([0, 0, 0, TRB_TYPE_ENABLE_SLOT_CMD << 10]);
+    let completion = xhci.wait_command_completion(cmd_ptr)?;
     let slot_id = completion[3] >> 24;
-    dev.slot_id = slot_id;
     console::println!("Ouroboros kernel: xhci: slot {slot_id} enabled");
 
-    // Output Device Context must be allocated and pointed to from DCBAA
-    // before Address Device is issued - the xHC writes the resulting
-    // device state there.
-    dcbaa[slot_id as usize] = OUTPUT_DEVICE_CONTEXT.0.get() as u64;
-
-    // EP0's ring position is reset to the start for every new device -
-    // real, not defensive: the EP0 transfer ring is shared across every
-    // device this function ever tries (unlike the command/event rings,
-    // which are correctly global), and each device's own Address Device
-    // command below unconditionally tells hardware its EP0 dequeue
-    // pointer starts at the ring's base address. Without this reset, a
-    // second (or later) candidate device's Address Device call would
-    // still declare "start at the ring base", while this driver's own
-    // `ep0_enqueue` had already advanced past it from a previous,
-    // abandoned (non-keyboard) device's control transfers - a real
-    // mismatch between what hardware was told and where new TRBs would
-    // actually land. Safe to discard: an abandoned device's own ring
-    // position is never revisited.
-    dev.ep0_enqueue = 0;
-    dev.ep0_cycle = true;
+    // Claim pool entry `idx` for this device: a fresh EP0 ring (Link TRB
+    // rewritten with cycle=1, matching the fresh DeviceSlot ring state
+    // below - a reused entry's Link TRB may carry a stale cycle bit from
+    // a previous occupant's laps), a zeroed Output Device Context, and
+    // its DCBAA entry (which must point at the context before Address
+    // Device is issued - the xHC writes the resulting device state
+    // there). Per-device rings replaced the old single shared EP0 ring
+    // and its per-candidate rewind dance - see `EP0_RINGS`'s doc
+    // comment for the history.
+    {
+        let ring = unsafe { &mut *EP0_RINGS[idx].0.get() };
+        let ring_addr = EP0_RINGS[idx].0.get() as u64;
+        *ring = [[0; 4]; EP0_RING_SIZE];
+        ring[EP0_RING_SIZE - 1] = [ring_addr as u32, (ring_addr >> 32) as u32, 0, (1 << 1) | (TRB_TYPE_LINK << 10) | 1]; // TC, cycle=1
+        unsafe { (*OUTPUT_DEVICE_CONTEXTS[idx].0.get()).fill(0) };
+    }
+    dcbaa[slot_id as usize] = OUTPUT_DEVICE_CONTEXTS[idx].0.get() as u64;
+    xhci.slots[idx] = Some(DeviceSlot { port, speed, slot_id, ep0_enqueue: 0, ep0_cycle: true });
 
     // Input Context: Input Control Context (A0=slot, A1=EP0) + Slot
     // Context + EP0 Context, laid out using `ctx_dwords` (32- or 64-byte
     // contexts, whichever HCCPARAMS1.CSZ says this controller needs).
     {
+        let ctx_dwords = xhci.ctx_dwords;
         let ctx = unsafe { &mut *INPUT_CONTEXT.0.get() };
         ctx.fill(0);
         ctx[1] = (1 << 0) | (1 << 1); // Add Context Flags: A0 | A1
@@ -1091,7 +1250,7 @@ unsafe fn try_keyboard_on_port(
         slot[0] = (speed << 20) | (1 << 27); // Route String=0, Speed, Context Entries=1
         slot[1] = port << 16; // Root Hub Port Number
 
-        let ep0_ring_addr = EP0_RING.0.get() as u64;
+        let ep0_ring_addr = EP0_RINGS[idx].0.get() as u64;
         let ep0 = &mut ctx[2 * ctx_dwords..3 * ctx_dwords];
         ep0[1] = (3 << 1) | (EP_TYPE_CONTROL << 3) | ((ep0_max_packet_size as u32) << 16); // CErr=3, EP Type=Control
         ep0[2] = (ep0_ring_addr as u32) | 1; // TR Dequeue Pointer | DCS=1
@@ -1099,14 +1258,69 @@ unsafe fn try_keyboard_on_port(
         ep0[4] = 8; // Average TRB Length
     }
 
-    let cmd_ptr = dev.push_command([INPUT_CONTEXT.0.get() as u32, (INPUT_CONTEXT.0.get() as u64 >> 32) as u32, 0, (TRB_TYPE_ADDRESS_DEVICE_CMD << 10) | (slot_id << 24)]);
-    dev.wait_command_completion(cmd_ptr)?;
+    let cmd_ptr = xhci.push_command([INPUT_CONTEXT.0.get() as u32, (INPUT_CONTEXT.0.get() as u64 >> 32) as u32, 0, (TRB_TYPE_ADDRESS_DEVICE_CMD << 10) | (slot_id << 24)]);
+    xhci.wait_command_completion(cmd_ptr)?;
     console::println!("Ouroboros kernel: xhci: slot {slot_id} addressed");
+
+    // GET_DESCRIPTOR(Device) - informational only (logs the real device's
+    // vendor/product IDs), but also serves as a live confirmation that
+    // *standard* control requests reach the real device correctly, unlike
+    // HID class requests - see `control_transfer`'s doc comment.
+    let mut device_desc = [0u8; 18];
+    xhci.control_transfer(idx, 0x80, 0x06, 0x0100, 0, &mut device_desc, true)?;
+    console::println!("Ouroboros kernel: xhci: GET_DESCRIPTOR(Device) -> {device_desc:02x?}");
+
+    // GET_DESCRIPTOR(Configuration) - a standard request, so (per the
+    // above) expected to reach the real device correctly. Requests a
+    // generous 64 bytes in one shot rather than the textbook two-step
+    // "read 9 bytes for wTotalLength, then re-read that many" dance -
+    // this device's full descriptor set (Configuration + Interface + HID
+    // + Endpoint, confirmed by direct inspection during earlier debugging)
+    // is well under 64 bytes, and a short packet for whatever's left over
+    // is normal, expected USB behavior (same reasoning as `CTRL_BUF`'s
+    // own doc comment).
+    let mut config_desc = [0u8; 64];
+    xhci.control_transfer(idx, 0x80, 0x06, 0x0200, 0, &mut config_desc, true)?;
+
+    log_interfaces(port, &config_desc);
+
+    let candidate = find_keyboard_interrupt_endpoint(&config_desc);
+    if candidate.is_none() {
+        // A real device, just not a boot-protocol keyboard - it stays
+        // addressed in its slot, ready for whenever a driver for its
+        // class exists (the whole point of the multi-device scan).
+        console::println!("Ouroboros kernel: xhci: port {port} device left addressed (no driver for this device class yet)");
+    }
+    Ok(candidate)
+}
+
+/// Activates the keyboard the scan found: `SET_CONFIGURATION` +
+/// `SET_PROTOCOL`, then Configure Endpoint for its interrupt IN endpoint
+/// and the first buffer arm. Runs strictly *after* the whole port scan,
+/// by design and not for tidiness: the moment the interrupt endpoint is
+/// armed, a keystroke DMAs a report and queues a Transfer Event at any
+/// time - which would interleave with a later device's own setup-time
+/// command/transfer waits if activation happened mid-scan.
+/// `wait_transfer_event`'s slot filter would survive that, but ordering
+/// makes it a non-event instead of a recoverable one.
+///
+/// # Safety
+/// Same requirements as `init_inner`.
+unsafe fn activate_keyboard(
+    xhci: &mut Xhci,
+    idx: usize,
+    endpoint_address: u8,
+    max_packet_size: u16,
+    b_interval: u8,
+) -> Result<(), Error> {
+    let Some((port, speed, slot_id)) = xhci.slots[idx].as_ref().map(|s| (s.port, s.speed, s.slot_id)) else {
+        return Err(Error::NoKeyboardFound);
+    };
 
     // SET_CONFIGURATION(1) - a standard request, no data stage. Assumes
     // configuration value 1, universal for a device this simple (see
     // module doc comment on scope).
-    dev.control_transfer(0x00, 0x09, 1, 0, &mut [], false)?;
+    xhci.control_transfer(idx, 0x00, 0x09, 1, 0, &mut [], false)?;
     console::println!("Ouroboros kernel: xhci: configuration set");
 
     // SET_PROTOCOL(Boot Protocol) - a HID *class* request
@@ -1121,37 +1335,23 @@ unsafe fn try_keyboard_on_port(
     // this driver now also copes with the device staying in native
     // Report Protocol mode regardless (see `poll_key`'s handling of
     // whatever byte pattern the interrupt endpoint actually delivers).
-    match dev.control_transfer(0x21, 0x0b, 0, 0, &mut [], false) {
+    match xhci.control_transfer(idx, 0x21, 0x0b, 0, 0, &mut [], false) {
         Ok(()) => console::println!("Ouroboros kernel: xhci: boot protocol set"),
         Err(e) => console::println!("Ouroboros kernel: xhci: SET_PROTOCOL failed, continuing anyway ({e})"),
     }
 
-    // GET_DESCRIPTOR(Device) - informational only (logs the real device's
-    // vendor/product IDs), but also serves as a live confirmation that
-    // *standard* control requests reach the real device correctly, unlike
-    // the class requests above - see `control_transfer`'s doc comment.
-    let mut device_desc = [0u8; 18];
-    dev.control_transfer(0x80, 0x06, 0x0100, 0, &mut device_desc, true)?;
-    console::println!("Ouroboros kernel: xhci: GET_DESCRIPTOR(Device) -> {device_desc:02x?}");
-
-    // GET_DESCRIPTOR(Configuration) - a standard request, so (per the
-    // above) expected to reach the real device correctly. Requests a
-    // generous 64 bytes in one shot rather than the textbook two-step
-    // "read 9 bytes for wTotalLength, then re-read that many" dance -
-    // this device's full descriptor set (Configuration + Interface + HID
-    // + Endpoint, confirmed by direct inspection during earlier debugging)
-    // is well under 64 bytes, and a short packet for whatever's left over
-    // is normal, expected USB behavior (same reasoning as `CTRL_BUF`'s
-    // own doc comment).
-    let mut config_desc = [0u8; 64];
-    dev.control_transfer(0x80, 0x06, 0x0200, 0, &mut config_desc, true)?;
-
-    let Some((endpoint_address, max_packet_size, b_interval)) = find_keyboard_interrupt_endpoint(&config_desc) else {
-        return Ok(false); // a real device, just not a boot-protocol keyboard - not an error
-    };
     let endpoint_number = (endpoint_address & 0x0f) as u32;
     let dci = endpoint_number * 2 + 1; // IN direction
-    dev.int_dci = dci;
+    xhci.keyboard = Some(KeyboardState {
+        slot: idx,
+        int_dci: dci,
+        int_enqueue: 0,
+        int_cycle: true,
+        last_report: [0; 8],
+        had_error: false,
+        pending: [0; 5],
+        pending_len: 0,
+    });
     console::println!(
         "Ouroboros kernel: xhci: interrupt IN endpoint {endpoint_address:#04x} (DCI {dci}), max_packet_size={max_packet_size}, bInterval={b_interval}"
     );
@@ -1163,7 +1363,7 @@ unsafe fn try_keyboard_on_port(
     // USB 2.0/3.x specs' own encoding for those speeds, so the xHCI field
     // is just bInterval-1; for Low/Full speed it's a direct 1-255ms frame
     // count, needing an actual log2 conversion (1ms = 8 * 125us).
-    let interval_field: u32 = if dev.speed == 1 || dev.speed == 2 {
+    let interval_field: u32 = if speed == 1 || speed == 2 {
         let target_units = (b_interval as u32).max(1) * 8;
         let mut n = 0u32;
         while (1u32 << n) < target_units {
@@ -1182,13 +1382,14 @@ unsafe fn try_keyboard_on_port(
     // Endpoint Context itself, laid out with `ctx_dwords`-sized contexts
     // exactly like Address Device's Input Context was.
     {
+        let ctx_dwords = xhci.ctx_dwords;
         let ctx = unsafe { &mut *INPUT_CONTEXT.0.get() };
         ctx.fill(0);
         ctx[1] = (1 << 0) | (1 << dci); // Add Context Flags: A0 | A_dci
 
         let slot = &mut ctx[ctx_dwords..2 * ctx_dwords];
-        slot[0] = (dev.speed << 20) | (dci << 27); // Route String=0, Speed, Context Entries=dci
-        slot[1] = dev.port << 16; // Root Hub Port Number
+        slot[0] = (speed << 20) | (dci << 27); // Route String=0, Speed, Context Entries=dci
+        slot[1] = port << 16; // Root Hub Port Number
 
         let int_ring_addr = INT_RING.0.get() as u64;
         let ep_off = ctx_dwords * (1 + dci as usize);
@@ -1208,20 +1409,54 @@ unsafe fn try_keyboard_on_port(
         ring[INT_RING_SIZE - 1] = [ring_addr as u32, (ring_addr >> 32) as u32, 0, (1 << 1) | (TRB_TYPE_LINK << 10) | 1];
     }
 
-    let cmd_ptr = dev.push_command([
+    let cmd_ptr = xhci.push_command([
         INPUT_CONTEXT.0.get() as u32,
         (INPUT_CONTEXT.0.get() as u64 >> 32) as u32,
         0,
         (TRB_TYPE_CONFIGURE_ENDPOINT_CMD << 10) | (slot_id << 24),
     ]);
-    dev.wait_command_completion(cmd_ptr)?;
+    xhci.wait_command_completion(cmd_ptr)?;
     console::println!("Ouroboros kernel: xhci: interrupt endpoint configured");
 
     // Arms the endpoint for its first incoming report - see
     // `repost_interrupt_buffer`'s doc comment.
-    dev.repost_interrupt_buffer();
+    xhci.repost_interrupt_buffer();
 
-    Ok(true)
+    Ok(())
+}
+
+/// Logs every interface descriptor's class/subclass/protocol from a raw
+/// Configuration descriptor set - the multi-device scan's classification
+/// evidence, printed for *every* enumerated device so a boot screenshot
+/// answers "what is this device" directly (the exact question the
+/// USB-storage scoping needs answered for a passed-through stick - see
+/// `docs/roadmap.md`). Mass storage (class 0x08) gets an explicit
+/// callout since it's the class the next milestone is waiting to see.
+/// Same bounded-walk shape as [`find_keyboard_interrupt_endpoint`], and
+/// the same tolerance for a short-arrived buffer.
+fn log_interfaces(port: u32, desc: &[u8]) {
+    const DESCRIPTOR_TYPE_INTERFACE: u8 = 4;
+    const CLASS_MASS_STORAGE: u8 = 0x08;
+
+    let mut i = 0usize;
+    while i + 2 <= desc.len() {
+        let b_length = desc[i] as usize;
+        if b_length == 0 || i + b_length > desc.len() {
+            break;
+        }
+        if desc[i + 1] == DESCRIPTOR_TYPE_INTERFACE && b_length >= 9 {
+            let class = desc[i + 5];
+            let subclass = desc[i + 6];
+            let protocol = desc[i + 7];
+            console::println!(
+                "Ouroboros kernel: xhci: port {port}: interface class={class:#04x} subclass={subclass:#04x} protocol={protocol:#04x}"
+            );
+            if class == CLASS_MASS_STORAGE {
+                console::println!("Ouroboros kernel: xhci: port {port}: USB mass storage interface - recognized, not driven yet");
+            }
+        }
+        i += b_length;
+    }
 }
 
 /// Walks a raw Configuration descriptor set (Configuration + Interface +
@@ -1297,5 +1532,5 @@ unsafe fn poll_until(mut cond: impl FnMut() -> bool) -> bool {
 /// waiting - see that module for why no shell/ABI changes were needed to
 /// wire this in.
 pub fn poll_key() -> Option<u8> {
-    unsafe { (*KEYBOARD.0.get()).as_mut() }.and_then(Device::poll_key)
+    unsafe { (*XHCI.0.get()).as_mut() }.and_then(Xhci::poll_key)
 }
