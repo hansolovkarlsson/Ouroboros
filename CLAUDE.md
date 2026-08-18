@@ -3451,7 +3451,13 @@ real-hardware-only, passed on the first attempt.
 (the scan still runs exactly once at boot - a device attached *after*
 it is invisible until the next boot; not what hid the USB 2.0 stick,
 though - that was EHCI routing, see the diagnostic above, disproved as
-late-attach by its own 6-second recheck); no hubs; at most 4 devices;
+late-attach by its own 6-second recheck. **Update: the one-shot scan
+IS what nearly hid the USB *3.x* stick** - Parallels attaches
+passthrough devices a few seconds after VM start, and the stick was
+only caught because a temporary diagnostic delay happened to push the
+scan late enough; see `docs/roadmap.md`'s storage item - the
+mass-storage milestone needs a delayed/repeated scan or minimal
+hot-plug); no hubs; at most 4 devices;
 only the first keyboard found is
 driven; addressed non-keyboard devices are inert - enumerated and held,
 with no driver to do anything with them yet (that's the next

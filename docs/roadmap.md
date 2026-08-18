@@ -291,8 +291,24 @@ phase:
   properly.
 - **USB mass storage over xHCI — the follow-up to the diagnostic
   above, parked until it can be scoped against real hardware.**
-  **First enumeration check run (2026-08-17), with a real finding: a
-  USB 2.0 stick never appears on the xHCI controller at all.** A
+  **GO - confirmed with a real USB 3.x stick (2026-08-17, second
+  enumeration check):** a SuperSpeed flash drive (`idVendor=0x21c4`,
+  `bcdUSB` 3.2) passed through to the VM landed on the xHCI
+  controller's port 3 at `speed=4`, enumerated through this kernel's
+  own multi-device scan, and presented **exactly the target
+  interface - `class=0x08 subclass=0x06 protocol=0x50`
+  (SCSI-transparent, Bulk-Only Transport)** - with the mass-storage
+  callout printed and the device left addressed, keyboard working
+  alongside it. The driver plan below applies as written. **One real
+  design input found by the same diagnostic:** Parallels attaches
+  passthrough USB devices *a few seconds after* VM start - the
+  temporary port dump showed only the mouse/keyboard 6 seconds in,
+  and the stick appeared moments later mid-scan (the first, bare run
+  missed it entirely) - so the storage driver needs a delayed or
+  repeated port scan (or minimal hot-plug via Port Status Change
+  events) rather than trusting the current boot-time one-shot.
+  **The first enumeration check (a USB 2.0 stick) had already found
+  the complementary negative:** A
   SanDisk Cruzer Glide (high-speed/USB 2.0, per Parallels' own device
   listing) was passed through via `prlsrvctl usb set` and confirmed
   `Connected-To-Vm: YES` while the VM ran — yet a temporary in-kernel
