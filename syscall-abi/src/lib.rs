@@ -217,6 +217,22 @@ pub const MSG_RECV: u64 = 24;
 /// as [`TRY_READ_CHAR`]/[`READ_CHAR`].
 pub const MSG_TRY_RECV: u64 = 25;
 
+/// `(dest task, req ptr, req len, reply ptr)` -> the packed
+/// `(sender << 32) | copied_len` of the reply (sender is always
+/// `dest`), [`RECV_INTERRUPTED`] on Ctrl+C, [`TASK_ERR_NO_SUCH_TASK`],
+/// [`TASK_ERR_PROTECTED`] (calling yourself is a guaranteed deadlock),
+/// or a `MSG_ERR_*` code if the send half fails. The synchronous
+/// request/response primitive (MINIX's `sendrec` shape): sends the
+/// request to `dest`, then blocks until a reply *from `dest`
+/// specifically* arrives - a message from any other task stays queued
+/// for a later [`MSG_RECV`] rather than being mistaken for the reply.
+/// The reply buffer is a fixed [`MSG_MAX_LEN`] bytes (implied, not
+/// passed - the 4-argument syscall ABI is exactly full). With direct
+/// delivery on both hops (see `tasks.rs::send_message`), a call to a
+/// server blocked in [`MSG_RECV`] round-trips without waiting for a
+/// tick on either side.
+pub const MSG_CALL: u64 = 29;
+
 /// `()` -> the block device's capacity in sectors, or
 /// [`BLOCK_ERR_NO_DEVICE`]/[`BLOCK_ERR_DENIED`]. Raw block-device
 /// introspection for the filesystem server - see the note on

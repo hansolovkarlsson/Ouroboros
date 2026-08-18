@@ -356,12 +356,42 @@ static MAILBOXES: [MailboxSlot; NUM_TASKS] = [
     MailboxSlot(UnsafeCell::new(Mailbox::new())),
 ];
 
-/// `MSG_SEND`'s core: copy `data` into `dest`'s mailbox. The caller
-/// validates `dest` exists; this only enforces the size and depth
-/// bounds.
+/// `MSG_SEND`'s core: deliver `data` to `dest`. The caller validates
+/// `dest` exists; this only enforces the size and depth bounds.
+///
+/// **Direct delivery first, mailbox second:** if the destination is
+/// already blocked waiting for exactly this message (a plain `recv`,
+/// or a call-reply wait naming this sender - see
+/// [`WaitReason::Message`]'s `from` filter), the mailbox is skipped
+/// entirely - the bytes are copied straight into its waiting buffer,
+/// the packed result stashed in its saved `x0` (the same slot
+/// `on_tick`'s wake-check writes), and the task marked runnable. This
+/// is the eager version of the wake-check's own delivery, not a new
+/// mechanism - it exists so a send -> recv handoff completes without
+/// waiting for the next tick, which is what makes synchronous
+/// request/response round trips (the `MSG_CALL` syscall, and the
+/// filesystem server built on it) fast enough to put every disk
+/// operation through.
 pub(crate) fn send_message(sender: usize, dest: usize, data: &[u8]) -> u64 {
     if data.len() > MSG_MAX {
         return syscall_abi::MSG_ERR_TOO_BIG;
+    }
+    if let TaskState::Blocked(WaitReason::Message { buf, len, from }) =
+        unsafe { *STATES[dest].0.get() }
+    {
+        if from.is_none() || from == Some(sender) {
+            let copy_len = data.len().min(len as usize);
+            let dst = buf as *mut u8;
+            for (i, &b) in data[..copy_len].iter().enumerate() {
+                // SAFETY: the receiver validated (buf, len) at its own
+                // syscall boundary; single address space, same trust
+                // model as the wake-check's copy-out.
+                unsafe { core::ptr::write_volatile(dst.add(i), b) };
+            }
+            unsafe { (*TASKS[dest].0.get()).gpr[0] = ((sender as u64) << 32) | copy_len as u64 };
+            unsafe { *STATES[dest].0.get() = TaskState::Runnable };
+            return 0;
+        }
     }
     let mailbox = unsafe { &mut *MAILBOXES[dest].0.get() };
     if mailbox.count >= MSG_QUEUE_DEPTH {
@@ -380,19 +410,45 @@ pub(crate) fn send_message(sender: usize, dest: usize, data: &[u8]) -> u64 {
 /// copy - single address space, the same trust model as every `fs_*`
 /// buffer), returning the packed `(sender << 32) | copied_len` the
 /// receive syscalls hand to userland - or `None` if the mailbox is
-/// empty.
+/// empty. The unfiltered form of [`try_recv_message_from`].
 pub(crate) fn try_recv_message(task: usize, buf: u64, buf_len: u64) -> Option<u64> {
+    try_recv_message_from(task, buf, buf_len, None)
+}
+
+/// [`try_recv_message`] with an optional sender filter: pops the oldest
+/// queued message *from `from`* (any sender when `None`), leaving
+/// non-matching messages queued in their original order - the selective
+/// receive a call-reply wait needs, so an unrelated task's message
+/// can't be mistaken for the reply. Removal from the middle of the
+/// ring shifts the younger entries down one slot - bounded by the
+/// 4-deep queue, so the cost is irrelevant.
+pub(crate) fn try_recv_message_from(
+    task: usize,
+    buf: u64,
+    buf_len: u64,
+    from: Option<usize>,
+) -> Option<u64> {
     let mailbox = unsafe { &mut *MAILBOXES[task].0.get() };
-    if mailbox.count == 0 {
-        return None;
+    let mut found = None;
+    for i in 0..mailbox.count {
+        let slot = (mailbox.head + i) % MSG_QUEUE_DEPTH;
+        if from.is_none() || from == Some(mailbox.msgs[slot].sender as usize) {
+            found = Some(i);
+            break;
+        }
     }
-    let msg = mailbox.msgs[mailbox.head];
-    mailbox.head = (mailbox.head + 1) % MSG_QUEUE_DEPTH;
+    let i = found?;
+    let msg = mailbox.msgs[(mailbox.head + i) % MSG_QUEUE_DEPTH];
+    for j in i..mailbox.count - 1 {
+        let dst_slot = (mailbox.head + j) % MSG_QUEUE_DEPTH;
+        let src_slot = (mailbox.head + j + 1) % MSG_QUEUE_DEPTH;
+        mailbox.msgs[dst_slot] = mailbox.msgs[src_slot];
+    }
     mailbox.count -= 1;
     let copy_len = (msg.len as u64).min(buf_len) as usize;
     let dst = buf as *mut u8;
-    for (i, &b) in msg.data[..copy_len].iter().enumerate() {
-        unsafe { core::ptr::write_volatile(dst.add(i), b) };
+    for (k, &b) in msg.data[..copy_len].iter().enumerate() {
+        unsafe { core::ptr::write_volatile(dst.add(k), b) };
     }
     Some(((msg.sender as u64) << 32) | copy_len as u64)
 }
@@ -420,9 +476,13 @@ pub(crate) enum WaitReason {
     /// collecting the status is what frees the slot) or `Unused` (it
     /// was killed out from under the waiter - `TASK_KILLED_STATUS`).
     TaskExit(usize),
-    /// Waiting for a message (`MSG_RECV`): the receiver's buffer, into
-    /// which the wake-check copies the oldest queued message.
-    Message { buf: u64, len: u64 },
+    /// Waiting for a message (`MSG_RECV`, and `MSG_CALL`'s reply half):
+    /// the receiver's buffer, into which delivery copies the oldest
+    /// matching queued message. `from` is the sender filter - `None`
+    /// for a plain receive-from-any (`MSG_RECV`), `Some(task)` for a
+    /// call waiting on that specific task's reply (`MSG_CALL`), so an
+    /// unrelated task's message can never be mistaken for the reply.
+    Message { buf: u64, len: u64, from: Option<usize> },
 }
 
 impl WaitReason {
@@ -465,9 +525,10 @@ impl WaitReason {
                     _ => None,
                 }
             }
-            WaitReason::Message { buf, len } => {
+            WaitReason::Message { buf, len, from } => {
                 // Same Ctrl+C escape hatch as TaskExit's - a `recv`
-                // with no sender coming must not brick the session.
+                // (or a call to a wedged server) with no reply coming
+                // must not brick the session.
                 if waiter == INPUT_OWNER.load(Ordering::Relaxed) {
                     if let Some(byte) = crate::syscall::poll_keyboard_byte() {
                         if byte == 0x03 {
@@ -475,7 +536,7 @@ impl WaitReason {
                         }
                     }
                 }
-                try_recv_message(waiter, buf, len)
+                try_recv_message_from(waiter, buf, len, from)
             }
         }
     }

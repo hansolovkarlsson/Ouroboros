@@ -761,14 +761,60 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
                 return packed;
             }
             // Block until one arrives (or Ctrl+C) - same pass-through
-            // return contract as READ_CHAR/WAIT.
-            unsafe { tasks::block_current_and_switch(frame, tasks::WaitReason::Message { buf: arg0, len: arg1 }) }
+            // return contract as READ_CHAR/WAIT. No sender filter: a
+            // plain recv takes the oldest message from anyone.
+            unsafe {
+                tasks::block_current_and_switch(
+                    frame,
+                    tasks::WaitReason::Message { buf: arg0, len: arg1, from: None },
+                )
+            }
         }
         syscall_abi::MSG_TRY_RECV => {
             if !valid_user_range(arg0, arg1) {
                 return FS_ERROR;
             }
             tasks::try_recv_message(tasks::current_task(), arg0, arg1).unwrap_or(syscall_abi::NO_MSG)
+        }
+        syscall_abi::MSG_CALL => {
+            let dest = arg0 as usize;
+            // Request pointer/length are caller-supplied; the reply
+            // buffer's length is the fixed MSG_MAX_LEN (the 4-argument
+            // ABI is exactly full - see the syscall-abi doc).
+            if !valid_user_range(arg1, arg2) || !valid_user_range(arg3, syscall_abi::MSG_MAX_LEN) {
+                return FS_ERROR;
+            }
+            if dest == tasks::current_task() {
+                // Calling yourself would block waiting for a reply
+                // only you could send - a guaranteed deadlock, same
+                // up-front refusal as WAIT's self-wait.
+                return syscall_abi::TASK_ERR_PROTECTED;
+            }
+            if dest >= tasks::NUM_TASKS || !tasks::task_exists(dest) {
+                return syscall_abi::TASK_ERR_NO_SUCH_TASK;
+            }
+            // SAFETY: bounds sanity-checked above, same trust model as
+            // MSG_SEND.
+            let data = unsafe { core::slice::from_raw_parts(arg1 as *const u8, arg2 as usize) };
+            let sent = tasks::send_message(tasks::current_task(), dest, data);
+            if sent != 0 {
+                return sent;
+            }
+            // The send above direct-delivers if dest is blocked in a
+            // recv (waking it); blocking here then switches straight
+            // to it - the synchronous handoff. The reply can't exist
+            // yet (dest hasn't run since the request was queued), so
+            // there's no fast path to check first.
+            unsafe {
+                tasks::block_current_and_switch(
+                    frame,
+                    tasks::WaitReason::Message {
+                        buf: arg3,
+                        len: syscall_abi::MSG_MAX_LEN,
+                        from: Some(dest),
+                    },
+                )
+            }
         }
         syscall_abi::BLOCK_INFO => {
             if !block_access_allowed() {
