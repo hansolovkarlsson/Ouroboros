@@ -3952,31 +3952,165 @@ genuinely sharing the console). Every userland facility this project
 has - spawn, IPC, job control, wait/reaping - now demonstrated on the
 platform it was built for.
 
-**Part 2, scoped but not started:** the userland FAT32 filesystem
-server - MINIX's textbook first move, chosen because the FS is pure
-logic (no MMIO/DMA, which can't be meaningfully isolated without an
-IOMMU anyway). It will speak this IPC to clients and new raw
-block-device syscalls to the kernel. See `docs/roadmap.md`.
+**Part 2 is done - see "Driver isolation, part 2" immediately below.**
 
-**Still coarse:** receive-from-any only (no selective receive); no
-blocking sends or back-pressure; senders are never notified when a
-receiver dies; no capabilities (any task can message any task - the
-kernel's existing trust model); 64-byte messages (part 2's FS
-protocol will need a request/response convention within that, or a
-size bump).
+**Still coarse:** ~~receive-from-any only (no selective receive)~~
+(partially closed: `MSG_CALL`'s reply wait filters by sender, and the
+mailbox pop supports a sender filter - a general selective `recv`
+still doesn't exist); no blocking sends or back-pressure; senders are
+never notified when a receiver dies; no capabilities (any task can
+message any task - the kernel's existing trust model); 64-byte
+messages (enough for part 2's FS protocol, which passes pointers
+rather than payloads - see below).
+
+## Driver isolation, part 2: the filesystem moves to userland
+
+The first real component out of the EL1 kernel, done 2026-08-18 in
+five independently-tested stages, each committed and regressed before
+the next depended on it (the project's standing staged discipline).
+The result: **the kernel contains no filesystem at all** -
+`kernel/src/fat32.rs` (1040 lines) moved into `fsd/`, the fifth
+userland program, and every file operation is now an IPC round trip.
+Two architectural calls made explicitly with the user before any code:
+**direct client IPC** (the shell's nine typed `fs_*` wrappers became
+`MSG_CALL` round trips; the kernel's fs_* syscalls 7-14 are numbering
+gaps now, like 5 - not kernel forwarding stubs, which would have kept
+the whole FS interface in the kernel forever), and **a synchronous
+call primitive** (`MSG_CALL`, 29 - MINIX-sendrec-shaped) rather than
+tick-paced plain send+recv, fixing both the reply mis-routing hole (a
+blocked `MSG_RECV` took the oldest message from *anyone*) and latency
+(~40ms/op and a ~5s `exec` otherwise).
+
+**The pieces, in stage order:**
+
+1. **Block custody + syscalls (26-28).** A `BlockCell` in `syscall.rs`
+   holds the raw `BlockDevice`; `BLOCK_INFO`/`BLOCK_READ`/`BLOCK_WRITE`
+   expose it one 512-byte sector at a time, **gated to `FSD_TASK`
+   (task 2) alone** - the actual "supervised" in "supervised EL0
+   process": the kernel holds the device, exactly one task may ask it
+   to touch the disk. Verified from EL0 via a temporary shell builtin
+   (denied when gated, then capacity/MBR-signature/write-echo with the
+   gate temporarily forced, then reverted).
+2. **IPC upgrades.** Direct delivery in `tasks::send_message` (a
+   destination already blocked in a matching message wait gets the
+   bytes copied straight into its buffer, the packed result in its
+   saved `x0`, and a wake - the eager version of the wake-check's own
+   logic, no new mechanism), a `from` sender filter on
+   `WaitReason::Message` with selective mailbox pop
+   (`try_recv_message_from` - non-matching messages stay queued in
+   order), and the `MSG_CALL` arm itself: send (direct-delivers,
+   waking the server), then block on `Message { from: Some(dest) }` -
+   `block_current_and_switch`'s existing immediate switch lands on the
+   just-woken server, so the whole round trip is sub-tick with zero
+   new scheduler mechanisms. Self-call refused up front (guaranteed
+   deadlock, `WAIT`'s own precedent). Verified: pong regression
+   byte-identical; a call's reply filter proven directly (a stale
+   queued message from another task skipped, then correctly returned
+   by a later plain `recv`); Ctrl+C interrupting a call to a
+   never-replying task.
+3. **`fsd/` as protected task 2.** Boot-loaded by `loader::load_fsd`
+   (`\EFI\ORBS\FSD.BIN`, a fixed path - the server is infrastructure
+   with a fixed slot clients hardcode, not the configurable `INIT.CFG`
+   program; missing FSD.BIN = warn and boot on, every request then
+   failing no-such-task, which the shell folds into its ordinary
+   no-filesystem message). `NUM_TASKS` 4 -> 5, `MAX_EL0_REGIONS` (and
+   the EL0 L2/L3 pools) 4 -> 5, spawnable slots now 3-4 (`spawn` scans
+   from `FIRST_SPAWNABLE = 3` and never touches slot 2 - a spawned
+   program landing in the block-syscall-privileged slot would inherit
+   the server's disk access), task 2 joins 0/1 in the
+   `EXIT`/`KILL`/`WAIT` protections.
+4. **The move itself.** `fsd/src/fat32.rs` is the kernel module
+   essentially verbatim - the `BlockDevice` it owned by value became a
+   zero-sized `Disk` shim over the block syscalls - plus one new
+   method, `read_at` (windowed reads at a byte offset, skipping whole
+   clusters to the window). The server speaks the `FSOP_*` protocol
+   (56-byte requests: op + six LE u64 args, *pointers into the
+   client's memory* - which is why 64-byte messages were enough, no
+   size bump: the same single-address-space trust model the old
+   syscall pointer arguments had, one level up; replies are one u64
+   with the old syscalls' exact return semantics, so `print_fs_error`
+   and every cmd_* arm work unchanged). The mounted `Fs` lives in the
+   server's own stack frame (userland has no static mutable state;
+   the server is one infinite request loop). `SPAWN` (16) was
+   recontracted - the kernel can't read a path anymore, so `exec`
+   reads via `FSOP_READ_AT` in 512-byte chunks, feeds `SPAWN_STAGE`
+   (30) into the existing 128KB staging buffer, then `SPAWN` takes the
+   staged total. `MOUNT` (22) is the device half only, with a replace
+   flag; the shell's `mount` is server-first (FSOP_MOUNT, then device
+   replacement only after the server confirms nothing is mounted, then
+   FSOP_MOUNT again) - **a regression caught by reasoning before it
+   shipped**: naive first-installed-wins device custody would have let
+   `make run`'s unmountable FAT16 vvfat virtio disk permanently hog
+   the cell and block a later USB stick; the server-first flow
+   preserves the old first-MOUNTED-wins behavior, verified directly
+   against the run-usb-multi rig.
+5. **Docs + verification** (this section, architecture/processes/
+   shell-commands/manual/roadmap/CHANGELOG).
+
+**A genuinely new instance of the prebuilt-libcore PIE constraint,
+found the hard way porting fat32.rs:** `str::rfind` with a `char`
+pattern pulls libcore's `memrchr`, whose prebuilt non-PIC object
+carries `R_AARCH64_ABS64` relocations a PIE userland link rejects
+outright - even in release. Joins the documented `slice_error_fail`
+(str range slicing - hit again here in `split_parent`/
+`make_short_name`, fixed with `.get()`) and debug-build cases; fixed
+with a manual reverse byte scan. The failure is loud (a link error),
+never silent; `docs/processes.md`'s "Binary format" now keeps the
+list (byte-slice indexing, forward `find`/memchr, `copy_from_slice`,
+and `core::fmt` itself are all confirmed fine).
+
+**Confirmed working end to end on QEMU, zero aborts in `-d int`
+cross-checks throughout:** the full disk-command surface over IPC
+against real FAT32 (`ls`/`cat`/`cd`/`pwd`/`mkdir`/`write`/`cat`/`cp`/
+`mv`/`rm`/`rmdir`, `>`/`>>` redirects), every error path organically
+(not-found, is-a-directory, bad ELF, already-exists, `rmdir /`),
+chunked `exec` of HELLO.BIN and PONG.BIN with the full
+exit/wait/send/recv lifecycle alongside the fsd server (two servers
+coexisting, no cross-talk - the reply filter's whole point),
+`selftest`, FAT16 degradation byte-compatible with before (the shared
+no-filesystem message; `mount` cascading to a clean no-device answer),
+the missing-FSD.BIN boot (warn, no hang, no-such-task -> no-filesystem
+messages), the USB replace flow on the three-device rig (vvfat fails,
+`mount` swaps in the stick, its FAT32 mounts, marker file listed), and
+reboot persistence (a file written through the whole
+shell -> IPC -> server -> BLOCK_WRITE -> virtio chain read back on a
+fresh boot, pre-existing files untouched). **Confirmed on real
+Parallels hardware** via `make test-parallels`: `fsd: filesystem
+server ready` at boot, `selftest` clean, and the complete
+`mount` -> xHCI rescan -> Lexar INQUIRY -> `usb-msd block device
+installed` -> **`fsd: FAT32 mounted` (the mount itself now running in
+userland over BLOCK_READ)** -> `ls` of the real stick's contents ->
+`uptime` advancing (1669 ticks). Reads only on the real stick, per
+standing policy.
+
+**Still coarse, worth knowing before building on this:** a crashed or
+wedged server means no disk until reboot - there's no
+restart/supervision (MINIX's reincarnation-server idea, a real future
+milestone; Ctrl+C rescues a *client* blocked on a call, but nothing
+rescues the server itself); the isolation is still trust-based, not
+enforced (all EL0 regions are mutually accessible - the server can
+read/write any client memory, and any task could corrupt the server's;
+per-task page tables are the real fix); `FSOP_*` request pointers are
+trusted exactly like syscall pointers were; one filesystem, one
+device (the block cell holds exactly one; a second stick can't be
+mounted alongside); `read_at` exists server-side but `cat` still
+reads from offset 0 only (no paging); and the fsd server's fat32
+engine still carries all the pre-existing FAT32 limitations (8.3-only,
+no LFN, first-FAT32-partition-only, no append/offset-write underneath
+`>>`).
 
 ## Commands
 
 ```sh
 make build                  # cargo build (debug) - kernel only, see below
 make build PROFILE=release  # release profile
-make shell-bin               # build shell/ for aarch64-unknown-none + objcopy to a raw .bin
-make run                    # stage ESP dir (kernel + shell binary + config) + boot in QEMU with a virtio-mmio block device attached (fast dev loop - vvfat backing, FAT16, not FAT32 - see "Phase 3b")
+make shell-bin               # build shell/ for aarch64-unknown-none + strip (same pattern: hello-bin, pong-bin, fsd-bin)
+make run                    # stage ESP dir (kernel + userland binaries incl. the fsd filesystem server + config) + boot in QEMU with a virtio-mmio block device attached (fast dev loop - vvfat backing, FAT16, not FAT32 - see "Phase 3b")
 make run-virtio-console      # same as `run`, plus a virtio-mmio console device attached (for testing virtio_console.rs - see "virtio-console" above for why this alone doesn't organically trigger the fallback)
 make run-usb-kbd             # same as `run`, plus an xHCI controller + USB keyboard + HMP monitor socket for sendkey keystroke injection (see "USB HID keyboard driver" above)
 make run-usb-multi           # same as `run-usb-kbd`, plus a usb-tablet and a usb-storage stick on the same controller - the three-device rig for xhci.rs's multi-device scan (see "xHCI multi-device support" above)
 make image                  # build esp.img, a raw MBR+FAT32 disk image (not directly usable by Parallels - see below)
-make run-image               # boot esp.img (genuine FAT32) instead of run's vvfat - needed for anything that reads the filesystem at runtime (fat32.rs and up)
+make run-image               # boot esp.img (genuine FAT32) instead of run's vvfat - needed for anything that reads the filesystem at runtime (the fsd server and every disk command)
 make parallels-hdd          # wrap esp.img into esp.hdd, a Parallels-native virtual hard disk
 make test-parallels          # scripted real-hardware round trip via prlctl - see below
 make clean
@@ -4074,38 +4208,43 @@ kernel/
   src/gicv2.rs       GICv2 backend (distributor + memory-mapped CPU interface), addresses now passed in from madt::GicInfo instead of hardcoded
   src/gicv3.rs       GICv3 backend (redistributor wake/discovery, ICC_* system-register CPU interface) - confirmed working on QEMU and real Parallels hardware, see "MADT/GICv3" above
   src/timer.rs       ARM generic timer (non-secure EL1 physical timer, PPI 14 / GIC INTID 30), TICK_INTERVAL_MS
-  src/loader.rs      reads INIT.CFG + a program off the ESP during boot services, into a 2MB-aligned EL0-accessible region, real ELF64 parsing + R_AARCH64_RELATIVE relocation processing - see "A real relocating loader" above and docs/processes.md; elf_region_size/populate_region split so the same parsing/loading logic is reusable from the runtime spawn path too, see "Dynamic task creation and exec()" above
-  src/syscall.rs     svc syscall dispatch table (print/double/report/try_read_char/putc/get_ticks/fs_list_dir/fs_read_file/fs_mkdir/fs_rmdir/fs_touch/fs_rm/fs_write_file/fs_mv/read_char/spawn/exit/task_state/kill/fg/wait/mount/msg_send/msg_recv/msg_try_recv, gap at 5) - confirmed working end to end, see above, "Blocking primitives" above for read_char, and "Dynamic task creation and exec()" above for spawn
-  src/tasks.rs       up to 4 task slots (task 0 = loaded program, task 1 = idle, slots 2-3 spawn/exit-cycled) + the round-robin scheduler over Runnable/Blocked/Unused task state (block_current_and_switch, exit_current_and_switch, on_tick's wake-check, tasks::spawn, allocate_runtime_region/free_runtime_region) - confirmed working, see "Blocking primitives", "Dynamic task creation and exec()", and "Task destruction" above
+  src/loader.rs      reads INIT.CFG + a program off the ESP during boot services (plus the optional filesystem server, \EFI\ORBS\FSD.BIN), into 2MB-aligned EL0-accessible regions, real ELF64 parsing + R_AARCH64_RELATIVE relocation processing - see "A real relocating loader" above and docs/processes.md; elf_region_size/populate_region split so the same parsing/loading logic is reusable from the runtime spawn path too, see "Dynamic task creation and exec()" above
+  src/syscall.rs     svc syscall dispatch table (print/double/report/try_read_char/putc/get_ticks/read_char/spawn/exit/task_state/kill/fg/wait/mount/msg_send/msg_recv/msg_try_recv/block_info/block_read/block_write/msg_call/spawn_stage; gaps at 5 and 7-14 - the old fs_* syscalls moved to the fsd server's FSOP_* protocol) plus the block-device cell (the kernel's entire remaining storage role) - see "Driver isolation, part 2" above
+  src/tasks.rs       up to 5 task slots (task 0 = loaded program, task 1 = idle, task 2 = filesystem server, slots 3-4 spawn/exit-cycled) + the round-robin scheduler over Runnable/Blocked/Unused/Zombie task state (block_current_and_switch, exit_current_and_switch, on_tick's wake-check, tasks::spawn, allocate_runtime_region/free_runtime_region, mailboxes with direct delivery + sender-filtered receive) - confirmed working, see "Blocking primitives", "Dynamic task creation and exec()", "Task destruction", and "Driver isolation" parts 1/2 above
   src/virtio_mmio.rs virtio-mmio transport: 32-slot device discovery, modern (non-legacy) register layout, addresses confirmed via devicetree dump
   src/block.rs       BlockDevice enum (Virtio | UsbMsd) - the block-device abstraction fat32.rs sits on, see "USB mass storage" above
   src/usb_msd.rs     USB mass storage: Bulk-Only Transport + SCSI (INQUIRY/READ CAPACITY/READ(10)/WRITE(10)) over xhci.rs's bulk endpoints - Parallels' first working disk, see "USB mass storage" above
   src/virtio_blk.rs  runtime virtio-blk driver: feature negotiation, one virtqueue, synchronous polling sector reads and writes - phase 3a (reads)/phase 4 (writes), confirmed working, see above
   src/virtio_console.rs  transmit-only virtio-console driver over the same transport - device discovery, feature negotiation, transmitq0 - confirmed working on QEMU; confirmed *not* what Parallels' serial port actually is, see "virtio-console" above
-  src/fat32.rs       hand-rolled FAT32 over virtio_blk::Device: MBR, BPB, FAT cluster chains, 8.3-only directory entries, mkdir/rmdir/touch/rm/write_file/mv write support - phase 3b (reads)/phase 4-8 (writes), confirmed working, see above
   src/xhci.rs        from-scratch xHCI (USB3 host controller) driver: command/event rings, multi-device port scan (every connected device enumerated, its interfaces logged, and kept concurrently addressed - up to 4, see "xHCI multi-device support" above), per-device EP0 rings/output contexts, and a real interrupt endpoint for HID keyboard reports - confirmed working end to end with a real keyboard on real Parallels hardware, see "USB HID keyboard driver" above and docs/xhci-keyboard-postmortem.md
 
 shell/               userland default shell - a separate crate, built for aarch64-unknown-none, loaded from disk (not compiled into the kernel)
   linker.ld          self-relocating (PIE) linker script: entry at offset 0, .rela.dyn/.dynsym/.dynamic/.data.rel.ro, no .bss/.data (see "A real relocating loader" above and docs/processes.md)
   src/main.rs        line editor + command dispatch (help/echo/uptime/clear/ls/cat/cd/pwd/mkdir/rmdir/touch/rm/write/cp/mv/exec/exit/ps/kill/fg/selftest, plus `> file`/`>> file` output redirection on any of them - see "Output redirection" above), running as real EL0 userland code, built for real relocation (relocation-model=pic, --release only) - main loop blocks on read_char (syscall 15) instead of busy-polling, see "Blocking primitives" above; see docs/processes.md
 
-pong/                fourth userland program: the IPC echo server (recv -> send back to sender; `quit` exits) - the long-lived server shape driver isolation's FS server will have, see "Driver isolation, part 1" above
+fsd/                 fifth userland program: THE FILESYSTEM SERVER (driver isolation part 2) - owns the FAT32 engine, speaks the FSOP_* protocol to clients over IPC, and is the only task the BLOCK_* syscalls accept; boot-loaded into protected task slot 2, see "Driver isolation, part 2" above
+  src/main.rs        the request loop: recv -> decode FsRequest -> dispatch to Fs -> reply one u64; mounted Fs lives in main's stack frame (no static state in userland)
+  src/fat32.rs       the kernel's old hand-rolled FAT32 module, moved essentially verbatim (MBR, BPB, FAT chains, 8.3 entries, full read/write support) plus read_at (windowed offset reads); its BlockDevice became disk.rs's syscall shim
+  src/disk.rs        zero-sized Disk handle: read_sector/write_sector/capacity as BLOCK_READ/BLOCK_WRITE/BLOCK_INFO syscall wrappers
+
+pong/                fourth userland program: the IPC echo server (recv -> send back to sender; `quit` exits) - the long-lived server shape the fsd filesystem server now actually has, see "Driver isolation, part 1" above
   src/main.rs        ~90 lines: the recv/echo loop over MSG_RECV/MSG_SEND
 
 hello/               second userland program: prints a banner and exits via the EXIT syscall - the living proof of "the shell is just a program" and the reference for how a program ends itself (see "Task destruction" above)
   src/main.rs        ~70 lines: _start, a putc-loop print, the exit call
 
-syscall-abi/         shared syscall ABI crate - syscall numbers + sentinel values (NO_CHAR/FS_ERROR/NO_FS), depended on directly by both kernel and shell, no more hand-duplicated numbers - see docs/processes.md
+syscall-abi/         shared syscall ABI crate - syscall numbers, sentinel/error values, and the fsd server's FSOP_* request-protocol constants, depended on directly by the kernel and every userland program - see docs/processes.md
   src/lib.rs         #![no_std], no logic, just pub consts - safe under either target since every value is a scalar inlined at the use site, not a pointer needing relocation
 
 scripts/
   test-parallels.sh  scripted real-hardware smoke test via prlctl (start/type/capture/stop) - invoked by `make test-parallels`, see "## Commands" above and docs/roadmap.md's "Testing infrastructure" section
 ```
 
-Four-crate workspace (`kernel`, `shell`, `hello`, `syscall-abi`), with `shell`/`hello`
-deliberately excluded from the workspace's `default-members` (see
-`Cargo.toml`) since they need a different `--target` than `kernel`;
-`syscall-abi` needs no such exclusion (a plain lib, no `[[bin]]` to
-conflict with a target) and gets built automatically as `kernel`'s path
-dependency. Expect further growth as more userland programs emerge, each
-depending on `syscall-abi` the same way `shell` does.
+Six-crate workspace (`kernel`, `shell`, `hello`, `pong`, `fsd`,
+`syscall-abi`), with every userland crate deliberately excluded from the
+workspace's `default-members` (see `Cargo.toml`) since they need a
+different `--target` than `kernel`; `syscall-abi` needs no such
+exclusion (a plain lib, no `[[bin]]` to conflict with a target) and gets
+built automatically as `kernel`'s path dependency. Expect further growth
+as more userland programs emerge, each depending on `syscall-abi` the
+same way `shell` does.

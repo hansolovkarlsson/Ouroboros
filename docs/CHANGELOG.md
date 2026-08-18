@@ -7,6 +7,34 @@ what broke, how it was diagnosed), see `CLAUDE.md`; for *how* something
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## Driver isolation part 2: the filesystem moves to userland
+
+The first real component out of the EL1 kernel: `fsd/`, the fifth
+userland program, owns the FAT32 engine (the kernel's old `fat32.rs`,
+moved essentially verbatim onto a `BLOCK_*`-syscall disk shim) in
+protected, boot-loaded task slot 2. The kernel keeps only raw sector
+access - `BLOCK_INFO`/`BLOCK_READ`/`BLOCK_WRITE` (26-28), accepted
+from the server's slot alone - and syscalls 7-14 (the old `fs_*`
+family) are numbering gaps now; their contracts survive unchanged as
+the `FSOP_*` request protocol clients speak to the server over IPC.
+Enabling work in the same milestone: `MSG_CALL` (29), a synchronous
+MINIX-sendrec-shaped call primitive built from direct delivery in
+`send_message` (a matching blocked receiver gets the bytes, its saved
+`x0`, and a wake immediately - no tick wait) plus a reply-sender
+filter on the message wait (an unrelated task's message can no longer
+be mistaken for a reply); a two-step staged `spawn` (`SPAWN_STAGE`,
+30 - `exec` reads the program via the server in 512-byte chunks, since
+the kernel can't read a path anymore); and a server-first two-phase
+`mount` with device replacement (preserving first-MOUNTED-wins: an
+unmountable boot disk never blocks a later USB stick). Scheduler/MMU
+grew to 5 slots/EL0 regions. Two new prebuilt-libcore PIE constraints
+found and documented (`str` range slicing, and `rfind`'s `memrchr`).
+Confirmed end to end on QEMU (full disk surface over IPC, chunked
+exec, reboot persistence, FAT16/missing-FSD.BIN degradation, USB
+replace flow, zero aborts throughout) and real Parallels hardware
+(mount -> INQUIRY -> server-side FAT32 mount -> ls of the real stick;
+reads only by policy).
+
 ## Driver isolation part 1: real IPC
 
 The prerequisite the roadmap's driver-isolation item named: fixed-size

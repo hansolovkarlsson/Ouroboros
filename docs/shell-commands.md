@@ -41,11 +41,13 @@ implement a completely different command set.
   bare `cd`).
 - **Name matching is case-insensitive**, same as FAT itself (`ls`/`cat`/
   `cd` on `boot`, `Boot`, or `BOOT` all find the same entry).
-- **No mounted filesystem this boot** (e.g. `make run`'s fast dev-loop
-  disk, which is FAT16 — see `fat32.rs`) makes every disk command print
-  one shared message rather than a command-specific error, since no path
-  could ever resolve in that state. Use `make run-image` (or a real
-  Parallels/`esp.img` boot) for disk commands to do anything.
+- **No filesystem available this boot** (e.g. `make run`'s fast
+  dev-loop disk is FAT16, which the server can't mount — or no FSD.BIN
+  was on the ESP at all, so there's no filesystem server) makes every
+  disk command print one shared message rather than a command-specific
+  error, since no path could ever resolve in that state. Use `make
+  run-image` (or a Parallels boot plus `mount` with a USB stick) for
+  disk commands to do anything.
 - **Only 8.3 short filenames.** No long-filename (LFN) support in the
   underlying FAT32 reader — `mkdir`/`touch` additionally only accept
   ASCII alphanumerics, `_`, and `-` in names they create (one optional
@@ -63,7 +65,7 @@ implement a completely different command set.
 | `uptime` | `uptime` | Prints the preemption tick count since boot. | Backed by `get_ticks` — real kernel state, not a demo. |
 | `clear` | `clear` | Clears the screen (ANSI `\x1b[2J\x1b[H`). | A raw escape sequence the shell sends itself, not a syscall — the console has no notion of a screen. |
 | `pwd` | `pwd` | Prints the current working directory. | Shell-local state only, no syscall. |
-| `ls` | `ls [path]` | Lists a directory's entries, `name` for files and `name/` for subdirectories. Defaults to the current directory. | Truncates rather than erroring if the listing doesn't fit a 512-byte buffer (the kernel's per-syscall cap). |
+| `ls` | `ls [path]` | Lists a directory's entries, `name` for files and `name/` for subdirectories. Defaults to the current directory. | Truncates rather than erroring if the listing doesn't fit a 512-byte buffer (the ABI's per-buffer cap). |
 | `cat` | `cat <file>` | Prints a file's contents. | Truncates at 512 bytes (the kernel's per-syscall cap) with a notice if the file is larger; a file argument is required. |
 | `cd` | `cd [path]` | Changes the current working directory. | Validates the target exists and is a directory first (via a listing call — there's no dedicated "does this exist" syscall). |
 | `mkdir` | `mkdir <dir>` | Creates an empty subdirectory. | Fails with a specific message for each reason (already exists, invalid name, parent missing, disk full — the kernel returns distinct `FS_ERR_*` codes now). Grows a full parent directory by a cluster automatically (as do `touch`/`write`/`cp`/`mv` when creating entries). |
@@ -71,14 +73,17 @@ implement a completely different command set.
 | `touch` | `touch <file>` | Creates an empty (zero-byte) file, or succeeds silently if one already exists there. | There's no RTC on this kernel, so unlike real `touch`, an existing file's "timestamp" isn't updated — nothing happens, successfully. Fails if the target is a directory. |
 | `rm` | `rm <file>` | Removes a file. | Fails if it doesn't exist or is a directory — use `rmdir` for those. |
 | `write` | `write <file> [words...]` | Joins every word after the filename with a single space (same style as `echo`) and writes the result as the file's *entire* contents, replacing whatever was there. Creates the file if it doesn't exist. | `write <file>` with no words truncates the file to empty (a real, valid case, not an error). Fails if the target is an existing directory or the parent is missing. |
-| `cp` | `cp <src> <dst>` | Copies `src`'s contents to `dst`, creating `dst` if it doesn't exist or replacing it if it does. | Reads `src` fully into a 512-byte buffer (the kernel's per-syscall cap) before writing anything to `dst`, so copying a file onto itself is safe. Refuses (rather than truncating) if `src` is larger than that buffer. No recursive directory copy. |
+| `cp` | `cp <src> <dst>` | Copies `src`'s contents to `dst`, creating `dst` if it doesn't exist or replacing it if it does. | Reads `src` fully into a 512-byte buffer (the ABI's per-buffer cap) before writing anything to `dst`, so copying a file onto itself is safe. Refuses (rather than truncating) if `src` is larger than that buffer. No recursive directory copy. |
 | `ps` | `ps` | One line per scheduler slot: `unused`, `runnable`, `blocked (waiting)`, or `` exited - `wait` to collect its status `` (a zombie holding its slot). | The caller can't distinguish "running right now" from "runnable" — it is, by definition, the one running when it asks. Output is redirectable like any other command's. |
-| `kill` | `kill <n>` | Destroys task `n` (see `ps` for numbers). | Tasks 0 (this shell) and 1 (idle) are protected. A killed task's slot becomes spawnable again and its memory is reclaimed when allocation order allows. |
+| `kill` | `kill <n>` | Destroys task `n` (see `ps` for numbers). | Tasks 0 (this shell), 1 (idle), and 2 (the filesystem server) are protected. A killed task's slot becomes spawnable again and its memory is reclaimed when allocation order allows. |
 | `fg` | `fg <n>` | Hands the keyboard to task `n` — e.g. `exec /EFI/ORBS/SH.BIN` then `fg 2` gives a real nested shell session; its `exit` hands the keyboard back. | **Ctrl+C is the escape hatch**: typed while another task owns the keyboard, the kernel reclaims it for this shell (the foregrounded task keeps running in the background — Ctrl+C is keyboard reclamation, not a signal; `kill` the task if it should die too). Ownership also reverts automatically when the foregrounded task exits or is killed. While this shell owns the keyboard, Ctrl+C (like every unhandled control byte) is ignored by the line editor. |
 | `send` | `send <n> <words...>` | Sends the words (space-joined, like `write`) as one IPC message (≤64 bytes) to task `n`'s mailbox. | Fails distinctly for a missing task, an over-long message, or a full mailbox (4 pending max). A dead task's queued mail dies with it. |
 | `recv` | `recv` | Blocks until a message arrives and prints `task N: <message>`. | Ctrl+C interrupts, like `wait`; typing during a blocked `recv` is otherwise discarded. |
-| `wait` | `wait <n>` | Blocks until task `n` dies, then reports its exit status — which is also what *reaps* it (an exited task holds its slot as a zombie, shown by `ps`, until waited). | Ctrl+C interrupts the wait (the task keeps running); any other typing during a wait is discarded, like typing at a busy foreground job in `sh`. Waiting on tasks 0/1 or yourself is refused. **Behavior change from earlier builds:** an un-waited exited task holds its slot — `exec` something three times without waiting and the third fails with "no free task slot" until you `wait` (or the task is `kill`ed, which reaps immediately). |
+| `wait` | `wait <n>` | Blocks until task `n` dies, then reports its exit status — which is also what *reaps* it (an exited task holds its slot as a zombie, shown by `ps`, until waited). | Ctrl+C interrupts the wait (the task keeps running); any other typing during a wait is discarded, like typing at a busy foreground job in `sh`. Waiting on tasks 0-2 or yourself is refused (they never die). **Behavior change from earlier builds:** an un-waited exited task holds its slot — `exec` something three times without waiting and the third fails with "no free task slot" until you `wait` (or the task is `kill`ed, which reaps immediately). |
 | `exit` | `exit` | Asks the kernel to destroy this task (`exit` syscall). | Always refused for the boot shell itself (it's the sole keyboard owner - the kernel returns `EXIT_DENIED` and the shell prints why); exists as the reference for how a replacement/spawned program ends itself. `hello/` (`exec /EFI/ORBS/HELLO.BIN`) demonstrates a successful exit. |
+| `exec` | `exec <path>` | Loads the program at `path` and starts it as a new, independent task alongside this shell (see `ps`) — spawn semantics, not exec-replaces-current-process. | Reads the program via the filesystem server in 512-byte chunks, stages them into the kernel, then spawns (see `architecture.md`'s "Dynamic task creation"). Fails with the specific reason: no such file, is a directory, not a loadable program (bad ELF), too large, or no free task slot (two spawnable slots, 3-4). |
+| `mount` | `mount` | Makes a USB storage stick's FAT32 filesystem available — the Parallels workflow: passthrough USB attaches a few seconds *after* boot, so boot, wait a moment, then `mount`. | Two halves under the hood: the filesystem server first retries mounting whatever block device the kernel already holds; only if that yields nothing does the kernel rescan the USB ports and install a found stick as a *replacement* device (safe exactly because nothing is mounted), then the server mounts it. An unmountable boot-time disk (e.g. `make run`'s FAT16) therefore never blocks a later stick. |
+| `selftest` | `selftest` | Exercises the two historically-crashing code patterns (`write!`/`core::fmt` formatting, slice/str-vs-literal comparison) and prints pass/fail lines. | The relocating loader's permanent acceptance test — see `processes.md`'s "Binary format". |
 | `mv` | `mv <src> <dst>` | Renames or moves a file or directory to `dst` — and if `dst` is an existing directory, moves `src` *into* it keeping its basename (`mv notes.txt backup/`), like real `mv`. | A `dst` that exists and isn't a directory still fails rather than being overwritten. `mv x x` is refused ("source and destination are the same"). Moving a directory to a different parent correctly updates its own `..` entry, so `cd ..` inside it still resolves to the *new* parent afterward. No cycle detection beyond the trivial self-move guard. |
 
 Any other input prints `unknown command: <word>`. A blank line (just
@@ -138,18 +143,16 @@ Limits, all refuse-outright rather than write-something-wrong:
   the 128-byte input line, so nothing typed at the shell can ever
   exceed one FAT32 cluster's worth of content; `cp` is bounded by its
   own 256-byte read buffer instead.
-- **`mv` has no move-into-an-existing-directory-keeping-basename
-  shortcut** (real `mv`'s most common everyday case beyond a plain
-  rename) and no cycle detection (moving a directory into its own
-  descendant isn't guarded against).
-- **Every filesystem error beyond "no mounted filesystem" collapses to
-  one generic message per command** (e.g. `mkdir`'s "already exists, bad
-  name, parent missing, or disk full" covers four genuinely different
-  failures) — the underlying syscalls report only two sentinel values,
-  not a specific reason. See `architecture.md`'s syscall table.
+- **`mv` has no cycle detection** beyond the trivial self-move guard
+  (moving a directory into its own descendant isn't prevented).
+- **Every filesystem failure prints its specific reason** ("already
+  exists", "no such file or directory", "disk full", ...) — the
+  filesystem server returns one named `FS_ERR_*` code per real cause
+  (see `architecture.md`'s protocol notes), decoded by one shared
+  message table in the shell.
 - **`cd ..` from `/` stays at `/`** rather than erroring — a minor,
   deliberate rough edge, not a bug.
-- **Disk-command pointer/length arguments are trusted by the kernel, not
-  validated** against this program's actual mapped region — fine while
-  this is the only, trusted userland program (see `processes.md`'s
-  "known rough edges").
+- **Buffer pointers are trusted, not validated** — by the kernel for
+  syscall arguments and by the filesystem server for the pointers
+  embedded in its requests — fine while every userland program is
+  trusted (see `processes.md`'s "known rough edges").

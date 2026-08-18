@@ -168,6 +168,20 @@ Consequences of "real ELF, real relocations, but still narrowly scoped
   never gets linked in. `make shell-bin` already does this — replicate
   it (`cargo build -p <your-crate> --target aarch64-unknown-none
   --release`) for any new program.
+- **Some libcore code paths break the link even in `--release` — a
+  small, growing list of known instances of the same underlying
+  constraint.** Confirmed cases: `&str[a..b]` range slicing of a `str`
+  (its out-of-bounds panic path, `slice_error_fail`, formats the
+  offending string — use non-panicking `.get(a..b)` instead; found
+  during the output-redirection milestone), and `str::rfind` with a
+  `char` pattern (pulls libcore's `memrchr`, whose prebuilt non-PIC
+  object carries `R_AARCH64_ABS64` relocations outright — use a manual
+  reverse byte scan; found porting `fat32.rs` into the filesystem
+  server). Byte-slice (`[u8]`) indexing, `find`/forward `memchr`,
+  `copy_from_slice`, and `core::fmt` itself are all confirmed fine.
+  The failure is loud (a link error naming `R_AARCH64_ABS64`), never
+  silent — when you hit a new one, replace the libcore call with a
+  hand-rolled equivalent and add it to this list.
 - **`core::fmt` (`write!`, `{}` formatting) is safe now — confirmed,
   not just reasoned about.** Historically unsafe here for the identical
   reason the old flat loader made *any* absolute data pointer unsafe
@@ -226,44 +240,31 @@ immediately, resuming with the byte once one arrives; see
 actually works), and `putc` (`PUTC`, one raw byte, no newline
 translation) cover interactive I/O; `get_ticks` (`GET_TICKS`, added for
 phase 2's `uptime` builtin) is the pattern to follow whenever a command
-needs real kernel state it can't get any other way. `fs_list_dir`/
-`fs_read_file` (`FS_LIST_DIR`/`FS_READ_FILE`, added for phase 3c's disk
-commands) are the first syscalls needing more than one argument — a path
-pointer/length and a buffer pointer/length at once — which is why the
-syscall ABI itself supports up to 4 arguments (`x0`-`x3`), not just one.
-`fs_mkdir`/`fs_rmdir` (`FS_MKDIR`/`FS_RMDIR`, added for phase 4) are the
-first syscalls that write to disk, `fs_touch`/`fs_rm`
-(`FS_TOUCH`/`FS_RM`, added for phase 5) round out file lifecycle the
-same way — each of these four takes just a path pointer/length, no
-output buffer — and `fs_write_file` (`FS_WRITE_FILE`, added for phase 6)
-is the first syscall able to give a file more than zero bytes, taking a
-second pointer/length pair (`data ptr`, `data len`) the same shape as
-`fs_list_dir`/`fs_read_file`'s buffer argument, except as *input* rather
-than output. Its `data len` may legitimately be `0` (truncating a file
-to empty) — the one `(pointer, length)` pair in this whole ABI where a
-zero length is valid rather than rejected; see
-`architecture.md`'s syscall table for `valid_user_range_allow_empty`,
-the real bug this required fixing. `fs_mv` (`FS_MV`, added for phase 8)
-takes two path pointer/length pairs (`src`, `dst`) and reuses the moved
-item's existing cluster chain rather than reading and rewriting its
-content. `spawn` (`SPAWN`, 16) takes a single path pointer/length pair
-(same shape as `fs_mkdir`/`fs_touch`) and loads that path as a new,
-independent task rather than doing anything with its file content
-directly — see `docs/architecture.md`'s "Dynamic task creation" section.
-It shares the `NO_FS` sentinel with the `fs_*` syscalls, but its own
-failure sentinel is a separate, named constant, `SPAWN_ERROR` (same bit
-pattern as `FS_ERROR`, `u64::MAX`, but named separately since spawning a
-program and reading/writing a file are different operations that just
-happen to fail the same collapsed way). All eight `fs_*` syscalls share two
-distinct failure sentinels: `FS_ERROR` (`u64::MAX`) for "mounted, but
-this operation failed" (a program still can't tell "already exists"
-from "disk full" within that — see `CLAUDE.md`'s "Phase 4"/"Phase
-5"/"Phase 6" sections) and `NO_FS` (`u64::MAX - 1`) specifically for "no
-filesystem is mounted this boot" — added after real testing showed every
-disk command failing
-identically on `make run` (FAT16) looked like a broken path rather than
-"nothing's mounted," with the real cause visible only in the kernel's
-own boot log. A userland program makes these directly via `svc`:
+needs real kernel state it can't get any other way.
+
+**File operations are not syscalls anymore** — they're IPC requests to
+the filesystem server (`fsd/`, task 2), sent as `FSOP_*` messages via
+`msg_call` (see `docs/architecture.md`'s "The filesystem server" and
+the protocol notes under its syscall table). The old eight `fs_*`
+syscalls' numbers (7-14) are deliberate gaps now; their exact contracts
+survive unchanged as the protocol ops, and the shell's `fs_call`/
+`fs_list_dir`/`fs_read_file`/... wrapper functions
+(`shell/src/main.rs`) are the reference client to copy — each is one
+56-byte request (op + six little-endian u64 args, pointers into your
+own buffers) and one u64 reply carrying the old return-value semantics.
+Two failure values every client should know: `NO_FS` (`u64::MAX - 1`)
+means no filesystem is available (nothing mounted, or no server loaded
+this boot — the wrappers fold `msg_call`'s no-such-task answer into it),
+and any value `>= FS_ERR_MIN` is an error, with one named `FS_ERR_*`
+code per real reason (not found, already exists, disk full, ...).
+
+`spawn` (`SPAWN`, 16) starts a staged program image as a new,
+independent task — since the kernel has no filesystem, the caller first
+reads the program via the server (`FSOP_READ_AT`, 512 bytes per round
+trip) and feeds each chunk through `spawn_stage` (30) into the kernel's
+staging buffer; see the shell's `cmd_exec` for the reference flow and
+`docs/architecture.md`'s "Dynamic task creation" section for the
+kernel-side mechanics. A userland program makes these directly via `svc`:
 
 ```rust
 #[inline(always)]
@@ -367,11 +368,12 @@ Worth knowing before building further on this:
   the runtime allocator's reclaim is LIFO-or-leak (a bump cursor, not
   a free list), so pathological spawn/exit orderings can still strand
   regions for the rest of the boot.
-- **Fixed 4-task scheduler.** `tasks.rs` now has four slots (up from
-  two) - task 0 (the boot-loaded shell) and task 1 (idle) are permanent,
-  slots 2 and 3 start `Unused` and are filled by `spawn`. Once all four
-  are in use, a further `exec` fails with `SPAWN_ERROR` (no free slot)
-  rather than growing the scheduler further.
+- **Fixed 5-task scheduler.** `tasks.rs` has five slots - tasks 0 (the
+  boot-loaded shell), 1 (idle), and 2 (the filesystem server's reserved
+  slot) are permanent; slots 3 and 4 start `Unused` and are filled by
+  `spawn`. Once both spawnable slots are in use, a further `exec` fails
+  with `SPAWN_ERR_NO_FREE_SLOT` rather than growing the scheduler
+  further.
 - **No heap for userland programs**, and no `.bss`, so no static mutable
   state at all — every program is constrained to stack-local state, same
   as the shell.
@@ -391,15 +393,13 @@ Worth knowing before building further on this:
   literal~~ - both safe now, confirmed via the shell's `selftest`
   builtin.** See "Binary format" above for what actually fixed this
   (real relocation processing, not a coding convention to remember).
-- **Disk-command pointer/length arguments are trusted, not validated.**
-  `fs_list_dir`/`fs_read_file`/`fs_mkdir`/`fs_rmdir`/`fs_touch`/`fs_rm`/
-  `fs_write_file`/`fs_mv` dereference the caller's `(pointer, length)`
-  pairs directly, checked only against a minimal sanity bound
-  (`syscall.rs::valid_user_range`, or `valid_user_range_allow_empty` for
-  `fs_write_file`'s data argument specifically) — not against the
-  calling program's actual mapped region. Fine with exactly one,
-  currently-trusted userland program; a real gap once that stops being
-  true.
+- **Pointer/length arguments are trusted, not validated** - by the
+  kernel (`syscall.rs::valid_user_range` is a minimal sanity bound, not
+  a check against the caller's actual mapped region) and by the
+  filesystem server alike (an `FSOP_*` request's embedded pointers are
+  dereferenced directly, the same trust model one level up - see
+  `fsd/src/main.rs`'s module doc comment). Fine while every userland
+  program is trusted; a real gap once that stops being true.
 - **Write support (phases 4-8) covers directories, files with real
   content, copying, and renaming/moving, but every write fully replaces
   a file rather than appending or writing at an offset.** No recursive
@@ -415,13 +415,13 @@ Worth knowing before building further on this:
   redirection" sections). A parent directory that's out of free
   entry slots is grown by a cluster automatically (`insert_dir_entry`'s
   extension — directories never *shrink*, though: an emptied extension
-  cluster stays linked until the directory is removed). Every `fs_*` syscall
-  now returns a specific `FS_ERR_*` code for every failure reason
+  cluster stays linked until the directory is removed). Every filesystem
+  operation returns a specific `FS_ERR_*` code for every failure reason
   ("already exists", "disk full", "invalid name", ... — a reserved top
-  band `>= FS_ERR_MIN` in `syscall-abi`, mapped from `fat32::Error` by
-  `syscall.rs::fs_error_code`), alongside the existing `NO_FS`
-  distinction — the old one-collapsed-sentinel gap is closed. `spawn`'s
-  own sentinel remains collapsed (a separate, smaller gap). See `CLAUDE.md`'s "Phase 4" through "Phase 8"
+  band `>= FS_ERR_MIN` in `syscall-abi`, mapped from the server's
+  `fat32::Error` by `fsd/src/main.rs::error_code`), alongside the
+  existing `NO_FS` distinction — the old one-collapsed-sentinel gap is
+  closed, and `spawn`'s codes are split the same way. See `CLAUDE.md`'s "Phase 4" through "Phase 8"
   sections. **This closes the write-support arc phase 3 deliberately
   deferred** - what's left in the parking lot from here is genuinely
   bigger work, not more commands of this shape.

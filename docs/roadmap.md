@@ -392,7 +392,27 @@ phase:
   userland program, a real long-lived echo server) round-tripping
   messages with the shell on QEMU, and the error/interrupt paths on
   real Parallels hardware. **Part 2 — the first component actually
-  moved — is the userland FAT32 filesystem server** (MINIX-style:
-  pure logic, no MMIO/DMA — hardware drivers can't be meaningfully
-  isolated without an IOMMU anyway), speaking this IPC to clients and
-  new raw block syscalls to the kernel. Not yet scoped in detail.
+  moved — is done too (2026-08-18): the FAT32 filesystem lives in
+  userland** (MINIX-style: pure logic, no MMIO/DMA — hardware drivers
+  can't be meaningfully isolated without an IOMMU anyway). `fsd/` (the
+  fifth userland program) owns the kernel's old `fat32.rs` essentially
+  verbatim, boot-loaded into protected task slot 2; clients reach it
+  via a synchronous `MSG_CALL` round trip (new syscall 29: direct
+  delivery plus a reply-sender filter, MINIX-sendrec-shaped) carrying
+  `FSOP_*` requests whose contracts are the old `fs_*` syscalls'
+  verbatim; the kernel keeps only raw sector access
+  (`BLOCK_INFO`/`BLOCK_READ`/`BLOCK_WRITE`, syscalls 26-28, accepted
+  from task 2 alone — the "supervised" part), and syscalls 7-14 are
+  numbering gaps now. `spawn` became a two-step staged flow (the
+  kernel can't read a path anymore; `exec` reads via the server and
+  feeds `SPAWN_STAGE`), and `mount` a server-first two-phase flow with
+  device replacement. Confirmed end to end on QEMU (full disk surface
+  over IPC, chunked exec, reboot persistence, FAT16 and
+  missing-FSD.BIN degradation, the USB replace flow) and on real
+  Parallels hardware (the whole mount → INQUIRY → server-side FAT32
+  mount → `ls` of the real stick chain; reads only by policy). See
+  `CLAUDE.md`'s userland-filesystem section. **What's next in this
+  direction** (not yet scoped): server restart/supervision (a wedged
+  fsd means no disk until reboot), moving further components, and
+  per-task memory protection to make the isolation enforced rather
+  than trust-based.

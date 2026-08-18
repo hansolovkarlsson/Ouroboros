@@ -70,8 +70,8 @@ make run-gicv3       # forces GICv3 instead of QEMU's default GICv2
 ```
 
 The one everyday gotcha: **`make run`'s disk is FAT16** (an artifact of
-QEMU's vvfat driver), which the kernel's FAT32-only reader can't mount
-— every disk command prints a shared "no filesystem mounted this boot"
+QEMU's vvfat driver), which the FAT32-only filesystem server can't
+mount — every disk command prints a shared "no filesystem mounted"
 message there. Use `make run-image` whenever you want `ls`/`cat`/
 `exec`/etc. to actually work.
 
@@ -176,31 +176,39 @@ statuses). `NO_FS` (`MAX-1`) means no filesystem is mounted this boot.
 | 4 | `putc` | byte | Raw console byte write |
 | 5 | — | | *Deliberate gap (removed `shell_input`; ABI stability over density)* |
 | 6 | `get_ticks` | — | Preemption tick count since boot |
-| 7 | `fs_list_dir` | path ptr/len, buf ptr/len | Directory listing (`name\n`, `name/\n`) |
-| 8 | `fs_read_file` | path ptr/len, buf ptr/len | Read a file; returns its *real* size (compare to detect truncation) |
-| 9 | `fs_mkdir` | path ptr/len | Create a directory (grows a full parent automatically) |
-| 10 | `fs_rmdir` | path ptr/len | Remove an empty directory |
-| 11 | `fs_touch` | path ptr/len | Create an empty file (no-op if it exists) |
-| 12 | `fs_rm` | path ptr/len | Remove a file |
-| 13 | `fs_write_file` | path ptr/len, data ptr/len | Create/fully replace a file's contents (zero-length data = truncate) |
-| 14 | `fs_mv` | src ptr/len, dst ptr/len | Rename/move (relinks the cluster chain; no content copy) |
+| 7–14 | — | | *Deliberate gaps: the old `fs_*` syscalls — the filesystem lives in userland now (the fsd server); their contracts survive as the `FSOP_*` request protocol below* |
 | 15 | `read_char` | — | Blocking read: the task is suspended until a byte arrives |
-| 16 | `spawn` | path ptr/len | Load a program from disk as a new task alongside the caller |
-| 17 | `exit` | code | Destroy the calling task; status kept (masked to 0–255) until `wait`ed. Tasks 0/1 refused (`EXIT_DENIED`) |
+| 16 | `spawn` | staged total len | Start a program image previously fed in via `spawn_stage` as a new task alongside the caller |
+| 17 | `exit` | code | Destroy the calling task; status kept (masked to 0–255) until `wait`ed. Tasks 0–2 refused (`EXIT_DENIED`) |
 | 18 | `task_state` | index | `UNUSED`/`RUNNABLE`/`BLOCKED`/`ZOMBIE`, or `TASK_STATE_INVALID` past the last slot |
-| 19 | `kill` | index | Destroy another task (reaps immediately). Tasks 0/1 protected |
+| 19 | `kill` | index | Destroy another task (reaps immediately). Tasks 0–2 protected |
 | 20 | `fg` | index | Hand keyboard ownership to a task (auto-reverts to task 0 on the owner's death, or on Ctrl+C) |
 | 21 | `wait` | index | Block until the task dies; returns its status (0–255), `TASK_KILLED_STATUS` (0x100), or `WAIT_INTERRUPTED` (Ctrl+C). Collecting the status reaps the slot |
-| 22 | `mount` | — | Rescan the USB ports and mount a storage device's FAT32 (`0`, `MOUNT_ALREADY`, or `MOUNT_NO_DEVICE`) — the Parallels disk path |
-| 23 | `msg_send` | dest, buf ptr/len | IPC: copy a message (≤64 bytes) into a task's bounded mailbox |
+| 22 | `mount` | replace flag | Rescan the USB ports and install a storage device as the kernel's block device (`0`, `MOUNT_ALREADY`, or `MOUNT_NO_DEVICE`) — the device half; the FS half is the server's `FSOP_MOUNT` |
+| 23 | `msg_send` | dest, buf ptr/len | IPC: deliver a message (≤64 bytes) — straight into a matching blocked receiver's buffer (direct delivery), or into the task's bounded mailbox |
 | 24 | `msg_recv` | buf ptr/len | Block until a message arrives; returns `(sender << 32) \| len`, or `RECV_INTERRUPTED` on Ctrl+C |
 | 25 | `msg_try_recv` | buf ptr/len | Non-blocking receive; `NO_MSG` when empty |
+| 26 | `block_info` | — | Block-device capacity in sectors — **task 2 (the fsd server) only**, like all three `block_*` syscalls |
+| 27 | `block_read` | LBA, buf ptr | Read one 512-byte sector (fsd only) |
+| 28 | `block_write` | LBA, buf ptr | Write one 512-byte sector (fsd only) |
+| 29 | `msg_call` | dest, req ptr/len, reply ptr | Synchronous request/response: send + block for a reply *from `dest` specifically*; sub-tick round trips via direct delivery. Reply buffer is a fixed 64 bytes |
+| 30 | `spawn_stage` | offset, chunk ptr/len | Feed one chunk of a program image into the kernel's 128KB staging buffer for `spawn` |
+
+**File operations** are `FSOP_*` requests to the filesystem server
+(task 2), sent via `msg_call`: a 56-byte message (op + six LE u64
+args — pointers into your own buffers), one u64 reply with the old
+syscalls' exact return semantics. Ops: `LIST_DIR`, `READ_FILE`,
+`READ_AT` (windowed read at an offset), `WRITE_FILE`, `MKDIR`,
+`RMDIR`, `TOUCH`, `RM`, `MV`, `MOUNT`. The shell's `fs_call` wrapper
+(`shell/src/main.rs`) is the reference client.
 
 Filesystem failures return a specific `FS_ERR_*` code (`NOT_FOUND`,
 `NOT_A_FILE`, `NOT_A_DIRECTORY`, `INVALID_NAME`, `ALREADY_EXISTS`,
 `NOT_EMPTY`, `IS_ROOT`, `DISK_FULL`, `IO`); `spawn` adds
 `SPAWN_ERR_BAD_ELF`/`SPAWN_ERR_TOO_LARGE`/`SPAWN_ERR_NO_FREE_SLOT`;
-the task syscalls add `TASK_ERR_NO_SUCH_TASK`/`TASK_ERR_PROTECTED`.
+the task syscalls add `TASK_ERR_NO_SUCH_TASK`/`TASK_ERR_PROTECTED`;
+the block syscalls add `BLOCK_ERR_NO_DEVICE`/`BLOCK_ERR_IO`/
+`BLOCK_ERR_DENIED`.
 
 ## Writing your own program
 

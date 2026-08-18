@@ -87,8 +87,9 @@ tables it walks. Two coarse block kinds cover almost everything:
 | Device | `0x0`–`0x3FFF_FFFF` (fixed low 1GB) | Device-nGnRnE, non-executable |
 | RAM | Whatever the UEFI memory map reports as general RAM | Normal WB, executable, EL1-only |
 
-Within RAM, up to two small regions get finer-grained (4KB page) EL0
-access instead of the default EL1-only 2MB/1GB blocks — one per EL0 task.
+Within RAM, up to five small regions get finer-grained (4KB page) EL0
+access instead of the default EL1-only 2MB/1GB blocks — one per EL0 task
+(boot shell, idle, filesystem server, and two spawnable slots).
 See [`processes.md`](processes.md) for how those regions are sized and
 placed, and `mmu.rs`'s own module doc comment for the full mechanics
 (including two real bugs that shaped this design: a starting-level
@@ -120,16 +121,16 @@ running touches them), a real limitation for whatever runs next.
 
 ## Process model
 
-`tasks.rs` implements round-robin scheduling among up to `NUM_TASKS` (4)
+`tasks.rs` implements round-robin scheduling among up to `NUM_TASKS` (5)
 EL0 task slots — no priorities, no queue. Every task is either `Unused`,
-`Runnable`, or `Blocked(reason)`; the scheduler only ever picks among the
-runnable ones, and `Unused` slots are simply skipped. Two things move
-execution from one task to another: the timer tick catching the current
-task mid-execution and switching to the next runnable one (`on_tick`),
-and a blocking syscall (currently just `read_char`, see the syscall table
-above) suspending its own caller immediately and switching away
-mid-syscall (`block_current_and_switch`) rather than waiting for the next
-tick.
+`Runnable`, `Blocked(reason)`, or `Zombie(status)`; the scheduler only
+ever picks among the runnable ones. Two things move execution from one
+task to another: the timer tick catching the current task mid-execution
+and switching to the next runnable one (`on_tick`), and a blocking
+syscall (`read_char`, `wait`, `msg_recv`, `msg_call` — see the syscall
+table below) suspending its own caller immediately and switching away
+mid-syscall (`block_current_and_switch`) rather than waiting for the
+next tick.
 
 - **Task 0** runs whatever program `loader.rs` loaded from disk — see
   [`processes.md`](processes.md).
@@ -139,9 +140,45 @@ tick.
   module doc comment), so idling is a real spin, not an architectural
   `wfe` wait, and blocking syscalls are built the same way for the same
   reason (see below) rather than having a task call `wfe` itself.
-- **Task slots 2 and 3** start `Unused` and are filled by `tasks::spawn`
-  when the `spawn` syscall loads a further program from disk at runtime
-  (the shell's `exec <path>` command) — see "Dynamic task creation" below.
+- **Task 2** is reserved for the filesystem server (`fsd/`, boot-loaded
+  from `\EFI\ORBS\FSD.BIN` — see "The filesystem server" below). It
+  stays `Unused` if no FSD.BIN exists, and `spawn` never fills it: the
+  slot is block-syscall-privileged, so a spawned program landing there
+  would inherit the server's disk access.
+- **Task slots 3 and 4** start `Unused` and are filled by `tasks::spawn`
+  when the `spawn` syscall starts a further program at runtime (the
+  shell's `exec <path>` command) — see "Dynamic task creation" below.
+
+### The filesystem server (`fsd/`) — the first component moved out of the kernel
+
+The FAT32 filesystem lives in userland (driver isolation part 2, the
+MINIX-style first move — pure logic, no MMIO/DMA, which couldn't be
+meaningfully isolated without an IOMMU anyway). The split:
+
+- **The kernel keeps the device**: `virtio_blk.rs`/`usb_msd.rs` and the
+  `BlockDevice` enum stay kernel-side, held in `syscall.rs`'s block
+  cell. Three syscalls (`block_info`/`block_read`/`block_write`) expose
+  it one 512-byte sector at a time — **only to task 2** (any other
+  caller gets `BLOCK_ERR_DENIED`), which is the "supervised" in
+  "supervised EL0 process".
+- **The server owns the filesystem**: `fsd/src/fat32.rs` is the
+  kernel's old module, moved essentially verbatim (its `BlockDevice`
+  became a zero-sized shim over the `block_*` syscalls). The mounted
+  state lives in the server's own stack frame — userland programs have
+  no static mutable state, and the server is one infinite request loop
+  that never returns.
+- **Clients speak IPC**: requests are `FSOP_*` messages (see the
+  syscall table's protocol section below), normally via `msg_call`'s
+  synchronous round trip. The shell's `fs_*` wrapper functions are the
+  reference client; every disk command, redirect, and `exec`'s program
+  loading flows through them.
+
+A missing FSD.BIN degrades gracefully: the kernel logs a warning at
+boot, slot 2 stays `Unused`, and every request fails with
+`TASK_ERR_NO_SUCH_TASK` — which the shell reports with its ordinary
+no-filesystem message. A wedged or crashed server means no disk until
+reboot (there's no restart/supervision mechanism yet); Ctrl+C rescues a
+client blocked in a call to it.
 
 ### Dynamic task creation (`spawn`/`exec`)
 
@@ -151,10 +188,16 @@ running — this is `tasks::spawn`, not POSIX exec-replaces-current-process
 semantics. The shell command is named `exec` to match
 `docs/roadmap.md`'s original wording for this item, but nothing about
 the calling task is replaced or stopped; it keeps running, and the new
-program becomes a new, independent task in whichever slot is `Unused`.
+program becomes a new, independent task in whichever spawnable slot
+(3-4) is `Unused`.
 
-The kernel-side pieces, in the order the `spawn` syscall (16) exercises
-them:
+Since the filesystem moved to userland, "loads from disk" is a
+two-step, client-driven flow: the shell reads the program via the
+filesystem server (`FSOP_READ_AT`, 512 bytes per round trip), feeds
+each chunk into the kernel's 128KB staging buffer (`spawn_stage`, 30),
+and only then invokes `spawn` (16) with the staged total — the kernel
+itself can't read a path anymore. The kernel-side pieces, in the order
+the `spawn` syscall then exercises them:
 
 1. **A runtime physical-page bump allocator** (`tasks::allocate_runtime_region`)
    — `boot::allocate_pages` (what `loader.rs` uses for task 0 at boot) is
@@ -218,29 +261,31 @@ like a genuine background task with no input, not a second terminal
 racing the first, but it also has no way to *become* the owner without a
 future `fg`/job-control mechanism this kernel doesn't have yet.
 
-**Real Parallels hardware confirmation:** the `spawn` syscall's error
-paths (missing argument, bad path, `NO_FS`) are confirmed working on
-real hardware — but the actual *success* path (a second program loading
-and running) is not, because Parallels has no working disk driver at
-all yet (see "What's not here yet" below and `CLAUDE.md`'s "Next
-milestone" — virtio-blk simply isn't present on Parallels over any
-transport this project can drive). This is a pre-existing gap this
-feature inherits, not one it introduces; every other piece this feature
-touches (the `mmu.rs` generalization, the stashed memory map, the
-4-slot scheduler) is exercised on real hardware by ordinary boot and
-shell use, which continues to work correctly.
+**Real Parallels hardware confirmation:** the full flow — including the
+success path, a second program really loading from disk and running —
+is confirmed on real hardware, via the USB mass-storage path (`mount` a
+passed-through stick holding the program binaries; see `CLAUDE.md`'s
+"Driver isolation, part 1" section for the first such run, and the
+userland-filesystem milestone for the same flow through the fsd
+server).
 
 **Blocking primitives.** A task that has nothing to do until some
-condition holds (today: a keyboard byte becoming available) can block
-instead of busy-polling. `on_tick` runs a wake-check every tick before
-its normal scheduling decision: for each blocked task, it evaluates that
-task's wait reason, and if satisfied, stashes the resulting value into
-the task's saved context (`x0`) and marks it runnable again — the task
-resumes exactly where its blocking syscall left off, with the value
-already in hand, indistinguishable from the syscall having simply
-returned it. Worst-case wake latency is one tick period, the same bound
-this kernel's keyboard input has always had. The shell's main loop uses
-this (`read_char`) instead of the busy-poll it used before — see
+condition holds (a keyboard byte arriving, another task exiting, a
+message arriving — `WaitReason::Keyboard`/`TaskExit`/`Message`) can
+block instead of busy-polling. `on_tick` runs a wake-check every tick
+before its normal scheduling decision: for each blocked task, it
+evaluates that task's wait reason, and if satisfied, stashes the
+resulting value into the task's saved context (`x0`) and marks it
+runnable again — the task resumes exactly where its blocking syscall
+left off, with the value already in hand, indistinguishable from the
+syscall having simply returned it. Worst-case wake latency from the
+tick path is one tick period — but message delivery doesn't wait for
+it: `tasks::send_message` *directly delivers* to a destination already
+blocked in a matching message wait (copy into its buffer, stash its
+`x0`, mark it runnable), the eager version of the wake-check's own
+logic, which is what makes `msg_call`'s synchronous round trips — and
+therefore every filesystem operation — sub-tick. The shell's main loop
+uses `read_char` instead of the busy-poll it used before — see
 `shell/src/main.rs`'s `main` for the current shape.
 
 The tick period is 20ms (`timer::TICK_INTERVAL_MS`) — short specifically
@@ -254,12 +299,13 @@ unconditional round-robin scheduling would predict.
 Convention: syscall number in `x8`, up to 4 arguments in `x0`-`x3`, return
 value in `x0` — chosen to match Linux's shape (a reasonable default for a
 "POSIX-ish" project), not for ABI compatibility with anything. Grew from
-1 argument to 4 for phase 3c's file-I/O syscalls, which need a path
+1 argument to 4 for phase 3c's file-I/O syscalls, which needed a path
 pointer/length and a buffer pointer/length at once — see
 `exceptions.rs`'s module doc comment for how the SVC trampoline marshals
-them. `fs_mkdir`/`fs_rmdir` (9/10, phase 4) are the first syscalls this
-kernel exposes that actually write to disk — see `fat32.rs`/
-`virtio_blk.rs` for the write path underneath them. Every number and
+them. The eight `fs_*` syscalls that motivated that growth are gone
+again (numbers 7–14 are deliberate gaps now): the filesystem lives in
+userland (the `fsd/` server — see "The filesystem server" below), and
+file operations are IPC requests to it, not syscalls. Every number and
 sentinel in the table below is a constant in the `syscall-abi` crate
 (`syscall-abi/src/lib.rs`), not a bare literal — both
 `kernel/src/syscall.rs`'s dispatch table and `shell/src/main.rs` depend
@@ -275,63 +321,57 @@ the way hand-duplicated numbers did before this crate existed.
 | 4 | `putc` | a byte | `0` | Raw single-byte console write, no newline translation |
 | *5* | *(gap)* | | | `shell_input` used to live here; removed when line editing moved into userland. Left unfilled rather than renumbered — see `syscall.rs`'s module doc comment |
 | 6 | `get_ticks` | ignored | preemption tick count since boot | Added for phase 2's `uptime` builtin — the first syscall added specifically so a loaded program could read real kernel state, not just I/O |
-| 7 | `fs_list_dir` | path ptr, path len, buf ptr, buf len | bytes written, `NO_FS`, or an `FS_ERR_*` code | Formats each entry as `name\n`/`name/\n`, truncating rather than erroring if `buf` is too small. Every `fs_*` error value lives in a reserved top band (`>= FS_ERR_MIN`, `syscall-abi`) — one named code per real failure reason (`FS_ERR_NOT_FOUND`, `FS_ERR_ALREADY_EXISTS`, `FS_ERR_DISK_FULL`, ...), mapped from `fat32::Error` by `syscall.rs::fs_error_code`; `FS_ERROR` (`u64::MAX`) remains only as the generic fallback for argument-validation rejections |
-| 8 | `fs_read_file` | path ptr, path len, buf ptr, buf len | the file's real size (may exceed `buf`'s length — compare to detect truncation), `NO_FS`, or an `FS_ERR_*` code | |
-| 9 | `fs_mkdir` | path ptr, path len | `0`, `NO_FS`, or an `FS_ERR_*` code | Creates an empty directory; the specific code says why it failed (see row 7's note) |
-| 10 | `fs_rmdir` | path ptr, path len | `0`, `NO_FS`, or an `FS_ERR_*` code | Removes an empty directory |
-| 11 | `fs_touch` | path ptr, path len | `0`, `NO_FS`, or an `FS_ERR_*` code | Creates an empty (zero-byte) file, or succeeds as a no-op if one already exists there |
-| 12 | `fs_rm` | path ptr, path len | `0`, `NO_FS`, or an `FS_ERR_*` code | Removes a file (not a directory — use `fs_rmdir` for those) |
-| 13 | `fs_write_file` | path ptr, path len, data ptr, data len | `0`, `NO_FS`, or an `FS_ERR_*` code | Creates a file with exactly `data`'s contents, or fully overwrites (not appends to) an existing file's contents. `data len` may legitimately be `0` (truncate to empty) — the one `fs_*` argument pair where a zero length is valid rather than rejected, see below |
-| 14 | `fs_mv` | src ptr, src len, dst ptr, dst len | `0`, `NO_FS`, or an `FS_ERR_*` code | Renames or moves the file or directory at `src` to `dst`, reusing its existing cluster chain rather than reading and rewriting content. `dst` must not already exist |
+| *7–14* | *(gaps)* | | | The eight `fs_*` syscalls (`list_dir`/`read_file`/`mkdir`/`rmdir`/`touch`/`rm`/`write_file`/`mv`) lived here until the filesystem moved out of the kernel entirely. Their exact contracts survive unchanged as the filesystem server's `FSOP_*` request protocol (below); the numbers stay unfilled, same stable-ABI reasoning as the gap at 5 |
 | 15 | `read_char` | ignored | a byte | Blocking — if none is waiting, suspends the calling task and switches to another runnable one instead of returning `NO_CHAR`; resumes with the byte once available. See `tasks.rs`'s `block_current_and_switch` and the "Blocking primitives" section below |
-| 16 | `spawn` | path ptr, path len | `0`, `NO_FS`, or `SPAWN_ERROR` | Loads the program at `path` and starts it as a **new, independent task** alongside the caller — `tasks::spawn`, not exec-replaces-current-process. Failures return the specific code: an ordinary `FS_ERR_*` for a read failure (not found, is a directory, ...), or `SPAWN_ERR_BAD_ELF`/`SPAWN_ERR_TOO_LARGE`/`SPAWN_ERR_NO_FREE_SLOT`; `SPAWN_ERROR` (`u64::MAX`) remains only as the argument-validation fallback. A failure after the region allocation gives the memory back (`tasks::free_runtime_region` — always the LIFO case for a failed spawn). See "Dynamic task creation" above |
-| 17 | `exit` | exit code | **does not return** (or `EXIT_DENIED`) | Destroys the calling task: its slot becomes spawnable again, its EL0 mapping is removed (a fresh `mmu::rebuild_with_el0_regions`), and its RAM is returned to the runtime bump allocator when LIFO order allows (`tasks::free_runtime_region` — most-recent allocation only; anything else leaks, deliberately). Tasks 0 (the boot shell — the sole keyboard owner) and 1 (idle) are refused with `EXIT_DENIED`, the only case where this syscall returns. The exit code is logged (`task N exited (code X)`) but carries no other meaning — nothing waits on or reaps tasks yet |
+| 16 | `spawn` | total staged length | `0`, `SPAWN_ERROR`, or a `SPAWN_ERR_*` code | Parses, relocates, and starts the program image previously fed into the kernel's 128KB staging buffer via `spawn_stage` (30), as a **new, independent task** alongside the caller — `tasks::spawn`, not exec-replaces-current-process. **Contract changed with the userland-filesystem milestone**: it used to take a path, but the kernel has no filesystem to read one with anymore — the caller reads the program via the filesystem server (`FSOP_READ_AT`, 512 bytes at a time) and stages it first; see the shell's `cmd_exec` for the reference flow. Failures: `SPAWN_ERR_BAD_ELF`/`SPAWN_ERR_TOO_LARGE`/`SPAWN_ERR_NO_FREE_SLOT`; a failure after the region allocation gives the memory back (`tasks::free_runtime_region` — always the LIFO case). See "Dynamic task creation" above |
+| 17 | `exit` | exit code | **does not return** (or `EXIT_DENIED`) | Destroys the calling task: its slot becomes spawnable again, its EL0 mapping is removed (a fresh `mmu::rebuild_with_el0_regions`), and its RAM is returned to the runtime bump allocator when LIFO order allows (`tasks::free_runtime_region` — most-recent allocation only; anything else leaks, deliberately). Tasks 0 (the boot shell — the sole keyboard owner), 1 (idle), and 2 (the filesystem server) are refused with `EXIT_DENIED`, the only case where this syscall returns. The exit code is kept as `Zombie(status)` until a `wait` collects it |
 | 18 | `task_state` | task index | a `TASK_STATE_*` code, or `TASK_STATE_INVALID` past the last slot | Read-only observability for the spawn/exit lifecycle (the shell's `ps`): `UNUSED`/`RUNNABLE`/`BLOCKED` per slot. Probing indices upward until `INVALID` is how a caller discovers the slot count without it leaking into the ABI |
-| 19 | `kill` | task index | `0`, `TASK_ERR_PROTECTED`, or `TASK_ERR_NO_SUCH_TASK` | Destroys another task — `exit`'s teardown minus the context switch (a non-current task isn't executing; its saved context is simply discarded). Tasks 0/1 are protected. If the killed task held the keyboard, ownership reverts to task 0 |
+| 19 | `kill` | task index | `0`, `TASK_ERR_PROTECTED`, or `TASK_ERR_NO_SUCH_TASK` | Destroys another task — `exit`'s teardown minus the context switch (a non-current task isn't executing; its saved context is simply discarded). Tasks 0–2 (boot shell, idle, filesystem server) are protected. If the killed task held the keyboard, ownership reverts to task 0 |
 | 20 | `fg` | task index | `0`, `TASK_ERR_PROTECTED`, or `TASK_ERR_NO_SUCH_TASK` | Hands keyboard ownership to the given task (the wake-check's input-owner state, previously hardcoded to task 0). The caller's own next blocking read then waits until the foregrounded task exits, is killed, or the user types Ctrl+C (`0x03`, intercepted at the keyboard-poll choke point whenever a non-boot-shell task owns the keyboard — ownership reverts to task 0 and the byte is swallowed; reclamation, not a signal). Idle can't be foregrounded; index 0 is an explicit "give it back" |
-| 21 | `wait` | task index | exit status `0..=255`, `TASK_KILLED_STATUS` (`0x100`), `WAIT_INTERRUPTED`, `TASK_ERR_PROTECTED`, or `TASK_ERR_NO_SUCH_TASK` | Blocks until the task dies (via `WaitReason::TaskExit` — the same blocking machinery as `read_char`), or returns immediately if it's already a zombie. **Collecting the status is what reaps**: an exited task holds its slot as `Zombie(status)` until waited (`kill` reaps immediately instead — the killer already knows the outcome). Ctrl+C interrupts a wait (the target keeps running); other typing during a wait is discarded. Waiting on 0/1/yourself is refused (guaranteed deadlock) |
-| 22 | `mount` | — | `0` (just mounted), `MOUNT_ALREADY`, or `MOUNT_NO_DEVICE` | Rescans the xHCI ports for storage devices that attached after boot (`xhci::rescan_ports`) and mounts the first mass-storage device's FAT32 (`usb_msd.rs`, Bulk-Only Transport + SCSI over `block.rs`'s `BlockDevice` abstraction). The Parallels workflow: passthrough USB attaches seconds after the boot scan — boot, wait, `mount` |
+| 21 | `wait` | task index | exit status `0..=255`, `TASK_KILLED_STATUS` (`0x100`), `WAIT_INTERRUPTED`, `TASK_ERR_PROTECTED`, or `TASK_ERR_NO_SUCH_TASK` | Blocks until the task dies (via `WaitReason::TaskExit` — the same blocking machinery as `read_char`), or returns immediately if it's already a zombie. **Collecting the status is what reaps**: an exited task holds its slot as `Zombie(status)` until waited (`kill` reaps immediately instead — the killer already knows the outcome). Ctrl+C interrupts a wait (the target keeps running); other typing during a wait is discarded. Waiting on 0–2/yourself is refused (guaranteed deadlock — those tasks never die) |
+| 22 | `mount` | replace flag | `0` (a USB device was installed), `MOUNT_ALREADY`, or `MOUNT_NO_DEVICE` | **The device half only** since the filesystem moved to userland: rescans the xHCI ports for storage devices that attached after boot (`xhci::rescan_ports`) and installs the first mass-storage device (`usb_msd.rs`, Bulk-Only Transport + SCSI) as the kernel's block device for the server to reach via `block_read`/`block_write`. Actually mounting what it holds is the server's `FSOP_MOUNT` request; the shell's `mount` command composes the two, server first. `replace != 0` allows swapping out an installed-but-unmountable device (e.g. `make run`'s FAT16 vvfat disk) — callers pass it only after the server confirms nothing is mounted. The Parallels workflow is unchanged: boot, wait, `mount` |
 | 23 | `msg_send` | dest task, buf ptr, len | `0`, `TASK_ERR_NO_SUCH_TASK`, `MSG_ERR_TOO_BIG` (>64 bytes), or `MSG_ERR_FULL` | IPC: copies the message into the destination's bounded mailbox (4 pending max). No shared memory, no blocking sends. A dead task's queued mail is cleared on exit/kill — a slot's next occupant can never receive a predecessor's messages |
 | 24 | `msg_recv` | buf ptr, len | `(sender << 32) \| copied_len`, or `RECV_INTERRUPTED` (Ctrl+C) | Blocks until a message arrives (`WaitReason::Message` — the third user of the blocking machinery), copying the oldest queued message into the buffer |
 | 25 | `msg_try_recv` | buf ptr, len | same as `msg_recv`, or `NO_MSG` | The non-blocking sibling, same pairing as `try_read_char`/`read_char` |
+| 26 | `block_info` | — | capacity in sectors, `BLOCK_ERR_NO_DEVICE`, or `BLOCK_ERR_DENIED` | Raw block-device introspection for the filesystem server. **All three `block_*` syscalls are gated to task 2** (`FSD_TASK`): any other caller gets `BLOCK_ERR_DENIED` — the kernel holds the device, and exactly one task may ask it to touch the disk |
+| 27 | `block_read` | LBA, buf ptr | `0` or a `BLOCK_ERR_*` code | Reads exactly one 512-byte sector (the length is implied, not passed). Same `FSD_TASK` gate |
+| 28 | `block_write` | LBA, buf ptr | `0` or a `BLOCK_ERR_*` code | Writes exactly one 512-byte sector. Same gate |
+| 29 | `msg_call` | dest task, req ptr, req len, reply ptr | `(dest << 32) \| reply_len`, `RECV_INTERRUPTED`, `TASK_ERR_NO_SUCH_TASK`, `TASK_ERR_PROTECTED` (self-call), or a `MSG_ERR_*` code | Synchronous request/response (MINIX's `sendrec` shape): sends the request, then blocks for a reply **from `dest` specifically** — a message from any other task stays queued for a later `msg_recv` instead of being mistaken for the reply (`WaitReason::Message`'s sender filter). With direct delivery on both hops (`tasks::send_message` copies straight into a matching blocked receiver's buffer and wakes it), a call to a server blocked in `msg_recv` round-trips without waiting for a tick on either side. The reply buffer is a fixed 64 bytes — the 4-argument ABI is exactly full |
+| 30 | `spawn_stage` | offset, chunk ptr, chunk len | `0` or `SPAWN_ERROR` | Copies one chunk of a program image into the kernel's spawn staging buffer — the feed half of the two-step `spawn` (16) |
 | other | — | — | `u64::MAX` | Logged as unknown |
 
-All eight `fs_*` syscalls share two distinct failure sentinels, not one:
-`FS_ERROR` (`u64::MAX`) for "the filesystem is mounted but this operation
-failed" (not found, already exists, bad name, disk full, ...), and `NO_FS`
-(`u64::MAX - 1`) specifically for "there's no mounted filesystem at all"
-(e.g. `make run`'s vvfat disk is FAT16, not FAT32 — see `fat32.rs`).
-Added after real user confusion: without the split, every disk command
-failing on `make run` looked identical to a genuinely broken path, and the
-actual cause was only ever visible in the kernel's own boot log, never to
-the shell itself. `shell/src/main.rs`'s `cmd_ls`/`cmd_cat`/`cmd_cd`/
-`cmd_mkdir`/`cmd_rmdir`/`cmd_touch`/`cmd_rm`/`cmd_write`/`cmd_cp`/`cmd_mv`
-all match on the raw return value against both sentinels so they can
-print "no filesystem mounted" instead of a command-specific "not
-found"/"failed" message when that's the real cause. Safe to keep
-numerically distinct from any real success value: byte counts and file
-sizes returned on success are always far below `u64::MAX - 1`.
+### The filesystem request protocol (`FSOP_*`)
 
-`fs_write_file`'s `data` argument needed a genuine second validation
-rule, not just reused `valid_user_range` logic: `syscall.rs`'s argument
-sanity check normally rejects any zero-length `(pointer, length)` pair,
-correct for `fs_list_dir`/`fs_read_file`'s output buffers (a zero-length
-destination is pointless) but wrong here, where empty data is a real,
-meaningful case (truncating a file to zero bytes, exactly matching
-`fs_touch`'s own empty-file semantics) — caught immediately by testing
-`write <file>` with no content. `valid_user_range_allow_empty` covers
-this: same bound, but a zero length passes as long as the pointer is
-still non-null. Only `fs_write_file`'s data argument uses it; every path
-argument, including this syscall's own, still uses the stricter
-`valid_user_range`.
+File operations are messages to the filesystem server (task 2,
+`FSD_TASK`), normally sent via `msg_call`. A request is 56 bytes
+(`FS_REQUEST_LEN`): the op as a little-endian u64 at offset 0, then six
+little-endian u64 arguments — pointers and lengths into the *caller's*
+memory, which the server reads and writes directly (the same
+single-address-space trust model the old `fs_*` syscalls' pointer
+arguments had, now spanning two EL0 regions instead of EL0-to-kernel).
+The reply is a single u64 in the reply message's first 8 bytes, carrying
+exactly the old syscalls' return-value semantics — byte counts and real
+sizes on success, or a value in the reserved error band (`>= FS_ERR_MIN`):
+`NO_FS` when nothing is mounted, a specific `FS_ERR_*` code per real
+failure reason, `FS_ERROR` for argument-validation rejections. A call to
+an empty task-2 slot (no FSD.BIN on the ESP this boot) fails at the
+`msg_call` layer with `TASK_ERR_NO_SUCH_TASK`, which the shell's
+wrappers fold into `NO_FS` — literally true. Ops (constants in
+`syscall-abi`, contracts identical to the old syscalls of the same
+names): `FSOP_LIST_DIR`, `FSOP_READ_FILE`, `FSOP_READ_AT` (the one new
+capability — windowed reads at a byte offset, what `exec`'s chunked
+program loading is built on), `FSOP_WRITE_FILE` (zero-length data is
+valid — truncate to empty), `FSOP_MKDIR`, `FSOP_RMDIR`, `FSOP_TOUCH`,
+`FSOP_RM`, `FSOP_MV`, and `FSOP_MOUNT` (the FS half of the `mount`
+command). The shell's nine `fs_*` wrapper functions
+(`shell/src/main.rs::fs_call` and friends) are the reference client.
 
-The `syscall-abi` crate only covers the numbers/sentinels themselves, not
-argument validation or per-error-reason detail — see
+The `syscall-abi` crate covers the numbers, sentinels, and protocol
+constants, not argument validation — see
 [`processes.md`](processes.md)'s "known rough edges" for what's still a
 real gap (pointer/length arguments are trusted, not checked against the
-caller's actual mapped region; every `fs_*` failure beyond "no filesystem
-mounted" still collapses to one `FS_ERROR` value) and for how to depend
-on this crate when writing a new userland program.
+caller's actual mapped region — by the kernel and the server alike) and
+for how to depend on this crate when writing a new userland program.
 
 ## Console
 
