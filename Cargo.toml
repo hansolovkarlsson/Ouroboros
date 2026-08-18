@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
-members = ["kernel", "shell", "hello", "syscall-abi"]
-# `shell` and `hello` are built explicitly with `--target
+members = ["kernel", "shell", "hello", "pong", "syscall-abi"]
+# `shell`, `hello`, and `pong` are built explicitly with `--target
 # aarch64-unknown-none` (see the Makefile) - they must never be pulled
 # into a plain `cargo build`/`clippy` at the repo root, which would try
 # to build them for the workspace-wide default target

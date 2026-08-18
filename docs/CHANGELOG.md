@@ -7,6 +7,23 @@ what broke, how it was diagnosed), see `CLAUDE.md`; for *how* something
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## Driver isolation part 1: real IPC
+
+The prerequisite the roadmap's driver-isolation item named: fixed-size
+(≤64-byte) messages copied through the kernel into bounded per-task
+mailboxes (4 pending), `msg_send`/`msg_recv`/`msg_try_recv` (syscalls
+23-25), with blocking receive as the third user of the
+`WaitReason`/wake-check machinery (Ctrl+C-interruptible, same as
+`wait`) and mailboxes cleared on task death so a slot's next occupant
+can never receive a predecessor's mail. Proven by `pong/` - the fourth
+userland program and first long-lived *server* (the process shape the
+part-2 FAT32 filesystem server will have): recv -> echo to sender ->
+repeat, `quit` to exit. Confirmed on QEMU (echo round trips,
+queue-full at exactly the fifth pending message, the
+cleared-mailbox-on-kill proof, blocked-recv Ctrl+C, quit/wait
+lifecycle) and real Parallels (error paths + a blocked recv
+interrupted by a real Ctrl+C chord).
+
 ## USB mass storage - a real disk on real Parallels hardware
 
 The milestone the whole diagnostic arc pointed at: `usb_msd.rs`

@@ -313,6 +313,99 @@ pub(crate) fn interrupt_key_check(byte: u8) -> bool {
             .is_ok()
 }
 
+/// One queued IPC message: who sent it, how long it is, and the bytes
+/// (copied in at send time, copied out at receive time - no shared
+/// memory anywhere in this design, deliberately: copying is the
+/// isolation-friendly semantics, and at 64 bytes the cost is nothing).
+#[derive(Clone, Copy)]
+struct Message {
+    sender: u8,
+    len: u8,
+    data: [u8; MSG_MAX],
+}
+
+const MSG_MAX: usize = 64; // == syscall_abi::MSG_MAX_LEN, duplicated as a usize for array sizing
+const MSG_QUEUE_DEPTH: usize = 4;
+
+/// One task's bounded mailbox - a tiny ring of pending messages.
+struct Mailbox {
+    msgs: [Message; MSG_QUEUE_DEPTH],
+    head: usize,
+    count: usize,
+}
+
+impl Mailbox {
+    const fn new() -> Self {
+        Mailbox {
+            msgs: [Message { sender: 0, len: 0, data: [0; MSG_MAX] }; MSG_QUEUE_DEPTH],
+            head: 0,
+            count: 0,
+        }
+    }
+}
+
+struct MailboxSlot(UnsafeCell<Mailbox>);
+// SAFETY: single-core, only touched from SVC dispatch and the tick
+// handler's wake-check - the same never-reentrant reasoning as every
+// other per-task cell in this module.
+unsafe impl Sync for MailboxSlot {}
+static MAILBOXES: [MailboxSlot; NUM_TASKS] = [
+    MailboxSlot(UnsafeCell::new(Mailbox::new())),
+    MailboxSlot(UnsafeCell::new(Mailbox::new())),
+    MailboxSlot(UnsafeCell::new(Mailbox::new())),
+    MailboxSlot(UnsafeCell::new(Mailbox::new())),
+];
+
+/// `MSG_SEND`'s core: copy `data` into `dest`'s mailbox. The caller
+/// validates `dest` exists; this only enforces the size and depth
+/// bounds.
+pub(crate) fn send_message(sender: usize, dest: usize, data: &[u8]) -> u64 {
+    if data.len() > MSG_MAX {
+        return syscall_abi::MSG_ERR_TOO_BIG;
+    }
+    let mailbox = unsafe { &mut *MAILBOXES[dest].0.get() };
+    if mailbox.count >= MSG_QUEUE_DEPTH {
+        return syscall_abi::MSG_ERR_FULL;
+    }
+    let slot = (mailbox.head + mailbox.count) % MSG_QUEUE_DEPTH;
+    let msg = &mut mailbox.msgs[slot];
+    msg.sender = sender as u8;
+    msg.len = data.len() as u8;
+    msg.data[..data.len()].copy_from_slice(data);
+    mailbox.count += 1;
+    0
+}
+
+/// Pops `task`'s oldest queued message into `(buf, buf_len)` (raw
+/// copy - single address space, the same trust model as every `fs_*`
+/// buffer), returning the packed `(sender << 32) | copied_len` the
+/// receive syscalls hand to userland - or `None` if the mailbox is
+/// empty.
+pub(crate) fn try_recv_message(task: usize, buf: u64, buf_len: u64) -> Option<u64> {
+    let mailbox = unsafe { &mut *MAILBOXES[task].0.get() };
+    if mailbox.count == 0 {
+        return None;
+    }
+    let msg = mailbox.msgs[mailbox.head];
+    mailbox.head = (mailbox.head + 1) % MSG_QUEUE_DEPTH;
+    mailbox.count -= 1;
+    let copy_len = (msg.len as u64).min(buf_len) as usize;
+    let dst = buf as *mut u8;
+    for (i, &b) in msg.data[..copy_len].iter().enumerate() {
+        unsafe { core::ptr::write_volatile(dst.add(i), b) };
+    }
+    Some(((msg.sender as u64) << 32) | copy_len as u64)
+}
+
+/// A dead task's queued mail dies with it - called from both teardown
+/// paths (`exit`/`kill`), so a later occupant of the same slot can
+/// never receive a predecessor's messages.
+pub(crate) fn clear_mailbox(task: usize) {
+    let mailbox = unsafe { &mut *MAILBOXES[task].0.get() };
+    mailbox.head = 0;
+    mailbox.count = 0;
+}
+
 /// What a blocked task is waiting for. One variant today - a byte from
 /// the keyboard/console (`syscall_abi::READ_CHAR`, `syscall.rs`) - but
 /// deliberately a real enum, not a bool, since the mechanism below
@@ -327,6 +420,9 @@ pub(crate) enum WaitReason {
     /// collecting the status is what frees the slot) or `Unused` (it
     /// was killed out from under the waiter - `TASK_KILLED_STATUS`).
     TaskExit(usize),
+    /// Waiting for a message (`MSG_RECV`): the receiver's buffer, into
+    /// which the wake-check copies the oldest queued message.
+    Message { buf: u64, len: u64 },
 }
 
 impl WaitReason {
@@ -368,6 +464,18 @@ impl WaitReason {
                     TaskState::Unused => Some(syscall_abi::TASK_KILLED_STATUS),
                     _ => None,
                 }
+            }
+            WaitReason::Message { buf, len } => {
+                // Same Ctrl+C escape hatch as TaskExit's - a `recv`
+                // with no sender coming must not brick the session.
+                if waiter == INPUT_OWNER.load(Ordering::Relaxed) {
+                    if let Some(byte) = crate::syscall::poll_keyboard_byte() {
+                        if byte == 0x03 {
+                            return Some(syscall_abi::RECV_INTERRUPTED);
+                        }
+                    }
+                }
+                try_recv_message(waiter, buf, len)
             }
         }
     }
@@ -495,6 +603,7 @@ pub(crate) unsafe fn exit_current_and_switch(frame: *mut Context, status: u64) -
     // not at reap.
     unsafe { *STATES[current].0.get() = TaskState::Zombie(status & 0xff) };
     unsafe { *REGIONS[current].0.get() = (0, 0) };
+    clear_mailbox(current);
     let next = next_runnable(current);
     *frame = unsafe { *TASKS[next].0.get() };
     CURRENT.store(next, Ordering::Relaxed);
@@ -514,6 +623,7 @@ pub(crate) unsafe fn exit_current_and_switch(frame: *mut Context, status: u64) -
 pub(crate) fn kill_task(i: usize) {
     unsafe { *STATES[i].0.get() = TaskState::Unused };
     unsafe { *REGIONS[i].0.get() = (0, 0) };
+    clear_mailbox(i);
 }
 
 /// Whether slot `i` currently holds a *live* task (`Runnable` or

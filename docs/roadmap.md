@@ -381,12 +381,18 @@ phase:
   session can't be bricked. The task-lifecycle arc
   (spawn/ps/exit/kill/fg/Ctrl+C/wait) is complete; nothing is left in
   this area short of real signals/parent-child process trees. See `CLAUDE.md`'s "Task destruction" section.
-- **Actual microkernel-style driver isolation** — moving drivers
-  (starting with virtio-blk/virtio-console) out of the EL1 kernel and
-  into supervised EL0 processes, per `docs/research-minix-boot.md`'s
-  comparison (process-boundary isolation, MINIX's answer) and
-  `docs/research-helix-os.md`'s (a trait-based mechanism/policy split
-  inside one address space, a different real answer to the same
-  question — see that note's "what this says about Ouroboros's current
-  shape"). Dynamic task creation (above) is done; real IPC is still
-  needed before this is worth starting.
+- **Actual microkernel-style driver isolation** — moving components
+  out of the EL1 kernel and into supervised EL0 processes, per
+  `docs/research-minix-boot.md`'s comparison (process-boundary
+  isolation, MINIX's answer) and `docs/research-helix-os.md`'s.
+  **Part 1 — real IPC — is done (2026-08-17):** fixed-size (≤64-byte)
+  copied messages, bounded per-task mailboxes, blocking `msg_recv` on
+  the proven `WaitReason` machinery (Ctrl+C-interruptible), mailboxes
+  cleared on task death, proven end to end by `pong/` (the fourth
+  userland program, a real long-lived echo server) round-tripping
+  messages with the shell on QEMU, and the error/interrupt paths on
+  real Parallels hardware. **Part 2 — the first component actually
+  moved — is the userland FAT32 filesystem server** (MINIX-style:
+  pure logic, no MMIO/DMA — hardware drivers can't be meaningfully
+  isolated without an IOMMU anyway), speaking this IPC to clients and
+  new raw block syscalls to the kernel. Not yet scoped in detail.

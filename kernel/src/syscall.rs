@@ -703,6 +703,37 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
                 syscall_abi::MOUNT_NO_DEVICE
             }
         }
+        syscall_abi::MSG_SEND => {
+            let dest = arg0 as usize;
+            if !valid_user_range(arg1, arg2) {
+                return FS_ERROR;
+            }
+            if dest >= tasks::NUM_TASKS || !tasks::task_exists(dest) {
+                return syscall_abi::TASK_ERR_NO_SUCH_TASK;
+            }
+            // SAFETY: bounds sanity-checked above, same trust model as
+            // every fs_* buffer (see the module doc comment).
+            let data = unsafe { core::slice::from_raw_parts(arg1 as *const u8, arg2 as usize) };
+            tasks::send_message(tasks::current_task(), dest, data)
+        }
+        syscall_abi::MSG_RECV => {
+            if !valid_user_range(arg0, arg1) {
+                return FS_ERROR;
+            }
+            // Fast path: a message is already queued.
+            if let Some(packed) = tasks::try_recv_message(tasks::current_task(), arg0, arg1) {
+                return packed;
+            }
+            // Block until one arrives (or Ctrl+C) - same pass-through
+            // return contract as READ_CHAR/WAIT.
+            unsafe { tasks::block_current_and_switch(frame, tasks::WaitReason::Message { buf: arg0, len: arg1 }) }
+        }
+        syscall_abi::MSG_TRY_RECV => {
+            if !valid_user_range(arg0, arg1) {
+                return FS_ERROR;
+            }
+            tasks::try_recv_message(tasks::current_task(), arg0, arg1).unwrap_or(syscall_abi::NO_MSG)
+        }
         syscall_abi::FG => {
             let i = arg0 as usize;
             if i == 1 {

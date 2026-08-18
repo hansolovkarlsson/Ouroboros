@@ -3899,6 +3899,57 @@ rescan is user-triggered via `mount`, not event-driven); exFAT sticks
 won't mount (INQUIRY/capacity still prove the transport - reformat
 FAT32 to use one); no unmount.
 
+## Driver isolation, part 1: real IPC - message passing between tasks
+
+The final parking-lot item's honest first half. Fixed-size messages
+(≤64 bytes, `MSG_MAX_LEN`), **copied** through the kernel into bounded
+per-task mailboxes (`tasks.rs::MAILBOXES`, 4 pending each) - no shared
+memory anywhere, deliberately: copying is the isolation-friendly
+semantics, and at this size the cost is nothing. Three syscalls:
+`msg_send` (23 - fails fast on a missing task, an oversized message,
+or a full mailbox; no blocking sends), `msg_recv` (24 - blocks via
+`WaitReason::Message { buf, len }`, the third user of the blocking
+machinery `read_char` and `wait` already proved twice; the wake-check
+copies the oldest message straight into the receiver's waiting buffer
+and wakes it with `(sender << 32) | len` packed), and `msg_try_recv`
+(25, the non-blocking sibling). The same Ctrl+C escape hatch as
+`wait`: a `recv` with no sender coming must not brick the session.
+**A dead task's queued mail dies with it** - `clear_mailbox` wired
+into both teardown paths, so a slot's next occupant can never receive
+a predecessor's messages (verified directly, not assumed - see below).
+
+**`pong/` - the fourth userland program, and the first long-lived
+server**: recv -> echo each message back to its sender -> repeat;
+`quit` exits cleanly. This is the process shape part 2's FAT32
+filesystem server will have, not another run-and-exit demo. Shell
+gained `send <task> <words...>`/`recv` builtins - test plumbing, but
+exercising exactly the calls any IPC client makes.
+
+**Confirmed on QEMU, every scenario:** the echo round trip (`send 2
+hello ipc world` -> `recv` -> `task 2: hello ipc world`, looping);
+`quit` -> the kernel's exit line -> `wait 2` collecting status 0 ->
+`send` to the freed slot refusing with no-such-task; queue-full at
+exactly the fifth pending message to a never-receiving task; **the
+mailbox-clearing proof**: four messages queued to a task, `kill` it,
+`exec` a fresh pong into the same slot, `send ping`/`recv` returns
+`ping` - not the dead task's `m1`; a blocked `recv` interrupted by
+Ctrl+C; zero aborts. **Confirmed on real Parallels hardware:** the
+error paths and a blocked `recv` interrupted by a real held-Ctrl
+chord on the physical keyboard path.
+
+**Part 2, scoped but not started:** the userland FAT32 filesystem
+server - MINIX's textbook first move, chosen because the FS is pure
+logic (no MMIO/DMA, which can't be meaningfully isolated without an
+IOMMU anyway). It will speak this IPC to clients and new raw
+block-device syscalls to the kernel. See `docs/roadmap.md`.
+
+**Still coarse:** receive-from-any only (no selective receive); no
+blocking sends or back-pressure; senders are never notified when a
+receiver dies; no capabilities (any task can message any task - the
+kernel's existing trust model); 64-byte messages (part 2's FS
+protocol will need a request/response convention within that, or a
+size bump).
+
 ## Commands
 
 ```sh
@@ -4007,7 +4058,7 @@ kernel/
   src/gicv3.rs       GICv3 backend (redistributor wake/discovery, ICC_* system-register CPU interface) - confirmed working on QEMU and real Parallels hardware, see "MADT/GICv3" above
   src/timer.rs       ARM generic timer (non-secure EL1 physical timer, PPI 14 / GIC INTID 30), TICK_INTERVAL_MS
   src/loader.rs      reads INIT.CFG + a program off the ESP during boot services, into a 2MB-aligned EL0-accessible region, real ELF64 parsing + R_AARCH64_RELATIVE relocation processing - see "A real relocating loader" above and docs/processes.md; elf_region_size/populate_region split so the same parsing/loading logic is reusable from the runtime spawn path too, see "Dynamic task creation and exec()" above
-  src/syscall.rs     svc syscall dispatch table (print/double/report/try_read_char/putc/get_ticks/fs_list_dir/fs_read_file/fs_mkdir/fs_rmdir/fs_touch/fs_rm/fs_write_file/fs_mv/read_char/spawn/exit/task_state/kill/fg/wait/mount, gap at 5) - confirmed working end to end, see above, "Blocking primitives" above for read_char, and "Dynamic task creation and exec()" above for spawn
+  src/syscall.rs     svc syscall dispatch table (print/double/report/try_read_char/putc/get_ticks/fs_list_dir/fs_read_file/fs_mkdir/fs_rmdir/fs_touch/fs_rm/fs_write_file/fs_mv/read_char/spawn/exit/task_state/kill/fg/wait/mount/msg_send/msg_recv/msg_try_recv, gap at 5) - confirmed working end to end, see above, "Blocking primitives" above for read_char, and "Dynamic task creation and exec()" above for spawn
   src/tasks.rs       up to 4 task slots (task 0 = loaded program, task 1 = idle, slots 2-3 spawn/exit-cycled) + the round-robin scheduler over Runnable/Blocked/Unused task state (block_current_and_switch, exit_current_and_switch, on_tick's wake-check, tasks::spawn, allocate_runtime_region/free_runtime_region) - confirmed working, see "Blocking primitives", "Dynamic task creation and exec()", and "Task destruction" above
   src/virtio_mmio.rs virtio-mmio transport: 32-slot device discovery, modern (non-legacy) register layout, addresses confirmed via devicetree dump
   src/block.rs       BlockDevice enum (Virtio | UsbMsd) - the block-device abstraction fat32.rs sits on, see "USB mass storage" above
@@ -4020,6 +4071,9 @@ kernel/
 shell/               userland default shell - a separate crate, built for aarch64-unknown-none, loaded from disk (not compiled into the kernel)
   linker.ld          self-relocating (PIE) linker script: entry at offset 0, .rela.dyn/.dynsym/.dynamic/.data.rel.ro, no .bss/.data (see "A real relocating loader" above and docs/processes.md)
   src/main.rs        line editor + command dispatch (help/echo/uptime/clear/ls/cat/cd/pwd/mkdir/rmdir/touch/rm/write/cp/mv/exec/exit/ps/kill/fg/selftest, plus `> file`/`>> file` output redirection on any of them - see "Output redirection" above), running as real EL0 userland code, built for real relocation (relocation-model=pic, --release only) - main loop blocks on read_char (syscall 15) instead of busy-polling, see "Blocking primitives" above; see docs/processes.md
+
+pong/                fourth userland program: the IPC echo server (recv -> send back to sender; `quit` exits) - the long-lived server shape driver isolation's FS server will have, see "Driver isolation, part 1" above
+  src/main.rs        ~90 lines: the recv/echo loop over MSG_RECV/MSG_SEND
 
 hello/               second userland program: prints a banner and exits via the EXIT syscall - the living proof of "the shell is just a program" and the reference for how a program ends itself (see "Task destruction" above)
   src/main.rs        ~70 lines: _start, a putc-loop print, the exit call

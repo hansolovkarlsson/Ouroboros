@@ -92,7 +92,7 @@ const LF: u8 = b'\n';
 // Syscall numbers and sentinel values come from the shared `syscall-abi`
 // crate now, not hand-duplicated local consts - see its doc comment and
 // `kernel/src/syscall.rs`'s dispatch table, the other side of this ABI.
-use syscall_abi::{EXIT_DENIED, FS_ERR_MIN, FS_ERR_NOT_FOUND, MOUNT_ALREADY, MOUNT_NO_DEVICE, NO_FS, TASK_KILLED_STATUS, TASK_STATE_BLOCKED, TASK_STATE_INVALID, TASK_STATE_RUNNABLE, TASK_STATE_UNUSED, TASK_STATE_ZOMBIE, WAIT_INTERRUPTED};
+use syscall_abi::{EXIT_DENIED, FS_ERR_MIN, FS_ERR_NOT_FOUND, MOUNT_ALREADY, MOUNT_NO_DEVICE, NO_FS, RECV_INTERRUPTED, TASK_KILLED_STATUS, TASK_STATE_BLOCKED, TASK_STATE_INVALID, TASK_STATE_RUNNABLE, TASK_STATE_UNUSED, TASK_STATE_ZOMBIE, WAIT_INTERRUPTED};
 
 /// Placed first in `.text` by `linker.ld` (`KEEP(*(.text.start))`) so it
 /// lands at file/VA offset 0 - `tasks.rs` sets a loaded program's
@@ -377,7 +377,7 @@ fn dispatch_line(line: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize, out:
     let arg = words.next().unwrap_or("");
 
     match command {
-        "help" => out.put_line("commands: help, echo, uptime, clear, ls, cat, cd, pwd, mkdir, rmdir, touch, rm, write, cp, mv, mount, exec, exit, ps, kill, fg, wait, selftest (append `> file` or `>> file` to redirect output)"),
+        "help" => out.put_line("commands: help, echo, uptime, clear, ls, cat, cd, pwd, mkdir, rmdir, touch, rm, write, cp, mv, mount, exec, exit, ps, kill, fg, wait, send, recv, selftest (append `> file` or `>> file` to redirect output)"),
         "echo" => {
             let mut first = true;
             for word in line.split_whitespace().skip(1) {
@@ -424,6 +424,8 @@ fn dispatch_line(line: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize, out:
         "fg" => cmd_fg(arg),
         "wait" => cmd_wait(arg),
         "mount" => cmd_mount(),
+        "send" => cmd_send(line),
+        "recv" => cmd_recv(),
         "selftest" => cmd_selftest(out),
         _ => {
             print_str("unknown command: ");
@@ -604,6 +606,8 @@ fn print_fs_error(cmd: &str, code: u64) {
         syscall_abi::FS_ERR_IS_ROOT => "can't remove the root directory",
         syscall_abi::FS_ERR_DISK_FULL => "disk full",
         syscall_abi::FS_ERR_IO => "device I/O error",
+        syscall_abi::MSG_ERR_FULL => "mailbox full",
+        syscall_abi::MSG_ERR_TOO_BIG => "message too big (64-byte limit)",
         syscall_abi::SPAWN_ERR_BAD_ELF => "not a loadable program (bad ELF)",
         syscall_abi::SPAWN_ERR_TOO_LARGE => "program too large for the kernel's staging buffer (or empty)",
         syscall_abi::SPAWN_ERR_NO_FREE_SLOT => "no free task slot",
@@ -1407,6 +1411,69 @@ fn cmd_mount() {
         MOUNT_ALREADY => print_line("mount: a filesystem is already mounted"),
         MOUNT_NO_DEVICE => print_line("mount: no mountable USB storage device found (see the kernel log; is the stick attached to the VM?)"),
         _ => print_line("mount: unexpected return"),
+    }
+}
+
+/// `send <task> <words...>` - joins the words like `write` does and
+/// sends them as one IPC message (`MSG_SEND`) to the given task.
+fn cmd_send(line: &str) {
+    let mut words = line.split_whitespace();
+    words.next(); // "send" itself
+    let Some(task_arg) = words.next() else {
+        print_line("send: usage: send <task number> <words...>");
+        return;
+    };
+    let Some(dest) = parse_u64(task_arg) else {
+        print_line("send: usage: send <task number> <words...>");
+        return;
+    };
+
+    let mut msg = [0u8; 64];
+    let mut len = 0usize;
+    let mut first = true;
+    for word in words {
+        if !first && len < msg.len() {
+            msg[len] = b' ';
+            len += 1;
+        }
+        for b in word.bytes() {
+            if len < msg.len() {
+                msg[len] = b;
+                len += 1;
+            }
+        }
+        first = false;
+    }
+    if len == 0 {
+        print_line("send: usage: send <task number> <words...>");
+        return;
+    }
+
+    match syscall4(syscall_abi::MSG_SEND, dest, msg.as_ptr() as u64, len as u64, 0) {
+        code if code >= FS_ERR_MIN => print_fs_error("send", code),
+        _ => {}
+    }
+}
+
+/// `recv` - blocks until a message arrives (`MSG_RECV`) and prints it
+/// as `task N: <message>`. Ctrl+C interrupts, same as `wait`.
+fn cmd_recv() {
+    let mut buf = [0u8; 64];
+    match syscall4(syscall_abi::MSG_RECV, buf.as_mut_ptr() as u64, buf.len() as u64, 0, 0) {
+        RECV_INTERRUPTED => print_line("recv: interrupted"),
+        code if code >= FS_ERR_MIN => print_fs_error("recv", code),
+        packed => {
+            let sender = packed >> 32;
+            let len = (packed & 0xffff_ffff) as usize;
+            print_str("task ");
+            print_u64(sender);
+            print_str(": ");
+            if let Ok(text) = core::str::from_utf8(&buf[..len.min(buf.len())]) {
+                print_line(text);
+            } else {
+                print_line("(non-UTF-8 message)");
+            }
+        }
     }
 }
 

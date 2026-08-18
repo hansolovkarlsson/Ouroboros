@@ -135,6 +135,9 @@ $ fg 2                          # ...and hand it the keyboard (nested session)
 $ exit                          # (in the nested shell) hand it back
 $ ps                            # one line per task slot
 $ kill 2                        # destroy a task
+$ exec /EFI/ORBS/PONG.BIN       # spawn the message server...
+$ send 2 hello                  # ...send it an IPC message
+$ recv                          # ...and receive its echo back
 ```
 
 Job-control notes: only one task owns the keyboard at a time (`fg`
@@ -187,6 +190,9 @@ statuses). `NO_FS` (`MAX-1`) means no filesystem is mounted this boot.
 | 20 | `fg` | index | Hand keyboard ownership to a task (auto-reverts to task 0 on the owner's death, or on Ctrl+C) |
 | 21 | `wait` | index | Block until the task dies; returns its status (0–255), `TASK_KILLED_STATUS` (0x100), or `WAIT_INTERRUPTED` (Ctrl+C). Collecting the status reaps the slot |
 | 22 | `mount` | — | Rescan the USB ports and mount a storage device's FAT32 (`0`, `MOUNT_ALREADY`, or `MOUNT_NO_DEVICE`) — the Parallels disk path |
+| 23 | `msg_send` | dest, buf ptr/len | IPC: copy a message (≤64 bytes) into a task's bounded mailbox |
+| 24 | `msg_recv` | buf ptr/len | Block until a message arrives; returns `(sender << 32) \| len`, or `RECV_INTERRUPTED` on Ctrl+C |
+| 25 | `msg_try_recv` | buf ptr/len | Non-blocking receive; `NO_MSG` when empty |
 
 Filesystem failures return a specific `FS_ERR_*` code (`NOT_FOUND`,
 `NOT_A_FILE`, `NOT_A_DIRECTORY`, `INVALID_NAME`, `ALREADY_EXISTS`,

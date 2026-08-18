@@ -197,6 +197,29 @@ pub const WAIT: u64 = 21;
 /// picked up: boot, wait a moment, type `mount`.
 pub const MOUNT: u64 = 22;
 
+/// `(dest task, buf ptr, len)` -> `0`, [`TASK_ERR_NO_SUCH_TASK`],
+/// [`MSG_ERR_TOO_BIG`] (over [`MSG_MAX_LEN`]), or [`MSG_ERR_FULL`].
+/// Copies the message into `dest`'s bounded mailbox - no shared
+/// memory, no blocking sends. Send-to-self is allowed (it's just a
+/// queue). A task's queued mail dies with it (cleared on exit/kill);
+/// senders are never notified.
+pub const MSG_SEND: u64 = 23;
+
+/// `(buf ptr, len)` -> `(sender << 32) | copied_len`, or
+/// [`RECV_INTERRUPTED`] on Ctrl+C. **Blocks** until a message arrives,
+/// with the same scheduler-level suspension as [`READ_CHAR`]/[`WAIT`];
+/// the oldest queued message is copied into the buffer (truncated to
+/// the buffer length if needed).
+pub const MSG_RECV: u64 = 24;
+
+/// [`MSG_RECV`]'s non-blocking sibling: same contract, but returns
+/// [`NO_MSG`] immediately when the mailbox is empty - the same pairing
+/// as [`TRY_READ_CHAR`]/[`READ_CHAR`].
+pub const MSG_TRY_RECV: u64 = 25;
+
+/// The largest message [`MSG_SEND`] accepts, in bytes.
+pub const MSG_MAX_LEN: u64 = 64;
+
 /// [`WAIT`]'s answer when the waited task was killed rather than
 /// exiting: `0x100`, one past the largest real exit status.
 pub const TASK_KILLED_STATUS: u64 = 0x100;
@@ -294,6 +317,16 @@ pub const MOUNT_ALREADY: u64 = u64::MAX - 17;
 /// attached, activation failed, or its filesystem isn't FAT32 - the
 /// kernel log has the specific reason).
 pub const MOUNT_NO_DEVICE: u64 = u64::MAX - 18;
+
+/// A [`MSG_RECV`] cut short by Ctrl+C - nothing was received; same
+/// escape-hatch semantics as [`WAIT_INTERRUPTED`].
+pub const RECV_INTERRUPTED: u64 = u64::MAX - 19;
+/// [`MSG_SEND`]: the destination's mailbox is full.
+pub const MSG_ERR_FULL: u64 = u64::MAX - 20;
+/// [`MSG_SEND`]: the message exceeds [`MSG_MAX_LEN`].
+pub const MSG_ERR_TOO_BIG: u64 = u64::MAX - 21;
+/// [`MSG_TRY_RECV`]: the mailbox is empty right now.
+pub const NO_MSG: u64 = u64::MAX - 22;
 
 /// Floor of the reserved error band (with headroom for future codes):
 /// **any error-capable syscall's return value `>= FS_ERR_MIN` is an
