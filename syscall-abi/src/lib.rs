@@ -213,8 +213,9 @@ pub const MSG_TRY_RECV: u64 = 25;
 /// request to `dest`, then blocks until a reply *from `dest`
 /// specifically* arrives - a message from any other task stays queued
 /// for a later [`MSG_RECV`] rather than being mistaken for the reply.
-/// The reply buffer is a fixed [`MSG_MAX_LEN`] bytes (implied, not
-/// passed - the 4-argument syscall ABI is exactly full). With direct
+/// The reply buffer is a fixed [`MSG_MAX_LEN`] bytes - all 768 of
+/// them (implied, not passed - the 4-argument syscall ABI is exactly
+/// full), so a caller must always supply a full-size buffer. With direct
 /// delivery on both hops (see `tasks.rs::send_message`), a call to a
 /// server blocked in [`MSG_RECV`] round-trips without waiting for a
 /// tick on either side.
@@ -261,64 +262,87 @@ pub const SPAWN_STAGE: u64 = 30;
 
 // ---------------------------------------------------------------------
 // The filesystem server's request protocol (not syscalls) - messages
-// sent to FSD_TASK, normally via MSG_CALL. A request is FS_REQUEST_LEN
-// bytes: the op as a little-endian u64 at offset 0, then six
-// little-endian u64 arguments at offsets 8, 16, ... 48 (pointers and
-// lengths into the *caller's* memory - the server reads/writes client
-// buffers directly, the same single-address-space trust model the old
-// fs_* syscalls' pointer arguments had). The reply is a single
-// little-endian u64 in the reply message's first 8 bytes, carrying
-// exactly the old fs_* syscalls' return-value semantics: byte counts /
-// real sizes / 0 on success, or NO_FS / an FS_ERR_* code / FS_ERROR
-// from the reserved band. A call to an empty FSD_TASK slot fails with
-// TASK_ERR_NO_SUCH_TASK at the MSG_CALL layer itself - the "no
+// sent to FSD_TASK, normally via MSG_CALL. **v2, fully self-contained**
+// (v1 passed raw pointers into the caller's memory, which per-task
+// page tables made impossible for the server to dereference): a
+// request is a header - the op as a little-endian u64 at offset 0,
+// then four little-endian u64 parameters at offsets 8/16/24/32 - 
+// followed by the inline payload (path bytes, then data bytes for the
+// ops that carry data) starting at FS_REQ_PAYLOAD offset. The reply is
+// a status u64 at offset 0 (carrying exactly the old fs_* syscalls'
+// return-value semantics: byte counts / real sizes / 0, or NO_FS / an
+// FS_ERR_* code / FS_ERROR from the reserved band) followed by the
+// inline result payload (directory listings, file data) at offset 8.
+// Everything is copied task-to-task by the kernel's message machinery;
+// no pointer ever crosses a task boundary. Per-operation payloads are
+// capped at FS_DATA_MAX. A call to an empty FSD_TASK slot fails at the
+// MSG_CALL layer itself with TASK_ERR_NO_SUCH_TASK - the "no
 // filesystem server this boot" case.
 // ---------------------------------------------------------------------
 
-/// A filesystem request message's exact size in bytes (op + 6 args).
-pub const FS_REQUEST_LEN: u64 = 56;
+/// A request's header size: op + four parameter u64s. The inline
+/// payload starts here.
+pub const FS_REQ_PAYLOAD: u64 = 40;
 
-/// args: `(path ptr, path len, buf ptr, buf len)` -> bytes written.
+/// A reply's header size: the status u64. The inline result payload
+/// starts here.
+pub const FS_REPLY_PAYLOAD: u64 = 8;
+
+/// The per-operation payload cap, in bytes - one path, one data
+/// buffer, or one result may each be at most this long (the historical
+/// per-syscall buffer cap, kept as the protocol's own).
+pub const FS_DATA_MAX: u64 = 512;
+
+/// params: `(path len, want len)`; payload: path -> status = bytes of
+/// listing written to the reply payload (capped at `want len`).
 /// Formats each entry as `name\n`/`name/\n`, truncating rather than
-/// erroring if the buffer is too small.
+/// erroring if the cap is too small.
 pub const FSOP_LIST_DIR: u64 = 1;
-/// args: `(path ptr, path len, buf ptr, buf len)` -> the file's real
-/// size (which may exceed the buffer's length - compare to detect
-/// truncation).
+/// params: `(path len, want len)`; payload: path -> status = the
+/// file's *real* size (compare against `want len` to detect
+/// truncation); reply payload = the first `min(size, want)` bytes.
 pub const FSOP_READ_FILE: u64 = 2;
-/// args: `(path ptr, path len, offset, buf ptr, buf len)` -> bytes
-/// copied from the file starting at byte `offset` (`0` once the offset
-/// is at/past the end of the file). The chunked-read primitive the
-/// two-step [`SPAWN`] flow is built on - the one genuinely new
-/// capability in the protocol, everything else is the old syscalls'
-/// contracts verbatim.
+/// params: `(path len, offset, want len)`; payload: path -> status =
+/// bytes copied from the file starting at byte `offset` (`0` once the
+/// offset is at/past the end); reply payload = those bytes. The
+/// chunked-read primitive the two-step [`SPAWN`] flow is built on.
 pub const FSOP_READ_AT: u64 = 3;
-/// args: `(path ptr, path len, data ptr, data len)` -> `0`. Creates a
-/// file with exactly `data`'s contents, or fully overwrites (not
-/// appends to) an existing file's contents. Empty `data` is valid
+/// params: `(path len, data len)`; payload: path ++ data -> status =
+/// `0`. Creates a file with exactly the data's contents, or fully
+/// overwrites an existing file. Zero-length data is valid
 /// (truncate-to-empty).
 pub const FSOP_WRITE_FILE: u64 = 4;
-/// args: `(path ptr, path len)` -> `0`. Creates an empty directory.
+/// params: `(path len)`; payload: path -> `0`. Creates an empty
+/// directory.
 pub const FSOP_MKDIR: u64 = 5;
-/// args: `(path ptr, path len)` -> `0`. Removes an empty directory.
+/// params: `(path len)`; payload: path -> `0`. Removes an empty
+/// directory.
 pub const FSOP_RMDIR: u64 = 6;
-/// args: `(path ptr, path len)` -> `0`. Creates an empty file, or
-/// succeeds as a no-op if a file already exists there.
+/// params: `(path len)`; payload: path -> `0`. Creates an empty file,
+/// or succeeds as a no-op if a file already exists there.
 pub const FSOP_TOUCH: u64 = 7;
-/// args: `(path ptr, path len)` -> `0`. Removes a file (not a
+/// params: `(path len)`; payload: path -> `0`. Removes a file (not a
 /// directory - use [`FSOP_RMDIR`] for those).
 pub const FSOP_RM: u64 = 8;
-/// args: `(src ptr, src len, dst ptr, dst len)` -> `0`. Renames or
-/// moves `src` to `dst`; `dst` must not already exist.
+/// params: `(src len, dst len)`; payload: src ++ dst -> `0`. Renames
+/// or moves `src` to `dst`; `dst` must not already exist.
 pub const FSOP_MV: u64 = 9;
-/// no args -> `0` (mounted now), [`MOUNT_ALREADY`], or [`NO_FS`] (a
+/// no params -> `0` (mounted now), [`MOUNT_ALREADY`], or [`NO_FS`] (a
 /// device is present but carries no mountable FAT32). The FS half of
 /// the `mount` command - the device half is the [`MOUNT`] syscall,
 /// which must succeed (or report already-installed) first.
 pub const FSOP_MOUNT: u64 = 10;
 
-/// The largest message [`MSG_SEND`] accepts, in bytes.
-pub const MSG_MAX_LEN: u64 = 64;
+/// The largest message [`MSG_SEND`] accepts, in bytes. Raised from the
+/// original 64 when per-task page tables landed: the filesystem
+/// protocol's requests/replies became fully self-contained (payloads
+/// travel *inside* the message, kernel-copied task-to-task) once the
+/// server could no longer dereference pointers into a client's
+/// now-isolated memory - see the `FSOP_*` protocol section. Sized so
+/// one request holds a full path (up to [`FS_DATA_MAX`]... in practice
+/// paths are far shorter) plus a full data payload, and one reply
+/// holds the status plus a full result.
+pub const MSG_MAX_LEN: u64 = 768;
 
 /// [`WAIT`]'s answer when the waited task was killed rather than
 /// exiting: `0x100`, one past the largest real exit status.

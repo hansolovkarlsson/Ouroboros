@@ -330,11 +330,14 @@ pub(crate) fn interrupt_key_check(byte: u8) -> bool {
 #[derive(Clone, Copy)]
 struct Message {
     sender: u8,
-    len: u8,
+    /// u16, not u8: messages grew past 255 bytes when the filesystem
+    /// protocol's payloads moved inline (see syscall-abi's
+    /// MSG_MAX_LEN doc).
+    len: u16,
     data: [u8; MSG_MAX],
 }
 
-const MSG_MAX: usize = 64; // == syscall_abi::MSG_MAX_LEN, duplicated as a usize for array sizing
+const MSG_MAX: usize = syscall_abi::MSG_MAX_LEN as usize;
 const MSG_QUEUE_DEPTH: usize = 4;
 
 /// One task's bounded mailbox - a tiny ring of pending messages.
@@ -411,7 +414,7 @@ pub(crate) fn send_message(sender: usize, dest: usize, data: &[u8]) -> u64 {
     let slot = (mailbox.head + mailbox.count) % MSG_QUEUE_DEPTH;
     let msg = &mut mailbox.msgs[slot];
     msg.sender = sender as u8;
-    msg.len = data.len() as u8;
+    msg.len = data.len() as u16;
     msg.data[..data.len()].copy_from_slice(data);
     mailbox.count += 1;
     0

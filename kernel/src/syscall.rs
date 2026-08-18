@@ -247,6 +247,14 @@ fn valid_user_range(ptr: u64, len: u64) -> bool {
     ptr != 0 && len != 0 && len <= MAX_USER_LEN
 }
 
+/// The message syscalls' own bound - messages grew past
+/// [`MAX_USER_LEN`] when the filesystem protocol's payloads moved
+/// inline (`syscall_abi::MSG_MAX_LEN`, 768), so they can't share the
+/// 512-byte check the sector/staging buffers still use.
+fn valid_msg_range(ptr: u64, len: u64) -> bool {
+    ptr != 0 && len != 0 && len <= syscall_abi::MSG_MAX_LEN
+}
+
 /// Sized generously for a real userland program - the default shell is
 /// currently ~45KB. A fixed EL1 static, not a heap allocation: `alloc` is
 /// unavailable this deep into boot (see `loader.rs`'s own reasoning for
@@ -596,7 +604,7 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
             // marker in the shell's pipeline convention (see the
             // MSG_SEND doc in syscall-abi). The pointer must still be
             // non-null; only the length may be 0.
-            if arg1 == 0 || arg2 > MAX_USER_LEN {
+            if arg1 == 0 || arg2 > syscall_abi::MSG_MAX_LEN {
                 return FS_ERROR;
             }
             if dest >= tasks::NUM_TASKS || !tasks::task_exists(dest) {
@@ -608,7 +616,7 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
             tasks::send_message(tasks::current_task(), dest, data)
         }
         syscall_abi::MSG_RECV => {
-            if !valid_user_range(arg0, arg1) {
+            if !valid_msg_range(arg0, arg1) {
                 return FS_ERROR;
             }
             // Fast path: a message is already queued.
@@ -626,7 +634,7 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
             }
         }
         syscall_abi::MSG_TRY_RECV => {
-            if !valid_user_range(arg0, arg1) {
+            if !valid_msg_range(arg0, arg1) {
                 return FS_ERROR;
             }
             tasks::try_recv_message(tasks::current_task(), arg0, arg1).unwrap_or(syscall_abi::NO_MSG)
@@ -636,7 +644,7 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
             // Request pointer/length are caller-supplied; the reply
             // buffer's length is the fixed MSG_MAX_LEN (the 4-argument
             // ABI is exactly full - see the syscall-abi doc).
-            if !valid_user_range(arg1, arg2) || !valid_user_range(arg3, syscall_abi::MSG_MAX_LEN) {
+            if !valid_msg_range(arg1, arg2) || !valid_msg_range(arg3, syscall_abi::MSG_MAX_LEN) {
                 return FS_ERROR;
             }
             if dest == tasks::current_task() {

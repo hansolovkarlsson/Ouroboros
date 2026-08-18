@@ -1424,32 +1424,44 @@ fn get_ticks() -> u64 {
     syscall(syscall_abi::GET_TICKS, 0)
 }
 
-/// One filesystem-server round trip: packs an `FSOP_*` request (op +
-/// six little-endian u64 args - see the protocol section in
-/// `syscall-abi`) and `MSG_CALL`s it to the server's fixed slot
-/// ([`syscall_abi::FSD_TASK`]), returning the reply's u64 - which
-/// carries exactly the old fs_* syscalls' return-value semantics, so
-/// every caller (`cmd_ls`/`cmd_cat`/redirects/[`print_fs_error`])
-/// works unchanged. The two call-layer failures are folded into that
-/// same space: no server this boot (the call answers
-/// `TASK_ERR_NO_SUCH_TASK`) becomes [`NO_FS`] - which is literally
-/// true - and anything else (Ctrl+C mid-call, a full server mailbox)
-/// becomes the generic [`FS_ERROR`].
-fn fs_call(op: u64, args: [u64; 6]) -> u64 {
-    let mut req = [0u8; 56];
+/// One filesystem-server round trip, v2 protocol (fully
+/// self-contained - see the protocol section in `syscall-abi`): builds
+/// a request from a header (op + four params) plus up to two inline
+/// payload chunks (path, then data for the ops that carry it),
+/// `MSG_CALL`s it to the server's fixed slot
+/// ([`syscall_abi::FSD_TASK`]), and unpacks the reply - a status u64
+/// carrying exactly the old fs_* syscalls' return-value semantics,
+/// plus an inline result payload copied out into `result`. No pointer
+/// of this task's ever crosses to the server; the kernel's message
+/// machinery moves the bytes both ways, which is what makes the
+/// protocol work under per-task page tables. The two call-layer
+/// failures fold into the same status space: no server this boot
+/// becomes [`NO_FS`] - literally true - and anything else (Ctrl+C
+/// mid-call, a full server mailbox) becomes the generic [`FS_ERROR`].
+fn fs_call(op: u64, params: [u64; 4], payload1: &[u8], payload2: &[u8], result: &mut [u8]) -> u64 {
+    const HDR: usize = syscall_abi::FS_REQ_PAYLOAD as usize;
+    let mut req = [0u8; syscall_abi::MSG_MAX_LEN as usize];
     req[0..8].copy_from_slice(&op.to_le_bytes());
     let mut i = 0;
-    while i < 6 {
+    while i < 4 {
         let at = 8 + i * 8;
-        req[at..at + 8].copy_from_slice(&args[i].to_le_bytes());
+        req[at..at + 8].copy_from_slice(&params[i].to_le_bytes());
         i += 1;
     }
-    let mut reply = [0u8; 64];
+    let p1_end = HDR + payload1.len();
+    let p2_end = p1_end + payload2.len();
+    if p2_end > req.len() {
+        return syscall_abi::FS_ERROR;
+    }
+    req[HDR..p1_end].copy_from_slice(payload1);
+    req[p1_end..p2_end].copy_from_slice(payload2);
+
+    let mut reply = [0u8; syscall_abi::MSG_MAX_LEN as usize];
     let packed = syscall4(
         syscall_abi::MSG_CALL,
         syscall_abi::FSD_TASK,
         req.as_ptr() as u64,
-        req.len() as u64,
+        p2_end as u64,
         reply.as_mut_ptr() as u64,
     );
     if packed == syscall_abi::TASK_ERR_NO_SUCH_TASK {
@@ -1458,28 +1470,34 @@ fn fs_call(op: u64, args: [u64; 6]) -> u64 {
     if packed >= FS_ERR_MIN {
         return syscall_abi::FS_ERROR;
     }
-    let len = (packed & 0xffff_ffff) as usize;
-    if len < 8 {
+    let reply_len = ((packed & 0xffff_ffff) as usize).min(reply.len());
+    if reply_len < 8 {
         return syscall_abi::FS_ERROR;
     }
-    u64::from_le_bytes([
+    let status = u64::from_le_bytes([
         reply[0], reply[1], reply[2], reply[3], reply[4], reply[5], reply[6], reply[7],
-    ])
+    ]);
+    let data_len = (reply_len - 8).min(result.len());
+    result[..data_len].copy_from_slice(&reply[8..8 + data_len]);
+    status
 }
 
 /// Lists `path`'s directory entries into `buf` as `name\n`/`name/\n` -
 /// same format and truncation behavior as ever (the server implements
-/// the old kernel handler verbatim). Returns a byte count on success,
-/// [`NO_FS`], or a specific `FS_ERR_*` code (anything `>= FS_ERR_MIN`)
-/// (callers match on this directly - see [`cmd_ls`] and
-/// [`print_fs_error`] - so every failure reason gets its own accurate
-/// message). Every wrapper below is one [`fs_call`] round trip to the
-/// filesystem server: the shell's "libc layer" over IPC now, not
-/// syscalls; the contracts are unchanged.
+/// the old kernel handler verbatim, now into its own reply payload).
+/// Returns a byte count on success, [`NO_FS`], or a specific
+/// `FS_ERR_*` code (anything `>= FS_ERR_MIN`) - callers match on this
+/// directly (see [`cmd_ls`] and [`print_fs_error`] - so every failure
+/// reason gets its own accurate message). Every wrapper below is one
+/// [`fs_call`] round trip to the filesystem server: the shell's "libc
+/// layer" over IPC; the contracts are unchanged.
 fn fs_list_dir(path: &str, buf: &mut [u8]) -> u64 {
     fs_call(
         syscall_abi::FSOP_LIST_DIR,
-        [path.as_ptr() as u64, path.len() as u64, buf.as_mut_ptr() as u64, buf.len() as u64, 0, 0],
+        [path.len() as u64, buf.len() as u64, 0, 0],
+        path.as_bytes(),
+        &[],
+        buf,
     )
 }
 
@@ -1490,7 +1508,10 @@ fn fs_list_dir(path: &str, buf: &mut [u8]) -> u64 {
 fn fs_read_file(path: &str, buf: &mut [u8]) -> u64 {
     fs_call(
         syscall_abi::FSOP_READ_FILE,
-        [path.as_ptr() as u64, path.len() as u64, buf.as_mut_ptr() as u64, buf.len() as u64, 0, 0],
+        [path.len() as u64, buf.len() as u64, 0, 0],
+        path.as_bytes(),
+        &[],
+        buf,
     )
 }
 
@@ -1501,7 +1522,10 @@ fn fs_read_file(path: &str, buf: &mut [u8]) -> u64 {
 fn fs_read_at(path: &str, offset: u64, buf: &mut [u8]) -> u64 {
     fs_call(
         syscall_abi::FSOP_READ_AT,
-        [path.as_ptr() as u64, path.len() as u64, offset, buf.as_mut_ptr() as u64, buf.len() as u64, 0],
+        [path.len() as u64, offset, buf.len() as u64, 0],
+        path.as_bytes(),
+        &[],
+        buf,
     )
 }
 
@@ -1510,24 +1534,24 @@ fn fs_read_at(path: &str, offset: u64, buf: &mut [u8]) -> u64 {
 /// reason (already exists, invalid 8.3 name, parent missing, disk
 /// full, ... - see [`print_fs_error`]).
 fn fs_mkdir(path: &str) -> u64 {
-    fs_call(syscall_abi::FSOP_MKDIR, [path.as_ptr() as u64, path.len() as u64, 0, 0, 0, 0])
+    fs_call(syscall_abi::FSOP_MKDIR, [path.len() as u64, 0, 0, 0], path.as_bytes(), &[], &mut [])
 }
 
 /// Removes the empty directory at `path`. Same return contract as
 /// [`fs_mkdir`].
 fn fs_rmdir(path: &str) -> u64 {
-    fs_call(syscall_abi::FSOP_RMDIR, [path.as_ptr() as u64, path.len() as u64, 0, 0, 0, 0])
+    fs_call(syscall_abi::FSOP_RMDIR, [path.len() as u64, 0, 0, 0], path.as_bytes(), &[], &mut [])
 }
 
 /// Creates an empty file at `path`, or succeeds as a no-op if a file
 /// already exists there. Same return contract as [`fs_mkdir`].
 fn fs_touch(path: &str) -> u64 {
-    fs_call(syscall_abi::FSOP_TOUCH, [path.as_ptr() as u64, path.len() as u64, 0, 0, 0, 0])
+    fs_call(syscall_abi::FSOP_TOUCH, [path.len() as u64, 0, 0, 0], path.as_bytes(), &[], &mut [])
 }
 
 /// Removes the file at `path`. Same return contract as [`fs_mkdir`].
 fn fs_rm(path: &str) -> u64 {
-    fs_call(syscall_abi::FSOP_RM, [path.as_ptr() as u64, path.len() as u64, 0, 0, 0, 0])
+    fs_call(syscall_abi::FSOP_RM, [path.len() as u64, 0, 0, 0], path.as_bytes(), &[], &mut [])
 }
 
 /// Creates or fully overwrites the file at `path` with `data`. Same
@@ -1535,7 +1559,10 @@ fn fs_rm(path: &str) -> u64 {
 fn fs_write_file(path: &str, data: &[u8]) -> u64 {
     fs_call(
         syscall_abi::FSOP_WRITE_FILE,
-        [path.as_ptr() as u64, path.len() as u64, data.as_ptr() as u64, data.len() as u64, 0, 0],
+        [path.len() as u64, data.len() as u64, 0, 0],
+        path.as_bytes(),
+        data,
+        &mut [],
     )
 }
 
@@ -1544,7 +1571,10 @@ fn fs_write_file(path: &str, data: &[u8]) -> u64 {
 fn fs_mv(src: &str, dst: &str) -> u64 {
     fs_call(
         syscall_abi::FSOP_MV,
-        [src.as_ptr() as u64, src.len() as u64, dst.as_ptr() as u64, dst.len() as u64, 0, 0],
+        [src.len() as u64, dst.len() as u64, 0, 0],
+        src.as_bytes(),
+        dst.as_bytes(),
+        &mut [],
     )
 }
 
@@ -1690,7 +1720,7 @@ fn cmd_mount() {
     // first-MOUNTED-wins behavior: an unmountable boot-time device
     // (e.g. `make run`'s FAT16 vvfat disk) never blocks a later USB
     // stick from becoming the disk.
-    match fs_call(syscall_abi::FSOP_MOUNT, [0; 6]) {
+    match fs_call(syscall_abi::FSOP_MOUNT, [0; 4], &[], &[], &mut []) {
         0 => {
             print_line("mounted - disk commands available");
             return;
@@ -1716,7 +1746,7 @@ fn cmd_mount() {
             return;
         }
     }
-    match fs_call(syscall_abi::FSOP_MOUNT, [0; 6]) {
+    match fs_call(syscall_abi::FSOP_MOUNT, [0; 4], &[], &[], &mut []) {
         0 => print_line("mounted - disk commands available"),
         NO_FS => print_line("mount: device found, but no mountable FAT32 filesystem on it (see the server's log line)"),
         _ => print_line("mount: unexpected return"),
@@ -1767,7 +1797,7 @@ fn cmd_send(line: &str) {
 /// `recv` - blocks until a message arrives (`MSG_RECV`) and prints it
 /// as `task N: <message>`. Ctrl+C interrupts, same as `wait`.
 fn cmd_recv() {
-    let mut buf = [0u8; 64];
+    let mut buf = [0u8; syscall_abi::MSG_MAX_LEN as usize];
     match syscall4(syscall_abi::MSG_RECV, buf.as_mut_ptr() as u64, buf.len() as u64, 0, 0) {
         RECV_INTERRUPTED => print_line("recv: interrupted"),
         code if code >= FS_ERR_MIN => print_fs_error("recv", code),

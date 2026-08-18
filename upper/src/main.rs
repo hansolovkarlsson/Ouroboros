@@ -26,7 +26,7 @@ pub extern "C" fn _start() -> ! {
 }
 
 fn main() -> ! {
-    let mut buf = [0u8; 64];
+    let mut buf = [0u8; syscall_abi::MSG_MAX_LEN as usize];
     loop {
         let packed = syscall4(syscall_abi::MSG_RECV, buf.as_mut_ptr() as u64, buf.len() as u64, 0, 0);
         if packed >= syscall_abi::FS_ERR_MIN {

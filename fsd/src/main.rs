@@ -17,13 +17,15 @@
 //! lives in `main`'s own stack frame, which works because this server
 //! is one infinite loop that never returns.
 //!
-//! Request pointers are trusted, not validated against the caller's
-//! real region - the same single-address-space trust model the old
-//! in-kernel fs_* syscalls' pointer arguments had (see
-//! `kernel/src/syscall.rs`'s module doc comment), now spanning two EL0
-//! regions instead of EL0-to-kernel. The 512-byte per-buffer cap
-//! (`MAX_CLIENT_LEN`, the old kernel `MAX_USER_LEN`) is kept for the
-//! same sanity-bound reasons.
+//! **v2 protocol - fully self-contained, no client pointers.** The
+//! original protocol passed raw pointers into the caller's memory,
+//! which per-task page tables made impossible for this server to
+//! dereference; requests now carry their payloads inline (header +
+//! path/data bytes) and replies carry results inline (status + data),
+//! all copied task-to-task by the kernel's message machinery - this
+//! server only ever touches its own two buffers. The 512-byte
+//! per-operation payload cap (`syscall_abi::FS_DATA_MAX`, the old
+//! kernel `MAX_USER_LEN`) survives as the protocol's own.
 
 #![no_std]
 #![no_main]
@@ -40,10 +42,6 @@ pub extern "C" fn _start() -> ! {
     main()
 }
 
-/// The old kernel-side `MAX_USER_LEN`: the sanity cap on any
-/// client-supplied `(pointer, length)` pair.
-const MAX_CLIENT_LEN: u64 = 512;
-
 fn main() -> ! {
     let mut fs: Option<fat32::Fs> = None;
     // Auto-mount if the kernel already holds a device (QEMU's boot-time
@@ -52,7 +50,14 @@ fn main() -> ! {
     try_mount(&mut fs);
     print("fsd: filesystem server ready\r\n");
 
-    let mut req = [0u8; 64];
+    // v2 protocol: requests arrive fully self-contained (header +
+    // inline payload) and replies leave the same way (status + inline
+    // result) - this server never dereferences a client pointer, which
+    // is what makes it work at all under per-task page tables. Both
+    // buffers live in this frame; the request is borrowed while the
+    // reply is built, hence two separate arrays.
+    let mut req = [0u8; syscall_abi::MSG_MAX_LEN as usize];
+    let mut reply = [0u8; syscall_abi::MSG_MAX_LEN as usize];
     loop {
         let packed = syscall4(syscall_abi::MSG_RECV, req.as_mut_ptr() as u64, req.len() as u64, 0, 0);
         if packed >= syscall_abi::FS_ERR_MIN {
@@ -63,12 +68,11 @@ fn main() -> ! {
         }
         let sender = packed >> 32;
         let len = ((packed & 0xffff_ffff) as usize).min(req.len());
-        let result = handle(&mut fs, &req[..len]);
-        let reply = result.to_le_bytes();
+        let reply_len = handle(&mut fs, &req[..len], &mut reply);
         // A full/unreachable sender mailbox drops the reply - the
         // caller's MSG_CALL stays blocked until Ctrl+C; nothing better
         // exists to do with an undeliverable reply.
-        syscall4(syscall_abi::MSG_SEND, sender, reply.as_ptr() as u64, reply.len() as u64, 0);
+        syscall4(syscall_abi::MSG_SEND, sender, reply.as_ptr() as u64, reply_len as u64, 0);
     }
     loop {
         core::hint::spin_loop();
@@ -98,135 +102,169 @@ fn try_mount(fs: &mut Option<fat32::Fs>) {
     }
 }
 
-/// Decodes and executes one request, returning the reply value (the
-/// old fs_* syscalls' exact return-value semantics - see the protocol
-/// notes in `syscall-abi`).
-fn handle(fs: &mut Option<fat32::Fs>, req: &[u8]) -> u64 {
-    if req.len() < syscall_abi::FS_REQUEST_LEN as usize {
-        return syscall_abi::FS_ERROR;
+const REQ_PAYLOAD: usize = syscall_abi::FS_REQ_PAYLOAD as usize;
+const REPLY_PAYLOAD: usize = syscall_abi::FS_REPLY_PAYLOAD as usize;
+const DATA_MAX: usize = syscall_abi::FS_DATA_MAX as usize;
+
+/// Decodes and executes one v2 request from this server's own receive
+/// buffer, building the reply (status + inline result) in its own
+/// reply buffer. Returns the reply's total length. Every slice below
+/// is into `req`/`reply` - server-owned memory only.
+fn handle(fs: &mut Option<fat32::Fs>, req: &[u8], reply: &mut [u8]) -> usize {
+    if req.len() < REQ_PAYLOAD {
+        return status_reply(reply, syscall_abi::FS_ERROR);
     }
     let op = read_u64(req, 0);
-    let args = [
-        read_u64(req, 8),
-        read_u64(req, 16),
-        read_u64(req, 24),
-        read_u64(req, 32),
-        read_u64(req, 40),
-        read_u64(req, 48),
-    ];
+    let p = [read_u64(req, 8), read_u64(req, 16), read_u64(req, 24), read_u64(req, 32)];
+    let payload = &req[REQ_PAYLOAD..];
 
     if op == syscall_abi::FSOP_MOUNT {
         if fs.is_some() {
-            return syscall_abi::MOUNT_ALREADY;
+            return status_reply(reply, syscall_abi::MOUNT_ALREADY);
         }
         try_mount(fs);
-        return if fs.is_some() { 0 } else { syscall_abi::NO_FS };
+        let status = if fs.is_some() { 0 } else { syscall_abi::NO_FS };
+        return status_reply(reply, status);
     }
 
     let Some(fs) = fs.as_mut() else {
-        return syscall_abi::NO_FS;
+        return status_reply(reply, syscall_abi::NO_FS);
     };
     match op {
         syscall_abi::FSOP_LIST_DIR => {
-            let Some(path) = path_arg(args[0], args[1]) else { return syscall_abi::FS_ERROR };
-            let Some(buf) = buf_arg(args[2], args[3]) else { return syscall_abi::FS_ERROR };
-            // Same fill-until-full formatting as the old kernel
-            // fs_list_dir: once `buf` is full this stops *writing*,
-            // not iterating.
+            let Some(path) = path_from(payload, 0, p[0]) else {
+                return status_reply(reply, syscall_abi::FS_ERROR);
+            };
+            let Some(want) = want_len(p[1]) else {
+                return status_reply(reply, syscall_abi::FS_ERROR);
+            };
+            // Same fill-until-full formatting as ever: once the result
+            // window is full this stops *writing*, not iterating.
             let mut written = 0usize;
-            let result = fs.list_dir(path, |name, is_dir, _size| {
+            let (status_slot, result) = reply[..REPLY_PAYLOAD + want].split_at_mut(REPLY_PAYLOAD);
+            let outcome = fs.list_dir(path, |name, is_dir, _size| {
                 let suffix: &[u8] = if is_dir { b"/\n" } else { b"\n" };
                 let entry_len = name.len() + suffix.len();
-                if written + entry_len > buf.len() {
+                if written + entry_len > result.len() {
                     return;
                 }
-                buf[written..written + name.len()].copy_from_slice(name.as_bytes());
+                result[written..written + name.len()].copy_from_slice(name.as_bytes());
                 written += name.len();
-                buf[written..written + suffix.len()].copy_from_slice(suffix);
+                result[written..written + suffix.len()].copy_from_slice(suffix);
                 written += suffix.len();
             });
-            match result {
-                Ok(()) => written as u64,
-                Err(e) => error_code(&e),
+            match outcome {
+                Ok(()) => {
+                    status_slot[..8].copy_from_slice(&(written as u64).to_le_bytes());
+                    REPLY_PAYLOAD + written
+                }
+                Err(e) => status_reply(reply, error_code(&e)),
             }
         }
         syscall_abi::FSOP_READ_FILE => {
-            let Some(path) = path_arg(args[0], args[1]) else { return syscall_abi::FS_ERROR };
-            let Some(buf) = buf_arg(args[2], args[3]) else { return syscall_abi::FS_ERROR };
-            match fs.read_file(path, buf) {
-                Ok(size) => size as u64,
-                Err(e) => error_code(&e),
+            let Some(path) = path_from(payload, 0, p[0]) else {
+                return status_reply(reply, syscall_abi::FS_ERROR);
+            };
+            let Some(want) = want_len(p[1]) else {
+                return status_reply(reply, syscall_abi::FS_ERROR);
+            };
+            let (status_slot, result) = reply[..REPLY_PAYLOAD + want].split_at_mut(REPLY_PAYLOAD);
+            match fs.read_file(path, result) {
+                Ok(size) => {
+                    status_slot[..8].copy_from_slice(&(size as u64).to_le_bytes());
+                    REPLY_PAYLOAD + (size as usize).min(want)
+                }
+                Err(e) => status_reply(reply, error_code(&e)),
             }
         }
         syscall_abi::FSOP_READ_AT => {
-            let Some(path) = path_arg(args[0], args[1]) else { return syscall_abi::FS_ERROR };
-            let Some(buf) = buf_arg(args[3], args[4]) else { return syscall_abi::FS_ERROR };
-            match fs.read_at(path, args[2], buf) {
-                Ok(copied) => copied as u64,
-                Err(e) => error_code(&e),
+            let Some(path) = path_from(payload, 0, p[0]) else {
+                return status_reply(reply, syscall_abi::FS_ERROR);
+            };
+            let Some(want) = want_len(p[2]) else {
+                return status_reply(reply, syscall_abi::FS_ERROR);
+            };
+            let (status_slot, result) = reply[..REPLY_PAYLOAD + want].split_at_mut(REPLY_PAYLOAD);
+            match fs.read_at(path, p[1], result) {
+                Ok(copied) => {
+                    status_slot[..8].copy_from_slice(&(copied as u64).to_le_bytes());
+                    REPLY_PAYLOAD + copied as usize
+                }
+                Err(e) => status_reply(reply, error_code(&e)),
             }
         }
         syscall_abi::FSOP_WRITE_FILE => {
-            let Some(path) = path_arg(args[0], args[1]) else { return syscall_abi::FS_ERROR };
-            // Empty data is valid (truncate-to-empty) - the same
-            // allow-empty exception the old syscall's validation had.
-            let Some(data) = data_arg_allow_empty(args[2], args[3]) else { return syscall_abi::FS_ERROR };
+            let Some(path) = path_from(payload, 0, p[0]) else {
+                return status_reply(reply, syscall_abi::FS_ERROR);
+            };
+            // Zero-length data is valid (truncate-to-empty) - the
+            // payload just ends where the path does then.
+            let data_len = p[1] as usize;
+            let path_len = p[0] as usize;
+            if data_len > DATA_MAX || payload.len() < path_len + data_len {
+                return status_reply(reply, syscall_abi::FS_ERROR);
+            }
+            let data = &payload[path_len..path_len + data_len];
             match fs.write_file(path, data) {
-                Ok(()) => 0,
-                Err(e) => error_code(&e),
+                Ok(()) => status_reply(reply, 0),
+                Err(e) => status_reply(reply, error_code(&e)),
             }
         }
-        syscall_abi::FSOP_MKDIR => path_op(fs, args, fat32::Fs::mkdir),
-        syscall_abi::FSOP_RMDIR => path_op(fs, args, fat32::Fs::rmdir),
-        syscall_abi::FSOP_TOUCH => path_op(fs, args, fat32::Fs::touch),
-        syscall_abi::FSOP_RM => path_op(fs, args, fat32::Fs::rm),
+        syscall_abi::FSOP_MKDIR | syscall_abi::FSOP_RMDIR | syscall_abi::FSOP_TOUCH | syscall_abi::FSOP_RM => {
+            let Some(path) = path_from(payload, 0, p[0]) else {
+                return status_reply(reply, syscall_abi::FS_ERROR);
+            };
+            let outcome = match op {
+                syscall_abi::FSOP_MKDIR => fs.mkdir(path),
+                syscall_abi::FSOP_RMDIR => fs.rmdir(path),
+                syscall_abi::FSOP_TOUCH => fs.touch(path),
+                _ => fs.rm(path),
+            };
+            match outcome {
+                Ok(()) => status_reply(reply, 0),
+                Err(e) => status_reply(reply, error_code(&e)),
+            }
+        }
         syscall_abi::FSOP_MV => {
-            let Some(src) = path_arg(args[0], args[1]) else { return syscall_abi::FS_ERROR };
-            let Some(dst) = path_arg(args[2], args[3]) else { return syscall_abi::FS_ERROR };
+            let Some(src) = path_from(payload, 0, p[0]) else {
+                return status_reply(reply, syscall_abi::FS_ERROR);
+            };
+            let Some(dst) = path_from(payload, p[0] as usize, p[1]) else {
+                return status_reply(reply, syscall_abi::FS_ERROR);
+            };
             match fs.mv(src, dst) {
-                Ok(()) => 0,
-                Err(e) => error_code(&e),
+                Ok(()) => status_reply(reply, 0),
+                Err(e) => status_reply(reply, error_code(&e)),
             }
         }
-        _ => syscall_abi::FS_ERROR,
+        _ => status_reply(reply, syscall_abi::FS_ERROR),
     }
 }
 
-/// The shared shape of the four one-path operations.
-fn path_op(fs: &mut fat32::Fs, args: [u64; 6], op: fn(&mut fat32::Fs, &str) -> Result<(), fat32::Error>) -> u64 {
-    let Some(path) = path_arg(args[0], args[1]) else { return syscall_abi::FS_ERROR };
-    match op(fs, path) {
-        Ok(()) => 0,
-        Err(e) => error_code(&e),
-    }
+/// Writes a status-only reply and returns its length.
+fn status_reply(reply: &mut [u8], status: u64) -> usize {
+    reply[..8].copy_from_slice(&status.to_le_bytes());
+    REPLY_PAYLOAD
 }
 
-/// Validates and derefs a client path argument: non-null, non-empty,
-/// capped, UTF-8.
-fn path_arg(ptr: u64, len: u64) -> Option<&'static str> {
-    if ptr == 0 || len == 0 || len > MAX_CLIENT_LEN {
+/// A validated path slice out of the request payload: non-empty,
+/// capped, in-bounds, UTF-8.
+fn path_from(payload: &[u8], start: usize, len: u64) -> Option<&str> {
+    let len = len as usize;
+    if len == 0 || len > DATA_MAX || payload.len() < start + len {
         return None;
     }
-    let bytes = unsafe { core::slice::from_raw_parts(ptr as *const u8, len as usize) };
-    core::str::from_utf8(bytes).ok()
+    core::str::from_utf8(&payload[start..start + len]).ok()
 }
 
-/// Validates and derefs a client output buffer: non-null, non-empty,
-/// capped.
-fn buf_arg(ptr: u64, len: u64) -> Option<&'static mut [u8]> {
-    if ptr == 0 || len == 0 || len > MAX_CLIENT_LEN {
+/// A validated result-window size: non-zero, capped at the per-op
+/// payload max (which also always fits the reply buffer).
+fn want_len(want: u64) -> Option<usize> {
+    let want = want as usize;
+    if want == 0 || want > DATA_MAX {
         return None;
     }
-    Some(unsafe { core::slice::from_raw_parts_mut(ptr as *mut u8, len as usize) })
-}
-
-/// Validates and derefs client input data, where zero length is a real,
-/// meaningful value (truncate a file to empty).
-fn data_arg_allow_empty(ptr: u64, len: u64) -> Option<&'static [u8]> {
-    if ptr == 0 || len > MAX_CLIENT_LEN {
-        return None;
-    }
-    Some(unsafe { core::slice::from_raw_parts(ptr as *const u8, len as usize) })
+    Some(want)
 }
 
 /// The old kernel `fs_error_code`, unchanged: maps a `fat32::Error` to
