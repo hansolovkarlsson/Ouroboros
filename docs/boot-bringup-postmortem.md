@@ -558,7 +558,8 @@ mechanisms and one dead-end driver, a real, live, interactive console on
 real Parallels-on-Apple-Silicon hardware - the actual foundation
 everything after it was built on top of: turning that bare prompt into
 a [real, disk-backed userland shell](shell-and-filesystem-postmortem.md),
-[real keyboard input](xhci-keyboard-postmortem.md) reaching it, and -
-the last major piece, closed in a later session covered in this same
-document above - real, preemptive multitasking on that same real
-hardware, not just the emulator.
+[real keyboard input](xhci-keyboard-postmortem.md) reaching it,
+[a real disk on real hardware](usb-storage-postmortem.md) underneath
+it, and - closed in a later session covered in this same document
+above - real, preemptive multitasking on that same real hardware, not
+just the emulator.

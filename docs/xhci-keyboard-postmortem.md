@@ -11,14 +11,18 @@ existing write-up we could find that covered them. If you're building
 your own OS and your keyboard driver "sort of" works — enumerates fine,
 sends what look like correct commands, but you get garbage or silence
 back — some of this may save you a day of your own. This is the third of
-three related pieces: [`boot-bringup-postmortem.md`](boot-bringup-postmortem.md)
+four related pieces: [`boot-bringup-postmortem.md`](boot-bringup-postmortem.md)
 covers the earliest, most foundational bring-up work - exception
 vectors, the MMU switch, and the console-discovery saga that found a
-working display in the first place - and
+working display in the first place -
 [`shell-and-filesystem-postmortem.md`](shell-and-filesystem-postmortem.md)
 covers everything between that bare prompt and a real, disk-backed
 userland shell, which is what this document's driver finally had
-something to type into.
+something to type into - and
+[`usb-storage-postmortem.md`](usb-storage-postmortem.md) covers the
+day this document's xHCI driver grew a second device: a USB mass
+storage stick, the only disk real Parallels hardware turned out to
+offer.
 
 Eight real, confirmed bugs, each found by direct evidence (register
 dumps, decoded exception registers, byte-for-byte comparisons) rather

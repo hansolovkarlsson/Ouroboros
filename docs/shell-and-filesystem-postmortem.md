@@ -1,11 +1,13 @@
 # From a bare shell prompt to a real, disk-backed OS: an ARM64 kernel postmortem
 
-This is the middle piece of a three-part debugging history for
+This is the second piece of a four-part debugging history for
 [Ouroboros](../README.md), a from-scratch ARM64 microkernel.
 [The first piece](boot-bringup-postmortem.md) covers getting from "UEFI
 hands us control" to a live, working console on real hardware.
 [The third](xhci-keyboard-postmortem.md) covers getting real keyboard
-input into that console. This one covers everything in between: turning
+input into that console, and [the fourth](usb-storage-postmortem.md)
+covers getting this document's filesystem a real disk on real
+hardware, over USB. This one covers everything in between: turning
 a bare shell prompt into a real, disk-loaded userland process with real
 commands, a real filesystem underneath it, and real write support - and
 the bugs found doing it, several of which are genuinely reusable
