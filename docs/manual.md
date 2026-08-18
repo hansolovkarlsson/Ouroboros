@@ -122,6 +122,7 @@ tour:
 
 ```
 $ help                          # list every builtin
+$ mount                         # (Parallels) mount a passed-through USB stick
 $ ls /EFI/ORBS                  # disk commands (FAT32 boot only)
 $ write notes.txt hello world   # create/replace a file's contents
 $ cat notes.txt
@@ -185,6 +186,7 @@ statuses). `NO_FS` (`MAX-1`) means no filesystem is mounted this boot.
 | 19 | `kill` | index | Destroy another task (reaps immediately). Tasks 0/1 protected |
 | 20 | `fg` | index | Hand keyboard ownership to a task (auto-reverts to task 0 on the owner's death, or on Ctrl+C) |
 | 21 | `wait` | index | Block until the task dies; returns its status (0–255), `TASK_KILLED_STATUS` (0x100), or `WAIT_INTERRUPTED` (Ctrl+C). Collecting the status reaps the slot |
+| 22 | `mount` | — | Rescan the USB ports and mount a storage device's FAT32 (`0`, `MOUNT_ALREADY`, or `MOUNT_NO_DEVICE`) — the Parallels disk path |
 
 Filesystem failures return a specific `FS_ERR_*` code (`NOT_FOUND`,
 `NOT_A_FILE`, `NOT_A_DIRECTORY`, `INVALID_NAME`, `ALREADY_EXISTS`,
