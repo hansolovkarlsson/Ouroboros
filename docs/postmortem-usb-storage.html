@@ -1,0 +1,429 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>USB Storage Postmortem — Ouroboros</title>
+<meta name="description" content="The fourth chapter of the Ouroboros OS debugging history: proving the hypervisor offers no disk at all, then building one anyway — USB mass storage over a from-scratch xHCI driver.">
+<link rel="icon" type="image/png" href="assets/favicon.png">
+<link rel="stylesheet" href="assets/site.css">
+</head>
+<body>
+
+<nav class="sitenav">
+  <div class="sitenav-inner">
+    <a class="sitenav-mark" href="index.html">ouroboros</a>
+    <div class="sitenav-links">
+      <a href="index.html">Home</a>
+      <a href="postmortem-boot-bringup.html">Boot bring-up</a>
+      <a href="postmortem-shell-filesystem.html">Shell &amp; filesystem</a>
+      <a href="postmortem-xhci-keyboard.html">xHCI keyboard</a>
+      <a href="postmortem-usb-storage.html" class="current">USB storage</a>
+      <a href="glossary.html">Glossary</a>
+      <a href="https://github.com/hansolovkarlsson/Ouroboros">GitHub ↗</a>
+    </div>
+  </div>
+</nav>
+
+<div class="page">
+
+  <div class="kicker">Debugging postmortem · Ouroboros · part 4 of 4</div>
+
+  <h1 class="title small">Giving Parallels a disk</h1>
+  <p class="dek">
+    Proving the storage controller you wanted doesn't exist, discovering
+    the one documented path that does, and the keystroke that would have
+    killed the keyboard forever if it had arrived during a disk read.
+  </p>
+
+  <nav class="trilogy">
+    <a href="postmortem-boot-bringup.html">1 · Boot bring-up</a>
+    <a href="postmortem-shell-filesystem.html">2 · Shell &amp; filesystem</a>
+    <a href="postmortem-xhci-keyboard.html">3 · xHCI keyboard</a>
+    <a href="#" class="current" aria-current="page">4 · USB storage</a>
+  </nav>
+
+  <div class="companion">
+    <span class="companion-icon">💾</span>
+    <span>This is the last of four companion pieces — <a href="postmortem-boot-bringup.html">the boot bring-up postmortem</a> covers the foundations, <a href="postmortem-shell-filesystem.html">the shell &amp; filesystem postmortem</a> covers the filesystem this milestone finally gave a real disk on real hardware, and <a href="postmortem-xhci-keyboard.html">the xHCI keyboard postmortem</a> covers the USB host-controller driver this one builds directly on.</span>
+  </div>
+
+  <article>
+
+    <p>
+      This is a write-up of one day's work taking
+      <a href="https://github.com/hansolovkarlsson/Ouroboros">Ouroboros</a>,
+      a from-scratch ARM64 microkernel, from "our primary hardware
+      target has no disk and we don't know if it ever can" to reading a
+      real USB stick, loading programs from it at runtime, and passing
+      messages between them — on real Parallels Desktop on Apple
+      Silicon. If you're writing a bare-metal OS and wondering how to
+      get <em>any</em> disk on a hypervisor that doesn't offer you one,
+      or building a USB mass-storage driver over your own xHCI stack,
+      some of this may save you real time. Everything below was
+      confirmed by direct evidence — decoded descriptors, on-screen
+      device inventories, byte-level round trips — not guessed.
+    </p>
+
+    <p>
+      The starting problem: Parallels on Apple Silicon boots this kernel
+      fine (UEFI reads it off a virtual hard disk), and by the start of
+      this day the kernel had a working framebuffer console, a USB
+      keyboard, preemptive multitasking, and a full shell — but no way
+      to touch a disk <em>after</em> boot. Firmware reads the boot
+      volume during UEFI boot services; the moment boot services exit,
+      that access is gone, and every disk command in the shell printed
+      "no filesystem mounted this boot." The obvious question: what
+      storage interface does this hypervisor actually expose to the
+      guest, and can we drive it?
+    </p>
+
+    <h2>The answer is "none" — and proving a negative takes real experiments</h2>
+
+    <p>
+      A PCI device inventory (a diagnostic the kernel already carried)
+      showed five devices: HD Audio, an EHCI USB&nbsp;2.0 controller, an
+      xHCI USB&nbsp;3.0 controller, virtio-net, and one vendor-specific
+      Parallels device with no public documentation.
+      <strong>No storage controller of any kind</strong> — despite the
+      VM demonstrably booting from its "SATA" hard disk every single
+      run. "SATA" in the hypervisor's configuration does not mean an
+      AHCI controller on the guest bus.
+    </p>
+
+    <p>
+      That could still have meant "wrong attachment type," so the
+      alternatives were tested directly, from the host, using the
+      hypervisor's own CLI. It told us an ARM64 EFI VM accepts exactly
+      two disk interfaces (IDE and SCSI), and SCSI accepts three
+      controller subtypes. Attaching a scratch disk as each of the two
+      LSI Fusion-MPT subtypes — real, documented hardware that would
+      have been an implementable spec — produced a
+      <strong>byte-identical PCI inventory both times</strong>. The
+      emulated controllers simply don't exist on Apple Silicon, even
+      when the configuration accepts them. The third subtype was
+      refused by the hypervisor itself as incompatible with EFI
+      firmware.
+    </p>
+
+    <p>
+      Conclusion, with evidence rather than resignation: all storage on
+      this platform flows through a proprietary, non-PCI path.
+      "Implement a documented spec" is not available for any
+      attached-image disk. The one documented thing on that bus with a
+      path to storage was the xHCI controller the kernel already drove
+      for its keyboard — which pointed at USB mass storage via a
+      passed-through physical stick.
+    </p>
+
+    <p>
+      <strong>A tooling problem worth recording from the same
+      session:</strong> the kernel's PCI inventory prints during UEFI
+      boot services, and this platform's framebuffer console clears the
+      screen when it installs — about <em>two seconds</em> after
+      power-on. A capture loop screenshotting the booting VM at
+      0.4-second intervals never caught anything but the finished
+      shell. The fix was to make the diagnostic <em>return</em> its
+      data so the kernel could re-print it through the console that
+      survives.
+    </p>
+
+    <div class="lesson">
+      <span class="lesson-label">Lesson</span>
+      <p>
+        If your target boots faster than you can read, don't race it —
+        capture the diagnostic's data on one side of the transition and
+        replay it on the other.
+      </p>
+    </div>
+
+    <h2>USB passthrough routes by speed — USB 2.0 goes somewhere you can't follow</h2>
+
+    <p>
+      The first enumeration attempt used the USB 2.0 stick on hand.
+      Passed through and confirmed connected to the VM by the host's
+      own tooling — and it <strong>never appeared on the xHCI
+      controller</strong>. A temporary diagnostic (dump every connected
+      xHCI port at scan time, wait six wall-clock seconds, dump again)
+      showed the same two ports — virtual mouse, keyboard — before
+      <em>and</em> after the wait, ruling out slow attachment.
+    </p>
+
+    <p>
+      The VM has both an EHCI (USB 2.0) and an xHCI (USB 3.0)
+      controller, and the hypervisor routes passthrough devices by
+      their speed: <strong>high-speed devices land on EHCI,
+      SuperSpeed devices on xHCI</strong>. With no EHCI driver and no
+      appetite for writing a second host-controller driver for one
+      stick, the answer was: get a USB 3.x stick. When one arrived, it
+      appeared on an xHCI root port at SuperSpeed, enumerated through
+      the kernel's own multi-device scan, and presented exactly the
+      textbook mass-storage interface: SCSI-transparent command set
+      over Bulk-Only Transport.
+    </p>
+
+    <h2>Passthrough attaches <em>late</em> — your boot-time scan will miss it</h2>
+
+    <p>
+      The same six-second diagnostic produced a second, subtler
+      finding: on this hypervisor, a passed-through USB device attaches
+      <strong>several seconds after the VM starts</strong> — after the
+      kernel's one-shot boot-time port scan has already run (boot to
+      shell takes about two seconds; the attach lands around six to
+      eight). The very first bare run missed the stick entirely; the
+      diagnostic build only caught it because its deliberate six-second
+      delay happened to push the scan late enough.
+    </p>
+
+    <p>
+      This turned "no hot-plug support" from a documented nicety into a
+      hard design input: the storage driver got a runtime port rescan,
+      triggered explicitly by a <code class="inline">mount</code> shell
+      command — boot, wait a moment, type
+      <code class="inline">mount</code>. QEMU's monitor turned out to be
+      a perfect stand-in for testing this: genuine hot-plug of a
+      storage device into a running VM, fully scripted, no hardware
+      required.
+    </p>
+
+    <h2>What single-device assumptions quietly hide</h2>
+
+    <p>
+      Before storage, the xHCI driver was deliberately one-device: the
+      port scan tried each port until it found the keyboard and
+      <em>abandoned</em> everything else. Preparing for keyboard and
+      stick to coexist exposed two pieces of per-device state that were
+      single <strong>only because of that abandonment</strong>:
+    </p>
+
+    <ul class="techniques">
+      <li><strong>The Output Device Context</strong> — the memory the controller itself writes a device's state into, through a per-slot pointer array. One shared context with two live slots pointing at it is real memory corruption, not a bookkeeping wrinkle.</li>
+      <li><strong>The default-endpoint transfer ring</strong> — each device's Address Device command declares its own ring position to hardware. The old shared ring needed an explicit software rewind per candidate device; two live devices can't share the memory at all.</li>
+    </ul>
+
+    <p>
+      Both became small per-device pools. Two ordering and routing
+      rules came out of the same work, and both generalize:
+      <strong>activate the endpoint that generates unsolicited traffic
+      last</strong> (the keyboard's interrupt endpoint is armed only
+      after the whole scan finishes, so keystroke events can't
+      interleave with a later device's setup), and <strong>route
+      completion events by slot and endpoint ID</strong> — with more
+      than one live device, "the next event" and "my event" are
+      different things.
+    </p>
+
+    <h2>The mid-transfer keystroke that would have killed the keyboard permanently</h2>
+
+    <p>
+      The sharpest correctness point in the storage driver was found by
+      reading the event loop before it ever failed. During a bulk
+      transfer, the driver waits synchronously for <em>its</em>
+      completion event on the shared event ring. A keystroke arriving
+      in that window posts <em>its</em> event to the same ring. The
+      naive wait skips and drops foreign events — which here would not
+      just lose the keystroke: the keyboard's single interrupt buffer
+      is only re-armed when its event is <em>processed</em>, so a
+      dropped event means <strong>the keyboard never receives anything
+      again</strong>. Typing during disk I/O would brick input for the
+      rest of the boot.
+    </p>
+
+    <p>
+      The fix is routing, not dropping: the wait hands keyboard events
+      to the exact same report-processing code the normal poll uses
+      (factored so both can call it), which re-arms the buffer and
+      queues the keystrokes. Verified by firing keystrokes interleaved
+      with disk commands: zero lost characters.
+    </p>
+
+    <div class="lesson">
+      <span class="lesson-label">Lesson</span>
+      <p>
+        If your driver has any synchronous wait on a shared completion
+        queue, ask what happens to everyone <em>else's</em> completions
+        while you wait — especially completions whose processing is
+        what keeps their own device alive.
+      </p>
+    </div>
+
+    <h2>SCSI Unit Attention — found by the hot-plug test, not the spec</h2>
+
+    <p>
+      The QEMU hot-plug test produced a beautifully diagnosable failure
+      on first contact with a freshly attached device: INQUIRY
+      succeeded, then the first READ CAPACITY failed with an error
+      status, and a manual retry succeeded. That pattern <em>is</em>
+      the explanation: a freshly attached-or-reset SCSI device reports
+      a <strong>Unit Attention</strong> condition, failing the first
+      command with CHECK CONDITION until the sense data is fetched —
+      and INQUIRY is spec-exempt from Unit Attention, which is exactly
+      why it sailed through. The standard bring-up sequence (a short
+      TEST UNIT READY / REQUEST SENSE loop before the first real
+      command) cleared it. Real sticks set Unit Attention too, so the
+      QEMU-found fix mattered on hardware.
+    </p>
+
+    <div class="lesson">
+      <span class="lesson-label">Lesson</span>
+      <p>
+        When command A works and command B fails on a fresh device,
+        check which commands are <em>exempt</em> from pending
+        conditions before suspecting your transport.
+      </p>
+    </div>
+
+    <h2>Two error codes that collapse into one will eventually lie to you</h2>
+
+    <p>
+      Two same-day findings from outside the storage driver, same
+      underlying moral. First: the kernel bounds every userland syscall
+      buffer at 512 bytes, and rejects longer ones with the same
+      generic error code used for "no such file." The shell's new
+      append operator (<code class="inline">&gt;&gt;</code>) used a
+      1024-byte buffer for its read-back — the rejection was
+      indistinguishable from "file doesn't exist," whose legitimate
+      meaning in an append is "create it." Result: <strong>append
+      silently behaved as overwrite</strong>, discarding the existing
+      content, caught only because the very first append test compared
+      actual file contents rather than trusting the exit status.
+    </p>
+
+    <p>
+      Second: the day the collapsed filesystem error code was split
+      into specific ones, the new messages instantly exposed a real
+      mis-mapping that had been hiding for weeks —
+      <code class="inline">rmdir /</code> reported "invalid name"
+      instead of "can't remove the root directory," because a
+      path-splitting helper failed <em>before</em> the root check ever
+      ran. Invisible for as long as both causes collapsed into the same
+      vague message.
+    </p>
+
+    <div class="lesson">
+      <span class="lesson-label">Lesson</span>
+      <p>
+        Collapsed error codes don't just annoy users — they hide bugs
+        from their own authors. The day you split them, expect at least
+        one of the newly specific messages to be wrong in a way that
+        was always wrong.
+      </p>
+    </div>
+
+    <h2>A "can't happen yet" is a bug with a start date</h2>
+
+    <p>
+      Directory extension (letting <code class="inline">mkdir</code>
+      grow a full directory by a cluster) was a small feature — the
+      real find was in <code class="inline">rmdir</code>, which freed
+      exactly <em>one</em> cluster. That was correct for as long as
+      every directory was single-cluster <strong>by
+      construction</strong>, and became a silent cluster leak the
+      moment directories could grow — exactly the sequence (fill a
+      directory, empty it, remove it) the new feature made routine. The
+      same shape appeared earlier in this project's history and will
+      appear again: an invariant maintained by a limitation elsewhere
+      is a bug scheduled to trigger when that limitation is lifted.
+      When you lift one, grep for everyone who was leaning on it.
+    </p>
+
+    <h2>The toolchain can poison you even in release mode</h2>
+
+    <p>
+      Ouroboros userland is position-independent and links against
+      Rust's <em>prebuilt</em> core library, which contains some
+      non-position-independent object code. The known rule was
+      "userland must build in release" (debug builds pull the poisoned
+      objects in through panic machinery). This day added a sharper
+      corollary: even in release, an ordinary string slice by range
+      pulled in the slice-bounds panic path — whose can't-actually-happen
+      error branch formats the offending string with enough of the
+      formatting machinery to drag a non-PIC object into the link and
+      fail the build outright.
+    </p>
+
+    <div class="panel">
+      <div class="panel-tab"><span>the fix</span><span>shell/src/main.rs</span></div>
+      <pre><code><span class="bad">// fails to link: the slice's panic path pulls non-PIC
+// formatting code out of the prebuilt core library</span>
+<span class="bad">let head = &amp;line[..offset];</span>
+
+<span class="good">// links fine: non-panicking, no panic path to pull in
+// (the offset is a known-good char boundary anyway)</span>
+<span class="good">let head = line.get(..offset)?;</span></code></pre>
+    </div>
+
+    <div class="lesson">
+      <span class="lesson-label">Lesson</span>
+      <p>
+        If you link prebuilt core libraries under a stricter relocation
+        model than they were built for, panic <em>formatting</em> paths
+        are your enemy even when the panics themselves are impossible.
+        Prefer the non-panicking API shape wherever one exists.
+      </p>
+    </div>
+
+    <h2>The anomaly we recorded and did not explain</h2>
+
+    <p>
+      Honesty section. The very first real-hardware run after assigning
+      the USB stick to the VM showed <strong>no synthetic keystrokes
+      arriving at all</strong> — the boot completed normally and the
+      screen simply never echoed a single typed character. It never
+      reproduced: a control run without the stick was clean, a
+      six-command timeline probe typed straight through the attach
+      window was clean, and every subsequent full run was clean. The
+      best (unproven) explanation is that the scripted keystroke stream
+      was lost on the host side during first-attach USB turbulence.
+      It's recorded as exactly that — one unreproduced run, bounded by
+      control experiments — rather than silently forgotten or
+      hand-wavingly "fixed."
+    </p>
+
+    <div class="lesson mystery">
+      <span class="lesson-label">Lesson — an honest one</span>
+      <p>
+        Negative results and unexplained one-offs belong in the record,
+        bounded by whatever control experiments you can run — the
+        alternative is re-debugging them from scratch when they
+        resurface, with the first occurrence forgotten.
+      </p>
+    </div>
+
+    <h2>Techniques that generalized well</h2>
+
+    <ul class="techniques">
+      <li><strong>Prove a negative with experiments, not absence.</strong> "No storage controller" was established by attaching every controller type the hypervisor offers and showing the bus never changed — not by failing to find one once.</li>
+      <li><strong>A headless hardware lab pays for itself in a day.</strong> The hypervisor's own CLI drove every experiment here unattended: boot, per-scancode typing (including held-Shift and held-Ctrl chords), screenshots, USB assignment — no human watching a screen.</li>
+      <li><strong>One variable per hardware round trip.</strong> The USB 2.0 question, the late-attach question, and the keystroke anomaly each got their own dedicated boot with one thing changed.</li>
+      <li><strong>Organic tests beat synthetic ones where the system allows them.</strong> Tiny 512-byte clusters made directory growth reachable with fifteen real files; QEMU monitor hot-plug made the rescan path testable without hardware; a deliberate two-second delay in a test program made a blocking wait testable by a human-speed typist.</li>
+      <li><strong>Read the event loop before it fails.</strong> The keyboard-death trap was designed against, then verified — not discovered by a dead keyboard.</li>
+    </ul>
+
+    <h2>Where this ended up</h2>
+
+    <p>
+      The same screen that started the day saying "no filesystem
+      mounted this boot" ended it showing:
+      <code class="inline">mount</code> finding a real Lexar stick, its
+      real INQUIRY vendor strings, a 116&nbsp;GiB capacity, a mounted
+      FAT32, a listing of the stick's actual files — then
+      <code class="inline">exec</code> loading a program off that stick
+      at runtime (a first for this kernel on real hardware), a complete
+      message-passing round trip through it, and a blocking
+      <code class="inline">wait</code> collecting a second program's
+      exit status, with the two tasks' output visibly interleaved on
+      the console. Every userland facility the kernel has now runs on
+      the platform it was built for.
+    </p>
+
+  </article>
+
+  <footer class="site-footer">
+    <span>Ouroboros — an ARM64 microkernel, written from scratch in Rust</span>
+    <a href="https://github.com/hansolovkarlsson/Ouroboros">github.com/hansolovkarlsson/Ouroboros</a>
+  </footer>
+
+</div>
+</body>
+</html>

@@ -18,6 +18,7 @@
       <a href="postmortem-boot-bringup.html">Boot bring-up</a>
       <a href="postmortem-shell-filesystem.html" class="current">Shell &amp; filesystem</a>
       <a href="postmortem-xhci-keyboard.html">xHCI keyboard</a>
+      <a href="postmortem-usb-storage.html">USB storage</a>
       <a href="glossary.html">Glossary</a>
       <a href="https://github.com/hansolovkarlsson/Ouroboros">GitHub ↗</a>
     </div>
@@ -26,7 +27,7 @@
 
 <div class="page">
 
-  <div class="kicker">Debugging postmortem · Ouroboros · part 2 of 3</div>
+  <div class="kicker">Debugging postmortem · Ouroboros · part 2 of 4</div>
 
   <h1 class="title small">From a bare shell prompt to a real, disk-backed OS</h1>
   <p class="dek">
@@ -39,17 +40,18 @@
     <a href="postmortem-boot-bringup.html">1 · Boot bring-up</a>
     <a href="#" class="current" aria-current="page">2 · Shell &amp; filesystem</a>
     <a href="postmortem-xhci-keyboard.html">3 · xHCI keyboard</a>
+    <a href="postmortem-usb-storage.html">4 · USB storage</a>
   </nav>
 
   <div class="companion">
     <span class="companion-icon">📖</span>
-    <span>This is the middle of three companion pieces — <a href="postmortem-boot-bringup.html">the boot bring-up postmortem</a> covers everything below it sits on top of, and <a href="postmortem-xhci-keyboard.html">the xHCI keyboard postmortem</a> covers the USB input driver built on top of both.</span>
+    <span>This is the second of four companion pieces — <a href="postmortem-boot-bringup.html">the boot bring-up postmortem</a> covers everything below it sits on top of, <a href="postmortem-xhci-keyboard.html">the xHCI keyboard postmortem</a> covers the USB input driver built on top of both, and <a href="postmortem-usb-storage.html">the USB storage postmortem</a> covers this filesystem finally reaching a real disk on real hardware.</span>
   </div>
 
   <article>
 
     <p>
-      This is the middle piece of a three-part debugging history for
+      This is the second piece of a four-part debugging history for
       <a href="https://github.com/hansolovkarlsson/Ouroboros">Ouroboros</a>,
       a from-scratch ARM64 microkernel. Part one covers getting from
       "UEFI hands us control" to a live, working console on real

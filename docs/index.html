@@ -18,6 +18,7 @@
       <a href="postmortem-boot-bringup.html">Boot bring-up</a>
       <a href="postmortem-shell-filesystem.html">Shell &amp; filesystem</a>
       <a href="postmortem-xhci-keyboard.html">xHCI keyboard</a>
+      <a href="postmortem-usb-storage.html">USB storage</a>
       <a href="glossary.html">Glossary</a>
       <a href="https://github.com/hansolovkarlsson/Ouroboros">GitHub ↗</a>
     </div>
@@ -48,8 +49,8 @@
   <div class="stat-row">
     <div class="stat"><span class="stat-num">aarch64</span><span class="stat-label">Architecture</span></div>
     <div class="stat"><span class="stat-num">UEFI</span><span class="stat-label">Boot path</span></div>
-    <div class="stat"><span class="stat-num">3</span><span class="stat-label">Workspace crates</span></div>
-    <div class="stat"><span class="stat-num">3</span><span class="stat-label">Postmortems</span></div>
+    <div class="stat"><span class="stat-num">5</span><span class="stat-label">Workspace crates</span></div>
+    <div class="stat"><span class="stat-num">4</span><span class="stat-label">Postmortems</span></div>
   </div>
 
   <article>
@@ -85,10 +86,12 @@
       The short version: there is a real, disk-loaded userland shell,
       with a working command surface over a real filesystem, running on
       real Parallels hardware — with a live display, a real, physical
-      USB keyboard typing into it, and, as of the latest milestone, real
-      preemptive multitasking. Disk commands still don't work on
-      Parallels specifically — no virtio-blk device exists there over
-      any transport this project can drive (see "what's next" below).
+      USB keyboard typing into it, real preemptive multitasking, and,
+      as of the latest milestones, a real disk (a passed-through USB
+      stick, driven over the kernel's own xHCI driver — the only
+      storage path Parallels actually exposes), programs loaded and
+      spawned from it at runtime, job control, and real message-passing
+      IPC between tasks.
     </p>
 
     <ol class="timeline">
@@ -120,9 +123,21 @@
         <span class="tl-title">Real interrupt-controller discovery, and full preemption on Parallels</span>
         <p>Real ACPI MADT parsing replaced the old QEMU-devicetree-derived GIC address; a new GICv3 driver reaches real hardware for the first time. A second real-hardware-only bug (the task switch hanging via <code class="inline">wfe</code>, likely trapped by the host hypervisor) was root-caused and fixed the same session. Preemptive, two-task multitasking now works end to end on real Parallels hardware.</p>
       </li>
+      <li class="done">
+        <span class="tl-title">A real relocating loader, and a real task lifecycle</span>
+        <p>Userland programs are genuine position-independent ELF now (killing the old no-<code class="inline">core::fmt</code>/no-literal-comparison restrictions — and surfacing a latent syscall-path register-clobber bug along the way); tasks block instead of busy-polling, and <code class="inline">exec</code>, <code class="inline">exit</code>, <code class="inline">wait</code>, <code class="inline">kill</code>, <code class="inline">fg</code>, and a Ctrl+C escape hatch make spawned programs a real, controllable part of the system — including nested interactive shell sessions.</p>
+      </li>
+      <li class="done">
+        <span class="tl-title">A real disk on real Parallels hardware: USB mass storage</span>
+        <p>A dedicated diagnostic first proved Parallels exposes <em>no</em> storage controller of any kind on the guest PCI bus — so the kernel's own xHCI driver grew multi-device support and bulk endpoints, and a from-scratch Bulk-Only Transport + SCSI driver now mounts a passed-through USB 3.x stick: real FAT32, real files, programs <code class="inline">exec</code>'d off it at runtime.</p>
+      </li>
+      <li class="done">
+        <span class="tl-title">Real IPC — driver isolation, part 1</span>
+        <p>Fixed-size messages copied through the kernel into bounded per-task mailboxes, a blocking receive on the proven wait machinery, and a real long-lived userland message server — demonstrated end to end on real hardware, off the real stick.</p>
+      </li>
       <li>
         <span class="tl-title">What's next</span>
-        <p>A relocating loader to remove the current no-<code class="inline">core::fmt</code>/no-literal-comparison restriction on userland programs; blocking/waiting primitives; output redirection; virtio-blk/virtio-mmio on Parallels remain unaddressed (no such device present there over any transport this project can drive).</p>
+        <p>Driver isolation, part 2: moving the FAT32 filesystem out of the kernel into a userland server — the textbook microkernel move, speaking the new IPC to clients and raw block syscalls to the kernel.</p>
       </li>
     </ol>
 
@@ -131,7 +146,7 @@
     <p>
       Every real bug found along the way — the ones that mattered, not
       the routine typos — is written up in detail: symptom, root cause,
-      how it was actually confirmed, and the generalizable lesson. Three
+      how it was actually confirmed, and the generalizable lesson. Four
       pieces, in chronological order, each usable on its own.
     </p>
 
@@ -150,6 +165,11 @@
         <span class="pm-eyebrow">Part 3 · xHCI keyboard</span>
         <h3>Getting a USB keyboard working on Parallels</h3>
         <p>Seven real, confirmed hardware bugs bringing keyboard input to the kernel — a PCI Command register bit, a real UEFI firmware panic, a page-table assumption, a silently-dropped USB request class, a driver reading the wrong device, dropped keystrokes under real preemption, and a timeout that was iteration-bounded instead of time-bounded — the last two found weeks later, one of them by a user, not a script.</p>
+      </a>
+      <a class="pm-card" href="postmortem-usb-storage.html">
+        <span class="pm-eyebrow">Part 4 · USB storage</span>
+        <h3>Giving Parallels a disk</h3>
+        <p>Proving the hypervisor exposes no storage controller at all, USB passthrough that routes devices by speed and attaches them after your boot scan already ran, a mid-transfer keystroke that would have permanently killed the keyboard, SCSI Unit Attention found by a hot-plug test, and two error codes whose collapse silently turned append into overwrite.</p>
       </a>
     </div>
 
