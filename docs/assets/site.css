@@ -250,6 +250,7 @@ article h2 {
   margin: 3.2rem 0 1.1rem;
   padding-top: 2.1rem;
   border-top: 1px solid var(--wire);
+  scroll-margin-top: 4.5rem; /* anchored jumps clear the sticky nav */
 }
 article > h2:first-of-type { border-top: none; padding-top: 0; }
 

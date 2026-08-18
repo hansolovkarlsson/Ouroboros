@@ -15,6 +15,7 @@
     <a class="sitenav-mark" href="index.html">ouroboros</a>
     <div class="sitenav-links">
       <a href="index.html" class="current">Home</a>
+      <a href="tutorial.html">Learn</a>
       <a href="postmortem-boot-bringup.html">Boot bring-up</a>
       <a href="postmortem-shell-filesystem.html">Shell &amp; filesystem</a>
       <a href="postmortem-xhci-keyboard.html">xHCI keyboard</a>
@@ -42,6 +43,7 @@
 
   <div class="hero-links">
     <a class="primary" href="https://github.com/hansolovkarlsson/Ouroboros">View the source →</a>
+    <a href="#learn">Learn to build one</a>
     <a href="#postmortems">Read the postmortems</a>
     <a href="#status">Current status</a>
   </div>
@@ -140,6 +142,26 @@
         <p>Driver isolation, part 2: moving the FAT32 filesystem out of the kernel into a userland server — the textbook microkernel move, speaking the new IPC to clients and raw block syscalls to the kernel.</p>
       </li>
     </ol>
+
+    <h2 id="learn">Learn: build one yourself</h2>
+
+    <p>
+      The whole path this project walked, distilled into a staged
+      tutorial — the inverse of the postmortems below. Where they
+      document the debugging that <em>found</em> the working design,
+      the tutorial presents only the design itself: nine ordered
+      stages, each independently bootable, each ending with a concrete
+      way to prove it works, with code samples drawn from this kernel's
+      confirmed-working source.
+    </p>
+
+    <div class="postmortem-cards">
+      <a class="pm-card" href="tutorial.html">
+        <span class="pm-eyebrow">Tutorial · the working path</span>
+        <h3>Build an ARM64 OS from scratch</h3>
+        <p>From a UEFI hello world to a preemptive, multi-tasking kernel running position-independent userland programs loaded from disk — console discovery, exception vectors, your own page tables, a timer tick, EL0 and syscalls, task switching as a struct copy, PIE ELF loading, and a filesystem of your own. Stable Rust and QEMU are all you need.</p>
+      </a>
+    </div>
 
     <h2 id="postmortems">The postmortems</h2>
 
