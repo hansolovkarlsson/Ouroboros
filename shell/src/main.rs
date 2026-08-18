@@ -612,7 +612,7 @@ fn print_fs_error(cmd: &str, code: u64) {
         syscall_abi::SPAWN_ERR_TOO_LARGE => "program too large for the kernel's staging buffer (or empty)",
         syscall_abi::SPAWN_ERR_NO_FREE_SLOT => "no free task slot",
         syscall_abi::TASK_ERR_NO_SUCH_TASK => "no such task (see ps)",
-        syscall_abi::TASK_ERR_PROTECTED => "that task is protected (the boot shell and idle are permanent)",
+        syscall_abi::TASK_ERR_PROTECTED => "that task is protected (the boot shell, idle, and the filesystem server are permanent)",
         _ => "failed",
     });
 }

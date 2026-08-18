@@ -233,6 +233,27 @@ fn main() -> Status {
         program.entry
     );
 
+    // The filesystem server, same boot-services window - but unlike the
+    // shell, optional: booting without one just means no filesystem this
+    // boot (every FS request fails with "no such task", which the shell
+    // reports as its no-filesystem message), same graceful degradation
+    // the FAT16-vvfat dev loop has always had.
+    let fsd = match loader::load_fsd() {
+        Ok(fsd) => {
+            log::info!(
+                "Ouroboros kernel: loaded filesystem server, region {:#x}-{:#x}, entry {:#x}",
+                fsd.base,
+                fsd.base + fsd.size,
+                fsd.entry
+            );
+            Some(fsd)
+        }
+        Err(e) => {
+            log::warn!("Ouroboros kernel: no filesystem server ({e}) - disk commands won't work this boot");
+            None
+        }
+    };
+
     // SAFETY: no boot-services protocol references (console, allocator, or
     // otherwise) are held past this call. Nothing below this point may use
     // log::*, alloc, or UEFI protocols — only the raw MMIO in `uart`/
@@ -297,10 +318,18 @@ fn main() -> Status {
     unsafe {
         mmu::install_identity_map(
             memory_map,
-            // Slots 2/3 are (0, 0) - unused - until `tasks::spawn` fills
-            // one in; `install_identity_map` already treats a zero-size
-            // region as "no region" (see `overlaps_any`).
-            [(program.base, program.size), tasks::idle_region(), (0, 0), (0, 0)],
+            // Slot 2 is the filesystem server's region ((0, 0) - "no
+            // region" - if none was loaded); slots 3/4 stay (0, 0)
+            // until `tasks::spawn` fills one in. `install_identity_map`
+            // already treats a zero-size region as "no region" (see
+            // `overlaps_any`).
+            [
+                (program.base, program.size),
+                tasks::idle_region(),
+                fsd.as_ref().map_or((0, 0), |f| (f.base, f.size)),
+                (0, 0),
+                (0, 0),
+            ],
             &extra_devices[..extra_device_count],
         )
     };
@@ -487,7 +516,7 @@ fn main() -> Status {
     }
 
     // SAFETY: both EL0 regions were just mapped EL0-accessible above.
-    unsafe { tasks::init(&program) };
+    unsafe { tasks::init(&program, fsd.as_ref()) };
 
     console::println!("Ouroboros kernel: shell ready - type and press Enter");
 

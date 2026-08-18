@@ -204,6 +204,10 @@ pub enum LoaderError {
     PathEncoding,
     Program(uefi::fs::Error),
     ProgramEmpty,
+    /// [`FSD_PATH`] couldn't be read - kept distinct from [`Program`]
+    /// so the boot log doesn't misleadingly blame `INIT.CFG` for a
+    /// missing filesystem server.
+    Fsd(uefi::fs::Error),
     Alloc(uefi::Error),
     /// File is smaller than a bare ELF header, or a header/table field
     /// points past the end of the file - either a corrupt/truncated file
@@ -239,6 +243,7 @@ impl core::fmt::Display for LoaderError {
             LoaderError::ConfigEmpty => write!(f, "{CONFIG_PATH} is empty"),
             LoaderError::PathEncoding => write!(f, "program path isn't valid for a UEFI file path"),
             LoaderError::Program(e) => write!(f, "couldn't read the program named in {CONFIG_PATH}: {e}"),
+            LoaderError::Fsd(e) => write!(f, "couldn't read {FSD_PATH}: {e}"),
             LoaderError::ProgramEmpty => write!(f, "program named in {CONFIG_PATH} is empty"),
             LoaderError::Alloc(e) => write!(f, "couldn't allocate memory for the program: {e}"),
             LoaderError::Truncated => write!(f, "program file is truncated or has an invalid ELF header/table offset"),
@@ -287,6 +292,29 @@ pub fn load() -> Result<LoadedProgram, LoaderError> {
         return Err(LoaderError::ProgramEmpty);
     }
 
+    load_elf_into_el0_region(&program_bytes)
+}
+
+/// The filesystem server's fixed path - not configurable via
+/// [`CONFIG_PATH`], deliberately: `INIT.CFG` names the *interactive*
+/// program (task 0), while the FS server is infrastructure with a
+/// fixed task slot (`syscall_abi::FSD_TASK`) that clients hardcode.
+const FSD_PATH: &str = "\\EFI\\ORBS\\FSD.BIN";
+
+/// Loads the filesystem server ([`FSD_PATH`]) the same way [`load`]
+/// loads task 0's program. A missing/broken FSD.BIN is not fatal (the
+/// caller logs and boots on without a filesystem - every FS request
+/// then fails with "no such task", which the shell maps to its
+/// no-filesystem message), unlike task 0's program, which the boot
+/// genuinely can't proceed without.
+pub fn load_fsd() -> Result<LoadedProgram, LoaderError> {
+    let fs_proto = boot::get_image_file_system(boot::image_handle()).map_err(LoaderError::Protocol)?;
+    let mut fs = FileSystem::new(fs_proto);
+    let path = CString16::try_from(FSD_PATH).unwrap();
+    let program_bytes = fs.read(path.as_ref()).map_err(LoaderError::Fsd)?;
+    if program_bytes.is_empty() {
+        return Err(LoaderError::ProgramEmpty);
+    }
     load_elf_into_el0_region(&program_bytes)
 }
 

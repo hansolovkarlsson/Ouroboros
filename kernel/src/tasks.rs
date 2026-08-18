@@ -71,14 +71,22 @@ use crate::exceptions::Context;
 use crate::loader::LoadedProgram;
 
 /// Slots 0/1 are always the loaded program and the idle task (`init`);
-/// 2/3 start `Unused` and are only ever filled in by `spawn` (dynamic
-/// task creation). A small, fixed bound rather than anything growable -
-/// "generous but bounded," the same philosophy `mmu.rs`'s
+/// slot 2 is reserved for the filesystem server (`syscall_abi::FSD_TASK`,
+/// boot-loaded by `loader::load_fsd` - stays `Unused` if no FSD.BIN
+/// exists, and `spawn` never fills it: a spawned program landing in the
+/// server's fixed, block-syscall-privileged slot would inherit both
+/// roles); 3/4 start `Unused` and are only ever filled in by `spawn`
+/// (dynamic task creation). A small, fixed bound rather than anything
+/// growable - "generous but bounded," the same philosophy `mmu.rs`'s
 /// `MAX_EXTRA_L1_TABLES` already states for a similar "how many of these
 /// might we need" question - not a real limit this kernel has any way to
 /// raise gracefully yet (`spawn` just fails with `SpawnError::NoFreeSlot`
 /// past this).
-pub const NUM_TASKS: usize = 4;
+pub const NUM_TASKS: usize = 5;
+
+/// The first slot `spawn` may use - everything below it is fixed
+/// infrastructure (boot shell, idle, filesystem server).
+const FIRST_SPAWNABLE: usize = 3;
 
 /// 2MB - matches `loader.rs`'s own `SLOT_ALIGN` (a plain numeric
 /// constant, not shared across modules - simplest to just duplicate the
@@ -195,6 +203,7 @@ static TASKS: [TaskSlot; NUM_TASKS] = [
     TaskSlot(UnsafeCell::new(Context::zeroed())),
     TaskSlot(UnsafeCell::new(Context::zeroed())),
     TaskSlot(UnsafeCell::new(Context::zeroed())),
+    TaskSlot(UnsafeCell::new(Context::zeroed())),
 ];
 
 static CURRENT: AtomicUsize = AtomicUsize::new(0);
@@ -212,6 +221,7 @@ struct RegionSlot(UnsafeCell<(u64, u64)>);
 unsafe impl Sync for RegionSlot {}
 
 static REGIONS: [RegionSlot; NUM_TASKS] = [
+    RegionSlot(UnsafeCell::new((0, 0))),
     RegionSlot(UnsafeCell::new((0, 0))),
     RegionSlot(UnsafeCell::new((0, 0))),
     RegionSlot(UnsafeCell::new((0, 0))),
@@ -350,6 +360,7 @@ struct MailboxSlot(UnsafeCell<Mailbox>);
 // other per-task cell in this module.
 unsafe impl Sync for MailboxSlot {}
 static MAILBOXES: [MailboxSlot; NUM_TASKS] = [
+    MailboxSlot(UnsafeCell::new(Mailbox::new())),
     MailboxSlot(UnsafeCell::new(Mailbox::new())),
     MailboxSlot(UnsafeCell::new(Mailbox::new())),
     MailboxSlot(UnsafeCell::new(Mailbox::new())),
@@ -569,6 +580,7 @@ static STATES: [StateSlot; NUM_TASKS] = [
     StateSlot(UnsafeCell::new(TaskState::Runnable)),
     StateSlot(UnsafeCell::new(TaskState::Unused)),
     StateSlot(UnsafeCell::new(TaskState::Unused)),
+    StateSlot(UnsafeCell::new(TaskState::Unused)),
 ];
 
 /// Scans forward from `from` (exclusive), wrapping, for the next
@@ -716,10 +728,12 @@ pub(crate) enum SpawnError {
 /// which needs `region` recorded here *before* it's called - see
 /// `el0_regions`). This kernel calls it *spawn*, not POSIX
 /// *exec*-replaces-current-process semantics: the calling task keeps
-/// running unchanged, a new one joins it. Never touches slots 0/1 (the
-/// loaded program and the idle task) - only scans from slot 2 onward.
+/// running unchanged, a new one joins it. Never touches slots 0-2 (the
+/// loaded program, the idle task, and the filesystem server's reserved
+/// slot - see `NUM_TASKS`'s doc comment) - only scans from
+/// [`FIRST_SPAWNABLE`] onward.
 pub(crate) fn spawn(context: Context, region: (u64, u64)) -> Result<usize, SpawnError> {
-    for i in 2..NUM_TASKS {
+    for i in FIRST_SPAWNABLE..NUM_TASKS {
         if unsafe { *STATES[i].0.get() } == TaskState::Unused {
             unsafe { *TASKS[i].0.get() = context };
             unsafe { *REGIONS[i].0.get() = region };
@@ -742,15 +756,18 @@ pub fn idle_region() -> (u64, u64) {
 /// Builds task 0's [`Context`] from an already-loaded program — `loader.rs`
 /// copied its bytes into an EL0-accessible region during boot services, so
 /// there's nothing left to copy here, just cache maintenance — copies task
-/// 1's idle loop into its own small region, and disables the EL0
-/// `wfe`/`wfi` trap both tasks' idle loops rely on. Does not itself start
+/// 1's idle loop into its own small region, sets up the filesystem
+/// server as task 2 the same way as task 0 when one was loaded (`fsd`,
+/// `loader::load_fsd` - `None` leaves the slot `Unused`, and the boot
+/// proceeds without a filesystem), and disables the EL0 `wfe`/`wfi`
+/// trap both tasks' idle loops rely on. Does not itself start
 /// anything — see [`start`].
 ///
 /// # Safety
-/// Must run after `mmu.rs` has mapped both `program`'s region and
-/// [`idle_region`] EL0-accessible, and before either task could possibly
-/// run.
-pub unsafe fn init(program: &LoadedProgram) {
+/// Must run after `mmu.rs` has mapped `program`'s region, `fsd`'s
+/// region (when present), and [`idle_region`] EL0-accessible, and
+/// before any task could possibly run.
+pub unsafe fn init(program: &LoadedProgram, fsd: Option<&LoadedProgram>) {
     // Task 0: entry is the program's real ELF entry point, not just its
     // load base - loader.rs computes `entry = base + e_entry` (they
     // happen to be equal today, since shell/linker.ld keeps `_start` at
@@ -786,6 +803,20 @@ pub unsafe fn init(program: &LoadedProgram) {
     };
     unsafe { *REGIONS[1].0.get() = (idle_addr, IDLE_REGION_SIZE as u64) };
     clean_dcache_range(idle_addr, IDLE_REGION_SIZE as u64);
+
+    // Task 2: the filesystem server, exactly task 0's setup shape -
+    // entry point, stack at the top of its region, everything unmasked.
+    if let Some(fsd) = fsd {
+        *unsafe { &mut *TASKS[2].0.get() } = Context {
+            gpr: [0; 31],
+            sp_el0: fsd.base + fsd.size,
+            elr_el1: fsd.entry,
+            spsr_el1: 0,
+        };
+        unsafe { *REGIONS[2].0.get() = (fsd.base, fsd.size) };
+        unsafe { *STATES[2].0.get() = TaskState::Runnable };
+        clean_dcache_range(fsd.base, fsd.size);
+    }
 
     unsafe {
         asm!("dsb ish", "ic ialluis", "dsb ish", "isb", options(nostack));

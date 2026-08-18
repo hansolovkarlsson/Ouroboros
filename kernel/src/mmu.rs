@@ -238,11 +238,12 @@ static EXTRA_L1_TABLES: [Table; MAX_EXTRA_L1_TABLES] = [
 // straddle), the affected slot fails safe to EL1-only rather than
 // corrupting a table - see the WARNING branches in
 // `install_identity_map`.
-const MAX_EL0_REGIONS: usize = 4;
-const MAX_EL0_L2_TABLES: usize = 4;
-const MAX_EL0_L3_TABLES: usize = 4;
+const MAX_EL0_REGIONS: usize = 5;
+const MAX_EL0_L2_TABLES: usize = 5;
+const MAX_EL0_L3_TABLES: usize = 5;
 
 static EL0_L2_TABLES: [Table; MAX_EL0_L2_TABLES] = [
+    Table(UnsafeCell::new([0; ENTRIES_PER_TABLE])),
     Table(UnsafeCell::new([0; ENTRIES_PER_TABLE])),
     Table(UnsafeCell::new([0; ENTRIES_PER_TABLE])),
     Table(UnsafeCell::new([0; ENTRIES_PER_TABLE])),
@@ -250,6 +251,7 @@ static EL0_L2_TABLES: [Table; MAX_EL0_L2_TABLES] = [
 ];
 
 static EL0_L3_TABLES: [Table; MAX_EL0_L3_TABLES] = [
+    Table(UnsafeCell::new([0; ENTRIES_PER_TABLE])),
     Table(UnsafeCell::new([0; ENTRIES_PER_TABLE])),
     Table(UnsafeCell::new([0; ENTRIES_PER_TABLE])),
     Table(UnsafeCell::new([0; ENTRIES_PER_TABLE])),

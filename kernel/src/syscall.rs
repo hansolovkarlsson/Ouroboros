@@ -52,8 +52,13 @@ use crate::tasks;
 /// `tasks.rs` keyed per-slot - grew from 2 to 4 alongside it for dynamic
 /// task creation, even though only the original two tasks have ever
 /// actually called `report`.
-static TASK_REPORTS: [AtomicU64; crate::tasks::NUM_TASKS] =
-    [AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)];
+static TASK_REPORTS: [AtomicU64; crate::tasks::NUM_TASKS] = [
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+];
 
 /// The mounted FAT32 filesystem (if any) `fs_list_dir`/`fs_read_file`
 /// operate on - `None` is a valid, expected state (e.g. `make run`'s
@@ -642,12 +647,15 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
         }
         syscall_abi::EXIT => {
             let current = tasks::current_task();
-            if current <= 1 {
+            if current <= 2 {
                 // Task 0 (the boot shell - nothing would own the
-                // keyboard, see tasks::INPUT_OWNER_TASK) and task 1
+                // keyboard, see tasks::INPUT_OWNER_TASK), task 1
                 // (idle - never makes syscalls, refused for
-                // completeness) may not exit. The only case where EXIT
-                // returns to its caller.
+                // completeness), and task 2 (the filesystem server -
+                // its death would strand the disk for the rest of the
+                // boot, and its slot is block-syscall-privileged) may
+                // not exit. The only case where EXIT returns to its
+                // caller.
                 return syscall_abi::EXIT_DENIED;
             }
             console::println!("Ouroboros kernel: task {current} exited (code {arg0})");
@@ -682,10 +690,10 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
         }
         syscall_abi::KILL => {
             let i = arg0 as usize;
-            if i <= 1 {
-                // The boot shell (the permanent keyboard owner) and
-                // idle are protected - same reasoning as EXIT's own
-                // refusal of them.
+            if i <= 2 {
+                // The boot shell (the permanent keyboard owner), idle,
+                // and the filesystem server are protected - same
+                // reasoning as EXIT's own refusal of them.
                 return syscall_abi::TASK_ERR_PROTECTED;
             }
             if !tasks::task_exists(i) {
@@ -706,9 +714,11 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
         }
         syscall_abi::WAIT => {
             let i = arg0 as usize;
-            if i <= 1 || i == tasks::current_task() {
-                // Waiting on task 0/1 (they never die) or on yourself
-                // is a guaranteed deadlock - refused up front.
+            if i <= 2 || i == tasks::current_task() {
+                // Waiting on task 0/1/2 (they never die - the boot
+                // shell, idle, and the filesystem server are all
+                // exit/kill-protected) or on yourself is a guaranteed
+                // deadlock - refused up front.
                 return syscall_abi::TASK_ERR_PROTECTED;
             }
             if i >= tasks::NUM_TASKS {

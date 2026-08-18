@@ -347,8 +347,9 @@ pub const SPAWN_ERR_NO_FREE_SLOT: u64 = u64::MAX - 13;
 
 /// The index is out of range or the slot holds no task.
 pub const TASK_ERR_NO_SUCH_TASK: u64 = u64::MAX - 14;
-/// Task 0 (the boot shell) and task 1 (idle) are permanent - they can't
-/// be killed, and idle can't be foregrounded.
+/// Task 0 (the boot shell), task 1 (idle), and task 2 (the filesystem
+/// server, [`FSD_TASK`]) are permanent - they can't be killed or
+/// waited on, and idle can't be foregrounded.
 pub const TASK_ERR_PROTECTED: u64 = u64::MAX - 15;
 
 /// A [`WAIT`] cut short by Ctrl+C - the waited task keeps running,
