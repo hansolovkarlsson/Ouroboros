@@ -21,8 +21,12 @@ part-2 FAT32 filesystem server will have): recv -> echo to sender ->
 repeat, `quit` to exit. Confirmed on QEMU (echo round trips,
 queue-full at exactly the fifth pending message, the
 cleared-mailbox-on-kill proof, blocked-recv Ctrl+C, quit/wait
-lifecycle) and real Parallels (error paths + a blocked recv
-interrupted by a real Ctrl+C chord).
+lifecycle) and real Parallels - where, with the binaries copied onto
+the USB stick, the full success path landed a stack of firsts in one
+screen: the first runtime program load ever on real Parallels
+hardware (`exec /pong.bin` off the mounted stick), a complete IPC
+round trip through it, and `exec /hello.bin` + a blocking `wait`
+collecting its status.
 
 ## USB mass storage - a real disk on real Parallels hardware
 

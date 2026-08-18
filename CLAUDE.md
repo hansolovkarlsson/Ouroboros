@@ -3935,7 +3935,22 @@ mailbox-clearing proof**: four messages queued to a task, `kill` it,
 `ping` - not the dead task's `m1`; a blocked `recv` interrupted by
 Ctrl+C; zero aborts. **Confirmed on real Parallels hardware:** the
 error paths and a blocked `recv` interrupted by a real held-Ctrl
-chord on the physical keyboard path.
+chord on the physical keyboard path - **and then, with the user's
+binaries copied onto the USB stick, the full success path too, a
+stack of firsts in one screen:** `mount` -> `ls` showing
+`PONG.BIN`/`HELLO.BIN`/`SH.BIN` on the stick -> `exec /pong.bin`
+(**the first program ever loaded from disk at runtime on real
+Parallels hardware** - the identity-map rebuild line shows real
+hardware's own RAM span, `0x40000000-0xc0000000`, and the runtime
+regions) -> `ps` showing the server blocked in `recv` -> a complete
+IPC round trip (`send 2 hello ...` -> `recv` -> the echo back) ->
+`quit`/`wait` collecting status 0 with the region freed - and
+separately `exec /hello.bin` with `wait 2` typed during hello's
+delay, **the blocking wait path proven on real hardware** (the typed
+characters visibly interleaved with hello's own output - two tasks
+genuinely sharing the console). Every userland facility this project
+has - spawn, IPC, job control, wait/reaping - now demonstrated on the
+platform it was built for.
 
 **Part 2, scoped but not started:** the userland FAT32 filesystem
 server - MINIX's textbook first move, chosen because the FS is pure
