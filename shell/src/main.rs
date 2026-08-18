@@ -198,6 +198,23 @@ fn on_byte(byte: u8, buf: &mut [u8; BUFFER_SIZE], len: &mut usize, cwd: &mut [u8
 /// [`dispatch_line`], then - for a redirect - writes the captured output
 /// to the target file ([`finish_redirect`]).
 fn run_line(line: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize) {
+    // Pipelines first: a standalone `|` splits the line into a builtin
+    // (left, output captured) and a program path (right, spawned and
+    // fed the capture as IPC messages) - see cmd_pipeline. Combining
+    // with `>`/`>>` is refused: the right side is a real separate task
+    // writing straight to the console, so there's no capture of *its*
+    // output to redirect.
+    match parse_pipe(line) {
+        PipeParse::NoPipe => {}
+        PipeParse::Malformed(msg) => {
+            print_line(msg);
+            return;
+        }
+        PipeParse::Pipe { left, right } => {
+            cmd_pipeline(left, right, cwd, cwd_len);
+            return;
+        }
+    }
     match parse_redirect(line) {
         RedirectParse::NoRedirect => {
             let mut out = Output::Console;
@@ -216,6 +233,169 @@ fn run_line(line: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize) {
                 Output::Console => return,
             };
             finish_redirect(&capture[..len], overflowed, target, append, cwd, *cwd_len);
+        }
+    }
+}
+
+/// What [`parse_pipe`] found on a submitted line.
+enum PipeParse<'a> {
+    /// No standalone `|` token - not a pipeline.
+    NoPipe,
+    /// `left | right`: run `left` as a builtin with a capture sink,
+    /// spawn `right` as a program, stream the capture to it.
+    Pipe { left: &'a str, right: &'a str },
+    /// A `|` was present but the line was wrong; the message says how.
+    Malformed(&'static str),
+}
+
+/// Scans the line's whitespace tokens for the first standalone `|`
+/// and splits there - the operator must be its own token (`a|b` is one
+/// word), same no-quoting tokenization rule as `parse_redirect`. The
+/// right side must be exactly one token (a program path - programs
+/// receive no arguments), and mixing `|` with `>`/`>>` is refused.
+fn parse_pipe(line: &str) -> PipeParse<'_> {
+    for token in line.split_whitespace() {
+        // SAFETY-free pointer math: token is a subslice of line, so
+        // this offset arithmetic can't go out of range.
+        let token_start = token.as_ptr() as usize - line.as_ptr() as usize;
+        if token == "|" {
+            let left = line.get(..token_start).unwrap_or("").trim();
+            let rest = line.get(token_start + 1..).unwrap_or("").trim();
+            if left.is_empty() {
+                return PipeParse::Malformed("pipe: missing command before |");
+            }
+            if rest.is_empty() {
+                return PipeParse::Malformed("pipe: missing program after |");
+            }
+            let mut right_tokens = rest.split_whitespace();
+            let right = right_tokens.next().unwrap_or("");
+            if right_tokens.next().is_some() {
+                return PipeParse::Malformed(
+                    "pipe: exactly one program path may follow | (programs take no arguments)",
+                );
+            }
+            if right == "|" || left.split_whitespace().any(|t| t == ">" || t == ">>") {
+                return PipeParse::Malformed("pipe: only a single `left | program` pipeline is supported");
+            }
+            if right == ">" || right == ">>" {
+                return PipeParse::Malformed("pipe: can't combine | with output redirection");
+            }
+            return PipeParse::Pipe { left, right };
+        }
+        if token == ">" || token == ">>" {
+            // A redirect before any pipe operator: if a `|` appears
+            // later it belongs to the redirect's target text - refuse
+            // the combination outright rather than guessing.
+            if line.split_whitespace().any(|t| t == "|") {
+                return PipeParse::Malformed("pipe: can't combine | with output redirection");
+            }
+            return PipeParse::NoPipe;
+        }
+    }
+    PipeParse::NoPipe
+}
+
+/// `left | program`: runs the builtin `left` with a capture sink (the
+/// redirection machinery's), spawns `program` (see [`spawn_path`]),
+/// streams the capture to it as IPC messages (1-64 bytes each,
+/// [`syscall_abi::MSG_ERR_FULL`] retried with a real-tick timeout so a
+/// program that never reads can't hang the shell), sends the empty
+/// end-of-stream message, and waits for the program to exit. The
+/// program's own output goes straight to the console as it runs -
+/// there is no capture of a *task's* output, which is also why `|`
+/// can't combine with `>`.
+fn cmd_pipeline(left: &str, right: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize) {
+    let mut capture = [0u8; CAPTURE_SIZE];
+    let mut out = Output::Capture { buf: &mut capture, len: 0, overflowed: false };
+    dispatch_line(left, cwd, cwd_len, &mut out);
+    let (len, overflowed) = match out {
+        Output::Capture { len, overflowed, .. } => (len, overflowed),
+        Output::Console => return,
+    };
+    if overflowed {
+        print_line("pipe: left command's output exceeds the 512-byte capture buffer - nothing was piped");
+        return;
+    }
+
+    let slot = match spawn_path(right, cwd, *cwd_len) {
+        Ok(slot) => slot,
+        Err(0) => {
+            print_line("pipe: path too long");
+            return;
+        }
+        Err(NO_FS) => {
+            print_no_fs();
+            return;
+        }
+        Err(code) => {
+            print_fs_error("pipe", code);
+            return;
+        }
+    };
+
+    // Stream the capture in message-sized chunks, then the empty
+    // end-of-stream message (a still-non-null pointer with length 0 -
+    // see MSG_SEND's doc in syscall-abi).
+    let mut sent = 0usize;
+    loop {
+        let chunk_len = (len - sent).min(syscall_abi::MSG_MAX_LEN as usize);
+        if !pipe_send(slot, unsafe { capture.as_ptr().add(sent) }, chunk_len as u64) {
+            return; // pipe_send printed why, and killed the task if needed
+        }
+        if chunk_len == 0 {
+            break; // the empty message was the end-of-stream marker
+        }
+        sent += chunk_len;
+    }
+
+    match syscall(syscall_abi::WAIT, slot) {
+        WAIT_INTERRUPTED => print_line("pipe: interrupted (the program keeps running - see ps)"),
+        TASK_KILLED_STATUS => print_line("pipe: program was killed"),
+        code if code >= FS_ERR_MIN => {
+            // Most likely the program crashed (a fault reaps the slot
+            // immediately, so wait answers no-such-task) - the kernel
+            // already reported the fault itself.
+            print_line("pipe: program did not exit cleanly");
+        }
+        0 => {}
+        status => {
+            print_str("pipe: program exited with code ");
+            print_u64(status);
+            print_line("");
+        }
+    }
+}
+
+/// One pipeline send with full-mailbox retry: a program that reads
+/// slowly just makes this loop until space opens up (the tick
+/// preempts the shell, the program drains, the retry succeeds), but a
+/// program that never reads at all would hang the shell forever - so
+/// the retry is bounded by real ticks (~3 seconds), after which the
+/// program is killed and the pipe reports why. Returns whether the
+/// send succeeded.
+fn pipe_send(slot: u64, ptr: *const u8, len: u64) -> bool {
+    let deadline = syscall(syscall_abi::GET_TICKS, 0) + 150;
+    loop {
+        match syscall4(syscall_abi::MSG_SEND, slot, ptr as u64, len, 0) {
+            0 => return true,
+            syscall_abi::MSG_ERR_FULL => {
+                if syscall(syscall_abi::GET_TICKS, 0) > deadline {
+                    print_line("pipe: program stopped reading its input - killing it");
+                    syscall(syscall_abi::KILL, slot);
+                    return false;
+                }
+            }
+            syscall_abi::TASK_ERR_NO_SUCH_TASK => {
+                // The program exited (or crashed) before reading
+                // everything - a legitimate early exit for a filter;
+                // stop streaming and let the caller's wait sort out
+                // (and report) how it ended.
+                return true;
+            }
+            _ => {
+                print_line("pipe: send failed");
+                return false;
+            }
         }
     }
 }
@@ -377,7 +557,7 @@ fn dispatch_line(line: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize, out:
     let arg = words.next().unwrap_or("");
 
     match command {
-        "help" => out.put_line("commands: help, echo, uptime, clear, ls, cat, cd, pwd, mkdir, rmdir, touch, rm, write, cp, mv, mount, exec, exit, ps, kill, fg, wait, send, recv, selftest (append `> file` or `>> file` to redirect output)"),
+        "help" => out.put_line("commands: help, echo, uptime, clear, ls, cat, cd, pwd, mkdir, rmdir, touch, rm, write, cp, mv, mount, exec, exit, ps, kill, fg, wait, send, recv, selftest (append `> file`/`>> file` to redirect output, or `| /path/to/program` to pipe it into a spawned program)"),
         "echo" => {
             let mut first = true;
             for word in line.split_whitespace().skip(1) {
@@ -749,32 +929,39 @@ fn cmd_exec(arg: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize) {
         print_line("exec: missing program argument");
         return;
     }
+    match spawn_path(arg, cwd, cwd_len) {
+        Ok(_slot) => {}
+        Err(0) => print_line("exec: path too long"),
+        Err(NO_FS) => print_no_fs(),
+        Err(code) => print_fs_error("exec", code),
+    }
+}
+
+/// Resolves `arg` against the cwd and runs the two-step spawn flow
+/// (the kernel has no filesystem to read a path with: read the program
+/// via the filesystem server in 512-byte chunks - the per-buffer cap -
+/// feed each into the kernel's staging buffer via SPAWN_STAGE, then
+/// SPAWN the staged total, which returns the new task's slot index).
+/// Shared by `exec` and the pipeline flow (`left | program`), which
+/// needs the slot to stream input to and wait on. `Err(0)` means the
+/// path didn't resolve/encode (too long); any other `Err` is a real
+/// code for [`print_fs_error`] (or [`NO_FS`]).
+fn spawn_path(arg: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize) -> Result<u64, u64> {
     let mut path_buf = [0u8; PATH_SIZE];
     let Some(path_len) = resolve_path(cwd_str(cwd, cwd_len), arg, &mut path_buf) else {
-        print_line("exec: path too long");
-        return;
+        return Err(0);
     };
     let Ok(path) = core::str::from_utf8(&path_buf[..path_len]) else {
-        print_line("exec: path too long");
-        return;
+        return Err(0);
     };
 
-    // Two-step spawn (the kernel has no filesystem to read a path
-    // with anymore): read the program via the filesystem server in
-    // 512-byte chunks (the per-buffer cap), feed each into the
-    // kernel's staging buffer (SPAWN_STAGE), then SPAWN the staged
-    // total. A short read (or 0 for an empty file) ends the loop.
+    // A short read (or 0 for an empty file) ends the chunk loop.
     let mut offset: u64 = 0;
     let mut chunk = [0u8; 512];
     loop {
         let n = fs_read_at(path, offset, &mut chunk);
-        if n == NO_FS {
-            print_no_fs();
-            return;
-        }
         if n >= FS_ERR_MIN {
-            print_fs_error("exec", n);
-            return;
+            return Err(n);
         }
         if n == 0 {
             break;
@@ -782,8 +969,7 @@ fn cmd_exec(arg: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize) {
         if syscall4(syscall_abi::SPAWN_STAGE, offset, chunk.as_ptr() as u64, n, 0) != 0 {
             // Only reachable by staging past the kernel's 128KB buffer
             // - the same too-large refusal SPAWN itself would give.
-            print_fs_error("exec", syscall_abi::SPAWN_ERR_TOO_LARGE);
-            return;
+            return Err(syscall_abi::SPAWN_ERR_TOO_LARGE);
         }
         offset += n;
         if n < chunk.len() as u64 {
@@ -791,8 +977,8 @@ fn cmd_exec(arg: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize) {
         }
     }
     match syscall(syscall_abi::SPAWN, offset) {
-        code if code >= FS_ERR_MIN => print_fs_error("exec", code),
-        _ => {}
+        code if code >= FS_ERR_MIN => Err(code),
+        slot => Ok(slot),
     }
 }
 

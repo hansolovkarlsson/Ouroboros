@@ -317,12 +317,15 @@ fn spawn_staged(total_len: u64) -> u64 {
         spsr_el1: 0,
     };
     match tasks::spawn(context, (loaded.base, loaded.size)) {
-        Ok(_slot) => {
+        Ok(slot) => {
             // SAFETY: called from an SVC handler with interrupts masked
             // throughout - single-core, so nothing else can observe the
             // table set mid-rebuild.
             unsafe { mmu::rebuild_with_el0_regions(tasks::el0_regions()) };
-            0
+            // The new task's slot index, not a bare 0 - the caller
+            // needs it to wait on, send to, or kill what it just
+            // started (the shell's pipeline flow does all three).
+            slot as u64
         }
         Err(_) => {
             tasks::free_runtime_region(region_base, region_size);
@@ -589,7 +592,11 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
         }
         syscall_abi::MSG_SEND => {
             let dest = arg0 as usize;
-            if !valid_user_range(arg1, arg2) {
+            // A zero-length message is legal - it's the end-of-stream
+            // marker in the shell's pipeline convention (see the
+            // MSG_SEND doc in syscall-abi). The pointer must still be
+            // non-null; only the length may be 0.
+            if arg1 == 0 || arg2 > MAX_USER_LEN {
                 return FS_ERROR;
             }
             if dest >= tasks::NUM_TASKS || !tasks::task_exists(dest) {

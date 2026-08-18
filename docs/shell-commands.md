@@ -133,6 +133,34 @@ Limits, all refuse-outright rather than write-something-wrong:
   output would exceed 512 bytes prints `file too large to append to`
   and leaves the file untouched.
 
+## Pipelines
+
+Append `| /path/to/program` to any builtin to pipe its output into a
+freshly spawned program:
+
+```
+echo hello | /EFI/ORBS/UPPER.BIN     ->  HELLO
+ls | /EFI/ORBS/UPPER.BIN
+cat notes.txt | /EFI/ORBS/UPPER.BIN
+```
+
+The left side runs with its output captured (the same 512-byte capture
+the redirection machinery uses - a bigger output refuses rather than
+truncating); the right side is spawned like `exec` and receives the
+capture as a stream of IPC messages (1-64 bytes each) followed by one
+*empty* message meaning end-of-stream - see `MSG_SEND`'s notes in the
+syscall reference, and `upper/src/main.rs` for the filter-program shape
+to copy (no argv exists: stdin is `msg_recv`, stdout is `putc`, EOF is
+the empty message, finishing is `exit`). The shell waits for the
+program to exit before prompting again; Ctrl+C interrupts the wait.
+
+Limits, deliberate for v1: one `|` per line (no `a | b | c`); the left
+side must be a builtin (a spawned program's own output isn't
+capturable, which is also why `|` can't combine with `>`/`>>`); the
+right side is exactly one program path (programs take no arguments); a
+program that stops reading its input is killed after a ~3-second
+real-tick timeout rather than hanging the shell.
+
 ## Known limitations
 
 - **`write`/`cp` always fully replace a file's contents — no append or

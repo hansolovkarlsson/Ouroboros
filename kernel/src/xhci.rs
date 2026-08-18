@@ -470,6 +470,12 @@ fn keycode_to_ascii(keycode: u8, shift: bool, ctrl: bool) -> Option<u8> {
         0x2e => Some(if shift { b'+' } else { b'=' }),
         0x2f => Some(if shift { b'{' } else { b'[' }),
         0x30 => Some(if shift { b'}' } else { b']' }),
+        // Backslash/pipe - missing until the pipeline milestone made
+        // `|` a character worth typing; found by the scripted
+        // real-hardware smoke test (the chord arrived, the keymap
+        // dropped it), which means no physical keyboard could type a
+        // pipeline on Parallels either.
+        0x31 => Some(if shift { b'|' } else { b'\\' }),
         0x33 => Some(if shift { b':' } else { b';' }),
         0x34 => Some(if shift { b'"' } else { b'\'' }),
         0x36 => Some(if shift { b'<' } else { b',' }),

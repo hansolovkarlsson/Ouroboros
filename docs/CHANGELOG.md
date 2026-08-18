@@ -7,6 +7,32 @@ what broke, how it was diagnosed), see `CLAUDE.md`; for *how* something
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## Pipelines: `builtin | program`, data flowing between processes over IPC
+
+The composition layer on top of part-1 IPC and the two-step spawn:
+`left | /path/to/program` captures a builtin's output (the redirection
+machinery's 512-byte capture, refuse-not-truncate), spawns the program
+(`spawn` now returns the new task's slot index - the shell needs it to
+stream to, wait on, and kill), streams the capture to it as IPC
+messages, and marks end-of-stream with one *empty* message - a
+zero-length `msg_send` is legal now, the one ABI-behavior change. The
+filter putc's its output as it runs and exits; the shell waits
+(Ctrl+C-interruptible), and a program that stops reading its input is
+killed after a ~3-second real-tick timeout rather than hanging the
+shell on a full mailbox. `upper/` (the sixth userland program, ~80
+lines) is the reference filter: uppercases its stream, exits on the
+empty message. A real keymap gap found by the scripted real-hardware
+smoke: HID keycode 0x31 (backslash/pipe) was missing from
+`xhci.rs::keycode_to_ascii` entirely - no physical keyboard could type
+`|` on Parallels; fixed, and `test-parallels.sh` gained the
+held-Shift `|` chord. Verified on QEMU (echo/ls/cat piped through
+UPPER.BIN, every parse error, early-exiting and never-reading right
+sides including the timeout kill, FAT16 degradation, full regression,
+zero aborts) and on real Parallels hardware (the pipeline typed
+through the real keymap, correctly degrading to the no-filesystem
+message). v1 limits, documented: one pipe per line, builtin left /
+program right, no combining with `>`.
+
 ## EL0 fault isolation, and the filesystem server survives its own crashes
 
 The containment payoff of process isolation, plus MINIX-style

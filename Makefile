@@ -27,6 +27,8 @@ PONG_ELF     := target/$(USER_TARGET)/release/pong
 PONG_BIN     := target/$(USER_TARGET)/release/pong.bin
 FSD_ELF      := target/$(USER_TARGET)/release/fsd
 FSD_BIN      := target/$(USER_TARGET)/release/fsd.bin
+UPPER_ELF    := target/$(USER_TARGET)/release/upper
+UPPER_BIN    := target/$(USER_TARGET)/release/upper.bin
 ESP_DIR      := esp
 OVMF         := $(shell brew --prefix qemu 2>/dev/null)/share/qemu/edk2-aarch64-code.fd
 PDT          := /Applications/Parallels Desktop.app/Contents/MacOS/prl_disk_tool
@@ -45,7 +47,7 @@ ifeq ($(PROFILE),release)
 CARGO_FLAGS += --release
 endif
 
-.PHONY: build shell-bin hello-bin pong-bin fsd-bin esp run run-virtio-console run-usb-kbd run-usb-multi run-gicv3 image run-image parallels-hdd test-parallels clean
+.PHONY: build shell-bin hello-bin pong-bin fsd-bin upper-bin esp run run-virtio-console run-usb-kbd run-usb-multi run-gicv3 image run-image parallels-hdd test-parallels clean
 
 # Overridable by `make test-parallels VM_NAME=... CMDS=... BOOT_WAIT=...`.
 VM_NAME     ?= Ouroboros
@@ -88,6 +90,10 @@ fsd-bin:
 	cargo build -p fsd --target $(USER_TARGET) --release
 	"$(OBJCOPY)" --strip-all $(FSD_ELF) $(FSD_BIN)
 
+upper-bin:
+	cargo build -p upper --target $(USER_TARGET) --release
+	"$(OBJCOPY)" --strip-all $(UPPER_ELF) $(UPPER_BIN)
+
 # Stage the EFI System Partition layout QEMU/Parallels expect: a removable
 # UEFI drive boots \EFI\BOOT\BOOTAA64.EFI automatically, no boot manager
 # entry needed. \EFI\ORBS\ (must fit FAT's 8.3 short-name limit, which
@@ -96,13 +102,14 @@ fsd-bin:
 # itself: the default shell binary and the config file (loader.rs's
 # CONFIG_PATH) naming which program to load - edit INIT.CFG and rebuild
 # just that program to swap it out, no kernel rebuild required.
-esp: build shell-bin hello-bin pong-bin fsd-bin
+esp: build shell-bin hello-bin pong-bin fsd-bin upper-bin
 	mkdir -p $(ESP_DIR)/EFI/BOOT $(ESP_DIR)/EFI/ORBS
 	cp $(KERNEL) $(ESP_DIR)/EFI/BOOT/BOOTAA64.EFI
 	cp $(SHELL_BIN) $(ESP_DIR)/EFI/ORBS/SH.BIN
 	cp $(HELLO_BIN) $(ESP_DIR)/EFI/ORBS/HELLO.BIN
 	cp $(PONG_BIN) $(ESP_DIR)/EFI/ORBS/PONG.BIN
 	cp $(FSD_BIN) $(ESP_DIR)/EFI/ORBS/FSD.BIN
+	cp $(UPPER_BIN) $(ESP_DIR)/EFI/ORBS/UPPER.BIN
 	printf '\\EFI\\ORBS\\SH.BIN' > $(ESP_DIR)/EFI/ORBS/INIT.CFG
 
 # Boots the ESP directory directly in QEMU (no disk image needed) against

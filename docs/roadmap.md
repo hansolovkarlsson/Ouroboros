@@ -425,7 +425,13 @@ phase:
   restarts each followed by a working remount, then the capped
   give-up; a task-0 fault still halting cleanly. Not covered,
   deliberately: a wedged (looping, non-faulting) server - no watchdog;
-  and no journaling for disk state corrupted mid-write. **Still next
+  and no journaling for disk state corrupted mid-write. Pipelines
+  (`builtin | program`, data streaming between processes over IPC with
+  an empty-message EOF convention and a real-tick timeout kill for
+  non-reading programs - see docs/shell-commands.md) landed the same
+  day, closing the last small item queued behind IPC. **Still next
   in this direction** (not yet scoped): moving further components, and
   per-task memory protection to make the isolation enforced rather
-  than trust-based.
+  than trust-based - which would also unlock program-to-program pipes
+  (a task's own output isn't capturable today, so pipelines are
+  builtin-left only).

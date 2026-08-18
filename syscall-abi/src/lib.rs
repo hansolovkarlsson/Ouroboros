@@ -68,7 +68,9 @@ pub const GET_TICKS: u64 = 6;
 /// `block_current_and_switch`), not a spin-wait on either side.
 pub const READ_CHAR: u64 = 15;
 
-/// `(total staged length)` -> `0` on success, [`SPAWN_ERROR`] (bad
+/// `(total staged length)` -> **the new task's slot index** on success
+/// (needed to wait on, send to, or kill what was just started - the
+/// shell's pipeline flow does all three), [`SPAWN_ERROR`] (bad
 /// argument), or a `SPAWN_ERR_*` code. Parses, relocates, and starts
 /// the program previously fed into the kernel's staging buffer via
 /// [`SPAWN_STAGE`], as a new task running *alongside* the caller - a
@@ -178,10 +180,16 @@ pub const MOUNT: u64 = 22;
 
 /// `(dest task, buf ptr, len)` -> `0`, [`TASK_ERR_NO_SUCH_TASK`],
 /// [`MSG_ERR_TOO_BIG`] (over [`MSG_MAX_LEN`]), or [`MSG_ERR_FULL`].
-/// Copies the message into `dest`'s bounded mailbox - no shared
-/// memory, no blocking sends. Send-to-self is allowed (it's just a
-/// queue). A task's queued mail dies with it (cleared on exit/kill);
-/// senders are never notified.
+/// Delivers the message to `dest` - straight into a matching blocked
+/// receiver's buffer (direct delivery), or into its bounded mailbox.
+/// No shared memory, no blocking sends. Send-to-self is allowed (it's
+/// just a queue). A task's queued mail dies with it (cleared on
+/// exit/kill); senders are never notified. **A zero-length message is
+/// legal** (the pointer must still be non-null): it's the
+/// end-of-stream marker in the shell's pipeline convention - a
+/// pipeline child (`left | program`) receives its input as a stream of
+/// 1-to-[`MSG_MAX_LEN`]-byte data messages followed by one empty
+/// message meaning "no more input; finish and exit".
 pub const MSG_SEND: u64 = 23;
 
 /// `(buf ptr, len)` -> `(sender << 32) | copied_len`, or

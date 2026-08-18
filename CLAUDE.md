@@ -3370,8 +3370,8 @@ artifact, not a regression.
 bounded append (existing + new ≤ 512 bytes), not real append - a
 genuine append/offset-write syscall stays a known gap; capture is 512
 bytes, refuse-not-truncate; no `2>` (errors always go to the console,
-by design, but there's no way to redirect them); no pipes (`|` needs
-inter-task IPC, tracked separately in the roadmap), no input
+by design, but there's no way to redirect them); ~~no pipes~~ (**done - see "Pipelines" above**: `builtin | program`
+over IPC, one pipe per line), no input
 redirection (`<`), no quoting, no glued operators (`cmd>f`).
 
 ## xHCI multi-device support: every connected device enumerated, classified, and kept addressed - the groundwork the USB mass-storage milestone needs
@@ -4182,6 +4182,75 @@ is still trust-based isolation (a task can corrupt another's memory
 *without* faulting - per-task page tables remain the real fix, queued
 as the next big milestone).
 
+## Pipelines: `builtin | program` - data flowing between processes over IPC
+
+The queued milestone after fault isolation, done 2026-08-18: `left |
+/path/to/program` pipes a builtin's captured output into a freshly
+spawned program as a real IPC stream. Scoped honestly around what
+exists: spawned programs receive no argv and their output isn't
+capturable (putc goes straight to the console), so v1 is **builtin
+left, program right, one pipe per line, no combining with `>`** - all
+refused with specific messages, all documented in
+docs/shell-commands.md's "Pipelines" section.
+
+Mechanism - zero new syscalls: the shell captures the left side (the
+redirection machinery's 512-byte capture, refuse-not-truncate), spawns
+the right side via the existing two-step staged flow (**`SPAWN` now
+returns the new task's slot index** instead of a bare 0 - the shell
+needs it to stream to, wait on, and kill; success values stay below
+the error band, so every existing caller is unaffected), streams the
+capture in 1-64-byte `MSG_SEND`s, and marks end-of-stream with one
+*empty* message - **a zero-length message is legal now**, the one
+ABI-behavior change (the pointer must still be non-null; the empty
+message is the pipeline EOF convention, documented on `MSG_SEND` in
+syscall-abi). The filter's shape (`upper/`, the sixth userland
+program, ~80 lines, the reference to copy): stdin is `msg_recv`,
+stdout is `putc`, EOF is the empty message, finishing is `exit` - the
+shell `wait`s on the slot, Ctrl+C-interruptible.
+
+**The one real robustness piece:** a right side that never reads its
+input (e.g. piping into a spawned shell, which only reads the
+keyboard) fills the 4-deep mailbox and would hang the shell in a
+send-retry loop forever - Ctrl+C couldn't rescue it, since the shell
+would be running, not blocked. `pipe_send` bounds the retry with a
+real-tick deadline (~3s via `GET_TICKS`), then kills the program and
+says why. A right side that *exits early* mid-stream is legitimate
+(head-like filters): `MSG_SEND`'s no-such-task answer just ends the
+streaming, and the wait reports how the program actually ended.
+
+**A real keymap gap found by the scripted real-hardware smoke test:**
+HID keycode 0x31 (backslash/pipe) was missing from
+`xhci.rs::keycode_to_ascii` entirely - the smoke test's new held-Shift
+`|` chord (added to `scripts/test-parallels.sh` alongside the existing
+`>` chord) arrived at the driver and was dropped, which also meant **no
+physical keyboard could type a pipeline on Parallels**. Fixed
+(`0x31 -> \\ / |`), and the rerun typed the pipeline correctly through
+the real xHCI path.
+
+**Verified on QEMU:** `echo`/`ls`/`cat` piped through UPPER.BIN
+(uppercased output, child exit 0, slot reaped and reused); every parse
+error (missing left/right, extra tokens, both `|`+`>` orders refused);
+an early-exiting non-reader (hello - messages queue, it exits, the
+pipeline completes); the never-reading case (`help | SH.BIN` - mailbox
+fills, ~3s, "stopped reading its input - killing it", slot reclaimed);
+FAT16 degradation (the shared no-filesystem message); a full
+byte-identical regression of the existing surface. Zero aborts in
+every `-d int` cross-check. **Verified on real Parallels hardware:**
+the pipeline command typed through the fixed keymap and correctly
+degraded to the no-filesystem message (UPPER.BIN isn't on the stick,
+and disk arrives post-boot there); boot/typing/uptime regression
+clean.
+
+**Still coarse, worth knowing before building on this:** one pipe per
+line - `a | b | c` needs either shell-side chaining of captures or
+real program-to-program streams; the left side must be a builtin - a
+task's own output isn't capturable, which is the same gap that blocks
+`program | program` and `exec ... > file` alike (a stdout-over-IPC
+redirection model is the real fix, a candidate for the per-task
+milestone era); filters get no argv (nothing passes arguments to
+spawned programs at all); and the 512-byte capture bounds how much can
+flow through one pipeline.
+
 ## Commands
 
 ```sh
@@ -4309,6 +4378,9 @@ fsd/                 fifth userland program: THE FILESYSTEM SERVER (driver isola
   src/main.rs        the request loop: recv -> decode FsRequest -> dispatch to Fs -> reply one u64; mounted Fs lives in main's stack frame (no static state in userland)
   src/fat32.rs       the kernel's old hand-rolled FAT32 module, moved essentially verbatim (MBR, BPB, FAT chains, 8.3 entries, full read/write support) plus read_at (windowed offset reads); its BlockDevice became disk.rs's syscall shim
   src/disk.rs        zero-sized Disk handle: read_sector/write_sector/capacity as BLOCK_READ/BLOCK_WRITE/BLOCK_INFO syscall wrappers
+
+upper/               sixth userland program: the pipeline filter demo (uppercases its piped input) - the reference for the filter-program shape: stdin = msg_recv, stdout = putc, EOF = the empty message, finish = exit; see "Pipelines" above
+  src/main.rs        ~80 lines: the recv/uppercase/putc loop
 
 pong/                fourth userland program: the IPC echo server (recv -> send back to sender; `quit` exits) - the long-lived server shape the fsd filesystem server now actually has, see "Driver isolation, part 1" above
   src/main.rs        ~90 lines: the recv/echo loop over MSG_RECV/MSG_SEND

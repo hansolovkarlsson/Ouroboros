@@ -1,0 +1,11 @@
+[package]
+name = "upper"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+syscall-abi = { path = "../syscall-abi" }
+
+[[bin]]
+name = "upper"
+path = "src/main.rs"

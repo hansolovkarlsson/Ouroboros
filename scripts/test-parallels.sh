@@ -46,7 +46,7 @@ echo "==> screenshots and log will land in $OUT_DIR/"
 # Standard PC AT Set-1 make-code scancodes, decimal (prlctl rejects the
 # 0x.. form - confirmed the hard way). Covers what this project's shell
 # commands actually need: lowercase letters, digits, space, '/', '.',
-# '-', backspace, and enter, plus '>' as a real held-Shift chord (see
+# '-', backspace, and enter, plus '>' and '|' as real held-Shift chords (see
 # shifted_base/send_char below). Anything outside this set is skipped
 # with a warning rather than failing the whole run.
 scancode() {
@@ -74,6 +74,7 @@ scancode() {
 shifted_base() {
 	case "$1" in
 	'>') echo 52 ;; # Shift + '.'
+	'|') echo 43 ;; # Shift + backslash
 	*) echo "" ;;
 	esac
 }

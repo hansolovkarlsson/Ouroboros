@@ -290,6 +290,13 @@ hardcoded separately in `kernel/src/syscall.rs` and `shell/src/main.rs` -
 see "Known rough edges" below for what this still doesn't cover (pointer/
 length validation, per-error-reason detail).
 
+**Pipeline filter programs** are the other program shape worth
+knowing (see `docs/shell-commands.md`'s "Pipelines"): stdin is
+`msg_recv` (1-64-byte data messages, then one *empty* message meaning
+end-of-stream), stdout is `putc`, and finishing means `exit` - the
+shell waits on the slot. `upper/src/main.rs` is the ~80-line reference
+to copy. No argv exists; a filter's behavior has to be baked in.
+
 ## Writing a replacement program
 
 The default shell (`shell/`) is a real, if minimal, example to copy. To
