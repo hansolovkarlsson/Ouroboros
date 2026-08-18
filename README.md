@@ -8,6 +8,11 @@ A microkernel operating system for ARM64 (aarch64), written in Rust with some as
 
 **[Project site & debugging postmortems →](https://hansolovkarlsson.github.io/Ouroboros/)**
 
+**[Tutorial: build an OS like this from scratch →](docs/tutorial.md)** —
+the working path only, staged from UEFI hello world to preemptive
+multitasking and disk-loaded userland, with code samples from this
+kernel. Also [on the project site](https://hansolovkarlsson.github.io/Ouroboros/tutorial.html).
+
 **[User manual →](docs/manual.md)** — building, running (QEMU &
 Parallels), testing, shell usage, and the syscall ABI, in one place.
 
