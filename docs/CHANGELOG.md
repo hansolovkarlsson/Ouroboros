@@ -7,6 +7,39 @@ what broke, how it was diagnosed), see `CLAUDE.md`; for *how* something
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## Per-task page tables: MMU-enforced isolation, not trust
+
+The last of the three post-part-2 candidates, and the one that makes
+"microkernel" mean something enforceable. Before this, every EL0
+region was accessible to every task - isolation was a convention. Now
+each scheduler slot runs under its own translation-table view
+(`mmu.rs`: per-view L0/L1/L2/L3) with identical kernel/device mappings
+but EL0 access to its own region alone; `mmu::activate_task` switches
+`TTBR0` and flushes the TLB at every context switch. Touching another
+task's memory faults, and the fault-isolation work kills only the
+toucher - proven by an A/B probe (a byte-read of the shell's region
+from a spawned program succeeded under the old shared map, faulted
+under views). The syscall boundary closed its matching gap the same
+day: `in_caller_region` validates every `(pointer, length)` against the
+calling task's own region, so access can't be laundered through a
+kernel copy.
+
+The one thing per-task views broke - the filesystem server
+dereferencing pointers into client memory - drove a protocol rework
+(chosen with the user over mapping-based grants, which leak neighboring
+client memory at page granularity): **FSOP v2**, fully self-contained,
+payloads inline in the message (kernel-copied task-to-task), over
+768-byte messages (`MSG_MAX_LEN` 64 -> 768). This is the first half of
+MINIX's real design; a grant/safecopy primitive can lift the 512-byte
+per-op cap later without touching the framing. Per-task ASIDs (a
+per-switch-TLBI optimization) were implemented and passed on QEMU but
+faulted the idle task on real Parallels hardware - reverted in favor of
+the flush-on-switch design, confirmed correct on both platforms;
+recorded as a future optimization with the fault evidence. Confirmed on
+QEMU (full regression, the isolation A/B proof, fsd crash/restart under
+views) and real Parallels (selftest, disk, echo, ps, advancing uptime -
+no fault).
+
 ## Pipelines: `builtin | program`, data flowing between processes over IPC
 
 The composition layer on top of part-1 IPC and the two-step spawn:

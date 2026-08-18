@@ -249,9 +249,12 @@ the protocol notes under its syscall table). The old eight `fs_*`
 syscalls' numbers (7-14) are deliberate gaps now; their exact contracts
 survive unchanged as the protocol ops, and the shell's `fs_call`/
 `fs_list_dir`/`fs_read_file`/... wrapper functions
-(`shell/src/main.rs`) are the reference client to copy — each is one
-56-byte request (op + six little-endian u64 args, pointers into your
-own buffers) and one u64 reply carrying the old return-value semantics.
+(`shell/src/main.rs`) are the reference client to copy — a request is a
+header (op + four little-endian u64 params) plus an inline payload
+(path, then data), the reply a status u64 plus an inline result, all
+copied task-to-task by the kernel (the payloads are *inline*, not
+pointers — per-task page tables make a client's memory unreadable by
+the server; see `docs/architecture.md`'s protocol section).
 Two failure values every client should know: `NO_FS` (`u64::MAX - 1`)
 means no filesystem is available (nothing mounted, or no server loaded
 this boot — the wrappers fold `msg_call`'s no-such-task answer into it),
@@ -410,13 +413,18 @@ Worth knowing before building further on this:
   There's still no guard *page* though - a stack overflow may silently
   corrupt adjacent memory rather than fault at all (see the fixed-stack
   bullet above).
-- **Pointer/length arguments are trusted, not validated** - by the
-  kernel (`syscall.rs::valid_user_range` is a minimal sanity bound, not
-  a check against the caller's actual mapped region) and by the
-  filesystem server alike (an `FSOP_*` request's embedded pointers are
-  dereferenced directly, the same trust model one level up - see
-  `fsd/src/main.rs`'s module doc comment). Fine while every userland
-  program is trusted; a real gap once that stops being true.
+- **Isolation is MMU-enforced now, not trust-based.** Each task runs
+  under its own translation-table view (`mmu.rs`) in which only its own
+  region is EL0-accessible - touching another task's memory faults and
+  kills only the toucher. The complementary syscall-boundary check
+  (`syscall.rs::in_caller_region`) validates every `(pointer, length)`
+  argument against the caller's own region, so access can't be
+  laundered through a kernel copy. The filesystem protocol carries no
+  cross-task pointers at all (payloads are inline). What remains: the
+  512-byte per-op payload cap (a grant/safecopy primitive would lift
+  it), and there's still no stack *guard page* (an overflow can corrupt
+  the program's own region silently - within its own isolation
+  boundary, not another task's).
 - **Write support (phases 4-8) covers directories, files with real
   content, copying, and renaming/moving, but every write fully replaces
   a file rather than appending or writing at an offset.** No recursive

@@ -87,14 +87,33 @@ tables it walks. Two coarse block kinds cover almost everything:
 | Device | `0x0`–`0x3FFF_FFFF` (fixed low 1GB) | Device-nGnRnE, non-executable |
 | RAM | Whatever the UEFI memory map reports as general RAM | Normal WB, executable, EL1-only |
 
-Within RAM, up to five small regions get finer-grained (4KB page) EL0
-access instead of the default EL1-only 2MB/1GB blocks — one per EL0 task
-(boot shell, idle, filesystem server, and two spawnable slots).
-See [`processes.md`](processes.md) for how those regions are sized and
+**Isolation is per-task and MMU-enforced, not a trust model.** Each of
+the five scheduler slots has its *own* translation-table view (its own
+L0/L1/L2/L3 in `mmu.rs`): identical kernel and device mappings in every
+view, but EL0 access granted only to that task's own region. From any
+view, every other task's memory is ordinary EL1-only RAM, so an EL0
+touch of it faults — and, per the fault-isolation design above, kills
+only the toucher. `mmu::activate_task` switches `TTBR0_EL1` to the
+incoming task's view (and flushes the TLB) at every context switch;
+`tasks.rs` calls it wherever `CURRENT` changes. A view fine-grains only
+its own region (one 2MB→4KB split), since a region fits one 2MB slot by
+construction. The complementary half is at the syscall boundary: every
+`(pointer, length)` argument is checked to fall inside the calling
+task's own region (`syscall.rs::in_caller_region`) — otherwise a task
+could launder access to another's memory *through* a kernel copy.
+
+See [`processes.md`](processes.md) for how the regions are sized and
 placed, and `mmu.rs`'s own module doc comment for the full mechanics
-(including two real bugs that shaped this design: a starting-level
+(including two real bugs that shaped the paging design: a starting-level
 mismatch that caused a fault loop, and an EL0-vs-EL1-code-sharing issue
-that was worked around rather than root-caused).
+worked around rather than root-caused).
+
+Per-task ASIDs (which would make a context switch a plain `TTBR0`
+write, no TLB flush) were implemented and worked on QEMU but faulted
+the idle task on real Parallels hardware; reverted in favor of the
+flush-on-switch design, which is confirmed correct on both. The flush
+is cheap relative to everything else a tick already does — ASIDs stay a
+recorded future optimization, not a need.
 
 The walk starts at **L0** with `T0SZ=20`, matching firmware's own
 configuration — deliberately, not a simplification opportunity; a
@@ -375,35 +394,44 @@ the way hand-duplicated numbers did before this crate existed.
 ### The filesystem request protocol (`FSOP_*`)
 
 File operations are messages to the filesystem server (task 2,
-`FSD_TASK`), normally sent via `msg_call`. A request is 56 bytes
-(`FS_REQUEST_LEN`): the op as a little-endian u64 at offset 0, then six
-little-endian u64 arguments — pointers and lengths into the *caller's*
-memory, which the server reads and writes directly (the same
-single-address-space trust model the old `fs_*` syscalls' pointer
-arguments had, now spanning two EL0 regions instead of EL0-to-kernel).
-The reply is a single u64 in the reply message's first 8 bytes, carrying
-exactly the old syscalls' return-value semantics — byte counts and real
-sizes on success, or a value in the reserved error band (`>= FS_ERR_MIN`):
-`NO_FS` when nothing is mounted, a specific `FS_ERR_*` code per real
-failure reason, `FS_ERROR` for argument-validation rejections. A call to
-an empty task-2 slot (no FSD.BIN on the ESP this boot) fails at the
-`msg_call` layer with `TASK_ERR_NO_SUCH_TASK`, which the shell's
-wrappers fold into `NO_FS` — literally true. Ops (constants in
-`syscall-abi`, contracts identical to the old syscalls of the same
-names): `FSOP_LIST_DIR`, `FSOP_READ_FILE`, `FSOP_READ_AT` (the one new
-capability — windowed reads at a byte offset, what `exec`'s chunked
+`FSD_TASK`), normally sent via `msg_call`. The protocol is **fully
+self-contained** — payloads travel *inside* the message, not as
+pointers into the caller's memory, because per-task page tables make a
+client's memory unreadable by the server. A request is a header (the op
+as a little-endian u64 at offset 0, then four u64 parameters at
+8/16/24/32 — `FS_REQ_PAYLOAD`) followed by the inline payload (path
+bytes, then data bytes for `write`/`mv`). The reply is a status u64
+(`FS_REPLY_PAYLOAD`) followed by the inline result (a listing, file
+data). Everything is copied task-to-task by the kernel's message
+machinery; no pointer crosses a task boundary. Per-operation payloads
+are capped at `FS_DATA_MAX` (512) — which is why `MSG_MAX_LEN` is 768:
+one message holds a header, a full path, and a full data buffer. The
+status carries exactly the old syscalls' return-value semantics — byte
+counts and real sizes on success, or a value in the reserved error band
+(`>= FS_ERR_MIN`): `NO_FS` when nothing is mounted, a specific
+`FS_ERR_*` code per real failure reason, `FS_ERROR` for
+argument-validation rejections. A call to an empty task-2 slot (no
+FSD.BIN this boot) fails at the `msg_call` layer with
+`TASK_ERR_NO_SUCH_TASK`, which the shell's wrappers fold into `NO_FS` —
+literally true. Ops (constants in `syscall-abi`, contracts identical to
+the old syscalls of the same names): `FSOP_LIST_DIR`, `FSOP_READ_FILE`,
+`FSOP_READ_AT` (windowed reads at a byte offset, what `exec`'s chunked
 program loading is built on), `FSOP_WRITE_FILE` (zero-length data is
 valid — truncate to empty), `FSOP_MKDIR`, `FSOP_RMDIR`, `FSOP_TOUCH`,
 `FSOP_RM`, `FSOP_MV`, and `FSOP_MOUNT` (the FS half of the `mount`
 command). The shell's nine `fs_*` wrapper functions
 (`shell/src/main.rs::fs_call` and friends) are the reference client.
+This inline-payload design is the first half of MINIX's — small
+messages plus kernel-mediated copies; a grant/safecopy primitive could
+lift the 512-byte per-op cap later without touching the framing.
 
 The `syscall-abi` crate covers the numbers, sentinels, and protocol
-constants, not argument validation — see
-[`processes.md`](processes.md)'s "known rough edges" for what's still a
-real gap (pointer/length arguments are trusted, not checked against the
-caller's actual mapped region — by the kernel and the server alike) and
-for how to depend on this crate when writing a new userland program.
+constants. Argument validation is the kernel's: every syscall
+`(pointer, length)` pair is checked to fall inside the calling task's
+own region (`syscall.rs::in_caller_region`), so a task can't launder
+access to another's memory through a kernel copy. See
+[`processes.md`](processes.md) for how to depend on this crate when
+writing a new userland program.
 
 ## Console
 

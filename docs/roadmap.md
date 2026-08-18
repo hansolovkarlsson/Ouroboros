@@ -429,9 +429,22 @@ phase:
   (`builtin | program`, data streaming between processes over IPC with
   an empty-message EOF convention and a real-tick timeout kill for
   non-reading programs - see docs/shell-commands.md) landed the same
-  day, closing the last small item queued behind IPC. **Still next
-  in this direction** (not yet scoped): moving further components, and
-  per-task memory protection to make the isolation enforced rather
-  than trust-based - which would also unlock program-to-program pipes
-  (a task's own output isn't capturable today, so pipelines are
-  builtin-left only).
+  day, closing the last small item queued behind IPC. **Per-task memory protection is
+  done too (2026-08-18): isolation is MMU-enforced now, not
+  trust-based.** Each scheduler slot runs under its own
+  translation-table view where only its own region is EL0-accessible;
+  touching another task's memory faults and (via the fault-isolation
+  work) kills only the toucher, proven by A/B fault injection on QEMU
+  and confirmed on real Parallels hardware. The filesystem protocol
+  became fully self-contained to survive this (payloads inline, no
+  cross-task pointers - FSOP v2 over 768-byte messages), and the
+  syscall boundary now validates every pointer against the caller's
+  own region. Per-task ASIDs (a per-switch-TLBI optimization) were
+  implemented, passed on QEMU, but faulted the idle task on real
+  Parallels - reverted in favor of flush-on-switch, correct on both;
+  ASIDs stay a recorded future optimization. **Still next** (not yet
+  scoped): moving further components out of the kernel; a
+  grant/safecopy IPC primitive to lift the 512-byte per-op payload cap;
+  and program-to-program pipes (a task's own output still isn't
+  capturable, so pipelines are builtin-left only - a stdout-over-IPC
+  model is the real fix).

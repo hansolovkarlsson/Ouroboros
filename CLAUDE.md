@@ -4251,6 +4251,90 @@ milestone era); filters get no argv (nothing passes arguments to
 spawned programs at all); and the 512-byte capture bounds how much can
 flow through one pipeline.
 
+## Per-task page tables: MMU-enforced isolation, not trust (and FSOP v2)
+
+The last of the three post-part-2 candidates, done 2026-08-18 in three
+staged commits + one revert - the change that makes this kernel's
+isolation *enforced* rather than a convention. Before it, every EL0
+region was EL0-accessible to every task: any task could read or corrupt
+any other's memory (the shell's, the filesystem server's) without
+faulting. Now each of the five scheduler slots runs under its own
+translation-table view.
+
+**The design cascade, and a user decision it forced.** Per-task views
+break exactly one thing: the fsd server dereferencing pointers into
+client memory in FSOP requests (every *kernel-side* copy keeps working -
+kernel mappings are identical in every view). Two ways to fix it were
+weighed with the user: mapping-based grants (MINIX-*style* as often
+described) vs. inline payloads + kernel copies (MINIX's *actual*
+production design - `sys_safecopy`). Chosen: **inline payloads**, because
+sub-page grants would leak neighboring client memory into the server -
+the opposite of the milestone's point - and because copying is the
+first half of the real MINIX design, with a grant/safecopy primitive a
+clean later addition for bulk data. See the plan discussion; this was an
+explicit call, not a default.
+
+**Stage 1 - FSOP v2 (`36b4aa6`), done first, under the still-shared
+map.** The protocol became fully self-contained: a request is a header
+(op + four u64 params) plus inline payload (path, then data); a reply is
+a status u64 plus inline result; everything copied task-to-task, no
+pointer crossing a boundary. `MSG_MAX_LEN` 64 -> 768 to carry it
+(Message.len u16, mailboxes ~16KB, message syscalls get their own
+`valid_msg_range`). The 512-byte per-op cap survives as `FS_DATA_MAX`.
+The server now touches only its own two buffers; the shell's `fs_call`
+builds requests and unpacks replies, every wrapper signature unchanged
+upward. Regressed byte-clean on QEMU before any MMU change.
+
+**Stage 2 - per-task views + syscall hardening (`4eb9db4`) - the actual
+payoff.** `mmu.rs` builds one L0/L1/L2/L3 view per task: identical
+kernel/device mappings, EL0 access to that task's region alone (a view
+fine-grains only its own region's one 2MB slot - simpler than the old
+shared map's up-to-five-splits). `mmu::activate_task` switches TTBR0 +
+flushes the TLB, hooked into every `CURRENT` change in `tasks.rs`. And
+the long-documented "syscall pointers trusted, not validated" gap
+*had* to close here - with the MMU enforcing EL0 isolation, an
+unvalidated syscall pointer was the last way to reach another task's
+memory (by having the kernel touch it); `in_caller_region` checks every
+pair against the caller's own region. **Proven by A/B fault injection:**
+a temporary probe reading a byte of the shell's region from a spawned
+program *succeeded* under the stage-1 shared map (control) and *faulted*
+under views (`EL0 FAULT far_el1=0x5c600000`, permission fault, faulter
+killed alone, shell alive) - the isolation is real, not assumed. fsd
+crash/restart re-verified under views.
+
+**Stage 3 - ASIDs + nG (`2ac55b8`), attempted, reverted (`f23101b`).**
+To drop the per-switch TLBI: nG-tagged EL0 pages, ASID-per-view TTBR0,
+plain-write switches. Passed every QEMU test *and* the isolation probe -
+but on real Parallels hardware it faulted the idle task on its own
+instruction fetch (`EL0 FAULT task=1 esr=0x8200000f`, instruction
+permission fault). Per the plan's own contingency, reverted to stage
+2's flush-on-switch (correct on both platforms, re-confirmed on real
+Parallels: selftest, echo, ps, advancing uptime, no fault) - one
+variable at a time isolated it to the ASID change specifically, not
+views. ASIDs are only a per-switch-TLBI optimization this kernel
+doesn't need (a tick already does far heavier work); recorded as a
+future item with the fault evidence, not chased further this session.
+The root cause is unproven - leading candidates are real hardware not
+honoring nG the way TCG does, or a break-before-make gap when a rebuild
+changes a view whose ASID has live entries.
+
+**Confirmed on real Parallels hardware** (stage 1+2): `selftest`
+correct, disk auto-mounted from the USB stick, `echo`/`ps`/`uptime`
+clean with ticks advancing across the idle task - isolation enforced,
+no regression. Reads only on the stick, standing policy. One
+observed-and-ignored USB enumeration flake (the attached stick
+occasionally displacing keyboard enumeration on a given boot) is
+unrelated to this work.
+
+**Still coarse, worth knowing before building on this:** the 512-byte
+per-op FSOP payload cap (a grant/safecopy primitive lifts it - the
+recorded next IPC step); ASIDs reverted, so a context switch still
+flushes the TLB (cheap relative to a tick's other work); no stack
+guard page (an overflow corrupts the program's own region - within its
+isolation boundary, not another task's); and program-to-program pipes
+still need a stdout-over-IPC model (a task's own output isn't
+capturable, so pipelines stay builtin-left).
+
 ## Commands
 
 ```sh
@@ -4355,7 +4439,7 @@ kernel/
   src/font.rs        embedded public-domain 8x8 bitmap font (dhepper/font8x8), printable ASCII 0x20-0x7E only
   src/fbconsole.rs   text console rendered directly into the GOP framebuffer: glyph drawing, cursor, ptr::copy-based scroll - write-only, no ANSI parsing, see "GOP framebuffer console" above
   src/exceptions.rs  AArch64 exception vector table (VBAR_EL1) + fault reporting; SVC path (slot 8/"3:") saves x9 to a scratch stack slot before the EC check clobbers it (see "A real relocating loader" above) and saves/restores SP_EL0 at Context's real offset alongside ELR/SPSR, passing dispatch() the frame pointer itself (see "Blocking primitives" above); slot 8's non-SVC fall-through is the resumable EL0-fault path ("4:"/rust_el0_fault_handler) - kills just the faulting task, restarts a faulted filesystem server, see "EL0 fault isolation" above
-  src/mmu.rs         replaces firmware's translation tables with our own identity map (L0->L1->L2->L3 as needed), up to MAX_EL0_REGIONS (4) independent EL0 regions, an optional framebuffer device-block fallback, and (since "Dynamic task creation") a stashed memory map/extra-device list plus rebuild_with_el0_regions so install_identity_map can be called a second time at runtime - see "Dynamic task creation and exec()" above
+  src/mmu.rs         per-task translation-table views (one L0/L1/L2/L3 per scheduler slot; identity-mapped kernel/device shared, EL0 access to each task's own region only - enforced isolation, see "Per-task page tables" above), up to MAX_EL0_REGIONS (5) tasks/views, activate_task switches TTBR0+TLBI per context switch, an optional framebuffer device-block fallback, and (since "Dynamic task creation") a stashed memory map/extra-device list plus rebuild_with_el0_regions so install_identity_map can be called a second time at runtime - see "Dynamic task creation and exec()" above
   src/gic.rs         version-dispatching facade over gicv2.rs/gicv3.rs, selected by madt.rs's real discovery - see "MADT/GICv3" above
   src/gicv2.rs       GICv2 backend (distributor + memory-mapped CPU interface), addresses now passed in from madt::GicInfo instead of hardcoded
   src/gicv3.rs       GICv3 backend (redistributor wake/discovery, ICC_* system-register CPU interface) - confirmed working on QEMU and real Parallels hardware, see "MADT/GICv3" above

@@ -180,7 +180,8 @@ real-tick timeout rather than hanging the shell.
   message table in the shell.
 - **`cd ..` from `/` stays at `/`** rather than erroring — a minor,
   deliberate rough edge, not a bug.
-- **Buffer pointers are trusted, not validated** — by the kernel for
-  syscall arguments and by the filesystem server for the pointers
-  embedded in its requests — fine while every userland program is
-  trusted (see `processes.md`'s "known rough edges").
+- **Tasks are MMU-isolated from each other** — each runs under its own
+  page-table view where only its own memory is accessible, so a buggy
+  or hostile program faults (and dies alone) rather than corrupting the
+  shell or the filesystem server (see `processes.md`'s "known rough
+  edges" and `architecture.md`'s memory layout).
