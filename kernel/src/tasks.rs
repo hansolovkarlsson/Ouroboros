@@ -643,6 +643,7 @@ pub(crate) unsafe fn block_current_and_switch(frame: *mut Context, reason: WaitR
     let next = next_runnable(current);
     *frame = unsafe { *TASKS[next].0.get() };
     CURRENT.store(next, Ordering::Relaxed);
+    crate::mmu::activate_task(next);
     frame.gpr[0]
 }
 
@@ -683,6 +684,7 @@ pub(crate) unsafe fn exit_current_and_switch(frame: *mut Context, status: u64) -
     let next = next_runnable(current);
     *frame = unsafe { *TASKS[next].0.get() };
     CURRENT.store(next, Ordering::Relaxed);
+    crate::mmu::activate_task(next);
     frame.gpr[0]
 }
 
@@ -726,6 +728,7 @@ pub(crate) unsafe fn kill_current_and_switch(frame: *mut Context) {
     let next = next_runnable(current);
     *frame = unsafe { *TASKS[next].0.get() };
     CURRENT.store(next, Ordering::Relaxed);
+    crate::mmu::activate_task(next);
 }
 
 /// Fails every task blocked in a call to `dead` (a
@@ -963,6 +966,11 @@ fn clean_dcache_range(addr: u64, len: u64) {
 /// # Safety
 /// Must be called after [`init`].
 pub unsafe fn start() -> ! {
+    // The boot-time build already left task 0's view active
+    // (build_tables switches to the current task's view, and CURRENT
+    // starts at 0) - activated again here for explicitness, so this
+    // function's contract doesn't silently depend on that ordering.
+    crate::mmu::activate_task(0);
     let ctx = unsafe { *TASKS[0].0.get() };
     unsafe {
         asm!(
@@ -1047,4 +1055,7 @@ pub unsafe fn on_tick(frame: *mut Context) {
     unsafe { *TASKS[current].0.get() = *frame };
     *frame = unsafe { *TASKS[next].0.get() };
     CURRENT.store(next, Ordering::Relaxed);
+    // The eret this returns into lands in `next`'s EL0 code - it must
+    // run under `next`'s own table view (per-task page tables).
+    crate::mmu::activate_task(next);
 }

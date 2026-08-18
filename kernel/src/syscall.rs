@@ -18,22 +18,20 @@
 //! `syscall-abi/src/lib.rs` for the full list and `docs/processes.md`'s
 //! "known rough edges" for why this crate exists.
 //!
-//! ## Pointer arguments trust the caller - a real, known simplification
+//! ## Pointer arguments are validated against the caller's own region
 //!
 //! Several syscalls (`MSG_SEND`/`MSG_RECV`/`MSG_CALL`, `BLOCK_READ`/
 //! `BLOCK_WRITE`, `SPAWN_STAGE`) take raw `(pointer, length)` pairs -
-//! valid to dereference directly from EL1 because this kernel has
-//! exactly one address space (no per-process virtual memory yet), so an
-//! EL0-valid pointer is automatically EL1-valid too. What isn't done:
-//! verifying the pointer/length actually falls within the calling
-//! program's own mapped region before touching it. Fine while every
-//! userland program is currently trusted and no isolation guarantee is
-//! promised yet - a real gap once that stops being true.
-//! `valid_user_range` below is a minimal sanity bound (non-null,
-//! non-zero, capped length), not a real memory-safety check. The
-//! filesystem server's request protocol carries the same trust model
-//! one level up (its requests hold pointers into the *client's*
-//! memory) - see `fsd/src/main.rs`.
+//! valid to dereference directly from EL1 because everything is
+//! identity-mapped and the kernel's own mappings are identical in
+//! every per-task table view. Since the per-task page-tables
+//! milestone, every such pair is also checked to fall inside the
+//! *calling task's own* region (`in_caller_region` below) - the
+//! long-documented "trusted, not validated" gap, closed the moment it
+//! stopped being merely theoretical: with the MMU enforcing isolation
+//! at EL0, an unvalidated syscall pointer would have been the one
+//! remaining way for a task to reach another task's memory (by having
+//! the kernel do the touching for it).
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -239,20 +237,38 @@ pub(crate) fn poll_keyboard_byte() -> Option<u8> {
     Some(byte)
 }
 
-/// Minimal sanity bound for a userland `(pointer, length)` argument pair -
-/// see the module doc comment's note on what this isn't.
+/// Size cap for a userland `(pointer, length)` argument pair.
 const MAX_USER_LEN: u64 = 512;
 
+/// Whether `[ptr, ptr+len)` (or the single byte at `ptr`, for a
+/// zero-length pair) falls entirely inside the *calling task's own*
+/// mapped region - real validation since the per-task page-tables
+/// milestone, not just a sanity bound. Without it, a task could
+/// launder access to memory its own tables deny it *through* the
+/// kernel's copies (a `msg_send` sourced from another task's region,
+/// a `block_write` into one, ...) - the MMU would enforce isolation at
+/// EL0 while every syscall quietly bypassed it. Every legitimate
+/// caller's buffers (stack, locals, `.rodata` literals) live inside
+/// its own loaded region, so nothing real is refused.
+fn in_caller_region(ptr: u64, len: u64) -> bool {
+    let (base, size) = tasks::task_region(tasks::current_task());
+    if size == 0 {
+        return false;
+    }
+    ptr >= base && ptr.saturating_add(len.max(1)) <= base + size
+}
+
 fn valid_user_range(ptr: u64, len: u64) -> bool {
-    ptr != 0 && len != 0 && len <= MAX_USER_LEN
+    ptr != 0 && len != 0 && len <= MAX_USER_LEN && in_caller_region(ptr, len)
 }
 
 /// The message syscalls' own bound - messages grew past
 /// [`MAX_USER_LEN`] when the filesystem protocol's payloads moved
 /// inline (`syscall_abi::MSG_MAX_LEN`, 768), so they can't share the
-/// 512-byte check the sector/staging buffers still use.
+/// 512-byte check the sector/staging buffers still use. Same
+/// caller-region containment as [`valid_user_range`].
 fn valid_msg_range(ptr: u64, len: u64) -> bool {
-    ptr != 0 && len != 0 && len <= syscall_abi::MSG_MAX_LEN
+    ptr != 0 && len != 0 && len <= syscall_abi::MSG_MAX_LEN && in_caller_region(ptr, len)
 }
 
 /// Sized generously for a real userland program - the default shell is
@@ -603,8 +619,9 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
             // A zero-length message is legal - it's the end-of-stream
             // marker in the shell's pipeline convention (see the
             // MSG_SEND doc in syscall-abi). The pointer must still be
-            // non-null; only the length may be 0.
-            if arg1 == 0 || arg2 > syscall_abi::MSG_MAX_LEN {
+            // non-null and inside the caller's own region; only the
+            // length may be 0.
+            if arg1 == 0 || arg2 > syscall_abi::MSG_MAX_LEN || !in_caller_region(arg1, arg2) {
                 return FS_ERROR;
             }
             if dest >= tasks::NUM_TASKS || !tasks::task_exists(dest) {

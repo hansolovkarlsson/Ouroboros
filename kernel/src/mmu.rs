@@ -157,8 +157,39 @@ struct Table(UnsafeCell<[u64; ENTRIES_PER_TABLE]>);
 // TTBR0_EL1.
 unsafe impl Sync for Table {}
 
-static L0_TABLE: Table = Table(UnsafeCell::new([0; ENTRIES_PER_TABLE]));
-static L1_TABLE: Table = Table(UnsafeCell::new([0; ENTRIES_PER_TABLE]));
+/// One EL0 region slot per task (`tasks::NUM_TASKS`, kept in sync by
+/// the array literals both sides carry) - and, since the per-task
+/// page-tables milestone, also the number of translation-table
+/// *views*: view i grants EL0 access to region i alone. Each region is
+/// independently guaranteed to fit within one 2MB-aligned slot (see
+/// the safety comments on `install_identity_map`), so a view needs
+/// exactly one L2 split and one L3 split - its own region's.
+const MAX_EL0_REGIONS: usize = 5;
+
+// Per-task translation-table views (the per-task page-tables
+// milestone): view i is the table set task i runs under - identical
+// kernel/device mappings in every view, but EL0 access granted *only*
+// to el0_regions[i], task i's own region. That's the entire
+// enforcement mechanism: under view i, every other task's memory is
+// ordinary EL1-only RAM, and an EL0 touch of it faults (and, per the
+// fault-isolation milestone, kills only the toucher). One L1 per view
+// rather than sharing: the L1 is where a view's one EL0-split block
+// diverges from the others'. The *extra device* L1 tables further
+// below stay shared - their entries are identical in every view.
+static L0_TABLES: [Table; MAX_EL0_REGIONS] = [
+    Table(UnsafeCell::new([0; ENTRIES_PER_TABLE])),
+    Table(UnsafeCell::new([0; ENTRIES_PER_TABLE])),
+    Table(UnsafeCell::new([0; ENTRIES_PER_TABLE])),
+    Table(UnsafeCell::new([0; ENTRIES_PER_TABLE])),
+    Table(UnsafeCell::new([0; ENTRIES_PER_TABLE])),
+];
+static L1_TABLES: [Table; MAX_EL0_REGIONS] = [
+    Table(UnsafeCell::new([0; ENTRIES_PER_TABLE])),
+    Table(UnsafeCell::new([0; ENTRIES_PER_TABLE])),
+    Table(UnsafeCell::new([0; ENTRIES_PER_TABLE])),
+    Table(UnsafeCell::new([0; ENTRIES_PER_TABLE])),
+    Table(UnsafeCell::new([0; ENTRIES_PER_TABLE])),
+];
 
 /// The most `extra_devices` entries `install_identity_map` has ever been
 /// called with - matches `main.rs`'s own fixed-size staging array
@@ -222,27 +253,14 @@ static EXTRA_L1_TABLES: [Table; MAX_EXTRA_L1_TABLES] = [
     Table(UnsafeCell::new([0; ENTRIES_PER_TABLE])),
 ];
 
-// Independent EL0 regions, not one shared region split in half: task 0's
-// loaded-program region (loader.rs, arbitrary size, 2MB-aligned by
-// construction - see its module doc comment), task 1's small fixed idle
-// region (tasks.rs), and - since the dynamic-task-creation milestone -
-// up to two more `tasks::spawn`ed programs's own regions
-// (`tasks::allocate_runtime_region`, 2MB-aligned by the identical
-// over-allocate-and-trim trick). Each region is independently guaranteed
-// to fit within one 2MB slot, so at most `MAX_EL0_REGIONS` slots (and
-// therefore at most that many 1GB blocks, and at most that many L3
-// splits) can ever need EL0 handling - "generous, one only if it
-// straddles a boundary" reasoning, just now sized for
-// `tasks::NUM_TASKS` instead of a hardcoded two. If any count is ever
-// exceeded (shouldn't be, with every region pre-aligned not to
-// straddle), the affected slot fails safe to EL1-only rather than
-// corrupting a table - see the WARNING branches in
-// `install_identity_map`.
-const MAX_EL0_REGIONS: usize = 5;
-const MAX_EL0_L2_TABLES: usize = 5;
-const MAX_EL0_L3_TABLES: usize = 5;
+// One L2 + one L3 per *view* (not per region-in-a-shared-map, the
+// pre-per-task-tables design): view i only ever fine-grains the single
+// 1GB block and single 2MB slot containing its own region - every
+// other task's region is, from view i's perspective, ordinary EL1-only
+// RAM needing no split at all. A genuinely simpler shape than the old
+// shared map's up-to-five-splits bookkeeping.
 
-static EL0_L2_TABLES: [Table; MAX_EL0_L2_TABLES] = [
+static EL0_L2_TABLES: [Table; MAX_EL0_REGIONS] = [
     Table(UnsafeCell::new([0; ENTRIES_PER_TABLE])),
     Table(UnsafeCell::new([0; ENTRIES_PER_TABLE])),
     Table(UnsafeCell::new([0; ENTRIES_PER_TABLE])),
@@ -250,7 +268,7 @@ static EL0_L2_TABLES: [Table; MAX_EL0_L2_TABLES] = [
     Table(UnsafeCell::new([0; ENTRIES_PER_TABLE])),
 ];
 
-static EL0_L3_TABLES: [Table; MAX_EL0_L3_TABLES] = [
+static EL0_L3_TABLES: [Table; MAX_EL0_REGIONS] = [
     Table(UnsafeCell::new([0; ENTRIES_PER_TABLE])),
     Table(UnsafeCell::new([0; ENTRIES_PER_TABLE])),
     Table(UnsafeCell::new([0; ENTRIES_PER_TABLE])),
@@ -356,11 +374,12 @@ fn is_general_ram(ty: MemoryType) -> bool {
     )
 }
 
-fn overlaps_any(regions: &[(u64, u64); MAX_EL0_REGIONS], start: u64, end: u64) -> bool {
-    regions.iter().any(|&(region_start, region_size)| {
-        let region_end = region_start + region_size;
-        region_start < end && region_end > start
-    })
+/// Whether one (start, size) region overlaps [start, end) - the only
+/// overlap question a per-task view ever asks (about its own region).
+fn overlaps(region: (u64, u64), start: u64, end: u64) -> bool {
+    let (region_start, region_size) = region;
+    let region_end = region_start + region_size;
+    region_size != 0 && region_start < end && region_end > start
 }
 
 /// Builds the identity map and switches TTBR0_EL1 to it. The MMU stays
@@ -476,13 +495,8 @@ pub(crate) fn ram_span() -> (u64, u64) {
 }
 
 unsafe fn build_tables(memory_map: &MemoryMapOwned, el0_regions: [(u64, u64); MAX_EL0_REGIONS], extra_devices: &[(u64, u64)]) {
-    let l1 = unsafe { &mut *L1_TABLE.0.get() };
-
-    // Device: fixed low 1GB. See module doc comment for why this one stays
-    // a hardcoded convention rather than discovered.
-    l1[0] = device_block(0);
-
-    // RAM: real discovered span, not a guess.
+    // RAM: real discovered span, not a guess - computed once, used by
+    // every view.
     let mut min_addr = u64::MAX;
     let mut max_addr = 0u64;
     for desc in memory_map.entries().filter(|d| is_general_ram(d.ty)) {
@@ -491,79 +505,21 @@ unsafe fn build_tables(memory_map: &MemoryMapOwned, el0_regions: [(u64, u64); MA
         min_addr = min_addr.min(start);
         max_addr = max_addr.max(end);
     }
-    if min_addr <= max_addr {
-        let first_block = min_addr / GIB;
-        let last_block = (max_addr - 1) / GIB;
-        let mut next_el0_l2_table = 0usize;
-        let mut next_el0_l3_table = 0usize;
-        for block in first_block..=last_block {
-            let idx = block as usize;
-            if idx >= ENTRIES_PER_TABLE {
-                continue;
-            }
-            let block_start = block * GIB;
-            let block_end = block_start + GIB;
-            let overlaps_el0 = overlaps_any(&el0_regions, block_start, block_end);
 
-            if overlaps_el0 && next_el0_l2_table < MAX_EL0_L2_TABLES {
-                let l2 = unsafe { &mut *EL0_L2_TABLES[next_el0_l2_table].0.get() };
-                for (i, entry) in l2.iter_mut().enumerate() {
-                    let sub_base = block_start + (i as u64) * MIB2;
-                    let sub_end = sub_base + MIB2;
-                    let is_el0_slot = overlaps_any(&el0_regions, sub_base, sub_end);
-                    if is_el0_slot && next_el0_l3_table < MAX_EL0_L3_TABLES {
-                        // This one 2MB slot contains an (much smaller) EL0
-                        // region - split it further into 4KB pages so only
-                        // the region's own pages get EL0 access, not the
-                        // other ~2MB of kernel code/data (or the other EL0
-                        // region, if it happens to share this slot) that
-                        // shares it.
-                        let l3 = unsafe { &mut *EL0_L3_TABLES[next_el0_l3_table].0.get() };
-                        for (j, page) in l3.iter_mut().enumerate() {
-                            let page_base = sub_base + (j as u64) * 4096;
-                            let page_end = page_base + 4096;
-                            let is_el0_page = overlaps_any(&el0_regions, page_base, page_end);
-                            *page = if is_el0_page { el0_page_4k(page_base) } else { kernel_page_4k(page_base) };
-                        }
-                        *entry = table_desc(EL0_L3_TABLES[next_el0_l3_table].0.get() as u64);
-                        next_el0_l3_table += 1;
-                    } else {
-                        if is_el0_slot {
-                            crate::console::println!(
-                                "Ouroboros kernel: WARNING: out of EL0 L3 tables, denying EL0 access to 2MB slot {sub_base:#x}"
-                            );
-                        }
-                        *entry = kernel_block_2m(sub_base);
-                    }
-                }
-                l1[idx] = table_desc(EL0_L2_TABLES[next_el0_l2_table].0.get() as u64);
-                next_el0_l2_table += 1;
-            } else {
-                if overlaps_el0 {
-                    crate::console::println!(
-                        "Ouroboros kernel: WARNING: out of EL0 L2 tables, denying EL0 access to 1GB block {block_start:#x}"
-                    );
-                }
-                l1[idx] = normal_block(block_start);
-            }
-        }
-        crate::console::println!(
-            "Ouroboros kernel: identity map RAM {min_addr:#x}-{max_addr:#x} (1GB blocks {first_block}..={last_block}), device 0x0-{:#x}, EL0 regions {el0_regions:x?}",
-            GIB - 1
-        );
-    }
-
-    // Extra discovered device regions - see this function's doc comment
-    // and `MAX_EXTRA_L1_TABLES`'s. Only fires per-region if the RAM loop
-    // above (and the fixed low-1GB device block) left that region's own
-    // 1GB block unmapped. Handles landing outside `L1_TABLE`'s span
-    // (L0 index != 0) by allocating from `EXTRA_L1_TABLES`, reusing an
-    // already-allocated one if a previous region needed the same L0
-    // index.
+    // Extra discovered device regions - see `install_identity_map`'s doc
+    // comment and `MAX_EXTRA_L1_TABLES`'s. Planned once, shared by every
+    // view: an entry either lands inside a view's own L1 span (L0 index
+    // 0 - each view's L1 gets it, if the RAM loop left that block
+    // unmapped) or in a *shared* extra L1 table (L0 index != 0 - every
+    // view's L0 points at the same table, since the entries are
+    // identical across views).
     const L0_ENTRY_SIZE: u64 = GIB * ENTRIES_PER_TABLE as u64; // 512GB
-    let l0 = unsafe { &mut *L0_TABLE.0.get() };
-    let mut extra_l1_owners = [usize::MAX; MAX_EXTRA_L1_TABLES]; // L0 index each pool slot belongs to
+    let mut extra_l1_owners = [usize::MAX; MAX_EXTRA_L1_TABLES]; // L0 index each pool slot covers
     let mut next_extra_l1_table = 0usize;
+    // In-L1-span device blocks each view must add if RAM didn't cover
+    // them: (l1 index, base).
+    let mut l1_span_devices = [(usize::MAX, 0u64); MAX_EXTRA_DEVICES];
+    let mut l1_span_device_count = 0usize;
     for &(base, size) in extra_devices {
         if size == 0 {
             continue;
@@ -574,44 +530,178 @@ unsafe fn build_tables(memory_map: &MemoryMapOwned, el0_regions: [(u64, u64); MA
             crate::console::println!("Ouroboros kernel: WARNING: device region {base:#x} is out of range for this identity map, leaving unmapped");
             continue;
         }
-
-        let target_l1: &mut [u64; ENTRIES_PER_TABLE] = if l0_idx == 0 {
-            l1
-        } else {
-            let existing = extra_l1_owners.iter().position(|&owner| owner == l0_idx);
-            let slot = match existing {
-                Some(slot) => slot,
-                None => {
-                    if next_extra_l1_table >= MAX_EXTRA_L1_TABLES {
-                        crate::console::println!(
-                            "Ouroboros kernel: WARNING: out of extra L1 tables, leaving device region {base:#x} unmapped"
-                        );
-                        continue;
-                    }
-                    let slot = next_extra_l1_table;
-                    next_extra_l1_table += 1;
-                    extra_l1_owners[slot] = l0_idx;
-                    l0[l0_idx] = table_desc(EXTRA_L1_TABLES[slot].0.get() as u64);
-                    slot
+        if l0_idx == 0 {
+            l1_span_devices[l1_span_device_count] = (l1_idx, base);
+            l1_span_device_count += 1;
+            continue;
+        }
+        let slot = match extra_l1_owners.iter().position(|&owner| owner == l0_idx) {
+            Some(slot) => slot,
+            None => {
+                if next_extra_l1_table >= MAX_EXTRA_L1_TABLES {
+                    crate::console::println!(
+                        "Ouroboros kernel: WARNING: out of extra L1 tables, leaving device region {base:#x} unmapped"
+                    );
+                    continue;
                 }
-            };
-            unsafe { &mut *EXTRA_L1_TABLES[slot].0.get() }
+                let slot = next_extra_l1_table;
+                next_extra_l1_table += 1;
+                extra_l1_owners[slot] = l0_idx;
+                slot
+            }
         };
-
-        if target_l1[l1_idx] == 0 {
-            target_l1[l1_idx] = device_block(base);
+        let shared_l1 = unsafe { &mut *EXTRA_L1_TABLES[slot].0.get() };
+        if shared_l1[l1_idx] == 0 {
+            shared_l1[l1_idx] = device_block(base);
             crate::console::println!(
                 "Ouroboros kernel: device region {base:#x} (size {size:#x}) outside RAM span, mapped as its own device block (L0 index {l0_idx})"
             );
         }
     }
 
-    // L0[0] covers VA [0, 512GB) - RAM, the fixed low-1GB device block,
-    // and the framebuffer all fit inside it. Any further L0 entries
-    // needed for an out-of-range `extra_devices` region (see above) were
-    // already wired in by that loop.
-    l0[0] = table_desc(L1_TABLE.0.get() as u64);
+    // Build each task's view: identical kernel/device mappings, EL0
+    // access granted only to that view's own region.
+    for (view, &region) in el0_regions.iter().enumerate() {
+        unsafe {
+            build_view(
+                view,
+                region,
+                min_addr,
+                max_addr,
+                &extra_l1_owners,
+                next_extra_l1_table,
+                &l1_span_devices[..l1_span_device_count],
+            )
+        };
+    }
 
+    crate::console::println!(
+        "Ouroboros kernel: identity map RAM {min_addr:#x}-{max_addr:#x}, device 0x0-{:#x}, per-task EL0 regions {el0_regions:x?}",
+        GIB - 1
+    );
+
+    unsafe { switch_full(crate::tasks::current_task()) };
+}
+
+/// Builds one task's translation-table view: the shared kernel shape
+/// (fixed low-1GB device block, discovered RAM as EL1-only 1GB blocks,
+/// the shared extra-device L1 tables wired into L0) with exactly one
+/// difference per view - `el0_region` (this task's own region, `(0, 0)`
+/// for an unused slot) gets its containing 1GB block split down to 4KB
+/// pages so only the region's own pages carry EL0 access.
+unsafe fn build_view(
+    view: usize,
+    el0_region: (u64, u64),
+    min_addr: u64,
+    max_addr: u64,
+    extra_l1_owners: &[usize; MAX_EXTRA_L1_TABLES],
+    extra_l1_count: usize,
+    l1_span_devices: &[(usize, u64)],
+) {
+    let l1 = unsafe { &mut *L1_TABLES[view].0.get() };
+
+    // Device: fixed low 1GB. See module doc comment for why this one stays
+    // a hardcoded convention rather than discovered.
+    l1[0] = device_block(0);
+
+    if min_addr <= max_addr {
+        let first_block = min_addr / GIB;
+        let last_block = (max_addr - 1) / GIB;
+        for block in first_block..=last_block {
+            let idx = block as usize;
+            if idx >= ENTRIES_PER_TABLE {
+                continue;
+            }
+            let block_start = block * GIB;
+            let block_end = block_start + GIB;
+
+            if overlaps(el0_region, block_start, block_end) {
+                // This view's own region lives in this block - split it
+                // so only the region's own pages get EL0 access. One L2
+                // and one L3 per view is always enough: a region fits
+                // one 2MB slot by construction (see
+                // `install_identity_map`'s safety comment), so it
+                // touches exactly one 1GB block and one 2MB slot.
+                let l2 = unsafe { &mut *EL0_L2_TABLES[view].0.get() };
+                for (i, entry) in l2.iter_mut().enumerate() {
+                    let sub_base = block_start + (i as u64) * MIB2;
+                    let sub_end = sub_base + MIB2;
+                    if overlaps(el0_region, sub_base, sub_end) {
+                        let l3 = unsafe { &mut *EL0_L3_TABLES[view].0.get() };
+                        for (j, page) in l3.iter_mut().enumerate() {
+                            let page_base = sub_base + (j as u64) * 4096;
+                            let page_end = page_base + 4096;
+                            *page = if overlaps(el0_region, page_base, page_end) {
+                                el0_page_4k(page_base)
+                            } else {
+                                kernel_page_4k(page_base)
+                            };
+                        }
+                        *entry = table_desc(EL0_L3_TABLES[view].0.get() as u64);
+                    } else {
+                        *entry = kernel_block_2m(sub_base);
+                    }
+                }
+                l1[idx] = table_desc(EL0_L2_TABLES[view].0.get() as u64);
+            } else {
+                l1[idx] = normal_block(block_start);
+            }
+        }
+    }
+
+    // In-span device blocks the RAM loop didn't cover (e.g. a
+    // framebuffer outside the reported RAM span but inside the first
+    // 512GB).
+    for &(l1_idx, base) in l1_span_devices {
+        if l1[l1_idx] == 0 {
+            l1[l1_idx] = device_block(base);
+        }
+    }
+
+    let l0 = unsafe { &mut *L0_TABLES[view].0.get() };
+    l0[0] = table_desc(L1_TABLES[view].0.get() as u64);
+    // Shared extra-device L1 tables (64-bit PCI BARs past 512GB, etc.) -
+    // identical entries in every view, so every view's L0 points at the
+    // same tables.
+    for slot in 0..extra_l1_count {
+        let l0_idx = extra_l1_owners[slot];
+        if l0_idx != usize::MAX && l0_idx < ENTRIES_PER_TABLE {
+            l0[l0_idx] = table_desc(EXTRA_L1_TABLES[slot].0.get() as u64);
+        }
+    }
+}
+
+/// The per-context-switch table switch: points TTBR0_EL1 at `view`'s
+/// table set and invalidates the TLB. Called by `tasks.rs` wherever
+/// the current task changes - the moment the following `eret` lands in
+/// EL0, the new task can only see its own region.
+///
+/// The full `tlbi vmalle1` on every switch is the stage-2
+/// correctness-first design: with a single ASID, entries cached under
+/// the previous view would otherwise satisfy the next task's walks.
+/// The planned stage-3 refinement (per-task ASIDs + nG-tagged EL0
+/// entries) makes this a plain TTBR0 write; if that ever misbehaves on
+/// real hardware, this version is the known-correct fallback.
+pub(crate) fn activate_task(view: usize) {
+    let ttbr0 = L0_TABLES[view.min(MAX_EL0_REGIONS - 1)].0.get() as u64;
+    unsafe {
+        asm!(
+            "msr ttbr0_el1, {0}",
+            "isb",
+            "tlbi vmalle1",
+            "dsb ish",
+            "isb",
+            in(reg) ttbr0,
+            options(nostack),
+        );
+    }
+}
+
+/// The full MAIR/TCR/TTBR0 configuration sequence, switching to
+/// `view`'s table set - the boot-time install and every runtime
+/// rebuild end here. [`activate_task`] is the lighter switch-only
+/// sibling used on every context switch.
+unsafe fn switch_full(view: usize) {
     let mair_el1: u64 =
         (MAIR_ATTR_DEVICE_NGNRNE << (8 * MAIR_IDX_DEVICE_NGNRNE)) | (MAIR_ATTR_NORMAL_WB << (8 * MAIR_IDX_NORMAL_WB));
 
@@ -645,7 +735,7 @@ unsafe fn build_tables(memory_map: &MemoryMapOwned, el0_regions: [(u64, u64); MA
         | (0b10 << 30)               // TG1: 4KB granule (TTBR1 encoding)
         | (ips << 32); // IPS: from hardware
 
-    let ttbr0_el1 = L0_TABLE.0.get() as u64;
+    let ttbr0_el1 = L0_TABLES[view.min(MAX_EL0_REGIONS - 1)].0.get() as u64;
 
     // Masked and left masked: between the MAIR/TCR write and the TTBR0
     // switch below, code is still running under firmware's *old* tables
