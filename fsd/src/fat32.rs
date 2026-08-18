@@ -1,44 +1,26 @@
-//! Minimal FAT32 driver over [`BlockDevice`] (`block.rs` - virtio-blk
-//! or USB mass storage, transport-agnostic since the mass-storage
-//! milestone). Phase 3b of `docs/CHANGELOG.md` originally.
+//! The filesystem server's FAT32 engine - the kernel's old
+//! `kernel/src/fat32.rs`, moved here verbatim when the filesystem left
+//! the kernel (driver isolation part 2), with exactly one structural
+//! change: the `block::BlockDevice` it used to own by value became
+//! [`Disk`], a zero-sized handle whose `read_sector`/`write_sector`
+//! are the `BLOCK_*` syscalls (the kernel keeps the device and only
+//! accepts those calls from this task). Every algorithm, ordering
+//! decision, and documented bug fix is unchanged - see the original
+//! module's history in `docs/CHANGELOG.md` and CLAUDE.md (phases 3b
+//! through 8, directory extension, the cluster-0-means-root saga).
 //!
-//! ## Hand-rolled, not a crate - a real constraint, not just precedent
+//! Still hand-rolled, still zero-heap - a constraint that carries over
+//! unchanged: userland programs here have no allocator at all (no
+//! `.bss`/`.data`, stack-only state - see `docs/processes.md`), which
+//! is even stricter than the post-`exit_boot_services` kernel this
+//! code was written for.
 //!
-//! Every parser so far in this project (ACPI, devicetree, PCI, virtio) has
-//! been hand-rolled rather than pulling in a crate, generally as a
-//! deliberate choice to depend on no more than the data actually needs
-//! (see `acpi.rs`'s module doc comment). For FAT32 there's also a hard
-//! constraint pushing the same direction: this runs after
-//! `exit_boot_services`, where the global allocator is no longer valid
-//! (it was boot-services-backed - see `main.rs`), so anything reading the
-//! filesystem at runtime has to do it with **zero heap allocation**.
-//! Every existing `no_std` FAT crate surveyed assumes an allocator is
-//! reachable somewhere in its stack (directory listings as `Vec`, path
-//! buffers as `String`); reworking one to avoid that would likely be more
-//! effort than writing exactly the subset this project needs by hand.
-//!
-//! ## No long filenames (LFN)
-//!
-//! Every file this project creates so far fits an 8.3 short name
-//! (`SH.BIN`, `INIT.CFG`, `BOOTAA64.EFI`), so LFN directory entries
-//! (attribute `0x0F`) are recognized and skipped, not parsed. A real gap
-//! for any file with a longer name, not a permanent design decision.
-//!
-//! ## `run` vs `run-image` - the on-disk format actually differs
-//!
-//! A real, confirmed-by-inspection finding, not a formality: QEMU's
-//! `vvfat` driver (`make run`'s fast dev-loop backend, `fat:rw:<dir>`)
-//! produces **FAT16**, not FAT32 - confirmed by decoding its BPB directly
-//! with a temporary boot-time hex dump before writing this module:
-//! `BS_FilSysType` reads `"FAT16   "`, and `RootEntryCount`/`FATSz16` are
-//! both nonzero, which real FAT32 requires to be zero. `esp.img` (built
-//! by `hdiutil -fs FAT32`, what `make image`/`make parallels-hdd` and
-//! therefore Parallels itself ultimately boot from) is genuinely FAT32,
-//! confirmed the same way. [`Fs::mount`] therefore only ever works
-//! against `make run-image`, never plain `make run` - see the Makefile's
-//! `run-image` target for the full explanation.
+//! Still 8.3-only (no long filenames), still first-FAT32-partition
+//! only, and `make run`'s vvfat disk is still FAT16 - so mounting
+//! fails there and every request answers `NO_FS`, same degradation as
+//! always.
 
-use crate::block::{self, BlockDevice};
+use crate::disk::{Disk, DiskError};
 
 const SECTOR_SIZE: usize = 512;
 const DIR_ENTRY_SIZE: usize = 32;
@@ -52,11 +34,17 @@ const END_OF_CHAIN_MIN: u32 = 0x0fff_fff8;
 const MAX_NAME_LEN: usize = 12; // 8 name + '.' + 3 ext, the most an 8.3 short name is ever
 
 #[derive(Debug)]
+// The two carried fields (the offending sector size, the disk-error
+// kind) are no longer read since the kernel module's `Display` impl was
+// dropped in the port (`error_name` in main.rs uses fixed strings) -
+// kept anyway for fidelity with the original and any future
+// diagnostics rather than flattened to unit variants.
+#[allow(dead_code)]
 pub enum Error {
     NoFat32Partition,
     NotFat32,
     UnsupportedSectorSize(u16),
-    Io(block::Error),
+    Io(DiskError),
     NotFound,
     NotAFile,
     NotADirectory,
@@ -67,28 +55,9 @@ pub enum Error {
     DiskFull,
 }
 
-impl From<block::Error> for Error {
-    fn from(e: block::Error) -> Self {
+impl From<DiskError> for Error {
+    fn from(e: DiskError) -> Self {
         Error::Io(e)
-    }
-}
-
-impl core::fmt::Display for Error {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            Error::NoFat32Partition => write!(f, "no FAT32 partition (type 0x0b/0x0c) in the MBR"),
-            Error::NotFat32 => write!(f, "partition's BPB doesn't look like FAT32 (RootEntryCount/FATSz16 nonzero, or bad signature)"),
-            Error::UnsupportedSectorSize(n) => write!(f, "unsupported sector size {n} (only 512 is implemented)"),
-            Error::Io(e) => write!(f, "disk read failed: {e}"),
-            Error::NotFound => write!(f, "not found"),
-            Error::NotAFile => write!(f, "not a file"),
-            Error::NotADirectory => write!(f, "not a directory"),
-            Error::InvalidName => write!(f, "name doesn't fit an 8.3 short name (no long-filename support - see the module doc comment)"),
-            Error::AlreadyExists => write!(f, "already exists"),
-            Error::DirectoryNotEmpty => write!(f, "directory not empty"),
-            Error::CannotRemoveRoot => write!(f, "cannot remove the root directory"),
-            Error::DiskFull => write!(f, "no free cluster available"),
-        }
     }
 }
 
@@ -143,12 +112,18 @@ impl DirEntry {
     }
 
     fn root(root_cluster: u32) -> Self {
-        DirEntry { name: [0; MAX_NAME_LEN], name_len: 0, is_dir: true, size: 0, cluster: root_cluster }
+        DirEntry {
+            name: [0; MAX_NAME_LEN],
+            name_len: 0,
+            is_dir: true,
+            size: 0,
+            cluster: root_cluster,
+        }
     }
 }
 
 pub struct Fs {
-    device: BlockDevice,
+    disk: Disk,
     sectors_per_cluster: u32,
     fat_start_lba: u32,
     data_start_lba: u32,
@@ -170,14 +145,13 @@ impl Fs {
     /// Doesn't touch anything beyond sector 0 and the partition's own
     /// first sector.
     ///
-    /// `device` must already be initialized (`Device::init` called) -
-    /// every `read_sector` call in this module relies on that, checked
-    /// once here rather than at each call site.
-    pub fn mount(mut device: BlockDevice) -> Result<Self, Error> {
+    /// The kernel must have a block device installed (`BLOCK_INFO`
+    /// answering with a capacity) - every sector call in this module
+    /// relies on that, probed once by the caller rather than at each
+    /// call site.
+    pub fn mount(mut disk: Disk) -> Result<Self, Error> {
         let mut mbr = [0u8; SECTOR_SIZE];
-        // SAFETY: `device` was already initialized by the caller (see
-        // `mount`'s doc comment).
-        unsafe { device.read_sector(0, &mut mbr) }?;
+        disk.read_sector(0, &mut mbr)?;
 
         let mut partition_lba = None;
         for i in 0..4 {
@@ -195,8 +169,7 @@ impl Fs {
         let partition_lba = partition_lba.ok_or(Error::NoFat32Partition)?;
 
         let mut bpb = [0u8; SECTOR_SIZE];
-        // SAFETY: same as above.
-        unsafe { device.read_sector(partition_lba as u64, &mut bpb) }?;
+        disk.read_sector(partition_lba as u64, &mut bpb)?;
 
         let bytes_per_sector = u16::from_le_bytes([bpb[11], bpb[12]]);
         if bytes_per_sector as usize != SECTOR_SIZE {
@@ -221,7 +194,15 @@ impl Fs {
         let fat_start_lba = partition_lba + reserved_sectors;
         let data_start_lba = fat_start_lba + num_fats * fat_size_32;
 
-        Ok(Fs { device, sectors_per_cluster, fat_start_lba, data_start_lba, root_cluster, num_fats, fat_size_32 })
+        Ok(Fs {
+            disk,
+            sectors_per_cluster,
+            fat_start_lba,
+            data_start_lba,
+            root_cluster,
+            num_fats,
+            fat_size_32,
+        })
     }
 
     fn cluster_to_lba(&self, cluster: u32) -> u32 {
@@ -237,9 +218,13 @@ impl Fs {
         let sector = self.fat_start_lba + fat_byte_offset / SECTOR_SIZE as u32;
         let offset = (fat_byte_offset % SECTOR_SIZE as u32) as usize;
         let mut buf = [0u8; SECTOR_SIZE];
-        // SAFETY: `self.device` was initialized before `mount` returned.
-        unsafe { self.device.read_sector(sector as u64, &mut buf) }?;
-        let raw = u32::from_le_bytes([buf[offset], buf[offset + 1], buf[offset + 2], buf[offset + 3]]);
+        self.disk.read_sector(sector as u64, &mut buf)?;
+        let raw = u32::from_le_bytes([
+            buf[offset],
+            buf[offset + 1],
+            buf[offset + 2],
+            buf[offset + 3],
+        ]);
         let value = raw & 0x0fff_ffff;
         if value == 0 || value >= END_OF_CHAIN_MIN {
             Ok(None)
@@ -261,13 +246,16 @@ impl Fs {
         for i in 0..self.num_fats {
             let sector = self.fat_start_lba + i * self.fat_size_32 + sector_offset;
             let mut buf = [0u8; SECTOR_SIZE];
-            // SAFETY: `self.device` was initialized before `mount` returned.
-            unsafe { self.device.read_sector(sector as u64, &mut buf) }?;
-            let existing = u32::from_le_bytes([buf[offset], buf[offset + 1], buf[offset + 2], buf[offset + 3]]);
+            self.disk.read_sector(sector as u64, &mut buf)?;
+            let existing = u32::from_le_bytes([
+                buf[offset],
+                buf[offset + 1],
+                buf[offset + 2],
+                buf[offset + 3],
+            ]);
             let new = (existing & 0xf000_0000) | (value & 0x0fff_ffff);
             buf[offset..offset + 4].copy_from_slice(&new.to_le_bytes());
-            // SAFETY: same as above.
-            unsafe { self.device.write_sector(sector as u64, &buf) }?;
+            self.disk.write_sector(sector as u64, &buf)?;
         }
         Ok(())
     }
@@ -286,12 +274,16 @@ impl Fs {
             let fat_byte_offset = cluster * 4;
             let sector = self.fat_start_lba + fat_byte_offset / SECTOR_SIZE as u32;
             if sector != current_sector {
-                // SAFETY: `self.device` was initialized before `mount` returned.
-                unsafe { self.device.read_sector(sector as u64, &mut buf) }?;
+                self.disk.read_sector(sector as u64, &mut buf)?;
                 current_sector = sector;
             }
             let offset = (fat_byte_offset % SECTOR_SIZE as u32) as usize;
-            let value = u32::from_le_bytes([buf[offset], buf[offset + 1], buf[offset + 2], buf[offset + 3]]) & 0x0fff_ffff;
+            let value = u32::from_le_bytes([
+                buf[offset],
+                buf[offset + 1],
+                buf[offset + 2],
+                buf[offset + 3],
+            ]) & 0x0fff_ffff;
             if value == 0 {
                 return Ok(cluster);
             }
@@ -309,8 +301,7 @@ impl Fs {
         let lba = self.cluster_to_lba(cluster);
         let zero = [0u8; SECTOR_SIZE];
         for s in 0..self.sectors_per_cluster {
-            // SAFETY: `self.device` was initialized before `mount` returned.
-            unsafe { self.device.write_sector((lba + s) as u64, &zero) }?;
+            self.disk.write_sector((lba + s) as u64, &zero)?;
         }
         Ok(())
     }
@@ -340,7 +331,11 @@ impl Fs {
     /// Calls `f` for every real entry (LFN/free/volume-ID entries are
     /// skipped) in the directory starting at `start_cluster`, stopping
     /// early the first time `f` returns `true`.
-    fn walk_dir(&mut self, start_cluster: u32, mut f: impl FnMut(&DirEntry) -> bool) -> Result<(), Error> {
+    fn walk_dir(
+        &mut self,
+        start_cluster: u32,
+        mut f: impl FnMut(&DirEntry) -> bool,
+    ) -> Result<(), Error> {
         self.walk_dir_with_location(start_cluster, |entry, _lba, _offset| f(entry))
     }
 
@@ -360,8 +355,7 @@ impl Fs {
             let lba = self.cluster_to_lba(cluster);
             for s in 0..self.sectors_per_cluster {
                 let mut buf = [0u8; SECTOR_SIZE];
-                // SAFETY: same as `next_cluster`.
-                unsafe { self.device.read_sector((lba + s) as u64, &mut buf) }?;
+                self.disk.read_sector((lba + s) as u64, &mut buf)?;
                 for (i, raw) in buf.chunks_exact(DIR_ENTRY_SIZE).enumerate() {
                     match raw[0] {
                         DIR_ENTRY_END => return Ok(()),
@@ -439,7 +433,11 @@ impl Fs {
 
     /// Lists a directory's entries, calling `f(name, is_dir, size)` for
     /// each. `path` `""` or `"/"` lists the root.
-    pub fn list_dir(&mut self, path: &str, mut f: impl FnMut(&str, bool, u32)) -> Result<(), Error> {
+    pub fn list_dir(
+        &mut self,
+        path: &str,
+        mut f: impl FnMut(&str, bool, u32),
+    ) -> Result<(), Error> {
         let dir = self.find(path)?;
         if !dir.is_dir {
             return Err(Error::NotADirectory);
@@ -472,8 +470,7 @@ impl Fs {
                     break 'clusters;
                 }
                 let mut sector = [0u8; SECTOR_SIZE];
-                // SAFETY: same as `next_cluster`.
-                unsafe { self.device.read_sector((lba + s) as u64, &mut sector) }?;
+                self.disk.read_sector((lba + s) as u64, &mut sector)?;
                 let n = (total - written).min(buf.len() - written).min(SECTOR_SIZE);
                 buf[written..written + n].copy_from_slice(&sector[..n]);
                 written += n;
@@ -487,6 +484,76 @@ impl Fs {
             }
         }
         Ok(file.size)
+    }
+
+    /// Reads up to `buf.len()` bytes of the file at `path`, starting at
+    /// byte `offset`, returning how many were actually copied (`0` once
+    /// `offset` is at/past the end of the file - the loop-until-short
+    /// termination signal). The chunked-read primitive behind
+    /// `FSOP_READ_AT` and the shell's two-step `exec` flow - the one
+    /// genuinely new capability added in the move to userland;
+    /// [`read_file`](Self::read_file) always starts at byte 0 and can
+    /// never window into a file larger than one buffer.
+    ///
+    /// Whole clusters before `offset` are skipped by walking the FAT
+    /// chain without reading their data sectors; within the first
+    /// cluster actually read, sectors entirely before `offset` are
+    /// skipped the same way.
+    pub fn read_at(&mut self, path: &str, offset: u64, buf: &mut [u8]) -> Result<u32, Error> {
+        let file = self.find(path)?;
+        if file.is_dir {
+            return Err(Error::NotAFile);
+        }
+        let total = file.size as u64;
+        if offset >= total || buf.is_empty() || file.cluster == 0 {
+            return Ok(0);
+        }
+        let want = ((total - offset) as usize).min(buf.len());
+        let offset = offset as usize;
+
+        let cluster_bytes = self.sectors_per_cluster as usize * SECTOR_SIZE;
+        let mut cluster = file.cluster;
+        // Byte position (within the file) of `cluster`'s first byte.
+        let mut cluster_pos = 0usize;
+        while cluster_pos + cluster_bytes <= offset {
+            match self.next_cluster(cluster)? {
+                Some(next) => cluster = next,
+                // Chain shorter than the size field claims - treat as
+                // end-of-file rather than erroring, same lenience as
+                // read_file's own chain walk.
+                None => return Ok(0),
+            }
+            cluster_pos += cluster_bytes;
+        }
+
+        let mut written = 0usize;
+        'clusters: loop {
+            let lba = self.cluster_to_lba(cluster);
+            for s in 0..self.sectors_per_cluster {
+                if written >= want {
+                    break 'clusters;
+                }
+                let sector_pos = cluster_pos + s as usize * SECTOR_SIZE;
+                if sector_pos + SECTOR_SIZE <= offset {
+                    continue; // entirely before the requested window
+                }
+                let mut sector = [0u8; SECTOR_SIZE];
+                self.disk.read_sector((lba + s) as u64, &mut sector)?;
+                let from = offset.max(sector_pos) - sector_pos;
+                let n = (SECTOR_SIZE - from).min(want - written);
+                buf[written..written + n].copy_from_slice(&sector[from..from + n]);
+                written += n;
+            }
+            if written >= want {
+                break;
+            }
+            match self.next_cluster(cluster)? {
+                Some(next) => cluster = next,
+                None => break,
+            }
+            cluster_pos += cluster_bytes;
+        }
+        Ok(written as u32)
     }
 
     /// Creates an empty subdirectory at `path` (must not already exist;
@@ -529,13 +596,28 @@ impl Fs {
         self.write_fat_entry(new_cluster, END_OF_CHAIN_MIN)?;
         self.zero_cluster(new_cluster)?;
 
-        let dotdot_cluster = if parent.cluster == self.root_cluster { 0 } else { parent.cluster };
+        let dotdot_cluster = if parent.cluster == self.root_cluster {
+            0
+        } else {
+            parent.cluster
+        };
         let mut first_sector = [0u8; SECTOR_SIZE];
-        write_raw_entry(&mut first_sector[0..DIR_ENTRY_SIZE], &dot_name(), ATTR_DIRECTORY, new_cluster, 0);
-        write_raw_entry(&mut first_sector[DIR_ENTRY_SIZE..2 * DIR_ENTRY_SIZE], &dotdot_name(), ATTR_DIRECTORY, dotdot_cluster, 0);
+        write_raw_entry(
+            &mut first_sector[0..DIR_ENTRY_SIZE],
+            &dot_name(),
+            ATTR_DIRECTORY,
+            new_cluster,
+            0,
+        );
+        write_raw_entry(
+            &mut first_sector[DIR_ENTRY_SIZE..2 * DIR_ENTRY_SIZE],
+            &dotdot_name(),
+            ATTR_DIRECTORY,
+            dotdot_cluster,
+            0,
+        );
         let lba = self.cluster_to_lba(new_cluster);
-        // SAFETY: `self.device` was initialized before `mount` returned.
-        unsafe { self.device.write_sector(lba as u64, &first_sector) }?;
+        self.disk.write_sector(lba as u64, &first_sector)?;
 
         self.insert_dir_entry(parent.cluster, &short_name, ATTR_DIRECTORY, new_cluster, 0)
     }
@@ -596,11 +678,9 @@ impl Fs {
         let (lba, offset) = location.ok_or(Error::NotFound)?;
 
         let mut sector = [0u8; SECTOR_SIZE];
-        // SAFETY: `self.device` was initialized before `mount` returned.
-        unsafe { self.device.read_sector(lba, &mut sector) }?;
+        self.disk.read_sector(lba, &mut sector)?;
         sector[offset] = DIR_ENTRY_FREE;
-        // SAFETY: same as above.
-        unsafe { self.device.write_sector(lba, &sector) }?;
+        self.disk.write_sector(lba, &sector)?;
         Ok(())
     }
 
@@ -642,7 +722,11 @@ impl Fs {
             }
         })?;
         if let Some(entry) = existing {
-            return if entry.is_dir { Err(Error::NotAFile) } else { Ok(()) };
+            return if entry.is_dir {
+                Err(Error::NotAFile)
+            } else {
+                Ok(())
+            };
         }
 
         // Attribute byte `0` - no directory bit, no volume-ID bit, just
@@ -683,11 +767,9 @@ impl Fs {
         let (lba, offset) = location.ok_or(Error::NotFound)?;
 
         let mut sector = [0u8; SECTOR_SIZE];
-        // SAFETY: `self.device` was initialized before `mount` returned.
-        unsafe { self.device.read_sector(lba, &mut sector) }?;
+        self.disk.read_sector(lba, &mut sector)?;
         sector[offset] = DIR_ENTRY_FREE;
-        // SAFETY: same as above.
-        unsafe { self.device.write_sector(lba, &sector) }?;
+        self.disk.write_sector(lba, &sector)?;
         Ok(())
     }
 
@@ -736,7 +818,11 @@ impl Fs {
         // existing file: whatever name is already on disk is already
         // valid by construction, and might not even fit this kernel's
         // own (conservative) creation charset if another tool wrote it.
-        let short_name = if existing.is_none() { Some(make_short_name(name).ok_or(Error::InvalidName)?) } else { None };
+        let short_name = if existing.is_none() {
+            Some(make_short_name(name).ok_or(Error::InvalidName)?)
+        } else {
+            None
+        };
 
         let new_cluster = self.write_chain(data)?;
 
@@ -746,7 +832,13 @@ impl Fs {
             }
             self.patch_entry_cluster_size(lba, offset, new_cluster, data.len() as u32)
         } else {
-            self.insert_dir_entry(parent.cluster, &short_name.unwrap(), 0, new_cluster, data.len() as u32)
+            self.insert_dir_entry(
+                parent.cluster,
+                &short_name.unwrap(),
+                0,
+                new_cluster,
+                data.len() as u32,
+            )
         }
     }
 
@@ -782,8 +874,7 @@ impl Fs {
                 if start < end {
                     sector_buf[..end - start].copy_from_slice(&data[start..end]);
                 }
-                // SAFETY: `self.device` was initialized before `mount` returned.
-                unsafe { self.device.write_sector((lba + s) as u64, &sector_buf) }?;
+                self.disk.write_sector((lba + s) as u64, &sector_buf)?;
                 written += SECTOR_SIZE;
             }
             prev_cluster = cluster;
@@ -796,15 +887,19 @@ impl Fs {
     /// what [`write_file`](Self::write_file) uses to point an
     /// already-existing entry at a freshly written replacement chain,
     /// without re-deriving or re-validating its short name.
-    fn patch_entry_cluster_size(&mut self, lba: u64, offset: usize, cluster: u32, size: u32) -> Result<(), Error> {
+    fn patch_entry_cluster_size(
+        &mut self,
+        lba: u64,
+        offset: usize,
+        cluster: u32,
+        size: u32,
+    ) -> Result<(), Error> {
         let mut sector = [0u8; SECTOR_SIZE];
-        // SAFETY: `self.device` was initialized before `mount` returned.
-        unsafe { self.device.read_sector(lba, &mut sector) }?;
+        self.disk.read_sector(lba, &mut sector)?;
         sector[offset + 20..offset + 22].copy_from_slice(&((cluster >> 16) as u16).to_le_bytes());
         sector[offset + 26..offset + 28].copy_from_slice(&(cluster as u16).to_le_bytes());
         sector[offset + 28..offset + 32].copy_from_slice(&size.to_le_bytes());
-        // SAFETY: same as above.
-        unsafe { self.device.write_sector(lba, &sector) }?;
+        self.disk.write_sector(lba, &sector)?;
         Ok(())
     }
 
@@ -875,17 +970,25 @@ impl Fs {
         }
 
         let attr = if src_entry.is_dir { ATTR_DIRECTORY } else { 0 };
-        self.insert_dir_entry(dst_parent.cluster, &short_name, attr, src_entry.cluster, src_entry.size)?;
+        self.insert_dir_entry(
+            dst_parent.cluster,
+            &short_name,
+            attr,
+            src_entry.cluster,
+            src_entry.size,
+        )?;
 
         let mut sector = [0u8; SECTOR_SIZE];
-        // SAFETY: `self.device` was initialized before `mount` returned.
-        unsafe { self.device.read_sector(src_lba, &mut sector) }?;
+        self.disk.read_sector(src_lba, &mut sector)?;
         sector[src_offset] = DIR_ENTRY_FREE;
-        // SAFETY: same as above.
-        unsafe { self.device.write_sector(src_lba, &sector) }?;
+        self.disk.write_sector(src_lba, &sector)?;
 
         if src_entry.is_dir && src_parent.cluster != dst_parent.cluster {
-            let dotdot_cluster = if dst_parent.cluster == self.root_cluster { 0 } else { dst_parent.cluster };
+            let dotdot_cluster = if dst_parent.cluster == self.root_cluster {
+                0
+            } else {
+                dst_parent.cluster
+            };
             let moved_lba = self.cluster_to_lba(src_entry.cluster);
             // The `..` entry is always the second 32-byte entry in a
             // directory's first sector - `mkdir` writes it there
@@ -912,19 +1015,30 @@ impl Fs {
     /// garbage as entries) *before* the old last cluster is linked to
     /// it - a failure partway leaves at worst a claimed-but-orphaned
     /// cluster, never a directory chain pointing at garbage.
-    fn insert_dir_entry(&mut self, start_cluster: u32, short_name: &[u8; 11], attr: u8, cluster: u32, size: u32) -> Result<(), Error> {
+    fn insert_dir_entry(
+        &mut self,
+        start_cluster: u32,
+        short_name: &[u8; 11],
+        attr: u8,
+        cluster: u32,
+        size: u32,
+    ) -> Result<(), Error> {
         let mut current = start_cluster;
         loop {
             let lba = self.cluster_to_lba(current);
             for s in 0..self.sectors_per_cluster {
                 let mut buf = [0u8; SECTOR_SIZE];
-                // SAFETY: `self.device` was initialized before `mount` returned.
-                unsafe { self.device.read_sector((lba + s) as u64, &mut buf) }?;
+                self.disk.read_sector((lba + s) as u64, &mut buf)?;
                 for (i, raw) in buf.chunks_exact(DIR_ENTRY_SIZE).enumerate() {
                     if raw[0] == DIR_ENTRY_FREE || raw[0] == DIR_ENTRY_END {
-                        write_raw_entry(&mut buf[i * DIR_ENTRY_SIZE..(i + 1) * DIR_ENTRY_SIZE], short_name, attr, cluster, size);
-                        // SAFETY: same as above.
-                        unsafe { self.device.write_sector((lba + s) as u64, &buf) }?;
+                        write_raw_entry(
+                            &mut buf[i * DIR_ENTRY_SIZE..(i + 1) * DIR_ENTRY_SIZE],
+                            short_name,
+                            attr,
+                            cluster,
+                            size,
+                        );
+                        self.disk.write_sector((lba + s) as u64, &buf)?;
                         return Ok(());
                     }
                 }
@@ -988,12 +1102,37 @@ fn split_parent(path: &str) -> Option<(&str, &str)> {
     if trimmed.is_empty() {
         return None;
     }
-    let slash = trimmed.rfind('/')?;
-    let name = &trimmed[slash + 1..];
+    // Manual reverse byte scan, not `rfind('/')` - a char-pattern
+    // `rfind` pulls libcore's `memrchr`, whose prebuilt (non-PIC)
+    // object carries absolute relocations a PIE userland link rejects
+    // outright (`R_AARCH64_ABS64 cannot be used against local symbol`)
+    // - the same prebuilt-libcore constraint family as the documented
+    // `slice_error_fail`/release-only cases, found the hard way when
+    // this module first moved to userland.
+    let slash = {
+        let bytes = trimmed.as_bytes();
+        let mut found = None;
+        let mut i = bytes.len();
+        while i > 0 {
+            i -= 1;
+            if bytes[i] == b'/' {
+                found = Some(i);
+                break;
+            }
+        }
+        found?
+    };
+    // Non-panicking `.get()` slicing, not `&s[a..b]` - a userland
+    // program's str-slice panic path drags non-PIC libcore objects into
+    // the link and fails it outright (the documented
+    // `slice_error_fail` constraint from the output-redirection
+    // milestone; the offsets are guaranteed char boundaries anyway,
+    // they came from `rfind`).
+    let name = trimmed.get(slash + 1..)?;
     if name.is_empty() {
         return None;
     }
-    let parent = if slash == 0 { "/" } else { &trimmed[..slash] };
+    let parent = if slash == 0 { "/" } else { trimmed.get(..slash)? };
     Some((parent, name))
 }
 
@@ -1014,7 +1153,9 @@ fn make_short_name(name: &str) -> Option<[u8; 11]> {
         0 => (name, ""),
         1 => {
             let dot = name.find('.')?;
-            (&name[..dot], &name[dot + 1..])
+            // `.get()` for the same non-panicking-slice reason as
+            // `split_parent` above.
+            (name.get(..dot)?, name.get(dot + 1..)?)
         }
         _ => return None,
     };

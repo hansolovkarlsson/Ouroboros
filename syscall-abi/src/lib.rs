@@ -53,48 +53,13 @@ pub const PUTC: u64 = 4;
 /// just do I/O.
 pub const GET_TICKS: u64 = 6;
 
-/// `(path ptr, path len, buf ptr, buf len)` -> bytes written, [`NO_FS`],
-/// or [`FS_ERROR`]. Formats each entry as `name\n`/`name/\n`, truncating
-/// rather than erroring if the buffer is too small.
-pub const FS_LIST_DIR: u64 = 7;
-
-/// `(path ptr, path len, buf ptr, buf len)` -> the file's real size
-/// (which may exceed the buffer's length - compare to detect
-/// truncation), [`NO_FS`], or [`FS_ERROR`].
-pub const FS_READ_FILE: u64 = 8;
-
-/// `(path ptr, path len)` -> `0` on success, [`NO_FS`], or [`FS_ERROR`].
-/// Creates an empty directory.
-pub const FS_MKDIR: u64 = 9;
-
-/// `(path ptr, path len)` -> `0` on success, [`NO_FS`], or [`FS_ERROR`].
-/// Removes an empty directory.
-pub const FS_RMDIR: u64 = 10;
-
-/// `(path ptr, path len)` -> `0` on success, [`NO_FS`], or [`FS_ERROR`].
-/// Creates an empty (zero-byte) file, or succeeds as a no-op if a file
-/// already exists there (there's no RTC to update a modification time
-/// with, so "no-op" is the closest honest approximation of real
-/// `touch`'s behavior on an existing file).
-pub const FS_TOUCH: u64 = 11;
-
-/// `(path ptr, path len)` -> `0` on success, [`NO_FS`], or [`FS_ERROR`].
-/// Removes a file (not a directory - use [`FS_RMDIR`] for those).
-pub const FS_RM: u64 = 12;
-
-/// `(path ptr, path len, data ptr, data len)` -> `0` on success, [`NO_FS`],
-/// or [`FS_ERROR`]. Creates a file with exactly `data`'s contents, or
-/// fully overwrites (not appends to) an existing file's contents. The
-/// first syscall able to give a file more than zero bytes - without
-/// this, [`FS_TOUCH`] was the only way to create a file, and it only
-/// ever produces empty ones.
-pub const FS_WRITE_FILE: u64 = 13;
-
-/// `(src ptr, src len, dst ptr, dst len)` -> `0` on success, [`NO_FS`],
-/// or [`FS_ERROR`]. Renames or moves the file or directory at `src` to
-/// `dst`. `dst` must not already exist - this refuses rather than
-/// overwriting it or moving `src` inside it.
-pub const FS_MV: u64 = 14;
+// 7 through 14 are deliberate gaps now, like 5 - the eight fs_*
+// syscalls (list_dir/read_file/mkdir/rmdir/touch/rm/write_file/mv)
+// lived here until the filesystem moved out of the kernel entirely
+// (driver isolation part 2). Their exact contracts survive unchanged
+// as the filesystem server's request protocol - see the `FSOP_*`
+// constants further below - and their old numbers stay unfilled, same
+// stable-ABI-over-dense-ABI reasoning as the gap at 5.
 
 /// Blocking: waits until a byte is available and returns it, rather than
 /// returning [`NO_CHAR`] immediately like [`TRY_READ_CHAR`]. The caller
@@ -103,13 +68,18 @@ pub const FS_MV: u64 = 14;
 /// `block_current_and_switch`), not a spin-wait on either side.
 pub const READ_CHAR: u64 = 15;
 
-/// `(path ptr, path len)` -> `0` on success, [`NO_FS`], or
-/// [`SPAWN_ERROR`]. Loads a second program from disk and starts it
-/// running *alongside* the caller - a real `spawn`, not POSIX
-/// exec-replaces-current-process semantics; the calling task is
-/// completely untouched. See `tasks.rs`'s `spawn` for the mechanism and
-/// its real, deliberate limits (a small fixed number of extra task
-/// slots).
+/// `(total staged length)` -> `0` on success, [`SPAWN_ERROR`] (bad
+/// argument), or a `SPAWN_ERR_*` code. Parses, relocates, and starts
+/// the program previously fed into the kernel's staging buffer via
+/// [`SPAWN_STAGE`], as a new task running *alongside* the caller - a
+/// real `spawn`, not POSIX exec-replaces-current-process semantics;
+/// the calling task is completely untouched. **Contract change with
+/// the userland-filesystem milestone:** this used to take a path and
+/// read the file itself, but the kernel no longer contains a
+/// filesystem to read with - the caller reads the program (via the
+/// filesystem server) and stages it chunk by chunk first. See
+/// `tasks.rs`'s `spawn` for the mechanism and its real, deliberate
+/// limits (a small fixed number of extra task slots).
 pub const SPAWN: u64 = 16;
 
 /// `(exit code)` -> **does not return** on success: the calling task is
@@ -117,16 +87,18 @@ pub const SPAWN: u64 = 16;
 /// RAM reclaimed when the runtime allocator's LIFO order allows - see
 /// `tasks.rs`'s `free_runtime_region`) and another runnable task is
 /// switched to in its place. The one case where this *does* return to
-/// the caller: [`EXIT_DENIED`], for the two tasks that are refused -
+/// the caller: [`EXIT_DENIED`], for the three tasks that are refused -
 /// task 0 (the boot shell; nothing would own the keyboard, see
-/// `tasks.rs`'s `INPUT_OWNER_TASK`) and task 1 (idle; it never makes
-/// syscalls anyway, refused for completeness). The exit code is masked to a
+/// `tasks.rs`'s `INPUT_OWNER_TASK`), task 1 (idle; it never makes
+/// syscalls anyway, refused for completeness), and task 2 (the
+/// filesystem server, [`FSD_TASK`] - its death would strand the disk
+/// for the rest of the boot). The exit code is masked to a
 /// byte (`0..=255`, POSIX-style) and kept until collected by a
 /// [`WAIT`]er - see [`WAIT`] for the full reaping model.
 pub const EXIT: u64 = 17;
 
 /// [`EXIT`]'s only possible return value (a successful exit never
-/// returns): the calling task is one of the two that may not exit.
+/// returns): the calling task is one of the three that may not exit.
 pub const EXIT_DENIED: u64 = u64::MAX;
 
 /// `(task index)` -> one of the `TASK_STATE_*` values below, or
@@ -188,13 +160,20 @@ pub const FG: u64 = 20;
 /// the outcome).
 pub const WAIT: u64 = 21;
 
-/// `()` -> `0` (a filesystem was just mounted - disk commands work
-/// now), [`MOUNT_ALREADY`] (one was already mounted; nothing changed),
-/// or [`MOUNT_NO_DEVICE`]. Rescans the USB (xHCI) ports for storage
+/// `(replace)` -> `0` (a USB storage device was found and installed
+/// as the kernel's block device), [`MOUNT_ALREADY`] (a device is
+/// already installed and `replace` was `0`; nothing changed), or
+/// [`MOUNT_NO_DEVICE`]. Rescans the USB (xHCI) ports for storage
 /// devices that attached after boot - on Parallels, a passed-through
 /// stick appears a few seconds *after* the kernel's boot-time scan
-/// (confirmed by the enumeration diagnostics), so this is how it gets
-/// picked up: boot, wait a moment, type `mount`.
+/// (confirmed by the enumeration diagnostics). **The device half
+/// only** since the filesystem moved to userland: actually mounting
+/// what the device holds is the server's [`FSOP_MOUNT`] request, and
+/// the shell's `mount` command composes the two (server first - see
+/// its cmd_mount). `replace != 0` allows swapping out an installed
+/// device; callers may only pass it after the server confirms nothing
+/// is mounted, or a live filesystem's cached geometry would suddenly
+/// describe a different disk.
 pub const MOUNT: u64 = 22;
 
 /// `(dest task, buf ptr, len)` -> `0`, [`TASK_ERR_NO_SUCH_TASK`],
@@ -259,9 +238,76 @@ pub const BLOCK_SECTOR_SIZE: u64 = 512;
 
 /// The fixed task slot the filesystem server (`fsd/`) runs in - loaded
 /// at boot alongside the shell, protected from `kill`/`exit` like
-/// tasks 0/1. Clients hardcode this as the destination for `FsRequest`
-/// messages; the `BLOCK_*` syscalls accept only this task.
+/// tasks 0/1. Clients hardcode this as the destination for filesystem
+/// requests (see the `FSOP_*` protocol below); the `BLOCK_*` syscalls
+/// accept only this task.
 pub const FSD_TASK: u64 = 2;
+
+/// `(offset, chunk ptr, chunk len)` -> `0` on success or
+/// [`SPAWN_ERROR`]. Copies one chunk of a program image into the
+/// kernel's fixed 128KB spawn staging buffer at `offset` - the feed
+/// half of the two-step spawn (see [`SPAWN`]'s contract-change note).
+/// Chunks are bounded by the same 512-byte per-syscall buffer cap as
+/// everything else; offsets past the staging buffer are refused.
+pub const SPAWN_STAGE: u64 = 30;
+
+// ---------------------------------------------------------------------
+// The filesystem server's request protocol (not syscalls) - messages
+// sent to FSD_TASK, normally via MSG_CALL. A request is FS_REQUEST_LEN
+// bytes: the op as a little-endian u64 at offset 0, then six
+// little-endian u64 arguments at offsets 8, 16, ... 48 (pointers and
+// lengths into the *caller's* memory - the server reads/writes client
+// buffers directly, the same single-address-space trust model the old
+// fs_* syscalls' pointer arguments had). The reply is a single
+// little-endian u64 in the reply message's first 8 bytes, carrying
+// exactly the old fs_* syscalls' return-value semantics: byte counts /
+// real sizes / 0 on success, or NO_FS / an FS_ERR_* code / FS_ERROR
+// from the reserved band. A call to an empty FSD_TASK slot fails with
+// TASK_ERR_NO_SUCH_TASK at the MSG_CALL layer itself - the "no
+// filesystem server this boot" case.
+// ---------------------------------------------------------------------
+
+/// A filesystem request message's exact size in bytes (op + 6 args).
+pub const FS_REQUEST_LEN: u64 = 56;
+
+/// args: `(path ptr, path len, buf ptr, buf len)` -> bytes written.
+/// Formats each entry as `name\n`/`name/\n`, truncating rather than
+/// erroring if the buffer is too small.
+pub const FSOP_LIST_DIR: u64 = 1;
+/// args: `(path ptr, path len, buf ptr, buf len)` -> the file's real
+/// size (which may exceed the buffer's length - compare to detect
+/// truncation).
+pub const FSOP_READ_FILE: u64 = 2;
+/// args: `(path ptr, path len, offset, buf ptr, buf len)` -> bytes
+/// copied from the file starting at byte `offset` (`0` once the offset
+/// is at/past the end of the file). The chunked-read primitive the
+/// two-step [`SPAWN`] flow is built on - the one genuinely new
+/// capability in the protocol, everything else is the old syscalls'
+/// contracts verbatim.
+pub const FSOP_READ_AT: u64 = 3;
+/// args: `(path ptr, path len, data ptr, data len)` -> `0`. Creates a
+/// file with exactly `data`'s contents, or fully overwrites (not
+/// appends to) an existing file's contents. Empty `data` is valid
+/// (truncate-to-empty).
+pub const FSOP_WRITE_FILE: u64 = 4;
+/// args: `(path ptr, path len)` -> `0`. Creates an empty directory.
+pub const FSOP_MKDIR: u64 = 5;
+/// args: `(path ptr, path len)` -> `0`. Removes an empty directory.
+pub const FSOP_RMDIR: u64 = 6;
+/// args: `(path ptr, path len)` -> `0`. Creates an empty file, or
+/// succeeds as a no-op if a file already exists there.
+pub const FSOP_TOUCH: u64 = 7;
+/// args: `(path ptr, path len)` -> `0`. Removes a file (not a
+/// directory - use [`FSOP_RMDIR`] for those).
+pub const FSOP_RM: u64 = 8;
+/// args: `(src ptr, src len, dst ptr, dst len)` -> `0`. Renames or
+/// moves `src` to `dst`; `dst` must not already exist.
+pub const FSOP_MV: u64 = 9;
+/// no args -> `0` (mounted now), [`MOUNT_ALREADY`], or [`NO_FS`] (a
+/// device is present but carries no mountable FAT32). The FS half of
+/// the `mount` command - the device half is the [`MOUNT`] syscall,
+/// which must succeed (or report already-installed) first.
+pub const FSOP_MOUNT: u64 = 10;
 
 /// The largest message [`MSG_SEND`] accepts, in bytes.
 pub const MSG_MAX_LEN: u64 = 64;

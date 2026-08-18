@@ -1,22 +1,35 @@
 //! The filesystem server - the fifth userland program, and the first
 //! real component moved out of the EL1 kernel (driver isolation part 2,
-//! MINIX-style): it owns the FAT32 logic, speaks IPC to clients
-//! (requests arrive as messages, mostly via `MSG_CALL`), and reaches
-//! the disk through the `BLOCK_*` syscalls - which the kernel only
-//! accepts from this task's fixed slot (`syscall_abi::FSD_TASK`).
+//! MINIX-style): it owns the FAT32 engine (`fat32.rs`, the kernel's old
+//! module ported onto `disk.rs`'s `BLOCK_*` syscall shim), speaks the
+//! `FSOP_*` request protocol to clients (see `syscall-abi`'s protocol
+//! section - requests arrive as messages, normally via `MSG_CALL`), and
+//! is the only task the kernel's `BLOCK_*` syscalls accept.
 //!
 //! Boot-loaded by the kernel (`loader::load_fsd`, `\EFI\ORBS\FSD.BIN`)
-//! into task slot 2, which is exit/kill-protected and never used by
-//! `spawn`. Same build shape as `pong/`/`hello/`/`shell/`:
-//! `aarch64-unknown-none`, release-only, shared linker script,
-//! constants from `syscall-abi`.
+//! into task slot 2 (`syscall_abi::FSD_TASK`), which is
+//! exit/kill-protected and never used by `spawn`. Same build shape as
+//! `pong/`/`hello/`/`shell/`: `aarch64-unknown-none`, release-only,
+//! shared linker script, constants from `syscall-abi`.
 //!
-//! **Skeleton for now**: replies to every message with a fixed banner
-//! text so the boot-load/IPC plumbing can be verified end to end; the
-//! actual FAT32 engine and request protocol land next.
+//! **No static mutable state** (the linker asserts `.data`/`.bss`
+//! empty, same as every userland program here) - the mounted `Fs`
+//! lives in `main`'s own stack frame, which works because this server
+//! is one infinite loop that never returns.
+//!
+//! Request pointers are trusted, not validated against the caller's
+//! real region - the same single-address-space trust model the old
+//! in-kernel fs_* syscalls' pointer arguments had (see
+//! `kernel/src/syscall.rs`'s module doc comment), now spanning two EL0
+//! regions instead of EL0-to-kernel. The 512-byte per-buffer cap
+//! (`MAX_CLIENT_LEN`, the old kernel `MAX_USER_LEN`) is kept for the
+//! same sanity-bound reasons.
 
 #![no_std]
 #![no_main]
+
+mod disk;
+mod fat32;
 
 use core::arch::asm;
 use core::panic::PanicInfo;
@@ -27,24 +40,247 @@ pub extern "C" fn _start() -> ! {
     main()
 }
 
+/// The old kernel-side `MAX_USER_LEN`: the sanity cap on any
+/// client-supplied `(pointer, length)` pair.
+const MAX_CLIENT_LEN: u64 = 512;
+
 fn main() -> ! {
+    let mut fs: Option<fat32::Fs> = None;
+    // Auto-mount if the kernel already holds a device (QEMU's boot-time
+    // virtio path; on Parallels the device arrives later, via the
+    // `mount` command -> MOUNT syscall -> FSOP_MOUNT request).
+    try_mount(&mut fs);
     print("fsd: filesystem server ready\r\n");
-    let mut buf = [0u8; 64];
+
+    let mut req = [0u8; 64];
     loop {
-        let packed = syscall4(syscall_abi::MSG_RECV, buf.as_mut_ptr() as u64, buf.len() as u64, 0, 0);
+        let packed = syscall4(syscall_abi::MSG_RECV, req.as_mut_ptr() as u64, req.len() as u64, 0, 0);
         if packed >= syscall_abi::FS_ERR_MIN {
             // RECV_INTERRUPTED can't reach a non-keyboard-owner task,
             // and no other error is expected - park rather than spin
-            // on a broken call (same posture as pong).
+            // on a broken call.
             break;
         }
         let sender = packed >> 32;
-        let reply = b"fsd: not serving files yet";
+        let len = ((packed & 0xffff_ffff) as usize).min(req.len());
+        let result = handle(&mut fs, &req[..len]);
+        let reply = result.to_le_bytes();
+        // A full/unreachable sender mailbox drops the reply - the
+        // caller's MSG_CALL stays blocked until Ctrl+C; nothing better
+        // exists to do with an undeliverable reply.
         syscall4(syscall_abi::MSG_SEND, sender, reply.as_ptr() as u64, reply.len() as u64, 0);
     }
     loop {
         core::hint::spin_loop();
     }
+}
+
+/// Attempts the mount if the kernel has a device installed. Quiet when
+/// there's simply no device (the ordinary Parallels-before-`mount`
+/// case); logs the outcome whenever a device is actually present.
+fn try_mount(fs: &mut Option<fat32::Fs>) {
+    if fs.is_some() {
+        return;
+    }
+    if disk::Disk.capacity_sectors().is_err() {
+        return;
+    }
+    match fat32::Fs::mount(disk::Disk) {
+        Ok(mounted) => {
+            *fs = Some(mounted);
+            print("fsd: FAT32 mounted, disk commands available\r\n");
+        }
+        Err(e) => {
+            print("fsd: FAT32 mount failed (");
+            print(error_name(&e));
+            print(") - disk commands won't work\r\n");
+        }
+    }
+}
+
+/// Decodes and executes one request, returning the reply value (the
+/// old fs_* syscalls' exact return-value semantics - see the protocol
+/// notes in `syscall-abi`).
+fn handle(fs: &mut Option<fat32::Fs>, req: &[u8]) -> u64 {
+    if req.len() < syscall_abi::FS_REQUEST_LEN as usize {
+        return syscall_abi::FS_ERROR;
+    }
+    let op = read_u64(req, 0);
+    let args = [
+        read_u64(req, 8),
+        read_u64(req, 16),
+        read_u64(req, 24),
+        read_u64(req, 32),
+        read_u64(req, 40),
+        read_u64(req, 48),
+    ];
+
+    if op == syscall_abi::FSOP_MOUNT {
+        if fs.is_some() {
+            return syscall_abi::MOUNT_ALREADY;
+        }
+        try_mount(fs);
+        return if fs.is_some() { 0 } else { syscall_abi::NO_FS };
+    }
+
+    let Some(fs) = fs.as_mut() else {
+        return syscall_abi::NO_FS;
+    };
+    match op {
+        syscall_abi::FSOP_LIST_DIR => {
+            let Some(path) = path_arg(args[0], args[1]) else { return syscall_abi::FS_ERROR };
+            let Some(buf) = buf_arg(args[2], args[3]) else { return syscall_abi::FS_ERROR };
+            // Same fill-until-full formatting as the old kernel
+            // fs_list_dir: once `buf` is full this stops *writing*,
+            // not iterating.
+            let mut written = 0usize;
+            let result = fs.list_dir(path, |name, is_dir, _size| {
+                let suffix: &[u8] = if is_dir { b"/\n" } else { b"\n" };
+                let entry_len = name.len() + suffix.len();
+                if written + entry_len > buf.len() {
+                    return;
+                }
+                buf[written..written + name.len()].copy_from_slice(name.as_bytes());
+                written += name.len();
+                buf[written..written + suffix.len()].copy_from_slice(suffix);
+                written += suffix.len();
+            });
+            match result {
+                Ok(()) => written as u64,
+                Err(e) => error_code(&e),
+            }
+        }
+        syscall_abi::FSOP_READ_FILE => {
+            let Some(path) = path_arg(args[0], args[1]) else { return syscall_abi::FS_ERROR };
+            let Some(buf) = buf_arg(args[2], args[3]) else { return syscall_abi::FS_ERROR };
+            match fs.read_file(path, buf) {
+                Ok(size) => size as u64,
+                Err(e) => error_code(&e),
+            }
+        }
+        syscall_abi::FSOP_READ_AT => {
+            let Some(path) = path_arg(args[0], args[1]) else { return syscall_abi::FS_ERROR };
+            let Some(buf) = buf_arg(args[3], args[4]) else { return syscall_abi::FS_ERROR };
+            match fs.read_at(path, args[2], buf) {
+                Ok(copied) => copied as u64,
+                Err(e) => error_code(&e),
+            }
+        }
+        syscall_abi::FSOP_WRITE_FILE => {
+            let Some(path) = path_arg(args[0], args[1]) else { return syscall_abi::FS_ERROR };
+            // Empty data is valid (truncate-to-empty) - the same
+            // allow-empty exception the old syscall's validation had.
+            let Some(data) = data_arg_allow_empty(args[2], args[3]) else { return syscall_abi::FS_ERROR };
+            match fs.write_file(path, data) {
+                Ok(()) => 0,
+                Err(e) => error_code(&e),
+            }
+        }
+        syscall_abi::FSOP_MKDIR => path_op(fs, args, fat32::Fs::mkdir),
+        syscall_abi::FSOP_RMDIR => path_op(fs, args, fat32::Fs::rmdir),
+        syscall_abi::FSOP_TOUCH => path_op(fs, args, fat32::Fs::touch),
+        syscall_abi::FSOP_RM => path_op(fs, args, fat32::Fs::rm),
+        syscall_abi::FSOP_MV => {
+            let Some(src) = path_arg(args[0], args[1]) else { return syscall_abi::FS_ERROR };
+            let Some(dst) = path_arg(args[2], args[3]) else { return syscall_abi::FS_ERROR };
+            match fs.mv(src, dst) {
+                Ok(()) => 0,
+                Err(e) => error_code(&e),
+            }
+        }
+        _ => syscall_abi::FS_ERROR,
+    }
+}
+
+/// The shared shape of the four one-path operations.
+fn path_op(fs: &mut fat32::Fs, args: [u64; 6], op: fn(&mut fat32::Fs, &str) -> Result<(), fat32::Error>) -> u64 {
+    let Some(path) = path_arg(args[0], args[1]) else { return syscall_abi::FS_ERROR };
+    match op(fs, path) {
+        Ok(()) => 0,
+        Err(e) => error_code(&e),
+    }
+}
+
+/// Validates and derefs a client path argument: non-null, non-empty,
+/// capped, UTF-8.
+fn path_arg(ptr: u64, len: u64) -> Option<&'static str> {
+    if ptr == 0 || len == 0 || len > MAX_CLIENT_LEN {
+        return None;
+    }
+    let bytes = unsafe { core::slice::from_raw_parts(ptr as *const u8, len as usize) };
+    core::str::from_utf8(bytes).ok()
+}
+
+/// Validates and derefs a client output buffer: non-null, non-empty,
+/// capped.
+fn buf_arg(ptr: u64, len: u64) -> Option<&'static mut [u8]> {
+    if ptr == 0 || len == 0 || len > MAX_CLIENT_LEN {
+        return None;
+    }
+    Some(unsafe { core::slice::from_raw_parts_mut(ptr as *mut u8, len as usize) })
+}
+
+/// Validates and derefs client input data, where zero length is a real,
+/// meaningful value (truncate a file to empty).
+fn data_arg_allow_empty(ptr: u64, len: u64) -> Option<&'static [u8]> {
+    if ptr == 0 || len > MAX_CLIENT_LEN {
+        return None;
+    }
+    Some(unsafe { core::slice::from_raw_parts(ptr as *const u8, len as usize) })
+}
+
+/// The old kernel `fs_error_code`, unchanged: maps a `fat32::Error` to
+/// its ABI code. The mount-shape variants map to `FS_ERR_IO` rather
+/// than being omitted - an unreachable arm today isn't a proof it
+/// stays unreachable.
+fn error_code(e: &fat32::Error) -> u64 {
+    match e {
+        fat32::Error::NotFound => syscall_abi::FS_ERR_NOT_FOUND,
+        fat32::Error::NotAFile => syscall_abi::FS_ERR_NOT_A_FILE,
+        fat32::Error::NotADirectory => syscall_abi::FS_ERR_NOT_A_DIRECTORY,
+        fat32::Error::InvalidName => syscall_abi::FS_ERR_INVALID_NAME,
+        fat32::Error::AlreadyExists => syscall_abi::FS_ERR_ALREADY_EXISTS,
+        fat32::Error::DirectoryNotEmpty => syscall_abi::FS_ERR_NOT_EMPTY,
+        fat32::Error::CannotRemoveRoot => syscall_abi::FS_ERR_IS_ROOT,
+        fat32::Error::DiskFull => syscall_abi::FS_ERR_DISK_FULL,
+        fat32::Error::Io(_)
+        | fat32::Error::NoFat32Partition
+        | fat32::Error::NotFat32
+        | fat32::Error::UnsupportedSectorSize(_) => syscall_abi::FS_ERR_IO,
+    }
+}
+
+/// Fixed name per error for the mount log - replaces the old kernel
+/// module's `Display` impl (dropped in the port; nothing here needs
+/// `core::fmt`, and a static string table is leaner).
+fn error_name(e: &fat32::Error) -> &'static str {
+    match e {
+        fat32::Error::NoFat32Partition => "no FAT32 partition in the MBR",
+        fat32::Error::NotFat32 => "partition is not FAT32",
+        fat32::Error::UnsupportedSectorSize(_) => "unsupported sector size",
+        fat32::Error::Io(_) => "disk I/O error",
+        fat32::Error::NotFound => "not found",
+        fat32::Error::NotAFile => "not a file",
+        fat32::Error::NotADirectory => "not a directory",
+        fat32::Error::InvalidName => "invalid name",
+        fat32::Error::AlreadyExists => "already exists",
+        fat32::Error::DirectoryNotEmpty => "directory not empty",
+        fat32::Error::CannotRemoveRoot => "cannot remove root",
+        fat32::Error::DiskFull => "disk full",
+    }
+}
+
+fn read_u64(buf: &[u8], offset: usize) -> u64 {
+    u64::from_le_bytes([
+        buf[offset],
+        buf[offset + 1],
+        buf[offset + 2],
+        buf[offset + 3],
+        buf[offset + 4],
+        buf[offset + 5],
+        buf[offset + 6],
+        buf[offset + 7],
+    ])
 }
 
 fn print(s: &str) {
@@ -54,7 +290,7 @@ fn print(s: &str) {
 }
 
 #[inline(always)]
-fn syscall4(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64) -> u64 {
+pub(crate) fn syscall4(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64) -> u64 {
     let ret: u64;
     unsafe {
         asm!(

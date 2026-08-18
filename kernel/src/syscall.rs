@@ -20,26 +20,28 @@
 //!
 //! ## Pointer arguments trust the caller - a real, known simplification
 //!
-//! `fs_list_dir`/`fs_read_file` take raw `(pointer, length)` pairs for
-//! paths and output buffers - valid to dereference directly from EL1
-//! because this kernel has exactly one address space (no per-process
-//! virtual memory yet), so an EL0-valid pointer from the one loaded
-//! program is automatically EL1-valid too. What isn't done: verifying the
-//! pointer/length actually falls within that program's own mapped region
-//! before touching it. Fine while there's exactly one, currently-trusted
-//! userland program and no isolation guarantee promised yet - a real gap
-//! once that stops being true. `valid_user_range` below is a minimal
-//! sanity bound (non-null, non-zero, capped length), not a real
-//! memory-safety check.
+//! Several syscalls (`MSG_SEND`/`MSG_RECV`/`MSG_CALL`, `BLOCK_READ`/
+//! `BLOCK_WRITE`, `SPAWN_STAGE`) take raw `(pointer, length)` pairs -
+//! valid to dereference directly from EL1 because this kernel has
+//! exactly one address space (no per-process virtual memory yet), so an
+//! EL0-valid pointer is automatically EL1-valid too. What isn't done:
+//! verifying the pointer/length actually falls within the calling
+//! program's own mapped region before touching it. Fine while every
+//! userland program is currently trusted and no isolation guarantee is
+//! promised yet - a real gap once that stops being true.
+//! `valid_user_range` below is a minimal sanity bound (non-null,
+//! non-zero, capped length), not a real memory-safety check. The
+//! filesystem server's request protocol carries the same trust model
+//! one level up (its requests hold pointers into the *client's*
+//! memory) - see `fsd/src/main.rs`.
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use syscall_abi::{FS_ERROR, NO_CHAR, NO_FS, SPAWN_ERROR};
+use syscall_abi::{FS_ERROR, NO_CHAR, SPAWN_ERROR};
 
 use crate::console;
 use crate::exceptions;
 use crate::exceptions::Context;
-use crate::fat32;
 use crate::loader;
 use crate::mmu;
 use crate::tasks;
@@ -60,75 +62,11 @@ static TASK_REPORTS: [AtomicU64; crate::tasks::NUM_TASKS] = [
     AtomicU64::new(0),
 ];
 
-/// The mounted FAT32 filesystem (if any) `fs_list_dir`/`fs_read_file`
-/// operate on - `None` is a valid, expected state (e.g. `make run`'s
-/// vvfat disk is FAT16, not FAT32 - see `fat32.rs`), not a bug; both
-/// syscalls just report an error to userland rather than the kernel
-/// refusing to boot without one.
-struct FsCell(core::cell::UnsafeCell<Option<fat32::Fs>>);
-// SAFETY: single-core; only ever touched from syscall dispatch, which by
-// construction can't run re-entrantly (taking an exception masks further
-// exceptions until the next `eret`) - same reasoning as every other
-// single-instance global in this project.
-unsafe impl Sync for FsCell {}
-static FS: FsCell = FsCell(core::cell::UnsafeCell::new(None));
-
-/// Installs the filesystem `fs_list_dir`/`fs_read_file` operate on. Called
-/// once at boot (`main.rs`), after a successful `fat32::Fs::mount` - never
-/// called again, so no locking beyond `FsCell`'s existing single-core
-/// reasoning is needed.
-pub fn install_fs(fs: fat32::Fs) {
-    unsafe { *FS.0.get() = Some(fs) };
-}
-
-/// Mounts the activated USB mass-storage device (if any) as the global
-/// filesystem - shared by the boot-time attempt (`main.rs`, covers
-/// QEMU where the device is present at scan time) and the `MOUNT`
-/// syscall (covers real Parallels, where a passed-through stick
-/// attaches a few seconds after boot - see the enumeration
-/// diagnostics). First-mounted-wins: a no-op if a filesystem (virtio
-/// or a previous USB mount) is already installed. Returns whether a
-/// filesystem is installed after the attempt.
-/// Whether any filesystem is installed - the `MOUNT` syscall's
-/// "already mounted" distinction.
-fn fs_installed() -> bool {
-    unsafe { (*FS.0.get()).is_some() }
-}
-
-pub fn try_mount_usb_storage() -> bool {
-    if fs_installed() {
-        return true;
-    }
-    if !crate::xhci::storage_present() {
-        return false;
-    }
-    let device = match crate::usb_msd::Device::init() {
-        Ok(d) => d,
-        Err(e) => {
-            console::println!("Ouroboros kernel: usb-msd init failed ({e})");
-            return false;
-        }
-    };
-    match fat32::Fs::mount(crate::block::BlockDevice::UsbMsd(device)) {
-        Ok(fs) => {
-            console::println!("Ouroboros kernel: FAT32 mounted from USB storage, disk commands available");
-            install_fs(fs);
-            true
-        }
-        Err(e) => {
-            console::println!("Ouroboros kernel: FAT32 mount failed on USB storage ({e})");
-            false
-        }
-    }
-}
-
 /// The raw block device the `BLOCK_*` syscalls operate on - the
-/// kernel's half of the userland-filesystem split. Same `FsCell` idiom
-/// and single-core safety reasoning as `FS` above; `None` is the
-/// expected state whenever no disk was discovered this boot. Custody
-/// note: `fat32::Fs` owns its device by value, so a device lives
-/// either here (for the filesystem server to reach via `BLOCK_READ`/
-/// `BLOCK_WRITE`) or inside a mounted kernel `Fs` - never both.
+/// kernel's entire remaining role in storage since the filesystem
+/// moved to userland (the fsd server): hold the device, do raw
+/// sectors on request, for exactly one authorized task. `None` is the
+/// expected state whenever no disk was discovered this boot.
 struct BlockCell(core::cell::UnsafeCell<Option<crate::block::BlockDevice>>);
 // SAFETY: same single-core, non-reentrant-dispatch reasoning as FsCell.
 unsafe impl Sync for BlockCell {}
@@ -136,18 +74,45 @@ static BLOCK: BlockCell = BlockCell(core::cell::UnsafeCell::new(None));
 
 /// Installs the block device the `BLOCK_*` syscalls serve. First
 /// installed wins, same as the filesystem itself.
-// Callerless until the userland-filesystem custody flip (the kernel FS
-// still owns the device today) - the allow comes off with that change.
-#[allow(dead_code)]
 pub fn install_block_device(device: crate::block::BlockDevice) {
     unsafe { *BLOCK.0.get() = Some(device) };
 }
 
 /// Whether a block device is installed - `MOUNT`'s "already" answer on
 /// the device level.
-#[allow(dead_code)]
 pub fn block_device_installed() -> bool {
     unsafe { (*BLOCK.0.get()).is_some() }
+}
+
+/// Activates the USB mass-storage device (if any) and installs it as
+/// the block device the filesystem server operates on - shared by the
+/// boot-time attempt (`main.rs`, covers QEMU where the device is
+/// present at scan time) and the `MOUNT` syscall (covers real
+/// Parallels, where a passed-through stick attaches a few seconds
+/// after boot - see the enumeration diagnostics; the syscall arm has
+/// its own replace-capable variant inline). First-installed wins: a
+/// no-op if a device (virtio or a previous USB one) is already in the
+/// cell. Returns whether a device is installed after the attempt. The
+/// *filesystem* half of mounting lives in the server now
+/// (`FSOP_MOUNT`), not here - the kernel only handles the device.
+pub fn try_install_usb_block_device() -> bool {
+    if block_device_installed() {
+        return true;
+    }
+    if !crate::xhci::storage_present() {
+        return false;
+    }
+    match crate::usb_msd::Device::init() {
+        Ok(device) => {
+            install_block_device(crate::block::BlockDevice::UsbMsd(device));
+            console::println!("Ouroboros kernel: usb-msd block device installed");
+            true
+        }
+        Err(e) => {
+            console::println!("Ouroboros kernel: usb-msd init failed ({e})");
+            false
+        }
+    }
 }
 
 /// Whether the calling task may use the `BLOCK_*` syscalls: only the
@@ -188,172 +153,6 @@ fn valid_user_range(ptr: u64, len: u64) -> bool {
     ptr != 0 && len != 0 && len <= MAX_USER_LEN
 }
 
-/// Same bound as [`valid_user_range`], except a zero length is
-/// accepted (with a still-non-null pointer) rather than rejected -
-/// needed for `fs_write_file`'s data argument, where empty input is a
-/// real, meaningful case (writing/truncating a file to zero bytes),
-/// unlike every other `(pointer, length)` pair this module validates
-/// (a path can't be empty, an output buffer with zero length is
-/// pointless). A real bug caught by testing `write <file>` with no
-/// content words: without this, an empty write was indistinguishable
-/// from a rejected one.
-fn valid_user_range_allow_empty(ptr: u64, len: u64) -> bool {
-    if len == 0 { ptr != 0 } else { valid_user_range(ptr, len) }
-}
-
-/// Maps a `fat32::Error` to its ABI error code (`syscall-abi`'s
-/// `FS_ERR_*` band) - the split of the old single collapsed `FS_ERROR`,
-/// so userland finally learns *why* an operation failed. The
-/// mount-shape variants (`NoFat32Partition`/`NotFat32`/
-/// `UnsupportedSectorSize`) can't occur through an already-mounted
-/// `Fs`, but are mapped (to `FS_ERR_IO`) rather than omitted or
-/// panicked on - an unreachable arm today isn't a proof it stays
-/// unreachable.
-fn fs_error_code(e: &fat32::Error) -> u64 {
-    match e {
-        fat32::Error::NotFound => syscall_abi::FS_ERR_NOT_FOUND,
-        fat32::Error::NotAFile => syscall_abi::FS_ERR_NOT_A_FILE,
-        fat32::Error::NotADirectory => syscall_abi::FS_ERR_NOT_A_DIRECTORY,
-        fat32::Error::InvalidName => syscall_abi::FS_ERR_INVALID_NAME,
-        fat32::Error::AlreadyExists => syscall_abi::FS_ERR_ALREADY_EXISTS,
-        fat32::Error::DirectoryNotEmpty => syscall_abi::FS_ERR_NOT_EMPTY,
-        fat32::Error::CannotRemoveRoot => syscall_abi::FS_ERR_IS_ROOT,
-        fat32::Error::DiskFull => syscall_abi::FS_ERR_DISK_FULL,
-        fat32::Error::Io(_)
-        | fat32::Error::NoFat32Partition
-        | fat32::Error::NotFat32
-        | fat32::Error::UnsupportedSectorSize(_) => syscall_abi::FS_ERR_IO,
-    }
-}
-
-/// Formats `path`'s directory entries into `buf` as `name\n` (`name/\n`
-/// for subdirectories), stopping before an entry would overflow `buf`
-/// rather than erroring - a truncated listing is more useful to a caller
-/// than none at all, same spirit as `read_file`'s own truncation
-/// behavior. Returns the number of bytes written, [`NO_FS`] if there's no
-/// mounted filesystem, or a specific `FS_ERR_*` code (see
-/// [`fs_error_code`]) if `path` doesn't resolve to a directory.
-fn fs_list_dir(path: &str, buf: &mut [u8]) -> u64 {
-    let Some(fs) = (unsafe { &mut *FS.0.get() }) else {
-        return NO_FS;
-    };
-    // `list_dir`'s callback can't signal "stop early" (unlike
-    // `walk_dir`'s internal one - see fat32.rs), so once `buf` is full
-    // this just stops *writing*, not iterating: wasted work on a huge
-    // directory, harmless and simple for the small ones this project
-    // deals with.
-    let mut written = 0usize;
-    let result = fs.list_dir(path, |name, is_dir, _size| {
-        let suffix: &[u8] = if is_dir { b"/\n" } else { b"\n" };
-        let entry_len = name.len() + suffix.len();
-        if written + entry_len > buf.len() {
-            return;
-        }
-        buf[written..written + name.len()].copy_from_slice(name.as_bytes());
-        written += name.len();
-        buf[written..written + suffix.len()].copy_from_slice(suffix);
-        written += suffix.len();
-    });
-    match result {
-        Ok(()) => written as u64,
-        Err(e) => fs_error_code(&e),
-    }
-}
-
-/// Reads `path`'s contents into `buf`, same truncation contract as
-/// `fat32::Fs::read_file` (returns the file's real size, which may exceed
-/// `buf.len()` - compare to detect truncation). [`NO_FS`] if there's no
-/// mounted filesystem, or a specific `FS_ERR_*` code (see
-/// [`fs_error_code`]) if `path` doesn't resolve to a file.
-fn fs_read_file(path: &str, buf: &mut [u8]) -> u64 {
-    let Some(fs) = (unsafe { &mut *FS.0.get() }) else {
-        return NO_FS;
-    };
-    match fs.read_file(path, buf) {
-        Ok(size) => size as u64,
-        Err(e) => fs_error_code(&e),
-    }
-}
-
-/// Creates an empty directory at `path`. `0` on success, [`NO_FS`] if
-/// there's no mounted filesystem, or the specific `FS_ERR_*` code for
-/// whatever [`fat32::Fs::mkdir`] reported (already exists, invalid
-/// name, parent missing, disk full, ...) - the old
-/// "everything collapses to one sentinel" gap is closed, see
-/// [`fs_error_code`].
-fn fs_mkdir(path: &str) -> u64 {
-    let Some(fs) = (unsafe { &mut *FS.0.get() }) else {
-        return NO_FS;
-    };
-    match fs.mkdir(path) {
-        Ok(()) => 0,
-        Err(e) => fs_error_code(&e),
-    }
-}
-
-/// Removes the empty directory at `path`. Same success/error contract as
-/// [`fs_mkdir`].
-fn fs_rmdir(path: &str) -> u64 {
-    let Some(fs) = (unsafe { &mut *FS.0.get() }) else {
-        return NO_FS;
-    };
-    match fs.rmdir(path) {
-        Ok(()) => 0,
-        Err(e) => fs_error_code(&e),
-    }
-}
-
-/// Creates an empty file at `path`, or succeeds as a no-op if a file
-/// already exists there (see [`fat32::Fs::touch`]). Same
-/// `NO_FS`/`FS_ERR_*` contract as [`fs_mkdir`].
-fn fs_touch(path: &str) -> u64 {
-    let Some(fs) = (unsafe { &mut *FS.0.get() }) else {
-        return NO_FS;
-    };
-    match fs.touch(path) {
-        Ok(()) => 0,
-        Err(e) => fs_error_code(&e),
-    }
-}
-
-/// Removes the file at `path`. Same `NO_FS`/`FS_ERR_*` contract as
-/// [`fs_mkdir`].
-fn fs_rm(path: &str) -> u64 {
-    let Some(fs) = (unsafe { &mut *FS.0.get() }) else {
-        return NO_FS;
-    };
-    match fs.rm(path) {
-        Ok(()) => 0,
-        Err(e) => fs_error_code(&e),
-    }
-}
-
-/// Creates or fully overwrites the file at `path` with `data`. Same
-/// `NO_FS`/`FS_ERR_*` contract as [`fs_mkdir`] - the first syscall able
-/// to give a file more than zero bytes (see [`fat32::Fs::write_file`]).
-fn fs_write_file(path: &str, data: &[u8]) -> u64 {
-    let Some(fs) = (unsafe { &mut *FS.0.get() }) else {
-        return NO_FS;
-    };
-    match fs.write_file(path, data) {
-        Ok(()) => 0,
-        Err(e) => fs_error_code(&e),
-    }
-}
-
-/// Renames or moves the file or directory at `src` to `dst`. Same
-/// `NO_FS`/`FS_ERR_*` contract as [`fs_mkdir`] (see
-/// [`fat32::Fs::mv`]).
-fn fs_mv(src: &str, dst: &str) -> u64 {
-    let Some(fs) = (unsafe { &mut *FS.0.get() }) else {
-        return NO_FS;
-    };
-    match fs.mv(src, dst) {
-        Ok(()) => 0,
-        Err(e) => fs_error_code(&e),
-    }
-}
-
 /// Sized generously for a real userland program - the default shell is
 /// currently ~45KB. A fixed EL1 static, not a heap allocation: `alloc` is
 /// unavailable this deep into boot (see `loader.rs`'s own reasoning for
@@ -364,45 +163,38 @@ fn fs_mv(src: &str, dst: &str) -> u64 {
 const SPAWN_STAGING_SIZE: usize = 128 * 1024;
 
 struct SpawnStagingCell(core::cell::UnsafeCell<[u8; SPAWN_STAGING_SIZE]>);
-// SAFETY: single-core; only ever touched from within `spawn_program`,
-// which by construction can't run re-entrantly (same reasoning as `FS`).
+// SAFETY: single-core; only ever touched from the SPAWN_STAGE/SPAWN
+// dispatch arms, which by construction can't run re-entrantly (same
+// reasoning as `BLOCK`).
 unsafe impl Sync for SpawnStagingCell {}
 static SPAWN_STAGING: SpawnStagingCell = SpawnStagingCell(core::cell::UnsafeCell::new([0; SPAWN_STAGING_SIZE]));
 
-/// `syscall_abi::SPAWN`'s real work: read the whole file into
-/// [`SPAWN_STAGING`] via the same shared `FS` instance every other
-/// `fs_*` syscall uses, parse+relocate it into a freshly allocated
-/// region (`tasks::allocate_runtime_region`, `loader::elf_region_size`/
+/// `syscall_abi::SPAWN`'s real work: parse+relocate the program image
+/// previously fed into [`SPAWN_STAGING`] chunk by chunk (the
+/// `SPAWN_STAGE` syscall - the kernel contains no filesystem to read a
+/// path with anymore, so the caller reads the file via the filesystem
+/// server and stages it here first), into a freshly allocated region
+/// (`tasks::allocate_runtime_region`, `loader::elf_region_size`/
 /// `populate_region` - the same ELF-loading core `loader.rs`'s
 /// boot-time path uses, just with a different memory source), add a
 /// new task for it (`tasks::spawn`), and make its region
 /// EL0-accessible (`mmu::rebuild_with_el0_regions`). Failures return
-/// the specific code for what went wrong: the ordinary `FS_ERR_*` code
-/// for a read failure, or `SPAWN_ERR_TOO_LARGE`/`SPAWN_ERR_BAD_ELF`/
-/// `SPAWN_ERR_NO_FREE_SLOT` - the old collapsed [`SPAWN_ERROR`] is now
-/// only the dispatch arm's argument-validation fallback. Nothing
+/// `SPAWN_ERR_TOO_LARGE`/`SPAWN_ERR_BAD_ELF`/
+/// `SPAWN_ERR_NO_FREE_SLOT` - the collapsed [`SPAWN_ERROR`] is only
+/// the dispatch arm's argument-validation fallback. Nothing
 /// already-running is touched until the very last step, so there's no
 /// partial state to unwind - and a failure *after*
 /// `allocate_runtime_region` (a bad ELF, no free slot) gives the
 /// memory back via `tasks::free_runtime_region`, which always succeeds
 /// here since a failed spawn's allocation is by construction the most
 /// recent one (the LIFO case).
-fn spawn_program(path: &str) -> u64 {
-    let Some(fs) = (unsafe { &mut *FS.0.get() }) else {
-        return NO_FS;
-    };
+fn spawn_staged(total_len: u64) -> u64 {
     let staging = unsafe { &mut *SPAWN_STAGING.0.get() };
-    let size = match fs.read_file(path, staging) {
-        Ok(size) => size as usize,
-        // A read failure reports the ordinary FS_ERR_* code (not found,
-        // is-a-directory, I/O, ...) - the filesystem knows why better
-        // than a spawn-specific sentinel ever could.
-        Err(e) => return fs_error_code(&e),
-    };
-    // A file bigger than the staging buffer is refused outright, not
-    // silently loaded truncated (matches `cp`'s own "a partial copy is a
-    // wrong copy" reasoning, not `cat`'s "a truncated display is still
-    // useful" one - a truncated *program* would just crash).
+    let size = total_len as usize;
+    // A program bigger than the staging buffer can't have been staged
+    // in the first place (SPAWN_STAGE bounds every chunk), and an
+    // empty one isn't a program - refused outright, matching the old
+    // path-reading implementation's own refusal.
     if size == 0 || size > staging.len() {
         return syscall_abi::SPAWN_ERR_TOO_LARGE;
     }
@@ -550,100 +342,26 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
             0
         }
         syscall_abi::GET_TICKS => exceptions::ticks(),
-        syscall_abi::FS_LIST_DIR => {
-            if !valid_user_range(arg0, arg1) || !valid_user_range(arg2, arg3) {
-                return FS_ERROR;
-            }
-            // SAFETY: bounds sanity-checked above; see the module doc
-            // comment's note on what that check does and doesn't cover.
-            let path = unsafe { core::slice::from_raw_parts(arg0 as *const u8, arg1 as usize) };
-            let Ok(path) = core::str::from_utf8(path) else { return FS_ERROR };
-            let buf = unsafe { core::slice::from_raw_parts_mut(arg2 as *mut u8, arg3 as usize) };
-            fs_list_dir(path, buf)
-        }
-        syscall_abi::FS_READ_FILE => {
-            if !valid_user_range(arg0, arg1) || !valid_user_range(arg2, arg3) {
-                return FS_ERROR;
-            }
-            // SAFETY: same as FS_LIST_DIR.
-            let path = unsafe { core::slice::from_raw_parts(arg0 as *const u8, arg1 as usize) };
-            let Ok(path) = core::str::from_utf8(path) else { return FS_ERROR };
-            let buf = unsafe { core::slice::from_raw_parts_mut(arg2 as *mut u8, arg3 as usize) };
-            fs_read_file(path, buf)
-        }
-        syscall_abi::FS_MKDIR => {
-            if !valid_user_range(arg0, arg1) {
-                return FS_ERROR;
-            }
-            // SAFETY: bounds sanity-checked above; see the module doc
-            // comment's note on what that check does and doesn't cover.
-            let path = unsafe { core::slice::from_raw_parts(arg0 as *const u8, arg1 as usize) };
-            let Ok(path) = core::str::from_utf8(path) else { return FS_ERROR };
-            fs_mkdir(path)
-        }
-        syscall_abi::FS_RMDIR => {
-            if !valid_user_range(arg0, arg1) {
-                return FS_ERROR;
-            }
-            // SAFETY: same as FS_MKDIR.
-            let path = unsafe { core::slice::from_raw_parts(arg0 as *const u8, arg1 as usize) };
-            let Ok(path) = core::str::from_utf8(path) else { return FS_ERROR };
-            fs_rmdir(path)
-        }
-        syscall_abi::FS_TOUCH => {
-            if !valid_user_range(arg0, arg1) {
-                return FS_ERROR;
-            }
-            // SAFETY: same as FS_MKDIR.
-            let path = unsafe { core::slice::from_raw_parts(arg0 as *const u8, arg1 as usize) };
-            let Ok(path) = core::str::from_utf8(path) else { return FS_ERROR };
-            fs_touch(path)
-        }
-        syscall_abi::FS_RM => {
-            if !valid_user_range(arg0, arg1) {
-                return FS_ERROR;
-            }
-            // SAFETY: same as FS_MKDIR.
-            let path = unsafe { core::slice::from_raw_parts(arg0 as *const u8, arg1 as usize) };
-            let Ok(path) = core::str::from_utf8(path) else { return FS_ERROR };
-            fs_rm(path)
-        }
-        syscall_abi::FS_WRITE_FILE => {
-            // `data`'s length is allowed to be zero (see
-            // valid_user_range_allow_empty's doc comment) - the path
-            // never is.
-            if !valid_user_range(arg0, arg1) || !valid_user_range_allow_empty(arg2, arg3) {
-                return FS_ERROR;
-            }
-            // SAFETY: same as FS_LIST_DIR/FS_READ_FILE.
-            let path = unsafe { core::slice::from_raw_parts(arg0 as *const u8, arg1 as usize) };
-            let Ok(path) = core::str::from_utf8(path) else { return FS_ERROR };
-            let data = unsafe { core::slice::from_raw_parts(arg2 as *const u8, arg3 as usize) };
-            fs_write_file(path, data)
-        }
-        syscall_abi::FS_MV => {
-            // Both `src` and `dst` are paths - neither can legitimately
-            // be empty, so this uses the stricter valid_user_range for
-            // both, unlike FS_WRITE_FILE's data argument.
-            if !valid_user_range(arg0, arg1) || !valid_user_range(arg2, arg3) {
-                return FS_ERROR;
-            }
-            // SAFETY: same as FS_LIST_DIR/FS_READ_FILE.
-            let src = unsafe { core::slice::from_raw_parts(arg0 as *const u8, arg1 as usize) };
-            let Ok(src) = core::str::from_utf8(src) else { return FS_ERROR };
-            let dst = unsafe { core::slice::from_raw_parts(arg2 as *const u8, arg3 as usize) };
-            let Ok(dst) = core::str::from_utf8(dst) else { return FS_ERROR };
-            fs_mv(src, dst)
-        }
-        syscall_abi::SPAWN => {
-            if !valid_user_range(arg0, arg1) {
+        syscall_abi::SPAWN => spawn_staged(arg0),
+        syscall_abi::SPAWN_STAGE => {
+            // arg0 = offset into the staging buffer, arg1 = chunk
+            // pointer, arg2 = chunk length. Bounded by both the
+            // ordinary per-syscall cap and the staging buffer itself.
+            if !valid_user_range(arg1, arg2) {
                 return SPAWN_ERROR;
             }
-            // SAFETY: bounds sanity-checked above; see the module doc
-            // comment's note on what that check does and doesn't cover.
-            let path = unsafe { core::slice::from_raw_parts(arg0 as *const u8, arg1 as usize) };
-            let Ok(path) = core::str::from_utf8(path) else { return SPAWN_ERROR };
-            spawn_program(path)
+            let staging = unsafe { &mut *SPAWN_STAGING.0.get() };
+            let offset = arg0 as usize;
+            let len = arg2 as usize;
+            let Some(end) = offset.checked_add(len) else { return SPAWN_ERROR };
+            if end > staging.len() {
+                return SPAWN_ERROR;
+            }
+            // SAFETY: bounds sanity-checked above, same trust model as
+            // every other userland pointer argument.
+            let chunk = unsafe { core::slice::from_raw_parts(arg1 as *const u8, len) };
+            staging[offset..end].copy_from_slice(chunk);
+            0
         }
         syscall_abi::EXIT => {
             let current = tasks::current_task();
@@ -737,16 +455,38 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
             unsafe { tasks::block_current_and_switch(frame, tasks::WaitReason::TaskExit(i)) }
         }
         syscall_abi::MOUNT => {
-            let already = fs_installed();
-            // Rescan first (devices that attached after the boot scan -
-            // the Parallels case), then try the mount. Runs with IRQs
-            // masked for the duration like every SVC - ticks pause for
-            // the sub-second setup, an accepted cost.
+            // The device half only - the filesystem half is the
+            // server's FSOP_MOUNT request (see cmd_mount's server-first
+            // flow). arg0 != 0 means "replace": the caller has already
+            // confirmed with the server that nothing is mounted, so an
+            // installed-but-unmountable device (e.g. `make run`'s
+            // FAT16 vvfat virtio disk) may be swapped for a found USB
+            // stick - without the flag, an occupied cell answers
+            // MOUNT_ALREADY untouched. Swapping under a *mounted*
+            // filesystem would hand the server's cached geometry a
+            // different disk; the server-first check is what rules
+            // that out. Rescan first (devices that attached after the
+            // boot scan - the Parallels case), then install. Runs with
+            // IRQs masked like every SVC - ticks pause for the
+            // sub-second setup, an accepted cost.
+            let replace = arg0 != 0;
+            if !replace && block_device_installed() {
+                return syscall_abi::MOUNT_ALREADY;
+            }
             crate::xhci::rescan_ports();
-            if try_mount_usb_storage() {
-                if already { syscall_abi::MOUNT_ALREADY } else { 0 }
-            } else {
-                syscall_abi::MOUNT_NO_DEVICE
+            if !crate::xhci::storage_present() {
+                return syscall_abi::MOUNT_NO_DEVICE;
+            }
+            match crate::usb_msd::Device::init() {
+                Ok(device) => {
+                    install_block_device(crate::block::BlockDevice::UsbMsd(device));
+                    console::println!("Ouroboros kernel: usb-msd block device installed");
+                    0
+                }
+                Err(e) => {
+                    console::println!("Ouroboros kernel: usb-msd init failed ({e})");
+                    syscall_abi::MOUNT_NO_DEVICE
+                }
             }
         }
         syscall_abi::MSG_SEND => {

@@ -8,7 +8,6 @@ mod block;
 mod console;
 mod devicetree;
 mod exceptions;
-mod fat32;
 mod fbconsole;
 mod font;
 mod framebuffer;
@@ -440,7 +439,7 @@ fn main() -> Status {
     // attaches a few seconds *after* this point (confirmed by the
     // enumeration diagnostics), so this boot-time attempt mostly serves
     // QEMU; the shell's `mount` command covers the late-attach case.
-    syscall::try_mount_usb_storage();
+    syscall::try_install_usb_block_device();
 
     // GIC/timer setup - gated on `gic_info` being `Some` (real MADT
     // discovery, `madt.rs`), not the console-discovery heuristic this used to share
@@ -640,13 +639,12 @@ fn init_storage() {
         return;
     }
 
-    match fat32::Fs::mount(block::BlockDevice::Virtio(device)) {
-        Ok(fs) => {
-            console::println!("Ouroboros kernel: FAT32 mounted, disk commands available");
-            syscall::install_fs(fs);
-        }
-        Err(e) => console::println!("Ouroboros kernel: FAT32 mount failed ({e}) - disk commands won't work this boot"),
-    }
+    // Custody goes to the BLOCK cell for the filesystem server to
+    // reach via the BLOCK_* syscalls - the kernel no longer mounts
+    // (or contains) any filesystem itself; the server's own boot-time
+    // auto-mount takes it from here.
+    syscall::install_block_device(block::BlockDevice::Virtio(device));
+    console::println!("Ouroboros kernel: block device installed for the filesystem server");
 }
 
 /// Parks the core forever instead of returning to firmware. `wfe` is a

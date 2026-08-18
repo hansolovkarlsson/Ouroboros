@@ -759,8 +759,38 @@ fn cmd_exec(arg: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize) {
         return;
     };
 
-    match fs_spawn(path) {
-        NO_FS => print_no_fs(),
+    // Two-step spawn (the kernel has no filesystem to read a path
+    // with anymore): read the program via the filesystem server in
+    // 512-byte chunks (the per-buffer cap), feed each into the
+    // kernel's staging buffer (SPAWN_STAGE), then SPAWN the staged
+    // total. A short read (or 0 for an empty file) ends the loop.
+    let mut offset: u64 = 0;
+    let mut chunk = [0u8; 512];
+    loop {
+        let n = fs_read_at(path, offset, &mut chunk);
+        if n == NO_FS {
+            print_no_fs();
+            return;
+        }
+        if n >= FS_ERR_MIN {
+            print_fs_error("exec", n);
+            return;
+        }
+        if n == 0 {
+            break;
+        }
+        if syscall4(syscall_abi::SPAWN_STAGE, offset, chunk.as_ptr() as u64, n, 0) != 0 {
+            // Only reachable by staging past the kernel's 128KB buffer
+            // - the same too-large refusal SPAWN itself would give.
+            print_fs_error("exec", syscall_abi::SPAWN_ERR_TOO_LARGE);
+            return;
+        }
+        offset += n;
+        if n < chunk.len() as u64 {
+            break;
+        }
+    }
+    match syscall(syscall_abi::SPAWN, offset) {
         code if code >= FS_ERR_MIN => print_fs_error("exec", code),
         _ => {}
     }
@@ -1208,71 +1238,128 @@ fn get_ticks() -> u64 {
     syscall(syscall_abi::GET_TICKS, 0)
 }
 
+/// One filesystem-server round trip: packs an `FSOP_*` request (op +
+/// six little-endian u64 args - see the protocol section in
+/// `syscall-abi`) and `MSG_CALL`s it to the server's fixed slot
+/// ([`syscall_abi::FSD_TASK`]), returning the reply's u64 - which
+/// carries exactly the old fs_* syscalls' return-value semantics, so
+/// every caller (`cmd_ls`/`cmd_cat`/redirects/[`print_fs_error`])
+/// works unchanged. The two call-layer failures are folded into that
+/// same space: no server this boot (the call answers
+/// `TASK_ERR_NO_SUCH_TASK`) becomes [`NO_FS`] - which is literally
+/// true - and anything else (Ctrl+C mid-call, a full server mailbox)
+/// becomes the generic [`FS_ERROR`].
+fn fs_call(op: u64, args: [u64; 6]) -> u64 {
+    let mut req = [0u8; 56];
+    req[0..8].copy_from_slice(&op.to_le_bytes());
+    let mut i = 0;
+    while i < 6 {
+        let at = 8 + i * 8;
+        req[at..at + 8].copy_from_slice(&args[i].to_le_bytes());
+        i += 1;
+    }
+    let mut reply = [0u8; 64];
+    let packed = syscall4(
+        syscall_abi::MSG_CALL,
+        syscall_abi::FSD_TASK,
+        req.as_ptr() as u64,
+        req.len() as u64,
+        reply.as_mut_ptr() as u64,
+    );
+    if packed == syscall_abi::TASK_ERR_NO_SUCH_TASK {
+        return NO_FS;
+    }
+    if packed >= FS_ERR_MIN {
+        return syscall_abi::FS_ERROR;
+    }
+    let len = (packed & 0xffff_ffff) as usize;
+    if len < 8 {
+        return syscall_abi::FS_ERROR;
+    }
+    u64::from_le_bytes([
+        reply[0], reply[1], reply[2], reply[3], reply[4], reply[5], reply[6], reply[7],
+    ])
+}
+
 /// Lists `path`'s directory entries into `buf` as `name\n`/`name/\n` -
-/// see `syscall.rs::fs_list_dir` for the exact format and truncation
-/// behavior. Returns the raw syscall result: a byte count on success,
-/// [`NO_FS`] if there's no mounted filesystem, or a specific `FS_ERR_*`
-/// code (anything `>= FS_ERR_MIN`) - callers match on this directly (see
-/// [`cmd_ls`] and [`print_fs_error`]), so every failure reason gets its
-/// own accurate message.
+/// same format and truncation behavior as ever (the server implements
+/// the old kernel handler verbatim). Returns a byte count on success,
+/// [`NO_FS`], or a specific `FS_ERR_*` code (anything `>= FS_ERR_MIN`)
+/// (callers match on this directly - see [`cmd_ls`] and
+/// [`print_fs_error`] - so every failure reason gets its own accurate
+/// message). Every wrapper below is one [`fs_call`] round trip to the
+/// filesystem server: the shell's "libc layer" over IPC now, not
+/// syscalls; the contracts are unchanged.
 fn fs_list_dir(path: &str, buf: &mut [u8]) -> u64 {
-    syscall4(syscall_abi::FS_LIST_DIR, path.as_ptr() as u64, path.len() as u64, buf.as_mut_ptr() as u64, buf.len() as u64)
+    fs_call(
+        syscall_abi::FSOP_LIST_DIR,
+        [path.as_ptr() as u64, path.len() as u64, buf.as_mut_ptr() as u64, buf.len() as u64, 0, 0],
+    )
 }
 
-/// Reads `path`'s contents into `buf`. Returns the raw syscall result:
-/// the file's *real* size on success (which may exceed `buf.len()` -
-/// compare to detect truncation, same contract as
-/// `fat32::Fs::read_file`/`syscall.rs::fs_read_file`), [`NO_FS`], or a
-/// specific `FS_ERR_*` code - same reasoning as [`fs_list_dir`].
+/// Reads `path`'s contents into `buf`. Returns the file's *real* size
+/// on success (which may exceed `buf.len()` - compare to detect
+/// truncation), [`NO_FS`], or a specific `FS_ERR_*` code - same
+/// contract as ever, same reasoning as [`fs_list_dir`].
 fn fs_read_file(path: &str, buf: &mut [u8]) -> u64 {
-    syscall4(syscall_abi::FS_READ_FILE, path.as_ptr() as u64, path.len() as u64, buf.as_mut_ptr() as u64, buf.len() as u64)
+    fs_call(
+        syscall_abi::FSOP_READ_FILE,
+        [path.as_ptr() as u64, path.len() as u64, buf.as_mut_ptr() as u64, buf.len() as u64, 0, 0],
+    )
 }
 
-/// Creates an empty directory at `path`. Returns the raw syscall result:
-/// `0` on success, [`NO_FS`], or a specific `FS_ERR_*` code for the real
-/// failure reason (already exists, invalid 8.3 name, parent missing,
-/// disk full, ... - see `syscall.rs::fs_error_code` and
-/// [`print_fs_error`]); the old one-collapsed-sentinel gap is closed.
+/// Reads up to `buf.len()` bytes of `path` starting at byte `offset`,
+/// returning how many were copied (`0` at/past end of file) - the
+/// chunked-read primitive [`cmd_exec`]'s two-step spawn flow loops
+/// over. Same error space as [`fs_read_file`].
+fn fs_read_at(path: &str, offset: u64, buf: &mut [u8]) -> u64 {
+    fs_call(
+        syscall_abi::FSOP_READ_AT,
+        [path.as_ptr() as u64, path.len() as u64, offset, buf.as_mut_ptr() as u64, buf.len() as u64, 0],
+    )
+}
+
+/// Creates an empty directory at `path`. Returns `0` on success,
+/// [`NO_FS`], or a specific `FS_ERR_*` code for the real failure
+/// reason (already exists, invalid 8.3 name, parent missing, disk
+/// full, ... - see [`print_fs_error`]).
 fn fs_mkdir(path: &str) -> u64 {
-    syscall4(syscall_abi::FS_MKDIR, path.as_ptr() as u64, path.len() as u64, 0, 0)
+    fs_call(syscall_abi::FSOP_MKDIR, [path.as_ptr() as u64, path.len() as u64, 0, 0, 0, 0])
 }
 
 /// Removes the empty directory at `path`. Same return contract as
 /// [`fs_mkdir`].
 fn fs_rmdir(path: &str) -> u64 {
-    syscall4(syscall_abi::FS_RMDIR, path.as_ptr() as u64, path.len() as u64, 0, 0)
+    fs_call(syscall_abi::FSOP_RMDIR, [path.as_ptr() as u64, path.len() as u64, 0, 0, 0, 0])
 }
 
 /// Creates an empty file at `path`, or succeeds as a no-op if a file
 /// already exists there. Same return contract as [`fs_mkdir`].
 fn fs_touch(path: &str) -> u64 {
-    syscall4(syscall_abi::FS_TOUCH, path.as_ptr() as u64, path.len() as u64, 0, 0)
+    fs_call(syscall_abi::FSOP_TOUCH, [path.as_ptr() as u64, path.len() as u64, 0, 0, 0, 0])
 }
 
 /// Removes the file at `path`. Same return contract as [`fs_mkdir`].
 fn fs_rm(path: &str) -> u64 {
-    syscall4(syscall_abi::FS_RM, path.as_ptr() as u64, path.len() as u64, 0, 0)
+    fs_call(syscall_abi::FSOP_RM, [path.as_ptr() as u64, path.len() as u64, 0, 0, 0, 0])
 }
 
 /// Creates or fully overwrites the file at `path` with `data`. Same
 /// return contract as [`fs_mkdir`].
 fn fs_write_file(path: &str, data: &[u8]) -> u64 {
-    syscall4(syscall_abi::FS_WRITE_FILE, path.as_ptr() as u64, path.len() as u64, data.as_ptr() as u64, data.len() as u64)
+    fs_call(
+        syscall_abi::FSOP_WRITE_FILE,
+        [path.as_ptr() as u64, path.len() as u64, data.as_ptr() as u64, data.len() as u64, 0, 0],
+    )
 }
 
 /// Renames or moves the file or directory at `src` to `dst`. Same
 /// return contract as [`fs_mkdir`].
 fn fs_mv(src: &str, dst: &str) -> u64 {
-    syscall4(syscall_abi::FS_MV, src.as_ptr() as u64, src.len() as u64, dst.as_ptr() as u64, dst.len() as u64)
-}
-
-/// Loads the program at `path` and starts it as a new task. Returns `0`
-/// on success, [`NO_FS`], an ordinary `FS_ERR_*` code for a read failure
-/// (not found, is a directory, ...), or one of the spawn-specific codes
-/// (`SPAWN_ERR_BAD_ELF`/`SPAWN_ERR_TOO_LARGE`/`SPAWN_ERR_NO_FREE_SLOT`)
-/// - all in the same `>= FS_ERR_MIN` band [`print_fs_error`] decodes.
-fn fs_spawn(path: &str) -> u64 {
-    syscall4(syscall_abi::SPAWN, path.as_ptr() as u64, path.len() as u64, 0, 0)
+    fs_call(
+        syscall_abi::FSOP_MV,
+        [src.as_ptr() as u64, src.len() as u64, dst.as_ptr() as u64, dst.len() as u64, 0, 0],
+    )
 }
 
 /// Asks the kernel to destroy this task (`EXIT` syscall). Never returns
@@ -1406,10 +1493,46 @@ fn print_u64(n: u64) {
 /// later than the kernel's boot-time scan - boot, wait a moment, type
 /// `mount`, and the disk commands come alive.
 fn cmd_mount() {
-    match syscall(syscall_abi::MOUNT, 0) {
+    // Server-first, then the device: ask the filesystem server to
+    // mount whatever block device the kernel already holds
+    // (FSOP_MOUNT). Only if that can't produce a filesystem - nothing
+    // mounted and the current device (if any) isn't mountable - ask
+    // the kernel to rescan the USB ports and install a found stick as
+    // a *replacement* device (MOUNT with the replace flag, safe
+    // exactly because the server just confirmed nothing is mounted),
+    // then ask the server again. This preserves the old
+    // first-MOUNTED-wins behavior: an unmountable boot-time device
+    // (e.g. `make run`'s FAT16 vvfat disk) never blocks a later USB
+    // stick from becoming the disk.
+    match fs_call(syscall_abi::FSOP_MOUNT, [0; 6]) {
+        0 => {
+            print_line("mounted - disk commands available");
+            return;
+        }
+        MOUNT_ALREADY => {
+            print_line("mount: a filesystem is already mounted");
+            return;
+        }
+        NO_FS => {}
+        _ => {
+            print_line("mount: unexpected return");
+            return;
+        }
+    }
+    match syscall(syscall_abi::MOUNT, 1) {
+        0 => {}
+        MOUNT_NO_DEVICE => {
+            print_line("mount: no USB storage device found (see the kernel log; is the stick attached to the VM?)");
+            return;
+        }
+        _ => {
+            print_line("mount: unexpected return");
+            return;
+        }
+    }
+    match fs_call(syscall_abi::FSOP_MOUNT, [0; 6]) {
         0 => print_line("mounted - disk commands available"),
-        MOUNT_ALREADY => print_line("mount: a filesystem is already mounted"),
-        MOUNT_NO_DEVICE => print_line("mount: no mountable USB storage device found (see the kernel log; is the stick attached to the VM?)"),
+        NO_FS => print_line("mount: device found, but no mountable FAT32 filesystem on it (see the server's log line)"),
         _ => print_line("mount: unexpected return"),
     }
 }
