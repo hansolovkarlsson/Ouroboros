@@ -92,9 +92,9 @@ static NEXT_TAG: AtomicU32 = AtomicU32::new(1);
 /// lives in `xhci.rs`, the DMA buffers are statics, so all a device
 /// *is* here is its validated capacity.
 pub struct Device {
-    /// Validated at init (logged there too) - kept for a future
-    /// capacity-reporting need, unused today.
-    _capacity_sectors: u64,
+    /// Validated at init (logged there too) - reported to the
+    /// filesystem server via the `BLOCK_INFO` syscall.
+    capacity_sectors: u64,
 }
 
 impl Device {
@@ -143,7 +143,13 @@ impl Device {
         let capacity_sectors = last_lba as u64 + 1;
         console::println!("Ouroboros kernel: usb-msd: capacity {capacity_sectors} sectors ({block_size}-byte blocks)");
 
-        Ok(Device { _capacity_sectors: capacity_sectors })
+        Ok(Device { capacity_sectors })
+    }
+
+    /// The device's capacity in 512-byte sectors, as validated by
+    /// `READ CAPACITY(10)` at init.
+    pub fn capacity_sectors(&self) -> u64 {
+        self.capacity_sectors
     }
 
     /// Reads one 512-byte sector via `READ(10)`.

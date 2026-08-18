@@ -217,6 +217,36 @@ pub const MSG_RECV: u64 = 24;
 /// as [`TRY_READ_CHAR`]/[`READ_CHAR`].
 pub const MSG_TRY_RECV: u64 = 25;
 
+/// `()` -> the block device's capacity in sectors, or
+/// [`BLOCK_ERR_NO_DEVICE`]/[`BLOCK_ERR_DENIED`]. Raw block-device
+/// introspection for the filesystem server - see the note on
+/// [`BLOCK_READ`] for who may call this (only [`FSD_TASK`]).
+pub const BLOCK_INFO: u64 = 26;
+
+/// `(lba, buf ptr)` -> `0` on success, or a `BLOCK_ERR_*` code. Reads
+/// exactly one [`BLOCK_SECTOR_SIZE`]-byte sector into `buf` (the length
+/// is implied, not passed). **Gated to [`FSD_TASK`]**: any other caller
+/// gets [`BLOCK_ERR_DENIED`] - the filesystem server is the only task
+/// allowed to touch the disk, the actual "supervised" part of moving
+/// the filesystem out of the kernel.
+pub const BLOCK_READ: u64 = 27;
+
+/// `(lba, buf ptr)` -> `0` on success, or a `BLOCK_ERR_*` code. Writes
+/// exactly one [`BLOCK_SECTOR_SIZE`]-byte sector from `buf`. Same
+/// [`FSD_TASK`]-only gate as [`BLOCK_READ`].
+pub const BLOCK_WRITE: u64 = 28;
+
+/// The fixed sector size the `BLOCK_*` syscalls transfer, in bytes.
+/// Matches the kernel's own `block::BlockDevice` (a hardcoded
+/// `[u8; 512]` on both backends) and FAT32's `SECTOR_SIZE`.
+pub const BLOCK_SECTOR_SIZE: u64 = 512;
+
+/// The fixed task slot the filesystem server (`fsd/`) runs in - loaded
+/// at boot alongside the shell, protected from `kill`/`exit` like
+/// tasks 0/1. Clients hardcode this as the destination for `FsRequest`
+/// messages; the `BLOCK_*` syscalls accept only this task.
+pub const FSD_TASK: u64 = 2;
+
 /// The largest message [`MSG_SEND`] accepts, in bytes.
 pub const MSG_MAX_LEN: u64 = 64;
 
@@ -327,6 +357,15 @@ pub const MSG_ERR_FULL: u64 = u64::MAX - 20;
 pub const MSG_ERR_TOO_BIG: u64 = u64::MAX - 21;
 /// [`MSG_TRY_RECV`]: the mailbox is empty right now.
 pub const NO_MSG: u64 = u64::MAX - 22;
+
+/// `BLOCK_*`: no block device has been discovered/installed this boot
+/// (nothing attached, or activation failed).
+pub const BLOCK_ERR_NO_DEVICE: u64 = u64::MAX - 23;
+/// `BLOCK_*`: the device-level read/write itself failed.
+pub const BLOCK_ERR_IO: u64 = u64::MAX - 24;
+/// `BLOCK_*`: the caller isn't [`FSD_TASK`] (or passed a bad buffer).
+/// Only the filesystem server may touch the disk.
+pub const BLOCK_ERR_DENIED: u64 = u64::MAX - 25;
 
 /// Floor of the reserved error band (with headroom for future codes):
 /// **any error-capable syscall's return value `>= FS_ERR_MIN` is an

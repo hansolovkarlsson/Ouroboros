@@ -117,6 +117,42 @@ pub fn try_mount_usb_storage() -> bool {
     }
 }
 
+/// The raw block device the `BLOCK_*` syscalls operate on - the
+/// kernel's half of the userland-filesystem split. Same `FsCell` idiom
+/// and single-core safety reasoning as `FS` above; `None` is the
+/// expected state whenever no disk was discovered this boot. Custody
+/// note: `fat32::Fs` owns its device by value, so a device lives
+/// either here (for the filesystem server to reach via `BLOCK_READ`/
+/// `BLOCK_WRITE`) or inside a mounted kernel `Fs` - never both.
+struct BlockCell(core::cell::UnsafeCell<Option<crate::block::BlockDevice>>);
+// SAFETY: same single-core, non-reentrant-dispatch reasoning as FsCell.
+unsafe impl Sync for BlockCell {}
+static BLOCK: BlockCell = BlockCell(core::cell::UnsafeCell::new(None));
+
+/// Installs the block device the `BLOCK_*` syscalls serve. First
+/// installed wins, same as the filesystem itself.
+// Callerless until the userland-filesystem custody flip (the kernel FS
+// still owns the device today) - the allow comes off with that change.
+#[allow(dead_code)]
+pub fn install_block_device(device: crate::block::BlockDevice) {
+    unsafe { *BLOCK.0.get() = Some(device) };
+}
+
+/// Whether a block device is installed - `MOUNT`'s "already" answer on
+/// the device level.
+#[allow(dead_code)]
+pub fn block_device_installed() -> bool {
+    unsafe { (*BLOCK.0.get()).is_some() }
+}
+
+/// Whether the calling task may use the `BLOCK_*` syscalls: only the
+/// filesystem server. This gate is the "supervised" in "supervised EL0
+/// process" - the kernel holds the device, and exactly one task is
+/// allowed to ask it to touch the disk.
+fn block_access_allowed() -> bool {
+    tasks::current_task() as u64 == syscall_abi::FSD_TASK
+}
+
 /// Falls back to the USB keyboard (xhci.rs) when the byte-stream console
 /// has nothing waiting - no shell/ABI changes needed to wire keyboard
 /// input in, since both sources feed the same syscalls (`TRY_READ_CHAR`,
@@ -733,6 +769,48 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
                 return FS_ERROR;
             }
             tasks::try_recv_message(tasks::current_task(), arg0, arg1).unwrap_or(syscall_abi::NO_MSG)
+        }
+        syscall_abi::BLOCK_INFO => {
+            if !block_access_allowed() {
+                return syscall_abi::BLOCK_ERR_DENIED;
+            }
+            match unsafe { &*BLOCK.0.get() } {
+                Some(device) => device.capacity_sectors(),
+                None => syscall_abi::BLOCK_ERR_NO_DEVICE,
+            }
+        }
+        syscall_abi::BLOCK_READ => {
+            // arg0 = LBA, arg1 = buffer pointer; length is implied
+            // (exactly one 512-byte sector), so the validation passes
+            // the fixed size rather than a caller-supplied one.
+            if !block_access_allowed() || !valid_user_range(arg1, syscall_abi::BLOCK_SECTOR_SIZE) {
+                return syscall_abi::BLOCK_ERR_DENIED;
+            }
+            let Some(device) = (unsafe { &mut *BLOCK.0.get() }) else {
+                return syscall_abi::BLOCK_ERR_NO_DEVICE;
+            };
+            // SAFETY: pointer sanity-checked above (same trust model as
+            // every fs_* buffer); the device was initialized before
+            // install_block_device, its regions mapped.
+            let buf = unsafe { &mut *(arg1 as *mut [u8; 512]) };
+            match unsafe { device.read_sector(arg0, buf) } {
+                Ok(()) => 0,
+                Err(_) => syscall_abi::BLOCK_ERR_IO,
+            }
+        }
+        syscall_abi::BLOCK_WRITE => {
+            if !block_access_allowed() || !valid_user_range(arg1, syscall_abi::BLOCK_SECTOR_SIZE) {
+                return syscall_abi::BLOCK_ERR_DENIED;
+            }
+            let Some(device) = (unsafe { &mut *BLOCK.0.get() }) else {
+                return syscall_abi::BLOCK_ERR_NO_DEVICE;
+            };
+            // SAFETY: same as BLOCK_READ.
+            let buf = unsafe { &*(arg1 as *const [u8; 512]) };
+            match unsafe { device.write_sector(arg0, buf) } {
+                Ok(()) => 0,
+                Err(_) => syscall_abi::BLOCK_ERR_IO,
+            }
         }
         syscall_abi::FG => {
             let i = arg0 as usize;

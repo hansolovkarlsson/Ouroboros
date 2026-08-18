@@ -58,4 +58,13 @@ impl BlockDevice {
             BlockDevice::UsbMsd(d) => unsafe { d.write_sector(sector, buf) }.map_err(Error::UsbMsd),
         }
     }
+
+    /// The device's capacity in 512-byte sectors - the `BLOCK_INFO`
+    /// syscall's answer.
+    pub fn capacity_sectors(&self) -> u64 {
+        match self {
+            BlockDevice::Virtio(d) => d.capacity_sectors(),
+            BlockDevice::UsbMsd(d) => d.capacity_sectors(),
+        }
+    }
 }
