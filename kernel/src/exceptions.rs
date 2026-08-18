@@ -172,10 +172,14 @@ mrs x9, esr_el1
 lsr x9, x9, #26
 cmp x9, #0x15
 b.eq 3f
-ldr x9, [sp]
-add sp, sp, #16
-mov x3, #8
-b   1f
+// Not an svc: a genuine EL0 fault (data/instruction abort, undefined
+// instruction, ...). Unlike every EL1 fault - which still takes the
+// diverging report-and-halt path "1:" below, honestly, since a kernel
+// fault has nothing safe to resume - an EL0 fault is *contained*: the
+// "4:" trampoline kills just the faulting task and resumes the next
+// runnable one. This is the actual payoff of process isolation; before
+// it existed, any userland wild pointer halted the whole system.
+b   4f
 .balign 0x80
 // slot 9: IRQ, lower EL AArch64 - a tick firing while EL0 runs. Same
 // resumable path as slot 5; see module doc comment.
@@ -334,10 +338,69 @@ ldp x28, x29, [sp, #224]
 ldr x30, [sp, #240]
 add sp, sp, #272
 eret
+
+4:
+// The resumable EL0-fault path: same frame-interchange contract as
+// "2:" (save a full Context, hand its address to Rust, blindly restore
+// whatever the handler left there and eret) - the handler kills the
+// faulting task and copies the next runnable task's saved Context into
+// the frame, so the restore below resumes the survivor, not the
+// faulter. Entry mirrors "3:": recover the real x9 from the EC check's
+// scratch slot first.
+ldr x9, [sp]
+add sp, sp, #16
+sub sp, sp, #272
+stp x0, x1, [sp, #0]
+stp x2, x3, [sp, #16]
+stp x4, x5, [sp, #32]
+stp x6, x7, [sp, #48]
+stp x8, x9, [sp, #64]
+stp x10, x11, [sp, #80]
+stp x12, x13, [sp, #96]
+stp x14, x15, [sp, #112]
+stp x16, x17, [sp, #128]
+stp x18, x19, [sp, #144]
+stp x20, x21, [sp, #160]
+stp x22, x23, [sp, #176]
+stp x24, x25, [sp, #192]
+stp x26, x27, [sp, #208]
+stp x28, x29, [sp, #224]
+str x30, [sp, #240]
+mrs x0, sp_el0
+str x0, [sp, #248]
+mrs x0, elr_el1
+mrs x1, spsr_el1
+stp x0, x1, [sp, #256]
+mov x0, sp   // frame pointer -> rust_el0_fault_handler's argument
+bl  {rust_el0_fault_handler}
+ldr x0, [sp, #248]
+msr sp_el0, x0
+ldp x0, x1, [sp, #256]
+msr elr_el1, x0
+msr spsr_el1, x1
+ldp x0, x1, [sp, #0]
+ldp x2, x3, [sp, #16]
+ldp x4, x5, [sp, #32]
+ldp x6, x7, [sp, #48]
+ldp x8, x9, [sp, #64]
+ldp x10, x11, [sp, #80]
+ldp x12, x13, [sp, #96]
+ldp x14, x15, [sp, #112]
+ldp x16, x17, [sp, #128]
+ldp x18, x19, [sp, #144]
+ldp x20, x21, [sp, #160]
+ldp x22, x23, [sp, #176]
+ldp x24, x25, [sp, #192]
+ldp x26, x27, [sp, #208]
+ldp x28, x29, [sp, #224]
+ldr x30, [sp, #240]
+add sp, sp, #272
+eret
 "#,
     rust_handler = sym rust_exception_handler,
     rust_irq_handler = sym rust_irq_handler,
     rust_syscall_handler = sym syscall::dispatch,
+    rust_el0_fault_handler = sym rust_el0_fault_handler,
 );
 
 unsafe extern "C" {
@@ -367,6 +430,69 @@ extern "C" fn rust_exception_handler(esr: u64, far: u64, elr: u64, vector: u64) 
         "Ouroboros kernel: EXCEPTION vector={vector} esr_el1={esr:#x} far_el1={far:#x} elr_el1={elr:#x}"
     );
     halt()
+}
+
+/// The resumable EL0-fault path's Rust half, called from the vector
+/// table's "4:" trampoline with the faulting task's saved [`Context`] -
+/// the containment payoff of process isolation: report the fault, tear
+/// down *just the faulting task* (the same teardown order as the `KILL`
+/// syscall's arm), switch the frame to the next runnable task, and let
+/// the trampoline's blind restore resume the survivor. Before this
+/// existed, any userland wild pointer took the diverging
+/// report-and-halt path and stopped the whole system.
+///
+/// Tasks 0 (the boot shell - the keyboard owner; nothing meaningful
+/// survives its death) and 1 (idle - it faulting means a kernel bug,
+/// its code is 8 bytes of `nop; b`) still halt, honestly. If the dead
+/// task is the filesystem server, the kernel restarts it from the
+/// image kept at boot - see `syscall::restart_fsd`.
+extern "C" fn rust_el0_fault_handler(frame: *mut Context) {
+    let (esr, far, elr): (u64, u64, u64);
+    // SAFETY: pure system-register reads; still valid - nothing has
+    // re-trapped since the fault (IRQs are masked from exception entry
+    // until the eret).
+    unsafe {
+        core::arch::asm!(
+            "mrs {0}, esr_el1",
+            "mrs {1}, far_el1",
+            "mrs {2}, elr_el1",
+            out(reg) esr,
+            out(reg) far,
+            out(reg) elr,
+            options(nomem, nostack),
+        );
+    }
+    let current = tasks::current_task();
+    console::println!(
+        "Ouroboros kernel: EL0 FAULT task={current} esr_el1={esr:#x} far_el1={far:#x} elr_el1={elr:#x}"
+    );
+    if current <= 1 {
+        console::println!(
+            "Ouroboros kernel: task {current} is the boot shell/idle - nothing to resume, halting"
+        );
+        halt();
+    }
+    console::println!("Ouroboros kernel: task {current} killed after fault");
+    // Same teardown order as the KILL arm (syscall.rs): reclaim RAM
+    // (LIFO-or-leak), hand the keyboard back if the faulter held it,
+    // fail anyone blocked mid-call to it, then discard its context and
+    // switch the frame to the next runnable task.
+    let (base, size) = tasks::task_region(current);
+    tasks::free_runtime_region(base, size);
+    tasks::revert_input_owner_if(current);
+    tasks::fail_calls_to(current);
+    // SAFETY: `frame` is the live trap frame of this very fault (the
+    // "4:" trampoline's contract).
+    unsafe { tasks::kill_current_and_switch(frame) };
+    if current as u64 == syscall_abi::FSD_TASK {
+        syscall::restart_fsd();
+    }
+    // One rebuild covers both the dropped region and (if the server
+    // was restarted) its fresh one.
+    // SAFETY: IRQs are masked for the whole exception - single core,
+    // nothing else can observe the table set mid-rebuild, the same
+    // contract as the EXIT/KILL arms' rebuilds.
+    unsafe { crate::mmu::rebuild_with_el0_regions(tasks::el0_regions()) };
 }
 
 static TICKS: AtomicU64 = AtomicU64::new(0);

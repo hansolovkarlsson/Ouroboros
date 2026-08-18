@@ -393,6 +393,16 @@ Worth knowing before building further on this:
   literal~~ - both safe now, confirmed via the shell's `selftest`
   builtin.** See "Binary format" above for what actually fixed this
   (real relocation processing, not a coding convention to remember).
+- **A crashing program no longer takes the system down.** An EL0
+  fault (wild pointer, undefined instruction, ...) kills just the
+  faulting task - reported on the console with ESR/FAR/ELR, slot
+  reaped, memory reclaimed when allocation order allows - and the rest
+  of the system keeps running; the filesystem server specifically is
+  restarted from a kept image (up to 3 times per boot). The boot shell
+  and idle task are the exceptions: their faults still halt, honestly.
+  There's still no guard *page* though - a stack overflow may silently
+  corrupt adjacent memory rather than fault at all (see the fixed-stack
+  bullet above).
 - **Pointer/length arguments are trusted, not validated** - by the
   kernel (`syscall.rs::valid_user_range` is a minimal sanity bound, not
   a check against the caller's actual mapped region) and by the

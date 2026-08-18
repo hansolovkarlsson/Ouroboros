@@ -699,6 +699,72 @@ pub(crate) fn kill_task(i: usize) {
     clear_mailbox(i);
 }
 
+/// The EL0-fault teardown's context switch: destroys the *currently
+/// running* task (whichever one is live in `frame` - it just faulted)
+/// and switches to the next runnable one. [`exit_current_and_switch`]'s
+/// exact shape with kill semantics instead of exit's: the slot goes
+/// straight to `Unused` (reap-immediately, like [`kill_task`] - a
+/// `WAIT`er on this task wakes with `TASK_KILLED_STATUS` via the
+/// existing `Unused` poll arm; there's no meaningful exit status to
+/// keep from a crash). No return value: the fault trampoline ("4:" in
+/// `exceptions.rs`) restores the frame blindly with no post-call `x0`
+/// write, unlike the SVC trampoline, so there's nothing to pass
+/// through.
+///
+/// # Safety
+/// Same contract as [`block_current_and_switch`]: `frame` must be the
+/// live trap frame of the exception currently being handled.
+pub(crate) unsafe fn kill_current_and_switch(frame: *mut Context) {
+    let frame = unsafe { &mut *frame };
+    let current = CURRENT.load(Ordering::Relaxed);
+    unsafe { *STATES[current].0.get() = TaskState::Unused };
+    unsafe { *REGIONS[current].0.get() = (0, 0) };
+    clear_mailbox(current);
+    let next = next_runnable(current);
+    *frame = unsafe { *TASKS[next].0.get() };
+    CURRENT.store(next, Ordering::Relaxed);
+}
+
+/// Fails every task blocked in a call to `dead` (a
+/// `Blocked(Message { from: Some(dead) })` reply wait): stashes
+/// `TASK_ERR_NO_SUCH_TASK` in the waiter's saved `x0` and wakes it -
+/// the same stash-and-mark delivery the wake-check and direct delivery
+/// already use. Without this, a client mid-`MSG_CALL` to a task that
+/// dies waits forever (Ctrl+C being the only rescue, and only for the
+/// keyboard owner); with it, the caller's call simply fails - which
+/// the shell's `fs_call` maps to `NO_FS`, exactly right for "the
+/// filesystem server died under your request". Wired into all three
+/// death paths (`EXIT`, `KILL`, the EL0-fault teardown). Plain
+/// `MSG_RECV` waits (`from: None`) are deliberately untouched -
+/// they're not waiting on any particular task.
+pub(crate) fn fail_calls_to(dead: usize) {
+    for i in 0..NUM_TASKS {
+        if let TaskState::Blocked(WaitReason::Message { from: Some(target), .. }) =
+            unsafe { *STATES[i].0.get() }
+        {
+            if target == dead {
+                unsafe { (*TASKS[i].0.get()).gpr[0] = syscall_abi::TASK_ERR_NO_SUCH_TASK };
+                unsafe { *STATES[i].0.get() = TaskState::Runnable };
+            }
+        }
+    }
+}
+
+/// Installs a task directly into a specific slot - the filesystem
+/// server's *restart* path (`syscall.rs::restart_fsd`), which must
+/// land in slot 2 exactly ([`spawn`] deliberately scans from
+/// [`FIRST_SPAWNABLE`] and can never fill the reserved slot). The
+/// caller guarantees the slot is `Unused` (the fault teardown just
+/// made it so) and handles the mmu rebuild that actually makes the
+/// region EL0-accessible. Does the same freshly-written-code cache
+/// maintenance as [`init`]/[`spawn`].
+pub(crate) fn install_task(slot: usize, context: Context, region: (u64, u64)) {
+    unsafe { *TASKS[slot].0.get() = context };
+    unsafe { *REGIONS[slot].0.get() = region };
+    unsafe { *STATES[slot].0.get() = TaskState::Runnable };
+    flush_new_code(region.0, region.1);
+}
+
 /// Whether slot `i` currently holds a *live* task (`Runnable` or
 /// `Blocked`) - the `KILL`/`FG`/`WAIT` syscalls' existence check.
 /// Zombies are deliberately not "live": `fg`/`kill` on one would
@@ -738,6 +804,13 @@ pub(crate) fn spawn(context: Context, region: (u64, u64)) -> Result<usize, Spawn
             unsafe { *TASKS[i].0.get() = context };
             unsafe { *REGIONS[i].0.get() = region };
             unsafe { *STATES[i].0.get() = TaskState::Runnable };
+            // Freshly-written code needs the same clean/invalidate
+            // sequence `init` gives the boot-loaded programs - a
+            // latent gap until the fault-isolation milestone added
+            // flush_new_code: never visible on QEMU (TCG doesn't model
+            // cache incoherency) and never *observed* on real
+            // Parallels hardware, but never correct to omit either.
+            flush_new_code(region.0, region.1);
             return Ok(i);
         }
     }
@@ -853,6 +926,21 @@ pub unsafe fn init(program: &LoadedProgram, fsd: Option<&LoadedProgram>) {
 /// never actually been exercised against hardware that would notice), but
 /// an unverified simplification that stopped being safe to carry forward
 /// once task 0's code could be bigger than one cache line.
+/// The full freshly-written-code sequence for one region: clean the
+/// D-cache over the range, then invalidate the I-cache, barriered -
+/// what `init` does inline for the boot-loaded programs, packaged for
+/// the runtime paths (`spawn`, `install_task`) that write code after
+/// boot.
+pub(crate) fn flush_new_code(base: u64, size: u64) {
+    if size == 0 {
+        return;
+    }
+    clean_dcache_range(base, size);
+    unsafe {
+        asm!("dsb ish", "ic ialluis", "dsb ish", "isb", options(nostack));
+    }
+}
+
 fn clean_dcache_range(addr: u64, len: u64) {
     const CACHE_LINE: u64 = 64;
     let mut offset = 0;

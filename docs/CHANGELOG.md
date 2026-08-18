@@ -7,6 +7,36 @@ what broke, how it was diagnosed), see `CLAUDE.md`; for *how* something
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## EL0 fault isolation, and the filesystem server survives its own crashes
+
+The containment payoff of process isolation, plus MINIX-style
+supervision in minimal form. Before this, any userland fault - a wild
+pointer in any program - took the diverging report-and-halt exception
+path and stopped the whole system. Now: a fourth, resumable trampoline
+in `exceptions.rs` handles every non-SVC synchronous EL0 exception by
+killing just the faulting task (same teardown as `kill`, slot reaped
+immediately) and resuming the next runnable one; tasks blocked
+mid-`msg_call` to any dying task are woken with a cleanly failed call
+on all three death paths (`tasks::fail_calls_to` - previously they
+waited forever); and a faulted filesystem server is restarted from its
+raw image, kept in a kernel static at boot precisely because the
+crashed server *was* the filesystem that would otherwise be needed to
+reload it. The fresh server remounts from disk (its state was always
+disk-derivable); a 3-restart per-boot cap guards against crash loops,
+degrading to the same no-filesystem behavior as a missing FSD.BIN. A
+latent gap fixed along the way: runtime-spawned code never got the
+dcache-clean/icache-invalidate sequence boot-loaded programs always
+had (`tasks::flush_new_code`, now shared by spawn and the restart
+path). Verified by direct fault injection on QEMU: a crashing spawned
+program killed alone (shell running on, region reclaimed and reused);
+fsd crashed mid-call four times - three restarts each followed by a
+working remount, with the blocked caller failing cleanly each time,
+then the capped give-up; a task-0 fault still halting cleanly; abort
+counts in the -d int traces exactly matching the injections. Boot and
+typing regression confirmed on real Parallels hardware. Not covered,
+deliberately: wedged (non-faulting) servers - no watchdog - and disk
+state corrupted mid-write - no journaling.
+
 ## Driver isolation part 2: the filesystem moves to userland
 
 The first real component out of the EL1 kernel: `fsd/`, the fifth

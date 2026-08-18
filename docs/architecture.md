@@ -104,17 +104,34 @@ single-level-simpler table was tried first and hard-faulted.
 
 `exceptions.rs` installs a 16-entry AArch64 vector table. Two shapes:
 
-- **Diverging** (most vectors): capture `ESR_EL1`/`FAR_EL1`/`ELR_EL1`,
-  report through the console if one exists, halt. Never returns.
-- **Resumable** (IRQ vectors, and the SVC vector when `ESR_EL1`'s EC field
-  is `0x15`): save the full general-purpose register set plus
-  `SP_EL0`/`ELR_EL1`/`SPSR_EL1` to a stack frame (`Context`, mirrored
-  exactly by `tasks.rs`'s task state), call into Rust, restore, `eret`.
+- **Diverging** (EL1 faults and every other unexpected vector): capture
+  `ESR_EL1`/`FAR_EL1`/`ELR_EL1`, report through the console if one
+  exists, halt. Never returns — a *kernel* fault has nothing safe to
+  resume.
+- **Resumable** (IRQ vectors, the SVC vector when `ESR_EL1`'s EC field
+  is `0x15`, and — since the fault-isolation milestone — every *other*
+  synchronous EL0 exception): save the full general-purpose register
+  set plus `SP_EL0`/`ELR_EL1`/`SPSR_EL1` to a stack frame (`Context`,
+  mirrored exactly by `tasks.rs`'s task state), call into Rust,
+  restore, `eret`.
 
 The IRQ path's saved frame is what makes task switching possible: a timer
 tick's handler is handed a pointer to that live frame and can overwrite it
 in place (`tasks::on_tick`) — the trampoline's restore-and-`eret`
 afterward doesn't know or care that the values changed underneath it.
+
+**An EL0 fault is contained, not fatal** — the actual payoff of process
+isolation. A userland wild pointer used to take the diverging path and
+halt the whole system; now the fault handler
+(`rust_el0_fault_handler`) reports it, tears down *just the faulting
+task* (same teardown as `kill`: region freed, keyboard reverted,
+anyone blocked mid-`msg_call` to it woken with a failed call —
+`tasks::fail_calls_to` — slot reaped), overwrites the frame with the
+next runnable task's context, and the trampoline resumes the survivor.
+Tasks 0 (the boot shell) and 1 (idle) faulting still halt — nothing
+meaningful survives those. If the dead task is the filesystem server,
+the kernel restarts it from an image kept at boot (see "The filesystem
+server" below).
 
 FP/SIMD registers are not part of the saved context. Fine today (nothing
 running touches them), a real limitation for whatever runs next.
@@ -176,9 +193,24 @@ meaningfully isolated without an IOMMU anyway). The split:
 A missing FSD.BIN degrades gracefully: the kernel logs a warning at
 boot, slot 2 stays `Unused`, and every request fails with
 `TASK_ERR_NO_SUCH_TASK` — which the shell reports with its ordinary
-no-filesystem message. A wedged or crashed server means no disk until
-reboot (there's no restart/supervision mechanism yet); Ctrl+C rescues a
-client blocked in a call to it.
+no-filesystem message.
+
+**A crashed server is restarted, not fatal** (the supervision half of
+EL0 fault isolation — MINIX's reincarnation server, minimal edition):
+`loader.rs` keeps FSD.BIN's raw bytes in a kernel static at boot
+(128KB cap), and the fault handler restarts a faulted server from that
+copy (`syscall::restart_fsd`) — no filesystem needed to reload it,
+which matters since the crashed server *was* the filesystem. The
+client whose call the server died under gets a cleanly failed call
+(the shell shows its no-filesystem message once); the fresh server
+re-runs its own startup and remounts from disk — all its state was
+always derivable from disk, which is what makes this a real recovery.
+A per-boot cap (3 restarts) guards against crash loops: past it, the
+kernel gives up and slot 2 stays `Unused`, the same degradation as a
+missing FSD.BIN. What this doesn't cover: a *wedged* (looping,
+non-faulting) server — no watchdog exists, and Ctrl+C remains the
+rescue for a client blocked calling one; and disk state a crashing
+server corrupted mid-write — there's no journaling.
 
 ### Dynamic task creation (`spawn`/`exec`)
 

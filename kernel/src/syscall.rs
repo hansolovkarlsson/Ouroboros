@@ -123,6 +123,100 @@ fn block_access_allowed() -> bool {
     tasks::current_task() as u64 == syscall_abi::FSD_TASK
 }
 
+/// The filesystem server's raw ELF image, kept from boot: `loader.rs`
+/// copies FSD.BIN's bytes here while boot services can still read the
+/// ESP, so a crashed server can be restarted (`restart_fsd`) without
+/// needing a filesystem to load it from - which is good, because the
+/// crashed server *was* the filesystem. Same fixed-static pattern as
+/// [`SPAWN_STAGING`]. Length 0 means no image kept (no FSD.BIN this
+/// boot, or one too big for the buffer) - restart unavailable.
+const FSD_IMAGE_SIZE: usize = 128 * 1024;
+
+struct FsdImageCell(core::cell::UnsafeCell<([u8; FSD_IMAGE_SIZE], usize)>);
+// SAFETY: single-core; written once during boot services, read only
+// from the EL0-fault handler (which runs with all exceptions masked).
+unsafe impl Sync for FsdImageCell {}
+static FSD_IMAGE: FsdImageCell = FsdImageCell(core::cell::UnsafeCell::new(([0; FSD_IMAGE_SIZE], 0)));
+
+/// Stashes the filesystem server's raw image for later restart -
+/// called once by `loader::load_fsd` during boot services. Returns
+/// whether the image fit (a too-big image just means no restart
+/// capability, not a boot failure).
+pub fn stash_fsd_image(bytes: &[u8]) -> bool {
+    if bytes.is_empty() || bytes.len() > FSD_IMAGE_SIZE {
+        return false;
+    }
+    let cell = unsafe { &mut *FSD_IMAGE.0.get() };
+    cell.0[..bytes.len()].copy_from_slice(bytes);
+    cell.1 = bytes.len();
+    true
+}
+
+/// Crash-loop guard: a per-boot cap on filesystem-server restarts. A
+/// server that faults during its own startup would otherwise
+/// fault-restart-fault forever; past the cap the kernel gives up and
+/// leaves slot 2 `Unused` - every FS request then fails with
+/// no-such-task, the same graceful degradation as a missing FSD.BIN.
+const MAX_FSD_RESTARTS: u64 = 3;
+static FSD_RESTARTS: AtomicU64 = AtomicU64::new(0);
+
+/// Restarts the filesystem server from the image kept at boot - the
+/// supervision half of EL0 fault isolation (MINIX's reincarnation
+/// server, minimal edition). Called from `exceptions.rs`'s EL0-fault
+/// handler after the dead server's teardown; the caller does the mmu
+/// rebuild that makes the fresh region EL0-accessible. The restarted
+/// server re-runs its own startup (device probe, remount from disk) -
+/// all its state was always derivable from disk, which is what makes
+/// this a real recovery rather than a hope.
+pub(crate) fn restart_fsd() {
+    let cell = unsafe { &*FSD_IMAGE.0.get() };
+    if cell.1 == 0 {
+        console::println!(
+            "Ouroboros kernel: no kept filesystem-server image - not restarting (disk commands unavailable)"
+        );
+        return;
+    }
+    let attempts = FSD_RESTARTS.fetch_add(1, Ordering::Relaxed) + 1;
+    if attempts > MAX_FSD_RESTARTS {
+        console::println!(
+            "Ouroboros kernel: filesystem server crashed more than {MAX_FSD_RESTARTS} times this boot - giving up (disk commands unavailable)"
+        );
+        return;
+    }
+    let image = &cell.0[..cell.1];
+    let (header, phdrs, region_size) = match loader::elf_region_size(image) {
+        Ok(result) => result,
+        Err(_) => {
+            console::println!("Ouroboros kernel: kept fsd image failed to parse - not restarting");
+            return;
+        }
+    };
+    let region_base = tasks::allocate_runtime_region(region_size);
+    // SAFETY: `region_base` was just handed out by
+    // `allocate_runtime_region`, fresh and at least `region_size`
+    // bytes - the same contract as spawn_staged's call.
+    let loaded = match unsafe {
+        loader::populate_region(image, &header, phdrs.as_slice(), region_base, region_size)
+    } {
+        Ok(loaded) => loaded,
+        Err(_) => {
+            tasks::free_runtime_region(region_base, region_size);
+            console::println!("Ouroboros kernel: kept fsd image failed to load - not restarting");
+            return;
+        }
+    };
+    let context = Context {
+        gpr: [0; 31],
+        sp_el0: loaded.base + loaded.size,
+        elr_el1: loaded.entry,
+        spsr_el1: 0,
+    };
+    tasks::install_task(syscall_abi::FSD_TASK as usize, context, (loaded.base, loaded.size));
+    console::println!(
+        "Ouroboros kernel: filesystem server restarted after fault (attempt {attempts}/{MAX_FSD_RESTARTS})"
+    );
+}
+
 /// Falls back to the USB keyboard (xhci.rs) when the byte-stream console
 /// has nothing waiting - no shell/ABI changes needed to wire keyboard
 /// input in, since both sources feed the same syscalls (`TRY_READ_CHAR`,
@@ -389,6 +483,9 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
             // A foregrounded task's death hands the keyboard back to
             // the boot shell - see tasks::revert_input_owner_if.
             tasks::revert_input_owner_if(current);
+            // Anyone blocked mid-MSG_CALL to this task gets a failed
+            // call instead of waiting forever - see fail_calls_to.
+            tasks::fail_calls_to(current);
             // SAFETY: `frame` is the live trap frame of this very
             // syscall (dispatch's contract with the SVC trampoline).
             let resumed_x0 = unsafe { tasks::exit_current_and_switch(frame, arg0) };
@@ -424,6 +521,7 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
             let (base, size) = tasks::task_region(i);
             tasks::free_runtime_region(base, size);
             tasks::revert_input_owner_if(i);
+            tasks::fail_calls_to(i);
             tasks::kill_task(i);
             // SAFETY: same masked-IRQ single-core contract as
             // spawn_program's and EXIT's rebuilds.

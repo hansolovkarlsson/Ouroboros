@@ -411,8 +411,21 @@ phase:
   missing-FSD.BIN degradation, the USB replace flow) and on real
   Parallels hardware (the whole mount → INQUIRY → server-side FAT32
   mount → `ls` of the real stick chain; reads only by policy). See
-  `CLAUDE.md`'s userland-filesystem section. **What's next in this
-  direction** (not yet scoped): server restart/supervision (a wedged
-  fsd means no disk until reboot), moving further components, and
+  `CLAUDE.md`'s userland-filesystem section. **The follow-up - EL0
+  fault isolation + server supervision - is done too (2026-08-18):**
+  an EL0 fault now kills just the faulting task and the system keeps
+  running (a new resumable fault trampoline in `exceptions.rs`; a
+  userland wild pointer used to halt the whole kernel), tasks blocked
+  mid-`msg_call` to a dying task get a cleanly failed call on every
+  death path (`tasks::fail_calls_to`), and a crashed filesystem server
+  is restarted from an image kept at boot (remounting from disk,
+  3-restart crash-loop cap, then graceful give-up). Confirmed on QEMU
+  by direct fault injection: a crashing spawned program killed alone
+  with the shell running on; fsd crashed mid-call four times - three
+  restarts each followed by a working remount, then the capped
+  give-up; a task-0 fault still halting cleanly. Not covered,
+  deliberately: a wedged (looping, non-faulting) server - no watchdog;
+  and no journaling for disk state corrupted mid-write. **Still next
+  in this direction** (not yet scoped): moving further components, and
   per-task memory protection to make the isolation enforced rather
   than trust-based.

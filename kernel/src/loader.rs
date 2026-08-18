@@ -315,6 +315,15 @@ pub fn load_fsd() -> Result<LoadedProgram, LoaderError> {
     if program_bytes.is_empty() {
         return Err(LoaderError::ProgramEmpty);
     }
+    // Keep the raw image for crash recovery - the kernel can restart a
+    // faulted filesystem server from this copy without needing a
+    // filesystem to load it from (see syscall::restart_fsd). A too-big
+    // image just means no restart capability, logged, not a failure.
+    if !crate::syscall::stash_fsd_image(&program_bytes) {
+        log::warn!(
+            "Ouroboros kernel: FSD.BIN too large to keep for crash recovery - the server won't be restartable this boot"
+        );
+    }
     load_elf_into_el0_region(&program_bytes)
 }
 

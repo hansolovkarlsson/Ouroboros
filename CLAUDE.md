@@ -4099,6 +4099,89 @@ engine still carries all the pre-existing FAT32 limitations (8.3-only,
 no LFN, first-FAT32-partition-only, no append/offset-write underneath
 `>>`).
 
+## EL0 fault isolation, and the filesystem server survives its own crashes
+
+The follow-up the part-2 milestone's "still coarse" list named first -
+and it opened with a finding bigger than the item itself: **any EL0
+fault used to halt the entire kernel.** `exceptions.rs`'s slot 8
+(Synchronous, lower EL) only took the resumable path for `svc`; every
+other EL0 exception - a wild pointer in any userland program - fell
+through to the diverging report-and-halt path. A microkernel that
+moved its filesystem to userland *for fault containment* was
+converting every userland fault into a whole-system halt. Two layers
+fixed that, done 2026-08-18:
+
+**Layer A - EL0 faults are contained.** A fourth trampoline ("4:") in
+`exceptions.rs`: slot 8's EC-check fall-through now builds the same
+272-byte `Context` frame as the IRQ/SVC paths and calls
+`rust_el0_fault_handler`, which reports the fault (ESR/FAR/ELR + task
+index), tears down just the faulting task (the `KILL` arm's exact
+order: region freed LIFO-or-leak, keyboard reverted, slot reaped
+immediately via the new `tasks::kill_current_and_switch` - the
+frame-interchange contract again: the handler overwrites the frame
+with the next runnable task's context and the trampoline's blind
+restore resumes the survivor). Tasks 0/1 faulting still halt,
+honestly - nothing meaningful survives the keyboard owner's or idle's
+death. Alongside it, a fix all three death paths (exit/kill/fault)
+gained: `tasks::fail_calls_to(dead)` wakes anyone blocked
+mid-`MSG_CALL` to a dying task with `TASK_ERR_NO_SUCH_TASK` (the
+shell's `fs_call` maps it to `NO_FS`) - previously they waited
+forever, Ctrl+C being the only rescue.
+
+**Layer B - the filesystem server is supervised** (MINIX's
+reincarnation server, minimal edition). `loader::load_fsd` keeps
+FSD.BIN's raw bytes in a kernel static (`FSD_IMAGE`, 128KB cap) while
+boot services can still read the ESP - kept precisely because the
+crashed server *was* the filesystem that would otherwise be needed to
+reload it. On a task-2 fault, `syscall::restart_fsd` reparses and
+reloads that image into a fresh region (`tasks::install_task`, the
+direct-slot variant `spawn` deliberately can't provide - it must never
+fill the block-syscall-privileged slot 2 itself) and the fresh server
+re-runs its own startup: device probe, remount from disk - its state
+was always disk-derivable, which is what makes this real recovery. A
+per-boot cap (3 restarts) guards crash loops; past it the kernel gives
+up and slot 2 stays `Unused`, the same graceful degradation as a
+missing FSD.BIN.
+
+**A latent pre-existing gap found and fixed along the way:**
+runtime-`spawn`ed code never got the dcache-clean/icache-invalidate
+sequence `tasks::init` gives boot-loaded programs - invisible on QEMU
+(TCG models no cache incoherency) and never observed to bite on real
+Parallels hardware, but never correct to omit. `tasks::flush_new_code`
+packages `init`'s inline sequence; `spawn` and `install_task` both
+call it now.
+
+**Verified by direct fault injection on QEMU, each scenario's abort
+count in the `-d int` trace exactly matching the injections (the
+zero-aborts discipline, adapted):** a TEMP-crashing `hello` (null
+write) killed alone - `EL0 FAULT task=3` reported with the exact
+injected `FAR_EL1`, shell kept running, the freed region visibly
+reused by a subsequent spawn, full lifecycle clean after; fsd crashed
+mid-call (a TEMP magic-op crash + TEMP shell trigger, both reverted) -
+the blocked caller woke with the no-filesystem message (fail_calls_to
+proven organically: the caller was blocked on the reply when the
+server died), restart attempts 1/3 -> 2/3 -> 3/3 each followed by the
+fresh server's banner, a successful remount, and working disk
+commands, then the fourth crash hitting the cap and degrading cleanly
+with the shell alive; a task-0 fault (TEMP shell null write) reporting
+and halting cleanly - one abort, no fault loop. Full no-injection
+regression byte-identical (disk surface over IPC, exec/exit/wait/kill,
+IPC coexistence, selftest, zero aborts), and a real-Parallels boot +
+typing + uptime regression via `make test-parallels` (the fault
+machinery is architecture-level and inert until a fault; no crash
+injection ships).
+
+**Still coarse, worth knowing before building on this:** a *wedged*
+(looping, non-faulting) server is not detected - that needs a
+watchdog/heartbeat, deliberately out of scope, and Ctrl+C remains the
+client-side rescue; no journaling - disk state a server corrupted
+mid-write before crashing stays corrupted; the restart cap is per-boot
+total, not rate-based; stack overflows may still silently corrupt
+rather than fault (no guard page - unchanged); and fault containment
+is still trust-based isolation (a task can corrupt another's memory
+*without* faulting - per-task page tables remain the real fix, queued
+as the next big milestone).
+
 ## Commands
 
 ```sh
@@ -4202,7 +4285,7 @@ kernel/
   src/framebuffer.rs GOP (EFI_GRAPHICS_OUTPUT_PROTOCOL) discovery: resolution/stride/pixel format + framebuffer physical base/size - the real lead for Parallels, see "GOP framebuffer console" above
   src/font.rs        embedded public-domain 8x8 bitmap font (dhepper/font8x8), printable ASCII 0x20-0x7E only
   src/fbconsole.rs   text console rendered directly into the GOP framebuffer: glyph drawing, cursor, ptr::copy-based scroll - write-only, no ANSI parsing, see "GOP framebuffer console" above
-  src/exceptions.rs  AArch64 exception vector table (VBAR_EL1) + fault reporting; SVC path (slot 8/"3:") saves x9 to a scratch stack slot before the EC check clobbers it (see "A real relocating loader" above) and saves/restores SP_EL0 at Context's real offset alongside ELR/SPSR, passing dispatch() the frame pointer itself (see "Blocking primitives" above)
+  src/exceptions.rs  AArch64 exception vector table (VBAR_EL1) + fault reporting; SVC path (slot 8/"3:") saves x9 to a scratch stack slot before the EC check clobbers it (see "A real relocating loader" above) and saves/restores SP_EL0 at Context's real offset alongside ELR/SPSR, passing dispatch() the frame pointer itself (see "Blocking primitives" above); slot 8's non-SVC fall-through is the resumable EL0-fault path ("4:"/rust_el0_fault_handler) - kills just the faulting task, restarts a faulted filesystem server, see "EL0 fault isolation" above
   src/mmu.rs         replaces firmware's translation tables with our own identity map (L0->L1->L2->L3 as needed), up to MAX_EL0_REGIONS (4) independent EL0 regions, an optional framebuffer device-block fallback, and (since "Dynamic task creation") a stashed memory map/extra-device list plus rebuild_with_el0_regions so install_identity_map can be called a second time at runtime - see "Dynamic task creation and exec()" above
   src/gic.rs         version-dispatching facade over gicv2.rs/gicv3.rs, selected by madt.rs's real discovery - see "MADT/GICv3" above
   src/gicv2.rs       GICv2 backend (distributor + memory-mapped CPU interface), addresses now passed in from madt::GicInfo instead of hardcoded
