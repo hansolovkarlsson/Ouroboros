@@ -288,6 +288,7 @@ const AP_EL1_EL0_RW: u64 = 0b01 << 6; // AP[2:1]: EL1 R/W, EL0 R/W too
 const SH_INNER: u64 = 0b11 << 8;
 const SH_OUTER: u64 = 0b10 << 8;
 const AF: u64 = 1 << 10;
+const NG: u64 = 1 << 11; // non-global: entry is ASID-tagged (EL0 pages only)
 const PXN: u64 = 1 << 53;
 const UXN: u64 = 1 << 54;
 const OUTPUT_ADDR_MASK: u64 = 0x0000_ffff_ffff_f000; // bits 47:12
@@ -296,6 +297,18 @@ const MAIR_IDX_DEVICE_NGNRNE: u64 = 0;
 const MAIR_IDX_NORMAL_WB: u64 = 1;
 const MAIR_ATTR_DEVICE_NGNRNE: u64 = 0x00;
 const MAIR_ATTR_NORMAL_WB: u64 = 0xff;
+
+/// The TTBR0_EL1 value for `view`'s table set, with its ASID in bits
+/// [63:48]. ASID = view + 1 (never 0, which is conventionally the
+/// "global/kernel" ASID and reserved). Kernel/device entries are
+/// global (no nG bit), so they're shared across every ASID; only the
+/// nG-tagged EL0 pages are ASID-private, which is what lets a plain
+/// TTBR0 write - no TLBI - switch views safely.
+fn ttbr0_for(view: usize) -> u64 {
+    let base = L0_TABLES[view.min(MAX_EL0_REGIONS - 1)].0.get() as u64;
+    let asid = (view as u64 + 1) & 0xff;
+    base | (asid << 48)
+}
 
 fn table_desc(next_level_addr: u64) -> u64 {
     DESC_VALID | DESC_TABLE | (next_level_addr & OUTPUT_ADDR_MASK)
@@ -365,6 +378,7 @@ fn el0_page_4k(base: u64) -> u64 {
         | AP_EL1_EL0_RW
         | SH_INNER
         | AF
+        | NG // ASID-tagged: only the owning view's ASID can hit these
 }
 
 fn is_general_ram(ty: MemoryType) -> bool {
@@ -683,15 +697,18 @@ unsafe fn build_view(
 /// entries) makes this a plain TTBR0 write; if that ever misbehaves on
 /// real hardware, this version is the known-correct fallback.
 pub(crate) fn activate_task(view: usize) {
-    let ttbr0 = L0_TABLES[view.min(MAX_EL0_REGIONS - 1)].0.get() as u64;
+    // Just the TTBR0 write (ASID-tagged) + isb - no TLBI. The EL0
+    // pages are nG/ASID-private, so the incoming view's ASID can't hit
+    // the outgoing view's cached EL0 translations, and kernel/device
+    // entries are global and identical across views. A stale entry is
+    // impossible by construction; the only invalidation needed is when
+    // a view's *contents* change (a rebuild), handled there by
+    // tlbi aside1is.
     unsafe {
         asm!(
             "msr ttbr0_el1, {0}",
             "isb",
-            "tlbi vmalle1",
-            "dsb ish",
-            "isb",
-            in(reg) ttbr0,
+            in(reg) ttbr0_for(view),
             options(nostack),
         );
     }
@@ -735,7 +752,7 @@ unsafe fn switch_full(view: usize) {
         | (0b10 << 30)               // TG1: 4KB granule (TTBR1 encoding)
         | (ips << 32); // IPS: from hardware
 
-    let ttbr0_el1 = L0_TABLES[view.min(MAX_EL0_REGIONS - 1)].0.get() as u64;
+    let ttbr0_el1 = ttbr0_for(view);
 
     // Masked and left masked: between the MAIR/TCR write and the TTBR0
     // switch below, code is still running under firmware's *old* tables
@@ -752,7 +769,11 @@ unsafe fn switch_full(view: usize) {
             "isb",                    // MAIR/TCR visible before TTBR0 switch
             "msr ttbr0_el1, {ttbr0}",
             "isb",                    // TTBR0 switch takes effect
-            "tlbi vmalle1",           // drop stale entries from firmware's tables
+            // vmalle1 flushes every ASID - correct both at boot (drops
+            // firmware's stale entries) and on a rebuild (a rebuild can
+            // change any view's EL0 pages, and this is the caller's own
+            // heavyweight path, unlike the per-switch activate_task).
+            "tlbi vmalle1",
             "ic ialluis",             // drop stale I-cache lines tagged under the old tables
             "dsb ish",
             "isb",
