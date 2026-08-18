@@ -289,8 +289,20 @@ phase:
   content living on a real USB stick rather than `esp.hdd`. Untested;
   needs a real passed-through USB storage device to even scope
   properly.
-- **USB mass storage over xHCI — the follow-up to the diagnostic
-  above, parked until it can be scoped against real hardware.**
+- ~~**USB mass storage over xHCI**~~ — **DONE (2026-08-17, the same
+  day it was scoped): real Parallels hardware has a working disk for
+  the first time.** `usb_msd.rs` (Bulk-Only Transport + SCSI
+  INQUIRY/READ CAPACITY/READ(10)/WRITE(10)) over new bulk endpoints in
+  `xhci.rs`, a `BlockDevice` abstraction decoupling `fat32.rs` from
+  virtio, boot-time auto-mount (QEMU) plus a `mount` command with a
+  runtime port rescan (Parallels, where passthrough attaches seconds
+  after boot). Confirmed end to end on real hardware: `mount` on the
+  real Lexar USB 3.x stick → INQUIRY with its real vendor strings,
+  capacity 243,404,800 sectors, FAT32 mounted, `ls` of the stick's
+  actual contents. Reads and writes confirmed on QEMU (including
+  reboot persistence and typing-during-disk-I/O keyboard survival);
+  real-stick testing kept read-only by policy. **Historical scoping
+  notes below kept as written.**
   **GO - confirmed with a real USB 3.x stick (2026-08-17, second
   enumeration check):** a SuperSpeed flash drive (`idVendor=0x21c4`,
   `bcdUSB` 3.2) passed through to the VM landed on the xHCI

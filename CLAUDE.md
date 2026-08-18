@@ -3825,6 +3825,80 @@ USB stick rather than `esp.hdd`. Untested, and needs a real
 passed-through device to scope - see `docs/roadmap.md`'s new
 "Disk on real Parallels hardware" parking-lot entry.
 
+## USB mass storage: a real disk on real Parallels hardware, at last
+
+The milestone every diagnostic this week pointed at: `usb_msd.rs`
+(Bulk-Only Transport + SCSI) over new bulk endpoints in `xhci.rs`
+gives Parallels its first working disk - `mount` on a real
+passed-through Lexar USB 3.x stick produced its real INQUIRY strings
+(`vendor='Lexar' product='USB Flash Drive'`), its real capacity
+(243,404,800 sectors), a mounted FAT32, and an `ls` of the stick's
+actual contents, live on real hardware. Five pieces, staged and
+individually verified:
+
+1. **`block.rs`** - a `BlockDevice` enum (`Virtio` | `UsbMsd`)
+   decoupling `fat32.rs` from virtio-blk (the same enum-over-trait-
+   object idiom as `Console`; a pure refactor first, regression-tested
+   before anything new). First-mounted-wins - virtio stays the QEMU
+   dev loop's primary.
+2. **Bulk endpoints in `xhci.rs`** - the multi-device scan classifies
+   the mass-storage interface (`find_msd_bulk_endpoints`),
+   `activate_storage` configures both bulk endpoints in one Configure
+   Endpoint command (max packet by speed, MaxBurst 0 - no SuperSpeed
+   companion parsing), and `bulk_transfer` is the synchronous
+   transport. **The correctness piece:** `wait_transfer_event` now
+   *routes* keyboard events arriving mid-bulk-transfer through the
+   factored `process_keyboard_report` instead of dropping them -
+   dropping would lose the keystroke *and* leave the interrupt buffer
+   unreposted, a permanently dead keyboard the first time someone
+   typed during disk I/O. Verified by firing keystrokes interleaved
+   with disk commands: zero drops.
+3. **`usb_msd.rs`** - CBW/CSW framing with tag validation, INQUIRY /
+   READ CAPACITY(10) (non-512-byte block sizes refused) / READ(10) /
+   WRITE(10), one sector per call, modeled on `virtio_blk.rs`'s
+   synchronous polling shape. **A real SCSI detail found organically
+   by the hot-plug test, not the spec-reading:** a freshly attached
+   device reports Unit Attention - INQUIRY succeeded (it's
+   spec-exempt) while the first READ CAPACITY failed with CHECK
+   CONDITION, fixed with the standard TEST UNIT READY / REQUEST SENSE
+   bring-up loop.
+4. **`mount` (syscall 22)** - a runtime port rescan
+   (`xhci::rescan_ports`, skipping ports already owned, tombstoning
+   failed setups so their pool entries and half-configured hardware
+   slots are never reused) plus `try_mount_usb_storage`, shared with
+   the boot-time auto-mount. This is the Parallels workflow the
+   enumeration diagnostics demanded: passthrough attaches a few
+   seconds *after* the boot scan, so - boot, wait a moment, type
+   `mount`.
+5. **`run-usb-multi`'s stick is a real FAT32 image now** (hdiutil,
+   marker file), so QEMU's three-device rig organically mounts from
+   USB (its virtio drive is unmountable FAT16 vvfat) - plus monitor
+   `device_add` hot-plugging for the rescan path.
+
+**Verified:** QEMU - boot auto-mount, `ls`/`cat` of the marker file,
+`write`/`mkdir` + reboot persistence over WRITE(10), the full
+hot-plug-then-`mount` flow, typing-during-I/O, `run-image` virtio
+regression, zero aborts everywhere. **Real Parallels hardware** - the
+full `mount` → INQUIRY → capacity → FAT32 → `ls` chain on the real
+stick, ticks advancing throughout; real-stick testing kept read-only
+by policy (writes proven on QEMU; write to a real stick only with an
+explicit go-ahead). One unreproduced anomaly noted honestly: the very
+first real-hardware run after assigning the stick showed no synthetic
+keystrokes arriving at all (system state indistinguishable from
+healthy in the screenshots); two subsequent full runs, and a
+six-command timeline probe spanning the attach window, were all
+completely clean - most likely the `prlctl send-key-event` stream was
+lost during initial attach turbulence, not a kernel fault.
+
+**Still coarse, worth knowing before building on this:** no BOT error
+recovery (a failed/stalled command fails the operation; the spec's
+Reset Recovery sequence is a documented gap, same posture as the
+interrupt endpoint's); one storage device (first wins); one sector
+per transfer (throughput is a non-goal); no hot-plug *detection* (the
+rescan is user-triggered via `mount`, not event-driven); exFAT sticks
+won't mount (INQUIRY/capacity still prove the transport - reformat
+FAT32 to use one); no unmount.
+
 ## Commands
 
 ```sh
@@ -3933,9 +4007,11 @@ kernel/
   src/gicv3.rs       GICv3 backend (redistributor wake/discovery, ICC_* system-register CPU interface) - confirmed working on QEMU and real Parallels hardware, see "MADT/GICv3" above
   src/timer.rs       ARM generic timer (non-secure EL1 physical timer, PPI 14 / GIC INTID 30), TICK_INTERVAL_MS
   src/loader.rs      reads INIT.CFG + a program off the ESP during boot services, into a 2MB-aligned EL0-accessible region, real ELF64 parsing + R_AARCH64_RELATIVE relocation processing - see "A real relocating loader" above and docs/processes.md; elf_region_size/populate_region split so the same parsing/loading logic is reusable from the runtime spawn path too, see "Dynamic task creation and exec()" above
-  src/syscall.rs     svc syscall dispatch table (print/double/report/try_read_char/putc/get_ticks/fs_list_dir/fs_read_file/fs_mkdir/fs_rmdir/fs_touch/fs_rm/fs_write_file/fs_mv/read_char/spawn/exit/task_state/kill/fg, gap at 5) - confirmed working end to end, see above, "Blocking primitives" above for read_char, and "Dynamic task creation and exec()" above for spawn
+  src/syscall.rs     svc syscall dispatch table (print/double/report/try_read_char/putc/get_ticks/fs_list_dir/fs_read_file/fs_mkdir/fs_rmdir/fs_touch/fs_rm/fs_write_file/fs_mv/read_char/spawn/exit/task_state/kill/fg/wait/mount, gap at 5) - confirmed working end to end, see above, "Blocking primitives" above for read_char, and "Dynamic task creation and exec()" above for spawn
   src/tasks.rs       up to 4 task slots (task 0 = loaded program, task 1 = idle, slots 2-3 spawn/exit-cycled) + the round-robin scheduler over Runnable/Blocked/Unused task state (block_current_and_switch, exit_current_and_switch, on_tick's wake-check, tasks::spawn, allocate_runtime_region/free_runtime_region) - confirmed working, see "Blocking primitives", "Dynamic task creation and exec()", and "Task destruction" above
   src/virtio_mmio.rs virtio-mmio transport: 32-slot device discovery, modern (non-legacy) register layout, addresses confirmed via devicetree dump
+  src/block.rs       BlockDevice enum (Virtio | UsbMsd) - the block-device abstraction fat32.rs sits on, see "USB mass storage" above
+  src/usb_msd.rs     USB mass storage: Bulk-Only Transport + SCSI (INQUIRY/READ CAPACITY/READ(10)/WRITE(10)) over xhci.rs's bulk endpoints - Parallels' first working disk, see "USB mass storage" above
   src/virtio_blk.rs  runtime virtio-blk driver: feature negotiation, one virtqueue, synchronous polling sector reads and writes - phase 3a (reads)/phase 4 (writes), confirmed working, see above
   src/virtio_console.rs  transmit-only virtio-console driver over the same transport - device discovery, feature negotiation, transmitq0 - confirmed working on QEMU; confirmed *not* what Parallels' serial port actually is, see "virtio-console" above
   src/fat32.rs       hand-rolled FAT32 over virtio_blk::Device: MBR, BPB, FAT cluster chains, 8.3-only directory entries, mkdir/rmdir/touch/rm/write_file/mv write support - phase 3b (reads)/phase 4-8 (writes), confirmed working, see above

@@ -7,6 +7,27 @@ what broke, how it was diagnosed), see `CLAUDE.md`; for *how* something
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## USB mass storage - a real disk on real Parallels hardware
+
+The milestone the whole diagnostic arc pointed at: `usb_msd.rs`
+(Bulk-Only Transport + SCSI INQUIRY/READ CAPACITY/READ(10)/WRITE(10))
+over new bulk endpoints in `xhci.rs`, a `BlockDevice` enum decoupling
+`fat32.rs` from virtio-blk, boot-time auto-mount (QEMU) and a `mount`
+command with a runtime port rescan (Parallels passthrough attaches
+seconds after boot). Two real findings along the way: keyboard events
+arriving mid-bulk-transfer must be routed, not dropped (dropping also
+kills the keyboard permanently - the interrupt buffer never reposts),
+and a freshly attached SCSI device reports Unit Attention (INQUIRY is
+exempt; the first READ CAPACITY failed until the standard TEST UNIT
+READY/REQUEST SENSE bring-up loop was added - found by the hot-plug
+test, not spec-reading). Confirmed on QEMU (auto-mount, reads, writes
+with reboot persistence, hot-plug + mount, typing during disk I/O
+losing zero keystrokes) and on real Parallels hardware: `mount` on a
+real Lexar USB 3.x stick produced its real INQUIRY strings, real
+capacity (243,404,800 sectors), a mounted FAT32, and an `ls` of the
+stick's actual contents - the first working disk this kernel has ever
+had on its primary hardware target.
+
 ## `wait()` and reaping - exit statuses become real
 
 The last job-control gap: exit codes went nowhere but a log line.

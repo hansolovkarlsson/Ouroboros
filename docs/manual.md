@@ -93,11 +93,13 @@ absolute path, so the two files must stay together.
 
 What works on real Parallels hardware today: the GOP framebuffer
 console, a real USB keyboard (including Shift and Ctrl chords),
-preemptive multitasking, and the whole shell — **except disk commands
-and `exec`**, because Parallels exposes no storage controller this
-kernel can drive (confirmed by direct diagnosis; see `roadmap.md`'s
-"Disk on real Parallels hardware" — USB mass storage over the existing
-xHCI driver is the open lead).
+preemptive multitasking, the whole shell — **and real disk access via
+a passed-through USB stick** (Parallels exposes no storage controller
+this kernel can drive, but USB mass storage over the xHCI driver
+works: pass a USB 3.x stick through to the VM, boot, wait a few
+seconds for it to attach, and type `mount` — a FAT32-formatted stick
+then serves the full disk-command surface, `exec` included; USB 2.0
+sticks land on the EHCI controller instead and can't be used).
 
 ### Scripted real-hardware testing
 
