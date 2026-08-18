@@ -4043,6 +4043,7 @@ already target `kernel` correctly; building `shell` needs the explicit
 ```
 docs/
   manual.md          the one-stop user manual: prerequisites, building, running on QEMU/Parallels, scripted testing, shell tour, condensed syscall table, writing-a-program essentials - links into the deeper references below
+  tutorial.md        build-an-OS-like-this-from-scratch tutorial: the working path only (no bug narratives), staged from UEFI hello world through PIE userland/disk/multitasking, with code samples drawn from this kernel's confirmed-working source
   architecture.md    reference doc: boot flow, privilege model, memory layout, exceptions, process model, syscall ABI, console
   processes.md       reference doc: process loading/config mechanism, memory model, binary format, writing a replacement program
   shell-commands.md  reference doc: the default shell's builtin commands - syntax, behavior, known limitations

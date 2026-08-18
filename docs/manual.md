@@ -8,7 +8,9 @@ kernel works, [`processes.md`](processes.md) for the userland program
 model, [`shell-commands.md`](shell-commands.md) for the full builtin
 command reference, [`roadmap.md`](roadmap.md) for what's next, and
 `CLAUDE.md` at the repository root for the debugging history behind
-every design decision.
+every design decision. If you want to build an OS like this yourself,
+[`tutorial.md`](tutorial.md) is the staged from-scratch guide —
+the working path only, with code samples from this kernel.
 
 ## Prerequisites
 
