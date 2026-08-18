@@ -76,6 +76,47 @@ pub fn install_fs(fs: fat32::Fs) {
     unsafe { *FS.0.get() = Some(fs) };
 }
 
+/// Mounts the activated USB mass-storage device (if any) as the global
+/// filesystem - shared by the boot-time attempt (`main.rs`, covers
+/// QEMU where the device is present at scan time) and the `MOUNT`
+/// syscall (covers real Parallels, where a passed-through stick
+/// attaches a few seconds after boot - see the enumeration
+/// diagnostics). First-mounted-wins: a no-op if a filesystem (virtio
+/// or a previous USB mount) is already installed. Returns whether a
+/// filesystem is installed after the attempt.
+/// Whether any filesystem is installed - the `MOUNT` syscall's
+/// "already mounted" distinction.
+fn fs_installed() -> bool {
+    unsafe { (*FS.0.get()).is_some() }
+}
+
+pub fn try_mount_usb_storage() -> bool {
+    if fs_installed() {
+        return true;
+    }
+    if !crate::xhci::storage_present() {
+        return false;
+    }
+    let device = match crate::usb_msd::Device::init() {
+        Ok(d) => d,
+        Err(e) => {
+            console::println!("Ouroboros kernel: usb-msd init failed ({e})");
+            return false;
+        }
+    };
+    match fat32::Fs::mount(crate::block::BlockDevice::UsbMsd(device)) {
+        Ok(fs) => {
+            console::println!("Ouroboros kernel: FAT32 mounted from USB storage, disk commands available");
+            install_fs(fs);
+            true
+        }
+        Err(e) => {
+            console::println!("Ouroboros kernel: FAT32 mount failed on USB storage ({e})");
+            false
+        }
+    }
+}
+
 /// Falls back to the USB keyboard (xhci.rs) when the byte-stream console
 /// has nothing waiting - no shell/ABI changes needed to wire keyboard
 /// input in, since both sources feed the same syscalls (`TRY_READ_CHAR`,
@@ -648,6 +689,19 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
             // WaitReason::TaskExit's poll). Same pass-through-unmodified
             // return contract as READ_CHAR's blocking path.
             unsafe { tasks::block_current_and_switch(frame, tasks::WaitReason::TaskExit(i)) }
+        }
+        syscall_abi::MOUNT => {
+            let already = fs_installed();
+            // Rescan first (devices that attached after the boot scan -
+            // the Parallels case), then try the mount. Runs with IRQs
+            // masked for the duration like every SVC - ticks pause for
+            // the sub-second setup, an accepted cost.
+            crate::xhci::rescan_ports();
+            if try_mount_usb_storage() {
+                if already { syscall_abi::MOUNT_ALREADY } else { 0 }
+            } else {
+                syscall_abi::MOUNT_NO_DEVICE
+            }
         }
         syscall_abi::FG => {
             let i = arg0 as usize;

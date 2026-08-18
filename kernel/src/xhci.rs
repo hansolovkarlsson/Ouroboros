@@ -207,6 +207,8 @@ const IR_ERDP: u64 = 0x18;
 
 const EP_TYPE_CONTROL: u32 = 4;
 const EP_TYPE_INTERRUPT_IN: u32 = 7;
+const EP_TYPE_BULK_OUT: u32 = 2;
+const EP_TYPE_BULK_IN: u32 = 6;
 
 const MAX_SLOTS_ENABLED: usize = 8;
 const MAX_SCRATCHPAD_BUFFERS: usize = 8;
@@ -342,6 +344,11 @@ static EP0_RINGS: [Aligned64<[Trb; EP0_RING_SIZE]>; MAX_DEVICES] = [
 // polls the device on its own schedule and DMAs new data straight into
 // a buffer this driver posted ahead of time.
 static INT_RING: Aligned64<[Trb; INT_RING_SIZE]> = Aligned64(UnsafeCell::new([[0; 4]; INT_RING_SIZE]));
+// Transfer rings for the mass-storage device's bulk endpoint pair
+// (usb_msd.rs drives them through `bulk_transfer` below) - same
+// 16-entry shape as INT_RING, one ring per endpoint per the xHCI model.
+static BULK_IN_RING: Aligned64<[Trb; INT_RING_SIZE]> = Aligned64(UnsafeCell::new([[0; 4]; INT_RING_SIZE]));
+static BULK_OUT_RING: Aligned64<[Trb; INT_RING_SIZE]> = Aligned64(UnsafeCell::new([[0; 4]; INT_RING_SIZE]));
 static EVENT_RING: Aligned64<[Trb; EVENT_RING_SIZE]> = Aligned64(UnsafeCell::new([[0; 4]; EVENT_RING_SIZE]));
 
 #[repr(C)]
@@ -486,6 +493,12 @@ fn keycode_to_ascii(keycode: u8, shift: bool, ctrl: bool) -> Option<u8> {
 struct Xhci {
     db_base: u64,
     ir0_base: u64,
+    /// Kept for runtime port rescans (`rescan_ports`) - the boot scan's
+    /// locals weren't enough once "scan again later" became a real
+    /// operation (Parallels attaches passthrough USB seconds after the
+    /// boot scan runs).
+    op_base: u64,
+    max_ports: u32,
     /// 8 or 16, from HCCPARAMS1.CSZ - see `CTX_DWORDS_MAX`'s doc comment.
     ctx_dwords: usize,
     cmd_enqueue: usize,
@@ -494,6 +507,22 @@ struct Xhci {
     evt_cycle: bool,
     slots: [Option<DeviceSlot>; MAX_DEVICES],
     keyboard: Option<KeyboardState>,
+    storage: Option<StorageState>,
+}
+
+/// The activated mass-storage device's bulk endpoint pair - filled in
+/// by `activate_storage`, driven by `usb_msd.rs` through
+/// [`Xhci::bulk_transfer`]. At most one, same first-wins policy as the
+/// keyboard.
+struct StorageState {
+    /// Pool index into `Xhci::slots`.
+    slot: usize,
+    in_dci: u32,
+    out_dci: u32,
+    in_enqueue: usize,
+    in_cycle: bool,
+    out_enqueue: usize,
+    out_cycle: bool,
 }
 
 /// One concurrently-addressed device: its root port, speed, the slot ID
@@ -526,11 +555,12 @@ struct KeyboardState {
     /// Newly-pressed keycodes from the most recently processed report,
     /// translated to ASCII, beyond the first one already returned from
     /// that report - see `poll_key`'s doc comment for the real,
-    /// confirmed dropped-keystroke bug this fixes. Sized 5 (not 6):
-    /// `buf[2..8]` holds at most 6 simultaneous keycodes, and the first
-    /// qualifying one is always returned immediately rather than queued,
-    /// so at most 5 can ever need to wait here.
-    pending: [u8; 5],
+    /// confirmed dropped-keystroke bug this fixes. Sized 6: `buf[2..8]`
+    /// holds at most 6 simultaneous keycodes, and - since the
+    /// mass-storage milestone - a report can be processed from *inside*
+    /// a bulk-transfer wait (see `wait_transfer_event`), where there's
+    /// no caller to hand the first key to, so all 6 may need to queue.
+    pending: [u8; 6],
     pending_len: usize,
 }
 
@@ -705,12 +735,29 @@ impl Xhci {
                 continue;
             }
             let event_slot = trb[3] >> 24;
+            let event_dci = (trb[3] >> 16) & 0x1f;
+            let code = trb[2] >> 24;
             if event_slot != expected_slot_id {
-                console::println!("Ouroboros kernel: xhci: transfer event for slot {event_slot} while waiting on slot {expected_slot_id}, skipping");
+                // A keystroke arriving mid-bulk-transfer lands here: its
+                // event must be *routed*, not dropped - dropping it
+                // would also leave the interrupt buffer unreposted, a
+                // permanently dead keyboard the first time someone
+                // typed during disk I/O. Anything else is genuinely
+                // unexpected and logged.
+                let kb_ids = self.keyboard.as_ref().and_then(|kb| {
+                    self.slots[kb.slot].as_ref().map(|s| (s.slot_id, kb.int_dci))
+                });
+                if kb_ids == Some((event_slot, event_dci)) {
+                    self.process_keyboard_report(code);
+                } else {
+                    console::println!("Ouroboros kernel: xhci: transfer event for slot {event_slot} while waiting on slot {expected_slot_id}, skipping");
+                }
                 continue;
             }
-            let code = trb[2] >> 24;
-            if code != COMPLETION_SUCCESS {
+            // Short Packet is success with a residue (normal for a
+            // device-terminated IN transfer) - the residue lives in the
+            // returned TRB's word 2 if a caller ever needs it.
+            if code != COMPLETION_SUCCESS && code != COMPLETION_SHORT_PACKET {
                 return Err(Error::TransferFailed(code));
             }
             return Ok(trb);
@@ -863,14 +910,8 @@ impl Xhci {
     fn poll_key(&mut self) -> Option<u8> {
         // Drain any keycodes still queued from the last processed report
         // before touching the event ring at all.
-        {
-            let kb = self.keyboard.as_mut()?;
-            if kb.pending_len > 0 {
-                let ascii = kb.pending[0];
-                kb.pending.copy_within(1..kb.pending_len, 0);
-                kb.pending_len -= 1;
-                return Some(ascii);
-            }
+        if let Some(k) = self.pop_pending_key() {
+            return Some(k);
         }
         let (kb_slot_id, kb_dci) = {
             let kb = self.keyboard.as_ref()?;
@@ -890,9 +931,10 @@ impl Xhci {
         // With more than one device concurrently addressed, a transfer
         // event is only a keyboard report if its slot ID (word 3 bits
         // 31:24) and endpoint DCI (bits 20:16) both match the keyboard's
-        // - routing, not luck. Nothing else generates transfer events
-        // today (no other endpoint is ever armed), so a mismatch is
-        // logged as genuinely unexpected rather than silently dropped.
+        // - routing, not luck. (Bulk-transfer completions never appear
+        // here in practice - storage commands consume their own events
+        // synchronously inside wait_transfer_event - so a mismatch is
+        // still logged as genuinely unexpected.)
         let event_slot = event[3] >> 24;
         let event_dci = (event[3] >> 16) & 0x1f;
         if event_slot != kb_slot_id || event_dci != kb_dci {
@@ -901,24 +943,91 @@ impl Xhci {
         }
 
         let code = event[2] >> 24;
+        self.process_keyboard_report(code);
+        self.pop_pending_key()
+    }
+
+    /// One synchronous bulk transfer for the storage device: a single
+    /// Normal TRB (IOC set) on the IN or OUT ring, doorbell, then wait
+    /// for this slot's transfer event - `usb_msd.rs`'s only way of
+    /// moving bytes. A keystroke arriving mid-transfer is routed to the
+    /// keyboard handler by `wait_transfer_event`, not lost. Short
+    /// Packet completions count as success (a device-terminated IN
+    /// transfer is normal - e.g. a 36-byte INQUIRY answered with less).
+    fn bulk_transfer(&mut self, dir_in: bool, buf_addr: u64, len: u32) -> Result<(), Error> {
+        let Some(st) = self.storage.as_mut() else {
+            return Err(Error::NoPortConnected);
+        };
+        let slot_idx = st.slot;
+        let (dci, ring_ptr, ring_len) = if dir_in {
+            (st.in_dci, BULK_IN_RING.0.get().cast::<Trb>(), INT_RING_SIZE)
+        } else {
+            (st.out_dci, BULK_OUT_RING.0.get().cast::<Trb>(), INT_RING_SIZE)
+        };
+        let (enqueue, cycle) = if dir_in {
+            (&mut st.in_enqueue, &mut st.in_cycle)
+        } else {
+            (&mut st.out_enqueue, &mut st.out_cycle)
+        };
+        unsafe {
+            Self::ring_push(
+                ring_ptr,
+                ring_len,
+                enqueue,
+                cycle,
+                [buf_addr as u32, (buf_addr >> 32) as u32, len, (1 << 5) | (TRB_TYPE_NORMAL << 10)], // IOC
+            );
+        }
+        let Some(slot_id) = self.slots[slot_idx].as_ref().map(|s| s.slot_id) else {
+            return Err(Error::NoPortConnected);
+        };
+        unsafe {
+            core::arch::asm!("dsb sy", options(nostack, preserves_flags));
+            write32(self.db_base + (slot_id as u64) * 4, dci);
+        }
+        self.wait_transfer_event(slot_id).map(|_| ())
+    }
+
+    /// Pops the oldest queued keycode, if any.
+    fn pop_pending_key(&mut self) -> Option<u8> {
+        let kb = self.keyboard.as_mut()?;
+        if kb.pending_len == 0 {
+            return None;
+        }
+        let ascii = kb.pending[0];
+        kb.pending.copy_within(1..kb.pending_len, 0);
+        kb.pending_len -= 1;
+        Some(ascii)
+    }
+
+    /// The keyboard-report half of the old `poll_key`, factored out so
+    /// `wait_transfer_event` can route a keyboard event arriving *during
+    /// a bulk transfer* through the exact same logic instead of dropping
+    /// it (which would also have left the interrupt buffer unreposted -
+    /// a permanently dead keyboard the first time someone typed during
+    /// disk I/O). Handles the completion code (transition-logged errors,
+    /// re-arm), reads the report, re-arms the endpoint, and queues every
+    /// newly-pressed mapped key into `pending` - callers pop from there.
+    fn process_keyboard_report(&mut self, code: u32) {
         if code != COMPLETION_SUCCESS && code != COMPLETION_SHORT_PACKET {
             // Logged only on the ok->error transition - see `had_error`'s
             // doc comment for why (an unconditional per-event version of
             // this flooded the screen during earlier debugging).
-            let newly_failed = {
-                let kb = self.keyboard.as_mut()?;
-                let newly = !kb.had_error;
-                kb.had_error = true;
-                newly
+            let newly_failed = match self.keyboard.as_mut() {
+                Some(kb) => {
+                    let newly = !kb.had_error;
+                    kb.had_error = true;
+                    newly
+                }
+                None => false,
             };
             if newly_failed {
                 console::println!("Ouroboros kernel: xhci: interrupt endpoint error (completion code {code})");
             }
             self.repost_interrupt_buffer(); // keep the ring armed even after an error
-            return None;
+            return;
         }
-        {
-            let kb = self.keyboard.as_mut()?;
+        if let Some(kb) = self.keyboard.as_mut() {
             if kb.had_error {
                 console::println!("Ouroboros kernel: xhci: interrupt endpoint recovered");
                 kb.had_error = false;
@@ -932,20 +1041,19 @@ impl Xhci {
         }
 
         // Re-arm before doing anything else with the data, so a slow
-        // shell command in between doesn't leave the endpoint unable to
+        // consumer in between doesn't leave the endpoint unable to
         // receive the next report.
         self.repost_interrupt_buffer();
 
-        let kb = self.keyboard.as_mut()?;
+        let Some(kb) = self.keyboard.as_mut() else { return };
         if buf == kb.last_report {
-            return None;
+            return;
         }
         let previous = kb.last_report;
         kb.last_report = buf;
 
         let shift = buf[0] & (MOD_LSHIFT | MOD_RSHIFT) != 0;
         let ctrl = buf[0] & (MOD_LCTRL | MOD_RCTRL) != 0;
-        let mut result = None;
         for &keycode in &buf[2..8] {
             if keycode == 0 || keycode < 4 {
                 continue; // no key, or error rollover (1-3)
@@ -956,16 +1064,13 @@ impl Xhci {
             let Some(ascii) = keycode_to_ascii(keycode, shift, ctrl) else {
                 continue;
             };
-            if result.is_none() {
-                result = Some(ascii);
-            } else {
-                // Can't overflow: at most 6 keycodes total in buf[2..8],
-                // one already consumed by `result`, `pending` sized 5.
+            // Can't overflow: at most 6 keycodes total in buf[2..8],
+            // pending sized 6 and drained before each event pop.
+            if kb.pending_len < kb.pending.len() {
                 kb.pending[kb.pending_len] = ascii;
                 kb.pending_len += 1;
             }
         }
-        result
     }
 }
 
@@ -1077,6 +1182,8 @@ unsafe fn init_inner(bar_base: u64) -> Result<(), Error> {
     let mut xhci = Xhci {
         db_base,
         ir0_base,
+        op_base,
+        max_ports,
         ctx_dwords,
         cmd_enqueue: 0,
         cmd_cycle: true,
@@ -1084,6 +1191,7 @@ unsafe fn init_inner(bar_base: u64) -> Result<(), Error> {
         evt_cycle: true,
         slots: [None, None, None, None],
         keyboard: None,
+        storage: None,
     };
 
     // Port scan: wait for at least one port to report a connected device.
@@ -1120,6 +1228,7 @@ unsafe fn init_inner(bar_base: u64) -> Result<(), Error> {
     // ordering constraint behind that.
     let mut next_idx = 0usize;
     let mut keyboard_candidate: Option<(usize, u8, u16, u8)> = None;
+    let mut storage_candidate: Option<(usize, u8, u8)> = None;
     let mut last_error: Option<Error> = None;
     for port in 1..=max_ports {
         let portsc_addr = op_base + OP_PORTSC_BASE + ((port - 1) as u64) * 0x10;
@@ -1131,14 +1240,25 @@ unsafe fn init_inner(bar_base: u64) -> Result<(), Error> {
             continue;
         }
         match unsafe { setup_device_on_port(&mut xhci, dcbaa, next_idx, port, portsc_addr) } {
-            Ok(candidate) => {
-                if let Some((ep, mps, bi)) = candidate {
-                    if keyboard_candidate.is_none() {
-                        console::println!("Ouroboros kernel: xhci: port {port}: boot-protocol keyboard - activating after the scan");
-                        keyboard_candidate = Some((next_idx, ep, mps, bi));
-                    } else {
-                        console::println!("Ouroboros kernel: xhci: port {port}: a second keyboard - left addressed, not driven (first one wins)");
+            Ok(class) => {
+                match class {
+                    DeviceClass::Keyboard(ep, mps, bi) => {
+                        if keyboard_candidate.is_none() {
+                            console::println!("Ouroboros kernel: xhci: port {port}: boot-protocol keyboard - activating after the scan");
+                            keyboard_candidate = Some((next_idx, ep, mps, bi));
+                        } else {
+                            console::println!("Ouroboros kernel: xhci: port {port}: a second keyboard - left addressed, not driven (first one wins)");
+                        }
                     }
+                    DeviceClass::Storage(ep_in, ep_out) => {
+                        if storage_candidate.is_none() {
+                            console::println!("Ouroboros kernel: xhci: port {port}: USB mass storage - activating after the scan");
+                            storage_candidate = Some((next_idx, ep_in, ep_out));
+                        } else {
+                            console::println!("Ouroboros kernel: xhci: port {port}: a second storage device - left addressed, not driven (first one wins)");
+                        }
+                    }
+                    DeviceClass::Other => {}
                 }
                 next_idx += 1;
             }
@@ -1158,12 +1278,111 @@ unsafe fn init_inner(bar_base: u64) -> Result<(), Error> {
         }
     }
 
-    let Some((kb_idx, ep, mps, bi)) = keyboard_candidate else {
-        return Err(last_error.unwrap_or(Error::NoKeyboardFound));
-    };
-    unsafe { activate_keyboard(&mut xhci, kb_idx, ep, mps, bi)? };
+    // Storage first, keyboard last: the keyboard's activation *arms* an
+    // endpoint that generates unsolicited events, so it stays the final
+    // step (see activate_keyboard's doc comment); storage's bulk
+    // endpoints only ever transfer on command, safe to configure here.
+    // Storage activation failure is non-fatal to the keyboard.
+    if let Some((st_idx, ep_in, ep_out)) = storage_candidate {
+        if let Err(e) = unsafe { activate_storage(&mut xhci, st_idx, ep_in, ep_out) } {
+            console::println!("Ouroboros kernel: xhci: storage activation failed ({e}) - continuing without it");
+        }
+    }
 
-    unsafe { *XHCI.0.get() = Some(xhci) };
+    let kb_result = match keyboard_candidate {
+        Some((kb_idx, ep, mps, bi)) => unsafe { activate_keyboard(&mut xhci, kb_idx, ep, mps, bi) },
+        None => Err(last_error.unwrap_or(Error::NoKeyboardFound)),
+    };
+
+    // Install the controller state if *anything* usable came out of the
+    // scan - a storage-only controller (no keyboard) must not lose its
+    // activated device just because init's keyboard-shaped result is an
+    // error.
+    if kb_result.is_ok() || xhci.storage.is_some() {
+        unsafe { *XHCI.0.get() = Some(xhci) };
+    }
+    kb_result
+}
+
+/// Activates the mass-storage device the scan found: `SET_CONFIGURATION`
+/// then one Configure Endpoint command adding *both* bulk endpoint
+/// contexts, with fresh transfer rings. Unlike the keyboard's interrupt
+/// endpoint, bulk endpoints only transfer on command - nothing is armed
+/// here, so this can safely run before the keyboard's activation.
+///
+/// # Safety
+/// Same requirements as `init_inner`.
+unsafe fn activate_storage(xhci: &mut Xhci, idx: usize, ep_in: u8, ep_out: u8) -> Result<(), Error> {
+    let Some((port, speed, slot_id)) = xhci.slots[idx].as_ref().map(|s| (s.port, s.speed, s.slot_id)) else {
+        return Err(Error::NoPortConnected); // slot vanished - can't happen through the scan's own flow
+    };
+
+    xhci.control_transfer(idx, 0x00, 0x09, 1, 0, &mut [], false)?; // SET_CONFIGURATION(1)
+
+    let in_dci = ((ep_in & 0x0f) as u32) * 2 + 1;
+    let out_dci = ((ep_out & 0x0f) as u32) * 2;
+    let max_dci = in_dci.max(out_dci);
+    // Bulk max packet size is fixed by speed: 512 at High Speed, 1024 at
+    // SuperSpeed(+) - both platforms' storage devices enumerate
+    // SuperSpeed (confirmed by the enumeration checks), High Speed kept
+    // for completeness. MaxBurst stays 0 (no SuperSpeed endpoint
+    // companion parsing - a burst of 1 is always legal for the host to
+    // declare).
+    let max_packet: u32 = match speed {
+        3 => 512,
+        _ => 1024,
+    };
+
+    {
+        let ctx_dwords = xhci.ctx_dwords;
+        let ctx = unsafe { &mut *INPUT_CONTEXT.0.get() };
+        ctx.fill(0);
+        ctx[1] = (1 << 0) | (1 << in_dci) | (1 << out_dci); // A0 | A_in | A_out
+
+        let slot = &mut ctx[ctx_dwords..2 * ctx_dwords];
+        slot[0] = (speed << 20) | (max_dci << 27); // Route String=0, Speed, Context Entries
+        slot[1] = port << 16;
+
+        for (dci, ring_addr, ep_type) in [
+            (in_dci, BULK_IN_RING.0.get() as u64, EP_TYPE_BULK_IN),
+            (out_dci, BULK_OUT_RING.0.get() as u64, EP_TYPE_BULK_OUT),
+        ] {
+            let off = ctx_dwords * (1 + dci as usize);
+            let ep = &mut ctx[off..off + ctx_dwords];
+            ep[1] = (3 << 1) | (ep_type << 3) | (max_packet << 16); // CErr=3
+            ep[2] = (ring_addr as u32) | 1; // TR Dequeue Pointer | DCS=1
+            ep[3] = (ring_addr >> 32) as u32;
+            ep[4] = 512; // Average TRB Length - one sector, the only transfer size used
+        }
+    }
+
+    for ring_cell in [&BULK_IN_RING, &BULK_OUT_RING] {
+        let ring = unsafe { &mut *ring_cell.0.get() };
+        let ring_addr = ring_cell.0.get() as u64;
+        *ring = [[0; 4]; INT_RING_SIZE];
+        ring[INT_RING_SIZE - 1] = [ring_addr as u32, (ring_addr >> 32) as u32, 0, (1 << 1) | (TRB_TYPE_LINK << 10) | 1];
+    }
+
+    let cmd_ptr = xhci.push_command([
+        INPUT_CONTEXT.0.get() as u32,
+        (INPUT_CONTEXT.0.get() as u64 >> 32) as u32,
+        0,
+        (TRB_TYPE_CONFIGURE_ENDPOINT_CMD << 10) | (slot_id << 24),
+    ]);
+    xhci.wait_command_completion(cmd_ptr)?;
+
+    xhci.storage = Some(StorageState {
+        slot: idx,
+        in_dci,
+        out_dci,
+        in_enqueue: 0,
+        in_cycle: true,
+        out_enqueue: 0,
+        out_cycle: true,
+    });
+    console::println!(
+        "Ouroboros kernel: xhci: storage bulk endpoints configured (IN {ep_in:#04x} DCI {in_dci}, OUT {ep_out:#04x} DCI {out_dci})"
+    );
     Ok(())
 }
 
@@ -1188,13 +1407,26 @@ unsafe fn init_inner(bar_base: u64) -> Result<(), Error> {
 /// # Safety
 /// Same requirements as `init_inner` - must run after the controller has
 /// been reset and started.
+/// What the scan found a device to be - decided from its Configuration
+/// descriptor after Address Device.
+enum DeviceClass {
+    /// A boot-protocol keyboard: its interrupt IN endpoint's
+    /// `(bEndpointAddress, wMaxPacketSize, bInterval)`.
+    Keyboard(u8, u16, u8),
+    /// A mass-storage (BOT/SCSI) device: its bulk `(IN, OUT)` endpoint
+    /// addresses.
+    Storage(u8, u8),
+    /// Anything else - left addressed, no driver.
+    Other,
+}
+
 unsafe fn setup_device_on_port(
     xhci: &mut Xhci,
     dcbaa: &mut [u64; MAX_SLOTS_ENABLED + 1],
     idx: usize,
     port: u32,
     portsc_addr: u64,
-) -> Result<Option<(u8, u16, u8)>, Error> {
+) -> Result<DeviceClass, Error> {
     console::println!("Ouroboros kernel: xhci: device connected on port {port}");
 
     // Reset the port, then clear the resulting Port Reset Change bit.
@@ -1298,14 +1530,65 @@ unsafe fn setup_device_on_port(
 
     log_interfaces(port, &config_desc);
 
-    let candidate = find_keyboard_interrupt_endpoint(&config_desc);
-    if candidate.is_none() {
-        // A real device, just not a boot-protocol keyboard - it stays
-        // addressed in its slot, ready for whenever a driver for its
-        // class exists (the whole point of the multi-device scan).
-        console::println!("Ouroboros kernel: xhci: port {port} device left addressed (no driver for this device class yet)");
+    if let Some((ep, mps, interval)) = find_keyboard_interrupt_endpoint(&config_desc) {
+        return Ok(DeviceClass::Keyboard(ep, mps, interval));
     }
-    Ok(candidate)
+    if let Some((ep_in, ep_out)) = find_msd_bulk_endpoints(&config_desc) {
+        return Ok(DeviceClass::Storage(ep_in, ep_out));
+    }
+    // A real device, just neither of the two classes this kernel
+    // drives - it stays addressed in its slot, ready for whenever a
+    // driver exists (the whole point of the multi-device scan).
+    console::println!("Ouroboros kernel: xhci: port {port} device left addressed (no driver for this device class yet)");
+    Ok(DeviceClass::Other)
+}
+
+/// Walks a raw Configuration descriptor set for a mass-storage
+/// interface (`bInterfaceClass=0x08`, subclass `0x06` SCSI-transparent,
+/// protocol `0x50` Bulk-Only Transport - exactly what both QEMU's
+/// `usb-storage` and the real Parallels-passed-through stick present,
+/// confirmed by the enumeration checks) and returns its bulk
+/// `(IN, OUT)` endpoint addresses. Same bounded-walk shape as
+/// [`find_keyboard_interrupt_endpoint`]/[`log_interfaces`].
+fn find_msd_bulk_endpoints(desc: &[u8]) -> Option<(u8, u8)> {
+    const DESCRIPTOR_TYPE_INTERFACE: u8 = 4;
+    const DESCRIPTOR_TYPE_ENDPOINT: u8 = 5;
+    const CLASS_MASS_STORAGE: u8 = 0x08;
+    const SUBCLASS_SCSI: u8 = 0x06;
+    const PROTOCOL_BOT: u8 = 0x50;
+    const ATTR_TYPE_BULK: u8 = 0x02;
+    const DIR_IN: u8 = 0x80;
+
+    let mut i = 0usize;
+    let mut in_msd_interface = false;
+    let mut ep_in: Option<u8> = None;
+    let mut ep_out: Option<u8> = None;
+    while i + 2 <= desc.len() {
+        let b_length = desc[i] as usize;
+        if b_length == 0 || i + b_length > desc.len() {
+            break;
+        }
+        let b_type = desc[i + 1];
+        if b_type == DESCRIPTOR_TYPE_INTERFACE && b_length >= 9 {
+            in_msd_interface = desc[i + 5] == CLASS_MASS_STORAGE
+                && desc[i + 6] == SUBCLASS_SCSI
+                && desc[i + 7] == PROTOCOL_BOT;
+        } else if b_type == DESCRIPTOR_TYPE_ENDPOINT && b_length >= 7 && in_msd_interface {
+            let addr = desc[i + 2];
+            if desc[i + 3] & 0x03 == ATTR_TYPE_BULK {
+                if addr & DIR_IN != 0 {
+                    ep_in.get_or_insert(addr);
+                } else {
+                    ep_out.get_or_insert(addr);
+                }
+            }
+        }
+        i += b_length;
+    }
+    match (ep_in, ep_out) {
+        (Some(i), Some(o)) => Some((i, o)),
+        _ => None,
+    }
 }
 
 /// Activates the keyboard the scan found: `SET_CONFIGURATION` +
@@ -1363,7 +1646,7 @@ unsafe fn activate_keyboard(
         int_cycle: true,
         last_report: [0; 8],
         had_error: false,
-        pending: [0; 5],
+        pending: [0; 6],
         pending_len: 0,
     });
     console::println!(
@@ -1547,4 +1830,73 @@ unsafe fn poll_until(mut cond: impl FnMut() -> bool) -> bool {
 /// wire this in.
 pub fn poll_key() -> Option<u8> {
     unsafe { (*XHCI.0.get()).as_mut() }.and_then(Xhci::poll_key)
+}
+
+/// Whether an activated mass-storage device exists - `usb_msd.rs`'s
+/// gate, and `main.rs`/`syscall.rs`'s "is there anything to mount".
+pub(crate) fn storage_present() -> bool {
+    unsafe { (*XHCI.0.get()).as_ref() }.is_some_and(|x| x.storage.is_some())
+}
+
+/// One synchronous bulk transfer on the storage device's IN (`dir_in`)
+/// or OUT ring - see [`Xhci::bulk_transfer`]. `usb_msd.rs`'s transport.
+pub(crate) fn storage_bulk(dir_in: bool, buf_addr: u64, len: u32) -> Result<(), Error> {
+    match unsafe { (*XHCI.0.get()).as_mut() } {
+        Some(x) => x.bulk_transfer(dir_in, buf_addr, len),
+        None => Err(Error::NoPortConnected),
+    }
+}
+
+/// Runtime port rescan - the `mount` syscall's first half, for devices
+/// that attached *after* the boot scan (real Parallels passes USB
+/// through a few seconds post-boot, confirmed by the enumeration
+/// diagnostics). Walks every connected port not already bound to a
+/// pool slot, sets the device up exactly like the boot scan
+/// (`setup_device_on_port`), and activates the first mass-storage
+/// device found if none is active yet. Keyboards found here are *not*
+/// activated (the boot keyboard, if any, stays the one driven -
+/// runtime keyboard switchover is out of scope); other classes are
+/// left addressed as usual.
+pub(crate) fn rescan_ports() {
+    let Some(x) = (unsafe { (*XHCI.0.get()).as_mut() }) else {
+        return;
+    };
+    let dcbaa = unsafe { &mut *DCBAA.0.get() };
+    for port in 1..=x.max_ports {
+        let portsc_addr = x.op_base + OP_PORTSC_BASE + ((port - 1) as u64) * 0x10;
+        if unsafe { read32(portsc_addr) } & PORTSC_CCS == 0 {
+            continue;
+        }
+        if x.slots.iter().flatten().any(|s| s.port == port) {
+            continue; // already owned by the boot scan or a prior rescan
+        }
+        let Some(idx) = x.slots.iter().position(|s| s.is_none()) else {
+            console::println!("Ouroboros kernel: xhci: rescan: device pool full, skipping port {port}");
+            break;
+        };
+        match unsafe { setup_device_on_port(x, dcbaa, idx, port, portsc_addr) } {
+            Ok(DeviceClass::Storage(ep_in, ep_out)) if x.storage.is_none() => {
+                console::println!("Ouroboros kernel: xhci: rescan: port {port}: USB mass storage - activating");
+                if let Err(e) = unsafe { activate_storage(x, idx, ep_in, ep_out) } {
+                    console::println!("Ouroboros kernel: xhci: rescan: storage activation failed ({e})");
+                }
+            }
+            Ok(DeviceClass::Keyboard(..)) => {
+                console::println!("Ouroboros kernel: xhci: rescan: port {port}: a keyboard - left addressed (rescan only drives storage)");
+            }
+            Ok(_) => {}
+            Err(e) => {
+                console::println!("Ouroboros kernel: xhci: rescan: port {port} setup failed ({e})");
+                // Tombstone the pool entry instead of clearing it: the
+                // failed setup may have bound this entry's Output
+                // Device Context into hardware's DCBAA for an enabled
+                // slot (the same reuse hazard the boot scan handles by
+                // sacrificing entries), and the port must read as
+                // "owned" so the next rescan doesn't retry into a
+                // half-configured device. slot_id 0 is never a real
+                // hardware slot, so nothing can ever ring its doorbell.
+                x.slots[idx] = Some(DeviceSlot { port, speed: 0, slot_id: 0, ep0_enqueue: 0, ep0_cycle: true });
+            }
+        }
+    }
 }

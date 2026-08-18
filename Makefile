@@ -169,8 +169,19 @@ run-usb-kbd: esp
 # show up in the boot log as a recognized-but-not-driven mass storage
 # interface (class 0x08); the keyboard must still type normally via the
 # monitor's `sendkey`.
-run-usb-multi: esp
-	@[ -f usbstick.img ] || dd if=/dev/zero of=usbstick.img bs=1m count=8 2>/dev/null
+# A real FAT32 image for the USB stick (not the old zeroed scratch file)
+# so the mass-storage driver has something to actually mount - built the
+# same hdiutil way as esp.img, with a marker file to ls/cat. 64MB: small
+# hdiutil FAT32 requests can silently produce FAT16 (same class of
+# surprise as make run's vvfat - see fat32.rs's module doc comment).
+usbstick.img:
+	rm -rf usbstick-src && mkdir usbstick-src
+	printf 'hello from the USB stick\n' > usbstick-src/USBTEST.TXT
+	hdiutil create -size 64m -fs FAT32 -volname USBSTICK -srcfolder usbstick-src -format UDTO -ov usbstick.cdr
+	mv usbstick.cdr usbstick.img
+	rm -rf usbstick-src
+
+run-usb-multi: esp usbstick.img
 	qemu-system-aarch64 \
 		-machine virt \
 		-cpu cortex-a72 \
@@ -282,4 +293,4 @@ test-parallels:
 
 clean:
 	cargo clean
-	rm -rf $(ESP_DIR) $(ESP_DIR).img $(ESP_DIR).dmg $(ESP_DIR).hdd vcon.log qemu-monitor.sock usbstick.img
+	rm -rf $(ESP_DIR) $(ESP_DIR).img $(ESP_DIR).dmg $(ESP_DIR).hdd vcon.log qemu-monitor.sock usbstick.img usbstick.cdr

@@ -4,6 +4,7 @@
 extern crate alloc;
 
 mod acpi;
+mod block;
 mod console;
 mod devicetree;
 mod exceptions;
@@ -22,6 +23,7 @@ mod syscall;
 mod tasks;
 mod timer;
 mod uart;
+mod usb_msd;
 mod uart16550;
 mod virtio_blk;
 mod virtio_console;
@@ -402,6 +404,15 @@ fn main() -> Status {
         console::println!("Ouroboros kernel: skipping virtio-blk (unconfirmed-safe virtio-mmio scan on this platform) - disk commands won't work this boot");
     }
 
+    // Second disk path: USB mass storage over the xHCI driver, if the
+    // multi-device scan activated one and nothing else mounted
+    // (first-mounted-wins - virtio stays the QEMU dev loop's primary).
+    // On real Parallels hardware the passed-through stick usually
+    // attaches a few seconds *after* this point (confirmed by the
+    // enumeration diagnostics), so this boot-time attempt mostly serves
+    // QEMU; the shell's `mount` command covers the late-attach case.
+    syscall::try_mount_usb_storage();
+
     // GIC/timer setup - gated on `gic_info` being `Some` (real MADT
     // discovery, `madt.rs`), not the console-discovery heuristic this used to share
     // with virtio-mmio above. The old shared gate existed because real
@@ -600,7 +611,7 @@ fn init_storage() {
         return;
     }
 
-    match fat32::Fs::mount(device) {
+    match fat32::Fs::mount(block::BlockDevice::Virtio(device)) {
         Ok(fs) => {
             console::println!("Ouroboros kernel: FAT32 mounted, disk commands available");
             syscall::install_fs(fs);

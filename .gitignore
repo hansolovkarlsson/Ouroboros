@@ -11,3 +11,5 @@
 .DS_Store
 /usbstick.img
 /qemu-monitor.sock
+/usbstick.cdr
+/usbstick-src/

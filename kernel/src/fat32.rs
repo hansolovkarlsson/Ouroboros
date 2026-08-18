@@ -1,5 +1,6 @@
-//! Minimal read-only FAT32 reader over `virtio_blk::Device`. Phase 3b of
-//! `docs/CHANGELOG.md`.
+//! Minimal FAT32 driver over [`BlockDevice`] (`block.rs` - virtio-blk
+//! or USB mass storage, transport-agnostic since the mass-storage
+//! milestone). Phase 3b of `docs/CHANGELOG.md` originally.
 //!
 //! ## Hand-rolled, not a crate - a real constraint, not just precedent
 //!
@@ -37,7 +38,7 @@
 //! against `make run-image`, never plain `make run` - see the Makefile's
 //! `run-image` target for the full explanation.
 
-use crate::virtio_blk;
+use crate::block::{self, BlockDevice};
 
 const SECTOR_SIZE: usize = 512;
 const DIR_ENTRY_SIZE: usize = 32;
@@ -55,7 +56,7 @@ pub enum Error {
     NoFat32Partition,
     NotFat32,
     UnsupportedSectorSize(u16),
-    Io(virtio_blk::Error),
+    Io(block::Error),
     NotFound,
     NotAFile,
     NotADirectory,
@@ -66,8 +67,8 @@ pub enum Error {
     DiskFull,
 }
 
-impl From<virtio_blk::Error> for Error {
-    fn from(e: virtio_blk::Error) -> Self {
+impl From<block::Error> for Error {
+    fn from(e: block::Error) -> Self {
         Error::Io(e)
     }
 }
@@ -147,7 +148,7 @@ impl DirEntry {
 }
 
 pub struct Fs {
-    device: virtio_blk::Device,
+    device: BlockDevice,
     sectors_per_cluster: u32,
     fat_start_lba: u32,
     data_start_lba: u32,
@@ -172,7 +173,7 @@ impl Fs {
     /// `device` must already be initialized (`Device::init` called) -
     /// every `read_sector` call in this module relies on that, checked
     /// once here rather than at each call site.
-    pub fn mount(mut device: virtio_blk::Device) -> Result<Self, Error> {
+    pub fn mount(mut device: BlockDevice) -> Result<Self, Error> {
         let mut mbr = [0u8; SECTOR_SIZE];
         // SAFETY: `device` was already initialized by the caller (see
         // `mount`'s doc comment).

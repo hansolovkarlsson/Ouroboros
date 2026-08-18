@@ -92,7 +92,7 @@ const LF: u8 = b'\n';
 // Syscall numbers and sentinel values come from the shared `syscall-abi`
 // crate now, not hand-duplicated local consts - see its doc comment and
 // `kernel/src/syscall.rs`'s dispatch table, the other side of this ABI.
-use syscall_abi::{EXIT_DENIED, FS_ERR_MIN, FS_ERR_NOT_FOUND, NO_FS, TASK_KILLED_STATUS, TASK_STATE_BLOCKED, TASK_STATE_INVALID, TASK_STATE_RUNNABLE, TASK_STATE_UNUSED, TASK_STATE_ZOMBIE, WAIT_INTERRUPTED};
+use syscall_abi::{EXIT_DENIED, FS_ERR_MIN, FS_ERR_NOT_FOUND, MOUNT_ALREADY, MOUNT_NO_DEVICE, NO_FS, TASK_KILLED_STATUS, TASK_STATE_BLOCKED, TASK_STATE_INVALID, TASK_STATE_RUNNABLE, TASK_STATE_UNUSED, TASK_STATE_ZOMBIE, WAIT_INTERRUPTED};
 
 /// Placed first in `.text` by `linker.ld` (`KEEP(*(.text.start))`) so it
 /// lands at file/VA offset 0 - `tasks.rs` sets a loaded program's
@@ -377,7 +377,7 @@ fn dispatch_line(line: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize, out:
     let arg = words.next().unwrap_or("");
 
     match command {
-        "help" => out.put_line("commands: help, echo, uptime, clear, ls, cat, cd, pwd, mkdir, rmdir, touch, rm, write, cp, mv, exec, exit, ps, kill, fg, wait, selftest (append `> file` or `>> file` to redirect output)"),
+        "help" => out.put_line("commands: help, echo, uptime, clear, ls, cat, cd, pwd, mkdir, rmdir, touch, rm, write, cp, mv, mount, exec, exit, ps, kill, fg, wait, selftest (append `> file` or `>> file` to redirect output)"),
         "echo" => {
             let mut first = true;
             for word in line.split_whitespace().skip(1) {
@@ -423,6 +423,7 @@ fn dispatch_line(line: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize, out:
         "kill" => cmd_kill(arg),
         "fg" => cmd_fg(arg),
         "wait" => cmd_wait(arg),
+        "mount" => cmd_mount(),
         "selftest" => cmd_selftest(out),
         _ => {
             print_str("unknown command: ");
@@ -1393,6 +1394,20 @@ fn cmd_wait(arg: &str) {
 fn print_u64(n: u64) {
     let mut out = Output::Console;
     out.put_u64_decimal(n);
+}
+
+/// `mount` - rescans the USB ports for a storage device that attached
+/// after boot and mounts its FAT32 filesystem. The Parallels workflow:
+/// a passed-through stick appears a few seconds after the VM starts,
+/// later than the kernel's boot-time scan - boot, wait a moment, type
+/// `mount`, and the disk commands come alive.
+fn cmd_mount() {
+    match syscall(syscall_abi::MOUNT, 0) {
+        0 => print_line("mounted - disk commands available"),
+        MOUNT_ALREADY => print_line("mount: a filesystem is already mounted"),
+        MOUNT_NO_DEVICE => print_line("mount: no mountable USB storage device found (see the kernel log; is the stick attached to the VM?)"),
+        _ => print_line("mount: unexpected return"),
+    }
 }
 
 /// `exit` builtin. This boot-loaded shell is task 0, which the kernel

@@ -188,6 +188,15 @@ pub const FG: u64 = 20;
 /// the outcome).
 pub const WAIT: u64 = 21;
 
+/// `()` -> `0` (a filesystem was just mounted - disk commands work
+/// now), [`MOUNT_ALREADY`] (one was already mounted; nothing changed),
+/// or [`MOUNT_NO_DEVICE`]. Rescans the USB (xHCI) ports for storage
+/// devices that attached after boot - on Parallels, a passed-through
+/// stick appears a few seconds *after* the kernel's boot-time scan
+/// (confirmed by the enumeration diagnostics), so this is how it gets
+/// picked up: boot, wait a moment, type `mount`.
+pub const MOUNT: u64 = 22;
+
 /// [`WAIT`]'s answer when the waited task was killed rather than
 /// exiting: `0x100`, one past the largest real exit status.
 pub const TASK_KILLED_STATUS: u64 = 0x100;
@@ -277,6 +286,14 @@ pub const TASK_ERR_PROTECTED: u64 = u64::MAX - 15;
 /// nothing was collected. In the reserved band like every other
 /// non-value result, though it's an outcome more than an error.
 pub const WAIT_INTERRUPTED: u64 = u64::MAX - 16;
+
+/// [`MOUNT`]: a filesystem was already mounted - the rescan still ran,
+/// but nothing about the mounted filesystem changed.
+pub const MOUNT_ALREADY: u64 = u64::MAX - 17;
+/// [`MOUNT`]: no mountable USB storage device was found (none
+/// attached, activation failed, or its filesystem isn't FAT32 - the
+/// kernel log has the specific reason).
+pub const MOUNT_NO_DEVICE: u64 = u64::MAX - 18;
 
 /// Floor of the reserved error band (with headroom for future codes):
 /// **any error-capable syscall's return value `>= FS_ERR_MIN` is an
