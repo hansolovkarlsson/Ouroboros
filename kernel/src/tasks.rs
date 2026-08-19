@@ -476,6 +476,123 @@ pub(crate) fn clear_mailbox(task: usize) {
     mailbox.count = 0;
 }
 
+/// One task's single outstanding grant - the enforced bulk-transfer
+/// capability behind the `GRANT`/`SAFECOPY` syscalls. `grantee` (a slot
+/// index, the same identity IPC uses everywhere) may bulk-copy the
+/// `len`-byte buffer at `ptr` - which lives in *this granter's* own EL0
+/// region - in the directions `dir` permits (a mask of
+/// `GRANT_READ`/`GRANT_WRITE`). `active` distinguishes "no grant" from a
+/// real one. Deliberately a single slot per task, not a table: a task
+/// makes one blocking call at a time, so it can have at most one grant
+/// in flight; a new grant overwrites the old.
+#[derive(Clone, Copy)]
+struct Grant {
+    grantee: usize,
+    ptr: u64,
+    len: u64,
+    dir: u64,
+    active: bool,
+}
+
+struct GrantSlot(UnsafeCell<Grant>);
+// SAFETY: same single-core, SVC/tick-only, never-reentrant reasoning as
+// MailboxSlot and every other per-task cell in this module.
+unsafe impl Sync for GrantSlot {}
+static GRANTS: [GrantSlot; NUM_TASKS] = [
+    GrantSlot(UnsafeCell::new(Grant { grantee: 0, ptr: 0, len: 0, dir: 0, active: false })),
+    GrantSlot(UnsafeCell::new(Grant { grantee: 0, ptr: 0, len: 0, dir: 0, active: false })),
+    GrantSlot(UnsafeCell::new(Grant { grantee: 0, ptr: 0, len: 0, dir: 0, active: false })),
+    GrantSlot(UnsafeCell::new(Grant { grantee: 0, ptr: 0, len: 0, dir: 0, active: false })),
+    GrantSlot(UnsafeCell::new(Grant { grantee: 0, ptr: 0, len: 0, dir: 0, active: false })),
+];
+
+/// `GRANT`'s core: record `granter`'s outstanding grant. The caller
+/// (the syscall arm) has already validated that `grantee` exists, `dir`
+/// is a valid non-zero direction mask, `len` is within `SAFECOPY_MAX`,
+/// and `[ptr, ptr+len)` lies inside `granter`'s own region - this only
+/// stores it.
+pub(crate) fn set_grant(granter: usize, grantee: usize, ptr: u64, len: u64, dir: u64) {
+    let g = unsafe { &mut *GRANTS[granter].0.get() };
+    *g = Grant { grantee, ptr, len, dir, active: true };
+}
+
+/// A dead task's grant dies with it - called from every teardown path
+/// alongside [`clear_mailbox`], so a later occupant of the same slot
+/// can't inherit a predecessor's grant.
+pub(crate) fn clear_grant(task: usize) {
+    let g = unsafe { &mut *GRANTS[task].0.get() };
+    g.active = false;
+}
+
+/// `SAFECOPY`'s core: `server` copies `len` bytes between `client`'s
+/// granted buffer (at `client_off` within it) and the already-validated
+/// server-local address `local` (the syscall arm checked `local`/`len`
+/// against `server`'s own region before calling). `dir` is a *single*
+/// direction bit (`GRANT_READ` = read client -> local, `GRANT_WRITE` =
+/// write local -> client). Returns `Some(len)` on success, `None` if
+/// the copy is unauthorized - the enforcement is here:
+///
+/// 1. `client`'s grant is active, names `server` as grantee, and its
+///    `dir` mask permits this direction;
+/// 2. `client` is *currently* blocked in a `MSG_CALL` to `server` (a
+///    stale grant is inert - once the call returns the client is
+///    runnable, not blocked-calling-me);
+/// 3. `[client_off, client_off+len)` stays within the granted buffer;
+/// 4. the resulting client range stays within `client`'s live region
+///    (defence in depth - the grant was region-checked when set, and a
+///    blocked task's region doesn't move, but the kernel is about to
+///    dereference the address, so it re-checks).
+pub(crate) fn safecopy(
+    server: usize,
+    client: usize,
+    client_off: u64,
+    local: u64,
+    len: u64,
+    dir: u64,
+) -> Option<u64> {
+    if client >= NUM_TASKS {
+        return None;
+    }
+    // Exactly one direction bit, and the grant must permit it.
+    if dir != syscall_abi::GRANT_READ && dir != syscall_abi::GRANT_WRITE {
+        return None;
+    }
+    let grant = unsafe { *GRANTS[client].0.get() };
+    if !grant.active || grant.grantee != server || grant.dir & dir == 0 {
+        return None;
+    }
+    // The client must be actively blocked in a call to this server.
+    let blocked_calling_me = matches!(
+        unsafe { *STATES[client].0.get() },
+        TaskState::Blocked(WaitReason::Message { from: Some(f), .. }) if f == server
+    );
+    if !blocked_calling_me {
+        return None;
+    }
+    // Bounds within the granted buffer.
+    let end = client_off.checked_add(len)?;
+    if end > grant.len {
+        return None;
+    }
+    let client_addr = grant.ptr.checked_add(client_off)?;
+    // Re-validate against the client's live region.
+    let (base, size) = task_region(client);
+    if size == 0 || client_addr < base || client_addr.checked_add(len)? > base + size {
+        return None;
+    }
+    // Both addresses are in identity-mapped, EL1-RW RAM in every view
+    // (only the EL0-access overlay is per-task - see mmu.rs), so this
+    // copy works regardless of which task's TTBR0 is currently active.
+    unsafe {
+        if dir == syscall_abi::GRANT_READ {
+            core::ptr::copy_nonoverlapping(client_addr as *const u8, local as *mut u8, len as usize);
+        } else {
+            core::ptr::copy_nonoverlapping(local as *const u8, client_addr as *mut u8, len as usize);
+        }
+    }
+    Some(len)
+}
+
 /// What a blocked task is waiting for. One variant today - a byte from
 /// the keyboard/console (`syscall_abi::READ_CHAR`, `syscall.rs`) - but
 /// deliberately a real enum, not a bool, since the mechanism below
@@ -681,6 +798,7 @@ pub(crate) unsafe fn exit_current_and_switch(frame: *mut Context, status: u64) -
     unsafe { *STATES[current].0.get() = TaskState::Zombie(status & 0xff) };
     unsafe { *REGIONS[current].0.get() = (0, 0) };
     clear_mailbox(current);
+    clear_grant(current);
     let next = next_runnable(current);
     *frame = unsafe { *TASKS[next].0.get() };
     CURRENT.store(next, Ordering::Relaxed);
@@ -702,6 +820,7 @@ pub(crate) fn kill_task(i: usize) {
     unsafe { *STATES[i].0.get() = TaskState::Unused };
     unsafe { *REGIONS[i].0.get() = (0, 0) };
     clear_mailbox(i);
+    clear_grant(i);
 }
 
 /// The EL0-fault teardown's context switch: destroys the *currently
@@ -725,6 +844,7 @@ pub(crate) unsafe fn kill_current_and_switch(frame: *mut Context) {
     unsafe { *STATES[current].0.get() = TaskState::Unused };
     unsafe { *REGIONS[current].0.get() = (0, 0) };
     clear_mailbox(current);
+    clear_grant(current);
     let next = next_runnable(current);
     *frame = unsafe { *TASKS[next].0.get() };
     CURRENT.store(next, Ordering::Relaxed);

@@ -260,6 +260,63 @@ pub const FSD_TASK: u64 = 2;
 /// everything else; offsets past the staging buffer are refused.
 pub const SPAWN_STAGE: u64 = 30;
 
+/// `(grantee task, buf ptr, buf len, dir)` -> `0` on success, or
+/// [`GRANT_ERR`]. Records, in the caller's own single per-task grant
+/// slot, that task `grantee` may bulk-copy the `buf len`-byte buffer at
+/// `buf ptr` - which must lie inside the caller's own EL0 region - in
+/// direction `dir` (a mask of [`GRANT_READ`]/[`GRANT_WRITE`], from the
+/// *granter's* point of view: `GRANT_READ` lets the grantee read *from*
+/// this buffer, `GRANT_WRITE` lets it write *into* it). The first half
+/// of the enforced capability-based bulk-transfer primitive that lifts
+/// the [`FS_DATA_MAX`] per-op cap: the grant names an exact buffer, and
+/// the kernel enforces the grantee can touch only those bytes, and only
+/// while the granter is actively blocked in a [`MSG_CALL`] to it (see
+/// [`SAFECOPY`]). Each task has exactly one grant slot; a new grant
+/// overwrites the old, and a task's grant is cleared when it dies.
+/// `buf len` is capped at [`SAFECOPY_MAX`].
+pub const GRANT: u64 = 31;
+
+/// `(client task, client offset, local buf ptr, len, dir)` -> `len` on
+/// success, or [`SAFECOPY_ERR`]. Issued by a *server* to copy `len`
+/// bytes between a client's granted buffer (at `client offset` within
+/// it) and the server's own `local buf ptr`, in direction `dir`
+/// ([`GRANT_READ`] = server reads client -> local; [`GRANT_WRITE`] =
+/// server writes local -> client). Authorized only when **all** hold:
+/// the client's grant is set with `grantee == caller` and a `dir` that
+/// permits this direction; the client is *currently* blocked in a
+/// [`MSG_CALL`] to the caller (a stale grant is inert - the client is
+/// runnable, not blocked-calling-me, once its call has returned);
+/// `client offset + len` stays within the granted buffer; and
+/// `local buf ptr`/`len` lies inside the caller's own region. `len` is
+/// capped at [`SAFECOPY_MAX`]. Note: takes five arguments - the arm
+/// reads `frame`-saved registers, same as the multi-arg `fs_*` syscalls
+/// once did. Unlike the `BLOCK_*` syscalls this is *not* gated to one
+/// task: the grant plus the active call is the whole capability, so any
+/// task acting as a server can use it.
+pub const SAFECOPY: u64 = 32;
+
+/// The largest buffer a single [`GRANT`]/[`SAFECOPY`] may name, in
+/// bytes. This is the per-operation bulk-transfer chunk size; callers
+/// wanting more loop, streaming one chunk at a time (the shell's `cat`
+/// does exactly this). A 4x lift over the old [`FS_DATA_MAX`], chosen
+/// to sit comfortably inside both a client's and the filesystem
+/// server's fixed 8KB stacks alongside their other buffers - tunable if
+/// that headroom ever changes (there's no userland heap or stack guard
+/// page yet). The genuine ceiling on a *single* transfer stays
+/// userland-memory-bound regardless; this primitive lifts the per-op
+/// cap and lets streaming callers move arbitrarily much in total.
+pub const SAFECOPY_MAX: u64 = 2048;
+
+/// [`GRANT`]/[`SAFECOPY`] direction bit: the grantee may **read** from
+/// the granted buffer (the granter is providing data - e.g. a bulk
+/// file write, where the server reads the client's data out).
+pub const GRANT_READ: u64 = 1;
+/// [`GRANT`]/[`SAFECOPY`] direction bit: the grantee may **write** into
+/// the granted buffer (the granter is receiving data - e.g. a bulk file
+/// read, where the server writes the file's bytes into the client's
+/// buffer).
+pub const GRANT_WRITE: u64 = 2;
+
 // ---------------------------------------------------------------------
 // The filesystem server's request protocol (not syscalls) - messages
 // sent to FSD_TASK, normally via MSG_CALL. **v2, fully self-contained**
@@ -332,6 +389,24 @@ pub const FSOP_MV: u64 = 9;
 /// the `mount` command - the device half is the [`MOUNT`] syscall,
 /// which must succeed (or report already-installed) first.
 pub const FSOP_MOUNT: u64 = 10;
+
+/// params: `(path len, offset)`; payload: path. The bulk sibling of
+/// [`FSOP_READ_AT`]: instead of returning the bytes inline (capped at
+/// [`FS_DATA_MAX`]), the server reads up to [`SAFECOPY_MAX`] bytes from
+/// byte `offset` and [`SAFECOPY`]s them straight into the client's
+/// granted buffer (the client must [`GRANT`] a [`GRANT_WRITE`] buffer
+/// to [`FSD_TASK`] first). status = bytes delivered this chunk (`0`
+/// once `offset` is at/past the end). Loop with a rising `offset` to
+/// stream a file of any size - the shell's `cat` does exactly this.
+pub const FSOP_READ_BULK: u64 = 11;
+/// params: `(path len, data len)`; payload: path. The bulk sibling of
+/// [`FSOP_WRITE_FILE`]: the data does *not* travel inline. The client
+/// [`GRANT`]s a [`GRANT_READ`] buffer holding `data len` (up to
+/// [`SAFECOPY_MAX`]) bytes to [`FSD_TASK`]; the server [`SAFECOPY`]s it
+/// in, then creates/overwrites the file with exactly those bytes.
+/// status = `0` on success, or an `FS_ERR_*` code. Raises the write cap
+/// from [`FS_DATA_MAX`] to [`SAFECOPY_MAX`].
+pub const FSOP_WRITE_BULK: u64 = 12;
 
 /// The largest message [`MSG_SEND`] accepts, in bytes. Raised from the
 /// original 64 when per-task page tables landed: the filesystem
@@ -461,6 +536,16 @@ pub const BLOCK_ERR_IO: u64 = u64::MAX - 24;
 /// `BLOCK_*`: the caller isn't [`FSD_TASK`] (or passed a bad buffer).
 /// Only the filesystem server may touch the disk.
 pub const BLOCK_ERR_DENIED: u64 = u64::MAX - 25;
+
+/// [`GRANT`]: a bad argument - grantee out of range/nonexistent, an
+/// invalid direction, a zero/oversized (`> `[`SAFECOPY_MAX`]) length,
+/// or a buffer that isn't inside the caller's own region.
+pub const GRANT_ERR: u64 = u64::MAX - 26;
+/// [`SAFECOPY`]: the copy was refused - no matching grant, the client
+/// isn't blocked in a call to the caller, a direction the grant doesn't
+/// permit, an out-of-bounds `client offset`/`len`, or a bad local
+/// buffer.
+pub const SAFECOPY_ERR: u64 = u64::MAX - 27;
 
 /// Floor of the reserved error band (with headroom for future codes):
 /// **any error-capable syscall's return value `>= FS_ERR_MIN` is an

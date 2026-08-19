@@ -753,6 +753,41 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
             tasks::set_input_owner(i);
             0
         }
+        syscall_abi::GRANT => {
+            // arg0 = grantee, arg1 = buf ptr, arg2 = buf len, arg3 = dir.
+            let grantee = arg0 as usize;
+            let dir = arg3;
+            let valid_dir =
+                dir != 0 && dir & !(syscall_abi::GRANT_READ | syscall_abi::GRANT_WRITE) == 0;
+            if !valid_dir
+                || grantee >= tasks::NUM_TASKS
+                || !tasks::task_exists(grantee)
+                || arg2 == 0
+                || arg2 > syscall_abi::SAFECOPY_MAX
+                || !in_caller_region(arg1, arg2)
+            {
+                return syscall_abi::GRANT_ERR;
+            }
+            tasks::set_grant(tasks::current_task(), grantee, arg1, arg2, dir);
+            0
+        }
+        syscall_abi::SAFECOPY => {
+            // arg0 = client, arg1 = client offset, arg2 = local buf ptr,
+            // arg3 = len; the 5th argument (direction) doesn't fit the
+            // 4-arg dispatch signature - it's read from the saved frame
+            // (x4), exactly as the trampoline's doc comment describes.
+            let client = arg0 as usize;
+            let local = arg2;
+            let len = arg3;
+            let dir = unsafe { (*frame).gpr[4] };
+            if len == 0 || len > syscall_abi::SAFECOPY_MAX || !in_caller_region(local, len) {
+                return syscall_abi::SAFECOPY_ERR;
+            }
+            match tasks::safecopy(tasks::current_task(), client, arg1, local, len, dir) {
+                Some(n) => n,
+                None => syscall_abi::SAFECOPY_ERR,
+            }
+        }
         _ => {
             console::println!("Ouroboros kernel: syscall from EL0: unknown number={number}");
             u64::MAX
