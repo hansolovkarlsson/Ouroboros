@@ -47,7 +47,12 @@ both a tiny file (RMW of sector 0) and a 5564-byte file (RMW of the last
 partial sector, previously refused); `cp x x` refused; a missing source
 leaves the destination untouched; inline `write` unaffected; FAT16
 degrades to the shared no-filesystem message. Zero aborts throughout.
-Real-hardware write testing is gated on the reads-only stick policy.
+**Confirmed on real Parallels hardware** (with the user's go-ahead to
+write a scratch file): a streaming `cp` of the 5.7KB `hello.bin` on the
+real Lexar stick read back complete, and after a VM reboot a persisted
+file was appended to with `>>` - `cat` showing both the original and
+appended lines, the partial-sector RMW preserving content on real
+silicon; the scratch files were removed afterward.
 
 ## Grant/safecopy IPC: enforced capability-based bulk transfer
 

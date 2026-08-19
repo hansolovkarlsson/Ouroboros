@@ -4583,11 +4583,20 @@ Abort`/`Undefined Instruction`) in `-d int` cross-checks across every
 session (main cp/`>>`, reboot persistence, small-file RMW, FAT16
 degradation).
 
-**Real hardware:** the write path writes to the USB stick, and this
-project's standing policy is **reads-only on the real stick without an
-explicit go-ahead**. QEMU proves the write path end to end; a
-real-hardware write exercise (a scratch file on the stick) is left gated
-on that go-ahead, with a read-only regression available meanwhile.
+**Confirmed on real Parallels hardware too** (with the user's explicit
+go-ahead to write a scratch file - the standing policy is reads-only on
+the real stick otherwise). On the real Lexar stick: `echo streamtest >
+/wtest.txt` created a file; `cp /hello.bin /wcopy.bin` streamed a
+byte-complete copy of the 5.7KB binary (catting it back showed the `ELF`
+header, the `.rodata` string, and the section-name tail ~5.7KB in - all
+three chunks); after a VM reboot `/wtest.txt` still read `streamtest`
+(real write persistence), and `echo appendline >> /wtest.txt` then
+`cat` showed **`streamtest` then `appendline`** - the partial-sector RMW
+of the existing file's sector 0 preserving its content and appending on
+real silicon. The scratch files were `rm`'d afterward, leaving the stick
+as found. Two runs hit the known stick-at-boot-displaces-the-keyboard
+flake (nothing typed); the successful runs used the designed
+boot-then-`mount` workflow, same as the grant/safecopy milestone.
 
 **Still coarse, worth knowing before building on this:** no
 *interior/random-access* writes - `write_at` refuses an offset past the

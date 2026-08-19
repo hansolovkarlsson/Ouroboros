@@ -458,8 +458,10 @@ phase:
   bytes before it (a partial-sector read-modify-write, the one piece no
   prior write path had). `cp` streams through it and copies a file of
   **any size** now (proven on QEMU with the 72KB shell binary,
-  reboot-persisted); `>>` appends at the end of a file of any existing
-  size (the old "too large to append" refusal is gone). **Still next**
+  reboot-persisted, and confirmed on real Parallels hardware - a
+  streaming `cp` and a `>>` append both verified on the real USB stick);
+  `>>` appends at the end of a file of any existing size (the old "too
+  large to append" refusal is gone). **Still next**
   (not yet scoped): *interior/random-access* writes (`write_at` refuses
   an offset past EOF - no sparse files) for a future editor/log; a
   **userland heap and/or a stack guard page** (the fixed 8KB unguarded
