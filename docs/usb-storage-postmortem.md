@@ -12,7 +12,11 @@ covers exception vectors, the MMU, and the console-discovery saga;
 covers the road to a disk-backed userland shell (on QEMU — this
 document is about getting the same thing on real hardware);
 [`xhci-keyboard-postmortem.md`](xhci-keyboard-postmortem.md) covers the
-USB keyboard driver this day's storage driver was built on top of.
+USB keyboard driver this day's storage driver was built on top of. A
+later, different-era companion —
+[`isolation-and-dataflow-postmortem.md`](isolation-and-dataflow-postmortem.md)
+— covers the day this project's isolation went from a convention to
+MMU-enforced, and the data paths that had to be rebuilt to survive it.
 
 Like the others, this is kept separate from the project's own
 historical record (`CLAUDE.md`, `CHANGELOG.md`) because most of what's
