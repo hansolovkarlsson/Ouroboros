@@ -390,14 +390,17 @@ pub const FSOP_MV: u64 = 9;
 /// which must succeed (or report already-installed) first.
 pub const FSOP_MOUNT: u64 = 10;
 
-/// params: `(path len, offset)`; payload: path. The bulk sibling of
-/// [`FSOP_READ_AT`]: instead of returning the bytes inline (capped at
-/// [`FS_DATA_MAX`]), the server reads up to [`SAFECOPY_MAX`] bytes from
-/// byte `offset` and [`SAFECOPY`]s them straight into the client's
-/// granted buffer (the client must [`GRANT`] a [`GRANT_WRITE`] buffer
-/// to [`FSD_TASK`] first). status = bytes delivered this chunk (`0`
-/// once `offset` is at/past the end). Loop with a rising `offset` to
-/// stream a file of any size - the shell's `cat` does exactly this.
+/// params: `(path len, offset, want)`; payload: path. The bulk sibling
+/// of [`FSOP_READ_AT`]: instead of returning the bytes inline (capped
+/// at [`FS_DATA_MAX`]), the server reads up to `min(want, `[`SAFECOPY_MAX`]`)`
+/// bytes from byte `offset` and [`SAFECOPY`]s them straight into the
+/// client's granted buffer (the client must [`GRANT`] a [`GRANT_WRITE`]
+/// buffer of at least that size to [`FSD_TASK`] first; `want` is
+/// normally the granted buffer's length, so a client can use a buffer
+/// smaller than [`SAFECOPY_MAX`] without the server overrunning the
+/// grant). status = bytes delivered this chunk (`0` once `offset` is
+/// at/past the end). Loop with a rising `offset` to stream a file of
+/// any size - the shell's `cat` does exactly this.
 pub const FSOP_READ_BULK: u64 = 11;
 /// params: `(path len, data len)`; payload: path. The bulk sibling of
 /// [`FSOP_WRITE_FILE`]: the data does *not* travel inline. The client

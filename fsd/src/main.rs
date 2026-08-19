@@ -208,8 +208,12 @@ fn handle(fs: &mut Option<fat32::Fs>, sender: u64, req: &[u8], reply: &mut [u8])
                 return status_reply(reply, syscall_abi::FS_ERROR);
             };
             let offset = p[1];
+            // `want` (p[2]) lets a client with a buffer smaller than
+            // SAFECOPY_MAX cap how much we read, so the SAFECOPY below
+            // never exceeds its grant. Clamp to our own working buffer.
+            let want = (p[2] as usize).min(syscall_abi::SAFECOPY_MAX as usize);
             let mut chunk = [0u8; syscall_abi::SAFECOPY_MAX as usize];
-            match fs.read_at(path, offset, &mut chunk) {
+            match fs.read_at(path, offset, &mut chunk[..want]) {
                 Ok(copied) => {
                     let copied = copied as usize;
                     if copied > 0 {
@@ -243,6 +247,38 @@ fn handle(fs: &mut Option<fat32::Fs>, sender: u64, req: &[u8], reply: &mut [u8])
             }
             let data = &payload[path_len..path_len + data_len];
             match fs.write_file(path, data) {
+                Ok(()) => status_reply(reply, 0),
+                Err(e) => status_reply(reply, error_code(&e)),
+            }
+        }
+        syscall_abi::FSOP_WRITE_BULK => {
+            // The bulk sibling of WRITE_FILE: the data doesn't travel
+            // inline (DATA_MAX-capped). The client GRANT_READ-granted a
+            // buffer of `data_len` bytes (<= SAFECOPY_MAX); we SAFECOPY
+            // it into our own working buffer, then write. Zero-length is
+            // valid (truncate-to-empty) - no grant, no safecopy needed.
+            let Some(path) = path_from(payload, 0, p[0]) else {
+                return status_reply(reply, syscall_abi::FS_ERROR);
+            };
+            let data_len = p[1] as usize;
+            if data_len > syscall_abi::SAFECOPY_MAX as usize {
+                return status_reply(reply, syscall_abi::FS_ERROR);
+            }
+            let mut databuf = [0u8; syscall_abi::SAFECOPY_MAX as usize];
+            if data_len > 0 {
+                let r = syscall5(
+                    syscall_abi::SAFECOPY,
+                    sender,
+                    0,
+                    databuf.as_mut_ptr() as u64,
+                    data_len as u64,
+                    syscall_abi::GRANT_READ,
+                );
+                if r >= syscall_abi::FS_ERR_MIN {
+                    return status_reply(reply, syscall_abi::FS_ERROR);
+                }
+            }
+            match fs.write_file(path, &databuf[..data_len]) {
                 Ok(()) => status_reply(reply, 0),
                 Err(e) => status_reply(reply, error_code(&e)),
             }
