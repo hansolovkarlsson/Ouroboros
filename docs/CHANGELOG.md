@@ -7,6 +7,59 @@ what broke, how it was diagnosed), see `CLAUDE.md`; for *how* something
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## Grant/safecopy IPC: enforced capability-based bulk transfer
+
+The second half of MINIX's IPC design, and the fix for the last
+user-visible limitation per-task page tables left behind. FSOP v2 made
+filesystem requests self-contained (payloads inline, kernel-copied)
+because a server can no longer dereference a client pointer - which
+capped every operation at what fits one 768-byte message, ~512 bytes.
+This milestone moves bulk data directly between two isolated regions
+instead, without the message.
+
+Two new syscalls, **enforced, not trust-based** (the user's explicit
+call, consistent with the per-task-tables milestone): `grant` (31) - a
+client records, in its own single per-task grant slot, that one server
+task may bulk-copy an *exact* buffer in the client's own region, in a
+given direction; `safecopy` (32) - the server, while handling the
+client's `msg_call`, copies within that grant. The kernel authorizes a
+copy only when the grant names this server and permits the direction,
+the client is *currently* blocked in a call to it (a stale grant is
+inert), and both ranges are in bounds. The copy runs at EL1, where all
+RAM is identity-mapped read/write in every per-task view - so it reaches
+both regions regardless of the active `TTBR0`, while the server can
+touch only the designated bytes, only during a call the client
+initiated, and never a third task. `safecopy` takes five arguments; the
+fifth (direction) is read from the saved trap frame's `x4`, the
+4-argument dispatch signature being full.
+
+The FSOP protocol gained `FSOP_READ_BULK`/`FSOP_WRITE_BULK`. `cat` now
+**streams a file of any size** (loops the bulk read, one `SAFECOPY_MAX`
+= 2048-byte chunk at a time, never holding the whole file - the old
+512-byte truncation and its notice are gone); `cp` copies files up to
+2048 (was refused past 512); `>`/`>>` redirection captures and appends
+past 512 too. Buffer sizes were chosen against the guard-page-less 8KB
+userland stack: cp uses a full 2048; the redirect capture/append stay
+at 1024 because `cat ... > file` nests the capture, cat's 2048 chunk,
+and `fs_call`'s request/reply on one frame. `write`'s content is
+bounded by the 128-byte input line, so it stays on the cheap inline
+path. Larger transfers still refuse-not-truncate; the ultimate ceiling
+is userland memory (no heap), with a FAT32 offset-write primitive and a
+userland heap/guard page recorded as the follow-ons.
+
+A real correctness detail, caught by design: a client with a buffer
+smaller than `SAFECOPY_MAX` would have the server overrun its grant, so
+`FSOP_READ_BULK` carries a `want` parameter bounding the read. Verified
+on QEMU against the real FAT32 image: a 5564-byte file streams complete
+(chunk-boundary markers all present, all 120 lines); cp of a 1500-byte
+file round-trips where it used to refuse, cp of 5564 refuses; a
+>512-byte redirect capture and a correctly-ordered `>>` append (not the
+historical overwrite bug); reboot persistence; FAT16 graceful
+degradation; zero aborts throughout. Real Parallels regression clean
+(selftest, echo, uptime, graceful mount/ls) - the primitive's mechanism
+rests on the already-hardware-validated per-task views; a full disk
+exercise there awaits a connected USB stick.
+
 ## Per-task page tables: MMU-enforced isolation, not trust
 
 The last of the three post-part-2 candidates, and the one that makes

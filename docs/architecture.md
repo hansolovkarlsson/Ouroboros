@@ -387,8 +387,10 @@ the way hand-duplicated numbers did before this crate existed.
 | 26 | `block_info` | — | capacity in sectors, `BLOCK_ERR_NO_DEVICE`, or `BLOCK_ERR_DENIED` | Raw block-device introspection for the filesystem server. **All three `block_*` syscalls are gated to task 2** (`FSD_TASK`): any other caller gets `BLOCK_ERR_DENIED` — the kernel holds the device, and exactly one task may ask it to touch the disk |
 | 27 | `block_read` | LBA, buf ptr | `0` or a `BLOCK_ERR_*` code | Reads exactly one 512-byte sector (the length is implied, not passed). Same `FSD_TASK` gate |
 | 28 | `block_write` | LBA, buf ptr | `0` or a `BLOCK_ERR_*` code | Writes exactly one 512-byte sector. Same gate |
-| 29 | `msg_call` | dest task, req ptr, req len, reply ptr | `(dest << 32) \| reply_len`, `RECV_INTERRUPTED`, `TASK_ERR_NO_SUCH_TASK`, `TASK_ERR_PROTECTED` (self-call), or a `MSG_ERR_*` code | Synchronous request/response (MINIX's `sendrec` shape): sends the request, then blocks for a reply **from `dest` specifically** — a message from any other task stays queued for a later `msg_recv` instead of being mistaken for the reply (`WaitReason::Message`'s sender filter). With direct delivery on both hops (`tasks::send_message` copies straight into a matching blocked receiver's buffer and wakes it), a call to a server blocked in `msg_recv` round-trips without waiting for a tick on either side. The reply buffer is a fixed 64 bytes — the 4-argument ABI is exactly full |
+| 29 | `msg_call` | dest task, req ptr, req len, reply ptr | `(dest << 32) \| reply_len`, `RECV_INTERRUPTED`, `TASK_ERR_NO_SUCH_TASK`, `TASK_ERR_PROTECTED` (self-call), or a `MSG_ERR_*` code | Synchronous request/response (MINIX's `sendrec` shape): sends the request, then blocks for a reply **from `dest` specifically** — a message from any other task stays queued for a later `msg_recv` instead of being mistaken for the reply (`WaitReason::Message`'s sender filter). With direct delivery on both hops (`tasks::send_message` copies straight into a matching blocked receiver's buffer and wakes it), a call to a server blocked in `msg_recv` round-trips without waiting for a tick on either side. The reply buffer is a fixed `MSG_MAX_LEN` (768) bytes — the 4-argument ABI is exactly full |
 | 30 | `spawn_stage` | offset, chunk ptr, chunk len | `0` or `SPAWN_ERROR` | Copies one chunk of a program image into the kernel's spawn staging buffer — the feed half of the two-step `spawn` (16) |
+| 31 | `grant` | grantee task, buf ptr, buf len, dir | `0` or `GRANT_ERR` | Records, in the caller's own single per-task grant slot, that `grantee` may bulk-copy the exact `buf` (which must lie in the caller's own region) in direction `dir` (`GRANT_READ`/`GRANT_WRITE`). The capability half of the enforced bulk-transfer primitive — `buf len` capped at `SAFECOPY_MAX` (2048). See "Grant/safecopy" below |
+| 32 | `safecopy` | client task, client offset, local buf ptr, len, **dir (5th arg, from the saved frame's x4)** | `len` or `SAFECOPY_ERR` | A *server* copies `len` bytes between a client's granted buffer and its own `local buf`, in direction `dir`. Authorized only when the client's grant names this server and permits the direction, the client is *currently* blocked in a `msg_call` to it, and both ranges are in bounds. Not task-gated (unlike `block_*`): the grant plus the active call is the whole capability. See "Grant/safecopy" below |
 | other | — | — | `u64::MAX` | Logged as unknown |
 
 ### The filesystem request protocol (`FSOP_*`)
@@ -403,9 +405,11 @@ as a little-endian u64 at offset 0, then four u64 parameters at
 bytes, then data bytes for `write`/`mv`). The reply is a status u64
 (`FS_REPLY_PAYLOAD`) followed by the inline result (a listing, file
 data). Everything is copied task-to-task by the kernel's message
-machinery; no pointer crosses a task boundary. Per-operation payloads
-are capped at `FS_DATA_MAX` (512) — which is why `MSG_MAX_LEN` is 768:
-one message holds a header, a full path, and a full data buffer. The
+machinery; no pointer crosses a task boundary. Inline per-operation
+payloads are capped at `FS_DATA_MAX` (512) — which is why `MSG_MAX_LEN`
+is 768: one message holds a header, a full path, and a full data buffer.
+Bulk file reads/writes escape that cap via the grant/safecopy path
+(below), not by growing the message. The
 status carries exactly the old syscalls' return-value semantics — byte
 counts and real sizes on success, or a value in the reserved error band
 (`>= FS_ERR_MIN`): `NO_FS` when nothing is mounted, a specific
@@ -419,11 +423,48 @@ the old syscalls of the same names): `FSOP_LIST_DIR`, `FSOP_READ_FILE`,
 program loading is built on), `FSOP_WRITE_FILE` (zero-length data is
 valid — truncate to empty), `FSOP_MKDIR`, `FSOP_RMDIR`, `FSOP_TOUCH`,
 `FSOP_RM`, `FSOP_MV`, and `FSOP_MOUNT` (the FS half of the `mount`
-command). The shell's nine `fs_*` wrapper functions
+command), plus the two **bulk** ops that carry their data via
+grant/safecopy rather than inline: `FSOP_READ_BULK` (params
+`path len, offset, want`; the server `safecopy`s up to `want` ≤
+`SAFECOPY_MAX` bytes into the client's `GRANT_WRITE` buffer, status =
+bytes delivered — `cat` loops it to stream any size) and
+`FSOP_WRITE_BULK` (params `path len, data len`; the server `safecopy`s
+the client's `GRANT_READ` buffer out, then writes — `cp` and redirect
+use it). The shell's `fs_*` wrapper functions
 (`shell/src/main.rs::fs_call` and friends) are the reference client.
 This inline-payload design is the first half of MINIX's — small
-messages plus kernel-mediated copies; a grant/safecopy primitive could
-lift the 512-byte per-op cap later without touching the framing.
+messages plus kernel-mediated copies — and the grant/safecopy primitive
+below is the second half.
+
+### Grant/safecopy — enforced capability-based bulk transfer
+
+The inline FSOP payload cap (`FS_DATA_MAX`, 512) is fine for paths and
+directory listings but too small to move file contents. Rather than
+grow the message, a client can hand the server a *capability* to copy
+directly between their two isolated regions:
+
+- The client `grant`s (syscall 31) an exact buffer in its own region to
+  the server, with a direction (`GRANT_READ` = server may read it,
+  `GRANT_WRITE` = server may write it). The grant lives in a single
+  per-task slot (like the mailbox), cleared at task death.
+- The server, while handling the client's `msg_call`, `safecopy`s
+  (syscall 32) between that granted buffer and its own working buffer.
+
+The kernel authorizes a `safecopy` only when **all** hold: the client's
+grant is active, names this server, and permits the direction; the
+client is *currently* blocked in a `msg_call` to this server (so a stale
+grant is inert — once the call returns the client is runnable, not
+blocked-calling-me); and both the granted range and the server's local
+range are in bounds within their respective regions. The copy itself
+runs at EL1, where all RAM is identity-mapped read/write in every
+per-task view (only the EL0-access overlay is per-task), so it reaches
+both regions regardless of which view's `TTBR0` is active. This is the
+MINIX `safecopy` model: the server can touch *only* the bytes a client
+explicitly designated, *only* during a call that client initiated, and
+can never reach a third task — enforced by the kernel, not trusted. The
+per-op transfer is capped at `SAFECOPY_MAX` (2048); larger transfers
+stream in a loop (`cat`), and the ultimate ceiling on a single buffer
+stays userland-memory-bound (no heap, 8KB stack).
 
 The `syscall-abi` crate covers the numbers, sentinels, and protocol
 constants. Argument validation is the kernel's: every syscall

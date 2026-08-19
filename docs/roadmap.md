@@ -442,9 +442,21 @@ phase:
   own region. Per-task ASIDs (a per-switch-TLBI optimization) were
   implemented, passed on QEMU, but faulted the idle task on real
   Parallels - reverted in favor of flush-on-switch, correct on both;
-  ASIDs stay a recorded future optimization. **Still next** (not yet
-  scoped): moving further components out of the kernel; a
-  grant/safecopy IPC primitive to lift the 512-byte per-op payload cap;
-  and program-to-program pipes (a task's own output still isn't
-  capturable, so pipelines are builtin-left only - a stdout-over-IPC
-  model is the real fix).
+  ASIDs stay a recorded future optimization.
+- **Grant/safecopy IPC - the enforced bulk-transfer primitive - is
+  done** (QEMU end-to-end; real-hardware regression clean, the primitive
+  itself pending a stick for a full disk exercise). Two syscalls
+  (`grant`/`safecopy`) move bulk file data directly between two isolated
+  regions under a kernel-enforced capability (an explicit grant + an
+  active call), lifting the 512-byte per-op cap for file reads/writes to
+  `SAFECOPY_MAX` (2048): `cat` streams any size, `cp`/redirect handle
+  larger files. This is the second half of MINIX's IPC design (small
+  messages + kernel-mediated copies). **Still next** (not yet scoped):
+  a **grant/safecopy for bulk data beyond one buffer** (a reusable
+  multi-op grant, or a FAT32 **offset/append-write** primitive) so
+  `write`/`cp`/`>>` of genuinely large files stop refusing-past-2048;
+  a **userland heap and/or a stack guard page** (the real ceiling on a
+  single transfer is the fixed 8KB unguarded stack); moving further
+  components out of the kernel; and program-to-program pipes (a task's
+  own output still isn't capturable, so pipelines are builtin-left only
+  - a stdout-over-IPC model is the real fix).

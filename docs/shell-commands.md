@@ -66,14 +66,14 @@ implement a completely different command set.
 | `clear` | `clear` | Clears the screen (ANSI `\x1b[2J\x1b[H`). | A raw escape sequence the shell sends itself, not a syscall — the console has no notion of a screen. |
 | `pwd` | `pwd` | Prints the current working directory. | Shell-local state only, no syscall. |
 | `ls` | `ls [path]` | Lists a directory's entries, `name` for files and `name/` for subdirectories. Defaults to the current directory. | Truncates rather than erroring if the listing doesn't fit a 512-byte buffer (the ABI's per-buffer cap). |
-| `cat` | `cat <file>` | Prints a file's contents. | Truncates at 512 bytes (the kernel's per-syscall cap) with a notice if the file is larger; a file argument is required. |
+| `cat` | `cat <file>` | Prints a file's contents. | Streams the file in chunks via the grant/safecopy bulk path, so it prints a file of *any* size (no truncation) without ever holding the whole thing; a file argument is required. |
 | `cd` | `cd [path]` | Changes the current working directory. | Validates the target exists and is a directory first (via a listing call — there's no dedicated "does this exist" syscall). |
 | `mkdir` | `mkdir <dir>` | Creates an empty subdirectory. | Fails with a specific message for each reason (already exists, invalid name, parent missing, disk full — the kernel returns distinct `FS_ERR_*` codes now). Grows a full parent directory by a cluster automatically (as do `touch`/`write`/`cp`/`mv` when creating entries). |
 | `rmdir` | `rmdir <dir>` | Removes an *empty* subdirectory. | Fails if it doesn't exist, isn't empty, or is root. |
 | `touch` | `touch <file>` | Creates an empty (zero-byte) file, or succeeds silently if one already exists there. | There's no RTC on this kernel, so unlike real `touch`, an existing file's "timestamp" isn't updated — nothing happens, successfully. Fails if the target is a directory. |
 | `rm` | `rm <file>` | Removes a file. | Fails if it doesn't exist or is a directory — use `rmdir` for those. |
 | `write` | `write <file> [words...]` | Joins every word after the filename with a single space (same style as `echo`) and writes the result as the file's *entire* contents, replacing whatever was there. Creates the file if it doesn't exist. | `write <file>` with no words truncates the file to empty (a real, valid case, not an error). Fails if the target is an existing directory or the parent is missing. |
-| `cp` | `cp <src> <dst>` | Copies `src`'s contents to `dst`, creating `dst` if it doesn't exist or replacing it if it does. | Reads `src` fully into a 512-byte buffer (the ABI's per-buffer cap) before writing anything to `dst`, so copying a file onto itself is safe. Refuses (rather than truncating) if `src` is larger than that buffer. No recursive directory copy. |
+| `cp` | `cp <src> <dst>` | Copies `src`'s contents to `dst`, creating `dst` if it doesn't exist or replacing it if it does. | Reads `src` fully into a buffer (up to `SAFECOPY_MAX`, 2048 bytes — the grant/safecopy bulk path raised this from 512) before writing anything to `dst`, so copying a file onto itself is safe. Refuses (rather than truncating) if `src` is larger than that buffer — a partial copy is a wrong copy. No recursive directory copy. |
 | `ps` | `ps` | One line per scheduler slot: `unused`, `runnable`, `blocked (waiting)`, or `` exited - `wait` to collect its status `` (a zombie holding its slot). | The caller can't distinguish "running right now" from "runnable" — it is, by definition, the one running when it asks. Output is redirectable like any other command's. |
 | `kill` | `kill <n>` | Destroys task `n` (see `ps` for numbers). | Tasks 0 (this shell), 1 (idle), and 2 (the filesystem server) are protected. A killed task's slot becomes spawnable again and its memory is reclaimed when allocation order allows. |
 | `fg` | `fg <n>` | Hands the keyboard to task `n` — e.g. `exec /EFI/ORBS/SH.BIN` then `fg 2` gives a real nested shell session; its `exit` hands the keyboard back. | **Ctrl+C is the escape hatch**: typed while another task owns the keyboard, the kernel reclaims it for this shell (the foregrounded task keeps running in the background — Ctrl+C is keyboard reclamation, not a signal; `kill` the task if it should die too). Ownership also reverts automatically when the foregrounded task exits or is killed. While this shell owns the keyboard, Ctrl+C (like every unhandled control byte) is ignored by the line editor. |
@@ -114,24 +114,28 @@ Semantics, deliberately close to `sh` where the architecture allows:
   `echo hi>f` is a single token, not a redirect — the same no-quoting
   tokenization rule as everywhere else. Exactly one word (the target
   path) may follow the operator.
-- `cat`'s two display niceties stay off the captured bytes: the
-  tidy-terminal trailing newline and the truncation notice both go to
-  the screen only, so `cat a > b` copies `a`'s bytes exactly (bounded
-  by the same 512-byte read buffer as `cp` — a larger file's copy is
-  truncated the same way `cat`'s display is, notice on screen).
+- `cat`'s display-only trailing newline stays off the captured bytes,
+  so `cat a > b` copies `a`'s bytes exactly. (`cat` itself no longer
+  truncates — it streams any size — but a *redirect capture* is still
+  bounded, see the limits just below, so `cat big > b` for a `big`
+  larger than the capture refuses rather than writing a partial copy;
+  use `cp` for larger files.)
 
 Limits, all refuse-outright rather than write-something-wrong:
 
-- A command's redirected output is captured in a 512-byte buffer; a
-  command that emits more than that prints `output too large to
-  capture` and **nothing is written at all** (no current builtin can
-  exceed it in normal use).
-- `>>` is shell-side read-concatenate-rewrite (the kernel has no append
-  primitive — every `fs_write_file` is a full replace), bounded by the
-  kernel's own 512-byte per-syscall buffer cap (`MAX_USER_LEN`,
-  `kernel/src/syscall.rs`): appending where existing content plus new
-  output would exceed 512 bytes prints `file too large to append to`
-  and leaves the file untouched.
+- A command's redirected output is captured in a 1024-byte buffer
+  (raised from 512 by the grant/safecopy milestone; the write itself
+  goes through the bulk path, but the capture stays below `SAFECOPY_MAX`
+  because it nests with `cat`'s streaming chunk on the shell's fixed,
+  unguarded 8KB stack); a command that emits more than that prints
+  `output too large to capture` and **nothing is written at all**.
+- `>>` is shell-side read-concatenate-rewrite (the kernel/FAT32 layer
+  has no append/offset-write primitive — every write is a full
+  replace), bounded by the same 1024-byte combined buffer: appending
+  where existing content plus new output would exceed it prints
+  `file too large to append to` and leaves the file untouched. (Both
+  halves now use the bulk path, so this is a stack-driven limit, not
+  the old 512-byte syscall cap.)
 
 ## Pipelines
 
@@ -144,7 +148,7 @@ ls | /EFI/ORBS/UPPER.BIN
 cat notes.txt | /EFI/ORBS/UPPER.BIN
 ```
 
-The left side runs with its output captured (the same 512-byte capture
+The left side runs with its output captured (the same 1024-byte capture
 the redirection machinery uses - a bigger output refuses rather than
 truncating); the right side is spawned like `exec` and receives the
 capture as a stream of IPC messages (1-64 bytes each) followed by one

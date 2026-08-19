@@ -4335,6 +4335,149 @@ isolation boundary, not another task's); and program-to-program pipes
 still need a stdout-over-IPC model (a task's own output isn't
 capturable, so pipelines stay builtin-left).
 
+## Grant/safecopy IPC: enforced capability-based bulk transfer, and a streaming `cat`
+
+The second half of MINIX's IPC design, closing the last user-visible
+limitation the per-task-page-tables milestone left behind. FSOP v2 made
+filesystem requests self-contained (payloads inline, kernel-copied
+task-to-task) precisely because a server can no longer dereference a
+client pointer under per-task views - which capped every operation at
+what fits one 768-byte message (`FS_DATA_MAX`, ~512 bytes). `cat`
+truncated at 512, `cp`/`>>` refused files past their buffers. This
+milestone moves bulk data *directly between two isolated regions*
+instead, without stuffing it through the message.
+
+**Enforced, not trust-based - a deliberate user decision, weighed
+against the simpler alternative.** The choice was between a real MINIX
+`safecopy`-style *grant* (the client pre-registers an exact buffer; the
+kernel enforces the server can touch only those bytes) and a simpler
+"server names a client pointer, kernel checks it's within the calling
+client's region" model. The latter is less code but lets a buggy or
+compromised server read/write *anywhere* in its caller's region, not
+just an agreed buffer - a trust assumption, right after a whole
+milestone spent making isolation *enforced*. The user picked the
+enforced grant, explicitly to avoid that class of security issue and
+because it's the capability every future out-of-kernel component will
+want (retrofitting enforcement later would touch every call site).
+
+**The two syscalls:**
+- `GRANT` (31): a client records, in its own single per-task grant slot
+  (the `MAILBOXES` pattern - `GRANTS: [GrantSlot; NUM_TASKS]`, cleared
+  at every task death alongside `clear_mailbox`), that task `grantee`
+  may bulk-copy an exact `(ptr, len)` buffer *in the client's own
+  region*, in a direction (`GRANT_READ` = grantee may read it,
+  `GRANT_WRITE` = grantee may write it). Validated: grantee exists, dir
+  is a nonzero subset of the two bits, `len <= SAFECOPY_MAX`, and
+  `in_caller_region(ptr, len)`.
+- `SAFECOPY` (32): a *server* names the client it's serving and copies
+  `len` bytes between the client's granted buffer and the server's own
+  `local` buffer. `tasks::safecopy` authorizes it only when **all**
+  hold: the grant is active, names this server, and permits the
+  direction; the client is *currently* `Blocked(Message { from:
+  Some(server) })` - an active `MSG_CALL` to this server (the temporal
+  bound - a stale grant is inert because once the call returns the
+  client is `Runnable`, not blocked-calling-me); `client_off + len`
+  stays within the granted buffer; and the resulting client range is
+  within the client's live region. The copy is a raw
+  `copy_nonoverlapping` between the two identity-mapped addresses -
+  which works across per-task views because **all RAM stays
+  coarse-block identity-mapped EL1-RW in every view; only the EL0-access
+  overlay is per-task** (`mmu.rs:171-176`), so the kernel reaches both
+  regions at EL1 regardless of the active `TTBR0`. **Not gated to one
+  task** (unlike `BLOCK_*`): the grant plus the active call *is* the
+  capability, so any future server can use it. It takes five arguments;
+  the fifth (direction) is read from the saved trap frame's `x4` (the
+  `dispatch` signature's four named args are full) - exactly the
+  mechanism the SVC trampoline's own doc comment already described for a
+  5th arg.
+
+**FSOP gained two bulk ops.** `FSOP_READ_BULK` (params `path len,
+offset, want`) - the server reads up to `min(want, SAFECOPY_MAX)` bytes
+from `offset` into its working buffer and `SAFECOPY`s them into the
+client's `GRANT_WRITE` buffer; reply is status only (bytes delivered, 0
+at EOF). `FSOP_WRITE_BULK` (params `path len, data len`) - the server
+`SAFECOPY`s the client's `GRANT_READ` buffer in, then `write_file`s it.
+The `want` parameter is a real correctness piece, reasoned through
+before testing: without it the server would read a full `SAFECOPY_MAX`
+chunk and try to `SAFECOPY` it into a client buffer smaller than that,
+overrunning the grant - so a client with a smaller buffer passes its
+length as `want`.
+
+**The callers.** `cmd_cat` now **streams a file of any size**: loop
+`fs_read_bulk` over a rising offset, `putc` each chunk, stop at a
+genuine 0 - into one fixed `SAFECOPY_MAX` chunk buffer, never holding
+the whole file (the old single-`fs_read_file`-at-offset-0 truncation
+and its "(truncated)" notice are gone). `cmd_cp` reads the source via a
+new `fs_read_all` helper (a one-byte `fs_read_file` "stat" for the real
+size - so it can refuse an oversize file - plus one `fs_read_bulk`
+chunk for the content) and writes via `fs_write_bulk`, lifting cp from
+512 to `SAFECOPY_MAX`. `finish_redirect` (`>`/`>>`) uses the same
+helpers. `cmd_write` deliberately stays on the cheap inline
+`fs_write_file`: its content is bounded by the 128-byte input line,
+always under 512, so it pays no `GRANT`.
+
+**Buffer sizing was a genuine engineering call, made against the
+guard-page-less 8KB userland stack, not a default.** The worst nesting
+is `cat big > file`: `run_line`'s capture buffer, `cmd_cat`'s
+`SAFECOPY_MAX` (2048) streaming chunk, and `fs_call`'s 768+768
+request/reply all live on one frame. So `SAFECOPY_MAX` is 2048 and
+`cp`'s buffer is a full 2048 (cp doesn't nest with a capture), but the
+redirect **capture (1024) and append buffer (1024) stay *below*
+`SAFECOPY_MAX`** to keep that nesting under budget. This is exactly the
+"drop it if any stack-overflow symptom appears" guidance the plan went
+in with, applied proactively from the nesting analysis rather than
+after a silent corruption - the right instinct on a stack with no guard
+page.
+
+**Confirmed on QEMU against the real FAT32 `esp.img`, staged and
+committed per stage** (the project's standing discipline): stage 1 (the
+primitive, unreachable until a caller exists) verified only that both
+task-death paths still tear down cleanly with the new `clear_grant`
+calls, zero aborts; stage 2 proved the *whole* stage-1 chain
+end-to-end via a 5564-byte file streaming complete (three 2048 chunks -
+unique markers planted in chunks 1/2/3 all present, all 120 lines in
+order, no truncation), plus small/empty/nonexistent files; stage 3 -
+cp of a 1500-byte file round-trips where it used to refuse, cp of 5564
+correctly refuses (>2048), an 800-byte redirect capture (was
+512-capped), a correctly-**ordered** `>>` append (existing content
+*then* the appended line - not the historical `>>`-behaves-like-`>`
+overwrite bug, which the old 1024-append-buffer's read-back-rejection
+once caused), a small inline write, and an empty redirect. **Reboot
+persistence confirmed** - a cp'd and a redirected file both survived a
+fresh QEMU boot with markers intact, pre-existing `INIT.CFG` unchanged
+(the bulk write reaches real disk sectors). `make run`'s FAT16 degrades
+to the shared "no filesystem mounted" message. Zero aborts
+(`Data Abort`/`Prefetch Abort`/`Undefined Instruction`) in `-d int`
+cross-checks across every session.
+
+**Real Parallels hardware: regression clean, the primitive itself
+pending a stick.** `make test-parallels` (`selftest;echo;uptime;mount;
+ls /`) confirmed the milestone doesn't regress real-hardware boot/shell:
+`selftest`'s three relocation checks (`write!`/`core::fmt`,
+slice-vs-literal, str-vs-literal) all pass - meaningful, since the shell
+binary was heavily modified this milestone and must load/relocate
+correctly on real hardware; `echo`/`uptime` (1395 ticks, preemption
+working) clean; `mount`/`ls` degrade gracefully (no stick attached).
+The grant/safecopy primitive itself couldn't be exercised there - on
+real Parallels the *only* readable disk is the passthrough USB stick
+(no virtio-blk), and it wasn't connected this run - but its mechanism
+(an EL1 region-to-region copy under the per-task views) rests entirely
+on foundations the per-task-tables milestone already confirmed on real
+hardware. A full disk exercise (`mount` a stick with a multi-KB file,
+`cat` it) is the honest remaining real-hardware step, gated on a
+connected stick, reads-only per standing policy.
+
+**Still coarse, worth knowing before building on this:** the per-op
+transfer is capped at `SAFECOPY_MAX` (2048) - `cat` streams past it in a
+loop, but a *single* `write`/`cp`/`>>` still refuses past 2048 (a
+streaming cp needs a FAT32 offset/append-write primitive - there are no
+partial writes at the FAT32 layer - and/or a userland heap; the fixed
+8KB unguarded stack is the real ceiling on one buffer); directory
+*listings* (`ls`) still use the 512-byte inline path (no bulk variant);
+the grant is a single per-task slot (one in-flight call's worth, which
+is all the synchronous model needs); and there's still no stack guard
+page.
+
 ## Commands
 
 ```sh
@@ -4445,8 +4588,8 @@ kernel/
   src/gicv3.rs       GICv3 backend (redistributor wake/discovery, ICC_* system-register CPU interface) - confirmed working on QEMU and real Parallels hardware, see "MADT/GICv3" above
   src/timer.rs       ARM generic timer (non-secure EL1 physical timer, PPI 14 / GIC INTID 30), TICK_INTERVAL_MS
   src/loader.rs      reads INIT.CFG + a program off the ESP during boot services (plus the optional filesystem server, \EFI\ORBS\FSD.BIN), into 2MB-aligned EL0-accessible regions, real ELF64 parsing + R_AARCH64_RELATIVE relocation processing - see "A real relocating loader" above and docs/processes.md; elf_region_size/populate_region split so the same parsing/loading logic is reusable from the runtime spawn path too, see "Dynamic task creation and exec()" above
-  src/syscall.rs     svc syscall dispatch table (print/double/report/try_read_char/putc/get_ticks/read_char/spawn/exit/task_state/kill/fg/wait/mount/msg_send/msg_recv/msg_try_recv/block_info/block_read/block_write/msg_call/spawn_stage; gaps at 5 and 7-14 - the old fs_* syscalls moved to the fsd server's FSOP_* protocol) plus the block-device cell (the kernel's entire remaining storage role) - see "Driver isolation, part 2" above
-  src/tasks.rs       up to 5 task slots (task 0 = loaded program, task 1 = idle, task 2 = filesystem server, slots 3-4 spawn/exit-cycled) + the round-robin scheduler over Runnable/Blocked/Unused/Zombie task state (block_current_and_switch, exit_current_and_switch, on_tick's wake-check, tasks::spawn, allocate_runtime_region/free_runtime_region, mailboxes with direct delivery + sender-filtered receive) - confirmed working, see "Blocking primitives", "Dynamic task creation and exec()", "Task destruction", and "Driver isolation" parts 1/2 above
+  src/syscall.rs     svc syscall dispatch table (print/double/report/try_read_char/putc/get_ticks/read_char/spawn/exit/task_state/kill/fg/wait/mount/msg_send/msg_recv/msg_try_recv/block_info/block_read/block_write/msg_call/spawn_stage/grant/safecopy; gaps at 5 and 7-14 - the old fs_* syscalls moved to the fsd server's FSOP_* protocol) plus the block-device cell (the kernel's entire remaining storage role) and in_caller_region validation - grant/safecopy are the enforced bulk-transfer primitive, see "Grant/safecopy IPC" above
+  src/tasks.rs       up to 5 task slots (task 0 = loaded program, task 1 = idle, task 2 = filesystem server, slots 3-4 spawn/exit-cycled) + the round-robin scheduler over Runnable/Blocked/Unused/Zombie task state (block_current_and_switch, exit_current_and_switch, on_tick's wake-check, tasks::spawn, allocate_runtime_region/free_runtime_region, mailboxes with direct delivery + sender-filtered receive, per-task grant slots + safecopy for the bulk-transfer primitive) - confirmed working, see "Blocking primitives", "Dynamic task creation and exec()", "Task destruction", "Driver isolation" parts 1/2, and "Grant/safecopy IPC" above
   src/virtio_mmio.rs virtio-mmio transport: 32-slot device discovery, modern (non-legacy) register layout, addresses confirmed via devicetree dump
   src/block.rs       BlockDevice enum (Virtio | UsbMsd) - the block-device abstraction fat32.rs sits on, see "USB mass storage" above
   src/usb_msd.rs     USB mass storage: Bulk-Only Transport + SCSI (INQUIRY/READ CAPACITY/READ(10)/WRITE(10)) over xhci.rs's bulk endpoints - Parallels' first working disk, see "USB mass storage" above
@@ -4458,7 +4601,7 @@ shell/               userland default shell - a separate crate, built for aarch6
   linker.ld          self-relocating (PIE) linker script: entry at offset 0, .rela.dyn/.dynsym/.dynamic/.data.rel.ro, no .bss/.data (see "A real relocating loader" above and docs/processes.md)
   src/main.rs        line editor + command dispatch (help/echo/uptime/clear/ls/cat/cd/pwd/mkdir/rmdir/touch/rm/write/cp/mv/exec/exit/ps/kill/fg/selftest, plus `> file`/`>> file` output redirection on any of them - see "Output redirection" above), running as real EL0 userland code, built for real relocation (relocation-model=pic, --release only) - main loop blocks on read_char (syscall 15) instead of busy-polling, see "Blocking primitives" above; see docs/processes.md
 
-fsd/                 fifth userland program: THE FILESYSTEM SERVER (driver isolation part 2) - owns the FAT32 engine, speaks the FSOP_* protocol to clients over IPC, and is the only task the BLOCK_* syscalls accept; boot-loaded into protected task slot 2, see "Driver isolation, part 2" above
+fsd/                 fifth userland program: THE FILESYSTEM SERVER (driver isolation part 2) - owns the FAT32 engine, speaks the FSOP_* protocol to clients over IPC (including the bulk FSOP_READ_BULK/FSOP_WRITE_BULK ops that move file data via grant/safecopy - see "Grant/safecopy IPC" above), and is the only task the BLOCK_* syscalls accept; boot-loaded into protected task slot 2, see "Driver isolation, part 2" above
   src/main.rs        the request loop: recv -> decode FsRequest -> dispatch to Fs -> reply one u64; mounted Fs lives in main's stack frame (no static state in userland)
   src/fat32.rs       the kernel's old hand-rolled FAT32 module, moved essentially verbatim (MBR, BPB, FAT chains, 8.3 entries, full read/write support) plus read_at (windowed offset reads); its BlockDevice became disk.rs's syscall shim
   src/disk.rs        zero-sized Disk handle: read_sector/write_sector/capacity as BLOCK_READ/BLOCK_WRITE/BLOCK_INFO syscall wrappers
