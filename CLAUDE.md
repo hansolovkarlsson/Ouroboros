@@ -4495,6 +4495,109 @@ the grant is a single per-task slot (one in-flight call's worth, which
 is all the synchronous model needs); and there's still no stack guard
 page.
 
+## FAT32 offset-write (`write_at`): streaming `cp` and unbounded `>>`
+
+The follow-on the grant/safecopy milestone recorded as the exact thing
+needed for genuinely large file writes. Every write at the FAT32 layer
+was a **full replace**: `fat32::write_file` always allocated a fresh
+cluster chain (`write_chain`), freed the old one, and repointed the
+directory entry - it never mutated existing clusters and never did a
+partial-sector write. So `cp`/`>>` were each bounded by one in-memory
+buffer, and `cp` of a file over `SAFECOPY_MAX` (2048) refused outright.
+
+**`fat32::write_at(path, offset, data)`** writes `data` at a byte
+`offset`, extending the file (allocating clusters, growing the size
+field), **without** rewriting the bytes before `offset`. Most of it
+reuses primitives that were already there - the chain walk
+(`next_cluster`), cluster allocation/linking (`find_free_cluster` +
+`write_fat_entry`), the size/cluster patch (`patch_entry_cluster_size`),
+and `read_at`'s offset-traversal template. **The one genuinely new
+primitive is `write_partial_sector` - a read-modify-write of a partial
+sector of file *data*.** Before this, RMW existed only for metadata
+(directory entries via `patch_entry_cluster_size`, FAT entries via
+`write_fat_entry`); every data write built fresh whole clusters and had
+nothing to preserve. The per-sector write decides, for each sector: a
+**full** sector is written directly (no read); a partial sector that
+overlaps the file's existing content (`sector_start < old_size`) is
+**RMW'd** (read, splice, write - preserving the bytes outside the write
+window); a partial sector entirely past the old end of file is
+**zero-padded** (`write_chain`'s pattern - freshly allocated, nothing to
+preserve). Grow-only size update (`max(old_size, offset+len)`); a
+previously-empty (`touch`ed, cluster-0) file gets its head cluster
+allocated here; a write past EOF is refused (`Error::InvalidOffset` - no
+sparse gaps, which sequential/append callers never hit). `extend_chain`
+factors out the allocate-mark-link tail extension. A new `FSOP_WRITE_AT`
+(op 13) carries the data via grant/safecopy `GRANT_READ`, structurally
+identical to `FSOP_WRITE_BULK`.
+
+**`cp` streams now, and copies a file of any size.** `cmd_cp` probes the
+source exists (via a one-byte `fs_read_file` stat - so a bad source
+*never* clobbers the destination), truncates/creates `dst` empty
+(`fs_write_bulk(dst, &[])`), then loops `fs_read_bulk(src, off, chunk)` →
+`fs_write_at(dst, off, chunk)` over a rising offset until the read
+returns 0. No buffer ever holds more than one `SAFECOPY_MAX` chunk, so
+`cp` handles a file bounded only by disk space. **A real correctness trap
+caught by design, not testing: `cp x x` (self-copy) is guarded.**
+Streaming truncates `dst` first, which would destroy `src` if they're
+the same resolved path - the old read-whole-then-write cp was safe by
+construction, this isn't. Reuses `mv`'s exact same-path byte-equality
+check (two runtime buffers, relocation-safe). Streaming cp is also
+**non-atomic** (an interrupted copy leaves `dst` truncated) - inherent to
+streaming without holding the whole file; "a partial copy is a wrong
+copy" is already the stance.
+
+**A subtle test-coverage point worth remembering: streaming `cp` never
+exercises the RMW branch.** Because cp truncates `dst` to empty first,
+`old_size` grows monotonically and every write lands sector-aligned at
+EOF (the zero-pad/full-sector branches) - the partial-sector RMW only
+fires when appending *into* an existing non-sector-aligned file, which is
+exactly what **`>>`** does. So write_at isn't fully exercised by cp
+alone; the `>>` rewire is what proves the RMW path.
+
+**`>>` appends at the file's end via `write_at` now** - `finish_redirect`
+stats the destination's size (one-byte `fs_read_file`) and
+`fs_write_at(dst, size, captured)`, with no read-back of the existing
+content. This drops the old read-concatenate-rewrite's combined buffer
+*and* its "file too large to append to" refusal, so `>>` works on a
+target of any existing size (the new output is still bounded by the
+1024-byte capture - the input side). A missing `dst` is created
+(`fs_write_bulk`). `write`/`>` are unchanged. The now-unused `fs_read_all`
+helper and `APPEND_BUFFER_SIZE` constant were removed.
+
+**Confirmed on QEMU against the real FAT32 `esp.img`, tested holistically
+because write_at is dead code until wired** (so the primitive and both
+consumers landed and were proven together, the project's "prove a
+primitive via its first consumer" pattern): streaming `cp` of a 5564-byte
+non-sector-aligned multi-chunk text file is byte-exact (chunk-boundary
+markers all present, all 120 lines in order); `cp` of the 72KB shell
+binary persists **complete** across a reboot - the `.shstrtab` section
+name, which lives at the very *end* of the ELF (~72KB in), reads back on
+the fresh boot, proving all 36 streamed chunks landed and the size field
+is right at scale; `>>` appends correctly and **preserves existing
+content** on both a tiny file (RMW of sector 0) and the 5564-byte file
+(RMW of the last partial sector, which the old `>>` refused as
+">1024"); `cp x x` refused; a missing source leaves `dst` untouched;
+inline `write` unaffected; `make run`'s FAT16 degrades to the shared "no
+filesystem mounted" message. Zero aborts (`Data Abort`/`Prefetch
+Abort`/`Undefined Instruction`) in `-d int` cross-checks across every
+session (main cp/`>>`, reboot persistence, small-file RMW, FAT16
+degradation).
+
+**Real hardware:** the write path writes to the USB stick, and this
+project's standing policy is **reads-only on the real stick without an
+explicit go-ahead**. QEMU proves the write path end to end; a
+real-hardware write exercise (a scratch file on the stick) is left gated
+on that go-ahead, with a read-only regression available meanwhile.
+
+**Still coarse, worth knowing before building on this:** no
+*interior/random-access* writes - `write_at` refuses an offset past the
+current end of file (no sparse files), so it does append and
+sequential-overwrite, not seek-anywhere (a future editor/log would want
+that); streaming `cp` is non-atomic (truncate-then-append); the *new*
+content of a single `write`/`>>` is still bounded by its input source
+(the 128-byte line / the 1024-byte capture), which a userland heap +
+guard page would lift; and directories still never shrink.
+
 ## Commands
 
 ```sh
@@ -4620,7 +4723,7 @@ shell/               userland default shell - a separate crate, built for aarch6
 
 fsd/                 fifth userland program: THE FILESYSTEM SERVER (driver isolation part 2) - owns the FAT32 engine, speaks the FSOP_* protocol to clients over IPC (including the bulk FSOP_READ_BULK/FSOP_WRITE_BULK ops that move file data via grant/safecopy - see "Grant/safecopy IPC" above), and is the only task the BLOCK_* syscalls accept; boot-loaded into protected task slot 2, see "Driver isolation, part 2" above
   src/main.rs        the request loop: recv -> decode FsRequest -> dispatch to Fs -> reply one u64; mounted Fs lives in main's stack frame (no static state in userland)
-  src/fat32.rs       the kernel's old hand-rolled FAT32 module, moved essentially verbatim (MBR, BPB, FAT chains, 8.3 entries, full read/write support) plus read_at (windowed offset reads); its BlockDevice became disk.rs's syscall shim
+  src/fat32.rs       the kernel's old hand-rolled FAT32 module, moved essentially verbatim (MBR, BPB, FAT chains, 8.3 entries, full read/write support) plus read_at (windowed offset reads) and write_at (offset writes that extend the file via a partial-sector read-modify-write - streaming cp and unbounded >>, see "FAT32 offset-write" above); its BlockDevice became disk.rs's syscall shim
   src/disk.rs        zero-sized Disk handle: read_sector/write_sector/capacity as BLOCK_READ/BLOCK_WRITE/BLOCK_INFO syscall wrappers
 
 upper/               sixth userland program: the pipeline filter demo (uppercases its piped input) - the reference for the filter-program shape: stdin = msg_recv, stdout = putc, EOF = the empty message, finish = exit; see "Pipelines" above

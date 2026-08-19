@@ -429,8 +429,13 @@ grant/safecopy rather than inline: `FSOP_READ_BULK` (params
 `SAFECOPY_MAX` bytes into the client's `GRANT_WRITE` buffer, status =
 bytes delivered — `cat` loops it to stream any size) and
 `FSOP_WRITE_BULK` (params `path len, data len`; the server `safecopy`s
-the client's `GRANT_READ` buffer out, then writes — `cp` and redirect
-use it). The shell's `fs_*` wrapper functions
+the client's `GRANT_READ` buffer out, then writes), and `FSOP_WRITE_AT`
+(params `path len, offset, data len`; same `GRANT_READ` transfer, but
+`fat32::write_at` writes the data at a byte `offset` and *extends* the
+file rather than replacing it — **without** rewriting the bytes before
+`offset`, the FAT32 offset-write primitive behind streaming `cp` and
+unbounded `>>`; a write past the current end of file is refused, no
+sparse gaps). The shell's `fs_*` wrapper functions
 (`shell/src/main.rs::fs_call` and friends) are the reference client.
 This inline-payload design is the first half of MINIX's — small
 messages plus kernel-mediated copies — and the grant/safecopy primitive

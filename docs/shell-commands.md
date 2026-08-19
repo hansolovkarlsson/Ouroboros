@@ -73,7 +73,7 @@ implement a completely different command set.
 | `touch` | `touch <file>` | Creates an empty (zero-byte) file, or succeeds silently if one already exists there. | There's no RTC on this kernel, so unlike real `touch`, an existing file's "timestamp" isn't updated — nothing happens, successfully. Fails if the target is a directory. |
 | `rm` | `rm <file>` | Removes a file. | Fails if it doesn't exist or is a directory — use `rmdir` for those. |
 | `write` | `write <file> [words...]` | Joins every word after the filename with a single space (same style as `echo`) and writes the result as the file's *entire* contents, replacing whatever was there. Creates the file if it doesn't exist. | `write <file>` with no words truncates the file to empty (a real, valid case, not an error). Fails if the target is an existing directory or the parent is missing. |
-| `cp` | `cp <src> <dst>` | Copies `src`'s contents to `dst`, creating `dst` if it doesn't exist or replacing it if it does. | Reads `src` fully into a buffer (up to `SAFECOPY_MAX`, 2048 bytes — the grant/safecopy bulk path raised this from 512) before writing anything to `dst`, so copying a file onto itself is safe. Refuses (rather than truncating) if `src` is larger than that buffer — a partial copy is a wrong copy. No recursive directory copy. |
+| `cp` | `cp <src> <dst>` | Copies `src`'s contents to `dst`, creating `dst` if it doesn't exist or replacing it if it does. | **Streams the copy one chunk at a time via the FAT32 offset-write primitive, so it handles a file of any size** (bounded by disk space, not a shell buffer) — the old 2048-byte ceiling is gone. `cp x x` (a file onto itself, however the two paths are spelled) is **refused**: streaming truncates `dst` first, which would destroy the source. A missing source leaves `dst` untouched. Non-atomic: an interrupted copy leaves `dst` truncated (a partial copy is a wrong copy). No recursive directory copy. |
 | `ps` | `ps` | One line per scheduler slot: `unused`, `runnable`, `blocked (waiting)`, or `` exited - `wait` to collect its status `` (a zombie holding its slot). | The caller can't distinguish "running right now" from "runnable" — it is, by definition, the one running when it asks. Output is redirectable like any other command's. |
 | `kill` | `kill <n>` | Destroys task `n` (see `ps` for numbers). | Tasks 0 (this shell), 1 (idle), and 2 (the filesystem server) are protected. A killed task's slot becomes spawnable again and its memory is reclaimed when allocation order allows. |
 | `fg` | `fg <n>` | Hands the keyboard to task `n` — e.g. `exec /EFI/ORBS/SH.BIN` then `fg 2` gives a real nested shell session; its `exit` hands the keyboard back. | **Ctrl+C is the escape hatch**: typed while another task owns the keyboard, the kernel reclaims it for this shell (the foregrounded task keeps running in the background — Ctrl+C is keyboard reclamation, not a signal; `kill` the task if it should die too). Ownership also reverts automatically when the foregrounded task exits or is killed. While this shell owns the keyboard, Ctrl+C (like every unhandled control byte) is ignored by the line editor. |
@@ -129,13 +129,13 @@ Limits, all refuse-outright rather than write-something-wrong:
   because it nests with `cat`'s streaming chunk on the shell's fixed,
   unguarded 8KB stack); a command that emits more than that prints
   `output too large to capture` and **nothing is written at all**.
-- `>>` is shell-side read-concatenate-rewrite (the kernel/FAT32 layer
-  has no append/offset-write primitive — every write is a full
-  replace), bounded by the same 1024-byte combined buffer: appending
-  where existing content plus new output would exceed it prints
-  `file too large to append to` and leaves the file untouched. (Both
-  halves now use the bulk path, so this is a stack-driven limit, not
-  the old 512-byte syscall cap.)
+- `>>` **appends at the file's end via the FAT32 offset-write
+  primitive** (`write_at`) — no read-back of the existing content, so it
+  works on a target file of **any existing size** (the old
+  read-concatenate-rewrite capped both halves at a combined buffer and
+  refused a large existing file; that refusal is gone). The *new* output
+  is still bounded by the 1024-byte capture above — the input side — but
+  what you append it to is not.
 
 ## Pipelines
 

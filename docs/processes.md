@@ -430,21 +430,20 @@ Worth knowing before building further on this:
   userland-memory-bound (no heap, 8KB stack); and there's still no stack
   *guard page* (an overflow can corrupt the program's own region
   silently - within its own isolation boundary, not another task's).
-- **Write support (phases 4-8) covers directories, files with real
-  content, copying, and renaming/moving, but every write fully replaces
-  a file rather than appending or writing at an offset.** No recursive
-  `cp`, no move-into-an-existing-directory-keeping-basename shortcut for
-  `mv`, no cycle detection (`mv` a directory into its own descendant
-  isn't guarded against). Output redirection (`>`/`>>`) exists now,
-  but entirely shell-side (see `docs/shell-commands.md`'s "Output
-  redirection" section) — `>>` composes read-then-full-rewrite (now
-  over the grant/safecopy bulk path, bounded by a 1024-byte combined
-  buffer chosen for stack safety, not the old 512 syscall cap), since
-  there's still no real append/offset-write primitive at the syscall or
-  FAT32 layer;
-  `cp`/`mv`/redirection all needed no new read/write primitives beyond
-  what already existed (see `CLAUDE.md`'s "Phase 7"/"Phase 8"/"Output
-  redirection" sections). A parent directory that's out of free
+- **Write support covers directories, files with real content,
+  copying, renaming/moving, and now writing at a byte offset**
+  (`fat32::write_at` - write data at an offset, extending the file,
+  without rewriting the bytes before it, via a partial-sector
+  read-modify-write). `cp` streams through it and handles a file of any
+  size; `>>` appends at the end of a file of any existing size. What's
+  still missing: no *interior/random-access* or sparse writes (`write_at`
+  refuses an offset past the current end of file), no recursive `cp`, no
+  move-into-an-existing-directory-keeping-basename shortcut for `mv`, no
+  cycle detection (`mv` a directory into its own descendant isn't guarded
+  against). Output redirection (`>`/`>>`) is entirely shell-side (see
+  `docs/shell-commands.md`'s "Output redirection" section) - `>` is a
+  full replace, `>>` is a `write_at` append; the *new* output is bounded
+  by the 1024-byte capture, but the target file it appends to isn't. A parent directory that's out of free
   entry slots is grown by a cluster automatically (`insert_dir_entry`'s
   extension — directories never *shrink*, though: an emptied extension
   cluster stays linked until the directory is removed). Every filesystem

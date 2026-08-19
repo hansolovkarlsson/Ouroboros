@@ -7,6 +7,48 @@ what broke, how it was diagnosed), see `CLAUDE.md`; for *how* something
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## FAT32 offset-write (`write_at`): streaming `cp`, unbounded `>>`
+
+The follow-on the grant/safecopy milestone recorded. Every write at the
+FAT32 layer was a **full replace** - `write_file` allocated a fresh
+cluster chain, freed the old, repointed the entry, and never touched
+existing clusters or wrote a partial sector - so `cp`/`>>` were each
+bounded by one in-memory buffer and `cp` of a file over `SAFECOPY_MAX`
+(2048) refused outright.
+
+`fat32::write_at(path, offset, data)` writes at a byte offset and
+**extends** the file without rewriting the bytes before it. The one
+genuinely new primitive is a partial-sector **read-modify-write for file
+data** (RMW previously existed only for metadata - directory and FAT
+entries); a sector overlapping existing content is read, spliced, and
+written back, a sector past the old end of file is zero-padded, a full
+sector skips the read. It reuses the chain walk, cluster allocation, and
+size-field patching that were already there, adds a grow-only size
+update, and refuses a write past EOF (no sparse gaps). A new
+`FSOP_WRITE_AT` carries the data via grant/safecopy exactly like
+`FSOP_WRITE_BULK`.
+
+`cp` streams now - probe the source, truncate the destination, then loop
+read-a-chunk/`write_at`-at-the-offset - so it copies a file of **any
+size** (bounded by disk space, not a shell buffer). `cp x x` (self-copy)
+is refused, because streaming truncates the destination first, which
+would destroy the source (the old read-whole-then-write cp was safe by
+construction; this isn't). `>>` appends at the file's end via `write_at`
+(no read-back), so it works on a target of any existing size - the old
+"file too large to append to" refusal is gone.
+
+Verified on QEMU against the real FAT32 image: streaming `cp` of a
+5564-byte (non-sector-aligned, multi-chunk) text file is byte-exact
+(chunk-boundary markers and all 120 lines correct); `cp` of the 72KB
+shell binary persists complete across a reboot (the `.shstrtab` section
+name, at the very end of the ELF ~72KB in, reads back - all 36 streamed
+chunks landed); `>>` appends correctly and preserves existing content on
+both a tiny file (RMW of sector 0) and a 5564-byte file (RMW of the last
+partial sector, previously refused); `cp x x` refused; a missing source
+leaves the destination untouched; inline `write` unaffected; FAT16
+degrades to the shared no-filesystem message. Zero aborts throughout.
+Real-hardware write testing is gated on the reads-only stick policy.
+
 ## Grant/safecopy IPC: enforced capability-based bulk transfer
 
 The second half of MINIX's IPC design, and the fix for the last

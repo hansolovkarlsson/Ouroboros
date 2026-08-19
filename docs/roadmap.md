@@ -452,12 +452,19 @@ phase:
   active call), lifting the 512-byte per-op cap for file reads/writes to
   `SAFECOPY_MAX` (2048): `cat` streams any size, `cp`/redirect handle
   larger files. This is the second half of MINIX's IPC design (small
-  messages + kernel-mediated copies). **Still next** (not yet scoped):
-  a **grant/safecopy for bulk data beyond one buffer** (a reusable
-  multi-op grant, or a FAT32 **offset/append-write** primitive) so
-  `write`/`cp`/`>>` of genuinely large files stop refusing-past-2048;
-  a **userland heap and/or a stack guard page** (the real ceiling on a
-  single transfer is the fixed 8KB unguarded stack); moving further
-  components out of the kernel; and program-to-program pipes (a task's
-  own output still isn't capturable, so pipelines are builtin-left only
-  - a stdout-over-IPC model is the real fix).
+  messages + kernel-mediated copies).
+- **The FAT32 offset-write primitive (`fat32::write_at`) is done** -
+  write at a byte offset, extending the file, without rewriting the
+  bytes before it (a partial-sector read-modify-write, the one piece no
+  prior write path had). `cp` streams through it and copies a file of
+  **any size** now (proven on QEMU with the 72KB shell binary,
+  reboot-persisted); `>>` appends at the end of a file of any existing
+  size (the old "too large to append" refusal is gone). **Still next**
+  (not yet scoped): *interior/random-access* writes (`write_at` refuses
+  an offset past EOF - no sparse files) for a future editor/log; a
+  **userland heap and/or a stack guard page** (the fixed 8KB unguarded
+  stack is the remaining ceiling on a single non-streaming buffer, and
+  what a `write`/`>>` of a large *single* payload would need); moving
+  further components out of the kernel; and program-to-program pipes (a
+  task's own output still isn't capturable, so pipelines are builtin-left
+  only - a stdout-over-IPC model is the real fix).
