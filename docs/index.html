@@ -15,6 +15,7 @@
     <a class="sitenav-mark" href="index.html">ouroboros</a>
     <div class="sitenav-links">
       <a href="index.html" class="current">Home</a>
+      <a href="architecture-overview.html">Architecture</a>
       <a href="tutorial.html">Learn</a>
       <a href="postmortem-boot-bringup.html">Boot bring-up</a>
       <a href="postmortem-shell-filesystem.html">Shell &amp; filesystem</a>
@@ -43,6 +44,7 @@
 
   <div class="hero-links">
     <a class="primary" href="https://github.com/hansolovkarlsson/Ouroboros">View the source →</a>
+    <a href="architecture-overview.html">See the architecture</a>
     <a href="#learn">Learn to build one</a>
     <a href="#postmortems">Read the postmortems</a>
     <a href="#status">Current status</a>
@@ -142,6 +144,25 @@
         <p>Driver isolation, part 2: moving the FAT32 filesystem out of the kernel into a userland server — the textbook microkernel move, speaking the new IPC to clients and raw block syscalls to the kernel.</p>
       </li>
     </ol>
+
+    <h2 id="architecture">Architecture at a glance</h2>
+
+    <p>
+      Before the debugging stories or the build-it-yourself tutorial,
+      the shortest way in: a single visual page laying out the layers,
+      the EL0/EL1 privilege boundary everything crosses, and who is
+      responsible for what — including the one design decision that
+      defines this kernel, a filesystem that runs as an unprivileged,
+      restartable userland process.
+    </p>
+
+    <div class="postmortem-cards">
+      <a class="pm-card" href="architecture-overview.html">
+        <span class="pm-eyebrow">Overview · the layers</span>
+        <h3>The shape of the system</h3>
+        <p>Six diagrams: the privilege stack, what the kernel keeps versus what it pushes out, the five task slots, the MMU-enforced isolation model, a single <code class="inline">cat</code> traced across the boundary as a sequence of traps, and the boot sequence from firmware to EL0.</p>
+      </a>
+    </div>
 
     <h2 id="learn">Learn: build one yourself</h2>
 

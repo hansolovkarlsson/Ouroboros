@@ -3,471 +3,339 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Ouroboros Architecture</title>
-<meta name="description" content="How Ouroboros — an ARM64 microkernel for Apple Silicon — separates its layers: the EL0/EL1 privilege boundary, a userland filesystem server, and MMU-enforced task isolation.">
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@600;700;800&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<title>Ouroboros — architecture at a glance</title>
+<meta name="description" content="How Ouroboros — an ARM64 microkernel for Apple Silicon — separates its layers: the EL0/EL1 privilege boundary, a filesystem running as an unprivileged userland process, and MMU-enforced task isolation.">
+<link rel="icon" type="image/png" href="assets/favicon.png">
+<link rel="stylesheet" href="assets/site.css">
 <style>
-  :root{
-    --bg:#eef1f4;
-    --surface:#ffffff;
-    --surface-2:#f4f6f9;
-    --surface-3:#e9edf1;
-    --ink:#181d24;
-    --ink-soft:#49525e;
-    --ink-faint:#7c8794;
-    --line:#d6dce2;
-    --line-strong:#bcc5cf;
-    --accent:#b7641f;
-    --accent-ink:#8f4e18;
-    --accent-soft:rgba(183,100,31,0.11);
-    --accent-line:rgba(183,100,31,0.42);
-    --kernel:#1b6b74;
-    --kernel-soft:rgba(27,107,116,0.10);
-    --kernel-line:rgba(27,107,116,0.38);
-    --crit:#a83e37;
-    --crit-soft:rgba(168,62,55,0.10);
-    --shadow:0 1px 2px rgba(20,30,40,0.05),0 8px 26px rgba(20,30,40,0.07);
-    --shadow-lift:0 2px 6px rgba(20,30,40,0.08),0 18px 44px rgba(20,30,40,0.12);
-  }
-  @media (prefers-color-scheme: dark){
-    :root:not([data-theme="light"]){
-      --bg:#0f131a;
-      --surface:#161c24;
-      --surface-2:#1c232d;
-      --surface-3:#232b36;
-      --ink:#e7ecf2;
-      --ink-soft:#a6b1bf;
-      --ink-faint:#6c7783;
-      --line:#28313d;
-      --line-strong:#3a4653;
-      --accent:#d98a45;
-      --accent-ink:#e6a568;
-      --accent-soft:rgba(217,138,69,0.15);
-      --accent-line:rgba(217,138,69,0.5);
-      --kernel:#4bb3bd;
-      --kernel-soft:rgba(75,179,189,0.13);
-      --kernel-line:rgba(75,179,189,0.42);
-      --crit:#dc7369;
-      --crit-soft:rgba(220,115,105,0.14);
-      --shadow:0 1px 2px rgba(0,0,0,0.4),0 10px 30px rgba(0,0,0,0.42);
-      --shadow-lift:0 2px 8px rgba(0,0,0,0.45),0 22px 50px rgba(0,0,0,0.55);
-    }
-  }
-  :root[data-theme="dark"]{
-    --bg:#0f131a;
-    --surface:#161c24;
-    --surface-2:#1c232d;
-    --surface-3:#232b36;
-    --ink:#e7ecf2;
-    --ink-soft:#a6b1bf;
-    --ink-faint:#6c7783;
-    --line:#28313d;
-    --line-strong:#3a4653;
-    --accent:#d98a45;
-    --accent-ink:#e6a568;
-    --accent-soft:rgba(217,138,69,0.15);
-    --accent-line:rgba(217,138,69,0.5);
-    --kernel:#4bb3bd;
-    --kernel-soft:rgba(75,179,189,0.13);
-    --kernel-line:rgba(75,179,189,0.42);
-    --crit:#dc7369;
-    --crit-soft:rgba(220,115,105,0.14);
-    --shadow:0 1px 2px rgba(0,0,0,0.4),0 10px 30px rgba(0,0,0,0.42);
-    --shadow-lift:0 2px 8px rgba(0,0,0,0.45),0 22px 50px rgba(0,0,0,0.55);
-  }
+  /* Page-specific diagram components, built on the shared site tokens
+     so this page reads as part of the same series. The privilege split
+     is drawn with the site's own device: light surface = EL0 userland,
+     the dark register/terminal panel = the EL1 kernel. Amber stays the
+     one accent, reserved here for the privilege boundary and the traps
+     that cross it. */
 
-  *{box-sizing:border-box}
-  html{-webkit-text-size-adjust:100%}
-  body{
-    margin:0;
-    background:var(--bg);
-    color:var(--ink);
-    font-family:"IBM Plex Sans",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
-    font-size:17px;
-    line-height:1.62;
-    -webkit-font-smoothing:antialiased;
-    text-rendering:optimizeLegibility;
+  .page.arch { max-width: 880px; }
+
+  .arch figure { margin: 1.8rem 0 0.4rem; }
+  .arch figcaption {
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    color: var(--panel-dim);
+    letter-spacing: 0.02em;
+    margin: 0.7rem 0 0;
+    line-height: 1.5;
   }
-  .wrap{max-width:1080px;margin:0 auto;padding:0 clamp(18px,4vw,44px)}
-  .spine{max-width:660px}
+  .arch figcaption .fig { color: var(--amber); font-weight: 700; }
 
-  h1,h2,h3{font-family:"Archivo",sans-serif;font-weight:800;line-height:1.08;letter-spacing:-0.02em;text-wrap:balance;margin:0}
-  h2{font-size:clamp(1.5rem,3.4vw,2.05rem);letter-spacing:-0.025em}
-  h3{font-size:1.06rem;font-weight:700;letter-spacing:-0.01em;font-family:"IBM Plex Sans",sans-serif}
-  p{margin:0 0 1.05em}
-  a{color:var(--accent-ink);text-decoration:none;border-bottom:1px solid var(--accent-line)}
-  a:hover{border-bottom-color:var(--accent)}
-  a:focus-visible{outline:2px solid var(--accent);outline-offset:3px;border-radius:2px}
-  code,.mono{font-family:"IBM Plex Mono",ui-monospace,monospace}
-  code{font-size:0.86em;background:var(--surface-2);border:1px solid var(--line);padding:0.08em 0.36em;border-radius:5px;color:var(--ink)}
-  .lede{font-size:1.16rem;color:var(--ink-soft)}
-  strong{font-weight:600;color:var(--ink)}
-
-  .eyebrow{
-    font-family:"IBM Plex Mono",monospace;font-size:0.72rem;font-weight:600;
-    letter-spacing:0.16em;text-transform:uppercase;color:var(--accent-ink);
-    display:inline-flex;align-items:center;gap:0.5em;
+  /* ---- privilege stack ---- */
+  .pstack { display: flex; flex-direction: column; margin: 0; }
+  .pband { border-radius: 9px; padding: 1rem 1.1rem; border: 1px solid var(--wire); }
+  .pband.kern { background: var(--panel-bg); border-color: var(--panel-border); }
+  .pband-head { display: flex; align-items: center; gap: 0.6rem; margin-bottom: 0.85rem; flex-wrap: wrap; }
+  .pband-head .name { font-family: var(--font-mono); font-weight: 700; font-size: 0.92rem; color: var(--ink); }
+  .pband.kern .pband-head .name { color: var(--panel-text); }
+  .pband-head .role { font-family: var(--font-mono); font-size: 0.72rem; color: var(--panel-dim); margin-left: auto; }
+  .el {
+    font-family: var(--font-mono); font-size: 0.72rem; font-weight: 700;
+    padding: 0.15rem 0.5rem; border-radius: 5px; letter-spacing: 0.04em;
+    background: var(--amber-soft); color: var(--amber); border: 1px solid var(--amber);
   }
-  .eyebrow::before{content:"";width:1.7em;height:1px;background:var(--accent-line)}
-
-  /* ---- header / hero ---- */
-  header.hero{padding:clamp(46px,9vw,104px) 0 clamp(30px,5vw,52px)}
-  .brandrow{display:flex;align-items:center;gap:0.7em;margin-bottom:clamp(24px,5vw,40px)}
-  .glyph{width:30px;height:30px;flex:none}
-  .brandname{font-family:"Archivo",sans-serif;font-weight:700;font-size:0.98rem;letter-spacing:0.02em}
-  .kicker{margin-left:auto;font-family:"IBM Plex Mono",monospace;font-size:0.74rem;color:var(--ink-faint);letter-spacing:0.04em}
-  h1{font-size:clamp(2.5rem,7vw,4.4rem);letter-spacing:-0.035em}
-  h1 .thin{display:block;font-weight:600;font-size:clamp(1.02rem,2.5vw,1.35rem);letter-spacing:0.01em;color:var(--ink-soft);margin-top:1.1rem;max-width:34ch;line-height:1.42}
-  .thesis{margin-top:clamp(26px,4vw,40px);max-width:60ch;font-size:1.14rem;color:var(--ink-soft)}
-  .thesis b{color:var(--ink);font-weight:600}
-
-  .facts{display:flex;flex-wrap:wrap;gap:0;margin-top:clamp(30px,5vw,44px);border:1px solid var(--line);border-radius:12px;overflow:hidden;background:var(--surface)}
-  .fact{flex:1 1 130px;padding:16px 20px;border-right:1px solid var(--line)}
-  .fact:last-child{border-right:0}
-  .fact .n{font-family:"Archivo",sans-serif;font-weight:800;font-size:1.7rem;letter-spacing:-0.03em;line-height:1}
-  .fact .l{font-size:0.8rem;color:var(--ink-faint);margin-top:6px;letter-spacing:0.01em}
-
-  /* ---- section rhythm ---- */
-  section{padding:clamp(40px,7vw,72px) 0;border-top:1px solid var(--line)}
-  .sechead{margin-bottom:clamp(26px,4vw,38px)}
-  .sechead h2{margin-top:0.6rem}
-  .sechead .sub{margin-top:0.9rem;color:var(--ink-soft);max-width:62ch}
-
-  /* ---- figure plate ---- */
-  figure{margin:clamp(26px,4vw,40px) 0 0}
-  .plate{
-    background:var(--surface);border:1px solid var(--line);border-radius:16px;
-    box-shadow:var(--shadow);padding:clamp(18px,3vw,30px);overflow:hidden;
+  .el.e1 { background: transparent; color: var(--panel-amber); border-color: var(--panel-border); }
+  .chips { display: flex; flex-wrap: wrap; gap: 0.4rem; }
+  .chip {
+    font-family: var(--font-mono); font-size: 0.74rem; font-weight: 500;
+    padding: 0.35rem 0.55rem; border-radius: 6px;
+    background: var(--paper); border: 1px solid var(--wire); color: var(--ink);
+    display: inline-flex; align-items: center; gap: 0.4em;
   }
-  figcaption{
-    margin-top:14px;font-size:0.85rem;color:var(--ink-faint);
-    display:flex;gap:0.7em;align-items:baseline;
-  }
-  figcaption .fig{font-family:"IBM Plex Mono",monospace;font-weight:600;color:var(--accent-ink);letter-spacing:0.05em;white-space:nowrap}
+  .chip .n { color: var(--panel-dim); font-size: 0.9em; }
+  .pband.kern .chip { background: rgba(255,255,255,0.045); border-color: var(--panel-border); color: var(--panel-text); }
+  .pband.kern .chip .n { color: var(--panel-dim); }
+  .chip.pro { border-color: var(--amber); }
+  .chip.pro .dot { color: var(--amber); font-size: 0.6em; }
 
-  /* ---- the privilege stack ---- */
-  .stack{display:flex;flex-direction:column;gap:0}
-  .band{border-radius:12px;padding:clamp(14px,2.4vw,20px);border:1px solid}
-  .band.el0{background:var(--accent-soft);border-color:var(--accent-line)}
-  .band.el1{background:var(--kernel-soft);border-color:var(--kernel-line)}
-  .band-label{display:flex;align-items:center;gap:0.6em;margin-bottom:14px;flex-wrap:wrap}
-  .lvl{font-family:"IBM Plex Mono",monospace;font-weight:600;font-size:0.78rem;letter-spacing:0.04em;padding:3px 9px;border-radius:6px}
-  .lvl.el0{background:var(--accent);color:#fff}
-  .lvl.el1{background:var(--kernel);color:#fff}
-  .band-label .name{font-family:"Archivo",sans-serif;font-weight:700;font-size:0.98rem}
-  .band-label .role{font-size:0.82rem;color:var(--ink-soft);margin-left:auto}
-  .chips{display:flex;flex-wrap:wrap;gap:8px}
-  .chip{
-    background:var(--surface);border:1px solid var(--line-strong);border-radius:8px;
-    padding:7px 11px;font-size:0.82rem;font-weight:500;display:flex;align-items:center;gap:0.5em;
+  .pbound { position: relative; padding: 0.9rem 0; text-align: center; }
+  .pbound::before {
+    content: ""; position: absolute; left: 7%; right: 7%; top: 50%; height: 2px;
+    background: repeating-linear-gradient(90deg, var(--amber) 0 12px, transparent 12px 22px); opacity: 0.9;
   }
-  .chip .mono{font-size:0.74rem;color:var(--ink-faint)}
-  .chip.pro{border-color:var(--kernel-line)}
-  .chip.pro .dot{color:var(--kernel)}
-  .chip .dot{color:var(--ink-faint);font-size:0.7em}
-
-  .boundary{
-    position:relative;margin:6px 0;padding:12px 0;text-align:center;
-  }
-  .boundary::before{
-    content:"";position:absolute;left:8%;right:8%;top:50%;height:2px;
-    background:repeating-linear-gradient(90deg,var(--accent) 0 14px,transparent 14px 24px);
-    opacity:0.85;
-  }
-  .boundary span{
-    position:relative;background:var(--surface);border:1px solid var(--accent-line);
-    color:var(--accent-ink);font-family:"IBM Plex Mono",monospace;font-size:0.76rem;font-weight:600;
-    letter-spacing:0.02em;padding:5px 13px;border-radius:20px;box-shadow:var(--shadow);
+  .pbound span {
+    position: relative; background: var(--paper); border: 1px solid var(--amber);
+    color: var(--amber); font-family: var(--font-mono); font-size: 0.72rem; font-weight: 600;
+    padding: 0.35rem 0.85rem; border-radius: 20px;
   }
 
   /* ---- responsibility grid ---- */
-  .rgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:14px}
-  .rcard{
-    background:var(--surface);border:1px solid var(--line);border-radius:13px;padding:18px 18px 16px;
-    box-shadow:var(--shadow);transition:transform .18s ease,box-shadow .18s ease;
+  .rgrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 0.7rem; margin: 0; }
+  .rcard { background: var(--surface); border: 1px solid var(--wire); border-radius: 9px; padding: 0.9rem 1rem; }
+  .rcard .tag {
+    font-family: var(--font-mono); font-size: 0.64rem; font-weight: 700; letter-spacing: 0.09em;
+    text-transform: uppercase; color: var(--amber); display: block; margin-bottom: 0.45rem;
   }
-  .rcard:hover{transform:translateY(-2px);box-shadow:var(--shadow-lift)}
-  .rcard .tag{font-family:"IBM Plex Mono",monospace;font-size:0.7rem;font-weight:600;letter-spacing:0.08em;text-transform:uppercase;color:var(--kernel);display:block;margin-bottom:9px}
-  .rcard h3{margin-bottom:7px}
-  .rcard p{font-size:0.9rem;color:var(--ink-soft);margin:0}
-  .rcard p code{font-size:0.82em}
-  .rcard.out{border-style:dashed;border-color:var(--line-strong);background:var(--surface-2)}
-  .rcard.out .tag{color:var(--accent-ink)}
+  .rcard h3 { font-family: var(--font-mono); font-style: normal; font-weight: 600; font-size: 0.94rem; margin: 0 0 0.35rem; color: var(--ink); }
+  .rcard p { font-size: 0.86rem; color: var(--ink-soft); margin: 0; line-height: 1.5; }
+  .rcard.out { border-style: dashed; border-color: var(--wire-strong); background: var(--paper); }
+  .rcard.out .tag { color: var(--ink-soft); }
 
   /* ---- task table ---- */
-  .tasktable{width:100%;border-collapse:collapse;font-size:0.92rem}
-  .tasktable th,.tasktable td{text-align:left;padding:13px 14px;border-bottom:1px solid var(--line);vertical-align:top}
-  .tasktable thead th{font-size:0.72rem;letter-spacing:0.09em;text-transform:uppercase;color:var(--ink-faint);font-weight:600;border-bottom:1px solid var(--line-strong)}
-  .tasktable tr:last-child td{border-bottom:0}
-  .slot{font-family:"IBM Plex Mono",monospace;font-weight:600;color:var(--accent-ink)}
-  .tname{font-weight:600;white-space:nowrap}
-  .tasktable td .d{color:var(--ink-soft);font-size:0.88rem}
-  .badge{display:inline-block;font-family:"IBM Plex Mono",monospace;font-size:0.68rem;font-weight:600;letter-spacing:0.04em;padding:2px 8px;border-radius:5px;white-space:nowrap}
-  .badge.pro{background:var(--kernel-soft);color:var(--kernel);border:1px solid var(--kernel-line)}
-  .badge.spawn{background:var(--surface-3);color:var(--ink-soft);border:1px solid var(--line-strong)}
-  .badge.own{background:var(--accent-soft);color:var(--accent-ink);border:1px solid var(--accent-line)}
-
-  /* ---- isolation trio ---- */
-  .trio{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:14px;margin-top:8px}
-  .icell{background:var(--surface);border:1px solid var(--line);border-radius:13px;padding:20px;box-shadow:var(--shadow)}
-  .icell .num{font-family:"Archivo",sans-serif;font-weight:800;font-size:0.92rem;color:var(--accent-ink);letter-spacing:0.02em}
-  .icell h3{margin:12px 0 8px}
-  .icell p{font-size:0.9rem;color:var(--ink-soft);margin:0}
-
-  .memo{display:grid;grid-template-columns:1fr auto 1fr;gap:12px;align-items:stretch;margin-top:22px}
-  .memblk{border:1px solid var(--line-strong);border-radius:11px;padding:16px;background:var(--surface-2)}
-  .memblk .who{font-weight:600;font-size:0.9rem;margin-bottom:10px;display:flex;align-items:center;gap:0.5em}
-  .memblk .who .lvl{font-size:0.68rem;padding:2px 7px}
-  .memrow{font-family:"IBM Plex Mono",monospace;font-size:0.76rem;padding:6px 9px;border-radius:6px;margin-bottom:6px;border:1px solid var(--line)}
-  .memrow.mine{background:var(--accent-soft);border-color:var(--accent-line);color:var(--accent-ink)}
-  .memrow.locked{background:var(--surface-3);color:var(--ink-faint);text-decoration:line-through;text-decoration-color:var(--ink-faint)}
-  .memmid{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;min-width:96px;text-align:center}
-  .memmid .k{font-family:"IBM Plex Mono",monospace;font-size:0.7rem;color:var(--kernel);font-weight:600;letter-spacing:0.03em}
-  .memmid .arrow{color:var(--accent);font-size:1.3rem;line-height:1}
-  .memmid .cap{font-size:0.72rem;color:var(--ink-faint);max-width:14ch}
-
-  /* ---- swimlane data flow ---- */
-  .lane{position:relative;display:grid;grid-template-columns:1fr 1fr;gap:0 0}
-  .lane::before{content:"";position:absolute;left:50%;top:8px;bottom:8px;width:2px;transform:translateX(-1px);
-    background:repeating-linear-gradient(180deg,var(--accent) 0 12px,transparent 12px 22px);opacity:0.8}
-  .laneheads{display:grid;grid-template-columns:1fr 1fr;margin-bottom:14px;gap:12px}
-  .lanehead{display:flex;align-items:center;gap:0.55em;font-family:"Archivo",sans-serif;font-weight:700;font-size:0.9rem}
-  .lanehead.r{justify-content:flex-end}
-  .step{position:relative;padding:0 22px;margin-bottom:12px;min-height:1px}
-  .step .box{
-    background:var(--surface);border:1px solid var(--line);border-radius:11px;padding:12px 14px;box-shadow:var(--shadow);
+  .ttable-wrap { border: 1px solid var(--wire); border-radius: 9px; overflow-x: auto; background: var(--surface); }
+  table.ttable { width: 100%; border-collapse: collapse; font-size: 0.88rem; }
+  table.ttable th, table.ttable td { text-align: left; padding: 0.75rem 0.85rem; border-bottom: 1px solid var(--wire); vertical-align: top; }
+  table.ttable thead th {
+    font-family: var(--font-mono); font-size: 0.64rem; letter-spacing: 0.09em; text-transform: uppercase;
+    color: var(--panel-dim); font-weight: 700; border-bottom: 1px solid var(--wire-strong);
   }
-  .step.left .box{border-left:3px solid var(--accent)}
-  .step.right .box{border-right:3px solid var(--kernel)}
-  .step.right{grid-column:2}
-  .step.left{grid-column:1}
-  .step .sn{font-family:"IBM Plex Mono",monospace;font-size:0.72rem;font-weight:600;color:var(--ink-faint);letter-spacing:0.03em}
-  .step .st{font-size:0.9rem;margin-top:2px}
-  .step .st b{font-weight:600}
-  .step .st code{font-size:0.82em}
-  .step.cross .box::after{
-    content:"";position:absolute;top:50%;width:20px;height:2px;background:var(--accent);
+  table.ttable tr:last-child td { border-bottom: 0; }
+  table.ttable .slot { font-family: var(--font-mono); font-weight: 700; color: var(--amber); }
+  table.ttable .tname { font-family: var(--font-mono); font-weight: 600; color: var(--ink); white-space: nowrap; }
+  table.ttable .d { color: var(--ink-soft); }
+  .tbadge {
+    font-family: var(--font-mono); font-size: 0.62rem; font-weight: 700; letter-spacing: 0.03em;
+    padding: 0.12rem 0.45rem; border-radius: 5px; white-space: nowrap; display: inline-block;
   }
-  .step.left.cross .box::after{right:-20px}
-  .step.right.cross .box::after{left:-20px}
-  .step .tag2{display:inline-block;font-family:"IBM Plex Mono",monospace;font-size:0.68rem;color:var(--accent-ink);background:var(--accent-soft);border:1px solid var(--accent-line);border-radius:5px;padding:1px 6px;margin-top:7px;letter-spacing:0.02em}
-  .lanenote{margin-top:20px;padding:16px 18px;background:var(--kernel-soft);border:1px solid var(--kernel-line);border-radius:11px;font-size:0.92rem;color:var(--ink-soft)}
-  .lanenote b{color:var(--ink)}
+  .tbadge.pro { background: var(--amber-soft); color: var(--amber); border: 1px solid var(--amber); }
+  .tbadge.spawn { background: var(--paper); color: var(--ink-soft); border: 1px solid var(--wire-strong); }
+  .tbadge.own { background: var(--surface); color: var(--ink-soft); border: 1px solid var(--wire); }
+
+  /* ---- isolation trio + memory sketch ---- */
+  .trio { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 0.7rem; margin: 0; }
+  .icell { background: var(--surface); border: 1px solid var(--wire); border-radius: 9px; padding: 1rem 1.1rem; }
+  .icell .num { font-family: var(--font-mono); font-size: 0.72rem; font-weight: 700; color: var(--amber); letter-spacing: 0.03em; }
+  .icell h3 { font-family: var(--font-mono); font-style: normal; font-weight: 600; font-size: 0.94rem; margin: 0.6rem 0 0.4rem; color: var(--ink); }
+  .icell p { font-size: 0.86rem; color: var(--ink-soft); margin: 0; line-height: 1.5; }
+
+  .memo { display: grid; grid-template-columns: 1fr auto 1fr; gap: 0.8rem; align-items: stretch; }
+  .memblk { border: 1px solid var(--wire-strong); border-radius: 8px; padding: 0.9rem; background: var(--surface); }
+  .memblk .who { font-family: var(--font-mono); font-weight: 600; font-size: 0.82rem; color: var(--ink); margin-bottom: 0.6rem; display: flex; align-items: center; gap: 0.4em; }
+  .memblk .who .el { font-size: 0.62rem; padding: 0.05rem 0.35rem; }
+  .memrow { font-family: var(--font-mono); font-size: 0.72rem; padding: 0.35rem 0.5rem; border-radius: 5px; margin-bottom: 0.35rem; border: 1px solid var(--wire); }
+  .memrow.mine { background: var(--amber-soft); border-color: var(--amber); color: var(--amber); }
+  .memrow.locked { background: var(--paper); color: var(--panel-dim); text-decoration: line-through; }
+  .memmid { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 0.4rem; min-width: 88px; text-align: center; }
+  .memmid .k { font-family: var(--font-mono); font-size: 0.66rem; color: var(--ink-soft); font-weight: 600; line-height: 1.35; }
+  .memmid .ar { color: var(--amber); font-size: 1.2rem; line-height: 1; }
+
+  /* ---- swimlane ---- */
+  .laneheads { display: grid; grid-template-columns: 1fr 1fr; gap: 0.7rem; margin-bottom: 0.8rem; }
+  .lanehead { font-family: var(--font-mono); font-weight: 700; font-size: 0.8rem; color: var(--ink); display: flex; align-items: center; gap: 0.4em; }
+  .lanehead.r { justify-content: flex-end; }
+  .lane { position: relative; display: grid; grid-template-columns: 1fr 1fr; }
+  .lane::before {
+    content: ""; position: absolute; left: 50%; top: 6px; bottom: 6px; width: 2px; transform: translateX(-1px);
+    background: repeating-linear-gradient(180deg, var(--amber) 0 10px, transparent 10px 20px); opacity: 0.85;
+  }
+  .lstep { position: relative; padding: 0 1.1rem; margin-bottom: 0.65rem; }
+  .lstep.left { grid-column: 1; }
+  .lstep.right { grid-column: 2; }
+  .lstep .box { border-radius: 8px; padding: 0.7rem 0.85rem; }
+  .lstep.left .box { background: var(--surface); border: 1px solid var(--wire); border-left: 3px solid var(--amber); }
+  .lstep.right .box { background: var(--panel-bg); border: 1px solid var(--panel-border); border-right: 3px solid var(--panel-amber); }
+  .lstep .sn { font-family: var(--font-mono); font-size: 0.66rem; font-weight: 700; color: var(--panel-dim); letter-spacing: 0.03em; }
+  .lstep.right .sn { color: var(--panel-dim); }
+  .lstep .st { font-size: 0.86rem; margin-top: 0.15rem; line-height: 1.45; color: var(--ink); }
+  .lstep.right .st { color: var(--panel-text); }
+  .lstep .st b { font-weight: 700; }
+  .lstep .st code { font-family: var(--font-mono); font-size: 0.82em; color: var(--amber); }
+  .lstep.right .st code { color: var(--panel-amber); }
+  .lstep .op {
+    display: inline-block; font-family: var(--font-mono); font-size: 0.64rem; color: var(--amber);
+    background: var(--amber-soft); border: 1px solid var(--amber); border-radius: 5px; padding: 0.05rem 0.4rem; margin-top: 0.45rem;
+  }
+  .lnote { margin: 1rem 0 0; padding: 0.85rem 1rem; background: var(--amber-soft); border-radius: 6px; font-size: 0.88rem; color: var(--ink); line-height: 1.5; }
+  .lnote b { font-weight: 700; }
 
   /* ---- boot ribbon ---- */
-  .ribbon{display:flex;gap:0;overflow-x:auto;padding:4px 2px 10px;-webkit-overflow-scrolling:touch}
-  .rstep{flex:0 0 auto;min-width:132px;max-width:170px;padding:14px 16px;position:relative}
-  .rstep:not(:last-child)::after{content:"";position:absolute;right:-1px;top:20px;bottom:20px;width:1px;background:var(--line)}
-  .rstep .rn{font-family:"IBM Plex Mono",monospace;font-size:0.72rem;color:var(--accent-ink);font-weight:600}
-  .rstep .rt{font-weight:600;font-size:0.88rem;margin-top:5px;line-height:1.3}
-  .rstep .rd{font-size:0.78rem;color:var(--ink-faint);margin-top:5px;line-height:1.4}
-  .rstep.mark .rt{color:var(--accent-ink)}
-  .boot-caption{font-size:0.86rem;color:var(--ink-soft);margin-top:6px}
+  .ribbon { display: flex; gap: 0; overflow-x: auto; -webkit-overflow-scrolling: touch; padding-bottom: 0.3rem; }
+  .rstep { flex: 0 0 auto; min-width: 128px; max-width: 168px; padding: 0.7rem 0.9rem; position: relative; }
+  .rstep:not(:last-child)::after { content: ""; position: absolute; right: 0; top: 1rem; bottom: 1rem; width: 1px; background: var(--wire); }
+  .rstep .rn { font-family: var(--font-mono); font-size: 0.68rem; color: var(--amber); font-weight: 700; }
+  .rstep .rt { font-family: var(--font-mono); font-weight: 600; font-size: 0.82rem; margin-top: 0.3rem; line-height: 1.3; color: var(--ink); }
+  .rstep .rd { font-size: 0.74rem; color: var(--ink-soft); margin-top: 0.3rem; line-height: 1.4; }
+  .rstep.mark .rt { color: var(--amber); }
 
-  .callout{
-    border-left:3px solid var(--crit);background:var(--crit-soft);
-    border-radius:0 11px 11px 0;padding:15px 18px;margin:24px 0 0;font-size:0.94rem;color:var(--ink-soft);
-  }
-  .callout b{color:var(--ink)}
-  .callout .lab{font-family:"IBM Plex Mono",monospace;font-size:0.7rem;font-weight:600;letter-spacing:0.08em;text-transform:uppercase;color:var(--crit);display:block;margin-bottom:5px}
-
-  .twocol{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:8px}
-  .plaincard{background:var(--surface);border:1px solid var(--line);border-radius:13px;padding:20px;box-shadow:var(--shadow)}
-  .plaincard h3{margin-bottom:9px}
-  .plaincard p{font-size:0.92rem;color:var(--ink-soft);margin:0}
-
-  footer{border-top:1px solid var(--line);padding:clamp(34px,6vw,56px) 0 clamp(46px,8vw,72px);color:var(--ink-soft);font-size:0.9rem}
-  footer .flinks{display:flex;flex-wrap:wrap;gap:8px 22px;margin-top:16px}
-  footer .flinks a{font-family:"IBM Plex Mono",monospace;font-size:0.82rem}
-  footer .meta{margin-top:22px;font-size:0.78rem;color:var(--ink-faint);font-family:"IBM Plex Mono",monospace}
-
-  .fade{opacity:0;transform:translateY(14px);animation:rise .7s cubic-bezier(.2,.7,.2,1) forwards}
-  .fade.d1{animation-delay:.06s}.fade.d2{animation-delay:.13s}.fade.d3{animation-delay:.2s}
-  @keyframes rise{to{opacity:1;transform:none}}
-
-  @media (max-width:760px){
-    body{font-size:16px}
-    .facts{flex-direction:column}
-    .fact{border-right:0;border-bottom:1px solid var(--line)}
-    .fact:last-child{border-bottom:0}
-    .memo{grid-template-columns:1fr}
-    .memmid{flex-direction:row;min-height:44px}
-    .memmid .arrow{transform:rotate(90deg)}
-    .lane,.laneheads{grid-template-columns:1fr}
-    .lane::before{display:none}
-    .step.left,.step.right{grid-column:1}
-    .step{padding:0}
-    .step.cross .box::after{display:none}
-    .lanehead.r{justify-content:flex-start}
-    .twocol{grid-template-columns:1fr}
-  }
-  @media (prefers-reduced-motion:reduce){
-    .fade{animation:none;opacity:1;transform:none}
-    .rcard{transition:none}
-    *{scroll-behavior:auto}
+  @media (max-width: 640px) {
+    .memo { grid-template-columns: 1fr; }
+    .memmid { flex-direction: row; min-width: 0; }
+    .memmid .ar { transform: rotate(90deg); }
+    .laneheads, .lane { grid-template-columns: 1fr; }
+    .lane::before { display: none; }
+    .lstep.left, .lstep.right { grid-column: 1; padding: 0; }
+    .lanehead.r { justify-content: flex-start; }
   }
 </style>
 </head>
 <body>
 
-<div class="wrap">
-  <header class="hero">
-    <div class="brandrow">
-      <svg class="glyph" viewBox="0 0 40 40" aria-hidden="true" fill="none">
-        <circle cx="20" cy="20" r="14" stroke="var(--accent)" stroke-width="2.4" stroke-dasharray="66 22" stroke-linecap="round"/>
-        <circle cx="32.5" cy="12.5" r="3.1" fill="var(--accent)"/>
-      </svg>
-      <span class="brandname">Ouroboros</span>
-      <span class="kicker">aarch64 · rust · pre-alpha</span>
+<nav class="sitenav">
+  <div class="sitenav-inner">
+    <a class="sitenav-mark" href="index.html">ouroboros</a>
+    <div class="sitenav-links">
+      <a href="index.html">Home</a>
+      <a href="architecture-overview.html" class="current">Architecture</a>
+      <a href="tutorial.html">Learn</a>
+      <a href="postmortem-boot-bringup.html">Boot bring-up</a>
+      <a href="postmortem-shell-filesystem.html">Shell &amp; filesystem</a>
+      <a href="postmortem-xhci-keyboard.html">xHCI keyboard</a>
+      <a href="postmortem-usb-storage.html">USB storage</a>
+      <a href="glossary.html">Glossary</a>
+      <a href="https://github.com/hansolovkarlsson/Ouroboros">GitHub ↗</a>
     </div>
+  </div>
+</nav>
 
-    <h1 class="fade">Architecture
-      <span class="thin">A microkernel for Apple Silicon, drawn as its layers — and the one boundary everything crosses.</span>
-    </h1>
+<div class="page arch">
 
-    <p class="thesis fade d1">Most operating systems put the filesystem, the drivers, and the scheduler together in one privileged blob. Ouroboros draws a hard line instead. The kernel keeps only what <b>must</b> touch privileged hardware; everything it can push out — the shell, the programs, even <b>the filesystem itself</b> — runs as an unprivileged, isolated, restartable process on the far side of that line.</p>
+  <div class="kicker">Architecture · EL1 / EL0</div>
+  <h1 class="title small">The shape of the system</h1>
+  <p class="dek">
+    Most operating systems put the filesystem, the drivers, and the
+    scheduler together in one privileged blob. Ouroboros draws a hard
+    line instead — and pushes everything it can across it. This is that
+    line, and what lives on each side of it.
+  </p>
 
-    <div class="facts fade d2">
-      <div class="fact"><div class="n">2</div><div class="l">exception levels &mdash; EL1 kernel, EL0 userland</div></div>
-      <div class="fact"><div class="n">5</div><div class="l">task slots, each its own page-table view</div></div>
-      <div class="fact"><div class="n">1</div><div class="l">filesystem &mdash; running <em>outside</em> the kernel</div></div>
-      <div class="fact"><div class="n">0</div><div class="l">shared memory between tasks</div></div>
-    </div>
-  </header>
-</div>
+  <div class="stat-row">
+    <div class="stat"><span class="stat-num">2</span><span class="stat-label">Exception levels</span></div>
+    <div class="stat"><span class="stat-num">5</span><span class="stat-label">Task slots</span></div>
+    <div class="stat"><span class="stat-num">1</span><span class="stat-label">FS, in userland</span></div>
+    <div class="stat"><span class="stat-num">0</span><span class="stat-label">Shared memory</span></div>
+  </div>
 
-<div class="wrap">
+  <article class="arch">
 
-  <!-- ===================== THE BOUNDARY ===================== -->
-  <section>
-    <div class="sechead spine">
-      <span class="eyebrow">The one boundary</span>
-      <h2>Privilege is the organizing idea</h2>
-      <p class="sub">The ARM processor runs code at exception levels. Ouroboros uses two: <strong>EL1</strong> for the kernel, <strong>EL0</strong> for everything else. EL0 code cannot touch kernel memory, device registers, or privileged system registers. The only way from EL0 into EL1 is a <strong>trap</strong> — a system call, a fault, or the timer interrupt — caught by the exception vector table. That single crossing is where the whole design lives.</p>
-    </div>
+    <h2>Privilege is the organizing idea</h2>
+
+    <p>
+      The ARM processor runs code at exception levels. Ouroboros uses
+      two: <strong>EL1</strong> for the kernel, <strong>EL0</strong> for
+      everything else. EL0 code cannot touch kernel memory, device
+      registers, or privileged system registers. The only way from EL0
+      into EL1 is a <strong>trap</strong> — a system call
+      (<code class="inline">svc</code>), a fault, or the timer interrupt —
+      caught by the exception vector table. That single crossing is where
+      the whole design lives.
+    </p>
 
     <figure>
-      <div class="plate">
-        <div class="stack">
-          <div class="band el0">
-            <div class="band-label">
-              <span class="lvl el0">EL0</span>
-              <span class="name">Userland</span>
-              <span class="role">unprivileged &mdash; isolated tasks</span>
-            </div>
-            <div class="chips">
-              <span class="chip">Shell <span class="mono">task&nbsp;0</span></span>
-              <span class="chip">Idle <span class="mono">task&nbsp;1</span></span>
-              <span class="chip pro"><span class="dot">&#9679;</span>Filesystem server <span class="mono">task&nbsp;2</span></span>
-              <span class="chip">Spawned program <span class="mono">task&nbsp;3</span></span>
-              <span class="chip">Spawned program <span class="mono">task&nbsp;4</span></span>
-            </div>
+      <div class="pstack">
+        <div class="pband user">
+          <div class="pband-head">
+            <span class="el">EL0</span>
+            <span class="name">Userland</span>
+            <span class="role">unprivileged · isolated tasks</span>
           </div>
+          <div class="chips">
+            <span class="chip">Shell <span class="n">task 0</span></span>
+            <span class="chip">Idle <span class="n">task 1</span></span>
+            <span class="chip pro"><span class="dot">●</span>Filesystem server <span class="n">task 2</span></span>
+            <span class="chip">Program <span class="n">task 3</span></span>
+            <span class="chip">Program <span class="n">task 4</span></span>
+          </div>
+        </div>
 
-          <div class="boundary"><span>&#8645;&nbsp; svc &nbsp;/&nbsp; fault &nbsp;/&nbsp; IRQ &nbsp;&rarr;&nbsp; exception vectors (VBAR_EL1)</span></div>
+        <div class="pbound"><span>↑↓ &nbsp;svc / fault / IRQ &nbsp;→&nbsp; exception vectors (VBAR_EL1)</span></div>
 
-          <div class="band el1">
-            <div class="band-label">
-              <span class="lvl el1">EL1</span>
-              <span class="name">Kernel</span>
-              <span class="role">privileged &mdash; the trusted core</span>
-            </div>
-            <div class="chips">
-              <span class="chip">Exception vectors</span>
-              <span class="chip">Scheduler</span>
-              <span class="chip">Syscall dispatch</span>
-              <span class="chip">Per-task MMU</span>
-              <span class="chip">IPC &amp; grant/safecopy</span>
-              <span class="chip">Timer + GIC</span>
-              <span class="chip">Console drivers</span>
-              <span class="chip">Block device custody</span>
-              <span class="chip">USB (xHCI) · virtio</span>
-            </div>
+        <div class="pband kern">
+          <div class="pband-head">
+            <span class="el e1">EL1</span>
+            <span class="name">Kernel</span>
+            <span class="role">privileged · the trusted core</span>
+          </div>
+          <div class="chips">
+            <span class="chip">Exception vectors</span>
+            <span class="chip">Scheduler</span>
+            <span class="chip">Syscall dispatch</span>
+            <span class="chip">Per-task MMU</span>
+            <span class="chip">IPC · grant/safecopy</span>
+            <span class="chip">Timer + GIC</span>
+            <span class="chip">Console drivers</span>
+            <span class="chip">Block device custody</span>
+            <span class="chip">USB (xHCI) · virtio</span>
           </div>
         </div>
       </div>
-      <figcaption><span class="fig">FIG.&nbsp;1</span> The privilege stack. Copper marks the boundary; every arrow in this document that crosses it is a trap.</figcaption>
+      <figcaption><span class="fig">FIG 1</span> &nbsp;The privilege stack. Amber marks the boundary; every crossing in this document is a trap through it.</figcaption>
     </figure>
-  </section>
 
-  <!-- ===================== KERNEL ===================== -->
-  <section>
-    <div class="sechead spine">
-      <span class="eyebrow">EL1 · what stays privileged</span>
-      <h2>Inside the kernel</h2>
-      <p class="sub">The kernel is deliberately small. It owns the things that <em>require</em> privilege — trap handling, memory mapping, the interrupt controller, raw devices — and the mechanisms tasks use to talk to each other. It does not contain policy it can push outward.</p>
-    </div>
+    <h2>Inside the kernel</h2>
+
+    <p>
+      The kernel is deliberately small. It owns the things that
+      <em>require</em> privilege — trap handling, memory mapping, the
+      interrupt controller, raw devices — and the mechanisms tasks use to
+      talk to each other. It does not contain policy it can push outward.
+    </p>
 
     <figure>
       <div class="rgrid">
         <div class="rcard">
           <span class="tag">Traps</span>
           <h3>Exception vectors</h3>
-          <p>A 16-entry <code>VBAR_EL1</code> table catches every syscall, fault, and interrupt. Kernel faults report and halt; EL0 faults are <em>contained</em> — only the faulting task dies.</p>
+          <p>A 16-entry <code class="inline">VBAR_EL1</code> table catches every syscall, fault, and interrupt. Kernel faults report and halt; EL0 faults are contained — only the faulting task dies.</p>
         </div>
         <div class="rcard">
           <span class="tag">Scheduling</span>
           <h3>Round-robin scheduler</h3>
-          <p>Preemptive, no priorities. A 20&nbsp;ms timer tick switches tasks; a blocking syscall switches immediately. Task states: unused, runnable, blocked, zombie.</p>
+          <p>Preemptive, no priorities. A 20 ms timer tick switches tasks; a blocking syscall switches immediately. States: unused, runnable, blocked, zombie.</p>
         </div>
         <div class="rcard">
           <span class="tag">Boundary</span>
           <h3>Syscall dispatch</h3>
-          <p>Number in <code>x8</code>, arguments in <code>x0</code>–<code>x4</code>, return in <code>x0</code>. A shared <code>syscall-abi</code> crate keeps both sides of the ABI from drifting.</p>
+          <p>Number in <code class="inline">x8</code>, arguments in <code class="inline">x0</code>–<code class="inline">x4</code>, return in <code class="inline">x0</code>. A shared <code class="inline">syscall-abi</code> crate keeps both sides from drifting.</p>
         </div>
         <div class="rcard">
           <span class="tag">Memory</span>
           <h3>Per-task page tables</h3>
-          <p>Each task has its own L0–L3 translation view. Kernel and device mappings are shared; EL0 access is granted to that task's region <em>only</em>. Switching a task switches <code>TTBR0</code>.</p>
+          <p>Each task has its own L0–L3 view. Kernel and device mappings are shared; EL0 access is granted to that task's region only. Switching tasks switches <code class="inline">TTBR0</code>.</p>
         </div>
         <div class="rcard">
           <span class="tag">Messaging</span>
-          <h3>IPC &amp; grant/safecopy</h3>
-          <p>Fixed-size messages copied task-to-task through bounded mailboxes, plus a capability primitive for moving bulk data directly between two isolated regions.</p>
+          <h3>IPC · grant/safecopy</h3>
+          <p>Fixed-size messages copied task-to-task through bounded mailboxes, plus a capability for moving bulk data directly between two isolated regions.</p>
         </div>
         <div class="rcard">
           <span class="tag">Time</span>
-          <h3>Timer + interrupt controller</h3>
-          <p>The ARM generic timer drives preemption; the GIC (v2 or v3, discovered from ACPI's MADT) routes its interrupt. Real IRQ delivery on both QEMU and Parallels.</p>
+          <h3>Timer + interrupts</h3>
+          <p>The ARM generic timer drives preemption; the GIC (v2 or v3, discovered from ACPI's MADT) routes its interrupt. Real IRQ delivery on QEMU and Parallels.</p>
         </div>
         <div class="rcard">
           <span class="tag">Console</span>
           <h3>Console drivers</h3>
-          <p>Four discovery paths tried in order; on Apple Silicon the win is a <strong>GOP framebuffer console</strong> rendered glyph-by-glyph. PL011, 16550, and virtio also supported.</p>
+          <p>Four discovery paths tried in order; on Apple Silicon the win is a GOP framebuffer console drawn glyph-by-glyph. PL011, 16550, and virtio also supported.</p>
         </div>
         <div class="rcard">
           <span class="tag">Devices</span>
           <h3>Raw hardware</h3>
-          <p>A from-scratch <strong>xHCI</strong> USB stack (the keyboard, and USB mass storage), <strong>virtio</strong> transport and block driver — the parts that genuinely touch MMIO and DMA.</p>
+          <p>A from-scratch <strong>xHCI</strong> USB stack (keyboard and mass storage) and a <strong>virtio</strong> transport + block driver — the parts that genuinely touch MMIO and DMA.</p>
         </div>
         <div class="rcard">
           <span class="tag">Storage</span>
           <h3>Block-device custody</h3>
-          <p>The kernel holds the raw disk and exposes it one 512-byte sector at a time — but <em>only</em> to the filesystem server. Any other caller is denied. This is the "supervised" in supervised userland.</p>
+          <p>The kernel holds the raw disk and hands out one 512-byte sector at a time — but only to the filesystem server. Any other caller is denied.</p>
         </div>
         <div class="rcard out">
           <span class="tag">Not here</span>
-          <h3>The filesystem &rarr; userland</h3>
-          <p>FAT32 parsing, directories, paths, cluster chains — none of it lives in the kernel. It moved out to a task (<code>fsd</code>), reached only over IPC. See below.</p>
+          <h3>The filesystem → userland</h3>
+          <p>FAT32 parsing, directories, paths, cluster chains — none of it lives in the kernel. It moved out to a task (<code class="inline">fsd</code>), reached only over IPC.</p>
         </div>
       </div>
-      <figcaption><span class="fig">FIG.&nbsp;2</span> Kernel responsibilities. The dashed plate is what was deliberately <em>removed</em> from the kernel.</figcaption>
+      <figcaption><span class="fig">FIG 2</span> &nbsp;Kernel responsibilities. The dashed card is what was deliberately <em>removed</em> from the kernel.</figcaption>
     </figure>
-  </section>
 
-  <!-- ===================== USERLAND ===================== -->
-  <section>
-    <div class="sechead spine">
-      <span class="eyebrow">EL0 · what runs unprivileged</span>
-      <h2>The tasks</h2>
-      <p class="sub">Five scheduler slots. The first three have fixed roles; the last two are filled at runtime when the shell's <code>exec</code> starts another program. Each is an ordinary EL0 program — the shell is not special kernel code, it is just the program loaded into slot&nbsp;0.</p>
-    </div>
+    <h2>The tasks</h2>
+
+    <p>
+      Five scheduler slots. The first three have fixed roles; the last
+      two are filled at runtime when the shell's
+      <code class="inline">exec</code> starts another program. Each is an
+      ordinary EL0 program — the shell is not special kernel code, it is
+      just the program loaded into slot 0.
+    </p>
 
     <figure>
-      <div class="plate" style="padding:0;overflow-x:auto">
-        <table class="tasktable">
+      <div class="ttable-wrap">
+        <table class="ttable">
           <thead>
             <tr><th>Slot</th><th>Task</th><th>Responsibility</th><th>Status</th></tr>
           </thead>
@@ -476,212 +344,202 @@
               <td class="slot">0</td>
               <td class="tname">Shell</td>
               <td><span class="d">The interactive program loaded from disk at boot. Owns the keyboard. Every disk command is an IPC request to the filesystem server.</span></td>
-              <td><span class="badge own">own view</span></td>
+              <td><span class="tbadge own">own view</span></td>
             </tr>
             <tr>
               <td class="slot">1</td>
               <td class="tname">Idle</td>
-              <td><span class="d">A bare busy-spin — runs when nothing else can. (A real spin, not <code>wfe</code>: EL0 <code>wfe</code> hangs under the Apple hypervisor.)</span></td>
-              <td><span class="badge pro">protected</span></td>
+              <td><span class="d">A bare busy-spin — runs when nothing else can. (A real spin, not <code class="inline">wfe</code>: EL0 <code class="inline">wfe</code> hangs under the Apple hypervisor.)</span></td>
+              <td><span class="tbadge pro">protected</span></td>
             </tr>
             <tr>
               <td class="slot">2</td>
-              <td class="tname">Filesystem server</td>
-              <td><span class="d">Owns the entire FAT32 engine. The <em>only</em> task allowed the block-device syscalls. Boot-loaded, and restarted by the kernel if it crashes.</span></td>
-              <td><span class="badge pro">protected</span></td>
+              <td class="tname">FS server</td>
+              <td><span class="d">Owns the entire FAT32 engine. The only task allowed the block-device syscalls. Boot-loaded, and restarted by the kernel if it crashes.</span></td>
+              <td><span class="tbadge pro">protected</span></td>
             </tr>
             <tr>
               <td class="slot">3</td>
               <td class="tname">Spawnable</td>
-              <td><span class="d">Filled by <code>exec &lt;path&gt;</code> — a second program running concurrently with the shell. Its own memory, its own view, reaped when it exits.</span></td>
-              <td><span class="badge spawn">runtime</span></td>
+              <td><span class="d">Filled by <code class="inline">exec &lt;path&gt;</code> — a second program running concurrently with the shell. Own memory, own view, reaped when it exits.</span></td>
+              <td><span class="tbadge spawn">runtime</span></td>
             </tr>
             <tr>
               <td class="slot">4</td>
               <td class="tname">Spawnable</td>
-              <td><span class="d">A third concurrent program. Job control (<code>fg</code>, <code>kill</code>, <code>wait</code>) and IPC let these cooperate — a shell can foreground a nested shell, a client can call a server.</span></td>
-              <td><span class="badge spawn">runtime</span></td>
+              <td><span class="d">A third concurrent program. Job control (<code class="inline">fg</code>, <code class="inline">kill</code>, <code class="inline">wait</code>) and IPC let these cooperate — a shell can foreground a nested shell, a client can call a server.</span></td>
+              <td><span class="tbadge spawn">runtime</span></td>
             </tr>
           </tbody>
         </table>
       </div>
-      <figcaption><span class="fig">FIG.&nbsp;3</span> The task table. Slots 0–2 are protected from <code>exit</code>/<code>kill</code>; 3–4 cycle as programs come and go.</figcaption>
+      <figcaption><span class="fig">FIG 3</span> &nbsp;The task table. Slots 0–2 are protected from <code class="inline">exit</code>/<code class="inline">kill</code>; 3–4 cycle as programs come and go.</figcaption>
     </figure>
-  </section>
 
-  <!-- ===================== ISOLATION ===================== -->
-  <section>
-    <div class="sechead spine">
-      <span class="eyebrow">Enforced, not trusted</span>
-      <h2>How the tasks are kept apart</h2>
-      <p class="sub">Isolation here is enforced by the hardware MMU, not by good behavior. Three mechanisms compose: separate address-space views, message passing by copy, and a capability for the cases where copying through a message is too small.</p>
-    </div>
+    <h2>How the tasks are kept apart</h2>
 
-    <div class="trio">
-      <div class="icell">
-        <div class="num">01 &mdash; separation</div>
-        <h3>Per-task page tables</h3>
-        <p>Every task runs under its own translation-table view. From inside any task, another task's memory is simply not mapped for EL0 — touching it faults, and the fault kills only the toucher. Proven by injection: the same read succeeds under a shared map and faults under views.</p>
-      </div>
-      <div class="icell">
-        <div class="num">02 &mdash; communication</div>
-        <h3>Messages by copy</h3>
-        <p>Tasks never share memory. A message is copied — task, into the kernel, out to the destination's mailbox. Small, bounded, and safe by construction: no pointer from one task is ever dereferenced by another.</p>
-      </div>
-      <div class="icell">
-        <div class="num">03 &mdash; bulk data</div>
-        <h3>Grant &amp; safecopy</h3>
-        <p>To move file contents, a client <em>grants</em> the server an exact buffer, in one direction. The server may copy only those bytes, only while the client's call is in flight, and never a third task's — a capability the kernel checks, not a trust it assumes.</p>
-      </div>
-    </div>
+    <p>
+      Isolation here is enforced by the hardware MMU, not by good
+      behavior. Three mechanisms compose: separate address-space views,
+      message passing by copy, and a capability for the cases where
+      copying through a message is too small.
+    </p>
 
     <figure>
-      <div class="plate">
-        <div class="memo">
-          <div class="memblk">
-            <div class="who"><span class="lvl el0">EL0</span> Shell &middot; task 0</div>
-            <div class="memrow mine">its own region &mdash; rw</div>
-            <div class="memrow locked">fsd region</div>
-            <div class="memrow locked">kernel region</div>
+      <div class="trio">
+        <div class="icell">
+          <div class="num">01 · separation</div>
+          <h3>Per-task page tables</h3>
+          <p>Every task runs under its own translation view. From inside any task, another's memory is simply not mapped for EL0 — touching it faults, and the fault kills only the toucher. Proven by injection: the same read succeeds under a shared map and faults under views.</p>
+        </div>
+        <div class="icell">
+          <div class="num">02 · communication</div>
+          <h3>Messages by copy</h3>
+          <p>Tasks never share memory. A message is copied — out of the sender, into the kernel, into the destination's mailbox. Small, bounded, safe by construction: no pointer from one task is ever dereferenced by another.</p>
+        </div>
+        <div class="icell">
+          <div class="num">03 · bulk data</div>
+          <h3>Grant &amp; safecopy</h3>
+          <p>To move file contents, a client <em>grants</em> the server an exact buffer, in one direction. The server may copy only those bytes, only while the client's call is in flight, never a third task's — a capability the kernel checks, not a trust it assumes.</p>
+        </div>
+      </div>
+    </figure>
+
+    <figure>
+      <div class="memo">
+        <div class="memblk">
+          <div class="who"><span class="el">EL0</span> Shell · task 0</div>
+          <div class="memrow mine">its own region — rw</div>
+          <div class="memrow locked">fsd region</div>
+          <div class="memrow locked">kernel region</div>
+        </div>
+        <div class="memmid">
+          <div class="k">kernel copies<br>at EL1</div>
+          <div class="ar" aria-hidden="true">⇄</div>
+          <div class="k" style="color:var(--panel-dim);font-weight:400">the only path<br>between them</div>
+        </div>
+        <div class="memblk">
+          <div class="who"><span class="el">EL0</span> Filesystem · task 2</div>
+          <div class="memrow mine">its own region — rw</div>
+          <div class="memrow locked">shell region</div>
+          <div class="memrow locked">kernel region</div>
+        </div>
+      </div>
+      <figcaption><span class="fig">FIG 4</span> &nbsp;Two tasks. Each sees only its own memory; the kernel is the single trusted courier between them.</figcaption>
+    </figure>
+
+    <h2>One file read, end to end</h2>
+
+    <p>
+      Because the filesystem is a separate process, a plain
+      <code class="inline">cat</code> crosses the privilege boundary
+      several times. This is the cost the microkernel split pays — and,
+      right beside it, exactly what it buys.
+    </p>
+
+    <figure>
+      <div class="laneheads">
+        <div class="lanehead"><span class="el">EL0</span> Userland tasks</div>
+        <div class="lanehead r">Kernel <span class="el e1">EL1</span></div>
+      </div>
+      <div class="lane">
+        <div class="lstep left">
+          <div class="box">
+            <div class="sn">01 · shell</div>
+            <div class="st">You type <code>cat /notes.txt</code>. The shell <b>grants</b> the server a read buffer, then <b>calls</b> it.</div>
+            <span class="op">svc · msg_call</span>
           </div>
-          <div class="memmid">
-            <div class="k">kernel copies<br>at EL1</div>
-            <div class="arrow" aria-hidden="true">&#8646;</div>
-            <div class="cap">the only path between them</div>
+        </div>
+        <div class="lstep right">
+          <div class="box">
+            <div class="sn">02 · kernel</div>
+            <div class="st">Copies the request into the server's mailbox, blocks the shell, switches to <b>task 2</b>.</div>
           </div>
-          <div class="memblk">
-            <div class="who"><span class="lvl el0">EL0</span> Filesystem &middot; task 2</div>
-            <div class="memrow mine">its own region &mdash; rw</div>
-            <div class="memrow locked">shell region</div>
-            <div class="memrow locked">kernel region</div>
+        </div>
+        <div class="lstep left">
+          <div class="box">
+            <div class="sn">03 · fs server</div>
+            <div class="st">Walks FAT32 to find the file. It needs a disk sector, so it asks for one.</div>
+            <span class="op">svc · block_read</span>
+          </div>
+        </div>
+        <div class="lstep right">
+          <div class="box">
+            <div class="sn">04 · kernel</div>
+            <div class="st">Only task 2 may. The <b>virtio / USB</b> driver reads the 512-byte sector from hardware and returns it.</div>
+          </div>
+        </div>
+        <div class="lstep left">
+          <div class="box">
+            <div class="sn">05 · fs server</div>
+            <div class="st">Has the file's bytes. It <b>safecopies</b> them into the shell's granted buffer, then replies.</div>
+            <span class="op">svc · safecopy</span>
+          </div>
+        </div>
+        <div class="lstep right">
+          <div class="box">
+            <div class="sn">06 · kernel</div>
+            <div class="st">Delivers the reply, wakes the shell, switches back to <b>task 0</b>.</div>
+          </div>
+        </div>
+        <div class="lstep left">
+          <div class="box">
+            <div class="sn">07 · shell</div>
+            <div class="st">Prints the file. For a large file, steps 3–6 simply repeat, one chunk at a time.</div>
           </div>
         </div>
       </div>
-      <figcaption><span class="fig">FIG.&nbsp;4</span> Two tasks. Each sees only its own memory; the kernel is the single trusted courier between them.</figcaption>
-    </figure>
-  </section>
-
-  <!-- ===================== DATA FLOW ===================== -->
-  <section>
-    <div class="sechead spine">
-      <span class="eyebrow">The design, in motion</span>
-      <h2>One file read, end to end</h2>
-      <p class="sub">Because the filesystem is a separate process, a plain <code>cat</code> crosses the privilege boundary several times. This is the cost the microkernel split pays — and, right beside it, exactly what it buys.</p>
-    </div>
-
-    <figure>
-      <div class="plate">
-        <div class="laneheads">
-          <div class="lanehead"><span class="lvl el0">EL0</span> Userland tasks</div>
-          <div class="lanehead r">Kernel <span class="lvl el1">EL1</span></div>
-        </div>
-        <div class="lane">
-          <div class="step left cross">
-            <div class="box">
-              <div class="sn">01 · shell</div>
-              <div class="st">You type <code>cat /notes.txt</code>. The shell <b>grants</b> the server a read buffer, then <b>calls</b> it.</div>
-              <span class="tag2">svc · msg_call</span>
-            </div>
-          </div>
-          <div class="step right cross">
-            <div class="box">
-              <div class="sn">02 · kernel</div>
-              <div class="st">Copies the request into the server's mailbox, blocks the shell, and switches to <b>task&nbsp;2</b>.</div>
-            </div>
-          </div>
-          <div class="step left cross">
-            <div class="box">
-              <div class="sn">03 · filesystem server</div>
-              <div class="st">Walks FAT32 to find the file. It needs a disk sector, so it asks for one.</div>
-              <span class="tag2">svc · block_read</span>
-            </div>
-          </div>
-          <div class="step right cross">
-            <div class="box">
-              <div class="sn">04 · kernel</div>
-              <div class="st">Only task&nbsp;2 may. The <b>virtio / USB</b> driver reads the 512-byte sector from real hardware and returns it.</div>
-            </div>
-          </div>
-          <div class="step left cross">
-            <div class="box">
-              <div class="sn">05 · filesystem server</div>
-              <div class="st">Has the file's bytes. It <b>safecopies</b> them straight into the shell's granted buffer, then replies.</div>
-              <span class="tag2">svc · safecopy</span>
-            </div>
-          </div>
-          <div class="step right cross">
-            <div class="box">
-              <div class="sn">06 · kernel</div>
-              <div class="st">Delivers the reply, wakes the shell, and switches back to <b>task&nbsp;0</b>.</div>
-            </div>
-          </div>
-          <div class="step left">
-            <div class="box">
-              <div class="sn">07 · shell</div>
-              <div class="st">Prints the file. For a large file, steps 3–6 simply repeat, one chunk at a time.</div>
-            </div>
-          </div>
-        </div>
-        <div class="lanenote"><b>What it costs:</b> several boundary crossings per read, where a monolithic kernel would have none. <b>What it buys:</b> a filesystem bug can corrupt only its own memory and its own mount — it cannot scribble on the shell, and if it crashes the kernel restarts it. The disk is never reachable except through the one supervised task.</div>
-      </div>
-      <figcaption><span class="fig">FIG.&nbsp;5</span> <code>cat</code> as a sequence of traps. Copper edges are EL0 steps; teal edges are the kernel.</figcaption>
+      <div class="lnote"><b>What it costs:</b> several boundary crossings per read, where a monolithic kernel would have none. <b>What it buys:</b> a filesystem bug can corrupt only its own memory and its own mount — it cannot scribble on the shell, and if it crashes, the kernel restarts it. The disk is never reachable except through the one supervised task.</div>
+      <figcaption><span class="fig">FIG 5</span> &nbsp;<code class="inline">cat</code> as a sequence of traps. Light cards are EL0; dark panels are the kernel.</figcaption>
     </figure>
 
-    <div class="callout">
-      <span class="lab">The payoff</span>
-      <b>An EL0 fault is contained, not fatal.</b> A wild pointer in any userland program used to halt the whole system. Now the kernel reports the fault, tears down just that task, and resumes the rest. If the dead task is the filesystem server, it is <b>reloaded from an image kept at boot</b> and remounts from disk — because all of its state was always derivable from the disk. That is the whole reason the filesystem was worth moving out.
+    <div class="lesson">
+      <span class="lesson-label">The payoff</span>
+      <p><strong>An EL0 fault is contained, not fatal.</strong> A wild pointer in any userland program used to halt the whole system. Now the kernel reports the fault, tears down just that task, and resumes the rest. If the dead task is the filesystem server, it is reloaded from an image kept at boot and remounts from disk — because all of its state was always derivable from the disk. That is the whole reason the filesystem was worth moving out.</p>
     </div>
-  </section>
 
-  <!-- ===================== BOOT ===================== -->
-  <section>
-    <div class="sechead spine">
-      <span class="eyebrow">Cold start</span>
-      <h2>From firmware to EL0</h2>
-      <p class="sub">There is no separate bootloader — the kernel <em>is</em> a UEFI application, the only boot path that works on both the QEMU dev loop and the real Parallels target. It sets itself up while still inside firmware, then leaves that world for good.</p>
-    </div>
+    <h2>From firmware to EL0</h2>
+
+    <p>
+      There is no separate bootloader — the kernel <em>is</em> a UEFI
+      application, the only boot path that works on both the QEMU dev
+      loop and the real Parallels target. It sets itself up while still
+      inside firmware, then leaves that world for good.
+    </p>
 
     <figure>
-      <div class="plate">
+      <div class="ttable-wrap">
         <div class="ribbon">
           <div class="rstep"><div class="rn">01</div><div class="rt">UEFI init</div><div class="rd">Logging, allocator, protocols — all still firmware-backed.</div></div>
-          <div class="rstep"><div class="rn">02</div><div class="rt">Find the console</div><div class="rd">Devicetree → ACPI → PCI → framebuffer.</div></div>
+          <div class="rstep"><div class="rn">02</div><div class="rt">Find console</div><div class="rd">Devicetree → ACPI → PCI → framebuffer.</div></div>
           <div class="rstep"><div class="rn">03</div><div class="rt">Load programs</div><div class="rd">Shell + filesystem server off the ESP.</div></div>
-          <div class="rstep mark"><div class="rn">04</div><div class="rt">Exit boot services</div><div class="rd">Firmware left behind — permanently. Keep the memory map.</div></div>
-          <div class="rstep"><div class="rn">05</div><div class="rt">Install vectors</div><div class="rd"><code>VBAR_EL1</code>, before anything can fault.</div></div>
-          <div class="rstep"><div class="rn">06</div><div class="rt">Own the MMU</div><div class="rd">Swap in the kernel's own translation tables.</div></div>
-          <div class="rstep"><div class="rn">07</div><div class="rt">GIC + timer</div><div class="rd">Arm the 20&nbsp;ms preemption tick.</div></div>
-          <div class="rstep"><div class="rn">08</div><div class="rt">Build tasks</div><div class="rd">Initial context for the shell, idle, and server.</div></div>
-          <div class="rstep mark"><div class="rn">09</div><div class="rt">Drop to EL0</div><div class="rd"><code>tasks::start</code> — and never returns.</div></div>
+          <div class="rstep mark"><div class="rn">04</div><div class="rt">Exit boot services</div><div class="rd">Firmware left behind, permanently.</div></div>
+          <div class="rstep"><div class="rn">05</div><div class="rt">Install vectors</div><div class="rd"><code class="inline">VBAR_EL1</code>, before anything can fault.</div></div>
+          <div class="rstep"><div class="rn">06</div><div class="rt">Own the MMU</div><div class="rd">Swap in the kernel's own page tables.</div></div>
+          <div class="rstep"><div class="rn">07</div><div class="rt">GIC + timer</div><div class="rd">Arm the 20 ms preemption tick.</div></div>
+          <div class="rstep"><div class="rn">08</div><div class="rt">Build tasks</div><div class="rd">Initial context for shell, idle, server.</div></div>
+          <div class="rstep mark"><div class="rn">09</div><div class="rt">Drop to EL0</div><div class="rd"><code class="inline">tasks::start</code> — and never returns.</div></div>
         </div>
       </div>
-      <figcaption><span class="fig">FIG.&nbsp;6</span> The boot sequence. After step 9 every return to the kernel is a trap through the vector table.</figcaption>
+      <figcaption><span class="fig">FIG 6</span> &nbsp;The boot sequence. After step 9, every return to the kernel is a trap through the vector table.</figcaption>
     </figure>
 
-    <div class="twocol">
-      <div class="plaincard">
-        <h3>Why UEFI, not a bootloader</h3>
-        <p>Parallels boots ARM VMs exclusively through UEFI firmware — there is no direct-kernel shortcut like QEMU's. Building the kernel as a UEFI app is the one path that runs on both the fast emulator loop and the real hardware target.</p>
-      </div>
-      <div class="plaincard">
-        <h3>Two targets, one code path</h3>
-        <p>Development runs against QEMU, where a console and disk are easy. The proving ground is real Parallels on Apple Silicon — where the framebuffer console, USB keyboard, USB storage, GICv3, and preemption were each confirmed on hardware.</p>
-      </div>
-    </div>
-  </section>
+    <h2>Go deeper</h2>
 
-  <footer>
-    <div class="spine">
-      <p><strong>Ouroboros</strong> is an ARM64 microkernel written in Rust, in its earliest stages — microkernel architecture, POSIX-ish syscalls, preemptive multitasking, drawing ideas from Linux, MINIX, and Plan&nbsp;9. This page is the overview; the reference documents go deeper.</p>
-      <div class="flinks">
-        <a href="architecture.md">architecture.md</a>
-        <a href="processes.md">processes.md</a>
-        <a href="shell-commands.md">shell-commands.md</a>
-        <a href="roadmap.md">roadmap.md</a>
-        <a href="CHANGELOG.md">CHANGELOG.md</a>
-      </div>
-      <div class="meta">EL1 · EL0 &nbsp;//&nbsp; aarch64-unknown-uefi + aarch64-unknown-none &nbsp;//&nbsp; reference overview</div>
-    </div>
+    <p>
+      This page is the overview. The reference documents in the
+      repository go all the way down: <a href="https://github.com/hansolovkarlsson/Ouroboros/blob/main/docs/architecture.md">architecture.md</a>
+      for the full mechanics, <a href="https://github.com/hansolovkarlsson/Ouroboros/blob/main/docs/processes.md">processes.md</a>
+      for the userland-program model, and the four
+      <a href="postmortem-boot-bringup.html">postmortems</a> for the
+      debugging that <em>found</em> this design on real hardware.
+    </p>
+
+  </article>
+
+  <footer class="site-footer">
+    <span>Ouroboros — an ARM64 microkernel, written from scratch in Rust</span>
+    <a href="https://github.com/hansolovkarlsson/Ouroboros">github.com/hansolovkarlsson/Ouroboros</a>
   </footer>
 
 </div>
