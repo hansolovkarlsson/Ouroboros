@@ -253,6 +253,27 @@ fn main() -> Status {
         }
     };
 
+    // The console server, same boot-services window and same optional
+    // posture as the filesystem server: booting without one just means
+    // the kernel's own console handles all output (Stage 1a has clients
+    // still printing via the kernel's PUTC anyway, so a missing COND.BIN
+    // is invisible for now).
+    let cond = match loader::load_cond() {
+        Ok(cond) => {
+            log::info!(
+                "Ouroboros kernel: loaded console server, region {:#x}-{:#x}, entry {:#x}",
+                cond.base,
+                cond.base + cond.size,
+                cond.entry
+            );
+            Some(cond)
+        }
+        Err(e) => {
+            log::warn!("Ouroboros kernel: no console server ({e}) - the kernel console handles all output this boot");
+            None
+        }
+    };
+
     // SAFETY: no boot-services protocol references (console, allocator, or
     // otherwise) are held past this call. Nothing below this point may use
     // log::*, alloc, or UEFI protocols — only the raw MMIO in `uart`/
@@ -317,15 +338,16 @@ fn main() -> Status {
     unsafe {
         mmu::install_identity_map(
             memory_map,
-            // Slot 2 is the filesystem server's region ((0, 0) - "no
-            // region" - if none was loaded); slots 3/4 stay (0, 0)
-            // until `tasks::spawn` fills one in. `install_identity_map`
-            // already treats a zero-size region as "no region" (see
-            // `overlaps_any`).
+            // Slot 2 is the filesystem server's region and slot 3 the
+            // console server's ((0, 0) - "no region" - if either wasn't
+            // loaded); slots 4/5 stay (0, 0) until `tasks::spawn` fills
+            // one in. `install_identity_map` already treats a zero-size
+            // region as "no region" (see `overlaps_any`).
             [
                 (program.base, program.size),
                 tasks::idle_region(),
                 fsd.as_ref().map_or((0, 0), |f| (f.base, f.size)),
+                cond.as_ref().map_or((0, 0), |c| (c.base, c.size)),
                 (0, 0),
                 (0, 0),
             ],
@@ -514,8 +536,8 @@ fn main() -> Status {
         );
     }
 
-    // SAFETY: both EL0 regions were just mapped EL0-accessible above.
-    unsafe { tasks::init(&program, fsd.as_ref()) };
+    // SAFETY: every loaded EL0 region was just mapped EL0-accessible above.
+    unsafe { tasks::init(&program, fsd.as_ref(), cond.as_ref()) };
 
     console::println!("Ouroboros kernel: shell ready - type and press Enter");
 

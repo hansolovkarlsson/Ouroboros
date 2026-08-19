@@ -72,21 +72,22 @@ use crate::loader::LoadedProgram;
 
 /// Slots 0/1 are always the loaded program and the idle task (`init`);
 /// slot 2 is reserved for the filesystem server (`syscall_abi::FSD_TASK`,
-/// boot-loaded by `loader::load_fsd` - stays `Unused` if no FSD.BIN
-/// exists, and `spawn` never fills it: a spawned program landing in the
-/// server's fixed, block-syscall-privileged slot would inherit both
-/// roles); 3/4 start `Unused` and are only ever filled in by `spawn`
-/// (dynamic task creation). A small, fixed bound rather than anything
-/// growable - "generous but bounded," the same philosophy `mmu.rs`'s
-/// `MAX_EXTRA_L1_TABLES` already states for a similar "how many of these
-/// might we need" question - not a real limit this kernel has any way to
-/// raise gracefully yet (`spawn` just fails with `SpawnError::NoFreeSlot`
-/// past this).
-pub const NUM_TASKS: usize = 5;
+/// boot-loaded by `loader::load_fsd`); slot 3 for the console server
+/// (`syscall_abi::CON_TASK`, boot-loaded by `loader::load_cond`). Both
+/// servers stay `Unused` if their `*.BIN` doesn't exist, and `spawn`
+/// never fills either: a spawned program landing in one of these fixed,
+/// privileged slots would inherit its role. 4/5 start `Unused` and are
+/// only ever filled in by `spawn` (dynamic task creation). A small,
+/// fixed bound rather than anything growable - "generous but bounded,"
+/// the same philosophy `mmu.rs`'s `MAX_EXTRA_L1_TABLES` already states
+/// for a similar "how many of these might we need" question - not a real
+/// limit this kernel has any way to raise gracefully yet (`spawn` just
+/// fails with `SpawnError::NoFreeSlot` past this).
+pub const NUM_TASKS: usize = 6;
 
 /// The first slot `spawn` may use - everything below it is fixed
-/// infrastructure (boot shell, idle, filesystem server).
-const FIRST_SPAWNABLE: usize = 3;
+/// infrastructure (boot shell, idle, filesystem server, console server).
+const FIRST_SPAWNABLE: usize = 4;
 
 /// 2MB - matches `loader.rs`'s own `SLOT_ALIGN` (a plain numeric
 /// constant, not shared across modules - simplest to just duplicate the
@@ -204,6 +205,7 @@ static TASKS: [TaskSlot; NUM_TASKS] = [
     TaskSlot(UnsafeCell::new(Context::zeroed())),
     TaskSlot(UnsafeCell::new(Context::zeroed())),
     TaskSlot(UnsafeCell::new(Context::zeroed())),
+    TaskSlot(UnsafeCell::new(Context::zeroed())),
 ];
 
 static CURRENT: AtomicUsize = AtomicUsize::new(0);
@@ -221,6 +223,7 @@ struct RegionSlot(UnsafeCell<(u64, u64)>);
 unsafe impl Sync for RegionSlot {}
 
 static REGIONS: [RegionSlot; NUM_TASKS] = [
+    RegionSlot(UnsafeCell::new((0, 0))),
     RegionSlot(UnsafeCell::new((0, 0))),
     RegionSlot(UnsafeCell::new((0, 0))),
     RegionSlot(UnsafeCell::new((0, 0))),
@@ -368,6 +371,7 @@ static MAILBOXES: [MailboxSlot; NUM_TASKS] = [
     MailboxSlot(UnsafeCell::new(Mailbox::new())),
     MailboxSlot(UnsafeCell::new(Mailbox::new())),
     MailboxSlot(UnsafeCell::new(Mailbox::new())),
+    MailboxSlot(UnsafeCell::new(Mailbox::new())),
 ];
 
 /// `MSG_SEND`'s core: deliver `data` to `dest`. The caller validates
@@ -499,6 +503,7 @@ struct GrantSlot(UnsafeCell<Grant>);
 // MailboxSlot and every other per-task cell in this module.
 unsafe impl Sync for GrantSlot {}
 static GRANTS: [GrantSlot; NUM_TASKS] = [
+    GrantSlot(UnsafeCell::new(Grant { grantee: 0, ptr: 0, len: 0, dir: 0, active: false })),
     GrantSlot(UnsafeCell::new(Grant { grantee: 0, ptr: 0, len: 0, dir: 0, active: false })),
     GrantSlot(UnsafeCell::new(Grant { grantee: 0, ptr: 0, len: 0, dir: 0, active: false })),
     GrantSlot(UnsafeCell::new(Grant { grantee: 0, ptr: 0, len: 0, dir: 0, active: false })),
@@ -701,6 +706,7 @@ static STATES: [StateSlot; NUM_TASKS] = [
     StateSlot(UnsafeCell::new(TaskState::Unused)),
     StateSlot(UnsafeCell::new(TaskState::Unused)),
     StateSlot(UnsafeCell::new(TaskState::Unused)),
+    StateSlot(UnsafeCell::new(TaskState::Unused)),
 ];
 
 /// Scans forward from `from` (exclusive), wrapping, for the next
@@ -753,11 +759,40 @@ fn next_runnable(from: usize) -> usize {
 /// dispatched (true when called from `syscall::dispatch`, its only
 /// caller).
 pub(crate) unsafe fn block_current_and_switch(frame: *mut Context, reason: WaitReason) -> u64 {
+    unsafe { block_current_and_switch_to(frame, reason, None) }
+}
+
+/// Like [`block_current_and_switch`], but switches straight to `prefer`
+/// when it's given and currently runnable, instead of round-robining to
+/// the next runnable task (which, with an always-runnable idle task, is
+/// usually idle, so a plain `MSG_CALL` reply would otherwise wait a full
+/// tick). `MSG_CALL` uses this to switch directly to the server it just
+/// delivered a request to: that server runs, replies (direct-delivered
+/// back, waking this caller), and blocks again, all before the next tick,
+/// the sub-tick synchronous round trip the ABI's `MSG_CALL` doc
+/// describes. Safe regardless of what `prefer` actually does: if it never
+/// replies, this caller stays blocked exactly as it would have, woken by
+/// the eventual reply or Ctrl+C.
+///
+/// # Safety
+/// Same contract as [`block_current_and_switch`].
+pub(crate) unsafe fn block_current_and_switch_to(
+    frame: *mut Context,
+    reason: WaitReason,
+    prefer: Option<usize>,
+) -> u64 {
     let frame = unsafe { &mut *frame };
     let current = CURRENT.load(Ordering::Relaxed);
     unsafe { *TASKS[current].0.get() = *frame };
     unsafe { *STATES[current].0.get() = TaskState::Blocked(reason) };
-    let next = next_runnable(current);
+    let next = match prefer {
+        Some(p)
+            if p != current && unsafe { *STATES[p].0.get() } == TaskState::Runnable =>
+        {
+            p
+        }
+        _ => next_runnable(current),
+    };
     *frame = unsafe { *TASKS[next].0.get() };
     CURRENT.store(next, Ordering::Relaxed);
     crate::mmu::activate_task(next);
@@ -966,7 +1001,11 @@ pub fn idle_region() -> (u64, u64) {
 /// Must run after `mmu.rs` has mapped `program`'s region, `fsd`'s
 /// region (when present), and [`idle_region`] EL0-accessible, and
 /// before any task could possibly run.
-pub unsafe fn init(program: &LoadedProgram, fsd: Option<&LoadedProgram>) {
+pub unsafe fn init(
+    program: &LoadedProgram,
+    fsd: Option<&LoadedProgram>,
+    cond: Option<&LoadedProgram>,
+) {
     // Task 0: entry is the program's real ELF entry point, not just its
     // load base - loader.rs computes `entry = base + e_entry` (they
     // happen to be equal today, since shell/linker.ld keeps `_start` at
@@ -1015,6 +1054,22 @@ pub unsafe fn init(program: &LoadedProgram, fsd: Option<&LoadedProgram>) {
         unsafe { *REGIONS[2].0.get() = (fsd.base, fsd.size) };
         unsafe { *STATES[2].0.get() = TaskState::Runnable };
         clean_dcache_range(fsd.base, fsd.size);
+    }
+
+    // Task 3: the console server, same setup shape as the filesystem
+    // server - entry point, stack at the top of its region, everything
+    // unmasked. Absent (no COND.BIN) leaves the slot `Unused`, and the
+    // boot proceeds with the kernel's own console handling all output.
+    if let Some(cond) = cond {
+        *unsafe { &mut *TASKS[3].0.get() } = Context {
+            gpr: [0; 31],
+            sp_el0: cond.base + cond.size,
+            elr_el1: cond.entry,
+            spsr_el1: 0,
+        };
+        unsafe { *REGIONS[3].0.get() = (cond.base, cond.size) };
+        unsafe { *STATES[3].0.get() = TaskState::Runnable };
+        clean_dcache_range(cond.base, cond.size);
     }
 
     unsafe {

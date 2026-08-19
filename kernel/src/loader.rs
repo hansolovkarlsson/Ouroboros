@@ -208,6 +208,9 @@ pub enum LoaderError {
     /// so the boot log doesn't misleadingly blame `INIT.CFG` for a
     /// missing filesystem server.
     Fsd(uefi::fs::Error),
+    /// [`CON_PATH`] couldn't be read - kept distinct from [`Program`]/
+    /// [`Fsd`] so a missing console server is named for what it is.
+    Cond(uefi::fs::Error),
     Alloc(uefi::Error),
     /// File is smaller than a bare ELF header, or a header/table field
     /// points past the end of the file - either a corrupt/truncated file
@@ -244,6 +247,7 @@ impl core::fmt::Display for LoaderError {
             LoaderError::PathEncoding => write!(f, "program path isn't valid for a UEFI file path"),
             LoaderError::Program(e) => write!(f, "couldn't read the program named in {CONFIG_PATH}: {e}"),
             LoaderError::Fsd(e) => write!(f, "couldn't read {FSD_PATH}: {e}"),
+            LoaderError::Cond(e) => write!(f, "couldn't read {CON_PATH}: {e}"),
             LoaderError::ProgramEmpty => write!(f, "program named in {CONFIG_PATH} is empty"),
             LoaderError::Alloc(e) => write!(f, "couldn't allocate memory for the program: {e}"),
             LoaderError::Truncated => write!(f, "program file is truncated or has an invalid ELF header/table offset"),
@@ -323,6 +327,29 @@ pub fn load_fsd() -> Result<LoadedProgram, LoaderError> {
         log::warn!(
             "Ouroboros kernel: FSD.BIN too large to keep for crash recovery - the server won't be restartable this boot"
         );
+    }
+    load_elf_into_el0_region(&program_bytes)
+}
+
+/// The console server's fixed path - not configurable via [`CONFIG_PATH`]
+/// for the same reason as [`FSD_PATH`]: the console server is
+/// infrastructure with a fixed task slot (`syscall_abi::CON_TASK`) that
+/// clients hardcode, not the interactive program `INIT.CFG` names.
+const CON_PATH: &str = "\\EFI\\ORBS\\COND.BIN";
+
+/// Loads the console server ([`CON_PATH`]) the same way [`load_fsd`]
+/// loads the filesystem server. A missing/broken COND.BIN is not fatal
+/// (the caller logs and boots on with the kernel's own console handling
+/// all output), unlike task 0's program. No crash-recovery image is
+/// stashed yet - console-server supervision is a later, optional stage
+/// (see the plan); a fault in it currently just leaves the slot dead.
+pub fn load_cond() -> Result<LoadedProgram, LoaderError> {
+    let fs_proto = boot::get_image_file_system(boot::image_handle()).map_err(LoaderError::Protocol)?;
+    let mut fs = FileSystem::new(fs_proto);
+    let path = CString16::try_from(CON_PATH).unwrap();
+    let program_bytes = fs.read(path.as_ref()).map_err(LoaderError::Cond)?;
+    if program_bytes.is_empty() {
+        return Err(LoaderError::ProgramEmpty);
     }
     load_elf_into_el0_region(&program_bytes)
 }

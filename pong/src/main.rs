@@ -52,8 +52,35 @@ fn main() -> ! {
 }
 
 fn print(s: &str) {
-    for b in s.bytes() {
-        syscall4(syscall_abi::PUTC, b as u64, 0, 0, 0);
+    con_write(s.as_bytes());
+}
+
+/// Route output through the console server (task `CON_TASK`) as a batched
+/// `DSPOP_WRITE` message, falling back to the kernel console (`PUTC`) if
+/// there's no server this boot - same shape as the shell's `con_write`.
+fn con_write(bytes: &[u8]) {
+    let payload_off = syscall_abi::FS_REQ_PAYLOAD as usize;
+    let mut off = 0;
+    while off < bytes.len() {
+        let n = (bytes.len() - off).min(syscall_abi::FS_DATA_MAX as usize);
+        let mut req = [0u8; syscall_abi::FS_REQ_PAYLOAD as usize + syscall_abi::FS_DATA_MAX as usize];
+        req[0..8].copy_from_slice(&syscall_abi::DSPOP_WRITE.to_le_bytes());
+        req[8..16].copy_from_slice(&(n as u64).to_le_bytes());
+        req[payload_off..payload_off + n].copy_from_slice(&bytes[off..off + n]);
+        let mut reply = [0u8; syscall_abi::MSG_MAX_LEN as usize];
+        let r = syscall4(
+            syscall_abi::MSG_CALL,
+            syscall_abi::CON_TASK,
+            req.as_ptr() as u64,
+            (payload_off + n) as u64,
+            reply.as_mut_ptr() as u64,
+        );
+        if r >= syscall_abi::FS_ERR_MIN {
+            for &b in &bytes[off..off + n] {
+                syscall4(syscall_abi::PUTC, b as u64, 0, 0, 0);
+            }
+        }
+        off += n;
     }
 }
 

@@ -58,6 +58,7 @@ static TASK_REPORTS: [AtomicU64; crate::tasks::NUM_TASKS] = [
     AtomicU64::new(0),
     AtomicU64::new(0),
     AtomicU64::new(0),
+    AtomicU64::new(0),
 ];
 
 /// The raw block device the `BLOCK_*` syscalls operate on - the
@@ -119,6 +120,16 @@ pub fn try_install_usb_block_device() -> bool {
 /// allowed to ask it to touch the disk.
 fn block_access_allowed() -> bool {
     tasks::current_task() as u64 == syscall_abi::FSD_TASK
+}
+
+/// Whether the calling task may use [`CON_WRITE`]: only the console
+/// server. The console analogue of [`block_access_allowed`] - the kernel
+/// owns the console, and exactly one task is allowed to push steady-state
+/// output through it (ordinary tasks reach it only via a `DSPOP_WRITE`
+/// message to that server; the kernel's own `console::*` stays the
+/// emergency/boot path).
+fn con_access_allowed() -> bool {
+    tasks::current_task() as u64 == syscall_abi::CON_TASK
 }
 
 /// The filesystem server's raw ELF image, kept from boot: `loader.rs`
@@ -462,6 +473,23 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
             console::putc(arg0 as u8);
             0
         }
+        syscall_abi::CON_WRITE => {
+            // The console server's byte-stream backend: write a batch of
+            // bytes to the kernel's console in one syscall (vs one PUTC
+            // per byte). Gated to CON_TASK, and the buffer must lie in
+            // the server's own region - same trust model as BLOCK_READ's
+            // sector buffer.
+            if !con_access_allowed() || !valid_user_range(arg0, arg1) {
+                return syscall_abi::FS_ERROR;
+            }
+            // SAFETY: pointer/length sanity-checked in the caller's own
+            // region just above.
+            let bytes = unsafe { core::slice::from_raw_parts(arg0 as *const u8, arg1 as usize) };
+            for &b in bytes {
+                console::putc(b);
+            }
+            0
+        }
         syscall_abi::GET_TICKS => exceptions::ticks(),
         syscall_abi::SPAWN => spawn_staged(arg0),
         syscall_abi::SPAWN_STAGE => {
@@ -486,15 +514,17 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
         }
         syscall_abi::EXIT => {
             let current = tasks::current_task();
-            if current <= 2 {
+            if current <= 3 {
                 // Task 0 (the boot shell - nothing would own the
                 // keyboard, see tasks::INPUT_OWNER_TASK), task 1
                 // (idle - never makes syscalls, refused for
-                // completeness), and task 2 (the filesystem server -
+                // completeness), task 2 (the filesystem server -
                 // its death would strand the disk for the rest of the
-                // boot, and its slot is block-syscall-privileged) may
-                // not exit. The only case where EXIT returns to its
-                // caller.
+                // boot, and its slot is block-syscall-privileged), and
+                // task 3 (the console server - its death would strand
+                // steady-state output; the kernel's emergency console
+                // still works, but the shell wouldn't render) may not
+                // exit. The only case where EXIT returns to its caller.
                 return syscall_abi::EXIT_DENIED;
             }
             console::println!("Ouroboros kernel: task {current} exited (code {arg0})");
@@ -532,10 +562,11 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
         }
         syscall_abi::KILL => {
             let i = arg0 as usize;
-            if i <= 2 {
+            if i <= 3 {
                 // The boot shell (the permanent keyboard owner), idle,
-                // and the filesystem server are protected - same
-                // reasoning as EXIT's own refusal of them.
+                // the filesystem server, and the console server are
+                // protected - same reasoning as EXIT's own refusal of
+                // them.
                 return syscall_abi::TASK_ERR_PROTECTED;
             }
             if !tasks::task_exists(i) {
@@ -557,11 +588,11 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
         }
         syscall_abi::WAIT => {
             let i = arg0 as usize;
-            if i <= 2 || i == tasks::current_task() {
-                // Waiting on task 0/1/2 (they never die - the boot
-                // shell, idle, and the filesystem server are all
-                // exit/kill-protected) or on yourself is a guaranteed
-                // deadlock - refused up front.
+            if i <= 3 || i == tasks::current_task() {
+                // Waiting on task 0/1/2/3 (they never die - the boot
+                // shell, idle, the filesystem server, and the console
+                // server are all exit/kill-protected) or on yourself is
+                // a guaranteed deadlock - refused up front.
                 return syscall_abi::TASK_ERR_PROTECTED;
             }
             if i >= tasks::NUM_TASKS {
@@ -682,17 +713,21 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
             }
             // The send above direct-delivers if dest is blocked in a
             // recv (waking it); blocking here then switches straight
-            // to it - the synchronous handoff. The reply can't exist
-            // yet (dest hasn't run since the request was queued), so
-            // there's no fast path to check first.
+            // to it (block_current_and_switch_to's `prefer`) - the
+            // synchronous handoff that makes the round trip sub-tick
+            // rather than waiting for the round-robin to come back
+            // around past the idle task. The reply can't exist yet
+            // (dest hasn't run since the request was queued), so there's
+            // no fast path to check first.
             unsafe {
-                tasks::block_current_and_switch(
+                tasks::block_current_and_switch_to(
                     frame,
                     tasks::WaitReason::Message {
                         buf: arg3,
                         len: syscall_abi::MSG_MAX_LEN,
                         from: Some(dest),
                     },
+                    Some(dest),
                 )
             }
         }

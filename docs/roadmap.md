@@ -443,6 +443,29 @@ phase:
   implemented, passed on QEMU, but faulted the idle task on real
   Parallels - reverted in favor of flush-on-switch, correct on both;
   ASIDs stay a recorded future optimization.
+  **Part 3 - a second driver out of the kernel - is in progress
+  (2026-08-19): the console server, `cond/`.** Per the
+  microkernel-comparison assessment, moving a *second* component out is
+  the highest-value proof the `fsd` pattern generalizes (the block
+  transport can't move without an IOMMU, so the console's text-rendering
+  logic is the candidate). **Stage 1 (byte-stream) is done and verified
+  on QEMU:** `cond` is boot-loaded into a new protected slot 3
+  (`CON_TASK`); userland output routes to it as batched `DSPOP_WRITE`
+  `MSG_CALL`s and it forwards via the gated `CON_WRITE` syscall (33),
+  with a `PUTC` fallback - the stdout-over-IPC substrate the pipe/redirect
+  items wanted. A needed scheduler fix landed with it
+  (`block_current_and_switch_to`: `MSG_CALL` switches straight to the
+  destination server, making round trips sub-tick as the ABI doc already
+  promised - without it, per-character echo dropped burst input).
+  **Stage 2 (not started): the framebuffer rendering backend** - move
+  `fbconsole`/`font` (glyphs, cursor, scroll) + real ANSI parsing into
+  `cond` via gated blit/scroll primitives (chosen over mapping the
+  framebuffer into EL0, which would need the MMU surgery that faulted
+  real Parallels once), leaving the kernel a minimal emergency console
+  for boot/faults. See `CLAUDE.md`'s "Driver isolation, part 3". After
+  this, the next microkernel steps are a general supervision/heartbeat
+  mechanism (generalizing `fsd`'s bespoke restart) and a capability model
+  for who-may-call-whom.
 - **Grant/safecopy IPC - the enforced bulk-transfer primitive - is
   done** (confirmed end-to-end on both QEMU and real Parallels hardware:
   `cat /hello.bin` streamed a full 5784-byte binary off the USB stick,

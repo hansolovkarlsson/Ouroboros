@@ -252,6 +252,15 @@ pub const BLOCK_SECTOR_SIZE: u64 = 512;
 /// accept only this task.
 pub const FSD_TASK: u64 = 2;
 
+/// The fixed task slot the console server (`cond/`) runs in - loaded at
+/// boot alongside the shell and the filesystem server, protected from
+/// `kill`/`exit`/`wait` like tasks 0/1/2. The second component moved out
+/// of the EL1 kernel: it owns the steady-state console (userland text
+/// output flows to it over IPC), while the kernel keeps only a minimal
+/// emergency console for boot/fault reporting. Clients hardcode this as
+/// the destination for console-output requests.
+pub const CON_TASK: u64 = 3;
+
 /// `(offset, chunk ptr, chunk len)` -> `0` on success or
 /// [`SPAWN_ERROR`]. Copies one chunk of a program image into the
 /// kernel's fixed 128KB spawn staging buffer at `offset` - the feed
@@ -316,6 +325,18 @@ pub const GRANT_READ: u64 = 1;
 /// read, where the server writes the file's bytes into the client's
 /// buffer).
 pub const GRANT_WRITE: u64 = 2;
+
+/// `(buf ptr, len)` -> `0` on success, or a reserved-band error. The
+/// console server's byte-stream backend primitive: writes `len` bytes
+/// from `buf` (in the server's own region) straight to the kernel's
+/// console. **Gated to [`CON_TASK`]** alone, exactly like the `BLOCK_*`
+/// syscalls are gated to [`FSD_TASK`] - ordinary tasks reach the console
+/// only through the server (a [`DSPOP_WRITE`] message), while the
+/// kernel's own `console::putc`/`println!` stay the emergency/boot path.
+/// Bytes are written raw, no newline translation (same as [`PUTC`]).
+/// `len` is bounded by the same per-buffer cap as the sector/staging
+/// buffers.
+pub const CON_WRITE: u64 = 33;
 
 // ---------------------------------------------------------------------
 // The filesystem server's request protocol (not syscalls) - messages
@@ -421,6 +442,24 @@ pub const FSOP_WRITE_BULK: u64 = 12;
 /// file of any size, one chunk at a time.
 pub const FSOP_WRITE_AT: u64 = 13;
 
+// ---------------------------------------------------------------------
+// The console server's request protocol (not syscalls) - messages sent
+// to CON_TASK, normally via MSG_CALL. Shares the filesystem protocol's
+// header shape: the op as a little-endian u64 at offset 0, parameters as
+// little-endian u64s from offset 8, and the inline payload from
+// FS_REQ_PAYLOAD. The reply is a status u64 at offset 0 (0 on success).
+// A call to an empty CON_TASK slot fails at the MSG_CALL layer with
+// TASK_ERR_NO_SUCH_TASK - the "no console server this boot" case, which
+// clients handle by falling back to the kernel console via PUTC.
+// ---------------------------------------------------------------------
+
+/// params: `(text len)`; payload: the text bytes -> status `0`. Writes
+/// the text to the console - rendered on a framebuffer backend, or
+/// forwarded to the kernel's byte-stream console via [`CON_WRITE`].
+/// Text is capped at [`FS_DATA_MAX`] per request; clients chunk longer
+/// output (see the shell's `con_write`).
+pub const DSPOP_WRITE: u64 = 1;
+
 /// The largest message [`MSG_SEND`] accepts, in bytes. Raised from the
 /// original 64 when per-task page tables landed: the filesystem
 /// protocol's requests/replies became fully self-contained (payloads
@@ -513,9 +552,10 @@ pub const SPAWN_ERR_NO_FREE_SLOT: u64 = u64::MAX - 13;
 
 /// The index is out of range or the slot holds no task.
 pub const TASK_ERR_NO_SUCH_TASK: u64 = u64::MAX - 14;
-/// Task 0 (the boot shell), task 1 (idle), and task 2 (the filesystem
-/// server, [`FSD_TASK`]) are permanent - they can't be killed or
-/// waited on, and idle can't be foregrounded.
+/// Task 0 (the boot shell), task 1 (idle), task 2 (the filesystem
+/// server, [`FSD_TASK`]), and task 3 (the console server, [`CON_TASK`])
+/// are permanent - they can't be killed or waited on, and idle can't be
+/// foregrounded.
 pub const TASK_ERR_PROTECTED: u64 = u64::MAX - 15;
 
 /// A [`WAIT`] cut short by Ctrl+C - the waited task keeps running,

@@ -7,6 +7,50 @@ what broke, how it was diagnosed), see `CLAUDE.md`; for *how* something
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## Console server, Stage 1: the console moves out of the kernel (byte-stream)
+
+The second component moved out of the EL1 kernel (after the filesystem
+server): the *steady-state* console. `cond/` (the seventh userland
+program) is boot-loaded into a new protected task slot 3
+(`syscall_abi::CON_TASK`), exactly like `fsd` in slot 2. Userland text
+output no longer goes straight to the kernel - the shell, `hello`,
+`pong`, and `upper` now send it to `cond` as batched `DSPOP_WRITE`
+messages (`MSG_CALL`), and `cond` forwards it through a new **gated
+`CON_WRITE` syscall (33)**, the console analogue of `BLOCK_*` gated to
+`FSD_TASK`. A `PUTC` fallback in every client keeps output working if
+there's no console server this boot.
+
+This is deliberately **Stage 1 of two** - the byte-stream backend only.
+The point is the architecture (a second protected server, the `DSPOP_*`
+protocol, userland output as an IPC stream - the stdout-over-IPC
+substrate the pipe/redirect items wanted) proven end to end on QEMU with
+zero framebuffer/MMU changes. **Stage 2** moves the framebuffer text-
+rendering logic (`fbconsole`/`font` glyphs, cursor, scroll, plus real
+ANSI parsing) into `cond` via gated blit/scroll primitives - the
+Parallels-visible "rendering driver in userland." The kernel keeps a
+minimal emergency console for boot and fault reporting regardless.
+
+**A scheduler fix landed alongside it, needed but not originally scoped:
+`MSG_CALL` now switches directly to the destination server.** Per-
+character echo through IPC exposed that a plain `MSG_CALL` reply waited
+up to a full tick - the round-robin picked the always-runnable idle task
+before the just-woken server - which dropped burst input outright. The
+ABI's `MSG_CALL` doc already promised sub-tick round trips, so
+`tasks::block_current_and_switch_to` now takes a `prefer` task and
+`MSG_CALL` passes the destination; the server runs, replies (direct-
+delivered back), and blocks again before the next tick. Every `fsd` call
+got faster too.
+
+**Confirmed on QEMU (`make run` and `make run-image`), zero `-d int`
+aborts:** shell banner/`help`/`uptime`/`echo` render through `cond`;
+`selftest`'s relocation checks pass (the shell binary changed); `ls`/
+`cat` via `fsd` (two servers coexisting); a pipe (`echo ... |
+UPPER.BIN`) and `exec HELLO.BIN` route spawned output through `cond`;
+`ps` shows all six slots. Not yet on real Parallels hardware - Stage 2's
+framebuffer backend is what matters there (Parallels has no UART
+console). See `CLAUDE.md`'s "Driver isolation, part 3" for the full
+writeup.
+
 ## FAT32 offset-write (`write_at`): streaming `cp`, unbounded `>>`
 
 The follow-on the grant/safecopy milestone recorded. Every write at the

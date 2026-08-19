@@ -4607,6 +4607,77 @@ content of a single `write`/`>>` is still bounded by its input source
 (the 128-byte line / the 1024-byte capture), which a userland heap +
 guard page would lift; and directories still never shrink.
 
+## Driver isolation, part 3: the console server (Stage 1 - byte-stream)
+
+The second component moved out of the EL1 kernel, after the filesystem
+server: the *steady-state* console. `cond/` (the seventh userland
+program, "console daemon") is boot-loaded into a new protected task slot
+3 (`syscall_abi::CON_TASK`), exactly like `fsd` in slot 2. Userland text
+output no longer goes straight to the kernel: the shell, `hello`, `pong`,
+and `upper` now send their output to `cond` as batched `DSPOP_WRITE`
+messages (via `MSG_CALL`), and `cond` forwards it to the kernel console
+through a new **gated `CON_WRITE` syscall (33)** - the console analogue of
+how `BLOCK_*` is gated to `FSD_TASK`. A `PUTC` fallback in every client
+keeps output working if there's no console server this boot (missing
+`COND.BIN`, or any call failure) - so output always reaches *a* console.
+
+This is deliberately **Stage 1 of two**: the byte-stream backend only.
+`cond` forwards bytes; it doesn't yet render. The point of this stage is
+the *architecture* (a second protected server, the `DSPOP_*` protocol,
+and userland output as an IPC stream - the stdout-over-IPC substrate the
+pipe/redirect items wanted) proven end to end on QEMU, with zero
+framebuffer/MMU changes. **Stage 2** moves the framebuffer text-rendering
+logic (`fbconsole`/`font` glyphs, cursor, `ptr::copy` scroll, plus real
+ANSI parsing) out of the kernel into `cond`'s framebuffer backend, via
+gated blit/scroll primitives - the part that's Parallels-visible and the
+actual "rendering driver in userland." The kernel keeps a minimal
+emergency console for boot and fault reporting regardless (the fault
+handlers and all post-`exit_boot_services` bring-up print with no
+userland available - see `console.rs`/`exceptions.rs`).
+
+**A real scheduler fix landed alongside this, needed but not originally
+scoped: `MSG_CALL` now switches directly to the destination server.**
+Routing per-character echo through IPC exposed that a plain `MSG_CALL`
+reply waited up to a full tick - `block_current_and_switch`'s
+`next_runnable` picked the always-runnable idle task (slot 1) before the
+just-woken server, so the round trip only completed when the round-robin
+came back around. At ~a tick per echoed character that dropped burst
+input outright (confirmed by a burst-injection test garbling `help` to
+`hl`). The ABI's own `MSG_CALL` doc already *claimed* sub-tick round trips
+("direct delivery on both hops... without waiting for a tick"), so this
+made reality match it: `tasks::block_current_and_switch_to` takes a
+`prefer` task and `MSG_CALL` passes the destination (runnable after its
+direct delivery), so the server runs, replies (direct-delivered back,
+waking the caller), and blocks again all before the next tick. Every
+`fsd` call got faster too; burst input renders clean afterward.
+`block_current_and_switch` stays as a `prefer: None` wrapper for the
+keyboard/wait/plain-recv blocks that shouldn't prefer anyone.
+
+**Confirmed on QEMU end to end, both `make run` (byte-stream/FAT16) and
+`make run-image` (real FAT32), zero `-d int` aborts:** the shell banner,
+`help`, `uptime`, and `echo` all render through `cond`; `selftest`'s
+three relocation checks pass (the shell binary changed - `con_write` was
+added - so it must still load and relocate correctly); `ls`/`cat` work
+via `fsd` (two servers, slots 2 and 3, coexisting with no cross-talk); a
+pipe (`echo hi there | /EFI/ORBS/UPPER.BIN` -> `HI THERE`) and `exec
+/EFI/ORBS/HELLO.BIN` both route the spawned program's output through
+`cond`; `ps` shows all six slots (0 shell, 1 idle, 2 fsd, 3 cond, 4-5
+spawnable). **Not yet on real Parallels hardware** (Stage 2's framebuffer
+backend is what matters most there, and the byte-stream backend is
+QEMU-shaped anyway - Parallels has no UART console).
+
+**Still coarse, worth knowing before Stage 2:** the kernel's own
+`console::println!` logging (boot messages, the identity-map rebuild line
+on every spawn/exit, fault reports) still writes the kernel console
+directly, so on the shared UART it interleaves with `cond`'s output -
+harmless as bytes, but on a framebuffer (Stage 2) the kernel and `cond`
+would fight over the screen unless the split is handled (kernel owns it
+during boot/faults, `cond` in steady state); `con_write`'s `MSG_CALL`
+carries a 768-byte reply buffer per call (the ABI's fixed reply size),
+the one real stack cost, fine on the current unguarded stack but worth
+remembering; and per-character keystroke echo is one `MSG_CALL` each -
+sub-tick now, but still an IPC round trip per typed character.
+
 ## Commands
 
 ```sh
@@ -4736,7 +4807,10 @@ fsd/                 fifth userland program: THE FILESYSTEM SERVER (driver isola
   src/fat32.rs       the kernel's old hand-rolled FAT32 module, moved essentially verbatim (MBR, BPB, FAT chains, 8.3 entries, full read/write support) plus read_at (windowed offset reads) and write_at (offset writes that extend the file via a partial-sector read-modify-write - streaming cp and unbounded >>, see "FAT32 offset-write" above); its BlockDevice became disk.rs's syscall shim
   src/disk.rs        zero-sized Disk handle: read_sector/write_sector/capacity as BLOCK_READ/BLOCK_WRITE/BLOCK_INFO syscall wrappers
 
-upper/               sixth userland program: the pipeline filter demo (uppercases its piped input) - the reference for the filter-program shape: stdin = msg_recv, stdout = putc, EOF = the empty message, finish = exit; see "Pipelines" above
+cond/                seventh userland program: THE CONSOLE SERVER (driver isolation part 3, Stage 1) - owns the steady-state console; userland output flows to it as batched DSPOP_WRITE messages over IPC, and it forwards them to the kernel console via the gated CON_WRITE syscall (33, accepted from CON_TASK/slot 3 alone). Byte-stream backend only so far; framebuffer rendering is Stage 2. Boot-loaded into protected task slot 3, see "Driver isolation, part 3" above
+  src/main.rs        the request loop: recv -> decode DSPOP_WRITE -> CON_WRITE the text -> reply; the filesystem server's shape, cloned
+
+upper/               sixth userland program: the pipeline filter demo (uppercases its piped input) - the reference for the filter-program shape: stdin = msg_recv, stdout = con_write (routed through the console server), EOF = the empty message, finish = exit; see "Pipelines" above
   src/main.rs        ~80 lines: the recv/uppercase/putc loop
 
 pong/                fourth userland program: the IPC echo server (recv -> send back to sender; `quit` exits) - the long-lived server shape the fsd filesystem server now actually has, see "Driver isolation, part 1" above
@@ -4752,8 +4826,8 @@ scripts/
   test-parallels.sh  scripted real-hardware smoke test via prlctl (start/type/capture/stop) - invoked by `make test-parallels`, see "## Commands" above and docs/roadmap.md's "Testing infrastructure" section
 ```
 
-Six-crate workspace (`kernel`, `shell`, `hello`, `pong`, `fsd`,
-`syscall-abi`), with every userland crate deliberately excluded from the
+Eight-crate workspace (`kernel`, `shell`, `hello`, `pong`, `fsd`,
+`upper`, `cond`, `syscall-abi`), with every userland crate deliberately excluded from the
 workspace's `default-members` (see `Cargo.toml`) since they need a
 different `--target` than `kernel`; `syscall-abi` needs no such
 exclusion (a plain lib, no `[[bin]]` to conflict with a target) and gets

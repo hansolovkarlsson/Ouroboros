@@ -1417,9 +1417,7 @@ impl Output<'_> {
 }
 
 fn print_str(s: &str) {
-    for b in s.bytes() {
-        putc(b);
-    }
+    con_write(s.as_bytes());
 }
 
 fn print_line(s: &str) {
@@ -2012,7 +2010,45 @@ fn read_char() -> u8 {
 }
 
 fn putc(byte: u8) {
-    syscall(syscall_abi::PUTC, byte as u64);
+    con_write(&[byte]);
+}
+
+/// Route output to the console server (task `CON_TASK`) as batched
+/// `DSPOP_WRITE` messages, rather than one `PUTC` syscall per byte. The
+/// console server owns the steady-state console (it renders to a
+/// framebuffer, or forwards to the kernel's byte-stream console); this
+/// is the client half of moving the console out of the kernel.
+///
+/// Falls back to the kernel's own console (`PUTC`) whenever the call
+/// fails - most importantly when there's no console server this boot
+/// (`TASK_ERR_NO_SUCH_TASK`), but also on any other reserved-band error -
+/// so output always reaches *a* console. Longer strings are split into
+/// `FS_DATA_MAX` chunks; each carries a 768-byte reply buffer (the
+/// `MSG_CALL` ABI's fixed reply size), the one real stack cost here.
+fn con_write(bytes: &[u8]) {
+    let payload_off = syscall_abi::FS_REQ_PAYLOAD as usize;
+    let mut off = 0;
+    while off < bytes.len() {
+        let n = (bytes.len() - off).min(syscall_abi::FS_DATA_MAX as usize);
+        let mut req = [0u8; syscall_abi::FS_REQ_PAYLOAD as usize + syscall_abi::FS_DATA_MAX as usize];
+        req[0..8].copy_from_slice(&syscall_abi::DSPOP_WRITE.to_le_bytes());
+        req[8..16].copy_from_slice(&(n as u64).to_le_bytes());
+        req[payload_off..payload_off + n].copy_from_slice(&bytes[off..off + n]);
+        let mut reply = [0u8; syscall_abi::MSG_MAX_LEN as usize];
+        let r = syscall4(
+            syscall_abi::MSG_CALL,
+            syscall_abi::CON_TASK,
+            req.as_ptr() as u64,
+            (payload_off + n) as u64,
+            reply.as_mut_ptr() as u64,
+        );
+        if r >= syscall_abi::FS_ERR_MIN {
+            for &b in &bytes[off..off + n] {
+                syscall(syscall_abi::PUTC, b as u64);
+            }
+        }
+        off += n;
+    }
 }
 
 fn wfe() {
