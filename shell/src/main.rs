@@ -835,30 +835,48 @@ fn cmd_cat(arg: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize, out: &mut Output) {
         return;
     };
 
-    let mut file_buf = [0u8; CAT_BUFFER_SIZE];
-    match fs_read_file(path, &mut file_buf) {
-        NO_FS => print_no_fs(),
-        code if code >= FS_ERR_MIN => print_fs_error("cat", code),
-        size => {
-            let n = (size as usize).min(file_buf.len());
-            for &b in &file_buf[..n] {
-                out.put(b);
+    // Stream the file in SAFECOPY_MAX-byte chunks via the bulk-read
+    // primitive: the server SAFECOPYs each chunk straight into `chunk`
+    // (granted GRANT_WRITE by fs_read_bulk), so `cat` handles a file of
+    // any size without ever holding the whole thing, and without the
+    // old 512-byte truncation - the headline win of the grant/safecopy
+    // milestone. A short read (`n < chunk.len()`) already means EOF per
+    // read_at's contract, but we loop until a genuine 0 rather than
+    // relying on that, at the cost of one extra round trip at the end.
+    let mut chunk = [0u8; syscall_abi::SAFECOPY_MAX as usize];
+    let mut offset: u64 = 0;
+    let mut wrote_any = false;
+    let mut last_byte = 0u8;
+    loop {
+        match fs_read_bulk(path, offset, &mut chunk) {
+            NO_FS => {
+                print_no_fs();
+                return;
             }
-            // The tidy-terminal trailing newline is a display nicety,
-            // console-only: keeping it out of a capture means
-            // `cat a > b` copies a's bytes exactly (bounded by the read
-            // buffer), rather than appending bytes a never contained.
-            if out.is_console() && !file_buf[..n].ends_with(b"\n") {
-                out.put(CR);
-                out.put(LF);
+            code if code >= FS_ERR_MIN => {
+                print_fs_error("cat", code);
+                return;
             }
-            // The truncation notice is an error-ish diagnostic, not
-            // output - console always, never captured into the file
-            // (which would corrupt a redirected copy with notice text).
-            if size as usize > file_buf.len() {
-                print_line("cat: (truncated - file is larger than this shell's read buffer)");
+            0 => break,
+            n => {
+                let n = (n as usize).min(chunk.len());
+                for &b in &chunk[..n] {
+                    out.put(b);
+                }
+                wrote_any = true;
+                last_byte = chunk[n - 1];
+                offset += n as u64;
             }
         }
+    }
+    // The tidy-terminal trailing newline is a display nicety,
+    // console-only: keeping it out of a capture means `cat a > b`
+    // copies a's bytes exactly. Add it when the streamed content didn't
+    // end with a newline - including the empty-file case (nothing
+    // written), matching the old behavior exactly.
+    if out.is_console() && (!wrote_any || last_byte != LF) {
+        out.put(CR);
+        out.put(LF);
     }
 }
 
@@ -1526,6 +1544,38 @@ fn fs_read_at(path: &str, offset: u64, buf: &mut [u8]) -> u64 {
         path.as_bytes(),
         &[],
         buf,
+    )
+}
+
+/// Streams one chunk of `path` starting at byte `offset` directly into
+/// `buf` via the grant/safecopy bulk path (rather than inline in the
+/// reply, which [`fs_read_at`]'s 512-byte cap bounds): grants `buf` to
+/// the filesystem server as a `GRANT_WRITE` buffer - the server
+/// `SAFECOPY`s the file bytes straight into it during the call - then
+/// issues the bulk read. Returns bytes delivered this chunk (`0`
+/// at/past end of file), [`NO_FS`], or a specific `FS_ERR_*` code.
+/// `buf.len()` must be `<= SAFECOPY_MAX`. Loop with a rising `offset`
+/// to read a file of any size without ever holding the whole thing -
+/// see [`cmd_cat`].
+fn fs_read_bulk(path: &str, offset: u64, buf: &mut [u8]) -> u64 {
+    let granted = syscall4(
+        syscall_abi::GRANT,
+        syscall_abi::FSD_TASK,
+        buf.as_mut_ptr() as u64,
+        buf.len() as u64,
+        syscall_abi::GRANT_WRITE,
+    );
+    if granted != 0 {
+        return syscall_abi::FS_ERROR;
+    }
+    // No inline result payload - the data arrives via SAFECOPY into
+    // `buf`; the reply carries only the status (bytes delivered).
+    fs_call(
+        syscall_abi::FSOP_READ_BULK,
+        [path.len() as u64, offset, 0, 0],
+        path.as_bytes(),
+        &[],
+        &mut [],
     )
 }
 

@@ -68,7 +68,7 @@ fn main() -> ! {
         }
         let sender = packed >> 32;
         let len = ((packed & 0xffff_ffff) as usize).min(req.len());
-        let reply_len = handle(&mut fs, &req[..len], &mut reply);
+        let reply_len = handle(&mut fs, sender, &req[..len], &mut reply);
         // A full/unreachable sender mailbox drops the reply - the
         // caller's MSG_CALL stays blocked until Ctrl+C; nothing better
         // exists to do with an undeliverable reply.
@@ -109,8 +109,11 @@ const DATA_MAX: usize = syscall_abi::FS_DATA_MAX as usize;
 /// Decodes and executes one v2 request from this server's own receive
 /// buffer, building the reply (status + inline result) in its own
 /// reply buffer. Returns the reply's total length. Every slice below
-/// is into `req`/`reply` - server-owned memory only.
-fn handle(fs: &mut Option<fat32::Fs>, req: &[u8], reply: &mut [u8]) -> usize {
+/// is into `req`/`reply` - server-owned memory only. `sender` is the
+/// calling task, needed by the bulk ops to `SAFECOPY` against the
+/// client's grant (they move their data directly between task regions
+/// rather than inline in the reply - see `FSOP_READ_BULK`).
+fn handle(fs: &mut Option<fat32::Fs>, sender: u64, req: &[u8], reply: &mut [u8]) -> usize {
     if req.len() < REQ_PAYLOAD {
         return status_reply(reply, syscall_abi::FS_ERROR);
     }
@@ -189,6 +192,40 @@ fn handle(fs: &mut Option<fat32::Fs>, req: &[u8], reply: &mut [u8]) -> usize {
                 Ok(copied) => {
                     status_slot[..8].copy_from_slice(&(copied as u64).to_le_bytes());
                     REPLY_PAYLOAD + copied as usize
+                }
+                Err(e) => status_reply(reply, error_code(&e)),
+            }
+        }
+        syscall_abi::FSOP_READ_BULK => {
+            // The bulk sibling of READ_AT: the data doesn't travel in
+            // the reply (capped at DATA_MAX). We read one SAFECOPY_MAX
+            // chunk from `offset` into our own working buffer, then
+            // SAFECOPY it straight into the client's granted buffer -
+            // the client must have GRANT_WRITE-granted a buffer to us
+            // first (the shell's fs_read_bulk does). Reply is status
+            // only: bytes delivered this chunk (0 at/past EOF).
+            let Some(path) = path_from(payload, 0, p[0]) else {
+                return status_reply(reply, syscall_abi::FS_ERROR);
+            };
+            let offset = p[1];
+            let mut chunk = [0u8; syscall_abi::SAFECOPY_MAX as usize];
+            match fs.read_at(path, offset, &mut chunk) {
+                Ok(copied) => {
+                    let copied = copied as usize;
+                    if copied > 0 {
+                        let r = syscall5(
+                            syscall_abi::SAFECOPY,
+                            sender,
+                            0,
+                            chunk.as_ptr() as u64,
+                            copied as u64,
+                            syscall_abi::GRANT_WRITE,
+                        );
+                        if r >= syscall_abi::FS_ERR_MIN {
+                            return status_reply(reply, syscall_abi::FS_ERROR);
+                        }
+                    }
+                    status_reply(reply, copied as u64)
                 }
                 Err(e) => status_reply(reply, error_code(&e)),
             }
@@ -337,6 +374,28 @@ pub(crate) fn syscall4(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64) 
             in("x1") arg1,
             in("x2") arg2,
             in("x3") arg3,
+            in("x8") number,
+            options(nostack),
+        );
+    }
+    ret
+}
+
+/// Five-argument variant for `SAFECOPY`, whose fifth argument
+/// (direction) rides in `x4` - the kernel's dispatch reads it from the
+/// saved frame, since the 4-argument dispatch signature is full (see
+/// the syscall-abi doc on `SAFECOPY`).
+#[inline(always)]
+pub(crate) fn syscall5(number: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> u64 {
+    let ret: u64;
+    unsafe {
+        asm!(
+            "svc #0",
+            inout("x0") a0 => ret,
+            in("x1") a1,
+            in("x2") a2,
+            in("x3") a3,
+            in("x4") a4,
             in("x8") number,
             options(nostack),
         );
