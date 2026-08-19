@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The Manual — Ouroboros</title>
+<meta name="description" content="The one-stop manual for using Ouroboros: building it, running it on QEMU and real Parallels hardware, testing, the shell, and the complete syscall ABI.">
+<link rel="icon" type="image/png" href="../assets/favicon.png">
+<link rel="stylesheet" href="../assets/site.css">
+<style>
+  .cmp-wrap { overflow-x: auto; margin: 1.6rem 0 2rem; }
+  .cmp-table { width: 100%; border-collapse: collapse; font-family: var(--font-serif); font-size: 0.9rem; min-width: 560px; }
+  .cmp-table th, .cmp-table td { text-align: left; vertical-align: top; padding: 0.6rem 0.72rem; border-bottom: 1px solid var(--wire); }
+  .cmp-table thead th { font-family: var(--font-mono); font-size: 0.68rem; letter-spacing: 0.06em; text-transform: uppercase; color: var(--panel-dim); border-bottom: 1px solid var(--wire-strong); }
+  .cmp-table td { color: var(--ink-soft); }
+  .cmp-table tbody tr:last-child th, .cmp-table tbody tr:last-child td { border-bottom: none; }
+</style>
+</head>
+<body>
+
+<nav class="sitenav">
+  <div class="sitenav-inner">
+    <a class="sitenav-mark" href="../index.html">ouroboros</a>
+    <div class="sitenav-links">
+      <a href="../index.html">Home</a>
+      <a href="architecture-overview.html">Architecture</a>
+      <a href="tutorial.html">Learn</a>
+      <a href="docs.html" class="current">Docs</a>
+      <a href="https://github.com/hansolovkarlsson/Ouroboros">GitHub ↗</a>
+    </div>
+  </div>
+</nav>
+
+<div class="page">
+
+  <div class="kicker">User manual · Ouroboros</div>
+
+  <h1 class="title small">Ouroboros manual</h1>
+  <p class="dek">The one-stop reference for using Ouroboros: building it, running it on QEMU and on real Parallels hardware, testing it, using the shell, and the complete syscall ABI. Each section links to the deeper reference where one exists — <a href="architecture-overview.html"><code class="inline">architecture.md</code></a> for how the kernel works, <a href="processes.html"><code class="inline">processes.md</code></a> for the userland program model, <a href="shell-commands.html"><code class="inline">shell-commands.md</code></a> for the full builtin command reference, <a href="roadmap.html"><code class="inline">roadmap.md</code></a> for what's next, and <code class="inline">CLAUDE.md</code> at the repository root for the debugging history behind every design decision. If you want to build an OS like this yourself, <a href="tutorial.html"><code class="inline">tutorial.md</code></a> is the staged from-scratch guide — the working path only, with code samples from this kernel.</p>
+
+  <article>
+
+<h2>Prerequisites</h2>
+
+<ul>
+<li><strong>Rust</strong> — pinned by <code class="inline">rust-toolchain.toml</code> (stable channel; the <code class="inline">aarch64-unknown-uefi</code> and <code class="inline">aarch64-unknown-none</code> targets and the <code class="inline">llvm-tools</code> component install automatically on first build). No nightly, no <code class="inline">-Z build-std</code>.</li>
+<li><strong>QEMU</strong> — <code class="inline">brew install qemu</code>, which also provides the aarch64 OVMF firmware the run targets point at.</li>
+<li><strong>macOS's <code class="inline">hdiutil</code></strong> — used by <code class="inline">make image</code> to build the FAT32 disk image.</li>
+<li><strong>Parallels Desktop</strong> (optional, for real-hardware runs) — provides <code class="inline">prl_disk_tool</code> (used by <code class="inline">make parallels-hdd</code>) and <code class="inline">prlctl</code> (used by <code class="inline">make test-parallels</code>).</li>
+</ul>
+
+<h2>Building</h2>
+
+<div class="panel"><div class="panel-tab"><span>sh</span></div><pre><code>make build                  # kernel only (debug profile)
+make build PROFILE=release  # kernel, release profile
+make shell-bin              # the default shell (userland)
+make hello-bin              # the demo second program (userland)
+make esp                    # stage the full ESP directory layout</code></pre></div>
+
+<p>The workspace has four crates: <code class="inline">kernel</code> (a UEFI application, <code class="inline">aarch64-unknown-uefi</code>), <code class="inline">shell</code> and <code class="inline">hello</code> (userland programs, <code class="inline">aarch64-unknown-none</code>), and <code class="inline">syscall-abi</code> (the shared constants both sides import, so syscall numbers can never silently drift). Userland programs <strong>always build <code class="inline">--release</code></strong> regardless of <code class="inline">PROFILE</code> — a hard toolchain constraint of the position-independent build, not a preference (a debug build fails to link; see <code class="inline">processes.md</code>'s "Binary format").</p>
+
+<p>The staged ESP layout:</p>
+
+<div class="panel"><pre><code>\EFI\BOOT\BOOTAA64.EFI   the kernel (UEFI auto-boots this path)
+\EFI\ORBS\SH.BIN         the default shell
+\EFI\ORBS\HELLO.BIN      the demo second program
+\EFI\ORBS\INIT.CFG       one line: the path of the program to boot into</code></pre></div>
+
+<p>Swap the boot program by editing <code class="inline">INIT.CFG</code> — no kernel rebuild needed. (<code class="inline">ORBS</code>, not the full project name: FAT's 8.3 short-name limit, which the runtime FAT32 reader doesn't parse long-filename entries around.)</p>
+
+<h2>Running on QEMU</h2>
+
+<div class="panel"><div class="panel-tab"><span>sh</span></div><pre><code>make run             # fast dev loop - vvfat-backed disk (FAT16!)
+make run-image       # boots esp.img - real FAT32, disk commands work
+make run-usb-kbd     # + xHCI controller &amp; USB keyboard (monitor sendkey)
+make run-usb-multi   # + USB tablet and storage stick (3-device xHCI rig)
+make run-virtio-console  # + a virtio console device (see its Makefile note)
+make run-gicv3       # forces GICv3 instead of QEMU's default GICv2</code></pre></div>
+
+<p>The one everyday gotcha: <strong><code class="inline">make run</code>'s disk is FAT16</strong> (an artifact of QEMU's vvfat driver), which the FAT32-only filesystem server can't mount — every disk command prints a shared "no filesystem mounted" message there. Use <code class="inline">make run-image</code> whenever you want <code class="inline">ls</code>/<code class="inline">cat</code>/ <code class="inline">exec</code>/etc. to actually work.</p>
+
+<p>Exit QEMU with <code class="inline">Ctrl+a x</code>. On the USB targets, keystrokes can be injected through the monitor socket: <code class="inline">printf 'sendkey u\n' | nc -U qemu-monitor.sock</code>.</p>
+
+<h2>Running on Parallels (real hardware)</h2>
+
+<div class="panel"><div class="panel-tab"><span>sh</span></div><pre><code>make image           # esp.img - raw MBR+FAT32 disk image
+make parallels-hdd   # wraps it into esp.hdd via prl_disk_tool</code></pre></div>
+
+<p>Attach <code class="inline">esp.hdd</code> as the VM's <strong>Hard Disk</strong> device. Two confirmed traps (see <code class="inline">CLAUDE.md</code>'s "Parallels disk attachment"): Parallels rejects raw <code class="inline">.img</code> files on the Hard Disk device, and attaching the image to the CD/DVD device <em>looks</em> like it works but doesn't (the optical driver wants ISO9660). Also: <code class="inline">esp.hdd</code> stores a <em>pointer</em> to <code class="inline">esp.dmg</code>'s absolute path, so the two files must stay together.</p>
+
+<p>What works on real Parallels hardware today: the GOP framebuffer console, a real USB keyboard (including Shift and Ctrl chords), preemptive multitasking, the whole shell — <strong>and real disk access via a passed-through USB stick</strong> (Parallels exposes no storage controller this kernel can drive, but USB mass storage over the xHCI driver works: pass a USB 3.x stick through to the VM, boot, wait a few seconds for it to attach, and type <code class="inline">mount</code> — a FAT32-formatted stick then serves the full disk-command surface, <code class="inline">exec</code> included; USB 2.0 sticks land on the EHCI controller instead and can't be used).</p>
+
+<h3>Scripted real-hardware testing</h3>
+
+<div class="panel"><div class="panel-tab"><span>sh</span></div><pre><code>make test-parallels CMDS="help;ls;uptime" [BOOT_WAIT=12] [VM_NAME=Ouroboros]</code></pre></div>
+
+<p>Rebuilds <code class="inline">esp.hdd</code>, boots the registered VM headlessly, types each <code class="inline">;</code>-separated command via <code class="inline">prlctl send-key-event</code>, and saves a screenshot after each into a <code class="inline">parallels-test-&lt;timestamp&gt;/</code> directory (gitignored — delete it when done). Supports <code class="inline">&gt;</code> (a held-Shift chord) and a <code class="inline">CTRL-C</code> pseudo-command (a held-Ctrl chord, no Enter). Requires the VM registered in Parallels with its Hard Disk pointed at this repo's <code class="inline">esp.hdd</code>.</p>
+
+<h2>Using the shell</h2>
+
+<p>Full reference: <a href="shell-commands.html"><code class="inline">shell-commands.md</code></a>. The short tour:</p>
+
+<div class="panel"><pre><code>$ help                          # list every builtin
+$ mount                         # (Parallels) mount a passed-through USB stick
+$ ls /EFI/ORBS                  # disk commands (FAT32 boot only)
+$ write notes.txt hello world   # create/replace a file's contents
+$ cat notes.txt
+$ echo backup &gt;&gt; log.txt        # output redirection: &gt; replace, &gt;&gt; append
+$ mv notes.txt /EFI/ORBS        # into an existing directory keeps the name
+$ exec /EFI/ORBS/HELLO.BIN      # spawn a second program (runs alongside)
+$ wait 2                        # block until it exits, collect its status
+$ exec /EFI/ORBS/SH.BIN         # spawn a second shell...
+$ fg 2                          # ...and hand it the keyboard (nested session)
+$ exit                          # (in the nested shell) hand it back
+$ ps                            # one line per task slot
+$ kill 2                        # destroy a task
+$ exec /EFI/ORBS/PONG.BIN       # spawn the message server...
+$ send 2 hello                  # ...send it an IPC message
+$ recv                          # ...and receive its echo back</code></pre></div>
+
+<p>Job-control notes: only one task owns the keyboard at a time (<code class="inline">fg</code> moves it; ownership returns to the boot shell automatically when the owner dies, or on <strong>Ctrl+C</strong>, which reclaims the keyboard without killing anything). An exited task holds its slot as a zombie until <code class="inline">wait</code>ed (<code class="inline">ps</code> shows it); <code class="inline">kill</code> reaps immediately. Ctrl+C also interrupts a stuck <code class="inline">wait</code>.</p>
+
+<h2>Syscall ABI</h2>
+
+<p>Full per-syscall detail: <a href="architecture-overview.html"><code class="inline">architecture.md</code></a>'s syscall table; the authoritative constants live in <code class="inline">syscall-abi/src/lib.rs</code>, imported by both the kernel and every userland program.</p>
+
+<p><strong>Calling convention</strong> (Linux-shaped, not Linux-compatible): syscall number in <code class="inline">x8</code>, up to four arguments in <code class="inline">x0</code>–<code class="inline">x3</code>, return value in <code class="inline">x0</code>, via <code class="inline">svc #0</code>. Pointer/length arguments are bounded at <strong>512 bytes per buffer</strong> (<code class="inline">MAX_USER_LEN</code>) — longer buffers are rejected, not truncated.</p>
+
+<p><strong>Error convention:</strong> all failure codes live in a reserved top band of <code class="inline">u64</code> — <strong>any return value <code class="inline">&gt;= FS_ERR_MIN</code> (<code class="inline">u64::MAX - 31</code>) is an error</strong>; everything below is a real result (byte counts, sizes, exit statuses). <code class="inline">NO_FS</code> (<code class="inline">MAX-1</code>) means no filesystem is mounted this boot.</p>
+
+<div class="cmp-wrap"><table class="cmp-table"><thead><tr><th scope="col">#</th><th scope="col">Name</th><th scope="col">Arguments</th><th scope="col">Purpose</th></tr></thead><tbody><tr><td>0</td><td><code class="inline">print</code></td><td>value</td><td>Demo: log a value through the kernel console</td></tr><tr><td>1</td><td><code class="inline">double</code></td><td>value</td><td>Demo: returns <code class="inline">value * 2</code></td></tr><tr><td>2</td><td><code class="inline">report</code></td><td>task id</td><td>Demo: per-task counter</td></tr><tr><td>3</td><td><code class="inline">try_read_char</code></td><td>—</td><td>Non-blocking read; <code class="inline">NO_CHAR</code> if nothing waiting</td></tr><tr><td>4</td><td><code class="inline">putc</code></td><td>byte</td><td>Raw console byte write</td></tr><tr><td>5</td><td>—</td><td></td><td><em>Deliberate gap (removed <code class="inline">shell_input</code>; ABI stability over density)</em></td></tr><tr><td>6</td><td><code class="inline">get_ticks</code></td><td>—</td><td>Preemption tick count since boot</td></tr><tr><td>7–14</td><td>—</td><td></td><td><em>Deliberate gaps: the old <code class="inline">fs_*</code> syscalls — the filesystem lives in userland now (the fsd server); their contracts survive as the <code class="inline">FSOP_*</code> request protocol below</em></td></tr><tr><td>15</td><td><code class="inline">read_char</code></td><td>—</td><td>Blocking read: the task is suspended until a byte arrives</td></tr><tr><td>16</td><td><code class="inline">spawn</code></td><td>staged total len</td><td>Start a program image previously fed in via <code class="inline">spawn_stage</code> as a new task alongside the caller; returns the new task's slot index</td></tr><tr><td>17</td><td><code class="inline">exit</code></td><td>code</td><td>Destroy the calling task; status kept (masked to 0–255) until <code class="inline">wait</code>ed. Tasks 0–2 refused (<code class="inline">EXIT_DENIED</code>)</td></tr><tr><td>18</td><td><code class="inline">task_state</code></td><td>index</td><td><code class="inline">UNUSED</code>/<code class="inline">RUNNABLE</code>/<code class="inline">BLOCKED</code>/<code class="inline">ZOMBIE</code>, or <code class="inline">TASK_STATE_INVALID</code> past the last slot</td></tr><tr><td>19</td><td><code class="inline">kill</code></td><td>index</td><td>Destroy another task (reaps immediately). Tasks 0–2 protected</td></tr><tr><td>20</td><td><code class="inline">fg</code></td><td>index</td><td>Hand keyboard ownership to a task (auto-reverts to task 0 on the owner's death, or on Ctrl+C)</td></tr><tr><td>21</td><td><code class="inline">wait</code></td><td>index</td><td>Block until the task dies; returns its status (0–255), <code class="inline">TASK_KILLED_STATUS</code> (0x100), or <code class="inline">WAIT_INTERRUPTED</code> (Ctrl+C). Collecting the status reaps the slot</td></tr><tr><td>22</td><td><code class="inline">mount</code></td><td>replace flag</td><td>Rescan the USB ports and install a storage device as the kernel's block device (<code class="inline">0</code>, <code class="inline">MOUNT_ALREADY</code>, or <code class="inline">MOUNT_NO_DEVICE</code>) — the device half; the FS half is the server's <code class="inline">FSOP_MOUNT</code></td></tr><tr><td>23</td><td><code class="inline">msg_send</code></td><td>dest, buf ptr/len</td><td>IPC: deliver a message (≤64 bytes) — straight into a matching blocked receiver's buffer (direct delivery), or into the task's bounded mailbox. Zero length is legal: the pipeline end-of-stream marker</td></tr><tr><td>24</td><td><code class="inline">msg_recv</code></td><td>buf ptr/len</td><td>Block until a message arrives; returns <code class="inline">(sender &lt;&lt; 32) | len</code>, or <code class="inline">RECV_INTERRUPTED</code> on Ctrl+C</td></tr><tr><td>25</td><td><code class="inline">msg_try_recv</code></td><td>buf ptr/len</td><td>Non-blocking receive; <code class="inline">NO_MSG</code> when empty</td></tr><tr><td>26</td><td><code class="inline">block_info</code></td><td>—</td><td>Block-device capacity in sectors — <strong>task 2 (the fsd server) only</strong>, like all three <code class="inline">block_*</code> syscalls</td></tr><tr><td>27</td><td><code class="inline">block_read</code></td><td>LBA, buf ptr</td><td>Read one 512-byte sector (fsd only)</td></tr><tr><td>28</td><td><code class="inline">block_write</code></td><td>LBA, buf ptr</td><td>Write one 512-byte sector (fsd only)</td></tr><tr><td>29</td><td><code class="inline">msg_call</code></td><td>dest, req ptr/len, reply ptr</td><td>Synchronous request/response: send + block for a reply <em>from <code class="inline">dest</code> specifically</em>; sub-tick round trips via direct delivery. Reply buffer is a fixed 64 bytes</td></tr><tr><td>30</td><td><code class="inline">spawn_stage</code></td><td>offset, chunk ptr/len</td><td>Feed one chunk of a program image into the kernel's 128KB staging buffer for <code class="inline">spawn</code></td></tr></tbody></table></div>
+
+<p><strong>File operations</strong> are <code class="inline">FSOP_*</code> requests to the filesystem server (task 2), sent via <code class="inline">msg_call</code>: a 56-byte message (op + six LE u64 args — pointers into your own buffers), one u64 reply with the old syscalls' exact return semantics. Ops: <code class="inline">LIST_DIR</code>, <code class="inline">READ_FILE</code>, <code class="inline">READ_AT</code> (windowed read at an offset), <code class="inline">WRITE_FILE</code>, <code class="inline">MKDIR</code>, <code class="inline">RMDIR</code>, <code class="inline">TOUCH</code>, <code class="inline">RM</code>, <code class="inline">MV</code>, <code class="inline">MOUNT</code>. The shell's <code class="inline">fs_call</code> wrapper (<code class="inline">shell/src/main.rs</code>) is the reference client.</p>
+
+<p>Filesystem failures return a specific <code class="inline">FS_ERR_*</code> code (<code class="inline">NOT_FOUND</code>, <code class="inline">NOT_A_FILE</code>, <code class="inline">NOT_A_DIRECTORY</code>, <code class="inline">INVALID_NAME</code>, <code class="inline">ALREADY_EXISTS</code>, <code class="inline">NOT_EMPTY</code>, <code class="inline">IS_ROOT</code>, <code class="inline">DISK_FULL</code>, <code class="inline">IO</code>); <code class="inline">spawn</code> adds <code class="inline">SPAWN_ERR_BAD_ELF</code>/<code class="inline">SPAWN_ERR_TOO_LARGE</code>/<code class="inline">SPAWN_ERR_NO_FREE_SLOT</code>; the task syscalls add <code class="inline">TASK_ERR_NO_SUCH_TASK</code>/<code class="inline">TASK_ERR_PROTECTED</code>; the block syscalls add <code class="inline">BLOCK_ERR_NO_DEVICE</code>/<code class="inline">BLOCK_ERR_IO</code>/ <code class="inline">BLOCK_ERR_DENIED</code>.</p>
+
+<h2>Writing your own program</h2>
+
+<p>The full guide is <a href="processes.html"><code class="inline">processes.md</code></a>; <code class="inline">hello/</code> is the working ~70-line template. The essentials: <code class="inline">#![no_std]</code>/<code class="inline">#![no_main]</code>, <code class="inline">_start</code> placed first in <code class="inline">.text</code> via <code class="inline">.text.start</code>, syscalls via inline <code class="inline">svc #0</code>, <strong>release builds only</strong>, and <strong>no static mutable state</strong> (the linker script asserts <code class="inline">.data</code>/<code class="inline">.bss</code> empty — keep state in <code class="inline">main</code>'s stack frame). Stage the stripped ELF on the ESP and either point <code class="inline">INIT.CFG</code> at it (boot into it) or <code class="inline">exec</code> it from the shell.</p>
+
+  </article>
+
+  <footer class="site-footer">
+    <span>Ouroboros — an ARM64 microkernel, written from scratch in Rust</span>
+    <a href="https://github.com/hansolovkarlsson/Ouroboros">github.com/hansolovkarlsson/Ouroboros</a>
+  </footer>
+
+</div>
+</body>
+</html>

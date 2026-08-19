@@ -15,13 +15,9 @@
     <a class="sitenav-mark" href="index.html">ouroboros</a>
     <div class="sitenav-links">
       <a href="index.html" class="current">Home</a>
-      <a href="architecture-overview.html">Architecture</a>
-      <a href="tutorial.html">Learn</a>
-      <a href="postmortem-boot-bringup.html">Boot bring-up</a>
-      <a href="postmortem-shell-filesystem.html">Shell &amp; filesystem</a>
-      <a href="postmortem-xhci-keyboard.html">xHCI keyboard</a>
-      <a href="postmortem-usb-storage.html">USB storage</a>
-      <a href="glossary.html">Glossary</a>
+      <a href="site/architecture-overview.html">Architecture</a>
+      <a href="site/tutorial.html">Learn</a>
+      <a href="site/docs.html">Docs</a>
       <a href="https://github.com/hansolovkarlsson/Ouroboros">GitHub ↗</a>
     </div>
   </div>
@@ -44,7 +40,8 @@
 
   <div class="hero-links">
     <a class="primary" href="https://github.com/hansolovkarlsson/Ouroboros">View the source →</a>
-    <a href="architecture-overview.html">See the architecture</a>
+    <a href="site/architecture-overview.html">See the architecture</a>
+    <a href="site/docs.html">Browse all docs</a>
     <a href="#learn">Learn to build one</a>
     <a href="#postmortems">Read the postmortems</a>
     <a href="#status">Current status</a>
@@ -54,7 +51,7 @@
     <div class="stat"><span class="stat-num">aarch64</span><span class="stat-label">Architecture</span></div>
     <div class="stat"><span class="stat-num">UEFI</span><span class="stat-label">Boot path</span></div>
     <div class="stat"><span class="stat-num">5</span><span class="stat-label">Workspace crates</span></div>
-    <div class="stat"><span class="stat-num">4</span><span class="stat-label">Postmortems</span></div>
+    <div class="stat"><span class="stat-num">5</span><span class="stat-label">Postmortems</span></div>
   </div>
 
   <article>
@@ -157,7 +154,7 @@
     </p>
 
     <div class="postmortem-cards">
-      <a class="pm-card" href="architecture-overview.html">
+      <a class="pm-card" href="site/architecture-overview.html">
         <span class="pm-eyebrow">Overview · the layers</span>
         <h3>The shape of the system</h3>
         <p>Six diagrams: the privilege stack, what the kernel keeps versus what it pushes out, the five task slots, the MMU-enforced isolation model, a single <code class="inline">cat</code> traced across the boundary as a sequence of traps, and the boot sequence from firmware to EL0.</p>
@@ -177,7 +174,7 @@
     </p>
 
     <div class="postmortem-cards">
-      <a class="pm-card" href="tutorial.html">
+      <a class="pm-card" href="site/tutorial.html">
         <span class="pm-eyebrow">Tutorial · the working path</span>
         <h3>Build an ARM64 OS from scratch</h3>
         <p>From a UEFI hello world to a preemptive, multi-tasking kernel running position-independent userland programs loaded from disk — console discovery, exception vectors, your own page tables, a timer tick, EL0 and syscalls, task switching as a struct copy, PIE ELF loading, and a filesystem of your own. Stable Rust and QEMU are all you need.</p>
@@ -190,31 +187,43 @@
       Every real bug found along the way — the ones that mattered, not
       the routine typos — is written up in detail: symptom, root cause,
       how it was actually confirmed, and the generalizable lesson. Four
-      pieces, in chronological order, each usable on its own.
+      bug-hunt chapters in chronological order, plus a later design
+      retrospective — each usable on its own.
     </p>
 
     <div class="postmortem-cards">
-      <a class="pm-card" href="postmortem-boot-bringup.html">
+      <a class="pm-card" href="site/postmortem-boot-bringup.html">
         <span class="pm-eyebrow">Part 1 · Boot bring-up</span>
         <h3>From "it doesn't boot" to a real console</h3>
         <p>Exception vectors, the MMU switch, GIC/timer bring-up, the EL0/syscall boundary, and a console-discovery saga that killed three mechanisms and one whole driver before finding the one that worked on real hardware.</p>
       </a>
-      <a class="pm-card" href="postmortem-shell-filesystem.html">
+      <a class="pm-card" href="site/postmortem-shell-filesystem.html">
         <span class="pm-eyebrow">Part 2 · Shell &amp; filesystem</span>
         <h3>From a bare prompt to a real, disk-backed OS</h3>
         <p>A relocation bug found twice before its real shape was understood, a hang with zero diagnostic output, a disk that lied about its own filesystem format, and the write-support arc built on top.</p>
       </a>
-      <a class="pm-card" href="postmortem-xhci-keyboard.html">
+      <a class="pm-card" href="site/postmortem-xhci-keyboard.html">
         <span class="pm-eyebrow">Part 3 · xHCI keyboard</span>
         <h3>Getting a USB keyboard working on Parallels</h3>
         <p>Seven real, confirmed hardware bugs bringing keyboard input to the kernel — a PCI Command register bit, a real UEFI firmware panic, a page-table assumption, a silently-dropped USB request class, a driver reading the wrong device, dropped keystrokes under real preemption, and a timeout that was iteration-bounded instead of time-bounded — the last two found weeks later, one of them by a user, not a script.</p>
       </a>
-      <a class="pm-card" href="postmortem-usb-storage.html">
+      <a class="pm-card" href="site/postmortem-usb-storage.html">
         <span class="pm-eyebrow">Part 4 · USB storage</span>
         <h3>Giving Parallels a disk</h3>
         <p>Proving the hypervisor exposes no storage controller at all, USB passthrough that routes devices by speed and attaches them after your boot scan already ran, a mid-transfer keystroke that would have permanently killed the keyboard, SCSI Unit Attention found by a hot-plug test, and two error codes whose collapse silently turned append into overwrite.</p>
       </a>
+      <a class="pm-card" href="site/postmortem-isolation-dataflow.html">
+        <span class="pm-eyebrow">Retrospective · a different era</span>
+        <h3>Enforce the isolation, rebuild the data flow</h3>
+        <p>Not a bug hunt but a design-led day: MMU-enforced per-task isolation and fault containment, then rebuilding every cheap data path enforcement broke — grant/safecopy IPC, a FAT32 offset-write, and the one works-on-QEMU-fails-on-silicon reversal.</p>
+      </a>
     </div>
+
+    <p>
+      Every document in this project — the guides, the architecture and
+      reference material, all five postmortems, and the research notes —
+      is collected in <a href="site/docs.html">the documentation library</a>.
+    </p>
 
     <h2>Following along</h2>
 

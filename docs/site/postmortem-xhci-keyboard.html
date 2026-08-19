@@ -5,23 +5,19 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>xHCI Keyboard Postmortem — Ouroboros</title>
 <meta name="description" content="Five real, confirmed hardware bugs found bringing USB keyboard input to a from-scratch ARM64 kernel on real Parallels-on-Apple-Silicon hardware.">
-<link rel="icon" type="image/png" href="assets/favicon.png">
-<link rel="stylesheet" href="assets/site.css">
+<link rel="icon" type="image/png" href="../assets/favicon.png">
+<link rel="stylesheet" href="../assets/site.css">
 </head>
 <body>
 
 <nav class="sitenav">
   <div class="sitenav-inner">
-    <a class="sitenav-mark" href="index.html">ouroboros</a>
+    <a class="sitenav-mark" href="../index.html">ouroboros</a>
     <div class="sitenav-links">
-      <a href="index.html">Home</a>
+      <a href="../index.html">Home</a>
       <a href="architecture-overview.html">Architecture</a>
       <a href="tutorial.html">Learn</a>
-      <a href="postmortem-boot-bringup.html">Boot bring-up</a>
-      <a href="postmortem-shell-filesystem.html">Shell &amp; filesystem</a>
-      <a href="postmortem-xhci-keyboard.html" class="current">xHCI keyboard</a>
-      <a href="postmortem-usb-storage.html">USB storage</a>
-      <a href="glossary.html">Glossary</a>
+      <a href="docs.html" class="current">Docs</a>
       <a href="https://github.com/hansolovkarlsson/Ouroboros">GitHub ↗</a>
     </div>
   </div>
@@ -59,7 +55,7 @@
 
   <div class="companion">
     <span class="companion-icon">🖥️</span>
-    <span>This is the third of four companion pieces — <a href="postmortem-boot-bringup.html">the boot bring-up postmortem</a> covers the exception vectors, MMU, and console-discovery work everything here sits on top of, <a href="postmortem-shell-filesystem.html">the shell &amp; filesystem postmortem</a> covers the disk-backed userland shell this driver's keystrokes actually reach, and <a href="postmortem-usb-storage.html">the USB storage postmortem</a> covers the day this same xHCI driver grew a second device: a real disk.</span>
+    <span>This is the third of four companion pieces — <a href="postmortem-boot-bringup.html">the boot bring-up postmortem</a> covers the exception vectors, MMU, and console-discovery work everything here sits on top of, <a href="postmortem-shell-filesystem.html">the shell &amp; filesystem postmortem</a> covers the disk-backed userland shell this driver's keystrokes actually reach, and <a href="postmortem-usb-storage.html">the USB storage postmortem</a> covers the day this same xHCI driver grew a second device: a real disk. A later companion — <a href="postmortem-isolation-dataflow.html">the isolation &amp; data-flow retrospective</a> — covers a different era: the design-led day that made this kernel's memory isolation MMU-enforced.</span>
   </div>
 
   <article>

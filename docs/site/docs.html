@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Documentation — Ouroboros</title>
+<meta name="description" content="The full documentation library for Ouroboros — guides, architecture and reference, debugging postmortems, and research notes, each as a web page and backed by a Markdown source in the repository.">
+<link rel="icon" type="image/png" href="../assets/favicon.png">
+<link rel="stylesheet" href="../assets/site.css">
+</head>
+<body>
+
+<nav class="sitenav">
+  <div class="sitenav-inner">
+    <a class="sitenav-mark" href="../index.html">ouroboros</a>
+    <div class="sitenav-links">
+      <a href="../index.html">Home</a>
+      <a href="architecture-overview.html">Architecture</a>
+      <a href="tutorial.html">Learn</a>
+      <a href="docs.html" class="current">Docs</a>
+      <a href="https://github.com/hansolovkarlsson/Ouroboros">GitHub ↗</a>
+    </div>
+  </div>
+</nav>
+
+<div class="page">
+
+  <div class="kicker">Documentation · Ouroboros</div>
+
+  <h1 class="title">The documentation library</h1>
+  <p class="dek">
+    Every document in this project, as a web page — the build-it-yourself
+    guide, the architecture and reference material, the debugging
+    postmortems, and the research notes. Each page has a Markdown source
+    of record in the repository under <code class="inline">docs/</code>.
+  </p>
+
+  <article>
+
+    <h2>Guides</h2>
+    <p>Start here — how to build the system, and how to use and extend it.</p>
+    <div class="postmortem-cards">
+      <a class="pm-card" href="manual.html">
+        <span class="pm-eyebrow">Guide · start here</span>
+        <h3>The manual</h3>
+        <p>The one-stop reference for using Ouroboros: building it, running it on QEMU and real Parallels hardware, scripted testing, the shell tour, and the complete syscall ABI table.</p>
+      </a>
+      <a class="pm-card" href="tutorial.html">
+        <span class="pm-eyebrow">Guide · the working path</span>
+        <h3>Build an ARM64 OS from scratch</h3>
+        <p>Nine ordered stages from a UEFI hello world to preemptive multitasking and position-independent userland loaded from disk — the working path only, no bug narratives. Stable Rust and QEMU are all you need.</p>
+      </a>
+      <a class="pm-card" href="shell-commands.html">
+        <span class="pm-eyebrow">Guide · reference</span>
+        <h3>Shell commands</h3>
+        <p>The default shell's builtin commands — syntax, behaviour, and known limitations, command by command, from <code class="inline">ls</code>/<code class="inline">cat</code> through <code class="inline">exec</code>/<code class="inline">fg</code>/<code class="inline">kill</code> and pipelines.</p>
+      </a>
+      <a class="pm-card" href="glossary.html">
+        <span class="pm-eyebrow">Guide · reference</span>
+        <h3>Glossary</h3>
+        <p>Every acronym and term this project leans on — EL0/EL1, GIC, MMIO, PPI, virtqueue, PIE, FAT32, xHCI — defined in one place, grouped by area.</p>
+      </a>
+    </div>
+
+    <h2>Architecture &amp; reference</h2>
+    <p>The shape of the system and the mechanisms underneath it.</p>
+    <div class="postmortem-cards">
+      <a class="pm-card" href="architecture-overview.html">
+        <span class="pm-eyebrow">Reference · the layers</span>
+        <h3>Architecture overview</h3>
+        <p>Six diagrams: the privilege stack, what the kernel keeps versus what it pushes out, the five task slots, the MMU-enforced isolation model, a single <code class="inline">cat</code> traced across the boundary, and the boot sequence from firmware to EL0.</p>
+      </a>
+      <a class="pm-card" href="processes.html">
+        <span class="pm-eyebrow">Reference · userland</span>
+        <h3>The process model</h3>
+        <p>How userland programs are loaded, laid out in memory, and structured — the ELF/PIE binary format, the config mechanism, and a guide to writing a replacement program (and the relocation-class traps to avoid).</p>
+      </a>
+      <a class="pm-card" href="roadmap.html">
+        <span class="pm-eyebrow">Reference · what's next</span>
+        <h3>Roadmap</h3>
+        <p>The forward-looking parking lot of known future work — a relocating loader's next steps, blocking primitives, driver isolation, and the testing infrastructure — not yet sequenced.</p>
+      </a>
+      <a class="pm-card" href="changelog.html">
+        <span class="pm-eyebrow">Reference · history</span>
+        <h3>Changelog</h3>
+        <p>The full milestone-by-milestone record, phase 0 to the present, newest first — every completed step with the same level of detail as the postmortems.</p>
+      </a>
+    </div>
+
+    <h2>Postmortems</h2>
+    <p>
+      Every real bug that mattered, written up in full — symptom, root
+      cause, how it was actually confirmed, and the generalizable lesson.
+      In chronological order, each usable on its own.
+    </p>
+    <div class="postmortem-cards">
+      <a class="pm-card" href="postmortem-boot-bringup.html">
+        <span class="pm-eyebrow">Part 1 · Boot bring-up</span>
+        <h3>From "it doesn't boot" to a real console</h3>
+        <p>Exception vectors, the MMU switch, GIC/timer bring-up, the EL0/syscall boundary, and a console-discovery saga that killed three mechanisms and one whole driver before finding the one that worked on real hardware.</p>
+      </a>
+      <a class="pm-card" href="postmortem-shell-filesystem.html">
+        <span class="pm-eyebrow">Part 2 · Shell &amp; filesystem</span>
+        <h3>From a bare prompt to a real, disk-backed OS</h3>
+        <p>A relocation bug found twice before its real shape was understood, a hang with zero diagnostic output, a disk that lied about its own filesystem format, and the write-support arc built on top.</p>
+      </a>
+      <a class="pm-card" href="postmortem-xhci-keyboard.html">
+        <span class="pm-eyebrow">Part 3 · xHCI keyboard</span>
+        <h3>Getting a USB keyboard working on Parallels</h3>
+        <p>Seven real, confirmed hardware bugs bringing keyboard input to the kernel — a PCI Command register bit, a real UEFI firmware panic, a page-table assumption, a silently-dropped USB request class, a driver reading the wrong device, and two found weeks later, one of them by a user, not a script.</p>
+      </a>
+      <a class="pm-card" href="postmortem-usb-storage.html">
+        <span class="pm-eyebrow">Part 4 · USB storage</span>
+        <h3>Giving Parallels a disk</h3>
+        <p>Proving the hypervisor exposes no storage controller at all, USB passthrough that routes devices by speed and attaches them after your boot scan already ran, a mid-transfer keystroke that would have permanently killed the keyboard, and SCSI Unit Attention found by a hot-plug test.</p>
+      </a>
+      <a class="pm-card" href="postmortem-isolation-dataflow.html">
+        <span class="pm-eyebrow">Retrospective · a different era</span>
+        <h3>Enforce the isolation, rebuild the data flow</h3>
+        <p>A design-led day, not a bug hunt: MMU-enforced per-task isolation and fault containment, then rebuilding every cheap data path enforcement broke — grant/safecopy IPC, a FAT32 offset-write, and the one works-on-QEMU-fails-on-silicon reversal.</p>
+      </a>
+    </div>
+
+    <h2>Research &amp; assessments</h2>
+    <p>
+      Where this project sits against the ideas it draws on — a current
+      self-assessment, and notes on the two outside influences it measures
+      itself against.
+    </p>
+    <div class="postmortem-cards">
+      <a class="pm-card" href="microkernel-comparison.html">
+        <span class="pm-eyebrow">Assessment · self</span>
+        <h3>Microkernel, protection, fault tolerance</h3>
+        <p>How close the mechanisms actually are — measured against MINIX and Helix OS on three axes, with a consolidated scorecard and a ranked list of what would close each gap. On its one moved service, a genuine microkernel; what's missing is breadth, not honesty.</p>
+      </a>
+      <a class="pm-card" href="research-minix-boot.html">
+        <span class="pm-eyebrow">Research · influence</span>
+        <h3>How MINIX boots</h3>
+        <p>How a decades-mature microkernel boots and starts its user-space servers — on x86 and on ARM — and where Ouroboros's UEFI-native boot resembles or deliberately diverges from it.</p>
+      </a>
+      <a class="pm-card" href="research-helix-os.html">
+        <span class="pm-eyebrow">Research · influence</span>
+        <h3>Helix OS's fault-tolerant design</h3>
+        <p>A young, layered, trait-based Rust kernel that makes hot-reload and self-healing first-class primitives — and the real difference between its in-address-space module recovery and MINIX-style process isolation.</p>
+      </a>
+    </div>
+
+  </article>
+
+  <footer class="site-footer">
+    <span>Ouroboros — an ARM64 microkernel, written from scratch in Rust</span>
+    <a href="https://github.com/hansolovkarlsson/Ouroboros">github.com/hansolovkarlsson/Ouroboros</a>
+  </footer>
+
+</div>
+</body>
+</html>

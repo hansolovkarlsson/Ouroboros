@@ -1,0 +1,222 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Helix OS's Design — Ouroboros</title>
+<meta name="description" content="A research note on Helix OS — a young, layered, trait-based experimental kernel in Rust whose hot-reload and self-healing framework make fault tolerance a first-class primitive — and what its design says about Ouroboros's own shape.">
+<link rel="icon" type="image/png" href="../assets/favicon.png">
+<link rel="stylesheet" href="../assets/site.css">
+<style>
+  .cmp-wrap { overflow-x: auto; margin: 1.8rem 0 2.4rem; }
+  .cmp-table {
+    width: 100%; border-collapse: collapse;
+    font-family: var(--font-serif); font-size: 0.9rem; min-width: 560px;
+  }
+  .cmp-table th, .cmp-table td {
+    text-align: left; vertical-align: top;
+    padding: 0.62rem 0.75rem; border-bottom: 1px solid var(--wire);
+  }
+  .cmp-table thead th {
+    font-family: var(--font-mono); font-size: 0.68rem; letter-spacing: 0.06em;
+    text-transform: uppercase; color: var(--panel-dim);
+    border-bottom: 1px solid var(--wire-strong); white-space: nowrap;
+  }
+  .cmp-table tbody th { font-weight: 600; color: var(--ink); width: 26%; }
+  .cmp-table td { color: var(--ink-soft); }
+  .cmp-table .oc { color: var(--ink); }
+  .cmp-table tbody tr:last-child th, .cmp-table tbody tr:last-child td { border-bottom: none; }
+</style>
+</head>
+<body>
+
+<nav class="sitenav">
+  <div class="sitenav-inner">
+    <a class="sitenav-mark" href="../index.html">ouroboros</a>
+    <div class="sitenav-links">
+      <a href="../index.html">Home</a>
+      <a href="architecture-overview.html">Architecture</a>
+      <a href="tutorial.html">Learn</a>
+      <a href="docs.html" class="current">Docs</a>
+      <a href="https://github.com/hansolovkarlsson/Ouroboros">GitHub ↗</a>
+    </div>
+  </div>
+</nav>
+
+<div class="page">
+
+  <div class="kicker">Research note · Ouroboros</div>
+
+  <h1 class="title small">Helix OS: layered, fault-tolerant kernel design</h1>
+  <p class="dek">
+    A second outside design influence — a young Rust kernel that makes
+    hot-reload and self-healing first-class primitives — read for what its
+    <em>design</em> suggests, not as a battle-tested reference.
+  </p>
+
+  <div class="companion">
+    <span class="companion-icon">📚</span>
+    <span>One of two outward-looking research notes — see also <a href="research-minix-boot.html">how MINIX boots</a> — that feed the current <a href="microkernel-comparison.html">microkernel self-assessment</a>.</span>
+  </div>
+
+  <article>
+
+    <blockquote class="aside">
+      <span class="aside-label">A caveat before anything else</span>
+      <p>
+        This note is about
+        <a href="https://github.com/HelixOS-Org/helix">HelixOS-Org/helix</a>,
+        a "next-generation modular framework for experimental operating
+        system development in Rust." It is a young, small, unproven project
+        — explicitly labelled pre-alpha, "not suitable for production use"
+        by its own README, unlike MINIX's decades of hardening. Treat
+        everything below as an interesting <em>design</em> to learn from,
+        not a reference implementation.
+      </p>
+    </blockquote>
+
+    <h2>Architecture: five layers, trait boundaries between all of them</h2>
+
+    <p>
+      Helix organizes roughly 20 crates into five layers, each depending
+      only on trait interfaces exposed by the layer below:
+    </p>
+
+    <ol>
+      <li>
+        <strong>Boot protocols</strong> — three interchangeable frontends
+        (Limine, Multiboot2, UEFI) that extract memory maps, framebuffers,
+        and ACPI/SMBIOS handoff data.
+      </li>
+      <li>
+        <strong>Hardware abstraction (HAL)</strong> — architecture-agnostic
+        traits (<code class="inline">Cpu</code>,
+        <code class="inline">Mmu</code>,
+        <code class="inline">InterruptController</code>,
+        <code class="inline">Firmware</code>). The stated claim: adding an
+        architecture means implementing four traits, "the rest compiles
+        unchanged."
+      </li>
+      <li>
+        <strong>Kernel core</strong> — the actual trusted computing base:
+        interrupt dispatch, capability validation, syscall gateways, IPC.
+        Deliberately excludes scheduling and allocation policy — the
+        project's own framing is <strong>"mechanism, not policy."</strong>
+      </li>
+      <li>
+        <strong>Subsystem frameworks</strong> — trait-based abstractions for
+        scheduling, memory, and userspace support, living <em>outside</em>
+        the TCB. Includes a subsystem offering "kernel-level observability,
+        failure prediction, and self-healing hooks."
+      </li>
+      <li>
+        <strong>Pluggable module implementations</strong> — concrete
+        implementations of the layer-4 traits, swappable without modifying
+        the kernel core.
+      </li>
+    </ol>
+
+    <h2>Fault tolerance: hot-reload and self-healing as primitives</h2>
+
+    <p>
+      This is the genuinely distinct part — a different fault story from a
+      conventional microkernel's, MINIX's included:
+    </p>
+
+    <ul>
+      <li>
+        <strong>Hot-reload protocol</strong> — runtime module replacement,
+        "not an afterthought": pause → snapshot state → unload the old
+        module → load the replacement → restore state → resume, with ABI
+        compatibility checking and <strong>automatic rollback</strong> if
+        the swap fails. A stronger claim than MINIX's reincarnation server:
+        MINIX restarts a crashed <em>process</em> from scratch (no state
+        transfer), while Helix aims at <em>live</em> replacement of a
+        running module.
+      </li>
+      <li>
+        <strong>Self-healing framework</strong> — a watchdog + health
+        monitor + recovery manager. When a module crashes <em>or hangs</em>,
+        the kernel detects it via health checks and can restart it with an
+        attempted state migration, "without requiring a full reboot."
+      </li>
+    </ul>
+
+    <h2>The most interesting contrast: Helix vs. MINIX</h2>
+
+    <p>
+      Both claim a fault-tolerance story, but mean genuinely different
+      things by it. MINIX's is <strong>process-boundary-based</strong>: a
+      driver crashes, RS restarts the process from a clean slate, and
+      isolation comes from the driver never having been in the kernel's
+      address space. Helix's is <strong>module-boundary-based, inside one
+      address space</strong>: nothing here runs with hardware-enforced
+      isolation from the kernel core the way a MINIX server does — the
+      safety story leans on Rust's memory safety and the hot-reload
+      protocol's own bookkeeping, not a privilege boundary. A real
+      architectural difference, not just phrasing, and worth remembering
+      before treating "self-healing" as a synonym for MINIX-style isolation.
+    </p>
+
+    <h2>Side by side with Ouroboros</h2>
+
+    <div class="cmp-wrap">
+      <table class="cmp-table">
+        <thead>
+          <tr><th scope="col"></th><th scope="col">Helix</th><th scope="col">Ouroboros</th></tr>
+        </thead>
+        <tbody>
+          <tr><th scope="row">Target architecture</th><td>x86_64 (AArch64/RISC-V stubbed)</td><td class="oc">AArch64 (Parallels on Apple Silicon primary)</td></tr>
+          <tr><th scope="row">Boot</th><td>Limine / Multiboot2 / UEFI, three frontends</td><td class="oc">UEFI only — the one path that works on the real target</td></tr>
+          <tr><th scope="row">Kernel / policy boundary</th><td>Explicit, trait-based, swappable modules outside the TCB</td><td class="oc">Partial — the FS is a userland server; scheduler/MMU/drivers still kernel-resident</td></tr>
+          <tr><th scope="row">Fault isolation</th><td>Module restart with attempted state migration, no reboot (within one address space)</td><td class="oc">MMU-enforced per-task isolation; the FS server is contained + supervised</td></tr>
+          <tr><th scope="row">Runtime extensibility</th><td>Hot-reload is a designed-in primitive</td><td class="oc">Dynamic spawn / exec / exit / wait, but reload = restart, not live swap</td></tr>
+          <tr><th scope="row">Maturity</th><td>Pre-alpha, unproven</td><td class="oc">Pre-alpha, incrementally verified on QEMU and real Parallels hardware</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h2>What this says about Ouroboros</h2>
+
+    <p>
+      What Helix adds to the picture that MINIX's boot sequence didn't
+      emphasize is a concrete vocabulary for the layer <em>within</em> a
+      kernel. Ouroboros's own <code class="inline">console::Console</code>
+      enum already does in miniature, for one concern, what Helix's HAL does
+      project-wide — a real precedent in this codebase for the same idea.
+      Two of Helix's framings are worth holding onto explicitly:
+    </p>
+
+    <ul>
+      <li>
+        <strong>"Mechanism, not policy"</strong> as a phrase to hold the
+        kernel core to — a useful, quotable framing for future EL1-vs-EL0
+        decisions, distinct from MINIX's "push it to user space entirely"
+        answer to the same question.
+      </li>
+      <li>
+        <strong>Self-healing / hot-reload as a design goal to hold in
+        mind,</strong> not a near-term target — Ouroboros now has the
+        prerequisites (dynamic task creation, a supervised restartable
+        server) that this presupposed, so the <em>shape</em> of the
+        mechanism (pause → snapshot → swap → restore → rollback) is a
+        reasonable target once a general supervision layer exists.
+      </li>
+    </ul>
+
+    <p>
+      The full note, with sources linked throughout, lives in the
+      repository as
+      <a href="https://github.com/hansolovkarlsson/Ouroboros/blob/main/docs/research-helix-os.md">research-helix-os.md</a>.
+    </p>
+
+  </article>
+
+  <footer class="site-footer">
+    <span>Ouroboros — an ARM64 microkernel, written from scratch in Rust</span>
+    <a href="https://github.com/hansolovkarlsson/Ouroboros">github.com/hansolovkarlsson/Ouroboros</a>
+  </footer>
+
+</div>
+</body>
+</html>

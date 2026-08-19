@@ -1,0 +1,549 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Isolation &amp; Data Flow — Ouroboros</title>
+<meta name="description" content="A design-led retrospective on one day that took Ouroboros from isolation-as-convention to MMU-enforced isolation with fault containment — and rebuilt every data path that enforcement broke: EL0 fault isolation, pipelines, per-task page tables, grant/safecopy IPC, and a FAT32 offset-write.">
+<link rel="icon" type="image/png" href="../assets/favicon.png">
+<link rel="stylesheet" href="../assets/site.css">
+</head>
+<body>
+
+<nav class="sitenav">
+  <div class="sitenav-inner">
+    <a class="sitenav-mark" href="../index.html">ouroboros</a>
+    <div class="sitenav-links">
+      <a href="../index.html">Home</a>
+      <a href="architecture-overview.html">Architecture</a>
+      <a href="tutorial.html">Learn</a>
+      <a href="docs.html" class="current">Docs</a>
+      <a href="https://github.com/hansolovkarlsson/Ouroboros">GitHub ↗</a>
+    </div>
+  </div>
+</nav>
+
+<div class="page">
+
+  <div class="kicker">Design retrospective · Ouroboros</div>
+
+  <h1 class="title small">Enforce the isolation, then rebuild the data flow</h1>
+  <p class="dek">
+    One day that took a microkernel from isolation-as-a-polite-convention
+    to MMU-enforced isolation with fault containment — and then rebuilt
+    every cheap data path that enforcement broke.
+  </p>
+
+  <div class="companion">
+    <span class="companion-icon">🧩</span>
+    <span>A companion to this project's four <a href="postmortem-boot-bringup.html">bug-hunt</a> <a href="postmortem-shell-filesystem.html">postmortems</a>, which cover an entirely different era — getting the kernel <a href="postmortem-xhci-keyboard.html">running</a> on real <a href="postmortem-usb-storage.html">hardware</a> at all, decoded register by register. This one is different in character: the day was design-led and largely smooth, so what's worth sharing is a <em>design</em> story — with a few "caught by reasoning, not by a crash" moments and one genuine works-on-the-emulator-fails-on-silicon reversal.</span>
+  </div>
+
+  <article>
+
+    <p>
+      This is a write-up of one day's work on
+      <a href="https://github.com/hansolovkarlsson/Ouroboros">Ouroboros</a>,
+      a from-scratch ARM64 microkernel, that took it from <em>isolation as
+      a polite convention</em> — tasks that could read each other's memory,
+      a userland crash that halted the whole kernel — to MMU-enforced
+      isolation with fault containment, and then rebuilt the data paths
+      that enforcement broke. Five milestones landed: EL0 fault isolation,
+      pipelines, per-task page tables, a grant/safecopy IPC primitive, and
+      a FAT32 offset-write. If you're building a microkernel and about to
+      move a driver into userland, or wondering how processes move bulk
+      data across a hard isolation boundary without a shared heap, some of
+      this may save you time.
+    </p>
+
+    <h2>The one idea the whole day turns on</h2>
+
+    <p>
+      A microkernel's pitch is isolation: put the filesystem, the drivers,
+      the network stack in ordinary user processes, so a bug in one can't
+      corrupt the kernel or its neighbours. By the start of this day
+      Ouroboros had already done the structural part — the FAT32
+      filesystem ran as a userland server (<code class="inline">fsd</code>,
+      task 2), reached over IPC, with the kernel holding only raw
+      block-device access.
+    </p>
+
+    <p>
+      But the isolation was <strong>make-believe</strong>. Every task's
+      memory was accessible to every other task; nothing but good
+      behaviour stopped the shell from scribbling on the filesystem
+      server's memory. And a wild pointer in <em>any</em> user process
+      didn't fault that process — it halted the entire kernel. A
+      microkernel whose whole point is containment was converting every
+      userland fault into a total-system halt, and calling memory
+      isolation "enforced" when it was enforced by nobody.
+    </p>
+
+    <blockquote class="aside">
+      <span class="aside-label">The thesis</span>
+      <p>
+        Enforcing isolation is the easy half. The hard half is that real
+        isolation breaks every cheap way processes were moving data —
+        shared memory, passed pointers, "just read it from over there" —
+        and you have to rebuild each one as an explicit, authorized,
+        copied operation.
+      </p>
+    </blockquote>
+
+    <p>
+      Fault isolation and per-task page tables are the enforcement. FSOP
+      v2, grant/safecopy, and the FAT32 offset-write are the rebuilt data
+      paths. Pipelines are data flowing between processes on top of all of
+      it.
+    </p>
+
+    <h2>Part 1 — Containing a crash: EL0 fault isolation</h2>
+
+    <p>
+      The first finding was worse than the feature it motivated. The plan
+      was modest — restart a filesystem server if it wedges — but scoping
+      it surfaced that <strong>any EL0 fault halted the whole kernel.</strong>
+      The AArch64 exception vector for "synchronous exception from a lower
+      EL" had exactly one resumable path: the <code class="inline">svc</code>
+      (syscall) trap. Every <em>other</em> lower-EL synchronous exception —
+      a null dereference, a bad pointer, a stack overflow in any user
+      program — fell through to the same report-the-registers-and-halt
+      path the kernel used for its own fatal faults.
+    </p>
+
+    <h3>Contain the fault</h3>
+    <p>
+      A fourth exception trampoline: the syscall vector's "not an
+      <code class="inline">svc</code>" fall-through now builds the same
+      register frame the IRQ and syscall paths build, and calls a Rust
+      handler that tears down <em>only</em> the faulting task (free its
+      region, revert keyboard ownership if it held it, reap its slot) and
+      switches to the next runnable task — the exact teardown a
+      <code class="inline">kill</code> does, driven from an exception
+      instead of a syscall. Tasks 0 and 1 (the boot shell and the idle
+      task) still halt honestly on a fault: nothing meaningful survives the
+      loss of the keyboard owner or the idle task.
+    </p>
+
+    <h3>Supervise the server</h3>
+    <p>
+      The filesystem server is special — if it dies, so does every disk
+      operation, <em>including the one that would reload it.</em> So the
+      kernel keeps <code class="inline">fsd</code>'s raw program image in a
+      static buffer, filled while boot services can still read the ESP. On
+      a task-2 fault, the kernel reparses that image into a fresh region
+      and re-runs the server's own startup — probe the device, remount from
+      disk. Its state was always disk-derivable, which is what makes this
+      real recovery rather than wishful restart. A per-boot cap of three
+      restarts guards a crash loop; past it, disk access degrades
+      gracefully, exactly as if <code class="inline">fsd</code> had never
+      loaded.
+    </p>
+
+    <div class="lesson">
+      <span class="lesson-label">A latent bug worth stealing</span>
+      <p>
+        Runtime-spawned code never got the cache maintenance (clean
+        D-cache to point of unification, invalidate I-cache) that
+        boot-loaded code did. Invisible on QEMU (TCG models no cache
+        incoherency) and never <em>observed</em> to bite on real hardware —
+        but a self-modifying-by-construction operation (writing code bytes,
+        then executing them) is simply wrong without it. If you load or
+        relocate code at runtime on ARM, do the cache dance; don't wait for
+        the hardware that notices.
+      </p>
+    </div>
+
+    <p>
+      <strong>How it was verified:</strong> direct fault injection, with
+      the <code class="inline">-d int</code> abort-count discipline this
+      project uses everywhere adapted to <em>expect</em> exactly the
+      injected aborts and no others. A deliberately-crashing test program
+      (null write) was killed alone with the shell surviving; a
+      deliberately-crashing <code class="inline">fsd</code> woke its blocked
+      caller with a clean error, restarted 1/3 → 2/3 → 3/3 with a working
+      server each time, then degraded cleanly at the cap.
+    </p>
+
+    <h2>Part 2 — Data between processes: pipelines</h2>
+
+    <p>
+      A short one, included because it's the "flow" half of the day's theme
+      and because it contains a lesson about testing on real hardware.
+      <code class="inline">builtin | program</code> now pipes a shell
+      builtin's output into a freshly spawned program over IPC: the shell
+      captures the left side, spawns the right, streams the bytes as
+      messages, and marks end-of-stream with a single <strong>empty
+      message</strong> (a zero-length message became legal for exactly this
+      convention). A filter program's shape is stdin = receive, stdout =
+      putc, EOF = the empty message, done = exit.
+    </p>
+
+    <p>
+      The robustness piece worth copying: a right-hand program that never
+      reads its input (say, piping into something that only reads the
+      keyboard) fills the receiver's bounded mailbox, and the shell would
+      spin forever trying to send — and <em>Ctrl+C can't rescue a process
+      that's running, only one that's blocked.</em> So the send loop
+      carries a real wall-clock deadline (via the generic timer's
+      free-running counter, no interrupts needed) and kills the stuck child
+      after a few seconds.
+    </p>
+
+    <div class="lesson">
+      <span class="lesson-label">The real-hardware lesson</span>
+      <p>
+        The scripted test typed a <code class="inline">|</code>, and
+        nothing happened. The HID keycode for backslash/pipe was missing
+        from the driver's keymap entirely — which meant not just that the
+        test failed, but that <strong>no physical keyboard could type a
+        pipeline on the actual target platform.</strong> A feature can be
+        "done" on the emulator and unreachable by a real user for a reason
+        that has nothing to do with the feature. The fix was one keymap
+        entry; the lesson is that your input path is part of your feature's
+        surface.
+      </p>
+    </div>
+
+    <h2>Part 3 — Enforcing memory isolation: per-task page tables</h2>
+
+    <p>
+      This is the load-bearing milestone, and the one with the day's only
+      genuine hardware reversal. Until now every task's EL0 region was
+      accessible to every task — one shared translation-table set,
+      isolation by convention. The fix: <strong>each scheduler slot gets
+      its own translation-table view.</strong> The kernel and device
+      mappings are identical in every view; only the EL0-access overlay
+      differs, granting a task EL0 reach into its own region alone. A
+      context switch swaps <code class="inline">TTBR0</code> and flushes the
+      TLB. Touch another task's memory and you take a permission fault —
+      which, thanks to Part 1, kills only the toucher.
+    </p>
+
+    <div class="lesson">
+      <span class="lesson-label">Proven, not asserted</span>
+      <p>
+        A temporary probe that reads one byte of the shell's region from a
+        spawned program <em>succeeded</em> under the old shared map and
+        <em>faulted</em> (permission fault, faulter killed alone, shell
+        alive) under per-task views. Isolation you can't demonstrate
+        breaking is isolation you're only hoping for.
+      </p>
+    </div>
+
+    <p>
+      <strong>The cascade — and the reason the rest of the day existed.</strong>
+      Per-task views break exactly one thing: the filesystem server
+      dereferencing a client's pointer. Under the old shared map, a client
+      passed a pointer into its own buffer and the server just read it.
+      Under enforced isolation, that pointer points at memory the server's
+      own tables deny it. Every "just read it from the client" shortcut in
+      the IPC protocol was now a fault waiting to happen.
+    </p>
+
+    <p>
+      Two ways out were weighed with the project owner, explicitly, because
+      the choice is a security decision:
+    </p>
+
+    <ul>
+      <li>
+        <strong>Map-based grants</strong> (as MINIX is often
+        <em>described</em>): the client grants the server a mapping of its
+        buffer. Rejected — sub-page grants leak the <em>neighbouring</em>
+        bytes in the same page into the server, which is the opposite of
+        the milestone's point.
+      </li>
+      <li>
+        <strong>Inline payloads + kernel copies</strong> (MINIX's
+        <em>actual</em> production design, <code class="inline">sys_safecopy</code>):
+        the request carries its data inside the message; the kernel copies
+        it task-to-task; no pointer crosses a boundary.
+      </li>
+    </ul>
+
+    <p>
+      Inline payloads won. The filesystem protocol became <strong>FSOP
+      v2</strong> — fully self-contained requests and replies,
+      kernel-copied — and messages grew from 64 to 768 bytes to carry a
+      path plus a data buffer. This is the <em>first half</em> of MINIX's
+      real IPC design; Part 4 is the second half.
+    </p>
+
+    <div class="lesson mystery">
+      <span class="lesson-label">The hardware reversal: per-task ASIDs</span>
+      <p>
+        Flushing the whole TLB on every context switch is correct but
+        wasteful; the standard optimization is to tag each view's
+        translation with an Address Space ID and mark the EL0 pages
+        non-global, so a switch is a cheap tagged-<code class="inline">TTBR0</code>
+        write with no flush. It was implemented as a separately-committed,
+        separately-revertible stage, precisely because ASIDs and stale TLBs
+        are classic silicon-only trouble. It passed every QEMU test
+        <em>and</em> the cross-task isolation probe — and then faulted the
+        idle task on real Parallels hardware, on its own instruction fetch.
+        Per the plan's own contingency it was reverted to flush-on-switch
+        (correct on both platforms) and recorded as a future optimization
+        with the fault evidence. The lesson is structural: put the
+        optimization you're least sure of on its own commit, so "revert it
+        and ship the correct-everywhere version" is one command, not a
+        bisect.
+      </p>
+    </div>
+
+    <h2>Part 4 — Moving bulk data under enforcement: grant/safecopy</h2>
+
+    <p>
+      FSOP v2's inline payloads solved correctness but imposed a cap: a
+      request is one 768-byte message, so no operation could move more than
+      ~512 bytes. <code class="inline">cat</code> truncated at 512;
+      <code class="inline">cp</code> of anything larger refused. Growing
+      the message is a dead end (you can't put a megabyte in a mailbox).
+      The right move is MINIX's second half: let the kernel copy bulk data
+      <em>directly between two isolated regions</em>, under an explicit
+      capability.
+    </p>
+
+    <p>The design, and why enforced beat simple. Two syscalls:</p>
+
+    <ul>
+      <li>
+        <code class="inline">grant(grantee, ptr, len, dir)</code> — a
+        client records, in its own single per-task grant slot, that one
+        server may copy an <em>exact</em> buffer in the client's own
+        region, in a given direction.
+      </li>
+      <li>
+        <code class="inline">safecopy(client, offset, local, len, dir)</code>
+        — the server, while serving that client, copies within the grant.
+      </li>
+    </ul>
+
+    <p>
+      The tempting cheaper design is "the server names a pointer, the
+      kernel checks it's inside the calling client's region." It's less
+      code and can never reach a <em>third</em> task. But it lets a buggy
+      or compromised server read or write <em>anywhere</em> in its caller's
+      region — a trust assumption, reintroduced one milestone after a whole
+      milestone spent removing trust assumptions. The project owner chose
+      the enforced grant deliberately: the server can touch only the bytes
+      the client designated.
+    </p>
+
+    <div class="lesson">
+      <span class="lesson-label">The interesting term is temporal</span>
+      <p>
+        A <code class="inline">safecopy</code> is allowed only if the grant
+        names this server <em>and</em> permits the direction <em>and the
+        client is currently blocked in a call to this server</em> <em>and</em>
+        the ranges are in bounds. That third clause means you need no
+        persistent grant table and no revocation: a stale grant is inert,
+        because the instant the call returns the client is runnable, not
+        blocked-calling-me. In a synchronous request/response model a client
+        makes one call at a time, so one grant slot per task suffices.
+        Capability plus temporal binding replaces a whole data structure.
+      </p>
+    </div>
+
+    <p>
+      <strong>Two mechanical notes worth stealing.</strong> First, the copy
+      itself works <em>across</em> per-task views because all RAM stays
+      identity-mapped read/write for the kernel (EL1) in <em>every</em>
+      view — only the EL0-access overlay is per-view. So a
+      <code class="inline">safecopy</code> running in the kernel reaches
+      both regions regardless of which view's <code class="inline">TTBR0</code>
+      is active; you don't switch address spaces to copy between them.
+      Second, <code class="inline">safecopy</code> needs five arguments and
+      the syscall ABI passes four in registers — the fifth (direction) is
+      read out of the saved trap frame's <code class="inline">x4</code>,
+      which the exception trampoline already spills. When you're one
+      argument over the ABI, the frame is already holding it.
+    </p>
+
+    <div class="lesson">
+      <span class="lesson-label">Caught before testing, not by a crash</span>
+      <p>
+        The bulk read op carries a <code class="inline">want</code>
+        (max-bytes) parameter. Without it, a server reading a full chunk
+        into its own buffer would try to <code class="inline">safecopy</code>
+        that whole chunk into a <em>client</em> buffer that might be smaller
+        — overrunning the grant. The client passing its buffer length as
+        <code class="inline">want</code> is what keeps the server inside the
+        grant when the client's buffer is small. Reasoned through from "what
+        are the buffer sizes on each side," not discovered by a corruption.
+      </p>
+    </div>
+
+    <p>
+      The payoff: <code class="inline">cat</code> streams a file of any size
+      (loop the bulk read one chunk at a time, never holding the whole
+      file); <code class="inline">cp</code> and redirection handle larger
+      files. <strong>Confirmed on real Parallels hardware:</strong>
+      <code class="inline">cat</code> of a 5.7 KB binary off a real USB
+      stick rendered the ELF header, an embedded
+      <code class="inline">.rodata</code> string, and the section-name tail
+      ~5.7 KB in — the old <code class="inline">cat</code> would have stopped
+      at 512 bytes and never reached it.
+    </p>
+
+    <h2>Part 5 — Files that actually flow: the FAT32 offset-write</h2>
+
+    <p>
+      Grant/safecopy lifted the <em>IPC</em> cap but not the
+      <em>filesystem</em> one. Every write at the FAT32 layer was a full
+      replace: allocate a fresh cluster chain, write it, free the old,
+      repoint the directory entry. It never mutated an existing cluster and
+      never wrote a partial sector. So <code class="inline">cp</code> and
+      <code class="inline">&gt;&gt;</code> were still bounded by a single
+      in-memory buffer.
+    </p>
+
+    <p>
+      <code class="inline">write_at(path, offset, data)</code> writes at a
+      byte offset and <em>extends</em> the file without rewriting the bytes
+      before it. Most of it reuses machinery that existed — the
+      cluster-chain walk, cluster allocation, the directory-entry patch,
+      the read side's offset-traversal template. <strong>The one genuinely
+      new primitive is a partial-sector read-modify-write of file
+      data.</strong> Every prior write built fresh whole clusters and had
+      nothing to preserve; RMW existed only for metadata. The rule, per
+      sector: a full-sector write goes straight down (nothing to preserve);
+      a partial write into a sector that overlaps existing content is
+      read-modify-written (preserve the bytes outside the window); a partial
+      write into a sector entirely past the old end of file is zero-padded
+      (freshly allocated, nothing real there).
+    </p>
+
+    <div class="lesson">
+      <span class="lesson-label">The self-destruct trap</span>
+      <p>
+        The old <code class="inline">cp</code> read the whole source before
+        writing anything, so <code class="inline">cp x x</code> was safe by
+        construction. Streaming <code class="inline">cp</code> truncates the
+        destination <em>first</em> and then reads the source chunk by chunk
+        — so <code class="inline">cp x x</code> would truncate the source to
+        empty before reading a byte of it. Guarded with a same-path check
+        before any write. When you convert a read-all-then-write operation
+        to a streaming one, re-audit every safe-by-construction property:
+        streaming changed the order of operations, and order was doing
+        load-bearing work.
+      </p>
+    </div>
+
+    <div class="lesson">
+      <span class="lesson-label">The coverage blind spot</span>
+      <p>
+        Streaming <code class="inline">cp</code> truncates the destination
+        to empty first, so its size grows monotonically and <em>every</em>
+        write lands sector-aligned at the current end of file — the
+        full-sector and zero-pad branches. <strong>Streaming
+        <code class="inline">cp</code> never exercises the read-modify-write
+        branch at all.</strong> The RMW path — the one genuinely new,
+        genuinely risky piece of code — only fires when appending into an
+        <em>existing, non-sector-aligned</em> file, which is what
+        <code class="inline">&gt;&gt;</code> does. If we'd tested
+        <code class="inline">write_at</code> only through
+        <code class="inline">cp</code>, the scariest code would have shipped
+        unexercised. A streaming rewrite can route <em>around</em> the code
+        path you most need to test; know which caller hits which branch.
+      </p>
+    </div>
+
+    <p>
+      <strong>Confirmed on real Parallels hardware</strong> (with the
+      owner's explicit go-ahead to write a scratch file — the standing
+      policy is reads-only on the real stick): a streaming
+      <code class="inline">cp</code> of a 5.7 KB binary read back complete;
+      a file created with <code class="inline">&gt;</code> persisted across a
+      full VM reboot; and <code class="inline">&gt;&gt;</code> then appended
+      to it, <code class="inline">cat</code> showing both the original and
+      appended lines — the partial-sector RMW preserving content on real
+      silicon. Scratch files removed afterward.
+    </p>
+
+    <h2>Real-hardware findings worth their own note</h2>
+
+    <p>
+      <strong>A stick present at boot displaces the keyboard.</strong> On
+      roughly half the boots with a USB stick connected, the one-shot xHCI
+      device scan enumerated the storage device and reported <em>no
+      boot-protocol keyboard</em> — the known 4-device-pool /
+      enumeration-timing limitation, but far more consistent with a real
+      stick in the mix than "occasionally." The working path is the
+      platform's own designed workflow: boot with the keyboard enumerated
+      first, then trigger a rescan (the shell's
+      <code class="inline">mount</code> command) for the stick that attaches
+      a few seconds later. If your one-shot device scan races the
+      hypervisor's device attachment, a runtime rescan is not a nicety,
+      it's the only reliable path.
+    </p>
+
+    <p>
+      <strong>The reads-only-then-scratch-file discipline.</strong>
+      Real-hardware <em>write</em> testing means writing to someone's
+      physical device. The rule this project follows: reads-only by
+      default, an explicit go-ahead before any write, and then only a
+      <em>new scratch file</em> (existing files read, never mutated),
+      removed afterward. It costs a couple of extra boots and it's worth it.
+    </p>
+
+    <h2>Takeaways</h2>
+
+    <ul>
+      <li>
+        <strong>Enforcing isolation is the cheap half; rebuilding data flow
+        under it is the real work.</strong> Per-task page tables were a
+        bounded change. The three milestones that followed all exist
+        because enforcement broke a data path that used to be free.
+      </li>
+      <li>
+        <strong>A capability plus a temporal binding can replace a data
+        structure.</strong> Tying a grant's validity to "the client is
+        currently blocked in a call to me" eliminated the grant table and
+        revocation entirely, for a synchronous IPC model.
+      </li>
+      <li>
+        <strong>The kernel is above the isolation boundary — use that.</strong>
+        Copying between two isolated regions needs no address-space switch
+        when all RAM stays kernel-mapped in every view; only the EL0
+        overlay is per-task.
+      </li>
+      <li>
+        <strong>Put your least-certain optimization on its own revertible
+        commit.</strong> Per-task ASIDs passed the emulator and the
+        isolation probe and still faulted real silicon; reverting was one
+        command because it was one commit.
+      </li>
+      <li>
+        <strong>A streaming rewrite can route around the code you most need
+        to test.</strong> <code class="inline">cp</code> never exercised
+        <code class="inline">write_at</code>'s read-modify-write; only
+        <code class="inline">&gt;&gt;</code> did. Map callers to branches
+        before you trust your test matrix.
+      </li>
+      <li>
+        <strong>Re-audit safe-by-construction properties when you change
+        operation order.</strong> Read-all-then-write made
+        <code class="inline">cp x x</code> safe for free; streaming took
+        that away silently.
+      </li>
+    </ul>
+
+    <p>
+      None of these are ARM-specific or Parallels-specific; all of them are
+      the kind of thing that's obvious in hindsight and expensive to learn
+      by crash. The full milestone-by-milestone record lives in the
+      repository as
+      <a href="https://github.com/hansolovkarlsson/Ouroboros/blob/main/docs/isolation-and-dataflow-postmortem.md">isolation-and-dataflow-postmortem.md</a>.
+    </p>
+
+  </article>
+
+  <footer class="site-footer">
+    <span>Ouroboros — an ARM64 microkernel, written from scratch in Rust</span>
+    <a href="https://github.com/hansolovkarlsson/Ouroboros">github.com/hansolovkarlsson/Ouroboros</a>
+  </footer>
+
+</div>
+</body>
+</html>
