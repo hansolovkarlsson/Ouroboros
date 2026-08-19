@@ -4719,10 +4719,21 @@ client's `MSG_CALL` is blocked, and a run could be batched later);
 ABI's fixed reply size), the one real stack cost; per-character keystroke
 echo is one `MSG_CALL` each (sub-tick now, but still an IPC round trip
 per typed character); and on a framebuffer-only platform a few short
-kernel operational lines (`task N exited`, fault reports) still reach the
-shared screen (the long rebuild diagnostic was made boot-only) - a proper
-"kernel console goes quiet once `cond` owns the screen" handoff is the
-real fix, deferred. The `fbdev.rs` `ptr::copy` scroll is confirmed on
+*kernel-own* operational lines (`task N exited`, fault reports) still
+reach the shared screen at the kernel's own fbconsole cursor - confirmed
+on real Parallels hardware, where the fix below was verified visually.
+**The main visible offender turned out to be `fsd`, not the kernel:** the
+filesystem server was the one userland client still printing via `PUTC`
+(missed in Stage 1's client sweep), so its `fsd: ...` startup lines
+rendered stranded mid-screen while every other program's output went
+through `cond`. Fixed - `fsd`'s `print` now uses `con_write` like the
+others (a nested `MSG_CALL`, shell -> `fsd` -> `cond`, which resolves
+fine: `cond` never calls back), re-confirmed on real Parallels hardware
+(the `fsd` line now renders at `cond`'s cursor, interleaved correctly).
+What remains is genuinely kernel-only (the long rebuild diagnostic was
+already made boot-only); a proper "kernel console goes quiet once `cond`
+owns the screen" handoff for those last few lines is the real fix,
+deferred. The `fbdev.rs` `ptr::copy` scroll is confirmed on
 QEMU's RAM-backed `ramfb`; a Device-nGnRnE framebuffer (if Parallels maps
 it outside the RAM span) has stricter ordering rules and is unverified,
 the same open question the kernel's `fbconsole` already carried.
