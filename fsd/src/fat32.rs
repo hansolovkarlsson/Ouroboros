@@ -53,6 +53,10 @@ pub enum Error {
     DirectoryNotEmpty,
     CannotRemoveRoot,
     DiskFull,
+    /// `write_at` was asked to write past the current end of file, which
+    /// would leave a sparse gap FAT32 can't represent. Sequential/append
+    /// callers never hit this; it's a guard, not an expected path.
+    InvalidOffset,
 }
 
 impl From<DiskError> for Error {
@@ -901,6 +905,152 @@ impl Fs {
         sector[offset + 28..offset + 32].copy_from_slice(&size.to_le_bytes());
         self.disk.write_sector(lba, &sector)?;
         Ok(())
+    }
+
+    /// Read-modify-write of a partial sector of *file data*: read the
+    /// whole 512-byte sector, splice `bytes` in at `in_off`, write it
+    /// back. The one primitive [`write_at`](Self::write_at) needs that no
+    /// prior write path had - every existing data write built fresh whole
+    /// clusters (`write_chain`) and never had bytes to preserve. Modeled
+    /// on the metadata RMW [`patch_entry_cluster_size`](Self::patch_entry_cluster_size)
+    /// and [`write_fat_entry`](Self::write_fat_entry) already do, just for
+    /// content rather than a directory/FAT field.
+    fn write_partial_sector(&mut self, lba: u64, in_off: usize, bytes: &[u8]) -> Result<(), Error> {
+        let mut sector = [0u8; SECTOR_SIZE];
+        self.disk.read_sector(lba, &mut sector)?;
+        sector[in_off..in_off + bytes.len()].copy_from_slice(bytes);
+        self.disk.write_sector(lba, &sector)?;
+        Ok(())
+    }
+
+    /// Appends one freshly allocated cluster to the chain whose current
+    /// last cluster is `tail`, returning the new cluster. The same
+    /// allocate-mark-link sequence [`write_chain`](Self::write_chain) and
+    /// `insert_dir_entry`'s directory extension already use, factored out
+    /// for [`write_at`](Self::write_at)'s file-data extension.
+    fn extend_chain(&mut self, tail: u32) -> Result<u32, Error> {
+        let new = self.find_free_cluster()?;
+        self.write_fat_entry(new, END_OF_CHAIN_MIN)?;
+        self.write_fat_entry(tail, new)?;
+        Ok(new)
+    }
+
+    /// Writes `data` starting at byte `offset` in the file at `path`,
+    /// extending the file (allocating clusters, growing the size field)
+    /// as needed - **without** rewriting the bytes before `offset`,
+    /// unlike [`write_file`](Self::write_file). The FAT32 primitive behind
+    /// streaming `cp` and unbounded `>>`.
+    ///
+    /// Grows the file to `max(old_size, offset + data.len())`. Refuses
+    /// `offset > old_size` ([`Error::InvalidOffset`]) - a sparse gap FAT32
+    /// can't represent; sequential/append callers never reach it. Empty
+    /// `data` is a no-op. A previously-empty (cluster-`0`, `touch`ed) file
+    /// gets its first cluster allocated here and recorded in its entry.
+    ///
+    /// Per-sector, the write reads-modifies-writes any sector that
+    /// overlaps the file's existing content (preserving the bytes outside
+    /// the write window); a sector entirely past the old end of file is
+    /// freshly allocated, so it's zero-padded rather than read first (the
+    /// same pattern `write_chain` uses for a fresh tail sector). A full
+    /// 512-byte write skips the read either way.
+    pub fn write_at(&mut self, path: &str, offset: u64, data: &[u8]) -> Result<(), Error> {
+        if data.is_empty() {
+            return Ok(());
+        }
+        // Locate the entry and, via its parent, the on-disk location of
+        // its directory record (needed to patch cluster/size) - the same
+        // lookup `write_file` does.
+        let (parent_path, name) = split_parent(path).ok_or(Error::InvalidName)?;
+        let parent = self.find(parent_path)?;
+        if !parent.is_dir {
+            return Err(Error::NotADirectory);
+        }
+        let mut loc: Option<(u64, usize, u32, u32)> = None; // (dir_lba, dir_off, cluster, size)
+        let mut found_dir = false;
+        self.walk_dir_with_location(parent.cluster, |entry, lba, off| {
+            if entry.name().eq_ignore_ascii_case(name) {
+                if entry.is_dir {
+                    found_dir = true;
+                } else {
+                    loc = Some((lba, off, entry.cluster, entry.size));
+                }
+                true
+            } else {
+                false
+            }
+        })?;
+        if found_dir {
+            return Err(Error::NotAFile);
+        }
+        let (dir_lba, dir_off, mut head_cluster, old_size_u32) = loc.ok_or(Error::NotFound)?;
+        let old_size = old_size_u32 as u64;
+        if offset > old_size {
+            return Err(Error::InvalidOffset);
+        }
+
+        let cluster_bytes = self.sectors_per_cluster as u64 * SECTOR_SIZE as u64;
+
+        // A previously-empty file has no head cluster yet.
+        if head_cluster == 0 {
+            let c = self.find_free_cluster()?;
+            self.write_fat_entry(c, END_OF_CHAIN_MIN)?;
+            head_cluster = c;
+        }
+
+        // Walk to the cluster holding `offset`, extending the chain if the
+        // walk runs off the end (offset is at most old_size, so at most one
+        // cluster boundary short).
+        let mut cluster = head_cluster;
+        let mut cluster_pos = 0u64; // file byte offset of `cluster`'s first byte
+        while cluster_pos + cluster_bytes <= offset {
+            cluster = match self.next_cluster(cluster)? {
+                Some(next) => next,
+                None => self.extend_chain(cluster)?,
+            };
+            cluster_pos += cluster_bytes;
+        }
+
+        // Per-sector write.
+        let mut pos = offset;
+        let mut written = 0usize;
+        while written < data.len() {
+            // Advance to the cluster containing `pos`, extending as needed.
+            while pos >= cluster_pos + cluster_bytes {
+                cluster = match self.next_cluster(cluster)? {
+                    Some(next) => next,
+                    None => self.extend_chain(cluster)?,
+                };
+                cluster_pos += cluster_bytes;
+            }
+            let sector_in_cluster = (pos - cluster_pos) / SECTOR_SIZE as u64;
+            let sector_lba = self.cluster_to_lba(cluster) as u64 + sector_in_cluster;
+            let sector_start = cluster_pos + sector_in_cluster * SECTOR_SIZE as u64;
+            let in_off = (pos - sector_start) as usize;
+            let n = (SECTOR_SIZE - in_off).min(data.len() - written);
+
+            if in_off == 0 && n == SECTOR_SIZE {
+                // Whole sector overwritten - nothing to preserve, no read.
+                let mut sector = [0u8; SECTOR_SIZE];
+                sector.copy_from_slice(&data[written..written + n]);
+                self.disk.write_sector(sector_lba, &sector)?;
+            } else if sector_start < old_size {
+                // Partial write into a sector with existing content - RMW.
+                self.write_partial_sector(sector_lba, in_off, &data[written..written + n])?;
+            } else {
+                // Partial write into a fresh sector past the old EOF -
+                // zero-pad, don't read (there's nothing real to preserve).
+                let mut sector = [0u8; SECTOR_SIZE];
+                sector[in_off..in_off + n].copy_from_slice(&data[written..written + n]);
+                self.disk.write_sector(sector_lba, &sector)?;
+            }
+            pos += n as u64;
+            written += n;
+        }
+
+        // Grow-only size, and record the head cluster (which changed if
+        // the file was previously empty).
+        let new_size = old_size.max(offset + data.len() as u64) as u32;
+        self.patch_entry_cluster_size(dir_lba, dir_off, head_cluster, new_size)
     }
 
     /// Renames or moves the file or directory at `src` to `dst`. `dst`

@@ -462,29 +462,6 @@ fn parse_redirect(line: &str) -> RedirectParse<'_> {
     RedirectParse::NoRedirect
 }
 
-/// Holds an existing file's content plus the new capture during a `>>`
-/// append ([`finish_redirect`]): the kernel's `fs_write_file` is
-/// full-replace only (no append/offset writes at the FAT32 layer - a
-/// known, documented gap), so append is read-everything, concatenate,
-/// write-everything-back, all shell-side - the same
-/// compose-two-existing-syscalls approach `cp` established. Anything
-/// that doesn't fit is refused outright rather than partially written.
-///
-/// Raised past the old 512 by the grant/safecopy milestone. The old
-/// value was forced by a real bug (found by testing, not review): the
-/// append read-back and write went through the inline
-/// `fs_read_file`/`fs_write_file` path, whose per-op payload is capped
-/// at 512, and a first cut using 1024 hit that cap - the read-back's
-/// rejection looked exactly like "no such file", so `>>` silently
-/// behaved like `>`, discarding the existing content. Both halves now
-/// go through the bulk grant/safecopy path
-/// ([`fs_read_all`]/[`fs_write_bulk`], up to
-/// [`SAFECOPY_MAX`](syscall_abi::SAFECOPY_MAX)), which lifts that cap -
-/// but this stays *below* SAFECOPY_MAX for the same stack reason as
-/// [`CAPTURE_SIZE`]: it nests with the capture buffer on `run_line`'s
-/// frame plus `fs_call`'s request/reply, on a fixed unguarded 8KB stack.
-const APPEND_BUFFER_SIZE: usize = 1024;
-
 /// Writes `captured` (a command's redirected output) to `target` -
 /// full replace for `>`, read-concatenate-rewrite for `>>`. The read
 /// completes in full before the write starts, same
@@ -508,49 +485,49 @@ fn finish_redirect(captured: &[u8], overflowed: bool, target: &str, append: bool
         return;
     };
 
-    let mut combined = [0u8; APPEND_BUFFER_SIZE];
-    let data: &[u8] = if append {
-        // fs_read_all fills `combined` with the existing content (up to
-        // its length) via the bulk path and returns the file's *real*
-        // size - which may exceed the buffer, so the check below refuses
-        // both "existing alone doesn't fit" and "existing + capture
-        // doesn't fit" in one comparison.
-        let existing = match fs_read_all(path, &mut combined) {
+    if append {
+        // Append the captured output at the current end of file via the
+        // offset-write primitive - no read-back of the existing content,
+        // so `>>` works regardless of how large the target already is
+        // (the old read-concatenate-rewrite capped both halves at a
+        // combined buffer and refused a large existing file). Stat the
+        // size first: a missing file is created with the captured
+        // content, an existing one is appended to at its EOF.
+        let mut probe = [0u8; 1];
+        let size = match fs_read_file(path, &mut probe) {
             NO_FS => {
                 print_no_fs();
                 return;
             }
             // No such file: `>>` creates it, standard sh semantics.
-            FS_ERR_NOT_FOUND => 0,
+            FS_ERR_NOT_FOUND => {
+                match fs_write_bulk(path, captured) {
+                    NO_FS => print_no_fs(),
+                    code if code >= FS_ERR_MIN => print_fs_error("redirect", code),
+                    _ => {}
+                }
+                return;
+            }
             // Any other error (target is a directory, I/O failure, ...)
-            // is distinguishable from "missing" and reported here,
-            // instead of limping into a write that would fail anyway.
+            // is reported here rather than limping into a doomed write.
             code if code >= FS_ERR_MIN => {
                 print_fs_error("redirect", code);
                 return;
             }
-            // captured.len() <= CAPTURE_SIZE <= APPEND_BUFFER_SIZE, so
-            // the subtraction can't underflow (it can legitimately reach
-            // 0, refusing any append to a nonempty file when the capture
-            // alone fills the buffer).
-            size => {
-                if size as usize > combined.len() - captured.len() {
-                    print_line("redirect: file too large to append to - nothing written");
-                    return;
-                }
-                size as usize
-            }
+            size => size,
         };
-        combined[existing..existing + captured.len()].copy_from_slice(captured);
-        &combined[..existing + captured.len()]
+        match fs_write_at(path, size, captured) {
+            NO_FS => print_no_fs(),
+            code if code >= FS_ERR_MIN => print_fs_error("redirect", code),
+            _ => {}
+        }
     } else {
-        captured
-    };
-
-    match fs_write_bulk(path, data) {
-        NO_FS => print_no_fs(),
-        code if code >= FS_ERR_MIN => print_fs_error("redirect", code),
-        _ => {}
+        // `>`: full replace with the captured output.
+        match fs_write_bulk(path, captured) {
+            NO_FS => print_no_fs(),
+            code if code >= FS_ERR_MIN => print_fs_error("redirect", code),
+            _ => {}
+        }
     }
 }
 
@@ -1155,38 +1132,23 @@ fn cmd_cp(line: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize) {
         print_line("cp: path too long");
         return;
     };
-    let Ok(src_path) = core::str::from_utf8(&src_path_buf[..src_path_len]) else {
+    let mut dst_path_buf = [0u8; PATH_SIZE];
+    let Some(dst_path_len) = resolve_path(cwd_str(cwd, cwd_len), dst_arg, &mut dst_path_buf) else {
         print_line("cp: path too long");
         return;
     };
 
-    let mut content = [0u8; syscall_abi::SAFECOPY_MAX as usize];
-    let size = match fs_read_all(src_path, &mut content) {
-        NO_FS => {
-            print_no_fs();
-            return;
-        }
-        code if code >= FS_ERR_MIN => {
-            print_fs_error("cp", code);
-            return;
-        }
-        n => n,
-    };
-    // fs_read_all returns the file's *real* size, which may exceed the
-    // buffer. Refusing outright here (rather than silently copying a
-    // truncated prefix, the way `cat` streams) matches `cp`'s own
-    // correctness expectation - a partial copy is a wrong copy, not just
-    // an incomplete display. The grant/safecopy bulk path raised this
-    // ceiling from 512 to SAFECOPY_MAX; genuinely larger files still
-    // refuse (a streaming cp needs a FAT32 offset-write primitive - see
-    // docs/roadmap.md).
-    if size as usize > content.len() {
-        print_line("cp: source file too large to copy (exceeds this shell's buffer)");
+    // Self-copy guard: streaming cp truncates dst *first*, so `cp a a`
+    // (however spelled after resolution) would destroy the source before
+    // reading it. The old read-whole-then-write cp was safe by
+    // construction; this isn't. Byte equality of two runtime buffers -
+    // relocation-safe, the same check `mv` uses.
+    if src_path_buf[..src_path_len] == dst_path_buf[..dst_path_len] {
+        print_line("cp: source and destination are the same");
         return;
     }
 
-    let mut dst_path_buf = [0u8; PATH_SIZE];
-    let Some(dst_path_len) = resolve_path(cwd_str(cwd, cwd_len), dst_arg, &mut dst_path_buf) else {
+    let Ok(src_path) = core::str::from_utf8(&src_path_buf[..src_path_len]) else {
         print_line("cp: path too long");
         return;
     };
@@ -1195,10 +1157,68 @@ fn cmd_cp(line: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize) {
         return;
     };
 
-    match fs_write_bulk(dst_path, &content[..size as usize]) {
-        NO_FS => print_no_fs(),
-        code if code >= FS_ERR_MIN => print_fs_error("cp", code),
+    // Confirm the source exists (and is a file, not a directory) *before*
+    // touching dst - streaming truncates dst first, so a bad source must
+    // not have already clobbered a good destination. A one-byte read is
+    // the cheapest existence/kind check (fs_read_file returns the real
+    // size or the specific error).
+    let mut probe = [0u8; 1];
+    match fs_read_file(src_path, &mut probe) {
+        NO_FS => {
+            print_no_fs();
+            return;
+        }
+        code if code >= FS_ERR_MIN => {
+            print_fs_error("cp", code);
+            return;
+        }
         _ => {}
+    }
+
+    // Truncate/create dst empty, then stream src into it one
+    // SAFECOPY_MAX chunk at a time via write_at - so cp handles a file of
+    // any size (bounded by disk space, not any shell buffer). Non-atomic:
+    // an interrupted copy leaves dst truncated, which is honest ("a
+    // partial copy is a wrong copy").
+    match fs_write_bulk(dst_path, &[]) {
+        NO_FS => {
+            print_no_fs();
+            return;
+        }
+        code if code >= FS_ERR_MIN => {
+            print_fs_error("cp", code);
+            return;
+        }
+        _ => {}
+    }
+
+    let mut chunk = [0u8; syscall_abi::SAFECOPY_MAX as usize];
+    let mut offset: u64 = 0;
+    loop {
+        let n = match fs_read_bulk(src_path, offset, &mut chunk) {
+            NO_FS => {
+                print_no_fs();
+                return;
+            }
+            code if code >= FS_ERR_MIN => {
+                print_fs_error("cp", code);
+                return;
+            }
+            0 => break,
+            n => (n as usize).min(chunk.len()),
+        };
+        match fs_write_at(dst_path, offset, &chunk[..n]) {
+            NO_FS => {
+                print_no_fs();
+                return;
+            }
+            code if code >= FS_ERR_MIN => {
+                print_fs_error("cp", code);
+                return;
+            }
+            _ => {}
+        }
+        offset += n as u64;
     }
 }
 
@@ -1629,28 +1649,33 @@ fn fs_write_bulk(path: &str, data: &[u8]) -> u64 {
     )
 }
 
-/// Reads the whole file at `path` into `buf` (`buf.len()` must be
-/// `<= SAFECOPY_MAX`), returning the file's *real* size - which may
-/// exceed `buf.len()`, exactly like [`fs_read_file`], so a caller can
-/// refuse an oversize file (a partial copy is a wrong copy). [`NO_FS`]
-/// or an `FS_ERR_*` code on failure. Combines a one-byte [`fs_read_file`]
-/// "stat" (which returns the real size regardless of how little it
-/// copies) with one [`fs_read_bulk`] chunk (which fills up to
-/// `buf.len()` without the 512-byte inline cap) - so the caller gets
-/// both the size for its overflow check and the content in one place.
-fn fs_read_all(path: &str, buf: &mut [u8]) -> u64 {
-    let mut one = [0u8; 1];
-    let size = fs_read_file(path, &mut one);
-    if size >= FS_ERR_MIN {
-        return size;
+/// Writes `data` at byte `offset` in `path`, extending the file without
+/// rewriting the bytes before `offset` (the FAT32 offset-write
+/// primitive), via the grant/safecopy bulk path (`GRANT_READ`). Returns
+/// `0`, [`NO_FS`], or an `FS_ERR_*` code. `data.len()` must be
+/// `<= SAFECOPY_MAX`. Loop with a rising `offset` to write a file of any
+/// size one chunk at a time - see [`cmd_cp`]. Empty `data` is a no-op.
+fn fs_write_at(path: &str, offset: u64, data: &[u8]) -> u64 {
+    if data.is_empty() {
+        return 0;
     }
-    if size > 0 && !buf.is_empty() {
-        let got = fs_read_bulk(path, 0, buf);
-        if got >= FS_ERR_MIN {
-            return got;
-        }
+    let granted = syscall4(
+        syscall_abi::GRANT,
+        syscall_abi::FSD_TASK,
+        data.as_ptr() as u64,
+        data.len() as u64,
+        syscall_abi::GRANT_READ,
+    );
+    if granted != 0 {
+        return syscall_abi::FS_ERROR;
     }
-    size
+    fs_call(
+        syscall_abi::FSOP_WRITE_AT,
+        [path.len() as u64, offset, data.len() as u64, 0],
+        path.as_bytes(),
+        &[],
+        &mut [],
+    )
 }
 
 /// Creates an empty directory at `path`. Returns `0` on success,

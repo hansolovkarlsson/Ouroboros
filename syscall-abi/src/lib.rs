@@ -410,6 +410,16 @@ pub const FSOP_READ_BULK: u64 = 11;
 /// status = `0` on success, or an `FS_ERR_*` code. Raises the write cap
 /// from [`FS_DATA_MAX`] to [`SAFECOPY_MAX`].
 pub const FSOP_WRITE_BULK: u64 = 12;
+/// params: `(path len, offset, data len)`; payload: path. Writes `data`
+/// (granted via [`GRANT_READ`], up to [`SAFECOPY_MAX`]) at byte `offset`
+/// within the file, **extending it without rewriting the bytes before
+/// `offset`** - the FAT32 offset-write primitive behind streaming `cp`
+/// and unbounded `>>`. The client [`GRANT`]s a [`GRANT_READ`] buffer to
+/// [`FSD_TASK`] first, exactly like [`FSOP_WRITE_BULK`]. status = `0` on
+/// success, or an `FS_ERR_*` code (a write past the current end of file
+/// is refused - no sparse gaps). Loop with a rising `offset` to write a
+/// file of any size, one chunk at a time.
+pub const FSOP_WRITE_AT: u64 = 13;
 
 /// The largest message [`MSG_SEND`] accepts, in bytes. Raised from the
 /// original 64 when per-task page tables landed: the filesystem

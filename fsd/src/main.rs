@@ -283,6 +283,38 @@ fn handle(fs: &mut Option<fat32::Fs>, sender: u64, req: &[u8], reply: &mut [u8])
                 Err(e) => status_reply(reply, error_code(&e)),
             }
         }
+        syscall_abi::FSOP_WRITE_AT => {
+            // Like WRITE_BULK, but writes at a byte offset (p[1]) and
+            // extends the file rather than replacing it - the streaming
+            // primitive. Data (p[2] bytes) comes via the client's
+            // GRANT_READ buffer, safecopied into our working buffer.
+            let Some(path) = path_from(payload, 0, p[0]) else {
+                return status_reply(reply, syscall_abi::FS_ERROR);
+            };
+            let offset = p[1];
+            let data_len = p[2] as usize;
+            if data_len > syscall_abi::SAFECOPY_MAX as usize {
+                return status_reply(reply, syscall_abi::FS_ERROR);
+            }
+            let mut databuf = [0u8; syscall_abi::SAFECOPY_MAX as usize];
+            if data_len > 0 {
+                let r = syscall5(
+                    syscall_abi::SAFECOPY,
+                    sender,
+                    0,
+                    databuf.as_mut_ptr() as u64,
+                    data_len as u64,
+                    syscall_abi::GRANT_READ,
+                );
+                if r >= syscall_abi::FS_ERR_MIN {
+                    return status_reply(reply, syscall_abi::FS_ERROR);
+                }
+            }
+            match fs.write_at(path, offset, &databuf[..data_len]) {
+                Ok(()) => status_reply(reply, 0),
+                Err(e) => status_reply(reply, error_code(&e)),
+            }
+        }
         syscall_abi::FSOP_MKDIR | syscall_abi::FSOP_RMDIR | syscall_abi::FSOP_TOUCH | syscall_abi::FSOP_RM => {
             let Some(path) = path_from(payload, 0, p[0]) else {
                 return status_reply(reply, syscall_abi::FS_ERROR);
@@ -357,6 +389,7 @@ fn error_code(e: &fat32::Error) -> u64 {
         fat32::Error::Io(_)
         | fat32::Error::NoFat32Partition
         | fat32::Error::NotFat32
+        | fat32::Error::InvalidOffset
         | fat32::Error::UnsupportedSectorSize(_) => syscall_abi::FS_ERR_IO,
     }
 }
@@ -378,6 +411,7 @@ fn error_name(e: &fat32::Error) -> &'static str {
         fat32::Error::DirectoryNotEmpty => "directory not empty",
         fat32::Error::CannotRemoveRoot => "cannot remove root",
         fat32::Error::DiskFull => "disk full",
+        fat32::Error::InvalidOffset => "invalid offset",
     }
 }
 
