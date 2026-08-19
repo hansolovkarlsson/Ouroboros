@@ -552,6 +552,19 @@ fn main() -> Status {
 
     console::println!("Ouroboros kernel: shell ready - type and press Enter");
 
+    // Hand the screen over to the console server. On a framebuffer-only
+    // platform (Parallels), the kernel's own fbconsole and cond both draw
+    // to the same framebuffer at independent cursors, so once cond is
+    // loaded to render there, the kernel goes quiet on its console -
+    // steady-state operational logs (task exited, mount/USB diagnostics)
+    // would otherwise corrupt cond's output. Fault reports still print
+    // (println_force). Only armed when the kernel console is actually a
+    // framebuffer and cond exists to take it over; on a byte-stream
+    // console (QEMU's UART) it stays off, keeping those logs for dev.
+    if cond.is_some() && console::is_framebuffer() {
+        console::set_quiet(true);
+    }
+
     // Unmasked last, right before dropping to EL0: nothing before this
     // point expects to be interrupted, and everything after (task 0, or
     // halt()'s wfe loop if it ever somehow got back here) is fine being

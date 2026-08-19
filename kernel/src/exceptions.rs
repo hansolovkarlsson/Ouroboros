@@ -426,7 +426,7 @@ pub fn install() {
 /// classes (Synchronous, IRQ, FIQ, SError) x 4 source groups (current EL
 /// w/ SP_EL0, current EL w/ SP_ELx, lower EL AArch64, lower EL AArch32).
 extern "C" fn rust_exception_handler(esr: u64, far: u64, elr: u64, vector: u64) -> ! {
-    console::println!(
+    console::println_force!(
         "Ouroboros kernel: EXCEPTION vector={vector} esr_el1={esr:#x} far_el1={far:#x} elr_el1={elr:#x}"
     );
     halt()
@@ -463,16 +463,16 @@ extern "C" fn rust_el0_fault_handler(frame: *mut Context) {
         );
     }
     let current = tasks::current_task();
-    console::println!(
+    console::println_force!(
         "Ouroboros kernel: EL0 FAULT task={current} esr_el1={esr:#x} far_el1={far:#x} elr_el1={elr:#x}"
     );
     if current <= 1 {
-        console::println!(
+        console::println_force!(
             "Ouroboros kernel: task {current} is the boot shell/idle - nothing to resume, halting"
         );
         halt();
     }
-    console::println!("Ouroboros kernel: task {current} killed after fault");
+    console::println_force!("Ouroboros kernel: task {current} killed after fault");
     // Same teardown order as the KILL arm (syscall.rs): reclaim RAM
     // (LIFO-or-leak), hand the keyboard back if the faulter held it,
     // fail anyone blocked mid-call to it, then discard its context and

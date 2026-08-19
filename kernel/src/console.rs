@@ -4,6 +4,7 @@
 
 use core::cell::UnsafeCell;
 use core::fmt;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::fbconsole::FbConsole;
 use crate::uart::Uart;
@@ -117,6 +118,19 @@ unsafe impl Sync for ConsoleCell {}
 
 static CONSOLE: ConsoleCell = ConsoleCell(UnsafeCell::new(None));
 
+/// When set, ordinary [`print`]/[`println`] output is suppressed - the
+/// "kernel console goes quiet once `cond` owns the screen" handoff.
+/// `main` sets it only on a framebuffer-only platform where the userland
+/// console server (`cond`) is loaded and rendering to the same
+/// framebuffer the kernel's own `fbconsole` would (Parallels); there,
+/// kernel operational logs (`task N exited`, the USB/mount diagnostics,
+/// ...) would otherwise render at the kernel `fbconsole`'s stale cursor
+/// and corrupt `cond`'s output. On a byte-stream console (QEMU's UART)
+/// this stays off - those logs interleave harmlessly and are useful for
+/// dev. Fault reports bypass it entirely via [`print_force`] - a fault is
+/// worth showing even if it overwrites the server's screen.
+static CONSOLE_QUIET: AtomicBool = AtomicBool::new(false);
+
 /// Installs `console` as the global console. Must only be called after
 /// `exit_boot_services`, and only once.
 pub fn install(console: Console) {
@@ -125,10 +139,33 @@ pub fn install(console: Console) {
     }
 }
 
-/// Writes to the global console if one has been installed; silently does
-/// nothing otherwise — there may genuinely be no console yet (e.g. a fault
-/// before discovery/`install` has run).
+/// Whether the installed console renders to a framebuffer (as opposed to
+/// a byte stream) - the case where the kernel and the userland console
+/// server share a screen and the kernel needs to go quiet. Used by `main`
+/// to decide whether to arm [`set_quiet`].
+pub fn is_framebuffer() -> bool {
+    matches!(unsafe { (*CONSOLE.0.get()).as_ref() }, Some(Console::Framebuffer(_)))
+}
+
+/// Silence ([`true`]) or restore ([`false`]) ordinary kernel console
+/// output - see [`CONSOLE_QUIET`].
+pub fn set_quiet(quiet: bool) {
+    CONSOLE_QUIET.store(quiet, Ordering::Relaxed);
+}
+
+/// Writes to the global console if one has been installed, unless the
+/// console has been quieted ([`set_quiet`]); silently does nothing when
+/// there's no console yet (e.g. a fault before discovery/`install` ran).
 pub fn print(args: fmt::Arguments) {
+    if CONSOLE_QUIET.load(Ordering::Relaxed) {
+        return;
+    }
+    print_force(args);
+}
+
+/// Like [`print`], but ignores [`set_quiet`] - for fault reports, which
+/// must reach a console even after the kernel has otherwise gone quiet.
+pub fn print_force(args: fmt::Arguments) {
     if let Some(console) = unsafe { (*CONSOLE.0.get()).as_mut() } {
         let _ = fmt::Write::write_fmt(console, args);
     }
@@ -141,6 +178,16 @@ macro_rules! println {
 }
 
 pub(crate) use println;
+
+/// [`println`] that bypasses [`set_quiet`] (via [`print_force`]) - the
+/// fault handlers' reporting macro.
+macro_rules! println_force {
+    ($($arg:tt)*) => {
+        $crate::console::print_force(format_args!("{}\n", format_args!($($arg)*)))
+    };
+}
+
+pub(crate) use println_force;
 
 /// Writes one raw byte to the global console if one has been installed;
 /// silently does nothing otherwise, same as [`print`].

@@ -4730,10 +4730,22 @@ through `cond`. Fixed - `fsd`'s `print` now uses `con_write` like the
 others (a nested `MSG_CALL`, shell -> `fsd` -> `cond`, which resolves
 fine: `cond` never calls back), re-confirmed on real Parallels hardware
 (the `fsd` line now renders at `cond`'s cursor, interleaved correctly).
-What remains is genuinely kernel-only (the long rebuild diagnostic was
-already made boot-only); a proper "kernel console goes quiet once `cond`
-owns the screen" handoff for those last few lines is the real fix,
-deferred. The `fbdev.rs` `ptr::copy` scroll is confirmed on
+The remaining kernel-own lines were then handled too, by the real fix:
+**a "kernel console goes quiet once `cond` owns the screen" handoff.**
+`console.rs` gained a `CONSOLE_QUIET` flag; `main` arms it right before
+`tasks::start` *only* when the kernel's own console is a framebuffer and
+`cond` is loaded to take it over (i.e. Parallels) - so ordinary
+`console::println!` (task exited, USB/mount diagnostics, ...) is
+suppressed there, while on a byte-stream console (QEMU's UART) it stays
+on, logs intact for dev. **Fault reports bypass it** via a new
+`println_force!` / `console::print_force` (the four fault-reporting sites
+in `exceptions.rs` use it) - a fault is worth showing even if it
+overwrites the server's screen. Confirmed on QEMU that the byte-stream
+path is unaffected (`task N exited` still logs, quiet stays off); the
+suppression itself only activates on a framebuffer console, which on QEMU
+can't coexist with UART input (a forced framebuffer console kills the
+UART read path), so the on-framebuffer behaviour is verified by
+inspection here and confirmable on real Parallels hardware. The `fbdev.rs` `ptr::copy` scroll is confirmed on
 QEMU's RAM-backed `ramfb`; a Device-nGnRnE framebuffer (if Parallels maps
 it outside the RAM span) has stricter ordering rules and is unverified,
 the same open question the kernel's `fbconsole` already carried.
