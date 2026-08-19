@@ -9,6 +9,7 @@ mod console;
 mod devicetree;
 mod exceptions;
 mod fbconsole;
+mod fbdev;
 mod font;
 mod framebuffer;
 mod gic;
@@ -356,6 +357,16 @@ fn main() -> Status {
     };
     console::println!("Ouroboros kernel: identity map installed, MMU running on our own tables");
     tasks::init_runtime_allocator();
+
+    // Make the framebuffer available to the console server's FB_* syscalls
+    // whenever one was discovered and is now mapped - independent of which
+    // console the kernel itself installs below (on QEMU + ramfb a
+    // byte-stream console wins the kernel's own slot, but cond can still
+    // render to the framebuffer). SAFETY: fb_info.base was just folded
+    // into the identity map above, same contract as FbConsole::new.
+    if let Some(info) = fb_info {
+        unsafe { fbdev::install(&info) };
+    }
 
     // A fourth console-discovery fallback: the GOP framebuffer, tried
     // right after devicetree/ACPI/PCI - ahead of virtio-console below,

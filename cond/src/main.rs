@@ -11,19 +11,23 @@
 //! protected and never used by `spawn` - exactly like the filesystem
 //! server in slot 2. Same build shape as every other userland program
 //! here: `aarch64-unknown-none`, release-only, shared linker script,
-//! constants from `syscall-abi`, no static mutable state.
+//! constants from `syscall-abi`, no static mutable state (the backend's
+//! cursor lives in `main`'s stack frame).
 //!
-//! **Stage 1 - byte-stream backend.** The only backend so far forwards
-//! received text to the kernel's console through the gated `CON_WRITE`
-//! syscall (a batched write, one syscall per message rather than one
-//! `PUTC` per byte). On QEMU that console is a UART; the framebuffer-
-//! rendering backend (glyphs, cursor, scroll, ANSI - the logic moved out
-//! of the kernel's `fbconsole`) is Stage 2. The request loop, the reply
-//! shape, and the `MSG_RECV`/`MSG_SEND` boilerplate are the filesystem
-//! server's, cloned.
+//! **Two backends, chosen at startup from `CON_INFO`:**
+//! - **Byte-stream** (QEMU's UART path): forward text to the kernel's
+//!   console through the gated `CON_WRITE` syscall. Nothing to render.
+//! - **Framebuffer** (Parallels, QEMU `ramfb`): render text *here* - this
+//!   is the console rendering logic (the 8x8 font, cursor, line wrap,
+//!   scroll decisions, ANSI parsing) moved out of the kernel's
+//!   `fbconsole`. Each glyph is looked up in this program's own `font`
+//!   and blitted via `FB_BLIT`; the kernel keeps only the dumb pixel
+//!   primitives (`FB_BLIT`/`FB_SCROLL`/`FB_CLEAR`, `kernel/src/fbdev.rs`).
 
 #![no_std]
 #![no_main]
+
+mod font;
 
 use core::arch::asm;
 use core::panic::PanicInfo;
@@ -39,61 +43,177 @@ const REPLY_PAYLOAD: usize = syscall_abi::FS_REPLY_PAYLOAD as usize;
 const DATA_MAX: usize = syscall_abi::FS_DATA_MAX as usize;
 
 fn main() -> ! {
-    // Announce through the server's own backend, proving CON_WRITE works
-    // from here before any client ever calls in.
-    con_write_raw(b"cond: console server ready\r\n");
+    let mut backend = detect_backend();
+    write_text(&mut backend, b"cond: console server ready\r\n");
 
-    // Request loop, the filesystem server's shape: block on MSG_RECV,
-    // decode one request, act, reply. A console request carries text to
-    // put on screen; the reply is a bare status.
     let mut req = [0u8; syscall_abi::MSG_MAX_LEN as usize];
     let mut reply = [0u8; syscall_abi::MSG_MAX_LEN as usize];
     loop {
         let packed = syscall4(syscall_abi::MSG_RECV, req.as_mut_ptr() as u64, req.len() as u64, 0, 0);
         if packed >= syscall_abi::FS_ERR_MIN {
-            // RECV_INTERRUPTED can't reach a non-keyboard-owner task, and
-            // no other error is expected - park rather than spin on a
-            // broken call, the same posture the filesystem server takes.
             break;
         }
         let sender = packed >> 32;
         let len = ((packed & 0xffff_ffff) as usize).min(req.len());
-        let reply_len = handle(&req[..len], &mut reply);
-        // A full/unreachable sender mailbox drops the reply; the caller's
-        // MSG_CALL stays blocked until Ctrl+C, same as the filesystem
-        // server - nothing better exists to do with an undeliverable ack.
-        syscall4(syscall_abi::MSG_SEND, sender, reply.as_ptr() as u64, reply_len as u64, 0);
+        let reply_len = handle(&mut backend, &req[..len], &mut reply);
+        syscall4(syscall_abi::MSG_SEND, sender, reply.as_mut_ptr() as u64, reply_len as u64, 0);
     }
     loop {
         core::hint::spin_loop();
     }
 }
 
-/// Decodes one request and builds a status-only reply. The only op today
-/// is `DSPOP_WRITE` (put text on the console); an unknown/malformed
-/// request is acked with status 0 rather than failing the caller - lost
-/// output is never worth wedging a client's `MSG_CALL` over.
-fn handle(req: &[u8], reply: &mut [u8]) -> usize {
+/// Decodes one request and builds a status-only reply. The only op is
+/// `DSPOP_WRITE` (put text on the console); anything else is acked with
+/// status 0 - lost output never wedges a client's `MSG_CALL`.
+fn handle(backend: &mut Backend, req: &[u8], reply: &mut [u8]) -> usize {
     reply[..8].copy_from_slice(&0u64.to_le_bytes());
     if req.len() < REQ_PAYLOAD {
         return REPLY_PAYLOAD;
     }
-    let op = read_u64(req, 0);
-    if op == syscall_abi::DSPOP_WRITE {
+    if read_u64(req, 0) == syscall_abi::DSPOP_WRITE {
         let text_len = read_u64(req, 8) as usize;
         let payload = &req[REQ_PAYLOAD..];
         let n = text_len.min(payload.len()).min(DATA_MAX);
-        con_write_raw(&payload[..n]);
+        write_text(backend, &payload[..n]);
     }
     REPLY_PAYLOAD
 }
 
-/// Push bytes straight to the kernel console via the gated `CON_WRITE`
-/// syscall. `bytes` must be at most `DATA_MAX` (the kernel's per-buffer
-/// cap) - the one caller, `handle`, already clamps to it, and the banner
-/// is well under.
+// ---------------------------------------------------------------------
+// Backends
+// ---------------------------------------------------------------------
+
+enum Backend {
+    ByteStream,
+    Framebuffer(Fb),
+}
+
+fn detect_backend() -> Backend {
+    if syscall4(syscall_abi::CON_INFO, syscall_abi::CON_INFO_KIND, 0, 0, 0)
+        == syscall_abi::CON_KIND_FRAMEBUFFER
+    {
+        let cols = syscall4(syscall_abi::CON_INFO, syscall_abi::CON_INFO_COLS, 0, 0, 0) as usize;
+        let rows = syscall4(syscall_abi::CON_INFO, syscall_abi::CON_INFO_ROWS, 0, 0, 0) as usize;
+        syscall4(syscall_abi::FB_CLEAR, 0, 0, 0, 0);
+        Backend::Framebuffer(Fb {
+            cols: cols.max(1),
+            rows: rows.max(1),
+            col: 0,
+            row: 0,
+            ansi: Ansi::Ground,
+        })
+    } else {
+        Backend::ByteStream
+    }
+}
+
+fn write_text(backend: &mut Backend, bytes: &[u8]) {
+    match backend {
+        Backend::ByteStream => con_write_raw(bytes),
+        Backend::Framebuffer(fb) => {
+            for &c in bytes {
+                fb.put_char(c);
+            }
+        }
+    }
+}
+
+/// The framebuffer backend's rendering state - a character-cell cursor and
+/// a small ANSI escape parser. No pixels here: it looks glyphs up in
+/// `font` and drives the kernel's `FB_*` primitives.
+struct Fb {
+    cols: usize,
+    rows: usize,
+    col: usize,
+    row: usize,
+    ansi: Ansi,
+}
+
+enum Ansi {
+    Ground,
+    Esc,
+    Csi,
+}
+
+impl Fb {
+    fn put_char(&mut self, c: u8) {
+        match self.ansi {
+            Ansi::Ground => match c {
+                0x1b => self.ansi = Ansi::Esc, // ESC
+                b'\r' => self.col = 0,
+                b'\n' => self.newline(),
+                0x08 => self.col = self.col.saturating_sub(1), // backspace
+                _ => {
+                    if let Some(glyph) = font::glyph(c) {
+                        syscall4(
+                            syscall_abi::FB_BLIT,
+                            glyph.as_ptr() as u64,
+                            1,
+                            self.col as u64,
+                            self.row as u64,
+                        );
+                        self.col += 1;
+                        if self.col >= self.cols {
+                            self.newline();
+                        }
+                    }
+                    // Non-printable, non-control bytes are dropped rather
+                    // than drawing junk (the kernel's old fbconsole drew a
+                    // blank for them) - the shell only ever sends
+                    // printable text plus \r\n\b and ANSI.
+                }
+            },
+            Ansi::Esc => {
+                // Only the CSI form (ESC [) is understood; anything else
+                // ends the sequence.
+                self.ansi = if c == b'[' { Ansi::Csi } else { Ansi::Ground };
+            }
+            Ansi::Csi => {
+                // Collect (and ignore) parameter bytes until the final
+                // letter. Handle the two the shell's `clear` uses; ignore
+                // the rest. This is what finally makes `clear` actually
+                // clear on a framebuffer (the kernel's fbconsole never
+                // parsed ANSI - see its module doc comment).
+                if (0x40..=0x7e).contains(&c) {
+                    match c {
+                        b'J' => {
+                            syscall4(syscall_abi::FB_CLEAR, 0, 0, 0, 0);
+                            self.col = 0;
+                            self.row = 0;
+                        }
+                        b'H' => {
+                            self.col = 0;
+                            self.row = 0;
+                        }
+                        _ => {}
+                    }
+                    self.ansi = Ansi::Ground;
+                }
+            }
+        }
+    }
+
+    fn newline(&mut self) {
+        self.col = 0;
+        if self.row + 1 < self.rows {
+            self.row += 1;
+        } else {
+            // Already on the last row: scroll up one and stay put.
+            syscall4(syscall_abi::FB_SCROLL, 1, 0, 0, 0);
+        }
+    }
+}
+
+/// Byte-stream backend: push bytes to the kernel console via the gated
+/// `CON_WRITE`, chunked at the kernel's per-buffer cap.
 fn con_write_raw(bytes: &[u8]) {
-    syscall4(syscall_abi::CON_WRITE, bytes.as_ptr() as u64, bytes.len() as u64, 0, 0);
+    let mut off = 0;
+    while off < bytes.len() {
+        let n = (bytes.len() - off).min(DATA_MAX);
+        syscall4(syscall_abi::CON_WRITE, bytes[off..].as_ptr() as u64, n as u64, 0, 0);
+        off += n;
+    }
 }
 
 fn read_u64(buf: &[u8], offset: usize) -> u64 {

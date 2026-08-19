@@ -490,6 +490,52 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
             }
             0
         }
+        syscall_abi::CON_INFO => {
+            // Lets the console server discover its backend (byte-stream vs
+            // framebuffer) and the framebuffer's cell grid at startup.
+            if !con_access_allowed() {
+                return syscall_abi::FS_ERROR;
+            }
+            match arg0 {
+                syscall_abi::CON_INFO_KIND => {
+                    if crate::fbdev::is_present() {
+                        syscall_abi::CON_KIND_FRAMEBUFFER
+                    } else {
+                        syscall_abi::CON_KIND_BYTESTREAM
+                    }
+                }
+                syscall_abi::CON_INFO_COLS => crate::fbdev::cols() as u64,
+                syscall_abi::CON_INFO_ROWS => crate::fbdev::rows() as u64,
+                _ => 0,
+            }
+        }
+        syscall_abi::FB_BLIT => {
+            // Plot arg1 glyph bitmaps (arg0, in the server's region) at
+            // cells (arg2.., arg3). Gated + buffer-validated like BLOCK_*.
+            let count = arg1 as usize;
+            let bytes = count * crate::fbdev::GLYPH_BYTES;
+            if !con_access_allowed() || !valid_user_range(arg0, bytes as u64) {
+                return syscall_abi::FS_ERROR;
+            }
+            // SAFETY: pointer/length validated in the caller's own region.
+            let glyphs = unsafe { core::slice::from_raw_parts(arg0 as *const u8, bytes) };
+            crate::fbdev::blit_glyphs(glyphs, count, arg2 as usize, arg3 as usize);
+            0
+        }
+        syscall_abi::FB_SCROLL => {
+            if !con_access_allowed() {
+                return syscall_abi::FS_ERROR;
+            }
+            crate::fbdev::scroll(arg0 as usize);
+            0
+        }
+        syscall_abi::FB_CLEAR => {
+            if !con_access_allowed() {
+                return syscall_abi::FS_ERROR;
+            }
+            crate::fbdev::clear();
+            0
+        }
         syscall_abi::GET_TICKS => exceptions::ticks(),
         syscall_abi::SPAWN => spawn_staged(arg0),
         syscall_abi::SPAWN_STAGE => {

@@ -4607,7 +4607,7 @@ content of a single `write`/`>>` is still bounded by its input source
 (the 128-byte line / the 1024-byte capture), which a userland heap +
 guard page would lift; and directories still never shrink.
 
-## Driver isolation, part 3: the console server (Stage 1 - byte-stream)
+## Driver isolation, part 3: the console server (both stages, framebuffer rendering in userland)
 
 The second component moved out of the EL1 kernel, after the filesystem
 server: the *steady-state* console. `cond/` (the seventh userland
@@ -4621,19 +4621,44 @@ how `BLOCK_*` is gated to `FSD_TASK`. A `PUTC` fallback in every client
 keeps output working if there's no console server this boot (missing
 `COND.BIN`, or any call failure) - so output always reaches *a* console.
 
-This is deliberately **Stage 1 of two**: the byte-stream backend only.
-`cond` forwards bytes; it doesn't yet render. The point of this stage is
-the *architecture* (a second protected server, the `DSPOP_*` protocol,
-and userland output as an IPC stream - the stdout-over-IPC substrate the
-pipe/redirect items wanted) proven end to end on QEMU, with zero
-framebuffer/MMU changes. **Stage 2** moves the framebuffer text-rendering
-logic (`fbconsole`/`font` glyphs, cursor, `ptr::copy` scroll, plus real
-ANSI parsing) out of the kernel into `cond`'s framebuffer backend, via
-gated blit/scroll primitives - the part that's Parallels-visible and the
-actual "rendering driver in userland." The kernel keeps a minimal
-emergency console for boot and fault reporting regardless (the fault
-handlers and all post-`exit_boot_services` bring-up print with no
-userland available - see `console.rs`/`exceptions.rs`).
+**Stage 1 was the byte-stream backend** (a second protected server, the
+`DSPOP_*` protocol, userland output as an IPC stream - the stdout-over-IPC
+substrate the pipe/redirect items wanted), proven on QEMU with zero
+framebuffer/MMU changes. **Stage 2 moved the framebuffer text-rendering
+logic out of the kernel** - the actual "rendering driver in userland."
+`cond` gained a `Framebuffer` backend chosen at startup from a new
+`CON_INFO` syscall: it holds the cursor, does line wrap and scroll
+*decisions*, parses ANSI, and looks each character up in its **own** copy
+of `font.rs` (the font is the thing that was console-driver logic).
+The kernel keeps only **dumb pixel primitives** in `fbdev.rs`, gated to
+`CON_TASK` like `BLOCK_*` is to `FSD_TASK`: `FB_BLIT` (35, plot a run of
+8-byte glyph bitmaps from the server's region at cell (col,row)),
+`FB_SCROLL` (36, `ptr::copy` the framebuffer up N rows), `FB_CLEAR` (37).
+The framebuffer-access mechanism was a deliberate choice (gated
+primitives, not mapping the framebuffer into the server's EL0 view -
+which would need the per-view device-mapping MMU surgery that faulted
+real Parallels once, the reverted ASIDs; see the plan). `main.rs` calls
+`fbdev::install` whenever a framebuffer is discovered and mapped,
+independent of which console the *kernel* installs - so on QEMU+`ramfb` a
+byte-stream (UART) console wins the kernel's own slot while `cond` still
+renders to the framebuffer. **The payoff beyond parity: ANSI works now** -
+the kernel's old `fbconsole` never parsed escapes, so `clear` did nothing
+on a framebuffer; `cond`'s parser handles `\x1b[2J`/`\x1b[H`, so `clear`
+actually clears.
+
+The kernel keeps a minimal emergency console (its existing `fbconsole`
+for boot/faults, or the byte-stream UART) regardless - the fault handlers
+and all post-`exit_boot_services` bring-up print with no userland
+available (see `console.rs`/`exceptions.rs`). On QEMU+`ramfb` the two
+don't interfere (kernel logs go to the UART, `cond` to `ramfb` - separate
+devices); on a **framebuffer-only** platform (Parallels) they share the
+screen (kernel during boot/faults, `cond` in steady state after it
+`FB_CLEAR`s on startup). The one recurring interference source - the long
+`mmu.rs` identity-map rebuild diagnostic that fired on every spawn/exit -
+was made boot-only (a `log` flag through `build_tables`); a couple of
+short kernel operational lines (`task N exited`, fault reports) still
+reach the kernel console, minor and mostly terminal-ish, left for the
+real-hardware assessment.
 
 **A real scheduler fix landed alongside this, needed but not originally
 scoped: `MSG_CALL` now switches directly to the destination server.**
@@ -4653,30 +4678,54 @@ waking the caller), and blocks again all before the next tick. Every
 `block_current_and_switch` stays as a `prefer: None` wrapper for the
 keyboard/wait/plain-recv blocks that shouldn't prefer anyone.
 
-**Confirmed on QEMU end to end, both `make run` (byte-stream/FAT16) and
-`make run-image` (real FAT32), zero `-d int` aborts:** the shell banner,
-`help`, `uptime`, and `echo` all render through `cond`; `selftest`'s
-three relocation checks pass (the shell binary changed - `con_write` was
-added - so it must still load and relocate correctly); `ls`/`cat` work
-via `fsd` (two servers, slots 2 and 3, coexisting with no cross-talk); a
-pipe (`echo hi there | /EFI/ORBS/UPPER.BIN` -> `HI THERE`) and `exec
-/EFI/ORBS/HELLO.BIN` both route the spawned program's output through
-`cond`; `ps` shows all six slots (0 shell, 1 idle, 2 fsd, 3 cond, 4-5
-spawnable). **Not yet on real Parallels hardware** (Stage 2's framebuffer
-backend is what matters most there, and the byte-stream backend is
-QEMU-shaped anyway - Parallels has no UART console).
+**Stage 1 confirmed on QEMU end to end, both `make run` (byte-stream/
+FAT16) and `make run-image` (real FAT32), zero `-d int` aborts:** the
+shell banner, `help`, `uptime`, and `echo` all render through `cond`;
+`selftest`'s three relocation checks pass (the shell binary changed -
+`con_write` was added - so it must still load and relocate correctly);
+`ls`/`cat` work via `fsd` (two servers, slots 2 and 3, coexisting with no
+cross-talk); a pipe (`echo hi there | /EFI/ORBS/UPPER.BIN` -> `HI THERE`)
+and `exec /EFI/ORBS/HELLO.BIN` both route the spawned program's output
+through `cond`; `ps` shows all six slots (0 shell, 1 idle, 2 fsd, 3 cond,
+4-5 spawnable).
 
-**Still coarse, worth knowing before Stage 2:** the kernel's own
-`console::println!` logging (boot messages, the identity-map rebuild line
-on every spawn/exit, fault reports) still writes the kernel console
-directly, so on the shared UART it interleaves with `cond`'s output -
-harmless as bytes, but on a framebuffer (Stage 2) the kernel and `cond`
-would fight over the screen unless the split is handled (kernel owns it
-during boot/faults, `cond` in steady state); `con_write`'s `MSG_CALL`
-carries a 768-byte reply buffer per call (the ABI's fixed reply size),
-the one real stack cost, fine on the current unguarded stack but worth
-remembering; and per-character keystroke echo is one `MSG_CALL` each -
-sub-tick now, but still an IPC round trip per typed character.
+**Stage 2 (framebuffer) confirmed on QEMU `ramfb`, by QMP screendump** -
+the only way to check pixel-level rendering, the same technique that
+verified the kernel's original `fbconsole` (a `-device ramfb -display
+none` boot, a serial socket for input + kernel log, a QMP socket for
+`screendump` to a PPM, inspected as an image). Three captures, zero
+aborts: (1) the boot/shell banners plus `$ help` with the commands list
+**correctly line-wrapped** across three rows; (2) after `clear`, a
+blanked screen with only the post-clear content at the top - **ANSI
+actually clearing**, which never worked on the kernel's fbconsole; (3)
+32 `help`s rendered and **scrolled** cleanly (the `FB_SCROLL` `ptr::copy`
+memmove), no corruption. The byte-stream backend was re-confirmed
+unregressed on `make run` (no framebuffer -> `CON_INFO` reports
+byte-stream -> `CON_WRITE` -> UART). **Not yet on real Parallels
+hardware** - the framebuffer backend is exactly what matters most there
+(Parallels has no UART console, so `cond` uses the framebuffer path), and
+this is the first version reasoned/verified far enough to expect a real
+rendered userland console there; that confirmation is on the user, same
+as every framebuffer milestone before (this environment can't boot
+Parallels).
+
+**Still coarse, worth knowing before building on this:** real-Parallels
+confirmation is pending (above); the framebuffer backend has no colour
+and only a *minimal* ANSI parser (CSI `J`/`H` acted on, everything else
+swallowed - enough for `clear`, not a real terminal); rendering is one
+`FB_BLIT` syscall per glyph (fine - each is fast EL1 work while the
+client's `MSG_CALL` is blocked, and a run could be batched later);
+`con_write`'s `MSG_CALL` carries a 768-byte reply buffer per call (the
+ABI's fixed reply size), the one real stack cost; per-character keystroke
+echo is one `MSG_CALL` each (sub-tick now, but still an IPC round trip
+per typed character); and on a framebuffer-only platform a few short
+kernel operational lines (`task N exited`, fault reports) still reach the
+shared screen (the long rebuild diagnostic was made boot-only) - a proper
+"kernel console goes quiet once `cond` owns the screen" handoff is the
+real fix, deferred. The `fbdev.rs` `ptr::copy` scroll is confirmed on
+QEMU's RAM-backed `ramfb`; a Device-nGnRnE framebuffer (if Parallels maps
+it outside the RAM span) has stricter ordering rules and is unverified,
+the same open question the kernel's `fbconsole` already carried.
 
 ## Commands
 
@@ -4781,7 +4830,8 @@ kernel/
   src/console.rs     global console handle (Console enum: Pl011 | Uart16550 | Virtio | Framebuffer), shared between main() and the exception handler
   src/framebuffer.rs GOP (EFI_GRAPHICS_OUTPUT_PROTOCOL) discovery: resolution/stride/pixel format + framebuffer physical base/size - the real lead for Parallels, see "GOP framebuffer console" above
   src/font.rs        embedded public-domain 8x8 bitmap font (dhepper/font8x8), printable ASCII 0x20-0x7E only
-  src/fbconsole.rs   text console rendered directly into the GOP framebuffer: glyph drawing, cursor, ptr::copy-based scroll - write-only, no ANSI parsing, see "GOP framebuffer console" above
+  src/fbconsole.rs   text console rendered directly into the GOP framebuffer: glyph drawing, cursor, ptr::copy-based scroll - write-only, no ANSI parsing; now the kernel's *emergency/boot* console only (steady-state userland rendering moved to the cond server - see "Driver isolation, part 3"), see "GOP framebuffer console" above
+  src/fbdev.rs       dumb framebuffer primitives for the console server: plot a run of glyph bitmaps (FB_BLIT), scroll (FB_SCROLL), clear (FB_CLEAR), all gated to CON_TASK - the pixel plumbing cond drives while it owns the font/cursor/wrap/scroll/ANSI logic, see "Driver isolation, part 3"
   src/exceptions.rs  AArch64 exception vector table (VBAR_EL1) + fault reporting; SVC path (slot 8/"3:") saves x9 to a scratch stack slot before the EC check clobbers it (see "A real relocating loader" above) and saves/restores SP_EL0 at Context's real offset alongside ELR/SPSR, passing dispatch() the frame pointer itself (see "Blocking primitives" above); slot 8's non-SVC fall-through is the resumable EL0-fault path ("4:"/rust_el0_fault_handler) - kills just the faulting task, restarts a faulted filesystem server, see "EL0 fault isolation" above
   src/mmu.rs         per-task translation-table views (one L0/L1/L2/L3 per scheduler slot; identity-mapped kernel/device shared, EL0 access to each task's own region only - enforced isolation, see "Per-task page tables" above), up to MAX_EL0_REGIONS (5) tasks/views, activate_task switches TTBR0+TLBI per context switch, an optional framebuffer device-block fallback, and (since "Dynamic task creation") a stashed memory map/extra-device list plus rebuild_with_el0_regions so install_identity_map can be called a second time at runtime - see "Dynamic task creation and exec()" above
   src/gic.rs         version-dispatching facade over gicv2.rs/gicv3.rs, selected by madt.rs's real discovery - see "MADT/GICv3" above
@@ -4807,8 +4857,9 @@ fsd/                 fifth userland program: THE FILESYSTEM SERVER (driver isola
   src/fat32.rs       the kernel's old hand-rolled FAT32 module, moved essentially verbatim (MBR, BPB, FAT chains, 8.3 entries, full read/write support) plus read_at (windowed offset reads) and write_at (offset writes that extend the file via a partial-sector read-modify-write - streaming cp and unbounded >>, see "FAT32 offset-write" above); its BlockDevice became disk.rs's syscall shim
   src/disk.rs        zero-sized Disk handle: read_sector/write_sector/capacity as BLOCK_READ/BLOCK_WRITE/BLOCK_INFO syscall wrappers
 
-cond/                seventh userland program: THE CONSOLE SERVER (driver isolation part 3, Stage 1) - owns the steady-state console; userland output flows to it as batched DSPOP_WRITE messages over IPC, and it forwards them to the kernel console via the gated CON_WRITE syscall (33, accepted from CON_TASK/slot 3 alone). Byte-stream backend only so far; framebuffer rendering is Stage 2. Boot-loaded into protected task slot 3, see "Driver isolation, part 3" above
-  src/main.rs        the request loop: recv -> decode DSPOP_WRITE -> CON_WRITE the text -> reply; the filesystem server's shape, cloned
+cond/                seventh userland program: THE CONSOLE SERVER (driver isolation part 3) - owns the steady-state console; userland output flows to it as batched DSPOP_WRITE messages over IPC. Two backends (chosen from CON_INFO): byte-stream (forward to the kernel console via the gated CON_WRITE syscall 33 - QEMU's UART) and framebuffer (render glyphs itself via the gated FB_BLIT/FB_SCROLL/FB_CLEAR primitives - the console rendering logic, font included, moved out of the kernel's fbconsole; Parallels, QEMU ramfb). Boot-loaded into protected task slot 3 (CON_TASK), accepted by CON_WRITE/FB_* alone, see "Driver isolation, part 3" above
+  src/main.rs        the request loop (recv -> decode DSPOP_WRITE -> render -> reply, the filesystem server's shape) plus two backends chosen from CON_INFO at startup: byte-stream (forward to the kernel console via CON_WRITE) and framebuffer (render glyphs here - cursor, wrap, scroll, a small ANSI parser - via FB_BLIT/FB_SCROLL/FB_CLEAR)
+  src/font.rs        cond's own copy of the 8x8 bitmap font (from kernel/src/font.rs) - the font is what "console driver logic" meant, so it moved to userland; the kernel keeps a copy only for its emergency fbconsole
 
 upper/               sixth userland program: the pipeline filter demo (uppercases its piped input) - the reference for the filter-program shape: stdin = msg_recv, stdout = con_write (routed through the console server), EOF = the empty message, finish = exit; see "Pipelines" above
   src/main.rs        ~80 lines: the recv/uppercase/putc loop

@@ -457,15 +457,21 @@ phase:
   (`block_current_and_switch_to`: `MSG_CALL` switches straight to the
   destination server, making round trips sub-tick as the ABI doc already
   promised - without it, per-character echo dropped burst input).
-  **Stage 2 (not started): the framebuffer rendering backend** - move
-  `fbconsole`/`font` (glyphs, cursor, scroll) + real ANSI parsing into
-  `cond` via gated blit/scroll primitives (chosen over mapping the
-  framebuffer into EL0, which would need the MMU surgery that faulted
-  real Parallels once), leaving the kernel a minimal emergency console
-  for boot/faults. See `CLAUDE.md`'s "Driver isolation, part 3". After
-  this, the next microkernel steps are a general supervision/heartbeat
-  mechanism (generalizing `fsd`'s bespoke restart) and a capability model
-  for who-may-call-whom.
+  **Stage 2 (framebuffer) is done and verified on QEMU too:** the
+  text-rendering logic (cursor, wrap, scroll, ANSI, the font) moved into
+  `cond`, driving new *dumb* gated pixel primitives in `fbdev.rs` -
+  `FB_BLIT`/`FB_SCROLL`/`FB_CLEAR` (chosen over mapping the framebuffer
+  into EL0, which would need the MMU surgery that faulted real Parallels
+  once). Confirmed on QEMU `ramfb` by QMP screendump (wrapped `help`,
+  `clear` actually clearing - which never worked on the kernel's old
+  fbconsole - and 32 `help`s scrolling cleanly); the kernel keeps a
+  minimal emergency console (fbconsole/UART) for boot/faults.
+  **Real-Parallels confirmation is pending** - the framebuffer backend is
+  what matters most there (no UART console), on the user to test like
+  every framebuffer milestone. See `CLAUDE.md`'s "Driver isolation, part
+  3". After this, the next microkernel steps are a general supervision/
+  heartbeat mechanism (generalizing `fsd`'s bespoke restart) and a
+  capability model for who-may-call-whom.
 - **Grant/safecopy IPC - the enforced bulk-transfer primitive - is
   done** (confirmed end-to-end on both QEMU and real Parallels hardware:
   `cat /hello.bin` streamed a full 5784-byte binary off the USB stick,

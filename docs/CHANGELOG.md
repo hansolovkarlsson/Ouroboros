@@ -7,7 +7,7 @@ what broke, how it was diagnosed), see `CLAUDE.md`; for *how* something
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
-## Console server, Stage 1: the console moves out of the kernel (byte-stream)
+## Console server: the console moves out of the kernel (rendering in userland)
 
 The second component moved out of the EL1 kernel (after the filesystem
 server): the *steady-state* console. `cond/` (the seventh userland
@@ -20,15 +20,22 @@ messages (`MSG_CALL`), and `cond` forwards it through a new **gated
 `FSD_TASK`. A `PUTC` fallback in every client keeps output working if
 there's no console server this boot.
 
-This is deliberately **Stage 1 of two** - the byte-stream backend only.
-The point is the architecture (a second protected server, the `DSPOP_*`
-protocol, userland output as an IPC stream - the stdout-over-IPC
-substrate the pipe/redirect items wanted) proven end to end on QEMU with
-zero framebuffer/MMU changes. **Stage 2** moves the framebuffer text-
-rendering logic (`fbconsole`/`font` glyphs, cursor, scroll, plus real
-ANSI parsing) into `cond` via gated blit/scroll primitives - the
-Parallels-visible "rendering driver in userland." The kernel keeps a
-minimal emergency console for boot and fault reporting regardless.
+Done in two stages. **Stage 1** was the byte-stream backend (the second
+protected server, the `DSPOP_*` protocol, userland output as an IPC
+stream - the stdout-over-IPC substrate the pipe/redirect items wanted),
+zero framebuffer/MMU changes. **Stage 2 moved the framebuffer text-
+rendering logic out of the kernel** - the real "rendering driver in
+userland." `cond` gained a `Framebuffer` backend (chosen from a new
+`CON_INFO` syscall) that owns the cursor, line wrap, scroll decisions,
+ANSI parsing, and its **own** copy of the 8x8 font; the kernel keeps only
+dumb gated pixel primitives in `fbdev.rs` - `FB_BLIT` (plot glyph
+bitmaps), `FB_SCROLL` (`ptr::copy` the screen up), `FB_CLEAR`. Gated
+primitives were chosen over mapping the framebuffer into the server's
+EL0 view (which would need the per-view device-mapping MMU work that
+faulted real Parallels once). A payoff beyond parity: the kernel's old
+`fbconsole` never parsed ANSI, so `clear` did nothing on a framebuffer;
+`cond`'s parser handles `\x1b[2J`/`\x1b[H`, so `clear` clears. The kernel
+keeps a minimal emergency console (fbconsole/UART) for boot and faults.
 
 **A scheduler fix landed alongside it, needed but not originally scoped:
 `MSG_CALL` now switches directly to the destination server.** Per-
@@ -46,10 +53,13 @@ aborts:** shell banner/`help`/`uptime`/`echo` render through `cond`;
 `selftest`'s relocation checks pass (the shell binary changed); `ls`/
 `cat` via `fsd` (two servers coexisting); a pipe (`echo ... |
 UPPER.BIN`) and `exec HELLO.BIN` route spawned output through `cond`;
-`ps` shows all six slots. Not yet on real Parallels hardware - Stage 2's
-framebuffer backend is what matters there (Parallels has no UART
-console). See `CLAUDE.md`'s "Driver isolation, part 3" for the full
-writeup.
+`ps` shows all six slots. Stage 2's framebuffer rendering was confirmed
+on QEMU `ramfb` by QMP screendump (the pixel-level check): the wrapped
+`help` output, `clear` actually clearing, and 32 `help`s scrolling
+cleanly. Not yet on real Parallels hardware - the framebuffer backend is
+exactly what matters there (Parallels has no UART console), and that
+confirmation is on the user, same as every framebuffer milestone. See
+`CLAUDE.md`'s "Driver isolation, part 3" for the full writeup.
 
 ## FAT32 offset-write (`write_at`): streaming `cp`, unbounded `>>`
 

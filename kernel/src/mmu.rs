@@ -444,7 +444,7 @@ pub unsafe fn install_identity_map(
     // Re-borrow from the stash rather than the original parameter (now
     // moved) - the rest of this function is unchanged either way.
     let memory_map = unsafe { (*STORED_MEMORY_MAP.0.get()).as_ref() }.unwrap();
-    unsafe { build_tables(memory_map, el0_regions, extra_devices) };
+    unsafe { build_tables(memory_map, el0_regions, extra_devices, true) };
 }
 
 /// The runtime counterpart to [`install_identity_map`]: rebuilds the
@@ -475,7 +475,7 @@ pub(crate) unsafe fn rebuild_with_el0_regions(el0_regions: [(u64, u64); MAX_EL0_
     let memory_map = unsafe { (*STORED_MEMORY_MAP.0.get()).as_ref() }
         .expect("install_identity_map must run before rebuild_with_el0_regions");
     let (extra_devices, count) = unsafe { *STORED_EXTRA_DEVICES.0.get() };
-    unsafe { build_tables(memory_map, el0_regions, &extra_devices[..count]) };
+    unsafe { build_tables(memory_map, el0_regions, &extra_devices[..count], false) };
 }
 
 /// The discovered general-RAM span `(min_addr, max_addr)` - the same
@@ -498,7 +498,7 @@ pub(crate) fn ram_span() -> (u64, u64) {
     (min_addr, max_addr)
 }
 
-unsafe fn build_tables(memory_map: &MemoryMapOwned, el0_regions: [(u64, u64); MAX_EL0_REGIONS], extra_devices: &[(u64, u64)]) {
+unsafe fn build_tables(memory_map: &MemoryMapOwned, el0_regions: [(u64, u64); MAX_EL0_REGIONS], extra_devices: &[(u64, u64)], log: bool) {
     // RAM: real discovered span, not a guess - computed once, used by
     // every view.
     let mut min_addr = u64::MAX;
@@ -557,9 +557,11 @@ unsafe fn build_tables(memory_map: &MemoryMapOwned, el0_regions: [(u64, u64); MA
         let shared_l1 = unsafe { &mut *EXTRA_L1_TABLES[slot].0.get() };
         if shared_l1[l1_idx] == 0 {
             shared_l1[l1_idx] = device_block(base);
-            crate::console::println!(
-                "Ouroboros kernel: device region {base:#x} (size {size:#x}) outside RAM span, mapped as its own device block (L0 index {l0_idx})"
-            );
+            if log {
+                crate::console::println!(
+                    "Ouroboros kernel: device region {base:#x} (size {size:#x}) outside RAM span, mapped as its own device block (L0 index {l0_idx})"
+                );
+            }
         }
     }
 
@@ -579,10 +581,17 @@ unsafe fn build_tables(memory_map: &MemoryMapOwned, el0_regions: [(u64, u64); MA
         };
     }
 
-    crate::console::println!(
-        "Ouroboros kernel: identity map RAM {min_addr:#x}-{max_addr:#x}, device 0x0-{:#x}, per-task EL0 regions {el0_regions:x?}",
-        GIB - 1
-    );
+    // Boot-only: this is a long diagnostic (the full region array). On a
+    // framebuffer-only platform (Parallels) the kernel console and the
+    // userland console server share the screen, so re-logging it on every
+    // runtime rebuild (spawn/exit) would corrupt the server's rendering -
+    // see CLAUDE.md's "Driver isolation, part 3".
+    if log {
+        crate::console::println!(
+            "Ouroboros kernel: identity map RAM {min_addr:#x}-{max_addr:#x}, device 0x0-{:#x}, per-task EL0 regions {el0_regions:x?}",
+            GIB - 1
+        );
+    }
 
     unsafe { switch_full(crate::tasks::current_task()) };
 }

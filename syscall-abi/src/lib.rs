@@ -338,6 +338,48 @@ pub const GRANT_WRITE: u64 = 2;
 /// buffers.
 pub const CON_WRITE: u64 = 33;
 
+/// `(field)` -> the requested geometry value, or `0`. Lets the console
+/// server discover which backend it has and how big the screen is at
+/// startup. **Gated to [`CON_TASK`]**. Fields: [`CON_INFO_KIND`]
+/// ([`CON_KIND_BYTESTREAM`] or [`CON_KIND_FRAMEBUFFER`]),
+/// [`CON_INFO_COLS`], [`CON_INFO_ROWS`] (the framebuffer's character-cell
+/// grid, `0` on a byte-stream backend).
+pub const CON_INFO: u64 = 34;
+
+/// `(glyphs ptr, count, col, row)` -> `0`, or a reserved-band error.
+/// Plots `count` consecutive 8-byte glyph bitmaps (from the server's own
+/// font, in its own region) at framebuffer character cells
+/// `(col..col+count, row)`. **Gated to [`CON_TASK`]**. The dumb blit half
+/// of the framebuffer backend - the server owns the font, the cursor,
+/// wrap, and scroll *decisions*; this just puts the pixels on screen.
+/// Cells past the last column/row are skipped.
+pub const FB_BLIT: u64 = 35;
+
+/// `(count)` -> `0`. Scrolls the framebuffer up by `count` character rows
+/// (memmove within the framebuffer), blanking the newly-exposed bottom.
+/// **Gated to [`CON_TASK`]**. The server decides *when* to scroll (its
+/// cursor hit the bottom); this does the pixel move.
+pub const FB_SCROLL: u64 = 36;
+
+/// `()` -> `0`. Blanks the entire framebuffer. **Gated to [`CON_TASK`]**.
+/// Used by the server's startup and its `clear`/ANSI-`2J` handling.
+pub const FB_CLEAR: u64 = 37;
+
+/// [`CON_INFO`] field: the backend kind ([`CON_KIND_*`]).
+pub const CON_INFO_KIND: u64 = 0;
+/// [`CON_INFO`] field: framebuffer columns (character cells wide).
+pub const CON_INFO_COLS: u64 = 1;
+/// [`CON_INFO`] field: framebuffer rows (character cells tall).
+pub const CON_INFO_ROWS: u64 = 2;
+
+/// [`CON_INFO_KIND`]: no framebuffer - the server forwards text to the
+/// kernel's byte-stream console via [`CON_WRITE`] (QEMU's UART path).
+pub const CON_KIND_BYTESTREAM: u64 = 0;
+/// [`CON_INFO_KIND`]: a framebuffer is present - the server renders
+/// glyphs itself via [`FB_BLIT`]/[`FB_SCROLL`]/[`FB_CLEAR`] (Parallels,
+/// QEMU `ramfb`).
+pub const CON_KIND_FRAMEBUFFER: u64 = 1;
+
 // ---------------------------------------------------------------------
 // The filesystem server's request protocol (not syscalls) - messages
 // sent to FSD_TASK, normally via MSG_CALL. **v2, fully self-contained**
