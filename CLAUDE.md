@@ -4450,22 +4450,39 @@ to the shared "no filesystem mounted" message. Zero aborts
 (`Data Abort`/`Prefetch Abort`/`Undefined Instruction`) in `-d int`
 cross-checks across every session.
 
-**Real Parallels hardware: regression clean, the primitive itself
-pending a stick.** `make test-parallels` (`selftest;echo;uptime;mount;
-ls /`) confirmed the milestone doesn't regress real-hardware boot/shell:
+**Confirmed on real Parallels hardware, end to end** (`make
+test-parallels`, reads-only per standing policy). First, the regression:
 `selftest`'s three relocation checks (`write!`/`core::fmt`,
 slice-vs-literal, str-vs-literal) all pass - meaningful, since the shell
 binary was heavily modified this milestone and must load/relocate
-correctly on real hardware; `echo`/`uptime` (1395 ticks, preemption
-working) clean; `mount`/`ls` degrade gracefully (no stick attached).
-The grant/safecopy primitive itself couldn't be exercised there - on
-real Parallels the *only* readable disk is the passthrough USB stick
-(no virtio-blk), and it wasn't connected this run - but its mechanism
-(an EL1 region-to-region copy under the per-task views) rests entirely
-on foundations the per-task-tables milestone already confirmed on real
-hardware. A full disk exercise (`mount` a stick with a multi-KB file,
-`cat` it) is the honest remaining real-hardware step, gated on a
-connected stick, reads-only per standing policy.
+correctly on real hardware; `echo`/`uptime` clean. Then the actual
+bulk-read proof: `mount` (the runtime rescan found the passthrough
+Lexar stick - `usb-msd: INQUIRY -> vendor='Lexar'`, `fsd: FAT32
+mounted`), `ls /` (the stick's real contents), and **`cat /hello.bin`
+streamed the whole 5784-byte binary** - the `ELF` magic at the start,
+the embedded `.rodata` string ("Hello from a second program!"), and the
+section-name tail (`.text .dynstr ... .rodata`) all rendered, ~5KB in,
+with no truncation notice. The *old* `cat` would have stopped at 512
+bytes and never reached that tail, so this is a direct, unambiguous
+demonstration that the multi-chunk grant/safecopy bulk read works on
+real silicon. The shell stayed fully responsive afterward (the next
+command typed and got a clean text response - one dropped keystroke
+via `send-key-event`'s synthetic keyboard, the documented artifact, not
+a crash).
+
+**A real-hardware enumeration wrinkle worth knowing (not caused by this
+work): a stick connected *at boot* consistently displaced the keyboard**
+- the boot log showed `keyboard not available (devices found, but no
+boot-protocol keyboard among them)` on every boot where the stick was
+present during the one-shot xHCI scan, so nothing could be typed. This
+is the multi-device-scan limitation already on record (the 4-device
+pool / Parallels' enumeration timing), just more consistent than
+"occasionally" when a real stick is in the mix. The working path is the
+*designed* Parallels workflow: let the VM boot with the keyboard
+enumerated first, then type `mount`, whose runtime rescan
+(`xhci::rescan_ports`) picks up the stick that attached a few seconds
+later - keyboard intact, stick found. That's exactly the boot that
+produced the successful `cat` above.
 
 **Still coarse, worth knowing before building on this:** the per-op
 transfer is capped at `SAFECOPY_MAX` (2048) - `cat` streams past it in a

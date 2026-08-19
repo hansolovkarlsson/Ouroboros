@@ -444,8 +444,9 @@ phase:
   Parallels - reverted in favor of flush-on-switch, correct on both;
   ASIDs stay a recorded future optimization.
 - **Grant/safecopy IPC - the enforced bulk-transfer primitive - is
-  done** (QEMU end-to-end; real-hardware regression clean, the primitive
-  itself pending a stick for a full disk exercise). Two syscalls
+  done** (confirmed end-to-end on both QEMU and real Parallels hardware:
+  `cat /hello.bin` streamed a full 5784-byte binary off the USB stick,
+  no truncation, where the old `cat` stopped at 512 bytes). Two syscalls
   (`grant`/`safecopy`) move bulk file data directly between two isolated
   regions under a kernel-enforced capability (an explicit grant + an
   active call), lifting the 512-byte per-op cap for file reads/writes to

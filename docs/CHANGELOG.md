@@ -55,10 +55,16 @@ on QEMU against the real FAT32 image: a 5564-byte file streams complete
 file round-trips where it used to refuse, cp of 5564 refuses; a
 >512-byte redirect capture and a correctly-ordered `>>` append (not the
 historical overwrite bug); reboot persistence; FAT16 graceful
-degradation; zero aborts throughout. Real Parallels regression clean
-(selftest, echo, uptime, graceful mount/ls) - the primitive's mechanism
-rests on the already-hardware-validated per-task views; a full disk
-exercise there awaits a connected USB stick.
+degradation; zero aborts throughout. **Confirmed on real Parallels
+hardware end to end**: `selftest` passes (the heavily-modified shell
+binary relocates correctly), then `mount` finds the passthrough Lexar
+stick, `ls` lists it, and `cat /hello.bin` streams the whole 5784-byte
+binary via grant/safecopy - the `ELF` magic, the `.rodata` string, and
+the section-name tail (~5KB in) all rendered with no truncation, where
+the old `cat` would have stopped at 512 bytes. (A stick present *at
+boot* consistently displaced the keyboard in the one-shot xHCI scan -
+the known multi-device limitation - so the run used the designed
+workflow: boot, then `mount` to rescan for the late-attaching stick.)
 
 ## Per-task page tables: MMU-enforced isolation, not trust
 
