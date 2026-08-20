@@ -157,7 +157,7 @@ running touches them), a real limitation for whatever runs next.
 
 ## Process model
 
-`tasks.rs` implements round-robin scheduling among up to `NUM_TASKS` (5)
+`tasks.rs` implements round-robin scheduling among up to `NUM_TASKS` (6)
 EL0 task slots — no priorities, no queue. Every task is either `Unused`,
 `Runnable`, `Blocked(reason)`, or `Zombie(status)`; the scheduler only
 ever picks among the runnable ones. Two things move execution from one
@@ -166,7 +166,12 @@ and switching to the next runnable one (`on_tick`), and a blocking
 syscall (`read_char`, `wait`, `msg_recv`, `msg_call` — see the syscall
 table below) suspending its own caller immediately and switching away
 mid-syscall (`block_current_and_switch`) rather than waiting for the
-next tick.
+next tick. A `msg_call` additionally switches *straight to the
+destination server* (`block_current_and_switch_to`'s `prefer`) rather
+than to the next runnable task — otherwise the round-robin would pick
+the always-runnable idle task before the just-woken server, and a
+synchronous request/reply would cost a full tick per call (visible as
+dropped input once per-character console echo became an IPC round trip).
 
 - **Task 0** runs whatever program `loader.rs` loaded from disk — see
   [`processes.md`](processes.md).
@@ -181,7 +186,12 @@ next tick.
   stays `Unused` if no FSD.BIN exists, and `spawn` never fills it: the
   slot is block-syscall-privileged, so a spawned program landing there
   would inherit the server's disk access.
-- **Task slots 3 and 4** start `Unused` and are filled by `tasks::spawn`
+- **Task 3** is reserved for the console server (`cond/`, boot-loaded
+  from `\EFI\ORBS\COND.BIN` — see "The console server" below). Same
+  posture as the filesystem server: stays `Unused` without COND.BIN,
+  never filled by `spawn` (its slot is the only one the `con_write`/
+  `fb_*` syscalls accept).
+- **Task slots 4 and 5** start `Unused` and are filled by `tasks::spawn`
   when the `spawn` syscall starts a further program at runtime (the
   shell's `exec <path>` command) — see "Dynamic task creation" below.
 
@@ -230,6 +240,40 @@ missing FSD.BIN. What this doesn't cover: a *wedged* (looping,
 non-faulting) server — no watchdog exists, and Ctrl+C remains the
 rescue for a client blocked calling one; and disk state a crashing
 server corrupted mid-write — there's no journaling.
+
+### The console server (`cond/`) — the second component moved out of the kernel
+
+The *steady-state* console lives in userland too (driver isolation part
+3). Userland text output no longer goes straight to the kernel: the
+shell and every other program send their output to `cond` (task 3) as
+batched `DSPOP_WRITE` messages, normally via `msg_call`, and fall back
+to the kernel's `putc` only if no console server is loaded. `cond` picks
+one of two backends at startup from `con_info`:
+
+- **Byte-stream** (QEMU's UART): forward the text to the kernel's
+  console via the gated `con_write` syscall. Nothing to render.
+- **Framebuffer** (Parallels, QEMU `ramfb`): render the text *here* —
+  the console rendering logic (an 8x8 font, the cursor, line wrap,
+  scroll decisions, a small ANSI parser) moved out of the kernel's
+  `fbconsole` into `cond`. Each glyph is looked up in the server's own
+  font and drawn via the gated `fb_blit`; the kernel keeps only *dumb*
+  pixel primitives (`fb_blit`/`fb_scroll`/`fb_clear`, `fbdev.rs`) — the
+  framebuffer analogue of the `block_*` device access. This was chosen
+  over mapping the framebuffer into the server's EL0 view, which would
+  have needed a per-view device-mapping the MMU doesn't have (and which
+  the reverted per-task ASIDs already showed is silicon-only trouble).
+
+The kernel retains a minimal *emergency* console for its own boot and
+fault reporting — the fault handlers and all post-`exit_boot_services`
+bring-up print with no userland available. On a framebuffer-only
+platform, once `cond` is up the kernel goes quiet on its console (a
+`CONSOLE_QUIET` flag armed in `main`) so its operational logs don't
+render at the kernel's own cursor and corrupt the server's output; fault
+reports bypass the flag (`console::print_force`) — a fault is worth
+showing even if it overwrites the screen. On a byte-stream console
+(QEMU's UART) the flag stays off, keeping those logs for dev. A payoff
+beyond parity: `cond` parses ANSI, so `clear` actually clears on a
+framebuffer — the kernel's old `fbconsole` never did.
 
 ### Dynamic task creation (`spawn`/`exec`)
 
@@ -369,7 +413,7 @@ the way hand-duplicated numbers did before this crate existed.
 | 1 | `double` | a number | `arg0 * 2` | Demo only — proves a return value survives the trampoline |
 | 2 | `report` | a task ID | `0` or `u64::MAX` | Demo only — original two-task milestone's proof of per-task syscall state |
 | 3 | `try_read_char` | ignored | a byte, or `NO_CHAR` (`u64::MAX`) if none waiting | Non-blocking |
-| 4 | `putc` | a byte | `0` | Raw single-byte console write, no newline translation |
+| 4 | `putc` | a byte | `0` | Raw single-byte write to the kernel's console, no newline translation. Now mostly a *fallback*: userland output normally goes to the console server over IPC (`con_write` below), and every client's helper falls back to `putc` only when no console server is present this boot |
 | *5* | *(gap)* | | | `shell_input` used to live here; removed when line editing moved into userland. Left unfilled rather than renumbered — see `syscall.rs`'s module doc comment |
 | 6 | `get_ticks` | ignored | preemption tick count since boot | Added for phase 2's `uptime` builtin — the first syscall added specifically so a loaded program could read real kernel state, not just I/O |
 | *7–14* | *(gaps)* | | | The eight `fs_*` syscalls (`list_dir`/`read_file`/`mkdir`/`rmdir`/`touch`/`rm`/`write_file`/`mv`) lived here until the filesystem moved out of the kernel entirely. Their exact contracts survive unchanged as the filesystem server's `FSOP_*` request protocol (below); the numbers stay unfilled, same stable-ABI reasoning as the gap at 5 |
@@ -381,7 +425,7 @@ the way hand-duplicated numbers did before this crate existed.
 | 20 | `fg` | task index | `0`, `TASK_ERR_PROTECTED`, or `TASK_ERR_NO_SUCH_TASK` | Hands keyboard ownership to the given task (the wake-check's input-owner state, previously hardcoded to task 0). The caller's own next blocking read then waits until the foregrounded task exits, is killed, or the user types Ctrl+C (`0x03`, intercepted at the keyboard-poll choke point whenever a non-boot-shell task owns the keyboard — ownership reverts to task 0 and the byte is swallowed; reclamation, not a signal). Idle can't be foregrounded; index 0 is an explicit "give it back" |
 | 21 | `wait` | task index | exit status `0..=255`, `TASK_KILLED_STATUS` (`0x100`), `WAIT_INTERRUPTED`, `TASK_ERR_PROTECTED`, or `TASK_ERR_NO_SUCH_TASK` | Blocks until the task dies (via `WaitReason::TaskExit` — the same blocking machinery as `read_char`), or returns immediately if it's already a zombie. **Collecting the status is what reaps**: an exited task holds its slot as `Zombie(status)` until waited (`kill` reaps immediately instead — the killer already knows the outcome). Ctrl+C interrupts a wait (the target keeps running); other typing during a wait is discarded. Waiting on 0–2/yourself is refused (guaranteed deadlock — those tasks never die) |
 | 22 | `mount` | replace flag | `0` (a USB device was installed), `MOUNT_ALREADY`, or `MOUNT_NO_DEVICE` | **The device half only** since the filesystem moved to userland: rescans the xHCI ports for storage devices that attached after boot (`xhci::rescan_ports`) and installs the first mass-storage device (`usb_msd.rs`, Bulk-Only Transport + SCSI) as the kernel's block device for the server to reach via `block_read`/`block_write`. Actually mounting what it holds is the server's `FSOP_MOUNT` request; the shell's `mount` command composes the two, server first. `replace != 0` allows swapping out an installed-but-unmountable device (e.g. `make run`'s FAT16 vvfat disk) — callers pass it only after the server confirms nothing is mounted. The Parallels workflow is unchanged: boot, wait, `mount` |
-| 23 | `msg_send` | dest task, buf ptr, len | `0`, `TASK_ERR_NO_SUCH_TASK`, `MSG_ERR_TOO_BIG` (>64 bytes), or `MSG_ERR_FULL` | IPC: delivers straight into a matching blocked receiver's buffer (direct delivery), or into the destination's bounded mailbox (4 pending max). No shared memory, no blocking sends. **A zero-length message is legal** — the end-of-stream marker in the shell's pipeline convention (data messages, then one empty message meaning "finish and exit"). A dead task's queued mail is cleared on exit/kill/fault |
+| 23 | `msg_send` | dest task, buf ptr, len | `0`, `TASK_ERR_NO_SUCH_TASK`, `MSG_ERR_TOO_BIG` (>`MSG_MAX_LEN`, 768 bytes), or `MSG_ERR_FULL` | IPC: delivers straight into a matching blocked receiver's buffer (direct delivery), or into the destination's bounded mailbox (4 pending max). No shared memory, no blocking sends. **A zero-length message is legal** — the end-of-stream marker in the shell's pipeline convention (data messages, then one empty message meaning "finish and exit"). A dead task's queued mail is cleared on exit/kill/fault |
 | 24 | `msg_recv` | buf ptr, len | `(sender << 32) \| copied_len`, or `RECV_INTERRUPTED` (Ctrl+C) | Blocks until a message arrives (`WaitReason::Message` — the third user of the blocking machinery), copying the oldest queued message into the buffer |
 | 25 | `msg_try_recv` | buf ptr, len | same as `msg_recv`, or `NO_MSG` | The non-blocking sibling, same pairing as `try_read_char`/`read_char` |
 | 26 | `block_info` | — | capacity in sectors, `BLOCK_ERR_NO_DEVICE`, or `BLOCK_ERR_DENIED` | Raw block-device introspection for the filesystem server. **All three `block_*` syscalls are gated to task 2** (`FSD_TASK`): any other caller gets `BLOCK_ERR_DENIED` — the kernel holds the device, and exactly one task may ask it to touch the disk |
@@ -391,6 +435,11 @@ the way hand-duplicated numbers did before this crate existed.
 | 30 | `spawn_stage` | offset, chunk ptr, chunk len | `0` or `SPAWN_ERROR` | Copies one chunk of a program image into the kernel's spawn staging buffer — the feed half of the two-step `spawn` (16) |
 | 31 | `grant` | grantee task, buf ptr, buf len, dir | `0` or `GRANT_ERR` | Records, in the caller's own single per-task grant slot, that `grantee` may bulk-copy the exact `buf` (which must lie in the caller's own region) in direction `dir` (`GRANT_READ`/`GRANT_WRITE`). The capability half of the enforced bulk-transfer primitive — `buf len` capped at `SAFECOPY_MAX` (2048). See "Grant/safecopy" below |
 | 32 | `safecopy` | client task, client offset, local buf ptr, len, **dir (5th arg, from the saved frame's x4)** | `len` or `SAFECOPY_ERR` | A *server* copies `len` bytes between a client's granted buffer and its own `local buf`, in direction `dir`. Authorized only when the client's grant names this server and permits the direction, the client is *currently* blocked in a `msg_call` to it, and both ranges are in bounds. Not task-gated (unlike `block_*`): the grant plus the active call is the whole capability. See "Grant/safecopy" below |
+| 33 | `con_write` | buf ptr, len | `0` or an error | The console server's byte-stream backend: writes `len` bytes to the kernel's console. **Gated to task 3** (`CON_TASK`), like `block_*` to task 2 — ordinary tasks reach the console only through the server (a `DSPOP_WRITE` message); the kernel's own `console::*` stays the emergency/boot path. See "Console" below |
+| 34 | `con_info` | field | the geometry value | Lets the console server discover its backend and framebuffer size at startup. **Gated to task 3**. Fields: kind (`CON_KIND_BYTESTREAM`/`CON_KIND_FRAMEBUFFER`), cols, rows |
+| 35 | `fb_blit` | glyphs ptr, count, col, row | `0` or an error | Plots `count` 8-byte glyph bitmaps (from the server's own font, in its own region) at framebuffer cells `(col..col+count, row)`. **Gated to task 3**. The dumb blit half of the framebuffer backend — the server owns the font/cursor/wrap/scroll/ANSI, this just puts pixels on screen (`fbdev.rs`) |
+| 36 | `fb_scroll` | count | `0` | Scrolls the framebuffer up `count` character rows (a `ptr::copy` memmove), blanking the exposed bottom. **Gated to task 3** |
+| 37 | `fb_clear` | — | `0` | Blanks the whole framebuffer. **Gated to task 3**. Used by the server's startup and its `clear`/ANSI-`2J` handling |
 | other | — | — | `u64::MAX` | Logged as unknown |
 
 ### The filesystem request protocol (`FSOP_*`)
@@ -481,13 +530,21 @@ writing a new userland program.
 
 ## Console
 
-`console.rs` holds a global `Console` handle (`Pl011`, `Uart16550`, or
-`Virtio`), installed once after `exit_boot_services` and shared between
-`main()` and the exception handler (a fault needs somewhere to report
-through too). All three drivers support read and write, though `Virtio`'s
-read always returns nothing — see below.
+The *steady-state* console is a userland server (`cond/`, task 3 — see
+"The console server" above); this section is about the **kernel's own
+console**, which is now the emergency/boot path only: it carries the
+messages printed before any userland exists (all post-`exit_boot_services`
+bring-up) and fault reports (which can fire with no scheduler running).
 
-Which driver, and at what address, is determined by trying up to four
+`console.rs` holds a global `Console` handle (`Pl011`, `Uart16550`,
+`Virtio`, or `Framebuffer`), installed once after `exit_boot_services`
+and shared between `main()` and the exception handler. The byte-stream
+drivers support read and write; `Virtio` and `Framebuffer` are
+write-only (their read always returns `None`). Keyboard input, when a
+console can't provide it, comes from the xHCI USB keyboard driver
+instead (`xhci.rs`).
+
+Which driver, and at what address, is determined by trying up to five
 mechanisms in order, logging why each failed before trying the next:
 
 1. **Devicetree** (`devicetree.rs`) — confirmed dead on both QEMU (default
@@ -500,9 +557,22 @@ mechanisms in order, logging why each failed before trying the next:
    on Parallels (no SPCR table entry at all).
 3. **PCI enumeration for a class 0x07/0x00 serial controller** (`pci.rs`)
    — confirmed dead on both (neither platform exposes a PCI 16550).
-4. **virtio-mmio for a console device** (`virtio_console.rs`, device ID
-   3) — tried only if all three above fail, and only *after*
-   `mmu::install_identity_map` rather than alongside the other three (see
+4. **GOP framebuffer console** (`framebuffer.rs`/`fbconsole.rs`) — tried
+   after devicetree/ACPI/PCI, and (like virtio below) only *after*
+   `mmu::install_identity_map`, since the framebuffer must be mapped
+   under this kernel's own tables before it can be drawn to. Unlike every
+   other mechanism, `EFI_GRAPHICS_OUTPUT_PROTOCOL` is a standard UEFI
+   protocol needing no address guessing or platform convention; it's
+   queried during boot services and written directly after exit. **This
+   is the console that works on Parallels**, confirmed rendering a live
+   shell on real hardware. Note the division of labour once userland is
+   up: this kernel `fbconsole` is only the emergency/boot renderer, while
+   the userland console server (`cond`) does the steady-state rendering
+   to the *same* framebuffer through the gated `fb_*` primitives (see
+   "The console server" above).
+5. **virtio-mmio for a console device** (`virtio_console.rs`, device ID
+   3) — tried only if all four above fail, and only *after*
+   `mmu::install_identity_map` rather than alongside the first three (see
    `virtio_console.rs`'s module doc comment for the real MMU-mapping
    constraint that forces this later placement). Confirmed working end to
    end on QEMU: discovery, feature negotiation, transmitq0 setup, and

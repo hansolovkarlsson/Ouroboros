@@ -9,6 +9,51 @@ behind each decision, see `CLAUDE.md`. This document is the one to
 update first when direction changes; the others describe what exists,
 this one describes where it's going.
 
+## What's next (the current frontier)
+
+The microkernel arc is the through-line now. Two components have moved
+out of the EL1 kernel into supervised, protected userland servers — the
+FAT32 **filesystem** (`fsd`, part 2) and the **console** (`cond`, part 3,
+both stages done and confirmed on real Parallels hardware). What each
+newly proved: the pattern generalizes (a second server, on a
+hardware-adjacent component), and userland output is now an IPC stream.
+The prioritized next steps, roughly in order of value (details in the
+parking lot below and in `microkernel-comparison.md`):
+
+1. **A general supervision / heartbeat mechanism.** Today the restart is
+   bespoke to `fsd`. A uniform "any registered server can be
+   health-checked and restarted" facility (MINIX's reincarnation server /
+   Helix's self-heal, in miniature) would generalize it to `cond` and
+   anything moved out next, and — the real gap — catch a *wedged*
+   (looping, non-faulting) server, which nothing detects now.
+
+2. **A capability model for who-may-call-whom.** Isolation is
+   MMU-enforced at the memory level, but the IPC topology is still flat —
+   any task may `msg_call` any task. A per-task table of permitted
+   endpoints would make isolation *topological*, the last big structural
+   gap against MINIX.
+
+3. **Finish the stdout-over-IPC payoff the console server enabled.** A
+   program's output already flows over IPC (to `cond`); routing a
+   program's output stream to the shell instead would unlock
+   **program-to-program pipes** (`a | b` where both are programs) and
+   **`exec ... > file`** — the pipe/redirect items that are currently
+   builtin-left-only because a task's own output wasn't capturable.
+
+4. **Smaller hardening, mostly recorded already:** a stack **guard page**
+   (turn silent overflow into a clean fault) and a userland **heap**;
+   revisiting **per-task ASIDs** with a proven break-before-make sequence
+   (the reverted TLB optimization); and FAT32 **interior/random-access
+   writes** (`write_at` refuses an offset past EOF today — no sparse
+   files) for a future editor/log.
+
+**Deferred / blocked** (recorded, not chased): moving a *third* driver
+out is limited by the no-IOMMU DMA constraint (the block transport can't
+safely leave the kernel); reverse-engineering Parallels' proprietary
+serial/storage device (vendor `0x1ab8`, no public spec); and an EHCI
+driver for USB 2.0 sticks (a whole second host-controller bring-up for
+poor value).
+
 ## Testing infrastructure: scripted real-hardware round trips
 
 Every real-hardware bug in `xhci-keyboard-postmortem.md` and

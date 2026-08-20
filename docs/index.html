@@ -51,7 +51,7 @@
     <div class="stat"><span class="stat-num">aarch64</span><span class="stat-label">Architecture</span></div>
     <div class="stat"><span class="stat-num">UEFI</span><span class="stat-label">Boot path</span></div>
     <div class="stat"><span class="stat-num">5</span><span class="stat-label">Workspace crates</span></div>
-    <div class="stat"><span class="stat-num">5</span><span class="stat-label">Postmortems</span></div>
+    <div class="stat"><span class="stat-num">6</span><span class="stat-label">Postmortems</span></div>
   </div>
 
   <article>
@@ -187,8 +187,9 @@
       Every real bug found along the way — the ones that mattered, not
       the routine typos — is written up in detail: symptom, root cause,
       how it was actually confirmed, and the generalizable lesson. Four
-      bug-hunt chapters in chronological order, plus a later design
-      retrospective — each usable on its own.
+      bug-hunt chapters in chronological order, plus two design
+      retrospectives from the microkernel-isolation arc — each usable on
+      its own.
     </p>
 
     <div class="postmortem-cards">
@@ -217,11 +218,16 @@
         <h3>Enforce the isolation, rebuild the data flow</h3>
         <p>Not a bug hunt but a design-led day: MMU-enforced per-task isolation and fault containment, then rebuilding every cheap data path enforcement broke — grant/safecopy IPC, a FAT32 offset-write, and the one works-on-QEMU-fails-on-silicon reversal.</p>
       </a>
+      <a class="pm-card" href="site/postmortem-console-server.html">
+        <span class="pm-eyebrow">Retrospective · driver isolation</span>
+        <h3>Moving the console into userland</h3>
+        <p>The second component out of the kernel: a driver the kernel itself depends on (a split, not a move), the gated-primitives-vs-mapped-memory decision, a scheduler lie that routing echo through IPC exposed, a missed client that stranded on real hardware, and verifying pixels by screendump.</p>
+      </a>
     </div>
 
     <p>
       Every document in this project — the guides, the architecture and
-      reference material, all five postmortems, and the research notes —
+      reference material, all six postmortems, and the research notes —
       is collected in <a href="site/docs.html">the documentation library</a>.
     </p>
 

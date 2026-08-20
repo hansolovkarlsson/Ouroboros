@@ -1,0 +1,278 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The Console in Userland — Ouroboros</title>
+<meta name="description" content="A design retrospective on moving Ouroboros's console out of the kernel into an unprivileged userland server — the framebuffer-access decision, a scheduler bug that routing echo through IPC exposed, a missed client, the kernel-console handoff, and verifying pixels by screendump.">
+<link rel="icon" type="image/png" href="../assets/favicon.png">
+<link rel="stylesheet" href="../assets/site.css">
+</head>
+<body>
+
+<nav class="sitenav">
+  <div class="sitenav-inner">
+    <a class="sitenav-mark" href="../index.html">ouroboros</a>
+    <div class="sitenav-links">
+      <a href="../index.html">Home</a>
+      <a href="architecture-overview.html">Architecture</a>
+      <a href="tutorial.html">Learn</a>
+      <a href="docs.html" class="current">Docs</a>
+      <a href="https://github.com/hansolovkarlsson/Ouroboros">GitHub ↗</a>
+    </div>
+  </div>
+</nav>
+
+<div class="page">
+
+  <div class="kicker">Design retrospective · Ouroboros</div>
+
+  <h1 class="title small">Moving the console into userland</h1>
+  <p class="dek">
+    The second component pulled out of the kernel into an unprivileged,
+    protected server — and why routing console output through IPC exposed
+    a scheduler bug that every batch test had hidden.
+  </p>
+
+  <div class="companion">
+    <span class="companion-icon">🖥️</span>
+    <span>A companion to the <a href="postmortem-isolation-dataflow.html">isolation &amp; data-flow retrospective</a>, which covers the earlier arc that made isolation MMU-enforced. This one is the next step: proving the pattern generalizes to a hardware-adjacent component.</span>
+  </div>
+
+  <article>
+
+    <p>
+      This is a write-up of the milestone that moved the console out of
+      the EL1 kernel of
+      <a href="https://github.com/hansolovkarlsson/Ouroboros">Ouroboros</a>,
+      a from-scratch ARM64 microkernel, into an unprivileged, protected
+      userland server — the second component isolated this way, after the
+      filesystem. If you're building a microkernel and wondering how to
+      move a service the kernel itself still needs, or why routing output
+      through IPC exposed a scheduler bug that batch tests hid, some of
+      this may save you time.
+    </p>
+
+    <h2>A driver the kernel depends on is a <em>split</em>, not a move</h2>
+
+    <p>
+      The filesystem was a clean move: the kernel never needed FAT32 for
+      itself, so all of it could leave, with the kernel keeping only a raw
+      block-device syscall underneath. The console is different. The
+      kernel prints through it constantly, with no userland available:
+      every boot message before the first process exists, and — the
+      load-bearing case — every fault report, which can fire when the
+      scheduler isn't even running. You cannot move the console wholesale
+      into a userland server, because the thing that reports "the userland
+      server crashed" <em>is</em> the console.
+    </p>
+
+    <p>So the milestone is a <strong>split</strong>, not a move:</p>
+    <ul>
+      <li>The <strong>steady-state</strong> console (everything userland
+      prints during normal operation) moves to a server, <code class="inline">cond</code>.</li>
+      <li>The kernel keeps a <strong>minimal emergency console</strong>
+      for its own boot and fault output.</li>
+    </ul>
+
+    <p>
+      That framing — "keep an early/panic console, move the rich one" — is
+      how real kernels are structured (printk vs. a display server), and
+      naming it up front kept the rest of the design honest. The
+      interesting engineering is all in the seams it creates.
+    </p>
+
+    <h2>The framebuffer-access decision: gated primitives, not mapped memory</h2>
+
+    <p>
+      For the server to render text on a framebuffer, it needs to reach
+      the framebuffer. Two ways: <strong>map the framebuffer into the
+      server's own address space</strong> (the purest "driver owns its
+      hardware" — write pixels directly, zero-copy), or <strong>keep the
+      framebuffer in the kernel behind dumb, gated primitives</strong>
+      (blit a run of glyphs, scroll, clear) with the server owning the
+      <em>logic</em> — font, cursor, wrap, scroll decisions, ANSI — and
+      calling the primitives.
+    </p>
+
+    <p>
+      The mapping option needed a capability the kernel's MMU didn't have:
+      per-address-space access to a <em>device</em> region (only ordinary
+      task RAM was ever made user-accessible). Building that is exactly
+      the class of MMU change that had already bitten this project once —
+      a per-task-ASID optimization that passed every emulator test and
+      then faulted real hardware, and had to be reverted. Taking that risk
+      to move a <em>text console</em> was a bad trade.
+    </p>
+
+    <div class="lesson">
+      <span class="lesson-label">The call</span>
+      <p>
+        Gated primitives won. The kernel keeps a dumb 2D blitter; the
+        server owns everything that makes it a text console. When the
+        "pure" version needs a new privileged mechanism and the pragmatic
+        version reuses a proven one, the pragmatic version is usually
+        right — especially when the new mechanism is the kind your
+        hardware has already punished you for.
+      </p>
+    </div>
+
+    <h2>The real bug: routing echo through IPC exposed a scheduler lie</h2>
+
+    <p>
+      The server takes output over IPC. The shell now sends each printed
+      line — and, because a line editor echoes as you type, <em>each typed
+      character</em> — as a synchronous call to the server. The first
+      real-hardware-shaped test dropped characters: <code class="inline">help</code>
+      came back as <code class="inline">hl</code>.
+    </p>
+
+    <p>
+      The cause was not in the new code. It was a latency that had always
+      been there and never mattered until output ran through it. A
+      synchronous IPC call blocks the caller and switches to "the next
+      runnable task." With an always-runnable idle task in the schedule,
+      the next runnable task is <em>idle</em>, not the server that was just
+      handed the request — so the reply didn't come back until the
+      round-robin wrapped around a full tick later. At roughly a tick per
+      echoed character, input arriving faster than that overflowed the
+      hardware receive buffer and dropped.
+    </p>
+
+    <div class="lesson">
+      <span class="lesson-label">The sharp part</span>
+      <p>
+        The IPC primitive's own documentation already claimed this
+        couldn't happen — its contract said a call to a waiting server
+        "round-trips without waiting for a tick." That was aspirational:
+        the direct message <em>delivery</em> was implemented, but the
+        <em>scheduling</em> still went through the idle task. A property
+        you documented but never enforced is a latent bug with a note
+        attached; the first workload that leaned on it found it. The fix
+        made reality match the doc — a call now switches straight to the
+        destination server — and every filesystem call got faster too.
+      </p>
+    </div>
+
+    <p>
+      <strong>Test on the real hot path.</strong> A batch-output test
+      (print a whole line, check it appears) would never have found this;
+      it only shows up when the round trip happens per character, fast,
+      against real input timing. And when a fix makes a <em>documented</em>
+      promise finally true, that's a sign the promise was load-bearing all
+      along.
+    </p>
+
+    <h2>The oversight: sweep <em>all</em> the clients, or one strands</h2>
+
+    <p>
+      Moving output to the server means every program that prints has to
+      be switched from "write to the kernel" to "send to the server." The
+      shell, the demo programs, the pipe filter — all updated. One was
+      missed: the <em>filesystem</em> server, which also prints a couple
+      of startup lines.
+    </p>
+
+    <p>
+      It compiled and ran fine, and on the byte-stream developer console
+      it was invisible — kernel output and server output both go to the
+      same serial stream, so interleaving is just interleaving. It only
+      became visible on the real target, on a screenshot from actual
+      hardware: the filesystem server's two lines rendered <em>stranded in
+      the middle of the screen</em>, at the kernel console's cursor, while
+      everything else rendered at the server's cursor near the top.
+    </p>
+
+    <div class="lesson">
+      <span class="lesson-label">Lesson</span>
+      <p>
+        A missed client doesn't error; it draws in the wrong place, and
+        only on the platform where two cursors exist. A "convert every
+        caller" change needs a checklist of callers — and the platform
+        where a miss is invisible is not the platform to sign off on.
+      </p>
+    </div>
+
+    <h2>The handoff: the kernel has to learn to shut up</h2>
+
+    <p>
+      Even with every userland client routed through the server, the
+      <em>kernel</em> still prints its own operational lines during steady
+      state — a task exited, a device was mounted, a diagnostic. On the
+      developer console those are useful and harmless. On a
+      framebuffer-only platform, where the kernel's emergency console and
+      the userland server draw to the same screen at independent cursors,
+      they corrupt the server's output.
+    </p>
+
+    <p>
+      The fix is a real handoff: once the server owns the screen, the
+      kernel goes quiet on its console — a flag, armed only when the
+      kernel's own console is a framebuffer and a server exists to take it
+      over, so the developer console (a byte stream) keeps its logs.
+      <strong>Fault reports bypass the flag</strong>: a fault is worth
+      showing even if it overwrites the server's screen — that's the whole
+      reason the kernel kept an emergency console. The distinction that
+      matters is <em>operational noise</em> (suppress) versus <em>a
+      fault</em> (always show), and it's worth drawing explicitly rather
+      than suppressing everything or nothing.
+    </p>
+
+    <h2>Verifying pixels: screendumps, not logs</h2>
+
+    <p>
+      A text console's output can be checked by reading the bytes. A
+      rendered framebuffer can't — "the driver didn't crash" says nothing
+      about whether the right pixels landed. So this milestone leaned on
+      capturing the actual framebuffer to an image and looking at it:
+      three captures on the emulator (text with correct line-wrap; a
+      screen that a <code class="inline">clear</code> actually blanked —
+      which the kernel's old renderer never managed, having no escape
+      parser; and many screens' worth of output scrolling cleanly), then
+      the real hardware. The staging was emulator-first throughout — the
+      byte-stream backend and all the server plumbing proven with zero
+      framebuffer risk before any of the pixel path existed.
+      <strong>When your output is visual, verify it visually; a returned
+      success code is not a rendered glyph.</strong>
+    </p>
+
+    <h2>Takeaways</h2>
+
+    <ul>
+      <li><strong>A component the kernel itself depends on splits; it
+      doesn't move.</strong> Keep the minimal in-kernel version for the
+      kernel's own use, move the rich version to userland.</li>
+      <li><strong>Prefer reusing a proven privileged mechanism over
+      building a new one</strong> — especially a new MMU capability, on
+      hardware that has already shown it will fault on MMU changes the
+      emulator accepts.</li>
+      <li><strong>A documented invariant you never enforced is a latent
+      bug.</strong> The first workload that relies on it will find it.</li>
+      <li><strong>Test on the real hot path.</strong> The scheduler
+      latency was invisible to a batch test and obvious to per-character
+      echo.</li>
+      <li><strong>"Convert every caller" needs a caller checklist</strong>,
+      and don't sign off on the platform where a missed one is
+      invisible.</li>
+      <li><strong>Separate operational noise from faults</strong> when
+      deciding what a shared emergency console suppresses.</li>
+      <li><strong>Verify visual output visually.</strong> Screendumps
+      caught what no log could.</li>
+    </ul>
+
+    <p>
+      None of these are specific to ARM or to this hypervisor. The full
+      write-up lives in the repository as
+      <a href="https://github.com/hansolovkarlsson/Ouroboros/blob/main/docs/console-server-postmortem.md">console-server-postmortem.md</a>.
+    </p>
+
+  </article>
+
+  <footer class="site-footer">
+    <span>Ouroboros — an ARM64 microkernel, written from scratch in Rust</span>
+    <a href="https://github.com/hansolovkarlsson/Ouroboros">github.com/hansolovkarlsson/Ouroboros</a>
+  </footer>
+
+</div>
+</body>
+</html>

@@ -43,6 +43,7 @@
     <a href="#interrupts">Interrupts &amp; timing</a>
     <a href="#storage">Storage &amp; filesystem</a>
     <a href="#usb">USB &amp; xHCI</a>
+    <a href="#servers">Servers, IPC &amp; isolation</a>
     <a href="#software">Software &amp; toolchain</a>
   </div>
 
@@ -229,6 +230,40 @@
 
         <dt id="boot-protocol">Boot Protocol</dt>
         <dd>A simplified, fixed 8-byte HID report layout that keyboards and mice support for compatibility with simple BIOS/UEFI-era drivers, without needing to parse a full HID report descriptor. Ouroboros assumes this fixed layout directly rather than parsing report descriptors.</dd>
+
+      </dl>
+    </section>
+
+    <section class="glossary-group" id="servers">
+      <h2>Servers, IPC &amp; isolation</h2>
+      <dl class="terms">
+
+        <dt id="microkernel">Microkernel</dt>
+        <dd>An OS design where drivers, the filesystem, and other services run as ordinary <em>userland</em> processes rather than inside the privileged kernel, so a bug in one can't corrupt the kernel or its neighbours. Ouroboros draws this from MINIX; it has moved two components out so far (the filesystem and the console).</dd>
+
+        <dt id="driver-isolation">Driver isolation</dt>
+        <dd>The act of moving a component out of the EL1 kernel into an unprivileged, restartable EL0 server — the concrete microkernel move. A driver that touches DMA can't be isolated safely without an IOMMU (which this platform lacks), so what moves out is pure-logic components; the kernel keeps a thin, gated hardware syscall underneath.</dd>
+
+        <dt id="server">Server (userland)</dt>
+        <dd>A long-lived userland program that owns a resource and answers requests over IPC in an infinite receive → handle → reply loop. Runs in a fixed, protected task slot that can't be killed or reused by <code class="inline">spawn</code>.</dd>
+
+        <dt id="fsd">fsd <span class="term-full">filesystem server</span></dt>
+        <dd>The FAT32 filesystem, running as a userland server (task 2). The kernel keeps only raw sector access (three <code class="inline">block_*</code> syscalls, accepted from this task alone); every file operation is an IPC request to <code class="inline">fsd</code>.</dd>
+
+        <dt id="cond">cond <span class="term-full">console server</span></dt>
+        <dd>The console, running as a userland server (task 3). Userland output flows to it over IPC; it either forwards to the kernel's byte-stream console or, on a framebuffer, renders the glyphs itself (font, cursor, wrap, scroll, ANSI) via dumb kernel pixel primitives. The kernel keeps only a minimal emergency console for boot and fault reporting.</dd>
+
+        <dt id="ipc">IPC <span class="term-full">inter-process communication</span></dt>
+        <dd>How isolated tasks talk: by <em>copied</em> messages through the kernel, never shared memory — the isolation-friendly semantics. A message goes straight into a waiting receiver's buffer, or into a small bounded mailbox.</dd>
+
+        <dt id="msgcall">msg_call / sendrec</dt>
+        <dd>The synchronous request/reply IPC primitive (MINIX's <code class="inline">sendrec</code> shape): send a request to a server and block for <em>its</em> reply specifically. The kernel switches straight to the destination server so the round trip completes without waiting for a scheduler tick.</dd>
+
+        <dt id="grant-safecopy">grant / safecopy</dt>
+        <dd>A capability-based way to move <em>bulk</em> data between two isolated tasks (messages are small). A client grants a server permission to copy an exact buffer, in one direction, only while its call is live; the kernel enforces the server can touch only those bytes. This is MINIX's <code class="inline">safecopy</code>.</dd>
+
+        <dt id="pertask-pagetables">Per-task page tables</dt>
+        <dd>Each scheduler slot runs under its own MMU translation-table view: identical kernel/device mappings, but EL0 access to that task's own memory alone. Touching another task's memory faults — isolation enforced by hardware, not convention. Proven by fault injection.</dd>
 
       </dl>
     </section>

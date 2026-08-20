@@ -119,6 +119,11 @@
         <h3>Enforce the isolation, rebuild the data flow</h3>
         <p>A design-led day, not a bug hunt: MMU-enforced per-task isolation and fault containment, then rebuilding every cheap data path enforcement broke — grant/safecopy IPC, a FAT32 offset-write, and the one works-on-QEMU-fails-on-silicon reversal.</p>
       </a>
+      <a class="pm-card" href="postmortem-console-server.html">
+        <span class="pm-eyebrow">Retrospective · driver isolation</span>
+        <h3>Moving the console into userland</h3>
+        <p>The second component out of the kernel: a driver the kernel itself depends on (a split, not a move), the gated-primitives-vs-mapped-memory decision, a scheduler lie that routing echo through IPC exposed, a missed client that stranded on real hardware, and verifying pixels by screendump.</p>
+      </a>
     </div>
 
     <h2>Research &amp; assessments</h2>

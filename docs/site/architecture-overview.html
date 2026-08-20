@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Ouroboros — architecture at a glance</title>
-<meta name="description" content="How Ouroboros — an ARM64 microkernel for Apple Silicon — separates its layers: the EL0/EL1 privilege boundary, a filesystem running as an unprivileged userland process, and MMU-enforced task isolation.">
+<meta name="description" content="How Ouroboros — an ARM64 microkernel for Apple Silicon — separates its layers: the EL0/EL1 privilege boundary, a filesystem and a console running as unprivileged userland servers, and MMU-enforced task isolation.">
 <link rel="icon" type="image/png" href="../assets/favicon.png">
 <link rel="stylesheet" href="../assets/site.css">
 <style>
@@ -193,7 +193,7 @@
 
   <div class="stat-row">
     <div class="stat"><span class="stat-num">2</span><span class="stat-label">Exception levels</span></div>
-    <div class="stat"><span class="stat-num">5</span><span class="stat-label">Task slots</span></div>
+    <div class="stat"><span class="stat-num">6</span><span class="stat-label">Task slots</span></div>
     <div class="stat"><span class="stat-num">1</span><span class="stat-label">FS, in userland</span></div>
     <div class="stat"><span class="stat-num">0</span><span class="stat-label">Shared memory</span></div>
   </div>
@@ -297,8 +297,8 @@
         </div>
         <div class="rcard">
           <span class="tag">Console</span>
-          <h3>Console drivers</h3>
-          <p>Four discovery paths tried in order; on Apple Silicon the win is a GOP framebuffer console drawn glyph-by-glyph. PL011, 16550, and virtio also supported.</p>
+          <h3>Console: discovery + emergency</h3>
+          <p>Five discovery paths tried in order (a GOP framebuffer wins on Apple Silicon), a minimal emergency console for boot and fault reporting, and dumb framebuffer pixel primitives. The rendering itself moved out — see below.</p>
         </div>
         <div class="rcard">
           <span class="tag">Devices</span>
@@ -314,6 +314,11 @@
           <span class="tag">Not here</span>
           <h3>The filesystem → userland</h3>
           <p>FAT32 parsing, directories, paths, cluster chains — none of it lives in the kernel. It moved out to a task (<code class="inline">fsd</code>), reached only over IPC.</p>
+        </div>
+        <div class="rcard out">
+          <span class="tag">Not here</span>
+          <h3>The console → userland</h3>
+          <p>Font, cursor, line wrap, scrolling, ANSI parsing — the console rendering moved out to a task (<code class="inline">cond</code>) too, driving the kernel's dumb pixel primitives over gated syscalls.</p>
         </div>
       </div>
       <figcaption><span class="fig">FIG 2</span> &nbsp;Kernel responsibilities. The dashed card is what was deliberately <em>removed</em> from the kernel.</figcaption>
@@ -356,20 +361,26 @@
             </tr>
             <tr>
               <td class="slot">3</td>
-              <td class="tname">Spawnable</td>
-              <td><span class="d">Filled by <code class="inline">exec &lt;path&gt;</code> — a second program running concurrently with the shell. Own memory, own view, reaped when it exits.</span></td>
-              <td><span class="tbadge spawn">runtime</span></td>
+              <td class="tname">Console server</td>
+              <td><span class="d">Owns the steady-state console. Userland output flows to it over IPC; it renders glyphs to the framebuffer (or forwards to a UART). Boot-loaded and protected, like the FS server.</span></td>
+              <td><span class="tbadge pro">protected</span></td>
             </tr>
             <tr>
               <td class="slot">4</td>
               <td class="tname">Spawnable</td>
-              <td><span class="d">A third concurrent program. Job control (<code class="inline">fg</code>, <code class="inline">kill</code>, <code class="inline">wait</code>) and IPC let these cooperate — a shell can foreground a nested shell, a client can call a server.</span></td>
+              <td><span class="d">Filled by <code class="inline">exec &lt;path&gt;</code> — a program running concurrently with the shell. Own memory, own view, reaped when it exits.</span></td>
+              <td><span class="tbadge spawn">runtime</span></td>
+            </tr>
+            <tr>
+              <td class="slot">5</td>
+              <td class="tname">Spawnable</td>
+              <td><span class="d">A second concurrent program. Job control (<code class="inline">fg</code>, <code class="inline">kill</code>, <code class="inline">wait</code>) and IPC let these cooperate — a shell can foreground a nested shell, a client can call a server.</span></td>
               <td><span class="tbadge spawn">runtime</span></td>
             </tr>
           </tbody>
         </table>
       </div>
-      <figcaption><span class="fig">FIG 3</span> &nbsp;The task table. Slots 0–2 are protected from <code class="inline">exit</code>/<code class="inline">kill</code>; 3–4 cycle as programs come and go.</figcaption>
+      <figcaption><span class="fig">FIG 3</span> &nbsp;The task table. Slots 0–3 are protected from <code class="inline">exit</code>/<code class="inline">kill</code>; 4–5 cycle as programs come and go.</figcaption>
     </figure>
 
     <h2>How the tasks are kept apart</h2>
@@ -407,6 +418,7 @@
           <div class="who"><span class="el">EL0</span> Shell · task 0</div>
           <div class="memrow mine">its own region — rw</div>
           <div class="memrow locked">fsd region</div>
+          <div class="memrow locked">cond region</div>
           <div class="memrow locked">kernel region</div>
         </div>
         <div class="memmid">

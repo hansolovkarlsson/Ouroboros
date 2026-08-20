@@ -237,10 +237,17 @@ nothing is waiting), `read_char` (`READ_CHAR`, blocking - suspends the
 calling task and switches to another runnable one instead of returning
 immediately, resuming with the byte once one arrives; see
 `docs/architecture.md`'s "Process model" section for how blocking
-actually works), and `putc` (`PUTC`, one raw byte, no newline
-translation) cover interactive I/O; `get_ticks` (`GET_TICKS`, added for
-phase 2's `uptime` builtin) is the pattern to follow whenever a command
-needs real kernel state it can't get any other way.
+actually works) cover interactive input. **Output goes to the console
+server, not straight to the kernel:** a program builds its text into a
+`DSPOP_WRITE` message and sends it to the console server (task 3,
+`CON_TASK`) via `msg_call`, falling back to `putc` (`PUTC`, one raw byte)
+only if no console server is loaded this boot. Every userland program
+here carries the same small `con_write` helper for this (copy the
+shell's or `hello/`'s); it's what moved console *rendering* out of the
+kernel (see `docs/architecture.md`'s "The console server"). `get_ticks`
+(`GET_TICKS`, added for phase 2's `uptime` builtin) is the pattern to
+follow whenever a command needs real kernel state it can't get any other
+way.
 
 **File operations are not syscalls anymore** — they're IPC requests to
 the filesystem server (`fsd/`, task 2), sent as `FSOP_*` messages via
@@ -296,9 +303,10 @@ length validation, per-error-reason detail).
 **Pipeline filter programs** are the other program shape worth
 knowing (see `docs/shell-commands.md`'s "Pipelines"): stdin is
 `msg_recv` (1-64-byte data messages, then one *empty* message meaning
-end-of-stream), stdout is `putc`, and finishing means `exit` - the
-shell waits on the slot. `upper/src/main.rs` is the ~80-line reference
-to copy. No argv exists; a filter's behavior has to be baked in.
+end-of-stream), stdout is `con_write` (routed to the console server, as
+above), and finishing means `exit` - the shell waits on the slot.
+`upper/src/main.rs` is the ~80-line reference to copy. No argv exists; a
+filter's behavior has to be baked in.
 
 ## Writing a replacement program
 
