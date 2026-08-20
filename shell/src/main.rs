@@ -981,7 +981,12 @@ fn spawn_path(arg: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize) -> Result<u64, u6
             break;
         }
     }
-    match syscall(syscall_abi::SPAWN, offset) {
+    // arg1 is the spawned program's stdout target - the console by default
+    // (a plain `exec`); the pipeline/redirect paths will pass the shell's
+    // own task index instead so they can relay/capture the output. Passed
+    // explicitly (not via the 1-arg `syscall` helper, which would leave x1
+    // as 0 - task 0, the shell - and misroute every ordinary spawn).
+    match syscall4(syscall_abi::SPAWN, offset, syscall_abi::CON_TASK, 0, 0) {
         code if code >= FS_ERR_MIN => Err(code),
         slot => Ok(slot),
     }

@@ -562,6 +562,31 @@ pub(crate) fn clear_mailbox(task: usize) {
     mailbox.count = 0;
 }
 
+/// Per-task stdout target: the task index a program's output should go to,
+/// set by whoever `spawn`ed it (see the `SPAWN`/`STDOUT_TARGET` syscalls).
+/// `CON_TASK` (the console server) by default, and for every boot-loaded
+/// task; a shell orchestrating a program-to-program pipe or an
+/// `exec … > file` redirect sets a spawned program's target to itself, so
+/// it can relay or capture that program's output. Reset to the console
+/// default on task death so a reused slot never inherits a stale target.
+static STDOUT_TARGET: [AtomicU64; NUM_TASKS] = [const { AtomicU64::new(syscall_abi::CON_TASK) }; NUM_TASKS];
+
+/// Record `task`'s stdout target - called by `spawn` once a slot is chosen.
+pub(crate) fn set_stdout_target(task: usize, target: u64) {
+    STDOUT_TARGET[task].store(target, Ordering::Relaxed);
+}
+
+/// The stdout target of `task`, for the `STDOUT_TARGET` syscall.
+pub(crate) fn stdout_target_of(task: usize) -> u64 {
+    STDOUT_TARGET[task].load(Ordering::Relaxed)
+}
+
+/// Reset `task`'s stdout target to the console default - called on task
+/// death alongside `clear_mailbox`/`clear_grant`.
+fn reset_stdout_target(task: usize) {
+    STDOUT_TARGET[task].store(syscall_abi::CON_TASK, Ordering::Relaxed);
+}
+
 /// One task's single outstanding grant - the enforced bulk-transfer
 /// capability behind the `GRANT`/`SAFECOPY` syscalls. `grantee` (a slot
 /// index, the same identity IPC uses everywhere) may bulk-copy the
@@ -916,6 +941,7 @@ pub(crate) unsafe fn exit_current_and_switch(frame: *mut Context, status: u64) -
     unsafe { *REGIONS[current].0.get() = (0, 0) };
     clear_mailbox(current);
     clear_grant(current);
+    reset_stdout_target(current);
     let next = next_runnable(current);
     *frame = unsafe { *TASKS[next].0.get() };
     CURRENT.store(next, Ordering::Relaxed);
@@ -938,6 +964,7 @@ pub(crate) fn kill_task(i: usize) {
     unsafe { *REGIONS[i].0.get() = (0, 0) };
     clear_mailbox(i);
     clear_grant(i);
+    reset_stdout_target(i);
 }
 
 /// The EL0-fault teardown's context switch: destroys the *currently
@@ -962,6 +989,7 @@ pub(crate) unsafe fn kill_current_and_switch(frame: *mut Context) {
     unsafe { *REGIONS[current].0.get() = (0, 0) };
     clear_mailbox(current);
     clear_grant(current);
+    reset_stdout_target(current);
     let next = next_runnable(current);
     *frame = unsafe { *TASKS[next].0.get() };
     CURRENT.store(next, Ordering::Relaxed);

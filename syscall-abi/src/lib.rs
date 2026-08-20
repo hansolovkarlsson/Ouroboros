@@ -68,10 +68,10 @@ pub const GET_TICKS: u64 = 6;
 /// `block_current_and_switch`), not a spin-wait on either side.
 pub const READ_CHAR: u64 = 15;
 
-/// `(total staged length)` -> **the new task's slot index** on success
-/// (needed to wait on, send to, or kill what was just started - the
-/// shell's pipeline flow does all three), [`SPAWN_ERROR`] (bad
-/// argument), or a `SPAWN_ERR_*` code. Parses, relocates, and starts
+/// `(total staged length, stdout target)` -> **the new task's slot
+/// index** on success (needed to wait on, send to, or kill what was just
+/// started - the shell's pipeline flow does all three), [`SPAWN_ERROR`]
+/// (bad argument), or a `SPAWN_ERR_*` code. Parses, relocates, and starts
 /// the program previously fed into the kernel's staging buffer via
 /// [`SPAWN_STAGE`], as a new task running *alongside* the caller - a
 /// real `spawn`, not POSIX exec-replaces-current-process semantics;
@@ -81,7 +81,13 @@ pub const READ_CHAR: u64 = 15;
 /// filesystem to read with - the caller reads the program (via the
 /// filesystem server) and stages it chunk by chunk first. See
 /// `tasks.rs`'s `spawn` for the mechanism and its real, deliberate
-/// limits (a small fixed number of extra task slots).
+/// limits (a small fixed number of extra task slots). The **stdout
+/// target** (arg1) is the task index the spawned program's output
+/// should go to - normally [`CON_TASK`] (the console), but a shell
+/// orchestrating a program-to-program pipe or an `exec … > file`
+/// redirect sets it to itself so it can relay/capture the program's
+/// output. The program reads it back via [`STDOUT_TARGET`]; a program
+/// that ignores it (outputs straight to the console) is unaffected.
 pub const SPAWN: u64 = 16;
 
 /// `(exit code)` -> **does not return** on success: the calling task is
@@ -364,6 +370,19 @@ pub const FB_SCROLL: u64 = 36;
 /// `()` -> `0`. Blanks the entire framebuffer. **Gated to [`CON_TASK`]**.
 /// Used by the server's startup and its `clear`/ANSI-`2J` handling.
 pub const FB_CLEAR: u64 = 37;
+
+/// `()` -> the calling task's **stdout target** (the task index its
+/// output should be sent to, set by whoever [`SPAWN`]ed it; [`CON_TASK`]
+/// by default, and for boot-loaded tasks). A program routes its output
+/// there: if it's [`CON_TASK`], via the console server (a [`DSPOP_WRITE`]
+/// message); otherwise as a raw byte stream (1-to-[`MSG_MAX_LEN`]-byte
+/// data messages, then one empty end-of-stream message - the same
+/// convention the shell's `builtin | program` pipe already uses) to that
+/// task, which relays or captures it. This is what makes a *task's own*
+/// output capturable, enabling program-to-program pipes and
+/// `exec … > file`. A program that doesn't call this simply always
+/// outputs to the console, as before.
+pub const STDOUT_TARGET: u64 = 38;
 
 /// [`CON_INFO`] field: the backend kind ([`CON_KIND_*`]).
 pub const CON_INFO_KIND: u64 = 0;

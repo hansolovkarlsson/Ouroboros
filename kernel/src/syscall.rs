@@ -227,7 +227,7 @@ static SPAWN_STAGING: SpawnStagingCell = SpawnStagingCell(core::cell::UnsafeCell
 /// memory back via `tasks::free_runtime_region`, which always succeeds
 /// here since a failed spawn's allocation is by construction the most
 /// recent one (the LIFO case).
-fn spawn_staged(total_len: u64) -> u64 {
+fn spawn_staged(total_len: u64, stdout_target: u64) -> u64 {
     let staging = unsafe { &mut *SPAWN_STAGING.0.get() };
     let size = total_len as usize;
     // A program bigger than the staging buffer can't have been staged
@@ -263,6 +263,9 @@ fn spawn_staged(total_len: u64) -> u64 {
     };
     match tasks::spawn(context, (loaded.base, loaded.size)) {
         Ok(slot) => {
+            // Record where this program's output should go (the console by
+            // default; the shell for a pipe/redirect). See STDOUT_TARGET.
+            tasks::set_stdout_target(slot, stdout_target);
             // SAFETY: called from an SVC handler with interrupts masked
             // throughout - single-core, so nothing else can observe the
             // table set mid-rebuild.
@@ -447,7 +450,8 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
             0
         }
         syscall_abi::GET_TICKS => exceptions::ticks(),
-        syscall_abi::SPAWN => spawn_staged(arg0),
+        syscall_abi::SPAWN => spawn_staged(arg0, arg1),
+        syscall_abi::STDOUT_TARGET => tasks::stdout_target_of(tasks::current_task()),
         syscall_abi::SPAWN_STAGE => {
             // arg0 = offset into the staging buffer, arg1 = chunk
             // pointer, arg2 = chunk length. Bounded by both the
