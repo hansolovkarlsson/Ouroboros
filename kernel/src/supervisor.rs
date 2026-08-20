@@ -6,22 +6,42 @@
 //! restarted without a filesystem to reload it from - which matters,
 //! since one of the servers *is* the filesystem.
 //!
-//! Two things restart a supervised server, both reusing the same reload:
+//! Three things restart a supervised server, all reusing the same reload:
 //! - **A crash.** `exceptions.rs`'s EL0-fault handler, on a fault in a
 //!   supervised slot, tears the task down and calls [`restart`].
-//! - **A wedge.** A server stuck in an infinite loop never faults, so the
-//!   crash path never fires - the failure mode nothing else detects. The
-//!   [`heartbeat`], driven by `tasks::on_tick` every tick, catches it: a
-//!   healthy server (idle in `msg_recv`, or briefly busy) keeps returning
-//!   to a `Blocked` state; a wedged one stays `Runnable`. Continuously
-//!   `Runnable` for [`WEDGE_TICKS`] ⇒ wedged ⇒ restart on the same path.
+//! - **A *runnable* wedge.** A server stuck in an infinite loop never
+//!   faults, so the crash path never fires. The passive [`heartbeat`],
+//!   driven by `tasks::on_tick` every tick, catches it: a healthy server
+//!   (idle in `msg_recv`, or briefly busy) keeps returning to a `Blocked`
+//!   state; a wedged one stays `Runnable`. Continuously `Runnable` for
+//!   [`WEDGE_TICKS`] ⇒ wedged ⇒ restart.
+//! - **A *blocked* wedge (the active ping).** A server stuck `Blocked`
+//!   forever (deadlocked mid-request, waiting on a reply that never comes)
+//!   is invisible to both paths above: it never faults, and it never goes
+//!   `Runnable`, so a healthy idle server and a deadlocked one look
+//!   identical from the outside. The only way to tell them apart is to
+//!   *poke* it. [`poll_ping`], also driven by `on_tick`, does: it has the
+//!   caller inject a `SYSOP_PING` message (sender [`KERNEL_SENDER`]) into a
+//!   server that's been sitting `Blocked`. A server idle in its main
+//!   `msg_recv` is woken by direct delivery and replies; that reply,
+//!   addressed back to `KERNEL_SENDER`, is intercepted by the `MSG_SEND`
+//!   syscall arm as the ack ([`note_ack`]). A server stuck mid-sub-call
+//!   does *not* get woken (the ping just queues, unseen) - so an
+//!   outstanding ping older than [`PING_TIMEOUT`] ⇒ wedged ⇒ restart.
 //!
-//! The heartbeat is deliberately *passive* (it reads task state, no
-//! server-side ping). It can't catch a server blocked forever on a
-//! deadlocked call (rarer; `tasks::fail_calls_to` already handles the
-//! dead-target case), which an active ping could - a clean future
-//! refinement. On this single-user, fast-request system, "continuously
-//! runnable for seconds" is a reliable wedge signal.
+//! Why a ping and not just more state-reading: the runnable-wedge detector
+//! is passive (it reads task state, no server cooperation), but a
+//! blocked-forever server can't be distinguished from a healthy idle one
+//! without a response, so the active ping is the only tool for it. It
+//! needs *no server changes* regardless - a server replies to any unknown
+//! op, and that reply is the ack. `tasks::fail_calls_to` already rescues
+//! callers of a server that *dies*; the ping is what catches a server that
+//! wedges *without* dying while some caller waits on it. On this
+//! single-user, fast-request system a healthy server acks within a tick or
+//! two, far inside [`PING_TIMEOUT`], so a genuine deadlock is caught while
+//! a healthy idle server never trips.
+//!
+//! [`KERNEL_SENDER`]: syscall_abi::KERNEL_SENDER
 
 use core::cell::UnsafeCell;
 

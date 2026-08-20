@@ -4826,7 +4826,11 @@ and `fail_calls_to` already rescues the dead-*target* case), and can't
 tell a genuine multi-second workload from a wedge - neither exists on
 this single-user, fast-request system. An active `*_PING` op the servers
 ack is the stronger signal and a clean future refinement, noted rather
-than built.
+than built. **(Update, 2026-08-20: built - see "Active health-ping"
+below. It turned out to need no `*_PING` op the servers implement at all:
+a server replies to any unknown op, and that reply, addressed to a
+reserved `KERNEL_SENDER` sentinel, is the ack - so it kept the
+"no server changes" property this paragraph valued.)**
 
 **Confirmed on QEMU, every behavior, by temp fault/wedge injection
 (reverted after) - staged crash-recovery-first, per the plan:** the
@@ -4882,8 +4886,9 @@ and firing it twice hedges the rest.
 
 **Still coarse, worth knowing before building on this:** the heartbeat is
 passive, so a server *deadlocked while `Blocked`* (waiting forever on a
-call that will never complete) isn't caught - only a `Runnable` wedge is;
-an active health ping is the real fix for that (deliberately deferred).
+call that will never complete) isn't caught by *it* - only a `Runnable`
+wedge is; the active health ping (see "Active health-ping" below, added
+2026-08-20) is the fix, and now catches exactly that case.
 The restart cap is a per-boot *total* per slot (crashes and wedges share
 it), not rate-based - a server that recovers fine for hours then fails
 once still counts against the same 3. A wedged server *past* the cap is
@@ -4893,6 +4898,111 @@ server already degrades that way on the crash path). And supervision is
 still restart-from-a-kept-image only: no journaling, so on-disk state a
 server corrupted mid-write before dying stays corrupted (unchanged from
 the fsd-only recovery).
+
+## Active health-ping: catching a server wedged while `Blocked`
+
+The one gap the supervision milestone above named as its own next step,
+built 2026-08-20: the passive heartbeat catches a server stuck *`Runnable`*
+(an infinite loop), but a server stuck *`Blocked`* forever - deadlocked
+mid-request, waiting on a reply that never comes - is invisible to it,
+because a healthy idle server (parked in `msg_recv`) and a deadlocked one
+are indistinguishable from the outside. The only way to tell them apart is
+to *poke* the server and see if it responds.
+
+**The mechanism is entirely kernel-side and needs no server changes - the
+awkward part, sidestepped.** The kernel isn't a task, so it can't
+`MSG_CALL` a server and await a reply the normal way. Instead: when
+`supervisor::poll_ping` (driven by `on_tick` alongside the passive
+`heartbeat`) observes a supervised server that's sat `Blocked` for a poke
+interval (`PING_INTERVAL`, ~1.3s), it returns `Inject`, and `on_tick` calls
+the *existing* `tasks::send_message(KERNEL_SENDER, slot, &ping)` with a
+reserved sender sentinel (`KERNEL_SENDER = 0xFE`, fitting `Message.sender`'s
+`u8` and clear of every real task index). A server idle in its main
+`MSG_RECV` (`Blocked(Message{from:None})`) is woken by direct delivery and
+replies to whatever "sender" the message carried; that reply, addressed
+back to `KERNEL_SENDER`, is intercepted by the `MSG_SEND` syscall arm
+(before its normal dest validation) as the ack -
+`supervisor::note_ack(current)`. **No new syscall, no `fsd`/`cond` change:**
+a server already replies to any unknown op (an `FS_ERROR`/status-0 reply),
+and that reply *is* the ack. A `SYSOP_PING` op (`0xFFFF`, clear of the
+`FSOP_*`/`DSPOP_*` ops which start at 1) rides in the ping's header purely
+for self-documentation.
+
+**The detection turns on which `Blocked` state the server is in - and that
+falls out of the message machinery for free.** A server stuck mid-sub-call
+(`Blocked(Message{from:Some(x)})`, waiting on a specific reply) is *not*
+woken by the ping - `send_message`'s direct-delivery only fires when
+`from` is `None` or matches the sender, and `KERNEL_SENDER` matches
+neither - so the ping just queues in its mailbox, unseen, and no ack comes
+back. That's exactly the deadlock signal: an outstanding ping older than
+`PING_TIMEOUT` (~160ms, 8 ticks - far above a healthy ack's tick-or-two)
+means wedged, restarted on the *same* teardown path the crash and
+runnable-wedge paths already use (`free_runtime_region` +
+`revert_input_owner_if` + `fail_calls_to` + reload from the kept image +
+mmu rebuild). One ping outstanding at a time (so a server's 4-deep mailbox
+can never fill with pings); a `Runnable` server is never pinged (that's the
+passive heartbeat's job, and `poll_ping` resets its ping state whenever it
+sees the server `Runnable`).
+
+**Honest value framing:** in today's 2-server acyclic topology
+(`clients -> fsd -> cond`, `cond` calls no one) a genuine blocked-deadlock
+can't actually form - `fail_calls_to` rescues callers when a target *dies*,
+and the passive heartbeat restarts a `Runnable`-wedged target (which then
+runs `fail_calls_to`). So the active ping is a **forward-looking**
+robustness investment: it becomes load-bearing once the call graph grows
+(A->B->A cycles, more servers), where two mutually-`Blocked` servers would
+otherwise hang undetected forever. Small, low-risk, kernel-only - but with
+no natural failing case to demonstrate *today* without temporary artificial
+instrumentation.
+
+**Landed in two staged commits (the standing discipline for any
+scheduler/SVC-path change).** Stage 1 the inert plumbing (the ABI
+constants, the `MSG_SEND` ack interception, the per-`Entry` ping state +
+`poll_ping`/`note_ack`), committed and regression-verified byte-identical
+first - the point being to prove the ABI change and the new `MSG_SEND`
+branch don't perturb the heavily-exercised `fsd`/`cond` IPC in isolation,
+before any ping is ever sent. Stage 2 the `on_tick` wiring.
+
+**Confirmed on QEMU (esp.img FAT32), zero `-d int` aborts throughout:**
+- **The false-positive gate (critical):** twice - 15s and 10s of idle plus
+  render-heavy `help` bursts and the full disk surface
+  (`selftest`/`mkdir`/`write`/`cat`/`cp`/`ls`/`mv`/`rm`/`rmdir`) - *zero*
+  spurious supervisor events. Healthy servers are pinged every ~1.3s and
+  ack well inside the timeout.
+- **The ack path is live** (temp instrumentation, reverted): clean
+  `inject slot 3 -> ack slot 3` and `inject slot 2 -> ack slot 2` pairs -
+  the ping genuinely pokes both servers and both reply.
+- **A caught wedge** (temp instrumentation, reverted): an `fsd` deadlock
+  injected via an `MSG_CALL` to idle (task 1, which never replies - the one
+  `Blocked` state the ping can't wake) produced exactly the intended
+  sequence - `inject slot 2` with *no* matching ack -> `server slot 2
+  wedged - unresponsive (ping timeout) - restarting` -> `restarted
+  (attempt 1/3)` -> `fsd` remounted -> disk commands worked again. `cond`
+  (slot 3) kept acking throughout (the wedge was isolated to `fsd`), and
+  the shell's blocked `ls /wedge` call was rescued by `fail_calls_to`.
+
+The wedge test's own trigger was a lesson worth keeping: the first attempt
+put the temp wedge in `fsd`'s `FSOP_READ_FILE` arm and triggered it with
+`cat /wedge` - which did nothing, because `cat` streams via `FSOP_READ_BULK`
+(grant/safecopy) now, not `FSOP_READ_FILE`. Moved to a generic check right
+after the request header is decoded (any path-bearing op, triggered with
+`ls /wedge`), it fired immediately.
+
+**Not re-run on real Parallels hardware this round** - the ping machinery
+is inert on a healthy system (a server always acks in time), the same
+no-regression posture the supervision milestone's own non-crash paths
+already carry; there's no natural blocked-deadlock to exercise on real
+hardware without the same temporary instrumentation used on QEMU.
+
+**Still coarse, worth knowing before building on this:** the detection is
+heuristic, not a proof - it can't tell a genuine multi-second workload from
+a wedge (none exists on this single-user system), and its real value is
+forward-looking (no blocked-deadlock can form in the current acyclic
+2-server topology - see the value framing above). Timing constants
+(`PING_INTERVAL` 64 ticks, `PING_TIMEOUT` 8 ticks) are tunable. The restart
+cap is shared with the crash/runnable-wedge paths (a per-boot total per
+slot). And, unchanged: no journaling, so disk state a server corrupted
+mid-write before wedging stays corrupted.
 
 ## Commands
 

@@ -7,6 +7,51 @@ what broke, how it was diagnosed), see `CLAUDE.md`; for *how* something
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## Active health-ping: catching a server wedged while blocked
+
+The refinement the supervision milestone (below) named as its one gap: the
+passive heartbeat catches a server stuck *`Runnable`* (an infinite loop),
+but a server stuck *`Blocked`* forever - deadlocked mid-request, waiting on
+a reply that never comes - is invisible to it, since a healthy idle server
+and a deadlocked one look identical from the outside. The active ping tells
+them apart by *poking* the server.
+
+The mechanism needs **no new syscall and no change to any server**, because
+it rides the machinery already there. When a supervised server has sat
+`Blocked` for a poke interval (~1.3s), `supervisor::poll_ping` (driven by
+`on_tick` alongside the passive `heartbeat`) has the caller inject a
+`SYSOP_PING` message under a reserved sender sentinel (`KERNEL_SENDER`). A
+server idle in its main `msg_recv` is woken by direct delivery and replies
+to whatever "sender" the message carried; that reply, addressed back to
+`KERNEL_SENDER`, is intercepted by the `MSG_SEND` syscall arm as the ack
+(`supervisor::note_ack`). A server stuck mid-sub-call does *not* get woken -
+the ping just queues, unseen - so an outstanding ping older than the timeout
+(~160ms, far above a healthy ack's tick-or-two) means wedged, and it
+restarts on the *same* teardown path the crash and runnable-wedge paths
+already use. One ping outstanding at a time, so a server's 4-deep mailbox
+can never fill with pings; a `Runnable` server is never pinged (that's the
+passive heartbeat's job).
+
+Landed in two staged commits (the project's standing discipline for any
+scheduler/SVC-path change): stage 1 the inert plumbing (the `KERNEL_SENDER`/
+`SYSOP_PING` ABI constants, the `MSG_SEND` ack interception, the per-`Entry`
+ping state + `poll_ping`/`note_ack`), regression-verified byte-identical to
+prove the ABI change and the new `MSG_SEND` branch don't perturb the
+heavily-exercised `fsd`/`cond` IPC; stage 2 the `on_tick` wiring. Verified
+on QEMU, zero `-d int` aborts throughout: the **false-positive gate** (15s
+and 10s idle + render-heavy bursts + the full disk surface -> zero spurious
+restarts - a healthy server always acks in time); the **ack path live**
+(temp instrumentation, reverted: clean inject/ack pairs for both servers);
+and a **caught wedge** (temp `fsd` deadlock via an `MSG_CALL` to idle that
+never replies, reverted: the ping to `fsd` went unacked -> "wedged -
+unresponsive (ping timeout) - restarting" -> "restarted (attempt 1/3)" ->
+`fsd` remounted -> disk commands worked again, with `cond` acking normally
+throughout and the blocked shell call rescued by `fail_calls_to`). Not
+re-run on real Parallels hardware this round - the ping machinery is inert
+on a healthy system (a server always acks), the same no-regression posture
+the supervision milestone's non-crash paths already have. See `CLAUDE.md`'s
+"Active health-ping" section for the full write-up.
+
 ## Server supervision + heartbeat: uniform crash recovery, and the first wedge detection
 
 Generalized fault tolerance from a bespoke fsd-only mechanism to a real
@@ -36,7 +81,8 @@ crash+restart, cond wedge+restart, cond restart-cap "giving up" with
 graceful `PUTC` fallback, and fsd crash+wedge both recovering - then a
 clean full regression (selftest + disk surface, zero aborts, no
 supervisor events). The passive heartbeat can't catch a server
-*deadlocked while blocked* (an active health ping would - deferred).
+*deadlocked while blocked* - an active health ping does, added as the
+follow-up milestone above.
 **Confirmed on real Parallels hardware too:** with temporary
 instrumentation (reverted, never committed), a live `cond` crash recovered
 on the framebuffer - the screen cleared to a fresh `cond` banner and the

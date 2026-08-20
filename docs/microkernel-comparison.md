@@ -191,13 +191,19 @@ same day as the isolation work, which is not a coincidence.
   gracefully (a dead `fsd` slot stays `Unused`, the same path as a
   missing `FSD.BIN`; a dead `cond` falls back to the kernel's `PUTC`
   console).
-- **A wedged server is caught, not just a crashed one.** A server stuck
-  in an infinite loop never faults, so the crash path can't see it. A
-  passive **heartbeat** in the scheduler tick catches it: a healthy
-  server keeps returning to a `Blocked` state, so staying continuously
-  `Runnable` for ~2.5s is the wedge signal — restarted on the same path
-  as a crash, with no server-side changes. This is exactly the "health
-  checks for hangs, not just crashes" primitive Helix names.
+- **A wedged server is caught, not just a crashed one — either way it
+  wedges.** A server stuck in an infinite loop never faults, so the crash
+  path can't see it; a passive **heartbeat** in the scheduler tick catches
+  that: a healthy server keeps returning to a `Blocked` state, so staying
+  continuously `Runnable` for ~2.5s is the wedge signal. A server stuck
+  the *other* way — `Blocked` forever, deadlocked mid-request — is
+  invisible to that (a healthy idle server looks the same), so an **active
+  health ping** covers it: the supervisor pokes a long-`Blocked` server
+  with a message and restarts it if the ack doesn't come back in time,
+  needing no server-side changes (the server's ordinary reply is the ack).
+  Both restart on the same path as a crash. This is exactly the "health
+  checks for hangs, not just crashes" primitive Helix names — and it now
+  covers both flavors of hang.
 - **Clients don't hang on a dying server.** A task blocked mid-`MSG_CALL`
   to a server that dies is woken with `TASK_ERR_NO_SUCH_TASK`
   (`fail_calls_to`, wired into all three death paths — exit, kill, and
@@ -214,12 +220,17 @@ same day as the isolation work, which is not a coincidence.
   driver (xHCI, virtio-blk/the block transport) still takes the system
   down — it's EL1 code, and the no-IOMMU DMA constraint is what keeps the
   block transport in the kernel for now (see `roadmap.md`).
-- **The heartbeat is passive, so a deadlocked-while-blocked server is
-  still invisible.** The wedge detector sees a server stuck `Runnable`;
-  it can't see one blocked forever on a call that never completes (rarer,
-  and `fail_calls_to` already handles the dead-*target* case). An active
-  health ping (a `*_PING` op servers ack) is the stronger signal and the
-  recorded next refinement. Ctrl+C still rescues a blocked *client*.
+- **Wedge detection is heuristic, not a proof.** Both detectors are sound
+  on this single-user, fast-request system — a healthy server returns to
+  `Blocked` in far less than a tick, and acks a ping within a tick or two —
+  but neither can tell a genuine multi-second workload from a wedge, and
+  the active ping's value is largely forward-looking: in today's small,
+  acyclic server topology a true blocked-deadlock can't actually form
+  (`fail_calls_to` rescues callers of a *dying* server, and a
+  runnable-wedged target is restarted before anything cycles), so the ping
+  earns its keep once the call graph grows. And there's no journaling — a
+  server that corrupted on-disk state mid-write before dying comes back to
+  the corruption. Ctrl+C still rescues a blocked *client*.
 - **Restart is not hot-reload.** Helix's headline is *live* replacement
   of a running module with new code, with state snapshot/restore and
   automatic rollback. Ouroboros reloads the *same* image from a static,

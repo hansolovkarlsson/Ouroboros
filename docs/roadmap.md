@@ -20,17 +20,21 @@ hardware-adjacent component), and userland output is now an IPC stream.
 The prioritized next steps, roughly in order of value (details in the
 parking lot below and in `microkernel-comparison.md`):
 
-**Recently completed (2026-08-19): a general supervision / heartbeat
-mechanism** (`kernel/src/supervisor.rs`). Crash recovery is no longer
-bespoke to `fsd` — a registry supervises both `fsd` and `cond` (and up
-to 4 servers), restarting either on a fault; and a passive **heartbeat**
-in `on_tick` now catches a *wedged* (looping, non-faulting) server — the
-gap this item named — by observing that a healthy server keeps returning
-to a `Blocked` state while a wedged one stays `Runnable`. A shared
-per-boot restart cap degrades gracefully past it. The remaining
-refinement here is an **active health ping** (a `*_PING` op servers ack)
-to also catch a server *deadlocked while blocked*, which the passive
-heartbeat can't see. See `CHANGELOG.md`. The prioritized next steps:
+**Recently completed (2026-08-19/20): general supervision + heartbeat,
+now with an active health ping** (`kernel/src/supervisor.rs`). Crash
+recovery is no longer bespoke to `fsd` — a registry supervises both `fsd`
+and `cond` (and up to 4 servers), restarting either on a fault; a passive
+**heartbeat** in `on_tick` catches a *runnable* wedge (a looping,
+non-faulting server) by observing that a healthy server keeps returning to
+a `Blocked` state while a wedged one stays `Runnable`; and an **active
+health ping** (2026-08-20) now also catches a server *deadlocked while
+blocked* — the one gap the passive heartbeat couldn't see — by poking a
+long-`Blocked` server with a `SYSOP_PING` message (sender `KERNEL_SENDER`)
+and restarting it if the reply/ack doesn't come back inside a timeout. It
+needs no new syscall and no server changes (a server's ordinary reply,
+addressed to the sentinel, is the ack). A shared per-boot restart cap
+degrades gracefully past it. See `CHANGELOG.md`. The prioritized next
+steps:
 
 1. **A capability model for who-may-call-whom.** Isolation is
    MMU-enforced at the memory level, but the IPC topology is still flat —
