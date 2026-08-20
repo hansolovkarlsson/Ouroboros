@@ -36,8 +36,12 @@ crash+restart, cond wedge+restart, cond restart-cap "giving up" with
 graceful `PUTC` fallback, and fsd crash+wedge both recovering - then a
 clean full regression (selftest + disk surface, zero aborts, no
 supervisor events). The passive heartbeat can't catch a server
-*deadlocked while blocked* (an active health ping would - deferred); a
-real-Parallels recheck of a live `cond` recovery is the usual next step.
+*deadlocked while blocked* (an active health ping would - deferred).
+**Confirmed on real Parallels hardware too:** with temporary
+instrumentation (reverted, never committed), a live `cond` crash recovered
+on the framebuffer - the screen cleared to a fresh `cond` banner and the
+next `uptime` rendered a real tick count through the restarted server, the
+console server recovering on the platform where it's the only console.
 See `CLAUDE.md`'s "Server supervision + heartbeat" for the full write-up.
 
 ## Console server: the console moves out of the kernel (rendering in userland)

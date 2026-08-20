@@ -4857,13 +4857,28 @@ which showed `cond` faulting on the shell banner one character at a time
 keyed on a single distinctive typed byte instead. The takeaway for future
 `cond`-side testing: it sees the shell's output one byte per message.
 
-**Not re-confirmed on real Parallels hardware this round** - the crash/
-restart/heartbeat machinery is architecture-level and inert until a fault
-or wedge (no injection ships), and the console-server milestone already
-confirmed `cond` itself renders correctly on real Parallels; a real-
-hardware recheck (a genuine `cond` crash there recovering on the
-framebuffer) is the usual next step, on the user, same as every prior
-Parallels-facing change.
+**Confirmed on real Parallels hardware too - cond crash recovery, live,
+the case that matters most here.** The shipped kernel has no fault
+injection, so this needed temporary instrumentation (a `cond` crash on a
+poison byte, a one-char `z` shell builtin to send it, and the restart log
+forced past `CONSOLE_QUIET` - all reverted after, never committed), then
+`make test-parallels CMDS="help;z;uptime;z;uptime"`. The captures showed
+the recovery unmistakably: after each `z`, the framebuffer cleared to a
+fresh `cond: console server ready` banner (the restarted `cond` runs
+`FB_CLEAR` then reprints it - the fault line the kernel's emergency
+fbconsole drew gets wiped by that clear), and the following `uptime`
+rendered a real tick count (`957 ticks since boot`) *through the restarted
+`cond`* - the console server, the only thing drawing the screen on this
+platform, crashed and came back, twice, with the shell responsive
+throughout. This is the first live confirmation that a supervised server
+whose own job is the display recovers on the platform where that's the
+sole console. (A real *wedge* recovery on Parallels, and `fsd` recovery
+there, weren't separately re-exercised - `fsd` needs a disk, still absent
+on Parallels; both share this exact restart path, now hardware-proven for
+`cond`.) One incidental note for future testers: the synthetic keyboard
+(`prlctl send-key-event`) drops the odd keystroke, so a multi-char trigger
+word can arrive mangled - a single-char command (`z`) is far more robust,
+and firing it twice hedges the rest.
 
 **Still coarse, worth knowing before building on this:** the heartbeat is
 passive, so a server *deadlocked while `Blocked`* (waiting forever on a
