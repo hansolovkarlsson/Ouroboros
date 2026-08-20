@@ -214,7 +214,7 @@ same day as the isolation work, which is not a coincidence.
   driver (xHCI, virtio-blk/the block transport) still takes the system
   down — it's EL1 code, and the no-IOMMU DMA constraint is what keeps the
   block transport in the kernel for now (see `roadmap.md`).
-- **The heartbeat is passive, so a *deadlocked-while-blocked* server is
+- **The heartbeat is passive, so a deadlocked-while-blocked server is
   still invisible.** The wedge detector sees a server stuck `Runnable`;
   it can't see one blocked forever on a call that never completes (rarer,
   and `fail_calls_to` already handles the dead-*target* case). An active

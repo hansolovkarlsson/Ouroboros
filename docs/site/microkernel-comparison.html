@@ -8,39 +8,12 @@
 <link rel="icon" type="image/png" href="../assets/favicon.png">
 <link rel="stylesheet" href="../assets/site.css">
 <style>
-  /* Scorecard: the one bespoke figure this page needs, built on site tokens. */
-  .cmp-wrap { overflow-x: auto; margin: 1.8rem 0 2.4rem; }
-  .cmp-table {
-    width: 100%;
-    border-collapse: collapse;
-    font-family: var(--font-serif);
-    font-size: 0.9rem;
-    min-width: 640px;
-  }
-  .cmp-table th, .cmp-table td {
-    text-align: left;
-    vertical-align: top;
-    padding: 0.62rem 0.75rem;
-    border-bottom: 1px solid var(--wire);
-  }
-  .cmp-table thead th {
-    font-family: var(--font-mono);
-    font-size: 0.68rem;
-    letter-spacing: 0.06em;
-    text-transform: uppercase;
-    color: var(--panel-dim);
-    border-bottom: 1px solid var(--wire-strong);
-    white-space: nowrap;
-  }
-  .cmp-table tbody th {
-    font-weight: 600;
-    color: var(--ink);
-    width: 22%;
-  }
+  .cmp-wrap { overflow-x: auto; margin: 1.6rem 0 2rem; }
+  .cmp-table { width: 100%; border-collapse: collapse; font-family: var(--font-serif); font-size: 0.9rem; min-width: 560px; }
+  .cmp-table th, .cmp-table td { text-align: left; vertical-align: top; padding: 0.6rem 0.72rem; border-bottom: 1px solid var(--wire); }
+  .cmp-table thead th { font-family: var(--font-mono); font-size: 0.68rem; letter-spacing: 0.06em; text-transform: uppercase; color: var(--panel-dim); border-bottom: 1px solid var(--wire-strong); }
   .cmp-table td { color: var(--ink-soft); }
-  .cmp-table .oc { color: var(--ink); }
-  .cmp-table tbody tr:last-child th,
-  .cmp-table tbody tr:last-child td { border-bottom: none; }
+  .cmp-table tbody tr:last-child th, .cmp-table tbody tr:last-child td { border-bottom: none; }
 </style>
 </head>
 <body>
@@ -62,245 +35,128 @@
 
   <div class="kicker">Assessment · Ouroboros</div>
 
-  <h1 class="title small">Microkernel, protection, fault tolerance: where Ouroboros stands</h1>
-  <p class="dek">
-    A self-assessment against the three ideas this project draws on —
-    the microkernel (MINIX), enforced protection, and self-healing
-    (Helix OS) — measured as they actually stand in the code today, not
-    as aspiration.
-  </p>
-
-  <div class="companion">
-    <span class="companion-icon">⚖️</span>
-    <span>Reads best after the <a href="architecture-overview.html">architecture overview</a>, and alongside the two research notes it draws on: <a href="research-minix-boot.html">how MINIX boots</a> and <a href="research-helix-os.html">Helix OS's fault-tolerant design</a>.</span>
-  </div>
+  <h1 class="title small">Where Ouroboros stands: microkernel, protection, fault tolerance</h1>
+  <p class="dek">A self-assessment against the three ideas this project draws on, measured as they actually stand in the code today — not aspiration. It sits alongside the two outward-looking research notes, <a href="research-minix-boot.html"><code class="inline">research-minix-boot.md</code></a> and <a href="research-helix-os.html"><code class="inline">research-helix-os.md</code></a>, and reads best after <a href="architecture-overview.html"><code class="inline">architecture.md</code></a>, which is the authoritative reference for the mechanisms named below.</p>
 
   <article>
 
-    <p>
-      The short version: on its <strong>one</strong> moved service,
-      Ouroboros is now a genuine microkernel — enforced isolation,
-      capability-based bulk IPC, and real crash recovery. The mechanisms
-      are the real thing. What separates it from MINIX and Helix is
-      <strong>breadth and generality</strong>, not the honesty of the
-      individual pieces.
-    </p>
+<p><strong>This note supersedes the "current shape" sections of both research notes.</strong> Both were written before the driver-isolation, per-task-page- table, and fault-containment milestones (all 2026-08-18), and both state flatly that Ouroboros has "<em>no</em> fault isolation of any kind." That is no longer true, which is exactly what makes this re-assessment worth writing. Where those notes say "none yet," read this instead.</p>
 
-    <blockquote class="aside">
-      <span class="aside-label">A note on the sources</span>
-      <p>
-        This assessment supersedes the "current shape" sections of the two
-        research notes — both were written before this project's isolation
-        work and still say Ouroboros has no fault isolation of any kind.
-        That's no longer true, which is what makes the re-assessment worth
-        writing.
-      </p>
-    </blockquote>
+<p>The short version: on its <strong>one</strong> moved service, Ouroboros is now a genuine microkernel — enforced isolation, capability-based bulk IPC, and real crash recovery. The mechanisms are the real thing. What separates it from MINIX and Helix is <strong>breadth and generality</strong>, not honesty of the individual pieces.</p>
 
-    <h2>Axis 1 — Microkernel (MINIX)</h2>
+<p>---</p>
 
-    <p>
-      The defining MINIX move is that <strong>the kernel does not contain
-      the services</strong>: drivers, the filesystem, and the network
-      stack are separate user-space processes, and the kernel is just
-      mechanism (IPC, scheduling, privilege) underneath them.
-    </p>
+<h2>Axis 1 — Microkernel (MINIX)</h2>
 
-    <h3>Where Ouroboros genuinely qualifies now</h3>
-    <p>
-      The entire FAT32 filesystem lives in userland —
-      <code class="inline">fsd</code> runs at EL0 as an ordinary loaded
-      program in task slot 2, and the kernel's own
-      <code class="inline">fat32.rs</code> no longer exists. Every
-      <code class="inline">ls</code>, <code class="inline">cat</code>,
-      <code class="inline">cp</code> is an IPC round trip to a separate
-      process. The kernel's remaining storage role is three sector-level
-      block syscalls, <strong>accepted only from task 2</strong> — the
-      literal meaning of "supervised." The IPC converged on MINIX's actual
-      primitives: <code class="inline">MSG_CALL</code> is sendrec-shaped
-      (a sender-filtered synchronous request/reply), and bulk data crosses
-      the boundary by <strong>grant/safecopy</strong> — MINIX's
-      <code class="inline">sys_safecopy</code>, chosen over a simpler
-      bounds-checked-pointer model precisely to avoid re-introducing trust.
-    </p>
+<p>The defining MINIX move is that <strong>the kernel does not contain the services</strong>: drivers, the filesystem, and the network stack are separate user-space processes, and the kernel is just mechanism (IPC, scheduling, privilege) underneath them. Measured against that one test:</p>
 
-    <h3>Where it falls short of MINIX</h3>
-    <p>
-      One service, not a driver fleet — the USB/xHCI stack, the block
-      device, the console, the GIC, and the scheduler are all still
-      undifferentiated EL1 kernel code. There is no boot image of many
-      cooperating servers, no capability model for <em>who may call
-      whom</em> (trust is flat within EL0), and no process manager / PID
-      namespace / <code class="inline">fork</code> above the spawn +
-      wait/reap primitives that do exist.
-    </p>
+<h3>Where Ouroboros genuinely qualifies now</h3>
 
-    <div class="lesson">
-      <span class="lesson-label">Verdict</span>
-      <p>
-        Structurally a microkernel on the service it actually moved, using
-        the right IPC primitives. Short of MINIX on <em>breadth</em> (one
-        server, not many) and <em>topology</em> (flat trust, no capability
-        graph).
-      </p>
-    </div>
+<ul>
+<li><strong>The entire FAT32 filesystem lives in userland.</strong> <code class="inline">fsd/</code> (the filesystem server) runs at EL0 as an ordinary loaded program in task slot 2. <code class="inline">kernel/src/fat32.rs</code> no longer exists — its ~1040 lines moved out of the kernel verbatim into <code class="inline">fsd/src/fat32.rs</code>. Every <code class="inline">ls</code>, <code class="inline">cat</code>, <code class="inline">cp</code>, <code class="inline">mkdir</code>, <code class="inline">write</code> is now an IPC round trip from the shell to a separate process, not a syscall into kernel code.</li>
+<li><strong>The kernel's remaining storage role is deliberately tiny and gated.</strong> Three syscalls (<code class="inline">BLOCK_INFO</code> / <code class="inline">BLOCK_READ</code> / <code class="inline">BLOCK_WRITE</code>, one 512-byte sector at a time) are all that's left, and they are <strong>accepted only from task 2</strong> (<code class="inline">FSD_TASK</code>). That gate is the literal meaning of "supervised": the kernel holds the block device, and exactly one task is permitted to ask it to touch the disk. A spawned program can never land in slot 2 (<code class="inline">spawn</code> scans from <code class="inline">FIRST_SPAWNABLE = 3</code>), so it can never inherit that privilege.</li>
+<li><strong>The IPC converged on MINIX's actual primitives, not a hand-wave.</strong> <code class="inline">MSG_CALL</code> (syscall 29) is sendrec-shaped: a synchronous request/reply that blocks the client on a reply <em>filtered by sender</em>, so a reply can't be mis-routed the way a plain "receive from anyone" would allow. This is the same shape MINIX's <code class="inline">_syscall()</code> has always had (implemented as <code class="inline">sendrec</code> to a server).</li>
+<li><strong>Bulk data crosses the boundary by MINIX's real mechanism, too.</strong> Once per-task page tables made a server unable to dereference a client pointer, file data moves by <strong>grant/safecopy</strong>: the client pre-registers an exact <code class="inline">(ptr, len, direction)</code> capability (<code class="inline">GRANT</code>, syscall 31), and the kernel copies only those bytes, only while the call is live, only in the granted direction (<code class="inline">SAFECOPY</code>, syscall 32). This is MINIX's <code class="inline">sys_safecopy</code> — chosen deliberately over the simpler "server names a client pointer and the kernel bounds-checks it" model, because the simpler one re-introduces exactly the trust the isolation milestone had just removed. (See <a href="architecture-overview.html"><code class="inline">architecture.md</code></a> and the grant/safecopy section of <a href="postmortem-isolation-dataflow.html"><code class="inline">isolation-and-dataflow-postmortem.md</code></a>.)</li>
+</ul>
 
-    <h2>Axis 2 — Protective states / enforced isolation</h2>
+<h3>Where it falls short of MINIX</h3>
 
-    <p>
-      "Protected" was aspirational here until very recently, so it's worth
-      being precise about the line that got crossed. <strong>Before:</strong>
-      isolation was a convention — every EL0 region was accessible to every
-      task; nothing <em>stopped</em> one task reaching into another's
-      memory, it was just impolite.
-    </p>
+<ul>
+<li><strong>One service, not a driver fleet.</strong> MINIX runs disk, network, keyboard, and every device driver as separate servers started in dependency order by <code class="inline">/etc/rc</code>. Ouroboros has exactly <strong>one</strong> out-of-kernel server (the filesystem). The USB/xHCI stack, the block device itself, the console/framebuffer, the GIC, and the scheduler are all still undifferentiated EL1 kernel code.</li>
+<li><strong>No boot image of multiple programs.</strong> MINIX packs kernel + PM + VFS + RS + drivers into <code class="inline">/boot/image</code>. Ouroboros loads one configurable program (the shell, via <code class="inline">INIT.CFG</code>) plus one fixed-path infrastructure server (<code class="inline">\EFI\ORBS\FSD.BIN</code>). It's two loaded programs, not a typed set of cooperating servers.</li>
+<li><strong>No <code class="inline">who-may-call-whom</code> capability model.</strong> Any task can <code class="inline">MSG_CALL</code> any task; the kernel's trust model is still flat within EL0. MINIX's server topology is more principled — a driver is granted the specific endpoints it may talk to.</li>
+<li><strong>No process manager / no PID namespace / no <code class="inline">fork</code>.</strong> Task creation is <code class="inline">spawn</code> (add a task alongside the caller), not the POSIX fork-exec-wait lineage MINIX's PM administers. There <em>is</em> a wait/reaping path (<code class="inline">WAIT</code>, syscall 21, with <code class="inline">Zombie(status)</code> slots), but no process hierarchy above it.</li>
+</ul>
 
-    <h3>Now — hardware-enforced, and proven by fault injection</h3>
-    <p>
-      Each of the scheduler slots runs under its own translation-table
-      view: identical kernel/device mappings, but EL0 access to that task's
-      own region alone. A context switch swaps
-      <code class="inline">TTBR0</code> and flushes the TLB. This was
-      verified, not assumed — an A/B probe read a byte of the shell's
-      region from a spawned program: it <em>succeeded</em> under the old
-      shared map and <em>faulted</em> under per-task views (faulter killed
-      alone, shell alive). The last soft path closed with it: syscall
-      pointer arguments are now validated against the caller's own region,
-      so the kernel can't be tricked into touching another task's memory
-      either.
-    </p>
+<p><strong>Verdict:</strong> structurally a microkernel on the service it actually moved, using the right IPC primitives. Short of MINIX on <em>breadth</em> (one server, not many) and <em>topology</em> (flat trust, no capability graph).</p>
 
-    <div class="lesson">
-      <span class="lesson-label">Verdict</span>
-      <p>
-        This is the axis where Ouroboros is <em>strongest</em> relative to
-        both influences. MINIX gets EL0-equivalent isolation from separate
-        address spaces; Helix explicitly does <em>not</em> have
-        hardware-enforced isolation between modules. Ouroboros now has
-        real, MMU-enforced, injection-verified per-task isolation. It lacks
-        only a stack guard page and the reverted per-task-ASID TLB
-        optimization.
-      </p>
-    </div>
+<p>---</p>
 
-    <h2>Axis 3 — Fault tolerance (Helix OS, and MINIX's RS)</h2>
+<h2>Axis 2 — Protective states / enforced isolation</h2>
 
-    <p>
-      Helix's pitch is self-healing: a module crashes or hangs, the kernel
-      detects it and restarts it without a reboot. MINIX's is the
-      reincarnation server: a crashed process is restarted from a clean
-      slate because it was never in the kernel to begin with. Ouroboros has
-      a real, minimal version of both — and it landed the same day as the
-      isolation work, which is not a coincidence.
-    </p>
+<p>"Protected" was aspirational in this project until very recently, so it's worth being precise about the line that got crossed.</p>
 
-    <h3>What exists</h3>
-    <p>
-      Every EL0 fault is now contained — a faulting task is torn down
-      alone, and the survivors keep running (before the fix, any userland
-      wild pointer halted the whole kernel). The filesystem server is
-      supervised: on a task-2 fault the kernel reloads
-      <code class="inline">fsd</code>'s image from a static buffer and the
-      fresh server remounts from disk — its state was always disk-derivable,
-      which is what makes this real recovery. A 3-restart-per-boot cap
-      guards crash loops, then it degrades gracefully. Clients blocked
-      mid-call to a dying server are woken with an error rather than
-      hanging.
-    </p>
+<h3>Before (the state the research notes describe)</h3>
 
-    <h3>Where it's short of Helix (and MINIX's RS)</h3>
-    <p>
-      Only <code class="inline">fsd</code> is supervised — recovery is
-      special-cased for one task, not a general policy engine. There is no
-      wedged-server detection (a server stuck in an infinite loop, not
-      faulting, is invisible — that needs a watchdog). And restart is not
-      hot-reload: it reloads the same image and re-derives state from disk,
-      closer to MINIX's clean-slate restart than to Helix's live swap. No
-      journaling, either — a crash is survived, data integrity across one
-      is not guaranteed.
-    </p>
+<p>Isolation was a <strong>convention</strong>. Every EL0 region was accessible to every task — the shell could read or write the filesystem server's memory and vice versa, with no fault. "Supervised EL0 process" meant "we gate a syscall by task index." Real, but soft: nothing <em>stopped</em> one task from reaching into another's memory, it was just impolite.</p>
 
-    <div class="lesson">
-      <span class="lesson-label">Verdict</span>
-      <p>
-        A genuine, working reincarnation story for one service, with the
-        crucial "state is disk-derivable" property that makes it real
-        recovery. Short of both influences on generality, on the
-        non-crashing failure mode, and on liveness of the swap.
-      </p>
-    </div>
+<h3>Now — hardware-enforced, and proven by fault injection</h3>
 
-    <h2>The consolidated scorecard</h2>
+<ul>
+<li><strong>Per-task MMU page-table views.</strong> Each of the five scheduler slots runs under its own translation tables (<code class="inline">mmu.rs</code>): identical kernel and device mappings in every view, but <strong>EL0 access to that task's own region alone</strong>. <code class="inline">mmu::activate_task</code> swaps <code class="inline">TTBR0</code> and flushes the TLB on every context switch.</li>
+<li><strong>This was verified, not assumed.</strong> An A/B fault-injection probe read a byte of the shell's region from a spawned program: it <em>succeeded</em> under the old shared map (the control) and <em>faulted</em> under per-task views (<code class="inline">EL0 FAULT far_el1=0x5c600000</code>, a permission fault, faulting task killed alone, shell alive). The isolation is demonstrably real.</li>
+<li><strong>The last soft path closed with it: syscall pointers are now validated.</strong> With the MMU enforcing EL0-to-EL0 isolation, the remaining way to reach another task's memory was to have the <em>kernel</em> touch a bad pointer on your behalf. <code class="inline">in_caller_region</code> (<code class="inline">syscall.rs</code>) now checks every pointer/length argument against the caller's own mapped region. Isolation is enforced on both the direct path (MMU) and the kernel-mediated path (validation) — a real closure of a limitation that had been documented as open since the FS syscalls were first written.</li>
+</ul>
 
-    <p>
-      Read this as "how close is the <em>mechanism</em>," not "is it as
-      mature." All three projects are pre-alpha; MINIX is the only one with
-      decades of real-world hardening behind the design.
-    </p>
+<h3>The honest caveats</h3>
 
-    <div class="cmp-wrap">
-      <table class="cmp-table">
-        <thead>
-          <tr><th scope="col">Dimension</th><th scope="col">MINIX</th><th scope="col">Helix</th><th scope="col">Ouroboros (today)</th></tr>
-        </thead>
-        <tbody>
-          <tr><th scope="row">Services outside the kernel</th><td>Full fleet (disk, net, FS, all drivers)</td><td>Modules outside the TCB, but within one address space</td><td class="oc"><strong>One</strong> — the FAT32 server, a real separate EL0 process</td></tr>
-          <tr><th scope="row">Isolation mechanism</th><td>Separate address spaces (hardware)</td><td>Rust memory safety + hot-reload bookkeeping (no hardware boundary)</td><td class="oc"><strong>Per-task MMU views (hardware), injection-verified</strong> + validated syscall pointers</td></tr>
-          <tr><th scope="row">IPC</th><td>Synchronous SEND / RECEIVE / SENDREC, fixed 64-byte messages</td><td>Trait-boundary calls + IPC queuing</td><td class="oc">Synchronous sendrec-shaped <code class="inline">MSG_CALL</code> + copy-by-mailbox</td></tr>
-          <tr><th scope="row">Bulk data across the boundary</th><td><code class="inline">sys_safecopy</code> (capability-gated copy)</td><td>Within one address space (no cross-space copy)</td><td class="oc"><strong>grant + safecopy</strong> — the same capability model as MINIX</td></tr>
-          <tr><th scope="row">Crash recovery</th><td>RS restarts the crashed process, clean slate</td><td>Self-heal: watchdog + health monitor + recovery</td><td class="oc">Reload server, remount from disk; 3-restart cap</td></tr>
-          <tr><th scope="row">Non-crashing hang recovery</th><td>Timeouts / RS health</td><td>Health checks for hangs (first-class)</td><td class="oc"><strong>None</strong> — no watchdog/heartbeat</td></tr>
-          <tr><th scope="row">Live code replacement</th><td>No (restart, not hot-swap)</td><td><strong>Yes</strong> — pause / snapshot / swap / restore / rollback</td><td class="oc">No (reload same image)</td></tr>
-          <tr><th scope="row">Supervision scope</th><td>Uniform (RS parents every boot-image process)</td><td>Uniform (self-heal framework)</td><td class="oc"><strong>Special-cased</strong> — only <code class="inline">fsd</code></td></tr>
-          <tr><th scope="row">Trust topology</th><td>Capability-gated endpoints between servers</td><td>Trait boundaries</td><td class="oc"><strong>Flat</strong> within EL0 — any task may message any task</td></tr>
-          <tr><th scope="row">Kernel / policy split</th><td>Kernel is mechanism; PM/VFS/RS are policy</td><td>Explicit: core (mechanism) vs. subsystems (policy)</td><td class="oc"><strong>Partial</strong> — FS is out; scheduler, MMU, drivers still kernel-resident</td></tr>
-        </tbody>
-      </table>
-    </div>
+<ul>
+<li><strong>No stack guard page.</strong> An EL0 stack overflow silently corrupts the program's <em>own</em> region. It's contained to that task's isolation boundary — it can't reach another task — but it's silent rather than a clean fault.</li>
+<li><strong>ASIDs are reverted.</strong> The optimization to tag EL0 pages non-global and give each view its own ASID (skipping the per-switch TLB flush) passed every QEMU test <em>and</em> the isolation probe — then faulted the idle task on its own instruction fetch on real Parallels silicon. It was reverted to flush-on-switch (correct on both platforms). A useful reminder that "protected" is validated per platform, not proven in the abstract. The per-switch flush is cheap relative to what a timer tick already does, so nothing is lost but an optimization.</li>
+<li><strong>The privilege model is two-level and flat within EL0.</strong> EL1 kernel vs. EL0 userland is hardware-enforced; among EL0 tasks there are no rings of trust, only mutually-exclusive memory views.</li>
+</ul>
 
-    <h2>What would close the gap, in order of payoff</h2>
+<p><strong>Verdict:</strong> this is the axis where Ouroboros is <em>strongest</em> relative to both influences. MINIX gets EL0-equivalent isolation from separate address spaces; Helix explicitly does <strong>not</strong> have hardware-enforced isolation between modules (its safety leans on Rust's memory safety and hot-reload bookkeeping — see the research note). Ouroboros now has real, MMU-enforced, injection-verified per-task isolation. It lacks only a guard page and the reverted TLB optimization.</p>
 
-    <p>
-      Not commitments — the natural next moves toward the fuller ideal, and
-      the shape each would take given what already exists:
-    </p>
+<p>---</p>
 
-    <ol>
-      <li>
-        <strong>Move a second driver out of the kernel.</strong> The
-        single highest-value proof: that <code class="inline">fsd</code>
-        wasn't a one-off, and that the IPC + grant/safecopy machinery
-        generalizes. A console server or a block server are the obvious
-        candidates.
-      </li>
-      <li>
-        <strong>A general supervision / heartbeat mechanism.</strong> Today
-        the restart is bespoke to one task. A uniform "any registered
-        server can be health-checked and restarted" facility would catch
-        the wedged (looping, non-faulting) failure mode that currently has
-        no answer.
-      </li>
-      <li>
-        <strong>A capability model for who-may-call-whom.</strong> The flat
-        trust topology is the last big structural gap against MINIX — a
-        per-task table of permitted endpoints would make isolation
-        <em>topological</em>, not just memory-level.
-      </li>
-      <li>
-        <strong>The smaller, already-recorded hardening:</strong> a stack
-        guard page (turn silent overflow corruption into a clean fault),
-        and revisiting per-task ASIDs with a proven break-before-make
-        sequence (the reverted optimization).
-      </li>
-    </ol>
+<h2>Axis 3 — Fault tolerance (Helix OS, and MINIX's RS)</h2>
 
-    <p>
-      None of these is a small task, and none is needed to call the current
-      state honest. They're the difference between "the mechanisms are
-      real" (true today) and "the mechanisms are general" (the next era of
-      the project). The full assessment lives in the repository as
-      <a href="https://github.com/hansolovkarlsson/Ouroboros/blob/main/docs/microkernel-comparison.md">microkernel-comparison.md</a>.
-    </p>
+<p>Helix's pitch is self-healing: a module crashes or hangs, the kernel detects it and restarts it (with attempted state migration) without a reboot. MINIX's is the reincarnation server: a crashed <em>process</em> is restarted from a clean slate because it was never in the kernel to begin with. Ouroboros has a real, minimal version of both — and it landed the same day as the isolation work, which is not a coincidence.</p>
+
+<h3>What exists</h3>
+
+<ul>
+<li><strong>Every EL0 fault is contained.</strong> This was the sleeper finding of the isolation arc: <em>before</em> the fix, any userland wild-pointer fault fell through the kernel's report-and-halt path. A microkernel that moved its filesystem to userland <em>for containment</em> was converting every FS bug into a whole-system halt. Now <code class="inline">exceptions.rs</code>'s slot-8 fall-through (<code class="inline">rust_el0_fault_handler</code>) tears down <strong>just the faulting task</strong> — region freed, keyboard ownership reverted, slot reaped — and the survivors keep running. (Tasks 0 and 1 faulting still halt honestly; nothing meaningful survives the keyboard owner's or the idle task's death.)</li>
+<li><strong>Servers are supervised, uniformly</strong> — MINIX's reincarnation server, minimal edition, generalized (<code class="inline">kernel/src/supervisor.rs</code>). A registry keeps each supervised server's ELF image from boot (<code class="inline">fsd</code> <em>and</em> <code class="inline">cond</code>, each registered at load — kept precisely because one crashed server <em>is</em> the filesystem you'd otherwise need in order to reload it) and restarts one from that copy on a fault, into a fresh region; the new server re-runs its own startup (probe the device, remount from disk). <strong>Its state was always disk-derivable, which is what makes this real recovery rather than a restart that loses everything.</strong> A shared 3-restart-per-boot cap guards loops; past it the kernel degrades gracefully (a dead <code class="inline">fsd</code> slot stays <code class="inline">Unused</code>, the same path as a missing <code class="inline">FSD.BIN</code>; a dead <code class="inline">cond</code> falls back to the kernel's <code class="inline">PUTC</code> console).</li>
+<li><strong>A wedged server is caught, not just a crashed one.</strong> A server stuck in an infinite loop never faults, so the crash path can't see it. A passive <strong>heartbeat</strong> in the scheduler tick catches it: a healthy server keeps returning to a <code class="inline">Blocked</code> state, so staying continuously <code class="inline">Runnable</code> for ~2.5s is the wedge signal — restarted on the same path as a crash, with no server-side changes. This is exactly the "health checks for hangs, not just crashes" primitive Helix names.</li>
+<li><strong>Clients don't hang on a dying server.</strong> A task blocked mid-<code class="inline">MSG_CALL</code> to a server that dies is woken with <code class="inline">TASK_ERR_NO_SUCH_TASK</code> (<code class="inline">fail_calls_to</code>, wired into all three death paths — exit, kill, and fault), which the shell folds into its ordinary "no filesystem" message. Previously such a caller waited forever, with Ctrl+C the only rescue.</li>
+</ul>
+
+<h3>Where it's short of Helix (and of MINIX's RS)</h3>
+
+<ul>
+<li><strong>Kernel-resident drivers still have no containment.</strong> Supervision now covers the userland servers uniformly (<code class="inline">fsd</code> and <code class="inline">cond</code>, via the <code class="inline">supervisor.rs</code> registry — no longer special-cased to one task), and catches both crashes and wedges. But a crash in any <em>kernel-resident</em> driver (xHCI, virtio-blk/the block transport) still takes the system down — it's EL1 code, and the no-IOMMU DMA constraint is what keeps the block transport in the kernel for now (see <code class="inline">roadmap.md</code>).</li>
+<li><strong>The heartbeat is passive, so a deadlocked-while-blocked server is still invisible.</strong> The wedge detector sees a server stuck <code class="inline">Runnable</code>; it can't see one blocked forever on a call that never completes (rarer, and <code class="inline">fail_calls_to</code> already handles the dead-<em>target</em> case). An active health ping (a <code class="inline">*_PING</code> op servers ack) is the stronger signal and the recorded next refinement. Ctrl+C still rescues a blocked <em>client</em>.</li>
+<li><strong>Restart is not hot-reload.</strong> Helix's headline is <em>live</em> replacement of a running module with new code, with state snapshot/restore and automatic rollback. Ouroboros reloads the <em>same</em> image from a static, and recovers state by re-deriving it from disk, not by migrating it. That's closer to MINIX's "restart from a clean slate" than to Helix's live swap.</li>
+<li><strong>No journaling.</strong> If a server corrupts the disk mid-write and <em>then</em> crashes, recovery restarts a healthy server onto corrupted data. Fault tolerance here is about surviving a <em>crash</em>, not guaranteeing data integrity across one.</li>
+</ul>
+
+<p><strong>Verdict:</strong> a genuine, working reincarnation story for one service, with the crucial "state is disk-derivable" property that makes it real recovery. Short of both influences on generality (one supervised task, not all), on the non-crashing failure mode (no watchdog), and on liveness of the swap (reload, not hot-reload).</p>
+
+<p>---</p>
+
+<h2>Consolidated scorecard</h2>
+
+<p>Read this as "how close is the <em>mechanism</em>," not "is it as mature." All three projects are pre-alpha; MINIX is the only one with decades of real-world hardening behind the design.</p>
+
+<div class="cmp-wrap"><table class="cmp-table"><thead><tr><th scope="col">Dimension</th><th scope="col">MINIX</th><th scope="col">Helix</th><th scope="col">Ouroboros (today)</th></tr></thead><tbody><tr><td>Services outside the kernel</td><td>Full fleet (disk, net, FS, all drivers) as separate address-space processes</td><td>Modules outside the TCB, but within one address space</td><td><strong>One</strong> — the FAT32 filesystem server (<code class="inline">fsd</code>), a real separate EL0 process</td></tr><tr><td>Isolation mechanism</td><td>Separate address spaces (hardware)</td><td>Rust memory safety + hot-reload bookkeeping (no hardware boundary between modules)</td><td><strong>Per-task MMU page-table views (hardware), injection-verified</strong> + validated syscall pointers</td></tr><tr><td>IPC</td><td>Synchronous <code class="inline">SEND</code>/<code class="inline">RECEIVE</code>/<code class="inline">SENDREC</code>, fixed 64-byte messages</td><td>Trait-boundary calls + IPC queuing in the scheduler</td><td>Synchronous <code class="inline">MSG_CALL</code> (sendrec-shaped, sender-filtered) + copy-by-mailbox; <strong>grant/safecopy</strong> capability for bulk data</td></tr><tr><td>Bulk data across the boundary</td><td><code class="inline">sys_safecopy</code> (capability-gated copy)</td><td>Within one address space (no cross-space copy needed)</td><td><strong><code class="inline">GRANT</code> + <code class="inline">SAFECOPY</code></strong> — the same capability model as MINIX</td></tr><tr><td>Crash recovery</td><td>RS restarts the crashed <em>process</em> from a clean slate</td><td>Self-heal: watchdog + health monitor + recovery, with attempted state migration</td><td><code class="inline">restart_fsd</code> reloads the server, remounts from disk (state is disk-derived); <strong>3-restart cap</strong></td></tr><tr><td>Non-crashing hang recovery</td><td>Timeouts / RS health</td><td>Health checks for hangs (first-class)</td><td><strong>None</strong> — no watchdog/heartbeat</td></tr><tr><td>Live code replacement</td><td>No (restart, not hot-swap)</td><td><strong>Yes</strong> — pause/snapshot/swap/restore/rollback</td><td>No (reload same image)</td></tr><tr><td>Supervision scope</td><td>Uniform (RS parents every boot-image process)</td><td>Uniform (self-heal framework)</td><td><strong>Special-cased</strong> — only <code class="inline">fsd</code></td></tr><tr><td>Trust topology</td><td>Capability-gated endpoints between servers</td><td>Trait boundaries</td><td><strong>Flat</strong> within EL0 — any task may message any task</td></tr><tr><td>Kernel/policy split</td><td>Kernel is mechanism; PM/VFS/RS are policy</td><td>Explicit: <code class="inline">core/</code> (mechanism) vs. <code class="inline">subsystems/</code> + <code class="inline">modules_impl/</code> (policy)</td><td><strong>Partial</strong> — the FS is out; scheduler, MMU, drivers, console are still kernel-resident</td></tr></tbody></table></div>
+
+<p>---</p>
+
+<h2>What would close the gap, in order of payoff</h2>
+
+<p>Not commitments — the natural next moves toward the fuller ideal, and the shape each would take given what already exists:</p>
+
+<ol>
+<li><strong>Move a second driver out of the kernel.</strong> This is the single highest -value proof: that <code class="inline">fsd</code> wasn't a one-off, and that the IPC + grant/safecopy machinery generalizes. A console server or a block server are the obvious candidates. Doing it a second time is what turns "a microkernel on one service" into "a microkernel."</li>
+<li><strong>A general supervision / heartbeat mechanism.</strong> Today <code class="inline">restart_fsd</code> is bespoke. A uniform "any registered server can be health-checked and restarted" facility — MINIX's RS, or Helix's self-heal pipeline in miniature — would catch the <em>wedged</em> (looping, non-faulting) failure mode that currently has no answer, and would make the recovery story apply to whatever the step above moves out.</li>
+<li><strong>A capability model for who-may-call-whom.</strong> The flat "any task can message any task" trust topology is the last big structural gap against MINIX. A per-task table of permitted endpoints would make the isolation <em>topological</em>, not just memory-level.</li>
+<li><strong>The smaller, already-recorded items</strong> that harden the isolation itself: a stack <strong>guard page</strong> (turn silent stack-overflow corruption into a clean fault), and revisiting <strong>per-task ASIDs</strong> with a proven break-before-make sequence (the reverted optimization — see the isolation postmortem for the real-hardware fault evidence).</li>
+</ol>
+
+<p>None of these is a small task, and none is needed to call the current state honest. They're the difference between "the mechanisms are real" (true today) and "the mechanisms are general" (the next era of the project).</p>
+
+<p>---</p>
+
+<h2>Sources and cross-references</h2>
+
+<ul>
+<li><a href="architecture-overview.html"><code class="inline">architecture.md</code></a> — the authoritative reference for every mechanism named above (privilege model, per-task views, syscall ABI, FSOP protocol, grant/safecopy, console discovery).</li>
+<li><a href="research-minix-boot.html"><code class="inline">research-minix-boot.md</code></a> and <a href="research-helix-os.html"><code class="inline">research-helix-os.md</code></a> — the outward-looking notes on the two influences. Their "current shape" / "what this says about Ouroboros" sections predate the isolation work and are superseded by this note; their descriptions of MINIX and Helix themselves stand.</li>
+<li><a href="postmortem-isolation-dataflow.html"><code class="inline">isolation-and-dataflow-postmortem.md</code></a> — the day-by-day account of the EL0 fault isolation, <code class="inline">fsd</code> supervision, per-task page tables, and grant/safecopy milestones that this note assesses.</li>
+<li><a href="changelog.html"><code class="inline">CHANGELOG.md</code></a> — the full milestone history, newest first.</li>
+</ul>
 
   </article>
 
