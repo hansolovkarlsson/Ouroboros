@@ -7,6 +7,43 @@ what broke, how it was diagnosed), see `CLAUDE.md`; for *how* something
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## Program-to-program pipes and `exec … > file`: stdout-over-IPC
+
+Pipes were **builtin-left only** (`builtin | /path/program`, the shell
+capturing the builtin's output and streaming it) because a *task's own*
+output wasn't capturable - a spawned program's output went straight to the
+console. This milestone makes it capturable, delivering both
+`programA | programB` (both spawned programs) and `exec prog > file`.
+
+**A scoping finding shaped the design:** the clean pipe has the shell
+**relay** (`producer → shell → consumer`), and `producer → shell` is
+already permitted by the capability send-mask - so this needed **no
+capability delegation** (which the item had been expected to require). The
+same "route a program's stdout to the shell" mechanism delivers `exec >
+file` too (the shell captures and writes the file).
+
+The mechanism is a per-task **stdout target** (a task index, `CON_TASK` by
+default), set at spawn (`SPAWN` gained an arg; new `STDOUT_TARGET` and
+`SELF` syscalls, 38/39). A producer program routes output there:
+`CON_TASK` → the console server (`DSPOP_WRITE`, unchanged); otherwise a raw
+byte stream (chunked data messages + an empty end-of-stream marker) to the
+shell. For a pipe the shell relays each chunk on to the consumer (reusing
+the existing `pipe_send` + timeout-kill) and forwards EOF; for a redirect
+it captures into the buffer `finish_redirect` writes to the file. The
+consumer side of a pipe is an ordinary stdin→console filter (`upper`,
+unchanged).
+
+Four staged commits (stdout_target plumbing, `hello`'s producer routing,
+the `program | program` orchestration, then `exec > file`). Verified on
+QEMU, zero `-d int` aborts: `HELLO.BIN | UPPER.BIN` renders both of hello's
+lines uppercased through the relay; `exec HELLO.BIN > /h.txt` then `cat`
+shows the captured output; the existing `builtin | program` pipe, builtin
+`>`/`>>` redirects, and plain `exec` are all unchanged. See `CLAUDE.md`'s
+"program-to-program pipes" section. Still 2-stage (`a | b | c` needs
+chaining), producer-`hello`-only for now (any future generator follows the
+same pattern), and capture-bounded for the `> file` case (512 bytes, same
+cap as existing redirects; pipes stream unbounded).
+
 ## A capability model for who-may-call-whom: IPC isolation goes topological
 
 Isolation was MMU-enforced at the *memory* level (per-task page tables,

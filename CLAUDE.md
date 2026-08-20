@@ -5095,6 +5095,87 @@ coarse-grained per-slot: it says *whether* A may message B, not *what* A
 may say (message contents are still trusted, same as every pointer the
 syscall boundary already trusts within the single address space).
 
+## Program-to-program pipes and `exec … > file`: stdout-over-IPC
+
+Pipes were **builtin-left only** - `builtin | /path/program` worked (the
+shell captures the builtin's output into a 512-byte buffer and streams it),
+but `programA | programB` didn't, because a *task's own* output wasn't
+capturable: a spawned program's output went straight to the console
+(`con_write` -> `cond`). Same reason `exec prog > file` didn't exist. This
+milestone makes a task's output routable, delivering both.
+
+**The scoping finding that shaped it (and dropped delegation).** I picked
+this expecting it to "absorb capability delegation," but the clean design
+doesn't need it. The cleanest pipe has the shell **relay**
+(`producerA -> shell -> consumerB`), and `producer -> shell` is *already*
+permitted by the capability send-mask (a spawned task's mask includes the
+shell). So no capability is granted to anyone. Better, the *same* mechanism
+- "a program's stdout can be routed to the shell instead of the console" -
+delivers **both** `programA | programB` (the shell relays A's output to B)
+*and* `exec prog > file` (the shell captures A's output and writes it to a
+file). The direct-streaming alternative (A sends straight to B, needing a
+delegated A->B capability) is worse engineering here: it pushes
+flow-control/retry logic into every producer, gives no help to `exec >
+file`, and exists only to exercise delegation. So this milestone uses the
+relay model; **delegation stays a separate future item** (for direct
+task-to-task streaming, or a program that runs its own server).
+
+**The mechanism: a per-task `stdout_target`.** A spawned program's output
+goes to a stdout target - a task index, defaulting to `CON_TASK`. The shell
+sets it per spawn: normal `exec prog` / `builtin | prog` -> the console; a
+pipe producer or `exec prog > file` -> the shell itself. Three ABI
+additions: `SPAWN` (16) gained a second argument (the target - existing
+callers pass `CON_TASK`); `STDOUT_TARGET` (38) returns the caller's target;
+`SELF` (39) returns the caller's own task index, which the shell needs to
+route a producer's stdout back to itself (a foreground-spawned shell isn't
+task 0). Kernel-side it's a per-task `STDOUT_TARGET` array
+(`tasks.rs`, default `CON_TASK`, set at spawn, reset on death) - small.
+
+**A producer routes output through its target** (`hello`, the one generator
+program, and any future one): `target == CON_TASK` -> `con_write` (the
+`DSPOP_WRITE` console path, unchanged); otherwise a raw byte stream
+(`MSG_MAX_LEN`-chunked data messages, with a bounded full-mailbox retry) to
+the target, plus an empty end-of-stream message when done. **The consumer
+side of a pipe is unchanged** - `upper` stays an ordinary stdin
+(`msg_recv`) -> console filter that exits on the empty EOF message; in the
+relay model its stdin just comes from the shell's relay rather than a
+captured builtin buffer.
+
+**The shell orchestration** (`shell/src/main.rs`): `cmd_pipeline` branches
+on a `/path` left into `cmd_pipeline_prog`, which spawns the consumer
+(stdout -> console), spawns the producer (stdout -> this shell via
+`self_task()`), relays each chunk the producer sends on to the consumer
+(the existing `pipe_send` + timeout-kill), forwards the empty EOF, and
+`wait`s both (Ctrl+C interrupts the relay and kills both). `cmd_exec` now
+receives the redirect sink: `out.is_console()` -> the current
+fire-and-forget spawn; otherwise spawn with stdout -> shell,
+`capture_program_output` relays into the sink until EOF and reaps, and
+`run_line`'s existing `finish_redirect` writes the file (a Ctrl+C/error
+kills the program and marks the capture overflowed, so no partial file is
+written).
+
+**Confirmed on QEMU, zero `-d int` aborts across every run:**
+- `/EFI/ORBS/HELLO.BIN | /EFI/ORBS/UPPER.BIN` -> both of hello's lines
+  rendered uppercased through the relay (`HELLO...` / `GOODBYE...`), both
+  tasks exit cleanly and reap; the existing `builtin | program` pipe
+  (`echo | UPPER` -> `BUILTIN PIPE`) unchanged.
+- `exec /EFI/ORBS/HELLO.BIN > /h.txt` then `cat /h.txt` -> hello's captured
+  banner + goodbye; the builtin `>`/`>>` redirect and plain `exec`
+  (fire-and-forget to the console) unchanged.
+- `selftest`, `ls`, `echo` unaffected.
+
+**Still coarse, worth knowing before building on this:** 2-stage only
+(`a | b | c` needs shell-side chaining of relays); the only producer
+program is `hello` (any future generator follows the same `stdout_target`
+pattern - `upper` is a consumer/filter, unchanged); `exec > file` is
+capture-bounded (512 bytes, `refuse-not-truncate`, same as existing
+redirects - pipes themselves stream unbounded since they relay rather than
+buffer); the relay routes through the shell (a bottleneck, fine at this
+scale - direct task-to-task streaming is what delegation would later
+enable); and a producer's output helper (`hello`) is per-crate, not shared
+(same as `con_write` today - a shared userland runtime crate is a broader
+future cleanup).
+
 ## Commands
 
 ```sh

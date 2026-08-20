@@ -25,10 +25,11 @@ implement a completely different command set.
   take exactly two paths; every other command just one); any further
   words are ignored (`mkdir a b c` creates `a` and says nothing about
   `b`/`c`).
-- **Output redirection (`> file` / `>> file`) works** — see the
-  dedicated section below. **No pipes, input redirection (`<`),
-  globbing, `;`/`&&` chaining, environment variables, command history,
-  or tab completion.** One command per line, typed in full, every time.
+- **Output redirection (`> file` / `>> file`) and pipes (`|`) work** — see
+  the dedicated sections below (pipes now include `program | program` and
+  `exec prog > file`). **No input redirection (`<`), globbing, `;`/`&&`
+  chaining, environment variables, command history, or tab completion.**
+  One command per line, typed in full, every time.
 - **Path resolution** (`ls`, `cat`, `cd`, `mkdir`, `rmdir`, `touch`,
   `rm`): a leading `/` is an absolute path; anything else is resolved
   against the current working directory. `.` and `..` are collapsed
@@ -139,31 +140,50 @@ Limits, all refuse-outright rather than write-something-wrong:
 
 ## Pipelines
 
-Append `| /path/to/program` to any builtin to pipe its output into a
-freshly spawned program:
+Pipe a command's output into a freshly spawned program with `|`. The left
+side can be a **builtin** or a **program**:
 
 ```
-echo hello | /EFI/ORBS/UPPER.BIN     ->  HELLO
+echo hello | /EFI/ORBS/UPPER.BIN                  ->  HELLO
 ls | /EFI/ORBS/UPPER.BIN
-cat notes.txt | /EFI/ORBS/UPPER.BIN
+/EFI/ORBS/HELLO.BIN | /EFI/ORBS/UPPER.BIN          ->  HELLO FROM A SECOND PROGRAM! ...
 ```
 
-The left side runs with its output captured (the same 1024-byte capture
-the redirection machinery uses - a bigger output refuses rather than
-truncating); the right side is spawned like `exec` and receives the
-capture as a stream of IPC messages (1-64 bytes each) followed by one
-*empty* message meaning end-of-stream - see `MSG_SEND`'s notes in the
-syscall reference, and `upper/src/main.rs` for the filter-program shape
-to copy (no argv exists: stdin is `msg_recv`, stdout is `putc`, EOF is
-the empty message, finishing is `exit`). The shell waits for the
-program to exit before prompting again; Ctrl+C interrupts the wait.
+- **Builtin left** (`echo … | prog`): the builtin runs with its output
+  captured (the same capture the redirection machinery uses - a bigger
+  output refuses rather than truncating), then streamed to the spawned
+  program.
+- **Program left** (`/prog_a | /prog_b`): both sides are spawned programs.
+  The shell **relays** - it routes the producer's output back to itself
+  (the producer's stdout target is the shell) and forwards each chunk on to
+  the consumer, so a program's own output is capturable now. This is what
+  the per-task stdout target (`SPAWN`'s stdout argument, the `STDOUT_TARGET`
+  and `SELF` syscalls) exists for. No capability delegation is involved -
+  `producer → shell` is already permitted by the IPC send-mask.
 
-Limits, deliberate for v1: one `|` per line (no `a | b | c`); the left
-side must be a builtin (a spawned program's own output isn't
-capturable, which is also why `|` can't combine with `>`/`>>`); the
-right side is exactly one program path (programs take no arguments); a
-program that stops reading its input is killed after a ~3-second
-real-tick timeout rather than hanging the shell.
+Either way the right side is a standard filter program (see
+`upper/src/main.rs` for the shape to copy: stdin is `msg_recv`, output is
+its stdout target - the console by default - EOF is the empty message,
+finishing is `exit`). The shell waits for the program(s) to exit before
+prompting again; Ctrl+C interrupts and kills them.
+
+**`exec prog > file`** captures a program's output to a file (the same
+relay, but the shell accumulates the output and writes it rather than
+forwarding it to another program):
+
+```
+exec /EFI/ORBS/HELLO.BIN > out.txt
+cat out.txt                          ->  Hello from a second program! ...
+```
+
+Limits, deliberate for v1: one `|` per line (no `a | b | c` - that needs
+shell-side chaining of relays); the right side is exactly one program path
+(programs take no arguments); the only *producer* program shipped is
+`HELLO.BIN` (any generator follows the same stdout-target pattern; `upper`
+is a consumer/filter); `exec > file` capture is bounded (512 bytes,
+refuse-not-truncate - pipes themselves stream unbounded); and a program
+that stops reading its input is killed after a ~3-second real-tick timeout
+rather than hanging the shell.
 
 ## Known limitations
 

@@ -300,7 +300,21 @@ semantics. The shell command is named `exec` to match
 `docs/roadmap.md`'s original wording for this item, but nothing about
 the calling task is replaced or stopped; it keeps running, and the new
 program becomes a new, independent task in whichever spawnable slot
-(3-4) is `Unused`.
+(4-5) is `Unused`.
+
+**Where a spawned program's output goes** is set at spawn time (`spawn`'s
+stdout-target argument, arg1). Normally it's `CON_TASK` — output goes
+straight to the console server. But the shell can set it to *itself* so a
+program's output routes back to the shell to be relayed or captured, which
+is what makes program-to-program pipes and `exec … > file` work: for
+`/prog_a | /prog_b` the shell spawns the consumer (stdout → console) and
+the producer (stdout → shell), then relays each chunk the producer emits on
+to the consumer (forwarding the empty end-of-stream marker); for `exec prog
+> file` it captures the producer's output and writes it to the file. A
+producer reads its target via `stdout_target` (38) and routes accordingly;
+the shell learns its own index via `self` (39). No capability delegation is
+involved — `producer → shell` is already permitted by the IPC send-mask
+(see "IPC capabilities" above).
 
 Since the filesystem moved to userland, "loads from disk" is a
 two-step, client-driven flow: the shell reads the program via the
@@ -434,7 +448,7 @@ the way hand-duplicated numbers did before this crate existed.
 | 6 | `get_ticks` | ignored | preemption tick count since boot | Added for phase 2's `uptime` builtin — the first syscall added specifically so a loaded program could read real kernel state, not just I/O |
 | *7–14* | *(gaps)* | | | The eight `fs_*` syscalls (`list_dir`/`read_file`/`mkdir`/`rmdir`/`touch`/`rm`/`write_file`/`mv`) lived here until the filesystem moved out of the kernel entirely. Their exact contracts survive unchanged as the filesystem server's `FSOP_*` request protocol (below); the numbers stay unfilled, same stable-ABI reasoning as the gap at 5 |
 | 15 | `read_char` | ignored | a byte | Blocking — if none is waiting, suspends the calling task and switches to another runnable one instead of returning `NO_CHAR`; resumes with the byte once available. See `tasks.rs`'s `block_current_and_switch` and the "Blocking primitives" section below |
-| 16 | `spawn` | total staged length | **the new task's slot index**, `SPAWN_ERROR`, or a `SPAWN_ERR_*` code | Parses, relocates, and starts the program image previously fed into the kernel's 128KB staging buffer via `spawn_stage` (30), as a **new, independent task** alongside the caller — `tasks::spawn`, not exec-replaces-current-process. **Contract changed with the userland-filesystem milestone**: it used to take a path, but the kernel has no filesystem to read one with anymore — the caller reads the program via the filesystem server (`FSOP_READ_AT`, 512 bytes at a time) and stages it first; see the shell's `cmd_exec` for the reference flow. Failures: `SPAWN_ERR_BAD_ELF`/`SPAWN_ERR_TOO_LARGE`/`SPAWN_ERR_NO_FREE_SLOT`; a failure after the region allocation gives the memory back (`tasks::free_runtime_region` — always the LIFO case). See "Dynamic task creation" above |
+| 16 | `spawn` | total staged length, **stdout target** | **the new task's slot index**, `SPAWN_ERROR`, or a `SPAWN_ERR_*` code | Parses, relocates, and starts the program image previously fed into the kernel's 128KB staging buffer via `spawn_stage` (30), as a **new, independent task** alongside the caller. The **stdout target** (arg1) is the task the program's output should go to — `CON_TASK` for a plain `exec`, or the shell itself for a pipe/redirect producer (see `stdout_target`, 38) — `tasks::spawn`, not exec-replaces-current-process. **Contract changed with the userland-filesystem milestone**: it used to take a path, but the kernel has no filesystem to read one with anymore — the caller reads the program via the filesystem server (`FSOP_READ_AT`, 512 bytes at a time) and stages it first; see the shell's `cmd_exec` for the reference flow. Failures: `SPAWN_ERR_BAD_ELF`/`SPAWN_ERR_TOO_LARGE`/`SPAWN_ERR_NO_FREE_SLOT`; a failure after the region allocation gives the memory back (`tasks::free_runtime_region` — always the LIFO case). See "Dynamic task creation" above |
 | 17 | `exit` | exit code | **does not return** (or `EXIT_DENIED`) | Destroys the calling task: its slot becomes spawnable again, its EL0 mapping is removed (a fresh `mmu::rebuild_with_el0_regions`), and its RAM is returned to the runtime bump allocator when LIFO order allows (`tasks::free_runtime_region` — most-recent allocation only; anything else leaks, deliberately). Tasks 0 (the boot shell — the sole keyboard owner), 1 (idle), and 2 (the filesystem server) are refused with `EXIT_DENIED`, the only case where this syscall returns. The exit code is kept as `Zombie(status)` until a `wait` collects it |
 | 18 | `task_state` | task index | a `TASK_STATE_*` code, or `TASK_STATE_INVALID` past the last slot | Read-only observability for the spawn/exit lifecycle (the shell's `ps`): `UNUSED`/`RUNNABLE`/`BLOCKED` per slot. Probing indices upward until `INVALID` is how a caller discovers the slot count without it leaking into the ABI |
 | 19 | `kill` | task index | `0`, `TASK_ERR_PROTECTED`, or `TASK_ERR_NO_SUCH_TASK` | Destroys another task — `exit`'s teardown minus the context switch (a non-current task isn't executing; its saved context is simply discarded). Tasks 0–2 (boot shell, idle, filesystem server) are protected. If the killed task held the keyboard, ownership reverts to task 0 |
@@ -456,6 +470,8 @@ the way hand-duplicated numbers did before this crate existed.
 | 35 | `fb_blit` | glyphs ptr, count, col, row | `0` or an error | Plots `count` 8-byte glyph bitmaps (from the server's own font, in its own region) at framebuffer cells `(col..col+count, row)`. **Gated to task 3**. The dumb blit half of the framebuffer backend — the server owns the font/cursor/wrap/scroll/ANSI, this just puts pixels on screen (`fbdev.rs`) |
 | 36 | `fb_scroll` | count | `0` | Scrolls the framebuffer up `count` character rows (a `ptr::copy` memmove), blanking the exposed bottom. **Gated to task 3** |
 | 37 | `fb_clear` | — | `0` | Blanks the whole framebuffer. **Gated to task 3**. Used by the server's startup and its `clear`/ANSI-`2J` handling |
+| 38 | `stdout_target` | — | the caller's stdout target task index | Where this program's output should go (set by whoever `spawn`ed it; `CON_TASK` by default). A producer routes output there: `CON_TASK` → the console server (`DSPOP_WRITE`); otherwise a raw byte stream (chunked data messages + an empty end-of-stream message) to that task, which relays or captures it. This is what makes a task's own output capturable — program-to-program pipes and `exec … > file` |
+| 39 | `self` | — | the caller's own task slot index | A task's identity (otherwise unknowable — every other task-aware syscall takes an index). The shell needs it to route a pipe producer's stdout back to itself, and a foreground-spawned shell isn't task 0 |
 | other | — | — | `u64::MAX` | Logged as unknown |
 
 ### The filesystem request protocol (`FSOP_*`)

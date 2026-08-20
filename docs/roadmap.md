@@ -49,12 +49,21 @@ caller blocked in a call to it regardless of the mask). Static policy only
 for now — runtime delegation (granting a spawned program a capability it
 doesn't get by default) is the natural follow-up. See `CHANGELOG.md`.
 
-1. **Finish the stdout-over-IPC payoff the console server enabled.** A
-   program's output already flows over IPC (to `cond`); routing a
-   program's output stream to the shell instead would unlock
-   **program-to-program pipes** (`a | b` where both are programs) and
-   **`exec ... > file`** — the pipe/redirect items that are currently
-   builtin-left-only because a task's own output wasn't capturable.
+**Recently completed (2026-08-20): the stdout-over-IPC payoff — program-to
+-program pipes and `exec … > file`.** A task's own output is capturable now
+via a per-slot **stdout target** (a task index, `CON_TASK` by default, set
+at spawn): a producer routes its output to the shell instead of the
+console, and the shell relays it on to a consumer program (`a | b` where
+both are programs) or captures it to a file (`exec prog > file`). The clean
+relay design (`producer → shell → consumer`) needed **no capability
+delegation** — `producer → shell` is already permitted by the send-mask.
+Still 2-stage, producer-`hello`-only for now. See `CHANGELOG.md`.
+
+1. **Runtime capability delegation.** The capability send-mask is static (a
+   function of slot); MINIX's grant mechanism lets a process hand another a
+   specific capability at runtime — needed for direct task-to-task
+   streaming (relay-free pipes), or a spawned program that reaches an
+   endpoint outside its default `{shell,fsd,cond}` set.
 
 2. **Smaller hardening, mostly recorded already:** a stack **guard page**
    (turn silent overflow into a clean fault) and a userland **heap**;
