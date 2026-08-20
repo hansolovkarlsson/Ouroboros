@@ -30,7 +30,11 @@ pub extern "C" fn _start() -> ! {
 }
 
 fn main() -> ! {
-    print("Hello from a second program! (HELLO.BIN, running as its own task)\r\n");
+    // Where our output goes: the console by default, or - when the shell
+    // spawned us as a pipe producer or an `exec … > file` source - the
+    // shell, which relays or captures it. See the STDOUT_TARGET syscall.
+    let target = syscall(syscall_abi::STDOUT_TARGET, 0);
+    write_out(target, b"Hello from a second program! (HELLO.BIN, running as its own task)\r\n");
     // Run for ~2 seconds of real tick time before exiting - deliberate,
     // not filler: it makes `wait`'s *blocking* path organically testable
     // (an instant exit would always be a zombie before `wait` could
@@ -41,7 +45,13 @@ fn main() -> ! {
     while get_ticks() < start + 100 {
         core::hint::spin_loop();
     }
-    print("Goodbye - exiting now.\r\n");
+    write_out(target, b"Goodbye - exiting now.\r\n");
+    // If our output was piped/captured (not the console), signal
+    // end-of-stream so the relaying task knows we're done producing.
+    if target != syscall_abi::CON_TASK {
+        let dummy = [0u8; 1];
+        syscall4(syscall_abi::MSG_SEND, target, dummy.as_ptr() as u64, 0, 0);
+    }
     task_exit(0);
     // Unreachable for any task that's allowed to exit; a refused exit
     // (this program somehow running as task 0/1) just parks quietly.
@@ -50,8 +60,38 @@ fn main() -> ! {
     }
 }
 
-fn print(s: &str) {
-    con_write(s.as_bytes());
+/// Route output to our stdout target: the console server (a `DSPOP_WRITE`
+/// message) when it's `CON_TASK`, otherwise a raw byte stream to the
+/// relaying/capturing task (the shell).
+fn write_out(target: u64, bytes: &[u8]) {
+    if target == syscall_abi::CON_TASK {
+        con_write(bytes);
+    } else {
+        pipe_out(target, bytes);
+    }
+}
+
+/// Send `bytes` as raw `MSG_MAX_LEN`-chunked messages to `target`. A full
+/// mailbox is retried for a bounded time (the relaying task drains it
+/// between our sends); if it stops reading for ~3s, or dies, we give up
+/// rather than hang.
+fn pipe_out(target: u64, bytes: &[u8]) {
+    let mut off = 0;
+    while off < bytes.len() {
+        let n = (bytes.len() - off).min(syscall_abi::MSG_MAX_LEN as usize);
+        let chunk = &bytes[off..off + n];
+        let deadline = get_ticks() + 150;
+        loop {
+            let r = syscall4(syscall_abi::MSG_SEND, target, chunk.as_ptr() as u64, n as u64, 0);
+            if r == 0 {
+                break;
+            }
+            if r != syscall_abi::MSG_ERR_FULL || get_ticks() > deadline {
+                return;
+            }
+        }
+        off += n;
+    }
 }
 
 /// Route output through the console server (task `CON_TASK`) as a batched
