@@ -502,6 +502,29 @@ pub const FSOP_WRITE_AT: u64 = 13;
 /// output (see the shell's `con_write`).
 pub const DSPOP_WRITE: u64 = 1;
 
+/// A reserved *sender* sentinel the kernel's supervisor uses to inject a
+/// liveness **ping** into a supervised server's mailbox, and the *dest*
+/// a server's reply to that ping carries (which the kernel intercepts as
+/// the ack - see [`SYSOP_PING`]). Fits `Message.sender`'s `u8` and sits
+/// clear of every real task index (`0..NUM_TASKS`), so it can never be
+/// mistaken for one. Not a task: an ordinary [`MSG_SEND`] to it never
+/// reaches a mailbox - the kernel treats `dest == KERNEL_SENDER` as "this
+/// task is acking a supervisor ping" and returns `0`. A non-server, or a
+/// server with no ping outstanding, sending to it is a harmless no-op
+/// (the same single-address-space trust model as every other message).
+pub const KERNEL_SENDER: u64 = 0xFE;
+
+/// The op the supervisor's liveness ping carries in its message header
+/// (offset 0, the same slot `FSOP_*`/`DSPOP_*` occupy). Deliberately well
+/// clear of every real server op (which start at 1), so a server that
+/// *does* inspect it can fast-path it - though none needs to: a server
+/// replies harmlessly to any unknown op, and that reply, addressed to
+/// [`KERNEL_SENDER`], is itself the ack. The active half of server
+/// supervision (`kernel/src/supervisor.rs`), catching a server stuck
+/// `Blocked` forever - which the passive heartbeat (a server observed
+/// continuously `Runnable`) structurally can't see.
+pub const SYSOP_PING: u64 = 0xFFFF;
+
 /// The largest message [`MSG_SEND`] accepts, in bytes. Raised from the
 /// original 64 when per-task page tables landed: the filesystem
 /// protocol's requests/replies became fully self-contained (payloads

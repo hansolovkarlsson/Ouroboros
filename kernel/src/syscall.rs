@@ -599,6 +599,19 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
         }
         syscall_abi::MSG_SEND => {
             let dest = arg0 as usize;
+            // A supervised server's reply to a liveness ping is addressed
+            // to KERNEL_SENDER (the sender the ping was injected under -
+            // see supervisor.rs / syscall-abi's SYSOP_PING). That's not a
+            // real task, so intercept it here, before the buffer/dest
+            // validation below, as the ack: the reply payload is
+            // deliberately ignored (we only care that the server got far
+            // enough around its loop to reply at all). A non-server, or a
+            // server with no ping outstanding, is a harmless no-op inside
+            // note_ack.
+            if arg0 == syscall_abi::KERNEL_SENDER {
+                crate::supervisor::note_ack(tasks::current_task());
+                return 0;
+            }
             // A zero-length message is legal - it's the end-of-stream
             // marker in the shell's pipeline convention (see the
             // MSG_SEND doc in syscall-abi). The pointer must still be

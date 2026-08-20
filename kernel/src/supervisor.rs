@@ -52,6 +52,35 @@ const MAX_RESTARTS: u32 = 3;
 /// genuine wedge promptly. Tunable.
 const WEDGE_TICKS: u32 = 128;
 
+/// How often (in ticks) the active ping pokes a server that's been sitting
+/// `Blocked` - about once a second at the 20ms tick. A healthy idle server
+/// is woken, acks, and goes back to `Blocked`; this is just the poke
+/// cadence, not the failure threshold.
+const PING_INTERVAL: u32 = 64;
+
+/// How long (in ticks) an injected ping may go unacked before the server is
+/// declared wedged. Far above a healthy ack's round trip (a woken server
+/// acks within a tick or two), so a genuine `Blocked`-deadlock is caught
+/// while a healthy idle server never trips.
+const PING_TIMEOUT: u32 = 8;
+
+/// [`poll_ping`]'s verdict for one supervised server this tick.
+// Stage 1 (inert plumbing): defined and unit-reachable via `poll_ping`, but
+// `on_tick` doesn't drive it yet - stage 2 wires it in and drops this allow.
+#[allow(dead_code)]
+pub enum PingAction {
+    /// Nothing to do - the server is making progress, or a ping is
+    /// outstanding but not yet timed out, or it isn't yet time to ping.
+    None,
+    /// Inject a fresh ping into this server's mailbox (the caller does the
+    /// actual `tasks::send_message`, since the send machinery lives there).
+    Inject,
+    /// An outstanding ping went unacked past [`PING_TIMEOUT`] - the server
+    /// is wedged while `Blocked`. Restart it on the same teardown path the
+    /// Runnable-wedge and fault handler use.
+    Wedged,
+}
+
 struct Entry {
     /// The task slot this server runs in once registered; `None` = free.
     slot: Option<usize>,
@@ -62,11 +91,37 @@ struct Entry {
     /// Heartbeat: consecutive ticks observed `Runnable` (reset on any
     /// `Blocked` state, and on a restart).
     runnable_ticks: u32,
+    /// Active ping: whether a ping is currently awaiting an ack.
+    ping_outstanding: bool,
+    /// Ticks the outstanding ping has waited (only meaningful while
+    /// `ping_outstanding`); vs [`PING_TIMEOUT`].
+    ping_wait: u32,
+    /// Ticks the server has sat `Blocked` with no ping outstanding; vs
+    /// [`PING_INTERVAL`], the poke cadence.
+    idle_ticks: u32,
 }
 
 impl Entry {
     const fn empty() -> Self {
-        Entry { slot: None, image: [0; IMG_CAP], image_len: 0, restarts: 0, runnable_ticks: 0 }
+        Entry {
+            slot: None,
+            image: [0; IMG_CAP],
+            image_len: 0,
+            restarts: 0,
+            runnable_ticks: 0,
+            ping_outstanding: false,
+            ping_wait: 0,
+            idle_ticks: 0,
+        }
+    }
+
+    /// Clears all liveness state (heartbeat + ping) - a fresh server owes
+    /// nothing yet. Called on register and on every restart.
+    fn reset_liveness(&mut self) {
+        self.runnable_ticks = 0;
+        self.ping_outstanding = false;
+        self.ping_wait = 0;
+        self.idle_ticks = 0;
     }
 }
 
@@ -99,7 +154,7 @@ pub fn register(slot: usize, image: &[u8]) -> bool {
     e.image[..image.len()].copy_from_slice(image);
     e.image_len = image.len();
     e.restarts = 0;
-    e.runnable_ticks = 0;
+    e.reset_liveness();
     true
 }
 
@@ -134,8 +189,8 @@ pub fn restart(slot: usize) {
         );
         return;
     }
-    // Fresh server, fresh heartbeat.
-    e.runnable_ticks = 0;
+    // Fresh server, fresh liveness (heartbeat + ping).
+    e.reset_liveness();
     let image_len = e.image_len;
     let (header, phdrs, region_size) = match loader::elf_region_size(&e.image[..image_len]) {
         Ok(result) => result,
@@ -188,4 +243,72 @@ pub fn heartbeat(slot: usize, blocked: bool) -> bool {
     // counter, and a give-up (past the cap) leaves it climbing past the
     // threshold so it never re-fires.
     e.runnable_ticks == WEDGE_TICKS
+}
+
+/// Record that `slot` acked a liveness ping - a supervised server replied
+/// to a ping (its reply, addressed to [`KERNEL_SENDER`], is intercepted by
+/// the `MSG_SEND` syscall arm, which calls this). Clears the outstanding
+/// ping so the poke cadence starts over. A no-op for an unregistered slot
+/// or one with no ping outstanding - so a stray message to `KERNEL_SENDER`
+/// from anyone, at any time, does nothing.
+///
+/// [`KERNEL_SENDER`]: syscall_abi::KERNEL_SENDER
+pub fn note_ack(slot: usize) {
+    let reg = unsafe { &mut *REGISTRY.0.get() };
+    if let Some(e) = reg.iter_mut().find(|e| e.slot == Some(slot)) {
+        e.ping_outstanding = false;
+        e.ping_wait = 0;
+        e.idle_ticks = 0;
+    }
+}
+
+/// One active-ping observation for a supervised server, called from
+/// `on_tick` alongside [`heartbeat`]. `blocked` = the server is currently
+/// in any `Blocked` state. The active ping catches the failure the passive
+/// heartbeat can't: a server stuck `Blocked` forever (deadlocked
+/// mid-request). Returns what the caller should do this tick - see
+/// [`PingAction`]. A no-op ([`PingAction::None`]) for an unregistered slot.
+///
+/// The state machine, per supervised server:
+/// - **Runnable** (making progress, or a Runnable-wedge the passive
+///   heartbeat owns): reset all ping state; never ping a running server.
+/// - **Blocked, ping outstanding**: count ticks; past [`PING_TIMEOUT`] with
+///   no ack, it's wedged ([`PingAction::Wedged`], and reset since a restart
+///   follows).
+/// - **Blocked, no ping outstanding**: count idle ticks; every
+///   [`PING_INTERVAL`], ask the caller to inject one
+///   ([`PingAction::Inject`]) and mark it outstanding. One ping outstanding
+///   at a time, so the server's 4-deep mailbox can never fill with pings.
+// Stage 1: defined but not yet called from `on_tick` (stage 2 wires it in
+// and removes this allow); `note_ack` above is already live via MSG_SEND.
+#[allow(dead_code)]
+pub fn poll_ping(slot: usize, blocked: bool) -> PingAction {
+    let reg = unsafe { &mut *REGISTRY.0.get() };
+    let Some(e) = reg.iter_mut().find(|e| e.slot == Some(slot)) else {
+        return PingAction::None;
+    };
+    if !blocked {
+        // A running server needs no ping; a Runnable *wedge* is the passive
+        // heartbeat's job. Drop any half-finished ping cycle.
+        e.ping_outstanding = false;
+        e.ping_wait = 0;
+        e.idle_ticks = 0;
+        return PingAction::None;
+    }
+    if e.ping_outstanding {
+        e.ping_wait = e.ping_wait.saturating_add(1);
+        if e.ping_wait >= PING_TIMEOUT {
+            e.reset_liveness();
+            return PingAction::Wedged;
+        }
+        return PingAction::None;
+    }
+    e.idle_ticks = e.idle_ticks.saturating_add(1);
+    if e.idle_ticks >= PING_INTERVAL {
+        e.ping_outstanding = true;
+        e.ping_wait = 0;
+        e.idle_ticks = 0;
+        return PingAction::Inject;
+    }
+    PingAction::None
 }
