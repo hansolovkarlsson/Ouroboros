@@ -114,22 +114,26 @@ pub fn try_install_usb_block_device() -> bool {
     }
 }
 
-/// Whether the calling task may use the `BLOCK_*` syscalls: only the
-/// filesystem server. This gate is the "supervised" in "supervised EL0
-/// process" - the kernel holds the device, and exactly one task is
-/// allowed to ask it to touch the disk.
+/// Whether the calling task may use the `BLOCK_*` syscalls: whoever holds
+/// `CAP_BLOCK`, which by the capability policy (`tasks::caps_for_slot`) is
+/// the filesystem server alone. This gate is the "supervised" in
+/// "supervised EL0 process" - the kernel holds the device, and exactly one
+/// task is allowed to ask it to touch the disk. (Was a hardcoded
+/// `== FSD_TASK` check; folded into the capability model, equivalent by
+/// construction since fsd is the only `CAP_BLOCK` slot.)
 fn block_access_allowed() -> bool {
-    tasks::current_task() as u64 == syscall_abi::FSD_TASK
+    tasks::cap_has(tasks::current_task(), tasks::CAP_BLOCK)
 }
 
-/// Whether the calling task may use [`CON_WRITE`]: only the console
-/// server. The console analogue of [`block_access_allowed`] - the kernel
-/// owns the console, and exactly one task is allowed to push steady-state
-/// output through it (ordinary tasks reach it only via a `DSPOP_WRITE`
-/// message to that server; the kernel's own `console::*` stays the
-/// emergency/boot path).
+/// Whether the calling task may use [`CON_WRITE`]/`CON_INFO`/`FB_*`:
+/// whoever holds `CAP_CON`, which by the capability policy is the console
+/// server alone. The console analogue of [`block_access_allowed`] - the
+/// kernel owns the console, and exactly one task is allowed to push
+/// steady-state output through it (ordinary tasks reach it only via a
+/// `DSPOP_WRITE` message to that server; the kernel's own `console::*`
+/// stays the emergency/boot path). (Was a hardcoded `== CON_TASK` check.)
 fn con_access_allowed() -> bool {
-    tasks::current_task() as u64 == syscall_abi::CON_TASK
+    tasks::cap_has(tasks::current_task(), tasks::CAP_CON)
 }
 
 /// Falls back to the USB keyboard (xhci.rs) when the byte-stream console

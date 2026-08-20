@@ -89,6 +89,39 @@ pub const NUM_TASKS: usize = 6;
 /// infrastructure (boot shell, idle, filesystem server, console server).
 const FIRST_SPAWNABLE: usize = 4;
 
+// Per-slot capabilities (the capability model for who-may-do-what).
+// Because task-slot roles are static (see `NUM_TASKS`'s doc comment - 0
+// shell, 1 idle, 2 fsd, 3 cond, 4-5 spawnable), a task's capabilities are
+// a pure function of its slot: no stored table, no mutable state, and a
+// restarted server or a spawned child automatically gets the right caps.
+// The whole policy lives in `caps_for_slot`. Packed in one `u32`: the low
+// `NUM_TASKS` bits are the IPC send-mask (added in the who-may-call-whom
+// stage), the high bits are resource caps.
+//
+/// `CAP_BLOCK`: may use the `BLOCK_*` syscalls (raw disk access). Only the
+/// filesystem server holds it - the "supervised" in "supervised EL0
+/// process".
+pub(crate) const CAP_BLOCK: u32 = 1 << 8;
+/// `CAP_CON`: may use `CON_WRITE`/`CON_INFO`/`FB_*` (the console device).
+/// Only the console server holds it - ordinary tasks reach the console
+/// only through it (a `DSPOP_WRITE` message).
+pub(crate) const CAP_CON: u32 = 1 << 9;
+
+/// The capability set for `slot`, a pure function of the slot's static
+/// role. This is the single source of truth for the capability policy.
+fn caps_for_slot(slot: usize) -> u32 {
+    match slot as u64 {
+        syscall_abi::FSD_TASK => CAP_BLOCK,
+        syscall_abi::CON_TASK => CAP_CON,
+        _ => 0,
+    }
+}
+
+/// Whether `slot` holds capability `cap` (a `CAP_*` bit).
+pub(crate) fn cap_has(slot: usize, cap: u32) -> bool {
+    caps_for_slot(slot) & cap != 0
+}
+
 /// 2MB - matches `loader.rs`'s own `SLOT_ALIGN` (a plain numeric
 /// constant, not shared across modules - simplest to just duplicate the
 /// value rather than build a shared-constants module for one number).
