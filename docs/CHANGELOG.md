@@ -7,6 +7,45 @@ what broke, how it was diagnosed), see `CLAUDE.md`; for *how* something
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## A capability model for who-may-call-whom: IPC isolation goes topological
+
+Isolation was MMU-enforced at the *memory* level (per-task page tables,
+grant/safecopy) but the IPC *topology* was still flat: any task could
+`MSG_SEND`/`MSG_CALL` any task, and the privileged kernel gates were ad-hoc
+hardcoded slot checks. This milestone - the roadmap's last big structural
+gap vs MINIX - makes isolation topological: a per-slot capability set
+enforced at the IPC boundary, so a task can only reach the endpoints its
+capabilities allow.
+
+The change is small because **capabilities are a pure function of task
+slot** (roles are static: 0 shell, 1 idle, 2 fsd, 3 cond, 4-5 spawnable) -
+no stored table, no mutable state, the whole policy in one
+`caps_for_slot(slot)`. It packs a **send-mask** (which slots this one may
+*initiate* IPC to) plus resource bits (`CAP_BLOCK` for `BLOCK_*`, `CAP_CON`
+for the console device). The policy: the shell reaches the two servers and
+its children; each program reaches the servers and the shell; `fsd` reaches
+`cond` (its logs); `idle`/`cond` initiate nothing. A **reply exemption**
+makes request/response work - a server's reply to a caller blocked in a
+`MSG_CALL` to it is always allowed (the same "client blocked in a call to
+me" condition `SAFECOPY` uses), so only *unsolicited* sends are
+mask-checked. The one flow that shaped the policy: `pong`'s echo to a
+`send`/`recv` client is an unsolicited server->client send (not a reply),
+which is why the child mask includes the shell.
+
+Two staged commits: stage 1 folded the two hardcoded resource gates
+(`== FSD_TASK`/`== CON_TASK`) into `cap_has` - a pure refactor, verified
+byte-identical; stage 2 added the send-mask and the `may_send` check in the
+`MSG_SEND`/`MSG_CALL` arms (returning a new `MSG_ERR_DENIED`). Verified on
+QEMU, zero `-d int` aborts: **every existing flow intact** (selftest, the
+disk surface over IPC, console output, the pipeline, the pong echo,
+exec/ps - no false denials), and **denials fire** (A/B, temp probe
+reverted: the shell denied a send to idle, and a spawned `hello` denied a
+send outside its `{shell,fsd,cond}` mask - enforcement against untrusted
+spawned code - while permitted sends succeed alongside). The supervisor
+ping is unaffected (kernel-origin, bypasses the boundary). See `CLAUDE.md`'s
+"capability model" section for the full write-up. Static policy only (no
+runtime delegation yet - the natural follow-up).
+
 ## Active health-ping: catching a server wedged while blocked
 
 The refinement the supervision milestone (below) named as its one gap: the

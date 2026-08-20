@@ -78,19 +78,25 @@ privilege) underneath them. Measured against that one test:
   program (the shell, via `INIT.CFG`) plus one fixed-path infrastructure
   server (`\EFI\ORBS\FSD.BIN`). It's two loaded programs, not a typed set
   of cooperating servers.
-- **No `who-may-call-whom` capability model.** Any task can `MSG_CALL`
-  any task; the kernel's trust model is still flat within EL0. MINIX's
-  server topology is more principled — a driver is granted the specific
-  endpoints it may talk to.
+- **The `who-may-call-whom` capability model is coarse and static.** IPC
+  is no longer flat — a per-slot send-mask, enforced at the
+  `MSG_SEND`/`MSG_CALL` boundary, restricts which endpoints each task may
+  reach (a spawned program can reach only the two servers and the shell,
+  not arbitrary tasks or the device gates). But the policy is a static
+  function of slot: there's no runtime *delegation* (granting a spawned
+  program a capability it doesn't get by default), which MINIX's grant
+  mechanism provides.
 - **No process manager / no PID namespace / no `fork`.** Task creation is
   `spawn` (add a task alongside the caller), not the POSIX
   fork-exec-wait lineage MINIX's PM administers. There *is* a
   wait/reaping path (`WAIT`, syscall 21, with `Zombie(status)` slots),
   but no process hierarchy above it.
 
-**Verdict:** structurally a microkernel on the service it actually moved,
-using the right IPC primitives. Short of MINIX on *breadth* (one server,
-not many) and *topology* (flat trust, no capability graph).
+**Verdict:** structurally a microkernel on the services it actually moved,
+using the right IPC primitives and now an enforced (if coarse, static) IPC
+capability topology. Short of MINIX mainly on *breadth* (two servers, not
+a full fleet) and on capability *delegation* (the topology is fixed per
+slot, not granted at runtime).
 
 ---
 
@@ -258,16 +264,16 @@ real-world hardening behind the design.
 
 | Dimension | MINIX | Helix | Ouroboros (today) |
 |---|---|---|---|
-| Services outside the kernel | Full fleet (disk, net, FS, all drivers) as separate address-space processes | Modules outside the TCB, but within one address space | **One** — the FAT32 filesystem server (`fsd`), a real separate EL0 process |
+| Services outside the kernel | Full fleet (disk, net, FS, all drivers) as separate address-space processes | Modules outside the TCB, but within one address space | **Two** — the FAT32 filesystem server (`fsd`) and the console server (`cond`), real separate EL0 processes |
 | Isolation mechanism | Separate address spaces (hardware) | Rust memory safety + hot-reload bookkeeping (no hardware boundary between modules) | **Per-task MMU page-table views (hardware), injection-verified** + validated syscall pointers |
 | IPC | Synchronous `SEND`/`RECEIVE`/`SENDREC`, fixed 64-byte messages | Trait-boundary calls + IPC queuing in the scheduler | Synchronous `MSG_CALL` (sendrec-shaped, sender-filtered) + copy-by-mailbox; **grant/safecopy** capability for bulk data |
 | Bulk data across the boundary | `sys_safecopy` (capability-gated copy) | Within one address space (no cross-space copy needed) | **`GRANT` + `SAFECOPY`** — the same capability model as MINIX |
-| Crash recovery | RS restarts the crashed *process* from a clean slate | Self-heal: watchdog + health monitor + recovery, with attempted state migration | `restart_fsd` reloads the server, remounts from disk (state is disk-derived); **3-restart cap** |
-| Non-crashing hang recovery | Timeouts / RS health | Health checks for hangs (first-class) | **None** — no watchdog/heartbeat |
+| Crash recovery | RS restarts the crashed *process* from a clean slate | Self-heal: watchdog + health monitor + recovery, with attempted state migration | A supervisor registry reloads any crashed server from a kept image (fsd remounts from disk — state is disk-derived); **shared 3-restart cap** |
+| Non-crashing hang recovery | Timeouts / RS health | Health checks for hangs (first-class) | **Yes** — a passive heartbeat catches a *runnable* wedge; an active ping catches a *blocked* wedge |
 | Live code replacement | No (restart, not hot-swap) | **Yes** — pause/snapshot/swap/restore/rollback | No (reload same image) |
-| Supervision scope | Uniform (RS parents every boot-image process) | Uniform (self-heal framework) | **Special-cased** — only `fsd` |
-| Trust topology | Capability-gated endpoints between servers | Trait boundaries | **Flat** within EL0 — any task may message any task |
-| Kernel/policy split | Kernel is mechanism; PM/VFS/RS are policy | Explicit: `core/` (mechanism) vs. `subsystems/` + `modules_impl/` (policy) | **Partial** — the FS is out; scheduler, MMU, drivers, console are still kernel-resident |
+| Supervision scope | Uniform (RS parents every boot-image process) | Uniform (self-heal framework) | **Uniform** — a registry supervises every boot-image server (`fsd` + `cond`) |
+| Trust topology | Capability-gated endpoints between servers | Trait boundaries | **Capability send-mask** — a per-slot mask enforced at the IPC boundary restricts who each task may reach (static, no runtime delegation yet) |
+| Kernel/policy split | Kernel is mechanism; PM/VFS/RS are policy | Explicit: `core/` (mechanism) vs. `subsystems/` + `modules_impl/` (policy) | **Partial** — the FS and console are out; scheduler, MMU, and the remaining drivers are still kernel-resident |
 
 ---
 
@@ -276,22 +282,31 @@ real-world hardening behind the design.
 Not commitments — the natural next moves toward the fuller ideal, and the
 shape each would take given what already exists:
 
-1. **Move a second driver out of the kernel.** This is the single highest
-   -value proof: that `fsd` wasn't a one-off, and that the IPC +
-   grant/safecopy machinery generalizes. A console server or a block
-   server are the obvious candidates. Doing it a second time is what
-   turns "a microkernel on one service" into "a microkernel."
-2. **A general supervision / heartbeat mechanism.** Today `restart_fsd`
-   is bespoke. A uniform "any registered server can be health-checked and
-   restarted" facility — MINIX's RS, or Helix's self-heal pipeline in
-   miniature — would catch the *wedged* (looping, non-faulting) failure
-   mode that currently has no answer, and would make the recovery story
-   apply to whatever the step above moves out.
-3. **A capability model for who-may-call-whom.** The flat "any task can
-   message any task" trust topology is the last big structural gap
-   against MINIX. A per-task table of permitted endpoints would make the
-   isolation *topological*, not just memory-level.
-4. **The smaller, already-recorded items** that harden the isolation
+The first three moves on this list have since shipped, in order:
+
+- ~~**Move a second driver out of the kernel.**~~ **Done** — the console
+  server (`cond`) is a second real EL0 process, proving the `fsd` pattern
+  (IPC + grant/safecopy) generalizes.
+- ~~**A general supervision / heartbeat mechanism.**~~ **Done** — a
+  supervisor registry restarts any server (fsd + cond) on a crash; a
+  passive heartbeat catches a *runnable* wedge and an active ping catches
+  a *blocked* wedge.
+- ~~**A capability model for who-may-call-whom.**~~ **Done** — a per-slot
+  IPC send-mask enforced at the `MSG_SEND`/`MSG_CALL` boundary makes the
+  isolation topological, not just memory-level.
+
+What's left, in rough order of payoff:
+
+1. **Runtime capability delegation.** The send-mask is static (a function
+   of slot). MINIX's grant mechanism lets a process hand another a
+   specific, revocable capability at runtime — needed for a spawned
+   program to reach an endpoint outside its default `{shell,fsd,cond}`
+   set (e.g. program-to-program pipes, or a program that needs its own
+   server).
+2. **More breadth** — a third component out (limited by the no-IOMMU DMA
+   constraint on the block transport), and the stdout-over-IPC payoff
+   (program-to-program pipes, `exec … > file`).
+3. **The smaller, already-recorded items** that harden the isolation
    itself: a stack **guard page** (turn silent stack-overflow corruption
    into a clean fault), and revisiting **per-task ASIDs** with a proven
    break-before-make sequence (the reverted optimization — see the

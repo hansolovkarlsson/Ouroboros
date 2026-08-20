@@ -36,20 +36,27 @@ addressed to the sentinel, is the ack). A shared per-boot restart cap
 degrades gracefully past it. See `CHANGELOG.md`. The prioritized next
 steps:
 
-1. **A capability model for who-may-call-whom.** Isolation is
-   MMU-enforced at the memory level, but the IPC topology is still flat —
-   any task may `msg_call` any task. A per-task table of permitted
-   endpoints would make isolation *topological*, the last big structural
-   gap against MINIX.
+**Recently completed (2026-08-20): a capability model for
+who-may-call-whom.** The IPC topology is no longer flat — a per-slot
+capability set (a **send-mask** of which slots each task may initiate IPC
+to, plus resource caps for the disk/console gates) is enforced at the
+`MSG_SEND`/`MSG_CALL` boundary, so a task can only reach the endpoints its
+capabilities allow. Isolation is now *topological*, not just memory-level —
+the last big structural gap against MINIX. Because task-slot roles are
+static, capabilities are a pure function of slot (no stored state); a
+reply exemption keeps request/response working (a server replies to a
+caller blocked in a call to it regardless of the mask). Static policy only
+for now — runtime delegation (granting a spawned program a capability it
+doesn't get by default) is the natural follow-up. See `CHANGELOG.md`.
 
-2. **Finish the stdout-over-IPC payoff the console server enabled.** A
+1. **Finish the stdout-over-IPC payoff the console server enabled.** A
    program's output already flows over IPC (to `cond`); routing a
    program's output stream to the shell instead would unlock
    **program-to-program pipes** (`a | b` where both are programs) and
    **`exec ... > file`** — the pipe/redirect items that are currently
    builtin-left-only because a task's own output wasn't capturable.
 
-3. **Smaller hardening, mostly recorded already:** a stack **guard page**
+2. **Smaller hardening, mostly recorded already:** a stack **guard page**
    (turn silent overflow into a clean fault) and a userland **heap**;
    revisiting **per-task ASIDs** with a proven break-before-make sequence
    (the reverted TLB optimization); and FAT32 **interior/random-access
@@ -527,8 +534,10 @@ phase:
   what matters most there (no UART console), on the user to test like
   every framebuffer milestone. See `CLAUDE.md`'s "Driver isolation, part
   3". **(Update: the general supervision/heartbeat mechanism named here
-  as the next step is now done - 2026-08-19, `supervisor.rs`; the next
-  microkernel step is the capability model for who-may-call-whom.)**
+  as the next step is now done - 2026-08-19, `supervisor.rs`; and the
+  capability model for who-may-call-whom that followed it is done too -
+  2026-08-20, IPC send-mask enforced at the `MSG_SEND`/`MSG_CALL`
+  boundary. See the "Recently completed" notes near the top.)**
 - **Grant/safecopy IPC - the enforced bulk-transfer primitive - is
   done** (confirmed end-to-end on both QEMU and real Parallels hardware:
   `cat /hello.bin` streamed a full 5784-byte binary off the USB stick,

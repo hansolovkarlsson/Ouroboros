@@ -5004,6 +5004,97 @@ cap is shared with the crash/runnable-wedge paths (a per-boot total per
 slot). And, unchanged: no journaling, so disk state a server corrupted
 mid-write before wedging stays corrupted.
 
+## The capability model: who-may-call-whom (IPC topology, enforced)
+
+Isolation was MMU-enforced at the *memory* level (per-task page tables,
+grant/safecopy) and fault-contained, but the IPC *topology* was still flat
+and trust-based: any task could `MSG_SEND`/`MSG_CALL` any task, and the
+privileged kernel gates were ad-hoc hardcoded slot checks
+(`current_task() == FSD_TASK` for `BLOCK_*`, `== CON_TASK` for the console
+device). Nearly every recent milestone's "still coarse" note named the
+same gap ("enforced at memory, trust-based at IPC"). This milestone makes
+isolation **topological**: a per-slot capability set, enforced at the IPC
+boundary, so a task can only reach the endpoints it's allowed to - the
+roadmap's last big structural gap vs MINIX.
+
+**The simplification that made it small: capabilities are a pure function
+of task slot.** Task-slot roles are static (0 shell, 1 idle, 2 fsd, 3
+cond, 4-5 spawnable), so a task's capabilities are a pure function of its
+slot - no stored table, no mutable state, no per-creation plumbing, and a
+restarted server or a spawned child gets the right caps automatically
+(fitting the kernel's no-heap discipline). The entire policy lives in one
+`tasks::caps_for_slot(slot) -> u32`: the low `NUM_TASKS` bits are the IPC
+**send-mask** (which slots this one may *initiate* a send/call to), the
+high bits are resource caps (`CAP_BLOCK` = may use `BLOCK_*`; `CAP_CON` =
+may use `CON_WRITE`/`CON_INFO`/`FB_*`). (Runtime capability *delegation* -
+a task granting a cap to another - would need mutable state and is
+explicitly future work; v1 is a static policy.)
+
+The policy, validated against every real IPC flow:
+
+| slot | role | send-mask | resource |
+|---|---|---|---|
+| 0 | shell | {2 fsd, 3 cond, 4, 5} | - |
+| 1 | idle | {} | - |
+| 2 | fsd | {3 cond} | `CAP_BLOCK` |
+| 3 | cond | {} | `CAP_CON` |
+| 4,5 | spawnable | {0 shell, 2 fsd, 3 cond} | - |
+
+**The reply exemption is what makes request/response work, and it's the
+subtle piece.** A server replies to a caller via `MSG_SEND(caller)`, and
+the caller is blocked in a `MSG_CALL` to that server
+(`Blocked(Message{from: Some(server)})`). Such a reply is *always* allowed
+regardless of the send-mask - it completes an authorized round trip rather
+than initiating a new one. This is the same "the client is blocked in a
+call to me" condition `SAFECOPY` already keys off, and it's what lets
+`cond` (send-mask `{}`) reply to any caller. So only *unsolicited* sends
+are mask-checked: `tasks::may_send(src, dest)` returns `true` if it's such
+a reply, else if `caps_for_slot(src)`'s send-mask has `dest`. Enforced in
+the `MSG_SEND` and `MSG_CALL` syscall arms, returning a new
+`MSG_ERR_DENIED`. The kernel's own supervisor ping bypasses this entirely
+(it calls `send_message` directly, not through the syscall boundary; its
+ack is intercepted before validation).
+
+**The one flow that shaped the policy - and why the child mask includes
+the shell:** `pong` (a spawned echo server) replies to a `send`/`recv`
+client via an *unsolicited* `MSG_SEND(0)` - the shell did `send` then a
+*separate* `recv`, so the shell isn't blocked in a call to pong, and the
+reply exemption does *not* fire. That send is mask-governed, so the child
+send-mask has to include slot 0. It's the specific non-reply
+server->client send the "every flow intact" gate had to prove.
+
+**Landed in two staged commits.** Stage 1 folded the two hardcoded
+resource gates into the capability vocabulary
+(`block_access_allowed`/`con_access_allowed` -> `cap_has(current,
+CAP_BLOCK/CAP_CON)`) - a pure refactor, equivalent by construction (fsd
+is the only `CAP_BLOCK` slot, cond the only `CAP_CON`), verified
+byte-identical (fsd still mounts/reads the disk, cond still renders all
+output). Stage 2 added the send-mask + `may_send` enforcement.
+
+**Confirmed on QEMU, zero `-d int` aborts across every run:**
+- **Every existing flow intact:** `selftest`, the full disk surface over
+  IPC (shell->fsd), all console output (shell->cond), the pipeline
+  (shell->child->cond), the pong echo (shell->child *and* pong's
+  unsolicited send->shell), `exec`/`ps` - no false denials.
+- **Denials fire (A/B, temp probe reverted):** `send 1` from the shell
+  (shell->idle, not in the shell's mask) -> `permission denied`; and a
+  temp-instrumented spawned `hello` refused a `MSG_SEND` to idle (outside
+  its `{shell,fsd,cond}` child mask) - proving the mask is enforced
+  against untrusted *spawned code*, the actual security point - while
+  permitted sends (the pong echo) succeed in the same run.
+
+**Still coarse, worth knowing before building on this:** the policy is
+*static* (a pure function of slot) - no runtime delegation, so a spawned
+program that legitimately needs to reach an endpoint outside
+`{shell,fsd,cond}` (another server, a sibling for program-to-program
+pipes) can't be granted it yet; that's the natural follow-up (a
+spawn-with-capabilities API, or a delegation primitive). `GRANT`/`SAFECOPY`
+were left as-is - already the enforced-capability model for bulk transfer
+(the grant + active call *is* the capability). And the send-mask is
+coarse-grained per-slot: it says *whether* A may message B, not *what* A
+may say (message contents are still trusted, same as every pointer the
+syscall boundary already trusts within the single address space).
+
 ## Commands
 
 ```sh

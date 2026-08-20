@@ -402,7 +402,7 @@
         <div class="icell">
           <div class="num">02 · communication</div>
           <h3>Messages by copy</h3>
-          <p>Tasks never share memory. A message is copied — out of the sender, into the kernel, into the destination's mailbox. Small, bounded, safe by construction: no pointer from one task is ever dereferenced by another.</p>
+          <p>Tasks never share memory. A message is copied — out of the sender, into the kernel, into the destination's mailbox. Small, bounded, safe by construction: no pointer from one task is ever dereferenced by another. And a task may only message the endpoints its per-slot capability mask allows — a spawned program can reach the two servers and the shell, not arbitrary tasks — so isolation is topological, not just memory-level.</p>
         </div>
         <div class="icell">
           <div class="num">03 · bulk data</div>

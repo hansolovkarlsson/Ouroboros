@@ -441,13 +441,13 @@ the way hand-duplicated numbers did before this crate existed.
 | 20 | `fg` | task index | `0`, `TASK_ERR_PROTECTED`, or `TASK_ERR_NO_SUCH_TASK` | Hands keyboard ownership to the given task (the wake-check's input-owner state, previously hardcoded to task 0). The caller's own next blocking read then waits until the foregrounded task exits, is killed, or the user types Ctrl+C (`0x03`, intercepted at the keyboard-poll choke point whenever a non-boot-shell task owns the keyboard — ownership reverts to task 0 and the byte is swallowed; reclamation, not a signal). Idle can't be foregrounded; index 0 is an explicit "give it back" |
 | 21 | `wait` | task index | exit status `0..=255`, `TASK_KILLED_STATUS` (`0x100`), `WAIT_INTERRUPTED`, `TASK_ERR_PROTECTED`, or `TASK_ERR_NO_SUCH_TASK` | Blocks until the task dies (via `WaitReason::TaskExit` — the same blocking machinery as `read_char`), or returns immediately if it's already a zombie. **Collecting the status is what reaps**: an exited task holds its slot as `Zombie(status)` until waited (`kill` reaps immediately instead — the killer already knows the outcome). Ctrl+C interrupts a wait (the target keeps running); other typing during a wait is discarded. Waiting on 0–2/yourself is refused (guaranteed deadlock — those tasks never die) |
 | 22 | `mount` | replace flag | `0` (a USB device was installed), `MOUNT_ALREADY`, or `MOUNT_NO_DEVICE` | **The device half only** since the filesystem moved to userland: rescans the xHCI ports for storage devices that attached after boot (`xhci::rescan_ports`) and installs the first mass-storage device (`usb_msd.rs`, Bulk-Only Transport + SCSI) as the kernel's block device for the server to reach via `block_read`/`block_write`. Actually mounting what it holds is the server's `FSOP_MOUNT` request; the shell's `mount` command composes the two, server first. `replace != 0` allows swapping out an installed-but-unmountable device (e.g. `make run`'s FAT16 vvfat disk) — callers pass it only after the server confirms nothing is mounted. The Parallels workflow is unchanged: boot, wait, `mount` |
-| 23 | `msg_send` | dest task, buf ptr, len | `0`, `TASK_ERR_NO_SUCH_TASK`, `MSG_ERR_TOO_BIG` (>`MSG_MAX_LEN`, 768 bytes), or `MSG_ERR_FULL` | IPC: delivers straight into a matching blocked receiver's buffer (direct delivery), or into the destination's bounded mailbox (4 pending max). No shared memory, no blocking sends. **A zero-length message is legal** — the end-of-stream marker in the shell's pipeline convention (data messages, then one empty message meaning "finish and exit"). A dead task's queued mail is cleared on exit/kill/fault |
+| 23 | `msg_send` | dest task, buf ptr, len | `0`, `TASK_ERR_NO_SUCH_TASK`, `MSG_ERR_DENIED` (the capability send-mask forbids reaching `dest` — see "IPC capabilities" below), `MSG_ERR_TOO_BIG` (>`MSG_MAX_LEN`, 768 bytes), or `MSG_ERR_FULL` | IPC: delivers straight into a matching blocked receiver's buffer (direct delivery), or into the destination's bounded mailbox (4 pending max). No shared memory, no blocking sends. **A zero-length message is legal** — the end-of-stream marker in the shell's pipeline convention (data messages, then one empty message meaning "finish and exit"). A dead task's queued mail is cleared on exit/kill/fault |
 | 24 | `msg_recv` | buf ptr, len | `(sender << 32) \| copied_len`, or `RECV_INTERRUPTED` (Ctrl+C) | Blocks until a message arrives (`WaitReason::Message` — the third user of the blocking machinery), copying the oldest queued message into the buffer |
 | 25 | `msg_try_recv` | buf ptr, len | same as `msg_recv`, or `NO_MSG` | The non-blocking sibling, same pairing as `try_read_char`/`read_char` |
 | 26 | `block_info` | — | capacity in sectors, `BLOCK_ERR_NO_DEVICE`, or `BLOCK_ERR_DENIED` | Raw block-device introspection for the filesystem server. **All three `block_*` syscalls are gated to task 2** (`FSD_TASK`): any other caller gets `BLOCK_ERR_DENIED` — the kernel holds the device, and exactly one task may ask it to touch the disk |
 | 27 | `block_read` | LBA, buf ptr | `0` or a `BLOCK_ERR_*` code | Reads exactly one 512-byte sector (the length is implied, not passed). Same `FSD_TASK` gate |
 | 28 | `block_write` | LBA, buf ptr | `0` or a `BLOCK_ERR_*` code | Writes exactly one 512-byte sector. Same gate |
-| 29 | `msg_call` | dest task, req ptr, req len, reply ptr | `(dest << 32) \| reply_len`, `RECV_INTERRUPTED`, `TASK_ERR_NO_SUCH_TASK`, `TASK_ERR_PROTECTED` (self-call), or a `MSG_ERR_*` code | Synchronous request/response (MINIX's `sendrec` shape): sends the request, then blocks for a reply **from `dest` specifically** — a message from any other task stays queued for a later `msg_recv` instead of being mistaken for the reply (`WaitReason::Message`'s sender filter). With direct delivery on both hops (`tasks::send_message` copies straight into a matching blocked receiver's buffer and wakes it), a call to a server blocked in `msg_recv` round-trips without waiting for a tick on either side. The reply buffer is a fixed `MSG_MAX_LEN` (768) bytes — the 4-argument ABI is exactly full |
+| 29 | `msg_call` | dest task, req ptr, req len, reply ptr | `(dest << 32) \| reply_len`, `RECV_INTERRUPTED`, `TASK_ERR_NO_SUCH_TASK`, `TASK_ERR_PROTECTED` (self-call), `MSG_ERR_DENIED` (the capability send-mask forbids calling `dest`), or a `MSG_ERR_*` code | Synchronous request/response (MINIX's `sendrec` shape): sends the request, then blocks for a reply **from `dest` specifically** — a message from any other task stays queued for a later `msg_recv` instead of being mistaken for the reply (`WaitReason::Message`'s sender filter). With direct delivery on both hops (`tasks::send_message` copies straight into a matching blocked receiver's buffer and wakes it), a call to a server blocked in `msg_recv` round-trips without waiting for a tick on either side. The reply buffer is a fixed `MSG_MAX_LEN` (768) bytes — the 4-argument ABI is exactly full |
 | 30 | `spawn_stage` | offset, chunk ptr, chunk len | `0` or `SPAWN_ERROR` | Copies one chunk of a program image into the kernel's spawn staging buffer — the feed half of the two-step `spawn` (16) |
 | 31 | `grant` | grantee task, buf ptr, buf len, dir | `0` or `GRANT_ERR` | Records, in the caller's own single per-task grant slot, that `grantee` may bulk-copy the exact `buf` (which must lie in the caller's own region) in direction `dir` (`GRANT_READ`/`GRANT_WRITE`). The capability half of the enforced bulk-transfer primitive — `buf len` capped at `SAFECOPY_MAX` (2048). See "Grant/safecopy" below |
 | 32 | `safecopy` | client task, client offset, local buf ptr, len, **dir (5th arg, from the saved frame's x4)** | `len` or `SAFECOPY_ERR` | A *server* copies `len` bytes between a client's granted buffer and its own `local buf`, in direction `dir`. Authorized only when the client's grant names this server and permits the direction, the client is *currently* blocked in a `msg_call` to it, and both ranges are in bounds. Not task-gated (unlike `block_*`): the grant plus the active call is the whole capability. See "Grant/safecopy" below |
@@ -505,6 +505,46 @@ sparse gaps). The shell's `fs_*` wrapper functions
 This inline-payload design is the first half of MINIX's — small
 messages plus kernel-mediated copies — and the grant/safecopy primitive
 below is the second half.
+
+### IPC capabilities — who-may-call-whom
+
+Memory isolation is MMU-enforced, but the IPC *topology* is enforced too:
+a task can only initiate a `msg_send`/`msg_call` to the endpoints its
+capabilities allow. Because task-slot roles are static (0 shell, 1 idle,
+2 fsd, 3 cond, 4–5 spawnable), capabilities are a **pure function of
+slot** — no stored table, no runtime state — living entirely in
+`tasks::caps_for_slot(slot)`. A slot's capability word packs a **send-mask**
+(which slots it may initiate IPC to) plus resource bits (`CAP_BLOCK` gates
+`block_*` to the filesystem server; `CAP_CON` gates `con_write`/`con_info`/
+`fb_*` to the console server — the two device gates, formerly hardcoded
+`== FSD_TASK`/`== CON_TASK` checks, are the resource half of this same
+model).
+
+The policy:
+
+| slot | role | may initiate IPC to | resource caps |
+|---|---|---|---|
+| 0 | shell | fsd, cond, spawned children (4, 5) | — |
+| 1 | idle | — | — |
+| 2 | fsd | cond (its logs) | `CAP_BLOCK` |
+| 3 | cond | — (only replies) | `CAP_CON` |
+| 4, 5 | spawnable | shell, fsd, cond | — |
+
+Enforced at the `msg_send`/`msg_call` boundary by `tasks::may_send(src,
+dest)`, which returns `MSG_ERR_DENIED` unless the send is permitted. Two
+ways it's permitted: the **reply exemption** — if `dest` is currently
+blocked in a `msg_call` to `src` (`Blocked(Message{from: Some(src)})`),
+the send completes that authorized round trip and is always allowed
+regardless of the mask (the same condition `safecopy` uses, and what lets
+`cond`, whose send-mask is empty, reply to any caller) — otherwise the
+send-mask must permit `dest`. Only *unsolicited* sends are mask-checked.
+The kernel's supervisor ping bypasses this (it calls `send_message`
+directly, not through the syscall boundary).
+
+The policy is **static** (no runtime delegation yet): a spawned program
+gets the fixed `{shell, fsd, cond}` mask and can't be granted more, which
+is the natural next step. `grant`/`safecopy` (below) are the separate,
+already-delegable capability for bulk *data*.
 
 ### Grant/safecopy — enforced capability-based bulk transfer
 

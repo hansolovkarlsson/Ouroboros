@@ -262,6 +262,9 @@
         <dt id="msgcall">msg_call / sendrec</dt>
         <dd>The synchronous request/reply IPC primitive (MINIX's <code class="inline">sendrec</code> shape): send a request to a server and block for <em>its</em> reply specifically. The kernel switches straight to the destination server so the round trip completes without waiting for a scheduler tick.</dd>
 
+        <dt id="capability-model">Capability model / send-mask</dt>
+        <dd>Who-may-call-whom, enforced. Beyond memory isolation, each task has a per-slot <em>send-mask</em> — the set of endpoints it may initiate IPC to — checked at the <code class="inline">msg_send</code>/<code class="inline">msg_call</code> boundary, so a spawned program can reach only the two servers and the shell, not arbitrary tasks or the privileged device gates. A reply to a caller blocked in a call is always allowed (so servers reply freely). Because task roles are static, the whole policy is a pure function of slot — no stored state. Isolation is topological, not just memory-level; MINIX's send masks in miniature. Static for now (no runtime delegation).</dd>
+
         <dt id="grant-safecopy">grant / safecopy</dt>
         <dd>A capability-based way to move <em>bulk</em> data between two isolated tasks (messages are small). A client grants a server permission to copy an exact buffer, in one direction, only while its call is live; the kernel enforces the server can touch only those bytes. This is MINIX's <code class="inline">safecopy</code>.</dd>
 
