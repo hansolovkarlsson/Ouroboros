@@ -178,16 +178,26 @@ same day as the isolation work, which is not a coincidence.
   survivors keep running. (Tasks 0 and 1 faulting still halt honestly;
   nothing meaningful survives the keyboard owner's or the idle task's
   death.)
-- **The filesystem server is supervised** — MINIX's reincarnation
-  server, minimal edition. On a task-2 fault, `syscall::restart_fsd`
-  reloads `fsd`'s image (kept in a kernel static, `FSD_IMAGE`, precisely
-  because the crashed server *was* the filesystem you'd otherwise need in
-  order to reload it) into a fresh region, and the new server re-runs its
-  own startup: probe the device, remount from disk. **Its state was
-  always disk-derivable, which is what makes this real recovery rather
-  than a restart that loses everything.** A 3-restart-per-boot cap guards
-  crash loops; past it the kernel degrades gracefully (slot stays
-  `Unused`, the same path as a missing `FSD.BIN`).
+- **Servers are supervised, uniformly** — MINIX's reincarnation server,
+  minimal edition, generalized (`kernel/src/supervisor.rs`). A registry
+  keeps each supervised server's ELF image from boot (`fsd` *and* `cond`,
+  each registered at load — kept precisely because one crashed server
+  *is* the filesystem you'd otherwise need in order to reload it) and
+  restarts one from that copy on a fault, into a fresh region; the new
+  server re-runs its own startup (probe the device, remount from disk).
+  **Its state was always disk-derivable, which is what makes this real
+  recovery rather than a restart that loses everything.** A shared
+  3-restart-per-boot cap guards loops; past it the kernel degrades
+  gracefully (a dead `fsd` slot stays `Unused`, the same path as a
+  missing `FSD.BIN`; a dead `cond` falls back to the kernel's `PUTC`
+  console).
+- **A wedged server is caught, not just a crashed one.** A server stuck
+  in an infinite loop never faults, so the crash path can't see it. A
+  passive **heartbeat** in the scheduler tick catches it: a healthy
+  server keeps returning to a `Blocked` state, so staying continuously
+  `Runnable` for ~2.5s is the wedge signal — restarted on the same path
+  as a crash, with no server-side changes. This is exactly the "health
+  checks for hangs, not just crashes" primitive Helix names.
 - **Clients don't hang on a dying server.** A task blocked mid-`MSG_CALL`
   to a server that dies is woken with `TASK_ERR_NO_SUCH_TASK`
   (`fail_calls_to`, wired into all three death paths — exit, kill, and
@@ -197,17 +207,19 @@ same day as the isolation work, which is not a coincidence.
 
 ### Where it's short of Helix (and of MINIX's RS)
 
-- **Only `fsd` is supervised.** Recovery is special-cased for one task,
-  not a general policy engine watching every component. MINIX's RS and
-  Helix's self-heal framework supervise uniformly. A crash in any
-  *kernel-resident* driver (xHCI, virtio-blk, console) still has no
-  containment at all — it's EL1 code, and a bug there takes the system
-  down exactly as the research notes describe.
-- **No wedged-server detection.** A server stuck in an infinite loop —
-  *not* faulting — is invisible. Catching that needs a watchdog /
-  heartbeat, which doesn't exist. Ctrl+C rescues a blocked *client*, but
-  nothing rescues a looping *server*. Helix names exactly this (health
-  checks for hangs, not just crashes) as a first-class primitive.
+- **Kernel-resident drivers still have no containment.** Supervision now
+  covers the userland servers uniformly (`fsd` and `cond`, via the
+  `supervisor.rs` registry — no longer special-cased to one task), and
+  catches both crashes and wedges. But a crash in any *kernel-resident*
+  driver (xHCI, virtio-blk/the block transport) still takes the system
+  down — it's EL1 code, and the no-IOMMU DMA constraint is what keeps the
+  block transport in the kernel for now (see `roadmap.md`).
+- **The heartbeat is passive, so a *deadlocked-while-blocked* server is
+  still invisible.** The wedge detector sees a server stuck `Runnable`;
+  it can't see one blocked forever on a call that never completes (rarer,
+  and `fail_calls_to` already handles the dead-*target* case). An active
+  health ping (a `*_PING` op servers ack) is the stronger signal and the
+  recorded next refinement. Ctrl+C still rescues a blocked *client*.
 - **Restart is not hot-reload.** Helix's headline is *live* replacement
   of a running module with new code, with state snapshot/restore and
   automatic rollback. Ouroboros reloads the *same* image from a static,

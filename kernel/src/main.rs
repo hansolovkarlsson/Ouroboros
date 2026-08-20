@@ -19,6 +19,7 @@ mod loader;
 mod madt;
 mod mmu;
 mod pci;
+mod supervisor;
 mod syscall;
 mod tasks;
 mod timer;

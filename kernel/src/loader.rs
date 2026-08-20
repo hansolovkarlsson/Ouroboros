@@ -319,11 +319,12 @@ pub fn load_fsd() -> Result<LoadedProgram, LoaderError> {
     if program_bytes.is_empty() {
         return Err(LoaderError::ProgramEmpty);
     }
-    // Keep the raw image for crash recovery - the kernel can restart a
-    // faulted filesystem server from this copy without needing a
-    // filesystem to load it from (see syscall::restart_fsd). A too-big
-    // image just means no restart capability, logged, not a failure.
-    if !crate::syscall::stash_fsd_image(&program_bytes) {
+    // Register the raw image with the supervisor for crash/wedge
+    // recovery - the kernel can restart a faulted or wedged filesystem
+    // server from this copy without needing a filesystem to load it from
+    // (see supervisor::restart). A too-big image just means no restart
+    // capability, logged, not a failure.
+    if !crate::supervisor::register(syscall_abi::FSD_TASK as usize, &program_bytes) {
         log::warn!(
             "Ouroboros kernel: FSD.BIN too large to keep for crash recovery - the server won't be restartable this boot"
         );
@@ -338,11 +339,10 @@ pub fn load_fsd() -> Result<LoadedProgram, LoaderError> {
 const CON_PATH: &str = "\\EFI\\ORBS\\COND.BIN";
 
 /// Loads the console server ([`CON_PATH`]) the same way [`load_fsd`]
-/// loads the filesystem server. A missing/broken COND.BIN is not fatal
-/// (the caller logs and boots on with the kernel's own console handling
-/// all output), unlike task 0's program. No crash-recovery image is
-/// stashed yet - console-server supervision is a later, optional stage
-/// (see the plan); a fault in it currently just leaves the slot dead.
+/// loads the filesystem server, and registers it with the supervisor for
+/// crash/wedge recovery too. A missing/broken COND.BIN is not fatal (the
+/// caller logs and boots on with the kernel's own console handling all
+/// output), unlike task 0's program.
 pub fn load_cond() -> Result<LoadedProgram, LoaderError> {
     let fs_proto = boot::get_image_file_system(boot::image_handle()).map_err(LoaderError::Protocol)?;
     let mut fs = FileSystem::new(fs_proto);
@@ -350,6 +350,11 @@ pub fn load_cond() -> Result<LoadedProgram, LoaderError> {
     let program_bytes = fs.read(path.as_ref()).map_err(LoaderError::Cond)?;
     if program_bytes.is_empty() {
         return Err(LoaderError::ProgramEmpty);
+    }
+    if !crate::supervisor::register(syscall_abi::CON_TASK as usize, &program_bytes) {
+        log::warn!(
+            "Ouroboros kernel: COND.BIN too large to keep for crash recovery - the console server won't be restartable this boot"
+        );
     }
     load_elf_into_el0_region(&program_bytes)
 }

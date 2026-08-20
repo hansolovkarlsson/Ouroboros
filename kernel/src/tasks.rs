@@ -1221,6 +1221,43 @@ pub unsafe fn on_tick(frame: *mut Context) {
         }
     }
 
+    // Heartbeat: catch a supervised server (fsd/cond) wedged in a loop -
+    // it never returns to a Blocked state and never faults, so the crash
+    // path can't see it. A healthy server (idle in recv, or briefly busy)
+    // is observed Blocked; a wedged one stays Runnable. On a wedge,
+    // restart it on the exact teardown path the fault handler uses.
+    // `slot` is a real index passed to is_supervised/heartbeat/restart/
+    // task_region, not just an array subscript.
+    #[allow(clippy::needless_range_loop)]
+    for slot in 0..NUM_TASKS {
+        if !crate::supervisor::is_supervised(slot) {
+            continue;
+        }
+        let blocked = matches!(unsafe { *STATES[slot].0.get() }, TaskState::Blocked(_));
+        if crate::supervisor::heartbeat(slot, blocked) {
+            crate::console::println!("Ouroboros kernel: server slot {slot} wedged (no progress) - restarting");
+            let (base, size) = task_region(slot);
+            free_runtime_region(base, size);
+            revert_input_owner_if(slot);
+            fail_calls_to(slot);
+            if slot == current {
+                // The wedged server is the interrupted task: discard its
+                // frame and switch away, exactly like the fault handler.
+                unsafe { kill_current_and_switch(frame) };
+                crate::supervisor::restart(slot);
+                // SAFETY: IRQs masked for the whole tick, single core -
+                // same contract the fault handler's rebuild relies on.
+                unsafe { crate::mmu::rebuild_with_el0_regions(el0_regions()) };
+                return;
+            }
+            // Not the current task: tear it down in place, leave `current`
+            // running, and fall through to the ordinary round-robin.
+            kill_task(slot);
+            crate::supervisor::restart(slot);
+            unsafe { crate::mmu::rebuild_with_el0_regions(el0_regions()) };
+        }
+    }
+
     let next = next_runnable(current);
     if next == current {
         // Nothing else runnable - stay put rather than pointlessly saving

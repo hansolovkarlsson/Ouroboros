@@ -224,22 +224,38 @@ boot, slot 2 stays `Unused`, and every request fails with
 `TASK_ERR_NO_SUCH_TASK` — which the shell reports with its ordinary
 no-filesystem message.
 
-**A crashed server is restarted, not fatal** (the supervision half of
-EL0 fault isolation — MINIX's reincarnation server, minimal edition):
-`loader.rs` keeps FSD.BIN's raw bytes in a kernel static at boot
-(128KB cap), and the fault handler restarts a faulted server from that
-copy (`syscall::restart_fsd`) — no filesystem needed to reload it,
-which matters since the crashed server *was* the filesystem. The
-client whose call the server died under gets a cleanly failed call
-(the shell shows its no-filesystem message once); the fresh server
-re-runs its own startup and remounts from disk — all its state was
-always derivable from disk, which is what makes this a real recovery.
-A per-boot cap (3 restarts) guards against crash loops: past it, the
-kernel gives up and slot 2 stays `Unused`, the same degradation as a
-missing FSD.BIN. What this doesn't cover: a *wedged* (looping,
-non-faulting) server — no watchdog exists, and Ctrl+C remains the
-rescue for a client blocked calling one; and disk state a crashing
-server corrupted mid-write — there's no journaling.
+**A failed server is restarted, not fatal** — general server
+supervision (MINIX's reincarnation server / Helix's self-heal, minimal
+edition), owned by `kernel/src/supervisor.rs`. A registry keeps each
+supervised server's raw ELF image from boot (`loader.rs` registers both
+`fsd` and `cond` via `supervisor::register`; 128KB cap each), and
+restarts one from that copy on either failure mode — no filesystem
+needed to reload it, which matters since one of the servers *is* the
+filesystem:
+
+- **A crash.** The EL0-fault handler, on a fault in any supervised slot
+  (not just fsd — `cond` recovers too), tears the task down and calls
+  `supervisor::restart`.
+- **A wedge.** A server stuck in an infinite loop never faults, so the
+  crash path can't see it. A passive **heartbeat** in `tasks::on_tick`
+  catches it: a healthy server keeps returning to a `Blocked` state
+  (idle in `msg_recv`, or briefly busy), so staying continuously
+  `Runnable` for ~2.5s (128 ticks) is the wedge signal — no server
+  changes, no new ABI. It restarts on the same teardown path as a crash.
+
+The client whose call the server died under gets a cleanly failed call
+(`fail_calls_to`; the shell shows its no-filesystem message once); the
+fresh server re-runs its own startup and remounts from disk — all its
+state was always derivable from disk, which is what makes this a real
+recovery. A shared per-boot cap (3 restarts, covering crashes *and*
+wedges) guards against loops: past it the kernel gives up and the slot
+stays `Unused` (a dead `fsd` degrades like a missing FSD.BIN; a dead
+`cond` falls back to the kernel's own `PUTC` console). What this doesn't
+cover: a server *deadlocked while blocked* (waiting forever on a call
+that never completes) — the passive heartbeat only sees a `Runnable`
+wedge, so an active health ping is the real fix (deferred), and Ctrl+C
+remains the rescue for a *client* blocked calling one; and disk state a
+crashing server corrupted mid-write — there's no journaling.
 
 ### The console server (`cond/`) — the second component moved out of the kernel
 

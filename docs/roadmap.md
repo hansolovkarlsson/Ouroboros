@@ -20,27 +20,32 @@ hardware-adjacent component), and userland output is now an IPC stream.
 The prioritized next steps, roughly in order of value (details in the
 parking lot below and in `microkernel-comparison.md`):
 
-1. **A general supervision / heartbeat mechanism.** Today the restart is
-   bespoke to `fsd`. A uniform "any registered server can be
-   health-checked and restarted" facility (MINIX's reincarnation server /
-   Helix's self-heal, in miniature) would generalize it to `cond` and
-   anything moved out next, and — the real gap — catch a *wedged*
-   (looping, non-faulting) server, which nothing detects now.
+**Recently completed (2026-08-19): a general supervision / heartbeat
+mechanism** (`kernel/src/supervisor.rs`). Crash recovery is no longer
+bespoke to `fsd` — a registry supervises both `fsd` and `cond` (and up
+to 4 servers), restarting either on a fault; and a passive **heartbeat**
+in `on_tick` now catches a *wedged* (looping, non-faulting) server — the
+gap this item named — by observing that a healthy server keeps returning
+to a `Blocked` state while a wedged one stays `Runnable`. A shared
+per-boot restart cap degrades gracefully past it. The remaining
+refinement here is an **active health ping** (a `*_PING` op servers ack)
+to also catch a server *deadlocked while blocked*, which the passive
+heartbeat can't see. See `CHANGELOG.md`. The prioritized next steps:
 
-2. **A capability model for who-may-call-whom.** Isolation is
+1. **A capability model for who-may-call-whom.** Isolation is
    MMU-enforced at the memory level, but the IPC topology is still flat —
    any task may `msg_call` any task. A per-task table of permitted
    endpoints would make isolation *topological*, the last big structural
    gap against MINIX.
 
-3. **Finish the stdout-over-IPC payoff the console server enabled.** A
+2. **Finish the stdout-over-IPC payoff the console server enabled.** A
    program's output already flows over IPC (to `cond`); routing a
    program's output stream to the shell instead would unlock
    **program-to-program pipes** (`a | b` where both are programs) and
    **`exec ... > file`** — the pipe/redirect items that are currently
    builtin-left-only because a task's own output wasn't capturable.
 
-4. **Smaller hardening, mostly recorded already:** a stack **guard page**
+3. **Smaller hardening, mostly recorded already:** a stack **guard page**
    (turn silent overflow into a clean fault) and a userland **heap**;
    revisiting **per-task ASIDs** with a proven break-before-make sequence
    (the reverted TLB optimization); and FAT32 **interior/random-access
@@ -469,7 +474,10 @@ phase:
   with the shell running on; fsd crashed mid-call four times - three
   restarts each followed by a working remount, then the capped
   give-up; a task-0 fault still halting cleanly. Not covered,
-  deliberately: a wedged (looping, non-faulting) server - no watchdog;
+  deliberately: a wedged (looping, non-faulting) server - no watchdog
+  **(update: a wedged server IS caught now, by the 2026-08-19 heartbeat
+  in `supervisor.rs`; the crash-recovery here was also generalized past
+  fsd to cover `cond` - see the "Recently completed" note near the top)**;
   and no journaling for disk state corrupted mid-write. Pipelines
   (`builtin | program`, data streaming between processes over IPC with
   an empty-message EOF convention and a real-tick timeout kill for
@@ -514,9 +522,9 @@ phase:
   **Real-Parallels confirmation is pending** - the framebuffer backend is
   what matters most there (no UART console), on the user to test like
   every framebuffer milestone. See `CLAUDE.md`'s "Driver isolation, part
-  3". After this, the next microkernel steps are a general supervision/
-  heartbeat mechanism (generalizing `fsd`'s bespoke restart) and a
-  capability model for who-may-call-whom.
+  3". **(Update: the general supervision/heartbeat mechanism named here
+  as the next step is now done - 2026-08-19, `supervisor.rs`; the next
+  microkernel step is the capability model for who-may-call-whom.)**
 - **Grant/safecopy IPC - the enforced bulk-transfer primitive - is
   done** (confirmed end-to-end on both QEMU and real Parallels hardware:
   `cat /hello.bin` streamed a full 5784-byte binary off the USB stick,

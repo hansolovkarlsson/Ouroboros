@@ -484,8 +484,11 @@ extern "C" fn rust_el0_fault_handler(frame: *mut Context) {
     // SAFETY: `frame` is the live trap frame of this very fault (the
     // "4:" trampoline's contract).
     unsafe { tasks::kill_current_and_switch(frame) };
-    if current as u64 == syscall_abi::FSD_TASK {
-        syscall::restart_fsd();
+    // Any supervised server (the filesystem or console server) is
+    // restarted from its kept image - the generalized version of the
+    // fsd-only restart, now covering cond too. See supervisor.rs.
+    if crate::supervisor::is_supervised(current) {
+        crate::supervisor::restart(current);
     }
     // One rebuild covers both the dropped region and (if the server
     // was restarted) its fresh one.

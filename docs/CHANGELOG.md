@@ -7,6 +7,39 @@ what broke, how it was diagnosed), see `CLAUDE.md`; for *how* something
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## Server supervision + heartbeat: uniform crash recovery, and the first wedge detection
+
+Generalized fault tolerance from a bespoke fsd-only mechanism to a real
+supervision registry (MINIX's reincarnation server / Helix's self-heal,
+in miniature). New module `kernel/src/supervisor.rs` keeps each
+supervised server's boot ELF image and restarts it on either failure
+mode: a **crash** (the EL0-fault handler now restarts *any* supervised
+slot generically, not just fsd - so the console server `cond` recovers
+from a fault too, which it previously couldn't) or a **wedge** (a server
+stuck in an infinite loop, which never faults). Wedge detection is a
+passive **heartbeat** in `tasks::on_tick`: a healthy server keeps
+returning to a `Blocked` state (idle in `msg_recv`, or briefly busy), so
+staying continuously `Runnable` for ~2.5s (`WEDGE_TICKS = 128`) is the
+wedge signal - no server changes, no new ABI. Both failure modes restart
+on the same teardown path (`free_runtime_region` + `revert_input_owner_if`
++ `fail_calls_to` + reload from the kept image + mmu rebuild), with a
+shared per-boot restart cap (3) that degrades gracefully past it (a dead
+`cond` falls back to the kernel's `PUTC` console; a dead `fsd` degrades
+like a missing FSD.BIN).
+
+The fsd-only singletons in `syscall.rs` (`FSD_IMAGE`/`stash_fsd_image`/
+`restart_fsd`/`MAX_FSD_RESTARTS`/`FSD_RESTARTS`) were deleted and
+replaced by the registry; `loader.rs` registers both servers at boot.
+Verified on QEMU by temp fault/wedge injection (reverted after): the
+critical false-positive check (idle + bursts never trip a restart), cond
+crash+restart, cond wedge+restart, cond restart-cap "giving up" with
+graceful `PUTC` fallback, and fsd crash+wedge both recovering - then a
+clean full regression (selftest + disk surface, zero aborts, no
+supervisor events). The passive heartbeat can't catch a server
+*deadlocked while blocked* (an active health ping would - deferred); a
+real-Parallels recheck of a live `cond` recovery is the usual next step.
+See `CLAUDE.md`'s "Server supervision + heartbeat" for the full write-up.
+
 ## Console server: the console moves out of the kernel (rendering in userland)
 
 The second component moved out of the EL1 kernel (after the filesystem

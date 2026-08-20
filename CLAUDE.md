@@ -4129,7 +4129,13 @@ shell's `fs_call` maps it to `NO_FS`) - previously they waited
 forever, Ctrl+C being the only rescue.
 
 **Layer B - the filesystem server is supervised** (MINIX's
-reincarnation server, minimal edition). `loader::load_fsd` keeps
+reincarnation server, minimal edition). **(Update: this fsd-only
+machinery was later generalized into `kernel/src/supervisor.rs` -
+`FSD_IMAGE`/`stash_fsd_image`/`restart_fsd` no longer exist under those
+names; a registry now supervises both fsd and cond, and adds wedge
+detection on top of this crash path. See "Server supervision +
+heartbeat" below. The description here is the original fsd-only design,
+kept as accurate history.)** `loader::load_fsd` keeps
 FSD.BIN's raw bytes in a kernel static (`FSD_IMAGE`, 128KB cap) while
 boot services can still read the ESP - kept precisely because the
 crashed server *was* the filesystem that would otherwise be needed to
@@ -4750,6 +4756,129 @@ QEMU's RAM-backed `ramfb`; a Device-nGnRnE framebuffer (if Parallels maps
 it outside the RAM span) has stricter ordering rules and is unverified,
 the same open question the kernel's `fbconsole` already carried.
 
+## Server supervision + heartbeat: crash recovery for every server, and the first wedge detection
+
+Before this, fault tolerance was narrow and bespoke: crash recovery was
+**fsd-only** (`syscall::restart_fsd`, special-cased in the fault handler
+as `if current == FSD_TASK`), the console server `cond` had *no* recovery
+at all (a `cond` fault left slot 3 dead), and a server stuck in an
+infinite loop was never noticed by anything - the top microkernel gap
+`roadmap.md` and `microkernel-comparison.md` both named. This milestone
+(2026-08-19) builds the general mechanism - MINIX's reincarnation server
+/ Helix's self-heal in miniature: a registry of supervised servers,
+uniform crash recovery for all of them, and a **heartbeat** that catches
+a wedged server and restarts it on the same path as a crash. New module,
+`kernel/src/supervisor.rs`.
+
+**The registry** (`supervisor.rs`) generalizes the fsd-only machinery
+that used to live in `syscall.rs` (`FSD_IMAGE`/`stash_fsd_image`/
+`restart_fsd`/`MAX_FSD_RESTARTS`/`FSD_RESTARTS`, all deleted from there):
+a fixed `[Entry; MAX_SUPERVISED]` (4 slots), each holding a supervised
+server's `slot`, its raw ELF **image kept from boot** (`[u8; IMG_CAP]`,
+128KB - fsd is the biggest today, cond a few KB), a per-boot `restarts`
+count, and the heartbeat's `runnable_ticks`. The kept image is
+load-bearing for exactly the reason the fsd-only version already needed
+it: one of the servers *is* the filesystem, so a dead server can't be
+reloaded from disk - the kernel keeps its own copy. Same single-core
+`UnsafeCell`/`Sync` contract as the old `FSD_IMAGE` (filled once at boot,
+afterward touched only from the fault handler and `on_tick`, both
+IRQs-masked, never reentrant).
+
+**Stage 1 - generalized crash recovery** (mirrors the proven fault
+path). `loader.rs` registers *both* servers now
+(`supervisor::register(FSD_TASK, ...)` in `load_fsd`, and the new
+`supervisor::register(CON_TASK, ...)` in `load_cond`);
+`exceptions.rs::rust_el0_fault_handler` replaced its fsd special-case
+with the generic `if supervisor::is_supervised(current) {
+supervisor::restart(current) }`. `restart(slot)` is the generalized
+`restart_fsd`: reparse the kept image (`loader::elf_region_size` ->
+`allocate_runtime_region` -> `populate_region`), `install_task(slot,
+...)`, per-slot restart cap. The **caller** still does teardown + the
+mmu rebuild, the exact contract `restart_fsd` had with the fault handler.
+The headline new capability: **cond now recovers from a fault too**, not
+just fsd.
+
+**Stage 2 - the heartbeat** (the genuinely new detection, in the
+scheduler hot path). `tasks::on_tick`, before its round-robin switch,
+runs one cheap check per supervised slot: `blocked = matches!(*STATES[slot],
+Blocked(_))`, then `supervisor::heartbeat(slot, blocked)`. The detection
+is **passive by design** - a healthy server (idle in `msg_recv`, or
+briefly busy) keeps returning to a `Blocked` state; a wedged one stays
+`Runnable`. So `heartbeat` resets `runnable_ticks` on any `Blocked`
+observation and increments it otherwise, returning `true` exactly once
+(`== WEDGE_TICKS`, not `>=`, so a give-up past the cap leaves it climbing
+without re-firing) when the slot has been continuously `Runnable` for
+`WEDGE_TICKS` (128 ticks ≈ 2.5s at the 20ms tick - safely above any real
+request, which completes in far less than one tick). On a wedge, the
+restart runs on the **exact teardown path the fault handler uses**:
+`free_runtime_region` + `revert_input_owner_if` + `fail_calls_to`, then -
+if the wedged slot is the interrupted `current` -
+`kill_current_and_switch(frame)` + `restart` + `rebuild_with_el0_regions`
++ `return` (skip the normal switch, exactly like the fault handler);
+otherwise `kill_task(slot)` + `restart` + rebuild and fall through to the
+ordinary round-robin.
+
+**Passive, not an active ping - a deliberate trade-off, documented.**
+Reading task state needs *no server changes and no new ABI*: `cond`,
+`fsd`, and every future server get supervised for free. The cost is that
+it can't catch a server *blocked forever* on a deadlocked call (rarer,
+and `fail_calls_to` already rescues the dead-*target* case), and can't
+tell a genuine multi-second workload from a wedge - neither exists on
+this single-user, fast-request system. An active `*_PING` op the servers
+ack is the stronger signal and a clean future refinement, noted rather
+than built.
+
+**Confirmed on QEMU, every behavior, by temp fault/wedge injection
+(reverted after) - staged crash-recovery-first, per the plan:** the
+**critical false-positive check** first - boot, ~14s idle plus normal
+commands (`help`/`ls`/`cat`, render-heavy `help` bursts): *zero* wedge or
+restart events, shell responsive throughout (a healthy idle/busy server
+never trips). Then, with temp triggers: **cond crash** -> `EL0 FAULT
+task=3` -> `server slot 3 restarted (attempt 1/3)`, output working after;
+**cond wedge** -> `server slot 3 wedged (no progress) - restarting` ->
+restart; **cond restart cap** -> `failed more than 3 times this boot -
+giving up`, *and* output kept flowing afterward because the shell's
+`con_write` falls back to `PUTC` when cond is permanently dead (graceful
+degradation, same shape as a missing COND.BIN); **fsd crash** and **fsd
+wedge** both restart identically (the generalization preserving fsd's
+old behavior while adding the wedge path). A final clean regression
+(temp code fully reverted): `selftest` passes, the full disk surface
+(`mkdir`/`write`/`cat`/`cp`/`ls`/`rm`/`rmdir`) works, `uptime` advancing,
+**no supervisor events**, zero aborts in the `-d int` cross-check.
+
+**A real testing finding worth keeping (not a bug):** the shell writes
+its output to `cond` **byte-by-byte** (`putc` -> a 1-byte `DSPOP_WRITE`
+each), not batched - so a multi-byte magic string ("CRASHME") never
+arrives at `cond` as one contiguous payload, and an early trigger keyed
+on `windows(7)`/`len == 7` silently never fired. Proven by an
+unconditional-crash probe (crash on the *first* client `DSPOP_WRITE`),
+which showed `cond` faulting on the shell banner one character at a time
+(`O`, `u`, `r`, ... each its own message + restart). The working triggers
+keyed on a single distinctive typed byte instead. The takeaway for future
+`cond`-side testing: it sees the shell's output one byte per message.
+
+**Not re-confirmed on real Parallels hardware this round** - the crash/
+restart/heartbeat machinery is architecture-level and inert until a fault
+or wedge (no injection ships), and the console-server milestone already
+confirmed `cond` itself renders correctly on real Parallels; a real-
+hardware recheck (a genuine `cond` crash there recovering on the
+framebuffer) is the usual next step, on the user, same as every prior
+Parallels-facing change.
+
+**Still coarse, worth knowing before building on this:** the heartbeat is
+passive, so a server *deadlocked while `Blocked`* (waiting forever on a
+call that will never complete) isn't caught - only a `Runnable` wedge is;
+an active health ping is the real fix for that (deliberately deferred).
+The restart cap is a per-boot *total* per slot (crashes and wedges share
+it), not rate-based - a server that recovers fine for hours then fails
+once still counts against the same 3. A wedged server *past* the cap is
+left looping, its CPU share wasted honestly rather than killed (killing
+it outright, leaving the slot `Unused`, is the alternative - a dead FS
+server already degrades that way on the crash path). And supervision is
+still restart-from-a-kept-image only: no journaling, so on-disk state a
+server corrupted mid-write before dying stays corrupted (unchanged from
+the fsd-only recovery).
+
 ## Commands
 
 ```sh
@@ -4856,15 +4985,16 @@ kernel/
   src/font.rs        embedded public-domain 8x8 bitmap font (dhepper/font8x8), printable ASCII 0x20-0x7E only
   src/fbconsole.rs   text console rendered directly into the GOP framebuffer: glyph drawing, cursor, ptr::copy-based scroll - write-only, no ANSI parsing; now the kernel's *emergency/boot* console only (steady-state userland rendering moved to the cond server - see "Driver isolation, part 3"), see "GOP framebuffer console" above
   src/fbdev.rs       dumb framebuffer primitives for the console server: plot a run of glyph bitmaps (FB_BLIT), scroll (FB_SCROLL), clear (FB_CLEAR), all gated to CON_TASK - the pixel plumbing cond drives while it owns the font/cursor/wrap/scroll/ANSI logic, see "Driver isolation, part 3"
-  src/exceptions.rs  AArch64 exception vector table (VBAR_EL1) + fault reporting; SVC path (slot 8/"3:") saves x9 to a scratch stack slot before the EC check clobbers it (see "A real relocating loader" above) and saves/restores SP_EL0 at Context's real offset alongside ELR/SPSR, passing dispatch() the frame pointer itself (see "Blocking primitives" above); slot 8's non-SVC fall-through is the resumable EL0-fault path ("4:"/rust_el0_fault_handler) - kills just the faulting task, restarts a faulted filesystem server, see "EL0 fault isolation" above
+  src/exceptions.rs  AArch64 exception vector table (VBAR_EL1) + fault reporting; SVC path (slot 8/"3:") saves x9 to a scratch stack slot before the EC check clobbers it (see "A real relocating loader" above) and saves/restores SP_EL0 at Context's real offset alongside ELR/SPSR, passing dispatch() the frame pointer itself (see "Blocking primitives" above); slot 8's non-SVC fall-through is the resumable EL0-fault path ("4:"/rust_el0_fault_handler) - kills just the faulting task, and restarts it via supervisor::restart if it was a supervised server (fsd/cond), see "EL0 fault isolation" and "Server supervision + heartbeat" above
   src/mmu.rs         per-task translation-table views (one L0/L1/L2/L3 per scheduler slot; identity-mapped kernel/device shared, EL0 access to each task's own region only - enforced isolation, see "Per-task page tables" above), up to MAX_EL0_REGIONS (5) tasks/views, activate_task switches TTBR0+TLBI per context switch, an optional framebuffer device-block fallback, and (since "Dynamic task creation") a stashed memory map/extra-device list plus rebuild_with_el0_regions so install_identity_map can be called a second time at runtime - see "Dynamic task creation and exec()" above
   src/gic.rs         version-dispatching facade over gicv2.rs/gicv3.rs, selected by madt.rs's real discovery - see "MADT/GICv3" above
   src/gicv2.rs       GICv2 backend (distributor + memory-mapped CPU interface), addresses now passed in from madt::GicInfo instead of hardcoded
   src/gicv3.rs       GICv3 backend (redistributor wake/discovery, ICC_* system-register CPU interface) - confirmed working on QEMU and real Parallels hardware, see "MADT/GICv3" above
   src/timer.rs       ARM generic timer (non-secure EL1 physical timer, PPI 14 / GIC INTID 30), TICK_INTERVAL_MS
-  src/loader.rs      reads INIT.CFG + a program off the ESP during boot services (plus the optional filesystem server, \EFI\ORBS\FSD.BIN), into 2MB-aligned EL0-accessible regions, real ELF64 parsing + R_AARCH64_RELATIVE relocation processing - see "A real relocating loader" above and docs/processes.md; elf_region_size/populate_region split so the same parsing/loading logic is reusable from the runtime spawn path too, see "Dynamic task creation and exec()" above
+  src/loader.rs      reads INIT.CFG + a program off the ESP during boot services (plus the filesystem server \EFI\ORBS\FSD.BIN and console server \EFI\ORBS\COND.BIN, each registered with supervisor::register for crash/wedge recovery), into 2MB-aligned EL0-accessible regions, real ELF64 parsing + R_AARCH64_RELATIVE relocation processing - see "A real relocating loader" above and docs/processes.md; elf_region_size/populate_region split so the same parsing/loading logic is reusable from the runtime spawn path and supervisor restarts too, see "Dynamic task creation and exec()" and "Server supervision + heartbeat" above
+  src/supervisor.rs  server supervision registry: keeps each supervised server's boot ELF image and restarts it on a crash (generic fault hook) or a wedge (on_tick's heartbeat), with a per-boot restart cap - the generalized replacement for syscall.rs's old fsd-only restart_fsd/FSD_IMAGE, now covering fsd AND cond, see "Server supervision + heartbeat" above
   src/syscall.rs     svc syscall dispatch table (print/double/report/try_read_char/putc/get_ticks/read_char/spawn/exit/task_state/kill/fg/wait/mount/msg_send/msg_recv/msg_try_recv/block_info/block_read/block_write/msg_call/spawn_stage/grant/safecopy; gaps at 5 and 7-14 - the old fs_* syscalls moved to the fsd server's FSOP_* protocol) plus the block-device cell (the kernel's entire remaining storage role) and in_caller_region validation - grant/safecopy are the enforced bulk-transfer primitive, see "Grant/safecopy IPC" above
-  src/tasks.rs       up to 5 task slots (task 0 = loaded program, task 1 = idle, task 2 = filesystem server, slots 3-4 spawn/exit-cycled) + the round-robin scheduler over Runnable/Blocked/Unused/Zombie task state (block_current_and_switch, exit_current_and_switch, on_tick's wake-check, tasks::spawn, allocate_runtime_region/free_runtime_region, mailboxes with direct delivery + sender-filtered receive, per-task grant slots + safecopy for the bulk-transfer primitive) - confirmed working, see "Blocking primitives", "Dynamic task creation and exec()", "Task destruction", "Driver isolation" parts 1/2, and "Grant/safecopy IPC" above
+  src/tasks.rs       up to 6 task slots (task 0 = loaded program, task 1 = idle, task 2 = filesystem server, task 3 = console server, slots 4-5 spawn/exit-cycled) + the round-robin scheduler over Runnable/Blocked/Unused/Zombie task state (block_current_and_switch, exit_current_and_switch, on_tick's wake-check + the supervisor heartbeat, tasks::spawn, allocate_runtime_region/free_runtime_region, mailboxes with direct delivery + sender-filtered receive, per-task grant slots + safecopy for the bulk-transfer primitive) - confirmed working, see "Blocking primitives", "Dynamic task creation and exec()", "Task destruction", "Driver isolation" parts 1/2/3, "Grant/safecopy IPC", and "Server supervision + heartbeat" above
   src/virtio_mmio.rs virtio-mmio transport: 32-slot device discovery, modern (non-legacy) register layout, addresses confirmed via devicetree dump
   src/block.rs       BlockDevice enum (Virtio | UsbMsd) - the block-device abstraction fat32.rs sits on, see "USB mass storage" above
   src/usb_msd.rs     USB mass storage: Bulk-Only Transport + SCSI (INQUIRY/READ CAPACITY/READ(10)/WRITE(10)) over xhci.rs's bulk endpoints - Parallels' first working disk, see "USB mass storage" above
