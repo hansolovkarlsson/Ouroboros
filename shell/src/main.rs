@@ -703,7 +703,7 @@ fn dispatch_line(line: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize, out:
         "write" => cmd_write(line, cwd, *cwd_len),
         "cp" => cmd_cp(line, cwd, *cwd_len),
         "mv" => cmd_mv(line, cwd, *cwd_len),
-        "exec" => cmd_exec(arg, cwd, *cwd_len),
+        "exec" => cmd_exec(arg, cwd, *cwd_len, out),
         "exit" => cmd_exit(),
         "ps" => cmd_ps(out),
         "kill" => cmd_kill(arg),
@@ -1049,17 +1049,63 @@ fn cmd_mkdir(arg: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize) {
 /// current-process. The new task keeps running after this command returns;
 /// there's no way yet to wait for it, stop it, or free its memory once
 /// started (see `tasks.rs`'s module doc comment).
-fn cmd_exec(arg: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize) {
+fn cmd_exec(arg: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize, out: &mut Output) {
     if arg.is_empty() {
         print_line("exec: missing program argument");
         return;
     }
-    match spawn_path(arg, cwd, cwd_len, syscall_abi::CON_TASK) {
-        Ok(_slot) => {}
+    if out.is_console() {
+        // Plain `exec prog`: fire-and-forget, the program's output goes
+        // straight to the console.
+        match spawn_path(arg, cwd, cwd_len, syscall_abi::CON_TASK) {
+            Ok(_slot) => {}
+            Err(0) => print_line("exec: path too long"),
+            Err(NO_FS) => print_no_fs(),
+            Err(code) => print_fs_error("exec", code),
+        }
+        return;
+    }
+    // `exec prog > file`: route the program's output back to this shell and
+    // capture it into the redirect sink, then wait for the program - the
+    // caller (`run_line`) writes the capture to the file (`finish_redirect`).
+    match spawn_path(arg, cwd, cwd_len, self_task()) {
+        Ok(slot) => capture_program_output(slot, out),
         Err(0) => print_line("exec: path too long"),
         Err(NO_FS) => print_no_fs(),
         Err(code) => print_fs_error("exec", code),
     }
+}
+
+/// Relay-capture a program's output (routed back to this shell as a raw
+/// byte stream) into `out`, until its empty end-of-stream message, then
+/// reap it. On Ctrl+C or a relay error the program is killed and the
+/// capture is marked overflowed so the caller's `finish_redirect` refuses
+/// to write a partial file.
+fn capture_program_output(slot: u64, out: &mut Output) {
+    let mut buf = [0u8; syscall_abi::MSG_MAX_LEN as usize];
+    loop {
+        let packed = syscall4(syscall_abi::MSG_RECV, buf.as_mut_ptr() as u64, buf.len() as u64, 0, 0);
+        if packed == RECV_INTERRUPTED || packed >= FS_ERR_MIN {
+            print_line(if packed == RECV_INTERRUPTED {
+                "exec: interrupted - killing the program, nothing written"
+            } else {
+                "exec: capture failed, nothing written"
+            });
+            syscall(syscall_abi::KILL, slot);
+            if let Output::Capture { overflowed, .. } = out {
+                *overflowed = true;
+            }
+            return;
+        }
+        let len = (packed & 0xffff_ffff) as usize;
+        if len == 0 {
+            break; // end of stream
+        }
+        for &b in &buf[..len] {
+            out.put(b);
+        }
+    }
+    let _ = syscall(syscall_abi::WAIT, slot);
 }
 
 /// Resolves `arg` against the cwd and runs the two-step spawn flow
