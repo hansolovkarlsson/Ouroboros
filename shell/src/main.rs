@@ -774,6 +774,7 @@ fn print_fs_error(cmd: &str, code: u64) {
         syscall_abi::FS_ERR_IO => "device I/O error",
         syscall_abi::MSG_ERR_FULL => "mailbox full",
         syscall_abi::MSG_ERR_TOO_BIG => "message too big (64-byte limit)",
+        syscall_abi::MSG_ERR_DENIED => "permission denied (the IPC capability policy doesn't permit reaching that task)",
         syscall_abi::SPAWN_ERR_BAD_ELF => "not a loadable program (bad ELF)",
         syscall_abi::SPAWN_ERR_TOO_LARGE => "program too large for the kernel's staging buffer (or empty)",
         syscall_abi::SPAWN_ERR_NO_FREE_SLOT => "no free task slot",

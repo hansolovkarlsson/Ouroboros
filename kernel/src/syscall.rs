@@ -627,6 +627,12 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
             if dest >= tasks::NUM_TASKS || !tasks::task_exists(dest) {
                 return syscall_abi::TASK_ERR_NO_SUCH_TASK;
             }
+            // Capability check: may this task send to `dest`? A reply to a
+            // pending call is exempt (see may_send); an unsolicited send
+            // needs the send-mask bit.
+            if !tasks::may_send(tasks::current_task(), dest) {
+                return syscall_abi::MSG_ERR_DENIED;
+            }
             // SAFETY: bounds sanity-checked above, same trust model as
             // every fs_* buffer (see the module doc comment).
             let data = unsafe { core::slice::from_raw_parts(arg1 as *const u8, arg2 as usize) };
@@ -672,6 +678,12 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
             }
             if dest >= tasks::NUM_TASKS || !tasks::task_exists(dest) {
                 return syscall_abi::TASK_ERR_NO_SUCH_TASK;
+            }
+            // Capability check: may this task call `dest`? (The request half
+            // of a call is an unsolicited send, so it's mask-governed; the
+            // reply rides the reply exemption in may_send.)
+            if !tasks::may_send(tasks::current_task(), dest) {
+                return syscall_abi::MSG_ERR_DENIED;
             }
             // SAFETY: bounds sanity-checked above, same trust model as
             // MSG_SEND.

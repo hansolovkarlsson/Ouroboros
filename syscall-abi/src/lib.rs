@@ -665,6 +665,15 @@ pub const GRANT_ERR: u64 = u64::MAX - 26;
 /// buffer.
 pub const SAFECOPY_ERR: u64 = u64::MAX - 27;
 
+/// [`MSG_SEND`]/[`MSG_CALL`]: the send was refused by the IPC capability
+/// policy - the calling task's per-slot send-mask doesn't permit reaching
+/// the destination (and it isn't an authorized reply to a pending call).
+/// The topological half of isolation: a task can only initiate IPC to the
+/// endpoints its capabilities allow. In normal operation no legitimate
+/// flow hits this (the policy is derived from the real call graph); it's
+/// the enforcement backstop against an unauthorized send.
+pub const MSG_ERR_DENIED: u64 = u64::MAX - 28;
+
 /// Floor of the reserved error band (with headroom for future codes):
 /// **any error-capable syscall's return value `>= FS_ERR_MIN` is an
 /// error**, everything below is a real result. The predicate callers

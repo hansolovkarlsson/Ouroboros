@@ -107,19 +107,68 @@ pub(crate) const CAP_BLOCK: u32 = 1 << 8;
 /// only through it (a `DSPOP_WRITE` message).
 pub(crate) const CAP_CON: u32 = 1 << 9;
 
+// Send-mask bits (low `NUM_TASKS` bits of a `Caps` word): bit `t` set means
+// "may initiate a send/call to slot `t`". Named per target for readability.
+const TO_SHELL: u32 = 1 << 0; // slot 0
+const TO_FSD: u32 = 1 << (syscall_abi::FSD_TASK as u32); // slot 2
+const TO_CON: u32 = 1 << (syscall_abi::CON_TASK as u32); // slot 3
+const TO_SPAWN_4: u32 = 1 << 4;
+const TO_SPAWN_5: u32 = 1 << 5;
+
 /// The capability set for `slot`, a pure function of the slot's static
-/// role. This is the single source of truth for the capability policy.
+/// role. This is the single source of truth for the capability policy -
+/// the send-mask (who this slot may initiate IPC to) plus resource caps.
+/// Validated against every real IPC flow (see the plan / CLAUDE.md's
+/// capability-model section): servers reply freely via the reply exemption
+/// in [`may_send`], so only *unsolicited* sends need a mask bit.
 fn caps_for_slot(slot: usize) -> u32 {
     match slot as u64 {
-        syscall_abi::FSD_TASK => CAP_BLOCK,
+        // Shell: calls the filesystem and console servers, and sends pipe
+        // input to its spawned children.
+        0 => TO_FSD | TO_CON | TO_SPAWN_4 | TO_SPAWN_5,
+        // Idle: never sends.
+        1 => 0,
+        // Filesystem server: logs to the console server; owns the disk.
+        // (Replies to its clients ride the reply exemption.)
+        syscall_abi::FSD_TASK => TO_CON | CAP_BLOCK,
+        // Console server: only ever replies (reply-exempt), so no send-mask
+        // bits; owns the console device.
         syscall_abi::CON_TASK => CAP_CON,
-        _ => 0,
+        // Spawnable slots: may reach the two servers (a nested shell needs
+        // fsd; every program outputs via cond) and message the shell (e.g.
+        // pong's unsolicited echo). Not each other, not idle, no devices.
+        _ => TO_SHELL | TO_FSD | TO_CON,
     }
 }
 
 /// Whether `slot` holds capability `cap` (a `CAP_*` bit).
 pub(crate) fn cap_has(slot: usize, cap: u32) -> bool {
     caps_for_slot(slot) & cap != 0
+}
+
+/// Whether task `src` may initiate an IPC send/call to `dest` (the
+/// who-may-call-whom enforcement, checked at the `MSG_SEND`/`MSG_CALL`
+/// boundary). Two ways it's allowed:
+/// - **A reply to an authorized call.** If `dest` is currently blocked in a
+///   `MSG_CALL` to `src` (`Blocked(Message{from: Some(src)})`), this send
+///   completes that round trip rather than initiating a new one - always
+///   allowed regardless of the send-mask. This is the same "the client is
+///   blocked in a call to me" condition `SAFECOPY` keys off, and it's what
+///   lets a server (e.g. `cond`, whose send-mask is empty) reply to any
+///   caller.
+/// - **An unsolicited send permitted by the send-mask.** Otherwise `src`'s
+///   `caps_for_slot` send-mask must have `dest`'s bit set.
+///
+/// The kernel's own supervisor ping bypasses this entirely - it calls
+/// [`send_message`] directly (not through the syscall boundary), and its
+/// ack is intercepted before validation.
+pub(crate) fn may_send(src: usize, dest: usize) -> bool {
+    if let TaskState::Blocked(WaitReason::Message { from: Some(f), .. }) = unsafe { *STATES[dest].0.get() } {
+        if f == src {
+            return true;
+        }
+    }
+    dest < NUM_TASKS && caps_for_slot(src) & (1 << dest) != 0
 }
 
 /// 2MB - matches `loader.rs`'s own `SLOT_ALIGN` (a plain numeric
