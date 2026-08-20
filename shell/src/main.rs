@@ -308,6 +308,15 @@ fn parse_pipe(line: &str) -> PipeParse<'_> {
 /// there is no capture of a *task's* output, which is also why `|`
 /// can't combine with `>`.
 fn cmd_pipeline(left: &str, right: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize) {
+    // A program path on the left (its first token is an absolute path) is a
+    // program-to-program pipe: the shell relays the producer's live output
+    // to the consumer. A builtin on the left is the original
+    // capture-the-builtin's-output-and-stream-it path below.
+    if left.trim_start().as_bytes().first() == Some(&b'/') {
+        cmd_pipeline_prog(left.trim_start(), right, cwd, cwd_len);
+        return;
+    }
+
     let mut capture = [0u8; CAPTURE_SIZE];
     let mut out = Output::Capture { buf: &mut capture, len: 0, overflowed: false };
     dispatch_line(left, cwd, cwd_len, &mut out);
@@ -320,7 +329,7 @@ fn cmd_pipeline(left: &str, right: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut
         return;
     }
 
-    let slot = match spawn_path(right, cwd, *cwd_len) {
+    let slot = match spawn_path(right, cwd, *cwd_len, syscall_abi::CON_TASK) {
         Ok(slot) => slot,
         Err(0) => {
             print_line("pipe: path too long");
@@ -363,6 +372,117 @@ fn cmd_pipeline(left: &str, right: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut
         0 => {}
         status => {
             print_str("pipe: program exited with code ");
+            print_u64(status);
+            print_line("");
+        }
+    }
+}
+
+/// Program-to-program pipe (`/prog_a | /prog_b`): both sides are spawned
+/// programs, so unlike the builtin-left path there's no captured buffer to
+/// stream - the shell *relays* the producer's live output to the consumer.
+/// It spawns the consumer (stdout -> console), spawns the producer with its
+/// stdout routed back to this shell, then forwards each chunk the producer
+/// sends on to the consumer (the same `pipe_send` + timeout-kill), forwards
+/// the empty end-of-stream marker, and waits for both to exit. This is what
+/// the per-task `stdout_target` (SPAWN's arg1) and `SELF` were added for.
+fn cmd_pipeline_prog(left: &str, right: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize) {
+    // Consumer first (stdout -> console), ready to receive the relayed
+    // stream.
+    let consumer = match spawn_path(right, cwd, *cwd_len, syscall_abi::CON_TASK) {
+        Ok(slot) => slot,
+        Err(0) => {
+            print_line("pipe: path too long");
+            return;
+        }
+        Err(NO_FS) => {
+            print_no_fs();
+            return;
+        }
+        Err(code) => {
+            print_fs_error("pipe", code);
+            return;
+        }
+    };
+    // Producer with its stdout routed back to this shell so we can relay it.
+    let producer = match spawn_path(left, cwd, *cwd_len, self_task()) {
+        Ok(slot) => slot,
+        Err(0) => {
+            print_line("pipe: path too long");
+            syscall(syscall_abi::KILL, consumer);
+            return;
+        }
+        Err(NO_FS) => {
+            print_no_fs();
+            syscall(syscall_abi::KILL, consumer);
+            return;
+        }
+        Err(code) => {
+            print_fs_error("pipe", code);
+            syscall(syscall_abi::KILL, consumer);
+            return;
+        }
+    };
+
+    // Relay: receive the producer's output, forward each chunk to the
+    // consumer, until the producer's empty end-of-stream message - which is
+    // then forwarded on to the consumer, whose EOF handling makes it finish.
+    let mut buf = [0u8; syscall_abi::MSG_MAX_LEN as usize];
+    loop {
+        let packed = syscall4(syscall_abi::MSG_RECV, buf.as_mut_ptr() as u64, buf.len() as u64, 0, 0);
+        if packed == RECV_INTERRUPTED {
+            print_line("pipe: interrupted - killing both programs");
+            syscall(syscall_abi::KILL, producer);
+            syscall(syscall_abi::KILL, consumer);
+            return;
+        }
+        if packed >= FS_ERR_MIN {
+            print_line("pipe: relay failed");
+            syscall(syscall_abi::KILL, producer);
+            syscall(syscall_abi::KILL, consumer);
+            return;
+        }
+        let len = (packed & 0xffff_ffff) as usize;
+        if !pipe_send(consumer, buf.as_ptr(), len as u64) {
+            // pipe_send reported why and killed the consumer if it stopped
+            // reading; stop the producer too.
+            syscall(syscall_abi::KILL, producer);
+            return;
+        }
+        if len == 0 {
+            break; // producer's end-of-stream, now forwarded to the consumer
+        }
+    }
+
+    // Both exit on their own: the producer sent its EOF then exits; the
+    // consumer exits on the forwarded EOF. Reap both.
+    wait_pipe_stage("producer", producer);
+    wait_pipe_stage("consumer", consumer);
+}
+
+/// Wait for one stage of a program-to-program pipe and report how it ended.
+fn wait_pipe_stage(label: &str, slot: u64) {
+    match syscall(syscall_abi::WAIT, slot) {
+        0 => {}
+        WAIT_INTERRUPTED => {
+            print_str("pipe: ");
+            print_str(label);
+            print_line(" wait interrupted (it may still be running - see ps)");
+        }
+        TASK_KILLED_STATUS => {
+            print_str("pipe: ");
+            print_str(label);
+            print_line(" was killed");
+        }
+        code if code >= FS_ERR_MIN => {
+            print_str("pipe: ");
+            print_str(label);
+            print_line(" did not exit cleanly");
+        }
+        status => {
+            print_str("pipe: ");
+            print_str(label);
+            print_str(" exited with code ");
             print_u64(status);
             print_line("");
         }
@@ -934,7 +1054,7 @@ fn cmd_exec(arg: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize) {
         print_line("exec: missing program argument");
         return;
     }
-    match spawn_path(arg, cwd, cwd_len) {
+    match spawn_path(arg, cwd, cwd_len, syscall_abi::CON_TASK) {
         Ok(_slot) => {}
         Err(0) => print_line("exec: path too long"),
         Err(NO_FS) => print_no_fs(),
@@ -951,7 +1071,7 @@ fn cmd_exec(arg: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize) {
 /// needs the slot to stream input to and wait on. `Err(0)` means the
 /// path didn't resolve/encode (too long); any other `Err` is a real
 /// code for [`print_fs_error`] (or [`NO_FS`]).
-fn spawn_path(arg: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize) -> Result<u64, u64> {
+fn spawn_path(arg: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize, stdout_target: u64) -> Result<u64, u64> {
     let mut path_buf = [0u8; PATH_SIZE];
     let Some(path_len) = resolve_path(cwd_str(cwd, cwd_len), arg, &mut path_buf) else {
         return Err(0);
@@ -981,15 +1101,22 @@ fn spawn_path(arg: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize) -> Result<u64, u6
             break;
         }
     }
-    // arg1 is the spawned program's stdout target - the console by default
-    // (a plain `exec`); the pipeline/redirect paths will pass the shell's
-    // own task index instead so they can relay/capture the output. Passed
-    // explicitly (not via the 1-arg `syscall` helper, which would leave x1
-    // as 0 - task 0, the shell - and misroute every ordinary spawn).
-    match syscall4(syscall_abi::SPAWN, offset, syscall_abi::CON_TASK, 0, 0) {
+    // arg1 is the spawned program's stdout target: CON_TASK for a plain
+    // `exec` (output straight to the console), or the shell's own task
+    // index for a pipe/redirect producer (so its output routes back here to
+    // be relayed/captured). Passed explicitly (not via the 1-arg `syscall`
+    // helper, which would leave x1 as 0 - task 0 - and misroute the spawn).
+    match syscall4(syscall_abi::SPAWN, offset, stdout_target, 0, 0) {
         code if code >= FS_ERR_MIN => Err(code),
         slot => Ok(slot),
     }
+}
+
+/// This shell's own task slot index (the boot shell is task 0, but a
+/// foreground-spawned shell is a higher slot) - needed as a pipe
+/// producer's stdout target so its output routes back here. See `SELF`.
+fn self_task() -> u64 {
+    syscall(syscall_abi::SELF, 0)
 }
 
 fn cmd_rmdir(arg: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize) {

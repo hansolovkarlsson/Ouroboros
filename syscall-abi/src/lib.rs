@@ -384,6 +384,16 @@ pub const FB_CLEAR: u64 = 37;
 /// outputs to the console, as before.
 pub const STDOUT_TARGET: u64 = 38;
 
+/// `()` -> the calling task's own slot index. A task's identity, which it
+/// otherwise has no way to learn (every other task-aware syscall takes an
+/// index rather than reporting the caller's). The shell needs it to
+/// orchestrate a program-to-program pipe: it spawns the producer with a
+/// stdout target of *itself* (this value) so the producer's output routes
+/// back to the shell to be relayed on to the consumer - and the boot shell
+/// (task 0) and a foreground-spawned shell (some higher slot) must each use
+/// their real index, not a hardcoded 0.
+pub const SELF: u64 = 39;
+
 /// [`CON_INFO`] field: the backend kind ([`CON_KIND_*`]).
 pub const CON_INFO_KIND: u64 = 0;
 /// [`CON_INFO`] field: framebuffer columns (character cells wide).
