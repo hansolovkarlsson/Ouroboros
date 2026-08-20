@@ -65,9 +65,6 @@ const PING_INTERVAL: u32 = 64;
 const PING_TIMEOUT: u32 = 8;
 
 /// [`poll_ping`]'s verdict for one supervised server this tick.
-// Stage 1 (inert plumbing): defined and unit-reachable via `poll_ping`, but
-// `on_tick` doesn't drive it yet - stage 2 wires it in and drops this allow.
-#[allow(dead_code)]
 pub enum PingAction {
     /// Nothing to do - the server is making progress, or a ping is
     /// outstanding but not yet timed out, or it isn't yet time to ping.
@@ -279,9 +276,6 @@ pub fn note_ack(slot: usize) {
 ///   [`PING_INTERVAL`], ask the caller to inject one
 ///   ([`PingAction::Inject`]) and mark it outstanding. One ping outstanding
 ///   at a time, so the server's 4-deep mailbox can never fill with pings.
-// Stage 1: defined but not yet called from `on_tick` (stage 2 wires it in
-// and removes this allow); `note_ack` above is already live via MSG_SEND.
-#[allow(dead_code)]
 pub fn poll_ping(slot: usize, blocked: bool) -> PingAction {
     let reg = unsafe { &mut *REGISTRY.0.get() };
     let Some(e) = reg.iter_mut().find(|e| e.slot == Some(slot)) else {

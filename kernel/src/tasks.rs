@@ -1234,8 +1234,35 @@ pub unsafe fn on_tick(frame: *mut Context) {
             continue;
         }
         let blocked = matches!(unsafe { *STATES[slot].0.get() }, TaskState::Blocked(_));
-        if crate::supervisor::heartbeat(slot, blocked) {
-            crate::console::println!("Ouroboros kernel: server slot {slot} wedged (no progress) - restarting");
+
+        // Passive heartbeat: a server observed continuously `Runnable` is a
+        // non-faulting loop wedge.
+        let runnable_wedge = crate::supervisor::heartbeat(slot, blocked);
+
+        // Active ping: catches the failure the passive heartbeat can't - a
+        // server stuck `Blocked` forever (deadlocked mid-request), which
+        // looks identical to a healthy idle server from the outside. Poke a
+        // blocked server, and declare it wedged if a prior poke went
+        // unacked past the timeout. The ping rides the ordinary message
+        // machinery (sender KERNEL_SENDER); the server's reply, addressed
+        // back to that sentinel, is the ack (see supervisor.rs / the
+        // MSG_SEND syscall arm). Injecting into a server idle in its main
+        // recv wakes it (direct delivery); into one stuck mid-sub-call it
+        // just queues, unseen - which is the deadlock we want to catch.
+        let blocked_wedge = match crate::supervisor::poll_ping(slot, blocked) {
+            crate::supervisor::PingAction::Inject => {
+                let mut ping = [0u8; syscall_abi::FS_REQ_PAYLOAD as usize];
+                ping[..8].copy_from_slice(&syscall_abi::SYSOP_PING.to_le_bytes());
+                let _ = send_message(syscall_abi::KERNEL_SENDER as usize, slot, &ping);
+                false
+            }
+            crate::supervisor::PingAction::Wedged => true,
+            crate::supervisor::PingAction::None => false,
+        };
+
+        if runnable_wedge || blocked_wedge {
+            let why = if blocked_wedge { "unresponsive (ping timeout)" } else { "no progress (runnable)" };
+            crate::console::println!("Ouroboros kernel: server slot {slot} wedged - {why} - restarting");
             let (base, size) = task_region(slot);
             free_runtime_region(base, size);
             revert_input_owner_if(slot);
