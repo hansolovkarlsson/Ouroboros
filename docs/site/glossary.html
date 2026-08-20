@@ -253,6 +253,9 @@
         <dt id="cond">cond <span class="term-full">console server</span></dt>
         <dd>The console, running as a userland server (task 3). Userland output flows to it over IPC; it either forwards to the kernel's byte-stream console or, on a framebuffer, renders the glyphs itself (font, cursor, wrap, scroll, ANSI) via dumb kernel pixel primitives. The kernel keeps only a minimal emergency console for boot and fault reporting.</dd>
 
+        <dt id="supervision">Server supervision / heartbeat</dt>
+        <dd>What makes a server <em>restartable</em>, not just isolated (MINIX's reincarnation server / Helix's self-heal, minimal edition). The kernel keeps each supervised server's boot image and restarts it from that copy on either failure mode: a <strong>crash</strong> (the fault handler restarts any supervised task, <code class="inline">fsd</code> and <code class="inline">cond</code> alike), or a <strong>wedge</strong> — a server stuck in an infinite loop, which never faults. The wedge <em>heartbeat</em> is passive: a healthy server keeps returning to a blocked state, so one that stays runnable for ~2.5s is restarted on the same path. A per-boot restart cap degrades gracefully past it. Confirmed live on real Parallels hardware for <code class="inline">cond</code>.</dd>
+
         <dt id="ipc">IPC <span class="term-full">inter-process communication</span></dt>
         <dd>How isolated tasks talk: by <em>copied</em> messages through the kernel, never shared memory — the isolation-friendly semantics. A message goes straight into a waiting receiver's buffer, or into a small bounded mailbox.</dd>
 

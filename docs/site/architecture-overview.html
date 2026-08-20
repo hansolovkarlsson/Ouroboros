@@ -356,13 +356,13 @@
             <tr>
               <td class="slot">2</td>
               <td class="tname">FS server</td>
-              <td><span class="d">Owns the entire FAT32 engine. The only task allowed the block-device syscalls. Boot-loaded, and restarted by the kernel if it crashes.</span></td>
+              <td><span class="d">Owns the entire FAT32 engine. The only task allowed the block-device syscalls. Boot-loaded and supervised — the kernel restarts it from a kept image if it crashes or wedges.</span></td>
               <td><span class="tbadge pro">protected</span></td>
             </tr>
             <tr>
               <td class="slot">3</td>
               <td class="tname">Console server</td>
-              <td><span class="d">Owns the steady-state console. Userland output flows to it over IPC; it renders glyphs to the framebuffer (or forwards to a UART). Boot-loaded and protected, like the FS server.</span></td>
+              <td><span class="d">Owns the steady-state console. Userland output flows to it over IPC; it renders glyphs to the framebuffer (or forwards to a UART). Boot-loaded, protected, and supervised like the FS server — restarted if it crashes or wedges (confirmed live on real Parallels).</span></td>
               <td><span class="tbadge pro">protected</span></td>
             </tr>
             <tr>
@@ -497,7 +497,7 @@
           </div>
         </div>
       </div>
-      <div class="lnote"><b>What it costs:</b> several boundary crossings per read, where a monolithic kernel would have none. <b>What it buys:</b> a filesystem bug can corrupt only its own memory and its own mount — it cannot scribble on the shell, and if it crashes, the kernel restarts it. The disk is never reachable except through the one supervised task.</div>
+      <div class="lnote"><b>What it costs:</b> several boundary crossings per read, where a monolithic kernel would have none. <b>What it buys:</b> a filesystem bug can corrupt only its own memory and its own mount — it cannot scribble on the shell, and if it crashes or wedges, the kernel restarts it from a kept image (the same supervision covers the console server). The disk is never reachable except through the one supervised task.</div>
       <figcaption><span class="fig">FIG 5</span> &nbsp;<code class="inline">cat</code> as a sequence of traps. Light cards are EL0; dark panels are the kernel.</figcaption>
     </figure>
 
