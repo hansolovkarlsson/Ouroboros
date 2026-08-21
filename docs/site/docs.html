@@ -124,6 +124,11 @@
         <h3>Moving the console into userland</h3>
         <p>The second component out of the kernel: a driver the kernel itself depends on (a split, not a move), the gated-primitives-vs-mapped-memory decision, a scheduler lie that routing echo through IPC exposed, a missed client that stranded on real hardware, and verifying pixels by screendump.</p>
       </a>
+      <a class="pm-card" href="postmortem-capability-hardening.html">
+        <span class="pm-eyebrow">Retrospective · scoping</span>
+        <h3>Scope it down before you build it</h3>
+        <p>Five milestones in one day — an active health-ping, a capability model, program-to-program pipes, a stack guard page, a userland heap — whose lesson is scoping: three shrank when asked whether the clean design needed the hard part, a guard page found a silent overflow on its first test, and a one-build gate proved <code class="inline">alloc</code> can't be PIE-linked on stable before a week was spent on it.</p>
+      </a>
     </div>
 
     <h2>Research &amp; assessments</h2>

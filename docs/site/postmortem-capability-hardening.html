@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Scope It Down — Ouroboros</title>
+<meta name="description" content="A design-led retrospective on one day of Ouroboros work — an active health-ping, a capability model, program-to-program pipes, a stack guard page, and a userland heap — whose real lesson is scoping: three of five milestones shrank when someone asked whether the clean design needed the hard part, and the riskiest was settled by a one-build go/no-go gate.">
+<link rel="icon" type="image/png" href="../assets/favicon.png">
+<link rel="stylesheet" href="../assets/site.css">
+</head>
+<body>
+
+<nav class="sitenav">
+  <div class="sitenav-inner">
+    <a class="sitenav-mark" href="../index.html">ouroboros</a>
+    <div class="sitenav-links">
+      <a href="../index.html">Home</a>
+      <a href="architecture-overview.html">Architecture</a>
+      <a href="tutorial.html">Learn</a>
+      <a href="docs.html" class="current">Docs</a>
+      <a href="https://github.com/hansolovkarlsson/Ouroboros">GitHub ↗</a>
+    </div>
+  </div>
+</nav>
+
+<div class="page">
+
+  <div class="kicker">Design retrospective · Ouroboros</div>
+
+  <h1 class="title small">Scope it down before you build it</h1>
+  <p class="dek">
+    Five milestones in one day — an active health-ping, a capability model,
+    program-to-program pipes, a stack guard page, and a userland heap — whose
+    real lesson isn't a bug. It's that most of the value was in deciding what
+    <em>not</em> to build.
+  </p>
+
+  <div class="companion">
+    <span class="companion-icon">✂️</span>
+    <span>A companion to this project's four <a href="postmortem-boot-bringup.html">bug-hunt</a> <a href="postmortem-shell-filesystem.html">postmortems</a> (real-hardware faults, decoded register by register) and two <a href="postmortem-isolation-dataflow.html">design</a> <a href="postmortem-console-server.html">retrospectives</a>. This is the third retrospective, and its lesson is about <em>scoping</em> — three of five milestones got smaller when someone asked whether the clean design needed the hard part, and the riskiest unknown was settled by a one-build go/no-go gate.</span>
+  </div>
+
+  <article>
+
+    <p>This is a write-up of one day's work on <a href="../index.html">Ouroboros</a>, a from-scratch ARM64 microkernel, that took the isolation/capability model and the userland runtime from <em>"the mechanisms are real"</em> to <em>"the mechanisms are general and hardened."</em> Five milestones landed in a single day: an <strong>active health-ping</strong> for the server supervisor, a <strong>capability model</strong> for who-may-call-whom, <strong>program-to-program pipes</strong> (and <code class="inline">exec &gt; file</code>), a <strong>stack guard page</strong>, and a <strong>userland heap</strong>.</p>
+
+    <p>Like the others, it's kept out of the project's own historical record (<code class="inline">CLAUDE.md</code>, <code class="inline">CHANGELOG.md</code>) because most of it isn't Ouroboros-specific. If you build systems and have ever committed a week to a feature whose hard part turned out to be unnecessary — or whose blocking unknown could have been settled on the first afternoon — some of this may save you time.</p>
+
+    <h2>The one idea the whole day turns on</h2>
+
+    <p>Every one of the five milestones started with an obvious, heavyweight design — and three of the five got <em>smaller</em> the moment someone asked a blunt question before writing code:</p>
+
+    <blockquote><p>Does the clean design actually need the hard part?</p></blockquote>
+
+    <p>Twice the answer was no, and the milestone shrank. Once the hard part was a genuine unknown that gated the entire approach, and the right move was to <strong>retire that unknown with the cheapest possible experiment before building anything else</strong> — a go/no-go gate. It failed, and failing in one build instead of one week is the whole point.</p>
+
+    <p>The remaining two milestones were straightforward to build — and each handed back a <em>finding for free</em>, something true about the system that the work exposed without anyone going looking for it. Here is each, in the order it happened.</p>
+
+    <h2>1. The active ping: the kernel isn't a task, so it borrows a reply</h2>
+
+    <p>The server supervisor already restarted a <em>crashed</em> server and caught a <em>wedged</em> (infinite-loop, <code class="inline">Runnable</code>) one via a passive heartbeat. The one gap: a server stuck <strong><code class="inline">Blocked</code> forever</strong> — deadlocked on a reply that never comes — is indistinguishable from a healthy idle server from the outside. The only way to tell them apart is to poke it.</p>
+
+    <p>The obvious design is heavy: a <code class="inline">*_PING</code> request op every server implements, a <code class="inline">PING_ACK</code> syscall, changes to every server's main loop. And it runs into a real obstacle — <strong>the kernel isn't a task.</strong> It has no mailbox; it can't <code class="inline">msg_call</code> a server and block for a reply the way a client does.</p>
+
+    <p>The blunt question: does the ping need any of that? It doesn't. A server already replies to <em>any</em> message it receives — an unknown op just yields a harmless status reply. So the kernel injects a ping as an ordinary message (sender = a reserved <code class="inline">KERNEL_SENDER</code> sentinel), and the server's <em>ordinary reply</em>, addressed back to that sentinel, is intercepted by the <code class="inline">MSG_SEND</code> syscall arm as the ack. <strong>No new syscall. No change to any server.</strong> A server idle in its main <code class="inline">recv</code> is woken and replies within a tick; a server stuck mid-request never sees the queued ping and never acks — which is exactly the signal.</p>
+
+    <p>The honest part, documented rather than hidden: in today's small, acyclic server topology (<code class="inline">clients → fsd → cond</code>, and <code class="inline">cond</code> calls no one) a true blocked-deadlock <em>can't actually form</em> — <code class="inline">fail_calls_to</code> already rescues callers of a dying server, and the passive heartbeat restarts a runnable-wedged one. So the active ping is a <strong>forward-looking</strong> guard with no failing case to demonstrate today. That's worth saying out loud when you ship a mechanism: <em>this is insurance against a future the code doesn't have yet</em>, not a fix for a bug you can point at.</p>
+
+    <h2>2. Capabilities as a pure function of slot</h2>
+
+    <p>Isolation was MMU-enforced at the <em>memory</em> level but flat at the <em>IPC</em> level: any task could message any task, and the privileged gates (disk, console) were ad-hoc <code class="inline">if current == FSD_TASK</code> checks scattered around. The capability model closes that — a per-task send-mask, checked at the <code class="inline">msg_send</code>/<code class="inline">msg_call</code> boundary.</p>
+
+    <p>The design instinct is a per-task capability <em>table</em>: mutable state, populated at task creation, threaded through every spawn and restart path. But task-slot roles in this kernel are <strong>static</strong> — slot 0 is always the shell, 2 always the filesystem server, 3 always the console server, 4–5 always spawnable. So a task's capabilities are a <strong>pure function of its slot</strong>. No table, no mutable state, no plumbing: the entire policy is one <code class="inline">caps_for_slot(slot)</code> function, and a restarted server or a spawned child gets the right capabilities automatically because its <em>slot</em> determines them.</p>
+
+    <p>The one subtlety worth keeping is the <strong>reply exemption</strong>. In a request/response system the server replies by sending <em>to</em> the client — so a naive "who-may-send-to-whom" mask would forbid every reply. The fix reuses a condition the bulk-transfer primitive (<code class="inline">safecopy</code>) already needs: a send is always allowed if the destination is <em>currently blocked in a call to the sender</em>. That completes an authorized round trip rather than initiating a new one. Only <em>unsolicited</em> sends are mask-checked.</p>
+
+    <p>The flow that shaped the policy — and the one the "does every existing path still work?" test had to catch — was the <code class="inline">pong</code> echo server. It replies to a <code class="inline">send</code>/<code class="inline">recv</code> client with an <strong>unsolicited</strong> <code class="inline">msg_send</code> (the client did a <code class="inline">send</code> and then a <em>separate</em> <code class="inline">recv</code>, so it isn't blocked in a call), which means the reply exemption does <em>not</em> apply and the child send-mask must include the shell. It's easy to miss on paper and obvious the moment you enumerate real flows. Enumerate the real flows.</p>
+
+    <h2>3. Pipes: the feature I expected to "absorb" delegation didn't need it</h2>
+
+    <p>Program-to-program pipes (<code class="inline">a | b</code> where both are programs) were queued as the consumer for <strong>runtime capability delegation</strong> — the idea being that the producer would stream directly to the consumer, which would need the producer to be <em>granted</em> the capability to reach it.</p>
+
+    <p>Scoping the clean design killed that assumption. The cleanest pipe has the shell <strong>relay</strong>: <code class="inline">producer → shell → consumer</code>. And <code class="inline">producer → shell</code> is <em>already permitted</em> by the capability send-mask from milestone 2 (a spawned task's mask includes the shell). So no capability is granted to anyone — <strong>the relay model needs no delegation at all.</strong> Better still, the <em>same</em> mechanism — "a program's stdout can be routed to the shell instead of the console" — delivers <code class="inline">exec prog &gt; file</code> for free (the shell captures the output and writes it), which the direct-streaming design would not.</p>
+
+    <p>This is the second time in the day the heavyweight sub-feature (here, delegation) evaporated under the question. It's also a reminder that a roadmap item's <em>stated dependency</em> is a hypothesis, not a fact: "pipes need delegation" was written down long before anyone scoped the pipe, and it was wrong. The delegation milestone survives — but now honestly labelled as <em>premature</em>, a mechanism still without a hard consumer.</p>
+
+    <p>The mechanism that did ship is a per-task <strong>stdout target</strong> (a task index, <code class="inline">CON_TASK</code> by default, set at spawn), plus a tiny <code class="inline">SELF</code> syscall so the shell can name itself as a producer's target (a foreground-spawned shell isn't task 0, so it can't hardcode it).</p>
+
+    <h2>4. The guard page that paid for itself on the first test</h2>
+
+    <p>Every userland task ran on a fixed 8KB stack with <strong>no guard</strong> — the region was <code class="inline">[code][stack]</code>, tight, so an overflow ran straight into the program's own code, still EL0-accessible: silent corruption, no fault. The fix is textbook: one inaccessible page below the stack, so an overflow faults cleanly and the existing fault-isolation handler contains it (kills just that task).</p>
+
+    <p>This one built smoothly and then, on the <em>very first</em> fault-injection test, found a real bug that had nothing to do with the injection. <code class="inline">exec /EFI/ORBS/HELLO.BIN</code> faulted the <strong>shell itself</strong> — <code class="inline">EL0 FAULT task=0 esr_el1=0x9200004f far_el1=0x5c60cfe0</code>, a permission fault 32 bytes below the shell's 8KB stack bottom, inside its brand-new guard page. The shell's own <code class="inline">exec</code> path (<code class="inline">spawn_path</code> → the filesystem server call, with its 768+768-byte request/reply buffers, plus staging and the call chain) uses just <em>over</em> 8KB of stack, and had been quietly overflowing by ~32 bytes into the top of its own code region <em>on every <code class="inline">exec</code></em> — undetected because nothing was mapped there to fault on. The guard page turned an invisible, latent corruption into a loud, decoded fault the first time it ran.</p>
+
+    <p>The fix was to grow the stack 8KB → 16KB. But the lesson is the mechanism's whole justification, demonstrated rather than argued: <strong>a guard page's value isn't hypothetical overflow protection — it's that it makes existing, silent overflows visible.</strong> The kind of bug that "never caused a problem" because its corruption happened to land on bytes nobody read yet.</p>
+
+    <p>(One honest caveat, documented: a single stack frame larger than the one-page guard could jump over it. Incremental overflows — recursion, normal frame growth — hit it; a giant single local array might not. Still strictly better than silent corruption.)</p>
+
+    <h2>5. The heap, and the one-build gate that saved a week</h2>
+
+    <p>The last milestone wanted a real userland heap: <code class="inline">Vec</code>, <code class="inline">String</code>, <code class="inline">Box</code> — dynamic allocation for programs, and concretely a way to lift the shell's 512-byte capture cap so <code class="inline">cat big &gt; file</code> stops refusing.</p>
+
+    <p>This one had a genuine unknown at its center, and it gated the <em>entire</em> approach: <strong>can <code class="inline">alloc</code>'s collections even link under this project's hand-rolled PIE loader?</strong> The loader already couldn't tolerate certain libcore relocations (documented cases: <code class="inline">str</code> range-slicing, <code class="inline">memrchr</code>), because prebuilt libraries on stable Rust carry <code class="inline">R_AARCH64_ABS64</code> relocations that a <code class="inline">-pie</code> link rejects. Whether that wall extended to <code class="inline">liballoc</code> was unknown — and everything downstream (a <code class="inline">GlobalAlloc</code>, a free-list allocator, lifting the linker's no-static-state assert) depended on the answer.</p>
+
+    <p>So the milestone opened with a <strong>go/no-go gate</strong>: the smallest possible experiment that answers the blocking question and nothing else. A minimal bump <code class="inline">GlobalAlloc</code> over a static array, <code class="inline">extern crate alloc</code>, and a <code class="inline">selftest</code> that builds a <code class="inline">Vec</code> and a <code class="inline">String</code>. It failed at <em>link</em>, in one build:</p>
+
+    <div class="panel"><pre><code>rust-lld: error: relocation R_AARCH64_ABS64 cannot be used against
+local symbol; recompile with -fPIC
+&gt;&gt;&gt; defined in ... liballoc-....rlib(alloc-....rcgu.o)
+&gt;&gt;&gt; referenced by ... .rodata..Lanon...</code></pre></div>
+
+    <p>Prebuilt <code class="inline">liballoc</code>'s own <code class="inline">.rodata</code> (anonymous const data that <code class="inline">Vec</code>/<code class="inline">String</code> pull in unavoidably) carries the exact relocation the loader can't accept. The only fix is <code class="inline">-Z build-std</code> to rebuild <code class="inline">liballoc</code> with PIE flags — <strong>nightly-only</strong>, off-limits on a project that has held the stable-only line since the relocating-loader milestone declined <code class="inline">-Z build-std</code> for this very reason.</p>
+
+    <p>That is a <strong>useful negative result</strong>, and getting it on the first afternoon — before writing a free-list allocator, before touching the linker script, before any of the plumbing that assumed <code class="inline">Vec</code> — is the entire argument for gating a risky unknown up front. The milestone pivoted to a <strong>raw buffer</strong>: a 256KB kernel-provided heap area per program, reported by a <code class="inline">heap_info</code> syscall, used via a plain <code class="inline">&amp;mut [u8]</code>. No allocator, no collections, no static state — it sidesteps every obstacle the <code class="inline">alloc</code> version would have had to solve, and it still delivers the concrete win (the shell backs its redirect/pipe capture with it, and <code class="inline">cat big &gt; file</code> now captures the full 72KB and writes it in chunks). The negative result is now recorded in <code class="inline">processes.md</code>'s relocation-gotcha list so it never has to be re-discovered.</p>
+
+    <h2>What generalizes</h2>
+
+    <p>Nothing here is Ouroboros-specific. The reusable parts:</p>
+
+    <ul>
+      <li><strong>Before building the heavyweight version, ask if the clean design needs it.</strong> Three of five milestones shrank on this question: the ping needed no new syscall (a reply is an ack), the capability model needed no mutable table (roles are static), the pipes needed no delegation (the shell can relay). A stated dependency is a hypothesis.</li>
+      <li><strong>When an unknown gates the whole approach, retire it first, with the cheapest experiment that answers only that question.</strong> The heap's <code class="inline">alloc</code> gate failed in one build. A week of allocator and linker work would have hit the same wall at the end instead of the start.</li>
+      <li><strong>A negative result is a deliverable.</strong> "<code class="inline">alloc</code> can't be PIE-linked on stable" is now permanent, cited knowledge — as valuable as a feature, because it stops the next attempt.</li>
+      <li><strong>Some mechanisms pay for themselves by making the invisible visible.</strong> The guard page's first test found a real, silent, pre-existing overflow. You don't add a guard page to catch a <em>future</em> bug; you add it and it shows you the bug you already had.</li>
+      <li><strong>Ship forward-looking guards honestly.</strong> The active ping guards a deadlock the current topology can't produce. Saying so — "insurance, not a fix" — is the difference between documentation and marketing.</li>
+    </ul>
+
+    <p>The day shipped five milestones and one negative result. The negative result may be the most reused of the six.</p>
+
+  </article>
+</div>
+
+</body>
+</html>
