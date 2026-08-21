@@ -114,7 +114,15 @@ const CONFIG_PATH: &str = "\\EFI\\ORBS\\INIT.CFG";
 // nothing was mapped to fault on it. Grown to 16KB to give that path
 // comfortable headroom; if `mmu.rs`'s `guard_page_addr` `STACK_PAGES` isn't
 // kept equal to this, the guard lands in the wrong place.
-const STACK_PAGES: u64 = 4;
+//
+// Grown again to 24KB (6 pages) once the network server (`netd`) appeared:
+// its client ops (ping/resolve/fetch) and TCP server nest several 1600/2048
+// -byte frame buffers down one call chain (serve -> handle_* -> arp/tcp/dns),
+// sitting right at the 16KB edge - a later change (the flow-control drain
+// loop) tipped `ping` over it into the guard page (a clean fault, caught, not
+// silent - exactly what the guard is for). netd is the most stack-hungry
+// program; 24KB gives it real margin.
+const STACK_PAGES: u64 = 6;
 /// One inaccessible guard page between the code and the stack. The stack
 /// grows down from the top of the region; an overflow past the 8KB stack
 /// lands in this page, which `mmu.rs` maps EL1-only, taking a clean EL0

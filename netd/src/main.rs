@@ -73,13 +73,9 @@ const RESP_404: &[u8] =
     b"HTTP/1.0 404 Not Found\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nNot Found\r\n";
 const RESP_503: &[u8] = b"HTTP/1.0 503 Service Unavailable\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nNo filesystem mounted\r\n";
 
-/// Cap on how many bytes of a file the server will stream in one response.
-/// The server blasts segments without waiting for ACKs (no flow control yet),
-/// so the whole body must fit inside the peer's advertised window (~64 KB);
-/// 16 KB stays comfortably under it. Larger files are truncated here.
-const MAX_SERVE: usize = 16384;
 /// One file chunk / one TCP body segment - kept under the 1460 MSS so each
-/// `FSOP_READ_BULK` maps to exactly one segment.
+/// `FSOP_READ_BULK` maps to at most one segment (a segment may be smaller when
+/// the peer's remaining window is tighter - see `pump_send`).
 const SERVE_CHUNK: usize = 1400;
 
 #[no_mangle]
@@ -126,27 +122,48 @@ fn serve(packed_mac: u64) -> ! {
         // up front, so this never sleeps through waiting input).
         syscall(syscall_abi::NET_WAIT, 0);
 
-        // 1. Client requests. Handled synchronously: during a `fetch`/`ping`
-        // its own receive loop consumes frames, so an unsolicited server
-        // frame arriving mid-request is dropped (single-threaded, one thing
-        // at a time) - acceptable, the client retransmits.
-        loop {
-            let packed =
-                syscall4(syscall_abi::MSG_TRY_RECV, buf.as_mut_ptr() as u64, buf.len() as u64, 0, 0);
-            if packed >= syscall_abi::FS_ERR_MIN {
-                break; // NO_MSG or an error: mailbox drained
-            }
-            let sender = packed >> 32;
-            let len = (packed & 0xffff_ffff) as usize;
-            handle_client(packed_mac, sender, &buf, len);
-        }
+        // 1. Client requests (ping/resolve/fetch), handled synchronously; the
+        // supervisor health-ping is acked here too (any reply acks it).
+        drain_client_messages(packed_mac, &mut buf);
 
         // 2. Incoming frames: ARP replies for our IP, and the TCP server.
         if packed_mac != syscall_abi::NET_ERROR {
             while let Some(n) = recv(&mut frame) {
                 on_frame(&mac, &frame[..n], &mut conn);
             }
+            // 3. Stream the active response up to the current window - in
+            // bounded bursts, draining the mailbox (acking the health-ping)
+            // between them, so a full window can go out in one wake without any
+            // single stretch running long enough to look wedged. Stops when a
+            // burst makes no progress (window full, or the response is done).
+            while let Some(c) = conn.as_mut() {
+                if !c.responded {
+                    break;
+                }
+                let before = c.snd_nxt;
+                pump_send(&mac, c);
+                drain_client_messages(packed_mac, &mut buf);
+                if c.snd_nxt == before {
+                    break;
+                }
+            }
         }
+    }
+}
+
+/// Drain and handle every queued client message (and the supervisor
+/// health-ping, whose reply is the ack). Non-blocking; returns when the
+/// mailbox is empty.
+fn drain_client_messages(packed_mac: u64, buf: &mut [u8]) {
+    loop {
+        let packed =
+            syscall4(syscall_abi::MSG_TRY_RECV, buf.as_mut_ptr() as u64, buf.len() as u64, 0, 0);
+        if packed >= syscall_abi::FS_ERR_MIN {
+            return; // NO_MSG or an error: mailbox drained
+        }
+        let sender = packed >> 32;
+        let len = (packed & 0xffff_ffff) as usize;
+        handle_client(packed_mac, sender, buf, len);
     }
 }
 
@@ -553,12 +570,16 @@ fn tcp_get(mac: &[u8; 6], dst_mac: &[u8; 6], target: &[u8; 4], request: &[u8], r
 }
 
 /// The state of the one in-flight server connection.
+/// Longest request path the server will resolve.
+const PATH_MAX: usize = 128;
+
 enum ConnState {
     /// Sent SYN-ACK, waiting for the peer's ACK (or its request data).
     SynRcvd,
-    /// Handshake complete, waiting for the HTTP request.
+    /// Handshake complete; the response is being streamed (paced by the
+    /// peer's window - see `pump_send`).
     Established,
-    /// Response + our FIN sent, waiting for the peer to finish closing.
+    /// Our FIN sent, waiting for the peer to finish closing.
     Closing,
 }
 
@@ -570,14 +591,36 @@ struct TcpConn {
     peer_ip: [u8; 4],
     peer_mac: [u8; 6],
     peer_port: u16,
-    /// Our next send sequence number.
+    /// Our next send sequence number (the seq of the next byte we'll send).
     snd_nxt: u32,
+    /// The oldest unacknowledged sequence number - advanced by the peer's
+    /// ACKs. `snd_nxt - snd_una` is what's currently in flight.
+    snd_una: u32,
     /// The next sequence number we expect from the peer.
     rcv_nxt: u32,
+    /// The peer's advertised receive window (bytes it will accept beyond
+    /// `snd_una`) - the flow-control limit on how much we may have in flight.
+    window: u32,
     state: ConnState,
-    /// Whether we've already sent the response (guards against a
-    /// retransmitted request re-triggering it).
+    /// Whether we've begun responding (guards a retransmitted request from
+    /// restarting the response).
     responded: bool,
+    // --- the response being streamed ---
+    /// A fixed prefix sent first: the whole response for `/`/404/503, or the
+    /// 200 header ahead of a file's body. `'static` - no lifetime in the conn.
+    prefix: &'static [u8],
+    /// How much of `prefix` has been sent.
+    prefix_off: usize,
+    /// Whether a file body follows the prefix (streamed from `fsd`).
+    file: bool,
+    path: [u8; PATH_MAX],
+    path_len: usize,
+    /// Next file byte offset to read/send.
+    read_off: u64,
+    /// Whether the body is fully sent (EOF or a read error).
+    eof: bool,
+    /// Whether our FIN has been sent.
+    fin_sent: bool,
 }
 
 /// A parsed inbound TCP segment addressed to our listen port.
@@ -586,6 +629,8 @@ struct TcpIn {
     src_mac: [u8; 6],
     src_port: u16,
     seq: u32,
+    ack: u32,
+    window: u16,
     flags: u8,
     /// Byte offset of the TCP payload within the frame, and its length.
     data_off: usize,
@@ -672,16 +717,20 @@ fn parse_tcp_in(frame: &[u8]) -> Option<TcpIn> {
         src_mac,
         src_port: u16be(frame, t),
         seq: u32be(frame, t + 4),
+        ack: u32be(frame, t + 8),
+        window: u16be(frame, t + 14),
         flags: frame[t + 13],
         data_off,
         data_len,
     })
 }
 
-/// The server TCP state machine for one segment. Minimal but real: SYN ->
-/// SYN-ACK, request data -> response + FIN, then ack the peer's FIN and close.
-/// One connection at a time; a SYN always (re)starts it. `frame` is the raw
-/// packet, so the request payload can be sliced out for the file server.
+/// The server TCP state machine for one segment. SYN -> SYN-ACK; the request
+/// starts a response that is then *streamed under flow control* (`pump_send`),
+/// paced by the peer's advertised window and driven forward by its ACKs;
+/// finally our FIN, then ack the peer's FIN and close. One connection at a
+/// time; a SYN always (re)starts it. `frame` is the raw packet, so the request
+/// payload can be sliced out for the file server.
 fn handle_tcp(mac: &[u8; 6], frame: &[u8], seg: &TcpIn, conn: &mut Option<TcpConn>) {
     // RST tears down a matching connection.
     if seg.flags & TCP_RST != 0 {
@@ -698,9 +747,19 @@ fn handle_tcp(mac: &[u8; 6], frame: &[u8], seg: &TcpIn, conn: &mut Option<TcpCon
             peer_mac: seg.src_mac,
             peer_port: seg.src_port,
             snd_nxt: SERVER_ISN,
+            snd_una: SERVER_ISN,
             rcv_nxt: seg.seq.wrapping_add(1), // SYN consumes a sequence number
+            window: seg.window as u32,
             state: ConnState::SynRcvd,
             responded: false,
+            prefix: &[],
+            prefix_off: 0,
+            file: false,
+            path: [0; PATH_MAX],
+            path_len: 0,
+            read_off: 0,
+            eof: false,
+            fin_sent: false,
         };
         send_seg(mac, &c, TCP_SYN | TCP_ACK, true, &[]);
         c.snd_nxt = c.snd_nxt.wrapping_add(1); // our SYN consumes one too
@@ -714,23 +773,32 @@ fn handle_tcp(mac: &[u8; 6], frame: &[u8], seg: &TcpIn, conn: &mut Option<TcpCon
     }
     let Some(c) = conn.as_mut() else { return };
 
+    // Track the peer's ACK (frees send window) and its advertised window.
+    if seg.flags & TCP_ACK != 0 && seq_gt(seg.ack, c.snd_una) {
+        c.snd_una = seg.ack;
+    }
+    c.window = seg.window as u32;
+
     // A bare ACK completes the handshake.
     if matches!(c.state, ConnState::SynRcvd) && seg.flags & TCP_ACK != 0 {
         c.state = ConnState::Established;
     }
 
-    // The request data (may arrive with the handshake ACK, or just after) ->
-    // serve the response and immediately FIN. Only once.
+    // The request (may arrive with the handshake ACK, or just after) -> set up
+    // the response. Only once; the streaming itself is driven by pump_send.
     if !c.responded && seg.data_len > 0 && seg.seq == c.rcv_nxt {
         c.rcv_nxt = c.rcv_nxt.wrapping_add(seg.data_len);
+        c.responded = true;
         let end = (seg.data_off + seg.data_len as usize).min(frame.len());
         let request = &frame[seg.data_off..end];
-        serve_http(mac, c, request); // sends header + body segments, advances snd_nxt
-        send_seg(mac, c, TCP_FIN | TCP_ACK, false, &[]);
-        c.snd_nxt = c.snd_nxt.wrapping_add(1); // FIN consumes a sequence number
-        c.responded = true;
-        c.state = ConnState::Closing;
+        start_response(c, request);
     }
+
+    // Note: the actual sending (pump_send) is NOT done here. It runs once per
+    // event-loop wake, *after* the whole frame batch is drained and the client
+    // mailbox is serviced - so a supervisor health-ping is always acked
+    // promptly and a burst can never block netd long enough to look wedged.
+    // This ACK just updated snd_una/window above; the next pump uses it.
 
     // The peer's FIN: ack it (past any data it carried plus the FIN) and close.
     if seg.flags & TCP_FIN != 0 {
@@ -738,6 +806,12 @@ fn handle_tcp(mac: &[u8; 6], frame: &[u8], seg: &TcpIn, conn: &mut Option<TcpCon
         send_seg(mac, c, TCP_ACK, false, &[]);
         *conn = None;
     }
+}
+
+/// Wrapping "is `a` sequence-after `b`" - handles the u32 sequence-number
+/// wraparound the raw `>` can't.
+fn seq_gt(a: u32, b: u32) -> bool {
+    (a.wrapping_sub(b) as i32) > 0
 }
 
 /// Whether `seg` belongs to the active connection (same peer address+port).
@@ -767,63 +841,122 @@ fn send_seg(mac: &[u8; 6], c: &TcpConn, flags: u8, with_mss: bool, payload: &[u8
     }
 }
 
-/// Serve an HTTP response for `request` on connection `c`, advancing
-/// `c.snd_nxt` past every byte sent. `GET /` returns a built-in landing page;
-/// any other path is streamed from the filesystem server (`fsd`) - netd is
-/// `fsd`'s first non-shell client, the cross-server flow this milestone is
-/// about. A missing file is a 404, a missing filesystem a 503. The body
-/// streams in `SERVE_CHUNK`-byte TCP segments after a 200 header segment; the
-/// caller sends the FIN.
-fn serve_http(mac: &[u8; 6], c: &mut TcpConn, request: &[u8]) {
-    let mut pathbuf = [0u8; 128];
+/// Decide the response for `request` and record it on the connection (the
+/// bytes are then streamed by `pump_send`, paced by the window). `GET /`
+/// serves a built-in landing page; any other path is a file streamed from the
+/// filesystem server (`fsd`) - netd is `fsd`'s first non-shell client. A
+/// missing file is a 404, a missing/unmounted filesystem a 503. The file is
+/// probed here (a first read) so the 404/503 *replaces* the 200 header rather
+/// than following it; the probe's bytes are discarded and the body is re-read
+/// from offset 0 while streaming (fsd reads are idempotent, offset-based).
+fn start_response(c: &mut TcpConn, request: &[u8]) {
+    let mut pathbuf = [0u8; PATH_MAX];
     let path = parse_path(request, &mut pathbuf);
 
+    c.prefix_off = 0;
+    c.file = false;
+    c.read_off = 0;
+    c.eof = false;
+    c.fin_sent = false;
+
     if path.is_empty() || path == b"/" {
-        send_body(mac, c, INDEX_PAGE);
+        c.prefix = INDEX_PAGE;
         return;
     }
 
-    // Probe the file with the first chunk, so a 404/503 replaces the 200 header
-    // rather than following it.
-    let mut chunk = [0u8; SERVE_CHUNK];
-    let first = read_file_chunk(path, 0, &mut chunk);
+    let mut probe = [0u8; SERVE_CHUNK];
+    let first = read_file_chunk(path, 0, &mut probe);
     if first >= syscall_abi::FS_ERR_MIN {
-        let body: &[u8] = if first == syscall_abi::TASK_ERR_NO_SUCH_TASK {
+        c.prefix = if first == syscall_abi::TASK_ERR_NO_SUCH_TASK {
             RESP_503
         } else {
             RESP_404
         };
-        send_body(mac, c, body);
         return;
     }
 
-    // File exists: 200 header, then stream the body (the first chunk is
-    // already in hand; loop for the rest until EOF or the size cap).
-    send_body(mac, c, RESP_200_HDR);
-    let mut n = first as usize;
-    let mut offset = 0u64;
-    let mut served = 0usize;
-    loop {
-        if n > 0 {
-            send_body(mac, c, &chunk[..n]);
-            served += n;
-            offset += n as u64;
-        }
-        if n == 0 || served >= MAX_SERVE {
-            break;
-        }
-        let r = read_file_chunk(path, offset, &mut chunk);
-        if r >= syscall_abi::FS_ERR_MIN {
-            break; // a mid-stream read error just truncates the body
-        }
-        n = r as usize;
-    }
+    // File exists: a 200 header, then its body streamed from offset 0.
+    c.prefix = RESP_200_HDR;
+    c.file = true;
+    c.path_len = path.len().min(PATH_MAX);
+    c.path[..c.path_len].copy_from_slice(&path[..c.path_len]);
 }
 
-/// Send `body` as one PSH|ACK segment and advance the send sequence.
-fn send_body(mac: &[u8; 6], c: &mut TcpConn, body: &[u8]) {
-    send_seg(mac, c, TCP_PSH | TCP_ACK, false, body);
-    c.snd_nxt = c.snd_nxt.wrapping_add(body.len() as u32);
+/// Send up to `MAX_BURST` segments of the response - as much as the peer's
+/// window currently allows - advancing `snd_nxt`, then stop. Runs once per
+/// event-loop wake; the peer's ACKs (which free window) drive the next call.
+/// Two bounds work together: the **window** (`snd_nxt - snd_una` never exceeds
+/// it) is flow control - it's what lets a file of any size stream paced by the
+/// client's consumption rather than overrunning its receive buffer; the
+/// **burst cap** keeps any single pump short so netd returns to service its
+/// mailbox (and ack the supervisor health-ping) promptly - a whole-window
+/// blast per call once looked wedged and got netd restarted mid-transfer.
+fn pump_send(mac: &[u8; 6], c: &mut TcpConn) {
+    /// Segments per pump call. One: the caller (`serve`) loops pump + a
+    /// mailbox drain, so it still flushes a *full window* per wake, but the
+    /// supervisor health-ping is acked after **every** segment (~1 fsd read +
+    /// send, a few ms) - never letting one uninterrupted stretch approach the
+    /// ~160 ms ping timeout. Larger bursts (16, 48) were both measured to
+    /// occasionally overrun it under QEMU's variable-latency TCG and get netd
+    /// restarted mid-transfer; draining per segment removes that entirely at
+    /// negligible cost (one extra non-blocking syscall per segment, dwarfed by
+    /// the disk read itself).
+    const MAX_BURST: usize = 1;
+    let mut sent = 0usize;
+    loop {
+        if sent >= MAX_BURST {
+            return; // yield - the next wake (driven by an ACK) continues
+        }
+        let in_flight = c.snd_nxt.wrapping_sub(c.snd_una);
+        let avail = c.window.saturating_sub(in_flight);
+        if avail == 0 {
+            return; // window full - wait for an ACK
+        }
+
+        // 1. The fixed prefix (a whole fixed response, or the file's 200 header).
+        if c.prefix_off < c.prefix.len() {
+            let prefix = c.prefix; // 'static - copying the reference, not borrowing c
+            let n = (prefix.len() - c.prefix_off)
+                .min(SERVE_CHUNK)
+                .min(avail as usize);
+            let slice = &prefix[c.prefix_off..c.prefix_off + n];
+            send_seg(mac, c, TCP_PSH | TCP_ACK, false, slice);
+            c.snd_nxt = c.snd_nxt.wrapping_add(n as u32);
+            c.prefix_off += n;
+            sent += 1;
+            continue;
+        }
+
+        // 2. The file body, one window-and-MSS-bounded chunk at a time.
+        if c.file && !c.eof {
+            let want = SERVE_CHUNK.min(avail as usize);
+            let mut chunk = [0u8; SERVE_CHUNK];
+            let r = read_file_chunk(&c.path[..c.path_len], c.read_off, &mut chunk[..want]);
+            if r >= syscall_abi::FS_ERR_MIN {
+                c.eof = true; // a mid-stream read error just ends the body
+                continue;
+            }
+            let got = r as usize;
+            if got == 0 {
+                c.eof = true; // real end of file
+                continue;
+            }
+            send_seg(mac, c, TCP_PSH | TCP_ACK, false, &chunk[..got]);
+            c.snd_nxt = c.snd_nxt.wrapping_add(got as u32);
+            c.read_off += got as u64;
+            sent += 1;
+            continue;
+        }
+
+        // 3. Body fully sent -> FIN (once). avail >= 1 here, so it fits.
+        if !c.fin_sent {
+            send_seg(mac, c, TCP_FIN | TCP_ACK, false, &[]);
+            c.snd_nxt = c.snd_nxt.wrapping_add(1); // FIN consumes a sequence number
+            c.fin_sent = true;
+            c.state = ConnState::Closing;
+        }
+        return;
+    }
 }
 
 /// Extract the request-target path from an HTTP request line
