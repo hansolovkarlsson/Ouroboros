@@ -14,3 +14,4 @@
 /qemu-monitor.sock
 /usbstick.cdr
 /usbstick-src/
+/net.pcap

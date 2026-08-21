@@ -29,6 +29,7 @@ mod uart16550;
 mod virtio_blk;
 mod virtio_console;
 mod virtio_mmio;
+mod virtio_net;
 mod xhci;
 
 use uefi::boot;
@@ -462,6 +463,13 @@ fn main() -> Status {
     // regardless of whether the scan itself would be safe.
     if virtio_mmio_probe_safe {
         init_storage();
+        // Network stack, Stage 1 (docs/roadmap.md): the virtio-net driver +
+        // a raw-frame ARP round-trip proof. Same gate as storage - the
+        // virtio-mmio scan crashes real Parallels hardware, and Parallels
+        // exposes virtio-net over PCI anyway (needs a transport this project
+        // doesn't have yet). Silent when no NIC is attached (only
+        // `make run-net` attaches one).
+        init_net();
     } else {
         console::println!("Ouroboros kernel: skipping virtio-blk (unconfirmed-safe virtio-mmio scan on this platform) - disk commands won't work this boot");
     }
@@ -692,6 +700,94 @@ fn init_storage() {
     // auto-mount takes it from here.
     syscall::install_block_device(block::BlockDevice::Virtio(device));
     console::println!("Ouroboros kernel: block device installed for the filesystem server");
+}
+
+/// Network stack, Stage 1 (`docs/roadmap.md`): brings up the virtio-net
+/// driver and proves raw-frame transmit *and* receive end to end with a
+/// broadcast ARP request for the QEMU user-net gateway, decoding the reply.
+///
+/// The kernel driver (`virtio_net.rs`) is only the DMA-owning half that must
+/// stay in EL1 (no IOMMU); the real protocol stack (ARP/IP/ICMP/UDP/TCP) is
+/// a later stage's userland `netd` server reached through gated syscalls.
+/// This boot-time ARP probe is Stage 1's liveness proof, not that server -
+/// hence the hardcoded QEMU user-net addresses (gateway `10.0.2.2`, our
+/// assumed `10.0.2.15`), a QEMU-shaped convention like the device-region
+/// addresses elsewhere, replaced by real ARP/DHCP in `netd`.
+///
+/// Silent when no NIC is attached: plain `make run`/`run-image` don't attach
+/// one (only `make run-net` does), so a `NotFound` returns quietly rather
+/// than logging on every normal dev boot.
+fn init_net() {
+    let mut device = match unsafe { virtio_net::Device::discover() } {
+        Ok(d) => d,
+        Err(virtio_net::Error::NotFound) => return, // no NIC this boot - stay quiet
+        Err(e) => {
+            console::println!("Ouroboros kernel: virtio-net discovery failed ({e})");
+            return;
+        }
+    };
+    if let Err(e) = unsafe { device.init() } {
+        console::println!("Ouroboros kernel: virtio-net init failed ({e})");
+        return;
+    }
+    let mac = device.mac();
+    console::println!(
+        "Ouroboros kernel: virtio-net ready, MAC {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+        mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
+    );
+
+    // A broadcast ARP request: "who has 10.0.2.2? tell 10.0.2.15." 42 bytes
+    // (Ethernet 14 + ARP 28); the device/host pads to the 60-byte minimum.
+    let mut arp = [0u8; 42];
+    arp[0..6].copy_from_slice(&[0xff; 6]); // eth dst: broadcast
+    arp[6..12].copy_from_slice(&mac); // eth src
+    arp[12..14].copy_from_slice(&[0x08, 0x06]); // ethertype: ARP
+    arp[14..16].copy_from_slice(&[0x00, 0x01]); // htype: Ethernet
+    arp[16..18].copy_from_slice(&[0x08, 0x00]); // ptype: IPv4
+    arp[18] = 6; // hlen
+    arp[19] = 4; // plen
+    arp[20..22].copy_from_slice(&[0x00, 0x01]); // oper: request
+    arp[22..28].copy_from_slice(&mac); // sha: our MAC
+    arp[28..32].copy_from_slice(&[10, 0, 2, 15]); // spa: our assumed IP
+    // tha (32..38) stays zero
+    arp[38..42].copy_from_slice(&[10, 0, 2, 2]); // tpa: the gateway
+
+    let ticks_per_ms = timer::frequency_hz() / 1000;
+    if let Err(e) = unsafe { device.send_frame(&arp, ticks_per_ms.saturating_mul(100)) } {
+        console::println!("Ouroboros kernel: virtio-net ARP send failed ({e})");
+        return;
+    }
+
+    // Poll for the ARP reply for up to ~1 second (a real wall-clock deadline
+    // off the generic timer, the xHCI-driver lesson - never an iteration
+    // count). Ignore any other frame that happens to arrive meanwhile.
+    let deadline = timer::now_ticks().wrapping_add(ticks_per_ms.saturating_mul(1000));
+    let mut frame = [0u8; virtio_net::MAX_FRAME];
+    loop {
+        if let Some(len) = unsafe { device.poll_frame(&mut frame) } {
+            if len >= 42
+                && frame[12] == 0x08
+                && frame[13] == 0x06 // ethertype ARP
+                && frame[20] == 0x00
+                && frame[21] == 0x02 // oper: reply
+                && frame[28..32] == [10, 0, 2, 2]
+            // sender: the gateway
+            {
+                console::println!(
+                    "Ouroboros kernel: virtio-net ARP reply - 10.0.2.2 is at {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                    frame[22], frame[23], frame[24], frame[25], frame[26], frame[27]
+                );
+                return;
+            }
+            // Some other frame (broadcast noise, etc.) - keep waiting.
+        }
+        if timer::now_ticks().wrapping_sub(deadline) < u64::MAX / 2 {
+            console::println!(
+                "Ouroboros kernel: virtio-net no ARP reply within 1s (the request was sent - an RX or gateway issue)"
+            );
+            return;
+        }
+    }
 }
 
 /// Parks the core forever instead of returning to firmware. `wfe` is a

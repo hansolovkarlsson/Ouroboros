@@ -146,6 +146,27 @@ run: esp
 		-global virtio-mmio.force-legacy=false \
 		-nographic
 
+# Same as `run`, plus a virtio-net device on virtio-mmio with QEMU's
+# user-mode (SLIRP) networking - the dev loop for the network stack
+# (kernel/src/virtio_net.rs, docs/roadmap.md's Stage 1). SLIRP answers ARP
+# for its gateway (10.0.2.2), which is what init_net's boot-time probe
+# exercises. `-object filter-dump` writes every frame to net.pcap for
+# independent host-side inspection (tcpdump/tshark), the same "verify against
+# a source outside the kernel's own output" discipline used elsewhere.
+run-net: esp
+	qemu-system-aarch64 \
+		-machine virt \
+		-cpu cortex-a72 \
+		-m 512M \
+		-bios $(OVMF) \
+		-drive file=fat:rw:$(ESP_DIR),format=raw,media=disk,if=none,id=hd0 \
+		-device virtio-blk-device,drive=hd0 \
+		-netdev user,id=net0 \
+		-device virtio-net-device,netdev=net0 \
+		-object filter-dump,id=f0,netdev=net0,file=net.pcap \
+		-global virtio-mmio.force-legacy=false \
+		-nographic
+
 # Same as `run`, plus a virtio-mmio console device (device ID 3, the
 # virtio-console/virtio-serial class - see kernel/src/virtio_console.rs)
 # attached via a separate chardev, for testing that driver. On this
