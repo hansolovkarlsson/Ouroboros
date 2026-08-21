@@ -672,7 +672,7 @@ fn dispatch_line(line: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize, out:
     let arg = words.next().unwrap_or("");
 
     match command {
-        "help" => out.put_line("commands: help, echo, uptime, clear, ls, cat, cd, pwd, mkdir, rmdir, touch, rm, write, writeat, cp, mv, mount, exec, exit, ps, kill, fg, wait, send, recv, selftest (append `> file`/`>> file` to redirect output, or `| /path/to/program` to pipe it into a spawned program)"),
+        "help" => out.put_line("commands: help, echo, uptime, clear, ls, cat, cd, pwd, mkdir, rmdir, touch, rm, write, writeat, cp, mv, mount, ping, exec, exit, ps, kill, fg, wait, send, recv, selftest (append `> file`/`>> file` to redirect output, or `| /path/to/program` to pipe it into a spawned program)"),
         "echo" => {
             let mut first = true;
             for word in line.split_whitespace().skip(1) {
@@ -691,6 +691,7 @@ fn dispatch_line(line: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize, out:
             out.put_u64_decimal(get_ticks());
             out.put_line(" ticks since boot");
         }
+        "ping" => cmd_ping(arg, out),
         "clear" => {
             // ANSI clear-screen + cursor-home - the shell's own escape
             // sequence, not a syscall; the console itself has no notion
@@ -1740,6 +1741,97 @@ fn get_ticks() -> u64 {
 /// failures fold into the same status space: no server this boot
 /// becomes [`NO_FS`] - literally true - and anything else (Ctrl+C
 /// mid-call, a full server mailbox) becomes the generic [`FS_ERROR`].
+/// `ping <a.b.c.d>` - asks the network server (`netd`, task `NET_TASK`) to
+/// ARP-resolve the host and send it an ICMP echo request, reporting whether
+/// a reply came back. The whole protocol stack lives in `netd`; the shell
+/// just packs the target and reads the status.
+fn cmd_ping(arg: &str, out: &mut Output) {
+    let ip = arg.trim();
+    let Some(target) = parse_ipv4(ip) else {
+        print_line("ping: usage: ping <a.b.c.d>");
+        return;
+    };
+    // Request: [NETOP_PING][target IPv4 packed LE]; reply: [status].
+    let packed_target = target[0] as u64
+        | (target[1] as u64) << 8
+        | (target[2] as u64) << 16
+        | (target[3] as u64) << 24;
+    let mut req = [0u8; 16];
+    req[0..8].copy_from_slice(&syscall_abi::NETOP_PING.to_le_bytes());
+    req[8..16].copy_from_slice(&packed_target.to_le_bytes());
+    let mut reply = [0u8; syscall_abi::MSG_MAX_LEN as usize];
+    let packed = syscall4(
+        syscall_abi::MSG_CALL,
+        syscall_abi::NET_TASK,
+        req.as_ptr() as u64,
+        req.len() as u64,
+        reply.as_mut_ptr() as u64,
+    );
+    if packed == syscall_abi::TASK_ERR_NO_SUCH_TASK {
+        print_line("ping: no network server this boot");
+        return;
+    }
+    if packed >= FS_ERR_MIN {
+        print_line("ping: request failed");
+        return;
+    }
+    let status = u64::from_le_bytes([
+        reply[0], reply[1], reply[2], reply[3], reply[4], reply[5], reply[6], reply[7],
+    ]);
+    match status {
+        syscall_abi::NET_PING_OK => {
+            out.put_str("reply from ");
+            out.put_str(ip);
+            out.put_line("");
+        }
+        syscall_abi::NET_PING_TIMEOUT => {
+            out.put_str("no reply from ");
+            out.put_str(ip);
+            out.put_line(" (timeout)");
+        }
+        syscall_abi::NET_PING_NO_ARP => {
+            out.put_str(ip);
+            out.put_line(" is unreachable (no ARP reply)");
+        }
+        syscall_abi::NET_PING_NO_NIC => print_line("ping: no network interface this boot"),
+        _ => print_line("ping: unexpected result"),
+    }
+}
+
+/// Parse a dotted-quad IPv4 (`10.0.2.2`) into its four octets. Hand-rolled
+/// byte-by-byte (no `str::split`) to stay clear of any libcore relocation
+/// gotcha in a PIE-loaded program - see `docs/processes.md`.
+fn parse_ipv4(s: &str) -> Option<[u8; 4]> {
+    let mut out = [0u8; 4];
+    let mut idx = 0; // octet being built
+    let mut val: u32 = 0;
+    let mut digits = 0;
+    for &c in s.as_bytes() {
+        if c == b'.' {
+            if digits == 0 || idx >= 3 {
+                return None;
+            }
+            out[idx] = val as u8;
+            idx += 1;
+            val = 0;
+            digits = 0;
+        } else if c.is_ascii_digit() {
+            val = val * 10 + (c - b'0') as u32;
+            if val > 255 {
+                return None;
+            }
+            digits += 1;
+        } else {
+            return None;
+        }
+    }
+    if digits == 0 || idx != 3 {
+        return None;
+    }
+    out[3] = val as u8;
+    Some(out)
+}
+
 fn fs_call(op: u64, params: [u64; 4], payload1: &[u8], payload2: &[u8], result: &mut [u8]) -> u64 {
     const HDR: usize = syscall_abi::FS_REQ_PAYLOAD as usize;
     let mut req = [0u8; syscall_abi::MSG_MAX_LEN as usize];

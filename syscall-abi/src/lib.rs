@@ -465,6 +465,30 @@ pub const NET_NO_FRAME: u64 = u64::MAX;
 /// caller isn't [`NET_TASK`], or a bad buffer. Distinct from [`NET_NO_FRAME`].
 pub const NET_ERROR: u64 = u64::MAX - 1;
 
+// The `NETOP_*` request protocol clients speak to the network server
+// (`netd`, [`NET_TASK`]) over `MSG_CALL`, mirroring the `FSOP_*` shape. A
+// request is an op (LE u64) plus op-specific args; the reply is a single
+// LE u64 status. The whole protocol stack (ARP/IPv4/ICMP) lives in `netd`;
+// clients just name what they want.
+//
+/// [`NETOP_PING`] request: `[op: u64][target IPv4: u64]` where the target is
+/// its 4 octets packed little-endian (`a | b<<8 | c<<16 | d<<24`). `netd`
+/// ARP-resolves the target, sends an ICMP echo request, waits for the reply,
+/// and replies with one of the `NET_PING_*` status codes below.
+pub const NETOP_PING: u64 = 1;
+
+/// [`NETOP_PING`] reply: an ICMP echo reply came back - the host is up.
+pub const NET_PING_OK: u64 = 0;
+/// [`NETOP_PING`] reply: the target was resolved but no echo reply arrived
+/// before the deadline (host down, or dropping ICMP).
+pub const NET_PING_TIMEOUT: u64 = 1;
+/// [`NETOP_PING`] reply: ARP resolution failed - no host answered for that
+/// IP (nothing at that address on the local network).
+pub const NET_PING_NO_ARP: u64 = 2;
+/// [`NETOP_PING`] reply: no NIC is installed this boot, so nothing can be
+/// sent at all.
+pub const NET_PING_NO_NIC: u64 = 3;
+
 /// [`CON_INFO`] field: the backend kind ([`CON_KIND_*`]).
 pub const CON_INFO_KIND: u64 = 0;
 /// [`CON_INFO`] field: framebuffer columns (character cells wide).
