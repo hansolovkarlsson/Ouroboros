@@ -116,6 +116,18 @@ side-by-side reading:
 
 ## What this says about Ouroboros's current shape
 
+**Update (2026-08-21): this section describes an earlier, more monolithic
+Ouroboros — kept for history, corrected here.** Since it was written, the
+FAT32 filesystem (`fsd`) and the console (`cond`) have moved out of the EL1
+kernel into supervised, MMU-isolated EL0 servers reached over
+`sendrec`-shaped IPC (`MSG_CALL`) — a real process/server boundary now
+exists, with `grant`/`safecopy` capability copies (MINIX's `sys_safecopy`),
+a capability send-mask, and a reincarnation-server-style restart layer. The
+gap versus MINIX is now *breadth* (two servers, not a full fleet; no VFS/PM;
+no process trees), not the absence of the model. See
+[`research-directions.md`](research-directions.md) for the current
+synthesis and where the influences point next. The original text follows.
+
 Worth being honest about, not just cataloguing differences: `notes.txt`
 states a microkernel goal, but the *current* implementation is
 considerably more monolithic than either MINIX platform. MMU management,

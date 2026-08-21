@@ -127,6 +127,17 @@ before treating "self-healing" as a synonym for MINIX-style isolation.
 
 ## What this says about Ouroboros's current shape
 
+**Update (2026-08-21): this section's premise is now out of date — kept as
+written for history, with the correction here.** When it was written
+Ouroboros had no fault isolation at all; since then it has gained
+MMU-enforced per-task isolation, EL0 fault containment, and a general server
+supervision layer (a restart-from-image registry, a passive heartbeat, and
+an active health ping) — which is precisely Helix's self-heal story
+(watchdog + health monitor + recovery) in miniature. Helix's remaining
+distinct idea is *hot-reload with state migration* (live replacement, not
+stateless restart). See [`research-directions.md`](research-directions.md)
+for the current synthesis. The original text follows.
+
 Same honest framing as the MINIX note: Ouroboros currently has *no*
 fault isolation of any kind, and neither MINIX's process-based nor
 Helix's module-based story exists here yet. What Helix adds to the

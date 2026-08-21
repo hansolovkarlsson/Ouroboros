@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Comparative Directions — Ouroboros</title>
+<meta name="description" content="A synthesis across MINIX, Linux, Plan 9, and Helix asking which architectural ideas are still worth implementing in Ouroboros — and why Plan 9's per-process namespaces plus a uniform file protocol is the standout.">
+<link rel="icon" type="image/png" href="../assets/favicon.png">
+<link rel="stylesheet" href="../assets/site.css">
+<style>
+  .cmp-wrap { overflow-x: auto; margin: 1.8rem 0 2.4rem; }
+  .cmp-table {
+    width: 100%; border-collapse: collapse;
+    font-family: var(--font-serif); font-size: 0.9rem; min-width: 560px;
+  }
+  .cmp-table th, .cmp-table td {
+    text-align: left; vertical-align: top;
+    padding: 0.62rem 0.75rem; border-bottom: 1px solid var(--wire);
+  }
+  .cmp-table thead th {
+    font-family: var(--font-mono); font-size: 0.68rem; letter-spacing: 0.06em;
+    text-transform: uppercase; color: var(--panel-dim);
+    border-bottom: 1px solid var(--wire-strong); white-space: nowrap;
+  }
+  .cmp-table tbody th { font-weight: 600; color: var(--ink); width: 26%; }
+  .cmp-table td { color: var(--ink-soft); }
+  .cmp-table .oc { color: var(--ink); }
+  .cmp-table tbody tr:last-child th, .cmp-table tbody tr:last-child td { border-bottom: none; }
+</style>
+</head>
+<body>
+
+<nav class="sitenav">
+  <div class="sitenav-inner">
+    <a class="sitenav-mark" href="../index.html">ouroboros</a>
+    <div class="sitenav-links">
+      <a href="../index.html">Home</a>
+      <a href="architecture-overview.html">Architecture</a>
+      <a href="tutorial.html">Learn</a>
+      <a href="docs.html" class="current">Docs</a>
+      <a href="https://github.com/hansolovkarlsson/Ouroboros">GitHub ↗</a>
+    </div>
+  </div>
+</nav>
+
+<div class="page">
+
+  <div class="kicker">Research note · Ouroboros</div>
+
+  <h1 class="title small">Comparative directions: where the influences point next</h1>
+  <p class="dek">
+    A synthesis across all four stated influences — MINIX, Linux, Plan 9,
+    Helix — asking one forward-looking question: given everything Ouroboros
+    has actually built, which architectural idea is still genuinely worth
+    implementing?
+  </p>
+
+  <div class="companion">
+    <span class="companion-icon">🧭</span>
+    <span>Complements the per-influence notes — <a href="research-minix-boot.html">how MINIX boots</a> and <a href="research-helix-os.html">Helix's design</a> — and supplies the Plan 9 material they were missing. Feeds the <a href="microkernel-comparison.html">microkernel self-assessment</a>.</span>
+  </div>
+
+  <article>
+
+    <blockquote class="aside">
+      <span class="aside-label">The finding, up front</span>
+      <p>
+        <strong>Plan 9's per-process namespace + uniform file protocol
+        (9P) is the standout.</strong> It's the one idea that would
+        <em>unify</em> mechanisms Ouroboros already built piecemeal — the
+        <code class="inline">fsd</code>/<code class="inline">cond</code>
+        server protocols, the capability send-mask, per-task memory
+        isolation, delegation — into a single coherent design, rather than
+        piling on a new feature. Everything else is either already absorbed
+        or better sequenced behind it.
+      </p>
+    </blockquote>
+
+    <h2>First, recalibrate: what Ouroboros already absorbed</h2>
+
+    <p>
+      This has to come first, because the older influence notes were
+      written when Ouroboros had <em>"no fault isolation of any kind"</em>
+      and <em>"one program, hardcoded"</em> — both long since false. The
+      classic microkernel checklist is largely done:
+    </p>
+
+    <ul>
+      <li><strong>MMU-enforced per-task isolation</strong> plus <code class="inline">grant</code>/<code class="inline">safecopy</code> bulk transfer — MINIX's <code class="inline">sys_safecopy</code> capability-copy model, enforced.</li>
+      <li><strong>Synchronous <code class="inline">sendrec</code>-shaped IPC</strong> (<code class="inline">MSG_CALL</code>, sender-filtered replies) — MINIX's IPC shape.</li>
+      <li><strong>Server supervision</strong> — a registry that restarts a crashed server from a kept image, a passive heartbeat for a <em>runnable</em> wedge, an active ping for a <em>blocked</em> wedge. MINIX's reincarnation server <em>and</em> Helix's self-heal pipeline, in miniature.</li>
+      <li><strong>A capability model</strong> — a per-slot IPC send-mask, extensible at runtime by delegation.</li>
+      <li><strong>Two real userland servers</strong> reached over IPC: the FAT32 filesystem (<code class="inline">fsd</code>) and the console (<code class="inline">cond</code>).</li>
+    </ul>
+
+    <p>
+      So the interesting question is no longer "what basic microkernel
+      feature is missing." It's "what <em>different</em> architectural idea
+      would take this somewhere new." That reframing points hard at Plan 9.
+    </p>
+
+    <h2>The standout: Plan 9's namespaces + a uniform file protocol</h2>
+
+    <p>
+      Plan 9 rests on two ideas: a <strong>per-process name space</strong>
+      and <strong>one message-oriented file protocol (9P)</strong> that
+      <em>every</em> service speaks. All I/O — files, network connections,
+      process control, the console — is file operations on named objects,
+      and each process composes its own private view by mounting service
+      trees into its namespace. Crucially, a mount affects only the
+      namespace of the process that made it: no global state, no special
+      permission. The striking part for this project is that
+      <strong>Ouroboros has independently reinvented the pieces Plan 9
+      unifies, but in bespoke form:</strong>
+    </p>
+
+    <div class="cmp-wrap"><table class="cmp-table">
+      <thead><tr><th scope="col">Plan 9 unifies…</th><th scope="col">…what Ouroboros built by hand</th></tr></thead>
+      <tbody>
+        <tr><th>One 9P protocol every server speaks</th><td><code class="inline">fsd</code>'s <code class="inline">FSOP_*</code> protocol <em>and</em> <code class="inline">cond</code>'s separate <code class="inline">DSPOP_*</code> protocol</td></tr>
+        <tr><th>Namespace = the services you can reach</th><td>The per-slot capability <span class="oc">send-mask</span> (who a task may message)</td></tr>
+        <tr><th>Per-process namespace, mounts local</th><td>Per-task <span class="oc">page-table views</span> (each task's own memory view)</td></tr>
+        <tr><th><code class="inline">bind</code> / passing a mount to a child</th><td>Runtime capability <span class="oc">delegation</span> (the current frontier item)</td></tr>
+      </tbody>
+    </table></div>
+
+    <p>Adopting the Plan 9 shape would deliver three things at once:</p>
+
+    <ol>
+      <li><strong><code class="inline">FSOP_*</code> and <code class="inline">DSPOP_*</code> collapse into one protocol.</strong> Every server — and every future one (a network stack, a synthetic <code class="inline">/proc</code>) — becomes reachable through the same <code class="inline">walk</code>/<code class="inline">open</code>/<code class="inline">read</code>/<code class="inline">write</code>/<code class="inline">stat</code> verbs, no new ABI per server. "Everything is a file" becomes less bespoke code.</li>
+      <li><strong>The namespace <em>becomes</em> the capability mechanism.</strong> Plan 9's sandboxing <em>is</em> namespace restriction: you can only reach what's mounted for you. That's a cleaner statement of the capability model Ouroboros built by hand — and the <strong>transitive-delegation gap</strong> at the top of the roadmap frontier becomes Plan 9's <code class="inline">bind</code>. The hard capability problem and the naming problem are the <em>same</em> problem in Plan 9.</li>
+      <li><strong>It subsumes several roadmap items</strong> — general delegation, a VFS indirection, multi-filesystem support, program composition — into one mechanism. In Plan 9 the namespace <em>is</em> the VFS.</li>
+    </ol>
+
+    <p>
+      <strong>Honest scoping:</strong> this is a large milestone (a namespace
+      table per task, a 9P-ish protocol, <code class="inline">mount</code>/<code class="inline">bind</code>
+      syscalls, rewriting <code class="inline">fsd</code>/<code class="inline">cond</code>
+      as 9P servers), and the <em>distributed</em> half of Plan 9 (9P over a
+      network) needs a network stack that doesn't exist. Take the local half
+      now, defer the distributed half honestly — the local half is the
+      coherent next architecture that makes the system feel designed rather
+      than accreted.
+    </p>
+
+    <h2>The rest, ranked by fit</h2>
+
+    <ul>
+      <li><strong>MINIX's VFS / a real <code class="inline">init</code> + boot image.</strong> An <code class="inline">INIT.CFG</code> naming a <em>list</em> of programs plus an <code class="inline">init</code> task that starts and supervises them — a small step now that <code class="inline">spawn</code>/<code class="inline">wait</code>/supervision exist. (Plan 9 namespaces make the VFS part moot — the namespace <em>is</em> the VFS.)</li>
+      <li><strong>Helix's hot-reload with state migration.</strong> Ouroboros restarts servers <em>statelessly</em> (re-derive from disk). Live replacement <em>with</em> state hand-off matters for the first <em>stateful</em> server (a future network stack with live connections), not for <code class="inline">fsd</code>. Remember the shape before building one.</li>
+      <li><strong>A unified <code class="inline">poll</code>/<code class="inline">select</code> event model</strong> (Linux and Plan 9 both). Blocking is single-reason today; a task can't wait on several sources at once. Real the moment something multiplexes (keyboard <em>and</em> a pipe); premature until then.</li>
+      <li><strong>Helix's mechanism-vs-policy vocabulary</strong> — worth adopting now as <em>language</em>, even without code, to hold future EL1-vs-EL0 decisions to and resist the split happening by drift.</li>
+    </ul>
+
+    <h2>What to skip (cautionary)</h2>
+
+    <ul>
+      <li><strong>Plan 9's network transparency / distributed 9P</strong> — the local namespace idea is the gold; the remote-mount half needs networking. Don't let the full vision pull in that dependency prematurely.</li>
+      <li><strong>Linux's monolithic model</strong> — cgroups, the in-kernel driver model, the syscall surface: antithetical to the microkernel direction. The one Linux idea worth stealing (the fd/VFS abstraction) is done more cleanly by Plan 9 anyway.</li>
+      <li><strong>Full POSIX <code class="inline">fork</code></strong> — needs copy-on-write address spaces; <code class="inline">spawn</code> (fresh image, no shared parent state) is the simpler, better-fitting primitive here.</li>
+    </ul>
+
+    <h2>Recommendation</h2>
+
+    <p>
+      The Plan 9 <strong>namespace + uniform-protocol</strong> direction is
+      the one genuinely interesting architectural move left: it unifies
+      <code class="inline">fsd</code>, <code class="inline">cond</code>, the
+      capability model, and delegation into a single coherent mechanism, and
+      it's the natural next architecture given everything already landed. If
+      a single next <em>big</em> milestone is wanted, this is it — and
+      general capability delegation should probably be designed <em>as</em>
+      the namespace/<code class="inline">bind</code> mechanism rather than as a
+      standalone send-mask extension, since Plan 9 shows they are the same
+      problem.
+    </p>
+
+    <p>
+      The full note, with sources linked throughout, lives in the repository
+      as
+      <a href="https://github.com/hansolovkarlsson/Ouroboros/blob/main/docs/research-directions.md">research-directions.md</a>.
+    </p>
+
+  </article>
+
+  <footer class="site-footer">
+    <span>Ouroboros — an ARM64 microkernel, written from scratch in Rust</span>
+    <a href="https://github.com/hansolovkarlsson/Ouroboros">github.com/hansolovkarlsson/Ouroboros</a>
+  </footer>
+
+</div>
+</body>
+</html>

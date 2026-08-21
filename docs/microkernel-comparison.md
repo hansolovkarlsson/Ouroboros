@@ -341,6 +341,11 @@ project).
   notes on the two influences. Their "current shape" / "what this says
   about Ouroboros" sections predate the isolation work and are superseded
   by this note; their descriptions of MINIX and Helix themselves stand.
+- [`research-directions.md`](research-directions.md) — the forward-looking
+  companion to this note: a synthesis across all four influences
+  (adding the Plan 9 material) identifying Plan 9's namespaces + uniform
+  file protocol as the standout next architecture — the one mechanism that
+  would unify the servers, the capability model, and delegation.
 - [`isolation-and-dataflow-postmortem.md`](isolation-and-dataflow-postmortem.md)
   — the day-by-day account of the EL0 fault isolation, `fsd`
   supervision, per-task page tables, and grant/safecopy milestones that
