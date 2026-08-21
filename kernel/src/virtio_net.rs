@@ -375,6 +375,22 @@ impl Device {
         }
     }
 
+    /// Whether a frame is waiting in the receive ring, *without* consuming
+    /// it - a cheap peek of the used-ring index, used by the tick wake-check
+    /// to wake a task blocked in `WaitReason::NetInput` when input arrives
+    /// (the async-receive primitive; see `tasks.rs`). A later `poll_frame`
+    /// is what actually reads and re-posts the buffer.
+    ///
+    /// # Safety
+    /// Must be called after [`init`](Self::init).
+    pub unsafe fn has_frame(&self) -> bool {
+        let used = unsafe { &*RX_USED.0.get() };
+        unsafe {
+            core::arch::asm!("dmb sy", options(nostack, preserves_flags));
+        }
+        unsafe { read_volatile(&used.idx) != self.rx_last_used }
+    }
+
     /// Non-blocking receive: if the device has delivered a frame since the
     /// last call, copies its payload (past the 12-byte header) into `out`,
     /// re-posts the receive buffer, and returns the frame length; otherwise

@@ -456,6 +456,16 @@ pub const NET_RECV: u64 = 43;
 /// Gated to [`NET_TASK`] like [`NET_SEND`].
 pub const NET_MAC: u64 = 44;
 
+/// `()` -> blocks the caller until either a frame arrives on the NIC *or* a
+/// message lands in its mailbox, then returns (the value is not meaningful -
+/// the caller drains both sources itself via [`NET_RECV`] and
+/// [`MSG_TRY_RECV`]). The async-receive primitive: it lets the network
+/// server wait on network input and client IPC at once, rather than
+/// busy-polling one and starving the other. A minimal poll/select, scoped to
+/// exactly the two sources the network server multiplexes. Gated to
+/// [`NET_TASK`] like [`NET_SEND`].
+pub const NET_WAIT: u64 = 45;
+
 /// [`NET_RECV`] returned when no frame is currently available (a poll that
 /// found the receive ring empty) - distinct from a real length (`u64::MAX`
 /// is out of any frame's range) and from the error sentinel.

@@ -54,6 +54,17 @@ const ICMP_SEQ: u16 = 1;
 /// ICMP echo payload length (bytes appended after the 8-byte ICMP header).
 const PAYLOAD: usize = 32;
 
+/// The TCP port `netd`'s HTTP server listens on, and a fixed server-side
+/// initial sequence number (one server connection at a time, so fixed
+/// suffices - the same reasoning as the client's `TCP_ISN`).
+const SERVER_PORT: u16 = 80;
+const SERVER_ISN: u32 = 0x0002_0000;
+
+/// The fixed page the server serves to every request. Small enough to fit one
+/// TCP segment (well under the 1460 MSS), so the response is a single
+/// `PSH|ACK`. `Connection: close` + our FIN delimit the body for HTTP/1.0.
+const HTTP_RESPONSE: &[u8] = b"HTTP/1.0 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n<!DOCTYPE html><html><head><title>Ouroboros</title></head><body><h1>Hello from Ouroboros</h1><p>Served by a from-scratch ARM64 microkernel's userland network server over a hand-rolled TCP/IP stack.</p></body></html>";
+
 #[no_mangle]
 #[link_section = ".text.start"]
 pub extern "C" fn _start() -> ! {
@@ -69,48 +80,87 @@ fn main() -> ! {
     serve(packed_mac);
 }
 
-/// The request loop: block on `MSG_RECV`, dispatch by op, reply with a
-/// single-u64 status. Replying to every message is also what acks the
-/// supervisor's health-ping (its reply, addressed to the kernel's sentinel,
-/// is intercepted as the ack).
+/// The event loop: block in `NET_WAIT` until either a client message or an
+/// incoming frame, then drain both. Client requests (`ping`/`resolve`/
+/// `fetch`) are handled synchronously; incoming frames feed the ARP responder
+/// and the TCP HTTP server. This is the async-receive model - `netd` no
+/// longer busy-polls one source while starving the other, and it can now
+/// *answer* the network (serve a page, reply to ARP), not just initiate.
+///
+/// Replying to every client message is also what acks the supervisor's
+/// health-ping (its reply, addressed to the kernel's sentinel, is intercepted
+/// as the ack) - and staying `Blocked` in `NET_WAIT` between bursts is what
+/// keeps the passive heartbeat seeing a healthy server.
 fn serve(packed_mac: u64) -> ! {
+    let mac = if packed_mac == syscall_abi::NET_ERROR {
+        [0u8; 6]
+    } else {
+        unpack_mac(packed_mac)
+    };
     let mut buf = [0u8; syscall_abi::MSG_MAX_LEN as usize];
+    let mut frame = [0u8; 1600];
+    // The one in-flight server connection's state - kept on this frame
+    // because userland has no static mutable state (`.bss` asserted empty).
+    // `serve` never returns, so the frame persists for the whole boot.
+    let mut conn: Option<TcpConn> = None;
     loop {
-        let packed = syscall4(syscall_abi::MSG_RECV, buf.as_mut_ptr() as u64, buf.len() as u64, 0, 0);
-        if packed >= syscall_abi::FS_ERR_MIN {
-            continue; // interrupted or error - wait again
+        // Block until a client message or an incoming frame is pending (or
+        // return immediately if either already is - the kernel checks both
+        // up front, so this never sleeps through waiting input).
+        syscall(syscall_abi::NET_WAIT, 0);
+
+        // 1. Client requests. Handled synchronously: during a `fetch`/`ping`
+        // its own receive loop consumes frames, so an unsolicited server
+        // frame arriving mid-request is dropped (single-threaded, one thing
+        // at a time) - acceptable, the client retransmits.
+        loop {
+            let packed =
+                syscall4(syscall_abi::MSG_TRY_RECV, buf.as_mut_ptr() as u64, buf.len() as u64, 0, 0);
+            if packed >= syscall_abi::FS_ERR_MIN {
+                break; // NO_MSG or an error: mailbox drained
+            }
+            let sender = packed >> 32;
+            let len = (packed & 0xffff_ffff) as usize;
+            handle_client(packed_mac, sender, &buf, len);
         }
-        let sender = packed >> 32;
-        let len = (packed & 0xffff_ffff) as usize;
-        match read_u64(&buf, 0) {
-            syscall_abi::NETOP_PING => {
-                let status = handle_ping(packed_mac, read_u64(&buf, 8));
-                reply(sender, &status.to_le_bytes());
+
+        // 2. Incoming frames: ARP replies for our IP, and the TCP server.
+        if packed_mac != syscall_abi::NET_ERROR {
+            while let Some(n) = recv(&mut frame) {
+                on_frame(&mac, &frame[..n], &mut conn);
             }
-            syscall_abi::NETOP_RESOLVE => {
-                // The hostname fills the message after the 8-byte op.
-                let end = len.min(buf.len()).max(8);
-                let (status, ip) = handle_resolve(packed_mac, &buf[8..end]);
-                let mut r = [0u8; 16];
-                r[0..8].copy_from_slice(&status.to_le_bytes());
-                r[8..16].copy_from_slice(&ip.to_le_bytes());
-                reply(sender, &r);
-            }
-            syscall_abi::NETOP_FETCH => {
-                let end = len.min(buf.len()).max(8);
-                // Copy the hostname out first - handle_fetch reuses `buf`'s
-                // sibling buffers, and the reply is built into a fresh one.
-                let mut host = [0u8; 256];
-                let hlen = (end - 8).min(host.len());
-                host[..hlen].copy_from_slice(&buf[8..8 + hlen]);
-                let mut r = [0u8; syscall_abi::MSG_MAX_LEN as usize];
-                let rlen = handle_fetch(packed_mac, &host[..hlen], &mut r);
-                reply(sender, &r[..rlen]);
-            }
-            // Unknown op (including the supervisor's health-ping): any reply
-            // acks it. The value is irrelevant to the ping sentinel.
-            _ => reply(sender, &0u64.to_le_bytes()),
         }
+    }
+}
+
+/// Dispatch one client request (a `MSG_CALL` from the shell) by op, replying
+/// with the op's status. The unknown-op arm also acks the supervisor ping.
+fn handle_client(packed_mac: u64, sender: u64, buf: &[u8], len: usize) {
+    match read_u64(buf, 0) {
+        syscall_abi::NETOP_PING => {
+            let status = handle_ping(packed_mac, read_u64(buf, 8));
+            reply(sender, &status.to_le_bytes());
+        }
+        syscall_abi::NETOP_RESOLVE => {
+            let end = len.min(buf.len()).max(8);
+            let (status, ip) = handle_resolve(packed_mac, &buf[8..end]);
+            let mut r = [0u8; 16];
+            r[0..8].copy_from_slice(&status.to_le_bytes());
+            r[8..16].copy_from_slice(&ip.to_le_bytes());
+            reply(sender, &r);
+        }
+        syscall_abi::NETOP_FETCH => {
+            let end = len.min(buf.len()).max(8);
+            let mut host = [0u8; 256];
+            let hlen = (end - 8).min(host.len());
+            host[..hlen].copy_from_slice(&buf[8..8 + hlen]);
+            let mut r = [0u8; syscall_abi::MSG_MAX_LEN as usize];
+            let rlen = handle_fetch(packed_mac, &host[..hlen], &mut r);
+            reply(sender, &r[..rlen]);
+        }
+        // Unknown op (including the supervisor's health-ping): any reply acks
+        // it. The value is irrelevant to the ping sentinel.
+        _ => reply(sender, &0u64.to_le_bytes()),
     }
 }
 
@@ -485,6 +535,216 @@ fn tcp_get(mac: &[u8; 6], dst_mac: &[u8; 6], target: &[u8; 4], request: &[u8], r
     }
 }
 
+/// The state of the one in-flight server connection.
+enum ConnState {
+    /// Sent SYN-ACK, waiting for the peer's ACK (or its request data).
+    SynRcvd,
+    /// Handshake complete, waiting for the HTTP request.
+    Established,
+    /// Response + our FIN sent, waiting for the peer to finish closing.
+    Closing,
+}
+
+/// One server-side TCP connection. `netd` serves one at a time - a second
+/// peer's SYN while a connection is active just replaces it (single-threaded,
+/// no concurrency), the same "one at a time, fixed values suffice" stance the
+/// client side takes.
+struct TcpConn {
+    peer_ip: [u8; 4],
+    peer_mac: [u8; 6],
+    peer_port: u16,
+    /// Our next send sequence number.
+    snd_nxt: u32,
+    /// The next sequence number we expect from the peer.
+    rcv_nxt: u32,
+    state: ConnState,
+    /// Whether we've already sent the response (guards against a
+    /// retransmitted request re-triggering it).
+    responded: bool,
+}
+
+/// A parsed inbound TCP segment addressed to our listen port.
+struct TcpIn {
+    src_ip: [u8; 4],
+    src_mac: [u8; 6],
+    src_port: u16,
+    seq: u32,
+    flags: u8,
+    data_len: u32,
+}
+
+/// Dispatch one received frame: answer ARP requests for our IP, and feed TCP
+/// segments to the HTTP server. Everything else (including our own client
+/// ops' replies, which the synchronous handlers already consumed) is ignored.
+fn on_frame(mac: &[u8; 6], frame: &[u8], conn: &mut Option<TcpConn>) {
+    if frame.len() < 14 {
+        return;
+    }
+    let ethertype = ((frame[12] as u16) << 8) | frame[13] as u16;
+    match ethertype {
+        0x0806 => handle_arp(mac, frame),
+        0x0800 => {
+            if let Some(seg) = parse_tcp_in(frame) {
+                handle_tcp(mac, &seg, conn);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Answer an ARP request for our IP (so the gateway/host can resolve us before
+/// forwarding a connection to the server). Ignores requests for anyone else.
+fn handle_arp(mac: &[u8; 6], frame: &[u8]) {
+    if frame.len() < 42 {
+        return;
+    }
+    if frame[20] != 0x00 || frame[21] != 0x01 || frame[38..42] != OUR_IP {
+        return; // not an ARP request, or not for us
+    }
+    let mut req_mac = [0u8; 6];
+    req_mac.copy_from_slice(&frame[22..28]);
+    let mut req_ip = [0u8; 4];
+    req_ip.copy_from_slice(&frame[28..32]);
+    let mut arp = [0u8; 42];
+    arp[0..6].copy_from_slice(&req_mac); // eth dst: the requester
+    arp[6..12].copy_from_slice(mac); // eth src: us
+    arp[12..14].copy_from_slice(&[0x08, 0x06]); // ethertype: ARP
+    arp[14..16].copy_from_slice(&[0x00, 0x01]); // htype: Ethernet
+    arp[16..18].copy_from_slice(&[0x08, 0x00]); // ptype: IPv4
+    arp[18] = 6; // hlen
+    arp[19] = 4; // plen
+    arp[20..22].copy_from_slice(&[0x00, 0x02]); // oper: reply
+    arp[22..28].copy_from_slice(mac); // sha: us
+    arp[28..32].copy_from_slice(&OUR_IP); // spa: us
+    arp[32..38].copy_from_slice(&req_mac); // tha: the requester
+    arp[38..42].copy_from_slice(&req_ip); // tpa: the requester
+    let _ = send(&arp);
+}
+
+/// Parse an inbound frame as a TCP segment addressed to our listen port,
+/// returning the peer's address and the segment's fields (using the IP
+/// total-length field to find the true payload end, ignoring Ethernet
+/// padding). `None` if it isn't IPv4/TCP to port 80.
+fn parse_tcp_in(frame: &[u8]) -> Option<TcpIn> {
+    if frame.len() < 34 || frame[12] != 0x08 || frame[13] != 0x00 {
+        return None; // not IPv4
+    }
+    if frame[23] != 6 {
+        return None; // not TCP
+    }
+    let ihl = (frame[14] & 0x0f) as usize * 4;
+    let t = 14 + ihl;
+    if frame.len() < t + 20 {
+        return None;
+    }
+    if u16be(frame, t + 2) != SERVER_PORT {
+        return None; // not to our listen port
+    }
+    let data_off = t + ((frame[t + 12] >> 4) as usize) * 4;
+    let ip_total = u16be(frame, 16) as usize;
+    let seg_end = (14 + ip_total).min(frame.len());
+    let data_len = seg_end.saturating_sub(data_off) as u32;
+    let mut src_ip = [0u8; 4];
+    src_ip.copy_from_slice(&frame[26..30]);
+    let mut src_mac = [0u8; 6];
+    src_mac.copy_from_slice(&frame[6..12]);
+    Some(TcpIn {
+        src_ip,
+        src_mac,
+        src_port: u16be(frame, t),
+        seq: u32be(frame, t + 4),
+        flags: frame[t + 13],
+        data_len,
+    })
+}
+
+/// The server TCP state machine for one segment. Minimal but real: SYN ->
+/// SYN-ACK, request data -> response + FIN, then ack the peer's FIN and close.
+/// One connection at a time; a SYN always (re)starts it.
+fn handle_tcp(mac: &[u8; 6], seg: &TcpIn, conn: &mut Option<TcpConn>) {
+    // RST tears down a matching connection.
+    if seg.flags & TCP_RST != 0 {
+        if seg_matches(conn, seg) {
+            *conn = None;
+        }
+        return;
+    }
+
+    // SYN (without ACK): start or restart the connection, answer with SYN-ACK.
+    if seg.flags & TCP_SYN != 0 && seg.flags & TCP_ACK == 0 {
+        let mut c = TcpConn {
+            peer_ip: seg.src_ip,
+            peer_mac: seg.src_mac,
+            peer_port: seg.src_port,
+            snd_nxt: SERVER_ISN,
+            rcv_nxt: seg.seq.wrapping_add(1), // SYN consumes a sequence number
+            state: ConnState::SynRcvd,
+            responded: false,
+        };
+        send_seg(mac, &c, TCP_SYN | TCP_ACK, true, &[]);
+        c.snd_nxt = c.snd_nxt.wrapping_add(1); // our SYN consumes one too
+        *conn = Some(c);
+        return;
+    }
+
+    // Everything else must belong to the active connection.
+    if !seg_matches(conn, seg) {
+        return;
+    }
+    let Some(c) = conn.as_mut() else { return };
+
+    // A bare ACK completes the handshake.
+    if matches!(c.state, ConnState::SynRcvd) && seg.flags & TCP_ACK != 0 {
+        c.state = ConnState::Established;
+    }
+
+    // The request data (may arrive with the handshake ACK, or just after) ->
+    // send the response and immediately FIN. Only once.
+    if !c.responded && seg.data_len > 0 && seg.seq == c.rcv_nxt {
+        c.rcv_nxt = c.rcv_nxt.wrapping_add(seg.data_len);
+        send_seg(mac, c, TCP_PSH | TCP_ACK, false, HTTP_RESPONSE);
+        c.snd_nxt = c.snd_nxt.wrapping_add(HTTP_RESPONSE.len() as u32);
+        send_seg(mac, c, TCP_FIN | TCP_ACK, false, &[]);
+        c.snd_nxt = c.snd_nxt.wrapping_add(1); // FIN consumes a sequence number
+        c.responded = true;
+        c.state = ConnState::Closing;
+    }
+
+    // The peer's FIN: ack it (past any data it carried plus the FIN) and close.
+    if seg.flags & TCP_FIN != 0 {
+        c.rcv_nxt = seg.seq.wrapping_add(seg.data_len).wrapping_add(1);
+        send_seg(mac, c, TCP_ACK, false, &[]);
+        *conn = None;
+    }
+}
+
+/// Whether `seg` belongs to the active connection (same peer address+port).
+fn seg_matches(conn: &Option<TcpConn>, seg: &TcpIn) -> bool {
+    match conn {
+        Some(c) => c.peer_ip == seg.src_ip && c.peer_port == seg.src_port,
+        None => false,
+    }
+}
+
+/// Build and send one server-direction segment for connection `c`.
+fn send_seg(mac: &[u8; 6], c: &TcpConn, flags: u8, with_mss: bool, payload: &[u8]) {
+    let mut out = [0u8; 1600];
+    if let Some(n) = build_tcp_srv(
+        mac,
+        &c.peer_mac,
+        &c.peer_ip,
+        c.peer_port,
+        c.snd_nxt,
+        c.rcv_nxt,
+        flags,
+        with_mss,
+        payload,
+        &mut out,
+    ) {
+        let _ = send(&out[..n]);
+    }
+}
+
 /// Build an Ethernet+IPv4+TCP segment into `out`, returning its length.
 /// `with_mss` adds a 4-byte MSS option (for the SYN). The TCP checksum
 /// covers the IPv4 pseudo-header.
@@ -493,6 +753,51 @@ fn build_tcp(
     mac: &[u8; 6],
     dst_mac: &[u8; 6],
     dst_ip: &[u8; 4],
+    seq: u32,
+    ack: u32,
+    flags: u8,
+    with_mss: bool,
+    payload: &[u8],
+    out: &mut [u8],
+) -> Option<usize> {
+    // Client direction: our ephemeral source port to the peer's port 80.
+    build_tcp_generic(
+        mac, dst_mac, dst_ip, TCP_SRC_PORT, 80, seq, ack, flags, with_mss, payload, out,
+    )
+}
+
+/// Server direction: our port 80 to the peer's ephemeral port. Same framing
+/// as [`build_tcp`], just the ports reversed - both delegate to
+/// [`build_tcp_generic`].
+#[allow(clippy::too_many_arguments)]
+fn build_tcp_srv(
+    mac: &[u8; 6],
+    peer_mac: &[u8; 6],
+    peer_ip: &[u8; 4],
+    peer_port: u16,
+    seq: u32,
+    ack: u32,
+    flags: u8,
+    with_mss: bool,
+    payload: &[u8],
+    out: &mut [u8],
+) -> Option<usize> {
+    build_tcp_generic(
+        mac, peer_mac, peer_ip, SERVER_PORT, peer_port, seq, ack, flags, with_mss, payload, out,
+    )
+}
+
+/// Build an Ethernet+IPv4+TCP segment (source IP always ours). The TCP
+/// checksum covers the IPv4 pseudo-header; `with_mss` adds the SYN's MSS
+/// option. Shared by the client ([`build_tcp`]) and server ([`build_tcp_srv`])
+/// directions, which differ only in the source/destination ports.
+#[allow(clippy::too_many_arguments)]
+fn build_tcp_generic(
+    mac: &[u8; 6],
+    dst_mac: &[u8; 6],
+    dst_ip: &[u8; 4],
+    src_port: u16,
+    dst_port: u16,
     seq: u32,
     ack: u32,
     flags: u8,
@@ -525,8 +830,8 @@ fn build_tcp(
     out[ip + 10..ip + 12].copy_from_slice(&ipc.to_be_bytes());
     // TCP.
     let t = ip + IP_LEN;
-    out[t..t + 2].copy_from_slice(&TCP_SRC_PORT.to_be_bytes());
-    out[t + 2..t + 4].copy_from_slice(&80u16.to_be_bytes());
+    out[t..t + 2].copy_from_slice(&src_port.to_be_bytes());
+    out[t + 2..t + 4].copy_from_slice(&dst_port.to_be_bytes());
     out[t + 4..t + 8].copy_from_slice(&seq.to_be_bytes());
     out[t + 8..t + 12].copy_from_slice(&ack.to_be_bytes());
     out[t + 12] = ((tcp_hdr / 4) as u8) << 4; // data offset in 32-bit words

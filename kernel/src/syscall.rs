@@ -106,6 +106,19 @@ fn net_access_allowed() -> bool {
     tasks::cap_has(tasks::current_task(), tasks::CAP_NET)
 }
 
+/// Whether the NIC has a frame waiting (a non-consuming peek) - the tick
+/// wake-check calls this to wake a task blocked in `WaitReason::NetInput`.
+/// `false` if no NIC is installed. Not gated: it reads no frame data and is
+/// only ever reached from the kernel's own wake-check, not a syscall.
+pub(crate) fn net_has_frame() -> bool {
+    match unsafe { &*NET.0.get() } {
+        // SAFETY: single-core, non-reentrant; has_frame only reads the used
+        // ring index (see virtio_net::has_frame).
+        Some(device) => unsafe { device.has_frame() },
+        None => false,
+    }
+}
+
 /// Activates the USB mass-storage device (if any) and installs it as
 /// the block device the filesystem server operates on - shared by the
 /// boot-time attempt (`main.rs`, covers QEMU where the device is
@@ -857,6 +870,16 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
                 Some(len) => len as u64,
                 None => syscall_abi::NET_NO_FRAME,
             }
+        }
+        syscall_abi::NET_WAIT => {
+            if !net_access_allowed() {
+                return syscall_abi::NET_ERROR;
+            }
+            // Block until a frame arrives or a message is queued (or one
+            // already is - the poll checks both up front, so this never
+            // sleeps through pending input). Same frame-overwrite blocking
+            // contract as READ_CHAR/MSG_RECV.
+            unsafe { tasks::block_current_and_switch(frame, tasks::WaitReason::NetInput) }
         }
         syscall_abi::FG => {
             let i = arg0 as usize;

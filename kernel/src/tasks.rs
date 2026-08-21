@@ -522,6 +522,14 @@ pub(crate) fn send_message(sender: usize, dest: usize, data: &[u8]) -> u64 {
     msg.len = data.len() as u16;
     msg.data[..data.len()].copy_from_slice(data);
     mailbox.count += 1;
+    // A destination parked in NET_WAIT isn't in a Message wait, so the
+    // direct-delivery path above didn't fire - but it *does* want to wake on
+    // a queued message. Mark it runnable now so a client call reaches it this
+    // switch (sub-tick), not only on the next tick's wake-check. It drains
+    // the mailbox itself on resume (NET_WAIT returns; the value is ignored).
+    if let TaskState::Blocked(WaitReason::NetInput) = unsafe { *STATES[dest].0.get() } {
+        unsafe { *STATES[dest].0.get() = TaskState::Runnable };
+    }
     0
 }
 
@@ -794,6 +802,13 @@ pub(crate) enum WaitReason {
     /// call waiting on that specific task's reply (`MSG_CALL`), so an
     /// unrelated task's message can never be mistaken for the reply.
     Message { buf: u64, len: u64, from: Option<usize> },
+    /// Waiting for network input *or* a message (`NET_WAIT`): satisfied
+    /// when the NIC has a frame waiting or the task's mailbox is non-empty.
+    /// Unlike `Message` it consumes neither - the waiter drains both
+    /// sources itself after waking (`NET_RECV` / `MSG_TRY_RECV`). This is
+    /// the async-receive primitive the network server uses to multiplex
+    /// incoming frames and client IPC without busy-polling either.
+    NetInput,
 }
 
 impl WaitReason {
@@ -849,8 +864,24 @@ impl WaitReason {
                 }
                 try_recv_message_from(waiter, buf, len, from)
             }
+            WaitReason::NetInput => {
+                // Woken by either source; consume neither (the waiter
+                // drains them itself). The returned value is not meaningful
+                // to NET_WAIT's caller.
+                if crate::syscall::net_has_frame() || has_queued_message(waiter) {
+                    Some(0)
+                } else {
+                    None
+                }
+            }
         }
     }
+}
+
+/// Whether `task`'s mailbox holds at least one queued message - the
+/// message half of `WaitReason::NetInput`'s wake condition.
+fn has_queued_message(task: usize) -> bool {
+    unsafe { (*MAILBOXES[task].0.get()).count > 0 }
 }
 
 #[derive(Clone, Copy, PartialEq)]

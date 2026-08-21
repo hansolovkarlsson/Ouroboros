@@ -345,6 +345,26 @@ run-image-net: image
 		-global virtio-mmio.force-legacy=false \
 		-nographic
 
+# Like `run-image-net`, but forwards host port 5555 to the guest's TCP port 80
+# (SLIRP hostfwd), so `netd`'s HTTP server (the guest answering the network) is
+# reachable from the host: boot this, then on the host run
+#   curl http://localhost:5555/
+# and the from-scratch TCP stack serves its page. Every frame still goes to
+# net.pcap for host-side inspection.
+run-image-server: image
+	qemu-system-aarch64 \
+		-machine virt \
+		-cpu cortex-a72 \
+		-m 512M \
+		-bios $(OVMF) \
+		-drive file=$(ESP_DIR).img,format=raw,if=none,id=hd0 \
+		-device virtio-blk-device,drive=hd0 \
+		-netdev user,id=net0,hostfwd=tcp::5555-:80 \
+		-device virtio-net-device,netdev=net0 \
+		-object filter-dump,id=f0,netdev=net0,file=net.pcap \
+		-global virtio-mmio.force-legacy=false \
+		-nographic
+
 # Wraps esp.img into esp.hdd, a Parallels-native virtual hard disk, via
 # prl_disk_tool's `--dmg` import (its only documented way to build a .hdd
 # from an existing raw image; needs a real .dmg container, not the raw .img,
