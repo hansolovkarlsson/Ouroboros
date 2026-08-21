@@ -127,6 +127,87 @@ serial/storage device (vendor `0x1ab8`, no public spec); and an EHCI
 driver for USB 2.0 sticks (a whole second host-controller bring-up for
 poor value).
 
+## A network stack (scoped)
+
+The one large subsystem Ouroboros has never had. It's a good fit for the
+current architecture rather than a stretch: the "DMA driver in the kernel,
+protocol logic in a userland server" split maps onto the `fsd`/`cond`
+precedent exactly, and it would be the first genuinely *stateful* server —
+which is what would finally motivate Helix-style hot-reload-with-state-
+migration and, eventually, the distributed half of the Plan 9 `/net`
+direction (see [`research-directions.md`](research-directions.md)).
+
+**The architecture, dictated by the no-IOMMU DMA constraint.** Same rule
+that keeps the block transport in the kernel: a NIC does DMA (RX/TX
+descriptor rings plus packet buffers the device reads and writes), and with
+no IOMMU a device can DMA anywhere, so the *driver* must stay in the trusted
+EL1 kernel. So the stack splits:
+
+- **Kernel (EL1): a virtio-net driver** — RX/TX virtqueues over the existing
+  `virtio_mmio.rs` transport (the same one `virtio_blk.rs` uses), exposed as
+  a gated device through a small syscall pair (send a frame / poll-receive a
+  frame), accepted from one network-server task alone — exactly the
+  `BLOCK_*` → `fsd` gating pattern.
+- **Userland (EL0): `netd`, the protocol stack** — Ethernet / ARP / IPv4 /
+  ICMP / UDP (/ TCP), a boot-loaded, supervised, MMU-isolated EL0 server (the
+  `fsd`/`cond` precedent), reached over IPC by clients. The MINIX `inet`-
+  server / Plan 9 `/net` model.
+
+**Platform reality (the storage story again).** QEMU exposes virtio-net over
+virtio-mmio (`-device virtio-net-device`), reachable with the existing
+transport — the dev loop. **Parallels exposes virtio-net over PCI** (the
+device inventory already found it: vendor `0x1af4`, device `0x1000`, class
+`0x02:0x00`), which needs a **virtio-pci transport this project doesn't
+have** (it deliberately uses virtio-mmio only). So real-hardware networking
+is gated behind a virtio-pci transport sub-project — the same shape as
+storage (virtio-blk-mmio on QEMU, a separate USB-MSD path for Parallels).
+QEMU-first throughout; Parallels networking is a later, separately-scoped
+step, not a Stage 1 concern.
+
+**Staging (each independently verifiable, the standing discipline):**
+
+1. **virtio-net driver (kernel), raw frames.** Discovery + feature
+   negotiation (`VIRTIO_F_VERSION_1`, `VIRTIO_NET_F_MAC`), RX/TX virtqueue
+   setup, the 12-byte virtio-net header, gated `NET_SEND`/`NET_RECV`
+   syscalls. Polled, matching every other driver. Proven by a specific,
+   independently-checkable value — e.g. send a broadcast ARP request and
+   receive a well-formed reply frame — not "no error returned."
+2. **ARP + IPv4 + ICMP echo (`netd`).** The classic "the stack works" proof:
+   reply to a host `ping` (host → guest ICMP echo request → guest reply),
+   and/or `ping` out from the guest. ARP resolution, IPv4 parse/checksum,
+   ICMP echo — hand-rolled, fixed-buffer (the ACPI/FAT32/virtio precedent).
+   A `ping` shell command as the first client.
+3. **UDP.** Connectionless, far simpler than TCP: send/receive datagrams,
+   proven by a DNS query or a UDP echo. A minimal socket-op IPC protocol
+   (`NETOP_*`, the `FSOP_*` shape) — or, if the Plan 9 namespace work has
+   landed by then, a `/net` file interface (which this would be the ideal
+   first consumer of).
+4. **TCP (the big one, separately scoped when reached).** The full state
+   machine — retransmission, windows, seq/ack — enough for a client
+   active-open first, a minimal `listen` later. This is where the
+   hand-roll-vs-vendor decision below actually bites.
+
+**Decisions to settle before starting (not now):**
+
+- **Hand-roll vs. a `no_std` stack for the protocol logic**, TCP especially.
+  The project has hand-rolled every parser so far and avoided
+  allocator-assuming crates; `smoltcp` *can* run `no_std`/no-alloc with
+  fixed buffers, so it's a genuine option for TCP specifically — the same
+  hand-roll-vs-crate call FAT32 faced. Note it, don't pre-decide.
+- **Client API shape**: a bespoke socket-op IPC protocol now, or wait for the
+  Plan 9 `/net` file interface. The two connect — a network server is a
+  strong first consumer for the namespace direction.
+- **Polled vs. interrupt-driven RX**: polled for the first cut (every driver
+  is), but a NIC is the strongest case yet for real IRQ-driven RX, since
+  packets arrive unsolicited — the first driver where polling is a real
+  latency cost, not just a simplicity choice, worth knowing going in.
+
+**Scale, honestly:** Stages 1–3 are each roughly a milestone the size of the
+storage or console work; Stage 4 (TCP) is larger than any single milestone
+this project has done. This is a multi-milestone arc, not one task — but
+Stages 1–2 alone (frames + `ping`) are a satisfying, self-contained first
+target that proves the whole architecture end to end.
+
 ## Testing infrastructure: scripted real-hardware round trips
 
 Every real-hardware bug in `xhci-keyboard-postmortem.md` and
