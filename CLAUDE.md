@@ -5535,6 +5535,91 @@ was verified host-side. Directories still never shrink, and everything else
 about the module's scope (8.3-only, no LFN, first-FAT32-partition-only) is
 unchanged.
 
+## Network stack, Stage 1: a virtio-net driver, and the first frames this kernel has ever sent
+
+The first networking this project has ever had. Stage 1 of the network-stack
+arc scoped in `docs/roadmap.md`: the **kernel-side virtio-net driver only** -
+the DMA-owning half that, per the no-IOMMU DMA constraint, must stay in the
+trusted EL1 kernel (without an IOMMU a device can DMA anywhere, so the
+ring/buffer owner can't be an untrusted EL0 task - the same rule that keeps
+virtio-blk in the kernel). The protocol stack (ARP/IP/ICMP/UDP/TCP) is a
+later stage's userland `netd` server; this driver just moves opaque frames.
+
+**Built directly on the existing virtio infrastructure.** `virtio_net.rs`
+reuses `virtio_mmio.rs`'s transport (the same one `virtio_blk.rs` proved
+out) and is modeled on the block driver's shape: static aligned virtqueue
+structures in the `UnsafeCell`-wrapper idiom, feature negotiation, and
+poll-the-used-ring completion (no IRQ wiring, matching every driver here).
+The `Desc`/`Avail`/`Used` ring types are redefined locally rather than shared
+with `virtio_blk.rs` - a small, deliberate duplication (the
+`RUNTIME_SLOT_ALIGN` call) that keeps the new module from touching the proven
+block driver at all.
+
+**Two real differences from virtio-blk, both handled:**
+- **Two virtqueues, not one.** virtio-net has a receiveq (queue 0) and a
+  transmitq (queue 1), each with its own desc/avail/used rings. Receive
+  buffers are *pre-posted* at init (the device fills them asynchronously as
+  frames arrive) and drained incrementally by `poll_frame`, then re-posted -
+  unlike the block driver's strictly one-request-at-a-time model. Transmit
+  stays one-at-a-time (`send_frame`).
+- **A 12-byte `virtio_net_hdr` prefixes every frame** in both directions.
+  `VIRTIO_F_VERSION_1` makes it 12 bytes (including the trailing
+  `num_buffers`), regardless of `VIRTIO_NET_F_MRG_RXBUF` - which is
+  deliberately *not* negotiated, so every frame fits one buffer and
+  `num_buffers` is always 1. On transmit the header is all zeros (no
+  checksum/GSO offload requested); on receive the device writes it and
+  `poll_frame` skips past it.
+
+**Feature negotiation spans both feature words**, unlike virtio-blk (which
+touched only the high word): `VIRTIO_NET_F_MAC` is low-word bit 5,
+`VIRTIO_F_VERSION_1` is high-word bit 0. The MAC is read from config space
+after negotiation (the first `virtio_net_config` field, 6 bytes at offset 0).
+`send_frame`'s TX-completion poll uses a **real wall-clock deadline** off the
+generic timer (`timer::now_ticks`/`frequency_hz`), the xHCI-driver lesson
+that an iteration count is not a valid proxy for elapsed time under a
+hypervisor - not the unbounded loop virtio-blk still uses.
+
+**`init_net` in `main.rs` is Stage 1's end-to-end proof**, modeled on
+`init_storage`: it discovers + inits the NIC, logs the MAC, then sends a
+**broadcast ARP request** for the QEMU user-net gateway (`10.0.2.2`, "tell
+`10.0.2.15`") and polls for the reply, decoding it - proving transmit *and*
+receive, not just "no error." The IP addresses are a hardcoded QEMU user-net
+convention (a QEMU-shaped choice like the device-region addresses elsewhere),
+replaced by real ARP/DHCP in `netd` later. Gated behind
+`virtio_mmio_probe_safe` exactly like `init_storage` (the virtio-mmio scan
+crashes real Parallels hardware, and Parallels exposes virtio-net over PCI
+anyway - a transport this project doesn't have, so **Stage 1 is QEMU-only by
+design**). Silent when no NIC is attached (`NotFound` returns without
+logging), so plain `make run`/`run-image` are unperturbed.
+
+**Confirmed on QEMU two ways, the "verify against a source outside the
+kernel's own output" discipline** (the same reasoning behind the FAT32
+gap's host-side hex inspection). A new `make run-net` target attaches
+`virtio-net-device` over virtio-mmio with QEMU user-mode (SLIRP) networking
+plus an `-object filter-dump` writing every frame to `net.pcap`:
+- The kernel's own log: `virtio-net ready, MAC 52:54:00:12:34:56` then
+  `virtio-net ARP reply - 10.0.2.2 is at 52:55:0a:00:02:02` (SLIRP's gateway
+  MAC).
+- The pcap, decoded independently with `tcpdump`: the ARP request going
+  *out* (`who-has 10.0.2.2 tell 10.0.2.15`, broadcast from our MAC) and the
+  reply coming *in* (`10.0.2.2 is-at 52:55:0a:00:02:02`, unicast to us) -
+  TX and RX both confirmed by something other than this kernel's own
+  decoding.
+- Regression: plain `make run` (no NIC) boots normally, `init_net` silent,
+  storage unaffected, zero `-d int` aborts.
+
+**Still coarse, worth knowing before building on this - Stage 1 is
+deliberately just the driver:** no protocol stack (the ARP probe is a fixed
+hand-built frame, not a real ARP implementation - that's `netd`, Stage 2); no
+gated `NET_SEND`/`NET_RECV` syscalls yet (they land with `netd`, their first
+consumer, rather than as dead code now); polled, not interrupt-driven (a NIC
+is the strongest case yet for real IRQ-driven RX since packets arrive
+unsolicited, but polled matches every other driver for the first cut);
+QEMU-only (Parallels' virtio-net is PCI, needing a virtio-pci transport -
+see `docs/roadmap.md`); small fixed rings (`RX_COUNT` 4, `QUEUE_SIZE` 8),
+fine for a polled ARP round-trip, not tuned for throughput; and the
+hardcoded QEMU user-net IPs in `init_net`.
+
 ## Commands
 
 ```sh
@@ -5543,6 +5628,7 @@ make build PROFILE=release  # release profile
 make shell-bin               # build shell/ for aarch64-unknown-none + strip (same pattern: hello-bin, pong-bin, fsd-bin)
 make run                    # stage ESP dir (kernel + userland binaries incl. the fsd filesystem server + config) + boot in QEMU with a virtio-mmio block device attached (fast dev loop - vvfat backing, FAT16, not FAT32 - see "Phase 3b")
 make run-virtio-console      # same as `run`, plus a virtio-mmio console device attached (for testing virtio_console.rs - see "virtio-console" above for why this alone doesn't organically trigger the fallback)
+make run-net                 # same as `run`, plus a virtio-net device on virtio-mmio + QEMU user-mode (SLIRP) networking + an -object filter-dump pcap (net.pcap) - the dev loop for the network stack (kernel/src/virtio_net.rs, Stage 1); init_net's boot ARP probe exercises SLIRP's gateway, see "Network stack, Stage 1" above
 make run-usb-kbd             # same as `run`, plus an xHCI controller + USB keyboard + HMP monitor socket for sendkey keystroke injection (see "USB HID keyboard driver" above)
 make run-usb-multi           # same as `run-usb-kbd`, plus a usb-tablet and a usb-storage stick on the same controller - the three-device rig for xhci.rs's multi-device scan (see "xHCI multi-device support" above)
 make image                  # build esp.img, a raw MBR+FAT32 disk image (not directly usable by Parallels - see below)
@@ -5631,7 +5717,7 @@ docs/
   capability-and-hardening-postmortem.md   design retrospective (a seventh piece, 2026-08-20): a one-day arc of five milestones - the active health-ping, the capability model (who-may-call-whom), program-to-program pipes, the stack guard page, and the userland heap - with the spine "scope it down before you build it": three of the five shrank when asked whether the clean design needed the hard part (the ping needs no new syscall since a reply is an ack; capabilities are a pure function of slot, no mutable table; pipes need no delegation since the shell can relay), the guard page found a real silent 8KB `exec`-path overflow in the shell on its first test, and a one-build go/no-go gate proved `alloc`'s collections can't be PIE-linked on stable (`R_AARCH64_ABS64` in prebuilt liballoc, `-Z build-std` nightly-only) before any of the heap plumbing was written, forcing the raw-buffer pivot - covers the five "Server supervision"/"capability model"/"pipes"/"guard page"/"heap" sections above
 
 kernel/
-  src/main.rs        #[entry] point: UEFI init, console discovery, madt::discover(), loader::load(), ExitBootServices, exceptions::install(), mmu::install_identity_map(), xhci::init(), gic+timer init, tasks::init(), then tasks::start()
+  src/main.rs        #[entry] point: UEFI init, console discovery, madt::discover(), loader::load(), ExitBootServices, exceptions::install(), mmu::install_identity_map(), xhci::init(), init_storage()/init_net() (both gated on virtio_mmio_probe_safe), gic+timer init, tasks::init(), then tasks::start()
   src/uart.rs        raw PL011 console driver (read + write), used only after ExitBootServices
   src/uart16550.rs   raw 16550-compatible console driver (read + write; PCI-discovered consoles; different hardware, different driver)
   src/devicetree.rs  console UART discovery via the UEFI-provided devicetree (dead end on QEMU/Parallels)
@@ -5658,6 +5744,7 @@ kernel/
   src/usb_msd.rs     USB mass storage: Bulk-Only Transport + SCSI (INQUIRY/READ CAPACITY/READ(10)/WRITE(10)) over xhci.rs's bulk endpoints - Parallels' first working disk, see "USB mass storage" above
   src/virtio_blk.rs  runtime virtio-blk driver: feature negotiation, one virtqueue, synchronous polling sector reads and writes - phase 3a (reads)/phase 4 (writes), confirmed working, see above
   src/virtio_console.rs  transmit-only virtio-console driver over the same transport - device discovery, feature negotiation, transmitq0 - confirmed working on QEMU; confirmed *not* what Parallels' serial port actually is, see "virtio-console" above
+  src/virtio_net.rs  virtio-net driver over the same transport: receiveq (pre-posted buffers) + transmitq, VIRTIO_F_VERSION_1/VIRTIO_NET_F_MAC negotiation, the 12-byte virtio_net_hdr, send_frame/poll_frame moving opaque Ethernet frames - the DMA-owning kernel half of the network stack (Stage 1), QEMU-only (gated like virtio-blk; Parallels' virtio-net is PCI). See "Network stack, Stage 1" above and main.rs's init_net
   src/xhci.rs        from-scratch xHCI (USB3 host controller) driver: command/event rings, multi-device port scan (every connected device enumerated, its interfaces logged, and kept concurrently addressed - up to 4, see "xHCI multi-device support" above), per-device EP0 rings/output contexts, and a real interrupt endpoint for HID keyboard reports - confirmed working end to end with a real keyboard on real Parallels hardware, see "USB HID keyboard driver" above and docs/xhci-keyboard-postmortem.md
 
 shell/               userland default shell - a separate crate, built for aarch64-unknown-none, loaded from disk (not compiled into the kernel)

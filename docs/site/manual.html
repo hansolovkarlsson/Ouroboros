@@ -75,6 +75,7 @@ make run-image       # boots esp.img - real FAT32, disk commands work
 make run-usb-kbd     # + xHCI controller &amp; USB keyboard (monitor sendkey)
 make run-usb-multi   # + USB tablet and storage stick (3-device xHCI rig)
 make run-virtio-console  # + a virtio console device (see its Makefile note)
+make run-net         # + a virtio-net device & QEMU user-net + a net.pcap dump
 make run-gicv3       # forces GICv3 instead of QEMU's default GICv2</code></pre></div>
 
 <p>The one everyday gotcha: <strong><code class="inline">make run</code>'s disk is FAT16</strong> (an artifact of QEMU's vvfat driver), which the FAT32-only filesystem server can't mount — every disk command prints a shared "no filesystem mounted" message there. Use <code class="inline">make run-image</code> whenever you want <code class="inline">ls</code>/<code class="inline">cat</code>/ <code class="inline">exec</code>/etc. to actually work.</p>

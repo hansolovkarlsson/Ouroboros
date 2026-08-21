@@ -166,12 +166,17 @@ step, not a Stage 1 concern.
 
 **Staging (each independently verifiable, the standing discipline):**
 
-1. **virtio-net driver (kernel), raw frames.** Discovery + feature
-   negotiation (`VIRTIO_F_VERSION_1`, `VIRTIO_NET_F_MAC`), RX/TX virtqueue
-   setup, the 12-byte virtio-net header, gated `NET_SEND`/`NET_RECV`
-   syscalls. Polled, matching every other driver. Proven by a specific,
-   independently-checkable value — e.g. send a broadcast ARP request and
-   receive a well-formed reply frame — not "no error returned."
+1. ~~**virtio-net driver (kernel), raw frames.**~~ **DONE (2026-08-21).**
+   `kernel/src/virtio_net.rs`: discovery + feature negotiation
+   (`VIRTIO_F_VERSION_1`/`VIRTIO_NET_F_MAC`), receiveq (pre-posted buffers) +
+   transmitq, the 12-byte virtio-net header, `send_frame`/`poll_frame`.
+   Polled, matching every other driver. Proven on QEMU by `main.rs::init_net`
+   sending a broadcast ARP request and decoding the reply, cross-checked
+   against a `tcpdump` of the `make run-net` pcap (request out, reply in) -
+   not "no error returned." Gated behind `virtio_mmio_probe_safe` (QEMU-only;
+   Parallels' virtio-net is PCI). The gated `NET_SEND`/`NET_RECV` syscalls
+   deferred to Stage 2 with `netd`, their first consumer, rather than dead
+   code now. See `CHANGELOG.md` / `CLAUDE.md`'s "Network stack, Stage 1."
 2. **ARP + IPv4 + ICMP echo (`netd`).** The classic "the stack works" proof:
    reply to a host `ping` (host → guest ICMP echo request → guest reply),
    and/or `ping` out from the guest. ARP resolution, IPv4 parse/checksum,

@@ -7,6 +7,46 @@ what broke, how it was diagnosed), see `CLAUDE.md`; for *how* something
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## Network stack, Stage 1: a virtio-net driver, and the first frames this kernel has sent
+
+The first networking this project has ever had. Stage 1 of the network-stack
+arc (`docs/roadmap.md`): the **kernel-side virtio-net driver only** - the
+DMA-owning half that, per the no-IOMMU DMA constraint, must stay in the
+trusted EL1 kernel (a device can DMA anywhere without an IOMMU, so the
+ring/buffer owner can't be an untrusted EL0 task - the same rule that keeps
+virtio-blk in the kernel). The protocol stack (ARP/IP/ICMP/UDP/TCP) is a
+later stage's userland `netd` server; this driver just moves opaque frames.
+
+`kernel/src/virtio_net.rs` reuses `virtio_mmio.rs`'s transport and the block
+driver's static-virtqueue + poll-the-used-ring shape (no IRQ). Two real
+differences from virtio-blk, both handled: **two virtqueues** (a receiveq
+with pre-posted buffers drained incrementally by `poll_frame`, a transmitq
+used one-at-a-time by `send_frame`), and a **12-byte `virtio_net_hdr`** on
+every frame (`VIRTIO_F_VERSION_1`; `MRG_RXBUF` deliberately not negotiated,
+so one buffer per frame). Negotiation spans both feature words
+(`VIRTIO_NET_F_MAC` low, `VIRTIO_F_VERSION_1` high); the MAC is read from
+config space; TX completion polls a **real wall-clock deadline** off the
+generic timer (the xHCI iteration-count lesson).
+
+`main.rs::init_net` is the end-to-end proof (modeled on `init_storage`):
+discover + init, log the MAC, then send a **broadcast ARP request** for the
+QEMU user-net gateway and decode the reply - proving transmit *and* receive.
+Gated behind `virtio_mmio_probe_safe` like storage, so **Stage 1 is QEMU-only
+by design** (the scan crashes real Parallels, which exposes virtio-net over
+PCI anyway - a transport this project doesn't have). Silent when no NIC is
+attached, so plain `make run`/`run-image` are unperturbed.
+
+Confirmed on QEMU **two ways** (a new `make run-net` target attaches the NIC
+over virtio-mmio with QEMU user-net + an `-object filter-dump` pcap): the
+kernel logs `virtio-net ARP reply - 10.0.2.2 is at 52:55:0a:00:02:02`, and
+`net.pcap` decoded independently with `tcpdump` shows the ARP request out and
+the reply in - TX and RX confirmed by a source outside the kernel's own
+output. Regression: plain `make run` boots normally, `init_net` silent, zero
+`-d int` aborts. Still just the driver: no protocol stack, no `NET_*`
+syscalls yet (those land with `netd`, Stage 2), polled not interrupt-driven,
+QEMU-only. See `CLAUDE.md`'s "Network stack, Stage 1" section and
+`docs/roadmap.md`.
+
 ## FAT32 interior / random-access writes (`write_at` past EOF) - and a `writeat` builtin
 
 `fat32::write_at` refused any offset past the current end of file

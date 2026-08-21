@@ -66,6 +66,7 @@ make run-image       # boots esp.img - real FAT32, disk commands work
 make run-usb-kbd     # + xHCI controller & USB keyboard (monitor sendkey)
 make run-usb-multi   # + USB tablet and storage stick (3-device xHCI rig)
 make run-virtio-console  # + a virtio console device (see its Makefile note)
+make run-net         # + a virtio-net device & QEMU user-net + a net.pcap dump
 make run-gicv3       # forces GICv3 instead of QEMU's default GICv2
 ```
 
