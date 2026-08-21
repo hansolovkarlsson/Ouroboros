@@ -208,6 +208,93 @@ this project has done. This is a multi-milestone arc, not one task — but
 Stages 1–2 alone (frames + `ping`) are a satisfying, self-contained first
 target that proves the whole architecture end to end.
 
+## More filesystems: a VFS layer, then exFAT / ext2 (scoped)
+
+Today the filesystem server `fsd` *is* FAT32 — the type is hardcoded
+(`fsd/src/fat32.rs`), and it mounts only the first FAT32-typed MBR
+partition. Supporting more filesystems is really two things: an internal
+abstraction so `fsd` can drive several, and the filesystem drivers
+themselves.
+
+**The key insight: the client-facing VFS already exists.** Clients call
+`FSOP_LIST_DIR`/`READ_FILE`/`WRITE_AT`/… over IPC — they never know it's
+FAT32. So the *interface* is already filesystem-agnostic; what's missing is
+**internal multiplexing inside `fsd`**: detect the filesystem type at mount
+time and dispatch each `FSOP_*` op to the right driver. That's a much
+smaller change than "write a VFS from scratch."
+
+**Architecture, matching the project's idioms.** A `Filesystem` **enum**
+(`Fat32 | ExFat | Ext2 | …`) with a shared method surface — the same
+enum-over-`dyn` pattern `console::Console` and `block::BlockDevice` already
+use, chosen because `fsd` is `no_std` with no heap (fixed buffers, no
+`alloc` — the real `alloc` heap stays blocked on stable, see above), so
+`dyn Trait` isn't available. FAT32 becomes the first arm; `FSOP_*` is
+unchanged. Every driver is **hand-rolled, fixed-buffer**, no crates — the
+same reasoning FAT32 was hand-rolled (no-alloc post-`exit_boot_services`,
+and filesystem crates assume an allocator and would hit the PIE/libcore
+wall anyway).
+
+**Read-only first, read-write later — the big scoping lever.** For each new
+filesystem, read-only support is dramatically simpler and safer (no
+allocation, no bitmap/inode/FAT updates, no directory insertion, no
+corruption risk). FAT32's own history is the evidence — write support was
+phases 4–8, where all the corruption risk lived. So each new FS lands
+read-only as one milestone, read-write as a separate one.
+
+**Staging:**
+
+0. **GPT + multi-partition (prerequisite).** Real disks — especially large
+   ones and anything macOS/Linux formats — use GPT, not MBR, and `fsd`
+   reads only the *first FAT32* MBR partition today. A GPT parser (a
+   bounded, documented structure) plus "pick the right partition by type"
+   is a small, self-contained first step that every later stage needs.
+1. **The VFS refactor (a pure refactor first).** Extract the hardcoded
+   `Fs` into the `Filesystem` enum with FAT32 as the only arm and a
+   mount-time type-detection step — proven byte-identical to today before
+   any new filesystem exists, exactly the "refactor first, prove no change"
+   pattern `block.rs`'s `BlockDevice` enum already followed.
+2. **exFAT, read-only.** The natural second filesystem: it's a **documented
+   spec** (Microsoft published it in 2019) and structurally the *same shape*
+   as FAT (clusters, a partition, directory entries), so it reuses the most
+   existing code — and it lifts a **real current limitation** (macOS/Windows
+   format large USB sticks as exFAT; the USB-mass-storage milestone already
+   notes "exFAT sticks won't mount — reformat FAT32"). The genuinely new
+   parts: an allocation *bitmap* (not just FAT chains — contiguous files
+   skip the FAT entirely), **UTF-16 long names** (no more 8.3), directory
+   entry *sets* (a file entry + stream-extension + name entries), and an
+   up-case table for case-insensitive comparison. Moderate.
+3. **exFAT, read-write.** Bitmap allocation, directory-entry-set writes —
+   the same "narrowest useful case, claim-before-use ordering" discipline
+   FAT32's write arc used.
+4. **ext2, read-only — the real VFS test.** ext2 is a genuinely *different*
+   model (inode-based, block groups, direct/indirect block pointers, Unix
+   permissions/owners/timestamps, hard links, symlinks) — which is exactly
+   what forces the `Filesystem` abstraction to be *real* (FAT and exFAT are
+   similar enough that a thin abstraction would do). ext2 is the tractable
+   Linux target; it's well-documented and has no journaling. It surfaces a
+   protocol question: `FSOP_*` is FAT-shaped (no permissions, no symlinks),
+   so a first read-only cut presents files and ignores metadata it doesn't
+   model — going further would grow the protocol (which a richer Plan 9
+   `/net`-style file interface would want anyway).
+5. **ext2, read-write.** Inode + block-bitmap allocation, directory record
+   insertion — the highest corruption risk of the set, the phase-4–8
+   discipline applied to a more complex on-disk structure.
+
+**Deferred, noted:** **ext4** is much larger (extents, journaling, htree
+directories, checksums, 64-bit features) and the no-alloc fixed-buffer
+constraint makes a big filesystem genuinely harder — a separate, large arc,
+not a near-term follow-on to ext2. FAT12/16 read support would be a cheap
+add to the exFAT/FAT32 family if ever wanted, but has little real use here.
+
+**Relationship to the Plan 9 direction** (see
+[`research-directions.md`](research-directions.md)): the `Filesystem`-enum-
+in-`fsd` is the pragmatic near-term shape. The Plan 9 end state is instead
+*one server per filesystem* mounted into per-task namespaces — the enum is a
+stepping stone to that, not a dead end, and the `FSOP_*` protocol growth
+ext2 wants (permissions, symlinks) is the same richer file interface the
+namespace direction points at. Sequence the enum now; generalize to
+per-FS servers if and when namespaces land.
+
 ## Testing infrastructure: scripted real-hardware round trips
 
 Every real-hardware bug in `xhci-keyboard-postmortem.md` and
