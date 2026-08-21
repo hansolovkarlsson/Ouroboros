@@ -395,16 +395,18 @@ fn cmd_pipeline(left: &str, right: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut
 }
 
 /// Program-to-program pipe (`/prog_a | /prog_b`): both sides are spawned
-/// programs, so unlike the builtin-left path there's no captured buffer to
-/// stream - the shell *relays* the producer's live output to the consumer.
-/// It spawns the consumer (stdout -> console), spawns the producer with its
-/// stdout routed back to this shell, then forwards each chunk the producer
-/// sends on to the consumer (the same `pipe_send` + timeout-kill), forwards
-/// the empty end-of-stream marker, and waits for both to exit. This is what
-/// the per-task `stdout_target` (SPAWN's arg1) and `SELF` were added for.
+/// programs, and the producer streams its output *directly* to the consumer
+/// over IPC - the shell is not in the byte path. That direct sibling-to-
+/// sibling send is normally forbidden (a spawned task's static send-mask
+/// doesn't include its siblings); the shell authorizes it with a runtime
+/// capability *delegation* (the `DELEGATE` syscall), which it alone can
+/// grant because it alone statically holds the send-caps for the spawnable
+/// slots. The shell then only waits for both to exit. (Before delegation,
+/// the shell relayed every chunk producer -> shell -> consumer; delegation
+/// is what took it out of the hot path.)
 fn cmd_pipeline_prog(left: &str, right: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize) {
-    // Consumer first (stdout -> console), ready to receive the relayed
-    // stream.
+    // Consumer first (stdout -> console), so it's a live task the producer
+    // can be pointed at and then delegated the right to reach.
     let consumer = match spawn_path(right, cwd, *cwd_len, syscall_abi::CON_TASK) {
         Ok(slot) => slot,
         Err(0) => {
@@ -420,8 +422,9 @@ fn cmd_pipeline_prog(left: &str, right: &str, cwd: &mut [u8; CWD_SIZE], cwd_len:
             return;
         }
     };
-    // Producer with its stdout routed back to this shell so we can relay it.
-    let producer = match spawn_path(left, cwd, *cwd_len, self_task()) {
+    // Producer with its stdout routed straight to the consumer, so it
+    // streams there directly instead of back through the shell.
+    let producer = match spawn_path(left, cwd, *cwd_len, consumer) {
         Ok(slot) => slot,
         Err(0) => {
             print_line("pipe: path too long");
@@ -439,39 +442,24 @@ fn cmd_pipeline_prog(left: &str, right: &str, cwd: &mut [u8; CWD_SIZE], cwd_len:
             return;
         }
     };
-
-    // Relay: receive the producer's output, forward each chunk to the
-    // consumer, until the producer's empty end-of-stream message - which is
-    // then forwarded on to the consumer, whose EOF handling makes it finish.
-    let mut buf = [0u8; syscall_abi::MSG_MAX_LEN as usize];
-    loop {
-        let packed = syscall4(syscall_abi::MSG_RECV, buf.as_mut_ptr() as u64, buf.len() as u64, 0, 0);
-        if packed == RECV_INTERRUPTED {
-            print_line("pipe: interrupted - killing both programs");
-            syscall(syscall_abi::KILL, producer);
-            syscall(syscall_abi::KILL, consumer);
-            return;
-        }
-        if packed >= FS_ERR_MIN {
-            print_line("pipe: relay failed");
-            syscall(syscall_abi::KILL, producer);
-            syscall(syscall_abi::KILL, consumer);
-            return;
-        }
-        let len = (packed & 0xffff_ffff) as usize;
-        if !pipe_send(consumer, buf.as_ptr(), len as u64) {
-            // pipe_send reported why and killed the consumer if it stopped
-            // reading; stop the producer too.
-            syscall(syscall_abi::KILL, producer);
-            return;
-        }
-        if len == 0 {
-            break; // producer's end-of-stream, now forwarded to the consumer
-        }
+    // Authorize the producer to send to the consumer - the whole point of
+    // this feature. Without it the producer's sends would be denied. (A
+    // tick could let the producer run in the window between the two spawns
+    // and this call; its own bounded send-retry tolerates a brief denial
+    // until this lands - see hello's `pipe_out`.)
+    if syscall4(syscall_abi::DELEGATE, producer, consumer, 0, 0) != 0 {
+        print_line("pipe: could not authorize the stream");
+        syscall(syscall_abi::KILL, producer);
+        syscall(syscall_abi::KILL, consumer);
+        return;
     }
 
-    // Both exit on their own: the producer sent its EOF then exits; the
-    // consumer exits on the forwarded EOF. Reap both.
+    // Both run and exit on their own now: the producer streams to the
+    // consumer and sends an empty end-of-stream message, then exits; the
+    // consumer finishes on that EOF and exits. The shell only reaps them.
+    // A consumer that never reads its input leaves the producer's bounded
+    // retry to give up and exit, after which this WAIT blocks on the
+    // still-live consumer until Ctrl+C (wait_pipe_stage's interrupted arm).
     wait_pipe_stage("producer", producer);
     wait_pipe_stage("consumer", consumer);
 }

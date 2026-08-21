@@ -47,10 +47,19 @@ fn main() -> ! {
     }
     write_out(target, b"Goodbye - exiting now.\r\n");
     // If our output was piped/captured (not the console), signal
-    // end-of-stream so the relaying task knows we're done producing.
+    // end-of-stream (an empty message) so the reading task knows we're
+    // done. Bounded-retry it on the same transients as pipe_out - a lost
+    // EOF would leave the consumer waiting forever.
     if target != syscall_abi::CON_TASK {
         let dummy = [0u8; 1];
-        syscall4(syscall_abi::MSG_SEND, target, dummy.as_ptr() as u64, 0, 0);
+        let deadline = get_ticks() + 150;
+        loop {
+            let r = syscall4(syscall_abi::MSG_SEND, target, dummy.as_ptr() as u64, 0, 0);
+            let transient = r == syscall_abi::MSG_ERR_FULL || r == syscall_abi::MSG_ERR_DENIED;
+            if r == 0 || !transient || get_ticks() > deadline {
+                break;
+            }
+        }
     }
     task_exit(0);
     // Unreachable for any task that's allowed to exit; a refused exit
@@ -71,10 +80,14 @@ fn write_out(target: u64, bytes: &[u8]) {
     }
 }
 
-/// Send `bytes` as raw `MSG_MAX_LEN`-chunked messages to `target`. A full
-/// mailbox is retried for a bounded time (the relaying task drains it
-/// between our sends); if it stops reading for ~3s, or dies, we give up
-/// rather than hang.
+/// Send `bytes` as raw `MSG_MAX_LEN`-chunked messages to `target`. Two
+/// transients are retried for a bounded time: a full mailbox
+/// (`MSG_ERR_FULL` - the reading task drains it between our sends), and a
+/// denied send (`MSG_ERR_DENIED` - when we're a pipe producer streaming
+/// straight to a sibling consumer, the shell delegates us that send
+/// capability moments after spawning us, and a tick can let us run first;
+/// see the shell's `cmd_pipeline_prog`). If either persists for ~3s, or any
+/// other error comes back, or the target dies, we give up rather than hang.
 fn pipe_out(target: u64, bytes: &[u8]) {
     let mut off = 0;
     while off < bytes.len() {
@@ -86,7 +99,8 @@ fn pipe_out(target: u64, bytes: &[u8]) {
             if r == 0 {
                 break;
             }
-            if r != syscall_abi::MSG_ERR_FULL || get_ticks() > deadline {
+            let transient = r == syscall_abi::MSG_ERR_FULL || r == syscall_abi::MSG_ERR_DENIED;
+            if !transient || get_ticks() > deadline {
                 return;
             }
         }
