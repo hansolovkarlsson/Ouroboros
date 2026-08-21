@@ -371,6 +371,27 @@ fn el0_page_4k(base: u64) -> u64 {
         | AF
 }
 
+/// The stack guard page's address for an EL0 region, or `None` for a
+/// region too small to have one. Derived from the layout `loader.rs`
+/// builds - `[code][1 guard page][STACK_PAGES stack pages]`, stack at the
+/// top - so the guard is the page immediately below the stack,
+/// `STACK_PAGES + 1` pages down from the region end. `build_view` maps
+/// that one page EL1-only so a stack overflow into it faults cleanly. The
+/// idle task's single-page region (and any region too small to hold
+/// `[code][guard][stack]`) has no guard. `STACK_PAGES` is duplicated from
+/// `loader.rs` by convention - the same pattern `RUNTIME_SLOT_ALIGN` uses
+/// for `loader`'s `SLOT_ALIGN`; a mismatch would misplace the guard, so
+/// keep them in sync.
+fn guard_page_addr(region: (u64, u64)) -> Option<u64> {
+    const STACK_PAGES: u64 = 4; // must match loader.rs (16KB stack)
+    let (base, size) = region;
+    let guard_from_end = (STACK_PAGES + 1) * 4096;
+    if size <= guard_from_end {
+        return None;
+    }
+    Some(base + size - guard_from_end)
+}
+
 fn is_general_ram(ty: MemoryType) -> bool {
     !matches!(
         ty,
@@ -641,10 +662,17 @@ unsafe fn build_view(
                     let sub_end = sub_base + MIB2;
                     if overlaps(el0_region, sub_base, sub_end) {
                         let l3 = unsafe { &mut *EL0_L3_TABLES[view].0.get() };
+                        let guard = guard_page_addr(el0_region);
                         for (j, page) in l3.iter_mut().enumerate() {
                             let page_base = sub_base + (j as u64) * 4096;
                             let page_end = page_base + 4096;
-                            *page = if overlaps(el0_region, page_base, page_end) {
+                            *page = if Some(page_base) == guard {
+                                // The stack guard page: inside the EL0
+                                // region but mapped EL1-only, so a stack
+                                // overflow into it takes a clean EL0 fault
+                                // instead of corrupting the code below.
+                                kernel_page_4k(page_base)
+                            } else if overlaps(el0_region, page_base, page_end) {
                                 el0_page_4k(page_base)
                             } else {
                                 kernel_page_4k(page_base)

@@ -106,7 +106,23 @@ use uefi::CString16;
 /// renamed to the tidier `ORBS` abbreviation.)
 const CONFIG_PATH: &str = "\\EFI\\ORBS\\INIT.CFG";
 
-const STACK_PAGES: u64 = 2; // 8KB - headroom for an unoptimized debug build's stack frames.
+// 16KB. Was 8KB (2 pages) - but the stack guard page (below) immediately
+// caught the shell's own `exec` path overflowing 8KB by ~32 bytes
+// (`cmd_exec` -> `spawn_path` -> `fs_call`'s 768+768-byte request/reply
+// buffers + staging + the call chain), a real, silent, pre-existing
+// overflow into the top of the code region that had gone unnoticed because
+// nothing was mapped to fault on it. Grown to 16KB to give that path
+// comfortable headroom; if `mmu.rs`'s `guard_page_addr` `STACK_PAGES` isn't
+// kept equal to this, the guard lands in the wrong place.
+const STACK_PAGES: u64 = 4;
+/// One inaccessible guard page between the code and the stack. The stack
+/// grows down from the top of the region; an overflow past the 8KB stack
+/// lands in this page, which `mmu.rs` maps EL1-only, taking a clean EL0
+/// fault instead of silently corrupting the code below. See `mmu.rs`'s
+/// `build_view` (which derives the guard's address from the region's
+/// `(base, size)` and this same layout convention) and the stack-guard
+/// milestone writeup.
+const GUARD_PAGES: u64 = 1;
 const SLOT_ALIGN: u64 = 0x20_0000; // 2MB - see module doc comment.
 
 /// Generous headroom, not a real limit this project has ever come close
@@ -571,7 +587,11 @@ pub(crate) fn elf_region_size(program: &[u8]) -> Result<(ElfHeader, ProgramHeade
 
     let page_size = PAGE_SIZE as u64;
     let code_pages = max_end.div_ceil(page_size);
-    let region_pages = code_pages + STACK_PAGES;
+    // Layout: [code_pages][1 guard page][STACK_PAGES stack pages]. The
+    // stack sits at the top (sp_el0 = base + size); the guard page,
+    // immediately below it, is mapped EL1-only by mmu.rs so a stack
+    // overflow faults cleanly instead of running into the code below.
+    let region_pages = code_pages + GUARD_PAGES + STACK_PAGES;
     let region_size = region_pages * page_size;
 
     Ok((header, phdrs, region_size))
