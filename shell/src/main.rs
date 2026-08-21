@@ -75,17 +75,12 @@ const PATH_SIZE: usize = 128;
 // reads/writes escape this cap via the grant/safecopy path (see
 // `fs_read_bulk`/`fs_write_bulk`), but a listing still doesn't.
 const LIST_BUFFER_SIZE: usize = 512;
-/// Redirected-output capture buffer ([`Output::Capture`]), holding a
-/// builtin's output until a pending `>`/`>>` writes it (via
-/// [`fs_write_bulk`] now, so the write itself can be up to
-/// [`SAFECOPY_MAX`](syscall_abi::SAFECOPY_MAX)). Raised past the old 512
-/// by the grant/safecopy milestone, but deliberately kept *below*
-/// SAFECOPY_MAX: during `cat ... > file`, `cat`'s streaming chunk (a
-/// full SAFECOPY_MAX buffer) and `fs_call`'s request/reply nest on top
-/// of this on the same `run_line` frame, and this program's stack is a
-/// fixed, unguarded 8KB (see `docs/processes.md`). Output larger than
-/// this refuses-not-truncates, as before.
-const CAPTURE_SIZE: usize = 1024;
+// The redirect/pipe capture buffer used to be a fixed stack array
+// (`CAPTURE_SIZE`, 1024 bytes); it's the program's 256KB heap region now
+// (`get_heap` / `Output::Capture`), so a large capture like
+// `cat big > file` fits and is written to disk in `SAFECOPY_MAX` chunks
+// (`write_all`) rather than refused. Output larger than the heap still
+// refuses-not-truncates.
 
 const BACKSPACE: u8 = 0x08;
 const DEL: u8 = 0x7f;
@@ -200,6 +195,27 @@ fn on_byte(byte: u8, buf: &mut [u8; BUFFER_SIZE], len: &mut usize, cwd: &mut [u8
 /// the matching [`Output`] sink, dispatches the rest of the line via
 /// [`dispatch_line`], then - for a redirect - writes the captured output
 /// to the target file ([`finish_redirect`]).
+/// This program's heap region as a mutable byte slice (see the `heap_info`
+/// syscall): a 256KB raw buffer the shell uses to hold a redirect/pipe
+/// capture far larger than its 16KB stack. Not an allocator - just this
+/// program's own EL0-accessible heap area.
+///
+/// # Safety contract
+/// Returns a `&'static mut` over a fixed region, so the caller must not
+/// keep two of these alive at once (they'd alias). The shell only ever
+/// captures one command at a time (a redirect *or* a pipeline, never
+/// nested), so each call's slice is used and dropped within one command -
+/// no aliasing in practice, the same single-address-space discipline the
+/// shell already uses for its syscall buffers.
+fn get_heap() -> &'static mut [u8] {
+    let base = syscall(syscall_abi::HEAP_INFO, syscall_abi::HEAP_INFO_BASE);
+    let size = syscall(syscall_abi::HEAP_INFO, syscall_abi::HEAP_INFO_SIZE) as usize;
+    if base == 0 || size == 0 {
+        return &mut [];
+    }
+    unsafe { core::slice::from_raw_parts_mut(base as *mut u8, size) }
+}
+
 fn run_line(line: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize) {
     // Pipelines first: a standalone `|` splits the line into a builtin
     // (left, output captured) and a program path (right, spawned and
@@ -225,17 +241,17 @@ fn run_line(line: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize) {
         }
         RedirectParse::Malformed(msg) => print_line(msg),
         RedirectParse::Redirect { cmd, target, append } => {
-            let mut capture = [0u8; CAPTURE_SIZE];
-            let mut out = Output::Capture { buf: &mut capture, len: 0, overflowed: false };
+            let capture = get_heap();
+            let mut out = Output::Capture { buf: capture, len: 0, overflowed: false };
             dispatch_line(cmd, cwd, cwd_len, &mut out);
-            let (len, overflowed) = match out {
-                Output::Capture { len, overflowed, .. } => (len, overflowed),
+            let (buf, len, overflowed) = match out {
+                Output::Capture { buf, len, overflowed } => (buf, len, overflowed),
                 // Never constructed on this path; written out rather than
                 // `unreachable!()` so a logic error here degrades to a
                 // silently-skipped write, not a panic-handler hang.
                 Output::Console => return,
             };
-            finish_redirect(&capture[..len], overflowed, target, append, cwd, *cwd_len);
+            finish_redirect(&buf[..len], overflowed, target, append, cwd, *cwd_len);
         }
     }
 }
@@ -317,15 +333,15 @@ fn cmd_pipeline(left: &str, right: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut
         return;
     }
 
-    let mut capture = [0u8; CAPTURE_SIZE];
-    let mut out = Output::Capture { buf: &mut capture, len: 0, overflowed: false };
+    let capture = get_heap();
+    let mut out = Output::Capture { buf: capture, len: 0, overflowed: false };
     dispatch_line(left, cwd, cwd_len, &mut out);
-    let (len, overflowed) = match out {
-        Output::Capture { len, overflowed, .. } => (len, overflowed),
+    let (buf, len, overflowed) = match out {
+        Output::Capture { buf, len, overflowed } => (buf, len, overflowed),
         Output::Console => return,
     };
     if overflowed {
-        print_line("pipe: left command's output exceeds the 512-byte capture buffer - nothing was piped");
+        print_line("pipe: left command's output exceeds the capture buffer - nothing was piped");
         return;
     }
 
@@ -351,7 +367,7 @@ fn cmd_pipeline(left: &str, right: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut
     let mut sent = 0usize;
     loop {
         let chunk_len = (len - sent).min(syscall_abi::MSG_MAX_LEN as usize);
-        if !pipe_send(slot, unsafe { capture.as_ptr().add(sent) }, chunk_len as u64) {
+        if !pipe_send(slot, unsafe { buf.as_ptr().add(sent) }, chunk_len as u64) {
             return; // pipe_send printed why, and killed the task if needed
         }
         if chunk_len == 0 {
@@ -605,50 +621,55 @@ fn finish_redirect(captured: &[u8], overflowed: bool, target: &str, append: bool
         return;
     };
 
-    if append {
-        // Append the captured output at the current end of file via the
-        // offset-write primitive - no read-back of the existing content,
-        // so `>>` works regardless of how large the target already is
-        // (the old read-concatenate-rewrite capped both halves at a
-        // combined buffer and refused a large existing file). Stat the
-        // size first: a missing file is created with the captured
-        // content, an existing one is appended to at its EOF.
+    let result = if append {
+        // Append at the current end of file via the offset-write
+        // primitive - no read-back of the existing content, so `>>` works
+        // regardless of how large the target already is. Stat the size
+        // first: a missing file is created (write from offset 0), an
+        // existing one is appended to at its EOF.
         let mut probe = [0u8; 1];
-        let size = match fs_read_file(path, &mut probe) {
-            NO_FS => {
-                print_no_fs();
-                return;
-            }
+        match fs_read_file(path, &mut probe) {
             // No such file: `>>` creates it, standard sh semantics.
-            FS_ERR_NOT_FOUND => {
-                match fs_write_bulk(path, captured) {
-                    NO_FS => print_no_fs(),
-                    code if code >= FS_ERR_MIN => print_fs_error("redirect", code),
-                    _ => {}
-                }
-                return;
-            }
-            // Any other error (target is a directory, I/O failure, ...)
-            // is reported here rather than limping into a doomed write.
-            code if code >= FS_ERR_MIN => {
-                print_fs_error("redirect", code);
-                return;
-            }
-            size => size,
-        };
-        match fs_write_at(path, size, captured) {
-            NO_FS => print_no_fs(),
-            code if code >= FS_ERR_MIN => print_fs_error("redirect", code),
-            _ => {}
+            FS_ERR_NOT_FOUND => write_all(path, captured, 0, true),
+            code if code >= FS_ERR_MIN => code, // NO_FS, is-a-directory, etc.
+            size => write_all(path, captured, size, false),
         }
     } else {
-        // `>`: full replace with the captured output.
-        match fs_write_bulk(path, captured) {
-            NO_FS => print_no_fs(),
-            code if code >= FS_ERR_MIN => print_fs_error("redirect", code),
-            _ => {}
+        // `>`: full replace (truncate to empty, then write from offset 0).
+        write_all(path, captured, 0, true)
+    };
+    match result {
+        NO_FS => print_no_fs(),
+        code if code >= FS_ERR_MIN => print_fs_error("redirect", code),
+        _ => {}
+    }
+}
+
+/// Write `data` to `path` starting at `start_offset`, chunked at
+/// `SAFECOPY_MAX` (a single `fs_write_*` can't exceed it, but a heap-backed
+/// capture can be far larger). With `truncate`, the file is first replaced
+/// with empty content (for `>` and for `>>` creating a new file), then
+/// written from `start_offset`; without it (appending to an existing file)
+/// the existing content is left in place. Returns `0` on success or the
+/// first error code.
+fn write_all(path: &str, data: &[u8], start_offset: u64, truncate: bool) -> u64 {
+    if truncate {
+        let r = fs_write_bulk(path, &[]); // create/truncate to empty
+        if r >= FS_ERR_MIN {
+            return r;
         }
     }
+    let chunk = syscall_abi::SAFECOPY_MAX as usize;
+    let mut off = 0usize;
+    while off < data.len() {
+        let n = (data.len() - off).min(chunk);
+        let r = fs_write_at(path, start_offset + off as u64, &data[off..off + n]);
+        if r >= FS_ERR_MIN {
+            return r;
+        }
+        off += n;
+    }
+    0
 }
 
 /// Tokenizes on whitespace (no quoting - `echo "a b"` sees two words, not
@@ -1515,12 +1536,14 @@ fn cmd_mv(line: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize) {
 /// sink to represent stderr.
 enum Output<'a> {
     Console,
-    /// Captured for a pending redirect. `len` counts stored bytes;
-    /// once the buffer is full, further bytes are discarded (not
+    /// Captured for a pending redirect or pipe. `buf` is the program's
+    /// heap region (see `get_heap` - 256KB, far larger than the stack), so
+    /// a large capture like `cat big > file` fits. `len` counts stored
+    /// bytes; once the buffer is full, further bytes are discarded (not
     /// wrapped) and `overflowed` is set so the redirect can refuse to
     /// write a silently-incomplete file - `cp`'s "a partial copy is a
     /// wrong copy" reasoning, not `cat`'s truncate-and-note.
-    Capture { buf: &'a mut [u8; CAPTURE_SIZE], len: usize, overflowed: bool },
+    Capture { buf: &'a mut [u8], len: usize, overflowed: bool },
 }
 
 impl Output<'_> {
