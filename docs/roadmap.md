@@ -199,10 +199,20 @@ step, not a Stage 1 concern.
    changes — a whole new transport landed purely in userland, the payoff of
    the driver/protocol split. See `CHANGELOG.md` / `CLAUDE.md`'s "Network
    stack, Stage 3."
-4. **TCP (the big one, separately scoped when reached).** The full state
-   machine — retransmission, windows, seq/ack — enough for a client
-   active-open first, a minimal `listen` later. This is where the
-   hand-roll-vs-vendor decision below actually bites.
+4. **TCP — client active-open DONE (2026-08-21, Stage 4a); `listen`
+   deferred.** Decided hand-roll (not `smoltcp`) and minimal-client scope
+   with the user. `netd` gained a hand-rolled client TCP (`build_tcp`/
+   `parse_tcp` with the IPv4 pseudo-header checksum, `tcp_get`: SYN handshake,
+   in-order reassembly, clean FIN teardown) plus a minimal default route
+   (on-subnet → target, else the gateway), and a `fetch <hostname>` shell
+   command chains resolve → route → TCP → HTTP GET. Verified fetching a real
+   web page (`fetch example.com` → `HTTP/1.1 200 OK` + the Example Domain
+   HTML), cross-checked against a `tcpdump` of the pcap (a clean four-way TCP
+   conversation, checksums accepted). No kernel changes. **Still deferred
+   (Stage 4b):** a `listen`/passive-open server side (hits the same
+   async-receive gap `ping`/`resolve` did), retransmission, congestion
+   control, multiple connections, and a streaming (not one-reply-capped)
+   response. See `CHANGELOG.md` / `CLAUDE.md`'s "Network stack, Stage 4a."
 
 **Decisions to settle before starting (not now):**
 

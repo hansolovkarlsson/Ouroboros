@@ -5759,9 +5759,76 @@ chasing beyond a directly-returned A, no `/etc/hosts`, no caching); UDP is
 send-one/receive-one with a fixed source port and checksum 0 (no real
 socket/port abstraction, no UDP checksum validation on receive); still
 guest-initiated only (no listening UDP service - same async-receive gap as
-ping); and no TCP yet (Stage 4, the big one - the connection state machine,
-retransmission, and windows, where the hand-roll-vs-`smoltcp` decision
-actually bites; see `docs/roadmap.md`).
+ping); ~~and no TCP yet (Stage 4, the big one)~~ **(client TCP is done -
+Stage 4a below)**.
+
+## Network stack, Stage 4a: a client TCP, and a `fetch` command (real HTTP)
+
+The stack's first **TCP**: `fetch <hostname>` opens a client TCP connection
+to the host on port 80, sends a minimal HTTP GET, and prints the response - a
+from-scratch microkernel fetching a real web page over hand-rolled TCP. Two
+decisions were confirmed with the user before starting (TCP is the one
+milestone the roadmap flagged as "separately scoped"): **hand-roll** (not
+vendor `smoltcp` - consistent with every other protocol here, and no PIE-link
+risk from a large crate), and **minimal client scope** (active-open only; a
+listening/server side is deferred, the roadmap's "client active-open first").
+**No kernel changes** - `netd` uses the Stage 2 `NET_*` syscalls; a whole new
+transport lands purely in userland.
+
+**`fetch` chains the entire stack**, which is the satisfying part: `netd`'s
+`NETOP_FETCH` handler resolves the hostname (reusing the refactored
+`resolve_ip` from Stage 3), picks the **next hop** (a minimal default route -
+on-subnet `10.0.2.0/24` → the target directly, else the gateway `10.0.2.2`;
+the first time off-subnet routing matters, since `ping`/`resolve` only ever
+targeted on-subnet addresses), ARP-resolves it, then runs the TCP client.
+
+**The TCP client, hand-rolled fixed-buffer, one connection at a time:**
+- `build_tcp`/`parse_tcp` - Ethernet+IPv4+TCP segment build/parse. The TCP
+  checksum is the one that covers the **IPv4 pseudo-header** (src/dst IP,
+  protocol, TCP length) - `tcp_checksum` prepends those words to the
+  segment; ICMP/UDP/IP checksums don't need it.
+- `tcp_get` - the synchronous state machine: SYN (with an MSS option) →
+  wait for SYN-ACK (checking `ack == ISN+1`, handling RST as "refused") →
+  ACK → send the HTTP request (`PSH|ACK`, advancing `snd_nxt`) → receive the
+  response with **in-order reassembly** (accept a segment only when
+  `seq == rcv_nxt`, ACK each) → on the peer's FIN, ACK it and send our own
+  FIN (a clean four-way teardown). Fixed ephemeral port and ISN (one
+  connection, so no per-connection state needed).
+- The request is `GET / HTTP/1.0` with a **Host header** (so name-based
+  virtual hosts - Cloudflare et al. - serve the right site) and
+  `Connection: close` (so the server FINs, ending the receive loop).
+
+**Timeouts are deliberately tight** (resolve ~800ms, SYN-ACK ~700ms, response
+~1s, extended only while data is arriving) so the whole `fetch` - during
+which `netd` busy-polls and is therefore `Runnable`, not `Blocked` - stays
+under the supervisor's ~2.5s wedge threshold. A real fetch to a fast host
+completes in well under 100ms, so this is margin, not a limit hit in
+practice. (Stage 3's DNS timeout was tightened from 1.5s to 800ms for the
+same reason, now that resolve is a sub-step of fetch.)
+
+**Confirmed on QEMU (`make run-image-net`), zero `-d int` aborts,
+cross-checked against a `tcpdump` of the pcap** - and it fetches a **real web
+page**: `fetch example.com` → `HTTP/1.1 200 OK`, `Content-Type: text/html`,
+and the actual Example Domain HTML (truncated at 825 bytes with a notice,
+since the response exceeds the one-message reply). The pcap showed a
+complete, correct TCP conversation, all checksums accepted by `tcpdump`:
+`S seq 4096 [mss 1460]` → `S. seq 64001 ack 4097` → `. ack 1` →
+`P. GET / HTTP/1.0` → server `. ack 57` → `P. HTTP/1.1 200 OK` (825 bytes) →
+server `F.` → our `. ack` (data then FIN) → our `F.` → server `. ack 58` (a
+clean four-way close). `ping`/`resolve` still work; no supervisor restart.
+
+**Still coarse, worth knowing before building on this:** **client
+active-open only** - no `listen`/passive open, so the guest can't *serve*
+TCP (a `listen` side hits the same async-receive gap `ping`/`resolve`
+deferred, and is a real follow-up); one connection at a time, fixed
+port/ISN; **no retransmission** (a lost segment on a real lossy path would
+just time out - fine on SLIRP's reliable local path, a gap on a real
+network); no congestion control or window management beyond a fixed
+advertised window; the response is capped at what fits one IPC reply
+(~750 bytes shown, though the full length is reported) - a streaming/paged
+fetch would want a bulk-transfer path; in-order segments assumed (an
+out-of-order segment is dropped, not buffered); still QEMU-only (Parallels'
+virtio-net is PCI); and the NIC driver is still polled, not IRQ-driven.
 
 ## Commands
 
@@ -5893,7 +5960,7 @@ kernel/
 
 shell/               userland default shell - a separate crate, built for aarch64-unknown-none, loaded from disk (not compiled into the kernel)
   linker.ld          self-relocating (PIE) linker script: entry at offset 0, .rela.dyn/.dynsym/.dynamic/.data.rel.ro, no .bss/.data (see "A real relocating loader" above and docs/processes.md)
-  src/main.rs        line editor + command dispatch (help/echo/uptime/clear/ls/cat/cd/pwd/mkdir/rmdir/touch/rm/write/writeat/cp/mv/mount/ping/resolve/exec/exit/ps/kill/fg/wait/send/recv/selftest, plus `> file`/`>> file` output redirection and `| /path/program` pipes on any of them - see "Output redirection", "Pipelines", "Runtime capability delegation", and "FAT32 interior/random-access writes" above), running as real EL0 userland code, built for real relocation (relocation-model=pic, --release only) - main loop blocks on read_char (syscall 15) instead of busy-polling, see "Blocking primitives" above; see docs/processes.md
+  src/main.rs        line editor + command dispatch (help/echo/uptime/clear/ls/cat/cd/pwd/mkdir/rmdir/touch/rm/write/writeat/cp/mv/mount/ping/resolve/fetch/exec/exit/ps/kill/fg/wait/send/recv/selftest, plus `> file`/`>> file` output redirection and `| /path/program` pipes on any of them - see "Output redirection", "Pipelines", "Runtime capability delegation", and "FAT32 interior/random-access writes" above), running as real EL0 userland code, built for real relocation (relocation-model=pic, --release only) - main loop blocks on read_char (syscall 15) instead of busy-polling, see "Blocking primitives" above; see docs/processes.md
 
 fsd/                 fifth userland program: THE FILESYSTEM SERVER (driver isolation part 2) - owns the FAT32 engine, speaks the FSOP_* protocol to clients over IPC (including the bulk FSOP_READ_BULK/FSOP_WRITE_BULK ops that move file data via grant/safecopy - see "Grant/safecopy IPC" above), and is the only task the BLOCK_* syscalls accept; boot-loaded into protected task slot 2, see "Driver isolation, part 2" above
   src/main.rs        the request loop: recv -> decode FsRequest -> dispatch to Fs -> reply one u64; mounted Fs lives in main's stack frame (no static state in userland)
@@ -5904,8 +5971,8 @@ cond/                seventh userland program: THE CONSOLE SERVER (driver isolat
   src/main.rs        the request loop (recv -> decode DSPOP_WRITE -> render -> reply, the filesystem server's shape) plus two backends chosen from CON_INFO at startup: byte-stream (forward to the kernel console via CON_WRITE) and framebuffer (render glyphs here - cursor, wrap, scroll, a small ANSI parser - via FB_BLIT/FB_SCROLL/FB_CLEAR)
   src/font.rs        cond's own copy of the 8x8 bitmap font (from kernel/src/font.rs) - the font is what "console driver logic" meant, so it moved to userland; the kernel keeps a copy only for its emergency fbconsole
 
-netd/                eighth userland program: THE NETWORK SERVER (network stack, Stage 2) - owns the protocol stack (ARP/IPv4/ICMP) in userland; the kernel keeps only the DMA-owning virtio-net driver, reached by this task alone via the gated NET_SEND/NET_RECV/NET_MAC syscalls (the fsd/BLOCK_* pattern). Boot-loaded into protected task slot 4 (NET_TASK), supervised. Speaks the NETOP_PING request protocol to clients (the shell's `ping` command); hand-rolled fixed-buffer frame building (ARP/IPv4/ICMP/UDP/DNS) + Internet checksums, no crates. NETOP_RESOLVE (Stage 3) does DNS-over-UDP for the shell's `resolve` command. See "Network stack, Stage 2" and "Stage 3" above
-  src/main.rs        the request loop (NETOP_PING -> arp_resolve + icmp_echo; NETOP_RESOLVE -> a DNS A-query over UDP) plus the ARP/IPv4/ICMP/UDP/DNS frame builders, the DNS response parser (name-compression aware), the reply matchers, and ip_checksum
+netd/                eighth userland program: THE NETWORK SERVER (network stack, Stage 2) - owns the protocol stack (ARP/IPv4/ICMP) in userland; the kernel keeps only the DMA-owning virtio-net driver, reached by this task alone via the gated NET_SEND/NET_RECV/NET_MAC syscalls (the fsd/BLOCK_* pattern). Boot-loaded into protected task slot 4 (NET_TASK), supervised. Speaks the NETOP_PING request protocol to clients (the shell's `ping` command); hand-rolled fixed-buffer frame building (ARP/IPv4/ICMP/UDP/DNS) + Internet checksums, no crates. NETOP_RESOLVE (Stage 3) does DNS-over-UDP for `resolve`; NETOP_FETCH (Stage 4a) does a client-TCP HTTP GET for `fetch`. See "Network stack, Stage 2/3/4a" above
+  src/main.rs        the request loop (NETOP_PING -> ICMP echo; NETOP_RESOLVE -> DNS-over-UDP; NETOP_FETCH -> resolve + route + a client TCP HTTP GET) plus the ARP/IPv4/ICMP/UDP/DNS/TCP frame builders, the DNS/TCP parsers, next-hop routing, ip_checksum and the TCP pseudo-header checksum
 
 upper/               sixth userland program: the pipeline filter demo (uppercases its piped input) - the reference for the filter-program shape: stdin = msg_recv, stdout = con_write (routed through the console server), EOF = the empty message, finish = exit; see "Pipelines" above
   src/main.rs        ~80 lines: the recv/uppercase/putc loop

@@ -7,6 +7,36 @@ what broke, how it was diagnosed), see `CLAUDE.md`; for *how* something
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## Network stack, Stage 4a: a client TCP, and a `fetch` command (real HTTP)
+
+The stack's first **TCP**: `fetch <hostname>` opens a client TCP connection
+on port 80, sends a minimal HTTP GET, and prints the response — a from-scratch
+microkernel fetching a real web page over hand-rolled TCP. Two calls confirmed
+with the user first (TCP was the roadmap's "separately scoped" milestone):
+**hand-roll** (not `smoltcp`) and **minimal client scope** (active-open only).
+**No kernel changes** — `netd` uses the Stage 2 `NET_*` syscalls.
+
+`fetch` chains the whole stack: `netd`'s `NETOP_FETCH` resolves the hostname
+(reusing `resolve_ip`), picks the next hop (a minimal default route —
+on-subnet → target, else the gateway; the first time off-subnet routing
+mattered), ARP-resolves it, and runs a hand-rolled client TCP: `build_tcp`/
+`parse_tcp` (with the **TCP checksum over the IPv4 pseudo-header**), and
+`tcp_get` — the SYN(+MSS)/SYN-ACK/ACK handshake, the HTTP request, in-order
+response reassembly (ACKing each segment), and a clean four-way FIN teardown.
+The request carries a Host header (name-based vhosts) and `Connection: close`.
+Tight timeouts keep the busy-polling fetch under the supervisor wedge
+threshold. The shell's `fetch <hostname>` prints the response (truncated to
+one IPC reply, with the full length reported).
+
+Confirmed on QEMU (`make run-image-net`), zero `-d int` aborts, cross-checked
+with `tcpdump`: `fetch example.com` → `HTTP/1.1 200 OK` + the real Example
+Domain HTML. The pcap showed a complete, correct TCP conversation (SYN /
+SYN-ACK `ack=ISN+1` / ACK / GET / 200 / FINs — a clean four-way close), all
+checksums accepted. `ping`/`resolve` still work, no supervisor restart. Still
+coarse: client active-open only (no `listen`), one connection, no
+retransmission, response capped at one reply. See `CLAUDE.md`'s "Network
+stack, Stage 4a."
+
 ## Network stack, Stage 3: UDP, and a `resolve` command (real DNS)
 
 The stack's first UDP application: `resolve <hostname>` does a **DNS A-record

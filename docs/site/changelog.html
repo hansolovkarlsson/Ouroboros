@@ -40,6 +40,14 @@
 
   <article>
 
+<h2>Network stack, Stage 4a: a client TCP, and a <code class="inline">fetch</code> command (real HTTP)</h2>
+
+<p>The stack's first <strong>TCP</strong>: <code class="inline">fetch &lt;hostname&gt;</code> opens a client TCP connection on port 80, sends a minimal HTTP GET, and prints the response — a from-scratch microkernel fetching a real web page over hand-rolled TCP. Two calls confirmed with the user first (TCP was the roadmap's "separately scoped" milestone): <strong>hand-roll</strong> (not <code class="inline">smoltcp</code>) and <strong>minimal client scope</strong> (active-open only). <strong>No kernel changes</strong> — <code class="inline">netd</code> uses the Stage 2 <code class="inline">NET_*</code> syscalls.</p>
+
+<p><code class="inline">fetch</code> chains the whole stack: <code class="inline">netd</code>'s <code class="inline">NETOP_FETCH</code> resolves the hostname (reusing <code class="inline">resolve_ip</code>), picks the next hop (a minimal default route — on-subnet → target, else the gateway; the first time off-subnet routing mattered), ARP-resolves it, and runs a hand-rolled client TCP: <code class="inline">build_tcp</code>/<code class="inline">parse_tcp</code> (with the <strong>TCP checksum over the IPv4 pseudo-header</strong>), and <code class="inline">tcp_get</code> — the SYN(+MSS)/SYN-ACK/ACK handshake, the HTTP request, in-order response reassembly (ACKing each segment), and a clean four-way FIN teardown. The request carries a Host header and <code class="inline">Connection: close</code>. Tight timeouts keep the busy-polling fetch under the supervisor wedge threshold.</p>
+
+<p>Confirmed on QEMU (<code class="inline">make run-image-net</code>), zero <code class="inline">-d int</code> aborts, cross-checked with <code class="inline">tcpdump</code>: <code class="inline">fetch example.com</code> → <code class="inline">HTTP/1.1 200 OK</code> + the real Example Domain HTML. The pcap showed a complete, correct TCP conversation (SYN / SYN-ACK <code class="inline">ack=ISN+1</code> / ACK / GET / 200 / FINs — a clean four-way close), all checksums accepted. <code class="inline">ping</code>/<code class="inline">resolve</code> still work, no supervisor restart. Still coarse: client active-open only (no <code class="inline">listen</code>), one connection, no retransmission, response capped at one reply.</p>
+
 <h2>Network stack, Stage 3: UDP, and a <code class="inline">resolve</code> command (real DNS)</h2>
 
 <p>The stack's first UDP application: <code class="inline">resolve &lt;hostname&gt;</code> does a <strong>DNS A-record query over UDP</strong> and prints the resolved IPv4. Builds entirely on Stage 2's <code class="inline">netd</code>/<code class="inline">NETOP</code> plumbing — <strong>no kernel changes</strong> (the <code class="inline">NET_*</code> syscalls already move opaque frames; UDP is just a different payload), the payoff of the driver/protocol split.</p>
