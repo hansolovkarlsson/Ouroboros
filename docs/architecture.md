@@ -88,7 +88,7 @@ tables it walks. Two coarse block kinds cover almost everything:
 | RAM | Whatever the UEFI memory map reports as general RAM | Normal WB, executable, EL1-only |
 
 **Isolation is per-task and MMU-enforced, not a trust model.** Each of
-the five scheduler slots has its *own* translation-table view (its own
+the six scheduler slots has its *own* translation-table view (its own
 L0/L1/L2/L3 in `mmu.rs`): identical kernel and device mappings in every
 view, but EL0 access granted only to that task's own region. From any
 view, every other task's memory is ordinary EL1-only RAM, so an EL0
@@ -97,7 +97,15 @@ only the toucher. `mmu::activate_task` switches `TTBR0_EL1` to the
 incoming task's view (and flushes the TLB) at every context switch;
 `tasks.rs` calls it wherever `CURRENT` changes. A view fine-grains only
 its own region (one 2MB→4KB split), since a region fits one 2MB slot by
-construction. The complementary half is at the syscall boundary: every
+construction.
+
+A loaded program's region is laid out `[code][1 guard page][16KB stack]`,
+the stack growing down from the top. The guard page is inside the region
+but mapped EL1-only (a hole in the EL0 access), so a **stack overflow**
+faults cleanly and kills just that task instead of silently corrupting the
+code below - the same fault-isolation path as touching another task's
+memory. (The guard immediately exposed a real overflow: the shell's own
+`exec` path used just over 8KB, so the stack was grown from 8KB to 16KB.) The complementary half is at the syscall boundary: every
 `(pointer, length)` argument is checked to fall inside the calling
 task's own region (`syscall.rs::in_caller_region`) — otherwise a task
 could launder access to another's memory *through* a kernel copy.

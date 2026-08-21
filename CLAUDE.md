@@ -5176,6 +5176,75 @@ enable); and a producer's output helper (`hello`) is per-crate, not shared
 (same as `con_write` today - a shared userland runtime crate is a broader
 future cleanup).
 
+## Stack guard page: silent overflow becomes a clean fault - and it found a real bug
+
+Every userland task ran on a fixed 8KB stack with **no guard**. The region
+layout was tight - `[code_pages][2 stack pages]`, no gap - and the stack
+grows *down* from the top (`sp_el0 = base + size`), so an overflow
+descended straight into the program's own code, which is still
+EL0-accessible: **silent corruption, no fault.** This was the one "still
+coarse" item the whole isolation arc kept flagging (grant/safecopy's buffer
+sizing was hand-tuned specifically against this unguarded stack).
+
+**The fix: one inaccessible guard page immediately below the stack.**
+`loader.rs` grows each region by a page - `[code_pages][1 guard page]
+[STACK_PAGES stack pages]`, stack still at the top, code still at the
+bottom, only the region grows. `mmu.rs::build_view` derives the guard's
+address from the region's `(base, size)` (no plumbing change to
+`el0_regions`) - `base + size - (STACK_PAGES+1)*PAGE`, the page just below
+the stack - and maps that one L3 page `kernel_page_4k` (EL1-only), a hole
+*inside* the EL0 region. An overflow into it takes an EL0 permission fault,
+which the existing fault-isolation handler already contains: kills just
+that task (and, for a supervised server, a supervisor restart), or halts
+for task 0/1 (nothing meaningful survives the shell/idle dying). The
+address is size-gated so the single-page idle region (a bare asm busy-spin
+that never uses a stack) gets no guard. No ABI change, no userland change,
+no policy. **The one duplicated value: `mmu.rs`'s `guard_page_addr` carries
+its own `STACK_PAGES` const that must equal `loader.rs`'s** (the same
+duplicate-a-value pattern `RUNTIME_SLOT_ALIGN` already uses) - a mismatch
+misplaces the guard.
+
+**The guard immediately earned its keep by catching a real, silent,
+pre-existing bug - the whole point, demonstrated on the first injection
+test.** `exec /EFI/ORBS/HELLO.BIN` faulted the *shell* (task 0), not the
+spawned program: `EL0 FAULT task=0 esr_el1=0x9200004f`
+(EC 0x24 Data Abort from a lower EL, DFSC 0x0f permission fault level 3 - an
+EL0 write to the EL1-only guard page) `far_el1=0x5c60cfe0`, exactly 32 bytes
+below the shell's 8KB stack bottom, inside its guard page. The shell's own
+`exec` path - `cmd_exec` -> `spawn_path` -> `fs_call`'s 768+768-byte
+request/reply buffers + the 512-byte chunk staging + the call chain - uses
+just over 8KB of stack, so it had been overflowing by ~32 bytes into the
+top of its code region *every single time*, silently, unnoticed because
+nothing was mapped there to fault on it (the corrupted bytes evidently
+weren't critical). **Fixed by growing the stack 8KB -> 16KB**
+(`STACK_PAGES` 2 -> 4). This is a real "the guard page paid for itself
+immediately" result, not a hypothetical.
+
+**Confirmed on QEMU, both directions, zero unexpected aborts:**
+- **No false faults** (16KB stack): `selftest`, the previously-faulting
+  `exec HELLO.BIN` (now clean), streaming `cp` of the 72KB `SH.BIN`, the
+  cat-stream+redirect-capture nesting (grant/safecopy's own worst case),
+  and the `HELLO.BIN | UPPER.BIN` program-pipe all ran with **zero EL0
+  faults**, zero `-d int` aborts. Real usage stays well within 16KB, so the
+  guard (below it) is never touched.
+- **Catches a real overflow, contained** (temp recursion in `hello`, a
+  per-frame 256-byte buffer used after the recursive call to defeat
+  tail-call elimination, `black_box(depth)` to stop the compiler proving it
+  infinite - reverted after): `EL0 FAULT task=4 ... far_el1` 8 bytes into
+  hello's own guard page -> `task 4 killed after fault` -> the shell stayed
+  fully responsive (`uptime`/`ls` after). The one `-d int` abort was
+  exactly the injected overflow, caught and contained.
+
+**Still coarse, worth knowing before building on this:** a single stack
+frame larger than one page (4KB) - a giant local array - could *skip over*
+the one-page guard into the code below, the standard single-guard-page
+limitation; incremental overflows (recursion, normal frame growth) hit it,
+and it's strictly better than the previous silent corruption regardless. No
+userland heap still (a separate item) - programs are still fixed-buffer,
+now on a 16KB guarded stack instead of an 8KB unguarded one. And a
+mismatched `STACK_PAGES` between `loader.rs` and `mmu.rs` would silently
+misplace the guard - kept equal by a cross-referencing comment on each.
+
 ## Commands
 
 ```sh

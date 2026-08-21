@@ -40,6 +40,16 @@
 
   <article>
 
+<h2>Stack guard page — and the silent overflow it immediately found</h2>
+
+<p>Every userland task ran on a fixed 8KB stack with <strong>no guard</strong>: the layout was tight (<code class="inline">[code][2 stack pages]</code>, no gap), so a stack overflow descended straight into the program's own code - still EL0-accessible - as silent corruption, no fault. This adds one inaccessible <strong>guard page</strong> immediately below each stack, so an overflow takes a clean EL0 permission fault that the existing fault-isolation handler already contains (kills just that task; halts only for task 0/1).</p>
+
+<p><code class="inline">loader.rs</code> grows each region by a page (<code class="inline">[code][1 guard page][stack]</code>); <code class="inline">mmu.rs::build_view</code> derives the guard's address from the region's <code class="inline">(base, size)</code> and maps that one L3 page EL1-only - a hole inside the EL0 region, size-gated so the single-page idle region gets none. No ABI change, no userland change.</p>
+
+<p><strong>The guard immediately earned its keep by catching a real, pre-existing bug:</strong> the shell's own <code class="inline">exec</code> path (<code class="inline">cmd_exec</code> → <code class="inline">spawn_path</code> → <code class="inline">fs_call</code>'s 768+768-byte request/reply buffers + staging + the call chain) was overflowing its 8KB stack by ~32 bytes into the top of its code region, every time - silently, because nothing was mapped to fault on it. Fixed by growing the stack 8KB → <strong>16KB</strong> (<code class="inline">STACK_PAGES</code> 2 → 4, kept in sync between <code class="inline">loader.rs</code> and <code class="inline">mmu.rs</code>).</p>
+
+<p>Verified on QEMU, both directions, zero unexpected aborts: <strong>no false faults</strong> with the 16KB stack (<code class="inline">selftest</code>, the previously-faulting <code class="inline">exec</code>, streaming <code class="inline">cp</code> of the 72KB binary, cat-stream+redirect, and the <code class="inline">hello | upper</code> program-pipe all run with zero EL0 faults); and a temp-injected recursion overflow in <code class="inline">hello</code> (reverted) took a clean EL0 fault in its guard page → the task killed alone → the shell survived. Known limitation (documented): a single &gt;4KB stack frame could skip the one-page guard - the standard single-guard limitation, still strictly better than silent corruption. See <code class="inline">CLAUDE.md</code>'s "Stack guard page" section.</p>
+
 <h2>Program-to-program pipes and <code class="inline">exec … &gt; file</code>: stdout-over-IPC</h2>
 
 <p>Pipes were <strong>builtin-left only</strong> (<code class="inline">builtin | /path/program</code>, the shell capturing the builtin's output and streaming it) because a <em>task's own</em> output wasn't capturable - a spawned program's output went straight to the console. This milestone makes it capturable, delivering both <code class="inline">programA | programB</code> (both spawned programs) and <code class="inline">exec prog &gt; file</code>.</p>

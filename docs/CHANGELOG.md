@@ -7,6 +7,41 @@ what broke, how it was diagnosed), see `CLAUDE.md`; for *how* something
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## Stack guard page - and the silent overflow it immediately found
+
+Every userland task ran on a fixed 8KB stack with **no guard**: the layout
+was tight (`[code][2 stack pages]`, no gap), so a stack overflow descended
+straight into the program's own code - still EL0-accessible - as silent
+corruption, no fault. This adds one inaccessible **guard page** immediately
+below each stack, so an overflow takes a clean EL0 permission fault that
+the existing fault-isolation handler already contains (kills just that
+task; halts only for task 0/1).
+
+`loader.rs` grows each region by a page (`[code][1 guard page][stack]`);
+`mmu.rs::build_view` derives the guard's address from the region's
+`(base, size)` and maps that one L3 page EL1-only - a hole inside the EL0
+region, size-gated so the single-page idle region gets none. No ABI
+change, no userland change.
+
+**The guard immediately earned its keep by catching a real, pre-existing
+bug:** the shell's own `exec` path (`cmd_exec` -> `spawn_path` ->
+`fs_call`'s 768+768-byte request/reply buffers + staging + the call chain)
+was overflowing its 8KB stack by ~32 bytes into the top of its code region,
+every time - silently, because nothing was mapped to fault on it. Fixed by
+growing the stack 8KB -> **16KB** (`STACK_PAGES` 2 -> 4, kept in sync
+between `loader.rs` and `mmu.rs`).
+
+Verified on QEMU, both directions, zero unexpected aborts: **no false
+faults** with the 16KB stack (`selftest`, the previously-faulting `exec`,
+streaming `cp` of the 72KB binary, cat-stream+redirect, and the
+`hello | upper` program-pipe all run with zero EL0 faults); and a
+temp-injected recursion overflow in `hello` (reverted) took a clean EL0
+fault in its guard page -> the task killed alone -> the shell survived.
+Known limitation (documented): a single >4KB stack frame could skip the
+one-page guard - the standard single-guard limitation, still strictly
+better than today's silent corruption. See `CLAUDE.md`'s "Stack guard
+page" section.
+
 ## Program-to-program pipes and `exec … > file`: stdout-over-IPC
 
 Pipes were **builtin-left only** (`builtin | /path/program`, the shell

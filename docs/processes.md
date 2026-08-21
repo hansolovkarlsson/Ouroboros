@@ -77,8 +77,13 @@ don't add key/value parsing preemptively.
 ## Memory model
 
 A loaded program gets one EL0-accessible region: its code (and rodata) at
-the base, followed by a fixed stack allowance (currently 2 pages, 8KB),
-with the stack pointer starting at the top and growing down. No heap, no
+the base, then one inaccessible **guard page**, then a fixed stack
+allowance (currently 4 pages, 16KB), with the stack pointer starting at the
+top and growing down - so a stack overflow lands in the guard page and
+takes a clean fault instead of corrupting the code below (see "Stack guard
+page" in `CLAUDE.md`; the guard immediately caught a real 8KB overflow in
+the shell's own `exec` path, which is why the stack is 16KB, not 8KB). No
+heap, no
 `.bss`/`.data` support (see "Binary format" below) — everything a program
 needs beyond code and a stack has to be a local variable today.
 
@@ -395,9 +400,12 @@ Worth knowing before building further on this:
 - **No heap for userland programs**, and no `.bss`, so no static mutable
   state at all — every program is constrained to stack-local state, same
   as the shell.
-- **Stack size is fixed** (2 pages, 8KB) regardless of what a program
-  actually needs, and there's no guard page — a stack overflow silently
-  corrupts whatever memory follows it rather than faulting.
+- **Stack size is fixed** (4 pages, 16KB) regardless of what a program
+  actually needs, but there **is** a guard page now — a stack overflow
+  lands in an inaccessible page below the stack and takes a clean EL0
+  fault (the task is killed alone) instead of silently corrupting the code
+  below. One caveat: a single stack frame larger than the one-page guard
+  (4KB) could skip over it — the standard single-guard limitation.
 - **Must be built in `--release`, not debug.** A real, confirmed
   toolchain constraint (an `R_AARCH64_ABS64` relocation inside prebuilt
   `libcore`'s own object code that only a release build's optimizer
@@ -418,8 +426,10 @@ Worth knowing before building further on this:
   of the system keeps running; the filesystem server specifically is
   restarted from a kept image (up to 3 times per boot). The boot shell
   and idle task are the exceptions: their faults still halt, honestly.
-  There's still no guard *page* though - a stack overflow may silently
-  corrupt adjacent memory rather than fault at all (see the fixed-stack
+  There **is** a guard page now - a stack overflow lands in an
+  inaccessible page below the stack and faults cleanly (the task killed
+  alone) rather than silently corrupting adjacent memory (see the
+  fixed-stack
   bullet above).
 - **Isolation is MMU-enforced now, not trust-based.** Each task runs
   under its own translation-table view (`mmu.rs`) in which only its own
@@ -435,9 +445,10 @@ Worth knowing before building further on this:
   reads/writes to `SAFECOPY_MAX` (2048) per op and lets `cat` stream any
   size. What remains: the 512-byte inline cap still bounds directory
   *listings* (`ls`); a single non-streaming transfer is still
-  userland-memory-bound (no heap, 8KB stack); and there's still no stack
-  *guard page* (an overflow can corrupt the program's own region
-  silently - within its own isolation boundary, not another task's).
+  userland-memory-bound (no heap, 16KB stack); and the stack now has a
+  *guard page* (an overflow faults cleanly and kills just that task,
+  rather than silently corrupting the program's own region - except a
+  single >4KB frame could skip the one-page guard).
 - **Write support covers directories, files with real content,
   copying, renaming/moving, and now writing at a byte offset**
   (`fat32::write_at` - write data at an offset, extending the file,

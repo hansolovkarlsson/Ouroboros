@@ -65,12 +65,15 @@ Still 2-stage, producer-`hello`-only for now. See `CHANGELOG.md`.
    streaming (relay-free pipes), or a spawned program that reaches an
    endpoint outside its default `{shell,fsd,cond}` set.
 
-2. **Smaller hardening, mostly recorded already:** a stack **guard page**
-   (turn silent overflow into a clean fault) and a userland **heap**;
+2. **Smaller hardening, mostly recorded already:** a userland **heap**
+   (programs are still fixed-buffer, now on a 16KB guarded stack);
    revisiting **per-task ASIDs** with a proven break-before-make sequence
    (the reverted TLB optimization); and FAT32 **interior/random-access
    writes** (`write_at` refuses an offset past EOF today — no sparse
-   files) for a future editor/log.
+   files) for a future editor/log. **(The stack guard page from this list
+   is done — 2026-08-20 — and it immediately caught a real, silent 8KB
+   overflow in the shell's own `exec` path; the stack was grown to 16KB.
+   See `CHANGELOG.md`.)**
 
 **Deferred / blocked** (recorded, not chased): moving a *third* driver
 out is limited by the no-IOMMU DMA constraint (the block transport can't
@@ -568,9 +571,10 @@ phase:
   large to append" refusal is gone). **Still next**
   (not yet scoped): *interior/random-access* writes (`write_at` refuses
   an offset past EOF - no sparse files) for a future editor/log; a
-  **userland heap and/or a stack guard page** (the fixed 8KB unguarded
-  stack is the remaining ceiling on a single non-streaming buffer, and
-  what a `write`/`>>` of a large *single* payload would need); moving
+  **userland heap** (the stack guard page from this note is done - see
+  `CHANGELOG.md`; the stack is now a 16KB *guarded* stack, but it's still
+  the ceiling on a single non-streaming buffer, which a `write`/`>>` of a
+  large *single* payload would need a heap to lift); moving
   further components out of the kernel; and program-to-program pipes (a
   task's own output still isn't capturable, so pipelines are builtin-left
   only - a stdout-over-IPC model is the real fix).
