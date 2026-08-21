@@ -672,7 +672,7 @@ fn dispatch_line(line: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize, out:
     let arg = words.next().unwrap_or("");
 
     match command {
-        "help" => out.put_line("commands: help, echo, uptime, clear, ls, cat, cd, pwd, mkdir, rmdir, touch, rm, write, cp, mv, mount, exec, exit, ps, kill, fg, wait, send, recv, selftest (append `> file`/`>> file` to redirect output, or `| /path/to/program` to pipe it into a spawned program)"),
+        "help" => out.put_line("commands: help, echo, uptime, clear, ls, cat, cd, pwd, mkdir, rmdir, touch, rm, write, writeat, cp, mv, mount, exec, exit, ps, kill, fg, wait, send, recv, selftest (append `> file`/`>> file` to redirect output, or `| /path/to/program` to pipe it into a spawned program)"),
         "echo" => {
             let mut first = true;
             for word in line.split_whitespace().skip(1) {
@@ -710,6 +710,7 @@ fn dispatch_line(line: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize, out:
         "touch" => cmd_touch(arg, cwd, *cwd_len),
         "rm" => cmd_rm(arg, cwd, *cwd_len),
         "write" => cmd_write(line, cwd, *cwd_len),
+        "writeat" => cmd_writeat(line, cwd, *cwd_len),
         "cp" => cmd_cp(line, cwd, *cwd_len),
         "mv" => cmd_mv(line, cwd, *cwd_len),
         "exec" => cmd_exec(arg, cwd, *cwd_len, out),
@@ -1290,6 +1291,64 @@ fn cmd_write(line: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize) {
     match fs_write_file(path, &content[..len]) {
         NO_FS => print_no_fs(),
         code if code >= FS_ERR_MIN => print_fs_error("write", code),
+        _ => {}
+    }
+}
+
+/// `writeat <file> <offset> <text...>` - a random-access write: writes the
+/// text at byte `offset` in an existing file, overwriting bytes *in place*
+/// and, if `offset` is past the end of the file, zero-filling the gap
+/// `[old_size, offset)`. Unlike `write` (full replace) it leaves the bytes
+/// outside the written window intact, and unlike `write` it does *not*
+/// create the file - the file must already exist (use `write`/`touch`
+/// first). The reachable consumer of `fat32::write_at`'s interior and
+/// past-EOF paths, which `cp`/`>>` (sequential/append only) never exercise.
+fn cmd_writeat(line: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize) {
+    let mut words = line.split_whitespace();
+    words.next(); // "writeat" itself
+    let (Some(filename), Some(offset_str)) = (words.next(), words.next()) else {
+        print_line("writeat: usage: writeat <file> <offset> <text...>");
+        return;
+    };
+    let Some(offset) = parse_u64(offset_str) else {
+        print_line("writeat: offset must be a number");
+        return;
+    };
+
+    let mut content = [0u8; BUFFER_SIZE];
+    let mut len = 0usize;
+    let mut first = true;
+    for word in words {
+        if !first && len < content.len() {
+            content[len] = b' ';
+            len += 1;
+        }
+        for b in word.bytes() {
+            if len < content.len() {
+                content[len] = b;
+                len += 1;
+            }
+        }
+        first = false;
+    }
+    if len == 0 {
+        print_line("writeat: missing text argument");
+        return;
+    }
+
+    let mut path_buf = [0u8; PATH_SIZE];
+    let Some(path_len) = resolve_path(cwd_str(cwd, cwd_len), filename, &mut path_buf) else {
+        print_line("writeat: path too long");
+        return;
+    };
+    let Ok(path) = core::str::from_utf8(&path_buf[..path_len]) else {
+        print_line("writeat: path too long");
+        return;
+    };
+
+    match fs_write_at(path, offset, &content[..len]) {
+        NO_FS => print_no_fs(),
+        code if code >= FS_ERR_MIN => print_fs_error("writeat", code),
         _ => {}
     }
 }

@@ -32,6 +32,11 @@ const DIR_ENTRY_END: u8 = 0x00;
 const FAT32_PARTITION_TYPES: [u8; 2] = [0x0b, 0x0c]; // FAT32 CHS, FAT32 LBA
 const END_OF_CHAIN_MIN: u32 = 0x0fff_fff8;
 const MAX_NAME_LEN: usize = 12; // 8 name + '.' + 3 ext, the most an 8.3 short name is ever
+/// Cap on a single `write_at` gap zero-fill (`offset` past the old EOF).
+/// FAT32 has no sparse representation, so a gap is zero-filled sector by
+/// sector - fine for an editor/log, but a fat-fingered huge offset must not
+/// try to zero-fill the whole volume. 1 MiB is far above any real use here.
+const MAX_GAP_FILL: u64 = 1 << 20;
 
 #[derive(Debug)]
 // The two carried fields (the offending sector size, the disk-error
@@ -939,20 +944,25 @@ impl Fs {
     /// extending the file (allocating clusters, growing the size field)
     /// as needed - **without** rewriting the bytes before `offset`,
     /// unlike [`write_file`](Self::write_file). The FAT32 primitive behind
-    /// streaming `cp` and unbounded `>>`.
+    /// streaming `cp`, unbounded `>>`, and random-access `writeat`.
     ///
-    /// Grows the file to `max(old_size, offset + data.len())`. Refuses
-    /// `offset > old_size` ([`Error::InvalidOffset`]) - a sparse gap FAT32
-    /// can't represent; sequential/append callers never reach it. Empty
-    /// `data` is a no-op. A previously-empty (cluster-`0`, `touch`ed) file
-    /// gets its first cluster allocated here and recorded in its entry.
+    /// Grows the file to `max(old_size, offset + data.len())`. `offset` may
+    /// be **past the old end of file**: the gap `[old_size, offset)` is
+    /// zero-filled on disk (FAT32 has no sparse representation, so the gap is
+    /// real zero bytes), bounded by `MAX_GAP_FILL` so a fat-fingered huge
+    /// offset can't try to zero-fill the volume (`Error::InvalidOffset` past
+    /// that). Empty `data` is a no-op. A previously-empty (cluster-`0`,
+    /// `touch`ed) file gets its first cluster allocated here and recorded in
+    /// its entry.
     ///
-    /// Per-sector, the write reads-modifies-writes any sector that
-    /// overlaps the file's existing content (preserving the bytes outside
-    /// the write window); a sector entirely past the old end of file is
-    /// freshly allocated, so it's zero-padded rather than read first (the
-    /// same pattern `write_chain` uses for a fresh tail sector). A full
-    /// 512-byte write skips the read either way.
+    /// One unified per-sector pass covers the whole affected range
+    /// `[min(old_size, offset), offset + data.len())`, building each sector
+    /// from zeros (positions before `offset`, the gap) and `data` (positions
+    /// from `offset`). A sector that overlaps existing content is
+    /// read-modified-written, preserving the bytes outside the write window -
+    /// including the boundary sector that straddles `old_size`; a sector
+    /// entirely past the old EOF is zero-padded rather than read first; a
+    /// full 512-byte write skips the read either way.
     pub fn write_at(&mut self, path: &str, offset: u64, data: &[u8]) -> Result<(), Error> {
         if data.is_empty() {
             return Ok(());
@@ -984,7 +994,7 @@ impl Fs {
         }
         let (dir_lba, dir_off, mut head_cluster, old_size_u32) = loc.ok_or(Error::NotFound)?;
         let old_size = old_size_u32 as u64;
-        if offset > old_size {
+        if offset > old_size && offset - old_size > MAX_GAP_FILL {
             return Err(Error::InvalidOffset);
         }
 
@@ -997,12 +1007,17 @@ impl Fs {
             head_cluster = c;
         }
 
-        // Walk to the cluster holding `offset`, extending the chain if the
-        // walk runs off the end (offset is at most old_size, so at most one
-        // cluster boundary short).
+        // One unified pass over [write_start, write_end): when `offset` is
+        // past the old EOF, start at `old_size` and zero-fill the gap up to
+        // `offset` before the data; otherwise start at `offset`.
+        let write_start = old_size.min(offset);
+        let write_end = offset + data.len() as u64;
+
+        // Walk to the cluster holding `write_start`, extending the chain if
+        // the walk runs off the end.
         let mut cluster = head_cluster;
         let mut cluster_pos = 0u64; // file byte offset of `cluster`'s first byte
-        while cluster_pos + cluster_bytes <= offset {
+        while cluster_pos + cluster_bytes <= write_start {
             cluster = match self.next_cluster(cluster)? {
                 Some(next) => next,
                 None => self.extend_chain(cluster)?,
@@ -1010,10 +1025,8 @@ impl Fs {
             cluster_pos += cluster_bytes;
         }
 
-        // Per-sector write.
-        let mut pos = offset;
-        let mut written = 0usize;
-        while written < data.len() {
+        let mut pos = write_start;
+        while pos < write_end {
             // Advance to the cluster containing `pos`, extending as needed.
             while pos >= cluster_pos + cluster_bytes {
                 cluster = match self.next_cluster(cluster)? {
@@ -1026,30 +1039,40 @@ impl Fs {
             let sector_lba = self.cluster_to_lba(cluster) as u64 + sector_in_cluster;
             let sector_start = cluster_pos + sector_in_cluster * SECTOR_SIZE as u64;
             let in_off = (pos - sector_start) as usize;
-            let n = (SECTOR_SIZE - in_off).min(data.len() - written);
+            let n = ((SECTOR_SIZE - in_off) as u64).min(write_end - pos) as usize;
+
+            // This sector's bytes: zeros for positions before `offset` (the
+            // gap fill), `data` from `offset` on.
+            let mut chunk = [0u8; SECTOR_SIZE];
+            for (i, slot) in chunk[..n].iter_mut().enumerate() {
+                let fp = pos + i as u64;
+                if fp >= offset {
+                    *slot = data[(fp - offset) as usize];
+                }
+            }
 
             if in_off == 0 && n == SECTOR_SIZE {
-                // Whole sector overwritten - nothing to preserve, no read.
-                let mut sector = [0u8; SECTOR_SIZE];
-                sector.copy_from_slice(&data[written..written + n]);
-                self.disk.write_sector(sector_lba, &sector)?;
+                // Whole sector determined by `chunk` - nothing to preserve.
+                self.disk.write_sector(sector_lba, &chunk)?;
             } else if sector_start < old_size {
-                // Partial write into a sector with existing content - RMW.
-                self.write_partial_sector(sector_lba, in_off, &data[written..written + n])?;
+                // Partial write into a sector with existing content - RMW,
+                // preserving the bytes outside [in_off, in_off+n). This is
+                // also the boundary sector that straddles `old_size` (its
+                // post-old_size gap bytes come through as zeros in `chunk`).
+                self.write_partial_sector(sector_lba, in_off, &chunk[..n])?;
             } else {
                 // Partial write into a fresh sector past the old EOF -
                 // zero-pad, don't read (there's nothing real to preserve).
                 let mut sector = [0u8; SECTOR_SIZE];
-                sector[in_off..in_off + n].copy_from_slice(&data[written..written + n]);
+                sector[in_off..in_off + n].copy_from_slice(&chunk[..n]);
                 self.disk.write_sector(sector_lba, &sector)?;
             }
             pos += n as u64;
-            written += n;
         }
 
         // Grow-only size, and record the head cluster (which changed if
         // the file was previously empty).
-        let new_size = old_size.max(offset + data.len() as u64) as u32;
+        let new_size = old_size.max(write_end) as u32;
         self.patch_entry_cluster_size(dir_lba, dir_off, head_cluster, new_size)
     }
 
