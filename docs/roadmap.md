@@ -78,19 +78,41 @@ recovering on Ctrl+C), zero aborts. Still coarse (one delegated target per
 task, non-transitive, in practice shell-only); a general, transitive
 capability-passing mechanism is the remaining gap. See `CHANGELOG.md`.
 
-1. **Smaller hardening, mostly recorded already:**
-   revisiting **per-task ASIDs** with a proven break-before-make sequence
-   (the reverted TLB optimization); and FAT32 **interior/random-access
-   writes** (`write_at` refuses an offset past EOF today — no sparse
-   files) for a future editor/log. **(Two items from this list are done —
-   2026-08-20 — the stack guard page (which immediately caught a real,
-   silent 8KB overflow in the shell's own `exec` path; the stack was grown
-   to 16KB), and a userland heap: a real `alloc`-backed heap turned out to
-   be impossible on stable — prebuilt lib`alloc` has `R_AARCH64_ABS64`
-   relocations a `-pie` link rejects, and `-Z build-std` is nightly-only —
-   so it shipped as a 256KB *raw buffer* per program (`heap_info`),
-   lifting the shell's capture cap so `cat big > file` works. See
-   `CHANGELOG.md`.)**
+The frontier, in rough order of value:
+
+1. **FAT32 interior / random-access writes — the recommended next
+   milestone.** `fat32::write_at` refuses any offset past the current end of
+   file today (no sparse files), so it does append and sequential-overwrite
+   but not seek-anywhere: no way to rewrite bytes *inside* an existing file
+   while leaving the rest intact. Lifting that is what a future editor or a
+   log with in-place updates needs. It's the pick here because it's
+   **concrete, unblocked, and self-contained** — it lives entirely in the
+   fsd server's `fat32.rs` plus its `FSOP_*` layer, no kernel/scheduler/MMU
+   risk — and it has a real use, unlike the more speculative items below.
+
+2. **General / transitive capability delegation.** The delegation shipped
+   2026-08-21 is deliberately coarse: one delegated target per task,
+   non-transitive, in practice shell-only. Making it general (any task hands
+   any held capability onward, revocably — MINIX's full grant model) would
+   unlock true relay-free `a | b | c` and a spawned program running its
+   *own* server. The catch: **neither consumer exists yet**, so building
+   this first would repeat the "premature, a mechanism without a hard
+   consumer" trap the capability-and-hardening postmortem flagged for
+   delegation itself. Build the consumer first, or wait until one is
+   actually wanted.
+
+3. **Per-task ASIDs, revisited** — a pure TLB-flush-per-switch optimization
+   that passed on QEMU but faulted the idle task on real Parallels and was
+   reverted (see the isolation postmortem for the decoded fault evidence);
+   needs a proven break-before-make sequence. Low value — a context switch
+   already does far heavier work than the per-switch flush it would save.
+
+The stack **guard page** (16KB guarded stack, which immediately caught a
+real silent 8KB overflow in the shell's own `exec` path) and the 256KB raw
+**userland heap** (`heap_info` — a real `alloc`-backed heap stays blocked on
+stable: prebuilt lib`alloc` has `R_AARCH64_ABS64` relocations a `-pie` link
+rejects, and `-Z build-std` is nightly-only), formerly tracked here, both
+shipped 2026-08-20. See `CHANGELOG.md`.
 
 **Deferred / blocked** (recorded, not chased): moving a *third* driver
 out is limited by the no-IOMMU DMA constraint (the block transport can't
@@ -586,7 +608,8 @@ phase:
   streaming `cp` and a `>>` append both verified on the real USB stick);
   `>>` appends at the end of a file of any existing size (the old "too
   large to append" refusal is gone). **Still next**
-  (not yet scoped): *interior/random-access* writes (`write_at` refuses
+  (now the recommended frontier milestone - see "What's next" item 1
+  above): *interior/random-access* writes (`write_at` refuses
   an offset past EOF - no sparse files) for a future editor/log; the
   **userland heap and guard page from this note are both done** (see
   `CHANGELOG.md`) - the stack is a 16KB *guarded* stack now, and each
