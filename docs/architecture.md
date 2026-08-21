@@ -317,17 +317,26 @@ program becomes a new, independent task in whichever spawnable slot
 
 **Where a spawned program's output goes** is set at spawn time (`spawn`'s
 stdout-target argument, arg1). Normally it's `CON_TASK` — output goes
-straight to the console server. But the shell can set it to *itself* so a
-program's output routes back to the shell to be relayed or captured, which
-is what makes program-to-program pipes and `exec … > file` work: for
-`/prog_a | /prog_b` the shell spawns the consumer (stdout → console) and
-the producer (stdout → shell), then relays each chunk the producer emits on
-to the consumer (forwarding the empty end-of-stream marker); for `exec prog
-> file` it captures the producer's output and writes it to the file. A
-producer reads its target via `stdout_target` (38) and routes accordingly;
-the shell learns its own index via `self` (39). No capability delegation is
-involved — `producer → shell` is already permitted by the IPC send-mask
-(see "IPC capabilities" above).
+straight to the console server. But the shell can point it elsewhere, which
+is what makes program-to-program pipes and `exec … > file` work:
+
+- For `/prog_a | /prog_b` the shell spawns the consumer (stdout → console)
+  and the producer with **stdout aimed straight at the consumer's slot**,
+  then hands the producer a runtime capability to reach it —
+  `delegate(producer, consumer)` (41) — so the producer streams **directly**
+  to the consumer over IPC, with the shell out of the byte path (it only
+  waits for both to exit). That sibling-to-sibling send is normally
+  forbidden by the static send-mask; the shell alone can authorize it,
+  because it alone statically holds the spawnable slots' send-caps (see "IPC
+  capabilities" and "Runtime capability delegation" below).
+- For `exec prog > file` the shell sets the producer's stdout to *itself*
+  (learning its own index via `self`, 39), captures the producer's output,
+  and writes it to the file — no delegation needed, since `producer → shell`
+  is already permitted by the send-mask.
+
+A producer reads its target via `stdout_target` (38) and routes accordingly:
+`CON_TASK` → the console server; any other task → a raw `msg_send` byte
+stream ending in an empty end-of-stream message.
 
 Since the filesystem moved to userland, "loads from disk" is a
 two-step, client-driven flow: the shell reads the program via the
@@ -486,6 +495,7 @@ the way hand-duplicated numbers did before this crate existed.
 | 38 | `stdout_target` | — | the caller's stdout target task index | Where this program's output should go (set by whoever `spawn`ed it; `CON_TASK` by default). A producer routes output there: `CON_TASK` → the console server (`DSPOP_WRITE`); otherwise a raw byte stream (chunked data messages + an empty end-of-stream message) to that task, which relays or captures it. This is what makes a task's own output capturable — program-to-program pipes and `exec … > file` |
 | 39 | `self` | — | the caller's own task slot index | A task's identity (otherwise unknowable — every other task-aware syscall takes an index). The shell needs it to route a pipe producer's stdout back to itself, and a foreground-spawned shell isn't task 0 |
 | 40 | `heap_info` | field (`0`=base, `1`=size) | the requested heap-area geometry, or `0` | Each program's region carries a fixed 256KB **raw heap area** (between its code and its stack guard page) it reads/writes via a `&mut [u8]` — space far larger than the 16KB stack, for data a fixed stack buffer can't hold (the shell backs its redirect/pipe capture with it, so `cat big > file` works). *Not* a `GlobalAlloc` heap — `alloc`'s collections can't link under this PIE loader (prebuilt lib`alloc` has `R_AARCH64_ABS64` relocations a `-pie` link rejects; the fix is nightly `-Z build-std`) |
+| 41 | `delegate` | grantee task, target task | `0` or `MSG_ERR_DENIED` | **Runtime capability delegation**: grant `grantee` the right to initiate sends to `target` — a dynamic addition to `grantee`'s send-mask. The caller may only delegate a send-cap it *statically holds itself* (no transitive re-delegation), which confines it to the shell authorizing a pipe's producer to stream directly to its consumer. Cleared when either task dies. See "Runtime capability delegation" below |
 | other | — | — | `u64::MAX` | Logged as unknown |
 
 ### The filesystem request protocol (`FSOP_*`)
@@ -571,10 +581,31 @@ send-mask must permit `dest`. Only *unsolicited* sends are mask-checked.
 The kernel's supervisor ping bypasses this (it calls `send_message`
 directly, not through the syscall boundary).
 
-The policy is **static** (no runtime delegation yet): a spawned program
-gets the fixed `{shell, fsd, cond}` mask and can't be granted more, which
-is the natural next step. `grant`/`safecopy` (below) are the separate,
-already-delegable capability for bulk *data*.
+The send-mask is a static *baseline*, but it can be extended at runtime by
+delegation (next). `grant`/`safecopy` (below) are the separate, delegable
+capability for bulk *data*.
+
+### Runtime capability delegation
+
+The static send-mask is a baseline; `delegate(grantee, target)` (41) hands
+one task the runtime right to initiate sends to another — a dynamic addition
+to `grantee`'s send-mask, consulted by `may_send` after the static check. It
+is stored in one per-task slot (`tasks::DELEGATED_SEND`, the single-slot
+`grant`/`stdout_target` precedent) and cleared on task death — both a dying
+task's delegated-out capability and any delegation aimed *at* it, so a reused
+slot can never inherit a stale one.
+
+The rule that makes it safe: **a task may only delegate a send-capability it
+*statically* holds** (`tasks::may_delegate` consults `caps_for_slot`, not the
+delegated slot — so nothing can be laundered onward). This self-secures the
+feature to its one use today: only the shell (slot 0) statically holds the
+spawnable slots' send-caps, so **only the shell can authorize one spawned
+program to reach another** — which is exactly what a relay-free
+program-to-program pipe needs (see "Dynamic task creation" above). A spawned
+program cannot delegate that reach, because it does not hold it. Enforced at
+the same `msg_send`/`msg_call` boundary as the static mask; a denied
+delegation, and a send with no covering capability, both return
+`MSG_ERR_DENIED`.
 
 ### Grant/safecopy — enforced capability-based bulk transfer
 

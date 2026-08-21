@@ -78,14 +78,20 @@ privilege) underneath them. Measured against that one test:
   program (the shell, via `INIT.CFG`) plus one fixed-path infrastructure
   server (`\EFI\ORBS\FSD.BIN`). It's two loaded programs, not a typed set
   of cooperating servers.
-- **The `who-may-call-whom` capability model is coarse and static.** IPC
-  is no longer flat — a per-slot send-mask, enforced at the
+- **The `who-may-call-whom` capability model is coarse, but no longer
+  purely static.** IPC is not flat — a per-slot send-mask, enforced at the
   `MSG_SEND`/`MSG_CALL` boundary, restricts which endpoints each task may
   reach (a spawned program can reach only the two servers and the shell,
-  not arbitrary tasks or the device gates). But the policy is a static
-  function of slot: there's no runtime *delegation* (granting a spawned
-  program a capability it doesn't get by default), which MINIX's grant
-  mechanism provides.
+  not arbitrary tasks or the device gates). The static per-slot mask is now
+  a *baseline* that can be extended at runtime: `DELEGATE` (syscall 41) lets
+  a task hand another a send-capability it statically holds — MINIX's grant
+  mechanism, in miniature for the send topology. It's used today for
+  relay-free program-to-program pipes (the shell delegates a producer the
+  right to stream directly to its consumer). It stays coarse: one delegated
+  target per task, and delegation is confined by the "may only delegate what
+  you statically hold" rule (no transitive re-delegation), so in practice
+  only the shell delegates. A general capability-passing mechanism (any task
+  handing any held capability onward, transitively) is the remaining gap.
 - **No process manager / no PID namespace / no `fork`.** Task creation is
   `spawn` (add a task alongside the caller), not the POSIX
   fork-exec-wait lineage MINIX's PM administers. There *is* a
@@ -93,10 +99,11 @@ privilege) underneath them. Measured against that one test:
   but no process hierarchy above it.
 
 **Verdict:** structurally a microkernel on the services it actually moved,
-using the right IPC primitives and now an enforced (if coarse, static) IPC
-capability topology. Short of MINIX mainly on *breadth* (two servers, not
-a full fleet) and on capability *delegation* (the topology is fixed per
-slot, not granted at runtime).
+using the right IPC primitives and an enforced IPC capability topology that
+is now a static baseline plus runtime delegation. Short of MINIX mainly on
+*breadth* (two servers, not a full fleet) and on *general* capability
+delegation (today's is coarse — one delegated target per task, non-transitive,
+in practice shell-only — where MINIX's grants are general and transitive).
 
 ---
 
@@ -137,10 +144,6 @@ reaching into another's memory, it was just impolite.
 
 ### The honest caveats
 
-- **No stack guard page.** An EL0 stack overflow silently corrupts the
-  program's *own* region. It's contained to that task's isolation
-  boundary — it can't reach another task — but it's silent rather than a
-  clean fault.
 - **ASIDs are reverted.** The optimization to tag EL0 pages non-global
   and give each view its own ASID (skipping the per-switch TLB flush)
   passed every QEMU test *and* the isolation probe — then faulted the
@@ -158,8 +161,9 @@ both influences. MINIX gets EL0-equivalent isolation from separate
 address spaces; Helix explicitly does **not** have hardware-enforced
 isolation between modules (its safety leans on Rust's memory safety and
 hot-reload bookkeeping — see the research note). Ouroboros now has real,
-MMU-enforced, injection-verified per-task isolation. It lacks only a
-guard page and the reverted TLB optimization.
+MMU-enforced, injection-verified per-task isolation, with a stack guard
+page turning silent overflow into a clean, contained fault. The one thing
+left on this axis is the reverted per-task-ASID TLB optimization.
 
 ---
 
@@ -272,7 +276,7 @@ real-world hardening behind the design.
 | Non-crashing hang recovery | Timeouts / RS health | Health checks for hangs (first-class) | **Yes** — a passive heartbeat catches a *runnable* wedge; an active ping catches a *blocked* wedge |
 | Live code replacement | No (restart, not hot-swap) | **Yes** — pause/snapshot/swap/restore/rollback | No (reload same image) |
 | Supervision scope | Uniform (RS parents every boot-image process) | Uniform (self-heal framework) | **Uniform** — a registry supervises every boot-image server (`fsd` + `cond`) |
-| Trust topology | Capability-gated endpoints between servers | Trait boundaries | **Capability send-mask** — a per-slot mask enforced at the IPC boundary restricts who each task may reach (static, no runtime delegation yet) |
+| Trust topology | Capability-gated endpoints between servers | Trait boundaries | **Capability send-mask** — a per-slot mask enforced at the IPC boundary restricts who each task may reach, now a static baseline plus runtime `DELEGATE` (coarse: one target, non-transitive, in practice shell-only) |
 | Kernel/policy split | Kernel is mechanism; PM/VFS/RS are policy | Explicit: `core/` (mechanism) vs. `subsystems/` + `modules_impl/` (policy) | **Partial** — the FS and console are out; scheduler, MMU, and the remaining drivers are still kernel-resident |
 
 ---
@@ -294,23 +298,31 @@ The first three moves on this list have since shipped, in order:
 - ~~**A capability model for who-may-call-whom.**~~ **Done** — a per-slot
   IPC send-mask enforced at the `MSG_SEND`/`MSG_CALL` boundary makes the
   isolation topological, not just memory-level.
+- ~~**Runtime capability delegation (basic).**~~ **Done** — `DELEGATE`
+  (syscall 41) extends the static send-mask at runtime, confined by a "may
+  only delegate what you statically hold" rule; its first consumer is
+  relay-free program-to-program pipes (the shell out of the byte path).
+- ~~**The stdout-over-IPC payoff** (program-to-program pipes,
+  `exec … > file`).~~ **Done** — a per-task stdout target routes a program's
+  output to the console, the shell (for capture/relay), or, with delegation,
+  straight to a consumer.
+- ~~**A stack guard page.**~~ **Done** — an inaccessible page below each
+  task's stack turns silent overflow into a clean, contained fault (it found
+  a real latent 8KB overflow in the shell's `exec` path on its first test).
 
 What's left, in rough order of payoff:
 
-1. **Runtime capability delegation.** The send-mask is static (a function
-   of slot). MINIX's grant mechanism lets a process hand another a
-   specific, revocable capability at runtime — needed for a spawned
-   program to reach an endpoint outside its default `{shell,fsd,cond}`
-   set (e.g. program-to-program pipes, or a program that needs its own
-   server).
-2. **More breadth** — a third component out (limited by the no-IOMMU DMA
-   constraint on the block transport), and the stdout-over-IPC payoff
-   (program-to-program pipes, `exec … > file`).
+1. **General capability delegation.** Today's `DELEGATE` is coarse — one
+   delegated target per task, non-transitive, in practice shell-only.
+   MINIX's grant mechanism is general and transitive (any task hands any
+   held capability onward, revocably) — needed for direct task-to-task
+   streaming without a relay, or a spawned program that runs its own server.
+2. **More breadth** — a third component out of the kernel (limited by the
+   no-IOMMU DMA constraint on the block transport).
 3. **The smaller, already-recorded items** that harden the isolation
-   itself: a stack **guard page** (turn silent stack-overflow corruption
-   into a clean fault), and revisiting **per-task ASIDs** with a proven
-   break-before-make sequence (the reverted optimization — see the
-   isolation postmortem for the real-hardware fault evidence).
+   itself: revisiting **per-task ASIDs** with a proven break-before-make
+   sequence (the reverted optimization — see the isolation postmortem for
+   the real-hardware fault evidence).
 
 None of these is a small task, and none is needed to call the current
 state honest. They're the difference between "the mechanisms are real"

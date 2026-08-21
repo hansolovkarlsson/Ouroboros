@@ -7,6 +7,61 @@ what broke, how it was diagnosed), see `CLAUDE.md`; for *how* something
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## Runtime capability delegation - relay-free program-to-program pipes
+
+The IPC send-mask (who-may-call-whom) was a **pure function of task slot**:
+a spawned program could reach `{shell, fsd, cond}` and nothing else. So a
+program-to-program pipe (`/prog_a | /prog_b`) couldn't stream directly - the
+shell relayed every chunk (`producer → shell → consumer`), sitting in the
+byte hot path. This adds **runtime delegation**: the shell hands the
+producer a capability to send straight to the consumer, taking itself out of
+the loop.
+
+**The primitive** (`DELEGATE`, syscall 41): grant one task the runtime right
+to send to another - a dynamic addition to the grantee's static send-mask,
+consulted by `may_send` after the static check, stored in one per-task slot
+(`tasks::DELEGATED_SEND`, the single-slot `grant`/`stdout_target`
+precedent), and cleared on task death (both a dying task's delegated-out
+capability and any delegation aimed *at* it, so a reused slot can't inherit
+a stale one). The rule that makes it safe: **a task may only delegate a
+send-capability it *statically* holds** (`may_delegate` checks
+`caps_for_slot`, never the delegated slot - no transitive re-delegation).
+This self-secures the feature: only the shell statically holds the spawnable
+slots' send-caps, so **only the shell can authorize one spawned program to
+reach another** - a spawned program cannot, because it doesn't hold that
+reach.
+
+**The consumer** (`cmd_pipeline_prog`): the shell spawns the consumer
+(stdout → console) and the producer with its stdout aimed straight at the
+consumer's slot, `DELEGATE(producer, consumer)`, then only waits for both to
+exit - no relay loop. The producer program needs no change: it already
+routes output to its stdout target (a raw `msg_send` stream + empty
+end-of-stream message when the target isn't the console). The spawn/delegate
+race (a tick could let the producer run before the shell delegates) is
+closed in the producer, not by pre-arranging slots: `hello`'s send retry now
+tolerates `MSG_ERR_DENIED` as well as `MSG_ERR_FULL`, a denied-then-allowed
+send being exactly the transient the existing bounded (~3s) retry is for.
+The lost auto-kill of a non-reading consumer is the documented tradeoff -
+the producer's bounded retry gives up and exits, then the shell's
+`WAIT(consumer)` blocks until Ctrl+C, leaving the consumer alive in the
+background (`kill` it via `ps`).
+
+Landed in two staged commits (the standing discipline). Stage 1 the inert
+kernel primitive - verified byte-identical existing behavior plus a
+temporary race-free kernel self-test (reverted) confirming `may_send(4,5)`
+went false → true → false across delegate/clear and `may_delegate` was true
+for the shell, false for a child. Stage 2 the shell/`hello` wiring.
+**Confirmed on QEMU, zero `-d int` aborts:** `HELLO.BIN | UPPER.BIN` streams
+both lines uppercased with both tasks reaped (both lines intact proves the
+race is closed); the builtin-left pipe (`echo | UPPER.BIN`) and `exec >
+file` are unregressed; and the non-reading case (`HELLO.BIN | SH.BIN`)
+recovers cleanly on Ctrl+C with the shell responsive afterward. See
+`CLAUDE.md`'s "Runtime capability delegation" section and
+`docs/architecture.md`. Real-Parallels confirmation of the success path is
+pending (it needs the userland binaries on a USB stick + `mount`, per the
+standing reads-only policy); the delegation primitive is inert until a pipe
+uses it, and a clean boot with it present is already confirmed.
+
 ## Userland heap (raw buffer) - and a useful negative result about `alloc`
 
 Programs were fixed-buffer only (16KB stack, no heap, no static state), so

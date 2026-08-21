@@ -58,24 +58,27 @@ both are programs) or captures it to a file (`exec prog > file`). The clean
 relay design (`producer → shell → consumer`) needed **no capability
 delegation** — `producer → shell` is already permitted by the send-mask.
 Still 2-stage, producer-`hello`-only for now. See `CHANGELOG.md`.
+**(Update, 2026-08-21: program-to-program pipes are relay-free now — see the
+delegation note immediately below; `exec … > file` still routes through the
+shell for capture.)**
 
-1. **Runtime capability delegation — the recommended next milestone.** The
-   capability send-mask is static (a function of slot); MINIX's grant
-   mechanism lets a process hand another a specific capability at runtime.
-   It's the natural continuation of the capability model, and the only
-   frontier item that is both structurally interesting and not blocked. Its
-   **motivating first consumer is program-to-program direct streaming**
-   (relay-free pipes): today `a | b` streams `producer → shell → consumer`;
-   delegating the producer a capability to reach the consumer directly
-   removes the shell from the hot path. A spawned program reaching any
-   endpoint outside its default `{shell,fsd,cond}` set is the other
-   consumer. Note that the capability-and-hardening postmortem deliberately
-   shipped delegation-adjacent work (pipes) *without* delegation and flagged
-   delegation as "premature, a mechanism still without a hard consumer" —
-   program-to-program streaming is that hard consumer, which is what makes
-   this a well-motivated milestone now rather than a speculative one.
+**Recently completed (2026-08-21): runtime capability delegation — its first
+consumer, relay-free program-to-program pipes.** The static per-slot
+send-mask is now a *baseline* extensible at runtime: `DELEGATE` (syscall 41)
+hands one task the right to send to another, confined by a "may only
+delegate a send-cap you *statically* hold" rule (no transitive
+re-delegation). This self-secures it — only the shell holds the spawnable
+slots' send-caps, so only it can authorize one spawned program to reach
+another. Its first consumer: `/prog_a | /prog_b` now streams the producer's
+output **directly** to the consumer (the shell delegates producer→consumer
+and steps out of the byte path, instead of relaying every chunk). Confirmed
+on QEMU (both lines of `HELLO.BIN | UPPER.BIN` uppercased and reaped, the
+builtin-left pipe and `exec > file` unregressed, the non-reading consumer
+recovering on Ctrl+C), zero aborts. Still coarse (one delegated target per
+task, non-transitive, in practice shell-only); a general, transitive
+capability-passing mechanism is the remaining gap. See `CHANGELOG.md`.
 
-2. **Smaller hardening, mostly recorded already:**
+1. **Smaller hardening, mostly recorded already:**
    revisiting **per-task ASIDs** with a proven break-before-make sequence
    (the reverted TLB optimization); and FAT32 **interior/random-access
    writes** (`write_at` refuses an offset past EOF today — no sparse
@@ -591,6 +594,10 @@ phase:
   its capture cap; a real `alloc`-backed heap (`Vec`/`String`) stays
   blocked on stable (prebuilt lib`alloc` isn't PIE, `-Z build-std` is
   nightly); moving
-  further components out of the kernel; and program-to-program pipes (a
+  further components out of the kernel; and ~~program-to-program pipes (a
   task's own output still isn't capturable, so pipelines are builtin-left
-  only - a stdout-over-IPC model is the real fix).
+  only - a stdout-over-IPC model is the real fix)~~ **done — a per-task
+  stdout target made a program's output capturable (`exec > file`, pipes
+  relayed through the shell), and runtime capability delegation (2026-08-21)
+  then made `programA | programB` stream directly, shell out of the byte
+  path. See the "Recently completed" notes above.**

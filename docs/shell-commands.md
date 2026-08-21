@@ -150,13 +150,14 @@ ls | /EFI/ORBS/UPPER.BIN
   captured (the same capture the redirection machinery uses - a bigger
   output refuses rather than truncating), then streamed to the spawned
   program.
-- **Program left** (`/prog_a | /prog_b`): both sides are spawned programs.
-  The shell **relays** - it routes the producer's output back to itself
-  (the producer's stdout target is the shell) and forwards each chunk on to
-  the consumer, so a program's own output is capturable now. This is what
-  the per-task stdout target (`SPAWN`'s stdout argument, the `STDOUT_TARGET`
-  and `SELF` syscalls) exists for. No capability delegation is involved -
-  `producer → shell` is already permitted by the IPC send-mask.
+- **Program left** (`/prog_a | /prog_b`): both sides are spawned programs,
+  and the producer streams its output **directly** to the consumer - the
+  shell is not in the byte path. The shell spawns the consumer, spawns the
+  producer with its stdout aimed at the consumer, and hands the producer a
+  runtime capability to reach it (`DELEGATE`); that sibling-to-sibling send
+  is otherwise forbidden by the IPC send-mask, and the shell alone can grant
+  it (only it holds the spawnable slots' send-caps). The shell then just
+  waits for both to exit.
 
 Either way the right side is a standard filter program (see
 `upper/src/main.rs` for the shape to copy: stdin is `msg_recv`, output is
@@ -178,9 +179,14 @@ shell-side chaining of relays); the right side is exactly one program path
 (programs take no arguments); the only *producer* program shipped is
 `HELLO.BIN` (any generator follows the same stdout-target pattern; `upper`
 is a consumer/filter); `exec > file` capture is bounded (512 bytes,
-refuse-not-truncate - pipes themselves stream unbounded); and a program
-that stops reading its input is killed after a ~3-second real-tick timeout
-rather than hanging the shell.
+refuse-not-truncate - pipes themselves stream unbounded). A consumer that
+stops reading behaves differently in the two cases: for a **builtin-left**
+pipe the shell is feeding it, so it kills the consumer after a ~3-second
+real-tick timeout; for a **program-left** pipe the shell is out of the byte
+path, so the producer gives up after its own ~3-second timeout and exits,
+and the shell's wait on the still-live consumer blocks until you press
+**Ctrl+C** (which leaves the consumer running in the background - `kill` it
+via `ps`).
 
 ## Known limitations
 

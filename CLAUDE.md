@@ -5174,7 +5174,11 @@ buffer); the relay routes through the shell (a bottleneck, fine at this
 scale - direct task-to-task streaming is what delegation would later
 enable); and a producer's output helper (`hello`) is per-crate, not shared
 (same as `con_write` today - a shared userland runtime crate is a broader
-future cleanup).
+future cleanup). **(Update, 2026-08-21: the "relay routes through the shell"
+bottleneck is gone for program-to-program pipes - runtime capability
+delegation now lets the producer stream *directly* to the consumer, shell
+out of the byte path. See "Runtime capability delegation" below. `exec >
+file` still routes through the shell, since capture is the point there.)**
 
 ## Stack guard page: silent overflow becomes a clean fault - and it found a real bug
 
@@ -5322,6 +5326,118 @@ way). And `get_heap`'s `&'static mut` is sound only under the shell's
 one-capture-at-a-time usage - a program capturing two things at once would
 alias it.
 
+## Runtime capability delegation: relay-free program-to-program pipes, and a self-securing rule
+
+The capability model (see "The capability model" above) enforced the IPC
+topology with a **static** per-slot send-mask: `tasks::caps_for_slot(slot)`
+is a pure function of slot, so a spawned program could reach
+`{shell, fsd, cond}` and nothing else. That made a program-to-program pipe
+(`/prog_a | /prog_b`) impossible to stream directly - neither spawnable
+slot's mask includes the other - so the shell relayed every chunk
+(`producer → shell → consumer`, the stdout-over-IPC milestone), sitting in
+the byte hot path. This milestone (2026-08-21) adds **runtime delegation**:
+the shell hands the producer a capability to send straight to the consumer,
+taking itself out of the loop. It's the "hard consumer" the
+capability-and-hardening postmortem said delegation lacked when it shipped
+the pipes *without* it.
+
+**The self-securing insight, which is the whole reason this stayed small.**
+The safety rule is "you may only delegate a send-capability you *statically*
+hold" (`tasks::may_delegate` checks `caps_for_slot`, **not** the dynamically-
+delegated slot - no transitive re-delegation, so nothing can be laundered
+onward). That rule falls out perfectly here: only **slot 0 (the shell)**
+statically holds `TO_SPAWN_4 | TO_SPAWN_5`; spawnable tasks hold only
+`TO_SHELL | TO_FSD | TO_CON`. So **only the shell can authorize
+producer→consumer streaming** - a spawned program literally cannot delegate
+that reach, because it doesn't have it. No `CAP_DELEGATE` bit, no
+delegation-gate slot check: the existing static policy secures delegation by
+construction.
+
+**The mechanism** mirrors the single-slot `GRANTS`/`STDOUT_TARGET`
+precedent. One delegated send-target per task (`tasks::DELEGATED_SEND`, a
+`NO_DELEGATION` sentinel = `NUM_TASKS`); `may_send` consults it after the
+static mask (`DELEGATED_SEND[src] == dest`); `DELEGATE` (syscall 41) sets it
+after `may_delegate` passes; `clear_delegate` (wired into all three teardown
+paths - `exit`/`kill`/fault - alongside `clear_grant`) clears **both** a
+dying task's delegated-out target *and* any delegation pointing *at* it (a
+cheap `NUM_TASKS` scan), so a reused slot can never inherit a stale one. One
+delegated target per task is enough for the one consumer (a 3-stage
+`a | b | c`, whose middle stage would both send and receive, is out of scope,
+shell-side too).
+
+**The shell consumer** (`cmd_pipeline_prog`): spawn the consumer
+(stdout → console), spawn the producer with its stdout aimed straight at the
+consumer's slot (not back at the shell), `DELEGATE(producer, consumer)`, then
+only `wait` on both - the relay loop is gone. **The producer program needed
+no change** - `hello` already routes output to its `stdout_target` (a raw
+`msg_send` stream + empty end-of-stream message when the target isn't the
+console), so pointing it at the consumer just works, given the permission.
+
+**The one real correctness piece: the spawn/delegate race, closed in the
+producer.** A tick can preempt the shell in the window between spawning the
+producer and calling `DELEGATE`, letting the producer run and attempt its
+first send *before* it's authorized - which returns `MSG_ERR_DENIED`. Rather
+than pre-arranging slot numbers (brittle - a pre-existing spawned task
+breaks the assumption), `hello`'s `pipe_out` (and its EOF send) now retry on
+`MSG_ERR_DENIED` as well as `MSG_ERR_FULL`: a denied-then-allowed send is
+exactly the transient the existing bounded (~3s) retry is for, and the shell
+delegates within one tick (~20ms), far inside that budget. A genuinely
+never-allowed target (a bug) still times out and gives up, same as a
+never-draining mailbox.
+
+**The documented tradeoff:** the old relay auto-killed a non-reading consumer
+(the shell was feeding it, so it knew). In the direct model the shell is out
+of the loop, so it can't - a non-reading consumer leaves the producer's
+bounded retry to give up and exit, after which the shell's `WAIT(consumer)`
+blocks until Ctrl+C, leaving the consumer alive in the background (`kill` it
+via `ps`). Accepted, not a regression in reachability: the shell is never
+unrecoverably stuck (Ctrl+C always rescues the wait).
+
+**Staged, the standing discipline for any scheduler/SVC-path-adjacent
+change.** Stage 1 the inert kernel primitive (`DELEGATE`, `may_delegate`,
+`DELEGATED_SEND`, the `may_send` clause, teardown clearing) with **no
+caller** - provably inert, since `DELEGATED_SEND` stays `NO_DELEGATION` for
+every task until something delegates, so `may_send` is unchanged for all real
+traffic. Verified on QEMU by a **temporary race-free kernel self-test**
+(reverted): `may_send(4,5)` went `false → true → false` across
+delegate/clear, and `may_delegate` was `true` for the shell (holds
+`TO_SPAWN_5`) but `false` for a spawnable child - the self-securing property,
+proven directly. Plus a piped-stdin regression against real FAT32
+(`selftest`'s three relocation checks, the disk surface, the existing
+builtin-left pipe, `exec`/`exit`), byte-identical, zero `-d int` aborts.
+Stage 2 the shell/`hello` wiring.
+
+**Confirmed working end to end on QEMU, zero aborts across three sessions:**
+`/EFI/ORBS/HELLO.BIN | /EFI/ORBS/UPPER.BIN` streamed both of hello's lines
+uppercased (`HELLO FROM A SECOND PROGRAM!` / `GOODBYE - EXITING NOW.`) with
+the producer (task 5) exiting, then the consumer (task 4) finishing and
+exiting, both reaped - **both lines arriving intact is the direct proof the
+race is closed** (no dropped chunk). The builtin-left pipe
+(`echo hi there | UPPER.BIN` → `HI THERE`) and `exec HELLO.BIN > /pout.txt`
+(the other stdout-target consumer, unaffected by `hello`'s `pipe_out` change)
+were byte-identical. The non-reading case (`HELLO.BIN | SH.BIN` - a spawned
+shell never reads its mailbox) behaved exactly as designed: hello timed out
+and exited, the shell blocked on `WAIT(consumer)`, a raw `0x03` interrupted
+it (`pipe: consumer wait interrupted`), and `ps`/`uptime` afterward confirmed
+the shell responsive with the non-reader still alive in the background.
+
+**Not re-confirmed on real Parallels hardware this round** - the primitive is
+inert on a healthy system (nothing delegates until a program-to-program pipe
+runs), and the success path additionally needs the userland binaries on the
+USB stick plus `mount` (the standing reads-only-on-the-real-stick posture);
+a clean boot with the kernel change present was already confirmed on QEMU,
+and the boot/typing regression is the realistic scripted `make test-parallels`
+check if wanted.
+
+**Still coarse, worth knowing before building on this:** one delegated target
+per task (enough for a 2-stage pipe; `a | b | c` needs more); non-transitive
+by rule (the self-securing property depends on it); in practice only the
+shell ever delegates (the same rule); and the lost auto-kill of a non-reading
+consumer (Ctrl+C is the escape). A general, transitive, revocable
+capability-passing mechanism (any task handing any held capability onward -
+MINIX's full grant model) is the remaining gap, and what a spawned program
+running its *own* server, or true relay-free `a | b | c`, would need.
+
 ## Commands
 
 ```sh
@@ -5437,8 +5553,8 @@ kernel/
   src/timer.rs       ARM generic timer (non-secure EL1 physical timer, PPI 14 / GIC INTID 30), TICK_INTERVAL_MS
   src/loader.rs      reads INIT.CFG + a program off the ESP during boot services (plus the filesystem server \EFI\ORBS\FSD.BIN and console server \EFI\ORBS\COND.BIN, each registered with supervisor::register for crash/wedge recovery), into 2MB-aligned EL0-accessible regions, real ELF64 parsing + R_AARCH64_RELATIVE relocation processing - see "A real relocating loader" above and docs/processes.md; elf_region_size/populate_region split so the same parsing/loading logic is reusable from the runtime spawn path and supervisor restarts too, see "Dynamic task creation and exec()" and "Server supervision + heartbeat" above
   src/supervisor.rs  server supervision registry: keeps each supervised server's boot ELF image and restarts it on a crash (generic fault hook) or a wedge (on_tick's heartbeat), with a per-boot restart cap - the generalized replacement for syscall.rs's old fsd-only restart_fsd/FSD_IMAGE, now covering fsd AND cond, see "Server supervision + heartbeat" above
-  src/syscall.rs     svc syscall dispatch table (print/double/report/try_read_char/putc/get_ticks/read_char/spawn/exit/task_state/kill/fg/wait/mount/msg_send/msg_recv/msg_try_recv/block_info/block_read/block_write/msg_call/spawn_stage/grant/safecopy; gaps at 5 and 7-14 - the old fs_* syscalls moved to the fsd server's FSOP_* protocol) plus the block-device cell (the kernel's entire remaining storage role) and in_caller_region validation - grant/safecopy are the enforced bulk-transfer primitive, see "Grant/safecopy IPC" above
-  src/tasks.rs       up to 6 task slots (task 0 = loaded program, task 1 = idle, task 2 = filesystem server, task 3 = console server, slots 4-5 spawn/exit-cycled) + the round-robin scheduler over Runnable/Blocked/Unused/Zombie task state (block_current_and_switch, exit_current_and_switch, on_tick's wake-check + the supervisor heartbeat, tasks::spawn, allocate_runtime_region/free_runtime_region, mailboxes with direct delivery + sender-filtered receive, per-task grant slots + safecopy for the bulk-transfer primitive) - confirmed working, see "Blocking primitives", "Dynamic task creation and exec()", "Task destruction", "Driver isolation" parts 1/2/3, "Grant/safecopy IPC", and "Server supervision + heartbeat" above
+  src/syscall.rs     svc syscall dispatch table (print/double/report/try_read_char/putc/get_ticks/read_char/spawn/exit/task_state/kill/fg/wait/mount/msg_send/msg_recv/msg_try_recv/block_info/block_read/block_write/msg_call/spawn_stage/grant/safecopy/.../delegate; gaps at 5 and 7-14 - the old fs_* syscalls moved to the fsd server's FSOP_* protocol) plus the block-device cell (the kernel's entire remaining storage role) and in_caller_region validation - grant/safecopy are the enforced bulk-transfer primitive (see "Grant/safecopy IPC"), delegate (41) is runtime capability delegation of the IPC send-mask (see "Runtime capability delegation" above)
+  src/tasks.rs       up to 6 task slots (task 0 = loaded program, task 1 = idle, task 2 = filesystem server, task 3 = console server, slots 4-5 spawn/exit-cycled) + the round-robin scheduler over Runnable/Blocked/Unused/Zombie task state (block_current_and_switch, exit_current_and_switch, on_tick's wake-check + the supervisor heartbeat, tasks::spawn, allocate_runtime_region/free_runtime_region, mailboxes with direct delivery + sender-filtered receive, per-task grant slots + safecopy for the bulk-transfer primitive, per-slot capability send-mask + per-task runtime delegation for who-may-call-whom) - confirmed working, see "Blocking primitives", "Dynamic task creation and exec()", "Task destruction", "Driver isolation" parts 1/2/3, "Grant/safecopy IPC", "The capability model", "Runtime capability delegation", and "Server supervision + heartbeat" above
   src/virtio_mmio.rs virtio-mmio transport: 32-slot device discovery, modern (non-legacy) register layout, addresses confirmed via devicetree dump
   src/block.rs       BlockDevice enum (Virtio | UsbMsd) - the block-device abstraction fat32.rs sits on, see "USB mass storage" above
   src/usb_msd.rs     USB mass storage: Bulk-Only Transport + SCSI (INQUIRY/READ CAPACITY/READ(10)/WRITE(10)) over xhci.rs's bulk endpoints - Parallels' first working disk, see "USB mass storage" above
