@@ -28,6 +28,9 @@ CMDS="${CMDS:-help}"
 BOOT_WAIT="${BOOT_WAIT:-12}"
 KEY_DELAY="${KEY_DELAY:-0.12}"
 CMD_SETTLE="${CMD_SETTLE:-1}"
+# How many run directories to keep (including this run's). Older ones are
+# pruned automatically before the new run is created. Set to 0 to disable.
+KEEP_RUNS="${KEEP_RUNS:-5}"
 
 command -v prlctl >/dev/null 2>&1 || {
 	echo "prlctl not found - is Parallels Desktop installed?" >&2
@@ -38,6 +41,17 @@ prlctl status "$VM_NAME" >/dev/null 2>&1 || {
 	echo "no VM named '$VM_NAME' is registered in Parallels (see 'prlctl list -a')" >&2
 	exit 1
 }
+
+# Prune older run directories, keeping the KEEP_RUNS-1 most recent so that
+# once this run's directory is added, KEEP_RUNS total remain. The timestamped
+# names sort chronologically, so a lexical sort is a chronological one.
+if [ "$KEEP_RUNS" -gt 0 ]; then
+	keep=$((KEEP_RUNS - 1))
+	for old in $(ls -d parallels-test-* 2>/dev/null | sort -r | tail -n +$((keep + 1))); do
+		echo "==> pruning old run $old"
+		rm -rf "$old"
+	done
+fi
 
 OUT_DIR="parallels-test-$(date +%Y%m%d-%H%M%S)"
 mkdir -p "$OUT_DIR"
