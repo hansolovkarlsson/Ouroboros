@@ -59,11 +59,21 @@ relay design (`producer → shell → consumer`) needed **no capability
 delegation** — `producer → shell` is already permitted by the send-mask.
 Still 2-stage, producer-`hello`-only for now. See `CHANGELOG.md`.
 
-1. **Runtime capability delegation.** The capability send-mask is static (a
-   function of slot); MINIX's grant mechanism lets a process hand another a
-   specific capability at runtime — needed for direct task-to-task
-   streaming (relay-free pipes), or a spawned program that reaches an
-   endpoint outside its default `{shell,fsd,cond}` set.
+1. **Runtime capability delegation — the recommended next milestone.** The
+   capability send-mask is static (a function of slot); MINIX's grant
+   mechanism lets a process hand another a specific capability at runtime.
+   It's the natural continuation of the capability model, and the only
+   frontier item that is both structurally interesting and not blocked. Its
+   **motivating first consumer is program-to-program direct streaming**
+   (relay-free pipes): today `a | b` streams `producer → shell → consumer`;
+   delegating the producer a capability to reach the consumer directly
+   removes the shell from the hot path. A spawned program reaching any
+   endpoint outside its default `{shell,fsd,cond}` set is the other
+   consumer. Note that the capability-and-hardening postmortem deliberately
+   shipped delegation-adjacent work (pipes) *without* delegation and flagged
+   delegation as "premature, a mechanism still without a hard consumer" —
+   program-to-program streaming is that hard consumer, which is what makes
+   this a well-motivated milestone now rather than a speculative one.
 
 2. **Smaller hardening, mostly recorded already:**
    revisiting **per-task ASIDs** with a proven break-before-make sequence
