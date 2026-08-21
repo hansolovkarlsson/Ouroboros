@@ -508,6 +508,28 @@ pub const NET_RESOLVE_NXDOMAIN: u64 = 2;
 /// [`NETOP_RESOLVE`] reply: no NIC this boot.
 pub const NET_RESOLVE_NO_NIC: u64 = 3;
 
+/// [`NETOP_FETCH`] request: `[op: u64][hostname bytes...]` (same shape as
+/// [`NETOP_RESOLVE`]). `netd` resolves the hostname, opens a **client TCP
+/// connection** to it on port 80, sends a minimal `GET / HTTP/1.0` request,
+/// reads the response, and closes. The reply is `[status: u64][total: u64]
+/// [response bytes...]` where `total` is the full response length and the
+/// bytes are the response truncated to what fits one message. The first TCP
+/// application in the stack.
+pub const NETOP_FETCH: u64 = 3;
+
+/// [`NETOP_FETCH`] reply: connected, sent, and read a response.
+pub const NET_FETCH_OK: u64 = 0;
+/// [`NETOP_FETCH`] reply: no reply progressed before the deadline (SYN or a
+/// data segment was never answered).
+pub const NET_FETCH_TIMEOUT: u64 = 1;
+/// [`NETOP_FETCH`] reply: the peer refused the connection (a TCP RST).
+pub const NET_FETCH_REFUSED: u64 = 2;
+/// [`NETOP_FETCH`] reply: the hostname didn't resolve, or the next hop
+/// (host or gateway) didn't answer ARP.
+pub const NET_FETCH_NO_ROUTE: u64 = 3;
+/// [`NETOP_FETCH`] reply: no NIC this boot.
+pub const NET_FETCH_NO_NIC: u64 = 4;
+
 /// [`CON_INFO`] field: the backend kind ([`CON_KIND_*`]).
 pub const CON_INFO_KIND: u64 = 0;
 /// [`CON_INFO`] field: framebuffer columns (character cells wide).

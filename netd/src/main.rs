@@ -35,6 +35,18 @@ const DNS_SERVER: [u8; 4] = [10, 0, 2, 3];
 const DNS_SRC_PORT: u16 = 0x8000;
 /// The DNS transaction id we send and match on the reply.
 const DNS_ID: u16 = 0x4f42; // "OB"
+/// QEMU user-net's gateway - the next hop for any off-subnet target.
+const GATEWAY: [u8; 4] = [10, 0, 2, 2];
+/// Our fixed ephemeral TCP source port and initial sequence number (one
+/// connection at a time, so fixed values suffice).
+const TCP_SRC_PORT: u16 = 0xc000;
+const TCP_ISN: u32 = 0x0000_1000;
+/// TCP flag bits.
+const TCP_FIN: u8 = 0x01;
+const TCP_SYN: u8 = 0x02;
+const TCP_RST: u8 = 0x04;
+const TCP_PSH: u8 = 0x08;
+const TCP_ACK: u8 = 0x10;
 /// A fixed ICMP echo identifier - `netd` has no static state to count from,
 /// and one outstanding ping at a time makes a fixed id/seq sufficient.
 const ICMP_ID: u16 = 0x4f42; // "OB"
@@ -83,6 +95,17 @@ fn serve(packed_mac: u64) -> ! {
                 r[0..8].copy_from_slice(&status.to_le_bytes());
                 r[8..16].copy_from_slice(&ip.to_le_bytes());
                 reply(sender, &r);
+            }
+            syscall_abi::NETOP_FETCH => {
+                let end = len.min(buf.len()).max(8);
+                // Copy the hostname out first - handle_fetch reuses `buf`'s
+                // sibling buffers, and the reply is built into a fresh one.
+                let mut host = [0u8; 256];
+                let hlen = (end - 8).min(host.len());
+                host[..hlen].copy_from_slice(&buf[8..8 + hlen]);
+                let mut r = [0u8; syscall_abi::MSG_MAX_LEN as usize];
+                let rlen = handle_fetch(packed_mac, &host[..hlen], &mut r);
+                reply(sender, &r[..rlen]);
             }
             // Unknown op (including the supervisor's health-ping): any reply
             // acks it. The value is irrelevant to the ping sentinel.
@@ -250,41 +273,341 @@ fn handle_resolve(packed_mac: u64, host: &[u8]) -> (u64, u64) {
     if host.is_empty() {
         return (syscall_abi::NET_RESOLVE_NXDOMAIN, 0);
     }
-    let mac = unpack_mac(packed_mac);
-    let Some(server_mac) = arp_resolve(&mac, &DNS_SERVER) else {
-        return (syscall_abi::NET_RESOLVE_TIMEOUT, 0);
-    };
+    match resolve_ip(&unpack_mac(packed_mac), host) {
+        Ok(ip) => (syscall_abi::NET_RESOLVE_OK, pack_ip(&ip)),
+        Err(code) => (code, 0),
+    }
+}
 
+/// Resolve `host` to an IPv4 via a DNS A-query over UDP. `Err` is a
+/// `NET_RESOLVE_*` status (`TIMEOUT` / `NXDOMAIN`). Shared by `resolve` and
+/// `fetch` (which resolves the hostname before connecting).
+fn resolve_ip(mac: &[u8; 6], host: &[u8]) -> Result<[u8; 4], u64> {
+    let Some(server_mac) = arp_resolve(mac, &DNS_SERVER) else {
+        return Err(syscall_abi::NET_RESOLVE_TIMEOUT);
+    };
     let mut dns = [0u8; 300];
     let Some(dlen) = build_dns_query(host, &mut dns) else {
-        return (syscall_abi::NET_RESOLVE_NXDOMAIN, 0);
+        return Err(syscall_abi::NET_RESOLVE_NXDOMAIN);
     };
     let mut frame = [0u8; 400];
-    let Some(flen) = build_dns_frame(&mac, &server_mac, &dns[..dlen], &mut frame) else {
-        return (syscall_abi::NET_RESOLVE_NXDOMAIN, 0);
+    let Some(flen) = build_dns_frame(mac, &server_mac, &dns[..dlen], &mut frame) else {
+        return Err(syscall_abi::NET_RESOLVE_NXDOMAIN);
     };
     if send(&frame[..flen]).is_err() {
-        return (syscall_abi::NET_RESOLVE_TIMEOUT, 0);
+        return Err(syscall_abi::NET_RESOLVE_TIMEOUT);
     }
-
-    let deadline = now() + 75; // ~1.5s
+    let deadline = now() + 40; // ~800ms (kept tight so a fetch's resolve+TCP
+                               // total stays under the supervisor wedge threshold)
     let mut rx = [0u8; 1600];
     loop {
         if let Some(len) = recv(&mut rx) {
             if let Some(payload) = dns_payload(&rx[..len]) {
-                return match parse_dns_a(payload) {
-                    Some(ip) => (
-                        syscall_abi::NET_RESOLVE_OK,
-                        ip[0] as u64 | (ip[1] as u64) << 8 | (ip[2] as u64) << 16 | (ip[3] as u64) << 24,
-                    ),
-                    None => (syscall_abi::NET_RESOLVE_NXDOMAIN, 0),
-                };
+                return parse_dns_a(payload).ok_or(syscall_abi::NET_RESOLVE_NXDOMAIN);
             }
         }
         if now() > deadline {
-            return (syscall_abi::NET_RESOLVE_TIMEOUT, 0);
+            return Err(syscall_abi::NET_RESOLVE_TIMEOUT);
         }
     }
+}
+
+fn pack_ip(ip: &[u8; 4]) -> u64 {
+    ip[0] as u64 | (ip[1] as u64) << 8 | (ip[2] as u64) << 16 | (ip[3] as u64) << 24
+}
+
+/// The next hop for `target`: itself if on the QEMU user-net `10.0.2.0/24`
+/// subnet, otherwise the gateway (`10.0.2.2`) - a minimal default route. The
+/// first place off-subnet routing matters (`ping`/`resolve` only ever
+/// targeted on-subnet addresses).
+fn next_hop(target: &[u8; 4]) -> [u8; 4] {
+    if target[0] == 10 && target[1] == 0 && target[2] == 2 {
+        *target
+    } else {
+        GATEWAY
+    }
+}
+
+/// A parsed TCP segment (the fields the minimal client needs).
+struct TcpSeg {
+    seq: u32,
+    ack: u32,
+    flags: u8,
+    data_off: usize, // byte offset of the payload within the frame
+    data_len: usize,
+}
+
+/// `resolve` + route + connect: a client HTTP GET over TCP. Fills `out` with
+/// `[status: u64][total: u64][response bytes...]` and returns its length.
+fn handle_fetch(packed_mac: u64, host: &[u8], out: &mut [u8]) -> usize {
+    let finish = |out: &mut [u8], status: u64, resp: &[u8]| -> usize {
+        out[0..8].copy_from_slice(&status.to_le_bytes());
+        out[8..16].copy_from_slice(&(resp.len() as u64).to_le_bytes());
+        let n = resp.len().min(out.len() - 16);
+        out[16..16 + n].copy_from_slice(&resp[..n]);
+        16 + n
+    };
+    if packed_mac == syscall_abi::NET_ERROR {
+        return finish(out, syscall_abi::NET_FETCH_NO_NIC, &[]);
+    }
+    if host.is_empty() {
+        return finish(out, syscall_abi::NET_FETCH_NO_ROUTE, &[]);
+    }
+    let mac = unpack_mac(packed_mac);
+    let Ok(ip) = resolve_ip(&mac, host) else {
+        return finish(out, syscall_abi::NET_FETCH_NO_ROUTE, &[]);
+    };
+    let Some(dst_mac) = arp_resolve(&mac, &next_hop(&ip)) else {
+        return finish(out, syscall_abi::NET_FETCH_NO_ROUTE, &[]);
+    };
+
+    // Minimal HTTP/1.0 request with a Host header (so name-based virtual
+    // hosts like Cloudflare's serve the right site). Connection: close makes
+    // the server FIN after the response, ending our receive loop.
+    let mut req = [0u8; 400];
+    let Some(rlen) = build_http_get(host, &mut req) else {
+        return finish(out, syscall_abi::NET_FETCH_NO_ROUTE, &[]);
+    };
+
+    let mut resp = [0u8; 2048];
+    let (status, got) = tcp_get(&mac, &dst_mac, &ip, &req[..rlen], &mut resp);
+    finish(out, status, &resp[..got])
+}
+
+/// Build `GET / HTTP/1.0\r\nHost: <host>\r\nConnection: close\r\n\r\n`.
+fn build_http_get(host: &[u8], out: &mut [u8]) -> Option<usize> {
+    let mut w = 0;
+    let mut put = |bytes: &[u8]| -> Option<()> {
+        if w + bytes.len() > out.len() {
+            return None;
+        }
+        out[w..w + bytes.len()].copy_from_slice(bytes);
+        w += bytes.len();
+        Some(())
+    };
+    put(b"GET / HTTP/1.0\r\nHost: ")?;
+    put(host)?;
+    put(b"\r\nConnection: close\r\n\r\n")?;
+    Some(w)
+}
+
+/// A minimal client-side TCP connection: SYN handshake, send `request`, read
+/// the response (in-order reassembly), clean FIN teardown. One connection,
+/// bounded by short timeouts (kept under the supervisor wedge threshold).
+/// Returns `(NET_FETCH_* status, bytes copied into resp)`.
+fn tcp_get(mac: &[u8; 6], dst_mac: &[u8; 6], target: &[u8; 4], request: &[u8], resp: &mut [u8]) -> (u64, usize) {
+    let mut frame = [0u8; 1600];
+    let mut rx = [0u8; 1600];
+
+    // SYN.
+    let Some(n) = build_tcp(mac, dst_mac, target, TCP_ISN, 0, TCP_SYN, true, &[], &mut frame) else {
+        return (syscall_abi::NET_FETCH_TIMEOUT, 0);
+    };
+    if send(&frame[..n]).is_err() {
+        return (syscall_abi::NET_FETCH_TIMEOUT, 0);
+    }
+
+    // Wait for SYN-ACK (~700ms).
+    let their_isn = {
+        let deadline = now() + 35;
+        loop {
+            if let Some(len) = recv(&mut rx) {
+                if let Some(s) = parse_tcp(&rx[..len], target) {
+                    if s.flags & TCP_RST != 0 {
+                        return (syscall_abi::NET_FETCH_REFUSED, 0);
+                    }
+                    if s.flags & (TCP_SYN | TCP_ACK) == (TCP_SYN | TCP_ACK) && s.ack == TCP_ISN + 1 {
+                        break s.seq;
+                    }
+                }
+            }
+            if now() > deadline {
+                return (syscall_abi::NET_FETCH_TIMEOUT, 0);
+            }
+        }
+    };
+
+    let snd_nxt = TCP_ISN + 1;
+    let mut rcv_nxt = their_isn.wrapping_add(1);
+    // ACK the SYN-ACK, then send the request (PSH|ACK).
+    if let Some(n) = build_tcp(mac, dst_mac, target, snd_nxt, rcv_nxt, TCP_ACK, false, &[], &mut frame) {
+        let _ = send(&frame[..n]);
+    }
+    let mut snd_nxt = snd_nxt;
+    if let Some(n) = build_tcp(mac, dst_mac, target, snd_nxt, rcv_nxt, TCP_PSH | TCP_ACK, false, request, &mut frame) {
+        let _ = send(&frame[..n]);
+        snd_nxt = snd_nxt.wrapping_add(request.len() as u32);
+    }
+
+    // Receive the response until the peer's FIN or a deadline (~1s).
+    let mut got = 0usize;
+    let mut fin = false;
+    let mut deadline = now() + 50;
+    loop {
+        if let Some(len) = recv(&mut rx) {
+            if let Some(s) = parse_tcp(&rx[..len], target) {
+                if s.flags & TCP_RST != 0 {
+                    break;
+                }
+                if s.data_len > 0 && s.seq == rcv_nxt {
+                    let take = s.data_len.min(resp.len() - got);
+                    resp[got..got + take].copy_from_slice(&rx[s.data_off..s.data_off + take]);
+                    got += take;
+                    rcv_nxt = rcv_nxt.wrapping_add(s.data_len as u32);
+                    if let Some(n) = build_tcp(mac, dst_mac, target, snd_nxt, rcv_nxt, TCP_ACK, false, &[], &mut frame) {
+                        let _ = send(&frame[..n]);
+                    }
+                    deadline = now() + 50; // extend while making progress
+                }
+                if s.flags & TCP_FIN != 0 {
+                    rcv_nxt = rcv_nxt.wrapping_add(1); // FIN consumes one sequence number
+                    // ACK the FIN, then send our own FIN to close cleanly.
+                    if let Some(n) = build_tcp(mac, dst_mac, target, snd_nxt, rcv_nxt, TCP_ACK, false, &[], &mut frame) {
+                        let _ = send(&frame[..n]);
+                    }
+                    if let Some(n) = build_tcp(mac, dst_mac, target, snd_nxt, rcv_nxt, TCP_FIN | TCP_ACK, false, &[], &mut frame) {
+                        let _ = send(&frame[..n]);
+                    }
+                    fin = true;
+                    break;
+                }
+            }
+        }
+        if got >= resp.len() || now() > deadline {
+            break;
+        }
+    }
+
+    if got > 0 || fin {
+        (syscall_abi::NET_FETCH_OK, got)
+    } else {
+        (syscall_abi::NET_FETCH_TIMEOUT, 0)
+    }
+}
+
+/// Build an Ethernet+IPv4+TCP segment into `out`, returning its length.
+/// `with_mss` adds a 4-byte MSS option (for the SYN). The TCP checksum
+/// covers the IPv4 pseudo-header.
+#[allow(clippy::too_many_arguments)]
+fn build_tcp(
+    mac: &[u8; 6],
+    dst_mac: &[u8; 6],
+    dst_ip: &[u8; 4],
+    seq: u32,
+    ack: u32,
+    flags: u8,
+    with_mss: bool,
+    payload: &[u8],
+    out: &mut [u8],
+) -> Option<usize> {
+    let tcp_hdr = 20 + if with_mss { 4 } else { 0 };
+    const IP_LEN: usize = 20;
+    let total = 14 + IP_LEN + tcp_hdr + payload.len();
+    if out.len() < total {
+        return None;
+    }
+    // Ethernet.
+    out[0..6].copy_from_slice(dst_mac);
+    out[6..12].copy_from_slice(mac);
+    out[12..14].copy_from_slice(&[0x08, 0x00]);
+    // IPv4.
+    let ip = 14;
+    out[ip] = 0x45;
+    out[ip + 1] = 0;
+    out[ip + 2..ip + 4].copy_from_slice(&((IP_LEN + tcp_hdr + payload.len()) as u16).to_be_bytes());
+    out[ip + 4..ip + 8].copy_from_slice(&[0u8; 4]);
+    out[ip + 8] = 64;
+    out[ip + 9] = 6; // protocol: TCP
+    out[ip + 10..ip + 12].copy_from_slice(&[0, 0]);
+    out[ip + 12..ip + 16].copy_from_slice(&OUR_IP);
+    out[ip + 16..ip + 20].copy_from_slice(dst_ip);
+    let ipc = ip_checksum(&out[ip..ip + IP_LEN]);
+    out[ip + 10..ip + 12].copy_from_slice(&ipc.to_be_bytes());
+    // TCP.
+    let t = ip + IP_LEN;
+    out[t..t + 2].copy_from_slice(&TCP_SRC_PORT.to_be_bytes());
+    out[t + 2..t + 4].copy_from_slice(&80u16.to_be_bytes());
+    out[t + 4..t + 8].copy_from_slice(&seq.to_be_bytes());
+    out[t + 8..t + 12].copy_from_slice(&ack.to_be_bytes());
+    out[t + 12] = ((tcp_hdr / 4) as u8) << 4; // data offset in 32-bit words
+    out[t + 13] = flags;
+    out[t + 14..t + 16].copy_from_slice(&64240u16.to_be_bytes()); // window
+    out[t + 16..t + 18].copy_from_slice(&[0, 0]); // checksum placeholder
+    out[t + 18..t + 20].copy_from_slice(&[0, 0]); // urgent pointer
+    if with_mss {
+        out[t + 20..t + 24].copy_from_slice(&[2, 4, 0x05, 0xb4]); // MSS 1460
+    }
+    out[t + tcp_hdr..t + tcp_hdr + payload.len()].copy_from_slice(payload);
+    let seg_len = tcp_hdr + payload.len();
+    let csum = tcp_checksum(&OUR_IP, dst_ip, &out[t..t + seg_len]);
+    out[t + 16..t + 18].copy_from_slice(&csum.to_be_bytes());
+    Some(total)
+}
+
+/// Parse a received frame as a TCP segment from `peer`:80 to us. Uses the IP
+/// total-length field to find the true end of the TCP data (ignoring any
+/// Ethernet padding).
+fn parse_tcp(frame: &[u8], peer: &[u8; 4]) -> Option<TcpSeg> {
+    if frame.len() < 34 || frame[12] != 0x08 || frame[13] != 0x00 {
+        return None; // not IPv4
+    }
+    if frame[23] != 6 || frame[26..30] != *peer {
+        return None; // not TCP, or not from the peer
+    }
+    let ihl = (frame[14] & 0x0f) as usize * 4;
+    let t = 14 + ihl;
+    if frame.len() < t + 20 {
+        return None;
+    }
+    if u16be(frame, t) != 80 || u16be(frame, t + 2) != TCP_SRC_PORT {
+        return None; // wrong ports
+    }
+    let data_off = t + ((frame[t + 12] >> 4) as usize) * 4;
+    let ip_total = u16be(frame, 16) as usize;
+    let seg_end = (14 + ip_total).min(frame.len());
+    let data_len = seg_end.saturating_sub(data_off);
+    Some(TcpSeg {
+        seq: u32be(frame, t + 4),
+        ack: u32be(frame, t + 8),
+        flags: frame[t + 13],
+        data_off,
+        data_len,
+    })
+}
+
+/// One's-complement Internet checksum over the IPv4 pseudo-header plus a TCP
+/// segment (TCP requires the pseudo-header; UDP/ICMP/IP don't).
+fn tcp_checksum(src: &[u8; 4], dst: &[u8; 4], seg: &[u8]) -> u16 {
+    let mut sum: u32 = 0;
+    for w in [
+        ((src[0] as u32) << 8) | src[1] as u32,
+        ((src[2] as u32) << 8) | src[3] as u32,
+        ((dst[0] as u32) << 8) | dst[1] as u32,
+        ((dst[2] as u32) << 8) | dst[3] as u32,
+        6u32,             // protocol
+        seg.len() as u32, // TCP length
+    ] {
+        sum += w;
+    }
+    let mut i = 0;
+    while i + 1 < seg.len() {
+        sum += ((seg[i] as u32) << 8) | seg[i + 1] as u32;
+        i += 2;
+    }
+    if i < seg.len() {
+        sum += (seg[i] as u32) << 8;
+    }
+    while sum >> 16 != 0 {
+        sum = (sum & 0xffff) + (sum >> 16);
+    }
+    !(sum as u16)
+}
+
+fn u16be(b: &[u8], o: usize) -> u16 {
+    ((b[o] as u16) << 8) | b[o + 1] as u16
+}
+fn u32be(b: &[u8], o: usize) -> u32 {
+    ((b[o] as u32) << 24) | ((b[o + 1] as u32) << 16) | ((b[o + 2] as u32) << 8) | b[o + 3] as u32
 }
 
 /// Build a DNS standard query (A record, recursion desired) for `host` into
