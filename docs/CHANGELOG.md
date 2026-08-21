@@ -7,6 +7,33 @@ what broke, how it was diagnosed), see `CLAUDE.md`; for *how* something
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## Network stack, Stage 3: UDP, and a `resolve` command (real DNS)
+
+The stack's first UDP application: `resolve <hostname>` does a **DNS A-record
+query over UDP** and prints the resolved IPv4. Builds entirely on Stage 2's
+`netd`/`NETOP` plumbing — **no kernel changes** (the `NET_*` syscalls already
+move opaque frames; UDP is just a different payload), the payoff of the
+driver/protocol split.
+
+`netd` gained a `NETOP_RESOLVE` handler (request = op + hostname; reply =
+status + packed IPv4): ARP-resolve the user-net DNS server (`10.0.2.3`),
+encode a DNS query (header + hand-rolled QNAME labels), wrap it in
+UDP → IPv4 → Ethernet (IP checksum computed, UDP checksum 0 — optional on
+IPv4), send, and poll for the response; a hand-rolled DNS parser walks the
+answer records (**handling name-compression pointers**) and returns the first
+A record, mapping no-answer to `NXDOMAIN` and no-response to `TIMEOUT`. The
+shell's `resolve <hostname>` command packs the name into a `MSG_CALL` and
+prints `<host> is a.b.c.d`.
+
+Confirmed on QEMU (`make run-image-net`), zero `-d int` aborts, cross-checked
+with `tcpdump` — and it resolves **real hostnames** via SLIRP's DNS proxy:
+`resolve example.com` → `172.66.147.243`, `resolve one.one.one.one` →
+`1.0.0.1`, `resolve nope.invalidtld` → `could not resolve` (`NXDomain`). The
+pcap decoded our query as `10.0.2.15.32768 > 10.0.2.3.53: … A? example.com.`;
+multi-A responses parsed correctly. `ping` still works, no supervisor
+restart. Still coarse: A records only, fixed DNS server, guest-initiated
+only. TCP is Stage 4. See `CLAUDE.md`'s "Network stack, Stage 3."
+
 ## Network stack, Stage 2: the protocol stack moves to userland (`netd`), and a `ping` command
 
 Networking moves out of the EL1 kernel the same way `fsd` and `cond` did: the

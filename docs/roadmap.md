@@ -189,11 +189,16 @@ step, not a Stage 1 concern.
    async receive loop (the poll/select gap, see `research-directions.md`),
    deliberately deferred. See `CHANGELOG.md` / `CLAUDE.md`'s "Network stack,
    Stage 2."
-3. **UDP.** Connectionless, far simpler than TCP: send/receive datagrams,
-   proven by a DNS query or a UDP echo. A minimal socket-op IPC protocol
-   (`NETOP_*`, the `FSOP_*` shape) — or, if the Plan 9 namespace work has
-   landed by then, a `/net` file interface (which this would be the ideal
-   first consumer of).
+3. ~~**UDP.**~~ **DONE (2026-08-21).** UDP send/receive, proven by real
+   **DNS resolution**: a `NETOP_RESOLVE` op in `netd` (the `NETOP_*`/`FSOP_*`
+   shape) does a DNS A-query over UDP to the user-net DNS server, parses the
+   response (name-compression-aware), and returns the first A record; the
+   shell's `resolve <hostname>` command is the first client. Verified on QEMU
+   resolving real hostnames via SLIRP's DNS proxy (`resolve example.com` →
+   `172.66.147.243`), cross-checked against a `tcpdump` of the pcap. No kernel
+   changes — a whole new transport landed purely in userland, the payoff of
+   the driver/protocol split. See `CHANGELOG.md` / `CLAUDE.md`'s "Network
+   stack, Stage 3."
 4. **TCP (the big one, separately scoped when reached).** The full state
    machine — retransmission, windows, seq/ack — enough for a client
    active-open first, a minimal `listen` later. This is where the

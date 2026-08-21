@@ -40,6 +40,14 @@
 
   <article>
 
+<h2>Network stack, Stage 3: UDP, and a <code class="inline">resolve</code> command (real DNS)</h2>
+
+<p>The stack's first UDP application: <code class="inline">resolve &lt;hostname&gt;</code> does a <strong>DNS A-record query over UDP</strong> and prints the resolved IPv4. Builds entirely on Stage 2's <code class="inline">netd</code>/<code class="inline">NETOP</code> plumbing — <strong>no kernel changes</strong> (the <code class="inline">NET_*</code> syscalls already move opaque frames; UDP is just a different payload), the payoff of the driver/protocol split.</p>
+
+<p><code class="inline">netd</code> gained a <code class="inline">NETOP_RESOLVE</code> handler: ARP-resolve the user-net DNS server (<code class="inline">10.0.2.3</code>), encode a DNS query (header + hand-rolled QNAME labels), wrap it in UDP → IPv4 → Ethernet (IP checksum computed, UDP checksum 0 — optional on IPv4), send, and poll for the response; a hand-rolled DNS parser walks the answer records (<strong>handling name-compression pointers</strong>) and returns the first A record, mapping no-answer to <code class="inline">NXDOMAIN</code> and no-response to <code class="inline">TIMEOUT</code>. The shell's <code class="inline">resolve &lt;hostname&gt;</code> prints <code class="inline">&lt;host&gt; is a.b.c.d</code>.</p>
+
+<p>Confirmed on QEMU (<code class="inline">make run-image-net</code>), zero <code class="inline">-d int</code> aborts, cross-checked with <code class="inline">tcpdump</code> — and it resolves <strong>real hostnames</strong> via SLIRP's DNS proxy: <code class="inline">resolve example.com</code> → <code class="inline">172.66.147.243</code>, <code class="inline">resolve one.one.one.one</code> → <code class="inline">1.0.0.1</code>, <code class="inline">resolve nope.invalidtld</code> → <code class="inline">could not resolve</code> (<code class="inline">NXDomain</code>). The pcap decoded our query as <code class="inline">10.0.2.15.32768 &gt; 10.0.2.3.53: … A? example.com.</code>; multi-A responses parsed correctly. <code class="inline">ping</code> still works, no supervisor restart. Still coarse: A records only, fixed DNS server, guest-initiated only. TCP is Stage 4.</p>
+
 <h2>Network stack, Stage 2: the protocol stack moves to userland (<code class="inline">netd</code>), and a <code class="inline">ping</code> command</h2>
 
 <p>Networking moves out of the EL1 kernel the same way <code class="inline">fsd</code> and <code class="inline">cond</code> did: the kernel keeps only the DMA-owning virtio-net driver (no IOMMU), reached by one task through gated syscalls, and the whole protocol stack (ARP/IPv4/ICMP) lives in a new userland server, <code class="inline">netd</code>. It ends with a real <code class="inline">ping &lt;ip&gt;</code> at the shell. Two staged commits.</p>

@@ -5708,8 +5708,60 @@ one ping at a time with a fixed ICMP id/seq (no static state in userland to
 count from); the source IP `10.0.2.15` and /24 on-subnet assumption are the
 QEMU user-net convention (no DHCP, no routing/gateway resolution for
 off-subnet targets - a real target outside 10.0.2.0/24 would need the gateway
-ARP'd instead); no UDP/TCP yet (UDP is Stage 3, TCP Stage 4 - see
-`docs/roadmap.md`); and the NIC driver is still polled, not IRQ-driven.
+ARP'd instead); ~~no UDP/TCP yet (UDP is Stage 3, TCP Stage 4)~~ **(UDP is
+done - Stage 3 below; TCP is Stage 4)**; and the NIC driver is still polled,
+not IRQ-driven.
+
+## Network stack, Stage 3: UDP, and a `resolve` command (real DNS)
+
+Stage 3 adds **UDP** and, with it, the stack's first real application-layer
+protocol: `resolve <hostname>` does a **DNS A-record query over UDP** and
+prints the resolved IPv4. It builds entirely on Stage 2's `netd`/`NETOP`
+plumbing - **no kernel changes** (the `NET_*` syscalls already move opaque
+frames; UDP is just a different payload), which is the payoff of the
+driver/protocol split: a whole new transport lands purely in userland.
+
+**The new `netd` operation.** `NETOP_RESOLVE` (the `FSOP_*` request shape:
+request = op + the hostname bytes; reply = a status u64 + a packed-IPv4 u64).
+Given a hostname `netd` ARP-resolves the QEMU user-net DNS server
+(`10.0.2.3`), encodes a DNS query (12-byte header + the hostname as
+length-prefixed **QNAME labels**, hand-rolled byte-by-byte), wraps it in a
+UDP datagram → IPv4 packet → Ethernet frame (IP header checksum computed;
+**UDP checksum 0**, which is optional on IPv4 and which SLIRP accepts - a
+deliberate simplification, avoiding the UDP pseudo-header checksum), sends
+it, and polls for the response. A hand-rolled DNS parser walks the answer
+records - **handling name-compression pointers** (the `0xc0` two-byte
+terminal), the one genuinely fiddly part - and returns the first A record.
+No answers → `NXDOMAIN`; no response → `TIMEOUT`; distinct statuses the shell
+maps to messages. `serve`/`reply` were generalized to carry a byte payload
+(resolve's reply is 16 bytes, status + IP, vs ping's 8-byte status).
+
+**The `resolve` command** (`shell/src/main.rs`) packs the hostname into a
+`NETOP_RESOLVE` `MSG_CALL` to `netd` and prints `<host> is a.b.c.d` (the
+octets via `put_u64_decimal`) or the error. The DNS timeout (~1.5s) plus the
+ARP (~500ms) stays under the supervisor's ~2.5s wedge threshold while `netd`
+busy-polls (it's `Runnable`, not `Blocked`, during a resolve).
+
+**Confirmed on QEMU (`make run-image-net`), zero `-d int` aborts,
+cross-checked against a `tcpdump` of the pcap** - and it resolves **real
+hostnames** through SLIRP's DNS proxy (which forwards to the host's
+resolver): `resolve example.com` → `example.com is 172.66.147.243` (a genuine
+Cloudflare address), `resolve one.one.one.one` → `one.one.one.one is 1.0.0.1`,
+`resolve nope.invalidtld` → `could not resolve` (the server returned
+`NXDomain`). The pcap decoded our hand-built query cleanly as
+`10.0.2.15.32768 > 10.0.2.3.53: … A? example.com.` with a valid UDP/IP
+framing, and the multi-A-record responses were parsed correctly (first A
+taken). `ping` still works; no supervisor restart.
+
+**Still coarse, worth knowing before building on this:** DNS only queries the
+fixed user-net server (`10.0.2.3`) and only reads **A records** (no AAAA/CNAME
+chasing beyond a directly-returned A, no `/etc/hosts`, no caching); UDP is
+send-one/receive-one with a fixed source port and checksum 0 (no real
+socket/port abstraction, no UDP checksum validation on receive); still
+guest-initiated only (no listening UDP service - same async-receive gap as
+ping); and no TCP yet (Stage 4, the big one - the connection state machine,
+retransmission, and windows, where the hand-roll-vs-`smoltcp` decision
+actually bites; see `docs/roadmap.md`).
 
 ## Commands
 
@@ -5841,7 +5893,7 @@ kernel/
 
 shell/               userland default shell - a separate crate, built for aarch64-unknown-none, loaded from disk (not compiled into the kernel)
   linker.ld          self-relocating (PIE) linker script: entry at offset 0, .rela.dyn/.dynsym/.dynamic/.data.rel.ro, no .bss/.data (see "A real relocating loader" above and docs/processes.md)
-  src/main.rs        line editor + command dispatch (help/echo/uptime/clear/ls/cat/cd/pwd/mkdir/rmdir/touch/rm/write/writeat/cp/mv/mount/ping/exec/exit/ps/kill/fg/wait/send/recv/selftest, plus `> file`/`>> file` output redirection and `| /path/program` pipes on any of them - see "Output redirection", "Pipelines", "Runtime capability delegation", and "FAT32 interior/random-access writes" above), running as real EL0 userland code, built for real relocation (relocation-model=pic, --release only) - main loop blocks on read_char (syscall 15) instead of busy-polling, see "Blocking primitives" above; see docs/processes.md
+  src/main.rs        line editor + command dispatch (help/echo/uptime/clear/ls/cat/cd/pwd/mkdir/rmdir/touch/rm/write/writeat/cp/mv/mount/ping/resolve/exec/exit/ps/kill/fg/wait/send/recv/selftest, plus `> file`/`>> file` output redirection and `| /path/program` pipes on any of them - see "Output redirection", "Pipelines", "Runtime capability delegation", and "FAT32 interior/random-access writes" above), running as real EL0 userland code, built for real relocation (relocation-model=pic, --release only) - main loop blocks on read_char (syscall 15) instead of busy-polling, see "Blocking primitives" above; see docs/processes.md
 
 fsd/                 fifth userland program: THE FILESYSTEM SERVER (driver isolation part 2) - owns the FAT32 engine, speaks the FSOP_* protocol to clients over IPC (including the bulk FSOP_READ_BULK/FSOP_WRITE_BULK ops that move file data via grant/safecopy - see "Grant/safecopy IPC" above), and is the only task the BLOCK_* syscalls accept; boot-loaded into protected task slot 2, see "Driver isolation, part 2" above
   src/main.rs        the request loop: recv -> decode FsRequest -> dispatch to Fs -> reply one u64; mounted Fs lives in main's stack frame (no static state in userland)
@@ -5852,8 +5904,8 @@ cond/                seventh userland program: THE CONSOLE SERVER (driver isolat
   src/main.rs        the request loop (recv -> decode DSPOP_WRITE -> render -> reply, the filesystem server's shape) plus two backends chosen from CON_INFO at startup: byte-stream (forward to the kernel console via CON_WRITE) and framebuffer (render glyphs here - cursor, wrap, scroll, a small ANSI parser - via FB_BLIT/FB_SCROLL/FB_CLEAR)
   src/font.rs        cond's own copy of the 8x8 bitmap font (from kernel/src/font.rs) - the font is what "console driver logic" meant, so it moved to userland; the kernel keeps a copy only for its emergency fbconsole
 
-netd/                eighth userland program: THE NETWORK SERVER (network stack, Stage 2) - owns the protocol stack (ARP/IPv4/ICMP) in userland; the kernel keeps only the DMA-owning virtio-net driver, reached by this task alone via the gated NET_SEND/NET_RECV/NET_MAC syscalls (the fsd/BLOCK_* pattern). Boot-loaded into protected task slot 4 (NET_TASK), supervised. Speaks the NETOP_PING request protocol to clients (the shell's `ping` command); hand-rolled fixed-buffer frame building + Internet checksums, no crates. See "Network stack, Stage 2" above
-  src/main.rs        the request loop (recv -> NETOP_PING -> arp_resolve + icmp_echo -> reply a NET_PING_* status) plus the ARP/IPv4/ICMP frame builders, the reply matcher, and ip_checksum
+netd/                eighth userland program: THE NETWORK SERVER (network stack, Stage 2) - owns the protocol stack (ARP/IPv4/ICMP) in userland; the kernel keeps only the DMA-owning virtio-net driver, reached by this task alone via the gated NET_SEND/NET_RECV/NET_MAC syscalls (the fsd/BLOCK_* pattern). Boot-loaded into protected task slot 4 (NET_TASK), supervised. Speaks the NETOP_PING request protocol to clients (the shell's `ping` command); hand-rolled fixed-buffer frame building (ARP/IPv4/ICMP/UDP/DNS) + Internet checksums, no crates. NETOP_RESOLVE (Stage 3) does DNS-over-UDP for the shell's `resolve` command. See "Network stack, Stage 2" and "Stage 3" above
+  src/main.rs        the request loop (NETOP_PING -> arp_resolve + icmp_echo; NETOP_RESOLVE -> a DNS A-query over UDP) plus the ARP/IPv4/ICMP/UDP/DNS frame builders, the DNS response parser (name-compression aware), the reply matchers, and ip_checksum
 
 upper/               sixth userland program: the pipeline filter demo (uppercases its piped input) - the reference for the filter-program shape: stdin = msg_recv, stdout = con_write (routed through the console server), EOF = the empty message, finish = exit; see "Pipelines" above
   src/main.rs        ~80 lines: the recv/uppercase/putc loop
