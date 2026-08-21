@@ -123,7 +123,33 @@ const STACK_PAGES: u64 = 4;
 /// `(base, size)` and this same layout convention) and the stack-guard
 /// milestone writeup.
 const GUARD_PAGES: u64 = 1;
+/// A fixed heap allowance per program, between the code and the guard page
+/// (`[code][heap][guard][stack]`). Programs can't use `alloc`'s
+/// collections - prebuilt `liballoc` has `R_AARCH64_ABS64` relocations a
+/// PIE link rejects, and rebuilding it (`-Z build-std`) is nightly-only,
+/// off-limits on this stable-only project - so this is a raw buffer a
+/// program reads/writes via a `&mut [u8]` (reported by the `heap_info`
+/// syscall), not a `GlobalAlloc`-backed heap. It lets a program hold data
+/// far larger than its 16KB stack: the shell backs its redirect/pipe
+/// capture with it, so `cat big > file` captures the whole file instead of
+/// refusing. 256KB, still far inside one 2MB slot.
+const HEAP_PAGES: u64 = 64;
 const SLOT_ALIGN: u64 = 0x20_0000; // 2MB - see module doc comment.
+
+/// The heap area `(base, size)` inside a loaded program's region, computed
+/// from the region's `(base, size)` and the fixed `[code][heap][guard]
+/// [stack]` layout: the heap sits `HEAP_PAGES + GUARD_PAGES + STACK_PAGES`
+/// pages down from the region end, and is `HEAP_PAGES` long. Returns
+/// `(0, 0)` for a region too small to have a heap (the idle task's single
+/// page). Used by the `heap_info` syscall.
+pub(crate) fn heap_area(base: u64, size: u64) -> (u64, u64) {
+    let page = PAGE_SIZE as u64;
+    let tail = (HEAP_PAGES + GUARD_PAGES + STACK_PAGES) * page;
+    if size < tail {
+        return (0, 0);
+    }
+    (base + size - tail, HEAP_PAGES * page)
+}
 
 /// Generous headroom, not a real limit this project has ever come close
 /// to: the default shell has 6 program headers (3 `PT_LOAD` plus
@@ -587,11 +613,12 @@ pub(crate) fn elf_region_size(program: &[u8]) -> Result<(ElfHeader, ProgramHeade
 
     let page_size = PAGE_SIZE as u64;
     let code_pages = max_end.div_ceil(page_size);
-    // Layout: [code_pages][1 guard page][STACK_PAGES stack pages]. The
-    // stack sits at the top (sp_el0 = base + size); the guard page,
-    // immediately below it, is mapped EL1-only by mmu.rs so a stack
-    // overflow faults cleanly instead of running into the code below.
-    let region_pages = code_pages + GUARD_PAGES + STACK_PAGES;
+    // Layout: [code_pages][HEAP_PAGES heap][1 guard page][STACK_PAGES
+    // stack pages]. The stack sits at the top (sp_el0 = base + size); the
+    // guard page, immediately below it, is mapped EL1-only by mmu.rs so a
+    // stack overflow faults cleanly; the heap (a raw buffer the program
+    // reaches via `heap_info`) is below the guard, above the code.
+    let region_pages = code_pages + HEAP_PAGES + GUARD_PAGES + STACK_PAGES;
     let region_size = region_pages * page_size;
 
     Ok((header, phdrs, region_size))

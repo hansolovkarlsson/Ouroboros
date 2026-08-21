@@ -453,6 +453,15 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
         syscall_abi::SPAWN => spawn_staged(arg0, arg1),
         syscall_abi::STDOUT_TARGET => tasks::stdout_target_of(tasks::current_task()),
         syscall_abi::SELF => tasks::current_task() as u64,
+        syscall_abi::HEAP_INFO => {
+            let (base, size) = tasks::task_region(tasks::current_task());
+            let (heap_base, heap_size) = loader::heap_area(base, size);
+            match arg0 {
+                syscall_abi::HEAP_INFO_BASE => heap_base,
+                syscall_abi::HEAP_INFO_SIZE => heap_size,
+                _ => 0,
+            }
+        }
         syscall_abi::SPAWN_STAGE => {
             // arg0 = offset into the staging buffer, arg1 = chunk
             // pointer, arg2 = chunk length. Bounded by both the

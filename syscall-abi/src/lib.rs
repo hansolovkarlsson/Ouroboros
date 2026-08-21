@@ -394,6 +394,26 @@ pub const STDOUT_TARGET: u64 = 38;
 /// their real index, not a hardcoded 0.
 pub const SELF: u64 = 39;
 
+/// `(field)` -> the requested heap-area geometry, or `0`. Each program's
+/// EL0 region carries a fixed **heap area** (a raw buffer between its code
+/// and its stack guard page) that it can read/write via a `&mut [u8]` -
+/// space far larger than the 16KB stack, for holding data a fixed stack
+/// buffer can't (the shell backs its redirect/pipe capture with it, so
+/// `cat big > file` captures the whole file). It is *not* a
+/// `GlobalAlloc`-backed heap: `alloc`'s collections can't link under this
+/// PIE loader (prebuilt `liballoc` has `R_AARCH64_ABS64` relocations a
+/// `-pie` link rejects, and rebuilding it needs nightly `-Z build-std`),
+/// so it's a raw buffer, not `Vec`/`Box`/`String`. Fields:
+/// [`HEAP_INFO_BASE`] (the area's base address, `0` if the region is too
+/// small to have one - e.g. the idle task) and [`HEAP_INFO_SIZE`] (its
+/// length in bytes).
+pub const HEAP_INFO: u64 = 40;
+
+/// [`HEAP_INFO`] field: the heap area's base address (`0` if none).
+pub const HEAP_INFO_BASE: u64 = 0;
+/// [`HEAP_INFO`] field: the heap area's size in bytes.
+pub const HEAP_INFO_SIZE: u64 = 1;
+
 /// [`CON_INFO`] field: the backend kind ([`CON_KIND_*`]).
 pub const CON_INFO_KIND: u64 = 0;
 /// [`CON_INFO`] field: framebuffer columns (character cells wide).
