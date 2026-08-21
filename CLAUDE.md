@@ -5618,7 +5618,98 @@ unsolicited, but polled matches every other driver for the first cut);
 QEMU-only (Parallels' virtio-net is PCI, needing a virtio-pci transport -
 see `docs/roadmap.md`); small fixed rings (`RX_COUNT` 4, `QUEUE_SIZE` 8),
 fine for a polled ARP round-trip, not tuned for throughput; and the
-hardcoded QEMU user-net IPs in `init_net`.
+hardcoded QEMU user-net IPs in `init_net`. **(Update: `init_net`'s ARP probe
+is gone as of Stage 2 below - the kernel no longer sends anything; it just
+installs the NIC into a cell for `netd` to drive.)**
+
+## Network stack, Stage 2: the protocol stack moves to userland (`netd`), and a `ping` command
+
+Stage 2 moves networking out of the EL1 kernel the same way the filesystem
+(`fsd`) and console (`cond`) already moved: the kernel keeps only the
+DMA-owning virtio-net driver (no IOMMU - a device can DMA anywhere, so the
+ring/buffer owner must stay trusted), reached by exactly one task through
+gated syscalls, and the whole protocol stack (ARP/IPv4/ICMP) lives in a new
+userland server, `netd`. It ends with a real `ping <ip>` you can type at the
+shell. Built in two staged commits (2a plumbing, 2b protocol), the standing
+discipline.
+
+**A fourth protected task slot, and the renumber it forced.** `netd` is
+`syscall_abi::NET_TASK` (slot 4) - the fourth boot-loaded, supervised,
+`exit`/`kill`/`wait`-protected server after the shell(0)/idle(1)/fsd(2)/
+cond(3). Inserting it shifted the spawnable slots from {4,5} to {5,6}, so
+`NUM_TASKS` 6→7, `MAX_EL0_REGIONS` 6→7, `FIRST_SPAWNABLE` 4→5, the
+`exit`/`kill`/`wait` protections extend to `<= 4`, `caps_for_slot` gained a
+`NET_TASK` arm (`CAP_NET` + logs to cond) and the shell gained `TO_NET`, and
+the seven `NUM_TASKS`/`MAX_EL0_REGIONS`-sized static arrays each grew one
+element - exactly the shape of the change that inserted `cond` at slot 3. The
+riskiest part is that renumber (it touches the task-slot invariant everything
+depends on), so it was regression-tested hard: after it, `selftest`, the disk
+surface, `exec` (now spawns into slot 5), `ps` (shows netd blocked in slot
+4), and a program pipe (spawns into slot 6) all still work, zero aborts.
+
+**Stage 2a - the gated `NET_*` syscalls and a `netd` that drives the NIC from
+userland.** `NET_SEND` (42), `NET_RECV` (43), and `NET_MAC` (44) operate on a
+kernel-held `NetCell` (the `BlockCell`/`install_block_device` pattern -
+`init_net` installs the device instead of probing it) and are gated to
+`CAP_NET`, i.e. `netd` alone. Frames are validated with `in_caller_region`,
+not `valid_user_range`, since an Ethernet frame exceeds the 512-byte
+`MAX_USER_LEN` cap. `netd` (the eighth userland program) proved the whole
+EL0→gated-syscall→kernel-driver→wire path in 2a by building a broadcast ARP
+request *from userland* and receiving the reply - the same probe `init_net`
+used to do in the kernel, now one privilege level up. `loader::load_netd`
+(`\EFI\ORBS\NETD.BIN`) registers it with the supervisor for crash/wedge
+recovery like the other servers.
+
+**A real subtlety the server loop has to get right: the supervisor's
+health-ping.** A supervised server that just `MSG_RECV`s and discards would
+never *reply*, so the active health-ping (see "Active health-ping" above)
+would time out and restart it every cycle. `netd`'s request loop therefore
+replies to *every* message with a status u64 - which, for the ping message
+addressed to the kernel's sentinel, is exactly the ack. Confirmed by an 8s
+idle run showing zero supervisor events on slot 4.
+
+**Stage 2b - real ARP + IPv4 + ICMP, and the `ping` command.** `netd` gained
+a `NETOP_PING` request handler (the `FSOP_*` IPC shape - an op plus a target
+IPv4, a one-u64 status reply). Given a target it ARP-resolves the host (send
+request, poll for the reply, extract the MAC), builds an ICMP echo request
+inside an IPv4 packet inside an Ethernet frame - with correct **IP and ICMP
+Internet checksums** (one hand-rolled `ip_checksum` over 16-bit big-endian
+words, folded) - sends it, and polls for the matching echo reply (right
+source IP, ICMP type 0, our id). All hand-rolled fixed-buffer, no crates, no
+heap - the ACPI/FAT32/virtio precedent. Timeouts are deliberately short (ARP
+~500ms, ICMP ~1s) so even a worst-case unreachable ping stays under the
+supervisor's ~2.5s wedge threshold while `netd` busy-polls (it's `Runnable`,
+not `Blocked`, during a ping). The shell's `ping <a.b.c.d>` command parses the
+dotted quad **byte-by-byte** (no `str::split`, to stay clear of the
+PIE/libcore relocation gotchas documented in `docs/processes.md`),
+`MSG_CALL`s `netd`, and maps the `NET_PING_*` status to a message.
+
+**Scope decision, made explicitly with the user: guest-initiated ping only.**
+Replying to a *host's* ping needs `netd` to receive frames asynchronously (a
+frame arrives unsolicited, with no client call outstanding) - the unified
+poll/select gap documented in `research-directions.md`, since a task blocks
+on exactly one thing today. Deferred deliberately; guest-initiated ping still
+exercises the entire stack (ARP + IPv4 + ICMP).
+
+**Confirmed on QEMU (`make run-image-net`, real FAT32 + the NIC), zero
+`-d int` aborts, cross-checked against a `tcpdump` of the `filter-dump`
+pcap** (the "verify against a source outside the kernel's own output"
+discipline): `ping 10.0.2.2` and `ping 10.0.2.3` → `reply from ...`;
+`ping 10.0.2.99` → `unreachable (no ARP reply)`; bad input → usage. The pcap
+showed the ARP request/reply and a **valid ICMP echo request/reply** (`id
+0x4f42`, checksums validated by `tcpdump` with no "bad cksum") for each
+reachable host, and only an unanswered ARP for the unused one. The shell
+stayed responsive after (`uptime` advancing), no supervisor restart.
+
+**Still coarse, worth knowing before building on this:** guest-initiated ping
+only (no async receive → can't answer a host ping - the poll/select gap);
+QEMU-only (Parallels' virtio-net is PCI, still needs a virtio-pci transport);
+one ping at a time with a fixed ICMP id/seq (no static state in userland to
+count from); the source IP `10.0.2.15` and /24 on-subnet assumption are the
+QEMU user-net convention (no DHCP, no routing/gateway resolution for
+off-subnet targets - a real target outside 10.0.2.0/24 would need the gateway
+ARP'd instead); no UDP/TCP yet (UDP is Stage 3, TCP Stage 4 - see
+`docs/roadmap.md`); and the NIC driver is still polled, not IRQ-driven.
 
 ## Commands
 
@@ -5750,7 +5841,7 @@ kernel/
 
 shell/               userland default shell - a separate crate, built for aarch64-unknown-none, loaded from disk (not compiled into the kernel)
   linker.ld          self-relocating (PIE) linker script: entry at offset 0, .rela.dyn/.dynsym/.dynamic/.data.rel.ro, no .bss/.data (see "A real relocating loader" above and docs/processes.md)
-  src/main.rs        line editor + command dispatch (help/echo/uptime/clear/ls/cat/cd/pwd/mkdir/rmdir/touch/rm/write/writeat/cp/mv/exec/exit/ps/kill/fg/wait/send/recv/selftest, plus `> file`/`>> file` output redirection and `| /path/program` pipes on any of them - see "Output redirection", "Pipelines", "Runtime capability delegation", and "FAT32 interior/random-access writes" above), running as real EL0 userland code, built for real relocation (relocation-model=pic, --release only) - main loop blocks on read_char (syscall 15) instead of busy-polling, see "Blocking primitives" above; see docs/processes.md
+  src/main.rs        line editor + command dispatch (help/echo/uptime/clear/ls/cat/cd/pwd/mkdir/rmdir/touch/rm/write/writeat/cp/mv/mount/ping/exec/exit/ps/kill/fg/wait/send/recv/selftest, plus `> file`/`>> file` output redirection and `| /path/program` pipes on any of them - see "Output redirection", "Pipelines", "Runtime capability delegation", and "FAT32 interior/random-access writes" above), running as real EL0 userland code, built for real relocation (relocation-model=pic, --release only) - main loop blocks on read_char (syscall 15) instead of busy-polling, see "Blocking primitives" above; see docs/processes.md
 
 fsd/                 fifth userland program: THE FILESYSTEM SERVER (driver isolation part 2) - owns the FAT32 engine, speaks the FSOP_* protocol to clients over IPC (including the bulk FSOP_READ_BULK/FSOP_WRITE_BULK ops that move file data via grant/safecopy - see "Grant/safecopy IPC" above), and is the only task the BLOCK_* syscalls accept; boot-loaded into protected task slot 2, see "Driver isolation, part 2" above
   src/main.rs        the request loop: recv -> decode FsRequest -> dispatch to Fs -> reply one u64; mounted Fs lives in main's stack frame (no static state in userland)
@@ -5760,6 +5851,9 @@ fsd/                 fifth userland program: THE FILESYSTEM SERVER (driver isola
 cond/                seventh userland program: THE CONSOLE SERVER (driver isolation part 3) - owns the steady-state console; userland output flows to it as batched DSPOP_WRITE messages over IPC. Two backends (chosen from CON_INFO): byte-stream (forward to the kernel console via the gated CON_WRITE syscall 33 - QEMU's UART) and framebuffer (render glyphs itself via the gated FB_BLIT/FB_SCROLL/FB_CLEAR primitives - the console rendering logic, font included, moved out of the kernel's fbconsole; Parallels, QEMU ramfb). Boot-loaded into protected task slot 3 (CON_TASK), accepted by CON_WRITE/FB_* alone, see "Driver isolation, part 3" above
   src/main.rs        the request loop (recv -> decode DSPOP_WRITE -> render -> reply, the filesystem server's shape) plus two backends chosen from CON_INFO at startup: byte-stream (forward to the kernel console via CON_WRITE) and framebuffer (render glyphs here - cursor, wrap, scroll, a small ANSI parser - via FB_BLIT/FB_SCROLL/FB_CLEAR)
   src/font.rs        cond's own copy of the 8x8 bitmap font (from kernel/src/font.rs) - the font is what "console driver logic" meant, so it moved to userland; the kernel keeps a copy only for its emergency fbconsole
+
+netd/                eighth userland program: THE NETWORK SERVER (network stack, Stage 2) - owns the protocol stack (ARP/IPv4/ICMP) in userland; the kernel keeps only the DMA-owning virtio-net driver, reached by this task alone via the gated NET_SEND/NET_RECV/NET_MAC syscalls (the fsd/BLOCK_* pattern). Boot-loaded into protected task slot 4 (NET_TASK), supervised. Speaks the NETOP_PING request protocol to clients (the shell's `ping` command); hand-rolled fixed-buffer frame building + Internet checksums, no crates. See "Network stack, Stage 2" above
+  src/main.rs        the request loop (recv -> NETOP_PING -> arp_resolve + icmp_echo -> reply a NET_PING_* status) plus the ARP/IPv4/ICMP frame builders, the reply matcher, and ip_checksum
 
 upper/               sixth userland program: the pipeline filter demo (uppercases its piped input) - the reference for the filter-program shape: stdin = msg_recv, stdout = con_write (routed through the console server), EOF = the empty message, finish = exit; see "Pipelines" above
   src/main.rs        ~80 lines: the recv/uppercase/putc loop
@@ -5777,8 +5871,8 @@ scripts/
   test-parallels.sh  scripted real-hardware smoke test via prlctl (start/type/capture/stop) - invoked by `make test-parallels`, see "## Commands" above and docs/roadmap.md's "Testing infrastructure" section
 ```
 
-Eight-crate workspace (`kernel`, `shell`, `hello`, `pong`, `fsd`,
-`upper`, `cond`, `syscall-abi`), with every userland crate deliberately excluded from the
+Nine-crate workspace (`kernel`, `shell`, `hello`, `pong`, `fsd`,
+`upper`, `cond`, `netd`, `syscall-abi`), with every userland crate deliberately excluded from the
 workspace's `default-members` (see `Cargo.toml`) since they need a
 different `--target` than `kernel`; `syscall-abi` needs no such
 exclusion (a plain lib, no `[[bin]]` to conflict with a target) and gets

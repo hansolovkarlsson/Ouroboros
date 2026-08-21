@@ -7,6 +7,47 @@ what broke, how it was diagnosed), see `CLAUDE.md`; for *how* something
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## Network stack, Stage 2: the protocol stack moves to userland (`netd`), and a `ping` command
+
+Networking moves out of the EL1 kernel the same way `fsd` and `cond` did: the
+kernel keeps only the DMA-owning virtio-net driver (no IOMMU), reached by one
+task through gated syscalls, and the whole protocol stack (ARP/IPv4/ICMP)
+lives in a new userland server, `netd`. It ends with a real `ping <ip>` at
+the shell. Two staged commits.
+
+**2a - a fourth protected task slot + gated `NET_*` syscalls.** `netd` is
+`NET_TASK` (slot 4), the fourth boot-loaded, supervised, protected server -
+inserting it shifted the spawnable slots to {5,6} (`NUM_TASKS` 6→7, the
+`exit`/`kill`/`wait` protections to `<= 4`, a `CAP_NET` arm in
+`caps_for_slot`, seven static arrays each +1), the same shape as when `cond`
+was inserted at slot 3, regression-tested hard afterward. `NET_SEND` (42) /
+`NET_RECV` (43) / `NET_MAC` (44) operate on a kernel-held `NetCell` gated to
+`CAP_NET` (`netd` alone), the `BLOCK_*` → fsd pattern; `init_net` installs the
+NIC instead of probing it. `netd` proved the userland NIC path with an ARP
+round-trip from EL0. A subtlety: a supervised server must *reply* to every
+message or the health-ping restarts it, so `netd`'s loop replies with a
+status u64 - which acks the ping.
+
+**2b - real ARP + IPv4 + ICMP + `ping`.** `netd` gained a `NETOP_PING` handler
+(the `FSOP_*` shape): ARP-resolve the target, build an ICMP echo request in an
+IPv4 packet in an Ethernet frame with correct IP/ICMP checksums, send it, poll
+for the matching reply. Hand-rolled fixed-buffer (the checksum, the frame
+builders, the reply matcher), no crates. Short timeouts (ARP ~500ms, ICMP
+~1s) keep an unreachable ping under the supervisor's wedge threshold. The
+shell's `ping <a.b.c.d>` parses the quad byte-by-byte (no `str::split`, PIE
+relocation safety), `MSG_CALL`s `netd`, maps the status to a message.
+**Scope: guest-initiated ping only** - answering a host's ping needs an async
+receive loop (the poll/select gap), deliberately deferred.
+
+Confirmed on QEMU (`make run-image-net`), zero `-d int` aborts, cross-checked
+with `tcpdump` of the pcap: `ping 10.0.2.2`/`10.0.2.3` → `reply from ...`,
+`ping 10.0.2.99` → `unreachable (no ARP reply)`; the pcap showed valid ARP
+and ICMP echo request/reply (`id 0x4f42`, checksums validated) for the
+reachable hosts. The renumber left everything working (`selftest`, disk
+surface, `exec` → slot 5, pipe → slot 6, `ps` shows netd in slot 4), no
+supervisor restart. See `CLAUDE.md`'s "Network stack, Stage 2" and
+`docs/roadmap.md`. UDP is Stage 3, TCP Stage 4.
+
 ## Network stack, Stage 1: a virtio-net driver, and the first frames this kernel has sent
 
 The first networking this project has ever had. Stage 1 of the network-stack

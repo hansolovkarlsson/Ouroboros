@@ -177,11 +177,18 @@ step, not a Stage 1 concern.
    Parallels' virtio-net is PCI). The gated `NET_SEND`/`NET_RECV` syscalls
    deferred to Stage 2 with `netd`, their first consumer, rather than dead
    code now. See `CHANGELOG.md` / `CLAUDE.md`'s "Network stack, Stage 1."
-2. **ARP + IPv4 + ICMP echo (`netd`).** The classic "the stack works" proof:
-   reply to a host `ping` (host → guest ICMP echo request → guest reply),
-   and/or `ping` out from the guest. ARP resolution, IPv4 parse/checksum,
-   ICMP echo — hand-rolled, fixed-buffer (the ACPI/FAT32/virtio precedent).
-   A `ping` shell command as the first client.
+2. ~~**ARP + IPv4 + ICMP echo (`netd`).**~~ **DONE (2026-08-21).** The
+   protocol stack moved to a userland server (`netd/`, the eighth userland
+   program, a fourth protected task slot — `NET_TASK`, 4 — reached via the
+   gated `NET_SEND`/`NET_RECV`/`NET_MAC` syscalls). ARP resolution + IPv4 +
+   ICMP echo, all hand-rolled fixed-buffer with correct Internet checksums,
+   exposed as a `NETOP_PING` request; a `ping <a.b.c.d>` shell command is the
+   first client. Verified on QEMU (`ping 10.0.2.2`/`.3` → reply, `.99` →
+   unreachable), cross-checked against a `tcpdump` of the `run-image-net`
+   pcap. **Guest-initiated ping only** — answering a host's ping needs an
+   async receive loop (the poll/select gap, see `research-directions.md`),
+   deliberately deferred. See `CHANGELOG.md` / `CLAUDE.md`'s "Network stack,
+   Stage 2."
 3. **UDP.** Connectionless, far simpler than TCP: send/receive datagrams,
    proven by a DNS query or a UDP echo. A minimal socket-op IPC protocol
    (`NETOP_*`, the `FSOP_*` shape) — or, if the Plan 9 namespace work has

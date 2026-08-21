@@ -496,6 +496,9 @@ the way hand-duplicated numbers did before this crate existed.
 | 39 | `self` | — | the caller's own task slot index | A task's identity (otherwise unknowable — every other task-aware syscall takes an index). The shell needs it to route a pipe producer's stdout back to itself, and a foreground-spawned shell isn't task 0 |
 | 40 | `heap_info` | field (`0`=base, `1`=size) | the requested heap-area geometry, or `0` | Each program's region carries a fixed 256KB **raw heap area** (between its code and its stack guard page) it reads/writes via a `&mut [u8]` — space far larger than the 16KB stack, for data a fixed stack buffer can't hold (the shell backs its redirect/pipe capture with it, so `cat big > file` works). *Not* a `GlobalAlloc` heap — `alloc`'s collections can't link under this PIE loader (prebuilt lib`alloc` has `R_AARCH64_ABS64` relocations a `-pie` link rejects; the fix is nightly `-Z build-std`) |
 | 41 | `delegate` | grantee task, target task | `0` or `MSG_ERR_DENIED` | **Runtime capability delegation**: grant `grantee` the right to initiate sends to `target` — a dynamic addition to `grantee`'s send-mask. The caller may only delegate a send-cap it *statically holds itself* (no transitive re-delegation), which confines it to the shell authorizing a pipe's producer to stream directly to its consumer. Cleared when either task dies. See "Runtime capability delegation" below |
+| 42 | `net_send` | frame ptr, frame len | `0` or `NET_ERROR` | Transmit one raw Ethernet frame through the kernel's virtio-net driver. **Gated to `NET_TASK`** (the network server) — the DMA-owning NIC driver stays in the kernel (no IOMMU), reached only by the one task that owns the protocol stack, the `block_*` → fsd pattern |
+| 43 | `net_recv` | buf ptr, buf len | the frame's length (copied into `buf`, truncated to `buf len`), `NET_NO_FRAME` if none is waiting, or `NET_ERROR` | Non-blocking poll of the virtio-net receive ring. Gated to `NET_TASK` like `net_send` |
+| 44 | `net_mac` | — | the NIC's 6-byte MAC packed little-endian into a `u64`, or `NET_ERROR` | The network server needs it to build the Ethernet source of every frame. Gated to `NET_TASK` |
 | other | — | — | `u64::MAX` | Logged as unknown |
 
 ### The filesystem request protocol (`FSOP_*`)
@@ -552,12 +555,13 @@ below is the second half.
 Memory isolation is MMU-enforced, but the IPC *topology* is enforced too:
 a task can only initiate a `msg_send`/`msg_call` to the endpoints its
 capabilities allow. Because task-slot roles are static (0 shell, 1 idle,
-2 fsd, 3 cond, 4–5 spawnable), capabilities are a **pure function of
+2 fsd, 3 cond, 4 netd, 5–6 spawnable), capabilities are a **pure function of
 slot** — no stored table, no runtime state — living entirely in
 `tasks::caps_for_slot(slot)`. A slot's capability word packs a **send-mask**
 (which slots it may initiate IPC to) plus resource bits (`CAP_BLOCK` gates
 `block_*` to the filesystem server; `CAP_CON` gates `con_write`/`con_info`/
-`fb_*` to the console server — the two device gates, formerly hardcoded
+`fb_*` to the console server; `CAP_NET` gates `net_send`/`net_recv`/`net_mac`
+to the network server — the three device gates, formerly hardcoded
 `== FSD_TASK`/`== CON_TASK` checks, are the resource half of this same
 model).
 
@@ -565,11 +569,12 @@ The policy:
 
 | slot | role | may initiate IPC to | resource caps |
 |---|---|---|---|
-| 0 | shell | fsd, cond, spawned children (4, 5) | — |
+| 0 | shell | fsd, cond, netd, spawned children (5, 6) | — |
 | 1 | idle | — | — |
 | 2 | fsd | cond (its logs) | `CAP_BLOCK` |
 | 3 | cond | — (only replies) | `CAP_CON` |
-| 4, 5 | spawnable | shell, fsd, cond | — |
+| 4 | netd | cond (its logs) | `CAP_NET` |
+| 5, 6 | spawnable | shell, fsd, cond | — |
 
 Enforced at the `msg_send`/`msg_call` boundary by `tasks::may_send(src,
 dest)`, which returns `MSG_ERR_DENIED` unless the send is permitted. Two

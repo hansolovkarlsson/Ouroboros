@@ -15,7 +15,8 @@ flatly that Ouroboros has "*no* fault isolation of any kind." That is no
 longer true, which is exactly what makes this re-assessment worth
 writing. Where those notes say "none yet," read this instead.
 
-The short version: on its **one** moved service, Ouroboros is now a
+The short version: on the **three** services it has moved out (the
+filesystem, the console, and now the network stack), Ouroboros is a
 genuine microkernel — enforced isolation, capability-based bulk IPC, and
 real crash recovery. The mechanisms are the real thing. What separates
 it from MINIX and Helix is **breadth and generality**, not honesty of
@@ -45,7 +46,7 @@ privilege) underneath them. Measured against that one test:
   meaning of "supervised": the kernel holds the block device, and
   exactly one task is permitted to ask it to touch the disk. A spawned
   program can never land in slot 2 (`spawn` scans from
-  `FIRST_SPAWNABLE = 3`), so it can never inherit that privilege.
+  `FIRST_SPAWNABLE = 5`), so it can never inherit that privilege.
 - **The IPC converged on MINIX's actual primitives, not a hand-wave.**
   `MSG_CALL` (syscall 29) is sendrec-shaped: a synchronous request/reply
   that blocks the client on a reply *filtered by sender*, so a reply
@@ -67,17 +68,22 @@ privilege) underneath them. Measured against that one test:
 
 ### Where it falls short of MINIX
 
-- **One service, not a driver fleet.** MINIX runs disk, network,
+- **Three services, not a driver fleet.** MINIX runs disk, network,
   keyboard, and every device driver as separate servers started in
-  dependency order by `/etc/rc`. Ouroboros has exactly **one**
-  out-of-kernel server (the filesystem). The USB/xHCI stack, the block
-  device itself, the console/framebuffer, the GIC, and the scheduler are
-  all still undifferentiated EL1 kernel code.
-- **No boot image of multiple programs.** MINIX packs kernel + PM + VFS +
-  RS + drivers into `/boot/image`. Ouroboros loads one configurable
-  program (the shell, via `INIT.CFG`) plus one fixed-path infrastructure
-  server (`\EFI\ORBS\FSD.BIN`). It's two loaded programs, not a typed set
-  of cooperating servers.
+  dependency order by `/etc/rc`. Ouroboros has **three** out-of-kernel
+  servers now — the filesystem (`fsd`), the console (`cond`), and the
+  network protocol stack (`netd`) — but the USB/xHCI stack, the block
+  device and NIC *drivers* (which own DMA and can't leave without an
+  IOMMU), the GIC, and the scheduler are all still undifferentiated EL1
+  kernel code. Note the pattern: the *policy* (FAT32 logic, console
+  rendering, ARP/IP/ICMP) moved out; the DMA-owning *driver* half stayed,
+  reached by its one server through gated syscalls.
+- **A boot image of a few fixed programs, not a typed fleet.** MINIX packs
+  kernel + PM + VFS + RS + drivers into `/boot/image`. Ouroboros loads one
+  configurable program (the shell, via `INIT.CFG`) plus three fixed-path
+  infrastructure servers (`\EFI\ORBS\{FSD,COND,NETD}.BIN`). Four loaded
+  programs, a start in that direction but not yet a typed set of
+  cooperating servers started in dependency order.
 - **The `who-may-call-whom` capability model is coarse, but no longer
   purely static.** IPC is not flat — a per-slot send-mask, enforced at the
   `MSG_SEND`/`MSG_CALL` boundary, restricts which endpoints each task may
@@ -101,7 +107,7 @@ privilege) underneath them. Measured against that one test:
 **Verdict:** structurally a microkernel on the services it actually moved,
 using the right IPC primitives and an enforced IPC capability topology that
 is now a static baseline plus runtime delegation. Short of MINIX mainly on
-*breadth* (two servers, not a full fleet) and on *general* capability
+*breadth* (three servers, not a full fleet) and on *general* capability
 delegation (today's is coarse — one delegated target per task, non-transitive,
 in practice shell-only — where MINIX's grants are general and transitive).
 
@@ -122,7 +128,7 @@ reaching into another's memory, it was just impolite.
 
 ### Now — hardware-enforced, and proven by fault injection
 
-- **Per-task MMU page-table views.** Each of the five scheduler slots
+- **Per-task MMU page-table views.** Each of the seven scheduler slots
   runs under its own translation tables (`mmu.rs`): identical kernel and
   device mappings in every view, but **EL0 access to that task's own
   region alone**. `mmu::activate_task` swaps `TTBR0` and flushes the TLB
@@ -190,7 +196,7 @@ same day as the isolation work, which is not a coincidence.
   death.)
 - **Servers are supervised, uniformly** — MINIX's reincarnation server,
   minimal edition, generalized (`kernel/src/supervisor.rs`). A registry
-  keeps each supervised server's ELF image from boot (`fsd` *and* `cond`,
+  keeps each supervised server's ELF image from boot (`fsd`, `cond`, and `netd`,
   each registered at load — kept precisely because one crashed server
   *is* the filesystem you'd otherwise need in order to reload it) and
   restarts one from that copy on a fault, into a fresh region; the new
@@ -224,7 +230,7 @@ same day as the isolation work, which is not a coincidence.
 ### Where it's short of Helix (and of MINIX's RS)
 
 - **Kernel-resident drivers still have no containment.** Supervision now
-  covers the userland servers uniformly (`fsd` and `cond`, via the
+  covers the userland servers uniformly (`fsd`, `cond`, and `netd`, via the
   `supervisor.rs` registry — no longer special-cased to one task), and
   catches both crashes and wedges. But a crash in any *kernel-resident*
   driver (xHCI, virtio-blk/the block transport) still takes the system
@@ -268,14 +274,14 @@ real-world hardening behind the design.
 
 | Dimension | MINIX | Helix | Ouroboros (today) |
 |---|---|---|---|
-| Services outside the kernel | Full fleet (disk, net, FS, all drivers) as separate address-space processes | Modules outside the TCB, but within one address space | **Two** — the FAT32 filesystem server (`fsd`) and the console server (`cond`), real separate EL0 processes |
+| Services outside the kernel | Full fleet (disk, net, FS, all drivers) as separate address-space processes | Modules outside the TCB, but within one address space | **Three** — the FAT32 filesystem (`fsd`), the console (`cond`), and the network protocol stack (`netd`), real separate EL0 processes |
 | Isolation mechanism | Separate address spaces (hardware) | Rust memory safety + hot-reload bookkeeping (no hardware boundary between modules) | **Per-task MMU page-table views (hardware), injection-verified** + validated syscall pointers |
 | IPC | Synchronous `SEND`/`RECEIVE`/`SENDREC`, fixed 64-byte messages | Trait-boundary calls + IPC queuing in the scheduler | Synchronous `MSG_CALL` (sendrec-shaped, sender-filtered) + copy-by-mailbox; **grant/safecopy** capability for bulk data |
 | Bulk data across the boundary | `sys_safecopy` (capability-gated copy) | Within one address space (no cross-space copy needed) | **`GRANT` + `SAFECOPY`** — the same capability model as MINIX |
 | Crash recovery | RS restarts the crashed *process* from a clean slate | Self-heal: watchdog + health monitor + recovery, with attempted state migration | A supervisor registry reloads any crashed server from a kept image (fsd remounts from disk — state is disk-derived); **shared 3-restart cap** |
 | Non-crashing hang recovery | Timeouts / RS health | Health checks for hangs (first-class) | **Yes** — a passive heartbeat catches a *runnable* wedge; an active ping catches a *blocked* wedge |
 | Live code replacement | No (restart, not hot-swap) | **Yes** — pause/snapshot/swap/restore/rollback | No (reload same image) |
-| Supervision scope | Uniform (RS parents every boot-image process) | Uniform (self-heal framework) | **Uniform** — a registry supervises every boot-image server (`fsd` + `cond`) |
+| Supervision scope | Uniform (RS parents every boot-image process) | Uniform (self-heal framework) | **Uniform** — a registry supervises every boot-image server (`fsd`, `cond`, `netd`) |
 | Trust topology | Capability-gated endpoints between servers | Trait boundaries | **Capability send-mask** — a per-slot mask enforced at the IPC boundary restricts who each task may reach, now a static baseline plus runtime `DELEGATE` (coarse: one target, non-transitive, in practice shell-only) |
 | Kernel/policy split | Kernel is mechanism; PM/VFS/RS are policy | Explicit: `core/` (mechanism) vs. `subsystems/` + `modules_impl/` (policy) | **Partial** — the FS and console are out; scheduler, MMU, and the remaining drivers are still kernel-resident |
 
@@ -292,7 +298,7 @@ The first three moves on this list have since shipped, in order:
   server (`cond`) is a second real EL0 process, proving the `fsd` pattern
   (IPC + grant/safecopy) generalizes.
 - ~~**A general supervision / heartbeat mechanism.**~~ **Done** — a
-  supervisor registry restarts any server (fsd + cond) on a crash; a
+  supervisor registry restarts any server (fsd, cond, netd) on a crash; a
   passive heartbeat catches a *runnable* wedge and an active ping catches
   a *blocked* wedge.
 - ~~**A capability model for who-may-call-whom.**~~ **Done** — a per-slot
