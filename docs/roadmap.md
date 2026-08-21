@@ -218,12 +218,16 @@ step, not a Stage 1 concern.
    `HTTP/1.1 200 OK` + Example Domain HTML (client), and host
    `curl localhost:5555` → `HTTP/1.0 200 OK` + the guest's page via SLIRP
    hostfwd (server), each cross-checked against a `tcpdump` of the pcap (clean
-   four-way conversations, checksums accepted). **Still open:** request
-   parsing (the server serves one fixed page, ignoring the path/method — a
-   static-file server reading from `fsd` is the natural next step),
-   retransmission, congestion control, multiple concurrent connections, a
-   streaming (not one-reply-capped) response, and IRQ-driven RX. See
-   `CHANGELOG.md` / `CLAUDE.md`'s "Network stack, Stage 4a/4b."
+   four-way conversations, checksums accepted). Stage 4c made the server a
+   real **static-file server**: it parses the request path and streams the
+   file from `fsd` over TCP (`netd` becomes `fsd`'s first non-shell client,
+   via a new `netd`→`fsd` capability), verified serving a real file
+   byte-identically over multiple segments. **Still open:** real flow control
+   (the server caps a response at ~16 KB — the body must fit the peer's
+   window without ACK-paced sending), retransmission, congestion control,
+   multiple concurrent connections, `Content-Length`/`Content-Type`, a
+   directory listing, and IRQ-driven RX. See `CHANGELOG.md` / `CLAUDE.md`'s
+   "Network stack, Stage 4a/4b/4c."
 
 **Decisions to settle before starting (not now):**
 

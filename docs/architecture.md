@@ -580,7 +580,7 @@ The policy:
 | 1 | idle | — | — |
 | 2 | fsd | cond (its logs) | `CAP_BLOCK` |
 | 3 | cond | — (only replies) | `CAP_CON` |
-| 4 | netd | cond (its logs) | `CAP_NET` |
+| 4 | netd | fsd (serving files over HTTP), cond (its logs) | `CAP_NET` |
 | 5, 6 | spawnable | shell, fsd, cond | — |
 
 Enforced at the `msg_send`/`msg_call` boundary by `tasks::may_send(src,

@@ -7,6 +7,37 @@ what broke, how it was diagnosed), see `CLAUDE.md`; for *how* something
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## Network stack, Stage 4c: a static-file HTTP server (netd serves files from fsd)
+
+Stage 4b's server answered every request with one fixed page. This makes it
+real: it parses the request-target path and streams that file from the
+filesystem server over TCP — `curl localhost:5555/EFI/ORBS/INIT.CFG` returns
+the file's actual bytes. The guest serves its own filesystem.
+
+**The interesting part is the cross-server flow, not the parsing:** `netd`
+becomes `fsd`'s **first non-shell client**. A request arrives at `netd` over
+TCP → `netd` `MSG_CALL`s `fsd` to read the file → `netd` streams it back —
+two userland servers cooperating on one external request, the driver-isolation
+design paying off. One visible capability change makes it legal: `netd`'s
+send-mask (`caps_for_slot`) gains `TO_FSD`. The read reuses the shell's exact
+grant/safecopy `FSOP_READ_BULK` path (`cat`'s), ported into `netd`.
+
+`serve_http` serves a landing page for `/`, else probes the file (so a 404
+replaces the 200 header rather than following it) and streams a 200 header
+plus the body in `SERVE_CHUNK` (1400)-byte segments (one `FSOP_READ_BULK`
+each), advancing `snd_nxt`; 404 for a missing file, 503 for no filesystem.
+Bounded at `MAX_SERVE` (~16 KB) — no flow control yet, so the body must fit
+the peer's window; larger files truncate.
+
+Confirmed on QEMU (`make run-image-server`, zero `-d int` aborts): `curl /`
+→ the page; `curl /EFI/ORBS/INIT.CFG` → HTTP 200 + the real file content;
+`curl /nope` → 404; `curl /EFI/ORBS/SH.BIN` (72 KB) → the first 16800 bytes,
+**byte-identical** to the real file, over 12 body segments + a header (the
+multi-segment path). Shell disk commands, `selftest`, and client net ops
+unregressed. Still coarse: the ~16 KB cap, no `Content-Length`, one
+connection, no directory listing, QEMU-only. See `CLAUDE.md`'s "Network
+stack, Stage 4c."
+
 ## Network stack, Stage 4b: an async-receive event loop, and a TCP HTTP server
 
 The guest **answers** the network now, not just initiates. Stage 4a's gap

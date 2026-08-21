@@ -40,6 +40,16 @@
 
   <article>
 
+<h2>Network stack, Stage 4c: a static-file HTTP server (netd serves files from fsd)</h2>
+
+<p>Stage 4b's server answered every request with one fixed page. This makes it real: it parses the request-target path and streams that file from the filesystem server over TCP — <code class="inline">curl localhost:5555/EFI/ORBS/INIT.CFG</code> returns the file's actual bytes. The guest serves its own filesystem.</p>
+
+<p><strong>The interesting part is the cross-server flow, not the parsing:</strong> <code class="inline">netd</code> becomes <code class="inline">fsd</code>'s <strong>first non-shell client</strong>. A request arrives at <code class="inline">netd</code> over TCP → <code class="inline">netd</code> <code class="inline">MSG_CALL</code>s <code class="inline">fsd</code> to read the file → <code class="inline">netd</code> streams it back — two userland servers cooperating on one external request, the driver-isolation design paying off. One visible capability change makes it legal: <code class="inline">netd</code>'s send-mask (<code class="inline">caps_for_slot</code>) gains <code class="inline">TO_FSD</code>. The read reuses the shell's exact grant/safecopy <code class="inline">FSOP_READ_BULK</code> path (<code class="inline">cat</code>'s), ported into <code class="inline">netd</code>.</p>
+
+<p><code class="inline">serve_http</code> serves a landing page for <code class="inline">/</code>, else probes the file (so a 404 replaces the 200 header rather than following it) and streams a 200 header plus the body in <code class="inline">SERVE_CHUNK</code> (1400)-byte segments (one <code class="inline">FSOP_READ_BULK</code> each), advancing <code class="inline">snd_nxt</code>; 404 for a missing file, 503 for no filesystem. Bounded at <code class="inline">MAX_SERVE</code> (~16 KB) — no flow control yet, so the body must fit the peer's window; larger files truncate.</p>
+
+<p>Confirmed on QEMU (<code class="inline">make run-image-server</code>, zero <code class="inline">-d int</code> aborts): <code class="inline">curl /</code> → the page; <code class="inline">curl /EFI/ORBS/INIT.CFG</code> → HTTP 200 + the real file content; <code class="inline">curl /nope</code> → 404; <code class="inline">curl /EFI/ORBS/SH.BIN</code> (72 KB) → the first 16800 bytes, <strong>byte-identical</strong> to the real file, over 12 body segments + a header (the multi-segment path). Shell disk commands, <code class="inline">selftest</code>, and client net ops unregressed. Still coarse: the ~16 KB cap, no <code class="inline">Content-Length</code>, one connection, no directory listing, QEMU-only.</p>
+
 <h2>Network stack, Stage 4b: an async-receive event loop, and a TCP HTTP server</h2>
 
 <p>The guest <strong>answers</strong> the network now, not just initiates. Stage 4a's gap was that <code class="inline">netd</code> was client-only — it blocked on <code class="inline">MSG_RECV</code>, so nothing watched the wire between requests, and a task can't block on IPC <em>and</em> poll for frames at once. This adds the missing async-receive primitive (the poll/select gap flagged since Stage 2) and a TCP HTTP server you can <code class="inline">curl</code> from the host.</p>
