@@ -65,15 +65,19 @@ Still 2-stage, producer-`hello`-only for now. See `CHANGELOG.md`.
    streaming (relay-free pipes), or a spawned program that reaches an
    endpoint outside its default `{shell,fsd,cond}` set.
 
-2. **Smaller hardening, mostly recorded already:** a userland **heap**
-   (programs are still fixed-buffer, now on a 16KB guarded stack);
+2. **Smaller hardening, mostly recorded already:**
    revisiting **per-task ASIDs** with a proven break-before-make sequence
    (the reverted TLB optimization); and FAT32 **interior/random-access
    writes** (`write_at` refuses an offset past EOF today — no sparse
-   files) for a future editor/log. **(The stack guard page from this list
-   is done — 2026-08-20 — and it immediately caught a real, silent 8KB
-   overflow in the shell's own `exec` path; the stack was grown to 16KB.
-   See `CHANGELOG.md`.)**
+   files) for a future editor/log. **(Two items from this list are done —
+   2026-08-20 — the stack guard page (which immediately caught a real,
+   silent 8KB overflow in the shell's own `exec` path; the stack was grown
+   to 16KB), and a userland heap: a real `alloc`-backed heap turned out to
+   be impossible on stable — prebuilt lib`alloc` has `R_AARCH64_ABS64`
+   relocations a `-pie` link rejects, and `-Z build-std` is nightly-only —
+   so it shipped as a 256KB *raw buffer* per program (`heap_info`),
+   lifting the shell's capture cap so `cat big > file` works. See
+   `CHANGELOG.md`.)**
 
 **Deferred / blocked** (recorded, not chased): moving a *third* driver
 out is limited by the no-IOMMU DMA constraint (the block transport can't
@@ -570,11 +574,13 @@ phase:
   `>>` appends at the end of a file of any existing size (the old "too
   large to append" refusal is gone). **Still next**
   (not yet scoped): *interior/random-access* writes (`write_at` refuses
-  an offset past EOF - no sparse files) for a future editor/log; a
-  **userland heap** (the stack guard page from this note is done - see
-  `CHANGELOG.md`; the stack is now a 16KB *guarded* stack, but it's still
-  the ceiling on a single non-streaming buffer, which a `write`/`>>` of a
-  large *single* payload would need a heap to lift); moving
+  an offset past EOF - no sparse files) for a future editor/log; the
+  **userland heap and guard page from this note are both done** (see
+  `CHANGELOG.md`) - the stack is a 16KB *guarded* stack now, and each
+  program has a 256KB raw heap area (`heap_info`) the shell uses to lift
+  its capture cap; a real `alloc`-backed heap (`Vec`/`String`) stays
+  blocked on stable (prebuilt lib`alloc` isn't PIE, `-Z build-std` is
+  nightly); moving
   further components out of the kernel; and program-to-program pipes (a
   task's own output still isn't capturable, so pipelines are builtin-left
   only - a stdout-over-IPC model is the real fix).

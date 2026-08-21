@@ -5245,6 +5245,83 @@ now on a 16KB guarded stack instead of an 8KB unguarded one. And a
 mismatched `STACK_PAGES` between `loader.rs` and `mmu.rs` would silently
 misplace the guard - kept equal by a cross-referencing comment on each.
 
+## Userland heap: a raw buffer, because `alloc` can't link under this loader
+
+Programs were fixed-buffer only - `#![no_std]`, no allocator, `.bss`/`.data`
+asserted empty (no static mutable state), every buffer a stack local. So
+the shell's redirect/pipe capture was a 1024-byte stack array and `cat big
+> file` *refused* anything larger (`docs/processes.md`'s "known rough
+edges" kept flagging this). This gives each program a heap.
+
+**The go/no-go gate, and the useful negative result it produced.** The
+milestone opened by testing the risky assumption directly - can a real
+`alloc`-backed heap (`Vec`/`String`/`Box`) even be built here? - before
+investing in the plumbing. It **can't, on stable:** adding a
+`#[global_allocator]` + `extern crate alloc` + a `selftest` `Vec`/`String`
+check failed at *link* with `relocation R_AARCH64_ABS64 cannot be used
+against local symbol; recompile with -fPIC`, from prebuilt lib`alloc`'s own
+`.rodata` (anonymous const data - vtable-ish absolute pointers that
+`Vec`/`String` pull in unavoidably). This is the exact
+`R_AARCH64_ABS64`-in-PIE wall already documented for `slice_error_fail`/
+`memrchr`/`find`, one level deeper: the prebuilt lib`alloc` on stable wasn't
+built `-fPIC`, so its absolute relocations can't survive a `-pie` link. The
+only fix is `-Z build-std` (rebuild lib`alloc` with this project's PIE
+flags), which is **nightly-only** and breaks the stable-only invariant
+(`rust-toolchain.toml`; the relocating-loader milestone already declined
+`-Z build-std` for exactly this reason). **One build retired the whole
+risk** - the gate did its job - and the answer forced a pivot (decided with
+the user) from an `alloc` heap to a **raw buffer** one.
+
+**The design that shipped: a kernel-provided raw heap area, no allocator.**
+Each program's region grew to `[code][256KB heap][guard][16KB stack]`
+(`loader.rs`, `HEAP_PAGES = 64`). The guard page is *unchanged* - still
+`STACK_PAGES+1` pages from the region end (just below the stack); the heap
+sits *below* the guard, above the code, and is ordinary EL0-accessible
+region memory (no `mmu.rs` change - the heap pages are `el0_page_4k` like
+the code, only the guard is the EL1-only hole). A `heap_info` syscall (40,
+`field` like `con_info`) reports the area's `(base, size)` - the kernel
+computes it from the region's `(base, size)` and the fixed layout
+(`loader::heap_area`, `HEAP_PAGES+GUARD+STACK` pages down from the end;
+`(0, 0)` for a region too small, i.e. the idle task's single page). A
+program reaches it with a `&mut [u8]` - a raw buffer, *not* `Vec`/`Box`/
+`String`. **No `GlobalAlloc`, so no static state, so the `.bss` assert
+stayed in place** - the raw-buffer approach sidesteps the whole
+static-state problem the `alloc` version would have needed to solve.
+
+**The consumer: the shell's redirect/pipe capture is heap-backed now.**
+`get_heap()` (in `shell/src/main.rs`) returns the heap region as a
+`&'static mut [u8]` (safe by the shell's single-capture-at-a-time
+discipline - a redirect *or* a pipe, never nested, so no aliasing);
+`Output::Capture` holds a slice instead of a 1024-byte stack array;
+`run_line`'s redirect path and `cmd_pipeline`'s builtin-left path both
+capture into it. Because a single `fs_write_*` is `SAFECOPY_MAX`-capped, a
+large capture is written to disk in `SAFECOPY_MAX` chunks by a new
+`write_all` helper (`>` truncates then writes from 0; `>>` appends at the
+stat'd EOF). `CAPTURE_SIZE` (the old 1024-byte cap) is gone.
+
+**Confirmed on QEMU, zero `-d int` aborts:**
+- **The headline win:** `cat /EFI/ORBS/SH.BIN > /big.bin` - the full 72KB -
+  captures completely and writes it (chunked), where it used to refuse at
+  1024 bytes. Proven by round-tripping: `cat /big.bin | /EFI/ORBS/UPPER.BIN`
+  renders the *uppercased* ELF section names (`.TEXT`/`.SHSTRTAB`), so the
+  whole file came back through the heap capture, the chunked write, a fresh
+  read, and the pipe.
+- Regressions: small `>` (`echo … > f`), `>>` append (lines in order), and
+  the builtin-left pipe (`echo … | UPPER` -> uppercased) all still work;
+  `selftest`, `exec`, streaming `cp`, and the disk surface unaffected. The
+  region grows ~256KB per program (fits the 2MB slot); the idle region
+  correctly gets no heap.
+
+**Still coarse, worth knowing before building on this:** it's a *raw
+buffer*, not dynamic collections - a program that wants `Vec`/`String`/`Box`
+still can't have them (blocked by the `alloc`/PIE wall above; a hand-rolled
+growable type over the heap is the workaround if ever needed). One
+fixed-size area per program (256KB, no growth). The shell is the only
+consumer so far (any future program gets the heap via `heap_info` the same
+way). And `get_heap`'s `&'static mut` is sound only under the shell's
+one-capture-at-a-time usage - a program capturing two things at once would
+alias it.
+
 ## Commands
 
 ```sh

@@ -82,10 +82,14 @@ allowance (currently 4 pages, 16KB), with the stack pointer starting at the
 top and growing down - so a stack overflow lands in the guard page and
 takes a clean fault instead of corrupting the code below (see "Stack guard
 page" in `CLAUDE.md`; the guard immediately caught a real 8KB overflow in
-the shell's own `exec` path, which is why the stack is 16KB, not 8KB). No
-heap, no
-`.bss`/`.data` support (see "Binary format" below) — everything a program
-needs beyond code and a stack has to be a local variable today.
+the shell's own `exec` path, which is why the stack is 16KB, not 8KB).
+Below the guard is a 256KB **raw heap area** the program reaches via the
+`heap_info` syscall (a `&mut [u8]`, not a `GlobalAlloc`-backed heap - see
+"Binary format" for why `alloc`'s `Vec`/`String` can't be used here) - the
+shell uses it to hold a redirect/pipe capture far larger than its stack, so
+`cat big > file` works. No `.bss`/`.data` support still (see "Binary
+format" below) — beyond code, the heap area, and a stack, a program has no
+static state today.
 
 **Why the region is 2MB-aligned even though it's usually only a few KB:**
 `mmu.rs` gives a region fine-grained (4KB page) EL0 access by splitting
@@ -187,6 +191,16 @@ Consequences of "real ELF, real relocations, but still narrowly scoped
   The failure is loud (a link error naming `R_AARCH64_ABS64`), never
   silent — when you hit a new one, replace the libcore call with a
   hand-rolled equivalent and add it to this list.
+- **The whole `alloc` crate is unusable** for the same reason, and there's
+  no hand-rolled-around-it fix: prebuilt lib`alloc`'s own `.rodata`
+  (anonymous const data that `Vec`/`String`/`Box` pull in unavoidably)
+  carries `R_AARCH64_ABS64` relocations, so `extern crate alloc` +
+  any collection fails the `-pie` link. The only fix is `-Z build-std`
+  (rebuild lib`alloc` with PIE flags), which is nightly-only and off-limits
+  on this stable project — so **no `Vec`/`String`/`Box`**. The userland
+  heap is a *raw buffer* (`heap_info`), not a `GlobalAlloc` heap, because
+  of this (found by the go/no-go gate that opened the userland-heap
+  milestone).
 - **`core::fmt` (`write!`, `{}` formatting) is safe now — confirmed,
   not just reasoned about.** Historically unsafe here for the identical
   reason the old flat loader made *any* absolute data pointer unsafe
@@ -397,9 +411,13 @@ Worth knowing before building further on this:
   `spawn`. Once both spawnable slots are in use, a further `exec` fails
   with `SPAWN_ERR_NO_FREE_SLOT` rather than growing the scheduler
   further.
-- **No heap for userland programs**, and no `.bss`, so no static mutable
-  state at all — every program is constrained to stack-local state, same
-  as the shell.
+- **No `alloc`-backed heap, and no `.bss`** — so no dynamic collections
+  (`Vec`/`String`/`Box`) and no static mutable state. There **is** a 256KB
+  *raw* heap area per program (`heap_info` syscall, a `&mut [u8]`), which
+  lifts fixed-buffer caps (the shell's redirect/pipe capture uses it) - but
+  a real `GlobalAlloc` heap is blocked: prebuilt lib`alloc` has
+  `R_AARCH64_ABS64` relocations a `-pie` link rejects, and rebuilding it
+  needs nightly `-Z build-std` (see "Binary format").
 - **Stack size is fixed** (4 pages, 16KB) regardless of what a program
   actually needs, but there **is** a guard page now — a stack overflow
   lands in an inaccessible page below the stack and takes a clean EL0
@@ -444,8 +462,10 @@ Worth knowing before building further on this:
   grant plus an active call), which lifted the 512-byte cap for file
   reads/writes to `SAFECOPY_MAX` (2048) per op and lets `cat` stream any
   size. What remains: the 512-byte inline cap still bounds directory
-  *listings* (`ls`); a single non-streaming transfer is still
-  userland-memory-bound (no heap, 16KB stack); and the stack now has a
+  *listings* (`ls`); a single non-streaming transfer is
+  userland-memory-bound, but a program has a 256KB raw heap area now
+  (`heap_info`) on top of its 16KB stack, which the shell uses to capture
+  large redirect/pipe output; and the stack now has a
   *guard page* (an overflow faults cleanly and kills just that task,
   rather than silently corrupting the program's own region - except a
   single >4KB frame could skip the one-page guard).

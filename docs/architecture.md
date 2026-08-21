@@ -99,13 +99,18 @@ incoming task's view (and flushes the TLB) at every context switch;
 its own region (one 2MB→4KB split), since a region fits one 2MB slot by
 construction.
 
-A loaded program's region is laid out `[code][1 guard page][16KB stack]`,
-the stack growing down from the top. The guard page is inside the region
-but mapped EL1-only (a hole in the EL0 access), so a **stack overflow**
-faults cleanly and kills just that task instead of silently corrupting the
-code below - the same fault-isolation path as touching another task's
-memory. (The guard immediately exposed a real overflow: the shell's own
-`exec` path used just over 8KB, so the stack was grown from 8KB to 16KB.) The complementary half is at the syscall boundary: every
+A loaded program's region is laid out `[code][256KB heap][1 guard page]
+[16KB stack]`, the stack growing down from the top. The guard page is inside
+the region but mapped EL1-only (a hole in the EL0 access), so a **stack
+overflow** faults cleanly and kills just that task instead of silently
+corrupting what's below it - the same fault-isolation path as touching
+another task's memory. (The guard immediately exposed a real overflow: the
+shell's own `exec` path used just over 8KB, so the stack was grown from 8KB
+to 16KB.) The **heap** below the guard is a raw EL0-accessible buffer a
+program reaches via the `heap_info` syscall (a `&mut [u8]`, *not* a
+`GlobalAlloc`-backed heap - `alloc`'s collections can't link under this PIE
+loader) - the shell backs its redirect/pipe capture with it, so
+`cat big > file` holds and writes the whole file. The complementary half is at the syscall boundary: every
 `(pointer, length)` argument is checked to fall inside the calling
 task's own region (`syscall.rs::in_caller_region`) — otherwise a task
 could launder access to another's memory *through* a kernel copy.
@@ -480,6 +485,7 @@ the way hand-duplicated numbers did before this crate existed.
 | 37 | `fb_clear` | — | `0` | Blanks the whole framebuffer. **Gated to task 3**. Used by the server's startup and its `clear`/ANSI-`2J` handling |
 | 38 | `stdout_target` | — | the caller's stdout target task index | Where this program's output should go (set by whoever `spawn`ed it; `CON_TASK` by default). A producer routes output there: `CON_TASK` → the console server (`DSPOP_WRITE`); otherwise a raw byte stream (chunked data messages + an empty end-of-stream message) to that task, which relays or captures it. This is what makes a task's own output capturable — program-to-program pipes and `exec … > file` |
 | 39 | `self` | — | the caller's own task slot index | A task's identity (otherwise unknowable — every other task-aware syscall takes an index). The shell needs it to route a pipe producer's stdout back to itself, and a foreground-spawned shell isn't task 0 |
+| 40 | `heap_info` | field (`0`=base, `1`=size) | the requested heap-area geometry, or `0` | Each program's region carries a fixed 256KB **raw heap area** (between its code and its stack guard page) it reads/writes via a `&mut [u8]` — space far larger than the 16KB stack, for data a fixed stack buffer can't hold (the shell backs its redirect/pipe capture with it, so `cat big > file` works). *Not* a `GlobalAlloc` heap — `alloc`'s collections can't link under this PIE loader (prebuilt lib`alloc` has `R_AARCH64_ABS64` relocations a `-pie` link rejects; the fix is nightly `-Z build-std`) |
 | other | — | — | `u64::MAX` | Logged as unknown |
 
 ### The filesystem request protocol (`FSOP_*`)

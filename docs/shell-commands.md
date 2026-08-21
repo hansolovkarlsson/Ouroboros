@@ -80,9 +80,9 @@ implement a completely different command set.
 | `fg` | `fg <n>` | Hands the keyboard to task `n` — e.g. `exec /EFI/ORBS/SH.BIN` then `fg 2` gives a real nested shell session; its `exit` hands the keyboard back. | **Ctrl+C is the escape hatch**: typed while another task owns the keyboard, the kernel reclaims it for this shell (the foregrounded task keeps running in the background — Ctrl+C is keyboard reclamation, not a signal; `kill` the task if it should die too). Ownership also reverts automatically when the foregrounded task exits or is killed. While this shell owns the keyboard, Ctrl+C (like every unhandled control byte) is ignored by the line editor. |
 | `send` | `send <n> <words...>` | Sends the words (space-joined, like `write`) as one IPC message (≤64 bytes) to task `n`'s mailbox. | Fails distinctly for a missing task, an over-long message, or a full mailbox (4 pending max). A dead task's queued mail dies with it. |
 | `recv` | `recv` | Blocks until a message arrives and prints `task N: <message>`. | Ctrl+C interrupts, like `wait`; typing during a blocked `recv` is otherwise discarded. |
-| `wait` | `wait <n>` | Blocks until task `n` dies, then reports its exit status — which is also what *reaps* it (an exited task holds its slot as a zombie, shown by `ps`, until waited). | Ctrl+C interrupts the wait (the task keeps running); any other typing during a wait is discarded, like typing at a busy foreground job in `sh`. Waiting on tasks 0-2 or yourself is refused (they never die). **Behavior change from earlier builds:** an un-waited exited task holds its slot — `exec` something three times without waiting and the third fails with "no free task slot" until you `wait` (or the task is `kill`ed, which reaps immediately). |
+| `wait` | `wait <n>` | Blocks until task `n` dies, then reports its exit status — which is also what *reaps* it (an exited task holds its slot as a zombie, shown by `ps`, until waited). | Ctrl+C interrupts the wait (the task keeps running); any other typing during a wait is discarded, like typing at a busy foreground job in `sh`. Waiting on tasks 0-3 (shell, idle, fsd, cond) or yourself is refused (they never die). **Behavior change from earlier builds:** an un-waited exited task holds its slot — `exec` something three times without waiting and the third fails with "no free task slot" until you `wait` (or the task is `kill`ed, which reaps immediately). |
 | `exit` | `exit` | Asks the kernel to destroy this task (`exit` syscall). | Always refused for the boot shell itself (it's the sole keyboard owner - the kernel returns `EXIT_DENIED` and the shell prints why); exists as the reference for how a replacement/spawned program ends itself. `hello/` (`exec /EFI/ORBS/HELLO.BIN`) demonstrates a successful exit. |
-| `exec` | `exec <path>` | Loads the program at `path` and starts it as a new, independent task alongside this shell (see `ps`) — spawn semantics, not exec-replaces-current-process. | Reads the program via the filesystem server in 512-byte chunks, stages them into the kernel, then spawns (see `architecture.md`'s "Dynamic task creation"). Fails with the specific reason: no such file, is a directory, not a loadable program (bad ELF), too large, or no free task slot (two spawnable slots, 3-4). |
+| `exec` | `exec <path>` | Loads the program at `path` and starts it as a new, independent task alongside this shell (see `ps`) — spawn semantics, not exec-replaces-current-process. | Reads the program via the filesystem server in 512-byte chunks, stages them into the kernel, then spawns (see `architecture.md`'s "Dynamic task creation"). Fails with the specific reason: no such file, is a directory, not a loadable program (bad ELF), too large, or no free task slot (two spawnable slots, 4-5). |
 | `mount` | `mount` | Makes a USB storage stick's FAT32 filesystem available — the Parallels workflow: passthrough USB attaches a few seconds *after* boot, so boot, wait a moment, then `mount`. | Two halves under the hood: the filesystem server first retries mounting whatever block device the kernel already holds; only if that yields nothing does the kernel rescan the USB ports and install a found stick as a *replacement* device (safe exactly because nothing is mounted), then the server mounts it. An unmountable boot-time disk (e.g. `make run`'s FAT16) therefore never blocks a later stick. |
 | `selftest` | `selftest` | Exercises the two historically-crashing code patterns (`write!`/`core::fmt` formatting, slice/str-vs-literal comparison) and prints pass/fail lines. | The relocating loader's permanent acceptance test — see `processes.md`'s "Binary format". |
 | `mv` | `mv <src> <dst>` | Renames or moves a file or directory to `dst` — and if `dst` is an existing directory, moves `src` *into* it keeping its basename (`mv notes.txt backup/`), like real `mv`. | A `dst` that exists and isn't a directory still fails rather than being overwritten. `mv x x` is refused ("source and destination are the same"). Moving a directory to a different parent correctly updates its own `..` entry, so `cd ..` inside it still resolves to the *new* parent afterward. No cycle detection beyond the trivial self-move guard. |
@@ -116,19 +116,16 @@ Semantics, deliberately close to `sh` where the architecture allows:
   tokenization rule as everywhere else. Exactly one word (the target
   path) may follow the operator.
 - `cat`'s display-only trailing newline stays off the captured bytes,
-  so `cat a > b` copies `a`'s bytes exactly. (`cat` itself no longer
-  truncates — it streams any size — but a *redirect capture* is still
-  bounded, see the limits just below, so `cat big > b` for a `big`
-  larger than the capture refuses rather than writing a partial copy;
-  use `cp` for larger files.)
+  so `cat a > b` copies `a`'s bytes exactly. `cat big > b` now captures
+  and writes the whole thing (`cat` streams any size, and the capture is
+  heap-backed — see below), no longer refusing.
 
 Limits, all refuse-outright rather than write-something-wrong:
 
-- A command's redirected output is captured in a 1024-byte buffer
-  (raised from 512 by the grant/safecopy milestone; the write itself
-  goes through the bulk path, but the capture stays below `SAFECOPY_MAX`
-  because it nests with `cat`'s streaming chunk on the shell's fixed,
-  unguarded 8KB stack); a command that emits more than that prints
+- A command's redirected output is captured in the shell's **256KB heap
+  region** (the userland-heap milestone — a raw buffer far larger than the
+  stack, so `cat big > file` fits and is written to disk in `SAFECOPY_MAX`
+  chunks); a command that emits more than 256KB prints
   `output too large to capture` and **nothing is written at all**.
 - `>>` **appends at the file's end via the FAT32 offset-write
   primitive** (`write_at`) — no read-back of the existing content, so it

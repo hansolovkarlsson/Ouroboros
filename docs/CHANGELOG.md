@@ -7,6 +7,41 @@ what broke, how it was diagnosed), see `CLAUDE.md`; for *how* something
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## Userland heap (raw buffer) - and a useful negative result about `alloc`
+
+Programs were fixed-buffer only (16KB stack, no heap, no static state), so
+the shell's redirect/pipe capture was a 1024-byte stack array and `cat big
+> file` *refused* anything larger. This gives each program a **256KB raw
+heap area** in its region (`[code][heap][guard][stack]`), reported by a new
+`heap_info` syscall (40), and backs the shell's capture with it - so a large
+capture is held whole and written to disk in chunks.
+
+**A go/no-go gate produced a useful negative result first:** a real
+`alloc`-backed heap (`Vec`/`String`/`Box`) **can't be built under this
+loader on stable.** Prebuilt lib`alloc` carries `R_AARCH64_ABS64`
+relocations in its `.rodata` that a `-pie` link rejects (the same
+`recompile with -fPIC` wall documented for `slice_error_fail`/`memrchr`),
+and the fix - `-Z build-std` to rebuild lib`alloc` with PIE flags - is
+nightly-only, off-limits on this stable-only project. One build proved it,
+before any real investment. So this is a **raw buffer** a program uses via a
+`&mut [u8]`, not a `GlobalAlloc` heap.
+
+`loader.rs` sizes the heap into the region (the guard page is unchanged -
+still just below the stack, the heap sits below the guard). The shell's
+`Output::Capture` holds a heap-backed slice now, and `finish_redirect`
+writes a large capture in `SAFECOPY_MAX` chunks (`write_all`), since one
+`fs_write_*` is capped there.
+
+Verified on QEMU, zero `-d int` aborts: **`cat /EFI/ORBS/SH.BIN > /big.bin`
+(the full 72KB) captures completely and writes it**, where it used to refuse
+at 1024 bytes - proven by round-tripping (`cat /big.bin | UPPER.BIN` shows
+the uppercased ELF section names, so the whole file came back). Small `>`,
+`>>` append, and the builtin-left pipe all still work; the region grows
+~256KB per program (fits the 2MB slot), the idle region gets no heap. See
+`CLAUDE.md`'s "Userland heap" section. Still coarse: a raw buffer, not
+dynamic collections; one fixed-size area per program; the shell is the only
+consumer so far.
+
 ## Stack guard page - and the silent overflow it immediately found
 
 Every userland task ran on a fixed 8KB stack with **no guard**: the layout
