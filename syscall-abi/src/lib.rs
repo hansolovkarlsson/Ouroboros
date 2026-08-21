@@ -489,6 +489,25 @@ pub const NET_PING_NO_ARP: u64 = 2;
 /// sent at all.
 pub const NET_PING_NO_NIC: u64 = 3;
 
+/// [`NETOP_RESOLVE`] request: `[op: u64][hostname bytes...]` (the hostname
+/// fills the rest of the message, no length prefix - `netd` takes it from
+/// the message length). `netd` sends a **DNS A-record query over UDP** to
+/// the QEMU user-net DNS server (`10.0.2.3`), waits for the response, and
+/// replies `[status: u64][ipv4: u64]` where a `NET_RESOLVE_OK` status means
+/// the four resolved octets are packed little-endian in the second word.
+/// The first end-to-end UDP application in the stack.
+pub const NETOP_RESOLVE: u64 = 2;
+
+/// [`NETOP_RESOLVE`] reply: resolved - the IPv4 is in the reply's second u64.
+pub const NET_RESOLVE_OK: u64 = 0;
+/// [`NETOP_RESOLVE`] reply: no DNS response before the deadline.
+pub const NET_RESOLVE_TIMEOUT: u64 = 1;
+/// [`NETOP_RESOLVE`] reply: the server answered but with no A record (the
+/// name doesn't resolve, or an encoding this minimal parser can't read).
+pub const NET_RESOLVE_NXDOMAIN: u64 = 2;
+/// [`NETOP_RESOLVE`] reply: no NIC this boot.
+pub const NET_RESOLVE_NO_NIC: u64 = 3;
+
 /// [`CON_INFO`] field: the backend kind ([`CON_KIND_*`]).
 pub const CON_INFO_KIND: u64 = 0;
 /// [`CON_INFO`] field: framebuffer columns (character cells wide).

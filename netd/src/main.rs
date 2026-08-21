@@ -29,6 +29,12 @@ use core::panic::PanicInfo;
 
 /// Our assumed IPv4 (QEMU user-net gives the guest `10.0.2.15` by default).
 const OUR_IP: [u8; 4] = [10, 0, 2, 15];
+/// QEMU user-net's built-in DNS proxy (forwards to the host's resolver).
+const DNS_SERVER: [u8; 4] = [10, 0, 2, 3];
+/// A fixed ephemeral UDP source port for DNS queries (one query at a time).
+const DNS_SRC_PORT: u16 = 0x8000;
+/// The DNS transaction id we send and match on the reply.
+const DNS_ID: u16 = 0x4f42; // "OB"
 /// A fixed ICMP echo identifier - `netd` has no static state to count from,
 /// and one outstanding ping at a time makes a fixed id/seq sufficient.
 const ICMP_ID: u16 = 0x4f42; // "OB"
@@ -63,14 +69,25 @@ fn serve(packed_mac: u64) -> ! {
             continue; // interrupted or error - wait again
         }
         let sender = packed >> 32;
-        let op = read_u64(&buf, 0);
-        let status = match op {
-            syscall_abi::NETOP_PING => handle_ping(packed_mac, read_u64(&buf, 8)),
+        let len = (packed & 0xffff_ffff) as usize;
+        match read_u64(&buf, 0) {
+            syscall_abi::NETOP_PING => {
+                let status = handle_ping(packed_mac, read_u64(&buf, 8));
+                reply(sender, &status.to_le_bytes());
+            }
+            syscall_abi::NETOP_RESOLVE => {
+                // The hostname fills the message after the 8-byte op.
+                let end = len.min(buf.len()).max(8);
+                let (status, ip) = handle_resolve(packed_mac, &buf[8..end]);
+                let mut r = [0u8; 16];
+                r[0..8].copy_from_slice(&status.to_le_bytes());
+                r[8..16].copy_from_slice(&ip.to_le_bytes());
+                reply(sender, &r);
+            }
             // Unknown op (including the supervisor's health-ping): any reply
-            // acks it. Status is irrelevant to the sentinel.
-            _ => 0,
-        };
-        reply(sender, status);
+            // acks it. The value is irrelevant to the ping sentinel.
+            _ => reply(sender, &0u64.to_le_bytes()),
+        }
     }
 }
 
@@ -221,6 +238,207 @@ fn is_echo_reply(frame: &[u8], target: &[u8; 4]) -> bool {
     frame[icmp] == 0 && frame[icmp + 4..icmp + 6] == ICMP_ID.to_be_bytes()
 }
 
+/// Resolve `host` to an IPv4 by sending a DNS A-record query over UDP to the
+/// user-net DNS server and parsing the response. Returns
+/// `(status, packed_ip)` - the `NET_RESOLVE_*` status, and the four resolved
+/// octets packed little-endian when it's `NET_RESOLVE_OK`. The first UDP
+/// application in the stack (Stage 3).
+fn handle_resolve(packed_mac: u64, host: &[u8]) -> (u64, u64) {
+    if packed_mac == syscall_abi::NET_ERROR {
+        return (syscall_abi::NET_RESOLVE_NO_NIC, 0);
+    }
+    if host.is_empty() {
+        return (syscall_abi::NET_RESOLVE_NXDOMAIN, 0);
+    }
+    let mac = unpack_mac(packed_mac);
+    let Some(server_mac) = arp_resolve(&mac, &DNS_SERVER) else {
+        return (syscall_abi::NET_RESOLVE_TIMEOUT, 0);
+    };
+
+    let mut dns = [0u8; 300];
+    let Some(dlen) = build_dns_query(host, &mut dns) else {
+        return (syscall_abi::NET_RESOLVE_NXDOMAIN, 0);
+    };
+    let mut frame = [0u8; 400];
+    let Some(flen) = build_dns_frame(&mac, &server_mac, &dns[..dlen], &mut frame) else {
+        return (syscall_abi::NET_RESOLVE_NXDOMAIN, 0);
+    };
+    if send(&frame[..flen]).is_err() {
+        return (syscall_abi::NET_RESOLVE_TIMEOUT, 0);
+    }
+
+    let deadline = now() + 75; // ~1.5s
+    let mut rx = [0u8; 1600];
+    loop {
+        if let Some(len) = recv(&mut rx) {
+            if let Some(payload) = dns_payload(&rx[..len]) {
+                return match parse_dns_a(payload) {
+                    Some(ip) => (
+                        syscall_abi::NET_RESOLVE_OK,
+                        ip[0] as u64 | (ip[1] as u64) << 8 | (ip[2] as u64) << 16 | (ip[3] as u64) << 24,
+                    ),
+                    None => (syscall_abi::NET_RESOLVE_NXDOMAIN, 0),
+                };
+            }
+        }
+        if now() > deadline {
+            return (syscall_abi::NET_RESOLVE_TIMEOUT, 0);
+        }
+    }
+}
+
+/// Build a DNS standard query (A record, recursion desired) for `host` into
+/// `out`, returning its length. Encodes the hostname as length-prefixed
+/// labels (hand-rolled, no `str::split`).
+fn build_dns_query(host: &[u8], out: &mut [u8]) -> Option<usize> {
+    if out.len() < 12 {
+        return None;
+    }
+    out[0..2].copy_from_slice(&DNS_ID.to_be_bytes());
+    out[2..4].copy_from_slice(&0x0100u16.to_be_bytes()); // flags: recursion desired
+    out[4..6].copy_from_slice(&1u16.to_be_bytes()); // qdcount
+    out[6..12].copy_from_slice(&[0u8; 6]); // an/ns/ar count
+
+    let mut w = 12;
+    let mut label_start = 0;
+    let mut i = 0;
+    while i <= host.len() {
+        if i == host.len() || host[i] == b'.' {
+            let ll = i - label_start;
+            if ll == 0 || ll > 63 || w + 1 + ll >= out.len() {
+                return None;
+            }
+            out[w] = ll as u8;
+            w += 1;
+            out[w..w + ll].copy_from_slice(&host[label_start..i]);
+            w += ll;
+            label_start = i + 1;
+        }
+        i += 1;
+    }
+    if w + 5 > out.len() {
+        return None;
+    }
+    out[w] = 0; // root label
+    w += 1;
+    out[w..w + 2].copy_from_slice(&1u16.to_be_bytes()); // QTYPE A
+    out[w + 2..w + 4].copy_from_slice(&1u16.to_be_bytes()); // QCLASS IN
+    Some(w + 4)
+}
+
+/// Wrap a DNS message in a UDP datagram, IPv4 packet, and Ethernet frame to
+/// the DNS server. UDP checksum 0 (optional for IPv4, and SLIRP accepts it).
+fn build_dns_frame(mac: &[u8; 6], server_mac: &[u8; 6], dns: &[u8], out: &mut [u8]) -> Option<usize> {
+    const IP_LEN: usize = 20;
+    const UDP_LEN: usize = 8;
+    let total = 14 + IP_LEN + UDP_LEN + dns.len();
+    if out.len() < total {
+        return None;
+    }
+    // Ethernet.
+    out[0..6].copy_from_slice(server_mac);
+    out[6..12].copy_from_slice(mac);
+    out[12..14].copy_from_slice(&[0x08, 0x00]);
+    // IPv4.
+    let ip = 14;
+    out[ip] = 0x45;
+    out[ip + 1] = 0;
+    out[ip + 2..ip + 4].copy_from_slice(&((IP_LEN + UDP_LEN + dns.len()) as u16).to_be_bytes());
+    out[ip + 4..ip + 8].copy_from_slice(&[0u8; 4]); // id, flags/frag
+    out[ip + 8] = 64; // TTL
+    out[ip + 9] = 17; // protocol: UDP
+    out[ip + 10..ip + 12].copy_from_slice(&[0, 0]); // checksum placeholder
+    out[ip + 12..ip + 16].copy_from_slice(&OUR_IP);
+    out[ip + 16..ip + 20].copy_from_slice(&DNS_SERVER);
+    let ipc = ip_checksum(&out[ip..ip + IP_LEN]);
+    out[ip + 10..ip + 12].copy_from_slice(&ipc.to_be_bytes());
+    // UDP.
+    let udp = ip + IP_LEN;
+    out[udp..udp + 2].copy_from_slice(&DNS_SRC_PORT.to_be_bytes());
+    out[udp + 2..udp + 4].copy_from_slice(&53u16.to_be_bytes());
+    out[udp + 4..udp + 6].copy_from_slice(&((UDP_LEN + dns.len()) as u16).to_be_bytes());
+    out[udp + 6..udp + 8].copy_from_slice(&[0, 0]); // checksum 0 (optional on IPv4)
+    out[udp + 8..udp + 8 + dns.len()].copy_from_slice(dns);
+    Some(total)
+}
+
+/// If `frame` is a UDP datagram from the DNS server (port 53) carrying our
+/// transaction id, return the DNS message payload.
+fn dns_payload(frame: &[u8]) -> Option<&[u8]> {
+    if frame.len() < 34 || frame[12] != 0x08 || frame[13] != 0x00 {
+        return None; // not IPv4
+    }
+    if frame[23] != 17 {
+        return None; // not UDP (IP protocol = 14 + 9)
+    }
+    if frame[26..30] != DNS_SERVER {
+        return None; // source IP != DNS server
+    }
+    let ihl = (frame[14] & 0x0f) as usize * 4;
+    let udp = 14 + ihl;
+    if frame.len() < udp + 8 {
+        return None;
+    }
+    if frame[udp..udp + 2] != 53u16.to_be_bytes() {
+        return None; // UDP source port != 53
+    }
+    let dns = udp + 8;
+    if frame.len() < dns + 12 || frame[dns..dns + 2] != DNS_ID.to_be_bytes() {
+        return None; // truncated, or not our query id
+    }
+    Some(&frame[dns..])
+}
+
+/// Find the first A record's IPv4 in a DNS response, handling name
+/// compression pointers. `None` if there's no usable A record.
+fn parse_dns_a(resp: &[u8]) -> Option<[u8; 4]> {
+    if resp.len() < 12 {
+        return None;
+    }
+    let qdcount = ((resp[4] as usize) << 8) | resp[5] as usize;
+    let ancount = ((resp[6] as usize) << 8) | resp[7] as usize;
+    if ancount == 0 {
+        return None;
+    }
+    let mut pos = 12;
+    for _ in 0..qdcount {
+        pos = skip_name(resp, pos)?;
+        pos += 4; // qtype + qclass
+    }
+    for _ in 0..ancount {
+        pos = skip_name(resp, pos)?;
+        if pos + 10 > resp.len() {
+            return None;
+        }
+        let rtype = ((resp[pos] as usize) << 8) | resp[pos + 1] as usize;
+        let rdlength = ((resp[pos + 8] as usize) << 8) | resp[pos + 9] as usize;
+        let rdata = pos + 10;
+        if rtype == 1 && rdlength == 4 && rdata + 4 <= resp.len() {
+            return Some([resp[rdata], resp[rdata + 1], resp[rdata + 2], resp[rdata + 3]]);
+        }
+        pos = rdata + rdlength;
+    }
+    None
+}
+
+/// Skip a DNS name at `pos`, returning the position just after it. A
+/// compression pointer (top two bits set) is a 2-byte terminal.
+fn skip_name(buf: &[u8], mut pos: usize) -> Option<usize> {
+    loop {
+        if pos >= buf.len() {
+            return None;
+        }
+        let len = buf[pos] as usize;
+        if len == 0 {
+            return Some(pos + 1);
+        }
+        if len & 0xc0 == 0xc0 {
+            return Some(pos + 2); // compression pointer ends the name
+        }
+        pos += 1 + len;
+    }
+}
+
 /// One's-complement Internet checksum over 16-bit big-endian words (the IPv4
 /// header and ICMP message both use it).
 fn ip_checksum(data: &[u8]) -> u16 {
@@ -280,9 +498,9 @@ fn recv(buf: &mut [u8]) -> Option<usize> {
     }
 }
 
-/// Reply to a client `MSG_CALL` (or ack the supervisor ping) with a status.
-fn reply(sender: u64, status: u64) {
-    syscall4(syscall_abi::MSG_SEND, sender, &status as *const u64 as u64, 8, 0);
+/// Reply to a client `MSG_CALL` (or ack the supervisor ping) with `data`.
+fn reply(sender: u64, data: &[u8]) {
+    syscall4(syscall_abi::MSG_SEND, sender, data.as_ptr() as u64, data.len() as u64, 0);
 }
 
 /// Route a log line through the console server as a batched `DSPOP_WRITE`,

@@ -672,7 +672,7 @@ fn dispatch_line(line: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize, out:
     let arg = words.next().unwrap_or("");
 
     match command {
-        "help" => out.put_line("commands: help, echo, uptime, clear, ls, cat, cd, pwd, mkdir, rmdir, touch, rm, write, writeat, cp, mv, mount, ping, exec, exit, ps, kill, fg, wait, send, recv, selftest (append `> file`/`>> file` to redirect output, or `| /path/to/program` to pipe it into a spawned program)"),
+        "help" => out.put_line("commands: help, echo, uptime, clear, ls, cat, cd, pwd, mkdir, rmdir, touch, rm, write, writeat, cp, mv, mount, ping, resolve, exec, exit, ps, kill, fg, wait, send, recv, selftest (append `> file`/`>> file` to redirect output, or `| /path/to/program` to pipe it into a spawned program)"),
         "echo" => {
             let mut first = true;
             for word in line.split_whitespace().skip(1) {
@@ -692,6 +692,7 @@ fn dispatch_line(line: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize, out:
             out.put_line(" ticks since boot");
         }
         "ping" => cmd_ping(arg, out),
+        "resolve" => cmd_resolve(arg, out),
         "clear" => {
             // ANSI clear-screen + cursor-home - the shell's own escape
             // sequence, not a syscall; the console itself has no notion
@@ -1795,6 +1796,70 @@ fn cmd_ping(arg: &str, out: &mut Output) {
         }
         syscall_abi::NET_PING_NO_NIC => print_line("ping: no network interface this boot"),
         _ => print_line("ping: unexpected result"),
+    }
+}
+
+/// `resolve <hostname>` - asks the network server (`netd`) to look up a
+/// hostname's IPv4 via a DNS query over UDP, and prints the result. The
+/// first UDP application in the stack; the whole DNS logic lives in `netd`.
+fn cmd_resolve(arg: &str, out: &mut Output) {
+    let host = arg.trim();
+    let hb = host.as_bytes();
+    // Request: [NETOP_RESOLVE][hostname bytes]; reply: [status][ipv4].
+    if hb.is_empty() || 8 + hb.len() > syscall_abi::MSG_MAX_LEN as usize {
+        print_line("resolve: usage: resolve <hostname>");
+        return;
+    }
+    let mut req = [0u8; syscall_abi::MSG_MAX_LEN as usize];
+    req[0..8].copy_from_slice(&syscall_abi::NETOP_RESOLVE.to_le_bytes());
+    req[8..8 + hb.len()].copy_from_slice(hb);
+    let mut reply = [0u8; syscall_abi::MSG_MAX_LEN as usize];
+    let packed = syscall4(
+        syscall_abi::MSG_CALL,
+        syscall_abi::NET_TASK,
+        req.as_ptr() as u64,
+        (8 + hb.len()) as u64,
+        reply.as_mut_ptr() as u64,
+    );
+    if packed == syscall_abi::TASK_ERR_NO_SUCH_TASK {
+        print_line("resolve: no network server this boot");
+        return;
+    }
+    if packed >= FS_ERR_MIN {
+        print_line("resolve: request failed");
+        return;
+    }
+    let status = u64::from_le_bytes([
+        reply[0], reply[1], reply[2], reply[3], reply[4], reply[5], reply[6], reply[7],
+    ]);
+    let ip = u64::from_le_bytes([
+        reply[8], reply[9], reply[10], reply[11], reply[12], reply[13], reply[14], reply[15],
+    ]);
+    match status {
+        syscall_abi::NET_RESOLVE_OK => {
+            out.put_str(host);
+            out.put_str(" is ");
+            out.put_u64_decimal(ip & 0xff);
+            out.put(b'.');
+            out.put_u64_decimal((ip >> 8) & 0xff);
+            out.put(b'.');
+            out.put_u64_decimal((ip >> 16) & 0xff);
+            out.put(b'.');
+            out.put_u64_decimal((ip >> 24) & 0xff);
+            out.put_line("");
+        }
+        syscall_abi::NET_RESOLVE_TIMEOUT => {
+            print_str("resolve: no response for ");
+            print_str(host);
+            print_line("");
+        }
+        syscall_abi::NET_RESOLVE_NXDOMAIN => {
+            print_str("resolve: could not resolve ");
+            print_str(host);
+            print_line("");
+        }
+        syscall_abi::NET_RESOLVE_NO_NIC => print_line("resolve: no network interface this boot"),
+        _ => print_line("resolve: unexpected result"),
     }
 }
 
