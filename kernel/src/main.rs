@@ -277,6 +277,22 @@ fn main() -> Status {
         }
     };
 
+    let netd = match loader::load_netd() {
+        Ok(netd) => {
+            log::info!(
+                "Ouroboros kernel: loaded network server, region {:#x}-{:#x}, entry {:#x}",
+                netd.base,
+                netd.base + netd.size,
+                netd.entry
+            );
+            Some(netd)
+        }
+        Err(e) => {
+            log::warn!("Ouroboros kernel: no network server ({e}) - no network this boot");
+            None
+        }
+    };
+
     // SAFETY: no boot-services protocol references (console, allocator, or
     // otherwise) are held past this call. Nothing below this point may use
     // log::*, alloc, or UEFI protocols — only the raw MMIO in `uart`/
@@ -341,16 +357,17 @@ fn main() -> Status {
     unsafe {
         mmu::install_identity_map(
             memory_map,
-            // Slot 2 is the filesystem server's region and slot 3 the
-            // console server's ((0, 0) - "no region" - if either wasn't
-            // loaded); slots 4/5 stay (0, 0) until `tasks::spawn` fills
-            // one in. `install_identity_map` already treats a zero-size
-            // region as "no region" (see `overlaps_any`).
+            // Slots 2/3/4 are the filesystem/console/network servers'
+            // regions ((0, 0) - "no region" - for any that wasn't loaded);
+            // slots 5/6 stay (0, 0) until `tasks::spawn` fills one in.
+            // `install_identity_map` already treats a zero-size region as
+            // "no region" (see `overlaps_any`).
             [
                 (program.base, program.size),
                 tasks::idle_region(),
                 fsd.as_ref().map_or((0, 0), |f| (f.base, f.size)),
                 cond.as_ref().map_or((0, 0), |c| (c.base, c.size)),
+                netd.as_ref().map_or((0, 0), |n| (n.base, n.size)),
                 (0, 0),
                 (0, 0),
             ],
@@ -557,7 +574,7 @@ fn main() -> Status {
     }
 
     // SAFETY: every loaded EL0 region was just mapped EL0-accessible above.
-    unsafe { tasks::init(&program, fsd.as_ref(), cond.as_ref()) };
+    unsafe { tasks::init(&program, fsd.as_ref(), cond.as_ref(), netd.as_ref()) };
 
     console::println!("Ouroboros kernel: shell ready - type and press Enter");
 
@@ -702,21 +719,16 @@ fn init_storage() {
     console::println!("Ouroboros kernel: block device installed for the filesystem server");
 }
 
-/// Network stack, Stage 1 (`docs/roadmap.md`): brings up the virtio-net
-/// driver and proves raw-frame transmit *and* receive end to end with a
-/// broadcast ARP request for the QEMU user-net gateway, decoding the reply.
-///
-/// The kernel driver (`virtio_net.rs`) is only the DMA-owning half that must
-/// stay in EL1 (no IOMMU); the real protocol stack (ARP/IP/ICMP/UDP/TCP) is
-/// a later stage's userland `netd` server reached through gated syscalls.
-/// This boot-time ARP probe is Stage 1's liveness proof, not that server -
-/// hence the hardcoded QEMU user-net addresses (gateway `10.0.2.2`, our
-/// assumed `10.0.2.15`), a QEMU-shaped convention like the device-region
-/// addresses elsewhere, replaced by real ARP/DHCP in `netd`.
+/// Brings up the virtio-net driver and hands it to the `NET` cell for the
+/// network server (`netd`) to reach through the gated `NET_SEND`/`NET_RECV`
+/// syscalls - the DMA-owning driver stays in EL1 (no IOMMU), the protocol
+/// stack lives in userland (`netd`), the `BLOCK_*` -> fsd pattern. (Stage 1
+/// proved the driver with an in-kernel ARP probe; Stage 2 moved all traffic
+/// to `netd`, so this no longer sends anything itself.)
 ///
 /// Silent when no NIC is attached: plain `make run`/`run-image` don't attach
-/// one (only `make run-net` does), so a `NotFound` returns quietly rather
-/// than logging on every normal dev boot.
+/// one (only `make run-net`/`run-image-net` do), so a `NotFound` returns
+/// quietly rather than logging on every normal dev boot.
 fn init_net() {
     let mut device = match unsafe { virtio_net::Device::discover() } {
         Ok(d) => d,
@@ -736,58 +748,13 @@ fn init_net() {
         mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
     );
 
-    // A broadcast ARP request: "who has 10.0.2.2? tell 10.0.2.15." 42 bytes
-    // (Ethernet 14 + ARP 28); the device/host pads to the 60-byte minimum.
-    let mut arp = [0u8; 42];
-    arp[0..6].copy_from_slice(&[0xff; 6]); // eth dst: broadcast
-    arp[6..12].copy_from_slice(&mac); // eth src
-    arp[12..14].copy_from_slice(&[0x08, 0x06]); // ethertype: ARP
-    arp[14..16].copy_from_slice(&[0x00, 0x01]); // htype: Ethernet
-    arp[16..18].copy_from_slice(&[0x08, 0x00]); // ptype: IPv4
-    arp[18] = 6; // hlen
-    arp[19] = 4; // plen
-    arp[20..22].copy_from_slice(&[0x00, 0x01]); // oper: request
-    arp[22..28].copy_from_slice(&mac); // sha: our MAC
-    arp[28..32].copy_from_slice(&[10, 0, 2, 15]); // spa: our assumed IP
-    // tha (32..38) stays zero
-    arp[38..42].copy_from_slice(&[10, 0, 2, 2]); // tpa: the gateway
-
-    let ticks_per_ms = timer::frequency_hz() / 1000;
-    if let Err(e) = unsafe { device.send_frame(&arp, ticks_per_ms.saturating_mul(100)) } {
-        console::println!("Ouroboros kernel: virtio-net ARP send failed ({e})");
-        return;
-    }
-
-    // Poll for the ARP reply for up to ~1 second (a real wall-clock deadline
-    // off the generic timer, the xHCI-driver lesson - never an iteration
-    // count). Ignore any other frame that happens to arrive meanwhile.
-    let deadline = timer::now_ticks().wrapping_add(ticks_per_ms.saturating_mul(1000));
-    let mut frame = [0u8; virtio_net::MAX_FRAME];
-    loop {
-        if let Some(len) = unsafe { device.poll_frame(&mut frame) } {
-            if len >= 42
-                && frame[12] == 0x08
-                && frame[13] == 0x06 // ethertype ARP
-                && frame[20] == 0x00
-                && frame[21] == 0x02 // oper: reply
-                && frame[28..32] == [10, 0, 2, 2]
-            // sender: the gateway
-            {
-                console::println!(
-                    "Ouroboros kernel: virtio-net ARP reply - 10.0.2.2 is at {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-                    frame[22], frame[23], frame[24], frame[25], frame[26], frame[27]
-                );
-                return;
-            }
-            // Some other frame (broadcast noise, etc.) - keep waiting.
-        }
-        if timer::now_ticks().wrapping_sub(deadline) < u64::MAX / 2 {
-            console::println!(
-                "Ouroboros kernel: virtio-net no ARP reply within 1s (the request was sent - an RX or gateway issue)"
-            );
-            return;
-        }
-    }
+    // Hand the NIC to the NET cell for the network server (netd) to reach
+    // via the gated NET_SEND/NET_RECV syscalls - the kernel keeps only the
+    // DMA-owning driver, the BLOCK_* -> fsd pattern. The protocol stack
+    // (ARP/IP/ICMP) and any actual traffic now live in userland; this
+    // function no longer sends anything itself.
+    syscall::install_net_device(device);
+    console::println!("Ouroboros kernel: NIC installed for the network server");
 }
 
 /// Parks the core forever instead of returning to firmware. `wfe` is a

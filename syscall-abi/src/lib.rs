@@ -267,6 +267,15 @@ pub const FSD_TASK: u64 = 2;
 /// the destination for console-output requests.
 pub const CON_TASK: u64 = 3;
 
+/// The fixed task slot the network server (`netd/`) runs in - loaded at
+/// boot alongside the shell, filesystem, and console servers, protected
+/// from `kill`/`exit`/`wait` like tasks 0-3. It owns the network protocol
+/// stack (ARP/IPv4/ICMP/...) in userland; the kernel keeps only the
+/// DMA-owning virtio-net driver, reached by this task alone through the
+/// gated [`NET_SEND`]/[`NET_RECV`] syscalls (the `BLOCK_*` -> [`FSD_TASK`]
+/// pattern). Inserting it here shifted the spawnable slots up to 5-6.
+pub const NET_TASK: u64 = 4;
+
 /// `(offset, chunk ptr, chunk len)` -> `0` on success or
 /// [`SPAWN_ERROR`]. Copies one chunk of a program image into the
 /// kernel's fixed 128KB spawn staging buffer at `offset` - the feed
@@ -427,6 +436,34 @@ pub const HEAP_INFO_SIZE: u64 = 1;
 /// flow. Enforced at the `MSG_SEND`/`MSG_CALL` boundary (the kernel's
 /// `may_send`).
 pub const DELEGATE: u64 = 41;
+
+/// `(frame ptr, frame len)` -> `0` on success, or an error sentinel.
+/// Transmits one raw Ethernet frame through the kernel's virtio-net driver.
+/// **Gated to [`NET_TASK`]** (the network server) alone - the DMA-owning
+/// NIC driver stays in the kernel (no IOMMU), reached only by the one task
+/// that owns the protocol stack, exactly like `BLOCK_*` -> [`FSD_TASK`].
+pub const NET_SEND: u64 = 42;
+
+/// `(buf ptr, buf len)` -> the received frame's length (its bytes copied
+/// into `buf`, truncated to `buf len`), `NET_NO_FRAME` if none is waiting,
+/// or an error sentinel. Non-blocking poll of the virtio-net receive ring.
+/// Gated to [`NET_TASK`] like [`NET_SEND`].
+pub const NET_RECV: u64 = 43;
+
+/// `()` -> the NIC's 6-byte MAC address packed little-endian into a `u64`
+/// (`mac[0]` in bits 0-7 ... `mac[5]` in bits 40-47), or [`NET_ERROR`].
+/// The network server needs it to build the Ethernet source of every frame.
+/// Gated to [`NET_TASK`] like [`NET_SEND`].
+pub const NET_MAC: u64 = 44;
+
+/// [`NET_RECV`] returned when no frame is currently available (a poll that
+/// found the receive ring empty) - distinct from a real length (`u64::MAX`
+/// is out of any frame's range) and from the error sentinel.
+pub const NET_NO_FRAME: u64 = u64::MAX;
+
+/// [`NET_SEND`]/[`NET_RECV`] error sentinel: no NIC installed this boot, the
+/// caller isn't [`NET_TASK`], or a bad buffer. Distinct from [`NET_NO_FRAME`].
+pub const NET_ERROR: u64 = u64::MAX - 1;
 
 /// [`CON_INFO`] field: the backend kind ([`CON_KIND_*`]).
 pub const CON_INFO_KIND: u64 = 0;

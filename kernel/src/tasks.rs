@@ -83,11 +83,12 @@ use crate::loader::LoadedProgram;
 /// for a similar "how many of these might we need" question - not a real
 /// limit this kernel has any way to raise gracefully yet (`spawn` just
 /// fails with `SpawnError::NoFreeSlot` past this).
-pub const NUM_TASKS: usize = 6;
+pub const NUM_TASKS: usize = 7;
 
 /// The first slot `spawn` may use - everything below it is fixed
-/// infrastructure (boot shell, idle, filesystem server, console server).
-const FIRST_SPAWNABLE: usize = 4;
+/// infrastructure (boot shell, idle, filesystem server, console server,
+/// network server).
+const FIRST_SPAWNABLE: usize = 5;
 
 // Per-slot capabilities (the capability model for who-may-do-what).
 // Because task-slot roles are static (see `NUM_TASKS`'s doc comment - 0
@@ -106,14 +107,19 @@ pub(crate) const CAP_BLOCK: u32 = 1 << 8;
 /// Only the console server holds it - ordinary tasks reach the console
 /// only through it (a `DSPOP_WRITE` message).
 pub(crate) const CAP_CON: u32 = 1 << 9;
+/// `CAP_NET`: may use `NET_SEND`/`NET_RECV` (the virtio-net device). Only
+/// the network server holds it - ordinary tasks reach the network only
+/// through it (a `NETOP_*` message).
+pub(crate) const CAP_NET: u32 = 1 << 10;
 
 // Send-mask bits (low `NUM_TASKS` bits of a `Caps` word): bit `t` set means
 // "may initiate a send/call to slot `t`". Named per target for readability.
 const TO_SHELL: u32 = 1 << 0; // slot 0
 const TO_FSD: u32 = 1 << (syscall_abi::FSD_TASK as u32); // slot 2
 const TO_CON: u32 = 1 << (syscall_abi::CON_TASK as u32); // slot 3
-const TO_SPAWN_4: u32 = 1 << 4;
+const TO_NET: u32 = 1 << (syscall_abi::NET_TASK as u32); // slot 4
 const TO_SPAWN_5: u32 = 1 << 5;
+const TO_SPAWN_6: u32 = 1 << 6;
 
 /// The capability set for `slot`, a pure function of the slot's static
 /// role. This is the single source of truth for the capability policy -
@@ -123,9 +129,9 @@ const TO_SPAWN_5: u32 = 1 << 5;
 /// in [`may_send`], so only *unsolicited* sends need a mask bit.
 fn caps_for_slot(slot: usize) -> u32 {
     match slot as u64 {
-        // Shell: calls the filesystem and console servers, and sends pipe
-        // input to its spawned children.
-        0 => TO_FSD | TO_CON | TO_SPAWN_4 | TO_SPAWN_5,
+        // Shell: calls the filesystem, console, and network servers, and
+        // sends pipe input to its spawned children.
+        0 => TO_FSD | TO_CON | TO_NET | TO_SPAWN_5 | TO_SPAWN_6,
         // Idle: never sends.
         1 => 0,
         // Filesystem server: logs to the console server; owns the disk.
@@ -134,9 +140,13 @@ fn caps_for_slot(slot: usize) -> u32 {
         // Console server: only ever replies (reply-exempt), so no send-mask
         // bits; owns the console device.
         syscall_abi::CON_TASK => CAP_CON,
-        // Spawnable slots: may reach the two servers (a nested shell needs
-        // fsd; every program outputs via cond) and message the shell (e.g.
-        // pong's unsolicited echo). Not each other, not idle, no devices.
+        // Network server: logs to the console server; owns the NIC. (Replies
+        // to its clients ride the reply exemption.)
+        syscall_abi::NET_TASK => TO_CON | CAP_NET,
+        // Spawnable slots: may reach the servers a program legitimately needs
+        // (fsd for a nested shell, cond for output) and message the shell
+        // (e.g. pong's unsolicited echo). Not the NIC, not each other, not
+        // idle, no devices.
         _ => TO_SHELL | TO_FSD | TO_CON,
     }
 }
@@ -294,6 +304,7 @@ static TASKS: [TaskSlot; NUM_TASKS] = [
     TaskSlot(UnsafeCell::new(Context::zeroed())),
     TaskSlot(UnsafeCell::new(Context::zeroed())),
     TaskSlot(UnsafeCell::new(Context::zeroed())),
+    TaskSlot(UnsafeCell::new(Context::zeroed())),
 ];
 
 static CURRENT: AtomicUsize = AtomicUsize::new(0);
@@ -311,6 +322,7 @@ struct RegionSlot(UnsafeCell<(u64, u64)>);
 unsafe impl Sync for RegionSlot {}
 
 static REGIONS: [RegionSlot; NUM_TASKS] = [
+    RegionSlot(UnsafeCell::new((0, 0))),
     RegionSlot(UnsafeCell::new((0, 0))),
     RegionSlot(UnsafeCell::new((0, 0))),
     RegionSlot(UnsafeCell::new((0, 0))),
@@ -454,6 +466,7 @@ struct MailboxSlot(UnsafeCell<Mailbox>);
 // other per-task cell in this module.
 unsafe impl Sync for MailboxSlot {}
 static MAILBOXES: [MailboxSlot; NUM_TASKS] = [
+    MailboxSlot(UnsafeCell::new(Mailbox::new())),
     MailboxSlot(UnsafeCell::new(Mailbox::new())),
     MailboxSlot(UnsafeCell::new(Mailbox::new())),
     MailboxSlot(UnsafeCell::new(Mailbox::new())),
@@ -670,6 +683,7 @@ static GRANTS: [GrantSlot; NUM_TASKS] = [
     GrantSlot(UnsafeCell::new(Grant { grantee: 0, ptr: 0, len: 0, dir: 0, active: false })),
     GrantSlot(UnsafeCell::new(Grant { grantee: 0, ptr: 0, len: 0, dir: 0, active: false })),
     GrantSlot(UnsafeCell::new(Grant { grantee: 0, ptr: 0, len: 0, dir: 0, active: false })),
+    GrantSlot(UnsafeCell::new(Grant { grantee: 0, ptr: 0, len: 0, dir: 0, active: false })),
 ];
 
 /// `GRANT`'s core: record `granter`'s outstanding grant. The caller
@@ -864,6 +878,7 @@ unsafe impl Sync for StateSlot {}
 static STATES: [StateSlot; NUM_TASKS] = [
     StateSlot(UnsafeCell::new(TaskState::Runnable)),
     StateSlot(UnsafeCell::new(TaskState::Runnable)),
+    StateSlot(UnsafeCell::new(TaskState::Unused)),
     StateSlot(UnsafeCell::new(TaskState::Unused)),
     StateSlot(UnsafeCell::new(TaskState::Unused)),
     StateSlot(UnsafeCell::new(TaskState::Unused)),
@@ -1172,6 +1187,7 @@ pub unsafe fn init(
     program: &LoadedProgram,
     fsd: Option<&LoadedProgram>,
     cond: Option<&LoadedProgram>,
+    netd: Option<&LoadedProgram>,
 ) {
     // Task 0: entry is the program's real ELF entry point, not just its
     // load base - loader.rs computes `entry = base + e_entry` (they
@@ -1237,6 +1253,21 @@ pub unsafe fn init(
         unsafe { *REGIONS[3].0.get() = (cond.base, cond.size) };
         unsafe { *STATES[3].0.get() = TaskState::Runnable };
         clean_dcache_range(cond.base, cond.size);
+    }
+
+    // Task 4: the network server, same setup shape as the filesystem and
+    // console servers. Absent (no NETD.BIN) leaves the slot `Unused`, and
+    // the boot proceeds with no network - `ping` reports no server.
+    if let Some(netd) = netd {
+        *unsafe { &mut *TASKS[4].0.get() } = Context {
+            gpr: [0; 31],
+            sp_el0: netd.base + netd.size,
+            elr_el1: netd.entry,
+            spsr_el1: 0,
+        };
+        unsafe { *REGIONS[4].0.get() = (netd.base, netd.size) };
+        unsafe { *STATES[4].0.get() = TaskState::Runnable };
+        clean_dcache_range(netd.base, netd.size);
     }
 
     unsafe {

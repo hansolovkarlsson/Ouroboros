@@ -59,6 +59,7 @@ static TASK_REPORTS: [AtomicU64; crate::tasks::NUM_TASKS] = [
     AtomicU64::new(0),
     AtomicU64::new(0),
     AtomicU64::new(0),
+    AtomicU64::new(0),
 ];
 
 /// The raw block device the `BLOCK_*` syscalls operate on - the
@@ -81,6 +82,28 @@ pub fn install_block_device(device: crate::block::BlockDevice) {
 /// the device level.
 pub fn block_device_installed() -> bool {
     unsafe { (*BLOCK.0.get()).is_some() }
+}
+
+/// The virtio-net device the `NET_*` syscalls operate on - the kernel's
+/// entire remaining role in networking since the protocol stack moved to
+/// userland (the netd server): hold the NIC, send/receive raw frames on
+/// request, for exactly one authorized task (netd), the `BLOCK_*` -> fsd
+/// pattern. `None` whenever no NIC was discovered this boot.
+struct NetCell(core::cell::UnsafeCell<Option<crate::virtio_net::Device>>);
+// SAFETY: same single-core, non-reentrant-dispatch reasoning as BlockCell.
+unsafe impl Sync for NetCell {}
+static NET: NetCell = NetCell(core::cell::UnsafeCell::new(None));
+
+/// Installs the NIC the `NET_*` syscalls serve (from `main.rs::init_net`).
+pub fn install_net_device(device: crate::virtio_net::Device) {
+    unsafe { *NET.0.get() = Some(device) };
+}
+
+/// Whether the calling task may use the `NET_*` syscalls: whoever holds
+/// `CAP_NET`, which by the capability policy is the network server alone -
+/// the networking analogue of [`block_access_allowed`].
+fn net_access_allowed() -> bool {
+    tasks::cap_has(tasks::current_task(), tasks::CAP_NET)
 }
 
 /// Activates the USB mass-storage device (if any) and installs it as
@@ -484,17 +507,19 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
         }
         syscall_abi::EXIT => {
             let current = tasks::current_task();
-            if current <= 3 {
+            if current <= 4 {
                 // Task 0 (the boot shell - nothing would own the
                 // keyboard, see tasks::INPUT_OWNER_TASK), task 1
                 // (idle - never makes syscalls, refused for
                 // completeness), task 2 (the filesystem server -
                 // its death would strand the disk for the rest of the
-                // boot, and its slot is block-syscall-privileged), and
+                // boot, and its slot is block-syscall-privileged),
                 // task 3 (the console server - its death would strand
                 // steady-state output; the kernel's emergency console
-                // still works, but the shell wouldn't render) may not
-                // exit. The only case where EXIT returns to its caller.
+                // still works, but the shell wouldn't render), and task 4
+                // (the network server - block-syscall-privileged for the
+                // NIC) may not exit. The only case where EXIT returns to
+                // its caller.
                 return syscall_abi::EXIT_DENIED;
             }
             console::println!("Ouroboros kernel: task {current} exited (code {arg0})");
@@ -532,9 +557,10 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
         }
         syscall_abi::KILL => {
             let i = arg0 as usize;
-            if i <= 3 {
+            if i <= 4 {
                 // The boot shell (the permanent keyboard owner), idle,
-                // the filesystem server, and the console server are
+                // the filesystem server, the console server, and the
+                // network server are
                 // protected - same reasoning as EXIT's own refusal of
                 // them.
                 return syscall_abi::TASK_ERR_PROTECTED;
@@ -558,11 +584,11 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
         }
         syscall_abi::WAIT => {
             let i = arg0 as usize;
-            if i <= 3 || i == tasks::current_task() {
-                // Waiting on task 0/1/2/3 (they never die - the boot
-                // shell, idle, the filesystem server, and the console
-                // server are all exit/kill-protected) or on yourself is
-                // a guaranteed deadlock - refused up front.
+            if i <= 4 || i == tasks::current_task() {
+                // Waiting on task 0/1/2/3/4 (they never die - the boot
+                // shell, idle, the filesystem server, the console server,
+                // and the network server are all exit/kill-protected) or
+                // on yourself is a guaranteed deadlock - refused up front.
                 return syscall_abi::TASK_ERR_PROTECTED;
             }
             if i >= tasks::NUM_TASKS {
@@ -766,6 +792,70 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
             match unsafe { device.write_sector(arg0, buf) } {
                 Ok(()) => 0,
                 Err(_) => syscall_abi::BLOCK_ERR_IO,
+            }
+        }
+        syscall_abi::NET_SEND => {
+            // arg0 = frame ptr, arg1 = frame len (a raw Ethernet frame; the
+            // driver prepends the virtio-net header itself). Validated with
+            // in_caller_region, not valid_user_range - a frame exceeds the
+            // 512-byte MAX_USER_LEN cap.
+            if !net_access_allowed()
+                || arg0 == 0
+                || arg1 == 0
+                || arg1 > crate::virtio_net::MAX_FRAME as u64
+                || !in_caller_region(arg0, arg1)
+            {
+                return syscall_abi::NET_ERROR;
+            }
+            let Some(device) = (unsafe { &mut *NET.0.get() }) else {
+                return syscall_abi::NET_ERROR;
+            };
+            // SAFETY: bounds sanity-checked above, same trust model as BLOCK_*.
+            let frame = unsafe { core::slice::from_raw_parts(arg0 as *const u8, arg1 as usize) };
+            let timeout = crate::timer::frequency_hz() / 1000 * 100; // ~100ms
+            match unsafe { device.send_frame(frame, timeout) } {
+                Ok(()) => 0,
+                Err(_) => syscall_abi::NET_ERROR,
+            }
+        }
+        syscall_abi::NET_MAC => {
+            if !net_access_allowed() {
+                return syscall_abi::NET_ERROR;
+            }
+            match unsafe { &*NET.0.get() } {
+                Some(device) => {
+                    let m = device.mac();
+                    // Pack the 6 MAC bytes little-endian into the low 48 bits.
+                    (m[0] as u64)
+                        | (m[1] as u64) << 8
+                        | (m[2] as u64) << 16
+                        | (m[3] as u64) << 24
+                        | (m[4] as u64) << 32
+                        | (m[5] as u64) << 40
+                }
+                None => syscall_abi::NET_ERROR,
+            }
+        }
+        syscall_abi::NET_RECV => {
+            // arg0 = buffer ptr, arg1 = buffer len; a waiting frame is copied
+            // in (truncated to len) and its true length returned, or
+            // NET_NO_FRAME if the receive ring is empty.
+            if !net_access_allowed()
+                || arg0 == 0
+                || arg1 == 0
+                || arg1 > crate::virtio_net::MAX_FRAME as u64
+                || !in_caller_region(arg0, arg1)
+            {
+                return syscall_abi::NET_ERROR;
+            }
+            let Some(device) = (unsafe { &mut *NET.0.get() }) else {
+                return syscall_abi::NET_ERROR;
+            };
+            // SAFETY: same as NET_SEND.
+            let buf = unsafe { core::slice::from_raw_parts_mut(arg0 as *mut u8, arg1 as usize) };
+            match unsafe { device.poll_frame(buf) } {
+                Some(len) => len as u64,
+                None => syscall_abi::NET_NO_FRAME,
             }
         }
         syscall_abi::FG => {

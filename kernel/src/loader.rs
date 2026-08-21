@@ -253,6 +253,9 @@ pub enum LoaderError {
     /// [`CON_PATH`] couldn't be read - kept distinct from [`Program`]/
     /// [`Fsd`] so a missing console server is named for what it is.
     Cond(uefi::fs::Error),
+    /// [`NET_PATH`] couldn't be read - kept distinct so a missing network
+    /// server is named for what it is.
+    Netd(uefi::fs::Error),
     Alloc(uefi::Error),
     /// File is smaller than a bare ELF header, or a header/table field
     /// points past the end of the file - either a corrupt/truncated file
@@ -290,6 +293,7 @@ impl core::fmt::Display for LoaderError {
             LoaderError::Program(e) => write!(f, "couldn't read the program named in {CONFIG_PATH}: {e}"),
             LoaderError::Fsd(e) => write!(f, "couldn't read {FSD_PATH}: {e}"),
             LoaderError::Cond(e) => write!(f, "couldn't read {CON_PATH}: {e}"),
+            LoaderError::Netd(e) => write!(f, "couldn't read {NET_PATH}: {e}"),
             LoaderError::ProgramEmpty => write!(f, "program named in {CONFIG_PATH} is empty"),
             LoaderError::Alloc(e) => write!(f, "couldn't allocate memory for the program: {e}"),
             LoaderError::Truncated => write!(f, "program file is truncated or has an invalid ELF header/table offset"),
@@ -396,6 +400,28 @@ pub fn load_cond() -> Result<LoadedProgram, LoaderError> {
     if !crate::supervisor::register(syscall_abi::CON_TASK as usize, &program_bytes) {
         log::warn!(
             "Ouroboros kernel: COND.BIN too large to keep for crash recovery - the console server won't be restartable this boot"
+        );
+    }
+    load_elf_into_el0_region(&program_bytes)
+}
+
+const NET_PATH: &str = "\\EFI\\ORBS\\NETD.BIN";
+
+/// Loads the network server ([`NET_PATH`]) the same way [`load_cond`] loads
+/// the console server, and registers it with the supervisor for crash/wedge
+/// recovery too. A missing/broken NETD.BIN is not fatal (the caller logs and
+/// boots on with no network - `ping` reports no server).
+pub fn load_netd() -> Result<LoadedProgram, LoaderError> {
+    let fs_proto = boot::get_image_file_system(boot::image_handle()).map_err(LoaderError::Protocol)?;
+    let mut fs = FileSystem::new(fs_proto);
+    let path = CString16::try_from(NET_PATH).unwrap();
+    let program_bytes = fs.read(path.as_ref()).map_err(LoaderError::Netd)?;
+    if program_bytes.is_empty() {
+        return Err(LoaderError::ProgramEmpty);
+    }
+    if !crate::supervisor::register(syscall_abi::NET_TASK as usize, &program_bytes) {
+        log::warn!(
+            "Ouroboros kernel: NETD.BIN too large to keep for crash recovery - the network server won't be restartable this boot"
         );
     }
     load_elf_into_el0_region(&program_bytes)
