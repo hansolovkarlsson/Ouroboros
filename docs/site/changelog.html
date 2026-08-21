@@ -40,6 +40,18 @@
 
   <article>
 
+<h2>Network stack, Stage 4d: TCP send-side flow control (stream files of any size)</h2>
+
+<p>Stage 4c capped a served file at ~16 KB because it blasted the whole body at once — fine only if it fits the peer's window. This adds real <strong>send-side flow control</strong>: the server never lets unacknowledged data (<code class="inline">snd_nxt - snd_una</code>) exceed the peer's advertised window, and streams the body <em>paced by the peer's ACKs</em>, so a file of any size flows. The cap is gone.</p>
+
+<p>The TCP server is stateful across event-loop wakes now: <code class="inline">TcpConn</code> tracks <code class="inline">snd_una</code> (advanced by ACKs), the peer's <code class="inline">window</code>, and the in-progress response (a fixed prefix, then a file body streamed from <code class="inline">fsd</code> by rising offset). <code class="inline">handle_tcp</code> updates <code class="inline">snd_una</code>/<code class="inline">window</code> per segment but no longer sends inline; <code class="inline">pump_send</code> sends one window-bounded segment and <code class="inline">serve()</code> loops pump + a mailbox drain, flushing a full window per wake then blocking in <code class="inline">NET_WAIT</code> for the next ACK.</p>
+
+<p><strong>The per-segment mailbox drain is the subtle, load-bearing part.</strong> A large transfer is many slow <code class="inline">fsd</code> reads (each chunk = an IPC round trip + a virtio-blk read, tens of ms under TCG), so netd is busy for seconds — and the supervisor's ~160 ms health-ping would judge it wedged and <strong>restart it mid-transfer</strong> (losing the connection state; observed directly as a truncated download). Draining the mailbox — acking the ping — after <em>every segment</em> keeps the worst ack latency to one segment. Bursts of 16 and 48 each occasionally overran the timeout under TCG; per-segment draining removes the race at negligible cost.</p>
+
+<p>A real stack overflow surfaced too: the extra frame tipped netd's client-op path (already nesting 1600/2048-byte buffers near the 16 KB edge) into its <strong>guard page</strong> — a clean contained fault, exactly what the guard is for. <code class="inline">STACK_PAGES</code> grew 4→6 (16→24 KB/region); netd is the most stack-hungry program.</p>
+
+<p>Confirmed on QEMU: a 256 KB file streams byte-identical three times in a row, zero restarts/faults, plus 60 KB <code class="inline">SH.BIN</code>, the small responses, and a full shell+disk+client-net regression — zero <code class="inline">-d int</code> aborts. Throughput is disk-bound (~55 KB/s under TCG), not a TCP-layer limit. Still coarse: no retransmission, no congestion control, one connection, QEMU-only.</p>
+
 <h2>Network stack, Stage 4c: a static-file HTTP server (netd serves files from fsd)</h2>
 
 <p>Stage 4b's server answered every request with one fixed page. This makes it real: it parses the request-target path and streams that file from the filesystem server over TCP — <code class="inline">curl localhost:5555/EFI/ORBS/INIT.CFG</code> returns the file's actual bytes. The guest serves its own filesystem.</p>

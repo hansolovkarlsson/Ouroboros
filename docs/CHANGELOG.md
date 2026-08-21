@@ -7,6 +7,45 @@ what broke, how it was diagnosed), see `CLAUDE.md`; for *how* something
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## Network stack, Stage 4d: TCP send-side flow control (stream files of any size)
+
+Stage 4c capped a served file at ~16 KB because it blasted the whole body at
+once — fine only if it fits the peer's window. This adds real **send-side
+flow control**: the server never lets unacknowledged data (`snd_nxt -
+snd_una`) exceed the peer's advertised window, and streams the body *paced by
+the peer's ACKs*, so a file of any size flows. The cap is gone.
+
+The TCP server is stateful across event-loop wakes now: `TcpConn` tracks
+`snd_una` (advanced by ACKs), the peer's `window`, and the in-progress
+response (a fixed prefix, then a file body streamed from `fsd` by rising
+offset). `handle_tcp` updates `snd_una`/`window` per segment but no longer
+sends inline; `pump_send` sends one window-bounded segment and `serve()`
+loops pump + a mailbox drain, flushing a full window per wake then blocking
+in `NET_WAIT` for the next ACK.
+
+**The per-segment mailbox drain is the subtle, load-bearing part.** A large
+transfer is many slow `fsd` reads (each chunk = an IPC round trip + a
+virtio-blk read, tens of ms under TCG), so netd is busy for seconds — and
+the supervisor's ~160 ms health-ping would judge it wedged and **restart it
+mid-transfer** (losing the connection state; observed directly as a
+truncated download). Draining the mailbox — acking the ping — after *every
+segment* keeps the worst ack latency to one segment. Bursts of 16 and 48
+each occasionally overran the timeout under TCG; per-segment draining removes
+the race at negligible cost.
+
+A real stack overflow surfaced too: the extra frame tipped netd's client-op
+path (already nesting 1600/2048-byte buffers near the 16 KB edge) into its
+**guard page** — a clean contained fault, exactly what the guard is for.
+`STACK_PAGES` grew 4→6 (16→24 KB/region); netd is the most stack-hungry
+program.
+
+Confirmed on QEMU: a 256 KB file streams byte-identical three times in a
+row, zero restarts/faults, plus 60 KB `SH.BIN`, the small responses, and a
+full shell+disk+client-net regression — zero `-d int` aborts. Throughput is
+disk-bound (~55 KB/s under TCG), not a TCP-layer limit. Still coarse: no
+retransmission, no congestion control, one connection, QEMU-only. See
+`CLAUDE.md`'s "Network stack, Stage 4d."
+
 ## Network stack, Stage 4c: a static-file HTTP server (netd serves files from fsd)
 
 Stage 4b's server answered every request with one fixed page. This makes it

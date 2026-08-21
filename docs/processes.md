@@ -464,7 +464,7 @@ Worth knowing before building further on this:
   size. What remains: the 512-byte inline cap still bounds directory
   *listings* (`ls`); a single non-streaming transfer is
   userland-memory-bound, but a program has a 256KB raw heap area now
-  (`heap_info`) on top of its 16KB stack, which the shell uses to capture
+  (`heap_info`) on top of its 24KB stack, which the shell uses to capture
   large redirect/pipe output; and the stack now has a
   *guard page* (an overflow faults cleanly and kills just that task,
   rather than silently corrupting the program's own region - except a

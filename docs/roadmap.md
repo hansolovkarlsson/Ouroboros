@@ -222,12 +222,14 @@ step, not a Stage 1 concern.
    real **static-file server**: it parses the request path and streams the
    file from `fsd` over TCP (`netd` becomes `fsd`'s first non-shell client,
    via a new `netd`→`fsd` capability), verified serving a real file
-   byte-identically over multiple segments. **Still open:** real flow control
-   (the server caps a response at ~16 KB — the body must fit the peer's
-   window without ACK-paced sending), retransmission, congestion control,
-   multiple concurrent connections, `Content-Length`/`Content-Type`, a
-   directory listing, and IRQ-driven RX. See `CHANGELOG.md` / `CLAUDE.md`'s
-   "Network stack, Stage 4a/4b/4c."
+   byte-identically over multiple segments. Stage 4d added real **send-side
+   flow control** (track the peer's window, keep `snd_nxt - snd_una` under it,
+   stream ACK-paced) so a file of *any* size streams — verified with a 256 KB
+   file, byte-identical, three times over. **Still open:** retransmission,
+   congestion control (`cwnd`/slow-start — only the peer's flow-control window
+   is honored), multiple concurrent connections, `Content-Length`/
+   `Content-Type`, a directory listing, and IRQ-driven RX. See `CHANGELOG.md`
+   / `CLAUDE.md`'s "Network stack, Stage 4a–4d."
 
 **Decisions to settle before starting (not now):**
 
