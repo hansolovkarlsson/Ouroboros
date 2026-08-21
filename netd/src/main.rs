@@ -64,10 +64,6 @@ const SERVER_ISN: u32 = 0x0002_0000;
 /// server. Fits one TCP segment (well under the 1460 MSS).
 const INDEX_PAGE: &[u8] = b"HTTP/1.0 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n<!DOCTYPE html><html><head><title>Ouroboros</title></head><body><h1>Hello from Ouroboros</h1><p>Served by a from-scratch ARM64 microkernel's userland network server over a hand-rolled TCP/IP stack. Any other path is read from the filesystem server, e.g. <code>/EFI/ORBS/INIT.CFG</code>.</p></body></html>";
 
-/// The 200 header sent ahead of a file's bytes (the body streams after it, in
-/// its own segments). `Connection: close` + our FIN delimit the length.
-const RESP_200_HDR: &[u8] =
-    b"HTTP/1.0 200 OK\r\nContent-Type: application/octet-stream\r\nConnection: close\r\n\r\n";
 /// Full responses for the two failure cases.
 const RESP_404: &[u8] =
     b"HTTP/1.0 404 Not Found\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nNot Found\r\n";
@@ -572,6 +568,10 @@ fn tcp_get(mac: &[u8; 6], dst_mac: &[u8; 6], target: &[u8; 4], request: &[u8], r
 /// The state of the one in-flight server connection.
 /// Longest request path the server will resolve.
 const PATH_MAX: usize = 128;
+/// Capacity of a connection's response prefix (a whole fixed response, or a
+/// file's 200 header). Sized to hold the largest fixed response (the ~300-byte
+/// index page) with margin.
+const PREFIX_MAX: usize = 512;
 
 enum ConnState {
     /// Sent SYN-ACK, waiting for the peer's ACK (or its request data).
@@ -606,9 +606,13 @@ struct TcpConn {
     /// restarting the response).
     responded: bool,
     // --- the response being streamed ---
-    /// A fixed prefix sent first: the whole response for `/`/404/503, or the
-    /// 200 header ahead of a file's body. `'static` - no lifetime in the conn.
-    prefix: &'static [u8],
+    /// A prefix sent first: the whole response for `/`/404/503, or the 200
+    /// header (with Content-Type/Content-Length) ahead of a file's body. An
+    /// owned buffer, not a `'static` slice, so the 200 header can be built
+    /// per-request.
+    prefix: [u8; PREFIX_MAX],
+    /// How many bytes of `prefix` are valid.
+    prefix_len: usize,
     /// How much of `prefix` has been sent.
     prefix_off: usize,
     /// Whether a file body follows the prefix (streamed from `fsd`).
@@ -752,7 +756,8 @@ fn handle_tcp(mac: &[u8; 6], frame: &[u8], seg: &TcpIn, conn: &mut Option<TcpCon
             window: seg.window as u32,
             state: ConnState::SynRcvd,
             responded: false,
-            prefix: &[],
+            prefix: [0; PREFIX_MAX],
+            prefix_len: 0,
             prefix_off: 0,
             file: false,
             path: [0; PATH_MAX],
@@ -846,9 +851,10 @@ fn send_seg(mac: &[u8; 6], c: &TcpConn, flags: u8, with_mss: bool, payload: &[u8
 /// serves a built-in landing page; any other path is a file streamed from the
 /// filesystem server (`fsd`) - netd is `fsd`'s first non-shell client. A
 /// missing file is a 404, a missing/unmounted filesystem a 503. The file is
-/// probed here (a first read) so the 404/503 *replaces* the 200 header rather
-/// than following it; the probe's bytes are discarded and the body is re-read
-/// from offset 0 while streaming (fsd reads are idempotent, offset-based).
+/// *stat*'d here (one `FSOP_READ_FILE`, whose status is the real size) - which
+/// both checks existence (so the 404/503 replaces the 200 header) and gives
+/// the size for `Content-Length`; the body is then streamed from offset 0
+/// (fsd reads are idempotent, offset-based).
 fn start_response(c: &mut TcpConn, request: &[u8]) {
     let mut pathbuf = [0u8; PATH_MAX];
     let path = parse_path(request, &mut pathbuf);
@@ -860,26 +866,146 @@ fn start_response(c: &mut TcpConn, request: &[u8]) {
     c.fin_sent = false;
 
     if path.is_empty() || path == b"/" {
-        c.prefix = INDEX_PAGE;
+        set_prefix(c, INDEX_PAGE);
         return;
     }
 
-    let mut probe = [0u8; SERVE_CHUNK];
-    let first = read_file_chunk(path, 0, &mut probe);
-    if first >= syscall_abi::FS_ERR_MIN {
-        c.prefix = if first == syscall_abi::TASK_ERR_NO_SUCH_TASK {
+    let size = stat_size(path);
+    if size >= syscall_abi::FS_ERR_MIN {
+        let resp: &[u8] = if size == syscall_abi::TASK_ERR_NO_SUCH_TASK {
             RESP_503
         } else {
             RESP_404
         };
+        set_prefix(c, resp);
         return;
     }
 
-    // File exists: a 200 header, then its body streamed from offset 0.
-    c.prefix = RESP_200_HDR;
+    // File exists: a 200 header (Content-Type by extension, Content-Length =
+    // size), then its body streamed from offset 0.
+    let n = build_200_header(&mut c.prefix, content_type(path), size);
+    c.prefix_len = n;
     c.file = true;
     c.path_len = path.len().min(PATH_MAX);
     c.path[..c.path_len].copy_from_slice(&path[..c.path_len]);
+}
+
+/// Copy a complete fixed response (`INDEX_PAGE`/404/503) into the connection's
+/// prefix buffer.
+fn set_prefix(c: &mut TcpConn, bytes: &[u8]) {
+    let n = bytes.len().min(PREFIX_MAX);
+    c.prefix[..n].copy_from_slice(&bytes[..n]);
+    c.prefix_len = n;
+}
+
+/// Stat a file via the filesystem server: `FSOP_READ_FILE`'s status is the
+/// file's *real* size regardless of how much was copied, so a `want` of 1 (the
+/// smallest fsd accepts - it rejects 0) gets the size in one call; the single
+/// returned byte is ignored. Returns the size, or an `FS_ERR_*`/`TASK_ERR_*`
+/// code (`>= FS_ERR_MIN`) - the same value space `read_file_chunk` uses, so
+/// callers map `TASK_ERR_NO_SUCH_TASK` -> 503 and any other error -> 404.
+fn stat_size(path: &[u8]) -> u64 {
+    const HDR: usize = syscall_abi::FS_REQ_PAYLOAD as usize;
+    let mut req = [0u8; syscall_abi::MSG_MAX_LEN as usize];
+    req[0..8].copy_from_slice(&syscall_abi::FSOP_READ_FILE.to_le_bytes());
+    req[8..16].copy_from_slice(&(path.len() as u64).to_le_bytes()); // param0: path len
+    req[16..24].copy_from_slice(&1u64.to_le_bytes()); // param1: want = 1 (size via status)
+    let end = HDR + path.len();
+    if end > req.len() {
+        return syscall_abi::FS_ERROR;
+    }
+    req[HDR..end].copy_from_slice(path);
+    let mut reply = [0u8; syscall_abi::MSG_MAX_LEN as usize];
+    let packed = syscall4(
+        syscall_abi::MSG_CALL,
+        syscall_abi::FSD_TASK,
+        req.as_ptr() as u64,
+        end as u64,
+        reply.as_mut_ptr() as u64,
+    );
+    if packed >= syscall_abi::FS_ERR_MIN {
+        return packed;
+    }
+    if (packed & 0xffff_ffff) < 8 {
+        return syscall_abi::FS_ERROR;
+    }
+    read_u64(&reply, 0) // status = the file's real size
+}
+
+/// Pick a Content-Type from the request path's extension (case-insensitive).
+/// A small, common set; everything else is served as a generic binary stream.
+fn content_type(path: &[u8]) -> &'static [u8] {
+    // Find the extension (bytes after the last '.').
+    let mut dot = None;
+    for (i, &b) in path.iter().enumerate() {
+        if b == b'.' {
+            dot = Some(i);
+        }
+    }
+    let Some(d) = dot else {
+        return b"application/octet-stream";
+    };
+    let ext = &path[d + 1..];
+    // Lowercase into a small fixed buffer for comparison.
+    let mut lc = [0u8; 8];
+    if ext.is_empty() || ext.len() > lc.len() {
+        return b"application/octet-stream";
+    }
+    for (i, &b) in ext.iter().enumerate() {
+        lc[i] = b.to_ascii_lowercase();
+    }
+    let e = &lc[..ext.len()];
+    match e {
+        b"html" | b"htm" => b"text/html",
+        b"txt" | b"cfg" | b"md" | b"log" => b"text/plain",
+        b"css" => b"text/css",
+        b"js" => b"text/javascript",
+        b"json" => b"application/json",
+        b"png" => b"image/png",
+        b"jpg" | b"jpeg" => b"image/jpeg",
+        b"gif" => b"image/gif",
+        _ => b"application/octet-stream",
+    }
+}
+
+/// Build a `200 OK` header with `Content-Type` and `Content-Length` into
+/// `buf`, returning its length.
+fn build_200_header(buf: &mut [u8], ct: &[u8], size: u64) -> usize {
+    let mut w = 0;
+    let mut put = |bytes: &[u8], w: &mut usize| {
+        let n = bytes.len().min(buf.len() - *w);
+        buf[*w..*w + n].copy_from_slice(&bytes[..n]);
+        *w += n;
+    };
+    put(b"HTTP/1.0 200 OK\r\nContent-Type: ", &mut w);
+    put(ct, &mut w);
+    put(b"\r\nContent-Length: ", &mut w);
+    let mut digits = [0u8; 20];
+    let dn = u64_decimal(size, &mut digits);
+    put(&digits[..dn], &mut w);
+    put(b"\r\nConnection: close\r\n\r\n", &mut w);
+    w
+}
+
+/// Format `v` as decimal into `buf`, returning the digit count. Hand-rolled
+/// (netd builds all its bytes manually; no `core::fmt`).
+fn u64_decimal(v: u64, buf: &mut [u8]) -> usize {
+    if v == 0 {
+        buf[0] = b'0';
+        return 1;
+    }
+    let mut tmp = [0u8; 20];
+    let mut n = 0;
+    let mut x = v;
+    while x > 0 {
+        tmp[n] = b'0' + (x % 10) as u8;
+        x /= 10;
+        n += 1;
+    }
+    for i in 0..n {
+        buf[i] = tmp[n - 1 - i];
+    }
+    n
 }
 
 /// Send up to `MAX_BURST` segments of the response - as much as the peer's
@@ -913,14 +1039,15 @@ fn pump_send(mac: &[u8; 6], c: &mut TcpConn) {
             return; // window full - wait for an ACK
         }
 
-        // 1. The fixed prefix (a whole fixed response, or the file's 200 header).
-        if c.prefix_off < c.prefix.len() {
-            let prefix = c.prefix; // 'static - copying the reference, not borrowing c
-            let n = (prefix.len() - c.prefix_off)
+        // 1. The prefix (a whole fixed response, or the file's 200 header).
+        if c.prefix_off < c.prefix_len {
+            let n = (c.prefix_len - c.prefix_off)
                 .min(SERVE_CHUNK)
                 .min(avail as usize);
-            let slice = &prefix[c.prefix_off..c.prefix_off + n];
-            send_seg(mac, c, TCP_PSH | TCP_ACK, false, slice);
+            // Copy out of the conn's own buffer so send_seg can borrow c.
+            let mut seg = [0u8; SERVE_CHUNK];
+            seg[..n].copy_from_slice(&c.prefix[c.prefix_off..c.prefix_off + n]);
+            send_seg(mac, c, TCP_PSH | TCP_ACK, false, &seg[..n]);
             c.snd_nxt = c.snd_nxt.wrapping_add(n as u32);
             c.prefix_off += n;
             sent += 1;
