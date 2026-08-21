@@ -292,6 +292,17 @@ image: esp
 	rm -f $(ESP_DIR).img
 	hdiutil create -size 64m -fs FAT32 -volname OUROBOROS -srcfolder $(ESP_DIR) -format UDTO -ov $(ESP_DIR).cdr
 	mv $(ESP_DIR).cdr $(ESP_DIR).img
+	# Strip the macOS AppleDouble sidecars (._* files) hdiutil sprinkles
+	# onto the FAT volume during the copy - FAT can't hold extended
+	# attributes, so macOS spills them into these files, which then show up
+	# in the shell's `ls` as mangled 8.3 aliases (_EFI~1, etc.) since the
+	# FAT32 reader doesn't decode long filenames. Attach the flat image
+	# read-write, delete them, detach.
+	MP=$$(mktemp -d); \
+	hdiutil attach -nobrowse -mountpoint "$$MP" $(ESP_DIR).img >/dev/null; \
+	find "$$MP" -name '._*' -delete; \
+	hdiutil detach "$$MP" >/dev/null; \
+	rmdir "$$MP"
 
 # Boots the real esp.img (genuine FAT32) instead of `run`'s vvfat
 # passthrough - needed for anything that reads the filesystem at runtime
