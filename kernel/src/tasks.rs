@@ -140,9 +140,11 @@ fn caps_for_slot(slot: usize) -> u32 {
         // Console server: only ever replies (reply-exempt), so no send-mask
         // bits; owns the console device.
         syscall_abi::CON_TASK => CAP_CON,
-        // Network server: logs to the console server; owns the NIC. (Replies
-        // to its clients ride the reply exemption.)
-        syscall_abi::NET_TASK => TO_CON | CAP_NET,
+        // Network server: logs to the console server, and calls the
+        // filesystem server (its HTTP server reads files from fsd to serve
+        // them - netd is fsd's first non-shell client); owns the NIC.
+        // (Replies to its own clients ride the reply exemption.)
+        syscall_abi::NET_TASK => TO_FSD | TO_CON | CAP_NET,
         // Spawnable slots: may reach the servers a program legitimately needs
         // (fsd for a nested shell, cond for output) and message the shell
         // (e.g. pong's unsolicited echo). Not the NIC, not each other, not

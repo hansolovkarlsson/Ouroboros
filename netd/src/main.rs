@@ -60,10 +60,27 @@ const PAYLOAD: usize = 32;
 const SERVER_PORT: u16 = 80;
 const SERVER_ISN: u32 = 0x0002_0000;
 
-/// The fixed page the server serves to every request. Small enough to fit one
-/// TCP segment (well under the 1460 MSS), so the response is a single
-/// `PSH|ACK`. `Connection: close` + our FIN delimit the body for HTTP/1.0.
-const HTTP_RESPONSE: &[u8] = b"HTTP/1.0 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n<!DOCTYPE html><html><head><title>Ouroboros</title></head><body><h1>Hello from Ouroboros</h1><p>Served by a from-scratch ARM64 microkernel's userland network server over a hand-rolled TCP/IP stack.</p></body></html>";
+/// The page served for `GET /` - a small landing page pointing at the file
+/// server. Fits one TCP segment (well under the 1460 MSS).
+const INDEX_PAGE: &[u8] = b"HTTP/1.0 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n<!DOCTYPE html><html><head><title>Ouroboros</title></head><body><h1>Hello from Ouroboros</h1><p>Served by a from-scratch ARM64 microkernel's userland network server over a hand-rolled TCP/IP stack. Any other path is read from the filesystem server, e.g. <code>/EFI/ORBS/INIT.CFG</code>.</p></body></html>";
+
+/// The 200 header sent ahead of a file's bytes (the body streams after it, in
+/// its own segments). `Connection: close` + our FIN delimit the length.
+const RESP_200_HDR: &[u8] =
+    b"HTTP/1.0 200 OK\r\nContent-Type: application/octet-stream\r\nConnection: close\r\n\r\n";
+/// Full responses for the two failure cases.
+const RESP_404: &[u8] =
+    b"HTTP/1.0 404 Not Found\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nNot Found\r\n";
+const RESP_503: &[u8] = b"HTTP/1.0 503 Service Unavailable\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nNo filesystem mounted\r\n";
+
+/// Cap on how many bytes of a file the server will stream in one response.
+/// The server blasts segments without waiting for ACKs (no flow control yet),
+/// so the whole body must fit inside the peer's advertised window (~64 KB);
+/// 16 KB stays comfortably under it. Larger files are truncated here.
+const MAX_SERVE: usize = 16384;
+/// One file chunk / one TCP body segment - kept under the 1460 MSS so each
+/// `FSOP_READ_BULK` maps to exactly one segment.
+const SERVE_CHUNK: usize = 1400;
 
 #[no_mangle]
 #[link_section = ".text.start"]
@@ -570,6 +587,8 @@ struct TcpIn {
     src_port: u16,
     seq: u32,
     flags: u8,
+    /// Byte offset of the TCP payload within the frame, and its length.
+    data_off: usize,
     data_len: u32,
 }
 
@@ -585,7 +604,7 @@ fn on_frame(mac: &[u8; 6], frame: &[u8], conn: &mut Option<TcpConn>) {
         0x0806 => handle_arp(mac, frame),
         0x0800 => {
             if let Some(seg) = parse_tcp_in(frame) {
-                handle_tcp(mac, &seg, conn);
+                handle_tcp(mac, frame, &seg, conn);
             }
         }
         _ => {}
@@ -654,14 +673,16 @@ fn parse_tcp_in(frame: &[u8]) -> Option<TcpIn> {
         src_port: u16be(frame, t),
         seq: u32be(frame, t + 4),
         flags: frame[t + 13],
+        data_off,
         data_len,
     })
 }
 
 /// The server TCP state machine for one segment. Minimal but real: SYN ->
 /// SYN-ACK, request data -> response + FIN, then ack the peer's FIN and close.
-/// One connection at a time; a SYN always (re)starts it.
-fn handle_tcp(mac: &[u8; 6], seg: &TcpIn, conn: &mut Option<TcpConn>) {
+/// One connection at a time; a SYN always (re)starts it. `frame` is the raw
+/// packet, so the request payload can be sliced out for the file server.
+fn handle_tcp(mac: &[u8; 6], frame: &[u8], seg: &TcpIn, conn: &mut Option<TcpConn>) {
     // RST tears down a matching connection.
     if seg.flags & TCP_RST != 0 {
         if seg_matches(conn, seg) {
@@ -699,11 +720,12 @@ fn handle_tcp(mac: &[u8; 6], seg: &TcpIn, conn: &mut Option<TcpConn>) {
     }
 
     // The request data (may arrive with the handshake ACK, or just after) ->
-    // send the response and immediately FIN. Only once.
+    // serve the response and immediately FIN. Only once.
     if !c.responded && seg.data_len > 0 && seg.seq == c.rcv_nxt {
         c.rcv_nxt = c.rcv_nxt.wrapping_add(seg.data_len);
-        send_seg(mac, c, TCP_PSH | TCP_ACK, false, HTTP_RESPONSE);
-        c.snd_nxt = c.snd_nxt.wrapping_add(HTTP_RESPONSE.len() as u32);
+        let end = (seg.data_off + seg.data_len as usize).min(frame.len());
+        let request = &frame[seg.data_off..end];
+        serve_http(mac, c, request); // sends header + body segments, advances snd_nxt
         send_seg(mac, c, TCP_FIN | TCP_ACK, false, &[]);
         c.snd_nxt = c.snd_nxt.wrapping_add(1); // FIN consumes a sequence number
         c.responded = true;
@@ -743,6 +765,148 @@ fn send_seg(mac: &[u8; 6], c: &TcpConn, flags: u8, with_mss: bool, payload: &[u8
     ) {
         let _ = send(&out[..n]);
     }
+}
+
+/// Serve an HTTP response for `request` on connection `c`, advancing
+/// `c.snd_nxt` past every byte sent. `GET /` returns a built-in landing page;
+/// any other path is streamed from the filesystem server (`fsd`) - netd is
+/// `fsd`'s first non-shell client, the cross-server flow this milestone is
+/// about. A missing file is a 404, a missing filesystem a 503. The body
+/// streams in `SERVE_CHUNK`-byte TCP segments after a 200 header segment; the
+/// caller sends the FIN.
+fn serve_http(mac: &[u8; 6], c: &mut TcpConn, request: &[u8]) {
+    let mut pathbuf = [0u8; 128];
+    let path = parse_path(request, &mut pathbuf);
+
+    if path.is_empty() || path == b"/" {
+        send_body(mac, c, INDEX_PAGE);
+        return;
+    }
+
+    // Probe the file with the first chunk, so a 404/503 replaces the 200 header
+    // rather than following it.
+    let mut chunk = [0u8; SERVE_CHUNK];
+    let first = read_file_chunk(path, 0, &mut chunk);
+    if first >= syscall_abi::FS_ERR_MIN {
+        let body: &[u8] = if first == syscall_abi::TASK_ERR_NO_SUCH_TASK {
+            RESP_503
+        } else {
+            RESP_404
+        };
+        send_body(mac, c, body);
+        return;
+    }
+
+    // File exists: 200 header, then stream the body (the first chunk is
+    // already in hand; loop for the rest until EOF or the size cap).
+    send_body(mac, c, RESP_200_HDR);
+    let mut n = first as usize;
+    let mut offset = 0u64;
+    let mut served = 0usize;
+    loop {
+        if n > 0 {
+            send_body(mac, c, &chunk[..n]);
+            served += n;
+            offset += n as u64;
+        }
+        if n == 0 || served >= MAX_SERVE {
+            break;
+        }
+        let r = read_file_chunk(path, offset, &mut chunk);
+        if r >= syscall_abi::FS_ERR_MIN {
+            break; // a mid-stream read error just truncates the body
+        }
+        n = r as usize;
+    }
+}
+
+/// Send `body` as one PSH|ACK segment and advance the send sequence.
+fn send_body(mac: &[u8; 6], c: &mut TcpConn, body: &[u8]) {
+    send_seg(mac, c, TCP_PSH | TCP_ACK, false, body);
+    c.snd_nxt = c.snd_nxt.wrapping_add(body.len() as u32);
+}
+
+/// Extract the request-target path from an HTTP request line
+/// (`GET /path HTTP/1.1`) into `buf`, stripping any query string. No
+/// %-decoding (paths here are simple). Returns the path slice (empty if the
+/// line is malformed - treated as `/`).
+fn parse_path<'a>(request: &[u8], buf: &'a mut [u8]) -> &'a [u8] {
+    // Skip the method to the first space.
+    let mut i = 0;
+    while i < request.len() && request[i] != b' ' {
+        i += 1;
+    }
+    i += 1; // past the space
+    let start = i;
+    while i < request.len()
+        && request[i] != b' '
+        && request[i] != b'?'
+        && request[i] != b'\r'
+        && request[i] != b'\n'
+    {
+        i += 1;
+    }
+    let end = i.min(request.len());
+    if start >= end {
+        return &buf[..0];
+    }
+    let n = (end - start).min(buf.len());
+    buf[..n].copy_from_slice(&request[start..start + n]);
+    &buf[..n]
+}
+
+/// Read up to `buf.len()` bytes of the file at `path` (starting at `offset`)
+/// from the filesystem server via the grant/safecopy bulk path - the same
+/// mechanism the shell's `cat` uses, ported here so netd can serve files.
+/// Returns the byte count copied into `buf` (`0` at/past EOF), or an
+/// `FS_ERR_*`/`TASK_ERR_*` code (`>= FS_ERR_MIN`). `buf.len()` must be
+/// `<= SAFECOPY_MAX`.
+fn read_file_chunk(path: &[u8], offset: u64, buf: &mut [u8]) -> u64 {
+    let want = buf.len() as u64;
+    // Grant the buffer to fsd (GRANT_WRITE - the server writes file bytes into
+    // it via SAFECOPY during the call).
+    let granted = syscall4(
+        syscall_abi::GRANT,
+        syscall_abi::FSD_TASK,
+        buf.as_mut_ptr() as u64,
+        want,
+        syscall_abi::GRANT_WRITE,
+    );
+    if granted != 0 {
+        return syscall_abi::FS_ERROR;
+    }
+    const HDR: usize = syscall_abi::FS_REQ_PAYLOAD as usize;
+    let mut req = [0u8; syscall_abi::MSG_MAX_LEN as usize];
+    req[0..8].copy_from_slice(&syscall_abi::FSOP_READ_BULK.to_le_bytes());
+    req[8..16].copy_from_slice(&(path.len() as u64).to_le_bytes()); // param0: path len
+    req[16..24].copy_from_slice(&offset.to_le_bytes()); // param1: offset
+    req[24..32].copy_from_slice(&want.to_le_bytes()); // param2: want
+                                                      // param3 (0) already zeroed
+    let end = HDR + path.len();
+    if end > req.len() {
+        return syscall_abi::FS_ERROR;
+    }
+    req[HDR..end].copy_from_slice(path);
+    let mut reply = [0u8; syscall_abi::MSG_MAX_LEN as usize];
+    let packed = syscall4(
+        syscall_abi::MSG_CALL,
+        syscall_abi::FSD_TASK,
+        req.as_ptr() as u64,
+        end as u64,
+        reply.as_mut_ptr() as u64,
+    );
+    // A missing fsd (or a denied/interrupted call) is an error; pass the code
+    // through so the caller can map TASK_ERR_NO_SUCH_TASK -> 503.
+    if packed >= syscall_abi::FS_ERR_MIN {
+        return packed;
+    }
+    let reply_len = (packed & 0xffff_ffff) as usize;
+    if reply_len < 8 {
+        return syscall_abi::FS_ERROR;
+    }
+    // Reply status = bytes delivered (already SAFECOPY'd into `buf`), or an
+    // FS_ERR_* code.
+    read_u64(&reply, 0)
 }
 
 /// Build an Ethernet+IPv4+TCP segment into `out`, returning its length.
