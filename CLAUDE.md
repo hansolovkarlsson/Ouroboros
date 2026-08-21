@@ -5965,15 +5965,14 @@ The shell (fsd's other client), `selftest`, and the client net ops
 (`ping`/`resolve`) all stayed unregressed with `netd` now also calling `fsd`.
 
 **Still coarse, worth knowing before building on this:** the ~16 KB cap
-(needs real flow control / windowing to stream arbitrary files); no
-`Content-Length` (the FIN + `Connection: close` delimit the body, so a
-truncated file looks complete to the client); one connection at a time
+**(Update: lifted - Stage 4d, flow control)**; no `Content-Length`
+**(Update: added - Stage 4e, below)**; one connection at a time
 (inherited); `Content-Type` is always `application/octet-stream` (no
-extension sniffing); no directory listing (`GET` of a directory path just
-404s the way `fsd` reports it); no `..`/percent-decode handling beyond what
-`fsd`'s own path resolution does; the response path parses only the target,
-ignoring method and headers (a `POST` is served like a `GET`); and it's
-still QEMU-only, polled RX.
+extension sniffing) **(Update: added - Stage 4e, below)**; no directory
+listing (`GET` of a directory path just 404s the way `fsd` reports it); no
+`..`/percent-decode handling beyond what `fsd`'s own path resolution does;
+the response path parses only the target, ignoring method and headers (a
+`POST` is served like a `GET`); and it's still QEMU-only, polled RX.
 
 ## Network stack, Stage 4d: TCP send-side flow control - stream files of any size
 
@@ -6040,6 +6039,49 @@ loopback, a real gap on a real network); no congestion control (only the
 peer's flow-control window, no `cwnd`/slow-start); one connection at a time
 (inherited); no window scaling (a >64 KB window isn't negotiated - fine, the
 peer's ~64 KB is plenty); still QEMU-only, polled RX.
+
+## Network stack, Stage 4e: proper HTTP response headers (Content-Type + Content-Length)
+
+A small, self-contained polish over the file server: it sent every file as
+`application/octet-stream` with no length, so browsers *downloaded* instead
+of rendering and clients relied on connection-close to find the end. This
+makes the responses correct - pure `netd`, no kernel/capability/state-machine
+change.
+
+- `start_response` now **stats** the file (one `FSOP_READ_FILE` whose status
+  is the file's *real* size - `want=1`, the smallest fsd accepts since its
+  `want_len` rejects 0; the single returned byte is ignored) instead of a
+  probe read. The stat both checks existence (404/503 as before) and gives
+  the size for `Content-Length`; the body still streams from offset 0.
+- `content_type()` picks a MIME type from the path extension
+  (case-insensitive): `html`/`htm`, `txt`/`cfg`/`md`/`log`, `css`, `js`,
+  `json`, `png`, `jpg`/`jpeg`, `gif`; everything else stays
+  `application/octet-stream`.
+- `build_200_header()` formats the `200 OK` with `Content-Type` +
+  `Content-Length` (`u64_decimal`, hand-rolled - `netd` builds all its bytes
+  manually). `TcpConn`'s `prefix` became an owned `[u8; PREFIX_MAX]` buffer
+  instead of a `&'static` slice so the header can be built per-request;
+  `INDEX_PAGE`/404/503 are copied in via `set_prefix`.
+
+**Confirmed on QEMU** (`curl -i`): `INIT.CFG` (`.cfg`) -> `text/plain`,
+`Content-Length: 16`; `PAGE.HTM` (`.htm`) -> `text/html`, `Content-Length:
+63` (renders in a browser now); `SH.BIN` (`.bin`) ->
+`application/octet-stream`, `Content-Length: 59968`; a 256 KB file ->
+`Content-Length: 262144` with a byte-identical streamed body (proper headers
+and flow control together); 404 for a missing path. One honest note that is
+*not* a bug: a `.html` (4-char extension) name 404s because it isn't a valid
+FAT 8.3 short name and `fsd` has no long-filename support - the documented
+no-LFN limitation; a `.htm` name works. Shell + client net ops
+(`ping`/`resolve`/`fetch`) + `selftest` unregressed; zero `-d int` aborts,
+zero supervisor restarts.
+
+**Still coarse:** `Content-Type` is a small fixed extension map (no config,
+no charset parameter); `Content-Length` assumes the stat'd size equals what
+streams (a mid-transfer read error would truncate below it - `Connection:
+close` is still sent as the ultimate delimiter); no `HEAD` special-casing (a
+`HEAD` is served like a `GET`, body and all - trivial to add now that the
+size is known); everything else from Stage 4a-4d (one connection, no
+retransmission/congestion control, QEMU-only) is unchanged.
 
 ## Commands
 
@@ -6183,7 +6225,7 @@ cond/                seventh userland program: THE CONSOLE SERVER (driver isolat
   src/main.rs        the request loop (recv -> decode DSPOP_WRITE -> render -> reply, the filesystem server's shape) plus two backends chosen from CON_INFO at startup: byte-stream (forward to the kernel console via CON_WRITE) and framebuffer (render glyphs here - cursor, wrap, scroll, a small ANSI parser - via FB_BLIT/FB_SCROLL/FB_CLEAR)
   src/font.rs        cond's own copy of the 8x8 bitmap font (from kernel/src/font.rs) - the font is what "console driver logic" meant, so it moved to userland; the kernel keeps a copy only for its emergency fbconsole
 
-netd/                eighth userland program: THE NETWORK SERVER (network stack, Stage 2) - owns the protocol stack (ARP/IPv4/ICMP) in userland; the kernel keeps only the DMA-owning virtio-net driver, reached by this task alone via the gated NET_SEND/NET_RECV/NET_MAC syscalls (the fsd/BLOCK_* pattern). Boot-loaded into protected task slot 4 (NET_TASK), supervised. Speaks the NETOP_PING request protocol to clients (the shell's `ping` command); hand-rolled fixed-buffer frame building (ARP/IPv4/ICMP/UDP/DNS) + Internet checksums, no crates. NETOP_RESOLVE (Stage 3) does DNS-over-UDP for `resolve`; NETOP_FETCH (Stage 4a) does a client-TCP HTTP GET for `fetch`. Stage 4b makes it event-driven (blocks in NET_WAIT, drains client messages *and* incoming frames each wake) and adds a TCP HTTP server on port 80 + an ARP responder - the guest answers the network now, not just initiates. Stage 4c makes that HTTP server a real static-file server: it parses the request path and streams the file from fsd over TCP (netd is fsd's first non-shell client, reached via a new netd->fsd capability). Stage 4d adds TCP send-side flow control (window tracking + ACK-paced streaming) so a file of *any* size streams, not just what fits one window. See "Network stack, Stage 2/3/4a/4b/4c/4d" above
+netd/                eighth userland program: THE NETWORK SERVER (network stack, Stage 2) - owns the protocol stack (ARP/IPv4/ICMP) in userland; the kernel keeps only the DMA-owning virtio-net driver, reached by this task alone via the gated NET_SEND/NET_RECV/NET_MAC syscalls (the fsd/BLOCK_* pattern). Boot-loaded into protected task slot 4 (NET_TASK), supervised. Speaks the NETOP_PING request protocol to clients (the shell's `ping` command); hand-rolled fixed-buffer frame building (ARP/IPv4/ICMP/UDP/DNS) + Internet checksums, no crates. NETOP_RESOLVE (Stage 3) does DNS-over-UDP for `resolve`; NETOP_FETCH (Stage 4a) does a client-TCP HTTP GET for `fetch`. Stage 4b makes it event-driven (blocks in NET_WAIT, drains client messages *and* incoming frames each wake) and adds a TCP HTTP server on port 80 + an ARP responder - the guest answers the network now, not just initiates. Stage 4c makes that HTTP server a real static-file server: it parses the request path and streams the file from fsd over TCP (netd is fsd's first non-shell client, reached via a new netd->fsd capability). Stage 4d adds TCP send-side flow control (window tracking + ACK-paced streaming) so a file of *any* size streams, not just what fits one window. Stage 4e adds proper HTTP response headers (Content-Type by extension + Content-Length via an fsd stat). See "Network stack, Stage 2/3/4a/4b/4c/4d/4e" above
   src/main.rs        the NET_WAIT event loop (drain client requests -> NETOP_PING/RESOLVE/FETCH; drain frames -> ARP replies + the TCP server state machine) plus start_response (request-path parsing + a landing page or a file from fsd) and pump_send (window-bounded, ACK-paced streaming under flow control, one segment per call with a per-segment mailbox drain so the supervisor health-ping is always acked), read_file_chunk's grant/safecopy FSOP_READ_BULK, the ARP/IPv4/ICMP/UDP/DNS/TCP frame builders (build_tcp_generic shared by client build_tcp + server build_tcp_srv), the DNS/TCP parsers, next-hop routing, ip_checksum and the TCP pseudo-header checksum
 
 upper/               sixth userland program: the pipeline filter demo (uppercases its piped input) - the reference for the filter-program shape: stdin = msg_recv, stdout = con_write (routed through the console server), EOF = the empty message, finish = exit; see "Pipelines" above

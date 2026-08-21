@@ -7,6 +7,30 @@ what broke, how it was diagnosed), see `CLAUDE.md`; for *how* something
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## Network stack, Stage 4e: proper HTTP response headers (Content-Type + Content-Length)
+
+A small polish over the file server, which sent every file as
+`application/octet-stream` with no length (so browsers downloaded instead of
+rendering, and clients relied on connection-close to find the end). Pure
+`netd` — no kernel/capability change.
+
+`start_response` now *stats* the file (one `FSOP_READ_FILE`, whose status is
+the real size — `want=1`, the smallest fsd accepts) instead of a probe read:
+that both checks existence and gives the size for `Content-Length`.
+`content_type()` maps the path extension (case-insensitive) to a MIME type
+(html/htm, txt/cfg/md/log, css, js, json, png, jpg/jpeg, gif; else
+octet-stream). `build_200_header()` formats the 200 with both headers
+(hand-rolled `u64_decimal`); `TcpConn.prefix` became an owned buffer so the
+header can be built per-request.
+
+Confirmed on QEMU (`curl -i`): `.cfg`→text/plain len 16, `.htm`→text/html
+len 63 (renders), `.bin`→octet-stream len 59968, a 256KB file→Content-Length
+262144 with a byte-identical streamed body, 404 for a missing path. (A
+`.html` name — 4-char extension — 404s because it isn't a valid FAT 8.3 name
+and fsd has no LFN support; not a bug, the documented limitation. `.htm`
+works.) Shell + client net ops unregressed; zero aborts, zero restarts. See
+`CLAUDE.md`'s "Network stack, Stage 4e."
+
 ## Network stack, Stage 4d: TCP send-side flow control (stream files of any size)
 
 Stage 4c capped a served file at ~16 KB because it blasted the whole body at

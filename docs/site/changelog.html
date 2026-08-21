@@ -40,6 +40,14 @@
 
   <article>
 
+<h2>Network stack, Stage 4e: proper HTTP response headers (Content-Type + Content-Length)</h2>
+
+<p>A small polish over the file server, which sent every file as <code class="inline">application/octet-stream</code> with no length (so browsers downloaded instead of rendering, and clients relied on connection-close to find the end). Pure <code class="inline">netd</code> — no kernel/capability change.</p>
+
+<p><code class="inline">start_response</code> now <em>stats</em> the file (one <code class="inline">FSOP_READ_FILE</code>, whose status is the real size — <code class="inline">want=1</code>, the smallest fsd accepts) instead of a probe read: that both checks existence and gives the size for <code class="inline">Content-Length</code>. <code class="inline">content_type()</code> maps the path extension (case-insensitive) to a MIME type (html/htm, txt/cfg/md/log, css, js, json, png, jpg/jpeg, gif; else octet-stream). <code class="inline">build_200_header()</code> formats the 200 with both headers (hand-rolled <code class="inline">u64_decimal</code>); <code class="inline">TcpConn.prefix</code> became an owned buffer so the header can be built per-request.</p>
+
+<p>Confirmed on QEMU (<code class="inline">curl -i</code>): <code class="inline">.cfg</code>→text/plain len 16, <code class="inline">.htm</code>→text/html len 63 (renders), <code class="inline">.bin</code>→octet-stream len 59968, a 256KB file→Content-Length 262144 with a byte-identical streamed body, 404 for a missing path. (A <code class="inline">.html</code> name — 4-char extension — 404s because it isn't a valid FAT 8.3 name and fsd has no LFN support; not a bug, the documented limitation. <code class="inline">.htm</code> works.) Shell + client net ops unregressed; zero aborts, zero restarts.</p>
+
 <h2>Network stack, Stage 4d: TCP send-side flow control (stream files of any size)</h2>
 
 <p>Stage 4c capped a served file at ~16 KB because it blasted the whole body at once — fine only if it fits the peer's window. This adds real <strong>send-side flow control</strong>: the server never lets unacknowledged data (<code class="inline">snd_nxt - snd_una</code>) exceed the peer's advertised window, and streams the body <em>paced by the peer's ACKs</em>, so a file of any size flows. The cap is gone.</p>
