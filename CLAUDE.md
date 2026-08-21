@@ -5830,6 +5830,89 @@ fetch would want a bulk-transfer path; in-order segments assumed (an
 out-of-order segment is dropped, not buffered); still QEMU-only (Parallels'
 virtio-net is PCI); and the NIC driver is still polled, not IRQ-driven.
 
+## Network stack, Stage 4b: an async-receive event loop, and a TCP HTTP server the guest actually answers
+
+Stage 4a's own "still coarse" list named the gap directly: the network
+server was **client-only**. It could *initiate* (`ping`/`resolve`/`fetch`)
+but never *react* to unsolicited input, because a task can block on IPC
+messages **or** poll for frames, not both at once - and `netd`'s loop
+blocked on `MSG_RECV`, so nothing was watching the wire between client
+requests. This milestone adds the missing async-receive primitive (the
+poll/select gap flagged since Stage 2) and uses it to make the guest a
+**server you can `curl` from the host**.
+
+**The kernel primitive - a minimal poll/select, scoped to exactly the two
+sources `netd` multiplexes.** `virtio_net::has_frame()` is a non-consuming
+peek of the RX used-ring index (one volatile read, no dequeue).
+`syscall::net_has_frame()` exposes it to the kernel's own wake-check, and a
+new gated syscall, `NET_WAIT` (45), blocks the caller until *either* a
+frame is waiting on the NIC *or* a message is queued in its mailbox, then
+returns - the caller drains both itself (`NET_RECV` / `MSG_TRY_RECV`), so
+`NET_WAIT` consumes nothing and its return value carries no meaning.
+`tasks.rs` grew a `WaitReason::NetInput` whose `poll` wakes on
+frame-or-message (consuming neither, unlike `Message`), a
+`has_queued_message` helper for the message half, and - so a client
+`MSG_CALL` to `netd` still lands sub-tick rather than waiting up to a tick
+- `send_message` now also marks a `NetInput`-blocked destination
+`Runnable` (a `netd` parked in `NET_WAIT` isn't in a `Message` wait, so the
+existing direct-delivery path doesn't fire for it; this is the equivalent
+wake). This is the first *new* `WaitReason` since the blocking-primitives
+and message milestones, and it generalizes them cleanly - the same
+frame-overwrite blocking contract, just a two-source wake condition.
+
+**`netd` is event-driven now.** `serve()` blocks in `NET_WAIT`, then drains
+*both* sources each wake: client requests (`ping`/`resolve`/`fetch`, still
+handled synchronously - during one, its own receive loop consumes frames,
+so an unsolicited server frame arriving mid-request is dropped and the peer
+retransmits, acceptable for a single-threaded server) and incoming frames.
+Frame handling does two things: it answers **ARP requests for our IP** (so
+the gateway/host can resolve the guest before forwarding a connection to
+it), and it runs a minimal **TCP server on port 80**. The server state
+machine is real but small - a SYN starts (or restarts) the one in-flight
+connection with a SYN-ACK; the request data triggers a fixed HTML response
+(`PSH|ACK`) immediately followed by our FIN; the peer's FIN is acked and
+the connection closes back to listen. One connection at a time, its state
+kept on `serve()`'s own stack frame (userland has no static mutable state -
+`serve` never returns, so the frame persists for the whole boot). Replying
+to every client message still acks the supervisor health-ping, and staying
+`Blocked` in `NET_WAIT` between bursts is what keeps the passive heartbeat
+seeing a healthy server. `build_tcp` was split into a shared
+`build_tcp_generic` (with source/destination port parameters) plus thin
+`build_tcp` (client: ephemeral -> 80) and `build_tcp_srv` (server: 80 ->
+ephemeral) wrappers, so the client path's six call sites are untouched.
+
+**Confirmed end to end on QEMU - the guest answered a real host `curl`.** A
+new `make run-image-server` target adds SLIRP `hostfwd=tcp::5555-:80`, so
+the host reaches the guest's port 80 via `localhost:5555`. `curl
+http://localhost:5555/` returned `HTTP/1.0 200 OK` and the full page, three
+sequential connections in a row (the single-connection slot resets cleanly
+after each closes), and the `filter-dump` pcap showed a textbook exchange:
+host SYN -> guest SYN-ACK (seq = `SERVER_ISN`, ack = their ISN+1) -> host
+ACK -> host `GET / HTTP/1.1` -> guest 278-byte `HTTP/1.0 200 OK` response
+-> guest FIN -> host ACK -> host FIN -> **guest ACK** (the `Closing`-state
+FIN handler completing the four-way teardown). The client half was
+re-confirmed unregressed through the new event loop (`ping 10.0.2.2` ->
+`reply from 10.0.2.2`, `resolve example.com` -> a real DNS A record,
+`fetch example.com` -> a real `HTTP/1.1 200 OK` + Example Domain HTML), and
+the full non-network surface too (`selftest`'s three relocation checks,
+`write`/`cat` through `fsd`, a spawned `echo | UPPER.BIN` pipe through
+`cond`) - the shared `send_message` change didn't disturb `fsd`/`cond`
+IPC. Zero `-d int` aborts across every run.
+
+**Still coarse, worth knowing before building on this:** the server serves
+one **fixed page** to every request (it doesn't parse the request path or
+method - a real static-file or routing server is the next step, and would
+want to read from `fsd`); **one connection at a time** (a second peer's SYN
+replaces the first - no concurrent connections, which needs per-connection
+state beyond one stack slot); no retransmission, congestion control, or
+out-of-order buffering (inherited from Stage 4a - fine on SLIRP's reliable
+local path); the response must fit one TCP segment (well under the MSS, so
+one `PSH`); `NetInput` multiplexes exactly *frames + messages* for `netd`
+(a genuine general poll/select over arbitrary fds/sources is a bigger,
+separate thing this deliberately isn't); and it's still QEMU-only
+(Parallels' virtio-net is PCI, which this project's virtio path doesn't
+drive) and the NIC is still polled, not IRQ-driven.
+
 ## Commands
 
 ```sh
@@ -5840,6 +5923,7 @@ make run                    # stage ESP dir (kernel + userland binaries incl. th
 make run-virtio-console      # same as `run`, plus a virtio-mmio console device attached (for testing virtio_console.rs - see "virtio-console" above for why this alone doesn't organically trigger the fallback)
 make run-net                 # same as `run`, plus a virtio-net device on virtio-mmio + QEMU user-mode (SLIRP) networking + an -object filter-dump pcap (net.pcap) - the dev loop for the network stack (kernel/src/virtio_net.rs, Stage 1); init_net's boot ARP probe exercises SLIRP's gateway, see "Network stack, Stage 1" above
 make run-image-net           # `run-image` (real FAT32, disk commands work) *and* the NIC from `run-net` in one boot - the fullest QEMU run: fsd mounts, the shell/disk commands work, and init_net's ARP probe runs, with net.pcap dumped
+make run-image-server        # like run-image-net, plus SLIRP hostfwd tcp::5555->:80, so `curl http://localhost:5555/` on the host reaches netd's TCP HTTP server (the guest answering the network - see "Network stack, Stage 4b" above)
 make run-usb-kbd             # same as `run`, plus an xHCI controller + USB keyboard + HMP monitor socket for sendkey keystroke injection (see "USB HID keyboard driver" above)
 make run-usb-multi           # same as `run-usb-kbd`, plus a usb-tablet and a usb-storage stick on the same controller - the three-device rig for xhci.rs's multi-device scan (see "xHCI multi-device support" above)
 make image                  # build esp.img, a raw MBR+FAT32 disk image (not directly usable by Parallels - see below)
@@ -5949,7 +6033,7 @@ kernel/
   src/loader.rs      reads INIT.CFG + a program off the ESP during boot services (plus the filesystem server \EFI\ORBS\FSD.BIN and console server \EFI\ORBS\COND.BIN, each registered with supervisor::register for crash/wedge recovery), into 2MB-aligned EL0-accessible regions, real ELF64 parsing + R_AARCH64_RELATIVE relocation processing - see "A real relocating loader" above and docs/processes.md; elf_region_size/populate_region split so the same parsing/loading logic is reusable from the runtime spawn path and supervisor restarts too, see "Dynamic task creation and exec()" and "Server supervision + heartbeat" above
   src/supervisor.rs  server supervision registry: keeps each supervised server's boot ELF image and restarts it on a crash (generic fault hook) or a wedge (on_tick's heartbeat), with a per-boot restart cap - the generalized replacement for syscall.rs's old fsd-only restart_fsd/FSD_IMAGE, now covering fsd AND cond, see "Server supervision + heartbeat" above
   src/syscall.rs     svc syscall dispatch table (print/double/report/try_read_char/putc/get_ticks/read_char/spawn/exit/task_state/kill/fg/wait/mount/msg_send/msg_recv/msg_try_recv/block_info/block_read/block_write/msg_call/spawn_stage/grant/safecopy/.../delegate; gaps at 5 and 7-14 - the old fs_* syscalls moved to the fsd server's FSOP_* protocol) plus the block-device cell (the kernel's entire remaining storage role) and in_caller_region validation - grant/safecopy are the enforced bulk-transfer primitive (see "Grant/safecopy IPC"), delegate (41) is runtime capability delegation of the IPC send-mask (see "Runtime capability delegation" above)
-  src/tasks.rs       up to 6 task slots (task 0 = loaded program, task 1 = idle, task 2 = filesystem server, task 3 = console server, slots 4-5 spawn/exit-cycled) + the round-robin scheduler over Runnable/Blocked/Unused/Zombie task state (block_current_and_switch, exit_current_and_switch, on_tick's wake-check + the supervisor heartbeat, tasks::spawn, allocate_runtime_region/free_runtime_region, mailboxes with direct delivery + sender-filtered receive, per-task grant slots + safecopy for the bulk-transfer primitive, per-slot capability send-mask + per-task runtime delegation for who-may-call-whom) - confirmed working, see "Blocking primitives", "Dynamic task creation and exec()", "Task destruction", "Driver isolation" parts 1/2/3, "Grant/safecopy IPC", "The capability model", "Runtime capability delegation", and "Server supervision + heartbeat" above
+  src/tasks.rs       up to 6 task slots (task 0 = loaded program, task 1 = idle, task 2 = filesystem server, task 3 = console server, slots 4-5 spawn/exit-cycled) + the round-robin scheduler over Runnable/Blocked/Unused/Zombie task state (block_current_and_switch, exit_current_and_switch, on_tick's wake-check + the supervisor heartbeat, tasks::spawn, allocate_runtime_region/free_runtime_region, mailboxes with direct delivery + sender-filtered receive, WaitReason::NetInput + the async-receive wake for the network server, per-task grant slots + safecopy for the bulk-transfer primitive, per-slot capability send-mask + per-task runtime delegation for who-may-call-whom) - confirmed working, see "Blocking primitives", "Dynamic task creation and exec()", "Task destruction", "Driver isolation" parts 1/2/3, "Grant/safecopy IPC", "The capability model", "Runtime capability delegation", and "Server supervision + heartbeat" above
   src/virtio_mmio.rs virtio-mmio transport: 32-slot device discovery, modern (non-legacy) register layout, addresses confirmed via devicetree dump
   src/block.rs       BlockDevice enum (Virtio | UsbMsd) - the block-device abstraction fat32.rs sits on, see "USB mass storage" above
   src/usb_msd.rs     USB mass storage: Bulk-Only Transport + SCSI (INQUIRY/READ CAPACITY/READ(10)/WRITE(10)) over xhci.rs's bulk endpoints - Parallels' first working disk, see "USB mass storage" above
@@ -5971,8 +6055,8 @@ cond/                seventh userland program: THE CONSOLE SERVER (driver isolat
   src/main.rs        the request loop (recv -> decode DSPOP_WRITE -> render -> reply, the filesystem server's shape) plus two backends chosen from CON_INFO at startup: byte-stream (forward to the kernel console via CON_WRITE) and framebuffer (render glyphs here - cursor, wrap, scroll, a small ANSI parser - via FB_BLIT/FB_SCROLL/FB_CLEAR)
   src/font.rs        cond's own copy of the 8x8 bitmap font (from kernel/src/font.rs) - the font is what "console driver logic" meant, so it moved to userland; the kernel keeps a copy only for its emergency fbconsole
 
-netd/                eighth userland program: THE NETWORK SERVER (network stack, Stage 2) - owns the protocol stack (ARP/IPv4/ICMP) in userland; the kernel keeps only the DMA-owning virtio-net driver, reached by this task alone via the gated NET_SEND/NET_RECV/NET_MAC syscalls (the fsd/BLOCK_* pattern). Boot-loaded into protected task slot 4 (NET_TASK), supervised. Speaks the NETOP_PING request protocol to clients (the shell's `ping` command); hand-rolled fixed-buffer frame building (ARP/IPv4/ICMP/UDP/DNS) + Internet checksums, no crates. NETOP_RESOLVE (Stage 3) does DNS-over-UDP for `resolve`; NETOP_FETCH (Stage 4a) does a client-TCP HTTP GET for `fetch`. See "Network stack, Stage 2/3/4a" above
-  src/main.rs        the request loop (NETOP_PING -> ICMP echo; NETOP_RESOLVE -> DNS-over-UDP; NETOP_FETCH -> resolve + route + a client TCP HTTP GET) plus the ARP/IPv4/ICMP/UDP/DNS/TCP frame builders, the DNS/TCP parsers, next-hop routing, ip_checksum and the TCP pseudo-header checksum
+netd/                eighth userland program: THE NETWORK SERVER (network stack, Stage 2) - owns the protocol stack (ARP/IPv4/ICMP) in userland; the kernel keeps only the DMA-owning virtio-net driver, reached by this task alone via the gated NET_SEND/NET_RECV/NET_MAC syscalls (the fsd/BLOCK_* pattern). Boot-loaded into protected task slot 4 (NET_TASK), supervised. Speaks the NETOP_PING request protocol to clients (the shell's `ping` command); hand-rolled fixed-buffer frame building (ARP/IPv4/ICMP/UDP/DNS) + Internet checksums, no crates. NETOP_RESOLVE (Stage 3) does DNS-over-UDP for `resolve`; NETOP_FETCH (Stage 4a) does a client-TCP HTTP GET for `fetch`. Stage 4b makes it event-driven (blocks in NET_WAIT, drains client messages *and* incoming frames each wake) and adds a TCP HTTP server on port 80 + an ARP responder - the guest answers the network now, not just initiates. See "Network stack, Stage 2/3/4a/4b" above
+  src/main.rs        the NET_WAIT event loop (drain client requests -> NETOP_PING/RESOLVE/FETCH; drain frames -> ARP replies + the TCP server state machine) plus the ARP/IPv4/ICMP/UDP/DNS/TCP frame builders (build_tcp_generic shared by client build_tcp + server build_tcp_srv), the DNS/TCP parsers, next-hop routing, ip_checksum and the TCP pseudo-header checksum
 
 upper/               sixth userland program: the pipeline filter demo (uppercases its piped input) - the reference for the filter-program shape: stdin = msg_recv, stdout = con_write (routed through the console server), EOF = the empty message, finish = exit; see "Pipelines" above
   src/main.rs        ~80 lines: the recv/uppercase/putc loop

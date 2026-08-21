@@ -68,8 +68,18 @@ make run-usb-multi   # + USB tablet and storage stick (3-device xHCI rig)
 make run-virtio-console  # + a virtio console device (see its Makefile note)
 make run-net         # + a virtio-net device & QEMU user-net + a net.pcap dump
 make run-image-net   # real FAT32 *and* the NIC in one boot - the fullest run
+make run-image-server # + SLIRP hostfwd tcp::5555->:80, so the host can curl netd's HTTP server
 make run-gicv3       # forces GICv3 instead of QEMU's default GICv2
 ```
+
+To test the network **client** ops, boot `make run-image-net` and type
+`ping 10.0.2.2`, `resolve example.com`, or `fetch example.com` at the
+shell. To test the network **server**, boot `make run-image-server` and,
+on the host, run `curl http://localhost:5555/` — the guest's from-scratch
+TCP stack serves a page. (QEMU's user-mode networking (SLIRP) reaches the
+outside for the client ops, and its `hostfwd` forwards a host port to the
+guest's port 80 for the server; both are QEMU-only — Parallels' virtio-net
+is PCI, which this project's virtio path doesn't drive.)
 
 The one everyday gotcha: **`make run`'s disk is FAT16** (an artifact of
 QEMU's vvfat driver), which the FAT32-only filesystem server can't

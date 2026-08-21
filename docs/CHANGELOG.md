@@ -7,6 +7,39 @@ what broke, how it was diagnosed), see `CLAUDE.md`; for *how* something
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## Network stack, Stage 4b: an async-receive event loop, and a TCP HTTP server
+
+The guest **answers** the network now, not just initiates. Stage 4a's gap
+was that `netd` was client-only — it blocked on `MSG_RECV`, so nothing
+watched the wire between requests, and a task can't block on IPC *and* poll
+for frames at once. This adds the missing async-receive primitive (the
+poll/select gap flagged since Stage 2) and a TCP HTTP server you can `curl`
+from the host.
+
+**Kernel (a minimal poll/select):** `virtio_net::has_frame()` peeks the RX
+used-ring without consuming; `NET_WAIT` (syscall 45, gated to `CAP_NET`)
+blocks the caller until either a frame or a message is pending, then returns
+(the caller drains both itself). `tasks.rs` gained `WaitReason::NetInput`
+(wakes on frame-or-message, consuming neither) and a `send_message` wake so
+client calls to `netd` still land sub-tick.
+
+**`netd`:** `serve()` is an event loop now — block in `NET_WAIT`, drain
+client requests (`ping`/`resolve`/`fetch`, unchanged) *and* incoming frames.
+Frames feed an ARP responder (answers requests for our IP) and a minimal
+TCP server on port 80 (SYN → SYN-ACK, request → a fixed HTML page + FIN,
+then acks the peer's FIN and closes). One connection at a time, state on
+`serve()`'s stack (no static mutable state in userland). `build_tcp` split
+into `build_tcp_generic` + client/server port wrappers.
+
+Confirmed on QEMU (`make run-image-server`, SLIRP hostfwd tcp::5555→:80):
+host `curl http://localhost:5555/` → `HTTP/1.0 200 OK` + the page, three
+connections in a row; the pcap showed a textbook SYN/SYN-ACK/GET/200/
+FIN/FIN-ACK exchange. Client ops (`ping`→reply, `resolve`→real DNS,
+`fetch`→Example Domain) and the full disk/selftest/pipe surface unregressed;
+zero `-d int` aborts. Still coarse: one fixed page, one connection at a
+time, no retransmission/congestion control, QEMU-only. See `CLAUDE.md`'s
+"Network stack, Stage 4b."
+
 ## Network stack, Stage 4a: a client TCP, and a `fetch` command (real HTTP)
 
 The stack's first **TCP**: `fetch <hostname>` opens a client TCP connection

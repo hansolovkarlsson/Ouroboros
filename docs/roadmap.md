@@ -185,10 +185,13 @@ step, not a Stage 1 concern.
    exposed as a `NETOP_PING` request; a `ping <a.b.c.d>` shell command is the
    first client. Verified on QEMU (`ping 10.0.2.2`/`.3` → reply, `.99` →
    unreachable), cross-checked against a `tcpdump` of the `run-image-net`
-   pcap. **Guest-initiated ping only** — answering a host's ping needs an
-   async receive loop (the poll/select gap, see `research-directions.md`),
-   deliberately deferred. See `CHANGELOG.md` / `CLAUDE.md`'s "Network stack,
-   Stage 2."
+   pcap. **Guest-initiated ping only** at the time — answering unsolicited
+   input needed an async receive loop (the poll/select gap), since closed by
+   Stage 4b's `NET_WAIT`/`WaitReason::NetInput` (`netd` now answers ARP
+   requests and serves TCP; a host-ping responder would be a trivial add on
+   the same event loop, though SLIRP can't route an inbound host→guest ping
+   to test it). See `CHANGELOG.md` / `CLAUDE.md`'s "Network stack, Stage
+   2/4b."
 3. ~~**UDP.**~~ **DONE (2026-08-21).** UDP send/receive, proven by real
    **DNS resolution**: a `NETOP_RESOLVE` op in `netd` (the `NETOP_*`/`FSOP_*`
    shape) does a DNS A-query over UDP to the user-net DNS server, parses the
@@ -199,20 +202,28 @@ step, not a Stage 1 concern.
    changes — a whole new transport landed purely in userland, the payoff of
    the driver/protocol split. See `CHANGELOG.md` / `CLAUDE.md`'s "Network
    stack, Stage 3."
-4. **TCP — client active-open DONE (2026-08-21, Stage 4a); `listen`
-   deferred.** Decided hand-roll (not `smoltcp`) and minimal-client scope
-   with the user. `netd` gained a hand-rolled client TCP (`build_tcp`/
-   `parse_tcp` with the IPv4 pseudo-header checksum, `tcp_get`: SYN handshake,
-   in-order reassembly, clean FIN teardown) plus a minimal default route
-   (on-subnet → target, else the gateway), and a `fetch <hostname>` shell
-   command chains resolve → route → TCP → HTTP GET. Verified fetching a real
-   web page (`fetch example.com` → `HTTP/1.1 200 OK` + the Example Domain
-   HTML), cross-checked against a `tcpdump` of the pcap (a clean four-way TCP
-   conversation, checksums accepted). No kernel changes. **Still deferred
-   (Stage 4b):** a `listen`/passive-open server side (hits the same
-   async-receive gap `ping`/`resolve` did), retransmission, congestion
-   control, multiple connections, and a streaming (not one-reply-capped)
-   response. See `CHANGELOG.md` / `CLAUDE.md`'s "Network stack, Stage 4a."
+4. **TCP — client active-open DONE (2026-08-21, Stage 4a); server side
+   DONE (2026-08-21, Stage 4b).** Decided hand-roll (not `smoltcp`) and
+   minimal scope with the user. Stage 4a: `netd` gained a hand-rolled client
+   TCP (`build_tcp`/`parse_tcp` with the IPv4 pseudo-header checksum,
+   `tcp_get`: SYN handshake, in-order reassembly, clean FIN teardown) plus a
+   minimal default route (on-subnet → target, else the gateway), and a
+   `fetch <hostname>` shell command chains resolve → route → TCP → HTTP GET.
+   Stage 4b closed the async-receive gap `ping`/`resolve`/`listen` all named:
+   a new `NET_WAIT` syscall + `WaitReason::NetInput` (a minimal poll/select
+   over frames-or-messages) makes `netd` event-driven, and it now runs a TCP
+   HTTP server on port 80 (SYN → SYN-ACK → request → a fixed page + FIN →
+   ack the peer's FIN) plus an ARP responder — the guest *answers* the
+   network. Verified both directions on QEMU: `fetch example.com` →
+   `HTTP/1.1 200 OK` + Example Domain HTML (client), and host
+   `curl localhost:5555` → `HTTP/1.0 200 OK` + the guest's page via SLIRP
+   hostfwd (server), each cross-checked against a `tcpdump` of the pcap (clean
+   four-way conversations, checksums accepted). **Still open:** request
+   parsing (the server serves one fixed page, ignoring the path/method — a
+   static-file server reading from `fsd` is the natural next step),
+   retransmission, congestion control, multiple concurrent connections, a
+   streaming (not one-reply-capped) response, and IRQ-driven RX. See
+   `CHANGELOG.md` / `CLAUDE.md`'s "Network stack, Stage 4a/4b."
 
 **Decisions to settle before starting (not now):**
 
