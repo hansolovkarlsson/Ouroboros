@@ -307,6 +307,24 @@ run-image: image
 		-global virtio-mmio.force-legacy=false \
 		-nographic
 
+# `run-image` (real FAT32, so disk commands work) *and* the NIC from
+# `run-net` in one boot - the fullest QEMU run: the filesystem server mounts,
+# the shell/disk commands work, and init_net's boot-time ARP probe exercises
+# the network. Every frame is dumped to net.pcap for host-side inspection.
+run-image-net: image
+	qemu-system-aarch64 \
+		-machine virt \
+		-cpu cortex-a72 \
+		-m 512M \
+		-bios $(OVMF) \
+		-drive file=$(ESP_DIR).img,format=raw,if=none,id=hd0 \
+		-device virtio-blk-device,drive=hd0 \
+		-netdev user,id=net0 \
+		-device virtio-net-device,netdev=net0 \
+		-object filter-dump,id=f0,netdev=net0,file=net.pcap \
+		-global virtio-mmio.force-legacy=false \
+		-nographic
+
 # Wraps esp.img into esp.hdd, a Parallels-native virtual hard disk, via
 # prl_disk_tool's `--dmg` import (its only documented way to build a .hdd
 # from an existing raw image; needs a real .dmg container, not the raw .img,
