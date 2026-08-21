@@ -414,6 +414,20 @@ pub const HEAP_INFO_BASE: u64 = 0;
 /// [`HEAP_INFO`] field: the heap area's size in bytes.
 pub const HEAP_INFO_SIZE: u64 = 1;
 
+/// `(grantee, target)` -> `0` on success, [`MSG_ERR_DENIED`] otherwise.
+/// Runtime capability delegation: grant `grantee` (a task slot) the right to
+/// initiate IPC sends to `target` (a task slot) - a dynamic addition to
+/// `grantee`'s static send-mask. The caller may only delegate a send
+/// capability it *statically holds itself* (no transitive re-delegation),
+/// which in practice confines this to the shell authorizing a pipeline's
+/// producer to stream directly to its consumer (relay-free
+/// `programA | programB`): only the shell holds the send-caps for the
+/// spawnable slots. The delegation is cleared automatically when either the
+/// grantee or the target dies, so no explicit revoke is needed for that
+/// flow. Enforced at the `MSG_SEND`/`MSG_CALL` boundary (the kernel's
+/// `may_send`).
+pub const DELEGATE: u64 = 41;
+
 /// [`CON_INFO`] field: the backend kind ([`CON_KIND_*`]).
 pub const CON_INFO_KIND: u64 = 0;
 /// [`CON_INFO`] field: framebuffer columns (character cells wide).

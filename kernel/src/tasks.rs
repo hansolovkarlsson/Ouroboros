@@ -168,7 +168,13 @@ pub(crate) fn may_send(src: usize, dest: usize) -> bool {
             return true;
         }
     }
-    dest < NUM_TASKS && caps_for_slot(src) & (1 << dest) != 0
+    if dest < NUM_TASKS && caps_for_slot(src) & (1 << dest) != 0 {
+        return true;
+    }
+    // A runtime-delegated send capability (the `DELEGATE` syscall) - `src`
+    // was handed the right to reach `dest` at runtime by a task that
+    // statically held it. See [`DELEGATED_SEND`].
+    dest < NUM_TASKS && DELEGATED_SEND[src].load(Ordering::Relaxed) == dest as u64
 }
 
 /// 2MB - matches `loader.rs`'s own `SLOT_ALIGN` (a plain numeric
@@ -587,6 +593,54 @@ fn reset_stdout_target(task: usize) {
     STDOUT_TARGET[task].store(syscall_abi::CON_TASK, Ordering::Relaxed);
 }
 
+/// Runtime capability delegation (the `DELEGATE` syscall). The static
+/// send-mask in [`caps_for_slot`] is fixed per slot; delegation lets a task
+/// that *statically holds* a send-capability hand it to another task at
+/// runtime - the mechanism a shell uses to authorize a pipeline's producer
+/// to stream directly to its consumer (relay-free `programA | programB`),
+/// taking the shell out of the byte hot path.
+///
+/// One delegated send-target per task (a slot index, or `NO_DELEGATION`),
+/// matching the single-slot `GRANTS`/`STDOUT_TARGET` precedent: a task
+/// orchestrates one delegated stream at a time, so one slot suffices
+/// (`a | b | c`, whose middle stage would both send and receive, stays out
+/// of scope). No transitive re-delegation - [`may_delegate`] consults only
+/// the *static* mask, so a delegated capability can never be laundered
+/// onward, which is also why only the shell (the one slot holding
+/// `TO_SPAWN_*`) can ever authorize producer->consumer streaming.
+const NO_DELEGATION: u64 = NUM_TASKS as u64;
+static DELEGATED_SEND: [AtomicU64; NUM_TASKS] =
+    [const { AtomicU64::new(NO_DELEGATION) }; NUM_TASKS];
+
+/// Whether `delegator` may delegate the right to send to `target` - it must
+/// *statically* hold that send-capability itself (the delegated mask is
+/// deliberately not consulted, so nothing can be re-delegated onward). This
+/// is what confines inter-child streaming to the shell: only slot 0 holds
+/// `TO_SPAWN_*`, so only it can authorize a spawnable task to reach another.
+pub(crate) fn may_delegate(delegator: usize, target: usize) -> bool {
+    target < NUM_TASKS && caps_for_slot(delegator) & (1 << target) != 0
+}
+
+/// `DELEGATE`'s core: grant `grantee` the runtime capability to send to
+/// `target`. The syscall arm has already checked [`may_delegate`] and that
+/// `grantee`/`target` are valid live slots - this only records it.
+pub(crate) fn set_delegate(grantee: usize, target: usize) {
+    DELEGATED_SEND[grantee].store(target as u64, Ordering::Relaxed);
+}
+
+/// Clear every delegation involving `task` - both the one `task` was granted
+/// (delegated-out) and any pointing *at* `task`, so a reused slot can never
+/// inherit a delegation aimed at a now-dead target. Called from every
+/// teardown path alongside [`clear_grant`]/[`reset_stdout_target`].
+fn clear_delegate(task: usize) {
+    DELEGATED_SEND[task].store(NO_DELEGATION, Ordering::Relaxed);
+    for slot in DELEGATED_SEND.iter() {
+        if slot.load(Ordering::Relaxed) == task as u64 {
+            slot.store(NO_DELEGATION, Ordering::Relaxed);
+        }
+    }
+}
+
 /// One task's single outstanding grant - the enforced bulk-transfer
 /// capability behind the `GRANT`/`SAFECOPY` syscalls. `grantee` (a slot
 /// index, the same identity IPC uses everywhere) may bulk-copy the
@@ -941,6 +995,7 @@ pub(crate) unsafe fn exit_current_and_switch(frame: *mut Context, status: u64) -
     unsafe { *REGIONS[current].0.get() = (0, 0) };
     clear_mailbox(current);
     clear_grant(current);
+    clear_delegate(current);
     reset_stdout_target(current);
     let next = next_runnable(current);
     *frame = unsafe { *TASKS[next].0.get() };
@@ -964,6 +1019,7 @@ pub(crate) fn kill_task(i: usize) {
     unsafe { *REGIONS[i].0.get() = (0, 0) };
     clear_mailbox(i);
     clear_grant(i);
+    clear_delegate(i);
     reset_stdout_target(i);
 }
 
@@ -989,6 +1045,7 @@ pub(crate) unsafe fn kill_current_and_switch(frame: *mut Context) {
     unsafe { *REGIONS[current].0.get() = (0, 0) };
     clear_mailbox(current);
     clear_grant(current);
+    clear_delegate(current);
     reset_stdout_target(current);
     let next = next_runnable(current);
     *frame = unsafe { *TASKS[next].0.get() };

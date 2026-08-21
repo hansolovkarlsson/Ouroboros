@@ -818,6 +818,25 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
                 None => syscall_abi::SAFECOPY_ERR,
             }
         }
+        syscall_abi::DELEGATE => {
+            // arg0 = grantee slot, arg1 = target slot: grant `grantee` the
+            // runtime capability to send to `target`. The caller may only
+            // delegate a send-cap it *statically holds* (may_delegate),
+            // which confines inter-child streaming to the shell - see the
+            // DELEGATE doc in syscall-abi and tasks::may_delegate.
+            let grantee = arg0 as usize;
+            let target = arg1 as usize;
+            if grantee >= tasks::NUM_TASKS
+                || !tasks::task_exists(grantee)
+                || target >= tasks::NUM_TASKS
+                || !tasks::task_exists(target)
+                || !tasks::may_delegate(tasks::current_task(), target)
+            {
+                return syscall_abi::MSG_ERR_DENIED;
+            }
+            tasks::set_delegate(grantee, target);
+            0
+        }
         _ => {
             console::println!("Ouroboros kernel: syscall from EL0: unknown number={number}");
             u64::MAX
