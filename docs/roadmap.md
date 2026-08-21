@@ -78,19 +78,25 @@ recovering on Ctrl+C), zero aborts. Still coarse (one delegated target per
 task, non-transitive, in practice shell-only); a general, transitive
 capability-passing mechanism is the remaining gap. See `CHANGELOG.md`.
 
+**Recently completed (2026-08-21): FAT32 interior / random-access writes.**
+`fat32::write_at` used to refuse any offset past the current end of file (no
+sparse gap), so it only did append and sequential-overwrite. It now supports
+a true random-access write at any offset, **zero-filling the gap** on disk
+when the offset is past EOF (FAT32 has no sparse representation, so real zero
+bytes). A finding that shaped the scope: the *interior*-overwrite path
+(offset ≤ old_size) was already coded — it just had no caller, since `cp`/`>>`
+are sequential/append only; and `FSOP_WRITE_AT` already existed, so no new
+syscall/FSOP was needed. A `writeat <file> <offset> <text...>` shell builtin
+is the reachable consumer (in place, file must exist). Verified on QEMU with
+the gap bytes confirmed real `0x00` by hex-inspecting the raw serial log
+(a 1195-byte multi-sector gap all zero — the `extend_chain` fresh-cluster
+case), reboot persistence, and FAT16 degradation; zero aborts. Still coarse:
+1 MiB gap cap, no create-on-`writeat`, no truncate-to-length. See
+`CHANGELOG.md`.
+
 The frontier, in rough order of value:
 
-1. **FAT32 interior / random-access writes — the recommended next
-   milestone.** `fat32::write_at` refuses any offset past the current end of
-   file today (no sparse files), so it does append and sequential-overwrite
-   but not seek-anywhere: no way to rewrite bytes *inside* an existing file
-   while leaving the rest intact. Lifting that is what a future editor or a
-   log with in-place updates needs. It's the pick here because it's
-   **concrete, unblocked, and self-contained** — it lives entirely in the
-   fsd server's `fat32.rs` plus its `FSOP_*` layer, no kernel/scheduler/MMU
-   risk — and it has a real use, unlike the more speculative items below.
-
-2. **General / transitive capability delegation.** The delegation shipped
+1. **General / transitive capability delegation.** The delegation shipped
    2026-08-21 is deliberately coarse: one delegated target per task,
    non-transitive, in practice shell-only. Making it general (any task hands
    any held capability onward, revocably — MINIX's full grant model) would
@@ -101,7 +107,7 @@ The frontier, in rough order of value:
    delegation itself. Build the consumer first, or wait until one is
    actually wanted.
 
-3. **Per-task ASIDs, revisited** — a pure TLB-flush-per-switch optimization
+2. **Per-task ASIDs, revisited** — a pure TLB-flush-per-switch optimization
    that passed on QEMU but faulted the idle task on real Parallels and was
    reverted (see the isolation postmortem for the decoded fault evidence);
    needs a proven break-before-make sequence. Low value — a context switch
@@ -607,10 +613,12 @@ phase:
   reboot-persisted, and confirmed on real Parallels hardware - a
   streaming `cp` and a `>>` append both verified on the real USB stick);
   `>>` appends at the end of a file of any existing size (the old "too
-  large to append" refusal is gone). **Still next**
-  (now the recommended frontier milestone - see "What's next" item 1
-  above): *interior/random-access* writes (`write_at` refuses
-  an offset past EOF - no sparse files) for a future editor/log; the
+  large to append" refusal is gone). ~~**Still next**:
+  *interior/random-access* writes (`write_at` refuses
+  an offset past EOF - no sparse files) for a future editor/log~~ **done
+  (2026-08-21): `write_at` now supports a random-access write at any offset,
+  zero-filling a past-EOF gap; the `writeat` builtin is the consumer - see
+  `CHANGELOG.md`**; the
   **userland heap and guard page from this note are both done** (see
   `CHANGELOG.md`) - the stack is a 16KB *guarded* stack now, and each
   program has a 256KB raw heap area (`heap_info`) the shell uses to lift

@@ -5438,6 +5438,103 @@ capability-passing mechanism (any task handing any held capability onward -
 MINIX's full grant model) is the remaining gap, and what a spawned program
 running its *own* server, or true relay-free `a | b | c`, would need.
 
+## FAT32 interior / random-access writes: `write_at` past EOF, and a `writeat` builtin
+
+The FAT32 offset-write milestone (`fat32::write_at`, see above) deliberately
+**refused any offset past the current end of file** (`Error::InvalidOffset`)
+- a sparse gap FAT32 can't represent - so it only ever did append and
+sequential-overwrite, which is all its callers (`cp` streaming, `>>` append)
+ever needed. This milestone lifts that: `write_at` now supports a true
+**random-access write** at any offset, zero-filling the gap when the offset
+is past EOF. It's the frontier item `docs/roadmap.md` named next (concrete,
+unblocked, self-contained - entirely in the fsd server's `fat32.rs` plus its
+`FSOP_*` layer, no kernel/scheduler/MMU risk).
+
+**A finding that shaped the scope: most of "interior writes" already
+existed.** `write_at`'s per-sector loop already RMW'd a partial sector
+overlapping existing content, so an *interior* overwrite (offset ≤ old_size)
+was already coded - it just had **no caller that exercised it** (`cp`/`>>`
+are sequential/append only, always offset ≤ old_size). And `FSOP_WRITE_AT`
+(op 13) + the shell's `fs_write_at` wrapper (bulk data via grant/safecopy)
+already existed. So the real gaps were exactly two: the `offset > old_size`
+refusal (no zero-filled gap), and no *user-facing* way to invoke an
+arbitrary-offset write. No new syscall or FSOP op was needed.
+
+**The zero-fill, done by generalizing the existing loop rather than bolting
+on a separate pass.** When `offset > old_size`, the gap `[old_size, offset)`
+must become **real zero bytes on disk** - FAT32 has no sparse representation,
+and the clusters `extend_chain` allocates are *not* zeroed, so without this
+the gap would be garbage (the correctness crux). The clean implementation:
+the per-sector loop now runs one unified pass over
+`[min(old_size, offset), offset + len)`, and for each sector builds its
+bytes from **zeros for positions before `offset`** (the gap) and **`data`
+from `offset` on**. This means:
+- The boundary sector that straddles `old_size` (unaligned old size) is
+  handled by the *existing* `sector_start < old_size` RMW branch - it reads
+  the sector, splices in the chunk (which is zeros past `old_size`),
+  preserving the real bytes before `old_size`. No special-casing.
+- The same-sector case (a small gap within one sector) falls out of the same
+  chunk-building - the zeros and data are spliced together in one RMW, so
+  the stale `[old_size, offset)` bytes are overwritten with zeros rather than
+  left as garbage (the subtle bug a naive "write only at offset" would have).
+- Full interior sectors and fresh past-EOF sectors take the existing
+  direct-write / zero-pad branches unchanged.
+- It's **byte-identical for the offset ≤ old_size paths** (when
+  `offset ≤ old_size`, `write_start = offset` and every chunk byte is `data`,
+  exactly the old behavior) - verified, so `cp`/`>>` don't regress.
+
+**A `MAX_GAP_FILL` (1 MiB) cap**: a gap is zero-filled sector by sector, so a
+fat-fingered huge offset must not try to zero-fill the whole volume.
+`write_at` refuses `offset - old_size > MAX_GAP_FILL` with
+`Error::InvalidOffset` - which also keeps that variant *constructed* (it was
+formerly only produced by the now-removed refusal, and is still matched in
+the fsd error mapping, where it maps to `FS_ERR_IO` → the shell's "device
+I/O error"). A dedicated error code for it would be ABI expansion for a rare
+guard; `FS_ERR_IO` is acceptable.
+
+**The consumer: a `writeat <file> <offset> <text...>` shell builtin** -
+a random-access write, in place, exercising both the previously-unreachable
+interior-overwrite path and the new past-EOF zero-fill. Unlike `write`
+(full replace) it leaves the bytes outside the written window intact, and
+unlike `write` it does *not* create the file (the file must already exist -
+`write_at` needs the entry; use `write`/`touch` first). This is the
+project's standing "prove a primitive via its first consumer" pattern -
+`write_at`'s interior/past-EOF paths had never been reachable before.
+
+**Confirmed working end to end on QEMU (real FAT32 `esp.img`), zero `-d int`
+aborts across every session - with the gap bytes verified as real `0x00` by
+hex-inspecting the raw serial log on the host** (no in-guest hexdump exists;
+`cat`'s raw bytes, NULs included, land in the captured serial output):
+interior overwrite (`write /f.txt AAAAAAAAAA` → `writeat /f.txt 3 XY` →
+`cat` → `AAAXYAAAAA`, proving RMW preserves the surrounding bytes - the
+path `cp`/`>>` never reached); append at exact EOF; a past-EOF
+**single-sector** gap (5 bytes, all `0x00`); a past-EOF **multi-sector** gap
+(`writeat /h.txt 1200 ENDHERE` on a 5-byte file → the 1195-byte gap read
+back **all `0x00`, only distinct value `[0]`** - the case that exercises
+freshly `extend_chain`'d clusters and would have shown garbage if the
+zero-fill were wrong); the error cases (`writeat` on a nonexistent file →
+"no such file or directory"; past the 1 MiB cap → "device I/O error");
+**reboot persistence** (the multi-sector gap's zeros and the interior
+content both survived a fresh boot against the same `esp.img`, proving the
+writes reached real disk sectors); and FAT16 degradation (`make run`'s
+unmountable vvfat → the shared "no filesystem mounted" message; `help` lists
+`writeat`). **Not yet re-confirmed on real Parallels hardware** - the fat32
+path is only reachable there via a mounted USB stick, under the standing
+reads-only policy (a scratch write needs an explicit go-ahead); the
+boot/typing regression is the realistic scripted check otherwise.
+
+**Still coarse, worth knowing before building on this:** `writeat` requires
+the file to already exist (no create-on-write); the new content of one
+`writeat` is bounded by the shell's input line (`BUFFER_SIZE`, 128 bytes),
+and a single `write_at`/`fs_write_at` call is still capped at `SAFECOPY_MAX`
+(2048) like every other bulk op; a past-EOF gap is capped at 1 MiB
+(`MAX_GAP_FILL`); the 1 MiB-cap error surfaces as the generic "device I/O
+error" (no dedicated code); and there's still no in-guest way to *inspect*
+raw bytes (no hexdump), so a NUL gap looks blank in `cat` - the zero-fill
+was verified host-side. Directories still never shrink, and everything else
+about the module's scope (8.3-only, no LFN, first-FAT32-partition-only) is
+unchanged.
+
 ## Commands
 
 ```sh
@@ -5564,11 +5661,11 @@ kernel/
 
 shell/               userland default shell - a separate crate, built for aarch64-unknown-none, loaded from disk (not compiled into the kernel)
   linker.ld          self-relocating (PIE) linker script: entry at offset 0, .rela.dyn/.dynsym/.dynamic/.data.rel.ro, no .bss/.data (see "A real relocating loader" above and docs/processes.md)
-  src/main.rs        line editor + command dispatch (help/echo/uptime/clear/ls/cat/cd/pwd/mkdir/rmdir/touch/rm/write/cp/mv/exec/exit/ps/kill/fg/selftest, plus `> file`/`>> file` output redirection on any of them - see "Output redirection" above), running as real EL0 userland code, built for real relocation (relocation-model=pic, --release only) - main loop blocks on read_char (syscall 15) instead of busy-polling, see "Blocking primitives" above; see docs/processes.md
+  src/main.rs        line editor + command dispatch (help/echo/uptime/clear/ls/cat/cd/pwd/mkdir/rmdir/touch/rm/write/writeat/cp/mv/exec/exit/ps/kill/fg/wait/send/recv/selftest, plus `> file`/`>> file` output redirection and `| /path/program` pipes on any of them - see "Output redirection", "Pipelines", "Runtime capability delegation", and "FAT32 interior/random-access writes" above), running as real EL0 userland code, built for real relocation (relocation-model=pic, --release only) - main loop blocks on read_char (syscall 15) instead of busy-polling, see "Blocking primitives" above; see docs/processes.md
 
 fsd/                 fifth userland program: THE FILESYSTEM SERVER (driver isolation part 2) - owns the FAT32 engine, speaks the FSOP_* protocol to clients over IPC (including the bulk FSOP_READ_BULK/FSOP_WRITE_BULK ops that move file data via grant/safecopy - see "Grant/safecopy IPC" above), and is the only task the BLOCK_* syscalls accept; boot-loaded into protected task slot 2, see "Driver isolation, part 2" above
   src/main.rs        the request loop: recv -> decode FsRequest -> dispatch to Fs -> reply one u64; mounted Fs lives in main's stack frame (no static state in userland)
-  src/fat32.rs       the kernel's old hand-rolled FAT32 module, moved essentially verbatim (MBR, BPB, FAT chains, 8.3 entries, full read/write support) plus read_at (windowed offset reads) and write_at (offset writes that extend the file via a partial-sector read-modify-write - streaming cp and unbounded >>, see "FAT32 offset-write" above); its BlockDevice became disk.rs's syscall shim
+  src/fat32.rs       the kernel's old hand-rolled FAT32 module, moved essentially verbatim (MBR, BPB, FAT chains, 8.3 entries, full read/write support) plus read_at (windowed offset reads) and write_at (random-access offset writes - interior overwrite via a partial-sector read-modify-write, and past-EOF writes that zero-fill the gap, bounded by MAX_GAP_FILL; behind streaming cp, unbounded >>, and the writeat builtin - see "FAT32 offset-write" and "FAT32 interior/random-access writes" above); its BlockDevice became disk.rs's syscall shim
   src/disk.rs        zero-sized Disk handle: read_sector/write_sector/capacity as BLOCK_READ/BLOCK_WRITE/BLOCK_INFO syscall wrappers
 
 cond/                seventh userland program: THE CONSOLE SERVER (driver isolation part 3) - owns the steady-state console; userland output flows to it as batched DSPOP_WRITE messages over IPC. Two backends (chosen from CON_INFO): byte-stream (forward to the kernel console via the gated CON_WRITE syscall 33 - QEMU's UART) and framebuffer (render glyphs itself via the gated FB_BLIT/FB_SCROLL/FB_CLEAR primitives - the console rendering logic, font included, moved out of the kernel's fbconsole; Parallels, QEMU ramfb). Boot-loaded into protected task slot 3 (CON_TASK), accepted by CON_WRITE/FB_* alone, see "Driver isolation, part 3" above

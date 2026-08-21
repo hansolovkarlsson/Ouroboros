@@ -470,13 +470,15 @@ Worth knowing before building further on this:
   rather than silently corrupting the program's own region - except a
   single >4KB frame could skip the one-page guard).
 - **Write support covers directories, files with real content,
-  copying, renaming/moving, and now writing at a byte offset**
-  (`fat32::write_at` - write data at an offset, extending the file,
+  copying, renaming/moving, and random-access writing at a byte offset**
+  (`fat32::write_at` - write data at any offset, extending the file,
   without rewriting the bytes before it, via a partial-sector
-  read-modify-write). `cp` streams through it and handles a file of any
-  size; `>>` appends at the end of a file of any existing size. What's
-  still missing: no *interior/random-access* or sparse writes (`write_at`
-  refuses an offset past the current end of file), no recursive `cp`, no
+  read-modify-write; an offset past the end of file zero-fills the gap,
+  bounded by a 1 MiB cap). `cp` streams through it and handles a file of
+  any size; `>>` appends at the end of a file of any existing size; the
+  `writeat` builtin writes in place at any offset. What's still missing:
+  no way to *shrink* a file except by full-replacing it (no
+  truncate-to-length), no recursive `cp`, no
   move-into-an-existing-directory-keeping-basename shortcut for `mv`, no
   cycle detection (`mv` a directory into its own descendant isn't guarded
   against). Output redirection (`>`/`>>`) is entirely shell-side (see

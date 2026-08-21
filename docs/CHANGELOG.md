@@ -7,6 +7,57 @@ what broke, how it was diagnosed), see `CLAUDE.md`; for *how* something
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## FAT32 interior / random-access writes (`write_at` past EOF) - and a `writeat` builtin
+
+`fat32::write_at` refused any offset past the current end of file
+(`Error::InvalidOffset`) - a sparse gap FAT32 can't represent - so it only
+did append and sequential-overwrite, which is all `cp` streaming and `>>`
+append ever needed. This lifts that: a true **random-access write** at any
+offset, zero-filling the gap when the offset is past EOF. The frontier item
+the roadmap named next (concrete, unblocked, self-contained - entirely in the
+fsd server's `fat32.rs` plus its `FSOP_*` layer, no kernel/scheduler/MMU
+risk).
+
+**A finding that shaped the scope: most of "interior writes" already
+existed.** `write_at`'s per-sector loop already RMW'd a partial sector
+overlapping existing content, so an *interior* overwrite (offset ≤ old_size)
+was already coded - it just had **no caller** (`cp`/`>>` are sequential/append
+only). And `FSOP_WRITE_AT` (op 13) + the shell's `fs_write_at` wrapper already
+existed. The real gaps were exactly two: the `offset > old_size` refusal, and
+no user-facing way to invoke an arbitrary-offset write. No new syscall or FSOP
+op needed.
+
+**The zero-fill, by generalizing the existing loop.** When `offset > old_size`
+the gap `[old_size, offset)` must become **real zero bytes on disk** (FAT32
+has no sparse representation, and `extend_chain`'s fresh clusters aren't
+zeroed - so without this the gap is garbage, the correctness crux). The
+per-sector loop now runs one unified pass over
+`[min(old_size, offset), offset + len)`, building each sector from zeros
+(positions before `offset`) and data (from `offset`). The boundary sector
+straddling `old_size` and the same-sector-gap case both fall out of the
+existing RMW branch with no special-casing, and it's byte-identical for the
+offset-within-file paths (so `cp`/`>>` don't regress). A `MAX_GAP_FILL`
+(1 MiB) cap keeps a fat-fingered offset from zero-filling the volume
+(`Error::InvalidOffset`, mapped to `FS_ERR_IO`).
+
+**The consumer:** a `writeat <file> <offset> <text...>` shell builtin - a
+random-access write, in place, exercising both the previously-unreachable
+interior-overwrite path and the new past-EOF zero-fill. Unlike `write` (full
+replace) it leaves the bytes outside the window intact and does not create
+the file (it must already exist).
+
+**Confirmed on QEMU (real FAT32), zero `-d int` aborts, with the gap bytes
+verified as real `0x00` by hex-inspecting the raw serial log on the host:**
+interior overwrite (`AAAXYAAAAA`), append, past-EOF single-sector gap (5
+bytes all zero) and **multi-sector gap** (a 1195-byte gap read back all
+`0x00` - exercising freshly `extend_chain`'d clusters), the error cases
+(nonexistent file, 1 MiB cap), **reboot persistence** (gap zeros + interior
+content survive a fresh boot), and FAT16 degradation (shared no-filesystem
+message; `help` lists `writeat`). Real-Parallels confirmation pending (the
+fat32 path is only reachable there via a mounted USB stick, reads-only by
+policy). See `CLAUDE.md`'s "FAT32 interior/random-access writes" section and
+`docs/shell-commands.md`.
+
 ## Runtime capability delegation - relay-free program-to-program pipes
 
 The IPC send-mask (who-may-call-whom) was a **pure function of task slot**:

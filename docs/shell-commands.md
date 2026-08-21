@@ -74,6 +74,7 @@ implement a completely different command set.
 | `touch` | `touch <file>` | Creates an empty (zero-byte) file, or succeeds silently if one already exists there. | There's no RTC on this kernel, so unlike real `touch`, an existing file's "timestamp" isn't updated — nothing happens, successfully. Fails if the target is a directory. |
 | `rm` | `rm <file>` | Removes a file. | Fails if it doesn't exist or is a directory — use `rmdir` for those. |
 | `write` | `write <file> [words...]` | Joins every word after the filename with a single space (same style as `echo`) and writes the result as the file's *entire* contents, replacing whatever was there. Creates the file if it doesn't exist. | `write <file>` with no words truncates the file to empty (a real, valid case, not an error). Fails if the target is an existing directory or the parent is missing. |
+| `writeat` | `writeat <file> <offset> <text...>` | A **random-access write**: writes the text at byte `offset`, overwriting bytes *in place* and leaving everything outside the written window intact (unlike `write`, which replaces the whole file). If `offset` is past the end of the file, the gap is **zero-filled** on disk. | The file must **already exist** — `writeat` does not create it (use `write`/`touch` first). The text is bounded by the input line. A past-EOF gap is capped at 1 MiB (a larger offset reports a device I/O error). Fails on a missing file, or if the target is a directory. |
 | `cp` | `cp <src> <dst>` | Copies `src`'s contents to `dst`, creating `dst` if it doesn't exist or replacing it if it does. | **Streams the copy one chunk at a time via the FAT32 offset-write primitive, so it handles a file of any size** (bounded by disk space, not a shell buffer) — the old 2048-byte ceiling is gone. `cp x x` (a file onto itself, however the two paths are spelled) is **refused**: streaming truncates `dst` first, which would destroy the source. A missing source leaves `dst` untouched. Non-atomic: an interrupted copy leaves `dst` truncated (a partial copy is a wrong copy). No recursive directory copy. |
 | `ps` | `ps` | One line per scheduler slot: `unused`, `runnable`, `blocked (waiting)`, or `` exited - `wait` to collect its status `` (a zombie holding its slot). | The caller can't distinguish "running right now" from "runnable" — it is, by definition, the one running when it asks. Output is redirectable like any other command's. |
 | `kill` | `kill <n>` | Destroys task `n` (see `ps` for numbers). | Tasks 0 (this shell), 1 (idle), and 2 (the filesystem server) are protected. A killed task's slot becomes spawnable again and its memory is reclaimed when allocation order allows. |
@@ -190,14 +191,15 @@ via `ps`).
 
 ## Known limitations
 
-- **`write`/`cp` always fully replace a file's contents — no append or
-  partial/offset writes at the syscall/FAT32 layer.** `>>` provides
-  *bounded* append purely shell-side (see "Output redirection" above) —
-  a real append primitive would need a new syscall and FAT32-layer
-  support that don't exist yet. `write` content is also bounded by
-  the 128-byte input line, so nothing typed at the shell can ever
-  exceed one FAT32 cluster's worth of content; `cp` is bounded by its
-  own 256-byte read buffer instead.
+- **Write granularity: `write` full-replaces; `writeat`/`>>`/`cp` do
+  offset writes.** The FAT32 layer has a real random-access offset-write
+  primitive (`write_at`): `writeat` writes in place at any offset
+  (zero-filling a past-EOF gap, capped at 1 MiB), `>>` appends at the
+  file's current end, and `cp` streams a copy of any size through it.
+  `write` still replaces a file's *entire* contents (bounded by the
+  128-byte input line). What's still missing: no way to *shrink* a file
+  except by full-replacing it (no truncate-to-length), and `writeat`
+  won't create a missing file.
 - **`mv` has no cycle detection** beyond the trivial self-move guard
   (moving a directory into its own descendant isn't prevented).
 - **Every filesystem failure prints its specific reason** ("already
