@@ -273,6 +273,14 @@ struct ArgsStagingCell(core::cell::UnsafeCell<[u8; ARGS_STAGING_SIZE]>);
 unsafe impl Sync for ArgsStagingCell {}
 static ARGS_STAGING: ArgsStagingCell = ArgsStagingCell(core::cell::UnsafeCell::new([0; ARGS_STAGING_SIZE]));
 
+/// Staging buffer for a spawn's working directory (`CWD_STAGE` writes it
+/// here; the next `SPAWN` copies `arg3` bytes into the child's per-slot cwd).
+const CWD_STAGING_SIZE: usize = syscall_abi::CWD_MAX as usize;
+struct CwdStagingCell(core::cell::UnsafeCell<[u8; CWD_STAGING_SIZE]>);
+// SAFETY: single-core, non-reentrant - same as ARGS_STAGING.
+unsafe impl Sync for CwdStagingCell {}
+static CWD_STAGING: CwdStagingCell = CwdStagingCell(core::cell::UnsafeCell::new([0; CWD_STAGING_SIZE]));
+
 /// Number of arguments in an `ARGS_STAGE` blob (`[argc: u32 LE]` header).
 fn argv_count(blob: &[u8]) -> u64 {
     if blob.len() < 4 {
@@ -325,7 +333,7 @@ fn argv_get(blob: &[u8], index: usize) -> Option<&[u8]> {
 /// memory back via `tasks::free_runtime_region`, which always succeeds
 /// here since a failed spawn's allocation is by construction the most
 /// recent one (the LIFO case).
-fn spawn_staged(total_len: u64, stdout_target: u64, argv_len: u64) -> u64 {
+fn spawn_staged(total_len: u64, stdout_target: u64, argv_len: u64, cwd_len: u64) -> u64 {
     let staging = unsafe { &mut *SPAWN_STAGING.0.get() };
     let size = total_len as usize;
     // A program bigger than the staging buffer can't have been staged
@@ -371,6 +379,13 @@ fn spawn_staged(total_len: u64, stdout_target: u64, argv_len: u64) -> u64 {
             if argv_len > 0 {
                 let staged = unsafe { &*ARGS_STAGING.0.get() };
                 tasks::set_argv(slot, &staged[..argv_len]);
+            }
+            // Attach the working directory staged via CWD_STAGE (arg3 = its
+            // length; 0 = none). The child reads it via GET_CWD.
+            let cwd_len = (cwd_len as usize).min(CWD_STAGING_SIZE);
+            if cwd_len > 0 {
+                let staged = unsafe { &*CWD_STAGING.0.get() };
+                tasks::set_cwd(slot, &staged[..cwd_len]);
             }
             // SAFETY: called from an SVC handler with interrupts masked
             // throughout - single-core, so nothing else can observe the
@@ -566,7 +581,37 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
             let ticks = crate::timer::now_ticks();
             (ticks / freq) * 1_000_000 + ((ticks % freq) * 1_000_000) / freq
         }
-        syscall_abi::SPAWN => spawn_staged(arg0, arg1, arg2),
+        syscall_abi::SPAWN => spawn_staged(arg0, arg1, arg2, arg3),
+        syscall_abi::CWD_STAGE => {
+            // arg0 = cwd pointer, arg1 = length. Copies the working-directory
+            // string into the staging buffer for the next SPAWN (arg3).
+            if !valid_user_range(arg0, arg1) {
+                return SPAWN_ERROR;
+            }
+            let len = arg1 as usize;
+            if len > CWD_STAGING_SIZE {
+                return SPAWN_ERROR;
+            }
+            let staging = unsafe { &mut *CWD_STAGING.0.get() };
+            // SAFETY: range sanity-checked above, same trust model as every
+            // other userland pointer argument.
+            let path = unsafe { core::slice::from_raw_parts(arg0 as *const u8, len) };
+            staging[..len].copy_from_slice(path);
+            0
+        }
+        syscall_abi::GET_CWD => {
+            // arg0 = out pointer, arg1 = out capacity. Copies up to capacity
+            // bytes of the current task's cwd, returns its true length.
+            if !valid_user_range(arg0, arg1) {
+                return 0;
+            }
+            let cwd = tasks::cwd_path(tasks::current_task());
+            let n = (cwd.len() as u64).min(arg1) as usize;
+            // SAFETY: out range validated above.
+            let dst = unsafe { core::slice::from_raw_parts_mut(arg0 as *mut u8, n) };
+            dst.copy_from_slice(&cwd[..n]);
+            cwd.len() as u64
+        }
         syscall_abi::ARGS_STAGE => {
             // arg0 = blob pointer, arg1 = blob length. Copies the whole argv
             // blob into the staging buffer (a single call - the blob is small,

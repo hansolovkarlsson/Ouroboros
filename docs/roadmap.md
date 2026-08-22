@@ -446,15 +446,18 @@ the shell's own cwd/lifecycle) and the redirection/pipe **syntax**
    `ulib`, dropping the shell builtin once its `/bin` version works. *First
    increment done:* `ulib` (syscalls, argv, output routing, decimal, `exit`,
    the panic handler) plus `echo`/`uptime`/`clear` — the commands needing
-   neither the filesystem nor the cwd. See `CHANGELOG.md`'s "Standalone
-   binaries, Stage 4 (first increment)." *Next:* a **cwd-delivery mechanism**
-   (a per-task cwd, mirroring argv) so a spawned command can resolve relative
-   paths / default to the current directory — required before the filesystem
-   commands (`ls`/`cat`/`mkdir`/`rmdir`/`touch`/`rm`/`cp`/`mv`/`writeat`) can
-   externalize; then the rest (`ps`/`kill`/`wait`/`ping`/`resolve`/`fetch`/
-   `mount`/`selftest`/`help`) incrementally. Each command is cheap now that
-   `ulib` exists. (`cd`/`pwd`/`exit`/`exec` and the redirect/pipe syntax stay
-   builtin.)
+   neither the filesystem nor the cwd. *Filesystem increment done:* a
+   **cwd-delivery ABI** (`CWD_STAGE`/`GET_CWD`, a per-task cwd mirroring argv,
+   staged at `SPAWN`) plus `ls`/`cat` externalized — `ulib` grew the fs client
+   layer (`cwd`, `resolve`, `fs_list_dir`/`fs_read_bulk`) so a spawned command
+   resolves relative paths and defaults a bare `ls` to the current directory.
+   See `CHANGELOG.md`'s "Standalone binaries, Stage 4 (first increment)" and
+   "(filesystem increment)." *Next:* the remaining filesystem commands
+   (`mkdir`/`rmdir`/`touch`/`rm`/`cp`/`mv`/`writeat`) follow the same
+   cwd+argv pattern, then the non-fs ones (`ps`/`kill`/`wait`/`ping`/`resolve`/
+   `fetch`/`mount`/`selftest`/`help`) incrementally. Each command is cheap now
+   that `ulib` exists. (`cd`/`pwd`/`exit`/`exec` and the redirect/pipe syntax
+   stay builtin.)
 
 **Scale, honestly:** a multi-milestone arc (breadth comparable to a slice of
 the network stack), but Stages 1–3 alone already deliver "type a bare program

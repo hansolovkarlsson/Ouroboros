@@ -208,6 +208,239 @@ pub fn exit(code: u64) -> ! {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Working directory + path resolution
+// ---------------------------------------------------------------------------
+
+/// Longest path a command handles - the shell's own `PATH_SIZE`.
+pub const PATH_MAX: usize = syscall_abi::CWD_MAX as usize;
+/// Max path components `resolve` collapses to (the shell's `MAX_COMPONENTS`).
+pub const MAX_COMPONENTS: usize = 16;
+
+/// Copy this task's working directory (delivered at spawn) into `buf`,
+/// returning its length - `0` if it was spawned without one.
+pub fn cwd(buf: &mut [u8]) -> usize {
+    let n = syscall4(syscall_abi::GET_CWD, buf.as_mut_ptr() as u64, buf.len() as u64, 0, 0);
+    (n as usize).min(buf.len())
+}
+
+fn is_root(b: &[u8]) -> bool {
+    b.len() == 1 && b[0] == b'/'
+}
+fn is_dot(s: &str) -> bool {
+    s.len() == 1 && s.as_bytes()[0] == b'.'
+}
+fn is_dotdot(s: &str) -> bool {
+    s.len() == 2 && s.as_bytes()[0] == b'.' && s.as_bytes()[1] == b'.'
+}
+
+/// Resolve `arg` against `cwd` into `out`, returning the length - absolute if
+/// `arg` starts with `/`, else joined onto `cwd`, then `.`/`..` collapsed.
+/// An empty `arg` resolves to `cwd` itself. `None` if it doesn't fit / is too
+/// deep. Ported from the shell's `resolve_path`; scalar comparisons only, no
+/// `core::fmt` - relocation-safe.
+pub fn resolve(cwd: &str, arg: &str, out: &mut [u8]) -> Option<usize> {
+    let mut raw = [0u8; PATH_MAX];
+    let raw_len = concat_path(cwd, arg, &mut raw)?;
+    let raw_str = core::str::from_utf8(&raw[..raw_len]).ok()?;
+    normalize_path(raw_str, out)
+}
+
+fn concat_path(cwd: &str, comp: &str, out: &mut [u8]) -> Option<usize> {
+    if comp.is_empty() {
+        let b = cwd.as_bytes();
+        if b.len() > out.len() {
+            return None;
+        }
+        out[..b.len()].copy_from_slice(b);
+        return Some(b.len());
+    }
+    if comp.as_bytes()[0] == b'/' {
+        let b = comp.as_bytes();
+        if b.len() > out.len() {
+            return None;
+        }
+        out[..b.len()].copy_from_slice(b);
+        return Some(b.len());
+    }
+    let mut len = 0;
+    let cb = cwd.as_bytes();
+    if cb.len() > out.len() {
+        return None;
+    }
+    out[..cb.len()].copy_from_slice(cb);
+    len += cb.len();
+    if !is_root(cb) {
+        if len >= out.len() {
+            return None;
+        }
+        out[len] = b'/';
+        len += 1;
+    }
+    let pb = comp.as_bytes();
+    if len + pb.len() > out.len() {
+        return None;
+    }
+    out[len..len + pb.len()].copy_from_slice(pb);
+    Some(len + pb.len())
+}
+
+fn normalize_path(path: &str, out: &mut [u8]) -> Option<usize> {
+    let mut stack: [&str; MAX_COMPONENTS] = [""; MAX_COMPONENTS];
+    let mut depth = 0usize;
+    for component in path.split('/').filter(|c| !c.is_empty()) {
+        if is_dot(component) {
+            continue;
+        }
+        if is_dotdot(component) {
+            depth = depth.saturating_sub(1);
+            continue;
+        }
+        if depth >= MAX_COMPONENTS {
+            return None;
+        }
+        stack[depth] = component;
+        depth += 1;
+    }
+    if out.is_empty() {
+        return None;
+    }
+    let mut len = 1;
+    out[0] = b'/';
+    for (i, comp) in stack[..depth].iter().enumerate() {
+        let b = comp.as_bytes();
+        if i > 0 {
+            if len >= out.len() {
+                return None;
+            }
+            out[len] = b'/';
+            len += 1;
+        }
+        if len + b.len() > out.len() {
+            return None;
+        }
+        out[len..len + b.len()].copy_from_slice(b);
+        len += b.len();
+    }
+    Some(len)
+}
+
+// ---------------------------------------------------------------------------
+// Filesystem IPC (to the fsd server) - ported from the shell's `fs_*`
+// ---------------------------------------------------------------------------
+
+/// One filesystem-server round trip (FSOP v2): op + four u64 params + up to
+/// two inline payloads, reply is a status u64 + inline result. Returns the
+/// status, [`NO_FS`] if no filesystem server, or [`FS_ERROR`] on a malformed
+/// round trip. See the shell's `fs_call` - this is that, verbatim.
+pub fn fs_call(op: u64, params: [u64; 4], payload1: &[u8], payload2: &[u8], result: &mut [u8]) -> u64 {
+    const HDR: usize = syscall_abi::FS_REQ_PAYLOAD as usize;
+    let mut req = [0u8; syscall_abi::MSG_MAX_LEN as usize];
+    req[0..8].copy_from_slice(&op.to_le_bytes());
+    let mut i = 0;
+    while i < 4 {
+        let at = 8 + i * 8;
+        req[at..at + 8].copy_from_slice(&params[i].to_le_bytes());
+        i += 1;
+    }
+    let p1_end = HDR + payload1.len();
+    let p2_end = p1_end + payload2.len();
+    if p2_end > req.len() {
+        return syscall_abi::FS_ERROR;
+    }
+    req[HDR..p1_end].copy_from_slice(payload1);
+    req[p1_end..p2_end].copy_from_slice(payload2);
+    let mut reply = [0u8; syscall_abi::MSG_MAX_LEN as usize];
+    let packed = syscall4(
+        syscall_abi::MSG_CALL,
+        syscall_abi::FSD_TASK,
+        req.as_ptr() as u64,
+        p2_end as u64,
+        reply.as_mut_ptr() as u64,
+    );
+    if packed == syscall_abi::TASK_ERR_NO_SUCH_TASK {
+        return syscall_abi::NO_FS;
+    }
+    if packed >= syscall_abi::FS_ERR_MIN {
+        return syscall_abi::FS_ERROR;
+    }
+    let reply_len = ((packed & 0xffff_ffff) as usize).min(reply.len());
+    if reply_len < 8 {
+        return syscall_abi::FS_ERROR;
+    }
+    let status = u64::from_le_bytes([
+        reply[0], reply[1], reply[2], reply[3], reply[4], reply[5], reply[6], reply[7],
+    ]);
+    let data_len = (reply_len - 8).min(result.len());
+    result[..data_len].copy_from_slice(&reply[8..8 + data_len]);
+    status
+}
+
+/// List `path`'s entries into `buf` as `name\n`/`name/\n`. Returns a byte
+/// count, [`NO_FS`], or a specific `FS_ERR_*` code.
+pub fn fs_list_dir(path: &str, buf: &mut [u8]) -> u64 {
+    fs_call(
+        syscall_abi::FSOP_LIST_DIR,
+        [path.len() as u64, buf.len() as u64, 0, 0],
+        path.as_bytes(),
+        &[],
+        buf,
+    )
+}
+
+/// Read up to `buf.len()` bytes of `path` from `offset` into `buf` via the
+/// grant/safecopy bulk path (the server SAFECOPYs straight into `buf`).
+/// Returns the byte count (0 at EOF), [`NO_FS`], or an `FS_ERR_*` code.
+pub fn fs_read_bulk(path: &str, offset: u64, buf: &mut [u8]) -> u64 {
+    let want = buf.len() as u64;
+    let granted = syscall4(
+        syscall_abi::GRANT,
+        syscall_abi::FSD_TASK,
+        buf.as_mut_ptr() as u64,
+        want,
+        syscall_abi::GRANT_WRITE,
+    );
+    if granted != 0 {
+        return syscall_abi::FS_ERROR;
+    }
+    fs_call(
+        syscall_abi::FSOP_READ_BULK,
+        [path.len() as u64, offset, want, 0],
+        path.as_bytes(),
+        &[],
+        &mut [],
+    )
+}
+
+/// Whether a status code is a failure (`>= FS_ERR_MIN`, which covers every
+/// `FS_ERR_*`, `NO_FS`, and `FS_ERROR`). A real byte count never reaches this.
+pub fn is_fs_error(code: u64) -> bool {
+    code >= syscall_abi::FS_ERR_MIN
+}
+
+/// Print `cmd: <message>` for an fs status code to the console (errors go to
+/// the console regardless of a command's stdout target - the stderr split).
+/// Ported from the shell's `print_fs_error`/`print_no_fs`.
+pub fn fs_error(cmd: &str, code: u64) {
+    con_write(cmd.as_bytes());
+    con_write(b": ");
+    let msg: &[u8] = match code {
+        syscall_abi::NO_FS => b"no filesystem mounted this boot",
+        syscall_abi::FS_ERR_NOT_FOUND => b"no such file or directory",
+        syscall_abi::FS_ERR_NOT_A_FILE => b"is a directory",
+        syscall_abi::FS_ERR_NOT_A_DIRECTORY => b"not a directory",
+        syscall_abi::FS_ERR_INVALID_NAME => b"invalid name",
+        syscall_abi::FS_ERR_ALREADY_EXISTS => b"already exists",
+        syscall_abi::FS_ERR_NOT_EMPTY => b"directory not empty",
+        syscall_abi::FS_ERR_IS_ROOT => b"can't remove the root directory",
+        syscall_abi::FS_ERR_DISK_FULL => b"disk full",
+        syscall_abi::FS_ERR_IO => b"device I/O error",
+        _ => b"failed",
+    };
+    con_write(msg);
+    con_write(b"\r\n");
+}
+
 /// The one panic handler the command binary needs - provided here so each
 /// command crate doesn't repeat it. Parks; there's nowhere to report to.
 #[panic_handler]

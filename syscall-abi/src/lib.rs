@@ -90,7 +90,9 @@ pub const READ_CHAR: u64 = 15;
 /// that ignores it (outputs straight to the console) is unaffected. The
 /// **argv blob length** (arg2) attaches the argument vector previously
 /// staged via [`ARGS_STAGE`] (`0` = no args); the child reads it via
-/// [`GET_ARGC`]/[`GET_ARG`].
+/// [`GET_ARGC`]/[`GET_ARG`]. The **cwd length** (arg3) attaches the working
+/// directory staged via [`CWD_STAGE`] (`0` = none); the child reads it via
+/// [`GET_CWD`].
 pub const SPAWN: u64 = 16;
 
 /// `(exit code)` -> **does not return** on success: the calling task is
@@ -511,6 +513,24 @@ pub const NO_ARG: u64 = u64::MAX;
 /// matching [`MAX_USER_LEN`](self)'s spirit - bounded today by the shell's
 /// 128-byte input line, so 512 bytes of blob is ample.
 pub const ARGV_MAX: u64 = 512;
+
+/// `(cwd pointer, cwd length)` -> `0` on success, [`SPAWN_ERROR`] on a bad
+/// range or an over-long path. Stages the **working directory** for the next
+/// [`SPAWN`] (its arg3 is the cwd length; `0` = none), so a spawned command
+/// inherits the shell's cwd and can resolve relative paths / default to the
+/// current directory. Delivered kernel-side and fetched via [`GET_CWD`],
+/// exactly like argv and the stdout target. Bounded by [`CWD_MAX`].
+pub const CWD_STAGE: u64 = 50;
+
+/// `(out pointer, out capacity)` -> the length of the current task's working
+/// directory (copying up to `out capacity` of its bytes into the buffer), or
+/// `0` if it was spawned without one (a boot-loaded task, or a [`SPAWN`] with
+/// arg3 = 0).
+pub const GET_CWD: u64 = 51;
+
+/// Maximum length of a staged working-directory path (and the per-task cwd
+/// store) - the shell's own `PATH_SIZE`.
+pub const CWD_MAX: u64 = 128;
 
 /// [`NET_RECV`] returned when no frame is currently available (a poll that
 /// found the receive ring empty) - distinct from a real length (`u64::MAX`

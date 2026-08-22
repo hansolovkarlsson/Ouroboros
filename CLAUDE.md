@@ -560,7 +560,7 @@ kernel/
 
 shell/               userland default shell - a separate crate, built for aarch64-unknown-none, loaded from disk (not compiled into the kernel)
   linker.ld          self-relocating (PIE) linker script: entry at offset 0, .rela.dyn/.dynsym/.dynamic/.data.rel.ro, no .bss/.data (see "A real relocating loader" above and docs/processes.md)
-  src/main.rs        line editor + command dispatch (help/ls/cat/cd/pwd/mkdir/rmdir/touch/rm/write/writeat/cp/mv/mount/ping/resolve/fetch/exec/exit/ps/kill/fg/wait/send/recv/selftest/env/set/unset builtins - echo/uptime/clear are externalized to /bin now, Stage 4, plus `> file`/`>> file` output redirection and `| /path/program` pipes on any of them - see "Output redirection", "Pipelines", "Runtime capability delegation", and "FAT32 interior/random-access writes" above; an unknown command is then looked up as a program on PATH via run_path_command - /bin by bare name, foreground/reaped - see "Standalone binaries, Stage 2"; plus env/set/unset and $VAR expansion over a stack-local env store, with PATH a real variable driving the lookup - see "Standalone binaries, Stage 3"), running as real EL0 userland code, built for real relocation (relocation-model=pic, --release only) - main loop blocks on read_char (syscall 15) instead of busy-polling, see "Blocking primitives" above; see docs/processes.md
+  src/main.rs        line editor + command dispatch (help/cd/pwd/mkdir/rmdir/touch/rm/write/writeat/cp/mv/mount/ping/resolve/fetch/exec/exit/ps/kill/fg/wait/send/recv/selftest/env/set/unset builtins - echo/uptime/clear/ls/cat are externalized to /bin now, Stage 4, plus `> file`/`>> file` output redirection and `| /path/program` pipes on any of them - see "Output redirection", "Pipelines", "Runtime capability delegation", and "FAT32 interior/random-access writes" above; an unknown command is then looked up as a program on PATH via run_path_command - /bin by bare name, foreground/reaped - see "Standalone binaries, Stage 2"; plus env/set/unset and $VAR expansion over a stack-local env store, with PATH a real variable driving the lookup - see "Standalone binaries, Stage 3"), running as real EL0 userland code, built for real relocation (relocation-model=pic, --release only) - main loop blocks on read_char (syscall 15) instead of busy-polling, see "Blocking primitives" above; see docs/processes.md
 
 fsd/                 fifth userland program: THE FILESYSTEM SERVER (driver isolation part 2) - owns the FAT32 engine, speaks the FSOP_* protocol to clients over IPC (including the bulk FSOP_READ_BULK/FSOP_WRITE_BULK ops that move file data via grant/safecopy - see "Grant/safecopy IPC" above), and is the only task the BLOCK_* syscalls accept; boot-loaded into protected task slot 2, see "Driver isolation, part 2" above
   src/main.rs        the request loop: recv -> decode FsRequest -> dispatch to Fs -> reply one u64; mounted Fs lives in main's stack frame (no static state in userland)
@@ -582,8 +582,8 @@ pong/                fourth userland program: the IPC echo server (recv -> send 
 
 hello/               second userland program: prints a banner and exits via the EXIT syscall - the living proof of "the shell is just a program" and the reference for how a program ends itself (see "Task destruction" above)
 args/                ninth userland program: prints the argument vector it was spawned with (GET_ARGC/GET_ARG) - the proof of the argv ABI (see "Standalone binaries, Stage 1" - the first step of the /bin/PATH/environment arc)
-ulib/                shared userland support library (a lib crate, not a program): syscall wrappers, argv reading, output routing (con_write/pipe_out/write_out), decimal formatting, exit, and the one #[panic_handler] - the foundation the externalized /bin commands share (see "Standalone binaries, Stage 4")
-echo/ uptime/ clear/ the first externalized commands (Stage 4): former shell builtins, now real /bin programs (/bin/ECHO, /bin/UPTIME, /bin/CLEAR) over ulib, found by PATH. Need neither fsd nor cwd; the filesystem commands await a cwd-delivery mechanism
+ulib/                shared userland support library (a lib crate, not a program): syscall wrappers, argv reading (GET_ARGC/GET_ARG), cwd (GET_CWD) + path resolution (resolve/concat_path/normalize_path), the fs client layer (fs_call/fs_list_dir/fs_read_bulk/is_fs_error/fs_error), output routing (con_write/pipe_out/write_out), decimal formatting, exit, and the one #[panic_handler] - the foundation the externalized /bin commands share (see "Standalone binaries, Stage 4")
+echo/ uptime/ clear/ ls/ cat/  the externalized commands (Stage 4): former shell builtins, now real /bin programs (/bin/ECHO, /bin/LS, ...) over ulib, found by PATH. echo/uptime/clear need neither fsd nor cwd; ls/cat resolve paths against the cwd the shell delivers at spawn (CWD_STAGE/GET_CWD) and talk to fsd via ulib's fs helpers
   src/main.rs        ~70 lines: _start, a putc-loop print, the exit call
 
 syscall-abi/         shared syscall ABI crate - syscall numbers, sentinel/error values, and the fsd server's FSOP_* request-protocol constants, depended on directly by the kernel and every userland program - see docs/processes.md
@@ -593,9 +593,9 @@ scripts/
   test-parallels.sh  scripted real-hardware smoke test via prlctl (start/type/capture/stop) - invoked by `make test-parallels`, see "## Commands" above and docs/roadmap.md's "Testing infrastructure" section
 ```
 
-Fourteen-crate workspace (`kernel`, `shell`, `hello`, `pong`, `fsd`,
-`upper`, `cond`, `netd`, `args`, `ulib`, `echo`, `uptime`, `clear`,
-`syscall-abi`), with every userland crate deliberately excluded from the
+Sixteen-crate workspace (`kernel`, `shell`, `hello`, `pong`, `fsd`,
+`upper`, `cond`, `netd`, `args`, `ulib`, `echo`, `uptime`, `clear`, `ls`,
+`cat`, `syscall-abi`), with every userland crate deliberately excluded from the
 workspace's `default-members` (see `Cargo.toml`) since they need a
 different `--target` than `kernel`; `syscall-abi` needs no such
 exclusion (a plain lib, no `[[bin]]` to conflict with a target) and gets

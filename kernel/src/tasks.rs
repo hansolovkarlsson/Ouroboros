@@ -651,6 +651,61 @@ pub(crate) fn clear_argv(task: usize) {
     argv.len = 0;
 }
 
+/// Per-task working directory: the cwd a task was spawned with (the shell's
+/// cwd at spawn time), so a spawned command can resolve relative paths and
+/// default to the current directory. Delivered kernel-side and fetched via
+/// `GET_CWD`, the same shape as argv. Boot-loaded tasks get none (len 0).
+const CWD_CAP: usize = syscall_abi::CWD_MAX as usize;
+
+struct Cwd {
+    data: [u8; CWD_CAP],
+    len: usize,
+}
+
+impl Cwd {
+    const fn new() -> Self {
+        Cwd { data: [0; CWD_CAP], len: 0 }
+    }
+}
+
+struct CwdSlot(UnsafeCell<Cwd>);
+// SAFETY: same single-core, non-reentrant per-task-cell reasoning as ARGVS.
+unsafe impl Sync for CwdSlot {}
+static CWDS: [CwdSlot; NUM_TASKS] = [
+    CwdSlot(UnsafeCell::new(Cwd::new())),
+    CwdSlot(UnsafeCell::new(Cwd::new())),
+    CwdSlot(UnsafeCell::new(Cwd::new())),
+    CwdSlot(UnsafeCell::new(Cwd::new())),
+    CwdSlot(UnsafeCell::new(Cwd::new())),
+    CwdSlot(UnsafeCell::new(Cwd::new())),
+    CwdSlot(UnsafeCell::new(Cwd::new())),
+];
+
+/// Store a freshly spawned task's working directory (from the `SPAWN`
+/// handler, out of the staging buffer). Truncated to `CWD_CAP`.
+pub(crate) fn set_cwd(task: usize, path: &[u8]) {
+    let cwd = unsafe { &mut *CWDS[task].0.get() };
+    let n = path.len().min(CWD_CAP);
+    cwd.data[..n].copy_from_slice(&path[..n]);
+    cwd.len = n;
+}
+
+/// The working directory for `task` (empty if none) - read by the `GET_CWD`
+/// syscall arm for the calling task.
+pub(crate) fn cwd_path(task: usize) -> &'static [u8] {
+    // SAFETY: single-core, non-reentrant (see CwdSlot); static-lifetime data,
+    // copied from immediately by the caller.
+    let cwd = unsafe { &*CWDS[task].0.get() };
+    &cwd.data[..cwd.len]
+}
+
+/// Drop a dead task's cwd - wired into every teardown path alongside
+/// `clear_argv`.
+pub(crate) fn clear_cwd(task: usize) {
+    let cwd = unsafe { &mut *CWDS[task].0.get() };
+    cwd.len = 0;
+}
+
 /// Per-task stdout target: the task index a program's output should go to,
 /// set by whoever `spawn`ed it (see the `SPAWN`/`STDOUT_TARGET` syscalls).
 /// `CON_TASK` (the console server) by default, and for every boot-loaded
@@ -1111,6 +1166,7 @@ pub(crate) unsafe fn exit_current_and_switch(frame: *mut Context, status: u64) -
     clear_grant(current);
     clear_delegate(current);
     clear_argv(current);
+    clear_cwd(current);
     reset_stdout_target(current);
     let next = next_runnable(current);
     *frame = unsafe { *TASKS[next].0.get() };
@@ -1136,6 +1192,7 @@ pub(crate) fn kill_task(i: usize) {
     clear_grant(i);
     clear_delegate(i);
     clear_argv(i);
+    clear_cwd(i);
     reset_stdout_target(i);
 }
 
@@ -1163,6 +1220,7 @@ pub(crate) unsafe fn kill_current_and_switch(frame: *mut Context) {
     clear_grant(current);
     clear_delegate(current);
     clear_argv(current);
+    clear_cwd(current);
     reset_stdout_target(current);
     let next = next_runnable(current);
     *frame = unsafe { *TASKS[next].0.get() };

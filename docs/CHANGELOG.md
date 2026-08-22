@@ -7,6 +7,46 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/`; 
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## Standalone binaries, Stage 4 (filesystem increment): a cwd-delivery ABI, and `ls`/`cat` externalized
+
+Fifth step of the arc, and the first filesystem commands to leave the shell.
+Externalizing `ls`/`cat` needed the one thing the first increment
+(`echo`/`uptime`/`clear`) deliberately dodged: a spawned program has no cwd, so
+it can't resolve a relative path or default a bare `ls` to "the current
+directory." This adds a **cwd-delivery mechanism**, mirroring the argv ABI, then
+moves `ls` and `cat` out.
+
+- **The cwd ABI** (`syscall-abi`): `CWD_STAGE` (50) stages the shell's cwd
+  bytes into a kernel buffer before `SPAWN`, exactly as `ARGS_STAGE` does for
+  argv; `SPAWN`'s `arg3` now carries the staged cwd length; the kernel copies
+  it into a per-slot `CWDS` store (the `MAILBOXES`/`ARGVS` pattern, cleared in
+  all three teardown paths); `GET_CWD` (51) lets the child copy it back out
+  (`CWD_MAX` = 128). A spawn with no cwd staged yields `/`.
+- **`ulib` grew the filesystem client layer** it didn't need before:
+  `cwd()`/`GET_CWD`, `resolve`/`concat_path`/`normalize_path` (the shell's own
+  path logic, relocation-safe), `fs_call`/`fs_list_dir`/`fs_read_bulk`, and
+  `is_fs_error`/`fs_error` — so a command talks to the filesystem server over
+  the same IPC the shell uses.
+- **`ls` and `cat` became `/bin` programs.** `ls` lists `argv[1]` (or, absent,
+  the cwd) via `fs_list_dir`; `cat` streams `argv[1]` in `SAFECOPY_MAX` chunks
+  via the grant/safecopy bulk-read path — both resolving against the delivered
+  cwd. Their shell builtins (and the now-dead `cmd_ls`/`cmd_cat`/`get_ticks`/
+  `LIST_BUFFER_SIZE`) were removed; `cd`/`cp`/`mv` keep `resolve_path` and the
+  fs wrappers they still use.
+
+Verified on QEMU (run-image), zero `-d int` aborts: bare `ls` → the root
+listing; `cd EFI` then bare `ls` → **EFI's** contents (proving the spawned
+program received cwd `/EFI`, not the default); relative `ls ORBS` and
+`cat ORBS/INIT.CFG` after `cd EFI` → resolved correctly; absolute
+`cat /EFI/ORBS/INIT.CFG` → the file; `ls /bin` → the command binaries;
+`cat /nope/missing` → a clean "no such file or directory" and exit code 1; the
+remaining builtins unregressed.
+
+The arc continues: the rest of the filesystem commands
+(`mkdir`/`rmdir`/`touch`/`rm`/`cp`/`mv`/`writeat`) can now follow the same
+cwd+argv pattern, then the non-fs ones (`ps`/`kill`/`wait`/`ping`/…). See
+`roadmap.md`.
+
 ## Standalone binaries, Stage 4 (first increment): `ulib` + echo/uptime/clear externalized
 
 Fourth step of the arc, and the first commands to actually leave the shell. A

@@ -198,12 +198,9 @@ fn expand_vars<'a>(line: &str, env: &Env, out: &'a mut [u8]) -> &'a str {
     }
     core::str::from_utf8(&out[..n]).unwrap_or("")
 }
-// Sized to the filesystem protocol's inline per-op payload cap
-// (`FS_DATA_MAX`, 512): a directory listing travels inline in the reply,
-// so a larger buffer would just be truncated at the server. Bulk file
-// reads/writes escape this cap via the grant/safecopy path (see
-// `fs_read_bulk`/`fs_write_bulk`), but a listing still doesn't.
-const LIST_BUFFER_SIZE: usize = 512;
+// (`LIST_BUFFER_SIZE` used to live here for the built-in `ls`'s listing
+// buffer; `ls` is a /bin program now, so its listing buffer lives in the
+// `ls` crate over `ulib`.)
 // The redirect/pipe capture buffer used to be a fixed stack array
 // (`CAPTURE_SIZE`, 1024 bytes); it's the program's 256KB heap region now
 // (`get_heap` / `Output::Capture`), so a large capture like
@@ -816,8 +813,8 @@ fn dispatch_line(line: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize, env:
         "resolve" => cmd_resolve(arg, out),
         "fetch" => cmd_fetch(arg, out),
         "pwd" => out.put_line(cwd_str(cwd, *cwd_len)),
-        "ls" => cmd_ls(arg, cwd, *cwd_len, out),
-        "cat" => cmd_cat(arg, cwd, *cwd_len, out),
+        // ls and cat are externalized to /bin now (Stage 4) - they run as
+        // spawned programs that inherit the shell's cwd via GET_CWD.
         "cd" => cmd_cd(arg, cwd, cwd_len),
         "mkdir" => cmd_mkdir(arg, cwd, *cwd_len),
         "rmdir" => cmd_rmdir(arg, cwd, *cwd_len),
@@ -1035,88 +1032,10 @@ fn print_fs_error(cmd: &str, code: u64) {
     });
 }
 
-fn cmd_ls(arg: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize, out: &mut Output) {
-    let mut path_buf = [0u8; PATH_SIZE];
-    let Some(path_len) = resolve_path(cwd_str(cwd, cwd_len), arg, &mut path_buf) else {
-        print_line("ls: path too long");
-        return;
-    };
-    let Ok(path) = core::str::from_utf8(&path_buf[..path_len]) else {
-        print_line("ls: path too long");
-        return;
-    };
-
-    let mut listing = [0u8; LIST_BUFFER_SIZE];
-    match fs_list_dir(path, &mut listing) {
-        NO_FS => print_no_fs(),
-        code if code >= FS_ERR_MIN => print_fs_error("ls", code),
-        n => {
-            for &b in &listing[..n as usize] {
-                out.put(b);
-            }
-        }
-    }
-}
-
-fn cmd_cat(arg: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize, out: &mut Output) {
-    if arg.is_empty() {
-        print_line("cat: missing file argument");
-        return;
-    }
-    let mut path_buf = [0u8; PATH_SIZE];
-    let Some(path_len) = resolve_path(cwd_str(cwd, cwd_len), arg, &mut path_buf) else {
-        print_line("cat: path too long");
-        return;
-    };
-    let Ok(path) = core::str::from_utf8(&path_buf[..path_len]) else {
-        print_line("cat: path too long");
-        return;
-    };
-
-    // Stream the file in SAFECOPY_MAX-byte chunks via the bulk-read
-    // primitive: the server SAFECOPYs each chunk straight into `chunk`
-    // (granted GRANT_WRITE by fs_read_bulk), so `cat` handles a file of
-    // any size without ever holding the whole thing, and without the
-    // old 512-byte truncation - the headline win of the grant/safecopy
-    // milestone. A short read (`n < chunk.len()`) already means EOF per
-    // read_at's contract, but we loop until a genuine 0 rather than
-    // relying on that, at the cost of one extra round trip at the end.
-    let mut chunk = [0u8; syscall_abi::SAFECOPY_MAX as usize];
-    let mut offset: u64 = 0;
-    let mut wrote_any = false;
-    let mut last_byte = 0u8;
-    loop {
-        match fs_read_bulk(path, offset, &mut chunk) {
-            NO_FS => {
-                print_no_fs();
-                return;
-            }
-            code if code >= FS_ERR_MIN => {
-                print_fs_error("cat", code);
-                return;
-            }
-            0 => break,
-            n => {
-                let n = (n as usize).min(chunk.len());
-                for &b in &chunk[..n] {
-                    out.put(b);
-                }
-                wrote_any = true;
-                last_byte = chunk[n - 1];
-                offset += n as u64;
-            }
-        }
-    }
-    // The tidy-terminal trailing newline is a display nicety,
-    // console-only: keeping it out of a capture means `cat a > b`
-    // copies a's bytes exactly. Add it when the streamed content didn't
-    // end with a newline - including the empty-file case (nothing
-    // written), matching the old behavior exactly.
-    if out.is_console() && (!wrote_any || last_byte != LF) {
-        out.put(CR);
-        out.put(LF);
-    }
-}
+// `ls` and `cat` are externalized to `/bin` now (Stage 4) - their logic
+// moved into the `ls`/`cat` crates over `ulib`, resolving paths against the
+// cwd delivered at spawn (GET_CWD). The shared helpers they used
+// (fs_list_dir, fs_read_bulk, resolve_path) stay - cd/cp/mv still use them.
 
 fn cmd_cd(arg: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize) {
     let mut path_buf = [0u8; PATH_SIZE];
@@ -1457,7 +1376,18 @@ fn spawn_path(path: &str, argv: &[&str], cwd: &[u8; CWD_SIZE], cwd_len: usize, s
         Ok(n) => n,
         Err(()) => return Err(0),
     };
-    match syscall4(syscall_abi::SPAWN, offset, stdout_target, argv_len, 0) {
+    // Stage the cwd (arg3 = its length; the child reads it via GET_CWD), so a
+    // spawned command inherits this shell's working directory and can resolve
+    // relative paths / default to it.
+    let cwd_stage_len = if cwd_len > 0 {
+        if syscall4(syscall_abi::CWD_STAGE, cwd.as_ptr() as u64, cwd_len as u64, 0, 0) != 0 {
+            return Err(0);
+        }
+        cwd_len as u64
+    } else {
+        0
+    };
+    match syscall4(syscall_abi::SPAWN, offset, stdout_target, argv_len, cwd_stage_len) {
         code if code >= FS_ERR_MIN => Err(code),
         slot => Ok(slot),
     }
