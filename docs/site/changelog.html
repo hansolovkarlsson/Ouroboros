@@ -40,6 +40,12 @@
 
   <article>
 
+<h2>Network stack, Stage 4g: HTTP HEAD</h2>
+
+<p>A <code class="inline">HEAD</code> request now returns exactly the headers a <code class="inline">GET</code> would (including <code class="inline">Content-Type</code>/<code class="inline">Content-Length</code> for a file) with no body. Small, self-contained, and correct for every response kind: <code class="inline">start_response</code> builds the response as usual, then for a HEAD trims the prefix to the header block (through the first <code class="inline">\r\n\r\n</code> — present in the file 200, the directory listing, and the 404/503) and streams no file body. <code class="inline">is_head()</code> matches <code class="inline">"HEAD "</code> (a non-GET/HEAD method is still served like a GET — no 405 yet).</p>
+
+<p>Confirmed on QEMU with a raw client: <code class="inline">HEAD /EFI/ORBS/INIT.CFG</code> → 200, Content-Length 16, 0-byte body (headers byte-identical to the GET, which still returns its 16-byte body); <code class="inline">HEAD /EFI/ORBS</code> → text/html, 0-byte body; <code class="inline">HEAD /nope</code> → 404, 0-byte body. Shell + client net ops + selftest unregressed; zero aborts, zero restarts.</p>
+
 <h2>Network stack, Stage 4f: a browsable directory listing</h2>
 
 <p>A <code class="inline">GET</code> whose path resolves to a directory (including <code class="inline">/</code>) now returns a generated HTML index of its entries, each a link — so the guest's filesystem is browsable in a browser: <code class="inline">/</code> → <code class="inline">EFI/</code> → <code class="inline">ORBS/</code> → <code class="inline">INIT.CFG</code>, click through and open files. Pure <code class="inline">netd</code>, no kernel/capability change.</p>

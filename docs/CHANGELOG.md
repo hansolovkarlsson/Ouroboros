@@ -7,6 +7,23 @@ what broke, how it was diagnosed), see `CLAUDE.md`; for *how* something
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## Network stack, Stage 4g: HTTP HEAD
+
+A `HEAD` request now returns exactly the headers a `GET` would (including
+`Content-Type`/`Content-Length` for a file) with no body. Small, self-
+contained, and correct for every response kind: `start_response` builds the
+response as usual, then for a HEAD trims the prefix to the header block
+(through the first `\r\n\r\n` — present in the file 200, the directory
+listing, and the 404/503) and streams no file body. `is_head()` matches
+`"HEAD "` (a non-GET/HEAD method is still served like a GET — no 405 yet).
+
+Confirmed on QEMU with a raw client: `HEAD /EFI/ORBS/INIT.CFG` → 200,
+Content-Length 16, 0-byte body (headers byte-identical to the GET, which
+still returns its 16-byte body); `HEAD /EFI/ORBS` → text/html, 0-byte body;
+`HEAD /nope` → 404, 0-byte body. Shell + client net ops + selftest
+unregressed; zero aborts, zero restarts. See `CLAUDE.md`'s "Network stack,
+Stage 4g."
+
 ## Network stack, Stage 4f: a browsable directory listing
 
 A `GET` whose path resolves to a directory (including `/`) now returns a
