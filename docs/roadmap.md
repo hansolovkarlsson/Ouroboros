@@ -428,10 +428,13 @@ the shell's own cwd/lifecycle) and the redirection/pipe **syntax**
    argv store, cleared on task death; `spawn_path` stages the token list before
    `SPAWN`. Proven by the new `args/` program (`exec …/ARGS.BIN a b c` prints
    `argc=4` + each arg). See `CHANGELOG.md`'s "Standalone binaries, Stage 1."
-2. **`/bin` + PATH lookup.** Makefile stages command binaries into `esp/bin/`;
-   the shell's unknown-command arm searches PATH, probes existence (the
-   one-byte `fs_read_file` trick), and spawns the first hit with argv —
-   branching on console vs. capture exactly as `cmd_exec` does. Small–medium.
+2. **`/bin` + PATH lookup — DONE.** Makefile stages command binaries into
+   `esp/bin/` (uppercase, extension-less); the shell's unknown-command arm
+   (`run_path_command`) searches `DEFAULT_PATH` (`/bin`), probes existence
+   (the one-byte `fs_read_file` trick, case-insensitive via fsd's `find`), and
+   spawns the first hit with the whole line as argv — foreground (waited +
+   reaped, so no slot exhaustion), branching on console vs. capture like
+   `cmd_exec`. See `CHANGELOG.md`'s "Standalone binaries, Stage 2."
 3. **Shell environment.** A stack-local env store (PATH + user vars) threaded
    like `cwd`; `env`/`set`/`unset`; `$VAR` expansion — all obeying the
    relocation-safe idioms (scalar comparisons, hand-rolled formatting). PATH

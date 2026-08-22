@@ -72,6 +72,12 @@ const PATH_SIZE: usize = 128;
 // Max argv entries passed to a spawned program (`exec prog a b c ...`). The
 // 128-byte input line can't hold more real tokens than this in practice.
 const MAX_ARGS: usize = 16;
+
+// Where an unknown command is looked up as a program: a `:`-separated list of
+// directories searched in order. A constant for now; Stage 3 makes it a real
+// `PATH` env var. `/bin` matches the uppercase on-disk `\BIN\` case-
+// insensitively (fsd's `find`), so a lowercase-typed command works.
+const DEFAULT_PATH: &str = "/bin";
 // Sized to the filesystem protocol's inline per-op payload cap
 // (`FS_DATA_MAX`, 512): a directory listing travels inline in the reply,
 // so a larger buffer would just be truncated at the server. Bulk file
@@ -730,8 +736,12 @@ fn dispatch_line(line: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize, out:
         "recv" => cmd_recv(),
         "selftest" => cmd_selftest(out),
         _ => {
-            print_str("unknown command: ");
-            print_line(command);
+            // Not a builtin: try to run it as a program found on PATH
+            // (`/bin/<command>`). Only if that finds nothing is it "unknown".
+            if !run_path_command(command, line, cwd, *cwd_len, out) {
+                print_str("unknown command: ");
+                print_line(command);
+            }
         }
     }
 }
@@ -1103,6 +1113,89 @@ fn cmd_exec(line: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize, out: &mut Output) 
         Err(NO_FS) => print_no_fs(),
         Err(code) => print_fs_error("exec", code),
     }
+}
+
+/// Try to run an unknown command as a program found on `DEFAULT_PATH`:
+/// for each `:`-separated directory, probe `<dir>/<command>` and, on the
+/// first hit, spawn it with the whole line as its argv and run it in the
+/// **foreground** - wait for it (which also reaps its slot, unlike `exec`'s
+/// fire-and-forget). Returns `false` if no PATH directory has the command
+/// (the caller then prints "unknown command"). A `>`/`>>` redirect routes
+/// the program's output into the capture sink, exactly as `cmd_exec` does.
+fn run_path_command(command: &str, line: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize, out: &mut Output) -> bool {
+    // argv = every token on the line (argv[0] = the command as typed).
+    let mut argv_buf: [&str; MAX_ARGS] = [""; MAX_ARGS];
+    let mut n = 0;
+    for w in line.split_whitespace() {
+        if n >= MAX_ARGS {
+            break;
+        }
+        argv_buf[n] = w;
+        n += 1;
+    }
+    let argv = &argv_buf[..n];
+
+    for dir in DEFAULT_PATH.split(':') {
+        // Build "<dir>/<command>" into a fixed buffer (no allocation).
+        let mut cand = [0u8; PATH_SIZE];
+        let mut c = 0;
+        for &b in dir.as_bytes() {
+            if c < PATH_SIZE {
+                cand[c] = b;
+                c += 1;
+            }
+        }
+        if (c == 0 || cand[c - 1] != b'/') && c < PATH_SIZE {
+            cand[c] = b'/';
+            c += 1;
+        }
+        for &b in command.as_bytes() {
+            if c < PATH_SIZE {
+                cand[c] = b;
+                c += 1;
+            }
+        }
+        let Ok(candidate) = core::str::from_utf8(&cand[..c]) else {
+            continue;
+        };
+
+        // Probe: does this candidate exist as a file? (A one-byte read - the
+        // pattern cmd_cp uses; a real size, including 0, means it's there.)
+        let mut probe = [0u8; 1];
+        let r = fs_read_file(candidate, &mut probe);
+        if r == NO_FS {
+            return false; // no filesystem this boot - nothing to find
+        }
+        if r >= FS_ERR_MIN {
+            continue; // not in this directory - try the next
+        }
+
+        // Found it. Run it - foreground (console) or captured (redirect).
+        if out.is_console() {
+            match spawn_path(candidate, argv, cwd, cwd_len, syscall_abi::CON_TASK) {
+                Ok(slot) => {
+                    // Foreground: wait for it (also reaps the slot). Ctrl+C
+                    // interrupts the wait and leaves it running in the
+                    // background (see `ps`).
+                    if syscall(syscall_abi::WAIT, slot) == WAIT_INTERRUPTED {
+                        print_line("interrupted (the program keeps running - see ps)");
+                    }
+                }
+                Err(0) => print_line("command path too long"),
+                Err(NO_FS) => print_no_fs(),
+                Err(code) => print_fs_error(command, code),
+            }
+        } else {
+            match spawn_path(candidate, argv, cwd, cwd_len, self_task()) {
+                Ok(slot) => capture_program_output(slot, out),
+                Err(0) => print_line("command path too long"),
+                Err(NO_FS) => print_no_fs(),
+                Err(code) => print_fs_error(command, code),
+            }
+        }
+        return true;
+    }
+    false
 }
 
 /// Relay-capture a program's output (routed back to this shell as a raw

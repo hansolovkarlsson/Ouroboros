@@ -40,6 +40,20 @@
 
   <article>
 
+<h2>Standalone binaries, Stage 2: /bin + PATH lookup</h2>
+
+<p>Second step of the arc (Stage 1 gave spawned programs argv): an unknown command is now looked up as a <strong>program on a PATH</strong> and run by bare name. Type <code class="inline">args foo bar</code> and the shell finds <code class="inline">/bin/args</code>, spawns it with argv <code class="inline">[args, foo, bar]</code>, and runs it in the foreground — the first commands that aren't shell builtins.</p>
+
+<ul>
+<li><strong>Makefile</strong>: a new top-level <code class="inline">/bin</code> directory on the ESP, holding command programs named uppercase and extension-less (8.3-legal: <code class="inline">ARGS</code>), staged alongside the existing <code class="inline">\EFI\ORBS\</code> binaries. (Just <code class="inline">args</code> for now — the standalone commands themselves are Stage 4.)</li>
+<li><strong>shell</strong>: the unknown-command arm (<code class="inline">dispatch_line</code>) now calls <code class="inline">run_path_command</code>, which walks <code class="inline">DEFAULT_PATH</code> (<code class="inline">/bin</code>, a constant until Stage 3's env var), probes <code class="inline">&lt;dir&gt;/&lt;command&gt;</code> with a one-byte <code class="inline">fs_read_file</code>, and on the first hit spawns it with the whole line as argv. Case is handled by fsd's case-insensitive <code class="inline">find</code>, so a lowercase-typed <code class="inline">args</code> matches <code class="inline">\BIN\ARGS</code>. Only if no PATH directory has the command is it "unknown command".</li>
+<li><strong>Foreground, not fire-and-forget</strong>: unlike <code class="inline">exec</code>, a PATH-run command is waited for (which also <em>reaps its slot</em>) — so running commands back to back reuses the slot instead of exhausting the two spawnable slots with zombies (the Stage 1 caveat). A <code class="inline">&gt;</code>/<code class="inline">&gt;&gt;</code> redirect captures the program's output; Ctrl+C interrupts the wait (the program keeps running — see <code class="inline">ps</code>).</li>
+</ul>
+
+<p>Verified on QEMU (run-image, real FAT32): <code class="inline">args foo bar</code> → argc=3 with the args; <code class="inline">args</code> alone → argc=1; four <code class="inline">args</code> invocations back to back each ran in slot 5 and reaped (no slot exhaustion); a lowercase-typed command matched the uppercase on-disk <code class="inline">/bin/ARGS</code>; <code class="inline">bogus nonsense</code> → "unknown command: bogus"; <code class="inline">echo …</code> and the other builtins unregressed; <code class="inline">args one two &gt; /binout.txt</code> then <code class="inline">cat</code> showed the captured argv; zero <code class="inline">-d int</code> aborts.</p>
+
+<p>Next in the arc: a shell environment (Stage 3, makes PATH a real env var), then externalizing the actual commands into <code class="inline">/bin</code> (Stage 4). See <a href="roadmap.html">the roadmap</a>.</p>
+
 <h2>Standalone binaries, Stage 1: an argv ABI</h2>
 
 <p>First step of the roadmap's "standalone command binaries" arc: give spawned programs an argument vector. Nothing passed arguments to a spawned program before — <code class="inline">SPAWN</code>/<code class="inline">SPAWN_STAGE</code> carried only the program bytes plus a stdout target, a new task's GPRs were all zeroed, and <code class="inline">_start()</code> took nothing — so <code class="inline">exec /path a b c</code> ignored <code class="inline">a b c</code> entirely. This is the foundation the rest of the arc (a <code class="inline">/bin</code> directory, PATH lookup, standalone <code class="inline">ls</code>/<code class="inline">cat</code>/<code class="inline">echo</code>) stands on.</p>

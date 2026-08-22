@@ -128,7 +128,7 @@ args-bin:
 # CONFIG_PATH) naming which program to load - edit INIT.CFG and rebuild
 # just that program to swap it out, no kernel rebuild required.
 esp: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin args-bin
-	mkdir -p $(ESP_DIR)/EFI/BOOT $(ESP_DIR)/EFI/ORBS
+	mkdir -p $(ESP_DIR)/EFI/BOOT $(ESP_DIR)/EFI/ORBS $(ESP_DIR)/bin
 	cp $(KERNEL) $(ESP_DIR)/EFI/BOOT/BOOTAA64.EFI
 	cp $(SHELL_BIN) $(ESP_DIR)/EFI/ORBS/SH.BIN
 	cp $(HELLO_BIN) $(ESP_DIR)/EFI/ORBS/HELLO.BIN
@@ -139,6 +139,11 @@ esp: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin args
 	cp $(NETD_BIN) $(ESP_DIR)/EFI/ORBS/NETD.BIN
 	cp $(ARGS_BIN) $(ESP_DIR)/EFI/ORBS/ARGS.BIN
 	printf '\\EFI\\ORBS\\SH.BIN' > $(ESP_DIR)/EFI/ORBS/INIT.CFG
+	# /bin: programs the shell finds via PATH by bare name (Stage 2 of the
+	# standalone-binaries arc). Named uppercase, no extension (8.3-legal);
+	# fsd's case-insensitive lookup matches a lowercase-typed command. For
+	# now just the argv proof program, `args`.
+	cp $(ARGS_BIN) $(ESP_DIR)/bin/ARGS
 
 # Boots the ESP directory directly in QEMU (no disk image needed) against
 # the aarch64 OVMF firmware installed by `brew install qemu`.

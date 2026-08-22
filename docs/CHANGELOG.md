@@ -7,6 +7,43 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/`; 
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## Standalone binaries, Stage 2: /bin + PATH lookup
+
+Second step of the arc (Stage 1 gave spawned programs argv): an unknown
+command is now looked up as a **program on a PATH** and run by bare name.
+Type `args foo bar` and the shell finds `/bin/args`, spawns it with argv
+`[args, foo, bar]`, and runs it in the foreground — the first commands that
+aren't shell builtins.
+
+- **Makefile**: a new top-level `/bin` directory on the ESP, holding command
+  programs named uppercase and extension-less (8.3-legal: `ARGS`), staged
+  alongside the existing `\EFI\ORBS\` binaries. (Just `args` for now — the
+  standalone commands themselves are Stage 4.)
+- **shell**: the unknown-command arm (`dispatch_line`) now calls
+  `run_path_command`, which walks `DEFAULT_PATH` (`/bin`, a constant until
+  Stage 3's env var), probes `<dir>/<command>` with a one-byte `fs_read_file`,
+  and on the first hit spawns it with the whole line as argv. Case is handled
+  by fsd's case-insensitive `find`, so a lowercase-typed `args` matches
+  `\BIN\ARGS`. Only if no PATH directory has the command is it "unknown
+  command".
+- **Foreground, not fire-and-forget**: unlike `exec`, a PATH-run command is
+  waited for (which also *reaps its slot*) — so running commands back to back
+  reuses the slot instead of exhausting the two spawnable slots with zombies
+  (the Stage 1 caveat). A `>`/`>>` redirect captures the program's output,
+  exactly as `exec … > file` does; Ctrl+C interrupts the wait (the program
+  keeps running — see `ps`).
+
+Verified on QEMU (run-image, real FAT32): `args foo bar` → argc=3 with the
+args; `args` alone → argc=1; four `args` invocations back to back each ran in
+slot 5 and reaped (no slot exhaustion); a lowercase-typed command matched the
+uppercase on-disk `/bin/ARGS`; `bogus nonsense` → "unknown command: bogus";
+`echo …` and the other builtins unregressed; `args one two > /binout.txt`
+then `cat` showed the captured argv; zero `-d int` aborts.
+
+Next in the arc: a shell environment (Stage 3, makes PATH a real env var),
+then externalizing the actual commands into `/bin` (Stage 4). See
+`roadmap.md`.
+
 ## Standalone binaries, Stage 1: an argv ABI
 
 First step of the roadmap's "standalone command binaries" arc: give spawned
