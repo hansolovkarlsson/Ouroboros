@@ -15,7 +15,11 @@
 //! is even stricter than the post-`exit_boot_services` kernel this
 //! code was written for.
 //!
-//! Still 8.3-only (no long filenames), still first-FAT32-partition
+//! Long filenames (LFN) are **read** now (a name like `index.html` is
+//! reconstructed from the LFN entries a real formatter writes, and
+//! matched/listed by that long name), but not yet **written**:
+//! `make_short_name` still only creates 8.3 names, so a file the guest
+//! itself creates can't have a long name. Still first-FAT32-partition
 //! only, and `make run`'s vvfat disk is still FAT16 - so mounting
 //! fails there and every request answers `NO_FS`, same degradation as
 //! always.
@@ -32,6 +36,10 @@ const DIR_ENTRY_END: u8 = 0x00;
 const FAT32_PARTITION_TYPES: [u8; 2] = [0x0b, 0x0c]; // FAT32 CHS, FAT32 LBA
 const END_OF_CHAIN_MIN: u32 = 0x0fff_fff8;
 const MAX_NAME_LEN: usize = 12; // 8 name + '.' + 3 ext, the most an 8.3 short name is ever
+/// Longest reconstructed name a `DirEntry` can hold - a FAT long filename
+/// (LFN) is up to 255 UTF-16 chars; an 8.3 short name uses at most
+/// [`MAX_NAME_LEN`] of this buffer.
+const LONG_NAME_MAX: usize = 255;
 /// Cap on a single `write_at` gap zero-fill (`offset` past the old EOF).
 /// FAT32 has no sparse representation, so a gap is zero-filled sector by
 /// sector - fine for an editor/log, but a fat-fingered huge offset must not
@@ -75,7 +83,7 @@ impl From<DiskError> for Error {
 /// was read from, so callers get this instead.
 #[derive(Clone, Copy)]
 pub struct DirEntry {
-    name: [u8; MAX_NAME_LEN],
+    name: [u8; LONG_NAME_MAX],
     name_len: u8,
     pub is_dir: bool,
     pub size: u32,
@@ -84,32 +92,44 @@ pub struct DirEntry {
 
 impl DirEntry {
     pub fn name(&self) -> &str {
-        // SAFETY-free: always built from ASCII short-name bytes in `parse`.
+        // Built either from ASCII short-name bytes or an LFN reconstructed to
+        // ASCII (non-ASCII chars replaced with '?'), so always valid UTF-8.
         core::str::from_utf8(&self.name[..self.name_len as usize]).unwrap_or("")
     }
 
-    fn parse(raw: &[u8]) -> Self {
+    /// Decode a short (8.3) directory entry. `long_name`, when `Some`, is the
+    /// reconstructed long filename from the preceding LFN entries (already
+    /// checksum-validated against this short entry by the caller) and is used
+    /// verbatim in place of the 8.3 name.
+    fn parse(raw: &[u8], long_name: Option<&[u8]>) -> Self {
         let attr = raw[11];
         let cluster_hi = u16::from_le_bytes([raw[20], raw[21]]) as u32;
         let cluster_lo = u16::from_le_bytes([raw[26], raw[27]]) as u32;
         let size = u32::from_le_bytes([raw[28], raw[29], raw[30], raw[31]]);
 
-        let mut name = [0u8; MAX_NAME_LEN];
-        let mut len = 0usize;
-        for &b in &raw[0..8] {
-            if b == b' ' {
-                break;
+        let mut name = [0u8; LONG_NAME_MAX];
+        let len = if let Some(long) = long_name {
+            let n = long.len().min(LONG_NAME_MAX);
+            name[..n].copy_from_slice(&long[..n]);
+            n
+        } else {
+            let mut len = 0usize;
+            for &b in &raw[0..8] {
+                if b == b' ' {
+                    break;
+                }
+                name[len] = b;
+                len += 1;
             }
-            name[len] = b;
-            len += 1;
-        }
-        let ext_len = raw[8..11].iter().take_while(|&&b| b != b' ').count();
-        if ext_len > 0 {
-            name[len] = b'.';
-            len += 1;
-            name[len..len + ext_len].copy_from_slice(&raw[8..8 + ext_len]);
-            len += ext_len;
-        }
+            let ext_len = raw[8..11].iter().take_while(|&&b| b != b' ').count();
+            if ext_len > 0 {
+                name[len] = b'.';
+                len += 1;
+                name[len..len + ext_len].copy_from_slice(&raw[8..8 + ext_len]);
+                len += ext_len;
+            }
+            len
+        };
 
         DirEntry {
             name,
@@ -122,13 +142,44 @@ impl DirEntry {
 
     fn root(root_cluster: u32) -> Self {
         DirEntry {
-            name: [0; MAX_NAME_LEN],
+            name: [0; LONG_NAME_MAX],
             name_len: 0,
             is_dir: true,
             size: 0,
             cluster: root_cluster,
         }
     }
+}
+
+/// The LFN checksum stored in every long-name entry (byte 13): a rolling
+/// checksum of the associated short entry's 11-byte 8.3 name. We recompute it
+/// from the short entry and require it to match before trusting the LFN -
+/// otherwise an *orphaned* run of LFN entries (whose short entry was deleted
+/// and its slot reused) would attach the wrong long name to the next file.
+fn lfn_checksum(short_name: &[u8]) -> u8 {
+    let mut sum: u8 = 0;
+    for &b in &short_name[..11] {
+        sum = (sum >> 1).wrapping_add((sum & 1) << 7).wrapping_add(b);
+    }
+    sum
+}
+
+/// Extract the up-to-13 UTF-16LE characters from one LFN entry into `out` as
+/// ASCII bytes (non-ASCII -> '?'), stopping at the `0x0000` name terminator or
+/// `0xFFFF` padding. Returns how many were written. The 13 chars live at three
+/// non-contiguous field ranges within the 32-byte entry.
+fn lfn_chars(raw: &[u8], out: &mut [u8; 13]) -> usize {
+    const POS: [usize; 13] = [1, 3, 5, 7, 9, 14, 16, 18, 20, 22, 24, 28, 30];
+    let mut n = 0;
+    for &p in &POS {
+        let c = u16::from_le_bytes([raw[p], raw[p + 1]]);
+        if c == 0x0000 || c == 0xffff {
+            break;
+        }
+        out[n] = if c < 0x80 { c as u8 } else { b'?' };
+        n += 1;
+    }
+    n
 }
 
 pub struct Fs {
@@ -360,6 +411,13 @@ impl Fs {
         mut f: impl FnMut(&DirEntry, u64, usize) -> bool,
     ) -> Result<(), Error> {
         let mut cluster = start_cluster;
+        // Accumulated long filename from the LFN entries preceding a short
+        // entry (they're stored, in reverse order, immediately before it).
+        // `lfn_len == 0` means none pending. Reset by anything that breaks the
+        // run (a free/volume/end entry, or after consuming a short entry).
+        let mut lfn_name = [0u8; LONG_NAME_MAX];
+        let mut lfn_len = 0usize;
+        let mut lfn_sum = 0u8;
         loop {
             let lba = self.cluster_to_lba(cluster);
             for s in 0..self.sectors_per_cluster {
@@ -368,14 +426,47 @@ impl Fs {
                 for (i, raw) in buf.chunks_exact(DIR_ENTRY_SIZE).enumerate() {
                     match raw[0] {
                         DIR_ENTRY_END => return Ok(()),
-                        DIR_ENTRY_FREE => continue,
+                        DIR_ENTRY_FREE => {
+                            lfn_len = 0; // a gap invalidates any pending LFN run
+                            continue;
+                        }
                         _ => {}
                     }
                     let attr = raw[11];
-                    if attr == ATTR_LFN || attr & ATTR_VOLUME_ID != 0 {
+                    if attr == ATTR_LFN {
+                        // Place this entry's 13 chars at (seq-1)*13; entries
+                        // arrive high-seq first, but placing by seq makes order
+                        // irrelevant. The terminator lives in the highest-seq
+                        // entry, so `lfn_len` ends up the true length.
+                        let seq = (raw[0] & 0x1f) as usize;
+                        if seq >= 1 {
+                            let mut chars = [0u8; 13];
+                            let n = lfn_chars(raw, &mut chars);
+                            let base = (seq - 1) * 13;
+                            let end = (base + n).min(LONG_NAME_MAX);
+                            if base < LONG_NAME_MAX {
+                                lfn_name[base..end].copy_from_slice(&chars[..end - base]);
+                                lfn_len = lfn_len.max(end);
+                            }
+                            lfn_sum = raw[13];
+                        }
                         continue;
                     }
-                    if f(&DirEntry::parse(raw), (lba + s) as u64, i * DIR_ENTRY_SIZE) {
+                    if attr & ATTR_VOLUME_ID != 0 {
+                        lfn_len = 0; // volume label - not a real entry, breaks the run
+                        continue;
+                    }
+                    // A short entry: use the pending long name only if it's
+                    // present and its checksum matches this entry (guards
+                    // against orphaned LFN runs attaching to the wrong file).
+                    let long = if lfn_len > 0 && lfn_sum == lfn_checksum(&raw[0..11]) {
+                        Some(&lfn_name[..lfn_len])
+                    } else {
+                        None
+                    };
+                    let entry = DirEntry::parse(raw, long);
+                    lfn_len = 0;
+                    if f(&entry, (lba + s) as u64, i * DIR_ENTRY_SIZE) {
                         return Ok(());
                     }
                 }
