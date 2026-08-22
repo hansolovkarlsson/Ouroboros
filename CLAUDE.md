@@ -6186,13 +6186,58 @@ files/listings/small responses, and the full shell + client net ops
 aborts, zero supervisor restarts.
 
 **Still coarse:** **fast retransmit only** - there's no timer-based RTO for a
-fully silent peer (all ACKs lost, or a dead peer), which would need a
-`NET_WAIT` timeout (a kernel change) to wake netd without incoming frames -
-a real, separate follow-up; **go-back-N** resends a full window from the gap
+fully silent peer (all ACKs lost, or a dead peer) **(Update: added - Stage
+4i, below)**; **go-back-N** resends a full window from the gap
 rather than a single segment (simple and correct, but wasteful next to
 selective/SACK retransmit - it re-sends data a buffering receiver already
-has); no RTT estimation (the RTO, when added, would want it); one connection
+has); no RTT estimation; one connection
 at a time; still QEMU-only, polled RX.
+
+## Network stack, Stage 4i: TCP retransmit timeout (RTO)
+
+Fast retransmit (4h) recovers a loss only while data keeps flowing to the
+peer - its dup-ACKs are what drive it. When the peer goes **silent** (the
+last segments of a burst lost, or all its ACKs lost, or the single in-flight
+segment lost), no frames arrive and fast retransmit never fires. RTO is the
+timer-based fallback for exactly that.
+
+**The enabling kernel primitive: `NET_WAIT` now takes a timeout.** It used to
+wake only on a frame or a message - useless for a timer that must fire when
+*nothing* arrives. `WaitReason::NetInput` gained a `deadline` (a tick count
+from `exceptions::ticks()`; 0 = none); the tick wake-check (`poll`) wakes the
+task once the deadline passes even with no input. The `NET_WAIT` syscall
+reads `arg0` as a millisecond timeout and computes the deadline
+(`div_ceil` against `TICK_INTERVAL_MS`). This is the first `WaitReason` with a
+timer wake - a small, general addition (any future timed wait can reuse it).
+
+**netd: a per-connection RTO timer** (`service_rto`, run once per event-loop
+wake). Armed while data is unacked, restarted (and backoff reset) on any ACK
+progress, and on expiry - which only happens when the peer is silent, since a
+live peer's dup-ACKs would have triggered fast retransmit first - it resends
+from `snd_una` (go-back-N via the existing `rewind_to`; the next pump sends)
+with **exponential backoff** (1 s base, doubling, capped) and a **give-up**
+(RST + close) after 5 tries (a dead peer). `serve()` passes a 200 ms
+`NET_WAIT` timeout while data is unacked so netd wakes to check the timer
+during silence, and blocks indefinitely when idle (the health-ping still
+wakes it there).
+
+**Confirmed on QEMU by isolating the RTO path** - temporarily disabling fast
+retransmit and injecting one mid-stream drop (both reverted), so *only* the
+RTO could recover: the 256 KB transfer took ~6.7 s (vs ~5 s normal - the RTO
+wait) and completed byte-identical, with the timer firing exactly once. This
+exercised the whole new path end to end: the `NET_WAIT` timeout woke netd
+during the post-dup-ACK silence, `service_rto` fired after ~1 s of no
+progress, and the resend recovered. **The normal lossless path is unaffected
+- the timer never fires spuriously**: a healthy transfer advances `snd_una`
+every check, so the timer keeps resetting (256 KB byte-identical at normal
+speed). Fast retransmit (re-enabled), client net ops
+(`ping`/`resolve`/`fetch`), disk commands, a pipe, and `selftest` all
+unregressed; zero `-d int` aborts, zero supervisor restarts.
+
+**Still coarse:** fixed 1 s base RTO (no RTT estimation / Karn's algorithm);
+go-back-N resend (not selective/SACK); the give-up path (a truly dead peer)
+is implemented but *not exercised* (SLIRP can't sustain a peer silent past
+its own ACKs); one connection at a time; still QEMU-only, polled RX.
 
 ## Commands
 
@@ -6314,7 +6359,7 @@ kernel/
   src/loader.rs      reads INIT.CFG + a program off the ESP during boot services (plus the filesystem server \EFI\ORBS\FSD.BIN and console server \EFI\ORBS\COND.BIN, each registered with supervisor::register for crash/wedge recovery), into 2MB-aligned EL0-accessible regions, real ELF64 parsing + R_AARCH64_RELATIVE relocation processing - see "A real relocating loader" above and docs/processes.md; elf_region_size/populate_region split so the same parsing/loading logic is reusable from the runtime spawn path and supervisor restarts too, see "Dynamic task creation and exec()" and "Server supervision + heartbeat" above
   src/supervisor.rs  server supervision registry: keeps each supervised server's boot ELF image and restarts it on a crash (generic fault hook) or a wedge (on_tick's heartbeat), with a per-boot restart cap - the generalized replacement for syscall.rs's old fsd-only restart_fsd/FSD_IMAGE, now covering fsd AND cond, see "Server supervision + heartbeat" above
   src/syscall.rs     svc syscall dispatch table (print/double/report/try_read_char/putc/get_ticks/read_char/spawn/exit/task_state/kill/fg/wait/mount/msg_send/msg_recv/msg_try_recv/block_info/block_read/block_write/msg_call/spawn_stage/grant/safecopy/.../delegate; gaps at 5 and 7-14 - the old fs_* syscalls moved to the fsd server's FSOP_* protocol) plus the block-device cell (the kernel's entire remaining storage role) and in_caller_region validation - grant/safecopy are the enforced bulk-transfer primitive (see "Grant/safecopy IPC"), delegate (41) is runtime capability delegation of the IPC send-mask (see "Runtime capability delegation" above)
-  src/tasks.rs       up to 6 task slots (task 0 = loaded program, task 1 = idle, task 2 = filesystem server, task 3 = console server, slots 4-5 spawn/exit-cycled) + the round-robin scheduler over Runnable/Blocked/Unused/Zombie task state (block_current_and_switch, exit_current_and_switch, on_tick's wake-check + the supervisor heartbeat, tasks::spawn, allocate_runtime_region/free_runtime_region, mailboxes with direct delivery + sender-filtered receive, WaitReason::NetInput + the async-receive wake for the network server, per-task grant slots + safecopy for the bulk-transfer primitive, per-slot capability send-mask + per-task runtime delegation for who-may-call-whom) - confirmed working, see "Blocking primitives", "Dynamic task creation and exec()", "Task destruction", "Driver isolation" parts 1/2/3, "Grant/safecopy IPC", "The capability model", "Runtime capability delegation", and "Server supervision + heartbeat" above
+  src/tasks.rs       up to 6 task slots (task 0 = loaded program, task 1 = idle, task 2 = filesystem server, task 3 = console server, slots 4-5 spawn/exit-cycled) + the round-robin scheduler over Runnable/Blocked/Unused/Zombie task state (block_current_and_switch, exit_current_and_switch, on_tick's wake-check + the supervisor heartbeat, tasks::spawn, allocate_runtime_region/free_runtime_region, mailboxes with direct delivery + sender-filtered receive, WaitReason::NetInput (with an optional deadline, so NET_WAIT can time out - the network server's RTO timer) + the async-receive wake for the network server, per-task grant slots + safecopy for the bulk-transfer primitive, per-slot capability send-mask + per-task runtime delegation for who-may-call-whom) - confirmed working, see "Blocking primitives", "Dynamic task creation and exec()", "Task destruction", "Driver isolation" parts 1/2/3, "Grant/safecopy IPC", "The capability model", "Runtime capability delegation", and "Server supervision + heartbeat" above
   src/virtio_mmio.rs virtio-mmio transport: 32-slot device discovery, modern (non-legacy) register layout, addresses confirmed via devicetree dump
   src/block.rs       BlockDevice enum (Virtio | UsbMsd) - the block-device abstraction fat32.rs sits on, see "USB mass storage" above
   src/usb_msd.rs     USB mass storage: Bulk-Only Transport + SCSI (INQUIRY/READ CAPACITY/READ(10)/WRITE(10)) over xhci.rs's bulk endpoints - Parallels' first working disk, see "USB mass storage" above
@@ -6336,8 +6381,8 @@ cond/                seventh userland program: THE CONSOLE SERVER (driver isolat
   src/main.rs        the request loop (recv -> decode DSPOP_WRITE -> render -> reply, the filesystem server's shape) plus two backends chosen from CON_INFO at startup: byte-stream (forward to the kernel console via CON_WRITE) and framebuffer (render glyphs here - cursor, wrap, scroll, a small ANSI parser - via FB_BLIT/FB_SCROLL/FB_CLEAR)
   src/font.rs        cond's own copy of the 8x8 bitmap font (from kernel/src/font.rs) - the font is what "console driver logic" meant, so it moved to userland; the kernel keeps a copy only for its emergency fbconsole
 
-netd/                eighth userland program: THE NETWORK SERVER (network stack, Stage 2) - owns the protocol stack (ARP/IPv4/ICMP) in userland; the kernel keeps only the DMA-owning virtio-net driver, reached by this task alone via the gated NET_SEND/NET_RECV/NET_MAC syscalls (the fsd/BLOCK_* pattern). Boot-loaded into protected task slot 4 (NET_TASK), supervised. Speaks the NETOP_PING request protocol to clients (the shell's `ping` command); hand-rolled fixed-buffer frame building (ARP/IPv4/ICMP/UDP/DNS) + Internet checksums, no crates. NETOP_RESOLVE (Stage 3) does DNS-over-UDP for `resolve`; NETOP_FETCH (Stage 4a) does a client-TCP HTTP GET for `fetch`. Stage 4b makes it event-driven (blocks in NET_WAIT, drains client messages *and* incoming frames each wake) and adds a TCP HTTP server on port 80 + an ARP responder - the guest answers the network now, not just initiates. Stage 4c makes that HTTP server a real static-file server: it parses the request path and streams the file from fsd over TCP (netd is fsd's first non-shell client, reached via a new netd->fsd capability). Stage 4d adds TCP send-side flow control (window tracking + ACK-paced streaming) so a file of *any* size streams, not just what fits one window. Stage 4e adds proper HTTP response headers (Content-Type by extension + Content-Length via an fsd stat). Stage 4f makes a GET of a directory return a browsable HTML index (links resolved against the request path) - the guest's filesystem is browsable in a browser. Stage 4g adds HTTP HEAD (identical headers to GET, no body, for every response kind). Stage 4h adds TCP fast retransmit (three dup-ACKs -> go-back-N resend), the server's first loss recovery. See "Network stack, Stage 2/3/4a/4b/4c/4d/4e/4f/4g/4h" above
-  src/main.rs        the NET_WAIT event loop (drain client requests -> NETOP_PING/RESOLVE/FETCH; drain frames -> ARP replies + the TCP server state machine) plus start_response (request-path parsing + a landing page or a file from fsd) and pump_send (window-bounded, ACK-paced streaming under flow control, one segment per call with a per-segment mailbox drain so the supervisor health-ping is always acked), read_file_chunk's grant/safecopy FSOP_READ_BULK, the ARP/IPv4/ICMP/UDP/DNS/TCP frame builders (build_tcp_generic shared by client build_tcp + server build_tcp_srv), the DNS/TCP parsers, next-hop routing, ip_checksum and the TCP pseudo-header checksum
+netd/                eighth userland program: THE NETWORK SERVER (network stack, Stage 2) - owns the protocol stack (ARP/IPv4/ICMP) in userland; the kernel keeps only the DMA-owning virtio-net driver, reached by this task alone via the gated NET_SEND/NET_RECV/NET_MAC syscalls (the fsd/BLOCK_* pattern). Boot-loaded into protected task slot 4 (NET_TASK), supervised. Speaks the NETOP_PING request protocol to clients (the shell's `ping` command); hand-rolled fixed-buffer frame building (ARP/IPv4/ICMP/UDP/DNS) + Internet checksums, no crates. NETOP_RESOLVE (Stage 3) does DNS-over-UDP for `resolve`; NETOP_FETCH (Stage 4a) does a client-TCP HTTP GET for `fetch`. Stage 4b makes it event-driven (blocks in NET_WAIT, drains client messages *and* incoming frames each wake) and adds a TCP HTTP server on port 80 + an ARP responder - the guest answers the network now, not just initiates. Stage 4c makes that HTTP server a real static-file server: it parses the request path and streams the file from fsd over TCP (netd is fsd's first non-shell client, reached via a new netd->fsd capability). Stage 4d adds TCP send-side flow control (window tracking + ACK-paced streaming) so a file of *any* size streams, not just what fits one window. Stage 4e adds proper HTTP response headers (Content-Type by extension + Content-Length via an fsd stat). Stage 4f makes a GET of a directory return a browsable HTML index (links resolved against the request path) - the guest's filesystem is browsable in a browser. Stage 4g adds HTTP HEAD (identical headers to GET, no body, for every response kind). Stage 4h adds TCP fast retransmit (three dup-ACKs -> go-back-N resend), the server's first loss recovery. Stage 4i adds a timer-based RTO (via a new NET_WAIT timeout) for when the peer goes silent. See "Network stack, Stage 2/3/4a/4b/4c/4d/4e/4f/4g/4h/4i" above
+  src/main.rs        the NET_WAIT event loop (drain client requests -> NETOP_PING/RESOLVE/FETCH; drain frames -> ARP replies + the TCP server state machine) plus start_response (request-path parsing + a landing page or a file from fsd) and pump_send (window-bounded, ACK-paced streaming under flow control, one segment per call with a per-segment mailbox drain so the supervisor health-ping is always acked), read_file_chunk's grant/safecopy FSOP_READ_BULK, the ARP/IPv4/ICMP/UDP/DNS/TCP frame builders (build_tcp_generic shared by client build_tcp + server build_tcp_srv), the DNS/TCP parsers, next-hop routing, ip_checksum and the TCP pseudo-header checksum, plus loss recovery: fast retransmit (dup-ACKs -> rewind_to) and a timer-based RTO (service_rto over a NET_WAIT timeout)
 
 upper/               sixth userland program: the pipeline filter demo (uppercases its piped input) - the reference for the filter-program shape: stdin = msg_recv, stdout = con_write (routed through the console server), EOF = the empty message, finish = exit; see "Pipelines" above
   src/main.rs        ~80 lines: the recv/uppercase/putc loop

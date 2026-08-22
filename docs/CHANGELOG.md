@@ -7,6 +7,37 @@ what broke, how it was diagnosed), see `CLAUDE.md`; for *how* something
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## Network stack, Stage 4i: TCP retransmit timeout (RTO)
+
+Fast retransmit (4h) recovers a loss only while data keeps flowing (the
+peer's dup-ACKs drive it). When the peer goes **silent** — the last segments
+of a burst lost, or all its ACKs lost — no frames arrive and it never fires.
+RTO is the timer-based fallback.
+
+**Kernel:** `NET_WAIT` now takes a timeout. It used to wake only on a frame
+or a message — useless for a timer that must fire when nothing arrives.
+`WaitReason::NetInput` gained a `deadline`; the tick wake-check wakes the task
+once it passes even with no input. The syscall reads `arg0` as a ms timeout.
+
+**netd:** a per-connection RTO timer (`service_rto`, once per wake) — armed
+while data is unacked, restarted (backoff reset) on ACK progress, and on
+expiry (only reached when the peer is silent, since dup-ACKs would fire fast
+retransmit first) resends from `snd_una` (go-back-N via `rewind_to`) with
+exponential backoff (1 s base, capped) and a give-up (RST + close) after 5
+tries. `serve()` uses a 200 ms `NET_WAIT` timeout while data is unacked so
+netd wakes to check the timer during silence.
+
+Verified on QEMU by temporarily disabling fast retransmit and injecting one
+drop (reverted), so only the RTO could recover: a 256 KB transfer took ~6.7 s
+(vs ~5 s — the RTO wait) and completed byte-identical, the timer firing once —
+exercising the `NET_WAIT` timeout (netd woke during silence), `service_rto`,
+and the resend. The normal lossless path is unaffected (the timer never fires
+spuriously — `snd_una` advances every check): 256 KB byte-identical at normal
+speed. Client net ops, disk, a pipe, selftest unregressed; zero aborts, zero
+restarts. Still coarse: fixed 1 s RTO (no RTT estimation), go-back-N (not
+SACK), give-up path unexercised, one connection. See `CLAUDE.md`'s "Network
+stack, Stage 4i."
+
 ## Network stack, Stage 4h: TCP fast retransmit
 
 The server's first loss recovery. A lost segment used to stall the transfer

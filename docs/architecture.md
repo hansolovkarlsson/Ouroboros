@@ -424,9 +424,11 @@ message arriving, or network input arriving —
 block instead of busy-polling. `NetInput` is the network server's
 async-receive wait: unlike the others it consumes nothing when it fires
 (the waiter drains the frame or message itself), and its wake condition
-is *two* sources at once (a waiting NIC frame **or** a queued message) —
-a minimal poll/select that lets `netd` react to the wire and to client
-IPC without starving either. `on_tick` runs a wake-check every tick
+is *three* sources (a waiting NIC frame, a queued message, **or** an
+optional `deadline`) — a minimal poll/select that lets `netd` react to the
+wire and to client IPC without starving either, plus a timer (the only
+`WaitReason` with one) that fires the TCP retransmit timeout when a peer
+goes silent and no frames arrive. `on_tick` runs a wake-check every tick
 before its normal scheduling decision: for each blocked task, it
 evaluates that task's wait reason, and if satisfied, stashes the
 resulting value into the task's saved context (`x0`) and marks it
@@ -506,7 +508,7 @@ the way hand-duplicated numbers did before this crate existed.
 | 42 | `net_send` | frame ptr, frame len | `0` or `NET_ERROR` | Transmit one raw Ethernet frame through the kernel's virtio-net driver. **Gated to `NET_TASK`** (the network server) — the DMA-owning NIC driver stays in the kernel (no IOMMU), reached only by the one task that owns the protocol stack, the `block_*` → fsd pattern |
 | 43 | `net_recv` | buf ptr, buf len | the frame's length (copied into `buf`, truncated to `buf len`), `NET_NO_FRAME` if none is waiting, or `NET_ERROR` | Non-blocking poll of the virtio-net receive ring. Gated to `NET_TASK` like `net_send` |
 | 44 | `net_mac` | — | the NIC's 6-byte MAC packed little-endian into a `u64`, or `NET_ERROR` | The network server needs it to build the Ethernet source of every frame. Gated to `NET_TASK` |
-| 45 | `net_wait` | — | returns when input is pending (value not meaningful) | Blocks the caller until **either** a frame arrives on the NIC **or** a message is queued in its mailbox (`WaitReason::NetInput`), then returns — the async-receive primitive (a minimal poll/select over exactly the two sources the network server multiplexes). The caller drains both itself (`net_recv` / `msg_try_recv`). This is what lets `netd` wait on incoming frames and client IPC at once, so it can *answer* the network (serve TCP, reply to ARP) rather than only initiate. Gated to `NET_TASK` |
+| 45 | `net_wait` | timeout ms (`0` = none) | returns when input or the timeout is pending (value not meaningful) | Blocks the caller until a frame arrives on the NIC, a message is queued in its mailbox, **or** the timeout elapses (`WaitReason::NetInput { deadline }`), then returns — the async-receive primitive (a minimal poll/select) plus a timer. The caller drains sources itself (`net_recv` / `msg_try_recv`). The frame/message halves let `netd` wait on incoming frames and client IPC at once (so it can *answer* the network); the timeout is the timer the TCP retransmit timeout (RTO) needs to fire when a peer goes silent and no frames arrive. Gated to `NET_TASK` |
 | other | — | — | `u64::MAX` | Logged as unknown |
 
 ### The filesystem request protocol (`FSOP_*`)

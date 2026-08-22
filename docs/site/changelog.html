@@ -40,6 +40,16 @@
 
   <article>
 
+<h2>Network stack, Stage 4i: TCP retransmit timeout (RTO)</h2>
+
+<p>Fast retransmit (4h) recovers a loss only while data keeps flowing (the peer's dup-ACKs drive it). When the peer goes <strong>silent</strong> — the last segments of a burst lost, or all its ACKs lost — no frames arrive and it never fires. RTO is the timer-based fallback.</p>
+
+<p><strong>Kernel:</strong> <code class="inline">NET_WAIT</code> now takes a timeout. It used to wake only on a frame or a message — useless for a timer that must fire when nothing arrives. <code class="inline">WaitReason::NetInput</code> gained a <code class="inline">deadline</code>; the tick wake-check wakes the task once it passes even with no input. The syscall reads <code class="inline">arg0</code> as a ms timeout.</p>
+
+<p><strong>netd:</strong> a per-connection RTO timer (<code class="inline">service_rto</code>, once per wake) — armed while data is unacked, restarted (backoff reset) on ACK progress, and on expiry (only reached when the peer is silent, since dup-ACKs would fire fast retransmit first) resends from <code class="inline">snd_una</code> (go-back-N via <code class="inline">rewind_to</code>) with exponential backoff (1 s base, capped) and a give-up (RST + close) after 5 tries. <code class="inline">serve()</code> uses a 200 ms <code class="inline">NET_WAIT</code> timeout while data is unacked so netd wakes to check the timer during silence.</p>
+
+<p>Verified on QEMU by temporarily disabling fast retransmit and injecting one drop (reverted), so only the RTO could recover: a 256 KB transfer took ~6.7 s (vs ~5 s — the RTO wait) and completed byte-identical, the timer firing once — exercising the <code class="inline">NET_WAIT</code> timeout (netd woke during silence), <code class="inline">service_rto</code>, and the resend. The normal lossless path is unaffected (the timer never fires spuriously — <code class="inline">snd_una</code> advances every check): 256 KB byte-identical at normal speed. Client net ops, disk, a pipe, selftest unregressed; zero aborts, zero restarts. Still coarse: fixed 1 s RTO (no RTT estimation), go-back-N (not SACK), give-up path unexercised, one connection.</p>
+
 <h2>Network stack, Stage 4h: TCP fast retransmit</h2>
 
 <p>The server's first loss recovery. A lost segment used to stall the transfer forever (<code class="inline">snd_una</code> never advanced past the gap) — fine on SLIRP's lossless loopback, broken on a real network. This adds <strong>fast retransmit</strong>: three duplicate ACKs at <code class="inline">snd_una</code> (the peer re-acking the last in-order byte for each out-of-order segment past a gap) trigger a <strong>go-back-N</strong> resend from <code class="inline">snd_una</code>. Driven by incoming frames — no timer, no kernel change.</p>
