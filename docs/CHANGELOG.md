@@ -7,6 +7,36 @@ what broke, how it was diagnosed), see `CLAUDE.md`; for *how* something
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## Network stack, Stage 4h: TCP fast retransmit
+
+The server's first loss recovery. A lost segment used to stall the transfer
+forever (`snd_una` never advanced past the gap) — fine on SLIRP's lossless
+loopback, broken on a real network. This adds **fast retransmit**: three
+duplicate ACKs at `snd_una` (the peer re-acking the last in-order byte for
+each out-of-order segment past a gap) trigger a **go-back-N** resend from
+`snd_una`. Driven by incoming frames — no timer, no kernel change.
+
+`TcpConn` tracks `dup_acks` and `last_rexmit_una` (so leftover dup-ACKs don't
+double-retransmit the same gap); `rewind_to(seq)` repositions the send cursor
+(the response is a fixed `[prefix][file body][FIN]` stream from `SERVER_ISN+1`,
+so a seq maps back to a prefix/file offset), and `pump_send` resends.
+
+A real bug found by testing (an injected drop, since SLIRP can't lose
+packets): the first cut recovered the gap but stalled at ~86 KB — a buffering
+receiver acks *past* the rewound `snd_nxt` once the gap is filled, leaving
+`snd_una > snd_nxt` so the window wraps to look permanently full. Fixed by
+keeping `snd_nxt >= snd_una` (fast-forward the cursor when an ACK moves past
+it).
+
+Confirmed on QEMU with the drop injection: a 256 KB file that would stall now
+streams byte-identical at normal speed; the pcap shows textbook go-back-N
+(segments climb to the window edge, jump back to the gap sequence, re-climb).
+The normal lossless path is unaffected (retransmit code dormant without
+dup-ACKs); shell + client net ops + selftest unregressed; zero aborts, zero
+restarts. Still coarse: fast retransmit only (no timer-based RTO for a silent
+peer — needs a `NET_WAIT` timeout), go-back-N (not selective/SACK), one
+connection. See `CLAUDE.md`'s "Network stack, Stage 4h."
+
 ## Network stack, Stage 4g: HTTP HEAD
 
 A `HEAD` request now returns exactly the headers a `GET` would (including

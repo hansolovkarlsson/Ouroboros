@@ -227,13 +227,16 @@ step, not a Stage 1 concern.
    stream ACK-paced) so a file of *any* size streams — verified with a 256 KB
    file, byte-identical, three times over. Stage 4e added proper HTTP
    response headers (`Content-Type` by file extension + `Content-Length` via
-   an `fsd` stat), so a browser renders served files. **Still open:**
-   retransmission, congestion control (`cwnd`/slow-start — only the peer's
-   flow-control window is honored), multiple concurrent connections, richer
-   method handling (a 405 for non-GET/HEAD), and IRQ-driven RX. (Stage 4f
-   added a browsable HTML directory listing, so the guest's filesystem is
-   browsable end to end; Stage 4g added `HEAD`.) See `CHANGELOG.md` /
-   `CLAUDE.md`'s "Network stack, Stage 4a–4g."
+   an `fsd` stat), so a browser renders served files. **Still open:** a
+   timer-based **RTO** (Stage 4h added fast retransmit — dup-ACK-driven
+   recovery — but a fully silent peer needs a `NET_WAIT` timeout so netd wakes
+   without incoming frames), congestion control (`cwnd`/slow-start — only the
+   peer's flow-control window is honored), selective/SACK retransmit (4h is
+   go-back-N), multiple concurrent connections, richer method handling (a 405
+   for non-GET/HEAD), and IRQ-driven RX. (Stage 4f added a browsable HTML
+   directory listing, so the guest's filesystem is browsable end to end;
+   Stage 4g added `HEAD`; Stage 4h added fast retransmit.) See `CHANGELOG.md`
+   / `CLAUDE.md`'s "Network stack, Stage 4a–4h."
 
 **Decisions to settle before starting (not now):**
 

@@ -40,6 +40,16 @@
 
   <article>
 
+<h2>Network stack, Stage 4h: TCP fast retransmit</h2>
+
+<p>The server's first loss recovery. A lost segment used to stall the transfer forever (<code class="inline">snd_una</code> never advanced past the gap) — fine on SLIRP's lossless loopback, broken on a real network. This adds <strong>fast retransmit</strong>: three duplicate ACKs at <code class="inline">snd_una</code> (the peer re-acking the last in-order byte for each out-of-order segment past a gap) trigger a <strong>go-back-N</strong> resend from <code class="inline">snd_una</code>. Driven by incoming frames — no timer, no kernel change.</p>
+
+<p><code class="inline">TcpConn</code> tracks <code class="inline">dup_acks</code> and <code class="inline">last_rexmit_una</code> (so leftover dup-ACKs don't double-retransmit the same gap); <code class="inline">rewind_to(seq)</code> repositions the send cursor (the response is a fixed <code class="inline">[prefix][file body][FIN]</code> stream from <code class="inline">SERVER_ISN+1</code>, so a seq maps back to a prefix/file offset), and <code class="inline">pump_send</code> resends.</p>
+
+<p>A real bug found by testing (an injected drop, since SLIRP can't lose packets): the first cut recovered the gap but stalled at ~86 KB — a buffering receiver acks <em>past</em> the rewound <code class="inline">snd_nxt</code> once the gap is filled, leaving <code class="inline">snd_una &gt; snd_nxt</code> so the window wraps to look permanently full. Fixed by keeping <code class="inline">snd_nxt &gt;= snd_una</code> (fast-forward the cursor when an ACK moves past it).</p>
+
+<p>Confirmed on QEMU with the drop injection: a 256 KB file that would stall now streams byte-identical at normal speed; the pcap shows textbook go-back-N (segments climb to the window edge, jump back to the gap sequence, re-climb). The normal lossless path is unaffected (retransmit code dormant without dup-ACKs); shell + client net ops + selftest unregressed; zero aborts, zero restarts. Still coarse: fast retransmit only (no timer-based RTO for a silent peer — needs a <code class="inline">NET_WAIT</code> timeout), go-back-N (not selective/SACK), one connection.</p>
+
 <h2>Network stack, Stage 4g: HTTP HEAD</h2>
 
 <p>A <code class="inline">HEAD</code> request now returns exactly the headers a <code class="inline">GET</code> would (including <code class="inline">Content-Type</code>/<code class="inline">Content-Length</code> for a file) with no body. Small, self-contained, and correct for every response kind: <code class="inline">start_response</code> builds the response as usual, then for a HEAD trims the prefix to the header block (through the first <code class="inline">\r\n\r\n</code> — present in the file 200, the directory listing, and the 404/503) and streams no file body. <code class="inline">is_head()</code> matches <code class="inline">"HEAD "</code> (a non-GET/HEAD method is still served like a GET — no 405 yet).</p>

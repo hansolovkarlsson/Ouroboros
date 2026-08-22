@@ -6146,6 +6146,54 @@ still returns its 16-byte body); `HEAD /EFI/ORBS` -> `text/html`, 0-byte
 body; `HEAD /nope` -> 404, 0-byte body. Shell + client net ops + `selftest`
 unregressed; zero `-d int` aborts, zero supervisor restarts.
 
+## Network stack, Stage 4h: TCP fast retransmit
+
+The server's first loss recovery. Until now a lost segment stalled the
+transfer forever - `snd_una` never advanced past the gap, the window filled
+and stayed full - fine on SLIRP's lossless loopback, broken on a real
+network. This adds **fast retransmit**: three duplicate ACKs at `snd_una`
+(the peer re-acking the last in-order byte for each out-of-order segment it
+receives past a gap) trigger a **go-back-N** resend from `snd_una`. Driven
+entirely by incoming frames - no timer, no kernel change.
+
+- `TcpConn` tracks `dup_acks` (reset on real forward progress) and
+  `last_rexmit_una` (so the leftover dup-ACKs from the original out-of-order
+  burst don't fire a second retransmit for the same gap).
+- `rewind_to(seq)` repositions the send cursor: the response is a fixed byte
+  stream (`[prefix][file body from 0][FIN]`) starting at `SERVER_ISN + 1`, so
+  a sequence number maps straight back to a prefix offset and/or a file
+  offset re-read from `fsd`; the next `pump_send` resends from there.
+
+**A real bug found and fixed by testing - not review.** SLIRP can't lose
+packets, so verification used a temporary one-segment drop injection
+(skip the wire send, still advance the cursor - reverted after). The first
+attempt recovered the gap but then *stalled at ~86 KB*: a buffering receiver
+(Linux/macOS TCP buffers out-of-order segments) acks *past* the rewound
+`snd_nxt` in one jump once the retransmit fills the gap, leaving
+`snd_una > snd_nxt` - so `snd_nxt - snd_una` wraps to a huge number, the
+window looks permanently full, and `pump_send` sends nothing. Fixed by
+keeping the invariant `snd_nxt >= snd_una`: when an ACK moves past `snd_nxt`,
+fast-forward the cursor to `snd_una` (nothing below it is unsent-and-unacked).
+
+**Confirmed on QEMU** with the drop injection: a 256 KB file that would
+otherwise stall now streams **byte-identical, at normal speed**, and the
+pcap shows textbook go-back-N - segments climb to the window edge (seq
+~65535), then jump back to the gap's sequence (~file offset 20000) and
+re-climb. The normal lossless path is unaffected (the retransmit code is
+dormant without dup-ACKs): 256 KB byte-identical at normal speed,
+files/listings/small responses, and the full shell + client net ops
+(`ping`/`resolve`/`fetch`) + `selftest` all unregressed; zero `-d int`
+aborts, zero supervisor restarts.
+
+**Still coarse:** **fast retransmit only** - there's no timer-based RTO for a
+fully silent peer (all ACKs lost, or a dead peer), which would need a
+`NET_WAIT` timeout (a kernel change) to wake netd without incoming frames -
+a real, separate follow-up; **go-back-N** resends a full window from the gap
+rather than a single segment (simple and correct, but wasteful next to
+selective/SACK retransmit - it re-sends data a buffering receiver already
+has); no RTT estimation (the RTO, when added, would want it); one connection
+at a time; still QEMU-only, polled RX.
+
 ## Commands
 
 ```sh
@@ -6288,7 +6336,7 @@ cond/                seventh userland program: THE CONSOLE SERVER (driver isolat
   src/main.rs        the request loop (recv -> decode DSPOP_WRITE -> render -> reply, the filesystem server's shape) plus two backends chosen from CON_INFO at startup: byte-stream (forward to the kernel console via CON_WRITE) and framebuffer (render glyphs here - cursor, wrap, scroll, a small ANSI parser - via FB_BLIT/FB_SCROLL/FB_CLEAR)
   src/font.rs        cond's own copy of the 8x8 bitmap font (from kernel/src/font.rs) - the font is what "console driver logic" meant, so it moved to userland; the kernel keeps a copy only for its emergency fbconsole
 
-netd/                eighth userland program: THE NETWORK SERVER (network stack, Stage 2) - owns the protocol stack (ARP/IPv4/ICMP) in userland; the kernel keeps only the DMA-owning virtio-net driver, reached by this task alone via the gated NET_SEND/NET_RECV/NET_MAC syscalls (the fsd/BLOCK_* pattern). Boot-loaded into protected task slot 4 (NET_TASK), supervised. Speaks the NETOP_PING request protocol to clients (the shell's `ping` command); hand-rolled fixed-buffer frame building (ARP/IPv4/ICMP/UDP/DNS) + Internet checksums, no crates. NETOP_RESOLVE (Stage 3) does DNS-over-UDP for `resolve`; NETOP_FETCH (Stage 4a) does a client-TCP HTTP GET for `fetch`. Stage 4b makes it event-driven (blocks in NET_WAIT, drains client messages *and* incoming frames each wake) and adds a TCP HTTP server on port 80 + an ARP responder - the guest answers the network now, not just initiates. Stage 4c makes that HTTP server a real static-file server: it parses the request path and streams the file from fsd over TCP (netd is fsd's first non-shell client, reached via a new netd->fsd capability). Stage 4d adds TCP send-side flow control (window tracking + ACK-paced streaming) so a file of *any* size streams, not just what fits one window. Stage 4e adds proper HTTP response headers (Content-Type by extension + Content-Length via an fsd stat). Stage 4f makes a GET of a directory return a browsable HTML index (links resolved against the request path) - the guest's filesystem is browsable in a browser. Stage 4g adds HTTP HEAD (identical headers to GET, no body, for every response kind). See "Network stack, Stage 2/3/4a/4b/4c/4d/4e/4f/4g" above
+netd/                eighth userland program: THE NETWORK SERVER (network stack, Stage 2) - owns the protocol stack (ARP/IPv4/ICMP) in userland; the kernel keeps only the DMA-owning virtio-net driver, reached by this task alone via the gated NET_SEND/NET_RECV/NET_MAC syscalls (the fsd/BLOCK_* pattern). Boot-loaded into protected task slot 4 (NET_TASK), supervised. Speaks the NETOP_PING request protocol to clients (the shell's `ping` command); hand-rolled fixed-buffer frame building (ARP/IPv4/ICMP/UDP/DNS) + Internet checksums, no crates. NETOP_RESOLVE (Stage 3) does DNS-over-UDP for `resolve`; NETOP_FETCH (Stage 4a) does a client-TCP HTTP GET for `fetch`. Stage 4b makes it event-driven (blocks in NET_WAIT, drains client messages *and* incoming frames each wake) and adds a TCP HTTP server on port 80 + an ARP responder - the guest answers the network now, not just initiates. Stage 4c makes that HTTP server a real static-file server: it parses the request path and streams the file from fsd over TCP (netd is fsd's first non-shell client, reached via a new netd->fsd capability). Stage 4d adds TCP send-side flow control (window tracking + ACK-paced streaming) so a file of *any* size streams, not just what fits one window. Stage 4e adds proper HTTP response headers (Content-Type by extension + Content-Length via an fsd stat). Stage 4f makes a GET of a directory return a browsable HTML index (links resolved against the request path) - the guest's filesystem is browsable in a browser. Stage 4g adds HTTP HEAD (identical headers to GET, no body, for every response kind). Stage 4h adds TCP fast retransmit (three dup-ACKs -> go-back-N resend), the server's first loss recovery. See "Network stack, Stage 2/3/4a/4b/4c/4d/4e/4f/4g/4h" above
   src/main.rs        the NET_WAIT event loop (drain client requests -> NETOP_PING/RESOLVE/FETCH; drain frames -> ARP replies + the TCP server state machine) plus start_response (request-path parsing + a landing page or a file from fsd) and pump_send (window-bounded, ACK-paced streaming under flow control, one segment per call with a per-segment mailbox drain so the supervisor health-ping is always acked), read_file_chunk's grant/safecopy FSOP_READ_BULK, the ARP/IPv4/ICMP/UDP/DNS/TCP frame builders (build_tcp_generic shared by client build_tcp + server build_tcp_srv), the DNS/TCP parsers, next-hop routing, ip_checksum and the TCP pseudo-header checksum
 
 upper/               sixth userland program: the pipeline filter demo (uppercases its piped input) - the reference for the filter-program shape: stdin = msg_recv, stdout = con_write (routed through the console server), EOF = the empty message, finish = exit; see "Pipelines" above
