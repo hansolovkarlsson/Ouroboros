@@ -3,7 +3,7 @@
 Historical record of completed milestones, newest first. For
 forward-looking plans, see [`roadmap.md`](roadmap.md); for the
 debugging history and lessons behind each decision (what was tried,
-what broke, how it was diagnosed), see `CLAUDE.md`; for *how* something
+what broke, how it was diagnosed), see the debugging postmortems under `docs/`; for *how* something
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
@@ -34,8 +34,7 @@ Verified on QEMU: 4 concurrent small fetches all correct; 4 concurrent 60 KB
 `SH.BIN` streams all byte-identical (~1 s); a single connection still works;
 client net ops, disk, a pipe, `exec`, selftest unregressed; zero aborts, zero
 restarts, zero EL0 faults. Still coarse: 4 connections max, a SYN with no
-free slot is dropped, round-robin servicing, QEMU-only. See `CLAUDE.md`'s
-"Network stack, Stage 4j."
+free slot is dropped, round-robin servicing, QEMU-only.
 
 ## FAT32 long filename (LFN) read support
 
@@ -62,8 +61,7 @@ the checksum guard prevents mis-association). Both are documented follow-ups.
 Verified on QEMU against `index.html`, a 21-char name (2 LFN entries), and a
 long name in a subdirectory (all written by macOS): served by the web server
 and read via the shell (`ls`/`cat`/`cd`, nested). 8.3 files unaffected; the
-full write path unregressed; selftest, zero `-d int` aborts. See `CLAUDE.md`'s
-"FAT32 long filename (LFN) read support."
+full write path unregressed; selftest, zero `-d int` aborts.
 
 ## Network stack, Stage 4i: TCP retransmit timeout (RTO)
 
@@ -93,8 +91,7 @@ and the resend. The normal lossless path is unaffected (the timer never fires
 spuriously — `snd_una` advances every check): 256 KB byte-identical at normal
 speed. Client net ops, disk, a pipe, selftest unregressed; zero aborts, zero
 restarts. Still coarse: fixed 1 s RTO (no RTT estimation), go-back-N (not
-SACK), give-up path unexercised, one connection. See `CLAUDE.md`'s "Network
-stack, Stage 4i."
+SACK), give-up path unexercised, one connection.
 
 ## Network stack, Stage 4h: TCP fast retransmit
 
@@ -124,7 +121,7 @@ The normal lossless path is unaffected (retransmit code dormant without
 dup-ACKs); shell + client net ops + selftest unregressed; zero aborts, zero
 restarts. Still coarse: fast retransmit only (no timer-based RTO for a silent
 peer — needs a `NET_WAIT` timeout), go-back-N (not selective/SACK), one
-connection. See `CLAUDE.md`'s "Network stack, Stage 4h."
+connection.
 
 ## Network stack, Stage 4g: HTTP HEAD
 
@@ -140,8 +137,7 @@ Confirmed on QEMU with a raw client: `HEAD /EFI/ORBS/INIT.CFG` → 200,
 Content-Length 16, 0-byte body (headers byte-identical to the GET, which
 still returns its 16-byte body); `HEAD /EFI/ORBS` → text/html, 0-byte body;
 `HEAD /nope` → 404, 0-byte body. Shell + client net ops + selftest
-unregressed; zero aborts, zero restarts. See `CLAUDE.md`'s "Network stack,
-Stage 4g."
+unregressed; zero aborts, zero restarts.
 
 ## Network stack, Stage 4f: a browsable directory listing
 
@@ -166,8 +162,7 @@ Confirmed on QEMU: `GET /` → `EFI/`; `GET /EFI` → `../ ORBS/ BOOT/`;
 404 for a missing path; hrefs correct at every level. Shell + client net ops
 + selftest unregressed; zero aborts, zero restarts. Still coarse: capped by
 fsd's ~512-byte inline listing (big dirs truncate), names+links only (no
-sizes/timestamps/sorting), no Content-Length on the listing. See `CLAUDE.md`'s
-"Network stack, Stage 4f."
+sizes/timestamps/sorting), no Content-Length on the listing.
 
 ## Network stack, Stage 4e: proper HTTP response headers (Content-Type + Content-Length)
 
@@ -190,8 +185,7 @@ len 63 (renders), `.bin`→octet-stream len 59968, a 256KB file→Content-Length
 262144 with a byte-identical streamed body, 404 for a missing path. (A
 `.html` name — 4-char extension — 404s because it isn't a valid FAT 8.3 name
 and fsd has no LFN support; not a bug, the documented limitation. `.htm`
-works.) Shell + client net ops unregressed; zero aborts, zero restarts. See
-`CLAUDE.md`'s "Network stack, Stage 4e."
+works.) Shell + client net ops unregressed; zero aborts, zero restarts.
 
 ## Network stack, Stage 4d: TCP send-side flow control (stream files of any size)
 
@@ -229,8 +223,7 @@ Confirmed on QEMU: a 256 KB file streams byte-identical three times in a
 row, zero restarts/faults, plus 60 KB `SH.BIN`, the small responses, and a
 full shell+disk+client-net regression — zero `-d int` aborts. Throughput is
 disk-bound (~55 KB/s under TCG), not a TCP-layer limit. Still coarse: no
-retransmission, no congestion control, one connection, QEMU-only. See
-`CLAUDE.md`'s "Network stack, Stage 4d."
+retransmission, no congestion control, one connection, QEMU-only.
 
 ## Network stack, Stage 4c: a static-file HTTP server (netd serves files from fsd)
 
@@ -260,8 +253,7 @@ Confirmed on QEMU (`make run-image-server`, zero `-d int` aborts): `curl /`
 **byte-identical** to the real file, over 12 body segments + a header (the
 multi-segment path). Shell disk commands, `selftest`, and client net ops
 unregressed. Still coarse: the ~16 KB cap, no `Content-Length`, one
-connection, no directory listing, QEMU-only. See `CLAUDE.md`'s "Network
-stack, Stage 4c."
+connection, no directory listing, QEMU-only.
 
 ## Network stack, Stage 4b: an async-receive event loop, and a TCP HTTP server
 
@@ -293,8 +285,7 @@ connections in a row; the pcap showed a textbook SYN/SYN-ACK/GET/200/
 FIN/FIN-ACK exchange. Client ops (`ping`→reply, `resolve`→real DNS,
 `fetch`→Example Domain) and the full disk/selftest/pipe surface unregressed;
 zero `-d int` aborts. Still coarse: one fixed page, one connection at a
-time, no retransmission/congestion control, QEMU-only. See `CLAUDE.md`'s
-"Network stack, Stage 4b."
+time, no retransmission/congestion control, QEMU-only.
 
 ## Network stack, Stage 4a: a client TCP, and a `fetch` command (real HTTP)
 
@@ -323,8 +314,7 @@ Domain HTML. The pcap showed a complete, correct TCP conversation (SYN /
 SYN-ACK `ack=ISN+1` / ACK / GET / 200 / FINs — a clean four-way close), all
 checksums accepted. `ping`/`resolve` still work, no supervisor restart. Still
 coarse: client active-open only (no `listen`), one connection, no
-retransmission, response capped at one reply. See `CLAUDE.md`'s "Network
-stack, Stage 4a."
+retransmission, response capped at one reply.
 
 ## Network stack, Stage 3: UDP, and a `resolve` command (real DNS)
 
@@ -351,7 +341,7 @@ with `tcpdump` — and it resolves **real hostnames** via SLIRP's DNS proxy:
 pcap decoded our query as `10.0.2.15.32768 > 10.0.2.3.53: … A? example.com.`;
 multi-A responses parsed correctly. `ping` still works, no supervisor
 restart. Still coarse: A records only, fixed DNS server, guest-initiated
-only. TCP is Stage 4. See `CLAUDE.md`'s "Network stack, Stage 3."
+only. TCP is Stage 4.
 
 ## Network stack, Stage 2: the protocol stack moves to userland (`netd`), and a `ping` command
 
@@ -391,8 +381,7 @@ with `tcpdump` of the pcap: `ping 10.0.2.2`/`10.0.2.3` → `reply from ...`,
 and ICMP echo request/reply (`id 0x4f42`, checksums validated) for the
 reachable hosts. The renumber left everything working (`selftest`, disk
 surface, `exec` → slot 5, pipe → slot 6, `ps` shows netd in slot 4), no
-supervisor restart. See `CLAUDE.md`'s "Network stack, Stage 2" and
-`docs/roadmap.md`. UDP is Stage 3, TCP Stage 4.
+supervisor restart. See `docs/roadmap.md`. UDP is Stage 3, TCP Stage 4.
 
 ## Network stack, Stage 1: a virtio-net driver, and the first frames this kernel has sent
 
@@ -431,8 +420,7 @@ the reply in - TX and RX confirmed by a source outside the kernel's own
 output. Regression: plain `make run` boots normally, `init_net` silent, zero
 `-d int` aborts. Still just the driver: no protocol stack, no `NET_*`
 syscalls yet (those land with `netd`, Stage 2), polled not interrupt-driven,
-QEMU-only. See `CLAUDE.md`'s "Network stack, Stage 1" section and
-`docs/roadmap.md`.
+QEMU-only. See `docs/roadmap.md`.
 
 ## FAT32 interior / random-access writes (`write_at` past EOF) - and a `writeat` builtin
 
@@ -482,8 +470,7 @@ bytes all zero) and **multi-sector gap** (a 1195-byte gap read back all
 content survive a fresh boot), and FAT16 degradation (shared no-filesystem
 message; `help` lists `writeat`). Real-Parallels confirmation pending (the
 fat32 path is only reachable there via a mounted USB stick, reads-only by
-policy). See `CLAUDE.md`'s "FAT32 interior/random-access writes" section and
-`docs/shell-commands.md`.
+policy). See `docs/shell-commands.md`.
 
 ## Runtime capability delegation - relay-free program-to-program pipes
 
@@ -533,9 +520,7 @@ for the shell, false for a child. Stage 2 the shell/`hello` wiring.
 both lines uppercased with both tasks reaped (both lines intact proves the
 race is closed); the builtin-left pipe (`echo | UPPER.BIN`) and `exec >
 file` are unregressed; and the non-reading case (`HELLO.BIN | SH.BIN`)
-recovers cleanly on Ctrl+C with the shell responsive afterward. See
-`CLAUDE.md`'s "Runtime capability delegation" section and
-`docs/architecture.md`. Real-Parallels confirmation of the success path is
+recovers cleanly on Ctrl+C with the shell responsive afterward. See `docs/architecture.md`. Real-Parallels confirmation of the success path is
 pending (it needs the userland binaries on a USB stick + `mount`, per the
 standing reads-only policy); the delegation primitive is inert until a pipe
 uses it, and a clean boot with it present is already confirmed.
@@ -570,8 +555,7 @@ Verified on QEMU, zero `-d int` aborts: **`cat /EFI/ORBS/SH.BIN > /big.bin`
 at 1024 bytes - proven by round-tripping (`cat /big.bin | UPPER.BIN` shows
 the uppercased ELF section names, so the whole file came back). Small `>`,
 `>>` append, and the builtin-left pipe all still work; the region grows
-~256KB per program (fits the 2MB slot), the idle region gets no heap. See
-`CLAUDE.md`'s "Userland heap" section. Still coarse: a raw buffer, not
+~256KB per program (fits the 2MB slot), the idle region gets no heap. Still coarse: a raw buffer, not
 dynamic collections; one fixed-size area per program; the shell is the only
 consumer so far.
 
@@ -607,8 +591,7 @@ temp-injected recursion overflow in `hello` (reverted) took a clean EL0
 fault in its guard page -> the task killed alone -> the shell survived.
 Known limitation (documented): a single >4KB stack frame could skip the
 one-page guard - the standard single-guard limitation, still strictly
-better than today's silent corruption. See `CLAUDE.md`'s "Stack guard
-page" section.
+better than today's silent corruption.
 
 ## Program-to-program pipes and `exec … > file`: stdout-over-IPC
 
@@ -641,8 +624,7 @@ the `program | program` orchestration, then `exec > file`). Verified on
 QEMU, zero `-d int` aborts: `HELLO.BIN | UPPER.BIN` renders both of hello's
 lines uppercased through the relay; `exec HELLO.BIN > /h.txt` then `cat`
 shows the captured output; the existing `builtin | program` pipe, builtin
-`>`/`>>` redirects, and plain `exec` are all unchanged. See `CLAUDE.md`'s
-"program-to-program pipes" section. Still 2-stage (`a | b | c` needs
+`>`/`>>` redirects, and plain `exec` are all unchanged. Still 2-stage (`a | b | c` needs
 chaining), producer-`hello`-only for now (any future generator follows the
 same pattern), and capture-bounded for the `> file` case (512 bytes, same
 cap as existing redirects; pipes stream unbounded).
@@ -682,8 +664,7 @@ exec/ps - no false denials), and **denials fire** (A/B, temp probe
 reverted: the shell denied a send to idle, and a spawned `hello` denied a
 send outside its `{shell,fsd,cond}` mask - enforcement against untrusted
 spawned code - while permitted sends succeed alongside). The supervisor
-ping is unaffected (kernel-origin, bypasses the boundary). See `CLAUDE.md`'s
-"capability model" section for the full write-up. Static policy only (no
+ping is unaffected (kernel-origin, bypasses the boundary). Static policy only (no
 runtime delegation yet - the natural follow-up).
 
 ## Active health-ping: catching a server wedged while blocked
@@ -728,8 +709,7 @@ unresponsive (ping timeout) - restarting" -> "restarted (attempt 1/3)" ->
 throughout and the blocked shell call rescued by `fail_calls_to`). Not
 re-run on real Parallels hardware this round - the ping machinery is inert
 on a healthy system (a server always acks), the same no-regression posture
-the supervision milestone's non-crash paths already have. See `CLAUDE.md`'s
-"Active health-ping" section for the full write-up.
+the supervision milestone's non-crash paths already have.
 
 ## Server supervision + heartbeat: uniform crash recovery, and the first wedge detection
 
@@ -767,7 +747,7 @@ instrumentation (reverted, never committed), a live `cond` crash recovered
 on the framebuffer - the screen cleared to a fresh `cond` banner and the
 next `uptime` rendered a real tick count through the restarted server, the
 console server recovering on the platform where it's the only console.
-See `CLAUDE.md`'s "Server supervision + heartbeat" for the full write-up.
+
 
 ## Console server: the console moves out of the kernel (rendering in userland)
 
@@ -820,8 +800,7 @@ on QEMU `ramfb` by QMP screendump (the pixel-level check): the wrapped
 `help` output, `clear` actually clearing, and 32 `help`s scrolling
 cleanly. Not yet on real Parallels hardware - the framebuffer backend is
 exactly what matters there (Parallels has no UART console), and that
-confirmation is on the user, same as every framebuffer milestone. See
-`CLAUDE.md`'s "Driver isolation, part 3" for the full writeup.
+confirmation is on the user, same as every framebuffer milestone.
 
 ## FAT32 offset-write (`write_at`): streaming `cp`, unbounded `>>`
 
@@ -1206,7 +1185,7 @@ workspace-wide. Confirmed on QEMU with the reclaim directly observable
 (three exec/exit cycles landing at the same region base, a long-lived
 spawned shell interleaved with slot-3 cycles) and on real Parallels
 hardware (the typed `exit` refusal - the one reachable path there).
-See `CLAUDE.md`'s "Task destruction" section.
+
 
 ## Directory extension - full directories grow by a cluster instead of failing
 
@@ -1223,8 +1202,7 @@ identical existing loops. Confirmed organically on QEMU (the test
 image's 512-byte clusters fill after 14 entries): 20 files in one
 subdirectory, root-directory extension, content round-trip on an
 extended-cluster entry, reboot persistence, `rmdir` of the two-cluster
-directory, and freed-cluster reuse - zero aborts. See `CLAUDE.md`'s
-"Directory extension" section.
+directory, and freed-cluster reuse - zero aborts.
 
 ## ESP directory renamed to `\EFI\ORBS\`, and a project logo
 
@@ -1254,8 +1232,7 @@ endpoint DCI. Confirmed on a new QEMU three-device rig
 (`make run-usb-multi`: keyboard + tablet + storage - the storage
 stick classified exactly `0x08`/`0x06`/`0x50`, Bulk-Only Transport)
 and on real Parallels hardware (virtual mouse + keyboard concurrently
-addressed, typing clean). See `CLAUDE.md`'s "xHCI multi-device
-support" section.
+addressed, typing clean).
 
 ## Parallels disk diagnostic - no documented storage controller exists on this platform
 
@@ -1274,9 +1251,7 @@ controller instead; a USB 3.x stick is the pending retry). A permanent
 diagnostic improvement fell out: `pci::log_all_devices` returns its
 inventory and `main.rs` re-prints it through the post-exit console,
 since boot reaches the shell ~2 seconds after power-on - far too fast
-to read the UEFI-console rendering. See `CLAUDE.md`'s "Parallels disk
-diagnostic" section and the roadmap's "Disk on real Parallels
-hardware" entry.
+to read the UEFI-console rendering. See the roadmap's "Disk on real Parallels hardware" entry.
 
 ## Output redirection (`>`/`>>`) - pure shell-side, zero kernel changes
 
@@ -1297,8 +1272,7 @@ refusals - one organically, via six consecutive appends - and every
 error case, zero aborts) and on real Parallels hardware (the `NO_FS`
 path; typing `>` there needed a real `test-parallels.sh` extension - a
 held-Shift scancode chord via `prlctl`'s `--event press/release`).
-See `CLAUDE.md`'s "Output redirection" section and
-`shell-commands.md`'s user-facing reference.
+See `shell-commands.md`'s user-facing reference.
 
 ## Keyboard input routing: one designated owner task, not first-blocked-wins
 
@@ -1313,8 +1287,7 @@ the wake-check now skips keyboard polling for every other task, which
 simply stays blocked, a genuine background task rather than a second
 terminal racing the first. Confirmed by re-running the exact live QEMU
 scenario that exposed it, plus a real-Parallels regression pass (this
-wake-check is the only keyboard path there). See `CLAUDE.md`'s
-"Keyboard input routing" section.
+wake-check is the only keyboard path there).
 
 ## Dynamic task creation and `exec` - a real `spawn` syscall
 
@@ -1334,9 +1307,7 @@ and invalid after exit, and misuse doesn't fault, it just hangs -
 fixed with a fixed-capacity array. Confirmed on QEMU end to end (a
 second shell instance genuinely running concurrently); on real
 Parallels hardware only the error path is reachable (no disk driver
-exists there at all - pre-existing gap), confirmed clean. See
-`CLAUDE.md`'s "Dynamic task creation and exec()" section and
-`architecture.md`'s process-model section.
+exists there at all - pre-existing gap), confirmed clean. See `architecture.md`'s process-model section.
 
 ## Blocking primitives - tasks can really wait, and a second SVC-frame bug
 
@@ -1354,7 +1325,7 @@ every syscall resumed its own caller, fatal the moment a blocking
 syscall loaded a *different* task's context through it. Fixed to match
 the IRQ trampoline's proven layout. Confirmed on QEMU (a real
 4-second block with zero wake events, then instant wake on input) and
-on real Parallels hardware. See `CLAUDE.md`'s "Blocking primitives"
+on real Parallels hardware.
 section.
 
 ## A real relocating loader - and a pre-existing SVC-trampoline bug it surfaced along the way
@@ -1404,8 +1375,7 @@ command surface round-trips correctly. Zero aborts in `-d int`
 cross-checks. **Confirmed on real Parallels hardware too**, via `make
 test-parallels`: `selftest`'s three checks all passed identically, and
 `uptime` printed a genuine 4-digit tick count with no crash - direct
-real-hardware confirmation of the `x9` fix specifically. Full writeup
-in `CLAUDE.md`'s "A real relocating loader" section.
+real-hardware confirmation of the `x9` fix specifically.
 
 ## xHCI busy-waits switched from iteration-bounded to time-bounded - a real bug the user found, not this project's own testing
 
@@ -1441,15 +1411,12 @@ ever does.
 scenario that originally failed - not a scripted reproduction. Also
 regression-tested on QEMU and via this project's own `make
 test-parallels`, neither of which had ever reproduced the original bug
-but both confirm no regression to the already-working path. Full
-writeup in `CLAUDE.md`'s "xHCI's busy-waits were iteration-bounded"
-section.
+but both confirm no regression to the already-working path.
 
 ## MADT/GICv3: real interrupt-controller discovery for Parallels - full preemptive multitasking confirmed working end to end
 
 **The goal:** replace `gic.rs`'s old QEMU-devicetree-derived GICv2
-addresses (already confirmed unsafe on real Parallels hardware, see
-"take five" in `CLAUDE.md`) with real ACPI MADT discovery, and add a
+addresses (already confirmed unsafe on real Parallels hardware) with real ACPI MADT discovery, and add a
 GICv3 driver so Parallels - which almost certainly runs GICv3, not
 GICv2 - can actually reach it.
 
@@ -1503,8 +1470,7 @@ keycode at once, and the original code only ever translated and
 returned the first one, silently discarding any second forever. Fixed
 with a small `pending` buffer draining every qualifying keycode from a
 report. Confirmed fixed on real Parallels hardware: ten consecutive
-`uptime` invocations back to back, zero drops. Full writeup in
-`CLAUDE.md`'s "MADT/GICv3" section.
+`uptime` invocations back to back, zero drops.
 
 **Made practical by a new discovery the same day:** Parallels Desktop's
 own CLI, `prlctl`, can script an entire real-hardware test round trip
@@ -2125,7 +2091,7 @@ file equivalent — create and remove files, not just directories.
   (nothing but a `..` entry ever had cluster `0`), but `touch` was about
   to make "cluster `0`, and it's a file" common. Fixed by gating the
   substitution on `is_dir` before writing any test that could have hit
-  it. See `CLAUDE.md`'s "Phase 5" section for the full story.
+  it.
 - **Still no way to write content into a file** - `touch` only ever
   produces zero-byte files. `cp`/output redirection need a real
   "write file contents" syscall this project doesn't have yet.
@@ -2151,8 +2117,7 @@ misbehaving at runtime. Confirmed safe against this project's specific
 relocation risk (every value is a scalar `u64` const, inlined as an
 immediate at the use site under both targets — fundamentally different
 from the `core::fmt`/slice-literal-comparison bug, which is specifically
-about pointers to literal `.rodata` data). See `CLAUDE.md`'s "A shared
-syscall-ABI crate" section for the full story.
+about pointers to literal `.rodata` data).
 
 Also folded in during the same stretch of work: a real UX bug where
 every `fs_*` syscall collapsed "no filesystem is mounted this boot" and
@@ -2160,8 +2125,7 @@ every `fs_*` syscall collapsed "no filesystem is mounted this boot" and
 `u64::MAX` sentinel, making every disk command on `make run`'s FAT16
 disk look identical to a genuinely broken path. Fixed by splitting the
 sentinel (`NO_FS`, `u64::MAX - 1`, distinct from `FS_ERROR`) so the
-shell can print an explicit "no filesystem mounted" message instead —
-see `CLAUDE.md`'s "Phase 4" section addendum.
+shell can print an explicit "no filesystem mounted" message instead.
 
 ## Phase 4 — first filesystem write support: `mkdir`/`rmdir`
 
@@ -2187,11 +2151,9 @@ the full write surface (`rm`/`touch`/`cp`/`mv`/redirection) at once.
 - Confirmed working end to end against the real `esp.img`, including a
   genuine reboot-and-remount persistence check (not just a live
   in-memory one), root-removal and already-exists rejection, and
-  no corruption of pre-existing files. See `CLAUDE.md`'s "Phase 4"
-  section for the full story, including the on-disk write ordering each
-  operation follows and why it's ordered that way (claim-before-use for
-  `mkdir`'s cluster allocation, check-everything-before-writing-anything
-  for `rmdir`).
+  no corruption of pre-existing files. The on-disk write ordering each operation follows is deliberate
+  (claim-before-use for `mkdir`'s cluster allocation,
+  check-everything-before-writing-anything for `rmdir`).
 
 ## Phase 3 — a fully functional shell with disk commands
 
@@ -2222,8 +2184,7 @@ phase is really three dependent stages:
   drive as virtio-mmio explicitly instead, sidestepping that entirely.
   Modern (non-legacy) register interface, also deliberately chosen and
   verified via direct QEMU-monitor memory peeks before any driver code
-  was written — see `CLAUDE.md`'s "Phase 3a" section for the full story,
-  including a real bug in the diagnostic process itself (a truncated
+  was written — including a real bug in the diagnostic process itself (a truncated
   monitor read that briefly looked like "no block device exists at all").
   Parallels' own virtio-mmio behavior is still unconfirmed — same open
   question already on record for virtio-console.
@@ -2255,7 +2216,7 @@ phase is really three dependent stages:
   decoding its BPB by hand before writing any parser code (`BS_FilSysType`
   literally reads `"FAT16   "`) — `make run-image` (Makefile target)
   boots the real `esp.img` instead, since `run`'s disk can never satisfy
-  a FAT32 mount. See `CLAUDE.md`'s "Phase 3b" section for the full story.
+  a FAT32 mount.
 - **Decided: hand-rolled, not a crate** — turned out to be more than a
   style preference: this reader runs after `exit_boot_services`, where
   the global allocator is no longer valid, and every `no_std` FAT crate
@@ -2283,15 +2244,13 @@ phase is really three dependent stages:
   `open_dir`/`read_dir`/`open_file`/`read_file`/`close` handle-based
   shape — simpler, and sufficient since nothing here needs a persistent
   open handle across multiple calls. This is also what pushed the
-  syscall ABI itself from 1 argument to 4 (`x0`-`x3`) — see `CLAUDE.md`'s
-  "Phase 3c" section.
+  syscall ABI itself from 1 argument to 4 (`x0`-`x3`).
 - **All four commands built, all read-only, matching the original
   target:** `ls [path]` (`fs_list_dir`), `cat <file>` (`fs_read_file`),
   `pwd` (shell-local `cwd` state, no syscall), `cd <path>` (shell-local
   state + `fs_list_dir` for validation, no dedicated "exists" syscall).
 - **Two real bugs found by testing the actual commands, not by
-  inspection** - see `CLAUDE.md`'s "Phase 3c" section for the full
-  writeup: a slice/string-vs-literal comparison (`cwd_bytes != b"/"`)
+  inspection** - a slice/string-vs-literal comparison (`cwd_bytes != b"/"`)
   crashed for the same underlying reason `core::fmt` does (a data
   reference computed for link-time base `0x0`), and a FAT32 `..`-entry
   convention (cluster `0` means "root," not root's real cluster number)
