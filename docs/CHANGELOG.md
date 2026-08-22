@@ -7,6 +7,45 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/`; 
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## Standalone binaries, Stage 4 (bulk-data increment): `cp`/`mv`/`writeat` externalized
+
+Seventh step of the arc, and the last filesystem commands to leave the shell.
+These are the involved ones — two operands and, for `cp`/`writeat`, bulk data
+over grant/safecopy — but with `ulib`'s fs client layer already carrying the
+read/write primitives, each is a faithful port of its old builtin.
+
+- `ulib` gained the remaining fs helpers: `fs_read_file` (inline read / the
+  cheapest existence-and-kind probe), `fs_write_bulk` (create/truncate),
+  `fs_write_at` (the offset-write primitive), `fs_mv`, and `parse_u64`
+  (relocation-safe, shared by `writeat`).
+- `cp` resolves both operands against the cwd, guards against a self-copy
+  (streaming truncates the destination first), probes the source exists, then
+  streams it one `SAFECOPY_MAX` chunk at a time (`fs_read_bulk` → `fs_write_at`)
+  so a file of any size copies.
+- `mv` keeps the `mv file dir` convenience (an `fs_list_dir` probe decides
+  whether the destination is a directory to move *into*, keeping the basename)
+  and the self-move guard, then a single `FSOP_MV`.
+- `writeat` joins `argv[3..]` with spaces and writes at the parsed offset via
+  `fs_write_at` — interior overwrite in place, past-EOF writes zero-filling the
+  gap. It does not create the file.
+- The three shell builtins (`cmd_cp`/`cmd_mv`/`cmd_writeat`) and the now-unused
+  `fs_mv`/`fs_read_bulk` helpers were removed. Only `write` stays builtin (its
+  content is the raw command line, bounded by the input buffer, so it never
+  needs argv or the bulk path).
+
+Verified on QEMU (run-image), zero `-d int` aborts: `cp /src.txt /dst.txt`
+then `cat /dst.txt` → the copied text; `cp a a` → "source and destination are
+the same"; `mv /dst.txt /d` lands `DST.TXT` inside the directory; `mv` rename
+then `cat` → the content; `writeat /src.txt 6 AAAAA` → "hello AAAAA" (interior);
+`writeat /src.txt 20 END` past EOF → the gap zero-filled then "END"; a missing
+source to any of the three → the specific error and exit code 1.
+
+**The whole filesystem command surface now lives in `/bin`** (`ls`/`cat` +
+`mkdir`/`rmdir`/`touch`/`rm` + `cp`/`mv`/`writeat`), with only `write`, `cd`,
+and `pwd` left in the shell. The arc continues with the non-fs commands
+(`ps`/`kill`/`wait`/`ping`/`resolve`/`fetch`/`mount`/`selftest`/`help`). See
+`roadmap.md`.
+
 ## Standalone binaries, Stage 4 (write-command increment): `mkdir`/`rmdir`/`touch`/`rm` externalized
 
 Sixth step of the arc. With the cwd-delivery ABI in place, the four

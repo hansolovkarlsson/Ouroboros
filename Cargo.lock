@@ -51,6 +51,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "cp"
+version = "0.1.0"
+dependencies = [
+ "syscall-abi",
+ "ulib",
+]
+
+[[package]]
 name = "echo"
 version = "0.1.0"
 dependencies = [
@@ -94,6 +102,14 @@ dependencies = [
 
 [[package]]
 name = "mkdir"
+version = "0.1.0"
+dependencies = [
+ "syscall-abi",
+ "ulib",
+]
+
+[[package]]
+name = "mv"
 version = "0.1.0"
 dependencies = [
  "syscall-abi",
@@ -293,6 +309,14 @@ dependencies = [
 
 [[package]]
 name = "uptime"
+version = "0.1.0"
+dependencies = [
+ "syscall-abi",
+ "ulib",
+]
+
+[[package]]
+name = "writeat"
 version = "0.1.0"
 dependencies = [
  "syscall-abi",

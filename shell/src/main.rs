@@ -813,14 +813,13 @@ fn dispatch_line(line: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize, env:
         "resolve" => cmd_resolve(arg, out),
         "fetch" => cmd_fetch(arg, out),
         "pwd" => out.put_line(cwd_str(cwd, *cwd_len)),
-        // ls, cat, mkdir, rmdir, touch, and rm are externalized to /bin now
-        // (Stage 4) - they run as spawned programs that inherit the shell's cwd
-        // via GET_CWD.
+        // ls, cat, mkdir, rmdir, touch, rm, cp, mv, and writeat are externalized
+        // to /bin now (Stage 4) - they run as spawned programs that inherit the
+        // shell's cwd via GET_CWD. Only `write` stays builtin (its content is
+        // the raw command line, bounded by the input buffer, so it never needs
+        // argv or the bulk path).
         "cd" => cmd_cd(arg, cwd, cwd_len),
         "write" => cmd_write(line, cwd, *cwd_len),
-        "writeat" => cmd_writeat(line, cwd, *cwd_len),
-        "cp" => cmd_cp(line, cwd, *cwd_len),
-        "mv" => cmd_mv(line, cwd, *cwd_len),
         "exec" => cmd_exec(line, cwd, *cwd_len, out),
         "exit" => cmd_exit(),
         "ps" => cmd_ps(out),
@@ -1029,10 +1028,11 @@ fn print_fs_error(cmd: &str, code: u64) {
     });
 }
 
-// `ls` and `cat` are externalized to `/bin` now (Stage 4) - their logic
-// moved into the `ls`/`cat` crates over `ulib`, resolving paths against the
-// cwd delivered at spawn (GET_CWD). The shared helpers they used
-// (fs_list_dir, fs_read_bulk, resolve_path) stay - cd/cp/mv still use them.
+// ls, cat, mkdir, rmdir, touch, rm, cp, mv, and writeat are externalized to
+// `/bin` now (Stage 4) - their logic moved into per-command crates over `ulib`,
+// resolving paths against the cwd delivered at spawn (GET_CWD). The shared
+// helpers that survive here (fs_list_dir, resolve_path, fs_write_file/at) stay
+// because `cd` and `write` still use them.
 
 fn cmd_cd(arg: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize) {
     let mut path_buf = [0u8; PATH_SIZE];
@@ -1425,278 +1425,6 @@ fn cmd_write(line: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize) {
     match fs_write_file(path, &content[..len]) {
         NO_FS => print_no_fs(),
         code if code >= FS_ERR_MIN => print_fs_error("write", code),
-        _ => {}
-    }
-}
-
-/// `writeat <file> <offset> <text...>` - a random-access write: writes the
-/// text at byte `offset` in an existing file, overwriting bytes *in place*
-/// and, if `offset` is past the end of the file, zero-filling the gap
-/// `[old_size, offset)`. Unlike `write` (full replace) it leaves the bytes
-/// outside the written window intact, and unlike `write` it does *not*
-/// create the file - the file must already exist (use `write`/`touch`
-/// first). The reachable consumer of `fat32::write_at`'s interior and
-/// past-EOF paths, which `cp`/`>>` (sequential/append only) never exercise.
-fn cmd_writeat(line: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize) {
-    let mut words = line.split_whitespace();
-    words.next(); // "writeat" itself
-    let (Some(filename), Some(offset_str)) = (words.next(), words.next()) else {
-        print_line("writeat: usage: writeat <file> <offset> <text...>");
-        return;
-    };
-    let Some(offset) = parse_u64(offset_str) else {
-        print_line("writeat: offset must be a number");
-        return;
-    };
-
-    let mut content = [0u8; BUFFER_SIZE];
-    let mut len = 0usize;
-    let mut first = true;
-    for word in words {
-        if !first && len < content.len() {
-            content[len] = b' ';
-            len += 1;
-        }
-        for b in word.bytes() {
-            if len < content.len() {
-                content[len] = b;
-                len += 1;
-            }
-        }
-        first = false;
-    }
-    if len == 0 {
-        print_line("writeat: missing text argument");
-        return;
-    }
-
-    let mut path_buf = [0u8; PATH_SIZE];
-    let Some(path_len) = resolve_path(cwd_str(cwd, cwd_len), filename, &mut path_buf) else {
-        print_line("writeat: path too long");
-        return;
-    };
-    let Ok(path) = core::str::from_utf8(&path_buf[..path_len]) else {
-        print_line("writeat: path too long");
-        return;
-    };
-
-    match fs_write_at(path, offset, &content[..len]) {
-        NO_FS => print_no_fs(),
-        code if code >= FS_ERR_MIN => print_fs_error("writeat", code),
-        _ => {}
-    }
-}
-
-/// `cp <src> <dst>` - reads `src`'s entire content into a local buffer,
-/// then writes it to `dst` (creating `dst` if it doesn't exist,
-/// replacing it if it does - same semantics as `write`). Pure
-/// shell-side plumbing over the bulk grant/safecopy path
-/// ([`fs_read_all`]/[`fs_write_bulk`]), which raised the copyable size
-/// from 512 to [`SAFECOPY_MAX`](syscall_abi::SAFECOPY_MAX). The read
-/// completes in full, into this shell's own stack buffer, before the
-/// write ever starts - copying a file onto itself is therefore safe by
-/// construction, not a special case this handles explicitly.
-fn cmd_cp(line: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize) {
-    let mut words = line.split_whitespace();
-    words.next(); // "cp" itself
-    let Some(src_arg) = words.next() else {
-        print_line("cp: missing source file argument");
-        return;
-    };
-    let Some(dst_arg) = words.next() else {
-        print_line("cp: missing destination file argument");
-        return;
-    };
-
-    let mut src_path_buf = [0u8; PATH_SIZE];
-    let Some(src_path_len) = resolve_path(cwd_str(cwd, cwd_len), src_arg, &mut src_path_buf) else {
-        print_line("cp: path too long");
-        return;
-    };
-    let mut dst_path_buf = [0u8; PATH_SIZE];
-    let Some(dst_path_len) = resolve_path(cwd_str(cwd, cwd_len), dst_arg, &mut dst_path_buf) else {
-        print_line("cp: path too long");
-        return;
-    };
-
-    // Self-copy guard: streaming cp truncates dst *first*, so `cp a a`
-    // (however spelled after resolution) would destroy the source before
-    // reading it. The old read-whole-then-write cp was safe by
-    // construction; this isn't. Byte equality of two runtime buffers -
-    // relocation-safe, the same check `mv` uses.
-    if src_path_buf[..src_path_len] == dst_path_buf[..dst_path_len] {
-        print_line("cp: source and destination are the same");
-        return;
-    }
-
-    let Ok(src_path) = core::str::from_utf8(&src_path_buf[..src_path_len]) else {
-        print_line("cp: path too long");
-        return;
-    };
-    let Ok(dst_path) = core::str::from_utf8(&dst_path_buf[..dst_path_len]) else {
-        print_line("cp: path too long");
-        return;
-    };
-
-    // Confirm the source exists (and is a file, not a directory) *before*
-    // touching dst - streaming truncates dst first, so a bad source must
-    // not have already clobbered a good destination. A one-byte read is
-    // the cheapest existence/kind check (fs_read_file returns the real
-    // size or the specific error).
-    let mut probe = [0u8; 1];
-    match fs_read_file(src_path, &mut probe) {
-        NO_FS => {
-            print_no_fs();
-            return;
-        }
-        code if code >= FS_ERR_MIN => {
-            print_fs_error("cp", code);
-            return;
-        }
-        _ => {}
-    }
-
-    // Truncate/create dst empty, then stream src into it one
-    // SAFECOPY_MAX chunk at a time via write_at - so cp handles a file of
-    // any size (bounded by disk space, not any shell buffer). Non-atomic:
-    // an interrupted copy leaves dst truncated, which is honest ("a
-    // partial copy is a wrong copy").
-    match fs_write_bulk(dst_path, &[]) {
-        NO_FS => {
-            print_no_fs();
-            return;
-        }
-        code if code >= FS_ERR_MIN => {
-            print_fs_error("cp", code);
-            return;
-        }
-        _ => {}
-    }
-
-    let mut chunk = [0u8; syscall_abi::SAFECOPY_MAX as usize];
-    let mut offset: u64 = 0;
-    loop {
-        let n = match fs_read_bulk(src_path, offset, &mut chunk) {
-            NO_FS => {
-                print_no_fs();
-                return;
-            }
-            code if code >= FS_ERR_MIN => {
-                print_fs_error("cp", code);
-                return;
-            }
-            0 => break,
-            n => (n as usize).min(chunk.len()),
-        };
-        match fs_write_at(dst_path, offset, &chunk[..n]) {
-            NO_FS => {
-                print_no_fs();
-                return;
-            }
-            code if code >= FS_ERR_MIN => {
-                print_fs_error("cp", code);
-                return;
-            }
-            _ => {}
-        }
-        offset += n as u64;
-    }
-}
-
-/// `mv <src> <dst>` - renames or moves a file or directory. Needs no new
-/// buffer or content handling, unlike `cp`: it's a single syscall taking
-/// two paths, since the kernel side just relinks the existing entry
-/// rather than reading and rewriting any content.
-fn cmd_mv(line: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize) {
-    let mut words = line.split_whitespace();
-    words.next(); // "mv" itself
-    let Some(src_arg) = words.next() else {
-        print_line("mv: missing source argument");
-        return;
-    };
-    let Some(dst_arg) = words.next() else {
-        print_line("mv: missing destination argument");
-        return;
-    };
-
-    let mut src_path_buf = [0u8; PATH_SIZE];
-    let Some(src_path_len) = resolve_path(cwd_str(cwd, cwd_len), src_arg, &mut src_path_buf) else {
-        print_line("mv: path too long");
-        return;
-    };
-    let Ok(src_path) = core::str::from_utf8(&src_path_buf[..src_path_len]) else {
-        print_line("mv: path too long");
-        return;
-    };
-
-    let mut dst_path_buf = [0u8; PATH_SIZE];
-    let Some(dst_path_len) = resolve_path(cwd_str(cwd, cwd_len), dst_arg, &mut dst_path_buf) else {
-        print_line("mv: path too long");
-        return;
-    };
-    let Ok(dst_path) = core::str::from_utf8(&dst_path_buf[..dst_path_len]) else {
-        print_line("mv: path too long");
-        return;
-    };
-
-    // Trivial self-move guard (`mv a a`, however spelled after path
-    // resolution) - without it, the into-directory shortcut below would
-    // turn `mv somedir somedir` into "move somedir *inside itself*",
-    // the degenerate case of the known, documented no-cycle-detection
-    // limitation, now one typo closer than it used to be. Byte equality
-    // of two runtime buffers - not a comparison against a literal, so
-    // relocation-safe by the same reasoning `selftest` proves.
-    if src_path_buf[..src_path_len] == dst_path_buf[..dst_path_len] {
-        print_line("mv: source and destination are the same");
-        return;
-    }
-
-    // Real `mv`'s most common convenience beyond a plain rename:
-    // `mv file dir` moves *into* an existing directory, keeping the
-    // source's basename. Probed with the same fs_list_dir trick cmd_cd
-    // uses (there's still no dedicated "does this exist" syscall): a
-    // successful listing means dst is an existing directory, so the real
-    // destination becomes dst/<basename of the resolved source>; any
-    // error code just means "not a directory" and dst is used as-is.
-    let mut scratch = [0u8; 8];
-    let mut final_dst_buf = [0u8; PATH_SIZE];
-    final_dst_buf[..dst_path_len].copy_from_slice(&dst_path_buf[..dst_path_len]);
-    let mut final_dst_len = dst_path_len;
-    match fs_list_dir(dst_path, &mut scratch) {
-        NO_FS => {
-            print_no_fs();
-            return;
-        }
-        code if code >= FS_ERR_MIN => {}
-        _ => {
-            let src_bytes = &src_path_buf[..src_path_len];
-            let base_start = src_bytes.iter().rposition(|&b| b == b'/').map(|i| i + 1).unwrap_or(0);
-            let base = &src_bytes[base_start..];
-            // Root ("/") already ends in the separator - don't double it.
-            if !(final_dst_len == 1 && final_dst_buf[0] == b'/') {
-                if final_dst_len >= final_dst_buf.len() {
-                    print_line("mv: path too long");
-                    return;
-                }
-                final_dst_buf[final_dst_len] = b'/';
-                final_dst_len += 1;
-            }
-            if final_dst_len + base.len() > final_dst_buf.len() {
-                print_line("mv: path too long");
-                return;
-            }
-            final_dst_buf[final_dst_len..final_dst_len + base.len()].copy_from_slice(base);
-            final_dst_len += base.len();
-        }
-    }
-    let Ok(final_dst) = core::str::from_utf8(&final_dst_buf[..final_dst_len]) else {
-        print_line("mv: path too long");
-        return;
-    };
-
-    match fs_mv(src_path, final_dst) {
-        NO_FS => print_no_fs(),
-        code if code >= FS_ERR_MIN => print_fs_error("mv", code),
         _ => {}
     }
 }
@@ -2186,41 +1914,6 @@ fn fs_read_at(path: &str, offset: u64, buf: &mut [u8]) -> u64 {
     )
 }
 
-/// Streams one chunk of `path` starting at byte `offset` directly into
-/// `buf` via the grant/safecopy bulk path (rather than inline in the
-/// reply, which [`fs_read_at`]'s 512-byte cap bounds): grants `buf` to
-/// the filesystem server as a `GRANT_WRITE` buffer - the server
-/// `SAFECOPY`s the file bytes straight into it during the call - then
-/// issues the bulk read. Returns bytes delivered this chunk (`0`
-/// at/past end of file), [`NO_FS`], or a specific `FS_ERR_*` code.
-/// `buf.len()` must be `<= SAFECOPY_MAX`. Loop with a rising `offset`
-/// to read a file of any size without ever holding the whole thing -
-/// see [`cmd_cat`].
-fn fs_read_bulk(path: &str, offset: u64, buf: &mut [u8]) -> u64 {
-    let want = buf.len() as u64;
-    let granted = syscall4(
-        syscall_abi::GRANT,
-        syscall_abi::FSD_TASK,
-        buf.as_mut_ptr() as u64,
-        want,
-        syscall_abi::GRANT_WRITE,
-    );
-    if granted != 0 {
-        return syscall_abi::FS_ERROR;
-    }
-    // `want` (the granted buffer's length) bounds how much the server
-    // reads, so it never SAFECOPYs past the grant when `buf` is smaller
-    // than SAFECOPY_MAX. No inline result payload - the data arrives via
-    // SAFECOPY into `buf`; the reply carries only the status (bytes
-    // delivered).
-    fs_call(
-        syscall_abi::FSOP_READ_BULK,
-        [path.len() as u64, offset, want, 0],
-        path.as_bytes(),
-        &[],
-        &mut [],
-    )
-}
 
 /// Creates or fully overwrites `path` with `data` via the grant/safecopy
 /// bulk path (rather than inline in the request, which [`fs_write_file`]'s
@@ -2292,18 +1985,6 @@ fn fs_write_file(path: &str, data: &[u8]) -> u64 {
         [path.len() as u64, data.len() as u64, 0, 0],
         path.as_bytes(),
         data,
-        &mut [],
-    )
-}
-
-/// Renames or moves the file or directory at `src` to `dst`. Same
-/// return contract as [`fs_write_file`].
-fn fs_mv(src: &str, dst: &str) -> u64 {
-    fs_call(
-        syscall_abi::FSOP_MV,
-        [src.len() as u64, dst.len() as u64, 0, 0],
-        src.as_bytes(),
-        dst.as_bytes(),
         &mut [],
     )
 }

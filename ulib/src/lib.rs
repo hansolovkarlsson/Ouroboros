@@ -419,6 +419,105 @@ pub fn fs_read_bulk(path: &str, offset: u64, buf: &mut [u8]) -> u64 {
     )
 }
 
+/// Read up to `buf.len()` bytes of `path` inline (the reply carries the
+/// bytes, capped at 512 by the message limit) - returns the real byte count,
+/// [`NO_FS`], or an `FS_ERR_*` code. A one-byte `buf` is the cheapest
+/// existence/kind probe (a directory returns `FS_ERR_NOT_A_FILE`).
+pub fn fs_read_file(path: &str, buf: &mut [u8]) -> u64 {
+    fs_call(
+        syscall_abi::FSOP_READ_FILE,
+        [path.len() as u64, buf.len() as u64, 0, 0],
+        path.as_bytes(),
+        &[],
+        buf,
+    )
+}
+
+/// Create or fully overwrite `path` with `data` via the grant/safecopy bulk
+/// path (`GRANT_READ`). Returns `0`, [`NO_FS`], or an `FS_ERR_*` code.
+/// `data.len()` must be `<= SAFECOPY_MAX`; empty `data` truncates to empty and
+/// skips the grant.
+pub fn fs_write_bulk(path: &str, data: &[u8]) -> u64 {
+    if !data.is_empty() {
+        let granted = syscall4(
+            syscall_abi::GRANT,
+            syscall_abi::FSD_TASK,
+            data.as_ptr() as u64,
+            data.len() as u64,
+            syscall_abi::GRANT_READ,
+        );
+        if granted != 0 {
+            return syscall_abi::FS_ERROR;
+        }
+    }
+    fs_call(
+        syscall_abi::FSOP_WRITE_FILE,
+        [path.len() as u64, data.len() as u64, 0, 0],
+        path.as_bytes(),
+        &[],
+        &mut [],
+    )
+}
+
+/// Write `data` at byte `offset` in `path`, extending the file without
+/// rewriting the bytes before `offset` (the FAT32 offset-write primitive), via
+/// the grant/safecopy bulk path (`GRANT_READ`). Returns `0`, [`NO_FS`], or an
+/// `FS_ERR_*` code. `data.len()` must be `<= SAFECOPY_MAX`. Loop with a rising
+/// `offset` to write a file of any size one chunk at a time. Empty `data` is a
+/// no-op.
+pub fn fs_write_at(path: &str, offset: u64, data: &[u8]) -> u64 {
+    if data.is_empty() {
+        return 0;
+    }
+    let granted = syscall4(
+        syscall_abi::GRANT,
+        syscall_abi::FSD_TASK,
+        data.as_ptr() as u64,
+        data.len() as u64,
+        syscall_abi::GRANT_READ,
+    );
+    if granted != 0 {
+        return syscall_abi::FS_ERROR;
+    }
+    fs_call(
+        syscall_abi::FSOP_WRITE_AT,
+        [path.len() as u64, offset, data.len() as u64, 0],
+        path.as_bytes(),
+        &[],
+        &mut [],
+    )
+}
+
+/// Rename or move the file/directory at `src` to `dst` - a single op taking
+/// two paths (the server relinks the entry, no content moves). Returns `0`,
+/// [`NO_FS`], or an `FS_ERR_*` code.
+pub fn fs_mv(src: &str, dst: &str) -> u64 {
+    fs_call(
+        syscall_abi::FSOP_MV,
+        [src.len() as u64, dst.len() as u64, 0, 0],
+        src.as_bytes(),
+        dst.as_bytes(),
+        &mut [],
+    )
+}
+
+/// Parse a base-10 `u64`, returning `None` on empty input or any non-digit.
+/// Relocation-safe (scalar byte comparisons, no `str::parse`).
+pub fn parse_u64(s: &str) -> Option<u64> {
+    let bytes = s.as_bytes();
+    if bytes.is_empty() {
+        return None;
+    }
+    let mut value: u64 = 0;
+    for &b in bytes {
+        if !b.is_ascii_digit() {
+            return None;
+        }
+        value = value.checked_mul(10)?.checked_add((b - b'0') as u64)?;
+    }
+    Some(value)
+}
+
 /// Whether a status code is a failure (`>= FS_ERR_MIN`, which covers every
 /// `FS_ERR_*`, `NO_FS`, and `FS_ERROR`). A real byte count never reaches this.
 pub fn is_fs_error(code: u64) -> bool {

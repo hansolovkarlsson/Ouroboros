@@ -454,10 +454,12 @@ the shell's own cwd/lifecycle) and the redirection/pipe **syntax**
    See `CHANGELOG.md`'s "Standalone binaries, Stage 4 (first increment)" and
    "(filesystem increment)." *Write-command increment done:*
    `mkdir`/`rmdir`/`touch`/`rm` externalized — the path-only write ops, each a
-   single `FSOP_*` via a shared `ulib::fs_op_path` helper. *Next:* the
-   bulk-data / multi-arg filesystem commands (`cp`/`mv`/`writeat`), then the
-   non-fs ones (`ps`/`kill`/`wait`/`ping`/`resolve`/`fetch`/`mount`/`selftest`/
-   `help`) incrementally. Each command is cheap now that `ulib` exists.
+   single `FSOP_*` via a shared `ulib::fs_op_path` helper. *Bulk-data increment
+   done:* `cp`/`mv`/`writeat` externalized (`ulib` gained `fs_read_file`/
+   `fs_write_bulk`/`fs_write_at`/`fs_mv`/`parse_u64`) — **the whole filesystem
+   command surface now lives in `/bin`**. *Next:* the non-fs commands
+   (`ps`/`kill`/`wait`/`ping`/`resolve`/`fetch`/`mount`/`selftest`/`help`)
+   incrementally. Each command is cheap now that `ulib` exists.
    (`cd`/`pwd`/`exit`/`exec`, plus `write` and the redirect/pipe syntax, stay
    builtin.)
 

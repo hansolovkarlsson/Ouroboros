@@ -205,17 +205,19 @@ via `ps`).
 
 ## Known limitations
 
-- **`echo`, `uptime`, `clear`, `ls`, `cat`, `mkdir`, `rmdir`, `touch`, and
-  `rm` are `/bin` programs, not builtins.** They were externalized (they run as
-  `/bin/ECHO`, `/bin/LS`, `/bin/MKDIR`, etc., found via `$PATH`) — behaviour is
-  identical from a user's view, but they're **unavailable on a boot without a
-  mounted filesystem** (e.g. `make run`'s FAT16, or real hardware with no USB
-  stick), where a bare `echo` reports "unknown command" instead. (The
-  filesystem ones need a mounted disk to do anything regardless.) A spawned
-  command receives the shell's current directory (via the `CWD_STAGE`/`GET_CWD`
-  ABI), so a bare `ls` or a relative `mkdir foo` resolves against the cwd just
-  as the old builtins did, and reports errors with a non-zero exit code. The
-  other commands are still builtins.
+- **Every filesystem command (`ls`, `cat`, `mkdir`, `rmdir`, `touch`, `rm`,
+  `cp`, `mv`, `writeat`), plus `echo`/`uptime`/`clear`, is a `/bin` program,
+  not a builtin.** They were externalized (they run as `/bin/ECHO`, `/bin/LS`,
+  `/bin/CP`, etc., found via `$PATH`) — behaviour is identical from a user's
+  view, but they're **unavailable on a boot without a mounted filesystem** (e.g.
+  `make run`'s FAT16, or real hardware with no USB stick), where a bare `echo`
+  reports "unknown command" instead. (The filesystem ones need a mounted disk
+  to do anything regardless.) A spawned command receives the shell's current
+  directory (via the `CWD_STAGE`/`GET_CWD` ABI), so a bare `ls` or a relative
+  `cp a b` resolves against the cwd just as the old builtins did, and reports
+  errors with a non-zero exit code. Only `write`, `cd`, and `pwd` remain builtin
+  among the filesystem commands (they need the shell's own input line or cwd
+  state); everything else is still builtin too.
 - **Write granularity: `write` full-replaces; `writeat`/`>>`/`cp` do
   offset writes.** The FAT32 layer has a real random-access offset-write
   primitive (`write_at`): `writeat` writes in place at any offset
