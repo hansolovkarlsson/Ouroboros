@@ -100,14 +100,15 @@ its own region (one 2MB→4KB split), since a region fits one 2MB slot by
 construction.
 
 A loaded program's region is laid out `[code][256KB heap][1 guard page]
-[24KB stack]`, the stack growing down from the top. The guard page is inside
+[32KB stack]`, the stack growing down from the top. The guard page is inside
 the region but mapped EL1-only (a hole in the EL0 access), so a **stack
 overflow** faults cleanly and kills just that task instead of silently
 corrupting what's below it - the same fault-isolation path as touching
-another task's memory. (The guard has twice exposed a real overflow: the
-shell's own `exec` path used just over 8KB, growing the stack 8KB->16KB; then
-the network server's `ping`/`fetch` path, nesting several 1600/2048-byte
-frame buffers, tipped over 16KB, growing it 16KB->24KB.) The **heap** below the guard is a raw EL0-accessible buffer a
+another task's memory. (The guard has repeatedly exposed real overflows,
+each growing the stack: the shell's `exec` path over 8KB -> 16KB; the
+network server's `ping`/`fetch` path, nesting several 1600/2048-byte frame
+buffers, over 16KB -> 24KB; then netd again once it held 4 concurrent
+connections' `TcpConn`s *and* a client op's buffers, over 24KB -> 32KB.) The **heap** below the guard is a raw EL0-accessible buffer a
 program reaches via the `heap_info` syscall (a `&mut [u8]`, *not* a
 `GlobalAlloc`-backed heap - `alloc`'s collections can't link under this PIE
 loader) - the shell backs its redirect/pipe capture with it, so
@@ -503,7 +504,7 @@ the way hand-duplicated numbers did before this crate existed.
 | 37 | `fb_clear` | — | `0` | Blanks the whole framebuffer. **Gated to task 3**. Used by the server's startup and its `clear`/ANSI-`2J` handling |
 | 38 | `stdout_target` | — | the caller's stdout target task index | Where this program's output should go (set by whoever `spawn`ed it; `CON_TASK` by default). A producer routes output there: `CON_TASK` → the console server (`DSPOP_WRITE`); otherwise a raw byte stream (chunked data messages + an empty end-of-stream message) to that task, which relays or captures it. This is what makes a task's own output capturable — program-to-program pipes and `exec … > file` |
 | 39 | `self` | — | the caller's own task slot index | A task's identity (otherwise unknowable — every other task-aware syscall takes an index). The shell needs it to route a pipe producer's stdout back to itself, and a foreground-spawned shell isn't task 0 |
-| 40 | `heap_info` | field (`0`=base, `1`=size) | the requested heap-area geometry, or `0` | Each program's region carries a fixed 256KB **raw heap area** (between its code and its stack guard page) it reads/writes via a `&mut [u8]` — space far larger than the 24KB stack, for data a fixed stack buffer can't hold (the shell backs its redirect/pipe capture with it, so `cat big > file` works). *Not* a `GlobalAlloc` heap — `alloc`'s collections can't link under this PIE loader (prebuilt lib`alloc` has `R_AARCH64_ABS64` relocations a `-pie` link rejects; the fix is nightly `-Z build-std`) |
+| 40 | `heap_info` | field (`0`=base, `1`=size) | the requested heap-area geometry, or `0` | Each program's region carries a fixed 256KB **raw heap area** (between its code and its stack guard page) it reads/writes via a `&mut [u8]` — space far larger than the 32KB stack, for data a fixed stack buffer can't hold (the shell backs its redirect/pipe capture with it, so `cat big > file` works). *Not* a `GlobalAlloc` heap — `alloc`'s collections can't link under this PIE loader (prebuilt lib`alloc` has `R_AARCH64_ABS64` relocations a `-pie` link rejects; the fix is nightly `-Z build-std`) |
 | 41 | `delegate` | grantee task, target task | `0` or `MSG_ERR_DENIED` | **Runtime capability delegation**: grant `grantee` the right to initiate sends to `target` — a dynamic addition to `grantee`'s send-mask. The caller may only delegate a send-cap it *statically holds itself* (no transitive re-delegation), which confines it to the shell authorizing a pipe's producer to stream directly to its consumer. Cleared when either task dies. See "Runtime capability delegation" below |
 | 42 | `net_send` | frame ptr, frame len | `0` or `NET_ERROR` | Transmit one raw Ethernet frame through the kernel's virtio-net driver. **Gated to `NET_TASK`** (the network server) — the DMA-owning NIC driver stays in the kernel (no IOMMU), reached only by the one task that owns the protocol stack, the `block_*` → fsd pattern |
 | 43 | `net_recv` | buf ptr, buf len | the frame's length (copied into `buf`, truncated to `buf len`), `NET_NO_FRAME` if none is waiting, or `NET_ERROR` | Non-blocking poll of the virtio-net receive ring. Gated to `NET_TASK` like `net_send` |
@@ -652,7 +653,7 @@ can never reach a third task — enforced by the kernel, not trusted. The
 per-op transfer is capped at `SAFECOPY_MAX` (2048); larger transfers
 stream in a loop (`cat`), and the ultimate ceiling on a single buffer
 stays userland-memory-bound (a 256KB raw heap area via `heap_info`, on a
-24KB stack).
+32KB stack).
 
 The `syscall-abi` crate covers the numbers, sentinels, and protocol
 constants. Argument validation is the kernel's: every syscall

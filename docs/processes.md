@@ -79,11 +79,13 @@ don't add key/value parsing preemptively.
 
 A loaded program gets one EL0-accessible region: its code (and rodata) at
 the base, then one inaccessible **guard page**, then a fixed stack
-allowance (currently 4 pages, 16KB), with the stack pointer starting at the
+allowance (currently 8 pages, 32KB), with the stack pointer starting at the
 top and growing down - so a stack overflow lands in the guard page and
 takes a clean fault instead of corrupting the code below (see "Stack guard
-page" in `CLAUDE.md`; the guard immediately caught a real 8KB overflow in
-the shell's own `exec` path, which is why the stack is 16KB, not 8KB).
+page" in `CLAUDE.md`; the guard has repeatedly caught real overflows, each
+growing the stack - the shell's `exec` path forced 8KB->16KB, and the
+network server forced 16KB->24KB->32KB as it gained TCP buffers and then
+concurrent connections).
 Below the guard is a 256KB **raw heap area** the program reaches via the
 `heap_info` syscall (a `&mut [u8]`, not a `GlobalAlloc`-backed heap - see
 "Binary format" for why `alloc`'s `Vec`/`String` can't be used here) - the
@@ -465,7 +467,7 @@ Worth knowing before building further on this:
   size. What remains: the 512-byte inline cap still bounds directory
   *listings* (`ls`); a single non-streaming transfer is
   userland-memory-bound, but a program has a 256KB raw heap area now
-  (`heap_info`) on top of its 24KB stack, which the shell uses to capture
+  (`heap_info`) on top of its 32KB stack, which the shell uses to capture
   large redirect/pipe output; and the stack now has a
   *guard page* (an overflow faults cleanly and kills just that task,
   rather than silently corrupting the program's own region - except a

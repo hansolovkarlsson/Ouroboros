@@ -7,6 +7,36 @@ what broke, how it was diagnosed), see `CLAUDE.md`; for *how* something
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## Network stack, Stage 4j: concurrent TCP connections
+
+The server handled one connection at a time — a second peer's SYN *replaced*
+the first, so a browser (several connections per page) or multiple clients
+couldn't be served together. This multiplexes up to `MAX_CONNS` (4)
+connections, keyed by peer IP+port.
+
+The single `Option<TcpConn>` became `[Option<TcpConn>; MAX_CONNS]`;
+`handle_tcp` is now a router (a SYN opens a connection in a free slot —
+dropped if all busy, the peer retransmits — every other segment dispatched by
+`find_conn` to its connection's state machine, extracted into
+`handle_conn_segment`). `serve()` services the RTO and pumps *each* active
+connection per wake. Each connection's flow control / fast retransmit / RTO
+were already per-`TcpConn`, so this was purely routing + a per-connection
+loop.
+
+A guard-page overflow surfaced — and which half overflowed is the point: the
+concurrent *streaming* path was fine (4 concurrent 60 KB streams, zero
+faults), but a *client* op (`fetch`'s ~5 KB of TCP/DNS buffers) nesting on
+top of 4 `TcpConn`s (~2.3 KB each) on `serve()`'s frame overflowed 24 KB.
+`STACK_PAGES` grew 6→8 (24→32 KB/region); netd is by far the most
+stack-hungry program (4 connections + a full TCP client).
+
+Verified on QEMU: 4 concurrent small fetches all correct; 4 concurrent 60 KB
+`SH.BIN` streams all byte-identical (~1 s); a single connection still works;
+client net ops, disk, a pipe, `exec`, selftest unregressed; zero aborts, zero
+restarts, zero EL0 faults. Still coarse: 4 connections max, a SYN with no
+free slot is dropped, round-robin servicing, QEMU-only. See `CLAUDE.md`'s
+"Network stack, Stage 4j."
+
 ## FAT32 long filename (LFN) read support
 
 The oldest FAT32 limitation, closed on the read side — surfaced by real use:

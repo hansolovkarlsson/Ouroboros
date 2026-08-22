@@ -230,14 +230,15 @@ step, not a Stage 1 concern.
    an `fsd` stat), so a browser renders served files. **Still open:**
    congestion control (`cwnd`/slow-start — only the peer's flow-control window
    is honored), selective/SACK retransmit (4h/4i are go-back-N), RTT
-   estimation for the RTO (4i uses a fixed 1 s base), multiple concurrent
-   connections, richer method handling (a 405 for non-GET/HEAD), and
-   IRQ-driven RX. (Stage 4f added a browsable HTML directory listing, so the
-   guest's filesystem is browsable end to end; Stage 4g added `HEAD`; Stage
-   4h added fast retransmit; Stage 4i added a timer-based RTO — via a new
-   `NET_WAIT` timeout — for a silent peer, so loss recovery is complete for a
-   single connection.) See `CHANGELOG.md` / `CLAUDE.md`'s "Network stack,
-   Stage 4a–4i."
+   estimation for the RTO (4i uses a fixed 1 s base), richer method handling
+   (a 405 for non-GET/HEAD), and IRQ-driven RX (the NIC is still polled — the
+   biggest remaining item, and the first place polling is a real latency
+   cost). (Stage 4f added a browsable HTML directory listing; Stage 4g added
+   `HEAD`; Stage 4h added fast retransmit; Stage 4i added a timer-based RTO —
+   via a new `NET_WAIT` timeout — for a silent peer, so loss recovery is
+   complete; Stage 4j added concurrent connections (up to 4), so a browser
+   loading a page and multiple clients are served at once.) See
+   `CHANGELOG.md` / `CLAUDE.md`'s "Network stack, Stage 4a–4j."
 
 **Decisions to settle before starting (not now):**
 

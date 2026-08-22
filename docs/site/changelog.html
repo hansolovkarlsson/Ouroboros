@@ -40,6 +40,16 @@
 
   <article>
 
+<h2>Network stack, Stage 4j: concurrent TCP connections</h2>
+
+<p>The server handled one connection at a time — a second peer's SYN <em>replaced</em> the first, so a browser (several connections per page) or multiple clients couldn't be served together. This multiplexes up to <code class="inline">MAX_CONNS</code> (4) connections, keyed by peer IP+port.</p>
+
+<p>The single <code class="inline">Option&lt;TcpConn&gt;</code> became <code class="inline">[Option&lt;TcpConn&gt;; MAX_CONNS]</code>; <code class="inline">handle_tcp</code> is now a router (a SYN opens a connection in a free slot — dropped if all busy, the peer retransmits — every other segment dispatched by <code class="inline">find_conn</code> to its connection's state machine, extracted into <code class="inline">handle_conn_segment</code>). <code class="inline">serve()</code> services the RTO and pumps <em>each</em> active connection per wake. Each connection's flow control / fast retransmit / RTO were already per-<code class="inline">TcpConn</code>, so this was purely routing + a per-connection loop.</p>
+
+<p>A guard-page overflow surfaced — and which half overflowed is the point: the concurrent <em>streaming</em> path was fine (4 concurrent 60 KB streams, zero faults), but a <em>client</em> op (<code class="inline">fetch</code>'s ~5 KB of TCP/DNS buffers) nesting on top of 4 <code class="inline">TcpConn</code>s (~2.3 KB each) on <code class="inline">serve()</code>'s frame overflowed 24 KB. <code class="inline">STACK_PAGES</code> grew 6→8 (24→32 KB/region); netd is by far the most stack-hungry program (4 connections + a full TCP client).</p>
+
+<p>Verified on QEMU: 4 concurrent small fetches all correct; 4 concurrent 60 KB <code class="inline">SH.BIN</code> streams all byte-identical (~1 s); a single connection still works; client net ops, disk, a pipe, <code class="inline">exec</code>, selftest unregressed; zero aborts, zero restarts, zero EL0 faults. Still coarse: 4 connections max, a SYN with no free slot is dropped, round-robin servicing, QEMU-only.</p>
+
 <h2>FAT32 long filename (LFN) read support</h2>
 
 <p>The oldest FAT32 limitation, closed on the read side — surfaced by real use: serving <code class="inline">index.html</code>. A 4-char extension can't be an 8.3 short name, so a formatter writes a long filename (LFN) entry plus a mangled alias (<code class="inline">INDEX~1.HTM</code>), and <code class="inline">fat32.rs</code> (in <code class="inline">fsd</code>) only saw the alias. Now long names are <strong>read, listed, and matched</strong> by their true names: the web server serves <code class="inline">/index.html</code> (correct <code class="inline">text/html</code> type) and directory listings show real names.</p>

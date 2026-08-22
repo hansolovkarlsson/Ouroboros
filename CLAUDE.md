@@ -6241,6 +6241,52 @@ go-back-N resend (not selective/SACK); the give-up path (a truly dead peer)
 is implemented but *not exercised* (SLIRP can't sustain a peer silent past
 its own ACKs); one connection at a time; still QEMU-only, polled RX.
 
+## Network stack, Stage 4j: concurrent TCP connections
+
+The server handled one connection at a time - a second peer's SYN *replaced*
+the first, so a browser (which opens several connections for one page) or
+multiple clients couldn't be served together. This multiplexes up to
+`MAX_CONNS` (4) connections, keyed by peer IP+port.
+
+**The refactor: one connection -> an array, and `handle_tcp` becomes a
+router.** The single `Option<TcpConn>` became `[Option<TcpConn>; MAX_CONNS]`.
+A SYN opens a connection in this peer's existing slot (a duplicate SYN) or a
+free one - dropped if all slots are busy (the peer retransmits). Every other
+segment is dispatched by `find_conn` (match on peer IP+port) to its
+connection's state machine, which was extracted verbatim into
+`handle_conn_segment` (returning a "close" that frees the slot on the peer's
+FIN or an RST). `serve()` now services the RTO timer and pumps *each* active
+connection every wake (still draining the mailbox between bursts so the
+health-ping stays acked), and uses the RTO `NET_WAIT` timeout if *any*
+connection has data unacked. Each connection's flow control, fast retransmit,
+and RTO are unchanged - they were already per-`TcpConn` state, so
+multiplexing was purely the routing + the per-connection loop.
+
+**A stack overflow the guard page caught (again) - and which half
+overflowed is the interesting part.** `serve()`'s frame now permanently holds
+4 `TcpConn`s (~2.3 KB each, a 2 KB response-prefix buffer dominating). The
+concurrent *streaming* path was fine - 4 concurrent 60 KB streams passed with
+zero faults - because pumping doesn't nest deeply. But a *client* op
+(`fetch`, whose `handle_fetch` -> `tcp_get` stacks ~5 KB of TCP/DNS buffers)
+nests on top of the 4 `TcpConn`s via `drain_client_messages`, and *that*
+overflowed 24 KB into the guard page (a clean, contained fault). `STACK_PAGES`
+grew 6 -> 8 (24 KB -> 32 KB per region); netd is by far the most stack-hungry
+program now (4 connections + a full TCP client). All regions grow 8 KB; RAM
+is ample.
+
+**Confirmed on QEMU:** 4 concurrent small fetches all correct; 4 concurrent
+60 KB `SH.BIN` streams all byte-identical (~1 s); a single connection still
+works; client net ops (`ping`/`resolve`/`fetch`), disk (`write`/`cat`), a
+pipe, `exec`, and `selftest` all unregressed; zero `-d int` aborts, zero
+supervisor restarts, zero EL0 faults. (A test-harness note worth keeping: a
+bare `wait` in the shell test waited on the backgrounded QEMU too, not just
+the `curl`s - wait on the specific curl PIDs.)
+
+**Still coarse:** 4 connections max (each carries a 2 KB prefix buffer on the
+stack); a SYN with no free slot is dropped, not queued; still one thread
+servicing them round-robin (fine at this scale - no per-connection threads);
+QEMU-only, polled RX.
+
 ## FAT32 long filename (LFN) read support
 
 The oldest FAT32 limitation, closed on the read side - surfaced by real use:
@@ -6438,7 +6484,7 @@ cond/                seventh userland program: THE CONSOLE SERVER (driver isolat
   src/main.rs        the request loop (recv -> decode DSPOP_WRITE -> render -> reply, the filesystem server's shape) plus two backends chosen from CON_INFO at startup: byte-stream (forward to the kernel console via CON_WRITE) and framebuffer (render glyphs here - cursor, wrap, scroll, a small ANSI parser - via FB_BLIT/FB_SCROLL/FB_CLEAR)
   src/font.rs        cond's own copy of the 8x8 bitmap font (from kernel/src/font.rs) - the font is what "console driver logic" meant, so it moved to userland; the kernel keeps a copy only for its emergency fbconsole
 
-netd/                eighth userland program: THE NETWORK SERVER (network stack, Stage 2) - owns the protocol stack (ARP/IPv4/ICMP) in userland; the kernel keeps only the DMA-owning virtio-net driver, reached by this task alone via the gated NET_SEND/NET_RECV/NET_MAC syscalls (the fsd/BLOCK_* pattern). Boot-loaded into protected task slot 4 (NET_TASK), supervised. Speaks the NETOP_PING request protocol to clients (the shell's `ping` command); hand-rolled fixed-buffer frame building (ARP/IPv4/ICMP/UDP/DNS) + Internet checksums, no crates. NETOP_RESOLVE (Stage 3) does DNS-over-UDP for `resolve`; NETOP_FETCH (Stage 4a) does a client-TCP HTTP GET for `fetch`. Stage 4b makes it event-driven (blocks in NET_WAIT, drains client messages *and* incoming frames each wake) and adds a TCP HTTP server on port 80 + an ARP responder - the guest answers the network now, not just initiates. Stage 4c makes that HTTP server a real static-file server: it parses the request path and streams the file from fsd over TCP (netd is fsd's first non-shell client, reached via a new netd->fsd capability). Stage 4d adds TCP send-side flow control (window tracking + ACK-paced streaming) so a file of *any* size streams, not just what fits one window. Stage 4e adds proper HTTP response headers (Content-Type by extension + Content-Length via an fsd stat). Stage 4f makes a GET of a directory return a browsable HTML index (links resolved against the request path) - the guest's filesystem is browsable in a browser. Stage 4g adds HTTP HEAD (identical headers to GET, no body, for every response kind). Stage 4h adds TCP fast retransmit (three dup-ACKs -> go-back-N resend), the server's first loss recovery. Stage 4i adds a timer-based RTO (via a new NET_WAIT timeout) for when the peer goes silent. See "Network stack, Stage 2/3/4a/4b/4c/4d/4e/4f/4g/4h/4i" above
+netd/                eighth userland program: THE NETWORK SERVER (network stack, Stage 2) - owns the protocol stack (ARP/IPv4/ICMP) in userland; the kernel keeps only the DMA-owning virtio-net driver, reached by this task alone via the gated NET_SEND/NET_RECV/NET_MAC syscalls (the fsd/BLOCK_* pattern). Boot-loaded into protected task slot 4 (NET_TASK), supervised. Speaks the NETOP_PING request protocol to clients (the shell's `ping` command); hand-rolled fixed-buffer frame building (ARP/IPv4/ICMP/UDP/DNS) + Internet checksums, no crates. NETOP_RESOLVE (Stage 3) does DNS-over-UDP for `resolve`; NETOP_FETCH (Stage 4a) does a client-TCP HTTP GET for `fetch`. Stage 4b makes it event-driven (blocks in NET_WAIT, drains client messages *and* incoming frames each wake) and adds a TCP HTTP server on port 80 + an ARP responder - the guest answers the network now, not just initiates. Stage 4c makes that HTTP server a real static-file server: it parses the request path and streams the file from fsd over TCP (netd is fsd's first non-shell client, reached via a new netd->fsd capability). Stage 4d adds TCP send-side flow control (window tracking + ACK-paced streaming) so a file of *any* size streams, not just what fits one window. Stage 4e adds proper HTTP response headers (Content-Type by extension + Content-Length via an fsd stat). Stage 4f makes a GET of a directory return a browsable HTML index (links resolved against the request path) - the guest's filesystem is browsable in a browser. Stage 4g adds HTTP HEAD (identical headers to GET, no body, for every response kind). Stage 4h adds TCP fast retransmit (three dup-ACKs -> go-back-N resend), the server's first loss recovery. Stage 4i adds a timer-based RTO (via a new NET_WAIT timeout) for when the peer goes silent. Stage 4j multiplexes up to MAX_CONNS (4) concurrent connections (handle_tcp routes segments to a [Option<TcpConn>; N] by peer). See "Network stack, Stage 2/3/4a/4b/4c/4d/4e/4f/4g/4h/4i/4j" above
   src/main.rs        the NET_WAIT event loop (drain client requests -> NETOP_PING/RESOLVE/FETCH; drain frames -> ARP replies + the TCP server state machine) plus start_response (request-path parsing + a landing page or a file from fsd) and pump_send (window-bounded, ACK-paced streaming under flow control, one segment per call with a per-segment mailbox drain so the supervisor health-ping is always acked), read_file_chunk's grant/safecopy FSOP_READ_BULK, the ARP/IPv4/ICMP/UDP/DNS/TCP frame builders (build_tcp_generic shared by client build_tcp + server build_tcp_srv), the DNS/TCP parsers, next-hop routing, ip_checksum and the TCP pseudo-header checksum, plus loss recovery: fast retransmit (dup-ACKs -> rewind_to) and a timer-based RTO (service_rto over a NET_WAIT timeout)
 
 upper/               sixth userland program: the pipeline filter demo (uppercases its piped input) - the reference for the filter-program shape: stdin = msg_recv, stdout = con_write (routed through the console server), EOF = the empty message, finish = exit; see "Pipelines" above
