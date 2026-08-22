@@ -262,6 +262,16 @@ target that proves the whole architecture end to end.
 
 ## More filesystems: a VFS layer, then exFAT / ext2 (scoped)
 
+**Smaller FAT32 follow-up first: LFN *write*.** Long filenames are *read*
+now (`fsd` reconstructs them from a real formatter's LFN entries — see
+`CHANGELOG.md`'s "FAT32 long filename (LFN) read support"), but the guest
+still can't *create* one: `make_short_name` only makes 8.3 names. Writing LFN
+needs generating a unique `~N` short alias (scan the directory for
+collisions), the alias checksum, and laying down N+1 contiguous directory
+entries (growing the directory if needed) — a self-contained addition to
+`fat32.rs`, much smaller than a whole new filesystem. It would also let a
+clean delete free the orphaned LFN entries `rm` currently leaves behind.
+
 Today the filesystem server `fsd` *is* FAT32 — the type is hardcoded
 (`fsd/src/fat32.rs`), and it mounts only the first FAT32-typed MBR
 partition. Supporting more filesystems is really two things: an internal

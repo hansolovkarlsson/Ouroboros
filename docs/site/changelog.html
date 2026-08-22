@@ -40,6 +40,16 @@
 
   <article>
 
+<h2>FAT32 long filename (LFN) read support</h2>
+
+<p>The oldest FAT32 limitation, closed on the read side — surfaced by real use: serving <code class="inline">index.html</code>. A 4-char extension can't be an 8.3 short name, so a formatter writes a long filename (LFN) entry plus a mangled alias (<code class="inline">INDEX~1.HTM</code>), and <code class="inline">fat32.rs</code> (in <code class="inline">fsd</code>) only saw the alias. Now long names are <strong>read, listed, and matched</strong> by their true names: the web server serves <code class="inline">/index.html</code> (correct <code class="inline">text/html</code> type) and directory listings show real names.</p>
+
+<p><code class="inline">walk_dir_with_location</code> accumulates the run of LFN entries preceding each short entry — 13 UTF-16 chars each, in reverse order, placed by sequence number (order-independent), reconstructed to ASCII. The correctness piece: the long name is used only if its checksum (byte 13, over the short 8.3 name) matches the short entry, so an orphaned LFN run (deleted file, reused slot) can't attach the wrong name. <code class="inline">DirEntry.name</code> grew 12→255 bytes; <code class="inline">name()</code> returns the effective name, so <code class="inline">find</code>/<code class="inline">list_dir</code> get long names for free.</p>
+
+<p>Read-only: the guest still can't <em>create</em> a long-named file (<code class="inline">make_short_name</code> is 8.3-only), and deleting one leaves its LFN entries orphaned (harmless — the checksum guard prevents mis-association). Both are documented follow-ups.</p>
+
+<p>Verified on QEMU against <code class="inline">index.html</code>, a 21-char name (2 LFN entries), and a long name in a subdirectory (all written by macOS): served by the web server and read via the shell (<code class="inline">ls</code>/<code class="inline">cat</code>/<code class="inline">cd</code>, nested). 8.3 files unaffected; the full write path unregressed; selftest, zero <code class="inline">-d int</code> aborts.</p>
+
 <h2>Network stack, Stage 4i: TCP retransmit timeout (RTO)</h2>
 
 <p>Fast retransmit (4h) recovers a loss only while data keeps flowing (the peer's dup-ACKs drive it). When the peer goes <strong>silent</strong> — the last segments of a burst lost, or all its ACKs lost — no frames arrive and it never fires. RTO is the timer-based fallback.</p>

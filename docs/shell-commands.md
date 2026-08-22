@@ -49,13 +49,16 @@ implement a completely different command set.
   error, since no path could ever resolve in that state. Use `make
   run-image` (or a Parallels boot plus `mount` with a USB stick) for
   disk commands to do anything.
-- **Only 8.3 short filenames.** No long-filename (LFN) support in the
-  underlying FAT32 reader — `mkdir`/`touch` additionally only accept
-  ASCII alphanumerics, `_`, and `-` in names they create (one optional
-  `.` splitting an up-to-8-character base from an up-to-3-character
-  extension). Existing on-disk names outside that set (created by a real
-  formatter) can't be created by this shell, and LFN entries aren't
-  parsed at all — they won't show up in `ls`.
+- **Long filenames are read, not created.** The FAT32 reader now
+  reconstructs long filenames (LFN) written by a real formatter, so a
+  file like `index.html` shows up in `ls`, opens with `cat`, and can be
+  navigated — by its real name. But *creating* one from the shell still
+  isn't supported: `mkdir`/`touch`/`write` accept only 8.3 names — ASCII
+  alphanumerics, `_`, and `-`, one optional `.` splitting an
+  up-to-8-character base from an up-to-3-character extension — so a file
+  the shell itself creates can't have a long name (yet). Deleting a
+  long-named file works but leaves its LFN entries behind (a harmless
+  space leak).
 
 ## Commands
 

@@ -93,6 +93,8 @@
 
 <h2>More filesystems: a VFS layer, then exFAT / ext2 (scoped)</h2>
 
+<p><strong>Smaller FAT32 follow-up first: LFN <em>write</em>.</strong> Long filenames are <em>read</em> now (<code class="inline">fsd</code> reconstructs them from a real formatter's LFN entries), but the guest still can't <em>create</em> one: <code class="inline">make_short_name</code> only makes 8.3 names. Writing LFN needs generating a unique <code class="inline">~N</code> short alias, its checksum, and laying down N+1 contiguous directory entries — a self-contained addition to <code class="inline">fat32.rs</code>, much smaller than a whole new filesystem. It would also let a clean delete free the orphaned LFN entries <code class="inline">rm</code> currently leaves behind.</p>
+
 <p>Today the filesystem server <code class="inline">fsd</code> <em>is</em> FAT32 — the type is hardcoded, and it mounts only the first FAT32-typed MBR partition. Supporting more filesystems is really two things: an internal abstraction so <code class="inline">fsd</code> can drive several, and the drivers themselves.</p>
 
 <p><strong>The key insight: the client-facing VFS already exists.</strong> Clients call <code class="inline">FSOP_LIST_DIR</code>/<code class="inline">READ_FILE</code>/<code class="inline">WRITE_AT</code>/… over IPC — they never know it's FAT32. So the <em>interface</em> is already filesystem-agnostic; what's missing is <strong>internal multiplexing inside <code class="inline">fsd</code></strong>: detect the filesystem type at mount time and dispatch each <code class="inline">FSOP_*</code> op to the right driver. Much smaller than "write a VFS from scratch."</p>

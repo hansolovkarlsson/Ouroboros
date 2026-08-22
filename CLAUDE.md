@@ -2161,12 +2161,14 @@ scheduler (no dynamic task creation); no heap or `.bss` for userland
 programs, so no static mutable state at all; a fixed, unguarded 8KB stack
 per program; no ELF, no relocations, no dynamic linking (all of the
 above - `core::fmt`, literal comparisons, and the lack of ELF/relocations
-- are the same underlying limitation, not separate ones); `fat32.rs` has
+- are the same underlying limitation, not separate ones); `fat32.rs` had
 no long-filename support in general (this project's own ESP directory was
 renamed - `\EFI\ORBS\`, well inside FAT's 8.3 limit, not the 9-character
 `\EFI\OUROBOROS\` - specifically to stay reachable without needing it,
 but any *other* 9+
-character name still isn't), only looks at the first FAT32-typed MBR
+character name still wasn't) **(Update: LFN read is supported now - see
+"FAT32 long filename (LFN) read support" below; long names are read/listed/
+matched, though the guest still can't *create* one)**, only looks at the first FAT32-typed MBR
 partition, and while a file can now hold real content, be copied, and be
 renamed/moved, every write is still a full replace at the syscall/FAT32
 layer (no append/offset-write primitive - the shell's `>>` composes
@@ -6239,6 +6241,61 @@ go-back-N resend (not selective/SACK); the give-up path (a truly dead peer)
 is implemented but *not exercised* (SLIRP can't sustain a peer silent past
 its own ACKs); one connection at a time; still QEMU-only, polled RX.
 
+## FAT32 long filename (LFN) read support
+
+The oldest FAT32 limitation, closed on the read side - surfaced by real use:
+serving a web page whose file is `index.html`. A 4-character extension can't
+be an 8.3 short name, so a real formatter (macOS, Linux, Windows) writes a
+**long filename (LFN)** entry plus a mangled 8.3 alias (`INDEX~1.HTM`), and
+`fat32.rs` (in `fsd`) only ever saw the alias - the file couldn't be opened
+or listed by its real name. This reconstructs the long name so long-named
+files **read, list, and match** by their true names; the web server now
+serves `/index.html` (with the right `text/html` type) and directory
+listings show real names.
+
+**How LFN is stored, and how it's reconstructed.** A long name lives in one
+or more 32-byte LFN entries (attribute `0x0F`) placed, in *reverse* order,
+immediately before the file's short entry; each holds 13 UTF-16 characters at
+three non-contiguous field ranges, with a sequence number. `walk_dir_with_
+location` (the one directory-iteration choke point every read and every
+collision check goes through) now accumulates that run instead of skipping
+it: it places each entry's 13 chars at `(seq-1)*13`, so physical order
+doesn't matter, and the `0x0000` terminator in the highest-seq entry gives
+the length. Reconstructed to ASCII (non-ASCII -> `?`, adequate for this
+project). `DirEntry.name` grew from 12 to 255 bytes (the LFN max); `name()`
+returns the effective name (long if present, else 8.3), so `find`
+(case-insensitive) and `list_dir` get long names for free - no caller
+changed.
+
+**The one real correctness trap, handled: orphaned LFN runs.** Delete a
+long-named file (its short entry marked free) and its LFN entries can be left
+behind; reuse that slot for a different file and a naive reader would attach
+the *dead* file's long name to the *new* one. The guard is the LFN checksum
+(byte 13 of every LFN entry - a rolling checksum of the associated short
+entry's 11-byte 8.3 name): the accumulated long name is used only if that
+checksum matches the short entry it precedes, else the run is ignored and the
+8.3 name used. A free/volume/end entry also resets the pending run. This is
+required, not optional, the moment deletes and slot reuse exist.
+
+**Read-only, deliberately - two documented follow-ups.** The guest still
+can't *create* a long-named file: `make_short_name` only produces 8.3 names,
+so `write`/`mkdir`/`touch`/`cp`/`mv` reject a 4+ char extension or 8+ char
+base (writing LFN needs generating a unique `~N` alias, the checksum, and
+laying down N+1 contiguous entries - a real, separate piece). And deleting a
+long-named file leaves its LFN entries orphaned (harmless - the checksum
+guard prevents mis-association - just a minor space leak, since `rm` only
+frees the short entry it locates).
+
+**Confirmed on QEMU** against `index.html`, a 21-char name (2 LFN entries),
+and `a-webpage-in-efi.html` in a subdirectory - all written by macOS's FAT
+driver (so genuine on-disk LFN + alias): the web server serves `GET
+/index.html` -> `200 text/html`, the root listing shows the real names with
+working links, and the 2-entry name reconstructs correctly; the shell
+`ls`/`cat`/`cd` through long-named paths (including nested) all work. 8.3
+files (`INIT.CFG`/`SH.BIN`) are unaffected, and the full write path
+(`mkdir`/`write`/`cat`/`cp` from a long-named source/`rm`/`rmdir`) is
+unregressed. `selftest` passes; zero `-d int` aborts.
+
 ## Commands
 
 ```sh
@@ -6374,7 +6431,7 @@ shell/               userland default shell - a separate crate, built for aarch6
 
 fsd/                 fifth userland program: THE FILESYSTEM SERVER (driver isolation part 2) - owns the FAT32 engine, speaks the FSOP_* protocol to clients over IPC (including the bulk FSOP_READ_BULK/FSOP_WRITE_BULK ops that move file data via grant/safecopy - see "Grant/safecopy IPC" above), and is the only task the BLOCK_* syscalls accept; boot-loaded into protected task slot 2, see "Driver isolation, part 2" above
   src/main.rs        the request loop: recv -> decode FsRequest -> dispatch to Fs -> reply one u64; mounted Fs lives in main's stack frame (no static state in userland)
-  src/fat32.rs       the kernel's old hand-rolled FAT32 module, moved essentially verbatim (MBR, BPB, FAT chains, 8.3 entries, full read/write support) plus read_at (windowed offset reads) and write_at (random-access offset writes - interior overwrite via a partial-sector read-modify-write, and past-EOF writes that zero-fill the gap, bounded by MAX_GAP_FILL; behind streaming cp, unbounded >>, and the writeat builtin - see "FAT32 offset-write" and "FAT32 interior/random-access writes" above); its BlockDevice became disk.rs's syscall shim
+  src/fat32.rs       the kernel's old hand-rolled FAT32 module, moved essentially verbatim (MBR, BPB, FAT chains, 8.3 entries, full read/write support) plus long-filename (LFN) *read* support (walk_dir_with_location reconstructs a long name from the checksum-validated LFN entries preceding a short entry, so long names read/list/match - see "FAT32 long filename (LFN) read support" above; writing long names still isn't supported) plus read_at (windowed offset reads) and write_at (random-access offset writes - interior overwrite via a partial-sector read-modify-write, and past-EOF writes that zero-fill the gap, bounded by MAX_GAP_FILL; behind streaming cp, unbounded >>, and the writeat builtin - see "FAT32 offset-write" and "FAT32 interior/random-access writes" above); its BlockDevice became disk.rs's syscall shim
   src/disk.rs        zero-sized Disk handle: read_sector/write_sector/capacity as BLOCK_READ/BLOCK_WRITE/BLOCK_INFO syscall wrappers
 
 cond/                seventh userland program: THE CONSOLE SERVER (driver isolation part 3) - owns the steady-state console; userland output flows to it as batched DSPOP_WRITE messages over IPC. Two backends (chosen from CON_INFO): byte-stream (forward to the kernel console via the gated CON_WRITE syscall 33 - QEMU's UART) and framebuffer (render glyphs itself via the gated FB_BLIT/FB_SCROLL/FB_CLEAR primitives - the console rendering logic, font included, moved out of the kernel's fbconsole; Parallels, QEMU ramfb). Boot-loaded into protected task slot 3 (CON_TASK), accepted by CON_WRITE/FB_* alone, see "Driver isolation, part 3" above

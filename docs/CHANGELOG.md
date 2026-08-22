@@ -7,6 +7,34 @@ what broke, how it was diagnosed), see `CLAUDE.md`; for *how* something
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## FAT32 long filename (LFN) read support
+
+The oldest FAT32 limitation, closed on the read side — surfaced by real use:
+serving `index.html`. A 4-char extension can't be an 8.3 short name, so a
+formatter writes a long filename (LFN) entry plus a mangled alias
+(`INDEX~1.HTM`), and `fat32.rs` (in `fsd`) only saw the alias. Now long names
+are **read, listed, and matched** by their true names: the web server serves
+`/index.html` (correct `text/html` type) and directory listings show real
+names.
+
+`walk_dir_with_location` accumulates the run of LFN entries preceding each
+short entry — 13 UTF-16 chars each, in reverse order, placed by sequence
+number (order-independent), reconstructed to ASCII. The correctness piece:
+the long name is used only if its checksum (byte 13, over the short 8.3 name)
+matches the short entry, so an orphaned LFN run (deleted file, reused slot)
+can't attach the wrong name. `DirEntry.name` grew 12→255 bytes; `name()`
+returns the effective name, so `find`/`list_dir` get long names for free.
+
+Read-only: the guest still can't *create* a long-named file (`make_short_name`
+is 8.3-only), and deleting one leaves its LFN entries orphaned (harmless —
+the checksum guard prevents mis-association). Both are documented follow-ups.
+
+Verified on QEMU against `index.html`, a 21-char name (2 LFN entries), and a
+long name in a subdirectory (all written by macOS): served by the web server
+and read via the shell (`ls`/`cat`/`cd`, nested). 8.3 files unaffected; the
+full write path unregressed; selftest, zero `-d int` aborts. See `CLAUDE.md`'s
+"FAT32 long filename (LFN) read support."
+
 ## Network stack, Stage 4i: TCP retransmit timeout (RTO)
 
 Fast retransmit (4h) recovers a loss only while data keeps flowing (the

@@ -56,11 +56,12 @@ answer.
 syntax, no comments, just a path (trimmed of surrounding whitespace). The
 Makefile's `esp` target writes it automatically, pointing at the built-in
 shell. Note the directory is `ORBS`, not `OUROBOROS` — the full project
-name is 9 characters, one over FAT's 8.3 short-name limit: the runtime
-FAT32 reader (`fat32.rs`) doesn't parse long filenames, and a 9-character
-name would only be reachable through FAT's mangled 8.3 alias. (It was
-first truncated to `OUROBORO`, exactly 8 characters, then renamed to the
-tidier `ORBS`.)
+name is 9 characters, one over FAT's 8.3 short-name limit. The reason is
+partly historical now: `fat32.rs` *reads* long filenames today (LFN
+reconstruction), so a 9-character name would be reachable — but it still
+can't *create* one, so keeping this project-controlled path 8.3 avoids
+depending on LFN write support that doesn't exist. (It was first truncated
+to `OUROBORO`, exactly 8 characters, then renamed to the tidier `ORBS`.)
 
 ```
 \EFI\ORBS\SH.BIN
