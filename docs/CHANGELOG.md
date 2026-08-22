@@ -7,6 +7,48 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/`; 
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## Standalone binaries, Stage 1: an argv ABI
+
+First step of the roadmap's "standalone command binaries" arc: give spawned
+programs an argument vector. Nothing passed arguments to a spawned program
+before — `SPAWN`/`SPAWN_STAGE` carried only the program bytes plus a stdout
+target, a new task's GPRs were all zeroed, and `_start()` took nothing — so
+`exec /path a b c` ignored `a b c` entirely. This is the foundation the rest
+of the arc (a `/bin` directory, PATH lookup, standalone `ls`/`cat`/`echo`)
+stands on.
+
+Delivered kernel-side and fetched, the same shape as the per-task stdout
+target — so a program's start-up register/stack state is unchanged (`_start`
+still takes nothing). The shell stages an argv blob; the kernel keeps it
+per-task; the child reads it via new syscalls:
+
+- `ARGS_STAGE` (47): stage the argv blob into a kernel buffer, attached to
+  the next `SPAWN` (its new arg2 = the blob length; 0 = no args). Blob
+  format: `[argc: u32 LE]` then `[len: u32 LE][bytes]` per arg.
+- `GET_ARGC` (48) / `GET_ARG` (49): the child reads its argument count and
+  copies each argument out (`NO_ARG` for an out-of-range index).
+- A per-slot argv store in `tasks.rs` (the `MAILBOXES` pattern), filled at
+  spawn from the staging buffer, cleared on task death alongside the
+  mailbox/grant/delegate.
+
+Shell: `spawn_path` gained the argv vector and stages it before `SPAWN`;
+`cmd_exec` builds argv from the whole line (`exec prog a b c` → argv
+`[prog, a, b, c]`); the pipeline callers pass a single-element argv (just the
+program path). A new `args/` program (the ninth userland crate) prints its
+argv — the proof.
+
+Verified on QEMU (`run-image`, real FAT32): `exec /EFI/ORBS/ARGS.BIN alpha
+beta gamma` printed `argc=4` and `argv[0]=/EFI/ORBS/ARGS.BIN` …
+`argv[3]=gamma`; `exec …/ARGS.BIN` alone printed `argc=1`; `exec HELLO.BIN`,
+a `echo hi there | UPPER.BIN` pipe (→ `HI THERE`), `selftest`, and the disk
+surface all unregressed; zero `-d int` aborts. (Repeated fire-and-forget
+`exec` still exhausts the two spawnable slots — a spawned program that exits
+is a zombie holding its slot until waited; that's the existing 2-slot/reaping
+limit the arc's Stage 0 addresses, not an argv issue.)
+
+Still to come in the arc: `/bin` + PATH lookup (Stage 2), a shell environment
+(Stage 3), and externalizing the commands (Stage 4). See `roadmap.md`.
+
 ## Network stack, Stage 4o: TCP SACK (sender-side selective retransmit)
 
 The last open TCP item. Loss recovery was go-back-N (4h fast retransmit, 4i

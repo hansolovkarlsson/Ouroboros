@@ -591,6 +591,66 @@ pub(crate) fn clear_mailbox(task: usize) {
     mailbox.count = 0;
 }
 
+/// Per-task argv store: the argument-vector blob a task was spawned with
+/// (`ARGS_STAGE` blob format - see syscall-abi), filled at spawn from the
+/// kernel's staging buffer and read back by the child via the
+/// `GET_ARGC`/`GET_ARG` syscalls. Delivered kernel-side and fetched (not
+/// injected into the new task's registers/stack), the same shape as the
+/// per-task stdout target - so a spawned program's start-up state is
+/// unchanged. Boot-loaded tasks (the shell, the servers) get none (len 0).
+const ARGV_CAP: usize = syscall_abi::ARGV_MAX as usize;
+
+struct Argv {
+    data: [u8; ARGV_CAP],
+    len: usize,
+}
+
+impl Argv {
+    const fn new() -> Self {
+        Argv { data: [0; ARGV_CAP], len: 0 }
+    }
+}
+
+struct ArgvSlot(UnsafeCell<Argv>);
+// SAFETY: single-core, non-reentrant - the same per-task-cell reasoning as
+// MAILBOXES; set_argv (from SPAWN) and the getters (from the child's own
+// syscalls) never run concurrently.
+unsafe impl Sync for ArgvSlot {}
+static ARGVS: [ArgvSlot; NUM_TASKS] = [
+    ArgvSlot(UnsafeCell::new(Argv::new())),
+    ArgvSlot(UnsafeCell::new(Argv::new())),
+    ArgvSlot(UnsafeCell::new(Argv::new())),
+    ArgvSlot(UnsafeCell::new(Argv::new())),
+    ArgvSlot(UnsafeCell::new(Argv::new())),
+    ArgvSlot(UnsafeCell::new(Argv::new())),
+    ArgvSlot(UnsafeCell::new(Argv::new())),
+];
+
+/// Store a freshly spawned task's argv blob (from the `SPAWN` handler, which
+/// copies it out of the staging buffer). Truncated to `ARGV_CAP`.
+pub(crate) fn set_argv(task: usize, blob: &[u8]) {
+    let argv = unsafe { &mut *ARGVS[task].0.get() };
+    let n = blob.len().min(ARGV_CAP);
+    argv.data[..n].copy_from_slice(&blob[..n]);
+    argv.len = n;
+}
+
+/// The argv blob for `task` (empty if it was spawned with none) - read by
+/// the `GET_ARGC`/`GET_ARG` syscall arms for the calling task.
+pub(crate) fn argv_blob(task: usize) -> &'static [u8] {
+    // SAFETY: single-core, non-reentrant (see ArgvSlot); the data lives in a
+    // static for the whole boot, and the caller copies from it immediately.
+    let argv = unsafe { &*ARGVS[task].0.get() };
+    &argv.data[..argv.len]
+}
+
+/// Drop a dead task's argv so a later occupant of the slot can't read it -
+/// wired into every teardown path alongside `clear_mailbox`/`clear_grant`.
+pub(crate) fn clear_argv(task: usize) {
+    let argv = unsafe { &mut *ARGVS[task].0.get() };
+    argv.len = 0;
+}
+
 /// Per-task stdout target: the task index a program's output should go to,
 /// set by whoever `spawn`ed it (see the `SPAWN`/`STDOUT_TARGET` syscalls).
 /// `CON_TASK` (the console server) by default, and for every boot-loaded
@@ -1050,6 +1110,7 @@ pub(crate) unsafe fn exit_current_and_switch(frame: *mut Context, status: u64) -
     clear_mailbox(current);
     clear_grant(current);
     clear_delegate(current);
+    clear_argv(current);
     reset_stdout_target(current);
     let next = next_runnable(current);
     *frame = unsafe { *TASKS[next].0.get() };
@@ -1074,6 +1135,7 @@ pub(crate) fn kill_task(i: usize) {
     clear_mailbox(i);
     clear_grant(i);
     clear_delegate(i);
+    clear_argv(i);
     reset_stdout_target(i);
 }
 
@@ -1100,6 +1162,7 @@ pub(crate) unsafe fn kill_current_and_switch(frame: *mut Context) {
     clear_mailbox(current);
     clear_grant(current);
     clear_delegate(current);
+    clear_argv(current);
     reset_stdout_target(current);
     let next = next_runnable(current);
     *frame = unsafe { *TASKS[next].0.get() };

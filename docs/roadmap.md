@@ -422,11 +422,12 @@ the shell's own cwd/lifecycle) and the redirection/pipe **syntax**
    per-task fixed arrays in `tasks.rs` plus the EL0 region pool in `mmu.rs`).
    Slots, not RAM, are the ceiling (each task costs ~292 KB + code, fine at
    512 MB). Small.
-1. **argv ABI (foundational).** New syscalls to stage an argv blob and let the
-   child read `argc`/args (mirroring `SPAWN_STAGE` + the `stdout_target`/
-   `heap_info` getters); a per-slot kernel argv store cleared on task death;
-   `spawn_path` stages the token list before `SPAWN`. Proven by a tiny program
-   that prints its argv. Medium; everything below depends on it.
+1. **argv ABI (foundational) — DONE.** New syscalls stage an argv blob and let
+   the child read `argc`/args (`ARGS_STAGE`/`GET_ARGC`/`GET_ARG`, mirroring
+   `SPAWN_STAGE` + the `stdout_target`/`heap_info` getters); a per-slot kernel
+   argv store, cleared on task death; `spawn_path` stages the token list before
+   `SPAWN`. Proven by the new `args/` program (`exec …/ARGS.BIN a b c` prints
+   `argc=4` + each arg). See `CHANGELOG.md`'s "Standalone binaries, Stage 1."
 2. **`/bin` + PATH lookup.** Makefile stages command binaries into `esp/bin/`;
    the shell's unknown-command arm searches PATH, probes existence (the
    one-byte `fs_read_file` trick), and spawns the first hit with argv —

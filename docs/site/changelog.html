@@ -40,6 +40,24 @@
 
   <article>
 
+<h2>Standalone binaries, Stage 1: an argv ABI</h2>
+
+<p>First step of the roadmap's "standalone command binaries" arc: give spawned programs an argument vector. Nothing passed arguments to a spawned program before — <code class="inline">SPAWN</code>/<code class="inline">SPAWN_STAGE</code> carried only the program bytes plus a stdout target, a new task's GPRs were all zeroed, and <code class="inline">_start()</code> took nothing — so <code class="inline">exec /path a b c</code> ignored <code class="inline">a b c</code> entirely. This is the foundation the rest of the arc (a <code class="inline">/bin</code> directory, PATH lookup, standalone <code class="inline">ls</code>/<code class="inline">cat</code>/<code class="inline">echo</code>) stands on.</p>
+
+<p>Delivered kernel-side and fetched, the same shape as the per-task stdout target — so a program's start-up register/stack state is unchanged (<code class="inline">_start</code> still takes nothing). The shell stages an argv blob; the kernel keeps it per-task; the child reads it via new syscalls:</p>
+
+<ul>
+<li><code class="inline">ARGS_STAGE</code> (47): stage the argv blob into a kernel buffer, attached to the next <code class="inline">SPAWN</code> (its new arg2 = the blob length; 0 = no args). Blob format: <code class="inline">[argc: u32 LE]</code> then <code class="inline">[len: u32 LE][bytes]</code> per arg.</li>
+<li><code class="inline">GET_ARGC</code> (48) / <code class="inline">GET_ARG</code> (49): the child reads its argument count and copies each argument out (<code class="inline">NO_ARG</code> for an out-of-range index).</li>
+<li>A per-slot argv store in <code class="inline">tasks.rs</code> (the <code class="inline">MAILBOXES</code> pattern), filled at spawn from the staging buffer, cleared on task death alongside the mailbox/grant/delegate.</li>
+</ul>
+
+<p>Shell: <code class="inline">spawn_path</code> gained the argv vector and stages it before <code class="inline">SPAWN</code>; <code class="inline">cmd_exec</code> builds argv from the whole line (<code class="inline">exec prog a b c</code> → argv <code class="inline">[prog, a, b, c]</code>); the pipeline callers pass a single-element argv. A new <code class="inline">args/</code> program (the ninth userland crate) prints its argv — the proof.</p>
+
+<p>Verified on QEMU (<code class="inline">run-image</code>, real FAT32): <code class="inline">exec /EFI/ORBS/ARGS.BIN alpha beta gamma</code> printed <code class="inline">argc=4</code> and <code class="inline">argv[0]=/EFI/ORBS/ARGS.BIN</code> … <code class="inline">argv[3]=gamma</code>; <code class="inline">exec …/ARGS.BIN</code> alone printed <code class="inline">argc=1</code>; <code class="inline">exec HELLO.BIN</code>, a <code class="inline">echo hi there | UPPER.BIN</code> pipe (→ <code class="inline">HI THERE</code>), <code class="inline">selftest</code>, and the disk surface all unregressed; zero <code class="inline">-d int</code> aborts. (Repeated fire-and-forget <code class="inline">exec</code> still exhausts the two spawnable slots — a spawned program that exits is a zombie holding its slot until waited; that's the existing 2-slot/reaping limit the arc's Stage 0 addresses, not an argv issue.)</p>
+
+<p>Still to come in the arc: <code class="inline">/bin</code> + PATH lookup (Stage 2), a shell environment (Stage 3), and externalizing the commands (Stage 4). See <a href="roadmap.html">the roadmap</a>.</p>
+
 <h2>Network stack, Stage 4o: TCP SACK (sender-side selective retransmit)</h2>
 
 <p>The last open TCP item. Loss recovery was go-back-N (4h fast retransmit, 4i RTO both <code class="inline">rewind_to(snd_una)</code> then resend everything forward). This adds RFC 2018 SACK on the sender side: negotiate SACK-permitted, parse the peer's SACK blocks, and on a fast retransmit resend only the missing hole instead of the whole window.</p>

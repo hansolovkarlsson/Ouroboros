@@ -33,6 +33,8 @@ COND_ELF     := target/$(USER_TARGET)/release/cond
 COND_BIN     := target/$(USER_TARGET)/release/cond.bin
 NETD_ELF     := target/$(USER_TARGET)/release/netd
 NETD_BIN     := target/$(USER_TARGET)/release/netd.bin
+ARGS_ELF     := target/$(USER_TARGET)/release/args
+ARGS_BIN     := target/$(USER_TARGET)/release/args.bin
 ESP_DIR      := esp
 OVMF         := $(shell brew --prefix qemu 2>/dev/null)/share/qemu/edk2-aarch64-code.fd
 PDT          := /Applications/Parallels Desktop.app/Contents/MacOS/prl_disk_tool
@@ -51,7 +53,7 @@ ifeq ($(PROFILE),release)
 CARGO_FLAGS += --release
 endif
 
-.PHONY: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin esp run run-virtio-console run-usb-kbd run-usb-multi run-gicv3 image run-image parallels-hdd test-parallels clean
+.PHONY: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin args-bin esp run run-virtio-console run-usb-kbd run-usb-multi run-gicv3 image run-image parallels-hdd test-parallels clean
 
 # Overridable by `make test-parallels VM_NAME=... CMDS=... BOOT_WAIT=...`.
 VM_NAME     ?= Ouroboros
@@ -111,6 +113,12 @@ netd-bin:
 	cargo build -p netd --target $(USER_TARGET) --release
 	"$(OBJCOPY)" --strip-all $(NETD_ELF) $(NETD_BIN)
 
+# The argv proof program (args/) - spawned via `exec`, prints its argument
+# vector. Same recipe as every other userland program.
+args-bin:
+	cargo build -p args --target $(USER_TARGET) --release
+	"$(OBJCOPY)" --strip-all $(ARGS_ELF) $(ARGS_BIN)
+
 # Stage the EFI System Partition layout QEMU/Parallels expect: a removable
 # UEFI drive boots \EFI\BOOT\BOOTAA64.EFI automatically, no boot manager
 # entry needed. \EFI\ORBS\ (must fit FAT's 8.3 short-name limit, which
@@ -119,7 +127,7 @@ netd-bin:
 # itself: the default shell binary and the config file (loader.rs's
 # CONFIG_PATH) naming which program to load - edit INIT.CFG and rebuild
 # just that program to swap it out, no kernel rebuild required.
-esp: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin
+esp: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin args-bin
 	mkdir -p $(ESP_DIR)/EFI/BOOT $(ESP_DIR)/EFI/ORBS
 	cp $(KERNEL) $(ESP_DIR)/EFI/BOOT/BOOTAA64.EFI
 	cp $(SHELL_BIN) $(ESP_DIR)/EFI/ORBS/SH.BIN
@@ -129,6 +137,7 @@ esp: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin
 	cp $(UPPER_BIN) $(ESP_DIR)/EFI/ORBS/UPPER.BIN
 	cp $(COND_BIN) $(ESP_DIR)/EFI/ORBS/COND.BIN
 	cp $(NETD_BIN) $(ESP_DIR)/EFI/ORBS/NETD.BIN
+	cp $(ARGS_BIN) $(ESP_DIR)/EFI/ORBS/ARGS.BIN
 	printf '\\EFI\\ORBS\\SH.BIN' > $(ESP_DIR)/EFI/ORBS/INIT.CFG
 
 # Boots the ESP directory directly in QEMU (no disk image needed) against

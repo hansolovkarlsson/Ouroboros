@@ -69,6 +69,9 @@ use core::panic::PanicInfo;
 const BUFFER_SIZE: usize = 128;
 const CWD_SIZE: usize = 128;
 const PATH_SIZE: usize = 128;
+// Max argv entries passed to a spawned program (`exec prog a b c ...`). The
+// 128-byte input line can't hold more real tokens than this in practice.
+const MAX_ARGS: usize = 16;
 // Sized to the filesystem protocol's inline per-op payload cap
 // (`FS_DATA_MAX`, 512): a directory listing travels inline in the reply,
 // so a larger buffer would just be truncated at the server. Bulk file
@@ -345,7 +348,7 @@ fn cmd_pipeline(left: &str, right: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut
         return;
     }
 
-    let slot = match spawn_path(right, cwd, *cwd_len, syscall_abi::CON_TASK) {
+    let slot = match spawn_path(right, core::slice::from_ref(&right), cwd, *cwd_len, syscall_abi::CON_TASK) {
         Ok(slot) => slot,
         Err(0) => {
             print_line("pipe: path too long");
@@ -407,7 +410,7 @@ fn cmd_pipeline(left: &str, right: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut
 fn cmd_pipeline_prog(left: &str, right: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize) {
     // Consumer first (stdout -> console), so it's a live task the producer
     // can be pointed at and then delegated the right to reach.
-    let consumer = match spawn_path(right, cwd, *cwd_len, syscall_abi::CON_TASK) {
+    let consumer = match spawn_path(right, core::slice::from_ref(&right), cwd, *cwd_len, syscall_abi::CON_TASK) {
         Ok(slot) => slot,
         Err(0) => {
             print_line("pipe: path too long");
@@ -424,7 +427,7 @@ fn cmd_pipeline_prog(left: &str, right: &str, cwd: &mut [u8; CWD_SIZE], cwd_len:
     };
     // Producer with its stdout routed straight to the consumer, so it
     // streams there directly instead of back through the shell.
-    let producer = match spawn_path(left, cwd, *cwd_len, consumer) {
+    let producer = match spawn_path(left, core::slice::from_ref(&left), cwd, *cwd_len, consumer) {
         Ok(slot) => slot,
         Err(0) => {
             print_line("pipe: path too long");
@@ -716,7 +719,7 @@ fn dispatch_line(line: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize, out:
         "writeat" => cmd_writeat(line, cwd, *cwd_len),
         "cp" => cmd_cp(line, cwd, *cwd_len),
         "mv" => cmd_mv(line, cwd, *cwd_len),
-        "exec" => cmd_exec(arg, cwd, *cwd_len, out),
+        "exec" => cmd_exec(line, cwd, *cwd_len, out),
         "exit" => cmd_exit(),
         "ps" => cmd_ps(out),
         "kill" => cmd_kill(arg),
@@ -1062,15 +1065,28 @@ fn cmd_mkdir(arg: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize) {
 /// current-process. The new task keeps running after this command returns;
 /// there's no way yet to wait for it, stop it, or free its memory once
 /// started (see `tasks.rs`'s module doc comment).
-fn cmd_exec(arg: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize, out: &mut Output) {
-    if arg.is_empty() {
+fn cmd_exec(line: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize, out: &mut Output) {
+    // argv = the tokens after "exec": [program path, args...]. argv[0] is both
+    // the path to load and the program's own argv[0].
+    let mut argv_buf: [&str; MAX_ARGS] = [""; MAX_ARGS];
+    let mut n = 0;
+    for w in line.split_whitespace().skip(1) {
+        if n >= MAX_ARGS {
+            break;
+        }
+        argv_buf[n] = w;
+        n += 1;
+    }
+    if n == 0 {
         print_line("exec: missing program argument");
         return;
     }
+    let argv = &argv_buf[..n];
+    let path = argv[0];
     if out.is_console() {
-        // Plain `exec prog`: fire-and-forget, the program's output goes
-        // straight to the console.
-        match spawn_path(arg, cwd, cwd_len, syscall_abi::CON_TASK) {
+        // Plain `exec prog [args]`: fire-and-forget, output straight to the
+        // console.
+        match spawn_path(path, argv, cwd, cwd_len, syscall_abi::CON_TASK) {
             Ok(_slot) => {}
             Err(0) => print_line("exec: path too long"),
             Err(NO_FS) => print_no_fs(),
@@ -1078,10 +1094,10 @@ fn cmd_exec(arg: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize, out: &mut Output) {
         }
         return;
     }
-    // `exec prog > file`: route the program's output back to this shell and
-    // capture it into the redirect sink, then wait for the program - the
+    // `exec prog [args] > file`: route the program's output back to this shell
+    // and capture it into the redirect sink, then wait for the program - the
     // caller (`run_line`) writes the capture to the file (`finish_redirect`).
-    match spawn_path(arg, cwd, cwd_len, self_task()) {
+    match spawn_path(path, argv, cwd, cwd_len, self_task()) {
         Ok(slot) => capture_program_output(slot, out),
         Err(0) => print_line("exec: path too long"),
         Err(NO_FS) => print_no_fs(),
@@ -1130,9 +1146,34 @@ fn capture_program_output(slot: u64, out: &mut Output) {
 /// needs the slot to stream input to and wait on. `Err(0)` means the
 /// path didn't resolve/encode (too long); any other `Err` is a real
 /// code for [`print_fs_error`] (or [`NO_FS`]).
-fn spawn_path(arg: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize, stdout_target: u64) -> Result<u64, u64> {
+/// Encode `argv` into the `ARGS_STAGE` blob format (`[argc: u32 LE]` then
+/// `[len: u32 LE][bytes]` per arg) and stage it in the kernel for the next
+/// `SPAWN` to attach. Returns the blob length (SPAWN's arg2), or `Err(())`
+/// if it doesn't fit `ARGV_MAX` (unreachable with a 128-byte input line).
+fn stage_argv(argv: &[&str]) -> Result<u64, ()> {
+    const CAP: usize = syscall_abi::ARGV_MAX as usize;
+    let mut blob = [0u8; CAP];
+    blob[0..4].copy_from_slice(&(argv.len() as u32).to_le_bytes());
+    let mut off = 4usize;
+    for a in argv {
+        let bytes = a.as_bytes();
+        if off + 4 + bytes.len() > CAP {
+            return Err(());
+        }
+        blob[off..off + 4].copy_from_slice(&(bytes.len() as u32).to_le_bytes());
+        off += 4;
+        blob[off..off + bytes.len()].copy_from_slice(bytes);
+        off += bytes.len();
+    }
+    if syscall4(syscall_abi::ARGS_STAGE, blob.as_ptr() as u64, off as u64, 0, 0) != 0 {
+        return Err(());
+    }
+    Ok(off as u64)
+}
+
+fn spawn_path(path: &str, argv: &[&str], cwd: &[u8; CWD_SIZE], cwd_len: usize, stdout_target: u64) -> Result<u64, u64> {
     let mut path_buf = [0u8; PATH_SIZE];
-    let Some(path_len) = resolve_path(cwd_str(cwd, cwd_len), arg, &mut path_buf) else {
+    let Some(path_len) = resolve_path(cwd_str(cwd, cwd_len), path, &mut path_buf) else {
         return Err(0);
     };
     let Ok(path) = core::str::from_utf8(&path_buf[..path_len]) else {
@@ -1165,7 +1206,13 @@ fn spawn_path(arg: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize, stdout_target: u6
     // index for a pipe/redirect producer (so its output routes back here to
     // be relayed/captured). Passed explicitly (not via the 1-arg `syscall`
     // helper, which would leave x1 as 0 - task 0 - and misroute the spawn).
-    match syscall4(syscall_abi::SPAWN, offset, stdout_target, 0, 0) {
+    // Stage the argv blob (attached to this SPAWN via its arg2 = blob length;
+    // the child reads it via GET_ARGC/GET_ARG). argv[0] is the program name.
+    let argv_len = match stage_argv(argv) {
+        Ok(n) => n,
+        Err(()) => return Err(0),
+    };
+    match syscall4(syscall_abi::SPAWN, offset, stdout_target, argv_len, 0) {
         code if code >= FS_ERR_MIN => Err(code),
         slot => Ok(slot),
     }

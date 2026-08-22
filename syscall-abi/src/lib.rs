@@ -68,9 +68,9 @@ pub const GET_TICKS: u64 = 6;
 /// `block_current_and_switch`), not a spin-wait on either side.
 pub const READ_CHAR: u64 = 15;
 
-/// `(total staged length, stdout target)` -> **the new task's slot
-/// index** on success (needed to wait on, send to, or kill what was just
-/// started - the shell's pipeline flow does all three), [`SPAWN_ERROR`]
+/// `(total staged length, stdout target, argv blob length)` -> **the new
+/// task's slot index** on success (needed to wait on, send to, or kill what
+/// was just started - the shell's pipeline flow does all three), [`SPAWN_ERROR`]
 /// (bad argument), or a `SPAWN_ERR_*` code. Parses, relocates, and starts
 /// the program previously fed into the kernel's staging buffer via
 /// [`SPAWN_STAGE`], as a new task running *alongside* the caller - a
@@ -87,7 +87,10 @@ pub const READ_CHAR: u64 = 15;
 /// orchestrating a program-to-program pipe or an `exec … > file`
 /// redirect sets it to itself so it can relay/capture the program's
 /// output. The program reads it back via [`STDOUT_TARGET`]; a program
-/// that ignores it (outputs straight to the console) is unaffected.
+/// that ignores it (outputs straight to the console) is unaffected. The
+/// **argv blob length** (arg2) attaches the argument vector previously
+/// staged via [`ARGS_STAGE`] (`0` = no args); the child reads it via
+/// [`GET_ARGC`]/[`GET_ARG`].
 pub const SPAWN: u64 = 16;
 
 /// `(exit code)` -> **does not return** on success: the calling task is
@@ -477,6 +480,37 @@ pub const NET_WAIT: u64 = 45;
 /// "since boot," and it wraps after ~584,000 years, so callers need not
 /// worry about it.
 pub const MONOTONIC_US: u64 = 46;
+
+/// `(blob pointer, blob length)` -> `0` on success, [`SPAWN_ERROR`] on a bad
+/// range or an over-long blob. Stages an **argv blob** into a kernel buffer,
+/// to be attached to the next [`SPAWN`] (its arg2 is the blob length; `0` =
+/// no args). The blob encodes the argument vector as
+/// `[argc: u32 LE]` then, for each arg, `[len: u32 LE][bytes]` - all
+/// little-endian, read with unaligned loads. Bounded by [`ARGV_MAX`]. The
+/// child reads it back via [`GET_ARGC`]/[`GET_ARG`]. Delivered kernel-side
+/// (stored per-task, fetched by the child) exactly like [`STDOUT_TARGET`],
+/// so a spawned program's start-up register/stack state is unchanged.
+pub const ARGS_STAGE: u64 = 47;
+
+/// `()` -> the number of arguments (argv entries) the current task was
+/// spawned with. `0` for a task spawned with no argv (every boot-loaded task
+/// - the shell, the servers - and any [`SPAWN`] with arg2 = 0).
+pub const GET_ARGC: u64 = 48;
+
+/// `(index, out pointer, out capacity)` -> the true length of argument
+/// `index` (copying up to `out capacity` of its bytes into the buffer), or
+/// [`NO_ARG`] if `index >= argc`. A zero-length real argument returns `0`
+/// (distinct from [`NO_ARG`]).
+pub const GET_ARG: u64 = 49;
+
+/// [`GET_ARG`]'s return for an out-of-range index. `u64::MAX` is safely
+/// distinct from any real argument length ([`ARGV_MAX`]-bounded).
+pub const NO_ARG: u64 = u64::MAX;
+
+/// Maximum size of a staged argv blob (and of the per-task argv store),
+/// matching [`MAX_USER_LEN`](self)'s spirit - bounded today by the shell's
+/// 128-byte input line, so 512 bytes of blob is ample.
+pub const ARGV_MAX: u64 = 512;
 
 /// [`NET_RECV`] returned when no frame is currently available (a poll that
 /// found the receive ring empty) - distinct from a real length (`u64::MAX`

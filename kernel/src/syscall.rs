@@ -263,6 +263,49 @@ struct SpawnStagingCell(core::cell::UnsafeCell<[u8; SPAWN_STAGING_SIZE]>);
 unsafe impl Sync for SpawnStagingCell {}
 static SPAWN_STAGING: SpawnStagingCell = SpawnStagingCell(core::cell::UnsafeCell::new([0; SPAWN_STAGING_SIZE]));
 
+/// Staging buffer for a spawn's argv blob (`ARGS_STAGE` writes it here; the
+/// next `SPAWN` copies `arg2` bytes of it into the new task's per-slot argv
+/// store). Small - `ARGV_MAX` (512), bounded by the shell's input line.
+const ARGS_STAGING_SIZE: usize = syscall_abi::ARGV_MAX as usize;
+struct ArgsStagingCell(core::cell::UnsafeCell<[u8; ARGS_STAGING_SIZE]>);
+// SAFETY: single-core; only touched from the ARGS_STAGE/SPAWN arms, which
+// can't run re-entrantly - same reasoning as SPAWN_STAGING.
+unsafe impl Sync for ArgsStagingCell {}
+static ARGS_STAGING: ArgsStagingCell = ArgsStagingCell(core::cell::UnsafeCell::new([0; ARGS_STAGING_SIZE]));
+
+/// Number of arguments in an `ARGS_STAGE` blob (`[argc: u32 LE]` header).
+fn argv_count(blob: &[u8]) -> u64 {
+    if blob.len() < 4 {
+        return 0;
+    }
+    u32::from_le_bytes([blob[0], blob[1], blob[2], blob[3]]) as u64
+}
+
+/// The bytes of argument `index` within an `ARGS_STAGE` blob (`[len: u32 LE]
+/// [bytes]` per arg after the header), or `None` if out of range / malformed.
+fn argv_get(blob: &[u8], index: usize) -> Option<&[u8]> {
+    let argc = argv_count(blob) as usize;
+    if index >= argc {
+        return None;
+    }
+    let mut off = 4usize;
+    for k in 0..=index {
+        if off + 4 > blob.len() {
+            return None;
+        }
+        let len = u32::from_le_bytes([blob[off], blob[off + 1], blob[off + 2], blob[off + 3]]) as usize;
+        off += 4;
+        if off + len > blob.len() {
+            return None;
+        }
+        if k == index {
+            return Some(&blob[off..off + len]);
+        }
+        off += len;
+    }
+    None
+}
+
 /// `syscall_abi::SPAWN`'s real work: parse+relocate the program image
 /// previously fed into [`SPAWN_STAGING`] chunk by chunk (the
 /// `SPAWN_STAGE` syscall - the kernel contains no filesystem to read a
@@ -282,7 +325,7 @@ static SPAWN_STAGING: SpawnStagingCell = SpawnStagingCell(core::cell::UnsafeCell
 /// memory back via `tasks::free_runtime_region`, which always succeeds
 /// here since a failed spawn's allocation is by construction the most
 /// recent one (the LIFO case).
-fn spawn_staged(total_len: u64, stdout_target: u64) -> u64 {
+fn spawn_staged(total_len: u64, stdout_target: u64, argv_len: u64) -> u64 {
     let staging = unsafe { &mut *SPAWN_STAGING.0.get() };
     let size = total_len as usize;
     // A program bigger than the staging buffer can't have been staged
@@ -321,6 +364,14 @@ fn spawn_staged(total_len: u64, stdout_target: u64) -> u64 {
             // Record where this program's output should go (the console by
             // default; the shell for a pipe/redirect). See STDOUT_TARGET.
             tasks::set_stdout_target(slot, stdout_target);
+            // Attach the argv blob staged via ARGS_STAGE (arg2 = its length;
+            // 0 = no args). The child reads it via GET_ARGC/GET_ARG. Bounded
+            // by the staging buffer itself.
+            let argv_len = (argv_len as usize).min(ARGS_STAGING_SIZE);
+            if argv_len > 0 {
+                let staged = unsafe { &*ARGS_STAGING.0.get() };
+                tasks::set_argv(slot, &staged[..argv_len]);
+            }
             // SAFETY: called from an SVC handler with interrupts masked
             // throughout - single-core, so nothing else can observe the
             // table set mid-rebuild.
@@ -515,7 +566,46 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
             let ticks = crate::timer::now_ticks();
             (ticks / freq) * 1_000_000 + ((ticks % freq) * 1_000_000) / freq
         }
-        syscall_abi::SPAWN => spawn_staged(arg0, arg1),
+        syscall_abi::SPAWN => spawn_staged(arg0, arg1, arg2),
+        syscall_abi::ARGS_STAGE => {
+            // arg0 = blob pointer, arg1 = blob length. Copies the whole argv
+            // blob into the staging buffer (a single call - the blob is small,
+            // bounded by ARGV_MAX / valid_user_range's cap). The next SPAWN
+            // copies arg2 bytes of it into the new task's argv store.
+            if !valid_user_range(arg0, arg1) {
+                return SPAWN_ERROR;
+            }
+            let len = arg1 as usize;
+            if len > ARGS_STAGING_SIZE {
+                return SPAWN_ERROR;
+            }
+            let staging = unsafe { &mut *ARGS_STAGING.0.get() };
+            // SAFETY: range sanity-checked above, same trust model as every
+            // other userland pointer argument.
+            let blob = unsafe { core::slice::from_raw_parts(arg0 as *const u8, len) };
+            staging[..len].copy_from_slice(blob);
+            0
+        }
+        syscall_abi::GET_ARGC => argv_count(tasks::argv_blob(tasks::current_task())),
+        syscall_abi::GET_ARG => {
+            // arg0 = index, arg1 = out pointer, arg2 = out capacity. Copies up
+            // to capacity bytes of argument `index`, returns its true length,
+            // or NO_ARG if out of range.
+            if !valid_user_range(arg1, arg2) {
+                return syscall_abi::NO_ARG;
+            }
+            let blob = tasks::argv_blob(tasks::current_task());
+            match argv_get(blob, arg0 as usize) {
+                Some(bytes) => {
+                    let n = (bytes.len() as u64).min(arg2) as usize;
+                    // SAFETY: out range validated above.
+                    let dst = unsafe { core::slice::from_raw_parts_mut(arg1 as *mut u8, n) };
+                    dst.copy_from_slice(&bytes[..n]);
+                    bytes.len() as u64
+                }
+                None => syscall_abi::NO_ARG,
+            }
+        }
         syscall_abi::STDOUT_TARGET => tasks::stdout_target_of(tasks::current_task()),
         syscall_abi::SELF => tasks::current_task() as u64,
         syscall_abi::HEAP_INFO => {
