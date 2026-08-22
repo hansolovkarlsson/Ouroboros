@@ -367,6 +367,95 @@ ext2 wants (permissions, symlinks) is the same richer file interface the
 namespace direction points at. Sequence the enum now; generalize to
 per-FS servers if and when namespaces land.
 
+## Standalone command binaries: `/bin`, PATH, and a shell environment (scoped)
+
+Today every command is a **shell builtin** compiled into `shell/src/main.rs`
+(`dispatch_line`): the shell parses the line and calls a `cmd_*` handler
+directly. The only way to run a real program is `exec /path` — and even that
+passes **no arguments** (`SPAWN`/`SPAWN_STAGE` carry only the program bytes
+plus a stdout target; a spawned task's GPRs are all zeroed; `_start()` takes
+nothing). The goal: commands become **standalone programs** found via a
+**PATH** in a **`/bin` directory**, with a real **environment** in the shell.
+
+**The key insight: the exec substrate already exists — what's missing is
+argv.** The shell already resolves a path, reads a program from `fsd` in
+chunks, stages it, spawns it, and can route its output to the console, a
+capture buffer, or a pipe consumer (`spawn_path`/`cmd_exec`). The one
+foundational gap is that **nothing passes arguments to a spawned program**,
+so `ls /foo`, `cat x`, `echo hi` can't work as external programs until an
+argv mechanism exists. Everything else is plumbing on top of that.
+
+**Decisions (recommended; alternatives noted):**
+
+- **argv delivery: kernel-stored + getter syscalls.** The shell stages the
+  argv bytes; the kernel keeps them per-task; the child reads argc/args via
+  new syscalls — exactly how it already reads `stdout_target`/`heap_info`.
+  `_start` stays argument-less and the spawn `Context` is untouched. *Alt:
+  Unix-style argv on the child's stack — more conventional, but needs an asm
+  `_start` in every program.*
+- **Packaging: a shared userland support crate + thin per-command crates.**
+  Factor the `fs_*`/`con_write`/argv/formatting helpers (currently inside the
+  shell) into one `ulib`-style crate; each command is a small crate depending
+  on it. *Alt: one self-contained crate per command (heavy duplication); or a
+  busybox-style multi-call binary (FAT has no symlinks, so `/bin` needs copies
+  per name).*
+- **Environment: full, but shell-local.** A PATH plus a general env-var table
+  with `env`/`set`/`unset` and `$VAR` expansion — modeled on how `cwd` is
+  already threaded (stack-local, no statics; `linker.ld` asserts `.data`/
+  `.bss` empty). **Not** exported into child programs yet (that's a second,
+  argv-like ABI — deferred). *Alt: PATH-only.*
+- **`/bin` + naming:** a top-level `\bin` on the FAT root, programs staged
+  **uppercase, no extension** (`LS`, `CAT`, `ECHO`) — 8.3-legal, since FAT
+  writes are 8.3-only and lowercase-on-disk is impossible; the shell
+  uppercases the typed command for lookup.
+
+**Necessarily still builtin:** `cd`/`pwd`/`exit`/`exec` (they mutate or read
+the shell's own cwd/lifecycle) and the redirection/pipe **syntax**
+(`>`/`>>`/`|`). So it's *most* commands (~20 of 29), not all.
+
+**Staging:**
+
+0. **More spawnable task slots (prerequisite).** Only slots 5–6 are spawnable
+   today (`FIRST_SPAWNABLE=5`, `NUM_TASKS=7`) — two concurrent spawned tasks,
+   and a `builtin | /prog` pipe already uses both. "Every command is a
+   program" needs headroom; raise `NUM_TASKS` (a mechanical resize of the
+   per-task fixed arrays in `tasks.rs` plus the EL0 region pool in `mmu.rs`).
+   Slots, not RAM, are the ceiling (each task costs ~292 KB + code, fine at
+   512 MB). Small.
+1. **argv ABI (foundational).** New syscalls to stage an argv blob and let the
+   child read `argc`/args (mirroring `SPAWN_STAGE` + the `stdout_target`/
+   `heap_info` getters); a per-slot kernel argv store cleared on task death;
+   `spawn_path` stages the token list before `SPAWN`. Proven by a tiny program
+   that prints its argv. Medium; everything below depends on it.
+2. **`/bin` + PATH lookup.** Makefile stages command binaries into `esp/bin/`;
+   the shell's unknown-command arm searches PATH, probes existence (the
+   one-byte `fs_read_file` trick), and spawns the first hit with argv —
+   branching on console vs. capture exactly as `cmd_exec` does. Small–medium.
+3. **Shell environment.** A stack-local env store (PATH + user vars) threaded
+   like `cwd`; `env`/`set`/`unset`; `$VAR` expansion — all obeying the
+   relocation-safe idioms (scalar comparisons, hand-rolled formatting). PATH
+   lookup then reads `PATH` from it. Medium.
+4. **Externalize the commands.** A shared `ulib` crate, then a thin `/bin`
+   program per externalizable command (`echo`/`cat`/`ls`/`mkdir`/`rmdir`/
+   `touch`/`rm`/`cp`/`mv`/`writeat`/`uptime`/`ps`/`kill`/`wait`/`ping`/
+   `resolve`/`fetch`/`mount`/`selftest`/`help`/`clear`), each reading argv and
+   using `ulib`, dropping the shell builtin once its `/bin` version works.
+   Prove with a batch (`echo`/`cat`/`ls`), then the rest incrementally. Large
+   but scalable — the shared-lib refactor is the real work; each command is
+   then cheap.
+
+**Scale, honestly:** a multi-milestone arc (breadth comparable to a slice of
+the network stack), but Stages 1–3 alone already deliver "type a bare program
+name from `/bin`, with args and an environment" before most commands are
+externalized — a satisfying, self-contained first target.
+
+**Deferred, noted:** exporting the environment into child programs (a second,
+argv-like ABI); multi-stage `a | b | c` of standalone programs (needs the
+Stage 0 slots plus shell-side chaining); and a minimal built-in fallback set
+for booting without `/bin`. `/bin` needs real FAT32, so this is a
+`make run-image` / QEMU-verified feature primarily (like the rest of the
+disk surface); on Parallels it needs a disk (USB stick, reads-only posture).
+
 ## Testing infrastructure: scripted real-hardware round trips
 
 Every real-hardware bug in `xhci-keyboard-postmortem.md` and
