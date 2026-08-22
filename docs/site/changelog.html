@@ -40,6 +40,20 @@
 
   <article>
 
+<h2>Network stack, Stage 4l: RTT-estimated RTO</h2>
+
+<p>The retransmit timeout (Stage 4i) used a fixed 1 s base. This makes it adaptive: an RFC 6298 estimator (<code class="inline">rtt_update</code>) measures each connection's round-trip time and derives the RTO from a smoothed SRTT and its variation (RTTVAR), replacing the fixed base — a fast peer gets a fast RTO, a slow one a patient one.</p>
+
+<p>Meaningful RTT estimation needs a finer clock than netd's <code class="inline">now()</code> (the 20 ms preemption tick — a fetch RTT of tens of ms is 1–2 of those). A new kernel syscall, <code class="inline">MONOTONIC_US</code> (46), exposes the ARM generic timer's free-running counter as microseconds since boot (overflow-safe: whole seconds plus the sub-second remainder, not a naive <code class="inline">ticks * 1_000_000</code> that overflows a u64 in days). Pure system-register reads, not gated — a monotonic clock is a harmless read for any task.</p>
+
+<p>The estimator, per RFC 6298: the first sample R sets SRTT = R, RTTVAR = R/2; later samples fold in RTTVAR = ¾·RTTVAR + ¼·|SRTT−R|, SRTT = ⅞·SRTT + ⅛·R; then RTO = SRTT + max(G, 4·RTTVAR), converted to <code class="inline">now()</code> ticks and clamped to [200 ms, 2 s] (the floor matches the <code class="inline">NET_WAIT</code> poll so a minimum-RTO timer fires at the next poll; the ceiling stays under the supervisor's ~2.5 s wedge threshold). <code class="inline">RTO_INIT_TICKS</code> (~1 s, the RFC's initial value) is used until the first sample.</p>
+
+<p>One RTT sample is timed at a time (Karn's algorithm): it starts when genuinely new data is sent (tracked via a send high-water mark <code class="inline">snd_max</code>, so a retransmit is never timed), completes when its end sequence is acked, and is invalidated by any retransmit (<code class="inline">rewind_to</code> clears it — the ACK would be ambiguous).</p>
+
+<p>Verified on QEMU with temporary instrumentation (reverted): the server's RTT samples logged real values with correct RFC-6298 first-sample maths (srtt = rtt, rttvar = rtt/2) and an adaptive RTO (10 and 47–49 ticks, not the fixed 50); loss recovery via the adaptive RTO was confirmed by injecting one dropped segment with fast retransmit disabled — the file still downloaded complete (59968 bytes), so the RTO fired, resent from <code class="inline">snd_una</code>, and recovered. A clean run streamed the file byte-complete with no spurious retransmits, and client <code class="inline">ping</code>/<code class="inline">fetch</code> worked; zero <code class="inline">-d int</code> aborts throughout.</p>
+
+<p>A documented characteristic, not a bug: netd is single-threaded and processes a segment's ACK only after pumping a window, so a busy transfer's measured RTT includes netd's own send latency (~300 ms for a 60 KB file over SLIRP, vs ~9 ms for a tiny one). This <em>over</em>-estimates the RTO, which is the safe direction (a too-short RTO would retransmit spuriously) — it is not pure wire RTT. Still QEMU-only; the client <code class="inline">fetch</code> path uses its own fixed deadlines, not the estimator (only the server has a persistent per-connection RTO).</p>
+
 <h2>Network stack, Stage 4k: IRQ-driven NIC receive</h2>
 
 <p>The NIC was the last driver still polled — <code class="inline">netd</code> woke on the timer tick's wake-check (<code class="inline">net_has_frame()</code>), so a delivered frame waited up to one tick (20 ms) to be noticed. This wires the virtio-net receive queue's interrupt through the GIC so a frame wakes <code class="inline">netd</code> immediately. The tick-poll stays as a fallback, so the interrupt is a latency optimization, not a correctness dependency: a missed IRQ degrades to ≤1 tick of delay, never a lost frame.</p>

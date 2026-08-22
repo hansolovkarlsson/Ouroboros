@@ -7,6 +7,56 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/`; 
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## Network stack, Stage 4l: RTT-estimated RTO
+
+The retransmit timeout (Stage 4i) used a fixed 1 s base. This makes it
+adaptive: an RFC 6298 estimator (`TcpConn`/`rtt_update`) measures each
+connection's round-trip time and derives the RTO from a smoothed SRTT and
+its variation (RTTVAR), replacing the fixed base — a fast peer gets a fast
+RTO, a slow one a patient one.
+
+Meaningful RTT estimation needs a finer clock than netd's `now()` (the 20 ms
+preemption tick — a fetch RTT of tens of ms is 1–2 of those). A new kernel
+syscall, `MONOTONIC_US` (46), exposes the ARM generic timer's free-running
+counter as microseconds since boot (overflow-safe: whole seconds plus the
+sub-second remainder, not a naive `ticks * 1_000_000` that overflows a u64
+in days). Pure system-register reads, not gated — a monotonic clock is a
+harmless read for any task.
+
+The estimator, per RFC 6298: the first sample R sets SRTT = R, RTTVAR = R/2;
+later samples fold in RTTVAR = ¾·RTTVAR + ¼·|SRTT−R|, SRTT = ⅞·SRTT + ⅛·R;
+then RTO = SRTT + max(G, 4·RTTVAR), converted to `now()` ticks and clamped
+to [200 ms, 2 s] (the floor matches the `NET_WAIT` poll so a minimum-RTO
+timer fires at the next poll; the ceiling stays under the supervisor's
+~2.5 s wedge threshold). `RTO_INIT_TICKS` (~1 s, the RFC's initial value) is
+used until the first sample. `service_rto` arms the timer with this
+per-connection estimate instead of a fixed base.
+
+One RTT sample is timed at a time (Karn's algorithm): a sample starts when
+genuinely new data is sent (tracked via a send high-water mark `snd_max`, so
+a retransmit is never timed), completes when its end sequence is acked, and
+is invalidated by any retransmit (`rewind_to` clears it — the ACK would be
+ambiguous). The exponential backoff on repeated firings is unchanged.
+
+Verified on QEMU with temporary instrumentation (reverted): the server's RTT
+samples logged real values with correct RFC-6298 first-sample maths (srtt =
+rtt, rttvar = rtt/2) and an adaptive RTO (10 and 47–49 ticks, not the fixed
+50); loss recovery via the adaptive RTO was confirmed by injecting one
+dropped segment with fast retransmit disabled — the file still downloaded
+complete (59968 bytes), so the RTO fired, resent from `snd_una`, and
+recovered. A clean run (no injection) streamed the file byte-complete with
+no spurious retransmits, and client `ping`/`fetch` worked; zero `-d int`
+aborts throughout.
+
+A documented characteristic, not a bug: netd is single-threaded and
+processes a segment's ACK only after pumping a window, so a busy transfer's
+measured RTT includes netd's own send latency (~300 ms for a 60 KB file over
+SLIRP, vs ~9 ms for a tiny one). This *over*-estimates the RTO, which is the
+safe direction (a too-short RTO would retransmit spuriously) — it is not
+pure wire RTT. Still QEMU-only (the whole stack is); the client `fetch` path
+uses its own fixed deadlines, not the estimator (only the server has a
+persistent per-connection RTO).
+
 ## Network stack, Stage 4k: IRQ-driven NIC receive
 
 The NIC was the last driver still polled — `netd` woke on the timer tick's

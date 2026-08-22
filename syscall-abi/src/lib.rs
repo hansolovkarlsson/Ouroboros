@@ -466,6 +466,18 @@ pub const NET_MAC: u64 = 44;
 /// [`NET_TASK`] like [`NET_SEND`].
 pub const NET_WAIT: u64 = 45;
 
+/// `()` -> microseconds since boot, from the ARM generic timer's
+/// free-running counter (`CNTPCT_EL0` scaled by `CNTFRQ_EL0`). A
+/// high-resolution monotonic clock, unlike [`GET_TICKS`]'s 20 ms preemption
+/// tick - needed anywhere a real elapsed duration matters (the network
+/// server's TCP round-trip-time estimation is the first user; a fetch RTT
+/// of tens of ms is 1-2 of `GET_TICKS`'s ticks, far too coarse to estimate
+/// from). Not gated - a monotonic clock is a harmless read for any task.
+/// Only meaningful as a *difference* of two readings; the absolute value is
+/// "since boot," and it wraps after ~584,000 years, so callers need not
+/// worry about it.
+pub const MONOTONIC_US: u64 = 46;
+
 /// [`NET_RECV`] returned when no frame is currently available (a poll that
 /// found the receive ring empty) - distinct from a real length (`u64::MAX`
 /// is out of any frame's range) and from the error sentinel.

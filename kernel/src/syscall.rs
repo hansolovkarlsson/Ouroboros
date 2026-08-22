@@ -505,6 +505,16 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
             0
         }
         syscall_abi::GET_TICKS => exceptions::ticks(),
+        syscall_abi::MONOTONIC_US => {
+            // Microseconds since boot from the generic timer's free-running
+            // counter, computed overflow-safe (a naive now_ticks * 1_000_000
+            // overflows a u64 in a few days at 62.5 MHz): split into whole
+            // seconds plus the sub-second remainder. Pure system-register
+            // reads (no GIC, no interrupts) - see timer.rs.
+            let freq = crate::timer::frequency_hz();
+            let ticks = crate::timer::now_ticks();
+            (ticks / freq) * 1_000_000 + ((ticks % freq) * 1_000_000) / freq
+        }
         syscall_abi::SPAWN => spawn_staged(arg0, arg1),
         syscall_abi::STDOUT_TARGET => tasks::stdout_target_of(tasks::current_task()),
         syscall_abi::SELF => tasks::current_task() as u64,

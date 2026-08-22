@@ -75,14 +75,29 @@ const RESP_503: &[u8] = b"HTTP/1.0 503 Service Unavailable\r\nContent-Type: text
 /// the peer's remaining window is tighter - see `pump_send`).
 const SERVE_CHUNK: usize = 1400;
 
-/// TCP retransmit-timeout tuning, in `now()` ticks (a tick is 20ms). Base RTO
-/// ~1s (fixed - no RTT estimation), doubling per consecutive firing up to a
-/// cap, giving up (RST + close) after `RTO_MAX_RETRIES`. `RTO_POLL_MS` is how
-/// long `NET_WAIT` sleeps while data is unacked, so netd wakes to check the
-/// timer even if the peer is silent (no frames).
-const RTO_BASE_TICKS: u64 = 50;
+/// TCP retransmit-timeout tuning, in `now()` ticks (a tick is 20ms). The RTO
+/// is now *estimated per connection* from the measured round-trip time (RFC
+/// 6298 - see `TcpConn::update_rtt`), not fixed: `RTO_INIT_TICKS` (~1s, the
+/// RFC's initial value) is used until the first RTT sample, then the estimate
+/// clamped to `[RTO_MIN_TICKS, RTO_MAX_TICKS]`. It still doubles per
+/// consecutive firing up to a cap and gives up (RST + close) after
+/// `RTO_MAX_RETRIES`. `RTO_POLL_MS` is how long `NET_WAIT` sleeps while data
+/// is unacked, so netd wakes to check the timer even if the peer is silent.
+/// `RTO_MIN_TICKS` matches `RTO_POLL_MS` so a minimum-RTO timer fires at the
+/// next poll rather than sitting idle; `RTO_MAX_TICKS` (2s) stays under the
+/// supervisor's ~2.5s wedge threshold.
+const RTO_INIT_TICKS: u64 = 50; // ~1s, RFC 6298 initial RTO (pre-sample)
+const RTO_MIN_TICKS: u64 = 10; // 200ms, == RTO_POLL_MS
+const RTO_MAX_TICKS: u64 = 100; // 2s
 const RTO_MAX_RETRIES: u8 = 5;
 const RTO_POLL_MS: u64 = 200;
+/// A tick in microseconds (`MONOTONIC_US`'s unit), for converting an
+/// estimated RTO in µs to `now()` ticks.
+const TICK_US: u64 = 20_000;
+/// The RTO's clock-granularity floor `G` (RFC 6298's `max(G, 4*RTTVAR)`):
+/// the 20ms tick the RTO deadline is measured in, so the variance term never
+/// implies finer resolution than the timer actually has.
+const RTT_G_US: u64 = TICK_US;
 
 #[no_mangle]
 #[link_section = ".text.start"]
@@ -672,6 +687,27 @@ struct TcpConn {
     /// Consecutive RTO firings without progress - drives exponential backoff
     /// and the eventual give-up (a dead peer).
     rto_retries: u8,
+    /// Smoothed round-trip time and its variation, in microseconds (RFC 6298;
+    /// see `update_rtt`). `srtt_us == 0` means no sample taken yet.
+    srtt_us: u64,
+    rttvar_us: u64,
+    /// The current estimated RTO, in `now()` ticks - `RTO_INIT_TICKS` until the
+    /// first RTT sample, then derived from `srtt_us`/`rttvar_us`. `service_rto`
+    /// arms the timer with this instead of a fixed base.
+    rto_ticks: u64,
+    /// Highest sequence number ever *newly* sent (the send high-water mark) -
+    /// used to distinguish new data from a retransmit when starting an RTT
+    /// sample (Karn's algorithm: only new data is timed).
+    snd_max: u32,
+    /// Whether an RTT sample is currently outstanding. Started when new data is
+    /// sent (see `rtt_on_send`); completed when `rtt_seq` is acked; invalidated
+    /// by any retransmit (`rewind_to`), per Karn.
+    rtt_active: bool,
+    /// The sequence number that, once acked, completes the outstanding RTT
+    /// sample (the end seq of the timed segment).
+    rtt_seq: u32,
+    /// `MONOTONIC_US` reading when the timed segment was sent.
+    rtt_start_us: u64,
 }
 
 /// A parsed inbound TCP segment addressed to our listen port.
@@ -821,9 +857,17 @@ fn handle_tcp(mac: &[u8; 6], frame: &[u8], seg: &TcpIn, conns: &mut [Option<TcpC
             rto_deadline: 0,
             rto_snd_una: SERVER_ISN,
             rto_retries: 0,
+            srtt_us: 0,
+            rttvar_us: 0,
+            rto_ticks: RTO_INIT_TICKS,
+            snd_max: SERVER_ISN,
+            rtt_active: false,
+            rtt_seq: 0,
+            rtt_start_us: 0,
         };
         send_seg(mac, &c, TCP_SYN | TCP_ACK, true, &[]);
         c.snd_nxt = c.snd_nxt.wrapping_add(1); // our SYN consumes one too
+        c.snd_max = c.snd_nxt; // data starts here; the SYN itself isn't timed
         conns[i] = Some(c);
         return;
     }
@@ -849,6 +893,14 @@ fn handle_conn_segment(mac: &[u8; 6], frame: &[u8], seg: &TcpIn, c: &mut TcpConn
         if seq_gt(seg.ack, c.snd_una) {
             c.snd_una = seg.ack; // forward progress
             c.dup_acks = 0;
+            // Complete an outstanding RTT sample if this ACK covers the timed
+            // segment's end seq (and it wasn't invalidated by a retransmit -
+            // Karn; see rewind_to). !seq_gt(rtt_seq, ack) == ack >= rtt_seq.
+            if c.rtt_active && !seq_gt(c.rtt_seq, seg.ack) {
+                let rtt = now_us().wrapping_sub(c.rtt_start_us);
+                rtt_update(c, rtt);
+                c.rtt_active = false;
+            }
             // After a go-back-N rewind, the peer (which buffers out-of-order
             // segments) can ack *past* the rewound snd_nxt in one jump once the
             // retransmit fills the gap. Keep the invariant snd_nxt >= snd_una -
@@ -935,6 +987,10 @@ fn rewind_to(c: &mut TcpConn, seq: u32) {
     c.read_off = off.saturating_sub(c.prefix_len) as u64;
     c.eof = false;
     c.fin_sent = false;
+    // Karn's algorithm: a retransmit makes any outstanding RTT sample
+    // ambiguous (was the ACK for the original or the resend?), so drop it.
+    // The next genuinely-new send starts a fresh sample.
+    c.rtt_active = false;
 }
 
 /// Service the retransmit timer, called once per event-loop wake. Manages the
@@ -957,11 +1013,11 @@ fn service_rto(mac: &[u8; 6], c: &mut TcpConn, now: u64) -> bool {
         // Forward progress since the last check: restart the timer, reset backoff.
         c.rto_snd_una = c.snd_una;
         c.rto_retries = 0;
-        c.rto_deadline = now + RTO_BASE_TICKS;
+        c.rto_deadline = now + c.rto_ticks;
         return false;
     }
     if c.rto_deadline == 0 {
-        c.rto_deadline = now + RTO_BASE_TICKS; // just became outstanding - arm it
+        c.rto_deadline = now + c.rto_ticks; // just became outstanding - arm it (estimated RTO)
         return false;
     }
     if now >= c.rto_deadline {
@@ -971,7 +1027,7 @@ fn service_rto(mac: &[u8; 6], c: &mut TcpConn, now: u64) -> bool {
         }
         rewind_to(c, c.snd_una); // presume loss, resend from snd_una
         c.rto_retries += 1;
-        c.rto_deadline = now + (RTO_BASE_TICKS << c.rto_retries.min(4)); // exp. backoff, capped
+        c.rto_deadline = now + (c.rto_ticks << c.rto_retries.min(4)); // exp. backoff, capped
     }
     false
 }
@@ -1308,8 +1364,10 @@ fn pump_send(mac: &[u8; 6], c: &mut TcpConn) {
             // Copy out of the conn's own buffer so send_seg can borrow c.
             let mut seg = [0u8; SERVE_CHUNK];
             seg[..n].copy_from_slice(&c.prefix[c.prefix_off..c.prefix_off + n]);
+            let seg_start = c.snd_nxt;
             send_seg(mac, c, TCP_PSH | TCP_ACK, false, &seg[..n]);
             c.snd_nxt = c.snd_nxt.wrapping_add(n as u32);
+            rtt_on_send(c, seg_start);
             c.prefix_off += n;
             sent += 1;
             continue;
@@ -1329,8 +1387,10 @@ fn pump_send(mac: &[u8; 6], c: &mut TcpConn) {
                 c.eof = true; // real end of file
                 continue;
             }
+            let seg_start = c.snd_nxt;
             send_seg(mac, c, TCP_PSH | TCP_ACK, false, &chunk[..got]);
             c.snd_nxt = c.snd_nxt.wrapping_add(got as u32);
+            rtt_on_send(c, seg_start);
             c.read_off += got as u64;
             sent += 1;
             continue;
@@ -1789,6 +1849,49 @@ fn read_u64(buf: &[u8], off: usize) -> u64 {
 
 fn now() -> u64 {
     syscall(syscall_abi::GET_TICKS, 0)
+}
+
+/// Microseconds since boot - a high-resolution monotonic clock (unlike
+/// `now()`'s 20ms tick), used for RTT estimation where a real elapsed
+/// duration matters. Only meaningful as a difference of two readings.
+fn now_us() -> u64 {
+    syscall(syscall_abi::MONOTONIC_US, 0)
+}
+
+/// Fold a fresh round-trip-time measurement `r_us` into a connection's
+/// smoothed RTT and variance and recompute its RTO (RFC 6298). First sample:
+/// `SRTT = R`, `RTTVAR = R/2`. Later: `RTTVAR = 3/4 RTTVAR + 1/4 |SRTT - R|`,
+/// `SRTT = 7/8 SRTT + 1/8 R`. Then `RTO = SRTT + max(G, 4 RTTVAR)`, converted
+/// to `now()` ticks and clamped to `[RTO_MIN_TICKS, RTO_MAX_TICKS]`.
+fn rtt_update(c: &mut TcpConn, r_us: u64) {
+    if c.srtt_us == 0 {
+        c.srtt_us = r_us;
+        c.rttvar_us = r_us / 2;
+    } else {
+        let delta = c.srtt_us.abs_diff(r_us);
+        c.rttvar_us = (3 * c.rttvar_us + delta) / 4;
+        c.srtt_us = (7 * c.srtt_us + r_us) / 8;
+    }
+    let rto_us = c.srtt_us + (4 * c.rttvar_us).max(RTT_G_US);
+    c.rto_ticks = (rto_us / TICK_US).clamp(RTO_MIN_TICKS, RTO_MAX_TICKS);
+}
+
+/// Called after a data segment starting at `seg_start` is sent. If it's new
+/// data (at or past the send high-water mark, not a retransmit) and no RTT
+/// sample is already outstanding, start timing it: the sample completes when
+/// `snd_nxt` (its end seq) is acked. Karn's algorithm - retransmits are never
+/// timed, and an outstanding sample is invalidated if the segment is later
+/// retransmitted (see `rewind_to`).
+fn rtt_on_send(c: &mut TcpConn, seg_start: u32) {
+    if seq_gt(c.snd_max, seg_start) {
+        return; // seg_start < snd_max: a retransmit, not new data - don't time
+    }
+    c.snd_max = c.snd_nxt;
+    if !c.rtt_active {
+        c.rtt_active = true;
+        c.rtt_seq = c.snd_nxt;
+        c.rtt_start_us = now_us();
+    }
 }
 
 /// Transmit one frame. `Ok(())` on success.
