@@ -45,6 +45,14 @@ LS_ELF       := target/$(USER_TARGET)/release/ls
 LS_BIN       := target/$(USER_TARGET)/release/ls.bin
 CAT_ELF      := target/$(USER_TARGET)/release/cat
 CAT_BIN      := target/$(USER_TARGET)/release/cat.bin
+MKDIR_ELF    := target/$(USER_TARGET)/release/mkdir
+MKDIR_BIN    := target/$(USER_TARGET)/release/mkdir.bin
+RMDIR_ELF    := target/$(USER_TARGET)/release/rmdir
+RMDIR_BIN    := target/$(USER_TARGET)/release/rmdir.bin
+TOUCH_ELF    := target/$(USER_TARGET)/release/touch
+TOUCH_BIN    := target/$(USER_TARGET)/release/touch.bin
+RM_ELF       := target/$(USER_TARGET)/release/rm
+RM_BIN       := target/$(USER_TARGET)/release/rm.bin
 ESP_DIR      := esp
 OVMF         := $(shell brew --prefix qemu 2>/dev/null)/share/qemu/edk2-aarch64-code.fd
 PDT          := /Applications/Parallels Desktop.app/Contents/MacOS/prl_disk_tool
@@ -63,7 +71,7 @@ ifeq ($(PROFILE),release)
 CARGO_FLAGS += --release
 endif
 
-.PHONY: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin esp run run-virtio-console run-usb-kbd run-usb-multi run-gicv3 image run-image parallels-hdd test-parallels clean
+.PHONY: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin esp run run-virtio-console run-usb-kbd run-usb-multi run-gicv3 image run-image parallels-hdd test-parallels clean
 
 # Overridable by `make test-parallels VM_NAME=... CMDS=... BOOT_WAIT=...`.
 VM_NAME     ?= Ouroboros
@@ -152,6 +160,22 @@ cat-bin:
 	cargo build -p cat --target $(USER_TARGET) --release
 	"$(OBJCOPY)" --strip-all $(CAT_ELF) $(CAT_BIN)
 
+mkdir-bin:
+	cargo build -p mkdir --target $(USER_TARGET) --release
+	"$(OBJCOPY)" --strip-all $(MKDIR_ELF) $(MKDIR_BIN)
+
+rmdir-bin:
+	cargo build -p rmdir --target $(USER_TARGET) --release
+	"$(OBJCOPY)" --strip-all $(RMDIR_ELF) $(RMDIR_BIN)
+
+touch-bin:
+	cargo build -p touch --target $(USER_TARGET) --release
+	"$(OBJCOPY)" --strip-all $(TOUCH_ELF) $(TOUCH_BIN)
+
+rm-bin:
+	cargo build -p rm --target $(USER_TARGET) --release
+	"$(OBJCOPY)" --strip-all $(RM_ELF) $(RM_BIN)
+
 # Stage the EFI System Partition layout QEMU/Parallels expect: a removable
 # UEFI drive boots \EFI\BOOT\BOOTAA64.EFI automatically, no boot manager
 # entry needed. \EFI\ORBS\ (must fit FAT's 8.3 short-name limit, which
@@ -160,7 +184,7 @@ cat-bin:
 # itself: the default shell binary and the config file (loader.rs's
 # CONFIG_PATH) naming which program to load - edit INIT.CFG and rebuild
 # just that program to swap it out, no kernel rebuild required.
-esp: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin
+esp: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin
 	mkdir -p $(ESP_DIR)/EFI/BOOT $(ESP_DIR)/EFI/ORBS $(ESP_DIR)/bin
 	cp $(KERNEL) $(ESP_DIR)/EFI/BOOT/BOOTAA64.EFI
 	cp $(SHELL_BIN) $(ESP_DIR)/EFI/ORBS/SH.BIN
@@ -183,6 +207,10 @@ esp: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin args
 	cp $(CLEAR_BIN) $(ESP_DIR)/bin/CLEAR
 	cp $(LS_BIN) $(ESP_DIR)/bin/LS
 	cp $(CAT_BIN) $(ESP_DIR)/bin/CAT
+	cp $(MKDIR_BIN) $(ESP_DIR)/bin/MKDIR
+	cp $(RMDIR_BIN) $(ESP_DIR)/bin/RMDIR
+	cp $(TOUCH_BIN) $(ESP_DIR)/bin/TOUCH
+	cp $(RM_BIN) $(ESP_DIR)/bin/RM
 
 # Boots the ESP directory directly in QEMU (no disk image needed) against
 # the aarch64 OVMF firmware installed by `brew install qemu`.

@@ -7,6 +7,34 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/`; 
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## Standalone binaries, Stage 4 (write-command increment): `mkdir`/`rmdir`/`touch`/`rm` externalized
+
+Sixth step of the arc. With the cwd-delivery ABI in place, the four
+path-only write commands were the cheapest batch to externalize: each is just
+"resolve `argv[1]` against the delivered cwd, send one `FSOP_*`, report the
+status." They share a new `ulib::fs_op_path(op, path)` helper (the shape the
+shell's old `fs_mkdir`/`fs_rmdir`/`fs_touch`/`fs_rm` had), so each program is
+~40 lines of `_start` — argument check, cwd fetch, path resolve, one call.
+
+- `mkdir` → `FSOP_MKDIR`, `rmdir` → `FSOP_RMDIR`, `touch` → `FSOP_TOUCH`,
+  `rm` → `FSOP_RM`, staged as `/bin/MKDIR`/`RMDIR`/`TOUCH`/`RM`.
+- The four shell builtins (`cmd_mkdir`/`cmd_rmdir`/`cmd_touch`/`cmd_rm`) and
+  their now-unused `fs_*` helpers were removed; `fs_write_file`/`fs_mv` (still
+  used by `write`/`cp`/`mv`) inherited the shared status-contract doc comment.
+- On failure a command prints the specific reason (via `ulib::fs_error`) and
+  exits non-zero — the stderr-to-console split holds.
+
+Verified on QEMU (run-image), zero `-d int` aborts: `mkdir /d1` then `ls /`
+shows it; `touch /d1/f1` (absolute) and, after `cd /d1`, `touch f2` / `rm f1`
+(relative to the delivered cwd) all resolve; every error path is correct with
+exit code 1 — `rmdir` on a non-empty dir → "directory not empty", `mkdir` on
+an existing one → "already exists", `rm` on a directory → "is a directory",
+`rmdir /nope` → "no such file or directory".
+
+Still builtin (they need the shell's own state or move bulk data): `write`,
+`writeat`, `cp`, `mv`. The arc continues with those, then the non-fs commands.
+See `roadmap.md`.
+
 ## Standalone binaries, Stage 4 (filesystem increment): a cwd-delivery ABI, and `ls`/`cat` externalized
 
 Fifth step of the arc, and the first filesystem commands to leave the shell.

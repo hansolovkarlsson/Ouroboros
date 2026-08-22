@@ -452,12 +452,14 @@ the shell's own cwd/lifecycle) and the redirection/pipe **syntax**
    layer (`cwd`, `resolve`, `fs_list_dir`/`fs_read_bulk`) so a spawned command
    resolves relative paths and defaults a bare `ls` to the current directory.
    See `CHANGELOG.md`'s "Standalone binaries, Stage 4 (first increment)" and
-   "(filesystem increment)." *Next:* the remaining filesystem commands
-   (`mkdir`/`rmdir`/`touch`/`rm`/`cp`/`mv`/`writeat`) follow the same
-   cwd+argv pattern, then the non-fs ones (`ps`/`kill`/`wait`/`ping`/`resolve`/
-   `fetch`/`mount`/`selftest`/`help`) incrementally. Each command is cheap now
-   that `ulib` exists. (`cd`/`pwd`/`exit`/`exec` and the redirect/pipe syntax
-   stay builtin.)
+   "(filesystem increment)." *Write-command increment done:*
+   `mkdir`/`rmdir`/`touch`/`rm` externalized — the path-only write ops, each a
+   single `FSOP_*` via a shared `ulib::fs_op_path` helper. *Next:* the
+   bulk-data / multi-arg filesystem commands (`cp`/`mv`/`writeat`), then the
+   non-fs ones (`ps`/`kill`/`wait`/`ping`/`resolve`/`fetch`/`mount`/`selftest`/
+   `help`) incrementally. Each command is cheap now that `ulib` exists.
+   (`cd`/`pwd`/`exit`/`exec`, plus `write` and the redirect/pipe syntax, stay
+   builtin.)
 
 **Scale, honestly:** a multi-milestone arc (breadth comparable to a slice of
 the network stack), but Stages 1–3 alone already deliver "type a bare program

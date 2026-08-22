@@ -93,6 +93,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "mkdir"
+version = "0.1.0"
+dependencies = [
+ "syscall-abi",
+ "ulib",
+]
+
+[[package]]
 name = "netd"
 version = "0.1.0"
 dependencies = [
@@ -155,6 +163,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "rm"
+version = "0.1.0"
+dependencies = [
+ "syscall-abi",
+ "ulib",
+]
+
+[[package]]
+name = "rmdir"
+version = "0.1.0"
+dependencies = [
+ "syscall-abi",
+ "ulib",
+]
+
+[[package]]
 name = "shell"
 version = "0.1.0"
 dependencies = [
@@ -186,6 +210,14 @@ dependencies = [
 [[package]]
 name = "syscall-abi"
 version = "0.1.0"
+
+[[package]]
+name = "touch"
+version = "0.1.0"
+dependencies = [
+ "syscall-abi",
+ "ulib",
+]
 
 [[package]]
 name = "ucs2"

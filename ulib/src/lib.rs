@@ -388,6 +388,13 @@ pub fn fs_list_dir(path: &str, buf: &mut [u8]) -> u64 {
     )
 }
 
+/// Invoke a single path-only filesystem op (`FSOP_MKDIR`/`RMDIR`/`TOUCH`/`RM`):
+/// the path is the only input, the reply is a bare status (`0` on success, or
+/// an `FS_ERR_*`/`NO_FS` code). The shape `mkdir`/`rmdir`/`touch`/`rm` share.
+pub fn fs_op_path(op: u64, path: &str) -> u64 {
+    fs_call(op, [path.len() as u64, 0, 0, 0], path.as_bytes(), &[], &mut [])
+}
+
 /// Read up to `buf.len()` bytes of `path` from `offset` into `buf` via the
 /// grant/safecopy bulk path (the server SAFECOPYs straight into `buf`).
 /// Returns the byte count (0 at EOF), [`NO_FS`], or an `FS_ERR_*` code.

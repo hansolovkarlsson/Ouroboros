@@ -40,6 +40,20 @@
 
   <article>
 
+<h2>Standalone binaries, Stage 4 (write-command increment): <code class="inline">mkdir</code>/<code class="inline">rmdir</code>/<code class="inline">touch</code>/<code class="inline">rm</code> externalized</h2>
+
+<p>Sixth step of the arc. With the cwd-delivery ABI in place, the four path-only write commands were the cheapest batch to externalize: each is just "resolve <code class="inline">argv[1]</code> against the delivered cwd, send one <code class="inline">FSOP_*</code>, report the status." They share a new <code class="inline">ulib::fs_op_path(op, path)</code> helper (the shape the shell's old <code class="inline">fs_mkdir</code>/<code class="inline">fs_rmdir</code>/<code class="inline">fs_touch</code>/<code class="inline">fs_rm</code> had), so each program is ~40 lines of <code class="inline">_start</code> — argument check, cwd fetch, path resolve, one call.</p>
+
+<ul>
+<li><code class="inline">mkdir</code> → <code class="inline">FSOP_MKDIR</code>, <code class="inline">rmdir</code> → <code class="inline">FSOP_RMDIR</code>, <code class="inline">touch</code> → <code class="inline">FSOP_TOUCH</code>, <code class="inline">rm</code> → <code class="inline">FSOP_RM</code>, staged as <code class="inline">/bin/MKDIR</code>/<code class="inline">RMDIR</code>/<code class="inline">TOUCH</code>/<code class="inline">RM</code>.</li>
+<li>The four shell builtins (<code class="inline">cmd_mkdir</code>/<code class="inline">cmd_rmdir</code>/<code class="inline">cmd_touch</code>/<code class="inline">cmd_rm</code>) and their now-unused <code class="inline">fs_*</code> helpers were removed; <code class="inline">fs_write_file</code>/<code class="inline">fs_mv</code> (still used by <code class="inline">write</code>/<code class="inline">cp</code>/<code class="inline">mv</code>) inherited the shared status-contract doc comment.</li>
+<li>On failure a command prints the specific reason (via <code class="inline">ulib::fs_error</code>) and exits non-zero — the stderr-to-console split holds.</li>
+</ul>
+
+<p>Verified on QEMU (run-image), zero <code class="inline">-d int</code> aborts: <code class="inline">mkdir /d1</code> then <code class="inline">ls /</code> shows it; <code class="inline">touch /d1/f1</code> (absolute) and, after <code class="inline">cd /d1</code>, <code class="inline">touch f2</code> / <code class="inline">rm f1</code> (relative to the delivered cwd) all resolve; every error path is correct with exit code 1 — <code class="inline">rmdir</code> on a non-empty dir → "directory not empty", <code class="inline">mkdir</code> on an existing one → "already exists", <code class="inline">rm</code> on a directory → "is a directory", <code class="inline">rmdir /nope</code> → "no such file or directory".</p>
+
+<p>Still builtin (they need the shell's own state or move bulk data): <code class="inline">write</code>, <code class="inline">writeat</code>, <code class="inline">cp</code>, <code class="inline">mv</code>. The arc continues with those, then the non-fs commands. See <a href="roadmap.html">the roadmap</a>.</p>
+
 <h2>Standalone binaries, Stage 4 (filesystem increment): a cwd-delivery ABI, and <code class="inline">ls</code>/<code class="inline">cat</code> externalized</h2>
 
 <p>Fifth step of the arc, and the first filesystem commands to leave the shell. Externalizing <code class="inline">ls</code>/<code class="inline">cat</code> needed the one thing the first increment (<code class="inline">echo</code>/<code class="inline">uptime</code>/<code class="inline">clear</code>) deliberately dodged: a spawned program has no cwd, so it can't resolve a relative path or default a bare <code class="inline">ls</code> to "the current directory." This adds a <strong>cwd-delivery mechanism</strong>, mirroring the argv ABI, then moves <code class="inline">ls</code> and <code class="inline">cat</code> out.</p>

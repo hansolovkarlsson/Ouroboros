@@ -813,13 +813,10 @@ fn dispatch_line(line: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize, env:
         "resolve" => cmd_resolve(arg, out),
         "fetch" => cmd_fetch(arg, out),
         "pwd" => out.put_line(cwd_str(cwd, *cwd_len)),
-        // ls and cat are externalized to /bin now (Stage 4) - they run as
-        // spawned programs that inherit the shell's cwd via GET_CWD.
+        // ls, cat, mkdir, rmdir, touch, and rm are externalized to /bin now
+        // (Stage 4) - they run as spawned programs that inherit the shell's cwd
+        // via GET_CWD.
         "cd" => cmd_cd(arg, cwd, cwd_len),
-        "mkdir" => cmd_mkdir(arg, cwd, *cwd_len),
-        "rmdir" => cmd_rmdir(arg, cwd, *cwd_len),
-        "touch" => cmd_touch(arg, cwd, *cwd_len),
-        "rm" => cmd_rm(arg, cwd, *cwd_len),
         "write" => cmd_write(line, cwd, *cwd_len),
         "writeat" => cmd_writeat(line, cwd, *cwd_len),
         "cp" => cmd_cp(line, cwd, *cwd_len),
@@ -1070,28 +1067,6 @@ fn cmd_cd(arg: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize) {
     }
     cwd[..path_len].copy_from_slice(&path_buf[..path_len]);
     *cwd_len = path_len;
-}
-
-fn cmd_mkdir(arg: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize) {
-    if arg.is_empty() {
-        print_line("mkdir: missing directory argument");
-        return;
-    }
-    let mut path_buf = [0u8; PATH_SIZE];
-    let Some(path_len) = resolve_path(cwd_str(cwd, cwd_len), arg, &mut path_buf) else {
-        print_line("mkdir: path too long");
-        return;
-    };
-    let Ok(path) = core::str::from_utf8(&path_buf[..path_len]) else {
-        print_line("mkdir: path too long");
-        return;
-    };
-
-    match fs_mkdir(path) {
-        NO_FS => print_no_fs(),
-        code if code >= FS_ERR_MIN => print_fs_error("mkdir", code),
-        _ => {}
-    }
 }
 
 /// Loads and starts `arg` as a new, independent task alongside whatever is
@@ -1398,72 +1373,6 @@ fn spawn_path(path: &str, argv: &[&str], cwd: &[u8; CWD_SIZE], cwd_len: usize, s
 /// producer's stdout target so its output routes back here. See `SELF`.
 fn self_task() -> u64 {
     syscall(syscall_abi::SELF, 0)
-}
-
-fn cmd_rmdir(arg: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize) {
-    if arg.is_empty() {
-        print_line("rmdir: missing directory argument");
-        return;
-    }
-    let mut path_buf = [0u8; PATH_SIZE];
-    let Some(path_len) = resolve_path(cwd_str(cwd, cwd_len), arg, &mut path_buf) else {
-        print_line("rmdir: path too long");
-        return;
-    };
-    let Ok(path) = core::str::from_utf8(&path_buf[..path_len]) else {
-        print_line("rmdir: path too long");
-        return;
-    };
-
-    match fs_rmdir(path) {
-        NO_FS => print_no_fs(),
-        code if code >= FS_ERR_MIN => print_fs_error("rmdir", code),
-        _ => {}
-    }
-}
-
-fn cmd_touch(arg: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize) {
-    if arg.is_empty() {
-        print_line("touch: missing file argument");
-        return;
-    }
-    let mut path_buf = [0u8; PATH_SIZE];
-    let Some(path_len) = resolve_path(cwd_str(cwd, cwd_len), arg, &mut path_buf) else {
-        print_line("touch: path too long");
-        return;
-    };
-    let Ok(path) = core::str::from_utf8(&path_buf[..path_len]) else {
-        print_line("touch: path too long");
-        return;
-    };
-
-    match fs_touch(path) {
-        NO_FS => print_no_fs(),
-        code if code >= FS_ERR_MIN => print_fs_error("touch", code),
-        _ => {}
-    }
-}
-
-fn cmd_rm(arg: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize) {
-    if arg.is_empty() {
-        print_line("rm: missing file argument");
-        return;
-    }
-    let mut path_buf = [0u8; PATH_SIZE];
-    let Some(path_len) = resolve_path(cwd_str(cwd, cwd_len), arg, &mut path_buf) else {
-        print_line("rm: path too long");
-        return;
-    };
-    let Ok(path) = core::str::from_utf8(&path_buf[..path_len]) else {
-        print_line("rm: path too long");
-        return;
-    };
-
-    match fs_rm(path) {
-        NO_FS => print_no_fs(),
-        code if code >= FS_ERR_MIN => print_fs_error("rm", code),
-        _ => {}
-    }
 }
 
 /// `write <file> <words...>` - joins every word after the filename with a
@@ -2371,33 +2280,12 @@ fn fs_write_at(path: &str, offset: u64, data: &[u8]) -> u64 {
     )
 }
 
-/// Creates an empty directory at `path`. Returns `0` on success,
-/// [`NO_FS`], or a specific `FS_ERR_*` code for the real failure
-/// reason (already exists, invalid 8.3 name, parent missing, disk
+/// The status contract every path-op fs helper shares: `0` on success,
+/// [`NO_FS`] if no filesystem is mounted, or a specific `FS_ERR_*` code for the
+/// real failure reason (already exists, invalid 8.3 name, parent missing, disk
 /// full, ... - see [`print_fs_error`]).
-fn fs_mkdir(path: &str) -> u64 {
-    fs_call(syscall_abi::FSOP_MKDIR, [path.len() as u64, 0, 0, 0], path.as_bytes(), &[], &mut [])
-}
-
-/// Removes the empty directory at `path`. Same return contract as
-/// [`fs_mkdir`].
-fn fs_rmdir(path: &str) -> u64 {
-    fs_call(syscall_abi::FSOP_RMDIR, [path.len() as u64, 0, 0, 0], path.as_bytes(), &[], &mut [])
-}
-
-/// Creates an empty file at `path`, or succeeds as a no-op if a file
-/// already exists there. Same return contract as [`fs_mkdir`].
-fn fs_touch(path: &str) -> u64 {
-    fs_call(syscall_abi::FSOP_TOUCH, [path.len() as u64, 0, 0, 0], path.as_bytes(), &[], &mut [])
-}
-
-/// Removes the file at `path`. Same return contract as [`fs_mkdir`].
-fn fs_rm(path: &str) -> u64 {
-    fs_call(syscall_abi::FSOP_RM, [path.len() as u64, 0, 0, 0], path.as_bytes(), &[], &mut [])
-}
-
-/// Creates or fully overwrites the file at `path` with `data`. Same
-/// return contract as [`fs_mkdir`].
+///
+/// Creates or fully overwrites the file at `path` with `data`.
 fn fs_write_file(path: &str, data: &[u8]) -> u64 {
     fs_call(
         syscall_abi::FSOP_WRITE_FILE,
@@ -2409,7 +2297,7 @@ fn fs_write_file(path: &str, data: &[u8]) -> u64 {
 }
 
 /// Renames or moves the file or directory at `src` to `dst`. Same
-/// return contract as [`fs_mkdir`].
+/// return contract as [`fs_write_file`].
 fn fs_mv(src: &str, dst: &str) -> u64 {
     fs_call(
         syscall_abi::FSOP_MV,
