@@ -7,6 +7,20 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/`; 
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## Network stack, Stage 4m: HTTP 405 for unsupported methods
+
+The server treated every request like a GET (it only distinguished HEAD). A
+request with any other method (POST, DELETE, …) now gets a proper `405
+Method Not Allowed` with the `Allow: GET, HEAD` header RFC 7231 requires.
+Pure `netd`, one check: `start_response` rejects anything but GET/HEAD up
+front — before touching the path, so an unsupported method never reaches
+`fsd` — reusing the same fixed-response prefix mechanism as 404/503.
+
+Verified on QEMU: `curl -X POST /` and `curl -X DELETE /file` → `405 Method
+Not Allowed` + `Allow: GET, HEAD` + a plain-text body; `GET` (200, correct
+Content-Type/Content-Length) and `HEAD` (200 headers, no body) unregressed;
+zero `-d int` aborts.
+
 ## Network stack, Stage 4l: RTT-estimated RTO
 
 The retransmit timeout (Stage 4i) used a fixed 1 s base. This makes it

@@ -40,6 +40,12 @@
 
   <article>
 
+<h2>Network stack, Stage 4m: HTTP 405 for unsupported methods</h2>
+
+<p>The server treated every request like a GET (it only distinguished HEAD). A request with any other method (POST, DELETE, …) now gets a proper <code class="inline">405 Method Not Allowed</code> with the <code class="inline">Allow: GET, HEAD</code> header RFC 7231 requires. Pure <code class="inline">netd</code>, one check: <code class="inline">start_response</code> rejects anything but GET/HEAD up front — before touching the path, so an unsupported method never reaches <code class="inline">fsd</code> — reusing the same fixed-response prefix mechanism as 404/503.</p>
+
+<p>Verified on QEMU: <code class="inline">curl -X POST /</code> and <code class="inline">curl -X DELETE /file</code> → <code class="inline">405 Method Not Allowed</code> + <code class="inline">Allow: GET, HEAD</code> + a plain-text body; <code class="inline">GET</code> (200, correct Content-Type/Content-Length) and <code class="inline">HEAD</code> (200 headers, no body) unregressed; zero <code class="inline">-d int</code> aborts.</p>
+
 <h2>Network stack, Stage 4l: RTT-estimated RTO</h2>
 
 <p>The retransmit timeout (Stage 4i) used a fixed 1 s base. This makes it adaptive: an RFC 6298 estimator (<code class="inline">rtt_update</code>) measures each connection's round-trip time and derives the RTO from a smoothed SRTT and its variation (RTTVAR), replacing the fixed base — a fast peer gets a fast RTO, a slow one a patient one.</p>

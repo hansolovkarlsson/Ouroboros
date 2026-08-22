@@ -69,6 +69,9 @@ const MAX_CONNS: usize = 4;
 const RESP_404: &[u8] =
     b"HTTP/1.0 404 Not Found\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nNot Found\r\n";
 const RESP_503: &[u8] = b"HTTP/1.0 503 Service Unavailable\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nNo filesystem mounted\r\n";
+// Only GET and HEAD are implemented; any other method gets a 405 with an
+// Allow header naming the two that work (RFC 7231 requires Allow on a 405).
+const RESP_405: &[u8] = b"HTTP/1.0 405 Method Not Allowed\r\nAllow: GET, HEAD\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nMethod Not Allowed\r\n";
 
 /// One file chunk / one TCP body segment - kept under the 1460 MSS so each
 /// `FSOP_READ_BULK` maps to at most one segment (a segment may be smaller when
@@ -1063,15 +1066,26 @@ fn send_seg(mac: &[u8; 6], c: &TcpConn, flags: u8, with_mss: bool, payload: &[u8
 /// streams from offset 0 (fsd reads are idempotent, offset-based).
 fn start_response(c: &mut TcpConn, request: &[u8]) {
     let head = is_head(request);
-    let mut pathbuf = [0u8; PATH_MAX];
-    let path = parse_path(request, &mut pathbuf);
-    let path: &[u8] = if path.is_empty() { b"/" } else { path };
 
     c.prefix_off = 0;
     c.file = false;
     c.read_off = 0;
     c.eof = false;
     c.fin_sent = false;
+
+    // Only GET and HEAD are supported; any other method -> 405 (with the
+    // Allow header those two require). Checked before touching the path, so an
+    // unsupported method never reaches fsd. 405 has a body, so - unlike the
+    // other early responses - the HEAD-trim below doesn't apply (an
+    // unsupported method is by definition not HEAD).
+    if !head && !request.starts_with(b"GET ") {
+        set_prefix(c, RESP_405);
+        return;
+    }
+
+    let mut pathbuf = [0u8; PATH_MAX];
+    let path = parse_path(request, &mut pathbuf);
+    let path: &[u8] = if path.is_empty() { b"/" } else { path };
 
     // A file? (stat succeeds and returns a size.)
     let size = stat_size(path);
@@ -1108,7 +1122,7 @@ fn start_response(c: &mut TcpConn, request: &[u8]) {
 }
 
 /// Whether the request is an HTTP `HEAD` (headers only, no body). Methods are
-/// uppercase; a non-GET/HEAD method is still served like a GET (no 405 yet).
+/// uppercase; a non-GET/HEAD method gets a 405 (see `start_response`).
 fn is_head(request: &[u8]) -> bool {
     request.starts_with(b"HEAD ")
 }

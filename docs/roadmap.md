@@ -229,8 +229,7 @@ step, not a Stage 1 concern.
    response headers (`Content-Type` by file extension + `Content-Length` via
    an `fsd` stat), so a browser renders served files. **Still open:**
    congestion control (`cwnd`/slow-start — only the peer's flow-control window
-   is honored), selective/SACK retransmit (4h/4i are go-back-N), and richer
-   method handling (a 405 for non-GET/HEAD). (Stage 4f added a browsable HTML
+   is honored) and selective/SACK retransmit (4h/4i are go-back-N). (Stage 4f added a browsable HTML
    directory listing; Stage 4g added `HEAD`; Stage 4h added fast retransmit;
    Stage 4i added a timer-based RTO — via a new `NET_WAIT` timeout — for a
    silent peer, so loss recovery is complete; Stage 4j added concurrent
@@ -239,8 +238,9 @@ step, not a Stage 1 concern.
    GIC SPI wakes `netd` directly instead of waiting for the tick poll, which
    stays as a fallback; Stage 4l made the RTO adaptive — RFC 6298 SRTT/RTTVAR
    estimated from measured round-trip time via a new `MONOTONIC_US` clock
-   syscall, replacing the fixed 1 s base.) See `CHANGELOG.md`'s "Network
-   stack, Stage 4a–4l."
+   syscall, replacing the fixed 1 s base; Stage 4m returns a proper 405 for
+   an unsupported HTTP method.) See `CHANGELOG.md`'s "Network stack, Stage
+   4a–4m."
 
 **Decisions to settle before starting (not now):**
 
