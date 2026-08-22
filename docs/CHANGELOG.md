@@ -7,6 +7,36 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/`; 
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## Standalone binaries, Stage 3: a shell environment
+
+Third step of the arc: the shell gains environment variables and `$VAR`
+expansion, and `PATH` becomes a real variable driving command lookup
+(replacing Stage 2's `/bin` constant).
+
+- A stack-local env store (`Env` — a fixed 16-entry NAME=VALUE table),
+  threaded by `&mut` through `on_byte`/`run_line`/`dispatch_line` like `cwd`,
+  since userland has no static mutable state. Initialized with `PATH=/bin`.
+- Commands: `env` (list all), `set NAME=VALUE` / `export NAME=VALUE` (set or
+  replace), `unset NAME` (remove). Values are a single token (no quoting,
+  same limitation as `echo`).
+- `$VAR` expansion (`expand_vars`) rewrites the line before dispatch: `$NAME`
+  (`[A-Za-z0-9_]+`) becomes the variable's value (nothing if unset), a bare
+  `$` is literal. Hand-rolled scalar scan, relocation-safe.
+- `run_path_command` reads `PATH` from the env now, so `set PATH=…` changes
+  where bare commands are found.
+- Shell-local only: env is not exported into child programs yet (that's a
+  later, argv-like ABI — deferred).
+
+Verified on QEMU (run-image): `env` shows `PATH=/bin`; `set GREETING=hello` +
+`echo $GREETING` → `hello`; `echo pre-$GREETING-post` → `pre-hello-post`;
+`echo $MISSING done` → `done` (unset expands empty); `env` lists both vars;
+`unset GREETING` then `echo …$GREETING…` → empty; `set PATH=/nowhere` makes
+`args` "unknown command", `set PATH=/bin` makes it work again; zero `-d int`
+aborts.
+
+Next (last of the arc): externalize the actual commands into `/bin`
+(Stage 4). See `roadmap.md`.
+
 ## Standalone binaries, Stage 2: /bin + PATH lookup
 
 Second step of the arc (Stage 1 gave spawned programs argv): an unknown

@@ -40,6 +40,22 @@
 
   <article>
 
+<h2>Standalone binaries, Stage 3: a shell environment</h2>
+
+<p>Third step of the arc: the shell gains environment variables and <code class="inline">$VAR</code> expansion, and <code class="inline">PATH</code> becomes a real variable driving command lookup (replacing Stage 2's <code class="inline">/bin</code> constant).</p>
+
+<ul>
+<li>A stack-local env store (<code class="inline">Env</code> — a fixed 16-entry NAME=VALUE table), threaded by <code class="inline">&amp;mut</code> through <code class="inline">on_byte</code>/<code class="inline">run_line</code>/<code class="inline">dispatch_line</code> like <code class="inline">cwd</code>, since userland has no static mutable state. Initialized with <code class="inline">PATH=/bin</code>.</li>
+<li>Commands: <code class="inline">env</code> (list all), <code class="inline">set NAME=VALUE</code> / <code class="inline">export NAME=VALUE</code> (set or replace), <code class="inline">unset NAME</code> (remove). Values are a single token (no quoting, same limitation as <code class="inline">echo</code>).</li>
+<li><code class="inline">$VAR</code> expansion (<code class="inline">expand_vars</code>) rewrites the line before dispatch: <code class="inline">$NAME</code> (<code class="inline">[A-Za-z0-9_]+</code>) becomes the variable's value (nothing if unset), a bare <code class="inline">$</code> is literal. Hand-rolled scalar scan, relocation-safe.</li>
+<li><code class="inline">run_path_command</code> reads <code class="inline">PATH</code> from the env now, so <code class="inline">set PATH=…</code> changes where bare commands are found.</li>
+<li>Shell-local only: env is not exported into child programs yet (a later, argv-like ABI — deferred).</li>
+</ul>
+
+<p>Verified on QEMU (run-image): <code class="inline">env</code> shows <code class="inline">PATH=/bin</code>; <code class="inline">set GREETING=hello</code> + <code class="inline">echo $GREETING</code> → <code class="inline">hello</code>; <code class="inline">echo pre-$GREETING-post</code> → <code class="inline">pre-hello-post</code>; <code class="inline">echo $MISSING done</code> → <code class="inline">done</code> (unset expands empty); <code class="inline">env</code> lists both vars; <code class="inline">unset GREETING</code> then <code class="inline">echo …$GREETING…</code> → empty; <code class="inline">set PATH=/nowhere</code> makes <code class="inline">args</code> "unknown command", <code class="inline">set PATH=/bin</code> makes it work again; zero <code class="inline">-d int</code> aborts.</p>
+
+<p>Next (last of the arc): externalize the actual commands into <code class="inline">/bin</code> (Stage 4). See <a href="roadmap.html">the roadmap</a>.</p>
+
 <h2>Standalone binaries, Stage 2: /bin + PATH lookup</h2>
 
 <p>Second step of the arc (Stage 1 gave spawned programs argv): an unknown command is now looked up as a <strong>program on a PATH</strong> and run by bare name. Type <code class="inline">args foo bar</code> and the shell finds <code class="inline">/bin/args</code>, spawns it with argv <code class="inline">[args, foo, bar]</code>, and runs it in the foreground — the first commands that aren't shell builtins.</p>

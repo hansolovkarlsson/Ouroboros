@@ -435,10 +435,12 @@ the shell's own cwd/lifecycle) and the redirection/pipe **syntax**
    spawns the first hit with the whole line as argv — foreground (waited +
    reaped, so no slot exhaustion), branching on console vs. capture like
    `cmd_exec`. See `CHANGELOG.md`'s "Standalone binaries, Stage 2."
-3. **Shell environment.** A stack-local env store (PATH + user vars) threaded
-   like `cwd`; `env`/`set`/`unset`; `$VAR` expansion — all obeying the
-   relocation-safe idioms (scalar comparisons, hand-rolled formatting). PATH
-   lookup then reads `PATH` from it. Medium.
+3. **Shell environment — DONE.** A stack-local env store (`Env`: PATH + user
+   vars) threaded like `cwd`; `env`/`set`/`unset`; `$VAR` expansion
+   (`expand_vars`) — all relocation-safe (scalar comparisons, hand-rolled
+   formatting). `run_path_command` reads `PATH` from it, so `set PATH=…`
+   changes command lookup. Shell-local (not exported to children yet). See
+   `CHANGELOG.md`'s "Standalone binaries, Stage 3."
 4. **Externalize the commands.** A shared `ulib` crate, then a thin `/bin`
    program per externalizable command (`echo`/`cat`/`ls`/`mkdir`/`rmdir`/
    `touch`/`rm`/`cp`/`mv`/`writeat`/`uptime`/`ps`/`kill`/`wait`/`ping`/

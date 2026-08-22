@@ -78,6 +78,126 @@ const MAX_ARGS: usize = 16;
 // `PATH` env var. `/bin` matches the uppercase on-disk `\BIN\` case-
 // insensitively (fsd's `find`), so a lowercase-typed command works.
 const DEFAULT_PATH: &str = "/bin";
+
+// The shell environment: a small fixed table of NAME=VALUE variables, held
+// stack-local in `main` and threaded by `&mut` (like `cwd`), since userland
+// has no static mutable state. `PATH` lives here (drives command lookup);
+// `$VAR` in a line expands from here. Shell-local only - not exported into
+// child programs yet (that's a later, argv-like ABI). Sizes bound by the
+// 128-byte input line (`PATH` is the longest value).
+const MAX_ENV_VARS: usize = 16;
+const ENV_NAME_SIZE: usize = 24;
+const ENV_VALUE_SIZE: usize = 128;
+// Buffer for a line after `$VAR` expansion (can grow past the 128-byte input
+// when a variable's value is long).
+const EXPAND_SIZE: usize = 256;
+
+struct Env {
+    names: [[u8; ENV_NAME_SIZE]; MAX_ENV_VARS],
+    name_lens: [usize; MAX_ENV_VARS],
+    vals: [[u8; ENV_VALUE_SIZE]; MAX_ENV_VARS],
+    val_lens: [usize; MAX_ENV_VARS],
+    count: usize,
+}
+
+impl Env {
+    fn new() -> Self {
+        let mut e = Env {
+            names: [[0; ENV_NAME_SIZE]; MAX_ENV_VARS],
+            name_lens: [0; MAX_ENV_VARS],
+            vals: [[0; ENV_VALUE_SIZE]; MAX_ENV_VARS],
+            val_lens: [0; MAX_ENV_VARS],
+            count: 0,
+        };
+        e.set("PATH", DEFAULT_PATH.as_bytes());
+        e
+    }
+
+    fn index_of(&self, name: &[u8]) -> Option<usize> {
+        (0..self.count).find(|&i| self.names[i][..self.name_lens[i]] == *name)
+    }
+
+    fn get(&self, name: &[u8]) -> Option<&[u8]> {
+        self.index_of(name).map(|i| &self.vals[i][..self.val_lens[i]])
+    }
+
+    /// Set (or replace) `name`; `false` if the name/value is too long or the
+    /// table is full.
+    fn set(&mut self, name: &str, value: &[u8]) -> bool {
+        let nb = name.as_bytes();
+        if nb.is_empty() || nb.len() > ENV_NAME_SIZE || value.len() > ENV_VALUE_SIZE {
+            return false;
+        }
+        let i = match self.index_of(nb) {
+            Some(i) => i,
+            None => {
+                if self.count >= MAX_ENV_VARS {
+                    return false;
+                }
+                self.count += 1;
+                self.count - 1
+            }
+        };
+        self.names[i][..nb.len()].copy_from_slice(nb);
+        self.name_lens[i] = nb.len();
+        self.vals[i][..value.len()].copy_from_slice(value);
+        self.val_lens[i] = value.len();
+        true
+    }
+
+    /// Remove `name` (swap-remove); `false` if it wasn't set.
+    fn unset(&mut self, name: &[u8]) -> bool {
+        let Some(i) = self.index_of(name) else {
+            return false;
+        };
+        let last = self.count - 1;
+        if i != last {
+            self.names[i] = self.names[last];
+            self.name_lens[i] = self.name_lens[last];
+            self.vals[i] = self.vals[last];
+            self.val_lens[i] = self.val_lens[last];
+        }
+        self.count -= 1;
+        true
+    }
+}
+
+/// Expand `$VAR` references in `line` into `out`, returning the expanded
+/// string. A `$` followed by `[A-Za-z0-9_]+` is replaced by that variable's
+/// value (nothing if unset); a `$` not followed by a name is a literal `$`.
+/// Hand-rolled scalar scan - no `core::fmt`, no slice-vs-literal comparisons.
+fn expand_vars<'a>(line: &str, env: &Env, out: &'a mut [u8]) -> &'a str {
+    let bytes = line.as_bytes();
+    let mut n = 0;
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'$' {
+            let start = i + 1;
+            let mut j = start;
+            while j < bytes.len() && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_') {
+                j += 1;
+            }
+            if j > start {
+                if let Some(val) = env.get(&bytes[start..j]) {
+                    for &b in val {
+                        if n < out.len() {
+                            out[n] = b;
+                            n += 1;
+                        }
+                    }
+                }
+                i = j;
+                continue;
+            }
+        }
+        if n < out.len() {
+            out[n] = bytes[i];
+            n += 1;
+        }
+        i += 1;
+    }
+    core::str::from_utf8(&out[..n]).unwrap_or("")
+}
 // Sized to the filesystem protocol's inline per-op payload cap
 // (`FS_DATA_MAX`, 512): a directory listing travels inline in the reply,
 // so a larger buffer would just be truncated at the server. Bulk file
@@ -120,6 +240,7 @@ fn main() -> ! {
     let mut cwd = [0u8; CWD_SIZE];
     cwd[0] = b'/';
     let mut cwd_len = 1usize;
+    let mut env = Env::new();
 
     print_prompt();
     loop {
@@ -138,7 +259,7 @@ fn main() -> ! {
         // kernel-side blocking mechanism is what changed; this loop just
         // calls a syscall that happens to take longer to return now.
         let byte = read_char();
-        on_byte(byte, &mut buf, &mut len, &mut cwd, &mut cwd_len);
+        on_byte(byte, &mut buf, &mut len, &mut cwd, &mut cwd_len, &mut env);
     }
 }
 
@@ -151,7 +272,7 @@ fn print_prompt() {
 /// line (parsed and dispatched via [`run_line`], then a fresh prompt),
 /// backspace/DEL erases via the standard destructive-backspace sequence,
 /// anything else is appended and echoed immediately.
-fn on_byte(byte: u8, buf: &mut [u8; BUFFER_SIZE], len: &mut usize, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize) {
+fn on_byte(byte: u8, buf: &mut [u8; BUFFER_SIZE], len: &mut usize, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize, env: &mut Env) {
     match byte {
         CR | LF => {
             putc(CR);
@@ -162,7 +283,7 @@ fn on_byte(byte: u8, buf: &mut [u8; BUFFER_SIZE], len: &mut usize, cwd: &mut [u8
             // split across separate reads, or a stray high byte), so this
             // has to be checked, not assumed.
             match core::str::from_utf8(&buf[..*len]) {
-                Ok(line) => run_line(line, cwd, cwd_len),
+                Ok(line) => run_line(line, cwd, cwd_len, env),
                 Err(_) => print_line("input wasn't valid UTF-8"),
             }
             *len = 0;
@@ -225,7 +346,13 @@ fn get_heap() -> &'static mut [u8] {
     unsafe { core::slice::from_raw_parts_mut(base as *mut u8, size) }
 }
 
-fn run_line(line: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize) {
+fn run_line(line: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize, env: &mut Env) {
+    // Expand `$VAR` references first, using the current environment. The
+    // expanded text lives in `ebuf` (a local) for the rest of this call; env
+    // is only read here, so it's free to be borrowed mutably below.
+    let mut ebuf = [0u8; EXPAND_SIZE];
+    let line = expand_vars(line, env, &mut ebuf);
+
     // Pipelines first: a standalone `|` splits the line into a builtin
     // (left, output captured) and a program path (right, spawned and
     // fed the capture as IPC messages) - see cmd_pipeline. Combining
@@ -239,20 +366,20 @@ fn run_line(line: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize) {
             return;
         }
         PipeParse::Pipe { left, right } => {
-            cmd_pipeline(left, right, cwd, cwd_len);
+            cmd_pipeline(left, right, cwd, cwd_len, env);
             return;
         }
     }
     match parse_redirect(line) {
         RedirectParse::NoRedirect => {
             let mut out = Output::Console;
-            dispatch_line(line, cwd, cwd_len, &mut out);
+            dispatch_line(line, cwd, cwd_len, env, &mut out);
         }
         RedirectParse::Malformed(msg) => print_line(msg),
         RedirectParse::Redirect { cmd, target, append } => {
             let capture = get_heap();
             let mut out = Output::Capture { buf: capture, len: 0, overflowed: false };
-            dispatch_line(cmd, cwd, cwd_len, &mut out);
+            dispatch_line(cmd, cwd, cwd_len, env, &mut out);
             let (buf, len, overflowed) = match out {
                 Output::Capture { buf, len, overflowed } => (buf, len, overflowed),
                 // Never constructed on this path; written out rather than
@@ -332,7 +459,7 @@ fn parse_pipe(line: &str) -> PipeParse<'_> {
 /// program's own output goes straight to the console as it runs -
 /// there is no capture of a *task's* output, which is also why `|`
 /// can't combine with `>`.
-fn cmd_pipeline(left: &str, right: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize) {
+fn cmd_pipeline(left: &str, right: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize, env: &mut Env) {
     // A program path on the left (its first token is an absolute path) is a
     // program-to-program pipe: the shell relays the producer's live output
     // to the consumer. A builtin on the left is the original
@@ -344,7 +471,7 @@ fn cmd_pipeline(left: &str, right: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut
 
     let capture = get_heap();
     let mut out = Output::Capture { buf: capture, len: 0, overflowed: false };
-    dispatch_line(left, cwd, cwd_len, &mut out);
+    dispatch_line(left, cwd, cwd_len, env, &mut out);
     let (buf, len, overflowed) = match out {
         Output::Capture { buf, len, overflowed } => (buf, len, overflowed),
         Output::Console => return,
@@ -675,13 +802,13 @@ fn write_all(path: &str, data: &[u8], start_offset: u64, truncate: bool) -> u64 
 /// *output* goes to `out` (so a redirect can capture it); command *error*
 /// messages go straight to the console via [`print_line`] regardless -
 /// see [`Output`]'s doc comment for the stdout/stderr reasoning.
-fn dispatch_line(line: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize, out: &mut Output) {
+fn dispatch_line(line: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize, env: &mut Env, out: &mut Output) {
     let mut words = line.split_whitespace();
     let Some(command) = words.next() else { return };
     let arg = words.next().unwrap_or("");
 
     match command {
-        "help" => out.put_line("commands: help, echo, uptime, clear, ls, cat, cd, pwd, mkdir, rmdir, touch, rm, write, writeat, cp, mv, mount, ping, resolve, fetch, exec, exit, ps, kill, fg, wait, send, recv, selftest (append `> file`/`>> file` to redirect output, or `| /path/to/program` to pipe it into a spawned program)"),
+        "help" => out.put_line("commands: help, echo, uptime, clear, ls, cat, cd, pwd, mkdir, rmdir, touch, rm, write, writeat, cp, mv, mount, ping, resolve, fetch, exec, exit, ps, kill, fg, wait, send, recv, selftest, env, set, unset (a bare unknown command is looked up on $PATH; $VAR expands; append `> file`/`>> file` to redirect, or `| /path/to/program` to pipe)"),
         "echo" => {
             let mut first = true;
             for word in line.split_whitespace().skip(1) {
@@ -735,10 +862,13 @@ fn dispatch_line(line: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize, out:
         "send" => cmd_send(line),
         "recv" => cmd_recv(),
         "selftest" => cmd_selftest(out),
+        "env" => cmd_env(env, out),
+        "set" | "export" => cmd_set(arg, env),
+        "unset" => cmd_unset(arg, env),
         _ => {
             // Not a builtin: try to run it as a program found on PATH
-            // (`/bin/<command>`). Only if that finds nothing is it "unknown".
-            if !run_path_command(command, line, cwd, *cwd_len, out) {
+            // (`$PATH/<command>`). Only if that finds nothing is it "unknown".
+            if !run_path_command(command, line, cwd, *cwd_len, env, out) {
                 print_str("unknown command: ");
                 print_line(command);
             }
@@ -1115,14 +1245,55 @@ fn cmd_exec(line: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize, out: &mut Output) 
     }
 }
 
-/// Try to run an unknown command as a program found on `DEFAULT_PATH`:
+/// `env`: list every variable as `NAME=VALUE`.
+fn cmd_env(env: &Env, out: &mut Output) {
+    for i in 0..env.count {
+        for &b in &env.names[i][..env.name_lens[i]] {
+            out.put(b);
+        }
+        out.put(b'=');
+        for &b in &env.vals[i][..env.val_lens[i]] {
+            out.put(b);
+        }
+        out.put(CR);
+        out.put(LF);
+    }
+}
+
+/// `set NAME=VALUE` / `export NAME=VALUE`: set (or replace) a variable.
+/// Value is a single token (no quoting - `set X=a b` sets `X=a`), same as
+/// `echo`'s limitation. Not exported into child programs (shell-local).
+fn cmd_set(arg: &str, env: &mut Env) {
+    let Some((name, value)) = arg.split_once('=') else {
+        print_line("usage: set NAME=VALUE");
+        return;
+    };
+    if name.is_empty() {
+        print_line("set: empty variable name");
+        return;
+    }
+    if !env.set(name, value.as_bytes()) {
+        print_line("set: name/value too long, or too many variables");
+    }
+}
+
+/// `unset NAME`: remove a variable (silent if it wasn't set).
+fn cmd_unset(arg: &str, env: &mut Env) {
+    if arg.is_empty() {
+        print_line("usage: unset NAME");
+        return;
+    }
+    env.unset(arg.as_bytes());
+}
+
+/// Try to run an unknown command as a program found on `$PATH`:
 /// for each `:`-separated directory, probe `<dir>/<command>` and, on the
 /// first hit, spawn it with the whole line as its argv and run it in the
 /// **foreground** - wait for it (which also reaps its slot, unlike `exec`'s
 /// fire-and-forget). Returns `false` if no PATH directory has the command
 /// (the caller then prints "unknown command"). A `>`/`>>` redirect routes
 /// the program's output into the capture sink, exactly as `cmd_exec` does.
-fn run_path_command(command: &str, line: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize, out: &mut Output) -> bool {
+fn run_path_command(command: &str, line: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize, env: &Env, out: &mut Output) -> bool {
     // argv = every token on the line (argv[0] = the command as typed).
     let mut argv_buf: [&str; MAX_ARGS] = [""; MAX_ARGS];
     let mut n = 0;
@@ -1135,7 +1306,13 @@ fn run_path_command(command: &str, line: &str, cwd: &[u8; CWD_SIZE], cwd_len: us
     }
     let argv = &argv_buf[..n];
 
-    for dir in DEFAULT_PATH.split(':') {
+    // Search directories from the PATH env var (falling back to the default
+    // if unset or not valid UTF-8).
+    let path = env
+        .get(b"PATH")
+        .and_then(|v| core::str::from_utf8(v).ok())
+        .unwrap_or(DEFAULT_PATH);
+    for dir in path.split(':') {
         // Build "<dir>/<command>" into a fixed buffer (no allocation).
         let mut cand = [0u8; PATH_SIZE];
         let mut c = 0;
