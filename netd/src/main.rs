@@ -623,6 +623,15 @@ struct TcpConn {
     eof: bool,
     /// Whether our FIN has been sent.
     fin_sent: bool,
+    /// Consecutive duplicate ACKs seen at `snd_una` (with data outstanding).
+    /// Three triggers a fast retransmit: the peer is telling us a segment was
+    /// lost by re-acking the last in-order byte for each out-of-order segment
+    /// it receives past the gap.
+    dup_acks: u8,
+    /// The `snd_una` we last fast-retransmitted at - guards against a second
+    /// (wasteful) retransmit for the *same* gap when the leftover dup-ACKs from
+    /// the original out-of-order burst keep arriving. Reset on real progress.
+    last_rexmit_una: u32,
 }
 
 /// A parsed inbound TCP segment addressed to our listen port.
@@ -763,6 +772,8 @@ fn handle_tcp(mac: &[u8; 6], frame: &[u8], seg: &TcpIn, conn: &mut Option<TcpCon
             read_off: 0,
             eof: false,
             fin_sent: false,
+            dup_acks: 0,
+            last_rexmit_una: 0,
         };
         send_seg(mac, &c, TCP_SYN | TCP_ACK, true, &[]);
         c.snd_nxt = c.snd_nxt.wrapping_add(1); // our SYN consumes one too
@@ -776,9 +787,33 @@ fn handle_tcp(mac: &[u8; 6], frame: &[u8], seg: &TcpIn, conn: &mut Option<TcpCon
     }
     let Some(c) = conn.as_mut() else { return };
 
-    // Track the peer's ACK (frees send window) and its advertised window.
-    if seg.flags & TCP_ACK != 0 && seq_gt(seg.ack, c.snd_una) {
-        c.snd_una = seg.ack;
+    // Track the peer's ACK (frees send window), count duplicate ACKs, and
+    // update the advertised window.
+    if seg.flags & TCP_ACK != 0 {
+        if seq_gt(seg.ack, c.snd_una) {
+            c.snd_una = seg.ack; // forward progress
+            c.dup_acks = 0;
+            // After a go-back-N rewind, the peer (which buffers out-of-order
+            // segments) can ack *past* the rewound snd_nxt in one jump once the
+            // retransmit fills the gap. Keep the invariant snd_nxt >= snd_una -
+            // otherwise snd_nxt - snd_una wraps huge and the window looks full
+            // forever. Fast-forward the send cursor to snd_una (nothing below
+            // it is unsent-and-unacked, so there's nothing to resend there).
+            if seq_gt(c.snd_una, c.snd_nxt) {
+                rewind_to(c, c.snd_una);
+            }
+        } else if seg.ack == c.snd_una && c.snd_nxt != c.snd_una && seg.data_len == 0 {
+            // A duplicate ACK with data still outstanding: the peer received an
+            // out-of-order segment (a gap before it). Three of these => fast
+            // retransmit - rewind the send cursor to snd_una and resend from
+            // there (go-back-N); the next pump does the actual sending.
+            c.dup_acks = c.dup_acks.saturating_add(1);
+            if c.dup_acks >= 3 && c.last_rexmit_una != c.snd_una {
+                rewind_to(c, c.snd_una);
+                c.last_rexmit_una = c.snd_una;
+                c.dup_acks = 0;
+            }
+        }
     }
     c.window = seg.window as u32;
 
@@ -815,6 +850,22 @@ fn handle_tcp(mac: &[u8; 6], frame: &[u8], seg: &TcpIn, conn: &mut Option<TcpCon
 /// wraparound the raw `>` can't.
 fn seq_gt(a: u32, b: u32) -> bool {
     (a.wrapping_sub(b) as i32) > 0
+}
+
+/// Rewind the send cursor to sequence `seq` (for a fast retransmit), so the
+/// next `pump_send` resends everything from there (go-back-N). The response is
+/// a fixed byte stream - `[prefix][file body from offset 0][FIN]` starting at
+/// `SERVER_ISN + 1` (our SYN consumed one seq) - so a sequence number maps
+/// straight back to a byte offset: prefix bytes, then file bytes re-read from
+/// fsd, then the FIN. Resetting `eof`/`fin_sent` lets pump re-derive the tail.
+fn rewind_to(c: &mut TcpConn, seq: u32) {
+    let data_base = SERVER_ISN.wrapping_add(1);
+    let off = seq.wrapping_sub(data_base) as usize;
+    c.snd_nxt = seq;
+    c.prefix_off = off.min(c.prefix_len);
+    c.read_off = off.saturating_sub(c.prefix_len) as u64;
+    c.eof = false;
+    c.fin_sent = false;
 }
 
 /// Whether `seg` belongs to the active connection (same peer address+port).
