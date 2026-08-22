@@ -60,10 +60,6 @@ const PAYLOAD: usize = 32;
 const SERVER_PORT: u16 = 80;
 const SERVER_ISN: u32 = 0x0002_0000;
 
-/// The page served for `GET /` - a small landing page pointing at the file
-/// server. Fits one TCP segment (well under the 1460 MSS).
-const INDEX_PAGE: &[u8] = b"HTTP/1.0 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n<!DOCTYPE html><html><head><title>Ouroboros</title></head><body><h1>Hello from Ouroboros</h1><p>Served by a from-scratch ARM64 microkernel's userland network server over a hand-rolled TCP/IP stack. Any other path is read from the filesystem server, e.g. <code>/EFI/ORBS/INIT.CFG</code>.</p></body></html>";
-
 /// Full responses for the two failure cases.
 const RESP_404: &[u8] =
     b"HTTP/1.0 404 Not Found\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nNot Found\r\n";
@@ -568,10 +564,12 @@ fn tcp_get(mac: &[u8; 6], dst_mac: &[u8; 6], target: &[u8; 4], request: &[u8], r
 /// The state of the one in-flight server connection.
 /// Longest request path the server will resolve.
 const PATH_MAX: usize = 128;
-/// Capacity of a connection's response prefix (a whole fixed response, or a
-/// file's 200 header). Sized to hold the largest fixed response (the ~300-byte
-/// index page) with margin.
-const PREFIX_MAX: usize = 512;
+/// Capacity of a connection's response prefix: a whole fixed response, a
+/// file's 200 header, *or* a generated directory-listing page. Sized for the
+/// last of these - fsd's inline listing is capped at ~512 bytes of names,
+/// which expands into HTML with links; 2 KB holds a typical listing (a larger
+/// one is truncated).
+const PREFIX_MAX: usize = 2048;
 
 enum ConnState {
     /// Sent SYN-ACK, waiting for the peer's ACK (or its request data).
@@ -847,17 +845,19 @@ fn send_seg(mac: &[u8; 6], c: &TcpConn, flags: u8, with_mss: bool, payload: &[u8
 }
 
 /// Decide the response for `request` and record it on the connection (the
-/// bytes are then streamed by `pump_send`, paced by the window). `GET /`
-/// serves a built-in landing page; any other path is a file streamed from the
-/// filesystem server (`fsd`) - netd is `fsd`'s first non-shell client. A
-/// missing file is a 404, a missing/unmounted filesystem a 503. The file is
-/// *stat*'d here (one `FSOP_READ_FILE`, whose status is the real size) - which
-/// both checks existence (so the 404/503 replaces the 200 header) and gives
-/// the size for `Content-Length`; the body is then streamed from offset 0
-/// (fsd reads are idempotent, offset-based).
+/// bytes are then streamed by `pump_send`, paced by the window). A path that
+/// resolves to a **file** is streamed from the filesystem server (`fsd`) with
+/// a 200 header; a path that resolves to a **directory** (including `/`)
+/// returns a generated HTML **index** of its entries, with links, so the
+/// filesystem is browsable; anything else is a 404, and a missing/unmounted
+/// filesystem a 503. netd is `fsd`'s first non-shell client. The file is
+/// *stat*'d (one `FSOP_READ_FILE`, whose status is the real size) - which
+/// checks existence and gives the size for `Content-Length`; its body then
+/// streams from offset 0 (fsd reads are idempotent, offset-based).
 fn start_response(c: &mut TcpConn, request: &[u8]) {
     let mut pathbuf = [0u8; PATH_MAX];
     let path = parse_path(request, &mut pathbuf);
+    let path: &[u8] = if path.is_empty() { b"/" } else { path };
 
     c.prefix_off = 0;
     c.file = false;
@@ -865,51 +865,57 @@ fn start_response(c: &mut TcpConn, request: &[u8]) {
     c.eof = false;
     c.fin_sent = false;
 
-    if path.is_empty() || path == b"/" {
-        set_prefix(c, INDEX_PAGE);
-        return;
-    }
-
+    // A file? (stat succeeds and returns a size.)
     let size = stat_size(path);
-    if size >= syscall_abi::FS_ERR_MIN {
-        let resp: &[u8] = if size == syscall_abi::TASK_ERR_NO_SUCH_TASK {
-            RESP_503
-        } else {
-            RESP_404
-        };
-        set_prefix(c, resp);
+    if size < syscall_abi::FS_ERR_MIN {
+        // 200 header (Content-Type by extension, Content-Length = size), then
+        // the body streamed from offset 0.
+        let n = build_200_header(&mut c.prefix, content_type(path), size);
+        c.prefix_len = n;
+        c.file = true;
+        c.path_len = path.len().min(PATH_MAX);
+        c.path[..c.path_len].copy_from_slice(&path[..c.path_len]);
+        return;
+    }
+    // No filesystem / no server -> 503 (don't bother trying a listing).
+    if size == syscall_abi::TASK_ERR_NO_SUCH_TASK || size == syscall_abi::NO_FS {
+        set_prefix(c, RESP_503);
         return;
     }
 
-    // File exists: a 200 header (Content-Type by extension, Content-Length =
-    // size), then its body streamed from offset 0.
-    let n = build_200_header(&mut c.prefix, content_type(path), size);
-    c.prefix_len = n;
-    c.file = true;
-    c.path_len = path.len().min(PATH_MAX);
-    c.path[..c.path_len].copy_from_slice(&path[..c.path_len]);
+    // A directory? (list succeeds.) Build a browsable HTML index into prefix.
+    let mut names = [0u8; syscall_abi::FS_DATA_MAX as usize];
+    let listed = list_dir(path, &mut names);
+    if listed < syscall_abi::FS_ERR_MIN {
+        let n = build_listing(path, &names[..listed as usize], &mut c.prefix);
+        c.prefix_len = n;
+        return;
+    }
+
+    // Neither a file nor a directory.
+    set_prefix(c, RESP_404);
 }
 
-/// Copy a complete fixed response (`INDEX_PAGE`/404/503) into the connection's
-/// prefix buffer.
+/// Copy a complete fixed response (404/503) into the connection's prefix
+/// buffer.
 fn set_prefix(c: &mut TcpConn, bytes: &[u8]) {
     let n = bytes.len().min(PREFIX_MAX);
     c.prefix[..n].copy_from_slice(&bytes[..n]);
     c.prefix_len = n;
 }
 
-/// Stat a file via the filesystem server: `FSOP_READ_FILE`'s status is the
-/// file's *real* size regardless of how much was copied, so a `want` of 1 (the
-/// smallest fsd accepts - it rejects 0) gets the size in one call; the single
-/// returned byte is ignored. Returns the size, or an `FS_ERR_*`/`TASK_ERR_*`
-/// code (`>= FS_ERR_MIN`) - the same value space `read_file_chunk` uses, so
-/// callers map `TASK_ERR_NO_SUCH_TASK` -> 503 and any other error -> 404.
-fn stat_size(path: &[u8]) -> u64 {
+/// One request/response round trip to the filesystem server: build an
+/// `FSOP_*` request (op + two u64 params + the path payload), `MSG_CALL`
+/// `fsd`, and return its status - copying any inline reply payload into
+/// `result`. Returns the status (a byte count / size on success, or an
+/// `FS_ERR_*`/`TASK_ERR_*` code `>= FS_ERR_MIN`). The shell's `fs_call`,
+/// pared to netd's two callers.
+fn fsd_call(op: u64, p0: u64, p1: u64, path: &[u8], result: &mut [u8]) -> u64 {
     const HDR: usize = syscall_abi::FS_REQ_PAYLOAD as usize;
     let mut req = [0u8; syscall_abi::MSG_MAX_LEN as usize];
-    req[0..8].copy_from_slice(&syscall_abi::FSOP_READ_FILE.to_le_bytes());
-    req[8..16].copy_from_slice(&(path.len() as u64).to_le_bytes()); // param0: path len
-    req[16..24].copy_from_slice(&1u64.to_le_bytes()); // param1: want = 1 (size via status)
+    req[0..8].copy_from_slice(&op.to_le_bytes());
+    req[8..16].copy_from_slice(&p0.to_le_bytes());
+    req[16..24].copy_from_slice(&p1.to_le_bytes());
     let end = HDR + path.len();
     if end > req.len() {
         return syscall_abi::FS_ERROR;
@@ -924,12 +930,92 @@ fn stat_size(path: &[u8]) -> u64 {
         reply.as_mut_ptr() as u64,
     );
     if packed >= syscall_abi::FS_ERR_MIN {
-        return packed;
+        return packed; // MSG_CALL failed (no fsd task, denied, interrupted)
     }
-    if (packed & 0xffff_ffff) < 8 {
+    let reply_len = (packed & 0xffff_ffff) as usize;
+    if reply_len < 8 {
         return syscall_abi::FS_ERROR;
     }
-    read_u64(&reply, 0) // status = the file's real size
+    let n = (reply_len - 8).min(result.len());
+    result[..n].copy_from_slice(&reply[8..8 + n]);
+    read_u64(&reply, 0) // fsd's status
+}
+
+/// Stat a file: `FSOP_READ_FILE`'s status is the file's *real* size regardless
+/// of how much was copied, so a `want` of 1 (the smallest fsd accepts - it
+/// rejects 0) gets the size in one call; the returned byte is ignored.
+fn stat_size(path: &[u8]) -> u64 {
+    fsd_call(syscall_abi::FSOP_READ_FILE, path.len() as u64, 1, path, &mut [])
+}
+
+/// List a directory's entries into `out` as newline-separated names (dirs
+/// suffixed `/`, the same format the shell's `ls` uses); status is the byte
+/// count, or an error code. Bounded by fsd's inline reply cap.
+fn list_dir(path: &[u8], out: &mut [u8]) -> u64 {
+    fsd_call(
+        syscall_abi::FSOP_LIST_DIR,
+        path.len() as u64,
+        out.len() as u64,
+        path,
+        out,
+    )
+}
+
+/// Build a browsable HTML directory index for `dir_path` from fsd's
+/// newline-separated `entries` (dirs suffixed `/`) into `out`, returning its
+/// length. Each entry is a link resolved against `dir_path` so a browser can
+/// navigate into subdirectories and open files. No `Content-Length` (the body
+/// is generated; `Connection: close` delimits it); truncated if it exceeds
+/// `out`.
+fn build_listing(dir_path: &[u8], entries: &[u8], out: &mut [u8]) -> usize {
+    // The directory path without a trailing slash (except root itself), for
+    // joining hrefs cleanly.
+    let base: &[u8] = if dir_path.len() > 1 && *dir_path.last().unwrap() == b'/' {
+        &dir_path[..dir_path.len() - 1]
+    } else {
+        dir_path
+    };
+
+    let mut w = 0usize;
+    let mut put = |bytes: &[u8], w: &mut usize| {
+        let n = bytes.len().min(out.len().saturating_sub(*w));
+        out[*w..*w + n].copy_from_slice(&bytes[..n]);
+        *w += n;
+    };
+
+    put(b"HTTP/1.0 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n", &mut w);
+    put(b"<!DOCTYPE html><html><head><title>Index of ", &mut w);
+    put(base, &mut w);
+    put(b"</title></head><body><h1>Index of ", &mut w);
+    put(base, &mut w);
+    put(b"</h1><ul>", &mut w);
+
+    for line in entries.split(|&b| b == b'\n') {
+        if line.is_empty() {
+            continue;
+        }
+        let is_dir = *line.last().unwrap() == b'/';
+        let name = if is_dir { &line[..line.len() - 1] } else { line };
+        if name == b"." {
+            continue; // skip the self-link; keep ".." for parent navigation
+        }
+        put(b"<li><a href=\"", &mut w);
+        // href = base + "/" + name  (base is "/" for root -> avoid "//")
+        if base != b"/" {
+            put(base, &mut w);
+        }
+        put(b"/", &mut w);
+        put(name, &mut w);
+        if is_dir {
+            put(b"/", &mut w);
+        }
+        put(b"\">", &mut w);
+        put(line, &mut w); // display name (keeps the trailing / for dirs)
+        put(b"</a></li>", &mut w);
+    }
+
+    put(b"</ul></body></html>", &mut w);
+    w
 }
 
 /// Pick a Content-Type from the request path's extension (case-insensitive).
