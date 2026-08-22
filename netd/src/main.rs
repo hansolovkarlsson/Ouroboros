@@ -855,6 +855,7 @@ fn send_seg(mac: &[u8; 6], c: &TcpConn, flags: u8, with_mss: bool, payload: &[u8
 /// checks existence and gives the size for `Content-Length`; its body then
 /// streams from offset 0 (fsd reads are idempotent, offset-based).
 fn start_response(c: &mut TcpConn, request: &[u8]) {
+    let head = is_head(request);
     let mut pathbuf = [0u8; PATH_MAX];
     let path = parse_path(request, &mut pathbuf);
     let path: &[u8] = if path.is_empty() { b"/" } else { path };
@@ -870,30 +871,53 @@ fn start_response(c: &mut TcpConn, request: &[u8]) {
     if size < syscall_abi::FS_ERR_MIN {
         // 200 header (Content-Type by extension, Content-Length = size), then
         // the body streamed from offset 0.
-        let n = build_200_header(&mut c.prefix, content_type(path), size);
-        c.prefix_len = n;
+        c.prefix_len = build_200_header(&mut c.prefix, content_type(path), size);
         c.file = true;
         c.path_len = path.len().min(PATH_MAX);
         c.path[..c.path_len].copy_from_slice(&path[..c.path_len]);
-        return;
-    }
-    // No filesystem / no server -> 503 (don't bother trying a listing).
-    if size == syscall_abi::TASK_ERR_NO_SUCH_TASK || size == syscall_abi::NO_FS {
+    } else if size == syscall_abi::TASK_ERR_NO_SUCH_TASK || size == syscall_abi::NO_FS {
+        // No filesystem / no server -> 503 (don't bother trying a listing).
         set_prefix(c, RESP_503);
-        return;
+    } else {
+        // A directory? (list succeeds.) Build a browsable HTML index.
+        let mut names = [0u8; syscall_abi::FS_DATA_MAX as usize];
+        let listed = list_dir(path, &mut names);
+        if listed < syscall_abi::FS_ERR_MIN {
+            c.prefix_len = build_listing(path, &names[..listed as usize], &mut c.prefix);
+        } else {
+            // Neither a file nor a directory.
+            set_prefix(c, RESP_404);
+        }
     }
 
-    // A directory? (list succeeds.) Build a browsable HTML index into prefix.
-    let mut names = [0u8; syscall_abi::FS_DATA_MAX as usize];
-    let listed = list_dir(path, &mut names);
-    if listed < syscall_abi::FS_ERR_MIN {
-        let n = build_listing(path, &names[..listed as usize], &mut c.prefix);
-        c.prefix_len = n;
-        return;
+    // HEAD: identical headers to the GET, no body. Trim the prefix to just the
+    // header block (through the first CRLFCRLF - true for every response here,
+    // file 200 / listing / 404 / 503) and stream no file body. Correct for all
+    // response kinds, since a listing/error keeps its body in the prefix.
+    if head {
+        c.prefix_len = header_end(&c.prefix[..c.prefix_len]);
+        c.file = false;
     }
+}
 
-    // Neither a file nor a directory.
-    set_prefix(c, RESP_404);
+/// Whether the request is an HTTP `HEAD` (headers only, no body). Methods are
+/// uppercase; a non-GET/HEAD method is still served like a GET (no 405 yet).
+fn is_head(request: &[u8]) -> bool {
+    request.starts_with(b"HEAD ")
+}
+
+/// Byte offset just past the end of the HTTP header block (the first
+/// `\r\n\r\n`), or the whole length if none is found (shouldn't happen - every
+/// response this server builds ends its headers that way).
+fn header_end(buf: &[u8]) -> usize {
+    let mut i = 0;
+    while i + 4 <= buf.len() {
+        if buf[i] == b'\r' && buf[i + 1] == b'\n' && buf[i + 2] == b'\r' && buf[i + 3] == b'\n' {
+            return i + 4;
+        }
+        i += 1;
+    }
+    buf.len()
 }
 
 /// Copy a complete fixed response (404/503) into the connection's prefix
