@@ -229,9 +229,10 @@ step, not a Stage 1 concern.
    response headers (`Content-Type` by file extension + `Content-Length` via
    an `fsd` stat), so a browser renders served files. **Still open:**
    retransmission, congestion control (`cwnd`/slow-start — only the peer's
-   flow-control window is honored), multiple concurrent connections, a
-   directory listing, `HEAD`/method handling, and IRQ-driven RX. See
-   `CHANGELOG.md` / `CLAUDE.md`'s "Network stack, Stage 4a–4e."
+   flow-control window is honored), multiple concurrent connections,
+   `HEAD`/method handling, and IRQ-driven RX. (Stage 4f added a browsable
+   HTML directory listing, so the guest's filesystem is browsable end to
+   end.) See `CHANGELOG.md` / `CLAUDE.md`'s "Network stack, Stage 4a–4f."
 
 **Decisions to settle before starting (not now):**
 

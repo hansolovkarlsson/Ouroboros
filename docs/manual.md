@@ -80,7 +80,10 @@ stack serves a landing page. It's a real static-file server, too: any
 other path is streamed from the filesystem server, e.g.
 `curl http://localhost:5555/EFI/ORBS/INIT.CFG` returns that file's bytes
 (read through `fsd` — the guest serving its own filesystem over HTTP), and
-a missing path returns `404`. (QEMU's user-mode networking (SLIRP) reaches
+a missing path returns `404`. A directory path (e.g.
+`http://localhost:5555/EFI/ORBS`, or `/`) returns a browsable HTML index
+with links, so you can point a browser at the guest and click through its
+filesystem; files get a proper `Content-Type`, so text and HTML render. (QEMU's user-mode networking (SLIRP) reaches
 the outside for the client ops, and its `hostfwd` forwards a host port to
 the guest's port 80 for the server; both are QEMU-only — Parallels'
 virtio-net is PCI, which this project's virtio path doesn't drive.)

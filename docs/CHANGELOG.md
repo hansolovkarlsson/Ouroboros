@@ -7,6 +7,32 @@ what broke, how it was diagnosed), see `CLAUDE.md`; for *how* something
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## Network stack, Stage 4f: a browsable directory listing
+
+A `GET` whose path resolves to a directory (including `/`) now returns a
+generated HTML index of its entries, each a link — so the guest's filesystem
+is browsable in a browser: `/` → `EFI/` → `ORBS/` → `INIT.CFG`, click through
+and open files. Pure `netd`, no kernel/capability change.
+
+`start_response` distinguishes file / directory / neither: stat the path
+(`FSOP_READ_FILE`) → a file is served with headers as before; else (not a
+no-fs/no-server case) try `list_dir` (`FSOP_LIST_DIR`) → a directory is
+rendered as an index; else 404 (no-fs/no-server → 503). `/` lists the root
+now (the old fixed landing page is gone). The two fsd calls were unified into
+one `fsd_call` helper; `build_listing` turns fsd's newline-separated entries
+(dirs suffixed `/`) into `<li><a href=…>` links resolved against the request
+path (`.` filtered, `..` kept for parent nav). `PREFIX_MAX` 512→2048 to hold
+a listing.
+
+Confirmed on QEMU: `GET /` → `EFI/`; `GET /EFI` → `../ ORBS/ BOOT/`;
+`GET /EFI/ORBS` → all the `.BIN` files + `INIT.CFG`, each linked;
+`GET /EFI/BOOT` → `BOOTAA64.EFI`; files still serve with Content-Type/Length;
+404 for a missing path; hrefs correct at every level. Shell + client net ops
++ selftest unregressed; zero aborts, zero restarts. Still coarse: capped by
+fsd's ~512-byte inline listing (big dirs truncate), names+links only (no
+sizes/timestamps/sorting), no Content-Length on the listing. See `CLAUDE.md`'s
+"Network stack, Stage 4f."
+
 ## Network stack, Stage 4e: proper HTTP response headers (Content-Type + Content-Length)
 
 A small polish over the file server, which sent every file as

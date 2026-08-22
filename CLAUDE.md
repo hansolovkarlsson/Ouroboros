@@ -5969,7 +5969,8 @@ The shell (fsd's other client), `selftest`, and the client net ops
 **(Update: added - Stage 4e, below)**; one connection at a time
 (inherited); `Content-Type` is always `application/octet-stream` (no
 extension sniffing) **(Update: added - Stage 4e, below)**; no directory
-listing (`GET` of a directory path just 404s the way `fsd` reports it); no
+listing (`GET` of a directory path just 404s the way `fsd` reports it)
+**(Update: added - Stage 4f, a browsable HTML index)**; no
 `..`/percent-decode handling beyond what `fsd`'s own path resolution does;
 the response path parses only the target, ignoring method and headers (a
 `POST` is served like a `GET`); and it's still QEMU-only, polled RX.
@@ -6082,6 +6083,48 @@ close` is still sent as the ultimate delimiter); no `HEAD` special-casing (a
 `HEAD` is served like a `GET`, body and all - trivial to add now that the
 size is known); everything else from Stage 4a-4d (one connection, no
 retransmission/congestion control, QEMU-only) is unchanged.
+
+## Network stack, Stage 4f: a browsable directory listing
+
+A `GET` whose path resolves to a *directory* (including `/`) now returns a
+generated HTML **index** of its entries, each a link - so the guest's
+filesystem is browsable in a browser: `/` -> `EFI/` -> `ORBS/` ->
+`INIT.CFG`, click through the tree and open files. Pure `netd`, no
+kernel/capability change.
+
+`start_response` now distinguishes **file / directory / neither**: it stats
+the path (`FSOP_READ_FILE`); a file is served with headers as before; else,
+if it isn't a no-fs/no-server condition, it tries `list_dir`
+(`FSOP_LIST_DIR`) and a directory is rendered as an index; else 404 (a
+no-fs/no-server condition is 503). `/` naturally lists the root now, so the
+old fixed landing page is gone.
+
+- The two fsd calls (stat, list) were unified into one `fsd_call` helper
+  (the shell's `fs_call`, pared to netd's needs).
+- `build_listing` turns fsd's newline-separated entries (dirs suffixed `/`)
+  into `<li><a href=...>` links **resolved against the request path**, so
+  both navigation and file-open work; `.` is filtered, `..` kept for parent
+  navigation. No `Content-Length` (a generated body; `Connection: close`
+  delimits it), truncated if it exceeds the buffer.
+- `PREFIX_MAX` grew 512 -> 2048 to hold a listing (fsd's inline listing is
+  capped at ~512 bytes of names, which expands into linked HTML). `TcpConn`
+  grew accordingly; the 24 KB stack has headroom (client ops re-verified).
+
+**Confirmed on QEMU:** `GET /` -> `EFI/`; `GET /EFI` -> `../`, `ORBS/`,
+`BOOT/`; `GET /EFI/ORBS` -> all the `.BIN` files + `INIT.CFG`, each linked;
+`GET /EFI/BOOT` -> `BOOTAA64.EFI`; a file still serves with
+Content-Type/Length; `GET /nope` -> 404; hrefs correct at every level (a
+browser navigates the whole tree). Shell + client net ops
+(`ping`/`resolve`/`fetch`) + `selftest` unregressed; zero `-d int` aborts,
+zero supervisor restarts.
+
+**Still coarse:** the listing is capped by fsd's ~512-byte inline reply (a
+big directory is truncated - a bulk `list_dir` would lift it); no sorting,
+sizes, or timestamps (just names + links, Apache-autoindex-minimal); no
+`Content-Length` on the listing; no percent-decoding of the request path
+(fine for these 8.3 names); and a `..` link relies on the browser to
+collapse it in the URL. Everything else from Stage 4a-4e (one connection,
+no retransmission, QEMU-only) is unchanged.
 
 ## Commands
 
@@ -6225,7 +6268,7 @@ cond/                seventh userland program: THE CONSOLE SERVER (driver isolat
   src/main.rs        the request loop (recv -> decode DSPOP_WRITE -> render -> reply, the filesystem server's shape) plus two backends chosen from CON_INFO at startup: byte-stream (forward to the kernel console via CON_WRITE) and framebuffer (render glyphs here - cursor, wrap, scroll, a small ANSI parser - via FB_BLIT/FB_SCROLL/FB_CLEAR)
   src/font.rs        cond's own copy of the 8x8 bitmap font (from kernel/src/font.rs) - the font is what "console driver logic" meant, so it moved to userland; the kernel keeps a copy only for its emergency fbconsole
 
-netd/                eighth userland program: THE NETWORK SERVER (network stack, Stage 2) - owns the protocol stack (ARP/IPv4/ICMP) in userland; the kernel keeps only the DMA-owning virtio-net driver, reached by this task alone via the gated NET_SEND/NET_RECV/NET_MAC syscalls (the fsd/BLOCK_* pattern). Boot-loaded into protected task slot 4 (NET_TASK), supervised. Speaks the NETOP_PING request protocol to clients (the shell's `ping` command); hand-rolled fixed-buffer frame building (ARP/IPv4/ICMP/UDP/DNS) + Internet checksums, no crates. NETOP_RESOLVE (Stage 3) does DNS-over-UDP for `resolve`; NETOP_FETCH (Stage 4a) does a client-TCP HTTP GET for `fetch`. Stage 4b makes it event-driven (blocks in NET_WAIT, drains client messages *and* incoming frames each wake) and adds a TCP HTTP server on port 80 + an ARP responder - the guest answers the network now, not just initiates. Stage 4c makes that HTTP server a real static-file server: it parses the request path and streams the file from fsd over TCP (netd is fsd's first non-shell client, reached via a new netd->fsd capability). Stage 4d adds TCP send-side flow control (window tracking + ACK-paced streaming) so a file of *any* size streams, not just what fits one window. Stage 4e adds proper HTTP response headers (Content-Type by extension + Content-Length via an fsd stat). See "Network stack, Stage 2/3/4a/4b/4c/4d/4e" above
+netd/                eighth userland program: THE NETWORK SERVER (network stack, Stage 2) - owns the protocol stack (ARP/IPv4/ICMP) in userland; the kernel keeps only the DMA-owning virtio-net driver, reached by this task alone via the gated NET_SEND/NET_RECV/NET_MAC syscalls (the fsd/BLOCK_* pattern). Boot-loaded into protected task slot 4 (NET_TASK), supervised. Speaks the NETOP_PING request protocol to clients (the shell's `ping` command); hand-rolled fixed-buffer frame building (ARP/IPv4/ICMP/UDP/DNS) + Internet checksums, no crates. NETOP_RESOLVE (Stage 3) does DNS-over-UDP for `resolve`; NETOP_FETCH (Stage 4a) does a client-TCP HTTP GET for `fetch`. Stage 4b makes it event-driven (blocks in NET_WAIT, drains client messages *and* incoming frames each wake) and adds a TCP HTTP server on port 80 + an ARP responder - the guest answers the network now, not just initiates. Stage 4c makes that HTTP server a real static-file server: it parses the request path and streams the file from fsd over TCP (netd is fsd's first non-shell client, reached via a new netd->fsd capability). Stage 4d adds TCP send-side flow control (window tracking + ACK-paced streaming) so a file of *any* size streams, not just what fits one window. Stage 4e adds proper HTTP response headers (Content-Type by extension + Content-Length via an fsd stat). Stage 4f makes a GET of a directory return a browsable HTML index (links resolved against the request path) - the guest's filesystem is browsable in a browser. See "Network stack, Stage 2/3/4a/4b/4c/4d/4e/4f" above
   src/main.rs        the NET_WAIT event loop (drain client requests -> NETOP_PING/RESOLVE/FETCH; drain frames -> ARP replies + the TCP server state machine) plus start_response (request-path parsing + a landing page or a file from fsd) and pump_send (window-bounded, ACK-paced streaming under flow control, one segment per call with a per-segment mailbox drain so the supervisor health-ping is always acked), read_file_chunk's grant/safecopy FSOP_READ_BULK, the ARP/IPv4/ICMP/UDP/DNS/TCP frame builders (build_tcp_generic shared by client build_tcp + server build_tcp_srv), the DNS/TCP parsers, next-hop routing, ip_checksum and the TCP pseudo-header checksum
 
 upper/               sixth userland program: the pipeline filter demo (uppercases its piped input) - the reference for the filter-program shape: stdin = msg_recv, stdout = con_write (routed through the console server), EOF = the empty message, finish = exit; see "Pipelines" above
