@@ -7,6 +7,45 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/`; 
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## Standalone binaries, Stage 4 (first increment): `ulib` + echo/uptime/clear externalized
+
+Fourth step of the arc, and the first commands to actually leave the shell. A
+new shared userland crate, `ulib`, factors out the boilerplate every command
+program repeats — the `svc` wrappers, argv reading (`GET_ARGC`/`GET_ARG`),
+output routing (`write_out`/`con_write`/`pipe_out` + end-of-stream), a decimal
+formatter, `exit`, and the one `#[panic_handler]`. Then `echo`, `uptime`, and
+`clear` became real `/bin` programs (dropping their shell builtins), each just
+an `_start` over `ulib`.
+
+Why these three first: they need **neither the filesystem nor the shell's
+cwd**, so they externalize cleanly. The filesystem commands
+(`ls`/`cat`/`mkdir`/…) resolve paths against the shell's cwd, which a spawned
+program doesn't have — externalizing them needs a **cwd-delivery mechanism**
+(a per-task cwd, mirroring argv), the next increment.
+
+Because a bare command already resolves via PATH (Stage 2) and runs
+foreground/reaped (Stage 3's PATH still holds), dropping the builtins means
+`echo`/`uptime`/`clear` now run as `/bin/ECHO`/`/bin/UPTIME`/`/bin/CLEAR` — in
+the console, in a `| program` pipe (the builtin-left path spawns the program
+and captures it), and in a `> file` redirect, all unchanged from a user's
+view.
+
+The tradeoff, documented: an externalized command is unavailable on a boot
+without `/bin` (e.g. `make run`'s unmountable FAT16, or real hardware with no
+stick) — a bare `echo` there is "unknown command" rather than the builtin it
+used to be. A minimal built-in fallback set is a deferred option (see
+`roadmap.md`).
+
+Verified on QEMU (run-image): `echo hello world` → `hello world` (via
+`/bin/ECHO`, task 5, reaped); `uptime` → a real tick count; three invocations
+back to back each reaped (no slot exhaustion); `echo … | /EFI/ORBS/UPPER.BIN`
+→ uppercased through the pipe; `echo … > /echoout.txt` then `cat` showed the
+captured text; `help`/`selftest`/`ls /bin` and the remaining builtins
+unregressed; zero `-d int` aborts.
+
+The arc continues: a cwd-delivery mechanism, then the filesystem commands
+(`ls`/`cat`/…). See `roadmap.md`.
+
 ## Standalone binaries, Stage 3: a shell environment
 
 Third step of the arc: the shell gains environment variables and `$VAR`

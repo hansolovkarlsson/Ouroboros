@@ -40,6 +40,20 @@
 
   <article>
 
+<h2>Standalone binaries, Stage 4 (first increment): <code class="inline">ulib</code> + echo/uptime/clear externalized</h2>
+
+<p>Fourth step of the arc, and the first commands to actually leave the shell. A new shared userland crate, <code class="inline">ulib</code>, factors out the boilerplate every command program repeats — the <code class="inline">svc</code> wrappers, argv reading (<code class="inline">GET_ARGC</code>/<code class="inline">GET_ARG</code>), output routing (<code class="inline">write_out</code>/<code class="inline">con_write</code>/<code class="inline">pipe_out</code> + end-of-stream), a decimal formatter, <code class="inline">exit</code>, and the one <code class="inline">#[panic_handler]</code>. Then <code class="inline">echo</code>, <code class="inline">uptime</code>, and <code class="inline">clear</code> became real <code class="inline">/bin</code> programs (dropping their shell builtins), each just an <code class="inline">_start</code> over <code class="inline">ulib</code>.</p>
+
+<p>Why these three first: they need <strong>neither the filesystem nor the shell's cwd</strong>, so they externalize cleanly. The filesystem commands (<code class="inline">ls</code>/<code class="inline">cat</code>/<code class="inline">mkdir</code>/…) resolve paths against the shell's cwd, which a spawned program doesn't have — externalizing them needs a <strong>cwd-delivery mechanism</strong> (a per-task cwd, mirroring argv), the next increment.</p>
+
+<p>Because a bare command already resolves via PATH (Stage 2) and runs foreground/reaped, dropping the builtins means <code class="inline">echo</code>/<code class="inline">uptime</code>/<code class="inline">clear</code> now run as <code class="inline">/bin/ECHO</code>/<code class="inline">/bin/UPTIME</code>/<code class="inline">/bin/CLEAR</code> — in the console, in a <code class="inline">| program</code> pipe (the builtin-left path spawns the program and captures it), and in a <code class="inline">&gt; file</code> redirect, all unchanged from a user's view.</p>
+
+<p>The tradeoff, documented: an externalized command is unavailable on a boot without <code class="inline">/bin</code> (e.g. <code class="inline">make run</code>'s unmountable FAT16, or real hardware with no stick) — a bare <code class="inline">echo</code> there is "unknown command" rather than the builtin it used to be. A minimal built-in fallback set is a deferred option.</p>
+
+<p>Verified on QEMU (run-image): <code class="inline">echo hello world</code> → <code class="inline">hello world</code> (via <code class="inline">/bin/ECHO</code>, task 5, reaped); <code class="inline">uptime</code> → a real tick count; three invocations back to back each reaped (no slot exhaustion); <code class="inline">echo … | /EFI/ORBS/UPPER.BIN</code> → uppercased through the pipe; <code class="inline">echo … &gt; /echoout.txt</code> then <code class="inline">cat</code> showed the captured text; <code class="inline">help</code>/<code class="inline">selftest</code>/<code class="inline">ls /bin</code> and the remaining builtins unregressed; zero <code class="inline">-d int</code> aborts.</p>
+
+<p>The arc continues: a cwd-delivery mechanism, then the filesystem commands (<code class="inline">ls</code>/<code class="inline">cat</code>/…). See <a href="roadmap.html">the roadmap</a>.</p>
+
 <h2>Standalone binaries, Stage 3: a shell environment</h2>
 
 <p>Third step of the arc: the shell gains environment variables and <code class="inline">$VAR</code> expansion, and <code class="inline">PATH</code> becomes a real variable driving command lookup (replacing Stage 2's <code class="inline">/bin</code> constant).</p>

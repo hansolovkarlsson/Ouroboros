@@ -441,14 +441,20 @@ the shell's own cwd/lifecycle) and the redirection/pipe **syntax**
    formatting). `run_path_command` reads `PATH` from it, so `set PATH=…`
    changes command lookup. Shell-local (not exported to children yet). See
    `CHANGELOG.md`'s "Standalone binaries, Stage 3."
-4. **Externalize the commands.** A shared `ulib` crate, then a thin `/bin`
-   program per externalizable command (`echo`/`cat`/`ls`/`mkdir`/`rmdir`/
-   `touch`/`rm`/`cp`/`mv`/`writeat`/`uptime`/`ps`/`kill`/`wait`/`ping`/
-   `resolve`/`fetch`/`mount`/`selftest`/`help`/`clear`), each reading argv and
-   using `ulib`, dropping the shell builtin once its `/bin` version works.
-   Prove with a batch (`echo`/`cat`/`ls`), then the rest incrementally. Large
-   but scalable — the shared-lib refactor is the real work; each command is
-   then cheap.
+4. **Externalize the commands — IN PROGRESS.** A shared `ulib` crate, then a
+   thin `/bin` program per externalizable command, each reading argv and using
+   `ulib`, dropping the shell builtin once its `/bin` version works. *First
+   increment done:* `ulib` (syscalls, argv, output routing, decimal, `exit`,
+   the panic handler) plus `echo`/`uptime`/`clear` — the commands needing
+   neither the filesystem nor the cwd. See `CHANGELOG.md`'s "Standalone
+   binaries, Stage 4 (first increment)." *Next:* a **cwd-delivery mechanism**
+   (a per-task cwd, mirroring argv) so a spawned command can resolve relative
+   paths / default to the current directory — required before the filesystem
+   commands (`ls`/`cat`/`mkdir`/`rmdir`/`touch`/`rm`/`cp`/`mv`/`writeat`) can
+   externalize; then the rest (`ps`/`kill`/`wait`/`ping`/`resolve`/`fetch`/
+   `mount`/`selftest`/`help`) incrementally. Each command is cheap now that
+   `ulib` exists. (`cd`/`pwd`/`exit`/`exec` and the redirect/pipe syntax stay
+   builtin.)
 
 **Scale, honestly:** a multi-milestone arc (breadth comparable to a slice of
 the network stack), but Stages 1–3 alone already deliver "type a bare program

@@ -205,6 +205,12 @@ via `ps`).
 
 ## Known limitations
 
+- **`echo`, `uptime`, and `clear` are `/bin` programs, not builtins.** They
+  were externalized (they run as `/bin/ECHO`/`/bin/UPTIME`/`/bin/CLEAR`, found
+  via `$PATH`) — behaviour is identical from a user's view, but they're
+  **unavailable on a boot without a mounted filesystem** (e.g. `make run`'s
+  FAT16, or real hardware with no USB stick), where a bare `echo` reports
+  "unknown command" instead. The other commands are still builtins.
 - **Write granularity: `write` full-replaces; `writeat`/`>>`/`cp` do
   offset writes.** The FAT32 layer has a real random-access offset-write
   primitive (`write_at`): `writeat` writes in place at any offset

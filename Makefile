@@ -35,6 +35,12 @@ NETD_ELF     := target/$(USER_TARGET)/release/netd
 NETD_BIN     := target/$(USER_TARGET)/release/netd.bin
 ARGS_ELF     := target/$(USER_TARGET)/release/args
 ARGS_BIN     := target/$(USER_TARGET)/release/args.bin
+ECHO_ELF     := target/$(USER_TARGET)/release/echo
+ECHO_BIN     := target/$(USER_TARGET)/release/echo.bin
+UPTIME_ELF   := target/$(USER_TARGET)/release/uptime
+UPTIME_BIN   := target/$(USER_TARGET)/release/uptime.bin
+CLEAR_ELF    := target/$(USER_TARGET)/release/clear
+CLEAR_BIN    := target/$(USER_TARGET)/release/clear.bin
 ESP_DIR      := esp
 OVMF         := $(shell brew --prefix qemu 2>/dev/null)/share/qemu/edk2-aarch64-code.fd
 PDT          := /Applications/Parallels Desktop.app/Contents/MacOS/prl_disk_tool
@@ -53,7 +59,7 @@ ifeq ($(PROFILE),release)
 CARGO_FLAGS += --release
 endif
 
-.PHONY: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin args-bin esp run run-virtio-console run-usb-kbd run-usb-multi run-gicv3 image run-image parallels-hdd test-parallels clean
+.PHONY: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin args-bin echo-bin uptime-bin clear-bin esp run run-virtio-console run-usb-kbd run-usb-multi run-gicv3 image run-image parallels-hdd test-parallels clean
 
 # Overridable by `make test-parallels VM_NAME=... CMDS=... BOOT_WAIT=...`.
 VM_NAME     ?= Ouroboros
@@ -119,6 +125,21 @@ args-bin:
 	cargo build -p args --target $(USER_TARGET) --release
 	"$(OBJCOPY)" --strip-all $(ARGS_ELF) $(ARGS_BIN)
 
+# Externalized commands (standalone-binaries Stage 4): former shell builtins,
+# now real /bin programs sharing the `ulib` support crate. Same recipe as
+# every other userland program.
+echo-bin:
+	cargo build -p echo --target $(USER_TARGET) --release
+	"$(OBJCOPY)" --strip-all $(ECHO_ELF) $(ECHO_BIN)
+
+uptime-bin:
+	cargo build -p uptime --target $(USER_TARGET) --release
+	"$(OBJCOPY)" --strip-all $(UPTIME_ELF) $(UPTIME_BIN)
+
+clear-bin:
+	cargo build -p clear --target $(USER_TARGET) --release
+	"$(OBJCOPY)" --strip-all $(CLEAR_ELF) $(CLEAR_BIN)
+
 # Stage the EFI System Partition layout QEMU/Parallels expect: a removable
 # UEFI drive boots \EFI\BOOT\BOOTAA64.EFI automatically, no boot manager
 # entry needed. \EFI\ORBS\ (must fit FAT's 8.3 short-name limit, which
@@ -127,7 +148,7 @@ args-bin:
 # itself: the default shell binary and the config file (loader.rs's
 # CONFIG_PATH) naming which program to load - edit INIT.CFG and rebuild
 # just that program to swap it out, no kernel rebuild required.
-esp: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin args-bin
+esp: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin args-bin echo-bin uptime-bin clear-bin
 	mkdir -p $(ESP_DIR)/EFI/BOOT $(ESP_DIR)/EFI/ORBS $(ESP_DIR)/bin
 	cp $(KERNEL) $(ESP_DIR)/EFI/BOOT/BOOTAA64.EFI
 	cp $(SHELL_BIN) $(ESP_DIR)/EFI/ORBS/SH.BIN
@@ -142,8 +163,12 @@ esp: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin args
 	# /bin: programs the shell finds via PATH by bare name (Stage 2 of the
 	# standalone-binaries arc). Named uppercase, no extension (8.3-legal);
 	# fsd's case-insensitive lookup matches a lowercase-typed command. For
-	# now just the argv proof program, `args`.
+	# now the argv proof program plus the first externalized commands
+	# (echo/uptime/clear - Stage 4), each a real program sharing `ulib`.
 	cp $(ARGS_BIN) $(ESP_DIR)/bin/ARGS
+	cp $(ECHO_BIN) $(ESP_DIR)/bin/ECHO
+	cp $(UPTIME_BIN) $(ESP_DIR)/bin/UPTIME
+	cp $(CLEAR_BIN) $(ESP_DIR)/bin/CLEAR
 
 # Boots the ESP directory directly in QEMU (no disk image needed) against
 # the aarch64 OVMF firmware installed by `brew install qemu`.

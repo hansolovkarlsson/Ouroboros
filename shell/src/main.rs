@@ -809,37 +809,12 @@ fn dispatch_line(line: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize, env:
 
     match command {
         "help" => out.put_line("commands: help, echo, uptime, clear, ls, cat, cd, pwd, mkdir, rmdir, touch, rm, write, writeat, cp, mv, mount, ping, resolve, fetch, exec, exit, ps, kill, fg, wait, send, recv, selftest, env, set, unset (a bare unknown command is looked up on $PATH; $VAR expands; append `> file`/`>> file` to redirect, or `| /path/to/program` to pipe)"),
-        "echo" => {
-            let mut first = true;
-            for word in line.split_whitespace().skip(1) {
-                if !first {
-                    out.put(b' ');
-                }
-                for b in word.bytes() {
-                    out.put(b);
-                }
-                first = false;
-            }
-            out.put(CR);
-            out.put(LF);
-        }
-        "uptime" => {
-            out.put_u64_decimal(get_ticks());
-            out.put_line(" ticks since boot");
-        }
+        // echo, uptime, clear are externalized: they're /bin programs now
+        // (found via PATH by the unknown-command arm), not builtins. See
+        // "Standalone binaries, Stage 4".
         "ping" => cmd_ping(arg, out),
         "resolve" => cmd_resolve(arg, out),
         "fetch" => cmd_fetch(arg, out),
-        "clear" => {
-            // ANSI clear-screen + cursor-home - the shell's own escape
-            // sequence, not a syscall; the console itself has no notion
-            // of a screen, just a byte stream. (Redirecting this writes
-            // the raw escape bytes to the file - pointless but harmless,
-            // not special-cased.)
-            for &b in b"\x1b[2J\x1b[H" {
-                out.put(b);
-            }
-        }
         "pwd" => out.put_line(cwd_str(cwd, *cwd_len)),
         "ls" => cmd_ls(arg, cwd, *cwd_len, out),
         "cat" => cmd_cat(arg, cwd, *cwd_len, out),
@@ -2040,10 +2015,6 @@ fn cmd_selftest(out: &mut Output) {
     let word = core::str::from_utf8(&word_bytes).unwrap_or("");
     let str_ok = word == "hi";
     let _ = write!(w, "str-vs-literal comparison: {str_ok} (expect true)\r\n");
-}
-
-fn get_ticks() -> u64 {
-    syscall(syscall_abi::GET_TICKS, 0)
 }
 
 /// One filesystem-server round trip, v2 protocol (fully
