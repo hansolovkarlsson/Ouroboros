@@ -40,6 +40,16 @@
 
   <article>
 
+<h2>Network stack, Stage 4n: TCP congestion control (Reno)</h2>
+
+<p>The send window was bounded only by the peer's advertised flow-control window. This adds a congestion window (<code class="inline">cwnd</code>) — TCP Reno — so the send rate is <code class="inline">min(cwnd, peer window)</code>: it ramps up gently on a fresh connection and backs off on loss.</p>
+
+<p>Per-connection <code class="inline">cwnd</code>/<code class="inline">ssthresh</code> (bytes): <code class="inline">cwnd</code> starts at <code class="inline">INIT_CWND</code> (4·MSS) and grows on each new ACK — by up to a segment per ACK in slow start (cwnd &lt; ssthresh, ~doubling per RTT), by ~MSS²/cwnd per ACK in congestion avoidance (~one segment per RTT) — capped at the 16-bit window ceiling (no window scaling negotiated). Loss cuts it: a fast retransmit (3 dup-ACKs) halves cwnd to ssthresh (multiplicative decrease); an RTO drops cwnd to one segment (back to slow start), the stronger response to the stronger loss signal. All wired into the existing send-window computation and the already-proven fast-retransmit / RTO branches — no new state machine.</p>
+
+<p>Verified on QEMU with temporary instrumentation (reverted): a 60 KB download showed textbook Reno in the cwnd log — slow-start growth 5601 → 26604 (+MSS per ACK), then an injected drop (fast retransmit enabled) halved it to ssthresh = 13302, after which congestion avoidance grew it ~+146/ACK (MSS²/cwnd, the additive-increase phase, distinct from slow-start's +1400) — the file downloading byte-complete throughout. The pcap showed the initial burst metered by cwnd (≈4 segments) rather than the whole peer window. A clean run streamed byte-complete with client <code class="inline">ping</code>/<code class="inline">fetch</code> unregressed; zero <code class="inline">-d int</code> aborts.</p>
+
+<p>On lossless SLIRP the reduction paths need injected loss to exercise (cwnd otherwise just ramps to the peer window and stays); the visible everyday effect is the slow-start ramp at the start of a transfer. Still QEMU-only; this is Reno (no fast-recovery inflation, and go-back-N retransmit is unchanged — SACK stays the one open TCP item).</p>
+
 <h2>Network stack, Stage 4m: HTTP 405 for unsupported methods</h2>
 
 <p>The server treated every request like a GET (it only distinguished HEAD). A request with any other method (POST, DELETE, …) now gets a proper <code class="inline">405 Method Not Allowed</code> with the <code class="inline">Allow: GET, HEAD</code> header RFC 7231 requires. Pure <code class="inline">netd</code>, one check: <code class="inline">start_response</code> rejects anything but GET/HEAD up front — before touching the path, so an unsupported method never reaches <code class="inline">fsd</code> — reusing the same fixed-response prefix mechanism as 404/503.</p>

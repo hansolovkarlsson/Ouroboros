@@ -78,6 +78,23 @@ const RESP_405: &[u8] = b"HTTP/1.0 405 Method Not Allowed\r\nAllow: GET, HEAD\r\
 /// the peer's remaining window is tighter - see `pump_send`).
 const SERVE_CHUNK: usize = 1400;
 
+/// TCP congestion control (Reno), all in bytes. The segment size used for
+/// cwnd accounting is `SERVE_CHUNK`; the send window is `min(cwnd, peer
+/// window)`. `cwnd` starts at `INIT_CWND` and grows per ACK - by ~`MSS` per
+/// ACK in slow start (cwnd < ssthresh), by ~`MSS` per RTT in congestion
+/// avoidance - and is cut on loss: halved to `ssthresh` on a fast
+/// retransmit, dropped to one segment (back to slow start) on an RTO.
+/// Capped at `MAX_CWND` (the 16-bit TCP window ceiling - no window scaling
+/// is negotiated). On lossless SLIRP cwnd just ramps to the peer window and
+/// stays, so the visible effect is the slow-start ramp at the start of a
+/// transfer (the initial burst is `INIT_CWND`, not the whole peer window);
+/// the reduction paths need injected loss to exercise.
+const MSS: u32 = SERVE_CHUNK as u32;
+const INIT_CWND: u32 = 4 * MSS;
+const INIT_SSTHRESH: u32 = 0xFFFF;
+const MIN_CWND: u32 = 2 * MSS;
+const MAX_CWND: u32 = 0xFFFF;
+
 /// TCP retransmit-timeout tuning, in `now()` ticks (a tick is 20ms). The RTO
 /// is now *estimated per connection* from the measured round-trip time (RFC
 /// 6298 - see `TcpConn::update_rtt`), not fixed: `RTO_INIT_TICKS` (~1s, the
@@ -711,6 +728,11 @@ struct TcpConn {
     rtt_seq: u32,
     /// `MONOTONIC_US` reading when the timed segment was sent.
     rtt_start_us: u64,
+    /// Congestion window and slow-start threshold, in bytes (TCP Reno; see the
+    /// `INIT_CWND` etc. constants). The send window is `min(cwnd, peer
+    /// window)`.
+    cwnd: u32,
+    ssthresh: u32,
 }
 
 /// A parsed inbound TCP segment addressed to our listen port.
@@ -867,6 +889,8 @@ fn handle_tcp(mac: &[u8; 6], frame: &[u8], seg: &TcpIn, conns: &mut [Option<TcpC
             rtt_active: false,
             rtt_seq: 0,
             rtt_start_us: 0,
+            cwnd: INIT_CWND,
+            ssthresh: INIT_SSTHRESH,
         };
         send_seg(mac, &c, TCP_SYN | TCP_ACK, true, &[]);
         c.snd_nxt = c.snd_nxt.wrapping_add(1); // our SYN consumes one too
@@ -894,8 +918,19 @@ fn handle_conn_segment(mac: &[u8; 6], frame: &[u8], seg: &TcpIn, c: &mut TcpConn
     // update the advertised window.
     if seg.flags & TCP_ACK != 0 {
         if seq_gt(seg.ack, c.snd_una) {
+            let acked = seg.ack.wrapping_sub(c.snd_una); // new bytes acknowledged
             c.snd_una = seg.ack; // forward progress
             c.dup_acks = 0;
+            // Congestion control (Reno) grows the window on each new ACK: in
+            // slow start (cwnd < ssthresh) by up to a segment per ACK
+            // (exponential, ~doubles per RTT); in congestion avoidance by
+            // ~MSS*MSS/cwnd per ACK (~one segment per RTT). Capped at MAX_CWND.
+            if c.cwnd < c.ssthresh {
+                c.cwnd = c.cwnd.saturating_add(acked.min(MSS));
+            } else {
+                c.cwnd = c.cwnd.saturating_add((MSS * MSS / c.cwnd).max(1));
+            }
+            c.cwnd = c.cwnd.min(MAX_CWND);
             // Complete an outstanding RTT sample if this ACK covers the timed
             // segment's end seq (and it wasn't invalidated by a retransmit -
             // Karn; see rewind_to). !seq_gt(rtt_seq, ack) == ack >= rtt_seq.
@@ -920,6 +955,11 @@ fn handle_conn_segment(mac: &[u8; 6], frame: &[u8], seg: &TcpIn, c: &mut TcpConn
             // there (go-back-N); the next pump does the actual sending.
             c.dup_acks = c.dup_acks.saturating_add(1);
             if c.dup_acks >= 3 && c.last_rexmit_una != c.snd_una {
+                // Congestion control: a fast retransmit is a moderate loss
+                // signal - halve the window (multiplicative decrease) rather
+                // than collapsing to slow start the way an RTO does.
+                c.ssthresh = (c.cwnd / 2).max(MIN_CWND);
+                c.cwnd = c.ssthresh;
                 rewind_to(c, c.snd_una);
                 c.last_rexmit_una = c.snd_una;
                 c.dup_acks = 0;
@@ -1028,6 +1068,10 @@ fn service_rto(mac: &[u8; 6], c: &mut TcpConn, now: u64) -> bool {
             send_seg(mac, c, TCP_RST, false, &[]); // peer is dead - abort
             return true;
         }
+        // Congestion control: a timeout is the strongest loss signal - halve
+        // ssthresh and collapse cwnd to one segment, restarting slow start.
+        c.ssthresh = (c.cwnd / 2).max(MIN_CWND);
+        c.cwnd = MSS;
         rewind_to(c, c.snd_una); // presume loss, resend from snd_una
         c.rto_retries += 1;
         c.rto_deadline = now + (c.rto_ticks << c.rto_retries.min(4)); // exp. backoff, capped
@@ -1365,7 +1409,9 @@ fn pump_send(mac: &[u8; 6], c: &mut TcpConn) {
             return; // yield - the next wake (driven by an ACK) continues
         }
         let in_flight = c.snd_nxt.wrapping_sub(c.snd_una);
-        let avail = c.window.saturating_sub(in_flight);
+        // Send window: the smaller of the congestion window and the peer's
+        // advertised flow-control window, minus what's already in flight.
+        let avail = c.cwnd.min(c.window).saturating_sub(in_flight);
         if avail == 0 {
             return; // window full - wait for an ACK
         }

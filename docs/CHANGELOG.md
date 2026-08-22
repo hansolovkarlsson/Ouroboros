@@ -7,6 +7,39 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/`; 
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## Network stack, Stage 4n: TCP congestion control (Reno)
+
+The send window was bounded only by the peer's advertised flow-control
+window. This adds a congestion window (`cwnd`) — TCP Reno — so the send rate
+is `min(cwnd, peer window)`: it ramps up gently on a fresh connection and
+backs off on loss.
+
+Per-connection `cwnd`/`ssthresh` (bytes): `cwnd` starts at `INIT_CWND`
+(4·MSS) and grows on each new ACK — by up to a segment per ACK in slow start
+(cwnd < ssthresh, ~doubling per RTT), by ~MSS²/cwnd per ACK in congestion
+avoidance (~one segment per RTT) — capped at the 16-bit window ceiling (no
+window scaling negotiated). Loss cuts it: a fast retransmit (3 dup-ACKs)
+halves cwnd to ssthresh (multiplicative decrease); an RTO drops cwnd to one
+segment (back to slow start), the stronger response to the stronger loss
+signal. All wired into the existing send-window computation and the
+already-proven fast-retransmit / RTO branches — no new state machine.
+
+Verified on QEMU with temporary instrumentation (reverted): a 60 KB download
+showed textbook Reno in the cwnd log — slow-start growth 5601 → 26604 (+MSS
+per ACK), then an injected drop (fast retransmit enabled) halved it to
+ssthresh = 13302, after which congestion avoidance grew it ~+146/ACK
+(MSS²/cwnd, the additive-increase phase, distinct from slow-start's +1400) —
+the file downloading byte-complete throughout. The pcap showed the initial
+burst metered by cwnd (≈4 segments) rather than the whole peer window. A
+clean run streamed byte-complete with client `ping`/`fetch` unregressed;
+zero `-d int` aborts.
+
+On lossless SLIRP the reduction paths need injected loss to exercise (cwnd
+otherwise just ramps to the peer window and stays); the visible everyday
+effect is the slow-start ramp at the start of a transfer. Still QEMU-only;
+this is Reno (no fast-recovery inflation, and go-back-N retransmit is
+unchanged — SACK stays the one open TCP item).
+
 ## Network stack, Stage 4m: HTTP 405 for unsupported methods
 
 The server treated every request like a GET (it only distinguished HEAD). A
