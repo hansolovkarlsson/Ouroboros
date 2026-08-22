@@ -70,6 +70,15 @@ const RESP_503: &[u8] = b"HTTP/1.0 503 Service Unavailable\r\nContent-Type: text
 /// the peer's remaining window is tighter - see `pump_send`).
 const SERVE_CHUNK: usize = 1400;
 
+/// TCP retransmit-timeout tuning, in `now()` ticks (a tick is 20ms). Base RTO
+/// ~1s (fixed - no RTT estimation), doubling per consecutive firing up to a
+/// cap, giving up (RST + close) after `RTO_MAX_RETRIES`. `RTO_POLL_MS` is how
+/// long `NET_WAIT` sleeps while data is unacked, so netd wakes to check the
+/// timer even if the peer is silent (no frames).
+const RTO_BASE_TICKS: u64 = 50;
+const RTO_MAX_RETRIES: u8 = 5;
+const RTO_POLL_MS: u64 = 200;
+
 #[no_mangle]
 #[link_section = ".text.start"]
 pub extern "C" fn _start() -> ! {
@@ -110,9 +119,15 @@ fn serve(packed_mac: u64) -> ! {
     let mut conn: Option<TcpConn> = None;
     loop {
         // Block until a client message or an incoming frame is pending (or
-        // return immediately if either already is - the kernel checks both
-        // up front, so this never sleeps through waiting input).
-        syscall(syscall_abi::NET_WAIT, 0);
+        // return immediately if either already is). While data is unacked,
+        // use a timeout so we still wake to service the retransmit timer even
+        // if the peer has gone silent (no frames); otherwise block
+        // indefinitely (the health-ping still wakes us periodically).
+        let timeout = match conn.as_ref() {
+            Some(c) if c.snd_nxt != c.snd_una => RTO_POLL_MS,
+            _ => 0,
+        };
+        syscall(syscall_abi::NET_WAIT, timeout);
 
         // 1. Client requests (ping/resolve/fetch), handled synchronously; the
         // supervisor health-ping is acked here too (any reply acks it).
@@ -122,6 +137,13 @@ fn serve(packed_mac: u64) -> ! {
         if packed_mac != syscall_abi::NET_ERROR {
             while let Some(n) = recv(&mut frame) {
                 on_frame(&mac, &frame[..n], &mut conn);
+            }
+            // Service the retransmit timer (retransmit on timeout, or give up
+            // on a dead peer) - after processing any ACKs above, before pumping.
+            if let Some(c) = conn.as_mut() {
+                if service_rto(&mac, c, now()) {
+                    conn = None;
+                }
             }
             // 3. Stream the active response up to the current window - in
             // bounded bursts, draining the mailbox (acking the health-ping)
@@ -632,6 +654,17 @@ struct TcpConn {
     /// (wasteful) retransmit for the *same* gap when the leftover dup-ACKs from
     /// the original out-of-order burst keep arriving. Reset on real progress.
     last_rexmit_una: u32,
+    /// Retransmit-timeout (RTO) timer: the tick (from `now()`) at which
+    /// unacked data is presumed lost and resent; 0 = timer off (nothing
+    /// outstanding). The fallback to fast retransmit for when the peer goes
+    /// silent and no dup-ACKs arrive.
+    rto_deadline: u64,
+    /// The `snd_una` the RTO timer was last (re)armed at, to detect forward
+    /// progress (an advancing ACK) between checks.
+    rto_snd_una: u32,
+    /// Consecutive RTO firings without progress - drives exponential backoff
+    /// and the eventual give-up (a dead peer).
+    rto_retries: u8,
 }
 
 /// A parsed inbound TCP segment addressed to our listen port.
@@ -774,6 +807,9 @@ fn handle_tcp(mac: &[u8; 6], frame: &[u8], seg: &TcpIn, conn: &mut Option<TcpCon
             fin_sent: false,
             dup_acks: 0,
             last_rexmit_una: 0,
+            rto_deadline: 0,
+            rto_snd_una: SERVER_ISN,
+            rto_retries: 0,
         };
         send_seg(mac, &c, TCP_SYN | TCP_ACK, true, &[]);
         c.snd_nxt = c.snd_nxt.wrapping_add(1); // our SYN consumes one too
@@ -866,6 +902,45 @@ fn rewind_to(c: &mut TcpConn, seq: u32) {
     c.read_off = off.saturating_sub(c.prefix_len) as u64;
     c.eof = false;
     c.fin_sent = false;
+}
+
+/// Service the retransmit timer, called once per event-loop wake. Manages the
+/// RTO for the one connection: arm it while data is outstanding, restart it on
+/// forward progress (an advancing ACK, resetting backoff), and on expiry -
+/// which only happens when the peer has gone silent, since a live peer's
+/// dup-ACKs would have triggered fast retransmit first - resend from `snd_una`
+/// (go-back-N via `rewind_to`; the next pump does the sending) with
+/// exponential backoff. Returns `true` when the peer is unresponsive past
+/// `RTO_MAX_RETRIES` (a RST is sent and the caller drops the connection).
+fn service_rto(mac: &[u8; 6], c: &mut TcpConn, now: u64) -> bool {
+    let in_flight = c.snd_nxt.wrapping_sub(c.snd_una);
+    if in_flight == 0 {
+        c.rto_deadline = 0; // nothing outstanding - timer off
+        c.rto_retries = 0;
+        c.rto_snd_una = c.snd_una;
+        return false;
+    }
+    if c.snd_una != c.rto_snd_una {
+        // Forward progress since the last check: restart the timer, reset backoff.
+        c.rto_snd_una = c.snd_una;
+        c.rto_retries = 0;
+        c.rto_deadline = now + RTO_BASE_TICKS;
+        return false;
+    }
+    if c.rto_deadline == 0 {
+        c.rto_deadline = now + RTO_BASE_TICKS; // just became outstanding - arm it
+        return false;
+    }
+    if now >= c.rto_deadline {
+        if c.rto_retries >= RTO_MAX_RETRIES {
+            send_seg(mac, c, TCP_RST, false, &[]); // peer is dead - abort
+            return true;
+        }
+        rewind_to(c, c.snd_una); // presume loss, resend from snd_una
+        c.rto_retries += 1;
+        c.rto_deadline = now + (RTO_BASE_TICKS << c.rto_retries.min(4)); // exp. backoff, capped
+    }
+    false
 }
 
 /// Whether `seg` belongs to the active connection (same peer address+port).

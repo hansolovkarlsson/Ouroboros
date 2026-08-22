@@ -875,11 +875,22 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
             if !net_access_allowed() {
                 return syscall_abi::NET_ERROR;
             }
-            // Block until a frame arrives or a message is queued (or one
-            // already is - the poll checks both up front, so this never
-            // sleeps through pending input). Same frame-overwrite blocking
-            // contract as READ_CHAR/MSG_RECV.
-            unsafe { tasks::block_current_and_switch(frame, tasks::WaitReason::NetInput) }
+            // arg0 = timeout in milliseconds (0 = block indefinitely). A
+            // nonzero timeout also wakes the caller once it elapses with no
+            // input - the timer the network server's TCP retransmit timeout
+            // needs when a peer goes silent. Block until a frame arrives, a
+            // message is queued, or the deadline passes (or one is already
+            // true - the poll checks up front, never sleeping through pending
+            // input). Same frame-overwrite blocking contract as READ_CHAR.
+            let deadline = if arg0 == 0 {
+                0
+            } else {
+                let ticks = arg0.div_ceil(crate::timer::TICK_INTERVAL_MS);
+                crate::exceptions::ticks() + ticks.max(1)
+            };
+            unsafe {
+                tasks::block_current_and_switch(frame, tasks::WaitReason::NetInput { deadline })
+            }
         }
         syscall_abi::FG => {
             let i = arg0 as usize;

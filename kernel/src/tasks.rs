@@ -529,7 +529,7 @@ pub(crate) fn send_message(sender: usize, dest: usize, data: &[u8]) -> u64 {
     // a queued message. Mark it runnable now so a client call reaches it this
     // switch (sub-tick), not only on the next tick's wake-check. It drains
     // the mailbox itself on resume (NET_WAIT returns; the value is ignored).
-    if let TaskState::Blocked(WaitReason::NetInput) = unsafe { *STATES[dest].0.get() } {
+    if let TaskState::Blocked(WaitReason::NetInput { .. }) = unsafe { *STATES[dest].0.get() } {
         unsafe { *STATES[dest].0.get() = TaskState::Runnable };
     }
     0
@@ -810,7 +810,11 @@ pub(crate) enum WaitReason {
     /// sources itself after waking (`NET_RECV` / `MSG_TRY_RECV`). This is
     /// the async-receive primitive the network server uses to multiplex
     /// incoming frames and client IPC without busy-polling either.
-    NetInput,
+    /// `deadline` (a tick count from `exceptions::ticks()`; 0 = none) also
+    /// wakes it once that tick is reached even with no input - the timer the
+    /// network server's TCP retransmit timeout (RTO) needs to fire when a
+    /// peer goes silent and no frames arrive.
+    NetInput { deadline: u64 },
 }
 
 impl WaitReason {
@@ -866,11 +870,13 @@ impl WaitReason {
                 }
                 try_recv_message_from(waiter, buf, len, from)
             }
-            WaitReason::NetInput => {
-                // Woken by either source; consume neither (the waiter
-                // drains them itself). The returned value is not meaningful
-                // to NET_WAIT's caller.
-                if crate::syscall::net_has_frame() || has_queued_message(waiter) {
+            WaitReason::NetInput { deadline } => {
+                // Woken by a frame, a message, or the deadline (a bare timer
+                // wake with no input - what the RTO needs); consume nothing
+                // (the waiter drains sources itself). The value isn't
+                // meaningful to NET_WAIT's caller.
+                let timed_out = deadline != 0 && crate::exceptions::ticks() >= deadline;
+                if crate::syscall::net_has_frame() || has_queued_message(waiter) || timed_out {
                     Some(0)
                 } else {
                     None
