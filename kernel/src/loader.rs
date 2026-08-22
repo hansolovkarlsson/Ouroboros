@@ -121,8 +121,14 @@ const CONFIG_PATH: &str = "\\EFI\\ORBS\\INIT.CFG";
 // sitting right at the 16KB edge - a later change (the flow-control drain
 // loop) tipped `ping` over it into the guard page (a clean fault, caught, not
 // silent - exactly what the guard is for). netd is the most stack-hungry
-// program; 24KB gives it real margin.
-const STACK_PAGES: u64 = 6;
+// program; 24KB gave it margin.
+//
+// Grown again to 32KB (8 pages) when netd gained concurrent connections: its
+// serve() frame now permanently holds MAX_CONNS TcpConns (each ~2.3KB, a 2KB
+// response-prefix buffer dominating), and a client op (ping/resolve/fetch)
+// nests its own ~5KB TCP/DNS buffers on top of that - which overflowed 24KB
+// (caught, again, by the guard). All regions grow 8KB; RAM is ample.
+const STACK_PAGES: u64 = 8;
 /// One inaccessible guard page between the code and the stack. The stack
 /// grows down from the top of the region; an overflow past the 8KB stack
 /// lands in this page, which `mmu.rs` maps EL1-only, taking a clean EL0

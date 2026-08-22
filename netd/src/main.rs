@@ -59,6 +59,11 @@ const PAYLOAD: usize = 32;
 /// suffices - the same reasoning as the client's `TCP_ISN`).
 const SERVER_PORT: u16 = 80;
 const SERVER_ISN: u32 = 0x0002_0000;
+/// How many concurrent server connections `netd` can hold at once (a browser
+/// opens several for one page). Bounded because each `TcpConn` carries a
+/// ~2KB response-prefix buffer and they all live on `serve()`'s stack; a SYN
+/// arriving with no free slot is dropped (the peer retransmits).
+const MAX_CONNS: usize = 4;
 
 /// Full responses for the two failure cases.
 const RESP_404: &[u8] =
@@ -113,20 +118,20 @@ fn serve(packed_mac: u64) -> ! {
     };
     let mut buf = [0u8; syscall_abi::MSG_MAX_LEN as usize];
     let mut frame = [0u8; 1600];
-    // The one in-flight server connection's state - kept on this frame
+    // Up to MAX_CONNS concurrent server connections, kept on this frame
     // because userland has no static mutable state (`.bss` asserted empty).
     // `serve` never returns, so the frame persists for the whole boot.
-    let mut conn: Option<TcpConn> = None;
+    let mut conns: [Option<TcpConn>; MAX_CONNS] = core::array::from_fn(|_| None);
     loop {
         // Block until a client message or an incoming frame is pending (or
-        // return immediately if either already is). While data is unacked,
-        // use a timeout so we still wake to service the retransmit timer even
-        // if the peer has gone silent (no frames); otherwise block
-        // indefinitely (the health-ping still wakes us periodically).
-        let timeout = match conn.as_ref() {
-            Some(c) if c.snd_nxt != c.snd_una => RTO_POLL_MS,
-            _ => 0,
-        };
+        // return immediately if either already is). While *any* connection has
+        // data unacked, use a timeout so we still wake to service the
+        // retransmit timer even if a peer has gone silent (no frames);
+        // otherwise block indefinitely (the health-ping still wakes us).
+        let unacked = conns
+            .iter()
+            .any(|c| matches!(c, Some(c) if c.snd_nxt != c.snd_una));
+        let timeout = if unacked { RTO_POLL_MS } else { 0 };
         syscall(syscall_abi::NET_WAIT, timeout);
 
         // 1. Client requests (ping/resolve/fetch), handled synchronously; the
@@ -136,29 +141,31 @@ fn serve(packed_mac: u64) -> ! {
         // 2. Incoming frames: ARP replies for our IP, and the TCP server.
         if packed_mac != syscall_abi::NET_ERROR {
             while let Some(n) = recv(&mut frame) {
-                on_frame(&mac, &frame[..n], &mut conn);
+                on_frame(&mac, &frame[..n], &mut conns);
             }
-            // Service the retransmit timer (retransmit on timeout, or give up
-            // on a dead peer) - after processing any ACKs above, before pumping.
-            if let Some(c) = conn.as_mut() {
-                if service_rto(&mac, c, now()) {
-                    conn = None;
-                }
-            }
-            // 3. Stream the active response up to the current window - in
-            // bounded bursts, draining the mailbox (acking the health-ping)
-            // between them, so a full window can go out in one wake without any
-            // single stretch running long enough to look wedged. Stops when a
+            // 3. Per connection: service the retransmit timer (retransmit on
+            // timeout, or give up on a dead peer), then stream its response up
+            // to the current window - in bounded bursts, draining the mailbox
+            // (acking the health-ping) between them so no single stretch runs
+            // long enough to look wedged. Stops a connection's pump when a
             // burst makes no progress (window full, or the response is done).
-            while let Some(c) = conn.as_mut() {
-                if !c.responded {
-                    break;
+            for slot in conns.iter_mut() {
+                if let Some(c) = slot.as_mut() {
+                    if service_rto(&mac, c, now()) {
+                        *slot = None;
+                        continue;
+                    }
                 }
-                let before = c.snd_nxt;
-                pump_send(&mac, c);
-                drain_client_messages(packed_mac, &mut buf);
-                if c.snd_nxt == before {
-                    break;
+                while let Some(c) = slot.as_mut() {
+                    if !c.responded {
+                        break;
+                    }
+                    let before = c.snd_nxt;
+                    pump_send(&mac, c);
+                    drain_client_messages(packed_mac, &mut buf);
+                    if c.snd_nxt == before {
+                        break;
+                    }
                 }
             }
         }
@@ -684,7 +691,7 @@ struct TcpIn {
 /// Dispatch one received frame: answer ARP requests for our IP, and feed TCP
 /// segments to the HTTP server. Everything else (including our own client
 /// ops' replies, which the synchronous handlers already consumed) is ignored.
-fn on_frame(mac: &[u8; 6], frame: &[u8], conn: &mut Option<TcpConn>) {
+fn on_frame(mac: &[u8; 6], frame: &[u8], conns: &mut [Option<TcpConn>; MAX_CONNS]) {
     if frame.len() < 14 {
         return;
     }
@@ -693,7 +700,7 @@ fn on_frame(mac: &[u8; 6], frame: &[u8], conn: &mut Option<TcpConn>) {
         0x0806 => handle_arp(mac, frame),
         0x0800 => {
             if let Some(seg) = parse_tcp_in(frame) {
-                handle_tcp(mac, frame, &seg, conn);
+                handle_tcp(mac, frame, &seg, conns);
             }
         }
         _ => {}
@@ -769,23 +776,27 @@ fn parse_tcp_in(frame: &[u8]) -> Option<TcpIn> {
     })
 }
 
-/// The server TCP state machine for one segment. SYN -> SYN-ACK; the request
-/// starts a response that is then *streamed under flow control* (`pump_send`),
-/// paced by the peer's advertised window and driven forward by its ACKs;
-/// finally our FIN, then ack the peer's FIN and close. One connection at a
-/// time; a SYN always (re)starts it. `frame` is the raw packet, so the request
-/// payload can be sliced out for the file server.
-fn handle_tcp(mac: &[u8; 6], frame: &[u8], seg: &TcpIn, conn: &mut Option<TcpConn>) {
+/// Route one inbound TCP segment to its connection, multiplexing up to
+/// `MAX_CONNS` at once (keyed by the peer's IP+port). A SYN opens (or, for the
+/// same peer, restarts) a connection in a free slot - or is dropped if all
+/// slots are busy (the peer retransmits); every other segment is dispatched to
+/// its matching connection via [`handle_conn_segment`], and a returned "close"
+/// (the peer's FIN, or an RST) frees the slot.
+fn handle_tcp(mac: &[u8; 6], frame: &[u8], seg: &TcpIn, conns: &mut [Option<TcpConn>; MAX_CONNS]) {
     // RST tears down a matching connection.
     if seg.flags & TCP_RST != 0 {
-        if seg_matches(conn, seg) {
-            *conn = None;
+        if let Some(i) = find_conn(conns, seg) {
+            conns[i] = None;
         }
         return;
     }
 
-    // SYN (without ACK): start or restart the connection, answer with SYN-ACK.
+    // SYN (without ACK): open the connection in this peer's existing slot (a
+    // retransmitted/duplicate SYN) or a free one, and answer with SYN-ACK.
     if seg.flags & TCP_SYN != 0 && seg.flags & TCP_ACK == 0 {
+        let Some(i) = find_conn(conns, seg).or_else(|| free_slot(conns)) else {
+            return; // all slots busy - drop; the peer will retransmit
+        };
         let mut c = TcpConn {
             peer_ip: seg.src_ip,
             peer_mac: seg.src_mac,
@@ -813,16 +824,25 @@ fn handle_tcp(mac: &[u8; 6], frame: &[u8], seg: &TcpIn, conn: &mut Option<TcpCon
         };
         send_seg(mac, &c, TCP_SYN | TCP_ACK, true, &[]);
         c.snd_nxt = c.snd_nxt.wrapping_add(1); // our SYN consumes one too
-        *conn = Some(c);
+        conns[i] = Some(c);
         return;
     }
 
-    // Everything else must belong to the active connection.
-    if !seg_matches(conn, seg) {
-        return;
+    // Everything else is dispatched to its matching connection (if any).
+    if let Some(i) = find_conn(conns, seg) {
+        if handle_conn_segment(mac, frame, seg, conns[i].as_mut().unwrap()) {
+            conns[i] = None;
+        }
     }
-    let Some(c) = conn.as_mut() else { return };
+}
 
+/// The per-connection TCP state machine for one non-SYN segment: process its
+/// ACK (flow-control window, duplicate-ACK fast retransmit), complete the
+/// handshake, set up the response from the request, and handle the peer's FIN.
+/// Returns `true` when the connection should be closed (the peer FIN'd). The
+/// actual sending (`pump_send`) is *not* done here - it runs once per
+/// event-loop wake so the health-ping stays promptly acked (see `serve`).
+fn handle_conn_segment(mac: &[u8; 6], frame: &[u8], seg: &TcpIn, c: &mut TcpConn) -> bool {
     // Track the peer's ACK (frees send window), count duplicate ACKs, and
     // update the advertised window.
     if seg.flags & TCP_ACK != 0 {
@@ -878,8 +898,21 @@ fn handle_tcp(mac: &[u8; 6], frame: &[u8], seg: &TcpIn, conn: &mut Option<TcpCon
     if seg.flags & TCP_FIN != 0 {
         c.rcv_nxt = seg.seq.wrapping_add(seg.data_len).wrapping_add(1);
         send_seg(mac, c, TCP_ACK, false, &[]);
-        *conn = None;
+        return true;
     }
+    false
+}
+
+/// Index of the connection matching `seg`'s peer (IP + source port), if any.
+fn find_conn(conns: &[Option<TcpConn>; MAX_CONNS], seg: &TcpIn) -> Option<usize> {
+    conns.iter().position(|c| {
+        matches!(c, Some(c) if c.peer_ip == seg.src_ip && c.peer_port == seg.src_port)
+    })
+}
+
+/// Index of a free connection slot, if any.
+fn free_slot(conns: &[Option<TcpConn>; MAX_CONNS]) -> Option<usize> {
+    conns.iter().position(|c| c.is_none())
 }
 
 /// Wrapping "is `a` sequence-after `b`" - handles the u32 sequence-number
@@ -941,14 +974,6 @@ fn service_rto(mac: &[u8; 6], c: &mut TcpConn, now: u64) -> bool {
         c.rto_deadline = now + (RTO_BASE_TICKS << c.rto_retries.min(4)); // exp. backoff, capped
     }
     false
-}
-
-/// Whether `seg` belongs to the active connection (same peer address+port).
-fn seg_matches(conn: &Option<TcpConn>, seg: &TcpIn) -> bool {
-    match conn {
-        Some(c) => c.peer_ip == seg.src_ip && c.peer_port == seg.src_port,
-        None => false,
-    }
 }
 
 /// Build and send one server-direction segment for connection `c`.

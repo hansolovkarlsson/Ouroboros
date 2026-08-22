@@ -387,7 +387,7 @@ fn el0_page_4k(base: u64) -> u64 {
 /// for `loader`'s `SLOT_ALIGN`; a mismatch would misplace the guard, so
 /// keep them in sync.
 fn guard_page_addr(region: (u64, u64)) -> Option<u64> {
-    const STACK_PAGES: u64 = 6; // must match loader.rs (24KB stack)
+    const STACK_PAGES: u64 = 8; // must match loader.rs (32KB stack)
     let (base, size) = region;
     let guard_from_end = (STACK_PAGES + 1) * 4096;
     if size <= guard_from_end {
