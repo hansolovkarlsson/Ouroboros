@@ -129,6 +129,11 @@
         <h3>Scope it down before you build it</h3>
         <p>Five milestones in one day — an active health-ping, a capability model, program-to-program pipes, a stack guard page, a userland heap — whose lesson is scoping: three shrank when asked whether the clean design needed the hard part, a guard page found a silent overflow on its first test, and a one-build gate proved <code class="inline">alloc</code> can't be PIE-linked on stable before a week was spent on it.</p>
       </a>
+      <a class="pm-card" href="postmortem-network-stack.html">
+        <span class="pm-eyebrow">Retrospective · networking</span>
+        <h3>A network stack in a day</h3>
+        <p>From no networking to a concurrent HTTP server: the no-IOMMU driver/protocol split, the async-receive primitive a server needs (blocking on frames <em>or</em> messages, then a timer for the RTO), testing loss recovery on a wire that can't lose a packet, a go-back-N sequence-number wrap that stalled transfers, and the guard page catching the stack overflow twice more.</p>
+      </a>
     </div>
 
     <h2>Research &amp; assessments</h2>

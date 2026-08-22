@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>A Network Stack in a Day — Ouroboros</title>
+<meta name="description" content="A design-and-bugs retrospective on building Ouroboros's whole network stack in one day — from a virtio-net driver to a concurrent HTTP server — covering the no-IOMMU driver/protocol split, the async-receive primitive a server needs, testing loss recovery on a wire that can't lose a packet, and the guard page catching the stack overflow twice more.">
+<link rel="icon" type="image/png" href="../assets/favicon.png">
+<link rel="stylesheet" href="../assets/site.css">
+</head>
+<body>
+
+<nav class="sitenav">
+  <div class="sitenav-inner">
+    <a class="sitenav-mark" href="../index.html">ouroboros</a>
+    <div class="sitenav-links">
+      <a href="../index.html">Home</a>
+      <a href="architecture-overview.html">Architecture</a>
+      <a href="tutorial.html">Learn</a>
+      <a href="docs.html" class="current">Docs</a>
+      <a href="https://github.com/hansolovkarlsson/Ouroboros">GitHub ↗</a>
+    </div>
+  </div>
+</nav>
+
+<div class="page">
+
+  <div class="kicker">Design retrospective · Ouroboros</div>
+
+  <h1 class="title small">A network stack in a day</h1>
+  <p class="dek">
+    From no networking at all to a concurrent HTTP server you can point a
+    browser at — plus <code class="inline">ping</code>, DNS, and client HTTP.
+    Hand-rolled, <code class="inline">no_std</code>, no crates. Three real bugs
+    surfaced only under test.
+  </p>
+
+  <div class="companion">
+    <span class="companion-icon">🌐</span>
+    <span>A companion to this project's four <a href="postmortem-boot-bringup.html">bug-hunt</a> <a href="postmortem-xhci-keyboard.html">postmortems</a> and three <a href="postmortem-isolation-dataflow.html">design</a> <a href="postmortem-capability-hardening.html">retrospectives</a>. This one is both: a design story (the driver/protocol split, the async-receive primitive) wrapped around three bugs that only appeared under test.</span>
+  </div>
+
+  <article>
+
+    <p>This is a write-up of one day's work on <a href="../index.html">Ouroboros</a>, a from-scratch ARM64 microkernel, that took it from <em>no networking at all</em> to a <strong>concurrent HTTP server you can point a browser at</strong> — plus <code class="inline">ping</code>, <code class="inline">resolve</code> (DNS), and <code class="inline">fetch</code> (client HTTP) at the shell. Everything is hand-rolled, <code class="inline">no_std</code>, no crates: a virtio-net driver, ARP, IPv4, ICMP, UDP, DNS, and a TCP that does flow control, fast retransmit, a retransmit timeout, and multiple simultaneous connections.</p>
+
+    <p>Like the others, it's kept out of the project's own record (<code class="inline">CLAUDE.md</code>, <code class="inline">CHANGELOG.md</code>) because most of it isn't Ouroboros-specific. If you've ever written a TCP from scratch, or tried to test loss recovery on a network that never loses a packet, some of this may save you time.</p>
+
+    <h2>The shape of the day</h2>
+
+    <p>Networking landed as one long staged arc, each stage built and tested before the next depended on it:</p>
+    <ul>
+      <li><strong>Stage 1</strong> — the virtio-net driver: raw Ethernet frames in and out, proven by a hand-built ARP round-trip.</li>
+      <li><strong>Stage 2</strong> — the driver/protocol split: the stack moved to a userland server (<code class="inline">netd</code>) reached through gated syscalls; ARP + IPv4 + ICMP and a <code class="inline">ping</code> command.</li>
+      <li><strong>Stage 3</strong> — UDP, proven by real DNS resolution (<code class="inline">resolve</code>).</li>
+      <li><strong>Stage 4a</strong> — a client TCP (<code class="inline">fetch</code> — a real HTTP GET to a real site).</li>
+      <li><strong>Stage 4b</strong> — the async-receive primitive, and <code class="inline">netd</code> becomes a <em>server</em>.</li>
+      <li><strong>Stage 4c–4g</strong> — a real static-file HTTP server: files from the filesystem server, a directory listing, correct <code class="inline">Content-Type</code>/<code class="inline">Content-Length</code>, and <code class="inline">HEAD</code>.</li>
+      <li><strong>Stage 4h–4i</strong> — TCP loss recovery: fast retransmit, then a timer-based retransmit timeout (RTO).</li>
+      <li><strong>Stage 4j</strong> — concurrent connections.</li>
+    </ul>
+    <p>Three of those had a bug or a design turn worth writing down. The rest were "read the spec, hand-roll it, cross-check the bytes."</p>
+
+    <h2>Thread 1: the driver/protocol split is forced, not chosen</h2>
+
+    <p>The first decision was where the code lives. This is a microkernel — it had already moved its filesystem and console out of the kernel into supervised, MMU-isolated userland servers. Networking wants the same, but a hard constraint decides <em>which</em> half stays in the kernel.</p>
+
+    <p><strong>There is no IOMMU.</strong> A device programmed to DMA can read or write <em>anywhere</em> in physical memory. So the code that owns the device's DMA rings and buffers cannot be an untrusted EL0 task — a bug there is a write primitive over all of RAM. The DMA owner has to stay in the trusted kernel; it's the same rule that already kept the virtio-blk driver there.</p>
+
+    <p>So the split writes itself: the <strong>DMA-owning virtio-net driver stays in the kernel</strong>, exposed through three gated syscalls (<code class="inline">NET_SEND</code>/<code class="inline">NET_RECV</code>/<code class="inline">NET_MAC</code>) that move <em>opaque frames</em> and are accepted from one task only. The <strong>entire protocol stack</strong> lives in <code class="inline">netd</code>, a userland server holding the only capability to call those syscalls. The kernel never learns what a TCP segment is — so a whole new transport (UDP, then TCP) is <em>pure userland code</em>, no kernel change at all.</p>
+
+    <p>The lesson generalizes past "no IOMMU": <strong>let the trust boundary, not convenience, decide the split.</strong> The narrowest thing that must be trusted is the only thing that should be privileged; everything above it is a normal program.</p>
+
+    <h2>Thread 2: a server that can only initiate isn't a server</h2>
+
+    <p>Stages 1–4a all <em>initiate</em>: send a request, wait for the reply. The server's loop is trivial. A <em>server</em> is the opposite — it reacts to input that arrives <strong>unsolicited</strong> — and that exposed a gap. <code class="inline">netd</code>'s loop could block on an IPC message <em>or</em> poll the NIC for a frame, <strong>but a task can only block on one thing.</strong> Block on IPC and you're deaf to the wire; poll the wire and you spin (and the supervisor's heartbeat restarts you as wedged).</p>
+
+    <p>This is the classic poll/select problem, and it needed a kernel primitive: a task can wait for <strong>"a frame arrives <em>or</em> a message lands,"</strong> whichever comes first (a <code class="inline">NET_WAIT</code> syscall, backed by a <code class="inline">WaitReason::NetInput</code> the per-tick wake-check evaluates over both sources). That one primitive turned <code class="inline">netd</code> into an event loop, and the guest started <em>answering</em> the network — replying to ARP for its own address, and serving TCP.</p>
+
+    <p>It grew once more for RTO: <strong>a retransmit timeout must fire when nothing is arriving</strong> (a silent peer sends no frames and no messages). So <code class="inline">NET_WAIT</code> gained an optional timeout — wake on a frame, a message, <em>or</em> a deadline. It's the only <code class="inline">WaitReason</code> with a timer, and it's general. The broader point: <strong>a blocking primitive that can't also time out can't drive a protocol timer.</strong> Build the timeout in from the start.</p>
+
+    <h2>Thread 3: testing loss recovery on a wire that can't lose a packet</h2>
+
+    <p>The two hardest stages — fast retransmit and RTO — recover from <em>lost segments</em>. But the dev environment (QEMU's SLIRP user-mode networking) is a reliable local path: <strong>it never drops a packet.</strong> The exact condition these features exist for cannot occur in testing.</p>
+
+    <p>The answer was to <strong>inject the loss in the sender itself</strong>: a temporary hook that skips putting one segment on the wire but still advances the send cursor, so the peer sees a genuine gap. Reverted after; the acceptance test was the file arriving <strong>byte-identical</strong> despite the drop.</p>
+
+    <p>Isolating <em>which</em> mechanism fired took one more step. A mid-stream drop makes the peer send duplicate ACKs, which triggers <strong>fast</strong> retransmit — so to test <strong>RTO</strong>, fast retransmit had to be temporarily disabled, leaving the timer as the only path back. That's the general recipe for testing a fallback: <strong>you can't test the fallback until you disable the thing that would rescue you first.</strong></p>
+
+    <p>Two real bugs came out of this that no reading would have found:</p>
+
+    <p><strong>The go-back-N wrap-to-huge stall.</strong> After a fast retransmit rewinds the send cursor to the gap and resends, a <em>buffering</em> receiver (real Linux/macOS TCP buffers out-of-order segments) can acknowledge <em>past</em> the rewound point in one jump once the gap fills. That left <code class="inline">snd_una</code> (highest acked) <em>ahead of</em> <code class="inline">snd_nxt</code> (next to send); the in-flight calc <code class="inline">snd_nxt - snd_una</code>, unsigned, wrapped to ~4 billion, so "is there room in the window?" always answered no, and the transfer stalled forever at ~86 KB. The fix is a one-line invariant — <strong>never let <code class="inline">snd_nxt</code> fall below <code class="inline">snd_una</code></strong> — but the symptom (a clean stall at a specific offset, no crash) is one you only diagnose by watching sequence numbers in a packet trace.</p>
+
+    <p><strong>The supervisor restarting the server mid-transfer.</strong> A userland server that stops answering a periodic health-ping (~160 ms) is judged wedged and restarted. Streaming a large file is slow here — every chunk is an IPC round-trip plus an emulated disk read — so an early version that sent a whole window in one uninterrupted burst missed the ping and got <strong>restarted mid-transfer</strong>, losing the connection state. The fix wasn't "go faster"; it was <strong>yield often enough to stay responsive</strong>: send in small bursts, acking the health-ping between each. Supervision and long-running work are in tension, and the long work has to cooperate.</p>
+
+    <h2>Thread 4: the guard page as a running stack budget</h2>
+
+    <p>An earlier milestone gave every program a <strong>stack guard page</strong> — an unmapped page below the stack, so an overflow faults cleanly instead of silently corrupting the code below. Across this arc it became a budget check that reports when you exceed it. <code class="inline">netd</code> overflowed its stack <strong>twice more</strong> as it grew, each caught as a clean fault:</p>
+    <ul>
+      <li>The client-op path (<code class="inline">fetch</code> → TCP client → DNS) nests several 1600/2048-byte buffers down one chain, tipping over the 16 KB stack → grown to 24 KB.</li>
+      <li>Concurrent connections put an <strong>array</strong> of connection structs (each ~2 KB) permanently on the server's frame, and a client op nesting on top of that tipped over 24 KB → grown to 32 KB.</li>
+    </ul>
+
+    <p>The second has a diagnostic detail worth keeping: <strong>which half overflowed told us where to look.</strong> The concurrent <em>streaming</em> path was fine — four simultaneous transfers, zero faults — because pumping doesn't nest deeply. It was the <em>client</em> path, nesting on the now-larger permanent frame, that overflowed. A guard-page fault plus <em>which operation</em> triggered it points straight at the deep call chain. <code class="inline">netd</code> is now the most stack-hungry program in the system — learned by measurement, not guessing.</p>
+
+    <h2>Thread 5: verify against something that isn't your own code</h2>
+
+    <p>A recurring discipline, sharpest here: <strong>never confirm a network feature from the kernel's own log alone.</strong> Every stage was cross-checked against a <code class="inline">tcpdump</code> decode of a packet capture, and the server side against a real host <code class="inline">curl</code> through a forwarded port. When the kernel prints "sent an ARP reply" and the pcap shows it on the wire with checksums <code class="inline">tcpdump</code> accepts, those are two independent witnesses. The wrap-to-huge stall was <em>found</em> in the trace: the kernel's output showed nothing wrong; the sequence numbers showed the transfer jumping backward and flat-lining. A from-scratch stack lies to you in its own logs by construction — it only knows what you told it to print. The wire, and a mature peer's reaction to it, don't.</p>
+
+    <h2>What it adds up to, and what's honestly still missing</h2>
+
+    <p>By the end of the day the guest resolves DNS, fetches web pages, and serves its own filesystem over HTTP to a browser opening several concurrent connections — over a TCP that paces itself to the peer's window and recovers lost segments two ways. All hand-rolled, all in a userland server the kernel can restart if it crashes.</p>
+
+    <p>What's deliberately not there: <strong>IRQ-driven receive</strong> (the NIC is still polled — the biggest remaining item); <strong>congestion control</strong> and <strong>RTT estimation</strong> (only the peer's window is honored; the RTO is a fixed 1 s); <strong>SACK</strong> (loss recovery is go-back-N); and it's <strong>QEMU-only</strong> (the Parallels target exposes virtio-net over PCI, which this project's virtio path doesn't drive). None are hard to see the shape of; they're just the next milestones.</p>
+
+    <p>The meta-lesson is the staging. A network stack sounds like one enormous thing. Split into "driver, then one protocol at a time, each proven end-to-end before the next," it became ten small milestones — each of which either worked on the first real test or failed in a way a packet trace explained in minutes. The hard parts announced themselves exactly when the milestone that needed them arrived, and not before.</p>
+
+  </article>
+</div>
+
+</body>
+</html>

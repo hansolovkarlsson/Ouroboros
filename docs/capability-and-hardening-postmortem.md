@@ -137,6 +137,22 @@ delegation" was written down long before anyone scoped the pipe, and it was
 wrong. The delegation milestone survives — but now honestly labelled as
 *premature*, a mechanism still without a hard consumer.
 
+**Addendum, the next day: delegation got its consumer, and it was
+self-securing.** Runtime capability delegation shipped afterward as the
+relay-free upgrade to program-to-program pipes: the shell hands the producer
+a capability to send *straight* to the consumer, taking itself out of the
+byte path. What made it small was a property that falls out of milestone 2's
+static send-mask: **you may only delegate a send-capability you statically
+hold**, and the check reads the static policy, not the dynamically-delegated
+one — so nothing can be laundered onward (no transitive re-delegation). Only
+the shell statically holds "send to a spawnable slot," so *only the shell can
+authorize producer→consumer streaming* — no new capability bit, no
+delegation gate; the existing static policy secures delegation by
+construction. The scoping lesson held on the way in, too: I picked the
+milestone expecting it to "absorb" delegation as the hard part, and the clean
+relay design still didn't *need* it — delegation is an optimization (shell
+out of the hot path), not a requirement, which is exactly how it was shipped.
+
 The mechanism that did ship is a per-task **stdout target** (a task index,
 `CON_TASK` by default, set at spawn), plus a tiny `SELF` syscall so the
 shell can name itself as a producer's target (a foreground-spawned shell
