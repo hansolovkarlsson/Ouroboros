@@ -87,7 +87,7 @@
 
 use core::arch::global_asm;
 use core::ffi::c_void;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use crate::console;
 use crate::gic;
@@ -510,6 +510,22 @@ pub fn ticks() -> u64 {
 
 const SPURIOUS_INTID: u32 = 1023;
 
+/// The GIC INTID the NIC's receive interrupt is wired to, or [`NO_NET_INTID`]
+/// if no NIC was enabled this boot. Set by `main.rs` once, after
+/// `gic::enable_interrupt`, and read by [`rust_irq_handler`] to route a NIC
+/// IRQ to the network wake (`tasks::on_net_irq`). Same single-core "set
+/// once at boot, read from the IRQ handler" reasoning as [`TICKS`].
+const NO_NET_INTID: u32 = u32::MAX;
+static NET_INTID: AtomicU32 = AtomicU32::new(NO_NET_INTID);
+
+/// Registers which GIC INTID belongs to the NIC's receive interrupt, so
+/// [`rust_irq_handler`] can route it to the network wake. Called once from
+/// `main.rs` after the NIC's interrupt is enabled at the GIC. No-op in
+/// effect until then (the default never matches a real INTID).
+pub fn set_net_intid(intid: u32) {
+    NET_INTID.store(intid, Ordering::Relaxed);
+}
+
 /// Runs on every IRQ, called from the vector table's slots 5/9 trampoline
 /// with a pointer to its saved [`Context`] — `frame` *is* whatever was
 /// interrupted; overwriting it (as `tasks::on_tick` does) is how a task
@@ -543,6 +559,15 @@ extern "C" fn rust_irq_handler(frame: *mut Context) {
         // incrementing tick count - e.g. 1526 -> 1976 - across multiple
         // interactive commands, no hang).
         unsafe { tasks::on_tick(frame) };
+    } else if intid == NET_INTID.load(Ordering::Relaxed) {
+        // A NIC receive frame arrived (TX completions are suppressed at the
+        // device, so this INTID always means receive - see virtio_net.rs).
+        // Ack the device so it can raise the next one, then wake the network
+        // server (blocked in NET_WAIT) and switch to it now - the latency
+        // win over the tick-poll, which stays as a fallback (see
+        // tasks::on_net_irq).
+        syscall::net_ack_interrupt();
+        unsafe { tasks::on_net_irq(frame) };
     }
 
     if intid != SPURIOUS_INTID {

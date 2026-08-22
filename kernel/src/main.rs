@@ -561,12 +561,29 @@ fn main() -> Status {
         // correctly-incrementing tick count there (e.g. 566 -> 687 ticks)
         // with the shell staying fully responsive - GIC/timer IRQ
         // delivery itself is solid on real hardware, not just emulated.
+        let nic_intid = syscall::net_intid();
         unsafe {
             gic::configure(info);
             gic::init();
             gic::enable_interrupt(timer::INTID);
+            // IRQ-driven NIC receive: enable the NIC's receive interrupt at
+            // the GIC (an SPI - see virtio_net::intid / the GIC backends'
+            // SPI paths) and tell the IRQ handler which INTID it is, so a
+            // delivered frame wakes the network server immediately rather
+            // than at the next tick's poll. Only when a NIC was actually
+            // installed (init_net, behind virtio_mmio_probe_safe - QEMU
+            // only); the tick-poll fallback covers everything otherwise.
+            if let Some(intid) = nic_intid {
+                gic::enable_interrupt(intid);
+                exceptions::set_net_intid(intid);
+            }
         }
         timer::arm(timer::TICK_INTERVAL_MS);
+        if let Some(intid) = nic_intid {
+            console::println!(
+                "Ouroboros kernel: NIC receive interrupt enabled (GIC INTID {intid})"
+            );
+        }
     } else {
         console::println!(
             "Ouroboros kernel: skipping GIC/timer init (no MADT-confirmed interrupt controller on this platform) - no preemption this boot"

@@ -230,15 +230,15 @@ step, not a Stage 1 concern.
    an `fsd` stat), so a browser renders served files. **Still open:**
    congestion control (`cwnd`/slow-start — only the peer's flow-control window
    is honored), selective/SACK retransmit (4h/4i are go-back-N), RTT
-   estimation for the RTO (4i uses a fixed 1 s base), richer method handling
-   (a 405 for non-GET/HEAD), and IRQ-driven RX (the NIC is still polled — the
-   biggest remaining item, and the first place polling is a real latency
-   cost). (Stage 4f added a browsable HTML directory listing; Stage 4g added
-   `HEAD`; Stage 4h added fast retransmit; Stage 4i added a timer-based RTO —
-   via a new `NET_WAIT` timeout — for a silent peer, so loss recovery is
-   complete; Stage 4j added concurrent connections (up to 4), so a browser
-   loading a page and multiple clients are served at once.) See
-   `CHANGELOG.md` / `CLAUDE.md`'s "Network stack, Stage 4a–4j."
+   estimation for the RTO (4i uses a fixed 1 s base), and richer method
+   handling (a 405 for non-GET/HEAD). (Stage 4f added a browsable HTML
+   directory listing; Stage 4g added `HEAD`; Stage 4h added fast retransmit;
+   Stage 4i added a timer-based RTO — via a new `NET_WAIT` timeout — for a
+   silent peer, so loss recovery is complete; Stage 4j added concurrent
+   connections (up to 4), so a browser loading a page and multiple clients
+   are served at once; Stage 4k made receive interrupt-driven — the NIC's
+   GIC SPI wakes `netd` directly instead of waiting for the tick poll, which
+   stays as a fallback.) See `CHANGELOG.md`'s "Network stack, Stage 4a–4k."
 
 **Decisions to settle before starting (not now):**
 
@@ -250,10 +250,12 @@ step, not a Stage 1 concern.
 - **Client API shape**: a bespoke socket-op IPC protocol now, or wait for the
   Plan 9 `/net` file interface. The two connect — a network server is a
   strong first consumer for the namespace direction.
-- **Polled vs. interrupt-driven RX**: polled for the first cut (every driver
-  is), but a NIC is the strongest case yet for real IRQ-driven RX, since
-  packets arrive unsolicited — the first driver where polling is a real
-  latency cost, not just a simplicity choice, worth knowing going in.
+- **Polled vs. interrupt-driven RX**: *settled — receive is interrupt-driven
+  now (Stage 4k).* Polled was the first cut (every driver is), but a NIC is
+  the strongest case for real IRQ-driven RX, since packets arrive
+  unsolicited — the first driver where polling is a real latency cost, not
+  just a simplicity choice. The NIC's GIC SPI now wakes `netd` directly (the
+  tick poll stays as a fallback). Transmit still polls (`send_frame`).
 
 **Scale, honestly:** Stages 1–3 are each roughly a milestone the size of the
 storage or console work; Stage 4 (TCP) is larger than any single milestone

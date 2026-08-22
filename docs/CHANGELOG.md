@@ -7,6 +7,48 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/`; 
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## Network stack, Stage 4k: IRQ-driven NIC receive
+
+The NIC was the last driver still polled — `netd` woke on the timer tick's
+wake-check (`net_has_frame()`), so a delivered frame waited up to one tick
+(20 ms) to be noticed. This wires the virtio-net receive queue's interrupt
+through the GIC so a frame wakes `netd` immediately. The tick-poll stays as
+a fallback, so the interrupt is a latency optimization, not a correctness
+dependency: a missed IRQ degrades to ≤1 tick of delay, never a lost frame.
+
+The NIC's interrupt is a GIC **SPI**, and neither GIC backend routed SPIs
+before — both only ever enabled the timer PPI. `gicv2::enable_interrupt`
+now also sets `GICD_ITARGETSR` for an SPI (route it to CPU 0; an untargeted
+SPI is delivered nowhere); `gicv3::enable_interrupt` gains a distributor
+path for SPIs (`GICD_ISENABLER` + `GICD_IROUTER` affinity routing + Group 1
+in `GICD_IGROUPR`, versus the redistributor path a PPI uses). The
+slot→INTID mapping (QEMU `virt`: virtio-mmio slot *i* → SPI 16+*i* → GIC
+INTID 48+*i*) was confirmed via a devicetree dump, like the transport
+addresses themselves.
+
+`virtio_net::init` suppresses *transmit* interrupts
+(`VIRTQ_AVAIL_F_NO_INTERRUPT` on the TX ring — `send_frame` polls), so the
+device's single interrupt line only ever means "a receive frame arrived"
+and the handler needn't disambiguate queues. `rust_irq_handler` acks the
+device (`InterruptStatus` → `InterruptACK`, required or the device won't
+raise the next one) and calls a new `tasks::on_net_irq`, which wakes the
+`NetInput`-blocked server and switches to it immediately — the same
+frame-overwrite contract as `on_tick`. `netd` drains all frames and
+re-posts buffers itself, as before. Enabled only when a NIC was actually
+installed (QEMU only, behind `virtio_mmio_probe_safe`); the no-NIC path is
+untouched.
+
+Verified on QEMU, both GIC versions, with temporary IRQ instrumentation
+(reverted): under default **GICv2**, the receive IRQ fired for every
+inbound frame — 2 per `ping` (ARP + ICMP reply), 2 per `resolve`, 7 for a
+`fetch` — with `ping`/`resolve`/`fetch` all working, `uptime` advancing
+(the timer PPI coexists with the NIC SPI), and zero `-d int` aborts; under
+forced **GICv3** (`-machine virt,gic-version=3`), the same, via the
+distributor SPI path. A no-NIC boot (`selftest`/`ls`/`uptime`) was
+byte-unchanged with no interrupt enabled. Still QEMU-only (Parallels'
+virtio-net is PCI, an unsupported transport); receive is now
+interrupt-driven, transmit still polls.
+
 ## Network stack, Stage 4j: concurrent TCP connections
 
 The server handled one connection at a time — a second peer's SYN *replaced*

@@ -92,6 +92,14 @@ pub(crate) const REG_QUEUE_NUM_MAX: usize = 0x034;
 pub(crate) const REG_QUEUE_NUM: usize = 0x038;
 pub(crate) const REG_QUEUE_READY: usize = 0x044;
 pub(crate) const REG_QUEUE_NOTIFY: usize = 0x050;
+// Interrupt handling (used by IRQ-driven drivers - virtio_net's RX path).
+// InterruptStatus's low bits say why the device interrupted (bit 0 = used
+// buffer notification, bit 1 = configuration change); the driver must write
+// the same bits back to InterruptACK, or the device won't raise the next
+// interrupt (virtio-mmio spec section 4.2.2). A polling-only driver
+// (virtio_blk) never touches these.
+pub(crate) const REG_INTERRUPT_STATUS: usize = 0x060;
+pub(crate) const REG_INTERRUPT_ACK: usize = 0x064;
 pub(crate) const REG_STATUS: usize = 0x070;
 pub(crate) const REG_QUEUE_DESC_LOW: usize = 0x080;
 pub(crate) const REG_QUEUE_DESC_HIGH: usize = 0x084;

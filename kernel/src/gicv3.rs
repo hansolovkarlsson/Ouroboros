@@ -53,6 +53,17 @@ const SGI_BASE_OFFSET: usize = 0x1_0000;
 const GICR_IGROUPR0: usize = 0x0080; // within the SGI_base frame
 const GICR_ISENABLER0: usize = 0x0100; // within the SGI_base frame
 
+// Distributor registers used to enable an SPI (intid >= 32). Unlike a PPI -
+// enabled at this CPU's redistributor - an SPI lives in the distributor and
+// needs three things: Group 1 (like the redistributor's IGROUPR0 for PPIs,
+// or it defaults to Group 0/FIQ and never reaches the IRQ handler), an
+// affinity route to a real CPU (GICD_IROUTER; GICv3's replacement for
+// GICv2's GICD_ITARGETSR), and the enable bit. Offsets cross-checked
+// against Linux's include/linux/irqchip/arm-gic-v3.h.
+const GICD_IGROUPR: usize = 0x0080; // + 4 * (intid / 32)
+const GICD_ISENABLER: usize = 0x0100; // + 4 * (intid / 32)
+const GICD_IROUTER: usize = 0x6000; // + 8 * intid (64-bit per intid)
+
 const GICR_WAKER_PROCESSOR_SLEEP: u32 = 1 << 1;
 const GICR_WAKER_CHILDREN_ASLEEP: u32 = 1 << 2;
 
@@ -95,12 +106,22 @@ const GICD_CTLR_INIT: u32 = GICD_CTLR_ENABLE_G1 | GICD_CTLR_ENABLE_G1A | GICD_CT
 /// that could call the others is unmasked).
 static SGI_BASE: AtomicUsize = AtomicUsize::new(0);
 
+/// The distributor base, stashed by [`init`] for [`enable_interrupt`]'s SPI
+/// path (a PPI needs only the redistributor's [`SGI_BASE`]; an SPI needs the
+/// distributor). Same single-core "set in init before any IRQ" reasoning as
+/// [`SGI_BASE`].
+static GICD_BASE: AtomicUsize = AtomicUsize::new(0);
+
 unsafe fn read_reg32(base: usize, offset: usize) -> u32 {
     unsafe { read_volatile((base + offset) as *const u32) }
 }
 
 unsafe fn write_reg32(base: usize, offset: usize, value: u32) {
     unsafe { write_volatile((base + offset) as *mut u32, value) };
+}
+
+unsafe fn write_reg64(base: usize, offset: usize, value: u64) {
+    unsafe { write_volatile((base + offset) as *mut u64, value) };
 }
 
 unsafe fn read_reg64(base: usize, offset: usize) -> u64 {
@@ -174,6 +195,7 @@ pub unsafe fn init(gicd_base: usize, gicr_base: usize, gicr_size: usize) {
         find_own_redistributor(gicr_base, gicr_size).expect("no matching GICv3 redistributor frame found for this CPU's MPIDR_EL1 in the discovered GICR region");
     let sgi_base = rd_base + SGI_BASE_OFFSET;
     SGI_BASE.store(sgi_base, Ordering::Relaxed);
+    GICD_BASE.store(gicd_base, Ordering::Relaxed);
 
     unsafe {
         // Wake the redistributor before touching anything else in it.
@@ -220,16 +242,50 @@ pub unsafe fn init(gicd_base: usize, gicr_base: usize, gicr_size: usize) {
     }
 }
 
-/// Enables forwarding of `intid` (e.g. the timer PPI, 30) via this CPU's
-/// own redistributor frame (found by [`init`]) — unlike GICv2, the
-/// distributor plays no part in enabling a PPI.
+/// Enables forwarding of `intid`.
+///
+/// A PPI (intid < 32, e.g. the timer, 30) is enabled at this CPU's own
+/// redistributor frame (found by [`init`]) - unlike GICv2, the distributor
+/// plays no part. An SPI (intid >= 32, e.g. a virtio-mmio device) lives in
+/// the distributor instead and needs three writes: put it in Group 1 (or it
+/// defaults to Group 0/FIQ and never reaches this kernel's IRQ handler - the
+/// exact bug `init`'s `GICR_IGROUPR0` write already fixed for PPIs), route
+/// it to this CPU via `GICD_IROUTER`, then enable it. Trigger mode/priority
+/// are left at reset for the same reasons `gicv2.rs::enable_interrupt`
+/// documents.
 ///
 /// # Safety
 /// Must run after [`init`].
 pub unsafe fn enable_interrupt(intid: u32) {
-    let sgi_base = SGI_BASE.load(Ordering::Relaxed);
+    if intid < 32 {
+        let sgi_base = SGI_BASE.load(Ordering::Relaxed);
+        let bit = 1u32 << (intid % 32);
+        unsafe { write_reg32(sgi_base, GICR_ISENABLER0, bit) };
+        return;
+    }
+    // SPI: distributor.
+    let gicd = GICD_BASE.load(Ordering::Relaxed);
+    let word = 4 * ((intid / 32) as usize);
     let bit = 1u32 << (intid % 32);
-    unsafe { write_reg32(sgi_base, GICR_ISENABLER0, bit) };
+    unsafe {
+        // Group 1 (non-secure IRQ), matching the redistributor's IGROUPR0.
+        let mut grp = read_reg32(gicd, GICD_IGROUPR + word);
+        grp |= bit;
+        write_reg32(gicd, GICD_IGROUPR + word, grp);
+        // Route to this CPU. GICD_IROUTER's affinity layout is
+        // Aff0[7:0]/Aff1[15:8]/Aff2[23:16]/Aff3[39:32] (bit 31 = Interrupt
+        // Routing Mode; 0 = the specific PE below) - a different packing
+        // from GICR_TYPER's, so computed here rather than reusing
+        // `mpidr_affinity_packed`.
+        let mpidr = read_mpidr();
+        let route = (mpidr & 0xff)
+            | ((mpidr >> 8) & 0xff) << 8
+            | ((mpidr >> 16) & 0xff) << 16
+            | ((mpidr >> 32) & 0xff) << 32;
+        write_reg64(gicd, GICD_IROUTER + 8 * intid as usize, route);
+        // Enable.
+        write_reg32(gicd, GICD_ISENABLER + word, bit);
+    }
 }
 
 /// Reads the highest-priority pending interrupt ID and acknowledges it —

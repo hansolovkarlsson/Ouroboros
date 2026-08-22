@@ -119,6 +119,25 @@ pub(crate) fn net_has_frame() -> bool {
     }
 }
 
+/// The GIC INTID the installed NIC's receive interrupt is wired to, or
+/// `None` if no NIC was installed this boot - `main.rs` uses it to enable
+/// the interrupt at the GIC and register it with the IRQ handler.
+pub(crate) fn net_intid() -> Option<u32> {
+    unsafe { &*NET.0.get() }.as_ref().map(|device| device.intid())
+}
+
+/// Acknowledges the NIC's pending interrupt at the device (from the IRQ
+/// handler - see `exceptions::rust_irq_handler`), so it can raise the next
+/// one. A no-op if no NIC is installed. Not gated: it touches only the
+/// device's own interrupt-status/ack registers and is reached only from the
+/// kernel's IRQ handler, never a syscall.
+pub(crate) fn net_ack_interrupt() {
+    if let Some(device) = unsafe { &*NET.0.get() } {
+        // SAFETY: single-core IRQ context; device installed (init ran).
+        unsafe { device.ack_interrupt() };
+    }
+}
+
 /// Activates the USB mass-storage device (if any) and installs it as
 /// the block device the filesystem server operates on - shared by the
 /// boot-time attempt (`main.rs`, covers QEMU where the device is

@@ -68,6 +68,16 @@ pub const MAX_FRAME: usize = BUF_SIZE - HDR_LEN;
 // device-writable flag, for the receive descriptors.
 const VIRTQ_DESC_F_WRITE: u16 = 2;
 
+// Avail-ring flag: tell the device not to raise an interrupt when it
+// consumes a buffer from this queue. Set on the *transmit* ring only -
+// send_frame polls the TX used ring synchronously and wants no interrupt,
+// and suppressing TX interrupts means the device's single per-device
+// InterruptStatus/IRQ line only ever fires for *receive*, so the IRQ
+// handler can treat every NIC interrupt as "a frame arrived" without
+// disambiguating which queue. The receive ring leaves this clear
+// (interrupts enabled) - that's the whole point of the RX IRQ path.
+const VIRTQ_AVAIL_F_NO_INTERRUPT: u16 = 1;
+
 // Feature bits. VIRTIO_NET_F_MAC lives in the low feature word (bits 0-31),
 // VIRTIO_F_VERSION_1 in the high word (bits 32-63) - so unlike virtio-blk
 // (which touched only the high word) this negotiates across both.
@@ -211,6 +221,40 @@ impl Device {
         self.mac
     }
 
+    /// The GIC INTID this device's interrupt is wired to. QEMU's `virt`
+    /// machine assigns virtio-mmio slot `i` (base `SLOT_BASE + i *
+    /// SLOT_STRIDE`) to SPI `16 + i`, i.e. GIC INTID `32 + 16 + i` - a
+    /// QEMU-shaped convention like the transport addresses themselves,
+    /// confirmed via the same devicetree dump (`virtio_mmio@a000000 {
+    /// interrupts = <0x00 0x10 0x01>; }` = SPI 16, each subsequent slot
+    /// +1), not assumed. QEMU-only, like the rest of this driver (see the
+    /// module doc comment); `main.rs` enables it at the GIC only behind the
+    /// `virtio_mmio_probe_safe` gate.
+    pub fn intid(&self) -> u32 {
+        let slot = (self.base - virtio_mmio::SLOT_BASE) / virtio_mmio::SLOT_STRIDE;
+        // 32 (SPI base INTID) + 16 (this machine's first virtio-mmio SPI) + slot.
+        48 + slot as u32
+    }
+
+    /// Acknowledges the device's pending interrupt: reads InterruptStatus
+    /// and writes those bits straight back to InterruptACK, as the
+    /// virtio-mmio spec requires of a driver taking an interrupt (without
+    /// it the device won't raise the next one). Called from the IRQ handler
+    /// (`exceptions.rs` via `syscall::net_ack_interrupt`); it does *not*
+    /// drain the receive ring - `netd` does that via [`poll_frame`](Self::poll_frame)
+    /// on its own schedule after being woken. With TX interrupts suppressed
+    /// (see [`init`](Self::init)) the pending status is always the receive
+    /// used-buffer bit.
+    ///
+    /// # Safety
+    /// Must be called after [`init`](Self::init), from IRQ context.
+    pub unsafe fn ack_interrupt(&self) {
+        let status = unsafe { virtio_mmio::read_reg(self.base, virtio_mmio::REG_INTERRUPT_STATUS) };
+        if status != 0 {
+            unsafe { virtio_mmio::write_reg(self.base, virtio_mmio::REG_INTERRUPT_ACK, status) };
+        }
+    }
+
     /// Resets the device, negotiates `VIRTIO_F_VERSION_1` + `VIRTIO_NET_F_MAC`
     /// (nothing else - no checksum/GSO offload, no `MRG_RXBUF`, no control
     /// queue, keeping every frame one-buffer and the header a fixed 12
@@ -290,6 +334,12 @@ impl Device {
             // Transmitq (queue 1) - no buffers pre-posted; send_frame fills
             // descriptor 0 on demand.
             self.setup_queue(1, TX_DESC.0.get() as u64, TX_AVAIL.0.get() as u64, TX_USED.0.get() as u64)?;
+            // Suppress transmit interrupts (send_frame polls) so the shared
+            // per-device IRQ line only ever means "a receive frame arrived"
+            // - see VIRTQ_AVAIL_F_NO_INTERRUPT's comment. The receive ring's
+            // flags stay 0 (new_avail's default), leaving RX interrupts on.
+            (*TX_AVAIL.0.get()).flags = VIRTQ_AVAIL_F_NO_INTERRUPT;
+            core::arch::asm!("dsb sy", options(nostack, preserves_flags));
 
             write_reg(
                 base,

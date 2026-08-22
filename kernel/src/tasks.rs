@@ -1535,3 +1535,47 @@ pub unsafe fn on_tick(frame: *mut Context) {
     // run under `next`'s own table view (per-task page tables).
     crate::mmu::activate_task(next);
 }
+
+/// Called from `rust_irq_handler` on a NIC receive interrupt: wakes the
+/// task blocked in [`WaitReason::NetInput`] (the network server) and
+/// switches to it immediately, so a delivered frame is handled without
+/// waiting for the next tick. This is the latency win of IRQ-driven receive
+/// over the tick-poll - which stays in place as a fallback, so a missed IRQ
+/// degrades to at worst one tick of delay, never a lost frame (`on_tick`'s
+/// wake-check still evaluates `NetInput`'s `net_has_frame()` condition).
+///
+/// A NIC interrupt means a frame is in the receive ring - transmit
+/// completions are suppressed at the device (`virtio_net::init` sets the TX
+/// ring's NO_INTERRUPT flag), so the shared per-device line only ever fires
+/// for receive - so this wakes the `NetInput` waiter unconditionally rather
+/// than re-polling. If no task is blocked on `NetInput` (the server is
+/// already running, or none exists), it does nothing and resumes the
+/// interrupted task; the frame stays queued for the server's own next poll.
+///
+/// The frame-overwrite contract is identical to [`on_tick`]'s: `frame` is
+/// the interrupted task's live context, saved here and replaced with the
+/// woken task's, so the trampoline's blind restore resumes the server.
+///
+/// # Safety
+/// `frame` must be the live IRQ trap frame (the slots-5/9 trampoline's
+/// contract), same as [`on_tick`].
+pub unsafe fn on_net_irq(frame: *mut Context) {
+    let frame = unsafe { &mut *frame };
+    let current = CURRENT.load(Ordering::Relaxed);
+    for i in 0..NUM_TASKS {
+        if let TaskState::Blocked(WaitReason::NetInput { .. }) = unsafe { *STATES[i].0.get() } {
+            // NET_WAIT's return value is ignored (the server drains its
+            // sources itself), matching `NetInput`'s `poll` Some(0).
+            unsafe { (*TASKS[i].0.get()).gpr[0] = 0 };
+            unsafe { *STATES[i].0.get() = TaskState::Runnable };
+            if i != current {
+                unsafe { *TASKS[current].0.get() = *frame };
+                *frame = unsafe { *TASKS[i].0.get() };
+                CURRENT.store(i, Ordering::Relaxed);
+                crate::mmu::activate_task(i);
+            }
+            // Only one task ever blocks on NetInput (the network server).
+            return;
+        }
+    }
+}

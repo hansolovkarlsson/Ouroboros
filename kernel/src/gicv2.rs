@@ -24,6 +24,7 @@ use core::ptr::{read_volatile, write_volatile};
 
 const GICD_CTLR: usize = 0x000;
 const GICD_ISENABLER: usize = 0x100; // + 4 * (intid / 32)
+const GICD_ITARGETSR: usize = 0x800; // + intid (one target byte per intid)
 
 const GICC_CTLR: usize = 0x000;
 const GICC_PMR: usize = 0x004;
@@ -57,12 +58,32 @@ pub unsafe fn init(gicd_base: usize, gicc_base: usize) {
     }
 }
 
-/// Enables forwarding of `intid` (e.g. the timer PPI, 30) from the
-/// distributor to CPU interfaces.
+/// Enables forwarding of `intid` from the distributor to CPU interfaces.
+///
+/// A PPI (intid < 32, e.g. the timer, 30) is per-CPU/banked and needs only
+/// the enable bit - its target is implicitly this CPU. An SPI (intid >= 32,
+/// e.g. a virtio-mmio device) is shared and, until [`GICD_ITARGETSR`] names
+/// a target CPU, is delivered to none - so this routes an SPI to CPU 0
+/// before enabling it. Priority (`GICD_IPRIORITYR`) and trigger mode
+/// (`GICD_ICFGR`) are left at reset: reset priority (0) passes the wide-open
+/// `GICC_PMR` set in [`init`], and QEMU's virtio-mmio drives its line
+/// level-style, matching the level reset default - so no extra config is
+/// needed for this project's one SPI user.
 ///
 /// # Safety
 /// Must run after [`init`].
 pub unsafe fn enable_interrupt(gicd_base: usize, intid: u32) {
+    if intid >= 32 {
+        // Route this SPI to CPU 0 (ITARGETSR is a CPU bitmask, one byte per
+        // intid; 0x01 = CPU 0). Read-modify-write the containing word so the
+        // neighbouring intids' targets are preserved.
+        let word = GICD_ITARGETSR + ((intid as usize) & !3);
+        let shift = (intid % 4) * 8;
+        let mut targets = unsafe { read_reg(gicd_base, word) };
+        targets &= !(0xffu32 << shift);
+        targets |= 0x01u32 << shift;
+        unsafe { write_reg(gicd_base, word, targets) };
+    }
     let reg_offset = GICD_ISENABLER + 4 * ((intid / 32) as usize);
     let bit = 1u32 << (intid % 32);
     unsafe { write_reg(gicd_base, reg_offset, bit) };
