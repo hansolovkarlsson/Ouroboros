@@ -227,9 +227,9 @@ step, not a Stage 1 concern.
    stream ACK-paced) so a file of *any* size streams — verified with a 256 KB
    file, byte-identical, three times over. Stage 4e added proper HTTP
    response headers (`Content-Type` by file extension + `Content-Length` via
-   an `fsd` stat), so a browser renders served files. **Still open:**
-   selective/SACK retransmit (4h/4i/4n are go-back-N) — the one remaining TCP
-   item. (Stage 4f added a browsable HTML
+   an `fsd` stat), so a browser renders served files. **The TCP feature set
+   is complete** (handshake, flow control, fast retransmit, RTO, congestion
+   control, concurrent connections, and SACK on the sender). (Stage 4f added a browsable HTML
    directory listing; Stage 4g added `HEAD`; Stage 4h added fast retransmit;
    Stage 4i added a timer-based RTO — via a new `NET_WAIT` timeout — for a
    silent peer, so loss recovery is complete; Stage 4j added concurrent
@@ -241,8 +241,11 @@ step, not a Stage 1 concern.
    syscall, replacing the fixed 1 s base; Stage 4m returns a proper 405 for
    an unsupported HTTP method; Stage 4n adds TCP congestion control — a Reno
    `cwnd` (slow-start / congestion avoidance, halve on fast retransmit, reset
-   on RTO), so the send rate is `min(cwnd, peer window)`.) See `CHANGELOG.md`'s
-   "Network stack, Stage 4a–4n."
+   on RTO), so the send rate is `min(cwnd, peer window)`; Stage 4o adds
+   sender-side SACK — negotiate SACK-permitted, parse the peer's SACK blocks,
+   selectively retransmit only the hole instead of go-back-N (SLIRP doesn't
+   speak SACK, so the go-back-N fallback is the exercised path there).) See
+   `CHANGELOG.md`'s "Network stack, Stage 4a–4o."
 
 **Decisions to settle before starting (not now):**
 

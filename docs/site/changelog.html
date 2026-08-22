@@ -40,6 +40,20 @@
 
   <article>
 
+<h2>Network stack, Stage 4o: TCP SACK (sender-side selective retransmit)</h2>
+
+<p>The last open TCP item. Loss recovery was go-back-N (4h fast retransmit, 4i RTO both <code class="inline">rewind_to(snd_una)</code> then resend everything forward). This adds RFC 2018 SACK on the sender side: negotiate SACK-permitted, parse the peer's SACK blocks, and on a fast retransmit resend only the missing hole instead of the whole window.</p>
+
+<p>Scope, decided deliberately: <strong>sender-side only</strong> (the server). The receiver side (generating SACK blocks) is out of scope here — the server receives only a tiny request, and the client <code class="inline">fetch</code> reassembles its response in-order without buffering out-of-order data, so there's nothing to SACK.</p>
+
+<p>Three pieces: the server's SYN-ACK now advertises SACK-permitted (option kind 4, NOP-padded); <code class="inline">parse_tcp_in</code> walks the TCP options for SACK blocks (kind 5) into <code class="inline">TcpIn</code>; and on a fast retransmit with SACK blocks present, <code class="inline">sack_retransmit</code> resends only <code class="inline">[snd_una, lowest SACK left-edge)</code> via a new explicit-sequence send (<code class="inline">send_seg_at</code>/<code class="inline">retransmit_one</code>) that leaves the forward cursor untouched — the peer already holds the SACKed data. No SACK blocks → the existing go-back-N <code class="inline">rewind_to</code> fallback.</p>
+
+<p>A real environment limitation, confirmed and documented, not a bug: <strong>QEMU user-net (SLIRP) doesn't support SACK.</strong> SLIRP terminates the hostfwd TCP connection with its own minimal stack, whose SYN carries no SACK-permitted, so the guest's peer never enables SACK and never sends SACK blocks — every dup-ACK is a plain cumulative ACK. So the end-to-end selective-retransmit path can't be exercised through user-net (the same class of environment limit as "SLIRP can't lose packets" and "Parallels' virtio-net is PCI").</p>
+
+<p>Verified on QEMU, given that: SACK-permitted is really advertised (<code class="inline">tcpdump</code> shows <code class="inline">mss 1460,sackOK,nop,nop</code> on the SYN-ACK); the go-back-N fallback recovers a real injected drop byte-complete (the actual SLIRP path, since the peer sends no SACK); and — with temporary instrumentation (reverted) — the parser extracted a hand-built SACK block correctly (<code class="inline">sack_n=1 block=1000:2000</code>), and a fabricated SACK block drove <code class="inline">sack_retransmit</code> to resend <strong>only</strong> the dropped segment (seq 21004:22404) rather than the go-back-N burst (21004 onward), the pcap confirming the hole-only resend directly. A clean run streamed byte-complete with sackOK advertised, client <code class="inline">ping</code>/<code class="inline">fetch</code> unregressed; zero <code class="inline">-d int</code> aborts.</p>
+
+<p>This closes the TCP feature set (handshake, flow control, fast retransmit, RTO, congestion control, concurrent connections, and now SACK on the sender). Still coarse: sender-side only (no SACK-block generation on receive); the selective retransmit handles the first hole per event, bounded to a few segments (a larger hole finishes via the next dup-ACK round or the RTO); and end-to-end verification needs a SACK-speaking peer (not available through SLIRP).</p>
+
 <h2>Network stack, Stage 4n: TCP congestion control (Reno)</h2>
 
 <p>The send window was bounded only by the peer's advertised flow-control window. This adds a congestion window (<code class="inline">cwnd</code>) — TCP Reno — so the send rate is <code class="inline">min(cwnd, peer window)</code>: it ramps up gently on a fresh connection and backs off on loss.</p>

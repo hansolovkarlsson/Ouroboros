@@ -64,6 +64,9 @@ const SERVER_ISN: u32 = 0x0002_0000;
 /// ~2KB response-prefix buffer and they all live on `serve()`'s stack; a SYN
 /// arriving with no free slot is dropped (the peer retransmits).
 const MAX_CONNS: usize = 4;
+/// Max SACK blocks parsed from one segment's TCP options (RFC 2018 allows up
+/// to 4 in the 40-byte option area, 3 alongside timestamps).
+const MAX_SACK: usize = 4;
 
 /// Full responses for the two failure cases.
 const RESP_404: &[u8] =
@@ -747,6 +750,11 @@ struct TcpIn {
     /// Byte offset of the TCP payload within the frame, and its length.
     data_off: usize,
     data_len: u32,
+    /// SACK blocks `(left, right)` parsed from the segment's TCP options (RFC
+    /// 2018), for sender-side selective retransmit. `sack_n` is how many are
+    /// valid; empty on a segment carrying no SACK option.
+    sack: [(u32, u32); MAX_SACK],
+    sack_n: usize,
 }
 
 /// Dispatch one received frame: answer ARP requests for our IP, and feed TCP
@@ -820,6 +828,39 @@ fn parse_tcp_in(frame: &[u8]) -> Option<TcpIn> {
     let ip_total = u16be(frame, 16) as usize;
     let seg_end = (14 + ip_total).min(frame.len());
     let data_len = seg_end.saturating_sub(data_off) as u32;
+
+    // Walk the TCP options (between the fixed 20-byte header and the data) for
+    // SACK blocks (kind 5). kind 0 ends the list, kind 1 is a one-byte NOP,
+    // everything else is [kind, len, ...len-2 bytes]. A SACK option's body is
+    // 8-byte (left, right) big-endian pairs.
+    let mut sack = [(0u32, 0u32); MAX_SACK];
+    let mut sack_n = 0usize;
+    let opt_end = data_off.min(frame.len());
+    let mut i = t + 20;
+    while i < opt_end {
+        match frame[i] {
+            0 => break,
+            1 => i += 1,
+            _ => {
+                if i + 1 >= opt_end {
+                    break;
+                }
+                let len = frame[i + 1] as usize;
+                if len < 2 || i + len > opt_end {
+                    break;
+                }
+                if frame[i] == 5 {
+                    let mut j = i + 2;
+                    while j + 8 <= i + len && sack_n < MAX_SACK {
+                        sack[sack_n] = (u32be(frame, j), u32be(frame, j + 4));
+                        sack_n += 1;
+                        j += 8;
+                    }
+                }
+                i += len;
+            }
+        }
+    }
     let mut src_ip = [0u8; 4];
     src_ip.copy_from_slice(&frame[26..30]);
     let mut src_mac = [0u8; 6];
@@ -834,6 +875,8 @@ fn parse_tcp_in(frame: &[u8]) -> Option<TcpIn> {
         flags: frame[t + 13],
         data_off,
         data_len,
+        sack,
+        sack_n,
     })
 }
 
@@ -960,7 +1003,13 @@ fn handle_conn_segment(mac: &[u8; 6], frame: &[u8], seg: &TcpIn, c: &mut TcpConn
                 // than collapsing to slow start the way an RTO does.
                 c.ssthresh = (c.cwnd / 2).max(MIN_CWND);
                 c.cwnd = c.ssthresh;
-                rewind_to(c, c.snd_una);
+                // With SACK blocks, resend only the hole (selective retransmit)
+                // and leave the forward cursor alone; otherwise go-back-N.
+                if seg.sack_n > 0 {
+                    sack_retransmit(mac, c, seg);
+                } else {
+                    rewind_to(c, c.snd_una);
+                }
                 c.last_rexmit_una = c.snd_una;
                 c.dup_acks = 0;
             }
@@ -1095,6 +1144,74 @@ fn send_seg(mac: &[u8; 6], c: &TcpConn, flags: u8, with_mss: bool, payload: &[u8
         &mut out,
     ) {
         let _ = send(&out[..n]);
+    }
+}
+
+/// Send a server segment at an explicit sequence number (not `c.snd_nxt`) -
+/// used by selective retransmit to resend a specific gap without disturbing
+/// the forward send cursor.
+fn send_seg_at(mac: &[u8; 6], c: &TcpConn, seq: u32, flags: u8, payload: &[u8]) {
+    let mut out = [0u8; 1600];
+    if let Some(n) = build_tcp_srv(
+        mac, &c.peer_mac, &c.peer_ip, c.peer_port, seq, c.rcv_nxt, flags, false, payload, &mut out,
+    ) {
+        let _ = send(&out[..n]);
+    }
+}
+
+/// Retransmit one segment of the response stream at sequence `seq` (up to `n`
+/// bytes), reading the bytes from the prefix or the file at the matching
+/// offset - the same seq->offset mapping `rewind_to` uses, but as a one-off
+/// resend that leaves `snd_nxt`/`prefix_off`/`read_off` untouched.
+fn retransmit_one(mac: &[u8; 6], c: &mut TcpConn, seq: u32, n: usize) {
+    let data_base = SERVER_ISN.wrapping_add(1);
+    let off = seq.wrapping_sub(data_base) as usize;
+    let n = n.min(SERVE_CHUNK);
+    let mut buf = [0u8; SERVE_CHUNK];
+    if off < c.prefix_len {
+        // Within the prefix (the 200 header / fixed response). A retransmit
+        // never straddles the prefix->body boundary here, since a lost segment
+        // lies entirely in one or the other.
+        let take = n.min(c.prefix_len - off);
+        buf[..take].copy_from_slice(&c.prefix[off..off + take]);
+        send_seg_at(mac, c, seq, TCP_PSH | TCP_ACK, &buf[..take]);
+    } else if c.file {
+        let foff = (off - c.prefix_len) as u64;
+        let r = read_file_chunk(&c.path[..c.path_len], foff, &mut buf[..n]);
+        if r < syscall_abi::FS_ERR_MIN {
+            let got = r as usize;
+            send_seg_at(mac, c, seq, TCP_PSH | TCP_ACK, &buf[..got]);
+        }
+    }
+}
+
+/// Selective retransmit (RFC 2018 sender side): resend only the first hole -
+/// `[snd_una, the lowest SACK left-edge above snd_una)` - the peer's SACK
+/// blocks say it already holds everything above that, so unlike go-back-N this
+/// doesn't rewind the forward cursor or resend the SACKed data. Bounded to a
+/// few segments per event; a larger hole is finished by the next dup-ACK round
+/// or the RTO. Falls back to go-back-N if no block sits above snd_una.
+fn sack_retransmit(mac: &[u8; 6], c: &mut TcpConn, seg: &TcpIn) {
+    let mut hole_end = 0u32;
+    let mut found = false;
+    for k in 0..seg.sack_n {
+        let l = seg.sack[k].0;
+        if seq_gt(l, c.snd_una) && (!found || seq_gt(hole_end, l)) {
+            hole_end = l;
+            found = true;
+        }
+    }
+    if !found {
+        rewind_to(c, c.snd_una); // no usable SACK block - go-back-N
+        return;
+    }
+    let mut seq = c.snd_una;
+    let mut guard = 0;
+    while seq_gt(hole_end, seq) && guard < 8 {
+        let n = (hole_end.wrapping_sub(seq) as usize).min(SERVE_CHUNK);
+        retransmit_one(mac, c, seq, n);
+        seq = seq.wrapping_add(n as u32);
+        guard += 1;
     }
 }
 
@@ -1565,9 +1682,11 @@ fn build_tcp(
     payload: &[u8],
     out: &mut [u8],
 ) -> Option<usize> {
-    // Client direction: our ephemeral source port to the peer's port 80.
+    // Client direction: our ephemeral source port to the peer's port 80. We
+    // don't advertise SACK-permitted as a client (our fetch receiver is
+    // in-order-only; SACK is the server's sender-side win - see build_tcp_srv).
     build_tcp_generic(
-        mac, dst_mac, dst_ip, TCP_SRC_PORT, 80, seq, ack, flags, with_mss, payload, out,
+        mac, dst_mac, dst_ip, TCP_SRC_PORT, 80, seq, ack, flags, with_mss, false, payload, out,
     )
 }
 
@@ -1587,8 +1706,12 @@ fn build_tcp_srv(
     payload: &[u8],
     out: &mut [u8],
 ) -> Option<usize> {
+    // Server direction: advertise SACK-permitted on our SYN-ACK (the only
+    // with_mss server segment), so the peer sends SACK blocks we can use for
+    // selective retransmit (see sack_retransmit).
     build_tcp_generic(
-        mac, peer_mac, peer_ip, SERVER_PORT, peer_port, seq, ack, flags, with_mss, payload, out,
+        mac, peer_mac, peer_ip, SERVER_PORT, peer_port, seq, ack, flags, with_mss, with_mss, payload,
+        out,
     )
 }
 
@@ -1607,10 +1730,18 @@ fn build_tcp_generic(
     ack: u32,
     flags: u8,
     with_mss: bool,
+    sack_perm: bool,
     payload: &[u8],
     out: &mut [u8],
 ) -> Option<usize> {
-    let tcp_hdr = 20 + if with_mss { 4 } else { 0 };
+    // SYN options: MSS (4 bytes) plus, on the server's SYN-ACK, SACK-permitted
+    // (kind 4, len 2) padded with two NOPs to a 4-byte boundary - 8 bytes.
+    let opt_len = if with_mss {
+        if sack_perm { 8 } else { 4 }
+    } else {
+        0
+    };
+    let tcp_hdr = 20 + opt_len;
     const IP_LEN: usize = 20;
     let total = 14 + IP_LEN + tcp_hdr + payload.len();
     if out.len() < total {
@@ -1646,6 +1777,10 @@ fn build_tcp_generic(
     out[t + 18..t + 20].copy_from_slice(&[0, 0]); // urgent pointer
     if with_mss {
         out[t + 20..t + 24].copy_from_slice(&[2, 4, 0x05, 0xb4]); // MSS 1460
+        if sack_perm {
+            // SACK-permitted (kind 4, len 2) + two NOPs (kind 1) to pad to 4.
+            out[t + 24..t + 28].copy_from_slice(&[4, 2, 1, 1]);
+        }
     }
     out[t + tcp_hdr..t + tcp_hdr + payload.len()].copy_from_slice(payload);
     let seg_len = tcp_hdr + payload.len();
