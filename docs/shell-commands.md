@@ -25,11 +25,12 @@ implement a completely different command set.
   take exactly two paths; every other command just one); any further
   words are ignored (`mkdir a b c` creates `a` and says nothing about
   `b`/`c`).
-- **Output redirection (`> file` / `>> file`) and pipes (`|`) work** — see
-  the dedicated sections below (pipes now include `program | program` and
-  `exec prog > file`). **No input redirection (`<`), globbing, `;`/`&&`
-  chaining, environment variables, command history, or tab completion.**
-  One command per line, typed in full, every time.
+- **Output redirection (`> file` / `>> file`) and multi-stage pipes
+  (`a | b | c`) work** — see the dedicated sections below (pipelines are
+  N-stage now, with arguments and `$PATH` lookup on every stage), plus
+  `exec prog > file`. **No input redirection (`<`), globbing, `;`/`&&`
+  chaining, command history, or tab completion.** One command (or one
+  pipeline) per line, typed in full, every time.
 - **Path resolution** (`ls`, `cat`, `cd`, `mkdir`, `rmdir`, `touch`,
   `rm`): a leading `/` is an absolute path; anything else is resolved
   against the current working directory. `.` and `..` are collapsed
@@ -152,56 +153,57 @@ Limits, all refuse-outright rather than write-something-wrong:
 
 ## Pipelines
 
-Pipe a command's output into a freshly spawned program with `|`. The left
-side can be a **builtin** or a **program**:
+Chain commands with `|` — a full N-stage pipeline (`a | b | c | …`). Each
+stage is resolved like any command (bare name via `$PATH`, or a path), and
+**stages take arguments**:
 
 ```
-echo hello | /EFI/ORBS/UPPER.BIN                  ->  HELLO
-ls | /EFI/ORBS/UPPER.BIN
-/EFI/ORBS/HELLO.BIN | /EFI/ORBS/UPPER.BIN          ->  HELLO FROM A SECOND PROGRAM! ...
+echo hello world | upper                ->  HELLO WORLD
+echo chained pipe | upper | upper        ->  CHAINED PIPE   (three stages)
+cat /notes.txt | upper                   ->  the file, uppercased
+ps | upper                               ->  the process list, uppercased
 ```
 
-- **Builtin left** (`echo … | prog`): the builtin runs with its output
-  captured (the same capture the redirection machinery uses - a bigger
-  output refuses rather than truncating), then streamed to the spawned
-  program.
-- **Program left** (`/prog_a | /prog_b`): both sides are spawned programs,
-  and the producer streams its output **directly** to the consumer - the
-  shell is not in the byte path. The shell spawns the consumer, spawns the
-  producer with its stdout aimed at the consumer, and hands the producer a
-  runtime capability to reach it (`DELEGATE`); that sibling-to-sibling send
-  is otherwise forbidden by the IPC send-mask, and the shell alone can grant
-  it (only it holds the spawnable slots' send-caps). The shell then just
-  waits for both to exit.
+- The **first stage** may be a **builtin** or a **program**. A builtin runs
+  with its output captured (the same capture the redirection machinery uses -
+  a bigger output refuses rather than truncating), then streamed to stage 2.
+  A program first stage streams its own output onward directly.
+- **Every later stage must be a program** (it reads its predecessor's output
+  as stdin); a builtin or unknown name there reports "not found (a pipeline
+  stage must be a program)".
+- Programs stream **directly** to the next stage - the shell is not in the
+  byte path (except for the one hop out of a builtin first stage). The shell
+  spawns the stages, aims each one's stdout at the next (the last at the
+  console), and hands each producer a runtime capability to reach its
+  consumer (`DELEGATE`); that sibling-to-sibling send is otherwise forbidden
+  by the IPC send-mask, and the shell alone can grant it. A linear chain needs
+  only one delegated target per task, so no special "general delegation" is
+  involved. The shell then waits for every stage to exit.
 
-Either way the right side is a standard filter program (see
-`upper/src/main.rs` for the shape to copy: stdin is `msg_recv`, output is
-its stdout target - the console by default - EOF is the empty message,
-finishing is `exit`). The shell waits for the program(s) to exit before
-prompting again; Ctrl+C interrupts and kills them.
+A pipeline stage is a standard filter program (see `upper/src/main.rs` for
+the shape to copy: stdin is `msg_recv`, output goes to its **stdout target**
+so it can be a *middle* stage, EOF-in is the empty message, EOF-out is an
+empty message to the next stage, finishing is `exit`). Ctrl+C interrupts and
+kills them.
 
-**`exec prog > file`** captures a program's output to a file (the same
-relay, but the shell accumulates the output and writes it rather than
-forwarding it to another program):
+**`exec prog > file`** captures a program's output to a file (the redirection
+machinery, accumulating rather than forwarding):
 
 ```
 exec /EFI/ORBS/HELLO.BIN > out.txt
 cat out.txt                          ->  Hello from a second program! ...
 ```
 
-Limits, deliberate for v1: one `|` per line (no `a | b | c` - that needs
-shell-side chaining of relays); the right side is exactly one program path
-(programs take no arguments); the only *producer* program shipped is
-`HELLO.BIN` (any generator follows the same stdout-target pattern; `upper`
-is a consumer/filter); `exec > file` capture is bounded (512 bytes,
-refuse-not-truncate - pipes themselves stream unbounded). A consumer that
-stops reading behaves differently in the two cases: for a **builtin-left**
-pipe the shell is feeding it, so it kills the consumer after a ~3-second
-real-tick timeout; for a **program-left** pipe the shell is out of the byte
-path, so the producer gives up after its own ~3-second timeout and exits,
-and the shell's wait on the still-live consumer blocks until you press
-**Ctrl+C** (which leaves the consumer running in the background - `kill` it
-via `ps`).
+Limits: a pipeline is at most five program stages (the spawnable task slots -
+a longer chain fails with "no free task slot"); combining `|` with `>`/`>>`
+is refused (the last stage writes straight to the console, so there's no
+capture of its output to redirect); `exec > file` capture is bounded (512
+bytes, refuse-not-truncate - pipes themselves stream unbounded). A consumer
+that stops reading: a program producer gives up after its own ~3-second
+timeout and exits, and the shell's wait on the still-live consumer blocks
+until you press **Ctrl+C** (leaving it running in the background - `kill` it
+via `ps`); a builtin first stage the shell feeds directly gets its consumer
+killed after the same timeout.
 
 ## Known limitations
 

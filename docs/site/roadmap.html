@@ -157,12 +157,14 @@
 
 <ol>
 <li><strong>Chainable filter shape — DONE.</strong> <code class="inline">upper</code> rewritten over <code class="inline">ulib</code> to read stdin (<code class="inline">MSG_RECV</code>) and write to its stdout target (<code class="inline">write_out</code>) instead of a hardcoded console, propagating end-of-stream so the next stage finishes. No regression to <code class="inline">X | upper</code> (target is the console there); it can now be a middle stage. The reference shape every future filter copies.</li>
-<li><strong>N-stage parsing.</strong> Generalize <code class="inline">parse_pipe</code> to split into up to <code class="inline">MAX_STAGES</code> stages (a fixed array), validating each.</li>
-<li><strong>argv on pipeline stages.</strong> Lift the "no arguments" pipe restriction so a producer like <code class="inline">cat FILE | …</code> works.</li>
-<li><strong>PATH resolution in pipes.</strong> Resolve each stage via <code class="inline">$PATH</code> like a bare command, so <code class="inline">echo … | upper</code> works with bare names.</li>
-<li><strong>N-stage plumbing.</strong> Spawn stages consumer-first, wire each stdout to the next, <code class="inline">DELEGATE</code> each link, wait/reap all - generalizing <code class="inline">cmd_pipeline_prog</code>'s two-stage flow to a loop.</li>
-<li><strong>More filters (payoff).</strong> Real <code class="inline">/bin</code> filters (<code class="inline">grep</code>, <code class="inline">wc</code>, <code class="inline">head</code>, <code class="inline">sort</code>) so multi-stage pipelines are actually useful.</li>
+<li><strong>N-stage parsing — DONE.</strong> <code class="inline">split_pipeline</code> splits on every standalone <code class="inline">|</code> token into up to <code class="inline">MAX_STAGES</code> (8) trimmed stages.</li>
+<li><strong>argv on pipeline stages — DONE.</strong> <code class="inline">spawn_stage</code> tokenizes each stage into its own argv; the "no arguments" restriction is gone, so <code class="inline">cat FILE | …</code> carries its file.</li>
+<li><strong>PATH resolution in pipes — DONE.</strong> <code class="inline">resolve_command</code> resolves via <code class="inline">$PATH</code> for a bare name or as-is for a <code class="inline">/</code>-path, so <code class="inline">echo … | upper</code> works with bare names.</li>
+<li><strong>N-stage plumbing — DONE.</strong> <code class="inline">cmd_pipeline</code> (rewritten) spawns program stages right-to-left, <code class="inline">DELEGATE</code>s each adjacent link (one-target-per-task delegation suffices for a linear chain), and waits/reaps all; the first stage may be a builtin (captured, streamed to stage 2). The old <code class="inline">parse_pipe</code>/<code class="inline">cmd_pipeline_prog</code> patchwork was removed.</li>
+<li><strong>More filters (payoff) — NEXT.</strong> Real <code class="inline">/bin</code> filters (<code class="inline">grep</code>, <code class="inline">wc</code>, <code class="inline">head</code>, <code class="inline">sort</code>) so multi-stage pipelines are broadly useful (only <code class="inline">upper</code> exists so far).</li>
 </ol>
+
+<p>Steps 2–5 verified on QEMU (run-image), zero <code class="inline">-d int</code> aborts: <code class="inline">echo hello world | upper</code> → "HELLO WORLD"; <code class="inline">echo chained pipe | upper | upper</code> → "CHAINED PIPE" (three tasks, a real middle stage); <code class="inline">cat /pt.txt | upper</code> → the file uppercased; <code class="inline">pwd | upper</code> → "/" (builtin head). Combining <code class="inline">|</code> with <code class="inline">&gt;</code>/<code class="inline">&gt;&gt;</code> stays refused.</p>
 
 <h2>Testing infrastructure: scripted real-hardware round trips</h2>
 

@@ -40,6 +40,22 @@
 
   <article>
 
+<h2>Multi-stage pipelines: N-stage <code class="inline">a | b | c</code> with argv and PATH</h2>
+
+<p>Steps 2–5 of the pipeline arc, together — the two-stage pipe becomes a real N-stage pipeline of standalone programs. <code class="inline">echo hello | upper | upper</code> and <code class="inline">cat FILE | upper</code> now work: bare names, arguments on any stage, and a chain as long as the spawnable slots allow (five).</p>
+
+<ul>
+<li><strong>N-stage parsing</strong> (<code class="inline">split_pipeline</code>): the line splits on every standalone <code class="inline">|</code> token into up to <code class="inline">MAX_STAGES</code> (8) trimmed stages, not just the first.</li>
+<li><strong>argv on stages</strong> (<code class="inline">spawn_stage</code>): each stage is tokenized into its own argv and spawned with it — the old "programs take no arguments in a pipe" restriction is gone, so a producer like <code class="inline">cat FILE | …</code> carries its file.</li>
+<li><strong>PATH resolution in pipes</strong> (<code class="inline">resolve_command</code>): a stage's command resolves the same way a bare command does — <code class="inline">$PATH</code> for a bare name, used as-is for a <code class="inline">/</code>-path. So <code class="inline">echo … | upper</code> works with bare names.</li>
+<li><strong>N-stage plumbing</strong> (<code class="inline">cmd_pipeline</code>, rewritten): program stages are spawned right-to-left (each producer gets a live consumer to aim stdout at), each adjacent producer→consumer link is authorized with one <code class="inline">DELEGATE</code>, and the last stage writes to the console. A linear chain needs only the existing one-target-per-task delegation, so no general/transitive delegation was required. The first stage may still be a <strong>builtin</strong> (captured and streamed to stage 2); a later stage must be a program.</li>
+<li><code class="inline">upper</code> is now staged to <code class="inline">/bin/UPPER</code> too, so it resolves as a bare <code class="inline">upper</code>.</li>
+</ul>
+
+<p>The old two-path patchwork (<code class="inline">parse_pipe</code>/<code class="inline">cmd_pipeline_prog</code>, the <code class="inline">/</code>-prefix heuristic, single-<code class="inline">|</code>-only) is gone. Combining a pipe with <code class="inline">&gt;</code>/<code class="inline">&gt;&gt;</code> is still refused.</p>
+
+<p>Verified on QEMU (run-image), zero <code class="inline">-d int</code> aborts: <code class="inline">echo hello world | upper</code> → "HELLO WORLD"; <code class="inline">echo chained pipe | upper | upper</code> → "CHAINED PIPE" (three tasks, the middle <code class="inline">upper</code> a genuine middle stage, EOF propagating); <code class="inline">cat /pt.txt | upper</code> → the file uppercased (argv producer); <code class="inline">echo x | nosuchprog</code> and <code class="inline">echo x | pwd</code> → the not-a-program error; <code class="inline">pwd | upper</code> → "/" (builtin head). Only more <code class="inline">/bin</code> filters (<code class="inline">grep</code>/<code class="inline">wc</code>/<code class="inline">head</code>/<code class="inline">sort</code>) remain to make pipelines broadly useful.</p>
+
 <h2>Multi-stage pipelines, step 1: a chainable filter shape (<code class="inline">upper</code> over <code class="inline">ulib</code>)</h2>
 
 <p>First step of the multi-stage-pipeline arc (<code class="inline">a | b | c</code>), chosen after the standalone-binaries arc completed. The foundational piece every future pipeline stage depends on: a filter that can sit in the <em>middle</em> of a pipe, not only at the end.</p>

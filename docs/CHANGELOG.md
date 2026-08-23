@@ -7,6 +7,49 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/`; 
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## Multi-stage pipelines: N-stage `a | b | c` with argv and PATH
+
+Steps 2–5 of the pipeline arc, together — the two-stage pipe becomes a real
+N-stage pipeline of standalone programs. `echo hello | upper | upper` and
+`cat FILE | upper` now work: bare names, arguments on any stage, and a chain as
+long as the spawnable slots allow (five).
+
+- **N-stage parsing** (`split_pipeline`): the line splits on every standalone
+  `|` token into up to `MAX_STAGES` (8) trimmed stages, not just the first.
+- **argv on stages** (`spawn_stage`): each stage is tokenized into its own argv
+  and spawned with it — the old "programs take no arguments in a pipe"
+  restriction is gone, so a producer like `cat FILE | …` carries its file.
+- **PATH resolution in pipes** (`resolve_command`): a stage's command resolves
+  the same way a bare command does — `$PATH` for a bare name (the
+  `run_path_command` probe, factored out), used as-is for a `/`-path. So
+  `echo … | upper` works with bare names, not just explicit `/EFI/ORBS/…`.
+- **N-stage plumbing** (`cmd_pipeline`, rewritten): program stages are spawned
+  right-to-left (each producer gets a live consumer to aim stdout at), each
+  adjacent producer→consumer link is authorized with one `DELEGATE`, and the
+  last stage writes to the console. A linear chain needs only the existing
+  one-target-per-task delegation — each stage delegates to exactly one
+  successor — so no general/transitive delegation was required. The first stage
+  may still be a **builtin** (captured and streamed to stage 2, the shell the
+  byte path for that one hop, via `is_builtin`); a later stage must be a program
+  (it reads stdin), and a non-program there reports "not found (a pipeline stage
+  must be a program)".
+- `upper` is now staged to `/bin/UPPER` too (it's a real command now), so it
+  resolves as a bare `upper`.
+
+The old two-path patchwork (`parse_pipe`/`PipeParse`/`cmd_pipeline_prog`, the
+`/`-prefix program-vs-builtin heuristic, single-`|`-only) is gone. Combining a
+pipe with `>`/`>>` is still refused (the last stage writes straight to the
+console — there's no capture of its output to redirect).
+
+Verified on QEMU (run-image), zero `-d int` aborts: `echo hello world | upper`
+→ "HELLO WORLD"; `echo chained pipe | upper | upper` → "CHAINED PIPE" (three
+tasks, the middle `upper` a genuine middle stage, EOF propagating down the
+chain); `cat /pt.txt | upper` → the file's contents uppercased (argv producer);
+`cat /pt.txt | upper | upper` likewise over three stages; `echo x | nosuchprog`
+and `echo x | pwd` → the not-a-program error; `pwd | upper` → "/" (builtin
+head). Only more `/bin` filters (`grep`/`wc`/`head`/`sort`) remain to make
+pipelines broadly useful — see `roadmap.md`.
+
 ## Multi-stage pipelines, step 1: a chainable filter shape (`upper` over `ulib`)
 
 First step of the multi-stage-pipeline arc (`a | b | c`), chosen after the

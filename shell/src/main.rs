@@ -73,6 +73,11 @@ const PATH_SIZE: usize = 128;
 // 128-byte input line can't hold more real tokens than this in practice.
 const MAX_ARGS: usize = 16;
 
+// Max stages in a pipeline (`a | b | c | ...`). Generous; the real ceiling is
+// spawnable task slots (five: 5..NUM_TASKS), so a chain longer than that fails
+// at spawn with "no free task slot" rather than here - see cmd_pipeline.
+const MAX_STAGES: usize = 8;
+
 // Where an unknown command is looked up as a program: a `:`-separated list of
 // directories searched in order. A constant for now; Stage 3 makes it a real
 // `PATH` env var. `/bin` matches the uppercase on-disk `\BIN\` case-
@@ -350,22 +355,24 @@ fn run_line(line: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize, env: &mut
     let mut ebuf = [0u8; EXPAND_SIZE];
     let line = expand_vars(line, env, &mut ebuf);
 
-    // Pipelines first: a standalone `|` splits the line into a builtin
-    // (left, output captured) and a program path (right, spawned and
-    // fed the capture as IPC messages) - see cmd_pipeline. Combining
-    // with `>`/`>>` is refused: the right side is a real separate task
-    // writing straight to the console, so there's no capture of *its*
-    // output to redirect.
-    match parse_pipe(line) {
-        PipeParse::NoPipe => {}
-        PipeParse::Malformed(msg) => {
-            print_line(msg);
+    // Pipelines first: standalone `|` tokens split the line into N stages.
+    // The first stage may be a builtin (its output captured and streamed) or a
+    // program; every later stage is a program reading its predecessor's output
+    // as stdin and writing to the next (or the console, for the last) - see
+    // cmd_pipeline. Combining with `>`/`>>` is refused: the last stage writes
+    // straight to the console, so there's no capture of *its* output to
+    // redirect.
+    if line.split_whitespace().any(|t| t == "|") {
+        if line.split_whitespace().any(|t| t == ">" || t == ">>") {
+            print_line("pipe: can't combine | with output redirection");
             return;
         }
-        PipeParse::Pipe { left, right } => {
-            cmd_pipeline(left, right, cwd, cwd_len, env);
-            return;
+        let mut stages: [&str; MAX_STAGES] = [""; MAX_STAGES];
+        match split_pipeline(line, &mut stages) {
+            Ok(n) => cmd_pipeline(&stages[..n], cwd, cwd_len, env),
+            Err(msg) => print_line(msg),
         }
+        return;
     }
     match parse_redirect(line) {
         RedirectParse::NoRedirect => {
@@ -389,212 +396,249 @@ fn run_line(line: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize, env: &mut
     }
 }
 
-/// What [`parse_pipe`] found on a submitted line.
-enum PipeParse<'a> {
-    /// No standalone `|` token - not a pipeline.
-    NoPipe,
-    /// `left | right`: run `left` as a builtin with a capture sink,
-    /// spawn `right` as a program, stream the capture to it.
-    Pipe { left: &'a str, right: &'a str },
-    /// A `|` was present but the line was wrong; the message says how.
-    Malformed(&'static str),
-}
-
-/// Scans the line's whitespace tokens for the first standalone `|`
-/// and splits there - the operator must be its own token (`a|b` is one
-/// word), same no-quoting tokenization rule as `parse_redirect`. The
-/// right side must be exactly one token (a program path - programs
-/// receive no arguments), and mixing `|` with `>`/`>>` is refused.
-fn parse_pipe(line: &str) -> PipeParse<'_> {
+/// Split `line` into its `|`-separated stages (trimmed), filling `stages` and
+/// returning the count. Each `|` must be its own whitespace token (same
+/// no-quoting rule as `parse_redirect`); an empty stage or overflowing
+/// `stages` is an error. Only called when a `|` token is present, so the count
+/// is always >= 2.
+fn split_pipeline<'a>(line: &'a str, stages: &mut [&'a str]) -> Result<usize, &'static str> {
+    let base = line.as_ptr() as usize;
+    let mut count = 0;
+    let mut seg_start = 0usize;
     for token in line.split_whitespace() {
-        // SAFETY-free pointer math: token is a subslice of line, so
-        // this offset arithmetic can't go out of range.
-        let token_start = token.as_ptr() as usize - line.as_ptr() as usize;
         if token == "|" {
-            let left = line.get(..token_start).unwrap_or("").trim();
-            let rest = line.get(token_start + 1..).unwrap_or("").trim();
-            if left.is_empty() {
-                return PipeParse::Malformed("pipe: missing command before |");
+            let tok_off = token.as_ptr() as usize - base;
+            let seg = line.get(seg_start..tok_off).unwrap_or("").trim();
+            if seg.is_empty() {
+                return Err("pipe: empty pipeline stage (a `|` with no command beside it)");
             }
-            if rest.is_empty() {
-                return PipeParse::Malformed("pipe: missing program after |");
+            if count >= stages.len() {
+                return Err("pipe: too many pipeline stages");
             }
-            let mut right_tokens = rest.split_whitespace();
-            let right = right_tokens.next().unwrap_or("");
-            if right_tokens.next().is_some() {
-                return PipeParse::Malformed(
-                    "pipe: exactly one program path may follow | (programs take no arguments)",
-                );
-            }
-            if right == "|" || left.split_whitespace().any(|t| t == ">" || t == ">>") {
-                return PipeParse::Malformed("pipe: only a single `left | program` pipeline is supported");
-            }
-            if right == ">" || right == ">>" {
-                return PipeParse::Malformed("pipe: can't combine | with output redirection");
-            }
-            return PipeParse::Pipe { left, right };
-        }
-        if token == ">" || token == ">>" {
-            // A redirect before any pipe operator: if a `|` appears
-            // later it belongs to the redirect's target text - refuse
-            // the combination outright rather than guessing.
-            if line.split_whitespace().any(|t| t == "|") {
-                return PipeParse::Malformed("pipe: can't combine | with output redirection");
-            }
-            return PipeParse::NoPipe;
+            stages[count] = seg;
+            count += 1;
+            seg_start = tok_off + 1;
         }
     }
-    PipeParse::NoPipe
+    let seg = line.get(seg_start..).unwrap_or("").trim();
+    if seg.is_empty() {
+        return Err("pipe: missing command after |");
+    }
+    if count >= stages.len() {
+        return Err("pipe: too many pipeline stages");
+    }
+    stages[count] = seg;
+    Ok(count + 1)
 }
 
-/// `left | program`: runs the builtin `left` with a capture sink (the
-/// redirection machinery's), spawns `program` (see [`spawn_path`]),
-/// streams the capture to it as IPC messages (1-64 bytes each,
-/// [`syscall_abi::MSG_ERR_FULL`] retried with a real-tick timeout so a
-/// program that never reads can't hang the shell), sends the empty
-/// end-of-stream message, and waits for the program to exit. The
-/// program's own output goes straight to the console as it runs -
-/// there is no capture of a *task's* output, which is also why `|`
-/// can't combine with `>`.
-fn cmd_pipeline(left: &str, right: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize, env: &mut Env) {
-    // A program path on the left (its first token is an absolute path) is a
-    // program-to-program pipe: the shell relays the producer's live output
-    // to the consumer. A builtin on the left is the original
-    // capture-the-builtin's-output-and-stream-it path below.
-    if left.trim_start().as_bytes().first() == Some(&b'/') {
-        cmd_pipeline_prog(left.trim_start(), right, cwd, cwd_len);
-        return;
-    }
-
-    let capture = get_heap();
-    let mut out = Output::Capture { buf: capture, len: 0, overflowed: false };
-    dispatch_line(left, cwd, cwd_len, env, &mut out);
-    let (buf, len, overflowed) = match out {
-        Output::Capture { buf, len, overflowed } => (buf, len, overflowed),
-        Output::Console => return,
-    };
-    if overflowed {
-        print_line("pipe: left command's output exceeds the capture buffer - nothing was piped");
-        return;
-    }
-
-    let slot = match spawn_path(right, core::slice::from_ref(&right), cwd, *cwd_len, syscall_abi::CON_TASK) {
-        Ok(slot) => slot,
-        Err(0) => {
-            print_line("pipe: path too long");
-            return;
-        }
-        Err(NO_FS) => {
-            print_no_fs();
-            return;
-        }
-        Err(code) => {
-            print_fs_error("pipe", code);
-            return;
-        }
-    };
-
-    // Stream the capture in message-sized chunks, then the empty
-    // end-of-stream message (a still-non-null pointer with length 0 -
-    // see MSG_SEND's doc in syscall-abi).
-    let mut sent = 0usize;
-    loop {
-        let chunk_len = (len - sent).min(syscall_abi::MSG_MAX_LEN as usize);
-        if !pipe_send(slot, unsafe { buf.as_ptr().add(sent) }, chunk_len as u64) {
-            return; // pipe_send printed why, and killed the task if needed
-        }
-        if chunk_len == 0 {
-            break; // the empty message was the end-of-stream marker
-        }
-        sent += chunk_len;
-    }
-
-    match syscall(syscall_abi::WAIT, slot) {
-        WAIT_INTERRUPTED => print_line("pipe: interrupted (the program keeps running - see ps)"),
-        TASK_KILLED_STATUS => print_line("pipe: program was killed"),
-        code if code >= FS_ERR_MIN => {
-            // Most likely the program crashed (a fault reaps the slot
-            // immediately, so wait answers no-such-task) - the kernel
-            // already reported the fault itself.
-            print_line("pipe: program did not exit cleanly");
-        }
-        0 => {}
-        status => {
-            print_str("pipe: program exited with code ");
-            print_u64(status);
-            print_line("");
-        }
-    }
+/// Whether `cmd` is a shell builtin (so a pipeline's first stage can be one,
+/// captured and streamed - a later stage can't, it must be a program that
+/// reads its stdin). The list mirrors `dispatch_line`'s arms.
+fn is_builtin(cmd: &str) -> bool {
+    matches!(
+        cmd,
+        "help" | "cd" | "pwd" | "write" | "mount" | "exec" | "exit" | "ps" | "kill" | "fg"
+            | "wait" | "send" | "recv" | "selftest" | "env" | "set" | "unset"
+    )
 }
 
-/// Program-to-program pipe (`/prog_a | /prog_b`): both sides are spawned
-/// programs, and the producer streams its output *directly* to the consumer
-/// over IPC - the shell is not in the byte path. That direct sibling-to-
-/// sibling send is normally forbidden (a spawned task's static send-mask
-/// doesn't include its siblings); the shell authorizes it with a runtime
-/// capability *delegation* (the `DELEGATE` syscall), which it alone can
-/// grant because it alone statically holds the send-caps for the spawnable
-/// slots. The shell then only waits for both to exit. (Before delegation,
-/// the shell relayed every chunk producer -> shell -> consumer; delegation
-/// is what took it out of the hot path.)
-fn cmd_pipeline_prog(left: &str, right: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize) {
-    // Consumer first (stdout -> console), so it's a live task the producer
-    // can be pointed at and then delegated the right to reach.
-    let consumer = match spawn_path(right, core::slice::from_ref(&right), cwd, *cwd_len, syscall_abi::CON_TASK) {
-        Ok(slot) => slot,
-        Err(0) => {
-            print_line("pipe: path too long");
-            return;
+/// Resolve a pipeline stage's command to a program path `spawn_path` can load:
+/// a `/`- or `.`-containing token is used as-is (spawn_path resolves it against
+/// the cwd), a bare name is looked up on `$PATH` (the `run_path_command` probe).
+/// Returns the path written into `buf`, or `None` (not a program - a builtin,
+/// a typo, or no filesystem this boot).
+fn resolve_command<'a>(cmd: &str, env: &Env, buf: &'a mut [u8; PATH_SIZE]) -> Option<&'a str> {
+    if cmd.as_bytes().first() == Some(&b'/') || cmd.as_bytes().contains(&b'/') {
+        let b = cmd.as_bytes();
+        if b.is_empty() || b.len() > buf.len() {
+            return None;
         }
-        Err(NO_FS) => {
-            print_no_fs();
-            return;
+        buf[..b.len()].copy_from_slice(b);
+        return core::str::from_utf8(&buf[..b.len()]).ok();
+    }
+    let path = env
+        .get(b"PATH")
+        .and_then(|v| core::str::from_utf8(v).ok())
+        .unwrap_or(DEFAULT_PATH);
+    for dir in path.split(':') {
+        let mut c = 0;
+        for &x in dir.as_bytes() {
+            if c < buf.len() {
+                buf[c] = x;
+                c += 1;
+            }
         }
-        Err(code) => {
-            print_fs_error("pipe", code);
-            return;
+        if (c == 0 || buf[c - 1] != b'/') && c < buf.len() {
+            buf[c] = b'/';
+            c += 1;
         }
+        for &x in cmd.as_bytes() {
+            if c < buf.len() {
+                buf[c] = x;
+                c += 1;
+            }
+        }
+        let Ok(cand) = core::str::from_utf8(&buf[..c]) else {
+            continue;
+        };
+        let mut probe = [0u8; 1];
+        let r = fs_read_file(cand, &mut probe);
+        if r == NO_FS {
+            return None; // no filesystem this boot - nothing to find
+        }
+        if r < FS_ERR_MIN {
+            return core::str::from_utf8(&buf[..c]).ok();
+        }
+    }
+    None
+}
+
+/// Spawn one program pipeline stage: tokenize `stage` into argv, resolve
+/// `argv[0]` to a program path, and `spawn_path` it with `stdout_target`.
+/// `Err(0)` = not a program / path too long; any other `Err` is a real spawn
+/// status ([`NO_FS`] or an `FS_ERR_*`/`SPAWN_ERR_*` code).
+fn spawn_stage(stage: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize, env: &Env, stdout_target: u64) -> Result<u64, u64> {
+    let mut argv_buf: [&str; MAX_ARGS] = [""; MAX_ARGS];
+    let mut n = 0;
+    for w in stage.split_whitespace() {
+        if n >= MAX_ARGS {
+            break;
+        }
+        argv_buf[n] = w;
+        n += 1;
+    }
+    if n == 0 {
+        return Err(0);
+    }
+    let mut path_buf = [0u8; PATH_SIZE];
+    let Some(path) = resolve_command(argv_buf[0], env, &mut path_buf) else {
+        return Err(0);
     };
-    // Producer with its stdout routed straight to the consumer, so it
-    // streams there directly instead of back through the shell.
-    let producer = match spawn_path(left, core::slice::from_ref(&left), cwd, *cwd_len, consumer) {
-        Ok(slot) => slot,
-        Err(0) => {
-            print_line("pipe: path too long");
-            syscall(syscall_abi::KILL, consumer);
-            return;
-        }
-        Err(NO_FS) => {
-            print_no_fs();
-            syscall(syscall_abi::KILL, consumer);
-            return;
-        }
-        Err(code) => {
-            print_fs_error("pipe", code);
-            syscall(syscall_abi::KILL, consumer);
-            return;
-        }
+    // `path` borrows `path_buf`; copy it out so spawn_path can take it while
+    // argv (which borrows `stage`, a different buffer) stays valid.
+    let mut owned = [0u8; PATH_SIZE];
+    let plen = path.len();
+    owned[..plen].copy_from_slice(path.as_bytes());
+    let Ok(path) = core::str::from_utf8(&owned[..plen]) else {
+        return Err(0);
     };
-    // Authorize the producer to send to the consumer - the whole point of
-    // this feature. Without it the producer's sends would be denied. (A
-    // tick could let the producer run in the window between the two spawns
-    // and this call; its own bounded send-retry tolerates a brief denial
-    // until this lands - see hello's `pipe_out`.)
-    if syscall4(syscall_abi::DELEGATE, producer, consumer, 0, 0) != 0 {
-        print_line("pipe: could not authorize the stream");
-        syscall(syscall_abi::KILL, producer);
-        syscall(syscall_abi::KILL, consumer);
+    spawn_path(path, &argv_buf[..n], cwd, cwd_len, stdout_target)
+}
+
+/// Run an N-stage pipeline (`a | b | c`, N >= 2). The first stage may be a
+/// builtin (captured and streamed to stage 2) or a program; every later stage
+/// is a program reading its predecessor's output as stdin (`MSG_RECV`) and
+/// writing to the next stage, or to the console for the last one.
+///
+/// Program stages are spawned right-to-left so each producer has a live
+/// consumer to point its stdout at; each adjacent producer->consumer link is
+/// authorized with one `DELEGATE` (a spawnable slot's static mask reaches the
+/// console and the shell, but not a sibling). A linear chain needs only the
+/// existing one-target-per-task delegation - each stage delegates to exactly
+/// one successor. The shell waits on (and reaps) every program stage.
+fn cmd_pipeline(stages: &[&str], cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize, env: &mut Env) {
+    let head_cmd = stages[0].split_whitespace().next().unwrap_or("");
+    let mut head_buf = [0u8; PATH_SIZE];
+    let head_is_program = resolve_command(head_cmd, env, &mut head_buf).is_some();
+    let builtin_head = !head_is_program;
+    if builtin_head && !is_builtin(head_cmd) {
+        print_str("unknown command: ");
+        print_line(head_cmd);
         return;
     }
 
-    // Both run and exit on their own now: the producer streams to the
-    // consumer and sends an empty end-of-stream message, then exits; the
-    // consumer finishes on that EOF and exits. The shell only reaps them.
-    // A consumer that never reads its input leaves the producer's bounded
-    // retry to give up and exit, after which this WAIT blocks on the
-    // still-live consumer until Ctrl+C (wait_pipe_stage's interrupted arm).
-    wait_pipe_stage("producer", producer);
-    wait_pipe_stage("consumer", consumer);
+    // The stages spawned as a program chain (all but a builtin head).
+    let prog_stages: &[&str] = if builtin_head { &stages[1..] } else { stages };
+    if prog_stages.is_empty() {
+        print_line("pipe: missing program after |");
+        return;
+    }
+
+    // Spawn right-to-left: each stage's stdout is the next stage's slot, and
+    // the last stage writes to the console.
+    let mut slots = [0u64; MAX_STAGES];
+    let mut next_target = syscall_abi::CON_TASK;
+    for i in (0..prog_stages.len()).rev() {
+        match spawn_stage(prog_stages[i], cwd, *cwd_len, env, next_target) {
+            Ok(slot) => {
+                slots[i] = slot;
+                next_target = slot;
+            }
+            Err(code) => {
+                for s in &slots[i + 1..prog_stages.len()] {
+                    syscall(syscall_abi::KILL, *s);
+                }
+                let cmd = prog_stages[i].split_whitespace().next().unwrap_or("");
+                match code {
+                    0 => {
+                        print_str("pipe: ");
+                        print_str(cmd);
+                        print_line(": not found (a pipeline stage must be a program)");
+                    }
+                    NO_FS => print_no_fs(),
+                    _ => print_fs_error("pipe", code),
+                }
+                return;
+            }
+        }
+    }
+
+    // Authorize each adjacent producer->consumer link.
+    for i in 0..prog_stages.len() - 1 {
+        if syscall4(syscall_abi::DELEGATE, slots[i], slots[i + 1], 0, 0) != 0 {
+            for s in &slots[..prog_stages.len()] {
+                syscall(syscall_abi::KILL, *s);
+            }
+            print_line("pipe: could not authorize the stream");
+            return;
+        }
+    }
+
+    // A builtin head: capture its output and stream it to the first program
+    // stage (the shell is the byte path only for this one hop). A program head
+    // streams itself, directly to stage 2 via its delegated stdout.
+    if builtin_head {
+        let capture = get_heap();
+        let mut out = Output::Capture { buf: capture, len: 0, overflowed: false };
+        dispatch_line(stages[0], cwd, cwd_len, env, &mut out);
+        let (buf, len, overflowed) = match out {
+            Output::Capture { buf, len, overflowed } => (buf, len, overflowed),
+            Output::Console => {
+                for s in &slots[..prog_stages.len()] {
+                    syscall(syscall_abi::KILL, *s);
+                }
+                return;
+            }
+        };
+        if overflowed {
+            print_line("pipe: left command's output exceeds the capture buffer - nothing was piped");
+            for s in &slots[..prog_stages.len()] {
+                syscall(syscall_abi::KILL, *s);
+            }
+            return;
+        }
+        let mut sent = 0usize;
+        loop {
+            let chunk_len = (len - sent).min(syscall_abi::MSG_MAX_LEN as usize);
+            if !pipe_send(slots[0], unsafe { buf.as_ptr().add(sent) }, chunk_len as u64) {
+                for s in &slots[..prog_stages.len()] {
+                    syscall(syscall_abi::KILL, *s);
+                }
+                return;
+            }
+            if chunk_len == 0 {
+                break; // the empty message was the end-of-stream marker
+            }
+            sent += chunk_len;
+        }
+    }
+
+    // Reap every program stage (in order, so a producer that streamed and
+    // exited is collected before we block on its consumer).
+    for i in 0..prog_stages.len() {
+        let cmd = prog_stages[i].split_whitespace().next().unwrap_or("stage");
+        wait_pipe_stage(cmd, slots[i]);
+    }
 }
 
 /// Wait for one stage of a program-to-program pipe and report how it ended.

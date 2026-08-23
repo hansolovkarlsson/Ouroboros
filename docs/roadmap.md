@@ -527,25 +527,29 @@ fixed:
    next stage finishes. No regression to `X | upper` (target is the console
    there); it can now be a *middle* stage. The reference shape every future
    filter copies.
-2. **N-stage parsing.** Generalize `parse_pipe` to split into up to `MAX_STAGES`
-   stages (a fixed array, no `Vec`), validating each.
-3. **argv on pipeline stages.** Lift the "programs take no arguments" pipe
-   restriction so a producer like `cat FILE | …` works - at least the first
-   stage needs its arguments; ideally every stage.
-4. **PATH resolution in pipes.** Resolve each stage via `$PATH` like a bare
-   command (`run_path_command`), not just cwd-relative paths, so `echo … | upper`
-   works with bare names.
-5. **N-stage plumbing.** Spawn the stages (consumer-first so each producer has a
-   live target), wire each stage's stdout to the next (last → console or a `>`
-   capture), `DELEGATE` each adjacent link, and wait/reap all - generalizing
-   `cmd_pipeline_prog`'s two-stage spawn/delegate/wait to a loop. Keep the
-   builtin/captured-left path for a first-stage builtin.
-6. **More filters (payoff).** Real `/bin` filters (`grep`, `wc`, `head`, `sort`)
-   so multi-stage pipelines are actually useful, not just a mechanism demo.
+2. **N-stage parsing — DONE.** `split_pipeline` splits on every standalone `|`
+   token into up to `MAX_STAGES` (8) trimmed stages (a fixed array, no `Vec`).
+3. **argv on pipeline stages — DONE.** `spawn_stage` tokenizes each stage into
+   its own argv; the "programs take no arguments" pipe restriction is gone, so
+   `cat FILE | …` carries its file.
+4. **PATH resolution in pipes — DONE.** `resolve_command` resolves a stage's
+   command via `$PATH` for a bare name (the `run_path_command` probe, factored
+   out) or as-is for a `/`-path, so `echo … | upper` works with bare names.
+5. **N-stage plumbing — DONE.** `cmd_pipeline` (rewritten) spawns program stages
+   right-to-left, `DELEGATE`s each adjacent link (a linear chain needs only the
+   existing one-target-per-task delegation), and waits/reaps all; the first
+   stage may be a builtin (captured and streamed to stage 2). The old
+   `parse_pipe`/`PipeParse`/`cmd_pipeline_prog` patchwork was removed.
+6. **More filters (payoff) — NEXT.** Real `/bin` filters (`grep`, `wc`, `head`,
+   `sort`) so multi-stage pipelines are broadly useful, not just a mechanism
+   demo (only `upper` exists so far).
 
-**Verification:** a visible multi-stage transform (`echo hello | upper | …`),
-`cat FILE | grep x | wc`, byte-exactness, and zero `-d int` aborts, on
-`make run-image`.
+**Verification (steps 2–5, on `make run-image`, zero `-d int` aborts):**
+`echo hello world | upper` → "HELLO WORLD"; `echo chained pipe | upper | upper`
+→ "CHAINED PIPE" (three tasks, a real middle stage); `cat /pt.txt | upper` →
+the file uppercased (argv producer); `echo x | nosuchprog`/`echo x | pwd` → the
+not-a-program error; `pwd | upper` → "/" (builtin head). Combining `|` with
+`>`/`>>` stays refused.
 
 ## Testing infrastructure: scripted real-hardware round trips
 

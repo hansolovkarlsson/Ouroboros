@@ -228,6 +228,7 @@ esp: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin args
 	cp $(PONG_BIN) $(ESP_DIR)/EFI/ORBS/PONG.BIN
 	cp $(FSD_BIN) $(ESP_DIR)/EFI/ORBS/FSD.BIN
 	cp $(UPPER_BIN) $(ESP_DIR)/EFI/ORBS/UPPER.BIN
+	cp $(UPPER_BIN) $(ESP_DIR)/bin/UPPER
 	cp $(COND_BIN) $(ESP_DIR)/EFI/ORBS/COND.BIN
 	cp $(NETD_BIN) $(ESP_DIR)/EFI/ORBS/NETD.BIN
 	cp $(ARGS_BIN) $(ESP_DIR)/EFI/ORBS/ARGS.BIN
