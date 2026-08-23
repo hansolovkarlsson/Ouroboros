@@ -414,6 +414,72 @@ ext2 wants (permissions, symlinks) is the same richer file interface the
 namespace direction points at. Sequence the enum now; generalize to
 per-FS servers if and when namespaces land.
 
+## Disk management tools: mount/unmount, partition, format (scoped)
+
+With `fsd` now reading and writing FAT32/exFAT/ext2, the natural next capability
+is *managing* disks from the running system: listing what's mounted, unmounting,
+partitioning a raw disk, and formatting (mkfs) a partition. Today the guest can
+only use a disk that some *other* tool already partitioned and formatted (the
+`scripts/mk*.py` builders); these tools would let Ouroboros prepare a blank disk
+itself — e.g. erase, partition, and format a USB stick from within the VM.
+
+**Architecture — `fsd` grows from "filesystem server" into "storage server."**
+It's already the only task with `BLOCK_*` access and already contains the code
+that lays out FAT/exFAT/ext2 on-disk structures (that *is* the write arcs), so
+these become new `FSOP_*` ops with thin `/bin` clients — the same pattern as
+every other command. No new privileged task. Partitioning lives here too even
+though it's *below* any one filesystem, because `fsd` owns the raw-disk write
+path.
+
+**`/dev`? Deferred, deliberately.** There is exactly one block device (the
+kernel's single `BlockDevice` cell) and `fsd` mounts one filesystem, so a
+`/dev` namespace (devices/partitions addressed by name) has nothing to name yet.
+Tools target "the disk" implicitly and a partition by index. A real `/dev` is
+the Plan 9 direction (a device namespace served by a devfs) — do it *if/when*
+multiple disks/partitions need addressing, not before. YAGNI now.
+
+**Testing.** Fully developable and verifiable on **QEMU with a blank virtio-blk
+disk**: point the block device at an empty image, boot (`fsd` finds no FS →
+`NO_FS`, device present), then `partition` → `format` → `mount` → `ls`/`cat`,
+cross-checked with host tools (`fdisk`/`fsck_msdos`/`fsck_exfat`/`e2fsck`) — the
+standing discipline. The appealing real-hardware workflow ("boot from the
+`.hdd`, then erase/partition/format the passed-through USB stick from the VM")
+is **blocked by the xHCI keyboard↔storage contention bug** (see the parking
+lot): in `.hdd`-boot the keyboard works but USB storage reads/writes degrade. So
+that bug is a prerequisite for the real-hardware *demo* of this arc, though not
+for building it.
+
+**Staging (each independently shippable + testable, risk increasing):**
+
+1. **`mount` (no arg) lists what's mounted, and `unmount`.** A new
+   `FSOP_MOUNT_INFO` returning the mounted format + partition (LBA/index) +
+   capacity (`fsd` already has `Filesystem::name()`), so `mount` with no
+   argument prints e.g. "exFAT on partition 1"; and `FSOP_UNMOUNT` drops the
+   mounted FS (`fs = None`) so the disk can be reformatted. Small, low-risk, and
+   foundational — you unmount before formatting, and mount-info is how you
+   confirm a format worked. **Do first.**
+2. **`partition` + `erase`.** `erase` zeroes the leading sectors (a `BLOCK_WRITE`
+   loop via `fsd`). `partition` writes a partition table — **MBR first**
+   (trivial: 4 entries + `0x55AA`), **GPT later** (the `scripts/mkgpt.py` logic
+   — protective MBR + primary/backup headers with CRC32s + entry array — in
+   Rust). New `FSOP_PARTITION`/`FSOP_ERASE`. Moderate.
+3. **`format` (mkfs) — FAT32 first.** The big one: create a filesystem from
+   scratch on a partition (BPB/FAT/root-dir for FAT32). It's essentially the
+   *inverse* of the read/write arcs, so each format is its own milestone the
+   size of a slice of the write work: **FAT32** (moderate), then **exFAT** (VBR
+   checksum + up-case table + allocation bitmap), then **ext2** (superblock +
+   group descriptors + block/inode bitmaps + inode table + root inode +
+   `lost+found`). New `FSOP_FORMAT(partition, fstype)`. High-risk (writes fresh
+   filesystem metadata), but onto a fresh partition, so no existing-data risk.
+   Validate each against the matching host `fsck`.
+4. **Deferred: a `/dev` namespace** — only if multi-disk addressing arrives; the
+   Plan 9 devfs direction.
+
+**Scale, honestly:** milestones 1–2 are small-to-moderate and land quickly;
+milestone 3 is a multi-step arc (one mkfs per filesystem), the mirror image of
+the read/write work already done. Start with mount-info/unmount for a fast,
+useful, foundational win.
+
 ## Standalone command binaries: `/bin`, PATH, and a shell environment (scoped)
 
 Today every command is a **shell builtin** compiled into `shell/src/main.rs`
