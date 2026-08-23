@@ -40,6 +40,19 @@
 
   <article>
 
+<h2>More filesystems, step 3: exFAT read-write</h2>
+
+<p>The exFAT arm is now read-write, built in four staged commits mirroring FAT32's own write arc (narrowest-useful-first, one tested commit per stage - the scoping lever the arc calls out, since all the corruption risk lives in writes).</p>
+
+<ul>
+<li><strong>Stage A - allocation + <code class="inline">touch</code>.</strong> The machinery, exercised by the lowest-risk op (touch allocates no clusters). Free clusters are tracked by an allocation <em>bitmap</em> (located at mount from root's <code class="inline">0x81</code> entry); created files/dirs are FAT-<em>chained</em> (<code class="inline">NoFatChain = 0</code>), so allocation parallels FAT32's <code class="inline">write_chain</code>. <code class="inline">build_entry_set</code> assembles a File (<code class="inline">0x85</code>) + Stream-Extension (<code class="inline">0xC0</code>) + File-Name (<code class="inline">0xC1</code>) set with the two required checksums - the whole-set <code class="inline">SetChecksum</code> and the up-cased <code class="inline">NameHash</code>.</li>
+<li><strong>Stage B - <code class="inline">write_file</code>/<code class="inline">write_at</code>.</strong> Data writing through the bitmap. <code class="inline">write_file</code> writes the new chain before touching the old; <code class="inline">write_at</code> is the streaming/append primitive (<code class="inline">cp</code>/<code class="inline">&gt;&gt;</code>/<code class="inline">writeat</code>), a contiguous file first converted to a chain so it can be extended.</li>
+<li><strong>Stage C - <code class="inline">mkdir</code>/<code class="inline">rm</code>/<code class="inline">rmdir</code>.</strong> exFAT directories have <em>no</em> <code class="inline">.</code>/<code class="inline">..</code> entries (unlike FAT32), so an empty one is just a zeroed cluster; deletion clears each entry's in-use bit (no <code class="inline">0xE5</code> tombstone).</li>
+<li><strong>Stage D - <code class="inline">mv</code>.</strong> Re-points a new set at the same clusters (no data copy), preserving the <code class="inline">NoFatChain</code> layout; no <code class="inline">..</code> fixup needed. The write surface is complete, so the arm reports "exFAT" and never returns <code class="inline">Error::ReadOnly</code>.</li>
+</ul>
+
+<p>Verified on QEMU (<code class="inline">make run-image-exfat</code>) at every stage, zero <code class="inline">-d int</code> aborts: create/overwrite/append, streaming <code class="inline">cp</code> of a 16 KB (four-cluster) binary, <code class="inline">mkdir</code> + writing a file inside it, <code class="inline">rm</code>/<code class="inline">rmdir</code> (non-empty refused), rename + cross-directory move + moving a whole directory - all read back correctly and persisted across reboots. <strong>Validated against a real driver throughout</strong>: macOS mounts the volume, the copied binary reads back <em>byte-identical</em>, and <code class="inline">fsck_exfat</code> reports the volume OK (active bitmap + hierarchy clean) after all the churn. FAT32 via <code class="inline">run-image</code> unregressed.</p>
+
 <h2>More filesystems, step 2: exFAT read-only</h2>
 
 <p>The first real exercise of step 1's <code class="inline">Filesystem</code> enum — a <em>second</em> on-disk format, driven through the same <code class="inline">FSOP_*</code> protocol clients already speak, so nothing above <code class="inline">fsd</code> changed. Read-only first, the arc's big scoping lever: FAT32's write support was phases 4–8, where every corruption risk lived, so a new format lands read-only as one milestone and read-write as a separate one.</p>

@@ -350,9 +350,20 @@ read-only as one milestone, read-write as a separate one.
    lifts the **real limitation** the USB-mass-storage milestone noted ("exFAT
    sticks won't mount — reformat FAT32"), at least for reads. See
    `CHANGELOG.md`'s "More filesystems, step 2."
-3. **exFAT, read-write.** Bitmap allocation, directory-entry-set writes —
-   the same "narrowest useful case, claim-before-use ordering" discipline
-   FAT32's write arc used.
+3. **exFAT, read-write — DONE.** Built in four staged commits mirroring FAT32's
+   write arc (allocation + `touch`; `write_file`/`write_at`; `mkdir`/`rm`/
+   `rmdir`; `mv`). Free clusters tracked by the allocation *bitmap*
+   (`alloc_cluster`/`bitmap_set`, located at mount); created files/dirs are
+   FAT-chained (`NoFatChain = 0`), so allocation parallels FAT32's `write_chain`.
+   Creating an entry (`create_entry`/`build_entry_set`) computes both required
+   checksums (whole-set `SetChecksum` + up-cased `NameHash`); deleting one
+   (`delete_set`) clears each entry's in-use bit. Same claim-before-use /
+   write-new-before-free discipline as the FAT32 arc. exFAT dirs have no `.`/`..`
+   (so an empty dir is a zeroed cluster, and `mv` of a directory needs no
+   fixup). Verified on QEMU per stage (zero aborts) and **against a real driver**:
+   macOS mounts the volume, a copied binary reads back byte-identical, and
+   `fsck_exfat` passes (bitmap + hierarchy clean) after create/write/rm/rmdir/mv
+   churn. See `CHANGELOG.md`'s "More filesystems, step 3."
 4. **ext2, read-only — the real VFS test.** ext2 is a genuinely *different*
    model (inode-based, block groups, direct/indirect block pointers, Unix
    permissions/owners/timestamps, hard links, symlinks) — which is exactly

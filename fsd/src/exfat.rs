@@ -1,9 +1,23 @@
-//! exFAT, read-only - the second on-disk format `fsd` understands, and the
+//! exFAT, read-write - the second on-disk format `fsd` understands, and the
 //! first real exercise of the [`Filesystem`](crate::vfs::Filesystem) enum's
-//! dispatch (until now FAT32 was the only arm). Read-only first, matching the
-//! big scoping lever the "more filesystems" roadmap arc calls out: FAT32's own
-//! write support was where every corruption risk lived (phases 4-8), so a new
-//! format lands read-only as one milestone and read-write as a separate one.
+//! dispatch (until now FAT32 was the only arm). Landed read-only first, then
+//! read-write in four staged commits (allocation + `touch`; `write_file`/
+//! `write_at`; `mkdir`/`rm`/`rmdir`; `mv`) - the big scoping lever the "more
+//! filesystems" roadmap arc calls out, since FAT32's own write support was where
+//! every corruption risk lived (phases 4-8).
+//!
+//! **Write model.** Free clusters are tracked by an allocation *bitmap*
+//! ([`Fs::alloc_cluster`]/[`Fs::bitmap_set`]), located at mount from the root's
+//! `0x81` entry. Files/directories we create are always FAT-*chained*
+//! (`NoFatChain = 0`), so allocation parallels FAT32's `write_chain` (bitmap-set
+//! + FAT-link) and the reader's [`Fs::advance`] walks the chain. Creating an
+//! entry ([`Fs::create_entry`]) builds a full set with both required checksums -
+//! the whole-set `SetChecksum` and the up-cased `NameHash`; deleting one
+//! ([`Fs::delete_set`]) clears each entry's in-use bit. Same corruption
+//! discipline as the FAT32 write arc: claim before use, write the new thing
+//! before freeing the old, validate names up front. Verified against a real
+//! driver end to end (macOS mounts + `fsck_exfat` passes; a copied binary reads
+//! back byte-identical).
 //!
 //! Same constraints as everything in `fsd`: hand-rolled, fixed-buffer, no
 //! `alloc`, sitting on [`Disk`]'s `BLOCK_*` syscall shim. No crates - a
@@ -15,7 +29,7 @@
 //! Structurally it's still a cluster filesystem - a partition, a FAT, a data
 //! region of fixed-size clusters - so the read *machinery* (cluster-to-LBA,
 //! chain walking, windowed reads) is the same shape as [`fat32`](crate::fat32).
-//! The genuinely different parts, and how a read-only driver handles each:
+//! The genuinely different parts, and how this driver handles each:
 //!
 //! - **The boot sector** is a different layout: field *shifts* (`log2` of the
 //!   sector and cluster sizes) instead of raw counts, and the FAT/cluster-heap
@@ -32,16 +46,12 @@
 //! - **Names are UTF-16, up to 255 chars** - no 8.3, no LFN checksum dance.
 //!   We render them ASCII (non-ASCII -> `?`), exactly as `fat32.rs` does for
 //!   its own long names, since the whole userland here is ASCII-only.
-//! - **An allocation *bitmap*** replaces FAT free-cluster scanning - but that's
-//!   a *write* concern (finding free clusters). A read-only driver never
-//!   allocates, so it ignores the bitmap directory entry (`0x81`) completely.
-//! - **An up-case table** (`0x82`) drives case-insensitive comparison per spec.
-//!   We approximate with ASCII case-folding ([`str::eq_ignore_ascii_case`],
-//!   what `fat32.rs` already uses) - correct for ASCII names, which is all this
-//!   system creates or reads; the table entry is ignored.
-//!
-//! Every write op returns [`Error::ReadOnly`]; see [`Fs::write_file`] and the
-//! siblings below.
+//! - **An allocation *bitmap*** replaces FAT free-cluster scanning: reads ignore
+//!   it entirely, writes drive it (see the write model above). The up-case table
+//!   (`0x82`) that would drive case-insensitive comparison per spec is ignored -
+//!   we approximate with ASCII case-folding ([`str::eq_ignore_ascii_case`], what
+//!   `fat32.rs` already uses), correct for the ASCII names this system uses, and
+//!   the same ASCII up-case feeds the `NameHash` we write.
 
 use crate::disk::Disk;
 use crate::fat32::{split_parent, Error};

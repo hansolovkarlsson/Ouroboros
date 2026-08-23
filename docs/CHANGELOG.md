@@ -7,6 +7,50 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/`; 
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## More filesystems, step 3: exFAT read-write
+
+The exFAT arm is now read-write, built in four staged commits mirroring FAT32's
+own write arc (narrowest-useful-first, one tested commit per stage - the
+scoping lever the arc calls out, since all the corruption risk lives in writes).
+
+- **Stage A - allocation + `touch`.** The machinery, exercised by the
+  lowest-risk op (touch allocates no clusters). Free clusters are tracked by an
+  allocation *bitmap* (located at mount from root's `0x81` entry);
+  `alloc_cluster`/`bitmap_set`/`free_data` manage it and keep it in sync with
+  the FAT. Newly-created files/dirs are always FAT-*chained* (`NoFatChain = 0`),
+  so allocation is the direct parallel of FAT32's `write_chain` (bitmap-set +
+  FAT-link). `build_entry_set` assembles a File (`0x85`) + Stream-Extension
+  (`0xC0`) + File-Name (`0xC1`) set with the two required checksums - the
+  whole-set `SetChecksum` and the up-cased `NameHash` - and `create_entry`
+  inserts it, growing the directory when full.
+- **Stage B - `write_file`/`write_at`.** Data writing, allocation through the
+  bitmap. `write_file` writes the new chain before touching the old (FAT32's
+  ordering); `write_at` is the streaming/append primitive (`cp`/`>>`/`writeat`),
+  a contiguous file first converted to a FAT chain so it can be extended.
+  `patch_stream_ext` updates an existing set's stream extension and recomputes
+  its `SetChecksum`.
+- **Stage C - `mkdir`/`rm`/`rmdir`.** exFAT directories have *no* `.`/`..`
+  entries (unlike FAT32), so an empty one is just a zeroed cluster. `delete_set`
+  clears the in-use bit on every entry of a set (no `0xE5` tombstone).
+- **Stage D - `mv`.** Re-points a new set at the same clusters (no data copy),
+  preserving the `NoFatChain` layout; no `..` fixup needed. The write surface is
+  complete, so the arm reports "exFAT" (not "read-only") and never returns
+  `Error::ReadOnly`.
+
+Verified on QEMU (`make run-image-exfat`) at every stage, zero `-d int` aborts:
+create/overwrite/append, streaming `cp` of a 16 KB (four-cluster) binary,
+`mkdir` + writing a file inside it, `rm`/`rmdir` (non-empty refused), rename +
+cross-directory move + moving a whole directory - all read back correctly and
+persisted across reboots. **Validated against a real driver throughout**: macOS
+mounts the volume, the copied binary reads back *byte-identical* to the
+original, and `fsck_exfat` reports the volume OK (active bitmap + file-system
+hierarchy clean) after all the allocate/free/rename churn - proof the
+`SetChecksum`, `NameHash`, bitmap, and FAT stay spec-correct. FAT32 via
+`run-image` unregressed.
+
+Next in the arc (see `roadmap.md`): ext2 read-only - the genuinely different
+(inode-based) model that makes the `Filesystem` abstraction prove itself.
+
 ## More filesystems, step 2: exFAT read-only
 
 The first real exercise of step 1's `Filesystem` enum — a *second* on-disk

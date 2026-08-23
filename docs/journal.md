@@ -7,7 +7,7 @@ for the forward plan see [`roadmap.md`](roadmap.md).
 
 ---
 
-## 2026-08-23 — exFAT, read-only: the Filesystem enum earns its keep
+## 2026-08-23 — exFAT, read then write: the Filesystem enum earns its keep
 
 Yesterday's filesystem arc left a `Filesystem` enum inside `fsd` with exactly
 one arm (FAT32) — a refactor that *claimed* to make a second format cheap.
@@ -49,6 +49,37 @@ via `run-image` unregressed.
 The recurring lesson, again: a parser is only tested if you can *build* it a
 valid input — the harness that produces the artifact is part of the feature,
 same as `mkgpt.py` was for the GPT parser yesterday.
+
+**Then, read-write — the harder half, in four staged commits.** With the reader
+proven, the write surface followed the same discipline the FAT32 write arc used:
+narrowest-useful-first, one tested-and-committed stage at a time. Stage A built
+the machinery (allocation bitmap + entry-set construction with both checksums)
+and exercised it with `touch`, which allocates nothing — the lowest-risk first
+cut. Stage B added `write_file`/`write_at` (cluster allocation + data). Stage C
+added `mkdir`/`rm`/`rmdir`. Stage D added `mv`.
+
+What made exFAT writes genuinely harder than FAT32's: free space is an
+allocation *bitmap*, not a scan-the-FAT-for-zeros; and creating a file means
+building a whole *entry set* (a File entry + a Stream-Extension entry + N
+File-Name entries) with two checksums the format requires — a `SetChecksum` over
+the entire set and a `NameHash` over the up-cased name. Get either wrong and a
+real driver rejects the file. What made it *easier* than expected: exFAT has no
+8.3/LFN mangling (names are just UTF-16, so no `make_short_name`), and no
+`.`/`..` directory entries (an empty dir is a zeroed cluster, and moving a
+directory needs no `..` fixup — the one hard step FAT32's `mv` couldn't skip).
+
+The decision that kept it simple: created files are always FAT-*chained*
+(`NoFatChain = 0`), never pure-contiguous, so allocation is the direct parallel
+of FAT32's `write_chain` (set the bitmap bit, link the FAT) and the reader's
+existing `advance()` walks them. A macOS-created *contiguous* file being appended
+to is the one case needing a convert-to-chain step first.
+
+The validation this time was better than any log line: macOS's own exFAT driver
+mounts the volume `fsd` wrote, a binary copied through `cp` reads back
+byte-identical, and `fsck_exfat` — a real filesystem checker — pronounces the
+bitmap and directory hierarchy clean after a full churn of creates, writes,
+deletes, and renames. When another vendor's checker signs off on your on-disk
+structures, the checksums are right.
 
 ## 2026-08-22 — the userland day: /bin, pipelines, and the filesystem arc begins
 
