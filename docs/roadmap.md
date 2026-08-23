@@ -364,16 +364,22 @@ read-only as one milestone, read-write as a separate one.
    macOS mounts the volume, a copied binary reads back byte-identical, and
    `fsck_exfat` passes (bitmap + hierarchy clean) after create/write/rm/rmdir/mv
    churn. See `CHANGELOG.md`'s "More filesystems, step 3."
-4. **ext2, read-only — the real VFS test.** ext2 is a genuinely *different*
-   model (inode-based, block groups, direct/indirect block pointers, Unix
-   permissions/owners/timestamps, hard links, symlinks) — which is exactly
-   what forces the `Filesystem` abstraction to be *real* (FAT and exFAT are
-   similar enough that a thin abstraction would do). ext2 is the tractable
-   Linux target; it's well-documented and has no journaling. It surfaces a
-   protocol question: `FSOP_*` is FAT-shaped (no permissions, no symlinks),
-   so a first read-only cut presents files and ignores metadata it doesn't
-   model — going further would grow the protocol (which a richer Plan 9
-   `/net`-style file interface would want anyway).
+4. **ext2, read-only — DONE.** The third filesystem arm (`fsd/src/ext2.rs`),
+   and the real test of the abstraction: a genuinely *different* (inode-based)
+   model driven through the unchanged `FSOP_*` protocol. Inodes own metadata (a
+   directory entry is just `name -> inode number`); block group descriptors
+   locate each group's inode table; `block_for` follows 12 direct + single/
+   double indirect block pointers (triple = EOF; a `0` pointer is a sparse
+   hole); names are **case-sensitive** (Unix), unlike FAT/exFAT. Read-only
+   (writes return `Error::ReadOnly`); the FAT-shaped `FSOP_*` presents
+   files/dirs and ignores Unix metadata it can't model (symlinks reported, not
+   followed). Tested on QEMU (`make run-image-ext2`, a two-partition disk from
+   `scripts/mkext2.py`: ext2 first so `fsd` mounts it, FAT32 ESP second so UEFI
+   boots; ext2 built with `e2fsprogs`' `mke2fs -d`, block size 1024 to exercise
+   single-indirect blocks, lowercase `/bin` since the shell probes as typed).
+   Confirmed: `ls`/`cat`, subdirs, `/bin` off ext2, a `grep | wc` pipeline,
+   case-sensitivity, and writes refused; zero aborts. See `CHANGELOG.md`'s
+   "More filesystems, step 4."
 5. **ext2, read-write.** Inode + block-bitmap allocation, directory record
    insertion — the highest corruption risk of the set, the phase-4–8
    discipline applied to a more complex on-disk structure.

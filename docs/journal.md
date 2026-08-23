@@ -7,7 +7,7 @@ for the forward plan see [`roadmap.md`](roadmap.md).
 
 ---
 
-## 2026-08-23 — exFAT, read then write: the Filesystem enum earns its keep
+## 2026-08-23 — the filesystems day: exFAT read+write, a cleanup, then ext2
 
 Yesterday's filesystem arc left a `Filesystem` enum inside `fsd` with exactly
 one arm (FAT32) — a refactor that *claimed* to make a second format cheap.
@@ -80,6 +80,41 @@ byte-identical, and `fsck_exfat` — a real filesystem checker — pronounces th
 bitmap and directory hierarchy clean after a full churn of creates, writes,
 deletes, and renames. When another vendor's checker signs off on your on-disk
 structures, the checksums are right.
+
+**Then two housekeeping passes, before the tree got unwieldy.** First, the ~26
+userland crates (which had piled up at the repo root) moved under a `programs/`
+tree grouped by role (`fileutils`, `textutils`, `netutils`, `shellutils`,
+`servers`, `demos`, plus `shell`) — a pure `git mv` (history preserved), and
+because crates build by package name, the Makefile needed *zero* edits; only the
+`path = "../..."` deps deepened. Second, every generated artifact (the `esp/`
+staging tree, the disk images, `net.pcap`, logs) moved under a single `build/`
+dir driven by one Makefile variable, so the repo root is source/docs/config
+only. We considered moving `kernel/` and the shared libs too, but left them —
+three top-level dirs isn't crowding, and `kernel/` at the root is the
+conventional, legible shape.
+
+**Then ext2, read-only — the arm that actually tests the abstraction.** FAT32
+and exFAT are the same shape (clusters, a FAT, a flat directory-entry list), so
+the `Filesystem` enum barely had to stretch. ext2 is a different world: inodes
+own the metadata and a directory entry is just `name -> inode number`, so path
+resolution bounces between directory blocks and the inode table; files are found
+through block-group descriptors; data blocks are reached through 12 direct
+pointers then single/double indirect pointer-blocks; and names are
+*case-sensitive*. Driving all of that through the **unchanged** `FSOP_*`
+protocol — nothing above `fsd` touched — is the proof the abstraction was real
+and not FAT-shaped in disguise.
+
+Two nice moments in bring-up. First, the reader worked on the first boot for
+`exec` and `cd`, but bare commands (`ls`) failed — which turned out *not* to be
+a reader bug: the shell probes `/bin/<command>` as typed (lowercase), and it had
+always relied on FAT/exFAT matching case-insensitively. ext2, correctly
+case-sensitive, wouldn't match lowercase `ls` against the uppercase `LS` I'd
+copied in. The fix wasn't in the reader at all — it was to give the ext2 image a
+*lowercase* `/bin`, which is the Unix convention anyway. The abstraction was
+faithfully surfacing ext2's semantics; my test image was the thing being
+un-Unix. Second, forcing the image's block size to 1024 meant the >12 KiB `/bin`
+binaries spilled past the 12 direct pointers into single-indirect blocks — so
+`exec /bin/CAT` was quietly exercising the indirection path from the first run.
 
 ## 2026-08-22 — the userland day: /bin, pipelines, and the filesystem arc begins
 

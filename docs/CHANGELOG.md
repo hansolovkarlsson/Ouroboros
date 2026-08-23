@@ -7,6 +7,60 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/`; 
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## More filesystems, step 4: ext2 read-only
+
+The third filesystem arm - and the one that actually *tests* the `Filesystem`
+abstraction. FAT32 and exFAT are the same shape (a partition, a FAT, a heap of
+clusters, a flat list of directory entries), so a thin enum sufficed. ext2 is a
+genuinely different model, and driving it through the **unchanged** `FSOP_*`
+protocol - nothing above `fsd` touched - is the proof the abstraction is real,
+not FAT-shaped in disguise.
+
+New `fsd/src/ext2.rs`. What's structurally new versus FAT:
+
+- **Inodes own the metadata; a directory entry is just `name -> inode number`.**
+  Resolving a path reads the directory's inode, walks its data blocks for the
+  name, gets an inode number, reads *that* inode, and repeats
+  (`read_inode`/`find`). Mode, size, and block pointers live in the inode, not
+  the directory entry.
+- **Block groups.** A block group descriptor table (right after the superblock)
+  records each group's inode table location; inode *N* is in group
+  `(N-1)/inodes_per_group` at index `(N-1) % inodes_per_group`.
+- **Direct + indirect block pointers.** An inode has 12 direct block pointers
+  then single / double / triple indirect (pointer blocks of pointer blocks).
+  `block_for` maps a file's logical block to a physical one, following one or
+  two indirection levels (triple is beyond the sizes here, treated as EOF); a
+  `0` pointer is a sparse hole, read as zeros.
+- **Case-sensitive names** (Unix), unlike FAT/exFAT's case-fold - `find` matches
+  exactly. Entries are variable-length `rec_len` records within the directory's
+  data blocks.
+
+Read-only (writes return `Error::ReadOnly`). The `FSOP_*` protocol is FAT-shaped
+(no permissions, owners, or symlinks), so this presents files and directories
+and ignores the Unix metadata it can't model; symlinks are reported but not
+followed. Root is always inode 2.
+
+Testing needed an ext2 disk that still boots. Same two-partition trick as exFAT
+(new `scripts/mkext2.py` + `make run-image-ext2`): the **ext2 partition first**
+(so `fsd` mounts it - the FAT32 *and* exFAT probes both fail, ext2 succeeds, the
+enum reaching its third arm) and the **FAT32 ESP second** (UEFI boots
+`BOOTAA64`). The ext2 image is built with Homebrew `e2fsprogs`' `mke2fs -d`
+(block size forced to 1024 so the >12 KiB `/bin` binaries spill into
+single-indirect blocks, exercising the indirection), with a **lowercase `/bin`**
+- ext2 is case-sensitive and the shell probes `/bin/<command>` as typed, unlike
+the FAT/exFAT images whose 8.3-heritage uppercase names only work because those
+filesystems match case-insensitively.
+
+Verified on QEMU, zero `-d int` aborts: `ls`/`cat`, subdirectories, `/bin`
+running off ext2, a `cat /README.TXT | grep line | wc` pipeline (`3 11 57`),
+**case-sensitivity** (`cat /CaseSensitive.txt` reads it, `/casesensitive.txt` is
+"no such file or directory" - the behaviour that would differ on FAT/exFAT), and
+`touch` refused "read-only filesystem". FAT32/exFAT unregressed.
+
+Next in the arc (see `roadmap.md`): ext2 read-write - inode + block-bitmap
+allocation and directory-record insertion, the highest corruption risk of the
+set.
+
 ## More filesystems, step 3: exFAT read-write
 
 The exFAT arm is now read-write, built in four staged commits mirroring FAT32's

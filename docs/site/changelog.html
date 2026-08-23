@@ -40,6 +40,23 @@
 
   <article>
 
+<h2>More filesystems, step 4: ext2 read-only</h2>
+
+<p>The third filesystem arm - and the one that actually <em>tests</em> the <code class="inline">Filesystem</code> abstraction. FAT32 and exFAT are the same shape (a partition, a FAT, a heap of clusters, a flat list of directory entries), so a thin enum sufficed. ext2 is a genuinely different model, and driving it through the <strong>unchanged</strong> <code class="inline">FSOP_*</code> protocol - nothing above <code class="inline">fsd</code> touched - is the proof the abstraction is real, not FAT-shaped in disguise.</p>
+
+<p>New <code class="inline">fsd/src/ext2.rs</code>. What's structurally new versus FAT:</p>
+
+<ul>
+<li><strong>Inodes own the metadata; a directory entry is just <code class="inline">name -&gt; inode number</code>.</strong> Resolving a path reads the directory's inode, walks its data blocks for the name, gets an inode number, reads <em>that</em> inode, and repeats. Mode, size, and block pointers live in the inode.</li>
+<li><strong>Block groups.</strong> A block group descriptor table (after the superblock) records each group's inode table; inode <em>N</em> is in group <code class="inline">(N-1)/inodes_per_group</code> at index <code class="inline">(N-1) % inodes_per_group</code>.</li>
+<li><strong>Direct + indirect block pointers.</strong> 12 direct then single/double/triple indirect (pointer blocks of pointer blocks); <code class="inline">block_for</code> follows one or two indirection levels (triple = EOF). A <code class="inline">0</code> pointer is a sparse hole, read as zeros.</li>
+<li><strong>Case-sensitive names</strong> (Unix), unlike FAT/exFAT's case-fold - <code class="inline">find</code> matches exactly. Entries are variable-length <code class="inline">rec_len</code> records.</li>
+</ul>
+
+<p>Read-only (writes return <code class="inline">Error::ReadOnly</code>). The <code class="inline">FSOP_*</code> protocol is FAT-shaped, so this presents files/dirs and ignores the Unix metadata it can't model; symlinks are reported but not followed. Root is inode 2.</p>
+
+<p>Tested via the same two-partition trick as exFAT (new <code class="inline">scripts/mkext2.py</code> + <code class="inline">make run-image-ext2</code>): ext2 partition first (so <code class="inline">fsd</code> mounts it - FAT32 <em>and</em> exFAT probes both fail, ext2 succeeds), FAT32 ESP second (UEFI boots). The ext2 image is built with Homebrew <code class="inline">e2fsprogs</code>' <code class="inline">mke2fs -d</code> (block size 1024 so the &gt;12 KiB <code class="inline">/bin</code> binaries exercise single-indirect blocks), with a <strong>lowercase <code class="inline">/bin</code></strong> - ext2 is case-sensitive and the shell probes <code class="inline">/bin/&lt;command&gt;</code> as typed. Verified on QEMU, zero <code class="inline">-d int</code> aborts: <code class="inline">ls</code>/<code class="inline">cat</code>, subdirectories, <code class="inline">/bin</code> off ext2, a <code class="inline">cat | grep | wc</code> pipeline, case-sensitivity (<code class="inline">cat /CaseSensitive.txt</code> reads it, <code class="inline">/casesensitive.txt</code> is "no such file"), and <code class="inline">touch</code> refused read-only. FAT32/exFAT unregressed.</p>
+
 <h2>More filesystems, step 3: exFAT read-write</h2>
 
 <p>The exFAT arm is now read-write, built in four staged commits mirroring FAT32's own write arc (narrowest-useful-first, one tested commit per stage - the scoping lever the arc calls out, since all the corruption risk lives in writes).</p>
