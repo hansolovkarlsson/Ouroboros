@@ -28,7 +28,7 @@ pub enum Filesystem {
     Fat32(fat32::Fs),
     /// exFAT, read-write (see [`exfat`]).
     ExFat(exfat::Fs),
-    /// ext2, read-only (see [`ext2`]). Writes return [`Error::ReadOnly`].
+    /// ext2, read-write (see [`ext2`]).
     Ext2(ext2::Fs),
 }
 
@@ -66,7 +66,7 @@ impl Filesystem {
         match self {
             Filesystem::Fat32(_) => "FAT32",
             Filesystem::ExFat(_) => "exFAT",
-            Filesystem::Ext2(_) => "ext2 (read-only)",
+            Filesystem::Ext2(_) => "ext2",
         }
     }
 

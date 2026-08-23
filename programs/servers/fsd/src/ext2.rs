@@ -1,13 +1,24 @@
-//! ext2, read-only - the third on-disk format `fsd` understands, and the one
+//! ext2, read-write - the third on-disk format `fsd` understands, and the one
 //! that actually tests the [`Filesystem`](crate::vfs::Filesystem) abstraction.
 //! FAT32 and exFAT are the *same shape* (a partition, a FAT, a heap of clusters,
 //! directory entries in a flat list), so a thin enum sufficed. ext2 is a
 //! genuinely different model - and driving it through the unchanged `FSOP_*`
 //! protocol is the proof the abstraction is real, not FAT-shaped in disguise.
+//! Landed read-only first, then read-write in four staged commits (allocation +
+//! `touch`; `write_file`/`write_at`; `mkdir`/`rm`/`rmdir`; `mv`).
 //!
 //! Same constraints as everything in `fsd`: hand-rolled, fixed-buffer, no
-//! `alloc`, on [`Disk`]'s `BLOCK_*` syscall shim. Read-only first, the arc's
-//! discipline (write is a separate, higher-risk milestone).
+//! `alloc`, on [`Disk`]'s `BLOCK_*` syscall shim.
+//!
+//! **Write model.** Allocation is bitmap-based: each block group has a block
+//! bitmap and an inode bitmap, and every allocation keeps the free counts in the
+//! group descriptor *and* the superblock consistent (e2fsck checks all three).
+//! Files use direct + single/double indirect block pointers ([`Fs::ensure_block`]);
+//! directories track link counts (`mkdir` bumps the parent, `rmdir` decrements
+//! it) and `bg_used_dirs_count`. A freed inode gets links 0 + a plausible
+//! `i_dtime` (a small value is misread by e2fsck as an orphan-list pointer).
+//! Same claim-before-use / write-new-before-free discipline as the FAT arcs;
+//! validated end to end with e2fsck (clean) and debugfs (byte-identical reads).
 //!
 //! # The ext2 model, versus FAT
 //!
@@ -30,11 +41,10 @@
 //!   matches exactly. Directory entries are a linked list of variable-length
 //!   records (`rec_len`) within the directory's data blocks.
 //!
-//! **Scope of this read-only cut.** The `FSOP_*` protocol is FAT-shaped (no
-//! permissions, owners, or symlinks), so this presents files and directories
-//! and ignores the Unix metadata it can't model. Symlinks (mode `0xA000`) are
-//! reported as entries but not followed. Every write op returns
-//! [`Error::ReadOnly`]. Root is always inode 2.
+//! **Scope.** The `FSOP_*` protocol is FAT-shaped (no permissions, owners, or
+//! symlinks), so this presents files and directories and ignores the Unix
+//! metadata it can't model - created entries get fixed 0644/0755 modes, and
+//! symlinks are reported but not followed. Root is always inode 2.
 
 use crate::disk::Disk;
 use crate::fat32::{split_parent, Error};
@@ -1188,8 +1198,72 @@ impl Fs {
         self.write_int_at(inode_byte + 20, DELETION_TIME, 4)
     }
 
-    pub fn mv(&mut self, _src: &str, _dst: &str) -> Result<(), Error> {
-        Err(Error::ReadOnly)
+    /// Point directory `dir`'s `..` entry at `new_parent` (after a
+    /// cross-directory move). The `..` is a real entry in the dir's first block.
+    fn set_dotdot(&mut self, dir: &Inode, new_parent: u32) -> Result<(), Error> {
+        let bs = self.block_size as usize;
+        let phys = self.block_for(dir, 0)?;
+        if phys == 0 {
+            return Ok(());
+        }
+        let mut buf = [0u8; MAX_BLOCK_SIZE];
+        self.read_block(phys, &mut buf[..bs])?;
+        let mut off = 0usize;
+        while off + 8 <= bs {
+            let rec_len = u16::from_le_bytes([buf[off + 4], buf[off + 5]]) as usize;
+            let nl = buf[off + 6] as usize;
+            if rec_len < 8 || off + rec_len > bs {
+                break;
+            }
+            if nl == 2 && &buf[off + 8..off + 10] == b".." {
+                buf[off..off + 4].copy_from_slice(&new_parent.to_le_bytes());
+                self.write_block(phys, &buf[..bs])?;
+                return Ok(());
+            }
+            off += rec_len;
+        }
+        Ok(())
+    }
+
+    /// Rename or move a file/directory. `dst` must not already exist. Re-points
+    /// a new directory entry at `src`'s inode (no data copy) then unlinks the old
+    /// entry (write-new-before-delete). For a directory moved to a *different*
+    /// parent, fixes its `..` and moves the parent-link-count contribution.
+    pub fn mv(&mut self, src: &str, dst: &str) -> Result<(), Error> {
+        let (sp_path, s_name) = split_parent(src).ok_or(Error::InvalidName)?;
+        let (dp_path, d_name) = split_parent(dst).ok_or(Error::InvalidName)?;
+        let (sp_ino, mut sp) = self.resolve(sp_path)?;
+        if !sp.is_dir() {
+            return Err(Error::NotADirectory);
+        }
+        let (dp_ino, mut dp) = self.resolve(dp_path)?;
+        if !dp.is_dir() {
+            return Err(Error::NotADirectory);
+        }
+        let (s_ino, s_mode) = self.lookup_in(&sp, s_name)?.ok_or(Error::NotFound)?;
+        if self.lookup_in(&dp, d_name)?.is_some() {
+            return Err(Error::AlreadyExists);
+        }
+        let is_dir = s_mode & S_IFMT == S_IFDIR;
+        let ftype = if is_dir { FT_DIR } else { FT_REG };
+
+        if sp_ino == dp_ino {
+            // Rename within one directory - operate on a single parent struct.
+            self.insert_dirent(dp_ino, &mut dp, d_name, s_ino, ftype)?;
+            self.remove_dirent(&dp, s_name)
+        } else {
+            self.insert_dirent(dp_ino, &mut dp, d_name, s_ino, ftype)?;
+            self.remove_dirent(&sp, s_name)?;
+            if is_dir {
+                let moved = self.read_inode(s_ino)?;
+                self.set_dotdot(&moved, dp_ino)?; // ".." now points at the new parent
+                dp.links += 1;
+                sp.links -= 1;
+                self.write_inode(dp_ino, &dp)?;
+                self.write_inode(sp_ino, &sp)?;
+            }
+            Ok(())
+        }
     }
 }
 
