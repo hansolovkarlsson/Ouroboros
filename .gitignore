@@ -2,6 +2,9 @@
 /esp
 /esp.img
 /espgpt.img
+/espexfat.img
+/exfatpart.img
+/exfat-src/
 /esp.cdr
 /esp.dmg
 /esp.hdd

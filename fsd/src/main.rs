@@ -31,6 +31,7 @@
 #![no_main]
 
 mod disk;
+mod exfat;
 mod fat32;
 mod partition;
 mod vfs;
@@ -93,11 +94,13 @@ fn try_mount(fs: &mut Option<vfs::Filesystem>) {
     }
     match vfs::Filesystem::mount(disk::Disk) {
         Ok(mounted) => {
+            print("fsd: ");
+            print(mounted.name());
+            print(" mounted, disk commands available\r\n");
             *fs = Some(mounted);
-            print("fsd: FAT32 mounted, disk commands available\r\n");
         }
         Err(e) => {
-            print("fsd: FAT32 mount failed (");
+            print("fsd: mount failed (");
             print(error_name(&e));
             print(") - disk commands won't work\r\n");
         }
@@ -388,9 +391,11 @@ fn error_code(e: &fat32::Error) -> u64 {
         fat32::Error::DirectoryNotEmpty => syscall_abi::FS_ERR_NOT_EMPTY,
         fat32::Error::CannotRemoveRoot => syscall_abi::FS_ERR_IS_ROOT,
         fat32::Error::DiskFull => syscall_abi::FS_ERR_DISK_FULL,
+        fat32::Error::ReadOnly => syscall_abi::FS_ERR_READ_ONLY,
         fat32::Error::Io(_)
         | fat32::Error::NoFat32Partition
         | fat32::Error::NotFat32
+        | fat32::Error::NotExFat
         | fat32::Error::InvalidOffset
         | fat32::Error::UnsupportedSectorSize(_) => syscall_abi::FS_ERR_IO,
     }
@@ -401,8 +406,10 @@ fn error_code(e: &fat32::Error) -> u64 {
 /// `core::fmt`, and a static string table is leaner).
 fn error_name(e: &fat32::Error) -> &'static str {
     match e {
-        fat32::Error::NoFat32Partition => "no FAT32 partition in the MBR",
+        fat32::Error::NoFat32Partition => "no mountable partition on the disk",
         fat32::Error::NotFat32 => "partition is not FAT32",
+        fat32::Error::NotExFat => "partition is not exFAT",
+        fat32::Error::ReadOnly => "read-only filesystem",
         fat32::Error::UnsupportedSectorSize(_) => "unsupported sector size",
         fat32::Error::Io(_) => "disk I/O error",
         fat32::Error::NotFound => "not found",

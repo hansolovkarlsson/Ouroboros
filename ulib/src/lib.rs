@@ -558,6 +558,7 @@ pub fn fs_error(cmd: &str, code: u64) {
         syscall_abi::FS_ERR_NOT_EMPTY => b"directory not empty",
         syscall_abi::FS_ERR_IS_ROOT => b"can't remove the root directory",
         syscall_abi::FS_ERR_DISK_FULL => b"disk full",
+        syscall_abi::FS_ERR_READ_ONLY => b"read-only filesystem",
         syscall_abi::FS_ERR_IO => b"device I/O error",
         _ => b"failed",
     };

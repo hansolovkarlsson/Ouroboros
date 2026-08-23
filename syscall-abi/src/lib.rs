@@ -915,6 +915,13 @@ pub const SAFECOPY_ERR: u64 = u64::MAX - 27;
 /// the enforcement backstop against an unauthorized send.
 pub const MSG_ERR_DENIED: u64 = u64::MAX - 28;
 
+/// A write op (`FSOP_MKDIR`/`RMDIR`/`TOUCH`/`RM`/`MV`/`WRITE_*`) was
+/// refused because the mounted filesystem is read-only. Today only the
+/// exFAT arm returns it (read-only support - writes are a later
+/// milestone, the same read-first/write-later split FAT32 followed);
+/// FAT32 is fully read-write and never does.
+pub const FS_ERR_READ_ONLY: u64 = u64::MAX - 29;
+
 /// Floor of the reserved error band (with headroom for future codes):
 /// **any error-capable syscall's return value `>= FS_ERR_MIN` is an
 /// error**, everything below is a real result. The predicate callers

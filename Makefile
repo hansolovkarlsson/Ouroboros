@@ -89,7 +89,7 @@ ifeq ($(PROFILE),release)
 CARGO_FLAGS += --release
 endif
 
-.PHONY: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin ping-bin resolve-bin fetch-bin wc-bin grep-bin head-bin esp run run-virtio-console run-usb-kbd run-usb-multi run-gicv3 image run-image image-gpt run-image-gpt parallels-hdd test-parallels clean
+.PHONY: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin ping-bin resolve-bin fetch-bin wc-bin grep-bin head-bin esp run run-virtio-console run-usb-kbd run-usb-multi run-gicv3 image run-image image-gpt run-image-gpt image-exfat run-image-exfat parallels-hdd test-parallels clean
 
 # Overridable by `make test-parallels VM_NAME=... CMDS=... BOOT_WAIT=...`.
 VM_NAME     ?= Ouroboros
@@ -489,6 +489,51 @@ run-image-gpt: image-gpt
 		-m 512M \
 		-bios $(OVMF) \
 		-drive file=espgpt.img,format=raw,if=none,id=hd0 \
+		-device virtio-blk-device,drive=hd0 \
+		-global virtio-mmio.force-legacy=false \
+		-nographic
+
+# exfatpart.img: a raw exFAT filesystem holding /bin (the externalized commands,
+# so the shell can run them off exFAT) plus a few test files, built with macOS's
+# newfs_exfat (hdiutil can't make exFAT). This is the payload scripts/mkexfat.py
+# drops into the exFAT partition of the combined disk. For testing the exFAT
+# reader (fsd/src/exfat.rs, the more-filesystems arc's read-only exFAT step).
+exfatpart.img: esp
+	rm -rf exfat-src && mkdir -p exfat-src/bin
+	cp $(ESP_DIR)/bin/* exfat-src/bin/
+	printf 'hello from an exFAT volume\r\n' > exfat-src/HELLO.TXT
+	printf 'line one\r\nline two has several words\r\nthird and final line\r\n' > exfat-src/README.TXT
+	mkdir -p exfat-src/SUB
+	printf 'a nested file on exFAT\r\n' > exfat-src/SUB/NESTED.TXT
+	printf 'this exercises a long UTF-16 name\r\n' > "exfat-src/a-long-exfat-name.txt"
+	rm -f exfatpart.img
+	dd if=/dev/zero of=exfatpart.img bs=1m count=24 2>/dev/null
+	DEV=$$(hdiutil attach -nomount -imagekey diskimage-class=CRawDiskImage exfatpart.img | head -1 | awk '{print $$1}'); \
+	newfs_exfat -v OUROEXFAT "$$DEV" >/dev/null; \
+	diskutil mount "$$DEV" >/dev/null; \
+	MP=$$(diskutil info "$$DEV" | awk -F': *' '/Mount Point/{print $$2}'); \
+	cp -R exfat-src/. "$$MP/"; \
+	find "$$MP" -name '._*' -delete; rm -rf "$$MP/.fseventsd" "$$MP/.Trashes" "$$MP/.Spotlight-V100"; \
+	diskutil unmount "$$DEV" >/dev/null; hdiutil detach "$$DEV" >/dev/null
+	rm -rf exfat-src
+
+# espexfat.img: a two-partition MBR disk - partition 1 exFAT (fsd mounts it),
+# partition 2 the FAT32 ESP (UEFI boots it). See scripts/mkexfat.py for why the
+# exFAT partition must come first. Exercises fsd's Filesystem-enum fallthrough
+# (FAT32 probe fails on the exFAT partition, exFAT probe succeeds).
+image-exfat: image exfatpart.img
+	python3 scripts/mkexfat.py
+
+# Boot the combined disk: UEFI boots BOOTAA64 from the FAT32 ESP (partition 2),
+# then fsd mounts the exFAT partition (partition 1) - so `ls`/`cat`/pipelines
+# all read from exFAT (their /bin binaries live there too).
+run-image-exfat: image-exfat
+	qemu-system-aarch64 \
+		-machine virt \
+		-cpu cortex-a72 \
+		-m 512M \
+		-bios $(OVMF) \
+		-drive file=espexfat.img,format=raw,if=none,id=hd0 \
 		-device virtio-blk-device,drive=hd0 \
 		-global virtio-mmio.force-legacy=false \
 		-nographic

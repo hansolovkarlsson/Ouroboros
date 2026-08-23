@@ -55,6 +55,14 @@ const MAX_GAP_FILL: u64 = 1 << 20;
 pub enum Error {
     NoFat32Partition,
     NotFat32,
+    /// The probed partition isn't an exFAT volume either - the exFAT arm's
+    /// analogue of [`NotFat32`], so `vfs::mount` can try the next partition.
+    NotExFat,
+    /// A write was attempted on a read-only filesystem (the exFAT arm, whose
+    /// write support is a later milestone). FAT32 is fully read-write and
+    /// never returns this. This is the shared `Error` type for every
+    /// filesystem arm (see `vfs.rs`), so it lives here with the rest.
+    ReadOnly,
     UnsupportedSectorSize(u16),
     Io(DiskError),
     NotFound,
