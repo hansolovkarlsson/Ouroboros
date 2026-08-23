@@ -25,7 +25,7 @@ pub use crate::fat32::Error;
 /// A mounted filesystem, whatever its on-disk format.
 pub enum Filesystem {
     Fat32(fat32::Fs),
-    /// exFAT, read-only (see [`exfat`]). Writes return [`Error::ReadOnly`].
+    /// exFAT, read-write (see [`exfat`]).
     ExFat(exfat::Fs),
 }
 
@@ -59,7 +59,7 @@ impl Filesystem {
     pub fn name(&self) -> &'static str {
         match self {
             Filesystem::Fat32(_) => "FAT32",
-            Filesystem::ExFat(_) => "exFAT (read-only)",
+            Filesystem::ExFat(_) => "exFAT",
         }
     }
 

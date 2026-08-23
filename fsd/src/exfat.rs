@@ -778,6 +778,7 @@ impl Fs {
     /// shared by `touch`/`mkdir`/`write_file`/`mv`. `data_len` is the file's
     /// size (or a directory's allocated size); `first_cluster` its first cluster
     /// (`0` for an empty file).
+    #[allow(clippy::too_many_arguments)] // a directory target + a full entry description
     fn create_entry(
         &mut self,
         dir_cluster: u32,
@@ -786,10 +787,11 @@ impl Fs {
         is_dir: bool,
         first_cluster: u32,
         data_len: u64,
+        data_contiguous: bool,
     ) -> Result<(), Error> {
         let mut set = [0u8; MAX_SET_BYTES];
-        let entries =
-            build_entry_set(name, is_dir, first_cluster, data_len, &mut set).ok_or(Error::InvalidName)?;
+        let entries = build_entry_set(name, is_dir, first_cluster, data_len, data_contiguous, &mut set)
+            .ok_or(Error::InvalidName)?;
         let total_bytes = entries * ENTRY_SIZE;
         let start = self.find_free_run(dir_cluster, dir_contiguous, entries)?;
         self.write_set_at(dir_cluster, dir_contiguous, start, &set[..total_bytes])
@@ -973,7 +975,7 @@ impl Fs {
             ExistingKind::Dir => return Err(Error::NotAFile),
             ExistingKind::None => {}
         }
-        self.create_entry(dir_cluster, dir_contig, name, false, 0, 0)
+        self.create_entry(dir_cluster, dir_contig, name, false, 0, 0, false)
     }
 
     /// Create a file with exactly `data`, or fully replace an existing file's
@@ -1019,6 +1021,7 @@ impl Fs {
                 false,
                 new_cluster,
                 data.len() as u64,
+                false,
             ),
         }
     }
@@ -1155,7 +1158,7 @@ impl Fs {
         let new_cluster = self.alloc_cluster()?;
         self.zero_cluster(new_cluster)?;
         let cluster_bytes = self.sectors_per_cluster as u64 * SECTOR_SIZE as u64;
-        self.create_entry(dir_cluster, dir_contig, name, true, new_cluster, cluster_bytes)
+        self.create_entry(dir_cluster, dir_contig, name, true, new_cluster, cluster_bytes, false)
     }
 
     /// Remove a file (rejects a directory with `NotAFile`). Frees its clusters
@@ -1207,10 +1210,46 @@ impl Fs {
         self.delete_set(parent.first_cluster, parent.contiguous, slot, len)
     }
 
-    // ---- write surface: still read-only (later stages) ----------------------
+    /// Rename or move a file/directory. `dst` must not already exist. Re-points
+    /// a new entry set at `src`'s existing clusters (no data copy), preserving
+    /// its `NoFatChain` layout, then deletes `src`'s set - write-new-before-
+    /// delete-old ordering. exFAT has no `..` entry, so a moved directory needs
+    /// no fixup (unlike FAT32's `mv`).
+    pub fn mv(&mut self, src: &str, dst: &str) -> Result<(), Error> {
+        let (src_parent_path, src_name) = split_parent(src).ok_or(Error::InvalidName)?;
+        let (dst_parent_path, dst_name) = split_parent(dst).ok_or(Error::InvalidName)?;
 
-    pub fn mv(&mut self, _src: &str, _dst: &str) -> Result<(), Error> {
-        Err(Error::ReadOnly)
+        let src_parent = self.find(src_parent_path)?;
+        if !src_parent.is_dir {
+            return Err(Error::NotADirectory);
+        }
+        let dst_parent = self.find(dst_parent_path)?;
+        if !dst_parent.is_dir {
+            return Err(Error::NotADirectory);
+        }
+
+        let (src_entry, src_slot, src_len) = self
+            .find_in_parent(src_parent.first_cluster, src_parent.contiguous, src_parent.size, src_name)?
+            .ok_or(Error::NotFound)?;
+
+        if self
+            .find_in_parent(dst_parent.first_cluster, dst_parent.contiguous, dst_parent.size, dst_name)?
+            .is_some()
+        {
+            return Err(Error::AlreadyExists);
+        }
+
+        // Link dst to the same clusters first, then unlink src.
+        self.create_entry(
+            dst_parent.first_cluster,
+            dst_parent.contiguous,
+            dst_name,
+            src_entry.is_dir,
+            src_entry.first_cluster,
+            src_entry.size,
+            src_entry.contiguous,
+        )?;
+        self.delete_set(src_parent.first_cluster, src_parent.contiguous, src_slot, src_len)
     }
 }
 
@@ -1294,6 +1333,7 @@ fn build_entry_set(
     is_dir: bool,
     first_cluster: u32,
     data_len: u64,
+    contiguous: bool,
     buf: &mut [u8; MAX_SET_BYTES],
 ) -> Option<usize> {
     let mut name16 = [0u16; LONG_NAME_MAX];
@@ -1314,7 +1354,7 @@ fn build_entry_set(
     // Stream extension (0xC0).
     let se = ENTRY_SIZE;
     buf[se] = ET_STREAM_EXT;
-    buf[se + 1] = SECONDARY_ALLOC_POSSIBLE; // FAT-chained (NoFatChain clear)
+    buf[se + 1] = SECONDARY_ALLOC_POSSIBLE | if contiguous { NO_FAT_CHAIN } else { 0 };
     buf[se + 3] = name_len as u8;
     buf[se + 4..se + 6].copy_from_slice(&name_hash(&name16[..name_len]).to_le_bytes());
     buf[se + 8..se + 16].copy_from_slice(&data_len.to_le_bytes()); // ValidDataLength
