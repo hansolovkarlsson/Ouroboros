@@ -7,6 +7,34 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/`; 
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## Multi-stage pipelines, step 6: real `/bin` filters (`grep`/`wc`/`head`) — arc complete
+
+The payoff, and the last step of the pipeline arc: three real filter programs so
+pipelines are genuinely useful, not just a mechanism demo. Each is a small
+`ulib` filter following the `upper` shape (stdin via a new `ulib::pipe_recv`,
+output to the stdout target so it chains, end-of-stream + exit on EOF).
+
+- `wc` — counts lines/words/bytes of its stdin (byte-streaming, no line buffer)
+  and prints `<lines> <words> <bytes>`.
+- `grep <pattern>` — prints the stdin lines containing `pattern` (a plain
+  substring, hand-rolled `contains`, no regex); line-buffered, since stdin
+  arrives in arbitrary chunks.
+- `head [N]` — prints the first `N` lines (default 10), then signals
+  end-of-stream and exits early (the upstream producer's next send fails
+  harmlessly via `pipe_out`'s bounded retry).
+- `ulib::pipe_recv` factors out the filter's stdin read (the read half of the
+  shape whose write half is `write_out`).
+
+Verified on QEMU (run-image), zero `-d int` aborts: `echo one two three | wc` →
+`1 3 15`; `ls /bin | wc` → `22 22 110`; `ls /bin | head 3` → the first three
+entries; `ls /bin | grep CAT` → `CAT`; **`ls /bin | grep C | wc` → `7 7 33`**
+(three stages: list → filter → count); **`cat /g.txt | grep find | upper` →
+`FINDME IN HERE`** (list → filter → transform); `grep nomatch` → nothing.
+
+**The multi-stage-pipeline arc is complete:** a chainable filter shape, N-stage
+parsing, argv and PATH on every stage, per-link delegation plumbing, and a real
+set of filters. The classic `cat FILE | grep x | wc` works.
+
 ## Multi-stage pipelines: N-stage `a | b | c` with argv and PATH
 
 Steps 2–5 of the pipeline arc, together — the two-stage pipe becomes a real

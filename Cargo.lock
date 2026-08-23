@@ -88,6 +88,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "grep"
+version = "0.1.0"
+dependencies = [
+ "syscall-abi",
+ "ulib",
+]
+
+[[package]]
+name = "head"
+version = "0.1.0"
+dependencies = [
+ "syscall-abi",
+ "ulib",
+]
+
+[[package]]
 name = "hello"
 version = "0.1.0"
 dependencies = [
@@ -334,6 +350,14 @@ dependencies = [
 
 [[package]]
 name = "uptime"
+version = "0.1.0"
+dependencies = [
+ "syscall-abi",
+ "ulib",
+]
+
+[[package]]
+name = "wc"
 version = "0.1.0"
 dependencies = [
  "syscall-abi",

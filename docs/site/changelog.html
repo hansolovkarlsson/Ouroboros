@@ -40,6 +40,21 @@
 
   <article>
 
+<h2>Multi-stage pipelines, step 6: real <code class="inline">/bin</code> filters (<code class="inline">grep</code>/<code class="inline">wc</code>/<code class="inline">head</code>) — arc complete</h2>
+
+<p>The payoff, and the last step of the pipeline arc: three real filter programs so pipelines are genuinely useful, not just a mechanism demo. Each is a small <code class="inline">ulib</code> filter following the <code class="inline">upper</code> shape (stdin via a new <code class="inline">ulib::pipe_recv</code>, output to the stdout target so it chains, end-of-stream + exit on EOF).</p>
+
+<ul>
+<li><code class="inline">wc</code> — counts lines/words/bytes of its stdin (byte-streaming) and prints <code class="inline">&lt;lines&gt; &lt;words&gt; &lt;bytes&gt;</code>.</li>
+<li><code class="inline">grep &lt;pattern&gt;</code> — prints the stdin lines containing <code class="inline">pattern</code> (a plain substring, hand-rolled, no regex); line-buffered.</li>
+<li><code class="inline">head [N]</code> — prints the first <code class="inline">N</code> lines (default 10), then signals end-of-stream and exits early (the upstream producer's next send fails harmlessly).</li>
+<li><code class="inline">ulib::pipe_recv</code> factors out the filter's stdin read (the read half of the shape whose write half is <code class="inline">write_out</code>).</li>
+</ul>
+
+<p>Verified on QEMU (run-image), zero <code class="inline">-d int</code> aborts: <code class="inline">echo one two three | wc</code> → <code class="inline">1 3 15</code>; <code class="inline">ls /bin | wc</code> → <code class="inline">22 22 110</code>; <code class="inline">ls /bin | head 3</code> → the first three entries; <code class="inline">ls /bin | grep CAT</code> → <code class="inline">CAT</code>; <strong><code class="inline">ls /bin | grep C | wc</code> → <code class="inline">7 7 33</code></strong> (three stages); <strong><code class="inline">cat /g.txt | grep find | upper</code> → <code class="inline">FINDME IN HERE</code></strong> (list → filter → transform); <code class="inline">grep nomatch</code> → nothing.</p>
+
+<p><strong>The multi-stage-pipeline arc is complete:</strong> a chainable filter shape, N-stage parsing, argv and PATH on every stage, per-link delegation plumbing, and a real set of filters. The classic <code class="inline">cat FILE | grep x | wc</code> works.</p>
+
 <h2>Multi-stage pipelines: N-stage <code class="inline">a | b | c</code> with argv and PATH</h2>
 
 <p>Steps 2–5 of the pipeline arc, together — the two-stage pipe becomes a real N-stage pipeline of standalone programs. <code class="inline">echo hello | upper | upper</code> and <code class="inline">cat FILE | upper</code> now work: bare names, arguments on any stage, and a chain as long as the spawnable slots allow (five).</p>

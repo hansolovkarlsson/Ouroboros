@@ -61,6 +61,12 @@ WRITEAT_ELF  := target/$(USER_TARGET)/release/writeat
 WRITEAT_BIN  := target/$(USER_TARGET)/release/writeat.bin
 PING_ELF     := target/$(USER_TARGET)/release/ping
 PING_BIN     := target/$(USER_TARGET)/release/ping.bin
+WC_ELF       := target/$(USER_TARGET)/release/wc
+WC_BIN       := target/$(USER_TARGET)/release/wc.bin
+GREP_ELF     := target/$(USER_TARGET)/release/grep
+GREP_BIN     := target/$(USER_TARGET)/release/grep.bin
+HEAD_ELF     := target/$(USER_TARGET)/release/head
+HEAD_BIN     := target/$(USER_TARGET)/release/head.bin
 RESOLVE_ELF  := target/$(USER_TARGET)/release/resolve
 RESOLVE_BIN  := target/$(USER_TARGET)/release/resolve.bin
 FETCH_ELF    := target/$(USER_TARGET)/release/fetch
@@ -83,7 +89,7 @@ ifeq ($(PROFILE),release)
 CARGO_FLAGS += --release
 endif
 
-.PHONY: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin ping-bin resolve-bin fetch-bin esp run run-virtio-console run-usb-kbd run-usb-multi run-gicv3 image run-image parallels-hdd test-parallels clean
+.PHONY: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin ping-bin resolve-bin fetch-bin wc-bin grep-bin head-bin esp run run-virtio-console run-usb-kbd run-usb-multi run-gicv3 image run-image parallels-hdd test-parallels clean
 
 # Overridable by `make test-parallels VM_NAME=... CMDS=... BOOT_WAIT=...`.
 VM_NAME     ?= Ouroboros
@@ -204,6 +210,18 @@ ping-bin:
 	cargo build -p ping --target $(USER_TARGET) --release
 	"$(OBJCOPY)" --strip-all $(PING_ELF) $(PING_BIN)
 
+wc-bin:
+	cargo build -p wc --target $(USER_TARGET) --release
+	"$(OBJCOPY)" --strip-all $(WC_ELF) $(WC_BIN)
+
+grep-bin:
+	cargo build -p grep --target $(USER_TARGET) --release
+	"$(OBJCOPY)" --strip-all $(GREP_ELF) $(GREP_BIN)
+
+head-bin:
+	cargo build -p head --target $(USER_TARGET) --release
+	"$(OBJCOPY)" --strip-all $(HEAD_ELF) $(HEAD_BIN)
+
 resolve-bin:
 	cargo build -p resolve --target $(USER_TARGET) --release
 	"$(OBJCOPY)" --strip-all $(RESOLVE_ELF) $(RESOLVE_BIN)
@@ -220,7 +238,7 @@ fetch-bin:
 # itself: the default shell binary and the config file (loader.rs's
 # CONFIG_PATH) naming which program to load - edit INIT.CFG and rebuild
 # just that program to swap it out, no kernel rebuild required.
-esp: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin ping-bin resolve-bin fetch-bin
+esp: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin ping-bin resolve-bin fetch-bin wc-bin grep-bin head-bin
 	mkdir -p $(ESP_DIR)/EFI/BOOT $(ESP_DIR)/EFI/ORBS $(ESP_DIR)/bin
 	cp $(KERNEL) $(ESP_DIR)/EFI/BOOT/BOOTAA64.EFI
 	cp $(SHELL_BIN) $(ESP_DIR)/EFI/ORBS/SH.BIN
@@ -254,6 +272,9 @@ esp: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin args
 	cp $(PING_BIN) $(ESP_DIR)/bin/PING
 	cp $(RESOLVE_BIN) $(ESP_DIR)/bin/RESOLVE
 	cp $(FETCH_BIN) $(ESP_DIR)/bin/FETCH
+	cp $(WC_BIN) $(ESP_DIR)/bin/WC
+	cp $(GREP_BIN) $(ESP_DIR)/bin/GREP
+	cp $(HEAD_BIN) $(ESP_DIR)/bin/HEAD
 
 # Boots the ESP directory directly in QEMU (no disk image needed) against
 # the aarch64 OVMF firmware installed by `brew install qemu`.

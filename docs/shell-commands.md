@@ -223,6 +223,13 @@ killed after the same timeout.
   can't reach netd on its own). Remaining builtins: `write`, `cd`, `pwd`,
   `exec`, `exit`, the job-control commands (`ps`, `kill`, `wait`, `fg`), and
   `mount`/`selftest`/`help`.
+- **Pipeline filters live in `/bin` too:** `upper` (uppercases its input),
+  `grep <pattern>` (lines containing a substring), `wc` (line/word/byte
+  counts), and `head [N]` (first N lines, default 10). Each reads stdin and
+  writes to its stdout target, so they chain: `cat FILE | grep x | wc`,
+  `ls /bin | head 5`, `echo hi | upper`. They only do anything as a pipeline
+  stage (they read piped input); run bare, they just wait for input that never
+  comes (Ctrl+C to abort). See the Pipelines section.
 - **Write granularity: `write` full-replaces; `writeat`/`>>`/`cp` do
   offset writes.** The FAT32 layer has a real random-access offset-write
   primitive (`write_at`): `writeat` writes in place at any offset

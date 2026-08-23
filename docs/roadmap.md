@@ -540,9 +540,15 @@ fixed:
    existing one-target-per-task delegation), and waits/reaps all; the first
    stage may be a builtin (captured and streamed to stage 2). The old
    `parse_pipe`/`PipeParse`/`cmd_pipeline_prog` patchwork was removed.
-6. **More filters (payoff) — NEXT.** Real `/bin` filters (`grep`, `wc`, `head`,
-   `sort`) so multi-stage pipelines are broadly useful, not just a mechanism
-   demo (only `upper` exists so far).
+6. **More filters (payoff) — DONE.** `wc` (line/word/byte counts), `grep
+   <pattern>` (substring line filter), and `head [N]` (first N lines) shipped as
+   `/bin` programs over `ulib` (a new `ulib::pipe_recv` factors out the filter
+   stdin read). `cat FILE | grep x | wc` and `ls /bin | grep C | wc` work.
+   (`sort` deferred - it needs to buffer all input before emitting, unlike the
+   streaming/line-buffered three.)
+
+**The multi-stage-pipeline arc is complete.** Only `sort` (full-input
+buffering) is left as an optional future filter.
 
 **Verification (steps 2–5, on `make run-image`, zero `-d int` aborts):**
 `echo hello world | upper` → "HELLO WORLD"; `echo chained pipe | upper | upper`

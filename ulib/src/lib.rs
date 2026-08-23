@@ -154,6 +154,24 @@ pub fn pipe_out(target: u64, bytes: &[u8]) {
     }
 }
 
+/// Receive one pipeline-input message into `buf` (a filter's stdin). Returns
+/// the byte count; `0` means end-of-stream - the empty message that marks the
+/// end of a pipe, or an unexpected error - either way the filter should stop.
+/// The read half of the filter shape whose write half is [`write_out`].
+pub fn pipe_recv(buf: &mut [u8]) -> usize {
+    let packed = syscall4(
+        syscall_abi::MSG_RECV,
+        buf.as_mut_ptr() as u64,
+        buf.len() as u64,
+        0,
+        0,
+    );
+    if packed >= syscall_abi::FS_ERR_MIN {
+        return 0;
+    }
+    ((packed & 0xffff_ffff) as usize).min(buf.len())
+}
+
 /// If our output is piped/captured (target isn't the console), signal
 /// end-of-stream with an empty message so the reading task knows we're done.
 /// A no-op when writing straight to the console.
