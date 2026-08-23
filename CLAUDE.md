@@ -28,11 +28,14 @@ file can stay focused on durable, load-bearing guidance:
   built, and why it works the way it does*.
 - **`docs/roadmap.md`** — the forward-looking parking lot of known future
   work, not yet sequenced.
-- **The postmortems under `docs/`** (eight of them — boot bring-up; shell
+- **The postmortems under `docs/`** (nine of them — boot bring-up; shell
   & filesystem; xHCI keyboard; USB storage; isolation & dataflow; console
-  server; capability & hardening; network stack) are the design and bug
+  server; capability & hardening; network stack; userland maturation
+  (/bin, pipelines, VFS/GPT)) are the design and bug
   retrospectives. Read the relevant one for *the traps already hit and the
   lessons learned* before reworking a subsystem.
+- **`docs/journal.md`** — a chronological dev-log (narrative "what and why
+  each day"), a lighter companion to the milestone-oriented `CHANGELOG.md`.
 - **Reference docs**: `docs/architecture.md` (boot flow, privilege model,
   memory layout, exceptions, syscall ABI, console), `docs/processes.md`
   (userland loading, the ELF/PIE binary format, and the relocation-class
@@ -515,6 +518,7 @@ docs/
   processes.md       reference doc: process loading/config mechanism, memory model, binary format, writing a replacement program
   shell-commands.md  reference doc: the default shell's builtin commands - syntax, behavior, known limitations
   CHANGELOG.md       historical record of completed milestones (phase 0 through the most recent), newest first
+  journal.md         chronological dev-log: narrative "what was worked on and why" per day - a lighter companion to CHANGELOG.md's milestone record
   roadmap.md         forward-looking plan: parking lot of known future work, not yet sequenced
   research-minix-boot.md   research note: how MINIX boots (x86 boot monitor + boot image, ARM's U-Boot chain) vs Ouroboros's UEFI-native boot, sourced from MINIX's own docs
   research-helix-os.md     research note: Helix OS's layered, trait-based kernel design and hot-reload/self-healing fault tolerance, sourced from the HelixOS-Org/helix repo and docs
@@ -527,6 +531,7 @@ docs/
   console-server-postmortem.md   design retrospective (a sixth piece, the continuation of the isolation arc): moving the console out of the kernel into a userland server - a driver the kernel itself depends on is a split not a move, the gated-primitives-vs-mapped-memory framebuffer decision, the scheduler lie that routing per-character echo through IPC exposed (a documented-but-unenforced sub-tick-IPC invariant), the missed fsd client that stranded on real hardware, the kernel-console quiet handoff, and verifying pixels by screendump - see "Driver isolation, part 3" above
   capability-and-hardening-postmortem.md   design retrospective (a seventh piece, 2026-08-20): a one-day arc of five milestones - the active health-ping, the capability model (who-may-call-whom), program-to-program pipes, the stack guard page, and the userland heap - with the spine "scope it down before you build it": three of the five shrank when asked whether the clean design needed the hard part (the ping needs no new syscall since a reply is an ack; capabilities are a pure function of slot, no mutable table; pipes need no delegation since the shell can relay), the guard page found a real silent 8KB `exec`-path overflow in the shell on its first test, and a one-build go/no-go gate proved `alloc`'s collections can't be PIE-linked on stable (`R_AARCH64_ABS64` in prebuilt liballoc, `-Z build-std` nightly-only) before any of the heap plumbing was written, forcing the raw-buffer pivot - covers the five "Server supervision"/"capability model"/"pipes"/"guard page"/"heap" sections above (plus a next-day addendum: runtime capability delegation, the deferred pipes consumer, turned out self-securing)
   network-stack-postmortem.md   design retrospective (an eighth piece, 2026-08-21): the one-day arc that built the whole network stack - from a virtio-net driver to a concurrent HTTP server (ping/resolve/fetch + a static-file server) - with these threads: the no-IOMMU driver/protocol split (DMA owner stays in the kernel, the protocol stack becomes the netd userland server), the async-receive primitive a server needs (NET_WAIT blocking on frames-or-messages, then + a timeout for the RTO), testing loss recovery on a lossless wire (SLIRP can't drop, so inject a drop in the sender + disable fast retransmit to isolate the RTO), two real bugs found only in a packet trace (a go-back-N snd_una>snd_nxt unsigned-wrap stall; the supervisor restarting netd mid-transfer when a burst ran too long), the guard page catching netd's stack overflow twice more (16->24->32KB), and verifying against tcpdump/curl rather than the kernel's own log - covers all the "Network stack, Stage 1..4j" sections above
+  userland-and-pipelines-postmortem.md   design retrospective (a ninth piece, 2026-08-22): the day the shell's compiled-in builtins became a real /bin of standalone programs with multi-stage pipelines, then the filesystem arc began - threaded on "where does a command belong": the ps/kill/wait revert (job control is inherently a builtin - a spawned command runs in a reused slot and lists/races itself), a capability u32 bit-collision caught before shipping (send-mask reaching CAP_CON's bit at NUM_TASKS=10), delegation needing less than feared (netd via a targeted DELEGATE; a linear pipe needs only one-target-per-task delegation, so general delegation still has no consumer), the pipeline /-prefix heuristic replaced wholesale rather than special-cased again, and building a bootable GPT disk with valid CRCs (scripts/mkgpt.py) just to test the GPT parser - the recurring discipline "scope it down; let testing find the boundaries," three of the day's decisions being subtractions
 
 kernel/
   src/main.rs        #[entry] point: UEFI init, console discovery, madt::discover(), loader::load(), ExitBootServices, exceptions::install(), mmu::install_identity_map(), xhci::init(), init_storage()/init_net() (both gated on virtio_mmio_probe_safe), gic+timer init, tasks::init(), then tasks::start()

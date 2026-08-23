@@ -134,6 +134,11 @@
         <h3>A network stack in a day</h3>
         <p>From no networking to a concurrent HTTP server: the no-IOMMU driver/protocol split, the async-receive primitive a server needs (blocking on frames <em>or</em> messages, then a timer for the RTO), testing loss recovery on a wire that can't lose a packet, a go-back-N sequence-number wrap that stalled transfers, and the guard page catching the stack overflow twice more.</p>
       </a>
+      <a class="pm-card" href="postmortem-userland-pipelines.html">
+        <span class="pm-eyebrow">Retrospective · userland maturation</span>
+        <h3>/bin, pipelines, and where a command belongs</h3>
+        <p>Builtins became a real <code class="inline">/bin</code> of standalone programs with multi-stage pipelines: the ps/kill/wait revert that showed job control belongs in the shell, a capability bitfield collision caught before it shipped, delegation needing less than feared, a pipeline heuristic replaced wholesale, and building a bootable GPT disk just to test one.</p>
+      </a>
     </div>
 
     <h2>Research &amp; assessments</h2>

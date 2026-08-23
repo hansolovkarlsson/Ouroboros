@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Userland Maturation — Ouroboros</title>
+<meta name="description" content="A design retrospective on the day Ouroboros's shell went from compiled-in builtins to a real /bin of standalone programs with multi-stage pipelines — the ps/kill/wait revert, a capability bitfield collision, capability delegation needing less than feared, a pipeline heuristic replaced, and building a bootable GPT disk just to test one.">
+<link rel="icon" type="image/png" href="../assets/favicon.png">
+<link rel="stylesheet" href="../assets/site.css">
+</head>
+<body>
+
+<nav class="sitenav">
+  <div class="sitenav-inner">
+    <a class="sitenav-mark" href="../index.html">ouroboros</a>
+    <div class="sitenav-links">
+      <a href="../index.html">Home</a>
+      <a href="architecture-overview.html">Architecture</a>
+      <a href="tutorial.html">Learn</a>
+      <a href="docs.html" class="current">Docs</a>
+      <a href="https://github.com/hansolovkarlsson/Ouroboros">GitHub ↗</a>
+    </div>
+  </div>
+</nav>
+
+<div class="page">
+
+  <div class="kicker">Design retrospective · Ouroboros</div>
+
+  <h1 class="title small">Userland maturation: /bin, pipelines, and where a command belongs</h1>
+  <p class="dek">
+    One long day that turned the shell's compiled-in builtins into a real
+    <code class="inline">/bin</code> of standalone programs with genuine
+    multi-stage pipelines, then began abstracting the filesystem. The
+    through-line: <em>where does this command actually belong</em> — in the
+    shell, in a program, or nowhere yet?
+  </p>
+
+  <div class="companion">
+    <span class="companion-icon">🧩</span>
+    <span>The ninth retrospective, and a companion to the <a href="postmortem-capability-hardening.html">capability &amp; hardening</a> and <a href="postmortem-network-stack.html">network stack</a> retrospectives whose mechanisms it builds on. Not a bug hunt: a design day whose most interesting decisions were subtractions.</span>
+  </div>
+
+  <h2>The starting point</h2>
+  <p>Every command was a shell builtin: the shell parsed a line and called a <code class="inline">cmd_*</code> function compiled into its own binary. <code class="inline">exec /path</code> could launch a program, but passed it no arguments. The capability model, per-task isolation, grant/safecopy IPC, and runtime capability <em>delegation</em> all already existed. What didn't exist was any reason for a program other than the shell to run — no argv, no <code class="inline">/bin</code>, no environment, no way to compose programs. The plan was a staged arc: an argv ABI, a <code class="inline">/bin</code> + <code class="inline">PATH</code> lookup, a shell environment, then externalize the commands over a shared <code class="inline">ulib</code> crate. It mostly went as planned; the lessons are where it didn't.</p>
+
+  <h2>Lesson 1: not every command wants to be a program</h2>
+  <p>The externalization went smoothly — <code class="inline">echo</code>, <code class="inline">ls</code>, <code class="inline">cat</code>, <code class="inline">mkdir</code>, <code class="inline">cp</code>, <code class="inline">mv</code>, and the network commands all became clean <code class="inline">/bin</code> programs. So the next batch seemed obvious: <code class="inline">ps</code>, <code class="inline">kill</code>, <code class="inline">wait</code>. They were built, and <em>mostly</em> worked — then a test exposed the flaw:</p>
+  <div class="panel"><pre><code>$ ps                 # shows a long-lived task at slot 5
+$ kill 5             # correctly kills it
+$ wait 5             # "that task is protected"</code></pre></div>
+  <p><code class="inline">wait 5</code> was waiting on <em>itself</em>. An externalized command runs in a spawnable slot, and slots are reused immediately, so by the time <code class="inline">wait</code> ran it had <em>become</em> task 5. The whole point of these commands is to act on the shell's view of the task table; putting them in a spawned task makes them appear in their own output and makes any task number they're handed racy. This is not a bug — it's a category error, and exactly why <code class="inline">kill</code>/<code class="inline">wait</code>/<code class="inline">jobs</code>/<code class="inline">fg</code>/<code class="inline">bg</code> are shell builtins in bash. (Unix <code class="inline">ps</code> is external only because PIDs are stable; Ouroboros reuses slots the instant they free.) The work was reverted and the finding recorded.</p>
+  <p><strong>The lesson:</strong> "externalize the commands" is not a uniform goal. A command that takes a path and does I/O externalizes cleanly; one that manipulates the shell's own control state does not. Testing, not review, drew the line — the code compiled and ran; only exercising it revealed the abstraction was wrong. Knowing when to <em>stop</em> an arc is part of executing it.</p>
+
+  <h2>Lesson 2: a packed bitfield has a ceiling you can walk into</h2>
+  <p>Raising the spawnable-slot count from two to five was meant to be a mechanical <code class="inline">NUM_TASKS</code> bump. It nearly wasn't. Per-slot capabilities pack into one <code class="inline">u32</code>: the low <code class="inline">NUM_TASKS</code> bits are the IPC send-mask, and the resource caps (<code class="inline">CAP_BLOCK</code>/<code class="inline">CAP_CON</code>/<code class="inline">CAP_NET</code>) sat at bits 8/9/10. At <code class="inline">NUM_TASKS = 7</code> the send-mask stopped at bit 6 — a gap. At 10 it reaches bit 9: a spawnable slot's send-mask bit would have <em>aliased</em> <code class="inline">CAP_CON</code>, granting or denying a device capability as a side effect of the slot count. Caught by reading the layout before flipping the constant. A packed representation encodes an invariant nothing enforces; the fix moved the resource caps to bit 16+, clear of any plausible slot count, with a comment so the next person doesn't rediscover it.</p>
+
+  <h2>Lesson 3: build the mechanism for a consumer that exists</h2>
+  <p>Runtime capability <em>delegation</em> shipped during the network arc, and the capability postmortem flagged a trap: don't build the <em>general</em> (transitive, multi-target) version until a consumer needs it. This day produced two consumers, and both needed <em>less</em> than feared.</p>
+  <p><strong>The network commands</strong> reach <code class="inline">netd</code>, which a spawnable slot's static mask doesn't include. The fix wasn't to widen the policy for every program — it was for the shell (which holds <code class="inline">TO_NET</code>) to <code class="inline">DELEGATE</code> it to the specific child at spawn. One subtlety: a tick can let the child call <code class="inline">netd</code> before the delegation lands, so it gets <code class="inline">MSG_ERR_DENIED</code>; rather than add synchronization, <code class="inline">ulib::net_call</code> retries briefly on that error — the race resolves itself.</p>
+  <p><strong>Multi-stage pipelines</strong> looked like the case that would finally <em>require</em> general delegation — relay-free program chains were the roadmap's own example for it. But a linear chain doesn't: task <em>a</em> delegates to <em>b</em>, <em>b</em> to <em>c</em>, and each task has exactly <strong>one</strong> downstream target — which the existing one-target-per-task delegation already models. The general version still has no consumer. The specific mechanism was enough; building the general one first would have been waste.</p>
+
+  <h2>Lesson 4: a heuristic that doesn't generalize is technical debt</h2>
+  <p>The two-stage pipe had grown a patchwork: it split on the <em>first</em> <code class="inline">|</code> only, the right side had to be a single argument-less token with an explicit path, and it decided "program or builtin?" by a <code class="inline">/</code>-prefix heuristic. Each was a reasonable shortcut for one <code class="inline">builtin | program</code> pipe; none survived N stages, arguments, or bare names. The fix replaced them rather than extending them: split on every <code class="inline">|</code>, resolve each stage like any command (<code class="inline">$PATH</code> or path), tokenize each into its own argv, spawn the chain right-to-left delegating each link. The rewrite was larger than an extension, but left one code path instead of three, and the "no arguments" and "one <code class="inline">|</code> per line" limits simply evaporated. When a shortcut needs a special case to handle the next case, that's the signal to generalize.</p>
+
+  <h2>Lesson 5: to test a format, you have to be able to make one</h2>
+  <p>The filesystem arc opened with a pure refactor (extract <code class="inline">fsd</code>'s hardcoded FAT32 into a <code class="inline">Filesystem</code> enum, prove byte-identical) and then GPT + multi-partition support. The code was straightforward; <em>testing</em> it was the problem. The GPT parser only matters if fed a real GPT disk, and macOS ships no GPT tooling (<code class="inline">hdiutil</code> builds MBR). Worse, the disk has to be <em>bootable</em> — the parser runs after UEFI loads the kernel from it — and UEFI validates a GPT's CRC32s before booting. So testing meant building the artifact by hand: <code class="inline">scripts/mkgpt.py</code> wraps the FAT32 partition in a protective MBR, primary and backup GPT headers with correct CRC32s, and an ESP entry. The test is conclusive precisely because the GPT disk has <em>no</em> real MBR table (only the protective 0xEE entry): <code class="inline">fsd</code> mounting it means the GPT parser found it. For a format or protocol, the harness that <em>produces</em> valid inputs is part of the feature — a parser you can't feed a valid input isn't tested.</p>
+
+  <h2>The shape of the day</h2>
+  <p>Two arcs closed (standalone binaries, multi-stage pipelines) and a third begun (filesystems), and the discipline underneath was the one the earlier retrospectives keep finding: <strong>scope it down before you build it, and let testing tell you where the real boundaries are.</strong> Three of the day's decisions were subtractions — job control <em>stays</em> builtin, general delegation <em>isn't</em> needed, the pipeline heuristics <em>go away</em> — and each made the system simpler, not poorer. Everything was QEMU-verified with zero exception-trace aborts. The one honest gap: none of it has run on real Parallels hardware yet — a real-hardware regression pass is the debt this day leaves behind.</p>
+
+  <p class="backlink"><a href="../userland-and-pipelines-postmortem.html">Markdown source</a> · <a href="docs.html">Documentation library</a></p>
+
+</div>
+
+</body>
+</html>

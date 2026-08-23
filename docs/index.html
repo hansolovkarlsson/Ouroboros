@@ -187,9 +187,9 @@
       Every real bug found along the way — the ones that mattered, not
       the routine typos — is written up in detail: symptom, root cause,
       how it was actually confirmed, and the generalizable lesson. Four
-      bug-hunt chapters in chronological order, plus two design
-      retrospectives from the microkernel-isolation arc — each usable on
-      its own.
+      bug-hunt chapters in chronological order, plus five design
+      retrospectives from the microkernel-isolation, network, and
+      userland arcs — each usable on its own.
     </p>
 
     <div class="postmortem-cards">
@@ -223,11 +223,26 @@
         <h3>Moving the console into userland</h3>
         <p>The second component out of the kernel: a driver the kernel itself depends on (a split, not a move), the gated-primitives-vs-mapped-memory decision, a scheduler lie that routing echo through IPC exposed, a missed client that stranded on real hardware, and verifying pixels by screendump.</p>
       </a>
+      <a class="pm-card" href="site/postmortem-capability-hardening.html">
+        <span class="pm-eyebrow">Retrospective · capability &amp; hardening</span>
+        <h3>Scope it down before you build it</h3>
+        <p>Five hardening milestones in a day — a health ping, the capability model, program-to-program pipes, a stack guard page, a userland heap — where three shrank when asked whether the clean design needed the hard part, the guard page caught a real silent overflow on its first test, and a one-build gate proved the heap couldn't be alloc-backed on stable.</p>
+      </a>
+      <a class="pm-card" href="site/postmortem-network-stack.html">
+        <span class="pm-eyebrow">Retrospective · network stack</span>
+        <h3>A network stack in a day</h3>
+        <p>From a virtio-net driver to a concurrent HTTP server — the no-IOMMU driver/protocol split, the async-receive primitive a server needs, testing loss recovery on a wire that can't lose a packet, two bugs visible only in a packet trace, and the guard page catching the stack overflow twice more.</p>
+      </a>
+      <a class="pm-card" href="site/postmortem-userland-pipelines.html">
+        <span class="pm-eyebrow">Retrospective · userland maturation</span>
+        <h3>/bin, pipelines, and where a command belongs</h3>
+        <p>Builtins became a real <code class="inline">/bin</code> of standalone programs with multi-stage pipelines: the ps/kill/wait revert that showed job control belongs in the shell, a capability bitfield collision caught before it shipped, delegation needing less than feared, a pipeline heuristic replaced wholesale, and building a bootable GPT disk just to test one.</p>
+      </a>
     </div>
 
     <p>
       Every document in this project — the guides, the architecture and
-      reference material, all six postmortems, and the research notes —
+      reference material, all nine postmortems, and the research notes —
       is collected in <a href="site/docs.html">the documentation library</a>.
     </p>
 

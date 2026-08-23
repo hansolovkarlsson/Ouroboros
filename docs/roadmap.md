@@ -596,6 +596,31 @@ Pulled from `docs/processes.md`'s "known rough edges" and `CLAUDE.md`'s
 running "next milestone" notes — real gaps, not yet a committed next
 phase:
 
+**New gaps from the /bin + pipelines + filesystem work (2026-08-22):**
+
+- **Real-hardware regression pass (outstanding debt).** The whole `/bin` command
+  surface, multi-stage pipelines, the netd commands, Stage 0's slot bump, and
+  the VFS/GPT work are all **QEMU-verified only** — a large body of change
+  resting on the emulator. A pass over it on real Parallels (via
+  `make test-parallels` or a physical stick) is the biggest outstanding
+  confidence gap. See the [userland & pipelines postmortem](userland-and-pipelines-postmortem.md).
+- **GPT is parsed but not validated on read.** `fsd`'s `partition::discover`
+  trusts the "EFI PART" signature; it doesn't check the GPT header/entry-array
+  CRC32s or fall back to the backup GPT on a corrupt primary. Fine for the
+  clean images we make, a robustness gap for a real damaged disk. (The
+  *builder*, `scripts/mkgpt.py`, does write correct CRCs — UEFI requires them.)
+- **Pipelines can't combine with `>`/`>>`.** `a | b > file` is refused (the last
+  stage writes straight to the console; there's no capture of its output). A
+  real feature would route the last stage's stdout into a file capture.
+- **`grep` is substring-only and case-sensitive** (no regex, no `-i`); **`head`
+  relies on the producer's send-timeout** when it exits early rather than
+  actively signalling upstream; **`sort` isn't written** (it needs to buffer all
+  input before emitting, unlike the streaming/line-buffered filters). All small,
+  optional filter follow-ups.
+- **A pipeline stage other than the first can't be a builtin** (a later stage
+  must be a program that reads stdin). Reasonable, but means e.g. `cat x | ps` is
+  not meaningful; documented, not likely worth changing.
+
 - ~~xHCI keyboard failing outright on a real, manually-launched
   Parallels VM~~ — **done, found and fixed the same day, by the user
   directly** (not by any of this project's own scripted testing, which
