@@ -164,7 +164,7 @@ unsafe impl Sync for Table {}
 /// independently guaranteed to fit within one 2MB-aligned slot (see
 /// the safety comments on `install_identity_map`), so a view needs
 /// exactly one L2 split and one L3 split - its own region's.
-const MAX_EL0_REGIONS: usize = 7;
+const MAX_EL0_REGIONS: usize = 10;
 
 // Per-task translation-table views (the per-task page-tables
 // milestone): view i is the table set task i runs under - identical
@@ -176,24 +176,14 @@ const MAX_EL0_REGIONS: usize = 7;
 // rather than sharing: the L1 is where a view's one EL0-split block
 // diverges from the others'. The *extra device* L1 tables further
 // below stay shared - their entries are identical in every view.
-static L0_TABLES: [Table; MAX_EL0_REGIONS] = [
-    Table(UnsafeCell::new([0; ENTRIES_PER_TABLE])),
-    Table(UnsafeCell::new([0; ENTRIES_PER_TABLE])),
-    Table(UnsafeCell::new([0; ENTRIES_PER_TABLE])),
-    Table(UnsafeCell::new([0; ENTRIES_PER_TABLE])),
-    Table(UnsafeCell::new([0; ENTRIES_PER_TABLE])),
-    Table(UnsafeCell::new([0; ENTRIES_PER_TABLE])),
-    Table(UnsafeCell::new([0; ENTRIES_PER_TABLE])),
-];
-static L1_TABLES: [Table; MAX_EL0_REGIONS] = [
-    Table(UnsafeCell::new([0; ENTRIES_PER_TABLE])),
-    Table(UnsafeCell::new([0; ENTRIES_PER_TABLE])),
-    Table(UnsafeCell::new([0; ENTRIES_PER_TABLE])),
-    Table(UnsafeCell::new([0; ENTRIES_PER_TABLE])),
-    Table(UnsafeCell::new([0; ENTRIES_PER_TABLE])),
-    Table(UnsafeCell::new([0; ENTRIES_PER_TABLE])),
-    Table(UnsafeCell::new([0; ENTRIES_PER_TABLE])),
-];
+// `[const { … }; N]` (rather than an explicit N-element literal) so these
+// auto-scale with `MAX_EL0_REGIONS` - raising the task-slot count (Stage 0)
+// then touches one constant, not four table arrays. `Table` isn't `Copy`
+// (`UnsafeCell` isn't), which is why the repeat needs the inline-const form.
+static L0_TABLES: [Table; MAX_EL0_REGIONS] =
+    [const { Table(UnsafeCell::new([0; ENTRIES_PER_TABLE])) }; MAX_EL0_REGIONS];
+static L1_TABLES: [Table; MAX_EL0_REGIONS] =
+    [const { Table(UnsafeCell::new([0; ENTRIES_PER_TABLE])) }; MAX_EL0_REGIONS];
 
 /// The most `extra_devices` entries `install_identity_map` has ever been
 /// called with - matches `main.rs`'s own fixed-size staging array
@@ -264,25 +254,11 @@ static EXTRA_L1_TABLES: [Table; MAX_EXTRA_L1_TABLES] = [
 // RAM needing no split at all. A genuinely simpler shape than the old
 // shared map's up-to-five-splits bookkeeping.
 
-static EL0_L2_TABLES: [Table; MAX_EL0_REGIONS] = [
-    Table(UnsafeCell::new([0; ENTRIES_PER_TABLE])),
-    Table(UnsafeCell::new([0; ENTRIES_PER_TABLE])),
-    Table(UnsafeCell::new([0; ENTRIES_PER_TABLE])),
-    Table(UnsafeCell::new([0; ENTRIES_PER_TABLE])),
-    Table(UnsafeCell::new([0; ENTRIES_PER_TABLE])),
-    Table(UnsafeCell::new([0; ENTRIES_PER_TABLE])),
-    Table(UnsafeCell::new([0; ENTRIES_PER_TABLE])),
-];
+static EL0_L2_TABLES: [Table; MAX_EL0_REGIONS] =
+    [const { Table(UnsafeCell::new([0; ENTRIES_PER_TABLE])) }; MAX_EL0_REGIONS];
 
-static EL0_L3_TABLES: [Table; MAX_EL0_REGIONS] = [
-    Table(UnsafeCell::new([0; ENTRIES_PER_TABLE])),
-    Table(UnsafeCell::new([0; ENTRIES_PER_TABLE])),
-    Table(UnsafeCell::new([0; ENTRIES_PER_TABLE])),
-    Table(UnsafeCell::new([0; ENTRIES_PER_TABLE])),
-    Table(UnsafeCell::new([0; ENTRIES_PER_TABLE])),
-    Table(UnsafeCell::new([0; ENTRIES_PER_TABLE])),
-    Table(UnsafeCell::new([0; ENTRIES_PER_TABLE])),
-];
+static EL0_L3_TABLES: [Table; MAX_EL0_REGIONS] =
+    [const { Table(UnsafeCell::new([0; ENTRIES_PER_TABLE])) }; MAX_EL0_REGIONS];
 
 // Stage-1 descriptor bit positions (VMSAv8-64, 4KB granule), cross-checked
 // against Linux's arch/arm64/include/asm/pgtable-hwdef.h rather than

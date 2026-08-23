@@ -71,19 +71,21 @@ use crate::exceptions::Context;
 use crate::loader::LoadedProgram;
 
 /// Slots 0/1 are always the loaded program and the idle task (`init`);
-/// slot 2 is reserved for the filesystem server (`syscall_abi::FSD_TASK`,
-/// boot-loaded by `loader::load_fsd`); slot 3 for the console server
-/// (`syscall_abi::CON_TASK`, boot-loaded by `loader::load_cond`). Both
-/// servers stay `Unused` if their `*.BIN` doesn't exist, and `spawn`
-/// never fills either: a spawned program landing in one of these fixed,
-/// privileged slots would inherit its role. 4/5 start `Unused` and are
-/// only ever filled in by `spawn` (dynamic task creation). A small,
-/// fixed bound rather than anything growable - "generous but bounded,"
-/// the same philosophy `mmu.rs`'s `MAX_EXTRA_L1_TABLES` already states
-/// for a similar "how many of these might we need" question - not a real
-/// limit this kernel has any way to raise gracefully yet (`spawn` just
-/// fails with `SpawnError::NoFreeSlot` past this).
-pub const NUM_TASKS: usize = 7;
+/// slots 2/3/4 are reserved for the boot-loaded servers - the filesystem
+/// server (`syscall_abi::FSD_TASK`, `loader::load_fsd`), the console server
+/// (`syscall_abi::CON_TASK`, `loader::load_cond`), and the network server
+/// (`syscall_abi::NET_TASK`). Each server stays `Unused` if its `*.BIN`
+/// doesn't exist, and `spawn` never fills a reserved slot: a spawned program
+/// landing in one would inherit its role. Slots [`FIRST_SPAWNABLE`]..NUM_TASKS
+/// (5..10) start `Unused` and are only ever filled by `spawn` (dynamic task
+/// creation) - the pool a foreground command, a background task, and a
+/// pipeline draw from. A small, fixed bound rather than anything growable -
+/// "generous but bounded," the same philosophy `mmu.rs`'s
+/// `MAX_EXTRA_L1_TABLES` already states for a similar "how many of these might
+/// we need" question. Raising it is a one-constant change now (`spawn` just
+/// fails with `SpawnError::NoFreeSlot` past this): the per-task arrays and the
+/// `mmu.rs` table pool (`MAX_EL0_REGIONS`, which must stay equal) auto-scale.
+pub const NUM_TASKS: usize = 10;
 
 /// The first slot `spawn` may use - everything below it is fixed
 /// infrastructure (boot shell, idle, filesystem server, console server,
@@ -92,25 +94,28 @@ const FIRST_SPAWNABLE: usize = 5;
 
 // Per-slot capabilities (the capability model for who-may-do-what).
 // Because task-slot roles are static (see `NUM_TASKS`'s doc comment - 0
-// shell, 1 idle, 2 fsd, 3 cond, 4-5 spawnable), a task's capabilities are
-// a pure function of its slot: no stored table, no mutable state, and a
-// restarted server or a spawned child automatically gets the right caps.
-// The whole policy lives in `caps_for_slot`. Packed in one `u32`: the low
-// `NUM_TASKS` bits are the IPC send-mask (added in the who-may-call-whom
-// stage), the high bits are resource caps.
+// shell, 1 idle, 2 fsd, 3 cond, 4 netd, 5..10 spawnable), a task's
+// capabilities are a pure function of its slot: no stored table, no mutable
+// state, and a restarted server or a spawned child automatically gets the
+// right caps. The whole policy lives in `caps_for_slot`. Packed in one `u32`:
+// the low `NUM_TASKS` bits are the IPC send-mask (added in the who-may-call-
+// whom stage), and the resource caps live at bit 16 and up - clear of the
+// send-mask for any `NUM_TASKS` up to 16, so raising the slot count can't
+// collide with them (it nearly did at NUM_TASKS=10, when the send-mask first
+// reached bit 9 - CAP_CON's old home).
 //
 /// `CAP_BLOCK`: may use the `BLOCK_*` syscalls (raw disk access). Only the
 /// filesystem server holds it - the "supervised" in "supervised EL0
 /// process".
-pub(crate) const CAP_BLOCK: u32 = 1 << 8;
+pub(crate) const CAP_BLOCK: u32 = 1 << 16;
 /// `CAP_CON`: may use `CON_WRITE`/`CON_INFO`/`FB_*` (the console device).
 /// Only the console server holds it - ordinary tasks reach the console
 /// only through it (a `DSPOP_WRITE` message).
-pub(crate) const CAP_CON: u32 = 1 << 9;
+pub(crate) const CAP_CON: u32 = 1 << 17;
 /// `CAP_NET`: may use `NET_SEND`/`NET_RECV` (the virtio-net device). Only
 /// the network server holds it - ordinary tasks reach the network only
 /// through it (a `NETOP_*` message).
-pub(crate) const CAP_NET: u32 = 1 << 10;
+pub(crate) const CAP_NET: u32 = 1 << 18;
 
 // Send-mask bits (low `NUM_TASKS` bits of a `Caps` word): bit `t` set means
 // "may initiate a send/call to slot `t`". Named per target for readability.
@@ -118,8 +123,10 @@ const TO_SHELL: u32 = 1 << 0; // slot 0
 const TO_FSD: u32 = 1 << (syscall_abi::FSD_TASK as u32); // slot 2
 const TO_CON: u32 = 1 << (syscall_abi::CON_TASK as u32); // slot 3
 const TO_NET: u32 = 1 << (syscall_abi::NET_TASK as u32); // slot 4
-const TO_SPAWN_5: u32 = 1 << 5;
-const TO_SPAWN_6: u32 = 1 << 6;
+/// Every spawnable slot's bit ([`FIRST_SPAWNABLE`]..NUM_TASKS) - the shell's
+/// send-mask so it can relay pipe input to any child it spawns. Computed from
+/// the two constants, so raising `NUM_TASKS` widens it automatically.
+const TO_SPAWNABLE: u32 = ((1u32 << NUM_TASKS) - 1) & !((1u32 << FIRST_SPAWNABLE) - 1);
 
 /// The capability set for `slot`, a pure function of the slot's static
 /// role. This is the single source of truth for the capability policy -
@@ -131,7 +138,7 @@ fn caps_for_slot(slot: usize) -> u32 {
     match slot as u64 {
         // Shell: calls the filesystem, console, and network servers, and
         // sends pipe input to its spawned children.
-        0 => TO_FSD | TO_CON | TO_NET | TO_SPAWN_5 | TO_SPAWN_6,
+        0 => TO_FSD | TO_CON | TO_NET | TO_SPAWNABLE,
         // Idle: never sends.
         1 => 0,
         // Filesystem server: logs to the console server; owns the disk.
@@ -299,15 +306,12 @@ struct TaskSlot(UnsafeCell<Context>);
 // an exception masks further IRQs until the next `eret`).
 unsafe impl Sync for TaskSlot {}
 
-static TASKS: [TaskSlot; NUM_TASKS] = [
-    TaskSlot(UnsafeCell::new(Context::zeroed())),
-    TaskSlot(UnsafeCell::new(Context::zeroed())),
-    TaskSlot(UnsafeCell::new(Context::zeroed())),
-    TaskSlot(UnsafeCell::new(Context::zeroed())),
-    TaskSlot(UnsafeCell::new(Context::zeroed())),
-    TaskSlot(UnsafeCell::new(Context::zeroed())),
-    TaskSlot(UnsafeCell::new(Context::zeroed())),
-];
+// `[const { … }; NUM_TASKS]` (not an explicit literal) so these per-slot
+// arrays auto-scale when NUM_TASKS changes (Stage 0) - the initializer is the
+// same for every slot, and the wrapper types aren't `Copy`, so the repeat
+// needs the inline-const form.
+static TASKS: [TaskSlot; NUM_TASKS] =
+    [const { TaskSlot(UnsafeCell::new(Context::zeroed())) }; NUM_TASKS];
 
 static CURRENT: AtomicUsize = AtomicUsize::new(0);
 
@@ -323,15 +327,8 @@ struct RegionSlot(UnsafeCell<(u64, u64)>);
 // SAFETY: same argument as `TaskSlot` above.
 unsafe impl Sync for RegionSlot {}
 
-static REGIONS: [RegionSlot; NUM_TASKS] = [
-    RegionSlot(UnsafeCell::new((0, 0))),
-    RegionSlot(UnsafeCell::new((0, 0))),
-    RegionSlot(UnsafeCell::new((0, 0))),
-    RegionSlot(UnsafeCell::new((0, 0))),
-    RegionSlot(UnsafeCell::new((0, 0))),
-    RegionSlot(UnsafeCell::new((0, 0))),
-    RegionSlot(UnsafeCell::new((0, 0))),
-];
+static REGIONS: [RegionSlot; NUM_TASKS] =
+    [const { RegionSlot(UnsafeCell::new((0, 0))) }; NUM_TASKS];
 
 /// The `el0_regions` array every `mmu::rebuild_with_el0_regions` call
 /// needs: every task slot's own region, `(0, 0)` for any `Unused` one
@@ -467,15 +464,8 @@ struct MailboxSlot(UnsafeCell<Mailbox>);
 // handler's wake-check - the same never-reentrant reasoning as every
 // other per-task cell in this module.
 unsafe impl Sync for MailboxSlot {}
-static MAILBOXES: [MailboxSlot; NUM_TASKS] = [
-    MailboxSlot(UnsafeCell::new(Mailbox::new())),
-    MailboxSlot(UnsafeCell::new(Mailbox::new())),
-    MailboxSlot(UnsafeCell::new(Mailbox::new())),
-    MailboxSlot(UnsafeCell::new(Mailbox::new())),
-    MailboxSlot(UnsafeCell::new(Mailbox::new())),
-    MailboxSlot(UnsafeCell::new(Mailbox::new())),
-    MailboxSlot(UnsafeCell::new(Mailbox::new())),
-];
+static MAILBOXES: [MailboxSlot; NUM_TASKS] =
+    [const { MailboxSlot(UnsafeCell::new(Mailbox::new())) }; NUM_TASKS];
 
 /// `MSG_SEND`'s core: deliver `data` to `dest`. The caller validates
 /// `dest` exists; this only enforces the size and depth bounds.
@@ -616,15 +606,8 @@ struct ArgvSlot(UnsafeCell<Argv>);
 // MAILBOXES; set_argv (from SPAWN) and the getters (from the child's own
 // syscalls) never run concurrently.
 unsafe impl Sync for ArgvSlot {}
-static ARGVS: [ArgvSlot; NUM_TASKS] = [
-    ArgvSlot(UnsafeCell::new(Argv::new())),
-    ArgvSlot(UnsafeCell::new(Argv::new())),
-    ArgvSlot(UnsafeCell::new(Argv::new())),
-    ArgvSlot(UnsafeCell::new(Argv::new())),
-    ArgvSlot(UnsafeCell::new(Argv::new())),
-    ArgvSlot(UnsafeCell::new(Argv::new())),
-    ArgvSlot(UnsafeCell::new(Argv::new())),
-];
+static ARGVS: [ArgvSlot; NUM_TASKS] =
+    [const { ArgvSlot(UnsafeCell::new(Argv::new())) }; NUM_TASKS];
 
 /// Store a freshly spawned task's argv blob (from the `SPAWN` handler, which
 /// copies it out of the staging buffer). Truncated to `ARGV_CAP`.
@@ -671,15 +654,8 @@ impl Cwd {
 struct CwdSlot(UnsafeCell<Cwd>);
 // SAFETY: same single-core, non-reentrant per-task-cell reasoning as ARGVS.
 unsafe impl Sync for CwdSlot {}
-static CWDS: [CwdSlot; NUM_TASKS] = [
-    CwdSlot(UnsafeCell::new(Cwd::new())),
-    CwdSlot(UnsafeCell::new(Cwd::new())),
-    CwdSlot(UnsafeCell::new(Cwd::new())),
-    CwdSlot(UnsafeCell::new(Cwd::new())),
-    CwdSlot(UnsafeCell::new(Cwd::new())),
-    CwdSlot(UnsafeCell::new(Cwd::new())),
-    CwdSlot(UnsafeCell::new(Cwd::new())),
-];
+static CWDS: [CwdSlot; NUM_TASKS] =
+    [const { CwdSlot(UnsafeCell::new(Cwd::new())) }; NUM_TASKS];
 
 /// Store a freshly spawned task's working directory (from the `SPAWN`
 /// handler, out of the staging buffer). Truncated to `CWD_CAP`.
@@ -801,15 +777,9 @@ struct GrantSlot(UnsafeCell<Grant>);
 // SAFETY: same single-core, SVC/tick-only, never-reentrant reasoning as
 // MailboxSlot and every other per-task cell in this module.
 unsafe impl Sync for GrantSlot {}
-static GRANTS: [GrantSlot; NUM_TASKS] = [
-    GrantSlot(UnsafeCell::new(Grant { grantee: 0, ptr: 0, len: 0, dir: 0, active: false })),
-    GrantSlot(UnsafeCell::new(Grant { grantee: 0, ptr: 0, len: 0, dir: 0, active: false })),
-    GrantSlot(UnsafeCell::new(Grant { grantee: 0, ptr: 0, len: 0, dir: 0, active: false })),
-    GrantSlot(UnsafeCell::new(Grant { grantee: 0, ptr: 0, len: 0, dir: 0, active: false })),
-    GrantSlot(UnsafeCell::new(Grant { grantee: 0, ptr: 0, len: 0, dir: 0, active: false })),
-    GrantSlot(UnsafeCell::new(Grant { grantee: 0, ptr: 0, len: 0, dir: 0, active: false })),
-    GrantSlot(UnsafeCell::new(Grant { grantee: 0, ptr: 0, len: 0, dir: 0, active: false })),
-];
+static GRANTS: [GrantSlot; NUM_TASKS] = [const {
+    GrantSlot(UnsafeCell::new(Grant { grantee: 0, ptr: 0, len: 0, dir: 0, active: false }))
+}; NUM_TASKS];
 
 /// `GRANT`'s core: record `granter`'s outstanding grant. The caller
 /// (the syscall arm) has already validated that `grantee` exists, `dir`
@@ -1029,9 +999,16 @@ struct StateSlot(UnsafeCell<TaskState>);
 // from EL1 with IRQs masked.
 unsafe impl Sync for StateSlot {}
 
+// Not uniform (slots 0/1 boot Runnable - the loaded program and idle - the
+// rest Unused until a server is installed or `spawn` fills them), so this one
+// stays an explicit literal rather than a `[const { … }; NUM_TASKS]` repeat:
+// two Runnable, then NUM_TASKS-2 Unused.
 static STATES: [StateSlot; NUM_TASKS] = [
     StateSlot(UnsafeCell::new(TaskState::Runnable)),
     StateSlot(UnsafeCell::new(TaskState::Runnable)),
+    StateSlot(UnsafeCell::new(TaskState::Unused)),
+    StateSlot(UnsafeCell::new(TaskState::Unused)),
+    StateSlot(UnsafeCell::new(TaskState::Unused)),
     StateSlot(UnsafeCell::new(TaskState::Unused)),
     StateSlot(UnsafeCell::new(TaskState::Unused)),
     StateSlot(UnsafeCell::new(TaskState::Unused)),

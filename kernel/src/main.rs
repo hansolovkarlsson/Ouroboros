@@ -354,23 +354,23 @@ fn main() -> Status {
         extra_devices[extra_device_count] = (secondary_base, secondary_size);
         extra_device_count += 1;
     }
+    // The boot EL0 regions, one per task slot (auto-sized to NUM_TASKS so
+    // raising the slot count needs no edit here): slot 0 the loaded program,
+    // slot 1 idle, slots 2/3/4 the filesystem/console/network servers ((0, 0)
+    // - "no region" - for any that wasn't loaded), and every spawnable slot
+    // (5..) stays (0, 0) until `tasks::spawn` fills it in.
+    // `install_identity_map` already treats a zero-size region as "no region"
+    // (see `overlaps_any`).
+    let mut el0_regions = [(0u64, 0u64); tasks::NUM_TASKS];
+    el0_regions[0] = (program.base, program.size);
+    el0_regions[1] = tasks::idle_region();
+    el0_regions[2] = fsd.as_ref().map_or((0, 0), |f| (f.base, f.size));
+    el0_regions[3] = cond.as_ref().map_or((0, 0), |c| (c.base, c.size));
+    el0_regions[4] = netd.as_ref().map_or((0, 0), |n| (n.base, n.size));
     unsafe {
         mmu::install_identity_map(
             memory_map,
-            // Slots 2/3/4 are the filesystem/console/network servers'
-            // regions ((0, 0) - "no region" - for any that wasn't loaded);
-            // slots 5/6 stay (0, 0) until `tasks::spawn` fills one in.
-            // `install_identity_map` already treats a zero-size region as
-            // "no region" (see `overlaps_any`).
-            [
-                (program.base, program.size),
-                tasks::idle_region(),
-                fsd.as_ref().map_or((0, 0), |f| (f.base, f.size)),
-                cond.as_ref().map_or((0, 0), |c| (c.base, c.size)),
-                netd.as_ref().map_or((0, 0), |n| (n.base, n.size)),
-                (0, 0),
-                (0, 0),
-            ],
+            el0_regions,
             &extra_devices[..extra_device_count],
         )
     };

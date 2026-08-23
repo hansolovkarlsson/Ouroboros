@@ -52,15 +52,8 @@ use crate::tasks;
 /// `tasks.rs` keyed per-slot - grew from 2 to 4 alongside it for dynamic
 /// task creation, even though only the original two tasks have ever
 /// actually called `report`.
-static TASK_REPORTS: [AtomicU64; crate::tasks::NUM_TASKS] = [
-    AtomicU64::new(0),
-    AtomicU64::new(0),
-    AtomicU64::new(0),
-    AtomicU64::new(0),
-    AtomicU64::new(0),
-    AtomicU64::new(0),
-    AtomicU64::new(0),
-];
+static TASK_REPORTS: [AtomicU64; crate::tasks::NUM_TASKS] =
+    [const { AtomicU64::new(0) }; crate::tasks::NUM_TASKS];
 
 /// The raw block device the `BLOCK_*` syscalls operate on - the
 /// kernel's entire remaining role in storage since the filesystem

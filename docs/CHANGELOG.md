@@ -7,6 +7,43 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/`; 
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## More spawnable task slots: `NUM_TASKS` 7 → 10 (five concurrent spawned tasks)
+
+Standalone-binaries Stage 0, done after the rest of the arc rather than before
+it (the fs/net command externalization got by on two spawnable slots because
+each foreground command is waited-and-reaped before the next). Raising the
+ceiling gives real headroom for concurrency: a foreground command + a
+background task + a multi-stage pipeline.
+
+- `NUM_TASKS` 7 → 10; `FIRST_SPAWNABLE` stays 5, so slots 5–9 are spawnable —
+  five, up from two. Slots 0–4 remain the fixed roles (shell, idle, fsd, cond,
+  netd).
+- The per-task fixed arrays in `tasks.rs` (`TASKS`/`REGIONS`/`MAILBOXES`/
+  `ARGVS`/`CWDS`/`GRANTS`) and the L0/L1/L2/L3 table pools in `mmu.rs` were
+  converted from explicit N-element literals to `[const { … }; N]`, so they now
+  auto-scale from the one constant (the wrapper types aren't `Copy`, hence the
+  inline-const form). `mmu.rs`'s `MAX_EL0_REGIONS` must stay equal to
+  `NUM_TASKS` (one table view per task); the boot EL0-regions array in `main.rs`
+  is now built programmatically instead of a fixed literal. `STATES` stays a
+  literal (its boot values aren't uniform), extended by the three new slots.
+- The shell's send-mask to its spawnable children became a computed
+  `TO_SPAWNABLE` (bits `FIRST_SPAWNABLE..NUM_TASKS`) instead of the hardcoded
+  `TO_SPAWN_5 | TO_SPAWN_6`, so it widens automatically.
+
+**One real gotcha, caught before it shipped:** the capabilities `u32` packs the
+IPC send-mask in the low `NUM_TASKS` bits and the resource caps (`CAP_BLOCK`/
+`CAP_CON`/`CAP_NET`) at bits 8/9/10. At `NUM_TASKS=7` the send-mask stopped at
+bit 6 — no overlap — but at `NUM_TASKS=10` it reaches bit 9, which would have
+aliased `CAP_CON` (and bit 8 `CAP_BLOCK`): a spawnable slot's send-mask bit
+would have read as a device capability. The resource caps moved to bits 16/17/18,
+clear of the send-mask for any `NUM_TASKS` up to 16.
+
+Verified on QEMU (run-image), zero `-d int` aborts: `ps` shows ten slots; five
+`pong` instances `exec`'d concurrently into slots 5–9 (all succeed — was two
+max before); the sixth refused with "no free task slot"; a `builtin | /prog`
+pipeline still works; `kill`/reap frees slots correctly. The boot log's EL0
+region list now carries ten entries.
+
 ## Standalone binaries, Stage 4 (netd increment): `ping`/`resolve`/`fetch` externalized via capability delegation
 
 Eighth step of the arc, and the first commands to reach a server a spawnable

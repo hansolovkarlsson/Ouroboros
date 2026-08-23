@@ -415,13 +415,20 @@ the shell's own cwd/lifecycle) and the redirection/pipe **syntax**
 
 **Staging:**
 
-0. **More spawnable task slots (prerequisite).** Only slots 5–6 are spawnable
-   today (`FIRST_SPAWNABLE=5`, `NUM_TASKS=7`) — two concurrent spawned tasks,
-   and a `builtin | /prog` pipe already uses both. "Every command is a
-   program" needs headroom; raise `NUM_TASKS` (a mechanical resize of the
-   per-task fixed arrays in `tasks.rs` plus the EL0 region pool in `mmu.rs`).
-   Slots, not RAM, are the ceiling (each task costs ~292 KB + code, fine at
-   512 MB). Small.
+0. **More spawnable task slots (prerequisite) — DONE.** Was `NUM_TASKS=7`
+   (slots 5–6, two concurrent spawned tasks); now `NUM_TASKS=10`
+   (`FIRST_SPAWNABLE=5`, so slots 5–9 — **five** spawnable), the headroom a
+   foreground command + a background task + a pipeline need. The per-task arrays
+   in `tasks.rs` and the EL0 table pool in `mmu.rs` (`MAX_EL0_REGIONS`, which
+   must stay equal) were converted to `[const { … }; N]` so they now auto-scale
+   from the one constant; the boot EL0-regions array in `main.rs` is built
+   programmatically for the same reason. One real gotcha caught: the caps `u32`
+   packs the send-mask in the low `NUM_TASKS` bits and the resource caps at bits
+   8/9/10 — at `NUM_TASKS=10` the send-mask reached bit 9 and would have
+   collided with `CAP_CON`, so the resource caps moved to bits 16+. Verified on
+   QEMU: five `pong` instances spawned concurrently (slots 5–9), the sixth
+   refused with "no free task slot", the pipeline and `ps` (now ten slots) still
+   correct, zero `-d int` aborts.
 1. **argv ABI (foundational) — DONE.** New syscalls stage an argv blob and let
    the child read `argc`/args (`ARGS_STAGE`/`GET_ARGC`/`GET_ARG`, mirroring
    `SPAWN_STAGE` + the `stdout_target`/`heap_info` getters); a per-slot kernel
