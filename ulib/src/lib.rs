@@ -15,7 +15,7 @@
 //!
 //! Built for `aarch64-unknown-none` as an ordinary dependency; it links into
 //! each command binary under that binary's PIE flags (the shared
-//! `shell/linker.ld`), so it needs no linker script of its own.
+//! `programs/linker.ld`), so it needs no linker script of its own.
 
 #![no_std]
 

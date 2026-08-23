@@ -138,7 +138,7 @@ Consequences of "real ELF, real relocations, but still narrowly scoped
 — no dynamic linking, no imported symbols, no `exec()`":
 
 - **Entry must still be the first byte, by convention, not necessity.**
-  The linker script (`shell/linker.ld`) still sets the link address to
+  The linker script (`programs/linker.ld`) still sets the link address to
   `0x0` and places the entry symbol first in `.text` via
   `KEEP(*(.text.start))`, keeping `LoadedProgram::entry == ::base`
   trivially true — but `loader.rs` computes `entry` as `base + e_entry`
@@ -149,7 +149,7 @@ Consequences of "real ELF, real relocations, but still narrowly scoped
 - **Still no `.bss`/`.data` for genuine static mutable state.**
   `loader.rs`'s segment-loading code is now generic enough to zero a
   real `.bss` region (any `PT_LOAD` segment where `p_memsz > p_filesz`)
-  — but `shell/linker.ld` still `ASSERT`s `.bss`/`.data` are empty, a
+  — but `programs/linker.ld` still `ASSERT`s `.bss`/`.data` are empty, a
   deliberate, separate decision not to expand this capability just
   because the loading mechanism could support it. A program's "global
   state" still has to be a local variable in `main`'s stack frame, the
@@ -337,13 +337,13 @@ write your own:
 
 1. **New crate**, `no_std` + `no_main`, built for `aarch64-unknown-none`
    (already an installed target — see `rust-toolchain.toml`).
-2. **Copy `shell/linker.ld`** as-is, or adapt it — the constraints above
+2. **Copy `programs/linker.ld`** as-is, or adapt it — the constraints above
    (entry first, no `.bss`/`.data`, the `.rela.dyn`/`.dynsym`/`.dynamic`/
    `.data.rel.ro` sections LLD needs for a well-formed self-relocating
    `ET_DYN`) apply to any program loaded this way, not just the shell.
 3. **Add a target-specific `rustflags` entry** in the workspace's
    `.cargo/config.toml` if your linker script lives somewhere other than
-   `shell/linker.ld` (the existing `[target.aarch64-unknown-none]` section
+   `programs/linker.ld` (the existing `[target.aarch64-unknown-none]` section
    points at a fixed path).
 4. **Write `_start`**, marked `#[no_mangle]` and placed in a
    `.text.start`-linked section so the linker script's `KEEP` picks it up:

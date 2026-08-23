@@ -1,9 +1,11 @@
 [build]
 target = "aarch64-unknown-uefi"
 
-# Used only by the `shell` crate, built explicitly with
+# Used by every userland program (`programs/**`), each built explicitly with
 # `--target aarch64-unknown-none` (see the Makefile) - the workspace-wide
-# default above stays aarch64-unknown-uefi for `kernel`.
+# default above stays aarch64-unknown-uefi for `kernel`. The shared linker
+# script `programs/linker.ld` is referenced by a path relative to the
+# workspace root (where cargo runs), not to any one crate.
 #
 # Position-independent, self-relocating executable (real relocations
 # processed by `loader.rs` at runtime), not the flat, position-dependent
@@ -37,7 +39,7 @@ target = "aarch64-unknown-uefi"
 #   (`mmu.rs`).
 [target.aarch64-unknown-none]
 rustflags = [
-    "-C", "link-arg=-Tshell/linker.ld",
+    "-C", "link-arg=-Tprograms/linker.ld",
     "-C", "relocation-model=pic",
     "-C", "link-arg=-pie",
     "-C", "link-arg=--no-dynamic-linker",

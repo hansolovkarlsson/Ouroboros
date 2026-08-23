@@ -1,0 +1,12 @@
+[package]
+name = "clear"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+syscall-abi = { path = "../../../syscall-abi" }
+ulib = { path = "../../../ulib" }
+
+[[bin]]
+name = "clear"
+path = "src/main.rs"

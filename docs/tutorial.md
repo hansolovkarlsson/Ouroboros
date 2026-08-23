@@ -820,7 +820,7 @@ Userland target configuration:
 # .cargo/config.toml
 [target.aarch64-unknown-none]
 rustflags = [
-    "-C", "link-arg=-Tshell/linker.ld",
+    "-C", "link-arg=-Tprograms/linker.ld",
     "-C", "relocation-model=pic",
     "-C", "link-arg=-pie",              # actually produce ET_DYN + .rela.dyn
     "-C", "link-arg=--no-dynamic-linker",

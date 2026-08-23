@@ -331,7 +331,7 @@ pub struct LoadedProgram {
     pub base: u64,
     pub size: u64,
     /// The address to set `ELR_EL1` to - `base + e_entry`. Happens to
-    /// always equal `base` today (`shell/linker.ld` deliberately keeps
+    /// always equal `base` today (`programs/linker.ld` deliberately keeps
     /// `_start` at output offset 0, via `KEEP(*(.text.start))`), but
     /// callers (`tasks.rs`) should use this field, not assume that
     /// equality themselves - a real ELF's entry point doesn't have to be
@@ -557,7 +557,7 @@ fn find_section_by_name(file: &[u8], header: &ElfHeader, name: &[u8]) -> Result<
 
 /// Copies every `PT_LOAD` segment's file bytes to `region_base +
 /// p_vaddr`, then zeroes `p_memsz - p_filesz` bytes past that - a real
-/// `.bss` region (if a program ever has one - `shell/linker.ld` still
+/// `.bss` region (if a program ever has one - `programs/linker.ld` still
 /// `ASSERT`s it doesn't, see that file's own doc comment) falls out of
 /// this for free, it isn't a separate feature.
 ///

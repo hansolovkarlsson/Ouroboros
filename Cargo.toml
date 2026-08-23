@@ -1,6 +1,21 @@
 [workspace]
 resolver = "2"
-members = ["kernel", "shell", "hello", "pong", "fsd", "upper", "cond", "netd", "args", "ulib", "echo", "uptime", "clear", "ls", "cat", "mkdir", "rmdir", "touch", "rm", "cp", "mv", "writeat", "ping", "resolve", "fetch", "wc", "grep", "head", "syscall-abi"]
+members = [
+    # Kernel + shared libraries stay at the repo root.
+    "kernel", "ulib", "syscall-abi",
+    # All userland programs live under programs/, grouped by role.
+    "programs/shell",
+    "programs/servers/fsd", "programs/servers/cond", "programs/servers/netd",
+    "programs/demos/hello", "programs/demos/pong",
+    "programs/fileutils/ls", "programs/fileutils/cat", "programs/fileutils/mkdir",
+    "programs/fileutils/rmdir", "programs/fileutils/touch", "programs/fileutils/rm",
+    "programs/fileutils/cp", "programs/fileutils/mv", "programs/fileutils/writeat",
+    "programs/textutils/upper", "programs/textutils/wc", "programs/textutils/grep",
+    "programs/textutils/head",
+    "programs/netutils/ping", "programs/netutils/resolve", "programs/netutils/fetch",
+    "programs/shellutils/echo", "programs/shellutils/uptime", "programs/shellutils/clear",
+    "programs/shellutils/args",
+]
 # `shell`, `hello`, and `pong` are built explicitly with `--target
 # aarch64-unknown-none` (see the Makefile) - they must never be pulled
 # into a plain `cargo build`/`clippy` at the repo root, which would try

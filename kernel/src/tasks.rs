@@ -1328,7 +1328,7 @@ pub unsafe fn init(
 ) {
     // Task 0: entry is the program's real ELF entry point, not just its
     // load base - loader.rs computes `entry = base + e_entry` (they
-    // happen to be equal today, since shell/linker.ld keeps `_start` at
+    // happen to be equal today, since programs/linker.ld keeps `_start` at
     // file/VA offset 0, but tasks.rs shouldn't assume that itself - see
     // LoadedProgram::entry's own doc comment). Stack at the top of the
     // loaded region, growing down, same shape every EL0 task has used.

@@ -897,7 +897,7 @@ pub unsafe fn on_tick(frame: *mut Context) {
       <div class="panel-tab"><span>.cargo/config.toml</span><span>userland target</span></div>
       <pre><code>[target.aarch64-unknown-none]
 rustflags = [
-    "-C", "link-arg=-Tshell/linker.ld",
+    "-C", "link-arg=-Tprograms/linker.ld",
     "-C", "relocation-model=pic",
     "-C", "link-arg=<span class="hl">-pie</span>",       <span class="dim"># actually produce ET_DYN + .rela.dyn —</span>
                                   <span class="dim"># pic alone resolves to fixed addresses</span>
@@ -915,7 +915,7 @@ rustflags = [
     </p>
 
     <div class="panel">
-      <div class="panel-tab"><span>shell/linker.ld</span><span>userland layout</span></div>
+      <div class="panel-tab"><span>programs/linker.ld</span><span>userland layout</span></div>
       <pre><code>ENTRY(_start)
 SECTIONS
 {
