@@ -76,6 +76,10 @@ const MAX_BLOCK_SIZE: usize = 4096;
 /// Longest name we keep (ext2 allows 255).
 const NAME_MAX: usize = 255;
 
+/// Cap on a single `write_at` gap zero-fill past EOF (same as the FAT arcs), so
+/// a fat-fingered huge offset can't try to fill the whole volume.
+const MAX_GAP_FILL: u64 = 1 << 20;
+
 /// A decoded inode - only the fields a read-only driver needs.
 #[derive(Clone, Copy)]
 struct Inode {
@@ -826,14 +830,186 @@ impl Fs {
         }
     }
 
+    // ---- write infrastructure (Stage B: data blocks) ------------------------
+
+    /// RMW one pointer (`u32` at `index`) inside an indirect (pointer) block.
+    fn write_indirect_ptr(&mut self, block: u32, index: u32, value: u32) -> Result<(), Error> {
+        self.write_int_at(block as u64 * self.block_size as u64 + index as u64 * 4, value, 4)
+    }
+
+    /// Ensure the file's logical block `logical` is allocated, returning its
+    /// physical block; allocates the block (zeroed) and any indirect blocks
+    /// needed to reach it, updating `node.block`/`node.i_blocks` in place. Only
+    /// direct + single/double indirect (triple returns `DiskFull`).
+    fn ensure_block(&mut self, node: &mut Inode, logical: u32) -> Result<u32, Error> {
+        let existing = self.block_for(node, logical)?;
+        if existing != 0 {
+            return Ok(existing);
+        }
+        let per_blk = self.block_size / 4;
+        let sectors_per_block = (self.block_size as usize / SECTOR_SIZE) as u32;
+        let blk = self.alloc_block(true)?;
+        node.i_blocks += sectors_per_block;
+
+        if logical < DIRECT_BLOCKS as u32 {
+            node.block[logical as usize] = blk;
+        } else if logical < DIRECT_BLOCKS as u32 + per_blk {
+            if node.block[12] == 0 {
+                node.block[12] = self.alloc_block(true)?;
+                node.i_blocks += sectors_per_block;
+            }
+            self.write_indirect_ptr(node.block[12], logical - DIRECT_BLOCKS as u32, blk)?;
+        } else if logical < DIRECT_BLOCKS as u32 + per_blk + per_blk * per_blk {
+            let dd = logical - DIRECT_BLOCKS as u32 - per_blk;
+            let (l1, l2) = (dd / per_blk, dd % per_blk);
+            if node.block[13] == 0 {
+                node.block[13] = self.alloc_block(true)?;
+                node.i_blocks += sectors_per_block;
+            }
+            let mut sib = self.indirect_lookup(node.block[13], l1)?;
+            if sib == 0 {
+                sib = self.alloc_block(true)?;
+                node.i_blocks += sectors_per_block;
+                self.write_indirect_ptr(node.block[13], l1, sib)?;
+            }
+            self.write_indirect_ptr(sib, l2, blk)?;
+        } else {
+            return Err(Error::DiskFull); // triple indirect unsupported
+        }
+        Ok(blk)
+    }
+
+    /// Free every data block of `node` (direct + indirect data blocks *and* the
+    /// indirect pointer blocks themselves). Reads indirection while it's still
+    /// intact, then frees the pointer blocks last.
+    fn free_all_blocks(&mut self, node: &Inode) -> Result<(), Error> {
+        let bs = self.block_size as usize;
+        let per_blk = self.block_size / 4;
+        let nblocks = (node.size as usize).div_ceil(bs) as u32;
+        for d in 0..nblocks {
+            let phys = self.block_for(node, d)?;
+            if phys != 0 {
+                self.free_block(phys)?;
+            }
+        }
+        if node.block[12] != 0 {
+            self.free_block(node.block[12])?;
+        }
+        if node.block[13] != 0 {
+            for l1 in 0..per_blk {
+                let sib = self.indirect_lookup(node.block[13], l1)?;
+                if sib != 0 {
+                    self.free_block(sib)?;
+                }
+            }
+            self.free_block(node.block[13])?;
+        }
+        Ok(())
+    }
+
+    // ---- write surface ------------------------------------------------------
+
+    /// Create a file with exactly `data`, or fully replace an existing file's
+    /// contents. Allocates and writes the new blocks, points the inode at them,
+    /// then frees the old blocks (write-new-before-free, the FAT arcs' ordering).
+    pub fn write_file(&mut self, path: &str, data: &[u8]) -> Result<(), Error> {
+        let (parent_path, name) = split_parent(path).ok_or(Error::InvalidName)?;
+        let (parent_ino, mut parent) = self.resolve(parent_path)?;
+        if !parent.is_dir() {
+            return Err(Error::NotADirectory);
+        }
+        let existing = self.lookup_in(&parent, name)?;
+        if let Some((_, mode)) = existing {
+            if mode & S_IFMT == S_IFDIR {
+                return Err(Error::NotAFile);
+            }
+        }
+
+        // Allocate + write the new data blocks first (nothing existing touched).
+        let mut node = Inode {
+            mode: NEW_FILE_MODE,
+            links: 1,
+            size: data.len() as u32,
+            i_blocks: 0,
+            block: [0; INODE_BLOCK_PTRS],
+        };
+        self.write_file_data(&mut node, data)?;
+
+        match existing {
+            Some((ino, _)) => {
+                let old = self.read_inode(ino)?;
+                node.mode = old.mode;
+                node.links = old.links;
+                self.write_inode(ino, &node)?;
+                self.free_all_blocks(&old)
+            }
+            None => {
+                let ino = self.alloc_inode(false)?;
+                self.write_inode(ino, &node)?;
+                self.insert_dirent(parent_ino, &mut parent, name, ino, FT_REG)
+            }
+        }
+    }
+
+    /// Allocate and write every data block of `data` into `node` (block pointers
+    /// + `i_blocks` filled in). Shared by `write_file`.
+    fn write_file_data(&mut self, node: &mut Inode, data: &[u8]) -> Result<(), Error> {
+        let bs = self.block_size as usize;
+        let nblocks = data.len().div_ceil(bs);
+        let mut buf = [0u8; MAX_BLOCK_SIZE];
+        for d in 0..nblocks {
+            let phys = self.ensure_block(node, d as u32)?;
+            let start = d * bs;
+            let end = ((d + 1) * bs).min(data.len());
+            buf[..end - start].copy_from_slice(&data[start..end]);
+            buf[end - start..bs].fill(0);
+            self.write_block(phys, &buf[..bs])?;
+        }
+        Ok(())
+    }
+
+    /// Write `data` at byte `offset`, extending the file as needed without
+    /// rewriting the bytes before `offset` - the streaming/append primitive
+    /// (`cp`/`>>`/`writeat`). Grow-only size; a gap past EOF is zero-filled
+    /// (bounded by `MAX_GAP_FILL`); blocks are allocated on demand.
+    pub fn write_at(&mut self, path: &str, offset: u64, data: &[u8]) -> Result<(), Error> {
+        if data.is_empty() {
+            return Ok(());
+        }
+        let (ino, mut node) = self.resolve(path)?;
+        if !node.is_reg() {
+            return Err(Error::NotAFile);
+        }
+        let old_size = node.size as u64;
+        if offset > old_size && offset - old_size > MAX_GAP_FILL {
+            return Err(Error::InvalidOffset);
+        }
+        let bs = self.block_size as u64;
+        let write_start = old_size.min(offset);
+        let write_end = offset + data.len() as u64;
+
+        let mut buf = [0u8; MAX_BLOCK_SIZE];
+        let mut pos = write_start;
+        while pos < write_end {
+            let logical = (pos / bs) as u32;
+            let in_block = (pos % bs) as usize;
+            let phys = self.ensure_block(&mut node, logical)?;
+            let n = (bs as usize - in_block).min((write_end - pos) as usize);
+            self.read_block(phys, &mut buf[..bs as usize])?;
+            for i in 0..n {
+                let fp = pos + i as u64;
+                buf[in_block + i] = if fp >= offset { data[(fp - offset) as usize] } else { 0 };
+            }
+            self.write_block(phys, &buf[..bs as usize])?;
+            pos += n as u64;
+        }
+
+        node.size = old_size.max(write_end) as u32;
+        self.write_inode(ino, &node)
+    }
+
     // ---- write surface: still read-only (later stages) ----------------------
 
-    pub fn write_file(&mut self, _path: &str, _data: &[u8]) -> Result<(), Error> {
-        Err(Error::ReadOnly)
-    }
-    pub fn write_at(&mut self, _path: &str, _offset: u64, _data: &[u8]) -> Result<(), Error> {
-        Err(Error::ReadOnly)
-    }
     pub fn mkdir(&mut self, _path: &str) -> Result<(), Error> {
         Err(Error::ReadOnly)
     }
