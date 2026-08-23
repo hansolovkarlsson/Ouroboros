@@ -639,12 +639,34 @@ phase:
 
 **New gaps from the /bin + pipelines + filesystem work (2026-08-22):**
 
-- **Real-hardware regression pass (outstanding debt).** The whole `/bin` command
-  surface, multi-stage pipelines, the netd commands, Stage 0's slot bump, and
-  the VFS/GPT work are all **QEMU-verified only** — a large body of change
-  resting on the emulator. A pass over it on real Parallels (via
-  `make test-parallels` or a physical stick) is the biggest outstanding
-  confidence gap. See the [userland & pipelines postmortem](userland-and-pipelines-postmortem.md).
+- **Real-hardware regression pass — DONE (2026-08-23), and it found a real
+  USB bug.** Ran on real Parallels hardware via `prlctl`. **Part 1 (boot /
+  kernel / shell): green** — boots to a working shell, `cond`/`netd`/`fsd` all
+  supervised, `ps` shows the correct task table incl. the raised slot count,
+  and `selftest` (the PIE/relocation self-test) passes; so the housekeeping
+  (moving `fsd`'s source, the `build/` reorg), the +1700 lines of exFAT/ext2 in
+  the `fsd` binary, and the slot bump did **not** regress the hardware boot
+  path. **Part 2 (filesystem on a real USB stick):** the exFAT read-write
+  driver is confirmed good on hardware — booting from a USB stick (an
+  `espexfat.img` written to it) auto-mounts the exFAT partition and reads/writes
+  work. **But the pass surfaced a genuine USB-subsystem bug** (see next item),
+  invisible on QEMU, where the keyboard is synthetic and storage is virtio-blk.
+- **USB keyboard ↔ mass-storage contention on xHCI (real-hardware bug, found
+  by the pass).** On Parallels the xHCI/USB stack can't reliably serve the USB
+  keyboard *and* USB mass storage at once — an inverse correlation observed
+  across two boot configs: booting from the `.hdd` with the stick passed through
+  late, the **keyboard works but storage reads degrade to device-I/O errors
+  shortly after mount**; booting from the USB stick itself, **storage works end
+  to end but the keyboard is never addressed** (no shell input). Points at
+  `xhci.rs`'s device management — the "up to 4 concurrently addressed devices"
+  limit and enumeration/addressing *order* — and/or `usb_msd.rs` read
+  recovery (SCSI Unit Attention / endpoint stall). A USB-subsystem robustness
+  issue, not a filesystem-driver bug (the FS drivers read/wrote fine whenever
+  the block layer served them). The scoped follow-up: make the xHCI driver keep
+  a HID keyboard *and* a mass-storage device concurrently live, and recover a
+  mass-storage endpoint that errors mid-session. Postmortem-worthy. See the
+  [userland & pipelines postmortem](userland-and-pipelines-postmortem.md) for
+  the QEMU-only body of work this pass was checking.
 - **GPT is parsed but not validated on read.** `fsd`'s `partition::discover`
   trusts the "EFI PART" signature; it doesn't check the GPT header/entry-array
   CRC32s or fall back to the backup GPT on a corrupt primary. Fine for the

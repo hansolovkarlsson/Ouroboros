@@ -147,6 +147,35 @@ FAT32 + exFAT + ext2 — `fsd` reads and writes all three through one unchanged
 different (inode-based, case-sensitive) filesystem slotted in as a third enum arm
 with zero changes above `fsd`.
 
+**And then the real-hardware pass — which did exactly what it's for: found a bug
+QEMU can't show.** After a session-long pile of QEMU-only work (exFAT, ext2,
+`/bin`, pipelines, the housekeeping), we took it to a real Parallels VM via
+`prlctl` (start / send-key-event / capture, reading the screenshots back).
+**Part 1 was clean:** boots to a shell, all servers supervised, `ps` correct,
+`selftest` (the relocation self-test) passes — none of the churn regressed the
+hardware boot path.
+
+**Part 2 got interesting.** Parallels exposes no disk to the kernel except USB
+mass storage, so testing the filesystem work meant a real USB stick (an
+`espexfat.img` written to it). First attempt — boot from the `.hdd`, stick
+passed through — showed `fsd: exFAT mounted` but then every read failed with
+"device I/O error", even reads of the *same sectors* the mount had just read
+successfully. Then Hans ran his own experiment: detach the `.hdd`/CD entirely so
+the VM boots *from the stick's* FAT32 ESP — and exFAT auto-mounted and read/wrote
+fine. But when I tried to drive that config, the keyboard was completely dead —
+not even a builtin registered.
+
+The two configs form an inverse correlation: `.hdd`-boot → keyboard works,
+storage reads degrade; USB-boot → storage works, keyboard dead. That's the
+diagnosis: the xHCI/USB stack can't reliably keep a USB keyboard *and* a USB
+mass-storage device live at the same time on this hardware (the "up to 4
+concurrently addressed devices" limit + enumeration order in `xhci.rs`, and/or
+mass-storage endpoint recovery in `usb_msd.rs`). It's a USB-subsystem robustness
+bug, not a filesystem bug — the FS drivers read and wrote correctly whenever the
+block layer actually served them. Recorded in the roadmap; it's the next real
+debugging target, and postmortem-worthy. The satisfying part: the whole reason
+to run on real hardware is to find precisely this kind of thing, and it did.
+
 ## 2026-08-22 — the userland day: /bin, pipelines, and the filesystem arc begins
 
 A long single day that took the shell from "every command is a builtin compiled
