@@ -37,7 +37,7 @@
 //! [`Error::ReadOnly`]. Root is always inode 2.
 
 use crate::disk::Disk;
-use crate::fat32::Error;
+use crate::fat32::{split_parent, Error};
 
 const SECTOR_SIZE: usize = 512;
 /// The ext2 superblock always starts 1024 bytes into the volume, whatever the
@@ -50,6 +50,20 @@ const ROOT_INO: u32 = 2;
 const S_IFMT: u16 = 0xf000;
 const S_IFREG: u16 = 0x8000; // regular file
 const S_IFDIR: u16 = 0x4000; // directory
+
+/// Default modes for entries this driver creates: a 0644 regular file, a 0755
+/// directory (the file-type bits ORed with rwx bits).
+const NEW_FILE_MODE: u16 = S_IFREG | 0o644;
+#[allow(dead_code)] // Stage C (mkdir)
+const NEW_DIR_MODE: u16 = S_IFDIR | 0o755;
+
+/// Directory-entry `file_type` values (when the `filetype` feature is present).
+const FT_REG: u8 = 1;
+#[allow(dead_code)] // Stage C (mkdir)
+const FT_DIR: u8 = 2;
+
+/// `s_feature_incompat` bit for the `filetype` feature.
+const INCOMPAT_FILETYPE: u32 = 0x0002;
 
 /// Direct block pointers in an inode (indices 0..12); [12]/[13]/[14] are the
 /// single / double / triple indirect pointers.
@@ -66,7 +80,13 @@ const NAME_MAX: usize = 255;
 #[derive(Clone, Copy)]
 struct Inode {
     mode: u16,
+    /// Hard-link count (`i_links_count`) - needed by the write path (`rm`
+    /// decrements it and frees the inode at zero; `mkdir` bumps the parent's).
+    links: u16,
     size: u32,
+    /// `i_blocks`, in 512-byte units (not filesystem blocks) - the write path
+    /// keeps it consistent as it allocates/frees blocks.
+    i_blocks: u32,
     /// The 15 block pointers, verbatim.
     block: [u32; INODE_BLOCK_PTRS],
 }
@@ -104,6 +124,21 @@ pub struct Fs {
     inode_size: u32,
     /// Block number of the block group descriptor table.
     bgdt_block: u32,
+    // ---- fields the write path needs (Stage A onward) --------------------
+    /// Blocks per group (for locating a group's block bitmap coverage).
+    blocks_per_group: u32,
+    /// The superblock's block number (`s_first_data_block`): 1 for 1 KiB
+    /// blocks, 0 otherwise. Block bitmaps count from here.
+    first_data_block: u32,
+    /// First non-reserved inode - new files/dirs allocate at or above it.
+    #[allow(dead_code)]
+    first_ino: u32,
+    /// Number of block groups (`ceil(inodes_count / inodes_per_group)`).
+    groups_count: u32,
+    /// Whether the volume has the `filetype` incompat feature - if so, byte 7 of
+    /// a directory entry is `file_type`; if not, it's the high byte of a u16
+    /// `name_len` (so writes must leave it `0`). mke2fs sets this by default.
+    has_filetype: bool,
 }
 
 impl Fs {
@@ -142,6 +177,16 @@ impl Fs {
         if inode_size == 0 || inodes_per_group == 0 {
             return Err(Error::NotExt2);
         }
+        let inodes_count = u32::from_le_bytes([sb[0], sb[1], sb[2], sb[3]]);
+        let blocks_per_group = u32::from_le_bytes([sb[32], sb[33], sb[34], sb[35]]);
+        let first_ino = if rev_level >= 1 {
+            u32::from_le_bytes([sb[84], sb[85], sb[86], sb[87]])
+        } else {
+            11
+        };
+        if blocks_per_group == 0 {
+            return Err(Error::NotExt2);
+        }
 
         Ok(Fs {
             disk,
@@ -152,6 +197,12 @@ impl Fs {
             // The block group descriptor table is the block right after the one
             // holding the superblock (first_data_block).
             bgdt_block: first_data_block + 1,
+            blocks_per_group,
+            first_data_block,
+            first_ino,
+            groups_count: inodes_count.div_ceil(inodes_per_group),
+            has_filetype: u32::from_le_bytes([sb[96], sb[97], sb[98], sb[99]]) & INCOMPAT_FILETYPE
+                != 0,
         })
     }
 
@@ -256,12 +307,20 @@ impl Fs {
         let i = &win[within..within + 128];
         let mode = u16::from_le_bytes([i[0], i[1]]);
         let size = u32::from_le_bytes([i[4], i[5], i[6], i[7]]);
+        let links = u16::from_le_bytes([i[26], i[27]]);
+        let i_blocks = u32::from_le_bytes([i[28], i[29], i[30], i[31]]);
         let mut block = [0u32; INODE_BLOCK_PTRS];
         for (b, slot) in block.iter_mut().enumerate() {
             let o = 40 + b * 4;
             *slot = u32::from_le_bytes([i[o], i[o + 1], i[o + 2], i[o + 3]]);
         }
-        Ok(Inode { mode, size, block })
+        Ok(Inode {
+            mode,
+            links,
+            size,
+            i_blocks,
+            block,
+        })
     }
 
     /// Call `f` for each entry in directory `inode`, stopping early when it
@@ -316,7 +375,14 @@ impl Fs {
     /// (Unix), unlike FAT/exFAT. `.`/`..` resolve naturally (they're real
     /// directory entries in ext2).
     fn find(&mut self, path: &str) -> Result<Inode, Error> {
-        let mut inode = self.read_inode(ROOT_INO)?;
+        Ok(self.resolve(path)?.1)
+    }
+
+    /// Like [`find`](Self::find), but also returns the inode *number* - the
+    /// write path needs it to write an inode back after modifying it.
+    fn resolve(&mut self, path: &str) -> Result<(u32, Inode), Error> {
+        let mut ino = ROOT_INO;
+        let mut inode = self.read_inode(ino)?;
         for component in path.split('/').filter(|c| !c.is_empty()) {
             if !inode.is_dir() {
                 return Err(Error::NotADirectory);
@@ -330,10 +396,10 @@ impl Fs {
                     false
                 }
             })?;
-            let ino = found.ok_or(Error::NotFound)?;
+            ino = found.ok_or(Error::NotFound)?;
             inode = self.read_inode(ino)?;
         }
-        Ok(inode)
+        Ok((ino, inode))
     }
 
     /// Lists a directory, calling `f(name, is_dir, size)` for each entry. `""`
@@ -440,7 +506,327 @@ impl Fs {
         Ok(done)
     }
 
-    // ---- write surface: read-only (write is a separate milestone) -----------
+    // ---- write infrastructure (Stage A) -------------------------------------
+    //
+    // ext2 allocation is bitmap-based: each block group has a block bitmap and
+    // an inode bitmap. Allocating flips a bitmap bit AND decrements the free
+    // counts in both the group descriptor and the superblock (e2fsck checks all
+    // three agree). Same claim-before-use discipline as the FAT arcs.
+
+    /// Write one filesystem block from `buf` (`buf.len() >= block_size`).
+    fn write_block(&mut self, block: u32, buf: &[u8]) -> Result<(), Error> {
+        let lba = self.block_lba(block);
+        for s in 0..self.block_size as usize / SECTOR_SIZE {
+            let mut sec = [0u8; SECTOR_SIZE];
+            sec.copy_from_slice(&buf[s * SECTOR_SIZE..(s + 1) * SECTOR_SIZE]);
+            self.disk.write_sector(lba + s as u64, &sec)?;
+        }
+        Ok(())
+    }
+
+    /// Byte offset of block group `group`'s 32-byte descriptor.
+    fn desc_byte(&self, group: u32) -> u64 {
+        self.bgdt_block as u64 * self.block_size as u64 + group as u64 * 32
+    }
+
+    /// Read a `u16` at a partition-relative byte offset (fields here are aligned,
+    /// never straddling a sector).
+    fn read_u16_at(&mut self, byte_offset: u64) -> Result<u16, Error> {
+        let lba = self.part_lba as u64 + byte_offset / SECTOR_SIZE as u64;
+        let w = (byte_offset % SECTOR_SIZE as u64) as usize;
+        let mut sec = [0u8; SECTOR_SIZE];
+        self.disk.read_sector(lba, &mut sec)?;
+        Ok(u16::from_le_bytes([sec[w], sec[w + 1]]))
+    }
+
+    /// RMW `len` bytes (<= 4) of a little-endian integer at a partition-relative
+    /// byte offset.
+    fn write_int_at(&mut self, byte_offset: u64, value: u32, len: usize) -> Result<(), Error> {
+        let lba = self.part_lba as u64 + byte_offset / SECTOR_SIZE as u64;
+        let w = (byte_offset % SECTOR_SIZE as u64) as usize;
+        let mut sec = [0u8; SECTOR_SIZE];
+        self.disk.read_sector(lba, &mut sec)?;
+        sec[w..w + len].copy_from_slice(&value.to_le_bytes()[..len]);
+        self.disk.write_sector(lba, &sec)?;
+        Ok(())
+    }
+
+    /// Add `delta` to a `u16` group-descriptor field at `desc + field_off`.
+    fn adjust_group_u16(&mut self, group: u32, field_off: u64, delta: i32) -> Result<(), Error> {
+        let at = self.desc_byte(group) + field_off;
+        let v = self.read_u16_at(at)? as i32 + delta;
+        self.write_int_at(at, v as u32, 2)
+    }
+
+    /// Add `delta` to a `u32` superblock free-count field at `SUPERBLOCK + off`.
+    fn adjust_super_u32(&mut self, field_off: u64, delta: i32) -> Result<(), Error> {
+        let at = SUPERBLOCK_OFFSET + field_off;
+        let v = self.read_u32_at(at)? as i32 + delta;
+        self.write_int_at(at, v as u32, 4)
+    }
+
+    /// Find the first free bit (`< max_bits`) in the bitmap at `bitmap_block`,
+    /// set it, write the bitmap back, and return the bit index. `None` if full.
+    fn bitmap_alloc(&mut self, bitmap_block: u32, max_bits: u32) -> Result<Option<u32>, Error> {
+        let bs = self.block_size as usize;
+        let mut buf = [0u8; MAX_BLOCK_SIZE];
+        self.read_block(bitmap_block, &mut buf[..bs])?;
+        let max_bytes = (max_bits as usize).div_ceil(8).min(bs);
+        for byte in 0..max_bytes {
+            if buf[byte] != 0xff {
+                let bit = buf[byte].trailing_ones();
+                let global = byte as u32 * 8 + bit;
+                if global >= max_bits {
+                    break;
+                }
+                buf[byte] |= 1 << bit;
+                self.write_block(bitmap_block, &buf[..bs])?;
+                return Ok(Some(global));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Clear bit `bit` in the bitmap at `bitmap_block` (free it).
+    #[allow(dead_code)] // Stage C (rm/rmdir)
+    fn bitmap_free(&mut self, bitmap_block: u32, bit: u32) -> Result<(), Error> {
+        let bs = self.block_size as usize;
+        let mut buf = [0u8; MAX_BLOCK_SIZE];
+        self.read_block(bitmap_block, &mut buf[..bs])?;
+        buf[(bit / 8) as usize] &= !(1u8 << (bit % 8));
+        self.write_block(bitmap_block, &buf[..bs])
+    }
+
+    /// Allocate one data block: find a free bit in some group's block bitmap,
+    /// set it, decrement the group + superblock free-block counts, return the
+    /// block number. Optionally zeroes it.
+    fn alloc_block(&mut self, zero: bool) -> Result<u32, Error> {
+        for group in 0..self.groups_count {
+            let bmp = self.read_u32_at(self.desc_byte(group))?;
+            if let Some(bit) = self.bitmap_alloc(bmp, self.blocks_per_group)? {
+                let block = self.first_data_block + group * self.blocks_per_group + bit;
+                self.adjust_group_u16(group, 12, -1)?; // bg_free_blocks_count
+                self.adjust_super_u32(12, -1)?; // s_free_blocks_count
+                if zero {
+                    self.zero_block(block)?;
+                }
+                return Ok(block);
+            }
+        }
+        Err(Error::DiskFull)
+    }
+
+    /// Free a data block: clear its block-bitmap bit and bump the free counts.
+    #[allow(dead_code)] // Stage B overwrite / Stage C rm
+    fn free_block(&mut self, block: u32) -> Result<(), Error> {
+        if block < self.first_data_block {
+            return Ok(());
+        }
+        let rel = block - self.first_data_block;
+        let group = rel / self.blocks_per_group;
+        let bit = rel % self.blocks_per_group;
+        let bmp = self.read_u32_at(self.desc_byte(group))?;
+        self.bitmap_free(bmp, bit)?;
+        self.adjust_group_u16(group, 12, 1)?;
+        self.adjust_super_u32(12, 1)
+    }
+
+    /// Zero a whole filesystem block.
+    fn zero_block(&mut self, block: u32) -> Result<(), Error> {
+        let z = [0u8; MAX_BLOCK_SIZE];
+        self.write_block(block, &z[..self.block_size as usize])
+    }
+
+    /// Allocate an inode: find a free bit in some group's inode bitmap (reserved
+    /// inodes are already marked used), set it, decrement free-inode counts, and
+    /// for a directory bump `bg_used_dirs_count`. Returns the inode number.
+    fn alloc_inode(&mut self, is_dir: bool) -> Result<u32, Error> {
+        for group in 0..self.groups_count {
+            let bmp = self.read_u32_at(self.desc_byte(group) + 4)?;
+            if let Some(bit) = self.bitmap_alloc(bmp, self.inodes_per_group)? {
+                let ino = group * self.inodes_per_group + bit + 1;
+                self.adjust_group_u16(group, 14, -1)?; // bg_free_inodes_count
+                self.adjust_super_u32(16, -1)?; // s_free_inodes_count
+                if is_dir {
+                    self.adjust_group_u16(group, 16, 1)?; // bg_used_dirs_count
+                }
+                return Ok(ino);
+            }
+        }
+        Err(Error::DiskFull)
+    }
+
+    /// Free an inode: clear its inode-bitmap bit, bump free-inode counts, and for
+    /// a directory decrement `bg_used_dirs_count`.
+    #[allow(dead_code)] // Stage C (rm/rmdir)
+    fn free_inode(&mut self, ino: u32, is_dir: bool) -> Result<(), Error> {
+        let group = (ino - 1) / self.inodes_per_group;
+        let bit = (ino - 1) % self.inodes_per_group;
+        let bmp = self.read_u32_at(self.desc_byte(group) + 4)?;
+        self.bitmap_free(bmp, bit)?;
+        self.adjust_group_u16(group, 14, 1)?;
+        self.adjust_super_u32(16, 1)?;
+        if is_dir {
+            self.adjust_group_u16(group, 16, -1)?;
+        }
+        Ok(())
+    }
+
+    /// Write inode `ino`'s managed fields (mode, links, size, i_blocks, the 15
+    /// block pointers) from `node`, zeroing the rest of the slot for a freshly
+    /// allocated inode. Assumes `inode_size <= 256` (mke2fs's default) so the
+    /// slot fits the 2-sector window.
+    fn write_inode(&mut self, ino: u32, node: &Inode) -> Result<(), Error> {
+        let group = (ino - 1) / self.inodes_per_group;
+        let index = (ino - 1) % self.inodes_per_group;
+        let inode_table = self.read_u32_at(self.desc_byte(group) + 8)?;
+        let inode_byte =
+            inode_table as u64 * self.block_size as u64 + index as u64 * self.inode_size as u64;
+        let lba = self.part_lba as u64 + inode_byte / SECTOR_SIZE as u64;
+        let within = (inode_byte % SECTOR_SIZE as u64) as usize;
+
+        let mut win = [0u8; SECTOR_SIZE * 2];
+        let mut sec = [0u8; SECTOR_SIZE];
+        self.disk.read_sector(lba, &mut sec)?;
+        win[..SECTOR_SIZE].copy_from_slice(&sec);
+        self.disk.read_sector(lba + 1, &mut sec)?;
+        win[SECTOR_SIZE..].copy_from_slice(&sec);
+
+        let sz = (self.inode_size as usize).min(256);
+        let slot = &mut win[within..within + sz];
+        slot.fill(0);
+        slot[0..2].copy_from_slice(&node.mode.to_le_bytes());
+        slot[4..8].copy_from_slice(&node.size.to_le_bytes());
+        slot[26..28].copy_from_slice(&node.links.to_le_bytes());
+        slot[28..32].copy_from_slice(&node.i_blocks.to_le_bytes());
+        for (b, ptr) in node.block.iter().enumerate() {
+            let o = 40 + b * 4;
+            slot[o..o + 4].copy_from_slice(&ptr.to_le_bytes());
+        }
+
+        let mut out = [0u8; SECTOR_SIZE];
+        out.copy_from_slice(&win[..SECTOR_SIZE]);
+        self.disk.write_sector(lba, &out)?;
+        out.copy_from_slice(&win[SECTOR_SIZE..]);
+        self.disk.write_sector(lba + 1, &out)?;
+        Ok(())
+    }
+
+    /// Insert a `(name -> ino)` record into directory `dir` (inode number
+    /// `dir_ino`). Uses the classic ext2 slack-split: find an entry whose
+    /// `rec_len` has room to spare after its real length and carve the new entry
+    /// out of the slack; if no block has room, grow the directory by one block.
+    fn insert_dirent(
+        &mut self,
+        dir_ino: u32,
+        dir: &mut Inode,
+        name: &str,
+        ino: u32,
+        ftype: u8,
+    ) -> Result<(), Error> {
+        let name_len = name.len();
+        if name_len == 0 || name_len > 255 {
+            return Err(Error::InvalidName);
+        }
+        let needed = round4(8 + name_len);
+        let bs = self.block_size as usize;
+        let ftype_byte = if self.has_filetype { ftype } else { 0 };
+        let nblocks = dir.size as usize / bs;
+        let mut buf = [0u8; MAX_BLOCK_SIZE];
+
+        for li in 0..nblocks {
+            let phys = self.block_for(dir, li as u32)?;
+            if phys == 0 {
+                continue;
+            }
+            self.read_block(phys, &mut buf[..bs])?;
+            let mut off = 0usize;
+            while off + 8 <= bs {
+                let e = &buf[off..];
+                let e_ino = u32::from_le_bytes([e[0], e[1], e[2], e[3]]);
+                let rec_len = u16::from_le_bytes([e[4], e[5]]) as usize;
+                let e_name_len = e[6] as usize;
+                if rec_len < 8 || off + rec_len > bs {
+                    break;
+                }
+                let used = if e_ino == 0 { 0 } else { round4(8 + e_name_len) };
+                if rec_len - used >= needed {
+                    let new_off = off + used;
+                    let new_rec = rec_len - used;
+                    if e_ino != 0 {
+                        buf[off + 4..off + 6].copy_from_slice(&(used as u16).to_le_bytes());
+                    }
+                    write_dirent(&mut buf[new_off..], ino, new_rec, name, ftype_byte);
+                    self.write_block(phys, &buf[..bs])?;
+                    return Ok(());
+                }
+                off += rec_len;
+            }
+        }
+
+        // No slack anywhere - grow the directory by one block (direct pointers
+        // only; a directory needing > 12 blocks isn't a case this system hits).
+        if nblocks >= DIRECT_BLOCKS {
+            return Err(Error::DiskFull);
+        }
+        let newblk = self.alloc_block(true)?;
+        let mut nb = [0u8; MAX_BLOCK_SIZE];
+        write_dirent(&mut nb[..bs], ino, bs, name, ftype_byte);
+        self.write_block(newblk, &nb[..bs])?;
+        dir.block[nblocks] = newblk;
+        dir.size += bs as u32;
+        dir.i_blocks += (bs / SECTOR_SIZE) as u32;
+        self.write_inode(dir_ino, dir)
+    }
+
+    // ---- write surface ------------------------------------------------------
+
+    /// Create an empty file, or succeed as a no-op if a file already exists
+    /// there (no RTC to update). An empty file needs no data blocks - just an
+    /// inode (links 1, size 0) and a directory entry.
+    pub fn touch(&mut self, path: &str) -> Result<(), Error> {
+        let (parent_path, name) = split_parent(path).ok_or(Error::InvalidName)?;
+        let (parent_ino, mut parent) = self.resolve(parent_path)?;
+        if !parent.is_dir() {
+            return Err(Error::NotADirectory);
+        }
+        match self.lookup_in(&parent, name)? {
+            Some((_, mode)) if mode & S_IFMT == S_IFDIR => return Err(Error::NotAFile),
+            Some(_) => return Ok(()), // a file already exists - no-op
+            None => {}
+        }
+        let ino = self.alloc_inode(false)?;
+        let node = Inode {
+            mode: NEW_FILE_MODE,
+            links: 1,
+            size: 0,
+            i_blocks: 0,
+            block: [0; INODE_BLOCK_PTRS],
+        };
+        self.write_inode(ino, &node)?;
+        self.insert_dirent(parent_ino, &mut parent, name, ino, FT_REG)
+    }
+
+    /// Look up `name` in directory `dir`, returning `(inode number, i_mode)` if
+    /// present. The kind check callers need without a second inode read for the
+    /// name match itself.
+    fn lookup_in(&mut self, dir: &Inode, name: &str) -> Result<Option<(u32, u16)>, Error> {
+        let mut found: Option<u32> = None;
+        self.walk_dir(dir, |entry| {
+            if entry.name() == name {
+                found = Some(entry.inode);
+                true
+            } else {
+                false
+            }
+        })?;
+        match found {
+            Some(ino) => Ok(Some((ino, self.read_inode(ino)?.mode))),
+            None => Ok(None),
+        }
+    }
+
+    // ---- write surface: still read-only (later stages) ----------------------
 
     pub fn write_file(&mut self, _path: &str, _data: &[u8]) -> Result<(), Error> {
         Err(Error::ReadOnly)
@@ -454,13 +840,25 @@ impl Fs {
     pub fn rmdir(&mut self, _path: &str) -> Result<(), Error> {
         Err(Error::ReadOnly)
     }
-    pub fn touch(&mut self, _path: &str) -> Result<(), Error> {
-        Err(Error::ReadOnly)
-    }
     pub fn rm(&mut self, _path: &str) -> Result<(), Error> {
         Err(Error::ReadOnly)
     }
     pub fn mv(&mut self, _src: &str, _dst: &str) -> Result<(), Error> {
         Err(Error::ReadOnly)
     }
+}
+
+/// Round `n` up to a multiple of 4 - ext2 directory entries are 4-byte aligned.
+fn round4(n: usize) -> usize {
+    n.div_ceil(4) * 4
+}
+
+/// Write a directory entry `(ino, rec_len, name_len, file_type, name)` at the
+/// start of `dst` (`dst.len() >= 8 + name.len()`).
+fn write_dirent(dst: &mut [u8], ino: u32, rec_len: usize, name: &str, ftype: u8) {
+    dst[0..4].copy_from_slice(&ino.to_le_bytes());
+    dst[4..6].copy_from_slice(&(rec_len as u16).to_le_bytes());
+    dst[6] = name.len() as u8;
+    dst[7] = ftype;
+    dst[8..8 + name.len()].copy_from_slice(name.as_bytes());
 }
