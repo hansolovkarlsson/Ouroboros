@@ -498,11 +498,54 @@ name from `/bin`, with args and an environment" before most commands are
 externalized — a satisfying, self-contained first target.
 
 **Deferred, noted:** exporting the environment into child programs (a second,
-argv-like ABI); multi-stage `a | b | c` of standalone programs (needs the
-Stage 0 slots plus shell-side chaining); and a minimal built-in fallback set
-for booting without `/bin`. `/bin` needs real FAT32, so this is a
-`make run-image` / QEMU-verified feature primarily (like the rest of the
-disk surface); on Parallels it needs a disk (USB stick, reads-only posture).
+argv-like ABI); and a minimal built-in fallback set for booting without `/bin`.
+`/bin` needs real FAT32, so this is a `make run-image` / QEMU-verified feature
+primarily (like the rest of the disk surface); on Parallels it needs a disk
+(USB stick, reads-only posture).
+
+## Multi-stage program pipelines (`a | b | c`) (scoped, IN PROGRESS)
+
+The next arc, chosen after the standalone-binaries arc completed: turn the
+two-stage pipe into a real N-stage pipeline of standalone programs. Stage 0
+(five spawnable slots) and the netd-command increment (which proved runtime
+`TO_NET` delegation) already landed the prerequisites; each pipeline link is
+one producer→consumer `DELEGATE`, and a linear chain only needs the existing
+*one-target-per-task* delegation (task *a* delegates to *b*, *b* to *c* — each
+task has exactly one downstream target, so the general/transitive delegation in
+"What's next" item 1 is **not** required for a linear pipe).
+
+**Where it stands today (the patchwork to replace):** `parse_pipe` splits on
+the *first* `|` only; the right side must be a single token with **no
+arguments** and an explicit path (`cmd_pipeline`/`cmd_pipeline_prog` use
+`spawn_path`, cwd-relative, **not** PATH); and a filter that isn't the last
+stage couldn't route its output onward. The last limitation is the one already
+fixed:
+
+1. **Chainable filter shape — DONE.** `upper` was rewritten over `ulib` to read
+   stdin (`MSG_RECV`) and write to its **stdout target** (`write_out`) instead
+   of a hardcoded console, propagating end-of-stream (`end_of_stream`) so the
+   next stage finishes. No regression to `X | upper` (target is the console
+   there); it can now be a *middle* stage. The reference shape every future
+   filter copies.
+2. **N-stage parsing.** Generalize `parse_pipe` to split into up to `MAX_STAGES`
+   stages (a fixed array, no `Vec`), validating each.
+3. **argv on pipeline stages.** Lift the "programs take no arguments" pipe
+   restriction so a producer like `cat FILE | …` works - at least the first
+   stage needs its arguments; ideally every stage.
+4. **PATH resolution in pipes.** Resolve each stage via `$PATH` like a bare
+   command (`run_path_command`), not just cwd-relative paths, so `echo … | upper`
+   works with bare names.
+5. **N-stage plumbing.** Spawn the stages (consumer-first so each producer has a
+   live target), wire each stage's stdout to the next (last → console or a `>`
+   capture), `DELEGATE` each adjacent link, and wait/reap all - generalizing
+   `cmd_pipeline_prog`'s two-stage spawn/delegate/wait to a loop. Keep the
+   builtin/captured-left path for a first-stage builtin.
+6. **More filters (payoff).** Real `/bin` filters (`grep`, `wc`, `head`, `sort`)
+   so multi-stage pipelines are actually useful, not just a mechanism demo.
+
+**Verification:** a visible multi-stage transform (`echo hello | upper | …`),
+`cat FILE | grep x | wc`, byte-exactness, and zero `-d int` aborts, on
+`make run-image`.
 
 ## Testing infrastructure: scripted real-hardware round trips
 

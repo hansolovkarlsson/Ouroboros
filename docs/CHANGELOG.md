@@ -7,6 +7,32 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/`; 
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## Multi-stage pipelines, step 1: a chainable filter shape (`upper` over `ulib`)
+
+First step of the multi-stage-pipeline arc (`a | b | c`), chosen after the
+standalone-binaries arc completed. The foundational piece every future pipeline
+stage depends on: a filter that can sit in the *middle* of a pipe, not only at
+the end.
+
+`upper` (the reference filter) was rewritten over `ulib`: it still reads stdin
+via `MSG_RECV` and uppercases each byte, but it now writes to its **stdout
+target** (`ulib::write_out`) instead of a hardcoded console, and propagates
+end-of-stream downstream (`ulib::end_of_stream`) before exiting. When it's the
+last stage its target is the console (unchanged behaviour); when it's a middle
+stage its target is the next program, so `… | upper | …` will chain. This is
+the shape every future filter (`grep`/`wc`/`head`/`sort`) copies. Dropping its
+hand-rolled `con_write`/`syscall4`/panic handler for `ulib`'s shrank it by half.
+
+Verified on QEMU (run-image), zero `-d int` aborts, no regression to the
+existing two-stage pipes: `echo hello world | /EFI/ORBS/UPPER.BIN` → "HELLO
+WORLD" (builtin-captured left), and `cat /pt.txt | /EFI/ORBS/UPPER.BIN` →
+"PIPED THROUGH A FILTER" (program left, live relay).
+
+The rest of the arc is staged in `roadmap.md`: N-stage parsing, argv on
+pipeline stages (so `cat FILE | …` works), PATH resolution in pipes, the
+N-stage spawn/delegate/wait plumbing (a linear chain needs only the existing
+one-target-per-task delegation), then real `/bin` filters as the payoff.
+
 ## More spawnable task slots: `NUM_TASKS` 7 → 10 (five concurrent spawned tasks)
 
 Standalone-binaries Stage 0, done after the rest of the arc rather than before

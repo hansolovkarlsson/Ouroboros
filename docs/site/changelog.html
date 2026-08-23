@@ -40,6 +40,16 @@
 
   <article>
 
+<h2>Multi-stage pipelines, step 1: a chainable filter shape (<code class="inline">upper</code> over <code class="inline">ulib</code>)</h2>
+
+<p>First step of the multi-stage-pipeline arc (<code class="inline">a | b | c</code>), chosen after the standalone-binaries arc completed. The foundational piece every future pipeline stage depends on: a filter that can sit in the <em>middle</em> of a pipe, not only at the end.</p>
+
+<p><code class="inline">upper</code> (the reference filter) was rewritten over <code class="inline">ulib</code>: it still reads stdin via <code class="inline">MSG_RECV</code> and uppercases each byte, but it now writes to its <strong>stdout target</strong> (<code class="inline">ulib::write_out</code>) instead of a hardcoded console, and propagates end-of-stream downstream (<code class="inline">ulib::end_of_stream</code>) before exiting. When it's the last stage its target is the console (unchanged behaviour); when it's a middle stage its target is the next program, so <code class="inline">… | upper | …</code> will chain. This is the shape every future filter (<code class="inline">grep</code>/<code class="inline">wc</code>/<code class="inline">head</code>/<code class="inline">sort</code>) copies.</p>
+
+<p>Verified on QEMU (run-image), zero <code class="inline">-d int</code> aborts, no regression to the existing two-stage pipes: <code class="inline">echo hello world | /EFI/ORBS/UPPER.BIN</code> → "HELLO WORLD" (builtin-captured left), and <code class="inline">cat /pt.txt | /EFI/ORBS/UPPER.BIN</code> → "PIPED THROUGH A FILTER" (program left, live relay).</p>
+
+<p>The rest of the arc is staged in <a href="roadmap.html">the roadmap</a>: N-stage parsing, argv on pipeline stages (so <code class="inline">cat FILE | …</code> works), PATH resolution in pipes, the N-stage spawn/delegate/wait plumbing (a linear chain needs only the existing one-target-per-task delegation), then real <code class="inline">/bin</code> filters as the payoff.</p>
+
 <h2>More spawnable task slots: <code class="inline">NUM_TASKS</code> 7 → 10 (five concurrent spawned tasks)</h2>
 
 <p>Standalone-binaries Stage 0, done after the rest of the arc rather than before it (the fs/net command externalization got by on two spawnable slots because each foreground command is waited-and-reaped before the next). Raising the ceiling gives real headroom for concurrency: a foreground command + a background task + a multi-stage pipeline.</p>

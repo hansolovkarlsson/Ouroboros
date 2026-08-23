@@ -147,7 +147,22 @@
 
 <p><strong>Scale, honestly:</strong> a multi-milestone arc (breadth comparable to a slice of the network stack), but Stages 1–3 alone already deliver "type a bare program name from <code class="inline">/bin</code>, with args and an environment" before most commands are externalized — a satisfying, self-contained first target.</p>
 
-<p><strong>Deferred, noted:</strong> exporting the environment into child programs (a second, argv-like ABI); multi-stage <code class="inline">a | b | c</code> of standalone programs (needs the Stage 0 slots plus shell-side chaining); a minimal built-in fallback set for booting without <code class="inline">/bin</code>. <code class="inline">/bin</code> needs real FAT32, so this is a <code class="inline">make run-image</code> / QEMU-verified feature primarily; on Parallels it needs a disk (USB stick, reads-only posture).</p>
+<p><strong>Deferred, noted:</strong> exporting the environment into child programs (a second, argv-like ABI); a minimal built-in fallback set for booting without <code class="inline">/bin</code>. <code class="inline">/bin</code> needs real FAT32, so this is a <code class="inline">make run-image</code> / QEMU-verified feature primarily; on Parallels it needs a disk (USB stick, reads-only posture).</p>
+
+<h2>Multi-stage program pipelines (<code class="inline">a | b | c</code>) (scoped, IN PROGRESS)</h2>
+
+<p>The next arc, chosen after the standalone-binaries arc completed: turn the two-stage pipe into a real N-stage pipeline of standalone programs. Stage 0 (five spawnable slots) and the netd-command increment (which proved runtime <code class="inline">TO_NET</code> delegation) already landed the prerequisites; each pipeline link is one producer→consumer <code class="inline">DELEGATE</code>, and a linear chain only needs the existing <em>one-target-per-task</em> delegation (task <em>a</em> delegates to <em>b</em>, <em>b</em> to <em>c</em>), so the general/transitive delegation above is <strong>not</strong> required for a linear pipe.</p>
+
+<p><strong>Where it stands (the patchwork to replace):</strong> <code class="inline">parse_pipe</code> splits on the <em>first</em> <code class="inline">|</code> only; the right side must be a single token with no arguments and an explicit path (not PATH); and a non-last filter couldn't route its output onward. Staged:</p>
+
+<ol>
+<li><strong>Chainable filter shape — DONE.</strong> <code class="inline">upper</code> rewritten over <code class="inline">ulib</code> to read stdin (<code class="inline">MSG_RECV</code>) and write to its stdout target (<code class="inline">write_out</code>) instead of a hardcoded console, propagating end-of-stream so the next stage finishes. No regression to <code class="inline">X | upper</code> (target is the console there); it can now be a middle stage. The reference shape every future filter copies.</li>
+<li><strong>N-stage parsing.</strong> Generalize <code class="inline">parse_pipe</code> to split into up to <code class="inline">MAX_STAGES</code> stages (a fixed array), validating each.</li>
+<li><strong>argv on pipeline stages.</strong> Lift the "no arguments" pipe restriction so a producer like <code class="inline">cat FILE | …</code> works.</li>
+<li><strong>PATH resolution in pipes.</strong> Resolve each stage via <code class="inline">$PATH</code> like a bare command, so <code class="inline">echo … | upper</code> works with bare names.</li>
+<li><strong>N-stage plumbing.</strong> Spawn stages consumer-first, wire each stdout to the next, <code class="inline">DELEGATE</code> each link, wait/reap all - generalizing <code class="inline">cmd_pipeline_prog</code>'s two-stage flow to a loop.</li>
+<li><strong>More filters (payoff).</strong> Real <code class="inline">/bin</code> filters (<code class="inline">grep</code>, <code class="inline">wc</code>, <code class="inline">head</code>, <code class="inline">sort</code>) so multi-stage pipelines are actually useful.</li>
+</ol>
 
 <h2>Testing infrastructure: scripted real-hardware round trips</h2>
 
