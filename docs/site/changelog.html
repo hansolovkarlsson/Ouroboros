@@ -40,6 +40,26 @@
 
   <article>
 
+<h2>More filesystems, step 2: exFAT read-only</h2>
+
+<p>The first real exercise of step 1's <code class="inline">Filesystem</code> enum — a <em>second</em> on-disk format, driven through the same <code class="inline">FSOP_*</code> protocol clients already speak, so nothing above <code class="inline">fsd</code> changed. Read-only first, the arc's big scoping lever: FAT32's write support was phases 4–8, where every corruption risk lived, so a new format lands read-only as one milestone and read-write as a separate one.</p>
+
+<p>New <code class="inline">fsd/src/exfat.rs</code>. exFAT is structurally a cluster filesystem like FAT (a partition, a FAT, a heap of fixed-size clusters), so the read machinery (cluster-to-LBA, chain walking, windowed <code class="inline">read_at</code>) mirrors <code class="inline">fat32.rs</code>. The genuinely different parts, and how a read-only driver handles each:</p>
+
+<ul>
+<li><strong>Boot sector by <code class="inline">log2</code> shifts</strong> instead of raw counts, and explicit <code class="inline">FatOffset</code>/<code class="inline">ClusterHeapOffset</code> sector counts (partition-relative).</li>
+<li><strong>Contiguous files skip the FAT entirely</strong> — a <code class="inline">NoFatChain</code> flag means the clusters are just consecutive (<code class="inline">advance()</code> branches on it); this is why exFAT allocates large files without a long chain.</li>
+<li><strong>Directory <em>entry sets</em></strong>, not one record: a File entry (<code class="inline">0x85</code>) + a Stream-Extension entry (<code class="inline">0xC0</code>, first cluster + data length + <code class="inline">NoFatChain</code>) + File-Name entries (<code class="inline">0xC1</code>, 15 UTF-16 chars each), reassembled by <code class="inline">walk_dir</code> — the analogue of FAT32's LFN reconstruction.</li>
+<li><strong>UTF-16 names up to 255 chars</strong>, rendered ASCII (non-ASCII → <code class="inline">?</code>), exactly as <code class="inline">fat32.rs</code> renders its own long names.</li>
+<li><strong>The allocation bitmap (<code class="inline">0x81</code>) and up-case table (<code class="inline">0x82</code>) are ignored</strong> — the bitmap is a <em>write</em> concern (finding free clusters), and ASCII case-fold approximates the up-case table correctly for our names.</li>
+</ul>
+
+<p>Every write op returns the new shared <code class="inline">Error::ReadOnly</code> → the new <code class="inline">FS_ERR_READ_ONLY</code> ABI code, rendered "read-only filesystem". <code class="inline">vfs::mount</code> now probes each partition <strong>FAT32-then-exFAT</strong> and takes the first that validates; a new <code class="inline">Filesystem::name()</code> reports the mounted format in <code class="inline">fsd</code>'s log.</p>
+
+<p>Testing needed an exFAT disk that's still UEFI-bootable. UEFI can only boot FAT, and <code class="inline">fsd</code> mounts the <em>first</em> partition it can, so a new two-partition disk (<code class="inline">scripts/mkexfat.py</code> + <code class="inline">make run-image-exfat</code>) puts the <strong>exFAT partition first</strong> (so <code class="inline">fsd</code> mounts it — FAT32 probe fails, exFAT probe succeeds) and the <strong>FAT32 ESP second</strong> (UEFI boots <code class="inline">BOOTAA64</code> from it). The exFAT filesystem is built with macOS's <code class="inline">newfs_exfat</code> (<code class="inline">hdiutil</code> can't make exFAT) and carries <code class="inline">/bin</code> plus test files.</p>
+
+<p>Verified on QEMU, zero <code class="inline">-d int</code> aborts: <code class="inline">fsd: exFAT (read-only) mounted</code>; <code class="inline">ls /</code> listing subdirs and a long name; <code class="inline">cat</code> of files and of a long-named file; <code class="inline">cat /README.TXT | grep line | wc</code> → <code class="inline">3 11 60</code> (a multi-stage pipeline reading from exFAT); <code class="inline">ls /bin</code> (the commands themselves loaded from exFAT); <code class="inline">touch</code>/<code class="inline">mkdir</code> refused "read-only filesystem". FAT32 via <code class="inline">run-image</code> unregressed.</p>
+
 <h2>More filesystems, step 0: GPT + multi-partition discovery</h2>
 
 <p>The prerequisite the rest of the arc needs: real disks (anything macOS/Linux formats) use GPT, not MBR, and <code class="inline">fsd</code> read only the first FAT32 <em>MBR</em> partition. Partition discovery is now its own concern, above any one filesystem.</p>

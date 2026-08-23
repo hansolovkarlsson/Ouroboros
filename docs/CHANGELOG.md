@@ -7,6 +7,70 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/`; 
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## More filesystems, step 2: exFAT read-only
+
+The first real exercise of step 1's `Filesystem` enum — a *second* on-disk
+format, driven through the same `FSOP_*` protocol clients already speak, so
+nothing above `fsd` changed. Read-only first, the big scoping lever the arc
+calls out: FAT32's own write support was phases 4–8, where every corruption
+risk lived, so a new format lands read-only as one milestone and read-write as
+a separate one.
+
+New `fsd/src/exfat.rs`. exFAT is structurally a cluster filesystem like FAT (a
+partition, a FAT, a heap of fixed-size clusters), so the read *machinery*
+(cluster-to-LBA, chain walking, windowed `read_at`) mirrors `fat32.rs`. The
+genuinely different parts, and how a read-only driver handles each:
+
+- **Boot sector by `log2` shifts.** `BytesPerSectorShift`/`SectorsPerCluster
+  Shift` instead of raw counts, and explicit `FatOffset`/`ClusterHeapOffset`
+  sector counts (partition-relative — `mount_at` adds `partition_lba`, exactly
+  as `partition.rs` hands it in).
+- **Contiguous files skip the FAT entirely.** Each entry carries a `NoFatChain`
+  flag; when set, its clusters are simply consecutive and the FAT is never
+  consulted (`advance()` branches on it). This is why exFAT allocates large
+  files without a long chain.
+- **Directory *entry sets*, not one record.** A File entry (`0x85`, attributes
+  + secondary count) then a Stream-Extension entry (`0xC0`, first cluster + data
+  length + `NoFatChain`) then File-Name entries (`0xC1`, 15 UTF-16 chars each).
+  `walk_dir` reassembles a set into one `DirEntry` — the exFAT analogue of
+  FAT32's LFN reconstruction.
+- **UTF-16 names up to 255 chars**, rendered ASCII (non-ASCII → `?`), exactly as
+  `fat32.rs` renders its own long names — the whole userland here is ASCII.
+- **The allocation bitmap (`0x81`) and up-case table (`0x82`) are ignored.** The
+  bitmap is a *write* concern (finding free clusters); a read-only driver never
+  allocates. The up-case table drives case-insensitive comparison per spec — we
+  approximate with ASCII case-fold (`eq_ignore_ascii_case`, what `fat32.rs`
+  already uses), correct for ASCII names.
+
+Every write op (`write_file`/`write_at`/`mkdir`/`rmdir`/`touch`/`rm`/`mv`)
+returns the new shared `Error::ReadOnly`, which `main.rs` maps to the new
+`FS_ERR_READ_ONLY` ABI code, rendered by `ulib::fs_error` as "read-only
+filesystem". `vfs::mount` now probes each partition **FAT32-then-exFAT** and
+takes the first that validates; a new `Filesystem::name()` reports the mounted
+format in `fsd`'s log.
+
+Testing needed an exFAT disk that's still UEFI-bootable. UEFI can only boot
+FAT, and `fsd` mounts the *first* partition it can, so a new two-partition disk
+(new `scripts/mkexfat.py` + `make image-exfat`/`run-image-exfat`) puts the
+**exFAT partition first** (so `fsd` mounts it — FAT32 probe fails, exFAT probe
+succeeds, the real enum fallthrough) and the **FAT32 ESP second** (UEFI ignores
+the exFAT partition it can't read and boots `BOOTAA64` from the FAT32 one). The
+exFAT filesystem itself is built with macOS's `newfs_exfat` (`hdiutil` can't
+make exFAT) and carries `/bin` (so the shell runs commands off exFAT) plus test
+files. One block device, no slot-ordering ambiguity.
+
+Verified on QEMU, zero `-d int` aborts: `fsd: exFAT (read-only) mounted`; `ls /`
+listing subdirs and a long name; `cat` of files and of a long-named file; `cat
+/README.TXT | grep line | wc` → `3 11 60` (a multi-stage pipeline reading from
+exFAT); `ls /bin` (the commands themselves loaded from exFAT); `touch`/`mkdir`
+refused with "read-only filesystem"; `cat /nope.txt` → "no such file or
+directory". FAT32 via `run-image` unregressed (mounts as "FAT32", `touch`/`rm`
+still work).
+
+Next in the arc (see `roadmap.md`): exFAT read-write (bitmap allocation,
+directory-entry-set writes), then ext2 read-only — the real VFS test, a
+genuinely different (inode-based) model.
+
 ## More filesystems, step 0: GPT + multi-partition discovery
 
 The prerequisite the rest of the arc needs: real disks (anything macOS/Linux

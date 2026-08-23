@@ -331,16 +331,25 @@ read-only as one milestone, read-write as a separate one.
    Proven byte-identical on QEMU (the whole FS surface + a file-reading
    pipeline), zero aborts. A second filesystem is a new arm plus a `mount`
    branch.
-2. **exFAT, read-only.** The natural second filesystem: it's a **documented
-   spec** (Microsoft published it in 2019) and structurally the *same shape*
-   as FAT (clusters, a partition, directory entries), so it reuses the most
-   existing code — and it lifts a **real current limitation** (macOS/Windows
-   format large USB sticks as exFAT; the USB-mass-storage milestone already
-   notes "exFAT sticks won't mount — reformat FAT32"). The genuinely new
-   parts: an allocation *bitmap* (not just FAT chains — contiguous files
-   skip the FAT entirely), **UTF-16 long names** (no more 8.3), directory
-   entry *sets* (a file entry + stream-extension + name entries), and an
-   up-case table for case-insensitive comparison. Moderate.
+2. **exFAT, read-only — DONE.** The second filesystem arm (`fsd/src/exfat.rs`),
+   and the first real exercise of step 1's `Filesystem` enum. Structurally the
+   *same shape* as FAT (clusters, a partition, directory entries), so the read
+   machinery mirrors `fat32.rs`; the genuinely new parts a read-only driver
+   handles: the `log2`-shift boot sector; **contiguous files that skip the FAT**
+   (the `NoFatChain` flag → `advance()`); directory **entry sets** (`0x85` File
+   + `0xC0` Stream-Ext + `0xC1` File-Name, reassembled by `walk_dir` — the
+   analogue of FAT32 LFN); **UTF-16 names** rendered ASCII. The allocation
+   *bitmap* (`0x81`) is ignored (a write concern — read-only never allocates)
+   and the up-case table (`0x82`) approximated by ASCII case-fold (correct for
+   our names). Writes return the new `Error::ReadOnly` → `FS_ERR_READ_ONLY`.
+   `vfs::mount` probes each partition FAT32-then-exFAT. Tested on QEMU via a new
+   two-partition disk (`scripts/mkexfat.py` + `make run-image-exfat`: exFAT
+   partition first so `fsd` mounts it, FAT32 ESP second so UEFI boots it),
+   exFAT built with `newfs_exfat`; `ls`/`cat`/a `grep | wc` pipeline all read
+   from exFAT, `/bin` runs off it, writes refused read-only, zero aborts. It
+   lifts the **real limitation** the USB-mass-storage milestone noted ("exFAT
+   sticks won't mount — reformat FAT32"), at least for reads. See
+   `CHANGELOG.md`'s "More filesystems, step 2."
 3. **exFAT, read-write.** Bitmap allocation, directory-entry-set writes —
    the same "narrowest useful case, claim-before-use ordering" discipline
    FAT32's write arc used.

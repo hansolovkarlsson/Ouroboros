@@ -7,6 +7,49 @@ for the forward plan see [`roadmap.md`](roadmap.md).
 
 ---
 
+## 2026-08-23 — exFAT, read-only: the Filesystem enum earns its keep
+
+Yesterday's filesystem arc left a `Filesystem` enum inside `fsd` with exactly
+one arm (FAT32) — a refactor that *claimed* to make a second format cheap.
+Today made good on it: `fsd/src/exfat.rs`, a read-only exFAT driver, the first
+real second arm. Nothing above `fsd` changed — clients speak `FSOP_*` and never
+learn the on-disk format — which is the whole point the refactor was for.
+
+**Read-only first, deliberately.** The roadmap's own scoping lever: FAT32's
+write support was phases 4–8, where every corruption bug lived. So a new format
+lands read-only as one milestone; read-write is a separate one. Every write op
+in `exfat.rs` returns a new shared `Error::ReadOnly` → a new `FS_ERR_READ_ONLY`
+ABI code → `ulib`'s "read-only filesystem" message.
+
+**What was actually new versus FAT32.** exFAT is still a cluster filesystem, so
+the read machinery (cluster→LBA, chain walking, windowed `read_at`) is the same
+shape as `fat32.rs`. The genuinely different parts: a boot sector described by
+`log2` shifts; **contiguous files that skip the FAT entirely** (a `NoFatChain`
+flag — `advance()` either walks the FAT or just returns cluster+1); directory
+**entry sets** (a File entry + a Stream-Extension entry + File-Name entries)
+reassembled into one `DirEntry`, structurally the same job FAT32's LFN
+reconstruction does; and UTF-16 names. Two structures a read-only driver gets to
+*ignore*: the allocation bitmap (that's how you find free clusters — a write
+concern) and the up-case table (ASCII case-fold suffices for the names this
+system uses, same shortcut `fat32.rs` already takes).
+
+**The testing wrinkle was the interesting part.** To prove the reader, `fsd`
+has to *mount* exFAT — but UEFI can only boot from FAT, and `fsd` mounts the
+first partition it can. So the test disk (`scripts/mkexfat.py`) is a
+two-partition MBR: **exFAT first** (so `fsd` mounts it — the FAT32 probe fails,
+the exFAT probe succeeds, exercising the real enum fallthrough) and the **FAT32
+ESP second** (UEFI ignores the exFAT partition it can't read and boots from the
+FAT32 one). The exFAT filesystem itself is built with macOS's `newfs_exfat`
+(`hdiutil` can't make exFAT) and carries `/bin` plus test files — so the shell
+runs its commands *off* exFAT. One block device, no slot ambiguity. It worked
+first boot: `ls`/`cat`/a `cat | grep | wc` pipeline all reading from exFAT,
+long names and subdirs resolved, writes refused read-only, zero aborts. FAT32
+via `run-image` unregressed.
+
+The recurring lesson, again: a parser is only tested if you can *build* it a
+valid input — the harness that produces the artifact is part of the feature,
+same as `mkgpt.py` was for the GPT parser yesterday.
+
 ## 2026-08-22 — the userland day: /bin, pipelines, and the filesystem arc begins
 
 A long single day that took the shell from "every command is a builtin compiled
