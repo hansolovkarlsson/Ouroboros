@@ -1120,17 +1120,95 @@ impl Fs {
         )
     }
 
+    /// Mark every entry of a set deleted by clearing its in-use bit (`0x85` ->
+    /// `0x05`, `0xC0` -> `0x40`, `0xC1` -> `0x41`) - how exFAT removes a set (no
+    /// `0xE5` tombstone byte like FAT). RMW one 32-byte slot at a time.
+    fn delete_set(
+        &mut self,
+        dir_cluster: u32,
+        dir_contig: bool,
+        primary_slot: usize,
+        set_len: usize,
+    ) -> Result<(), Error> {
+        for i in 0..set_len {
+            let (lba, off) = self
+                .slot_addr(dir_cluster, dir_contig, primary_slot + i)?
+                .ok_or(Error::NotFound)?;
+            let mut sec = [0u8; SECTOR_SIZE];
+            self.disk.read_sector(lba, &mut sec)?;
+            sec[off] &= !ET_IN_USE;
+            self.disk.write_sector(lba, &sec)?;
+        }
+        Ok(())
+    }
+
+    /// Create an empty subdirectory. Fails if the name exists. An exFAT
+    /// directory has *no* `.`/`..` entries (unlike FAT32) - an empty one is just
+    /// a zeroed cluster whose first slot is the end-of-directory marker.
+    pub fn mkdir(&mut self, path: &str) -> Result<(), Error> {
+        let (_parent_path, name) = split_parent(path).ok_or(Error::InvalidName)?;
+        let (dir_cluster, dir_contig, kind) = self.parent_for_create(path)?;
+        if kind != ExistingKind::None {
+            return Err(Error::AlreadyExists);
+        }
+        // Claim + zero the new directory's cluster before linking it in.
+        let new_cluster = self.alloc_cluster()?;
+        self.zero_cluster(new_cluster)?;
+        let cluster_bytes = self.sectors_per_cluster as u64 * SECTOR_SIZE as u64;
+        self.create_entry(dir_cluster, dir_contig, name, true, new_cluster, cluster_bytes)
+    }
+
+    /// Remove a file (rejects a directory with `NotAFile`). Frees its clusters
+    /// (bitmap + FAT), then deletes its entry set.
+    pub fn rm(&mut self, path: &str) -> Result<(), Error> {
+        let (parent_path, name) = split_parent(path).ok_or(Error::InvalidName)?;
+        let parent = self.find(parent_path)?;
+        if !parent.is_dir {
+            return Err(Error::NotADirectory);
+        }
+        let (entry, slot, len) = self
+            .find_in_parent(parent.first_cluster, parent.contiguous, parent.size, name)?
+            .ok_or(Error::NotFound)?;
+        if entry.is_dir {
+            return Err(Error::NotAFile);
+        }
+        if entry.first_cluster >= 2 {
+            self.free_data(entry.first_cluster, entry.contiguous, entry.size)?;
+        }
+        self.delete_set(parent.first_cluster, parent.contiguous, slot, len)
+    }
+
+    /// Remove an empty subdirectory (rejects a non-empty one, a file, and the
+    /// root). Frees its cluster(s), then deletes its entry set.
+    pub fn rmdir(&mut self, path: &str) -> Result<(), Error> {
+        let (parent_path, name) = split_parent(path).ok_or(Error::CannotRemoveRoot)?;
+        let parent = self.find(parent_path)?;
+        if !parent.is_dir {
+            return Err(Error::NotADirectory);
+        }
+        let (entry, slot, len) = self
+            .find_in_parent(parent.first_cluster, parent.contiguous, parent.size, name)?
+            .ok_or(Error::NotFound)?;
+        if !entry.is_dir {
+            return Err(Error::NotADirectory);
+        }
+        // Empty means the directory has no in-use entry set at all.
+        let mut empty = true;
+        self.walk_dir(entry.first_cluster, entry.contiguous, entry.size, |_e, _s, _l| {
+            empty = false;
+            true
+        })?;
+        if !empty {
+            return Err(Error::DirectoryNotEmpty);
+        }
+        if entry.first_cluster >= 2 {
+            self.free_data(entry.first_cluster, entry.contiguous, entry.size)?;
+        }
+        self.delete_set(parent.first_cluster, parent.contiguous, slot, len)
+    }
+
     // ---- write surface: still read-only (later stages) ----------------------
 
-    pub fn mkdir(&mut self, _path: &str) -> Result<(), Error> {
-        Err(Error::ReadOnly)
-    }
-    pub fn rmdir(&mut self, _path: &str) -> Result<(), Error> {
-        Err(Error::ReadOnly)
-    }
-    pub fn rm(&mut self, _path: &str) -> Result<(), Error> {
-        Err(Error::ReadOnly)
-    }
     pub fn mv(&mut self, _src: &str, _dst: &str) -> Result<(), Error> {
         Err(Error::ReadOnly)
     }
