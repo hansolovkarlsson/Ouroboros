@@ -39,7 +39,7 @@ make run-image-exfat
 ```
 
 This builds the ESP (kernel + servers + `/bin`), builds and populates the exFAT
-partition, assembles `espexfat.img`, and boots QEMU on it. When it's up you'll
+partition, assembles `build/espexfat.img`, and boots QEMU on it. When it's up you'll
 see:
 
 ```
@@ -48,12 +48,12 @@ fsd: exFAT mounted, disk commands available
 
 Quit QEMU any time with **`Ctrl-A`** then **`X`**.
 
-> **Persistence note.** Your writes are saved into `espexfat.img` and survive a
+> **Persistence note.** Your writes are saved into `build/espexfat.img` and survive a
 > reboot (that persistence is part of what's being tested). To start from a
 > clean, freshly-populated disk, rebuild it first:
 >
 > ```sh
-> make image-exfat        # rebuild espexfat.img without booting
+> make image-exfat        # rebuild build/espexfat.img without booting
 > make run-image-exfat    # then boot
 > ```
 
@@ -115,7 +115,7 @@ After quitting QEMU:
 
 ```sh
 # attach without mounting, find the exFAT partition
-DEV=$(hdiutil attach -nomount espexfat.img | awk '/Windows_NTFS|Microsoft/{print $1}')
+DEV=$(hdiutil attach -nomount build/espexfat.img | awk '/Windows_NTFS|Microsoft/{print $1}')
 
 # integrity check — bitmap + directory hierarchy
 fsck_exfat -n "/dev/r$(basename "$DEV")"       # expect: "appears to be OK"
@@ -124,7 +124,7 @@ fsck_exfat -n "/dev/r$(basename "$DEV")"       # expect: "appears to be OK"
 diskutil mount "$DEV"
 ls -la /Volumes/OUROEXFAT
 cat /Volumes/OUROEXFAT/W.TXT
-cmp /Volumes/OUROEXFAT/CATCOPY esp/bin/CAT && echo "copy is byte-identical"
+cmp /Volumes/OUROEXFAT/CATCOPY build/esp/bin/CAT && echo "copy is byte-identical"
 
 # clean up
 diskutil unmount "$DEV"
@@ -151,4 +151,4 @@ rest of the disk work.
 | The exFAT driver | `fsd/src/exfat.rs` |
 | Filesystem dispatch (FAT32 / exFAT) | `fsd/src/vfs.rs` |
 | Combined-disk builder | `scripts/mkexfat.py` |
-| Build + run targets | `Makefile` (`exfatpart.img`, `image-exfat`, `run-image-exfat`) |
+| Build + run targets | `Makefile` (`build/exfatpart.img`, `image-exfat`, `run-image-exfat`) |

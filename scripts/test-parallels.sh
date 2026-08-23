@@ -16,7 +16,7 @@
 # reports in a captured screenshot if you want to check this again.
 #
 # Requires the VM already registered in Parallels and its Hard Disk
-# device already pointed at this repo's esp.hdd (see the Makefile's
+# device already pointed at this repo's build/esp.hdd (see the Makefile's
 # `parallels-hdd` target's doc comment for how that .hdd gets built).
 #
 # Usage (normally via `make test-parallels`, see the Makefile target):
@@ -135,9 +135,9 @@ slug() {
 	printf '%s' "$1" | tr -c 'a-zA-Z0-9' '_' | cut -c1-40
 }
 
-echo "==> rebuilding esp.hdd from the current source"
+echo "==> rebuilding build/esp.hdd from the current source"
 if prlctl status "$VM_NAME" 2>/dev/null | grep -q running; then
-	echo "==> $VM_NAME is currently running - stopping it first (esp.hdd can't be rewritten while it's attached)"
+	echo "==> $VM_NAME is currently running - stopping it first (build/esp.hdd can't be rewritten while it's attached)"
 	prlctl stop "$VM_NAME" --kill >/dev/null 2>&1 || true
 	sleep 2
 fi

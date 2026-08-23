@@ -22,7 +22,7 @@ filesystem. Run from the repo root.
 """
 import struct, os, sys
 
-ESP, EXF, DST, SECT = "esp.img", "exfatpart.img", "espexfat.img", 512
+ESP, EXF, DST, SECT = "build/esp.img", "build/exfatpart.img", "build/espexfat.img", 512
 
 for f in (ESP, EXF):
     if not os.path.exists(f):

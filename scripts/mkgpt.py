@@ -14,7 +14,7 @@ whatever `make image` produced. Run from the repo root after `make image`.
 """
 import struct, zlib, os, uuid, sys
 
-SRC, DST, SECT = "esp.img", "espgpt.img", 512
+SRC, DST, SECT = "build/esp.img", "build/espgpt.img", 512
 
 if not os.path.exists(SRC):
     sys.exit(f"{SRC} not found - run `make image` first")

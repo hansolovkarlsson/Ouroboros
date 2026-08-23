@@ -62,7 +62,7 @@ the runtime FAT32 reader doesn't parse long-filename entries around.)
 
 ```sh
 make run             # fast dev loop - vvfat-backed disk (FAT16!)
-make run-image       # boots esp.img - real FAT32, disk commands work
+make run-image       # boots build/esp.img - real FAT32, disk commands work
 make run-usb-kbd     # + xHCI controller & USB keyboard (monitor sendkey)
 make run-usb-multi   # + USB tablet and storage stick (3-device xHCI rig)
 make run-virtio-console  # + a virtio console device (see its Makefile note)
@@ -101,15 +101,15 @@ injected through the monitor socket:
 ## Running on Parallels (real hardware)
 
 ```sh
-make image           # esp.img - raw MBR+FAT32 disk image
-make parallels-hdd   # wraps it into esp.hdd via prl_disk_tool
+make image           # build/esp.img - raw MBR+FAT32 disk image
+make parallels-hdd   # wraps it into build/esp.hdd via prl_disk_tool
 ```
 
-Attach `esp.hdd` as the VM's **Hard Disk** device. Two confirmed traps
+Attach `build/esp.hdd` as the VM's **Hard Disk** device. Two confirmed traps
 (see `CLAUDE.md`'s "Parallels disk attachment"): Parallels rejects raw
 `.img` files on the Hard Disk device, and attaching the image to the
 CD/DVD device *looks* like it works but doesn't (the optical driver
-wants ISO9660). Also: `esp.hdd` stores a *pointer* to `esp.dmg`'s
+wants ISO9660). Also: `build/esp.hdd` stores a *pointer* to `build/esp.dmg`'s
 absolute path, so the two files must stay together.
 
 What works on real Parallels hardware today: the GOP framebuffer
@@ -128,13 +128,13 @@ sticks land on the EHCI controller instead and can't be used).
 make test-parallels CMDS="help;ls;uptime" [BOOT_WAIT=12] [VM_NAME=Ouroboros]
 ```
 
-Rebuilds `esp.hdd`, boots the registered VM headlessly, types each
+Rebuilds `build/esp.hdd`, boots the registered VM headlessly, types each
 `;`-separated command via `prlctl send-key-event`, and saves a
 screenshot after each into a `parallels-test-<timestamp>/` directory
 (gitignored — delete it when done). Supports `>` (a held-Shift chord)
 and a `CTRL-C` pseudo-command (a held-Ctrl chord, no Enter). Requires
 the VM registered in Parallels with its Hard Disk pointed at this
-repo's `esp.hdd`.
+repo's `build/esp.hdd`.
 
 ## Using the shell
 

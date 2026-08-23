@@ -1,21 +1,9 @@
 /target
-/esp
-/esp.img
-/espgpt.img
-/espexfat.img
-/exfatpart.img
-/exfat-src/
-/esp.cdr
-/esp.dmg
-/esp.hdd
-/vcon.log
+# All generated build artifacts (staging tree, disk images, pcaps, logs,
+# sockets, transient src dirs) now live under build/ - see the Makefile.
+/build/
 /parallels/
 /parallels-test-*/
 /scratch/
 /Parallels Error Reports/
 .DS_Store
-/usbstick.img
-/qemu-monitor.sock
-/usbstick.cdr
-/usbstick-src/
-/net.pcap

@@ -440,11 +440,11 @@ make run-image-net           # `run-image` (real FAT32, disk commands work) *and
 make run-image-server        # like run-image-net, plus SLIRP hostfwd tcp::5555->:80, so `curl http://localhost:5555/` on the host reaches netd's TCP HTTP server (the guest answering the network - see "Network stack, Stage 4b" above)
 make run-usb-kbd             # same as `run`, plus an xHCI controller + USB keyboard + HMP monitor socket for sendkey keystroke injection (see "USB HID keyboard driver" above)
 make run-usb-multi           # same as `run-usb-kbd`, plus a usb-tablet and a usb-storage stick on the same controller - the three-device rig for xhci.rs's multi-device scan (see "xHCI multi-device support" above)
-make image                  # build esp.img, a raw MBR+FAT32 disk image (not directly usable by Parallels - see below)
-make run-image               # boot esp.img (genuine FAT32) instead of run's vvfat - needed for anything that reads the filesystem at runtime (the fsd server and every disk command)
-make run-image-gpt           # build espgpt.img (esp.img's FAT32 wrapped in a bootable GPT disk via scripts/mkgpt.py) and boot it - exercises fsd's GPT partition discovery (the disk has no real MBR table)
-make run-image-exfat         # build espexfat.img (two-partition MBR: exFAT partition 1 + FAT32 ESP partition 2, via newfs_exfat + scripts/mkexfat.py) and boot it - fsd mounts the exFAT partition (FAT32 probe fails, exFAT probe succeeds), UEFI boots the FAT32 ESP; exercises fsd/src/exfat.rs (the exFAT read-only arm)
-make parallels-hdd          # wrap esp.img into esp.hdd, a Parallels-native virtual hard disk
+make image                  # build build/esp.img, a raw MBR+FAT32 disk image (not directly usable by Parallels - see below)
+make run-image               # boot build/esp.img (genuine FAT32) instead of run's vvfat - needed for anything that reads the filesystem at runtime (the fsd server and every disk command)
+make run-image-gpt           # build build/espgpt.img (build/esp.img's FAT32 wrapped in a bootable GPT disk via scripts/mkgpt.py) and boot it - exercises fsd's GPT partition discovery (the disk has no real MBR table)
+make run-image-exfat         # build build/espexfat.img (two-partition MBR: exFAT partition 1 + FAT32 ESP partition 2, via newfs_exfat + scripts/mkexfat.py) and boot it - fsd mounts the exFAT partition (FAT32 probe fails, exFAT probe succeeds), UEFI boots the FAT32 ESP; exercises fsd/src/exfat.rs (the exFAT read-only arm)
+make parallels-hdd          # wrap build/esp.img into build/esp.hdd, a Parallels-native virtual hard disk
 make test-parallels          # scripted real-hardware round trip via prlctl - see below
 make clean
 ```
@@ -460,7 +460,7 @@ why it isn't just on `PATH`.
 There is no unit test suite — this is pre-alpha kernel code that mostly
 proves it boots. There is, as of 2026-08-16, a scripted real-hardware
 *smoke* test: `make test-parallels` (`scripts/test-parallels.sh`) rebuilds
-`esp.hdd`, boots the registered Parallels VM headlessly via `prlctl`
+`build/esp.hdd`, boots the registered Parallels VM headlessly via `prlctl`
 (Parallels Desktop's own CLI, `man prlctl` - discovered this session, not
 previously known to this project), types a `;`-separated list of shell
 commands through `prlctl send-key-event` (real decimal PS/2 Set-1
@@ -477,7 +477,7 @@ printing every raw HID report (press *and* release) through the console
 meant that on Parallels, where the framebuffer console is the *only*
 console, ordinary interactive typing flooded the screen with report
 dumps interleaved with the shell's actual output - found by the user
-directly, using the real `esp.hdd` normally with a physical keyboard,
+directly, using the real `build/esp.hdd` normally with a physical keyboard,
 not via `make test-parallels`. Removed outright (`xhci.rs::poll_key`)
 rather than gated behind a flag - it had already served its purpose
 confirming the driver end to end, and wasn't needed for normal
@@ -604,8 +604,8 @@ syscall-abi/         shared syscall ABI crate - syscall numbers, sentinel/error 
 
 scripts/
   test-parallels.sh  scripted real-hardware smoke test via prlctl (start/type/capture/stop) - invoked by `make test-parallels`, see "## Commands" above and docs/roadmap.md's "Testing infrastructure" section
-  mkgpt.py           builds espgpt.img: esp.img's FAT32 partition wrapped in a bootable GPT disk (protective MBR + primary/backup GPT headers with valid CRC32s + an ESP entry) - for testing fsd's GPT partition discovery, since macOS has no GPT tooling. Invoked by `make image-gpt`/`run-image-gpt`
-  mkexfat.py         builds espexfat.img: a two-partition MBR disk, exFAT partition first (fsd mounts it) + the FAT32 ESP second (UEFI boots it) - so fsd mounts exFAT while the disk still boots. The exFAT payload (exfatpart.img) is built by the Makefile via newfs_exfat (hdiutil can't make exFAT). For testing fsd/src/exfat.rs. Invoked by `make image-exfat`/`run-image-exfat`
+  mkgpt.py           builds build/espgpt.img: build/esp.img's FAT32 partition wrapped in a bootable GPT disk (protective MBR + primary/backup GPT headers with valid CRC32s + an ESP entry) - for testing fsd's GPT partition discovery, since macOS has no GPT tooling. Invoked by `make image-gpt`/`run-image-gpt`
+  mkexfat.py         builds build/espexfat.img: a two-partition MBR disk, exFAT partition first (fsd mounts it) + the FAT32 ESP second (UEFI boots it) - so fsd mounts exFAT while the disk still boots. The exFAT payload (build/exfatpart.img) is built by the Makefile via newfs_exfat (hdiutil can't make exFAT). For testing fsd/src/exfat.rs. Invoked by `make image-exfat`/`run-image-exfat`
 ```
 
 Twenty-nine-crate workspace. `kernel` and the two shared libs (`ulib`,

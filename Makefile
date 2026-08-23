@@ -71,7 +71,20 @@ RESOLVE_ELF  := target/$(USER_TARGET)/release/resolve
 RESOLVE_BIN  := target/$(USER_TARGET)/release/resolve.bin
 FETCH_ELF    := target/$(USER_TARGET)/release/fetch
 FETCH_BIN    := target/$(USER_TARGET)/release/fetch.bin
-ESP_DIR      := esp
+# All generated artifacts land under $(BUILD_DIR) so the repo root stays
+# source-only. The cargo `target/` dir is separate (cargo owns it). Every
+# path below is derived from BUILD_DIR, so pointing it elsewhere moves the
+# whole lot. $(BUILD_DIR) is created lazily by the `esp` staging step
+# (mkdir -p $(ESP_DIR)/...), which every image target depends on.
+BUILD_DIR    := build
+ESP_DIR      := $(BUILD_DIR)/esp
+ESP_IMG      := $(ESP_DIR).img
+ESP_HDD      := $(ESP_DIR).hdd
+GPT_IMG      := $(BUILD_DIR)/espgpt.img
+EXFAT_IMG    := $(BUILD_DIR)/espexfat.img
+EXFAT_PART   := $(BUILD_DIR)/exfatpart.img
+USBSTICK_IMG := $(BUILD_DIR)/usbstick.img
+NET_PCAP     := $(BUILD_DIR)/net.pcap
 OVMF         := $(shell brew --prefix qemu 2>/dev/null)/share/qemu/edk2-aarch64-code.fd
 PDT          := /Applications/Parallels Desktop.app/Contents/MacOS/prl_disk_tool
 
@@ -304,7 +317,7 @@ run: esp
 # user-mode (SLIRP) networking - the dev loop for the network stack
 # (kernel/src/virtio_net.rs, docs/roadmap.md's Stage 1). SLIRP answers ARP
 # for its gateway (10.0.2.2), which is what init_net's boot-time probe
-# exercises. `-object filter-dump` writes every frame to net.pcap for
+# exercises. `-object filter-dump` writes every frame to $(NET_PCAP) for
 # independent host-side inspection (tcpdump/tshark), the same "verify against
 # a source outside the kernel's own output" discipline used elsewhere.
 run-net: esp
@@ -317,7 +330,7 @@ run-net: esp
 		-device virtio-blk-device,drive=hd0 \
 		-netdev user,id=net0 \
 		-device virtio-net-device,netdev=net0 \
-		-object filter-dump,id=f0,netdev=net0,file=net.pcap \
+		-object filter-dump,id=f0,netdev=net0,file=$(NET_PCAP) \
 		-global virtio-mmio.force-legacy=false \
 		-nographic
 
@@ -344,7 +357,7 @@ run-virtio-console: esp
 		-global virtio-mmio.force-legacy=false \
 		-device virtio-serial-device \
 		-device virtconsole,chardev=vcon0 \
-		-chardev file,id=vcon0,path=vcon.log \
+		-chardev file,id=vcon0,path=$(BUILD_DIR)/vcon.log \
 		-nographic
 
 # Same as `run`, plus a real xHCI (USB3) host controller with a virtual
@@ -366,7 +379,7 @@ run-usb-kbd: esp
 		-global virtio-mmio.force-legacy=false \
 		-device qemu-xhci,id=xhci0 \
 		-device usb-kbd,bus=xhci0.0 \
-		-monitor unix:qemu-monitor.sock,server,nowait \
+		-monitor unix:$(BUILD_DIR)/qemu-monitor.sock,server,nowait \
 		-nographic
 
 # Same as `run-usb-kbd`, plus two more USB devices on the same xHCI
@@ -379,17 +392,18 @@ run-usb-kbd: esp
 # monitor's `sendkey`.
 # A real FAT32 image for the USB stick (not the old zeroed scratch file)
 # so the mass-storage driver has something to actually mount - built the
-# same hdiutil way as esp.img, with a marker file to ls/cat. 64MB: small
+# same hdiutil way as build/esp.img, with a marker file to ls/cat. 64MB: small
 # hdiutil FAT32 requests can silently produce FAT16 (same class of
 # surprise as make run's vvfat - see fat32.rs's module doc comment).
-usbstick.img:
-	rm -rf usbstick-src && mkdir usbstick-src
-	printf 'hello from the USB stick\n' > usbstick-src/USBTEST.TXT
-	hdiutil create -size 64m -fs FAT32 -volname USBSTICK -srcfolder usbstick-src -format UDTO -ov usbstick.cdr
-	mv usbstick.cdr usbstick.img
-	rm -rf usbstick-src
+$(USBSTICK_IMG):
+	mkdir -p $(BUILD_DIR)
+	rm -rf $(BUILD_DIR)/usbstick-src && mkdir $(BUILD_DIR)/usbstick-src
+	printf 'hello from the USB stick\n' > $(BUILD_DIR)/usbstick-src/USBTEST.TXT
+	hdiutil create -size 64m -fs FAT32 -volname USBSTICK -srcfolder $(BUILD_DIR)/usbstick-src -format UDTO -ov $(BUILD_DIR)/usbstick.cdr
+	mv $(BUILD_DIR)/usbstick.cdr $(USBSTICK_IMG)
+	rm -rf $(BUILD_DIR)/usbstick-src
 
-run-usb-multi: esp usbstick.img
+run-usb-multi: esp $(USBSTICK_IMG)
 	qemu-system-aarch64 \
 		-machine virt \
 		-cpu cortex-a72 \
@@ -401,9 +415,9 @@ run-usb-multi: esp usbstick.img
 		-device qemu-xhci,id=xhci0 \
 		-device usb-kbd,bus=xhci0.0 \
 		-device usb-tablet,bus=xhci0.0 \
-		-drive file=usbstick.img,format=raw,if=none,id=usbstick \
+		-drive file=$(USBSTICK_IMG),format=raw,if=none,id=usbstick \
 		-device usb-storage,drive=usbstick,bus=xhci0.0 \
-		-monitor unix:qemu-monitor.sock,server,nowait \
+		-monitor unix:$(BUILD_DIR)/qemu-monitor.sock,server,nowait \
 		-nographic
 
 # Same as `run`, but forces QEMU's virt machine onto GICv3 instead of its
@@ -449,13 +463,13 @@ image: esp
 	hdiutil detach "$$MP" >/dev/null; \
 	rmdir "$$MP"
 
-# Boots the real esp.img (genuine FAT32) instead of `run`'s vvfat
+# Boots the real build/esp.img (genuine FAT32) instead of `run`'s vvfat
 # passthrough - needed for anything that reads the filesystem at runtime
 # (fat32.rs and up), not just the fast kernel-dev loop `run` is for.
 # **`run`'s vvfat is FAT16, not FAT32** - confirmed by decoding its BPB
 # directly (BS_FilSysType literally reads "FAT16   ", and RootEntryCount/
 # FATSz16 are both nonzero, which real FAT32 requires to be zero): QEMU's
-# vvfat driver apparently can't produce FAT32 at all. esp.img (built by
+# vvfat driver apparently can't produce FAT32 at all. build/esp.img (built by
 # `hdiutil -fs FAT32`, what Parallels ultimately boots from too via
 # `parallels-hdd`) is genuinely FAT32 - confirmed the same way, decoding
 # its BPB directly with `xxd` before writing any parser code. Use this
@@ -472,14 +486,14 @@ run-image: image
 		-global virtio-mmio.force-legacy=false \
 		-nographic
 
-# espgpt.img: esp.img's FAT32 partition wrapped in a *GPT* disk (protective
+# $(GPT_IMG): build/esp.img's FAT32 partition wrapped in a *GPT* disk (protective
 # MBR + primary/backup GPT headers, an EFI-System-Partition entry) - built by
 # scripts/mkgpt.py because macOS has no GPT tooling and hdiutil only makes MBR.
 # For testing fsd's GPT partition discovery (the more-filesystems arc).
 image-gpt: image
 	python3 scripts/mkgpt.py
 
-# Boot the GPT disk instead of the MBR esp.img: UEFI boots BOOTAA64 from the
+# Boot the GPT disk instead of the MBR build/esp.img: UEFI boots BOOTAA64 from the
 # ESP, and fsd discovers the FAT32 partition through the GPT path (the disk has
 # no real MBR partition table, only a protective 0xEE entry).
 run-image-gpt: image-gpt
@@ -488,40 +502,40 @@ run-image-gpt: image-gpt
 		-cpu cortex-a72 \
 		-m 512M \
 		-bios $(OVMF) \
-		-drive file=espgpt.img,format=raw,if=none,id=hd0 \
+		-drive file=$(GPT_IMG),format=raw,if=none,id=hd0 \
 		-device virtio-blk-device,drive=hd0 \
 		-global virtio-mmio.force-legacy=false \
 		-nographic
 
-# exfatpart.img: a raw exFAT filesystem holding /bin (the externalized commands,
+# $(EXFAT_PART): a raw exFAT filesystem holding /bin (the externalized commands,
 # so the shell can run them off exFAT) plus a few test files, built with macOS's
 # newfs_exfat (hdiutil can't make exFAT). This is the payload scripts/mkexfat.py
 # drops into the exFAT partition of the combined disk. For testing the exFAT
 # reader (fsd/src/exfat.rs, the more-filesystems arc's read-only exFAT step).
-exfatpart.img: esp
-	rm -rf exfat-src && mkdir -p exfat-src/bin
-	cp $(ESP_DIR)/bin/* exfat-src/bin/
-	printf 'hello from an exFAT volume\r\n' > exfat-src/HELLO.TXT
-	printf 'line one\r\nline two has several words\r\nthird and final line\r\n' > exfat-src/README.TXT
-	mkdir -p exfat-src/SUB
-	printf 'a nested file on exFAT\r\n' > exfat-src/SUB/NESTED.TXT
-	printf 'this exercises a long UTF-16 name\r\n' > "exfat-src/a-long-exfat-name.txt"
-	rm -f exfatpart.img
-	dd if=/dev/zero of=exfatpart.img bs=1m count=24 2>/dev/null
-	DEV=$$(hdiutil attach -nomount -imagekey diskimage-class=CRawDiskImage exfatpart.img | head -1 | awk '{print $$1}'); \
+$(EXFAT_PART): esp
+	rm -rf $(BUILD_DIR)/exfat-src && mkdir -p $(BUILD_DIR)/exfat-src/bin
+	cp $(ESP_DIR)/bin/* $(BUILD_DIR)/exfat-src/bin/
+	printf 'hello from an exFAT volume\r\n' > $(BUILD_DIR)/exfat-src/HELLO.TXT
+	printf 'line one\r\nline two has several words\r\nthird and final line\r\n' > $(BUILD_DIR)/exfat-src/README.TXT
+	mkdir -p $(BUILD_DIR)/exfat-src/SUB
+	printf 'a nested file on exFAT\r\n' > $(BUILD_DIR)/exfat-src/SUB/NESTED.TXT
+	printf 'this exercises a long UTF-16 name\r\n' > "$(BUILD_DIR)/exfat-src/a-long-exfat-name.txt"
+	rm -f $(EXFAT_PART)
+	dd if=/dev/zero of=$(EXFAT_PART) bs=1m count=24 2>/dev/null
+	DEV=$$(hdiutil attach -nomount -imagekey diskimage-class=CRawDiskImage $(EXFAT_PART) | head -1 | awk '{print $$1}'); \
 	newfs_exfat -v OUROEXFAT "$$DEV" >/dev/null; \
 	diskutil mount "$$DEV" >/dev/null; \
 	MP=$$(diskutil info "$$DEV" | awk -F': *' '/Mount Point/{print $$2}'); \
-	cp -R exfat-src/. "$$MP/"; \
+	cp -R $(BUILD_DIR)/exfat-src/. "$$MP/"; \
 	find "$$MP" -name '._*' -delete; rm -rf "$$MP/.fseventsd" "$$MP/.Trashes" "$$MP/.Spotlight-V100"; \
 	diskutil unmount "$$DEV" >/dev/null; hdiutil detach "$$DEV" >/dev/null
-	rm -rf exfat-src
+	rm -rf $(BUILD_DIR)/exfat-src
 
-# espexfat.img: a two-partition MBR disk - partition 1 exFAT (fsd mounts it),
+# $(EXFAT_IMG): a two-partition MBR disk - partition 1 exFAT (fsd mounts it),
 # partition 2 the FAT32 ESP (UEFI boots it). See scripts/mkexfat.py for why the
 # exFAT partition must come first. Exercises fsd's Filesystem-enum fallthrough
 # (FAT32 probe fails on the exFAT partition, exFAT probe succeeds).
-image-exfat: image exfatpart.img
+image-exfat: image $(EXFAT_PART)
 	python3 scripts/mkexfat.py
 
 # Boot the combined disk: UEFI boots BOOTAA64 from the FAT32 ESP (partition 2),
@@ -533,7 +547,7 @@ run-image-exfat: image-exfat
 		-cpu cortex-a72 \
 		-m 512M \
 		-bios $(OVMF) \
-		-drive file=espexfat.img,format=raw,if=none,id=hd0 \
+		-drive file=$(EXFAT_IMG),format=raw,if=none,id=hd0 \
 		-device virtio-blk-device,drive=hd0 \
 		-global virtio-mmio.force-legacy=false \
 		-nographic
@@ -541,7 +555,7 @@ run-image-exfat: image-exfat
 # `run-image` (real FAT32, so disk commands work) *and* the NIC from
 # `run-net` in one boot - the fullest QEMU run: the filesystem server mounts,
 # the shell/disk commands work, and init_net's boot-time ARP probe exercises
-# the network. Every frame is dumped to net.pcap for host-side inspection.
+# the network. Every frame is dumped to $(NET_PCAP) for host-side inspection.
 run-image-net: image
 	qemu-system-aarch64 \
 		-machine virt \
@@ -552,7 +566,7 @@ run-image-net: image
 		-device virtio-blk-device,drive=hd0 \
 		-netdev user,id=net0 \
 		-device virtio-net-device,netdev=net0 \
-		-object filter-dump,id=f0,netdev=net0,file=net.pcap \
+		-object filter-dump,id=f0,netdev=net0,file=$(NET_PCAP) \
 		-global virtio-mmio.force-legacy=false \
 		-nographic
 
@@ -561,7 +575,7 @@ run-image-net: image
 # reachable from the host: boot this, then on the host run
 #   curl http://localhost:5555/
 # and the from-scratch TCP stack serves its page. Every frame still goes to
-# net.pcap for host-side inspection.
+# $(NET_PCAP) for host-side inspection.
 run-image-server: image
 	qemu-system-aarch64 \
 		-machine virt \
@@ -572,19 +586,19 @@ run-image-server: image
 		-device virtio-blk-device,drive=hd0 \
 		-netdev user,id=net0,hostfwd=tcp::5555-:80 \
 		-device virtio-net-device,netdev=net0 \
-		-object filter-dump,id=f0,netdev=net0,file=net.pcap \
+		-object filter-dump,id=f0,netdev=net0,file=$(NET_PCAP) \
 		-global virtio-mmio.force-legacy=false \
 		-nographic
 
-# Wraps esp.img into esp.hdd, a Parallels-native virtual hard disk, via
+# Wraps build/esp.img into build/esp.hdd, a Parallels-native virtual hard disk, via
 # prl_disk_tool's `--dmg` import (its only documented way to build a .hdd
 # from an existing raw image; needs a real .dmg container, not the raw .img,
-# and prl_disk_tool silently fails without absolute paths). Attach esp.hdd
-# as the VM's Hard Disk device in Parallels - not esp.img, and not CD/DVD
+# and prl_disk_tool silently fails without absolute paths). Attach build/esp.hdd
+# as the VM's Hard Disk device in Parallels - not build/esp.img, and not CD/DVD
 # (that's for optical filesystems, and MBR+FAT32 isn't one).
 #
-# esp.hdd only stores a pointer to esp.dmg's absolute path, not a copy of
-# its data - keep both files together, don't delete esp.dmg separately.
+# build/esp.hdd only stores a pointer to build/esp.dmg's absolute path, not a copy of
+# its data - keep both files together, don't delete build/esp.dmg separately.
 parallels-hdd: image
 	rm -f $(ESP_DIR).dmg
 	hdiutil convert $(ESP_DIR).img -format UDZO -o $(ESP_DIR).dmg
@@ -594,7 +608,7 @@ parallels-hdd: image
 # Scripted real-hardware test loop against Parallels - the manual "boot,
 # watch the screen, type on a keyboard, report back" round trip every
 # postmortem in docs/ paid wall-clock time for, now driven headlessly via
-# prlctl (Parallels Desktop's own CLI - `man prlctl`): rebuilds esp.hdd,
+# prlctl (Parallels Desktop's own CLI - `man prlctl`): rebuilds build/esp.hdd,
 # boots the registered VM named $(VM_NAME), types each ;-separated
 # command in $(CMDS) through Parallels' own virtual keyboard
 # (`prlctl send-key-event`, confirmed to land on the same
@@ -604,7 +618,7 @@ parallels-hdd: image
 # scripts/test-parallels.sh for the full mechanics.
 #
 # Needs the VM already registered in Parallels with its Hard Disk device
-# pointed at this repo's esp.hdd (see `parallels-hdd`'s own doc comment
+# pointed at this repo's build/esp.hdd (see `parallels-hdd`'s own doc comment
 # above for how that gets built and attached in the first place - this
 # target only rebuilds the disk image, it doesn't create/register a VM).
 #
@@ -616,4 +630,4 @@ test-parallels:
 
 clean:
 	cargo clean
-	rm -rf $(ESP_DIR) $(ESP_DIR).img $(ESP_DIR).dmg $(ESP_DIR).hdd vcon.log qemu-monitor.sock usbstick.img usbstick.cdr
+	rm -rf $(BUILD_DIR)
