@@ -320,11 +320,13 @@ read-only as one milestone, read-write as a separate one.
    reads only the *first FAT32* MBR partition today. A GPT parser (a
    bounded, documented structure) plus "pick the right partition by type"
    is a small, self-contained first step that every later stage needs.
-1. **The VFS refactor (a pure refactor first).** Extract the hardcoded
-   `Fs` into the `Filesystem` enum with FAT32 as the only arm and a
-   mount-time type-detection step — proven byte-identical to today before
-   any new filesystem exists, exactly the "refactor first, prove no change"
-   pattern `block.rs`'s `BlockDevice` enum already followed.
+1. **The VFS refactor (a pure refactor first) — DONE.** `fsd/src/vfs.rs`'s
+   `Filesystem` enum (FAT32 the only arm) now wraps the hardcoded `Fs`; its
+   per-op methods forward to the arm, and `mount` is the type-detection point.
+   `main.rs` holds an `Option<vfs::Filesystem>` and calls it exactly as before.
+   Proven byte-identical on QEMU (the whole FS surface + a file-reading
+   pipeline), zero aborts. A second filesystem is a new arm plus a `mount`
+   branch.
 2. **exFAT, read-only.** The natural second filesystem: it's a **documented
    spec** (Microsoft published it in 2019) and structurally the *same shape*
    as FAT (clusters, a partition, directory entries), so it reuses the most

@@ -7,6 +7,34 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/`; 
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## More filesystems, step 1: the VFS refactor (a `Filesystem` enum inside `fsd`)
+
+First step of the "more filesystems" arc, and a pure refactor — no behaviour
+change, proven byte-identical before any second filesystem exists (the
+"refactor first, prove no change" pattern `block.rs`'s `BlockDevice` enum
+already followed).
+
+`fsd` *was* FAT32: the type was hardcoded (`fsd/src/fat32.rs`'s `Fs`), and
+`main.rs` called it directly. The client-facing VFS already existed — clients
+speak `FSOP_*` over IPC and never know the format — so what was missing was
+*internal* multiplexing. New `fsd/src/vfs.rs` adds a `Filesystem` **enum**
+(`Fat32` the only arm today) whose per-op methods (`list_dir`/`read_file`/
+`read_at`/`write_file`/`write_at`/`mkdir`/`rmdir`/`touch`/`rm`/`mv`) forward to
+the arm, plus a `mount` that detects the format (just FAT32 for now). An enum,
+not `dyn Trait`, because `fsd` is `no_std` with no heap — the same reason
+`block::BlockDevice` and `console::Console` are enums. `main.rs` now holds an
+`Option<vfs::Filesystem>` and calls it exactly as it called `fat32::Fs`; a
+second filesystem (exFAT, ext2) is a new arm plus a branch in `mount`.
+
+Verified on QEMU (run-image), zero `-d int` aborts, the whole FS surface
+byte-identical through the new dispatch: `ls`, `mkdir`/`cd`/`write`/`cat`,
+`cp`, `mv`, `rm`, `rmdir` (correctly refusing a non-empty dir), and a
+pipeline reading a file (`cat h.txt | grep works | wc` → `0 3 18`).
+
+Next in the arc (see `roadmap.md`): GPT + multi-partition (so a second
+filesystem on a real disk is reachable), then exFAT read-only, then ext2
+read-only (the real test of the abstraction).
+
 ## Multi-stage pipelines, step 6: real `/bin` filters (`grep`/`wc`/`head`) — arc complete
 
 The payoff, and the last step of the pipeline arc: three real filter programs so

@@ -40,6 +40,16 @@
 
   <article>
 
+<h2>More filesystems, step 1: the VFS refactor (a <code class="inline">Filesystem</code> enum inside <code class="inline">fsd</code>)</h2>
+
+<p>First step of the "more filesystems" arc, and a pure refactor — no behaviour change, proven byte-identical before any second filesystem exists (the "refactor first, prove no change" pattern <code class="inline">block.rs</code>'s <code class="inline">BlockDevice</code> enum already followed).</p>
+
+<p><code class="inline">fsd</code> <em>was</em> FAT32: the type was hardcoded (<code class="inline">fsd/src/fat32.rs</code>'s <code class="inline">Fs</code>), and <code class="inline">main.rs</code> called it directly. The client-facing VFS already existed — clients speak <code class="inline">FSOP_*</code> over IPC and never know the format — so what was missing was <em>internal</em> multiplexing. New <code class="inline">fsd/src/vfs.rs</code> adds a <code class="inline">Filesystem</code> <strong>enum</strong> (<code class="inline">Fat32</code> the only arm today) whose per-op methods forward to the arm, plus a <code class="inline">mount</code> that detects the format. An enum, not <code class="inline">dyn Trait</code>, because <code class="inline">fsd</code> is <code class="inline">no_std</code> with no heap — the same reason <code class="inline">block::BlockDevice</code> and <code class="inline">console::Console</code> are enums. A second filesystem (exFAT, ext2) is a new arm plus a branch in <code class="inline">mount</code>.</p>
+
+<p>Verified on QEMU (run-image), zero <code class="inline">-d int</code> aborts, the whole FS surface byte-identical through the new dispatch: <code class="inline">ls</code>, <code class="inline">mkdir</code>/<code class="inline">cd</code>/<code class="inline">write</code>/<code class="inline">cat</code>, <code class="inline">cp</code>, <code class="inline">mv</code>, <code class="inline">rm</code>, <code class="inline">rmdir</code> (correctly refusing a non-empty dir), and a pipeline reading a file (<code class="inline">cat h.txt | grep works | wc</code> → <code class="inline">0 3 18</code>).</p>
+
+<p>Next in the arc (see <a href="roadmap.html">the roadmap</a>): GPT + multi-partition, then exFAT read-only, then ext2 read-only (the real test of the abstraction).</p>
+
 <h2>Multi-stage pipelines, step 6: real <code class="inline">/bin</code> filters (<code class="inline">grep</code>/<code class="inline">wc</code>/<code class="inline">head</code>) — arc complete</h2>
 
 <p>The payoff, and the last step of the pipeline arc: three real filter programs so pipelines are genuinely useful, not just a mechanism demo. Each is a small <code class="inline">ulib</code> filter following the <code class="inline">upper</code> shape (stdin via a new <code class="inline">ulib::pipe_recv</code>, output to the stdout target so it chains, end-of-stream + exit on EOF).</p>

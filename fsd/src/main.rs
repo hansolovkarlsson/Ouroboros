@@ -32,6 +32,7 @@
 
 mod disk;
 mod fat32;
+mod vfs;
 
 use core::arch::asm;
 use core::panic::PanicInfo;
@@ -43,7 +44,7 @@ pub extern "C" fn _start() -> ! {
 }
 
 fn main() -> ! {
-    let mut fs: Option<fat32::Fs> = None;
+    let mut fs: Option<vfs::Filesystem> = None;
     // Auto-mount if the kernel already holds a device (QEMU's boot-time
     // virtio path; on Parallels the device arrives later, via the
     // `mount` command -> MOUNT syscall -> FSOP_MOUNT request).
@@ -82,14 +83,14 @@ fn main() -> ! {
 /// Attempts the mount if the kernel has a device installed. Quiet when
 /// there's simply no device (the ordinary Parallels-before-`mount`
 /// case); logs the outcome whenever a device is actually present.
-fn try_mount(fs: &mut Option<fat32::Fs>) {
+fn try_mount(fs: &mut Option<vfs::Filesystem>) {
     if fs.is_some() {
         return;
     }
     if disk::Disk.capacity_sectors().is_err() {
         return;
     }
-    match fat32::Fs::mount(disk::Disk) {
+    match vfs::Filesystem::mount(disk::Disk) {
         Ok(mounted) => {
             *fs = Some(mounted);
             print("fsd: FAT32 mounted, disk commands available\r\n");
@@ -113,7 +114,7 @@ const DATA_MAX: usize = syscall_abi::FS_DATA_MAX as usize;
 /// calling task, needed by the bulk ops to `SAFECOPY` against the
 /// client's grant (they move their data directly between task regions
 /// rather than inline in the reply - see `FSOP_READ_BULK`).
-fn handle(fs: &mut Option<fat32::Fs>, sender: u64, req: &[u8], reply: &mut [u8]) -> usize {
+fn handle(fs: &mut Option<vfs::Filesystem>, sender: u64, req: &[u8], reply: &mut [u8]) -> usize {
     if req.len() < REQ_PAYLOAD {
         return status_reply(reply, syscall_abi::FS_ERROR);
     }
