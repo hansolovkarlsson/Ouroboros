@@ -7,6 +7,45 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/`; 
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## Standalone binaries, Stage 4 (netd increment): `ping`/`resolve`/`fetch` externalized via capability delegation
+
+Eighth step of the arc, and the first commands to reach a server a spawnable
+slot can't statically talk to. A spawned task gets `TO_SHELL | TO_FSD | TO_CON`
+(`tasks.rs::caps_for_slot`) — **not `TO_NET`** — so a spawned network client is
+`MSG_ERR_DENIED`. The fix is runtime capability delegation, not a policy
+widening: the shell holds `TO_NET` statically, so when it spawns a `/bin`
+command it `DELEGATE`s `TO_NET` to the child (`delegate_net` in
+`run_path_command`), exactly the mechanism the program-to-program pipe already
+uses to authorize a producer→consumer send. The static policy stays tight; the
+grant is per-task and cleared on death.
+
+- `ulib::net_call(req, reply)` — one `MSG_CALL` to the network server, returning
+  the packed result. It retries briefly on `MSG_ERR_DENIED` (a tick can let the
+  child run in the window before the shell's delegation lands — the same bounded
+  wait `pipe_out` uses), so the delegation race never surfaces as a failure.
+- `ping <a.b.c.d>` (its own `parse_ipv4`), `resolve <hostname>` (DNS-over-UDP,
+  IP formatted with `emit_dec`), and `fetch <hostname>` (HTTP GET, the response
+  streamed to stdout with a truncation note) are new `/bin` programs over
+  `ulib`. Each routes its success output to the stdout target (so `ping x >
+  file` / `resolve x > file` capture) and errors to the console — the stderr
+  split, with an end-of-stream on every exit so a capturing shell is never
+  stranded.
+- The three shell builtins (`cmd_ping`/`cmd_resolve`/`cmd_fetch`) and the
+  now-unused `parse_ipv4` were removed; a pre-existing orphaned `fs_call` doc
+  comment (stranded above `cmd_ping`) was reattached to `fs_call`.
+
+Verified on QEMU (a real-FAT32 image + virtio-net + SLIRP), zero `-d int`
+aborts: `ping 10.0.2.2` → "reply from 10.0.2.2" (a spawned-slot program reached
+netd only because the shell delegated `TO_NET`); `resolve example.com` →
+a real address; `resolve nonexistent.invalid` → "could not resolve" (exit 1);
+`fetch example.com` → the full HTTP response with headers and body plus the
+"… bytes total" truncation note; `resolve example.com > /res.txt` then `cat`
+showed the captured line.
+
+The three deliberately-builtin groups remain (see `roadmap.md`): `ps`/`kill`/
+`wait`/`fg` (job control), and `mount`/`selftest`/`help` (shell-coupled). With
+the network commands out, the externalization arc is effectively complete.
+
 ## Standalone binaries, Stage 4 (bulk-data increment): `cp`/`mv`/`writeat` externalized
 
 Seventh step of the arc, and the last filesystem commands to leave the shell.

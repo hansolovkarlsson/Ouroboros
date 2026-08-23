@@ -206,18 +206,21 @@ via `ps`).
 ## Known limitations
 
 - **Every filesystem command (`ls`, `cat`, `mkdir`, `rmdir`, `touch`, `rm`,
-  `cp`, `mv`, `writeat`), plus `echo`/`uptime`/`clear`, is a `/bin` program,
-  not a builtin.** They were externalized (they run as `/bin/ECHO`, `/bin/LS`,
-  `/bin/CP`, etc., found via `$PATH`) — behaviour is identical from a user's
-  view, but they're **unavailable on a boot without a mounted filesystem** (e.g.
-  `make run`'s FAT16, or real hardware with no USB stick), where a bare `echo`
-  reports "unknown command" instead. (The filesystem ones need a mounted disk
-  to do anything regardless.) A spawned command receives the shell's current
-  directory (via the `CWD_STAGE`/`GET_CWD` ABI), so a bare `ls` or a relative
-  `cp a b` resolves against the cwd just as the old builtins did, and reports
-  errors with a non-zero exit code. Only `write`, `cd`, and `pwd` remain builtin
-  among the filesystem commands (they need the shell's own input line or cwd
-  state); everything else is still builtin too.
+  `cp`, `mv`, `writeat`), the network commands (`ping`, `resolve`, `fetch`),
+  and `echo`/`uptime`/`clear` are `/bin` programs, not builtins.** They were
+  externalized (they run as `/bin/ECHO`, `/bin/LS`, `/bin/PING`, etc., found via
+  `$PATH`) — behaviour is identical from a user's view, but they're
+  **unavailable on a boot without a mounted filesystem** (e.g. `make run`'s
+  FAT16, or real hardware with no USB stick), where a bare `echo` reports
+  "unknown command" instead. (The filesystem ones need a mounted disk to do
+  anything regardless.) A spawned command receives the shell's current directory
+  (via the `CWD_STAGE`/`GET_CWD` ABI), so a bare `ls` or a relative `cp a b`
+  resolves against the cwd just as the old builtins did, and reports errors with
+  a non-zero exit code. The network commands reach the network server via the
+  `TO_NET` capability the shell delegates to them at spawn (a spawned program
+  can't reach netd on its own). Remaining builtins: `write`, `cd`, `pwd`,
+  `exec`, `exit`, the job-control commands (`ps`, `kill`, `wait`, `fg`), and
+  `mount`/`selftest`/`help`.
 - **Write granularity: `write` full-replaces; `writeat`/`>>`/`cp` do
   offset writes.** The FAT32 layer has a real random-access offset-write
   primitive (`write_at`): `writeat` writes in place at any offset

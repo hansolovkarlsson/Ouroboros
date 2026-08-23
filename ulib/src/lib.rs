@@ -547,6 +547,38 @@ pub fn fs_error(cmd: &str, code: u64) {
     con_write(b"\r\n");
 }
 
+// ---------------------------------------------------------------------------
+// Network server client
+// ---------------------------------------------------------------------------
+
+/// `MSG_CALL` the network server ([`NET_TASK`](syscall_abi::NET_TASK)) with the
+/// request bytes in `req`, receiving the reply into `reply`. Returns the packed
+/// `MSG_CALL` result (the reply length in the low 32 bits) on success, or an
+/// error/sentinel ([`TASK_ERR_NO_SUCH_TASK`](syscall_abi::TASK_ERR_NO_SUCH_TASK)
+/// when there's no netd this boot, or a code `>= FS_ERR_MIN`).
+///
+/// Reaching netd needs the `TO_NET` send-capability, which a spawnable slot does
+/// *not* hold statically - the shell delegates it (`DELEGATE`) to a command it
+/// spawns. A tick can let this program run in the window before that delegation
+/// lands, so a transient `MSG_ERR_DENIED` is retried briefly (the same bounded
+/// wait `pipe_out` uses), rather than surfaced as a failure.
+pub fn net_call(req: &[u8], reply: &mut [u8]) -> u64 {
+    let deadline = get_ticks() + 150;
+    loop {
+        let packed = syscall4(
+            syscall_abi::MSG_CALL,
+            syscall_abi::NET_TASK,
+            req.as_ptr() as u64,
+            req.len() as u64,
+            reply.as_mut_ptr() as u64,
+        );
+        if packed == syscall_abi::MSG_ERR_DENIED && get_ticks() <= deadline {
+            continue;
+        }
+        return packed;
+    }
+}
+
 /// The one panic handler the command binary needs - provided here so each
 /// command crate doesn't repeat it. Parks; there's nowhere to report to.
 #[panic_handler]

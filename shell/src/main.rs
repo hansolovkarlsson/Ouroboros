@@ -809,9 +809,9 @@ fn dispatch_line(line: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize, env:
         // echo, uptime, clear are externalized: they're /bin programs now
         // (found via PATH by the unknown-command arm), not builtins. See
         // "Standalone binaries, Stage 4".
-        "ping" => cmd_ping(arg, out),
-        "resolve" => cmd_resolve(arg, out),
-        "fetch" => cmd_fetch(arg, out),
+        // ping, resolve, and fetch are externalized to /bin now (Stage 4) -
+        // spawned programs that reach netd via the TO_NET capability the shell
+        // delegates at spawn (see run_path_command / delegate_net).
         "pwd" => out.put_line(cwd_str(cwd, *cwd_len)),
         // ls, cat, mkdir, rmdir, touch, rm, cp, mv, and writeat are externalized
         // to /bin now (Stage 4) - they run as spawned programs that inherit the
@@ -1161,6 +1161,21 @@ fn cmd_unset(arg: &str, env: &mut Env) {
 /// **foreground** - wait for it (which also reaps its slot, unlike `exec`'s
 /// fire-and-forget). Returns `false` if no PATH directory has the command
 /// (the caller then prints "unknown command"). A `>`/`>>` redirect routes
+/// Delegate this shell's `TO_NET` send-capability to a freshly spawned command
+/// (`slot`), so a network command (`ping`, and later `resolve`/`fetch`) can
+/// reach the network server - a spawnable slot doesn't hold `TO_NET` statically
+/// (`tasks.rs::caps_for_slot` gives it `TO_SHELL | TO_FSD | TO_CON`). The shell
+/// holds it, so it alone can grant it, the same `DELEGATE` mechanism the
+/// program-to-program pipe uses. Best-effort: granting it to every foreground
+/// command is harmless (a command that never calls netd never uses it, and the
+/// delegation is cleared when the task dies); a command with no network to
+/// reach just reports its own "no network server" path if the grant somehow
+/// failed. The cost of not knowing, from the shell, which `/bin` program needs
+/// the network.
+fn delegate_net(slot: u64) {
+    let _ = syscall4(syscall_abi::DELEGATE, slot, syscall_abi::NET_TASK, 0, 0);
+}
+
 /// the program's output into the capture sink, exactly as `cmd_exec` does.
 fn run_path_command(command: &str, line: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize, env: &Env, out: &mut Output) -> bool {
     // argv = every token on the line (argv[0] = the command as typed).
@@ -1220,6 +1235,7 @@ fn run_path_command(command: &str, line: &str, cwd: &[u8; CWD_SIZE], cwd_len: us
         if out.is_console() {
             match spawn_path(candidate, argv, cwd, cwd_len, syscall_abi::CON_TASK) {
                 Ok(slot) => {
+                    delegate_net(slot);
                     // Foreground: wait for it (also reaps the slot). Ctrl+C
                     // interrupts the wait and leaves it running in the
                     // background (see `ps`).
@@ -1233,7 +1249,10 @@ fn run_path_command(command: &str, line: &str, cwd: &[u8; CWD_SIZE], cwd_len: us
             }
         } else {
             match spawn_path(candidate, argv, cwd, cwd_len, self_task()) {
-                Ok(slot) => capture_program_output(slot, out),
+                Ok(slot) => {
+                    delegate_net(slot);
+                    capture_program_output(slot, out);
+                }
                 Err(0) => print_line("command path too long"),
                 Err(NO_FS) => print_no_fs(),
                 Err(code) => print_fs_error(command, code),
@@ -1584,245 +1603,18 @@ fn cmd_selftest(out: &mut Output) {
     let _ = write!(w, "str-vs-literal comparison: {str_ok} (expect true)\r\n");
 }
 
-/// One filesystem-server round trip, v2 protocol (fully
-/// self-contained - see the protocol section in `syscall-abi`): builds
-/// a request from a header (op + four params) plus up to two inline
-/// payload chunks (path, then data for the ops that carry it),
-/// `MSG_CALL`s it to the server's fixed slot
-/// ([`syscall_abi::FSD_TASK`]), and unpacks the reply - a status u64
-/// carrying exactly the old fs_* syscalls' return-value semantics,
-/// plus an inline result payload copied out into `result`. No pointer
-/// of this task's ever crosses to the server; the kernel's message
-/// machinery moves the bytes both ways, which is what makes the
-/// protocol work under per-task page tables. The two call-layer
-/// failures fold into the same status space: no server this boot
-/// becomes [`NO_FS`] - literally true - and anything else (Ctrl+C
-/// mid-call, a full server mailbox) becomes the generic [`FS_ERROR`].
-/// `ping <a.b.c.d>` - asks the network server (`netd`, task `NET_TASK`) to
-/// ARP-resolve the host and send it an ICMP echo request, reporting whether
-/// a reply came back. The whole protocol stack lives in `netd`; the shell
-/// just packs the target and reads the status.
-fn cmd_ping(arg: &str, out: &mut Output) {
-    let ip = arg.trim();
-    let Some(target) = parse_ipv4(ip) else {
-        print_line("ping: usage: ping <a.b.c.d>");
-        return;
-    };
-    // Request: [NETOP_PING][target IPv4 packed LE]; reply: [status].
-    let packed_target = target[0] as u64
-        | (target[1] as u64) << 8
-        | (target[2] as u64) << 16
-        | (target[3] as u64) << 24;
-    let mut req = [0u8; 16];
-    req[0..8].copy_from_slice(&syscall_abi::NETOP_PING.to_le_bytes());
-    req[8..16].copy_from_slice(&packed_target.to_le_bytes());
-    let mut reply = [0u8; syscall_abi::MSG_MAX_LEN as usize];
-    let packed = syscall4(
-        syscall_abi::MSG_CALL,
-        syscall_abi::NET_TASK,
-        req.as_ptr() as u64,
-        req.len() as u64,
-        reply.as_mut_ptr() as u64,
-    );
-    if packed == syscall_abi::TASK_ERR_NO_SUCH_TASK {
-        print_line("ping: no network server this boot");
-        return;
-    }
-    if packed >= FS_ERR_MIN {
-        print_line("ping: request failed");
-        return;
-    }
-    let status = u64::from_le_bytes([
-        reply[0], reply[1], reply[2], reply[3], reply[4], reply[5], reply[6], reply[7],
-    ]);
-    match status {
-        syscall_abi::NET_PING_OK => {
-            out.put_str("reply from ");
-            out.put_str(ip);
-            out.put_line("");
-        }
-        syscall_abi::NET_PING_TIMEOUT => {
-            out.put_str("no reply from ");
-            out.put_str(ip);
-            out.put_line(" (timeout)");
-        }
-        syscall_abi::NET_PING_NO_ARP => {
-            out.put_str(ip);
-            out.put_line(" is unreachable (no ARP reply)");
-        }
-        syscall_abi::NET_PING_NO_NIC => print_line("ping: no network interface this boot"),
-        _ => print_line("ping: unexpected result"),
-    }
-}
-
-/// `resolve <hostname>` - asks the network server (`netd`) to look up a
-/// hostname's IPv4 via a DNS query over UDP, and prints the result. The
-/// first UDP application in the stack; the whole DNS logic lives in `netd`.
-fn cmd_resolve(arg: &str, out: &mut Output) {
-    let host = arg.trim();
-    let hb = host.as_bytes();
-    // Request: [NETOP_RESOLVE][hostname bytes]; reply: [status][ipv4].
-    if hb.is_empty() || 8 + hb.len() > syscall_abi::MSG_MAX_LEN as usize {
-        print_line("resolve: usage: resolve <hostname>");
-        return;
-    }
-    let mut req = [0u8; syscall_abi::MSG_MAX_LEN as usize];
-    req[0..8].copy_from_slice(&syscall_abi::NETOP_RESOLVE.to_le_bytes());
-    req[8..8 + hb.len()].copy_from_slice(hb);
-    let mut reply = [0u8; syscall_abi::MSG_MAX_LEN as usize];
-    let packed = syscall4(
-        syscall_abi::MSG_CALL,
-        syscall_abi::NET_TASK,
-        req.as_ptr() as u64,
-        (8 + hb.len()) as u64,
-        reply.as_mut_ptr() as u64,
-    );
-    if packed == syscall_abi::TASK_ERR_NO_SUCH_TASK {
-        print_line("resolve: no network server this boot");
-        return;
-    }
-    if packed >= FS_ERR_MIN {
-        print_line("resolve: request failed");
-        return;
-    }
-    let status = u64::from_le_bytes([
-        reply[0], reply[1], reply[2], reply[3], reply[4], reply[5], reply[6], reply[7],
-    ]);
-    let ip = u64::from_le_bytes([
-        reply[8], reply[9], reply[10], reply[11], reply[12], reply[13], reply[14], reply[15],
-    ]);
-    match status {
-        syscall_abi::NET_RESOLVE_OK => {
-            out.put_str(host);
-            out.put_str(" is ");
-            out.put_u64_decimal(ip & 0xff);
-            out.put(b'.');
-            out.put_u64_decimal((ip >> 8) & 0xff);
-            out.put(b'.');
-            out.put_u64_decimal((ip >> 16) & 0xff);
-            out.put(b'.');
-            out.put_u64_decimal((ip >> 24) & 0xff);
-            out.put_line("");
-        }
-        syscall_abi::NET_RESOLVE_TIMEOUT => {
-            print_str("resolve: no response for ");
-            print_str(host);
-            print_line("");
-        }
-        syscall_abi::NET_RESOLVE_NXDOMAIN => {
-            print_str("resolve: could not resolve ");
-            print_str(host);
-            print_line("");
-        }
-        syscall_abi::NET_RESOLVE_NO_NIC => print_line("resolve: no network interface this boot"),
-        _ => print_line("resolve: unexpected result"),
-    }
-}
-
-/// `fetch <hostname>` - asks the network server (`netd`) to open a client TCP
-/// connection to the host on port 80, send a minimal HTTP GET, and return the
-/// response, which is printed. The first TCP application in the stack; all
-/// the connection logic lives in `netd`.
-fn cmd_fetch(arg: &str, out: &mut Output) {
-    let host = arg.trim();
-    let hb = host.as_bytes();
-    if hb.is_empty() || 8 + hb.len() > syscall_abi::MSG_MAX_LEN as usize {
-        print_line("fetch: usage: fetch <hostname>");
-        return;
-    }
-    let mut req = [0u8; syscall_abi::MSG_MAX_LEN as usize];
-    req[0..8].copy_from_slice(&syscall_abi::NETOP_FETCH.to_le_bytes());
-    req[8..8 + hb.len()].copy_from_slice(hb);
-    let mut reply = [0u8; syscall_abi::MSG_MAX_LEN as usize];
-    let packed = syscall4(
-        syscall_abi::MSG_CALL,
-        syscall_abi::NET_TASK,
-        req.as_ptr() as u64,
-        (8 + hb.len()) as u64,
-        reply.as_mut_ptr() as u64,
-    );
-    if packed == syscall_abi::TASK_ERR_NO_SUCH_TASK {
-        print_line("fetch: no network server this boot");
-        return;
-    }
-    if packed >= FS_ERR_MIN {
-        print_line("fetch: request failed");
-        return;
-    }
-    let reply_len = (packed & 0xffff_ffff) as usize;
-    let status = u64::from_le_bytes([
-        reply[0], reply[1], reply[2], reply[3], reply[4], reply[5], reply[6], reply[7],
-    ]);
-    let total = u64::from_le_bytes([
-        reply[8], reply[9], reply[10], reply[11], reply[12], reply[13], reply[14], reply[15],
-    ]);
-    match status {
-        syscall_abi::NET_FETCH_OK => {
-            let end = reply_len.min(reply.len());
-            for &b in &reply[16..end] {
-                out.put(b);
-            }
-            if (total as usize) > end - 16 {
-                out.put_line("");
-                out.put_str("[fetch: response truncated - ");
-                out.put_u64_decimal(total);
-                out.put_line(" bytes total]");
-            }
-        }
-        syscall_abi::NET_FETCH_TIMEOUT => {
-            print_str("fetch: no response from ");
-            print_str(host);
-            print_line("");
-        }
-        syscall_abi::NET_FETCH_REFUSED => {
-            print_str("fetch: connection refused by ");
-            print_str(host);
-            print_line("");
-        }
-        syscall_abi::NET_FETCH_NO_ROUTE => {
-            print_str("fetch: could not reach ");
-            print_str(host);
-            print_line("");
-        }
-        syscall_abi::NET_FETCH_NO_NIC => print_line("fetch: no network interface this boot"),
-        _ => print_line("fetch: unexpected result"),
-    }
-}
-
-/// Parse a dotted-quad IPv4 (`10.0.2.2`) into its four octets. Hand-rolled
-/// byte-by-byte (no `str::split`) to stay clear of any libcore relocation
-/// gotcha in a PIE-loaded program - see `docs/processes.md`.
-fn parse_ipv4(s: &str) -> Option<[u8; 4]> {
-    let mut out = [0u8; 4];
-    let mut idx = 0; // octet being built
-    let mut val: u32 = 0;
-    let mut digits = 0;
-    for &c in s.as_bytes() {
-        if c == b'.' {
-            if digits == 0 || idx >= 3 {
-                return None;
-            }
-            out[idx] = val as u8;
-            idx += 1;
-            val = 0;
-            digits = 0;
-        } else if c.is_ascii_digit() {
-            val = val * 10 + (c - b'0') as u32;
-            if val > 255 {
-                return None;
-            }
-            digits += 1;
-        } else {
-            return None;
-        }
-    }
-    if digits == 0 || idx != 3 {
-        return None;
-    }
-    out[3] = val as u8;
-    Some(out)
-}
-
+/// One filesystem-server round trip, v2 protocol (fully self-contained - see
+/// the protocol section in `syscall-abi`): builds a request from a header (op +
+/// four params) plus up to two inline payload chunks (path, then data for the
+/// ops that carry it), `MSG_CALL`s it to the server's fixed slot
+/// ([`syscall_abi::FSD_TASK`]), and unpacks the reply - a status u64 carrying
+/// exactly the old fs_* syscalls' return-value semantics, plus an inline result
+/// payload copied out into `result`. No pointer of this task's ever crosses to
+/// the server; the kernel's message machinery moves the bytes both ways, which
+/// is what makes the protocol work under per-task page tables. The two
+/// call-layer failures fold into the same status space: no server this boot
+/// becomes [`NO_FS`] - literally true - and anything else (Ctrl+C mid-call, a
+/// full server mailbox) becomes the generic [`FS_ERROR`].
 fn fs_call(op: u64, params: [u64; 4], payload1: &[u8], payload2: &[u8], result: &mut [u8]) -> u64 {
     const HDR: usize = syscall_abi::FS_REQ_PAYLOAD as usize;
     let mut req = [0u8; syscall_abi::MSG_MAX_LEN as usize];

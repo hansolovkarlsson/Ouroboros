@@ -73,6 +73,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "784a4df722dc6267a04af36895398f59d21d07dce47232adf31ec0ff2fa45e67"
 
 [[package]]
+name = "fetch"
+version = "0.1.0"
+dependencies = [
+ "syscall-abi",
+ "ulib",
+]
+
+[[package]]
 name = "fsd"
 version = "0.1.0"
 dependencies = [
@@ -134,6 +142,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "ping"
+version = "0.1.0"
+dependencies = [
+ "syscall-abi",
+ "ulib",
+]
+
+[[package]]
 name = "pong"
 version = "0.1.0"
 dependencies = [
@@ -176,6 +192,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1fbf4db142a473a8d80c26bbf18454ed458bf8d26c8219c331daecfdbd079001"
 dependencies = [
  "proc-macro2",
+]
+
+[[package]]
+name = "resolve"
+version = "0.1.0"
+dependencies = [
+ "syscall-abi",
+ "ulib",
 ]
 
 [[package]]

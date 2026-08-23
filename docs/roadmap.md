@@ -459,31 +459,31 @@ the shell's own cwd/lifecycle) and the redirection/pipe **syntax**
    `fs_write_bulk`/`fs_write_at`/`fs_mv`/`parse_u64`) — **the whole filesystem
    command surface now lives in `/bin`**.
 
-   *The remaining non-fs commands are NOT cheap, and split three ways
-   (established by trying `ps`/`kill`/`wait` and reverting):*
-   - **`ps`/`kill`/`wait`/`fg` stay builtin — job control, by design.** They
-     act on the kernel's task table, which the shell (task 0) sees directly. An
-     externalized version runs in a *spawnable slot*, so it (a) lists itself and
-     (b) makes a task number racy: the slot a `ps` reports is reused by the very
-     next command, so `wait <n>` typed after `ps` waited on itself (observed:
-     "that task is protected"). This is exactly why `kill`/`wait`/`jobs`/`fg`/
-     `bg` are shell builtins in bash. `ps` is external in Unix only because Unix
-     PIDs are stable; Ouroboros reuses slots immediately.
-   - **`ping`/`resolve`/`fetch` need capability delegation first.** Spawnable
-     slots get `TO_SHELL | TO_FSD | TO_CON` — *not* `TO_NET` (see
-     `tasks.rs::caps_for_slot`), so a spawned netd client is `MSG_ERR_DENIED`.
-     The clean path is the existing `DELEGATE` syscall: the shell (which holds
-     `TO_NET` statically) delegates it to the child at spawn, the same shape as
-     the pipe-consumer delegation — plus moving each command's netd request/
-     reply protocol (and `fetch`'s HTTP streaming) into the program. A real
-     mechanism increment, not a cheap port.
-   - **`mount`/`selftest`/`help` are shell-coupled / low-value externalized.**
+   *Netd increment done:* `ping`/`resolve`/`fetch` externalized via capability
+   delegation. A spawnable slot gets `TO_SHELL | TO_FSD | TO_CON` — not
+   `TO_NET` — so the shell (which holds `TO_NET` statically) `DELEGATE`s it to
+   the child at spawn (`delegate_net`), the same mechanism the program-to-
+   program pipe uses; `ulib::net_call` retries briefly on `MSG_ERR_DENIED` to
+   ride out the delegation race. Verified on QEMU with a NIC. **With the network
+   commands out, the externalization arc is effectively complete.**
+
+   *The commands that stay builtin, by design (established by trying `ps`/`kill`/
+   `wait` and reverting):*
+   - **`ps`/`kill`/`wait`/`fg` — job control.** They act on the kernel's task
+     table, which the shell (task 0) sees directly. An externalized version runs
+     in a *spawnable slot*, so it (a) lists itself and (b) makes a task number
+     racy: the slot a `ps` reports is reused by the very next command, so
+     `wait <n>` typed after `ps` waited on itself (observed: "that task is
+     protected"). This is exactly why `kill`/`wait`/`jobs`/`fg`/`bg` are shell
+     builtins in bash. `ps` is external in Unix only because Unix PIDs are
+     stable; Ouroboros reuses slots immediately.
+   - **`mount`/`selftest`/`help` — shell-coupled / low-value externalized.**
      `mount` drives the kernel USB rescan; `selftest` is the shell's own
      relocation proof; `help` is worth keeping as an always-available builtin
      (it's the fallback when `/bin` isn't mounted).
 
-   So the cheap phase of the arc is complete. (`cd`/`pwd`/`exit`/`exec`, plus
-   `write` and the redirect/pipe syntax, always stay builtin.)
+   (`cd`/`pwd`/`exit`/`exec`, plus `write` and the redirect/pipe syntax, always
+   stay builtin.)
 
 **Scale, honestly:** a multi-milestone arc (breadth comparable to a slice of
 the network stack), but Stages 1–3 alone already deliver "type a bare program
