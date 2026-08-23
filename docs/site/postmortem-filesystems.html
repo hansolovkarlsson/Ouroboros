@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The Filesystems Arc — Ouroboros</title>
+<meta name="description" content="A design-and-debugging retrospective on adding exFAT and ext2 to Ouroboros's filesystem server — each read-only then read-write, validated against foreign checkers (macOS, fsck_exfat, e2fsck, debugfs) — and the real-hardware pass that found a USB keyboard/storage bug the emulator could never show.">
+<link rel="icon" type="image/png" href="../assets/favicon.png">
+<link rel="stylesheet" href="../assets/site.css">
+</head>
+<body>
+
+<nav class="sitenav">
+  <div class="sitenav-inner">
+    <a class="sitenav-mark" href="../index.html">ouroboros</a>
+    <div class="sitenav-links">
+      <a href="../index.html">Home</a>
+      <a href="architecture-overview.html">Architecture</a>
+      <a href="tutorial.html">Learn</a>
+      <a href="docs.html" class="current">Docs</a>
+      <a href="https://github.com/hansolovkarlsson/Ouroboros">GitHub ↗</a>
+    </div>
+  </div>
+</nav>
+
+<div class="page">
+
+  <div class="kicker">Design retrospective · Ouroboros</div>
+
+  <h1 class="title small">The filesystems arc: exFAT, ext2, and what real hardware revealed</h1>
+  <p class="dek">
+    One long day: adding exFAT and ext2 to <code class="inline">fsd</code> — each
+    read-only then read-write — validating every step against foreign checkers,
+    and then taking the whole body of work to real Parallels hardware, which
+    found a bug the emulator can never show.
+  </p>
+
+  <div class="companion">
+    <span class="companion-icon">🗄️</span>
+    <span>The tenth retrospective — a companion to the <a href="postmortem-shell-filesystem.html">shell &amp; filesystem</a> postmortem (which brought up FAT32) and the <a href="postmortem-usb-storage.html">USB storage</a> one (which gave Parallels its first disk). Where the single hardcoded FAT32 engine became a real multi-filesystem layer — and where validating against something other than your own code paid off repeatedly.</span>
+  </div>
+
+  <h2>The starting point</h2>
+  <p><code class="inline">fsd</code>, the userland filesystem server, <em>was</em> FAT32: one hardcoded engine, one mounted filesystem. A prior refactor had wrapped it in a <code class="inline">Filesystem</code> enum with a single arm and a <code class="inline">mount()</code> that probed partitions — a "prove it's byte-identical first" step that set up for this. The goal: a second filesystem (exFAT), then a third and structurally different one (ext2), each read-only first and read-write second, all behind the unchanged <code class="inline">FSOP_*</code> IPC protocol clients already spoke.</p>
+
+  <h2>Lesson 1: an abstraction is only tested by a <em>different</em> implementation</h2>
+  <p>exFAT went in easily, and that was almost a trap. Structurally it's the same shape as FAT — a partition, a FAT, a heap of clusters, a directory of entries — so the read machinery mirrored <code class="inline">fat32.rs</code> and the enum barely stretched. If the arc had stopped there, the "abstraction" would have been validated only against a near-twin of what it already held. That proves very little.</p>
+  <p><strong>ext2 is what actually tested it.</strong> A genuinely different model: inodes own metadata and a directory entry is just <code class="inline">name -&gt; inode number</code>, so path resolution bounces between directory blocks and a separate inode table; files are reached through block-group descriptors and direct/indirect block pointers; names are case-<em>sensitive</em>. Making ext2 work through the <em>unchanged</em> protocol — nothing above <code class="inline">fsd</code> touched — is the real proof the abstraction was an abstraction and not FAT with extra coats of paint. If every implementation behind an interface is similar, the interface is untested.</p>
+
+  <h2>Lesson 2: validate against a foreign checker, never your own output</h2>
+  <p>The most valuable habit of the arc was never trusting the driver's own reads to prove its own writes. Every write stage was checked with a tool written by someone else:</p>
+  <ul>
+    <li><strong>exFAT</strong>: macOS's own exFAT driver mounted the volume and listed the files the driver created; <code class="inline">fsck_exfat</code> pronounced the bitmap and hierarchy clean after a create/write/delete/rename churn; and a binary copied <em>by the OS</em> read back byte-identical when dumped on the host.</li>
+    <li><strong>ext2</strong>: <code class="inline">e2fsck -fn</code> ran all five passes clean after each stage, and <code class="inline">debugfs</code> dumped a copied binary matching the original byte-for-byte.</li>
+  </ul>
+  <p>When a different vendor's <code class="inline">fsck</code> signs off on your on-disk structures — checking invariants your own code never looks at (free-count agreement across three places, link counts, orphan lists) — you have evidence your own reader can't give you, because your reader shares your bugs.</p>
+
+  <h2>Lesson 3: a field's meaning can depend on state — the e2fsck "orphan list" bug</h2>
+  <p>The best bug of the arc. After <code class="inline">rm</code>/<code class="inline">rmdir</code>, ext2 files were freed correctly by every measure I could see: link count zero, inode bitmap cleared, a deletion time set, and <code class="inline">s_last_orphan</code> was <code class="inline">0</code>. Yet <code class="inline">e2fsck</code> reported a <strong>"corrupted orphan linked list"</strong> naming exactly the deleted inodes.</p>
+  <p>The cause: e2fsck treats a links-0 inode whose <code class="inline">i_dtime</code> is <em>less than the inode count</em> as an entry on the orphan list, using <code class="inline">i_dtime</code> itself as the next-orphan pointer. The driver had written a sentinel deletion time of <code class="inline">1</code> — read by e2fsck as "next orphan = inode 1", fabricating a bogus chain. Fixed by writing a plausible <em>timestamp</em> (a fixed constant; no RTC). The lesson generalizes: <strong>a field can be overloaded to mean different things depending on the record's state</strong>, and a value obviously harmless in one reading can be actively wrong in another — exactly what a foreign checker exists to puncture.</p>
+
+  <h2>Lesson 4: read-first, write-later, and stage the write</h2>
+  <p>The corruption risk in a filesystem lives entirely in the writes, so each filesystem landed <strong>read-only as one milestone</strong>, then read-write as a <strong>sequence of small, independently-<code class="inline">fsck</code>-validated stages</strong>: allocation + <code class="inline">touch</code>; then data writes; then directories; then <code class="inline">mv</code>. exFAT's two checksums came out right on the first real test precisely because entry-set construction was the <em>only</em> new thing being checked that stage — a narrow surface is a debuggable surface.</p>
+
+  <h2>Lesson 5: the emulator hides an entire class of bug</h2>
+  <p>With all of it QEMU-green, the arc ended on a real Parallels VM. Boot, shell, servers, task table, relocation self-test — all clean, confirming the churn hadn't regressed the hardware path. Then the filesystem-on-real-hardware test found something QEMU structurally cannot show. Parallels exposes no disk to the kernel except USB mass storage, so it needed a real USB stick — and two boot configs produced an <em>inverse correlation</em>:</p>
+  <ul>
+    <li>Boot from the virtual hard disk, stick passed through late: the <strong>USB keyboard works, but USB storage reads degrade to device-I/O errors</strong> — the same sectors that read fine at mount.</li>
+    <li>Boot from the USB stick itself: <strong>storage works end to end, but the keyboard is never addressed</strong> — no shell input.</li>
+  </ul>
+  <p>Neither is a filesystem bug; the FS drivers read and wrote correctly whenever the block layer served them. It's the xHCI/USB stack failing to keep a HID keyboard <em>and</em> a mass-storage device concurrently live. QEMU never hinted at it because there the keyboard is a <em>synthetic</em> device and storage is <em>virtio-blk</em> — they never share an xHCI controller, so the contention that defines the bug doesn't exist to be found. <strong>Some bugs only exist where real hardware forces a sharing the emulator abstracts away.</strong> An emulator is a hypothesis about the hardware; a real-hardware pass is how you find where the hypothesis is wrong.</p>
+
+  <h2>The shape of the arc</h2>
+  <p>Two filesystems, each read then write, all behind one unchanged protocol; every stage checked by a tool that didn't share the driver's assumptions; and a real-hardware pass that both confirmed the work and surfaced the one thing the emulator could never reveal. The recurring disciplines were the old ones — prove the abstraction with a different implementation, stage the risky writes, verify against something outside your own code — plus a new one worth keeping: <strong>run on real hardware not to confirm success but to find the failures your emulator is structurally incapable of producing.</strong></p>
+
+  <p class="backlink"><a href="../filesystems-arc-postmortem.html">Markdown source</a> · <a href="docs.html">Documentation library</a></p>
+
+</div>
+
+</body>
+</html>

@@ -238,6 +238,11 @@
         <h3>/bin, pipelines, and where a command belongs</h3>
         <p>Builtins became a real <code class="inline">/bin</code> of standalone programs with multi-stage pipelines: the ps/kill/wait revert that showed job control belongs in the shell, a capability bitfield collision caught before it shipped, delegation needing less than feared, a pipeline heuristic replaced wholesale, and building a bootable GPT disk just to test one.</p>
       </a>
+      <a class="pm-card" href="site/postmortem-filesystems.html">
+        <span class="pm-eyebrow">Retrospective · the filesystems arc</span>
+        <h3>exFAT, ext2, and what real hardware revealed</h3>
+        <p>Two filesystems added to the server — each read-only then read-write, all behind one unchanged protocol — with the lessons: an abstraction is only tested by a genuinely different implementation (ext2's inodes), validate against a foreign checker not your own reader, a freed inode's <code class="inline">i_dtime</code> that e2fsck misread as an orphan pointer, and a real-hardware pass that found a USB keyboard/storage bug the emulator structurally cannot show.</p>
+      </a>
     </div>
 
     <p>

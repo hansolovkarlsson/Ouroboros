@@ -109,6 +109,33 @@ Next in the arc (see `roadmap.md`): ext2 read-write - inode + block-bitmap
 allocation and directory-record insertion, the highest corruption risk of the
 set.
 
+## Housekeeping: `programs/` + `build/` reorganization
+
+Two structural cleanups once the flat top-level layout got unwieldy (done
+between the exFAT and ext2 work). Purely moves — no behaviour change, all crate
+*package* names unchanged.
+
+- **All userland crates moved under `programs/`, grouped by role**:
+  `programs/shell`, `programs/servers/{fsd,cond,netd}`,
+  `programs/demos/{hello,pong}`, `programs/fileutils/*`, `programs/textutils/*`,
+  `programs/netutils/*`, `programs/shellutils/*`. The kernel and the two shared
+  libs (`ulib`, `syscall-abi`) stay at the repo root; the shared PIE linker
+  script moved to `programs/linker.ld`. Done with `git mv` (history preserved).
+  Because crates build by `-p <name>` and stage from `target/.../<name>`, the
+  **Makefile needed no edits** — only each moved crate's `path = "../..."` deps
+  deepened, the workspace `members` list, and `.cargo/config.toml`'s
+  `-Tprograms/linker.ld`.
+- **All generated artifacts moved under `build/`**: the `esp/` staging tree, the
+  disk images (`esp.img`/`esp.hdd`/`espgpt.img`/`espexfat.img`/`espext2.img`/…),
+  `net.pcap`, logs, and transient dirs — driven by one `BUILD_DIR` Makefile
+  variable, so the repo root holds only source/docs/config. `.gitignore`
+  collapsed to `/build/`; `make clean` is now `rm -rf build`.
+
+Verified on QEMU (boot, `/bin` commands, filesystem ops, zero `-d int` aborts)
+and later confirmed on real Parallels hardware (see the roadmap's real-hardware
+pass). One carryover: a registered Parallels VM's Hard Disk must be re-pointed to
+`build/esp.hdd`.
+
 ## More filesystems, step 3: exFAT read-write
 
 The exFAT arm is now read-write, built in four staged commits mirroring FAT32's
