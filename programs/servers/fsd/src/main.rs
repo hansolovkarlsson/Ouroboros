@@ -32,6 +32,7 @@
 
 mod disk;
 mod exfat;
+mod ext2;
 mod fat32;
 mod partition;
 mod vfs;
@@ -396,6 +397,7 @@ fn error_code(e: &fat32::Error) -> u64 {
         | fat32::Error::NoFat32Partition
         | fat32::Error::NotFat32
         | fat32::Error::NotExFat
+        | fat32::Error::NotExt2
         | fat32::Error::InvalidOffset
         | fat32::Error::UnsupportedSectorSize(_) => syscall_abi::FS_ERR_IO,
     }
@@ -409,6 +411,7 @@ fn error_name(e: &fat32::Error) -> &'static str {
         fat32::Error::NoFat32Partition => "no mountable partition on the disk",
         fat32::Error::NotFat32 => "partition is not FAT32",
         fat32::Error::NotExFat => "partition is not exFAT",
+        fat32::Error::NotExt2 => "partition is not ext2",
         fat32::Error::ReadOnly => "read-only filesystem",
         fat32::Error::UnsupportedSectorSize(_) => "unsupported sector size",
         fat32::Error::Io(_) => "disk I/O error",

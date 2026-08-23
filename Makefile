@@ -83,8 +83,14 @@ ESP_HDD      := $(ESP_DIR).hdd
 GPT_IMG      := $(BUILD_DIR)/espgpt.img
 EXFAT_IMG    := $(BUILD_DIR)/espexfat.img
 EXFAT_PART   := $(BUILD_DIR)/exfatpart.img
+EXT2_IMG     := $(BUILD_DIR)/espext2.img
+EXT2_PART    := $(BUILD_DIR)/ext2part.img
 USBSTICK_IMG := $(BUILD_DIR)/usbstick.img
 NET_PCAP     := $(BUILD_DIR)/net.pcap
+# mke2fs (ext2 image builder) from Homebrew's keg-only e2fsprogs - macOS has no
+# native ext2 tooling. `brew install e2fsprogs` provides it. Used only by the
+# ext2part.img target (fsd/src/ext2.rs testing).
+MKE2FS       := $(shell brew --prefix e2fsprogs 2>/dev/null)/sbin/mke2fs
 OVMF         := $(shell brew --prefix qemu 2>/dev/null)/share/qemu/edk2-aarch64-code.fd
 PDT          := /Applications/Parallels Desktop.app/Contents/MacOS/prl_disk_tool
 
@@ -102,7 +108,7 @@ ifeq ($(PROFILE),release)
 CARGO_FLAGS += --release
 endif
 
-.PHONY: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin ping-bin resolve-bin fetch-bin wc-bin grep-bin head-bin esp run run-virtio-console run-usb-kbd run-usb-multi run-gicv3 image run-image image-gpt run-image-gpt image-exfat run-image-exfat parallels-hdd test-parallels clean
+.PHONY: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin ping-bin resolve-bin fetch-bin wc-bin grep-bin head-bin esp run run-virtio-console run-usb-kbd run-usb-multi run-gicv3 image run-image image-gpt run-image-gpt image-exfat run-image-exfat image-ext2 run-image-ext2 parallels-hdd test-parallels clean
 
 # Overridable by `make test-parallels VM_NAME=... CMDS=... BOOT_WAIT=...`.
 VM_NAME     ?= Ouroboros
@@ -548,6 +554,51 @@ run-image-exfat: image-exfat
 		-m 512M \
 		-bios $(OVMF) \
 		-drive file=$(EXFAT_IMG),format=raw,if=none,id=hd0 \
+		-device virtio-blk-device,drive=hd0 \
+		-global virtio-mmio.force-legacy=false \
+		-nographic
+
+# $(EXT2_PART): a raw ext2 filesystem holding /bin (so the shell runs off ext2)
+# plus test files, built with Homebrew e2fsprogs' mke2fs (macOS has no native
+# ext2 tooling). Block size forced to 1024 so a >12 KiB file (the /bin/CAT
+# binary) spills past the 12 direct block pointers into single-indirect blocks -
+# exercising fsd/src/ext2.rs's indirection. The payload scripts/mkext2.py drops
+# into the ext2 partition of the combined disk.
+$(EXT2_PART): esp
+	@test -x "$(MKE2FS)" || { echo "mke2fs not found - run: brew install e2fsprogs"; exit 1; }
+	mkdir -p $(BUILD_DIR)
+	rm -rf $(BUILD_DIR)/ext2-src && mkdir -p $(BUILD_DIR)/ext2-src/bin
+	# ext2 is case-sensitive (Unix), and the shell probes /bin/<command> as
+	# typed (lowercase), so /bin gets lowercase names here - unlike the FAT/
+	# exFAT images, whose 8.3-heritage uppercase names only work because those
+	# filesystems match case-insensitively.
+	for f in $(ESP_DIR)/bin/*; do cp "$$f" "$(BUILD_DIR)/ext2-src/bin/$$(basename "$$f" | tr A-Z a-z)"; done
+	printf 'hello from an ext2 volume\n' > $(BUILD_DIR)/ext2-src/HELLO.TXT
+	printf 'line one\nline two has several words\nthird and final line\n' > $(BUILD_DIR)/ext2-src/README.TXT
+	mkdir -p $(BUILD_DIR)/ext2-src/sub
+	printf 'a nested file on ext2\n' > $(BUILD_DIR)/ext2-src/sub/NESTED.TXT
+	printf 'ext2 is case-sensitive, unlike FAT\n' > $(BUILD_DIR)/ext2-src/CaseSensitive.txt
+	rm -f $(EXT2_PART)
+	"$(MKE2FS)" -q -t ext2 -b 1024 -d $(BUILD_DIR)/ext2-src -F $(EXT2_PART) 24m
+	rm -rf $(BUILD_DIR)/ext2-src
+
+# build/espext2.img: a two-partition MBR disk - partition 1 ext2 (fsd mounts it),
+# partition 2 the FAT32 ESP (UEFI boots it). See scripts/mkext2.py. Exercises the
+# Filesystem-enum probe reaching its third arm (FAT32 + exFAT probes both fail on
+# the ext2 partition, ext2 succeeds).
+image-ext2: image $(EXT2_PART)
+	python3 scripts/mkext2.py
+
+# Boot the combined disk: UEFI boots BOOTAA64 from the FAT32 ESP (partition 2),
+# then fsd mounts the ext2 partition (partition 1) read-only - so `ls`/`cat`/
+# pipelines read from ext2 (their /bin binaries live there too).
+run-image-ext2: image-ext2
+	qemu-system-aarch64 \
+		-machine virt \
+		-cpu cortex-a72 \
+		-m 512M \
+		-bios $(OVMF) \
+		-drive file=$(EXT2_IMG),format=raw,if=none,id=hd0 \
 		-device virtio-blk-device,drive=hd0 \
 		-global virtio-mmio.force-legacy=false \
 		-nographic

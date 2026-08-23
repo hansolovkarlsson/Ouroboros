@@ -9,8 +9,9 @@
 //! **Write model.** Free clusters are tracked by an allocation *bitmap*
 //! ([`Fs::alloc_cluster`]/[`Fs::bitmap_set`]), located at mount from the root's
 //! `0x81` entry. Files/directories we create are always FAT-*chained*
-//! (`NoFatChain = 0`), so allocation parallels FAT32's `write_chain` (bitmap-set
-//! + FAT-link) and the reader's [`Fs::advance`] walks the chain. Creating an
+//! (`NoFatChain = 0`), so allocation parallels FAT32's `write_chain` (a
+//! bitmap-set plus a FAT-link) and the reader's [`Fs::advance`] walks the
+//! chain. Creating an
 //! entry ([`Fs::create_entry`]) builds a full set with both required checksums -
 //! the whole-set `SetChecksum` and the up-cased `NameHash`; deleting one
 //! ([`Fs::delete_set`]) clears each entry's in-use bit. Same corruption

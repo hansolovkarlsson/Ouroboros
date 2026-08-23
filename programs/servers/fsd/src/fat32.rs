@@ -58,6 +58,9 @@ pub enum Error {
     /// The probed partition isn't an exFAT volume either - the exFAT arm's
     /// analogue of [`NotFat32`], so `vfs::mount` can try the next partition.
     NotExFat,
+    /// The probed partition isn't an ext2 volume either (no `0xEF53` magic) -
+    /// the ext2 arm's analogue of [`NotFat32`], so `vfs::mount` moves on.
+    NotExt2,
     /// A write was attempted on a read-only filesystem (the exFAT arm, whose
     /// write support is a later milestone). FAT32 is fully read-write and
     /// never returns this. This is the shared `Error` type for every

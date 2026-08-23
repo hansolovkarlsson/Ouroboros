@@ -15,6 +15,7 @@
 
 use crate::disk::Disk;
 use crate::exfat;
+use crate::ext2;
 use crate::fat32;
 use crate::partition;
 
@@ -27,6 +28,8 @@ pub enum Filesystem {
     Fat32(fat32::Fs),
     /// exFAT, read-write (see [`exfat`]).
     ExFat(exfat::Fs),
+    /// ext2, read-only (see [`ext2`]). Writes return [`Error::ReadOnly`].
+    Ext2(ext2::Fs),
 }
 
 impl Filesystem {
@@ -51,6 +54,9 @@ impl Filesystem {
             if let Ok(fs) = exfat::Fs::mount_at(Disk, lba32) {
                 return Ok(Filesystem::ExFat(fs));
             }
+            if let Ok(fs) = ext2::Fs::mount_at(Disk, lba32) {
+                return Ok(Filesystem::Ext2(fs));
+            }
         }
         Err(Error::NoFat32Partition)
     }
@@ -60,6 +66,7 @@ impl Filesystem {
         match self {
             Filesystem::Fat32(_) => "FAT32",
             Filesystem::ExFat(_) => "exFAT",
+            Filesystem::Ext2(_) => "ext2 (read-only)",
         }
     }
 
@@ -67,6 +74,7 @@ impl Filesystem {
         match self {
             Filesystem::Fat32(fs) => fs.list_dir(path, f),
             Filesystem::ExFat(fs) => fs.list_dir(path, f),
+            Filesystem::Ext2(fs) => fs.list_dir(path, f),
         }
     }
 
@@ -74,6 +82,7 @@ impl Filesystem {
         match self {
             Filesystem::Fat32(fs) => fs.read_file(path, buf),
             Filesystem::ExFat(fs) => fs.read_file(path, buf),
+            Filesystem::Ext2(fs) => fs.read_file(path, buf),
         }
     }
 
@@ -81,6 +90,7 @@ impl Filesystem {
         match self {
             Filesystem::Fat32(fs) => fs.read_at(path, offset, buf),
             Filesystem::ExFat(fs) => fs.read_at(path, offset, buf),
+            Filesystem::Ext2(fs) => fs.read_at(path, offset, buf),
         }
     }
 
@@ -88,6 +98,7 @@ impl Filesystem {
         match self {
             Filesystem::Fat32(fs) => fs.write_file(path, data),
             Filesystem::ExFat(fs) => fs.write_file(path, data),
+            Filesystem::Ext2(fs) => fs.write_file(path, data),
         }
     }
 
@@ -95,6 +106,7 @@ impl Filesystem {
         match self {
             Filesystem::Fat32(fs) => fs.write_at(path, offset, data),
             Filesystem::ExFat(fs) => fs.write_at(path, offset, data),
+            Filesystem::Ext2(fs) => fs.write_at(path, offset, data),
         }
     }
 
@@ -102,6 +114,7 @@ impl Filesystem {
         match self {
             Filesystem::Fat32(fs) => fs.mkdir(path),
             Filesystem::ExFat(fs) => fs.mkdir(path),
+            Filesystem::Ext2(fs) => fs.mkdir(path),
         }
     }
 
@@ -109,6 +122,7 @@ impl Filesystem {
         match self {
             Filesystem::Fat32(fs) => fs.rmdir(path),
             Filesystem::ExFat(fs) => fs.rmdir(path),
+            Filesystem::Ext2(fs) => fs.rmdir(path),
         }
     }
 
@@ -116,6 +130,7 @@ impl Filesystem {
         match self {
             Filesystem::Fat32(fs) => fs.touch(path),
             Filesystem::ExFat(fs) => fs.touch(path),
+            Filesystem::Ext2(fs) => fs.touch(path),
         }
     }
 
@@ -123,6 +138,7 @@ impl Filesystem {
         match self {
             Filesystem::Fat32(fs) => fs.rm(path),
             Filesystem::ExFat(fs) => fs.rm(path),
+            Filesystem::Ext2(fs) => fs.rm(path),
         }
     }
 
@@ -130,6 +146,7 @@ impl Filesystem {
         match self {
             Filesystem::Fat32(fs) => fs.mv(src, dst),
             Filesystem::ExFat(fs) => fs.mv(src, dst),
+            Filesystem::Ext2(fs) => fs.mv(src, dst),
         }
     }
 }
