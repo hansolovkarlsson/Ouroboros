@@ -380,9 +380,24 @@ read-only as one milestone, read-write as a separate one.
    Confirmed: `ls`/`cat`, subdirs, `/bin` off ext2, a `grep | wc` pipeline,
    case-sensitivity, and writes refused; zero aborts. See `CHANGELOG.md`'s
    "More filesystems, step 4."
-5. **ext2, read-write.** Inode + block-bitmap allocation, directory record
-   insertion — the highest corruption risk of the set, the phase-4–8
-   discipline applied to a more complex on-disk structure.
+5. **ext2, read-write — DONE.** Built in four staged commits (allocation +
+   `touch`; `write_file`/`write_at`; `mkdir`/`rm`/`rmdir`; `mv`). Bitmap-based
+   block + inode allocation, keeping the free counts consistent across the group
+   descriptor *and* the superblock (plus `bg_used_dirs_count`); files use direct
+   + single/double indirect pointers (`ensure_block`); directories track link
+   counts (`mkdir`/`rmdir`) and a cross-dir `mv` fixes the moved dir's `..`. A
+   real e2fsck finding fixed along the way: a freed inode's `i_dtime` must be a
+   plausible timestamp, not a small sentinel (e2fsck reads a links-0 inode's
+   small `i_dtime` as a next-orphan pointer). Verified per stage on QEMU (zero
+   aborts) and **against the reference tools**: `e2fsck -fn` passes completely
+   clean after each stage's churn, and `debugfs` reads a copied binary back
+   byte-identical. See `CHANGELOG.md`'s "More filesystems, step 5."
+
+**The "more filesystems" arc is complete** (steps 0–5): GPT/MBR discovery, the
+VFS refactor, and FAT32 + exFAT + ext2 — `fsd` reads and writes all three
+through the unchanged `FSOP_*` protocol, the abstraction validated by a
+genuinely different (inode-based, case-sensitive) filesystem needing zero
+changes above `fsd`.
 
 **Deferred, noted:** **ext4** is much larger (extents, journaling, htree
 directories, checksums, 64-bit features) and the no-alloc fixed-buffer

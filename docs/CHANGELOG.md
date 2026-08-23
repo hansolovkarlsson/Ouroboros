@@ -7,6 +7,54 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/`; 
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## More filesystems, step 5: ext2 read-write (the arc's finale)
+
+The ext2 arm is now read-write, built in four staged commits mirroring the FAT
+write arcs (narrowest-useful-first, one tested commit per stage). This completes
+the whole "more filesystems" arc: `fsd` now reads *and writes* FAT32, exFAT, and
+ext2, all through the unchanged `FSOP_*` protocol.
+
+ext2 writing is the fiddliest of the three, because its consistency is spread
+across more structures than FAT's single table:
+
+- **Stage A - allocation + `touch`.** ext2 allocation is bitmap-based: each
+  block group has a block bitmap and an inode bitmap, and every allocation keeps
+  the free counts consistent in *both* the group descriptor and the superblock
+  (plus `bg_used_dirs_count` for directories) - e2fsck checks all of them agree.
+  `bitmap_alloc`/`alloc_block`/`alloc_inode`/`write_inode`/`insert_dirent` (the
+  classic slack-split directory insert) are the machinery; `touch` exercises it
+  with no data blocks.
+- **Stage B - `write_file`/`write_at`.** Data-block allocation with direct +
+  single/double indirect pointers (`ensure_block`); `write_file` writes new
+  blocks then frees the old (write-new-before-free); `write_at` is the
+  streaming/append primitive (`cp`/`>>`/`writeat`).
+- **Stage C - `mkdir`/`rm`/`rmdir`.** The link-count bookkeeping ext2 needs:
+  `mkdir` bumps the parent's link count (the new dir's `..`), `rmdir` decrements
+  it; a freed inode gets links 0 + a deletion time.
+- **Stage D - `mv`.** Re-point a dirent at the same inode then unlink the old;
+  a cross-directory *directory* move also fixes the moved dir's `..` and moves
+  the parent link-count contribution.
+
+A real e2fsck finding, fixed: a freed inode's `i_dtime` must be a plausible
+*timestamp*, not a small sentinel - e2fsck treats a links-0 inode whose
+`i_dtime` is `< s_inodes_count` as sitting on the orphan list (with `i_dtime`
+as the next-orphan pointer), so a sentinel of `1` produced a bogus "corrupted
+orphan linked list". Fixed with a fixed large constant (no RTC).
+
+Verified on QEMU at every stage (`make run-image-ext2`), zero `-d int` aborts:
+create/overwrite/append, streaming `cp` of a 16 KiB binary (single-indirect
+blocks), `mkdir` + writing inside it, `rm`/`rmdir` (non-empty refused), rename +
+cross-directory file and directory moves - all persisted across reboots. And
+validated against the reference tools throughout: **`e2fsck -fn` passes all five
+passes completely clean** after every stage's churn (bitmaps, free counts, link
+counts, directory connectivity all consistent), and `debugfs` reads a copied
+binary back **byte-identical**. FAT32/exFAT unregressed.
+
+**The "more filesystems" arc is complete** (steps 0-5): GPT/MBR discovery, the
+VFS refactor, and FAT32 + exFAT + ext2, each read-write (FAT32/exFAT) or with
+ext2 now read-write too. Deferred, as noted in `roadmap.md`: ext4 (a separate
+large arc), and FAT long-filename *write*.
+
 ## More filesystems, step 4: ext2 read-only
 
 The third filesystem arm - and the one that actually *tests* the `Filesystem`

@@ -40,6 +40,25 @@
 
   <article>
 
+<h2>More filesystems, step 5: ext2 read-write (the arc's finale)</h2>
+
+<p>The ext2 arm is now read-write, built in four staged commits mirroring the FAT write arcs. This completes the whole "more filesystems" arc: <code class="inline">fsd</code> reads <em>and writes</em> FAT32, exFAT, and ext2, all through the unchanged <code class="inline">FSOP_*</code> protocol.</p>
+
+<p>ext2 writing is the fiddliest of the three, because its consistency is spread across more structures than FAT's single table:</p>
+
+<ul>
+<li><strong>Stage A - allocation + <code class="inline">touch</code>.</strong> Bitmap-based allocation: each block group has a block bitmap and an inode bitmap, and every allocation keeps the free counts consistent in <em>both</em> the group descriptor and the superblock (plus <code class="inline">bg_used_dirs_count</code>) - e2fsck checks all agree. <code class="inline">insert_dirent</code> is the classic slack-split; <code class="inline">touch</code> exercises it with no data blocks.</li>
+<li><strong>Stage B - <code class="inline">write_file</code>/<code class="inline">write_at</code>.</strong> Data-block allocation with direct + single/double indirect pointers (<code class="inline">ensure_block</code>); write-new-before-free; the streaming/append primitive.</li>
+<li><strong>Stage C - <code class="inline">mkdir</code>/<code class="inline">rm</code>/<code class="inline">rmdir</code>.</strong> The link-count bookkeeping: <code class="inline">mkdir</code> bumps the parent (the new dir's <code class="inline">..</code>), <code class="inline">rmdir</code> decrements it; a freed inode gets links 0 + a deletion time.</li>
+<li><strong>Stage D - <code class="inline">mv</code>.</strong> Re-point a dirent at the same inode then unlink the old; a cross-directory <em>directory</em> move also fixes the moved dir's <code class="inline">..</code> and moves the parent link-count contribution.</li>
+</ul>
+
+<p>A real e2fsck finding, fixed: a freed inode's <code class="inline">i_dtime</code> must be a plausible <em>timestamp</em>, not a small sentinel - e2fsck treats a links-0 inode whose <code class="inline">i_dtime</code> is <code class="inline">&lt; s_inodes_count</code> as sitting on the orphan list (with <code class="inline">i_dtime</code> as the next-orphan pointer), so a sentinel of <code class="inline">1</code> produced a bogus "corrupted orphan linked list". Fixed with a fixed large constant (no RTC).</p>
+
+<p>Verified on QEMU at every stage (<code class="inline">make run-image-ext2</code>), zero <code class="inline">-d int</code> aborts: create/overwrite/append, streaming <code class="inline">cp</code> of a 16 KiB binary (single-indirect blocks), <code class="inline">mkdir</code> + writing inside it, <code class="inline">rm</code>/<code class="inline">rmdir</code> (non-empty refused), rename + cross-directory file and directory moves - all persisted across reboots. Validated against the reference tools throughout: <strong><code class="inline">e2fsck -fn</code> passes all five passes completely clean</strong> after every stage's churn, and <code class="inline">debugfs</code> reads a copied binary back <strong>byte-identical</strong>. FAT32/exFAT unregressed.</p>
+
+<p><strong>The "more filesystems" arc is complete</strong> (steps 0-5): GPT/MBR discovery, the VFS refactor, and FAT32 + exFAT + ext2 - the abstraction validated by a genuinely different (inode-based, case-sensitive) filesystem needing zero changes above <code class="inline">fsd</code>.</p>
+
 <h2>More filesystems, step 4: ext2 read-only</h2>
 
 <p>The third filesystem arm - and the one that actually <em>tests</em> the <code class="inline">Filesystem</code> abstraction. FAT32 and exFAT are the same shape (a partition, a FAT, a heap of clusters, a flat list of directory entries), so a thin enum sufficed. ext2 is a genuinely different model, and driving it through the <strong>unchanged</strong> <code class="inline">FSOP_*</code> protocol - nothing above <code class="inline">fsd</code> touched - is the proof the abstraction is real, not FAT-shaped in disguise.</p>

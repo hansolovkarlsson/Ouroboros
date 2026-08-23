@@ -116,6 +116,37 @@ un-Unix. Second, forcing the image's block size to 1024 meant the >12 KiB `/bin`
 binaries spilled past the 12 direct pointers into single-indirect blocks — so
 `exec /bin/CAT` was quietly exercising the indirection path from the first run.
 
+**And finally ext2 read-write — the finale of the whole filesystems arc.** Four
+staged commits again (allocation + `touch`; `write_file`/`write_at`;
+`mkdir`/`rm`/`rmdir`; `mv`). ext2 writing is the fiddliest of the three formats,
+because its consistency is spread across more structures than FAT's single
+table: allocation flips a block/inode *bitmap* bit **and** decrements free
+counts in both the group descriptor and the superblock; directories carry link
+counts that `mkdir`/`rmdir` must bump and drop; a cross-directory directory move
+has to repoint the moved dir's `..` and shift its parent-link contribution. The
+independent checker this time was `e2fsck` (macOS can't mount ext2), and it kept
+me honest.
+
+The best bug of the arc surfaced here. After `rm`/`rmdir`, `e2fsck` reported a
+"corrupted orphan linked list" naming exactly the inodes I'd deleted. Everything
+*looked* right — links 0, bitmap freed, deletion time set — and `s_last_orphan`
+was 0, so there shouldn't have been an orphan list at all. The cause was subtle:
+e2fsck treats a links-0 inode whose `i_dtime` is *less than the inode count* as
+sitting on the orphan list, using `i_dtime` as the next-orphan inode pointer. I'd
+written a sentinel deletion time of `1`, which e2fsck read as "next orphan =
+inode 1", fabricating a bogus chain. The fix was to write a plausible *timestamp*
+(a fixed large constant, since there's no RTC) instead of a small sentinel —
+after which `e2fsck -fn` passed all five passes completely clean, including the
+directory-connectivity and reference-count passes that validate `..` and link
+counts after directory moves. A copied binary also came back byte-identical
+through `debugfs`.
+
+That closes the "more filesystems" arc: GPT/MBR discovery, a VFS refactor, and
+FAT32 + exFAT + ext2 — `fsd` reads and writes all three through one unchanged
+`FSOP_*` protocol. The whole point of the VFS refactor, proven: a genuinely
+different (inode-based, case-sensitive) filesystem slotted in as a third enum arm
+with zero changes above `fsd`.
+
 ## 2026-08-22 — the userland day: /bin, pipelines, and the filesystem arc begins
 
 A long single day that took the shell from "every command is a builtin compiled
