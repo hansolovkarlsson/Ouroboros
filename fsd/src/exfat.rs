@@ -77,6 +77,10 @@ const END_OF_CHAIN: u32 = 0xffff_ffff;
 /// Longest reconstructed name we keep - the exFAT maximum.
 const LONG_NAME_MAX: usize = 255;
 
+/// Cap on a single `write_at` gap zero-fill past EOF (same as `fat32`'s), so a
+/// fat-fingered huge offset can't try to zero-fill the whole volume.
+const MAX_GAP_FILL: u64 = 1 << 20;
+
 /// UTF-16 name chars per File-Name (`0xC1`) entry.
 const NAME_CHARS_PER_ENTRY: usize = 15;
 /// Most 32-byte entries in one set: a File entry + a Stream-Extension entry +
@@ -281,14 +285,17 @@ impl Fs {
         start_cluster: u32,
         contiguous: bool,
         dir_size: u64,
-        mut f: impl FnMut(&DirEntry) -> bool,
+        mut f: impl FnMut(&DirEntry, usize, usize) -> bool,
     ) -> Result<(), Error> {
         let mut cluster = start_cluster;
         let mut consumed: u64 = 0;
+        let mut slot = 0usize; // global directory-entry slot index
 
         // Assembly state for the entry set currently being read.
         let mut in_set = false;
         let mut secondaries_left = 0u8;
+        let mut set_start = 0usize; // slot of the set's primary (0x85) entry
+        let mut set_len = 0usize; // declared entries in the set (1 + secondaries)
         let mut set_is_dir = false;
         let mut set_size = 0u64;
         let mut set_cluster = 0u32;
@@ -307,6 +314,8 @@ impl Fs {
                         return Ok(());
                     }
                     consumed += ENTRY_SIZE as u64;
+                    let this_slot = slot;
+                    slot += 1;
 
                     let t = raw[0];
                     if t == 0x00 {
@@ -319,6 +328,8 @@ impl Fs {
                     match t {
                         ET_FILE => {
                             secondaries_left = raw[1];
+                            set_start = this_slot;
+                            set_len = 1 + raw[1] as usize;
                             let attrs = u16::from_le_bytes([raw[4], raw[5]]);
                             set_is_dir = attrs & ATTR_DIRECTORY != 0;
                             set_size = 0;
@@ -377,7 +388,7 @@ impl Fs {
                             first_cluster: set_cluster,
                             contiguous: set_contig,
                         };
-                        if f(&entry) {
+                        if f(&entry, set_start, set_len) {
                             return Ok(());
                         }
                     }
@@ -404,7 +415,7 @@ impl Fs {
                 current.first_cluster,
                 current.contiguous,
                 current.size,
-                |entry| {
+                |entry, _slot, _len| {
                     if entry.name().eq_ignore_ascii_case(component) {
                         found = Some(*entry);
                         true
@@ -429,7 +440,7 @@ impl Fs {
         if !dir.is_dir {
             return Err(Error::NotADirectory);
         }
-        self.walk_dir(dir.first_cluster, dir.contiguous, dir.size, |entry| {
+        self.walk_dir(dir.first_cluster, dir.contiguous, dir.size, |entry, _slot, _len| {
             f(entry.name(), entry.is_dir, saturate_u32(entry.size));
             false
         })
@@ -574,7 +585,6 @@ impl Fs {
     }
 
     /// Set or clear the bitmap bit for `cluster` (bit index `cluster - 2`).
-    #[allow(dead_code)] // used by free_data (Stage C: rm/rmdir) and write (Stage B)
     fn bitmap_set(&mut self, cluster: u32, allocated: bool) -> Result<(), Error> {
         let bit = cluster - 2;
         let byte_index = (bit / 8) as u64;
@@ -630,7 +640,6 @@ impl Fs {
     /// FAT-chained allocation, its FAT entry). Handles both a file we created
     /// (FAT-chained) and a contiguous one another tool wrote (`NoFatChain`,
     /// walked by count from `size`).
-    #[allow(dead_code)] // used by rm/rmdir (Stage C) and write_file overwrite (Stage B)
     fn free_data(&mut self, first: u32, contiguous: bool, size: u64) -> Result<(), Error> {
         if first < 2 {
             return Ok(());
@@ -796,7 +805,7 @@ impl Fs {
             return Err(Error::NotADirectory);
         }
         let mut kind = ExistingKind::None;
-        self.walk_dir(parent.first_cluster, parent.contiguous, parent.size, |entry| {
+        self.walk_dir(parent.first_cluster, parent.contiguous, parent.size, |entry, _slot, _len| {
             if entry.name().eq_ignore_ascii_case(name) {
                 kind = if entry.is_dir {
                     ExistingKind::Dir
@@ -809,6 +818,146 @@ impl Fs {
             }
         })?;
         Ok((parent.first_cluster, parent.contiguous, kind))
+    }
+
+    /// Locate a named entry in a directory, also returning its set's on-disk
+    /// position (primary slot + entry count) so the set can be patched or
+    /// deleted. The located sibling of the lookup `parent_for_create` does.
+    fn find_in_parent(
+        &mut self,
+        dir_cluster: u32,
+        dir_contig: bool,
+        dir_size: u64,
+        name: &str,
+    ) -> Result<Option<(DirEntry, usize, usize)>, Error> {
+        let mut found: Option<(DirEntry, usize, usize)> = None;
+        self.walk_dir(dir_cluster, dir_contig, dir_size, |entry, slot, len| {
+            if entry.name().eq_ignore_ascii_case(name) {
+                found = Some((*entry, slot, len));
+                true
+            } else {
+                false
+            }
+        })?;
+        Ok(found)
+    }
+
+    /// Allocate and write a fresh FAT-chained cluster chain holding `data`,
+    /// returning its first cluster (`0` for empty `data`). The exFAT parallel of
+    /// `fat32::write_chain`: each cluster is bitmap-claimed and FAT-end-marked by
+    /// `alloc_cluster`, then linked to its predecessor.
+    fn write_chain(&mut self, data: &[u8]) -> Result<u32, Error> {
+        if data.is_empty() {
+            return Ok(0);
+        }
+        let cluster_bytes = self.sectors_per_cluster as usize * SECTOR_SIZE;
+        let num = data.len().div_ceil(cluster_bytes);
+        let mut first = 0u32;
+        let mut prev = 0u32;
+        let mut written = 0usize;
+        for i in 0..num {
+            let cluster = self.alloc_cluster()?;
+            if i == 0 {
+                first = cluster;
+            } else {
+                self.write_fat_entry(prev, cluster)?;
+            }
+            let lba = self.cluster_to_lba(cluster);
+            for s in 0..self.sectors_per_cluster {
+                let mut sector = [0u8; SECTOR_SIZE];
+                let start = written;
+                let end = (written + SECTOR_SIZE).min(data.len());
+                if start < end {
+                    sector[..end - start].copy_from_slice(&data[start..end]);
+                }
+                self.disk.write_sector((lba + s) as u64, &sector)?;
+                written += SECTOR_SIZE;
+            }
+            prev = cluster;
+        }
+        Ok(first)
+    }
+
+    /// Append one freshly allocated cluster after `tail`, returning it - the
+    /// exFAT `fat32::extend_chain`.
+    fn extend_chain(&mut self, tail: u32) -> Result<u32, Error> {
+        let new = self.alloc_cluster()?; // bitmap + FAT-end
+        self.write_fat_entry(tail, new)?;
+        Ok(new)
+    }
+
+    /// Convert a contiguous (`NoFatChain`) allocation into a FAT chain in place,
+    /// so it can be extended by `extend_chain`. Writes FAT links across the
+    /// existing consecutive clusters; the caller then clears the entry's
+    /// `NoFatChain` flag (which `patch_stream_ext` does). No-op if already
+    /// chained. The bitmap is unaffected (the clusters stay allocated).
+    fn ensure_chained(&mut self, first: u32, contiguous: bool, size: u64) -> Result<(), Error> {
+        if !contiguous || first < 2 || size == 0 {
+            return Ok(());
+        }
+        let cluster_bytes = self.sectors_per_cluster as u64 * SECTOR_SIZE as u64;
+        let n = size.div_ceil(cluster_bytes) as u32;
+        for i in 0..n {
+            let value = if i + 1 < n { first + i + 1 } else { END_OF_CHAIN };
+            self.write_fat_entry(first + i, value)?;
+        }
+        Ok(())
+    }
+
+    /// Read-modify-write of a partial sector of file data (preserve the bytes
+    /// outside `[in_off, in_off+bytes.len())`) - `fat32::write_partial_sector`.
+    fn write_partial_sector(&mut self, lba: u64, in_off: usize, bytes: &[u8]) -> Result<(), Error> {
+        let mut sector = [0u8; SECTOR_SIZE];
+        self.disk.read_sector(lba, &mut sector)?;
+        sector[in_off..in_off + bytes.len()].copy_from_slice(bytes);
+        self.disk.write_sector(lba, &sector)?;
+        Ok(())
+    }
+
+    /// Update an existing entry set's stream extension to point at a new
+    /// first-cluster / data-length (FAT-chained), then recompute the
+    /// `SetChecksum` over the whole set - the exFAT equivalent of
+    /// `fat32::patch_entry_cluster_size`, plus the checksum the format requires.
+    /// Reads all `set_len` entries (to checksum), rewrites the File + Stream
+    /// entries (the two that changed; the name entries are untouched).
+    fn patch_stream_ext(
+        &mut self,
+        dir_cluster: u32,
+        dir_contig: bool,
+        primary_slot: usize,
+        set_len: usize,
+        first_cluster: u32,
+        data_len: u64,
+    ) -> Result<(), Error> {
+        let mut set = [0u8; MAX_SET_BYTES];
+        let count = set_len.min(MAX_SET_ENTRIES);
+        for i in 0..count {
+            let (lba, off) = self
+                .slot_addr(dir_cluster, dir_contig, primary_slot + i)?
+                .ok_or(Error::NotFound)?;
+            let mut sec = [0u8; SECTOR_SIZE];
+            self.disk.read_sector(lba, &mut sec)?;
+            set[i * ENTRY_SIZE..(i + 1) * ENTRY_SIZE].copy_from_slice(&sec[off..off + ENTRY_SIZE]);
+        }
+        let se = ENTRY_SIZE;
+        set[se + 1] = SECONDARY_ALLOC_POSSIBLE; // FAT-chained now (NoFatChain clear)
+        set[se + 8..se + 16].copy_from_slice(&data_len.to_le_bytes()); // ValidDataLength
+        set[se + 20..se + 24].copy_from_slice(&first_cluster.to_le_bytes());
+        set[se + 24..se + 32].copy_from_slice(&data_len.to_le_bytes()); // DataLength
+        let sum = set_checksum(&set[..count * ENTRY_SIZE]);
+        set[2..4].copy_from_slice(&sum.to_le_bytes());
+        // Rewrite the two changed entries (File carries the new checksum).
+        for i in 0..2 {
+            let (lba, off) = self
+                .slot_addr(dir_cluster, dir_contig, primary_slot + i)?
+                .ok_or(Error::NotFound)?;
+            let mut sec = [0u8; SECTOR_SIZE];
+            self.disk.read_sector(lba, &mut sec)?;
+            sec[off..off + ENTRY_SIZE]
+                .copy_from_slice(&set[i * ENTRY_SIZE..(i + 1) * ENTRY_SIZE]);
+            self.disk.write_sector(lba, &sec)?;
+        }
+        Ok(())
     }
 
     // ---- write surface ------------------------------------------------------
@@ -827,14 +976,152 @@ impl Fs {
         self.create_entry(dir_cluster, dir_contig, name, false, 0, 0)
     }
 
+    /// Create a file with exactly `data`, or fully replace an existing file's
+    /// contents. Mirrors `fat32::write_file`'s ordering: the new chain is
+    /// allocated and written *before* the old file is touched, so a failure
+    /// partway never unlinks an existing file. Then the old chain is freed and
+    /// the entry patched (or a new entry created).
+    pub fn write_file(&mut self, path: &str, data: &[u8]) -> Result<(), Error> {
+        let (parent_path, name) = split_parent(path).ok_or(Error::InvalidName)?;
+        let parent = self.find(parent_path)?;
+        if !parent.is_dir {
+            return Err(Error::NotADirectory);
+        }
+        let existing =
+            self.find_in_parent(parent.first_cluster, parent.contiguous, parent.size, name)?;
+        if let Some((entry, _, _)) = existing {
+            if entry.is_dir {
+                return Err(Error::NotAFile);
+            }
+        }
+
+        // Write the replacement chain first (nothing existing touched yet).
+        let new_cluster = self.write_chain(data)?;
+
+        match existing {
+            Some((entry, primary_slot, set_len)) => {
+                if entry.first_cluster >= 2 {
+                    self.free_data(entry.first_cluster, entry.contiguous, entry.size)?;
+                }
+                self.patch_stream_ext(
+                    parent.first_cluster,
+                    parent.contiguous,
+                    primary_slot,
+                    set_len,
+                    new_cluster,
+                    data.len() as u64,
+                )
+            }
+            None => self.create_entry(
+                parent.first_cluster,
+                parent.contiguous,
+                name,
+                false,
+                new_cluster,
+                data.len() as u64,
+            ),
+        }
+    }
+
+    /// Write `data` at byte `offset`, extending the file as needed without
+    /// rewriting the bytes before `offset` - the primitive behind streaming
+    /// `cp`, `>>`, and `writeat`. Mirrors `fat32::write_at` (grow-only size, a
+    /// zero-filled gap past EOF bounded by `MAX_GAP_FILL`, a unified per-sector
+    /// pass), with allocation through the bitmap and a contiguous file first
+    /// converted to a FAT chain so it can be extended.
+    pub fn write_at(&mut self, path: &str, offset: u64, data: &[u8]) -> Result<(), Error> {
+        if data.is_empty() {
+            return Ok(());
+        }
+        let (parent_path, name) = split_parent(path).ok_or(Error::InvalidName)?;
+        let parent = self.find(parent_path)?;
+        if !parent.is_dir {
+            return Err(Error::NotADirectory);
+        }
+        let (entry, primary_slot, set_len) = self
+            .find_in_parent(parent.first_cluster, parent.contiguous, parent.size, name)?
+            .ok_or(Error::NotFound)?;
+        if entry.is_dir {
+            return Err(Error::NotAFile);
+        }
+
+        let old_size = entry.size;
+        if offset > old_size && offset - old_size > MAX_GAP_FILL {
+            return Err(Error::InvalidOffset);
+        }
+
+        // Make the existing allocation FAT-chained so it can be extended.
+        self.ensure_chained(entry.first_cluster, entry.contiguous, old_size)?;
+
+        let cluster_bytes = self.sectors_per_cluster as u64 * SECTOR_SIZE as u64;
+        let mut head_cluster = entry.first_cluster;
+        if head_cluster < 2 {
+            head_cluster = self.alloc_cluster()?;
+        }
+
+        let write_start = old_size.min(offset);
+        let write_end = offset + data.len() as u64;
+
+        // Walk to the cluster holding `write_start`, extending if needed.
+        let mut cluster = head_cluster;
+        let mut cluster_pos = 0u64;
+        while cluster_pos + cluster_bytes <= write_start {
+            cluster = match self.next_cluster(cluster)? {
+                Some(next) => next,
+                None => self.extend_chain(cluster)?,
+            };
+            cluster_pos += cluster_bytes;
+        }
+
+        let mut pos = write_start;
+        while pos < write_end {
+            while pos >= cluster_pos + cluster_bytes {
+                cluster = match self.next_cluster(cluster)? {
+                    Some(next) => next,
+                    None => self.extend_chain(cluster)?,
+                };
+                cluster_pos += cluster_bytes;
+            }
+            let sector_in_cluster = (pos - cluster_pos) / SECTOR_SIZE as u64;
+            let sector_lba = self.cluster_to_lba(cluster) as u64 + sector_in_cluster;
+            let sector_start = cluster_pos + sector_in_cluster * SECTOR_SIZE as u64;
+            let in_off = (pos - sector_start) as usize;
+            let n = ((SECTOR_SIZE - in_off) as u64).min(write_end - pos) as usize;
+
+            // Zeros before `offset` (the gap), `data` from `offset` on.
+            let mut chunk = [0u8; SECTOR_SIZE];
+            for (i, slot) in chunk[..n].iter_mut().enumerate() {
+                let fp = pos + i as u64;
+                if fp >= offset {
+                    *slot = data[(fp - offset) as usize];
+                }
+            }
+
+            if in_off == 0 && n == SECTOR_SIZE {
+                self.disk.write_sector(sector_lba, &chunk)?;
+            } else if sector_start < old_size {
+                self.write_partial_sector(sector_lba, in_off, &chunk[..n])?;
+            } else {
+                let mut sector = [0u8; SECTOR_SIZE];
+                sector[in_off..in_off + n].copy_from_slice(&chunk[..n]);
+                self.disk.write_sector(sector_lba, &sector)?;
+            }
+            pos += n as u64;
+        }
+
+        let new_size = old_size.max(write_end);
+        self.patch_stream_ext(
+            parent.first_cluster,
+            parent.contiguous,
+            primary_slot,
+            set_len,
+            head_cluster,
+            new_size,
+        )
+    }
+
     // ---- write surface: still read-only (later stages) ----------------------
 
-    pub fn write_file(&mut self, _path: &str, _data: &[u8]) -> Result<(), Error> {
-        Err(Error::ReadOnly)
-    }
-    pub fn write_at(&mut self, _path: &str, _offset: u64, _data: &[u8]) -> Result<(), Error> {
-        Err(Error::ReadOnly)
-    }
     pub fn mkdir(&mut self, _path: &str) -> Result<(), Error> {
         Err(Error::ReadOnly)
     }
