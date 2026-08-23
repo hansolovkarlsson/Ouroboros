@@ -1351,7 +1351,7 @@ fn is_dot_or_dotdot(name: &str) -> bool {
 /// Splits an absolute path into `(parent_path, name)` - e.g.
 /// `/EFI/NEWDIR` -> `("/EFI", "NEWDIR")`, `/NEWDIR` -> `("/", "NEWDIR")`.
 /// Returns `None` for `/` itself or a name-less path (nothing to split).
-fn split_parent(path: &str) -> Option<(&str, &str)> {
+pub(crate) fn split_parent(path: &str) -> Option<(&str, &str)> {
     let trimmed = path.trim_end_matches('/');
     if trimmed.is_empty() {
         return None;
