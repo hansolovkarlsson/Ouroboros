@@ -40,6 +40,20 @@
 
   <article>
 
+<h2>More filesystems, step 0: GPT + multi-partition discovery</h2>
+
+<p>The prerequisite the rest of the arc needs: real disks (anything macOS/Linux formats) use GPT, not MBR, and <code class="inline">fsd</code> read only the first FAT32 <em>MBR</em> partition. Partition discovery is now its own concern, above any one filesystem.</p>
+
+<ul>
+<li>New <code class="inline">fsd/src/partition.rs</code>: <code class="inline">discover(disk, out)</code> enumerates a disk's partition start LBAs — <strong>GPT or MBR</strong>. It detects GPT by the "EFI PART" signature at LBA 1, parses the header and entry array (skipping zero-GUID entries); otherwise reads the classic MBR table (skipping empty and the protective 0xEE entry). Bounded, fixed-buffer, no <code class="inline">alloc</code>.</li>
+<li><code class="inline">fat32::Fs::mount</code> became <code class="inline">mount_at(disk, partition_lba)</code> — the BPB-reading half, no partition scan; it returns <code class="inline">NotFat32</code> if the sector isn't a FAT32 BPB, so a caller can try the next partition.</li>
+<li><code class="inline">vfs::Filesystem::mount</code> now discovers partitions and tries <code class="inline">mount_at</code> at each (first FAT32 wins), mounting a FAT32 partition wherever it sits — MBR or GPT — and skipping one that isn't FAT32 (the hook a future exFAT/ext2 probe slots into).</li>
+</ul>
+
+<p>Testing needed a GPT disk, which macOS has no tooling for. New <code class="inline">scripts/mkgpt.py</code> (+ <code class="inline">make image-gpt</code>/<code class="inline">run-image-gpt</code>) wraps <code class="inline">esp.img</code>'s FAT32 partition in a <strong>bootable</strong> GPT container — a protective MBR, primary + backup GPT headers with correct CRC32s (UEFI validates them to boot), and an EFI-System-Partition entry at LBA 2048.</p>
+
+<p>Verified on QEMU, zero <code class="inline">-d int</code> aborts, two ways: (1) <code class="inline">run-image</code> (the MBR path) still mounts, no regression; (2) <code class="inline">run-image-gpt</code> boots from the GPT disk (capacity 133152 sectors) and <code class="inline">fsd</code> mounts the FAT32 partition <strong>via the GPT parser</strong> — the disk has no real MBR table, only the protective entry, so the GPT path is the only way it was found. <code class="inline">ls /</code>, <code class="inline">cat /EFI/ORBS/INIT.CFG</code>, <code class="inline">ls /bin | wc</code> (<code class="inline">22 22 110</code>), <code class="inline">mkdir</code>/<code class="inline">write</code>/<code class="inline">cat</code> all worked on the GPT-mounted partition.</p>
+
 <h2>More filesystems, step 1: the VFS refactor (a <code class="inline">Filesystem</code> enum inside <code class="inline">fsd</code>)</h2>
 
 <p>First step of the "more filesystems" arc, and a pure refactor — no behaviour change, proven byte-identical before any second filesystem exists (the "refactor first, prove no change" pattern <code class="inline">block.rs</code>'s <code class="inline">BlockDevice</code> enum already followed).</p>

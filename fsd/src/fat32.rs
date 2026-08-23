@@ -33,7 +33,6 @@ const ATTR_VOLUME_ID: u8 = 0x08;
 const ATTR_LFN: u8 = 0x0f;
 const DIR_ENTRY_FREE: u8 = 0xe5;
 const DIR_ENTRY_END: u8 = 0x00;
-const FAT32_PARTITION_TYPES: [u8; 2] = [0x0b, 0x0c]; // FAT32 CHS, FAT32 LBA
 const END_OF_CHAIN_MIN: u32 = 0x0fff_fff8;
 const MAX_NAME_LEN: usize = 12; // 8 name + '.' + 3 ext, the most an 8.3 short name is ever
 /// Longest reconstructed name a `DirEntry` can hold - a FAT long filename
@@ -200,34 +199,17 @@ pub struct Fs {
 }
 
 impl Fs {
-    /// Reads the MBR, finds the first FAT32-typed partition, reads and
-    /// validates its BPB, and computes the FAT/data region layout.
-    /// Doesn't touch anything beyond sector 0 and the partition's own
-    /// first sector.
+    /// Mount the FAT32 volume whose first sector is at `partition_lba`: read
+    /// and validate its BPB and compute the FAT/data region layout. Returns
+    /// [`Error::NotFat32`] if the sector isn't a FAT32 BPB, so the caller
+    /// (`vfs::mount`) can try the next partition. Partition *discovery* (MBR or
+    /// GPT) is now `partition.rs`'s job - this doesn't read the partition table.
     ///
     /// The kernel must have a block device installed (`BLOCK_INFO`
     /// answering with a capacity) - every sector call in this module
     /// relies on that, probed once by the caller rather than at each
     /// call site.
-    pub fn mount(mut disk: Disk) -> Result<Self, Error> {
-        let mut mbr = [0u8; SECTOR_SIZE];
-        disk.read_sector(0, &mut mbr)?;
-
-        let mut partition_lba = None;
-        for i in 0..4 {
-            let entry = 0x1be + i * 16;
-            if FAT32_PARTITION_TYPES.contains(&mbr[entry + 4]) {
-                partition_lba = Some(u32::from_le_bytes([
-                    mbr[entry + 8],
-                    mbr[entry + 9],
-                    mbr[entry + 10],
-                    mbr[entry + 11],
-                ]));
-                break;
-            }
-        }
-        let partition_lba = partition_lba.ok_or(Error::NoFat32Partition)?;
-
+    pub fn mount_at(mut disk: Disk, partition_lba: u32) -> Result<Self, Error> {
         let mut bpb = [0u8; SECTOR_SIZE];
         disk.read_sector(partition_lba as u64, &mut bpb)?;
 

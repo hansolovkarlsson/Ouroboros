@@ -7,6 +7,42 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/`; 
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## More filesystems, step 0: GPT + multi-partition discovery
+
+The prerequisite the rest of the arc needs: real disks (anything macOS/Linux
+formats, especially large ones) use GPT, not MBR, and `fsd` read only the first
+FAT32 *MBR* partition. Partition discovery is now its own concern, above any
+one filesystem.
+
+- New `fsd/src/partition.rs`: `discover(disk, out)` enumerates a disk's
+  partition start LBAs — **GPT or MBR**. It detects GPT by the "EFI PART"
+  signature at LBA 1 (a GPT disk also carries a protective MBR), parses the
+  header (entry-array LBA, count, size) and the entry array (skipping zero-GUID
+  entries); otherwise it reads the classic MBR table (skipping empty and the
+  protective 0xEE entry). Bounded, fixed-buffer, no `alloc`.
+- `fat32::Fs::mount` became `mount_at(disk, partition_lba)` — the BPB-reading
+  half, no partition scan; it returns `NotFat32` if the sector isn't a FAT32
+  BPB, so a caller can try the next partition. The MBR-scan and the
+  FAT32-type-byte filter are gone.
+- `vfs::Filesystem::mount` now discovers partitions and tries `mount_at` at each
+  (first FAT32 wins), so it mounts a FAT32 partition wherever it sits — first or
+  not, MBR or GPT — and a partition that isn't FAT32 is simply skipped (the hook
+  a future exFAT/ext2 probe slots into).
+
+Testing needed a GPT disk, which macOS has no tooling for (no `sgdisk`/`gdisk`;
+`hdiutil` builds MBR). New `scripts/mkgpt.py` (+ `make image-gpt`/
+`run-image-gpt`) wraps `esp.img`'s FAT32 partition in a **bootable** GPT
+container — a protective MBR, primary + backup GPT headers with correct CRC32s
+(UEFI validates them to boot), and an EFI-System-Partition entry at LBA 2048.
+
+Verified on QEMU, zero `-d int` aborts, two ways: (1) `run-image` (the MBR
+path) still mounts and the whole FS surface works — no regression; (2)
+`run-image-gpt` boots from the GPT disk (capacity 133152 sectors, the GPT
+container) and `fsd` mounts the FAT32 partition **via the GPT parser** — the
+disk has no real MBR table, only the protective entry, so the GPT path is the
+only way it was found. `ls /`, `cat /EFI/ORBS/INIT.CFG`, `ls /bin | wc`
+(`22 22 110`), `mkdir`/`write`/`cat` all worked on the GPT-mounted partition.
+
 ## More filesystems, step 1: the VFS refactor (a `Filesystem` enum inside `fsd`)
 
 First step of the "more filesystems" arc, and a pure refactor — no behaviour

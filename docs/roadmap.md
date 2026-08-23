@@ -315,11 +315,15 @@ read-only as one milestone, read-write as a separate one.
 
 **Staging:**
 
-0. **GPT + multi-partition (prerequisite).** Real disks — especially large
-   ones and anything macOS/Linux formats — use GPT, not MBR, and `fsd`
-   reads only the *first FAT32* MBR partition today. A GPT parser (a
-   bounded, documented structure) plus "pick the right partition by type"
-   is a small, self-contained first step that every later stage needs.
+0. **GPT + multi-partition (prerequisite) — DONE.** New `fsd/src/partition.rs`
+   `discover`s a disk's partition start LBAs — GPT (via the "EFI PART" header +
+   entry array) or MBR — and `vfs::mount` tries mounting a filesystem at each
+   (first FAT32 wins), so `fsd` mounts a FAT32 partition wherever it sits, MBR
+   *or* GPT. `fat32::Fs::mount` became `mount_at(disk, lba)` (no partition
+   scan). Tested both paths on QEMU (a new `scripts/mkgpt.py` / `make
+   run-image-gpt` builds a bootable GPT disk, since macOS has no GPT tooling);
+   the GPT disk has no real MBR table, so `fsd` mounting it proves the GPT
+   parser. See `CHANGELOG.md`'s "More filesystems, step 0."
 1. **The VFS refactor (a pure refactor first) — DONE.** `fsd/src/vfs.rs`'s
    `Filesystem` enum (FAT32 the only arm) now wraps the hardcoded `Fs`; its
    per-op methods forward to the arm, and `mount` is the type-detection point.

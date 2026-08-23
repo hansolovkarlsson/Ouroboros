@@ -32,6 +32,7 @@
 
 mod disk;
 mod fat32;
+mod partition;
 mod vfs;
 
 use core::arch::asm;

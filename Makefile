@@ -89,7 +89,7 @@ ifeq ($(PROFILE),release)
 CARGO_FLAGS += --release
 endif
 
-.PHONY: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin ping-bin resolve-bin fetch-bin wc-bin grep-bin head-bin esp run run-virtio-console run-usb-kbd run-usb-multi run-gicv3 image run-image parallels-hdd test-parallels clean
+.PHONY: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin ping-bin resolve-bin fetch-bin wc-bin grep-bin head-bin esp run run-virtio-console run-usb-kbd run-usb-multi run-gicv3 image run-image image-gpt run-image-gpt parallels-hdd test-parallels clean
 
 # Overridable by `make test-parallels VM_NAME=... CMDS=... BOOT_WAIT=...`.
 VM_NAME     ?= Ouroboros
@@ -468,6 +468,27 @@ run-image: image
 		-m 512M \
 		-bios $(OVMF) \
 		-drive file=$(ESP_DIR).img,format=raw,if=none,id=hd0 \
+		-device virtio-blk-device,drive=hd0 \
+		-global virtio-mmio.force-legacy=false \
+		-nographic
+
+# espgpt.img: esp.img's FAT32 partition wrapped in a *GPT* disk (protective
+# MBR + primary/backup GPT headers, an EFI-System-Partition entry) - built by
+# scripts/mkgpt.py because macOS has no GPT tooling and hdiutil only makes MBR.
+# For testing fsd's GPT partition discovery (the more-filesystems arc).
+image-gpt: image
+	python3 scripts/mkgpt.py
+
+# Boot the GPT disk instead of the MBR esp.img: UEFI boots BOOTAA64 from the
+# ESP, and fsd discovers the FAT32 partition through the GPT path (the disk has
+# no real MBR partition table, only a protective 0xEE entry).
+run-image-gpt: image-gpt
+	qemu-system-aarch64 \
+		-machine virt \
+		-cpu cortex-a72 \
+		-m 512M \
+		-bios $(OVMF) \
+		-drive file=espgpt.img,format=raw,if=none,id=hd0 \
 		-device virtio-blk-device,drive=hd0 \
 		-global virtio-mmio.force-legacy=false \
 		-nographic

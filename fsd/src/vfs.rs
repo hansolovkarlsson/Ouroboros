@@ -15,6 +15,7 @@
 
 use crate::disk::Disk;
 use crate::fat32;
+use crate::partition;
 
 /// Failure reasons, shared across every filesystem arm (FAT32's `Error` today).
 pub use crate::fat32::Error;
@@ -25,12 +26,26 @@ pub enum Filesystem {
 }
 
 impl Filesystem {
-    /// Detect the on-disk filesystem and mount it. Today that is the first
-    /// FAT32 MBR partition ([`fat32::Fs::mount`]); a future format adds a
-    /// detection branch here (by MBR/GPT partition type, or by probing the
-    /// boot sector / superblock) and its own arm.
-    pub fn mount(disk: Disk) -> Result<Self, Error> {
-        Ok(Filesystem::Fat32(fat32::Fs::mount(disk)?))
+    /// Discover the disk's partitions (MBR or GPT - see `partition::discover`)
+    /// and mount the first one that holds a filesystem we recognize. Today that
+    /// means trying FAT32 ([`fat32::Fs::mount_at`]) at each partition and taking
+    /// the first that validates; a future format (exFAT, ext2) adds another
+    /// probe here and its own arm. Returns [`Error::NoFat32Partition`] if no
+    /// partition mounts.
+    pub fn mount(mut disk: Disk) -> Result<Self, Error> {
+        let mut parts = [0u64; partition::MAX_PARTITIONS];
+        let count = partition::discover(&mut disk, &mut parts)?;
+        for &lba in &parts[..count] {
+            // FAT32's layout arithmetic is 32-bit (partitions past 2 TB aren't
+            // a concern here); a start LBA that doesn't fit just isn't tried.
+            let Ok(lba32) = u32::try_from(lba) else {
+                continue;
+            };
+            if let Ok(fs) = fat32::Fs::mount_at(Disk, lba32) {
+                return Ok(Filesystem::Fat32(fs));
+            }
+        }
+        Err(Error::NoFat32Partition)
     }
 
     pub fn list_dir(&mut self, path: &str, f: impl FnMut(&str, bool, u32)) -> Result<(), Error> {
