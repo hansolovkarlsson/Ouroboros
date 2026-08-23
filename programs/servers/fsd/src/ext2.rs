@@ -80,6 +80,14 @@ const NAME_MAX: usize = 255;
 /// a fat-fingered huge offset can't try to fill the whole volume.
 const MAX_GAP_FILL: u64 = 1 << 20;
 
+/// `i_dtime` written on a freed inode. It must be a plausible *timestamp*, not a
+/// small integer: e2fsck treats a links-0 inode whose `i_dtime` is `< s_inodes_
+/// count` as sitting on the orphan list (with `i_dtime` as the next-orphan inode
+/// pointer), so a small sentinel like `1` is misread as "next orphan = inode 1".
+/// We have no RTC, so a fixed constant well above any inode count is used
+/// (0x4000_0000 ~= a 2004 Unix time).
+const DELETION_TIME: u32 = 0x4000_0000;
+
 /// A decoded inode - only the fields a read-only driver needs.
 #[derive(Clone, Copy)]
 struct Inode {
@@ -1008,17 +1016,178 @@ impl Fs {
         self.write_inode(ino, &node)
     }
 
-    // ---- write surface: still read-only (later stages) ----------------------
+    // ---- write infrastructure (Stage C: directories) ------------------------
 
-    pub fn mkdir(&mut self, _path: &str) -> Result<(), Error> {
-        Err(Error::ReadOnly)
+    /// Unlink `name` from directory `dir`: extend the previous entry's `rec_len`
+    /// to swallow the removed one (or, if it's first in its block, zero its inode
+    /// field) - the standard ext2 removal. `NotFound` if absent.
+    fn remove_dirent(&mut self, dir: &Inode, name: &str) -> Result<(), Error> {
+        let bs = self.block_size as usize;
+        let nblocks = dir.size as usize / bs;
+        let mut buf = [0u8; MAX_BLOCK_SIZE];
+        for li in 0..nblocks {
+            let phys = self.block_for(dir, li as u32)?;
+            if phys == 0 {
+                continue;
+            }
+            self.read_block(phys, &mut buf[..bs])?;
+            let mut off = 0usize;
+            let mut prev: Option<usize> = None;
+            while off + 8 <= bs {
+                let e = &buf[off..];
+                let e_ino = u32::from_le_bytes([e[0], e[1], e[2], e[3]]);
+                let rec_len = u16::from_le_bytes([e[4], e[5]]) as usize;
+                let nl = e[6] as usize;
+                if rec_len < 8 || off + rec_len > bs {
+                    break;
+                }
+                if e_ino != 0
+                    && nl == name.len()
+                    && off + 8 + nl <= bs
+                    && &buf[off + 8..off + 8 + nl] == name.as_bytes()
+                {
+                    if let Some(p) = prev {
+                        let pr = u16::from_le_bytes([buf[p + 4], buf[p + 5]]) as usize;
+                        buf[p + 4..p + 6].copy_from_slice(&((pr + rec_len) as u16).to_le_bytes());
+                    } else {
+                        buf[off..off + 4].copy_from_slice(&0u32.to_le_bytes());
+                    }
+                    self.write_block(phys, &buf[..bs])?;
+                    return Ok(());
+                }
+                prev = Some(off);
+                off += rec_len;
+            }
+        }
+        Err(Error::NotFound)
     }
-    pub fn rmdir(&mut self, _path: &str) -> Result<(), Error> {
-        Err(Error::ReadOnly)
+
+    /// Whether directory `dir` holds any entry other than `.`/`..`.
+    fn dir_is_empty(&mut self, dir: &Inode) -> Result<bool, Error> {
+        let mut empty = true;
+        self.walk_dir(dir, |entry| {
+            let n = entry.name();
+            if n != "." && n != ".." {
+                empty = false;
+                true
+            } else {
+                false
+            }
+        })?;
+        Ok(empty)
     }
-    pub fn rm(&mut self, _path: &str) -> Result<(), Error> {
-        Err(Error::ReadOnly)
+
+    // ---- write surface ------------------------------------------------------
+
+    /// Create an empty subdirectory. Allocates an inode + one data block for its
+    /// `.`/`..` entries, links it into the parent, and bumps the parent's link
+    /// count (the new dir's `..` points at it). Fails if the name exists.
+    pub fn mkdir(&mut self, path: &str) -> Result<(), Error> {
+        let (parent_path, name) = split_parent(path).ok_or(Error::InvalidName)?;
+        let (parent_ino, mut parent) = self.resolve(parent_path)?;
+        if !parent.is_dir() {
+            return Err(Error::NotADirectory);
+        }
+        if self.lookup_in(&parent, name)?.is_some() {
+            return Err(Error::AlreadyExists);
+        }
+
+        let new_ino = self.alloc_inode(true)?;
+        let dblk = self.alloc_block(true)?;
+        let bs = self.block_size as usize;
+        let ftype_dir = if self.has_filetype { FT_DIR } else { 0 };
+        let mut buf = [0u8; MAX_BLOCK_SIZE];
+        write_dirent(&mut buf[0..], new_ino, 12, ".", ftype_dir);
+        write_dirent(&mut buf[12..], parent_ino, bs - 12, "..", ftype_dir);
+        self.write_block(dblk, &buf[..bs])?;
+
+        let mut node = Inode {
+            mode: NEW_DIR_MODE,
+            links: 2, // "." and the name in the parent
+            size: bs as u32,
+            i_blocks: (bs / SECTOR_SIZE) as u32,
+            block: [0; INODE_BLOCK_PTRS],
+        };
+        node.block[0] = dblk;
+        self.write_inode(new_ino, &node)?;
+
+        self.insert_dirent(parent_ino, &mut parent, name, new_ino, FT_DIR)?;
+        parent.links += 1; // the new dir's ".." references the parent
+        self.write_inode(parent_ino, &parent)
     }
+
+    /// Remove a file (rejects a directory with `NotAFile`). Unlinks the entry,
+    /// then decrements the inode's link count and - at zero - frees its data
+    /// blocks and the inode.
+    pub fn rm(&mut self, path: &str) -> Result<(), Error> {
+        let (parent_path, name) = split_parent(path).ok_or(Error::InvalidName)?;
+        let (_parent_ino, parent) = self.resolve(parent_path)?;
+        if !parent.is_dir() {
+            return Err(Error::NotADirectory);
+        }
+        let (tino, mode) = self.lookup_in(&parent, name)?.ok_or(Error::NotFound)?;
+        if mode & S_IFMT == S_IFDIR {
+            return Err(Error::NotAFile);
+        }
+        let target = self.read_inode(tino)?;
+        self.remove_dirent(&parent, name)?;
+        if target.links <= 1 {
+            self.free_all_blocks(&target)?;
+            self.free_inode(tino, false)?;
+            self.mark_inode_deleted(tino, target.mode)?;
+        } else {
+            let mut t = target;
+            t.links -= 1;
+            self.write_inode(tino, &t)?;
+        }
+        Ok(())
+    }
+
+    /// Remove an empty subdirectory (rejects a non-empty one, a file, or the
+    /// root). Unlinks it, frees its block(s) and inode, and decrements the
+    /// parent's link count (the gone `..` no longer points at it).
+    pub fn rmdir(&mut self, path: &str) -> Result<(), Error> {
+        let (parent_path, name) = split_parent(path).ok_or(Error::CannotRemoveRoot)?;
+        let (parent_ino, mut parent) = self.resolve(parent_path)?;
+        if !parent.is_dir() {
+            return Err(Error::NotADirectory);
+        }
+        let (tino, mode) = self.lookup_in(&parent, name)?.ok_or(Error::NotFound)?;
+        if mode & S_IFMT != S_IFDIR {
+            return Err(Error::NotADirectory);
+        }
+        let target = self.read_inode(tino)?;
+        if !self.dir_is_empty(&target)? {
+            return Err(Error::DirectoryNotEmpty);
+        }
+        self.remove_dirent(&parent, name)?;
+        self.free_all_blocks(&target)?;
+        self.free_inode(tino, true)?;
+        self.mark_inode_deleted(tino, target.mode)?;
+        parent.links -= 1; // the removed dir's ".." no longer references parent
+        self.write_inode(parent_ino, &parent)
+    }
+
+    /// Mark a freed inode deleted: links 0, everything cleared, and a nonzero
+    /// `i_dtime` (e2fsck expects a deleted inode to carry a deletion time).
+    fn mark_inode_deleted(&mut self, ino: u32, mode: u16) -> Result<(), Error> {
+        let dead = Inode {
+            mode,
+            links: 0,
+            size: 0,
+            i_blocks: 0,
+            block: [0; INODE_BLOCK_PTRS],
+        };
+        self.write_inode(ino, &dead)?;
+        // i_dtime lives at offset 20 within the inode.
+        let group = (ino - 1) / self.inodes_per_group;
+        let index = (ino - 1) % self.inodes_per_group;
+        let inode_table = self.read_u32_at(self.desc_byte(group) + 8)?;
+        let inode_byte =
+            inode_table as u64 * self.block_size as u64 + index as u64 * self.inode_size as u64;
+        self.write_int_at(inode_byte + 20, DELETION_TIME, 4)
+    }
+
     pub fn mv(&mut self, _src: &str, _dst: &str) -> Result<(), Error> {
         Err(Error::ReadOnly)
     }
