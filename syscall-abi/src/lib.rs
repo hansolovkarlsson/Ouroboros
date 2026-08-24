@@ -725,6 +725,53 @@ pub const FSOP_WRITE_BULK: u64 = 12;
 /// file of any size, one chunk at a time.
 pub const FSOP_WRITE_AT: u64 = 13;
 
+/// no params -> status `0` with an inline info block when a filesystem is
+/// mounted, or [`NO_FS`] when nothing is (a bare status reply then). The
+/// query behind `mount` with no argument (disk-tools arc, milestone 1).
+/// On success the reply payload (from [`FS_REPLY_PAYLOAD`]) is:
+/// `partition_lba: u64` (the volume's first sector), then
+/// `capacity_sectors: u64` (the whole disk's 512-byte-sector count), then
+/// the format name as ASCII bytes running to the end of the reply
+/// (`"FAT32"`/`"exFAT"`/`"ext2"`). The client formats these itself.
+pub const FSOP_MOUNT_INFO: u64 = 14;
+/// no params -> status `0` (was mounted, now dropped) or [`NO_FS`]
+/// (nothing was mounted). Drops the server's mounted filesystem so the
+/// disk can be reformatted or a different volume mounted (disk-tools arc,
+/// milestone 1). The device the kernel holds is untouched - a subsequent
+/// [`FSOP_MOUNT`] re-probes and re-mounts it.
+pub const FSOP_UNMOUNT: u64 = 15;
+
+/// params: `(sectors,)` -> status `0` (wiped) / [`MOUNT_ALREADY`] (refused:
+/// a filesystem is mounted - `unmount` first) / [`MOUNT_NO_DEVICE`] (no block
+/// device) / [`FS_ERR_IO`]. Zeroes the disk's first `sectors` 512-byte sectors
+/// (clamped to the disk's capacity; `0` means the milestone-2 default,
+/// [`ERASE_DEFAULT_SECTORS`]) - enough to destroy the MBR/GPT partition tables
+/// and any filesystem metadata living near the start of the disk, so a
+/// subsequent [`FSOP_PARTITION`] starts from a clean slate. Refused while a
+/// filesystem is mounted (the mount would be reading stale structures). Disk
+/// management arc, milestone 2.
+pub const FSOP_ERASE: u64 = 16;
+/// params: `(type byte,)` -> status `0` / [`MOUNT_ALREADY`] (refused: mounted)
+/// / [`MOUNT_NO_DEVICE`] / [`FS_ERR_DISK_FULL`] (disk too small) / [`FS_ERR_IO`].
+/// Writes a fresh **MBR** with a single primary partition spanning the disk
+/// from LBA [`PARTITION_START_LBA`] to the end, of the given MBR partition
+/// **type byte** (e.g. `0x0C` FAT32-LBA, `0x07` exFAT/NTFS, `0x83` Linux) - a
+/// type byte of `0` defaults to `0x0C`. Only LBA 0 (the partition table) is
+/// written; the partition's contents are left as-is for [`FSOP_FORMAT`] (a
+/// later milestone) to lay a filesystem into. GPT is a later step. Refused
+/// while mounted. Disk management arc, milestone 2.
+pub const FSOP_PARTITION: u64 = 17;
+
+/// [`FSOP_ERASE`]'s default wipe length when the request passes `0`: 2048
+/// sectors (1 MiB at 512 B/sector), the conventional wipe span - it covers
+/// the MBR (LBA 0), a GPT primary header + entry array (LBA 1..33), and any
+/// filesystem superblock/boot sector at a 1 MiB-aligned partition start.
+pub const ERASE_DEFAULT_SECTORS: u64 = 2048;
+/// The first sector [`FSOP_PARTITION`] gives its single partition: LBA 2048
+/// (1 MiB alignment, the near-universal modern convention that keeps the
+/// filesystem aligned to erase blocks / RAID stripes).
+pub const PARTITION_START_LBA: u64 = 2048;
+
 // ---------------------------------------------------------------------
 // The console server's request protocol (not syscalls) - messages sent
 // to CON_TASK, normally via MSG_CALL. Shares the filesystem protocol's

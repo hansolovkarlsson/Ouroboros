@@ -194,6 +194,10 @@ fn lfn_chars(raw: &[u8], out: &mut [u8; 13]) -> usize {
 
 pub struct Fs {
     disk: Disk,
+    /// The volume's first sector (the BPB) - kept so `mount`-info can
+    /// report where on the disk this filesystem lives (the disk-tools arc,
+    /// milestone 1). Not used by any read/write path.
+    partition_lba: u32,
     sectors_per_cluster: u32,
     fat_start_lba: u32,
     data_start_lba: u32,
@@ -249,6 +253,7 @@ impl Fs {
 
         Ok(Fs {
             disk,
+            partition_lba,
             sectors_per_cluster,
             fat_start_lba,
             data_start_lba,
@@ -256,6 +261,11 @@ impl Fs {
             num_fats,
             fat_size_32,
         })
+    }
+
+    /// The volume's first sector - for `mount`-info reporting only.
+    pub fn partition_lba(&self) -> u32 {
+        self.partition_lba
     }
 
     fn cluster_to_lba(&self, cluster: u32) -> u32 {

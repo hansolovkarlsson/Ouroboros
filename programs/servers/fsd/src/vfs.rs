@@ -70,6 +70,16 @@ impl Filesystem {
         }
     }
 
+    /// The first sector of the mounted volume - `mount`-info reporting only
+    /// (disk-tools milestone 1).
+    pub fn partition_lba(&self) -> u32 {
+        match self {
+            Filesystem::Fat32(fs) => fs.partition_lba(),
+            Filesystem::ExFat(fs) => fs.partition_lba(),
+            Filesystem::Ext2(fs) => fs.partition_lba(),
+        }
+    }
+
     pub fn list_dir(&mut self, path: &str, f: impl FnMut(&str, bool, u32)) -> Result<(), Error> {
         match self {
             Filesystem::Fat32(fs) => fs.list_dir(path, f),

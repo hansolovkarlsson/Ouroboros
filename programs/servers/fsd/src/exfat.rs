@@ -125,6 +125,9 @@ impl DirEntry {
 
 pub struct Fs {
     disk: Disk,
+    /// The volume's first sector (the VBR) - kept so `mount`-info can report
+    /// where this filesystem lives on the disk (disk-tools milestone 1).
+    partition_lba: u32,
     /// Sectors per cluster (`1 << SectorsPerClusterShift`).
     sectors_per_cluster: u32,
     /// Absolute LBA of the (first) FAT.
@@ -173,6 +176,7 @@ impl Fs {
 
         let mut fs = Fs {
             disk,
+            partition_lba,
             sectors_per_cluster: 1u32 << sectors_per_cluster_shift,
             fat_lba: partition_lba + fat_offset,
             cluster_heap_lba: partition_lba + cluster_heap_offset,
@@ -218,6 +222,11 @@ impl Fs {
                 None => return Ok(()),
             }
         }
+    }
+
+    /// The volume's first sector - for `mount`-info reporting only.
+    pub fn partition_lba(&self) -> u32 {
+        self.partition_lba
     }
 
     fn cluster_to_lba(&self, cluster: u32) -> u32 {

@@ -7,6 +7,66 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/`; 
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## Disk management tools, milestone 2: `erase` + `partition` (MBR)
+
+The guest can now prepare a blank disk itself, not just use one some other tool
+partitioned. Two new raw-disk `FSOP_*` ops in `fsd` (the "filesystem server"
+becoming a "storage server"), driven by two new shell builtins:
+
+- **`erase disk`** (`FSOP_ERASE`) zeroes the disk's first 2048 sectors (1 MiB) —
+  the partition table and any filesystem metadata near the start — via a
+  `BLOCK_WRITE` loop. The literal `disk` argument is a guard against an
+  accidental bare `erase`.
+- **`partition [fat32|exfat|ext2]`** (`FSOP_PARTITION`) writes a fresh MBR with
+  one primary partition spanning LBA 2048→end, tagged with the matching type
+  byte (0x0C / 0x07 / 0x83; default fat32). Only LBA 0 is written; the partition
+  is left unformatted for a later `format`.
+
+Both **refuse while a filesystem is mounted** (`MOUNT_ALREADY` → "unmount
+first") — which is why milestone 1's `unmount` came first.
+
+**A real architectural constraint the plan hadn't foreseen: these must be shell
+builtins, not `/bin` programs.** A `/bin` program is *read from the mounted
+disk* to be loaded — but `erase`/`partition` run precisely when nothing is
+mounted (you `unmount` first). The load-from-disk dependency and the
+unmount-first requirement are mutually exclusive, so the tools live in the
+shell, which is already resident. (The rest of the command surface stays in
+`/bin`; only the disk-preparation tools that operate on an unmounted disk are
+builtins.)
+
+Verified on QEMU against a scratch copy of the boot disk: the full
+`mount`→`unmount`→`erase disk`→`partition exfat` sequence, plus the
+refuse-while-mounted and usage guards. The resulting MBR was read cleanly by
+macOS's own `fdisk` (partition 1: type 0x07, start LBA 2048, 129024 sectors =
+131072 − 2048), and a hexdump confirmed the wipe (the old FAT32 boot sector at
+LBA 1 zeroed). Zero `-d int` aborts across the run. Next: milestone 3, `format`
+(mkfs) per filesystem — see `roadmap.md`.
+
+## Disk management tools, milestone 1: `mount`-info and `unmount`
+
+The first step of the disk-management arc (managing disks from the running
+system, not just using a disk some other tool prepared). `fsd` grows two new
+`FSOP_*` ops, and the shell's `mount` command is repurposed Unix-style:
+
+- **`mount` with no argument now *lists* what's mounted** (`FSOP_MOUNT_INFO`):
+  the format, its partition's first sector (LBA), and the disk capacity — e.g.
+  `exFAT mounted at partition LBA 2048 (disk 182272 sectors, 89 MiB)`, or
+  `nothing mounted`. Each `Fs` (FAT32/exFAT/ext2) now records its
+  `partition_lba`; `Filesystem` gained `name()`/`partition_lba()` accessors, and
+  the whole-disk capacity comes from `BLOCK_INFO`.
+- **`mount -a`** performs the old mounting action (the two-half server-then-USB
+  rescan for the Parallels late-attach workflow).
+- **`unmount`** (`FSOP_UNMOUNT`) drops the mounted filesystem (`fs = None`) so
+  the disk can be reformatted or a different volume mounted; the kernel's block
+  device is untouched, so `mount -a` re-probes and remounts it.
+
+Foundational for the rest of the arc — you unmount before formatting, and
+mount-info is how you confirm a format worked. Verified on QEMU across FAT32
+(partition LBA 1) and exFAT (partition LBA 2048): the full mount-info → unmount →
+"nothing mounted" → `mount -a` → remount cycle, `ls` after remount, and the
+`mount xyz` usage guard, with zero `-d int` aborts. See `roadmap.md`'s "Disk
+management tools" arc for milestones 2 (partition/erase) and 3 (format).
+
 ## More filesystems, step 5: ext2 read-write (the arc's finale)
 
 The ext2 arm is now read-write, built in four staged commits mirroring the FAT

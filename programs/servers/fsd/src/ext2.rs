@@ -228,6 +228,11 @@ impl Fs {
         })
     }
 
+    /// The volume's first sector - for `mount`-info reporting only.
+    pub fn partition_lba(&self) -> u32 {
+        self.part_lba
+    }
+
     /// Absolute LBA of the first sector of filesystem block `block`.
     fn block_lba(&self, block: u32) -> u64 {
         self.part_lba as u64 + block as u64 * (self.block_size as u64 / SECTOR_SIZE as u64)

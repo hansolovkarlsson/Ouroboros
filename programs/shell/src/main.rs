@@ -437,8 +437,9 @@ fn split_pipeline<'a>(line: &'a str, stages: &mut [&'a str]) -> Result<usize, &'
 fn is_builtin(cmd: &str) -> bool {
     matches!(
         cmd,
-        "help" | "cd" | "pwd" | "write" | "mount" | "exec" | "exit" | "ps" | "kill" | "fg"
-            | "wait" | "send" | "recv" | "selftest" | "env" | "set" | "unset"
+        "help" | "cd" | "pwd" | "write" | "mount" | "unmount" | "erase" | "partition" | "exec"
+            | "exit" | "ps" | "kill" | "fg" | "wait" | "send" | "recv" | "selftest" | "env"
+            | "set" | "unset"
     )
 }
 
@@ -849,7 +850,7 @@ fn dispatch_line(line: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize, env:
     let arg = words.next().unwrap_or("");
 
     match command {
-        "help" => out.put_line("commands: help, echo, uptime, clear, ls, cat, cd, pwd, mkdir, rmdir, touch, rm, write, writeat, cp, mv, mount, ping, resolve, fetch, exec, exit, ps, kill, fg, wait, send, recv, selftest, env, set, unset (a bare unknown command is looked up on $PATH; $VAR expands; append `> file`/`>> file` to redirect, or `| /path/to/program` to pipe)"),
+        "help" => out.put_line("commands: help, echo, uptime, clear, ls, cat, cd, pwd, mkdir, rmdir, touch, rm, write, writeat, cp, mv, mount, unmount, erase, partition, ping, resolve, fetch, exec, exit, ps, kill, fg, wait, send, recv, selftest, env, set, unset (a bare unknown command is looked up on $PATH; $VAR expands; append `> file`/`>> file` to redirect, or `| /path/to/program` to pipe)"),
         // echo, uptime, clear are externalized: they're /bin programs now
         // (found via PATH by the unknown-command arm), not builtins. See
         // "Standalone binaries, Stage 4".
@@ -870,7 +871,10 @@ fn dispatch_line(line: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize, env:
         "kill" => cmd_kill(arg),
         "fg" => cmd_fg(arg),
         "wait" => cmd_wait(arg),
-        "mount" => cmd_mount(),
+        "mount" => cmd_mount(arg, out),
+        "unmount" => cmd_unmount(),
+        "erase" => cmd_erase(arg),
+        "partition" => cmd_partition(arg),
         "send" => cmd_send(line),
         "recv" => cmd_recv(),
         "selftest" => cmd_selftest(out),
@@ -1950,12 +1954,55 @@ fn print_u64(n: u64) {
     out.put_u64_decimal(n);
 }
 
-/// `mount` - rescans the USB ports for a storage device that attached
-/// after boot and mounts its FAT32 filesystem. The Parallels workflow:
+/// `mount` (no arg) reports what's mounted; `mount -a` performs the
+/// mount action. The disk-tools arc (milestone 1) repurposed the bare
+/// command to *list*, Unix-style - the mounting action moved to `-a`.
+fn cmd_mount(arg: &str, out: &mut Output) {
+    match arg {
+        "" => mount_info(out),
+        "-a" => mount_disk(),
+        _ => print_line("mount: usage: `mount` (show what's mounted) or `mount -a` (mount the disk)"),
+    }
+}
+
+/// `mount` with no argument: ask the filesystem server what's mounted
+/// (FSOP_MOUNT_INFO) and print the format, its partition's first sector,
+/// and the disk's capacity - or that nothing is mounted.
+fn mount_info(out: &mut Output) {
+    // Reply payload: partition_lba (u64), capacity_sectors (u64), then the
+    // format name as ASCII to the end. Zero-init so the name's end is a 0.
+    let mut info = [0u8; 32];
+    match fs_call(syscall_abi::FSOP_MOUNT_INFO, [0; 4], &[], &[], &mut info) {
+        NO_FS => print_line("nothing mounted (run `mount -a` to mount the disk)"),
+        0 => {
+            let part_lba = u64::from_le_bytes([
+                info[0], info[1], info[2], info[3], info[4], info[5], info[6], info[7],
+            ]);
+            let capacity = u64::from_le_bytes([
+                info[8], info[9], info[10], info[11], info[12], info[13], info[14], info[15],
+            ]);
+            let name_end = info[16..].iter().position(|&b| b == 0).unwrap_or(16) + 16;
+            let name = core::str::from_utf8(&info[16..name_end]).unwrap_or("?");
+            out.put_str(name);
+            out.put_str(" mounted at partition LBA ");
+            out.put_u64_decimal(part_lba);
+            // 512-byte sectors -> MiB is sectors / 2048.
+            out.put_str(" (disk ");
+            out.put_u64_decimal(capacity);
+            out.put_str(" sectors, ");
+            out.put_u64_decimal(capacity / 2048);
+            out.put_line(" MiB)");
+        }
+        _ => print_line("mount: unexpected return"),
+    }
+}
+
+/// `mount -a` - rescans the USB ports for a storage device that attached
+/// after boot and mounts its filesystem. The Parallels workflow:
 /// a passed-through stick appears a few seconds after the VM starts,
 /// later than the kernel's boot-time scan - boot, wait a moment, type
-/// `mount`, and the disk commands come alive.
-fn cmd_mount() {
+/// `mount -a`, and the disk commands come alive.
+fn mount_disk() {
     // Server-first, then the device: ask the filesystem server to
     // mount whatever block device the kernel already holds
     // (FSOP_MOUNT). Only if that can't produce a filesystem - nothing
@@ -1995,8 +2042,64 @@ fn cmd_mount() {
     }
     match fs_call(syscall_abi::FSOP_MOUNT, [0; 4], &[], &[], &mut []) {
         0 => print_line("mounted - disk commands available"),
-        NO_FS => print_line("mount: device found, but no mountable FAT32 filesystem on it (see the server's log line)"),
+        NO_FS => print_line("mount: device found, but no mountable filesystem on it (see the server's log line)"),
         _ => print_line("mount: unexpected return"),
+    }
+}
+
+/// `unmount` - drops the filesystem server's mounted volume (FSOP_UNMOUNT)
+/// so the disk can be reformatted or a different volume mounted. The
+/// kernel's block device is untouched; `mount -a` re-probes and remounts
+/// it. The disk-tools arc, milestone 1.
+fn cmd_unmount() {
+    match fs_call(syscall_abi::FSOP_UNMOUNT, [0; 4], &[], &[], &mut []) {
+        0 => print_line("unmounted"),
+        NO_FS => print_line("unmount: nothing was mounted"),
+        _ => print_line("unmount: unexpected return"),
+    }
+}
+
+/// `erase disk` - zeroes the disk's first sectors (`FSOP_ERASE`), wiping the
+/// partition table and any filesystem metadata near the start so the disk can
+/// be freshly partitioned. Requires the literal argument `disk` as a guard
+/// against an accidental bare `erase`, and refuses while a filesystem is
+/// mounted. Disk-tools milestone 2. **Destructive.** Must be a builtin, not a
+/// `/bin` program: it runs when nothing is mounted, which is exactly when
+/// `/bin` can't be read to load a program.
+fn cmd_erase(arg: &str) {
+    if arg != "disk" {
+        print_line("erase: usage: `erase disk` (wipes the start of the disk; unmount first; destructive)");
+        return;
+    }
+    match fs_call(syscall_abi::FSOP_ERASE, [0; 4], &[], &[], &mut []) {
+        0 => print_line("erased - disk start wiped; run `partition` next"),
+        MOUNT_ALREADY => print_line("erase: a filesystem is mounted - run `unmount` first"),
+        MOUNT_NO_DEVICE => print_line("erase: no disk device"),
+        _ => print_line("erase: I/O error"),
+    }
+}
+
+/// `partition [fat32|exfat|ext2]` - writes a single-partition MBR spanning the
+/// disk (`FSOP_PARTITION`), tagging the partition with the given type byte
+/// (default fat32). Refuses while a filesystem is mounted. The partition is
+/// left unformatted - `format` (a later milestone) lays a filesystem into it.
+/// Disk-tools milestone 2. **Destructive** (overwrites the partition table).
+/// A builtin for the same reason as `erase`.
+fn cmd_partition(arg: &str) {
+    let type_byte: u64 = match arg {
+        "" | "fat32" => 0x0C,
+        "exfat" => 0x07,
+        "ext2" | "linux" => 0x83,
+        _ => {
+            print_line("partition: usage: `partition [fat32|exfat|ext2]` (default fat32; unmount first)");
+            return;
+        }
+    };
+    match fs_call(syscall_abi::FSOP_PARTITION, [type_byte, 0, 0, 0], &[], &[], &mut []) {
+        0 => print_line("partitioned - one MBR partition spanning the disk (unformatted; use `format` next)"),
+        MOUNT_ALREADY => print_line("partition: a filesystem is mounted - run `unmount` first"),
+        MOUNT_NO_DEVICE => print_line("partition: no disk device"),
+        _ => print_line("partition: disk too small or I/O error"),
     }
 }
 

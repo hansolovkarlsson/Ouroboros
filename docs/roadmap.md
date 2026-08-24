@@ -451,18 +451,31 @@ for building it.
 
 **Staging (each independently shippable + testable, risk increasing):**
 
-1. **`mount` (no arg) lists what's mounted, and `unmount`.** A new
-   `FSOP_MOUNT_INFO` returning the mounted format + partition (LBA/index) +
-   capacity (`fsd` already has `Filesystem::name()`), so `mount` with no
-   argument prints e.g. "exFAT on partition 1"; and `FSOP_UNMOUNT` drops the
-   mounted FS (`fs = None`) so the disk can be reformatted. Small, low-risk, and
-   foundational — you unmount before formatting, and mount-info is how you
-   confirm a format worked. **Do first.**
-2. **`partition` + `erase`.** `erase` zeroes the leading sectors (a `BLOCK_WRITE`
-   loop via `fsd`). `partition` writes a partition table — **MBR first**
-   (trivial: 4 entries + `0x55AA`), **GPT later** (the `scripts/mkgpt.py` logic
-   — protective MBR + primary/backup headers with CRC32s + entry array — in
-   Rust). New `FSOP_PARTITION`/`FSOP_ERASE`. Moderate.
+1. **`mount` (no arg) lists what's mounted, and `unmount`. — DONE
+   (2026-08-23).** `FSOP_MOUNT_INFO` returns the mounted format + the
+   partition's first sector (LBA) + the disk's capacity (each `Fs` now carries
+   its `partition_lba`; `Filesystem` gained `name()`/`partition_lba()`
+   accessors), so bare `mount` prints e.g. `exFAT mounted at partition LBA 2048
+   (disk 182272 sectors, 89 MiB)`; `FSOP_UNMOUNT` drops the mounted FS
+   (`fs = None`) so the disk can be reformatted. Bare `mount` was repurposed to
+   *list* (Unix-style); the old mounting action moved to `mount -a`. Verified on
+   QEMU across FAT32 (LBA 1) and exFAT (LBA 2048): mount-info → unmount → "nothing
+   mounted" → `mount -a` → remount, zero `-d int` aborts. Foundational — you
+   unmount before formatting, and mount-info is how you confirm a format worked.
+2. **`partition` + `erase`. — DONE (2026-08-23), MBR (GPT still later).**
+   `erase disk` zeroes the disk's first 2048 sectors (`FSOP_ERASE`, a
+   `BLOCK_WRITE` loop in `fsd`); `partition [fat32|exfat|ext2]` writes an
+   **MBR** with one primary partition spanning LBA 2048→end of the given type
+   byte (`FSOP_PARTITION`). Both refuse while mounted (`MOUNT_ALREADY` →
+   "unmount first"). Both are **shell builtins, not `/bin` programs** — a real
+   constraint the plan didn't foresee: they run when nothing is mounted, which
+   is exactly when `/bin` can't be read to load a program (the load-from-disk
+   paradox). Verified on QEMU against a scratch disk: `mount`→`unmount`→`erase
+   disk`→`partition exfat`, then the resulting MBR read cleanly by macOS
+   `fdisk` (type 0x07, start 2048, size 129024) and hexdump confirmed the wipe
+   (the old FAT32 boot sector at LBA 1 zeroed); zero `-d int` aborts. **GPT
+   still later** (the `scripts/mkgpt.py` logic — protective MBR + primary/backup
+   headers with CRC32s + entry array — in Rust).
 3. **`format` (mkfs) — FAT32 first.** The big one: create a filesystem from
    scratch on a partition (BPB/FAT/root-dir for FAT32). It's essentially the
    *inverse* of the read/write arcs, so each format is its own milestone the

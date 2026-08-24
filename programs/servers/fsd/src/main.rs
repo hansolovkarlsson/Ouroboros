@@ -108,6 +108,81 @@ fn try_mount(fs: &mut Option<vfs::Filesystem>) {
     }
 }
 
+/// Zero the disk's first `sectors` 512-byte sectors (`0` -> the default
+/// [`ERASE_DEFAULT_SECTORS`]), clamped to the disk's capacity. The
+/// destructive first step of preparing a blank disk: it removes the
+/// partition table and any filesystem metadata near the start, so a
+/// subsequent partition/format starts clean. Returns `0`,
+/// [`MOUNT_NO_DEVICE`] (no block device), or [`FS_ERR_IO`].
+fn erase_disk(sectors: u64) -> u64 {
+    let Ok(capacity) = disk::Disk.capacity_sectors() else {
+        return syscall_abi::MOUNT_NO_DEVICE;
+    };
+    let want = if sectors == 0 {
+        syscall_abi::ERASE_DEFAULT_SECTORS
+    } else {
+        sectors
+    };
+    let count = want.min(capacity);
+    let zero = [0u8; 512];
+    let mut lba = 0u64;
+    while lba < count {
+        if disk::Disk.write_sector(lba, &zero).is_err() {
+            return syscall_abi::FS_ERR_IO;
+        }
+        lba += 1;
+    }
+    0
+}
+
+/// Write a fresh MBR with a single primary partition of type `type_byte`
+/// (`0` -> `0x0C`, FAT32-LBA) spanning the disk from
+/// [`PARTITION_START_LBA`] to the end. Only LBA 0 is written; the
+/// partition's contents are left for a later format. Returns `0`,
+/// [`MOUNT_NO_DEVICE`], [`FS_ERR_DISK_FULL`] (disk smaller than the 1 MiB
+/// alignment start), or [`FS_ERR_IO`].
+fn partition_disk(type_byte: u8) -> u64 {
+    let Ok(capacity) = disk::Disk.capacity_sectors() else {
+        return syscall_abi::MOUNT_NO_DEVICE;
+    };
+    let start = syscall_abi::PARTITION_START_LBA;
+    if capacity <= start {
+        return syscall_abi::FS_ERR_DISK_FULL;
+    }
+    // MBR partitioning is a 32-bit LBA scheme; a partition past 2 TiB
+    // can't be expressed here (that's what GPT, a later step, is for).
+    let part_sectors = (capacity - start).min(u32::MAX as u64) as u32;
+    let ptype = if type_byte == 0 { 0x0C } else { type_byte };
+
+    let mut mbr = [0u8; 512];
+    // One partition entry at the classic offset 0x1BE (16 bytes):
+    //   [0]      boot flag (0x00, not bootable)
+    //   [1..4]   CHS start - 0xFE/0xFF/0xFF, the "use LBA, CHS invalid" marker
+    //   [4]      partition type byte
+    //   [5..8]   CHS end - same LBA marker
+    //   [8..12]  LBA start (LE)
+    //   [12..16] sector count (LE)
+    let e = 0x1BE;
+    mbr[e] = 0x00;
+    mbr[e + 1] = 0xFE;
+    mbr[e + 2] = 0xFF;
+    mbr[e + 3] = 0xFF;
+    mbr[e + 4] = ptype;
+    mbr[e + 5] = 0xFE;
+    mbr[e + 6] = 0xFF;
+    mbr[e + 7] = 0xFF;
+    mbr[e + 8..e + 12].copy_from_slice(&(start as u32).to_le_bytes());
+    mbr[e + 12..e + 16].copy_from_slice(&part_sectors.to_le_bytes());
+    // Boot signature.
+    mbr[510] = 0x55;
+    mbr[511] = 0xAA;
+
+    if disk::Disk.write_sector(0, &mbr).is_err() {
+        return syscall_abi::FS_ERR_IO;
+    }
+    0
+}
+
 const REQ_PAYLOAD: usize = syscall_abi::FS_REQ_PAYLOAD as usize;
 const REPLY_PAYLOAD: usize = syscall_abi::FS_REPLY_PAYLOAD as usize;
 const DATA_MAX: usize = syscall_abi::FS_DATA_MAX as usize;
@@ -134,6 +209,47 @@ fn handle(fs: &mut Option<vfs::Filesystem>, sender: u64, req: &[u8], reply: &mut
         try_mount(fs);
         let status = if fs.is_some() { 0 } else { syscall_abi::NO_FS };
         return status_reply(reply, status);
+    }
+
+    // Disk-tools milestone 1: report what's mounted, and unmount. Both
+    // handle the not-mounted case themselves (NO_FS), so they sit ahead
+    // of the guard below.
+    if op == syscall_abi::FSOP_MOUNT_INFO {
+        let Some(mounted) = fs.as_ref() else {
+            return status_reply(reply, syscall_abi::NO_FS);
+        };
+        let part_lba = mounted.partition_lba() as u64;
+        let capacity = disk::Disk.capacity_sectors().unwrap_or(0);
+        let name = mounted.name().as_bytes();
+        reply[0..8].copy_from_slice(&0u64.to_le_bytes());
+        reply[8..16].copy_from_slice(&part_lba.to_le_bytes());
+        reply[16..24].copy_from_slice(&capacity.to_le_bytes());
+        reply[24..24 + name.len()].copy_from_slice(name);
+        return 24 + name.len();
+    }
+    if op == syscall_abi::FSOP_UNMOUNT {
+        if fs.is_none() {
+            return status_reply(reply, syscall_abi::NO_FS);
+        }
+        *fs = None;
+        return status_reply(reply, 0);
+    }
+
+    // Disk-tools milestone 2: raw-disk erase + partition. Both refuse
+    // while a filesystem is mounted (they'd invalidate the live mount's
+    // structures), so they sit ahead of the guard and require an
+    // explicit `unmount` first.
+    if op == syscall_abi::FSOP_ERASE {
+        if fs.is_some() {
+            return status_reply(reply, syscall_abi::MOUNT_ALREADY);
+        }
+        return status_reply(reply, erase_disk(p[0]));
+    }
+    if op == syscall_abi::FSOP_PARTITION {
+        if fs.is_some() {
+            return status_reply(reply, syscall_abi::MOUNT_ALREADY);
+        }
+        return status_reply(reply, partition_disk(p[0] as u8));
     }
 
     let Some(fs) = fs.as_mut() else {
