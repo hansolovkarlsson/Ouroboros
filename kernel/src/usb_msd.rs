@@ -28,11 +28,21 @@
 //! `READ(10)`/`WRITE(10)` one sector per call (`fat32.rs` is
 //! sector-at-a-time anyway; throughput is explicitly a non-goal).
 //!
-//! **No BOT error recovery** - a failed or stalled command is reported
-//! and the caller's operation fails; the spec's Reset Recovery sequence
-//! (Bulk-Only Mass Storage Reset + clear both endpoint stalls) is a
-//! known, documented gap, same posture as the keyboard interrupt
-//! endpoint's stall handling.
+//! **BOT error recovery**: a failed or stalled bulk transfer is no longer
+//! fatal to the whole session. `bot_command` retries (bounded) with an
+//! xHCI-level endpoint reset between attempts (`xhci::storage_reset_endpoint`
+//! -> Reset Endpoint + Set TR Dequeue), which clears a halted bulk endpoint
+//! so the *next* command starts clean. This is the fix for the real-Parallels
+//! symptom where storage reads "degrade to I/O errors shortly after mount":
+//! once the keyboard's interrupt endpoint is armed on the same shared xHCI
+//! controller, a bulk transfer eventually stalls, and without recovery the
+//! halted endpoint stayed halted so every later command failed permanently.
+//! (This is the xHCI Reset Endpoint path, not the USB Bulk-Only Mass Storage
+//! *Reset* class request - Parallels' passthrough doesn't forward class
+//! requests, so the controller-command form is what actually works here. A
+//! pure transfer *timeout*, where the endpoint stays Running, isn't fully
+//! recovered - see `xhci::reset_storage_endpoint` - but the common Stall/halt
+//! case is.)
 
 use core::cell::UnsafeCell;
 use core::ptr::{read_volatile, write_volatile};
@@ -204,11 +214,62 @@ impl Device {
     }
 }
 
+/// Bounded diagnostic for bulk-recovery events - logs the first
+/// [`RECOVERY_LOG_LIMIT`] and then goes quiet, so a persistently failing
+/// device can't flood the (possibly framebuffer-only) console the way an
+/// unconditional per-event log would. See `xhci.rs`'s keyboard `had_error`
+/// transition-logging for the same discipline.
+static RECOVERY_LOG_COUNT: AtomicU32 = AtomicU32::new(0);
+const RECOVERY_LOG_LIMIT: u32 = 16;
+
+/// One full BOT command with bounded error recovery. Runs
+/// [`bot_command_once`]; on a bulk-transfer failure (`Error::Transfer` -
+/// a stall or timeout at the xHCI level), resets both bulk endpoints
+/// (`xhci::storage_reset_endpoint`) and retries from the CBW, up to
+/// `MAX_ATTEMPTS`. A CSW-level failure (`CommandFailed`/`CswMismatch`) is
+/// *not* retried here - that's the device rejecting the command, not the
+/// transport stalling, and its own caller (e.g. `init`'s Unit Attention
+/// clear) handles it.
+///
+/// On QEMU the transfer never stalls, so the retry path never runs and
+/// behavior is identical to a single `bot_command_once` - the recovery is
+/// exercised only by real shared-controller hardware.
+fn bot_command(cdb: &[u8], mut data: Option<(&mut [u8], bool)>) -> Result<(), Error> {
+    const MAX_ATTEMPTS: u32 = 3;
+    let mut attempt = 1u32;
+    loop {
+        // Reborrow the (mutable) data buffer fresh for each attempt - a
+        // `&mut` can't be copied, so the retry loop owns the Option and
+        // hands `bot_command_once` a reborrow each time.
+        let this = data.as_mut().map(|(buf, dir)| (&mut **buf, *dir));
+        match bot_command_once(cdb, this) {
+            Ok(()) => return Ok(()),
+            Err(e @ Error::Transfer(_)) if attempt < MAX_ATTEMPTS => {
+                let n = RECOVERY_LOG_COUNT.fetch_add(1, Ordering::Relaxed);
+                if n < RECOVERY_LOG_LIMIT {
+                    console::println!("Ouroboros kernel: usb-msd: {e}; resetting bulk endpoints, retry {attempt}/{MAX_ATTEMPTS}");
+                    if n + 1 == RECOVERY_LOG_LIMIT {
+                        console::println!("Ouroboros kernel: usb-msd: (further bulk-recovery messages suppressed)");
+                    }
+                }
+                // Reset both directions; the healthy one no-ops (its Reset
+                // Endpoint fails on a non-halted endpoint and is ignored -
+                // reset_storage_endpoint only touches software ring state on
+                // success, so a no-op reset can't desync it).
+                let _ = xhci::storage_reset_endpoint(true);
+                let _ = xhci::storage_reset_endpoint(false);
+                attempt += 1;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
 /// One full BOT command: CBW out, optional data stage (`Some((buffer,
 /// data_in))`), CSW in, status checked. The data stage goes through the
 /// static `DATA_BUF` (bounce buffer) so callers can pass ordinary stack
 /// slices without DMA-lifetime concerns.
-fn bot_command(cdb: &[u8], data: Option<(&mut [u8], bool)>) -> Result<(), Error> {
+fn bot_command_once(cdb: &[u8], data: Option<(&mut [u8], bool)>) -> Result<(), Error> {
     let tag = NEXT_TAG.fetch_add(1, Ordering::Relaxed);
     let (data_len, data_in) = match &data {
         Some((buf, dir_in)) => (buf.len() as u32, *dir_in),
