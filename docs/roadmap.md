@@ -9,6 +9,13 @@ behind each decision, see `CLAUDE.md`. This document is the one to
 update first when direction changes; the others describe what exists,
 this one describes where it's going.
 
+> **The long-term direction** — a Plan 9-style **resource-sharing cluster**
+> (distributed Ouroboros: machines sharing storage/devices/services over
+> per-machine namespaces and a uniform file protocol) now has its own phased
+> plan in [`roadmap-cluster.md`](roadmap-cluster.md). The Plan 9 "local
+> namespace + uniform protocol" work below is **Phase 0** of that arc — the
+> foundation the whole distributed vision builds on, not a standalone item.
+
 ## What's next (the current frontier)
 
 The microkernel arc is the through-line now. Two components have moved

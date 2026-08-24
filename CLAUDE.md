@@ -524,6 +524,7 @@ docs/
   CHANGELOG.md       historical record of completed milestones (phase 0 through the most recent), newest first
   journal.md         chronological dev-log: narrative "what was worked on and why" per day - a lighter companion to CHANGELOG.md's milestone record
   roadmap.md         forward-looking plan: parking lot of known future work, not yet sequenced
+  roadmap-cluster.md the big long-term direction: a Plan 9-style resource-sharing cluster (distributed Ouroboros) - phased plan from today's local servers to a two-node disk-sharing cluster over 9P-over-TCP and beyond, with the shared-memory "single system image" mirage explicitly out of scope. The vision the project is ultimately aiming at
   research-minix-boot.md   research note: how MINIX boots (x86 boot monitor + boot image, ARM's U-Boot chain) vs Ouroboros's UEFI-native boot, sourced from MINIX's own docs
   research-helix-os.md     research note: Helix OS's layered, trait-based kernel design and hot-reload/self-healing fault tolerance, sourced from the HelixOS-Org/helix repo and docs
   research-directions.md   research note (synthesis): a comparative deep dive across MINIX/Linux/Plan 9/Helix identifying Plan 9's per-process namespaces + uniform file protocol (9P) as the standout next architecture - the one mechanism that would unify fsd/cond's protocols, the capability send-mask, per-task isolation, and delegation; recalibrates the older influence notes' now-stale "no fault isolation" framing
