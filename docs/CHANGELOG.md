@@ -7,6 +7,46 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/`; 
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## Disk management tools, milestone 3 (step 3): `format` ext2 (mkfs) — the arc's finale
+
+`format ext2` completes milestone 3 (and the whole disk-management arc):
+`fsd` now mkfs's all three of its filesystems through the one `FSOP_FORMAT`
+op. `ext2::Fs::format` is the inverse of `mount_at`, deliberately minimal but
+`e2fsck`-clean:
+
+- **Single block group, fixed 4 KiB blocks.** 4 KiB blocks put
+  `s_first_data_block` at 0 (no 1 KiB boot-block special case), and one group
+  keeps the layout flat — no backup superblock, and `sparse_super`/`resize`/
+  `large_file` all off (the plain old-style ext2 e2fsck still fully validates).
+  128-byte inodes; the `filetype` incompat feature (matching what `mount_at`
+  reads). The cost is a 128 MiB cap (one group = `8 × 4096` blocks); a bigger
+  partition is formatted to 128 MiB, remainder unused — multi-group mkfs is
+  future work.
+- **What it writes.** The superblock (all the free/count/geometry fields
+  `mount_at` re-derives, a nonzero UUID, volume label `OUROBOROS`), the single
+  block-group descriptor, the block + inode bitmaps (used bits *and* the
+  padding bits for blocks/inodes that don't exist, which e2fsck checks), a
+  zeroed inode table carrying the root (inode 2) and `lost+found` (inode 11)
+  directories, and those two directories' data blocks (`.`/`..`/`lost+found`).
+- **A real gotcha, caught on the first boot.** The formatter first used eight
+  separate `[0u8; 4096]` structure buffers on the stack (~32 KiB), which
+  overran `fsd`'s guard page — `EL0 FAULT … esr=0x9200004f` (data abort, DFSC
+  permission fault level 3), the task cleanly killed and supervisor-restarted
+  rather than corrupting anything. Refactored to one reused 4 KiB buffer
+  (each step clears, fills, writes it), exactly the discipline the rest of the
+  file already follows. The guard page earning its keep again.
+
+Verified on QEMU end-to-end (`unmount`→`erase disk`→`partition ext2`→`format
+ext2`→`mount -a`, then a `write` — `fsd` mounted and wrote a file into *its
+own* mkfs output, exercising the superblock parse, root-inode read, root-dir
+walk, inode + block allocation from the new bitmaps, and dirent insertion),
+then on the host with the foreign checker: `e2fsck -fn` passes all five passes
+clean (exit 0, "12/4032 files, 133/16128 blocks"), and `debugfs` reads back
+the root (`.`/`..`/`lost+found`) plus the guest-written `GREETING.TXT` (inode
+12, regular 0644, 42 bytes) byte-for-byte. No faults in the passing run. With
+this, `fsd` can erase, partition, **and** format FAT32/exFAT/ext2 entirely
+from within the guest — the disk-management arc is complete.
+
 ## Disk management tools, milestone 3 (step 2): `format` exFAT (mkfs)
 
 `format exfat` now works alongside `format fat32`, through the same

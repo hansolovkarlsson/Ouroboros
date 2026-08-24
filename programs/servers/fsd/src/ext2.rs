@@ -233,6 +233,159 @@ impl Fs {
         self.part_lba
     }
 
+    /// Create a fresh ext2 filesystem (mkfs) in the partition
+    /// `[start_lba, start_lba + total_sectors)` - the inverse of
+    /// [`mount_at`](Self::mount_at). The disk-management arc, milestone 3's
+    /// final step (ext2).
+    ///
+    /// Deliberately minimal but e2fsck-clean: **one block group**, 4 KiB
+    /// blocks (so `s_first_data_block` is `0` - no 1 KiB boot-block special
+    /// case), a 128-byte inode, and the `filetype` incompat feature - exactly
+    /// the shape [`mount_at`](Self::mount_at) re-derives. It writes the
+    /// superblock, the single block-group descriptor, the block + inode
+    /// bitmaps, a zeroed inode table carrying the root (inode 2) and
+    /// `lost+found` (inode 11) directories, and those two directory data
+    /// blocks. No backup superblock is needed (single group), and
+    /// `sparse_super`/`resize`/`large_file` are all off - the plain old-style
+    /// ext2 layout `e2fsck` still fully validates.
+    ///
+    /// Being single-group caps the filesystem at one group's worth of 4 KiB
+    /// blocks (`8 * 4096 = 32768` blocks = 128 MiB); a larger partition is
+    /// formatted to 128 MiB with the remainder unused - fine for the modest
+    /// QEMU volumes this targets (multi-group mkfs is future work). Returns
+    /// [`Error::DiskFull`] if the partition is too small for the fixed
+    /// structures, or [`Error::Io`] on a write error. **Cost is O(inode-table
+    /// size) single-sector writes**, like the other arms' `format`.
+    pub fn format(mut disk: Disk, start_lba: u32, total_sectors: u32) -> Result<(), Error> {
+        const BLK: u32 = FMT_BLOCK as u32; // 4096
+        const LOG_BLK: u32 = 2; // 1024 << 2 == 4096
+        const INODE_SZ: u32 = 128;
+        const INODES_PER_BLK: u32 = BLK / INODE_SZ; // 32
+        const BLOCKS_PER_GROUP: u32 = 8 * BLK; // one block bitmap covers this
+        const FIRST_INO: u32 = 11; // inodes 1..10 reserved; 11 == lost+found
+
+        // Whole 4 KiB blocks the partition holds, capped to a single group.
+        let part_blocks = (total_sectors as u64 * SECTOR_SIZE as u64 / BLK as u64) as u32;
+        let blocks_count = part_blocks.min(BLOCKS_PER_GROUP);
+
+        // Fixed single-group layout (first_data_block == 0 for >= 2 KiB blocks):
+        //   0 boot+superblock | 1 GDT | 2 block bitmap | 3 inode bitmap
+        //   4.. inode table   | then the root dir, then lost+found data block.
+        let inodes_count = {
+            let target = (blocks_count / 4).clamp(16, 8192);
+            target.div_ceil(INODES_PER_BLK) * INODES_PER_BLK // whole inode-table blocks
+        };
+        let inode_table_blocks = inodes_count / INODES_PER_BLK;
+        let block_bitmap_block = 2u32;
+        let inode_bitmap_block = 3u32;
+        let inode_table_block = 4u32;
+        let root_block = inode_table_block + inode_table_blocks;
+        let lf_block = root_block + 1;
+        if blocks_count <= lf_block + 1 {
+            return Err(Error::DiskFull); // no room for the structures + two dirs
+        }
+
+        let free_blocks = blocks_count - (lf_block + 1); // blocks 0..=lf_block used
+        let free_inodes = inodes_count - FIRST_INO; // inodes 1..=11 used
+
+        // One reused 4 KiB scratch block - fsd's stack can't hold a separate
+        // buffer per structure (eight would overflow its guard page), so each
+        // step clears `buf`, fills it, and writes it.
+        let mut buf = [0u8; FMT_BLOCK];
+
+        // ---- block 0: boot area (zeroed) + the 1024-byte superblock ----------
+        {
+            let sb = &mut buf[1024..2048];
+            put32(sb, 0, inodes_count);
+            put32(sb, 4, blocks_count);
+            put32(sb, 8, 0); // s_r_blocks_count (no reservation)
+            put32(sb, 12, free_blocks);
+            put32(sb, 16, free_inodes);
+            put32(sb, 20, 0); // s_first_data_block (0 for >= 2 KiB blocks)
+            put32(sb, 24, LOG_BLK);
+            put32(sb, 28, LOG_BLK); // s_log_frag_size
+            put32(sb, 32, BLOCKS_PER_GROUP);
+            put32(sb, 36, BLOCKS_PER_GROUP); // s_frags_per_group
+            put32(sb, 40, inodes_count); // s_inodes_per_group (single group)
+            put32(sb, 48, MKFS_TIME); // s_wtime
+            put16(sb, 54, 0xFFFF); // s_max_mnt_count = -1 (unlimited)
+            put16(sb, 56, EXT2_MAGIC);
+            put16(sb, 58, 1); // s_state = EXT2_VALID_FS
+            put16(sb, 60, 1); // s_errors = continue
+            put32(sb, 64, MKFS_TIME); // s_lastcheck
+            put32(sb, 76, 1); // s_rev_level = DYNAMIC_REV
+            put32(sb, 84, FIRST_INO); // s_first_ino
+            put16(sb, 88, INODE_SZ as u16); // s_inode_size
+            put32(sb, 96, INCOMPAT_FILETYPE); // s_feature_incompat
+            sb[104..120].copy_from_slice(&FS_UUID); // nonzero so e2fsck won't offer one
+            let name = b"OUROBOROS";
+            sb[120..120 + name.len()].copy_from_slice(name); // s_volume_name
+        }
+        write_fmt_block(&mut disk, start_lba, 0, &buf)?;
+
+        // ---- block 1: the single block-group descriptor ----------------------
+        buf.fill(0);
+        put32(&mut buf, 0, block_bitmap_block); // bg_block_bitmap
+        put32(&mut buf, 4, inode_bitmap_block); // bg_inode_bitmap
+        put32(&mut buf, 8, inode_table_block); // bg_inode_table
+        put16(&mut buf, 12, free_blocks as u16); // bg_free_blocks_count
+        put16(&mut buf, 14, free_inodes as u16); // bg_free_inodes_count
+        put16(&mut buf, 16, 2); // bg_used_dirs_count (root + lost+found)
+        write_fmt_block(&mut disk, start_lba, 1, &buf)?;
+
+        // ---- block 2: block bitmap -------------------------------------------
+        // Bit i == block i (first_data_block is 0). Used: 0..=lf_block. Every
+        // bit for a block that doesn't exist (>= blocks_count) is set too.
+        buf.fill(0);
+        for b in 0..=lf_block {
+            set_bit(&mut buf, b);
+        }
+        for b in blocks_count..BLOCKS_PER_GROUP {
+            set_bit(&mut buf, b);
+        }
+        write_fmt_block(&mut disk, start_lba, block_bitmap_block, &buf)?;
+
+        // ---- block 3: inode bitmap -------------------------------------------
+        // Bit i == inode (i+1). Used: inodes 1..=11 (bits 0..=10). Bits for
+        // inodes >= inodes_count are set (they don't exist).
+        buf.fill(0);
+        for i in 0..FIRST_INO {
+            set_bit(&mut buf, i); // bits 0..11 -> inodes 1..11
+        }
+        for i in inodes_count..BLOCKS_PER_GROUP {
+            set_bit(&mut buf, i);
+        }
+        write_fmt_block(&mut disk, start_lba, inode_bitmap_block, &buf)?;
+
+        // ---- inode table: root (2) + lost+found (11), then zeroed remainder --
+        // Both fall in the first table block (32 inodes/block).
+        let dir_mode = S_IFDIR | 0o755;
+        let ib = BLK / SECTOR_SIZE as u32; // i_blocks (512-byte units) for one 4 KiB block
+        buf.fill(0);
+        write_inode_slot(&mut buf, ROOT_INO, dir_mode, BLK, 3, ib, root_block);
+        write_inode_slot(&mut buf, FIRST_INO, dir_mode, BLK, 2, ib, lf_block);
+        write_fmt_block(&mut disk, start_lba, inode_table_block, &buf)?;
+        buf.fill(0);
+        for b in 1..inode_table_blocks {
+            write_fmt_block(&mut disk, start_lba, inode_table_block + b, &buf)?;
+        }
+
+        // ---- root directory data block ---------------------------------------
+        buf.fill(0);
+        write_dirent(&mut buf[0..], ROOT_INO, 12, ".", FT_DIR);
+        write_dirent(&mut buf[12..], ROOT_INO, 12, "..", FT_DIR);
+        write_dirent(&mut buf[24..], FIRST_INO, FMT_BLOCK - 24, "lost+found", FT_DIR);
+        write_fmt_block(&mut disk, start_lba, root_block, &buf)?;
+
+        // ---- lost+found directory data block ---------------------------------
+        buf.fill(0);
+        write_dirent(&mut buf[0..], FIRST_INO, 12, ".", FT_DIR);
+        write_dirent(&mut buf[12..], ROOT_INO, FMT_BLOCK - 12, "..", FT_DIR);
+        write_fmt_block(&mut disk, start_lba, lf_block, &buf)?;
+
+        Ok(())
+    }
+
     /// Absolute LBA of the first sector of filesystem block `block`.
     fn block_lba(&self, block: u32) -> u64 {
         self.part_lba as u64 + block as u64 * (self.block_size as u64 / SECTOR_SIZE as u64)
@@ -1285,4 +1438,72 @@ fn write_dirent(dst: &mut [u8], ino: u32, rec_len: usize, name: &str, ftype: u8)
     dst[6] = name.len() as u8;
     dst[7] = ftype;
     dst[8..8 + name.len()].copy_from_slice(name.as_bytes());
+}
+
+// ---- mkfs ([`Fs::format`]) helpers --------------------------------------------
+//
+// The formatter uses a fixed 4 KiB block, single-block-group layout, so these
+// don't need an `Fs` instance (which doesn't exist yet at mkfs time).
+
+/// The fixed filesystem block size mkfs lays down (see [`Fs::format`]).
+const FMT_BLOCK: usize = 4096;
+/// A plausible fixed timestamp for the mkfs-written superblock/inodes - this
+/// system has no RTC, and e2fsck wants a nonzero, non-tiny time (~a 2004 date).
+const MKFS_TIME: u32 = 0x4000_0000;
+/// A fixed, nonzero volume UUID (ASCII "OUROBORO" tail) so e2fsck doesn't offer
+/// to generate one. e2fsck only requires it be nonzero, not any given value.
+const FS_UUID: [u8; 16] = [
+    0x0b, 0xad, 0xc0, 0xde, 0x00, 0x55, 0x00, 0x55, 0x4f, 0x55, 0x52, 0x4f, 0x42, 0x4f, 0x52, 0x4f,
+];
+
+/// Little-endian `u32` at `off` (mkfs field writer).
+fn put32(buf: &mut [u8], off: usize, v: u32) {
+    buf[off..off + 4].copy_from_slice(&v.to_le_bytes());
+}
+/// Little-endian `u16` at `off` (mkfs field writer).
+fn put16(buf: &mut [u8], off: usize, v: u16) {
+    buf[off..off + 2].copy_from_slice(&v.to_le_bytes());
+}
+/// Set bit `bit` in a little-endian bitmap block (bit 0 == byte 0 bit 0).
+fn set_bit(bitmap: &mut [u8], bit: u32) {
+    bitmap[(bit / 8) as usize] |= 1u8 << (bit % 8);
+}
+
+/// Write one mkfs block (`data.len() == FMT_BLOCK`) at filesystem block number
+/// `block` of the partition starting at `start_lba`, one sector at a time.
+fn write_fmt_block(disk: &mut Disk, start_lba: u32, block: u32, data: &[u8]) -> Result<(), Error> {
+    let spb = FMT_BLOCK / SECTOR_SIZE; // sectors per block (8)
+    let lba = start_lba as u64 + block as u64 * spb as u64;
+    for s in 0..spb {
+        let mut sec = [0u8; SECTOR_SIZE];
+        sec.copy_from_slice(&data[s * SECTOR_SIZE..(s + 1) * SECTOR_SIZE]);
+        disk.write_sector(lba + s as u64, &sec)?;
+    }
+    Ok(())
+}
+
+/// Write inode `ino`'s 128-byte slot into `table_block` (the inode-table block
+/// that contains it), setting only the fields this driver models - mode, size,
+/// links, `i_blocks`, and `block[0]` - plus the three timestamps. `ino` must
+/// live in this block (mkfs only writes inodes 2 and 11, both in the first).
+fn write_inode_slot(
+    table_block: &mut [u8],
+    ino: u32,
+    mode: u16,
+    size: u32,
+    links: u16,
+    i_blocks: u32,
+    block0: u32,
+) {
+    let inodes_per_block = FMT_BLOCK / 128;
+    let off = ((ino - 1) as usize % inodes_per_block) * 128;
+    let s = &mut table_block[off..off + 128];
+    put16(s, 0, mode); // i_mode
+    put32(s, 4, size); // i_size
+    put32(s, 8, MKFS_TIME); // i_atime
+    put32(s, 12, MKFS_TIME); // i_ctime
+    put32(s, 16, MKFS_TIME); // i_mtime
+    put16(s, 26, links); // i_links_count
+    put32(s, 28, i_blocks); // i_blocks (512-byte units)
+    put32(s, 40, block0); // i_block[0]
 }

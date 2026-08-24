@@ -2104,18 +2104,18 @@ fn cmd_partition(arg: &str) {
     }
 }
 
-/// `format [fat32|exfat]` - lays a fresh filesystem into the disk's first
-/// partition (`FSOP_FORMAT`); FAT32 and exFAT so far (ext2 is a later
-/// milestone-3 step). Refuses while a filesystem is mounted; the partition
-/// must already exist (`partition` first). Disk-tools milestone 3.
-/// **Destructive.** A builtin for the same reason as `erase`/`partition`.
+/// `format [fat32|exfat|ext2]` - lays a fresh filesystem into the disk's first
+/// partition (`FSOP_FORMAT`); FAT32, exFAT, and ext2 are all supported.
+/// Refuses while a filesystem is mounted; the partition must already exist
+/// (`partition` first). Disk-tools milestone 3. **Destructive.** A builtin for
+/// the same reason as `erase`/`partition`.
 fn cmd_format(arg: &str) {
     let fstype: u64 = match arg {
         "" | "fat32" => syscall_abi::FMT_FAT32,
         "exfat" => syscall_abi::FMT_EXFAT,
         "ext2" => syscall_abi::FMT_EXT2,
         _ => {
-            print_line("format: usage: `format [fat32|exfat]` (ext2 not yet; unmount first)");
+            print_line("format: usage: `format [fat32|exfat|ext2]` (unmount first)");
             return;
         }
     };
@@ -2124,7 +2124,7 @@ fn cmd_format(arg: &str) {
         MOUNT_ALREADY => print_line("format: a filesystem is mounted - run `unmount` first"),
         MOUNT_NO_DEVICE => print_line("format: no disk device"),
         FS_ERR_NOT_FOUND => print_line("format: no partition - run `partition` first"),
-        _ => print_line("format: unsupported filesystem (ext2 not yet), or the partition is too small / I/O error"),
+        _ => print_line("format: the partition is too small, or an I/O error occurred"),
     }
 }
 

@@ -209,10 +209,10 @@ fn find_partition() -> Option<(u32, u32)> {
 }
 
 /// Lay a fresh filesystem of type `fstype` into the disk's first MBR
-/// partition (mkfs). FAT32 only for now (milestone 3's first step); exFAT
-/// and ext2 return [`FS_ERROR`] until their formatters land. Returns `0`,
-/// [`MOUNT_NO_DEVICE`], [`FS_ERR_NOT_FOUND`] (no partition - run `partition`
-/// first), [`FS_ERR_DISK_FULL`] (partition too small), or [`FS_ERR_IO`].
+/// partition (mkfs). FAT32, exFAT, and ext2 are all supported (milestone 3);
+/// any other `fstype` returns [`FS_ERROR`]. Returns `0`, [`MOUNT_NO_DEVICE`],
+/// [`FS_ERR_NOT_FOUND`] (no partition - run `partition` first),
+/// [`FS_ERR_DISK_FULL`] (partition too small), or [`FS_ERR_IO`].
 fn format_disk(fstype: u64) -> u64 {
     if disk::Disk.capacity_sectors().is_err() {
         return syscall_abi::MOUNT_NO_DEVICE;
@@ -223,7 +223,8 @@ fn format_disk(fstype: u64) -> u64 {
     let result = match fstype {
         syscall_abi::FMT_FAT32 => fat32::Fs::format(disk::Disk, start, sectors),
         syscall_abi::FMT_EXFAT => exfat::Fs::format(disk::Disk, start, sectors),
-        _ => return syscall_abi::FS_ERROR, // ext2 mkfs not yet
+        syscall_abi::FMT_EXT2 => ext2::Fs::format(disk::Disk, start, sectors),
+        _ => return syscall_abi::FS_ERROR,
     };
     match result {
         Ok(()) => 0,

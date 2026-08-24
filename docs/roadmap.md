@@ -508,10 +508,30 @@ for building it.
      (`hi.txt` → "exfat-from-ouroboros"). (Note: `fsck_exfat` needs a real
      attached device — `hdiutil attach -nomount` — not a plain file, or it
      bails on an ioctl and misreports the boot region.)
-   - **ext2 — later** (superblock + group descriptors + block/inode bitmaps +
-     inode table + root inode + `lost+found`).
+   - **ext2 — DONE (2026-08-24).** `ext2::Fs::format` lays a deliberately
+     minimal but `e2fsck`-clean **single block group**, 4 KiB blocks (so
+     `s_first_data_block` is 0 — no 1 KiB boot-block special case), a 128-byte
+     inode, and the `filetype` incompat feature: superblock + the one block-group
+     descriptor + block & inode bitmaps (with the correct used-and-nonexistent
+     padding bits) + a zeroed inode table carrying the root (inode 2) and
+     `lost+found` (inode 11) directories + those two directory data blocks. No
+     backup superblock (single group); `sparse_super`/`resize`/`large_file` all
+     off — the plain old-style ext2 layout. Being single-group caps the volume
+     at 128 MiB (a bigger partition is formatted to 128 MiB, remainder unused —
+     fine for the QEMU volumes this targets; multi-group mkfs is future work).
+     A real gotcha found and fixed on the first boot: eight separate `[0u8;
+     4096]` structure buffers on the stack (~32 KiB) overflowed `fsd`'s guard
+     page (`EL0 FAULT … DFSC permission fault L3`, cleanly killed + supervisor-
+     restarted) — refactored to one reused 4 KiB buffer. Verified on QEMU
+     (`unmount`→`erase disk`→`partition ext2`→`format ext2`→`mount -a`, then a
+     `write` — the driver mounted and wrote a file into *its own* mkfs output),
+     then on the host with the foreign checker: `e2fsck -fn` passes all 5 passes
+     clean (exit 0), and `debugfs` reads back the root (`.`/`..`/`lost+found`)
+     plus the guest-written `GREETING.TXT` (inode 12, 0644, 42 bytes) byte-for-
+     byte.
    High-risk (writes fresh filesystem metadata), but onto a fresh partition, so
    no existing-data risk. Validate each against the matching host `fsck`.
+   **All three formats now land — the disk-management arc is complete.**
 4. **Deferred: a `/dev` namespace** — only if multi-disk addressing arrives; the
    Plan 9 devfs direction.
 
