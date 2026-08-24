@@ -229,6 +229,182 @@ impl Fs {
         self.partition_lba
     }
 
+    /// Create a fresh exFAT volume (mkfs) in the partition
+    /// `[start_lba, start_lba + total_sectors)` - the inverse of
+    /// [`mount_at`](Self::mount_at). Lays down the main + backup boot regions
+    /// (VBR, 8 extended boot sectors, OEM/reserved, and the boot checksum), a
+    /// single FAT, and a cluster heap holding three contiguous system files -
+    /// the allocation bitmap, the up-case table, and the root directory - with
+    /// the root carrying their directory entries (a volume label, the `0x81`
+    /// bitmap entry the reader locates at mount, and the `0x82` up-case entry).
+    /// The disk-management arc, milestone 3 (step 2). Validated against macOS's
+    /// `fsck_exfat`.
+    ///
+    /// Returns [`Error::DiskFull`] if the partition is too small to hold the
+    /// system structures, or [`Error::Io`] on a write error.
+    pub fn format(mut disk: Disk, start_lba: u32, total_sectors: u32) -> Result<(), Error> {
+        const FAT_OFFSET: u32 = 24; // right after the 24-sector main+backup boot regions
+        let volume_length = total_sectors as u64;
+        let spc_shift = sectors_per_cluster_shift_for(total_sectors);
+        let spc = 1u32 << spc_shift;
+        let cluster_bytes = spc as u64 * SECTOR_SIZE as u64;
+
+        // Size the FAT from an upper-bound cluster estimate, align the cluster
+        // heap to a cluster boundary, then finalize the real cluster count.
+        if total_sectors <= FAT_OFFSET + spc {
+            return Err(Error::DiskFull);
+        }
+        let max_clusters = (total_sectors - FAT_OFFSET) >> spc_shift;
+        let fat_length = (((max_clusters as u64 + 2) * 4).div_ceil(SECTOR_SIZE as u64)) as u32;
+        let cluster_heap_offset = align_up(FAT_OFFSET + fat_length, spc);
+        if total_sectors <= cluster_heap_offset {
+            return Err(Error::DiskFull);
+        }
+        let cluster_count = (total_sectors - cluster_heap_offset) >> spc_shift;
+
+        // System files, all single-cluster-runs for the sizes this targets
+        // (the cluster-size table keeps the bitmap ~1 cluster even for big
+        // disks): allocation bitmap, up-case table, root directory - laid out
+        // contiguously from cluster 2.
+        let bitmap_bytes = cluster_count.div_ceil(8) as u64;
+        let bitmap_clusters = bitmap_bytes.div_ceil(cluster_bytes) as u32;
+        let upcase_clusters = (UPCASE_TABLE_BYTES as u64).div_ceil(cluster_bytes) as u32;
+        let first_bitmap = 2u32;
+        let first_upcase = first_bitmap + bitmap_clusters;
+        let root_cluster = first_upcase + upcase_clusters;
+        let system_clusters = bitmap_clusters + upcase_clusters + 1; // +1 root
+        if cluster_count < system_clusters + 1 {
+            return Err(Error::DiskFull);
+        }
+
+        let fat_lba = start_lba + FAT_OFFSET;
+        let heap_lba = start_lba + cluster_heap_offset;
+        let cluster_lba = |c: u32| heap_lba + (c - 2) * spc;
+        let zero = [0u8; SECTOR_SIZE];
+
+        // --- FAT: zero it, then reserved entries + one EOC per system file ---
+        for s in 0..fat_length {
+            disk.write_sector((fat_lba + s) as u64, &zero)?;
+        }
+        // All system files are single clusters here, so each is its own EOC
+        // chain; FAT[0]=media, FAT[1]=EOC. They fit in FAT sector 0.
+        let mut fat0 = [0u8; SECTOR_SIZE];
+        let mut put_fat = |c: u32, v: u32| {
+            let off = c as usize * 4;
+            fat0[off..off + 4].copy_from_slice(&v.to_le_bytes());
+        };
+        put_fat(0, 0xFFFF_FFF8);
+        put_fat(1, END_OF_CHAIN);
+        for c in first_bitmap..root_cluster + 1 {
+            put_fat(c, END_OF_CHAIN);
+        }
+        disk.write_sector(fat_lba as u64, &fat0)?;
+
+        // --- Allocation bitmap: zero its clusters, set the system bits ---
+        for c in first_bitmap..first_bitmap + bitmap_clusters {
+            for s in 0..spc {
+                disk.write_sector((cluster_lba(c) + s) as u64, &zero)?;
+            }
+        }
+        // Clusters 2..(2+system_clusters) are in use -> the first
+        // `system_clusters` bits of the bitmap.
+        let mut bm = [0u8; SECTOR_SIZE];
+        let mut remaining = system_clusters as usize;
+        let mut bit = 0usize;
+        while remaining > 0 {
+            bm[bit / 8] |= 1u8 << (bit % 8);
+            bit += 1;
+            remaining -= 1;
+        }
+        disk.write_sector(cluster_lba(first_bitmap) as u64, &bm)?;
+
+        // --- Up-case table: zero its cluster, write the compressed table ---
+        for s in 0..spc {
+            disk.write_sector((cluster_lba(first_upcase) + s) as u64, &zero)?;
+        }
+        let mut upcase_buf = [0u8; UPCASE_TABLE_BYTES];
+        let upcase_checksum = build_upcase_table(&mut upcase_buf);
+        let mut upcase_sector = [0u8; SECTOR_SIZE];
+        upcase_sector[..UPCASE_TABLE_BYTES].copy_from_slice(&upcase_buf);
+        disk.write_sector(cluster_lba(first_upcase) as u64, &upcase_sector)?;
+
+        // --- Root directory: zero the cluster, write the 3 system entries ---
+        for s in 0..spc {
+            disk.write_sector((cluster_lba(root_cluster) + s) as u64, &zero)?;
+        }
+        let mut root = [0u8; SECTOR_SIZE];
+        // Volume Label entry (0x83).
+        let label = b"OUROBOROS";
+        root[0] = 0x83;
+        root[1] = label.len() as u8;
+        for (i, &c) in label.iter().enumerate() {
+            root[2 + i * 2] = c; // UTF-16LE (ASCII -> low byte, high byte 0)
+        }
+        // Allocation Bitmap entry (0x81).
+        let b = 32;
+        root[b] = ET_ALLOC_BITMAP;
+        root[b + 20..b + 24].copy_from_slice(&first_bitmap.to_le_bytes());
+        root[b + 24..b + 32].copy_from_slice(&bitmap_bytes.to_le_bytes());
+        // Up-case Table entry (0x82).
+        let u = 64;
+        root[u] = 0x82;
+        root[u + 4..u + 8].copy_from_slice(&upcase_checksum.to_le_bytes());
+        root[u + 20..u + 24].copy_from_slice(&first_upcase.to_le_bytes());
+        root[u + 24..u + 32].copy_from_slice(&(UPCASE_TABLE_BYTES as u64).to_le_bytes());
+        disk.write_sector(cluster_lba(root_cluster) as u64, &root)?;
+
+        // --- Boot regions: build the 12-sector main region, checksum it, and
+        // write it plus an identical backup at sector 12. ---
+        let mut main_region = [[0u8; SECTOR_SIZE]; 12];
+        let vbr = &mut main_region[0];
+        vbr[0] = 0xEB;
+        vbr[1] = 0x76;
+        vbr[2] = 0x90;
+        vbr[3..11].copy_from_slice(b"EXFAT   ");
+        // 11..64 MustBeZero.
+        vbr[64..72].copy_from_slice(&(start_lba as u64).to_le_bytes()); // PartitionOffset
+        vbr[72..80].copy_from_slice(&volume_length.to_le_bytes()); // VolumeLength
+        vbr[80..84].copy_from_slice(&FAT_OFFSET.to_le_bytes()); // FatOffset
+        vbr[84..88].copy_from_slice(&fat_length.to_le_bytes()); // FatLength
+        vbr[88..92].copy_from_slice(&cluster_heap_offset.to_le_bytes()); // ClusterHeapOffset
+        vbr[92..96].copy_from_slice(&cluster_count.to_le_bytes()); // ClusterCount
+        vbr[96..100].copy_from_slice(&root_cluster.to_le_bytes()); // FirstClusterOfRootDirectory
+        vbr[100..104].copy_from_slice(&0x4F55_524Fu32.to_le_bytes()); // VolumeSerialNumber
+        vbr[104] = 0x00; // FileSystemRevision = 1.00
+        vbr[105] = 0x01;
+        // 106..108 VolumeFlags = 0 (excluded from the boot checksum).
+        vbr[108] = 9; // BytesPerSectorShift (512)
+        vbr[109] = spc_shift;
+        vbr[110] = 1; // NumberOfFats
+        vbr[111] = 0x80; // DriveSelect
+        vbr[112] = 0xFF; // PercentInUse = not available (excluded from checksum)
+        // 113..120 Reserved.
+        vbr[510] = 0x55;
+        vbr[511] = 0xAA;
+        // Extended boot sectors 1..=8: the ExtendedBootSignature 0x0000AA55 in
+        // the last 4 bytes (stored little-endian: 55 AA 00 00).
+        for s in main_region.iter_mut().take(9).skip(1) {
+            s[508..512].copy_from_slice(&0x0000_AA55u32.to_le_bytes());
+        }
+        // Sector 9 (OEM parameters) and 10 (reserved) stay zero.
+        // Sector 11: boot checksum over sectors 0..=10, excluding the VBR's
+        // VolumeFlags (106,107) and PercentInUse (112) bytes.
+        let mut first11 = [0u8; SECTOR_SIZE * 11];
+        for (i, s) in main_region.iter().take(11).enumerate() {
+            first11[i * SECTOR_SIZE..(i + 1) * SECTOR_SIZE].copy_from_slice(s);
+        }
+        let boot_checksum = checksum32(&first11, &[106, 107, 112]);
+        for slot in main_region[11].chunks_exact_mut(4) {
+            slot.copy_from_slice(&boot_checksum.to_le_bytes());
+        }
+        // Main region at sectors 0..12, identical backup at 12..24.
+        for (i, s) in main_region.iter().enumerate() {
+            disk.write_sector((start_lba + i as u32) as u64, s)?;
+            disk.write_sector((start_lba + 12 + i as u32) as u64, s)?;
+        }
+        Ok(())
+    }
+
     fn cluster_to_lba(&self, cluster: u32) -> u32 {
         self.cluster_heap_lba + (cluster - 2) * self.sectors_per_cluster
     }
@@ -1279,6 +1455,61 @@ enum ExistingKind {
     None,
     File,
     Dir,
+}
+
+/// Round `v` up to the next multiple of `align` (a power of two).
+fn align_up(v: u32, align: u32) -> u32 {
+    v.div_ceil(align) * align
+}
+
+/// The exFAT 32-bit rolling checksum (rotate-right-1 then add), used by both
+/// the boot-region checksum and the up-case table checksum. `skip` names byte
+/// indices to exclude (the boot checksum excludes VolumeFlags/PercentInUse).
+fn checksum32(data: &[u8], skip: &[usize]) -> u32 {
+    let mut sum = 0u32;
+    for (i, &b) in data.iter().enumerate() {
+        if skip.contains(&i) {
+            continue;
+        }
+        sum = sum.rotate_right(1).wrapping_add(b as u32);
+    }
+    sum
+}
+
+/// Byte length of [`build_upcase_table`]'s minimal (ASCII `a-z`) compressed
+/// up-case table: 30 u16 entries.
+const UPCASE_TABLE_BYTES: usize = 60;
+
+/// Build the minimal valid compressed up-case table into `out` (identity for
+/// every code unit except ASCII `a-z -> A-Z`) and return its checksum. exFAT
+/// permits any valid table; this is the smallest one, and matches the ASCII
+/// case-folding the reader/`name_hash` use. Compression: a `0xFFFF` marker
+/// followed by a count means "the next `count` code units map to themselves".
+fn build_upcase_table(out: &mut [u8; UPCASE_TABLE_BYTES]) -> u32 {
+    let mut u16s = [0u16; 30];
+    u16s[0] = 0xFFFF; // identity run marker
+    u16s[1] = 0x0061; // ...for code units 0x0000..=0x0060 (97 of them)
+    for i in 0..26u16 {
+        u16s[2 + i as usize] = 0x0041 + i; // 0x0061..=0x007A -> 0x0041..=0x005A
+    }
+    u16s[28] = 0xFFFF; // identity run marker
+    u16s[29] = 0xFF85; // ...for code units 0x007B..=0xFFFF (65413 of them)
+    for (i, v) in u16s.iter().enumerate() {
+        out[i * 2..i * 2 + 2].copy_from_slice(&v.to_le_bytes());
+    }
+    checksum32(out, &[])
+}
+
+/// exFAT sectors-per-cluster shift by volume size (in 512-byte sectors),
+/// following the conventional exFAT cluster-size table - used by
+/// [`Fs::format`]. Bigger volumes get bigger clusters, which keeps the FAT
+/// and allocation bitmap small.
+fn sectors_per_cluster_shift_for(total_sectors: u32) -> u8 {
+    match total_sectors {
+        0..=524_288 => 3,          // <= 256 MB: 4 KB clusters
+        524_289..=67_108_864 => 6, // <= 32 GB: 32 KB clusters
+        _ => 8,                    // 128 KB clusters
+    }
 }
 
 /// ASCII up-case one UTF-16 unit (the standard exFAT up-case table is the

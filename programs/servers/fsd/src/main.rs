@@ -183,6 +183,55 @@ fn partition_disk(type_byte: u8) -> u64 {
     0
 }
 
+/// The disk's first MBR partition (start LBA, sector count), or `None` if
+/// the disk has no valid MBR (bad boot signature) or no non-empty partition
+/// entry. Reads LBA 0's four 16-byte entries at the classic 0x1BE offset -
+/// the pairing for [`partition_disk`]'s writer. GPT disks aren't handled here
+/// yet (a later step); [`FSOP_FORMAT`] targets the MBR partition table.
+fn find_partition() -> Option<(u32, u32)> {
+    let mut mbr = [0u8; 512];
+    if disk::Disk.read_sector(0, &mut mbr).is_err() {
+        return None;
+    }
+    if mbr[510] != 0x55 || mbr[511] != 0xAA {
+        return None;
+    }
+    for i in 0..4 {
+        let e = 0x1BE + i * 16;
+        let ptype = mbr[e + 4];
+        let start = u32::from_le_bytes([mbr[e + 8], mbr[e + 9], mbr[e + 10], mbr[e + 11]]);
+        let size = u32::from_le_bytes([mbr[e + 12], mbr[e + 13], mbr[e + 14], mbr[e + 15]]);
+        if ptype != 0 && size != 0 {
+            return Some((start, size));
+        }
+    }
+    None
+}
+
+/// Lay a fresh filesystem of type `fstype` into the disk's first MBR
+/// partition (mkfs). FAT32 only for now (milestone 3's first step); exFAT
+/// and ext2 return [`FS_ERROR`] until their formatters land. Returns `0`,
+/// [`MOUNT_NO_DEVICE`], [`FS_ERR_NOT_FOUND`] (no partition - run `partition`
+/// first), [`FS_ERR_DISK_FULL`] (partition too small), or [`FS_ERR_IO`].
+fn format_disk(fstype: u64) -> u64 {
+    if disk::Disk.capacity_sectors().is_err() {
+        return syscall_abi::MOUNT_NO_DEVICE;
+    }
+    let Some((start, sectors)) = find_partition() else {
+        return syscall_abi::FS_ERR_NOT_FOUND;
+    };
+    let result = match fstype {
+        syscall_abi::FMT_FAT32 => fat32::Fs::format(disk::Disk, start, sectors),
+        syscall_abi::FMT_EXFAT => exfat::Fs::format(disk::Disk, start, sectors),
+        _ => return syscall_abi::FS_ERROR, // ext2 mkfs not yet
+    };
+    match result {
+        Ok(()) => 0,
+        Err(fat32::Error::DiskFull) => syscall_abi::FS_ERR_DISK_FULL,
+        Err(_) => syscall_abi::FS_ERR_IO,
+    }
+}
+
 const REQ_PAYLOAD: usize = syscall_abi::FS_REQ_PAYLOAD as usize;
 const REPLY_PAYLOAD: usize = syscall_abi::FS_REPLY_PAYLOAD as usize;
 const DATA_MAX: usize = syscall_abi::FS_DATA_MAX as usize;
@@ -250,6 +299,12 @@ fn handle(fs: &mut Option<vfs::Filesystem>, sender: u64, req: &[u8], reply: &mut
             return status_reply(reply, syscall_abi::MOUNT_ALREADY);
         }
         return status_reply(reply, partition_disk(p[0] as u8));
+    }
+    if op == syscall_abi::FSOP_FORMAT {
+        if fs.is_some() {
+            return status_reply(reply, syscall_abi::MOUNT_ALREADY);
+        }
+        return status_reply(reply, format_disk(p[0]));
     }
 
     let Some(fs) = fs.as_mut() else {

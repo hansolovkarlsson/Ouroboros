@@ -7,6 +7,73 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/`; 
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## Disk management tools, milestone 3 (step 2): `format` exFAT (mkfs)
+
+`format exfat` now works alongside `format fat32`, through the same
+`FSOP_FORMAT` op and `find_partition` targeting. `exfat::Fs::format` is the
+mkfs — the inverse of `mount_at`, and a good deal more involved than FAT32's:
+
+- **Boot regions.** The main 12-sector boot region (VBR + 8 extended boot
+  sectors carrying the `0x0000AA55` ExtendedBootSignature + OEM/reserved +
+  the boot checksum) plus an identical backup region. The boot checksum is the
+  exFAT 32-bit rotate-add over sectors 0–10, excluding the VBR's VolumeFlags
+  (bytes 106–107) and PercentInUse (byte 112).
+- **Layout.** Microsoft's cluster-size table picks sectors-per-cluster; the FAT
+  is sized from the cluster-count upper bound, the cluster heap is aligned to a
+  cluster boundary, and the real cluster count is finalized.
+- **System files** (contiguous, FAT-chained, from cluster 2): the allocation
+  bitmap (with exactly the system clusters' bits set), a minimal compressed
+  up-case table (ASCII `a–z` → `A–Z`, everything else identity, with its own
+  32-bit checksum), and the root directory carrying the volume-label (`0x83`),
+  allocation-bitmap (`0x81`, which the reader locates at mount), and up-case
+  (`0x82`) entries.
+
+Verified on QEMU end-to-end, then two ways on the host: macOS `fsck_exfat`
+passes every phase — boot region, system files, up-case table, hierarchy, and
+the active bitmap ("the volume OUROBOROS appears to be OK") — and macOS mounted
+the volume and read back a file the guest wrote (`hi.txt` →
+"exfat-from-ouroboros"). One debugging note worth recording: `fsck_exfat`
+requires a real attached device (`hdiutil attach -nomount`), not a plain file —
+on a plain file it bails on a block-size ioctl and *misreports the boot region
+as invalid*, which briefly looked like a format bug but wasn't (the checksum
+was self-consistent all along; a real device node validated clean). Zero `-d
+int` aborts. Next: milestone 3's ext2 mkfs step.
+
+## Disk management tools, milestone 3 (step 1): `format` FAT32 (mkfs)
+
+The disk can now be *made* into a filesystem from inside the guest, closing the
+loop: `erase disk` → `partition fat32` → `format fat32` → `mount -a` → `ls`. A
+new `FSOP_FORMAT(fstype)` op and a shell `format [fat32]` builtin (a builtin for
+the same load-from-unmounted-disk reason as `erase`/`partition`).
+
+`format` targets the disk's first MBR partition (`find_partition`, reading LBA
+0). `fat32::Fs::format` is the mkfs — the inverse of `mount_at`:
+
+- Computes the layout with Microsoft's fatgen103 formulas: sectors-per-cluster
+  from the volume-size table, then `FATSz32`. Refuses a partition too small for
+  a valid FAT32 (< 65 525 clusters).
+- Writes the boot sector (BPB with the `"FAT32   "` type string `mount_at`
+  checks, label `OUROBOROS`) and FSInfo, plus their backup copies at reserved
+  sectors 6 and 7.
+- Zeroes both FATs and initializes the three reserved entries (FAT[0] media,
+  FAT[1] EOC, FAT[2] EOC for the one-cluster root), then zeroes the root
+  directory cluster.
+
+Refused while a filesystem is mounted. **exFAT and ext2 formats are later
+steps** (`format exfat`/`format ext2` return an "unsupported yet" error for
+now).
+
+Verified on QEMU end-to-end, then **two ways on the host**: macOS `fsck_msdos`
+passes all three phases on the Ouroboros-formatted partition (and `file(1)`
+decodes the BPB exactly as written — FAT32, 1000 sectors/FAT, 126 991 free
+clusters, label "OUROBOROS"); and macOS *mounted* the volume and read back a
+file the guest wrote onto its own fresh filesystem (`HELLO.TXT` →
+"made-by-ouroboros"). One cosmetic `fsck` note — FSInfo's free-count hint goes
+stale after writes — is a **pre-existing FAT32 write-engine trait** (the engine
+never maintained FSInfo; the spec allows it to be stale, and `fsck` only warns),
+not a format bug; a write-engine follow-up. Next: milestone 3's exFAT and ext2
+mkfs steps — see `roadmap.md`.
+
 ## Disk management tools, milestone 2: `erase` + `partition` (MBR)
 
 The guest can now prepare a blank disk itself, not just use one some other tool

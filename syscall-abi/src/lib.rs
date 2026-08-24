@@ -762,6 +762,26 @@ pub const FSOP_ERASE: u64 = 16;
 /// while mounted. Disk management arc, milestone 2.
 pub const FSOP_PARTITION: u64 = 17;
 
+/// params: `(fstype,)` -> status `0` / [`MOUNT_ALREADY`] (refused: mounted)
+/// / [`MOUNT_NO_DEVICE`] / [`FS_ERR_NOT_FOUND`] (no partition table - run
+/// [`FSOP_PARTITION`] first) / [`FS_ERR_DISK_FULL`] (partition too small for
+/// the format) / [`FS_ERROR`] (unsupported `fstype`) / [`FS_ERR_IO`]. Lays a
+/// fresh filesystem of type `fstype` ([`FMT_FAT32`]/[`FMT_EXFAT`]/[`FMT_EXT2`])
+/// into the disk's first MBR partition - the inverse of the read/write engines
+/// (mkfs). Writes the on-disk metadata (for FAT32: the boot sector + FSInfo +
+/// their backups, both FATs with their reserved entries, and a zeroed root
+/// directory); the partition must already exist ([`FSOP_PARTITION`]). Refused
+/// while mounted. Disk management arc, milestone 3. FAT32 first; exFAT/ext2
+/// later steps (an unsupported `fstype` returns [`FS_ERROR`]).
+pub const FSOP_FORMAT: u64 = 18;
+
+/// [`FSOP_FORMAT`] `fstype` selectors.
+pub const FMT_FAT32: u64 = 0;
+/// exFAT format (a later milestone-3 step; currently returns [`FS_ERROR`]).
+pub const FMT_EXFAT: u64 = 1;
+/// ext2 format (a later milestone-3 step; currently returns [`FS_ERROR`]).
+pub const FMT_EXT2: u64 = 2;
+
 /// [`FSOP_ERASE`]'s default wipe length when the request passes `0`: 2048
 /// sectors (1 MiB at 512 B/sector), the conventional wipe span - it covers
 /// the MBR (LBA 0), a GPT primary header + entry array (LBA 1..33), and any

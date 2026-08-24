@@ -192,6 +192,20 @@ fn lfn_chars(raw: &[u8], out: &mut [u8; 13]) -> usize {
     n
 }
 
+/// Microsoft's recommended FAT32 sectors-per-cluster by volume size (in
+/// 512-byte sectors), from the fatgen103 disk-size table - used by
+/// [`Fs::format`]. Keeps the cluster count in the valid FAT32 range and the
+/// FAT a bounded size as the volume grows.
+fn sectors_per_cluster_for(total_sectors: u32) -> u32 {
+    match total_sectors {
+        0..=532_480 => 1,              // <= 260 MB
+        532_481..=16_777_216 => 8,     // <= 8 GB
+        16_777_217..=33_554_432 => 16, // <= 16 GB
+        33_554_433..=67_108_864 => 32, // <= 32 GB
+        _ => 64,
+    }
+}
+
 pub struct Fs {
     disk: Disk,
     /// The volume's first sector (the BPB) - kept so `mount`-info can
@@ -266,6 +280,117 @@ impl Fs {
     /// The volume's first sector - for `mount`-info reporting only.
     pub fn partition_lba(&self) -> u32 {
         self.partition_lba
+    }
+
+    /// Create a fresh FAT32 filesystem (mkfs) in the partition
+    /// `[start_lba, start_lba + total_sectors)` - the inverse of
+    /// [`mount_at`](Self::mount_at). Writes the boot sector + FSInfo (and
+    /// their backup copies at reserved sectors 6/7), zeroes both FATs and
+    /// initializes their three reserved entries (FAT[0]=media, FAT[1]=EOC,
+    /// FAT[2]=EOC for the one-cluster root directory), and zeroes the root
+    /// directory cluster. The layout is exactly what `mount_at` re-derives,
+    /// and is what macOS's `fsck_msdos` validates. The disk-management arc,
+    /// milestone 3.
+    ///
+    /// Returns [`Error::DiskFull`] if the partition is too small to hold a
+    /// valid FAT32 (fewer than 65 525 clusters), or [`Error::Io`] on a write
+    /// error. **Cost is O(FAT size) single-sector writes** - practical for
+    /// the modest volumes this targets on QEMU; a real multi-GB stick would
+    /// want multi-sector writes (`disk.rs` only exposes one-sector writes
+    /// today).
+    pub fn format(mut disk: Disk, start_lba: u32, total_sectors: u32) -> Result<(), Error> {
+        const RESERVED: u32 = 32;
+        const NUM_FATS: u32 = 2;
+        const FAT32_MIN_CLUSTERS: u32 = 65_525;
+
+        if total_sectors < RESERVED + NUM_FATS + 1 {
+            return Err(Error::DiskFull);
+        }
+        let spc = sectors_per_cluster_for(total_sectors);
+        // Microsoft fatgen103 FATSz32 computation.
+        let tmp1 = total_sectors - RESERVED;
+        let tmp2 = (256 * spc + NUM_FATS) / 2;
+        let fat_size = tmp1.div_ceil(tmp2);
+        let reserved_and_fats = RESERVED + NUM_FATS * fat_size;
+        if total_sectors <= reserved_and_fats {
+            return Err(Error::DiskFull);
+        }
+        let data_sectors = total_sectors - reserved_and_fats;
+        let cluster_count = data_sectors / spc;
+        if cluster_count < FAT32_MIN_CLUSTERS {
+            return Err(Error::DiskFull);
+        }
+
+        let fat_start = start_lba + RESERVED;
+        let root_cluster = 2u32;
+        let zero = [0u8; SECTOR_SIZE];
+
+        // Reserved region: zero it, then write the boot sector + FSInfo and
+        // their backups.
+        for s in 0..RESERVED {
+            disk.write_sector((start_lba + s) as u64, &zero)?;
+        }
+        let mut boot = [0u8; SECTOR_SIZE];
+        boot[0] = 0xEB;
+        boot[1] = 0x58;
+        boot[2] = 0x90;
+        boot[3..11].copy_from_slice(b"MSWIN4.1");
+        boot[11..13].copy_from_slice(&(SECTOR_SIZE as u16).to_le_bytes());
+        boot[13] = spc as u8;
+        boot[14..16].copy_from_slice(&(RESERVED as u16).to_le_bytes());
+        boot[16] = NUM_FATS as u8;
+        // root_entry_count (17..19) and total_sectors_16 (19..21) stay 0 for FAT32.
+        boot[21] = 0xF8; // media descriptor (fixed disk)
+        // fat_size_16 (22..24) stays 0.
+        boot[24..26].copy_from_slice(&63u16.to_le_bytes()); // sectors per track (cosmetic)
+        boot[26..28].copy_from_slice(&255u16.to_le_bytes()); // heads (cosmetic)
+        boot[28..32].copy_from_slice(&start_lba.to_le_bytes()); // hidden sectors
+        boot[32..36].copy_from_slice(&total_sectors.to_le_bytes());
+        boot[36..40].copy_from_slice(&fat_size.to_le_bytes());
+        // ext_flags (40..42), fs_version (42..44) stay 0.
+        boot[44..48].copy_from_slice(&root_cluster.to_le_bytes());
+        boot[48..50].copy_from_slice(&1u16.to_le_bytes()); // FSInfo sector
+        boot[50..52].copy_from_slice(&6u16.to_le_bytes()); // backup boot sector
+        boot[64] = 0x80; // drive number
+        boot[66] = 0x29; // extended boot signature
+        boot[67..71].copy_from_slice(&0x4F55_524Fu32.to_le_bytes()); // volume serial
+        boot[71..82].copy_from_slice(b"OUROBOROS  "); // 11-byte volume label
+        boot[82..90].copy_from_slice(b"FAT32   "); // filesystem type (mount_at checks this)
+        boot[510] = 0x55;
+        boot[511] = 0xAA;
+        disk.write_sector(start_lba as u64, &boot)?;
+        disk.write_sector((start_lba + 6) as u64, &boot)?;
+
+        let mut fsinfo = [0u8; SECTOR_SIZE];
+        fsinfo[0..4].copy_from_slice(&0x4161_5252u32.to_le_bytes()); // "RRaA" lead signature
+        fsinfo[484..488].copy_from_slice(&0x6141_7272u32.to_le_bytes()); // "rrAa" struct signature
+        fsinfo[488..492].copy_from_slice(&(cluster_count - 1).to_le_bytes()); // free count (root uses 1)
+        fsinfo[492..496].copy_from_slice(&3u32.to_le_bytes()); // next-free hint
+        fsinfo[508..512].copy_from_slice(&0xAA55_0000u32.to_le_bytes()); // trail signature
+        disk.write_sector((start_lba + 1) as u64, &fsinfo)?;
+        disk.write_sector((start_lba + 7) as u64, &fsinfo)?;
+
+        // Both FATs: zero every sector, then write the three reserved entries
+        // into each copy's first sector.
+        for i in 0..NUM_FATS {
+            let this_fat = fat_start + i * fat_size;
+            for s in 0..fat_size {
+                disk.write_sector((this_fat + s) as u64, &zero)?;
+            }
+            let mut fat0 = [0u8; SECTOR_SIZE];
+            fat0[0..4].copy_from_slice(&0x0FFF_FFF8u32.to_le_bytes()); // FAT[0] = media | EOC bits
+            fat0[4..8].copy_from_slice(&0x0FFF_FFFFu32.to_le_bytes()); // FAT[1] = EOC (clean bits)
+            fat0[8..12].copy_from_slice(&0x0FFF_FFF8u32.to_le_bytes()); // FAT[2] = EOC (root dir chain)
+            disk.write_sector(this_fat as u64, &fat0)?;
+        }
+
+        // Root directory cluster: zeroed (an empty directory).
+        let data_start = fat_start + NUM_FATS * fat_size;
+        let root_lba = data_start + (root_cluster - 2) * spc;
+        for s in 0..spc {
+            disk.write_sector((root_lba + s) as u64, &zero)?;
+        }
+        Ok(())
     }
 
     fn cluster_to_lba(&self, cluster: u32) -> u32 {

@@ -476,15 +476,42 @@ for building it.
    (the old FAT32 boot sector at LBA 1 zeroed); zero `-d int` aborts. **GPT
    still later** (the `scripts/mkgpt.py` logic — protective MBR + primary/backup
    headers with CRC32s + entry array — in Rust).
-3. **`format` (mkfs) — FAT32 first.** The big one: create a filesystem from
-   scratch on a partition (BPB/FAT/root-dir for FAT32). It's essentially the
-   *inverse* of the read/write arcs, so each format is its own milestone the
-   size of a slice of the write work: **FAT32** (moderate), then **exFAT** (VBR
-   checksum + up-case table + allocation bitmap), then **ext2** (superblock +
-   group descriptors + block/inode bitmaps + inode table + root inode +
-   `lost+found`). New `FSOP_FORMAT(partition, fstype)`. High-risk (writes fresh
-   filesystem metadata), but onto a fresh partition, so no existing-data risk.
-   Validate each against the matching host `fsck`.
+3. **`format` (mkfs).** The big one: create a filesystem from scratch on a
+   partition. It's essentially the *inverse* of the read/write arcs, so each
+   format is its own step the size of a slice of the write work.
+   `FSOP_FORMAT(fstype)` targets the disk's first MBR partition (via
+   `find_partition`, reading the MBR); the shell's `format [fat32]` builtin
+   drives it, refused while mounted.
+   - **FAT32 — DONE (2026-08-23).** `fat32::Fs::format` writes the boot sector +
+     FSInfo (+ their backups at reserved sectors 6/7), zeroes both FATs and
+     initializes the three reserved entries, and zeroes the root directory; the
+     layout is exactly what `mount_at` re-derives, with the Microsoft fatgen103
+     FATSz32 / sectors-per-cluster computation. Verified on QEMU end-to-end
+     (`unmount`→`erase disk`→`partition fat32`→`format fat32`→`mount -a`→`ls`),
+     then two ways on the host: macOS `fsck_msdos` passes all phases, and macOS
+     *mounted* the volume and read back a file Ouroboros wrote onto it
+     (`HELLO.TXT` → "made-by-ouroboros"). Known cosmetic: the FAT32 write engine
+     doesn't maintain FSInfo's free-count hint after writes (a spec-sanctioned
+     stale advisory field; `fsck` warns, doesn't error) — a write-engine
+     follow-up, not a format bug.
+   - **exFAT — DONE (2026-08-23).** `exfat::Fs::format` writes the main + backup
+     boot regions (VBR, the 8 extended boot sectors with their `0x0000AA55`
+     signatures, and the boot checksum over sectors 0–10 excluding
+     VolumeFlags/PercentInUse), a single FAT, and a cluster heap of three
+     contiguous system files — the allocation bitmap, a minimal compressed
+     up-case table (ASCII `a–z`, with its own checksum), and the root directory
+     (carrying the `0x83` label + `0x81` bitmap + `0x82` up-case entries).
+     Verified on QEMU (`format exfat`→`mount -a`→write), then on the host:
+     macOS `fsck_exfat` passes **every** phase (boot region, system files,
+     up-case table, hierarchy, bitmap — "the volume OUROBOROS appears to be
+     OK"), and macOS mounted it and read back a file the guest wrote
+     (`hi.txt` → "exfat-from-ouroboros"). (Note: `fsck_exfat` needs a real
+     attached device — `hdiutil attach -nomount` — not a plain file, or it
+     bails on an ioctl and misreports the boot region.)
+   - **ext2 — later** (superblock + group descriptors + block/inode bitmaps +
+     inode table + root inode + `lost+found`).
+   High-risk (writes fresh filesystem metadata), but onto a fresh partition, so
+   no existing-data risk. Validate each against the matching host `fsck`.
 4. **Deferred: a `/dev` namespace** — only if multi-disk addressing arrives; the
    Plan 9 devfs direction.
 
