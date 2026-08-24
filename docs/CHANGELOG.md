@@ -7,6 +7,51 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/`; 
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## xHCI keyboard ↔ USB-storage contention fixed (two bugs, one symptom) — real hardware
+
+The real-Parallels bug where the xHCI stack couldn't serve the USB keyboard and
+a USB stick at once turned out to be **two independent bugs**, each confirmed
+fixed on real hardware:
+
+- **Mode A — keyboard works, storage reads degrade to I/O errors shortly after
+  mount** (boot from `.hdd`, stick attached late). `usb_msd.rs` had *no* BOT
+  error recovery, so a single contention-induced bulk-endpoint stall stayed
+  halted and every later command failed permanently. Added
+  `xhci::reset_storage_endpoint` (Reset Endpoint + Set TR Dequeue Pointer on the
+  storage bulk DCI — the same two-command shape as EP0's `recover_from_stall`,
+  and *controller commands* rather than USB class requests, which Parallels'
+  passthrough doesn't forward) and a bounded retry-with-recovery wrapper in
+  `usb_msd::bot_command` (old body → `bot_command_once`). Software ring state is
+  reset only after both commands succeed, so resetting a healthy endpoint
+  no-ops without desyncing. Holds under realistic sustained reads + typing.
+
+- **Mode B — storage works, the keyboard is never addressed** (stick present at
+  boot, or booting from the stick). A boot-log capture (via a temporary
+  `CNTPCT_EL0` screen-freeze, since removed) showed *only* the stick's port
+  enumerated — "no boot-protocol keyboard among them". Root cause: the boot port
+  scan broke its wait loop on the **first** connected port and enumerated
+  immediately, so the fast SuperSpeed stick won the race and the scan finished
+  before Parallels' slower synthetic keyboard settled — missed for the whole
+  boot (no hot-plug). Replaced "break on first connected" with a
+  **minimum-settle + debounce** scan (`SCAN_MIN_SETTLE_MS` 1500 /
+  `SCAN_DEBOUNCE_MS` 400 / `SCAN_SETTLE_CAP_MS` 5000): wait at least 1.5s, then
+  proceed once the connected-port set holds steady for 400ms (cap 5s). The
+  keyboard, which settles within ~1s even alone, is reliably present by
+  enumerate time. Confirmed: keyboard works with the stick present at boot
+  **and** booting entirely from the stick (the harder case, firmware hammering
+  the stick right up to handoff, then the kernel resets xHCI and re-enumerates
+  both).
+
+Lessons: an "inverse correlation across two configs" was two bugs wearing one
+symptom, each needing its own fix; and QEMU hid both (its keyboard is synthetic,
+its storage is virtio-blk, so they never share the xHCI bus — the contention and
+the enumeration race are structurally impossible there). Verified on QEMU for
+non-regression (keyboard + storage still co-enumerate, `keyboard ready`, zero
+aborts) and end-to-end on real Parallels hardware. Still open, tracked in the
+roadmap: a *large* multi-MB `cat` gets fsd supervisor-restarted mid-read (the
+long-read-vs-wedge-detector interaction, worsened by Mode A's retry) — separate
+from the contention itself, which realistic reads no longer trip.
+
 ## Disk management tools, milestone 3 (step 3): `format` ext2 (mkfs) — the arc's finale
 
 `format ext2` completes milestone 3 (and the whole disk-management arc):

@@ -777,22 +777,43 @@ phase:
   `espexfat.img` written to it) auto-mounts the exFAT partition and reads/writes
   work. **But the pass surfaced a genuine USB-subsystem bug** (see next item),
   invisible on QEMU, where the keyboard is synthetic and storage is virtio-blk.
-- **USB keyboard ↔ mass-storage contention on xHCI (real-hardware bug, found
-  by the pass).** On Parallels the xHCI/USB stack can't reliably serve the USB
-  keyboard *and* USB mass storage at once — an inverse correlation observed
-  across two boot configs: booting from the `.hdd` with the stick passed through
-  late, the **keyboard works but storage reads degrade to device-I/O errors
-  shortly after mount**; booting from the USB stick itself, **storage works end
-  to end but the keyboard is never addressed** (no shell input). Points at
-  `xhci.rs`'s device management — the "up to 4 concurrently addressed devices"
-  limit and enumeration/addressing *order* — and/or `usb_msd.rs` read
-  recovery (SCSI Unit Attention / endpoint stall). A USB-subsystem robustness
-  issue, not a filesystem-driver bug (the FS drivers read/wrote fine whenever
-  the block layer served them). The scoped follow-up: make the xHCI driver keep
-  a HID keyboard *and* a mass-storage device concurrently live, and recover a
-  mass-storage endpoint that errors mid-session. Postmortem-worthy. See the
-  [userland & pipelines postmortem](userland-and-pipelines-postmortem.md) for
-  the QEMU-only body of work this pass was checking.
+- ~~**USB keyboard ↔ mass-storage contention on xHCI (real-hardware bug, found
+  by the pass).**~~ — **DONE (2026-08-24), both halves confirmed on real
+  Parallels hardware.** The "inverse correlation across two boot configs" turned
+  out to be *two separate bugs*, each with its own fix:
+  - **Mode A — keyboard works, storage degrades to I/O errors shortly after
+    mount** (booting from the `.hdd`, stick attached late). Root cause:
+    `usb_msd.rs` had **no BOT error recovery**, so a single contention-induced
+    bulk-endpoint stall stayed halted forever and every later command failed.
+    Fix: `xhci::reset_storage_endpoint` (Reset Endpoint + Set TR Dequeue on the
+    bulk DCI — controller *commands*, which Parallels forwards, not the
+    class-request BOMS Reset it doesn't) + a bounded retry-with-recovery in
+    `usb_msd::bot_command`. Holds under realistic sustained reads + typing.
+    (A *separate*, still-open issue surfaced here: a giant multi-MB `cat` gets
+    fsd supervisor-restarted mid-read — the long-read-vs-wedge-detector problem,
+    tracked below.)
+  - **Mode B — storage works, the keyboard is never addressed** (stick present
+    at boot, or booting from the stick). Root cause, pinned by a boot-log
+    capture: `xhci.rs`'s port scan broke the wait loop on the **first** connected
+    port and enumerated immediately, so the fast SuperSpeed stick won the race
+    and the scan finished before Parallels' slower synthetic keyboard settled —
+    and with no hot-plug it was missed for the whole boot (the log showed *only*
+    the stick's port, "no boot-protocol keyboard among them"). Fix: a
+    **minimum-settle + debounce** port scan (`SCAN_MIN_SETTLE_MS` 1500 /
+    `SCAN_DEBOUNCE_MS` 400 / `SCAN_SETTLE_CAP_MS` 5000) so a slow device present
+    alongside a fast one is caught. Confirmed: keyboard works both with the stick
+    present at boot *and* booting entirely from the stick.
+
+  Neither the "4-device pool limit" nor SCSI Unit Attention was the culprit.
+  Postmortem-worthy (the two-bugs-wearing-one-symptom shape, and that QEMU hid
+  both — its keyboard is synthetic and its storage is virtio-blk, never sharing
+  the xHCI bus). Still open, tracked separately: **large-read fsd restart** — a
+  multi-MB read keeps fsd busy past the supervisor's wedge thresholds
+  (`WEDGE_TICKS` 2.56s / `PING_TIMEOUT` 160ms), so it's restarted mid-read and
+  the mount drops; the fix is fsd draining/acking the supervisor ping during
+  long bulk reads (the netd `pump_send` pattern) plus dialing back the Mode A
+  retry. See the [userland & pipelines postmortem](userland-and-pipelines-postmortem.md)
+  for the QEMU-only body of work this pass was checking.
 - **GPT is parsed but not validated on read.** `fsd`'s `partition::discover`
   trusts the "EFI PART" signature; it doesn't check the GPT header/entry-array
   CRC32s or fall back to the backup GPT on a corrupt primary. Fine for the

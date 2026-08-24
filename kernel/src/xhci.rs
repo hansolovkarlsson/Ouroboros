@@ -252,6 +252,27 @@ const MAX_DEVICES: usize = 4;
 // constraint required.
 const POLL_TIMEOUT_MS: u64 = 1000;
 
+/// Minimum boot port-scan settle wait: the scan always polls for at least this
+/// long before it will enumerate, so a slow device isn't missed just because a
+/// fast one already connected and its port-set looks "stable". See the scan
+/// loop in [`init_inner`] for the real bug this fixes: on real Parallels a fast
+/// SuperSpeed stick reports connected well before the slower synthetic keyboard
+/// settles on its own port, and enumerating the moment the stick connected
+/// missed the keyboard entirely (no hot-plug -> missed for the whole boot). The
+/// keyboard settles within ~1s even as the only device, so 1.5s reliably covers
+/// it; a debounce (below) extends the wait further if the set is still changing.
+const SCAN_MIN_SETTLE_MS: u64 = 1500;
+/// After [`SCAN_MIN_SETTLE_MS`], the scan proceeds once the set of connected
+/// ports has *additionally* held steady this long (all present devices have
+/// shown up) - so a device appearing right at the minimum-wait boundary still
+/// gets caught.
+const SCAN_DEBOUNCE_MS: u64 = 400;
+/// Overall cap on the boot port-scan settle wait, so a port set that never
+/// stops changing (or nothing connecting at all) can't spin here forever. Only
+/// reached when the set is still flapping - a normal boot proceeds via the
+/// min-settle + debounce path well before this.
+const SCAN_SETTLE_CAP_MS: u64 = 5000;
+
 /// A deadline `POLL_TIMEOUT_MS` from now, in the same `CNTPCT_EL0` units
 /// `timer::now_ticks` returns - compare against `timer::now_ticks()` in
 /// a `while` loop instead of counting fixed iterations. See
@@ -1261,21 +1282,51 @@ unsafe fn init_inner(bar_base: u64) -> Result<(), Error> {
         storage: None,
     };
 
-    // Port scan: wait for at least one port to report a connected device.
-    // No hot-plug - every device this driver will ever consider must
-    // already be attached by the time this loop finds it.
-    let mut any_connected = false;
-    let deadline = poll_deadline();
-    'wait: while crate::timer::now_ticks() < deadline {
+    // Port scan: wait for the set of connected ports to *settle*, not just for
+    // the first port to connect. No hot-plug - every device this driver will
+    // ever consider must already be attached by the time enumeration runs -
+    // which is exactly why enumerating too early is fatal: on real Parallels a
+    // fast SuperSpeed stick reports connected well before the slower synthetic
+    // keyboard settles, and the old "break on the first connected port" then
+    // enumerated immediately and missed the keyboard for the whole boot
+    // (confirmed by a boot-log capture: with the stick present, only the
+    // stick's port showed up, and the scan reported "no boot-protocol keyboard
+    // among them"). Debounce instead: poll every port's CCS into a bitmask and
+    // proceed only once it's held steady for SCAN_DEBOUNCE_MS (all present
+    // devices have shown up), or the SCAN_SETTLE_CAP_MS cap is hit. The
+    // keyboard, which settles within ~1s even as the only device, is reliably
+    // present by enumerate time this way. (The mask's exact bit positions
+    // don't matter - it's only a change detector; `1 << port` for port <=
+    // max_ports (<= 255) is masked to the low bits, which is fine here.)
+    let hz = crate::timer::frequency_hz();
+    let debounce_ticks = hz / 1000 * SCAN_DEBOUNCE_MS;
+    let start = crate::timer::now_ticks();
+    let min_deadline = start + hz / 1000 * SCAN_MIN_SETTLE_MS;
+    let cap = start + hz / 1000 * SCAN_SETTLE_CAP_MS;
+    let mut connected_mask = 0u64;
+    let mut stable_since = start;
+    loop {
+        let mut mask = 0u64;
         for port in 1..=max_ports {
             let portsc_addr = op_base + OP_PORTSC_BASE + ((port - 1) as u64) * 0x10;
             if unsafe { read32(portsc_addr) } & PORTSC_CCS != 0 {
-                any_connected = true;
-                break 'wait;
+                mask |= 1u64 << (port % 64);
             }
         }
+        let now = crate::timer::now_ticks();
+        if mask != connected_mask {
+            connected_mask = mask;
+            stable_since = now;
+        }
+        // Proceed once we've waited the minimum *and* the set has held steady
+        // for the debounce, or the overall cap is hit (which also covers "no
+        // device ever connected" -> the guard below returns NoPortConnected).
+        let settled = connected_mask != 0 && now - stable_since >= debounce_ticks;
+        if now >= cap || (now >= min_deadline && settled) {
+            break;
+        }
     }
-    if !any_connected {
+    if connected_mask == 0 {
         return Err(Error::NoPortConnected);
     }
 
