@@ -108,7 +108,7 @@ ifeq ($(PROFILE),release)
 CARGO_FLAGS += --release
 endif
 
-.PHONY: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin ping-bin resolve-bin fetch-bin wc-bin grep-bin head-bin esp run run-virtio-console run-usb-kbd run-usb-multi run-gicv3 image run-image image-gpt run-image-gpt image-exfat run-image-exfat image-ext2 run-image-ext2 parallels-hdd test-parallels clean
+.PHONY: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin ping-bin resolve-bin fetch-bin wc-bin grep-bin head-bin esp run run-virtio-console run-usb-kbd run-usb-multi run-gicv3 image run-image image-gpt run-image-gpt image-exfat run-image-exfat image-ext2 run-image-ext2 parallels-hdd release test-parallels clean
 
 # Overridable by `make test-parallels VM_NAME=... CMDS=... BOOT_WAIT=...`.
 VM_NAME     ?= Ouroboros
@@ -655,6 +655,15 @@ parallels-hdd: image
 	hdiutil convert $(ESP_DIR).img -format UDZO -o $(ESP_DIR).dmg
 	rm -rf $(ESP_DIR).hdd
 	"$(PDT)" create --hdd "$(CURDIR)/$(ESP_DIR).hdd" --dmg "$(CURDIR)/$(ESP_DIR).dmg"
+
+# Cut a release: build the release-profile disk images and package the
+# downloadable artifacts (esp.img.zip + esp.hdd.zip + SHA256SUMS) under
+# build/release/. Local and repeatable. The outward-facing publish step
+# (tag + push + GitHub Release) is deliberately NOT a make target - run
+# `scripts/release.sh publish` by hand. Version comes from ./VERSION.
+# See docs/RELEASING.md.
+release:
+	scripts/release.sh build
 
 # Scripted real-hardware test loop against Parallels - the manual "boot,
 # watch the screen, type on a keyboard, report back" round trip every
