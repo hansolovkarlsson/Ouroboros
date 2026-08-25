@@ -84,6 +84,7 @@ dependencies = [
 name = "fsd"
 version = "0.1.0"
 dependencies = [
+ "ninep-abi",
  "syscall-abi",
 ]
 
@@ -146,6 +147,10 @@ version = "0.1.0"
 dependencies = [
  "syscall-abi",
 ]
+
+[[package]]
+name = "ninep-abi"
+version = "0.1.0"
 
 [[package]]
 name = "ouroboros-kernel"
@@ -331,6 +336,7 @@ checksum = "0c8352f8c05e47892e7eaf13b34abd76a7f4aeaf817b716e88789381927f199c"
 name = "ulib"
 version = "0.1.0"
 dependencies = [
+ "ninep-abi",
  "syscall-abi",
 ]
 

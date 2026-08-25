@@ -394,11 +394,62 @@ pub fn fs_call(op: u64, params: [u64; 4], payload1: &[u8], payload2: &[u8], resu
     status
 }
 
+/// One filesystem-server round trip over the uniform verb set ([`ninep-abi`],
+/// the Phase 0 cluster protocol) — `fs_call`'s sibling, with the `tree` mount
+/// selector at offset 8 and the payload at [`ninep_abi::NP_REQ_PAYLOAD`] (48).
+/// `tree` is `0` for now (a single implicit mount); the per-task namespace
+/// resolves it to a real mount in a later step. The reply shape (status u64 +
+/// inline result) is identical to `fs_call`'s, so callers are unchanged.
+fn np_call(verb: u64, tree: u64, params: [u64; 4], payload1: &[u8], payload2: &[u8], result: &mut [u8]) -> u64 {
+    const HDR: usize = ninep_abi::NP_REQ_PAYLOAD as usize;
+    let mut req = [0u8; syscall_abi::MSG_MAX_LEN as usize];
+    req[0..8].copy_from_slice(&verb.to_le_bytes());
+    req[8..16].copy_from_slice(&tree.to_le_bytes());
+    let mut i = 0;
+    while i < 4 {
+        let at = 16 + i * 8;
+        req[at..at + 8].copy_from_slice(&params[i].to_le_bytes());
+        i += 1;
+    }
+    let p1_end = HDR + payload1.len();
+    let p2_end = p1_end + payload2.len();
+    if p2_end > req.len() {
+        return syscall_abi::FS_ERROR;
+    }
+    req[HDR..p1_end].copy_from_slice(payload1);
+    req[p1_end..p2_end].copy_from_slice(payload2);
+    let mut reply = [0u8; syscall_abi::MSG_MAX_LEN as usize];
+    let packed = syscall4(
+        syscall_abi::MSG_CALL,
+        syscall_abi::FSD_TASK,
+        req.as_ptr() as u64,
+        p2_end as u64,
+        reply.as_mut_ptr() as u64,
+    );
+    if packed == syscall_abi::TASK_ERR_NO_SUCH_TASK {
+        return syscall_abi::NO_FS;
+    }
+    if packed >= syscall_abi::FS_ERR_MIN {
+        return syscall_abi::FS_ERROR;
+    }
+    let reply_len = ((packed & 0xffff_ffff) as usize).min(reply.len());
+    if reply_len < 8 {
+        return syscall_abi::FS_ERROR;
+    }
+    let status = u64::from_le_bytes([
+        reply[0], reply[1], reply[2], reply[3], reply[4], reply[5], reply[6], reply[7],
+    ]);
+    let data_len = (reply_len - 8).min(result.len());
+    result[..data_len].copy_from_slice(&reply[8..8 + data_len]);
+    status
+}
+
 /// List `path`'s entries into `buf` as `name\n`/`name/\n`. Returns a byte
 /// count, [`NO_FS`], or a specific `FS_ERR_*` code.
 pub fn fs_list_dir(path: &str, buf: &mut [u8]) -> u64 {
-    fs_call(
-        syscall_abi::FSOP_LIST_DIR,
+    np_call(
+        ninep_abi::NP_READDIR,
+        0,
         [path.len() as u64, buf.len() as u64, 0, 0],
         path.as_bytes(),
         &[],
@@ -410,7 +461,17 @@ pub fn fs_list_dir(path: &str, buf: &mut [u8]) -> u64 {
 /// the path is the only input, the reply is a bare status (`0` on success, or
 /// an `FS_ERR_*`/`NO_FS` code). The shape `mkdir`/`rmdir`/`touch`/`rm` share.
 pub fn fs_op_path(op: u64, path: &str) -> u64 {
-    fs_call(op, [path.len() as u64, 0, 0, 0], path.as_bytes(), &[], &mut [])
+    // Callers still pass the `FSOP_*` op they always did (so `/bin` mkdir/rmdir/
+    // touch/rm are unchanged); map it to the uniform verb here. Unknown ops pass
+    // through untranslated (there is no such caller today).
+    let verb = match op {
+        syscall_abi::FSOP_MKDIR => ninep_abi::NP_MKDIR,
+        syscall_abi::FSOP_RMDIR => ninep_abi::NP_RMDIR,
+        syscall_abi::FSOP_TOUCH => ninep_abi::NP_TOUCH,
+        syscall_abi::FSOP_RM => ninep_abi::NP_RM,
+        other => other,
+    };
+    np_call(verb, 0, [path.len() as u64, 0, 0, 0], path.as_bytes(), &[], &mut [])
 }
 
 /// Read up to `buf.len()` bytes of `path` from `offset` into `buf` via the
@@ -428,8 +489,9 @@ pub fn fs_read_bulk(path: &str, offset: u64, buf: &mut [u8]) -> u64 {
     if granted != 0 {
         return syscall_abi::FS_ERROR;
     }
-    fs_call(
-        syscall_abi::FSOP_READ_BULK,
+    np_call(
+        ninep_abi::NP_READ,
+        0,
         [path.len() as u64, offset, want, 0],
         path.as_bytes(),
         &[],
@@ -442,8 +504,9 @@ pub fn fs_read_bulk(path: &str, offset: u64, buf: &mut [u8]) -> u64 {
 /// [`NO_FS`], or an `FS_ERR_*` code. A one-byte `buf` is the cheapest
 /// existence/kind probe (a directory returns `FS_ERR_NOT_A_FILE`).
 pub fn fs_read_file(path: &str, buf: &mut [u8]) -> u64 {
-    fs_call(
-        syscall_abi::FSOP_READ_FILE,
+    np_call(
+        ninep_abi::NP_READ_FILE,
+        0,
         [path.len() as u64, buf.len() as u64, 0, 0],
         path.as_bytes(),
         &[],
@@ -468,8 +531,9 @@ pub fn fs_write_bulk(path: &str, data: &[u8]) -> u64 {
             return syscall_abi::FS_ERROR;
         }
     }
-    fs_call(
-        syscall_abi::FSOP_WRITE_FILE,
+    np_call(
+        ninep_abi::NP_WRITE,
+        0,
         [path.len() as u64, data.len() as u64, 0, 0],
         path.as_bytes(),
         &[],
@@ -497,8 +561,9 @@ pub fn fs_write_at(path: &str, offset: u64, data: &[u8]) -> u64 {
     if granted != 0 {
         return syscall_abi::FS_ERROR;
     }
-    fs_call(
-        syscall_abi::FSOP_WRITE_AT,
+    np_call(
+        ninep_abi::NP_WRITE_AT,
+        0,
         [path.len() as u64, offset, data.len() as u64, 0],
         path.as_bytes(),
         &[],
@@ -510,8 +575,9 @@ pub fn fs_write_at(path: &str, offset: u64, data: &[u8]) -> u64 {
 /// two paths (the server relinks the entry, no content moves). Returns `0`,
 /// [`NO_FS`], or an `FS_ERR_*` code.
 pub fn fs_mv(src: &str, dst: &str) -> u64 {
-    fs_call(
-        syscall_abi::FSOP_MV,
+    np_call(
+        ninep_abi::NP_MV,
+        0,
         [src.len() as u64, dst.len() as u64, 0, 0],
         src.as_bytes(),
         dst.as_bytes(),

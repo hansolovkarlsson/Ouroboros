@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 syscall-abi = { path = "../../../syscall-abi" }
+ninep-abi = { path = "../../../ninep-abi" }
 
 [[bin]]
 name = "fsd"

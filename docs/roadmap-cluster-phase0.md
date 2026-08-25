@@ -195,15 +195,20 @@ doesn't reintroduce that.
 Each step boots, passes a full regression, and shows zero `-d int` aborts before
 the next begins — the cadence that carried the filesystem/network/xHCI arcs.
 
-- **0a — `ninep-abi` + `fsd` dual-speaks.** Define the crate. `fsd` answers the
-  new verbs (translating to its `vfs` calls) **alongside** `FSOP_*` during a
-  bridge period. No client changes yet. *Ship:* a new-verb request returns
-  byte-identical results to the `FSOP_*` one.
-- **0b — `ulib` speaks the verbs + single-mount namespace.** `ulib`'s
-  `fs_call`/`fs_op_path`/`fs_read_bulk`/… emit the new verbs, resolving through a
-  namespace with one default binding `/ → (fsd, tree 0)`. Every `/bin` command is
-  unchanged (ulib absorbs it). *Ship:* the whole shell + `/bin` surface works over
-  the new protocol; `FSOP_*` is now dead client-side and can be deleted.
+- **0a+0b — `ninep-abi` defined; `fsd` speaks it; `ulib` uses it. — DONE
+  (2026-08-25).** Merged into one step because 0a alone is untestable without an
+  NP client (the minimal client *is* the `ulib` re-point) — see the CHANGELOG's
+  "Cluster Phase 0, step 0a+0b" entry. The `ninep-abi` crate defines the verbs
+  (`tree` selector at offset 8; payload at `NP_REQ_PAYLOAD` 48; `NP_BASE` 0x100);
+  `fsd` gained `handle_ninep` (mirroring each `FSOP_*` file-op arm onto the same
+  `vfs` calls) and dual-speaks; `ulib`'s fs client emits the verbs with
+  `tree = 0`, so **every `/bin` filesystem command reaches `fsd` over NP** with no
+  `/bin` source change. Verified byte-identical to a pre-change baseline (`ls`/
+  `cat`/64 KiB read/`mkdir`/`touch`/`writeat`/`cp`/`mv`/`rm`/`rmdir`), zero aborts.
+  One scope correction found in build: the **shell has its own `FSOP_*` helpers**
+  (separate from `ulib`), so `FSOP_*` is *not yet* dead client-side — the shell
+  migration + retiring `fsd`'s `FSOP_*` file-op arms is a small **next sub-step**,
+  after which `FSOP_*` file ops are deleted. No kernel change.
 - **0c — kernel per-task namespace + `mount`/`bind`/`get` syscalls.** The
   `NAMESPACES` per-task store, the three syscalls, child inheritance at spawn
   (modelled on CWD). *Ship:* `bind` in one task changes only that task's view;

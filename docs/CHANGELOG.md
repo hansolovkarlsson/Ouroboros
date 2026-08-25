@@ -7,6 +7,48 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/`; 
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## Cluster Phase 0, step 0a+0b: the `ninep-abi` uniform verb set, in use end-to-end
+
+The first *build* step of the distributed-cluster arc (design:
+[`roadmap-cluster-phase0.md`](roadmap-cluster-phase0.md)). The whole direction
+rests on "remote is just this same protocol over TCP instead of local IPC," so
+step one is to stop having three bespoke server protocols and define **one
+uniform, server-agnostic verb set** — and make it the real, in-use path, not a
+paper spec.
+
+New crate **`ninep-abi`** (repo root, `#![no_std]`, consts only — the
+`syscall-abi` shape): the verbs `NP_READDIR`/`NP_READ_FILE`/`NP_READ`/`NP_WRITE`/
+`NP_WRITE_AT`/`NP_TOUCH`/`NP_MKDIR`/`NP_RMDIR`/`NP_RM`/`NP_MV` over a wire that
+mirrors `FSOP_*` with one added field — the **`tree` selector at offset 8** (the
+multi-mount key, and the Phase 1 remote-tree handle) — so the request header is
+`verb`/`tree`/4 params, payload at `NP_REQ_PAYLOAD` (48). Bulk data still moves
+by `grant`/`safecopy` untouched; status codes reuse `syscall-abi`'s existing set,
+so a verb is byte-identical to the `FSOP_*` op it replaces. Verb numbers start at
+`NP_BASE` (0x100), clear of `FSOP_*` (1..18) and `SYSOP_PING` (0xFFFF), so `fsd`
+speaks both during the migration.
+
+`fsd` gained `handle_ninep` (each arm calls the **same** `vfs` method + the same
+grant/safecopy path as the `FSOP_*` arm it mirrors; `vfs` engine unchanged), and
+`handle()` routes the `[NP_BASE, NP_LIMIT)` range to it. `ulib`'s fs client
+(`fs_list_dir`/`fs_read_file`/`fs_read_bulk`/`fs_write_bulk`/`fs_write_at`/
+`fs_op_path`/`fs_mv`, via a new `np_call`) now emits the verbs with `tree = 0` (a
+single implicit mount; the per-task namespace resolves it later) — so **every
+`/bin` filesystem command (`ls`/`cat`/`mkdir`/`touch`/`writeat`/`cp`/`mv`/`rm`/
+`rmdir`) reaches `fsd` over the new protocol**, with **outer signatures
+unchanged so no `/bin` source changed**. The shell keeps its own `FSOP_*`
+helpers for now (its migration + retiring the `FSOP_*` file-op arms is the next
+sub-step); `fsd` dual-speaks meanwhile. No kernel change.
+
+Verified on QEMU with a piped-stdin batch harness driving the real shell + `/bin`
+(`ls`/`cat` incl. a 64 KiB file/`mkdir`/`touch`/`write`/`writeat`/`cp`/`mv`/`rm`/
+`rmdir`): the capture is **byte-identical** to a pre-change baseline except two
+non-functional boot artifacts (the `fsd` binary is 8 KiB larger; its async
+"mounted" line interleaves differently with the first prompt), **zero `-d int`
+aborts**. Cross-protocol interop confirmed in passing — `write` (shell→`FSOP_*`)
+then `cat` (`/bin`→`NP`) reads the same bytes back. Next: 0c (per-task namespace
++ `mount`/`bind` syscalls), 0d (`fsd` multi-mount — the payoff), 0e (`cond` on
+the verbs, retiring `DSPOP_*`). Phase 0 complete = v0.5.0.
+
 ## Large-read fsd restart fixed: a sequential-read cursor in FAT32 (v0.4.1)
 
 The one frontier item the real-hardware pass left open: a *large* multi-MB
