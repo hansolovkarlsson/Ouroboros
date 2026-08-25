@@ -7,6 +7,57 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/`; 
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## Large-read fsd restart fixed: a sequential-read cursor in FAT32 (v0.4.1)
+
+The one frontier item the real-hardware pass left open: a *large* multi-MB
+`cat` (or any big sequential read — `netd` streaming a file over HTTP is the
+other) got `fsd` **supervisor-restarted mid-read**, dropping the mount. Root
+cause, found by reading the code rather than the (QEMU-invisible) symptom:
+`fat32::read_at`'s seek walked the file's cluster chain **from its start**
+every call, and `next_cluster` reads a FAT sector per step with no cache — so
+a client reading a file in `SAFECOPY_MAX` (2 KiB) chunks re-walked an
+ever-longer prefix each time. That's **O(n²) disk reads** over the whole file,
+and a single late-offset request issuing hundreds-to-thousands of FAT reads in
+*one uninterrupted `handle()` call*. On slow real hardware that lone request
+runs past the supervisor's runnable-wedge threshold (`WEDGE_TICKS`, ~2.56 s)
+and `fsd` is torn down and restarted mid-transfer.
+
+This is deeper than the fix originally sketched in the roadmap ("ack the
+health-ping during long reads"): that addresses only the *blocked*-wedge /
+`PING_TIMEOUT` path, but the detector that actually fires here is the
+*runnable*-wedge, which no ping touches. The real fix is to **bound the work
+per request**: `fat32::Fs` gained a `read_cursor` that remembers where the
+last `read_at` walk landed, so a forward/sequential read *resumes* from there
+instead of re-walking. Each bulk request becomes O(chunk); `fsd` returns to
+`msg_recv` between chunks (resetting the wedge counter and servicing the ping
+promptly — the `netd` "small bursts, drain between each" pattern, reached
+structurally rather than by threading a mailbox drain into the FS engine); and
+the whole read is O(n). Only the chain *position* is cached — never data,
+which is still read fresh every call — and it is invalidated at the single
+choke point for all chain mutation (`write_fat_entry`), so a read can never
+follow a stale chain (an in-place data overwrite, which leaves the chain
+untouched, correctly keeps the cursor).
+
+Verified on QEMU with a piped-stdin harness: a 64 KiB file (128 clusters, 512 B
+each; 32 chunks, so the cursor resumes across a cluster boundary ~31 times)
+`cat`s back with all 8192 monotonic per-line counters present, strictly
+increasing, no gaps/dups/reorder; a 1 MiB `cat … | wc` reports the exact
+`131072 131072 1048576`; zero `-d int` aborts. The A/B is decisive: the 1 MiB
+read is **0.99 s with the cursor vs. did-not-finish-in-120 s without it** — the
+runaway single-request runtime that trips the wedge on real hardware, made
+visible even on QEMU's fast virtio-blk.
+
+Deliberately **not** touched: the Mode A BOT retry (a real-hardware-only tuning
+knob that can't be validated on QEMU and risks regressing the confirmed
+contention fix — and cutting per-request FAT reads by orders of magnitude
+already shrinks its retry exposure). Scope note: the cursor helps *sequential
+read-only* workloads (`cat`, `netd` file serving — the reported bug); a large
+`cp` still re-walks on the read side because its interleaved destination writes
+invalidate the cursor each iteration (and `write_at` has its own start-walk),
+and `exfat`/`ext2` share the analogous re-walk — all tracked as follow-ups, not
+in this fix. Packaged as **v0.4.1** (an isolated fix on a released minor — no
+new arc).
+
 ## xHCI keyboard ↔ USB-storage contention fixed (two bugs, one symptom) — real hardware
 
 The real-Parallels bug where the xHCI stack couldn't serve the USB keyboard and
@@ -47,10 +98,11 @@ symptom, each needing its own fix; and QEMU hid both (its keyboard is synthetic,
 its storage is virtio-blk, so they never share the xHCI bus — the contention and
 the enumeration race are structurally impossible there). Verified on QEMU for
 non-regression (keyboard + storage still co-enumerate, `keyboard ready`, zero
-aborts) and end-to-end on real Parallels hardware. Still open, tracked in the
-roadmap: a *large* multi-MB `cat` gets fsd supervisor-restarted mid-read (the
-long-read-vs-wedge-detector interaction, worsened by Mode A's retry) — separate
-from the contention itself, which realistic reads no longer trip.
+aborts) and end-to-end on real Parallels hardware. One frontier item stayed
+open after this pass: a *large* multi-MB `cat` got fsd supervisor-restarted
+mid-read (the long-read-vs-wedge-detector interaction) — separate from the
+contention itself, which realistic reads no longer trip. **Now fixed** — see
+the "Large-read fsd restart fixed" entry above (v0.4.1).
 
 ## Disk management tools, milestone 3 (step 3): `format` ext2 (mkfs) — the arc's finale
 

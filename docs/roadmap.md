@@ -796,9 +796,9 @@ phase:
     bulk DCI — controller *commands*, which Parallels forwards, not the
     class-request BOMS Reset it doesn't) + a bounded retry-with-recovery in
     `usb_msd::bot_command`. Holds under realistic sustained reads + typing.
-    (A *separate*, still-open issue surfaced here: a giant multi-MB `cat` gets
-    fsd supervisor-restarted mid-read — the long-read-vs-wedge-detector problem,
-    tracked below.)
+    (A *separate* issue surfaced here: a giant multi-MB `cat` got fsd
+    supervisor-restarted mid-read — the long-read-vs-wedge-detector problem.
+    **Fixed in v0.4.1** — the FAT32 read cursor, tracked below.)
   - **Mode B — storage works, the keyboard is never addressed** (stick present
     at boot, or booting from the stick). Root cause, pinned by a boot-log
     capture: `xhci.rs`'s port scan broke the wait loop on the **first** connected
@@ -814,13 +814,23 @@ phase:
   Neither the "4-device pool limit" nor SCSI Unit Attention was the culprit.
   Postmortem-worthy (the two-bugs-wearing-one-symptom shape, and that QEMU hid
   both — its keyboard is synthetic and its storage is virtio-blk, never sharing
-  the xHCI bus). Still open, tracked separately: **large-read fsd restart** — a
-  multi-MB read keeps fsd busy past the supervisor's wedge thresholds
-  (`WEDGE_TICKS` 2.56s / `PING_TIMEOUT` 160ms), so it's restarted mid-read and
-  the mount drops; the fix is fsd draining/acking the supervisor ping during
-  long bulk reads (the netd `pump_send` pattern) plus dialing back the Mode A
-  retry. See the [userland & pipelines postmortem](userland-and-pipelines-postmortem.md)
-  for the QEMU-only body of work this pass was checking.
+  the xHCI bus). **large-read fsd restart — FIXED (2026-08-25, v0.4.1).** The
+  root cause wasn't the ping path the note below first guessed: `fat32::read_at`
+  re-walked the cluster chain from the file's start every call (O(n²) over a
+  chunked read), so a single late-offset request issued enough FAT reads to run
+  past the *runnable*-wedge threshold (`WEDGE_TICKS`, 2.56s) — which no ping
+  touches — and fsd was restarted mid-read. Fix: a `read_cursor` on
+  `fat32::Fs` that resumes the walk on a forward read instead of re-walking, so
+  each bulk request is O(chunk), fsd returns to `msg_recv` between chunks (the
+  netd "drain between small bursts" pattern, reached structurally), and the
+  read is O(n). Verified on QEMU: byte-exact reads, zero aborts, and a 1 MiB
+  read 0.99s-with vs. did-not-finish-in-120s-without. The Mode A retry was
+  deliberately left alone (hardware-only, unverifiable on QEMU, and the FAT-read
+  reduction already shrinks its exposure). Remaining, tracked below: the
+  read-side re-walk in a large `cp` (interleaved writes invalidate the cursor)
+  and the same pattern in `exfat`/`ext2`. See the
+  [userland & pipelines postmortem](userland-and-pipelines-postmortem.md) and
+  `CHANGELOG.md`'s "Large-read fsd restart fixed" entry.
 - **GPT is parsed but not validated on read.** `fsd`'s `partition::discover`
   trusts the "EFI PART" signature; it doesn't check the GPT header/entry-array
   CRC32s or fall back to the backup GPT on a corrupt primary. Fine for the

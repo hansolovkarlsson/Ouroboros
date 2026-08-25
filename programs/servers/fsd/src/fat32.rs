@@ -225,6 +225,42 @@ pub struct Fs {
     /// copies (`fat_start_lba + i * fat_size_32`) and to bound
     /// [`find_free_cluster`](Self::find_free_cluster)'s scan.
     fat_size_32: u32,
+    /// Sequential-read cursor - the fix for the "large-read fsd restart"
+    /// bug. [`read_at`](Self::read_at)'s seek walks the file's cluster
+    /// chain from its *start* to reach `offset`, and [`next_cluster`] reads
+    /// a FAT sector per step - so a client reading a multi-MB file in
+    /// [`SAFECOPY_MAX`]-sized chunks re-walks an ever-longer prefix each
+    /// call: O(n^2) disk reads overall, and a single late-offset request
+    /// issuing hundreds/thousands of FAT reads in one uninterrupted
+    /// `handle()` call. On slow real hardware that one request runs past
+    /// the supervisor's runnable-wedge threshold (`WEDGE_TICKS`, ~2.56s)
+    /// and fsd is restarted mid-read, dropping the mount. Caching where the
+    /// last walk landed lets a *forward* read resume from there instead:
+    /// each request becomes O(chunk), fsd returns to `msg_recv` between
+    /// chunks (resetting the wedge counter and servicing the health-ping -
+    /// the netd "small bursts, drain between each" pattern, reached
+    /// structurally), and the large read is O(n). Only the chain *position*
+    /// is cached, never data - reads still fetch every sector fresh - and
+    /// it is invalidated on any FAT mutation ([`write_fat_entry`]), so a
+    /// read can never follow a stale chain. `None` = no valid cursor.
+    read_cursor: Option<ReadCursor>,
+}
+
+/// A remembered point in a file's cluster chain for [`Fs::read_at`]'s
+/// sequential-read fast path - see [`Fs::read_cursor`].
+#[derive(Clone, Copy)]
+struct ReadCursor {
+    /// The file's start cluster - identifies which file this cursor is for.
+    /// A read whose file has a different start cluster ignores the cursor.
+    file_cluster: u32,
+    /// A cluster in that file's chain reachable by walking forward from the
+    /// file's start, and...
+    cluster: u32,
+    /// ...the file-byte position of that cluster's first byte (an exact
+    /// multiple of the cluster size). The invariant the fast path relies
+    /// on: `cluster` is the chain cluster covering `[cluster_pos,
+    /// cluster_pos + cluster_bytes)`.
+    cluster_pos: usize,
 }
 
 impl Fs {
@@ -274,6 +310,7 @@ impl Fs {
             root_cluster,
             num_fats,
             fat_size_32,
+            read_cursor: None,
         })
     }
 
@@ -428,6 +465,14 @@ impl Fs {
     /// 4 reserved bits, masking `value` to the low 28 - same split
     /// `next_cluster` already reads.
     fn write_fat_entry(&mut self, cluster: u32, value: u32) -> Result<(), Error> {
+        // Any change to the FAT changes chain topology, so a cached
+        // read cursor (a chain position) may no longer be valid - drop it.
+        // This is the single choke point for *all* chain mutation
+        // (allocation, free, extend), so invalidating here alone is
+        // sufficient; an in-place data overwrite that leaves the chain
+        // untouched never reaches this method and correctly keeps the
+        // cursor. See `Fs::read_cursor`.
+        self.read_cursor = None;
         let fat_byte_offset = cluster * 4;
         let sector_offset = fat_byte_offset / SECTOR_SIZE as u32;
         let offset = (fat_byte_offset % SECTOR_SIZE as u32) as usize;
@@ -740,9 +785,20 @@ impl Fs {
         let offset = offset as usize;
 
         let cluster_bytes = self.sectors_per_cluster as usize * SECTOR_SIZE;
-        let mut cluster = file.cluster;
-        // Byte position (within the file) of `cluster`'s first byte.
-        let mut cluster_pos = 0usize;
+        // Seek start: the file's first cluster, unless a cached cursor from
+        // an earlier read of *this same file* already sits at or before
+        // `offset` - then resume the walk from there (the sequential-read
+        // fast path; see `read_cursor`). The cursor's invariant guarantees
+        // its `cluster` covers `[cluster_pos, cluster_pos + cluster_bytes)`
+        // of the current chain, so resuming is exactly equivalent to
+        // walking from the start, only shorter.
+        let (mut cluster, mut cluster_pos) = match self.read_cursor {
+            Some(c) if c.file_cluster == file.cluster && c.cluster_pos <= offset => {
+                (c.cluster, c.cluster_pos)
+            }
+            // Byte position (within the file) of `cluster`'s first byte.
+            _ => (file.cluster, 0usize),
+        };
         while cluster_pos + cluster_bytes <= offset {
             match self.next_cluster(cluster)? {
                 Some(next) => cluster = next,
@@ -781,6 +837,17 @@ impl Fs {
             }
             cluster_pos += cluster_bytes;
         }
+        // Remember where this read ended so the next sequential read resumes
+        // here instead of re-walking from the file's start. `cluster` /
+        // `cluster_pos` still satisfy the cursor invariant (`cluster_pos` was
+        // only ever advanced in lock-step with `next_cluster`, and every exit
+        // path above leaves them paired). Only set on a real read; the early
+        // `Ok(0)` returns leave any existing cursor untouched.
+        self.read_cursor = Some(ReadCursor {
+            file_cluster: file.cluster,
+            cluster,
+            cluster_pos,
+        });
         Ok(written as u32)
     }
 
