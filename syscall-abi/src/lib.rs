@@ -628,6 +628,26 @@ pub const NET_FETCH_NO_ROUTE: u64 = 3;
 /// [`NETOP_FETCH`] reply: no NIC this boot.
 pub const NET_FETCH_NO_NIC: u64 = 4;
 
+/// [`NETOP_RMOUNT`] request (cluster Phase 1c - the remote-mount client):
+/// `[op: u64][ip:4][port:2 (LE)][pad:2][NP message...]`. The endpoint is at
+/// bytes 8..16 (an IPv4 and a big-... no, a *little*-endian TCP port, padded to
+/// a `u64`), and the rest of the message is a verbatim `ninep-abi` NP request
+/// (its 48-byte header + payload) that `netd` frames onto a TCP connection to
+/// `ip:port` (a machine's 9P export listener, [`ninep_abi::NP_NET_PORT`]), does
+/// one request/reply round trip against, and returns the reply body from. The
+/// reply to the client is the NP reply body verbatim - `[status: u64][data...]`,
+/// exactly the shape a local `MSG_CALL` to `fsd` returns - so the fs-helper
+/// layer routes a remote resolution here and is otherwise unchanged. Bounded by
+/// [`MSG_MAX_LEN`] both ways, so a remote read/write chunk is inline and small
+/// (the client loops, as `cat` already does). Gated by no capability beyond the
+/// [`NET_TASK`] send the shell already delegates at spawn.
+pub const NETOP_RMOUNT: u64 = 4;
+
+/// [`NETOP_RMOUNT`] byte offset of the endpoint (IPv4 + port) in the request.
+pub const NETOP_RMOUNT_ENDPOINT: usize = 8;
+/// [`NETOP_RMOUNT`] byte offset where the embedded NP message begins.
+pub const NETOP_RMOUNT_MSG: usize = 16;
+
 /// [`CON_INFO`] field: the backend kind ([`CON_KIND_*`]).
 pub const CON_INFO_KIND: u64 = 0;
 /// [`CON_INFO`] field: framebuffer columns (character cells wide).

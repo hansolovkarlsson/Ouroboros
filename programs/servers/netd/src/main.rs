@@ -37,10 +37,25 @@ const DNS_SRC_PORT: u16 = 0x8000;
 const DNS_ID: u16 = 0x4f42; // "OB"
 /// QEMU user-net's gateway - the next hop for any off-subnet target.
 const GATEWAY: [u8; 4] = [10, 0, 2, 2];
-/// Our fixed ephemeral TCP source port and initial sequence number (one
-/// connection at a time, so fixed values suffice).
+/// Base of our ephemeral TCP source-port range and the base initial sequence
+/// number. A single client connection is live at a time, but the remote-mount
+/// client (cluster Phase 1c) opens many *back to back* - one per verb - and a
+/// reused (port, ISN) 4-tuple collides with the peer's lingering TIME_WAIT
+/// socket (the SYN is dropped until it expires; observed as intermittent stalls).
+/// So `next_src_port` rotates the source port per connection, giving each a
+/// fresh 4-tuple. `TCP_SRC_PORT` remains the base of that range.
 const TCP_SRC_PORT: u16 = 0xc000;
 const TCP_ISN: u32 = 0x0000_1000;
+
+/// Pick an ephemeral source port (0xc000..0xf000) that varies per connection, so
+/// back-to-back client connections use distinct 4-tuples and never land on the
+/// peer's lingering TIME_WAIT socket. Derived from the microsecond clock rather
+/// than a counter (a zero-init `static` would need `.bss`, which the userland
+/// loader doesn't support); successive `tcp_get`s are a full round trip apart, so
+/// the clock has always advanced between them.
+fn next_src_port() -> u16 {
+    TCP_SRC_PORT.wrapping_add((now_us() % 0x3000) as u16)
+}
 /// TCP flag bits.
 const TCP_FIN: u8 = 0x01;
 const TCP_SYN: u8 = 0x02;
@@ -249,6 +264,14 @@ fn handle_client(packed_mac: u64, sender: u64, buf: &[u8], len: usize) {
             host[..hlen].copy_from_slice(&buf[8..8 + hlen]);
             let mut r = [0u8; syscall_abi::MSG_MAX_LEN as usize];
             let rlen = handle_fetch(packed_mac, &host[..hlen], &mut r);
+            reply(sender, &r[..rlen]);
+        }
+        syscall_abi::NETOP_RMOUNT => {
+            // The remote-mount client (cluster Phase 1c): carry the embedded NP
+            // request over TCP to the endpoint's 9P export gateway and reply with
+            // the NP reply body (`[status:u64][data]`) verbatim.
+            let mut r = [0u8; syscall_abi::MSG_MAX_LEN as usize];
+            let rlen = handle_rmount(packed_mac, buf, len, &mut r);
             reply(sender, &r[..rlen]);
         }
         // Unknown op (including the supervisor's health-ping): any reply acks
@@ -513,7 +536,7 @@ fn handle_fetch(packed_mac: u64, host: &[u8], out: &mut [u8]) -> usize {
     };
 
     let mut resp = [0u8; 2048];
-    let (status, got) = tcp_get(&mac, &dst_mac, &ip, &req[..rlen], &mut resp);
+    let (status, got) = tcp_get(&mac, &dst_mac, &ip, 80, &req[..rlen], &mut resp);
     finish(out, status, &resp[..got])
 }
 
@@ -538,12 +561,17 @@ fn build_http_get(host: &[u8], out: &mut [u8]) -> Option<usize> {
 /// the response (in-order reassembly), clean FIN teardown. One connection,
 /// bounded by short timeouts (kept under the supervisor wedge threshold).
 /// Returns `(NET_FETCH_* status, bytes copied into resp)`.
-fn tcp_get(mac: &[u8; 6], dst_mac: &[u8; 6], target: &[u8; 4], request: &[u8], resp: &mut [u8]) -> (u64, usize) {
+fn tcp_get(mac: &[u8; 6], dst_mac: &[u8; 6], target: &[u8; 4], dst_port: u16, request: &[u8], resp: &mut [u8]) -> (u64, usize) {
     let mut frame = [0u8; 1600];
     let mut rx = [0u8; 1600];
+    // A fresh source port (and a derived ISN) per connection, so back-to-back
+    // remote-mount round trips never reuse a 4-tuple the peer still holds in
+    // TIME_WAIT (which silently drops the SYN - see next_src_port).
+    let src_port = next_src_port();
+    let isn = TCP_ISN ^ ((src_port as u32) << 8);
 
     // SYN.
-    let Some(n) = build_tcp(mac, dst_mac, target, TCP_ISN, 0, TCP_SYN, true, &[], &mut frame) else {
+    let Some(n) = build_tcp(mac, dst_mac, target, src_port, dst_port, isn, 0, TCP_SYN, true, &[], &mut frame) else {
         return (syscall_abi::NET_FETCH_TIMEOUT, 0);
     };
     if send(&frame[..n]).is_err() {
@@ -555,11 +583,11 @@ fn tcp_get(mac: &[u8; 6], dst_mac: &[u8; 6], target: &[u8; 4], request: &[u8], r
         let deadline = now() + 35;
         loop {
             if let Some(len) = recv(&mut rx) {
-                if let Some(s) = parse_tcp(&rx[..len], target) {
+                if let Some(s) = parse_tcp(&rx[..len], target, dst_port, src_port) {
                     if s.flags & TCP_RST != 0 {
                         return (syscall_abi::NET_FETCH_REFUSED, 0);
                     }
-                    if s.flags & (TCP_SYN | TCP_ACK) == (TCP_SYN | TCP_ACK) && s.ack == TCP_ISN + 1 {
+                    if s.flags & (TCP_SYN | TCP_ACK) == (TCP_SYN | TCP_ACK) && s.ack == isn + 1 {
                         break s.seq;
                     }
                 }
@@ -570,14 +598,14 @@ fn tcp_get(mac: &[u8; 6], dst_mac: &[u8; 6], target: &[u8; 4], request: &[u8], r
         }
     };
 
-    let snd_nxt = TCP_ISN + 1;
+    let snd_nxt = isn + 1;
     let mut rcv_nxt = their_isn.wrapping_add(1);
     // ACK the SYN-ACK, then send the request (PSH|ACK).
-    if let Some(n) = build_tcp(mac, dst_mac, target, snd_nxt, rcv_nxt, TCP_ACK, false, &[], &mut frame) {
+    if let Some(n) = build_tcp(mac, dst_mac, target, src_port, dst_port, snd_nxt, rcv_nxt, TCP_ACK, false, &[], &mut frame) {
         let _ = send(&frame[..n]);
     }
     let mut snd_nxt = snd_nxt;
-    if let Some(n) = build_tcp(mac, dst_mac, target, snd_nxt, rcv_nxt, TCP_PSH | TCP_ACK, false, request, &mut frame) {
+    if let Some(n) = build_tcp(mac, dst_mac, target, src_port, dst_port, snd_nxt, rcv_nxt, TCP_PSH | TCP_ACK, false, request, &mut frame) {
         let _ = send(&frame[..n]);
         snd_nxt = snd_nxt.wrapping_add(request.len() as u32);
     }
@@ -588,7 +616,7 @@ fn tcp_get(mac: &[u8; 6], dst_mac: &[u8; 6], target: &[u8; 4], request: &[u8], r
     let mut deadline = now() + 50;
     loop {
         if let Some(len) = recv(&mut rx) {
-            if let Some(s) = parse_tcp(&rx[..len], target) {
+            if let Some(s) = parse_tcp(&rx[..len], target, dst_port, src_port) {
                 if s.flags & TCP_RST != 0 {
                     break;
                 }
@@ -597,7 +625,7 @@ fn tcp_get(mac: &[u8; 6], dst_mac: &[u8; 6], target: &[u8; 4], request: &[u8], r
                     resp[got..got + take].copy_from_slice(&rx[s.data_off..s.data_off + take]);
                     got += take;
                     rcv_nxt = rcv_nxt.wrapping_add(s.data_len as u32);
-                    if let Some(n) = build_tcp(mac, dst_mac, target, snd_nxt, rcv_nxt, TCP_ACK, false, &[], &mut frame) {
+                    if let Some(n) = build_tcp(mac, dst_mac, target, src_port, dst_port, snd_nxt, rcv_nxt, TCP_ACK, false, &[], &mut frame) {
                         let _ = send(&frame[..n]);
                     }
                     deadline = now() + 50; // extend while making progress
@@ -605,10 +633,10 @@ fn tcp_get(mac: &[u8; 6], dst_mac: &[u8; 6], target: &[u8; 4], request: &[u8], r
                 if s.flags & TCP_FIN != 0 {
                     rcv_nxt = rcv_nxt.wrapping_add(1); // FIN consumes one sequence number
                     // ACK the FIN, then send our own FIN to close cleanly.
-                    if let Some(n) = build_tcp(mac, dst_mac, target, snd_nxt, rcv_nxt, TCP_ACK, false, &[], &mut frame) {
+                    if let Some(n) = build_tcp(mac, dst_mac, target, src_port, dst_port, snd_nxt, rcv_nxt, TCP_ACK, false, &[], &mut frame) {
                         let _ = send(&frame[..n]);
                     }
-                    if let Some(n) = build_tcp(mac, dst_mac, target, snd_nxt, rcv_nxt, TCP_FIN | TCP_ACK, false, &[], &mut frame) {
+                    if let Some(n) = build_tcp(mac, dst_mac, target, src_port, dst_port, snd_nxt, rcv_nxt, TCP_FIN | TCP_ACK, false, &[], &mut frame) {
                         let _ = send(&frame[..n]);
                     }
                     fin = true;
@@ -626,6 +654,58 @@ fn tcp_get(mac: &[u8; 6], dst_mac: &[u8; 6], target: &[u8; 4], request: &[u8], r
     } else {
         (syscall_abi::NET_FETCH_TIMEOUT, 0)
     }
+}
+
+/// Serve one `NETOP_RMOUNT` client request (cluster Phase 1c): carry the
+/// embedded `ninep-abi` NP request over a TCP round trip to a remote machine's
+/// 9P export gateway and hand the client the NP reply body verbatim.
+///
+/// `buf[..len]` is `[op:u64][ip:4][port:2 LE][pad:2][NP message...]`. We frame
+/// the NP message with the 4-byte length prefix the export listener expects,
+/// open a client connection to `ip:port` (via [`tcp_get`], which sends the
+/// request and reads the reply until the peer's FIN - the export does one
+/// request/reply then closes, like HTTP `Connection: close`), strip the reply's
+/// length prefix, and copy `[status:u64][data]` into `out`. On any transport
+/// failure (no NIC, no route, timeout, refused) the reply is a bare
+/// [`syscall_abi::NO_FS`] status - a remote mount that can't be reached fails
+/// *cleanly* (the roadmap's stated Phase 1 posture), never hangs or corrupts.
+/// Returns the number of bytes written to `out`.
+fn handle_rmount(packed_mac: u64, buf: &[u8], len: usize, out: &mut [u8]) -> usize {
+    let fail = |out: &mut [u8]| -> usize {
+        out[0..8].copy_from_slice(&syscall_abi::NO_FS.to_le_bytes());
+        8
+    };
+    if packed_mac == syscall_abi::NET_ERROR || len < syscall_abi::NETOP_RMOUNT_MSG {
+        return fail(out);
+    }
+    let ep = syscall_abi::NETOP_RMOUNT_ENDPOINT;
+    let ip = [buf[ep], buf[ep + 1], buf[ep + 2], buf[ep + 3]];
+    let port = u16::from_le_bytes([buf[ep + 4], buf[ep + 5]]);
+    let msg = &buf[syscall_abi::NETOP_RMOUNT_MSG..len];
+
+    // Frame the NP message: [u32 len (LE)][msg].
+    let mut req = [0u8; ninep_abi::NP_NET_LEN_PREFIX + ninep_abi::NP_NET_MAX];
+    let mlen = msg.len().min(ninep_abi::NP_NET_MAX);
+    req[0..4].copy_from_slice(&(mlen as u32).to_le_bytes());
+    req[4..4 + mlen].copy_from_slice(&msg[..mlen]);
+
+    let mac = unpack_mac(packed_mac);
+    let Some(dst_mac) = arp_resolve(&mac, &next_hop(&ip)) else {
+        return fail(out);
+    };
+
+    let mut resp = [0u8; ninep_abi::NP_NET_LEN_PREFIX + ninep_abi::NP_NET_MAX];
+    let (status, got) = tcp_get(&mac, &dst_mac, &ip, port, &req[..4 + mlen], &mut resp);
+    if status != syscall_abi::NET_FETCH_OK || got < ninep_abi::NP_NET_LEN_PREFIX + 8 {
+        return fail(out);
+    }
+    // Strip the reply's 4-byte length prefix; the body is `[status:u64][data]`.
+    let body_len = u32::from_le_bytes([resp[0], resp[1], resp[2], resp[3]]) as usize;
+    let body_end = (ninep_abi::NP_NET_LEN_PREFIX + body_len).min(got);
+    let body = &resp[ninep_abi::NP_NET_LEN_PREFIX..body_end];
+    let n = body.len().min(out.len());
+    out[..n].copy_from_slice(&body[..n]);
+    n
 }
 
 /// The state of the one in-flight server connection.
@@ -1789,6 +1869,8 @@ fn build_tcp(
     mac: &[u8; 6],
     dst_mac: &[u8; 6],
     dst_ip: &[u8; 4],
+    src_port: u16,
+    dst_port: u16,
     seq: u32,
     ack: u32,
     flags: u8,
@@ -1796,11 +1878,13 @@ fn build_tcp(
     payload: &[u8],
     out: &mut [u8],
 ) -> Option<usize> {
-    // Client direction: our ephemeral source port to the peer's port 80. We
-    // don't advertise SACK-permitted as a client (our fetch receiver is
+    // Client direction: our (rotating) ephemeral source port to the peer's port
+    // (80 for an HTTP fetch, NP_NET_PORT 564 for a 9P remote-mount round trip).
+    // We don't advertise SACK-permitted as a client (our receiver is
     // in-order-only; SACK is the server's sender-side win - see build_tcp_srv).
     build_tcp_generic(
-        mac, dst_mac, dst_ip, TCP_SRC_PORT, 80, seq, ack, flags, with_mss, false, payload, out,
+        mac, dst_mac, dst_ip, src_port, dst_port, seq, ack, flags, with_mss, false, payload,
+        out,
     )
 }
 
@@ -1905,10 +1989,12 @@ fn build_tcp_generic(
     Some(total)
 }
 
-/// Parse a received frame as a TCP segment from `peer`:80 to us. Uses the IP
-/// total-length field to find the true end of the TCP data (ignoring any
-/// Ethernet padding).
-fn parse_tcp(frame: &[u8], peer: &[u8; 4]) -> Option<TcpSeg> {
+/// Parse a received frame as a TCP segment from `peer`:`peer_port` to us. Uses
+/// the IP total-length field to find the true end of the TCP data (ignoring any
+/// Ethernet padding). `peer_port` is the remote port this client connected to -
+/// 80 for an HTTP fetch, `NP_NET_PORT` 564 (or whatever `mount -r` named) for a
+/// 9P remote-mount round trip - so a reply is only accepted from that port.
+fn parse_tcp(frame: &[u8], peer: &[u8; 4], peer_port: u16, our_port: u16) -> Option<TcpSeg> {
     if frame.len() < 34 || frame[12] != 0x08 || frame[13] != 0x00 {
         return None; // not IPv4
     }
@@ -1920,8 +2006,8 @@ fn parse_tcp(frame: &[u8], peer: &[u8; 4]) -> Option<TcpSeg> {
     if frame.len() < t + 20 {
         return None;
     }
-    if u16be(frame, t) != 80 || u16be(frame, t + 2) != TCP_SRC_PORT {
-        return None; // wrong ports
+    if u16be(frame, t) != peer_port || u16be(frame, t + 2) != our_port {
+        return None; // wrong ports (peer's source, and our rotating ephemeral)
     }
     let data_off = t + ((frame[t + 12] >> 4) as usize) * 4;
     let ip_total = u16be(frame, 16) as usize;

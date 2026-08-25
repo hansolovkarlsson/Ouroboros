@@ -7,6 +7,55 @@ for the forward plan see [`roadmap.md`](roadmap.md).
 
 ---
 
+## 2026-08-25 (cont.) — Phase 1c: a machine reads another's disk over TCP
+
+Picked up where the cluster day left off: the export gateway (1a) let the host
+read the *guest's* disk; today's work is the mirror — the **remote-mount
+client**, so a guest reads someone else's disk. The shape is the whole thesis
+made real: `mount -r 10.0.2.2:5641 /mnt/a`, then `ls /mnt/a` and `cat
+/mnt/a/HELLO.TXT` — and `ls`/`cat` are the *unchanged* `/bin` programs. Only the
+namespace resolver decides local-vs-remote; everything above it is untouched.
+
+The pieces: a `NETOP_RMOUNT(endpoint, NP-request)` op in netd that frames the
+verb onto a TCP round trip (reusing `tcp_get`) and returns the reply; a remote
+namespace binding (`tree` sentinel `0xFF`, target = `[ip][port][root]`); a
+resolver that now returns a `Resolved { server, tree, endpoint }` instead of a
+bare `(tree, path)`; the fs helpers routing a remote resolution through netd
+instead of fsd — in both `ulib` and the shell's duplicate layer; and the `mount
+-r` builtin. Bulk reads, which use grant/safecopy locally, fall back to inline
+512-byte chunks over the wire, so `cat` streams a remote file the same way it
+streams a local one.
+
+It compiled clean and then the trace did its job — twice. First, `mount -r`
+succeeded but every remote op returned "no filesystem": the pcap showed the
+guest sending SYN, the host replying SYN-ACK, and the guest never ACKing.
+`parse_tcp` — the client-side parser, shared with HTTP fetch — hardwired the
+peer's source port to **80**, so it dropped the SYN-ACK coming from 5641. One
+line. Then a subtler one: readdir worked but the *next* read failed, then a
+readdir worked again — intermittent. The pcap: some SYNs got no reply at all.
+The remote-mount client opens a fresh connection per verb, back to back, and the
+fixed ephemeral source port `0xc000` meant each new SYN reused a 4-tuple the
+peer still held in TIME_WAIT — silently dropped until it expired. Fixed with a
+rotating `next_src_port` (and a derived ISN). A `.bss` snag along the way: the
+obvious counter is a `static`, but a zero-init static needs `.bss` the userland
+loader doesn't support, so the port comes from the microsecond clock instead —
+successive connections are a round trip apart, so it's always advanced.
+
+And one more for the relocation-trap collection: `mount -r`'s `host:port` split
+first used `&hostport[..c]`, and str range-indexing pulls in a UTF-8
+char-boundary panic path whose formatting tables break the PIE link
+(`R_AARCH64_ABS64`). Byte slices + `from_utf8` fixed it — the same class the
+shell-and-filesystem postmortem is about, still lurking.
+
+Verified against a foreign observer, a ~120-line host python 9P *server*
+(mirroring the 1a client): the guest lists and cats its tree, including a
+multi-chunk `cat` over four round trips. Local ls/cat unchanged, the export
+gateway still serves, zero Data/Prefetch aborts. A small honest note on staging:
+the export shipped first (labeled 1a), so this is the design's 1a+1c together —
+the outbound half is no longer ahead of us. Next is 1d, the two-VM integration
+(a shared QEMU socket link + per-guest IPs), which turns "host as server" into
+"machine A ↔ machine B" and cuts **v0.6.0**.
+
 ## 2026-08-25 — the cluster day: Phase 0 done (v0.5.0), Phase 1 begun
 
 The biggest single day of the project. It started with a small fix and ended

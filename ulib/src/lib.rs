@@ -460,21 +460,43 @@ pub fn get_ns(buf: &mut [u8]) -> usize {
     (n as usize).min(buf.len())
 }
 
-/// Resolve an absolute client `path` through the namespace `ns` into
-/// `(tree, fs_path)`: the longest component-aligned prefix binding wins and its
-/// `target` replaces the matched prefix; the binding's `tree` selects the mount.
-/// No match - an empty namespace, or a relative path (bindings are absolute) -
-/// is identity to tree 0, so an unbound task is unchanged. `fs_path` bytes are
-/// written to `out`; returns `(tree, length)`. Bounded, scalar-only
-/// (relocation-safe, like [`normalize_path`]).
-fn resolve_ns(ns: &[u8], path: &str, out: &mut [u8]) -> (u64, usize) {
+/// A resolved destination for a client path: which server task services it,
+/// how to select the mount there, and the server-side path. The one structural
+/// change Phase 1c makes to the fs-helper layer - a resolution can now name a
+/// *remote* machine (via `netd`), not just a local `fsd` mount.
+struct Resolved {
+    /// The server this op goes to: [`syscall_abi::FSD_TASK`] for a local mount,
+    /// [`syscall_abi::NET_TASK`] for a remote one (reached over TCP by `netd`).
+    server: u64,
+    /// Local mount selector (the binding's `tree`); for a remote resolution this
+    /// is `0` - the request's `tree` field the remote export ignores (it serves
+    /// its own boot mount).
+    tree: u64,
+    /// `[ip:4][port:2 LE]` of the remote export listener; valid iff
+    /// `server == NET_TASK`.
+    endpoint: [u8; ninep_abi::NS_ENDPOINT_LEN],
+    /// Length of the resolved server-side path written to the caller's buffer.
+    len: usize,
+}
+
+/// Resolve an absolute client `path` through the namespace `ns`: the longest
+/// component-aligned prefix binding wins and its `target` replaces the matched
+/// prefix. A binding's `tree` selects a local mount, *except* the sentinel
+/// [`ninep_abi::NS_REMOTE_TREE`] (`0xFF`), whose `target` begins with a 6-byte
+/// endpoint (`[ip:4][port:2]`) and a remote-side root - such a match resolves to
+/// [`syscall_abi::NET_TASK`] (routed over TCP). No match - an empty namespace,
+/// or a relative path (bindings are absolute) - is identity to the local boot
+/// mount (tree 0), so an unbound task is unchanged. The server-side path bytes
+/// are written to `out`. Bounded, scalar-only (relocation-safe, like
+/// [`normalize_path`]).
+fn resolve_ns(ns: &[u8], path: &str, out: &mut [u8]) -> Resolved {
     let pbytes = path.as_bytes();
-    let mut best_tree = 0u64;
+    let mut best_tree = 0u8;
     let mut best_plen = 0usize; // matched prefix length; 0 = no match
     let mut best_target: &[u8] = &[];
     let mut i = 0usize;
     while i + 3 <= ns.len() {
-        let tree = ns[i] as u64;
+        let tree = ns[i];
         let plen = ns[i + 1] as usize;
         let tlen = ns[i + 2] as usize;
         let pstart = i + 3;
@@ -501,16 +523,27 @@ fn resolve_ns(ns: &[u8], path: &str, out: &mut [u8]) -> (u64, usize) {
     if best_plen == 0 {
         let n = pbytes.len().min(out.len());
         out[..n].copy_from_slice(&pbytes[..n]);
-        return (0, n);
+        return Resolved { server: syscall_abi::FSD_TASK, tree: 0, endpoint: [0; ninep_abi::NS_ENDPOINT_LEN], len: n };
     }
+    // A remote binding: [ip:4][port:2][remote-root]. The endpoint splits off the
+    // head; the remote root plays the same role a local target does below.
+    let remote = best_tree == ninep_abi::NS_REMOTE_TREE
+        && best_target.len() >= ninep_abi::NS_ENDPOINT_LEN;
+    let mut endpoint = [0u8; ninep_abi::NS_ENDPOINT_LEN];
+    let target = if remote {
+        endpoint.copy_from_slice(&best_target[..ninep_abi::NS_ENDPOINT_LEN]);
+        &best_target[ninep_abi::NS_ENDPOINT_LEN..]
+    } else {
+        best_target
+    };
     // target ++ (path after the matched prefix). `after` is "" or starts '/'.
     let after = &pbytes[best_plen..];
     let mut n = 0usize;
     // Skip writing a "/" target when there's an `after` (avoids a leading "//").
-    let target_is_root = best_target == b"/";
+    let target_is_root = target == b"/";
     if !(target_is_root && !after.is_empty()) {
-        let t = best_target.len().min(out.len());
-        out[..t].copy_from_slice(&best_target[..t]);
+        let t = target.len().min(out.len());
+        out[..t].copy_from_slice(&target[..t]);
         n = t;
     }
     let a = after.len().min(out.len() - n);
@@ -520,29 +553,112 @@ fn resolve_ns(ns: &[u8], path: &str, out: &mut [u8]) -> (u64, usize) {
         out[0] = b'/'; // target "/" with empty after
         n = 1;
     }
-    (best_tree, n)
+    if remote {
+        Resolved { server: syscall_abi::NET_TASK, tree: 0, endpoint, len: n }
+    } else {
+        Resolved { server: syscall_abi::FSD_TASK, tree: best_tree as u64, endpoint, len: n }
+    }
 }
 
-/// Resolve `path` through this task's namespace into `(tree, fs_path)`, writing
-/// fs_path to `out`. Reads the namespace via `GET_NS` each call - cheap (the
-/// blob is small and every fs op is already an IPC round trip). An empty
-/// namespace yields `(0, path)` unchanged.
-fn mount_resolve(path: &str, out: &mut [u8]) -> (u64, usize) {
+/// Resolve `path` through this task's namespace, writing the server-side path to
+/// `out`. Reads the namespace via `GET_NS` each call - cheap (the blob is small
+/// and every fs op is already an IPC round trip). An empty namespace yields the
+/// local boot mount unchanged.
+fn mount_resolve(path: &str, out: &mut [u8]) -> Resolved {
     let mut ns = [0u8; syscall_abi::NS_MAX as usize];
     let nlen = get_ns(&mut ns);
     resolve_ns(&ns[..nlen], path, out)
+}
+
+/// Route one verb to its resolved destination: a local mount goes straight to
+/// `fsd` ([`np_call`]); a remote mount is wrapped in an `NETOP_RMOUNT` request
+/// to `netd` ([`np_remote`]), which carries it over TCP. The reply shape
+/// (status u64 + inline result) is identical either way, so callers are
+/// unchanged. Bulk (grant/safecopy) ops handle the remote case themselves (no
+/// grant crosses a machine) - see [`fs_read_bulk`].
+fn np_dispatch(r: &Resolved, verb: u64, params: [u64; 4], payload1: &[u8], payload2: &[u8], result: &mut [u8]) -> u64 {
+    if r.server == syscall_abi::NET_TASK {
+        np_remote(&r.endpoint, verb, params, payload1, payload2, result)
+    } else {
+        np_call(verb, r.tree, params, payload1, payload2, result)
+    }
+}
+
+/// One remote verb round trip: build an `NETOP_RMOUNT` request
+/// (`[op][ip:4][port:2][pad:2][NP message]`) to `netd`, which frames the NP
+/// message onto a TCP connection to `endpoint`'s 9P export gateway and returns
+/// the NP reply body. The embedded NP request's `tree` is `0` (the remote export
+/// serves its own boot mount). The reply is `[status:u64][data]`, decoded like
+/// [`np_call`]'s. Bounded by [`syscall_abi::MSG_MAX_LEN`] both ways.
+fn np_remote(endpoint: &[u8; ninep_abi::NS_ENDPOINT_LEN], verb: u64, params: [u64; 4], payload1: &[u8], payload2: &[u8], result: &mut [u8]) -> u64 {
+    const HDR: usize = ninep_abi::NP_REQ_PAYLOAD as usize; // 48
+    let base = syscall_abi::NETOP_RMOUNT_MSG; // 16
+    let mut req = [0u8; syscall_abi::MSG_MAX_LEN as usize];
+    req[0..8].copy_from_slice(&syscall_abi::NETOP_RMOUNT.to_le_bytes());
+    // Endpoint at NETOP_RMOUNT_ENDPOINT (8..14); bytes 14..16 stay zero pad.
+    req[syscall_abi::NETOP_RMOUNT_ENDPOINT..syscall_abi::NETOP_RMOUNT_ENDPOINT + ninep_abi::NS_ENDPOINT_LEN]
+        .copy_from_slice(&endpoint[..]);
+    // The NP message starts at `base`. Header: verb, tree(0), a0..a3.
+    req[base..base + 8].copy_from_slice(&verb.to_le_bytes());
+    req[base + 8..base + 16].copy_from_slice(&0u64.to_le_bytes());
+    let mut i = 0;
+    while i < 4 {
+        let at = base + 16 + i * 8;
+        req[at..at + 8].copy_from_slice(&params[i].to_le_bytes());
+        i += 1;
+    }
+    let p1_start = base + HDR;
+    let p1_end = p1_start + payload1.len();
+    let p2_end = p1_end + payload2.len();
+    if p2_end > req.len() {
+        return syscall_abi::FS_ERROR;
+    }
+    req[p1_start..p1_end].copy_from_slice(payload1);
+    req[p1_end..p2_end].copy_from_slice(payload2);
+
+    let mut reply = [0u8; syscall_abi::MSG_MAX_LEN as usize];
+    let packed = syscall4(
+        syscall_abi::MSG_CALL,
+        syscall_abi::NET_TASK,
+        req.as_ptr() as u64,
+        p2_end as u64,
+        reply.as_mut_ptr() as u64,
+    );
+    if packed == syscall_abi::TASK_ERR_NO_SUCH_TASK {
+        return syscall_abi::NO_FS;
+    }
+    if packed >= syscall_abi::FS_ERR_MIN {
+        return syscall_abi::FS_ERROR;
+    }
+    let reply_len = ((packed & 0xffff_ffff) as usize).min(reply.len());
+    if reply_len < 8 {
+        return syscall_abi::FS_ERROR;
+    }
+    let status = u64::from_le_bytes([
+        reply[0], reply[1], reply[2], reply[3], reply[4], reply[5], reply[6], reply[7],
+    ]);
+    let data_len = (reply_len - 8).min(result.len());
+    result[..data_len].copy_from_slice(&reply[8..8 + data_len]);
+    status
 }
 
 /// List `path`'s entries into `buf` as `name\n`/`name/\n`. Returns a byte
 /// count, [`NO_FS`], or a specific `FS_ERR_*` code.
 pub fn fs_list_dir(path: &str, buf: &mut [u8]) -> u64 {
     let mut fsp = [0u8; FSP_MAX];
-    let (tree, n) = mount_resolve(path, &mut fsp);
-    np_call(
+    let r = mount_resolve(path, &mut fsp);
+    // The remote export caps an inline listing at FS_DATA_MAX (512); the local
+    // path is bounded by the message reply either way.
+    let want = if r.server == syscall_abi::NET_TASK {
+        buf.len().min(ninep_abi::NP_REMOTE_CHUNK) as u64
+    } else {
+        buf.len() as u64
+    };
+    np_dispatch(
+        &r,
         ninep_abi::NP_READDIR,
-        tree,
-        [n as u64, buf.len() as u64, 0, 0],
-        &fsp[..n],
+        [r.len as u64, want, 0, 0],
+        &fsp[..r.len],
         &[],
         buf,
     )
@@ -563,8 +679,8 @@ pub fn fs_op_path(op: u64, path: &str) -> u64 {
         other => other,
     };
     let mut fsp = [0u8; FSP_MAX];
-    let (tree, n) = mount_resolve(path, &mut fsp);
-    np_call(verb, tree, [n as u64, 0, 0, 0], &fsp[..n], &[], &mut [])
+    let r = mount_resolve(path, &mut fsp);
+    np_dispatch(&r, verb, [r.len as u64, 0, 0, 0], &fsp[..r.len], &[], &mut [])
 }
 
 /// Read up to `buf.len()` bytes of `path` from `offset` into `buf` via the
@@ -572,7 +688,22 @@ pub fn fs_op_path(op: u64, path: &str) -> u64 {
 /// Returns the byte count (0 at EOF), [`NO_FS`], or an `FS_ERR_*` code.
 pub fn fs_read_bulk(path: &str, offset: u64, buf: &mut [u8]) -> u64 {
     let mut fsp = [0u8; FSP_MAX];
-    let (tree, n) = mount_resolve(path, &mut fsp);
+    let r = mount_resolve(path, &mut fsp);
+    // Remote: no grant crosses a machine boundary. The export delivers the bytes
+    // *inline* in the reply, so ask for a chunk that fits one message and copy
+    // the returned data straight into `buf` (the caller loops with a rising
+    // offset for a large file, exactly as it does locally).
+    if r.server == syscall_abi::NET_TASK {
+        let want = buf.len().min(ninep_abi::NP_REMOTE_CHUNK) as u64;
+        return np_remote(
+            &r.endpoint,
+            ninep_abi::NP_READ,
+            [r.len as u64, offset, want, 0],
+            &fsp[..r.len],
+            &[],
+            buf,
+        );
+    }
     let want = buf.len() as u64;
     let granted = syscall4(
         syscall_abi::GRANT,
@@ -586,9 +717,9 @@ pub fn fs_read_bulk(path: &str, offset: u64, buf: &mut [u8]) -> u64 {
     }
     np_call(
         ninep_abi::NP_READ,
-        tree,
-        [n as u64, offset, want, 0],
-        &fsp[..n],
+        r.tree,
+        [r.len as u64, offset, want, 0],
+        &fsp[..r.len],
         &[],
         &mut [],
     )
@@ -600,12 +731,17 @@ pub fn fs_read_bulk(path: &str, offset: u64, buf: &mut [u8]) -> u64 {
 /// existence/kind probe (a directory returns `FS_ERR_NOT_A_FILE`).
 pub fn fs_read_file(path: &str, buf: &mut [u8]) -> u64 {
     let mut fsp = [0u8; FSP_MAX];
-    let (tree, n) = mount_resolve(path, &mut fsp);
-    np_call(
+    let r = mount_resolve(path, &mut fsp);
+    let want = if r.server == syscall_abi::NET_TASK {
+        buf.len().min(ninep_abi::NP_REMOTE_CHUNK) as u64
+    } else {
+        buf.len() as u64
+    };
+    np_dispatch(
+        &r,
         ninep_abi::NP_READ_FILE,
-        tree,
-        [n as u64, buf.len() as u64, 0, 0],
-        &fsp[..n],
+        [r.len as u64, want, 0, 0],
+        &fsp[..r.len],
         &[],
         buf,
     )
@@ -617,7 +753,23 @@ pub fn fs_read_file(path: &str, buf: &mut [u8]) -> u64 {
 /// skips the grant.
 pub fn fs_write_bulk(path: &str, data: &[u8]) -> u64 {
     let mut fsp = [0u8; FSP_MAX];
-    let (tree, n) = mount_resolve(path, &mut fsp);
+    let r = mount_resolve(path, &mut fsp);
+    // Remote: no grant crosses a machine, so the data rides inline in the
+    // request (bounded by NP_REMOTE_CHUNK). The Phase 1 export is read-only, so
+    // this returns FS_ERROR today; the shape is ready for a writable export.
+    if r.server == syscall_abi::NET_TASK {
+        if data.len() > ninep_abi::NP_REMOTE_CHUNK {
+            return syscall_abi::FS_ERROR;
+        }
+        return np_remote(
+            &r.endpoint,
+            ninep_abi::NP_WRITE,
+            [r.len as u64, data.len() as u64, 0, 0],
+            &fsp[..r.len],
+            data,
+            &mut [],
+        );
+    }
     if !data.is_empty() {
         let granted = syscall4(
             syscall_abi::GRANT,
@@ -632,9 +784,9 @@ pub fn fs_write_bulk(path: &str, data: &[u8]) -> u64 {
     }
     np_call(
         ninep_abi::NP_WRITE,
-        tree,
-        [n as u64, data.len() as u64, 0, 0],
-        &fsp[..n],
+        r.tree,
+        [r.len as u64, data.len() as u64, 0, 0],
+        &fsp[..r.len],
         &[],
         &mut [],
     )
@@ -651,7 +803,20 @@ pub fn fs_write_at(path: &str, offset: u64, data: &[u8]) -> u64 {
         return 0;
     }
     let mut fsp = [0u8; FSP_MAX];
-    let (tree, n) = mount_resolve(path, &mut fsp);
+    let r = mount_resolve(path, &mut fsp);
+    if r.server == syscall_abi::NET_TASK {
+        if data.len() > ninep_abi::NP_REMOTE_CHUNK {
+            return syscall_abi::FS_ERROR;
+        }
+        return np_remote(
+            &r.endpoint,
+            ninep_abi::NP_WRITE_AT,
+            [r.len as u64, offset, data.len() as u64, 0],
+            &fsp[..r.len],
+            data,
+            &mut [],
+        );
+    }
     let granted = syscall4(
         syscall_abi::GRANT,
         syscall_abi::FSD_TASK,
@@ -664,9 +829,9 @@ pub fn fs_write_at(path: &str, offset: u64, data: &[u8]) -> u64 {
     }
     np_call(
         ninep_abi::NP_WRITE_AT,
-        tree,
-        [n as u64, offset, data.len() as u64, 0],
-        &fsp[..n],
+        r.tree,
+        [r.len as u64, offset, data.len() as u64, 0],
+        &fsp[..r.len],
         &[],
         &mut [],
     )
@@ -680,14 +845,14 @@ pub fn fs_mv(src: &str, dst: &str) -> u64 {
     // tree 0, so a cross-tree move can't arise yet (a later phase concern).
     let mut fsrc = [0u8; FSP_MAX];
     let mut fdst = [0u8; FSP_MAX];
-    let (tree, sn) = mount_resolve(src, &mut fsrc);
-    let (_dtree, dn) = mount_resolve(dst, &mut fdst);
-    np_call(
+    let rs = mount_resolve(src, &mut fsrc);
+    let rd = mount_resolve(dst, &mut fdst);
+    np_dispatch(
+        &rs,
         ninep_abi::NP_MV,
-        tree,
-        [sn as u64, dn as u64, 0, 0],
-        &fsrc[..sn],
-        &fdst[..dn],
+        [rs.len as u64, rd.len as u64, 0, 0],
+        &fsrc[..rs.len],
+        &fdst[..rd.len],
         &mut [],
     )
 }

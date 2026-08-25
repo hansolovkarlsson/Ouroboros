@@ -123,3 +123,23 @@ pub const NP_NET_LEN_PREFIX: usize = 4;
 /// (`SAFECOPY_MAX`) plus the header, and to fit comfortably in a couple of TCP
 /// segments. A large file streams a chunk per round trip, as `cat` does locally.
 pub const NP_NET_MAX: usize = 48 + 2048;
+
+/// The namespace `tree` sentinel marking a **remote** binding (cluster Phase 1c).
+/// A local binding's `tree` selects a mount *within* `fsd` (0 = the boot mount);
+/// `0xFF` instead means the binding's `target` begins with a 6-byte endpoint
+/// (`[ip:4][port:2 LE]`) followed by the remote-side root path, and a resolution
+/// against it routes through `netd`'s [`crate::NP_NET_PORT`] export gateway
+/// (via `NETOP_RMOUNT`) rather than the local `fsd`. Chosen at the top of the
+/// `u8` tree space, clear of every real (small) local tree id.
+pub const NS_REMOTE_TREE: u8 = 0xFF;
+
+/// Bytes of endpoint (`[ip:4][port:2 LE]`) at the head of a remote binding's
+/// `target`; the remote-side root path follows.
+pub const NS_ENDPOINT_LEN: usize = 6;
+
+/// The most inline data a remote read/write chunk carries in one `NETOP_RMOUNT`
+/// round trip. The NP reply body (`[status:u64][data]`) rides back in a single
+/// `MSG_MAX_LEN` (768) message, so the data must leave room for the 8-byte
+/// status (and a little slack). A client loops with a rising offset for a large
+/// file, exactly as the local `cat` streams `SAFECOPY_MAX` chunks.
+pub const NP_REMOTE_CHUNK: usize = 512;

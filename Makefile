@@ -108,7 +108,7 @@ ifeq ($(PROFILE),release)
 CARGO_FLAGS += --release
 endif
 
-.PHONY: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin ping-bin resolve-bin fetch-bin wc-bin grep-bin head-bin esp run run-virtio-console run-usb-kbd run-usb-multi run-gicv3 image run-image run-image-9p image-gpt run-image-gpt image-exfat run-image-exfat image-ext2 run-image-ext2 parallels-hdd release test-parallels clean
+.PHONY: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin ping-bin resolve-bin fetch-bin wc-bin grep-bin head-bin esp run run-virtio-console run-usb-kbd run-usb-multi run-gicv3 image run-image run-image-9p run-image-9p-client image-gpt run-image-gpt image-exfat run-image-exfat image-ext2 run-image-ext2 parallels-hdd release test-parallels clean
 
 # Overridable by `make test-parallels VM_NAME=... CMDS=... BOOT_WAIT=...`.
 VM_NAME     ?= Ouroboros
@@ -655,6 +655,29 @@ run-image-9p: image
 		-drive file=$(ESP_DIR).img,format=raw,if=none,id=hd0 \
 		-device virtio-blk-device,drive=hd0 \
 		-netdev user,id=net0,hostfwd=tcp::5555-:80,hostfwd=tcp::5640-:564 \
+		-device virtio-net-device,netdev=net0 \
+		-object filter-dump,id=f0,netdev=net0,file=$(NET_PCAP) \
+		-global virtio-mmio.force-legacy=false \
+		-nographic
+
+# The remote-mount *client* side of cluster Phase 1 (step 1c): a NIC + a real
+# FAT32 disk (so /bin's ls/cat load) and nothing else - the guest reaches a
+# host-run 9P server at 10.0.2.2 over SLIRP with no hostfwd needed (SLIRP routes
+# guest->host automatically). On the host, first start the test server:
+#   python3 scripts/np9p_server.py 5641
+# then in the guest:
+#   mount -r 10.0.2.2:5641 /mnt/a
+#   ls /mnt/a ; cat /mnt/a/HELLO.TXT
+# reading the *host's* filesystem over TCP - the "aha", one VM, host as server.
+run-image-9p-client: image
+	qemu-system-aarch64 \
+		-machine virt \
+		-cpu cortex-a72 \
+		-m 512M \
+		-bios $(OVMF) \
+		-drive file=$(ESP_DIR).img,format=raw,if=none,id=hd0 \
+		-device virtio-blk-device,drive=hd0 \
+		-netdev user,id=net0 \
 		-device virtio-net-device,netdev=net0 \
 		-object filter-dump,id=f0,netdev=net0,file=$(NET_PCAP) \
 		-global virtio-mmio.force-legacy=false \

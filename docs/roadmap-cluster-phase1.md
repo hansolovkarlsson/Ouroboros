@@ -141,12 +141,18 @@ only needed for the final integration.
   *Ship:* **a machine exports its filesystem** — a host python 9P client (over a
   `hostfwd tcp::5640-:564`) runs `readdir`/`read` against the guest's disk and
   gets its real contents. One VM, host as client.
-- **1c — the remote-mount client.** The remote namespace binding + `resolve_ns`
-  returning `server_task` + fs helpers routing remote paths through
-  `NETOP_RMOUNT`; a shell **`mount -r <host:port> <path>`** builtin
-  (`ns_add` gains a remote entry). *Ship:* a guest **remote-mounts a host-run 9P
-  server** and `ls`/`cat`s it — proving the client routing end to end. One VM,
-  host as server.
+- **1c — the remote-mount client. ✅ DONE.** The remote namespace binding +
+  `resolve_ns` returning a `Resolved { server, tree, endpoint, len }` + fs helpers
+  routing remote paths through `NETOP_RMOUNT`; a shell **`mount -r <host:port>
+  <path>`** builtin (`ns_add` with the `NS_REMOTE_TREE` sentinel). *Shipped:* a
+  guest **remote-mounts a host-run 9P server** (`scripts/np9p_server.py`, `make
+  run-image-9p-client`) and `ls`/`cat`s it — readdir, nested read, and a
+  multi-chunk `cat` all verified, one VM, host as server. Two bugs the trace
+  found: `parse_tcp` hardwired the peer port to 80; a reused source-port/ISN
+  4-tuple collided with the peer's TIME_WAIT (fixed by a rotating `next_src_port`).
+  **Note the staging reorder:** the export gateway (design's 1b) shipped first as
+  "1a", so this step is the design's 1a (outbound client) + 1c (remote binding +
+  `mount -r`) together.
 - **1d — two-VM integration (the "aha").** A new Makefile target giving two
   guests a shared L2 link (QEMU `-netdev socket,listen=`/`connect=`; today only
   SLIRP exists, guest↔host only) and a **configurable guest IP** (netd hardcodes

@@ -1833,19 +1833,31 @@ fn get_ns(buf: &mut [u8]) -> usize {
     (n as usize).min(buf.len())
 }
 
-/// Resolve an absolute `path` through the namespace `ns` into `(tree, fs_path)`:
-/// longest component-aligned prefix `bind` wins, its target replacing the
-/// prefix; no match (empty namespace, or a relative path) is identity to tree 0.
-/// A duplicate of `ulib::resolve_ns` (the shell keeps its own fs layer);
-/// scalar-only, relocation-safe.
-fn resolve_ns(ns: &[u8], path: &str, out: &mut [u8]) -> (u64, usize) {
+/// A resolved destination for a client path: which server task services it, the
+/// mount selector there, and (for a remote mount) the endpoint. A duplicate of
+/// `ulib::Resolved` - the shell keeps its own fs layer.
+struct Resolved {
+    server: u64,
+    tree: u64,
+    endpoint: [u8; ninep_abi::NS_ENDPOINT_LEN],
+    len: usize,
+}
+
+/// Resolve an absolute `path` through the namespace `ns`: longest
+/// component-aligned prefix `bind` wins, its target replacing the prefix. A
+/// binding's `tree` selects a local mount, except the sentinel
+/// [`ninep_abi::NS_REMOTE_TREE`] (`0xFF`), whose target is `[ip:4][port:2]` +
+/// remote root and resolves to [`syscall_abi::NET_TASK`] (a remote mount over
+/// TCP - cluster Phase 1c). No match is identity to the local boot mount. A
+/// duplicate of `ulib::resolve_ns`; scalar-only, relocation-safe.
+fn resolve_ns(ns: &[u8], path: &str, out: &mut [u8]) -> Resolved {
     let pbytes = path.as_bytes();
-    let mut best_tree = 0u64;
+    let mut best_tree = 0u8;
     let mut best_plen = 0usize;
     let mut best_target: &[u8] = &[];
     let mut i = 0usize;
     while i + 3 <= ns.len() {
-        let tree = ns[i] as u64;
+        let tree = ns[i];
         let plen = ns[i + 1] as usize;
         let tlen = ns[i + 2] as usize;
         let pstart = i + 3;
@@ -1869,14 +1881,23 @@ fn resolve_ns(ns: &[u8], path: &str, out: &mut [u8]) -> (u64, usize) {
     if best_plen == 0 {
         let n = pbytes.len().min(out.len());
         out[..n].copy_from_slice(&pbytes[..n]);
-        return (0, n);
+        return Resolved { server: syscall_abi::FSD_TASK, tree: 0, endpoint: [0; ninep_abi::NS_ENDPOINT_LEN], len: n };
     }
+    let remote = best_tree == ninep_abi::NS_REMOTE_TREE
+        && best_target.len() >= ninep_abi::NS_ENDPOINT_LEN;
+    let mut endpoint = [0u8; ninep_abi::NS_ENDPOINT_LEN];
+    let target = if remote {
+        endpoint.copy_from_slice(&best_target[..ninep_abi::NS_ENDPOINT_LEN]);
+        &best_target[ninep_abi::NS_ENDPOINT_LEN..]
+    } else {
+        best_target
+    };
     let after = &pbytes[best_plen..];
     let mut n = 0usize;
-    let target_is_root = best_target == b"/";
+    let target_is_root = target == b"/";
     if !(target_is_root && !after.is_empty()) {
-        let t = best_target.len().min(out.len());
-        out[..t].copy_from_slice(&best_target[..t]);
+        let t = target.len().min(out.len());
+        out[..t].copy_from_slice(&target[..t]);
         n = t;
     }
     let a = after.len().min(out.len() - n);
@@ -1886,14 +1907,82 @@ fn resolve_ns(ns: &[u8], path: &str, out: &mut [u8]) -> (u64, usize) {
         out[0] = b'/';
         n = 1;
     }
-    (best_tree, n)
+    if remote {
+        Resolved { server: syscall_abi::NET_TASK, tree: 0, endpoint, len: n }
+    } else {
+        Resolved { server: syscall_abi::FSD_TASK, tree: best_tree as u64, endpoint, len: n }
+    }
 }
 
-/// Resolve `path` through the shell's namespace into `(tree, fs_path)`.
-fn mount_resolve(path: &str, out: &mut [u8]) -> (u64, usize) {
+/// Resolve `path` through the shell's namespace.
+fn mount_resolve(path: &str, out: &mut [u8]) -> Resolved {
     let mut ns = [0u8; syscall_abi::NS_MAX as usize];
     let nlen = get_ns(&mut ns);
     resolve_ns(&ns[..nlen], path, out)
+}
+
+/// Route a verb to its resolved destination - local `fsd` ([`np_call`]) or a
+/// remote mount over TCP via `netd` ([`np_remote`]). A duplicate of
+/// `ulib::np_dispatch`.
+fn np_dispatch(r: &Resolved, verb: u64, params: [u64; 4], payload1: &[u8], payload2: &[u8], result: &mut [u8]) -> u64 {
+    if r.server == syscall_abi::NET_TASK {
+        np_remote(&r.endpoint, verb, params, payload1, payload2, result)
+    } else {
+        np_call(verb, r.tree, params, payload1, payload2, result)
+    }
+}
+
+/// One remote verb round trip via `netd`'s `NETOP_RMOUNT`. A duplicate of
+/// `ulib::np_remote` (the shell keeps its own fs layer). The embedded NP
+/// request's `tree` is `0` (the remote export serves its own boot mount).
+fn np_remote(endpoint: &[u8; ninep_abi::NS_ENDPOINT_LEN], verb: u64, params: [u64; 4], payload1: &[u8], payload2: &[u8], result: &mut [u8]) -> u64 {
+    const HDR: usize = ninep_abi::NP_REQ_PAYLOAD as usize;
+    let base = syscall_abi::NETOP_RMOUNT_MSG;
+    let mut req = [0u8; syscall_abi::MSG_MAX_LEN as usize];
+    req[0..8].copy_from_slice(&syscall_abi::NETOP_RMOUNT.to_le_bytes());
+    req[syscall_abi::NETOP_RMOUNT_ENDPOINT..syscall_abi::NETOP_RMOUNT_ENDPOINT + ninep_abi::NS_ENDPOINT_LEN]
+        .copy_from_slice(&endpoint[..]);
+    req[base..base + 8].copy_from_slice(&verb.to_le_bytes());
+    req[base + 8..base + 16].copy_from_slice(&0u64.to_le_bytes());
+    let mut i = 0;
+    while i < 4 {
+        let at = base + 16 + i * 8;
+        req[at..at + 8].copy_from_slice(&params[i].to_le_bytes());
+        i += 1;
+    }
+    let p1_start = base + HDR;
+    let p1_end = p1_start + payload1.len();
+    let p2_end = p1_end + payload2.len();
+    if p2_end > req.len() {
+        return syscall_abi::FS_ERROR;
+    }
+    req[p1_start..p1_end].copy_from_slice(payload1);
+    req[p1_end..p2_end].copy_from_slice(payload2);
+
+    let mut reply = [0u8; syscall_abi::MSG_MAX_LEN as usize];
+    let packed = syscall4(
+        syscall_abi::MSG_CALL,
+        syscall_abi::NET_TASK,
+        req.as_ptr() as u64,
+        p2_end as u64,
+        reply.as_mut_ptr() as u64,
+    );
+    if packed == syscall_abi::TASK_ERR_NO_SUCH_TASK {
+        return NO_FS;
+    }
+    if packed >= FS_ERR_MIN {
+        return syscall_abi::FS_ERROR;
+    }
+    let reply_len = ((packed & 0xffff_ffff) as usize).min(reply.len());
+    if reply_len < 8 {
+        return syscall_abi::FS_ERROR;
+    }
+    let status = u64::from_le_bytes([
+        reply[0], reply[1], reply[2], reply[3], reply[4], reply[5], reply[6], reply[7],
+    ]);
+    let data_len = (reply_len - 8).min(result.len());
+    result[..data_len].copy_from_slice(&reply[8..8 + data_len]);
+    status
 }
 
 /// Append one binding `[tree][prefix_len][target_len][prefix][target]` to this
@@ -1921,12 +2010,17 @@ fn ns_add(prefix: &[u8], target: &[u8], tree: u8) -> bool {
 
 fn fs_list_dir(path: &str, buf: &mut [u8]) -> u64 {
     let mut fsp = [0u8; FSP_MAX];
-    let (tree, n) = mount_resolve(path, &mut fsp);
-    np_call(
+    let r = mount_resolve(path, &mut fsp);
+    let want = if r.server == syscall_abi::NET_TASK {
+        buf.len().min(ninep_abi::NP_REMOTE_CHUNK) as u64
+    } else {
+        buf.len() as u64
+    };
+    np_dispatch(
+        &r,
         ninep_abi::NP_READDIR,
-        tree,
-        [n as u64, buf.len() as u64, 0, 0],
-        &fsp[..n],
+        [r.len as u64, want, 0, 0],
+        &fsp[..r.len],
         &[],
         buf,
     )
@@ -1938,12 +2032,17 @@ fn fs_list_dir(path: &str, buf: &mut [u8]) -> u64 {
 /// contract as ever, same reasoning as [`fs_list_dir`].
 fn fs_read_file(path: &str, buf: &mut [u8]) -> u64 {
     let mut fsp = [0u8; FSP_MAX];
-    let (tree, n) = mount_resolve(path, &mut fsp);
-    np_call(
+    let r = mount_resolve(path, &mut fsp);
+    let want = if r.server == syscall_abi::NET_TASK {
+        buf.len().min(ninep_abi::NP_REMOTE_CHUNK) as u64
+    } else {
+        buf.len() as u64
+    };
+    np_dispatch(
+        &r,
         ninep_abi::NP_READ_FILE,
-        tree,
-        [n as u64, buf.len() as u64, 0, 0],
-        &fsp[..n],
+        [r.len as u64, want, 0, 0],
+        &fsp[..r.len],
         &[],
         buf,
     )
@@ -1955,12 +2054,17 @@ fn fs_read_file(path: &str, buf: &mut [u8]) -> u64 {
 /// over. Same error space as [`fs_read_file`].
 fn fs_read_at(path: &str, offset: u64, buf: &mut [u8]) -> u64 {
     let mut fsp = [0u8; FSP_MAX];
-    let (tree, n) = mount_resolve(path, &mut fsp);
-    np_call(
+    let r = mount_resolve(path, &mut fsp);
+    let want = if r.server == syscall_abi::NET_TASK {
+        buf.len().min(ninep_abi::NP_REMOTE_CHUNK) as u64
+    } else {
+        buf.len() as u64
+    };
+    np_dispatch(
+        &r,
         ninep_abi::NP_READ_AT,
-        tree,
-        [n as u64, offset, buf.len() as u64, 0],
-        &fsp[..n],
+        [r.len as u64, offset, want, 0],
+        &fsp[..r.len],
         &[],
         buf,
     )
@@ -1976,7 +2080,20 @@ fn fs_read_at(path: &str, offset: u64, buf: &mut [u8]) -> u64 {
 /// Zero-length `data` is valid (truncate-to-empty) and skips the grant.
 fn fs_write_bulk(path: &str, data: &[u8]) -> u64 {
     let mut fsp = [0u8; FSP_MAX];
-    let (tree, n) = mount_resolve(path, &mut fsp);
+    let r = mount_resolve(path, &mut fsp);
+    if r.server == syscall_abi::NET_TASK {
+        if data.len() > ninep_abi::NP_REMOTE_CHUNK {
+            return syscall_abi::FS_ERROR;
+        }
+        return np_remote(
+            &r.endpoint,
+            ninep_abi::NP_WRITE,
+            [r.len as u64, data.len() as u64, 0, 0],
+            &fsp[..r.len],
+            data,
+            &mut [],
+        );
+    }
     if !data.is_empty() {
         let granted = syscall4(
             syscall_abi::GRANT,
@@ -1991,9 +2108,9 @@ fn fs_write_bulk(path: &str, data: &[u8]) -> u64 {
     }
     np_call(
         ninep_abi::NP_WRITE,
-        tree,
-        [n as u64, data.len() as u64, 0, 0],
-        &fsp[..n],
+        r.tree,
+        [r.len as u64, data.len() as u64, 0, 0],
+        &fsp[..r.len],
         &[],
         &mut [],
     )
@@ -2010,7 +2127,20 @@ fn fs_write_at(path: &str, offset: u64, data: &[u8]) -> u64 {
         return 0;
     }
     let mut fsp = [0u8; FSP_MAX];
-    let (tree, n) = mount_resolve(path, &mut fsp);
+    let r = mount_resolve(path, &mut fsp);
+    if r.server == syscall_abi::NET_TASK {
+        if data.len() > ninep_abi::NP_REMOTE_CHUNK {
+            return syscall_abi::FS_ERROR;
+        }
+        return np_remote(
+            &r.endpoint,
+            ninep_abi::NP_WRITE_AT,
+            [r.len as u64, offset, data.len() as u64, 0],
+            &fsp[..r.len],
+            data,
+            &mut [],
+        );
+    }
     let granted = syscall4(
         syscall_abi::GRANT,
         syscall_abi::FSD_TASK,
@@ -2023,9 +2153,9 @@ fn fs_write_at(path: &str, offset: u64, data: &[u8]) -> u64 {
     }
     np_call(
         ninep_abi::NP_WRITE_AT,
-        tree,
-        [n as u64, offset, data.len() as u64, 0],
-        &fsp[..n],
+        r.tree,
+        [r.len as u64, offset, data.len() as u64, 0],
+        &fsp[..r.len],
         &[],
         &mut [],
     )
@@ -2039,12 +2169,12 @@ fn fs_write_at(path: &str, offset: u64, data: &[u8]) -> u64 {
 /// Creates or fully overwrites the file at `path` with `data`.
 fn fs_write_file(path: &str, data: &[u8]) -> u64 {
     let mut fsp = [0u8; FSP_MAX];
-    let (tree, n) = mount_resolve(path, &mut fsp);
-    np_call(
+    let r = mount_resolve(path, &mut fsp);
+    np_dispatch(
+        &r,
         ninep_abi::NP_WRITE_FILE,
-        tree,
-        [n as u64, data.len() as u64, 0, 0],
-        &fsp[..n],
+        [r.len as u64, data.len() as u64, 0, 0],
+        &fsp[..r.len],
         data,
         &mut [],
     )
@@ -2182,7 +2312,129 @@ fn cmd_mount(line: &str, arg: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize, out: &
     match arg {
         "" => mount_info(out),
         "-a" => mount_disk(),
+        "-r" => cmd_mount_remote(line, cwd, cwd_len, out),
         _ => cmd_mount_at(line, cwd, cwd_len, out),
+    }
+}
+
+/// `mount -r <host:port> <path>` - remote-mount another machine's 9P export
+/// (cluster Phase 1c) into this shell's namespace at `<path>`. A path under
+/// `<path>` then resolves to a `NETOP_RMOUNT` round trip through `netd` to
+/// `host:port`, so `ls <path>` / `cat <path>/file` read the *remote* machine's
+/// disk over TCP - the pivot to distributed. The binding is per-task and
+/// inherited by spawned commands, exactly like every other namespace change.
+///
+/// **Trusted-LAN, no authentication** (the roadmap's stated Phase 1 posture):
+/// any peer that connects to an export is served; who-may-mount-what is a later
+/// hardening phase. `host` is a dotted-quad IPv4 (name resolution is a later
+/// nicety); `port` defaults to 564 ([`ninep_abi::NP_NET_PORT`]) if omitted.
+fn cmd_mount_remote(line: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize, out: &mut Output) {
+    let mut words = line.split_whitespace();
+    words.next(); // "mount"
+    words.next(); // "-r"
+    let (Some(hostport), Some(path_arg)) = (words.next(), words.next()) else {
+        out.put_line("mount: usage: mount -r <host:port> <path>  (trusted LAN, no auth)");
+        return;
+    };
+    // Split host[:port] on the ':' byte; default port NP_NET_PORT (564). Byte
+    // scanning (not `split`/`rsplit_once`) keeps the PIE relocation-safe - a
+    // char-pattern search emits an R_AARCH64_ABS64 against a core lookup table
+    // (see docs/processes.md).
+    let hb = hostport.as_bytes();
+    let colon = {
+        let mut idx = None;
+        let mut i = 0;
+        while i < hb.len() {
+            if hb[i] == b':' {
+                idx = Some(i);
+            }
+            i += 1;
+        }
+        idx
+    };
+    let (host, port) = match colon {
+        Some(c) => {
+            // Byte slices (not `&hostport[..c]`): str range-indexing inserts a
+            // UTF-8 char-boundary check whose panic path pulls in core's
+            // formatting tables and breaks the PIE link (R_AARCH64_ABS64) - the
+            // same relocation trap docs/processes.md warns about.
+            let h = core::str::from_utf8(&hb[..c]).unwrap_or("");
+            let p = core::str::from_utf8(&hb[c + 1..]).unwrap_or("");
+            match parse_u64(p) {
+                Some(pn) if pn <= u16::MAX as u64 => (h, pn as u16),
+                _ => {
+                    out.put_line("mount: bad port");
+                    return;
+                }
+            }
+        }
+        None => (hostport, ninep_abi::NP_NET_PORT),
+    };
+    let Some(ip) = parse_ipv4(host) else {
+        out.put_line("mount: <host> must be a dotted-quad IPv4 (e.g. 10.0.2.2)");
+        return;
+    };
+    let mut pbuf = [0u8; PATH_SIZE];
+    let Some(pl) = resolve_path(cwd_str(cwd, cwd_len), path_arg, &mut pbuf) else {
+        out.put_line("mount: path too long");
+        return;
+    };
+    let prefix = strip_trailing_slash(&pbuf[..pl]);
+    if prefix.len() < 2 || prefix[0] != b'/' {
+        out.put_line("mount: <path> must be a path below /");
+        return;
+    }
+    // Remote binding target: [ip:4][port:2 LE][remote-root]. The root is "/"
+    // (the remote export serves its whole boot mount).
+    let mut target = [0u8; ninep_abi::NS_ENDPOINT_LEN + 1];
+    target[0..4].copy_from_slice(&ip);
+    target[4..6].copy_from_slice(&port.to_le_bytes());
+    target[6] = b'/';
+    if ns_add(prefix, &target, ninep_abi::NS_REMOTE_TREE) {
+        out.put_str("remote-mounted (trusted, no auth) at ");
+        if let Ok(p) = core::str::from_utf8(prefix) {
+            out.put_line(p);
+        } else {
+            out.put_line("");
+        }
+    } else {
+        out.put_line("mount: path too long or namespace full");
+    }
+}
+
+/// Parse a dotted-quad IPv4 (`a.b.c.d`, each octet 0-255) - no names, no
+/// shorthand. Byte scanning on '.' (not `split`) keeps it PIE relocation-safe,
+/// like [`parse_u64`] and the host:port split above.
+fn parse_ipv4(s: &str) -> Option<[u8; 4]> {
+    let b = s.as_bytes();
+    let mut octets = [0u8; 4];
+    let mut n = 0;
+    let mut start = 0;
+    let mut i = 0;
+    loop {
+        let at_end = i == b.len();
+        if at_end || b[i] == b'.' {
+            if n >= 4 {
+                return None;
+            }
+            let part = core::str::from_utf8(&b[start..i]).ok()?;
+            let v = parse_u64(part)?;
+            if v > 255 {
+                return None;
+            }
+            octets[n] = v as u8;
+            n += 1;
+            start = i + 1;
+            if at_end {
+                break;
+            }
+        }
+        i += 1;
+    }
+    if n == 4 {
+        Some(octets)
+    } else {
+        None
     }
 }
 
@@ -2197,7 +2449,7 @@ fn cmd_mount_at(line: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize, out: &mut Outp
     let mut words = line.split_whitespace();
     words.next(); // "mount"
     let (Some(idx_arg), Some(path_arg)) = (words.next(), words.next()) else {
-        out.put_line("mount: usage: `mount` | `mount -a` | `mount <partition> <path>`");
+        out.put_line("mount: usage: `mount` | `mount -a` | `mount <partition> <path>` | `mount -r <host:port> <path>`");
         return;
     };
     let Some(index) = parse_u64(idx_arg) else {

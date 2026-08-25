@@ -7,6 +7,71 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/`; 
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## Cluster Phase 1, step 1c: the remote-mount client — a machine reads another's disk
+
+The other half of the pivot: a machine now **remote-mounts** another's 9P export
+and reads it. Where 1a made netd *serve* the filesystem over TCP, 1c makes it a
+*client* — `mount -r <host:port> <path>` binds a remote endpoint into the shell's
+namespace, and `ls <path>` / `cat <path>/file` then read the remote machine's
+disk. **The aha: `ls`/`cat` are unchanged** — the same `/bin` programs, over the
+same `ninep-abi` verbs; only the namespace resolution decides local-vs-remote.
+
+**netd's outbound primitive.** A new `NETOP_RMOUNT(endpoint, NP-request)` client
+op frames the NP message onto a TCP round trip to the endpoint's export gateway
+(reusing `tcp_get`, generalized off its HTTP specifics) and returns the reply
+body verbatim. A transport failure (no route, timeout, refused) replies a bare
+`NO_FS` — a remote mount that can't be reached fails *cleanly* (the roadmap's
+stated Phase 1 posture), never hangs or corrupts.
+
+**A remote namespace binding.** The binding's `tree` sentinel
+`NS_REMOTE_TREE` (`0xFF`) marks a remote entry whose `target` is
+`[ip:4][port:2][remote-root]`. Resolution now returns a small `Resolved
+{ server, tree, endpoint, len }` — a local match routes to `FSD_TASK` as before,
+a remote match to `NET_TASK` via `NETOP_RMOUNT`. Threaded through **both** the
+`ulib` fs layer and the shell's duplicate, plus the new `mount -r` builtin
+(dotted-quad IPv4, port defaults to 564). No capability change: a `/bin` command
+already holds `TO_FSD` statically *and* is delegated `TO_NET` at spawn. Bulk
+reads (grant/safecopy locally) fall back to **inline** chunks over the wire
+(`NP_REMOTE_CHUNK` 512, one message per round trip), so `cat` streams a remote
+file exactly as it streams a local one.
+
+**Two real bugs, both found by the packet trace, not the logs:**
+
+- **`parse_tcp` hardwired the peer's source port to 80.** The client-side parser
+  (shared with HTTP fetch) rejected the SYN-ACK from port 564/5641 outright, so
+  the handshake stalled. Fixed by threading the connected port through.
+- **A reused (source-port, ISN) 4-tuple collided with the peer's TIME_WAIT.**
+  The remote-mount client opens many connections *back to back* (one per verb),
+  and the fixed ephemeral port `0xc000` meant the second SYN landed on the peer's
+  lingering socket and was silently dropped — observed as *intermittent* stalls
+  (readdir would work, the next read wouldn't). Fixed with `next_src_port`, a
+  per-connection rotating source port (and a derived ISN); derived from the
+  microsecond clock, not a counter, since a zero-init `static` would need `.bss`
+  the userland loader doesn't support.
+
+One more relocation-class trap for the pile: `mount -r`'s host:port split first
+used `&hostport[..c]` — str range-indexing inserts a UTF-8 char-boundary check
+whose panic path pulls in core's formatting tables and breaks the PIE link
+(`R_AARCH64_ABS64`). Byte slices + `from_utf8` instead (docs/processes.md).
+
+**The staging reorder, recorded honestly:** the design (1a–1d) had 1a as the
+outbound remote-client and 1b as the export gateway; the build did the *export*
+first (labeled 1a, easier to verify with a host client), so this — the outbound
+client + remote binding + `mount -r` — is the design's 1a+1c together, and the
+outbound half is no longer ahead of us.
+
+Verified with a foreign observer — a host-side python 9P *server*
+(`scripts/np9p_server.py`) over `make run-image-9p-client` (the guest reaches the
+host at `10.0.2.2` over SLIRP, no hostfwd needed): a guest `mount -r
+10.0.2.2:5641 /mnt/a` then `ls /mnt/a` → `HELLO.TXT SUB/`, `cat
+/mnt/a/SUB/NOTE.TXT` → the nested file's bytes, and `cat /mnt/a/HELLO.TXT` → a
+~1960-byte file streamed correctly over four 512-byte round trips. Local `ls /` /
+`cat /EFI/ORBS/INIT.CFG` unchanged (regression pass), the export gateway still
+serves the host client (regression pass), and zero Data/Prefetch aborts across
+the run (only the expected HVC/IRQ/SVC). One VM, host as server — no second VM
+yet. Next: 1d (two-VM integration) → **v0.6.0**. See
+[`roadmap-cluster-phase1.md`](roadmap-cluster-phase1.md).
+
 ## Cluster Phase 1, step 1a: the 9P export gateway — a machine serves its fs over TCP
 
 The first step toward distributed: **netd exports the local `fsd` over TCP**, so
