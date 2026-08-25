@@ -47,11 +47,15 @@ pub extern "C" fn _start() -> ! {
 }
 
 fn main() -> ! {
-    let mut fs: Option<vfs::Filesystem> = None;
+    // The mount table (cluster Phase 0 multi-mount): several filesystems held at
+    // once, indexed by the ninep-abi `tree` selector. Tree 0 is the boot
+    // auto-mount; FSOP_MOUNT_AT fills the rest. Filesystem isn't Copy, so build
+    // the array of `None`s with a const block rather than `[None; N]`.
+    let mut mounts: [Option<vfs::Filesystem>; MAX_MOUNTS] = [const { None }; MAX_MOUNTS];
     // Auto-mount if the kernel already holds a device (QEMU's boot-time
     // virtio path; on Parallels the device arrives later, via the
     // `mount` command -> MOUNT syscall -> FSOP_MOUNT request).
-    try_mount(&mut fs);
+    try_mount(&mut mounts[0]);
     print("fsd: filesystem server ready\r\n");
 
     // v2 protocol: requests arrive fully self-contained (header +
@@ -72,7 +76,7 @@ fn main() -> ! {
         }
         let sender = packed >> 32;
         let len = ((packed & 0xffff_ffff) as usize).min(req.len());
-        let reply_len = handle(&mut fs, sender, &req[..len], &mut reply);
+        let reply_len = handle(&mut mounts, sender, &req[..len], &mut reply);
         // A full/unreachable sender mailbox drops the reply - the
         // caller's MSG_CALL stays blocked until Ctrl+C; nothing better
         // exists to do with an undeliverable reply.
@@ -237,6 +241,12 @@ const REQ_PAYLOAD: usize = syscall_abi::FS_REQ_PAYLOAD as usize;
 const REPLY_PAYLOAD: usize = syscall_abi::FS_REPLY_PAYLOAD as usize;
 const DATA_MAX: usize = syscall_abi::FS_DATA_MAX as usize;
 
+/// How many filesystems fsd can hold mounted at once (cluster Phase 0
+/// multi-mount), indexed by the ninep-abi `tree` selector. Tree 0 is the boot
+/// auto-mount; `FSOP_MOUNT_AT` fills the rest. Bounded like every fixed table
+/// here (netd's `MAX_CONNS`, the VFS's `MAX_PARTITIONS`).
+const MAX_MOUNTS: usize = 4;
+
 /// Decodes and executes one request from this server's own receive buffer,
 /// building the reply (status + inline result) in its own reply buffer. Returns
 /// the reply's total length. Every slice below is into `req`/`reply` -
@@ -244,36 +254,50 @@ const DATA_MAX: usize = syscall_abi::FS_DATA_MAX as usize;
 /// ops (`NP_READ`/`NP_WRITE`/`NP_WRITE_AT`) to `SAFECOPY` against the client's
 /// grant (they move their data directly between task regions rather than inline
 /// in the reply).
-fn handle(fs: &mut Option<vfs::Filesystem>, sender: u64, req: &[u8], reply: &mut [u8]) -> usize {
+fn handle(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], sender: u64, req: &[u8], reply: &mut [u8]) -> usize {
     if req.len() < REQ_PAYLOAD {
         return status_reply(reply, syscall_abi::FS_ERROR);
     }
     let op = read_u64(req, 0);
     // File operations travel over the uniform verb set (ninep-abi, the Phase 0
-    // cluster protocol) - every client (ulib/`/bin`, the shell, netd) is
-    // migrated, so the old FSOP_* file-op arms are gone. Dispatch the NP verb
-    // range to handle_ninep; what remains below is the FSOP_* disk-management
-    // control ops (mount/unmount/erase/partition/format - fsd-specific, not
-    // uniform file verbs) plus the SYSOP_PING fall-through.
+    // cluster protocol), carrying a `tree` selector that picks which mount -
+    // dispatched to handle_ninep. What remains below is the FSOP_* disk-
+    // management control ops (mount/unmount/erase/partition/format, plus
+    // FSOP_MOUNT_AT - fsd-specific, not uniform file verbs) plus the SYSOP_PING
+    // fall-through.
     if (ninep_abi::NP_BASE..ninep_abi::NP_LIMIT).contains(&op) {
-        return handle_ninep(fs, sender, op, req, reply);
+        return handle_ninep(mounts, sender, op, req, reply);
     }
     let p = [read_u64(req, 8), read_u64(req, 16), read_u64(req, 24), read_u64(req, 32)];
 
     if op == syscall_abi::FSOP_MOUNT {
-        if fs.is_some() {
+        // The auto-mount at tree 0 (the default the shell's `mount -a` triggers).
+        if mounts[0].is_some() {
             return status_reply(reply, syscall_abi::MOUNT_ALREADY);
         }
-        try_mount(fs);
-        let status = if fs.is_some() { 0 } else { syscall_abi::NO_FS };
+        try_mount(&mut mounts[0]);
+        let status = if mounts[0].is_some() { 0 } else { syscall_abi::NO_FS };
         return status_reply(reply, status);
     }
 
-    // Disk-tools milestone 1: report what's mounted, and unmount. Both
-    // handle the not-mounted case themselves (NO_FS), so they sit ahead
-    // of the guard below.
-    if op == syscall_abi::FSOP_MOUNT_INFO {
-        let Some(mounted) = fs.as_ref() else {
+    if op == syscall_abi::FSOP_MOUNT_AT {
+        // Multi-mount: mount the p[0]-th partition into a fresh tree slot and
+        // return the tree id, so a client can bind a namespace prefix to it.
+        let index = p[0] as usize;
+        let Some(tree) = mounts.iter().position(|m| m.is_none()) else {
+            return status_reply(reply, syscall_abi::MOUNT_ALREADY); // no free slot
+        };
+        match vfs::Filesystem::mount_partition(disk::Disk, index) {
+            Ok(fs) => {
+                mounts[tree] = Some(fs);
+                status_reply(reply, tree as u64)
+            }
+            Err(_) => status_reply(reply, syscall_abi::NO_FS),
+        }
+    } else if op == syscall_abi::FSOP_MOUNT_INFO {
+        // Report tree 0 (the primary mount), as ever. Handles the not-mounted
+        // case itself (NO_FS).
+        let Some(mounted) = mounts[0].as_ref() else {
             return status_reply(reply, syscall_abi::NO_FS);
         };
         let part_lba = mounted.partition_lba() as u64;
@@ -283,49 +307,35 @@ fn handle(fs: &mut Option<vfs::Filesystem>, sender: u64, req: &[u8], reply: &mut
         reply[8..16].copy_from_slice(&part_lba.to_le_bytes());
         reply[16..24].copy_from_slice(&capacity.to_le_bytes());
         reply[24..24 + name.len()].copy_from_slice(name);
-        return 24 + name.len();
-    }
-    if op == syscall_abi::FSOP_UNMOUNT {
-        if fs.is_none() {
+        24 + name.len()
+    } else if op == syscall_abi::FSOP_UNMOUNT {
+        // Unmount tree 0 (the primary mount).
+        if mounts[0].is_none() {
             return status_reply(reply, syscall_abi::NO_FS);
         }
-        *fs = None;
-        return status_reply(reply, 0);
-    }
-
-    // Disk-tools milestone 2: raw-disk erase + partition. Both refuse
-    // while a filesystem is mounted (they'd invalidate the live mount's
-    // structures), so they sit ahead of the guard and require an
-    // explicit `unmount` first.
-    if op == syscall_abi::FSOP_ERASE {
-        if fs.is_some() {
+        mounts[0] = None;
+        status_reply(reply, 0)
+    } else if op == syscall_abi::FSOP_ERASE
+        || op == syscall_abi::FSOP_PARTITION
+        || op == syscall_abi::FSOP_FORMAT
+    {
+        // Raw-disk ops (erase/partition/format) rewrite disk structures, so they
+        // refuse while *any* tree is mounted - unmount everything first.
+        if mounts.iter().any(|m| m.is_some()) {
             return status_reply(reply, syscall_abi::MOUNT_ALREADY);
         }
-        return status_reply(reply, erase_disk(p[0]));
+        let status = match op {
+            syscall_abi::FSOP_ERASE => erase_disk(p[0]),
+            syscall_abi::FSOP_PARTITION => partition_disk(p[0] as u8),
+            _ => format_disk(p[0]),
+        };
+        status_reply(reply, status)
+    } else {
+        // Anything else - a stray/legacy op, or the supervisor's SYSOP_PING. A
+        // bare status reply is right for all of them (for the ping, that reply,
+        // addressed back to the kernel sender, is itself the liveness ack).
+        status_reply(reply, syscall_abi::FS_ERROR)
     }
-    if op == syscall_abi::FSOP_PARTITION {
-        if fs.is_some() {
-            return status_reply(reply, syscall_abi::MOUNT_ALREADY);
-        }
-        return status_reply(reply, partition_disk(p[0] as u8));
-    }
-    if op == syscall_abi::FSOP_FORMAT {
-        if fs.is_some() {
-            return status_reply(reply, syscall_abi::MOUNT_ALREADY);
-        }
-        return status_reply(reply, format_disk(p[0]));
-    }
-
-    // File operations now travel over the uniform verb set (ninep-abi) and are
-    // served by handle_ninep above - every client (ulib/`/bin`, the shell, netd)
-    // was migrated, so the old FSOP_* file-op arms are gone. What still reaches
-    // here: the disk-management control ops handled inline above (mount/unmount/
-    // erase/partition/format - fsd-specific, not uniform file verbs), and
-    // anything else - a stray/legacy op, or the supervisor's SYSOP_PING. A bare
-    // status reply is the right answer to all of them (for the ping, that reply,
-    // addressed back to the kernel sender, is itself the liveness ack).
-    let _ = fs; // the mounted volume is consulted only by handle_ninep now
-    status_reply(reply, syscall_abi::FS_ERROR)
 }
 
 /// Decodes and executes one uniform-verb request (`ninep-abi`, the Phase 0
@@ -338,20 +348,20 @@ fn handle(fs: &mut Option<vfs::Filesystem>, sender: u64, req: &[u8], reply: &mut
 /// namespace resolves it to a real mount in a later step.
 ///
 /// [`NP_REQ_PAYLOAD`]: ninep_abi::NP_REQ_PAYLOAD
-fn handle_ninep(fs: &mut Option<vfs::Filesystem>, sender: u64, verb: u64, req: &[u8], reply: &mut [u8]) -> usize {
+fn handle_ninep(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], sender: u64, verb: u64, req: &[u8], reply: &mut [u8]) -> usize {
     const NP_HDR: usize = ninep_abi::NP_REQ_PAYLOAD as usize;
     if req.len() < NP_HDR {
         return status_reply(reply, syscall_abi::FS_ERROR);
     }
-    let tree = read_u64(req, 8);
+    let tree = read_u64(req, 8) as usize;
     let p = [read_u64(req, 16), read_u64(req, 24), read_u64(req, 32), read_u64(req, 40)];
     let payload = &req[NP_HDR..];
-    // Single implicit mount this step; a non-zero tree is a client bug until the
-    // namespace/multi-mount steps land.
-    if tree != 0 {
+    // The `tree` selector picks which mount (cluster Phase 0 multi-mount); an
+    // out-of-range tree is a client bug. An unmounted tree replies NO_FS.
+    if tree >= MAX_MOUNTS {
         return status_reply(reply, syscall_abi::FS_ERROR);
     }
-    let Some(fs) = fs.as_mut() else {
+    let Some(fs) = mounts[tree].as_mut() else {
         return status_reply(reply, syscall_abi::NO_FS);
     };
     match verb {

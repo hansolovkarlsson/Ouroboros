@@ -797,6 +797,18 @@ pub const FSOP_PARTITION: u64 = 17;
 /// later steps (an unsupported `fstype` returns [`FS_ERROR`]).
 pub const FSOP_FORMAT: u64 = 18;
 
+/// `(partition index)` -> the **tree id** (0..) the mount was placed in, or an
+/// error `>= FS_ERR_MIN`: [`NO_FS`] (no such partition / it mounts as no known
+/// format), [`MOUNT_ALREADY`] (no free mount slot). Mounts the disk's
+/// `index`-th partition (from the same MBR/GPT discovery the boot auto-mount
+/// uses) into a fresh mount slot, so several filesystems can be mounted at once
+/// (cluster Phase 0 multi-mount). The caller `bind`s a namespace prefix to the
+/// returned tree so paths under it resolve to this mount. Unlike [`FSOP_MOUNT`]
+/// (which mounts the first validating partition at tree 0), this selects a
+/// specific partition and returns where it landed. A small tree id (0..3) is
+/// always well below [`FS_ERR_MIN`], so it can't be mistaken for an error.
+pub const FSOP_MOUNT_AT: u64 = 19;
+
 /// [`FSOP_FORMAT`] `fstype` selectors.
 pub const FMT_FAT32: u64 = 0;
 /// exFAT format (a later milestone-3 step; currently returns [`FS_ERROR`]).

@@ -61,6 +61,34 @@ impl Filesystem {
         Err(Error::NoFat32Partition)
     }
 
+    /// Mount the disk's `index`-th partition (same MBR/GPT discovery order as
+    /// [`mount`](Self::mount), which mounts the first that validates). Probes
+    /// FAT32-then-exFAT-then-ext2 at that one partition. The multi-mount entry
+    /// point (cluster Phase 0): a client mounts a *specific* partition into a
+    /// tree rather than taking whatever validates first. Returns
+    /// [`Error::NoFat32Partition`] if `index` is out of range or the partition
+    /// mounts as no known format.
+    pub fn mount_partition(mut disk: Disk, index: usize) -> Result<Self, Error> {
+        let mut parts = [0u64; partition::MAX_PARTITIONS];
+        let count = partition::discover(&mut disk, &mut parts)?;
+        if index >= count {
+            return Err(Error::NoFat32Partition);
+        }
+        let Ok(lba32) = u32::try_from(parts[index]) else {
+            return Err(Error::NoFat32Partition);
+        };
+        if let Ok(fs) = fat32::Fs::mount_at(Disk, lba32) {
+            return Ok(Filesystem::Fat32(fs));
+        }
+        if let Ok(fs) = exfat::Fs::mount_at(Disk, lba32) {
+            return Ok(Filesystem::ExFat(fs));
+        }
+        if let Ok(fs) = ext2::Fs::mount_at(Disk, lba32) {
+            return Ok(Filesystem::Ext2(fs));
+        }
+        Err(Error::NoFat32Partition)
+    }
+
     /// The mounted format's name, for the startup/mount log line.
     pub fn name(&self) -> &'static str {
         match self {

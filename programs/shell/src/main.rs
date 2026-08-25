@@ -872,7 +872,7 @@ fn dispatch_line(line: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize, env:
         "kill" => cmd_kill(arg),
         "fg" => cmd_fg(arg),
         "wait" => cmd_wait(arg),
-        "mount" => cmd_mount(arg, out),
+        "mount" => cmd_mount(line, arg, cwd, *cwd_len, out),
         "unmount" => cmd_unmount(),
         "erase" => cmd_erase(arg),
         "partition" => cmd_partition(arg),
@@ -1161,25 +1161,9 @@ fn cmd_bind(line: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize, out: &mut Output) 
         out.put_line("bind: <newpath> must be a path below /");
         return;
     }
-    if prefix.len() > 255 || target.len() > 255 {
-        out.put_line("bind: path too long");
-        return;
-    }
-    // Append [tree 0][prefix_len][target_len][prefix][target] to our namespace.
-    let mut ns = [0u8; syscall_abi::NS_MAX as usize];
-    let nlen = get_ns(&mut ns);
-    let entry = 3 + prefix.len() + target.len();
-    if nlen + entry > ns.len() {
-        out.put_line("bind: namespace full");
-        return;
-    }
-    ns[nlen] = 0; // tree 0 (single mount in Phase 0)
-    ns[nlen + 1] = prefix.len() as u8;
-    ns[nlen + 2] = target.len() as u8;
-    ns[nlen + 3..nlen + 3 + prefix.len()].copy_from_slice(prefix);
-    ns[nlen + 3 + prefix.len()..nlen + entry].copy_from_slice(target);
-    if syscall4(syscall_abi::NS_SET, ns.as_ptr() as u64, (nlen + entry) as u64, 0, 0) != 0 {
-        out.put_line("bind: failed");
+    // Bind within the current mount: tree 0, target = the existing subtree.
+    if !ns_add(prefix, target, 0) {
+        out.put_line("bind: path too long or namespace full");
     }
 }
 
@@ -1912,6 +1896,29 @@ fn mount_resolve(path: &str, out: &mut [u8]) -> (u64, usize) {
     resolve_ns(&ns[..nlen], path, out)
 }
 
+/// Append one binding `[tree][prefix_len][target_len][prefix][target]` to this
+/// shell's namespace (read via `GET_NS`, written back via `NS_SET`). Returns
+/// `false` if a path is too long or the namespace is full. Shared by `bind`
+/// (tree 0, target = an existing subtree) and `mount` (a fresh tree from
+/// `FSOP_MOUNT_AT`, target = `/` - the mounted volume's root).
+fn ns_add(prefix: &[u8], target: &[u8], tree: u8) -> bool {
+    if prefix.len() > 255 || target.len() > 255 {
+        return false;
+    }
+    let mut ns = [0u8; syscall_abi::NS_MAX as usize];
+    let nlen = get_ns(&mut ns);
+    let entry = 3 + prefix.len() + target.len();
+    if nlen + entry > ns.len() {
+        return false;
+    }
+    ns[nlen] = tree;
+    ns[nlen + 1] = prefix.len() as u8;
+    ns[nlen + 2] = target.len() as u8;
+    ns[nlen + 3..nlen + 3 + prefix.len()].copy_from_slice(prefix);
+    ns[nlen + 3 + prefix.len()..nlen + entry].copy_from_slice(target);
+    syscall4(syscall_abi::NS_SET, ns.as_ptr() as u64, (nlen + entry) as u64, 0, 0) == 0
+}
+
 fn fs_list_dir(path: &str, buf: &mut [u8]) -> u64 {
     let mut fsp = [0u8; FSP_MAX];
     let (tree, n) = mount_resolve(path, &mut fsp);
@@ -2171,11 +2178,51 @@ fn print_u64(n: u64) {
 /// `mount` (no arg) reports what's mounted; `mount -a` performs the
 /// mount action. The disk-tools arc (milestone 1) repurposed the bare
 /// command to *list*, Unix-style - the mounting action moved to `-a`.
-fn cmd_mount(arg: &str, out: &mut Output) {
+fn cmd_mount(line: &str, arg: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize, out: &mut Output) {
     match arg {
         "" => mount_info(out),
         "-a" => mount_disk(),
-        _ => print_line("mount: usage: `mount` (show what's mounted) or `mount -a` (mount the disk)"),
+        _ => cmd_mount_at(line, cwd, cwd_len, out),
+    }
+}
+
+/// `mount <partition> <path>` - mount the disk's Nth partition and make it
+/// visible at `<path>` in this shell's namespace (cluster Phase 0 multi-mount).
+/// `fsd` mounts the partition into a fresh tree (`FSOP_MOUNT_AT`) and returns
+/// its tree id; we `bind` `<path>` onto that tree's root. A path under `<path>`
+/// then resolves to that filesystem - a **second disk visible alongside** the
+/// boot mount at `/`, which the old single-mount model physically couldn't
+/// express. Per-task, like every namespace change.
+fn cmd_mount_at(line: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize, out: &mut Output) {
+    let mut words = line.split_whitespace();
+    words.next(); // "mount"
+    let (Some(idx_arg), Some(path_arg)) = (words.next(), words.next()) else {
+        out.put_line("mount: usage: `mount` | `mount -a` | `mount <partition> <path>`");
+        return;
+    };
+    let Some(index) = parse_u64(idx_arg) else {
+        out.put_line("mount: <partition> must be a number (0, 1, ...)");
+        return;
+    };
+    let mut pbuf = [0u8; PATH_SIZE];
+    let Some(pl) = resolve_path(cwd_str(cwd, cwd_len), path_arg, &mut pbuf) else {
+        out.put_line("mount: path too long");
+        return;
+    };
+    let prefix = strip_trailing_slash(&pbuf[..pl]);
+    if prefix.len() < 2 || prefix[0] != b'/' {
+        out.put_line("mount: <path> must be a path below /");
+        return;
+    }
+    // fsd mounts the partition into a tree and returns the tree id (a small
+    // number < FS_ERR_MIN; an error is >= FS_ERR_MIN).
+    let tree = fs_call(syscall_abi::FSOP_MOUNT_AT, [index, 0, 0, 0], &[], &[], &mut []);
+    if tree >= FS_ERR_MIN {
+        print_fs_error("mount", tree);
+        return;
+    }
+    if !ns_add(prefix, b"/", tree as u8) {
+        out.put_line("mount: path too long or namespace full");
     }
 }
 

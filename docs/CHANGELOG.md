@@ -7,6 +7,37 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/`; 
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## Cluster Phase 0, step 0d: fsd multi-mount — two filesystems at once (the payoff)
+
+**Two different filesystems mounted simultaneously at different paths** — the
+concrete payoff the whole Phase 0 design pointed at, and something the old
+single-`Option<Filesystem>` model physically could not express.
+
+`fsd` grew from one mount to a **mount table** `[Option<vfs::Filesystem>;
+MAX_MOUNTS]` (4), indexed by the `ninep-abi` `tree` selector: tree 0 is the boot
+auto-mount, and `handle_ninep` now routes each request to `mounts[tree]` (an
+unmounted tree replies `NO_FS`). A new admin op **`FSOP_MOUNT_AT`** (19) mounts a
+*specific* partition (by discovery index) into the first free tree slot and
+returns the tree id; `vfs::Filesystem::mount_partition(disk, index)` is the
+partition-selecting sibling of `mount` (which takes the first that validates).
+The shell's **`mount <partition> <path>`** calls it, then `bind`s `<path>` onto
+the returned tree's root (a shared `ns_add(prefix, target, tree)` now backs both
+`bind` — tree 0 — and `mount` — a fresh tree). No kernel change (0c's namespace
+already carries the tree in each binding).
+
+Verified on QEMU against the existing two-partition **`run-image-ext2`** disk
+(ext2 at partition 0, the FAT32 ESP at partition 1 — so `fsd` auto-mounts ext2 at
+tree 0 and the disk still UEFI-boots the FAT32 ESP): `ls /` lists the **ext2**
+root (`README.TXT`/`HELLO.TXT`/`bin/`/`sub/`/`lost+found/`), then
+`mount 1 /mnt/f` mounts the **FAT32 ESP** at tree 1 and `ls /mnt/f` lists *its*
+root (`BIN/`/`EFI/`) — two different on-disk filesystems live at once, each read
+over NP by its tree (`cat /README.TXT` from ext2 tree 0 and
+`cat /mnt/f/EFI/ORBS/INIT.CFG` from FAT32 tree 1 both return their real
+contents), zero `-d int` aborts. Single-mount regression (the plain image) is
+byte-identical to before but for binary-size boot-log lines. **Phase 0's headline
+feature is done.** Remaining: 0e (`cond` on the verbs, retiring `DSPOP_*`); then
+Phase 0 complete = v0.5.0.
+
 ## Cluster Phase 0, step 0c: per-task namespaces + `bind` (the first kernel change)
 
 The Plan 9 foundation of the distributed vision: each task composes its own

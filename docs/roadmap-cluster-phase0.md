@@ -221,10 +221,17 @@ the next begins — the cadence that carried the filesystem/network/xHCI arcs.
   == `ls /EFI`, per-task, inherited by spawned `/bin` commands; regression
   byte-identical (empty namespace = identity), zero aborts. See the CHANGELOG's
   "step 0c" entry.
-- **0d — `fsd` multi-mount + THE payoff.** The `[Option<Mount>; MAX_MOUNTS]`
-  table; `mount` a second filesystem into a second tree; namespace binds
-  `/mnt/a`, `/mnt/b`. *Ship:* **two filesystems mounted at once** — `ls /mnt/a`
-  (say FAT32) and `ls /mnt/b` (say ext2) in one boot.
+- **0d — `fsd` multi-mount + THE payoff — DONE (2026-08-25).** `fsd`'s
+  `Option<Filesystem>` → `[Option<Filesystem>; MAX_MOUNTS]` (4) indexed by the
+  `tree` selector; `FSOP_MOUNT_AT` (19) + `vfs::mount_partition` mount a specific
+  partition into a fresh tree; the shell's `mount <partition> <path>` mounts it
+  and `bind`s `<path>` onto that tree (shared `ns_add` with `bind`). No kernel
+  change. Test disk simplification: rather than a new 3-partition script, the
+  existing **`run-image-ext2`** disk already has two partitions (ext2 + FAT32
+  ESP) — `ls /` (ext2, tree 0) then `mount 1 /mnt/f` + `ls /mnt/f` (FAT32,
+  tree 1) shows **two different filesystems at once**, reads served over NP per
+  tree, zero aborts; single-mount regression byte-identical. See the CHANGELOG's
+  "step 0d" entry.
 - **0e — `cond` → `/dev/cons` on the verbs.** `cond` adopts `NP_WRITE`; console
   output becomes a namespace-resolved write. *Ship:* two different servers, one
   verb set; `DSPOP_*` deleted. **Phase 0 done.**
