@@ -130,7 +130,12 @@ simultaneous mounts** — so it's a feature, not a refactor-for-vanity.*
 every server reached through the same verbs, all on QEMU + real hardware, zero
 aborts. The three bespoke protocols are gone.
 
-### Phase 1 — 9P-over-TCP: the pivot to distributed
+### Phase 1 — 9P-over-TCP: the pivot to distributed ✅ DONE
+
+> **Status:** complete. Export gateway (1a), remote-mount client (`mount -r`, 1c),
+> and two-node integration (1d — two QEMU guests on a shared L2 link, one mounting
+> and reading the other's disk, MAC-derived per-guest IPs) all shipped and verified.
+> Read-only sharing; read+write is Phase 2. Ready to cut **v0.6.0**.
 
 > **Detailed design:** [`roadmap-cluster-phase1.md`](roadmap-cluster-phase1.md) —
 > the grant/safecopy→inline-frame reframing, netd as the gateway both ways, the

@@ -7,6 +7,38 @@ for the forward plan see [`roadmap.md`](roadmap.md).
 
 ---
 
+## 2026-08-25 (cont.) — Phase 1d: two Ouroboros machines, one reads the other's disk
+
+The "aha," and it landed the same day. 1c proved the remote-mount client against a
+host python server; 1d makes the peer a *second Ouroboros VM* on a shared L2 link
+(QEMU `-netdev socket,listen=`/`connect=` — a virtual hub, no SLIRP, no gateway).
+Machine A exports (its port-564 listener is always on); machine B runs `mount -r
+10.0.2.10:564 /mnt/a` and reads A's actual disk — `ls /mnt/a` → `BIN/ EFI/`, `cat
+/mnt/a/EFI/ORBS/INIT.CFG` → A's file, `ls /mnt/a/BIN` → A's whole `/bin`.
+
+The one real design piece was the per-guest IP. netd's `OUR_IP` was the hardcoded
+SLIRP lease `10.0.2.15`; two guests need distinct addresses. I made it `our_ip()`,
+deriving the last octet from the NIC's MAC — the cleanest config channel that
+already exists (no boot arg, no new syscall). The trick that kept it zero-risk:
+map the QEMU-default MAC `…:56` back to `.15`, so every existing SLIRP path
+(ping/resolve/fetch, and the export gateway's hostfwd, which all target `.15`) is
+untouched, while the two-VM target hands out `…:0a`/`…:0b` → `.10`/`.11`. And no
+mutable global was needed — userland has no `.bss`, so `our_ip()` just reads
+`NET_MAC` each call. `next_hop` was already subnet-based, so two on-link guests
+route directly; the existing ARP responder answers for the derived IP. Only eight
+`OUR_IP` sites to touch.
+
+It worked on the first boot of the pair. The shared-link pcap tells the whole
+story: B ARPs for 10.0.2.10, A answers with `…:0a`, B opens TCP to `:564`, sends
+the 53-byte framed readdir, A replies 22 bytes and FINs — rotating source ports
+per connection (the TIME_WAIT fix from 1c earning its keep), SACK-permitted on A's
+SYN-ACK, no SLIRP anywhere. Zero Data/Prefetch aborts on *both* VMs under `-d int`.
+
+That's **Phase 1 complete** — the years-long question ("can several computers
+share resources as one system?") has its first real yes: two Ouroboros machines,
+one mounting and reading the other's disk over a protocol written from scratch.
+Read-only for now; read+write is Phase 2. Ready to cut v0.6.0.
+
 ## 2026-08-25 (cont.) — Phase 1c: a machine reads another's disk over TCP
 
 Picked up where the cluster day left off: the export gateway (1a) let the host

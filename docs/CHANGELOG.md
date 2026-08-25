@@ -7,6 +7,41 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/`; 
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## Cluster Phase 1, step 1d: two-node integration — machine B reads machine A's disk (Phase 1 done)
+
+**The aha, on real cross-machine wire.** Where 1a/1c were verified with one VM
+and a host python peer, 1d puts **two Ouroboros VMs on a shared L2 link** (QEMU
+socket networking — a virtual hub, no SLIRP, no gateway) and has one mount the
+other: machine A exports its disk (netd's port-564 listener is always on), machine
+B runs `mount -r 10.0.2.10:564 /mnt/a` and then `ls`/`cat`s A's real filesystem.
+
+**Per-guest IP, derived from the MAC.** netd's `OUR_IP` was the hardcoded SLIRP
+lease `10.0.2.15`; it's now `our_ip()`, deriving the last octet from the NIC's MAC
+(read via `NET_MAC`). Two guests on the link get distinct MACs (`…:0a`/`…:0b`) →
+distinct IPs (`.10`/`.11`) with **no new config channel**. The QEMU-default MAC
+(`…:56`) maps back to `.15`, so every existing SLIRP run (ping/resolve/fetch, and
+the export gateway's `hostfwd`, all of which target `.15`) is byte-for-byte
+unchanged — the whole per-guest-IP change is invisible to the single-VM paths. No
+mutable global was needed (userland has no `.bss`): `our_ip()` reads the MAC each
+call. `next_hop` was already subnet-based (`10.0.2.0/24` on-link → direct), so two
+on-link guests need no gateway; netd's existing ARP responder (Stage 4b) answers
+for the derived IP.
+
+**Testing infra** (`make run-image-2vm-a` / `run-image-2vm-b`): a QEMU
+`-netdev socket,listen=`/`connect=` pair joins the two guests at L2, each with its
+own disk copy (two QEMU write-locks can't share a file) and its own pcap. Run A
+first (it listens). Verified end to end: from B, `mount -r 10.0.2.10:564 /mnt/a`
+then `ls /mnt/a` → `BIN/ EFI/`, `cat /mnt/a/EFI/ORBS/INIT.CFG` → `\EFI\ORBS\SH.BIN`,
+`ls /mnt/a/BIN` → A's whole `/bin` — **B reading A's disk, block for block, over a
+protocol written from scratch.** Confirmed against the shared-link pcap (B ARPs A,
+TCP to `:564`, the framed NP exchange, rotating source ports, clean FIN — no SLIRP
+anywhere), and **zero Data/Prefetch aborts on both VMs** under `-d int`.
+
+**This is the milestone that answers the years-long question with a yes.** Phase 1
+is complete (1a export + 1c remote-mount client + 1d two-node); write-side
+sharing is Phase 2. Ready to cut **v0.6.0**. See
+[`roadmap-cluster.md`](roadmap-cluster.md) / [`roadmap-cluster-phase1.md`](roadmap-cluster-phase1.md).
+
 ## Cluster Phase 1, step 1c: the remote-mount client — a machine reads another's disk
 
 The other half of the pivot: a machine now **remote-mounts** another's 9P export

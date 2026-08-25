@@ -27,8 +27,27 @@
 use core::arch::asm;
 use core::panic::PanicInfo;
 
-/// Our assumed IPv4 (QEMU user-net gives the guest `10.0.2.15` by default).
-const OUR_IP: [u8; 4] = [10, 0, 2, 15];
+/// Our IPv4, derived from the NIC's MAC (cluster Phase 1d) so two guests on a
+/// shared L2 link get distinct addresses with no config channel: the last octet
+/// is the MAC's last octet. The QEMU-default MAC (`…:56`) maps to `.15` -
+/// SLIRP's DHCP lease - so every existing SLIRP-based run (ping/resolve/fetch,
+/// and the export gateway's `hostfwd`, all of which target `.15`) is unchanged;
+/// a two-VM socket-net target assigns distinct MACs (`…:0a`/`…:0b` -> `.10`/`.11`).
+/// No NIC -> `.15` (the value is never used without a NIC anyway).
+fn our_ip() -> [u8; 4] {
+    let packed = syscall(syscall_abi::NET_MAC, 0);
+    let last = if packed == syscall_abi::NET_ERROR {
+        15
+    } else {
+        let b = (packed >> 40) as u8; // mac[5]
+        if b == 0x56 {
+            15
+        } else {
+            b
+        }
+    };
+    [10, 0, 2, last]
+}
 /// QEMU user-net's built-in DNS proxy (forwards to the host's resolver).
 const DNS_SERVER: [u8; 4] = [10, 0, 2, 3];
 /// A fixed ephemeral UDP source port for DNS queries (one query at a time).
@@ -317,7 +336,7 @@ fn arp_resolve(mac: &[u8; 6], target: &[u8; 4]) -> Option<[u8; 6]> {
     arp[19] = 4; // plen
     arp[20..22].copy_from_slice(&[0x00, 0x01]); // oper: request
     arp[22..28].copy_from_slice(mac); // sha
-    arp[28..32].copy_from_slice(&OUR_IP); // spa
+    arp[28..32].copy_from_slice(&our_ip()); // spa
     arp[38..42].copy_from_slice(target); // tpa
     if send(&arp).is_err() {
         return None;
@@ -371,7 +390,7 @@ fn icmp_echo(mac: &[u8; 6], target_mac: &[u8; 6], target: &[u8; 4]) -> bool {
     ip[8] = 64; // TTL
     ip[9] = 1; // protocol: ICMP
     // checksum (ip[10..12]) left 0 for the computation
-    ip[12..16].copy_from_slice(&OUR_IP);
+    ip[12..16].copy_from_slice(&our_ip());
     ip[16..20].copy_from_slice(target);
     let csum = ip_checksum(&f[14..14 + IP_LEN]);
     f[24..26].copy_from_slice(&csum.to_be_bytes()); // 14 + 10
@@ -870,7 +889,7 @@ fn handle_arp(mac: &[u8; 6], frame: &[u8]) {
     if frame.len() < 42 {
         return;
     }
-    if frame[20] != 0x00 || frame[21] != 0x01 || frame[38..42] != OUR_IP {
+    if frame[20] != 0x00 || frame[21] != 0x01 || frame[38..42] != our_ip() {
         return; // not an ARP request, or not for us
     }
     let mut req_mac = [0u8; 6];
@@ -887,7 +906,7 @@ fn handle_arp(mac: &[u8; 6], frame: &[u8]) {
     arp[19] = 4; // plen
     arp[20..22].copy_from_slice(&[0x00, 0x02]); // oper: reply
     arp[22..28].copy_from_slice(mac); // sha: us
-    arp[28..32].copy_from_slice(&OUR_IP); // spa: us
+    arp[28..32].copy_from_slice(&our_ip()); // spa: us
     arp[32..38].copy_from_slice(&req_mac); // tha: the requester
     arp[38..42].copy_from_slice(&req_ip); // tpa: the requester
     let _ = send(&arp);
@@ -1960,7 +1979,7 @@ fn build_tcp_generic(
     out[ip + 8] = 64;
     out[ip + 9] = 6; // protocol: TCP
     out[ip + 10..ip + 12].copy_from_slice(&[0, 0]);
-    out[ip + 12..ip + 16].copy_from_slice(&OUR_IP);
+    out[ip + 12..ip + 16].copy_from_slice(&our_ip());
     out[ip + 16..ip + 20].copy_from_slice(dst_ip);
     let ipc = ip_checksum(&out[ip..ip + IP_LEN]);
     out[ip + 10..ip + 12].copy_from_slice(&ipc.to_be_bytes());
@@ -1984,7 +2003,7 @@ fn build_tcp_generic(
     }
     out[t + tcp_hdr..t + tcp_hdr + payload.len()].copy_from_slice(payload);
     let seg_len = tcp_hdr + payload.len();
-    let csum = tcp_checksum(&OUR_IP, dst_ip, &out[t..t + seg_len]);
+    let csum = tcp_checksum(&our_ip(), dst_ip, &out[t..t + seg_len]);
     out[t + 16..t + 18].copy_from_slice(&csum.to_be_bytes());
     Some(total)
 }
@@ -2118,7 +2137,7 @@ fn build_dns_frame(mac: &[u8; 6], server_mac: &[u8; 6], dns: &[u8], out: &mut [u
     out[ip + 8] = 64; // TTL
     out[ip + 9] = 17; // protocol: UDP
     out[ip + 10..ip + 12].copy_from_slice(&[0, 0]); // checksum placeholder
-    out[ip + 12..ip + 16].copy_from_slice(&OUR_IP);
+    out[ip + 12..ip + 16].copy_from_slice(&our_ip());
     out[ip + 16..ip + 20].copy_from_slice(&DNS_SERVER);
     let ipc = ip_checksum(&out[ip..ip + IP_LEN]);
     out[ip + 10..ip + 12].copy_from_slice(&ipc.to_be_bytes());

@@ -108,7 +108,7 @@ ifeq ($(PROFILE),release)
 CARGO_FLAGS += --release
 endif
 
-.PHONY: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin ping-bin resolve-bin fetch-bin wc-bin grep-bin head-bin esp run run-virtio-console run-usb-kbd run-usb-multi run-gicv3 image run-image run-image-9p run-image-9p-client image-gpt run-image-gpt image-exfat run-image-exfat image-ext2 run-image-ext2 parallels-hdd release test-parallels clean
+.PHONY: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin ping-bin resolve-bin fetch-bin wc-bin grep-bin head-bin esp run run-virtio-console run-usb-kbd run-usb-multi run-gicv3 image run-image run-image-9p run-image-9p-client run-image-2vm-a run-image-2vm-b image-gpt run-image-gpt image-exfat run-image-exfat image-ext2 run-image-ext2 parallels-hdd release test-parallels clean
 
 # Overridable by `make test-parallels VM_NAME=... CMDS=... BOOT_WAIT=...`.
 VM_NAME     ?= Ouroboros
@@ -680,6 +680,50 @@ run-image-9p-client: image
 		-netdev user,id=net0 \
 		-device virtio-net-device,netdev=net0 \
 		-object filter-dump,id=f0,netdev=net0,file=$(NET_PCAP) \
+		-global virtio-mmio.force-legacy=false \
+		-nographic
+
+# The two-VM integration - the cluster Phase 1 "aha" (step 1d): two guests share
+# an L2 link via QEMU socket networking (a virtual hub, no SLIRP), each with a
+# distinct MAC that netd derives a distinct static IP from (:0a -> 10.0.2.10,
+# :0b -> 10.0.2.11). Machine A *exports* its disk (netd's port-564 listener is
+# always on); machine B *remote-mounts* A over the shared link. Run in two
+# terminals - **A first** (it listens; B's socket connect fails if nothing is):
+#   Terminal 1:  make run-image-2vm-a
+#   Terminal 2:  make run-image-2vm-b
+# then in B's shell:
+#   mount -r 10.0.2.10:564 /mnt/a
+#   ls /mnt/a            # A's disk: BIN/ EFI/
+#   cat /mnt/a/EFI/ORBS/INIT.CFG
+# Each VM gets its own disk copy (two QEMU write-locks can't share one file) and
+# its own pcap (build/net-a.pcap / build/net-b.pcap) for tcpdump inspection.
+run-image-2vm-a: image
+	cp $(ESP_DIR).img $(ESP_DIR)-a.img
+	qemu-system-aarch64 \
+		-machine virt \
+		-cpu cortex-a72 \
+		-m 512M \
+		-bios $(OVMF) \
+		-drive file=$(ESP_DIR)-a.img,format=raw,if=none,id=hd0 \
+		-device virtio-blk-device,drive=hd0 \
+		-netdev socket,id=net0,listen=127.0.0.1:12340 \
+		-device virtio-net-device,netdev=net0,mac=52:54:00:12:34:0a \
+		-object filter-dump,id=f0,netdev=net0,file=$(BUILD_DIR)/net-a.pcap \
+		-global virtio-mmio.force-legacy=false \
+		-nographic
+
+run-image-2vm-b: image
+	cp $(ESP_DIR).img $(ESP_DIR)-b.img
+	qemu-system-aarch64 \
+		-machine virt \
+		-cpu cortex-a72 \
+		-m 512M \
+		-bios $(OVMF) \
+		-drive file=$(ESP_DIR)-b.img,format=raw,if=none,id=hd0 \
+		-device virtio-blk-device,drive=hd0 \
+		-netdev socket,id=net0,connect=127.0.0.1:12340 \
+		-device virtio-net-device,netdev=net0,mac=52:54:00:12:34:0b \
+		-object filter-dump,id=f0,netdev=net0,file=$(BUILD_DIR)/net-b.pcap \
 		-global virtio-mmio.force-legacy=false \
 		-nographic
 

@@ -153,12 +153,18 @@ only needed for the final integration.
   **Note the staging reorder:** the export gateway (design's 1b) shipped first as
   "1a", so this step is the design's 1a (outbound client) + 1c (remote binding +
   `mount -r`) together.
-- **1d — two-VM integration (the "aha").** A new Makefile target giving two
-  guests a shared L2 link (QEMU `-netdev socket,listen=`/`connect=`; today only
-  SLIRP exists, guest↔host only) and a **configurable guest IP** (netd hardcodes
-  `10.0.2.15` — two guests need distinct addresses; derive it from the MAC or a
-  boot arg). *Ship:* **machine A exports, machine B `mount -r A:564 /mnt/a`,
-  `ls /mnt/a` lists A's disk.** Verified against a `tcpdump` on the shared link.
+- **1d — two-VM integration (the "aha"). ✅ DONE.** `make run-image-2vm-a` /
+  `run-image-2vm-b` give two guests a shared L2 link (QEMU
+  `-netdev socket,listen=`/`connect=`, a virtual hub, no SLIRP), each with its own
+  disk copy and pcap. The **guest IP is derived from the MAC** (`our_ip()`, last
+  octet = MAC's last octet; the default `…:56` → `.15` so every SLIRP run is
+  unchanged; `…:0a`/`…:0b` → `.10`/`.11`) — no new config channel, no mutable
+  global (userland has no `.bss`, so it reads `NET_MAC` each call). *Shipped:* from
+  B, `mount -r 10.0.2.10:564 /mnt/a` then `ls /mnt/a` → `BIN/ EFI/`,
+  `cat /mnt/a/EFI/ORBS/INIT.CFG` → A's file, `ls /mnt/a/BIN` → A's whole `/bin` —
+  B reading A's disk over the from-scratch protocol. Verified against the
+  shared-link `tcpdump` (B ARPs A, TCP to `:564`, framed NP exchange, rotating
+  source ports, clean FIN) and zero `-d int` aborts on both VMs. **Phase 1 done.**
 
 ## Testing
 
