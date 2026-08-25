@@ -2514,13 +2514,14 @@ fn putc(byte: u8) {
 /// `FS_DATA_MAX` chunks; each carries a 768-byte reply buffer (the
 /// `MSG_CALL` ABI's fixed reply size), the one real stack cost here.
 fn con_write(bytes: &[u8]) {
-    let payload_off = syscall_abi::FS_REQ_PAYLOAD as usize;
+    let payload_off = ninep_abi::NP_REQ_PAYLOAD as usize;
     let mut off = 0;
     while off < bytes.len() {
         let n = (bytes.len() - off).min(syscall_abi::FS_DATA_MAX as usize);
-        let mut req = [0u8; syscall_abi::FS_REQ_PAYLOAD as usize + syscall_abi::FS_DATA_MAX as usize];
-        req[0..8].copy_from_slice(&syscall_abi::DSPOP_WRITE.to_le_bytes());
-        req[8..16].copy_from_slice(&(n as u64).to_le_bytes());
+        let mut req = [0u8; ninep_abi::NP_REQ_PAYLOAD as usize + syscall_abi::FS_DATA_MAX as usize];
+        req[0..8].copy_from_slice(&ninep_abi::NP_WRITE_FILE.to_le_bytes());
+        // tree (a8) and path_len (a16) stay 0; data_len at a1 (offset 24).
+        req[24..32].copy_from_slice(&(n as u64).to_le_bytes());
         req[payload_off..payload_off + n].copy_from_slice(&bytes[off..off + n]);
         let mut reply = [0u8; syscall_abi::MSG_MAX_LEN as usize];
         let r = syscall4(

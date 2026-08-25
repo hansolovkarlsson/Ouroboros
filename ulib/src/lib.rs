@@ -103,16 +103,19 @@ pub fn write_out(target: u64, bytes: &[u8]) {
     }
 }
 
-/// Route output through the console server (a batched `DSPOP_WRITE` message),
-/// falling back to the kernel console (`PUTC`) if there's no server this boot.
+/// Route output through the console server as a batched write over the uniform
+/// verb set (`ninep-abi`): an `NP_WRITE_FILE` whose inline data is the text -
+/// a write to the console "file" (cond ignores the tree/path). Falls back to
+/// the kernel console (`PUTC`) if there's no server this boot.
 pub fn con_write(bytes: &[u8]) {
-    let payload_off = syscall_abi::FS_REQ_PAYLOAD as usize;
+    let payload_off = ninep_abi::NP_REQ_PAYLOAD as usize;
     let mut off = 0;
     while off < bytes.len() {
         let n = (bytes.len() - off).min(syscall_abi::FS_DATA_MAX as usize);
-        let mut req = [0u8; syscall_abi::FS_REQ_PAYLOAD as usize + syscall_abi::FS_DATA_MAX as usize];
-        req[0..8].copy_from_slice(&syscall_abi::DSPOP_WRITE.to_le_bytes());
-        req[8..16].copy_from_slice(&(n as u64).to_le_bytes());
+        let mut req = [0u8; ninep_abi::NP_REQ_PAYLOAD as usize + syscall_abi::FS_DATA_MAX as usize];
+        req[0..8].copy_from_slice(&ninep_abi::NP_WRITE_FILE.to_le_bytes());
+        // tree (a8) and path_len (a16) stay 0; data_len at a1 (offset 24).
+        req[24..32].copy_from_slice(&(n as u64).to_le_bytes());
         req[payload_off..payload_off + n].copy_from_slice(&bytes[off..off + n]);
         let mut reply = [0u8; syscall_abi::MSG_MAX_LEN as usize];
         let r = syscall4(

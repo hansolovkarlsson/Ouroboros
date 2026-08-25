@@ -6,6 +6,7 @@ version = 4
 name = "args"
 version = "0.1.0"
 dependencies = [
+ "ninep-abi",
  "syscall-abi",
 ]
 
@@ -47,6 +48,7 @@ dependencies = [
 name = "cond"
 version = "0.1.0"
 dependencies = [
+ "ninep-abi",
  "syscall-abi",
 ]
 
@@ -108,6 +110,7 @@ dependencies = [
 name = "hello"
 version = "0.1.0"
 dependencies = [
+ "ninep-abi",
  "syscall-abi",
 ]
 
@@ -175,6 +178,7 @@ dependencies = [
 name = "pong"
 version = "0.1.0"
 dependencies = [
+ "ninep-abi",
  "syscall-abi",
 ]
 

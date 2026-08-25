@@ -7,6 +7,34 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/`; 
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## Cluster Phase 0, step 0e: cond on the verb set — the last bespoke protocol retired
+
+The console server joins the uniform protocol, and `DSPOP_*` — the third and
+last of the bespoke server protocols — is **deleted**. Writing the console is
+now a write to the console "file": an `ninep_abi::NP_WRITE_FILE` message whose
+inline data is the text. cond serves only the console, so it ignores the
+`tree`/`path` fields and renders the data; every `con_write` client (the shared
+`ulib` one plus the shell's, `fsd`'s, `netd`'s, and the `hello`/`pong`/`args`
+demos' own copies — seven in all) now emits the verb instead of `DSPOP_WRITE`.
+Console writes still address `CON_TASK` directly (no namespace resolution on the
+per-character echo hot path — the concern the console-server postmortem raised);
+making `/dev/cons` a namespace-mounted file is a Phase 3 concern, noted not built.
+
+Verified on QEMU by an A/B (committed `main` on `DSPOP_WRITE` vs. this change on
+`NP_WRITE_FILE`): the whole shell + `/bin` session — every character of which
+flows through `con_write` → cond — is **byte-identical**, zero `-d int` aborts.
+The framebuffer backend decodes the same `handle()`, so it's covered by
+construction (real-hardware Parallels confirms the pixels, as ever).
+
+**Phase 0 is complete.** The three hand-rolled protocols (`FSOP_*`, `DSPOP_*`,
+`NETOP_*`) are unified onto one `ninep-abi` verb set for the servers that own
+*files and the console*: `FSOP_*` is reduced to `fsd`'s disk-management control
+ops, `DSPOP_*` is gone, and `NETOP_*` (the `ping`/`resolve`/`fetch` *client*
+protocol) stays until `/net`-as-files lands in Phase 3. Combined with the
+per-task namespace + `bind` (0c) and multi-mount (0d), the Plan 9 foundation of
+the distributed vision is in place — a natural **v0.5.0**. Next: cut the release,
+then Phase 1 (9P-over-TCP).
+
 ## Cluster Phase 0, step 0d: fsd multi-mount — two filesystems at once (the payoff)
 
 **Two different filesystems mounted simultaneously at different paths** — the

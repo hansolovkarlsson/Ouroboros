@@ -351,7 +351,7 @@ pub const GRANT_WRITE: u64 = 2;
 /// from `buf` (in the server's own region) straight to the kernel's
 /// console. **Gated to [`CON_TASK`]** alone, exactly like the `BLOCK_*`
 /// syscalls are gated to [`FSD_TASK`] - ordinary tasks reach the console
-/// only through the server (a [`DSPOP_WRITE`] message), while the
+/// only through the server (an `ninep_abi::NP_WRITE_FILE` message), while the
 /// kernel's own `console::putc`/`println!` stay the emergency/boot path.
 /// Bytes are written raw, no newline translation (same as [`PUTC`]).
 /// `len` is bounded by the same per-buffer cap as the sector/staging
@@ -388,7 +388,7 @@ pub const FB_CLEAR: u64 = 37;
 /// `()` -> the calling task's **stdout target** (the task index its
 /// output should be sent to, set by whoever [`SPAWN`]ed it; [`CON_TASK`]
 /// by default, and for boot-loaded tasks). A program routes its output
-/// there: if it's [`CON_TASK`], via the console server (a [`DSPOP_WRITE`]
+/// there: if it's [`CON_TASK`], via the console server (an `ninep_abi::NP_WRITE_FILE`
 /// message); otherwise as a raw byte stream (1-to-[`MSG_MAX_LEN`]-byte
 /// data messages, then one empty end-of-stream message - the same
 /// convention the shell's `builtin | program` pipe already uses) to that
@@ -827,22 +827,16 @@ pub const ERASE_DEFAULT_SECTORS: u64 = 2048;
 pub const PARTITION_START_LBA: u64 = 2048;
 
 // ---------------------------------------------------------------------
-// The console server's request protocol (not syscalls) - messages sent
-// to CON_TASK, normally via MSG_CALL. Shares the filesystem protocol's
-// header shape: the op as a little-endian u64 at offset 0, parameters as
-// little-endian u64s from offset 8, and the inline payload from
-// FS_REQ_PAYLOAD. The reply is a status u64 at offset 0 (0 on success).
-// A call to an empty CON_TASK slot fails at the MSG_CALL layer with
-// TASK_ERR_NO_SUCH_TASK - the "no console server this boot" case, which
-// clients handle by falling back to the kernel console via PUTC.
+// The console server (CON_TASK) no longer has a bespoke protocol. Writing
+// the console is a write to the console "file": an `ninep_abi::NP_WRITE_FILE`
+// message (inline text as the data), sent to CON_TASK via MSG_CALL - the same
+// uniform verb set fsd speaks (cluster Phase 0). cond serves only the console,
+// so it ignores the tree/path and renders the data (see the shell's/ulib's
+// `con_write`). A call to an empty CON_TASK slot fails at the MSG_CALL layer
+// with TASK_ERR_NO_SUCH_TASK - the "no console server this boot" case, which
+// clients handle by falling back to the kernel console via PUTC. The old
+// `DSPOP_WRITE` op was retired here when cond adopted the verb set.
 // ---------------------------------------------------------------------
-
-/// params: `(text len)`; payload: the text bytes -> status `0`. Writes
-/// the text to the console - rendered on a framebuffer backend, or
-/// forwarded to the kernel's byte-stream console via [`CON_WRITE`].
-/// Text is capped at [`FS_DATA_MAX`] per request; clients chunk longer
-/// output (see the shell's `con_write`).
-pub const DSPOP_WRITE: u64 = 1;
 
 /// A reserved *sender* sentinel the kernel's supervisor uses to inject a
 /// liveness **ping** into a supervised server's mailbox, and the *dest*
@@ -857,7 +851,7 @@ pub const DSPOP_WRITE: u64 = 1;
 pub const KERNEL_SENDER: u64 = 0xFE;
 
 /// The op the supervisor's liveness ping carries in its message header
-/// (offset 0, the same slot `FSOP_*`/`DSPOP_*` occupy). Deliberately well
+/// (offset 0, the same slot `FSOP_*`/`NP_*` verbs occupy). Deliberately well
 /// clear of every real server op (which start at 1), so a server that
 /// *does* inspect it can fast-path it - though none needs to: a server
 /// replies harmlessly to any unknown op, and that reply, addressed to

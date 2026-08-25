@@ -38,9 +38,11 @@ pub extern "C" fn _start() -> ! {
     main()
 }
 
-const REQ_PAYLOAD: usize = syscall_abi::FS_REQ_PAYLOAD as usize;
 const REPLY_PAYLOAD: usize = syscall_abi::FS_REPLY_PAYLOAD as usize;
 const DATA_MAX: usize = syscall_abi::FS_DATA_MAX as usize;
+/// Request header size for the uniform verb set - the offset of a console
+/// write's inline text (`NP_WRITE_FILE`'s payload). One word past `FSOP_*`.
+const NP_HDR: usize = ninep_abi::NP_REQ_PAYLOAD as usize;
 
 fn main() -> ! {
     let mut backend = detect_backend();
@@ -63,17 +65,22 @@ fn main() -> ! {
     }
 }
 
-/// Decodes one request and builds a status-only reply. The only op is
-/// `DSPOP_WRITE` (put text on the console); anything else is acked with
-/// status 0 - lost output never wedges a client's `MSG_CALL`.
+/// Decodes one request and builds a status-only reply. The console is written
+/// with the uniform verb set (`ninep-abi`, the Phase 0 cluster protocol): an
+/// `NP_WRITE_FILE` whose inline data is the text to render - a write to the
+/// console "file". cond serves only the console, so it ignores the `tree` and
+/// `path` fields and just renders the data. Any other verb is acked with status
+/// 0 - lost output never wedges a client's `MSG_CALL`.
 fn handle(backend: &mut Backend, req: &[u8], reply: &mut [u8]) -> usize {
     reply[..8].copy_from_slice(&0u64.to_le_bytes());
-    if req.len() < REQ_PAYLOAD {
+    if req.len() < NP_HDR {
         return REPLY_PAYLOAD;
     }
-    if read_u64(req, 0) == syscall_abi::DSPOP_WRITE {
-        let text_len = read_u64(req, 8) as usize;
-        let payload = &req[REQ_PAYLOAD..];
+    if read_u64(req, 0) == ninep_abi::NP_WRITE_FILE {
+        // NP_WRITE_FILE: data_len at param a1 (offset 24), inline data at the
+        // payload offset. path_len (a0) is 0 from our clients - cond needs no path.
+        let text_len = read_u64(req, 24) as usize;
+        let payload = &req[NP_HDR..];
         let n = text_len.min(payload.len()).min(DATA_MAX);
         write_text(backend, &payload[..n]);
     }

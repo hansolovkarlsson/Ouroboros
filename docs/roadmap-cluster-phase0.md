@@ -232,9 +232,15 @@ the next begins — the cadence that carried the filesystem/network/xHCI arcs.
   tree 1) shows **two different filesystems at once**, reads served over NP per
   tree, zero aborts; single-mount regression byte-identical. See the CHANGELOG's
   "step 0d" entry.
-- **0e — `cond` → `/dev/cons` on the verbs.** `cond` adopts `NP_WRITE`; console
-  output becomes a namespace-resolved write. *Ship:* two different servers, one
-  verb set; `DSPOP_*` deleted. **Phase 0 done.**
+- **0e — `cond` on the verbs — DONE (2026-08-25). Phase 0 complete.** `cond`
+  decodes `NP_WRITE_FILE` (inline text = the console write) instead of
+  `DSPOP_WRITE`; all seven `con_write` clients emit the verb; `DSPOP_*` deleted.
+  Scope note: console writes still address `CON_TASK` directly (no namespace
+  resolution on the per-character echo hot path — the console-server postmortem's
+  concern); a namespace-mounted `/dev/cons` is deferred to Phase 3. *Shipped:*
+  byte-identical console output over the new verb, zero aborts; the three
+  bespoke protocols are unified (`FSOP_*` = fsd admin-only, `DSPOP_*` gone,
+  `NETOP_*` = the client protocol, until Phase 3). See the CHANGELOG's "step 0e".
 
 ## The multi-mount test disk
 
