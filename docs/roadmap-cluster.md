@@ -96,6 +96,11 @@ protocol you wrote from scratch.
 
 ### Phase 0 — Local namespace + a uniform file protocol (the foundation)
 
+> **Detailed design:** [`roadmap-cluster-phase0.md`](roadmap-cluster-phase0.md) —
+> the resolved design decisions (fused verbs now / fids deferred to Phase 1;
+> namespace as per-task kernel-stored opaque bytes; capabilities unchanged), the
+> `ninep-abi` verb/wire format, `fsd` multi-mount, and the staged 0a–0e plan.
+
 *This is the Plan 9 "local half" from [`research-directions.md`](research-directions.md),
 now understood as the foundation of the whole distributed vision rather than a
 standalone elegance play. It has a concrete local consumer — **multiple
