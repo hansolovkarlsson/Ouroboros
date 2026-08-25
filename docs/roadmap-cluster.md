@@ -132,6 +132,11 @@ aborts. The three bespoke protocols are gone.
 
 ### Phase 1 — 9P-over-TCP: the pivot to distributed
 
+> **Detailed design:** [`roadmap-cluster-phase1.md`](roadmap-cluster-phase1.md) —
+> the grant/safecopy→inline-frame reframing, netd as the gateway both ways, the
+> remote namespace binding, trusted-LAN-first, and the staged 1a–1d plan (the
+> first two host-testable with one VM; two-VM socket networking only for 1d).
+
 - **`netd` carries the file protocol over a TCP connection.** A 9P transaction is
   a request/reply message pair — the same shape `netd` already services locally,
   now framed over a TCP stream instead of kernel IPC.
