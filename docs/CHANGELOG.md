@@ -7,6 +7,40 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/`; 
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## Cluster Phase 0: netd migrated, and the FSOP_* file-op arms retired
+
+The last FSOP file-op client migrates, and the payoff: **`fsd`'s `FSOP_*`
+file-op handlers are deleted** — the uniform verb set is now the *sole* file
+protocol.
+
+`netd` (the static-file HTTP server) was the one remaining client still reading
+files from `fsd` over `FSOP_*` (`READ_FILE` to stat, `LIST_DIR`, `READ_BULK` to
+stream). Its own `fsd` client (`fsd_call` + the manual bulk-read build) now
+speaks the verbs (`NP_READ_FILE`/`NP_READDIR`/`NP_READ`, `tree = 0`).
+
+With every client (`ulib`/`/bin`, the shell, `netd`) migrated, `fsd`'s twelve
+`FSOP_*` file-op match arms (`LIST_DIR`/`READ_FILE`/`READ_AT`/`READ_BULK`/
+`WRITE_FILE`/`WRITE_BULK`/`WRITE_AT`/`MKDIR`/`RMDIR`/`TOUCH`/`RM`/`MV`) were
+**deleted** — ~210 lines. `handle()` now dispatches the NP range to
+`handle_ninep` and keeps only the `FSOP_*` **disk-management control ops**
+(mount/mount-info/unmount/erase/partition/format — `fsd`-specific, not uniform
+file verbs); any stray op (or the supervisor's `SYSOP_PING`) gets a bare status
+reply, which for the ping is the ack.
+
+Verified two ways on QEMU: (1) the fs batch (shell + `/bin`, incl. a 64 KiB read)
+— all outputs correct, **exactly one** "filesystem server ready" (the ping still
+acks, so `fsd` is *not* supervisor-restarted after the deletion), zero `-d int`
+aborts; (2) `netd` over the network (`run-image-server` + `curl`) — `GET
+/BIG.TXT` returns **HTTP 200, 65536 bytes, byte-identical** to the on-disk file,
+exercising `netd`'s stat + streaming reads end-to-end over NP.
+
+The three bespoke protocols are now down to two: `FSOP_*` is **admin-only**, and
+`DSPOP_*` (the console) remains until step 0e. Small cosmetic follow-up left: a
+few `FSOP_*` file-op *constants* linger as `ulib`'s mkdir/rmdir/touch/rm
+translation keys (`/bin` still passes them; `ulib` maps them to `NP_*`) — pointing
+`/bin` at the verbs directly would let those constants be deleted too. The
+load-bearing retirement (no FSOP file traffic; the handlers gone) is done.
+
 ## Cluster Phase 0: the shell migrates to the uniform verb set
 
 Follow-on to step 0a+0b: the **shell's own filesystem helpers** now speak

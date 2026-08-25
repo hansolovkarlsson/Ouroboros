@@ -145,6 +145,7 @@ dependencies = [
 name = "netd"
 version = "0.1.0"
 dependencies = [
+ "ninep-abi",
  "syscall-abi",
 ]
 

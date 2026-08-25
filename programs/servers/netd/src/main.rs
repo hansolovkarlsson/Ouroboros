@@ -77,7 +77,7 @@ const RESP_503: &[u8] = b"HTTP/1.0 503 Service Unavailable\r\nContent-Type: text
 const RESP_405: &[u8] = b"HTTP/1.0 405 Method Not Allowed\r\nAllow: GET, HEAD\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nMethod Not Allowed\r\n";
 
 /// One file chunk / one TCP body segment - kept under the 1460 MSS so each
-/// `FSOP_READ_BULK` maps to at most one segment (a segment may be smaller when
+/// `NP_READ` (bulk) maps to at most one segment (a segment may be smaller when
 /// the peer's remaining window is tighter - see `pump_send`).
 const SERVE_CHUNK: usize = 1400;
 
@@ -1222,7 +1222,7 @@ fn sack_retransmit(mac: &[u8; 6], c: &mut TcpConn, seg: &TcpIn) {
 /// returns a generated HTML **index** of its entries, with links, so the
 /// filesystem is browsable; anything else is a 404, and a missing/unmounted
 /// filesystem a 503. netd is `fsd`'s first non-shell client. The file is
-/// *stat*'d (one `FSOP_READ_FILE`, whose status is the real size) - which
+/// *stat*'d (one `NP_READ_FILE`, whose status is the real size) - which
 /// checks existence and gives the size for `Content-Length`; its body then
 /// streams from offset 0 (fsd reads are idempotent, offset-based).
 fn start_response(c: &mut TcpConn, request: &[u8]) {
@@ -1310,18 +1310,20 @@ fn set_prefix(c: &mut TcpConn, bytes: &[u8]) {
     c.prefix_len = n;
 }
 
-/// One request/response round trip to the filesystem server: build an
-/// `FSOP_*` request (op + two u64 params + the path payload), `MSG_CALL`
+/// One request/response round trip to the filesystem server over the uniform
+/// verb set ([`ninep-abi`], the Phase 0 cluster protocol): build a request
+/// (verb + `tree` selector + two u64 params + the path payload), `MSG_CALL`
 /// `fsd`, and return its status - copying any inline reply payload into
 /// `result`. Returns the status (a byte count / size on success, or an
-/// `FS_ERR_*`/`TASK_ERR_*` code `>= FS_ERR_MIN`). The shell's `fs_call`,
-/// pared to netd's two callers.
-fn fsd_call(op: u64, p0: u64, p1: u64, path: &[u8], result: &mut [u8]) -> u64 {
-    const HDR: usize = syscall_abi::FS_REQ_PAYLOAD as usize;
+/// `FS_ERR_*`/`TASK_ERR_*` code `>= FS_ERR_MIN`). The shell's `np_call`, pared
+/// to netd's two callers. `tree` is `0` for now (a single implicit mount).
+fn fsd_call(verb: u64, p0: u64, p1: u64, path: &[u8], result: &mut [u8]) -> u64 {
+    const HDR: usize = ninep_abi::NP_REQ_PAYLOAD as usize;
     let mut req = [0u8; syscall_abi::MSG_MAX_LEN as usize];
-    req[0..8].copy_from_slice(&op.to_le_bytes());
-    req[8..16].copy_from_slice(&p0.to_le_bytes());
-    req[16..24].copy_from_slice(&p1.to_le_bytes());
+    req[0..8].copy_from_slice(&verb.to_le_bytes());
+    req[8..16].copy_from_slice(&0u64.to_le_bytes()); // tree 0
+    req[16..24].copy_from_slice(&p0.to_le_bytes());
+    req[24..32].copy_from_slice(&p1.to_le_bytes());
     let end = HDR + path.len();
     if end > req.len() {
         return syscall_abi::FS_ERROR;
@@ -1347,11 +1349,11 @@ fn fsd_call(op: u64, p0: u64, p1: u64, path: &[u8], result: &mut [u8]) -> u64 {
     read_u64(&reply, 0) // fsd's status
 }
 
-/// Stat a file: `FSOP_READ_FILE`'s status is the file's *real* size regardless
+/// Stat a file: `NP_READ_FILE`'s status is the file's *real* size regardless
 /// of how much was copied, so a `want` of 1 (the smallest fsd accepts - it
 /// rejects 0) gets the size in one call; the returned byte is ignored.
 fn stat_size(path: &[u8]) -> u64 {
-    fsd_call(syscall_abi::FSOP_READ_FILE, path.len() as u64, 1, path, &mut [])
+    fsd_call(ninep_abi::NP_READ_FILE, path.len() as u64, 1, path, &mut [])
 }
 
 /// List a directory's entries into `out` as newline-separated names (dirs
@@ -1359,7 +1361,7 @@ fn stat_size(path: &[u8]) -> u64 {
 /// count, or an error code. Bounded by fsd's inline reply cap.
 fn list_dir(path: &[u8], out: &mut [u8]) -> u64 {
     fsd_call(
-        syscall_abi::FSOP_LIST_DIR,
+        ninep_abi::NP_READDIR,
         path.len() as u64,
         out.len() as u64,
         path,
@@ -1633,12 +1635,13 @@ fn read_file_chunk(path: &[u8], offset: u64, buf: &mut [u8]) -> u64 {
     if granted != 0 {
         return syscall_abi::FS_ERROR;
     }
-    const HDR: usize = syscall_abi::FS_REQ_PAYLOAD as usize;
+    const HDR: usize = ninep_abi::NP_REQ_PAYLOAD as usize;
     let mut req = [0u8; syscall_abi::MSG_MAX_LEN as usize];
-    req[0..8].copy_from_slice(&syscall_abi::FSOP_READ_BULK.to_le_bytes());
-    req[8..16].copy_from_slice(&(path.len() as u64).to_le_bytes()); // param0: path len
-    req[16..24].copy_from_slice(&offset.to_le_bytes()); // param1: offset
-    req[24..32].copy_from_slice(&want.to_le_bytes()); // param2: want
+    req[0..8].copy_from_slice(&ninep_abi::NP_READ.to_le_bytes());
+    req[8..16].copy_from_slice(&0u64.to_le_bytes()); // tree 0
+    req[16..24].copy_from_slice(&(path.len() as u64).to_le_bytes()); // param0: path len
+    req[24..32].copy_from_slice(&offset.to_le_bytes()); // param1: offset
+    req[32..40].copy_from_slice(&want.to_le_bytes()); // param2: want
                                                       // param3 (0) already zeroed
     let end = HDR + path.len();
     if end > req.len() {

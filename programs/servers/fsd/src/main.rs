@@ -237,28 +237,28 @@ const REQ_PAYLOAD: usize = syscall_abi::FS_REQ_PAYLOAD as usize;
 const REPLY_PAYLOAD: usize = syscall_abi::FS_REPLY_PAYLOAD as usize;
 const DATA_MAX: usize = syscall_abi::FS_DATA_MAX as usize;
 
-/// Decodes and executes one v2 request from this server's own receive
-/// buffer, building the reply (status + inline result) in its own
-/// reply buffer. Returns the reply's total length. Every slice below
-/// is into `req`/`reply` - server-owned memory only. `sender` is the
-/// calling task, needed by the bulk ops to `SAFECOPY` against the
-/// client's grant (they move their data directly between task regions
-/// rather than inline in the reply - see `FSOP_READ_BULK`).
+/// Decodes and executes one request from this server's own receive buffer,
+/// building the reply (status + inline result) in its own reply buffer. Returns
+/// the reply's total length. Every slice below is into `req`/`reply` -
+/// server-owned memory only. `sender` is the calling task, needed by the bulk
+/// ops (`NP_READ`/`NP_WRITE`/`NP_WRITE_AT`) to `SAFECOPY` against the client's
+/// grant (they move their data directly between task regions rather than inline
+/// in the reply).
 fn handle(fs: &mut Option<vfs::Filesystem>, sender: u64, req: &[u8], reply: &mut [u8]) -> usize {
     if req.len() < REQ_PAYLOAD {
         return status_reply(reply, syscall_abi::FS_ERROR);
     }
     let op = read_u64(req, 0);
-    // Uniform verb set (ninep-abi, the Phase 0 cluster protocol): fsd speaks it
-    // alongside FSOP_* during the migration - every /bin filesystem command
-    // reaches us this way now (via ulib), while the shell's own helpers still
-    // use FSOP_*. Dispatch the NP verb range here; everything else (FSOP_* 1..18,
-    // and SYSOP_PING at 0xFFFF) falls through to the unchanged path below.
+    // File operations travel over the uniform verb set (ninep-abi, the Phase 0
+    // cluster protocol) - every client (ulib/`/bin`, the shell, netd) is
+    // migrated, so the old FSOP_* file-op arms are gone. Dispatch the NP verb
+    // range to handle_ninep; what remains below is the FSOP_* disk-management
+    // control ops (mount/unmount/erase/partition/format - fsd-specific, not
+    // uniform file verbs) plus the SYSOP_PING fall-through.
     if (ninep_abi::NP_BASE..ninep_abi::NP_LIMIT).contains(&op) {
         return handle_ninep(fs, sender, op, req, reply);
     }
     let p = [read_u64(req, 8), read_u64(req, 16), read_u64(req, 24), read_u64(req, 32)];
-    let payload = &req[REQ_PAYLOAD..];
 
     if op == syscall_abi::FSOP_MOUNT {
         if fs.is_some() {
@@ -316,220 +316,16 @@ fn handle(fs: &mut Option<vfs::Filesystem>, sender: u64, req: &[u8], reply: &mut
         return status_reply(reply, format_disk(p[0]));
     }
 
-    let Some(fs) = fs.as_mut() else {
-        return status_reply(reply, syscall_abi::NO_FS);
-    };
-    match op {
-        syscall_abi::FSOP_LIST_DIR => {
-            let Some(path) = path_from(payload, 0, p[0]) else {
-                return status_reply(reply, syscall_abi::FS_ERROR);
-            };
-            let Some(want) = want_len(p[1]) else {
-                return status_reply(reply, syscall_abi::FS_ERROR);
-            };
-            // Same fill-until-full formatting as ever: once the result
-            // window is full this stops *writing*, not iterating.
-            let mut written = 0usize;
-            let (status_slot, result) = reply[..REPLY_PAYLOAD + want].split_at_mut(REPLY_PAYLOAD);
-            let outcome = fs.list_dir(path, |name, is_dir, _size| {
-                let suffix: &[u8] = if is_dir { b"/\n" } else { b"\n" };
-                let entry_len = name.len() + suffix.len();
-                if written + entry_len > result.len() {
-                    return;
-                }
-                result[written..written + name.len()].copy_from_slice(name.as_bytes());
-                written += name.len();
-                result[written..written + suffix.len()].copy_from_slice(suffix);
-                written += suffix.len();
-            });
-            match outcome {
-                Ok(()) => {
-                    status_slot[..8].copy_from_slice(&(written as u64).to_le_bytes());
-                    REPLY_PAYLOAD + written
-                }
-                Err(e) => status_reply(reply, error_code(&e)),
-            }
-        }
-        syscall_abi::FSOP_READ_FILE => {
-            let Some(path) = path_from(payload, 0, p[0]) else {
-                return status_reply(reply, syscall_abi::FS_ERROR);
-            };
-            let Some(want) = want_len(p[1]) else {
-                return status_reply(reply, syscall_abi::FS_ERROR);
-            };
-            let (status_slot, result) = reply[..REPLY_PAYLOAD + want].split_at_mut(REPLY_PAYLOAD);
-            match fs.read_file(path, result) {
-                Ok(size) => {
-                    status_slot[..8].copy_from_slice(&(size as u64).to_le_bytes());
-                    REPLY_PAYLOAD + (size as usize).min(want)
-                }
-                Err(e) => status_reply(reply, error_code(&e)),
-            }
-        }
-        syscall_abi::FSOP_READ_AT => {
-            let Some(path) = path_from(payload, 0, p[0]) else {
-                return status_reply(reply, syscall_abi::FS_ERROR);
-            };
-            let Some(want) = want_len(p[2]) else {
-                return status_reply(reply, syscall_abi::FS_ERROR);
-            };
-            let (status_slot, result) = reply[..REPLY_PAYLOAD + want].split_at_mut(REPLY_PAYLOAD);
-            match fs.read_at(path, p[1], result) {
-                Ok(copied) => {
-                    status_slot[..8].copy_from_slice(&(copied as u64).to_le_bytes());
-                    REPLY_PAYLOAD + copied as usize
-                }
-                Err(e) => status_reply(reply, error_code(&e)),
-            }
-        }
-        syscall_abi::FSOP_READ_BULK => {
-            // The bulk sibling of READ_AT: the data doesn't travel in
-            // the reply (capped at DATA_MAX). We read one SAFECOPY_MAX
-            // chunk from `offset` into our own working buffer, then
-            // SAFECOPY it straight into the client's granted buffer -
-            // the client must have GRANT_WRITE-granted a buffer to us
-            // first (the shell's fs_read_bulk does). Reply is status
-            // only: bytes delivered this chunk (0 at/past EOF).
-            let Some(path) = path_from(payload, 0, p[0]) else {
-                return status_reply(reply, syscall_abi::FS_ERROR);
-            };
-            let offset = p[1];
-            // `want` (p[2]) lets a client with a buffer smaller than
-            // SAFECOPY_MAX cap how much we read, so the SAFECOPY below
-            // never exceeds its grant. Clamp to our own working buffer.
-            let want = (p[2] as usize).min(syscall_abi::SAFECOPY_MAX as usize);
-            let mut chunk = [0u8; syscall_abi::SAFECOPY_MAX as usize];
-            match fs.read_at(path, offset, &mut chunk[..want]) {
-                Ok(copied) => {
-                    let copied = copied as usize;
-                    if copied > 0 {
-                        let r = syscall5(
-                            syscall_abi::SAFECOPY,
-                            sender,
-                            0,
-                            chunk.as_ptr() as u64,
-                            copied as u64,
-                            syscall_abi::GRANT_WRITE,
-                        );
-                        if r >= syscall_abi::FS_ERR_MIN {
-                            return status_reply(reply, syscall_abi::FS_ERROR);
-                        }
-                    }
-                    status_reply(reply, copied as u64)
-                }
-                Err(e) => status_reply(reply, error_code(&e)),
-            }
-        }
-        syscall_abi::FSOP_WRITE_FILE => {
-            let Some(path) = path_from(payload, 0, p[0]) else {
-                return status_reply(reply, syscall_abi::FS_ERROR);
-            };
-            // Zero-length data is valid (truncate-to-empty) - the
-            // payload just ends where the path does then.
-            let data_len = p[1] as usize;
-            let path_len = p[0] as usize;
-            if data_len > DATA_MAX || payload.len() < path_len + data_len {
-                return status_reply(reply, syscall_abi::FS_ERROR);
-            }
-            let data = &payload[path_len..path_len + data_len];
-            match fs.write_file(path, data) {
-                Ok(()) => status_reply(reply, 0),
-                Err(e) => status_reply(reply, error_code(&e)),
-            }
-        }
-        syscall_abi::FSOP_WRITE_BULK => {
-            // The bulk sibling of WRITE_FILE: the data doesn't travel
-            // inline (DATA_MAX-capped). The client GRANT_READ-granted a
-            // buffer of `data_len` bytes (<= SAFECOPY_MAX); we SAFECOPY
-            // it into our own working buffer, then write. Zero-length is
-            // valid (truncate-to-empty) - no grant, no safecopy needed.
-            let Some(path) = path_from(payload, 0, p[0]) else {
-                return status_reply(reply, syscall_abi::FS_ERROR);
-            };
-            let data_len = p[1] as usize;
-            if data_len > syscall_abi::SAFECOPY_MAX as usize {
-                return status_reply(reply, syscall_abi::FS_ERROR);
-            }
-            let mut databuf = [0u8; syscall_abi::SAFECOPY_MAX as usize];
-            if data_len > 0 {
-                let r = syscall5(
-                    syscall_abi::SAFECOPY,
-                    sender,
-                    0,
-                    databuf.as_mut_ptr() as u64,
-                    data_len as u64,
-                    syscall_abi::GRANT_READ,
-                );
-                if r >= syscall_abi::FS_ERR_MIN {
-                    return status_reply(reply, syscall_abi::FS_ERROR);
-                }
-            }
-            match fs.write_file(path, &databuf[..data_len]) {
-                Ok(()) => status_reply(reply, 0),
-                Err(e) => status_reply(reply, error_code(&e)),
-            }
-        }
-        syscall_abi::FSOP_WRITE_AT => {
-            // Like WRITE_BULK, but writes at a byte offset (p[1]) and
-            // extends the file rather than replacing it - the streaming
-            // primitive. Data (p[2] bytes) comes via the client's
-            // GRANT_READ buffer, safecopied into our working buffer.
-            let Some(path) = path_from(payload, 0, p[0]) else {
-                return status_reply(reply, syscall_abi::FS_ERROR);
-            };
-            let offset = p[1];
-            let data_len = p[2] as usize;
-            if data_len > syscall_abi::SAFECOPY_MAX as usize {
-                return status_reply(reply, syscall_abi::FS_ERROR);
-            }
-            let mut databuf = [0u8; syscall_abi::SAFECOPY_MAX as usize];
-            if data_len > 0 {
-                let r = syscall5(
-                    syscall_abi::SAFECOPY,
-                    sender,
-                    0,
-                    databuf.as_mut_ptr() as u64,
-                    data_len as u64,
-                    syscall_abi::GRANT_READ,
-                );
-                if r >= syscall_abi::FS_ERR_MIN {
-                    return status_reply(reply, syscall_abi::FS_ERROR);
-                }
-            }
-            match fs.write_at(path, offset, &databuf[..data_len]) {
-                Ok(()) => status_reply(reply, 0),
-                Err(e) => status_reply(reply, error_code(&e)),
-            }
-        }
-        syscall_abi::FSOP_MKDIR | syscall_abi::FSOP_RMDIR | syscall_abi::FSOP_TOUCH | syscall_abi::FSOP_RM => {
-            let Some(path) = path_from(payload, 0, p[0]) else {
-                return status_reply(reply, syscall_abi::FS_ERROR);
-            };
-            let outcome = match op {
-                syscall_abi::FSOP_MKDIR => fs.mkdir(path),
-                syscall_abi::FSOP_RMDIR => fs.rmdir(path),
-                syscall_abi::FSOP_TOUCH => fs.touch(path),
-                _ => fs.rm(path),
-            };
-            match outcome {
-                Ok(()) => status_reply(reply, 0),
-                Err(e) => status_reply(reply, error_code(&e)),
-            }
-        }
-        syscall_abi::FSOP_MV => {
-            let Some(src) = path_from(payload, 0, p[0]) else {
-                return status_reply(reply, syscall_abi::FS_ERROR);
-            };
-            let Some(dst) = path_from(payload, p[0] as usize, p[1]) else {
-                return status_reply(reply, syscall_abi::FS_ERROR);
-            };
-            match fs.mv(src, dst) {
-                Ok(()) => status_reply(reply, 0),
-                Err(e) => status_reply(reply, error_code(&e)),
-            }
-        }
-        _ => status_reply(reply, syscall_abi::FS_ERROR),
-    }
+    // File operations now travel over the uniform verb set (ninep-abi) and are
+    // served by handle_ninep above - every client (ulib/`/bin`, the shell, netd)
+    // was migrated, so the old FSOP_* file-op arms are gone. What still reaches
+    // here: the disk-management control ops handled inline above (mount/unmount/
+    // erase/partition/format - fsd-specific, not uniform file verbs), and
+    // anything else - a stray/legacy op, or the supervisor's SYSOP_PING. A bare
+    // status reply is the right answer to all of them (for the ping, that reply,
+    // addressed back to the kernel sender, is itself the liveness ack).
+    let _ = fs; // the mounted volume is consulted only by handle_ninep now
+    status_reply(reply, syscall_abi::FS_ERROR)
 }
 
 /// Decodes and executes one uniform-verb request (`ninep-abi`, the Phase 0
