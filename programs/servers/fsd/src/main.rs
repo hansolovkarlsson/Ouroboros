@@ -713,6 +713,37 @@ fn handle_ninep(fs: &mut Option<vfs::Filesystem>, sender: u64, verb: u64, req: &
                 Err(e) => status_reply(reply, error_code(&e)),
             }
         }
+        ninep_abi::NP_READ_AT => {
+            let Some(path) = path_from(payload, 0, p[0]) else {
+                return status_reply(reply, syscall_abi::FS_ERROR);
+            };
+            let Some(want) = want_len(p[2]) else {
+                return status_reply(reply, syscall_abi::FS_ERROR);
+            };
+            let (status_slot, result) = reply[..REPLY_PAYLOAD + want].split_at_mut(REPLY_PAYLOAD);
+            match fs.read_at(path, p[1], result) {
+                Ok(copied) => {
+                    status_slot[..8].copy_from_slice(&(copied as u64).to_le_bytes());
+                    REPLY_PAYLOAD + copied as usize
+                }
+                Err(e) => status_reply(reply, error_code(&e)),
+            }
+        }
+        ninep_abi::NP_WRITE_FILE => {
+            let Some(path) = path_from(payload, 0, p[0]) else {
+                return status_reply(reply, syscall_abi::FS_ERROR);
+            };
+            let data_len = p[1] as usize;
+            let path_len = p[0] as usize;
+            if data_len > DATA_MAX || payload.len() < path_len + data_len {
+                return status_reply(reply, syscall_abi::FS_ERROR);
+            }
+            let data = &payload[path_len..path_len + data_len];
+            match fs.write_file(path, data) {
+                Ok(()) => status_reply(reply, 0),
+                Err(e) => status_reply(reply, error_code(&e)),
+            }
+        }
         _ => status_reply(reply, syscall_abi::FS_ERROR),
     }
 }

@@ -1708,6 +1708,59 @@ fn fs_call(op: u64, params: [u64; 4], payload1: &[u8], payload2: &[u8], result: 
     status
 }
 
+/// One filesystem-server round trip over the uniform verb set ([`ninep-abi`],
+/// the Phase 0 cluster protocol) - [`fs_call`]'s sibling with the `tree` mount
+/// selector at offset 8 and the payload at [`ninep_abi::NP_REQ_PAYLOAD`] (48).
+/// `tree` is `0` for now (a single implicit mount); the per-task namespace
+/// resolves it to a real mount in a later step. The reply shape (status u64 +
+/// inline result) is identical to [`fs_call`]'s, so the wrappers below and
+/// their callers are unchanged. The shell's *admin* ops (mount/format/…) keep
+/// using [`fs_call`]/`FSOP_*` - they are `fsd`-specific control, not file verbs.
+fn np_call(verb: u64, tree: u64, params: [u64; 4], payload1: &[u8], payload2: &[u8], result: &mut [u8]) -> u64 {
+    const HDR: usize = ninep_abi::NP_REQ_PAYLOAD as usize;
+    let mut req = [0u8; syscall_abi::MSG_MAX_LEN as usize];
+    req[0..8].copy_from_slice(&verb.to_le_bytes());
+    req[8..16].copy_from_slice(&tree.to_le_bytes());
+    let mut i = 0;
+    while i < 4 {
+        let at = 16 + i * 8;
+        req[at..at + 8].copy_from_slice(&params[i].to_le_bytes());
+        i += 1;
+    }
+    let p1_end = HDR + payload1.len();
+    let p2_end = p1_end + payload2.len();
+    if p2_end > req.len() {
+        return syscall_abi::FS_ERROR;
+    }
+    req[HDR..p1_end].copy_from_slice(payload1);
+    req[p1_end..p2_end].copy_from_slice(payload2);
+
+    let mut reply = [0u8; syscall_abi::MSG_MAX_LEN as usize];
+    let packed = syscall4(
+        syscall_abi::MSG_CALL,
+        syscall_abi::FSD_TASK,
+        req.as_ptr() as u64,
+        p2_end as u64,
+        reply.as_mut_ptr() as u64,
+    );
+    if packed == syscall_abi::TASK_ERR_NO_SUCH_TASK {
+        return NO_FS;
+    }
+    if packed >= FS_ERR_MIN {
+        return syscall_abi::FS_ERROR;
+    }
+    let reply_len = ((packed & 0xffff_ffff) as usize).min(reply.len());
+    if reply_len < 8 {
+        return syscall_abi::FS_ERROR;
+    }
+    let status = u64::from_le_bytes([
+        reply[0], reply[1], reply[2], reply[3], reply[4], reply[5], reply[6], reply[7],
+    ]);
+    let data_len = (reply_len - 8).min(result.len());
+    result[..data_len].copy_from_slice(&reply[8..8 + data_len]);
+    status
+}
+
 /// Lists `path`'s directory entries into `buf` as `name\n`/`name/\n` -
 /// same format and truncation behavior as ever (the server implements
 /// the old kernel handler verbatim, now into its own reply payload).
@@ -1718,8 +1771,9 @@ fn fs_call(op: u64, params: [u64; 4], payload1: &[u8], payload2: &[u8], result: 
 /// [`fs_call`] round trip to the filesystem server: the shell's "libc
 /// layer" over IPC; the contracts are unchanged.
 fn fs_list_dir(path: &str, buf: &mut [u8]) -> u64 {
-    fs_call(
-        syscall_abi::FSOP_LIST_DIR,
+    np_call(
+        ninep_abi::NP_READDIR,
+        0,
         [path.len() as u64, buf.len() as u64, 0, 0],
         path.as_bytes(),
         &[],
@@ -1732,8 +1786,9 @@ fn fs_list_dir(path: &str, buf: &mut [u8]) -> u64 {
 /// truncation), [`NO_FS`], or a specific `FS_ERR_*` code - same
 /// contract as ever, same reasoning as [`fs_list_dir`].
 fn fs_read_file(path: &str, buf: &mut [u8]) -> u64 {
-    fs_call(
-        syscall_abi::FSOP_READ_FILE,
+    np_call(
+        ninep_abi::NP_READ_FILE,
+        0,
         [path.len() as u64, buf.len() as u64, 0, 0],
         path.as_bytes(),
         &[],
@@ -1746,8 +1801,9 @@ fn fs_read_file(path: &str, buf: &mut [u8]) -> u64 {
 /// chunked-read primitive [`cmd_exec`]'s two-step spawn flow loops
 /// over. Same error space as [`fs_read_file`].
 fn fs_read_at(path: &str, offset: u64, buf: &mut [u8]) -> u64 {
-    fs_call(
-        syscall_abi::FSOP_READ_AT,
+    np_call(
+        ninep_abi::NP_READ_AT,
+        0,
         [path.len() as u64, offset, buf.len() as u64, 0],
         path.as_bytes(),
         &[],
@@ -1776,8 +1832,9 @@ fn fs_write_bulk(path: &str, data: &[u8]) -> u64 {
             return syscall_abi::FS_ERROR;
         }
     }
-    fs_call(
-        syscall_abi::FSOP_WRITE_BULK,
+    np_call(
+        ninep_abi::NP_WRITE,
+        0,
         [path.len() as u64, data.len() as u64, 0, 0],
         path.as_bytes(),
         &[],
@@ -1805,8 +1862,9 @@ fn fs_write_at(path: &str, offset: u64, data: &[u8]) -> u64 {
     if granted != 0 {
         return syscall_abi::FS_ERROR;
     }
-    fs_call(
-        syscall_abi::FSOP_WRITE_AT,
+    np_call(
+        ninep_abi::NP_WRITE_AT,
+        0,
         [path.len() as u64, offset, data.len() as u64, 0],
         path.as_bytes(),
         &[],
@@ -1821,8 +1879,9 @@ fn fs_write_at(path: &str, offset: u64, data: &[u8]) -> u64 {
 ///
 /// Creates or fully overwrites the file at `path` with `data`.
 fn fs_write_file(path: &str, data: &[u8]) -> u64 {
-    fs_call(
-        syscall_abi::FSOP_WRITE_FILE,
+    np_call(
+        ninep_abi::NP_WRITE_FILE,
+        0,
         [path.len() as u64, data.len() as u64, 0, 0],
         path.as_bytes(),
         data,

@@ -7,6 +7,35 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/`; 
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## Cluster Phase 0: the shell migrates to the uniform verb set
+
+Follow-on to step 0a+0b: the **shell's own filesystem helpers** now speak
+`ninep-abi` too. 0a+0b moved `ulib` (every `/bin` command); the shell keeps a
+*separate* set of fs helpers (it predates `ulib`), so it was still emitting
+`FSOP_*` for file ops. Re-pointed all six — `fs_list_dir`/`fs_read_file`/
+`fs_read_at`/`fs_write_bulk`/`fs_write_at`/`fs_write_file` — through a new shell
+`np_call`, exactly as `ulib` was. The shell's **admin** ops (mount/mount-info/
+unmount/erase/partition/format) keep using `fs_call`/`FSOP_*` — they are
+`fsd`-specific control, not uniform file verbs.
+
+Two verbs were added to complete the file-op cover the shell needs: `NP_READ_AT`
+(windowed inline read — the exec loader's chunked `spawn_path` loop) and
+`NP_WRITE_FILE` (small inline create/overwrite — the `write` builtin), each
+mirroring its `FSOP_*` original into the same `vfs` call in `fsd`'s
+`handle_ninep`. The verb set now fully covers `fsd`'s file ops.
+
+Verified on QEMU with the same piped-stdin batch harness (an A/B: committed
+`main` with the shell on `FSOP_*` vs. this change with it on `NP`): **byte-
+identical** but for one boot-print interleaving line, zero `-d int` aborts. The
+run exercises both new verbs directly — every `/bin` command's program is loaded
+by the shell via `NP_READ_AT`, and `write` then `cat` round-trips through
+`NP_WRITE_FILE`.
+
+`FSOP_*` file-op arms **stay in `fsd`** for now: **`netd`** (the static-file HTTP
+server) still reads files from `fsd` via `FSOP_READ_FILE`/`LIST_DIR`/`READ_BULK`.
+Migrating `netd`'s `fsd` client is the next sub-step, after which the `FSOP_*`
+file-op arms are deleted and only the admin ops remain.
+
 ## Cluster Phase 0, step 0a+0b: the `ninep-abi` uniform verb set, in use end-to-end
 
 The first *build* step of the distributed-cluster arc (design:

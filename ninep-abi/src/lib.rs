@@ -80,8 +80,17 @@ pub const NP_RM: u64 = NP_BASE + 8;
 /// Rename/move (relink; no content moves). Params: `a0` = src length, `a1` =
 /// dst length; payload = src bytes then dst bytes. Status = 0.
 pub const NP_MV: u64 = NP_BASE + 9;
+/// Read a windowed slice of a file *inline* (the reply carries the bytes): the
+/// chunked-read primitive an exec loader loops over. Params: `a0` = path length,
+/// `a1` = offset, `a2` = want. Status = bytes copied (0 at/past EOF).
+pub const NP_READ_AT: u64 = NP_BASE + 10;
+/// Create/overwrite a file with data carried *inline* in the request (bounded
+/// by `FS_DATA_MAX`, 512) rather than by grant/safecopy - the small-write path.
+/// Params: `a0` = path length, `a1` = data length; payload = path then data.
+/// Status = 0.
+pub const NP_WRITE_FILE: u64 = NP_BASE + 11;
 
 /// One past the last defined verb — a server dispatches the `[NP_BASE, NP_LIMIT)`
 /// range to its verb handler and lets everything else (including `SYSOP_PING`)
 /// fall through to its existing path.
-pub const NP_LIMIT: u64 = NP_MV + 1;
+pub const NP_LIMIT: u64 = NP_WRITE_FILE + 1;
