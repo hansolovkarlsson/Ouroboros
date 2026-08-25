@@ -7,6 +7,110 @@ for the forward plan see [`roadmap.md`](roadmap.md).
 
 ---
 
+## 2026-08-25 — the cluster day: Phase 0 done (v0.5.0), Phase 1 begun
+
+The biggest single day of the project. It started with a small fix and ended
+with the filesystem servers speaking a single protocol over the network.
+
+**First, a patch: the large-read `fsd` restart (v0.4.1).** The real-hardware pass
+had left one open bug — a multi-MB `cat` got `fsd` supervisor-restarted mid-read.
+The roadmap had guessed the fix was "ack the health-ping during long reads," but
+reading the code told a different story: `fat32::read_at` re-walked the cluster
+chain *from the file's start on every call*, with no FAT cache, so a chunked
+read was O(n²) and a single late-offset request issued enough uncached FAT reads
+to blow past the *runnable*-wedge threshold (2.56 s) — which no ping touches. The
+fix was a sequential-read cursor that resumes the walk instead of restarting it:
+each request O(chunk), the read O(n). Proven on QEMU with a decisive A/B (a 1 MiB
+read: 0.99 s with the cursor vs. did-not-finish-in-120 s without). Shipped as
+v0.4.1 — the first *patch* release, exercising that half of the version scheme.
+
+**Then the whole of cluster Phase 0 — the arc.** The goal from
+[`roadmap-cluster.md`](roadmap-cluster.md): stop having three bespoke server
+protocols (`FSOP_*`, `DSPOP_*`, `NETOP_*`) and give every server *one* uniform,
+Plan 9-style verb set, with each task composing its own namespace. Built in
+sub-steps, each verified byte-identical and shippable:
+
+- **0a+0b — the `ninep-abi` verb set, in use end to end.** Merged into one step
+  because "fsd speaks the verbs" is untestable without a client — the minimal
+  client *is* the `ulib` re-point, so they went together. Every `/bin` filesystem
+  command reached `fsd` over the new protocol, byte-identical, with no `/bin`
+  source change (ulib absorbed it). The load-bearing addition was the `tree`
+  selector in the wire header — the future multi-mount key.
+- **The FSOP retirement, client by client.** The shell keeps its *own* fs helpers
+  (separate from ulib — a surprise found in the build), and `netd` is an fsd
+  client too, so retiring `FSOP_*` was a client census, not a server edit: migrate
+  the shell, then `netd`, and only then delete `fsd`'s twelve FSOP file-op arms
+  (~210 lines). `FSOP_*` is now admin-only.
+- **0c — per-task namespaces + `bind` (the first kernel change).** Modeled on the
+  existing per-task CWD store. The plan was CWD-style spawn-time *staging*; while
+  building it, the shell's own `cd` (which validates via `fs_list_dir`) showed it
+  must resolve too — which made **direct `NS_SET` + automatic parent→child
+  inheritance** the simpler design. An empty namespace is the identity, so
+  unbound behavior stayed byte-identical. `bind /mnt /EFI` → `ls /mnt` == `ls
+  /EFI`, per-task, inherited by spawned commands.
+- **0d — multi-mount, the payoff.** `fsd`'s single mount became a table indexed
+  by `tree`; `mount <partition> <path>` mounts a second filesystem and binds it.
+  A nice simplification: the existing two-partition `run-image-ext2` disk was
+  already the test rig — `ls /` (ext2) and `ls /mnt/f` (FAT32) show two different
+  on-disk filesystems at once, which the single-mount model physically couldn't
+  do.
+- **0e — `cond` on the verbs.** Console writes became `NP_WRITE_FILE` to the
+  console "file"; `DSPOP_*` deleted. The last bespoke protocol gone.
+
+Cut **v0.5.0** — the first *per-arc minor* release (Phase 0).
+
+**Then Phase 1 began — 9P-over-TCP.** Wrote the design
+([`roadmap-cluster-phase1.md`](roadmap-cluster-phase1.md)) and built **step 1a:
+the export gateway.** The reframing: locally, bulk data moves by grant/safecopy;
+over TCP there is no grant, so a verb travels as a length-delimited frame with
+data inline. `netd` grew a second inbound listener on port 564 (alongside HTTP's
+80) — the connection remembers its local port so replies leave the right source
+port, and the first-data handler dispatches by port to a new `handle_9p` that
+decodes the frame, runs the verb against local `fsd`, and frames the reply. A
+host-side python 9P client read the guest's disk over TCP (`readdir /` →
+`BIN/ EFI/`; `read /EFI/ORBS/INIT.CFG` → its contents), HTTP unregressed, zero
+aborts. A property worth naming fell out: because Phase 0 deferred fids, the
+verbs are *path-based* — one round trip per op regardless of path depth — so real
+9P's per-component-walk chattiness simply doesn't arise. The client half (1b/1c)
+and the two-VM "aha" (1d) are next.
+
+Design retrospective:
+[the cluster Phase 0 postmortem](cluster-phase0-postmortem.md).
+
+## 2026-08-24 — real-hardware xHCI, the north star, and the first releases
+
+Three threads: closed the last real-hardware bug, wrote down where the project is
+ultimately going, and started actually cutting releases.
+
+**The xHCI keyboard↔USB-storage contention, fixed on real Parallels hardware.**
+The bug wore one symptom over two boot configs, and it was *two* bugs. **Mode A**
+(keyboard works, storage degrades to I/O errors) was a missing BOT error
+recovery in `usb_msd.rs` — a single contention-induced bulk-endpoint stall
+stayed halted forever; fixed with `xhci::reset_storage_endpoint` (controller
+commands Parallels forwards, not the class request it doesn't) + a bounded
+retry. **Mode B** (storage works, keyboard never addressed) was a port-scan race
+— the scan broke on the first connected port, so the fast SuperSpeed stick won
+and the slower synthetic keyboard was missed; fixed with a minimum-settle +
+debounce scan. QEMU hid both (its keyboard is synthetic, its storage virtio-blk
+— they never share the xHCI bus). Both confirmed on hardware.
+
+**The north star, written down.** [`roadmap-cluster.md`](roadmap-cluster.md): a
+Plan 9-style distributed resource-sharing cluster — machines exporting resources
+as file trees, each composing a private namespace of the whole. Stated honestly:
+sharing resources is doable (Phases 0–4); transparent shared memory / single
+system image is the mirage, out of scope by design. The key insight the whole
+plan rests on: *"remote" is just "the same protocol over TCP instead of local
+IPC"* — which is why the local Plan 9 work (Phase 0) is step 1 of the cluster,
+not a detour.
+
+**Releases began.** A `VERSION` file, `scripts/release.sh` (a deliberate
+two-phase `build`/`publish` split), and `docs/RELEASING.md` with the version
+scheme: `0.MINOR.PATCH`, a completed *arc* → minor bump, an isolated *fix* →
+patch. First cut was **v0.4.0** — bundling everything built to date (four arcs).
+A real quirk surfaced: `prl_disk_tool`'s `.hdd` bundle references its `.dmg` by
+absolute path, so a zipped `.hdd` is useless off the build machine; the portable
+Parallels artifact is the self-contained `.dmg`, wrapped into a `.hdd` locally.
+
 ## 2026-08-23 — the filesystems day: exFAT read+write, a cleanup, then ext2
 
 Yesterday's filesystem arc left a `Filesystem` enum inside `fsd` with exactly
