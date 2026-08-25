@@ -94,3 +94,32 @@ pub const NP_WRITE_FILE: u64 = NP_BASE + 11;
 /// range to its verb handler and lets everything else (including `SYSOP_PING`)
 /// fall through to its existing path.
 pub const NP_LIMIT: u64 = NP_WRITE_FILE + 1;
+
+// ---------------------------------------------------------------------------
+// The verbs over TCP (cluster Phase 1: 9P-over-TCP). Locally a request is a
+// kernel-copied `MSG_CALL` and bulk data moves by grant/safecopy; over a TCP
+// stream there is no grant, so the same verb + params travel with data **inline
+// in the stream**, length-delimited so the receiver knows where a message ends:
+//
+//   request:  [u32 len (LE)][verb:u64][tree:u64][a0..a3:u64][payload...]
+//   reply:    [u32 len (LE)][status:u64][result...]
+//
+// `len` is the number of bytes that follow the 4-byte length field (the NP
+// message itself: the 48-byte header + payload for a request, or the 8-byte
+// status + result for a reply). A reader reads 4 bytes, then `len` more. The
+// header is exactly the local NP wire; only the transport of bulk data changes
+// (inline, not via a grant). See `docs/roadmap-cluster-phase1.md`.
+// ---------------------------------------------------------------------------
+
+/// The TCP port a machine's 9P export listener runs on (9P's registered port),
+/// distinct from any HTTP server. A client remote-mounts `host:NP_NET_PORT`.
+pub const NP_NET_PORT: u16 = 564;
+
+/// The 4-byte length prefix on every framed message (little-endian `u32`).
+pub const NP_NET_LEN_PREFIX: usize = 4;
+
+/// Largest framed message body (the bytes after the length prefix): the 48-byte
+/// header plus an inline data chunk. Sized to hold a bulk read/write chunk
+/// (`SAFECOPY_MAX`) plus the header, and to fit comfortably in a couple of TCP
+/// segments. A large file streams a chunk per round trip, as `cat` does locally.
+pub const NP_NET_MAX: usize = 48 + 2048;

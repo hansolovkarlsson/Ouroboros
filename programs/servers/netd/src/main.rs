@@ -656,6 +656,10 @@ struct TcpConn {
     peer_ip: [u8; 4],
     peer_mac: [u8; 6],
     peer_port: u16,
+    /// The local port this connection is served on - 80 (HTTP) or `NP_NET_PORT`
+    /// 564 (9P export). Replies go out from this source port, and it selects
+    /// which handler an incoming request goes to (`start_response` vs `handle_9p`).
+    local_port: u16,
     /// Our next send sequence number (the seq of the next byte we'll send).
     snd_nxt: u32,
     /// The oldest unacknowledged sequence number - advanced by the peer's
@@ -743,6 +747,10 @@ struct TcpIn {
     src_ip: [u8; 4],
     src_mac: [u8; 6],
     src_port: u16,
+    /// The local port the segment is addressed to - 80 (HTTP) or
+    /// `NP_NET_PORT` 564 (9P export); the connection remembers it so replies
+    /// go out from the right source port.
+    dst_port: u16,
     seq: u32,
     ack: u32,
     window: u16,
@@ -821,8 +829,9 @@ fn parse_tcp_in(frame: &[u8]) -> Option<TcpIn> {
     if frame.len() < t + 20 {
         return None;
     }
-    if u16be(frame, t + 2) != SERVER_PORT {
-        return None; // not to our listen port
+    let dst_port = u16be(frame, t + 2);
+    if dst_port != SERVER_PORT && dst_port != ninep_abi::NP_NET_PORT {
+        return None; // not to a listen port (HTTP 80 or 9P-export 564)
     }
     let data_off = t + ((frame[t + 12] >> 4) as usize) * 4;
     let ip_total = u16be(frame, 16) as usize;
@@ -869,6 +878,7 @@ fn parse_tcp_in(frame: &[u8]) -> Option<TcpIn> {
         src_ip,
         src_mac,
         src_port: u16be(frame, t),
+        dst_port,
         seq: u32be(frame, t + 4),
         ack: u32be(frame, t + 8),
         window: u16be(frame, t + 14),
@@ -905,6 +915,7 @@ fn handle_tcp(mac: &[u8; 6], frame: &[u8], seg: &TcpIn, conns: &mut [Option<TcpC
             peer_ip: seg.src_ip,
             peer_mac: seg.src_mac,
             peer_port: seg.src_port,
+            local_port: seg.dst_port,
             snd_nxt: SERVER_ISN,
             snd_una: SERVER_ISN,
             rcv_nxt: seg.seq.wrapping_add(1), // SYN consumes a sequence number
@@ -1029,7 +1040,14 @@ fn handle_conn_segment(mac: &[u8; 6], frame: &[u8], seg: &TcpIn, c: &mut TcpConn
         c.responded = true;
         let end = (seg.data_off + seg.data_len as usize).min(frame.len());
         let request = &frame[seg.data_off..end];
-        start_response(c, request);
+        // Dispatch by the local listen port: 80 is the HTTP server, 564 the 9P
+        // export gateway (cluster Phase 1). Both stage a response in `c.prefix`
+        // for pump_send to stream.
+        if c.local_port == ninep_abi::NP_NET_PORT {
+            handle_9p(c, request);
+        } else {
+            start_response(c, request);
+        }
     }
 
     // Note: the actual sending (pump_send) is NOT done here. It runs once per
@@ -1136,6 +1154,7 @@ fn send_seg(mac: &[u8; 6], c: &TcpConn, flags: u8, with_mss: bool, payload: &[u8
         &c.peer_mac,
         &c.peer_ip,
         c.peer_port,
+        c.local_port,
         c.snd_nxt,
         c.rcv_nxt,
         flags,
@@ -1153,7 +1172,7 @@ fn send_seg(mac: &[u8; 6], c: &TcpConn, flags: u8, with_mss: bool, payload: &[u8
 fn send_seg_at(mac: &[u8; 6], c: &TcpConn, seq: u32, flags: u8, payload: &[u8]) {
     let mut out = [0u8; 1600];
     if let Some(n) = build_tcp_srv(
-        mac, &c.peer_mac, &c.peer_ip, c.peer_port, seq, c.rcv_nxt, flags, false, payload, &mut out,
+        mac, &c.peer_mac, &c.peer_ip, c.peer_port, c.local_port, seq, c.rcv_nxt, flags, false, payload, &mut out,
     ) {
         let _ = send(&out[..n]);
     }
@@ -1225,6 +1244,98 @@ fn sack_retransmit(mac: &[u8; 6], c: &mut TcpConn, seg: &TcpIn) {
 /// *stat*'d (one `NP_READ_FILE`, whose status is the real size) - which
 /// checks existence and gives the size for `Content-Length`; its body then
 /// streams from offset 0 (fsd reads are idempotent, offset-based).
+/// Largest inline data chunk an exported bulk read returns per request - fits
+/// the prefix buffer with the 12-byte frame header, and about one TCP segment.
+const EXPORT_CHUNK: usize = 1400;
+
+/// The inline-reply cap fsd enforces on `readdir`/`read_file` (`FS_DATA_MAX`);
+/// a larger `want` is rejected, so the export clamps to it for those verbs.
+const DATA_INLINE: usize = syscall_abi::FS_DATA_MAX as usize;
+
+/// Serve one framed NP request on a 9P-export (port 564) connection (cluster
+/// Phase 1): decode the frame, run the verb against local `fsd`, and stage the
+/// framed reply in `c.prefix` for `pump_send` to stream (then FIN - one
+/// request/reply per connection, like the HTTP server's `Connection: close`).
+/// **Read-only for now** (readdir/read/read_file/read_at); write/mutate verbs
+/// get an error reply. The request's `tree` field is ignored - the export
+/// serves the local boot mount (tree 0).
+fn handle_9p(c: &mut TcpConn, request: &[u8]) {
+    let n = build_9p_reply(request, &mut c.prefix);
+    c.prefix_len = n;
+    c.prefix_off = 0;
+    c.file = false;
+}
+
+/// Decode a framed NP request and build its framed reply into `out`. See
+/// `ninep_abi`'s frame doc: request = `[u32 len][verb][tree][a0..a3][payload]`.
+fn build_9p_reply(request: &[u8], out: &mut [u8; PREFIX_MAX]) -> usize {
+    let hdr = ninep_abi::NP_REQ_PAYLOAD as usize; // 48
+    if request.len() < ninep_abi::NP_NET_LEN_PREFIX + hdr {
+        return frame_reply(out, syscall_abi::FS_ERROR, &[]);
+    }
+    let flen = u32::from_le_bytes([request[0], request[1], request[2], request[3]]) as usize;
+    let msg_end = (ninep_abi::NP_NET_LEN_PREFIX + flen).min(request.len());
+    let msg = &request[ninep_abi::NP_NET_LEN_PREFIX..msg_end];
+    if msg.len() < hdr {
+        return frame_reply(out, syscall_abi::FS_ERROR, &[]);
+    }
+    let verb = read_u64(msg, 0);
+    let p0 = read_u64(msg, 16) as usize;
+    let p1 = read_u64(msg, 24);
+    let p2 = read_u64(msg, 32);
+    let payload = &msg[hdr..];
+    let path = &payload[..p0.min(payload.len())];
+    let mut buf = [0u8; EXPORT_CHUNK];
+
+    // Data slice for a status that is a byte count (0..FS_ERR_MIN); empty on an
+    // error status.
+    fn ok_data(status: u64, buf: &[u8]) -> &[u8] {
+        if status < syscall_abi::FS_ERR_MIN {
+            &buf[..(status as usize).min(buf.len())]
+        } else {
+            &[]
+        }
+    }
+
+    match verb {
+        v if v == ninep_abi::NP_READDIR => {
+            // The inline verbs (readdir / read_file) are capped at fsd's inline
+            // reply size (FS_DATA_MAX 512); fsd rejects a larger `want`.
+            let want = (p1 as usize).min(DATA_INLINE);
+            let status = list_dir(path, &mut buf[..want]);
+            frame_reply(out, status, ok_data(status, &buf))
+        }
+        v if v == ninep_abi::NP_READ || v == ninep_abi::NP_READ_AT => {
+            let want = (p2 as usize).min(buf.len());
+            let status = read_file_chunk(path, p1, &mut buf[..want]);
+            frame_reply(out, status, ok_data(status, &buf))
+        }
+        v if v == ninep_abi::NP_READ_FILE => {
+            // Status = the file's real size; data = its first min(size, want) bytes.
+            let want = (p1 as usize).min(DATA_INLINE);
+            let size = stat_size(path);
+            if size >= syscall_abi::FS_ERR_MIN {
+                return frame_reply(out, size, &[]);
+            }
+            let n = read_file_chunk(path, 0, &mut buf[..want]);
+            frame_reply(out, size, ok_data(n, &buf))
+        }
+        _ => frame_reply(out, syscall_abi::FS_ERROR, &[]),
+    }
+}
+
+/// Frame a reply into `out`: `[u32 len (LE)][status:u64][data]`, `len` = the
+/// bytes after the prefix (8 + data). Returns the total byte count written.
+fn frame_reply(out: &mut [u8], status: u64, data: &[u8]) -> usize {
+    let cap = out.len().saturating_sub(ninep_abi::NP_NET_LEN_PREFIX + 8);
+    let dlen = data.len().min(cap);
+    let body = 8 + dlen;
+    out[0..4].copy_from_slice(&(body as u32).to_le_bytes());
+    out[4..12].copy_from_slice(&status.to_le_bytes());
+    out[12..12 + dlen].copy_from_slice(&data[..dlen]);
+    12 + dlen
+}
+
 fn start_response(c: &mut TcpConn, request: &[u8]) {
     let head = is_head(request);
 
@@ -1702,6 +1813,7 @@ fn build_tcp_srv(
     peer_mac: &[u8; 6],
     peer_ip: &[u8; 4],
     peer_port: u16,
+    src_port: u16,
     seq: u32,
     ack: u32,
     flags: u8,
@@ -1709,11 +1821,12 @@ fn build_tcp_srv(
     payload: &[u8],
     out: &mut [u8],
 ) -> Option<usize> {
-    // Server direction: advertise SACK-permitted on our SYN-ACK (the only
+    // Server direction: source port is the connection's local listen port (80
+    // HTTP or 564 9P export). Advertise SACK-permitted on our SYN-ACK (the only
     // with_mss server segment), so the peer sends SACK blocks we can use for
     // selective retransmit (see sack_retransmit).
     build_tcp_generic(
-        mac, peer_mac, peer_ip, SERVER_PORT, peer_port, seq, ack, flags, with_mss, with_mss, payload,
+        mac, peer_mac, peer_ip, src_port, peer_port, seq, ack, flags, with_mss, with_mss, payload,
         out,
     )
 }

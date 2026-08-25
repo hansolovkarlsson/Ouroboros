@@ -7,6 +7,40 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/`; 
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## Cluster Phase 1, step 1a: the 9P export gateway — a machine serves its fs over TCP
+
+The first step toward distributed: **netd exports the local `fsd` over TCP**, so
+a client on the network can read the machine's filesystem with the same verb
+set, reframed for the wire. This is the pivot the whole Phase 0 groundwork was
+for — *remote is just this protocol over TCP instead of local IPC*.
+
+**The reframing** (in `ninep-abi`): locally, bulk data moves by grant/safecopy;
+over TCP there is no grant, so a verb travels as a **length-delimited frame with
+data inline** — `[u32 len][verb][tree][a0..a3][payload]` request,
+`[u32 len][status][result]` reply. `NP_NET_PORT` (564) and `NP_NET_MAX` are added;
+no new verbs.
+
+**netd gains a second listener.** Its inbound TCP was hardwired to the HTTP
+server on port 80; now `parse_tcp_in` accepts port 564 too, `TcpConn` remembers
+its `local_port` (so replies leave from the right source port — `build_tcp_srv`
+threads it), and the first-data handler dispatches by port: 80 → the HTTP
+`start_response`, 564 → the new **`handle_9p`**, which decodes the NP frame, runs
+the verb against local `fsd` (reusing netd's existing `list_dir`/`stat_size`/
+`read_file_chunk` fsd-client calls), and frames the reply back — one
+request/reply per connection, like HTTP's `Connection: close`. **Read-side verbs
+for now** (`readdir`/`read`/`read_file`/`read_at`); writes come later.
+
+Verified with a foreign observer — a host-side python 9P client
+(`scripts/np9p_client.py`) over a new `make run-image-9p` (SLIRP
+`hostfwd tcp::5640-:564`): `readdir /` returns `BIN/ EFI/` (status 10), and
+`read /EFI/ORBS/INIT.CFG` returns `\EFI\ORBS\SH.BIN` (status 16, the real size) —
+the guest's disk, read over TCP from the host. The existing HTTP server still
+serves (`curl :5555` → the HTML index), netd is not restarted, and zero `-d int`
+aborts across repeated requests. One VM, host as client — no second VM needed
+yet. Next: 1b (netd's outbound remote-client) + 1c (the remote-mount client:
+`mount -r host:port /path`), then 1d (two-VM). See
+[`roadmap-cluster-phase1.md`](roadmap-cluster-phase1.md).
+
 ## Cluster Phase 0, step 0e: cond on the verb set — the last bespoke protocol retired
 
 The console server joins the uniform protocol, and `DSPOP_*` — the third and

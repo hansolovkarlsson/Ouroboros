@@ -108,7 +108,7 @@ ifeq ($(PROFILE),release)
 CARGO_FLAGS += --release
 endif
 
-.PHONY: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin ping-bin resolve-bin fetch-bin wc-bin grep-bin head-bin esp run run-virtio-console run-usb-kbd run-usb-multi run-gicv3 image run-image image-gpt run-image-gpt image-exfat run-image-exfat image-ext2 run-image-ext2 parallels-hdd release test-parallels clean
+.PHONY: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin ping-bin resolve-bin fetch-bin wc-bin grep-bin head-bin esp run run-virtio-console run-usb-kbd run-usb-multi run-gicv3 image run-image run-image-9p image-gpt run-image-gpt image-exfat run-image-exfat image-ext2 run-image-ext2 parallels-hdd release test-parallels clean
 
 # Overridable by `make test-parallels VM_NAME=... CMDS=... BOOT_WAIT=...`.
 VM_NAME     ?= Ouroboros
@@ -636,6 +636,25 @@ run-image-server: image
 		-drive file=$(ESP_DIR).img,format=raw,if=none,id=hd0 \
 		-device virtio-blk-device,drive=hd0 \
 		-netdev user,id=net0,hostfwd=tcp::5555-:80 \
+		-device virtio-net-device,netdev=net0 \
+		-object filter-dump,id=f0,netdev=net0,file=$(NET_PCAP) \
+		-global virtio-mmio.force-legacy=false \
+		-nographic
+
+# run-image-server plus a second hostfwd for netd's 9P-export listener (port
+# 564): the cluster Phase 1 export gateway (docs/roadmap-cluster-phase1.md). A
+# host 9P client (scripts/np9p_client.py) reaches the guest's exported fsd via
+#   python3 scripts/np9p_client.py localhost 5640 readdir /
+# reading the guest's disk over TCP. curl http://localhost:5555/ still works.
+run-image-9p: image
+	qemu-system-aarch64 \
+		-machine virt \
+		-cpu cortex-a72 \
+		-m 512M \
+		-bios $(OVMF) \
+		-drive file=$(ESP_DIR).img,format=raw,if=none,id=hd0 \
+		-device virtio-blk-device,drive=hd0 \
+		-netdev user,id=net0,hostfwd=tcp::5555-:80,hostfwd=tcp::5640-:564 \
 		-device virtio-net-device,netdev=net0 \
 		-object filter-dump,id=f0,netdev=net0,file=$(NET_PCAP) \
 		-global virtio-mmio.force-legacy=false \
