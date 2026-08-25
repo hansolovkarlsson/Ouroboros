@@ -209,10 +209,18 @@ the next begins — the cadence that carried the filesystem/network/xHCI arcs.
   (separate from `ulib`), so `FSOP_*` is *not yet* dead client-side — the shell
   migration + retiring `fsd`'s `FSOP_*` file-op arms is a small **next sub-step**,
   after which `FSOP_*` file ops are deleted. No kernel change.
-- **0c — kernel per-task namespace + `mount`/`bind`/`get` syscalls.** The
-  `NAMESPACES` per-task store, the three syscalls, child inheritance at spawn
-  (modelled on CWD). *Ship:* `bind` in one task changes only that task's view;
-  a child sees its parent's namespace.
+- **0c — kernel per-task namespace + `bind` — DONE (2026-08-25).** The
+  `NAMESPACES` per-task store (CWD-shaped), `NS_SET` (52) / `GET_NS` (53), and a
+  `bind <new> <old>` shell builtin; `resolve_ns` (longest component-aligned
+  prefix) in both `ulib` and the shell's fs helpers. Design revised while
+  building: instead of staging the namespace for the next spawn (the CWD model),
+  a child **inherits the spawning task's namespace automatically** at
+  `spawn_staged`, and `bind` sets its own via `NS_SET` — simpler, and it made the
+  shell's own `cd`/`write` (which must resolve too) fall out for free. `fsd`
+  untouched (every binding is tree 0). *Shipped:* `bind /mnt /EFI` then `ls /mnt`
+  == `ls /EFI`, per-task, inherited by spawned `/bin` commands; regression
+  byte-identical (empty namespace = identity), zero aborts. See the CHANGELOG's
+  "step 0c" entry.
 - **0d — `fsd` multi-mount + THE payoff.** The `[Option<Mount>; MAX_MOUNTS]`
   table; `mount` a second filesystem into a second tree; namespace binds
   `/mnt/a`, `/mnt/b`. *Ship:* **two filesystems mounted at once** — `ls /mnt/a`

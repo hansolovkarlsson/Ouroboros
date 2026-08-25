@@ -7,6 +7,46 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/`; 
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## Cluster Phase 0, step 0c: per-task namespaces + `bind` (the first kernel change)
+
+The Plan 9 foundation of the distributed vision: each task composes its own
+**namespace** — a table of `bind`ings mapping a path prefix to a mount subtree —
+and a mount affects only the task that made it. This is the arc's **first kernel
+change**, deliberately isolated from the multi-mount consumer (0d) to keep it
+bisectable.
+
+Modeled bolt-for-bolt on the existing per-task **CWD** store (`CWDS`/`GET_CWD`):
+the kernel keeps a per-task `NAMESPACES: [_; NUM_TASKS]` blob of opaque bytes
+(`kernel/src/tasks.rs`) and interprets nothing — userland resolves. Two
+syscalls: **`NS_SET`** (52, set the caller's own namespace) and **`GET_NS`** (53,
+read it). Inheritance is automatic and Plan-9-shaped: `spawn_staged` copies the
+**spawning task's** namespace into the child, so every command the shell spawns
+sees the shell's `bind`s. An **empty** namespace means identity-to-tree-0 (the
+default), so a task that never binds behaves exactly as before — zero regression
+risk.
+
+Resolution (`resolve_ns`: longest **component-aligned** prefix wins, its target
+replacing the matched prefix; `(tree, fs_path)` out) lives in userland, added to
+**both** `ulib`'s fs client (for `/bin`) and the shell's own fs helpers (so
+`cd`/`write` into a bound path resolve the same way `ls`/`cat` do — `cd`
+validates via `fs_list_dir`, which now resolves). A `bind <new> <old>` shell
+builtin appends one entry via `GET_NS`/`NS_SET`. Every binding is tree 0 in this
+step (single mount), so **`fsd` is untouched** — `bind` remaps *within* the one
+filesystem; multi-mount (0d) will point a prefix at a different disk.
+
+Verified on QEMU two ways: (1) **regression** — the fs batch (`ls`/`cat`/64 KiB
+read/`mkdir`/`write`/`writeat`/`cp`/`mv`/`rm`/`rmdir`) is **byte-identical** to a
+pre-change baseline but for two boot artifacts (the kernel binary grew ~2.5 KB;
+a print race), zero `-d int` aborts — an empty namespace really is identity; and
+(2) the **`bind` feature** — `bind /mnt /EFI` then `ls /mnt` == `ls /EFI`,
+`cat /mnt/ORBS/INIT.CFG` == `cat /EFI/ORBS/INIT.CFG`, and `cd /mnt; pwd` → `/mnt`
+with `ls` there listing `/EFI` — proving a *spawned* `/bin` command resolves the
+*inherited* namespace. Design note: the plan's spawn-time staging was replaced
+with **direct `NS_SET` + automatic parent→child inheritance** once building it
+showed the shell's own `cd` needs to resolve too — simpler, and no staging
+buffer/pending-length. Next: **0d** — `fsd` multi-mount + a 3-partition disk =
+two filesystems at once, the payoff.
+
 ## Cluster Phase 0: netd migrated, and the FSOP_* file-op arms retired
 
 The last FSOP file-op client migrates, and the payoff: **`fsd`'s `FSOP_*`

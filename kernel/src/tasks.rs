@@ -682,6 +682,56 @@ pub(crate) fn clear_cwd(task: usize) {
     cwd.len = 0;
 }
 
+/// Per-task namespace: the `bind` table a task was spawned with (its parent's
+/// namespace at spawn time), mapping a path prefix to a mount subtree - the
+/// Plan 9 per-task namespace (cluster Phase 0). Opaque bytes here, exactly like
+/// the cwd: the kernel stores and delivers them, userland (`ulib`/shell)
+/// interprets them. Delivered kernel-side and fetched via `GET_NS`. Boot-loaded
+/// tasks get none (len 0 = the identity-to-tree-0 default).
+const NS_CAP: usize = syscall_abi::NS_MAX as usize;
+
+struct Namespace {
+    data: [u8; NS_CAP],
+    len: usize,
+}
+
+impl Namespace {
+    const fn new() -> Self {
+        Namespace { data: [0; NS_CAP], len: 0 }
+    }
+}
+
+struct NsSlot(UnsafeCell<Namespace>);
+// SAFETY: same single-core, non-reentrant per-task-cell reasoning as CWDS.
+unsafe impl Sync for NsSlot {}
+static NAMESPACES: [NsSlot; NUM_TASKS] =
+    [const { NsSlot(UnsafeCell::new(Namespace::new())) }; NUM_TASKS];
+
+/// Store a freshly spawned task's namespace (from the `SPAWN` handler, out of
+/// the staging buffer). Truncated to `NS_CAP`.
+pub(crate) fn set_namespace(task: usize, blob: &[u8]) {
+    let ns = unsafe { &mut *NAMESPACES[task].0.get() };
+    let n = blob.len().min(NS_CAP);
+    ns.data[..n].copy_from_slice(&blob[..n]);
+    ns.len = n;
+}
+
+/// The namespace blob for `task` (empty if none) - read by the `GET_NS` syscall
+/// arm for the calling task.
+pub(crate) fn namespace(task: usize) -> &'static [u8] {
+    // SAFETY: single-core, non-reentrant (see NsSlot); static-lifetime data,
+    // copied from immediately by the caller.
+    let ns = unsafe { &*NAMESPACES[task].0.get() };
+    &ns.data[..ns.len]
+}
+
+/// Drop a dead task's namespace - wired into every teardown path alongside
+/// `clear_cwd`.
+pub(crate) fn clear_namespace(task: usize) {
+    let ns = unsafe { &mut *NAMESPACES[task].0.get() };
+    ns.len = 0;
+}
+
 /// Per-task stdout target: the task index a program's output should go to,
 /// set by whoever `spawn`ed it (see the `SPAWN`/`STDOUT_TARGET` syscalls).
 /// `CON_TASK` (the console server) by default, and for every boot-loaded
@@ -1144,6 +1194,7 @@ pub(crate) unsafe fn exit_current_and_switch(frame: *mut Context, status: u64) -
     clear_delegate(current);
     clear_argv(current);
     clear_cwd(current);
+    clear_namespace(current);
     reset_stdout_target(current);
     let next = next_runnable(current);
     *frame = unsafe { *TASKS[next].0.get() };
@@ -1170,6 +1221,7 @@ pub(crate) fn kill_task(i: usize) {
     clear_delegate(i);
     clear_argv(i);
     clear_cwd(i);
+    clear_namespace(i);
     reset_stdout_target(i);
 }
 
@@ -1198,6 +1250,7 @@ pub(crate) unsafe fn kill_current_and_switch(frame: *mut Context) {
     clear_delegate(current);
     clear_argv(current);
     clear_cwd(current);
+    clear_namespace(current);
     reset_stdout_target(current);
     let next = next_runnable(current);
     *frame = unsafe { *TASKS[next].0.get() };

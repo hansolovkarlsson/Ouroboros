@@ -532,6 +532,28 @@ pub const GET_CWD: u64 = 51;
 /// store) - the shell's own `PATH_SIZE`.
 pub const CWD_MAX: u64 = 128;
 
+/// `(namespace-blob pointer, blob length)` -> `0` on success, [`SPAWN_ERROR`]
+/// on a bad range or an over-long blob. Sets the **calling task's own
+/// namespace** - the per-task table of `bind`ings that maps a path prefix to a
+/// mount subtree (the Plan 9 namespace, cluster Phase 0). A child **inherits its
+/// parent's namespace automatically at [`SPAWN`]** (the kernel copies it), so
+/// `bind` needs only to update the caller's own view; and every task reads its
+/// own via [`GET_NS`] to resolve paths the same way its parent did. An empty
+/// namespace means identity-to-tree-0 (the default), so a task that never calls
+/// this behaves exactly as before namespaces existed. Bounded by [`NS_MAX`].
+pub const NS_SET: u64 = 52;
+
+/// `(out pointer, out capacity)` -> the length of the current task's namespace
+/// blob (copying up to `out capacity` of its bytes into the buffer), or `0` if
+/// it has none (never called [`NS_SET`], and inherited an empty one). The blob
+/// is a sequence of bindings, each
+/// `[tree:u8][prefix_len:u8][target_len:u8][prefix bytes][target bytes]`.
+pub const GET_NS: u64 = 53;
+
+/// Maximum size of a namespace blob (and the per-task namespace store). A
+/// handful of bindings of `CWD_MAX`-ish paths - 256 bytes is ample for now.
+pub const NS_MAX: u64 = 256;
+
 /// [`NET_RECV`] returned when no frame is currently available (a poll that
 /// found the receive ring empty) - distinct from a real length (`u64::MAX`
 /// is out of any frame's range) and from the error sentinel.

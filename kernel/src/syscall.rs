@@ -274,6 +274,11 @@ struct CwdStagingCell(core::cell::UnsafeCell<[u8; CWD_STAGING_SIZE]>);
 unsafe impl Sync for CwdStagingCell {}
 static CWD_STAGING: CwdStagingCell = CwdStagingCell(core::cell::UnsafeCell::new([0; CWD_STAGING_SIZE]));
 
+/// Upper bound for a namespace blob (matches the per-task store), used to bound
+/// the `NS_SET` copy. A task's namespace is set directly by `NS_SET` and a
+/// child inherits its parent's at spawn (no staging buffer needed).
+const NS_MAX_SIZE: usize = syscall_abi::NS_MAX as usize;
+
 /// Number of arguments in an `ARGS_STAGE` blob (`[argc: u32 LE]` header).
 fn argv_count(blob: &[u8]) -> u64 {
     if blob.len() < 4 {
@@ -380,6 +385,11 @@ fn spawn_staged(total_len: u64, stdout_target: u64, argv_len: u64, cwd_len: u64)
                 let staged = unsafe { &*CWD_STAGING.0.get() };
                 tasks::set_cwd(slot, &staged[..cwd_len]);
             }
+            // A child inherits its parent's (the spawning task's) namespace -
+            // Plan 9 semantics. Copying it here means `bind` in the shell is
+            // seen by every command it spawns, and the child reads it via
+            // GET_NS. An empty parent namespace copies as empty (the default).
+            tasks::set_namespace(slot, tasks::namespace(tasks::current_task()));
             // SAFETY: called from an SVC handler with interrupts masked
             // throughout - single-core, so nothing else can observe the
             // table set mid-rebuild.
@@ -604,6 +614,35 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
             let dst = unsafe { core::slice::from_raw_parts_mut(arg0 as *mut u8, n) };
             dst.copy_from_slice(&cwd[..n]);
             cwd.len() as u64
+        }
+        syscall_abi::NS_SET => {
+            // arg0 = namespace-blob pointer, arg1 = length. Sets the calling
+            // task's own namespace directly; children inherit it at SPAWN.
+            if !valid_user_range(arg0, arg1) {
+                return SPAWN_ERROR;
+            }
+            let len = arg1 as usize;
+            if len > NS_MAX_SIZE {
+                return SPAWN_ERROR;
+            }
+            // SAFETY: range sanity-checked above, same trust model as every
+            // other userland pointer argument.
+            let blob = unsafe { core::slice::from_raw_parts(arg0 as *const u8, len) };
+            tasks::set_namespace(tasks::current_task(), blob);
+            0
+        }
+        syscall_abi::GET_NS => {
+            // arg0 = out pointer, arg1 = out capacity. Copies up to capacity
+            // bytes of the current task's namespace, returns its true length.
+            if !valid_user_range(arg0, arg1) {
+                return 0;
+            }
+            let ns = tasks::namespace(tasks::current_task());
+            let n = (ns.len() as u64).min(arg1) as usize;
+            // SAFETY: out range validated above.
+            let dst = unsafe { core::slice::from_raw_parts_mut(arg0 as *mut u8, n) };
+            dst.copy_from_slice(&ns[..n]);
+            ns.len() as u64
         }
         syscall_abi::ARGS_STAGE => {
             // arg0 = blob pointer, arg1 = blob length. Copies the whole argv

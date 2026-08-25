@@ -444,14 +444,102 @@ fn np_call(verb: u64, tree: u64, params: [u64; 4], payload1: &[u8], payload2: &[
     status
 }
 
+/// Largest resolved filesystem path (a `bind` target can be longer than the
+/// prefix it replaces, so the resolved path can exceed the input).
+const FSP_MAX: usize = 256;
+
+/// Read the current task's namespace blob (set at spawn via `NS_STAGE`) into
+/// `buf`, returning its length (0 = none - the identity default). The blob is a
+/// sequence of `[tree:u8][prefix_len:u8][target_len:u8][prefix][target]`
+/// bindings - see [`resolve_ns`].
+pub fn get_ns(buf: &mut [u8]) -> usize {
+    let n = syscall4(syscall_abi::GET_NS, buf.as_mut_ptr() as u64, buf.len() as u64, 0, 0);
+    (n as usize).min(buf.len())
+}
+
+/// Resolve an absolute client `path` through the namespace `ns` into
+/// `(tree, fs_path)`: the longest component-aligned prefix binding wins and its
+/// `target` replaces the matched prefix; the binding's `tree` selects the mount.
+/// No match - an empty namespace, or a relative path (bindings are absolute) -
+/// is identity to tree 0, so an unbound task is unchanged. `fs_path` bytes are
+/// written to `out`; returns `(tree, length)`. Bounded, scalar-only
+/// (relocation-safe, like [`normalize_path`]).
+fn resolve_ns(ns: &[u8], path: &str, out: &mut [u8]) -> (u64, usize) {
+    let pbytes = path.as_bytes();
+    let mut best_tree = 0u64;
+    let mut best_plen = 0usize; // matched prefix length; 0 = no match
+    let mut best_target: &[u8] = &[];
+    let mut i = 0usize;
+    while i + 3 <= ns.len() {
+        let tree = ns[i] as u64;
+        let plen = ns[i + 1] as usize;
+        let tlen = ns[i + 2] as usize;
+        let pstart = i + 3;
+        let tstart = pstart + plen;
+        let tend = tstart + tlen;
+        if tend > ns.len() {
+            break; // malformed blob - stop parsing
+        }
+        let prefix = &ns[pstart..tstart];
+        let target = &ns[tstart..tend];
+        i = tend;
+        // Component-aligned: path == prefix, or path starts with prefix then
+        // '/'. Bindings are absolute, non-root, no trailing slash (the `bind`
+        // command enforces that).
+        let matches = pbytes.len() >= prefix.len()
+            && &pbytes[..prefix.len()] == prefix
+            && (pbytes.len() == prefix.len() || pbytes[prefix.len()] == b'/');
+        if matches && prefix.len() > best_plen {
+            best_tree = tree;
+            best_plen = prefix.len();
+            best_target = target;
+        }
+    }
+    if best_plen == 0 {
+        let n = pbytes.len().min(out.len());
+        out[..n].copy_from_slice(&pbytes[..n]);
+        return (0, n);
+    }
+    // target ++ (path after the matched prefix). `after` is "" or starts '/'.
+    let after = &pbytes[best_plen..];
+    let mut n = 0usize;
+    // Skip writing a "/" target when there's an `after` (avoids a leading "//").
+    let target_is_root = best_target == b"/";
+    if !(target_is_root && !after.is_empty()) {
+        let t = best_target.len().min(out.len());
+        out[..t].copy_from_slice(&best_target[..t]);
+        n = t;
+    }
+    let a = after.len().min(out.len() - n);
+    out[n..n + a].copy_from_slice(&after[..a]);
+    n += a;
+    if n == 0 && !out.is_empty() {
+        out[0] = b'/'; // target "/" with empty after
+        n = 1;
+    }
+    (best_tree, n)
+}
+
+/// Resolve `path` through this task's namespace into `(tree, fs_path)`, writing
+/// fs_path to `out`. Reads the namespace via `GET_NS` each call - cheap (the
+/// blob is small and every fs op is already an IPC round trip). An empty
+/// namespace yields `(0, path)` unchanged.
+fn mount_resolve(path: &str, out: &mut [u8]) -> (u64, usize) {
+    let mut ns = [0u8; syscall_abi::NS_MAX as usize];
+    let nlen = get_ns(&mut ns);
+    resolve_ns(&ns[..nlen], path, out)
+}
+
 /// List `path`'s entries into `buf` as `name\n`/`name/\n`. Returns a byte
 /// count, [`NO_FS`], or a specific `FS_ERR_*` code.
 pub fn fs_list_dir(path: &str, buf: &mut [u8]) -> u64 {
+    let mut fsp = [0u8; FSP_MAX];
+    let (tree, n) = mount_resolve(path, &mut fsp);
     np_call(
         ninep_abi::NP_READDIR,
-        0,
-        [path.len() as u64, buf.len() as u64, 0, 0],
-        path.as_bytes(),
+        tree,
+        [n as u64, buf.len() as u64, 0, 0],
+        &fsp[..n],
         &[],
         buf,
     )
@@ -471,13 +559,17 @@ pub fn fs_op_path(op: u64, path: &str) -> u64 {
         syscall_abi::FSOP_RM => ninep_abi::NP_RM,
         other => other,
     };
-    np_call(verb, 0, [path.len() as u64, 0, 0, 0], path.as_bytes(), &[], &mut [])
+    let mut fsp = [0u8; FSP_MAX];
+    let (tree, n) = mount_resolve(path, &mut fsp);
+    np_call(verb, tree, [n as u64, 0, 0, 0], &fsp[..n], &[], &mut [])
 }
 
 /// Read up to `buf.len()` bytes of `path` from `offset` into `buf` via the
 /// grant/safecopy bulk path (the server SAFECOPYs straight into `buf`).
 /// Returns the byte count (0 at EOF), [`NO_FS`], or an `FS_ERR_*` code.
 pub fn fs_read_bulk(path: &str, offset: u64, buf: &mut [u8]) -> u64 {
+    let mut fsp = [0u8; FSP_MAX];
+    let (tree, n) = mount_resolve(path, &mut fsp);
     let want = buf.len() as u64;
     let granted = syscall4(
         syscall_abi::GRANT,
@@ -491,9 +583,9 @@ pub fn fs_read_bulk(path: &str, offset: u64, buf: &mut [u8]) -> u64 {
     }
     np_call(
         ninep_abi::NP_READ,
-        0,
-        [path.len() as u64, offset, want, 0],
-        path.as_bytes(),
+        tree,
+        [n as u64, offset, want, 0],
+        &fsp[..n],
         &[],
         &mut [],
     )
@@ -504,11 +596,13 @@ pub fn fs_read_bulk(path: &str, offset: u64, buf: &mut [u8]) -> u64 {
 /// [`NO_FS`], or an `FS_ERR_*` code. A one-byte `buf` is the cheapest
 /// existence/kind probe (a directory returns `FS_ERR_NOT_A_FILE`).
 pub fn fs_read_file(path: &str, buf: &mut [u8]) -> u64 {
+    let mut fsp = [0u8; FSP_MAX];
+    let (tree, n) = mount_resolve(path, &mut fsp);
     np_call(
         ninep_abi::NP_READ_FILE,
-        0,
-        [path.len() as u64, buf.len() as u64, 0, 0],
-        path.as_bytes(),
+        tree,
+        [n as u64, buf.len() as u64, 0, 0],
+        &fsp[..n],
         &[],
         buf,
     )
@@ -519,6 +613,8 @@ pub fn fs_read_file(path: &str, buf: &mut [u8]) -> u64 {
 /// `data.len()` must be `<= SAFECOPY_MAX`; empty `data` truncates to empty and
 /// skips the grant.
 pub fn fs_write_bulk(path: &str, data: &[u8]) -> u64 {
+    let mut fsp = [0u8; FSP_MAX];
+    let (tree, n) = mount_resolve(path, &mut fsp);
     if !data.is_empty() {
         let granted = syscall4(
             syscall_abi::GRANT,
@@ -533,9 +629,9 @@ pub fn fs_write_bulk(path: &str, data: &[u8]) -> u64 {
     }
     np_call(
         ninep_abi::NP_WRITE,
-        0,
-        [path.len() as u64, data.len() as u64, 0, 0],
-        path.as_bytes(),
+        tree,
+        [n as u64, data.len() as u64, 0, 0],
+        &fsp[..n],
         &[],
         &mut [],
     )
@@ -551,6 +647,8 @@ pub fn fs_write_at(path: &str, offset: u64, data: &[u8]) -> u64 {
     if data.is_empty() {
         return 0;
     }
+    let mut fsp = [0u8; FSP_MAX];
+    let (tree, n) = mount_resolve(path, &mut fsp);
     let granted = syscall4(
         syscall_abi::GRANT,
         syscall_abi::FSD_TASK,
@@ -563,9 +661,9 @@ pub fn fs_write_at(path: &str, offset: u64, data: &[u8]) -> u64 {
     }
     np_call(
         ninep_abi::NP_WRITE_AT,
-        0,
-        [path.len() as u64, offset, data.len() as u64, 0],
-        path.as_bytes(),
+        tree,
+        [n as u64, offset, data.len() as u64, 0],
+        &fsp[..n],
         &[],
         &mut [],
     )
@@ -575,12 +673,18 @@ pub fn fs_write_at(path: &str, offset: u64, data: &[u8]) -> u64 {
 /// two paths (the server relinks the entry, no content moves). Returns `0`,
 /// [`NO_FS`], or an `FS_ERR_*` code.
 pub fn fs_mv(src: &str, dst: &str) -> u64 {
+    // Both paths resolve through the namespace; in Phase 0 every binding is
+    // tree 0, so a cross-tree move can't arise yet (a later phase concern).
+    let mut fsrc = [0u8; FSP_MAX];
+    let mut fdst = [0u8; FSP_MAX];
+    let (tree, sn) = mount_resolve(src, &mut fsrc);
+    let (_dtree, dn) = mount_resolve(dst, &mut fdst);
     np_call(
         ninep_abi::NP_MV,
-        0,
-        [src.len() as u64, dst.len() as u64, 0, 0],
-        src.as_bytes(),
-        dst.as_bytes(),
+        tree,
+        [sn as u64, dn as u64, 0, 0],
+        &fsrc[..sn],
+        &fdst[..dn],
         &mut [],
     )
 }
