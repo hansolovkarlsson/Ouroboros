@@ -197,11 +197,16 @@ expansion of a proven idea.
 > `cat /mnt/a/net/ip` reads another machine's address). "Everything is a file,
 > everything is mountable" pays off. Cut **v0.8.0**.
 
+**Follow-up ✅ DONE (2026-08-26):** the namespace-aware export — the export now
+resolves incoming paths through its own composed namespace with the shared
+`ninep_abi::resolve_ns` (one implementation, used by `ulib`, the shell, and
+`netd`), retiring the three per-server prefix special-cases. A fourth exported
+resource is a binding, not a code branch.
+
 Deferred to later phases: Plan 9's full `/net/tcp` connection files (using another
-machine's NIC to *dial out*); and — now that three non-disk servers are exported
-by prefix special-case — a fully namespace-aware export (resolve incoming paths
-through a composed per-export namespace) to retire the prefix hacks; plus union
-directories when a consumer appears.
+machine's NIC to *dial out*); union directories when a consumer appears; and
+transitive/remote re-export (the export namespace can now bind a remote subtree —
+a natural Phase 4 hook).
 - Union directories (Plan 9's join-several-sources-under-one-name) if/when a real
   consumer appears — not before. A fully namespace-aware export (vs. `/proc`'s
   prefix hack) lands when a second synthetic tree needs it.

@@ -490,82 +490,16 @@ struct Resolved {
 /// are written to `out`. Bounded, scalar-only (relocation-safe, like
 /// [`normalize_path`]).
 fn resolve_ns(ns: &[u8], path: &str, out: &mut [u8]) -> Resolved {
-    let pbytes = path.as_bytes();
-    let mut best_tree = 0u8;
-    let mut best_plen = 0usize; // matched prefix length; 0 = no match
-    let mut best_target: &[u8] = &[];
-    let mut i = 0usize;
-    while i + 3 <= ns.len() {
-        let tree = ns[i];
-        let plen = ns[i + 1] as usize;
-        let tlen = ns[i + 2] as usize;
-        let pstart = i + 3;
-        let tstart = pstart + plen;
-        let tend = tstart + tlen;
-        if tend > ns.len() {
-            break; // malformed blob - stop parsing
-        }
-        let prefix = &ns[pstart..tstart];
-        let target = &ns[tstart..tend];
-        i = tend;
-        // Component-aligned: path == prefix, or path starts with prefix then
-        // '/'. Bindings are absolute, non-root, no trailing slash (the `bind`
-        // command enforces that).
-        let matches = pbytes.len() >= prefix.len()
-            && &pbytes[..prefix.len()] == prefix
-            && (pbytes.len() == prefix.len() || pbytes[prefix.len()] == b'/');
-        if matches && prefix.len() > best_plen {
-            best_tree = tree;
-            best_plen = prefix.len();
-            best_target = target;
-        }
-    }
-    if best_plen == 0 {
-        let n = pbytes.len().min(out.len());
-        out[..n].copy_from_slice(&pbytes[..n]);
-        return Resolved { server: syscall_abi::FSD_TASK, tree: 0, endpoint: [0; ninep_abi::NS_ENDPOINT_LEN], len: n };
-    }
-    // A remote binding: [ip:4][port:2][remote-root]. The endpoint splits off the
-    // head; the remote root plays the same role a local target does below.
-    let remote = best_tree == ninep_abi::NS_REMOTE_TREE
-        && best_target.len() >= ninep_abi::NS_ENDPOINT_LEN;
-    let mut endpoint = [0u8; ninep_abi::NS_ENDPOINT_LEN];
-    let target = if remote {
-        endpoint.copy_from_slice(&best_target[..ninep_abi::NS_ENDPOINT_LEN]);
-        &best_target[ninep_abi::NS_ENDPOINT_LEN..]
-    } else {
-        best_target
-    };
-    // target ++ (path after the matched prefix). `after` is "" or starts '/'.
-    let after = &pbytes[best_plen..];
-    let mut n = 0usize;
-    // Skip writing a "/" target when there's an `after` (avoids a leading "//").
-    let target_is_root = target == b"/";
-    if !(target_is_root && !after.is_empty()) {
-        let t = target.len().min(out.len());
-        out[..t].copy_from_slice(&target[..t]);
-        n = t;
-    }
-    let a = after.len().min(out.len() - n);
-    out[n..n + a].copy_from_slice(&after[..a]);
-    n += a;
-    if n == 0 && !out.is_empty() {
-        out[0] = b'/'; // target "/" with empty after
-        n = 1;
-    }
-    if best_tree == ninep_abi::NS_CON_TREE {
-        // A console binding routes to CON_TASK (the console server), not fsd -
-        // write-only; the fs_path is unused (the console ignores it).
-        Resolved { server: syscall_abi::CON_TASK, tree: 0, endpoint, len: n }
-    } else if best_tree == ninep_abi::NS_NET_TREE {
-        // A /net binding routes to NET_TASK (the network server) as a *local*
-        // netd-fs - a zero endpoint distinguishes it from a remote mount (which
-        // always carries a real endpoint). Read-only (network identity files).
-        Resolved { server: syscall_abi::NET_TASK, tree: 0, endpoint: [0; ninep_abi::NS_ENDPOINT_LEN], len: n }
-    } else if remote {
-        Resolved { server: syscall_abi::NET_TASK, tree: 0, endpoint, len: n }
-    } else {
-        Resolved { server: syscall_abi::FSD_TASK, tree: best_tree as u64, endpoint, len: n }
+    // The resolution logic is shared (`ninep_abi::resolve_ns`, the single source
+    // of truth used by ulib, the shell, and netd's export). Map its task-neutral
+    // `NsTarget` to this layer's concrete server/tree/endpoint.
+    let r = ninep_abi::resolve_ns(ns, path.as_bytes(), out);
+    let zero = [0u8; ninep_abi::NS_ENDPOINT_LEN];
+    match r.target {
+        ninep_abi::NsTarget::Fsd(tree) => Resolved { server: syscall_abi::FSD_TASK, tree: tree as u64, endpoint: zero, len: r.len },
+        ninep_abi::NsTarget::Console => Resolved { server: syscall_abi::CON_TASK, tree: 0, endpoint: zero, len: r.len },
+        ninep_abi::NsTarget::NetLocal => Resolved { server: syscall_abi::NET_TASK, tree: 0, endpoint: zero, len: r.len },
+        ninep_abi::NsTarget::Remote(ep) => Resolved { server: syscall_abi::NET_TASK, tree: 0, endpoint: ep, len: r.len },
     }
 }
 

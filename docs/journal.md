@@ -7,6 +7,38 @@ for the forward plan see [`roadmap.md`](roadmap.md).
 
 ---
 
+## 2026-08-26 — the namespace-aware export: paying down the three prefix hacks
+
+Not a feature day — a cleanup I'd been deferring on purpose. Each Phase 3 file
+server (/proc, /dev/cons, /net) rode the export by an explicit path-prefix
+special-case, and I kept writing down "the general namespace-aware export is
+getting closer to worth building." Three consumers is the threshold I'd named, so
+today I built it.
+
+The move: the export gateway should serve *its own namespace* through the same
+resolver a local client uses — Plan 9's "a server exports a namespace." So the
+resolution logic (which had been duplicated in ulib and the shell) became one
+`resolve_ns` in ninep-abi, returning a task-neutral `NsTarget` the callers map to
+their own server ids. ulib and the shell deleted their copies and delegate; netd's
+export resolves incoming paths against a tiny `EXPORT_NS` binding blob and
+dispatches on the `NsTarget`. `route_export` and its three prefix checks: gone. A
+fourth exported resource is now a fourth binding, not a branch.
+
+The satisfying part is that there's nothing to demo — every path resolves exactly
+as before. The whole value is that three implementations that had to agree became
+one. That's the kind of change that's invisible until the day someone adds a
+resource and it Just Works without touching netd.
+
+Two process notes worth keeping. First: I verified `resolve_ns` in isolation (a
+throwaway `rustc` of the pure function against the export blob) the moment a remote
+`/net` read flaked in the big matrix test — the isolated test said the resolver was
+correct, which saved me from "fixing" the resolver, and a focused re-run confirmed
+remote /net works fine; the flake was connection churn (the 8th rapid back-to-back
+op), a pre-existing chattiness of one-connection-per-op, not a refactor bug.
+Second: deferring this until the third consumer was right. Built at the first
+consumer it would have been machinery guessing at a shape; built now, the shape was
+obvious because three real callers had already drawn it.
+
 ## 2026-08-25 (cont.) — Phase 3, step 3: /net, and Phase 3 complete
 
 The last Phase 3 file server: `/net`, the machine's network identity as read-only

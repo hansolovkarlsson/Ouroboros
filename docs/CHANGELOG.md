@@ -7,6 +7,37 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/`; 
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## Cluster: the namespace-aware export — retiring the per-server prefix hacks
+
+A structural cleanup, not a new feature: the export gateway now serves **its own
+composed namespace** through the *same* resolver a local client uses, replacing
+the three per-server path-prefix special-cases (`/proc`, `/dev/cons`, `/net`) that
+Phase 3 accumulated. This is the Plan 9 model stated properly — *a server exports
+a namespace* — and it was the deferred step the third consumer finally justified.
+
+**One resolver, three call sites.** The namespace-resolution logic (longest
+component-aligned prefix wins; sentinels route to remote / console / net; the rest
+to an fsd tree) moved into **`ninep-abi` as the single `resolve_ns`**, returning a
+task-neutral `NsTarget` (so the crate needs no `syscall-abi` dependency). `ulib`
+and the shell deleted their copies and now delegate to it (mapping `NsTarget` to
+their concrete server/tree/endpoint), and — the point — **`netd`'s export uses it
+too**, resolving each incoming request path against a small `EXPORT_NS` binding
+blob (`/proc`→proc tree, `/dev/cons`→console, `/net`→netd's net-fs; everything
+else the boot disk). `route_export` and its three hand-written prefix checks are
+gone. A fourth exported resource is now a fourth *binding*, not a code branch.
+
+**No behavior change — that's the point.** Every path resolves exactly as before;
+the win is that client and export share one implementation instead of three that
+had to be kept in agreement. Verified against the full matrix on QEMU and two VMs:
+local disk / `/proc` / `/dev/cons` / `/net` all read/write as before, and remotely
+`ls /mnt/a`, `cat` a file, `mkdir`+`write`+read-back (disk r/w), `cat
+/mnt/a/proc/2/state`, `cat /mnt/a/net/ip`/`mac`, and `write /mnt/a/dev/cons` all
+work through the shared resolver. Zero `-d int` aborts. (One incidental
+observation, unrelated to the refactor: a remote read can still flake under heavy
+back-to-back connection churn — the one-connection-per-op design's known
+chattiness, which client-side caching is the eventual answer to; it reproduces on
+neither light load nor the pre-refactor code.)
+
 ## Cluster Phase 3 (step 3): `/net` — a machine's network identity as files (Phase 3 done)
 
 The third and last Phase 3 file server, and the first served by **`netd` itself**:

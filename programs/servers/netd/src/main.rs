@@ -1399,48 +1399,21 @@ fn handle_9p(c: &mut TcpConn, request: &[u8]) {
     c.file = false;
 }
 
-/// Route an exported request path to a local `fsd` tree (cluster Phase 3): a path
-/// under `/proc` goes to the synthetic process filesystem at `NS_PROC_TREE`, with
-/// the `/proc` prefix stripped (the proc tree's root is the process table, so
-/// `/proc/2/state` on the wire is `/2/state` there); everything else goes to the
-/// boot disk (tree 0), path unchanged. `/proctology` is *not* a proc path -
-/// `/proc` must be a whole component. Byte scanning, no allocation.
-fn route_export(path: &[u8]) -> (u64, &[u8]) {
-    // The console (cluster Phase 3 /dev/cons) is a single writable file, not a
-    // tree - a write to it renders on this machine's screen. Marked with the
-    // NS_CON_TREE sentinel (>= MAX_MOUNTS, so never a real fsd tree); handle_9p
-    // routes it to CON_TASK. So `echo hi > /mnt/a/dev/cons` prints on machine A.
-    if path == b"/dev/cons" {
-        return (ninep_abi::NS_CON_TREE as u64, b"");
-    }
-    // /net (this machine's network identity, read-only) - served by netd itself.
-    const N: &[u8] = b"/net";
-    let is_net = path.len() >= N.len()
-        && &path[..N.len()] == N
-        && (path.len() == N.len() || path[N.len()] == b'/');
-    if is_net {
-        let tree = ninep_abi::NS_NET_TREE as u64;
-        return if path.len() == N.len() {
-            (tree, b"/") // "/net" -> the net root
-        } else {
-            (tree, &path[N.len()..]) // "/net/ip" -> "/ip"
-        };
-    }
-    const P: &[u8] = b"/proc";
-    let is_proc = path.len() >= P.len()
-        && &path[..P.len()] == P
-        && (path.len() == P.len() || path[P.len()] == b'/');
-    if is_proc {
-        let tree = ninep_abi::NS_PROC_TREE as u64;
-        if path.len() == P.len() {
-            (tree, b"/") // "/proc" itself -> the proc root
-        } else {
-            (tree, &path[P.len()..]) // "/proc/2/state" -> "/2/state"
-        }
-    } else {
-        (0, path)
-    }
-}
+/// `netd`'s **export namespace** (cluster Phase 3 — the namespace-aware export):
+/// the composed tree the export serves to remote clients. An exported request
+/// path resolves through this with the *same* [`ninep_abi::resolve_ns`] a local
+/// client uses on its own namespace — the Plan 9 model ("a server exports a
+/// namespace"), replacing the per-server prefix special-cases the earlier steps
+/// used. Unbound paths default to the boot disk (`fsd` tree 0); these three
+/// bindings add the synthetic servers. A binding is
+/// `[tree][prefix_len][target_len][prefix][target]`; every target here is `"/"`
+/// (each server's own root). A fourth resource is now a fourth *binding*, not a
+/// new code branch. A `const` blob lives in `.rodata` (no mutable statics).
+const EXPORT_NS: &[u8] = &[
+    ninep_abi::NS_PROC_TREE, 5, 1, b'/', b'p', b'r', b'o', b'c', b'/',
+    ninep_abi::NS_CON_TREE, 9, 1, b'/', b'd', b'e', b'v', b'/', b'c', b'o', b'n', b's', b'/',
+    ninep_abi::NS_NET_TREE, 4, 1, b'/', b'n', b'e', b't', b'/',
+];
 
 /// The `/net` synthetic filesystem (cluster Phase 3): this machine's network
 /// identity as read-only files, served by `netd` itself. `/` lists `ip` and
@@ -1546,42 +1519,51 @@ fn build_9p_reply(request: &[u8], out: &mut [u8; PREFIX_MAX]) -> usize {
     let p2 = read_u64(msg, 32);
     let payload = &msg[hdr..];
     let path = &payload[..p0.min(payload.len())];
-    // Route the incoming path to a local fsd tree (cluster Phase 3): a path under
-    // /proc goes to the synthetic process filesystem (with the /proc prefix
-    // stripped, since the proc tree's root is the process table), everything else
-    // to the boot disk (tree 0). This is what makes `ls /mnt/a/proc` on another
-    // machine show *this* machine's tasks.
-    let (tree, fspath) = route_export(path);
-    // The console (/dev/cons) is a different server (CON_TASK), not fsd: a write
-    // verb emits the inline bytes to the console, reads are refused (write-only).
-    if tree == ninep_abi::NS_CON_TREE as u64 {
-        let status = match verb {
-            v if v == ninep_abi::NP_WRITE || v == ninep_abi::NP_WRITE_FILE => {
-                let end = (p0 + p1 as usize).min(payload.len());
-                log(&payload[p0.min(payload.len())..end]);
-                0
-            }
-            v if v == ninep_abi::NP_WRITE_AT => {
-                let end = (p0 + p2 as usize).min(payload.len());
-                log(&payload[p0.min(payload.len())..end]);
-                0
-            }
-            _ => syscall_abi::FS_ERROR, // console is write-only
-        };
-        return frame_reply(out, status, &[]);
-    }
-    // /net: this machine's network identity, served by netd itself (read-only).
-    if tree == ninep_abi::NS_NET_TREE as u64 {
-        let mut ndata = [0u8; 32];
-        // readdir/read_file take the result window in a1; read/read_at in a2.
-        let want = if verb == ninep_abi::NP_READ || verb == ninep_abi::NP_READ_AT {
-            p2 as usize
-        } else {
-            p1 as usize
-        };
-        let (status, dlen) = net_op(verb, fspath, p1, want.min(ndata.len()), &mut ndata);
-        return frame_reply(out, status, &ndata[..dlen]);
-    }
+    // Resolve the incoming path through netd's export namespace with the shared
+    // resolver (cluster Phase 3 - the namespace-aware export): one code path, no
+    // per-server prefix special-cases. Unbound -> the boot disk (fsd tree 0); the
+    // EXPORT_NS bindings add /proc, /dev/cons, and /net. This is exactly how a
+    // local client resolves through *its* namespace.
+    let mut pbuf = [0u8; 256];
+    let resolved = ninep_abi::resolve_ns(EXPORT_NS, path, &mut pbuf);
+    let fspath = &pbuf[..resolved.len];
+    let tree: u64 = match resolved.target {
+        // The console (/dev/cons) is a different server (CON_TASK): a write verb
+        // emits the inline bytes to the console, reads are refused (write-only).
+        ninep_abi::NsTarget::Console => {
+            let status = match verb {
+                v if v == ninep_abi::NP_WRITE || v == ninep_abi::NP_WRITE_FILE => {
+                    let end = (p0 + p1 as usize).min(payload.len());
+                    log(&payload[p0.min(payload.len())..end]);
+                    0
+                }
+                v if v == ninep_abi::NP_WRITE_AT => {
+                    let end = (p0 + p2 as usize).min(payload.len());
+                    log(&payload[p0.min(payload.len())..end]);
+                    0
+                }
+                _ => syscall_abi::FS_ERROR, // console is write-only
+            };
+            return frame_reply(out, status, &[]);
+        }
+        // /net: this machine's network identity, served by netd itself (read-only).
+        ninep_abi::NsTarget::NetLocal => {
+            let mut ndata = [0u8; 32];
+            // readdir/read_file take the result window in a1; read/read_at in a2.
+            let want = if verb == ninep_abi::NP_READ || verb == ninep_abi::NP_READ_AT {
+                p2 as usize
+            } else {
+                p1 as usize
+            };
+            let (status, dlen) = net_op(verb, fspath, p1, want.min(ndata.len()), &mut ndata);
+            return frame_reply(out, status, &ndata[..dlen]);
+        }
+        // A remote binding in the export namespace would be transitive mounting -
+        // not bound today, so this can't occur; refuse defensively.
+        ninep_abi::NsTarget::Remote(_) => return frame_reply(out, syscall_abi::FS_ERROR, &[]),
+        // A local fsd tree (the boot disk, /proc, or a mounted partition).
+        ninep_abi::NsTarget::Fsd(t) => t as u64,
+    };
     let mut buf = [0u8; EXPORT_CHUNK];
 
     // Data slice for a status that is a byte count (0..FS_ERR_MIN); empty on an

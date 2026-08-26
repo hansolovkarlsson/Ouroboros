@@ -172,3 +172,119 @@ pub const NS_PROC_TREE: u8 = 4;
 /// status (and a little slack). A client loops with a rising offset for a large
 /// file, exactly as the local `cat` streams `SAFECOPY_MAX` chunks.
 pub const NP_REMOTE_CHUNK: usize = 512;
+
+// ---------------------------------------------------------------------------
+// The shared namespace resolver. A namespace is a sequence of bindings
+// `[tree:u8][prefix_len:u8][target_len:u8][prefix][target]`; resolving a path
+// picks the longest component-aligned prefix binding and replaces the prefix
+// with its target. The `tree` byte selects where the result lives - a real fsd
+// mount index, or one of the sentinels above (remote / console / net). This one
+// function is the single source of truth, used by `ulib`, the shell, *and*
+// `netd`'s export gateway (so an exported request resolves through netd's own
+// composed namespace, the Plan 9 model, instead of per-server prefix hacks).
+// It is deliberately task-id-neutral: it returns a [`NsTarget`] the caller maps
+// to a concrete server task, so this crate needs no dependency on `syscall-abi`.
+// Byte-only and bounded (relocation-safe: no `str` range-indexing, no fmt).
+// ---------------------------------------------------------------------------
+
+/// Where a resolved path lives - the server-neutral result of [`resolve_ns`].
+/// The caller maps this to a concrete task (fsd / cond / netd).
+#[derive(Clone, Copy)]
+pub enum NsTarget {
+    /// A local `fsd` mount at this tree index (`0` = boot disk, [`NS_PROC_TREE`]
+    /// = `/proc`, others = `mount`ed partitions).
+    Fsd(u8),
+    /// The console server (`/dev/cons`) - write-only.
+    Console,
+    /// The network server's local `/net` (read-only network identity).
+    NetLocal,
+    /// A remote mount: the `[ip:4][port:2 LE]` export endpoint to reach over TCP.
+    Remote([u8; NS_ENDPOINT_LEN]),
+}
+
+/// A namespace resolution: where the path lives, and the length of the
+/// server-side path bytes written to the caller's `out` buffer.
+#[derive(Clone, Copy)]
+pub struct NsResolved {
+    pub target: NsTarget,
+    pub len: usize,
+}
+
+/// Resolve absolute path `path` through namespace blob `ns`, writing the
+/// server-side path to `out`. The longest component-aligned prefix binding wins;
+/// its `target` replaces the matched prefix. No match (empty namespace, or a
+/// relative path - bindings are absolute) is identity to the local boot mount
+/// (`Fsd(0)`), so an unbound task is unchanged. A remote binding's `target`
+/// begins with a 6-byte endpoint (stripped into [`NsTarget::Remote`]); the
+/// console/net sentinels route to their servers. Bounded, byte-only.
+pub fn resolve_ns(ns: &[u8], path: &[u8], out: &mut [u8]) -> NsResolved {
+    let pbytes = path;
+    let mut best_tree = 0u8;
+    let mut best_plen = 0usize; // matched prefix length; 0 = no match
+    let mut best_target: &[u8] = &[];
+    let mut i = 0usize;
+    while i + 3 <= ns.len() {
+        let tree = ns[i];
+        let plen = ns[i + 1] as usize;
+        let tlen = ns[i + 2] as usize;
+        let pstart = i + 3;
+        let tstart = pstart + plen;
+        let tend = tstart + tlen;
+        if tend > ns.len() {
+            break; // malformed blob - stop parsing
+        }
+        let prefix = &ns[pstart..tstart];
+        let target = &ns[tstart..tend];
+        i = tend;
+        // Component-aligned: path == prefix, or path starts with prefix then '/'.
+        let matches = pbytes.len() >= prefix.len()
+            && &pbytes[..prefix.len()] == prefix
+            && (pbytes.len() == prefix.len() || pbytes[prefix.len()] == b'/');
+        if matches && prefix.len() > best_plen {
+            best_tree = tree;
+            best_plen = prefix.len();
+            best_target = target;
+        }
+    }
+    if best_plen == 0 {
+        let n = pbytes.len().min(out.len());
+        out[..n].copy_from_slice(&pbytes[..n]);
+        return NsResolved { target: NsTarget::Fsd(0), len: n };
+    }
+    // A remote binding: [ip:4][port:2][remote-root]. Split the endpoint off; the
+    // remote root plays the same role a local target does below.
+    let remote = best_tree == NS_REMOTE_TREE && best_target.len() >= NS_ENDPOINT_LEN;
+    let mut endpoint = [0u8; NS_ENDPOINT_LEN];
+    let target = if remote {
+        endpoint.copy_from_slice(&best_target[..NS_ENDPOINT_LEN]);
+        &best_target[NS_ENDPOINT_LEN..]
+    } else {
+        best_target
+    };
+    // target ++ (path after the matched prefix). `after` is "" or starts '/'.
+    let after = &pbytes[best_plen..];
+    let mut n = 0usize;
+    let target_is_root = target == b"/";
+    if !(target_is_root && !after.is_empty()) {
+        let t = target.len().min(out.len());
+        out[..t].copy_from_slice(&target[..t]);
+        n = t;
+    }
+    let a = after.len().min(out.len() - n);
+    out[n..n + a].copy_from_slice(&after[..a]);
+    n += a;
+    if n == 0 && !out.is_empty() {
+        out[0] = b'/'; // target "/" with empty after
+        n = 1;
+    }
+    let target = if best_tree == NS_CON_TREE {
+        NsTarget::Console
+    } else if best_tree == NS_NET_TREE {
+        NsTarget::NetLocal
+    } else if remote {
+        NsTarget::Remote(endpoint)
+    } else {
+        NsTarget::Fsd(best_tree)
+    };
+    NsResolved { target, len: n }
+}

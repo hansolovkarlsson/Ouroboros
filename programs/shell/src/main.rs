@@ -1851,71 +1851,15 @@ struct Resolved {
 /// TCP - cluster Phase 1c). No match is identity to the local boot mount. A
 /// duplicate of `ulib::resolve_ns`; scalar-only, relocation-safe.
 fn resolve_ns(ns: &[u8], path: &str, out: &mut [u8]) -> Resolved {
-    let pbytes = path.as_bytes();
-    let mut best_tree = 0u8;
-    let mut best_plen = 0usize;
-    let mut best_target: &[u8] = &[];
-    let mut i = 0usize;
-    while i + 3 <= ns.len() {
-        let tree = ns[i];
-        let plen = ns[i + 1] as usize;
-        let tlen = ns[i + 2] as usize;
-        let pstart = i + 3;
-        let tstart = pstart + plen;
-        let tend = tstart + tlen;
-        if tend > ns.len() {
-            break;
-        }
-        let prefix = &ns[pstart..tstart];
-        let target = &ns[tstart..tend];
-        i = tend;
-        let matches = pbytes.len() >= prefix.len()
-            && &pbytes[..prefix.len()] == prefix
-            && (pbytes.len() == prefix.len() || pbytes[prefix.len()] == b'/');
-        if matches && prefix.len() > best_plen {
-            best_tree = tree;
-            best_plen = prefix.len();
-            best_target = target;
-        }
-    }
-    if best_plen == 0 {
-        let n = pbytes.len().min(out.len());
-        out[..n].copy_from_slice(&pbytes[..n]);
-        return Resolved { server: syscall_abi::FSD_TASK, tree: 0, endpoint: [0; ninep_abi::NS_ENDPOINT_LEN], len: n };
-    }
-    let remote = best_tree == ninep_abi::NS_REMOTE_TREE
-        && best_target.len() >= ninep_abi::NS_ENDPOINT_LEN;
-    let mut endpoint = [0u8; ninep_abi::NS_ENDPOINT_LEN];
-    let target = if remote {
-        endpoint.copy_from_slice(&best_target[..ninep_abi::NS_ENDPOINT_LEN]);
-        &best_target[ninep_abi::NS_ENDPOINT_LEN..]
-    } else {
-        best_target
-    };
-    let after = &pbytes[best_plen..];
-    let mut n = 0usize;
-    let target_is_root = target == b"/";
-    if !(target_is_root && !after.is_empty()) {
-        let t = target.len().min(out.len());
-        out[..t].copy_from_slice(&target[..t]);
-        n = t;
-    }
-    let a = after.len().min(out.len() - n);
-    out[n..n + a].copy_from_slice(&after[..a]);
-    n += a;
-    if n == 0 && !out.is_empty() {
-        out[0] = b'/';
-        n = 1;
-    }
-    if best_tree == ninep_abi::NS_CON_TREE {
-        Resolved { server: syscall_abi::CON_TASK, tree: 0, endpoint, len: n }
-    } else if best_tree == ninep_abi::NS_NET_TREE {
-        // Local /net (netd-fs): NET_TASK with a zero endpoint (vs a remote mount).
-        Resolved { server: syscall_abi::NET_TASK, tree: 0, endpoint: [0; ninep_abi::NS_ENDPOINT_LEN], len: n }
-    } else if remote {
-        Resolved { server: syscall_abi::NET_TASK, tree: 0, endpoint, len: n }
-    } else {
-        Resolved { server: syscall_abi::FSD_TASK, tree: best_tree as u64, endpoint, len: n }
+    // Shared resolution logic (`ninep_abi::resolve_ns` - one source of truth for
+    // ulib, the shell, and netd's export); map its `NsTarget` to server/tree/ep.
+    let r = ninep_abi::resolve_ns(ns, path.as_bytes(), out);
+    let zero = [0u8; ninep_abi::NS_ENDPOINT_LEN];
+    match r.target {
+        ninep_abi::NsTarget::Fsd(tree) => Resolved { server: syscall_abi::FSD_TASK, tree: tree as u64, endpoint: zero, len: r.len },
+        ninep_abi::NsTarget::Console => Resolved { server: syscall_abi::CON_TASK, tree: 0, endpoint: zero, len: r.len },
+        ninep_abi::NsTarget::NetLocal => Resolved { server: syscall_abi::NET_TASK, tree: 0, endpoint: zero, len: r.len },
+        ninep_abi::NsTarget::Remote(ep) => Resolved { server: syscall_abi::NET_TASK, tree: 0, endpoint: ep, len: r.len },
     }
 }
 

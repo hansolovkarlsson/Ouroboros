@@ -117,12 +117,24 @@ deferred until more than two synthetic trees exist to expose.
   `-d int` aborts.
 
 **Phase 3 complete** — `/proc`, `/dev/cons`, `/net`, each a file server, each
-remotely readable. Not yet (later phases / deferred): Plan 9's full `/net/tcp`
-connection files (dialing *out* via another machine's NIC — a larger surface);
-and — now that there are **three** non-disk prefix special-cases in the export —
-the namespace-aware export (resolve incoming paths through a composed per-export
-namespace) to retire the prefix hacks, which has now clearly earned its place as
-the next structural step; plus union directories when a consumer appears.
+remotely readable.
+
+- **Follow-up — the namespace-aware export. ✅ DONE (2026-08-26).** With three
+  non-disk consumers, the deferred structural step earned its place: the export
+  now resolves each incoming path through its *own* composed namespace with the
+  **shared `ninep_abi::resolve_ns`** (moved out of `ulib`/shell, returning a
+  task-neutral `NsTarget`), against a small `EXPORT_NS` binding blob
+  (`/proc`/`/dev/cons`/`/net`; the rest the boot disk). `netd`'s `route_export`
+  and its three hand-written prefix checks are deleted — a fourth exported
+  resource is now a fourth *binding*, not a code branch. No behavior change;
+  three implementations that had to agree became one. Verified across the full
+  local + two-VM matrix, zero aborts.
+
+Not yet (later phases): Plan 9's full `/net/tcp` connection files (dialing *out*
+via another machine's NIC — a larger surface); union directories when a consumer
+appears; and transitive/remote re-export (the export namespace could now bind a
+*remote* subtree, which the resolver already returns as `NsTarget::Remote` —
+currently refused, a natural Phase 4 hook).
 
 ## Risks / deferred
 
