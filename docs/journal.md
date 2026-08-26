@@ -50,9 +50,16 @@ what you give up" pro/con vs MINIX/Linux/Unix/Plan 9/Helix (the older
 
 **No bug to postmortem today** — the release was mechanical and clean, the docs
 were prose. The only "problem" was conceptual (intended POSIX, built something
-else), and it's now documented in three places rather than as a standalone
-retrospective, since there's no debugging story to tell — just a design that
-turned out truer to microkernel/Plan 9 than to the original one-line goal.
+else). At first I left it documented across those three files without a
+standalone retrospective, reasoning there was no debugging story to tell; Hans
+then asked for the postmortem anyway, and writing it proved the instinct wrong —
+the drift *is* the story, and it's a genuinely different postmortem shape from the
+twelve before it (no bug, no single day, triggered by a question, not a crash).
+It's now [`posix-divergence-postmortem.md`](posix-divergence-postmortem.md), the
+thirteenth: how "POSIX-ish syscalls" stopped being true, why isolation forced it
+and Plan 9 rationalized it, and how portability returns as a userland libc — with
+the through-line that an architecture can drift from its stated goals with no test
+ever going red, and only attention catches it.
 
 ## 2026-08-26 (cont.) — Phase 4b: the full cpu model, importing the caller's namespace
 
