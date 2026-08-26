@@ -233,7 +233,20 @@ your files and can replay an observed request; encryption and per-peer identity
 are gated behind a "leaving a trusted network" trigger on the roadmap). Two knobs: no `\CLUSTER.KEY` = the export is closed
 entirely; a `\NOEXEC` flag file = the machine shares its disk but refuses remote
 `cpu` execution. Don't expose an Ouroboros export to a genuinely hostile network
-yet — per-peer auth and replay protection are named next steps.
+yet — per-peer auth, encryption, and replay protection are named next steps.
+
+**Config files (both optional, on the boot disk root), read by `netd` at boot:**
+
+| File | Effect |
+| --- | --- |
+| `\CLUSTER.KEY` | The shared cluster secret. All machines in a cluster need the **same** contents. Absent ⇒ the export is closed to every remote peer (fail-closed). |
+| `\NOEXEC` | Presence-only flag: authenticated peers may still `mount -r` the disk, but every `cpu` (remote-exec) is refused. |
+
+In the QEMU images a dev `\CLUSTER.KEY` is staged automatically (the Makefile's
+`CLUSTER_KEY`, default `ouroboros-dev-cluster-key-v1`), so the two-VM targets
+authenticate out of the box. To set your own on a running machine, just write the
+file — `write /CLUSTER.KEY my-secret` (then reboot so `netd` re-reads it), and
+`touch /NOEXEC` to enable the no-exec lever.
 
 ### Setting up two machines
 
