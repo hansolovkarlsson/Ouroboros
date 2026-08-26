@@ -1287,14 +1287,17 @@ const CPU_NONE: u8 = 0xFF;
 /// small because each `DialConn` carries its own send+recv buffers and the whole
 /// `[Option<DialConn>; MAX_DIAL]` array lives on `serve`'s (guard-paged) stack -
 /// so these three sizes trade directly against netd's stack headroom.
-const MAX_DIAL: usize = 2;
+// A listener + a couple of concurrent accepted connections ("small fan-out").
+// Each DialConn carries its send+recv buffers and the whole array lives on
+// serve()'s guard-paged (32 KB) stack, so this is capped tight - 4 overflowed.
+const MAX_DIAL: usize = 3;
 /// Per-connection send buffer: bytes the client has queued (via a /data write)
 /// that are not yet sent-and-acked. One small request's worth (stop-and-wait).
 const DIAL_SBUF: usize = 512;
 /// Per-connection receive buffer: bytes received from the peer awaiting a
 /// /data read. The peer is flow-controlled to it (we stop ACKing new data when
 /// it's full); the client should read promptly. Modest to bound stack use.
-const DIAL_RBUF: usize = 1024;
+const DIAL_RBUF: usize = 768;
 /// Ticks (`now()`) before an idle dial connection is reaped (bounded table, so
 /// an abandoned connection can't leak a slot forever).
 const DIAL_IDLE_TICKS: u64 = 600;
@@ -1305,8 +1308,16 @@ enum DialState {
     Free,
     /// Allocated by a `clone` read, not yet connected (no `connect` ctl yet).
     Idle,
-    /// `connect` issued; the SYN is being (re)sent and the SYN-ACK awaited.
+    /// `connect` issued; the SYN is being (re)sent and the SYN-ACK awaited
+    /// (active open - dial-out).
     Connecting,
+    /// `announce <port>` issued (dial-in): this slot is a passive **listener**,
+    /// accepting inbound connections on `announce_port`. It has no peer of its
+    /// own; each accepted connection is a *separate* slot (see `dial_accept`).
+    Listening,
+    /// A passively-accepted inbound connection: we received a SYN on a listener's
+    /// port, sent the SYN-ACK, and await the peer's final ACK (passive open).
+    Accepting,
     /// Handshake complete; data flows.
     Established,
     /// `close` issued (or the peer FIN'd); our FIN is being sent / we're
@@ -1357,6 +1368,57 @@ struct DialConn {
     /// Set once the peer's FIN has been received (so a drained read reports EOF
     /// / the connection can finish closing).
     peer_fin: bool,
+    /// For a `Listening` slot (dial-in): the port it accepts inbound connections
+    /// on (0 otherwise). `src_port` doubles as this too for an accepted conn -
+    /// see `dial_accept`.
+    announce_port: u16,
+    /// For a passively-accepted connection: the slot index of the `Listening`
+    /// conn that accepted it (`DIAL_NO_PARENT` for a dial-out / listener slot).
+    /// `listen` on the parent hands out accepted conns whose `pending` is set.
+    parent: u8,
+    /// A freshly-accepted connection not yet handed to the client via a `listen`
+    /// read. Cleared once `listen` returns its number.
+    pending: bool,
+}
+
+/// `DialConn::parent` sentinel: this conn is not a passively-accepted one.
+const DIAL_NO_PARENT: u8 = 0xFF;
+
+/// A fresh `Idle` dial connection with the given local (source) port. Shared by
+/// the `clone` allocation and the passive `dial_accept` path (which then fills
+/// in the peer + sequence state).
+fn new_dial(src_port: u16) -> DialConn {
+    DialConn {
+        state: DialState::Idle,
+        peer_ip: [0; 4],
+        peer_mac: [0; 6],
+        peer_port: 0,
+        src_port,
+        isn: TCP_ISN ^ ((src_port as u32) << 8),
+        snd_nxt: 0,
+        snd_una: 0,
+        rcv_nxt: 0,
+        fin_sent: false,
+        sbuf: [0; DIAL_SBUF],
+        slen: 0,
+        inflight: 0,
+        rbuf: [0; DIAL_RBUF],
+        rlen: 0,
+        retx_deadline: 0,
+        retries: 0,
+        last_activity: now(),
+        peer_fin: false,
+        announce_port: 0,
+        parent: DIAL_NO_PARENT,
+        pending: false,
+    }
+}
+
+/// Find a free dial slot (unused or `Free`), or `None` if the table is full.
+fn alloc_dial_slot(dials: &[Option<DialConn>; MAX_DIAL]) -> Option<usize> {
+    dials
+        .iter()
+        .position(|c| c.is_none() || matches!(c, Some(d) if d.state == DialState::Free))
 }
 
 /// A parsed inbound TCP segment addressed to our listen port.
@@ -1394,8 +1456,14 @@ fn on_frame(mac: &[u8; 6], frame: &[u8], conns: &mut [Option<TcpConn>; MAX_CONNS
         0x0806 => handle_arp(mac, frame),
         0x0800 => {
             // A dial-out (client) connection's segment is addressed to our
-            // ephemeral source port, not a listen port - try those first.
+            // ephemeral source port, not a listen port - try those first (and a
+            // retransmitted SYN for an already-accepted dial-in conn matches here
+            // too, so it never double-accepts below).
             if dial_on_segment(mac, frame, dials) {
+                return;
+            }
+            // A fresh inbound SYN to an `announce`d port (dial-in) - accept it.
+            if dial_accept(mac, frame, dials) {
                 return;
             }
             if let Some(seg) = parse_tcp_in(frame) {
@@ -2310,31 +2378,10 @@ fn dial_file_op(
         if !is_read {
             return (syscall_abi::FS_ERROR, 0);
         }
-        let Some(i) = dials.iter().position(|c| c.is_none() || matches!(c, Some(d) if d.state == DialState::Free)) else {
+        let Some(i) = alloc_dial_slot(dials) else {
             return (syscall_abi::FS_ERR_DISK_FULL, 0); // no free connection slot
         };
-        let src_port = next_src_port();
-        dials[i] = Some(DialConn {
-            state: DialState::Idle,
-            peer_ip: [0; 4],
-            peer_mac: [0; 6],
-            peer_port: 0,
-            src_port,
-            isn: TCP_ISN ^ ((src_port as u32) << 8),
-            snd_nxt: 0,
-            snd_una: 0,
-            rcv_nxt: 0,
-            fin_sent: false,
-            sbuf: [0; DIAL_SBUF],
-            slen: 0,
-            inflight: 0,
-            rbuf: [0; DIAL_RBUF],
-            rlen: 0,
-            retx_deadline: 0,
-            retries: 0,
-            last_activity: now(),
-            peer_fin: false,
-        });
+        dials[i] = Some(new_dial(next_src_port()));
         let mut num = [0u8; 8];
         let nlen = u64_decimal(i as u64, &mut num);
         num[nlen] = b'\n';
@@ -2376,6 +2423,21 @@ fn dial_file_op(
             c.last_activity = now();
             return (0, 0);
         }
+        if data_in.starts_with(b"announce ") {
+            // "announce <port>" (dial-in): make this slot a passive listener.
+            let mut rest = &data_in[b"announce ".len()..];
+            while !rest.is_empty() && matches!(rest[rest.len() - 1], b'\n' | b'\r' | b' ' | b'\t') {
+                rest = &rest[..rest.len() - 1];
+            }
+            let Some(port) = parse_dec(rest).filter(|p| *p <= u16::MAX as u64) else {
+                return (syscall_abi::FS_ERR_INVALID_NAME, 0);
+            };
+            let c = dials[n].as_mut().unwrap();
+            c.announce_port = port as u16;
+            c.state = DialState::Listening;
+            c.last_activity = now();
+            return (0, 0);
+        }
         if data_in.starts_with(b"close") {
             let c = dials[n].as_mut().unwrap();
             if c.state == DialState::Established {
@@ -2389,12 +2451,34 @@ fn dial_file_op(
         return (syscall_abi::FS_ERR_INVALID_NAME, 0);
     }
 
+    // /tcp/<N>/listen (dial-in): hand out the next connection accepted on this
+    // listener (its number), or nothing if none is pending yet. Non-blocking -
+    // the client polls, like /data.
+    if leaf == b"listen" && is_read {
+        let found = dials
+            .iter()
+            .position(|c| matches!(c, Some(d) if d.parent == n as u8 && d.pending));
+        let Some(m) = found else {
+            return (0, 0); // nothing accepted yet
+        };
+        dials[m].as_mut().unwrap().pending = false;
+        let mut num = [0u8; 8];
+        let nlen = u64_decimal(m as u64, &mut num);
+        num[nlen] = b'\n';
+        let total = nlen + 1;
+        let k = total.min(want).min(out.len());
+        out[..k].copy_from_slice(&num[..k]);
+        return (total as u64, k);
+    }
+
     if leaf == b"status" && is_read {
         let c = dials[n].as_ref().unwrap();
         let s: &[u8] = match c.state {
             DialState::Free => b"Free\n",
             DialState::Idle => b"Idle\n",
             DialState::Connecting => b"Connecting\n",
+            DialState::Listening => b"Listening\n",
+            DialState::Accepting => b"Accepting\n",
             DialState::Established => b"Established\n",
             DialState::Closing => b"Closing\n",
             DialState::Closed => b"Closed\n",
@@ -2456,7 +2540,10 @@ fn pump_dials(mac: &[u8; 6], dials: &mut [Option<DialConn>; MAX_DIAL]) {
                         }
                     }
                 }
-                DialState::Established => {
+                // Data flows the same whether we're staying open (Established) or
+                // draining (Closing) - queued send data must FLUSH before the FIN,
+                // or a response written just before `close` would be stranded.
+                DialState::Established | DialState::Closing => {
                     if c.inflight == 0 && c.slen > 0 {
                         let chunk = c.slen.min(DIAL_MSS);
                         if let Some(nn) = build_tcp(mac, &c.peer_mac, &c.peer_ip, c.src_port, c.peer_port, c.snd_nxt, c.rcv_nxt, TCP_PSH | TCP_ACK, false, &c.sbuf[..chunk], &mut frame) {
@@ -2474,26 +2561,37 @@ fn pump_dials(mac: &[u8; 6], dials: &mut [Option<DialConn>; MAX_DIAL]) {
                             c.retries += 1;
                             c.retx_deadline = t + DIAL_RETX_WAIT;
                         }
-                    }
-                }
-                DialState::Closing => {
-                    if !c.fin_sent && c.inflight == 0 {
+                    } else if c.state == DialState::Closing && !c.fin_sent && c.inflight == 0 && c.slen == 0 {
+                        // All queued data sent + acked - now the FIN.
                         if let Some(nn) = build_tcp(mac, &c.peer_mac, &c.peer_ip, c.src_port, c.peer_port, c.snd_nxt, c.rcv_nxt, TCP_FIN | TCP_ACK, false, &[], &mut frame) {
                             let _ = send(&frame[..nn]);
                         }
                         c.fin_sent = true;
                         c.snd_nxt = c.snd_nxt.wrapping_add(1);
                         c.retx_deadline = t + DIAL_RETX_WAIT;
-                    } else if c.fin_sent && t >= c.retx_deadline {
+                    } else if c.state == DialState::Closing && c.fin_sent && t >= c.retx_deadline {
                         c.state = DialState::Closed; // give up waiting for the FIN-ACK
+                    }
+                }
+                // Passive open (dial-in): retransmit the SYN-ACK until the peer's
+                // final ACK arrives (or give up).
+                DialState::Accepting if t >= c.retx_deadline => {
+                    if c.retries >= DIAL_SYN_TRIES {
+                        c.state = DialState::Closed;
+                    } else if let Some(nn) = build_tcp(mac, &c.peer_mac, &c.peer_ip, c.src_port, c.peer_port, c.isn, c.rcv_nxt, TCP_SYN | TCP_ACK, true, &[], &mut frame) {
+                        let _ = send(&frame[..nn]);
+                        c.retries += 1;
+                        c.retx_deadline = t + DIAL_RETX_WAIT;
                     }
                 }
                 _ => {}
             }
             // Reap a slot only once it's Closed AND its receive buffer is drained
-            // (so the client can still read the last bytes), or after a long idle.
+            // (so the client can still read the last bytes), or after a long idle -
+            // but never idle-reap a Listening slot (a listener has no traffic of
+            // its own yet must persist until an explicit close).
             (c.state == DialState::Closed && c.rlen == 0)
-                || t.saturating_sub(c.last_activity) > DIAL_IDLE_TICKS
+                || (c.state != DialState::Listening && t.saturating_sub(c.last_activity) > DIAL_IDLE_TICKS)
         };
         if reap {
             dials[i] = None;
@@ -2522,6 +2620,15 @@ fn dial_on_segment(mac: &[u8; 6], frame: &[u8], dials: &mut [Option<DialConn>; M
         if s.flags & TCP_RST != 0 {
             c.state = DialState::Closed;
             return true;
+        }
+        // Passive open (dial-in): the peer's final ACK completes the handshake.
+        // Do this before the data match so an ACK piggybacking the first request
+        // bytes both establishes the conn and buffers the data in one pass.
+        if c.state == DialState::Accepting && s.flags & TCP_ACK != 0 && s.ack == c.isn.wrapping_add(1) {
+            c.snd_una = c.isn.wrapping_add(1);
+            c.state = DialState::Established;
+            c.retx_deadline = 0;
+            c.retries = 0;
         }
         match c.state {
             DialState::Connecting => {
@@ -2589,6 +2696,71 @@ fn dial_on_segment(mac: &[u8; 6], frame: &[u8], dials: &mut [Option<DialConn>; M
         return true;
     }
     false
+}
+
+/// Passive open (dial-in): if `frame` is a fresh inbound SYN to a port some slot
+/// has `announce`d, accept it — allocate a new `DialConn` for the connection,
+/// send the SYN-ACK, and mark it `pending` for the listener's `listen` read.
+/// Returns true if the SYN was for an announced port (accepted, or dropped
+/// because the table is full — either way it isn't a server-conn segment).
+/// Called from `on_frame` after `dial_on_segment` (so a *retransmitted* SYN for
+/// an already-accepted conn matches there first and never double-accepts).
+fn dial_accept(mac: &[u8; 6], frame: &[u8], dials: &mut [Option<DialConn>; MAX_DIAL]) -> bool {
+    // Minimal parse: IPv4 + TCP, a pure SYN (no ACK).
+    if frame.len() < 34 || frame[12] != 0x08 || frame[13] != 0x00 || frame[23] != 6 {
+        return false;
+    }
+    let ihl = (frame[14] & 0x0f) as usize * 4;
+    let t = 14 + ihl;
+    if frame.len() < t + 20 {
+        return false;
+    }
+    let flags = frame[t + 13];
+    if flags & TCP_SYN == 0 || flags & TCP_ACK != 0 {
+        return false; // only a bare SYN opens a new accepted connection
+    }
+    let dst_port = u16be(frame, t + 2);
+    // Is dst_port a port some slot announced?
+    let Some(li) = dials
+        .iter()
+        .position(|c| matches!(c, Some(d) if d.state == DialState::Listening && d.announce_port == dst_port))
+    else {
+        return false;
+    };
+    let Some(m) = alloc_dial_slot(dials) else {
+        return true; // table full - drop the SYN; the client will retransmit
+    };
+    let src_ip = [frame[26], frame[27], frame[28], frame[29]];
+    let src_mac = [frame[6], frame[7], frame[8], frame[9], frame[10], frame[11]];
+    let src_port = u16be(frame, t);
+    let their_seq = u32be(frame, t + 4);
+
+    // Build the accepted conn. Its local (source) port is the announced port -
+    // replies go out FROM there, TO the client - and a fresh, rotating ISN keeps
+    // back-to-back accepts on the same port distinct.
+    let mut c = new_dial(dst_port);
+    let isn = TCP_ISN ^ ((next_src_port() as u32) << 8);
+    c.isn = isn;
+    c.snd_una = isn;
+    c.snd_nxt = isn;
+    c.peer_ip = src_ip;
+    c.peer_mac = src_mac;
+    c.peer_port = src_port;
+    c.rcv_nxt = their_seq.wrapping_add(1);
+    c.state = DialState::Accepting;
+    c.parent = li as u8;
+    c.pending = true;
+    c.last_activity = now();
+
+    // Send the SYN-ACK (seq = our ISN, ack = their SYN + 1); it consumes one seq.
+    let mut out = [0u8; 1600];
+    if let Some(nn) = build_tcp(mac, &c.peer_mac, &c.peer_ip, c.src_port, c.peer_port, c.isn, c.rcv_nxt, TCP_SYN | TCP_ACK, true, &[], &mut out) {
+        let _ = send(&out[..nn]);
+    }
+    c.snd_nxt = isn.wrapping_add(1);
+    c.retx_deadline = now() + DIAL_RETX_WAIT;
+    dials[m] = Some(c);
+    true
 }
 
 /// The `/net` server, served by `netd` itself: the read-only identity files

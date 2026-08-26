@@ -7,6 +7,31 @@ for the forward plan see [`roadmap.md`](roadmap.md).
 
 ---
 
+## 2026-08-26 (cont.) — dialing *in* through another machine (`/net/tcp` accept)
+
+The mirror of dial-out landed the same day: a machine now **accepts inbound** TCP
+connections on another's NIC (`serve /mnt/a/net 9000 …` announces on A's network;
+a client that connects to A:9000 is answered by a program on B). Passive open on
+A, relay to B, B owns the service. Verified end-to-end: the guest announced 9000,
+a host socket connected to it, the guest accepted (passive open), and the
+request/response relayed through the export were byte-exact; zero faults.
+
+Mostly reuse — an accepted connection *is* a `DialConn`, so buffers/retransmit/
+inbound handling were unchanged; the new bits (a `Listening` + `Accepting` state,
+`dial_accept`, a `listen` read) were a new arm on an existing state machine, a day
+not a month. Three things worth remembering. **Ordering is correctness**:
+`dial_accept` runs *after* `dial_on_segment` so a retransmitted SYN matches the
+already-accepted conn and never double-accepts. **The close-flush bug**: `Closing`
+originally sent only the FIN, stranding a response written just before `close` —
+fixed by flushing send data in both `Established` and `Closing`, FIN only once
+drained (TCP's FIN means "no *more* data," not "drop what's queued"). And **the
+stack overflow returned a fifth time**: `MAX_DIAL=4` blew netd's 32 KB stack;
+capped to 3 + a smaller rbuf. On a fixed stack, per-connection array growth is a
+stack question first. Full account in
+[`dial-in-postmortem.md`](dial-in-postmortem.md). Honest caveat carried from the
+design: dial-in is more speculative on consumers than dial-out — it completes the
+`/net/tcp` model symmetrically rather than unblocking a waiting consumer.
+
 ## 2026-08-26 (cont.) — dialing out of another machine's NIC (`/net/tcp`)
 
 The last unshared cluster resource fell today: a machine can now open a TCP

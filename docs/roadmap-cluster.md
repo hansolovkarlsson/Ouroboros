@@ -212,10 +212,18 @@ extended); `net_op` only mutates state while the event loop (`pump_dials` /
 client only. The "use another machine's network" half of the north star. See
 [`dial-out-postmortem.md`](dial-out-postmortem.md).
 
-Deferred to later phases: inbound `listen`/`accept` through another machine (dial
-*in*); UDP; union directories when a consumer appears; and transitive/remote
-re-export (the export namespace can now bind a remote subtree — a natural Phase 4
-hook).
+**Follow-up ✅ DONE (2026-08-26): `/net/tcp` dial-in** — the mirror of dial-out:
+`announce <port>` + `listen` make a machine **accept inbound** connections on
+another's NIC (`serve /mnt/a/net 9000 …` answers clients that connect to A's
+address). Passive open on A, relay to B, B owns the service. An accepted
+connection is just another `DialConn` (handle in the path, still no fids), so it
+was almost all reuse; small fan-out (a listener + two accepts). Completes the
+`/net/tcp` model symmetrically. See
+[`dial-in-postmortem.md`](dial-in-postmortem.md).
+
+Deferred to later phases: a persistent multi-accept server loop; UDP; union
+directories when a consumer appears; and transitive/remote re-export (the export
+namespace can now bind a remote subtree — a natural Phase 4 hook).
 - Union directories (Plan 9's join-several-sources-under-one-name) if/when a real
   consumer appears — not before. A fully namespace-aware export (vs. `/proc`'s
   prefix hack) lands when a second synthetic tree needs it.

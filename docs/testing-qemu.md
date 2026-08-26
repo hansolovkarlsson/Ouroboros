@@ -119,6 +119,24 @@ a `\NOEXEC` flag file authenticates mounts but refuses `cpu` remote-exec.
 The guest reaches the host at **10.0.2.2** over SLIRP with no hostfwd (SLIRP routes
 guest→host automatically), which is why `run-image-9p-client` needs only a NIC.
 
+**Dial-out and dial-in (`/net/tcp`).** `run-image-9p` also forwards `tcp::5900-:9000`,
+so the same host client can drive the guest's `/net/tcp` over the export:
+
+```sh
+# Dial-OUT: make the guest dial a host TCP server out of ITS nic (run a host
+# server on :8000 first; the guest reaches it at 10.0.2.2:8000):
+python3 scripts/np9p_client.py localhost 5640 dial 10.0.2.2 8000 GET / HTTP/1.0
+
+# Dial-IN: make the guest ANNOUNCE :9000 and accept an inbound connection; a
+# host socket connects to it via the :5900->:9000 hostfwd as the external client:
+python3 scripts/np9p_client.py localhost 5640 serve 9000 5900 HELLO-SERVED-VIA-GUEST
+```
+
+Both are foreign-observer round trips: `dial` proves the guest opened a real
+outbound connection (a host server sees it arrive from the guest's NIC); `serve`
+proves the guest accepted a real inbound one (the external host socket gets the
+served reply). See `docs/dial-out-postmortem.md` / `docs/dial-in-postmortem.md`.
+
 ---
 
 ## 5. The two-node cluster (the real thing)

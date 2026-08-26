@@ -7,6 +7,52 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/`; 
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## Dial-in: /net/tcp accept — serve on another machine's network
+
+The mirror of dial-out: a machine now **accepts inbound** TCP connections on
+another machine's network presence. `serve /mnt/a/net 9000 …` announces port 9000
+on **machine A's** NIC; a client that connects to A:9000 is answered by a program
+running on the announcing machine. A is pure **ingress** (accept + relay bytes);
+the server logic and its state live where `serve` runs. This completes the
+`/net/tcp` model symmetrically (dial-out = active open, dial-in = passive open).
+
+**The file model** (extends `/net/tcp`):
+- write `announce <port>` to `/net/tcp/N/ctl` — make slot N a passive listener;
+- read `/net/tcp/N/listen` → the number M of a newly accepted connection (empty
+  if none pending yet — non-blocking, the client polls);
+- `/net/tcp/M/data` / `/net/tcp/M/status` — the accepted connection, the same
+  `DialConn` machinery as any other.
+
+**Almost all reuse.** An accepted connection *is* a `DialConn` — its buffers,
+retransmit (`pump_dials`), and inbound handling (`dial_on_segment`) are unchanged;
+the relay needs no new relay code. The new bits: a `Listening` state + an
+`Accepting` (passive-open) state; `dial_accept` (a fresh inbound SYN to an
+announced port → allocate an accepted `DialConn`, send the SYN-ACK, mark it
+`pending` for the listener); and a `listen` read that scans for a `pending`
+accepted conn parented to that listener. The connection handle is still
+path-encoded (`/net/tcp/M/…`), so still no fids. A `/bin/serve` program is the
+consumer (accept one, respond, close).
+
+**A real bug fixed en route:** the `Closing` state only sent the FIN, never
+flushed queued send-buffer data — so a response written just before `close` would
+have been stranded. `pump_dials` now flushes data in *both* `Established` and
+`Closing`, sending the FIN only once the send buffer is drained.
+
+**Scope, honest:** small fan-out (a listener + up to two concurrent accepted
+connections — `MAX_DIAL=3`), TCP only, stop-and-wait. And dial-in is more
+speculative on consumers than dial-out (no cluster feature demands inbound-through
+-another-machine yet) — it completes the model and is a real capability, not a
+waiting consumer.
+
+**Verified** cross-implementation: the guest announced port 9000 on its NIC; a
+host socket connected to it (via a hostfwd) as the external client; the guest
+accepted the inbound connection (passive open), and the request/response relayed
+through the export were byte-exact end to end (external client received the served
+reply). Zero EL0 faults. The guard-page **stack overflow returned** (`MAX_DIAL=4`
+overflowed `serve`'s 32 KB stack — the network arc's recurring trap, now the
+fifth time) and was fixed by capping the fan-out. See
+[`dial-in-postmortem.md`](dial-in-postmortem.md).
+
 ## Dial-out: /net/tcp connection files — use another machine's network
 
 The last unshared cluster resource: a machine now dials TCP **out of another

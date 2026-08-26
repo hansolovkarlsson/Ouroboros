@@ -154,6 +154,74 @@ def do_dial(host, port, key, dst_ip, dst_port, request):
     print(f"\n[done] {len(got)} bytes received")
 
 
+def do_serve(host, port, key, announce_port, extern_port, response):
+    """Drive the GUEST's /net/tcp DIAL-IN over the export: announce a port on the
+    guest's NIC, then a host socket connects to the guest at that port (via the
+    hostfwd `extern_port`) as the external client; the guest accepts, we relay
+    the request/response over the export, and the external client sees the reply.
+    Proves "accept inbound on the guest's network, served from here.\""""
+    import time
+    base = "/net/tcp"
+    st, data = np_readfile(host, port, key, base + "/clone")
+    if st >= FS_ERR_MIN or not data.strip().isdigit():
+        print(f"clone failed (0x{st:016x})"); sys.exit(1)
+    n = int(data.strip())
+    print(f"[clone] listener {n}")
+    st, _ = np_writefile(host, port, key, f"{base}/{n}/ctl", f"announce {announce_port}".encode())
+    if st >= FS_ERR_MIN:
+        print(f"announce failed (0x{st:016x})"); sys.exit(1)
+    print(f"[announce] listening on guest:{announce_port}")
+
+    # The external client connects to the guest at announce_port (hostfwd).
+    ext = socket.create_connection(("localhost", extern_port), timeout=10)
+    req = b"PING-FROM-EXTERNAL-CLIENT\r\n"
+    ext.sendall(req)
+    print(f"[external] connected to localhost:{extern_port} (-> guest:{announce_port}), sent {len(req)} bytes")
+
+    # Accept: poll listen for the accepted connection M.
+    m = None
+    for _ in range(50):
+        st, data = np_readfile(host, port, key, f"{base}/{n}/listen", want=16)
+        if st < FS_ERR_MIN and data.strip().isdigit():
+            m = int(data.strip()); break
+        time.sleep(0.1)
+    if m is None:
+        print("no connection accepted (timeout)"); sys.exit(1)
+    print(f"[listen] accepted connection {m}")
+
+    # Read the request the external client sent (relayed through the guest).
+    got_req = b""
+    for _ in range(50):
+        st, data = np_readfile(host, port, key, f"{base}/{m}/data", want=512)
+        if st < FS_ERR_MIN and data:
+            got_req += data; break
+        time.sleep(0.05)
+    print(f"[request] guest relayed: {got_req!r}")
+
+    # Respond, then close.
+    np_writefile(host, port, key, f"{base}/{m}/data", response)
+    np_writefile(host, port, key, f"{base}/{m}/ctl", b"close")
+
+    # The external client should receive the response the guest relayed.
+    ext.settimeout(10)
+    got_resp = b""
+    try:
+        while True:
+            chunk = ext.recv(4096)
+            if not chunk:
+                break
+            got_resp += chunk
+    except OSError:
+        pass
+    ext.close()
+    np_writefile(host, port, key, f"{base}/{n}/ctl", b"close")  # stop listening
+    print(f"[external] received: {got_resp!r}")
+    if got_resp.strip() == response.strip():
+        print("[OK] external client got the response served from the export side")
+    else:
+        print("[FAIL] response mismatch"); sys.exit(1)
+
+
 def main():
     # Pull an optional `--key <k>` out of argv (anywhere after the fixed args).
     key = DEFAULT_KEY
@@ -166,6 +234,16 @@ def main():
         print(__doc__)
         sys.exit(2)
     host, port, op = args[0], int(args[1]), args[2]
+
+    if op == "serve":
+        # serve <host> <port> serve <announce_port> <extern_hostfwd_port> [response...]
+        if len(args) < 5:
+            print("usage: np9p_client.py <host> <port> serve <announce_port> <extern_port> [response...]")
+            sys.exit(2)
+        announce_port, extern_port = int(args[3]), int(args[4])
+        response = ((" ".join(args[5:]) if len(args) > 5 else "HELLO-SERVED-VIA-GUEST") + "\r\n").encode()
+        do_serve(host, port, key, announce_port, extern_port, response)
+        return
 
     if op == "dial":
         # dial <host> <port> dial <dst_ip> <dst_port> [request words...]

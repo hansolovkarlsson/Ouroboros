@@ -73,6 +73,8 @@ FETCH_ELF    := target/$(USER_TARGET)/release/fetch
 FETCH_BIN    := target/$(USER_TARGET)/release/fetch.bin
 DIAL_ELF     := target/$(USER_TARGET)/release/dial
 DIAL_BIN     := target/$(USER_TARGET)/release/dial.bin
+SERVE_ELF    := target/$(USER_TARGET)/release/serve
+SERVE_BIN    := target/$(USER_TARGET)/release/serve.bin
 # All generated artifacts land under $(BUILD_DIR) so the repo root stays
 # source-only. The cargo `target/` dir is separate (cargo owns it). Every
 # path below is derived from BUILD_DIR, so pointing it elsewhere moves the
@@ -115,7 +117,7 @@ ifeq ($(PROFILE),release)
 CARGO_FLAGS += --release
 endif
 
-.PHONY: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin ping-bin resolve-bin fetch-bin dial-bin wc-bin grep-bin head-bin esp run run-virtio-console run-usb-kbd run-usb-multi run-gicv3 image run-image run-image-9p run-image-9p-client run-image-2vm-a run-image-2vm-b image-gpt run-image-gpt image-exfat run-image-exfat image-ext2 run-image-ext2 parallels-hdd release test-parallels clean
+.PHONY: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin esp run run-virtio-console run-usb-kbd run-usb-multi run-gicv3 image run-image run-image-9p run-image-9p-client run-image-2vm-a run-image-2vm-b image-gpt run-image-gpt image-exfat run-image-exfat image-ext2 run-image-ext2 parallels-hdd release test-parallels clean
 
 # Overridable by `make test-parallels VM_NAME=... CMDS=... BOOT_WAIT=...`.
 VM_NAME     ?= Ouroboros
@@ -260,6 +262,10 @@ dial-bin:
 	cargo build -p dial --target $(USER_TARGET) --release
 	"$(OBJCOPY)" --strip-all $(DIAL_ELF) $(DIAL_BIN)
 
+serve-bin:
+	cargo build -p serve --target $(USER_TARGET) --release
+	"$(OBJCOPY)" --strip-all $(SERVE_ELF) $(SERVE_BIN)
+
 # Stage the EFI System Partition layout QEMU/Parallels expect: a removable
 # UEFI drive boots \EFI\BOOT\BOOTAA64.EFI automatically, no boot manager
 # entry needed. \EFI\ORBS\ (must fit FAT's 8.3 short-name limit, which
@@ -268,7 +274,7 @@ dial-bin:
 # itself: the default shell binary and the config file (loader.rs's
 # CONFIG_PATH) naming which program to load - edit INIT.CFG and rebuild
 # just that program to swap it out, no kernel rebuild required.
-esp: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin ping-bin resolve-bin fetch-bin dial-bin wc-bin grep-bin head-bin
+esp: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin
 	mkdir -p $(ESP_DIR)/EFI/BOOT $(ESP_DIR)/EFI/ORBS $(ESP_DIR)/bin
 	cp $(KERNEL) $(ESP_DIR)/EFI/BOOT/BOOTAA64.EFI
 	cp $(SHELL_BIN) $(ESP_DIR)/EFI/ORBS/SH.BIN
@@ -311,6 +317,7 @@ esp: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin args
 	cp $(RESOLVE_BIN) $(ESP_DIR)/bin/RESOLVE
 	cp $(FETCH_BIN) $(ESP_DIR)/bin/FETCH
 	cp $(DIAL_BIN) $(ESP_DIR)/bin/DIAL
+	cp $(SERVE_BIN) $(ESP_DIR)/bin/SERVE
 	cp $(WC_BIN) $(ESP_DIR)/bin/WC
 	cp $(GREP_BIN) $(ESP_DIR)/bin/GREP
 	cp $(HEAD_BIN) $(ESP_DIR)/bin/HEAD
@@ -674,7 +681,7 @@ run-image-9p: image
 		-bios $(OVMF) \
 		-drive file=$(ESP_DIR).img,format=raw,if=none,id=hd0 \
 		-device virtio-blk-device,drive=hd0 \
-		-netdev user,id=net0,hostfwd=tcp::5555-:80,hostfwd=tcp::5640-:564 \
+		-netdev user,id=net0,hostfwd=tcp::5555-:80,hostfwd=tcp::5640-:564,hostfwd=tcp::5900-:9000 \
 		-device virtio-net-device,netdev=net0 \
 		-object filter-dump,id=f0,netdev=net0,file=$(NET_PCAP) \
 		-global virtio-mmio.force-legacy=false \

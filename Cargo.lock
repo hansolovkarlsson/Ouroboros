@@ -254,6 +254,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "serve"
+version = "0.1.0"
+dependencies = [
+ "ninep-abi",
+ "syscall-abi",
+ "ulib",
+]
+
+[[package]]
 name = "shell"
 version = "0.1.0"
 dependencies = [

@@ -345,8 +345,28 @@ The only thing that changes is the base path: `/net` is your network,
 authenticated by the same cluster key as any export access. Unlike `cpu A fetch`
 (which runs a program on A), `dial` gives you a raw connection you drive
 yourself, with no matching program needed on A. Scoped to a TCP client
-(stop-and-wait, small transactions); dialing *in* (listen/accept) and UDP are
-later work.
+(stop-and-wait, small transactions); UDP is later work.
+
+### Accepting connections on another machine's network — `/net/tcp` dial-in
+
+The mirror of `dial`: **accept inbound** connections on another machine's network
+presence. `announce` a port, then `listen` hands out each accepted connection; a
+client that connects to that machine's address is answered by the program that
+announced. The `serve` command drives it (announce, accept one, respond, close):
+
+```
+$ mount -n /net                 # bind THIS machine's /net
+$ serve /net 9000 hi there      # answer clients that connect to US on :9000
+$ mount -r 10.0.2.10:564 /mnt/a # mount machine A's export
+$ serve /mnt/a/net 9000 hi there   # answer clients that connect to A on :9000
+```
+
+The last line makes a program *here* answer clients that connect to **machine A's
+address** — A lends its ingress, this machine owns the service. It's the inverse
+of `cpu A <server>` (which runs the server on A): here the server's state lives
+where `serve` runs. Scoped to a small fan-out (a listener plus a couple of
+concurrent connections), TCP only; a persistent multi-client server loop is a
+straightforward extension of `serve`.
 
 ### Under the hood (pointers)
 
