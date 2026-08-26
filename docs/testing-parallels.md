@@ -1,9 +1,20 @@
 # Running and testing Ouroboros on real Parallels hardware
 
+> **Status: PARKED ("perhaps do at some point later"), 2026-08-26.** Parallels
+> real-hardware testing is **not a current priority**. QEMU — single machine and
+> the two-node cluster (see [`testing-qemu.md`](testing-qemu.md)) — is good enough
+> for now, and Parallels can't prove the cluster anyway (no NIC transport; see the
+> caveat below). The intended physical target going forward is **2× Raspberry Pi
+> 4** (real ARM hardware, on order) — the Plan 9 mechanics fit genuine physical
+> machines better than a VM, and a concrete Pi test plan will be written when the
+> boards arrive. This document is kept as a **reference** (and because the
+> single-machine matrix + the `netd` boot-race analysis stay valid if anyone does
+> boot Parallels), not as an active plan.
+
 The practical guide to booting Ouroboros on **real Parallels Desktop hardware**
-(Apple Silicon) — the project's actual test target, not an emulator. Companion to
-[`testing-qemu.md`](testing-qemu.md) (the fast QEMU dev loop, single machine *and*
-two-node cluster) and [`manual.md`](manual.md) (using the OS once booted).
+(Apple Silicon). Companion to [`testing-qemu.md`](testing-qemu.md) (the fast QEMU
+dev loop, single machine *and* two-node cluster) and [`manual.md`](manual.md)
+(using the OS once booted).
 
 Read the caveat below **first**: it decides what you can and can't validate here.
 

@@ -739,6 +739,21 @@ not-a-program error; `pwd | upper` → "/" (builtin head). Combining `|` with
 
 ## Testing infrastructure: scripted real-hardware round trips
 
+> **Direction update (2026-08-26): Parallels real-hardware testing is PARKED.**
+> QEMU (single machine *and* the two-node cluster on a shared socket link — see
+> [`testing-qemu.md`](testing-qemu.md)) is the working dev/test loop and is
+> **good enough for now**. Parallels was never going to prove the cluster anyway
+> — it has no working NIC transport (virtio-PCI, unsupported), so networking and
+> the whole Plan 9 cluster are unreachable there (see
+> [`testing-parallels.md`](testing-parallels.md) for the full analysis, kept as a
+> "perhaps later" reference, not an active plan). **The intended physical target
+> is now 2× Raspberry Pi 4** (real ARM hardware, ordered 2026-08-26): the Plan 9
+> resource-sharing mechanics are a better fit for genuine physical machines than a
+> VM, so a real two-node cluster on the Pis is the eventual real-hardware proof.
+> A concrete Pi test plan gets written **when the boards arrive**, not before. The
+> `prlctl`/`make test-parallels` tooling below stays available but is no longer a
+> priority.
+
 Every real-hardware bug in `xhci-keyboard-postmortem.md` and
 `boot-bringup-postmortem.md` cost a manual round trip: rebuild, re-image,
 boot Parallels, watch the screen, type on a physical keyboard, report
