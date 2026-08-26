@@ -186,14 +186,21 @@ network and reads/writes it, surviving a clean disconnect. **This is the
 milestone that answers the years-long question with a yes** — everything after is
 expansion of a proven idea.
 
-### Phase 3 — All resources as files, remotely mountable
+### Phase 3 — All resources as files, remotely mountable 🚧 IN PROGRESS
 
-- Console (`/dev/cons`), network (`/net` — use *another* machine's NIC), a
-  synthetic process table (`/proc`) — each a file server, each remotely
-  mountable. "Everything is a file, everything is mountable" pays off: sharing a
-  resource is just mounting its tree from the machine that has it.
+> **Detailed design:** [`roadmap-cluster-phase3.md`](roadmap-cluster-phase3.md).
+> **Step 1 (`/proc`) ✅ DONE:** a synthetic, read-only process-table filesystem (an
+> fsd `Filesystem` arm at a reserved tree, generated from `TASK_STATE`), local via
+> `mount -p /proc` and remotely readable — `ls /mnt/a/proc` shows another machine's
+> live tasks (the export prefix-routes `/proc`). The first non-disk file server.
+
+- Console (`/dev/cons`), network (`/net` — use *another* machine's NIC) — each a
+  file server, each remotely mountable, still to come. `/proc` (done) is the first.
+  "Everything is a file, everything is mountable" pays off: sharing a resource is
+  just mounting its tree from the machine that has it.
 - Union directories (Plan 9's join-several-sources-under-one-name) if/when a real
-  consumer appears — not before.
+  consumer appears — not before. A fully namespace-aware export (vs. `/proc`'s
+  prefix hack) lands when a second synthetic tree needs it.
 
 ### Phase 4 — Remote execution (the honest "distributed processing")
 

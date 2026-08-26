@@ -35,6 +35,7 @@ mod exfat;
 mod ext2;
 mod fat32;
 mod partition;
+mod proc;
 mod vfs;
 
 use core::arch::asm;
@@ -56,6 +57,11 @@ fn main() -> ! {
     // virtio path; on Parallels the device arrives later, via the
     // `mount` command -> MOUNT syscall -> FSOP_MOUNT request).
     try_mount(&mut mounts[0]);
+    // The synthetic /proc filesystem (cluster Phase 3) always exists, at the
+    // reserved PROC_TREE index - no disk, so it's just constructed here. The
+    // shell's `mount -p` binds /proc to it; netd's export routes /proc paths to
+    // it, so another machine can read this one's process table as files.
+    mounts[ninep_abi::NS_PROC_TREE as usize] = Some(vfs::Filesystem::proc());
     print("fsd: filesystem server ready\r\n");
 
     // v2 protocol: requests arrive fully self-contained (header +
@@ -243,9 +249,11 @@ const DATA_MAX: usize = syscall_abi::FS_DATA_MAX as usize;
 
 /// How many filesystems fsd can hold mounted at once (cluster Phase 0
 /// multi-mount), indexed by the ninep-abi `tree` selector. Tree 0 is the boot
-/// auto-mount; `FSOP_MOUNT_AT` fills the rest. Bounded like every fixed table
-/// here (netd's `MAX_CONNS`, the VFS's `MAX_PARTITIONS`).
-const MAX_MOUNTS: usize = 4;
+/// auto-mount; `FSOP_MOUNT_AT` fills the middle; the reserved top slot
+/// (`NS_PROC_TREE`) is the synthetic `/proc` (cluster Phase 3), so the table is
+/// sized to include it. Bounded like every fixed table here (netd's
+/// `MAX_CONNS`, the VFS's `MAX_PARTITIONS`).
+const MAX_MOUNTS: usize = ninep_abi::NS_PROC_TREE as usize + 1;
 
 /// Decodes and executes one request from this server's own receive buffer,
 /// building the reply (status + inline result) in its own reply buffer. Returns

@@ -137,6 +137,14 @@ pub const NS_REMOTE_TREE: u8 = 0xFF;
 /// `target`; the remote-side root path follows.
 pub const NS_ENDPOINT_LEN: usize = 6;
 
+/// The reserved `fsd` mount-table index of the synthetic `/proc` filesystem
+/// (cluster Phase 3): `fsd` auto-mounts `Filesystem::proc()` here at boot, so the
+/// proc tree always exists alongside the boot disk (tree 0). A real tree number
+/// (not a sentinel like [`NS_REMOTE_TREE`]) - the shell's `mount -p` binds
+/// `/proc → (NS_PROC_TREE, "/")`, and `netd`'s export routes `/proc` paths to it.
+/// `fsd`'s `MAX_MOUNTS` is sized to include it (`NS_PROC_TREE + 1`).
+pub const NS_PROC_TREE: u8 = 4;
+
 /// The most inline data a remote read/write chunk carries in one `NETOP_RMOUNT`
 /// round trip. The NP reply body (`[status:u64][data]`) rides back in a single
 /// `MSG_MAX_LEN` (768) message, so the data must leave room for the 8-byte

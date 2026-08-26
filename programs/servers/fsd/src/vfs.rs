@@ -18,6 +18,7 @@ use crate::exfat;
 use crate::ext2;
 use crate::fat32;
 use crate::partition;
+use crate::proc;
 
 /// Failure reasons, shared across every filesystem arm (defined in `fat32.rs`,
 /// which held the only arm originally; now shared by the exFAT arm too).
@@ -30,9 +31,20 @@ pub enum Filesystem {
     ExFat(exfat::Fs),
     /// ext2, read-write (see [`ext2`]).
     Ext2(ext2::Fs),
+    /// `/proc` - a synthetic, read-only process-table filesystem (no disk;
+    /// generated from `TASK_STATE`). The first non-disk arm, proving the enum is
+    /// a genuine VFS and not just a format multiplexer. See [`proc`] and cluster
+    /// Phase 3 (`docs/roadmap-cluster-phase3.md`).
+    Proc(proc::Fs),
 }
 
 impl Filesystem {
+    /// The synthetic `/proc` filesystem - auto-mounted at the reserved `PROC_TREE`
+    /// index at boot (no disk, so no probing).
+    pub fn proc() -> Self {
+        Filesystem::Proc(proc::Fs::new())
+    }
+
     /// Discover the disk's partitions (MBR or GPT - see `partition::discover`)
     /// and mount the first one that holds a filesystem we recognize. Each
     /// partition is probed as FAT32 ([`fat32::Fs::mount_at`]) then exFAT
@@ -95,6 +107,7 @@ impl Filesystem {
             Filesystem::Fat32(_) => "FAT32",
             Filesystem::ExFat(_) => "exFAT",
             Filesystem::Ext2(_) => "ext2",
+            Filesystem::Proc(_) => "proc",
         }
     }
 
@@ -105,6 +118,7 @@ impl Filesystem {
             Filesystem::Fat32(fs) => fs.partition_lba(),
             Filesystem::ExFat(fs) => fs.partition_lba(),
             Filesystem::Ext2(fs) => fs.partition_lba(),
+            Filesystem::Proc(fs) => fs.partition_lba(),
         }
     }
 
@@ -113,6 +127,7 @@ impl Filesystem {
             Filesystem::Fat32(fs) => fs.list_dir(path, f),
             Filesystem::ExFat(fs) => fs.list_dir(path, f),
             Filesystem::Ext2(fs) => fs.list_dir(path, f),
+            Filesystem::Proc(fs) => fs.list_dir(path, f),
         }
     }
 
@@ -121,6 +136,7 @@ impl Filesystem {
             Filesystem::Fat32(fs) => fs.read_file(path, buf),
             Filesystem::ExFat(fs) => fs.read_file(path, buf),
             Filesystem::Ext2(fs) => fs.read_file(path, buf),
+            Filesystem::Proc(fs) => fs.read_file(path, buf),
         }
     }
 
@@ -129,6 +145,7 @@ impl Filesystem {
             Filesystem::Fat32(fs) => fs.read_at(path, offset, buf),
             Filesystem::ExFat(fs) => fs.read_at(path, offset, buf),
             Filesystem::Ext2(fs) => fs.read_at(path, offset, buf),
+            Filesystem::Proc(fs) => fs.read_at(path, offset, buf),
         }
     }
 
@@ -137,6 +154,7 @@ impl Filesystem {
             Filesystem::Fat32(fs) => fs.write_file(path, data),
             Filesystem::ExFat(fs) => fs.write_file(path, data),
             Filesystem::Ext2(fs) => fs.write_file(path, data),
+            Filesystem::Proc(fs) => fs.write_file(path, data),
         }
     }
 
@@ -145,6 +163,7 @@ impl Filesystem {
             Filesystem::Fat32(fs) => fs.write_at(path, offset, data),
             Filesystem::ExFat(fs) => fs.write_at(path, offset, data),
             Filesystem::Ext2(fs) => fs.write_at(path, offset, data),
+            Filesystem::Proc(fs) => fs.write_at(path, offset, data),
         }
     }
 
@@ -153,6 +172,7 @@ impl Filesystem {
             Filesystem::Fat32(fs) => fs.mkdir(path),
             Filesystem::ExFat(fs) => fs.mkdir(path),
             Filesystem::Ext2(fs) => fs.mkdir(path),
+            Filesystem::Proc(fs) => fs.mkdir(path),
         }
     }
 
@@ -161,6 +181,7 @@ impl Filesystem {
             Filesystem::Fat32(fs) => fs.rmdir(path),
             Filesystem::ExFat(fs) => fs.rmdir(path),
             Filesystem::Ext2(fs) => fs.rmdir(path),
+            Filesystem::Proc(fs) => fs.rmdir(path),
         }
     }
 
@@ -169,6 +190,7 @@ impl Filesystem {
             Filesystem::Fat32(fs) => fs.touch(path),
             Filesystem::ExFat(fs) => fs.touch(path),
             Filesystem::Ext2(fs) => fs.touch(path),
+            Filesystem::Proc(fs) => fs.touch(path),
         }
     }
 
@@ -177,6 +199,7 @@ impl Filesystem {
             Filesystem::Fat32(fs) => fs.rm(path),
             Filesystem::ExFat(fs) => fs.rm(path),
             Filesystem::Ext2(fs) => fs.rm(path),
+            Filesystem::Proc(fs) => fs.rm(path),
         }
     }
 
@@ -185,6 +208,7 @@ impl Filesystem {
             Filesystem::Fat32(fs) => fs.mv(src, dst),
             Filesystem::ExFat(fs) => fs.mv(src, dst),
             Filesystem::Ext2(fs) => fs.mv(src, dst),
+            Filesystem::Proc(fs) => fs.mv(src, dst),
         }
     }
 }

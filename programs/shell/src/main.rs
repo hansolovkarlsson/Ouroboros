@@ -2341,7 +2341,45 @@ fn cmd_mount(line: &str, arg: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize, out: &
         "" => mount_info(out),
         "-a" => mount_disk(),
         "-r" => cmd_mount_remote(line, cwd, cwd_len, out),
+        "-p" => cmd_mount_proc(line, cwd, cwd_len, out),
         _ => cmd_mount_at(line, cwd, cwd_len, out),
+    }
+}
+
+/// `mount -p <path>` - bind the synthetic `/proc` filesystem (the process table
+/// as files, cluster Phase 3) at `<path>` in this shell's namespace. `fsd`
+/// auto-mounts `/proc` at the reserved `NS_PROC_TREE` at boot, so this is just a
+/// namespace bind (like `mount <n> <path>` for a disk tree). Then `ls <path>`
+/// lists one dir per task slot and `cat <path>/<n>/state` reads its scheduler
+/// state. A remote machine's `/proc` needs no bind here - read it at
+/// `<remote-mount>/proc` (netd's export routes it). Usually `mount -p /proc`.
+fn cmd_mount_proc(line: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize, out: &mut Output) {
+    let mut words = line.split_whitespace();
+    words.next(); // "mount"
+    words.next(); // "-p"
+    let Some(path_arg) = words.next() else {
+        out.put_line("mount: usage: mount -p <path>  (e.g. mount -p /proc)");
+        return;
+    };
+    let mut pbuf = [0u8; PATH_SIZE];
+    let Some(pl) = resolve_path(cwd_str(cwd, cwd_len), path_arg, &mut pbuf) else {
+        out.put_line("mount: path too long");
+        return;
+    };
+    let prefix = strip_trailing_slash(&pbuf[..pl]);
+    if prefix.len() < 2 || prefix[0] != b'/' {
+        out.put_line("mount: <path> must be a path below /");
+        return;
+    }
+    if ns_add(prefix, b"/", ninep_abi::NS_PROC_TREE) {
+        out.put_str("proc mounted at ");
+        if let Ok(p) = core::str::from_utf8(prefix) {
+            out.put_line(p);
+        } else {
+            out.put_line("");
+        }
+    } else {
+        out.put_line("mount: path too long or namespace full");
     }
 }
 

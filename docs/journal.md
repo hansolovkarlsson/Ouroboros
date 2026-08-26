@@ -7,6 +7,42 @@ for the forward plan see [`roadmap.md`](roadmap.md).
 
 ---
 
+## 2026-08-25 (cont.) — Phase 3 begins: /proc, and reading another machine's processes
+
+With the shared disk working, the next Plan 9 idea: *everything* is a file, not
+just the disk. Phase 3's first step is `/proc` — the kernel's task table as a file
+tree — and, because it rides the same export, **a remote machine's `/proc` too**.
+The payoff line: `ls /mnt/a/proc` on one machine lists *another* machine's live
+tasks, and `cat /mnt/a/proc/2/state` reads its filesystem server's state.
+
+The satisfying part was how little it took. `fsd`'s `Filesystem` enum was already
+a per-op dispatch over a `tree`-indexed mount table; `/proc` is just a fourth arm
+— the *first non-disk* one, which is what turns the enum from a format
+multiplexer into a real VFS. It holds nothing; every listing and file is generated
+from the `TASK_STATE` syscall on demand (`/` → a dir per slot, `/<n>/state` →
+runnable/blocked/zombie/unused). Auto-mounted at a reserved tree at boot, so it
+always exists. Local access is a one-line namespace bind (`mount -p /proc`), the
+same mechanism `mount <n>` and `mount -r` already use.
+
+The remote half was the interesting design call. The export gateway sent every
+path to fsd tree 0 (the disk); to serve `/proc` it has to pick a different tree. I
+took the scoped route — the export *prefix-routes*: a `/proc/…` wire path goes to
+the proc tree (prefix stripped), everything else to the disk. That's a deliberate
+two-things-exposed hack, not the fully namespace-aware export Plan 9 ultimately
+wants (resolve the incoming path through a composed per-export namespace) — but
+that generalization has no second consumer yet, so it waits. Threading a `tree`
+through the export's four fsd-client calls (HTTP passes 0) was the only real
+plumbing.
+
+It worked first try on both halves. Locally the states read true — fsd runnable,
+netd blocked in NET_WAIT, slot 9 unused, the shell itself blocked waiting on the
+`cat` it spawned. Remotely, B lists and reads A's slots over TCP, disk access
+still working alongside, zero aborts on both nodes. One honest limit: only per-slot
+*state* is exposed — `GET_ARG*` returns the caller's own argv, so there's no
+cross-task name/cmd to show without a new kernel accessor. Enough for a real,
+demonstrable "a remote resource is a remote file." More of Phase 3 (`/dev/cons`,
+`/net`) later.
+
 ## 2026-08-25 (cont.) — Phase 2: a machine writes another's disk (shared-disk cluster)
 
 Phase 1 ended with B *reading* A's disk. Phase 2 makes it a genuine shared disk:

@@ -82,13 +82,15 @@ deferred until more than two synthetic trees exist to expose.
 
 ## Staging
 
-- **3a — `/proc`, local + remote (this step).** The `Proc` arm + reserved tree +
-  boot auto-mount in `fsd`; the export prefix-routing + `tree` threading in
-  `netd`; the `mount -p` builtin in the shell. *Ship:* on one machine `mount -p
-  /proc; ls /proc; cat /proc/0/state`; between two VMs, `ls /mnt/a/proc` and `cat
-  /mnt/a/proc/2/state` show A's filesystem-server/console-server/etc. task states.
-  Verified on QEMU + the two-VM rig, a foreign-observer host 9P client where
-  useful, zero `-d int` aborts.
+- **3a — `/proc`, local + remote. ✅ DONE.** The `Proc` arm (`proc.rs`) + reserved
+  tree (`NS_PROC_TREE`, `MAX_MOUNTS + 1`) + boot auto-mount in `fsd`; the export
+  prefix-routing (`route_export`) + `tree` threaded through the export's
+  `fsd_call`/`read_file_chunk`/`stat_size`/`list_dir` in `netd`; the `mount -p`
+  builtin in the shell. *Shipped:* locally `mount -p /proc; ls /proc` → `0/`…`9/`,
+  states read true (fsd `runnable`, netd `blocked`, slot 9 `unused`); between two
+  VMs, from B `ls /mnt/a/proc` lists A's ten slots and `cat /mnt/a/proc/2/state`
+  reads A's fsd state — B reading A's live process table as files. Disk access
+  alongside, zero `-d int` aborts on both nodes.
 
 Later Phase 3 (not this step): `/dev/cons` as a writable namespace file (remote
 console), `/net` (use another machine's NIC), and — when a real consumer appears

@@ -1306,7 +1306,7 @@ fn retransmit_one(mac: &[u8; 6], c: &mut TcpConn, seq: u32, n: usize) {
         send_seg_at(mac, c, seq, TCP_PSH | TCP_ACK, &buf[..take]);
     } else if c.file {
         let foff = (off - c.prefix_len) as u64;
-        let r = read_file_chunk(&c.path[..c.path_len], foff, &mut buf[..n]);
+        let r = read_file_chunk(&c.path[..c.path_len], 0, foff, &mut buf[..n]);
         if r < syscall_abi::FS_ERR_MIN {
             let got = r as usize;
             send_seg_at(mac, c, seq, TCP_PSH | TCP_ACK, &buf[..got]);
@@ -1378,6 +1378,29 @@ fn handle_9p(c: &mut TcpConn, request: &[u8]) {
     c.file = false;
 }
 
+/// Route an exported request path to a local `fsd` tree (cluster Phase 3): a path
+/// under `/proc` goes to the synthetic process filesystem at `NS_PROC_TREE`, with
+/// the `/proc` prefix stripped (the proc tree's root is the process table, so
+/// `/proc/2/state` on the wire is `/2/state` there); everything else goes to the
+/// boot disk (tree 0), path unchanged. `/proctology` is *not* a proc path -
+/// `/proc` must be a whole component. Byte scanning, no allocation.
+fn route_export(path: &[u8]) -> (u64, &[u8]) {
+    const P: &[u8] = b"/proc";
+    let is_proc = path.len() >= P.len()
+        && &path[..P.len()] == P
+        && (path.len() == P.len() || path[P.len()] == b'/');
+    if is_proc {
+        let tree = ninep_abi::NS_PROC_TREE as u64;
+        if path.len() == P.len() {
+            (tree, b"/") // "/proc" itself -> the proc root
+        } else {
+            (tree, &path[P.len()..]) // "/proc/2/state" -> "/2/state"
+        }
+    } else {
+        (0, path)
+    }
+}
+
 /// Decode a framed NP request and build its framed reply into `out`. See
 /// `ninep_abi`'s frame doc: request = `[u32 len][verb][tree][a0..a3][payload]`.
 fn build_9p_reply(request: &[u8], out: &mut [u8; PREFIX_MAX]) -> usize {
@@ -1397,6 +1420,12 @@ fn build_9p_reply(request: &[u8], out: &mut [u8; PREFIX_MAX]) -> usize {
     let p2 = read_u64(msg, 32);
     let payload = &msg[hdr..];
     let path = &payload[..p0.min(payload.len())];
+    // Route the incoming path to a local fsd tree (cluster Phase 3): a path under
+    // /proc goes to the synthetic process filesystem (with the /proc prefix
+    // stripped, since the proc tree's root is the process table), everything else
+    // to the boot disk (tree 0). This is what makes `ls /mnt/a/proc` on another
+    // machine show *this* machine's tasks.
+    let (tree, fspath) = route_export(path);
     let mut buf = [0u8; EXPORT_CHUNK];
 
     // Data slice for a status that is a byte count (0..FS_ERR_MIN); empty on an
@@ -1414,39 +1443,41 @@ fn build_9p_reply(request: &[u8], out: &mut [u8; PREFIX_MAX]) -> usize {
             // The inline verbs (readdir / read_file) are capped at fsd's inline
             // reply size (FS_DATA_MAX 512); fsd rejects a larger `want`.
             let want = (p1 as usize).min(DATA_INLINE);
-            let status = list_dir(path, &mut buf[..want]);
+            let status = list_dir(fspath, tree, &mut buf[..want]);
             frame_reply(out, status, ok_data(status, &buf))
         }
         v if v == ninep_abi::NP_READ || v == ninep_abi::NP_READ_AT => {
             let want = (p2 as usize).min(buf.len());
-            let status = read_file_chunk(path, p1, &mut buf[..want]);
+            let status = read_file_chunk(fspath, tree, p1, &mut buf[..want]);
             frame_reply(out, status, ok_data(status, &buf))
         }
         v if v == ninep_abi::NP_READ_FILE => {
             // Status = the file's real size; data = its first min(size, want) bytes.
             let want = (p1 as usize).min(DATA_INLINE);
-            let size = stat_size(path);
+            let size = stat_size(fspath, tree);
             if size >= syscall_abi::FS_ERR_MIN {
                 return frame_reply(out, size, &[]);
             }
-            let n = read_file_chunk(path, 0, &mut buf[..want]);
+            let n = read_file_chunk(fspath, tree, 0, &mut buf[..want]);
             frame_reply(out, size, ok_data(n, &buf))
         }
         // --- write / mutate verbs (cluster Phase 2: read+write) ---
-        // Path-only ops: the path is the whole payload, no data.
+        // Path-only ops: the path is the whole payload, no data. (A write under
+        // /proc routes to the read-only proc tree and is refused there.)
         v if v == ninep_abi::NP_TOUCH
             || v == ninep_abi::NP_MKDIR
             || v == ninep_abi::NP_RMDIR
             || v == ninep_abi::NP_RM =>
         {
-            let status = fsd_call(v, p0 as u64, 0, path, &mut []);
+            let status = fsd_call(v, tree, fspath.len() as u64, 0, fspath, &mut []);
             frame_reply(out, status, &[])
         }
         // Rename: payload is src (p0 bytes) then dst (p1 bytes), inline; fsd's
-        // NP_MV takes exactly that. fsd_call copies the payload verbatim.
+        // NP_MV takes exactly that. Only the disk (tree 0) mounts are writable, so
+        // the payload (with its original, unstripped paths) is passed as-is.
         v if v == ninep_abi::NP_MV => {
             let both = (p0 + p1 as usize).min(payload.len());
-            let status = fsd_call(ninep_abi::NP_MV, p0 as u64, p1, &payload[..both], &mut []);
+            let status = fsd_call(ninep_abi::NP_MV, tree, p0 as u64, p1, &payload[..both], &mut []);
             frame_reply(out, status, &[])
         }
         // Full create/overwrite: wire payload is path (p0) then data (p1),
@@ -1454,7 +1485,7 @@ fn build_9p_reply(request: &[u8], out: &mut [u8; PREFIX_MAX]) -> usize {
         // semantics for a <=512 chunk, no grant needed (0 data = truncate).
         v if v == ninep_abi::NP_WRITE || v == ninep_abi::NP_WRITE_FILE => {
             let both = (p0 + p1 as usize).min(payload.len());
-            let status = fsd_call(ninep_abi::NP_WRITE_FILE, p0 as u64, p1, &payload[..both], &mut []);
+            let status = fsd_call(ninep_abi::NP_WRITE_FILE, tree, p0 as u64, p1, &payload[..both], &mut []);
             frame_reply(out, status, &[])
         }
         // Offset write: wire payload is path (p0) then data (p2 bytes) at offset
@@ -1463,7 +1494,7 @@ fn build_9p_reply(request: &[u8], out: &mut [u8; PREFIX_MAX]) -> usize {
         v if v == ninep_abi::NP_WRITE_AT => {
             let dlen = (p2 as usize).min(payload.len().saturating_sub(p0));
             let data = &payload[p0..p0 + dlen];
-            let status = fsd_write_at(path, p1, data);
+            let status = fsd_write_at(fspath, tree, p1, data);
             frame_reply(out, status, &[])
         }
         _ => frame_reply(out, syscall_abi::FS_ERROR, &[]),
@@ -1476,7 +1507,7 @@ fn build_9p_reply(request: &[u8], out: &mut [u8; PREFIX_MAX]) -> usize {
 /// the exact mirror of `read_file_chunk`'s `GRANT_WRITE` read bridge, the other
 /// way. `data.len()` is bounded by `NP_REMOTE_CHUNK` (the client's inline cap).
 /// Returns fsd's status (0, or an `FS_ERR_*`/`TASK_ERR_*` code).
-fn fsd_write_at(path: &[u8], offset: u64, data: &[u8]) -> u64 {
+fn fsd_write_at(path: &[u8], tree: u64, offset: u64, data: &[u8]) -> u64 {
     if data.is_empty() {
         return 0;
     }
@@ -1496,7 +1527,7 @@ fn fsd_write_at(path: &[u8], offset: u64, data: &[u8]) -> u64 {
     const HDR: usize = ninep_abi::NP_REQ_PAYLOAD as usize;
     let mut req = [0u8; syscall_abi::MSG_MAX_LEN as usize];
     req[0..8].copy_from_slice(&ninep_abi::NP_WRITE_AT.to_le_bytes());
-    req[8..16].copy_from_slice(&0u64.to_le_bytes()); // tree 0
+    req[8..16].copy_from_slice(&tree.to_le_bytes()); // 0 = disk; NS_PROC_TREE = /proc
     req[16..24].copy_from_slice(&(path.len() as u64).to_le_bytes()); // p0: path len
     req[24..32].copy_from_slice(&offset.to_le_bytes()); // p1: offset
     req[32..40].copy_from_slice(&(dlen as u64).to_le_bytes()); // p2: data len
@@ -1558,7 +1589,7 @@ fn start_response(c: &mut TcpConn, request: &[u8]) {
     let path: &[u8] = if path.is_empty() { b"/" } else { path };
 
     // A file? (stat succeeds and returns a size.)
-    let size = stat_size(path);
+    let size = stat_size(path, 0);
     if size < syscall_abi::FS_ERR_MIN {
         // 200 header (Content-Type by extension, Content-Length = size), then
         // the body streamed from offset 0.
@@ -1572,7 +1603,7 @@ fn start_response(c: &mut TcpConn, request: &[u8]) {
     } else {
         // A directory? (list succeeds.) Build a browsable HTML index.
         let mut names = [0u8; syscall_abi::FS_DATA_MAX as usize];
-        let listed = list_dir(path, &mut names);
+        let listed = list_dir(path, 0, &mut names);
         if listed < syscall_abi::FS_ERR_MIN {
             c.prefix_len = build_listing(path, &names[..listed as usize], &mut c.prefix);
         } else {
@@ -1626,11 +1657,11 @@ fn set_prefix(c: &mut TcpConn, bytes: &[u8]) {
 /// `result`. Returns the status (a byte count / size on success, or an
 /// `FS_ERR_*`/`TASK_ERR_*` code `>= FS_ERR_MIN`). The shell's `np_call`, pared
 /// to netd's two callers. `tree` is `0` for now (a single implicit mount).
-fn fsd_call(verb: u64, p0: u64, p1: u64, path: &[u8], result: &mut [u8]) -> u64 {
+fn fsd_call(verb: u64, tree: u64, p0: u64, p1: u64, path: &[u8], result: &mut [u8]) -> u64 {
     const HDR: usize = ninep_abi::NP_REQ_PAYLOAD as usize;
     let mut req = [0u8; syscall_abi::MSG_MAX_LEN as usize];
     req[0..8].copy_from_slice(&verb.to_le_bytes());
-    req[8..16].copy_from_slice(&0u64.to_le_bytes()); // tree 0
+    req[8..16].copy_from_slice(&tree.to_le_bytes()); // 0 = disk; NS_PROC_TREE = /proc
     req[16..24].copy_from_slice(&p0.to_le_bytes());
     req[24..32].copy_from_slice(&p1.to_le_bytes());
     let end = HDR + path.len();
@@ -1661,16 +1692,17 @@ fn fsd_call(verb: u64, p0: u64, p1: u64, path: &[u8], result: &mut [u8]) -> u64 
 /// Stat a file: `NP_READ_FILE`'s status is the file's *real* size regardless
 /// of how much was copied, so a `want` of 1 (the smallest fsd accepts - it
 /// rejects 0) gets the size in one call; the returned byte is ignored.
-fn stat_size(path: &[u8]) -> u64 {
-    fsd_call(ninep_abi::NP_READ_FILE, path.len() as u64, 1, path, &mut [])
+fn stat_size(path: &[u8], tree: u64) -> u64 {
+    fsd_call(ninep_abi::NP_READ_FILE, tree, path.len() as u64, 1, path, &mut [])
 }
 
 /// List a directory's entries into `out` as newline-separated names (dirs
 /// suffixed `/`, the same format the shell's `ls` uses); status is the byte
 /// count, or an error code. Bounded by fsd's inline reply cap.
-fn list_dir(path: &[u8], out: &mut [u8]) -> u64 {
+fn list_dir(path: &[u8], tree: u64, out: &mut [u8]) -> u64 {
     fsd_call(
         ninep_abi::NP_READDIR,
+        tree,
         path.len() as u64,
         out.len() as u64,
         path,
@@ -1865,7 +1897,7 @@ fn pump_send(mac: &[u8; 6], c: &mut TcpConn) {
         if c.file && !c.eof {
             let want = SERVE_CHUNK.min(avail as usize);
             let mut chunk = [0u8; SERVE_CHUNK];
-            let r = read_file_chunk(&c.path[..c.path_len], c.read_off, &mut chunk[..want]);
+            let r = read_file_chunk(&c.path[..c.path_len], 0, c.read_off, &mut chunk[..want]);
             if r >= syscall_abi::FS_ERR_MIN {
                 c.eof = true; // a mid-stream read error just ends the body
                 continue;
@@ -1930,7 +1962,7 @@ fn parse_path<'a>(request: &[u8], buf: &'a mut [u8]) -> &'a [u8] {
 /// Returns the byte count copied into `buf` (`0` at/past EOF), or an
 /// `FS_ERR_*`/`TASK_ERR_*` code (`>= FS_ERR_MIN`). `buf.len()` must be
 /// `<= SAFECOPY_MAX`.
-fn read_file_chunk(path: &[u8], offset: u64, buf: &mut [u8]) -> u64 {
+fn read_file_chunk(path: &[u8], tree: u64, offset: u64, buf: &mut [u8]) -> u64 {
     let want = buf.len() as u64;
     // Grant the buffer to fsd (GRANT_WRITE - the server writes file bytes into
     // it via SAFECOPY during the call).
@@ -1947,7 +1979,7 @@ fn read_file_chunk(path: &[u8], offset: u64, buf: &mut [u8]) -> u64 {
     const HDR: usize = ninep_abi::NP_REQ_PAYLOAD as usize;
     let mut req = [0u8; syscall_abi::MSG_MAX_LEN as usize];
     req[0..8].copy_from_slice(&ninep_abi::NP_READ.to_le_bytes());
-    req[8..16].copy_from_slice(&0u64.to_le_bytes()); // tree 0
+    req[8..16].copy_from_slice(&tree.to_le_bytes()); // 0 = disk; NS_PROC_TREE = /proc
     req[16..24].copy_from_slice(&(path.len() as u64).to_le_bytes()); // param0: path len
     req[24..32].copy_from_slice(&offset.to_le_bytes()); // param1: offset
     req[32..40].copy_from_slice(&want.to_le_bytes()); // param2: want

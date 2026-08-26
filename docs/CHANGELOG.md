@@ -7,6 +7,52 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/`; 
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## Cluster Phase 3 (step 1): `/proc` — a machine's process table as (remote) files
+
+"Everything is a file" reaches across the network. `/proc` — a synthetic,
+read-only view of the kernel's task table — is now a file tree, both locally and,
+over the Phase-2 transport, **from another machine**: `ls /mnt/a/proc` on machine
+B lists **machine A's** live tasks, and `cat /mnt/a/proc/2/state` reads A's
+filesystem-server state. The Plan 9 idea — a resource is a file, a *remote*
+resource is a *remote* file — made concrete.
+
+**A synthetic `Filesystem` arm.** `fsd`'s `Filesystem` enum gains a fourth arm,
+`Proc` (a new `proc.rs`) — the first **non-disk** arm, which proves the enum is a
+real VFS and not just a format multiplexer. It holds no storage: every listing
+and file is generated on demand from the ungated `TASK_STATE` syscall. Layout:
+`/` → one dir per scheduler slot (`0/`…`9/`), `/<n>/state` →
+`runnable`/`blocked`/`zombie`/`unused`. Read-only (every mutate method returns
+`ReadOnly`). It is auto-mounted at boot into a **reserved mount-table index**
+(`NS_PROC_TREE`; `MAX_MOUNTS` grew by one), so the proc tree always exists
+alongside the boot disk at tree 0.
+
+**Local access is a namespace bind.** A new shell `mount -p /proc` binds `/proc →
+(NS_PROC_TREE, "/")` in the caller's namespace — exactly like `mount <n> <path>`
+binds a disk partition's tree — so `ls /proc; cat /proc/0/state` work on one
+machine, inherited by spawned commands like every namespace change.
+
+**Remote access needs no bind — the export routes `/proc`.** `netd`'s export
+gateway sent every incoming path to `fsd` tree 0 (the disk); it now **prefix-routes**:
+a wire path under `/proc` goes to `NS_PROC_TREE` (with the `/proc` prefix stripped,
+since the proc tree's root *is* the process table), everything else to the disk.
+So a remote `ls /mnt/a/proc` — arriving at A as `/proc/…` — is served from A's proc
+tree with zero client-side setup. (The `tree` selector is now threaded through the
+export's `fsd_call`/`read_file_chunk`/`stat_size`/`list_dir` calls; the HTTP file
+server passes tree 0, unchanged.) This is a deliberate, scoped prefix hack — the
+export exposes exactly two things, A's disk and A's `/proc` — not yet a fully
+namespace-aware export (deferred until a second synthetic tree needs it).
+
+**How it was proven.** Locally: `mount -p /proc; ls /proc` → `0/`…`9/`, and the
+states read true (`/proc/2` = fsd `runnable`, `/proc/4` = netd `blocked`, `/proc/9`
+= `unused`, `/proc/0` = the shell `blocked` waiting on the foreground `cat`).
+Between two VMs: from B, `mount -r 10.0.2.10:564 /mnt/a` then `ls /mnt/a/proc` lists
+A's ten slots and `cat /mnt/a/proc/2/state`/`…/4/state` return A's fsd/netd states
+— B reading A's live kernel table as files. Disk access (`ls /mnt/a`) still works
+alongside. Zero `-d int` aborts on both nodes. Only per-slot *state* is exposed
+(there is no cross-task argv/name accessor yet). Folds into the Phase 3 arc; more
+resources-as-files (`/dev/cons`, `/net`) later. See
+[`roadmap-cluster-phase3.md`](roadmap-cluster-phase3.md).
+
 ## Cluster Phase 2: two-node read+write — machine B writes machine A's disk
 
 The cluster becomes a *shared disk*, not just a shared reader. Phase 1 let B read
