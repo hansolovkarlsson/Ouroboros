@@ -29,7 +29,8 @@ Scoped honestly as *bounded* (~2 KB), which covers the small commands `cpu` is
 really for; truly unbounded streaming (remote sends as it produces, resumable
 caller) is documented in the roadmap as a later arc if the need arises. This was
 the pragmatic close-out — the cluster's last obvious gap, filled without opening a
-big new mechanism. **The cluster feels done.**
+big new mechanism. **The cluster feels done.** Written up as
+[`cpu-streaming-postmortem.md`](cpu-streaming-postmortem.md) (the 17th).
 
 ## 2026-08-26 (cont.) — reply authentication (auth tier 2, the cheap half)
 

@@ -34,7 +34,8 @@ refinement to build if the need arises.
 **Verified** end to end: a guest ran `cpu` against a host "export" that streamed
 1500 bytes back; the guest printed all 33 lines (the full 1500) — past the old
 768-byte cut — via the chunked pull. Zero EL0 faults, and the ~2 KB `PendingRun`
-on netd's stack did *not* trip the guard page (the recurring trap).
+on netd's stack did *not* trip the guard page (the recurring trap). See
+[`cpu-streaming-postmortem.md`](cpu-streaming-postmortem.md).
 
 ## Reply authentication — mutual auth on the export (auth tier 2, part 1)
 
