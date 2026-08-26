@@ -1,16 +1,24 @@
 # Ouroboros manual
 
-The one-stop reference for using Ouroboros: building it, running it on
-QEMU and on real Parallels hardware, testing it, using the shell, and
-the complete syscall ABI. Each section links to the deeper reference
-where one exists — [`architecture.md`](architecture.md) for how the
-kernel works, [`processes.md`](processes.md) for the userland program
-model, [`shell-commands.md`](shell-commands.md) for the full builtin
-command reference, [`roadmap.md`](roadmap.md) for what's next, and
-`CLAUDE.md` at the repository root for the debugging history behind
-every design decision. If you want to build an OS like this yourself,
-[`tutorial.md`](tutorial.md) is the staged from-scratch guide —
-the working path only, with code samples from this kernel.
+The one-stop reference for using Ouroboros: building it, running it,
+using the shell and the `/bin` commands, **sharing resources across a
+cluster of machines**, and the syscall ABI. Each section links to the
+deeper reference where one exists — [`testing-qemu.md`](testing-qemu.md)
+for the full QEMU run/test guide (single machine *and* the two-node
+cluster), [`architecture.md`](architecture.md) for how the kernel works,
+[`processes.md`](processes.md) for the userland program model,
+[`shell-commands.md`](shell-commands.md) for the builtin command
+reference, [`roadmap.md`](roadmap.md) / [`roadmap-cluster.md`](roadmap-cluster.md)
+for what's next, and `CLAUDE.md` at the repository root for the debugging
+history behind every design decision. To build an OS like this yourself,
+[`tutorial.md`](tutorial.md) is the staged from-scratch guide.
+
+**What Ouroboros is, in one line:** an ARM64 microkernel OS whose
+filesystem, console, and network are userland servers reached over a
+uniform file protocol — which is exactly what lets several machines share
+their disks, processes, consoles, and even *run programs on each other*
+over the network (the [cluster](#cluster-sharing-resources-across-machines)
+section below).
 
 ## Prerequisites
 
@@ -60,43 +68,25 @@ the runtime FAT32 reader doesn't parse long-filename entries around.)
 
 ## Running on QEMU
 
+The everyday commands:
+
 ```sh
-make run             # fast dev loop - vvfat-backed disk (FAT16!)
-make run-image       # boots build/esp.img - real FAT32, disk commands work
-make run-usb-kbd     # + xHCI controller & USB keyboard (monitor sendkey)
-make run-usb-multi   # + USB tablet and storage stick (3-device xHCI rig)
-make run-virtio-console  # + a virtio console device (see its Makefile note)
-make run-net         # + a virtio-net device & QEMU user-net + a net.pcap dump
-make run-image-net   # real FAT32 *and* the NIC in one boot - the fullest run
-make run-image-server # + SLIRP hostfwd tcp::5555->:80, so the host can curl netd's HTTP server
-make run-gicv3       # forces GICv3 instead of QEMU's default GICv2
+make run             # fastest loop - vvfat FAT16 disk (no real filesystem)
+make run-image       # boots build/esp.img - real FAT32; disk commands work
+make run-image-net   # real FAT32 + a NIC - the fullest single-machine run
 ```
 
-To test the network **client** ops, boot `make run-image-net` and type
-`ping 10.0.2.2`, `resolve example.com`, or `fetch example.com` at the
-shell. To test the network **server**, boot `make run-image-server` and, on the
-host, run `curl http://localhost:5555/` — the guest's from-scratch TCP
-stack serves a landing page. It's a real static-file server, too: any
-other path is streamed from the filesystem server, e.g.
-`curl http://localhost:5555/EFI/ORBS/INIT.CFG` returns that file's bytes
-(read through `fsd` — the guest serving its own filesystem over HTTP), and
-a missing path returns `404`. A directory path (e.g.
-`http://localhost:5555/EFI/ORBS`, or `/`) returns a browsable HTML index
-with links, so you can point a browser at the guest and click through its
-filesystem; files get a proper `Content-Type`, so text and HTML render. (QEMU's user-mode networking (SLIRP) reaches
-the outside for the client ops, and its `hostfwd` forwards a host port to
-the guest's port 80 for the server; both are QEMU-only — Parallels'
-virtio-net is PCI, which this project's virtio path doesn't drive.)
+The one everyday gotcha: **`make run`'s disk is FAT16** (a QEMU vvfat
+artifact), which the FAT32-only filesystem server can't mount — every disk
+command prints "no filesystem mounted" there. Use **`make run-image`**
+whenever you want `ls`/`cat`/`write`/`exec` to actually work. Exit QEMU
+with **`Ctrl+a x`**.
 
-The one everyday gotcha: **`make run`'s disk is FAT16** (an artifact of
-QEMU's vvfat driver), which the FAT32-only filesystem server can't
-mount — every disk command prints a shared "no filesystem mounted"
-message there. Use `make run-image` whenever you want `ls`/`cat`/
-`exec`/etc. to actually work.
-
-Exit QEMU with `Ctrl+a x`. On the USB targets, keystrokes can be
-injected through the monitor socket:
-`printf 'sendkey u\n' | nc -U qemu-monitor.sock`.
+That's enough to get a working shell. The **full run/test guide** — every
+`make run-*` target, the exFAT/ext2/GPT test disks, the network runs, the
+9P host peers, and the **two-node cluster** setup — is
+[`testing-qemu.md`](testing-qemu.md). You'll want it for the
+[cluster](#cluster-sharing-resources-across-machines) section below.
 
 ## Running on Parallels (real hardware)
 
@@ -138,42 +128,216 @@ repo's `build/esp.hdd`.
 
 ## Using the shell
 
-Full reference: [`shell-commands.md`](shell-commands.md). The short
-tour:
+Full builtin reference: [`shell-commands.md`](shell-commands.md). The
+short tour (boot `make run-image` so the disk is mountable):
 
 ```
-$ help                          # list every builtin
-$ mount                         # (Parallels) mount a passed-through USB stick
-$ ls /EFI/ORBS                  # disk commands (FAT32 boot only)
+$ help                          # list the builtins
+$ ls /                          # BIN/  EFI/
+$ ls /bin                       # the standalone commands (see below)
 $ write notes.txt hello world   # create/replace a file's contents
 $ cat notes.txt
 $ echo backup >> log.txt        # output redirection: > replace, >> append
-$ mv notes.txt /EFI/ORBS        # into an existing directory keeps the name
-$ exec /EFI/ORBS/HELLO.BIN      # spawn a second program (runs alongside)
-$ wait 2                        # block until it exits, collect its status
-$ exec /EFI/ORBS/SH.BIN         # spawn a second shell...
-$ fg 2                          # ...and hand it the keyboard (nested session)
-$ exit                          # (in the nested shell) hand it back
+$ cat log.txt | grep back | wc  # multi-stage pipelines
+$ mkdir docs ; mv notes.txt docs
+$ cd docs ; pwd
 $ ps                            # one line per task slot
-$ kill 2                        # destroy a task
-$ exec /EFI/ORBS/PONG.BIN       # spawn the message server...
-$ send 2 hello                  # ...send it an IPC message
-$ recv                          # ...and receive its echo back
+$ set PATH=/bin ; env           # a real environment; $VAR expansion
 ```
 
-Job-control notes: only one task owns the keyboard at a time (`fg`
-moves it; ownership returns to the boot shell automatically when the
-owner dies, or on **Ctrl+C**, which reclaims the keyboard without
-killing anything). An exited task holds its slot as a zombie until
-`wait`ed (`ps` shows it); `kill` reaps immediately. Ctrl+C also
-interrupts a stuck `wait`.
+### Commands come from two places
+
+- **Builtins** run inside the shell itself:
+  `help  cd  pwd  bind  write  mount  unmount  erase  partition  format
+  exec  exit  ps  kill  fg  wait  send  recv  selftest  env  set  unset  cpu`.
+  Job control (`ps`/`kill`/`fg`/`wait`), the disk-management trio
+  (`erase`/`partition`/`format` — they must run when *nothing* is mounted,
+  exactly when `/bin` can't be read), the mount/namespace commands, and
+  `cpu` (remote execution) are builtins for reasons the cluster section and
+  [`shell-commands.md`](shell-commands.md) explain.
+
+- **`/bin` programs** are real standalone binaries loaded from disk, found
+  on `$PATH` (default `/bin`), spawned with arguments, and reaped:
+  `ls  cat  cp  mv  mkdir  rmdir  touch  rm  writeat` (files),
+  `echo  uptime  clear  args` (basics),
+  `grep  wc  head  upper` (pipeline filters),
+  `ping  resolve  fetch` (network). You type them the same way (`ls`,
+  `cat x`); the shell finds `/bin/LS` on PATH (FAT is case-insensitive).
+  A `/bin` command resolves relative paths against the shell's working
+  directory, delivered to it at spawn.
+
+**Output redirection & pipelines** work across both:
+`echo hi > f.txt` (replace), `>> f.txt` (append), and `a | b | c`
+(each stage a separate program; the filters `grep`/`wc`/`head`/`upper`
+are built to chain). See [`shell-commands.md`](shell-commands.md).
+
+### Spawning, job control, and IPC demos
+
+```
+$ exec /bin/LS /             # exec spawns a program explicitly (like typing it)
+$ exec /EFI/ORBS/SH.BIN      # spawn a second shell...
+$ fg 5                       # ...and hand it the keyboard (a nested session)
+$ exit                       # (in the nested shell) hand it back
+$ kill 5                     # destroy a task
+$ exec /EFI/ORBS/PONG.BIN    # the IPC echo-server demo...
+$ send 5 hello ; recv        # ...send it a message and read its echo
+```
+
+Job-control notes: one task owns the keyboard at a time (`fg` moves it;
+it returns to the boot shell when the owner dies, or on **Ctrl+C**, which
+reclaims the keyboard without killing anything). An exited task holds its
+slot as a zombie until `wait`ed (`ps` shows it); `kill` reaps immediately.
+Ctrl+C also interrupts a stuck `wait`.
+
+### Disks and mounts
+
+```
+$ mount                      # show what's mounted (format, partition, capacity)
+$ mount -a                   # mount the kernel's block device (or rescan USB)
+$ mount 1 /mnt/f             # mount the disk's 2nd partition at /mnt/f (multi-mount)
+$ mount -p /proc             # the process table as files (see the cluster section)
+$ mount -n /net              # this machine's network identity (ip, mac)
+$ mount -c /dev/cons         # the console as a writable file
+$ bind /work /EFI/ORBS       # /work now resolves to /EFI/ORBS, for this shell
+$ unmount                    # drop the mounted filesystem
+```
+
+Every mount/`bind` changes **only this shell's** namespace (and the
+commands it spawns inherit it) — a per-task view, never a global one.
+Preparing a blank disk from inside the guest: `erase disk`, then
+`partition fat32` (or `exfat`/`ext2`), then `format fat32`, then
+`mount -a`. `mount -r`, and remote `/proc`/`/net`/`/dev/cons`, are the
+[cluster](#cluster-sharing-resources-across-machines) section.
+
+## Cluster: sharing resources across machines
+
+This is what Ouroboros is ultimately about: **several machines sharing
+their resources as one system** — one machine reads another's disk,
+inspects its processes, writes its screen, or *runs a program on it* — over
+a from-scratch 9P-style protocol carried on the network. It's the Plan 9
+model: *"remote" is just the same file protocol over TCP instead of local
+IPC*, so the commands you already know (`ls`, `cat`, `mkdir`, `cpu`) work
+across machines with no new syntax — only *where a path points* changes.
+
+**Trust, stated plainly:** this is a **trusted-LAN** design with **no
+authentication** — a machine that exports a resource serves any peer that
+connects. That's a deliberate, documented posture for now; don't expose an
+Ouroboros export to an untrusted network.
+
+### Setting up two machines
+
+Any two Ouroboros machines on the same network can do this. The dev setup
+is two QEMU guests on a shared virtual link — **see
+[`testing-qemu.md`](testing-qemu.md) §5** for the exact commands
+(`make run-image-2vm-a` in one terminal, `make run-image-2vm-b` in
+another). In that setup machine **A is 10.0.2.10** and **B is 10.0.2.11**;
+each `netd` runs a 9P **export** on TCP port **564** automatically, so every
+machine is ready to share the moment it boots. A machine reads its own
+address with `mount -n /net ; cat /net/ip`.
+
+Everything below is typed at one machine's shell and reaches the other over
+the network. The examples run on **machine B**, reaching **machine A**
+(`10.0.2.10`).
+
+### Sharing a disk — `mount -r`
+
+Mount another machine's exported filesystem into your namespace, then read
+(and write) it like any local path:
+
+```
+$ mount -r 10.0.2.10:564 /mnt/a     # bind A's export at /mnt/a (trusted, no auth)
+$ ls /mnt/a                         # A's disk root
+$ cat /mnt/a/EFI/ORBS/INIT.CFG      # read a file on A
+$ mkdir /mnt/a/reports              # create on A's disk
+$ write /mnt/a/reports/note.txt hi  # write to A's disk
+$ cp /BIN/LS /mnt/a/ls.copy         # stream a local file onto A (chunked)
+```
+
+The mount is **per-shell** and inherited by spawned commands. Read/write
+both work (single-writer: one machine writes a given tree at a time, by
+convention — no distributed lock yet). If A disconnects, the next operation
+on `/mnt/a` fails cleanly rather than hanging.
+
+### Another machine's processes — remote `/proc`
+
+`/proc` is a synthetic view of a machine's task table as files. Mount your
+own with `mount -p /proc`; read *another* machine's straight off its remote
+mount (no bind needed — `netd`'s export serves `/proc` too):
+
+```
+$ mount -p /proc                    # your own process table
+$ ls /proc                          # 0/ 1/ 2/ ... one dir per task slot
+$ cat /proc/2/state                 # runnable | blocked | zombie | unused
+$ ls /mnt/a/proc                    # MACHINE A's task slots
+$ cat /mnt/a/proc/2/state           # A's filesystem-server state
+```
+
+### Writing another machine's screen — remote `/dev/cons`
+
+`/dev/cons` is the console as a **writable** file. Write to your own with
+`mount -c /dev/cons`; write *another* machine's screen over its remote
+mount:
+
+```
+$ mount -c /dev/cons                # your console as a file
+$ echo hello > /dev/cons            # ...prints on this screen
+$ write /mnt/a/dev/cons "ping from B"   # prints on MACHINE A's screen
+```
+
+### Another machine's network identity — remote `/net`
+
+`/net` exposes a machine's IPv4 and MAC as read-only files:
+
+```
+$ mount -n /net ; cat /net/ip       # your own address (e.g. 10.0.2.11)
+$ cat /mnt/a/net/ip                 # MACHINE A's address -> 10.0.2.10
+$ cat /mnt/a/net/mac                # MACHINE A's MAC
+```
+
+### Running a program on another machine — `cpu`
+
+`cpu <host:port> <command>` runs `<command>` on the remote machine's CPU and
+streams its output back to you — and, crucially, the command reads **your**
+files, through your namespace **imported at `/host`**. That's the Plan 9
+`cpu` model: ship the computation to another machine while its data stays
+yours.
+
+```
+$ cpu 10.0.2.10:564 ls /            # run `ls` ON machine A; see A's disk root
+$ cpu 10.0.2.10:564 uptime          # run `uptime` on A; A's uptime
+$ cpu 10.0.2.10:564 ls /host        # /host is THIS machine (the caller) — YOUR root
+$ write local.txt hi
+$ cpu 10.0.2.10:564 cat /host/local.txt   # cat runs on A, but reads YOUR local.txt
+```
+
+So within one remote command, **`/`** is the machine it runs on and
+**`/host`** is the machine you launched it from. `cpu B ls /` shows B's
+disk; `cpu B ls /host` shows yours. The command's `/bin` program is loaded
+from the remote's disk, so both machines should have the same `/bin`.
+(Output is one message's worth for now — small commands; the imported
+namespace covers filesystem access, not the remote's `/proc`/`/net` unless
+you reach them under `/host`.)
+
+### Under the hood (pointers)
+
+Every machine's `netd` is both a client and a 9P **export gateway**; paths
+resolve through a per-task **namespace** whose bindings can point at a local
+`fsd` mount, the console, `/net`, or a **remote** endpoint. The full design
+and its build history: [`roadmap-cluster.md`](roadmap-cluster.md) and the
+per-phase design docs (`roadmap-cluster-phase{1,2,3,4}.md`), with the bug
+retrospectives in `cluster-distributed-postmortem.md` and
+`cluster-phase0-postmortem.md`.
 
 ## Syscall ABI
 
-Full per-syscall detail: [`architecture.md`](architecture.md)'s
+Full, current per-syscall detail: [`architecture.md`](architecture.md)'s
 syscall table; the authoritative constants live in
-`syscall-abi/src/lib.rs`, imported by both the kernel and every
-userland program.
+`syscall-abi/src/lib.rs` and `ninep-abi/src/lib.rs`, imported by both the
+kernel and every userland program. (The table below covers the core
+syscalls; the filesystem protocol has since moved to the uniform
+`ninep-abi` verb set — `NP_READDIR`/`NP_READ`/`NP_WRITE`/… — and the
+network/cluster ops to the `NETOP_*` protocol, both documented in those
+crates.)
 
 **Calling convention** (Linux-shaped, not Linux-compatible): syscall
 number in `x8`, up to four arguments in `x0`–`x3`, return value in

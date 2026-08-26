@@ -1,0 +1,211 @@
+# Running and testing Ouroboros on QEMU
+
+The practical guide to booting Ouroboros under QEMU — the fast dev loop the whole
+project relies on — from a single machine up to a **two-node cluster** on a shared
+virtual network. Companion to [`manual.md`](manual.md) (which covers *using* the
+OS once it's booted) and [`testing-exfat.md`](testing-exfat.md) (the exFAT disk
+rig). Every command here is a `make` target defined in the repository `Makefile`.
+
+Prerequisites: `brew install qemu` (which also provides the aarch64 OVMF firmware
+the targets point at) and macOS's `hdiutil` (for `make image`). For the ext2 test
+disk, also `brew install e2fsprogs`.
+
+Quit any QEMU instance with **`Ctrl+a x`**.
+
+---
+
+## 1. The fast single-machine runs
+
+```sh
+make run          # fastest loop - a vvfat-backed disk (FAT16!), no real FS
+make run-image    # boots build/esp.img - a real FAT32 disk; disk commands work
+```
+
+The everyday gotcha: **`make run`'s disk is FAT16** (an artifact of QEMU's vvfat
+driver), which the FAT32-only filesystem server can't mount — so every disk command
+prints "no filesystem mounted" there. Use **`make run-image`** whenever you want
+`ls`/`cat`/`write`/`exec` and the rest to actually work; it builds and boots
+`build/esp.img`, a genuine MBR+FAT32 disk.
+
+`make image` (re)builds `build/esp.img` on its own; the `run-image*` targets depend
+on it, so they rebuild it as needed.
+
+---
+
+## 2. Disk-format test images
+
+Ouroboros's filesystem server (`fsd`) mounts FAT32, exFAT, and ext2, and discovers
+partitions on MBR or GPT disks. Each format has a purpose-built test disk:
+
+```sh
+make run-image         # FAT32 (the default boot disk)
+make run-image-gpt     # the FAT32 disk wrapped in a bootable GPT (tests GPT discovery)
+make run-image-exfat   # a two-partition MBR: exFAT first (fsd mounts it) + FAT32 ESP (UEFI boots it)
+make run-image-ext2    # same two-partition trick with ext2 first  (needs `brew install e2fsprogs`)
+```
+
+The two-partition images (exFAT/ext2) are the trick that lets `fsd` mount a
+non-FAT filesystem while UEFI still boots from a FAT32 ESP: partition 1 is the
+filesystem under test, partition 2 is the bootable ESP. Inside the guest, `fsd`
+probes FAT32-then-exFAT-then-ext2 and mounts the first that validates, so it lands
+on partition 1. See [`testing-exfat.md`](testing-exfat.md) for the full exFAT
+round-trip (including verifying against macOS's own `fsck_exfat`).
+
+**Disk-management from inside the guest** (works on any of these, or a blank disk):
+`erase disk`, `partition [fat32|exfat|ext2]`, then `format [fat32|exfat|ext2]`
+lay down a fresh filesystem; `mount -a` mounts it. These are shell *builtins*
+(they must run when nothing is mounted — see [`manual.md`](manual.md)).
+
+---
+
+## 3. Networking (single machine)
+
+```sh
+make run-net          # a virtio-net NIC + QEMU user-net (SLIRP) + a net.pcap dump
+make run-image-net    # real FAT32 *and* the NIC in one boot - the fullest single run
+make run-image-server # + SLIRP hostfwd tcp::5555->:80 so the host can reach netd's HTTP server
+```
+
+- **Client ops:** boot `make run-image-net`, then at the shell `ping 10.0.2.2`,
+  `resolve example.com`, or `fetch example.com`. SLIRP reaches the outside world.
+- **Server:** boot `make run-image-server`, then on the host `curl
+  http://localhost:5555/` — the guest's from-scratch TCP stack serves a page. Any
+  path streams a file from `fsd` (`curl http://localhost:5555/EFI/ORBS/INIT.CFG`);
+  a directory returns a browsable HTML index. Every frame is dumped to
+  `build/net.pcap` for `tcpdump`/Wireshark inspection.
+
+QEMU's user-mode networking assigns the guest **10.0.2.15**, gateway **10.0.2.2**,
+DNS **10.0.2.3**. (Parallels' virtio-net is PCI, which this project's virtio-mmio
+path doesn't drive — networking is QEMU-only.)
+
+---
+
+## 4. The 9P export, tested from the host
+
+`netd` exports the guest's filesystem over 9P-over-TCP (port 564). Two host-side
+python peers (no dependencies beyond python 3) act as the "foreign observer":
+
+```sh
+# The host reads the GUEST's disk over TCP:
+make run-image-9p                                   # adds a hostfwd tcp::5640-:564
+python3 scripts/np9p_client.py localhost 5640 readdir /
+python3 scripts/np9p_client.py localhost 5640 read /EFI/ORBS/INIT.CFG
+
+# The GUEST reads a file served by the HOST:
+make run-image-9p-client                            # a NIC, no hostfwd needed
+python3 scripts/np9p_server.py 5641                 # on the host; serves a small tree
+#   ...then in the guest shell:
+#   mount -r 10.0.2.2:5641 /mnt/a ; ls /mnt/a ; cat /mnt/a/HELLO.TXT
+```
+
+The guest reaches the host at **10.0.2.2** over SLIRP with no hostfwd (SLIRP routes
+guest→host automatically), which is why `run-image-9p-client` needs only a NIC.
+
+---
+
+## 5. The two-node cluster (the real thing)
+
+Two Ouroboros guests on a **shared L2 link** — a QEMU socket "hub", no host in the
+middle — let you exercise the whole distributed stack (Phases 1–4): remote disk
+mount, remote `/proc`/`/dev/cons`/`/net`, and remote execution (`cpu`).
+
+```sh
+# Terminal 1 - machine A (start it FIRST; it listens):
+make run-image-2vm-a
+
+# Terminal 2 - machine B:
+make run-image-2vm-b
+```
+
+**How the link works.** `run-image-2vm-a` runs a QEMU `-netdev
+socket,listen=127.0.0.1:12340`; `-2vm-b` runs `connect=127.0.0.1:12340`. That pair
+is a virtual Ethernet hub joining the two guests at layer 2 — no SLIRP, no
+gateway, no DNS. Each guest gets its own disk copy (`build/esp-a.img` /
+`esp-b.img`, since two QEMU write-locks can't share one file) and its own pcap
+(`build/net-a.pcap` / `net-b.pcap`).
+
+**How the IPs work.** `netd` derives each guest's IPv4 from its NIC's MAC (last
+octet): the two-VM targets set MAC `…:0a` → **10.0.2.10** (machine A) and `…:0b` →
+**10.0.2.11** (machine B). (The default QEMU MAC `…:56` maps back to `.15`, so the
+single-VM SLIRP runs are unchanged.) Read a machine's own address any time with
+`mount -n /net ; cat /net/ip`.
+
+**What to do once both are up** — see [`manual.md`](manual.md)'s cluster section
+for the full command set. The essentials, typed in **machine B's** shell:
+
+```
+mount -r 10.0.2.10:564 /mnt/a       # mount machine A's disk
+ls /mnt/a                           #   ...and read it
+cat /mnt/a/proc/2/state             # A's filesystem-server state (its /proc)
+cat /mnt/a/net/ip                   # A's address (its /net)
+write /mnt/a/dev/cons hello         # prints "hello" on A's screen
+cpu 10.0.2.10:564 ls /              # run `ls` ON A, output back here
+cpu 10.0.2.10:564 cat /host/x       # run cat on A, reading THIS machine's /x
+```
+
+Watch the wire with `tcpdump -nr build/net-a.pcap` (or `-b`) to confirm it's real
+cross-machine traffic. Zero exception-trace aborts is the health bar — see §7.
+
+---
+
+## 6. USB and GIC variants
+
+```sh
+make run-usb-kbd     # + an xHCI controller & a USB keyboard (HMP monitor sendkey)
+make run-usb-multi   # + a USB tablet and a storage stick (the 3-device xHCI rig)
+make run-gicv3       # force GICv3 instead of QEMU's default GICv2
+```
+
+On the USB targets you can inject keystrokes through the monitor socket:
+`printf 'sendkey u\n' | nc -U qemu-monitor.sock`. (USB on *real* hardware is a
+Parallels story — see [`manual.md`](manual.md).)
+
+---
+
+## 7. Scripted / headless testing, and the health bar
+
+QEMU's `-nographic` routes the guest console to stdio, so you can drive the shell
+by feeding it commands and reading its output. For anything beyond a quick manual
+check — and for the two-VM cluster, where you're juggling two consoles — drive it
+from a small script over a pty (Python's `pty.fork` + `select`), sending a line and
+reading until the `$ ` prompt. The `scripts/np9p_*.py` peers and the two-VM targets
+are meant to be driven this way.
+
+**The health bar this project holds every change to:** boot with `-d int -D
+<logfile>` (the `run-image-2vm-*` and several other targets already add it, writing
+`build/int-*.log`) and confirm **zero `Data Abort` / `Prefetch Abort` / `SError`**
+across the run:
+
+```sh
+grep -cE "Data Abort|Prefetch Abort|SError" build/int-*.log   # must be 0
+```
+
+`Taking exception … [SVC]` (syscalls), `[IRQ]` (the timer tick), and `[Hypervisor
+Call]` (firmware PSCI at boot) are all expected and benign; an *abort* is a real
+fault. A clean run is zero aborts.
+
+**Real-hardware testing** (Parallels) is a separate path — `make test-parallels`;
+see [`manual.md`](manual.md)'s Parallels section.
+
+---
+
+## Quick reference — every run target
+
+| Target | What it adds |
+|---|---|
+| `run` | fastest loop; vvfat FAT16 disk (no real FS) |
+| `run-image` | real FAT32 disk (`build/esp.img`) — disk commands work |
+| `run-image-gpt` | FAT32 inside a bootable GPT (GPT discovery) |
+| `run-image-exfat` | exFAT partition + FAT32 ESP (`fsd` mounts exFAT) |
+| `run-image-ext2` | ext2 partition + FAT32 ESP (needs `e2fsprogs`) |
+| `run-net` | virtio-net + SLIRP + `net.pcap` |
+| `run-image-net` | real FAT32 **and** the NIC |
+| `run-image-server` | + `hostfwd tcp::5555->:80` (host `curl` reaches netd) |
+| `run-image-9p` | + `hostfwd tcp::5640->:564` (host reads guest's disk over 9P) |
+| `run-image-9p-client` | NIC only; guest mounts a host-run 9P server |
+| `run-image-2vm-a` | machine A of the two-node cluster (listen, IP `.10`) |
+| `run-image-2vm-b` | machine B of the two-node cluster (connect, IP `.11`) |
+| `run-usb-kbd` | xHCI + USB keyboard |
+| `run-usb-multi` | xHCI + tablet + storage stick |
+| `run-gicv3` | force GICv3 |
+| `test-parallels` | scripted real-hardware smoke test (Parallels, not QEMU) |

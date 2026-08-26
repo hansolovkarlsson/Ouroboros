@@ -524,7 +524,8 @@ postmortems under `docs/`); look there for the full write-up.
 
 ```
 docs/
-  manual.md          the one-stop user manual: prerequisites, building, running on QEMU/Parallels, scripted testing, shell tour, condensed syscall table, writing-a-program essentials - links into the deeper references below
+  manual.md          the one-stop user manual: prerequisites, building, running, the shell tour + /bin commands, the CLUSTER section (sharing disk/proc/console/net + cpu remote execution across machines), the syscall ABI, writing-a-program essentials - links into the deeper references below
+  testing-qemu.md    the QEMU run/test guide: every `make run-*` target, the disk-format test images (FAT32/exFAT/ext2/GPT), the network runs, the 9P host peers (np9p_client/server.py), and the TWO-NODE CLUSTER setup (socket networking, IP-from-MAC, run-image-2vm-a/b, the -d int zero-aborts health bar)
   tutorial.md        build-an-OS-like-this-from-scratch tutorial: the working path only (no bug narratives), staged from UEFI hello world through PIE userland/disk/multitasking, with code samples drawn from this kernel's confirmed-working source
   architecture.md    reference doc: boot flow, privilege model, memory layout, exceptions, process model, syscall ABI, console
   processes.md       reference doc: process loading/config mechanism, memory model, binary format, writing a replacement program
