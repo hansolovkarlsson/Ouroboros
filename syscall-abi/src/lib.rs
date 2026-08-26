@@ -653,11 +653,21 @@ pub const NETOP_RMOUNT_MSG: usize = 16;
 /// endpoint layout as [`NETOP_RMOUNT`] (reuse [`NETOP_RMOUNT_ENDPOINT`] /
 /// [`NETOP_RMOUNT_MSG`]), with the command line (program name + space-separated
 /// args) where the NP message would be. `netd` opens a connection to the remote
-/// export, sends an `ninep_abi::NP_RUN` frame, and streams the spawned command's
-/// output back; the reply to the client is that output (bounded by
-/// [`MSG_MAX_LEN`] for now - small commands; streaming to the shell is a later
-/// refinement). The shell's `cpu <host:port> <command>` builtin.
+/// export, sends an `ninep_abi::NP_RUN` frame, and collects the spawned command's
+/// output; the reply to the client is the **first** [`MSG_MAX_LEN`]-byte chunk of
+/// that output, and the shell pulls the rest with [`NETOP_RUN_MORE`]. `netd`
+/// holds the collected output (bounded ~2 KB by the remote's buffer) between the
+/// pull calls. The shell's `cpu <host:port> <command>` builtin.
 pub const NETOP_RUN: u64 = 5;
+
+/// [`NETOP_RUN`] follow-up: pull the next [`MSG_MAX_LEN`]-byte chunk of the last
+/// run's output (request is just `[op: u64]`; only the task that issued the
+/// `NETOP_RUN` may pull its output). The reply is the next chunk, or **empty**
+/// once the output is exhausted (end of stream). This is the shell-side chunked
+/// delivery that lifts `cpu` output past one message; truly unbounded streaming
+/// (the remote sending as it produces) is a later refinement - see
+/// `docs/roadmap-cluster.md`.
+pub const NETOP_RUN_MORE: u64 = 6;
 
 /// [`CON_INFO`] field: the backend kind ([`CON_KIND_*`]).
 pub const CON_INFO_KIND: u64 = 0;

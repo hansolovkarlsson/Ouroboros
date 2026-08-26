@@ -282,6 +282,10 @@ fn serve(packed_mac: u64) -> ! {
     // Dial-out (/net/tcp) client connections - persist across the separate NP
     // round trips of a clone/connect/data/close sequence, driven by pump_dials.
     let mut dials: [Option<DialConn>; MAX_DIAL] = core::array::from_fn(|_| None);
+    // The most recent cpu run's collected output, delivered to the shell in
+    // chunks via NETOP_RUN_MORE (one pending run at a time). On this frame - no
+    // mutable statics.
+    let mut pending = PendingRun::new();
     loop {
         // Block until a client message or an incoming frame is pending (or
         // return immediately if either already is). While *any* connection has
@@ -299,7 +303,7 @@ fn serve(packed_mac: u64) -> ! {
         // handled synchronously; the supervisor health-ping is acked here too
         // (any reply acks it). Also where a cpu child's output is captured
         // (cluster Phase 4a) - routed to its connection by drain_client_messages.
-        drain_client_messages(packed_mac, &mut buf, &mut conns, &mut dials, &auth);
+        drain_client_messages(packed_mac, &mut buf, &mut conns, &mut dials, &auth, Some(&mut pending));
 
         // 2. Incoming frames: ARP replies, dial-out connections, and the TCP server.
         if packed_mac != syscall_abi::NET_ERROR {
@@ -328,7 +332,7 @@ fn serve(packed_mac: u64) -> ! {
                     }
                     let before = c.snd_nxt;
                     pump_send(&mac, c); // `c` borrow ends here
-                    drain_client_messages(packed_mac, &mut buf, &mut conns, &mut dials, &auth);
+                    drain_client_messages(packed_mac, &mut buf, &mut conns, &mut dials, &auth, Some(&mut pending));
                     match conns[i].as_ref() {
                         Some(c) if c.snd_nxt != before => {} // progress - continue
                         _ => break,
@@ -344,7 +348,7 @@ fn serve(packed_mac: u64) -> ! {
 /// from a **cpu child** (cluster Phase 4a - a spawned remote-run command whose
 /// stdout we capture) is routed to *its* connection's output buffer instead of
 /// the normal client dispatch; everything else is a client request.
-fn drain_client_messages(packed_mac: u64, buf: &mut [u8], conns: &mut [Option<TcpConn>; MAX_CONNS], dials: &mut [Option<DialConn>; MAX_DIAL], auth: &Auth) {
+fn drain_client_messages(packed_mac: u64, buf: &mut [u8], conns: &mut [Option<TcpConn>; MAX_CONNS], dials: &mut [Option<DialConn>; MAX_DIAL], auth: &Auth, mut pending: Option<&mut PendingRun>) {
     loop {
         let packed =
             syscall4(syscall_abi::MSG_TRY_RECV, buf.as_mut_ptr() as u64, buf.len() as u64, 0, 0);
@@ -367,12 +371,12 @@ fn drain_client_messages(packed_mac: u64, buf: &mut [u8], conns: &mut [Option<Tc
             // dispatch (which replies); everything else is captured output.
             let is_request = len >= 8 && read_u64(buf, 0) == syscall_abi::NETOP_RMOUNT;
             if is_request {
-                handle_client(packed_mac, sender, buf, len, conns, dials, auth);
+                handle_client(packed_mac, sender, buf, len, conns, dials, auth, pending.as_deref_mut());
             } else {
                 cpu_child_msg(conns[ci].as_mut().unwrap(), sender as u8, &buf[..len]);
             }
         } else {
-            handle_client(packed_mac, sender, buf, len, conns, dials, auth);
+            handle_client(packed_mac, sender, buf, len, conns, dials, auth, pending.as_deref_mut());
         }
     }
 }
@@ -397,7 +401,12 @@ fn cpu_child_msg(c: &mut TcpConn, child: u8, data: &[u8]) {
 
 /// Dispatch one client request (a `MSG_CALL` from the shell) by op, replying
 /// with the op's status. The unknown-op arm also acks the supervisor ping.
-fn handle_client(packed_mac: u64, sender: u64, buf: &[u8], len: usize, conns: &mut [Option<TcpConn>; MAX_CONNS], dials: &mut [Option<DialConn>; MAX_DIAL], auth: &Auth) {
+/// `pending` is `Option` because `tcp_run`'s re-entrant drain (during a run)
+/// must NOT process a `cpu` run op - the shell that started this run is blocked
+/// in it, so no `NETOP_RUN`/`NETOP_RUN_MORE` can legitimately arrive there; it
+/// passes `None`, and the main serve loop passes `Some`.
+#[allow(clippy::too_many_arguments)]
+fn handle_client(packed_mac: u64, sender: u64, buf: &[u8], len: usize, conns: &mut [Option<TcpConn>; MAX_CONNS], dials: &mut [Option<DialConn>; MAX_DIAL], auth: &Auth, pending: Option<&mut PendingRun>) {
     match read_u64(buf, 0) {
         syscall_abi::NETOP_PING => {
             let status = handle_ping(packed_mac, read_u64(buf, 8));
@@ -437,7 +446,17 @@ fn handle_client(packed_mac: u64, sender: u64, buf: &[u8], len: usize, conns: &m
             // callbacks (its /host reads come back to *our* export) - passing
             // `conns` is what lets it do that.
             let mut r = [0u8; syscall_abi::MSG_MAX_LEN as usize];
-            let rlen = handle_run(packed_mac, buf, len, &mut r, conns, dials, auth);
+            let rlen = match pending {
+                Some(p) => handle_run(packed_mac, sender, buf, len, &mut r, conns, dials, auth, p),
+                None => 0, // a nested run can't happen (the caller is blocked)
+            };
+            reply(sender, &r[..rlen]);
+        }
+        syscall_abi::NETOP_RUN_MORE => {
+            // The shell pulls the next chunk of its last cpu run's output; an
+            // empty reply = end of stream. Owner-checked inside next_chunk.
+            let mut r = [0u8; syscall_abi::MSG_MAX_LEN as usize];
+            let rlen = pending.map(|p| p.next_chunk(sender, &mut r)).unwrap_or(0);
             reply(sender, &r[..rlen]);
         }
         // An NP read verb from a *local* client: the /net synthetic filesystem
@@ -940,7 +959,7 @@ fn tcp_run(packed_mac: u64, mac: &[u8; 6], dst_mac: &[u8; 6], target: &[u8; 4], 
         // Ack the health-ping / service other client requests (re-entrant-safe:
         // the shell is blocked in this very run, so no nested run can arrive).
         let before_deadline = deadline;
-        drain_client_messages(packed_mac, &mut cbuf, conns, dials, auth);
+        drain_client_messages(packed_mac, &mut cbuf, conns, dials, auth, None);
         while let Some(len) = recv(&mut rx) {
             if let Some(s) = parse_tcp(&rx[..len], target, dst_port, src_port) {
                 if s.flags & TCP_RST != 0 {
@@ -1041,7 +1060,45 @@ fn pump_conns(mac: &[u8; 6], conns: &mut [Option<TcpConn>; MAX_CONNS]) {
 /// commands). Request layout is `NETOP_RMOUNT`'s (endpoint + payload), the
 /// payload being the command line rather than an NP message.
 #[allow(clippy::too_many_arguments)]
-fn handle_run(packed_mac: u64, buf: &[u8], len: usize, out: &mut [u8], conns: &mut [Option<TcpConn>; MAX_CONNS], dials: &mut [Option<DialConn>; MAX_DIAL], auth: &Auth) -> usize {
+/// The collected output of the most recent `cpu` run, delivered to the shell one
+/// `MSG_MAX_LEN` chunk at a time (the shell pulls with `NETOP_RUN_MORE`). netd
+/// holds it here between pull calls - a single pending run at a time, on `serve`'s
+/// frame (no mutable statics). Bounded by `RUN_OUT_MAX` (the remote's own send
+/// buffer caps it too); truly unbounded streaming as the child produces is a
+/// later refinement (see `docs/roadmap-cluster.md`). The `owner` check means only
+/// the task that issued the run may pull its output.
+const RUN_OUT_MAX: usize = 2048;
+struct PendingRun {
+    active: bool,
+    owner: u64,
+    len: usize,
+    cursor: usize,
+    buf: [u8; RUN_OUT_MAX],
+}
+impl PendingRun {
+    fn new() -> Self {
+        PendingRun { active: false, owner: 0, len: 0, cursor: 0, buf: [0; RUN_OUT_MAX] }
+    }
+    /// Copy the next chunk (up to `out.len()`, capped at `MSG_MAX_LEN`) for task
+    /// `who` into `out`; returns its length, or 0 when exhausted / not the owner
+    /// (0 = end of stream, which the shell's pull loop stops on).
+    fn next_chunk(&mut self, who: u64, out: &mut [u8]) -> usize {
+        if !self.active || self.owner != who || self.cursor >= self.len {
+            return 0;
+        }
+        let cap = out.len().min(syscall_abi::MSG_MAX_LEN as usize);
+        let chunk = (self.len - self.cursor).min(cap);
+        out[..chunk].copy_from_slice(&self.buf[self.cursor..self.cursor + chunk]);
+        self.cursor += chunk;
+        if self.cursor >= self.len {
+            self.active = false; // fully delivered
+        }
+        chunk
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn handle_run(packed_mac: u64, sender: u64, buf: &[u8], len: usize, out: &mut [u8], conns: &mut [Option<TcpConn>; MAX_CONNS], dials: &mut [Option<DialConn>; MAX_DIAL], auth: &Auth, pending: &mut PendingRun) -> usize {
     let fail = |out: &mut [u8], msg: &[u8]| -> usize {
         let n = msg.len().min(out.len());
         out[..n].copy_from_slice(&msg[..n]);
@@ -1088,14 +1145,19 @@ fn handle_run(packed_mac: u64, buf: &[u8], len: usize, out: &mut [u8], conns: &m
     // must serve *during* the run - a plain blocking tcp_get would deadlock (it
     // would drop those frames while stuck waiting). tcp_run drives the run's
     // client connection AND serves the export + acks the health-ping each pass.
-    let mut resp = [0u8; ninep_abi::NP_NET_LEN_PREFIX + ninep_abi::NP_NET_MAX];
-    let (status, got) = tcp_run(packed_mac, &mac, &dst_mac, &ip, port, &req[..total], &mut resp, conns, dials, auth);
+    // Collect the run's output straight into the pending buffer (bounded by
+    // RUN_OUT_MAX; the remote's own send buffer caps it too). Then hand the shell
+    // the first chunk and let it pull the rest via NETOP_RUN_MORE.
+    pending.active = false;
+    let (status, got) = tcp_run(packed_mac, &mac, &dst_mac, &ip, port, &req[..total], &mut pending.buf, conns, dials, auth);
     if status != syscall_abi::NET_FETCH_OK {
         return fail(out, b"cpu: remote run failed\r\n");
     }
-    let n = got.min(out.len());
-    out[..n].copy_from_slice(&resp[..n]);
-    n
+    pending.owner = sender;
+    pending.len = got.min(RUN_OUT_MAX);
+    pending.cursor = 0;
+    pending.active = true;
+    pending.next_chunk(sender, out)
 }
 
 fn handle_rmount(packed_mac: u64, buf: &[u8], len: usize, out: &mut [u8], auth: &Auth) -> usize {

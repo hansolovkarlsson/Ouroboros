@@ -338,9 +338,10 @@ So within one remote command, **`/`** is the machine it runs on and
 **`/host`** is the machine you launched it from. `cpu B ls /` shows B's
 disk; `cpu B ls /host` shows yours. The command's `/bin` program is loaded
 from the remote's disk, so both machines should have the same `/bin`.
-(Output is one message's worth for now — small commands; the imported
-namespace covers filesystem access, not the remote's `/proc`/`/net` unless
-you reach them under `/host`.)
+(Output up to ~2 KB comes back whole — the shell pulls it in chunks; larger
+output is still bounded, with truly unbounded streaming a documented later
+refinement. The imported namespace covers filesystem access, not the remote's
+`/proc`/`/net` unless you reach them under `/host`.)
 
 ### Dialing out of another machine's network — `/net/tcp`
 

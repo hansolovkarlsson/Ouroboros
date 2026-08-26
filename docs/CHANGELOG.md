@@ -7,6 +7,35 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/`; 
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## `cpu` output past one message — chunked delivery to the shell
+
+`cpu <host:port> <cmd>`'s output was capped at one IPC message (768 bytes) — the
+`MSG_CALL` reply the shell got back. `cat` a file, `ls` a big dir, anything
+chatty was silently truncated. Now the shell **pulls the output in chunks**, so a
+command's full output (up to ~2 KB) comes back.
+
+**The design, forced by the capability model.** netd does *not* hold `TO_SHELL`,
+so it can't push a stream of messages to the shell — it can only reply via the
+one-shot reply exemption. So the fix is a **pull loop**: `handle_run` collects the
+run's output into a `PendingRun` buffer on `netd`'s frame (bounded by
+`RUN_OUT_MAX`, which the remote's own send buffer also caps), returns the first
+768-byte chunk, and the shell pulls the rest with a new `NETOP_RUN_MORE` op — an
+empty reply signals end of stream. An owner check means only the task that issued
+the run may pull its output; a single pending run at a time (the shell is blocked
+in the run until it gets the first chunk, so there's never a nested one).
+
+**Scope, honest:** this lifts the cap from 768 bytes to ~2 KB (the remote's
+buffer), which covers realistic command output — but it's still **bounded**,
+because netd collects the whole run before the shell pulls it. Truly unbounded
+streaming (the remote sending as the child produces, the caller forwarding
+incrementally) is a real arc, documented in `docs/roadmap-cluster.md` as a later
+refinement to build if the need arises.
+
+**Verified** end to end: a guest ran `cpu` against a host "export" that streamed
+1500 bytes back; the guest printed all 33 lines (the full 1500) — past the old
+768-byte cut — via the chunked pull. Zero EL0 faults, and the ~2 KB `PendingRun`
+on netd's stack did *not* trip the guard page (the recurring trap).
+
 ## Reply authentication — mutual auth on the export (auth tier 2, part 1)
 
 v0.10.0 authenticated the export *request* (proving the client holds the cluster

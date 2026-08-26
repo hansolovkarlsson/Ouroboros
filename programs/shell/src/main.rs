@@ -850,7 +850,7 @@ fn dispatch_line(line: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize, env:
     let arg = words.next().unwrap_or("");
 
     match command {
-        "help" => out.put_line("commands: help, echo, uptime, clear, ls, cat, cd, pwd, mkdir, rmdir, touch, rm, write, writeat, cp, mv, mount, unmount, erase, partition, format, ping, resolve, fetch, exec, exit, ps, kill, fg, wait, send, recv, selftest, env, set, unset (a bare unknown command is looked up on $PATH; $VAR expands; append `> file`/`>> file` to redirect, or `| /path/to/program` to pipe)"),
+        "help" => out.put_line("commands: help, echo, uptime, clear, ls, cat, cd, pwd, bind, mkdir, rmdir, touch, rm, write, writeat, cp, mv, mount, mount -a/-r/-p/-c/-n, unmount, erase, partition, format, ping, resolve, fetch, dial, serve, cpu, exec, exit, ps, kill, fg, wait, send, recv, selftest, env, set, unset (a bare unknown command is looked up on $PATH; $VAR expands; append `> file`/`>> file` to redirect, or `| /path/to/program` to pipe)"),
         // echo, uptime, clear are externalized: they're /bin programs now
         // (found via PATH by the unknown-command arm), not builtins. See
         // "Standalone binaries, Stage 4".
@@ -2685,6 +2685,30 @@ fn cmd_cpu(line: &str, out: &mut Output) {
     let rlen = ((packed & 0xffff_ffff) as usize).min(reply.len());
     for &b in &reply[..rlen] {
         out.put(b);
+    }
+    // Pull the rest of the output in chunks (netd delivers one MSG_MAX_LEN chunk
+    // per NETOP_RUN_MORE; an empty reply = end of stream). This lifts `cpu`
+    // output past one message. Bounded loop as a safety net.
+    let mut more = [0u8; 8];
+    more[0..8].copy_from_slice(&syscall_abi::NETOP_RUN_MORE.to_le_bytes());
+    for _ in 0..8 {
+        let packed = syscall4(
+            syscall_abi::MSG_CALL,
+            syscall_abi::NET_TASK,
+            more.as_ptr() as u64,
+            8,
+            reply.as_mut_ptr() as u64,
+        );
+        if packed >= FS_ERR_MIN {
+            break;
+        }
+        let n = ((packed & 0xffff_ffff) as usize).min(reply.len());
+        if n == 0 {
+            break; // end of stream
+        }
+        for &b in &reply[..n] {
+            out.put(b);
+        }
     }
 }
 

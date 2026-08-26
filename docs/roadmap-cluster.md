@@ -248,6 +248,28 @@ namespace can now bind a remote subtree — a natural Phase 4 hook).
   CPU or the data is, explicitly. Useful (offload to a beefier node; run near the
   data), and reachable, precisely because it sidesteps the shared-memory wall.
 
+**Output delivery ✅ improved (v0.14.0): chunked pull.** `cpu` output was capped
+at one IPC message (768 bytes); the shell now pulls it in chunks (`NETOP_RUN_MORE`,
+netd holding the run's output in a `PendingRun` buffer), lifting the cap to ~2 KB
+— realistic command output comes back whole.
+
+> **Future refinement — truly unbounded `cpu` output streaming (build if the need
+> arises).** The chunked pull above is still **bounded**: netd collects the whole
+> run into a ~2 KB buffer before the shell pulls it, and the remote itself
+> accumulates the child's output into a fixed buffer before sending. To stream
+> *unbounded* output, three things change: (1) the **remote** sends the child's
+> stdout as it's produced (a sliding send buffer, drained as it's ACK'd, instead
+> of accumulate-then-send) with TCP/mailbox backpressure throttling the child; (2)
+> the **caller** advances a *resumable* run connection one chunk per shell pull
+> (rather than running to completion first), so remote→caller→shell interleave;
+> and (3) either netd is granted `TO_SHELL` to *push* chunks, or the shell keeps
+> pulling as it does now. None of it is hard, but it's a real arc touching the
+> remote streaming path, a resumable-run restructure in netd, and the shell loop —
+> deferred until a command's multi-kilobyte output is actually wanted (the small
+> commands `cpu` is really for fit the ~2 KB bound today). The capability
+> constraint that netd can't push (no `TO_SHELL`) is why even the bounded version
+> is a pull loop.
+
 ### Phase 5 — Explicit distributed compute (frontier / research)
 
 - A deliberate work-distribution model — partition work + inputs, ship them,

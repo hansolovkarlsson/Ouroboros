@@ -7,6 +7,30 @@ for the forward plan see [`roadmap.md`](roadmap.md).
 
 ---
 
+## 2026-08-26 (cont.) — `cpu` output past one message (closing out the cluster)
+
+The one real functional gap left in the cluster: `cpu`'s output was capped at one
+IPC message (768 bytes) — `cat` a file or `ls` a big dir over `cpu` truncated. Now
+the shell pulls the output in chunks, so a command's full output (up to ~2 KB)
+comes back. The design was *forced* by the capability model: netd doesn't hold
+`TO_SHELL`, so it can't push a stream — only reply once via the reply exemption.
+So it's a pull loop: netd collects the run's output into a `PendingRun` buffer and
+the shell pulls chunks with a new `NETOP_RUN_MORE` op (empty reply = end).
+
+Two things worth noting. **The stack held** — I braced for the recurring guard-page
+overflow (a ~2 KB buffer on netd's already-tight frame), but writing tcp_run's
+output *into* the pending buffer instead of a local resp kept the peak neutral, and
+it booted clean. **The test apparatus levelled up**: I confirmed QEMU `-nographic`
+delivers piped stdin to the guest shell, then drove `cpu 10.0.2.2:5641 …` against a
+host "fake export" that streamed 1500 bytes back — the guest printed all 33 lines,
+past the old 768-byte cut. A single-guest end-to-end `cpu` test, no second VM.
+
+Scoped honestly as *bounded* (~2 KB), which covers the small commands `cpu` is
+really for; truly unbounded streaming (remote sends as it produces, resumable
+caller) is documented in the roadmap as a later arc if the need arises. This was
+the pragmatic close-out — the cluster's last obvious gap, filled without opening a
+big new mechanism. **The cluster feels done.**
+
 ## 2026-08-26 (cont.) — reply authentication (auth tier 2, the cheap half)
 
 v0.10.0 authenticated the export *request*; this makes the *reply* authenticated
