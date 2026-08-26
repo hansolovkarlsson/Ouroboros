@@ -7,6 +7,43 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/`; 
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## Cluster Phase 4b: namespace import — the full Plan 9 `cpu` model
+
+The compute cluster completes: a remote command now runs on the remote's CPU but
+reads **your** files, through your namespace imported at `/host`. `cpu
+10.0.2.10:564 cat /host/BONLY.TXT` runs `cat` on machine A yet prints
+`hello-from-B-imported` — a file that exists only on **B**, the caller — because
+`/host` is B's namespace, mounted into the command's namespace on A. `ls /` on the
+same command shows A's disk; `ls /host` shows B's. Data on B, computation on A, no
+shared memory. **This is the Plan 9 `cpu` model, whole.**
+
+**The import.** The `cpu` frame carries the caller's endpoint; before `SPAWN`,
+the remote netd binds `/host → remote(caller)` on its own namespace (`NS_SET`),
+which the child inherits at spawn. The child's `/host/…` accesses resolve to a 9P
+round trip back to the caller (through the remote's own netd), reading the
+*caller's* disk.
+
+**Two problems the design predicted, both solved.** First, the cpu child now talks
+to netd for *two* things — its stdout (`MSG_SEND`) and its `/host` fs access
+(`NETOP_RMOUNT` `MSG_CALL`) — so netd **demuxes by the op field**: a fs request
+always carries `NETOP_RMOUNT`, so it's never mistaken for output (which would
+deadlock the child), while raw text output never collides with that small value.
+Second — the real blocker — the caller's netd was servicing the run with a
+*blocking* `tcp_get`, so it couldn't serve the child's `/host` callbacks arriving
+at its own export (it dropped their frames): a mutual deadlock. Fixed by
+**`tcp_run`**, a client connection that **pumps the event loop while it waits** —
+each pass it accumulates the run's output, feeds every non-run frame to `on_frame`
+(so the child's `/host` reads are served *during* the run), pumps the server
+connections (so those replies go out), and acks the health-ping. The same "netd
+must never block" rule that shaped 4a's capture, now on the caller.
+
+**How it was proven.** Two VMs: a file written on B only, then from B `cpu
+10.0.2.10:564 ls /` (A's root), `ls /host` (B's root, showing the B-only file),
+and `cat /host/BONLY.TXT` (its contents) — the command on A reading B's disk
+through the import. Zero `-d int` aborts on both nodes; the non-cpu paths (remote
+mount/read) unregressed. Phase 4 (4a + 4b) is complete — the honest distributed
+processing, done. See [`roadmap-cluster-phase4.md`](roadmap-cluster-phase4.md).
+
 ## Cluster Phase 4a: remote execution — run a program on another machine
 
 The cluster becomes a *compute* cluster, not only a storage one. `cpu <host:port>

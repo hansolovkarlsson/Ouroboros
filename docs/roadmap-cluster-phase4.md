@@ -144,34 +144,32 @@ the capability model. (Alternative considered: give spawnable slots a static
   marker (proving it ran on A), `cpu … uptime` prints A's uptime, a bad command a
   clean error; the serve-loop restructure (iterate conns by index so the drain can
   route cpu output) regression-tested against the full export matrix, zero aborts.
-- **4b — namespace import. ⚠️ BLOCKED on a caller-side restructure (found while
-  wiring it, 2026-08-26).** The plan was straightforward: A's `cpu` frame carries
-  A's endpoint; B's netd, before `SPAWN`, binds `/host → remote(A)` on the child
-  (via `NS_SET`, inherited at spawn); the child's `/host/...` accesses resolve to A
-  through B's netd. Two of the three pieces are easy and were built: the endpoint
-  in the frame + the `/host` bind, and the **child-message demux** on B (the child
-  now talks to netd for *two* things — its stdout `MSG_SEND` and its remote-fs
-  `NETOP_RMOUNT` `MSG_CALL` — told apart safely by the op field, since a fs call
-  always carries `NETOP_RMOUNT` and so is never mistaken for output, which would
-  deadlock the child).
+- **4b — namespace import. ✅ DONE (2026-08-26).** The command runs on the remote's
+  CPU but reads the *caller's* files, through the caller's namespace imported at
+  `/host`. The `cpu` frame carries the caller's endpoint (in the `NP_RUN` a1/a2);
+  the remote netd binds `/host → remote(caller)` on its own namespace (`NS_SET`)
+  before `SPAWN`, and the child inherits it. Three pieces:
+  - **The `/host` bind + endpoint** — small.
+  - **The child-message demux** — the child now talks to netd for *two* things
+    (stdout `MSG_SEND`, `/host` fs `NETOP_RMOUNT` `MSG_CALL`), told apart safely by
+    the op field: a fs call always carries `NETOP_RMOUNT`, so it's never mistaken
+    for output (which would deadlock the child).
+  - **The caller-side non-blocking run (`tcp_run`)** — the real work, resolving the
+    deadlock found last session. `cpu B cat /host/F` needs the child to read the
+    caller's file *while* the caller runs the command, but a blocking `tcp_get`
+    (the old `handle_run`) froze the caller's event loop and *dropped* the child's
+    `/host` frames arriving at its export. `tcp_run` is a client connection that
+    **pumps the event loop while it waits**: each pass it accumulates the run's
+    output, feeds every non-run frame to `on_frame` (serving the child's `/host`
+    reads *during* the run), pumps the server connections so those replies go out,
+    and acks the health-ping. The "netd must never block" rule (4a's capture),
+    now on the caller.
 
-  **The blocker is a deadlock on the *caller's* side.** `cpu B cat /host/F` needs
-  B's child to read A's file *while* A is running the `cpu` command — but A's netd
-  services the run with a **synchronous** `tcp_get` (`handle_run`), which blocks
-  A's whole event loop waiting for B's output. So A's export cannot serve the
-  child's `/host` callbacks (A's `tcp_get` even *receives and drops* their frames,
-  filtered by port); the child blocks on its read, produces no output, and A's
-  `tcp_get` times out. **The two netds have a mutual dependency the blocking run
-  can't satisfy.**
-
-  **The fix (4b's real work): make the caller's run non-blocking** — a state
-  machine in netd's event loop, like the server-side connections, so A can *both*
-  drive the run's response *and* serve the child's imported-namespace callbacks in
-  the same loop. That is a real restructure of `handle_run` (from a `tcp_get` call
-  into a connection state), deliberately deferred rather than half-built into a
-  deadlock. The `/host` mount + demux are ready for it; the caller-side rework is
-  the gate. (This is the same "netd must never block" lesson that shaped 4a's
-  *capture* — now applying to the *caller* too.)
+  *Shipped:* two VMs, a file on B only, then from B `cpu 10.0.2.10:564 ls /` (A's
+  root), `ls /host` (B's root, showing the B-only file), and `cat /host/BONLY.TXT`
+  (its contents) — the command on A reading B's disk through the import. Zero
+  `-d int` aborts; non-cpu paths unregressed. **Phase 4 (4a + 4b) complete — the
+  full Plan 9 `cpu` model.**
 - **4c (later) — interactive stdin, exit status, environment**; and, further out,
   the honest **explicit distributed compute** of Phase 5.
 

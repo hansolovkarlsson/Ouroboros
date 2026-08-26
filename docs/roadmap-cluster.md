@@ -211,17 +211,18 @@ a natural Phase 4 hook).
   consumer appears — not before. A fully namespace-aware export (vs. `/proc`'s
   prefix hack) lands when a second synthetic tree needs it.
 
-### Phase 4 — Remote execution (the honest "distributed processing") 🚧 IN PROGRESS
+### Phase 4 — Remote execution (the honest "distributed processing") ✅ DONE
 
 > **Detailed design:** [`roadmap-cluster-phase4.md`](roadmap-cluster-phase4.md).
-> **Step 4a (remote spawn + output stream) ✅ DONE:** `cpu <host:port> <command>`
-> runs `<command>` on another machine and streams its output back — proven remote
-> by an A-only marker showing in `cpu A ls /`. netd spawns the `/bin` program with
-> its stdout piped back (a new spawner→child reply capability), captures it
-> non-blocking in its event loop, and streams it to the caller's `cpu` builtin.
-> The command runs with the *remote's* namespace (step 4a); **importing the
-> caller's namespace (4b)** — so the remote program reads *your* files — is next,
-> and the namespace-aware export's `NsTarget::Remote` hook is exactly its mechanism.
+> The full Plan 9 `cpu` model: `cpu <host:port> <command>` runs `<command>` on
+> another machine's CPU while reading **your** files through your namespace
+> imported at `/host`. **4a (remote spawn + output stream):** netd spawns the
+> `/bin` program with its stdout piped back (a spawner→child reply capability),
+> captures it non-blocking in its event loop, streams it to the caller's `cpu`
+> builtin. **4b (namespace import):** the remote binds `/host → remote(caller)` on
+> the child; the caller's netd stays responsive with `tcp_run` (pumping the event
+> loop while the run is in flight) so it serves the child's `/host` callbacks —
+> `cpu A cat /host/F` runs on A and reads B's file. Proven two-VM, zero aborts.
 
 - The Plan 9 `cpu` model: **run a program on machine B while its namespace —
   files, console, devices — is imported from machine A over 9P.** The program

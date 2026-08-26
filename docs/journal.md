@@ -7,6 +7,36 @@ for the forward plan see [`roadmap.md`](roadmap.md).
 
 ---
 
+## 2026-08-26 (cont.) — Phase 4b: the full cpu model, importing the caller's namespace
+
+The completion of remote execution: a command runs on the remote's CPU but reads
+*your* files. `cpu 10.0.2.10:564 cat /host/BONLY.TXT` runs cat on machine A and
+prints `hello-from-B-imported` — a file that only exists on B, the caller. On the
+same command, `ls /` shows A's disk and `ls /host` shows B's. Data on B, compute
+on A. Plan 9's cpu, whole.
+
+I'd stopped here last round because wiring it hit a deadlock, and this time I
+built the fix. The import itself is small: the cpu frame carries the caller's
+endpoint, and the remote netd binds /host -> remote(caller) on its own namespace
+before SPAWN, which the child inherits. The two hard parts were both foreseen by
+the last session's design finding. First, the child now talks to netd for two
+things — stdout (a send) and its /host reads (a NETOP_RMOUNT call) — so netd
+demuxes by op field; a fs call always carries NETOP_RMOUNT, so it's never mistaken
+for output, which would deadlock the child. Second, the real blocker: the caller's
+netd serviced the run with a blocking tcp_get, so it couldn't serve the child's
+/host callbacks arriving at its own export — it dropped their frames. That's a
+mutual deadlock (A waits for output; A must serve the reads that produce it).
+
+The fix is tcp_run: a client connection that pumps the event loop while it waits.
+Each pass it accumulates the run's output, feeds every non-run frame to on_frame
+(so the child's /host reads get served during the run), pumps the server
+connections so those replies go out, and acks the health-ping. It's the exact same
+"netd must never block" lesson that shaped 4a's capture — I just hadn't seen it
+would bite the caller too until I traced the deadlock. Once tcp_run was in, it
+worked on the first two-VM boot: A ran the command, saw both its own / and the
+imported /host, and read B's file through it. Zero aborts. Phase 4 — the honest
+distributed processing — is done.
+
 ## 2026-08-26 — Phase 4a: running a program on another machine
 
 The compute half of the cluster: `cpu <host> <command>` runs a program on another

@@ -266,9 +266,22 @@ fn drain_client_messages(packed_mac: u64, buf: &mut [u8], conns: &mut [Option<Tc
             .iter()
             .position(|c| matches!(c, Some(c) if c.cpu_child == sender as u8))
         {
-            cpu_child_msg(conns[ci].as_mut().unwrap(), sender as u8, &buf[..len]);
+            // A cpu child talks to us for TWO things (cluster Phase 4a/4b): its
+            // stdout (a raw MSG_SEND we capture) and - once its namespace imports
+            // the caller's (4b) - its remote-fs access (a NETOP_RMOUNT MSG_CALL we
+            // must service and reply to). Demux by the op field: a fs request
+            // always carries NETOP_RMOUNT (op 4), so it's never mistaken for
+            // output (which would deadlock the child); raw text output never
+            // starts with that small value. A request goes to the normal client
+            // dispatch (which replies); everything else is captured output.
+            let is_request = len >= 8 && read_u64(buf, 0) == syscall_abi::NETOP_RMOUNT;
+            if is_request {
+                handle_client(packed_mac, sender, buf, len, conns);
+            } else {
+                cpu_child_msg(conns[ci].as_mut().unwrap(), sender as u8, &buf[..len]);
+            }
         } else {
-            handle_client(packed_mac, sender, buf, len);
+            handle_client(packed_mac, sender, buf, len, conns);
         }
     }
 }
@@ -293,7 +306,7 @@ fn cpu_child_msg(c: &mut TcpConn, child: u8, data: &[u8]) {
 
 /// Dispatch one client request (a `MSG_CALL` from the shell) by op, replying
 /// with the op's status. The unknown-op arm also acks the supervisor ping.
-fn handle_client(packed_mac: u64, sender: u64, buf: &[u8], len: usize) {
+fn handle_client(packed_mac: u64, sender: u64, buf: &[u8], len: usize, conns: &mut [Option<TcpConn>; MAX_CONNS]) {
     match read_u64(buf, 0) {
         syscall_abi::NETOP_PING => {
             let status = handle_ping(packed_mac, read_u64(buf, 8));
@@ -328,8 +341,12 @@ fn handle_client(packed_mac: u64, sender: u64, buf: &[u8], len: usize) {
             // The remote-execution client (cluster Phase 4a): frame an NP_RUN to
             // the endpoint's export, which spawns the command there and streams
             // its output back; reply that output to the shell's `cpu` builtin.
+            // handle_run pumps our event loop while it waits (cluster Phase 4b),
+            // so we keep serving the spawned command's imported-namespace
+            // callbacks (its /host reads come back to *our* export) - passing
+            // `conns` is what lets it do that.
             let mut r = [0u8; syscall_abi::MSG_MAX_LEN as usize];
-            let rlen = handle_run(packed_mac, buf, len, &mut r);
+            let rlen = handle_run(packed_mac, buf, len, &mut r, conns);
             reply(sender, &r[..rlen]);
         }
         // An NP read verb from a *local* client: the /net synthetic filesystem
@@ -746,6 +763,161 @@ fn tcp_get(mac: &[u8; 6], dst_mac: &[u8; 6], target: &[u8; 4], dst_port: u16, re
     }
 }
 
+/// A client TCP connection for a remote *run* (cluster Phase 4b) that **pumps our
+/// own event loop while it waits**: the SYN handshake + `NP_RUN` send like
+/// `tcp_get`, but the receive loop, besides accumulating the run's output stream,
+/// also (a) acks the supervisor health-ping and serves other client requests,
+/// (b) feeds every non-run frame to `on_frame` - which is how the spawned
+/// command's imported-namespace (`/host`) reads, arriving at *our* export as
+/// frames, get served *during* the run - and (c) pumps the server connections so
+/// those export replies actually go out. A plain blocking `tcp_get` here would
+/// deadlock: it drops those frames while stuck waiting, the remote child blocks on
+/// its read, and no output ever comes. Returns `(NET_FETCH_* status, output len)`.
+#[allow(clippy::too_many_arguments)]
+fn tcp_run(packed_mac: u64, mac: &[u8; 6], dst_mac: &[u8; 6], target: &[u8; 4], dst_port: u16, request: &[u8], resp: &mut [u8], conns: &mut [Option<TcpConn>; MAX_CONNS]) -> (u64, usize) {
+    let mut frame = [0u8; 1600];
+    let mut rx = [0u8; 1600];
+    let mut cbuf = [0u8; syscall_abi::MSG_MAX_LEN as usize];
+    let src_port = next_src_port();
+    let isn = TCP_ISN ^ ((src_port as u32) << 8);
+
+    // SYN handshake (identical to tcp_get's, with retransmit).
+    const SYN_TRIES: u32 = 4;
+    const SYN_WAIT_TICKS: u64 = 12;
+    let Some(n) = build_tcp(mac, dst_mac, target, src_port, dst_port, isn, 0, TCP_SYN, true, &[], &mut frame) else {
+        return (syscall_abi::NET_FETCH_TIMEOUT, 0);
+    };
+    let their_isn = 'handshake: {
+        let mut tries = 0u32;
+        loop {
+            if send(&frame[..n]).is_err() {
+                return (syscall_abi::NET_FETCH_TIMEOUT, 0);
+            }
+            tries += 1;
+            let deadline = now() + SYN_WAIT_TICKS;
+            loop {
+                if let Some(len) = recv(&mut rx) {
+                    if let Some(s) = parse_tcp(&rx[..len], target, dst_port, src_port) {
+                        if s.flags & TCP_RST != 0 {
+                            return (syscall_abi::NET_FETCH_REFUSED, 0);
+                        }
+                        if s.flags & (TCP_SYN | TCP_ACK) == (TCP_SYN | TCP_ACK) && s.ack == isn + 1 {
+                            break 'handshake s.seq;
+                        }
+                    } else {
+                        // A non-run frame arriving mid-handshake (an early export
+                        // request, ARP): serve it so we don't drop it.
+                        on_frame(mac, &rx[..len], conns);
+                    }
+                }
+                if now() > deadline {
+                    break;
+                }
+            }
+            if tries >= SYN_TRIES {
+                return (syscall_abi::NET_FETCH_TIMEOUT, 0);
+            }
+        }
+    };
+
+    let snd_nxt = isn + 1;
+    let mut rcv_nxt = their_isn.wrapping_add(1);
+    if let Some(n) = build_tcp(mac, dst_mac, target, src_port, dst_port, snd_nxt, rcv_nxt, TCP_ACK, false, &[], &mut frame) {
+        let _ = send(&frame[..n]);
+    }
+    if let Some(n) = build_tcp(mac, dst_mac, target, src_port, dst_port, snd_nxt, rcv_nxt, TCP_PSH | TCP_ACK, false, request, &mut frame) {
+        let _ = send(&frame[..n]);
+    }
+
+    // Receive loop, pumping the export the whole time. A long deadline (a run with
+    // namespace-import callbacks does several TCP round trips), extended on any
+    // progress - the run's output, *or* an export request we served.
+    let mut got = 0usize;
+    let mut fin = false;
+    let mut deadline = now() + 300;
+    loop {
+        // Ack the health-ping / service other client requests (re-entrant-safe:
+        // the shell is blocked in this very run, so no nested run can arrive).
+        let before_deadline = deadline;
+        drain_client_messages(packed_mac, &mut cbuf, conns);
+        while let Some(len) = recv(&mut rx) {
+            if let Some(s) = parse_tcp(&rx[..len], target, dst_port, src_port) {
+                if s.flags & TCP_RST != 0 {
+                    fin = true; // treat a reset as the end of the run
+                    break;
+                }
+                if s.data_len > 0 && s.seq == rcv_nxt {
+                    let take = s.data_len.min(resp.len() - got);
+                    resp[got..got + take].copy_from_slice(&rx[s.data_off..s.data_off + take]);
+                    got += take;
+                    rcv_nxt = rcv_nxt.wrapping_add(s.data_len as u32);
+                    if let Some(n) = build_tcp(mac, dst_mac, target, src_port, dst_port, snd_nxt, rcv_nxt, TCP_ACK, false, &[], &mut frame) {
+                        let _ = send(&frame[..n]);
+                    }
+                    deadline = now() + 300;
+                }
+                if s.flags & TCP_FIN != 0 {
+                    rcv_nxt = rcv_nxt.wrapping_add(1);
+                    if let Some(n) = build_tcp(mac, dst_mac, target, src_port, dst_port, snd_nxt, rcv_nxt, TCP_ACK, false, &[], &mut frame) {
+                        let _ = send(&frame[..n]);
+                    }
+                    if let Some(n) = build_tcp(mac, dst_mac, target, src_port, dst_port, snd_nxt, rcv_nxt, TCP_FIN | TCP_ACK, false, &[], &mut frame) {
+                        let _ = send(&frame[..n]);
+                    }
+                    fin = true;
+                    break;
+                }
+            } else {
+                // Not our run connection: an export request (the child's /host
+                // read) or ARP - serve it, and count it as progress.
+                on_frame(mac, &rx[..len], conns);
+                deadline = now() + 300;
+            }
+        }
+        // Pump the server connections so served export replies actually go out.
+        pump_conns(mac, conns);
+        // If an export callback was served this pass, `deadline` moved.
+        let _ = before_deadline;
+        if fin || got >= resp.len() || now() > deadline {
+            break;
+        }
+    }
+
+    if got > 0 || fin {
+        (syscall_abi::NET_FETCH_OK, got)
+    } else {
+        (syscall_abi::NET_FETCH_TIMEOUT, 0)
+    }
+}
+
+/// Service every server connection once (retransmit timer + a bounded pump),
+/// exactly the main serve loop's step 3 - factored so `tcp_run` can keep the
+/// export flowing while it drives a remote run (cluster Phase 4b).
+#[allow(clippy::needless_range_loop)] // index needed for the re-borrow after pump
+fn pump_conns(mac: &[u8; 6], conns: &mut [Option<TcpConn>; MAX_CONNS]) {
+    for i in 0..conns.len() {
+        if conns[i].is_none() {
+            continue;
+        }
+        if service_rto(mac, conns[i].as_mut().unwrap(), now()) {
+            conns[i] = None;
+            continue;
+        }
+        loop {
+            let c = conns[i].as_mut().unwrap();
+            if !c.responded {
+                break;
+            }
+            let before = c.snd_nxt;
+            pump_send(mac, c);
+            match conns[i].as_ref() {
+                Some(c) if c.snd_nxt != before => {}
+                _ => break,
+            }
+        }
+    }
+}
+
 /// Serve one `NETOP_RMOUNT` client request (cluster Phase 1c): carry the
 /// embedded `ninep-abi` NP request over a TCP round trip to a remote machine's
 /// 9P export gateway and hand the client the NP reply body verbatim.
@@ -767,7 +939,7 @@ fn tcp_get(mac: &[u8; 6], dst_mac: &[u8; 6], target: &[u8; 4], dst_port: u16, re
 /// reply), bounded by the caller's `out` (one `MSG_MAX_LEN` for now - small
 /// commands). Request layout is `NETOP_RMOUNT`'s (endpoint + payload), the
 /// payload being the command line rather than an NP message.
-fn handle_run(packed_mac: u64, buf: &[u8], len: usize, out: &mut [u8]) -> usize {
+fn handle_run(packed_mac: u64, buf: &[u8], len: usize, out: &mut [u8], conns: &mut [Option<TcpConn>; MAX_CONNS]) -> usize {
     let fail = |out: &mut [u8], msg: &[u8]| -> usize {
         let n = msg.len().min(out.len());
         out[..n].copy_from_slice(&msg[..n]);
@@ -782,27 +954,37 @@ fn handle_run(packed_mac: u64, buf: &[u8], len: usize, out: &mut [u8]) -> usize 
     let cmdline = &buf[syscall_abi::NETOP_RMOUNT_MSG..len];
     let clen = cmdline.len().min(ninep_abi::NP_NET_MAX - (ninep_abi::NP_REQ_PAYLOAD as usize));
 
-    // Build the framed NP_RUN request: [u32 len][NP_RUN][tree=0][a0=cmdlen][..][cmdline].
+    // Build the framed NP_RUN request: [u32 len][NP_RUN][tree=0][a0=cmdlen][a1=our
+    // ip][a2=our port][cmdline]. a1/a2 carry OUR endpoint (cluster Phase 4b): the
+    // remote spawns the command with a /host mount back to us, so it reads *our*
+    // files at /host/... while running there.
     let hdr = ninep_abi::NP_REQ_PAYLOAD as usize; // 48
     let mut req = [0u8; ninep_abi::NP_NET_LEN_PREFIX + ninep_abi::NP_NET_MAX];
     let mlen = hdr + clen;
     req[0..4].copy_from_slice(&(mlen as u32).to_le_bytes());
     let m = ninep_abi::NP_NET_LEN_PREFIX;
     req[m..m + 8].copy_from_slice(&ninep_abi::NP_RUN.to_le_bytes()); // verb
-    // tree (m+8) stays 0; a0 (m+16) = command-line length.
-    req[m + 16..m + 24].copy_from_slice(&(clen as u64).to_le_bytes());
+    req[m + 16..m + 24].copy_from_slice(&(clen as u64).to_le_bytes()); // a0 = cmdlen
+    let our = our_ip();
+    let our_ip_packed = (our[0] as u64) | ((our[1] as u64) << 8) | ((our[2] as u64) << 16) | ((our[3] as u64) << 24);
+    req[m + 24..m + 32].copy_from_slice(&our_ip_packed.to_le_bytes()); // a1 = our ip
+    req[m + 32..m + 40].copy_from_slice(&(ninep_abi::NP_NET_PORT as u64).to_le_bytes()); // a2 = our port
     req[m + hdr..m + hdr + clen].copy_from_slice(&cmdline[..clen]);
 
     let mac = unpack_mac(packed_mac);
     let Some(dst_mac) = arp_resolve(&mac, &next_hop(&ip)) else {
         return fail(out, b"cpu: remote unreachable\r\n");
     };
+    // Pump our own event loop while awaiting the run's output (cluster Phase 4b):
+    // the spawned command's /host reads come back to *our* export as frames we
+    // must serve *during* the run - a plain blocking tcp_get would deadlock (it
+    // would drop those frames while stuck waiting). tcp_run drives the run's
+    // client connection AND serves the export + acks the health-ping each pass.
     let mut resp = [0u8; ninep_abi::NP_NET_LEN_PREFIX + ninep_abi::NP_NET_MAX];
-    let (status, got) = tcp_get(&mac, &dst_mac, &ip, port, &req[..ninep_abi::NP_NET_LEN_PREFIX + mlen], &mut resp);
+    let (status, got) = tcp_run(packed_mac, &mac, &dst_mac, &ip, port, &req[..ninep_abi::NP_NET_LEN_PREFIX + mlen], &mut resp, conns);
     if status != syscall_abi::NET_FETCH_OK {
         return fail(out, b"cpu: remote run failed\r\n");
     }
-    // The run response is the command's raw output stream (no framing).
     let n = got.min(out.len());
     out[..n].copy_from_slice(&resp[..n]);
     n
@@ -1514,8 +1696,11 @@ fn handle_9p(c: &mut TcpConn, request: &[u8]) {
 fn handle_cpu_run(c: &mut TcpConn, request: &[u8]) {
     let hdr = ninep_abi::NP_NET_LEN_PREFIX;
     let msg_hdr = ninep_abi::NP_REQ_PAYLOAD as usize; // 48
-    // a0 (command-line length) is at message offset 16.
+    // a0 (command-line length) at msg offset 16; a1/a2 = the caller's endpoint
+    // (ip, port) for the namespace import (cluster Phase 4b).
     let cmdlen = if request.len() >= hdr + 24 { read_u64(request, hdr + 16) as usize } else { 0 };
+    let caller_ip_packed = if request.len() >= hdr + 32 { read_u64(request, hdr + 24) } else { 0 };
+    let caller_port = if request.len() >= hdr + 40 { read_u64(request, hdr + 32) as u16 } else { 0 };
     let pstart = hdr + msg_hdr;
     let cmdline: &[u8] = if request.len() > pstart {
         &request[pstart..(pstart + cmdlen).min(request.len())]
@@ -1525,6 +1710,20 @@ fn handle_cpu_run(c: &mut TcpConn, request: &[u8]) {
     c.file = false;
     c.prefix_off = 0;
     c.prefix_len = 0;
+    // Import the caller's namespace (cluster Phase 4b): bind /host -> a remote
+    // mount back to the caller before SPAWN, so the spawned command reads the
+    // caller's files at /host/... while running here. Set on *our* namespace; the
+    // child inherits a copy at spawn (a later run overwrites it - netd never
+    // resolves through its own namespace). A zero endpoint = a 4a-only client.
+    if caller_ip_packed != 0 {
+        let ip = [
+            caller_ip_packed as u8,
+            (caller_ip_packed >> 8) as u8,
+            (caller_ip_packed >> 16) as u8,
+            (caller_ip_packed >> 24) as u8,
+        ];
+        set_host_ns(ip, caller_port);
+    }
     match cpu_spawn(cmdline) {
         Some(slot) => {
             // Capture: hold the response until the child's output completes.
@@ -1548,6 +1747,24 @@ fn handle_cpu_run(c: &mut TcpConn, request: &[u8]) {
 /// capability so its output reaches us. Returns the child's scheduler slot, or
 /// `None` on any failure (empty command, no such program, spawn error). Mirrors
 /// the shell's `spawn_path`, in netd.
+/// Set netd's namespace to a single binding `/host -> remote(ip:port)` (cluster
+/// Phase 4b): a `NS_REMOTE_TREE` binding whose target is `[ip:4][port:2][/]`. A
+/// child spawned right after inherits it, so its `/host/...` accesses become 9P
+/// round trips back to the caller (through this netd), reading the *caller's*
+/// files. netd only ever uses this namespace for that inheritance.
+fn set_host_ns(ip: [u8; 4], port: u16) {
+    // Binding: [tree][prefix_len=5][target_len=7]["/host"][ip:4][port:2]["/"].
+    let mut ns = [0u8; 3 + 5 + 7];
+    ns[0] = ninep_abi::NS_REMOTE_TREE;
+    ns[1] = 5;
+    ns[2] = (ninep_abi::NS_ENDPOINT_LEN + 1) as u8; // endpoint (6) + "/"
+    ns[3..8].copy_from_slice(b"/host");
+    ns[8..12].copy_from_slice(&ip);
+    ns[12..14].copy_from_slice(&port.to_le_bytes());
+    ns[14] = b'/';
+    let _ = syscall4(syscall_abi::NS_SET, ns.as_ptr() as u64, ns.len() as u64, 0, 0);
+}
+
 fn cpu_spawn(cmdline: &[u8]) -> Option<u8> {
     const ARGV_CAP: usize = syscall_abi::ARGV_MAX as usize;
     let mut blob = [0u8; ARGV_CAP]; // [argc:u32][ (len:u32, bytes) ... ]
