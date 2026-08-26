@@ -7,6 +7,53 @@ for the forward plan see [`roadmap.md`](roadmap.md).
 
 ---
 
+## 2026-08-26 (cont.) — v0.9.0, and admitting the syscalls aren't POSIX
+
+A release-and-documentation day, no code. Two things.
+
+**Cut v0.9.0.** Phase 4 (the full cpu model) plus the namespace-aware export
+refactor and the new user docs, folded to `main` in one fast-forward — the two
+stacked branches (`cluster-ns-aware-export` → `cluster-phase4-cpu`) were linear,
+so merging the child brought the parent. VERSION → 0.9.0, release notes, artifacts
+built, tagged, pushed, GitHub release live, both branches deleted. Phases 0–4 of
+the cluster are all released now — the achievable Plan 9 vision (resource-sharing
++ explicit remote execution), with only the shared-memory mirage out of scope.
+
+**Then a good question from Hans: are the syscalls POSIX, or something else?**
+The honest answer is *neither*, and pulling on that thread was the more valuable
+half of the day. The original `notes.txt` goal said "POSIX-ish system calls," but
+what actually got built is a message-passing microkernel ABI: a tiny trap surface
+(spawn/exit/kill/wait, the IPC primitives, raw console, and the three block_*
+calls gated to fsd) and *everything else* — files, console, network — as messages
+to userland servers. Only the register-shape calling convention is borrowed from
+Linux; the numbers match nothing, there's no `fork` (spawn instead), and none of
+`open`/`read`/`stat`/`socket` exist as syscalls (the fs_* calls that once did are
+the gravestone gaps at 7–14).
+
+The realization worth recording: this divergence wasn't a decision so much as a
+*consequence*. The microkernel + enforced-isolation work forced the filesystem out
+of the kernel (a driver the kernel depends on is a split, not a driver), which made
+"a file operation" necessarily a message to a server; Plan 9 then arrived and
+*rationalized* that into one uniform protocol + namespaces + the cluster. Hans's
+call: keep the design, don't force POSIX back in — but plan for eventual C-program
+portability. Which has a clean answer, because POSIX is a libc, not a kernel: port
+newlib/picolibc whose ~20 stubs translate to the existing server messages (the
+Fuchsia/MINIX3/APE way), implement `posix_spawn` natively for the fork gap, and
+build the fd table in userland. The nice twist: a POSIX fd is essentially a Plan 9
+fid, and we *deferred* fids in Phase 0 — so adding them someday pays off twice.
+
+Wrote it all down: a "Philosophy — not POSIX, not Linux" subsection in
+`architecture.md`, a parked "POSIX portability via a userland libc personality"
+entry in `roadmap.md`, and a fresh `comparison.md` — a user-facing "what you gain,
+what you give up" pro/con vs MINIX/Linux/Unix/Plan 9/Helix (the older
+`research-directions.md` had gone stale as a user-facing view).
+
+**No bug to postmortem today** — the release was mechanical and clean, the docs
+were prose. The only "problem" was conceptual (intended POSIX, built something
+else), and it's now documented in three places rather than as a standalone
+retrospective, since there's no debugging story to tell — just a design that
+turned out truer to microkernel/Plan 9 than to the original one-line goal.
+
 ## 2026-08-26 (cont.) — Phase 4b: the full cpu model, importing the caller's namespace
 
 The completion of remote execution: a command runs on the remote's CPU but reads
