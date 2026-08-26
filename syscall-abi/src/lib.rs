@@ -648,6 +648,17 @@ pub const NETOP_RMOUNT_ENDPOINT: usize = 8;
 /// [`NETOP_RMOUNT`] byte offset where the embedded NP message begins.
 pub const NETOP_RMOUNT_MSG: usize = 16;
 
+/// [`NETOP_RUN`] request (cluster Phase 4a - remote execution, the Plan 9 `cpu`
+/// model): `[op: u64][ip:4][port:2 LE][pad:2][command line...]` - the same
+/// endpoint layout as [`NETOP_RMOUNT`] (reuse [`NETOP_RMOUNT_ENDPOINT`] /
+/// [`NETOP_RMOUNT_MSG`]), with the command line (program name + space-separated
+/// args) where the NP message would be. `netd` opens a connection to the remote
+/// export, sends an `ninep_abi::NP_RUN` frame, and streams the spawned command's
+/// output back; the reply to the client is that output (bounded by
+/// [`MSG_MAX_LEN`] for now - small commands; streaming to the shell is a later
+/// refinement). The shell's `cpu <host:port> <command>` builtin.
+pub const NETOP_RUN: u64 = 5;
+
 /// [`CON_INFO`] field: the backend kind ([`CON_KIND_*`]).
 pub const CON_INFO_KIND: u64 = 0;
 /// [`CON_INFO`] field: framebuffer columns (character cells wide).

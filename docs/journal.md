@@ -7,6 +7,42 @@ for the forward plan see [`roadmap.md`](roadmap.md).
 
 ---
 
+## 2026-08-26 — Phase 4a: running a program on another machine
+
+The compute half of the cluster: `cpu <host> <command>` runs a program on another
+machine and streams its output back. The demo that makes it undeniable: I create a
+`/RANHERE` directory on machine A, then on machine B run `cpu 10.0.2.10:564 ls /` —
+and B prints `RANHERE/ BIN/ EFI/`. B's own disk has no RANHERE, so the `ls`
+*ran on A*. B's CPU never touched A's disk; A's did.
+
+I designed this carefully first (the Phase 4 doc), and the design paid off twice.
+First, it settled that netd is the spawner — because a spawned child's output
+arrives as ordinary messages to NET_TASK, which netd's event loop already drains
+every wake, so the capture is *non-blocking* (netd is supervised and can't block
+in a recv the way the shell's capture does). The child runs on its own slot; netd
+just relays its messages to the run connection, and its end-of-stream reaps it and
+releases the accumulated output to stream out. Second, the design flagged a
+capability gap ahead of time: the child's output pipe needs it to send to netd,
+but DELEGATE only hands out a cap the caller statically holds, and a /bin slot
+doesn't hold TO_NET. Fixed minimally — NET_TASK holds a self-send TO_NET bit *only*
+to delegate the reply cap to a child it spawns.
+
+Two bugs, both quick because the design had mapped the terrain. The serve loop
+held a `&mut conns[i]` across the per-segment mailbox drain, which now needs
+`&mut conns` to route cpu output — so I re-shaped it to iterate by index and end
+the borrow before draining. And the first run failed with "stage fail": I'd read
+and staged the ELF in 2048-byte chunks, but the kernel's per-syscall pointer cap
+(MAX_USER_LEN) is 512, which the shell's spawn_path already respects — dropped to
+512-byte chunks and it spawned. A console diagnostic in netd found it in one run.
+
+Scope kept tight: 4a runs with the *remote's* namespace (B's ls lists B's disk),
+so it's "run there with the remote's resources" — the ssh-like core. Importing the
+caller's namespace (so the remote command reads *my* files, the true Plan 9 cpu
+model) is 4b, and the namespace-aware export left exactly the hook it needs. The
+serve-loop restructure got a full export-matrix regression pass, zero aborts.
+Ouroboros can now run a computation on another machine — a compute cluster, not
+just a storage one.
+
 ## 2026-08-26 — the namespace-aware export: paying down the three prefix hacks
 
 Not a feature day — a cleanup I'd been deferring on purpose. Each Phase 3 file

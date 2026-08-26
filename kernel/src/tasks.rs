@@ -150,8 +150,11 @@ fn caps_for_slot(slot: usize) -> u32 {
         // Network server: logs to the console server, and calls the
         // filesystem server (its HTTP server reads files from fsd to serve
         // them - netd is fsd's first non-shell client); owns the NIC.
-        // (Replies to its own clients ride the reply exemption.)
-        syscall_abi::NET_TASK => TO_FSD | TO_CON | CAP_NET,
+        // (Replies to its own clients ride the reply exemption.) Holds TO_NET
+        // (a self-send bit) *only* so it may DELEGATE the reply capability to a
+        // child it spawns - the remote-exec (Plan 9 `cpu`, cluster Phase 4a)
+        // child whose stdout it captures, which pipes its output back to netd.
+        syscall_abi::NET_TASK => TO_FSD | TO_CON | TO_NET | CAP_NET,
         // Spawnable slots: may reach the servers a program legitimately needs
         // (fsd for a nested shell, cond for output) and message the shell
         // (e.g. pong's unsolicited echo). Not the NIC, not each other, not

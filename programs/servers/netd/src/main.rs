@@ -207,36 +207,40 @@ fn serve(packed_mac: u64) -> ! {
         syscall(syscall_abi::NET_WAIT, timeout);
 
         // 1. Client requests (ping/resolve/fetch), handled synchronously; the
-        // supervisor health-ping is acked here too (any reply acks it).
-        drain_client_messages(packed_mac, &mut buf);
+        // supervisor health-ping is acked here too (any reply acks it). Also
+        // where a cpu child's output is captured (cluster Phase 4a) - it arrives
+        // as messages to us, routed to its connection by `drain_client_messages`.
+        drain_client_messages(packed_mac, &mut buf, &mut conns);
 
         // 2. Incoming frames: ARP replies for our IP, and the TCP server.
         if packed_mac != syscall_abi::NET_ERROR {
             while let Some(n) = recv(&mut frame) {
                 on_frame(&mac, &frame[..n], &mut conns);
             }
-            // 3. Per connection: service the retransmit timer (retransmit on
-            // timeout, or give up on a dead peer), then stream its response up
-            // to the current window - in bounded bursts, draining the mailbox
-            // (acking the health-ping) between them so no single stretch runs
-            // long enough to look wedged. Stops a connection's pump when a
-            // burst makes no progress (window full, or the response is done).
-            for slot in conns.iter_mut() {
-                if let Some(c) = slot.as_mut() {
-                    if service_rto(&mac, c, now()) {
-                        *slot = None;
-                        continue;
-                    }
+            // 3. Per connection (by index, so the mailbox drain below can take
+            // `&mut conns` without a borrow clash): service the retransmit timer,
+            // then stream its response up to the window in bounded bursts,
+            // draining the mailbox between them (acking the health-ping, and
+            // capturing any cpu-child output) so no single stretch looks wedged.
+            for i in 0..conns.len() {
+                if conns[i].is_none() {
+                    continue;
                 }
-                while let Some(c) = slot.as_mut() {
+                if service_rto(&mac, conns[i].as_mut().unwrap(), now()) {
+                    conns[i] = None;
+                    continue;
+                }
+                loop {
+                    let c = conns[i].as_mut().unwrap();
                     if !c.responded {
                         break;
                     }
                     let before = c.snd_nxt;
-                    pump_send(&mac, c);
-                    drain_client_messages(packed_mac, &mut buf);
-                    if c.snd_nxt == before {
-                        break;
+                    pump_send(&mac, c); // `c` borrow ends here
+                    drain_client_messages(packed_mac, &mut buf, &mut conns);
+                    match conns[i].as_ref() {
+                        Some(c) if c.snd_nxt != before => {} // progress - continue
+                        _ => break,
                     }
                 }
             }
@@ -244,10 +248,12 @@ fn serve(packed_mac: u64) -> ! {
     }
 }
 
-/// Drain and handle every queued client message (and the supervisor
-/// health-ping, whose reply is the ack). Non-blocking; returns when the
-/// mailbox is empty.
-fn drain_client_messages(packed_mac: u64, buf: &mut [u8]) {
+/// Drain and handle every queued message (and the supervisor health-ping, whose
+/// reply is the ack). Non-blocking; returns when the mailbox is empty. A message
+/// from a **cpu child** (cluster Phase 4a - a spawned remote-run command whose
+/// stdout we capture) is routed to *its* connection's output buffer instead of
+/// the normal client dispatch; everything else is a client request.
+fn drain_client_messages(packed_mac: u64, buf: &mut [u8], conns: &mut [Option<TcpConn>; MAX_CONNS]) {
     loop {
         let packed =
             syscall4(syscall_abi::MSG_TRY_RECV, buf.as_mut_ptr() as u64, buf.len() as u64, 0, 0);
@@ -255,8 +261,33 @@ fn drain_client_messages(packed_mac: u64, buf: &mut [u8]) {
             return; // NO_MSG or an error: mailbox drained
         }
         let sender = packed >> 32;
-        let len = (packed & 0xffff_ffff) as usize;
-        handle_client(packed_mac, sender, buf, len);
+        let len = ((packed & 0xffff_ffff) as usize).min(buf.len());
+        if let Some(ci) = conns
+            .iter()
+            .position(|c| matches!(c, Some(c) if c.cpu_child == sender as u8))
+        {
+            cpu_child_msg(conns[ci].as_mut().unwrap(), sender as u8, &buf[..len]);
+        } else {
+            handle_client(packed_mac, sender, buf, len);
+        }
+    }
+}
+
+/// Route one message from a captured cpu child (cluster Phase 4a) to its
+/// connection: append output bytes to the connection's `prefix` (bounded), or -
+/// on the empty end-of-stream message - `WAIT`-reap the child and clear
+/// `cpu_child`, which releases `pump_send` to stream the accumulated output then
+/// FIN. Output beyond `PREFIX_MAX` is dropped (bounded for now; streaming the
+/// child's output straight through is a later refinement).
+fn cpu_child_msg(c: &mut TcpConn, child: u8, data: &[u8]) {
+    if data.is_empty() {
+        let _ = syscall(syscall_abi::WAIT, child as u64); // reap; ignore the status
+        c.cpu_child = CPU_NONE;
+    } else {
+        let space = c.prefix.len().saturating_sub(c.prefix_len);
+        let n = data.len().min(space);
+        c.prefix[c.prefix_len..c.prefix_len + n].copy_from_slice(&data[..n]);
+        c.prefix_len += n;
     }
 }
 
@@ -291,6 +322,14 @@ fn handle_client(packed_mac: u64, sender: u64, buf: &[u8], len: usize) {
             // the NP reply body (`[status:u64][data]`) verbatim.
             let mut r = [0u8; syscall_abi::MSG_MAX_LEN as usize];
             let rlen = handle_rmount(packed_mac, buf, len, &mut r);
+            reply(sender, &r[..rlen]);
+        }
+        syscall_abi::NETOP_RUN => {
+            // The remote-execution client (cluster Phase 4a): frame an NP_RUN to
+            // the endpoint's export, which spawns the command there and streams
+            // its output back; reply that output to the shell's `cpu` builtin.
+            let mut r = [0u8; syscall_abi::MSG_MAX_LEN as usize];
+            let rlen = handle_run(packed_mac, buf, len, &mut r);
             reply(sender, &r[..rlen]);
         }
         // An NP read verb from a *local* client: the /net synthetic filesystem
@@ -721,6 +760,54 @@ fn tcp_get(mac: &[u8; 6], dst_mac: &[u8; 6], target: &[u8; 4], dst_port: u16, re
 /// [`syscall_abi::NO_FS`] status - a remote mount that can't be reached fails
 /// *cleanly* (the roadmap's stated Phase 1 posture), never hangs or corrupts.
 /// Returns the number of bytes written to `out`.
+/// Serve one `NETOP_RUN` client request (cluster Phase 4a): frame an `NP_RUN` to
+/// the endpoint's export gateway (which spawns the command there and streams its
+/// stdout back), and return that output to the shell's `cpu` builtin. The reply
+/// is the **raw** output bytes (the run response is a stream, not a framed NP
+/// reply), bounded by the caller's `out` (one `MSG_MAX_LEN` for now - small
+/// commands). Request layout is `NETOP_RMOUNT`'s (endpoint + payload), the
+/// payload being the command line rather than an NP message.
+fn handle_run(packed_mac: u64, buf: &[u8], len: usize, out: &mut [u8]) -> usize {
+    let fail = |out: &mut [u8], msg: &[u8]| -> usize {
+        let n = msg.len().min(out.len());
+        out[..n].copy_from_slice(&msg[..n]);
+        n
+    };
+    if packed_mac == syscall_abi::NET_ERROR || len < syscall_abi::NETOP_RMOUNT_MSG {
+        return fail(out, b"cpu: no network\r\n");
+    }
+    let ep = syscall_abi::NETOP_RMOUNT_ENDPOINT;
+    let ip = [buf[ep], buf[ep + 1], buf[ep + 2], buf[ep + 3]];
+    let port = u16::from_le_bytes([buf[ep + 4], buf[ep + 5]]);
+    let cmdline = &buf[syscall_abi::NETOP_RMOUNT_MSG..len];
+    let clen = cmdline.len().min(ninep_abi::NP_NET_MAX - (ninep_abi::NP_REQ_PAYLOAD as usize));
+
+    // Build the framed NP_RUN request: [u32 len][NP_RUN][tree=0][a0=cmdlen][..][cmdline].
+    let hdr = ninep_abi::NP_REQ_PAYLOAD as usize; // 48
+    let mut req = [0u8; ninep_abi::NP_NET_LEN_PREFIX + ninep_abi::NP_NET_MAX];
+    let mlen = hdr + clen;
+    req[0..4].copy_from_slice(&(mlen as u32).to_le_bytes());
+    let m = ninep_abi::NP_NET_LEN_PREFIX;
+    req[m..m + 8].copy_from_slice(&ninep_abi::NP_RUN.to_le_bytes()); // verb
+    // tree (m+8) stays 0; a0 (m+16) = command-line length.
+    req[m + 16..m + 24].copy_from_slice(&(clen as u64).to_le_bytes());
+    req[m + hdr..m + hdr + clen].copy_from_slice(&cmdline[..clen]);
+
+    let mac = unpack_mac(packed_mac);
+    let Some(dst_mac) = arp_resolve(&mac, &next_hop(&ip)) else {
+        return fail(out, b"cpu: remote unreachable\r\n");
+    };
+    let mut resp = [0u8; ninep_abi::NP_NET_LEN_PREFIX + ninep_abi::NP_NET_MAX];
+    let (status, got) = tcp_get(&mac, &dst_mac, &ip, port, &req[..ninep_abi::NP_NET_LEN_PREFIX + mlen], &mut resp);
+    if status != syscall_abi::NET_FETCH_OK {
+        return fail(out, b"cpu: remote run failed\r\n");
+    }
+    // The run response is the command's raw output stream (no framing).
+    let n = got.min(out.len());
+    out[..n].copy_from_slice(&resp[..n]);
+    n
+}
+
 fn handle_rmount(packed_mac: u64, buf: &[u8], len: usize, out: &mut [u8]) -> usize {
     let fail = |out: &mut [u8]| -> usize {
         out[0..8].copy_from_slice(&syscall_abi::NO_FS.to_le_bytes());
@@ -871,7 +958,17 @@ struct TcpConn {
     /// window)`.
     cwnd: u32,
     ssthresh: u32,
+    /// Remote-execution (cluster Phase 4a): the scheduler slot of the spawned
+    /// `cpu` child whose stdout this connection is capturing, or `CPU_NONE`
+    /// (0xFF) when this isn't a run connection. While set, `pump_send` holds off
+    /// (the response isn't ready); the child's output messages accumulate into
+    /// `prefix`, and its end-of-stream reaps it, clears this, and lets the
+    /// accumulated output stream out then FIN.
+    cpu_child: u8,
 }
+
+/// `TcpConn::cpu_child` sentinel: this connection is not a remote-run capture.
+const CPU_NONE: u8 = 0xFF;
 
 /// A parsed inbound TCP segment addressed to our listen port.
 struct TcpIn {
@@ -1076,6 +1173,7 @@ fn handle_tcp(mac: &[u8; 6], frame: &[u8], seg: &TcpIn, conns: &mut [Option<TcpC
             rtt_start_us: 0,
             cwnd: INIT_CWND,
             ssthresh: INIT_SSTHRESH,
+            cpu_child: CPU_NONE,
         };
         send_seg(mac, &c, TCP_SYN | TCP_ACK, true, &[]);
         c.snd_nxt = c.snd_nxt.wrapping_add(1); // our SYN consumes one too
@@ -1393,10 +1491,145 @@ const DATA_INLINE: usize = syscall_abi::FS_DATA_MAX as usize;
 /// export serves the local boot mount (tree 0). Single-writer, trusted-LAN (see
 /// docs/roadmap-cluster-phase2.md).
 fn handle_9p(c: &mut TcpConn, request: &[u8]) {
+    // Peek the verb to route a remote-run request (cluster Phase 4a) vs a normal
+    // fs verb. The NP message begins right after the 4-byte length prefix.
+    let hdr = ninep_abi::NP_NET_LEN_PREFIX;
+    let verb = if request.len() >= hdr + 8 { read_u64(request, hdr) } else { 0 };
+    if verb == ninep_abi::NP_RUN {
+        handle_cpu_run(c, request);
+        return;
+    }
     let n = build_9p_reply(request, &mut c.prefix);
     c.prefix_len = n;
     c.prefix_off = 0;
     c.file = false;
+}
+
+/// Serve a remote-run request (cluster Phase 4a - the Plan 9 `cpu` model): spawn
+/// the named `/bin` command on *this* machine with its stdout piped back to us,
+/// and set the connection to capture it. The command's output accumulates into
+/// `c.prefix` as it runs (see the cpu-child routing in `drain_client_messages`);
+/// its end-of-stream reaps it and releases the connection to stream the output
+/// then FIN. On a spawn failure the connection streams an error line immediately.
+fn handle_cpu_run(c: &mut TcpConn, request: &[u8]) {
+    let hdr = ninep_abi::NP_NET_LEN_PREFIX;
+    let msg_hdr = ninep_abi::NP_REQ_PAYLOAD as usize; // 48
+    // a0 (command-line length) is at message offset 16.
+    let cmdlen = if request.len() >= hdr + 24 { read_u64(request, hdr + 16) as usize } else { 0 };
+    let pstart = hdr + msg_hdr;
+    let cmdline: &[u8] = if request.len() > pstart {
+        &request[pstart..(pstart + cmdlen).min(request.len())]
+    } else {
+        &[]
+    };
+    c.file = false;
+    c.prefix_off = 0;
+    c.prefix_len = 0;
+    match cpu_spawn(cmdline) {
+        Some(slot) => {
+            // Capture: hold the response until the child's output completes.
+            c.cpu_child = slot;
+        }
+        None => {
+            // Nothing to capture - stream an error line and FIN (cpu_child stays
+            // NONE, so pump_send sends c.prefix immediately).
+            let msg: &[u8] = b"cpu: cannot run command (no such /bin program?)\r\n";
+            let n = msg.len().min(c.prefix.len());
+            c.prefix[..n].copy_from_slice(&msg[..n]);
+            c.prefix_len = n;
+            c.cpu_child = CPU_NONE;
+        }
+    }
+}
+
+/// Spawn a `/bin` command for a remote-run request (cluster Phase 4a): parse the
+/// command line into argv, read the program from `/bin` on the local disk, and
+/// `SPAWN` it with stdout piped to netd (`NET_TASK`) plus the delegated reply
+/// capability so its output reaches us. Returns the child's scheduler slot, or
+/// `None` on any failure (empty command, no such program, spawn error). Mirrors
+/// the shell's `spawn_path`, in netd.
+fn cpu_spawn(cmdline: &[u8]) -> Option<u8> {
+    const ARGV_CAP: usize = syscall_abi::ARGV_MAX as usize;
+    let mut blob = [0u8; ARGV_CAP]; // [argc:u32][ (len:u32, bytes) ... ]
+    let mut w = 4usize;
+    let mut argc = 0u32;
+    let mut path = [0u8; 5 + 96]; // "/bin/" + program name
+    let mut plen = 0usize;
+
+    // Tokenize on spaces (byte scanning, relocation-safe). argv[0] is the program.
+    let mut i = 0usize;
+    while i < cmdline.len() {
+        while i < cmdline.len() && cmdline[i] == b' ' {
+            i += 1;
+        }
+        if i >= cmdline.len() {
+            break;
+        }
+        let start = i;
+        while i < cmdline.len() && cmdline[i] != b' ' {
+            i += 1;
+        }
+        let tok = &cmdline[start..i];
+        if w + 4 + tok.len() > blob.len() {
+            return None;
+        }
+        blob[w..w + 4].copy_from_slice(&(tok.len() as u32).to_le_bytes());
+        w += 4;
+        blob[w..w + tok.len()].copy_from_slice(tok);
+        w += tok.len();
+        if argc == 0 {
+            const P: &[u8] = b"/bin/";
+            if P.len() + tok.len() > path.len() {
+                return None;
+            }
+            path[..P.len()].copy_from_slice(P);
+            path[P.len()..P.len() + tok.len()].copy_from_slice(tok);
+            plen = P.len() + tok.len();
+        }
+        argc += 1;
+    }
+    if argc == 0 {
+        return None;
+    }
+    blob[0..4].copy_from_slice(&argc.to_le_bytes());
+
+    // Read the ELF from /bin (disk, tree 0) and feed it to the kernel's spawn
+    // staging buffer chunk by chunk, exactly as the shell's spawn_path does. The
+    // chunk is 512 bytes - the kernel's per-syscall pointer cap (`MAX_USER_LEN`)
+    // that both the read (into `chunk`) and the `SPAWN_STAGE` copy must fit.
+    let mut chunk = [0u8; 512];
+    let mut offset = 0u64;
+    loop {
+        let n = read_file_chunk(&path[..plen], 0, offset, &mut chunk);
+        if n >= syscall_abi::FS_ERR_MIN {
+            return None; // no such program, or a read error
+        }
+        if n == 0 {
+            break;
+        }
+        let n = (n as usize).min(chunk.len());
+        if syscall4(syscall_abi::SPAWN_STAGE, offset, chunk.as_ptr() as u64, n as u64, 0) != 0 {
+            return None; // staged past the kernel's buffer
+        }
+        offset += n as u64;
+        if n < chunk.len() {
+            break;
+        }
+    }
+    if offset == 0 {
+        return None; // empty file
+    }
+    // Stage argv, then spawn with stdout -> NET_TASK (us) and no cwd.
+    if syscall4(syscall_abi::ARGS_STAGE, blob.as_ptr() as u64, w as u64, 0, 0) != 0 {
+        return None;
+    }
+    let slot = syscall4(syscall_abi::SPAWN, offset, syscall_abi::NET_TASK, w as u64, 0);
+    if slot >= syscall_abi::FS_ERR_MIN {
+        return None;
+    }
+    // Delegate the reply capability so the child may pipe its output back to us.
+    let _ = syscall4(syscall_abi::DELEGATE, slot, syscall_abi::NET_TASK, 0, 0);
+    Some(slot as u8)
 }
 
 /// `netd`'s **export namespace** (cluster Phase 3 — the namespace-aware export):
@@ -1991,6 +2224,12 @@ fn u64_decimal(v: u64, buf: &mut [u8]) -> usize {
 /// mailbox (and ack the supervisor health-ping) promptly - a whole-window
 /// blast per call once looked wedged and got netd restarted mid-transfer.
 fn pump_send(mac: &[u8; 6], c: &mut TcpConn) {
+    // Remote-run capture (cluster Phase 4a): while a cpu child is still running,
+    // its output isn't complete - hold off streaming until end-of-stream clears
+    // this (see the cpu-child routing in `drain_client_messages`).
+    if c.cpu_child != CPU_NONE {
+        return;
+    }
     /// Segments per pump call. One: the caller (`serve`) loops pump + a
     /// mailbox drain, so it still flushes a *full window* per wake, but the
     /// supervisor health-ping is acked after **every** segment (~1 fsd read +

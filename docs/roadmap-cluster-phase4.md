@@ -132,13 +132,18 @@ the capability model. (Alternative considered: give spawnable slots a static
 
 ## Staging
 
-- **4a — remote spawn + output stream (this step).** The `RUN` frame; netd's
-  spawn path (read the `/bin` ELF via `read_file_chunk` + `SPAWN_STAGE`, stage
-  argv, `SPAWN` with `stdout_target = NET_TASK`, delegate `TO_FSD`); the
-  event-loop capture (forward the child's messages to the run connection, reap on
-  end-of-stream); A's `cpu <host:port> <command>` builtin. *Ship:* `cpu B:564 ls
-  /` and `cpu B:564 cat /net/ip` on A print **B's** listing / IP — the command ran
-  on B. Verified two-VM, zero aborts.
+- **4a — remote spawn + output stream. ✅ DONE (2026-08-26).** The `NP_RUN` frame;
+  netd's spawn path (read the `/bin` ELF via `read_file_chunk` + `SPAWN_STAGE` in
+  512-byte chunks — the `MAX_USER_LEN` cap — stage argv, `SPAWN` with
+  `stdout_target = NET_TASK`, then `DELEGATE` the reply cap); the event-loop
+  capture (`drain_client_messages` routes a message *from the child's slot* to its
+  connection, reaps on end-of-stream); A's `NETOP_RUN` + the `cpu <host:port>
+  <command>` shell builtin. The capability piece: `NET_TASK` gained a self-send
+  `TO_NET` bit *only* to delegate the reply cap to a spawned child. *Shipped:* on
+  two VMs, `cpu 10.0.2.10:564 ls /` prints A's root including the A-only `RANHERE/`
+  marker (proving it ran on A), `cpu … uptime` prints A's uptime, a bad command a
+  clean error; the serve-loop restructure (iterate conns by index so the drain can
+  route cpu output) regression-tested against the full export matrix, zero aborts.
 - **4b — namespace import.** Before `SPAWN`, netd sets the child's namespace to a
   remote mount back to A (carried in the RUN frame: A's endpoint). Then `cpu B cat
   /host/<A-file>` runs on B and reads A's disk. This is the Plan 9 `cpu` model

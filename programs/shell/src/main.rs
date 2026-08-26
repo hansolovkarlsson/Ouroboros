@@ -439,7 +439,7 @@ fn is_builtin(cmd: &str) -> bool {
         cmd,
         "help" | "cd" | "bind" | "pwd" | "write" | "mount" | "unmount" | "erase" | "partition" | "format"
             | "exec" | "exit" | "ps" | "kill" | "fg" | "wait" | "send" | "recv" | "selftest"
-            | "env" | "set" | "unset"
+            | "env" | "set" | "unset" | "cpu"
     )
 }
 
@@ -873,6 +873,7 @@ fn dispatch_line(line: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize, env:
         "fg" => cmd_fg(arg),
         "wait" => cmd_wait(arg),
         "mount" => cmd_mount(line, arg, cwd, *cwd_len, out),
+        "cpu" => cmd_cpu(line, out),
         "unmount" => cmd_unmount(),
         "erase" => cmd_erase(arg),
         "partition" => cmd_partition(arg),
@@ -2594,6 +2595,95 @@ fn parse_ipv4(s: &str) -> Option<[u8; 4]> {
         Some(octets)
     } else {
         None
+    }
+}
+
+/// `cpu <host:port> <command...>` - remote execution (cluster Phase 4a, the Plan
+/// 9 `cpu` model): run `<command>` on the remote machine and print its output
+/// here. In 4a the command runs on the remote's CPU using the *remote's*
+/// resources (its `/bin`, its disk); a later step imports this machine's
+/// namespace so it reads *our* files. Trusted-LAN, no auth. Output is bounded to
+/// one message for now (small commands). E.g. `cpu 10.0.2.10:564 ls /`.
+fn cmd_cpu(line: &str, out: &mut Output) {
+    let mut words = line.split_whitespace();
+    words.next(); // "cpu"
+    let Some(hostport) = words.next() else {
+        out.put_line("cpu: usage: cpu <host:port> <command...>  (e.g. cpu 10.0.2.10:564 ls /)");
+        return;
+    };
+    // Split host[:port] on the ':' byte (PIE-safe byte scan, see cmd_mount_remote).
+    let hb = hostport.as_bytes();
+    let mut colon = None;
+    let mut i = 0;
+    while i < hb.len() {
+        if hb[i] == b':' {
+            colon = Some(i);
+        }
+        i += 1;
+    }
+    let (host, port) = match colon {
+        Some(c) => {
+            let h = core::str::from_utf8(&hb[..c]).unwrap_or("");
+            let p = core::str::from_utf8(&hb[c + 1..]).unwrap_or("");
+            match parse_u64(p) {
+                Some(pn) if pn <= u16::MAX as u64 => (h, pn as u16),
+                _ => {
+                    out.put_line("cpu: bad port");
+                    return;
+                }
+            }
+        }
+        None => (hostport, ninep_abi::NP_NET_PORT),
+    };
+    let Some(ip) = parse_ipv4(host) else {
+        out.put_line("cpu: <host> must be a dotted-quad IPv4 (e.g. 10.0.2.10)");
+        return;
+    };
+    // The command = the remaining words joined by single spaces (spacing is
+    // irrelevant; the remote re-splits on spaces into argv).
+    let mut cmd = [0u8; 256];
+    let mut cl = 0usize;
+    for w in words {
+        if cl > 0 && cl < cmd.len() {
+            cmd[cl] = b' ';
+            cl += 1;
+        }
+        for &b in w.as_bytes() {
+            if cl < cmd.len() {
+                cmd[cl] = b;
+                cl += 1;
+            }
+        }
+    }
+    if cl == 0 {
+        out.put_line("cpu: usage: cpu <host:port> <command...>");
+        return;
+    }
+    // NETOP_RUN request: [op][ip:4][port:2 LE][pad:2][command line]. Sent to the
+    // local network server, which does the remote round trip and returns the
+    // command's output.
+    let mut req = [0u8; syscall_abi::MSG_MAX_LEN as usize];
+    req[0..8].copy_from_slice(&syscall_abi::NETOP_RUN.to_le_bytes());
+    req[8..12].copy_from_slice(&ip);
+    req[12..14].copy_from_slice(&port.to_le_bytes());
+    let base = 16usize;
+    let n = cl.min(req.len() - base);
+    req[base..base + n].copy_from_slice(&cmd[..n]);
+    let mut reply = [0u8; syscall_abi::MSG_MAX_LEN as usize];
+    let packed = syscall4(
+        syscall_abi::MSG_CALL,
+        syscall_abi::NET_TASK,
+        req.as_ptr() as u64,
+        (base + n) as u64,
+        reply.as_mut_ptr() as u64,
+    );
+    if packed >= FS_ERR_MIN {
+        out.put_line("cpu: could not reach the network server");
+        return;
+    }
+    let rlen = ((packed & 0xffff_ffff) as usize).min(reply.len());
+    for &b in &reply[..rlen] {
+        out.put(b);
     }
 }
 

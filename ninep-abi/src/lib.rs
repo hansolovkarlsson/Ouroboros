@@ -95,6 +95,16 @@ pub const NP_WRITE_FILE: u64 = NP_BASE + 11;
 /// fall through to its existing path.
 pub const NP_LIMIT: u64 = NP_WRITE_FILE + 1;
 
+/// Remote-execution **run** request (cluster Phase 4a — the Plan 9 `cpu` model):
+/// carried over the export connection in the same framed shape as an NP verb, but
+/// its "reply" is the spawned command's **output stream** (bytes, then FIN), not a
+/// single NP reply. `a0` = command-line length; the payload is the command line
+/// (program name + space-separated args, e.g. `ls /` or `cat /net/ip`). The
+/// export gateway spawns it on *this* machine (from `/bin`), captures its stdout,
+/// and streams it back to the caller. Chosen well above `NP_LIMIT` so the fs-verb
+/// dispatch never sees it — the cpu path handles it explicitly.
+pub const NP_RUN: u64 = NP_BASE + 0x20;
+
 // ---------------------------------------------------------------------------
 // The verbs over TCP (cluster Phase 1: 9P-over-TCP). Locally a request is a
 // kernel-copied `MSG_CALL` and bulk data moves by grant/safecopy; over a TCP

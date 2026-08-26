@@ -7,6 +7,55 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/`; 
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## Cluster Phase 4a: remote execution — run a program on another machine
+
+The cluster becomes a *compute* cluster, not only a storage one. `cpu <host:port>
+<command>` runs `<command>` on another machine and streams its output back —
+**the program executes on the remote's CPU, using the remote's resources.** The
+proof it's genuinely remote: on machine B, `cpu 10.0.2.10:564 ls /` shows
+`RANHERE/`, a directory that exists only on **machine A's** disk — so the `ls` ran
+on A. This is the transport half of the Plan 9 `cpu` model (step 4a; importing
+the caller's namespace is 4b — see
+[`roadmap-cluster-phase4.md`](roadmap-cluster-phase4.md)).
+
+**netd is the spawner, non-blocking.** A `RUN` frame (a new `ninep_abi::NP_RUN`
+verb) arrives on the export connection; netd reads the named `/bin` program off
+its own disk (`read_file_chunk` + `SPAWN_STAGE`, in 512-byte chunks — the kernel's
+`MAX_USER_LEN` per-syscall cap), stages argv, and `SPAWN`s it with `stdout_target
+= NET_TASK`. The child runs on the remote's scheduler; **netd only relays.** Its
+output arrives as ordinary messages to `NET_TASK`, which netd's event loop already
+drains every wake — so the capture never blocks the supervised, health-pinged
+server (unlike the shell's blocking `capture_program_output`). A message *from the
+child's slot* is routed to its connection's output buffer; the child's empty
+end-of-stream message `WAIT`-reaps it and releases the connection to stream the
+output then FIN.
+
+**A capability the model didn't have: a child talking back to its spawner.** The
+child's output pipe (`stdout_target = NET_TASK`) needs it to *send to netd*, but
+`DELEGATE` only hands out a send-cap the caller statically holds, and a `/bin`
+slot holds `TO_FSD`/`TO_CON`, not `TO_NET`. Resolved minimally: `NET_TASK` now
+holds `TO_NET` (a self-send bit) *solely* so it may `DELEGATE` the reply capability
+to a child it spawns — which netd does right after `SPAWN`. So the remote-run
+child can pipe its output back, and nothing else gains authority.
+
+**The A side** is a `NETOP_RUN` client op + a `cpu` shell builtin: the shell hands
+its netd `(endpoint, command line)`; netd frames the `NP_RUN`, does the TCP round
+trip (reusing `tcp_get`), and returns the streamed output, which the shell prints.
+
+**Scope (4a).** The command runs with the *remote's* namespace — `cpu B ls /`
+lists **B's** disk — so it uses B's `/bin`, B's files. Importing the *caller's*
+namespace (so the remote command reads *your* files) is **4b**. Output is bounded
+to one message for now (small commands); trusted-LAN, no auth; the child is
+reaped, and killable if the run is torn down.
+
+**How it was proven.** Two VMs: `cpu 10.0.2.10:564 ls /` returns A's root
+(including the A-only `RANHERE/` marker), `cpu … uptime` returns A's uptime, and a
+bad command a clean error. The netd serve-loop restructure this needed (iterate
+connections by index so the per-segment mailbox drain can take `&mut conns` and
+route cpu output) was regression-tested against the full export matrix — remote
+disk read/write, `/proc`, `/net`, `/dev/cons` all still work — with zero `-d int`
+aborts on both nodes.
+
 ## Cluster: the namespace-aware export — retiring the per-server prefix hacks
 
 A structural cleanup, not a new feature: the export gateway now serves **its own
