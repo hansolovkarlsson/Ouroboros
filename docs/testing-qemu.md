@@ -98,6 +98,24 @@ python3 scripts/np9p_server.py 5641                 # on the host; serves a smal
 #   mount -r 10.0.2.2:5641 /mnt/a ; ls /mnt/a ; cat /mnt/a/HELLO.TXT
 ```
 
+**Authentication (since v0.10.0 — the export-hardening phase).** The export
+requires a **shared cluster key**: every request is signed with
+`HMAC-SHA256(key, nonce ‖ request)`, and a peer without the key is refused
+(fail-closed). Both python peers sign/verify with the dev key by default
+(`ouroboros-dev-cluster-key-v1`, staged into the ESP as `\CLUSTER.KEY` from the
+Makefile's `CLUSTER_KEY`), so the commands above work unchanged. To prove the
+gate, pass a wrong key and watch it be rejected:
+
+```sh
+python3 scripts/np9p_client.py localhost 5640 readdir / --key wrong  # -> AUTH FAILED
+```
+
+This host↔guest round trip is the real cross-implementation check: the python
+`hmac` and the guest's hand-rolled `netd`/`hmac.rs` must agree byte-for-byte, or
+the correct key is rejected too (that's how a magic-byte transposition in the
+python peers was caught — see `docs/cluster-auth-postmortem.md`). A machine with
+a `\NOEXEC` flag file authenticates mounts but refuses `cpu` remote-exec.
+
 The guest reaches the host at **10.0.2.2** over SLIRP with no hostfwd (SLIRP routes
 guest→host automatically), which is why `run-image-9p-client` needs only a NIC.
 

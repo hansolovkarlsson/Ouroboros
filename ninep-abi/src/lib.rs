@@ -184,6 +184,53 @@ pub const NS_PROC_TREE: u8 = 4;
 pub const NP_REMOTE_CHUNK: usize = 512;
 
 // ---------------------------------------------------------------------------
+// Cluster authentication (the export-hardening phase; see the security section
+// of `docs/roadmap-cluster.md`). Every *inbound* framed export request carries
+// an auth header in front of the NP message; the exporter verifies it before
+// serving any verb (fs op *or* `NP_RUN`). The scheme is a **client-nonce MAC**:
+//
+//   framed request:  [u32 len][magic:8][nonce:16][mac:32][NP message...]
+//
+// where `mac = HMAC-SHA256(cluster_key, nonce || NP-message)`. The shared
+// cluster secret never crosses the wire, and a peer without it cannot forge a
+// request. `len` still counts every byte after the 4-byte prefix (now the auth
+// header + the NP message). The *reply* is unauthenticated in this first cut
+// (the request is the capability; a client trusting the returned data is a
+// later mutual-auth refinement) - so a reply is the same `[u32 len][status:u64]
+// [result]` frame as before. Replay-of-observed-ops is out of scope for this
+// tier: a passive sniffer can replay a captured frame verbatim (same nonce),
+// but cannot forge a *new* path/write - a server nonce or a nonce cache is the
+// documented next step. See `programs/servers/netd/src/hmac.rs`.
+// ---------------------------------------------------------------------------
+
+/// Magic at the head of an authenticated framed request, distinguishing it from
+/// an unauthenticated (legacy) frame. When the exporter has a key configured it
+/// requires this; a frame without it is refused (fail-closed).
+pub const NP_AUTH_MAGIC: u64 = 0x4155_5448_4E50_3031; // "AUTHNP01" (big-endian ASCII)
+
+/// Bytes of nonce in the auth header (a fresh, non-repeating value per request:
+/// the client's `MONOTONIC_US` clock, plus its packed IP for cross-machine
+/// separation). Only freshness is required - not secrecy or unpredictability.
+pub const NP_NONCE_LEN: usize = 16;
+
+/// Bytes of MAC in the auth header (one HMAC-SHA256 digest).
+pub const NP_MAC_LEN: usize = 32;
+
+/// The auth header size prepended to a framed request body: `magic`(8) +
+/// `nonce`([`NP_NONCE_LEN`]) + `mac`([`NP_MAC_LEN`]).
+pub const NP_AUTH_HDR: usize = 8 + NP_NONCE_LEN + NP_MAC_LEN;
+
+/// Offset of the nonce within the auth header (right after the 8-byte magic).
+pub const NP_AUTH_NONCE_OFF: usize = 8;
+/// Offset of the MAC within the auth header (after magic + nonce).
+pub const NP_AUTH_MAC_OFF: usize = 8 + NP_NONCE_LEN;
+
+/// Largest fully-framed request buffer: the 4-byte length prefix + the auth
+/// header + the biggest NP message. Buffers that build or receive a framed
+/// export request are sized to this.
+pub const NP_FRAME_MAX: usize = NP_NET_LEN_PREFIX + NP_AUTH_HDR + NP_NET_MAX;
+
+// ---------------------------------------------------------------------------
 // The shared namespace resolver. A namespace is a sequence of bindings
 // `[tree:u8][prefix_len:u8][target_len:u8][prefix][target]`; resolving a path
 // picks the longest component-aligned prefix binding and replaces the prefix

@@ -80,6 +80,11 @@ BUILD_DIR    := build
 ESP_DIR      := $(BUILD_DIR)/esp
 ESP_IMG      := $(ESP_DIR).img
 ESP_HDD      := $(ESP_DIR).hdd
+# The shared DEV cluster secret staged into the ESP as \CLUSTER.KEY (netd reads
+# it at boot to authenticate the 9P export - the export-hardening phase). NOT a
+# real secret; overridable on the command line for a mismatched-key test, e.g.
+# `make run-image-2vm-b CLUSTER_KEY=wrong-key` to prove the export refuses.
+CLUSTER_KEY  ?= ouroboros-dev-cluster-key-v1
 GPT_IMG      := $(BUILD_DIR)/espgpt.img
 EXFAT_IMG    := $(BUILD_DIR)/espexfat.img
 EXFAT_PART   := $(BUILD_DIR)/exfatpart.img
@@ -270,6 +275,14 @@ esp: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin args
 	cp $(NETD_BIN) $(ESP_DIR)/EFI/ORBS/NETD.BIN
 	cp $(ARGS_BIN) $(ESP_DIR)/EFI/ORBS/ARGS.BIN
 	printf '\\EFI\\ORBS\\SH.BIN' > $(ESP_DIR)/EFI/ORBS/INIT.CFG
+	# The cluster secret netd reads at boot to authenticate the 9P export
+	# (the export-hardening phase). A fixed DEV key, shared by every machine
+	# built from this tree, so two-VM runs (2vm-a/b, both derived from esp.img)
+	# authenticate each other with no per-machine config. NOT a real secret -
+	# it lives in the repo; a deployment would use its own. Fail-closed: with no
+	# CLUSTER.KEY, netd refuses all remote clients. The host peers
+	# (scripts/np9p_*.py) read this same value. Kept in sync with CLUSTER_KEY.
+	printf '%s' '$(CLUSTER_KEY)' > $(ESP_DIR)/CLUSTER.KEY
 	# /bin: programs the shell finds via PATH by bare name (Stage 2 of the
 	# standalone-binaries arc). Named uppercase, no extension (8.3-legal);
 	# fsd's case-insensitive lookup matches a lowercase-typed command. For

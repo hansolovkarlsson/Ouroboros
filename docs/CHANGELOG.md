@@ -7,6 +7,53 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/`; 
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## Cluster authentication: the export-hardening phase (v0.10.0)
+
+The distributed cluster stops trusting the whole LAN. Phases 1–4 all shipped
+**trusted-LAN, no auth**: any host that could reach a machine's 9P export (TCP
+564) could read/write its disk (`mount -r`) and run arbitrary `/bin` programs on
+it (`cpu`). Now every export request is authenticated with a **shared cluster
+secret**, and an unauthenticated peer gets nothing — fail-closed.
+
+**The scheme — a client-nonce MAC.** A framed export request now carries an auth
+header in front of the NP message: `[u32 len][magic:8][nonce:16][mac:32][NP
+message]`, where `mac = HMAC-SHA256(cluster_key, nonce ‖ NP-message)`. The secret
+never crosses the wire, and it folds into the existing one-request-per-connection
+model with **no extra round trip** (chosen over a server-nonce challenge-response
+precisely to avoid taxing every `ls`/`cat` with an added RTT). The *reply* stays
+unauthenticated in this first cut (the request is the capability); replay of an
+observed request is out of scope (a sniffer can replay a captured frame but can't
+forge a new one) — both documented, next-tier work.
+
+**One gate, three call sites, one symmetric key.** The inbound gate is `netd`'s
+`handle_9p` (`authenticate()` — verify or reply `FS_ERR_AUTH` + FIN, covering fs
+verbs *and* `NP_RUN`). The outbound signer is `handle_rmount`/`handle_run`
+(`frame_signed()` — a fresh `MONOTONIC_US`+IP nonce), covering `mount -r`, `cpu`,
+**and** the `/host` reverse callback. Because the key is *symmetric* (cluster
+membership, not per-peer identity), the bidirectional `cpu` case — where the
+remote becomes a client of the caller's export — authenticates in both directions
+with zero extra code.
+
+**Config, fail-closed.** `netd` reads the secret from `\CLUSTER.KEY` on the boot
+disk at startup, via its existing `fsd` client (no new config channel). No key =
+export refuses all remote clients (safe for a single-machine run). A `\NOEXEC`
+flag file is the one cheap safety lever: a machine may authenticate remote
+*mounts* while refusing `NP_RUN` entirely (RCE ≫ disk-sharing in blast radius).
+
+**Crypto, hand-rolled.** `programs/servers/netd/src/hmac.rs`: SHA-256 +
+HMAC-SHA256, `no_std`, no heap, no crate (the FAT32/ACPI/virtio precedent),
+validated against NIST SHA-256 and RFC 4231 HMAC known-answer vectors.
+
+**Verified.** Cross-implementation against a real guest (`make run-image-9p` +
+the auth-aware `scripts/np9p_client.py`, the foreign observer): a Python-signed
+request with the correct key made the guest's Rust `authenticate()` serve its
+real disk; a wrong key was refused; zero EL0 faults. The `.bss` no-mutable-statics
+ceiling bit again (the key threads as `&Auth` through the whole event loop); a
+sentinel collision (`FS_ERR_AUTH` first placed on a used `MAX-n` slot) was caught
+by `rustc`'s `unreachable_patterns`; and a magic-byte transposition shared by both
+Python peers was caught only by the independent Rust guest — see
+[`cluster-auth-postmortem.md`](cluster-auth-postmortem.md).
+
 ## Cluster Phase 4b: namespace import — the full Plan 9 `cpu` model
 
 The compute cluster completes: a remote command now runs on the remote's CPU but

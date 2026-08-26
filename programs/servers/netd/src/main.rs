@@ -27,6 +27,8 @@
 use core::arch::asm;
 use core::panic::PanicInfo;
 
+mod hmac;
+
 /// Our IPv4, derived from the NIC's MAC (cluster Phase 1d) so two guests on a
 /// shared L2 link get distinct addresses with no config channel: the last octet
 /// is the MAC's last octet. The QEMU-default MAC (`…:56`) maps to `.15` -
@@ -171,6 +173,85 @@ fn main() -> ! {
     serve(packed_mac);
 }
 
+/// The cluster authentication config, loaded once from disk at boot (the
+/// export-hardening phase; see `docs/roadmap-cluster.md`'s security section).
+/// A *shared cluster secret*: every machine in the cluster is configured with
+/// the same key, so any of them can mount/run on any other, and one without
+/// the key cannot join. Read-only after startup; no mutable statics exist in
+/// userland (`.bss` asserted empty), so this rides `serve`'s stack frame and is
+/// threaded (`&Auth`) through the event loop to the two leaves that need it -
+/// the inbound gate (`handle_9p`) and the outbound signer (`handle_rmount`/
+/// `handle_run`).
+struct Auth {
+    /// The cluster secret. Empty (`key_len == 0`) means unconfigured, which is
+    /// **fail-closed**: the export refuses every remote client. Harmless for a
+    /// single-machine run (nobody is mounting it).
+    key: [u8; hmac::BLOCK],
+    key_len: usize,
+    /// The no-exec lever: a machine may share its disk (mounts allowed) while
+    /// refusing remote code execution (`NP_RUN`). Set by a `\NOEXEC` flag file.
+    noexec: bool,
+}
+
+impl Auth {
+    /// Whether authentication is configured (a key is present). Unconfigured =
+    /// export closed.
+    fn enabled(&self) -> bool {
+        self.key_len > 0
+    }
+    fn key(&self) -> &[u8] {
+        &self.key[..self.key_len]
+    }
+}
+
+/// The disk path (FAT 8.3-legal) of the cluster secret and the no-exec flag.
+const KEY_PATH: &[u8] = b"/CLUSTER.KEY";
+const NOEXEC_PATH: &[u8] = b"/NOEXEC";
+
+/// Load the cluster auth config from disk via `fsd` at boot. The key file's
+/// trailing whitespace/newline is trimmed (so an editor-saved one-line secret
+/// works). Retries while `fsd` reports `NO_FS` (its disk isn't mounted yet - a
+/// boot-order race, since netd and fsd start together), but stops immediately
+/// on `FS_ERR_NOT_FOUND` (the file is definitively absent = run unconfigured).
+fn load_auth() -> Auth {
+    let mut auth = Auth { key: [0u8; hmac::BLOCK], key_len: 0, noexec: false };
+    let mut buf = [0u8; hmac::BLOCK];
+    // Up to ~2s of retries at 40ms, only for the transient "disk not mounted
+    // yet" case; a definitively-absent key file returns immediately.
+    for _ in 0..50 {
+        let n = read_file_chunk(KEY_PATH, 0, 0, &mut buf);
+        if n == syscall_abi::NO_FS {
+            syscall(syscall_abi::NET_WAIT, 40);
+            continue;
+        }
+        if n < syscall_abi::FS_ERR_MIN {
+            let mut len = (n as usize).min(buf.len());
+            while len > 0
+                && matches!(buf[len - 1], b'\n' | b'\r' | b' ' | b'\t')
+            {
+                len -= 1;
+            }
+            auth.key[..len].copy_from_slice(&buf[..len]);
+            auth.key_len = len;
+        }
+        break; // success, or FS_ERR_NOT_FOUND (unconfigured)
+    }
+    // The no-exec flag is presence-only: any successful read (even 0 bytes)
+    // means the file exists; FS_ERR_* means it doesn't.
+    let mut one = [0u8; 1];
+    let m = read_file_chunk(NOEXEC_PATH, 0, 0, &mut one);
+    auth.noexec = m < syscall_abi::FS_ERR_MIN;
+    if auth.enabled() {
+        log(b"netd: cluster auth enabled (export requires the cluster key)\r\n");
+        if auth.noexec {
+            log(b"netd: no-exec set (remote-run refused; disk-share allowed)\r\n");
+        }
+    } else {
+        log(b"netd: no cluster key - export CLOSED to remote clients (fail-closed)\r\n");
+    }
+    auth
+}
+
 /// The event loop: block in `NET_WAIT` until either a client message or an
 /// incoming frame, then drain both. Client requests (`ping`/`resolve`/
 /// `fetch`) are handled synchronously; incoming frames feed the ARP responder
@@ -190,6 +271,10 @@ fn serve(packed_mac: u64) -> ! {
     };
     let mut buf = [0u8; syscall_abi::MSG_MAX_LEN as usize];
     let mut frame = [0u8; 1600];
+    // The cluster auth config, read once from disk (retries past the fsd
+    // boot-order race). Rides this frame like `conns`, threaded through the
+    // event loop to the inbound gate and outbound signer.
+    let auth = load_auth();
     // Up to MAX_CONNS concurrent server connections, kept on this frame
     // because userland has no static mutable state (`.bss` asserted empty).
     // `serve` never returns, so the frame persists for the whole boot.
@@ -210,12 +295,12 @@ fn serve(packed_mac: u64) -> ! {
         // supervisor health-ping is acked here too (any reply acks it). Also
         // where a cpu child's output is captured (cluster Phase 4a) - it arrives
         // as messages to us, routed to its connection by `drain_client_messages`.
-        drain_client_messages(packed_mac, &mut buf, &mut conns);
+        drain_client_messages(packed_mac, &mut buf, &mut conns, &auth);
 
         // 2. Incoming frames: ARP replies for our IP, and the TCP server.
         if packed_mac != syscall_abi::NET_ERROR {
             while let Some(n) = recv(&mut frame) {
-                on_frame(&mac, &frame[..n], &mut conns);
+                on_frame(&mac, &frame[..n], &mut conns, &auth);
             }
             // 3. Per connection (by index, so the mailbox drain below can take
             // `&mut conns` without a borrow clash): service the retransmit timer,
@@ -237,7 +322,7 @@ fn serve(packed_mac: u64) -> ! {
                     }
                     let before = c.snd_nxt;
                     pump_send(&mac, c); // `c` borrow ends here
-                    drain_client_messages(packed_mac, &mut buf, &mut conns);
+                    drain_client_messages(packed_mac, &mut buf, &mut conns, &auth);
                     match conns[i].as_ref() {
                         Some(c) if c.snd_nxt != before => {} // progress - continue
                         _ => break,
@@ -253,7 +338,7 @@ fn serve(packed_mac: u64) -> ! {
 /// from a **cpu child** (cluster Phase 4a - a spawned remote-run command whose
 /// stdout we capture) is routed to *its* connection's output buffer instead of
 /// the normal client dispatch; everything else is a client request.
-fn drain_client_messages(packed_mac: u64, buf: &mut [u8], conns: &mut [Option<TcpConn>; MAX_CONNS]) {
+fn drain_client_messages(packed_mac: u64, buf: &mut [u8], conns: &mut [Option<TcpConn>; MAX_CONNS], auth: &Auth) {
     loop {
         let packed =
             syscall4(syscall_abi::MSG_TRY_RECV, buf.as_mut_ptr() as u64, buf.len() as u64, 0, 0);
@@ -276,12 +361,12 @@ fn drain_client_messages(packed_mac: u64, buf: &mut [u8], conns: &mut [Option<Tc
             // dispatch (which replies); everything else is captured output.
             let is_request = len >= 8 && read_u64(buf, 0) == syscall_abi::NETOP_RMOUNT;
             if is_request {
-                handle_client(packed_mac, sender, buf, len, conns);
+                handle_client(packed_mac, sender, buf, len, conns, auth);
             } else {
                 cpu_child_msg(conns[ci].as_mut().unwrap(), sender as u8, &buf[..len]);
             }
         } else {
-            handle_client(packed_mac, sender, buf, len, conns);
+            handle_client(packed_mac, sender, buf, len, conns, auth);
         }
     }
 }
@@ -306,7 +391,7 @@ fn cpu_child_msg(c: &mut TcpConn, child: u8, data: &[u8]) {
 
 /// Dispatch one client request (a `MSG_CALL` from the shell) by op, replying
 /// with the op's status. The unknown-op arm also acks the supervisor ping.
-fn handle_client(packed_mac: u64, sender: u64, buf: &[u8], len: usize, conns: &mut [Option<TcpConn>; MAX_CONNS]) {
+fn handle_client(packed_mac: u64, sender: u64, buf: &[u8], len: usize, conns: &mut [Option<TcpConn>; MAX_CONNS], auth: &Auth) {
     match read_u64(buf, 0) {
         syscall_abi::NETOP_PING => {
             let status = handle_ping(packed_mac, read_u64(buf, 8));
@@ -334,7 +419,7 @@ fn handle_client(packed_mac: u64, sender: u64, buf: &[u8], len: usize, conns: &m
             // request over TCP to the endpoint's 9P export gateway and reply with
             // the NP reply body (`[status:u64][data]`) verbatim.
             let mut r = [0u8; syscall_abi::MSG_MAX_LEN as usize];
-            let rlen = handle_rmount(packed_mac, buf, len, &mut r);
+            let rlen = handle_rmount(packed_mac, buf, len, &mut r, auth);
             reply(sender, &r[..rlen]);
         }
         syscall_abi::NETOP_RUN => {
@@ -346,7 +431,7 @@ fn handle_client(packed_mac: u64, sender: u64, buf: &[u8], len: usize, conns: &m
             // callbacks (its /host reads come back to *our* export) - passing
             // `conns` is what lets it do that.
             let mut r = [0u8; syscall_abi::MSG_MAX_LEN as usize];
-            let rlen = handle_run(packed_mac, buf, len, &mut r, conns);
+            let rlen = handle_run(packed_mac, buf, len, &mut r, conns, auth);
             reply(sender, &r[..rlen]);
         }
         // An NP read verb from a *local* client: the /net synthetic filesystem
@@ -774,7 +859,7 @@ fn tcp_get(mac: &[u8; 6], dst_mac: &[u8; 6], target: &[u8; 4], dst_port: u16, re
 /// deadlock: it drops those frames while stuck waiting, the remote child blocks on
 /// its read, and no output ever comes. Returns `(NET_FETCH_* status, output len)`.
 #[allow(clippy::too_many_arguments)]
-fn tcp_run(packed_mac: u64, mac: &[u8; 6], dst_mac: &[u8; 6], target: &[u8; 4], dst_port: u16, request: &[u8], resp: &mut [u8], conns: &mut [Option<TcpConn>; MAX_CONNS]) -> (u64, usize) {
+fn tcp_run(packed_mac: u64, mac: &[u8; 6], dst_mac: &[u8; 6], target: &[u8; 4], dst_port: u16, request: &[u8], resp: &mut [u8], conns: &mut [Option<TcpConn>; MAX_CONNS], auth: &Auth) -> (u64, usize) {
     let mut frame = [0u8; 1600];
     let mut rx = [0u8; 1600];
     let mut cbuf = [0u8; syscall_abi::MSG_MAX_LEN as usize];
@@ -807,7 +892,7 @@ fn tcp_run(packed_mac: u64, mac: &[u8; 6], dst_mac: &[u8; 6], target: &[u8; 4], 
                     } else {
                         // A non-run frame arriving mid-handshake (an early export
                         // request, ARP): serve it so we don't drop it.
-                        on_frame(mac, &rx[..len], conns);
+                        on_frame(mac, &rx[..len], conns, auth);
                     }
                 }
                 if now() > deadline {
@@ -839,7 +924,7 @@ fn tcp_run(packed_mac: u64, mac: &[u8; 6], dst_mac: &[u8; 6], target: &[u8; 4], 
         // Ack the health-ping / service other client requests (re-entrant-safe:
         // the shell is blocked in this very run, so no nested run can arrive).
         let before_deadline = deadline;
-        drain_client_messages(packed_mac, &mut cbuf, conns);
+        drain_client_messages(packed_mac, &mut cbuf, conns, auth);
         while let Some(len) = recv(&mut rx) {
             if let Some(s) = parse_tcp(&rx[..len], target, dst_port, src_port) {
                 if s.flags & TCP_RST != 0 {
@@ -870,7 +955,7 @@ fn tcp_run(packed_mac: u64, mac: &[u8; 6], dst_mac: &[u8; 6], target: &[u8; 4], 
             } else {
                 // Not our run connection: an export request (the child's /host
                 // read) or ARP - serve it, and count it as progress.
-                on_frame(mac, &rx[..len], conns);
+                on_frame(mac, &rx[..len], conns, auth);
                 deadline = now() + 300;
             }
         }
@@ -939,7 +1024,7 @@ fn pump_conns(mac: &[u8; 6], conns: &mut [Option<TcpConn>; MAX_CONNS]) {
 /// reply), bounded by the caller's `out` (one `MSG_MAX_LEN` for now - small
 /// commands). Request layout is `NETOP_RMOUNT`'s (endpoint + payload), the
 /// payload being the command line rather than an NP message.
-fn handle_run(packed_mac: u64, buf: &[u8], len: usize, out: &mut [u8], conns: &mut [Option<TcpConn>; MAX_CONNS]) -> usize {
+fn handle_run(packed_mac: u64, buf: &[u8], len: usize, out: &mut [u8], conns: &mut [Option<TcpConn>; MAX_CONNS], auth: &Auth) -> usize {
     let fail = |out: &mut [u8], msg: &[u8]| -> usize {
         let n = msg.len().min(out.len());
         out[..n].copy_from_slice(&msg[..n]);
@@ -952,24 +1037,28 @@ fn handle_run(packed_mac: u64, buf: &[u8], len: usize, out: &mut [u8], conns: &m
     let ip = [buf[ep], buf[ep + 1], buf[ep + 2], buf[ep + 3]];
     let port = u16::from_le_bytes([buf[ep + 4], buf[ep + 5]]);
     let cmdline = &buf[syscall_abi::NETOP_RMOUNT_MSG..len];
-    let clen = cmdline.len().min(ninep_abi::NP_NET_MAX - (ninep_abi::NP_REQ_PAYLOAD as usize));
-
-    // Build the framed NP_RUN request: [u32 len][NP_RUN][tree=0][a0=cmdlen][a1=our
-    // ip][a2=our port][cmdline]. a1/a2 carry OUR endpoint (cluster Phase 4b): the
-    // remote spawns the command with a /host mount back to us, so it reads *our*
-    // files at /host/... while running there.
     let hdr = ninep_abi::NP_REQ_PAYLOAD as usize; // 48
-    let mut req = [0u8; ninep_abi::NP_NET_LEN_PREFIX + ninep_abi::NP_NET_MAX];
-    let mlen = hdr + clen;
-    req[0..4].copy_from_slice(&(mlen as u32).to_le_bytes());
-    let m = ninep_abi::NP_NET_LEN_PREFIX;
-    req[m..m + 8].copy_from_slice(&ninep_abi::NP_RUN.to_le_bytes()); // verb
-    req[m + 16..m + 24].copy_from_slice(&(clen as u64).to_le_bytes()); // a0 = cmdlen
+    let clen = cmdline.len().min(ninep_abi::NP_NET_MAX - hdr);
+
+    // Build the NP_RUN message: [NP_RUN][tree=0][a0=cmdlen][a1=our ip][a2=our
+    // port][cmdline]. a1/a2 carry OUR endpoint (cluster Phase 4b): the remote
+    // spawns the command with a /host mount back to us, so it reads *our* files
+    // at /host/... while running there. This bare message is then framed + signed.
+    let mut np = [0u8; ninep_abi::NP_NET_MAX];
+    np[0..8].copy_from_slice(&ninep_abi::NP_RUN.to_le_bytes()); // verb
+    np[16..24].copy_from_slice(&(clen as u64).to_le_bytes()); // a0 = cmdlen
     let our = our_ip();
     let our_ip_packed = (our[0] as u64) | ((our[1] as u64) << 8) | ((our[2] as u64) << 16) | ((our[3] as u64) << 24);
-    req[m + 24..m + 32].copy_from_slice(&our_ip_packed.to_le_bytes()); // a1 = our ip
-    req[m + 32..m + 40].copy_from_slice(&(ninep_abi::NP_NET_PORT as u64).to_le_bytes()); // a2 = our port
-    req[m + hdr..m + hdr + clen].copy_from_slice(&cmdline[..clen]);
+    np[24..32].copy_from_slice(&our_ip_packed.to_le_bytes()); // a1 = our ip
+    np[32..40].copy_from_slice(&(ninep_abi::NP_NET_PORT as u64).to_le_bytes()); // a2 = our port
+    np[hdr..hdr + clen].copy_from_slice(&cmdline[..clen]);
+
+    // Frame + sign it (the export-hardening phase). A no-key client can't sign.
+    let mut req = [0u8; ninep_abi::NP_FRAME_MAX];
+    let total = frame_signed(auth, &np[..hdr + clen], &mut req);
+    if total == 0 {
+        return fail(out, b"cpu: no cluster key (cannot authenticate)\r\n");
+    }
 
     let mac = unpack_mac(packed_mac);
     let Some(dst_mac) = arp_resolve(&mac, &next_hop(&ip)) else {
@@ -981,7 +1070,7 @@ fn handle_run(packed_mac: u64, buf: &[u8], len: usize, out: &mut [u8], conns: &m
     // would drop those frames while stuck waiting). tcp_run drives the run's
     // client connection AND serves the export + acks the health-ping each pass.
     let mut resp = [0u8; ninep_abi::NP_NET_LEN_PREFIX + ninep_abi::NP_NET_MAX];
-    let (status, got) = tcp_run(packed_mac, &mac, &dst_mac, &ip, port, &req[..ninep_abi::NP_NET_LEN_PREFIX + mlen], &mut resp, conns);
+    let (status, got) = tcp_run(packed_mac, &mac, &dst_mac, &ip, port, &req[..total], &mut resp, conns, auth);
     if status != syscall_abi::NET_FETCH_OK {
         return fail(out, b"cpu: remote run failed\r\n");
     }
@@ -990,34 +1079,40 @@ fn handle_run(packed_mac: u64, buf: &[u8], len: usize, out: &mut [u8], conns: &m
     n
 }
 
-fn handle_rmount(packed_mac: u64, buf: &[u8], len: usize, out: &mut [u8]) -> usize {
-    let fail = |out: &mut [u8]| -> usize {
-        out[0..8].copy_from_slice(&syscall_abi::NO_FS.to_le_bytes());
+fn handle_rmount(packed_mac: u64, buf: &[u8], len: usize, out: &mut [u8], auth: &Auth) -> usize {
+    // A bare-status failure reply the shell surfaces cleanly. `st` distinguishes
+    // an unreachable peer (NO_FS) from an auth failure (FS_ERR_AUTH).
+    let fail = |out: &mut [u8], st: u64| -> usize {
+        out[0..8].copy_from_slice(&st.to_le_bytes());
         8
     };
     if packed_mac == syscall_abi::NET_ERROR || len < syscall_abi::NETOP_RMOUNT_MSG {
-        return fail(out);
+        return fail(out, syscall_abi::NO_FS);
     }
     let ep = syscall_abi::NETOP_RMOUNT_ENDPOINT;
     let ip = [buf[ep], buf[ep + 1], buf[ep + 2], buf[ep + 3]];
     let port = u16::from_le_bytes([buf[ep + 4], buf[ep + 5]]);
     let msg = &buf[syscall_abi::NETOP_RMOUNT_MSG..len];
 
-    // Frame the NP message: [u32 len (LE)][msg].
-    let mut req = [0u8; ninep_abi::NP_NET_LEN_PREFIX + ninep_abi::NP_NET_MAX];
-    let mlen = msg.len().min(ninep_abi::NP_NET_MAX);
-    req[0..4].copy_from_slice(&(mlen as u32).to_le_bytes());
-    req[4..4 + mlen].copy_from_slice(&msg[..mlen]);
+    // Frame + sign the NP message (the export-hardening phase): a no-key client
+    // can't sign, so it fails with FS_ERR_AUTH rather than sending an unsigned
+    // request the remote would reject anyway.
+    let mut req = [0u8; ninep_abi::NP_FRAME_MAX];
+    let np = &msg[..msg.len().min(ninep_abi::NP_NET_MAX)];
+    let total = frame_signed(auth, np, &mut req);
+    if total == 0 {
+        return fail(out, syscall_abi::FS_ERR_AUTH);
+    }
 
     let mac = unpack_mac(packed_mac);
     let Some(dst_mac) = arp_resolve(&mac, &next_hop(&ip)) else {
-        return fail(out);
+        return fail(out, syscall_abi::NO_FS);
     };
 
     let mut resp = [0u8; ninep_abi::NP_NET_LEN_PREFIX + ninep_abi::NP_NET_MAX];
-    let (status, got) = tcp_get(&mac, &dst_mac, &ip, port, &req[..4 + mlen], &mut resp);
+    let (status, got) = tcp_get(&mac, &dst_mac, &ip, port, &req[..total], &mut resp);
     if status != syscall_abi::NET_FETCH_OK || got < ninep_abi::NP_NET_LEN_PREFIX + 8 {
-        return fail(out);
+        return fail(out, syscall_abi::NO_FS);
     }
     // Strip the reply's 4-byte length prefix; the body is `[status:u64][data]`.
     let body_len = u32::from_le_bytes([resp[0], resp[1], resp[2], resp[3]]) as usize;
@@ -1178,7 +1273,7 @@ struct TcpIn {
 /// Dispatch one received frame: answer ARP requests for our IP, and feed TCP
 /// segments to the HTTP server. Everything else (including our own client
 /// ops' replies, which the synchronous handlers already consumed) is ignored.
-fn on_frame(mac: &[u8; 6], frame: &[u8], conns: &mut [Option<TcpConn>; MAX_CONNS]) {
+fn on_frame(mac: &[u8; 6], frame: &[u8], conns: &mut [Option<TcpConn>; MAX_CONNS], auth: &Auth) {
     if frame.len() < 14 {
         return;
     }
@@ -1187,7 +1282,7 @@ fn on_frame(mac: &[u8; 6], frame: &[u8], conns: &mut [Option<TcpConn>; MAX_CONNS
         0x0806 => handle_arp(mac, frame),
         0x0800 => {
             if let Some(seg) = parse_tcp_in(frame) {
-                handle_tcp(mac, frame, &seg, conns);
+                handle_tcp(mac, frame, &seg, conns, auth);
             }
         }
         _ => {}
@@ -1306,7 +1401,7 @@ fn parse_tcp_in(frame: &[u8]) -> Option<TcpIn> {
 /// slots are busy (the peer retransmits); every other segment is dispatched to
 /// its matching connection via [`handle_conn_segment`], and a returned "close"
 /// (the peer's FIN, or an RST) frees the slot.
-fn handle_tcp(mac: &[u8; 6], frame: &[u8], seg: &TcpIn, conns: &mut [Option<TcpConn>; MAX_CONNS]) {
+fn handle_tcp(mac: &[u8; 6], frame: &[u8], seg: &TcpIn, conns: &mut [Option<TcpConn>; MAX_CONNS], auth: &Auth) {
     // RST tears down a matching connection.
     if seg.flags & TCP_RST != 0 {
         if let Some(i) = find_conn(conns, seg) {
@@ -1366,7 +1461,7 @@ fn handle_tcp(mac: &[u8; 6], frame: &[u8], seg: &TcpIn, conns: &mut [Option<TcpC
 
     // Everything else is dispatched to its matching connection (if any).
     if let Some(i) = find_conn(conns, seg) {
-        if handle_conn_segment(mac, frame, seg, conns[i].as_mut().unwrap()) {
+        if handle_conn_segment(mac, frame, seg, conns[i].as_mut().unwrap(), auth) {
             conns[i] = None;
         }
     }
@@ -1378,7 +1473,7 @@ fn handle_tcp(mac: &[u8; 6], frame: &[u8], seg: &TcpIn, conns: &mut [Option<TcpC
 /// Returns `true` when the connection should be closed (the peer FIN'd). The
 /// actual sending (`pump_send`) is *not* done here - it runs once per
 /// event-loop wake so the health-ping stays promptly acked (see `serve`).
-fn handle_conn_segment(mac: &[u8; 6], frame: &[u8], seg: &TcpIn, c: &mut TcpConn) -> bool {
+fn handle_conn_segment(mac: &[u8; 6], frame: &[u8], seg: &TcpIn, c: &mut TcpConn, auth: &Auth) -> bool {
     // Track the peer's ACK (frees send window), count duplicate ACKs, and
     // update the advertised window.
     if seg.flags & TCP_ACK != 0 {
@@ -1455,7 +1550,7 @@ fn handle_conn_segment(mac: &[u8; 6], frame: &[u8], seg: &TcpIn, c: &mut TcpConn
         // export gateway (cluster Phase 1). Both stage a response in `c.prefix`
         // for pump_send to stream.
         if c.local_port == ninep_abi::NP_NET_PORT {
-            handle_9p(c, request);
+            handle_9p(c, request, auth);
         } else {
             start_response(c, request);
         }
@@ -1672,19 +1767,120 @@ const DATA_INLINE: usize = syscall_abi::FS_DATA_MAX as usize;
 /// each relayed to the local `fsd`. The request's `tree` field is ignored - the
 /// export serves the local boot mount (tree 0). Single-writer, trusted-LAN (see
 /// docs/roadmap-cluster-phase2.md).
-fn handle_9p(c: &mut TcpConn, request: &[u8]) {
-    // Peek the verb to route a remote-run request (cluster Phase 4a) vs a normal
-    // fs verb. The NP message begins right after the 4-byte length prefix.
-    let hdr = ninep_abi::NP_NET_LEN_PREFIX;
-    let verb = if request.len() >= hdr + 8 { read_u64(request, hdr) } else { 0 };
+fn handle_9p(c: &mut TcpConn, request: &[u8], auth: &Auth) {
+    // Authenticate first (the export-hardening phase): verify the client-nonce
+    // MAC over the request and recover the bare NP message. A failure (wrong or
+    // missing cluster key, or an unconfigured export) is refused before any verb
+    // runs - fail-closed. `authenticate` returns the NP message slice on success.
+    let Some(msg) = authenticate(auth, request) else {
+        deny_9p(c, request);
+        return;
+    };
+    // Route: a remote-run request (cluster Phase 4a) vs a normal fs verb. `msg`
+    // is the NP message (verb at offset 0), framing + auth already stripped.
+    let verb = if msg.len() >= 8 { read_u64(msg, 0) } else { 0 };
     if verb == ninep_abi::NP_RUN {
-        handle_cpu_run(c, request);
+        handle_cpu_run(c, msg, auth);
         return;
     }
-    let n = build_9p_reply(request, &mut c.prefix);
+    let n = build_9p_reply(msg, &mut c.prefix);
     c.prefix_len = n;
     c.prefix_off = 0;
     c.file = false;
+}
+
+/// Verify a framed export request's client-nonce MAC and return the bare NP
+/// message on success (the export-hardening phase; see `hmac.rs` and
+/// `ninep_abi`'s auth-frame constants). The framed request is
+/// `[len:4][magic:8][nonce:16][mac:32][NP message]`; the MAC is
+/// `HMAC(cluster_key, nonce || NP-message)`. Returns `None` (refuse) when the
+/// export is unconfigured (fail-closed), the frame is too short, the magic is
+/// absent (an unauthenticated/legacy frame), or the MAC doesn't match (wrong
+/// key / forgery). Constant-time MAC compare (`hmac::mac_eq`).
+fn authenticate<'a>(auth: &Auth, request: &'a [u8]) -> Option<&'a [u8]> {
+    if !auth.enabled() {
+        return None; // no cluster key configured: export closed
+    }
+    let p = ninep_abi::NP_NET_LEN_PREFIX; // 4
+    let need = p + ninep_abi::NP_AUTH_HDR; // 4 + 56 = 60
+    if request.len() < need {
+        return None;
+    }
+    if read_u64(request, p) != ninep_abi::NP_AUTH_MAGIC {
+        return None;
+    }
+    let noff = p + ninep_abi::NP_AUTH_NONCE_OFF;
+    let moff = p + ninep_abi::NP_AUTH_MAC_OFF;
+    let nonce = &request[noff..noff + ninep_abi::NP_NONCE_LEN];
+    let mac = &request[moff..moff + ninep_abi::NP_MAC_LEN];
+    let np = &request[need..];
+    let computed = hmac::hmac_sha256(auth.key(), nonce, np);
+    if hmac::mac_eq(mac, &computed) {
+        Some(np)
+    } else {
+        None
+    }
+}
+
+/// Stage an auth-denied response on the export connection (the request failed
+/// [`authenticate`]). For a remote-run (`cpu`) client - which reads the reply as
+/// a raw output stream - a human-readable denial line prints on the caller's
+/// screen; for an fs client (a remote mount) a framed `FS_ERR_AUTH` reply is
+/// staged, which the shell surfaces as "authentication failed". The verb peek
+/// is only used to pick the reply *format* (untrusted, but harmless either way).
+fn deny_9p(c: &mut TcpConn, request: &[u8]) {
+    let voff = ninep_abi::NP_NET_LEN_PREFIX + ninep_abi::NP_AUTH_HDR; // NP verb offset
+    let is_run = request.len() >= voff + 8 && read_u64(request, voff) == ninep_abi::NP_RUN;
+    c.file = false;
+    c.prefix_off = 0;
+    c.cpu_child = CPU_NONE;
+    if is_run {
+        let m: &[u8] = b"cpu: authentication failed (wrong or missing cluster key)\r\n";
+        let n = m.len().min(c.prefix.len());
+        c.prefix[..n].copy_from_slice(&m[..n]);
+        c.prefix_len = n;
+    } else {
+        c.prefix_len = frame_reply(&mut c.prefix, syscall_abi::FS_ERR_AUTH, &[]);
+    }
+}
+
+/// Frame **and sign** an NP message for an outbound export request (the
+/// export-hardening phase - the client-side counterpart of [`authenticate`]).
+/// Writes `[len:4][magic:8][nonce:16][mac:32][np]` into `out` and returns the
+/// total framed length, or `0` if there's no cluster key (can't sign -
+/// fail-closed on the client too) or `out` is too small. The nonce is a fresh,
+/// non-repeating value: the `MONOTONIC_US` clock plus our packed IP (for
+/// cross-machine separation). `mac = HMAC(cluster_key, nonce || np)`.
+fn frame_signed(auth: &Auth, np: &[u8], out: &mut [u8]) -> usize {
+    if !auth.enabled() {
+        return 0;
+    }
+    let p = ninep_abi::NP_NET_LEN_PREFIX;
+    let body = ninep_abi::NP_AUTH_HDR + np.len();
+    let total = p + body;
+    if total > out.len() || np.len() > ninep_abi::NP_NET_MAX {
+        return 0;
+    }
+    // Fresh nonce: [monotonic_us:8][our_ip_packed:8]. Held in a local so the
+    // HMAC input doesn't alias the `out` buffer we're writing the MAC into.
+    let us = syscall(syscall_abi::MONOTONIC_US, 0);
+    let ip = our_ip();
+    let ipp = (ip[0] as u64) | ((ip[1] as u64) << 8) | ((ip[2] as u64) << 16) | ((ip[3] as u64) << 24);
+    let mut nonce = [0u8; ninep_abi::NP_NONCE_LEN];
+    nonce[0..8].copy_from_slice(&us.to_le_bytes());
+    nonce[8..16].copy_from_slice(&ipp.to_le_bytes());
+    // Length prefix + magic + nonce, then the NP message after the header.
+    out[0..4].copy_from_slice(&(body as u32).to_le_bytes());
+    out[p..p + 8].copy_from_slice(&ninep_abi::NP_AUTH_MAGIC.to_le_bytes());
+    let noff = p + ninep_abi::NP_AUTH_NONCE_OFF;
+    out[noff..noff + ninep_abi::NP_NONCE_LEN].copy_from_slice(&nonce);
+    let npoff = p + ninep_abi::NP_AUTH_HDR;
+    out[npoff..npoff + np.len()].copy_from_slice(np);
+    // MAC over nonce || np, written into the header's mac slot.
+    let mac = hmac::hmac_sha256(auth.key(), &nonce, np);
+    let moff = p + ninep_abi::NP_AUTH_MAC_OFF;
+    out[moff..moff + ninep_abi::NP_MAC_LEN].copy_from_slice(&mac);
+    total
 }
 
 /// Serve a remote-run request (cluster Phase 4a - the Plan 9 `cpu` model): spawn
@@ -1693,23 +1889,34 @@ fn handle_9p(c: &mut TcpConn, request: &[u8]) {
 /// `c.prefix` as it runs (see the cpu-child routing in `drain_client_messages`);
 /// its end-of-stream reaps it and releases the connection to stream the output
 /// then FIN. On a spawn failure the connection streams an error line immediately.
-fn handle_cpu_run(c: &mut TcpConn, request: &[u8]) {
-    let hdr = ninep_abi::NP_NET_LEN_PREFIX;
-    let msg_hdr = ninep_abi::NP_REQ_PAYLOAD as usize; // 48
-    // a0 (command-line length) at msg offset 16; a1/a2 = the caller's endpoint
-    // (ip, port) for the namespace import (cluster Phase 4b).
-    let cmdlen = if request.len() >= hdr + 24 { read_u64(request, hdr + 16) as usize } else { 0 };
-    let caller_ip_packed = if request.len() >= hdr + 32 { read_u64(request, hdr + 24) } else { 0 };
-    let caller_port = if request.len() >= hdr + 40 { read_u64(request, hdr + 32) as u16 } else { 0 };
-    let pstart = hdr + msg_hdr;
-    let cmdline: &[u8] = if request.len() > pstart {
-        &request[pstart..(pstart + cmdlen).min(request.len())]
-    } else {
-        &[]
-    };
+fn handle_cpu_run(c: &mut TcpConn, msg: &[u8], auth: &Auth) {
     c.file = false;
     c.prefix_off = 0;
     c.prefix_len = 0;
+    c.cpu_child = CPU_NONE;
+    // The no-exec lever (the export-hardening phase): a machine may authenticate
+    // remote *mounts* while refusing remote code execution. Reject NP_RUN here -
+    // after auth, so an unauthenticated peer can't even probe it - streaming a
+    // denial line (the cpu client reads the reply as raw output).
+    if auth.noexec {
+        let m: &[u8] = b"cpu: remote execution disabled on this host (no-exec)\r\n";
+        let n = m.len().min(c.prefix.len());
+        c.prefix[..n].copy_from_slice(&m[..n]);
+        c.prefix_len = n;
+        return;
+    }
+    let msg_hdr = ninep_abi::NP_REQ_PAYLOAD as usize; // 48
+    // a0 (command-line length) at msg offset 16; a1/a2 = the caller's endpoint
+    // (ip, port) for the namespace import (cluster Phase 4b).
+    let cmdlen = if msg.len() >= 24 { read_u64(msg, 16) as usize } else { 0 };
+    let caller_ip_packed = if msg.len() >= 32 { read_u64(msg, 24) } else { 0 };
+    let caller_port = if msg.len() >= 40 { read_u64(msg, 32) as u16 } else { 0 };
+    let pstart = msg_hdr;
+    let cmdline: &[u8] = if msg.len() > pstart {
+        &msg[pstart..(pstart + cmdlen).min(msg.len())]
+    } else {
+        &[]
+    };
     // Import the caller's namespace (cluster Phase 4b): bind /host -> a remote
     // mount back to the caller before SPAWN, so the spawned command reads the
     // caller's files at /host/... while running here. Set on *our* namespace; the
@@ -1952,14 +2159,10 @@ fn hex_digit(v: u8) -> u8 {
 
 /// Decode a framed NP request and build its framed reply into `out`. See
 /// `ninep_abi`'s frame doc: request = `[u32 len][verb][tree][a0..a3][payload]`.
-fn build_9p_reply(request: &[u8], out: &mut [u8; PREFIX_MAX]) -> usize {
+fn build_9p_reply(msg: &[u8], out: &mut [u8; PREFIX_MAX]) -> usize {
     let hdr = ninep_abi::NP_REQ_PAYLOAD as usize; // 48
-    if request.len() < ninep_abi::NP_NET_LEN_PREFIX + hdr {
-        return frame_reply(out, syscall_abi::FS_ERROR, &[]);
-    }
-    let flen = u32::from_le_bytes([request[0], request[1], request[2], request[3]]) as usize;
-    let msg_end = (ninep_abi::NP_NET_LEN_PREFIX + flen).min(request.len());
-    let msg = &request[ninep_abi::NP_NET_LEN_PREFIX..msg_end];
+    // `msg` is the bare NP message (verb at offset 0); framing + auth were
+    // stripped by handle_9p/authenticate. Reject a runt.
     if msg.len() < hdr {
         return frame_reply(out, syscall_abi::FS_ERROR, &[]);
     }

@@ -1067,6 +1067,7 @@ fn print_fs_error(cmd: &str, code: u64) {
         syscall_abi::FS_ERR_IS_ROOT => "can't remove the root directory",
         syscall_abi::FS_ERR_DISK_FULL => "disk full",
         syscall_abi::FS_ERR_IO => "device I/O error",
+        syscall_abi::FS_ERR_AUTH => "cluster authentication failed (wrong or missing cluster key)",
         syscall_abi::MSG_ERR_FULL => "mailbox full",
         syscall_abi::MSG_ERR_TOO_BIG => "message too big (64-byte limit)",
         syscall_abi::MSG_ERR_DENIED => "permission denied (the IPC capability policy doesn't permit reaching that task)",
@@ -2493,7 +2494,7 @@ fn cmd_mount_remote(line: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize, out: &mut 
     words.next(); // "mount"
     words.next(); // "-r"
     let (Some(hostport), Some(path_arg)) = (words.next(), words.next()) else {
-        out.put_line("mount: usage: mount -r <host:port> <path>  (trusted LAN, no auth)");
+        out.put_line("mount: usage: mount -r <host:port> <path>  (needs the shared cluster key)");
         return;
     };
     // Split host[:port] on the ':' byte; default port NP_NET_PORT (564). Byte
@@ -2551,7 +2552,7 @@ fn cmd_mount_remote(line: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize, out: &mut 
     target[4..6].copy_from_slice(&port.to_le_bytes());
     target[6] = b'/';
     if ns_add(prefix, &target, ninep_abi::NS_REMOTE_TREE) {
-        out.put_str("remote-mounted (trusted, no auth) at ");
+        out.put_str("remote-mounted (cluster-key auth) at ");
         if let Ok(p) = core::str::from_utf8(prefix) {
             out.put_line(p);
         } else {

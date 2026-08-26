@@ -953,6 +953,7 @@ pub fn fs_error(cmd: &str, code: u64) {
         syscall_abi::FS_ERR_DISK_FULL => b"disk full",
         syscall_abi::FS_ERR_READ_ONLY => b"read-only filesystem",
         syscall_abi::FS_ERR_IO => b"device I/O error",
+        syscall_abi::FS_ERR_AUTH => b"cluster authentication failed (wrong or missing cluster key)",
         _ => b"failed",
     };
     con_write(msg);

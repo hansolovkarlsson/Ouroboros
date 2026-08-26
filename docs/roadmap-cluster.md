@@ -251,6 +251,19 @@ a natural Phase 4 hook).
   first, loudly documented; auth as a dedicated hardening phase.** The good news:
   the namespace-as-capability model means "a remote mount is a capability" fits
   the existing design rather than fighting it.
+  - **First cut ✅ DONE (v0.10.0, 2026-08-26) — the export-hardening phase.**
+    Trusted-LAN is over: every 9P-export request is authenticated with a
+    **shared cluster secret** via a client-nonce MAC (`mac = HMAC-SHA256(key,
+    nonce ‖ np)`, the secret never on the wire, no extra round trip), gating fs
+    verbs *and* `NP_RUN` at `netd`'s one chokepoint (`handle_9p`). Fail-closed
+    (no `\CLUSTER.KEY` = export refuses all remote clients); a `\NOEXEC` flag
+    shares the disk while refusing remote-exec. The symmetric key makes the
+    bidirectional `cpu` `/host` callback authenticate for free. See
+    [`cluster-auth-postmortem.md`](cluster-auth-postmortem.md).
+  - **Still deferred, out loud:** per-peer identity (vs one cluster secret),
+    reply-direction (mutual) auth, and replay protection (a captured request can
+    be replayed verbatim; forgery of a new one cannot). Each is a named next tier,
+    not a pretence.
 - **Consistency and failure.** Partitions, disconnects, concurrent writers — the
   CAP realities. Plan: single-writer first, clean-failure semantics, explicit
   about what's *not* coherent. Never pretend the network is reliable.

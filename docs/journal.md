@@ -7,6 +7,39 @@ for the forward plan see [`roadmap.md`](roadmap.md).
 
 ---
 
+## 2026-08-26 (cont.) — locking the cluster door: export authentication
+
+Phases 1–4 all shipped the same asterisk: *trusted-LAN, no auth*. Any host that
+could reach a machine's 9P export (TCP 564) could read/write its disk and run
+arbitrary `/bin` programs on it. Today that got a lock — the first real
+hardening phase, cut as **v0.10.0**.
+
+**The design fork, settled first.** Three ways to carry a credential over the
+wire; all need a keyed hash. Picked the **client-nonce MAC** (`mac = HMAC-SHA256(
+key, nonce ‖ np)`) over a server-nonce challenge-response, specifically because
+the export uses one connection per request — a challenge-response would tax every
+`ls`/`cat` with an extra round trip, while the client-nonce version folds into the
+existing single request. Weaker on paper (a sniffer can replay an observed
+request), stronger in *this* system. The secret is a **shared cluster key** —
+which made the scary case (the `cpu` `/host` reverse callback, where the remote
+becomes a client of the caller) authenticate in both directions for free.
+
+**Built in one gate.** SHA-256 + HMAC hand-rolled (`hmac.rs`, checked against
+NIST/RFC 4231 vectors); an auth header prepended to each framed request;
+`netd` reads the key from `\CLUSTER.KEY` at boot (fail-closed if absent); the key
+threads as `&Auth` through the whole event loop (no mutable statics — the `.bss`
+ceiling again). Inbound verify in `handle_9p`; outbound sign in `handle_rmount`/
+`handle_run`. A `\NOEXEC` flag shares the disk but refuses remote `cpu`.
+
+**Two bugs, both from foreign observers.** The host-only Python↔Python test
+passed while *both* scripts had the same transposed magic-byte constant — a
+mirror confirms your bug as happily as your correctness. Only pointing the Python
+client at the real Rust guest caught it. And `rustc`'s `unreachable_patterns`
+caught an `FS_ERR_AUTH` sentinel colliding with `SPAWN_ERR_BAD_ELF`. Verified
+end-to-end against the guest export (correct key serves the real disk, wrong key
+refused, zero faults). Full account in
+[`cluster-auth-postmortem.md`](cluster-auth-postmortem.md).
+
 ## 2026-08-26 (cont.) — v0.9.0, and admitting the syscalls aren't POSIX
 
 A release-and-documentation day, no code. Two things.

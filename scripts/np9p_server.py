@@ -21,6 +21,8 @@ Then in the guest (SLIRP maps the host to 10.0.2.2):
     ls /mnt/a/SUB
     cat /mnt/a/SUB/NOTE.TXT
 """
+import hashlib
+import hmac
 import socket
 import struct
 import sys
@@ -33,9 +35,34 @@ NP_READ_AT = NP_BASE + 10
 
 FS_ERROR = (1 << 64) - 1
 NO_FS = (1 << 64) - 2
+FS_ERR_AUTH = (1 << 64) - 1 - 30  # u64::MAX - 30
 # A stand-in for fsd's FS_ERR_NOT_FOUND band; any value >= FS_ERR_MIN reads as an
 # error to the client. Use FS_ERROR for "no such path".
 HDR = 48  # NP_REQ_PAYLOAD
+
+# Cluster auth (the export-hardening phase): the guest signs every request, so
+# this server must verify the client-nonce MAC before serving it. Must match the
+# guest's \CLUSTER.KEY (Makefile CLUSTER_KEY); override with `--key <k>`.
+NP_AUTH_MAGIC = int.from_bytes(b"AUTHNP01", "big")  # ninep-abi NP_AUTH_MAGIC
+NP_AUTH_HDR = 56  # magic(8) + nonce(16) + mac(32)
+DEFAULT_KEY = b"ouroboros-dev-cluster-key-v1"
+KEY = DEFAULT_KEY  # replaced from argv in main()
+
+
+def verify(body):
+    """Strip + verify the auth header; return the bare NP message, or None."""
+    if len(body) < NP_AUTH_HDR:
+        return None
+    (magic,) = struct.unpack("<Q", body[:8])
+    if magic != NP_AUTH_MAGIC:
+        return None
+    nonce = body[8:24]
+    mac = body[24:56]
+    np = body[56:]
+    expected = hmac.new(KEY, nonce + np, hashlib.sha256).digest()
+    if not hmac.compare_digest(mac, expected):
+        return None
+    return np
 
 # The served tree. Directories map a path to a list of (name, is_dir); files map
 # a path to bytes. HELLO.TXT is deliberately > NP_REMOTE_CHUNK (512) so a guest
@@ -88,6 +115,12 @@ def frame_reply(status, data=b""):
 
 
 def serve_request(body):
+    # Authenticate first (the export-hardening phase): reject a wrong/missing
+    # cluster key before serving any verb - the guest surfaces FS_ERR_AUTH.
+    np = verify(body)
+    if np is None:
+        return frame_reply(FS_ERR_AUTH)
+    body = np
     if len(body) < HDR:
         return frame_reply(FS_ERROR)
     verb, tree = struct.unpack("<QQ", body[:16])
@@ -123,7 +156,13 @@ def serve_request(body):
 
 
 def main():
-    port = int(sys.argv[1]) if len(sys.argv) > 1 else 5641
+    global KEY
+    args = sys.argv[1:]
+    if "--key" in args:
+        i = args.index("--key")
+        KEY = args[i + 1].encode()
+        del args[i:i + 2]
+    port = int(args[0]) if args else 5641
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     srv.bind(("0.0.0.0", port))

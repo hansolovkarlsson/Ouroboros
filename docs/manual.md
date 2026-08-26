@@ -219,10 +219,18 @@ model: *"remote" is just the same file protocol over TCP instead of local
 IPC*, so the commands you already know (`ls`, `cat`, `mkdir`, `cpu`) work
 across machines with no new syntax — only *where a path points* changes.
 
-**Trust, stated plainly:** this is a **trusted-LAN** design with **no
-authentication** — a machine that exports a resource serves any peer that
-connects. That's a deliberate, documented posture for now; don't expose an
-Ouroboros export to an untrusted network.
+**Trust, stated plainly:** the export is authenticated with a **shared cluster
+secret** (since v0.10.0 — the export-hardening phase). Every machine reads the
+same key from `\CLUSTER.KEY` on its boot disk; a request is signed with an HMAC
+so the secret never crosses the wire, and a peer without the key gets nothing
+(fail-closed). So `mount -r` and `cpu` work between machines that share the key,
+and are refused between machines that don't. This is **cluster-membership** auth,
+not per-peer identity, and it assumes a **trusted LAN** for the parts still
+deferred (a passive sniffer can replay an observed request; the reply direction
+isn't authenticated). Two knobs: no `\CLUSTER.KEY` = the export is closed
+entirely; a `\NOEXEC` flag file = the machine shares its disk but refuses remote
+`cpu` execution. Don't expose an Ouroboros export to a genuinely hostile network
+yet — per-peer auth and replay protection are named next steps.
 
 ### Setting up two machines
 
@@ -245,7 +253,7 @@ Mount another machine's exported filesystem into your namespace, then read
 (and write) it like any local path:
 
 ```
-$ mount -r 10.0.2.10:564 /mnt/a     # bind A's export at /mnt/a (trusted, no auth)
+$ mount -r 10.0.2.10:564 /mnt/a     # bind A's export at /mnt/a (needs the shared cluster key)
 $ ls /mnt/a                         # A's disk root
 $ cat /mnt/a/EFI/ORBS/INIT.CFG      # read a file on A
 $ mkdir /mnt/a/reports              # create on A's disk

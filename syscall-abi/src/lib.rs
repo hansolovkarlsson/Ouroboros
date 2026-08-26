@@ -963,6 +963,17 @@ pub const FS_ERR_DISK_FULL: u64 = u64::MAX - 9;
 /// mount-shape errors that can't actually occur through an
 /// already-mounted filesystem, mapped here rather than omitted.
 pub const FS_ERR_IO: u64 = u64::MAX - 10;
+/// Cluster authentication failed on a remote (9P-over-TCP) operation: the
+/// export rejected the request's client-nonce MAC (wrong/missing cluster
+/// key), or refused a remote-run because the exporter has `NP_RUN` disabled
+/// (the no-exec lever). Surfaces as a remote-mount / `cpu` failure so the
+/// shell can say "authentication failed" distinctly from [`NO_FS`] (an
+/// unreachable peer). In the `FS_ERR_*` band, so `>= FS_ERR_MIN` treats it as
+/// an error like every other. See `docs/roadmap-cluster.md`'s security phase.
+/// (`MAX - 30`: the one free slot left in the `FS_ERR_*` band between
+/// [`FS_ERR_READ_ONLY`] at `MAX - 29` and [`FS_ERR_MIN`] at `MAX - 31` - the
+/// low offsets are already taken by the `SPAWN_ERR_*`/`MSG_ERR_*` codes.)
+pub const FS_ERR_AUTH: u64 = u64::MAX - 30;
 
 // [`SPAWN`]-specific failure codes, in the same reserved band - the
 // split of the old collapsed [`SPAWN_ERROR`], mirroring the `FS_ERR_*`
