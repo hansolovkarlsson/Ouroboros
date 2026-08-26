@@ -100,16 +100,23 @@ it presumes a coordination model Phase 2 deliberately doesn't have.
 
 ## Staging
 
-- **2a — write-side export + client chunking (the core).** The mutate verbs in
-  `handle_9p`, the `NP_WRITE_AT` grant bridge, and the client chunking loop.
-  *Ship:* two VMs — B `touch`/`mkdir`/`write`/`cp`s onto A's disk, then reads it
-  back (and A sees it), over `run-image-2vm-*`. Verified against a shared-link
-  `tcpdump` and a foreign-observer host peer where useful, zero `-d int` aborts.
-- **2b — clean-disconnect semantics.** Confirm a mid-session peer drop makes the
-  next remote op fail cleanly (a distinct error, no hang, no corruption on A's
-  disk) — kill A mid-run and check B's error path and A's fsck-clean disk. Mostly
-  a *test* of Decision 3, not new code (Phase 1's timeout/NO_FS already fails
-  cleanly); any gap found becomes the fix.
+- **2a — write-side export + client chunking (the core). ✅ DONE.** The mutate
+  verbs in `handle_9p` (path-only + `mv` via `fsd_call`; `NP_WRITE`→inline
+  `NP_WRITE_FILE`; `NP_WRITE_AT` via a new `fsd_write_at` grant bridge) and the
+  client chunking loop in `fs_write_at`/`fs_write_bulk` (ulib + shell). *Shipped:*
+  two VMs — from B, `mkdir`/`write`/`cat`-back and `cp /BIN/LS /mnt/a/LSCOPY` (17
+  KB → 34 chunked `NP_WRITE_AT` round trips) onto A's disk; A reading its own disk
+  sees it all. **Byte-exactness confirmed by a foreign observer:** mounting A's
+  disk image on macOS, `LSCOPY` is `cmp`-identical to `/BIN/LS`. Zero `-d int`
+  aborts on both VMs.
+- **2b — clean-disconnect semantics. ✅ DONE.** `SIGKILL`ing A mid-session makes
+  B's next remote op fail cleanly (a distinct error via ARP/round-trip timeout →
+  `NO_FS`, no hang) and B stays responsive locally — Decision 3 as designed, no
+  new code. **One robustness gap the test surfaced and fixed:** the client
+  `tcp_get` sent a single SYN with no retransmit, so a dropped first packet on a
+  freshly-connected socket link failed the whole op (an intermittent first-`ls`);
+  now the SYN is retransmitted a few times within the op (helps HTTP fetch and
+  remote reads too).
 
 ## Testing
 

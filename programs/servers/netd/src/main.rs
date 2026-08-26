@@ -589,29 +589,40 @@ fn tcp_get(mac: &[u8; 6], dst_mac: &[u8; 6], target: &[u8; 4], dst_port: u16, re
     let src_port = next_src_port();
     let isn = TCP_ISN ^ ((src_port as u32) << 8);
 
-    // SYN.
+    // SYN, retransmitted up to SYN_TRIES times. A single SYN with no retransmit
+    // (the original) failed the whole op if that one packet was dropped - which a
+    // freshly-connected QEMU socket link (the two-VM cluster) can do to the very
+    // first frame. Each try resends the SYN and waits a short window for the
+    // SYN-ACK; a dropped SYN or SYN-ACK is recovered within the same op.
+    const SYN_TRIES: u32 = 4;
+    const SYN_WAIT_TICKS: u64 = 12; // per try (~a few hundred ms under TCG)
     let Some(n) = build_tcp(mac, dst_mac, target, src_port, dst_port, isn, 0, TCP_SYN, true, &[], &mut frame) else {
         return (syscall_abi::NET_FETCH_TIMEOUT, 0);
     };
-    if send(&frame[..n]).is_err() {
-        return (syscall_abi::NET_FETCH_TIMEOUT, 0);
-    }
-
-    // Wait for SYN-ACK (~700ms).
-    let their_isn = {
-        let deadline = now() + 35;
+    let their_isn = 'handshake: {
+        let mut tries = 0u32;
         loop {
-            if let Some(len) = recv(&mut rx) {
-                if let Some(s) = parse_tcp(&rx[..len], target, dst_port, src_port) {
-                    if s.flags & TCP_RST != 0 {
-                        return (syscall_abi::NET_FETCH_REFUSED, 0);
-                    }
-                    if s.flags & (TCP_SYN | TCP_ACK) == (TCP_SYN | TCP_ACK) && s.ack == isn + 1 {
-                        break s.seq;
+            if send(&frame[..n]).is_err() {
+                return (syscall_abi::NET_FETCH_TIMEOUT, 0);
+            }
+            tries += 1;
+            let deadline = now() + SYN_WAIT_TICKS;
+            loop {
+                if let Some(len) = recv(&mut rx) {
+                    if let Some(s) = parse_tcp(&rx[..len], target, dst_port, src_port) {
+                        if s.flags & TCP_RST != 0 {
+                            return (syscall_abi::NET_FETCH_REFUSED, 0);
+                        }
+                        if s.flags & (TCP_SYN | TCP_ACK) == (TCP_SYN | TCP_ACK) && s.ack == isn + 1 {
+                            break 'handshake s.seq;
+                        }
                     }
                 }
+                if now() > deadline {
+                    break; // this try timed out - resend the SYN (if tries left)
+                }
             }
-            if now() > deadline {
+            if tries >= SYN_TRIES {
                 return (syscall_abi::NET_FETCH_TIMEOUT, 0);
             }
         }
@@ -1355,9 +1366,11 @@ const DATA_INLINE: usize = syscall_abi::FS_DATA_MAX as usize;
 /// Phase 1): decode the frame, run the verb against local `fsd`, and stage the
 /// framed reply in `c.prefix` for `pump_send` to stream (then FIN - one
 /// request/reply per connection, like the HTTP server's `Connection: close`).
-/// **Read-only for now** (readdir/read/read_file/read_at); write/mutate verbs
-/// get an error reply. The request's `tree` field is ignored - the export
-/// serves the local boot mount (tree 0).
+/// **Read and write** (cluster Phase 2): reads (readdir/read/read_file/read_at)
+/// plus the mutate verbs (touch/mkdir/rmdir/rm/mv/write/write_file/write_at),
+/// each relayed to the local `fsd`. The request's `tree` field is ignored - the
+/// export serves the local boot mount (tree 0). Single-writer, trusted-LAN (see
+/// docs/roadmap-cluster-phase2.md).
 fn handle_9p(c: &mut TcpConn, request: &[u8]) {
     let n = build_9p_reply(request, &mut c.prefix);
     c.prefix_len = n;
@@ -1419,8 +1432,94 @@ fn build_9p_reply(request: &[u8], out: &mut [u8; PREFIX_MAX]) -> usize {
             let n = read_file_chunk(path, 0, &mut buf[..want]);
             frame_reply(out, size, ok_data(n, &buf))
         }
+        // --- write / mutate verbs (cluster Phase 2: read+write) ---
+        // Path-only ops: the path is the whole payload, no data.
+        v if v == ninep_abi::NP_TOUCH
+            || v == ninep_abi::NP_MKDIR
+            || v == ninep_abi::NP_RMDIR
+            || v == ninep_abi::NP_RM =>
+        {
+            let status = fsd_call(v, p0 as u64, 0, path, &mut []);
+            frame_reply(out, status, &[])
+        }
+        // Rename: payload is src (p0 bytes) then dst (p1 bytes), inline; fsd's
+        // NP_MV takes exactly that. fsd_call copies the payload verbatim.
+        v if v == ninep_abi::NP_MV => {
+            let both = (p0 + p1 as usize).min(payload.len());
+            let status = fsd_call(ninep_abi::NP_MV, p0 as u64, p1, &payload[..both], &mut []);
+            frame_reply(out, status, &[])
+        }
+        // Full create/overwrite: wire payload is path (p0) then data (p1),
+        // inline. Relay as fsd's inline NP_WRITE_FILE - same create/overwrite
+        // semantics for a <=512 chunk, no grant needed (0 data = truncate).
+        v if v == ninep_abi::NP_WRITE || v == ninep_abi::NP_WRITE_FILE => {
+            let both = (p0 + p1 as usize).min(payload.len());
+            let status = fsd_call(ninep_abi::NP_WRITE_FILE, p0 as u64, p1, &payload[..both], &mut []);
+            frame_reply(out, status, &[])
+        }
+        // Offset write: wire payload is path (p0) then data (p2 bytes) at offset
+        // p1. fsd's NP_WRITE_AT is grant-only, so bridge wire-inline -> a local
+        // GRANT_READ buffer (the mirror of read_file_chunk's GRANT_WRITE).
+        v if v == ninep_abi::NP_WRITE_AT => {
+            let dlen = (p2 as usize).min(payload.len().saturating_sub(p0));
+            let data = &payload[p0..p0 + dlen];
+            let status = fsd_write_at(path, p1, data);
+            frame_reply(out, status, &[])
+        }
         _ => frame_reply(out, syscall_abi::FS_ERROR, &[]),
     }
+}
+
+/// Relay an offset-write to fsd, bridging the wire's inline data to fsd's
+/// grant-based `NP_WRITE_AT` (cluster Phase 2): copy `data` into a local buffer,
+/// `GRANT_READ` it to fsd, then issue `NP_WRITE_AT(pathlen, offset, datalen)` -
+/// the exact mirror of `read_file_chunk`'s `GRANT_WRITE` read bridge, the other
+/// way. `data.len()` is bounded by `NP_REMOTE_CHUNK` (the client's inline cap).
+/// Returns fsd's status (0, or an `FS_ERR_*`/`TASK_ERR_*` code).
+fn fsd_write_at(path: &[u8], offset: u64, data: &[u8]) -> u64 {
+    if data.is_empty() {
+        return 0;
+    }
+    let mut dbuf = [0u8; ninep_abi::NP_REMOTE_CHUNK];
+    let dlen = data.len().min(dbuf.len());
+    dbuf[..dlen].copy_from_slice(&data[..dlen]);
+    let granted = syscall4(
+        syscall_abi::GRANT,
+        syscall_abi::FSD_TASK,
+        dbuf.as_ptr() as u64,
+        dlen as u64,
+        syscall_abi::GRANT_READ,
+    );
+    if granted != 0 {
+        return syscall_abi::FS_ERROR;
+    }
+    const HDR: usize = ninep_abi::NP_REQ_PAYLOAD as usize;
+    let mut req = [0u8; syscall_abi::MSG_MAX_LEN as usize];
+    req[0..8].copy_from_slice(&ninep_abi::NP_WRITE_AT.to_le_bytes());
+    req[8..16].copy_from_slice(&0u64.to_le_bytes()); // tree 0
+    req[16..24].copy_from_slice(&(path.len() as u64).to_le_bytes()); // p0: path len
+    req[24..32].copy_from_slice(&offset.to_le_bytes()); // p1: offset
+    req[32..40].copy_from_slice(&(dlen as u64).to_le_bytes()); // p2: data len
+    let end = HDR + path.len();
+    if end > req.len() {
+        return syscall_abi::FS_ERROR;
+    }
+    req[HDR..end].copy_from_slice(path);
+    let mut reply = [0u8; syscall_abi::MSG_MAX_LEN as usize];
+    let packed = syscall4(
+        syscall_abi::MSG_CALL,
+        syscall_abi::FSD_TASK,
+        req.as_ptr() as u64,
+        end as u64,
+        reply.as_mut_ptr() as u64,
+    );
+    if packed >= syscall_abi::FS_ERR_MIN {
+        return packed;
+    }
+    if (packed & 0xffff_ffff) < 8 {
+        return syscall_abi::FS_ERROR;
+    }
+    read_u64(&reply, 0)
 }
 
 /// Frame a reply into `out`: `[u32 len (LE)][status:u64][data]`, `len` = the

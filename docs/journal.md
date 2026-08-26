@@ -7,6 +7,41 @@ for the forward plan see [`roadmap.md`](roadmap.md).
 
 ---
 
+## 2026-08-25 (cont.) — Phase 2: a machine writes another's disk (shared-disk cluster)
+
+Phase 1 ended with B *reading* A's disk. Phase 2 makes it a genuine shared disk:
+B *writes* A's disk. And it turned out small — the transport, framing, remote
+binding, and client routing all existed; Phase 2 was really just teaching the
+export gateway the write verbs and chunking a large write client-side.
+
+The export side relays each mutate verb to the local fsd, reusing netd's
+fsd-client calls: path-only ops and `mv` go straight through, a full `NP_WRITE`
+maps to fsd's inline `NP_WRITE_FILE` (no grant), and `NP_WRITE_AT` bridges the
+wire's inline bytes to fsd's grant-based offset write — the exact mirror of the
+Phase-1 read bridge, the other way. The client loops a large write into ≤512-byte
+`NP_WRITE_AT` chunks, so `cp`/`writeat`/`>>` are all unchanged above the fs
+helper. Semantics: single-writer, clean-disconnect — documented, not coordinated
+(fsd already serializes disk access through one task, so a single writer never
+tears; the only thing we don't claim is *concurrent* writers).
+
+Two VMs, and it worked: from B, `mkdir /mnt/a/CL`, `write /mnt/a/CL/NOTE.TXT …`,
+`cat` it back through A, then `cp /BIN/LS /mnt/a/LSCOPY` — a 17 KB file over 34
+chunked round trips. Then A, reading its *own* disk, sees `CL/`, `LSCOPY`, and the
+note's exact text: B genuinely wrote A's disk. The clincher was the foreign
+observer — mounting A's disk image on macOS, `LSCOPY` is `cmp`-identical to
+`/BIN/LS`, byte for byte. That's the years-long question answered with a yes you
+can act on: two machines, one reading *and writing* the other's disk over a
+protocol written from scratch.
+
+The two-VM link also surfaced a real robustness gap the single-VM tests never
+could: the client's `tcp_get` sent a *single* SYN with no retransmit, so a dropped
+first packet on a freshly-connected QEMU socket hub failed the whole op (an
+intermittent first-`ls`). Added a SYN retransmit (a few tries within the op) — it
+helps HTTP fetch and remote reads too. And the disconnect test did its job:
+`SIGKILL` A mid-session, and B's next remote op fails cleanly (a distinct error,
+no hang) and B stays responsive locally — clean-disconnect, as designed. Zero
+aborts on both nodes throughout. Phase 2 done → v0.7.0.
+
 ## 2026-08-25 (cont.) — Phase 1d: two Ouroboros machines, one reads the other's disk
 
 The "aha," and it landed the same day. 1c proved the remote-mount client against a

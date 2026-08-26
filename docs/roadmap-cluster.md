@@ -161,7 +161,15 @@ TCP and runs `ls` / `cat` against A's disk. **Testable entirely in QEMU with two
 VMs on a virtual network — no second physical machine required** (see Testing
 below). This is the "aha."
 
-### Phase 2 — Two-node disk-sharing cluster (the answer to "is it doable?")
+### Phase 2 — Two-node disk-sharing cluster (the answer to "is it doable?") ✅ DONE
+
+> **Status:** complete. Machine B creates/edits files on machine A's disk over
+> 9P/TCP (write verbs relayed to fsd; large writes chunked to the inline cap);
+> single-writer, clean-disconnect (a killed peer fails the next op cleanly, no
+> hang, no corruption). Byte-exactness confirmed against A's disk image on macOS.
+> **The years-long question answered with a demonstrated yes.** Read+write,
+> trusted-LAN, single-writer; auth and concurrent-writer coherence remain. Cut
+> **v0.7.0**. Detailed design: [`roadmap-cluster-phase2.md`](roadmap-cluster-phase2.md).
 
 - **Read *and* write** a remote disk over 9P/TCP — machine B creates/edits files
   on machine A's storage.

@@ -7,6 +7,55 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/`; 
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## Cluster Phase 2: two-node read+write — machine B writes machine A's disk
+
+The cluster becomes a *shared disk*, not just a shared reader. Phase 1 let B read
+A's filesystem over 9P/TCP; Phase 2 lets B **create and edit files on A's disk** —
+`mkdir`/`write`/`cp`/`touch`/`rm`/`mv` against a remote mount all work, and A sees
+the changes on its own disk. **The milestone that answers "is a shared-disk
+cluster doable?" with a yes you can act on.**
+
+**Write-side export verbs.** The export gateway (`handle_9p`) was read-only; it
+now relays the mutate verbs to the local `fsd`, reusing netd's fsd-client calls.
+Path-only ops (`touch`/`mkdir`/`rmdir`/`rm`) and `mv` (two inline paths) go
+straight through `fsd_call`. A full write (`NP_WRITE`, ≤512 inline) is relayed as
+fsd's inline `NP_WRITE_FILE` — same create/overwrite, no grant. An offset write
+(`NP_WRITE_AT`) bridges the wire's inline data to fsd's **grant-based**
+`NP_WRITE_AT`: netd copies the bytes into a local buffer, `GRANT_READ`s it to
+fsd, and issues the call — the exact mirror of `read_file_chunk`'s `GRANT_WRITE`
+read bridge, the other direction.
+
+**Client chunks a large write.** A remote write's data rides inline (no grant
+across a machine), bounded by `NP_REMOTE_CHUNK` (512), so the fs helpers loop:
+`fs_write_at` splits a larger buffer into ≤512-byte `NP_WRITE_AT` round trips at
+rising offsets, and `fs_write_bulk` truncates-then-streams. Every `/bin` writer
+(`cp`, `writeat`, the shell `write`, `>>`) is unchanged — the chunking is
+invisible above the helper, like Phase 1's inline-read fallback.
+
+**Semantics: single-writer, clean-disconnect** (documented, not coordinated). One
+writer per remote tree by convention, no distributed lock (fsd serializes all
+disk access through one task, so a single writer never tears). A peer that drops
+makes the next remote op **fail cleanly** — a distinct error, the mount goes
+stale, nothing half-applied at the client, no hang, no corruption on the far
+disk. Concurrent multi-writer coherence is explicitly out of scope.
+
+**A robustness fix the two-VM link forced:** the client TCP `tcp_get` sent a
+**single SYN with no retransmit**, so a dropped first packet on a
+freshly-connected QEMU socket hub failed the whole op (seen as an intermittent
+first-`ls`). Now the SYN is retransmitted up to a few times within the op, so a
+dropped SYN/SYN-ACK is recovered — it helps HTTP fetch and remote reads too.
+
+**How it was proven.** Two Ouroboros VMs on the shared L2 link
+(`make run-image-2vm-a`/`-b`): from B, `mkdir /mnt/a/CL`, `write
+/mnt/a/CL/NOTE.TXT …`, `cat` it back (through A), and `cp /BIN/LS /mnt/a/LSCOPY` (a
+17 KB file → 34 chunked `NP_WRITE_AT` round trips). Then **A**, reading its *own*
+disk, sees `CL/`, `LSCOPY`, and the note's exact text — B genuinely wrote A's
+disk. Byte-exactness confirmed by a foreign observer: mounting A's disk image on
+macOS, `LSCOPY` is `cmp`-identical to `/BIN/LS`. Clean-disconnect verified by
+`SIGKILL`ing A mid-session — B's next op returns a clean error and B stays
+responsive locally. Zero Data/Prefetch aborts on both VMs. **Phase 2 done → cut
+v0.7.0.** See [`roadmap-cluster-phase2.md`](roadmap-cluster-phase2.md).
+
 ## Cluster Phase 1, step 1d: two-node integration — machine B reads machine A's disk (Phase 1 done)
 
 **The aha, on real cross-machine wire.** Where 1a/1c were verified with one VM

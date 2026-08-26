@@ -758,17 +758,39 @@ pub fn fs_write_bulk(path: &str, data: &[u8]) -> u64 {
     // request (bounded by NP_REMOTE_CHUNK). The Phase 1 export is read-only, so
     // this returns FS_ERROR today; the shape is ready for a writable export.
     if r.server == syscall_abi::NET_TASK {
-        if data.len() > ninep_abi::NP_REMOTE_CHUNK {
-            return syscall_abi::FS_ERROR;
-        }
-        return np_remote(
+        // Remote full overwrite: no grant crosses a machine, and the inline cap
+        // bounds one request - so truncate-and-write the first chunk (NP_WRITE),
+        // then stream the rest at rising offsets (NP_WRITE_AT). Empty data =
+        // NP_WRITE with 0 bytes = truncate-to-empty, the loop then no-ops.
+        let first = data.len().min(ninep_abi::NP_REMOTE_CHUNK);
+        let st = np_remote(
             &r.endpoint,
             ninep_abi::NP_WRITE,
-            [r.len as u64, data.len() as u64, 0, 0],
+            [r.len as u64, first as u64, 0, 0],
             &fsp[..r.len],
-            data,
+            &data[..first],
             &mut [],
         );
+        if st != 0 {
+            return st;
+        }
+        let mut off = first;
+        while off < data.len() {
+            let end = (off + ninep_abi::NP_REMOTE_CHUNK).min(data.len());
+            let st = np_remote(
+                &r.endpoint,
+                ninep_abi::NP_WRITE_AT,
+                [r.len as u64, off as u64, (end - off) as u64, 0],
+                &fsp[..r.len],
+                &data[off..end],
+                &mut [],
+            );
+            if st != 0 {
+                return st;
+            }
+            off = end;
+        }
+        return 0;
     }
     if !data.is_empty() {
         let granted = syscall4(
@@ -805,17 +827,26 @@ pub fn fs_write_at(path: &str, offset: u64, data: &[u8]) -> u64 {
     let mut fsp = [0u8; FSP_MAX];
     let r = mount_resolve(path, &mut fsp);
     if r.server == syscall_abi::NET_TASK {
-        if data.len() > ninep_abi::NP_REMOTE_CHUNK {
-            return syscall_abi::FS_ERROR;
+        // Remote: chunk to the inline cap (no grant crosses a machine), one
+        // NP_WRITE_AT round trip per <=NP_REMOTE_CHUNK bytes at rising offsets,
+        // so a caller's larger (e.g. SAFECOPY_MAX) buffer still writes whole.
+        let mut off = 0usize;
+        while off < data.len() {
+            let end = (off + ninep_abi::NP_REMOTE_CHUNK).min(data.len());
+            let st = np_remote(
+                &r.endpoint,
+                ninep_abi::NP_WRITE_AT,
+                [r.len as u64, offset + off as u64, (end - off) as u64, 0],
+                &fsp[..r.len],
+                &data[off..end],
+                &mut [],
+            );
+            if st != 0 {
+                return st;
+            }
+            off = end;
         }
-        return np_remote(
-            &r.endpoint,
-            ninep_abi::NP_WRITE_AT,
-            [r.len as u64, offset, data.len() as u64, 0],
-            &fsp[..r.len],
-            data,
-            &mut [],
-        );
+        return 0;
     }
     let granted = syscall4(
         syscall_abi::GRANT,
