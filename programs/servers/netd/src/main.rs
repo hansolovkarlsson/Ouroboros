@@ -1072,7 +1072,9 @@ fn handle_run(packed_mac: u64, buf: &[u8], len: usize, out: &mut [u8], conns: &m
 
     // Frame + sign it (the export-hardening phase). A no-key client can't sign.
     let mut req = [0u8; ninep_abi::NP_FRAME_MAX];
-    let total = frame_signed(auth, &np[..hdr + clen], &mut req);
+    // (cpu output is a stream, not a framed reply - reply-auth deferred, so the
+    // nonce is unused here.)
+    let (total, _nonce) = frame_signed(auth, &np[..hdr + clen], &mut req);
     if total == 0 {
         return fail(out, b"cpu: no cluster key (cannot authenticate)\r\n");
     }
@@ -1116,7 +1118,7 @@ fn handle_rmount(packed_mac: u64, buf: &[u8], len: usize, out: &mut [u8], auth: 
     // request the remote would reject anyway.
     let mut req = [0u8; ninep_abi::NP_FRAME_MAX];
     let np = &msg[..msg.len().min(ninep_abi::NP_NET_MAX)];
-    let total = frame_signed(auth, np, &mut req);
+    let (total, nonce) = frame_signed(auth, np, &mut req);
     if total == 0 {
         return fail(out, syscall_abi::FS_ERR_AUTH);
     }
@@ -1131,12 +1133,25 @@ fn handle_rmount(packed_mac: u64, buf: &[u8], len: usize, out: &mut [u8], auth: 
     if status != syscall_abi::NET_FETCH_OK || got < ninep_abi::NP_NET_LEN_PREFIX + 8 {
         return fail(out, syscall_abi::NO_FS);
     }
-    // Strip the reply's 4-byte length prefix; the body is `[status:u64][data]`.
+    // Strip the reply's 4-byte length prefix; the sealed body is
+    // `[mac:32][status:u64][data]` (reply-auth). Verify the MAC against the nonce
+    // WE signed the request with before trusting a single byte of the reply - an
+    // injected/forged reply (or one from a peer without the key) fails here.
+    let ml = ninep_abi::NP_MAC_LEN;
     let body_len = u32::from_le_bytes([resp[0], resp[1], resp[2], resp[3]]) as usize;
     let body_end = (ninep_abi::NP_NET_LEN_PREFIX + body_len).min(got);
     let body = &resp[ninep_abi::NP_NET_LEN_PREFIX..body_end];
-    let n = body.len().min(out.len());
-    out[..n].copy_from_slice(&body[..n]);
+    if body.len() < ml + 8 {
+        return fail(out, syscall_abi::FS_ERR_AUTH); // too short to be a sealed reply
+    }
+    let reply_mac = &body[..ml];
+    let reply_np = &body[ml..]; // [status:u64][data]
+    let computed = hmac::hmac_sha256(auth.key(), &nonce, reply_np);
+    if !hmac::mac_eq(reply_mac, &computed) {
+        return fail(out, syscall_abi::FS_ERR_AUTH); // reply not authenticated
+    }
+    let n = reply_np.len().min(out.len());
+    out[..n].copy_from_slice(&reply_np[..n]);
     n
 }
 
@@ -1957,7 +1972,7 @@ fn handle_9p(c: &mut TcpConn, request: &[u8], dials: &mut [Option<DialConn>; MAX
     // MAC over the request and recover the bare NP message. A failure (wrong or
     // missing cluster key, or an unconfigured export) is refused before any verb
     // runs - fail-closed. `authenticate` returns the NP message slice on success.
-    let Some(msg) = authenticate(auth, request) else {
+    let Some((msg, nonce)) = authenticate(auth, request) else {
         deny_9p(c, request);
         return;
     };
@@ -1969,6 +1984,9 @@ fn handle_9p(c: &mut TcpConn, request: &[u8], dials: &mut [Option<DialConn>; MAX
         return;
     }
     let n = build_9p_reply(msg, &mut c.prefix, dials, mac);
+    // Reply-auth (mutual authentication): MAC the reply against the request nonce
+    // so the client can prove it came from a holder of the cluster key.
+    let n = seal_reply(c, auth, &nonce, n);
     c.prefix_len = n;
     c.prefix_off = 0;
     c.file = false;
@@ -1981,8 +1999,10 @@ fn handle_9p(c: &mut TcpConn, request: &[u8], dials: &mut [Option<DialConn>; MAX
 /// `HMAC(cluster_key, nonce || NP-message)`. Returns `None` (refuse) when the
 /// export is unconfigured (fail-closed), the frame is too short, the magic is
 /// absent (an unauthenticated/legacy frame), or the MAC doesn't match (wrong
-/// key / forgery). Constant-time MAC compare (`hmac::mac_eq`).
-fn authenticate<'a>(auth: &Auth, request: &'a [u8]) -> Option<&'a [u8]> {
+/// key / forgery). Constant-time MAC compare (`hmac::mac_eq`). On success also
+/// returns a copy of the request nonce, which the reply is MAC'd against
+/// (reply-auth, mutual authentication - see `seal_reply`).
+fn authenticate<'a>(auth: &Auth, request: &'a [u8]) -> Option<(&'a [u8], [u8; ninep_abi::NP_NONCE_LEN])> {
     if !auth.enabled() {
         return None; // no cluster key configured: export closed
     }
@@ -2001,10 +2021,37 @@ fn authenticate<'a>(auth: &Auth, request: &'a [u8]) -> Option<&'a [u8]> {
     let np = &request[need..];
     let computed = hmac::hmac_sha256(auth.key(), nonce, np);
     if hmac::mac_eq(mac, &computed) {
-        Some(np)
+        let mut nonce_copy = [0u8; ninep_abi::NP_NONCE_LEN];
+        nonce_copy.copy_from_slice(nonce);
+        Some((np, nonce_copy))
     } else {
         None
     }
+}
+
+/// Seal a framed export reply with a MAC (reply-auth / mutual authentication -
+/// tier 2). `c.prefix[..n]` holds the finished framed reply `[len:4][status:8]
+/// [result…]`; rewrite it to `[len':4][mac:32][status:8][result…]` where
+/// `mac = HMAC(key, request_nonce || [status][result])`. Binding to the request
+/// nonce proves the server holds the key AND ties the reply to this specific
+/// request (so a captured reply can't be replayed against another). Returns the
+/// new framed length. (The `cpu`-run output *stream* is not framed and stays
+/// reply-unauthenticated - the harder streaming-MAC case, deferred.)
+fn seal_reply(c: &mut TcpConn, auth: &Auth, nonce: &[u8], n: usize) -> usize {
+    let ml = ninep_abi::NP_MAC_LEN; // 32
+    let body_start = ninep_abi::NP_NET_LEN_PREFIX; // 4
+    if n < body_start || n + ml > c.prefix.len() {
+        return n; // malformed or no room - leave unsealed (shouldn't happen)
+    }
+    let body_len = n - body_start;
+    // MAC over nonce || reply-body (compute before shifting the body).
+    let macv = hmac::hmac_sha256(auth.key(), nonce, &c.prefix[body_start..n]);
+    // Make room for the MAC: shift the body right by `ml`, then write the MAC.
+    c.prefix.copy_within(body_start..n, body_start + ml);
+    c.prefix[body_start..body_start + ml].copy_from_slice(&macv);
+    let new_body = ml + body_len;
+    c.prefix[0..4].copy_from_slice(&(new_body as u32).to_le_bytes());
+    body_start + new_body // = n + ml
 }
 
 /// Stage an auth-denied response on the export connection (the request failed
@@ -2032,19 +2079,20 @@ fn deny_9p(c: &mut TcpConn, request: &[u8]) {
 /// Frame **and sign** an NP message for an outbound export request (the
 /// export-hardening phase - the client-side counterpart of [`authenticate`]).
 /// Writes `[len:4][magic:8][nonce:16][mac:32][np]` into `out` and returns the
-/// total framed length, or `0` if there's no cluster key (can't sign -
-/// fail-closed on the client too) or `out` is too small. The nonce is a fresh,
-/// non-repeating value: the `MONOTONIC_US` clock plus our packed IP (for
-/// cross-machine separation). `mac = HMAC(cluster_key, nonce || np)`.
-fn frame_signed(auth: &Auth, np: &[u8], out: &mut [u8]) -> usize {
+/// total framed length (or `0` if there's no cluster key or `out` is too small)
+/// **and the nonce it used** - the client verifies the reply's MAC against that
+/// same nonce (reply-auth). The nonce is a fresh, non-repeating value: the
+/// `MONOTONIC_US` clock plus our packed IP. `mac = HMAC(cluster_key, nonce || np)`.
+fn frame_signed(auth: &Auth, np: &[u8], out: &mut [u8]) -> (usize, [u8; ninep_abi::NP_NONCE_LEN]) {
+    let zero_nonce = [0u8; ninep_abi::NP_NONCE_LEN];
     if !auth.enabled() {
-        return 0;
+        return (0, zero_nonce);
     }
     let p = ninep_abi::NP_NET_LEN_PREFIX;
     let body = ninep_abi::NP_AUTH_HDR + np.len();
     let total = p + body;
     if total > out.len() || np.len() > ninep_abi::NP_NET_MAX {
-        return 0;
+        return (0, zero_nonce);
     }
     // Fresh nonce: [monotonic_us:8][our_ip_packed:8]. Held in a local so the
     // HMAC input doesn't alias the `out` buffer we're writing the MAC into.
@@ -2065,7 +2113,7 @@ fn frame_signed(auth: &Auth, np: &[u8], out: &mut [u8]) -> usize {
     let mac = hmac::hmac_sha256(auth.key(), &nonce, np);
     let moff = p + ninep_abi::NP_AUTH_MAC_OFF;
     out[moff..moff + ninep_abi::NP_MAC_LEN].copy_from_slice(&mac);
-    total
+    (total, nonce)
 }
 
 /// Serve a remote-run request (cluster Phase 4a - the Plan 9 `cpu` model): spawn

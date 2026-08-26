@@ -194,13 +194,26 @@ pub const NP_REMOTE_CHUNK: usize = 512;
 // where `mac = HMAC-SHA256(cluster_key, nonce || NP-message)`. The shared
 // cluster secret never crosses the wire, and a peer without it cannot forge a
 // request. `len` still counts every byte after the 4-byte prefix (now the auth
-// header + the NP message). The *reply* is unauthenticated in this first cut
-// (the request is the capability; a client trusting the returned data is a
-// later mutual-auth refinement) - so a reply is the same `[u32 len][status:u64]
-// [result]` frame as before. Replay-of-observed-ops is out of scope for this
-// tier: a passive sniffer can replay a captured frame verbatim (same nonce),
-// but cannot forge a *new* path/write - a server nonce or a nonce cache is the
-// documented next step. See `programs/servers/netd/src/hmac.rs`.
+// header + the NP message).
+//
+// The *reply* is authenticated too (tier 2, mutual authentication):
+//
+//   framed reply:  [u32 len][mac:32][status:u64][result...]
+//
+// where `mac = HMAC-SHA256(cluster_key, request_nonce || [status][result])` -
+// the reply is MAC'd against the SAME nonce the client signed its request with,
+// which both proves the reply came from a holder of the key AND binds it to this
+// specific request (a captured reply can't be replayed against another). No
+// reply nonce field is needed - the request nonce is the shared per-transaction
+// value both sides already hold. The client rejects a reply whose MAC doesn't
+// verify (an injected/forged reply, or one from a peer without the key). This is
+// integrity/authenticity, NOT confidentiality: bytes still cross in cleartext.
+//
+// Still out of scope (deferred to the leaving-a-trusted-network hardening,
+// docs/roadmap-cluster.md): replay-of-observed-ops (a passive sniffer can replay
+// a captured request verbatim; forgery of a *new* one it cannot), per-peer
+// identity, transport encryption, and reply-auth for the `cpu`-run output
+// *stream* (not a framed reply). See `programs/servers/netd/src/hmac.rs`.
 // ---------------------------------------------------------------------------
 
 /// Magic at the head of an authenticated framed request, distinguishing it from

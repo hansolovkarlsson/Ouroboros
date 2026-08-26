@@ -50,7 +50,8 @@ KEY = DEFAULT_KEY  # replaced from argv in main()
 
 
 def verify(body):
-    """Strip + verify the auth header; return the bare NP message, or None."""
+    """Strip + verify the auth header; return (NP message, nonce), or None. The
+    nonce is what the reply is MAC'd against (reply-auth)."""
     if len(body) < NP_AUTH_HDR:
         return None
     (magic,) = struct.unpack("<Q", body[:8])
@@ -62,7 +63,7 @@ def verify(body):
     expected = hmac.new(KEY, nonce + np, hashlib.sha256).digest()
     if not hmac.compare_digest(mac, expected):
         return None
-    return np
+    return np, nonce
 
 # The served tree. Directories map a path to a list of (name, is_dir); files map
 # a path to bytes. HELLO.TXT is deliberately > NP_REMOTE_CHUNK (512) so a guest
@@ -116,13 +117,23 @@ def frame_reply(status, data=b""):
 
 def serve_request(body):
     # Authenticate first (the export-hardening phase): reject a wrong/missing
-    # cluster key before serving any verb - the guest surfaces FS_ERR_AUTH.
-    np = verify(body)
-    if np is None:
+    # cluster key before serving any verb - the guest surfaces FS_ERR_AUTH. A
+    # denial is unsealed (the client's reply-verify fails -> auth error anyway).
+    verified = verify(body)
+    if verified is None:
         return frame_reply(FS_ERR_AUTH)
-    body = np
+    body, nonce = verified
+
+    # Every real reply is SEALED (reply-auth): [u32 len][mac:32][status][data],
+    # mac = HMAC(key, request_nonce || [status][data]).
+    def sealed(status, data=b""):
+        inner = struct.pack("<Q", status) + data
+        mac = hmac.new(KEY, nonce + inner, hashlib.sha256).digest()
+        framed = mac + inner
+        return struct.pack("<I", len(framed)) + framed
+
     if len(body) < HDR:
-        return frame_reply(FS_ERROR)
+        return sealed(FS_ERROR)
     verb, tree = struct.unpack("<QQ", body[:16])
     a0, a1, a2, a3 = struct.unpack("<QQQQ", body[16:48])
     payload = body[HDR:]
@@ -131,28 +142,28 @@ def serve_request(body):
     if verb == NP_READDIR:
         out = listing(path)
         if out is None:
-            return frame_reply(FS_ERROR)
+            return sealed(FS_ERROR)
         want = a1
         out = out[:want]
-        return frame_reply(len(out), out)
+        return sealed(len(out), out)
 
     if verb in (NP_READ, NP_READ_AT):
         data = FILES.get(path)
         if data is None:
-            return frame_reply(FS_ERROR)
+            return sealed(FS_ERROR)
         offset, want = a1, a2
         chunk = data[offset : offset + want]
-        return frame_reply(len(chunk), chunk)
+        return sealed(len(chunk), chunk)
 
     if verb == NP_READ_FILE:
         data = FILES.get(path)
         if data is None:
-            return frame_reply(FS_ERROR)
+            return sealed(FS_ERROR)
         want = a1
-        return frame_reply(len(data), data[:want])
+        return sealed(len(data), data[:want])
 
     # Any mutate/unknown verb: the export is read-only.
-    return frame_reply(FS_ERROR)
+    return sealed(FS_ERROR)
 
 
 def main():

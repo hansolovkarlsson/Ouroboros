@@ -55,17 +55,19 @@ def build_frame(verb, tree, params, payload):
 
 def sign_frame(np_msg, key):
     # [u32 len][magic:8][nonce:16][mac:32][np]; len = bytes after the prefix.
-    # mac = HMAC-SHA256(key, nonce || np). The nonce is arbitrary (fresh); the
-    # export doesn't validate freshness in this tier.
+    # mac = HMAC-SHA256(key, nonce || np). Returns (frame, nonce) - the caller
+    # verifies the reply's MAC against the same nonce (reply-auth).
     nonce = os.urandom(NP_NONCE_LEN)
     mac = hmac.new(key, nonce + np_msg, hashlib.sha256).digest()
     auth = struct.pack("<Q", NP_AUTH_MAGIC) + nonce + mac
     body = auth + np_msg
-    return struct.pack("<I", len(body)) + body
+    return struct.pack("<I", len(body)) + body, nonce
 
 
-def recv_reply(sock):
-    # The server frames [u32 len][status u64][data] then FINs; read to EOF.
+def recv_reply(sock, key, nonce):
+    # The server frames [u32 len][mac:32][status u64][data] then FINs (reply-auth).
+    # Verify mac = HMAC(key, req_nonce || [status][data]) before trusting a byte;
+    # a failure (tamper, or a wrong/denied key) -> FS_ERR_AUTH.
     buf = b""
     while True:
         chunk = sock.recv(4096)
@@ -76,18 +78,22 @@ def recv_reply(sock):
         raise RuntimeError(f"short reply ({len(buf)} bytes)")
     (flen,) = struct.unpack("<I", buf[:4])
     body = buf[4:4 + flen]
-    if len(body) < 8:
-        raise RuntimeError(f"reply body too short ({len(body)} bytes)")
-    (status,) = struct.unpack("<Q", body[:8])
-    data = body[8:]
+    if len(body) < 32 + 8:
+        return FS_ERR_AUTH, b""  # too short to be a sealed reply (or a denial)
+    reply_mac, np = body[:32], body[32:]
+    if not hmac.compare_digest(reply_mac, hmac.new(key, nonce + np, hashlib.sha256).digest()):
+        return FS_ERR_AUTH, b""  # reply not authenticated
+    (status,) = struct.unpack("<Q", np[:8])
+    data = np[8:]
     return status, data
 
 
 def one_op(host, port, key, np_msg, timeout=10):
     """Run one signed NP op over a fresh export connection; return (status, data)."""
+    frame, nonce = sign_frame(np_msg, key)
     with socket.create_connection((host, port), timeout=timeout) as s:
-        s.sendall(sign_frame(np_msg, key))
-        status, data = recv_reply(s)
+        s.sendall(frame)
+        status, data = recv_reply(s, key, nonce)
     return status, data
 
 
@@ -269,14 +275,8 @@ def main():
     else:
         print(f"unknown op {op!r}", file=sys.stderr)
         sys.exit(2)
-    frame = sign_frame(np_msg, key)
-
-    with socket.create_connection((host, port), timeout=10) as s:
-        s.sendall(frame)
-        # Don't half-close the write side here: an immediate FIN could race the
-        # request and tear the connection down before the server replies. The
-        # server FINs after its framed reply; recv_reply reads to that EOF.
-        status, data = recv_reply(s)
+    # one_op signs, sends, reads the reply, and verifies the reply MAC (reply-auth).
+    status, data = one_op(host, port, key, np_msg)
 
     if status == FS_ERR_AUTH:
         print("status: AUTH FAILED (export rejected the cluster key)")

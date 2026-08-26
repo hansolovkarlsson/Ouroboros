@@ -7,6 +7,45 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/`; 
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## Reply authentication — mutual auth on the export (auth tier 2, part 1)
+
+v0.10.0 authenticated the export *request* (proving the client holds the cluster
+key). This adds the other direction: the *reply* is now MAC'd too, so the server
+proves *it* holds the key — **mutual authentication**. An active attacker who can
+inject into the TCP stream can no longer feed a client forged data (wrong file
+contents, a fake success); the client rejects any reply whose MAC doesn't verify.
+
+**The mechanism** (free-riding on the symmetric key): the framed reply gains a
+32-byte MAC prepended to its body —
+
+```
+reply:  [u32 len][mac:32][status:u64][result]
+mac = HMAC-SHA256(cluster_key, request_nonce ‖ [status][result])
+```
+
+Binding to the **request nonce** (not a fresh reply nonce) does double duty for
+free: both sides already hold that nonce, so no new field is needed, and it ties
+the reply to its specific request (a captured reply can't be replayed against a
+different one). `netd`'s `seal_reply` wraps every framed export reply
+(`authenticate` now returns the nonce); the client (`handle_rmount`, and the
+`/host` callback that rides it) verifies before trusting a byte, failing
+`FS_ERR_AUTH` on a mismatch. No round trip, no state — the existing `hmac.rs`
+applied to the other direction.
+
+**Scope, honest:** this is **integrity/authenticity, not confidentiality** —
+bytes still cross the wire in cleartext (a sniffer reads your files even with
+perfect MACs). And it's **defense-in-depth under trusted-LAN**, not solving a
+current threat: it's banked cheaply now, while the rest of the hardening (replay
+protection, per-peer identity, transport encryption, and reply-auth for the
+`cpu`-run output *stream*, which is not a framed reply) stays deferred behind an
+explicit **"leaving a trusted network" trigger** on the roadmap.
+
+**Verified** cross-implementation: the guest sealed each reply and the Python
+foreign observer verified it (a correct-key `readdir`/`dial`/`serve` all pass, so
+the guest's Rust `seal_reply` and the Python HMAC agree byte-for-byte); a tampered
+reply — any flipped byte of data or MAC — is rejected. Zero EL0 faults. See the
+tier-2 addendum in [`cluster-auth-postmortem.md`](cluster-auth-postmortem.md).
+
 ## Dial-in: /net/tcp accept — serve on another machine's network
 
 The mirror of dial-out: a machine now **accepts inbound** TCP connections on

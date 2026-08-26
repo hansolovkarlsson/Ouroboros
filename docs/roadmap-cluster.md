@@ -277,10 +277,36 @@ namespace can now bind a remote subtree — a natural Phase 4 hook).
     shares the disk while refusing remote-exec. The symmetric key makes the
     bidirectional `cpu` `/host` callback authenticate for free. See
     [`cluster-auth-postmortem.md`](cluster-auth-postmortem.md).
-  - **Still deferred, out loud:** per-peer identity (vs one cluster secret),
-    reply-direction (mutual) auth, and replay protection (a captured request can
-    be replayed verbatim; forgery of a new one cannot). Each is a named next tier,
-    not a pretence.
+  - **Tier 2 — reply-direction (mutual) auth ✅ DONE (v0.13.0, 2026-08-26).** The
+    export MACs its *reply* too (`mac = HMAC(key, request_nonce ‖ [status]
+    [result])`, prepended to the framed reply), so an active injector can't feed a
+    client forged data; the client rejects any reply whose MAC doesn't verify.
+    Bound to the request nonce (no new wire field). No round trip, no state.
+    **Integrity, not confidentiality** — bytes still cross in cleartext. Scoped to
+    the framed fs / `/net/tcp` replies; the `cpu`-run *output stream* (not a framed
+    reply) is left with the untrusted-network work below. Banked as defense-in
+    -depth under trusted-LAN because the symmetric key made it nearly free. See the
+    tier-2 addendum in [`cluster-auth-postmortem.md`](cluster-auth-postmortem.md).
+  - **Tier 2+, TRIGGER-GATED — activate only when Ouroboros leaves a trusted
+    network.** These are real hardening but **deliberately not built while the
+    deployment is a trusted LAN** (two QEMU VMs, or Hans's own Raspberry Pi
+    boards on his own network — same trusted posture). The **trigger** is a
+    concrete "expose the cluster across a semi-trusted or hostile segment"
+    scenario; until then, building these is a mechanism ahead of its threat model.
+    When the trigger fires:
+    - **Replay protection** — a captured request can be replayed verbatim today
+      (forgery of a *new* one cannot). Fix: a server nonce (costs a per-op round
+      trip) or a bounded seen-nonce cache (needs bounded state under no-heap).
+    - **Per-peer identity** — one shared secret = interchangeable members; no
+      per-machine access control or key rotation. Fix: per-machine identities,
+      properly wanting **asymmetric crypto** (Ed25519-class) — the heavy lift.
+    - **Confidentiality (encryption)** — the important honest one: authentication
+      (tiers 1–2) protects *integrity and who-may-act*, **not secrecy**. Every
+      byte still crosses the wire in **cleartext** — a sniffer reads your files
+      even with perfect MACs. An untrusted-network move needs transport
+      encryption, a separate axis from all the authentication above.
+    - **`cpu`-stream reply-auth** — MAC the remote-run output stream (per-chunk
+      or streaming), the framed-reply auth's harder cousin.
 - **Consistency and failure.** Partitions, disconnects, concurrent writers — the
   CAP realities. Plan: single-writer first, clean-failure semantics, explicit
   about what's *not* coherent. Never pretend the network is reliable.

@@ -7,6 +7,31 @@ for the forward plan see [`roadmap.md`](roadmap.md).
 
 ---
 
+## 2026-08-26 (cont.) — reply authentication (auth tier 2, the cheap half)
+
+v0.10.0 authenticated the export *request*; this makes the *reply* authenticated
+too, so the exchange is mutually authenticated — an active injector can't feed a
+client forged data. The framed reply gains a 32-byte MAC over `request_nonce ‖
+[status][result]`; binding to the request nonce (which both sides already hold)
+means no new wire field *and* ties each reply to its request. `netd`'s
+`seal_reply` wraps every framed export reply; `handle_rmount` verifies before
+trusting a byte. No round trip, no state — the existing `hmac.rs` applied to the
+other direction.
+
+Built as deliberate **defense-in-depth**, not to solve a current threat — Hans
+isn't planning a non-trusted LAN, and even reply-auth only matters against an
+active on-wire attacker. The reason to bank it now: the symmetric key + the
+request-nonce trick made it nearly free. The rest of the hardening (replay
+protection, per-peer identity, transport **encryption**, and reply-auth for the
+`cpu`-run output stream) is now on the roadmap behind an explicit **"leaving a
+trusted network" trigger**. The honest boundary I made sure to state everywhere:
+this is *integrity, not confidentiality* — bytes still cross in cleartext; a
+sniffer still reads every file. Verified cross-implementation (the Python
+observer verifies the guest's sealed reply; a tampered reply is rejected), zero
+faults. Written up as a tier-2 addendum to
+[`cluster-auth-postmortem.md`](cluster-auth-postmortem.md), not a fresh
+postmortem — it's a clean, small follow-on, not a debugging saga.
+
 ## 2026-08-26 (cont.) — dialing *in* through another machine (`/net/tcp` accept)
 
 The mirror of dial-out landed the same day: a machine now **accepts inbound** TCP

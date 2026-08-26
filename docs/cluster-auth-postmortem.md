@@ -161,3 +161,35 @@ deliverable:
 system you already built; and a test that shares your code's assumptions will
 confirm your bug as confidently as your correctness — only a genuinely
 independent observer, the compiler included, tells you the truth.*
+
+## Tier-2 addendum — reply authentication (2026-08-26, v0.13.0)
+
+Tier 1 (above) authenticated the *request*. The reply stayed plaintext, which
+this addendum closes: the export now MACs its reply too, so the exchange is
+**mutually authenticated** — an active injector can no longer feed a client
+forged data.
+
+Two things made it small and worth banking now even though the LAN is trusted:
+
+- **The symmetric key made it nearly free.** The server already shares the key,
+  so it just applies the same `hmac.rs` to the other direction. And binding the
+  reply MAC to the *request nonce* (rather than minting a fresh reply nonce)
+  meant **no new wire field** — both sides already hold that nonce — while also
+  tying each reply to its specific request. The right primitive reused in the
+  right place costs almost nothing; that's the whole reason it was worth doing
+  ahead of its threat model as defense-in-depth.
+
+- **The honest boundary is confidentiality.** This is the line worth stating
+  loudly: reply-auth adds *integrity and authenticity*, **not secrecy**. Every
+  byte still crosses the wire in cleartext. It would be easy to let "the export
+  is authenticated both ways now" quietly imply "the export is secure," and it
+  is not — a passive sniffer still reads every file. Encryption is a *separate
+  axis*, deliberately deferred behind the "leaving a trusted network" trigger
+  along with replay protection and per-peer identity. Naming that boundary is
+  part of the deliverable; an authentication win that lets someone believe they
+  have confidentiality is worse than no win.
+
+Verified the same way tier 1 was — the independent Python observer verifies the
+guest's sealed reply (so the Rust `seal_reply` and the Python HMAC must agree),
+and a tampered reply is rejected. The lesson from tier 1 held: the foreign
+observer, not the mirror, is what proves it.

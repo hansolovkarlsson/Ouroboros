@@ -224,10 +224,13 @@ secret** (since v0.10.0 — the export-hardening phase). Every machine reads the
 same key from `\CLUSTER.KEY` on its boot disk; a request is signed with an HMAC
 so the secret never crosses the wire, and a peer without the key gets nothing
 (fail-closed). So `mount -r` and `cpu` work between machines that share the key,
-and are refused between machines that don't. This is **cluster-membership** auth,
-not per-peer identity, and it assumes a **trusted LAN** for the parts still
-deferred (a passive sniffer can replay an observed request; the reply direction
-isn't authenticated). Two knobs: no `\CLUSTER.KEY` = the export is closed
+and are refused between machines that don't. Since v0.13.0 the exchange is
+**mutually authenticated** — replies are MAC'd too, so a client rejects a forged
+reply — but this is **integrity, not secrecy**: bytes still cross the wire in
+cleartext. This is **cluster-membership** auth, not per-peer identity, and it
+assumes a **trusted LAN** for the parts still deferred (a passive sniffer reads
+your files and can replay an observed request; encryption and per-peer identity
+are gated behind a "leaving a trusted network" trigger on the roadmap). Two knobs: no `\CLUSTER.KEY` = the export is closed
 entirely; a `\NOEXEC` flag file = the machine shares its disk but refuses remote
 `cpu` execution. Don't expose an Ouroboros export to a genuinely hostile network
 yet — per-peer auth and replay protection are named next steps.
