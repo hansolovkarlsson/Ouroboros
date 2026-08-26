@@ -293,6 +293,27 @@ fn handle_client(packed_mac: u64, sender: u64, buf: &[u8], len: usize) {
             let rlen = handle_rmount(packed_mac, buf, len, &mut r);
             reply(sender, &r[..rlen]);
         }
+        // An NP read verb from a *local* client: the /net synthetic filesystem
+        // (cluster Phase 3), served by netd itself. The client resolved /net to a
+        // stripped fspath (e.g. "/ip") and sent a direct NP request here (not
+        // wrapped in NETOP_RMOUNT). Reply in the fsd shape: [status:u64][data].
+        op if (ninep_abi::NP_BASE..ninep_abi::NP_LIMIT).contains(&op) => {
+            const HDR: usize = ninep_abi::NP_REQ_PAYLOAD as usize;
+            let a0 = read_u64(buf, 16) as usize;
+            let a1 = read_u64(buf, 24);
+            let a2 = read_u64(buf, 32);
+            let end = len.min(buf.len());
+            let path = if HDR < end { &buf[HDR..(HDR + a0).min(end)] } else { &[][..] };
+            let want = if op == ninep_abi::NP_READ || op == ninep_abi::NP_READ_AT {
+                a2 as usize
+            } else {
+                a1 as usize
+            };
+            let mut r = [0u8; 8 + 32];
+            let (status, dlen) = net_op(op, path, a1, want.min(32), &mut r[8..]);
+            r[0..8].copy_from_slice(&status.to_le_bytes());
+            reply(sender, &r[..8 + dlen]);
+        }
         // Unknown op (including the supervisor's health-ping): any reply acks
         // it. The value is irrelevant to the ping sentinel.
         _ => reply(sender, &0u64.to_le_bytes()),
@@ -1392,6 +1413,19 @@ fn route_export(path: &[u8]) -> (u64, &[u8]) {
     if path == b"/dev/cons" {
         return (ninep_abi::NS_CON_TREE as u64, b"");
     }
+    // /net (this machine's network identity, read-only) - served by netd itself.
+    const N: &[u8] = b"/net";
+    let is_net = path.len() >= N.len()
+        && &path[..N.len()] == N
+        && (path.len() == N.len() || path[N.len()] == b'/');
+    if is_net {
+        let tree = ninep_abi::NS_NET_TREE as u64;
+        return if path.len() == N.len() {
+            (tree, b"/") // "/net" -> the net root
+        } else {
+            (tree, &path[N.len()..]) // "/net/ip" -> "/ip"
+        };
+    }
     const P: &[u8] = b"/proc";
     let is_proc = path.len() >= P.len()
         && &path[..P.len()] == P
@@ -1405,6 +1439,91 @@ fn route_export(path: &[u8]) -> (u64, &[u8]) {
         }
     } else {
         (0, path)
+    }
+}
+
+/// The `/net` synthetic filesystem (cluster Phase 3): this machine's network
+/// identity as read-only files, served by `netd` itself. `/` lists `ip` and
+/// `mac`; `/ip` is the dotted-quad IPv4, `/mac` the colon-hex MAC. Serves one NP
+/// read verb into `out` (offset/want windowing like fsd), returning the status
+/// (a byte count / real size, or an `FS_ERR_*`). Shared by the export gateway
+/// (remote reads) and the local client path (`handle_client`).
+fn net_op(verb: u64, fspath: &[u8], offset: u64, want: usize, out: &mut [u8]) -> (u64, usize) {
+    // The file contents (tiny), rebuilt each call from the live NIC state.
+    let mut content = [0u8; 24];
+    let clen = net_content(fspath, &mut content);
+
+    if verb == ninep_abi::NP_READDIR {
+        if fspath == b"/" {
+            let listing: &[u8] = b"ip\nmac\n";
+            let n = listing.len().min(want).min(out.len());
+            out[..n].copy_from_slice(&listing[..n]);
+            return (n as u64, n);
+        }
+        return (syscall_abi::FS_ERR_NOT_A_DIRECTORY, 0);
+    }
+    let Some(clen) = clen else {
+        return (syscall_abi::FS_ERR_NOT_FOUND, 0);
+    };
+    match verb {
+        v if v == ninep_abi::NP_READ_FILE => {
+            // Status = the file's real size; data = its first min(size, want) bytes.
+            let n = clen.min(want).min(out.len());
+            out[..n].copy_from_slice(&content[..n]);
+            (clen as u64, n)
+        }
+        v if v == ninep_abi::NP_READ || v == ninep_abi::NP_READ_AT => {
+            let off = offset as usize;
+            if off >= clen {
+                return (0, 0); // at/past EOF
+            }
+            let n = (clen - off).min(want).min(out.len());
+            out[..n].copy_from_slice(&content[off..off + n]);
+            (n as u64, n)
+        }
+        _ => (syscall_abi::FS_ERROR, 0), // /net is read-only
+    }
+}
+
+/// The content of a `/net` file into `buf`: `/ip` -> dotted IPv4, `/mac` ->
+/// colon-hex MAC. `None` if `fspath` isn't a `/net` file.
+fn net_content(fspath: &[u8], buf: &mut [u8]) -> Option<usize> {
+    if fspath == b"/ip" {
+        let ip = our_ip();
+        let mut n = 0;
+        for (i, octet) in ip.iter().enumerate() {
+            if i > 0 {
+                buf[n] = b'.';
+                n += 1;
+            }
+            n += u64_decimal(*octet as u64, &mut buf[n..]);
+        }
+        buf[n] = b'\n';
+        Some(n + 1)
+    } else if fspath == b"/mac" {
+        let mac = unpack_mac(syscall(syscall_abi::NET_MAC, 0));
+        let mut n = 0;
+        for (i, b) in mac.iter().enumerate() {
+            if i > 0 {
+                buf[n] = b':';
+                n += 1;
+            }
+            buf[n] = hex_digit(b >> 4);
+            buf[n + 1] = hex_digit(b & 0xf);
+            n += 2;
+        }
+        buf[n] = b'\n';
+        Some(n + 1)
+    } else {
+        None
+    }
+}
+
+fn hex_digit(v: u8) -> u8 {
+    if v < 10 {
+        b'0' + v
+    } else {
+        b'a' + (v - 10)
     }
 }
 
@@ -1450,6 +1569,18 @@ fn build_9p_reply(request: &[u8], out: &mut [u8; PREFIX_MAX]) -> usize {
             _ => syscall_abi::FS_ERROR, // console is write-only
         };
         return frame_reply(out, status, &[]);
+    }
+    // /net: this machine's network identity, served by netd itself (read-only).
+    if tree == ninep_abi::NS_NET_TREE as u64 {
+        let mut ndata = [0u8; 32];
+        // readdir/read_file take the result window in a1; read/read_at in a2.
+        let want = if verb == ninep_abi::NP_READ || verb == ninep_abi::NP_READ_AT {
+            p2 as usize
+        } else {
+            p1 as usize
+        };
+        let (status, dlen) = net_op(verb, fspath, p1, want.min(ndata.len()), &mut ndata);
+        return frame_reply(out, status, &ndata[..dlen]);
     }
     let mut buf = [0u8; EXPORT_CHUNK];
 

@@ -7,6 +7,37 @@ for the forward plan see [`roadmap.md`](roadmap.md).
 
 ---
 
+## 2026-08-25 (cont.) — Phase 3, step 3: /net, and Phase 3 complete
+
+The last Phase 3 file server: `/net`, the machine's network identity as read-only
+files (`/net/ip`, `/net/mac`). Locally `cat /net/ip`; remotely `cat /mnt/a/net/ip`
+reads *another* machine's address. That completes the trio — `/proc`,
+`/dev/cons`, `/net` — three resources, three file servers, each remotely readable.
+
+`/net` is the first served by netd itself (netd owns the NIC, so it knows the
+IP/MAC). The remote half was easy — the export already routes prefixes, and netd
+is the export, so it just serves `/net` from its own state. The interesting part
+was the *local* half: a local `cat /net/ip` has to reach netd, but netd's client
+handler only spoke NETOP_*. So it now also answers NP read verbs addressed to
+NET_TASK. And the routing had a wrinkle: a `/net` binding and a *remote* mount
+both resolve to `server = NET_TASK`, so I needed to tell them apart — the
+discriminator is the endpoint (a remote mount always carries a real ip:port; local
+`/net` carries zeros). `is_local_net` checks it, and a local read goes to a direct
+`np_netlocal` NP call instead of the NETOP_RMOUNT remote wrap. Writes to `/net`
+are refused.
+
+Worked on the first boot of both: local ip/mac read true (10.0.2.15 + the default
+MAC), write refused; two VMs, B read A's 10.0.2.10 and its ...:0a MAC. Zero aborts.
+
+That's three prefix special-cases in the export now (/proc, /dev/cons, /net) —
+which is finally the honest signal that the namespace-aware export I've been
+deferring has earned its place. Each of these was a few lines because it rode the
+export's existing routing; a fourth resource is when I'd stop special-casing and
+make the export resolve through a real composed namespace. But Phase 3's stated
+scope — resources as files, remotely mountable — is done. The /net slice is
+network *identity*; using another machine's NIC to actually dial out (Plan 9's
+/net/tcp connection files) is a bigger surface for later. Cut v0.8.0.
+
 ## 2026-08-25 (cont.) — Phase 3, step 2: /dev/cons, writing another machine's screen
 
 Second Phase 3 file server: `/dev/cons`, the console as a writable file. The demo

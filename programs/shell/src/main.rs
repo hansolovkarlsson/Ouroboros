@@ -1909,6 +1909,9 @@ fn resolve_ns(ns: &[u8], path: &str, out: &mut [u8]) -> Resolved {
     }
     if best_tree == ninep_abi::NS_CON_TREE {
         Resolved { server: syscall_abi::CON_TASK, tree: 0, endpoint, len: n }
+    } else if best_tree == ninep_abi::NS_NET_TREE {
+        // Local /net (netd-fs): NET_TASK with a zero endpoint (vs a remote mount).
+        Resolved { server: syscall_abi::NET_TASK, tree: 0, endpoint: [0; ninep_abi::NS_ENDPOINT_LEN], len: n }
     } else if remote {
         Resolved { server: syscall_abi::NET_TASK, tree: 0, endpoint, len: n }
     } else {
@@ -1929,11 +1932,63 @@ fn mount_resolve(path: &str, out: &mut [u8]) -> Resolved {
 fn np_dispatch(r: &Resolved, verb: u64, params: [u64; 4], payload1: &[u8], payload2: &[u8], result: &mut [u8]) -> u64 {
     if r.server == syscall_abi::CON_TASK {
         syscall_abi::FS_ERROR // the console is write-only (writes con_write below)
+    } else if is_local_net(r) {
+        np_netlocal(verb, params, payload1, result)
     } else if r.server == syscall_abi::NET_TASK {
         np_remote(&r.endpoint, verb, params, payload1, payload2, result)
     } else {
         np_call(verb, r.tree, params, payload1, payload2, result)
     }
+}
+
+/// The local `/net` netd-fs (cluster Phase 3): `NET_TASK` with a zero endpoint (a
+/// remote mount always has a real endpoint). A duplicate of `ulib::is_local_net`.
+fn is_local_net(r: &Resolved) -> bool {
+    r.server == syscall_abi::NET_TASK && r.endpoint == [0u8; ninep_abi::NS_ENDPOINT_LEN]
+}
+
+/// A direct NP read to `NET_TASK` for the local `/net` filesystem - like
+/// `np_call` but addressed to `netd` (read-only, inline data). A duplicate of
+/// `ulib::np_netlocal`.
+fn np_netlocal(verb: u64, params: [u64; 4], payload1: &[u8], result: &mut [u8]) -> u64 {
+    const HDR: usize = ninep_abi::NP_REQ_PAYLOAD as usize;
+    let mut req = [0u8; syscall_abi::MSG_MAX_LEN as usize];
+    req[0..8].copy_from_slice(&verb.to_le_bytes());
+    let mut i = 0;
+    while i < 4 {
+        let at = 16 + i * 8;
+        req[at..at + 8].copy_from_slice(&params[i].to_le_bytes());
+        i += 1;
+    }
+    let end = HDR + payload1.len();
+    if end > req.len() {
+        return syscall_abi::FS_ERROR;
+    }
+    req[HDR..end].copy_from_slice(payload1);
+    let mut reply = [0u8; syscall_abi::MSG_MAX_LEN as usize];
+    let packed = syscall4(
+        syscall_abi::MSG_CALL,
+        syscall_abi::NET_TASK,
+        req.as_ptr() as u64,
+        end as u64,
+        reply.as_mut_ptr() as u64,
+    );
+    if packed == syscall_abi::TASK_ERR_NO_SUCH_TASK {
+        return NO_FS;
+    }
+    if packed >= FS_ERR_MIN {
+        return syscall_abi::FS_ERROR;
+    }
+    let reply_len = ((packed & 0xffff_ffff) as usize).min(reply.len());
+    if reply_len < 8 {
+        return syscall_abi::FS_ERROR;
+    }
+    let status = u64::from_le_bytes([
+        reply[0], reply[1], reply[2], reply[3], reply[4], reply[5], reply[6], reply[7],
+    ]);
+    let data_len = (reply_len - 8).min(result.len());
+    result[..data_len].copy_from_slice(&reply[8..8 + data_len]);
+    status
 }
 
 /// One remote verb round trip via `netd`'s `NETOP_RMOUNT`. A duplicate of
@@ -2089,6 +2144,9 @@ fn fs_write_bulk(path: &str, data: &[u8]) -> u64 {
         con_write(data); // /dev/cons
         return 0;
     }
+    if is_local_net(&r) {
+        return syscall_abi::FS_ERROR; // /net is read-only
+    }
     if r.server == syscall_abi::NET_TASK {
         // Remote full overwrite: truncate-and-write the first chunk (NP_WRITE),
         // then stream the rest (NP_WRITE_AT). See ulib::fs_write_bulk.
@@ -2159,6 +2217,9 @@ fn fs_write_at(path: &str, offset: u64, data: &[u8]) -> u64 {
     if r.server == syscall_abi::CON_TASK {
         con_write(data); // /dev/cons (offset ignored - the console is a stream)
         return 0;
+    }
+    if is_local_net(&r) {
+        return syscall_abi::FS_ERROR; // /net is read-only
     }
     if r.server == syscall_abi::NET_TASK {
         // Remote: chunk to the inline cap, one NP_WRITE_AT per <=NP_REMOTE_CHUNK
@@ -2359,7 +2420,43 @@ fn cmd_mount(line: &str, arg: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize, out: &
         "-r" => cmd_mount_remote(line, cwd, cwd_len, out),
         "-p" => cmd_mount_proc(line, cwd, cwd_len, out),
         "-c" => cmd_mount_con(line, cwd, cwd_len, out),
+        "-n" => cmd_mount_net(line, cwd, cwd_len, out),
         _ => cmd_mount_at(line, cwd, cwd_len, out),
+    }
+}
+
+/// `mount -n <path>` - bind the network server's synthetic `/net` (this machine's
+/// network identity as read-only files, cluster Phase 3) at `<path>`. Then `ls
+/// <path>` shows `ip`/`mac` and `cat <path>/ip` reads this machine's address. A
+/// remote machine's `/net` needs no bind - `cat <remote-mount>/net/ip` reads it
+/// (netd's export routes `/net`). Usually `mount -n /net`.
+fn cmd_mount_net(line: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize, out: &mut Output) {
+    let mut words = line.split_whitespace();
+    words.next(); // "mount"
+    words.next(); // "-n"
+    let Some(path_arg) = words.next() else {
+        out.put_line("mount: usage: mount -n <path>  (e.g. mount -n /net)");
+        return;
+    };
+    let mut pbuf = [0u8; PATH_SIZE];
+    let Some(pl) = resolve_path(cwd_str(cwd, cwd_len), path_arg, &mut pbuf) else {
+        out.put_line("mount: path too long");
+        return;
+    };
+    let prefix = strip_trailing_slash(&pbuf[..pl]);
+    if prefix.len() < 2 || prefix[0] != b'/' {
+        out.put_line("mount: <path> must be a path below /");
+        return;
+    }
+    if ns_add(prefix, b"/", ninep_abi::NS_NET_TREE) {
+        out.put_str("net mounted at ");
+        if let Ok(p) = core::str::from_utf8(prefix) {
+            out.put_line(p);
+        } else {
+            out.put_line("");
+        }
+    } else {
+        out.put_line("mount: path too long or namespace full");
     }
 }
 

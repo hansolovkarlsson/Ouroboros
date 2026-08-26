@@ -186,20 +186,22 @@ network and reads/writes it, surviving a clean disconnect. **This is the
 milestone that answers the years-long question with a yes** — everything after is
 expansion of a proven idea.
 
-### Phase 3 — All resources as files, remotely mountable 🚧 IN PROGRESS
+### Phase 3 — All resources as files, remotely mountable ✅ DONE
 
 > **Detailed design:** [`roadmap-cluster-phase3.md`](roadmap-cluster-phase3.md).
-> **Step 1 (`/proc`) ✅ DONE:** a synthetic, read-only process-table filesystem (an
-> fsd `Filesystem` arm at a reserved tree, generated from `TASK_STATE`), local via
-> `mount -p /proc` and remotely readable — `ls /mnt/a/proc` shows another machine's
-> live tasks. **Step 2 (`/dev/cons`) ✅ DONE:** the console as a writable file, the
-> first route to a *non-fsd* server (`cond`) — `mount -c /dev/cons` locally, and
-> `write /mnt/a/dev/cons …` prints on another machine's screen (remote console).
+> Three resources, each a file server, each remotely readable:
+> **`/proc`** (a synthetic process-table fs in fsd — `ls /mnt/a/proc` shows another
+> machine's live tasks); **`/dev/cons`** (the console as a writable file routed to
+> `cond` — `write /mnt/a/dev/cons …` prints on another machine's screen); and
+> **`/net`** (the network identity as read-only files, served by netd itself —
+> `cat /mnt/a/net/ip` reads another machine's address). "Everything is a file,
+> everything is mountable" pays off. Cut **v0.8.0**.
 
-- Network (`/net` — use *another* machine's NIC) is the remaining big piece.
-  `/proc` and `/dev/cons` are done. "Everything is a file, everything is mountable"
-  pays off: sharing a resource is just mounting its tree from the machine that has
-  it.
+Deferred to later phases: Plan 9's full `/net/tcp` connection files (using another
+machine's NIC to *dial out*); and — now that three non-disk servers are exported
+by prefix special-case — a fully namespace-aware export (resolve incoming paths
+through a composed per-export namespace) to retire the prefix hacks; plus union
+directories when a consumer appears.
 - Union directories (Plan 9's join-several-sources-under-one-name) if/when a real
   consumer appears — not before. A fully namespace-aware export (vs. `/proc`'s
   prefix hack) lands when a second synthetic tree needs it.

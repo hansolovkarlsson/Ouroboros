@@ -137,6 +137,17 @@ pub const NS_REMOTE_TREE: u8 = 0xFF;
 /// `target`; the remote-side root path follows.
 pub const NS_ENDPOINT_LEN: usize = 6;
 
+/// The namespace `tree` sentinel marking a binding to the **network server's
+/// `/net`** - a synthetic, read-only view of the machine's network identity
+/// (`/net/ip`, `/net/mac`), served by `netd` itself (cluster Phase 3). Like the
+/// console sentinel it routes to a non-fsd server (`NET_TASK`), but for *reads*:
+/// `resolve_ns` returns `server = NET_TASK` with a zero endpoint (the marker that
+/// distinguishes this local netd-fs from a remote mount, which always carries a
+/// real endpoint). The shell's `mount -n /net` binds it; `netd`'s export
+/// prefix-routes `/net` too, so `cat /mnt/a/net/ip` reads another machine's
+/// address. Chosen just below [`NS_CON_TREE`].
+pub const NS_NET_TREE: u8 = 0xFD;
+
 /// The namespace `tree` sentinel marking a binding to the **console server**
 /// (`cond`, `CON_TASK`) - cluster Phase 3's `/dev/cons`. Unlike a real fsd tree
 /// (`/proc`'s [`NS_PROC_TREE`]), this routes to a *different server*: a write to a

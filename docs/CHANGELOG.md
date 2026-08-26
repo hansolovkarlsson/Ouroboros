@@ -7,6 +7,46 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/`; 
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## Cluster Phase 3 (step 3): `/net` — a machine's network identity as files (Phase 3 done)
+
+The third and last Phase 3 file server, and the first served by **`netd` itself**:
+`/net`, a synthetic read-only view of the machine's network identity —
+`/net/ip` (dotted-quad IPv4), `/net/mac` (colon-hex MAC). Locally `mount -n /net;
+cat /net/ip`; remotely, **`cat /mnt/a/net/ip` reads machine A's address**. With it,
+**Phase 3 is complete** — three resources (`/proc`, `/dev/cons`, `/net`), each a
+file server, each remotely readable.
+
+**Served by netd, both directions.** `/proc` lives in fsd and `/dev/cons` routes
+to cond; `/net` is netd's *own* synthetic filesystem (netd owns the NIC, so it
+knows the IP/MAC — `our_ip()` and `NET_MAC`). A shared `net_op` serves the read
+verbs (readdir → `ip`/`mac`; read `/ip`/`/mac` with offset/want windowing) and is
+driven from two places: the **export gateway** (`route_export` recognizes `/net`,
+so a remote read is served straight from netd), and — new — netd's **local client
+handler**, which now answers NP read verbs addressed to `NET_TASK` (a local
+client's `/net` read is a direct NP call, not the `NETOP_RMOUNT` remote wrap).
+
+**The local-vs-remote discriminator.** A `/net` binding and a remote mount both
+resolve to `server = NET_TASK`, so they're told apart by the **endpoint**: `/net`
+(local netd-fs) carries a zero endpoint, a remote mount a real one. `resolve_ns`
+sets it, `is_local_net` checks it, and the fs helpers route a local `/net` read to
+a new `np_netlocal` (a direct NP call to `NET_TASK`) instead of `np_remote`;
+writes to `/net` are refused (read-only). Threaded through both `ulib` and the
+shell. The shell's `mount -n /net` binds it (`NS_NET_TREE` sentinel).
+
+**How it was proven.** Locally: `mount -n /net; ls /net` → `ip`/`mac`, `cat
+/net/ip` → `10.0.2.15`, `cat /net/mac` → the MAC, `write /net/ip x` refused. Two
+VMs: from B, `ls /mnt/a/net` → `ip`/`mac`, `cat /mnt/a/net/ip` → `10.0.2.10` (A's
+MAC-derived address), `cat /mnt/a/net/mac` → `52:54:00:12:34:0a` — B reading A's
+network identity over 9P/TCP. Zero `-d int` aborts on both nodes.
+
+**Phase 3 complete → cut v0.8.0.** Scope, honestly: `/net` is the network-identity
+slice (Plan 9's full `/net/tcp` connection files — using another machine's NIC to
+*dial* — is a later, larger surface). And there are now **three** non-disk prefix
+special-cases in the export, which is the real signal that the deferred
+namespace-aware export (resolve incoming paths through a composed per-export
+namespace, retiring the prefix hacks) has earned its place next. See
+[`roadmap-cluster-phase3.md`](roadmap-cluster-phase3.md).
+
 ## Cluster Phase 3 (step 2): `/dev/cons` — write another machine's screen
 
 The second Phase 3 file server, and the first that routes to a **non-fsd**

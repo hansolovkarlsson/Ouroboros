@@ -104,10 +104,25 @@ deferred until more than two synthetic trees exist to expose.
   `-d int` aborts. (`/dev` as a directory listing isn't served — `/dev/cons` is
   the writable file.)
 
-Later Phase 3 (not yet): `/net` (use another machine's NIC), and — now that
-`/dev/cons` is the *second* non-disk consumer — a fully namespace-aware export
-(resolve incoming paths through a composed per-export namespace) to retire the
-per-server prefix special-cases, plus union directories when a consumer appears.
+- **3c — `/net`, local + remote. ✅ DONE.** The machine's network identity as
+  read-only files (`/net/ip`, `/net/mac`), served by **`netd` itself** (the NIC
+  owner). A shared `net_op` serves the read verbs, driven from the export
+  (`route_export` recognizes `/net`) *and* from netd's local client handler (which
+  now answers NP read verbs addressed to `NET_TASK`). A `/net` binding and a
+  remote mount both resolve to `server = NET_TASK`, told apart by the endpoint
+  (local `/net` = zero, remote = real); `is_local_net` routes a local read to a
+  direct `np_netlocal` call. Shell `mount -n /net`; writes refused (read-only).
+  *Shipped:* locally `mount -n /net; cat /net/ip` → this machine's address; two
+  VMs, `cat /mnt/a/net/ip` → A's `10.0.2.10` and `/net/mac` → A's MAC. Zero
+  `-d int` aborts.
+
+**Phase 3 complete** — `/proc`, `/dev/cons`, `/net`, each a file server, each
+remotely readable. Not yet (later phases / deferred): Plan 9's full `/net/tcp`
+connection files (dialing *out* via another machine's NIC — a larger surface);
+and — now that there are **three** non-disk prefix special-cases in the export —
+the namespace-aware export (resolve incoming paths through a composed per-export
+namespace) to retire the prefix hacks, which has now clearly earned its place as
+the next structural step; plus union directories when a consumer appears.
 
 ## Risks / deferred
 

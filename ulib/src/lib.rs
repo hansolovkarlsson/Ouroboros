@@ -557,6 +557,11 @@ fn resolve_ns(ns: &[u8], path: &str, out: &mut [u8]) -> Resolved {
         // A console binding routes to CON_TASK (the console server), not fsd -
         // write-only; the fs_path is unused (the console ignores it).
         Resolved { server: syscall_abi::CON_TASK, tree: 0, endpoint, len: n }
+    } else if best_tree == ninep_abi::NS_NET_TREE {
+        // A /net binding routes to NET_TASK (the network server) as a *local*
+        // netd-fs - a zero endpoint distinguishes it from a remote mount (which
+        // always carries a real endpoint). Read-only (network identity files).
+        Resolved { server: syscall_abi::NET_TASK, tree: 0, endpoint: [0; ninep_abi::NS_ENDPOINT_LEN], len: n }
     } else if remote {
         Resolved { server: syscall_abi::NET_TASK, tree: 0, endpoint, len: n }
     } else {
@@ -585,11 +590,66 @@ fn np_dispatch(r: &Resolved, verb: u64, params: [u64; 4], payload1: &[u8], paylo
         // The console is write-only; reads/dir-ops/path-ops don't apply. (Writes
         // to /dev/cons are handled in the fs_write_* helpers, which con_write.)
         syscall_abi::FS_ERROR
+    } else if is_local_net(r) {
+        np_netlocal(verb, params, payload1, result)
     } else if r.server == syscall_abi::NET_TASK {
         np_remote(&r.endpoint, verb, params, payload1, payload2, result)
     } else {
         np_call(verb, r.tree, params, payload1, payload2, result)
     }
+}
+
+/// Whether a resolution is the *local* `/net` netd-fs (cluster Phase 3) rather
+/// than a remote mount: `NET_TASK` with a zero endpoint (a remote mount always
+/// carries a real endpoint).
+fn is_local_net(r: &Resolved) -> bool {
+    r.server == syscall_abi::NET_TASK && r.endpoint == [0u8; ninep_abi::NS_ENDPOINT_LEN]
+}
+
+/// One direct NP verb round trip to `netd` for the local `/net` filesystem: like
+/// [`np_call`] but addressed to `NET_TASK` (which serves `/net` read verbs in its
+/// client handler), and read-only (no payload2, no grant - `/net`'s data is
+/// inline in the reply). Reply shape `[status:u64][data]`, decoded as elsewhere.
+fn np_netlocal(verb: u64, params: [u64; 4], payload1: &[u8], result: &mut [u8]) -> u64 {
+    const HDR: usize = ninep_abi::NP_REQ_PAYLOAD as usize;
+    let mut req = [0u8; syscall_abi::MSG_MAX_LEN as usize];
+    req[0..8].copy_from_slice(&verb.to_le_bytes());
+    // tree (offset 8) stays 0.
+    let mut i = 0;
+    while i < 4 {
+        let at = 16 + i * 8;
+        req[at..at + 8].copy_from_slice(&params[i].to_le_bytes());
+        i += 1;
+    }
+    let end = HDR + payload1.len();
+    if end > req.len() {
+        return syscall_abi::FS_ERROR;
+    }
+    req[HDR..end].copy_from_slice(payload1);
+    let mut reply = [0u8; syscall_abi::MSG_MAX_LEN as usize];
+    let packed = syscall4(
+        syscall_abi::MSG_CALL,
+        syscall_abi::NET_TASK,
+        req.as_ptr() as u64,
+        end as u64,
+        reply.as_mut_ptr() as u64,
+    );
+    if packed == syscall_abi::TASK_ERR_NO_SUCH_TASK {
+        return syscall_abi::NO_FS;
+    }
+    if packed >= syscall_abi::FS_ERR_MIN {
+        return syscall_abi::FS_ERROR;
+    }
+    let reply_len = ((packed & 0xffff_ffff) as usize).min(reply.len());
+    if reply_len < 8 {
+        return syscall_abi::FS_ERROR;
+    }
+    let status = u64::from_le_bytes([
+        reply[0], reply[1], reply[2], reply[3], reply[4], reply[5], reply[6], reply[7],
+    ]);
+    let data_len = (reply_len - 8).min(result.len());
+    result[..data_len].copy_from_slice(&reply[8..8 + data_len]);
+    status
 }
 
 /// One remote verb round trip: build an `NETOP_RMOUNT` request
@@ -700,6 +760,11 @@ pub fn fs_read_bulk(path: &str, offset: u64, buf: &mut [u8]) -> u64 {
     if r.server == syscall_abi::CON_TASK {
         return syscall_abi::FS_ERROR; // the console is write-only
     }
+    if is_local_net(&r) {
+        // Local /net: data comes inline (no grant), like the remote case.
+        let want = buf.len().min(ninep_abi::NP_REMOTE_CHUNK) as u64;
+        return np_netlocal(ninep_abi::NP_READ, [r.len as u64, offset, want, 0], &fsp[..r.len], buf);
+    }
     // Remote: no grant crosses a machine boundary. The export delivers the bytes
     // *inline* in the reply, so ask for a chunk that fits one message and copy
     // the returned data straight into `buf` (the caller loops with a rising
@@ -768,6 +833,9 @@ pub fn fs_write_bulk(path: &str, data: &[u8]) -> u64 {
     if r.server == syscall_abi::CON_TASK {
         con_write(data); // /dev/cons: the bytes go to the console
         return 0;
+    }
+    if is_local_net(&r) {
+        return syscall_abi::FS_ERROR; // /net is read-only
     }
     // Remote: no grant crosses a machine, so the data rides inline in the
     // request (bounded by NP_REMOTE_CHUNK). The Phase 1 export is read-only, so
@@ -844,6 +912,9 @@ pub fn fs_write_at(path: &str, offset: u64, data: &[u8]) -> u64 {
     if r.server == syscall_abi::CON_TASK {
         con_write(data); // /dev/cons: append to the console (offset ignored)
         return 0;
+    }
+    if is_local_net(&r) {
+        return syscall_abi::FS_ERROR; // /net is read-only
     }
     if r.server == syscall_abi::NET_TASK {
         // Remote: chunk to the inline cap (no grant crosses a machine), one
