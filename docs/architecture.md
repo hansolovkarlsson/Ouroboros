@@ -469,6 +469,54 @@ sentinel in the table below is a constant in the `syscall-abi` crate
 on it directly, so the two sides of this ABI can't silently drift apart
 the way hand-duplicated numbers did before this crate existed.
 
+### Philosophy — not POSIX, not Linux, a message-passing microkernel ABI
+
+The "POSIX-ish" project goal describes a *feel* — a shell, familiar
+command names, byte-masked exit codes — not any real conformance. Nothing
+in this ABI is POSIX- or Linux-compatible, and it isn't meant to be. What
+it borrows from Linux is exactly one thing: the **register shape** of the
+calling convention (number in `x8`, args in `x0`-`x3`, return in `x0`,
+trapped via `svc`), chosen because it's a sane, familiar layout. The
+syscall *numbers* match nothing, and no code anywhere reads a Linux
+syscall number. Three properties make this a fundamentally different kind
+of ABI from either:
+
+- **`spawn`, not `fork`+`exec`.** There is no `fork`, no address-space
+  copy, no exec-replaces-current-process. `spawn` (16) creates a *new*
+  task running *alongside* the caller, which is left completely untouched
+  — closer to `posix_spawn`/`CreateProcess` than to Unix process
+  creation. This is a deliberate microkernel choice, not a not-yet-built
+  simplification: per-task page tables and EL0 isolation make a new
+  isolated region the natural unit, and a copy-on-write `fork` over that
+  model would be a large piece of machinery serving no current need.
+
+- **The syscall surface is deliberately tiny; the real "API" is IPC to
+  userland servers.** What POSIX makes a kernel entry point, Ouroboros
+  makes a *message* to a server. There is no `open`/`read`/`write`/`stat`/
+  `mkdir`/`unlink`, no `socket`/`connect` — none of the POSIX file or
+  network calls exist as syscalls. They used to (the `fs_*` calls at
+  7-14); they were moved *out* of the kernel into the filesystem server's
+  `FSOP_*` message protocol, and their old numbers are left as gaps
+  (gravestones, for ABI stability). The kernel keeps only: task lifecycle
+  (`spawn`/`exit`/`kill`/`wait`/`task_state`/`fg`), IPC primitives
+  (`msg_send`/`msg_recv`/`msg_call`/`grant`/`safecopy`/`delegate`), raw
+  console I/O, and — its *entire* remaining storage role — the three
+  `block_*` calls, gated to `fsd` alone. Files go to `fsd`, the console to
+  `cond`, the network to `netd`, each over the same message verbs.
+
+- **It composes into the cluster for free.** Because "a file operation" is
+  already a message to a server rather than a kernel trap, the same verbs
+  run over TCP instead of local IPC with no new kernel surface — which is
+  why remote mounts, remote `/proc`/`/dev/cons`/`/net`, and remote `cpu`
+  fell out of the existing design rather than requiring new syscalls.
+
+The shape to keep in mind, then, is **Plan 9 / microkernel, not Unix**:
+the kernel schedules tasks, passes messages, and touches the raw block
+device; everything a POSIX programmer thinks of as a syscall is an IPC
+round-trip to a userland server. The table below is intentionally short
+for that reason — it is the whole trap surface, and it is meant to stay
+roughly this size as the system grows by adding *servers*, not syscalls.
+
 | Number | Name | Arguments | Returns | Notes |
 |---|---|---|---|---|
 | 0 | `print` | value to log | `0` | Debug/demo only — logs through the kernel console with a fixed prefix, not a general write primitive |

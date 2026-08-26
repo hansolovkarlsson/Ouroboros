@@ -764,6 +764,77 @@ a change, did a fix regress the boot sequence — this turns what used to
 be a human-paced manual check into something that can run unattended and
 be reviewed after the fact from the saved screenshots.
 
+## POSIX / C-program portability: a userland libc personality (future, not sequenced)
+
+**The goal, restated honestly.** The original `notes.txt` intent was
+"POSIX-ish system calls." What actually got built is *not* POSIX and not
+Linux — it's a message-passing microkernel ABI (see
+`docs/architecture.md`'s "Philosophy — not POSIX, not Linux" subsection):
+a tiny syscall trap surface plus a set of userland servers reached by IPC,
+and — via the cluster arc — the same verbs over TCP. That divergence was
+*forced* by the microkernel/isolation work (a filesystem the kernel
+depends on is a split, not a driver) and then *rationalized* by the Plan 9
+direction (one uniform file protocol, per-task namespaces). **The decision
+here is to keep that design, not to force POSIX back into the kernel** —
+and to recover C-program portability the way real microkernels do: as a
+**userland POSIX personality**, not a kernel ABI.
+
+**The key realization: POSIX is a libc, not a kernel.** Existing C
+programs call `libc` (`open`/`read`/`printf`/`malloc`), never raw
+syscalls. So the port target is the *bottom edge of a libc*, whose stubs
+translate into this project's existing server messages — `read(fd)` →
+`FSOP_READ`/`NP_READ` to `fsd`, `write(1,…)` → `cond`, `socket`/`connect`
+→ `netd`. The kernel and servers stay exactly as they are. This is a
+solved shape, not a contradiction: **Fuchsia** (Zircon microkernel, *zero*
+POSIX syscalls, pure message-passing channels) runs POSIX C programs via a
+userland compat layer (musl + `fdio`); MINIX3 and Plan 9's APE do the
+same. A message-passing microkernel running unmodified C programs is
+normal.
+
+**Shape of the work, when it's eventually picked up:**
+
+- **Port a small libc** — `newlib` or `picolibc` first (designed for
+  exactly this, a porting layer of ~17-20 "syscall stubs": `_open`,
+  `_read`, `_write`, `_close`, `_lseek`, `_fstat`, `_sbrk`, `_exit`, a
+  process-creation call). `musl` later for real completeness. Much of the
+  substrate already exists: `read`/`write`/`lseek`/stat map onto
+  `FSOP_READ_AT`/the `read_cursor`/`FSOP_MOUNT_INFO`; `_sbrk`/`malloc`
+  onto the existing userland heap (`heap_info`); `_exit` onto `EXIT`.
+
+- **The architectural mismatches** (not just missing functions — think
+  about these before they can bite):
+  - **`fork()` — the big one.** There is no `fork`, only `spawn` (a new
+    task alongside the caller, no address-space copy). The honest answer
+    (Fuchsia's answer): implement **`posix_spawn` natively** — it maps
+    almost directly onto `SPAWN`/`SPAWN_STAGE`/`ARGS_STAGE` + the
+    stdout-target flow — and accept that programs which `fork()` and keep
+    running in *both* halves (not fork-then-exec) need porting. Most
+    well-behaved programs are fork-then-exec, which `posix_spawn` covers.
+  - **File descriptors.** POSIX wants integer fds with a stable open-file
+    handle + cursor; the current protocol is **path-per-op** (each verb
+    carries a path, no server-side handle — the Phase 0 fid deferral). An
+    fd table mapping `fd → (server, handle, offset)` is a *userland*
+    construct (libc/`fdio`), buildable entirely on top of today's servers.
+  - **`select`/`poll`, signals, `mmap`.** The blocking primitives
+    (`msg_recv`/`read_char`/`NET_WAIT`) are the substrate for poll; signals
+    mostly get stubbed in a first port; anonymous `mmap` maps to region
+    allocation, file-backed is harder.
+
+- **The one connection worth remembering: a POSIX fd ≈ a Plan 9 fid.**
+  Phase 0 *deferred* fids (verbs stayed path-based, which paid off over TCP
+  in Phase 1). But an open-file handle with a cursor is exactly what a 9P
+  fid is *and* exactly what a POSIX `fd` needs — so adding fids someday
+  serves the "proper" 9P model **and** POSIX portability in a single move.
+  Until then, the only thing to protect while the ABI is fluid is that the
+  server protocols stay *expressive enough to build fids/fds on* (stat, a
+  cursored handle, directory iteration, a poll-able wait) — which they
+  already are. So the design isn't painted into a corner; it has a clean
+  future step (fids) that pays off twice.
+
+Not sequenced, not started — this is parked so the reasoning isn't lost.
+It only matters once running third-party C code is actually a goal, which
+is a long way off.
+
 ## Parking lot (known future work, not yet sequenced)
 
 Pulled from `docs/processes.md`'s "known rough edges" and `CLAUDE.md`'s

@@ -530,6 +530,7 @@ docs/
   architecture.md    reference doc: boot flow, privilege model, memory layout, exceptions, process model, syscall ABI, console
   processes.md       reference doc: process loading/config mechanism, memory model, binary format, writing a replacement program
   shell-commands.md  reference doc: the default shell's builtin commands - syntax, behavior, known limitations
+  comparison.md      user-facing reference: Ouroboros vs MINIX/Linux/Unix/Plan 9/Helix as a "what you gain, what you give up" pro/con table (plus an at-a-glance capability matrix) - the practical trade for a would-be user, the complement to research-directions.md's design-influence lens
   testing-exfat.md   how-to: build the two-partition exFAT test disk (make run-image-exfat), drive the read-write surface from the shell, and verify against macOS's own driver (fsck_exfat + a byte-identical cmp) - the QEMU rig behind fsd/src/exfat.rs
   CHANGELOG.md       historical record of completed milestones (phase 0 through the most recent), newest first
   journal.md         chronological dev-log: narrative "what was worked on and why" per day - a lighter companion to CHANGELOG.md's milestone record
