@@ -7,6 +7,33 @@ for the forward plan see [`roadmap.md`](roadmap.md).
 
 ---
 
+## 2026-08-25 (cont.) — Phase 3, step 2: /dev/cons, writing another machine's screen
+
+Second Phase 3 file server: `/dev/cons`, the console as a writable file. The demo
+that makes it click: `write /mnt/a/dev/cons hi` on one machine, and "hi" appears
+on *another* machine's screen. Remote console.
+
+Where `/proc` was easy because it lived inside fsd (reusing the disk path whole),
+the console is the interesting case — it's a *different server* (`cond`,
+CON_TASK), so this is the first time the namespace and the export route somewhere
+other than fsd. I did it with a console sentinel (NS_CON_TREE), the same shape as
+the remote sentinel: locally `mount -c /dev/cons` binds the path, `resolve_ns`
+returns server = CON_TASK, and the write helpers just `con_write` the bytes (an
+NP_WRITE_FILE to the console) — which every task already does to print, so there
+was no new plumbing, just a new *destination*. Reads are refused (write-only).
+Remotely, the export recognizes `/dev/cons` and emits the inline bytes to
+CON_TASK — and netd already logs to the console, so it could reach it.
+
+Worked on the first boot of both halves: locally `write`/`echo >` both render and
+`cat /dev/cons` fails as it should; between two VMs, B's `write /mnt/a/dev/cons
+>>>HELLO-ON-A-FROM-B<<<` printed exactly that on A's console. Zero aborts. It's
+another explicit prefix/sentinel special-case rather than a general
+namespace-aware export — but /dev/cons is now the *second* such consumer, which is
+the signal that the generalization (an export that resolves incoming paths through
+a composed namespace) is getting closer to earning its keep. Still deferred; two
+special-cases is cheaper than the general mechanism, and honest about it. /net is
+the remaining big Phase 3 piece.
+
 ## 2026-08-25 (cont.) — Phase 3 begins: /proc, and reading another machine's processes
 
 With the shared disk working, the next Plan 9 idea: *everything* is a file, not

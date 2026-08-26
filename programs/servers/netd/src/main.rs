@@ -1385,6 +1385,13 @@ fn handle_9p(c: &mut TcpConn, request: &[u8]) {
 /// boot disk (tree 0), path unchanged. `/proctology` is *not* a proc path -
 /// `/proc` must be a whole component. Byte scanning, no allocation.
 fn route_export(path: &[u8]) -> (u64, &[u8]) {
+    // The console (cluster Phase 3 /dev/cons) is a single writable file, not a
+    // tree - a write to it renders on this machine's screen. Marked with the
+    // NS_CON_TREE sentinel (>= MAX_MOUNTS, so never a real fsd tree); handle_9p
+    // routes it to CON_TASK. So `echo hi > /mnt/a/dev/cons` prints on machine A.
+    if path == b"/dev/cons" {
+        return (ninep_abi::NS_CON_TREE as u64, b"");
+    }
     const P: &[u8] = b"/proc";
     let is_proc = path.len() >= P.len()
         && &path[..P.len()] == P
@@ -1426,6 +1433,24 @@ fn build_9p_reply(request: &[u8], out: &mut [u8; PREFIX_MAX]) -> usize {
     // to the boot disk (tree 0). This is what makes `ls /mnt/a/proc` on another
     // machine show *this* machine's tasks.
     let (tree, fspath) = route_export(path);
+    // The console (/dev/cons) is a different server (CON_TASK), not fsd: a write
+    // verb emits the inline bytes to the console, reads are refused (write-only).
+    if tree == ninep_abi::NS_CON_TREE as u64 {
+        let status = match verb {
+            v if v == ninep_abi::NP_WRITE || v == ninep_abi::NP_WRITE_FILE => {
+                let end = (p0 + p1 as usize).min(payload.len());
+                log(&payload[p0.min(payload.len())..end]);
+                0
+            }
+            v if v == ninep_abi::NP_WRITE_AT => {
+                let end = (p0 + p2 as usize).min(payload.len());
+                log(&payload[p0.min(payload.len())..end]);
+                0
+            }
+            _ => syscall_abi::FS_ERROR, // console is write-only
+        };
+        return frame_reply(out, status, &[]);
+    }
     let mut buf = [0u8; EXPORT_CHUNK];
 
     // Data slice for a status that is a byte count (0..FS_ERR_MIN); empty on an

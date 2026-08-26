@@ -553,7 +553,11 @@ fn resolve_ns(ns: &[u8], path: &str, out: &mut [u8]) -> Resolved {
         out[0] = b'/'; // target "/" with empty after
         n = 1;
     }
-    if remote {
+    if best_tree == ninep_abi::NS_CON_TREE {
+        // A console binding routes to CON_TASK (the console server), not fsd -
+        // write-only; the fs_path is unused (the console ignores it).
+        Resolved { server: syscall_abi::CON_TASK, tree: 0, endpoint, len: n }
+    } else if remote {
         Resolved { server: syscall_abi::NET_TASK, tree: 0, endpoint, len: n }
     } else {
         Resolved { server: syscall_abi::FSD_TASK, tree: best_tree as u64, endpoint, len: n }
@@ -577,7 +581,11 @@ fn mount_resolve(path: &str, out: &mut [u8]) -> Resolved {
 /// unchanged. Bulk (grant/safecopy) ops handle the remote case themselves (no
 /// grant crosses a machine) - see [`fs_read_bulk`].
 fn np_dispatch(r: &Resolved, verb: u64, params: [u64; 4], payload1: &[u8], payload2: &[u8], result: &mut [u8]) -> u64 {
-    if r.server == syscall_abi::NET_TASK {
+    if r.server == syscall_abi::CON_TASK {
+        // The console is write-only; reads/dir-ops/path-ops don't apply. (Writes
+        // to /dev/cons are handled in the fs_write_* helpers, which con_write.)
+        syscall_abi::FS_ERROR
+    } else if r.server == syscall_abi::NET_TASK {
         np_remote(&r.endpoint, verb, params, payload1, payload2, result)
     } else {
         np_call(verb, r.tree, params, payload1, payload2, result)
@@ -689,6 +697,9 @@ pub fn fs_op_path(op: u64, path: &str) -> u64 {
 pub fn fs_read_bulk(path: &str, offset: u64, buf: &mut [u8]) -> u64 {
     let mut fsp = [0u8; FSP_MAX];
     let r = mount_resolve(path, &mut fsp);
+    if r.server == syscall_abi::CON_TASK {
+        return syscall_abi::FS_ERROR; // the console is write-only
+    }
     // Remote: no grant crosses a machine boundary. The export delivers the bytes
     // *inline* in the reply, so ask for a chunk that fits one message and copy
     // the returned data straight into `buf` (the caller loops with a rising
@@ -754,6 +765,10 @@ pub fn fs_read_file(path: &str, buf: &mut [u8]) -> u64 {
 pub fn fs_write_bulk(path: &str, data: &[u8]) -> u64 {
     let mut fsp = [0u8; FSP_MAX];
     let r = mount_resolve(path, &mut fsp);
+    if r.server == syscall_abi::CON_TASK {
+        con_write(data); // /dev/cons: the bytes go to the console
+        return 0;
+    }
     // Remote: no grant crosses a machine, so the data rides inline in the
     // request (bounded by NP_REMOTE_CHUNK). The Phase 1 export is read-only, so
     // this returns FS_ERROR today; the shape is ready for a writable export.
@@ -826,6 +841,10 @@ pub fn fs_write_at(path: &str, offset: u64, data: &[u8]) -> u64 {
     }
     let mut fsp = [0u8; FSP_MAX];
     let r = mount_resolve(path, &mut fsp);
+    if r.server == syscall_abi::CON_TASK {
+        con_write(data); // /dev/cons: append to the console (offset ignored)
+        return 0;
+    }
     if r.server == syscall_abi::NET_TASK {
         // Remote: chunk to the inline cap (no grant crosses a machine), one
         // NP_WRITE_AT round trip per <=NP_REMOTE_CHUNK bytes at rising offsets,

@@ -137,6 +137,16 @@ pub const NS_REMOTE_TREE: u8 = 0xFF;
 /// `target`; the remote-side root path follows.
 pub const NS_ENDPOINT_LEN: usize = 6;
 
+/// The namespace `tree` sentinel marking a binding to the **console server**
+/// (`cond`, `CON_TASK`) - cluster Phase 3's `/dev/cons`. Unlike a real fsd tree
+/// (`/proc`'s [`NS_PROC_TREE`]), this routes to a *different server*: a write to a
+/// path bound with this sentinel becomes an `NP_WRITE_FILE` to `CON_TASK` (the
+/// console renders the inline bytes), and reads are refused (the console is
+/// write-only). The shell's `mount -c /dev/cons` binds it; `netd`'s export
+/// prefix-routes `/dev/cons` the same way, so another machine can write this
+/// one's screen. Chosen just below [`NS_REMOTE_TREE`], clear of every real tree.
+pub const NS_CON_TREE: u8 = 0xFE;
+
 /// The reserved `fsd` mount-table index of the synthetic `/proc` filesystem
 /// (cluster Phase 3): `fsd` auto-mounts `Filesystem::proc()` here at boot, so the
 /// proc tree always exists alongside the boot disk (tree 0). A real tree number

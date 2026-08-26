@@ -7,6 +7,40 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/`; 
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## Cluster Phase 3 (step 2): `/dev/cons` — write another machine's screen
+
+The second Phase 3 file server, and the first that routes to a **non-fsd**
+server: `/dev/cons`, the console as a writable file. Locally `echo hi >
+/dev/cons` renders on the screen; across the network, **`write /mnt/a/dev/cons
+…` prints on machine A's console** — remote console, the Plan 9 way.
+
+**The routing insight.** `/proc` (step 1) lived *inside* fsd, so it reused the
+disk path whole. The console is a different server (`cond`, `CON_TASK`), so
+`/dev/cons` needed the namespace and the export to target it — the first time
+either routed anywhere but fsd. It's done with a **console sentinel**
+(`NS_CON_TREE`), mirroring the remote sentinel: locally the shell's `mount -c
+/dev/cons` binds the path to it and `resolve_ns` returns `server = CON_TASK`, so
+the fs write helpers (shell + `ulib`) emit the bytes with `con_write` (an
+`NP_WRITE_FILE` to the console) instead of an fsd call; reads are refused (the
+console is write-only). Remotely, `netd`'s export `route_export` recognizes
+`/dev/cons` and `handle_9p` emits the write's inline bytes to `CON_TASK` (`netd`
+already messages the console for its own logging) — so a wire write from another
+machine lands on this one's screen with no client-side setup.
+
+**Scope, honestly.** `/dev/cons` is the writable console file; `ls /dev` (a `/dev`
+directory listing) isn't served, and the console isn't readable. Like `/proc`'s
+prefix routing, the console sentinel is an explicit special-case, not yet a
+fully namespace-aware export — but it's the *second* consumer, which is what a
+future generalization would be built for.
+
+**How it was proven.** Locally: `mount -c /dev/cons`, then `write /dev/cons
+CONSOLE-WRITE-OK` and `echo redirect-to-cons > /dev/cons` both render on the
+console, and `cat /dev/cons` returns an error (write-only). Between two VMs: from
+B, `mount -r 10.0.2.10:564 /mnt/a` then `write /mnt/a/dev/cons
+>>>HELLO-ON-A-FROM-B<<<` — and **machine A's console prints
+`>>>HELLO-ON-A-FROM-B<<<`**, B writing A's screen over 9P/TCP. Zero `-d int`
+aborts on both nodes. See [`roadmap-cluster-phase3.md`](roadmap-cluster-phase3.md).
+
 ## Cluster Phase 3 (step 1): `/proc` — a machine's process table as (remote) files
 
 "Everything is a file" reaches across the network. `/proc` — a synthetic,

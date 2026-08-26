@@ -92,9 +92,22 @@ deferred until more than two synthetic trees exist to expose.
   reads A's fsd state — B reading A's live process table as files. Disk access
   alongside, zero `-d int` aborts on both nodes.
 
-Later Phase 3 (not this step): `/dev/cons` as a writable namespace file (remote
-console), `/net` (use another machine's NIC), and — when a real consumer appears
-— union directories and a namespace-aware export.
+- **3b — `/dev/cons`, local + remote. ✅ DONE.** The console as a writable file —
+  the first route to a **non-fsd** server. A console sentinel (`NS_CON_TREE`,
+  mirroring the remote sentinel): locally the shell's `mount -c /dev/cons` binds
+  it and `resolve_ns` returns `server = CON_TASK`, so the fs write helpers (shell
+  + `ulib`) `con_write` the bytes instead of calling fsd; reads are refused
+  (write-only). Remotely, `netd`'s `route_export` recognizes `/dev/cons` and
+  `handle_9p` emits the write's inline bytes to `CON_TASK`. *Shipped:* locally
+  `mount -c /dev/cons; echo hi > /dev/cons` renders and `cat /dev/cons` errors;
+  two VMs, `write /mnt/a/dev/cons …` prints on **machine A's** screen. Zero
+  `-d int` aborts. (`/dev` as a directory listing isn't served — `/dev/cons` is
+  the writable file.)
+
+Later Phase 3 (not yet): `/net` (use another machine's NIC), and — now that
+`/dev/cons` is the *second* non-disk consumer — a fully namespace-aware export
+(resolve incoming paths through a composed per-export namespace) to retire the
+per-server prefix special-cases, plus union directories when a consumer appears.
 
 ## Risks / deferred
 

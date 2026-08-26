@@ -1907,7 +1907,9 @@ fn resolve_ns(ns: &[u8], path: &str, out: &mut [u8]) -> Resolved {
         out[0] = b'/';
         n = 1;
     }
-    if remote {
+    if best_tree == ninep_abi::NS_CON_TREE {
+        Resolved { server: syscall_abi::CON_TASK, tree: 0, endpoint, len: n }
+    } else if remote {
         Resolved { server: syscall_abi::NET_TASK, tree: 0, endpoint, len: n }
     } else {
         Resolved { server: syscall_abi::FSD_TASK, tree: best_tree as u64, endpoint, len: n }
@@ -1925,7 +1927,9 @@ fn mount_resolve(path: &str, out: &mut [u8]) -> Resolved {
 /// remote mount over TCP via `netd` ([`np_remote`]). A duplicate of
 /// `ulib::np_dispatch`.
 fn np_dispatch(r: &Resolved, verb: u64, params: [u64; 4], payload1: &[u8], payload2: &[u8], result: &mut [u8]) -> u64 {
-    if r.server == syscall_abi::NET_TASK {
+    if r.server == syscall_abi::CON_TASK {
+        syscall_abi::FS_ERROR // the console is write-only (writes con_write below)
+    } else if r.server == syscall_abi::NET_TASK {
         np_remote(&r.endpoint, verb, params, payload1, payload2, result)
     } else {
         np_call(verb, r.tree, params, payload1, payload2, result)
@@ -2081,6 +2085,10 @@ fn fs_read_at(path: &str, offset: u64, buf: &mut [u8]) -> u64 {
 fn fs_write_bulk(path: &str, data: &[u8]) -> u64 {
     let mut fsp = [0u8; FSP_MAX];
     let r = mount_resolve(path, &mut fsp);
+    if r.server == syscall_abi::CON_TASK {
+        con_write(data); // /dev/cons
+        return 0;
+    }
     if r.server == syscall_abi::NET_TASK {
         // Remote full overwrite: truncate-and-write the first chunk (NP_WRITE),
         // then stream the rest (NP_WRITE_AT). See ulib::fs_write_bulk.
@@ -2148,6 +2156,10 @@ fn fs_write_at(path: &str, offset: u64, data: &[u8]) -> u64 {
     }
     let mut fsp = [0u8; FSP_MAX];
     let r = mount_resolve(path, &mut fsp);
+    if r.server == syscall_abi::CON_TASK {
+        con_write(data); // /dev/cons (offset ignored - the console is a stream)
+        return 0;
+    }
     if r.server == syscall_abi::NET_TASK {
         // Remote: chunk to the inline cap, one NP_WRITE_AT per <=NP_REMOTE_CHUNK
         // at rising offsets. See ulib::fs_write_at.
@@ -2198,6 +2210,10 @@ fn fs_write_at(path: &str, offset: u64, data: &[u8]) -> u64 {
 fn fs_write_file(path: &str, data: &[u8]) -> u64 {
     let mut fsp = [0u8; FSP_MAX];
     let r = mount_resolve(path, &mut fsp);
+    if r.server == syscall_abi::CON_TASK {
+        con_write(data); // /dev/cons
+        return 0;
+    }
     np_dispatch(
         &r,
         ninep_abi::NP_WRITE_FILE,
@@ -2342,7 +2358,43 @@ fn cmd_mount(line: &str, arg: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize, out: &
         "-a" => mount_disk(),
         "-r" => cmd_mount_remote(line, cwd, cwd_len, out),
         "-p" => cmd_mount_proc(line, cwd, cwd_len, out),
+        "-c" => cmd_mount_con(line, cwd, cwd_len, out),
         _ => cmd_mount_at(line, cwd, cwd_len, out),
+    }
+}
+
+/// `mount -c <path>` - bind the console (`cond`, `CON_TASK`) as a writable file at
+/// `<path>` (cluster Phase 3 `/dev/cons`). A write to `<path>` then renders on the
+/// console; reads are refused (write-only). Usually `mount -c /dev/cons`. A remote
+/// machine's console needs no bind here - write `<remote-mount>/dev/cons` and
+/// netd's export routes it (so `echo hi > /mnt/a/dev/cons` prints on A's screen).
+fn cmd_mount_con(line: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize, out: &mut Output) {
+    let mut words = line.split_whitespace();
+    words.next(); // "mount"
+    words.next(); // "-c"
+    let Some(path_arg) = words.next() else {
+        out.put_line("mount: usage: mount -c <path>  (e.g. mount -c /dev/cons)");
+        return;
+    };
+    let mut pbuf = [0u8; PATH_SIZE];
+    let Some(pl) = resolve_path(cwd_str(cwd, cwd_len), path_arg, &mut pbuf) else {
+        out.put_line("mount: path too long");
+        return;
+    };
+    let prefix = strip_trailing_slash(&pbuf[..pl]);
+    if prefix.len() < 2 || prefix[0] != b'/' {
+        out.put_line("mount: <path> must be a path below /");
+        return;
+    }
+    if ns_add(prefix, b"/", ninep_abi::NS_CON_TREE) {
+        out.put_str("console mounted at ");
+        if let Ok(p) = core::str::from_utf8(prefix) {
+            out.put_line(p);
+        } else {
+            out.put_line("");
+        }
+    } else {
+        out.put_line("mount: path too long or namespace full");
     }
 }
 

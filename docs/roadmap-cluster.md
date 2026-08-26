@@ -192,12 +192,14 @@ expansion of a proven idea.
 > **Step 1 (`/proc`) ✅ DONE:** a synthetic, read-only process-table filesystem (an
 > fsd `Filesystem` arm at a reserved tree, generated from `TASK_STATE`), local via
 > `mount -p /proc` and remotely readable — `ls /mnt/a/proc` shows another machine's
-> live tasks (the export prefix-routes `/proc`). The first non-disk file server.
+> live tasks. **Step 2 (`/dev/cons`) ✅ DONE:** the console as a writable file, the
+> first route to a *non-fsd* server (`cond`) — `mount -c /dev/cons` locally, and
+> `write /mnt/a/dev/cons …` prints on another machine's screen (remote console).
 
-- Console (`/dev/cons`), network (`/net` — use *another* machine's NIC) — each a
-  file server, each remotely mountable, still to come. `/proc` (done) is the first.
-  "Everything is a file, everything is mountable" pays off: sharing a resource is
-  just mounting its tree from the machine that has it.
+- Network (`/net` — use *another* machine's NIC) is the remaining big piece.
+  `/proc` and `/dev/cons` are done. "Everything is a file, everything is mountable"
+  pays off: sharing a resource is just mounting its tree from the machine that has
+  it.
 - Union directories (Plan 9's join-several-sources-under-one-name) if/when a real
   consumer appears — not before. A fully namespace-aware export (vs. `/proc`'s
   prefix hack) lands when a second synthetic tree needs it.
