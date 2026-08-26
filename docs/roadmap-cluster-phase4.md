@@ -114,6 +114,22 @@ gated by the same honest trusted-LAN posture, made explicit, with the child full
 accounted for (reaped, killable, capability-scoped) so a remote run can't leak a
 slot or a capability.
 
+**A capability constraint found while designing, load-bearing for 4a.** The
+child's output pipe (`stdout_target = NET_TASK`) needs the child to *send to
+`NET_TASK`* — a runtime capability. Today only the **shell** hands that out
+(`delegate_net`), because `DELEGATE` lets a task delegate only a send-cap it
+**statically holds** (`may_delegate`), and a `/bin` slot statically holds
+`TO_FSD`/`TO_CON` but *not* `TO_NET`. netd spawning the child is not the shell, and
+netd delegating "send to `NET_TASK`" (itself) is a self-send cap it does not
+statically hold. **So 4a needs a capability-model addition before the output pipe
+works** — the cleanest being a **spawner→child reply capability** (a child may
+always send to the task that spawned it, the natural "parent" relationship),
+granted by `SPAWN` itself rather than a separate `DELEGATE`. This is the first real
+work item of 4a, and the reason it is not a quick add: the transport and spawn
+mechanics are straightforward, but *letting the child talk back to netd* touches
+the capability model. (Alternative considered: give spawnable slots a static
+`TO_NET` — rejected, it widens every command's authority for one caller's benefit.)
+
 ## Staging
 
 - **4a — remote spawn + output stream (this step).** The `RUN` frame; netd's
