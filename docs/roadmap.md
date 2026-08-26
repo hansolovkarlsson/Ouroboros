@@ -850,6 +850,183 @@ Not sequenced, not started — this is parked so the reasoning isn't lost.
 It only matters once running third-party C code is actually a goal, which
 is a long way off.
 
+## North-star directions ("Polaris" planning pass, 2026-08-26, not sequenced)
+
+A batch of longer-horizon directions captured together — what would move
+Ouroboros from "a microkernel that boots, runs a shell, and clusters" toward
+a system you could actually *live in*: a richer terminal, richer commands
+with real argument handling, more of the standard command set, a security /
+identity model, on-device compilation, and an honest map of what mainstream
+Unixes still have that this doesn't. **None are designed or sequenced yet;**
+each is recorded so the reasoning and the starting points aren't lost.
+Several build directly on things that already exist (cond's small ANSI
+parser, ext2's on-disk permission bits, the per-task capability model, the
+cluster-auth HMAC, `ulib`, and the POSIX-libc plan above), which is the point
+of writing them down now rather than from scratch later.
+
+### 1. Terminal escape codes / VT100 (scoped-ish, the nearest of these)
+
+cond already renders a **small ANSI parser** in the framebuffer backend
+(cursor, wrap, scroll — see `CLAUDE.md`'s "Driver isolation, part 3"), so
+this is *extending an existing subsystem*, not a new one. The goal is a
+usefully-complete VT100/VT220-ish terminal: SGR colors + bold/underline/
+reverse, cursor positioning (`ESC[H`, `ESC[<n>;<m>H`), line/screen erase
+(`ESC[K`, `ESC[2J`), save/restore cursor, and scroll regions — the subset a
+full-screen program (an editor, `less`, a `top`) needs to paint a screen.
+
+**What exists to build on / the hard parts.** The rendering primitives
+(`FB_BLIT`/`FB_SCROLL`/`FB_CLEAR`) are already gated to cond and already do
+glyph runs + scroll, so *color* is mostly a per-glyph attribute added to the
+blit path, and *positioning* is arithmetic cond already does for wrap. The
+genuinely new pieces: a color-capable font blit (foreground/background per
+cell), a real parser state machine (parameter accumulation, intermediate
+bytes) rather than the current minimal one, and — the awkward one — an
+**input** path for the responses some sequences require (cursor-position
+report, device attributes), which today's one-way `NP_WRITE_FILE` output
+model doesn't carry back. Reading the byte-stream UART backend (QEMU) is
+straightforward; the framebuffer backend (Parallels) is the one that matters
+and has no return channel yet. **Consumer question:** the first real
+consumer is a full-screen program, so this pairs naturally with "an editor"
+or `less` under item 4 — build the terminal and its first full-screen client
+close together so the escape set is driven by a real need, not guessed.
+
+### 2. Richer commands: flags, arguments, real option parsing (scoped, incremental)
+
+Today's `/bin` commands take positional arguments only, and several are
+deliberately minimal (the parking lot already notes `grep` is
+substring-only/case-sensitive, `ls` has no `-l`, `head` only, no `sort`).
+The direction: give the existing commands the flags that make them actually
+usable — `ls -l`/`-a`, `grep -i`/`-r`/`-n` (and eventually real patterns),
+`rm -r`/`-f`, `cp -r`, `cat -n`, `head -n`/`tail`, `wc -l`/`-w`/`-c`
+selection — plus a shared **option-parsing helper in `ulib`** so every
+command parses `-x`/`--long`/`--` the same way instead of hand-rolling it.
+
+**What exists to build on / the hard parts.** `ls -l` is the tell: it needs
+a **richer stat surface** than the protocol exposes today — mode bits, size,
+mtime, link count, uid/gid. ext2 *already stores* all of that (a guest-
+written file showed up as `inode 12, 0644, 42 bytes`), so `-l` is partly a
+matter of surfacing metadata the on-disk driver already reads through a
+`FSOP_STAT`-shaped op — but FAT/exFAT have no Unix mode/owner, so the stat
+surface has to degrade honestly per filesystem (the same "present what the
+FS can model" discipline ext2 read-only already used). Recursive flags
+(`-r`) want directory-tree walking in the client, which is new but small.
+This is a broad-but-shallow arc — many small, independently-shippable
+increments, each one command's flags — and it's the natural companion to
+item 4 (the two are "make the command set real"). It also feeds item 5:
+`chmod`/`chown` are exactly "a write path for the stat surface `ls -l`
+reads."
+
+### 3. More `/bin` commands (scoped, incremental)
+
+The standard toolset still missing, roughly in cheapness order: `sort`
+(already deferred — needs to buffer all input before emitting, unlike the
+streaming filters), `tail`, `tee`, `tr`, `cut`, `uniq`, `find`, `du`, `df`,
+`date`/`sleep` (both want a wall-clock the kernel already has via the timer
+counter and `MONOTONIC_US`), `env`-as-a-program, `true`/`false`/`yes`, a
+`kill`-by-name, and eventually an **editor** and a **pager** (`less`/`more`)
+— the two that turn item 1's terminal work into something with a consumer.
+
+**What exists to build on.** Every one of these is "a new crate under
+`programs/<category>/` over `ulib`, found by PATH" — the externalization arc
+is complete and the pattern is turnkey (a filter reads `pipe_recv`, writes
+`write_out`; a fs command resolves against the delivered cwd and calls the
+`fs_*` helpers). So most of these are genuinely small. The two that aren't:
+an **editor** (needs item 1's cursor addressing + item 4's richer input) and
+a **pager** (same, plus reading its input while also reading the keyboard —
+a program that multiplexes stdin and the tty, which nothing here does yet).
+`sort` is the one filter with a real design wrinkle (full-input buffering
+against the fixed-buffer/no-alloc constraint — a bounded external-ish sort,
+or a documented size cap). Cheap wins first; editor/pager last, gated on
+item 1.
+
+### 4. Login, users, security, file permissions (a substantial arc, medium-term)
+
+The biggest of these — the step from "single implicit user, whoever's at the
+keyboard" to a real **identity and permission model**. Pieces: a notion of
+*users* (uid/gid), a **login** prompt gating the shell, credential storage
+(a `/etc/passwd`-shaped file with hashed passwords), per-file
+**ownership + permission bits** actually *enforced* on `fsd` operations, and
+a privilege boundary for the operations that should need it (format, mount,
+kill another user's task, the cluster export).
+
+**What exists to build on — more than it looks.** Three foundations are
+already in place: (a) **ext2 already carries uid/gid/mode on disk** — the
+metadata a permission check needs is read today and simply ignored above
+`fsd`; enforcing it is "check the caller's identity against the inode's mode
+in the `FSOP_*` dispatch," which is why item 2's stat surface is the natural
+precursor. (b) The **capability model** is already a per-task "who may do
+what" mechanism at the IPC boundary — a user/permission layer is its
+higher-level cousin, and the two want to be reconciled, not built in
+parallel (a logged-in user's tasks get a capability set derived from their
+identity). (c) **Cluster auth already has real crypto** — hand-rolled
+SHA-256/HMAC (`netd/src/hmac.rs`, NIST/RFC-validated) and a
+fail-closed key-file pattern (`CLUSTER.KEY` read once at boot via `fsd`) —
+so password *hashing* and a `/etc/passwd` read reuse machinery that exists.
+
+**The hard parts / open questions.** Who is the *kernel's* notion of a
+user — the kernel schedules tasks, not people, so identity is likely a
+userland construct (a login server / an identity carried in the capability
+set) rather than a uid field in the task struct, matching the "personality
+in userland" stance the POSIX section takes. FAT/exFAT can't store owners at
+all, so enforcement is inherently ext2-only (or a shadow permission store) —
+an honest per-filesystem degradation again. And the **cluster** angle is the
+interesting one: the export currently authenticates the *machine* (shared
+key), not a *user* — per-user identity across the cluster is explicitly a
+named future tier in the cluster-auth postmortem, and this arc is where it
+would land. This is a multi-milestone arc, not one task; sequence it *after*
+item 2's stat surface exists, since permission enforcement has nothing to
+check against until then.
+
+### 5. An on-device compiler: C and/or Rust (north-star, very large)
+
+The self-hosting dream — compile a program *on* Ouroboros rather than
+cross-compiling from the Mac. Recorded honestly because the scale is very
+different for the two languages, and because it's tightly coupled to the
+POSIX-libc plan above.
+
+**C is the realistic target; Rust almost certainly isn't (near-term).** A
+Rust compiler self-hosting is effectively out of reach — `rustc` is enormous,
+assumes a hosted std/LLVM, and this project can't even PIE-link prebuilt
+`liballoc` on stable (the recurring `-Z build-std` wall). A **small C
+compiler** (`tcc`, `chibicc`, `cproc`+`qbe`) is a real possibility, but *only
+on top of the userland libc personality* — a C compiler is a C program: it
+needs `fopen`/`malloc`/`fork`-or-`posix_spawn`/`_exit`, i.e. it's a *consumer
+of item "POSIX / C-program portability" above*, not independent of it. So the
+honest sequence is: libc personality first, then a C compiler is "port one
+more (large, self-contained) C program." Below even that, the realistic
+*first* step toward on-device code generation is much smaller — an
+**assembler** (text → the ELF the loader already parses) or a tiny toy
+language — which needs no libc and would prove the write-a-program-then-run-it
+loop end to end. **Consumer question, stated plainly:** on-device compilation
+is a *want*, not a *need* — nothing here requires it, cross-compilation works
+fine — so this is a "because it's the Ouroboros thing to do" goal (the name
+is a snake eating its tail; a system that can build itself is the literal
+endgame), sequenced behind everything with an actual consumer.
+
+### 6. Document what MINIX / Linux / Unix have that Ouroboros doesn't (a doc task — and the organizing exercise)
+
+Not a feature — a **gap-analysis document**, and the meta-item that helps
+sequence the other five. `docs/comparison.md` already frames Ouroboros
+against MINIX/Linux/Unix/Plan 9/Helix as a "what you gain, what you give up"
+table; this extends that from *philosophy* to a *concrete checklist*: the
+syscalls, the libc functions, the `/bin` utilities, the subsystems (signals,
+job control depth, pipes-to-files, TTY line discipline, `/dev`, users/groups,
+mmap, dynamic linking, a real VFS with per-FS servers, sockets-as-fds, cron/
+init/service management, swap/paging) — each marked *have / partial / don't*,
+with a one-line "why not / what it would take" pointing at the relevant
+roadmap arc.
+
+**Why it's worth doing early.** It's cheap (a doc, no code), it's the
+natural *input* to prioritizing items 1–5 (it surfaces which gaps are one
+small program vs. a multi-milestone arc), and it's the kind of honest
+self-accounting this project already values — the postmortems and the
+POSIX-divergence reflection are the same instinct. The risk to avoid is
+turning it into an aspirational feature list; keep it a *factual* inventory
+of the current boundary, the way the parking lot below already tracks
+specific known gaps, just organized as a coherent map rather than a running
+list. This is the one to do *first* of the six, precisely because it tells
+you the order for the rest.
+
 ## Parking lot (known future work, not yet sequenced)
 
 Pulled from `docs/processes.md`'s "known rough edges" and `CLAUDE.md`'s
