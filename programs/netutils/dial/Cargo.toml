@@ -1,0 +1,13 @@
+[package]
+name = "dial"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+syscall-abi = { path = "../../../syscall-abi" }
+ninep-abi = { path = "../../../ninep-abi" }
+ulib = { path = "../../../ulib" }
+
+[[bin]]
+name = "dial"
+path = "src/main.rs"

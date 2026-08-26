@@ -326,6 +326,28 @@ from the remote's disk, so both machines should have the same `/bin`.
 namespace covers filesystem access, not the remote's `/proc`/`/net` unless
 you reach them under `/host`.)
 
+### Dialing out of another machine's network — `/net/tcp`
+
+A machine can open a TCP connection **out of another machine's NIC** — use A's
+network to reach the outside. It's exposed as Plan 9's `/net/tcp` connection
+files: read `clone` for a connection number, write `connect <ip>!<port>` to its
+`ctl`, then read/write its `data`. The `dial` command drives the whole sequence:
+
+```
+$ mount -n /net                              # bind THIS machine's /net
+$ dial /net 93.184.216.34 80 GET / HTTP/1.0  # dial out of OUR nic
+$ mount -r 10.0.2.10:564 /mnt/a              # mount machine A's export
+$ dial /mnt/a/net 93.184.216.34 80 GET / HTTP/1.0   # dial out of A's nic
+```
+
+The only thing that changes is the base path: `/net` is your network,
+`/mnt/a/net` is A's — so the last line reaches the web *through A's connection*,
+authenticated by the same cluster key as any export access. Unlike `cpu A fetch`
+(which runs a program on A), `dial` gives you a raw connection you drive
+yourself, with no matching program needed on A. Scoped to a TCP client
+(stop-and-wait, small transactions); dialing *in* (listen/accept) and UDP are
+later work.
+
 ### Under the hood (pointers)
 
 Every machine's `netd` is both a client and a 9P **export gateway**; paths

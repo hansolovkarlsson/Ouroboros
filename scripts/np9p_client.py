@@ -34,6 +34,7 @@ NP_BASE = 0x100
 NP_READDIR = NP_BASE + 0
 NP_READ_FILE = NP_BASE + 1
 NP_READ = NP_BASE + 2
+NP_WRITE_FILE = NP_BASE + 11
 NP_READ_AT = NP_BASE + 10
 FS_ERR_MIN = (1 << 64) - 64  # errors are a small band just below u64::MAX
 FS_ERR_AUTH = (1 << 64) - 1 - 30  # u64::MAX - 30
@@ -82,6 +83,77 @@ def recv_reply(sock):
     return status, data
 
 
+def one_op(host, port, key, np_msg, timeout=10):
+    """Run one signed NP op over a fresh export connection; return (status, data)."""
+    with socket.create_connection((host, port), timeout=timeout) as s:
+        s.sendall(sign_frame(np_msg, key))
+        status, data = recv_reply(s)
+    return status, data
+
+
+def np_readfile(host, port, key, path, want=512):
+    pb = path.encode()
+    return one_op(host, port, key, build_frame(NP_READ_FILE, 0, [len(pb), want], pb))
+
+
+def np_writefile(host, port, key, path, data):
+    pb = path.encode()
+    # NP_WRITE_FILE: a0 = path len, a1 = data len; payload = path ++ data.
+    msg = build_frame(NP_WRITE_FILE, 0, [len(pb), len(data)], pb + data)
+    return one_op(host, port, key, msg)
+
+
+def do_dial(host, port, key, dst_ip, dst_port, request):
+    """Drive the GUEST's /net/tcp to dial dst_ip:dst_port out of ITS nic, over the
+    export - "use the guest's network from here". Prints the response bytes."""
+    import time
+    base = "/net/tcp"
+    st, data = np_readfile(host, port, key, base + "/clone")
+    if st == FS_ERR_AUTH:
+        print("status: AUTH FAILED"); sys.exit(1)
+    if st >= FS_ERR_MIN or not data.strip().isdigit():
+        print(f"clone failed (status 0x{st:016x})"); sys.exit(1)
+    n = int(data.strip())
+    print(f"[clone] connection {n}")
+    st, _ = np_writefile(host, port, key, f"{base}/{n}/ctl", f"connect {dst_ip}!{dst_port}".encode())
+    if st >= FS_ERR_MIN:
+        print(f"connect failed (status 0x{st:016x})"); sys.exit(1)
+    # Poll status until Established.
+    for _ in range(50):
+        st, data = np_readfile(host, port, key, f"{base}/{n}/status", want=16)
+        s = data.split(b"\n")[0].decode("latin1", "replace")
+        if s.startswith("Established"):
+            print(f"[status] {s}"); break
+        if s.startswith("Closed"):
+            print("[status] Closed - refused/unreachable"); sys.exit(1)
+        time.sleep(0.1)
+    else:
+        print("connect timed out"); sys.exit(1)
+    if request:
+        np_writefile(host, port, key, f"{base}/{n}/data", request)
+    print("[response]")
+    got = b""
+    empties = 0
+    for _ in range(400):
+        st, data = np_readfile(host, port, key, f"{base}/{n}/data", want=512)
+        if st >= FS_ERR_MIN:
+            break
+        if data:
+            got += data; empties = 0
+            continue
+        st, sdata = np_readfile(host, port, key, f"{base}/{n}/status", want=16)
+        if sdata.split(b"\n")[0].startswith(b"Closed"):
+            break
+        empties += 1
+        if empties > 40:
+            break
+        time.sleep(0.05)
+    np_writefile(host, port, key, f"{base}/{n}/ctl", b"close")
+    sys.stdout.buffer.write(got)
+    sys.stdout.flush()
+    print(f"\n[done] {len(got)} bytes received")
+
+
 def main():
     # Pull an optional `--key <k>` out of argv (anywhere after the fixed args).
     key = DEFAULT_KEY
@@ -93,7 +165,19 @@ def main():
     if len(args) < 4:
         print(__doc__)
         sys.exit(2)
-    host, port, op, path = args[0], int(args[1]), args[2], args[3]
+    host, port, op = args[0], int(args[1]), args[2]
+
+    if op == "dial":
+        # dial <host> <port> dial <dst_ip> <dst_port> [request words...]
+        if len(args) < 5:
+            print("usage: np9p_client.py <host> <port> dial <dst_ip> <dst_port> [request...]")
+            sys.exit(2)
+        dst_ip, dst_port = args[3], int(args[4])
+        request = (" ".join(args[5:]) + "\r\n\r\n").encode() if len(args) > 5 else b""
+        do_dial(host, port, key, dst_ip, dst_port, request)
+        return
+
+    path = args[3]
     pb = path.encode()
 
     if op == "readdir":

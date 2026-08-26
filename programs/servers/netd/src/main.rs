@@ -279,29 +279,35 @@ fn serve(packed_mac: u64) -> ! {
     // because userland has no static mutable state (`.bss` asserted empty).
     // `serve` never returns, so the frame persists for the whole boot.
     let mut conns: [Option<TcpConn>; MAX_CONNS] = core::array::from_fn(|_| None);
+    // Dial-out (/net/tcp) client connections - persist across the separate NP
+    // round trips of a clone/connect/data/close sequence, driven by pump_dials.
+    let mut dials: [Option<DialConn>; MAX_DIAL] = core::array::from_fn(|_| None);
     loop {
         // Block until a client message or an incoming frame is pending (or
         // return immediately if either already is). While *any* connection has
-        // data unacked, use a timeout so we still wake to service the
-        // retransmit timer even if a peer has gone silent (no frames);
-        // otherwise block indefinitely (the health-ping still wakes us).
+        // data unacked (server or dial), use a timeout so we still wake to
+        // service the retransmit timer even if a peer has gone silent (no
+        // frames); otherwise block indefinitely (the health-ping still wakes us).
         let unacked = conns
             .iter()
-            .any(|c| matches!(c, Some(c) if c.snd_nxt != c.snd_una));
+            .any(|c| matches!(c, Some(c) if c.snd_nxt != c.snd_una))
+            || dials.iter().any(|c| matches!(c, Some(d) if d.state == DialState::Connecting || d.inflight > 0 || (d.state == DialState::Closing && !d.fin_sent)));
         let timeout = if unacked { RTO_POLL_MS } else { 0 };
         syscall(syscall_abi::NET_WAIT, timeout);
 
-        // 1. Client requests (ping/resolve/fetch), handled synchronously; the
-        // supervisor health-ping is acked here too (any reply acks it). Also
-        // where a cpu child's output is captured (cluster Phase 4a) - it arrives
-        // as messages to us, routed to its connection by `drain_client_messages`.
-        drain_client_messages(packed_mac, &mut buf, &mut conns, &auth);
+        // 1. Client requests (ping/resolve/fetch, and the /net/tcp file ops),
+        // handled synchronously; the supervisor health-ping is acked here too
+        // (any reply acks it). Also where a cpu child's output is captured
+        // (cluster Phase 4a) - routed to its connection by drain_client_messages.
+        drain_client_messages(packed_mac, &mut buf, &mut conns, &mut dials, &auth);
 
-        // 2. Incoming frames: ARP replies for our IP, and the TCP server.
+        // 2. Incoming frames: ARP replies, dial-out connections, and the TCP server.
         if packed_mac != syscall_abi::NET_ERROR {
             while let Some(n) = recv(&mut frame) {
-                on_frame(&mac, &frame[..n], &mut conns, &auth);
+                on_frame(&mac, &frame[..n], &mut conns, &mut dials, &auth);
             }
+            // Drive the dial-out connections (SYN/data/FIN retransmits, idle GC).
+            pump_dials(&mac, &mut dials);
             // 3. Per connection (by index, so the mailbox drain below can take
             // `&mut conns` without a borrow clash): service the retransmit timer,
             // then stream its response up to the window in bounded bursts,
@@ -322,7 +328,7 @@ fn serve(packed_mac: u64) -> ! {
                     }
                     let before = c.snd_nxt;
                     pump_send(&mac, c); // `c` borrow ends here
-                    drain_client_messages(packed_mac, &mut buf, &mut conns, &auth);
+                    drain_client_messages(packed_mac, &mut buf, &mut conns, &mut dials, &auth);
                     match conns[i].as_ref() {
                         Some(c) if c.snd_nxt != before => {} // progress - continue
                         _ => break,
@@ -338,7 +344,7 @@ fn serve(packed_mac: u64) -> ! {
 /// from a **cpu child** (cluster Phase 4a - a spawned remote-run command whose
 /// stdout we capture) is routed to *its* connection's output buffer instead of
 /// the normal client dispatch; everything else is a client request.
-fn drain_client_messages(packed_mac: u64, buf: &mut [u8], conns: &mut [Option<TcpConn>; MAX_CONNS], auth: &Auth) {
+fn drain_client_messages(packed_mac: u64, buf: &mut [u8], conns: &mut [Option<TcpConn>; MAX_CONNS], dials: &mut [Option<DialConn>; MAX_DIAL], auth: &Auth) {
     loop {
         let packed =
             syscall4(syscall_abi::MSG_TRY_RECV, buf.as_mut_ptr() as u64, buf.len() as u64, 0, 0);
@@ -361,12 +367,12 @@ fn drain_client_messages(packed_mac: u64, buf: &mut [u8], conns: &mut [Option<Tc
             // dispatch (which replies); everything else is captured output.
             let is_request = len >= 8 && read_u64(buf, 0) == syscall_abi::NETOP_RMOUNT;
             if is_request {
-                handle_client(packed_mac, sender, buf, len, conns, auth);
+                handle_client(packed_mac, sender, buf, len, conns, dials, auth);
             } else {
                 cpu_child_msg(conns[ci].as_mut().unwrap(), sender as u8, &buf[..len]);
             }
         } else {
-            handle_client(packed_mac, sender, buf, len, conns, auth);
+            handle_client(packed_mac, sender, buf, len, conns, dials, auth);
         }
     }
 }
@@ -391,7 +397,7 @@ fn cpu_child_msg(c: &mut TcpConn, child: u8, data: &[u8]) {
 
 /// Dispatch one client request (a `MSG_CALL` from the shell) by op, replying
 /// with the op's status. The unknown-op arm also acks the supervisor ping.
-fn handle_client(packed_mac: u64, sender: u64, buf: &[u8], len: usize, conns: &mut [Option<TcpConn>; MAX_CONNS], auth: &Auth) {
+fn handle_client(packed_mac: u64, sender: u64, buf: &[u8], len: usize, conns: &mut [Option<TcpConn>; MAX_CONNS], dials: &mut [Option<DialConn>; MAX_DIAL], auth: &Auth) {
     match read_u64(buf, 0) {
         syscall_abi::NETOP_PING => {
             let status = handle_ping(packed_mac, read_u64(buf, 8));
@@ -431,7 +437,7 @@ fn handle_client(packed_mac: u64, sender: u64, buf: &[u8], len: usize, conns: &m
             // callbacks (its /host reads come back to *our* export) - passing
             // `conns` is what lets it do that.
             let mut r = [0u8; syscall_abi::MSG_MAX_LEN as usize];
-            let rlen = handle_run(packed_mac, buf, len, &mut r, conns, auth);
+            let rlen = handle_run(packed_mac, buf, len, &mut r, conns, dials, auth);
             reply(sender, &r[..rlen]);
         }
         // An NP read verb from a *local* client: the /net synthetic filesystem
@@ -450,8 +456,18 @@ fn handle_client(packed_mac: u64, sender: u64, buf: &[u8], len: usize, conns: &m
             } else {
                 a1 as usize
             };
-            let mut r = [0u8; 8 + 32];
-            let (status, dlen) = net_op(op, path, a1, want.min(32), &mut r[8..]);
+            // A write's payload follows the path (a1 = data length for NP_WRITE/
+            // NP_WRITE_FILE); reads carry none. Needed for /net/tcp ctl/data writes.
+            let data_in: &[u8] = if op == ninep_abi::NP_WRITE || op == ninep_abi::NP_WRITE_FILE {
+                let ds = HDR + a0;
+                &buf[ds.min(end)..(ds + a1 as usize).min(end)]
+            } else {
+                &[]
+            };
+            let mac = if packed_mac == syscall_abi::NET_ERROR { [0u8; 6] } else { unpack_mac(packed_mac) };
+            let mut r = [0u8; 8 + 544];
+            let cap = (r.len() - 8).min(512);
+            let (status, dlen) = net_op(op, path, a1, want.min(cap), data_in, &mut r[8..], dials, &mac);
             r[0..8].copy_from_slice(&status.to_le_bytes());
             reply(sender, &r[..8 + dlen]);
         }
@@ -859,7 +875,7 @@ fn tcp_get(mac: &[u8; 6], dst_mac: &[u8; 6], target: &[u8; 4], dst_port: u16, re
 /// deadlock: it drops those frames while stuck waiting, the remote child blocks on
 /// its read, and no output ever comes. Returns `(NET_FETCH_* status, output len)`.
 #[allow(clippy::too_many_arguments)]
-fn tcp_run(packed_mac: u64, mac: &[u8; 6], dst_mac: &[u8; 6], target: &[u8; 4], dst_port: u16, request: &[u8], resp: &mut [u8], conns: &mut [Option<TcpConn>; MAX_CONNS], auth: &Auth) -> (u64, usize) {
+fn tcp_run(packed_mac: u64, mac: &[u8; 6], dst_mac: &[u8; 6], target: &[u8; 4], dst_port: u16, request: &[u8], resp: &mut [u8], conns: &mut [Option<TcpConn>; MAX_CONNS], dials: &mut [Option<DialConn>; MAX_DIAL], auth: &Auth) -> (u64, usize) {
     let mut frame = [0u8; 1600];
     let mut rx = [0u8; 1600];
     let mut cbuf = [0u8; syscall_abi::MSG_MAX_LEN as usize];
@@ -892,7 +908,7 @@ fn tcp_run(packed_mac: u64, mac: &[u8; 6], dst_mac: &[u8; 6], target: &[u8; 4], 
                     } else {
                         // A non-run frame arriving mid-handshake (an early export
                         // request, ARP): serve it so we don't drop it.
-                        on_frame(mac, &rx[..len], conns, auth);
+                        on_frame(mac, &rx[..len], conns, dials, auth);
                     }
                 }
                 if now() > deadline {
@@ -924,7 +940,7 @@ fn tcp_run(packed_mac: u64, mac: &[u8; 6], dst_mac: &[u8; 6], target: &[u8; 4], 
         // Ack the health-ping / service other client requests (re-entrant-safe:
         // the shell is blocked in this very run, so no nested run can arrive).
         let before_deadline = deadline;
-        drain_client_messages(packed_mac, &mut cbuf, conns, auth);
+        drain_client_messages(packed_mac, &mut cbuf, conns, dials, auth);
         while let Some(len) = recv(&mut rx) {
             if let Some(s) = parse_tcp(&rx[..len], target, dst_port, src_port) {
                 if s.flags & TCP_RST != 0 {
@@ -955,7 +971,7 @@ fn tcp_run(packed_mac: u64, mac: &[u8; 6], dst_mac: &[u8; 6], target: &[u8; 4], 
             } else {
                 // Not our run connection: an export request (the child's /host
                 // read) or ARP - serve it, and count it as progress.
-                on_frame(mac, &rx[..len], conns, auth);
+                on_frame(mac, &rx[..len], conns, dials, auth);
                 deadline = now() + 300;
             }
         }
@@ -1024,7 +1040,8 @@ fn pump_conns(mac: &[u8; 6], conns: &mut [Option<TcpConn>; MAX_CONNS]) {
 /// reply), bounded by the caller's `out` (one `MSG_MAX_LEN` for now - small
 /// commands). Request layout is `NETOP_RMOUNT`'s (endpoint + payload), the
 /// payload being the command line rather than an NP message.
-fn handle_run(packed_mac: u64, buf: &[u8], len: usize, out: &mut [u8], conns: &mut [Option<TcpConn>; MAX_CONNS], auth: &Auth) -> usize {
+#[allow(clippy::too_many_arguments)]
+fn handle_run(packed_mac: u64, buf: &[u8], len: usize, out: &mut [u8], conns: &mut [Option<TcpConn>; MAX_CONNS], dials: &mut [Option<DialConn>; MAX_DIAL], auth: &Auth) -> usize {
     let fail = |out: &mut [u8], msg: &[u8]| -> usize {
         let n = msg.len().min(out.len());
         out[..n].copy_from_slice(&msg[..n]);
@@ -1070,7 +1087,7 @@ fn handle_run(packed_mac: u64, buf: &[u8], len: usize, out: &mut [u8], conns: &m
     // would drop those frames while stuck waiting). tcp_run drives the run's
     // client connection AND serves the export + acks the health-ping each pass.
     let mut resp = [0u8; ninep_abi::NP_NET_LEN_PREFIX + ninep_abi::NP_NET_MAX];
-    let (status, got) = tcp_run(packed_mac, &mac, &dst_mac, &ip, port, &req[..total], &mut resp, conns, auth);
+    let (status, got) = tcp_run(packed_mac, &mac, &dst_mac, &ip, port, &req[..total], &mut resp, conns, dials, auth);
     if status != syscall_abi::NET_FETCH_OK {
         return fail(out, b"cpu: remote run failed\r\n");
     }
@@ -1247,6 +1264,101 @@ struct TcpConn {
 /// `TcpConn::cpu_child` sentinel: this connection is not a remote-run capture.
 const CPU_NONE: u8 = 0xFF;
 
+// ---------------------------------------------------------------------------
+// Dial-out: /net/tcp connection files (the Plan 9 `/net/tcp` model, scoped).
+// A client (local, or a remote machine through the export) opens a TCP
+// connection *out of this machine's NIC* by reading /net/tcp/clone (-> a
+// connection number N), writing "connect ip!port" to /net/tcp/N/ctl, then
+// writing/reading /net/tcp/N/data. The connection handle lives in the PATH
+// (N), so no protocol fids are needed - each op is an ordinary path-based NP
+// verb addressing slot N (the Phase-0 path-based-verbs design, extended).
+//
+// Architecture: net_op NEVER blocks or drives recv - it only mutates DialConn
+// state and moves bytes to/from the per-conn buffers. ALL the TCP work (send
+// the SYN when Connecting, complete the handshake, ACK + buffer inbound data,
+// retransmit, send the FIN) happens in the event loop: `pump_dials` each pass
+// and `dial_on_segment` for inbound frames - exactly the model the server-side
+// `conns` already use. Reliability is honestly scoped to **stop-and-wait**
+// (one segment outstanding at a time, no cwnd/SACK) - adequate for the small
+// request/response transactions this primitive targets, documented as such.
+// ---------------------------------------------------------------------------
+
+/// Concurrent dial-out connections. Bounded (no heap), like `MAX_CONNS`. Kept
+/// small because each `DialConn` carries its own send+recv buffers and the whole
+/// `[Option<DialConn>; MAX_DIAL]` array lives on `serve`'s (guard-paged) stack -
+/// so these three sizes trade directly against netd's stack headroom.
+const MAX_DIAL: usize = 2;
+/// Per-connection send buffer: bytes the client has queued (via a /data write)
+/// that are not yet sent-and-acked. One small request's worth (stop-and-wait).
+const DIAL_SBUF: usize = 512;
+/// Per-connection receive buffer: bytes received from the peer awaiting a
+/// /data read. The peer is flow-controlled to it (we stop ACKing new data when
+/// it's full); the client should read promptly. Modest to bound stack use.
+const DIAL_RBUF: usize = 1024;
+/// Ticks (`now()`) before an idle dial connection is reaped (bounded table, so
+/// an abandoned connection can't leak a slot forever).
+const DIAL_IDLE_TICKS: u64 = 600;
+
+#[derive(Clone, Copy, PartialEq)]
+enum DialState {
+    /// Slot is unallocated.
+    Free,
+    /// Allocated by a `clone` read, not yet connected (no `connect` ctl yet).
+    Idle,
+    /// `connect` issued; the SYN is being (re)sent and the SYN-ACK awaited.
+    Connecting,
+    /// Handshake complete; data flows.
+    Established,
+    /// `close` issued (or the peer FIN'd); our FIN is being sent / we're
+    /// draining. Buffered receive data is still readable until drained.
+    Closing,
+    /// Fully closed (peer refused, reset, or clean teardown done). A final
+    /// `status` read reports this; the slot is freed on the next `clone`/GC.
+    Closed,
+}
+
+/// One dial-out (client) TCP connection, addressed by its slot index N in the
+/// path `/net/tcp/N/...`. Leaner than [`TcpConn`] (no file serving, no
+/// congestion control) - stop-and-wait reliability with a send and a receive
+/// buffer.
+struct DialConn {
+    state: DialState,
+    peer_ip: [u8; 4],
+    peer_mac: [u8; 6],
+    peer_port: u16,
+    /// Our ephemeral source port (the local half of the 4-tuple; inbound
+    /// segments addressed here belong to this connection).
+    src_port: u16,
+    /// Our initial sequence number (for validating the SYN-ACK's ack).
+    isn: u32,
+    /// Next sequence number we'll send.
+    snd_nxt: u32,
+    /// Oldest unacked sequence number (peer ACKs advance it).
+    snd_una: u32,
+    /// Next sequence number expected from the peer.
+    rcv_nxt: u32,
+    /// Whether our FIN has been sent (in Closing).
+    fin_sent: bool,
+    /// Send buffer: `sbuf[..slen]` is queued client data; `[..inflight]` has
+    /// been sent (awaiting ACK), `[inflight..slen]` is unsent. An ACK removes
+    /// acked bytes from the front (compacting); an RTO resends `[..inflight]`.
+    sbuf: [u8; DIAL_SBUF],
+    slen: usize,
+    inflight: usize,
+    /// Receive buffer: `rbuf[..rlen]` is data received, awaiting a /data read.
+    rbuf: [u8; DIAL_RBUF],
+    rlen: usize,
+    /// Retransmit timer (a `now()` tick; 0 = off) and try counter, for the SYN
+    /// and for outstanding data (stop-and-wait, so one thing at a time).
+    retx_deadline: u64,
+    retries: u8,
+    /// Last activity tick, for idle GC.
+    last_activity: u64,
+    /// Set once the peer's FIN has been received (so a drained read reports EOF
+    /// / the connection can finish closing).
+    peer_fin: bool,
+}
+
 /// A parsed inbound TCP segment addressed to our listen port.
 struct TcpIn {
     src_ip: [u8; 4],
@@ -1273,7 +1385,7 @@ struct TcpIn {
 /// Dispatch one received frame: answer ARP requests for our IP, and feed TCP
 /// segments to the HTTP server. Everything else (including our own client
 /// ops' replies, which the synchronous handlers already consumed) is ignored.
-fn on_frame(mac: &[u8; 6], frame: &[u8], conns: &mut [Option<TcpConn>; MAX_CONNS], auth: &Auth) {
+fn on_frame(mac: &[u8; 6], frame: &[u8], conns: &mut [Option<TcpConn>; MAX_CONNS], dials: &mut [Option<DialConn>; MAX_DIAL], auth: &Auth) {
     if frame.len() < 14 {
         return;
     }
@@ -1281,8 +1393,13 @@ fn on_frame(mac: &[u8; 6], frame: &[u8], conns: &mut [Option<TcpConn>; MAX_CONNS
     match ethertype {
         0x0806 => handle_arp(mac, frame),
         0x0800 => {
+            // A dial-out (client) connection's segment is addressed to our
+            // ephemeral source port, not a listen port - try those first.
+            if dial_on_segment(mac, frame, dials) {
+                return;
+            }
             if let Some(seg) = parse_tcp_in(frame) {
-                handle_tcp(mac, frame, &seg, conns, auth);
+                handle_tcp(mac, frame, &seg, conns, dials, auth);
             }
         }
         _ => {}
@@ -1401,7 +1518,7 @@ fn parse_tcp_in(frame: &[u8]) -> Option<TcpIn> {
 /// slots are busy (the peer retransmits); every other segment is dispatched to
 /// its matching connection via [`handle_conn_segment`], and a returned "close"
 /// (the peer's FIN, or an RST) frees the slot.
-fn handle_tcp(mac: &[u8; 6], frame: &[u8], seg: &TcpIn, conns: &mut [Option<TcpConn>; MAX_CONNS], auth: &Auth) {
+fn handle_tcp(mac: &[u8; 6], frame: &[u8], seg: &TcpIn, conns: &mut [Option<TcpConn>; MAX_CONNS], dials: &mut [Option<DialConn>; MAX_DIAL], auth: &Auth) {
     // RST tears down a matching connection.
     if seg.flags & TCP_RST != 0 {
         if let Some(i) = find_conn(conns, seg) {
@@ -1461,7 +1578,7 @@ fn handle_tcp(mac: &[u8; 6], frame: &[u8], seg: &TcpIn, conns: &mut [Option<TcpC
 
     // Everything else is dispatched to its matching connection (if any).
     if let Some(i) = find_conn(conns, seg) {
-        if handle_conn_segment(mac, frame, seg, conns[i].as_mut().unwrap(), auth) {
+        if handle_conn_segment(mac, frame, seg, conns[i].as_mut().unwrap(), dials, auth) {
             conns[i] = None;
         }
     }
@@ -1473,7 +1590,7 @@ fn handle_tcp(mac: &[u8; 6], frame: &[u8], seg: &TcpIn, conns: &mut [Option<TcpC
 /// Returns `true` when the connection should be closed (the peer FIN'd). The
 /// actual sending (`pump_send`) is *not* done here - it runs once per
 /// event-loop wake so the health-ping stays promptly acked (see `serve`).
-fn handle_conn_segment(mac: &[u8; 6], frame: &[u8], seg: &TcpIn, c: &mut TcpConn, auth: &Auth) -> bool {
+fn handle_conn_segment(mac: &[u8; 6], frame: &[u8], seg: &TcpIn, c: &mut TcpConn, dials: &mut [Option<DialConn>; MAX_DIAL], auth: &Auth) -> bool {
     // Track the peer's ACK (frees send window), count duplicate ACKs, and
     // update the advertised window.
     if seg.flags & TCP_ACK != 0 {
@@ -1550,7 +1667,7 @@ fn handle_conn_segment(mac: &[u8; 6], frame: &[u8], seg: &TcpIn, c: &mut TcpConn
         // export gateway (cluster Phase 1). Both stage a response in `c.prefix`
         // for pump_send to stream.
         if c.local_port == ninep_abi::NP_NET_PORT {
-            handle_9p(c, request, auth);
+            handle_9p(c, request, dials, mac, auth);
         } else {
             start_response(c, request);
         }
@@ -1767,7 +1884,7 @@ const DATA_INLINE: usize = syscall_abi::FS_DATA_MAX as usize;
 /// each relayed to the local `fsd`. The request's `tree` field is ignored - the
 /// export serves the local boot mount (tree 0). Single-writer, trusted-LAN (see
 /// docs/roadmap-cluster-phase2.md).
-fn handle_9p(c: &mut TcpConn, request: &[u8], auth: &Auth) {
+fn handle_9p(c: &mut TcpConn, request: &[u8], dials: &mut [Option<DialConn>; MAX_DIAL], mac: &[u8; 6], auth: &Auth) {
     // Authenticate first (the export-hardening phase): verify the client-nonce
     // MAC over the request and recover the bare NP message. A failure (wrong or
     // missing cluster key, or an unconfigured export) is refused before any verb
@@ -1783,7 +1900,7 @@ fn handle_9p(c: &mut TcpConn, request: &[u8], auth: &Auth) {
         handle_cpu_run(c, msg, auth);
         return;
     }
-    let n = build_9p_reply(msg, &mut c.prefix);
+    let n = build_9p_reply(msg, &mut c.prefix, dials, mac);
     c.prefix_len = n;
     c.prefix_off = 0;
     c.file = false;
@@ -2072,13 +2189,419 @@ const EXPORT_NS: &[u8] = &[
     ninep_abi::NS_NET_TREE, 4, 1, b'/', b'n', b'e', b't', b'/',
 ];
 
-/// The `/net` synthetic filesystem (cluster Phase 3): this machine's network
-/// identity as read-only files, served by `netd` itself. `/` lists `ip` and
-/// `mac`; `/ip` is the dotted-quad IPv4, `/mac` the colon-hex MAC. Serves one NP
-/// read verb into `out` (offset/want windowing like fsd), returning the status
-/// (a byte count / real size, or an `FS_ERR_*`). Shared by the export gateway
-/// (remote reads) and the local client path (`handle_client`).
-fn net_op(verb: u64, fspath: &[u8], offset: u64, want: usize, out: &mut [u8]) -> (u64, usize) {
+// --- dial-out (/net/tcp) plumbing ---
+
+/// Max data bytes per dial segment (stop-and-wait), and the max a /data read
+/// returns per NP round trip (fits the inline reply cap; the client loops).
+const DIAL_MSS: usize = 1200;
+const DIAL_READ_MAX: usize = 512;
+const DIAL_SYN_TRIES: u8 = 6;
+const DIAL_DATA_TRIES: u8 = 8;
+const DIAL_RETX_WAIT: u64 = 12; // ticks per (re)try
+
+/// Parse a decimal byte string into a `u64` (no sign, no overflow guard beyond
+/// u64). `None` on empty or a non-digit.
+fn parse_dec(b: &[u8]) -> Option<u64> {
+    if b.is_empty() {
+        return None;
+    }
+    let mut v = 0u64;
+    for &d in b {
+        if !d.is_ascii_digit() {
+            return None;
+        }
+        v = v.wrapping_mul(10).wrapping_add((d - b'0') as u64);
+    }
+    Some(v)
+}
+
+/// Parse a dotted-quad IPv4 from bytes (byte-scanning, PIE-safe - no str
+/// range-indexing).
+fn parse_ip4(b: &[u8]) -> Option<[u8; 4]> {
+    let mut octets = [0u8; 4];
+    let mut n = 0usize;
+    let mut start = 0usize;
+    let mut i = 0usize;
+    loop {
+        let at_end = i == b.len();
+        if at_end || b[i] == b'.' {
+            let v = parse_dec(&b[start..i])?;
+            if v > 255 || n >= 4 {
+                return None;
+            }
+            octets[n] = v as u8;
+            n += 1;
+            start = i + 1;
+            if at_end {
+                break;
+            }
+        }
+        i += 1;
+    }
+    if n == 4 {
+        Some(octets)
+    } else {
+        None
+    }
+}
+
+/// Parse a `connect <a.b.c.d>!<port>` ctl command into an endpoint.
+fn parse_connect(data: &[u8]) -> Option<([u8; 4], u16)> {
+    const PFX: &[u8] = b"connect ";
+    if data.len() < PFX.len() || &data[..PFX.len()] != PFX {
+        return None;
+    }
+    let mut rest = &data[PFX.len()..];
+    // Trim trailing whitespace/newline.
+    while !rest.is_empty() && matches!(rest[rest.len() - 1], b'\n' | b'\r' | b' ' | b'\t') {
+        rest = &rest[..rest.len() - 1];
+    }
+    let bang = rest.iter().position(|&b| b == b'!')?;
+    let ip = parse_ip4(&rest[..bang])?;
+    let port = parse_dec(&rest[bang + 1..])?;
+    if port > u16::MAX as u64 {
+        return None;
+    }
+    Some((ip, port as u16))
+}
+
+/// Split a `/tcp/<N>/<leaf>` path into `(N, leaf)`. `sub` is the path *after*
+/// `/tcp` (e.g. `/3/data`); returns `None` for `/clone` or a malformed path.
+fn dial_path(sub: &[u8]) -> Option<(usize, &[u8])> {
+    if sub.is_empty() || sub[0] != b'/' {
+        return None;
+    }
+    let rest = &sub[1..]; // "<N>/<leaf>"
+    let slash = rest.iter().position(|&b| b == b'/')?;
+    let n = parse_dec(&rest[..slash])? as usize;
+    Some((n, &rest[slash + 1..]))
+}
+
+/// The `/net/tcp` file model (Plan 9 connection files, handle-in-path). `sub` is
+/// the path after `/tcp`. Pure state mutation - the event loop (`pump_dials` /
+/// `dial_on_segment`) does the actual TCP. `data_in` is a write's payload.
+fn dial_file_op(
+    verb: u64,
+    sub: &[u8],
+    want: usize,
+    data_in: &[u8],
+    out: &mut [u8],
+    dials: &mut [Option<DialConn>; MAX_DIAL],
+    mac: &[u8; 6],
+) -> (u64, usize) {
+    let is_read = verb == ninep_abi::NP_READ
+        || verb == ninep_abi::NP_READ_AT
+        || verb == ninep_abi::NP_READ_FILE;
+    let is_write = verb == ninep_abi::NP_WRITE || verb == ninep_abi::NP_WRITE_FILE;
+
+    // /tcp (dir): readdir lists clone (per-conn dirs omitted - minimal).
+    if sub.is_empty() || sub == b"/" {
+        if verb == ninep_abi::NP_READDIR {
+            let listing: &[u8] = b"clone\n";
+            let m = listing.len().min(want).min(out.len());
+            out[..m].copy_from_slice(&listing[..m]);
+            return (m as u64, m);
+        }
+        return (syscall_abi::FS_ERR_NOT_A_FILE, 0);
+    }
+
+    // /tcp/clone: allocate a connection, return its number.
+    if sub == b"/clone" {
+        if !is_read {
+            return (syscall_abi::FS_ERROR, 0);
+        }
+        let Some(i) = dials.iter().position(|c| c.is_none() || matches!(c, Some(d) if d.state == DialState::Free)) else {
+            return (syscall_abi::FS_ERR_DISK_FULL, 0); // no free connection slot
+        };
+        let src_port = next_src_port();
+        dials[i] = Some(DialConn {
+            state: DialState::Idle,
+            peer_ip: [0; 4],
+            peer_mac: [0; 6],
+            peer_port: 0,
+            src_port,
+            isn: TCP_ISN ^ ((src_port as u32) << 8),
+            snd_nxt: 0,
+            snd_una: 0,
+            rcv_nxt: 0,
+            fin_sent: false,
+            sbuf: [0; DIAL_SBUF],
+            slen: 0,
+            inflight: 0,
+            rbuf: [0; DIAL_RBUF],
+            rlen: 0,
+            retx_deadline: 0,
+            retries: 0,
+            last_activity: now(),
+            peer_fin: false,
+        });
+        let mut num = [0u8; 8];
+        let nlen = u64_decimal(i as u64, &mut num);
+        num[nlen] = b'\n';
+        let total = nlen + 1;
+        let m = total.min(want).min(out.len());
+        out[..m].copy_from_slice(&num[..m]);
+        return (total as u64, m);
+    }
+
+    // /tcp/<N>/<leaf>
+    let Some((n, leaf)) = dial_path(sub) else {
+        return (syscall_abi::FS_ERR_NOT_FOUND, 0);
+    };
+    if n >= dials.len() || dials[n].is_none() {
+        return (syscall_abi::FS_ERR_NOT_FOUND, 0);
+    }
+
+    if leaf == b"ctl" && is_write {
+        // "connect a.b.c.d!port" or "close".
+        if data_in.starts_with(b"connect ") {
+            let Some((ip, port)) = parse_connect(data_in) else {
+                return (syscall_abi::FS_ERR_INVALID_NAME, 0);
+            };
+            let Some(dst_mac) = arp_resolve(mac, &next_hop(&ip)) else {
+                if let Some(c) = dials[n].as_mut() {
+                    c.state = DialState::Closed;
+                }
+                return (syscall_abi::NO_FS, 0); // unreachable
+            };
+            let c = dials[n].as_mut().unwrap();
+            c.peer_ip = ip;
+            c.peer_port = port;
+            c.peer_mac = dst_mac;
+            c.snd_nxt = c.isn;
+            c.snd_una = c.isn;
+            c.state = DialState::Connecting;
+            c.retx_deadline = 0;
+            c.retries = 0;
+            c.last_activity = now();
+            return (0, 0);
+        }
+        if data_in.starts_with(b"close") {
+            let c = dials[n].as_mut().unwrap();
+            if c.state == DialState::Established {
+                c.state = DialState::Closing;
+            } else {
+                c.state = DialState::Closed;
+            }
+            c.last_activity = now();
+            return (0, 0);
+        }
+        return (syscall_abi::FS_ERR_INVALID_NAME, 0);
+    }
+
+    if leaf == b"status" && is_read {
+        let c = dials[n].as_ref().unwrap();
+        let s: &[u8] = match c.state {
+            DialState::Free => b"Free\n",
+            DialState::Idle => b"Idle\n",
+            DialState::Connecting => b"Connecting\n",
+            DialState::Established => b"Established\n",
+            DialState::Closing => b"Closing\n",
+            DialState::Closed => b"Closed\n",
+        };
+        let m = s.len().min(want).min(out.len());
+        out[..m].copy_from_slice(&s[..m]);
+        return (s.len() as u64, m);
+    }
+
+    if leaf == b"data" {
+        let c = dials[n].as_mut().unwrap();
+        c.last_activity = now();
+        if is_write {
+            // Append to the send buffer (bounded); return bytes accepted.
+            let room = c.sbuf.len() - c.slen;
+            let take = data_in.len().min(room);
+            c.sbuf[c.slen..c.slen + take].copy_from_slice(&data_in[..take]);
+            c.slen += take;
+            return (take as u64, 0);
+        }
+        if is_read {
+            // Drain the receive buffer (bounded to DIAL_READ_MAX). 0 = nothing
+            // buffered right now (the client should poll /status to tell "not
+            // yet" from EOF).
+            let take = c.rlen.min(want).min(DIAL_READ_MAX).min(out.len());
+            out[..take].copy_from_slice(&c.rbuf[..take]);
+            // Compact the receive buffer.
+            c.rbuf.copy_within(take..c.rlen, 0);
+            c.rlen -= take;
+            return (take as u64, take);
+        }
+    }
+
+    (syscall_abi::FS_ERR_NOT_FOUND, 0)
+}
+
+/// Event-loop step: drive every active dial connection - (re)send its SYN while
+/// Connecting, stream queued send data (stop-and-wait) and retransmit it, send
+/// the FIN while Closing, and reap idle slots. Called each `serve` pass.
+#[allow(clippy::needless_range_loop)] // index needed for the reap re-borrow
+fn pump_dials(mac: &[u8; 6], dials: &mut [Option<DialConn>; MAX_DIAL]) {
+    let mut frame = [0u8; 1600];
+    let t = now();
+    for i in 0..dials.len() {
+        if dials[i].is_none() {
+            continue;
+        }
+        let reap = {
+            let c = dials[i].as_mut().unwrap();
+            match c.state {
+                DialState::Connecting => {
+                    if c.retx_deadline == 0 || t >= c.retx_deadline {
+                        if c.retries >= DIAL_SYN_TRIES {
+                            c.state = DialState::Closed;
+                        } else if let Some(nn) = build_tcp(mac, &c.peer_mac, &c.peer_ip, c.src_port, c.peer_port, c.isn, 0, TCP_SYN, true, &[], &mut frame) {
+                            let _ = send(&frame[..nn]);
+                            c.retries += 1;
+                            c.retx_deadline = t + DIAL_RETX_WAIT;
+                        }
+                    }
+                }
+                DialState::Established => {
+                    if c.inflight == 0 && c.slen > 0 {
+                        let chunk = c.slen.min(DIAL_MSS);
+                        if let Some(nn) = build_tcp(mac, &c.peer_mac, &c.peer_ip, c.src_port, c.peer_port, c.snd_nxt, c.rcv_nxt, TCP_PSH | TCP_ACK, false, &c.sbuf[..chunk], &mut frame) {
+                            let _ = send(&frame[..nn]);
+                        }
+                        c.inflight = chunk;
+                        c.snd_nxt = c.snd_nxt.wrapping_add(chunk as u32);
+                        c.retx_deadline = t + DIAL_RETX_WAIT;
+                        c.retries = 0;
+                    } else if c.inflight > 0 && t >= c.retx_deadline {
+                        if c.retries >= DIAL_DATA_TRIES {
+                            c.state = DialState::Closed;
+                        } else if let Some(nn) = build_tcp(mac, &c.peer_mac, &c.peer_ip, c.src_port, c.peer_port, c.snd_una, c.rcv_nxt, TCP_PSH | TCP_ACK, false, &c.sbuf[..c.inflight], &mut frame) {
+                            let _ = send(&frame[..nn]);
+                            c.retries += 1;
+                            c.retx_deadline = t + DIAL_RETX_WAIT;
+                        }
+                    }
+                }
+                DialState::Closing => {
+                    if !c.fin_sent && c.inflight == 0 {
+                        if let Some(nn) = build_tcp(mac, &c.peer_mac, &c.peer_ip, c.src_port, c.peer_port, c.snd_nxt, c.rcv_nxt, TCP_FIN | TCP_ACK, false, &[], &mut frame) {
+                            let _ = send(&frame[..nn]);
+                        }
+                        c.fin_sent = true;
+                        c.snd_nxt = c.snd_nxt.wrapping_add(1);
+                        c.retx_deadline = t + DIAL_RETX_WAIT;
+                    } else if c.fin_sent && t >= c.retx_deadline {
+                        c.state = DialState::Closed; // give up waiting for the FIN-ACK
+                    }
+                }
+                _ => {}
+            }
+            // Reap a slot only once it's Closed AND its receive buffer is drained
+            // (so the client can still read the last bytes), or after a long idle.
+            (c.state == DialState::Closed && c.rlen == 0)
+                || t.saturating_sub(c.last_activity) > DIAL_IDLE_TICKS
+        };
+        if reap {
+            dials[i] = None;
+        }
+    }
+}
+
+/// Route an inbound TCP segment to a dial connection (matched by 4-tuple).
+/// Returns true if it belonged to one (handshake completion, ACK, buffered
+/// data + our ACK, or the peer's FIN). Called from `on_frame` before the
+/// server-connection path.
+#[allow(clippy::needless_range_loop)] // index needed for as_ref/as_mut re-borrow
+fn dial_on_segment(mac: &[u8; 6], frame: &[u8], dials: &mut [Option<DialConn>; MAX_DIAL]) -> bool {
+    let mut out = [0u8; 1600];
+    let t = now();
+    for i in 0..dials.len() {
+        let (peer, pport, sport) = match dials[i].as_ref() {
+            Some(c) if c.state != DialState::Free && c.state != DialState::Idle => (c.peer_ip, c.peer_port, c.src_port),
+            _ => continue,
+        };
+        let Some(s) = parse_tcp(frame, &peer, pport, sport) else {
+            continue;
+        };
+        let c = dials[i].as_mut().unwrap();
+        c.last_activity = t;
+        if s.flags & TCP_RST != 0 {
+            c.state = DialState::Closed;
+            return true;
+        }
+        match c.state {
+            DialState::Connecting => {
+                if s.flags & (TCP_SYN | TCP_ACK) == (TCP_SYN | TCP_ACK) && s.ack == c.isn.wrapping_add(1) {
+                    c.snd_nxt = c.isn.wrapping_add(1);
+                    c.snd_una = c.snd_nxt;
+                    c.rcv_nxt = s.seq.wrapping_add(1);
+                    c.state = DialState::Established;
+                    c.retx_deadline = 0;
+                    c.retries = 0;
+                    if let Some(nn) = build_tcp(mac, &c.peer_mac, &c.peer_ip, c.src_port, c.peer_port, c.snd_nxt, c.rcv_nxt, TCP_ACK, false, &[], &mut out) {
+                        let _ = send(&out[..nn]);
+                    }
+                }
+            }
+            DialState::Established | DialState::Closing => {
+                // ACK processing: advance snd_una, drop acked send data.
+                if seq_gt(s.ack, c.snd_una) {
+                    let acked = s.ack.wrapping_sub(c.snd_una) as usize;
+                    let data_acked = acked.min(c.inflight);
+                    if data_acked > 0 {
+                        c.sbuf.copy_within(data_acked..c.slen, 0);
+                        c.slen -= data_acked;
+                        c.inflight -= data_acked;
+                    }
+                    c.snd_una = s.ack;
+                    c.retries = 0;
+                    if c.inflight == 0 {
+                        c.retx_deadline = 0;
+                    }
+                }
+                // In-order data: buffer it (flow-controlled to rbuf) and ACK.
+                if s.data_len > 0 && s.seq == c.rcv_nxt {
+                    let room = c.rbuf.len() - c.rlen;
+                    let take = s.data_len.min(room).min(frame.len().saturating_sub(s.data_off));
+                    if take > 0 {
+                        c.rbuf[c.rlen..c.rlen + take].copy_from_slice(&frame[s.data_off..s.data_off + take]);
+                        c.rlen += take;
+                        c.rcv_nxt = c.rcv_nxt.wrapping_add(take as u32);
+                        if let Some(nn) = build_tcp(mac, &c.peer_mac, &c.peer_ip, c.src_port, c.peer_port, c.snd_nxt, c.rcv_nxt, TCP_ACK, false, &[], &mut out) {
+                            let _ = send(&out[..nn]);
+                        }
+                    }
+                }
+                // Peer FIN, in order (after any data in this segment): ACK it,
+                // send our FIN if we haven't, and close (rbuf stays drainable).
+                if s.flags & TCP_FIN != 0 && s.seq.wrapping_add(s.data_len as u32) == c.rcv_nxt {
+                    c.rcv_nxt = c.rcv_nxt.wrapping_add(1);
+                    c.peer_fin = true;
+                    if let Some(nn) = build_tcp(mac, &c.peer_mac, &c.peer_ip, c.src_port, c.peer_port, c.snd_nxt, c.rcv_nxt, TCP_ACK, false, &[], &mut out) {
+                        let _ = send(&out[..nn]);
+                    }
+                    if !c.fin_sent {
+                        c.fin_sent = true;
+                        if let Some(nn) = build_tcp(mac, &c.peer_mac, &c.peer_ip, c.src_port, c.peer_port, c.snd_nxt, c.rcv_nxt, TCP_FIN | TCP_ACK, false, &[], &mut out) {
+                            let _ = send(&out[..nn]);
+                        }
+                        c.snd_nxt = c.snd_nxt.wrapping_add(1);
+                    }
+                    c.state = DialState::Closed;
+                }
+            }
+            _ => {}
+        }
+        return true;
+    }
+    false
+}
+
+/// The `/net` server, served by `netd` itself: the read-only identity files
+/// (`/ip` dotted-quad, `/mac` colon-hex) AND the read-write `/net/tcp` dial-out
+/// connection files (see `dial_file_op`). `data_in` is a write's payload; the
+/// dial table + our MAC let the tcp subtree drive real connections. Shared by
+/// the export gateway (remote) and the local client path (`handle_client`).
+#[allow(clippy::too_many_arguments)]
+fn net_op(verb: u64, fspath: &[u8], offset: u64, want: usize, data_in: &[u8], out: &mut [u8], dials: &mut [Option<DialConn>; MAX_DIAL], mac: &[u8; 6]) -> (u64, usize) {
+    // The dial-out connection files (Plan 9 /net/tcp), a read-WRITE subtree.
+    if fspath.starts_with(b"/tcp") {
+        return dial_file_op(verb, &fspath[4..], want, data_in, out, dials, mac);
+    }
     // The file contents (tiny), rebuilt each call from the live NIC state.
     let mut content = [0u8; 24];
     let clen = net_content(fspath, &mut content);
@@ -2159,7 +2682,7 @@ fn hex_digit(v: u8) -> u8 {
 
 /// Decode a framed NP request and build its framed reply into `out`. See
 /// `ninep_abi`'s frame doc: request = `[u32 len][verb][tree][a0..a3][payload]`.
-fn build_9p_reply(msg: &[u8], out: &mut [u8; PREFIX_MAX]) -> usize {
+fn build_9p_reply(msg: &[u8], out: &mut [u8; PREFIX_MAX], dials: &mut [Option<DialConn>; MAX_DIAL], mac: &[u8; 6]) -> usize {
     let hdr = ninep_abi::NP_REQ_PAYLOAD as usize; // 48
     // `msg` is the bare NP message (verb at offset 0); framing + auth were
     // stripped by handle_9p/authenticate. Reject a runt.
@@ -2199,16 +2722,25 @@ fn build_9p_reply(msg: &[u8], out: &mut [u8; PREFIX_MAX]) -> usize {
             };
             return frame_reply(out, status, &[]);
         }
-        // /net: this machine's network identity, served by netd itself (read-only).
+        // /net: this machine's network identity (read-only) AND /net/tcp dial-out
+        // (the connection files - read-write). Served by netd itself.
         ninep_abi::NsTarget::NetLocal => {
-            let mut ndata = [0u8; 32];
+            let mut ndata = [0u8; 544];
             // readdir/read_file take the result window in a1; read/read_at in a2.
             let want = if verb == ninep_abi::NP_READ || verb == ninep_abi::NP_READ_AT {
                 p2 as usize
             } else {
                 p1 as usize
             };
-            let (status, dlen) = net_op(verb, fspath, p1, want.min(ndata.len()), &mut ndata);
+            // A write's payload follows the path (p1 = data length for the inline
+            // write verbs) - the /net/tcp ctl/data writes.
+            let data_in: &[u8] = if verb == ninep_abi::NP_WRITE || verb == ninep_abi::NP_WRITE_FILE {
+                let end = (p0 + p1 as usize).min(payload.len());
+                &payload[p0.min(payload.len())..end]
+            } else {
+                &[]
+            };
+            let (status, dlen) = net_op(verb, fspath, p1, want.min(ndata.len()), data_in, &mut ndata, dials, mac);
             return frame_reply(out, status, &ndata[..dlen]);
         }
         // A remote binding in the export namespace would be transitive mounting -

@@ -13,6 +13,7 @@ members = [
     "programs/textutils/upper", "programs/textutils/wc", "programs/textutils/grep",
     "programs/textutils/head",
     "programs/netutils/ping", "programs/netutils/resolve", "programs/netutils/fetch",
+    "programs/netutils/dial",
     "programs/shellutils/echo", "programs/shellutils/uptime", "programs/shellutils/clear",
     "programs/shellutils/args",
 ]

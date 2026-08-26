@@ -7,6 +7,54 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/`; 
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## Dial-out: /net/tcp connection files — use another machine's network
+
+The last unshared cluster resource: a machine now dials TCP **out of another
+machine's NIC**, exposed as Plan 9-style `/net/tcp` connection files. `dial
+/mnt/a/net 93.184.216.34 80 GET / HTTP/1.0` opens the connection from **machine
+A's** network — the "use another's network" half of the north star, alongside
+the disk/`/proc`/`/dev/cons`/remote-exec already shared.
+
+**The file model** (served by `netd` under `/net/tcp`, read-write):
+- read `/net/tcp/clone` → a connection number `N`;
+- write `connect <ip>!<port>` (or `close`) to `/net/tcp/N/ctl`;
+- write/read `/net/tcp/N/data` to send/receive bytes;
+- read `/net/tcp/N/status` → `Connecting`/`Established`/`Closed`.
+
+**The design that avoids fids.** The connection handle lives in the *path* (`N`),
+so each op is an ordinary path-based NP verb addressing a slot in `netd`'s
+bounded `[Option<DialConn>; MAX_DIAL]` table — no protocol fids (the Phase-0
+path-based-verbs design, extended). `net_op` only mutates dial state; **all the
+TCP work happens in the event loop** — `pump_dials` (send the SYN while
+Connecting, stream queued data, retransmit, send the FIN) and `dial_on_segment`
+(complete the handshake, ACK + buffer inbound, handle the peer FIN), the same
+model the server-side connections use. `connect` is asynchronous (the client
+polls `status`), so `net_op` never blocks the loop. Reliability is honestly
+scoped to **stop-and-wait** (one segment outstanding, no cwnd/SACK) — enough for
+the small request/response transactions this targets.
+
+**Routing is almost all reuse.** Locally (`mount -n /net`) a `/net/tcp` op
+resolves to `NsTarget::NetLocal` → a direct NP verb to `NET_TASK`; through a
+remote mount it resolves to `NsTarget::Remote` → the export → A's `net_op`, so
+dialing out of A's NIC is just `/mnt/a/net/tcp/...`. `ulib` gained
+`fs_write_inline` (an `NP_WRITE_FILE` routed through the namespace) and taught
+`np_netlocal` to carry write data, since `/net` was read-only before. A
+`/bin/dial` program is the consumer; `netd` grew nothing structural — a new arm
+of its existing `/net` server.
+
+**Scope, honest:** `cpu A fetch` already dials out for the run-a-program case;
+`/net/tcp`'s distinct value is a *raw* connection the caller drives (no matching
+program needed on A) composed as files. Deferred: inbound `listen`/`accept`
+through A, UDP, and flow-control beyond a simple window.
+
+**Verified** cross-implementation: the host drove the guest's `/net/tcp` over
+the export to dial back out to a host TCP server (the foreign observer), which
+saw the connection arrive from the guest's NIC and received its forwarded
+request; the reply streamed back through the guest. Zero EL0 faults. A stack
+overflow (the big per-conn buffers on `serve`'s guard-paged stack — the network
+arc's recurring trap) was found and fixed by shrinking `MAX_DIAL`/buffers. See
+[`dial-out-postmortem.md`](dial-out-postmortem.md).
+
 ## Cluster authentication: the export-hardening phase (v0.10.0)
 
 The distributed cluster stops trusting the whole LAN. Phases 1–4 all shipped

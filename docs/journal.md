@@ -7,6 +7,31 @@ for the forward plan see [`roadmap.md`](roadmap.md).
 
 ---
 
+## 2026-08-26 (cont.) — dialing out of another machine's NIC (`/net/tcp`)
+
+The last unshared cluster resource fell today: a machine can now open a TCP
+connection **out of another machine's network card**, exposed as Plan 9's
+`/net/tcp` connection files. `dial /mnt/a/net <ip> <port> …` connects from A's
+network — read `/net/tcp/clone` for a connection number, write `connect ip!port`
+to its `ctl`, read/write its `data`. Verified end-to-end: from the host I drove
+the guest's `/net/tcp` over the export to dial back out to a host TCP server,
+which saw the connection arrive from the guest's NIC and got the guest-forwarded
+request; the reply streamed back. Zero faults.
+
+Three things worth remembering. **The handle is the path** (`/net/tcp/N/…`), so a
+stateful, long-lived connection needed *no fids* — the Phase-0 decision to keep
+verbs path-based, which looked like a mere simplification then, is what let this
+fit now. **`net_op` never blocks; the event loop does the TCP** — `connect` is
+async and the client polls `status`, the same "netd must never block its own
+loop" rule from the network and remote-exec arcs, third time applied. And **the
+stack trap came back**: 2 KB+4 KB buffers per connection × 4 blew netd's
+guard-paged stack on first boot (the network arc bumped that stack three times;
+still not learned) — fixed by right-sizing to the actual small-transaction
+workload. Scoped honestly: `cpu A fetch` already dials out for the
+run-a-program case, so `/net/tcp`'s real value is a *raw* connection B drives
+with no program on A. Full account in
+[`dial-out-postmortem.md`](dial-out-postmortem.md).
+
 ## 2026-08-26 (cont.) — locking the cluster door: export authentication
 
 Phases 1–4 all shipped the same asterisk: *trusted-LAN, no auth*. Any host that

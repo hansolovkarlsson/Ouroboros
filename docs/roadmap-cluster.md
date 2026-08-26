@@ -203,10 +203,19 @@ resolves incoming paths through its own composed namespace with the shared
 `netd`), retiring the three per-server prefix special-cases. A fourth exported
 resource is a binding, not a code branch.
 
-Deferred to later phases: Plan 9's full `/net/tcp` connection files (using another
-machine's NIC to *dial out*); union directories when a consumer appears; and
-transitive/remote re-export (the export namespace can now bind a remote subtree —
-a natural Phase 4 hook).
+**Follow-up ✅ DONE (2026-08-26): `/net/tcp` dial-out** — Plan 9's connection
+files, so a machine dials TCP **out of another's NIC** (`dial /mnt/a/net <ip>
+<port> …` connects from A's network). The connection handle lives in the path
+(`/net/tcp/N/…`), so no fids were needed (the Phase-0 path-based-verbs design
+extended); `net_op` only mutates state while the event loop (`pump_dials` /
+`dial_on_segment`) does the TCP; `/net` became read-write. Stop-and-wait, TCP
+client only. The "use another machine's network" half of the north star. See
+[`dial-out-postmortem.md`](dial-out-postmortem.md).
+
+Deferred to later phases: inbound `listen`/`accept` through another machine (dial
+*in*); UDP; union directories when a consumer appears; and transitive/remote
+re-export (the export namespace can now bind a remote subtree — a natural Phase 4
+hook).
 - Union directories (Plan 9's join-several-sources-under-one-name) if/when a real
   consumer appears — not before. A fully namespace-aware export (vs. `/proc`'s
   prefix hack) lands when a second synthetic tree needs it.

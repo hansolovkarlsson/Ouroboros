@@ -525,7 +525,7 @@ fn np_dispatch(r: &Resolved, verb: u64, params: [u64; 4], payload1: &[u8], paylo
         // to /dev/cons are handled in the fs_write_* helpers, which con_write.)
         syscall_abi::FS_ERROR
     } else if is_local_net(r) {
-        np_netlocal(verb, params, payload1, result)
+        np_netlocal(verb, params, payload1, payload2, result)
     } else if r.server == syscall_abi::NET_TASK {
         np_remote(&r.endpoint, verb, params, payload1, payload2, result)
     } else {
@@ -541,10 +541,11 @@ fn is_local_net(r: &Resolved) -> bool {
 }
 
 /// One direct NP verb round trip to `netd` for the local `/net` filesystem: like
-/// [`np_call`] but addressed to `NET_TASK` (which serves `/net` read verbs in its
-/// client handler), and read-only (no payload2, no grant - `/net`'s data is
-/// inline in the reply). Reply shape `[status:u64][data]`, decoded as elsewhere.
-fn np_netlocal(verb: u64, params: [u64; 4], payload1: &[u8], result: &mut [u8]) -> u64 {
+/// [`np_call`] but addressed to `NET_TASK` (which serves `/net` read verbs and
+/// the `/net/tcp` dial-out connection files). The inline payload is
+/// `payload1 ++ payload2` (path, then any write data - the ctl/data writes to
+/// `/net/tcp`; empty `payload2` for a read). Reply shape `[status:u64][data]`.
+fn np_netlocal(verb: u64, params: [u64; 4], payload1: &[u8], payload2: &[u8], result: &mut [u8]) -> u64 {
     const HDR: usize = ninep_abi::NP_REQ_PAYLOAD as usize;
     let mut req = [0u8; syscall_abi::MSG_MAX_LEN as usize];
     req[0..8].copy_from_slice(&verb.to_le_bytes());
@@ -555,11 +556,12 @@ fn np_netlocal(verb: u64, params: [u64; 4], payload1: &[u8], result: &mut [u8]) 
         req[at..at + 8].copy_from_slice(&params[i].to_le_bytes());
         i += 1;
     }
-    let end = HDR + payload1.len();
+    let end = HDR + payload1.len() + payload2.len();
     if end > req.len() {
         return syscall_abi::FS_ERROR;
     }
-    req[HDR..end].copy_from_slice(payload1);
+    req[HDR..HDR + payload1.len()].copy_from_slice(payload1);
+    req[HDR + payload1.len()..end].copy_from_slice(payload2);
     let mut reply = [0u8; syscall_abi::MSG_MAX_LEN as usize];
     let packed = syscall4(
         syscall_abi::MSG_CALL,
@@ -697,7 +699,7 @@ pub fn fs_read_bulk(path: &str, offset: u64, buf: &mut [u8]) -> u64 {
     if is_local_net(&r) {
         // Local /net: data comes inline (no grant), like the remote case.
         let want = buf.len().min(ninep_abi::NP_REMOTE_CHUNK) as u64;
-        return np_netlocal(ninep_abi::NP_READ, [r.len as u64, offset, want, 0], &fsp[..r.len], buf);
+        return np_netlocal(ninep_abi::NP_READ, [r.len as u64, offset, want, 0], &fsp[..r.len], &[], buf);
     }
     // Remote: no grant crosses a machine boundary. The export delivers the bytes
     // *inline* in the reply, so ask for a chunk that fits one message and copy
@@ -827,6 +829,27 @@ pub fn fs_write_bulk(path: &str, data: &[u8]) -> u64 {
         [r.len as u64, data.len() as u64, 0, 0],
         &fsp[..r.len],
         &[],
+        &mut [],
+    )
+}
+
+/// Write `data` to `path` with the data carried **inline** in the request
+/// (`NP_WRITE_FILE`, bounded by [`syscall_abi::FS_DATA_MAX`]), routed through the
+/// namespace like any fs op. Unlike [`fs_write_bulk`] (grant/safecopy, and it
+/// refuses `/net`), this reaches the `/net/tcp` dial-out connection files - a
+/// `ctl` "connect …"/"close" or a `data` send - locally (`NsTarget::NetLocal`)
+/// and through a remote mount (`NsTarget::Remote`) alike. Returns the op's
+/// status (for `/net/tcp/N/data` that's the number of bytes accepted).
+pub fn fs_write_inline(path: &str, data: &[u8]) -> u64 {
+    let mut fsp = [0u8; FSP_MAX];
+    let r = mount_resolve(path, &mut fsp);
+    let d = &data[..data.len().min(syscall_abi::FS_DATA_MAX as usize)];
+    np_dispatch(
+        &r,
+        ninep_abi::NP_WRITE_FILE,
+        [r.len as u64, d.len() as u64, 0, 0],
+        &fsp[..r.len],
+        d,
         &mut [],
     )
 }
