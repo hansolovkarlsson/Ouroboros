@@ -18,8 +18,16 @@ dotfiles are matched only when the pattern starts with `.` (so `*` skips
 `.`/`..`). A token that matches nothing is kept literal (bash-style), and
 pipeline/redirect tokens have no wildcards so they pass through. Expansion
 happens in `run_line` after `$VAR` expansion (skipped entirely when the line has
-no wildcard). Each matching token can expand to several filenames, so it pairs
-best with commands that take several arguments (`echo` today).
+no wildcard). Each matching token can expand to several filenames, so it needs
+commands that take several arguments — **`ls` was taught to** (below), and `echo`
+already did.
+
+**`ls` now takes any number of operands, and file operands too.** It used to
+`readdir` its single argument, so a glob-expanded `ls *.txt` (which passes
+*files*, not a directory) failed with "not a directory". Now each operand is
+`stat`ed: file operands are listed together as a group, directory operands have
+their contents listed with a `name:` header when there's more than one operand.
+So `ls *.txt`, `ls -l *.log`, `ls file`, and `ls dir1 dir2` all work.
 
 **Tab completion.** Pressing Tab completes the last word of the input as a
 filename. A single match replaces the typed prefix with the full name (in the

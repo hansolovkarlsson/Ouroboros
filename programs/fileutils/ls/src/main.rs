@@ -6,10 +6,13 @@
 //! - **`-l`**: one entry per line with its type, size, and modified date/time
 //!   (from the `stat` op - `fs_stat`), the long form.
 //!
-//! Resolves its path against the shell-delivered cwd (`ulib::cwd`), the same as
-//! before; talks to the filesystem server via `ulib`'s `fs_list_dir`/`fs_stat`.
-//! No heap: entries are collected as offset+length records into the listing
-//! buffer and insertion-sorted in place (the `tree` shape).
+//! Takes any number of operands (so shell globs like `ls *.txt` work): each is
+//! `stat`ed and classified. **File** operands are listed together as a group (a
+//! plain `ls file` shows just that file, not "not a directory"); **directory**
+//! operands have their contents listed, with a `name:` header when there's more
+//! than one operand. No operands lists the cwd. Resolves paths against the
+//! shell-delivered cwd (`ulib::cwd`); talks to fsd via `fs_list_dir`/`fs_stat`.
+//! No heap: entries are offset+length records insertion-sorted in place.
 
 #![no_std]
 #![no_main]
@@ -22,6 +25,9 @@ const TERM_WIDTH: usize = 80;
 /// Most entries laid out per directory. The listing buffer bounds the byte
 /// count; this bounds the record array (a larger directory drops the overflow).
 const MAX_ENTRIES: usize = 128;
+
+/// Most path operands accepted on one command line (a big glob is truncated).
+const MAX_PATHS: usize = 64;
 
 /// One directory entry: offset+length into the listing buffer, plus its kind.
 #[derive(Clone, Copy)]
@@ -43,11 +49,13 @@ pub extern "C" fn _start() -> ! {
 
     // Parse args: `-l` selects the long form, `-a` shows dotfiles (including
     // `.`/`..`); both accepted in any position and combinable as `-la`/`-al`.
-    // The first non-flag argument is the path (empty = the current directory).
+    // Everything else is a path operand, collected (as typed) into `argsbuf`.
     let mut long = false;
     let mut all = false;
-    let mut argbuf = [0u8; ulib::PATH_MAX];
-    let mut arg = "";
+    let mut argsbuf = [0u8; 512];
+    let mut argslen = 0usize;
+    let mut offs = [(0u16, 0u16); MAX_PATHS];
+    let mut nargs = 0usize;
     let mut i = 1u64;
     loop {
         let mut buf = [0u8; ulib::PATH_MAX];
@@ -60,31 +68,99 @@ pub extern "C" fn _start() -> ! {
                     _ => {}
                 }
             }
-        } else if arg.is_empty() {
-            argbuf[..len].copy_from_slice(&buf[..len]);
-            arg = core::str::from_utf8(&argbuf[..len]).unwrap_or("");
+        } else if nargs < MAX_PATHS && argslen + len <= argsbuf.len() {
+            argsbuf[argslen..argslen + len].copy_from_slice(&buf[..len]);
+            offs[nargs] = (argslen as u16, len as u16);
+            argslen += len;
+            nargs += 1;
         }
         i += 1;
     }
+    let multi = nargs > 1;
 
-    let mut pathbuf = [0u8; ulib::PATH_MAX];
-    let path = match ulib::resolve(cwd, arg, &mut pathbuf) {
-        Some(plen) => core::str::from_utf8(&pathbuf[..plen]).unwrap_or("/"),
-        None => {
-            ulib::con_write(b"ls: path too long\r\n");
-            ulib::exit(1);
+    // Partition operands into file operands (a synthetic listing, shown as a
+    // group) and directory operands (contents listed). No operands = the cwd.
+    let mut filedata = [0u8; 512];
+    let mut filelen = 0usize;
+    let mut diroffs = [(0u16, 0u16); MAX_PATHS];
+    let mut ndirs = 0usize;
+
+    if nargs == 0 {
+        diroffs[0] = (0, 0); // len 0 = the cwd
+        ndirs = 1;
+    } else {
+        for &(s, l) in &offs[..nargs] {
+            let arg = &argsbuf[s as usize..s as usize + l as usize];
+            let argstr = core::str::from_utf8(arg).unwrap_or("");
+            let mut pb = [0u8; ulib::PATH_MAX];
+            let Some(pl) = ulib::resolve(cwd, argstr, &mut pb) else {
+                ls_err(argstr);
+                continue;
+            };
+            let resolved = core::str::from_utf8(&pb[..pl]).unwrap_or("");
+            let mut info = [0u8; ninep_abi::STAT_INFO_LEN];
+            if ulib::is_fs_error(ulib::fs_stat(resolved, &mut info)) {
+                ls_err(argstr);
+                continue;
+            }
+            if ulib::stat_is_dir(&info) {
+                diroffs[ndirs] = (s, l);
+                ndirs += 1;
+            } else if filelen + (l as usize) < filedata.len() {
+                // A file operand: shown as-typed in the file group.
+                filedata[filelen..filelen + l as usize].copy_from_slice(arg);
+                filelen += l as usize;
+                filedata[filelen] = b'\n';
+                filelen += 1;
+            }
         }
-    };
-
-    let mut listing = [0u8; 512];
-    let n = ulib::fs_list_dir(path, &mut listing);
-    if ulib::is_fs_error(n) {
-        ulib::fs_error("ls", n);
-        ulib::exit(1);
     }
-    let data = &listing[..n as usize];
 
-    // Collect entries and sort by name (case-insensitive).
+    // File operands are always shown (they were named), so `all` = true here.
+    if filelen > 0 {
+        show_listing(target, cwd, &filedata[..filelen], true, long);
+    }
+
+    // Each directory operand's contents, headed by its name when there's more
+    // than one operand.
+    for (d, &(s, l)) in diroffs[..ndirs].iter().enumerate() {
+        let argstr = core::str::from_utf8(&argsbuf[s as usize..s as usize + l as usize]).unwrap_or("");
+        let mut pb = [0u8; ulib::PATH_MAX];
+        let Some(pl) = ulib::resolve(cwd, argstr, &mut pb) else { continue };
+        let dirpath = core::str::from_utf8(&pb[..pl]).unwrap_or("/");
+        if multi {
+            // A blank line before each dir group, except before the very first
+            // output.
+            if filelen > 0 || d > 0 {
+                ulib::write_out(target, b"\r\n");
+            }
+            ulib::write_out(target, argstr.as_bytes());
+            ulib::write_out(target, b":\r\n");
+        }
+        let mut listing = [0u8; 512];
+        let n = ulib::fs_list_dir(dirpath, &mut listing);
+        if ulib::is_fs_error(n) {
+            ls_err(argstr);
+            continue;
+        }
+        show_listing(target, dirpath, &listing[..n as usize], all, long);
+    }
+
+    ulib::end_of_stream(target);
+    ulib::exit(0);
+}
+
+/// Print `ls: <arg>: no such file or directory` for a bad operand.
+fn ls_err(arg: &str) {
+    ulib::con_write(b"ls: ");
+    ulib::con_write(arg.as_bytes());
+    ulib::con_write(b": no such file or directory\r\n");
+}
+
+/// Collect a `name\n`/`name/\n` listing into entries, sort by name, and display
+/// it - columns (default) or the long form (`-l`). `dir` is the path the entries
+/// are relative to (for `-l`'s per-entry `stat`); `all` keeps dotfiles.
+fn show_listing(target: u64, dir: &str, data: &[u8], all: bool, long: bool) {
     let mut entries = [Entry { start: 0, len: 0, is_dir: false }; MAX_ENTRIES];
     let mut count = 0usize;
     let mut pos = 0usize;
@@ -105,7 +181,6 @@ pub extern "C" fn _start() -> ! {
         if name_len == 0 {
             continue;
         }
-        // Hide dotfiles (and `.`/`..`) unless `-a`, the Unix `ls` default.
         if !all && data[start] == b'.' {
             continue;
         }
@@ -117,16 +192,11 @@ pub extern "C" fn _start() -> ! {
         count += 1;
     }
     sort_entries(&mut entries[..count], data);
-    let entries = &entries[..count];
-
     if long {
-        print_long(target, path, entries, data);
+        print_long(target, dir, &entries[..count], data);
     } else {
-        print_columns(target, entries, data);
+        print_columns(target, &entries[..count], data);
     }
-
-    ulib::end_of_stream(target);
-    ulib::exit(0);
 }
 
 /// Default layout: names in columns, filled top-to-bottom then left-to-right

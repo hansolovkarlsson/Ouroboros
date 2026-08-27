@@ -2,18 +2,28 @@ NAME
     ls - list directory contents
 
 SYNOPSIS
-    ls [-l] [-a] [path]
+    ls [-l] [-a] [path...]
 
 DESCRIPTION
-    Lists the entries in <path> (default: the current directory), sorted by
-    name (case-insensitive). Files print plain; directories with a trailing /.
-    The default layout is multi-column; dotfiles are hidden.
+    Lists its operands, sorted by name (case-insensitive). With no operand,
+    lists the current directory. File operands are listed together as a group;
+    each directory operand has its contents listed, with a "name:" header when
+    there is more than one operand. Files print plain; directories with a
+    trailing /. The default layout is multi-column; dotfiles are hidden.
+
+    Takes any number of operands, so shell wildcards work: `ls *.txt`.
 
 OPTIONS
     -l    Long form, one entry per line: type (d/-), size, and modified
           YYYY-MM-DD HH:MM. The time is shown where the filesystem records
           one (FAT32 does; others show a dash).
     -a    Include dotfiles, and the . and .. entries.
+
+EXAMPLES
+    ls
+    ls -l /bin
+    ls -l *.txt
+    ls dir1 dir2
 
 SEE ALSO
     tree, cat, stat
