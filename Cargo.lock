@@ -230,6 +230,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "pwd"
+version = "0.1.0"
+dependencies = [
+ "syscall-abi",
+ "ulib",
+]
+
+[[package]]
 name = "quote"
 version = "1.0.47"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -429,6 +437,14 @@ dependencies = [
 
 [[package]]
 name = "wc"
+version = "0.1.0"
+dependencies = [
+ "syscall-abi",
+ "ulib",
+]
+
+[[package]]
+name = "write"
 version = "0.1.0"
 dependencies = [
  "syscall-abi",

@@ -485,7 +485,7 @@ fn split_pipeline<'a>(line: &'a str, stages: &mut [&'a str]) -> Result<usize, &'
 fn is_builtin(cmd: &str) -> bool {
     matches!(
         cmd,
-        "help" | "cd" | "bind" | "pwd" | "write" | "mount" | "unmount" | "erase" | "partition" | "format"
+        "help" | "cd" | "bind" | "mount" | "unmount" | "erase" | "partition" | "format"
             | "exec" | "exit" | "shutdown" | "poweroff" | "halt" | "more" | "less" | "ps" | "kill"
             | "fg" | "wait" | "send" | "recv" | "selftest" | "env" | "set" | "unset" | "cpu"
     )
@@ -898,22 +898,19 @@ fn dispatch_line(line: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize, env:
     let arg = words.next().unwrap_or("");
 
     match command {
-        "help" => out.put_line("builtins: help, exit, cd, pwd, write, bind, mount (-a/-r/-p/-c/-n), unmount, erase, partition, format, exec, cpu, ps, kill, fg, wait, shutdown, halt, more/less, send, recv, env, set, unset, selftest. Everything else is a program in /bin (run `ls /bin`): echo, cat, ls, tree, cp, mv, grep, ping, ... Also: $VAR expands; `> file`/`>> file` redirects, `| prog` pipes, `| more` pages."),
+        "help" => out.put_line("builtins: help, exit, cd, bind, mount (-a/-r/-p/-c/-n), unmount, erase, partition, format, exec, cpu, ps, kill, fg, wait, shutdown, halt, more/less, send, recv, env, set, unset, selftest. Everything else is a program in /bin (run `ls /bin`): echo, pwd, cat, ls, tree, write, cp, mv, grep, ping, ... Also: $VAR expands; `> file`/`>> file` redirects, `| prog` pipes, `| more` pages."),
         // echo, uptime, clear are externalized: they're /bin programs now
         // (found via PATH by the unknown-command arm), not builtins. See
         // "Standalone binaries, Stage 4".
         // ping, resolve, and fetch are externalized to /bin now (Stage 4) -
         // spawned programs that reach netd via the TO_NET capability the shell
         // delegates at spawn (see run_path_command / delegate_net).
-        "pwd" => out.put_line(cwd_str(cwd, *cwd_len)),
-        // ls, cat, mkdir, rmdir, touch, rm, cp, mv, and writeat are externalized
-        // to /bin now (Stage 4) - they run as spawned programs that inherit the
-        // shell's cwd via GET_CWD. Only `write` stays builtin (its content is
-        // the raw command line, bounded by the input buffer, so it never needs
-        // argv or the bulk path).
+        // pwd, ls, cat, mkdir, rmdir, touch, rm, cp, mv, writeat, and write are
+        // externalized to /bin - spawned programs that inherit the shell's cwd
+        // via GET_CWD. `cd`/`bind` stay because they mutate the shell's *own*
+        // per-task state (cwd, namespace), which a spawned program can't touch.
         "cd" => cmd_cd(arg, cwd, cwd_len),
         "bind" => cmd_bind(line, cwd, *cwd_len, out),
-        "write" => cmd_write(line, cwd, *cwd_len),
         "exec" => cmd_exec(line, cwd, *cwd_len, out),
         "exit" => cmd_exit(),
         "shutdown" | "poweroff" => cmd_power(syscall_abi::POWER_OFF),
@@ -1587,60 +1584,6 @@ fn self_task() -> u64 {
     syscall(syscall_abi::SELF, 0)
 }
 
-/// `write <file> <words...>` - joins every word after the filename with a
-/// single space (same join style as `echo`) and writes the result as the
-/// file's *entire* contents, replacing whatever was there. Takes `line`
-/// (not just the first argument, unlike every other command here) because
-/// it needs both the filename and the rest of the line as separate
-/// pieces - `run_line` already tokenized `arg` down to one word, which
-/// isn't enough here.
-fn cmd_write(line: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize) {
-    let mut words = line.split_whitespace();
-    words.next(); // "write" itself
-    let Some(filename) = words.next() else {
-        print_line("write: missing file argument");
-        return;
-    };
-
-    let mut content = [0u8; BUFFER_SIZE];
-    let mut len = 0usize;
-    let mut first = true;
-    for word in words {
-        if !first && len < content.len() {
-            content[len] = b' ';
-            len += 1;
-        }
-        for b in word.bytes() {
-            if len < content.len() {
-                content[len] = b;
-                len += 1;
-            }
-        }
-        first = false;
-    }
-
-    let mut path_buf = [0u8; PATH_SIZE];
-    let Some(path_len) = resolve_path(cwd_str(cwd, cwd_len), filename, &mut path_buf) else {
-        print_line("write: path too long");
-        return;
-    };
-    let Ok(path) = core::str::from_utf8(&path_buf[..path_len]) else {
-        print_line("write: path too long");
-        return;
-    };
-
-    // `write`'s content is bounded by the shell's input line
-    // (BUFFER_SIZE, 128) - always well under the inline 512-byte cap -
-    // so it stays on the cheap inline path rather than paying a GRANT
-    // per write. cp/redirect, which genuinely exceed 512, use the bulk
-    // path (fs_write_bulk).
-    match fs_write_file(path, &content[..len]) {
-        NO_FS => print_no_fs(),
-        code if code >= FS_ERR_MIN => print_fs_error("write", code),
-        _ => {}
-    }
-}
-
 /// Where a command's *output* goes: the console (the only choice before
 /// output redirection existed) or a capture buffer that a `>`/`>>`
 /// redirect writes to a file once the command returns. Passed down to
@@ -2297,29 +2240,6 @@ fn fs_write_at(path: &str, offset: u64, data: &[u8]) -> u64 {
         [r.len as u64, offset, data.len() as u64, 0],
         &fsp[..r.len],
         &[],
-        &mut [],
-    )
-}
-
-/// The status contract every path-op fs helper shares: `0` on success,
-/// [`NO_FS`] if no filesystem is mounted, or a specific `FS_ERR_*` code for the
-/// real failure reason (already exists, invalid 8.3 name, parent missing, disk
-/// full, ... - see [`print_fs_error`]).
-///
-/// Creates or fully overwrites the file at `path` with `data`.
-fn fs_write_file(path: &str, data: &[u8]) -> u64 {
-    let mut fsp = [0u8; FSP_MAX];
-    let r = mount_resolve(path, &mut fsp);
-    if r.server == syscall_abi::CON_TASK {
-        con_write(data); // /dev/cons
-        return 0;
-    }
-    np_dispatch(
-        &r,
-        ninep_abi::NP_WRITE_FILE,
-        [r.len as u64, data.len() as u64, 0, 0],
-        &fsp[..r.len],
-        data,
         &mut [],
     )
 }

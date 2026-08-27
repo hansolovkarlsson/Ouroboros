@@ -7,6 +7,24 @@ for the forward plan see [`roadmap.md`](roadmap.md).
 
 ---
 
+## 2026-08-27 (cont.) — moving `pwd` and `write` out to `/bin`
+
+A cleanup prompted by a good question: which builtins are builtins by *necessity*
+and which are just leftovers? Going through them honestly, most have a real
+reason — `cd`/`bind` change the shell's own cwd/namespace, `more`/`less` need the
+keyboard only the shell owns, `erase`/`partition`/`format` have to run when
+nothing is mounted (so `/bin` can't be loaded). But two didn't: `pwd` and
+`write`. `pwd` just prints the cwd, which the shell already hands every spawned
+program; `write` just writes a file, like every other `/bin` file command. The
+nice discovery was that the old `write` builtin *already* word-split and rejoined
+with single spaces — the "raw command line" reason in its doc comment was never
+actually true of the code — so an argv-based `/bin/write` is a byte-for-byte
+behavioural match, not an approximation. Both moved out cleanly and verified
+(`cd /d; pwd` → `/d`, `write` + `cat` round-trip). Notably I *didn't* move the
+two that were suggested first, `more`/`less` and `partition`/`format` — they're
+the two with the strongest reasons to stay (keyboard ownership; no-disk
+bootstrap), which was worth saying out loud rather than mechanically obliging.
+
 ## 2026-08-27 (cont.) — a pager: `more` (and `less`)
 
 Hans asked for `more` or `less` — "pick one". They're forward-vs-backward

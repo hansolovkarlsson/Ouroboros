@@ -7,6 +7,28 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/`; 
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## `pwd` and `write` move out to `/bin`
+
+Two more former builtins became real `/bin` programs, continuing the
+externalization arc. `pwd` reads the cwd the shell delivers at spawn (`GET_CWD`)
+and prints it; `write <file> [words...]` joins the words and writes them via
+`ulib`'s bulk path. Both are **behaviour-identical** to the builtins they
+replace — notably `write`, whose old builtin already word-split and rejoined with
+single spaces (the "raw command line" rationale in the docs wasn't what the code
+did), so nothing changed but where it lives.
+
+These moved because they need *nothing* from the shell that a spawned program
+lacks: the cwd is delivered at spawn, and file writes go through the same server
+every other `/bin` file command uses. The ones that **stayed** builtin each fail
+that test — `cd`/`bind` mutate the shell's *own* per-task cwd/namespace (a spawned
+program would change only its own), `more`/`less` need the keyboard only the shell
+owns, and `erase`/`partition`/`format` must run when nothing is mounted (exactly
+when `/bin` can't be read). The workspace is now 39 crates.
+
+**Verified** in QEMU: `pwd` at `/` printed `/`, `cd /d` then `pwd` printed `/d`
+(the program correctly sees the shell's cwd), and `write hi.txt hello …` then
+`cat hi.txt` round-tripped the content.
+
 ## `help` lists builtins only
 
 `help` had drifted into listing a mix of shell builtins and `/bin` programs

@@ -148,7 +148,7 @@ $ set PATH=/bin ; env           # a real environment; $VAR expansion
 ### Commands come from two places
 
 - **Builtins** run inside the shell itself:
-  `help  cd  pwd  bind  write  mount  unmount  erase  partition  format
+  `help  cd  bind  mount  unmount  erase  partition  format
   exec  exit  shutdown  halt  more  ps  kill  fg  wait  send  recv  selftest
   env  set  unset  cpu`.
   Job control (`ps`/`kill`/`fg`/`wait`), the disk-management trio
@@ -161,8 +161,8 @@ $ set PATH=/bin ; env           # a real environment; $VAR expansion
 
 - **`/bin` programs** are real standalone binaries loaded from disk, found
   on `$PATH` (default `/bin`), spawned with arguments, and reaped:
-  `ls  tree  cat  cp  mv  mkdir  rmdir  touch  rm  writeat` (files),
-  `echo  uptime  clear  args` (basics),
+  `ls  tree  cat  cp  mv  mkdir  rmdir  touch  rm  write  writeat` (files),
+  `echo  pwd  uptime  clear  args` (basics),
   `grep  wc  head  tail  nl  rev  uniq  upper` (pipeline filters),
   `ping  resolve  fetch` (network). You type them the same way (`ls`,
   `cat x`); the shell finds `/bin/LS` on PATH (FAT is case-insensitive).
