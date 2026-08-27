@@ -1,0 +1,17 @@
+NAME
+    cpu - run a command on another machine
+
+SYNOPSIS
+    cpu <host:port> <command...>
+
+DESCRIPTION
+    Runs <command> on the machine at host:port using its /bin, but reading THIS
+    machine's files through the namespace imported at /host. Within the
+    command, / is the remote and /host is you. The Plan 9 cpu model.
+
+EXAMPLES
+    cpu 10.0.2.10:564 ls /host
+    cpu 10.0.2.10:564 cat /host/notes.txt
+
+SEE ALSO
+    mount, dial

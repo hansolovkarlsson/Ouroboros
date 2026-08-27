@@ -32,6 +32,7 @@ fn contains(hay: &[u8], needle: &[u8]) -> bool {
 #[no_mangle]
 #[link_section = ".text.start"]
 pub extern "C" fn _start() -> ! {
+    ulib::usage_if_requested(b"usage: <input> | grep <pattern>  (keep stdin lines containing pattern)\r\n");
     let target = ulib::stdout_target();
 
     let mut patbuf = [0u8; MAX_LINE];

@@ -1,0 +1,12 @@
+NAME
+    bind - bind a name into the namespace
+
+SYNOPSIS
+    bind <name> <path>
+
+DESCRIPTION
+    Binds <name> to <path> in the shell's per-task namespace (the Plan 9 bind).
+    A builtin, because the namespace is the shell's own state.
+
+SEE ALSO
+    mount, cd

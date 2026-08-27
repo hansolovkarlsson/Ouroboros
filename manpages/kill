@@ -1,0 +1,12 @@
+NAME
+    kill - destroy a task
+
+SYNOPSIS
+    kill <task number>
+
+DESCRIPTION
+    Destroys the task in the given slot (see ps). The boot shell, idle, and the
+    fsd/cond/netd servers are protected and cannot be killed.
+
+SEE ALSO
+    ps, wait, fg

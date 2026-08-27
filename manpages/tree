@@ -1,0 +1,14 @@
+NAME
+    tree - list a directory as an indented tree
+
+SYNOPSIS
+    tree [path]
+
+DESCRIPTION
+    Recursively lists <path> (default: the current directory) as an indented
+    tree, sorted by name, ending with an "N directories, M files" summary.
+    ASCII branches (the console font is ASCII-only). Recursion is depth-capped
+    at 16 levels; . and .. are skipped.
+
+SEE ALSO
+    ls

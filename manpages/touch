@@ -1,0 +1,12 @@
+NAME
+    touch - create an empty file
+
+SYNOPSIS
+    touch <file>
+
+DESCRIPTION
+    Creates <file> as an empty file if it does not exist. (Timestamps are not
+    updated for an existing file yet.)
+
+SEE ALSO
+    write, rm

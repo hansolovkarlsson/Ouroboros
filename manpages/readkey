@@ -1,0 +1,10 @@
+NAME
+    readkey - keyboard echo diagnostic
+
+SYNOPSIS
+    readkey
+
+DESCRIPTION
+    Echoes each key you press as its character and decimal byte value. Press q
+    to quit, Ctrl+C to abort. Demonstrates that a /bin program can read the
+    keyboard.

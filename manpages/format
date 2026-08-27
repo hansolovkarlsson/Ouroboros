@@ -1,0 +1,12 @@
+NAME
+    format - lay a filesystem into the partition
+
+SYNOPSIS
+    format [fat32|exfat|ext2]
+
+DESCRIPTION
+    Creates a filesystem (mkfs) in the partition. Follows erase and partition.
+    A builtin (it must run when nothing is mounted).
+
+SEE ALSO
+    erase, partition, mount

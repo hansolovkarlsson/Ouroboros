@@ -98,6 +98,10 @@ pub struct DirEntry {
     pub is_dir: bool,
     pub size: u32,
     cluster: u32,
+    /// The FAT "write date" (raw offset 24) and "write time" (offset 22),
+    /// each a packed 16-bit field - decoded to a calendar by [`Fs::stat`].
+    pub mtime_date: u16,
+    pub mtime_time: u16,
 }
 
 impl DirEntry {
@@ -116,6 +120,8 @@ impl DirEntry {
         let cluster_hi = u16::from_le_bytes([raw[20], raw[21]]) as u32;
         let cluster_lo = u16::from_le_bytes([raw[26], raw[27]]) as u32;
         let size = u32::from_le_bytes([raw[28], raw[29], raw[30], raw[31]]);
+        let mtime_time = u16::from_le_bytes([raw[22], raw[23]]);
+        let mtime_date = u16::from_le_bytes([raw[24], raw[25]]);
 
         let mut name = [0u8; LONG_NAME_MAX];
         let len = if let Some(long) = long_name {
@@ -147,6 +153,8 @@ impl DirEntry {
             is_dir: attr & ATTR_DIRECTORY != 0,
             size,
             cluster: (cluster_hi << 16) | cluster_lo,
+            mtime_date,
+            mtime_time,
         }
     }
 
@@ -157,8 +165,34 @@ impl DirEntry {
             is_dir: true,
             size: 0,
             cluster: root_cluster,
+            mtime_date: 0,
+            mtime_time: 0,
         }
     }
+}
+
+/// Decode the FAT packed "write date"/"write time" fields into a calendar, or
+/// `None` if the date is zero (no timestamp recorded). FAT date: bits 15..9 =
+/// year since 1980, 8..5 = month (1-12), 4..0 = day (1-31). FAT time: bits
+/// 15..11 = hour, 10..5 = minute, 4..0 = seconds/2.
+fn decode_fat_time(date: u16, time: u16) -> Option<crate::vfs::CalTime> {
+    if date == 0 {
+        return None;
+    }
+    let year = 1980 + (date >> 9);
+    let month = ((date >> 5) & 0x0f) as u8;
+    let day = (date & 0x1f) as u8;
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+    Some(crate::vfs::CalTime {
+        year,
+        month,
+        day,
+        hour: (time >> 11) as u8,
+        min: ((time >> 5) & 0x3f) as u8,
+        sec: ((time & 0x1f) * 2) as u8,
+    })
 }
 
 /// The LFN checksum stored in every long-name entry (byte 13): a rolling
@@ -718,6 +752,18 @@ impl Fs {
         self.walk_dir(dir.cluster, |entry| {
             f(entry.name(), entry.is_dir, entry.size);
             false
+        })
+    }
+
+    /// Metadata for one path: size, directory flag, and the FAT "write" time
+    /// decoded to a calendar (or `None` if the entry carries no date, e.g. the
+    /// root). Backs `ls -l`.
+    pub fn stat(&mut self, path: &str) -> Result<crate::vfs::Stat, Error> {
+        let e = self.find(path)?;
+        Ok(crate::vfs::Stat {
+            size: e.size as u64,
+            is_dir: e.is_dir,
+            time: decode_fat_time(e.mtime_date, e.mtime_time),
         })
     }
 

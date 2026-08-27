@@ -1,0 +1,13 @@
+NAME
+    help - list shell builtins
+
+SYNOPSIS
+    help
+
+DESCRIPTION
+    Lists the shell's builtin commands and points to /bin (ls /bin) for the
+    externalized programs. Append -? to any command for its usage; man <cmd>
+    for a full page.
+
+SEE ALSO
+    man

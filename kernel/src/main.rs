@@ -19,6 +19,7 @@ mod loader;
 mod madt;
 mod mmu;
 mod pci;
+mod power;
 mod supervisor;
 mod syscall;
 mod tasks;
@@ -218,6 +219,12 @@ fn main() -> Status {
             None
         }
     };
+
+    // Read the PSCI conduit (hvc/smc) from ACPI's FADT now, in the same
+    // before-exit_boot_services window as the MADT parse, so the `POWER`
+    // syscall can power the machine off later without touching ACPI again. A
+    // failure is non-fatal - power-off just falls back to a CPU halt.
+    unsafe { power::discover_conduit(rsdp) };
 
     // Also boot-services-only (a filesystem read and a page allocation) -
     // see loader.rs's module doc comment for why this happens now rather

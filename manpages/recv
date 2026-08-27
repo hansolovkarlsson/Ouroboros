@@ -1,0 +1,13 @@
+NAME
+    recv - receive an IPC message
+
+SYNOPSIS
+    recv
+
+DESCRIPTION
+    Blocks until a message arrives, then prints "task N: <message>". Receives
+    into its own spawned slot - run it, find its slot in ps, and send to that
+    slot from elsewhere. Ctrl+C aborts.
+
+SEE ALSO
+    send, ps

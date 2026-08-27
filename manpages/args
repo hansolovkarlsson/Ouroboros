@@ -1,0 +1,12 @@
+NAME
+    args - print the argument vector
+
+SYNOPSIS
+    args [words...]
+
+DESCRIPTION
+    Prints the arguments it was spawned with (argv), one per line. The proof of
+    the argv ABI - mostly a diagnostic.
+
+SEE ALSO
+    echo

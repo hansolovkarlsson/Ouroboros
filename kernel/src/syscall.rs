@@ -194,13 +194,13 @@ fn con_access_allowed() -> bool {
 /// just a different caller deciding what to do with the result.
 pub(crate) fn poll_keyboard_byte() -> Option<u8> {
     let byte = console::read_byte().or_else(crate::xhci::poll_key)?;
-    // The fg escape hatch - see tasks::interrupt_key_check's doc
-    // comment. Intercepted here, the single choke point every keyboard
-    // path funnels through (the wake-check, READ_CHAR's fast path, and
-    // TRY_READ_CHAR alike), so Ctrl+C reclaims the keyboard no matter
-    // which path would have consumed it.
+    // The Ctrl+C escape hatch - see tasks::interrupt_key_check's doc comment.
+    // Intercepted here, the single choke point every keyboard path funnels
+    // through (the wake-check, READ_CHAR's fast path, and TRY_READ_CHAR alike),
+    // so Ctrl+C is caught no matter which path would have consumed it. It marks
+    // the foreground program for termination (tasks::on_tick does the kill) and
+    // swallows the byte.
     if tasks::interrupt_key_check(byte) {
-        console::println!("Ouroboros kernel: Ctrl+C - keyboard returned to the boot shell");
         return None;
     }
     Some(byte)
@@ -797,6 +797,15 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
             }
             tasks::zombie_status(i).unwrap_or(syscall_abi::TASK_NO_EXIT_CODE)
         }
+        syscall_abi::POWER => {
+            // arg0 = mode. Powers off or halts the machine - neither returns.
+            // An unrecognized mode is a no-op error (POWER_BAD_MODE).
+            match arg0 {
+                syscall_abi::POWER_OFF => crate::power::power_off(),
+                syscall_abi::POWER_HALT => crate::power::halt(),
+                _ => syscall_abi::POWER_BAD_MODE,
+            }
+        }
         syscall_abi::KILL => {
             let i = arg0 as usize;
             if i <= 4 {
@@ -1123,11 +1132,14 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
         }
         syscall_abi::FG => {
             let i = arg0 as usize;
-            if i == 1 {
-                // Foregrounding idle would strand the keyboard on a
-                // task that never reads it, with nothing able to type
-                // the way back. Index 0 is allowed - an explicit
-                // "give it back".
+            if (1..=4).contains(&i) {
+                // Foregrounding idle (1) or a supervised server (2/3/4 -
+                // fsd/cond/netd) is refused, same protected set as KILL/EXIT:
+                // idle would strand the keyboard on a task that never reads it,
+                // and a server has no reason to own the terminal - worse,
+                // foregrounding one then hitting Ctrl+C would route the
+                // terminate at a protected task (the kernel would kill it).
+                // Index 0 is allowed - an explicit "give it back".
                 return syscall_abi::TASK_ERR_PROTECTED;
             }
             if !tasks::task_exists(i) {

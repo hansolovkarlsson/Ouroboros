@@ -1,0 +1,12 @@
+NAME
+    upper - uppercase input
+
+SYNOPSIS
+    <input> | upper
+
+DESCRIPTION
+    Reads standard input and writes it with ASCII letters uppercased. The
+    reference pipeline filter.
+
+SEE ALSO
+    rev

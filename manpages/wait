@@ -1,0 +1,12 @@
+NAME
+    wait - wait for a task to exit
+
+SYNOPSIS
+    wait <task number>
+
+DESCRIPTION
+    Blocks until the task exits, prints its exit status, and reaps its slot (an
+    exited task holds its slot as a zombie until waited). Ctrl+C interrupts.
+
+SEE ALSO
+    ps, kill, exec

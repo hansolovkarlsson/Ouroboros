@@ -1,0 +1,13 @@
+NAME
+    writeat - write text at a byte offset
+
+SYNOPSIS
+    writeat <file> <offset> <text...>
+
+DESCRIPTION
+    Writes <text> (space-joined) into <file> starting at byte <offset>,
+    extending the file if needed. Bytes before <offset> are left unchanged; a
+    gap past end-of-file is zero-filled.
+
+SEE ALSO
+    write, cat

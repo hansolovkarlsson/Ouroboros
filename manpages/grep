@@ -1,0 +1,16 @@
+NAME
+    grep - keep lines matching a pattern
+
+SYNOPSIS
+    <input> | grep <pattern>
+
+DESCRIPTION
+    Reads standard input and writes only the lines that contain <pattern>
+    (a plain substring; no regular expressions). A pipeline filter.
+
+EXAMPLES
+    cat log.txt | grep ERROR
+    ls /bin | grep P
+
+SEE ALSO
+    wc, head, tail, uniq

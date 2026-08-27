@@ -1,0 +1,11 @@
+NAME
+    selftest - relocating-loader regression check
+
+SYNOPSIS
+    selftest
+
+DESCRIPTION
+    Exercises the two code patterns that once failed under the flat-binary
+    loader (write!/core::fmt formatting, and slice/string comparison against a
+    literal) and prints pass/fail lines. Confirms a spawned PIE binary
+    relocates correctly.

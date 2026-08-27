@@ -1,0 +1,15 @@
+NAME
+    wc - count lines, words, and bytes
+
+SYNOPSIS
+    <input> | wc
+
+DESCRIPTION
+    Reads standard input and prints its line, word, and byte counts.
+
+EXAMPLES
+    cat file | wc
+    ls /bin | wc
+
+SEE ALSO
+    grep, nl

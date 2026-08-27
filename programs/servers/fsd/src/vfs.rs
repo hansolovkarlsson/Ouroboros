@@ -24,6 +24,27 @@ use crate::proc;
 /// which held the only arm originally; now shared by the exFAT arm too).
 pub use crate::fat32::Error;
 
+/// A broken-down calendar timestamp (local time as the filesystem stores it) -
+/// deliberately not an epoch, so no filesystem's differing epoch leaks into the
+/// stat ABI and the client formats it with no date math.
+#[derive(Clone, Copy)]
+pub struct CalTime {
+    pub year: u16,
+    pub month: u8,
+    pub day: u8,
+    pub hour: u8,
+    pub min: u8,
+    pub sec: u8,
+}
+
+/// A path's metadata, from [`Filesystem::stat`] - what `ls -l` reports. `time`
+/// is `None` when the filesystem doesn't (yet) surface a modified time.
+pub struct Stat {
+    pub size: u64,
+    pub is_dir: bool,
+    pub time: Option<CalTime>,
+}
+
 /// A mounted filesystem, whatever its on-disk format.
 pub enum Filesystem {
     Fat32(fat32::Fs),
@@ -137,6 +158,19 @@ impl Filesystem {
             Filesystem::ExFat(fs) => fs.read_file(path, buf),
             Filesystem::Ext2(fs) => fs.read_file(path, buf),
             Filesystem::Proc(fs) => fs.read_file(path, buf),
+        }
+    }
+
+    /// Metadata for a single path (`ls -l`): size, whether it's a directory,
+    /// and the modified time when the filesystem surfaces one. Only FAT32
+    /// currently decodes a timestamp; the others return `time: None` (size and
+    /// type are always real).
+    pub fn stat(&mut self, path: &str) -> Result<Stat, Error> {
+        match self {
+            Filesystem::Fat32(fs) => fs.stat(path),
+            Filesystem::ExFat(fs) => fs.stat(path),
+            Filesystem::Ext2(fs) => fs.stat(path),
+            Filesystem::Proc(fs) => fs.stat(path),
         }
     }
 

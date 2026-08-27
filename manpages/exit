@@ -1,0 +1,12 @@
+NAME
+    exit - end the current program
+
+SYNOPSIS
+    exit
+
+DESCRIPTION
+    Ends the calling task. The boot shell cannot exit (nothing would own the
+    keyboard); a spawned program uses this to end itself.
+
+SEE ALSO
+    shutdown, kill

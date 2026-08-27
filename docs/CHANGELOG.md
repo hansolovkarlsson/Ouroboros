@@ -7,6 +7,291 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/`; 
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## Shell: filename wildcards and tab completion
+
+Two interactive shell improvements.
+
+**Wildcards (globbing).** `*` and `?` in a command line now expand against the
+filesystem before the command runs: `echo *.txt`, `cat /bin/L*`, `ls sub/*.log`.
+`*` matches any run, `?` any single character, case-insensitively (FAT is);
+dotfiles are matched only when the pattern starts with `.` (so `*` skips
+`.`/`..`). A token that matches nothing is kept literal (bash-style), and
+pipeline/redirect tokens have no wildcards so they pass through. Expansion
+happens in `run_line` after `$VAR` expansion (skipped entirely when the line has
+no wildcard). Each matching token can expand to several filenames, so it needs
+commands that take several arguments — **`ls` was taught to** (below), and `echo`
+already did.
+
+**`ls` now takes any number of operands, and file operands too.** It used to
+`readdir` its single argument, so a glob-expanded `ls *.txt` (which passes
+*files*, not a directory) failed with "not a directory". Now each operand is
+`stat`ed: file operands are listed together as a group, directory operands have
+their contents listed with a `name:` header when there's more than one operand.
+So `ls *.txt`, `ls -l *.log`, `ls file`, and `ls dir1 dir2` all work.
+
+**Tab completion.** Pressing Tab completes the last word of the input as a
+filename. A single match replaces the typed prefix with the full name (in the
+filesystem's case) plus `/` for a directory or a space for a file; several
+matches extend to their longest common prefix, and if that adds nothing, list
+them and redraw the line. It handles a directory prefix (`cat sub/pre<Tab>`).
+
+**A PIE trap worth recording:** both features were rewritten to work in **bytes**
+after a link failure — slicing a `&str` by a runtime index emits `core`'s
+*formatted* char-boundary panic path, which pulls in the `core::fmt` code the
+`-pie` link can't resolve (`R_AARCH64_ABS64`). Byte slices use a lighter,
+already-linked panic path; `from_utf8` converts back only where a `&str` is
+needed. (See `manpages`/`selftest` lore on the same relocation limit.)
+
+**Verified** in QEMU: `echo *` / `*.txt` / `/bin/L*` / `?anana.txt` expanded
+correctly and `*.md` stayed literal; `cat ba<Tab>` completed to `BANANA.TXT` and
+`echo ap<Tab>` listed `APPLE.TXT APRICOT.TXT` and extended to `AP`.
+
+## `man` - manual pages
+
+A `man <command>` that prints a full manual page, complementing the one-line
+`-?` usage. Pages are **plain-text files** under `/man/` on disk (e.g.
+`/man/ls`), read and printed by `/bin/man` (`\n`→`\r\n` for the console; pipe a
+long page to `more`). The source pages live in `manpages/` and the build stages
+them to `/man` on the ESP. Nearly 60 pages cover the `/bin` commands, the
+filters, the net commands, and the builtins, each with the traditional
+`NAME`/`SYNOPSIS`/`DESCRIPTION`/`OPTIONS`/`EXAMPLES`/`SEE ALSO` sections.
+
+**No styling:** the framebuffer console (`cond`) understands only a couple of
+ANSI sequences (clear/home) and silently drops the rest, so bold and colour
+would render as nothing — the pages are plain text with UPPERCASE section
+headers instead. **Verified** in QEMU: `man ls` (full page), `man partition`
+(a >8-char name, read via FAT long-filename support), `man nope` (a clean "no
+manual entry"), and `man` (usage).
+
+## `-?` usage help on every command that takes arguments
+
+A uniform convention: append `-?` to any command that takes arguments — builtin
+or `/bin` — and it prints a one-line usage instead of running. `ls -?`, `grep -?`,
+`mount -?`, `kill -?`, and so on.
+
+For `/bin` programs it's `ulib::usage_if_requested(b"usage: ...")` as the first
+line of `_start` (a new ulib helper that scans argv for `-?` and, if found,
+prints the usage and exits) — added to every arg-taking program (`ls`, `cat`,
+`mkdir`/`rmdir`/`touch`/`rm`, `cp`/`mv`, `writeat`, `tree`, `write`, `more`,
+`grep`/`head`/`tail`, `ping`/`resolve`/`fetch`/`dial`/`serve`, `send`/`recv`).
+For builtins it's a `builtin_usage(cmd)` table consulted in the shell's dispatch
+before the command runs, covering the ones with arguments (`cd`, `bind`, `mount`,
+`erase`/`partition`/`format`, `exec`, `cpu`, `kill`/`fg`/`wait`, `set`/`unset`);
+option-less builtins (`help`/`exit`/`ps`/`unmount`/`shutdown`/`halt`) just run.
+The argument-less filters (`wc`/`nl`/`rev`/`uniq`/`upper`) and `echo`/`args`
+(which print their arguments) are deliberately left alone. **Verified** in QEMU
+across both kinds, including `-?` mixed with other flags (`ls -l -?`).
+
+## A minimal shell: `more`/`less`, `send`, `recv`, `selftest` move to `/bin`
+
+Following the keyboard arc, the shell shed the commands that didn't need to be
+built in, leaving a deliberately minimal builtin set: shell state (`cd`/`bind`/
+`env`/`set`/`unset`), job control (`exec`/`ps`/`kill`/`fg`/`wait`), the
+disk-management and power commands that must run with nothing mounted
+(`erase`/`partition`/`format`/`shutdown`/`halt`), the mount commands, `cpu`, and
+`help`/`exit`. Everything else is a `/bin` program.
+
+- **`more`/`less` → `/bin`** — the flagship, and the payoff of the keyboard arc.
+  A pager reads the keyboard while it runs, which a spawned program couldn't do
+  before; now it can. `/bin/more` pages a file argument or stdin (a pipe), so
+  both `more <file>` and `<cmd> | more` work. Making the pipe case work needed
+  one more generalization: the shell now hands a **pipeline's last stage** the
+  keyboard (`cmd_pipeline`), so an interactive consumer gets keystrokes — the
+  same rule a single foreground command already gets. `less` is the same binary
+  under a second name.
+- **`send`/`recv` → `/bin`** — the IPC test pair; they only call a syscall.
+- **`selftest` → `/bin`** — the relocating-loader regression check. Moving it out
+  makes it test a *spawned* PIE binary (what actually matters), and it confirmed
+  `core::fmt`/`write!` links and runs in a `/bin` program (zero relocations).
+
+Two bugs found and fixed while moving `more`: a piped `more` read its stdin with
+the full 256 KB heap slice as the buffer, but `MSG_RECV` rejects a length over
+`MSG_MAX_LEN` (768) — fixed by reading one bounded chunk at a time into the heap;
+and the pipeline-last-stage `FG` was needed or the piped pager never got the
+keyboard. Added `ulib::heap()` (the program's heap area) and `ulib::read_char()`
+for interactive `/bin` programs. **Verified** in QEMU: `more /L.TXT`, `ls -l /bin
+| more` (paged, space-advanced), `send`, and `selftest` (all three checks pass).
+Workspace is now 44 crates.
+
+## Foreground programs own the keyboard — interactive `/bin` programs
+
+The single thing that forced every interactive command (a pager, and later an
+editor or a REPL) to be a shell **builtin** is gone. Keyboard input is routed to
+one owner (`INPUT_OWNER`, the boot shell by default), and a spawned `/bin`
+program was never made that owner — so it could never read a key. Now **the shell
+hands a foreground command the keyboard at spawn** (a `FG` before the `WAIT` in
+`run_found_command`), and the kernel already reverts ownership to the shell when
+that command dies. So an interactive command is just an ordinary `/bin` program
+that calls `read_char` — no kernel-of-the-shell required.
+
+**Ctrl+C now terminates the foreground program** (it used to just yank the
+keyboard back and leave the program running, stranded). The escape hatch
+(`interrupt_key_check`) marks the foreground owner for death; `on_tick` performs
+the kill at a safe point (the same teardown the `KILL` syscall uses, split on
+whether the victim is the interrupted task) and the shell's `WAIT` wakes with
+`TASK_KILLED_STATUS`. It catches Ctrl+C both from a program *blocked reading* (via
+the wake-check keyboard poll) and from a *running compute loop* (a once-per-tick
+poll of the foreground owner) — so a runaway program is still interruptible. It's
+**terminate, not a signal**: nothing is delivered to the program to catch (an
+editor can't yet offer "save first"); real signals, or a raw-input mode that
+delivers Ctrl+C as a byte, are a later refinement.
+
+Also new: **`ulib::read_char`** (the blocking key read) and **`/bin/READKEY`**, a
+small keyboard-echo diagnostic that's the living proof of the arc — it reads keys
+and prints each one, `q` quits, Ctrl+C aborts. The known caveat: a *running*
+(not blocked-reading) foreground program can lose type-ahead to the once-per-tick
+Ctrl+C poll — rare, since a program waiting for input is blocked, not running.
+
+**Verified** in QEMU: `readkey` received `a`/`Z`/`5` (a `/bin` program reading the
+keyboard — the whole point), `q` returned to the shell, and Ctrl+C terminated it
+(`task 5 terminated`) and dropped back to the prompt. Normal commands, pipelines,
+and the `more` builtin all still work. This unblocks the editor/BASIC direction:
+those are now just `/bin` programs.
+
+## `pwd` and `write` move out to `/bin`
+
+Two more former builtins became real `/bin` programs, continuing the
+externalization arc. `pwd` reads the cwd the shell delivers at spawn (`GET_CWD`)
+and prints it; `write <file> [words...]` joins the words and writes them via
+`ulib`'s bulk path. Both are **behaviour-identical** to the builtins they
+replace — notably `write`, whose old builtin already word-split and rejoined with
+single spaces (the "raw command line" rationale in the docs wasn't what the code
+did), so nothing changed but where it lives.
+
+These moved because they need *nothing* from the shell that a spawned program
+lacks: the cwd is delivered at spawn, and file writes go through the same server
+every other `/bin` file command uses. The ones that **stayed** builtin each fail
+that test — `cd`/`bind` mutate the shell's *own* per-task cwd/namespace (a spawned
+program would change only its own), `more`/`less` need the keyboard only the shell
+owns, and `erase`/`partition`/`format` must run when nothing is mounted (exactly
+when `/bin` can't be read). The workspace is now 39 crates.
+
+**Verified** in QEMU: `pwd` at `/` printed `/`, `cd /d` then `pwd` printed `/d`
+(the program correctly sees the shell's cwd), and `write hi.txt hello …` then
+`cat hi.txt` round-tripped the content.
+
+## `help` lists builtins only
+
+`help` had drifted into listing a mix of shell builtins and `/bin` programs
+(`echo`/`ls`/`cat`/`grep`/… were all shown as if builtin, a leftover from before
+they were externalized). It now lists only the actual builtins — the commands
+that run *inside* the shell — and points at `ls /bin` for the externalized
+programs (a live list that changes as programs are added, so `help` shouldn't
+try to enumerate it). No behavior change, just an honest command list.
+
+## `more` - a pager (`less` is an alias)
+
+A pager to read output a screen at a time: `more <file>` or `<command> | more`,
+with **space** for the next screen, **Enter** for one more line, and **q** to
+quit. `less` is an alias for the same forward-only pager.
+
+It's a **builtin**, and that's forced by the design rather than chosen: a pager
+must read the keyboard *while it runs*, but this kernel routes keyboard input to
+exactly one owner (`INPUT_OWNER`, the boot shell at task 0), and a spawned `/bin`
+program never becomes that owner. So a pager can only run inside the shell, which
+already owns the keyboard. Content is captured into the shell's 256 KB heap
+buffer — from a file (read in `FS_DATA_MAX` windows) or from a piped command
+(`<command> | more` intercepts the trailing `| more`, dispatches the producer
+with a capturing sink, then pages the buffer) — so output larger than the buffer
+is refused rather than paged, and `| more` currently takes a single command, not
+a multi-stage pipeline. The `--More--` prompt is erased with a `\r`-and-spaces
+trick the console (`cond`) already handles.
+
+**Verified** in QEMU (piped stdin driving the pager): `ls -l /bin | more` showed
+23 lines then `--More--`, **space** revealed the rest, control returned to the
+shell; `q` quit early mid-listing; `more /LIST.TXT` paged a file; and a short
+`ls | more` printed one screen with no prompt.
+
+## `ls`: columns, sort by name, and `ls -l` (size + date/time)
+
+`ls` used to dump entries one-per-line in raw on-disk order. Now it's a real
+listing: **sorted by name** (case-insensitive), **multi-column** by default (like
+a terminal `ls`, directories suffixed `/`), with dotfiles (and `.`/`..`) hidden
+unless **`-a`**. And **`ls -l`** is the long form — one entry per line with its
+type, size, and modified `YYYY-MM-DD HH:MM`. Flags combine (`-la`).
+
+The long form needed metadata the filesystem protocol didn't expose, so this adds
+a **`stat`** verb (`NP_STAT`) — the reusable per-file primitive the gap-analysis
+flagged as the keystone. Given a path, `fsd` returns a fixed 20-byte record:
+size, a directory flag, and a **broken-down calendar** modified time (not an
+epoch — so no filesystem's differing epoch leaks into the ABI, and the client
+formats it with no date math). A `time_valid` byte says whether the time is
+meaningful: **FAT32** now decodes its "write" date/time from the directory entry
+(the primary/dev target), while exFAT/ext2/`/proc` return size and type with the
+time unset (a follow-up). `ls -l` reads the directory (unchanged `readdir`) then
+stats each entry (`ulib::fs_stat` + `stat_*` accessors), so no existing readdir
+client was touched.
+
+**Verified** in QEMU on the FAT32 disk: `ls /bin` printed sorted columns
+(`ARGS  CAT  CLEAR …` down the columns, `/`-suffixed dirs), `ls -l /bin` showed
+real sizes and `2026-08-27 08:54` timestamps, `-a` revealed `./`/`../`, and bare
+`ls` at `/` listed `BIN/  CLUSTER.KEY  EFI/`.
+
+## `shutdown` and `halt` - machine power control
+
+Two new shell builtins to stop the machine: `shutdown` (alias `poweroff`) powers
+it off; `halt` stops the CPU without cutting power.
+
+Powering off is a privileged platform operation, so it goes through a new
+**`POWER` syscall** (56) that runs at EL1: `POWER_OFF` issues **PSCI `SYSTEM_OFF`**
+(the ARM firmware power-off call), and `POWER_HALT` masks interrupts and parks the
+core in `wfi` forever. The one real subtlety is the PSCI **conduit** — whether the
+firmware call is `hvc` or `smc` — which the new `power.rs` reads from **ACPI's
+FADT** (`ARM_BOOT_ARCH` flags) at boot, in the same before-`exit_boot_services`
+window as the MADT parse. If PSCI is absent or refuses, power-off falls back to a
+halt so the machine at least stops.
+
+They're **builtins, not `/bin` programs**, deliberately: you must be able to power
+off even with no disk mounted (exactly when `/bin` can't be read), the same
+reasoning as `erase`/`partition`/`format`. Not capability-gated — a single-user
+machine lets its shell turn itself off.
+
+**Verified** in QEMU: `shutdown` printed `powering off` and the VM **exited on its
+own** (PSCI `SYSTEM_OFF` via the `hvc` conduit QEMU's ACPI advertises — no
+fallback); `halt` printed `system halted` and a following `echo` produced nothing
+(the machine really stopped — not even the timer tick resumes it).
+
+## `tree` - a recursive directory listing in `/bin`
+
+A new `/bin/TREE`: lists a directory recursively as an indented tree, then a
+`N directories, M files` summary — the classic Unix `tree`. A standalone
+`programs/fileutils/` crate over `ulib`, resolving its path against the
+shell-delivered cwd like `ls`, and talking to fsd via `fs_list_dir`.
+
+Two constraints shaped it. The framebuffer console renders **ASCII 0x20–0x7E
+only**, so the branches are the ASCII forms (`|-- `, `` `-- ``, `|   `) rather
+than the Unicode box-drawing glyphs. And a spawned `/bin` program gets a
+**~32 KB stack**, so the recursion is **depth-capped at 16** (each frame holds a
+512-byte listing plus the child's path and prefix, which the recursion borrows —
+a deeper subtree just isn't descended). It skips the `.`/`..` entries FAT returns
+(descending `..` would loop forever), and links with **zero relocations** (the
+PIE requirement). The workspace is now 37 crates.
+
+**Verified** in QEMU against a built nested tree:
+
+```
+/t
+|-- SUB
+|   `-- DEEP.TXT
+|-- A.TXT
+`-- B.TXT
+
+1 directory, 3 files
+```
+
+plus `tree /efi` (the boot layout, correct `|   ` continuations and `2
+directories, 10 files`) and `tree /nonexistent` (a clean `no such file or
+directory`).
+
+Entries are **sorted alphabetically** (case-insensitive, directories and files
+interleaved) rather than shown in raw on-disk order: each directory's entries
+are collected as offset+length records into the listing buffer (no name bytes
+moved, no heap) and insertion-sorted before emitting — up to 64 entries per
+directory (the sort array is live across the recursion, so it's a stack bound).
+Verified with a deliberately out-of-order directory (`zebra`/`apple`/`mango`/…)
+coming out `APPLE BERRY MANGO ZEBRA`, and `tree /` rendering the whole disk
+sorted (`/bin` as `ARGS … WRITEAT`) with `6 directories, 44 files`.
+
 ## Fix: running a program by a relative path from `/`
 
 A command containing a `/` was being fed through the `$PATH` search like a bare

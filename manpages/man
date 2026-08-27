@@ -1,0 +1,17 @@
+NAME
+    man - show a command's manual page
+
+SYNOPSIS
+    man <command>
+
+DESCRIPTION
+    Prints the manual page for <command>, read from /man/<command>. Pages are
+    plain text (the console does not render bold or colour). Pipe a long page
+    to the pager.
+
+EXAMPLES
+    man ls
+    man grep | more
+
+SEE ALSO
+    help, ls

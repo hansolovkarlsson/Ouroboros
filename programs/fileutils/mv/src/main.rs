@@ -23,6 +23,7 @@ fn arg_or_die(index: u64, buf: &mut [u8], msg: &[u8]) -> usize {
 #[no_mangle]
 #[link_section = ".text.start"]
 pub extern "C" fn _start() -> ! {
+    ulib::usage_if_requested(b"usage: mv <src> <dst>  (rename/move a file)\r\n");
     let mut src_arg_buf = [0u8; PATH_MAX];
     let src_arg_len = arg_or_die(1, &mut src_arg_buf, b"mv: missing source argument\r\n");
     let src_arg = core::str::from_utf8(&src_arg_buf[..src_arg_len]).unwrap_or("");

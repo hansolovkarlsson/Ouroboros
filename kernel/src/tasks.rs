@@ -403,6 +403,14 @@ pub(crate) fn el0_regions() -> [(u64, u64); NUM_TASKS] {
 /// the revert too.
 static INPUT_OWNER: AtomicUsize = AtomicUsize::new(0);
 
+/// A foreground task the Ctrl+C escape hatch (`interrupt_key_check`) has marked
+/// for death, killed by [`on_tick`] at a safe point (the only place this kernel
+/// tears a task down and switches away). `usize::MAX` = nothing pending. The
+/// kill is deferred to `on_tick` rather than done inline in the keyboard poll
+/// because the poll runs in contexts (a wake-check pass, a syscall) where
+/// switching away from a task isn't safe - `on_tick` already owns that.
+static PENDING_KILL: AtomicUsize = AtomicUsize::new(usize::MAX);
+
 /// `FG`'s effect: hand the keyboard to task `owner`. Validation (index
 /// in range, slot occupied, not idle) is the syscall layer's job -
 /// this just stores.
@@ -418,25 +426,29 @@ pub(crate) fn revert_input_owner_if(dying: usize) {
     let _ = INPUT_OWNER.compare_exchange(dying, 0, Ordering::Relaxed, Ordering::Relaxed);
 }
 
-/// The `fg` escape hatch: if `byte` is Ctrl+C (`0x03`, ETX) *while a
-/// task other than the boot shell owns the keyboard*, ownership reverts
-/// to task 0 and the byte is swallowed (returns `true`) - the
-/// foregrounded task keeps running in the background, it just loses the
-/// terminal; `kill` it if it should die too. When task 0 already owns
-/// the keyboard, Ctrl+C is deliberately *not* special - it passes
-/// through as an ordinary byte (which the shell's line editor ignores,
-/// along with every other unhandled control byte), so this never
-/// surprises the normal single-shell case. Not a signal mechanism:
-/// nothing is delivered to the foregrounded task, it isn't interrupted
-/// or stopped - the narrowest thing that unsticks a stranded keyboard.
+/// The Ctrl+C escape hatch. When `byte` is Ctrl+C (`0x03`, ETX) and a task
+/// other than the boot shell owns the keyboard (a foreground `/bin` program is
+/// running, having been handed the keyboard by `run_found_command`), that
+/// program is marked for death ([`PENDING_KILL`], killed by [`on_tick`]) and the
+/// byte is swallowed (returns `true`). When it dies the keyboard reverts to the
+/// shell, whose `WAIT` on it then wakes with `TASK_KILLED_STATUS`. When task 0
+/// (the boot shell) already owns the keyboard, Ctrl+C is not special: it passes
+/// through as an ordinary byte the line editor ignores (returns `false`), so the
+/// normal single-shell case is unchanged.
+///
+/// This is the interrupt that makes interactive `/bin` programs viable: run an
+/// editor or a REPL, and Ctrl+C kills it and drops back to the shell. It is
+/// still not a *signal*; nothing is delivered to the program for it to catch (an
+/// editor can't offer "save first"). That's a later refinement (signals, or a
+/// raw-input mode). Ctrl+C means terminate.
 pub(crate) fn interrupt_key_check(byte: u8) -> bool {
     const ETX: u8 = 0x03; // Ctrl+C
-    byte == ETX
-        && INPUT_OWNER
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |owner| {
-                if owner != 0 { Some(0) } else { None }
-            })
-            .is_ok()
+    let owner = INPUT_OWNER.load(Ordering::Relaxed);
+    if byte != ETX || owner == 0 {
+        return false;
+    }
+    PENDING_KILL.store(owner, Ordering::Relaxed);
+    true
 }
 
 /// One queued IPC message: who sent it, how long it is, and the bytes
@@ -1662,6 +1674,45 @@ pub unsafe fn on_tick(frame: *mut Context) {
             unsafe { (*TASKS[i].0.get()).gpr[0] = value };
             unsafe { *STATES[i].0.get() = TaskState::Runnable };
         }
+    }
+
+    // Ctrl+C from a *running* foreground child (a compute loop that isn't
+    // reading input - the wake-check loop above only polls the keyboard for a
+    // child blocked *on* it). Poll once when the foreground owner is the
+    // interrupted (running) task; `interrupt_key_check` inside the poll marks a
+    // Ctrl+C for the kill below. A non-Ctrl+C byte here is type-ahead the busy
+    // child wasn't reading and is dropped - rare (a program that reads input is
+    // Blocked, not running, at the tick), and the price of catching Ctrl+C in a
+    // runaway loop with no read to piggyback on.
+    let owner = INPUT_OWNER.load(Ordering::Relaxed);
+    if owner != 0 && owner == current {
+        let _ = crate::syscall::poll_keyboard_byte();
+    }
+
+    // Honor a Ctrl+C kill (marked by `interrupt_key_check` from either poll
+    // site): tear the foreground child down - the `KILL` syscall's teardown,
+    // split on whether the victim is the interrupted (current) task, exactly
+    // like the supervised-server restart below but without a restart. Its death
+    // reverts the keyboard to the shell, whose `WAIT` wakes with
+    // `TASK_KILLED_STATUS`.
+    let victim = PENDING_KILL.swap(usize::MAX, Ordering::Relaxed);
+    // Only a spawnable slot (>= FIRST_SPAWNABLE) may be terminated - the same
+    // protected set KILL/EXIT/FG enforce (never the shell, idle, or a
+    // supervised server). FG refuses to foreground 0-4, so a real keyboard
+    // owner is always in range; this guard is the belt-and-braces backstop.
+    if (FIRST_SPAWNABLE..NUM_TASKS).contains(&victim) {
+        crate::console::println!("Ouroboros kernel: Ctrl+C - foreground task {victim} terminated");
+        let (base, size) = task_region(victim);
+        free_runtime_region(base, size);
+        revert_input_owner_if(victim);
+        fail_calls_to(victim);
+        if victim == current {
+            unsafe { kill_current_and_switch(frame) };
+            unsafe { crate::mmu::rebuild_with_el0_regions(el0_regions()) };
+            return;
+        }
+        kill_task(victim);
+        unsafe { crate::mmu::rebuild_with_el0_regions(el0_regions()) };
     }
 
     // Heartbeat: catch a supervised server (fsd/cond) wedged in a loop -

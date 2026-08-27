@@ -1,0 +1,14 @@
+NAME
+    erase - zero a disk's leading sectors
+
+SYNOPSIS
+    erase disk
+
+DESCRIPTION
+    Destructive. Zeroes the disk's first sectors (partition table plus early
+    filesystem metadata) so it can be freshly partitioned. Requires the literal
+    word "disk". Refused while a filesystem is mounted. A builtin (it must run
+    when nothing is mounted).
+
+SEE ALSO
+    partition, format, unmount

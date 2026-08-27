@@ -1,0 +1,14 @@
+NAME
+    shutdown, halt - stop the machine
+
+SYNOPSIS
+    shutdown
+    halt
+
+DESCRIPTION
+    shutdown (alias poweroff) powers the machine off (PSCI SYSTEM_OFF; under
+    QEMU the VM exits). halt stops the CPU without cutting power. Builtins, so
+    they work even with no disk mounted.
+
+SEE ALSO
+    exit

@@ -1,0 +1,13 @@
+NAME
+    exec - spawn a program in the background
+
+SYNOPSIS
+    exec <path> [args...]
+
+DESCRIPTION
+    Loads the program at <path> and starts it as an independent task alongside
+    the shell (fire-and-forget; not waited). Words after the path become its
+    argv. See ps for the spawned task; wait or kill to end it.
+
+SEE ALSO
+    ps, wait, kill, fg

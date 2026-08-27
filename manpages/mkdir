@@ -1,0 +1,12 @@
+NAME
+    mkdir - create a directory
+
+SYNOPSIS
+    mkdir <dir>
+
+DESCRIPTION
+    Creates the directory <dir>. Fails if it already exists, the name is
+    invalid, the parent is missing, or the disk is full.
+
+SEE ALSO
+    rmdir, ls, touch

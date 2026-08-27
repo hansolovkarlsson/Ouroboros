@@ -17,6 +17,7 @@ const CONTENT_MAX: usize = 512;
 #[no_mangle]
 #[link_section = ".text.start"]
 pub extern "C" fn _start() -> ! {
+    ulib::usage_if_requested(b"usage: writeat <file> <offset> <text...>  (write text at a byte offset)\r\n");
     let mut file_buf = [0u8; PATH_MAX];
     let file_len = match ulib::arg(1, &mut file_buf) {
         Some(len) if len > 0 => len,

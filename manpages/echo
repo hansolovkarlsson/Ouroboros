@@ -1,0 +1,15 @@
+NAME
+    echo - print arguments
+
+SYNOPSIS
+    echo [words...]
+
+DESCRIPTION
+    Prints its arguments separated by single spaces, followed by a newline.
+
+EXAMPLES
+    echo hello world
+    echo $PATH
+
+SEE ALSO
+    write

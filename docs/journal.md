@@ -7,6 +7,203 @@ for the forward plan see [`roadmap.md`](roadmap.md).
 
 ---
 
+## 2026-08-27 (cont.) — shell wildcards and tab completion
+
+Two classic interactive-shell features. Globbing was the straightforward one:
+expand `*`/`?` tokens against the filesystem in `run_line` before dispatch, with
+the standard iterative backtracking matcher and bash's "no match stays literal"
+rule. Tab completion was a bit more fiddly — find the current word, list the
+directory, and either complete a lone match (replacing the typed prefix with the
+real filename case), extend to the common prefix of several, or list them and
+redraw the line.
+
+The interesting part was a link failure that cost a proper bisection: the shell
+suddenly wouldn't link, `R_AARCH64_ABS64 ... referenced by core`. The project has
+long known that `core::fmt` can't be PIE-linked, but I hadn't hit it in a while.
+Stubbing pieces one by one showed it wasn't `fs_list_dir` or `resolve_path`
+(already live) — it was the `&str` slicing itself. Slicing a `&str` by a runtime
+index emits `str`'s char-boundary panic, which *formats* the offending string,
+which drags in the unlinkable `core::fmt`. Byte slicing doesn't. So the glob and
+completion code got rewritten to work entirely in `&[u8]`, converting back with
+`from_utf8` only where a `&str` was actually needed. Worth a memory: never slice
+a `&str` by a runtime index in a `/bin` program. After that, both features came
+up clean — `echo *.txt` matched, `cat ba<Tab>` filled in `BANANA.TXT`.
+
+## 2026-08-27 (cont.) — man pages
+
+`man <command>`. The first question was how much formatting the console can do,
+and the honest answer settled the design: `cond`'s ANSI parser handles clear and
+home and *silently drops everything else*, including SGR — so bold and colour
+would render as nothing on the framebuffer (they'd work over the QEMU serial
+line, but that's not the real target). So: plain text, with UPPERCASE section
+headers doing the visual structure the way real man pages always have. The
+implementation is deliberately boring — pages are plain files under `/man/`, and
+`man` is basically `cat` with a `/man/` prefix, a friendly "no manual entry"
+message, and `\n`→`\r\n` translation for the console. Keeping the pages as files
+(not baked into the binary) means adding one is just dropping a file in
+`manpages/`. A nice incidental check: `man partition` exercises FAT long
+filenames (9 chars, past 8.3), and it read back fine. Wrote pages for the whole
+command set — the file commands, the filters, the net commands, the builtins —
+so there's a real reference now, not just terse `-?` lines.
+
+## 2026-08-27 (cont.) — `-?` usage help everywhere
+
+A small usability sweep: every command that takes arguments now answers `-?` with
+a one-line usage. The trick to keeping it from being tedious was a single ulib
+helper, `usage_if_requested(b"usage: ...")`, that each `/bin` program calls as its
+first line — one line per program — and a small `builtin_usage` table the shell
+consults before dispatching a builtin. The judgment calls were about what to
+*leave alone*: `echo` and `args` print their arguments, so intercepting `-?` would
+be wrong, and the pure filters (`wc`/`rev`/`uniq`/…) have no options to describe.
+Everything else — the file commands, the net commands, the filters that take an
+argument, the arg-taking builtins — got it. Nice to type `mount -?` or `dial -?`
+and get a reminder instead of guessing.
+
+## 2026-08-27 (cont.) — shrinking the shell: more/less/send/recv/selftest to /bin
+
+With the keyboard arc in place, the obvious follow-up: pull everything out of the
+shell that doesn't need to be there, and leave only the parts that genuinely are
+the shell — cwd, namespace, environment, job control, the disk/power commands
+that must run with no disk, and remote exec. The flagship extraction was the
+pager. It had been a builtin purely because it reads the keyboard; now a `/bin`
+program can, so out it went. `more <file>` was trivial. `cmd | more` took one
+insight: the pager, as a pipeline's *last* stage, needs the keyboard too, so the
+shell now fg's the last stage of every pipeline (harmless for `grep`/`wc`, which
+own it and never read). Two small bugs surfaced doing it — a piped `more` handed
+`MSG_RECV` its whole 256 KB heap as the receive buffer (rejected, since messages
+cap at 768), and I'd forgotten the last-stage fg at first — both quick fixes.
+`send`/`recv`/`selftest` came along for the ride; the nice moment was `selftest`
+running as a `/bin` binary and proving `core::fmt` links under PIE from a spawned
+program, not just the shell. The shell's builtin list is now short and every
+entry earns its place.
+
+## 2026-08-27 (cont.) — the keyboard arc: interactive programs can be `/bin` now
+
+The big one, and it came straight out of a question: does a program that reads the
+keyboard (a BASIC interpreter, an editor) have to be built into the shell? The
+answer was "only because of one missing piece," so I built the piece. Keyboard
+input goes to a single owner, and nothing ever handed that ownership to a
+foreground program — so the shell now `FG`s a command before it `WAIT`s on it, and
+the kernel already reverts ownership when the command dies. That's the whole
+unlock: `readkey`, a throwaway echo program, ran as an ordinary `/bin` binary and
+printed the keys I typed. First time a spawned program in this OS has read the
+keyboard.
+
+The subtle half was Ctrl+C. It used to just steal the keyboard back and leave the
+program running (fine when nothing owned the keyboard but the shell; a deadlock
+once a foreground program reads input). So I made Ctrl+C *terminate* the
+foreground program — the escape hatch marks it, and `on_tick` does the kill using
+the exact teardown the supervisor's crash-restart already uses (current-task vs
+not). The one genuinely hard case was a *compute-bound* program that never reads:
+nobody polls the keyboard for it, so I added a once-per-tick poll of a running
+foreground owner. That can eat type-ahead, but only while a program is actively
+running rather than blocked on a read — and a program waiting for input is
+blocked, so in practice it's a non-issue. Terminate, not a signal, is the honest
+limitation; an editor that wants to catch Ctrl+C needs real signals later. But the
+door's open: the next editor or REPL is just a program in `/bin`.
+
+## 2026-08-27 (cont.) — moving `pwd` and `write` out to `/bin`
+
+A cleanup prompted by a good question: which builtins are builtins by *necessity*
+and which are just leftovers? Going through them honestly, most have a real
+reason — `cd`/`bind` change the shell's own cwd/namespace, `more`/`less` need the
+keyboard only the shell owns, `erase`/`partition`/`format` have to run when
+nothing is mounted (so `/bin` can't be loaded). But two didn't: `pwd` and
+`write`. `pwd` just prints the cwd, which the shell already hands every spawned
+program; `write` just writes a file, like every other `/bin` file command. The
+nice discovery was that the old `write` builtin *already* word-split and rejoined
+with single spaces — the "raw command line" reason in its doc comment was never
+actually true of the code — so an argv-based `/bin/write` is a byte-for-byte
+behavioural match, not an approximation. Both moved out cleanly and verified
+(`cd /d; pwd` → `/d`, `write` + `cat` round-trip). Notably I *didn't* move the
+two that were suggested first, `more`/`less` and `partition`/`format` — they're
+the two with the strongest reasons to stay (keyboard ownership; no-disk
+bootstrap), which was worth saying out loud rather than mechanically obliging.
+
+## 2026-08-27 (cont.) — a pager: `more` (and `less`)
+
+Hans asked for `more` or `less` — "pick one". They're forward-vs-backward
+cousins; I made `more` the pager and `less` an alias for it (backward scrolling
+would need a lot more, and our content is small). The design was decided for me
+by one fact: a pager has to read the keyboard *while it's running*, and this
+kernel gives keyboard input to exactly one owner — the boot shell, task 0. A
+spawned `/bin` program never becomes that owner (there's a whole doc comment in
+`tasks.rs` about why, born from a bug where two programs split keystrokes letter
+by letter). So a pager simply cannot be a `/bin` program; it has to be a builtin
+that runs inside the shell, which already holds the keyboard. That settled it.
+
+The rest fell out cleanly by reusing what was there: the shell's 256 KB heap
+buffer and its `Output::Capture` sink already exist for `>` redirects and
+pipeline heads, so `<cmd> | more` just intercepts the trailing `| more`,
+dispatches the producer with a capturing sink, and pages the buffer; `more <file>`
+reads the file into the same buffer. The only fiddly bit was erasing the
+`--More--` prompt, and `cond` turned out to already handle `\r`, so a
+carriage-return-and-spaces wipe did it. Space pages, Enter line-steps, q quits —
+all confirmed against a QEMU guest driven through piped stdin.
+
+## 2026-08-27 (cont.) — `ls` grows up: columns, sort, and `-l`
+
+The `ls` that just dumped names one per line always felt like a placeholder. This
+turned it into a real one: sorted by name, multi-column by default (column-major,
+like a terminal), dotfiles hidden unless `-a`, and a proper `-l` long form. The
+columns and sort are pure client formatting (the `tree` playbook — collect
+offset/length records, insertion-sort, lay out). The interesting part was `-l`,
+because size and date/time are *metadata the filesystem protocol didn't expose*.
+
+That's the keystone the gap-analysis kept pointing at: there was no `stat`. So I
+added one — `NP_STAT`, a fixed 20-byte record (size, dir flag, modified time).
+The design choice that made it clean was returning a **broken-down calendar**
+rather than an epoch: FAT stores calendar fields, ext2 stores unix seconds, and
+if the wire carried epochs I'd have to pick one and convert on both sides. A
+calendar means each filesystem fills what it natively has and the client just
+formats digits — no date math anywhere. I scoped the actual timestamp decode to
+FAT32 (the tested disk) and left exFAT/ext2/proc returning size+type with the
+time marked absent, shown as `-`. And crucially I made `ls -l` do readdir + a
+stat per entry rather than fattening the readdir format — so tree, cd, the HTTP
+directory index, none of the existing readdir callers had to change. `ls -l /bin`
+lighting up with real sizes and `2026-08-27 08:54` timestamps was a good moment.
+
+## 2026-08-27 (cont.) — `shutdown` and `halt`
+
+The machine could boot but never stop itself — you killed QEMU from the host or
+pulled the Parallels plug. So: `shutdown`/`halt`. The interesting part is that
+powering off is genuinely privileged: it's a PSCI firmware call (`hvc`/`smc`),
+which only EL1 can make, so it needs a real syscall (`POWER`, 56) rather than
+anything a userland program could do alone. And PSCI has one gotcha — is the
+conduit `hvc` or `smc`? Guessing wrong faults. The honest answer lives in ACPI's
+FADT (`ARM_BOOT_ARCH` flags), which the project already knows how to walk (it
+reads SPCR and MADT the same way), so `power.rs` reads the conduit at boot next to
+the MADT parse and stashes it. QEMU's ACPI advertises `hvc`, and `SYSTEM_OFF` made
+the VM exit cleanly on the first try. `halt` is the humble sibling — mask
+interrupts, `wfi` forever, and confirmed the machine truly stops by watching a
+follow-up `echo` produce nothing. Both are builtins, not `/bin`: you have to be
+able to power off with no disk mounted, the same logic that keeps
+`erase`/`partition`/`format` builtin.
+
+## 2026-08-27 (cont.) — `tree` joins `/bin`
+
+A satisfying little program to write because the constraints did the designing.
+`tree` is inherently recursive, and two things immediately bound the shape: the
+framebuffer font is ASCII-only (so the pretty Unicode box-drawing is out — ASCII
+`|-- `/`` `-- `` it is), and a spawned program has a ~32 KB stack (so unbounded
+recursion is a guard-page fault waiting to happen — depth-capped at 16, with each
+frame's buffers kept small since the child borrows the parent's path/prefix
+across the recursive call). The one real correctness trap was `.`/`..`: FAT hands
+them back in every subdirectory listing, and descending `..` would loop forever —
+so they're skipped explicitly. Came up clean on the first real boot: a built
+`/t/sub/deep.txt` tree rendered with the right branches and `1 directory, 3
+files`, and `tree /efi` drew the boot layout with correct `|   ` continuation
+lines.
+
+Then the obvious polish, added right after: **sorting**. Raw on-disk order is
+whatever the directory happens to hold; alphabetical is what you want to read. No
+heap means no `Vec` to sort, so each directory's entries become fixed
+offset+length records into the listing buffer and get insertion-sorted in place
+before emitting — the name bytes never move. Capped at 64 entries per directory,
+since that array stays live across the recursion into each child (a stack cost).
+`zebra`/`apple`/`mango` came out `APPLE BERRY MANGO ZEBRA`, and `tree /` rendered
+the whole disk sorted top to bottom without tripping the guard page.
+
 ## 2026-08-27 (cont.) — a path-command bug: `bin/echo` from `/`
 
 Hans hit a real one: `bin/echo hello` from `/` said `unknown command: bin/echo`,

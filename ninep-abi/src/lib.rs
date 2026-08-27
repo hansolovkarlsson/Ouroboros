@@ -90,10 +90,44 @@ pub const NP_READ_AT: u64 = NP_BASE + 10;
 /// Status = 0.
 pub const NP_WRITE_FILE: u64 = NP_BASE + 11;
 
+/// **Stat** a single path: `a0` = path length; payload = the path. On success
+/// the reply status is [`STAT_INFO_LEN`] and the result payload is a
+/// [`StatInfo`](the `STAT_*` field layout below); on failure it's an `FS_ERR_*`
+/// code. The per-file metadata behind `ls -l` (size, dir flag, modified time).
+pub const NP_STAT: u64 = NP_BASE + 12;
+
 /// One past the last defined verb — a server dispatches the `[NP_BASE, NP_LIMIT)`
 /// range to its verb handler and lets everything else (including `SYSOP_PING`)
 /// fall through to its existing path.
-pub const NP_LIMIT: u64 = NP_WRITE_FILE + 1;
+pub const NP_LIMIT: u64 = NP_STAT + 1;
+
+// The `NP_STAT` result payload: a fixed 20-byte little-endian record. The time
+// is a broken-down calendar (not an epoch) so no filesystem's differing epoch
+// leaks into the ABI and the client formats it without date math; `time_valid`
+// says whether the time fields are meaningful (a filesystem that doesn't yet
+// surface a timestamp sets it 0).
+/// Total length of the `NP_STAT` result record.
+pub const STAT_INFO_LEN: usize = 20;
+/// `u64` file size in bytes (0 for a directory).
+pub const STAT_SIZE_OFF: usize = 0;
+/// `u32` flags; bit 0 ([`STAT_FLAG_DIR`]) = directory.
+pub const STAT_FLAGS_OFF: usize = 8;
+/// `u16` modified year (e.g. 2026).
+pub const STAT_YEAR_OFF: usize = 12;
+/// `u8` modified month (1-12).
+pub const STAT_MONTH_OFF: usize = 14;
+/// `u8` modified day (1-31).
+pub const STAT_DAY_OFF: usize = 15;
+/// `u8` modified hour (0-23).
+pub const STAT_HOUR_OFF: usize = 16;
+/// `u8` modified minute (0-59).
+pub const STAT_MIN_OFF: usize = 17;
+/// `u8` modified second (0-59).
+pub const STAT_SEC_OFF: usize = 18;
+/// `u8` non-zero if the year..second fields are meaningful.
+pub const STAT_TIMEVALID_OFF: usize = 19;
+/// [`STAT_FLAGS_OFF`] bit: the entry is a directory.
+pub const STAT_FLAG_DIR: u32 = 1 << 0;
 
 /// Remote-execution **run** request (cluster Phase 4a — the Plan 9 `cpu` model):
 /// carried over the export connection in the same framed shape as an NP verb, but

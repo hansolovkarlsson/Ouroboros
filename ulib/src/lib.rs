@@ -58,6 +58,33 @@ pub fn syscall4(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64) -> u64 
     ret
 }
 
+/// True if any argument is `-?` - the uniform usage-help flag. A program checks
+/// this (usually via [`usage_if_requested`]) and prints its one-line usage.
+pub fn help_requested() -> bool {
+    let n = argc();
+    let mut i = 1u64;
+    let mut buf = [0u8; 4];
+    while i < n {
+        if let Some(l) = arg(i, &mut buf) {
+            if &buf[..l] == b"-?" {
+                return true;
+            }
+        }
+        i += 1;
+    }
+    false
+}
+
+/// If any argument is `-?`, print `usage` to the console and `exit(0)`. Call it
+/// at the top of `_start` - the uniform "add `-?` for usage" convention across
+/// `/bin` programs. Does nothing (returns) when no `-?` is present.
+pub fn usage_if_requested(usage: &[u8]) {
+    if help_requested() {
+        con_write(usage);
+        exit(0);
+    }
+}
+
 /// The number of arguments this program was spawned with (`argv[0]` is the
 /// program name).
 pub fn argc() -> u64 {
@@ -101,6 +128,33 @@ pub fn write_out(target: u64, bytes: &[u8]) {
     } else {
         pipe_out(target, bytes);
     }
+}
+
+/// This program's heap area as a mutable byte slice (its region's fixed raw
+/// heap, reported by `HEAP_INFO` - see the shell's own use). Space far larger
+/// than the stack, for data a fixed stack buffer can't hold (a pager buffering
+/// a file, say). Not a `GlobalAlloc` heap - just the program's own
+/// EL0-accessible scratch area; empty (`&mut []`) if the region is too small to
+/// have one.
+pub fn heap() -> &'static mut [u8] {
+    let base = syscall(syscall_abi::HEAP_INFO, syscall_abi::HEAP_INFO_BASE);
+    let size = syscall(syscall_abi::HEAP_INFO, syscall_abi::HEAP_INFO_SIZE);
+    if base == 0 || size == 0 {
+        return &mut [];
+    }
+    // SAFETY: HEAP_INFO reports this task's own reserved heap area, EL0-writable
+    // for the whole run and not aliased by anything else.
+    unsafe { core::slice::from_raw_parts_mut(base as *mut u8, size as usize) }
+}
+
+/// Block until a keyboard byte is available, and return it (`READ_CHAR`). A
+/// program only receives keystrokes while it *owns* the keyboard - the shell
+/// hands a foreground command that ownership at spawn, so an interactive `/bin`
+/// program (an editor, a REPL) can read input here; Ctrl+C terminates it (the
+/// kernel kills the foreground owner). A background/piped program that calls
+/// this just blocks forever (it never owns the keyboard).
+pub fn read_char() -> u8 {
+    syscall(syscall_abi::READ_CHAR, 0) as u8
 }
 
 /// Route output through the console server as a batched write over the uniform
@@ -757,6 +811,58 @@ pub fn fs_read_file(path: &str, buf: &mut [u8]) -> u64 {
         &[],
         buf,
     )
+}
+
+/// Stat `path`, filling `info` (which must be [`ninep_abi::STAT_INFO_LEN`]
+/// bytes) with the fixed metadata record. Returns [`ninep_abi::STAT_INFO_LEN`]
+/// on success, or [`NO_FS`]/an `FS_ERR_*` code (test with [`is_fs_error`]). The
+/// record is decoded with the `stat_*` accessors below.
+pub fn fs_stat(path: &str, info: &mut [u8]) -> u64 {
+    let mut fsp = [0u8; FSP_MAX];
+    let r = mount_resolve(path, &mut fsp);
+    np_dispatch(
+        &r,
+        ninep_abi::NP_STAT,
+        [r.len as u64, 0, 0, 0],
+        &fsp[..r.len],
+        &[],
+        info,
+    )
+}
+
+/// The size field of a stat record (see [`fs_stat`]).
+pub fn stat_size(info: &[u8]) -> u64 {
+    u64::from_le_bytes([
+        info[0], info[1], info[2], info[3], info[4], info[5], info[6], info[7],
+    ])
+}
+
+/// Whether a stat record's entry is a directory.
+pub fn stat_is_dir(info: &[u8]) -> bool {
+    let flags = u32::from_le_bytes([
+        info[ninep_abi::STAT_FLAGS_OFF],
+        info[ninep_abi::STAT_FLAGS_OFF + 1],
+        info[ninep_abi::STAT_FLAGS_OFF + 2],
+        info[ninep_abi::STAT_FLAGS_OFF + 3],
+    ]);
+    flags & ninep_abi::STAT_FLAG_DIR != 0
+}
+
+/// The modified time of a stat record as `(year, month, day, hour, min, sec)`,
+/// or `None` if the filesystem didn't surface one (`time_valid` == 0).
+pub fn stat_time(info: &[u8]) -> Option<(u16, u8, u8, u8, u8, u8)> {
+    if info[ninep_abi::STAT_TIMEVALID_OFF] == 0 {
+        return None;
+    }
+    let year = u16::from_le_bytes([info[ninep_abi::STAT_YEAR_OFF], info[ninep_abi::STAT_YEAR_OFF + 1]]);
+    Some((
+        year,
+        info[ninep_abi::STAT_MONTH_OFF],
+        info[ninep_abi::STAT_DAY_OFF],
+        info[ninep_abi::STAT_HOUR_OFF],
+        info[ninep_abi::STAT_MIN_OFF],
+        info[ninep_abi::STAT_SEC_OFF],
+    ))
 }
 
 /// Create or fully overwrite `path` with `data` via the grant/safecopy bulk

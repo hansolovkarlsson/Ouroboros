@@ -1,0 +1,11 @@
+NAME
+    rmdir - remove an empty directory
+
+SYNOPSIS
+    rmdir <dir>
+
+DESCRIPTION
+    Removes the directory <dir>, which must be empty.
+
+SEE ALSO
+    mkdir, rm

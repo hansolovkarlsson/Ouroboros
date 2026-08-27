@@ -2897,6 +2897,26 @@ fn net_op(verb: u64, fspath: &[u8], offset: u64, want: usize, data_in: &[u8], ou
         }
         return (syscall_abi::FS_ERR_NOT_A_DIRECTORY, 0);
     }
+    // Stat: `/` is the directory, `/ip`/`/mac` are files sized by their content.
+    // No timestamp (time_valid stays 0). Lets `ls -l /net` show real sizes.
+    if verb == ninep_abi::NP_STAT {
+        let (size, is_dir) = if fspath == b"/" {
+            (0u64, true)
+        } else {
+            match clen {
+                Some(c) => (c as u64, false),
+                None => return (syscall_abi::FS_ERR_NOT_FOUND, 0),
+            }
+        };
+        let mut info = [0u8; ninep_abi::STAT_INFO_LEN];
+        info[..8].copy_from_slice(&size.to_le_bytes());
+        let flags: u32 = if is_dir { ninep_abi::STAT_FLAG_DIR } else { 0 };
+        info[ninep_abi::STAT_FLAGS_OFF..ninep_abi::STAT_FLAGS_OFF + 4]
+            .copy_from_slice(&flags.to_le_bytes());
+        let n = info.len().min(out.len());
+        out[..n].copy_from_slice(&info[..n]);
+        return (ninep_abi::STAT_INFO_LEN as u64, n);
+    }
     let Some(clen) = clen else {
         return (syscall_abi::FS_ERR_NOT_FOUND, 0);
     };
@@ -3065,6 +3085,20 @@ fn build_9p_reply(msg: &[u8], out: &mut [u8; PREFIX_MAX], dials: &mut [Option<Di
             }
             let n = read_file_chunk(fspath, tree, 0, &mut buf[..want]);
             frame_reply(out, size, ok_data(n, &buf))
+        }
+        // Stat: relay to fsd; status = STAT_INFO_LEN, data = the 20-byte record
+        // (size/dir-flag/mtime). Lets `ls -l` work across a remote mount, not
+        // just on the local disk.
+        v if v == ninep_abi::NP_STAT => {
+            let status = fsd_call(
+                ninep_abi::NP_STAT,
+                tree,
+                fspath.len() as u64,
+                0,
+                fspath,
+                &mut buf[..ninep_abi::STAT_INFO_LEN],
+            );
+            frame_reply(out, status, ok_data(status, &buf))
         }
         // --- write / mutate verbs (cluster Phase 2: read+write) ---
         // Path-only ops: the path is the whole payload, no data. (A write under

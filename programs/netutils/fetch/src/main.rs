@@ -21,6 +21,7 @@ fn fail(msg: &[u8], target: u64) -> ! {
 #[no_mangle]
 #[link_section = ".text.start"]
 pub extern "C" fn _start() -> ! {
+    ulib::usage_if_requested(b"usage: fetch <url>  (HTTP GET a URL and print the response)\r\n");
     let target = ulib::stdout_target();
 
     let mut argbuf = [0u8; ulib::PATH_MAX];

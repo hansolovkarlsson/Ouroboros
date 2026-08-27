@@ -100,6 +100,21 @@ impl Fs {
         }
     }
 
+    /// Metadata for one path: type and size. Synthetic, so there's no
+    /// timestamp (`time: None`). Backs `ls -l`.
+    pub fn stat(&mut self, path: &str) -> Result<crate::vfs::Stat, Error> {
+        let (size, is_dir) = match parse(path) {
+            Node::Root | Node::Task(_) => (0u64, true),
+            Node::State(n) => (state_bytes(n).len() as u64, false),
+            Node::NotFound => return Err(Error::NotFound),
+        };
+        Ok(crate::vfs::Stat {
+            size,
+            is_dir,
+            time: None,
+        })
+    }
+
     // /proc is read-only: every mutate op is refused.
     pub fn write_file(&mut self, _path: &str, _data: &[u8]) -> Result<(), Error> {
         Err(Error::ReadOnly)

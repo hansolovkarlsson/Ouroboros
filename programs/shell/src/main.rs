@@ -63,7 +63,6 @@
 #![no_main]
 
 use core::arch::asm;
-use core::fmt::Write as _;
 use core::panic::PanicInfo;
 
 const BUFFER_SIZE: usize = 128;
@@ -203,6 +202,322 @@ fn expand_vars<'a>(line: &str, env: &Env, out: &'a mut [u8]) -> &'a str {
     }
     core::str::from_utf8(&out[..n]).unwrap_or("")
 }
+
+/// ASCII case-insensitive byte equality, hand-rolled (the `str`/`u8` case
+/// helpers in `core` pull in code the PIE loader can't link - see
+/// `programs/linker.ld` / `selftest`).
+fn ci_eq(a: u8, b: u8) -> bool {
+    let fold = |c: u8| if c.is_ascii_uppercase() { c + 32 } else { c };
+    fold(a) == fold(b)
+}
+
+/// Case-insensitive wildcard match: `*` matches any run (including empty), `?`
+/// any single byte, everything else literally. Iterative (no recursion), the
+/// standard backtrack-on-`*` algorithm.
+fn wildcard_match(pat: &[u8], name: &[u8]) -> bool {
+    let (mut p, mut n) = (0usize, 0usize);
+    let (mut star, mut mark) = (None, 0usize);
+    while n < name.len() {
+        if p < pat.len() && (pat[p] == b'?' || ci_eq(pat[p], name[n])) {
+            p += 1;
+            n += 1;
+        } else if p < pat.len() && pat[p] == b'*' {
+            star = Some(p);
+            mark = n;
+            p += 1;
+        } else if let Some(sp) = star {
+            // Backtrack: the `*` swallows one more byte of `name`.
+            p = sp + 1;
+            mark += 1;
+            n = mark;
+        } else {
+            return false;
+        }
+    }
+    while p < pat.len() && pat[p] == b'*' {
+        p += 1;
+    }
+    p == pat.len()
+}
+
+/// Split a glob token's bytes into its directory prefix (up to and including the
+/// last `/`, or empty) and the filename pattern (after it). Works on bytes -
+/// slicing a `&str` with a runtime index pulls in `core`'s formatted
+/// char-boundary panic path, which the PIE loader can't link (see `selftest`).
+fn glob_split(tok: &[u8]) -> (&[u8], &[u8]) {
+    let mut i = tok.len();
+    while i > 0 {
+        i -= 1;
+        if tok[i] == b'/' {
+            return (&tok[..i + 1], &tok[i + 1..]);
+        }
+    }
+    (&tok[..0], tok)
+}
+
+/// Expand a single glob token against the filesystem, writing space-separated
+/// matches (`<dir>name`) into `out`. Returns the bytes written, or 0 if nothing
+/// matched (the caller then keeps the token literal, bash-style). Dotfiles are
+/// matched only when the pattern itself begins with `.` (so `*` skips `.`/`..`).
+fn expand_one_glob(tok: &str, cwd: &str, out: &mut [u8]) -> usize {
+    let (dir_part, pat) = glob_split(tok.as_bytes());
+    // The directory to list: the dir prefix (sans trailing '/') resolved
+    // against cwd, or cwd itself.
+    let mut dirbuf = [0u8; PATH_SIZE];
+    let dir = if dir_part.is_empty() {
+        cwd
+    } else {
+        let trimmed = if dir_part.last() == Some(&b'/') {
+            &dir_part[..dir_part.len() - 1]
+        } else {
+            dir_part
+        };
+        let Ok(trimmed_str) = core::str::from_utf8(trimmed) else { return 0 };
+        match resolve_path(cwd, trimmed_str, &mut dirbuf) {
+            Some(l) => core::str::from_utf8(&dirbuf[..l]).unwrap_or(cwd),
+            None => return 0,
+        }
+    };
+
+    let mut listing = [0u8; LIST_SIZE];
+    let r = fs_list_dir(dir, &mut listing);
+    if r >= FS_ERR_MIN {
+        return 0;
+    }
+    let data = &listing[..r as usize];
+    let match_dot = pat.first() == Some(&b'.');
+
+    let mut written = 0usize;
+    let mut count = 0usize;
+    let mut start = 0usize;
+    for i in 0..=data.len() {
+        if i == data.len() || data[i] == b'\n' {
+            if i > start {
+                let mut line = &data[start..i];
+                if line.last() == Some(&b'/') {
+                    line = &line[..line.len() - 1]; // strip the dir marker
+                }
+                let skip = !match_dot && line.first() == Some(&b'.');
+                if !skip && !line.is_empty() && wildcard_match(pat, line) {
+                    if count > 0 && written < out.len() {
+                        out[written] = b' ';
+                        written += 1;
+                    }
+                    // <dir_part><name>
+                    for &b in dir_part {
+                        if written < out.len() {
+                            out[written] = b;
+                            written += 1;
+                        }
+                    }
+                    for &b in line {
+                        if written < out.len() {
+                            out[written] = b;
+                            written += 1;
+                        }
+                    }
+                    count += 1;
+                }
+            }
+            start = i + 1;
+        }
+    }
+    if count == 0 {
+        0
+    } else {
+        written
+    }
+}
+
+/// Expand filename globs (`*`, `?`) in `line` against the filesystem, producing
+/// a new line in `out`. Each whitespace token containing a wildcard is replaced
+/// by its (space-separated) matches; a token with no wildcard, or one that
+/// matches nothing, is copied verbatim. Pipeline/redirect tokens (`|`/`>`/`>>`)
+/// have no wildcards, so they pass through untouched.
+fn expand_globs<'a>(line: &str, cwd: &str, out: &'a mut [u8]) -> &'a str {
+    let mut len = 0usize;
+    let mut first = true;
+    for tok in line.split_whitespace() {
+        if !first && len < out.len() {
+            out[len] = b' ';
+            len += 1;
+        }
+        first = false;
+        let expanded = if tok.contains('*') || tok.contains('?') {
+            expand_one_glob(tok, cwd, &mut out[len..])
+        } else {
+            0
+        };
+        if expanded > 0 {
+            len += expanded;
+        } else {
+            // No wildcard, or no match: keep the token literal.
+            for &b in tok.as_bytes() {
+                if len < out.len() {
+                    out[len] = b;
+                    len += 1;
+                }
+            }
+        }
+    }
+    core::str::from_utf8(&out[..len]).unwrap_or("")
+}
+
+/// Iterate a `fs_list_dir` listing (`name\n`/`name/\n` lines), calling `f` with
+/// each entry's name (trailing `/` stripped) and whether it's a directory.
+fn for_each_entry(data: &[u8], mut f: impl FnMut(&[u8], bool)) {
+    let mut start = 0usize;
+    for i in 0..=data.len() {
+        if i == data.len() || data[i] == b'\n' {
+            if i > start {
+                let mut name = &data[start..i];
+                let is_dir = name.last() == Some(&b'/');
+                if is_dir {
+                    name = &name[..name.len() - 1];
+                }
+                f(name, is_dir);
+            }
+            start = i + 1;
+        }
+    }
+}
+
+/// Whether `name` begins with `prefix`, ASCII case-insensitively.
+fn starts_with_ci(name: &[u8], prefix: &[u8]) -> bool {
+    if prefix.len() > name.len() {
+        return false;
+    }
+    for k in 0..prefix.len() {
+        if !ci_eq(name[k], prefix[k]) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Tab completion: complete the last word of the input line as a filename,
+/// against the filesystem. A single match replaces the typed prefix with the
+/// full name (filesystem case) plus `/` (directory) or a space (file); several
+/// matches extend to their common prefix, and if that adds nothing, list them
+/// and redraw. No match does nothing. Byte-based throughout (a `&str` runtime
+/// slice pulls in `core`'s unlinkable formatted panic path - see `glob_split`).
+fn complete_word(buf: &mut [u8; BUFFER_SIZE], len: &mut usize, cwd: &[u8; CWD_SIZE], cwd_len: usize) {
+    // The word being completed: from the last space to the cursor.
+    let mut ws = *len;
+    while ws > 0 && buf[ws - 1] != b' ' {
+        ws -= 1;
+    }
+    let mut word = [0u8; PATH_SIZE];
+    let wn = (*len - ws).min(word.len());
+    word[..wn].copy_from_slice(&buf[ws..ws + wn]);
+    let (dir_part, prefix) = glob_split(&word[..wn]);
+
+    // The directory to list, built into `dirbuf`.
+    let mut dirbuf = [0u8; PATH_SIZE];
+    let dir_len = if dir_part.is_empty() {
+        let c = cwd_str(cwd, cwd_len).as_bytes();
+        let n = c.len().min(dirbuf.len());
+        dirbuf[..n].copy_from_slice(&c[..n]);
+        n
+    } else {
+        let trimmed = if dir_part.last() == Some(&b'/') {
+            &dir_part[..dir_part.len() - 1]
+        } else {
+            dir_part
+        };
+        let Ok(ts) = core::str::from_utf8(trimmed) else { return };
+        match resolve_path(cwd_str(cwd, cwd_len), ts, &mut dirbuf) {
+            Some(l) => l,
+            None => return,
+        }
+    };
+    let Ok(dir) = core::str::from_utf8(&dirbuf[..dir_len]) else { return };
+
+    let mut listing = [0u8; LIST_SIZE];
+    let r = fs_list_dir(dir, &mut listing);
+    if r >= FS_ERR_MIN {
+        return;
+    }
+    let data = &listing[..r as usize];
+    let match_dot = prefix.first() == Some(&b'.');
+
+    // One pass: longest common prefix of all matches, the count, and (for a
+    // lone match) whether it's a directory.
+    let mut lcp = [0u8; PATH_SIZE];
+    let mut lcp_len = 0usize;
+    let mut count = 0usize;
+    let mut only_is_dir = false;
+    for_each_entry(data, |name, is_dir| {
+        if name.is_empty() || (!match_dot && name.first() == Some(&b'.')) || !starts_with_ci(name, prefix) {
+            return;
+        }
+        if count == 0 {
+            let n = name.len().min(lcp.len());
+            lcp[..n].copy_from_slice(&name[..n]);
+            lcp_len = n;
+            only_is_dir = is_dir;
+        } else {
+            let mut k = 0;
+            while k < lcp_len && k < name.len() && ci_eq(lcp[k], name[k]) {
+                k += 1;
+            }
+            lcp_len = k;
+        }
+        count += 1;
+    });
+
+    if count == 0 {
+        return;
+    }
+
+    // Replace the typed prefix with the resolved-case completion (lcp), so
+    // casing is consistent. Erase the prefix from display + buffer, retype lcp.
+    for _ in 0..prefix.len() {
+        if *len > ws {
+            putc(BACKSPACE);
+            putc(b' ');
+            putc(BACKSPACE);
+            *len -= 1;
+        }
+    }
+    for &b in &lcp[..lcp_len] {
+        if *len < BUFFER_SIZE {
+            buf[*len] = b;
+            *len += 1;
+            putc(b);
+        }
+    }
+    if count == 1 {
+        let sep = if only_is_dir { b'/' } else { b' ' };
+        if *len < BUFFER_SIZE {
+            buf[*len] = sep;
+            *len += 1;
+            putc(sep);
+        }
+    } else if lcp_len == prefix.len() {
+        // Ambiguous, no further common prefix: list the matches, then redraw.
+        putc(CR);
+        putc(LF);
+        for_each_entry(data, |name, is_dir| {
+            if name.is_empty() || (!match_dot && name.first() == Some(&b'.')) || !starts_with_ci(name, prefix) {
+                return;
+            }
+            for &b in name {
+                putc(b);
+            }
+            if is_dir {
+                putc(b'/');
+            }
+            putc(b' ');
+        });
+        putc(CR);
+        putc(LF);
+        print_prompt();
+        for &b in &buf[..*len] {
+            putc(b);
+        }
+    }
+}
 // (`LIST_BUFFER_SIZE` used to live here for the built-in `ls`'s listing
 // buffer; `ls` is a /bin program now, so its listing buffer lives in the
 // `ls` crate over `ulib`.)
@@ -215,8 +530,18 @@ fn expand_vars<'a>(line: &str, env: &Env, out: &'a mut [u8]) -> &'a str {
 
 const BACKSPACE: u8 = 0x08;
 const DEL: u8 = 0x7f;
+const TAB: u8 = 0x09;
 const CR: u8 = b'\r';
 const LF: u8 = b'\n';
+
+/// The glob-expanded command line buffer (a `*`/`?` can expand to many
+/// filenames). Larger than `EXPAND_SIZE` for that reason; an expansion that
+/// overflows is truncated.
+const GLOB_LINE_SIZE: usize = 1024;
+
+/// A directory listing buffer for globbing and tab completion (the same
+/// `name\n`/`name/\n` format `fs_list_dir` fills, bounded by its reply cap).
+const LIST_SIZE: usize = 512;
 
 // Syscall numbers and sentinel values come from the shared `syscall-abi`
 // crate now, not hand-duplicated local consts - see its doc comment and
@@ -299,6 +624,10 @@ fn on_byte(byte: u8, buf: &mut [u8; BUFFER_SIZE], len: &mut usize, cwd: &mut [u8
                 putc(BACKSPACE);
             }
         }
+        TAB => {
+            // Filename completion of the last word (see `complete_word`).
+            complete_word(buf, len, cwd, *cwd_len);
+        }
         byte => {
             // Unhandled C0 control bytes (anything below space that
             // isn't the CR/LF/backspace cases above) are ignored rather
@@ -354,6 +683,16 @@ fn run_line(line: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize, env: &mut
     // is only read here, so it's free to be borrowed mutably below.
     let mut ebuf = [0u8; EXPAND_SIZE];
     let line = expand_vars(line, env, &mut ebuf);
+
+    // Filename globbing: expand `*`/`?` tokens against the filesystem (only if
+    // the line has a wildcard at all - most don't, so skip the fs work). The
+    // expanded line lives in `gbuf` for the rest of the call.
+    let mut gbuf = [0u8; GLOB_LINE_SIZE];
+    let line = if line.contains('*') || line.contains('?') {
+        expand_globs(line, cwd_str(cwd, *cwd_len), &mut gbuf)
+    } else {
+        line
+    };
 
     // Pipelines first: standalone `|` tokens split the line into N stages.
     // The first stage may be a builtin (its output captured and streamed) or a
@@ -437,9 +776,9 @@ fn split_pipeline<'a>(line: &'a str, stages: &mut [&'a str]) -> Result<usize, &'
 fn is_builtin(cmd: &str) -> bool {
     matches!(
         cmd,
-        "help" | "cd" | "bind" | "pwd" | "write" | "mount" | "unmount" | "erase" | "partition" | "format"
-            | "exec" | "exit" | "ps" | "kill" | "fg" | "wait" | "send" | "recv" | "selftest"
-            | "env" | "set" | "unset" | "cpu"
+        "help" | "cd" | "bind" | "mount" | "unmount" | "erase" | "partition" | "format"
+            | "exec" | "exit" | "shutdown" | "poweroff" | "halt" | "ps" | "kill"
+            | "fg" | "wait" | "env" | "set" | "unset" | "cpu"
     )
 }
 
@@ -634,6 +973,13 @@ fn cmd_pipeline(stages: &[&str], cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize, 
         }
     }
 
+    // Hand the last stage the keyboard, so a pipeline whose consumer is
+    // interactive (e.g. `ls -l | more`) can read paging keys - the same
+    // foreground-owns-the-keyboard rule a single command gets. Harmless for a
+    // non-interactive last stage (grep/wc): it owns the keyboard, never reads
+    // it, and ownership reverts on exit. Ctrl+C then terminates that stage.
+    syscall(syscall_abi::FG, slots[prog_stages.len() - 1]);
+
     // Reap every program stage (in order, so a producer that streamed and
     // exited is collected before we block on its consumer).
     for i in 0..prog_stages.len() {
@@ -729,7 +1075,7 @@ enum RedirectParse<'a> {
 /// an implementation accident. Operator detection uses scalar
 /// length/byte checks ([`is_dot`]/[`is_dotdot`] style) rather than
 /// `token == ">"` - literal comparisons are safe now that the loader
-/// relocates (see [`cmd_selftest`]), this just keeps the file on one
+/// relocates (see `selftest` (now `/bin/selftest`)), this just keeps the file on one
 /// idiom.
 fn parse_redirect(line: &str) -> RedirectParse<'_> {
     for token in line.split_whitespace() {
@@ -844,30 +1190,59 @@ fn write_all(path: &str, data: &[u8], start_offset: u64, truncate: bool) -> u64 
 /// *output* goes to `out` (so a redirect can capture it); command *error*
 /// messages go straight to the console via [`print_line`] regardless -
 /// see [`Output`]'s doc comment for the stdout/stderr reasoning.
+/// The one-line usage for a builtin that takes arguments, or `None` for one
+/// with no options (`help`/`exit`/`ps`/`unmount`/`shutdown`/`halt`) - those
+/// just run. Backs the `-?` help convention (`<builtin> -?`).
+fn builtin_usage(cmd: &str) -> Option<&'static str> {
+    Some(match cmd {
+        "cd" => "usage: cd [path]  (change directory; no argument = /)",
+        "bind" => "usage: bind <name> <path>  (bind a name into this shell's namespace)",
+        "mount" => "usage: mount | mount -a | mount <n> <path> | mount -r <host:port> <path> | mount -p/-c/-n <path>",
+        "erase" => "usage: erase disk  (zero the disk's leading sectors)",
+        "partition" => "usage: partition [fat32|exfat|ext2]  (write a single-partition MBR)",
+        "format" => "usage: format [fat32|exfat|ext2]  (lay a filesystem into the partition)",
+        "exec" => "usage: exec <path> [args...]  (spawn a program in the background)",
+        "cpu" => "usage: cpu <host:port> <command...>  (run a command on another machine)",
+        "kill" => "usage: kill <task number>  (destroy a task; see ps)",
+        "fg" => "usage: fg <task number>  (hand the keyboard to a task; 0 = give it back)",
+        "wait" => "usage: wait <task number>  (block until a task exits, then reap it)",
+        "set" | "export" => "usage: set NAME=VALUE  (set an environment variable)",
+        "unset" => "usage: unset NAME  (remove an environment variable)",
+        _ => return None,
+    })
+}
+
 fn dispatch_line(line: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize, env: &mut Env, out: &mut Output) {
     let mut words = line.split_whitespace();
     let Some(command) = words.next() else { return };
     let arg = words.next().unwrap_or("");
 
+    // `-?` prints a builtin's usage (the same convention `/bin` programs use).
+    if arg == "-?" {
+        if let Some(usage) = builtin_usage(command) {
+            out.put_line(usage);
+            return;
+        }
+    }
+
     match command {
-        "help" => out.put_line("commands: help, echo, uptime, clear, ls, cat, cd, pwd, bind, mkdir, rmdir, touch, rm, write, writeat, cp, mv, mount, mount -a/-r/-p/-c/-n, unmount, erase, partition, format, ping, resolve, fetch, dial, serve, cpu, exec, exit, ps, kill, fg, wait, send, recv, selftest, env, set, unset (a bare unknown command is looked up on $PATH; $VAR expands; append `> file`/`>> file` to redirect, or `| /path/to/program` to pipe)"),
+        "help" => out.put_line("builtins: help, exit, cd, bind, mount (-a/-r/-p/-c/-n), unmount, erase, partition, format, exec, cpu, ps, kill, fg, wait, shutdown, halt, env, set, unset. Everything else is a program in /bin (run `ls /bin`): echo, pwd, cat, ls, tree, write, cp, mv, grep, more, ping, send, recv, ... Add `-?` to a command for its usage, or `man <command>` for a full page. Also: $VAR expands; `> file`/`>> file` redirects, `| prog` pipes (`| more` to page)."),
         // echo, uptime, clear are externalized: they're /bin programs now
         // (found via PATH by the unknown-command arm), not builtins. See
         // "Standalone binaries, Stage 4".
         // ping, resolve, and fetch are externalized to /bin now (Stage 4) -
         // spawned programs that reach netd via the TO_NET capability the shell
         // delegates at spawn (see run_path_command / delegate_net).
-        "pwd" => out.put_line(cwd_str(cwd, *cwd_len)),
-        // ls, cat, mkdir, rmdir, touch, rm, cp, mv, and writeat are externalized
-        // to /bin now (Stage 4) - they run as spawned programs that inherit the
-        // shell's cwd via GET_CWD. Only `write` stays builtin (its content is
-        // the raw command line, bounded by the input buffer, so it never needs
-        // argv or the bulk path).
+        // pwd, ls, cat, mkdir, rmdir, touch, rm, cp, mv, writeat, and write are
+        // externalized to /bin - spawned programs that inherit the shell's cwd
+        // via GET_CWD. `cd`/`bind` stay because they mutate the shell's *own*
+        // per-task state (cwd, namespace), which a spawned program can't touch.
         "cd" => cmd_cd(arg, cwd, cwd_len),
         "bind" => cmd_bind(line, cwd, *cwd_len, out),
-        "write" => cmd_write(line, cwd, *cwd_len),
         "exec" => cmd_exec(line, cwd, *cwd_len, out),
         "exit" => cmd_exit(),
+        "shutdown" | "poweroff" => cmd_power(syscall_abi::POWER_OFF),
+        "halt" => cmd_power(syscall_abi::POWER_HALT),
         "ps" => cmd_ps(out),
         "kill" => cmd_kill(arg),
         "fg" => cmd_fg(arg),
@@ -878,9 +1253,6 @@ fn dispatch_line(line: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize, env:
         "erase" => cmd_erase(arg),
         "partition" => cmd_partition(arg),
         "format" => cmd_format(arg),
-        "send" => cmd_send(line),
-        "recv" => cmd_recv(),
-        "selftest" => cmd_selftest(out),
         "env" => cmd_env(env, out),
         "set" | "export" => cmd_set(arg, env),
         "unset" => cmd_unset(arg, env),
@@ -1381,11 +1753,19 @@ fn run_found_command(
         match spawn_path(candidate, argv, cwd, cwd_len, syscall_abi::CON_TASK) {
             Ok(slot) => {
                 delegate_net(slot);
-                // Foreground: wait for it (also reaps the slot). Ctrl+C
-                // interrupts the wait and leaves it running in the
-                // background (see `ps`).
-                if syscall(syscall_abi::WAIT, slot) == WAIT_INTERRUPTED {
-                    print_line("interrupted (the program keeps running - see ps)");
+                // Hand the foreground program the keyboard so it can read input
+                // (an editor, a REPL, a pager) - only the keyboard owner gets
+                // keystrokes, and the shell owns it by default. On the program's
+                // death (exit *or* Ctrl+C kill) ownership reverts to this shell
+                // automatically (kernel `revert_input_owner_if`). This is what
+                // lets an interactive command be an ordinary `/bin` program.
+                syscall(syscall_abi::FG, slot);
+                // Foreground: wait for it (also reaps the slot). A Ctrl+C now
+                // *terminates* the program (the kernel kills it and the wait
+                // returns TASK_KILLED_STATUS); print a newline so the next
+                // prompt starts clean.
+                if syscall(syscall_abi::WAIT, slot) == TASK_KILLED_STATUS {
+                    print_line("");
                 }
             }
             Err(0) => print_line("command path too long"),
@@ -1536,60 +1916,6 @@ fn self_task() -> u64 {
     syscall(syscall_abi::SELF, 0)
 }
 
-/// `write <file> <words...>` - joins every word after the filename with a
-/// single space (same join style as `echo`) and writes the result as the
-/// file's *entire* contents, replacing whatever was there. Takes `line`
-/// (not just the first argument, unlike every other command here) because
-/// it needs both the filename and the rest of the line as separate
-/// pieces - `run_line` already tokenized `arg` down to one word, which
-/// isn't enough here.
-fn cmd_write(line: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize) {
-    let mut words = line.split_whitespace();
-    words.next(); // "write" itself
-    let Some(filename) = words.next() else {
-        print_line("write: missing file argument");
-        return;
-    };
-
-    let mut content = [0u8; BUFFER_SIZE];
-    let mut len = 0usize;
-    let mut first = true;
-    for word in words {
-        if !first && len < content.len() {
-            content[len] = b' ';
-            len += 1;
-        }
-        for b in word.bytes() {
-            if len < content.len() {
-                content[len] = b;
-                len += 1;
-            }
-        }
-        first = false;
-    }
-
-    let mut path_buf = [0u8; PATH_SIZE];
-    let Some(path_len) = resolve_path(cwd_str(cwd, cwd_len), filename, &mut path_buf) else {
-        print_line("write: path too long");
-        return;
-    };
-    let Ok(path) = core::str::from_utf8(&path_buf[..path_len]) else {
-        print_line("write: path too long");
-        return;
-    };
-
-    // `write`'s content is bounded by the shell's input line
-    // (BUFFER_SIZE, 128) - always well under the inline 512-byte cap -
-    // so it stays on the cheap inline path rather than paying a GRANT
-    // per write. cp/redirect, which genuinely exceed 512, use the bulk
-    // path (fs_write_bulk).
-    match fs_write_file(path, &content[..len]) {
-        NO_FS => print_no_fs(),
-        code if code >= FS_ERR_MIN => print_fs_error("write", code),
-        _ => {}
-    }
-}
-
 /// Where a command's *output* goes: the console (the only choice before
 /// output redirection existed) or a capture buffer that a `>`/`>>`
 /// redirect writes to a file once the command returns. Passed down to
@@ -1644,7 +1970,7 @@ impl Output<'_> {
     }
 
     /// Hand-rolled decimal formatting. Historical note, kept because it
-    /// explains why [`cmd_selftest`] exists and why this still
+    /// explains why `selftest` (now `/bin/selftest`) exists and why this still
     /// hand-rolls rather than switching to `write!` itself: under the
     /// *old*, non-relocating flat-binary loader, `write!`/
     /// `core::fmt::Arguments` crashed here. That machinery builds its
@@ -1658,7 +1984,7 @@ impl Output<'_> {
     /// trying `write!` here first). **This is now fixed**, since
     /// `loader.rs` processes real `R_AARCH64_RELATIVE` relocations
     /// against the actual runtime load address (see CLAUDE.md's
-    /// "relocating loader" milestone and [`cmd_selftest`], which proves
+    /// "relocating loader" milestone and `selftest` (now `/bin/selftest`), which proves
     /// it) - but this is left as hand-rolled decimal formatting anyway,
     /// simply because it was already written, works, and doesn't need
     /// `core::fmt`'s machinery to do something this simple.
@@ -1696,53 +2022,6 @@ fn print_line(s: &str) {
     print_str(s);
     putc(CR);
     putc(LF);
-}
-
-/// A `core::fmt::Write` target over an [`Output`] sink - lets
-/// [`cmd_selftest`] use real `write!`/`format_args!` without pulling in
-/// `alloc`, and lets its output participate in redirection like any
-/// other command's.
-struct Writer<'a, 'b>(&'a mut Output<'b>);
-
-impl core::fmt::Write for Writer<'_, '_> {
-    fn write_str(&mut self, s: &str) -> core::fmt::Result {
-        self.0.put_str(s);
-        Ok(())
-    }
-}
-
-/// Exercises the exact two patterns that used to crash under the old,
-/// non-relocating flat-binary loader (see [`print_u64_decimal`]'s doc
-/// comment and [`resolve_path`]'s) - `write!`/`core::fmt::Write`, and a
-/// slice/string comparison against a literal - and confirms both now
-/// produce correct output. Kept as a real, permanent regression check
-/// rather than a throwaway test: this is the actual acceptance criterion
-/// for the whole relocating-loader milestone (CLAUDE.md) - these patterns
-/// need to be ordinary, safe Rust again, not something a program author
-/// has to keep avoiding by hand-discipline.
-fn cmd_selftest(out: &mut Output) {
-    let mut w = Writer(out);
-
-    // write!/core::fmt: n is computed at runtime (not a compile-time
-    // constant folded away), so this genuinely exercises the formatting
-    // machinery's argument dispatch, not just a literal string.
-    let n = 6 * 7;
-    let _ = write!(w, "write!/core::fmt: {n} (expect 42)\r\n");
-
-    // Slice-vs-literal comparison: `probe` is a real runtime value (not
-    // itself a literal), compared against a b"..." literal with `==` -
-    // the exact shape that crashed as `cwd_bytes != b"/"` in cmd_cd's old
-    // path-resolution code (see resolve_path's doc comment).
-    let probe: [u8; 1] = *b"/";
-    let slice_ok = probe.as_slice() == b"/";
-    let _ = write!(w, "slice-vs-literal comparison: {slice_ok} (expect true)\r\n");
-
-    // &str-vs-literal comparison: same shape as the old `component == ".."`
-    // crash - `word` is built at runtime, not itself a literal.
-    let word_bytes = *b"hi";
-    let word = core::str::from_utf8(&word_bytes).unwrap_or("");
-    let str_ok = word == "hi";
-    let _ = write!(w, "str-vs-literal comparison: {str_ok} (expect true)\r\n");
 }
 
 /// One filesystem-server round trip, v2 protocol (fully self-contained - see
@@ -2246,29 +2525,6 @@ fn fs_write_at(path: &str, offset: u64, data: &[u8]) -> u64 {
         [r.len as u64, offset, data.len() as u64, 0],
         &fsp[..r.len],
         &[],
-        &mut [],
-    )
-}
-
-/// The status contract every path-op fs helper shares: `0` on success,
-/// [`NO_FS`] if no filesystem is mounted, or a specific `FS_ERR_*` code for the
-/// real failure reason (already exists, invalid 8.3 name, parent missing, disk
-/// full, ... - see [`print_fs_error`]).
-///
-/// Creates or fully overwrites the file at `path` with `data`.
-fn fs_write_file(path: &str, data: &[u8]) -> u64 {
-    let mut fsp = [0u8; FSP_MAX];
-    let r = mount_resolve(path, &mut fsp);
-    if r.server == syscall_abi::CON_TASK {
-        con_write(data); // /dev/cons
-        return 0;
-    }
-    np_dispatch(
-        &r,
-        ninep_abi::NP_WRITE_FILE,
-        [r.len as u64, data.len() as u64, 0, 0],
-        &fsp[..r.len],
-        data,
         &mut [],
     )
 }
@@ -2997,69 +3253,6 @@ fn cmd_format(arg: &str) {
     }
 }
 
-/// `send <task> <words...>` - joins the words like `write` does and
-/// sends them as one IPC message (`MSG_SEND`) to the given task.
-fn cmd_send(line: &str) {
-    let mut words = line.split_whitespace();
-    words.next(); // "send" itself
-    let Some(task_arg) = words.next() else {
-        print_line("send: usage: send <task number> <words...>");
-        return;
-    };
-    let Some(dest) = parse_u64(task_arg) else {
-        print_line("send: usage: send <task number> <words...>");
-        return;
-    };
-
-    let mut msg = [0u8; 64];
-    let mut len = 0usize;
-    let mut first = true;
-    for word in words {
-        if !first && len < msg.len() {
-            msg[len] = b' ';
-            len += 1;
-        }
-        for b in word.bytes() {
-            if len < msg.len() {
-                msg[len] = b;
-                len += 1;
-            }
-        }
-        first = false;
-    }
-    if len == 0 {
-        print_line("send: usage: send <task number> <words...>");
-        return;
-    }
-
-    match syscall4(syscall_abi::MSG_SEND, dest, msg.as_ptr() as u64, len as u64, 0) {
-        code if code >= FS_ERR_MIN => print_fs_error("send", code),
-        _ => {}
-    }
-}
-
-/// `recv` - blocks until a message arrives (`MSG_RECV`) and prints it
-/// as `task N: <message>`. Ctrl+C interrupts, same as `wait`.
-fn cmd_recv() {
-    let mut buf = [0u8; syscall_abi::MSG_MAX_LEN as usize];
-    match syscall4(syscall_abi::MSG_RECV, buf.as_mut_ptr() as u64, buf.len() as u64, 0, 0) {
-        RECV_INTERRUPTED => print_line("recv: interrupted"),
-        code if code >= FS_ERR_MIN => print_fs_error("recv", code),
-        packed => {
-            let sender = packed >> 32;
-            let len = (packed & 0xffff_ffff) as usize;
-            print_str("task ");
-            print_u64(sender);
-            print_str(": ");
-            if let Ok(text) = core::str::from_utf8(&buf[..len.min(buf.len())]) {
-                print_line(text);
-            } else {
-                print_line("(non-UTF-8 message)");
-            }
-        }
-    }
-}
-
 /// `exit` builtin. This boot-loaded shell is task 0, which the kernel
 /// refuses to let exit (it's the one task that ever receives keyboard
 /// input - if it died, nothing could type again this boot), so for this
@@ -3072,6 +3265,24 @@ fn cmd_exit() {
         EXIT_DENIED => print_line("exit: refused - the boot shell can't exit (nothing would own the keyboard)"),
         _ => print_line("exit: unexpected return"),
     }
+}
+
+/// `shutdown`/`poweroff` (mode `POWER_OFF`) and `halt` (mode `POWER_HALT`).
+/// A **builtin**, not a `/bin` program, deliberately: you must be able to
+/// power the machine down even with no disk mounted (exactly when `/bin`
+/// can't be read), the same reasoning as `erase`/`partition`/`format`. The
+/// `POWER` syscall doesn't return on success (the kernel powers off or
+/// halts), so reaching the line after it means an unrecognized mode.
+fn cmd_power(mode: u64) {
+    print_line(if mode == syscall_abi::POWER_HALT {
+        "halting..."
+    } else {
+        "shutting down..."
+    });
+    syscall(syscall_abi::POWER, mode);
+    // Only reached if the kernel rejected the mode (it doesn't return
+    // otherwise) - shouldn't happen from here, but report rather than hang.
+    print_line("power: not supported");
 }
 
 /// The 1-argument syscalls this program used before phase 3c - a thin

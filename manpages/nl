@@ -1,0 +1,12 @@
+NAME
+    nl - number lines
+
+SYNOPSIS
+    <input> | nl
+
+DESCRIPTION
+    Reads standard input and writes each line prefixed with a right-aligned
+    line number and a tab (cat -n style).
+
+SEE ALSO
+    wc, cat

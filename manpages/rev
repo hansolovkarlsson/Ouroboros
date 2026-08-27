@@ -1,0 +1,12 @@
+NAME
+    rev - reverse each line
+
+SYNOPSIS
+    <input> | rev
+
+DESCRIPTION
+    Reads standard input and writes each line with its bytes reversed, keeping
+    the trailing newline last.
+
+SEE ALSO
+    upper

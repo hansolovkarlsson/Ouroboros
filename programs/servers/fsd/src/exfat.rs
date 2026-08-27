@@ -642,6 +642,17 @@ impl Fs {
         })
     }
 
+    /// Metadata for one path: size and directory flag. Timestamps aren't yet
+    /// decoded from the exFAT File entry, so `time` is `None`. Backs `ls -l`.
+    pub fn stat(&mut self, path: &str) -> Result<crate::vfs::Stat, Error> {
+        let e = self.find(path)?;
+        Ok(crate::vfs::Stat {
+            size: e.size,
+            is_dir: e.is_dir,
+            time: None,
+        })
+    }
+
     /// Reads a file into `buf` (up to `buf.len()` bytes), returning its real
     /// size (saturated to `u32`), same truncation-detection contract as
     /// `fat32::Fs::read_file`.

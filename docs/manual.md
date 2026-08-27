@@ -147,24 +147,38 @@ $ set PATH=/bin ; env           # a real environment; $VAR expansion
 
 ### Commands come from two places
 
-- **Builtins** run inside the shell itself:
-  `help  cd  pwd  bind  write  mount  unmount  erase  partition  format
-  exec  exit  ps  kill  fg  wait  send  recv  selftest  env  set  unset  cpu`.
-  Job control (`ps`/`kill`/`fg`/`wait`), the disk-management trio
+- **Builtins** run inside the shell itself — a deliberately minimal set:
+  `help  cd  bind  mount  unmount  erase  partition  format
+  exec  exit  shutdown  halt  ps  kill  fg  wait  env  set  unset  cpu`.
+  Job control (`ps`/`kill`/`fg`/`wait`/`exec`), the disk-management trio
   (`erase`/`partition`/`format` — they must run when *nothing* is mounted,
-  exactly when `/bin` can't be read), the mount/namespace commands, and
-  `cpu` (remote execution) are builtins for reasons the cluster section and
-  [`shell-commands.md`](shell-commands.md) explain.
+  exactly when `/bin` can't be read), power control (`shutdown`/`halt` — same
+  no-disk reasoning), the environment (`env`/`set`/`unset`) and
+  cwd/namespace (`cd`/`bind`) that *are* the shell's state, the mount commands,
+  and `cpu` (remote execution) are builtins for reasons the cluster section and
+  [`shell-commands.md`](shell-commands.md) explain. Everything else lives in
+  `/bin`.
 
 - **`/bin` programs** are real standalone binaries loaded from disk, found
   on `$PATH` (default `/bin`), spawned with arguments, and reaped:
-  `ls  cat  cp  mv  mkdir  rmdir  touch  rm  writeat` (files),
-  `echo  uptime  clear  args` (basics),
+  `ls  tree  cat  cp  mv  mkdir  rmdir  touch  rm  write  writeat  more` (files;
+  `more`/`less` is the pager),
+  `echo  pwd  uptime  clear  args  send  recv  selftest  man` (basics/diagnostics),
   `grep  wc  head  tail  nl  rev  uniq  upper` (pipeline filters),
   `ping  resolve  fetch` (network). You type them the same way (`ls`,
   `cat x`); the shell finds `/bin/LS` on PATH (FAT is case-insensitive).
   A `/bin` command resolves relative paths against the shell's working
   directory, delivered to it at spawn.
+
+**Usage help:** append `-?` to any command that takes arguments — builtin or
+`/bin` — for a one-line usage reminder (`ls -?`, `mount -?`, `dial -?`). For a
+full manual page, `man <command>` (e.g. `man ls`, `man cpu`); pipe a long one to
+the pager, `man grep | more`. Pages are plain-text files under `/man` on disk.
+
+**Wildcards & completion:** `*` and `?` in a command line expand against the
+filesystem (`echo *.txt`, `cat /bin/L*`); a pattern matching nothing is left
+literal. Press **Tab** to complete the last word as a filename — one match fills
+it in, several extend to the common prefix and then list.
 
 **Output redirection & pipelines** work across both:
 `echo hi > f.txt` (replace), `>> f.txt` (append), and `a | b | c`

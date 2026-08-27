@@ -1,0 +1,13 @@
+NAME
+    fg - hand the keyboard to a task
+
+SYNOPSIS
+    fg <task number>
+
+DESCRIPTION
+    Gives keyboard ownership to the given task; 0 gives it back to the shell.
+    (The shell already foregrounds each command it runs, so this is mainly for
+    a background task started with exec.)
+
+SEE ALSO
+    exec, ps, wait

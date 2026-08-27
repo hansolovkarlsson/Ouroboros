@@ -1,0 +1,17 @@
+NAME
+    cat - print a file
+
+SYNOPSIS
+    cat <file>
+
+DESCRIPTION
+    Prints the contents of <file> to standard output. Streams the file in
+    chunks, so a file of any size prints without being held whole in memory.
+    Relative paths resolve against the current directory.
+
+EXAMPLES
+    cat notes.txt
+    cat notes.txt | grep TODO
+
+SEE ALSO
+    more, ls, write

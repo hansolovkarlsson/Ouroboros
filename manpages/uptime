@@ -1,0 +1,8 @@
+NAME
+    uptime - time since boot
+
+SYNOPSIS
+    uptime
+
+DESCRIPTION
+    Prints how long the machine has been running.

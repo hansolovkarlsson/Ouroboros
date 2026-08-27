@@ -133,12 +133,29 @@ checksum = "0ceec5bc11778974d1bcb055b18002eba7f4b3518b6a0081b3af5f21666da9ad"
 name = "ls"
 version = "0.1.0"
 dependencies = [
+ "ninep-abi",
+ "syscall-abi",
+ "ulib",
+]
+
+[[package]]
+name = "man"
+version = "0.1.0"
+dependencies = [
  "syscall-abi",
  "ulib",
 ]
 
 [[package]]
 name = "mkdir"
+version = "0.1.0"
+dependencies = [
+ "syscall-abi",
+ "ulib",
+]
+
+[[package]]
+name = "more"
 version = "0.1.0"
 dependencies = [
  "syscall-abi",
@@ -229,12 +246,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "pwd"
+version = "0.1.0"
+dependencies = [
+ "syscall-abi",
+ "ulib",
+]
+
+[[package]]
 name = "quote"
 version = "1.0.47"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1fbf4db142a473a8d80c26bbf18454ed458bf8d26c8219c331daecfdbd079001"
 dependencies = [
  "proc-macro2",
+]
+
+[[package]]
+name = "readkey"
+version = "0.1.0"
+dependencies = [
+ "syscall-abi",
+ "ulib",
+]
+
+[[package]]
+name = "recv"
+version = "0.1.0"
+dependencies = [
+ "syscall-abi",
+ "ulib",
 ]
 
 [[package]]
@@ -263,6 +304,22 @@ dependencies = [
 
 [[package]]
 name = "rmdir"
+version = "0.1.0"
+dependencies = [
+ "syscall-abi",
+ "ulib",
+]
+
+[[package]]
+name = "selftest"
+version = "0.1.0"
+dependencies = [
+ "syscall-abi",
+ "ulib",
+]
+
+[[package]]
+name = "send"
 version = "0.1.0"
 dependencies = [
  "syscall-abi",
@@ -322,6 +379,14 @@ dependencies = [
 
 [[package]]
 name = "touch"
+version = "0.1.0"
+dependencies = [
+ "syscall-abi",
+ "ulib",
+]
+
+[[package]]
+name = "tree"
 version = "0.1.0"
 dependencies = [
  "syscall-abi",
@@ -420,6 +485,14 @@ dependencies = [
 
 [[package]]
 name = "wc"
+version = "0.1.0"
+dependencies = [
+ "syscall-abi",
+ "ulib",
+]
+
+[[package]]
+name = "write"
 version = "0.1.0"
 dependencies = [
  "syscall-abi",
