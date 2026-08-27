@@ -850,10 +850,40 @@ fn write_all(path: &str, data: &[u8], start_offset: u64, truncate: bool) -> u64 
 /// *output* goes to `out` (so a redirect can capture it); command *error*
 /// messages go straight to the console via [`print_line`] regardless -
 /// see [`Output`]'s doc comment for the stdout/stderr reasoning.
+/// The one-line usage for a builtin that takes arguments, or `None` for one
+/// with no options (`help`/`exit`/`ps`/`unmount`/`shutdown`/`halt`) - those
+/// just run. Backs the `-?` help convention (`<builtin> -?`).
+fn builtin_usage(cmd: &str) -> Option<&'static str> {
+    Some(match cmd {
+        "cd" => "usage: cd [path]  (change directory; no argument = /)",
+        "bind" => "usage: bind <name> <path>  (bind a name into this shell's namespace)",
+        "mount" => "usage: mount | mount -a | mount <n> <path> | mount -r <host:port> <path> | mount -p/-c/-n <path>",
+        "erase" => "usage: erase disk  (zero the disk's leading sectors)",
+        "partition" => "usage: partition [fat32|exfat|ext2]  (write a single-partition MBR)",
+        "format" => "usage: format [fat32|exfat|ext2]  (lay a filesystem into the partition)",
+        "exec" => "usage: exec <path> [args...]  (spawn a program in the background)",
+        "cpu" => "usage: cpu <host:port> <command...>  (run a command on another machine)",
+        "kill" => "usage: kill <task number>  (destroy a task; see ps)",
+        "fg" => "usage: fg <task number>  (hand the keyboard to a task; 0 = give it back)",
+        "wait" => "usage: wait <task number>  (block until a task exits, then reap it)",
+        "set" | "export" => "usage: set NAME=VALUE  (set an environment variable)",
+        "unset" => "usage: unset NAME  (remove an environment variable)",
+        _ => return None,
+    })
+}
+
 fn dispatch_line(line: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize, env: &mut Env, out: &mut Output) {
     let mut words = line.split_whitespace();
     let Some(command) = words.next() else { return };
     let arg = words.next().unwrap_or("");
+
+    // `-?` prints a builtin's usage (the same convention `/bin` programs use).
+    if arg == "-?" {
+        if let Some(usage) = builtin_usage(command) {
+            out.put_line(usage);
+            return;
+        }
+    }
 
     match command {
         "help" => out.put_line("builtins: help, exit, cd, bind, mount (-a/-r/-p/-c/-n), unmount, erase, partition, format, exec, cpu, ps, kill, fg, wait, shutdown, halt, env, set, unset. Everything else is a program in /bin (run `ls /bin`): echo, pwd, cat, ls, tree, write, cp, mv, grep, more, ping, send, recv, ... Add `-?` to a command for its usage. Also: $VAR expands; `> file`/`>> file` redirects, `| prog` pipes (`| more` to page)."),

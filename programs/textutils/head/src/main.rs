@@ -13,6 +13,7 @@ const DEFAULT_LINES: u64 = 10;
 #[no_mangle]
 #[link_section = ".text.start"]
 pub extern "C" fn _start() -> ! {
+    ulib::usage_if_requested(b"usage: <input> | head [N]  (first N stdin lines, default 10)\r\n");
     let target = ulib::stdout_target();
 
     let mut argbuf = [0u8; 24];

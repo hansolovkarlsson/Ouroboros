@@ -58,6 +58,33 @@ pub fn syscall4(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64) -> u64 
     ret
 }
 
+/// True if any argument is `-?` - the uniform usage-help flag. A program checks
+/// this (usually via [`usage_if_requested`]) and prints its one-line usage.
+pub fn help_requested() -> bool {
+    let n = argc();
+    let mut i = 1u64;
+    let mut buf = [0u8; 4];
+    while i < n {
+        if let Some(l) = arg(i, &mut buf) {
+            if &buf[..l] == b"-?" {
+                return true;
+            }
+        }
+        i += 1;
+    }
+    false
+}
+
+/// If any argument is `-?`, print `usage` to the console and `exit(0)`. Call it
+/// at the top of `_start` - the uniform "add `-?` for usage" convention across
+/// `/bin` programs. Does nothing (returns) when no `-?` is present.
+pub fn usage_if_requested(usage: &[u8]) {
+    if help_requested() {
+        con_write(usage);
+        exit(0);
+    }
+}
+
 /// The number of arguments this program was spawned with (`argv[0]` is the
 /// program name).
 pub fn argc() -> u64 {

@@ -19,6 +19,7 @@ const PAGE_ROWS: usize = 23;
 #[no_mangle]
 #[link_section = ".text.start"]
 pub extern "C" fn _start() -> ! {
+    ulib::usage_if_requested(b"usage: more <file>   or   <command> | more   (page a screen at a time)\r\n");
     let heap = ulib::heap();
     let mut total = 0usize;
 

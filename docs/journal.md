@@ -7,6 +7,19 @@ for the forward plan see [`roadmap.md`](roadmap.md).
 
 ---
 
+## 2026-08-27 (cont.) — `-?` usage help everywhere
+
+A small usability sweep: every command that takes arguments now answers `-?` with
+a one-line usage. The trick to keeping it from being tedious was a single ulib
+helper, `usage_if_requested(b"usage: ...")`, that each `/bin` program calls as its
+first line — one line per program — and a small `builtin_usage` table the shell
+consults before dispatching a builtin. The judgment calls were about what to
+*leave alone*: `echo` and `args` print their arguments, so intercepting `-?` would
+be wrong, and the pure filters (`wc`/`rev`/`uniq`/…) have no options to describe.
+Everything else — the file commands, the net commands, the filters that take an
+argument, the arg-taking builtins — got it. Nice to type `mount -?` or `dial -?`
+and get a reminder instead of guessing.
+
 ## 2026-08-27 (cont.) — shrinking the shell: more/less/send/recv/selftest to /bin
 
 With the keyboard arc in place, the obvious follow-up: pull everything out of the

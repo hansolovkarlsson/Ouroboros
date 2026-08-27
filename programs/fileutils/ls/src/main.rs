@@ -34,6 +34,7 @@ struct Entry {
 #[no_mangle]
 #[link_section = ".text.start"]
 pub extern "C" fn _start() -> ! {
+    ulib::usage_if_requested(b"usage: ls [-l] [-a] [path]  (-l long form, -a show dotfiles)\r\n");
     let target = ulib::stdout_target();
 
     let mut cwdbuf = [0u8; ulib::PATH_MAX];

@@ -11,6 +11,7 @@ const LF: u8 = b'\n';
 #[no_mangle]
 #[link_section = ".text.start"]
 pub extern "C" fn _start() -> ! {
+    ulib::usage_if_requested(b"usage: cat <file>  (print a file's contents)\r\n");
     let target = ulib::stdout_target();
 
     let mut argbuf = [0u8; ulib::PATH_MAX];

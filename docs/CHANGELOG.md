@@ -7,6 +7,25 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/`; 
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## `-?` usage help on every command that takes arguments
+
+A uniform convention: append `-?` to any command that takes arguments — builtin
+or `/bin` — and it prints a one-line usage instead of running. `ls -?`, `grep -?`,
+`mount -?`, `kill -?`, and so on.
+
+For `/bin` programs it's `ulib::usage_if_requested(b"usage: ...")` as the first
+line of `_start` (a new ulib helper that scans argv for `-?` and, if found,
+prints the usage and exits) — added to every arg-taking program (`ls`, `cat`,
+`mkdir`/`rmdir`/`touch`/`rm`, `cp`/`mv`, `writeat`, `tree`, `write`, `more`,
+`grep`/`head`/`tail`, `ping`/`resolve`/`fetch`/`dial`/`serve`, `send`/`recv`).
+For builtins it's a `builtin_usage(cmd)` table consulted in the shell's dispatch
+before the command runs, covering the ones with arguments (`cd`, `bind`, `mount`,
+`erase`/`partition`/`format`, `exec`, `cpu`, `kill`/`fg`/`wait`, `set`/`unset`);
+option-less builtins (`help`/`exit`/`ps`/`unmount`/`shutdown`/`halt`) just run.
+The argument-less filters (`wc`/`nl`/`rev`/`uniq`/`upper`) and `echo`/`args`
+(which print their arguments) are deliberately left alone. **Verified** in QEMU
+across both kinds, including `-?` mixed with other flags (`ls -l -?`).
+
 ## A minimal shell: `more`/`less`, `send`, `recv`, `selftest` move to `/bin`
 
 Following the keyboard arc, the shell shed the commands that didn't need to be

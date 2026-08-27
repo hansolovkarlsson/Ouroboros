@@ -17,6 +17,7 @@ const MAX_CONTENT: usize = 512;
 #[no_mangle]
 #[link_section = ".text.start"]
 pub extern "C" fn _start() -> ! {
+    ulib::usage_if_requested(b"usage: write <file> [words...]  (write space-joined words to a file)\r\n");
     // argv[1] = the file; argv[2..] = the words to write.
     let mut namebuf = [0u8; ulib::PATH_MAX];
     let Some(name_len) = ulib::arg(1, &mut namebuf) else {

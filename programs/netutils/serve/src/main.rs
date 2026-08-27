@@ -66,6 +66,7 @@ fn read_file(path: &str, buf: &mut [u8]) -> Option<usize> {
 #[no_mangle]
 #[link_section = ".text.start"]
 pub extern "C" fn _start() -> ! {
+    ulib::usage_if_requested(b"usage: serve <base> <port> [response...]  (accept TCP on another machine's NIC)\r\n");
     let target = stdout_target();
     if argc() < 3 {
         fail(b"serve: usage: serve <base> <port> [response...]\r\n", target);

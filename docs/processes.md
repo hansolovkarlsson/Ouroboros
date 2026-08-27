@@ -267,7 +267,10 @@ minimal working example. Ctrl+C **terminates** a foreground program (the kernel
 kills it and returns to the shell) — it's not delivered as a catchable signal
 yet. A *background*/piped program never owns the keyboard, so `read_char` there
 blocks forever; a pipeline consumer reads its stdin as messages (below), not from
-the keyboard. **Output goes to the console
+the keyboard. **Convention:** a program that takes arguments should call
+`ulib::usage_if_requested(b"usage: ...")` as the first line of `_start` - it
+prints the usage and exits when invoked with `-?`, the uniform help flag every
+arg-taking command (builtin and `/bin`) honors. **Output goes to the console
 server, not straight to the kernel:** a program builds its text into a
 `DSPOP_WRITE` message and sends it to the console server (task 3,
 `CON_TASK`) via `msg_call`, falling back to `putc` (`PUTC`, one raw byte)

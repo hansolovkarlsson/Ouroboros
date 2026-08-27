@@ -170,6 +170,9 @@ $ set PATH=/bin ; env           # a real environment; $VAR expansion
   A `/bin` command resolves relative paths against the shell's working
   directory, delivered to it at spawn.
 
+**Usage help:** append `-?` to any command that takes arguments — builtin or
+`/bin` — for a one-line usage reminder (`ls -?`, `mount -?`, `dial -?`).
+
 **Output redirection & pipelines** work across both:
 `echo hi > f.txt` (replace), `>> f.txt` (append), and `a | b | c`
 (each stage a separate program; the filters

@@ -50,6 +50,7 @@ struct Counts {
 #[no_mangle]
 #[link_section = ".text.start"]
 pub extern "C" fn _start() -> ! {
+    ulib::usage_if_requested(b"usage: tree [path]  (recursive directory listing, sorted)\r\n");
     let target = ulib::stdout_target();
 
     let mut cwdbuf = [0u8; ulib::PATH_MAX];

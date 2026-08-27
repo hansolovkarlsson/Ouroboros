@@ -19,6 +19,7 @@ fn fail(msg: &[u8], target: u64) -> ! {
 #[no_mangle]
 #[link_section = ".text.start"]
 pub extern "C" fn _start() -> ! {
+    ulib::usage_if_requested(b"usage: resolve <hostname>  (DNS-resolve a name to an IPv4 address)\r\n");
     let target = ulib::stdout_target();
 
     let mut argbuf = [0u8; ulib::PATH_MAX];

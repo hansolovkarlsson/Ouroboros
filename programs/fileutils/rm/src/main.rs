@@ -9,6 +9,7 @@
 #[no_mangle]
 #[link_section = ".text.start"]
 pub extern "C" fn _start() -> ! {
+    ulib::usage_if_requested(b"usage: rm <file>  (remove a file)\r\n");
     let mut argbuf = [0u8; ulib::PATH_MAX];
     let arg = match ulib::arg(1, &mut argbuf) {
         Some(len) => core::str::from_utf8(&argbuf[..len]).unwrap_or(""),

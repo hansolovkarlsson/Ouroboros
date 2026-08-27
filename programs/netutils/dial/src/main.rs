@@ -70,6 +70,7 @@ fn read_file(path: &str, buf: &mut [u8]) -> Option<usize> {
 #[no_mangle]
 #[link_section = ".text.start"]
 pub extern "C" fn _start() -> ! {
+    ulib::usage_if_requested(b"usage: dial <base> <ip> <port> [request...]  (TCP-connect out of another machine's NIC)\r\n");
     let target = stdout_target();
     if argc() < 4 {
         fail(b"dial: usage: dial <base> <ip> <port> [request...]\r\n", target);
