@@ -1,0 +1,12 @@
+NAME
+    env - list environment variables
+
+SYNOPSIS
+    env
+
+DESCRIPTION
+    Prints every shell variable as NAME=VALUE. PATH is preset to /bin and
+    drives command lookup.
+
+SEE ALSO
+    set, unset

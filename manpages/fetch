@@ -1,0 +1,12 @@
+NAME
+    fetch - HTTP GET a URL
+
+SYNOPSIS
+    fetch <url>
+
+DESCRIPTION
+    Performs an HTTP GET of <url> over TCP and prints the response. A minimal
+    client (no HTTPS).
+
+SEE ALSO
+    resolve, serve

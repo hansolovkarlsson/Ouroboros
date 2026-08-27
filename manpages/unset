@@ -1,0 +1,11 @@
+NAME
+    unset - remove an environment variable
+
+SYNOPSIS
+    unset NAME
+
+DESCRIPTION
+    Removes the shell variable NAME.
+
+SEE ALSO
+    env, set

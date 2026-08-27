@@ -1,0 +1,17 @@
+NAME
+    write - write words to a file
+
+SYNOPSIS
+    write <file> [words...]
+
+DESCRIPTION
+    Creates or overwrites <file> with the given words joined by single spaces
+    (no trailing newline). With no words, truncates <file> to empty. For exact
+    bytes or large content, use writeat or output redirection (> file).
+
+EXAMPLES
+    write hello.txt hello world
+    ls -l > listing.txt
+
+SEE ALSO
+    writeat, cat, touch

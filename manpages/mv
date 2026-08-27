@@ -1,0 +1,12 @@
+NAME
+    mv - rename or move a file
+
+SYNOPSIS
+    mv <src> <dst>
+
+DESCRIPTION
+    Renames <src> to <dst>, moving it between directories if needed. Paths
+    resolve against the current directory.
+
+SEE ALSO
+    cp, rm

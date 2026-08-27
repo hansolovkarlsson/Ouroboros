@@ -1,0 +1,12 @@
+NAME
+    uniq - collapse adjacent duplicate lines
+
+SYNOPSIS
+    <input> | uniq
+
+DESCRIPTION
+    Reads standard input and writes it with runs of adjacent identical lines
+    collapsed to one. Only neighbours are compared (pair with a future sort).
+
+SEE ALSO
+    grep, wc

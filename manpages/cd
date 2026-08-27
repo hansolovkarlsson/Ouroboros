@@ -1,0 +1,13 @@
+NAME
+    cd - change the working directory
+
+SYNOPSIS
+    cd [path]
+
+DESCRIPTION
+    Changes the shell's current directory to <path> (default: /). A builtin,
+    because it changes the shell's own state. Validates that the target exists
+    and is a directory.
+
+SEE ALSO
+    pwd, ls

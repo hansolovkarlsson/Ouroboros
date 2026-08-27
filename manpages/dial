@@ -1,0 +1,13 @@
+NAME
+    dial - open a TCP connection out of another machine's NIC
+
+SYNOPSIS
+    dial <base> <ip> <port> [request...]
+
+DESCRIPTION
+    Connects to <ip>:<port> through the network interface of the machine
+    remote-mounted at <base>, optionally sending [request] and printing the
+    reply. The Plan 9 /net/tcp connection model. Cluster feature.
+
+SEE ALSO
+    serve, fetch, mount

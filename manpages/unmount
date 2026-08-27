@@ -1,0 +1,12 @@
+NAME
+    unmount - unmount the filesystem
+
+SYNOPSIS
+    unmount
+
+DESCRIPTION
+    Unmounts the currently mounted filesystem so the device can be removed or
+    re-prepared (erase/partition/format).
+
+SEE ALSO
+    mount, erase

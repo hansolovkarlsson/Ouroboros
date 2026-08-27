@@ -1,0 +1,12 @@
+NAME
+    tail - last lines of input
+
+SYNOPSIS
+    <input> | tail [N]
+
+DESCRIPTION
+    Passes through the last N lines of standard input (default 10). Keeps the
+    newest lines in a fixed ring (cap 64) and flushes at end-of-input.
+
+SEE ALSO
+    head, more

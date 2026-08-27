@@ -7,6 +7,23 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/`; 
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## `man` - manual pages
+
+A `man <command>` that prints a full manual page, complementing the one-line
+`-?` usage. Pages are **plain-text files** under `/man/` on disk (e.g.
+`/man/ls`), read and printed by `/bin/man` (`\n`→`\r\n` for the console; pipe a
+long page to `more`). The source pages live in `manpages/` and the build stages
+them to `/man` on the ESP. Nearly 60 pages cover the `/bin` commands, the
+filters, the net commands, and the builtins, each with the traditional
+`NAME`/`SYNOPSIS`/`DESCRIPTION`/`OPTIONS`/`EXAMPLES`/`SEE ALSO` sections.
+
+**No styling:** the framebuffer console (`cond`) understands only a couple of
+ANSI sequences (clear/home) and silently drops the rest, so bold and colour
+would render as nothing — the pages are plain text with UPPERCASE section
+headers instead. **Verified** in QEMU: `man ls` (full page), `man partition`
+(a >8-char name, read via FAT long-filename support), `man nope` (a clean "no
+manual entry"), and `man` (usage).
+
 ## `-?` usage help on every command that takes arguments
 
 A uniform convention: append `-?` to any command that takes arguments — builtin

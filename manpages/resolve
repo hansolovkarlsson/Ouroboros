@@ -1,0 +1,11 @@
+NAME
+    resolve - DNS-resolve a hostname
+
+SYNOPSIS
+    resolve <hostname>
+
+DESCRIPTION
+    Looks up <hostname> over DNS and prints its IPv4 address.
+
+SEE ALSO
+    ping, fetch

@@ -7,6 +7,23 @@ for the forward plan see [`roadmap.md`](roadmap.md).
 
 ---
 
+## 2026-08-27 (cont.) — man pages
+
+`man <command>`. The first question was how much formatting the console can do,
+and the honest answer settled the design: `cond`'s ANSI parser handles clear and
+home and *silently drops everything else*, including SGR — so bold and colour
+would render as nothing on the framebuffer (they'd work over the QEMU serial
+line, but that's not the real target). So: plain text, with UPPERCASE section
+headers doing the visual structure the way real man pages always have. The
+implementation is deliberately boring — pages are plain files under `/man/`, and
+`man` is basically `cat` with a `/man/` prefix, a friendly "no manual entry"
+message, and `\n`→`\r\n` translation for the console. Keeping the pages as files
+(not baked into the binary) means adding one is just dropping a file in
+`manpages/`. A nice incidental check: `man partition` exercises FAT long
+filenames (9 chars, past 8.3), and it read back fine. Wrote pages for the whole
+command set — the file commands, the filters, the net commands, the builtins —
+so there's a real reference now, not just terse `-?` lines.
+
 ## 2026-08-27 (cont.) — `-?` usage help everywhere
 
 A small usability sweep: every command that takes arguments now answers `-?` with

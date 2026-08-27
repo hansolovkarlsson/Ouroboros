@@ -1,0 +1,12 @@
+NAME
+    pwd - print the working directory
+
+SYNOPSIS
+    pwd
+
+DESCRIPTION
+    Prints the shell's current working directory (delivered to the program at
+    spawn).
+
+SEE ALSO
+    cd, ls

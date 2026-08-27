@@ -163,7 +163,7 @@ $ set PATH=/bin ; env           # a real environment; $VAR expansion
   on `$PATH` (default `/bin`), spawned with arguments, and reaped:
   `ls  tree  cat  cp  mv  mkdir  rmdir  touch  rm  write  writeat  more` (files;
   `more`/`less` is the pager),
-  `echo  pwd  uptime  clear  args  send  recv  selftest` (basics/diagnostics),
+  `echo  pwd  uptime  clear  args  send  recv  selftest  man` (basics/diagnostics),
   `grep  wc  head  tail  nl  rev  uniq  upper` (pipeline filters),
   `ping  resolve  fetch` (network). You type them the same way (`ls`,
   `cat x`); the shell finds `/bin/LS` on PATH (FAT is case-insensitive).
@@ -171,7 +171,9 @@ $ set PATH=/bin ; env           # a real environment; $VAR expansion
   directory, delivered to it at spawn.
 
 **Usage help:** append `-?` to any command that takes arguments — builtin or
-`/bin` — for a one-line usage reminder (`ls -?`, `mount -?`, `dial -?`).
+`/bin` — for a one-line usage reminder (`ls -?`, `mount -?`, `dial -?`). For a
+full manual page, `man <command>` (e.g. `man ls`, `man cpu`); pipe a long one to
+the pager, `man grep | more`. Pages are plain-text files under `/man` on disk.
 
 **Output redirection & pipelines** work across both:
 `echo hi > f.txt` (replace), `>> f.txt` (append), and `a | b | c`

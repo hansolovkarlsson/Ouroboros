@@ -1,0 +1,13 @@
+NAME
+    ps - list tasks
+
+SYNOPSIS
+    ps
+
+DESCRIPTION
+    Lists each scheduler slot: its number, state (runnable, blocked, exited, or
+    unused), and name. A zombie shows its exit code. Boot tasks are named
+    shell/idle/fsd/cond/netd; spawned tasks show their argv[0].
+
+SEE ALSO
+    kill, fg, wait

@@ -1,0 +1,19 @@
+NAME
+    ls - list directory contents
+
+SYNOPSIS
+    ls [-l] [-a] [path]
+
+DESCRIPTION
+    Lists the entries in <path> (default: the current directory), sorted by
+    name (case-insensitive). Files print plain; directories with a trailing /.
+    The default layout is multi-column; dotfiles are hidden.
+
+OPTIONS
+    -l    Long form, one entry per line: type (d/-), size, and modified
+          YYYY-MM-DD HH:MM. The time is shown where the filesystem records
+          one (FAT32 does; others show a dash).
+    -a    Include dotfiles, and the . and .. entries.
+
+SEE ALSO
+    tree, cat, stat

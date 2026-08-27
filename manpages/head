@@ -1,0 +1,12 @@
+NAME
+    head - first lines of input
+
+SYNOPSIS
+    <input> | head [N]
+
+DESCRIPTION
+    Passes through the first N lines of standard input (default 10), then
+    stops. A pipeline filter.
+
+SEE ALSO
+    tail, more

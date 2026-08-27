@@ -1,0 +1,22 @@
+NAME
+    more, less - page output a screen at a time
+
+SYNOPSIS
+    more <file>
+    <command> | more
+
+DESCRIPTION
+    Displays a file (or piped input) one screen at a time. `less` is the same
+    program. At each --More-- pause:
+        space   next screen
+        Enter   one more line
+        q       quit
+    Ctrl+C aborts. Content is buffered, so a very large source is paged up to
+    the buffer size and then truncated.
+
+EXAMPLES
+    more manual.txt
+    ls -l /bin | more
+
+SEE ALSO
+    cat

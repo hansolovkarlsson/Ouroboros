@@ -1,0 +1,12 @@
+NAME
+    set - set an environment variable
+
+SYNOPSIS
+    set NAME=VALUE
+
+DESCRIPTION
+    Sets the shell variable NAME to VALUE. References like $NAME expand on later
+    command lines. A builtin (the environment is shell state).
+
+SEE ALSO
+    env, unset

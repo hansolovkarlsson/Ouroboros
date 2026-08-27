@@ -1,0 +1,13 @@
+NAME
+    ping - ICMP echo a host
+
+SYNOPSIS
+    ping <host>
+
+DESCRIPTION
+    Sends an ICMP echo request to <host> (an IPv4 address, or a name resolved
+    via DNS) and reports the reply. Requires a network interface (QEMU only;
+    not on Parallels).
+
+SEE ALSO
+    resolve, fetch

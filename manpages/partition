@@ -1,0 +1,12 @@
+NAME
+    partition - write a single-partition MBR
+
+SYNOPSIS
+    partition [fat32|exfat|ext2]
+
+DESCRIPTION
+    Writes a one-partition MBR to a blank disk, tagged for the given filesystem
+    type. Follow with format. A builtin (it must run when nothing is mounted).
+
+SEE ALSO
+    erase, format

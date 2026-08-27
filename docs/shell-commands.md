@@ -71,7 +71,8 @@ machines that don't share the key are refused.
 
 | Command | Syntax | Description | Notes |
 |---|---|---|---|
-| `help` | `help` | Lists the shell **builtins** only, and points to `/bin` (via `ls /bin`) for the externalized programs. | Static text, no syscall. Deliberately doesn't enumerate `/bin` — those change as programs are added, and `ls /bin` is the live list. |
+| `help` | `help` | Lists the shell **builtins** only, and points to `/bin` (via `ls /bin`) for the externalized programs. | Static text, no syscall. Deliberately doesn't enumerate `/bin` — those change as programs are added, and `ls /bin` is the live list. For per-command detail: `<cmd> -?` (one line) or `man <cmd>` (full page). |
+| `man` | `man <command>` | Prints a command's manual page — a plain-text file read from `/man/<command>` on disk. `man grep \| more` to page a long one. | A `/bin` program. Plain text only: the framebuffer console drops ANSI styling (bold/colour), so pages use UPPERCASE section headers (`NAME`/`SYNOPSIS`/`DESCRIPTION`/…). Source pages live in `manpages/`, staged to `/man` by the build. |
 | `echo` | `echo [words...]` | Prints all words after `echo`, space-separated. | The one command that uses more than its first argument. |
 | `uptime` | `uptime` | Prints the preemption tick count since boot. | Backed by `get_ticks` — real kernel state, not a demo. |
 | `clear` | `clear` | Clears the screen (ANSI `\x1b[2J\x1b[H`). | A raw escape sequence the shell sends itself, not a syscall — the console has no notion of a screen. |

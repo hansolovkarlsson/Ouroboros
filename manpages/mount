@@ -1,0 +1,18 @@
+NAME
+    mount - mount a filesystem or bind a resource
+
+SYNOPSIS
+    mount
+    mount -a
+    mount <n> <path>
+    mount -r <host:port> <path>
+    mount -p | -c | -n <path>
+
+DESCRIPTION
+    With no argument, lists what is mounted. -a mounts the disk device. <n>
+    <path> multi-mounts local partition n. -r remote-mounts another machine's
+    9P export. -p/-c/-n bind the synthetic /proc, /dev/cons, and /net into the
+    namespace.
+
+SEE ALSO
+    unmount, bind, cpu

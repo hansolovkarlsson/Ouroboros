@@ -1,0 +1,11 @@
+NAME
+    rm - remove a file
+
+SYNOPSIS
+    rm <file>
+
+DESCRIPTION
+    Removes <file>. Not recursive: use rmdir for an empty directory.
+
+SEE ALSO
+    rmdir, mv

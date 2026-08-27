@@ -1,0 +1,13 @@
+NAME
+    send - send an IPC message to a task
+
+SYNOPSIS
+    send <task number> <words...>
+
+DESCRIPTION
+    Sends the words (space-joined, up to 64 bytes) as one message to task
+    <task number>'s mailbox. The test companion to recv. See ps for task
+    numbers.
+
+SEE ALSO
+    recv, ps

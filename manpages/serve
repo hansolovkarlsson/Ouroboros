@@ -1,0 +1,13 @@
+NAME
+    serve - accept an inbound TCP connection on another machine's NIC
+
+SYNOPSIS
+    serve <base> <port> [response...]
+
+DESCRIPTION
+    Announces <port> on the machine remote-mounted at <base> and answers one
+    inbound connection with [response]. The accept side of dial. Cluster
+    feature.
+
+SEE ALSO
+    dial, mount

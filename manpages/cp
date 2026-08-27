@@ -1,0 +1,12 @@
+NAME
+    cp - copy a file
+
+SYNOPSIS
+    cp <src> <dst>
+
+DESCRIPTION
+    Copies the file <src> to <dst>, overwriting <dst> if it exists. Streams
+    the data, so any size copies. Paths resolve against the current directory.
+
+SEE ALSO
+    mv, cat, write
