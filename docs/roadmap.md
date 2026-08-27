@@ -1041,6 +1041,109 @@ specific known gaps, just organized as a coherent map rather than a running
 list. This is the one to do *first* of the six, precisely because it tells
 you the order for the rest.
 
+### Additional directions (2026-08-27 batch, not sequenced)
+
+A second batch, captured the same way. Several **extend items 1–6 above** rather
+than being new — flagged as such so the roadmap doesn't fork — and the genuinely
+new ones (links, a GPU, cluster data redundancy, SQLite) get the same "what
+exists to build on / hard parts / consumer question" treatment.
+
+**a. Users, login, passwords, permissions — and per-user home directories (extends item 4).**
+Item 4 already scopes the identity/permission arc: a login prompt, an
+`/etc/passwd`-shaped file with hashed passwords (reusing the cluster-auth
+SHA-256/HMAC), and ext2 mode/uid/gid actually *enforced* at the `FSOP_*`
+dispatch — ext2-only, because FAT/exFAT can't store owners. The addition here is
+**per-user home directories**: a `/home/<user>` the login sets as the shell's
+initial cwd — a small convention layered on the permission work, not a separate
+arc. Still sequenced after item 2's stat surface (nothing to check against until
+then).
+
+**b. Links: hard links + symbolic links (new, ext2-only).**
+The Unix link model, which ext2 already half-supports: an inode owns the data and
+a directory entry is just `name → inode`, `fsd`'s ext2 arm already keeps
+`i_links_count` consistent for `mkdir`/`rmdir`, and it already *reports*
+(doesn't follow) symlinks. So a **hard link** is "a second directory entry
+pointing at an existing inode, `i_links_count` bumped," and a **symlink** is "an
+inode whose data is a target path." The work: `ln`/`ln -s` commands,
+`FSOP_LINK`/`FSOP_SYMLINK` ops, and **symlink-following in path resolution**
+(with loop detection / a depth cap) — the last is the only genuinely new
+mechanism, and it's shared with item 4 (a `/home` symlink) and the stat surface
+(link count + type in `ls -l`). **ext2-only** (FAT/exFAT have no link concept),
+the same honest per-FS degradation as permissions. Small given the ext2
+foundation; pairs with items 2/4.
+
+**c. A text editor + full-screen terminal control (extends items 1 and 3).**
+Item 1 (VT100/cursor addressing in `cond`) plus the editor already noted under
+items 3/4 *are* this. The specific question raised — **"graphics mode only?"** —
+is worth recording an answer to: the **framebuffer** backend (Parallels, the
+real target) needs `cond` to grow real cursor positioning / erase / scroll
+regions (item 1's core) *and* an input return-channel for the sequences that
+need one (the awkward part item 1 flags); but the **byte-stream UART** backend
+(QEMU serial) already passes ANSI straight through to a host terminal, so an
+editor can be *developed and tested there first* and the framebuffer terminal
+caught up to it. So: not graphics-mode-only, but the framebuffer is where the
+real work is. Build the terminal and its first editor together (item 1's
+consumer question).
+
+**d. On-device compilers, C and Rust (extends item 5).**
+Item 5 already covers this in full: a small **C** compiler (`tcc`/`chibicc`/
+`cproc`+`qbe`) is realistic *on top of the userland libc personality* (a C
+compiler is a C program); **Rust** self-hosting is effectively out of reach
+(`rustc`'s size + the recurring `-Z build-std` PIE wall); and an **assembler** or
+a tiny toy language is the small first step that needs no libc. No change —
+recorded here as a pointer.
+
+**e. Download and run a Rust toolchain — "GnuRust" / gccrs (new, the far end of item 5).**
+The ambitious flip side of item 5: rather than *writing* a compiler, *acquire* a
+prebuilt one — **gccrs** (the GCC Rust front end) or a ported Rust toolchain —
+and run it on-device. The reality check makes it the furthest-out item here: it
+needs (1) the POSIX libc personality mature enough to run a very large C++
+program (gccrs is C++), (2) a filesystem with real capacity and enough RAM, and
+(3) a **download/fetch flow** (the network stack + a `fetch`-to-file path exist;
+a real package step doesn't). So it's a *consumer of the libc + fetch
+capabilities*, even further out than a small C compiler — and, like item 5, a
+"because it's the Ouroboros thing to do" goal, not a need. Recorded as the
+north-star tip of the compiler direction.
+
+**f. Graphics card / GPU support (new, large, QEMU-shaped start).**
+Today the only "graphics" is the boot-discovered **GOP linear framebuffer** that
+`cond` blits glyphs into — no acceleration, no mode-setting, no display-controller
+driver. Real GPU support is a large hardware arc; the realistic starting point
+(matching every other device here) is **virtio-gpu on QEMU** — a virtio device
+over the existing `virtio_mmio` transport, like virtio-net/blk, giving
+mode-setting and a 2D blitter under the same DMA-in-the-kernel /
+protocol-in-userland split the whole system already uses. A real discrete GPU is
+out of scope. **Consumer question, stated plainly:** nothing needs it yet — the
+framebuffer console suffices, and the terminal/editor work (items 1/c) lives
+happily on the plain framebuffer — so this is for an eventual windowing system /
+graphical apps, sequenced behind everything with a nearer consumer. Note
+virtio-gpu as the entry point when the time comes.
+
+**g. Cluster data redundancy — documents failsafed across nodes (new, a later cluster phase).**
+The cluster (see [`roadmap-cluster.md`](roadmap-cluster.md)) shares disk and
+resources today, but a document lives on exactly **one** node — lose that node,
+lose the file. The direction: **automatic replication** so data is mirrored
+across cluster nodes and survives a node failure (a write on one node propagated
+to others, with failure detection and recovery). This is a genuine
+distributed-systems arc — the cluster-distributed postmortem deliberately scoped
+**single-writer + clean-disconnect** and put concurrent-writer/replication *out
+of scope*, so this is exactly where that boundary would be revisited: a
+replication protocol, a consistency contract (quorum? primary-backup?), conflict
+handling, and failure detection. Large, and gated on the consistency model being
+worked out; it belongs as a later phase in `roadmap-cluster.md`, not a near-term
+item. It's the strongest "why" the project has for going distributed *beyond*
+resource-sharing.
+
+**h. SQLite — an on-device database (new, the canonical first libc port).**
+SQLite is a single-file, dependency-light **C library** — the textbook "port one
+self-contained C program" target — so it's a direct **consumer of the POSIX libc
+personality** (the section above): it needs `open`/`read`/`write`/`fsync`/
+`lseek`, optionally a little `mmap`, and file locking. Once the libc runs C
+programs, SQLite is a high-value, self-contained first real port (a real database
+on the device) *and* an excellent libc **test case** — it exercises a large slice
+of the file API and its own test suite is exhaustive. Recorded as a concrete,
+motivating milestone for the libc arc: "the libc is real when SQLite runs on it."
+
 ## Parking lot (known future work, not yet sequenced)
 
 Pulled from `docs/processes.md`'s "known rough edges" and `CLAUDE.md`'s
