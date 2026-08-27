@@ -7,6 +7,29 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/`; 
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## `more` - a pager (`less` is an alias)
+
+A pager to read output a screen at a time: `more <file>` or `<command> | more`,
+with **space** for the next screen, **Enter** for one more line, and **q** to
+quit. `less` is an alias for the same forward-only pager.
+
+It's a **builtin**, and that's forced by the design rather than chosen: a pager
+must read the keyboard *while it runs*, but this kernel routes keyboard input to
+exactly one owner (`INPUT_OWNER`, the boot shell at task 0), and a spawned `/bin`
+program never becomes that owner. So a pager can only run inside the shell, which
+already owns the keyboard. Content is captured into the shell's 256 KB heap
+buffer — from a file (read in `FS_DATA_MAX` windows) or from a piped command
+(`<command> | more` intercepts the trailing `| more`, dispatches the producer
+with a capturing sink, then pages the buffer) — so output larger than the buffer
+is refused rather than paged, and `| more` currently takes a single command, not
+a multi-stage pipeline. The `--More--` prompt is erased with a `\r`-and-spaces
+trick the console (`cond`) already handles.
+
+**Verified** in QEMU (piped stdin driving the pager): `ls -l /bin | more` showed
+23 lines then `--More--`, **space** revealed the rest, control returned to the
+shell; `q` quit early mid-listing; `more /LIST.TXT` paged a file; and a short
+`ls | more` printed one screen with no prompt.
+
 ## `ls`: columns, sort by name, and `ls -l` (size + date/time)
 
 `ls` used to dump entries one-per-line in raw on-disk order. Now it's a real

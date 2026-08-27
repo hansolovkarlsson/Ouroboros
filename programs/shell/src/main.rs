@@ -355,6 +355,29 @@ fn run_line(line: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize, env: &mut
     let mut ebuf = [0u8; EXPAND_SIZE];
     let line = expand_vars(line, env, &mut ebuf);
 
+    // `<command> | more`: page the command's output. Handled before the general
+    // pipeline path because `more` is a builtin pager (it must read the keyboard
+    // while running, which only the boot shell can - see `page_content`), not a
+    // program a pipeline could spawn. The producer is captured into the heap,
+    // then paged.
+    if let Some(producer) = trailing_more(line) {
+        if producer.split_whitespace().any(|t| t == "|") {
+            print_line("more: pipe a single command into more (multi-stage pipelines aren't supported yet)");
+            return;
+        }
+        let capture = get_heap();
+        let mut out = Output::Capture { buf: capture, len: 0, overflowed: false };
+        dispatch_line(producer, cwd, cwd_len, env, &mut out);
+        if let Output::Capture { buf, len, overflowed } = out {
+            if overflowed {
+                print_line("more: output too large to page (exceeds the capture buffer)");
+            } else {
+                page_content(&buf[..len]);
+            }
+        }
+        return;
+    }
+
     // Pipelines first: standalone `|` tokens split the line into N stages.
     // The first stage may be a builtin (its output captured and streamed) or a
     // program; every later stage is a program reading its predecessor's output
@@ -393,6 +416,31 @@ fn run_line(line: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize, env: &mut
             };
             finish_redirect(&buf[..len], overflowed, target, append, cwd, *cwd_len);
         }
+    }
+}
+
+/// If `line` ends in a `| more` stage (the last `|`-delimited stage is exactly
+/// `more`), return the producer text before that final `|`; else `None`. Used
+/// to page a command's output (`<command> | more`). The producer may itself
+/// contain `|` (a multi-stage pipeline) - the caller decides what it supports.
+fn trailing_more(line: &str) -> Option<&str> {
+    let base = line.as_ptr() as usize;
+    let mut last_pipe: Option<usize> = None;
+    for tok in line.split_whitespace() {
+        if tok == "|" {
+            last_pipe = Some(tok.as_ptr() as usize - base);
+        }
+    }
+    let p = last_pipe?;
+    let last_stage = line.get(p + 1..)?.trim();
+    if last_stage != "more" && last_stage != "less" {
+        return None;
+    }
+    let before = line.get(..p)?.trim();
+    if before.is_empty() {
+        None
+    } else {
+        Some(before)
     }
 }
 
@@ -438,8 +486,8 @@ fn is_builtin(cmd: &str) -> bool {
     matches!(
         cmd,
         "help" | "cd" | "bind" | "pwd" | "write" | "mount" | "unmount" | "erase" | "partition" | "format"
-            | "exec" | "exit" | "shutdown" | "poweroff" | "halt" | "ps" | "kill" | "fg" | "wait"
-            | "send" | "recv" | "selftest" | "env" | "set" | "unset" | "cpu"
+            | "exec" | "exit" | "shutdown" | "poweroff" | "halt" | "more" | "less" | "ps" | "kill"
+            | "fg" | "wait" | "send" | "recv" | "selftest" | "env" | "set" | "unset" | "cpu"
     )
 }
 
@@ -850,7 +898,7 @@ fn dispatch_line(line: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize, env:
     let arg = words.next().unwrap_or("");
 
     match command {
-        "help" => out.put_line("commands: help, echo, uptime, clear, ls, tree, cat, cd, pwd, bind, mkdir, rmdir, touch, rm, write, writeat, cp, mv, mount, mount -a/-r/-p/-c/-n, unmount, erase, partition, format, ping, resolve, fetch, dial, serve, cpu, exec, exit, shutdown, halt, ps, kill, fg, wait, send, recv, selftest, env, set, unset (a bare unknown command is looked up on $PATH; $VAR expands; append `> file`/`>> file` to redirect, or `| /path/to/program` to pipe)"),
+        "help" => out.put_line("commands: help, echo, uptime, clear, ls, tree, cat, cd, pwd, bind, mkdir, rmdir, touch, rm, write, writeat, cp, mv, mount, mount -a/-r/-p/-c/-n, unmount, erase, partition, format, ping, resolve, fetch, dial, serve, cpu, exec, exit, shutdown, halt, more, ps, kill, fg, wait, send, recv, selftest, env, set, unset (a bare unknown command is looked up on $PATH; $VAR expands; append `> file`/`>> file` to redirect, `| /path/to/program` to pipe, or `| more` to page)"),
         // echo, uptime, clear are externalized: they're /bin programs now
         // (found via PATH by the unknown-command arm), not builtins. See
         // "Standalone binaries, Stage 4".
@@ -870,6 +918,7 @@ fn dispatch_line(line: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize, env:
         "exit" => cmd_exit(),
         "shutdown" | "poweroff" => cmd_power(syscall_abi::POWER_OFF),
         "halt" => cmd_power(syscall_abi::POWER_HALT),
+        "more" | "less" => cmd_more(arg, cwd, *cwd_len),
         "ps" => cmd_ps(out),
         "kill" => cmd_kill(arg),
         "fg" => cmd_fg(arg),
@@ -3074,6 +3123,98 @@ fn cmd_exit() {
         EXIT_DENIED => print_line("exit: refused - the boot shell can't exit (nothing would own the keyboard)"),
         _ => print_line("exit: unexpected return"),
     }
+}
+
+/// Lines shown per screen before the pager pauses (a full screen is ~24 rows;
+/// one is kept for the `--More--` prompt). The console geometry isn't exposed
+/// to the shell, so this is the conventional fallback.
+const PAGE_ROWS: usize = 23;
+
+/// Page `content` a screen at a time, reading a key at each `--More--` pause:
+/// **space** = next screen, **Enter** = one more line, **q** = quit. A
+/// **builtin** (not a `/bin` program) precisely because it must read the
+/// keyboard while running - only the boot shell (task 0) owns the keyboard, so
+/// only a builtin can page interactively (see the keyboard-owner note in
+/// `tasks.rs`). Fed by `more <file>` or `<command> | more`.
+fn page_content(content: &[u8]) {
+    if content.is_empty() {
+        return;
+    }
+    let total = content.len();
+    let mut pos = 0usize;
+    let mut to_show = PAGE_ROWS;
+    loop {
+        let mut printed = 0usize;
+        while printed < to_show && pos < total {
+            let start = pos;
+            while pos < total && content[pos] != b'\n' {
+                pos += 1;
+            }
+            // Print the line, dropping a trailing '\r' (DOS endings) since we
+            // add our own CRLF for the console.
+            let mut end = pos;
+            if end > start && content[end - 1] == b'\r' {
+                end -= 1;
+            }
+            con_write(&content[start..end]);
+            con_write(b"\r\n");
+            if pos < total {
+                pos += 1; // step past the '\n'
+            }
+            printed += 1;
+        }
+        if pos >= total {
+            break; // everything shown
+        }
+        con_write(b"--More--");
+        let key = read_char();
+        con_write(b"\r        \r"); // erase the prompt (CR, spaces, CR)
+        match key {
+            b'q' | b'Q' => break,
+            b'\r' | b'\n' => to_show = 1, // one more line
+            _ => to_show = PAGE_ROWS,      // space (or anything) = next screen
+        }
+    }
+}
+
+/// `more <file>`: read the file into the heap buffer, then page it. Reads in
+/// `FS_DATA_MAX` windows (the inline read cap) until a short read signals EOF.
+fn cmd_more(arg: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize) {
+    if arg.is_empty() {
+        print_line("more: usage: more <file>   (or: <command> | more)");
+        return;
+    }
+    let mut pathbuf = [0u8; PATH_SIZE];
+    let Some(plen) = resolve_path(cwd_str(cwd, cwd_len), arg, &mut pathbuf) else {
+        print_line("more: path too long");
+        return;
+    };
+    let Ok(path) = core::str::from_utf8(&pathbuf[..plen]) else {
+        print_line("more: bad path");
+        return;
+    };
+
+    let heap = get_heap();
+    let chunk = syscall_abi::FS_DATA_MAX as usize;
+    let mut total = 0usize;
+    let mut first = true;
+    while total < heap.len() {
+        let want = chunk.min(heap.len() - total);
+        let n = fs_read_at(path, total as u64, &mut heap[total..total + want]);
+        if n >= FS_ERR_MIN {
+            if first {
+                print_fs_error("more", n);
+            }
+            return;
+        }
+        first = false;
+        let n = n as usize;
+        total += n;
+        if n < want {
+            break; // short read = EOF
+        }
+    }
+    page_content(&heap[..total]);
 }
 
 /// `shutdown`/`poweroff` (mode `POWER_OFF`) and `halt` (mode `POWER_HALT`).

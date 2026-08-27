@@ -149,12 +149,13 @@ $ set PATH=/bin ; env           # a real environment; $VAR expansion
 
 - **Builtins** run inside the shell itself:
   `help  cd  pwd  bind  write  mount  unmount  erase  partition  format
-  exec  exit  shutdown  halt  ps  kill  fg  wait  send  recv  selftest  env
-  set  unset  cpu`.
+  exec  exit  shutdown  halt  more  ps  kill  fg  wait  send  recv  selftest
+  env  set  unset  cpu`.
   Job control (`ps`/`kill`/`fg`/`wait`), the disk-management trio
   (`erase`/`partition`/`format` — they must run when *nothing* is mounted,
   exactly when `/bin` can't be read), power control (`shutdown`/`halt` — same
-  no-disk reasoning), the mount/namespace commands, and
+  no-disk reasoning), the pager (`more`/`less`, which must read the keyboard the
+  shell owns), the mount/namespace commands, and
   `cpu` (remote execution) are builtins for reasons the cluster section and
   [`shell-commands.md`](shell-commands.md) explain.
 

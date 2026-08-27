@@ -7,6 +7,27 @@ for the forward plan see [`roadmap.md`](roadmap.md).
 
 ---
 
+## 2026-08-27 (cont.) — a pager: `more` (and `less`)
+
+Hans asked for `more` or `less` — "pick one". They're forward-vs-backward
+cousins; I made `more` the pager and `less` an alias for it (backward scrolling
+would need a lot more, and our content is small). The design was decided for me
+by one fact: a pager has to read the keyboard *while it's running*, and this
+kernel gives keyboard input to exactly one owner — the boot shell, task 0. A
+spawned `/bin` program never becomes that owner (there's a whole doc comment in
+`tasks.rs` about why, born from a bug where two programs split keystrokes letter
+by letter). So a pager simply cannot be a `/bin` program; it has to be a builtin
+that runs inside the shell, which already holds the keyboard. That settled it.
+
+The rest fell out cleanly by reusing what was there: the shell's 256 KB heap
+buffer and its `Output::Capture` sink already exist for `>` redirects and
+pipeline heads, so `<cmd> | more` just intercepts the trailing `| more`,
+dispatches the producer with a capturing sink, and pages the buffer; `more <file>`
+reads the file into the same buffer. The only fiddly bit was erasing the
+`--More--` prompt, and `cond` turned out to already handle `\r`, so a
+carriage-return-and-spaces wipe did it. Space pages, Enter line-steps, q quits —
+all confirmed against a QEMU guest driven through piped stdin.
+
 ## 2026-08-27 (cont.) — `ls` grows up: columns, sort, and `-l`
 
 The `ls` that just dumped names one per line always felt like a placeholder. This
