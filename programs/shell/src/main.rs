@@ -438,8 +438,8 @@ fn is_builtin(cmd: &str) -> bool {
     matches!(
         cmd,
         "help" | "cd" | "bind" | "pwd" | "write" | "mount" | "unmount" | "erase" | "partition" | "format"
-            | "exec" | "exit" | "ps" | "kill" | "fg" | "wait" | "send" | "recv" | "selftest"
-            | "env" | "set" | "unset" | "cpu"
+            | "exec" | "exit" | "shutdown" | "poweroff" | "halt" | "ps" | "kill" | "fg" | "wait"
+            | "send" | "recv" | "selftest" | "env" | "set" | "unset" | "cpu"
     )
 }
 
@@ -850,7 +850,7 @@ fn dispatch_line(line: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize, env:
     let arg = words.next().unwrap_or("");
 
     match command {
-        "help" => out.put_line("commands: help, echo, uptime, clear, ls, cat, cd, pwd, bind, mkdir, rmdir, touch, rm, write, writeat, cp, mv, mount, mount -a/-r/-p/-c/-n, unmount, erase, partition, format, ping, resolve, fetch, dial, serve, cpu, exec, exit, ps, kill, fg, wait, send, recv, selftest, env, set, unset (a bare unknown command is looked up on $PATH; $VAR expands; append `> file`/`>> file` to redirect, or `| /path/to/program` to pipe)"),
+        "help" => out.put_line("commands: help, echo, uptime, clear, ls, tree, cat, cd, pwd, bind, mkdir, rmdir, touch, rm, write, writeat, cp, mv, mount, mount -a/-r/-p/-c/-n, unmount, erase, partition, format, ping, resolve, fetch, dial, serve, cpu, exec, exit, shutdown, halt, ps, kill, fg, wait, send, recv, selftest, env, set, unset (a bare unknown command is looked up on $PATH; $VAR expands; append `> file`/`>> file` to redirect, or `| /path/to/program` to pipe)"),
         // echo, uptime, clear are externalized: they're /bin programs now
         // (found via PATH by the unknown-command arm), not builtins. See
         // "Standalone binaries, Stage 4".
@@ -868,6 +868,8 @@ fn dispatch_line(line: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize, env:
         "write" => cmd_write(line, cwd, *cwd_len),
         "exec" => cmd_exec(line, cwd, *cwd_len, out),
         "exit" => cmd_exit(),
+        "shutdown" | "poweroff" => cmd_power(syscall_abi::POWER_OFF),
+        "halt" => cmd_power(syscall_abi::POWER_HALT),
         "ps" => cmd_ps(out),
         "kill" => cmd_kill(arg),
         "fg" => cmd_fg(arg),
@@ -3072,6 +3074,24 @@ fn cmd_exit() {
         EXIT_DENIED => print_line("exit: refused - the boot shell can't exit (nothing would own the keyboard)"),
         _ => print_line("exit: unexpected return"),
     }
+}
+
+/// `shutdown`/`poweroff` (mode `POWER_OFF`) and `halt` (mode `POWER_HALT`).
+/// A **builtin**, not a `/bin` program, deliberately: you must be able to
+/// power the machine down even with no disk mounted (exactly when `/bin`
+/// can't be read), the same reasoning as `erase`/`partition`/`format`. The
+/// `POWER` syscall doesn't return on success (the kernel powers off or
+/// halts), so reaching the line after it means an unrecognized mode.
+fn cmd_power(mode: u64) {
+    print_line(if mode == syscall_abi::POWER_HALT {
+        "halting..."
+    } else {
+        "shutting down..."
+    });
+    syscall(syscall_abi::POWER, mode);
+    // Only reached if the kernel rejected the mode (it doesn't return
+    // otherwise) - shouldn't happen from here, but report rather than hang.
+    print_line("power: not supported");
 }
 
 /// The 1-argument syscalls this program used before phase 3c - a thin

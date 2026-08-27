@@ -7,6 +7,30 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/`; 
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## `shutdown` and `halt` - machine power control
+
+Two new shell builtins to stop the machine: `shutdown` (alias `poweroff`) powers
+it off; `halt` stops the CPU without cutting power.
+
+Powering off is a privileged platform operation, so it goes through a new
+**`POWER` syscall** (56) that runs at EL1: `POWER_OFF` issues **PSCI `SYSTEM_OFF`**
+(the ARM firmware power-off call), and `POWER_HALT` masks interrupts and parks the
+core in `wfi` forever. The one real subtlety is the PSCI **conduit** — whether the
+firmware call is `hvc` or `smc` — which the new `power.rs` reads from **ACPI's
+FADT** (`ARM_BOOT_ARCH` flags) at boot, in the same before-`exit_boot_services`
+window as the MADT parse. If PSCI is absent or refuses, power-off falls back to a
+halt so the machine at least stops.
+
+They're **builtins, not `/bin` programs**, deliberately: you must be able to power
+off even with no disk mounted (exactly when `/bin` can't be read), the same
+reasoning as `erase`/`partition`/`format`. Not capability-gated — a single-user
+machine lets its shell turn itself off.
+
+**Verified** in QEMU: `shutdown` printed `powering off` and the VM **exited on its
+own** (PSCI `SYSTEM_OFF` via the `hvc` conduit QEMU's ACPI advertises — no
+fallback); `halt` printed `system halted` and a following `echo` produced nothing
+(the machine really stopped — not even the timer tick resumes it).
+
 ## `tree` - a recursive directory listing in `/bin`
 
 A new `/bin/TREE`: lists a directory recursively as an indented tree, then a

@@ -7,6 +7,23 @@ for the forward plan see [`roadmap.md`](roadmap.md).
 
 ---
 
+## 2026-08-27 (cont.) — `shutdown` and `halt`
+
+The machine could boot but never stop itself — you killed QEMU from the host or
+pulled the Parallels plug. So: `shutdown`/`halt`. The interesting part is that
+powering off is genuinely privileged: it's a PSCI firmware call (`hvc`/`smc`),
+which only EL1 can make, so it needs a real syscall (`POWER`, 56) rather than
+anything a userland program could do alone. And PSCI has one gotcha — is the
+conduit `hvc` or `smc`? Guessing wrong faults. The honest answer lives in ACPI's
+FADT (`ARM_BOOT_ARCH` flags), which the project already knows how to walk (it
+reads SPCR and MADT the same way), so `power.rs` reads the conduit at boot next to
+the MADT parse and stashes it. QEMU's ACPI advertises `hvc`, and `SYSTEM_OFF` made
+the VM exit cleanly on the first try. `halt` is the humble sibling — mask
+interrupts, `wfi` forever, and confirmed the machine truly stops by watching a
+follow-up `echo` produce nothing. Both are builtins, not `/bin`: you have to be
+able to power off with no disk mounted, the same logic that keeps
+`erase`/`partition`/`format` builtin.
+
 ## 2026-08-27 (cont.) — `tree` joins `/bin`
 
 A satisfying little program to write because the constraints did the designing.

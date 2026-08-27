@@ -578,6 +578,23 @@ pub const TASK_EXIT_CODE: u64 = 55;
 /// which is masked to a byte (`0..=255`) at exit.
 pub const TASK_NO_EXIT_CODE: u64 = u64::MAX;
 
+/// `(mode)` -> does not return on success. Machine power control: `mode`
+/// [`POWER_OFF`] powers the machine off (via PSCI `SYSTEM_OFF`, falling back to
+/// a halt if PSCI is unavailable), [`POWER_HALT`] halts the CPU (masks
+/// interrupts and parks forever). The kernel prints a final line and stops; an
+/// unrecognized mode returns [`POWER_BAD_MODE`] instead. Not gated - a
+/// single-user machine lets its shell turn itself off.
+pub const POWER: u64 = 56;
+
+/// [`POWER`] mode: power the machine off.
+pub const POWER_OFF: u64 = 0;
+/// [`POWER`] mode: halt the CPU (stop, without cutting power).
+pub const POWER_HALT: u64 = 1;
+
+/// [`POWER`]'s return for an unrecognized `mode` (the only case it returns at
+/// all). Distinct from `0` so a caller can tell "bad mode" from a value.
+pub const POWER_BAD_MODE: u64 = u64::MAX;
+
 /// [`NET_RECV`] returned when no frame is currently available (a poll that
 /// found the receive ring empty) - distinct from a real length (`u64::MAX`
 /// is out of any frame's range) and from the error sentinel.

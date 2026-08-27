@@ -797,6 +797,15 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
             }
             tasks::zombie_status(i).unwrap_or(syscall_abi::TASK_NO_EXIT_CODE)
         }
+        syscall_abi::POWER => {
+            // arg0 = mode. Powers off or halts the machine - neither returns.
+            // An unrecognized mode is a no-op error (POWER_BAD_MODE).
+            match arg0 {
+                syscall_abi::POWER_OFF => crate::power::power_off(),
+                syscall_abi::POWER_HALT => crate::power::halt(),
+                _ => syscall_abi::POWER_BAD_MODE,
+            }
+        }
         syscall_abi::KILL => {
             let i = arg0 as usize;
             if i <= 4 {
