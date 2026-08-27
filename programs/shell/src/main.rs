@@ -2278,13 +2278,25 @@ fn cmd_ps(out: &mut Output) {
         }
         out.put_str("task ");
         out.put_u64_decimal(i);
-        out.put_str(match state {
-            TASK_STATE_UNUSED => ": unused",
-            TASK_STATE_RUNNABLE => ": runnable",
-            TASK_STATE_BLOCKED => ": blocked (waiting)",
-            TASK_STATE_ZOMBIE => ": exited - `wait` to collect its status",
-            _ => ": ?",
-        });
+        if state == TASK_STATE_ZOMBIE {
+            // Show the exit code (peeked without reaping) so `ps` says *why*
+            // the zombie is holding its slot, before anyone `wait`s on it.
+            out.put_str(": exited (code ");
+            let code = syscall4(syscall_abi::TASK_EXIT_CODE, i, 0, 0, 0);
+            if code == syscall_abi::TASK_NO_EXIT_CODE {
+                out.put(b'?');
+            } else {
+                out.put_u64_decimal(code);
+            }
+            out.put_str(") - `wait` to collect");
+        } else {
+            out.put_str(match state {
+                TASK_STATE_UNUSED => ": unused",
+                TASK_STATE_RUNNABLE => ": runnable",
+                TASK_STATE_BLOCKED => ": blocked (waiting)",
+                _ => ": ?",
+            });
+        }
         // Append the name, when the slot has one (unused slots don't).
         let mut name = [0u8; syscall_abi::TASK_NAME_MAX as usize];
         let n = task_name(i, &mut name);

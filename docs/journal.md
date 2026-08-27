@@ -28,6 +28,16 @@ launched with, and the servers show `fsd`/`cond`/`netd`. Zombies stay nameless
 (their argv is cleared on exit — a zombie isn't running), which felt like the
 right call rather than reaching to preserve it.
 
+Then a natural follow-on the same day: if `ps` is going to list zombies, it
+should say *why* they exited. The status was already there (it's what `wait`
+returns), it just wasn't readable without reaping. A `TASK_EXIT_CODE` syscall
+(55) that peeks a zombie's status without consuming it — the read-only sibling of
+`wait` — and `ps` now prints `exited (code N)`. `exec /bin/CAT` with no argument
+(exits 1) and `exec /bin/ARGS` (exits 0) both showed the right code, matching the
+kernel's own exit log. Small, but it turns a zombie line from "something died
+here" into "this exited cleanly / this failed", which is the actual question you
+have when you see one.
+
 ## 2026-08-26 (cont.) — four more `/bin` filters (`tail`/`nl`/`rev`/`uniq`)
 
 A quieter, additive session after the cluster work: filling out `/bin` with the

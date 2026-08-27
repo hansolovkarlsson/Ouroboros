@@ -787,6 +787,16 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
                 None => 0,
             }
         }
+        syscall_abi::TASK_EXIT_CODE => {
+            // arg0 = task index. The exit status of a zombie (peeked, NOT
+            // reaped - unlike WAIT), or TASK_NO_EXIT_CODE for any other slot.
+            // Lets `ps` show why a zombie is holding its slot.
+            let i = arg0 as usize;
+            if i >= tasks::NUM_TASKS {
+                return syscall_abi::TASK_NO_EXIT_CODE;
+            }
+            tasks::zombie_status(i).unwrap_or(syscall_abi::TASK_NO_EXIT_CODE)
+        }
         syscall_abi::KILL => {
             let i = arg0 as usize;
             if i <= 4 {

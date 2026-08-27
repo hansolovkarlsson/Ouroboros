@@ -41,6 +41,16 @@ exit) show no name — a zombie isn't running. **Verified** end to end in QEMU: 
 boot tasks named as above, and `exec /bin/PONG` (a long-lived server) then `ps`
 showed `task 5: blocked (waiting)  /bin/PONG`.
 
+A follow-on: **`ps` now also shows a zombie's exit code.** A zombie already
+carried its status (that's what `wait` collects), but `ps` only said `exited -
+`wait` to collect its status`. A new **`TASK_EXIT_CODE`** syscall (55) *peeks*
+that status without reaping it (unlike `wait`, which collects and frees the
+slot), returning `TASK_NO_EXIT_CODE` for any non-zombie slot, so `ps` prints
+`task 5: exited (code 1) - `wait` to collect`. Now you can see *why* a task is
+holding its slot before deciding to `wait` on it. **Verified**: `exec /bin/CAT`
+(no arg, exits 1) showed `code 1`, `exec /bin/ARGS` (exits 0) showed `code 0`,
+each matching the kernel's own exit log.
+
 ## Four more `/bin` pipeline filters — `tail`, `nl`, `rev`, `uniq`
 
 The `/bin` filter set (`upper`/`grep`/`wc`/`head`) grew four classic Unix

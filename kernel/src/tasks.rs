@@ -375,6 +375,17 @@ pub(crate) fn try_reap(target: usize) -> Option<u64> {
     }
 }
 
+/// A zombie's exit status **without reaping it** (`Some(status)` only when
+/// `target` is a `Zombie`; `None` for any live/unused slot) - the read-only
+/// peek behind the `TASK_EXIT_CODE` syscall, so `ps` can show the code while
+/// the slot is still held. Unlike [`try_reap`], leaves the state untouched.
+pub(crate) fn zombie_status(target: usize) -> Option<u64> {
+    match unsafe { *STATES[target].0.get() } {
+        TaskState::Zombie(status) => Some(status),
+        _ => None,
+    }
+}
+
 pub(crate) fn el0_regions() -> [(u64, u64); NUM_TASKS] {
     core::array::from_fn(|i| unsafe { *REGIONS[i].0.get() })
 }
