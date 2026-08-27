@@ -7,6 +7,28 @@ for the forward plan see [`roadmap.md`](roadmap.md).
 
 ---
 
+## 2026-08-27 (cont.) — shell wildcards and tab completion
+
+Two classic interactive-shell features. Globbing was the straightforward one:
+expand `*`/`?` tokens against the filesystem in `run_line` before dispatch, with
+the standard iterative backtracking matcher and bash's "no match stays literal"
+rule. Tab completion was a bit more fiddly — find the current word, list the
+directory, and either complete a lone match (replacing the typed prefix with the
+real filename case), extend to the common prefix of several, or list them and
+redraw the line.
+
+The interesting part was a link failure that cost a proper bisection: the shell
+suddenly wouldn't link, `R_AARCH64_ABS64 ... referenced by core`. The project has
+long known that `core::fmt` can't be PIE-linked, but I hadn't hit it in a while.
+Stubbing pieces one by one showed it wasn't `fs_list_dir` or `resolve_path`
+(already live) — it was the `&str` slicing itself. Slicing a `&str` by a runtime
+index emits `str`'s char-boundary panic, which *formats* the offending string,
+which drags in the unlinkable `core::fmt`. Byte slicing doesn't. So the glob and
+completion code got rewritten to work entirely in `&[u8]`, converting back with
+`from_utf8` only where a `&str` was actually needed. Worth a memory: never slice
+a `&str` by a runtime index in a `/bin` program. After that, both features came
+up clean — `echo *.txt` matched, `cat ba<Tab>` filled in `BANANA.TXT`.
+
 ## 2026-08-27 (cont.) — man pages
 
 `man <command>`. The first question was how much formatting the console can do,

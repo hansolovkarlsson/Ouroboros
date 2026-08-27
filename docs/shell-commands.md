@@ -34,9 +34,19 @@ machines that don't share the key are refused.
 - **Output redirection (`> file` / `>> file`) and multi-stage pipes
   (`a | b | c`) work** — see the dedicated sections below (pipelines are
   N-stage now, with arguments and `$PATH` lookup on every stage), plus
-  `exec prog > file`. **No input redirection (`<`), globbing, `;`/`&&`
-  chaining, command history, or tab completion.** One command (or one
-  pipeline) per line, typed in full, every time.
+  `exec prog > file`. **No input redirection (`<`), `;`/`&&` chaining, or
+  command history yet.** One command (or one pipeline) per line.
+- **Filename wildcards (globbing):** `*` (any run) and `?` (any single
+  character) in a command line expand against the filesystem before the
+  command runs — `echo *.txt`, `cat /bin/L*`, `ls sub/*.log`. Matching is
+  case-insensitive (FAT is); dotfiles match only when the pattern starts
+  with `.` (so `*` skips `.`/`..`); a token matching nothing is left
+  literal. Each token can expand to several names, so it pairs best with
+  commands that take several arguments.
+- **Tab completion:** Tab completes the last word as a filename. One match
+  fills it in (with the filesystem's casing) plus `/` for a directory or a
+  space for a file; several matches extend to their common prefix and, if
+  that adds nothing, are listed. Handles a directory prefix (`cat sub/pr<Tab>`).
 - **Path resolution** (`ls`, `cat`, `cd`, `mkdir`, `rmdir`, `touch`,
   `rm`): a leading `/` is an absolute path; anything else is resolved
   against the current working directory. `.` and `..` are collapsed

@@ -175,6 +175,11 @@ $ set PATH=/bin ; env           # a real environment; $VAR expansion
 full manual page, `man <command>` (e.g. `man ls`, `man cpu`); pipe a long one to
 the pager, `man grep | more`. Pages are plain-text files under `/man` on disk.
 
+**Wildcards & completion:** `*` and `?` in a command line expand against the
+filesystem (`echo *.txt`, `cat /bin/L*`); a pattern matching nothing is left
+literal. Press **Tab** to complete the last word as a filename — one match fills
+it in, several extend to the common prefix and then list.
+
 **Output redirection & pipelines** work across both:
 `echo hi > f.txt` (replace), `>> f.txt` (append), and `a | b | c`
 (each stage a separate program; the filters

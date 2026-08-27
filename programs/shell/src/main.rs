@@ -202,6 +202,322 @@ fn expand_vars<'a>(line: &str, env: &Env, out: &'a mut [u8]) -> &'a str {
     }
     core::str::from_utf8(&out[..n]).unwrap_or("")
 }
+
+/// ASCII case-insensitive byte equality, hand-rolled (the `str`/`u8` case
+/// helpers in `core` pull in code the PIE loader can't link - see
+/// `programs/linker.ld` / `selftest`).
+fn ci_eq(a: u8, b: u8) -> bool {
+    let fold = |c: u8| if c.is_ascii_uppercase() { c + 32 } else { c };
+    fold(a) == fold(b)
+}
+
+/// Case-insensitive wildcard match: `*` matches any run (including empty), `?`
+/// any single byte, everything else literally. Iterative (no recursion), the
+/// standard backtrack-on-`*` algorithm.
+fn wildcard_match(pat: &[u8], name: &[u8]) -> bool {
+    let (mut p, mut n) = (0usize, 0usize);
+    let (mut star, mut mark) = (None, 0usize);
+    while n < name.len() {
+        if p < pat.len() && (pat[p] == b'?' || ci_eq(pat[p], name[n])) {
+            p += 1;
+            n += 1;
+        } else if p < pat.len() && pat[p] == b'*' {
+            star = Some(p);
+            mark = n;
+            p += 1;
+        } else if let Some(sp) = star {
+            // Backtrack: the `*` swallows one more byte of `name`.
+            p = sp + 1;
+            mark += 1;
+            n = mark;
+        } else {
+            return false;
+        }
+    }
+    while p < pat.len() && pat[p] == b'*' {
+        p += 1;
+    }
+    p == pat.len()
+}
+
+/// Split a glob token's bytes into its directory prefix (up to and including the
+/// last `/`, or empty) and the filename pattern (after it). Works on bytes -
+/// slicing a `&str` with a runtime index pulls in `core`'s formatted
+/// char-boundary panic path, which the PIE loader can't link (see `selftest`).
+fn glob_split(tok: &[u8]) -> (&[u8], &[u8]) {
+    let mut i = tok.len();
+    while i > 0 {
+        i -= 1;
+        if tok[i] == b'/' {
+            return (&tok[..i + 1], &tok[i + 1..]);
+        }
+    }
+    (&tok[..0], tok)
+}
+
+/// Expand a single glob token against the filesystem, writing space-separated
+/// matches (`<dir>name`) into `out`. Returns the bytes written, or 0 if nothing
+/// matched (the caller then keeps the token literal, bash-style). Dotfiles are
+/// matched only when the pattern itself begins with `.` (so `*` skips `.`/`..`).
+fn expand_one_glob(tok: &str, cwd: &str, out: &mut [u8]) -> usize {
+    let (dir_part, pat) = glob_split(tok.as_bytes());
+    // The directory to list: the dir prefix (sans trailing '/') resolved
+    // against cwd, or cwd itself.
+    let mut dirbuf = [0u8; PATH_SIZE];
+    let dir = if dir_part.is_empty() {
+        cwd
+    } else {
+        let trimmed = if dir_part.last() == Some(&b'/') {
+            &dir_part[..dir_part.len() - 1]
+        } else {
+            dir_part
+        };
+        let Ok(trimmed_str) = core::str::from_utf8(trimmed) else { return 0 };
+        match resolve_path(cwd, trimmed_str, &mut dirbuf) {
+            Some(l) => core::str::from_utf8(&dirbuf[..l]).unwrap_or(cwd),
+            None => return 0,
+        }
+    };
+
+    let mut listing = [0u8; LIST_SIZE];
+    let r = fs_list_dir(dir, &mut listing);
+    if r >= FS_ERR_MIN {
+        return 0;
+    }
+    let data = &listing[..r as usize];
+    let match_dot = pat.first() == Some(&b'.');
+
+    let mut written = 0usize;
+    let mut count = 0usize;
+    let mut start = 0usize;
+    for i in 0..=data.len() {
+        if i == data.len() || data[i] == b'\n' {
+            if i > start {
+                let mut line = &data[start..i];
+                if line.last() == Some(&b'/') {
+                    line = &line[..line.len() - 1]; // strip the dir marker
+                }
+                let skip = !match_dot && line.first() == Some(&b'.');
+                if !skip && !line.is_empty() && wildcard_match(pat, line) {
+                    if count > 0 && written < out.len() {
+                        out[written] = b' ';
+                        written += 1;
+                    }
+                    // <dir_part><name>
+                    for &b in dir_part {
+                        if written < out.len() {
+                            out[written] = b;
+                            written += 1;
+                        }
+                    }
+                    for &b in line {
+                        if written < out.len() {
+                            out[written] = b;
+                            written += 1;
+                        }
+                    }
+                    count += 1;
+                }
+            }
+            start = i + 1;
+        }
+    }
+    if count == 0 {
+        0
+    } else {
+        written
+    }
+}
+
+/// Expand filename globs (`*`, `?`) in `line` against the filesystem, producing
+/// a new line in `out`. Each whitespace token containing a wildcard is replaced
+/// by its (space-separated) matches; a token with no wildcard, or one that
+/// matches nothing, is copied verbatim. Pipeline/redirect tokens (`|`/`>`/`>>`)
+/// have no wildcards, so they pass through untouched.
+fn expand_globs<'a>(line: &str, cwd: &str, out: &'a mut [u8]) -> &'a str {
+    let mut len = 0usize;
+    let mut first = true;
+    for tok in line.split_whitespace() {
+        if !first && len < out.len() {
+            out[len] = b' ';
+            len += 1;
+        }
+        first = false;
+        let expanded = if tok.contains('*') || tok.contains('?') {
+            expand_one_glob(tok, cwd, &mut out[len..])
+        } else {
+            0
+        };
+        if expanded > 0 {
+            len += expanded;
+        } else {
+            // No wildcard, or no match: keep the token literal.
+            for &b in tok.as_bytes() {
+                if len < out.len() {
+                    out[len] = b;
+                    len += 1;
+                }
+            }
+        }
+    }
+    core::str::from_utf8(&out[..len]).unwrap_or("")
+}
+
+/// Iterate a `fs_list_dir` listing (`name\n`/`name/\n` lines), calling `f` with
+/// each entry's name (trailing `/` stripped) and whether it's a directory.
+fn for_each_entry(data: &[u8], mut f: impl FnMut(&[u8], bool)) {
+    let mut start = 0usize;
+    for i in 0..=data.len() {
+        if i == data.len() || data[i] == b'\n' {
+            if i > start {
+                let mut name = &data[start..i];
+                let is_dir = name.last() == Some(&b'/');
+                if is_dir {
+                    name = &name[..name.len() - 1];
+                }
+                f(name, is_dir);
+            }
+            start = i + 1;
+        }
+    }
+}
+
+/// Whether `name` begins with `prefix`, ASCII case-insensitively.
+fn starts_with_ci(name: &[u8], prefix: &[u8]) -> bool {
+    if prefix.len() > name.len() {
+        return false;
+    }
+    for k in 0..prefix.len() {
+        if !ci_eq(name[k], prefix[k]) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Tab completion: complete the last word of the input line as a filename,
+/// against the filesystem. A single match replaces the typed prefix with the
+/// full name (filesystem case) plus `/` (directory) or a space (file); several
+/// matches extend to their common prefix, and if that adds nothing, list them
+/// and redraw. No match does nothing. Byte-based throughout (a `&str` runtime
+/// slice pulls in `core`'s unlinkable formatted panic path - see `glob_split`).
+fn complete_word(buf: &mut [u8; BUFFER_SIZE], len: &mut usize, cwd: &[u8; CWD_SIZE], cwd_len: usize) {
+    // The word being completed: from the last space to the cursor.
+    let mut ws = *len;
+    while ws > 0 && buf[ws - 1] != b' ' {
+        ws -= 1;
+    }
+    let mut word = [0u8; PATH_SIZE];
+    let wn = (*len - ws).min(word.len());
+    word[..wn].copy_from_slice(&buf[ws..ws + wn]);
+    let (dir_part, prefix) = glob_split(&word[..wn]);
+
+    // The directory to list, built into `dirbuf`.
+    let mut dirbuf = [0u8; PATH_SIZE];
+    let dir_len = if dir_part.is_empty() {
+        let c = cwd_str(cwd, cwd_len).as_bytes();
+        let n = c.len().min(dirbuf.len());
+        dirbuf[..n].copy_from_slice(&c[..n]);
+        n
+    } else {
+        let trimmed = if dir_part.last() == Some(&b'/') {
+            &dir_part[..dir_part.len() - 1]
+        } else {
+            dir_part
+        };
+        let Ok(ts) = core::str::from_utf8(trimmed) else { return };
+        match resolve_path(cwd_str(cwd, cwd_len), ts, &mut dirbuf) {
+            Some(l) => l,
+            None => return,
+        }
+    };
+    let Ok(dir) = core::str::from_utf8(&dirbuf[..dir_len]) else { return };
+
+    let mut listing = [0u8; LIST_SIZE];
+    let r = fs_list_dir(dir, &mut listing);
+    if r >= FS_ERR_MIN {
+        return;
+    }
+    let data = &listing[..r as usize];
+    let match_dot = prefix.first() == Some(&b'.');
+
+    // One pass: longest common prefix of all matches, the count, and (for a
+    // lone match) whether it's a directory.
+    let mut lcp = [0u8; PATH_SIZE];
+    let mut lcp_len = 0usize;
+    let mut count = 0usize;
+    let mut only_is_dir = false;
+    for_each_entry(data, |name, is_dir| {
+        if name.is_empty() || (!match_dot && name.first() == Some(&b'.')) || !starts_with_ci(name, prefix) {
+            return;
+        }
+        if count == 0 {
+            let n = name.len().min(lcp.len());
+            lcp[..n].copy_from_slice(&name[..n]);
+            lcp_len = n;
+            only_is_dir = is_dir;
+        } else {
+            let mut k = 0;
+            while k < lcp_len && k < name.len() && ci_eq(lcp[k], name[k]) {
+                k += 1;
+            }
+            lcp_len = k;
+        }
+        count += 1;
+    });
+
+    if count == 0 {
+        return;
+    }
+
+    // Replace the typed prefix with the resolved-case completion (lcp), so
+    // casing is consistent. Erase the prefix from display + buffer, retype lcp.
+    for _ in 0..prefix.len() {
+        if *len > ws {
+            putc(BACKSPACE);
+            putc(b' ');
+            putc(BACKSPACE);
+            *len -= 1;
+        }
+    }
+    for &b in &lcp[..lcp_len] {
+        if *len < BUFFER_SIZE {
+            buf[*len] = b;
+            *len += 1;
+            putc(b);
+        }
+    }
+    if count == 1 {
+        let sep = if only_is_dir { b'/' } else { b' ' };
+        if *len < BUFFER_SIZE {
+            buf[*len] = sep;
+            *len += 1;
+            putc(sep);
+        }
+    } else if lcp_len == prefix.len() {
+        // Ambiguous, no further common prefix: list the matches, then redraw.
+        putc(CR);
+        putc(LF);
+        for_each_entry(data, |name, is_dir| {
+            if name.is_empty() || (!match_dot && name.first() == Some(&b'.')) || !starts_with_ci(name, prefix) {
+                return;
+            }
+            for &b in name {
+                putc(b);
+            }
+            if is_dir {
+                putc(b'/');
+            }
+            putc(b' ');
+        });
+        putc(CR);
+        putc(LF);
+        print_prompt();
+        for &b in &buf[..*len] {
+            putc(b);
+        }
+    }
+}
 // (`LIST_BUFFER_SIZE` used to live here for the built-in `ls`'s listing
 // buffer; `ls` is a /bin program now, so its listing buffer lives in the
 // `ls` crate over `ulib`.)
@@ -214,8 +530,18 @@ fn expand_vars<'a>(line: &str, env: &Env, out: &'a mut [u8]) -> &'a str {
 
 const BACKSPACE: u8 = 0x08;
 const DEL: u8 = 0x7f;
+const TAB: u8 = 0x09;
 const CR: u8 = b'\r';
 const LF: u8 = b'\n';
+
+/// The glob-expanded command line buffer (a `*`/`?` can expand to many
+/// filenames). Larger than `EXPAND_SIZE` for that reason; an expansion that
+/// overflows is truncated.
+const GLOB_LINE_SIZE: usize = 1024;
+
+/// A directory listing buffer for globbing and tab completion (the same
+/// `name\n`/`name/\n` format `fs_list_dir` fills, bounded by its reply cap).
+const LIST_SIZE: usize = 512;
 
 // Syscall numbers and sentinel values come from the shared `syscall-abi`
 // crate now, not hand-duplicated local consts - see its doc comment and
@@ -298,6 +624,10 @@ fn on_byte(byte: u8, buf: &mut [u8; BUFFER_SIZE], len: &mut usize, cwd: &mut [u8
                 putc(BACKSPACE);
             }
         }
+        TAB => {
+            // Filename completion of the last word (see `complete_word`).
+            complete_word(buf, len, cwd, *cwd_len);
+        }
         byte => {
             // Unhandled C0 control bytes (anything below space that
             // isn't the CR/LF/backspace cases above) are ignored rather
@@ -353,6 +683,16 @@ fn run_line(line: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize, env: &mut
     // is only read here, so it's free to be borrowed mutably below.
     let mut ebuf = [0u8; EXPAND_SIZE];
     let line = expand_vars(line, env, &mut ebuf);
+
+    // Filename globbing: expand `*`/`?` tokens against the filesystem (only if
+    // the line has a wildcard at all - most don't, so skip the fs work). The
+    // expanded line lives in `gbuf` for the rest of the call.
+    let mut gbuf = [0u8; GLOB_LINE_SIZE];
+    let line = if line.contains('*') || line.contains('?') {
+        expand_globs(line, cwd_str(cwd, *cwd_len), &mut gbuf)
+    } else {
+        line
+    };
 
     // Pipelines first: standalone `|` tokens split the line into N stages.
     // The first stage may be a builtin (its output captured and streamed) or a

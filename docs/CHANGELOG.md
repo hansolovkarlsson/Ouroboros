@@ -7,6 +7,37 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/`; 
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## Shell: filename wildcards and tab completion
+
+Two interactive shell improvements.
+
+**Wildcards (globbing).** `*` and `?` in a command line now expand against the
+filesystem before the command runs: `echo *.txt`, `cat /bin/L*`, `ls sub/*.log`.
+`*` matches any run, `?` any single character, case-insensitively (FAT is);
+dotfiles are matched only when the pattern starts with `.` (so `*` skips
+`.`/`..`). A token that matches nothing is kept literal (bash-style), and
+pipeline/redirect tokens have no wildcards so they pass through. Expansion
+happens in `run_line` after `$VAR` expansion (skipped entirely when the line has
+no wildcard). Each matching token can expand to several filenames, so it pairs
+best with commands that take several arguments (`echo` today).
+
+**Tab completion.** Pressing Tab completes the last word of the input as a
+filename. A single match replaces the typed prefix with the full name (in the
+filesystem's case) plus `/` for a directory or a space for a file; several
+matches extend to their longest common prefix, and if that adds nothing, list
+them and redraw the line. It handles a directory prefix (`cat sub/pre<Tab>`).
+
+**A PIE trap worth recording:** both features were rewritten to work in **bytes**
+after a link failure — slicing a `&str` by a runtime index emits `core`'s
+*formatted* char-boundary panic path, which pulls in the `core::fmt` code the
+`-pie` link can't resolve (`R_AARCH64_ABS64`). Byte slices use a lighter,
+already-linked panic path; `from_utf8` converts back only where a `&str` is
+needed. (See `manpages`/`selftest` lore on the same relocation limit.)
+
+**Verified** in QEMU: `echo *` / `*.txt` / `/bin/L*` / `?anana.txt` expanded
+correctly and `*.md` stayed literal; `cat ba<Tab>` completed to `BANANA.TXT` and
+`echo ap<Tab>` listed `APPLE.TXT APRICOT.TXT` and extended to `AP`.
+
 ## `man` - manual pages
 
 A `man <command>` that prints a full manual page, complementing the one-line
