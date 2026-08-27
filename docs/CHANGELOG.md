@@ -7,6 +7,22 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/`; 
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## Fix: running a program by a relative path from `/`
+
+A command containing a `/` was being fed through the `$PATH` search like a bare
+name — each PATH directory prepended — so `bin/echo` from `/` became
+`/bin/bin/echo` and failed with `unknown command: bin/echo`. It only *seemed*
+to work from a subdirectory: `../bin/echo` became `/bin/../bin/echo`, which
+normalizes back to `/bin/echo` by accident, regardless of the cwd.
+
+The fix applies the standard shell rule at the top-level command dispatch (the
+pipeline-stage resolver `resolve_command` already did this): a word containing a
+`/` is a **pathname**, resolved against the cwd (or used as-is if absolute) and
+**not** searched on `$PATH`; only a bare name searches `$PATH`. So `/bin/echo`,
+`bin/echo` (from `/`), and `../bin/echo` (from a subdir) all run `/bin/echo`; a
+missing pathname (`bin/nope`) still falls through to `unknown command`.
+**Verified** in QEMU across all five cases.
+
 ## `ps` shows process names
 
 `ps` printed only a slot number and state (`task 5: runnable`); now each line

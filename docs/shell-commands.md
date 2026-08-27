@@ -118,13 +118,20 @@ machines that don't share the key are refused.
 | `selftest` | `selftest` | Exercises the two historically-crashing code patterns (`write!`/`core::fmt` formatting, slice/str-vs-literal comparison) and prints pass/fail lines. | The relocating loader's permanent acceptance test — see `processes.md`'s "Binary format". |
 | `mv` | `mv <src> <dst>` | Renames or moves a file or directory to `dst` — and if `dst` is an existing directory, moves `src` *into* it keeping its basename (`mv notes.txt backup/`), like real `mv`. | A `dst` that exists and isn't a directory still fails rather than being overwritten. `mv x x` is refused ("source and destination are the same"). Moving a directory to a different parent correctly updates its own `..` entry, so `cd ..` inside it still resolves to the *new* parent afterward. No cycle detection beyond the trivial self-move guard. |
 
-Any other input is looked up as a **program on `$PATH`** (each `:`-separated
-directory in turn, e.g. `/bin/<name>`) and run in the foreground with the
-whole line as its argv — so a command binary is invoked by bare name, no
-`exec` or leading path needed. Only if no PATH directory has it does it print
-`unknown command: <word>`. `$VAR` references anywhere in a line are expanded
-from the environment before dispatch. A blank line (just Enter, or only
-whitespace) does nothing.
+Any other input names a **program to run** in the foreground, with the whole
+line as its argv. How the program is found follows the standard shell rule:
+
+- A **bare name** (no `/`) is looked up on **`$PATH`** — each `:`-separated
+  directory in turn, e.g. `/bin/<name>` — so a command binary is invoked by
+  name, no `exec` or leading path needed (`echo hello`).
+- A word **containing `/`** is a **pathname**, resolved against the current
+  directory (or used as-is if absolute) and **not** searched on `$PATH`:
+  `/bin/echo hello`, `bin/echo hello` from `/`, `../bin/echo hello` from a
+  subdirectory all run `/bin/echo`.
+
+Only if the resolved program can't be found does it print `unknown command:
+<word>`. `$VAR` references anywhere in a line are expanded from the environment
+before dispatch. A blank line (just Enter, or only whitespace) does nothing.
 
 ## Output redirection
 

@@ -1290,6 +1290,32 @@ fn run_path_command(command: &str, line: &str, cwd: &[u8; CWD_SIZE], cwd_len: us
     }
     let argv = &argv_buf[..n];
 
+    // A command containing '/' is a PATHNAME, not a bare name: resolve it
+    // against the cwd (absolute if it starts with '/') and run that file
+    // directly - the standard shell rule that PATH is searched *only* for
+    // names with no slash. Without this, `bin/echo` from `/` was turned into
+    // `<PATH>/bin/echo` (= `/bin/bin/echo`) and never found, while
+    // `../bin/echo` only "worked" by the accident of normalizing back onto
+    // PATH (`/bin/../bin/echo` -> `/bin/echo`).
+    if command.contains('/') {
+        let mut cand = [0u8; PATH_SIZE];
+        let Some(len) = resolve_path(cwd_str(cwd, cwd_len), command, &mut cand) else {
+            return false;
+        };
+        let Ok(candidate) = core::str::from_utf8(&cand[..len]) else {
+            return false;
+        };
+        // Probe for existence, same as the PATH loop below, so a missing
+        // pathname falls through to "unknown command" rather than an error.
+        let mut probe = [0u8; 1];
+        let r = fs_read_file(candidate, &mut probe);
+        if r == NO_FS || r >= FS_ERR_MIN {
+            return false;
+        }
+        run_found_command(candidate, command, argv, cwd, cwd_len, out);
+        return true;
+    }
+
     // Search directories from the PATH env var (falling back to the default
     // if unset or not valid UTF-8).
     let path = env
@@ -1332,35 +1358,51 @@ fn run_path_command(command: &str, line: &str, cwd: &[u8; CWD_SIZE], cwd_len: us
         }
 
         // Found it. Run it - foreground (console) or captured (redirect).
-        if out.is_console() {
-            match spawn_path(candidate, argv, cwd, cwd_len, syscall_abi::CON_TASK) {
-                Ok(slot) => {
-                    delegate_net(slot);
-                    // Foreground: wait for it (also reaps the slot). Ctrl+C
-                    // interrupts the wait and leaves it running in the
-                    // background (see `ps`).
-                    if syscall(syscall_abi::WAIT, slot) == WAIT_INTERRUPTED {
-                        print_line("interrupted (the program keeps running - see ps)");
-                    }
-                }
-                Err(0) => print_line("command path too long"),
-                Err(NO_FS) => print_no_fs(),
-                Err(code) => print_fs_error(command, code),
-            }
-        } else {
-            match spawn_path(candidate, argv, cwd, cwd_len, self_task()) {
-                Ok(slot) => {
-                    delegate_net(slot);
-                    capture_program_output(slot, out);
-                }
-                Err(0) => print_line("command path too long"),
-                Err(NO_FS) => print_no_fs(),
-                Err(code) => print_fs_error(command, code),
-            }
-        }
+        run_found_command(candidate, command, argv, cwd, cwd_len, out);
         return true;
     }
     false
+}
+
+/// Spawn an already-resolved, already-found candidate path and run it -
+/// foreground (wait+reap) when writing to the console, or captured when the
+/// sink is a redirect/pipe - the shared tail of both command-lookup paths
+/// (a bare name found on `$PATH`, and a `/`-containing pathname resolved
+/// against the cwd). Always returns after running (the caller reports "found").
+fn run_found_command(
+    candidate: &str,
+    command: &str,
+    argv: &[&str],
+    cwd: &[u8; CWD_SIZE],
+    cwd_len: usize,
+    out: &mut Output,
+) {
+    if out.is_console() {
+        match spawn_path(candidate, argv, cwd, cwd_len, syscall_abi::CON_TASK) {
+            Ok(slot) => {
+                delegate_net(slot);
+                // Foreground: wait for it (also reaps the slot). Ctrl+C
+                // interrupts the wait and leaves it running in the
+                // background (see `ps`).
+                if syscall(syscall_abi::WAIT, slot) == WAIT_INTERRUPTED {
+                    print_line("interrupted (the program keeps running - see ps)");
+                }
+            }
+            Err(0) => print_line("command path too long"),
+            Err(NO_FS) => print_no_fs(),
+            Err(code) => print_fs_error(command, code),
+        }
+    } else {
+        match spawn_path(candidate, argv, cwd, cwd_len, self_task()) {
+            Ok(slot) => {
+                delegate_net(slot);
+                capture_program_output(slot, out);
+            }
+            Err(0) => print_line("command path too long"),
+            Err(NO_FS) => print_no_fs(),
+            Err(code) => print_fs_error(command, code),
+        }
+    }
 }
 
 /// Relay-capture a program's output (routed back to this shell as a raw

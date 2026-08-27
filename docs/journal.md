@@ -7,6 +7,21 @@ for the forward plan see [`roadmap.md`](roadmap.md).
 
 ---
 
+## 2026-08-27 (cont.) — a path-command bug: `bin/echo` from `/`
+
+Hans hit a real one: `bin/echo hello` from `/` said `unknown command: bin/echo`,
+but `../bin/echo` from a subfolder worked. The "subfolder fixes it" framing was a
+red herring — the actual cause was that the top-level command dispatch fed
+*anything* non-builtin through the `$PATH` search, prepending each PATH dir. So
+`bin/echo` became `/bin/bin/echo` (gone), while `../bin/echo` became
+`/bin/../bin/echo` which normalizes back to `/bin/echo` by pure luck, no matter
+what the cwd was. The pipeline-stage resolver already got this right (a
+`/`-containing token is a pathname, resolved against the cwd, PATH untouched) —
+the top-level path just never learned the same rule. One `command.contains('/')`
+branch brought them into line. Nice to see the fix confirmed across all five
+shapes (bare, absolute, relative-from-root, relative-from-subdir, and a bogus
+path still landing on `unknown command`).
+
 ## 2026-08-27 — `ps` shows process names
 
 A small, satisfying observability win. `ps` had always printed a bare slot
