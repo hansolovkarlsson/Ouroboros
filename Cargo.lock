@@ -247,6 +247,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "readkey"
+version = "0.1.0"
+dependencies = [
+ "syscall-abi",
+ "ulib",
+]
+
+[[package]]
 name = "resolve"
 version = "0.1.0"
 dependencies = [

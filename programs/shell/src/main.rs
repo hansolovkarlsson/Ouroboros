@@ -1429,11 +1429,19 @@ fn run_found_command(
         match spawn_path(candidate, argv, cwd, cwd_len, syscall_abi::CON_TASK) {
             Ok(slot) => {
                 delegate_net(slot);
-                // Foreground: wait for it (also reaps the slot). Ctrl+C
-                // interrupts the wait and leaves it running in the
-                // background (see `ps`).
-                if syscall(syscall_abi::WAIT, slot) == WAIT_INTERRUPTED {
-                    print_line("interrupted (the program keeps running - see ps)");
+                // Hand the foreground program the keyboard so it can read input
+                // (an editor, a REPL, a pager) - only the keyboard owner gets
+                // keystrokes, and the shell owns it by default. On the program's
+                // death (exit *or* Ctrl+C kill) ownership reverts to this shell
+                // automatically (kernel `revert_input_owner_if`). This is what
+                // lets an interactive command be an ordinary `/bin` program.
+                syscall(syscall_abi::FG, slot);
+                // Foreground: wait for it (also reaps the slot). A Ctrl+C now
+                // *terminates* the program (the kernel kills it and the wait
+                // returns TASK_KILLED_STATUS); print a newline so the next
+                // prompt starts clean.
+                if syscall(syscall_abi::WAIT, slot) == TASK_KILLED_STATUS {
+                    print_line("");
                 }
             }
             Err(0) => print_line("command path too long"),

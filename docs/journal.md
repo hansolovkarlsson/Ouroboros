@@ -7,6 +7,31 @@ for the forward plan see [`roadmap.md`](roadmap.md).
 
 ---
 
+## 2026-08-27 (cont.) — the keyboard arc: interactive programs can be `/bin` now
+
+The big one, and it came straight out of a question: does a program that reads the
+keyboard (a BASIC interpreter, an editor) have to be built into the shell? The
+answer was "only because of one missing piece," so I built the piece. Keyboard
+input goes to a single owner, and nothing ever handed that ownership to a
+foreground program — so the shell now `FG`s a command before it `WAIT`s on it, and
+the kernel already reverts ownership when the command dies. That's the whole
+unlock: `readkey`, a throwaway echo program, ran as an ordinary `/bin` binary and
+printed the keys I typed. First time a spawned program in this OS has read the
+keyboard.
+
+The subtle half was Ctrl+C. It used to just steal the keyboard back and leave the
+program running (fine when nothing owned the keyboard but the shell; a deadlock
+once a foreground program reads input). So I made Ctrl+C *terminate* the
+foreground program — the escape hatch marks it, and `on_tick` does the kill using
+the exact teardown the supervisor's crash-restart already uses (current-task vs
+not). The one genuinely hard case was a *compute-bound* program that never reads:
+nobody polls the keyboard for it, so I added a once-per-tick poll of a running
+foreground owner. That can eat type-ahead, but only while a program is actively
+running rather than blocked on a read — and a program waiting for input is
+blocked, so in practice it's a non-issue. Terminate, not a signal, is the honest
+limitation; an editor that wants to catch Ctrl+C needs real signals later. But the
+door's open: the next editor or REPL is just a program in `/bin`.
+
 ## 2026-08-27 (cont.) — moving `pwd` and `write` out to `/bin`
 
 A cleanup prompted by a good question: which builtins are builtins by *necessity*

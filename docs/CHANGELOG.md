@@ -7,6 +7,41 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/`; 
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## Foreground programs own the keyboard — interactive `/bin` programs
+
+The single thing that forced every interactive command (a pager, and later an
+editor or a REPL) to be a shell **builtin** is gone. Keyboard input is routed to
+one owner (`INPUT_OWNER`, the boot shell by default), and a spawned `/bin`
+program was never made that owner — so it could never read a key. Now **the shell
+hands a foreground command the keyboard at spawn** (a `FG` before the `WAIT` in
+`run_found_command`), and the kernel already reverts ownership to the shell when
+that command dies. So an interactive command is just an ordinary `/bin` program
+that calls `read_char` — no kernel-of-the-shell required.
+
+**Ctrl+C now terminates the foreground program** (it used to just yank the
+keyboard back and leave the program running, stranded). The escape hatch
+(`interrupt_key_check`) marks the foreground owner for death; `on_tick` performs
+the kill at a safe point (the same teardown the `KILL` syscall uses, split on
+whether the victim is the interrupted task) and the shell's `WAIT` wakes with
+`TASK_KILLED_STATUS`. It catches Ctrl+C both from a program *blocked reading* (via
+the wake-check keyboard poll) and from a *running compute loop* (a once-per-tick
+poll of the foreground owner) — so a runaway program is still interruptible. It's
+**terminate, not a signal**: nothing is delivered to the program to catch (an
+editor can't yet offer "save first"); real signals, or a raw-input mode that
+delivers Ctrl+C as a byte, are a later refinement.
+
+Also new: **`ulib::read_char`** (the blocking key read) and **`/bin/READKEY`**, a
+small keyboard-echo diagnostic that's the living proof of the arc — it reads keys
+and prints each one, `q` quits, Ctrl+C aborts. The known caveat: a *running*
+(not blocked-reading) foreground program can lose type-ahead to the once-per-tick
+Ctrl+C poll — rare, since a program waiting for input is blocked, not running.
+
+**Verified** in QEMU: `readkey` received `a`/`Z`/`5` (a `/bin` program reading the
+keyboard — the whole point), `q` returned to the shell, and Ctrl+C terminated it
+(`task 5 terminated`) and dropped back to the prompt. Normal commands, pipelines,
+and the `more` builtin all still work. This unblocks the editor/BASIC direction:
+those are now just `/bin` programs.
+
 ## `pwd` and `write` move out to `/bin`
 
 Two more former builtins became real `/bin` programs, continuing the

@@ -17,7 +17,7 @@ members = [
     "programs/netutils/ping", "programs/netutils/resolve", "programs/netutils/fetch",
     "programs/netutils/dial", "programs/netutils/serve",
     "programs/shellutils/echo", "programs/shellutils/uptime", "programs/shellutils/clear",
-    "programs/shellutils/args", "programs/shellutils/pwd",
+    "programs/shellutils/args", "programs/shellutils/pwd", "programs/shellutils/readkey",
 ]
 # `shell`, `hello`, and `pong` are built explicitly with `--target
 # aarch64-unknown-none` (see the Makefile) - they must never be pulled
