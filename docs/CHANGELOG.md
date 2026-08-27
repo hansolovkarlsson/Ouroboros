@@ -7,6 +7,37 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/`; 
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## A minimal shell: `more`/`less`, `send`, `recv`, `selftest` move to `/bin`
+
+Following the keyboard arc, the shell shed the commands that didn't need to be
+built in, leaving a deliberately minimal builtin set: shell state (`cd`/`bind`/
+`env`/`set`/`unset`), job control (`exec`/`ps`/`kill`/`fg`/`wait`), the
+disk-management and power commands that must run with nothing mounted
+(`erase`/`partition`/`format`/`shutdown`/`halt`), the mount commands, `cpu`, and
+`help`/`exit`. Everything else is a `/bin` program.
+
+- **`more`/`less` → `/bin`** — the flagship, and the payoff of the keyboard arc.
+  A pager reads the keyboard while it runs, which a spawned program couldn't do
+  before; now it can. `/bin/more` pages a file argument or stdin (a pipe), so
+  both `more <file>` and `<cmd> | more` work. Making the pipe case work needed
+  one more generalization: the shell now hands a **pipeline's last stage** the
+  keyboard (`cmd_pipeline`), so an interactive consumer gets keystrokes — the
+  same rule a single foreground command already gets. `less` is the same binary
+  under a second name.
+- **`send`/`recv` → `/bin`** — the IPC test pair; they only call a syscall.
+- **`selftest` → `/bin`** — the relocating-loader regression check. Moving it out
+  makes it test a *spawned* PIE binary (what actually matters), and it confirmed
+  `core::fmt`/`write!` links and runs in a `/bin` program (zero relocations).
+
+Two bugs found and fixed while moving `more`: a piped `more` read its stdin with
+the full 256 KB heap slice as the buffer, but `MSG_RECV` rejects a length over
+`MSG_MAX_LEN` (768) — fixed by reading one bounded chunk at a time into the heap;
+and the pipeline-last-stage `FG` was needed or the piped pager never got the
+keyboard. Added `ulib::heap()` (the program's heap area) and `ulib::read_char()`
+for interactive `/bin` programs. **Verified** in QEMU: `more /L.TXT`, `ls -l /bin
+| more` (paged, space-advanced), `send`, and `selftest` (all three checks pass).
+Workspace is now 44 crates.
+
 ## Foreground programs own the keyboard — interactive `/bin` programs
 
 The single thing that forced every interactive command (a pager, and later an

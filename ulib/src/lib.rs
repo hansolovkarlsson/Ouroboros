@@ -103,6 +103,23 @@ pub fn write_out(target: u64, bytes: &[u8]) {
     }
 }
 
+/// This program's heap area as a mutable byte slice (its region's fixed raw
+/// heap, reported by `HEAP_INFO` - see the shell's own use). Space far larger
+/// than the stack, for data a fixed stack buffer can't hold (a pager buffering
+/// a file, say). Not a `GlobalAlloc` heap - just the program's own
+/// EL0-accessible scratch area; empty (`&mut []`) if the region is too small to
+/// have one.
+pub fn heap() -> &'static mut [u8] {
+    let base = syscall(syscall_abi::HEAP_INFO, syscall_abi::HEAP_INFO_BASE);
+    let size = syscall(syscall_abi::HEAP_INFO, syscall_abi::HEAP_INFO_SIZE);
+    if base == 0 || size == 0 {
+        return &mut [];
+    }
+    // SAFETY: HEAP_INFO reports this task's own reserved heap area, EL0-writable
+    // for the whole run and not aliased by anything else.
+    unsafe { core::slice::from_raw_parts_mut(base as *mut u8, size as usize) }
+}
+
 /// Block until a keyboard byte is available, and return it (`READ_CHAR`). A
 /// program only receives keystrokes while it *owns* the keyboard - the shell
 /// hands a foreground command that ownership at spawn, so an interactive `/bin`

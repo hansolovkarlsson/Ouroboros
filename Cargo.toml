@@ -10,7 +10,7 @@ members = [
     "programs/fileutils/ls", "programs/fileutils/cat", "programs/fileutils/mkdir",
     "programs/fileutils/rmdir", "programs/fileutils/touch", "programs/fileutils/rm",
     "programs/fileutils/cp", "programs/fileutils/mv", "programs/fileutils/writeat",
-    "programs/fileutils/tree", "programs/fileutils/write",
+    "programs/fileutils/tree", "programs/fileutils/write", "programs/fileutils/more",
     "programs/textutils/upper", "programs/textutils/wc", "programs/textutils/grep",
     "programs/textutils/head", "programs/textutils/tail", "programs/textutils/nl",
     "programs/textutils/rev", "programs/textutils/uniq",
@@ -18,6 +18,7 @@ members = [
     "programs/netutils/dial", "programs/netutils/serve",
     "programs/shellutils/echo", "programs/shellutils/uptime", "programs/shellutils/clear",
     "programs/shellutils/args", "programs/shellutils/pwd", "programs/shellutils/readkey",
+    "programs/shellutils/send", "programs/shellutils/recv", "programs/shellutils/selftest",
 ]
 # `shell`, `hello`, and `pong` are built explicitly with `--target
 # aarch64-unknown-none` (see the Makefile) - they must never be pulled

@@ -63,7 +63,6 @@
 #![no_main]
 
 use core::arch::asm;
-use core::fmt::Write as _;
 use core::panic::PanicInfo;
 
 const BUFFER_SIZE: usize = 128;
@@ -355,29 +354,6 @@ fn run_line(line: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize, env: &mut
     let mut ebuf = [0u8; EXPAND_SIZE];
     let line = expand_vars(line, env, &mut ebuf);
 
-    // `<command> | more`: page the command's output. Handled before the general
-    // pipeline path because `more` is a builtin pager (it must read the keyboard
-    // while running, which only the boot shell can - see `page_content`), not a
-    // program a pipeline could spawn. The producer is captured into the heap,
-    // then paged.
-    if let Some(producer) = trailing_more(line) {
-        if producer.split_whitespace().any(|t| t == "|") {
-            print_line("more: pipe a single command into more (multi-stage pipelines aren't supported yet)");
-            return;
-        }
-        let capture = get_heap();
-        let mut out = Output::Capture { buf: capture, len: 0, overflowed: false };
-        dispatch_line(producer, cwd, cwd_len, env, &mut out);
-        if let Output::Capture { buf, len, overflowed } = out {
-            if overflowed {
-                print_line("more: output too large to page (exceeds the capture buffer)");
-            } else {
-                page_content(&buf[..len]);
-            }
-        }
-        return;
-    }
-
     // Pipelines first: standalone `|` tokens split the line into N stages.
     // The first stage may be a builtin (its output captured and streamed) or a
     // program; every later stage is a program reading its predecessor's output
@@ -416,31 +392,6 @@ fn run_line(line: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize, env: &mut
             };
             finish_redirect(&buf[..len], overflowed, target, append, cwd, *cwd_len);
         }
-    }
-}
-
-/// If `line` ends in a `| more` stage (the last `|`-delimited stage is exactly
-/// `more`), return the producer text before that final `|`; else `None`. Used
-/// to page a command's output (`<command> | more`). The producer may itself
-/// contain `|` (a multi-stage pipeline) - the caller decides what it supports.
-fn trailing_more(line: &str) -> Option<&str> {
-    let base = line.as_ptr() as usize;
-    let mut last_pipe: Option<usize> = None;
-    for tok in line.split_whitespace() {
-        if tok == "|" {
-            last_pipe = Some(tok.as_ptr() as usize - base);
-        }
-    }
-    let p = last_pipe?;
-    let last_stage = line.get(p + 1..)?.trim();
-    if last_stage != "more" && last_stage != "less" {
-        return None;
-    }
-    let before = line.get(..p)?.trim();
-    if before.is_empty() {
-        None
-    } else {
-        Some(before)
     }
 }
 
@@ -486,8 +437,8 @@ fn is_builtin(cmd: &str) -> bool {
     matches!(
         cmd,
         "help" | "cd" | "bind" | "mount" | "unmount" | "erase" | "partition" | "format"
-            | "exec" | "exit" | "shutdown" | "poweroff" | "halt" | "more" | "less" | "ps" | "kill"
-            | "fg" | "wait" | "send" | "recv" | "selftest" | "env" | "set" | "unset" | "cpu"
+            | "exec" | "exit" | "shutdown" | "poweroff" | "halt" | "ps" | "kill"
+            | "fg" | "wait" | "env" | "set" | "unset" | "cpu"
     )
 }
 
@@ -682,6 +633,13 @@ fn cmd_pipeline(stages: &[&str], cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize, 
         }
     }
 
+    // Hand the last stage the keyboard, so a pipeline whose consumer is
+    // interactive (e.g. `ls -l | more`) can read paging keys - the same
+    // foreground-owns-the-keyboard rule a single command gets. Harmless for a
+    // non-interactive last stage (grep/wc): it owns the keyboard, never reads
+    // it, and ownership reverts on exit. Ctrl+C then terminates that stage.
+    syscall(syscall_abi::FG, slots[prog_stages.len() - 1]);
+
     // Reap every program stage (in order, so a producer that streamed and
     // exited is collected before we block on its consumer).
     for i in 0..prog_stages.len() {
@@ -777,7 +735,7 @@ enum RedirectParse<'a> {
 /// an implementation accident. Operator detection uses scalar
 /// length/byte checks ([`is_dot`]/[`is_dotdot`] style) rather than
 /// `token == ">"` - literal comparisons are safe now that the loader
-/// relocates (see [`cmd_selftest`]), this just keeps the file on one
+/// relocates (see `selftest` (now `/bin/selftest`)), this just keeps the file on one
 /// idiom.
 fn parse_redirect(line: &str) -> RedirectParse<'_> {
     for token in line.split_whitespace() {
@@ -898,7 +856,7 @@ fn dispatch_line(line: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize, env:
     let arg = words.next().unwrap_or("");
 
     match command {
-        "help" => out.put_line("builtins: help, exit, cd, bind, mount (-a/-r/-p/-c/-n), unmount, erase, partition, format, exec, cpu, ps, kill, fg, wait, shutdown, halt, more/less, send, recv, env, set, unset, selftest. Everything else is a program in /bin (run `ls /bin`): echo, pwd, cat, ls, tree, write, cp, mv, grep, ping, ... Also: $VAR expands; `> file`/`>> file` redirects, `| prog` pipes, `| more` pages."),
+        "help" => out.put_line("builtins: help, exit, cd, bind, mount (-a/-r/-p/-c/-n), unmount, erase, partition, format, exec, cpu, ps, kill, fg, wait, shutdown, halt, env, set, unset. Everything else is a program in /bin (run `ls /bin`): echo, pwd, cat, ls, tree, write, cp, mv, grep, more, ping, send, recv, ... Add `-?` to a command for its usage. Also: $VAR expands; `> file`/`>> file` redirects, `| prog` pipes (`| more` to page)."),
         // echo, uptime, clear are externalized: they're /bin programs now
         // (found via PATH by the unknown-command arm), not builtins. See
         // "Standalone binaries, Stage 4".
@@ -915,7 +873,6 @@ fn dispatch_line(line: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize, env:
         "exit" => cmd_exit(),
         "shutdown" | "poweroff" => cmd_power(syscall_abi::POWER_OFF),
         "halt" => cmd_power(syscall_abi::POWER_HALT),
-        "more" | "less" => cmd_more(arg, cwd, *cwd_len),
         "ps" => cmd_ps(out),
         "kill" => cmd_kill(arg),
         "fg" => cmd_fg(arg),
@@ -926,9 +883,6 @@ fn dispatch_line(line: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize, env:
         "erase" => cmd_erase(arg),
         "partition" => cmd_partition(arg),
         "format" => cmd_format(arg),
-        "send" => cmd_send(line),
-        "recv" => cmd_recv(),
-        "selftest" => cmd_selftest(out),
         "env" => cmd_env(env, out),
         "set" | "export" => cmd_set(arg, env),
         "unset" => cmd_unset(arg, env),
@@ -1646,7 +1600,7 @@ impl Output<'_> {
     }
 
     /// Hand-rolled decimal formatting. Historical note, kept because it
-    /// explains why [`cmd_selftest`] exists and why this still
+    /// explains why `selftest` (now `/bin/selftest`) exists and why this still
     /// hand-rolls rather than switching to `write!` itself: under the
     /// *old*, non-relocating flat-binary loader, `write!`/
     /// `core::fmt::Arguments` crashed here. That machinery builds its
@@ -1660,7 +1614,7 @@ impl Output<'_> {
     /// trying `write!` here first). **This is now fixed**, since
     /// `loader.rs` processes real `R_AARCH64_RELATIVE` relocations
     /// against the actual runtime load address (see CLAUDE.md's
-    /// "relocating loader" milestone and [`cmd_selftest`], which proves
+    /// "relocating loader" milestone and `selftest` (now `/bin/selftest`), which proves
     /// it) - but this is left as hand-rolled decimal formatting anyway,
     /// simply because it was already written, works, and doesn't need
     /// `core::fmt`'s machinery to do something this simple.
@@ -1698,53 +1652,6 @@ fn print_line(s: &str) {
     print_str(s);
     putc(CR);
     putc(LF);
-}
-
-/// A `core::fmt::Write` target over an [`Output`] sink - lets
-/// [`cmd_selftest`] use real `write!`/`format_args!` without pulling in
-/// `alloc`, and lets its output participate in redirection like any
-/// other command's.
-struct Writer<'a, 'b>(&'a mut Output<'b>);
-
-impl core::fmt::Write for Writer<'_, '_> {
-    fn write_str(&mut self, s: &str) -> core::fmt::Result {
-        self.0.put_str(s);
-        Ok(())
-    }
-}
-
-/// Exercises the exact two patterns that used to crash under the old,
-/// non-relocating flat-binary loader (see [`print_u64_decimal`]'s doc
-/// comment and [`resolve_path`]'s) - `write!`/`core::fmt::Write`, and a
-/// slice/string comparison against a literal - and confirms both now
-/// produce correct output. Kept as a real, permanent regression check
-/// rather than a throwaway test: this is the actual acceptance criterion
-/// for the whole relocating-loader milestone (CLAUDE.md) - these patterns
-/// need to be ordinary, safe Rust again, not something a program author
-/// has to keep avoiding by hand-discipline.
-fn cmd_selftest(out: &mut Output) {
-    let mut w = Writer(out);
-
-    // write!/core::fmt: n is computed at runtime (not a compile-time
-    // constant folded away), so this genuinely exercises the formatting
-    // machinery's argument dispatch, not just a literal string.
-    let n = 6 * 7;
-    let _ = write!(w, "write!/core::fmt: {n} (expect 42)\r\n");
-
-    // Slice-vs-literal comparison: `probe` is a real runtime value (not
-    // itself a literal), compared against a b"..." literal with `==` -
-    // the exact shape that crashed as `cwd_bytes != b"/"` in cmd_cd's old
-    // path-resolution code (see resolve_path's doc comment).
-    let probe: [u8; 1] = *b"/";
-    let slice_ok = probe.as_slice() == b"/";
-    let _ = write!(w, "slice-vs-literal comparison: {slice_ok} (expect true)\r\n");
-
-    // &str-vs-literal comparison: same shape as the old `component == ".."`
-    // crash - `word` is built at runtime, not itself a literal.
-    let word_bytes = *b"hi";
-    let word = core::str::from_utf8(&word_bytes).unwrap_or("");
-    let str_ok = word == "hi";
-    let _ = write!(w, "str-vs-literal comparison: {str_ok} (expect true)\r\n");
 }
 
 /// One filesystem-server round trip, v2 protocol (fully self-contained - see
@@ -2976,69 +2883,6 @@ fn cmd_format(arg: &str) {
     }
 }
 
-/// `send <task> <words...>` - joins the words like `write` does and
-/// sends them as one IPC message (`MSG_SEND`) to the given task.
-fn cmd_send(line: &str) {
-    let mut words = line.split_whitespace();
-    words.next(); // "send" itself
-    let Some(task_arg) = words.next() else {
-        print_line("send: usage: send <task number> <words...>");
-        return;
-    };
-    let Some(dest) = parse_u64(task_arg) else {
-        print_line("send: usage: send <task number> <words...>");
-        return;
-    };
-
-    let mut msg = [0u8; 64];
-    let mut len = 0usize;
-    let mut first = true;
-    for word in words {
-        if !first && len < msg.len() {
-            msg[len] = b' ';
-            len += 1;
-        }
-        for b in word.bytes() {
-            if len < msg.len() {
-                msg[len] = b;
-                len += 1;
-            }
-        }
-        first = false;
-    }
-    if len == 0 {
-        print_line("send: usage: send <task number> <words...>");
-        return;
-    }
-
-    match syscall4(syscall_abi::MSG_SEND, dest, msg.as_ptr() as u64, len as u64, 0) {
-        code if code >= FS_ERR_MIN => print_fs_error("send", code),
-        _ => {}
-    }
-}
-
-/// `recv` - blocks until a message arrives (`MSG_RECV`) and prints it
-/// as `task N: <message>`. Ctrl+C interrupts, same as `wait`.
-fn cmd_recv() {
-    let mut buf = [0u8; syscall_abi::MSG_MAX_LEN as usize];
-    match syscall4(syscall_abi::MSG_RECV, buf.as_mut_ptr() as u64, buf.len() as u64, 0, 0) {
-        RECV_INTERRUPTED => print_line("recv: interrupted"),
-        code if code >= FS_ERR_MIN => print_fs_error("recv", code),
-        packed => {
-            let sender = packed >> 32;
-            let len = (packed & 0xffff_ffff) as usize;
-            print_str("task ");
-            print_u64(sender);
-            print_str(": ");
-            if let Ok(text) = core::str::from_utf8(&buf[..len.min(buf.len())]) {
-                print_line(text);
-            } else {
-                print_line("(non-UTF-8 message)");
-            }
-        }
-    }
-}
-
 /// `exit` builtin. This boot-loaded shell is task 0, which the kernel
 /// refuses to let exit (it's the one task that ever receives keyboard
 /// input - if it died, nothing could type again this boot), so for this
@@ -3051,98 +2895,6 @@ fn cmd_exit() {
         EXIT_DENIED => print_line("exit: refused - the boot shell can't exit (nothing would own the keyboard)"),
         _ => print_line("exit: unexpected return"),
     }
-}
-
-/// Lines shown per screen before the pager pauses (a full screen is ~24 rows;
-/// one is kept for the `--More--` prompt). The console geometry isn't exposed
-/// to the shell, so this is the conventional fallback.
-const PAGE_ROWS: usize = 23;
-
-/// Page `content` a screen at a time, reading a key at each `--More--` pause:
-/// **space** = next screen, **Enter** = one more line, **q** = quit. A
-/// **builtin** (not a `/bin` program) precisely because it must read the
-/// keyboard while running - only the boot shell (task 0) owns the keyboard, so
-/// only a builtin can page interactively (see the keyboard-owner note in
-/// `tasks.rs`). Fed by `more <file>` or `<command> | more`.
-fn page_content(content: &[u8]) {
-    if content.is_empty() {
-        return;
-    }
-    let total = content.len();
-    let mut pos = 0usize;
-    let mut to_show = PAGE_ROWS;
-    loop {
-        let mut printed = 0usize;
-        while printed < to_show && pos < total {
-            let start = pos;
-            while pos < total && content[pos] != b'\n' {
-                pos += 1;
-            }
-            // Print the line, dropping a trailing '\r' (DOS endings) since we
-            // add our own CRLF for the console.
-            let mut end = pos;
-            if end > start && content[end - 1] == b'\r' {
-                end -= 1;
-            }
-            con_write(&content[start..end]);
-            con_write(b"\r\n");
-            if pos < total {
-                pos += 1; // step past the '\n'
-            }
-            printed += 1;
-        }
-        if pos >= total {
-            break; // everything shown
-        }
-        con_write(b"--More--");
-        let key = read_char();
-        con_write(b"\r        \r"); // erase the prompt (CR, spaces, CR)
-        match key {
-            b'q' | b'Q' => break,
-            b'\r' | b'\n' => to_show = 1, // one more line
-            _ => to_show = PAGE_ROWS,      // space (or anything) = next screen
-        }
-    }
-}
-
-/// `more <file>`: read the file into the heap buffer, then page it. Reads in
-/// `FS_DATA_MAX` windows (the inline read cap) until a short read signals EOF.
-fn cmd_more(arg: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize) {
-    if arg.is_empty() {
-        print_line("more: usage: more <file>   (or: <command> | more)");
-        return;
-    }
-    let mut pathbuf = [0u8; PATH_SIZE];
-    let Some(plen) = resolve_path(cwd_str(cwd, cwd_len), arg, &mut pathbuf) else {
-        print_line("more: path too long");
-        return;
-    };
-    let Ok(path) = core::str::from_utf8(&pathbuf[..plen]) else {
-        print_line("more: bad path");
-        return;
-    };
-
-    let heap = get_heap();
-    let chunk = syscall_abi::FS_DATA_MAX as usize;
-    let mut total = 0usize;
-    let mut first = true;
-    while total < heap.len() {
-        let want = chunk.min(heap.len() - total);
-        let n = fs_read_at(path, total as u64, &mut heap[total..total + want]);
-        if n >= FS_ERR_MIN {
-            if first {
-                print_fs_error("more", n);
-            }
-            return;
-        }
-        first = false;
-        let n = n as usize;
-        total += n;
-        if n < want {
-            break; // short read = EOF
-        }
-    }
-    page_content(&heap[..total]);
 }
 
 /// `shutdown`/`poweroff` (mode `POWER_OFF`) and `halt` (mode `POWER_HALT`).

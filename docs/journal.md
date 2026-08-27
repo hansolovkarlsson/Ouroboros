@@ -7,6 +7,24 @@ for the forward plan see [`roadmap.md`](roadmap.md).
 
 ---
 
+## 2026-08-27 (cont.) — shrinking the shell: more/less/send/recv/selftest to /bin
+
+With the keyboard arc in place, the obvious follow-up: pull everything out of the
+shell that doesn't need to be there, and leave only the parts that genuinely are
+the shell — cwd, namespace, environment, job control, the disk/power commands
+that must run with no disk, and remote exec. The flagship extraction was the
+pager. It had been a builtin purely because it reads the keyboard; now a `/bin`
+program can, so out it went. `more <file>` was trivial. `cmd | more` took one
+insight: the pager, as a pipeline's *last* stage, needs the keyboard too, so the
+shell now fg's the last stage of every pipeline (harmless for `grep`/`wc`, which
+own it and never read). Two small bugs surfaced doing it — a piped `more` handed
+`MSG_RECV` its whole 256 KB heap as the receive buffer (rejected, since messages
+cap at 768), and I'd forgotten the last-stage fg at first — both quick fixes.
+`send`/`recv`/`selftest` came along for the ride; the nice moment was `selftest`
+running as a `/bin` binary and proving `core::fmt` links under PIE from a spawned
+program, not just the shell. The shell's builtin list is now short and every
+entry earns its place.
+
 ## 2026-08-27 (cont.) — the keyboard arc: interactive programs can be `/bin` now
 
 The big one, and it came straight out of a question: does a program that reads the

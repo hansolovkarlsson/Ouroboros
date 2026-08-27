@@ -147,6 +147,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "more"
+version = "0.1.0"
+dependencies = [
+ "syscall-abi",
+ "ulib",
+]
+
+[[package]]
 name = "mv"
 version = "0.1.0"
 dependencies = [
@@ -255,6 +263,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "recv"
+version = "0.1.0"
+dependencies = [
+ "syscall-abi",
+ "ulib",
+]
+
+[[package]]
 name = "resolve"
 version = "0.1.0"
 dependencies = [
@@ -280,6 +296,22 @@ dependencies = [
 
 [[package]]
 name = "rmdir"
+version = "0.1.0"
+dependencies = [
+ "syscall-abi",
+ "ulib",
+]
+
+[[package]]
+name = "selftest"
+version = "0.1.0"
+dependencies = [
+ "syscall-abi",
+ "ulib",
+]
+
+[[package]]
+name = "send"
 version = "0.1.0"
 dependencies = [
  "syscall-abi",

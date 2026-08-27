@@ -67,6 +67,14 @@ WRITE_ELF    := target/$(USER_TARGET)/release/write
 WRITE_BIN    := target/$(USER_TARGET)/release/write.bin
 READKEY_ELF  := target/$(USER_TARGET)/release/readkey
 READKEY_BIN  := target/$(USER_TARGET)/release/readkey.bin
+MORE_ELF     := target/$(USER_TARGET)/release/more
+MORE_BIN     := target/$(USER_TARGET)/release/more.bin
+SEND_ELF     := target/$(USER_TARGET)/release/send
+SEND_BIN     := target/$(USER_TARGET)/release/send.bin
+RECV_ELF     := target/$(USER_TARGET)/release/recv
+RECV_BIN     := target/$(USER_TARGET)/release/recv.bin
+SELFTEST_ELF := target/$(USER_TARGET)/release/selftest
+SELFTEST_BIN := target/$(USER_TARGET)/release/selftest.bin
 PING_ELF     := target/$(USER_TARGET)/release/ping
 PING_BIN     := target/$(USER_TARGET)/release/ping.bin
 WC_ELF       := target/$(USER_TARGET)/release/wc
@@ -133,7 +141,7 @@ ifeq ($(PROFILE),release)
 CARGO_FLAGS += --release
 endif
 
-.PHONY: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin tree-bin pwd-bin write-bin readkey-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin esp run run-virtio-console run-usb-kbd run-usb-multi run-gicv3 image run-image run-image-9p run-image-9p-client run-image-2vm-a run-image-2vm-b image-gpt run-image-gpt image-exfat run-image-exfat image-ext2 run-image-ext2 parallels-hdd release test-parallels clean
+.PHONY: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin tree-bin pwd-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin esp run run-virtio-console run-usb-kbd run-usb-multi run-gicv3 image run-image run-image-9p run-image-9p-client run-image-2vm-a run-image-2vm-b image-gpt run-image-gpt image-exfat run-image-exfat image-ext2 run-image-ext2 parallels-hdd release test-parallels clean
 
 # Overridable by `make test-parallels VM_NAME=... CMDS=... BOOT_WAIT=...`.
 VM_NAME     ?= Ouroboros
@@ -266,6 +274,22 @@ readkey-bin:
 	cargo build -p readkey --target $(USER_TARGET) --release
 	"$(OBJCOPY)" --strip-all $(READKEY_ELF) $(READKEY_BIN)
 
+more-bin:
+	cargo build -p more --target $(USER_TARGET) --release
+	"$(OBJCOPY)" --strip-all $(MORE_ELF) $(MORE_BIN)
+
+send-bin:
+	cargo build -p send --target $(USER_TARGET) --release
+	"$(OBJCOPY)" --strip-all $(SEND_ELF) $(SEND_BIN)
+
+recv-bin:
+	cargo build -p recv --target $(USER_TARGET) --release
+	"$(OBJCOPY)" --strip-all $(RECV_ELF) $(RECV_BIN)
+
+selftest-bin:
+	cargo build -p selftest --target $(USER_TARGET) --release
+	"$(OBJCOPY)" --strip-all $(SELFTEST_ELF) $(SELFTEST_BIN)
+
 ping-bin:
 	cargo build -p ping --target $(USER_TARGET) --release
 	"$(OBJCOPY)" --strip-all $(PING_ELF) $(PING_BIN)
@@ -322,7 +346,7 @@ serve-bin:
 # itself: the default shell binary and the config file (loader.rs's
 # CONFIG_PATH) naming which program to load - edit INIT.CFG and rebuild
 # just that program to swap it out, no kernel rebuild required.
-esp: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin tree-bin pwd-bin write-bin readkey-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin tail-bin nl-bin rev-bin uniq-bin
+esp: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin tree-bin pwd-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin tail-bin nl-bin rev-bin uniq-bin
 	mkdir -p $(ESP_DIR)/EFI/BOOT $(ESP_DIR)/EFI/ORBS $(ESP_DIR)/bin
 	cp $(KERNEL) $(ESP_DIR)/EFI/BOOT/BOOTAA64.EFI
 	cp $(SHELL_BIN) $(ESP_DIR)/EFI/ORBS/SH.BIN
@@ -365,6 +389,11 @@ esp: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin args
 	cp $(PWD_BIN) $(ESP_DIR)/bin/PWD
 	cp $(WRITE_BIN) $(ESP_DIR)/bin/WRITE
 	cp $(READKEY_BIN) $(ESP_DIR)/bin/READKEY
+	cp $(MORE_BIN) $(ESP_DIR)/bin/MORE
+	cp $(MORE_BIN) $(ESP_DIR)/bin/LESS
+	cp $(SEND_BIN) $(ESP_DIR)/bin/SEND
+	cp $(RECV_BIN) $(ESP_DIR)/bin/RECV
+	cp $(SELFTEST_BIN) $(ESP_DIR)/bin/SELFTEST
 	cp $(PING_BIN) $(ESP_DIR)/bin/PING
 	cp $(RESOLVE_BIN) $(ESP_DIR)/bin/RESOLVE
 	cp $(FETCH_BIN) $(ESP_DIR)/bin/FETCH
