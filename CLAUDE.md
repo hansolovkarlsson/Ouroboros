@@ -26,8 +26,11 @@ file can stay focused on durable, load-bearing guidance:
   support, USB keyboard + storage, the userland servers, the network
   stack, …) is recorded there in condensed form. Check it for *what was
   built, and why it works the way it does*.
-- **`docs/roadmap.md`** — the forward-looking parking lot of known future
-  work, not yet sequenced.
+- **`docs/roadmap.md`** — the forward-looking plan of known future work
+  (open frontier, remaining follow-ups, north-star directions, open gaps).
+- **`docs/roadmap-completed.md`** — the finished arcs that used to live in
+  `roadmap.md`, moved out so the roadmap stays forward-looking (the
+  *plan-shaped* companion to `CHANGELOG.md`'s condensed milestone log).
 - **The postmortems under `docs/`** (seventeen of them — boot bring-up; shell
   & filesystem; xHCI keyboard; USB storage; isolation & dataflow; console
   server; capability & hardening; network stack; userland maturation
@@ -564,7 +567,8 @@ docs/
   testing-exfat.md   how-to: build the two-partition exFAT test disk (make run-image-exfat), drive the read-write surface from the shell, and verify against macOS's own driver (fsck_exfat + a byte-identical cmp) - the QEMU rig behind fsd/src/exfat.rs
   CHANGELOG.md       historical record of completed milestones (phase 0 through the most recent), newest first
   journal.md         chronological dev-log: narrative "what was worked on and why" per day - a lighter companion to CHANGELOG.md's milestone record
-  roadmap.md         forward-looking plan: parking lot of known future work, not yet sequenced
+  roadmap.md         forward-looking plan: open frontier, remaining follow-ups, north-star directions, open gaps (finished arcs moved to roadmap-completed.md)
+  roadmap-completed.md  the finished arcs/milestones moved out of roadmap.md so it stays forward-looking - the plan-shaped record (how each arc was sequenced + learned), companion to CHANGELOG.md's condensed log
   roadmap-cluster.md the big long-term direction: a Plan 9-style resource-sharing cluster (distributed Ouroboros) - phased plan from today's local servers to a two-node disk-sharing cluster over 9P-over-TCP and beyond, with the shared-memory "single system image" mirage explicitly out of scope. The vision the project is ultimately aiming at
   research-minix-boot.md   research note: how MINIX boots (x86 boot monitor + boot image, ARM's U-Boot chain) vs Ouroboros's UEFI-native boot, sourced from MINIX's own docs
   research-helix-os.md     research note: Helix OS's layered, trait-based kernel design and hot-reload/self-healing fault tolerance, sourced from the HelixOS-Org/helix repo and docs
