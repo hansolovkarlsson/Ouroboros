@@ -554,6 +554,18 @@ pub const GET_NS: u64 = 53;
 /// handful of bindings of `CWD_MAX`-ish paths - 256 bytes is ample for now.
 pub const NS_MAX: u64 = 256;
 
+/// `(task index, out pointer, out capacity)` -> the length of task `index`'s
+/// name (`argv[0]`, copying up to `out capacity` of its bytes into the buffer),
+/// or `0` if the slot has no name (empty/unused). Read-only, like [`TASK_STATE`]:
+/// the companion that turns `ps`'s slot list into named processes. Boot-loaded
+/// tasks (idle/`fsd`/`cond`/`netd`/init) are named by the loader; spawned tasks
+/// carry their `argv[0]`.
+pub const TASK_NAME: u64 = 54;
+
+/// Maximum name length [`TASK_NAME`] will report - a process name is short, and
+/// this caps the `ps` buffer without pulling in the full `ARGV_MAX`.
+pub const TASK_NAME_MAX: u64 = 32;
+
 /// [`NET_RECV`] returned when no frame is currently available (a poll that
 /// found the receive ring empty) - distinct from a real length (`u64::MAX`
 /// is out of any frame's range) and from the error sentinel.

@@ -141,7 +141,7 @@ $ echo backup >> log.txt        # output redirection: > replace, >> append
 $ cat log.txt | grep back | wc  # multi-stage pipelines
 $ mkdir docs ; mv notes.txt docs
 $ cd docs ; pwd
-$ ps                            # one line per task slot
+$ ps                            # one line per task slot: state + name
 $ set PATH=/bin ; env           # a real environment; $VAR expansion
 ```
 

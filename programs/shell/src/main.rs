@@ -2244,13 +2244,31 @@ fn task_state(i: u64) -> u64 {
     syscall(syscall_abi::TASK_STATE, i)
 }
 
+/// Task `i`'s name (`argv[0]`) via the `TASK_NAME` syscall, copied into
+/// `buf`; returns the number of bytes written (0 if the slot is nameless -
+/// an unused slot, or a spawned task that somehow carried no argv). See
+/// [`cmd_ps`].
+fn task_name(i: u64, buf: &mut [u8]) -> usize {
+    let len = syscall4(
+        syscall_abi::TASK_NAME,
+        i,
+        buf.as_mut_ptr() as u64,
+        buf.len() as u64,
+        0,
+    );
+    (len as usize).min(buf.len())
+}
+
 /// `ps` builtin: one line per scheduler slot, probing indices upward
 /// until the kernel answers [`TASK_STATE_INVALID`] (how the slot count
-/// is discovered without it leaking into the ABI as a constant). The
-/// caller can't tell "running right now" from "runnable, waiting its
-/// turn" - it is, by definition, the one running at the moment it asks -
-/// so both print as "runnable". Real output, so it goes through the
-/// sink (redirectable like any other command's).
+/// is discovered without it leaking into the ABI as a constant). Each
+/// line carries the task's name (`argv[0]`, via [`task_name`]) after its
+/// state - the servers and init are named by the kernel, spawned commands
+/// by the argv they were launched with. The caller can't tell "running
+/// right now" from "runnable, waiting its turn" - it is, by definition,
+/// the one running at the moment it asks - so both print as "runnable".
+/// Real output, so it goes through the sink (redirectable like any other
+/// command's).
 fn cmd_ps(out: &mut Output) {
     let mut i = 0u64;
     loop {
@@ -2260,13 +2278,24 @@ fn cmd_ps(out: &mut Output) {
         }
         out.put_str("task ");
         out.put_u64_decimal(i);
-        out.put_line(match state {
+        out.put_str(match state {
             TASK_STATE_UNUSED => ": unused",
             TASK_STATE_RUNNABLE => ": runnable",
             TASK_STATE_BLOCKED => ": blocked (waiting)",
             TASK_STATE_ZOMBIE => ": exited - `wait` to collect its status",
             _ => ": ?",
         });
+        // Append the name, when the slot has one (unused slots don't).
+        let mut name = [0u8; syscall_abi::TASK_NAME_MAX as usize];
+        let n = task_name(i, &mut name);
+        if n > 0 {
+            out.put_str("  ");
+            for &b in &name[..n] {
+                out.put(b);
+            }
+        }
+        out.put(CR);
+        out.put(LF);
         i += 1;
     }
 }

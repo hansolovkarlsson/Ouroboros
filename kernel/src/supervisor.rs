@@ -237,6 +237,12 @@ pub fn restart(slot: usize) {
         spsr_el1: 0,
     };
     tasks::install_task(slot, context, (loaded.base, loaded.size));
+    // The crash teardown cleared this slot's argv (the store `TASK_NAME`
+    // reads), so re-apply the server's name - otherwise a restarted server
+    // would go nameless in `ps`.
+    if let Some(name) = tasks::server_name(slot) {
+        tasks::set_name(slot, name);
+    }
     console::println!("Ouroboros kernel: server slot {slot} restarted (attempt {attempts}/{MAX_RESTARTS})");
 }
 

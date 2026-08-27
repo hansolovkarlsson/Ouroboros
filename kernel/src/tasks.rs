@@ -621,6 +621,32 @@ pub(crate) fn set_argv(task: usize, blob: &[u8]) {
     argv.len = n;
 }
 
+/// The fixed name of a supervised server slot (`fsd`/`cond`/`netd`), or `None`
+/// for any other slot. One source of truth for both the boot naming (`init`)
+/// and the re-naming a supervised restart needs (`supervisor::restart`, since a
+/// crash teardown clears the argv store this reads).
+pub(crate) fn server_name(slot: usize) -> Option<&'static [u8]> {
+    match slot {
+        s if s == syscall_abi::FSD_TASK as usize => Some(b"fsd"),
+        s if s == syscall_abi::CON_TASK as usize => Some(b"cond"),
+        s if s == syscall_abi::NET_TASK as usize => Some(b"netd"),
+        _ => None,
+    }
+}
+
+/// Give a boot-loaded task a name by synthesizing a single-argument argv blob
+/// (`[argc=1][len][bytes]`, the `ARGS_STAGE` format) so it shows up in `ps` via
+/// the `TASK_NAME` syscall - the loader calls this for the servers and init,
+/// which are loaded (not `SPAWN`ed) and would otherwise have an empty argv.
+pub(crate) fn set_name(task: usize, name: &[u8]) {
+    let argv = unsafe { &mut *ARGVS[task].0.get() };
+    let n = name.len().min(ARGV_CAP - 8); // 4-byte argc + 4-byte len header
+    argv.data[0..4].copy_from_slice(&1u32.to_le_bytes());
+    argv.data[4..8].copy_from_slice(&(n as u32).to_le_bytes());
+    argv.data[8..8 + n].copy_from_slice(&name[..n]);
+    argv.len = 8 + n;
+}
+
 /// The argv blob for `task` (empty if it was spawned with none) - read by
 /// the `GET_ARGC`/`GET_ARG` syscall arms for the calling task.
 pub(crate) fn argv_blob(task: usize) -> &'static [u8] {
@@ -1398,6 +1424,11 @@ pub unsafe fn init(
         spsr_el1: 0,
     };
     unsafe { *REGIONS[0].0.get() = (program.base, program.size) };
+    // Name the boot task so `ps` shows it (spawned tasks carry their own
+    // argv[0]; these loaded ones would otherwise be nameless). Task 0 is the
+    // init program named in INIT.CFG - the shell, in every configuration so
+    // far, so name it that.
+    set_name(0, b"shell");
     clean_dcache_range(program.base, program.size);
 
     // Task 1: idle loop, copied into its own small static region exactly
@@ -1416,6 +1447,7 @@ pub unsafe fn init(
         spsr_el1: 0,
     };
     unsafe { *REGIONS[1].0.get() = (idle_addr, IDLE_REGION_SIZE as u64) };
+    set_name(1, b"idle");
     clean_dcache_range(idle_addr, IDLE_REGION_SIZE as u64);
 
     // Task 2: the filesystem server, exactly task 0's setup shape -
@@ -1429,6 +1461,9 @@ pub unsafe fn init(
         };
         unsafe { *REGIONS[2].0.get() = (fsd.base, fsd.size) };
         unsafe { *STATES[2].0.get() = TaskState::Runnable };
+        if let Some(n) = server_name(2) {
+            set_name(2, n);
+        }
         clean_dcache_range(fsd.base, fsd.size);
     }
 
@@ -1445,6 +1480,9 @@ pub unsafe fn init(
         };
         unsafe { *REGIONS[3].0.get() = (cond.base, cond.size) };
         unsafe { *STATES[3].0.get() = TaskState::Runnable };
+        if let Some(n) = server_name(3) {
+            set_name(3, n);
+        }
         clean_dcache_range(cond.base, cond.size);
     }
 
@@ -1460,6 +1498,9 @@ pub unsafe fn init(
         };
         unsafe { *REGIONS[4].0.get() = (netd.base, netd.size) };
         unsafe { *STATES[4].0.get() = TaskState::Runnable };
+        if let Some(n) = server_name(4) {
+            set_name(4, n);
+        }
         clean_dcache_range(netd.base, netd.size);
     }
 
