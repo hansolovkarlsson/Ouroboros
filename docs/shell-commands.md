@@ -71,7 +71,7 @@ machines that don't share the key are refused.
 
 | Command | Syntax | Description | Notes |
 |---|---|---|---|
-| `help` | `help` | Lists every builtin command name. | Static text, no syscall. |
+| `help` | `help` | Lists the shell **builtins** only, and points to `/bin` (via `ls /bin`) for the externalized programs. | Static text, no syscall. Deliberately doesn't enumerate `/bin` — those change as programs are added, and `ls /bin` is the live list. |
 | `echo` | `echo [words...]` | Prints all words after `echo`, space-separated. | The one command that uses more than its first argument. |
 | `uptime` | `uptime` | Prints the preemption tick count since boot. | Backed by `get_ticks` — real kernel state, not a demo. |
 | `clear` | `clear` | Clears the screen (ANSI `\x1b[2J\x1b[H`). | A raw escape sequence the shell sends itself, not a syscall — the console has no notion of a screen. |

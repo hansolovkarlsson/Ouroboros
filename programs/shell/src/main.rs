@@ -898,7 +898,7 @@ fn dispatch_line(line: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize, env:
     let arg = words.next().unwrap_or("");
 
     match command {
-        "help" => out.put_line("commands: help, echo, uptime, clear, ls, tree, cat, cd, pwd, bind, mkdir, rmdir, touch, rm, write, writeat, cp, mv, mount, mount -a/-r/-p/-c/-n, unmount, erase, partition, format, ping, resolve, fetch, dial, serve, cpu, exec, exit, shutdown, halt, more, ps, kill, fg, wait, send, recv, selftest, env, set, unset (a bare unknown command is looked up on $PATH; $VAR expands; append `> file`/`>> file` to redirect, `| /path/to/program` to pipe, or `| more` to page)"),
+        "help" => out.put_line("builtins: help, exit, cd, pwd, write, bind, mount (-a/-r/-p/-c/-n), unmount, erase, partition, format, exec, cpu, ps, kill, fg, wait, shutdown, halt, more/less, send, recv, env, set, unset, selftest. Everything else is a program in /bin (run `ls /bin`): echo, cat, ls, tree, cp, mv, grep, ping, ... Also: $VAR expands; `> file`/`>> file` redirects, `| prog` pipes, `| more` pages."),
         // echo, uptime, clear are externalized: they're /bin programs now
         // (found via PATH by the unknown-command arm), not builtins. See
         // "Standalone binaries, Stage 4".

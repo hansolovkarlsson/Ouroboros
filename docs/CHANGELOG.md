@@ -7,6 +7,15 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/`; 
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## `help` lists builtins only
+
+`help` had drifted into listing a mix of shell builtins and `/bin` programs
+(`echo`/`ls`/`cat`/`grep`/… were all shown as if builtin, a leftover from before
+they were externalized). It now lists only the actual builtins — the commands
+that run *inside* the shell — and points at `ls /bin` for the externalized
+programs (a live list that changes as programs are added, so `help` shouldn't
+try to enumerate it). No behavior change, just an honest command list.
+
 ## `more` - a pager (`less` is an alias)
 
 A pager to read output a screen at a time: `more <file>` or `<command> | more`,
