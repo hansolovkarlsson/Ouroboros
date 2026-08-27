@@ -246,11 +246,18 @@ killed after the same timeout.
   `mount`/`selftest`/`help`.
 - **Pipeline filters live in `/bin` too:** `upper` (uppercases its input),
   `grep <pattern>` (lines containing a substring), `wc` (line/word/byte
-  counts), and `head [N]` (first N lines, default 10). Each reads stdin and
-  writes to its stdout target, so they chain: `cat FILE | grep x | wc`,
-  `ls /bin | head 5`, `echo hi | upper`. They only do anything as a pipeline
-  stage (they read piped input); run bare, they just wait for input that never
-  comes (Ctrl+C to abort). See the Pipelines section.
+  counts), `head [N]` (first N lines, default 10), `tail [N]` (last N lines,
+  default 10 — the complement of `head`; capped at 64 retained lines), `nl`
+  (numbers every line, right-aligned 6-column count + tab, like `cat -n`),
+  `rev` (reverses the character order of each line), and `uniq` (collapses
+  runs of *adjacent* identical lines). Each reads stdin and writes to its
+  stdout target, so they chain: `cat FILE | grep x | wc`,
+  `ls /bin | tail 5`, `cat FILE | uniq | nl`, `echo hi | rev`. They only do
+  anything as a pipeline stage (they read piped input); run bare, they just
+  wait for input that never comes (Ctrl+C to abort). Each is bounded to a
+  256-byte line buffer with no heap — a longer line is handled in pieces
+  (`tail` truncates it), the shared caveat of these fixed-buffer filters. See
+  the Pipelines section.
 - **Write granularity: `write` full-replaces; `writeat`/`>>`/`cp` do
   offset writes.** The FAT32 layer has a real random-access offset-write
   primitive (`write_at`): `writeat` writes in place at any offset

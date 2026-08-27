@@ -166,6 +166,14 @@ name = "ninep-abi"
 version = "0.1.0"
 
 [[package]]
+name = "nl"
+version = "0.1.0"
+dependencies = [
+ "syscall-abi",
+ "ulib",
+]
+
+[[package]]
 name = "ouroboros-kernel"
 version = "0.5.0"
 dependencies = [
@@ -238,6 +246,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "rev"
+version = "0.1.0"
+dependencies = [
+ "syscall-abi",
+ "ulib",
+]
+
+[[package]]
 name = "rm"
 version = "0.1.0"
 dependencies = [
@@ -295,6 +311,14 @@ dependencies = [
 [[package]]
 name = "syscall-abi"
 version = "0.1.0"
+
+[[package]]
+name = "tail"
+version = "0.1.0"
+dependencies = [
+ "syscall-abi",
+ "ulib",
+]
 
 [[package]]
 name = "touch"
@@ -369,6 +393,14 @@ name = "unicode-ident"
 version = "1.0.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
+
+[[package]]
+name = "uniq"
+version = "0.1.0"
+dependencies = [
+ "syscall-abi",
+ "ulib",
+]
 
 [[package]]
 name = "upper"

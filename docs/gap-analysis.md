@@ -184,8 +184,9 @@ this is the Plan 9 inheritance, and the project's distinctive strength.*
 ## 13. The standard command-line utility set
 
 **Have** (`/bin`, over `ulib`): `ls cat mkdir rmdir touch rm cp mv writeat`
-(fileutils) · `echo uptime clear args` (shellutils) · `grep wc head upper`
-(textutils, chainable filters) · `ping resolve fetch dial serve` (netutils).
+(fileutils) · `echo uptime clear args` (shellutils) · `grep wc head tail nl rev
+uniq upper` (textutils, chainable filters) · `ping resolve fetch dial serve`
+(netutils).
 **Builtins:** `help cd pwd write mount unmount erase partition format exec exit
 ps kill fg wait send recv selftest env set unset cpu`.
 
@@ -194,7 +195,8 @@ ps kill fg wait send recv selftest env set unset cpu`.
 | Utility | Status | Notes |
 |---|---|---|
 | `sort` | ✗ | The one filter with a real wrinkle — must buffer all input before emitting, against the fixed-buffer/no-alloc constraint. |
-| `tail` `tee` `tr` `cut` `uniq` | ✗ | Each a small `ulib` filter (the pattern is turnkey). |
+| `tail` `nl` `rev` `uniq` | ✅ | Shipped as `/bin` `ulib` filters (the turnkey pattern). `tail`/`uniq` bounded to a fixed line buffer; `nl` is `cat -n` style. |
+| `tee` `tr` `cut` | ✗ | The remaining small `ulib` filters (`tee` also needs an fsd write path for its file arg). |
 | `find` `du` `df` | ✗ | Client-side directory walking (new but small); `df` wants the volume info fsd already returns. |
 | `date` `sleep` | ✗ | Blocked on wall-clock (§12) and a per-task timer respectively. |
 | `chmod` `chown` `ln` | ✗ | Blocked on the stat surface + permissions arc (§3, §6). |

@@ -160,7 +160,7 @@ $ set PATH=/bin ; env           # a real environment; $VAR expansion
   on `$PATH` (default `/bin`), spawned with arguments, and reaped:
   `ls  cat  cp  mv  mkdir  rmdir  touch  rm  writeat` (files),
   `echo  uptime  clear  args` (basics),
-  `grep  wc  head  upper` (pipeline filters),
+  `grep  wc  head  tail  nl  rev  uniq  upper` (pipeline filters),
   `ping  resolve  fetch` (network). You type them the same way (`ls`,
   `cat x`); the shell finds `/bin/LS` on PATH (FAT is case-insensitive).
   A `/bin` command resolves relative paths against the shell's working
@@ -168,8 +168,9 @@ $ set PATH=/bin ; env           # a real environment; $VAR expansion
 
 **Output redirection & pipelines** work across both:
 `echo hi > f.txt` (replace), `>> f.txt` (append), and `a | b | c`
-(each stage a separate program; the filters `grep`/`wc`/`head`/`upper`
-are built to chain). See [`shell-commands.md`](shell-commands.md).
+(each stage a separate program; the filters
+`grep`/`wc`/`head`/`tail`/`nl`/`rev`/`uniq`/`upper` are built to chain).
+See [`shell-commands.md`](shell-commands.md).
 
 ### Spawning, job control, and IPC demos
 

@@ -93,7 +93,7 @@ isolated, comprehensible microkernel you can read in an afternoon.
 |---|---|
 | Plan 9 took "everything is a file" **further than Unix and made it distributed** — Ouroboros inherits that: remote resources are files, namespaces are per-process. | The **POSIX ABI itself** — the entire point of Unix portability, where C programs just compile and run. Ouroboros is "Unix-*ish* in feel" only. |
 | A **memory-safe microkernel** instead of a monolithic C design. | `fork`/`exec`, signals, users/permissions, and the enormous portable software ecosystem and standards conformance. |
-| Small pipeline filters (`grep`/`wc`/`head`/`upper`) and a shell keep the **Unix philosophy** in spirit. | Real completeness — Unix is a specification with implementations; Ouroboros is one unfinished experiment. |
+| Small pipeline filters (`grep`/`wc`/`head`/`tail`/`nl`/`rev`/`uniq`/`upper`) and a shell keep the **Unix philosophy** in spirit. | Real completeness — Unix is a specification with implementations; Ouroboros is one unfinished experiment. |
 
 ### vs. Plan 9
 
