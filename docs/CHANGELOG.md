@@ -7,6 +7,39 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/`; 
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## `tree` - a recursive directory listing in `/bin`
+
+A new `/bin/TREE`: lists a directory recursively as an indented tree, then a
+`N directories, M files` summary — the classic Unix `tree`. A standalone
+`programs/fileutils/` crate over `ulib`, resolving its path against the
+shell-delivered cwd like `ls`, and talking to fsd via `fs_list_dir`.
+
+Two constraints shaped it. The framebuffer console renders **ASCII 0x20–0x7E
+only**, so the branches are the ASCII forms (`|-- `, `` `-- ``, `|   `) rather
+than the Unicode box-drawing glyphs. And a spawned `/bin` program gets a
+**~32 KB stack**, so the recursion is **depth-capped at 16** (each frame holds a
+512-byte listing plus the child's path and prefix, which the recursion borrows —
+a deeper subtree just isn't descended). It skips the `.`/`..` entries FAT returns
+(descending `..` would loop forever), and links with **zero relocations** (the
+PIE requirement). The workspace is now 37 crates.
+
+**Verified** in QEMU against a built nested tree:
+
+```
+/t
+|-- SUB
+|   `-- DEEP.TXT
+|-- A.TXT
+`-- B.TXT
+
+1 directory, 3 files
+```
+
+plus `tree /efi` (the boot layout, correct `|   ` continuations and `2
+directories, 10 files`) and `tree /nonexistent` (a clean `no such file or
+directory`). Entries appear in filesystem order (not sorted) — a `sort` would be
+a later refinement.
+
 ## Fix: running a program by a relative path from `/`
 
 A command containing a `/` was being fed through the `$PATH` search like a bare

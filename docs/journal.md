@@ -7,6 +7,22 @@ for the forward plan see [`roadmap.md`](roadmap.md).
 
 ---
 
+## 2026-08-27 (cont.) — `tree` joins `/bin`
+
+A satisfying little program to write because the constraints did the designing.
+`tree` is inherently recursive, and two things immediately bound the shape: the
+framebuffer font is ASCII-only (so the pretty Unicode box-drawing is out — ASCII
+`|-- `/`` `-- `` it is), and a spawned program has a ~32 KB stack (so unbounded
+recursion is a guard-page fault waiting to happen — depth-capped at 16, with each
+frame's buffers kept small since the child borrows the parent's path/prefix
+across the recursive call). The one real correctness trap was `.`/`..`: FAT hands
+them back in every subdirectory listing, and descending `..` would loop forever —
+so they're skipped explicitly. Came up clean on the first real boot: a built
+`/t/sub/deep.txt` tree rendered with the right branches and `1 directory, 3
+files`, and `tree /efi` drew the boot layout with correct `|   ` continuation
+lines. Entries come out in filesystem order for now; a `sort` is the obvious next
+polish.
+
 ## 2026-08-27 (cont.) — a path-command bug: `bin/echo` from `/`
 
 Hans hit a real one: `bin/echo hello` from `/` said `unknown command: bin/echo`,

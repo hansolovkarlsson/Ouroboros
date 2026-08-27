@@ -59,6 +59,8 @@ MV_ELF       := target/$(USER_TARGET)/release/mv
 MV_BIN       := target/$(USER_TARGET)/release/mv.bin
 WRITEAT_ELF  := target/$(USER_TARGET)/release/writeat
 WRITEAT_BIN  := target/$(USER_TARGET)/release/writeat.bin
+TREE_ELF     := target/$(USER_TARGET)/release/tree
+TREE_BIN     := target/$(USER_TARGET)/release/tree.bin
 PING_ELF     := target/$(USER_TARGET)/release/ping
 PING_BIN     := target/$(USER_TARGET)/release/ping.bin
 WC_ELF       := target/$(USER_TARGET)/release/wc
@@ -125,7 +127,7 @@ ifeq ($(PROFILE),release)
 CARGO_FLAGS += --release
 endif
 
-.PHONY: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin esp run run-virtio-console run-usb-kbd run-usb-multi run-gicv3 image run-image run-image-9p run-image-9p-client run-image-2vm-a run-image-2vm-b image-gpt run-image-gpt image-exfat run-image-exfat image-ext2 run-image-ext2 parallels-hdd release test-parallels clean
+.PHONY: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin tree-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin esp run run-virtio-console run-usb-kbd run-usb-multi run-gicv3 image run-image run-image-9p run-image-9p-client run-image-2vm-a run-image-2vm-b image-gpt run-image-gpt image-exfat run-image-exfat image-ext2 run-image-ext2 parallels-hdd release test-parallels clean
 
 # Overridable by `make test-parallels VM_NAME=... CMDS=... BOOT_WAIT=...`.
 VM_NAME     ?= Ouroboros
@@ -242,6 +244,10 @@ writeat-bin:
 	cargo build -p writeat --target $(USER_TARGET) --release
 	"$(OBJCOPY)" --strip-all $(WRITEAT_ELF) $(WRITEAT_BIN)
 
+tree-bin:
+	cargo build -p tree --target $(USER_TARGET) --release
+	"$(OBJCOPY)" --strip-all $(TREE_ELF) $(TREE_BIN)
+
 ping-bin:
 	cargo build -p ping --target $(USER_TARGET) --release
 	"$(OBJCOPY)" --strip-all $(PING_ELF) $(PING_BIN)
@@ -298,7 +304,7 @@ serve-bin:
 # itself: the default shell binary and the config file (loader.rs's
 # CONFIG_PATH) naming which program to load - edit INIT.CFG and rebuild
 # just that program to swap it out, no kernel rebuild required.
-esp: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin tail-bin nl-bin rev-bin uniq-bin
+esp: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin tree-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin tail-bin nl-bin rev-bin uniq-bin
 	mkdir -p $(ESP_DIR)/EFI/BOOT $(ESP_DIR)/EFI/ORBS $(ESP_DIR)/bin
 	cp $(KERNEL) $(ESP_DIR)/EFI/BOOT/BOOTAA64.EFI
 	cp $(SHELL_BIN) $(ESP_DIR)/EFI/ORBS/SH.BIN
@@ -337,6 +343,7 @@ esp: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin args
 	cp $(CP_BIN) $(ESP_DIR)/bin/CP
 	cp $(MV_BIN) $(ESP_DIR)/bin/MV
 	cp $(WRITEAT_BIN) $(ESP_DIR)/bin/WRITEAT
+	cp $(TREE_BIN) $(ESP_DIR)/bin/TREE
 	cp $(PING_BIN) $(ESP_DIR)/bin/PING
 	cp $(RESOLVE_BIN) $(ESP_DIR)/bin/RESOLVE
 	cp $(FETCH_BIN) $(ESP_DIR)/bin/FETCH

@@ -77,6 +77,7 @@ machines that don't share the key are refused.
 | `clear` | `clear` | Clears the screen (ANSI `\x1b[2J\x1b[H`). | A raw escape sequence the shell sends itself, not a syscall — the console has no notion of a screen. |
 | `pwd` | `pwd` | Prints the current working directory. | Shell-local state only, no syscall. |
 | `ls` | `ls [path]` | Lists a directory's entries, `name` for files and `name/` for subdirectories. Defaults to the current directory. | Truncates rather than erroring if the listing doesn't fit a 512-byte buffer (the ABI's per-buffer cap). |
+| `tree` | `tree [path]` | Recursively lists a directory as an indented tree (ASCII branches `\|-- `/`` `-- ``, since the framebuffer font is ASCII-only), ending with a `N directories, M files` summary. Defaults to the current directory. | Depth-capped at 16 levels (the ~32 KB spawn stack bounds recursion — a deeper subtree isn't descended). Entries appear in filesystem order (not sorted); `.`/`..` are skipped. Each directory's listing is bounded to 512 bytes like `ls`. |
 | `cat` | `cat <file>` | Prints a file's contents. | Streams the file in chunks via the grant/safecopy bulk path, so it prints a file of *any* size (no truncation) without ever holding the whole thing; a file argument is required. |
 | `cd` | `cd [path]` | Changes the current working directory. | Validates the target exists and is a directory first (via a listing call — there's no dedicated "does this exist" syscall). |
 | `bind` | `bind <newpath> <oldpath>` | Maps `newpath` onto the existing subtree `oldpath` in this shell's **namespace**, so any path under `newpath` resolves as if it were under `oldpath` (Plan 9 `bind`; the cluster's per-task namespace, Phase 0). E.g. `bind /mnt /EFI` makes `ls /mnt` list `/EFI`. | **Per-task**: only this shell and the commands it spawns (which inherit the namespace) see it — no other task's view changes. Both paths are resolved against the cwd. A bare `bind` remaps *within* the current mount; to point `newpath` at a *different* disk partition use `mount <n> <path>`, and at *another machine* use `mount -r` (both below). |
@@ -234,8 +235,8 @@ killed after the same timeout.
 
 ## Known limitations
 
-- **Every filesystem command (`ls`, `cat`, `mkdir`, `rmdir`, `touch`, `rm`,
-  `cp`, `mv`, `writeat`), the network commands (`ping`, `resolve`, `fetch`,
+- **Every filesystem command (`ls`, `tree`, `cat`, `mkdir`, `rmdir`, `touch`,
+  `rm`, `cp`, `mv`, `writeat`), the network commands (`ping`, `resolve`, `fetch`,
   `dial`, `serve`), and `echo`/`uptime`/`clear` are `/bin` programs, not
   builtins.** They were
   externalized (they run as `/bin/ECHO`, `/bin/LS`, `/bin/PING`, etc., found via

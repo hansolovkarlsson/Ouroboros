@@ -158,7 +158,7 @@ $ set PATH=/bin ; env           # a real environment; $VAR expansion
 
 - **`/bin` programs** are real standalone binaries loaded from disk, found
   on `$PATH` (default `/bin`), spawned with arguments, and reaped:
-  `ls  cat  cp  mv  mkdir  rmdir  touch  rm  writeat` (files),
+  `ls  tree  cat  cp  mv  mkdir  rmdir  touch  rm  writeat` (files),
   `echo  uptime  clear  args` (basics),
   `grep  wc  head  tail  nl  rev  uniq  upper` (pipeline filters),
   `ping  resolve  fetch` (network). You type them the same way (`ls`,

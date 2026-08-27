@@ -183,7 +183,7 @@ this is the Plan 9 inheritance, and the project's distinctive strength.*
 
 ## 13. The standard command-line utility set
 
-**Have** (`/bin`, over `ulib`): `ls cat mkdir rmdir touch rm cp mv writeat`
+**Have** (`/bin`, over `ulib`): `ls tree cat mkdir rmdir touch rm cp mv writeat`
 (fileutils) · `echo uptime clear args` (shellutils) · `grep wc head tail nl rev
 uniq upper` (textutils, chainable filters) · `ping resolve fetch dial serve`
 (netutils).
