@@ -20,8 +20,16 @@ them back in every subdirectory listing, and descending `..` would loop forever 
 so they're skipped explicitly. Came up clean on the first real boot: a built
 `/t/sub/deep.txt` tree rendered with the right branches and `1 directory, 3
 files`, and `tree /efi` drew the boot layout with correct `|   ` continuation
-lines. Entries come out in filesystem order for now; a `sort` is the obvious next
-polish.
+lines.
+
+Then the obvious polish, added right after: **sorting**. Raw on-disk order is
+whatever the directory happens to hold; alphabetical is what you want to read. No
+heap means no `Vec` to sort, so each directory's entries become fixed
+offset+length records into the listing buffer and get insertion-sorted in place
+before emitting — the name bytes never move. Capped at 64 entries per directory,
+since that array stays live across the recursion into each child (a stack cost).
+`zebra`/`apple`/`mango` came out `APPLE BERRY MANGO ZEBRA`, and `tree /` rendered
+the whole disk sorted top to bottom without tripping the guard page.
 
 ## 2026-08-27 (cont.) — a path-command bug: `bin/echo` from `/`
 

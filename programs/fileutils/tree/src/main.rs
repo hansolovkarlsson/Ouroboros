@@ -26,6 +26,22 @@ const LIST_BUF: usize = 512;
 /// Room for the accumulated indent prefix: 4 bytes per ancestor level.
 const PREFIX_MAX: usize = MAX_DEPTH * 4 + 8;
 
+/// Most entries `tree` sorts per directory. The listing itself is capped at
+/// [`LIST_BUF`], so this is really a stack bound (the sort array is live across
+/// the recursion into each child); a directory with more entries has the
+/// overflow dropped, like the listing truncation.
+const MAX_ENTRIES: usize = 64;
+
+/// One directory entry as an offset+length into the current listing buffer
+/// (plus its kind), so sorting reorders these lightweight records rather than
+/// moving the name bytes around.
+#[derive(Clone, Copy)]
+struct Entry {
+    start: u16,
+    len: u16,
+    is_dir: bool,
+}
+
 struct Counts {
     dirs: u64,
     files: u64,
@@ -96,22 +112,48 @@ fn walk(path: &str, prefix: &str, target: u64, depth: usize, counts: &mut Counts
     }
     let data = &listing[..n as usize];
 
-    // First pass: how many real entries (so the last one gets `` `-- ``).
-    let total = count_entries(data);
-
-    // Second pass: emit each, recursing into directories.
-    let mut seen = 0usize;
-    for line in Lines::new(data) {
-        let (name, is_dir) = parse_entry(line);
-        if name.is_empty() || is_dot(name) {
+    // Collect the real entries (offset+len into `data`), skipping empty lines
+    // and the `.`/`..` FAT returns, then sort them alphabetically so the tree
+    // is in a stable, readable order rather than raw on-disk order.
+    let mut entries = [Entry { start: 0, len: 0, is_dir: false }; MAX_ENTRIES];
+    let mut count = 0usize;
+    let mut i = 0usize;
+    while i < data.len() && count < MAX_ENTRIES {
+        let start = i;
+        while i < data.len() && data[i] != b'\n' {
+            i += 1;
+        }
+        let line = &data[start..i];
+        if i < data.len() {
+            i += 1; // step past the newline
+        }
+        // A trailing '/' marks a directory (and isn't part of the name).
+        let (name_len, is_dir) = if line.last() == Some(&b'/') {
+            (line.len() - 1, true)
+        } else {
+            (line.len(), false)
+        };
+        let name = &data[start..start + name_len];
+        if name_len == 0 || is_dot(name) {
             continue;
         }
-        seen += 1;
-        let is_last = seen == total;
+        entries[count] = Entry {
+            start: start as u16,
+            len: name_len as u16,
+            is_dir,
+        };
+        count += 1;
+    }
+    sort_entries(&mut entries[..count], data);
+
+    // Emit each entry, recursing into directories - in sorted order.
+    for (idx, e) in entries[..count].iter().enumerate() {
+        let name = &data[e.start as usize..e.start as usize + e.len as usize];
+        let is_last = idx + 1 == count;
 
         emit_entry(target, prefix, is_last, name);
 
-        if is_dir {
+        if e.is_dir {
             counts.dirs += 1;
             if depth + 1 < MAX_DEPTH {
                 // Child prefix = this prefix + (a pipe if more siblings
@@ -130,6 +172,43 @@ fn walk(path: &str, prefix: &str, target: u64, depth: usize, counts: &mut Counts
             counts.files += 1;
         }
     }
+}
+
+/// Insertion-sort entries by name (case-insensitive, with a raw-byte tiebreak
+/// for stability) - small `n` (a single directory's entries), no heap, and the
+/// near-sorted-input case is cheap.
+fn sort_entries(entries: &mut [Entry], data: &[u8]) {
+    for i in 1..entries.len() {
+        let mut j = i;
+        while j > 0 && entry_less(entries[j], entries[j - 1], data) {
+            entries.swap(j, j - 1);
+            j -= 1;
+        }
+    }
+}
+
+fn entry_less(a: Entry, b: Entry, data: &[u8]) -> bool {
+    let an = &data[a.start as usize..a.start as usize + a.len as usize];
+    let bn = &data[b.start as usize..b.start as usize + b.len as usize];
+    name_less(an, bn)
+}
+
+/// `a` sorts before `b`: ASCII-case-insensitive lexicographic, then a raw-byte
+/// tiebreak so entries differing only in case have a deterministic order.
+fn name_less(a: &[u8], b: &[u8]) -> bool {
+    let mut i = 0;
+    while i < a.len() && i < b.len() {
+        let ca = a[i].to_ascii_lowercase();
+        let cb = b[i].to_ascii_lowercase();
+        if ca != cb {
+            return ca < cb;
+        }
+        i += 1;
+    }
+    if a.len() != b.len() {
+        return a.len() < b.len();
+    }
+    a < b
 }
 
 /// Emit one entry line: `<prefix><branch><name>` where the branch is
@@ -162,32 +241,10 @@ fn resolve_child(path: &str, name: &[u8], out: &mut [u8]) -> Option<usize> {
     ulib::resolve(path, name_str, out)
 }
 
-/// Split a directory entry line into `(name, is_dir)` - a trailing `/`
-/// (how `fs_list_dir` marks directories) is stripped and sets `is_dir`.
-fn parse_entry(line: &[u8]) -> (&[u8], bool) {
-    if let Some((&b'/', rest)) = line.split_last() {
-        (rest, true)
-    } else {
-        (line, false)
-    }
-}
-
 /// The `.`/`..` self/parent entries FAT returns - never shown, never
 /// descended (descending `..` would loop forever).
 fn is_dot(name: &[u8]) -> bool {
     name == b"." || name == b".."
-}
-
-/// Count the real (non-empty, non-dot) entries in a listing.
-fn count_entries(data: &[u8]) -> usize {
-    let mut c = 0;
-    for line in Lines::new(data) {
-        let (name, _) = parse_entry(line);
-        if !name.is_empty() && !is_dot(name) {
-            c += 1;
-        }
-    }
-    c
 }
 
 /// Append `src` to `buf` at `*n`, advancing `*n`, truncating at capacity.
@@ -197,36 +254,5 @@ fn append(buf: &mut [u8], n: &mut usize, src: &[u8]) {
             buf[*n] = b;
             *n += 1;
         }
-    }
-}
-
-/// Iterator over the `\n`-separated lines of a listing (a trailing line
-/// without a newline is yielded too; empty lines are yielded as empty and
-/// filtered by the caller).
-struct Lines<'a> {
-    data: &'a [u8],
-    pos: usize,
-}
-
-impl<'a> Lines<'a> {
-    fn new(data: &'a [u8]) -> Self {
-        Lines { data, pos: 0 }
-    }
-}
-
-impl<'a> Iterator for Lines<'a> {
-    type Item = &'a [u8];
-    fn next(&mut self) -> Option<&'a [u8]> {
-        if self.pos >= self.data.len() {
-            return None;
-        }
-        let start = self.pos;
-        let mut end = start;
-        while end < self.data.len() && self.data[end] != b'\n' {
-            end += 1;
-        }
-        // Advance past the newline (or to the end).
-        self.pos = if end < self.data.len() { end + 1 } else { end };
-        Some(&self.data[start..end])
     }
 }

@@ -37,8 +37,16 @@ PIE requirement). The workspace is now 37 crates.
 
 plus `tree /efi` (the boot layout, correct `|   ` continuations and `2
 directories, 10 files`) and `tree /nonexistent` (a clean `no such file or
-directory`). Entries appear in filesystem order (not sorted) — a `sort` would be
-a later refinement.
+directory`).
+
+Entries are **sorted alphabetically** (case-insensitive, directories and files
+interleaved) rather than shown in raw on-disk order: each directory's entries
+are collected as offset+length records into the listing buffer (no name bytes
+moved, no heap) and insertion-sorted before emitting — up to 64 entries per
+directory (the sort array is live across the recursion, so it's a stack bound).
+Verified with a deliberately out-of-order directory (`zebra`/`apple`/`mango`/…)
+coming out `APPLE BERRY MANGO ZEBRA`, and `tree /` rendering the whole disk
+sorted (`/bin` as `ARGS … WRITEAT`) with `6 directories, 44 files`.
 
 ## Fix: running a program by a relative path from `/`
 
