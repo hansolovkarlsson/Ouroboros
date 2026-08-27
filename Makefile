@@ -67,6 +67,14 @@ GREP_ELF     := target/$(USER_TARGET)/release/grep
 GREP_BIN     := target/$(USER_TARGET)/release/grep.bin
 HEAD_ELF     := target/$(USER_TARGET)/release/head
 HEAD_BIN     := target/$(USER_TARGET)/release/head.bin
+TAIL_ELF     := target/$(USER_TARGET)/release/tail
+TAIL_BIN     := target/$(USER_TARGET)/release/tail.bin
+NL_ELF       := target/$(USER_TARGET)/release/nl
+NL_BIN       := target/$(USER_TARGET)/release/nl.bin
+REV_ELF      := target/$(USER_TARGET)/release/rev
+REV_BIN      := target/$(USER_TARGET)/release/rev.bin
+UNIQ_ELF     := target/$(USER_TARGET)/release/uniq
+UNIQ_BIN     := target/$(USER_TARGET)/release/uniq.bin
 RESOLVE_ELF  := target/$(USER_TARGET)/release/resolve
 RESOLVE_BIN  := target/$(USER_TARGET)/release/resolve.bin
 FETCH_ELF    := target/$(USER_TARGET)/release/fetch
@@ -250,6 +258,22 @@ head-bin:
 	cargo build -p head --target $(USER_TARGET) --release
 	"$(OBJCOPY)" --strip-all $(HEAD_ELF) $(HEAD_BIN)
 
+tail-bin:
+	cargo build -p tail --target $(USER_TARGET) --release
+	"$(OBJCOPY)" --strip-all $(TAIL_ELF) $(TAIL_BIN)
+
+nl-bin:
+	cargo build -p nl --target $(USER_TARGET) --release
+	"$(OBJCOPY)" --strip-all $(NL_ELF) $(NL_BIN)
+
+rev-bin:
+	cargo build -p rev --target $(USER_TARGET) --release
+	"$(OBJCOPY)" --strip-all $(REV_ELF) $(REV_BIN)
+
+uniq-bin:
+	cargo build -p uniq --target $(USER_TARGET) --release
+	"$(OBJCOPY)" --strip-all $(UNIQ_ELF) $(UNIQ_BIN)
+
 resolve-bin:
 	cargo build -p resolve --target $(USER_TARGET) --release
 	"$(OBJCOPY)" --strip-all $(RESOLVE_ELF) $(RESOLVE_BIN)
@@ -274,7 +298,7 @@ serve-bin:
 # itself: the default shell binary and the config file (loader.rs's
 # CONFIG_PATH) naming which program to load - edit INIT.CFG and rebuild
 # just that program to swap it out, no kernel rebuild required.
-esp: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin
+esp: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin tail-bin nl-bin rev-bin uniq-bin
 	mkdir -p $(ESP_DIR)/EFI/BOOT $(ESP_DIR)/EFI/ORBS $(ESP_DIR)/bin
 	cp $(KERNEL) $(ESP_DIR)/EFI/BOOT/BOOTAA64.EFI
 	cp $(SHELL_BIN) $(ESP_DIR)/EFI/ORBS/SH.BIN
@@ -321,6 +345,10 @@ esp: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin args
 	cp $(WC_BIN) $(ESP_DIR)/bin/WC
 	cp $(GREP_BIN) $(ESP_DIR)/bin/GREP
 	cp $(HEAD_BIN) $(ESP_DIR)/bin/HEAD
+	cp $(TAIL_BIN) $(ESP_DIR)/bin/TAIL
+	cp $(NL_BIN) $(ESP_DIR)/bin/NL
+	cp $(REV_BIN) $(ESP_DIR)/bin/REV
+	cp $(UNIQ_BIN) $(ESP_DIR)/bin/UNIQ
 
 # Boots the ESP directory directly in QEMU (no disk image needed) against
 # the aarch64 OVMF firmware installed by `brew install qemu`.

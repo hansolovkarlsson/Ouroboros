@@ -724,8 +724,11 @@ fixed:
    <pattern>` (substring line filter), and `head [N]` (first N lines) shipped as
    `/bin` programs over `ulib` (a new `ulib::pipe_recv` factors out the filter
    stdin read). `cat FILE | grep x | wc` and `ls /bin | grep C | wc` work.
+   Later extended with four more of the same shape: `tail [N]` (last N lines, a
+   fixed 64-line ring flushed at EOF), `nl` (`cat -n`-style line numbering),
+   `rev` (per-line byte reversal), and `uniq` (adjacent-duplicate collapse).
    (`sort` deferred - it needs to buffer all input before emitting, unlike the
-   streaming/line-buffered three.)
+   streaming/line-buffered filters.)
 
 **The multi-stage-pipeline arc is complete.** Only `sort` (full-input
 buffering) is left as an optional future filter.
@@ -894,7 +897,7 @@ close together so the escape set is driven by a real need, not guessed.
 
 Today's `/bin` commands take positional arguments only, and several are
 deliberately minimal (the parking lot already notes `grep` is
-substring-only/case-sensitive, `ls` has no `-l`, `head` only, no `sort`).
+substring-only/case-sensitive, `ls` has no `-l`, no `sort`).
 The direction: give the existing commands the flags that make them actually
 usable — `ls -l`/`-a`, `grep -i`/`-r`/`-n` (and eventually real patterns),
 `rm -r`/`-f`, `cp -r`, `cat -n`, `head -n`/`tail`, `wc -l`/`-w`/`-c`
@@ -918,9 +921,10 @@ reads."
 
 ### 3. More `/bin` commands (scoped, incremental)
 
-The standard toolset still missing, roughly in cheapness order: `sort`
-(already deferred — needs to buffer all input before emitting, unlike the
-streaming filters), `tail`, `tee`, `tr`, `cut`, `uniq`, `find`, `du`, `df`,
+The standard toolset still missing, roughly in cheapness order (`tail`, `nl`,
+`rev`, `uniq` already shipped): `sort` (already deferred — needs to buffer all
+input before emitting, unlike the streaming filters), `tee`, `tr`, `cut`,
+`find`, `du`, `df`,
 `date`/`sleep` (both want a wall-clock the kernel already has via the timer
 counter and `MONOTONIC_US`), `env`-as-a-program, `true`/`false`/`yes`, a
 `kill`-by-name, and eventually an **editor** and a **pager** (`less`/`more`)

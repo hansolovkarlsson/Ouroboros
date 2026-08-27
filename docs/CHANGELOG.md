@@ -7,6 +7,40 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/`; 
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## Four more `/bin` pipeline filters — `tail`, `nl`, `rev`, `uniq`
+
+The `/bin` filter set (`upper`/`grep`/`wc`/`head`) grew four classic Unix
+line filters, each a standalone `programs/textutils/` crate over `ulib` in
+the exact `head`/`grep` shape (stdin = `pipe_recv`, stdout = `write_out`,
+EOF out = `end_of_stream`):
+
+- **`tail [N]`** — the last N lines (default 10), the complement of `head`.
+  Unlike `head` it can't stop early (it must read to EOF to know which lines
+  are last), so it keeps the newest lines in a fixed ring (`MAX_KEEP` = 64,
+  a larger N capped to that) and flushes at EOF.
+- **`nl`** — numbers every line, a right-aligned 6-column count + tab before
+  each (the `cat -n` behavior). Streamed with a line-piece flush, so the
+  number is emitted exactly once per logical line even when a long line is
+  flushed in pieces.
+- **`rev`** — reverses the byte order of each line, keeping the trailing
+  newline at the end (in-place two-pointer swap).
+- **`uniq`** — collapses runs of *adjacent* identical lines, comparing each
+  completed line against the previously emitted one (Unix `uniq` semantics:
+  only neighbours, so it pairs with a future `sort`; for now it de-dups
+  already-adjacent repeats).
+
+All four are bounded to a 256-byte line buffer with no heap — a longer line
+is handled in pieces (`tail` truncates it), the shared fixed-buffer caveat.
+Every binary links with **zero relocations** (fully position-independent, no
+`R_AARCH64_ABS64` — the recurring PIE trap avoided by construction).
+
+**Verified** end to end in QEMU (real FAT32 via `make run-image`, driven
+through `-nographic` stdin against a multi-line `/TEST.TXT` fixture):
+`nl` produced the numbered listing, `rev` turned `hi mom` into `mom ih`,
+`uniq` collapsed 6 fruit lines to 4, `tail 2`/`head 3` gave the right ends,
+and `cat TEST | uniq | wc` = `4 4 25` — confirming the whole chain. The
+workspace is now 36 crates.
+
 ## `cpu` output past one message — chunked delivery to the shell
 
 `cpu <host:port> <cmd>`'s output was capped at one IPC message (768 bytes) — the

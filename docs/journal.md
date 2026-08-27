@@ -7,6 +7,33 @@ for the forward plan see [`roadmap.md`](roadmap.md).
 
 ---
 
+## 2026-08-26 (cont.) — four more `/bin` filters (`tail`/`nl`/`rev`/`uniq`)
+
+A quieter, additive session after the cluster work: filling out `/bin` with the
+classic Unix line filters the pipeline machinery deserves. `head`/`grep`/`wc`
+already proved the shape (stdin = `pipe_recv`, stdout = `write_out`, EOF out =
+`end_of_stream`, finish = `exit`), so this was mostly writing four more programs
+to that template — the interesting part was each filter's own bounded, no-heap
+trick.
+
+`tail` is the one with a twist: unlike `head` it can't stop early, because it
+doesn't know which lines are the *last* ones until stdin ends. So it keeps the
+newest lines in a fixed ring (cap 64, a larger N clamped down) and flushes at EOF.
+`nl` numbers every line — I streamed it with a line-piece flush and a "mid-line"
+flag so a long line split into pieces still gets its number exactly once, rather
+than buffering whole lines. `rev` is an in-place two-pointer swap keeping the
+newline last. `uniq` compares each completed line against the previously emitted
+one (adjacent-only, real Unix semantics — it'll pair with a future `sort`).
+
+No new mechanism, no kernel change — just four crates, the workspace membership,
+and the Makefile's var/build/stage triples. I checked the binaries for stray
+`R_AARCH64_ABS64` relocations out of habit (the PIE trap that keeps biting new
+code) and they came back with *zero* relocations at all — fully position
+independent, everything inlined. Verified the lot in one QEMU boot against a
+multi-line `/TEST.TXT` fixture: `uniq` collapsed 6 fruit lines to 4, `rev` turned
+`hi mom` into `mom ih`, `nl` numbered the listing, and `cat TEST | uniq | wc`
+came back `4 4 25`. Workspace is 36 crates now.
+
 ## 2026-08-26 (cont.) — `cpu` output past one message (closing out the cluster)
 
 The one real functional gap left in the cluster: `cpu`'s output was capped at one
