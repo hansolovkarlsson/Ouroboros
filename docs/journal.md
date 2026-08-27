@@ -7,6 +7,48 @@ for the forward plan see [`roadmap.md`](roadmap.md).
 
 ---
 
+## 2026-08-27 (cont.) — reading the neighbours: Redox OS and the Pi-4 tutorials
+
+Not code — a research pass Hans asked for, on two outside resources: Redox OS
+(the mature Rust microkernel) and the `rust-raspberrypi-OS-tutorials` repo. I
+ran two parallel research agents and wrote up `docs/research-redox-and-pi.md`.
+
+The Redox half had a genuinely useful conclusion I didn't expect going in:
+**Ouroboros already structurally *is* a small Redox.** Both arrived
+independently at userspace fs/net/console daemons, supervised driver restart, a
+uniform resource protocol (their URL "schemes" ≈ our 9P verbs + per-task
+namespaces), and a non-POSIX kernel with POSIX pushed to a userland libc —
+which is exactly the conclusion our own posix-divergence postmortem reached. So
+the "what to adopt" list is short and specific rather than sprawling: `relibc`
+(the existence proof for our libc-portability plan — and it targets *both* Redox
+and Linux, so it's host-testable), making the namespace *itself* the capability
+boundary (Redox's null-namespace sandbox unifies two things we built separately
+— namespaces and the send-mask), and RedoxFS's CoW+checksums shape for the
+cluster-redundancy direction. Schemes vs. 9P turned out to be the *same*
+architecture in different spelling, so there's nothing to copy there except the
+namespace-as-security-boundary idea. I threaded those three into the roadmap's
+portability/security/redundancy north-stars where they'll actually be worked.
+
+The Pi half is a bring-up cookbook for when the boards arrive. The load-bearing
+call: we boot via UEFI, the tutorials boot a raw `kernel8.img` — two different
+worlds — so the plan is to try the pftf/RPi4 EDK2 UEFI+ACPI firmware *first*,
+because a Pi 4 under it exposes UEFI + ACPI + a GOP framebuffer, and our
+existing stack (UEFI loader, ACPI MADT → `gicv2.rs` for the Pi 4's GIC-400,
+GOP `fbconsole`) should carry over largely unchanged. The tutorials stay the
+reference for the raw BCM2711 facts (peripheral base `0xFE00_0000`, the GIC
+addresses, PL011-not-mini-UART, the serial rig) if UEFI proves unworkable.
+
+## 2026-08-27 (cont.) — keeping the roadmap forward-looking
+
+A cleanup Hans asked for: the roadmap had grown to 1700 lines, half of it
+finished work. Split it — `roadmap.md` back down to ~530 forward-looking lines
+(open frontier, remaining follow-ups, north-stars, open gaps), and the finished
+arcs (microkernel bring-up, network stack, filesystems, disk management,
+standalone binaries, pipelines, and the done parking-lot entries) moved verbatim
+into a new `roadmap-completed.md` — the plan-shaped companion to CHANGELOG.md's
+condensed milestone log. The moved text keeps its original "deferred" tails for
+context, with a note that those open items now live back in the roadmap.
+
 ## 2026-08-27 (cont.) — shell wildcards and tab completion
 
 Two classic interactive-shell features. Globbing was the straightforward one:

@@ -274,9 +274,14 @@ report, device attributes), which today's one-way `NP_WRITE_FILE` output
 model doesn't carry back. Reading the byte-stream UART backend (QEMU) is
 straightforward; the framebuffer backend (Parallels) is the one that matters
 and has no return channel yet. **Consumer question:** the first real
-consumer is a full-screen program, so this pairs naturally with "an editor"
-or `less` under item 4 — build the terminal and its first full-screen client
-close together so the escape set is driven by a real need, not guessed.
+consumer is a full-screen program that paints and repaints a screen. Note the
+**pager already shipped** (2026-08-27, `more`/`less`) *without* this — it
+scrolls line-by-line and clears with the minimal `ESC[2J`/`ESC[H` cond already
+has, so it isn't the consumer that forces the full escape set. The true
+consumer is an **editor** (or a `top`), so build the terminal and its first
+editor close together, driven by real need rather than guessed — the
+keyboard-ownership arc (below/shipped) already cleared the "an interactive
+`/bin` program can read keys" prerequisite both need.
 
 ### 2. Richer commands: flags, arguments, real option parsing (scoped, incremental)
 
@@ -312,22 +317,26 @@ The standard toolset still missing, roughly in cheapness order (`tail`, `nl`,
 input before emitting, unlike the streaming filters), `tee`, `tr`, `cut`,
 `find`, `du`, `df`,
 `date`/`sleep` (both want a wall-clock the kernel already has via the timer
-counter and `MONOTONIC_US`), `env`-as-a-program, `true`/`false`/`yes`, a
-`kill`-by-name, and eventually an **editor** and a **pager** (`less`/`more`)
-— the two that turn item 1's terminal work into something with a consumer.
+counter and `MONOTONIC_US`), `env`-as-a-program, `true`/`false`/`yes`, and a
+`kill`-by-name. The **pager** (`more`/`less`) **shipped 2026-08-27** — the
+keyboard-ownership arc (a foreground `/bin` program can read the keyboard)
+was its enabler, so it's a `/bin` program now, not a builtin. The remaining
+hard one is an **editor** — it needs item 1's cursor addressing plus item 4's
+richer input, and it's the real consumer that would justify item 1's terminal
+work.
 
 **What exists to build on.** Every one of these is "a new crate under
 `programs/<category>/` over `ulib`, found by PATH" — the externalization arc
 is complete and the pattern is turnkey (a filter reads `pipe_recv`, writes
 `write_out`; a fs command resolves against the delivered cwd and calls the
-`fs_*` helpers). So most of these are genuinely small. The two that aren't:
-an **editor** (needs item 1's cursor addressing + item 4's richer input) and
-a **pager** (same, plus reading its input while also reading the keyboard —
-a program that multiplexes stdin and the tty, which nothing here does yet).
-`sort` is the one filter with a real design wrinkle (full-input buffering
-against the fixed-buffer/no-alloc constraint — a bounded external-ish sort,
-or a documented size cap). Cheap wins first; editor/pager last, gated on
-item 1.
+`fs_*` helpers), and the keyboard-ownership arc proved even an *interactive*
+program (one that reads keys while running) can be a `/bin` binary — the pager
+is the existence proof. So most of these are genuinely small. The one that
+isn't: an **editor** (needs item 1's cursor addressing + item 4's richer
+input). `sort` is the one filter with a real design wrinkle (full-input
+buffering against the fixed-buffer/no-alloc constraint — a bounded
+external-ish sort, or a documented size cap). Cheap wins first; the editor
+last, gated on item 1.
 
 ### 4. Login, users, security, file permissions (a substantial arc, medium-term)
 

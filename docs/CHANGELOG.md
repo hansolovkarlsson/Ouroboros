@@ -46,6 +46,11 @@ needed. (See `manpages`/`selftest` lore on the same relocation limit.)
 correctly and `*.md` stayed literal; `cat ba<Tab>` completed to `BANANA.TXT` and
 `echo ap<Tab>` listed `APPLE.TXT APRICOT.TXT` and extended to `AP`.
 
+This shell-and-binaries branch as a whole — the keyboard-ownership arc, the
+externalization scoping, and the two old traps that resurfaced (this PIE wall
+and the pager's piped-read `MSG_MAX` bug) — is retrospected in
+[`interactive-shell-postmortem.md`](interactive-shell-postmortem.md).
+
 ## `man` - manual pages
 
 A `man <command>` that prints a full manual page, complementing the one-line
@@ -147,6 +152,11 @@ keyboard — the whole point), `q` returned to the shell, and Ctrl+C terminated 
 (`task 5 terminated`) and dropped back to the prompt. Normal commands, pipelines,
 and the `more` builtin all still work. This unblocks the editor/BASIC direction:
 those are now just `/bin` programs.
+
+The design behind this — *interactivity is keyboard ownership, not a shell
+property* — and the protected-server guard bug an ultrareview later caught in
+`FG` are written up in
+[`interactive-shell-postmortem.md`](interactive-shell-postmortem.md).
 
 ## `pwd` and `write` move out to `/bin`
 
