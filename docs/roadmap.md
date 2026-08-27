@@ -1003,7 +1003,17 @@ fine — so this is a "because it's the Ouroboros thing to do" goal (the name
 is a snake eating its tail; a system that can build itself is the literal
 endgame), sequenced behind everything with an actual consumer.
 
-### 6. Document what MINIX / Linux / Unix have that Ouroboros doesn't (a doc task — and the organizing exercise)
+### 6. Document what MINIX / Linux / Unix have that Ouroboros doesn't (a doc task — the organizing exercise) — DONE (2026-08-26)
+
+**Done — see [`gap-analysis.md`](gap-analysis.md).** A factual, per-subsystem
+*have / partial / don't* inventory of the current boundary (process model,
+syscall surface, VFS/fds, terminal, libc, users/permissions, networking,
+devices, memory, scheduling, cluster, time, the utility set, init, and
+observability), each row noting what it would take and which arc it maps to,
+capped by a ranked "biggest gaps" synthesis. It confirmed the sequencing hunch
+above: a per-file `FSOP_STAT` surface is the keystone (it gates `ls -l`, richer
+flags, *and* permissions), and a POSIX libc + fds is the second. Original
+framing kept below.
 
 Not a feature — a **gap-analysis document**, and the meta-item that helps
 sequence the other five. `docs/comparison.md` already frames Ouroboros

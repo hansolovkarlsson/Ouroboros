@@ -560,6 +560,7 @@ docs/
   processes.md       reference doc: process loading/config mechanism, memory model, binary format, writing a replacement program
   shell-commands.md  reference doc: the default shell's builtin commands - syntax, behavior, known limitations
   comparison.md      user-facing reference: Ouroboros vs MINIX/Linux/Unix/Plan 9/Helix as a "what you gain, what you give up" pro/con table (plus an at-a-glance capability matrix) - the practical trade for a would-be user, the complement to research-directions.md's design-influence lens
+  gap-analysis.md    factual per-subsystem have/partial/don't inventory of the current boundary vs mainstream Unixes (process model, syscalls, VFS/fds, terminal, libc, users/permissions, net, devices, memory, scheduling, cluster, time, the utility set, init, observability) - each row notes what it would take + its roadmap arc, capped by a ranked "biggest gaps" (FSOP_STAT surface is the keystone). The concrete companion to comparison.md and the organizing input to roadmap.md's north-star arcs
   testing-exfat.md   how-to: build the two-partition exFAT test disk (make run-image-exfat), drive the read-write surface from the shell, and verify against macOS's own driver (fsck_exfat + a byte-identical cmp) - the QEMU rig behind fsd/src/exfat.rs
   CHANGELOG.md       historical record of completed milestones (phase 0 through the most recent), newest first
   journal.md         chronological dev-log: narrative "what was worked on and why" per day - a lighter companion to CHANGELOG.md's milestone record
