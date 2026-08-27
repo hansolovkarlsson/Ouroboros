@@ -1290,6 +1290,32 @@ fn run_path_command(command: &str, line: &str, cwd: &[u8; CWD_SIZE], cwd_len: us
     }
     let argv = &argv_buf[..n];
 
+    // A command containing '/' is a PATHNAME, not a bare name: resolve it
+    // against the cwd (absolute if it starts with '/') and run that file
+    // directly - the standard shell rule that PATH is searched *only* for
+    // names with no slash. Without this, `bin/echo` from `/` was turned into
+    // `<PATH>/bin/echo` (= `/bin/bin/echo`) and never found, while
+    // `../bin/echo` only "worked" by the accident of normalizing back onto
+    // PATH (`/bin/../bin/echo` -> `/bin/echo`).
+    if command.contains('/') {
+        let mut cand = [0u8; PATH_SIZE];
+        let Some(len) = resolve_path(cwd_str(cwd, cwd_len), command, &mut cand) else {
+            return false;
+        };
+        let Ok(candidate) = core::str::from_utf8(&cand[..len]) else {
+            return false;
+        };
+        // Probe for existence, same as the PATH loop below, so a missing
+        // pathname falls through to "unknown command" rather than an error.
+        let mut probe = [0u8; 1];
+        let r = fs_read_file(candidate, &mut probe);
+        if r == NO_FS || r >= FS_ERR_MIN {
+            return false;
+        }
+        run_found_command(candidate, command, argv, cwd, cwd_len, out);
+        return true;
+    }
+
     // Search directories from the PATH env var (falling back to the default
     // if unset or not valid UTF-8).
     let path = env
@@ -1332,35 +1358,51 @@ fn run_path_command(command: &str, line: &str, cwd: &[u8; CWD_SIZE], cwd_len: us
         }
 
         // Found it. Run it - foreground (console) or captured (redirect).
-        if out.is_console() {
-            match spawn_path(candidate, argv, cwd, cwd_len, syscall_abi::CON_TASK) {
-                Ok(slot) => {
-                    delegate_net(slot);
-                    // Foreground: wait for it (also reaps the slot). Ctrl+C
-                    // interrupts the wait and leaves it running in the
-                    // background (see `ps`).
-                    if syscall(syscall_abi::WAIT, slot) == WAIT_INTERRUPTED {
-                        print_line("interrupted (the program keeps running - see ps)");
-                    }
-                }
-                Err(0) => print_line("command path too long"),
-                Err(NO_FS) => print_no_fs(),
-                Err(code) => print_fs_error(command, code),
-            }
-        } else {
-            match spawn_path(candidate, argv, cwd, cwd_len, self_task()) {
-                Ok(slot) => {
-                    delegate_net(slot);
-                    capture_program_output(slot, out);
-                }
-                Err(0) => print_line("command path too long"),
-                Err(NO_FS) => print_no_fs(),
-                Err(code) => print_fs_error(command, code),
-            }
-        }
+        run_found_command(candidate, command, argv, cwd, cwd_len, out);
         return true;
     }
     false
+}
+
+/// Spawn an already-resolved, already-found candidate path and run it -
+/// foreground (wait+reap) when writing to the console, or captured when the
+/// sink is a redirect/pipe - the shared tail of both command-lookup paths
+/// (a bare name found on `$PATH`, and a `/`-containing pathname resolved
+/// against the cwd). Always returns after running (the caller reports "found").
+fn run_found_command(
+    candidate: &str,
+    command: &str,
+    argv: &[&str],
+    cwd: &[u8; CWD_SIZE],
+    cwd_len: usize,
+    out: &mut Output,
+) {
+    if out.is_console() {
+        match spawn_path(candidate, argv, cwd, cwd_len, syscall_abi::CON_TASK) {
+            Ok(slot) => {
+                delegate_net(slot);
+                // Foreground: wait for it (also reaps the slot). Ctrl+C
+                // interrupts the wait and leaves it running in the
+                // background (see `ps`).
+                if syscall(syscall_abi::WAIT, slot) == WAIT_INTERRUPTED {
+                    print_line("interrupted (the program keeps running - see ps)");
+                }
+            }
+            Err(0) => print_line("command path too long"),
+            Err(NO_FS) => print_no_fs(),
+            Err(code) => print_fs_error(command, code),
+        }
+    } else {
+        match spawn_path(candidate, argv, cwd, cwd_len, self_task()) {
+            Ok(slot) => {
+                delegate_net(slot);
+                capture_program_output(slot, out);
+            }
+            Err(0) => print_line("command path too long"),
+            Err(NO_FS) => print_no_fs(),
+            Err(code) => print_fs_error(command, code),
+        }
+    }
 }
 
 /// Relay-capture a program's output (routed back to this shell as a raw
@@ -2244,13 +2286,31 @@ fn task_state(i: u64) -> u64 {
     syscall(syscall_abi::TASK_STATE, i)
 }
 
+/// Task `i`'s name (`argv[0]`) via the `TASK_NAME` syscall, copied into
+/// `buf`; returns the number of bytes written (0 if the slot is nameless -
+/// an unused slot, or a spawned task that somehow carried no argv). See
+/// [`cmd_ps`].
+fn task_name(i: u64, buf: &mut [u8]) -> usize {
+    let len = syscall4(
+        syscall_abi::TASK_NAME,
+        i,
+        buf.as_mut_ptr() as u64,
+        buf.len() as u64,
+        0,
+    );
+    (len as usize).min(buf.len())
+}
+
 /// `ps` builtin: one line per scheduler slot, probing indices upward
 /// until the kernel answers [`TASK_STATE_INVALID`] (how the slot count
-/// is discovered without it leaking into the ABI as a constant). The
-/// caller can't tell "running right now" from "runnable, waiting its
-/// turn" - it is, by definition, the one running at the moment it asks -
-/// so both print as "runnable". Real output, so it goes through the
-/// sink (redirectable like any other command's).
+/// is discovered without it leaking into the ABI as a constant). Each
+/// line carries the task's name (`argv[0]`, via [`task_name`]) after its
+/// state - the servers and init are named by the kernel, spawned commands
+/// by the argv they were launched with. The caller can't tell "running
+/// right now" from "runnable, waiting its turn" - it is, by definition,
+/// the one running at the moment it asks - so both print as "runnable".
+/// Real output, so it goes through the sink (redirectable like any other
+/// command's).
 fn cmd_ps(out: &mut Output) {
     let mut i = 0u64;
     loop {
@@ -2260,13 +2320,36 @@ fn cmd_ps(out: &mut Output) {
         }
         out.put_str("task ");
         out.put_u64_decimal(i);
-        out.put_line(match state {
-            TASK_STATE_UNUSED => ": unused",
-            TASK_STATE_RUNNABLE => ": runnable",
-            TASK_STATE_BLOCKED => ": blocked (waiting)",
-            TASK_STATE_ZOMBIE => ": exited - `wait` to collect its status",
-            _ => ": ?",
-        });
+        if state == TASK_STATE_ZOMBIE {
+            // Show the exit code (peeked without reaping) so `ps` says *why*
+            // the zombie is holding its slot, before anyone `wait`s on it.
+            out.put_str(": exited (code ");
+            let code = syscall4(syscall_abi::TASK_EXIT_CODE, i, 0, 0, 0);
+            if code == syscall_abi::TASK_NO_EXIT_CODE {
+                out.put(b'?');
+            } else {
+                out.put_u64_decimal(code);
+            }
+            out.put_str(") - `wait` to collect");
+        } else {
+            out.put_str(match state {
+                TASK_STATE_UNUSED => ": unused",
+                TASK_STATE_RUNNABLE => ": runnable",
+                TASK_STATE_BLOCKED => ": blocked (waiting)",
+                _ => ": ?",
+            });
+        }
+        // Append the name, when the slot has one (unused slots don't).
+        let mut name = [0u8; syscall_abi::TASK_NAME_MAX as usize];
+        let n = task_name(i, &mut name);
+        if n > 0 {
+            out.put_str("  ");
+            for &b in &name[..n] {
+                out.put(b);
+            }
+        }
+        out.put(CR);
+        out.put(LF);
         i += 1;
     }
 }

@@ -87,7 +87,7 @@ machines that don't share the key are refused.
 | `write` | `write <file> [words...]` | Joins every word after the filename with a single space (same style as `echo`) and writes the result as the file's *entire* contents, replacing whatever was there. Creates the file if it doesn't exist. | `write <file>` with no words truncates the file to empty (a real, valid case, not an error). Fails if the target is an existing directory or the parent is missing. |
 | `writeat` | `writeat <file> <offset> <text...>` | A **random-access write**: writes the text at byte `offset`, overwriting bytes *in place* and leaving everything outside the written window intact (unlike `write`, which replaces the whole file). If `offset` is past the end of the file, the gap is **zero-filled** on disk. | The file must **already exist** — `writeat` does not create it (use `write`/`touch` first). The text is bounded by the input line. A past-EOF gap is capped at 1 MiB (a larger offset reports a device I/O error). Fails on a missing file, or if the target is a directory. |
 | `cp` | `cp <src> <dst>` | Copies `src`'s contents to `dst`, creating `dst` if it doesn't exist or replacing it if it does. | **Streams the copy one chunk at a time via the FAT32 offset-write primitive, so it handles a file of any size** (bounded by disk space, not a shell buffer) — the old 2048-byte ceiling is gone. `cp x x` (a file onto itself, however the two paths are spelled) is **refused**: streaming truncates `dst` first, which would destroy the source. A missing source leaves `dst` untouched. Non-atomic: an interrupted copy leaves `dst` truncated (a partial copy is a wrong copy). No recursive directory copy. |
-| `ps` | `ps` | One line per scheduler slot: `unused`, `runnable`, `blocked (waiting)`, or `` exited - `wait` to collect its status `` (a zombie holding its slot). | The caller can't distinguish "running right now" from "runnable" — it is, by definition, the one running when it asks. Output is redirectable like any other command's. |
+| `ps` | `ps` | One line per scheduler slot: the state (`unused`, `runnable`, `blocked (waiting)`, or `` exited (code N) - `wait` to collect `` for a zombie, where `N` is the exit code) followed by the task's **name**. Boot tasks are named `shell`/`idle`/`fsd`/`cond`/`netd`; a spawned task shows its `argv[0]` (the path `exec`/a pipeline launched it with); unused slots and reaped-pending zombies (whose argv was cleared on exit) show no name. | The name comes from the `TASK_NAME` syscall (`argv[0]` of the named slot); the zombie exit code from `TASK_EXIT_CODE` (peeked without reaping — `wait` is still what collects the status and frees the slot). The caller can't distinguish "running right now" from "runnable" — it is, by definition, the one running when it asks. Output is redirectable like any other command's. |
 | `kill` | `kill <n>` | Destroys task `n` (see `ps` for numbers). | Tasks 0 (this shell), 1 (idle), and 2 (the filesystem server) are protected. A killed task's slot becomes spawnable again and its memory is reclaimed when allocation order allows. |
 | `fg` | `fg <n>` | Hands the keyboard to task `n` — e.g. `exec /EFI/ORBS/SH.BIN` then `fg 2` gives a real nested shell session; its `exit` hands the keyboard back. | **Ctrl+C is the escape hatch**: typed while another task owns the keyboard, the kernel reclaims it for this shell (the foregrounded task keeps running in the background — Ctrl+C is keyboard reclamation, not a signal; `kill` the task if it should die too). Ownership also reverts automatically when the foregrounded task exits or is killed. While this shell owns the keyboard, Ctrl+C (like every unhandled control byte) is ignored by the line editor. |
 | `send` | `send <n> <words...>` | Sends the words (space-joined, like `write`) as one IPC message (≤64 bytes) to task `n`'s mailbox. | Fails distinctly for a missing task, an over-long message, or a full mailbox (4 pending max). A dead task's queued mail dies with it. |
@@ -118,13 +118,20 @@ machines that don't share the key are refused.
 | `selftest` | `selftest` | Exercises the two historically-crashing code patterns (`write!`/`core::fmt` formatting, slice/str-vs-literal comparison) and prints pass/fail lines. | The relocating loader's permanent acceptance test — see `processes.md`'s "Binary format". |
 | `mv` | `mv <src> <dst>` | Renames or moves a file or directory to `dst` — and if `dst` is an existing directory, moves `src` *into* it keeping its basename (`mv notes.txt backup/`), like real `mv`. | A `dst` that exists and isn't a directory still fails rather than being overwritten. `mv x x` is refused ("source and destination are the same"). Moving a directory to a different parent correctly updates its own `..` entry, so `cd ..` inside it still resolves to the *new* parent afterward. No cycle detection beyond the trivial self-move guard. |
 
-Any other input is looked up as a **program on `$PATH`** (each `:`-separated
-directory in turn, e.g. `/bin/<name>`) and run in the foreground with the
-whole line as its argv — so a command binary is invoked by bare name, no
-`exec` or leading path needed. Only if no PATH directory has it does it print
-`unknown command: <word>`. `$VAR` references anywhere in a line are expanded
-from the environment before dispatch. A blank line (just Enter, or only
-whitespace) does nothing.
+Any other input names a **program to run** in the foreground, with the whole
+line as its argv. How the program is found follows the standard shell rule:
+
+- A **bare name** (no `/`) is looked up on **`$PATH`** — each `:`-separated
+  directory in turn, e.g. `/bin/<name>` — so a command binary is invoked by
+  name, no `exec` or leading path needed (`echo hello`).
+- A word **containing `/`** is a **pathname**, resolved against the current
+  directory (or used as-is if absolute) and **not** searched on `$PATH`:
+  `/bin/echo hello`, `bin/echo hello` from `/`, `../bin/echo hello` from a
+  subdirectory all run `/bin/echo`.
+
+Only if the resolved program can't be found does it print `unknown command:
+<word>`. `$VAR` references anywhere in a line are expanded from the environment
+before dispatch. A blank line (just Enter, or only whitespace) does nothing.
 
 ## Output redirection
 

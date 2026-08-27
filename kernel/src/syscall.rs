@@ -764,6 +764,39 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
                 tasks::task_state_code(i)
             }
         }
+        syscall_abi::TASK_NAME => {
+            // arg0 = task index, arg1 = out pointer, arg2 = out capacity.
+            // Copies up to capacity bytes of task `index`'s name (argv[0]),
+            // returns its true length, or 0 if the slot has no name. The
+            // read-only companion to TASK_STATE (see the shell's `ps`).
+            if !valid_user_range(arg1, arg2) {
+                return 0;
+            }
+            let i = arg0 as usize;
+            if i >= tasks::NUM_TASKS {
+                return 0;
+            }
+            match argv_get(tasks::argv_blob(i), 0) {
+                Some(name) => {
+                    let n = (name.len() as u64).min(arg2) as usize;
+                    // SAFETY: out range validated above.
+                    let dst = unsafe { core::slice::from_raw_parts_mut(arg1 as *mut u8, n) };
+                    dst.copy_from_slice(&name[..n]);
+                    name.len() as u64
+                }
+                None => 0,
+            }
+        }
+        syscall_abi::TASK_EXIT_CODE => {
+            // arg0 = task index. The exit status of a zombie (peeked, NOT
+            // reaped - unlike WAIT), or TASK_NO_EXIT_CODE for any other slot.
+            // Lets `ps` show why a zombie is holding its slot.
+            let i = arg0 as usize;
+            if i >= tasks::NUM_TASKS {
+                return syscall_abi::TASK_NO_EXIT_CODE;
+            }
+            tasks::zombie_status(i).unwrap_or(syscall_abi::TASK_NO_EXIT_CODE)
+        }
         syscall_abi::KILL => {
             let i = arg0 as usize;
             if i <= 4 {

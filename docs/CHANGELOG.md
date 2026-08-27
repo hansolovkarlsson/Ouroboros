@@ -7,6 +7,66 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/`; 
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## Fix: running a program by a relative path from `/`
+
+A command containing a `/` was being fed through the `$PATH` search like a bare
+name — each PATH directory prepended — so `bin/echo` from `/` became
+`/bin/bin/echo` and failed with `unknown command: bin/echo`. It only *seemed*
+to work from a subdirectory: `../bin/echo` became `/bin/../bin/echo`, which
+normalizes back to `/bin/echo` by accident, regardless of the cwd.
+
+The fix applies the standard shell rule at the top-level command dispatch (the
+pipeline-stage resolver `resolve_command` already did this): a word containing a
+`/` is a **pathname**, resolved against the cwd (or used as-is if absolute) and
+**not** searched on `$PATH`; only a bare name searches `$PATH`. So `/bin/echo`,
+`bin/echo` (from `/`), and `../bin/echo` (from a subdir) all run `/bin/echo`; a
+missing pathname (`bin/nope`) still falls through to `unknown command`.
+**Verified** in QEMU across all five cases.
+
+## `ps` shows process names
+
+`ps` printed only a slot number and state (`task 5: runnable`); now each line
+carries the task's **name**. The data mostly already existed — the kernel stores
+every spawned task's argv, and `argv[0]` *is* the command name — it just had no
+way out: `GET_ARG` (49) only reads the *calling* task's own argv.
+
+A new **`TASK_NAME`** syscall (54) closes that: `(task index, out ptr, out cap)`
+copies task *i*'s `argv[0]` into the caller's buffer and returns its length (or 0
+for a nameless slot), the exact bounds-checked copy-to-caller shape of
+`GET_ARG`/`GET_CWD`, and the read-only companion to `TASK_STATE` (18) that `ps`
+already probes. The one genuine gap was the **boot-loaded** tasks — the idle
+task, `fsd`/`cond`/`netd`, and the init program are loaded, not `SPAWN`ed, so
+their argv was empty. `tasks::set_name` synthesizes a single-argument argv blob
+for them (`init` names slot 0 `shell`, 1 `idle`, and the three servers via a new
+`server_name` helper); `supervisor::restart` re-applies the server name after a
+crash (the teardown clears argv), so a restarted server doesn't go nameless.
+
+Result:
+
+```
+task 0: runnable  shell
+task 2: blocked (waiting)  fsd
+task 3: blocked (waiting)  cond
+task 4: blocked (waiting)  netd
+task 5: blocked (waiting)  /bin/PONG
+```
+
+A spawned task shows the `argv[0]` it was launched with (a `/bin`-relative path
+for `exec`); unused slots and reaped-pending zombies (whose argv was cleared on
+exit) show no name — a zombie isn't running. **Verified** end to end in QEMU: the
+boot tasks named as above, and `exec /bin/PONG` (a long-lived server) then `ps`
+showed `task 5: blocked (waiting)  /bin/PONG`.
+
+A follow-on: **`ps` now also shows a zombie's exit code.** A zombie already
+carried its status (that's what `wait` collects), but `ps` only said `exited -
+`wait` to collect its status`. A new **`TASK_EXIT_CODE`** syscall (55) *peeks*
+that status without reaping it (unlike `wait`, which collects and frees the
+slot), returning `TASK_NO_EXIT_CODE` for any non-zombie slot, so `ps` prints
+`task 5: exited (code 1) - `wait` to collect`. Now you can see *why* a task is
+holding its slot before deciding to `wait` on it. **Verified**: `exec /bin/CAT`
+(no arg, exits 1) showed `code 1`, `exec /bin/ARGS` (exits 0) showed `code 0`,
+each matching the kernel's own exit log.
+
 ## Four more `/bin` pipeline filters — `tail`, `nl`, `rev`, `uniq`
 
 The `/bin` filter set (`upper`/`grep`/`wc`/`head`) grew four classic Unix

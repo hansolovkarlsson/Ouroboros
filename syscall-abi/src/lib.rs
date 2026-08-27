@@ -554,6 +554,30 @@ pub const GET_NS: u64 = 53;
 /// handful of bindings of `CWD_MAX`-ish paths - 256 bytes is ample for now.
 pub const NS_MAX: u64 = 256;
 
+/// `(task index, out pointer, out capacity)` -> the length of task `index`'s
+/// name (`argv[0]`, copying up to `out capacity` of its bytes into the buffer),
+/// or `0` if the slot has no name (empty/unused). Read-only, like [`TASK_STATE`]:
+/// the companion that turns `ps`'s slot list into named processes. Boot-loaded
+/// tasks (idle/`fsd`/`cond`/`netd`/init) are named by the loader; spawned tasks
+/// carry their `argv[0]`.
+pub const TASK_NAME: u64 = 54;
+
+/// Maximum name length [`TASK_NAME`] will report - a process name is short, and
+/// this caps the `ps` buffer without pulling in the full `ARGV_MAX`.
+pub const TASK_NAME_MAX: u64 = 32;
+
+/// `(task index)` -> the exit status (`0..=255`) of a zombie task, **without
+/// reaping it** (unlike [`WAIT`], which collects the status and frees the slot),
+/// or [`TASK_NO_EXIT_CODE`] if the slot isn't a zombie. Lets `ps` show *why* a
+/// zombie is holding its slot before anyone waits on it. A killed task is not a
+/// zombie (it goes straight to unused, no status), so this never reports one.
+pub const TASK_EXIT_CODE: u64 = 55;
+
+/// [`TASK_EXIT_CODE`]'s answer for a slot that isn't a zombie (running, blocked,
+/// unused, or out of range). `u64::MAX` is safely distinct from any real status,
+/// which is masked to a byte (`0..=255`) at exit.
+pub const TASK_NO_EXIT_CODE: u64 = u64::MAX;
+
 /// [`NET_RECV`] returned when no frame is currently available (a poll that
 /// found the receive ring empty) - distinct from a real length (`u64::MAX`
 /// is out of any frame's range) and from the error sentinel.

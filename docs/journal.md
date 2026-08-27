@@ -7,6 +7,52 @@ for the forward plan see [`roadmap.md`](roadmap.md).
 
 ---
 
+## 2026-08-27 (cont.) — a path-command bug: `bin/echo` from `/`
+
+Hans hit a real one: `bin/echo hello` from `/` said `unknown command: bin/echo`,
+but `../bin/echo` from a subfolder worked. The "subfolder fixes it" framing was a
+red herring — the actual cause was that the top-level command dispatch fed
+*anything* non-builtin through the `$PATH` search, prepending each PATH dir. So
+`bin/echo` became `/bin/bin/echo` (gone), while `../bin/echo` became
+`/bin/../bin/echo` which normalizes back to `/bin/echo` by pure luck, no matter
+what the cwd was. The pipeline-stage resolver already got this right (a
+`/`-containing token is a pathname, resolved against the cwd, PATH untouched) —
+the top-level path just never learned the same rule. One `command.contains('/')`
+branch brought them into line. Nice to see the fix confirmed across all five
+shapes (bare, absolute, relative-from-root, relative-from-subdir, and a bogus
+path still landing on `unknown command`).
+
+## 2026-08-27 — `ps` shows process names
+
+A small, satisfying observability win. `ps` had always printed a bare slot
+number and state (`task 5: runnable`) — you could see *that* something ran, but
+not *what*. The interesting part was that the data was already there: the kernel
+keeps every spawned task's argv, and `argv[0]` is the command name. It just
+couldn't get out — `GET_ARG` only reads the *calling* task's own argv, and the
+boot-loaded servers (`fsd`/`cond`/`netd`, idle, the init shell) were never
+`SPAWN`ed with an argv at all, so they had no name to read.
+
+So two pieces: a `TASK_NAME` syscall (54) — the read-another-task's-argv[0]
+mirror of `GET_ARG`, same bounds-checked copy-to-caller shape, the read-only
+partner to the `TASK_STATE` that `ps` already probes — and naming the
+boot-loaded tasks by synthesizing a one-argument argv blob for them (`set_name`),
+with a `server_name` helper as the single source of truth so a supervised
+*restart* re-applies the name after a crash wipes it. `ps` now appends the name;
+`exec /bin/PONG` then `ps` confirmed a spawned task shows the path it was
+launched with, and the servers show `fsd`/`cond`/`netd`. Zombies stay nameless
+(their argv is cleared on exit — a zombie isn't running), which felt like the
+right call rather than reaching to preserve it.
+
+Then a natural follow-on the same day: if `ps` is going to list zombies, it
+should say *why* they exited. The status was already there (it's what `wait`
+returns), it just wasn't readable without reaping. A `TASK_EXIT_CODE` syscall
+(55) that peeks a zombie's status without consuming it — the read-only sibling of
+`wait` — and `ps` now prints `exited (code N)`. `exec /bin/CAT` with no argument
+(exits 1) and `exec /bin/ARGS` (exits 0) both showed the right code, matching the
+kernel's own exit log. Small, but it turns a zombie line from "something died
+here" into "this exited cleanly / this failed", which is the actual question you
+have when you see one.
+
 ## 2026-08-26 (cont.) — four more `/bin` filters (`tail`/`nl`/`rev`/`uniq`)
 
 A quieter, additive session after the cluster work: filling out `/bin` with the
