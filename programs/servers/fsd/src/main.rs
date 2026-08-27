@@ -417,6 +417,39 @@ fn handle_ninep(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], sender: u64,
                 Err(e) => status_reply(reply, error_code(&e)),
             }
         }
+        ninep_abi::NP_STAT => {
+            let Some(path) = path_from(payload, 0, p[0]) else {
+                return status_reply(reply, syscall_abi::FS_ERROR);
+            };
+            match fs.stat(path) {
+                Ok(st) => {
+                    let (status_slot, result) =
+                        reply[..REPLY_PAYLOAD + ninep_abi::STAT_INFO_LEN].split_at_mut(REPLY_PAYLOAD);
+                    result.fill(0); // unset fields (time when absent) read as zero
+                    let mut flags: u32 = 0;
+                    if st.is_dir {
+                        flags |= ninep_abi::STAT_FLAG_DIR;
+                    }
+                    result[ninep_abi::STAT_SIZE_OFF..ninep_abi::STAT_SIZE_OFF + 8]
+                        .copy_from_slice(&st.size.to_le_bytes());
+                    result[ninep_abi::STAT_FLAGS_OFF..ninep_abi::STAT_FLAGS_OFF + 4]
+                        .copy_from_slice(&flags.to_le_bytes());
+                    if let Some(t) = st.time {
+                        result[ninep_abi::STAT_YEAR_OFF..ninep_abi::STAT_YEAR_OFF + 2]
+                            .copy_from_slice(&t.year.to_le_bytes());
+                        result[ninep_abi::STAT_MONTH_OFF] = t.month;
+                        result[ninep_abi::STAT_DAY_OFF] = t.day;
+                        result[ninep_abi::STAT_HOUR_OFF] = t.hour;
+                        result[ninep_abi::STAT_MIN_OFF] = t.min;
+                        result[ninep_abi::STAT_SEC_OFF] = t.sec;
+                        result[ninep_abi::STAT_TIMEVALID_OFF] = 1;
+                    }
+                    status_slot[..8].copy_from_slice(&(ninep_abi::STAT_INFO_LEN as u64).to_le_bytes());
+                    REPLY_PAYLOAD + ninep_abi::STAT_INFO_LEN
+                }
+                Err(e) => status_reply(reply, error_code(&e)),
+            }
+        }
         ninep_abi::NP_READ => {
             let Some(path) = path_from(payload, 0, p[0]) else {
                 return status_reply(reply, syscall_abi::FS_ERROR);

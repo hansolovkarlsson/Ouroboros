@@ -613,6 +613,15 @@ This inline-payload design is the first half of MINIX's — small
 messages plus kernel-mediated copies — and the grant/safecopy primitive
 below is the second half.
 
+One later addition, the **stat** verb (`NP_STAT`): given a path, the server
+returns a fixed 20-byte metadata record — size, a directory flag, and a
+broken-down calendar modified time (`STAT_*` offsets in `ninep-abi`). The time
+is a calendar, not an epoch, so no filesystem's epoch leaks into the ABI and the
+client formats it with no date math; a `time_valid` byte says whether it's
+meaningful (only FAT32 decodes a timestamp today). It's the metadata behind
+`ls -l`, which reads the directory then stats each entry (`ulib::fs_stat` and the
+`stat_*` accessors).
+
 ### IPC capabilities — who-may-call-whom
 
 Memory isolation is MMU-enforced, but the IPC *topology* is enforced too:

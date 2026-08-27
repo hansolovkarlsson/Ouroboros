@@ -65,7 +65,7 @@ set; roadmap arcs are cited by their `roadmap.md` section.
 | Mount / unmount / mkfs / partition / erase | ✅ | The disk-management arc: `FSOP_MOUNT`/`UNMOUNT`/`FORMAT`/`PARTITION`/`ERASE`. |
 | Integer file descriptors (open→fd, cursor, `dup`) | ✗ | Protocol is **path-per-op** (fids deferred in Phase 0). An fd table (`fd → server,handle,offset`) is a *userland/libc* construct buildable on today's servers — and a POSIX fd ≈ a 9P fid, so adding fids someday pays off twice (see the POSIX arc). |
 | `open`/`close`/`read`/`write`/`lseek` | ◐ | The *operations* exist (`FSOP_READ_AT`/`WRITE_AT`, a `read_cursor` for sequential resume), but not as a cursored open-file handle — every op re-sends the path. |
-| `stat`/`fstat` (per-file metadata) | ◐ | `FSOP_MOUNT_INFO` gives *volume* info; there's **no per-file stat op**. Sizes come back from read ops. `ls -l` needs a new `FSOP_STAT` surfacing size/mode/mtime — the precursor to richer commands *and* permissions (roadmap items 2 & 4). |
+| `stat`/`fstat` (per-file metadata) | ◐ | A per-file **`stat` op exists now** (`NP_STAT`): size, a directory flag, and a broken-down calendar mtime — backs `ls -l`. FAT32 decodes the timestamp; exFAT/ext2/`/proc` return size+type with the time unset (a follow-up). Still no **mode/owner** in the record — that's the remaining precursor to permissions (roadmap item 4). |
 | File permissions (mode bits) | ◐ | **Stored, not enforced**: ext2 carries uid/gid/mode on disk (read today, ignored above fsd); FAT/exFAT can't model them. Enforcement = check caller identity vs. inode mode in the `FSOP_*` dispatch (roadmap item 4). |
 | `chmod`/`chown` | ✗ | No write path for mode/owner. Pairs with the stat surface above. |
 | Symbolic links | ◐ | ext2 symlinks are **reported, not followed**; no creation. |
@@ -200,7 +200,7 @@ ps kill fg wait send recv selftest env set unset cpu`.
 | `find` `du` `df` | ✗ | Client-side directory walking (new but small); `df` wants the volume info fsd already returns. |
 | `date` `sleep` | ✗ | Blocked on wall-clock (§12) and a per-task timer respectively. |
 | `chmod` `chown` `ln` | ✗ | Blocked on the stat surface + permissions arc (§3, §6). |
-| Command flags (`ls -l`, `grep -i/-r`, `rm -r`, `cp -r`, real regex) | ◐/✗ | Positional args only today; a shared `ulib` option parser + the stat surface unlock these (roadmap item 2). |
+| Command flags (`ls -l`, `grep -i/-r`, `rm -r`, `cp -r`, real regex) | ◐ | `ls` now takes `-l`/`-a` (on the new `stat` op); the rest are still positional-only. A shared `ulib` option parser would generalize flag handling (roadmap item 2). |
 | An editor + a pager (`less`/`more`) | ✗ | The two consumers that justify the VT100 arc (§4) and general `select` — gated on items 1 & 3. |
 | `sed` `awk` `find … -exec` | ✗ | Larger; realistic once a libc/scripting layer exists. |
 

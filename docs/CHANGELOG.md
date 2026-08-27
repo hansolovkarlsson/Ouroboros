@@ -7,6 +7,31 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/`; 
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## `ls`: columns, sort by name, and `ls -l` (size + date/time)
+
+`ls` used to dump entries one-per-line in raw on-disk order. Now it's a real
+listing: **sorted by name** (case-insensitive), **multi-column** by default (like
+a terminal `ls`, directories suffixed `/`), with dotfiles (and `.`/`..`) hidden
+unless **`-a`**. And **`ls -l`** is the long form — one entry per line with its
+type, size, and modified `YYYY-MM-DD HH:MM`. Flags combine (`-la`).
+
+The long form needed metadata the filesystem protocol didn't expose, so this adds
+a **`stat`** verb (`NP_STAT`) — the reusable per-file primitive the gap-analysis
+flagged as the keystone. Given a path, `fsd` returns a fixed 20-byte record:
+size, a directory flag, and a **broken-down calendar** modified time (not an
+epoch — so no filesystem's differing epoch leaks into the ABI, and the client
+formats it with no date math). A `time_valid` byte says whether the time is
+meaningful: **FAT32** now decodes its "write" date/time from the directory entry
+(the primary/dev target), while exFAT/ext2/`/proc` return size and type with the
+time unset (a follow-up). `ls -l` reads the directory (unchanged `readdir`) then
+stats each entry (`ulib::fs_stat` + `stat_*` accessors), so no existing readdir
+client was touched.
+
+**Verified** in QEMU on the FAT32 disk: `ls /bin` printed sorted columns
+(`ARGS  CAT  CLEAR …` down the columns, `/`-suffixed dirs), `ls -l /bin` showed
+real sizes and `2026-08-27 08:54` timestamps, `-a` revealed `./`/`../`, and bare
+`ls` at `/` listed `BIN/  CLUSTER.KEY  EFI/`.
+
 ## `shutdown` and `halt` - machine power control
 
 Two new shell builtins to stop the machine: `shutdown` (alias `poweroff`) powers

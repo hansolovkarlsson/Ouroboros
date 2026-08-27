@@ -7,6 +7,28 @@ for the forward plan see [`roadmap.md`](roadmap.md).
 
 ---
 
+## 2026-08-27 (cont.) — `ls` grows up: columns, sort, and `-l`
+
+The `ls` that just dumped names one per line always felt like a placeholder. This
+turned it into a real one: sorted by name, multi-column by default (column-major,
+like a terminal), dotfiles hidden unless `-a`, and a proper `-l` long form. The
+columns and sort are pure client formatting (the `tree` playbook — collect
+offset/length records, insertion-sort, lay out). The interesting part was `-l`,
+because size and date/time are *metadata the filesystem protocol didn't expose*.
+
+That's the keystone the gap-analysis kept pointing at: there was no `stat`. So I
+added one — `NP_STAT`, a fixed 20-byte record (size, dir flag, modified time).
+The design choice that made it clean was returning a **broken-down calendar**
+rather than an epoch: FAT stores calendar fields, ext2 stores unix seconds, and
+if the wire carried epochs I'd have to pick one and convert on both sides. A
+calendar means each filesystem fills what it natively has and the client just
+formats digits — no date math anywhere. I scoped the actual timestamp decode to
+FAT32 (the tested disk) and left exFAT/ext2/proc returning size+type with the
+time marked absent, shown as `-`. And crucially I made `ls -l` do readdir + a
+stat per entry rather than fattening the readdir format — so tree, cd, the HTTP
+directory index, none of the existing readdir callers had to change. `ls -l /bin`
+lighting up with real sizes and `2026-08-27 08:54` timestamps was a good moment.
+
 ## 2026-08-27 (cont.) — `shutdown` and `halt`
 
 The machine could boot but never stop itself — you killed QEMU from the host or

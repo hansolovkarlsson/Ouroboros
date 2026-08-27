@@ -645,6 +645,17 @@ impl Fs {
         Ok(inode.size)
     }
 
+    /// Metadata for one path: size and directory flag. The inode's `i_mtime`
+    /// isn't parsed yet, so `time` is `None`. Backs `ls -l`.
+    pub fn stat(&mut self, path: &str) -> Result<crate::vfs::Stat, Error> {
+        let inode = self.find(path)?;
+        Ok(crate::vfs::Stat {
+            size: inode.size as u64,
+            is_dir: inode.is_dir(),
+            time: None,
+        })
+    }
+
     /// Reads up to `buf.len()` bytes from byte `offset`, returning how many were
     /// copied (`0` at/past EOF). The windowed primitive behind
     /// `FSOP_READ_AT`/`READ_BULK`.

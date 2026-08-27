@@ -759,6 +759,58 @@ pub fn fs_read_file(path: &str, buf: &mut [u8]) -> u64 {
     )
 }
 
+/// Stat `path`, filling `info` (which must be [`ninep_abi::STAT_INFO_LEN`]
+/// bytes) with the fixed metadata record. Returns [`ninep_abi::STAT_INFO_LEN`]
+/// on success, or [`NO_FS`]/an `FS_ERR_*` code (test with [`is_fs_error`]). The
+/// record is decoded with the `stat_*` accessors below.
+pub fn fs_stat(path: &str, info: &mut [u8]) -> u64 {
+    let mut fsp = [0u8; FSP_MAX];
+    let r = mount_resolve(path, &mut fsp);
+    np_dispatch(
+        &r,
+        ninep_abi::NP_STAT,
+        [r.len as u64, 0, 0, 0],
+        &fsp[..r.len],
+        &[],
+        info,
+    )
+}
+
+/// The size field of a stat record (see [`fs_stat`]).
+pub fn stat_size(info: &[u8]) -> u64 {
+    u64::from_le_bytes([
+        info[0], info[1], info[2], info[3], info[4], info[5], info[6], info[7],
+    ])
+}
+
+/// Whether a stat record's entry is a directory.
+pub fn stat_is_dir(info: &[u8]) -> bool {
+    let flags = u32::from_le_bytes([
+        info[ninep_abi::STAT_FLAGS_OFF],
+        info[ninep_abi::STAT_FLAGS_OFF + 1],
+        info[ninep_abi::STAT_FLAGS_OFF + 2],
+        info[ninep_abi::STAT_FLAGS_OFF + 3],
+    ]);
+    flags & ninep_abi::STAT_FLAG_DIR != 0
+}
+
+/// The modified time of a stat record as `(year, month, day, hour, min, sec)`,
+/// or `None` if the filesystem didn't surface one (`time_valid` == 0).
+pub fn stat_time(info: &[u8]) -> Option<(u16, u8, u8, u8, u8, u8)> {
+    if info[ninep_abi::STAT_TIMEVALID_OFF] == 0 {
+        return None;
+    }
+    let year = u16::from_le_bytes([info[ninep_abi::STAT_YEAR_OFF], info[ninep_abi::STAT_YEAR_OFF + 1]]);
+    Some((
+        year,
+        info[ninep_abi::STAT_MONTH_OFF],
+        info[ninep_abi::STAT_DAY_OFF],
+        info[ninep_abi::STAT_HOUR_OFF],
+        info[ninep_abi::STAT_MIN_OFF],
+        info[ninep_abi::STAT_SEC_OFF],
+    ))
+}
+
 /// Create or fully overwrite `path` with `data` via the grant/safecopy bulk
 /// path (`GRANT_READ`). Returns `0`, [`NO_FS`], or an `FS_ERR_*` code.
 /// `data.len()` must be `<= SAFECOPY_MAX`; empty `data` truncates to empty and
