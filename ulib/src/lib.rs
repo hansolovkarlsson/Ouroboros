@@ -103,8 +103,6 @@ pub fn write_out(target: u64, bytes: &[u8]) {
     }
 }
 
-/// Route output through the console server as a batched write over the uniform
-/// verb set (`ninep-abi`): an `NP_WRITE_FILE` whose inline data is the text -
 /// Block until a keyboard byte is available, and return it (`READ_CHAR`). A
 /// program only receives keystrokes while it *owns* the keyboard - the shell
 /// hands a foreground command that ownership at spawn, so an interactive `/bin`
@@ -115,6 +113,8 @@ pub fn read_char() -> u8 {
     syscall(syscall_abi::READ_CHAR, 0) as u8
 }
 
+/// Route output through the console server as a batched write over the uniform
+/// verb set (`ninep-abi`): an `NP_WRITE_FILE` whose inline data is the text -
 /// a write to the console "file" (cond ignores the tree/path). Falls back to
 /// the kernel console (`PUTC`) if there's no server this boot.
 pub fn con_write(bytes: &[u8]) {

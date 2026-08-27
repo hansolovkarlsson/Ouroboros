@@ -1696,7 +1696,11 @@ pub unsafe fn on_tick(frame: *mut Context) {
     // reverts the keyboard to the shell, whose `WAIT` wakes with
     // `TASK_KILLED_STATUS`.
     let victim = PENDING_KILL.swap(usize::MAX, Ordering::Relaxed);
-    if victim != usize::MAX && victim != 0 && victim < NUM_TASKS {
+    // Only a spawnable slot (>= FIRST_SPAWNABLE) may be terminated - the same
+    // protected set KILL/EXIT/FG enforce (never the shell, idle, or a
+    // supervised server). FG refuses to foreground 0-4, so a real keyboard
+    // owner is always in range; this guard is the belt-and-braces backstop.
+    if (FIRST_SPAWNABLE..NUM_TASKS).contains(&victim) {
         crate::console::println!("Ouroboros kernel: Ctrl+C - foreground task {victim} terminated");
         let (base, size) = task_region(victim);
         free_runtime_region(base, size);

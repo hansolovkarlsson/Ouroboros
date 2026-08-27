@@ -1132,11 +1132,14 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
         }
         syscall_abi::FG => {
             let i = arg0 as usize;
-            if i == 1 {
-                // Foregrounding idle would strand the keyboard on a
-                // task that never reads it, with nothing able to type
-                // the way back. Index 0 is allowed - an explicit
-                // "give it back".
+            if (1..=4).contains(&i) {
+                // Foregrounding idle (1) or a supervised server (2/3/4 -
+                // fsd/cond/netd) is refused, same protected set as KILL/EXIT:
+                // idle would strand the keyboard on a task that never reads it,
+                // and a server has no reason to own the terminal - worse,
+                // foregrounding one then hitting Ctrl+C would route the
+                // terminate at a protected task (the kernel would kill it).
+                // Index 0 is allowed - an explicit "give it back".
                 return syscall_abi::TASK_ERR_PROTECTED;
             }
             if !tasks::task_exists(i) {

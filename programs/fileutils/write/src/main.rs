@@ -1,5 +1,5 @@
 //! `write <file> [words...]` - create/overwrite `file` with the given words
-//! joined by single spaces, plus a trailing newline. Externalized from a shell
+//! joined by single spaces (no trailing newline). Externalized from a shell
 //! builtin: the old builtin already word-split and rejoined with single spaces
 //! (it never preserved raw spacing), so an argv-based `/bin/write` is
 //! behaviour-identical. Resolves the path against the shell-delivered cwd and
@@ -48,10 +48,9 @@ pub extern "C" fn _start() -> ! {
         }
         i += 1;
     }
-    if len < content.len() {
-        content[len] = b'\n';
-        len += 1;
-    }
+    // No trailing newline: the content is exactly the space-joined words,
+    // byte-for-byte what the old shell builtin wrote (and `write <file>` with
+    // no words truncates to empty - a valid case, not an error).
 
     // Resolve against the shell-delivered cwd.
     let mut cwdbuf = [0u8; ulib::PATH_MAX];
