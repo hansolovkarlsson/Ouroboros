@@ -118,6 +118,18 @@ The small open tails those arcs deliberately left:
 > A concrete Pi test plan gets written **when the boards arrive**, not before. The
 > `prlctl`/`make test-parallels` tooling below stays available but is no longer a
 > priority.
+>
+> **Pi-4 bring-up reference (pre-read, for when the boards arrive):**
+> `docs/research-redox-and-pi.md` (Part 2) maps the
+> `rust-raspberrypi-OS-tutorials` repo onto our situation. The key call: **try
+> the [pftf/RPi4](https://github.com/pftf/RPi4) EDK2 UEFI+ACPI firmware first** —
+> a Pi 4 under it exposes UEFI + ACPI + a GOP framebuffer, so our existing boot
+> path (UEFI loader, ACPI MADT → `gicv2.rs` for the Pi 4's GIC-400/GICv2, GOP
+> `fbconsole`) should carry over largely unchanged, rather than rewriting for raw
+> `kernel8.img` boot. The tutorials stay the fallback reference for the raw
+> BCM2711 facts (peripheral base `0xFE00_0000`, GIC-400 at GICD `0xFF84_1000`/
+> GICC `0xFF84_2000`, PL011-not-mini-UART, GPIO14/15 = ALT0, the serial rig:
+> USB-serial to TX/RX/GND, **not** VCC). See [[project-physical-hardware-target]].
 
 Every real-hardware bug in `xhci-keyboard-postmortem.md` and
 `boot-bringup-postmortem.md` cost a manual round trip: rebuild, re-image,
@@ -210,6 +222,17 @@ normal.
   cursored handle, directory iteration, a poll-able wait) — which they
   already are. So the design isn't painted into a corner; it has a clean
   future step (fids) that pays off twice.
+
+- **The existence proof to read first: Redox OS's `relibc`.** Redox is a
+  Rust microkernel with exactly this architecture (non-POSIX kernel, POSIX
+  in a userland libc) and it *ships* — real C/C++ programs and Rust `std`
+  both run on it via `relibc`. Two transferable tricks from it:
+  `relibc` **targets both Redox and Linux** (thin syscall wrapper on Linux,
+  `libredox` on Redox), so the libc is host-testable before the OS backend
+  exists; and Redox pushed **`fork`/`execve` into userspace** (`redox-rt`),
+  synthesizing `fork` as `clone` without `CLONE_VM` — the answer to "but C
+  calls `fork()`" without putting `fork` back in the kernel. See
+  `docs/research-redox-and-pi.md`.
 
 Not sequenced, not started — this is parked so the reasoning isn't lost.
 It only matters once running third-party C code is actually a goal, which
@@ -343,6 +366,17 @@ named future tier in the cluster-auth postmortem, and this arc is where it
 would land. This is a multi-milestone arc, not one task; sequence it *after*
 item 2's stat surface exists, since permission enforcement has nothing to
 check against until then.
+
+**A mechanism to borrow from Redox: the namespace *is* the sandbox.** Redox
+sandboxes a process by restricting which schemes (resources) its namespace
+can *name*, down to a "null namespace" that leaves a daemon only its
+pre-opened handles after init. Ouroboros already has both halves — per-task
+namespaces (`bind`/NS_SET) and the capability send-mask — but hasn't joined
+them (an empty namespace today means "unchanged," not "no access"). Making
+the namespace the enforcement boundary is exactly the reconciliation point
+(b) above wants, and Redox is the working model. Its RedoxFS also boots the
+kernel off an **encrypted partition** — the reference for at-rest security
+when this arc reaches disk encryption. See `docs/research-redox-and-pi.md`.
 
 ### 5. An on-device compiler: C and/or Rust (north-star, very large)
 
@@ -495,7 +529,12 @@ replication protocol, a consistency contract (quorum? primary-backup?), conflict
 handling, and failure detection. Large, and gated on the consistency model being
 worked out; it belongs as a later phase in `roadmap-cluster.md`, not a near-term
 item. It's the strongest "why" the project has for going distributed *beyond*
-resource-sharing.
+resource-sharing. **The substrate to borrow from Redox: RedoxFS's shape** — a
+small Rust filesystem (a daemon, exactly `fsd`'s model) with copy-on-write plus
+**data *and* metadata checksums**, written from scratch rather than porting ZFS
+(Redox tried the ZFS port and abandoned it as microkernel-hostile). Checksums +
+CoW are the integrity substrate a replication scheme needs; RedoxFS is the "write
+it small, don't port a giant" precedent. See `docs/research-redox-and-pi.md`.
 
 **h. SQLite — an on-device database (new, the canonical first libc port).**
 SQLite is a single-file, dependency-light **C library** — the textbook "port one
