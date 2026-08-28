@@ -146,7 +146,23 @@ a change, did a fix regress the boot sequence — this turns what used to
 be a human-paced manual check into something that can run unattended and
 be reviewed after the fact from the saved screenshots.
 
-## POSIX / C-program portability: a userland libc personality (future, not sequenced)
+## POSIX / C-program portability: a userland libc personality (STARTED 2026-08-28)
+
+> **Progress: the foundation is proven.** A C program now runs on Ouroboros
+> (`libc/hello.c`, `make chello-bin`): clang → `aarch64-unknown-none` ELF →
+> Rust's LLD against `programs/linker.ld` → the existing loader → the syscall
+> boundary, spawned like any `/bin` program (`# chello` → `hello from C on
+> Ouroboros`). No loader or kernel change was needed. That closes the one real
+> uncertainty — the toolchain path — so the rest is *growing a libc*, not
+> inventing the mechanism. **Next steps, in order:** (1) structure a minimal
+> libc — a `crt0` + the POSIX syscall stubs (`_write`→`cond`, `_read`/`_open`
+> →`fsd`'s `NP_*`, `_sbrk`→the userland heap, `_exit`→`EXIT`, `_fstat`), plus the
+> `memcpy`/`memset` the compiler synthesizes; (2) the loader's `.data`/`.bss`
+> support (C programs can't have globals/statics until then — the current
+> blocker for anything real); (3) port `picolibc`/`newlib` on top; then C
+> programs like SQLite and a small C compiler become "port one more program."
+> See `docs/processes.md`'s "Writing a program in C." The reasoning below is the
+> original parked plan, still accurate.
 
 **The goal, restated honestly.** The original `notes.txt` intent was
 "POSIX-ish system calls." What actually got built is *not* POSIX and not

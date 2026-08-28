@@ -7,6 +7,33 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/`; 
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## The first C program runs on Ouroboros (userland-libc arc begins)
+
+The foundational milestone of the POSIX/C-portability arc: a **C program,
+cross-compiled, runs on Ouroboros** through the same loader and syscall boundary
+the Rust programs use. `# chello` → `hello from C on Ouroboros`, spawned and
+reaped by the shell like any `/bin` program.
+
+The point was to prove the **toolchain path**, which was the one real
+uncertainty — the rest of the arc is growing a libc, not inventing a mechanism:
+
+- **clang → our PIE format.** Apple's system `clang` targets
+  `aarch64-unknown-none` (ELF), and Rust's bundled **LLD** (`ld.lld`) links the
+  object against the *same* `programs/linker.ld` and PIE flags
+  (`-fPIC`/`-pie`/`--no-dynamic-linker`) the Rust programs use, then
+  `llvm-objcopy` strips it to the identical `.bin` shape. No extra cross-toolchain
+  to install. `make chello-bin`.
+- **The loader needed no changes.** The C ELF is `ET_DYN`, entry at offset 0
+  (`_start` in `.text.start`), zero problematic relocations (no `R_AARCH64_ABS64`,
+  no `.data`/`.bss` — the linker script's ASSERTs held), so the existing
+  loader/spawn path loads and relocates it exactly like a Rust program.
+- **`libc/hello.c`** is deliberately self-contained for now — its own `_start`
+  plus inline `svc` syscall stubs (`putc`/`exit`) — because the milestone is the
+  *path*, not the library. The real libc (crt0 + POSIX syscall stubs
+  `_write`/`_read`/`_open`/`_sbrk`/`_exit`/…, then picolibc/newlib on top) grows
+  from here. Constraints inherited from the loader (no static mutable state yet,
+  so no globals/`.data`/`.bss`) are documented in `docs/processes.md`.
+
 ## Permission enforcement: the file mode/owner finally means something (arc step 3)
 
 The last piece of the users/permissions arc. The three inputs existed — file

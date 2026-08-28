@@ -721,6 +721,8 @@ programs/fileutils/ (ls cat mkdir rmdir touch rm cp mv writeat chmod chown tree 
   src/main.rs        ~70 lines: _start, a putc-loop print, the exit call
 
 syscall-abi/         shared syscall ABI crate - syscall numbers, sentinel/error values, and the fsd server's FSOP_* request-protocol constants, depended on directly by the kernel and every userland program - see docs/processes.md
+
+libc/                the userland-libc arc (C-program portability), STARTED 2026-08-28. libc/hello.c is the foundational proof: a self-contained C program (its own _start + inline svc syscall stubs) that runs on Ouroboros through the SAME loader + syscall boundary the Rust programs use - built by `make chello-bin` (clang --target=aarch64-unknown-none -> Rust's ld.lld against programs/linker.ld -> llvm-objcopy, all from tools already present), staged to /bin/CHELLO. No loader/kernel change needed. The mechanism is proven; NEXT is a real libc (crt0 + POSIX syscall stubs _write->cond / _read->fsd / _sbrk->heap / _exit->EXIT) and - the real blocker for non-trivial C - loader .data/.bss support (C programs can't have globals/statics until then). See docs/processes.md's "Writing a program in C" and roadmap.md's libc section
   src/lib.rs         #![no_std], no logic, just pub consts - safe under either target since every value is a scalar inlined at the use site, not a pointer needing relocation
 
 scripts/
