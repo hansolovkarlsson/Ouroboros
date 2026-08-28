@@ -1,0 +1,23 @@
+NAME
+    usermod - modify a user account (root only)
+
+SYNOPSIS
+    usermod <user> -g <group|gid>
+
+DESCRIPTION
+    Changes a user's PRIMARY group in /etc/passwd. ROOT ONLY. The group may be a
+    name (resolved via /etc/group) or a numeric gid. This is the "assign a user
+    to a group" operation in the primary-gid model - a task carries one
+    kernel-owned gid, so the primary group IS the passwd gid field.
+
+    The account's uid, home, and password are preserved; only the gid changes.
+    Full supplementary-group membership (a user in several groups at once) is a
+    later step that needs the kernel identity to carry a group list.
+
+EXAMPLES
+    # groupadd staff
+    # usermod user -g staff
+    usermod: updated user
+
+SEE ALSO
+    useradd, groupadd, passwd, id

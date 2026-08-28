@@ -9,26 +9,26 @@
 //!
 //! `/etc/passwd` format, one account per line:
 //!   `name:uid:gid:home:salt_hex:hash_hex`
-//! where `hash = SHA-256(salt || password)`. The salt+hash are precomputed at
-//! build time (`scripts/mkpasswd.py`); login only *verifies*, so it needs no
-//! runtime randomness. If `/etc/passwd` is absent (a fresh/formatted disk, or a
+//! where `hash = SHA-256(salt || password)`. All parsing, hashing, and the
+//! constant-time password check live in the shared [`accounts`] crate (the same
+//! logic the `/bin` account tools use); this module only does the keyboard I/O
+//! and the `SET_ID`. If `/etc/passwd` is absent (a fresh/formatted disk, or a
 //! test image without one), login falls back to a single-user **root** session
 //! so the machine stays usable - the standard "no accounts configured"
 //! bootstrap.
 //!
 //! All parsing is byte-only (no `&str` slicing by a runtime index - the PIE
-//! relocation trap), and the password check is constant-time
-//! ([`sha256::digest_eq`]).
+//! relocation trap).
 
-use crate::sha256;
 use crate::CWD_SIZE;
 
 const PASSWD_PATH: &str = "/etc/passwd";
-/// Read cap for `/etc/passwd`. Bounded by `FS_DATA_MAX` (512): the shell's
-/// `fs_read_file` is one inline `NP_READ_FILE`, whose `want` fsd rejects above
-/// that cap. 512 bytes holds ~5 accounts (each line is ~90 bytes); a longer
-/// passwd file would need a chunked read (a documented follow-up).
-const PASSWD_MAX: usize = syscall_abi::FS_DATA_MAX as usize;
+/// Read cap for `/etc/passwd`, matching the account tools' write cap
+/// ([`accounts`]/`useradd` bound writes to `SAFECOPY_MAX`). fsd caps a single
+/// inline read at `FS_DATA_MAX` (512), so [`read_passwd`] loops `fs_read_at` to
+/// fill this buffer in 512-byte chunks. 2 KB holds ~20 accounts (each line is
+/// ~90 bytes); beyond that a bigger buffer + the same loop is all it takes.
+const PASSWD_MAX: usize = syscall_abi::SAFECOPY_MAX as usize;
 const CR: u8 = 13;
 const LF: u8 = 10;
 const BS: u8 = 8;
@@ -39,13 +39,6 @@ const DEL: u8 = 127;
 pub struct Session {
     /// Length of the home path written into the cwd buffer `login` was given.
     pub cwd_len: usize,
-}
-
-/// The matched account's fields (borrowing the passwd buffer for `home`).
-struct Cred<'a> {
-    uid: u32,
-    gid: u32,
-    home: &'a [u8],
 }
 
 /// Run the login gate. Writes the session's home directory into `cwd` and
@@ -73,12 +66,20 @@ pub fn login(cwd: &mut [u8; CWD_SIZE]) -> Session {
         let wlen = read_field(&mut wbuf, false);
         crate::print_str("\r\n");
 
-        if let Some(cred) = verify(passwd, &ubuf[..ulen], &wbuf[..wlen]) {
-            // Drop from root to the user. The kernel saves root as this task's
-            // saved identity, so logout can restore it.
-            crate::syscall4(syscall_abi::SET_ID, cred.uid as u64, cred.gid as u64, 0, 0);
-            let hlen = write_cwd(cwd, cred.home);
-            return Session { cwd_len: hlen };
+        if let Some(acct) = accounts::find_user_by_name(passwd, &ubuf[..ulen]) {
+            if acct.verify(&wbuf[..wlen]) {
+                // Drop from root to the user. The kernel saves root as this
+                // task's saved identity, so logout can restore it.
+                crate::syscall4(
+                    syscall_abi::SET_ID,
+                    acct.uid as u64,
+                    acct.gid as u64,
+                    0,
+                    0,
+                );
+                let hlen = write_cwd(cwd, acct.home);
+                return Session { cwd_len: hlen };
+            }
         }
         crate::print_line("Login incorrect");
     }
@@ -100,22 +101,34 @@ fn write_cwd(cwd: &mut [u8; CWD_SIZE], home: &[u8]) -> usize {
 }
 
 /// Read `/etc/passwd` into `buf`, returning its length, or `None` if there's no
-/// such file. Retries a bounded number of times while the reply is `NO_FS` (the
-/// filesystem server may still be mounting the disk at boot); a real
-/// "not found" returns `None` immediately (the root fallback).
+/// such file. The first read retries a bounded number of times while the reply
+/// is `NO_FS` (fsd may still be mounting the disk at boot); a real "not found"
+/// returns `None` immediately (the root fallback). Since fsd caps one inline
+/// read at `FS_DATA_MAX` (512), the file is read in 512-byte chunks via
+/// `fs_read_at` at a rising offset until a short read signals end-of-file.
 fn read_passwd(buf: &mut [u8]) -> Option<usize> {
+    const CHUNK: usize = syscall_abi::FS_DATA_MAX as usize;
+    let mut off = 0usize;
     let mut tries = 0;
-    loop {
-        let r = crate::fs_read_file(PASSWD_PATH, buf);
-        if r < syscall_abi::FS_ERR_MIN {
-            return Some((r as usize).min(buf.len()));
+    while off < buf.len() {
+        let end = (off + CHUNK).min(buf.len());
+        let r = crate::fs_read_at(PASSWD_PATH, off as u64, &mut buf[off..end]);
+        if r >= syscall_abi::FS_ERR_MIN {
+            // An error on the *first* chunk means no file (or fsd still
+            // mounting -> retry); on a later chunk, keep what we have.
+            if off == 0 && r == syscall_abi::NO_FS && tries < 200 {
+                tries += 1;
+                continue;
+            }
+            return if off == 0 { None } else { Some(off) };
         }
-        if r == syscall_abi::NO_FS && tries < 200 {
-            tries += 1;
-            continue; // fsd still mounting - the round trip itself paces this
+        let n = (r as usize).min(end - off);
+        off += n;
+        if n < CHUNK {
+            break; // short read = end of file
         }
-        return None; // no filesystem, or no /etc/passwd -> root fallback
     }
+    Some(off)
 }
 
 /// Read one line of keyboard input into `buf` (up to its length), returning the
@@ -148,78 +161,5 @@ fn read_field(buf: &mut [u8], echo: bool) -> usize {
                 }
             }
         }
-    }
-}
-
-/// Find `user` in the passwd data and check `pass`. Returns the account's
-/// uid/gid/home on a match, or `None` (unknown user, or wrong password - a
-/// matched user with a bad password does *not* fall through to another line).
-fn verify<'a>(passwd: &'a [u8], user: &[u8], pass: &[u8]) -> Option<Cred<'a>> {
-    for line in passwd.split(|&c| c == LF) {
-        if line.is_empty() {
-            continue;
-        }
-        let mut fields = line.split(|&c| c == b':');
-        let name = fields.next()?;
-        if name != user {
-            continue;
-        }
-        let uid = parse_dec(fields.next()?)? as u32;
-        let gid = parse_dec(fields.next()?)? as u32;
-        let home = fields.next()?;
-        let salt_hex = fields.next()?;
-        let hash_hex = fields.next()?;
-
-        let mut salt = [0u8; 32];
-        let salt_len = hex_decode(salt_hex, &mut salt)?;
-        let mut stored = [0u8; sha256::DIGEST];
-        if hex_decode(hash_hex, &mut stored)? != sha256::DIGEST {
-            return None;
-        }
-        let digest = sha256::sha256_two(&salt[..salt_len], pass);
-        return if sha256::digest_eq(&digest, &stored) {
-            Some(Cred { uid, gid, home })
-        } else {
-            None
-        };
-    }
-    None
-}
-
-/// Decimal `u64` from bytes (uid/gid fields), or `None` on a non-digit.
-fn parse_dec(b: &[u8]) -> Option<u64> {
-    if b.is_empty() {
-        return None;
-    }
-    let mut v: u64 = 0;
-    for &c in b {
-        if !c.is_ascii_digit() {
-            return None;
-        }
-        v = v.checked_mul(10)?.checked_add((c - b'0') as u64)?;
-    }
-    Some(v)
-}
-
-/// Decode a hex string into `out`, returning the byte count, or `None` on an odd
-/// length or a non-hex digit.
-fn hex_decode(hex: &[u8], out: &mut [u8]) -> Option<usize> {
-    if !hex.len().is_multiple_of(2) || hex.len() / 2 > out.len() {
-        return None;
-    }
-    for i in 0..hex.len() / 2 {
-        let hi = hex_val(hex[i * 2])?;
-        let lo = hex_val(hex[i * 2 + 1])?;
-        out[i] = (hi << 4) | lo;
-    }
-    Some(hex.len() / 2)
-}
-
-fn hex_val(c: u8) -> Option<u8> {
-    match c {
-        b'0'..=b'9' => Some(c - b'0'),
-        b'a'..=b'f' => Some(c - b'a' + 10),
-        b'A'..=b'F' => Some(c - b'A' + 10),
-        _ => None,
     }
 }

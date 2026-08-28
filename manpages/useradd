@@ -1,0 +1,31 @@
+NAME
+    useradd - create a user account (root only)
+
+SYNOPSIS
+    useradd <name> [-u <uid>] [-g <group|gid>]
+
+DESCRIPTION
+    Adds an account to /etc/passwd and prompts (twice, no echo) for its initial
+    password. ROOT ONLY. Creates the home directory /Users/<name> and, on ext2,
+    chowns it to the new user.
+
+    -u <uid>          use this uid (default: the next free id at/above 1000)
+    -g <group|gid>    primary group by name or number (default: a user-private
+                      group named after the user, created in /etc/group with
+                      gid == uid, the usual convention)
+
+    The password salt is derived from the monotonic clock (there is no hardware
+    RNG yet), so it is weak but per-account unique. Account files hold ~20
+    entries (a 2 KB read cap).
+
+EXAMPLES
+    # useradd alice
+    New password: ****
+    Retype new password: ****
+    useradd: created alice
+
+    # groupadd devs
+    # useradd bob -g devs        put bob in the existing group "devs"
+
+SEE ALSO
+    passwd, usermod, groupadd, id, su, login

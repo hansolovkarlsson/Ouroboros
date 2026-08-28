@@ -387,11 +387,30 @@ size cap.) Cheap wins first; the editor last, gated on item 1.
 > Step 3 (*enforcement*) is now done too: `fsd`'s `check_access` gates every
 > file verb — the caller's uid/gid (`GET_ID(sender)`) vs. the inode owner/mode,
 > owner→group→other, root bypass, `FS_ERR_PERM` on refusal, `chmod` owner-only /
-> `chown` root-only. ext2-only (FAT/exFAT unrestricted). **The core arc is
-> complete.** Deferred refinements (smaller, unsequenced): the ancestor-directory
-> search (`x`) traversal check, per-user *cluster* identity, `/etc/shadow`
-> (passwords out of the world-readable `passwd`), `passwd`/`useradd`, per-user
-> `/home` (home is `/` today), and groups.
+> `chown` root-only. ext2-only (FAT/exFAT unrestricted).
+>
+> **Step 4 (*account management*) is now done too (2026-08-28)** — the "close the
+> security arc" pass. A shared **`accounts`** crate (repo-root, pure/`no_std`,
+> host-unit-tested) holds `/etc/passwd` + `/etc/group` parsing/formatting, the
+> SHA-256 hashing, salt derivation, and name↔id lookups, so `login` and the new
+> `/bin` tools share one implementation (it also absorbed the shell's duplicated
+> `sha256`). Added: `/bin/passwd`, `/bin/useradd`, `/bin/groupadd`, `/bin/usermod`
+> (all **root-only** — the option-1 model: self-service `passwd` is deferred to a
+> later `accountd`/setuid tier the shared crate is built to slot into); `su
+> <username>` and `id` **name resolution**; `/etc/group` (`name:gid:members`) with
+> a **primary-gid** group model (`usermod -g` / `useradd -g` set the primary gid;
+> supplementary groups stay a kernel-identity tier); per-user home directories
+> under **`/Users`** with `~`→`$HOME` shell expansion (login sets `HOME`, the ext2
+> image chowns `/Users/user` to the user). Salts are **clock-derived** (`MONOTONIC_US`
+> + hash) — documented as weak, with a virtio-entropy `RANDOM` syscall the noted
+> upgrade. The account files are read chunked into a 2 KB buffer (~20 accounts).
+>
+> **The arc is complete.** Deferred refinements (smaller, unsequenced): the
+> ancestor-directory search (`x`) traversal check, per-user *cluster* identity,
+> `/etc/shadow` (passwords out of the world-readable `passwd`), self-service
+> `passwd` (the `accountd`/setuid tier), a **virtio-entropy RNG** (for strong
+> salts), **supplementary group membership** (needs the kernel identity to carry
+> a group list), and symbolic-mode `chmod` / `useradd`-created dotfiles.
 
 The biggest of these — the step from "single implicit user, whoever's at the
 keyboard" to a real **identity and permission model**. Pieces: a notion of

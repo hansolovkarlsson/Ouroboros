@@ -1,11 +1,11 @@
-//! Hand-rolled SHA-256 for password verification in the shell's `login`.
+//! Hand-rolled SHA-256, the password-hash primitive for the account database.
 //!
-//! Copied verbatim from `netd/src/hmac.rs`'s SHA-256 (NIST-validated there); the
-//! shell needs the bare hash (no HMAC) to check `/etc/passwd` password hashes,
-//! and pulling in netd's crate isn't possible. A shared `sha256` crate would
-//! dedup the two copies - a worthwhile later cleanup, deliberately deferred to
-//! keep the login step from touching the shipped cluster-auth code. `no_std`,
-//! no heap, byte-only so it's PIE-relocation-safe.
+//! Byte-for-byte the SHA-256 from `netd/src/hmac.rs` (NIST-validated there);
+//! this is now the shared copy the shell's `login` and the `/bin` account tools
+//! use (the earlier per-copy in `shell/src/sha256.rs` was folded in here). netd
+//! keeps its own copy because it needs the HMAC wrapper and the shipped
+//! cluster-auth code is deliberately left untouched. `no_std`, no heap,
+//! byte-only so it's PIE-relocation-safe.
 
 /// SHA-256 round constants (FIPS 180-4).
 const K: [u32; 64] = [

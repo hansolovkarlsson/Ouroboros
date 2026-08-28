@@ -39,7 +39,9 @@ CREDENTIALS
     to a single root session so the machine stays usable.
 
     There is no `passwd` or `useradd` yet - accounts are the static file above.
-    Per-user home directories (home is / for now) are the next step.
+    A logged-in user starts in their home directory (the passwd `home` field,
+    normally /Users/<name>); the shell exports it as HOME, so `~` expands to it.
+    Manage accounts with useradd / passwd / groupadd / usermod (all root only).
 
 SEE ALSO
     su, logout, id, sh

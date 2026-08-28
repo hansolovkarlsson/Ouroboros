@@ -253,6 +253,53 @@ pub fn read_char() -> u8 {
     syscall(syscall_abi::READ_CHAR, 0) as u8
 }
 
+/// A microsecond-resolution monotonic timestamp since boot (`MONOTONIC_US`).
+/// The same clock netd's RTT estimator uses; the account tools use it as the
+/// (weak, clock-derived) entropy for a new password salt — see
+/// `accounts::make_salt`.
+pub fn monotonic_us() -> u64 {
+    syscall(syscall_abi::MONOTONIC_US, 0)
+}
+
+/// Read one line of keyboard input into `buf` (up to its length), returning the
+/// count. Submits on CR/LF, supports destructive backspace, and ignores other
+/// control bytes. When `echo` is set each byte is echoed to the console (a
+/// username); a password is read silently (`echo == false`). The interactive
+/// `/bin` account tools (`passwd`/`useradd`) use this — they only receive
+/// keystrokes while foreground (the shell hands a spawned command the keyboard,
+/// like the pager). Mirrors the shell's own `login::read_field`.
+pub fn read_line(buf: &mut [u8], echo: bool) -> usize {
+    const CR: u8 = 13;
+    const LF: u8 = 10;
+    const BS: u8 = 8;
+    const DEL: u8 = 127;
+    let mut len = 0usize;
+    loop {
+        let b = read_char();
+        match b {
+            CR | LF => return len,
+            BS | DEL => {
+                if len > 0 {
+                    len -= 1;
+                    if echo {
+                        con_write(&[BS, b' ', BS]);
+                    }
+                }
+            }
+            _ if b < 0x20 => {}
+            _ => {
+                if len < buf.len() {
+                    buf[len] = b;
+                    len += 1;
+                    if echo {
+                        con_write(&[b]);
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Route output through the console server as a batched write over the uniform
 /// verb set (`ninep-abi`): an `NP_WRITE_FILE` whose inline data is the text -
 /// a write to the console "file" (cond ignores the tree/path). Falls back to
@@ -876,6 +923,19 @@ pub fn fs_chown(path: &str, uid: Option<u16>, gid: Option<u16>) -> u64 {
     let uid = uid.map_or(u64::MAX, |u| u as u64);
     let gid = gid.map_or(u64::MAX, |g| g as u64);
     np_dispatch(&r, ninep_abi::NP_CHOWN, [r.len as u64, uid, gid, 0], &fsp[..r.len], &[], &mut [])
+}
+
+/// Read a whole small file into `buf`, returning its length, or `0` on any error
+/// (missing file / no filesystem). A convenience over [`fs_read_bulk`] for
+/// config-sized files like `/etc/passwd` / `/etc/group` (the account tools use
+/// it); `buf` should be `<= SAFECOPY_MAX` so one bulk read covers it.
+pub fn read_file_all(path: &str, buf: &mut [u8]) -> usize {
+    let r = fs_read_bulk(path, 0, buf);
+    if r < syscall_abi::FS_ERR_MIN {
+        (r as usize).min(buf.len())
+    } else {
+        0
+    }
 }
 
 /// Read up to `buf.len()` bytes of `path` from `offset` into `buf` via the
