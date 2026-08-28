@@ -433,10 +433,21 @@ The **constraints are the loader's, and they bite C harder than Rust**:
   `string.h` essentials. The libc sources compile with `-fno-builtin` so the
   optimizer doesn't rewrite `string.c`'s `memcpy`/`memset` loops into calls to
   themselves. `libc/hello.c` remains the self-contained *no-libc* proof (its own
-  `svc` stubs) and the `.data`/`.bss` regression test. **Still to grow:** file
-  I/O (`open`/`read`/`close`/`fstat` via `fsd`'s `NP_*` — a fd table), a
-  stdout-target-aware `write` (for pipes/redirection), then a ported
-  `picolibc`/`newlib` — see `roadmap.md`'s "POSIX / C-program portability."
+  `svc` stubs) and the `.data`/`.bss` regression test.
+- **File I/O works** (`libc/src/file.c`, `make cfile-bin` → `/bin/CFILE`):
+  `open`/`read`/`write`/`close`/`lseek`/`fstat` over `fsd`'s `NP_*`, via a small
+  fd table (fds ≥ 3 hold a path + cursor, since `fsd` is path-per-op). Reads use
+  the inline `NP_READ_AT`; writes grant the buffer and `NP_WRITE_AT`; `fstat`
+  reads `NP_STAT`. Relative paths resolve against the cwd; **tree 0 (the default
+  disk mount) only** for now. And `write(1|2)` is **stdout-target-aware**: it
+  goes to the console (batched via `cond`) or, when the program is a pipe
+  producer, to the consumer via `MSG_SEND` — so `cfile | grep hello` works.
+  Two things that had to be right for pipes: stdout is **buffered** (flushed on
+  newline / full / exit) rather than one `write` per char, and the pipe send
+  **yields and retries** on a full consumer mailbox (`MSG_ERR_FULL`) instead of
+  dropping bytes — the same shape as `ulib::pipe_out`. **Still to grow:** file
+  descriptors as real server handles (fids), then a ported `picolibc`/`newlib` —
+  see `roadmap.md`'s "POSIX / C-program portability."
 - **Watch the relocations** the same way (`llvm-readobj --dyn-relocations`): an
   `R_AARCH64_ABS64` is unloadable. Simple code is PC-relative and needs none;
   richer code emits `R_AARCH64_RELATIVE`, which the loader handles. `memcpy`/

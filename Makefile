@@ -163,13 +163,14 @@ LIBC_SRCS    := $(wildcard libc/src/*.c)
 LIBC_OBJS    := $(patsubst libc/src/%.c,$(BUILD_DIR)/libc/%.o,$(LIBC_SRCS))
 LIBC_CFLAGS  := $(CFLAGS_OS) -Ilibc/include -fno-builtin
 CDEMO_BIN    := $(BUILD_DIR)/cdemo.bin
+CFILE_BIN    := $(BUILD_DIR)/cfile.bin
 
 CARGO_FLAGS :=
 ifeq ($(PROFILE),release)
 CARGO_FLAGS += --release
 endif
 
-.PHONY: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin id-bin chello-bin cdemo-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin sort-bin esp run run-virtio-console run-usb-kbd run-usb-multi run-gicv3 image run-image run-image-9p run-image-9p-client run-image-2vm-a run-image-2vm-b image-gpt run-image-gpt image-exfat run-image-exfat image-ext2 run-image-ext2 parallels-hdd release test-parallels clean
+.PHONY: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin id-bin chello-bin cdemo-bin cfile-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin sort-bin esp run run-virtio-console run-usb-kbd run-usb-multi run-gicv3 image run-image run-image-9p run-image-9p-client run-image-2vm-a run-image-2vm-b image-gpt run-image-gpt image-exfat run-image-exfat image-ext2 run-image-ext2 parallels-hdd release test-parallels clean
 
 # Overridable by `make test-parallels VM_NAME=... CMDS=... BOOT_WAIT=...`.
 VM_NAME     ?= Ouroboros
@@ -333,6 +334,12 @@ cdemo-bin: $(LIBC_OBJS)
 	"$(LD_LLD)" $(LDFLAGS_OS) -o $(BUILD_DIR)/cdemo.elf $(BUILD_DIR)/cdemo.o $(LIBC_OBJS)
 	"$(OBJCOPY)" --strip-all $(BUILD_DIR)/cdemo.elf $(CDEMO_BIN)
 
+# A C program using the libc's file I/O (open/read/write/close/fstat over fsd).
+cfile-bin: $(LIBC_OBJS)
+	$(CC) $(CFLAGS_OS) -Ilibc/include -c libc/cfile.c -o $(BUILD_DIR)/cfile.o
+	"$(LD_LLD)" $(LDFLAGS_OS) -o $(BUILD_DIR)/cfile.elf $(BUILD_DIR)/cfile.o $(LIBC_OBJS)
+	"$(OBJCOPY)" --strip-all $(BUILD_DIR)/cfile.elf $(CFILE_BIN)
+
 write-bin:
 	cargo build -p write --target $(USER_TARGET) --release
 	"$(OBJCOPY)" --strip-all $(WRITE_ELF) $(WRITE_BIN)
@@ -421,7 +428,7 @@ serve-bin:
 # itself: the default shell binary and the config file (loader.rs's
 # CONFIG_PATH) naming which program to load - edit INIT.CFG and rebuild
 # just that program to swap it out, no kernel rebuild required.
-esp: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin id-bin chello-bin cdemo-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin tail-bin nl-bin rev-bin uniq-bin sort-bin
+esp: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin id-bin chello-bin cdemo-bin cfile-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin tail-bin nl-bin rev-bin uniq-bin sort-bin
 	mkdir -p $(ESP_DIR)/EFI/BOOT $(ESP_DIR)/EFI/ORBS $(ESP_DIR)/bin $(ESP_DIR)/man $(ESP_DIR)/etc
 	cp $(KERNEL) $(ESP_DIR)/EFI/BOOT/BOOTAA64.EFI
 	cp $(SHELL_BIN) $(ESP_DIR)/EFI/ORBS/SH.BIN
@@ -468,6 +475,7 @@ esp: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin args
 	cp $(ID_BIN) $(ESP_DIR)/bin/ID
 	cp $(CHELLO_BIN) $(ESP_DIR)/bin/CHELLO
 	cp $(CDEMO_BIN) $(ESP_DIR)/bin/CDEMO
+	cp $(CFILE_BIN) $(ESP_DIR)/bin/CFILE
 	cp $(WRITE_BIN) $(ESP_DIR)/bin/WRITE
 	cp $(READKEY_BIN) $(ESP_DIR)/bin/READKEY
 	cp $(MORE_BIN) $(ESP_DIR)/bin/MORE

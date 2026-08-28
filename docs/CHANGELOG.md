@@ -7,6 +7,33 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/`; 
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## C file I/O + pipe-aware output (libc arc, step 4)
+
+C programs can now **read and write files**, and their output **flows through
+pipes** — so a C program is a real participant in the shell, not just a
+compute-and-print toy. `# cfile` writes `/CTEST.TXT`, stats it, and reads it
+back (the shell's own `cat` confirms it's on disk); `cfile | grep hello` filters
+its output.
+
+- **`libc/src/file.c`**: `open`/`read`/`write`/`close`/`lseek`/`fstat` over
+  `fsd`'s `NP_*` verbs (`MSG_CALL` to `FSD_TASK`), through a small fd table
+  (fds ≥ 3 hold a path + cursor, since `fsd` is path-per-op). Reads use the
+  inline `NP_READ_AT`; writes grant the buffer + `NP_WRITE_AT`; `fstat` reads
+  `NP_STAT`. Relative paths resolve against the cwd (`GET_CWD`); tree 0 (the
+  default disk mount) only, for now. New `<fcntl.h>`/`<sys/stat.h>` + `make
+  cfile-bin` → `/bin/CFILE`.
+- **`write(1|2)` is stdout-target-aware:** to the console (batched via `cond`),
+  or — when the program is a pipe producer — to the consumer via `MSG_SEND`,
+  with an end-of-stream marker on `exit`. C programs now work in pipelines.
+- **Two bugs the pipe test caught and fixed:** `printf` was emitting *one
+  `write` per character* (a flood of 1-byte pipe messages), and `pipe_write`
+  gave up on a full consumer mailbox instead of yielding — together they dropped
+  bytes and merged lines downstream. Fixed by **buffering** stdout (flush on
+  newline / full / exit) and making the pipe send **yield + retry** on
+  `MSG_ERR_FULL` (the same shape as `ulib::pipe_out`).
+
+Next: file descriptors as real server handles (fids), then port picolibc/newlib.
+
 ## A minimal libc: C programs with printf/malloc/strings
 
 The libc arc's third step — a real (if small) C standard library, so a C program

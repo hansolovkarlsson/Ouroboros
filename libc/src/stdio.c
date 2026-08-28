@@ -3,15 +3,39 @@
 #include <string.h>
 #include <unistd.h>
 
+/* Buffered stdout. Without this, printf emitted one write() per character - a
+ * flood of 1-byte pipe messages that overran the consumer's mailbox and dropped
+ * bytes. Buffering flushes a whole line (or 256 bytes) at once. The buffer is a
+ * .bss static (the .data/.bss milestone). Flushed on newline, when full, and at
+ * program exit (via __libc_flush_stdout, called by exit before end-of-stream). */
+#define OBUF_SIZE 256
+static unsigned char g_obuf[OBUF_SIZE];
+static int g_olen;
+
+void __libc_flush_stdout(void) {
+    if (g_olen > 0) {
+        write(1, g_obuf, (size_t)g_olen);
+        g_olen = 0;
+    }
+}
+
+static void obuf_put(unsigned char c) {
+    g_obuf[g_olen++] = c;
+    if (c == '\n' || g_olen == OBUF_SIZE) {
+        __libc_flush_stdout();
+    }
+}
+
 int putchar(int c) {
-    char ch = (char)c;
-    write(1, &ch, 1);
+    obuf_put((unsigned char)c);
     return c;
 }
 
 int puts(const char *s) {
-    write(1, s, strlen(s));
-    putchar('\n');
+    for (size_t i = 0; s[i]; i++) {
+        obuf_put((unsigned char)s[i]);
+    }
+    obuf_put('\n');
     return 0;
 }
 
@@ -23,12 +47,18 @@ int getchar(void) {
     return -1;
 }
 
+static void print_str(const char *s) {
+    for (size_t i = 0; s[i]; i++) {
+        obuf_put((unsigned char)s[i]);
+    }
+}
+
 static void print_uint(unsigned long v, int base, int upper) {
     char buf[24];
     int i = 0;
     const char *digits = upper ? "0123456789ABCDEF" : "0123456789abcdef";
     if (v == 0) {
-        putchar('0');
+        obuf_put('0');
         return;
     }
     while (v) {
@@ -36,27 +66,26 @@ static void print_uint(unsigned long v, int base, int upper) {
         v /= (unsigned)base;
     }
     while (i > 0) {
-        putchar(buf[--i]);
+        obuf_put((unsigned char)buf[--i]);
     }
 }
 
 static void print_int(long v) {
     if (v < 0) {
-        putchar('-');
+        obuf_put('-');
         print_uint((unsigned long)(-v), 10, 0);
     } else {
         print_uint((unsigned long)v, 10, 0);
     }
 }
 
-/* Minimal printf: %d/%i, %u, %x/%X, %c, %s, %%. No width, precision, or floats
- * yet - the subset a first round of C programs needs. */
+/* Minimal printf: %d/%i, %u, %x/%X, %c, %s, %%. No width/precision/floats yet. */
 int printf(const char *fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
     for (const char *p = fmt; *p; p++) {
         if (*p != '%') {
-            putchar(*p);
+            obuf_put((unsigned char)*p);
             continue;
         }
         p++;
@@ -75,22 +104,20 @@ int printf(const char *fmt, ...) {
             print_uint((unsigned long)va_arg(ap, unsigned int), 16, 1);
             break;
         case 'c':
-            putchar((char)va_arg(ap, int));
+            obuf_put((unsigned char)va_arg(ap, int));
             break;
-        case 's': {
-            const char *s = va_arg(ap, const char *);
-            write(1, s, strlen(s));
+        case 's':
+            print_str(va_arg(ap, const char *));
             break;
-        }
         case '%':
-            putchar('%');
+            obuf_put('%');
             break;
         case '\0':
-            p--; /* trailing '%' - stop before the loop steps past NUL */
+            p--;
             break;
         default:
-            putchar('%');
-            putchar(*p);
+            obuf_put('%');
+            obuf_put((unsigned char)*p);
             break;
         }
     }

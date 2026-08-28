@@ -163,12 +163,16 @@ be reviewed after the fact from the saved screenshots.
 > `libc/` now has standard headers + sources (`crt0`, syscall stubs, `printf`,
 > `malloc`/`free` over `sbrk`, `string.h`) — a C program `#include`s `<stdio.h>`
 > and calls `printf`/`malloc` (`make cdemo-bin`, `/bin/CDEMO`: formatted output,
-> heap allocation, `sum(1..100)=5050`). **Remaining steps, in order:** (1) file
-> I/O — `open`/`read`/`close`/`fstat` over `fsd`'s `NP_*` with an fd table, plus a
-> stdout-target-aware `write` so a C program participates in pipes/redirection;
-> (2) port `picolibc`/`newlib` on top; then C programs like SQLite and a small C
-> compiler become "port one more program." See `docs/processes.md`'s "Writing a
-> program in C." The reasoning below is the original parked plan, still accurate.
+> heap allocation, `sum(1..100)=5050`). **File I/O + pipe-aware output landed
+> next** (fourth step): `open`/`read`/`write`/`close`/`lseek`/`fstat` over `fsd`
+> with an fd table, and a stdout-target-aware `write` so a C program works in a
+> pipeline (`make cfile-bin`, `/bin/CFILE`: writes a file, reads it back;
+> `cfile | grep hello` filters its output). **Remaining:** file descriptors as
+> real server handles (fids — a POSIX fd ≈ a 9P fid, the deferred-from-Phase-0
+> feature that pays off twice), then port `picolibc`/`newlib` on top; then C
+> programs like SQLite and a small C compiler become "port one more program."
+> See `docs/processes.md`'s "Writing a program in C." The reasoning below is the
+> original parked plan, still accurate.
 
 **The goal, restated honestly.** The original `notes.txt` intent was
 "POSIX-ish system calls." What actually got built is *not* POSIX and not
