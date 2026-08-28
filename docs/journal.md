@@ -7,6 +7,82 @@ for the forward plan see [`roadmap.md`](roadmap.md).
 
 ---
 
+## 2026-08-28 — the users/permissions arc: from stored metadata to an enforced login
+
+A full arc in one span: the step from "single implicit user, no permissions" to
+a real Unix-style identity-and-permission model. Five pieces, each built and
+merged in turn, plus a couple of asides.
+
+**The mode/owner surface (read side).** The `stat` op (`NP_STAT`) already
+carried size/dir-flag/mtime; it grew a POSIX `mode`/`uid`/`gid` triple guarded
+by a `mode_valid` byte (20→27-byte record, appended so the old fields decode
+unchanged). ext2 fills it from the inode (`read_inode` now parses `i_uid`/
+`i_gid`); FAT32/exFAT/`/proc` return `None`. `ls -l` renders a real permission
+string (`drwxr-xr-x`, setuid/setgid/sticky and all) plus owner columns — real on
+ext2, synthesized-with-a-dash owner elsewhere. This was the keystone the whole
+arc waited on — the roadmap had ranked it #1 precisely because everything else
+hangs off it.
+
+**chmod/chown (write side).** The write twins. Two verbs (`NP_CHMOD`/`NP_CHOWN`),
+a new `FS_ERR_NOT_SUPPORTED` for the filesystems that can't model it, and — the
+one subtlety — ext2 patches the inode field **in place** with a surgical
+read-modify-write, *not* the existing `write_inode` (which zeroes the whole slot
+for a fresh inode and would wipe a pre-existing file's timestamps). `chmod`
+preserves the type nibble. Validated the way this project validates
+disk-format work: not against our own reader but against **macOS's `e2fsck`**
+(clean after the edits) and `debugfs` (read back `Mode: 0700 User: 7 Group: 8`
+exactly). `/bin/chmod` (octal) and `/bin/chown` (numeric `uid:gid`).
+
+*An aside that fell out of testing:* manual pages had only ever been staged onto
+the FAT image; the ext2 and exFAT images had `/bin` but no `/man`, so `man`
+failed there. One Makefile line each. Also a small `docs/resources.md` +
+"develop on QEMU first" note for the eventual Pi work — QEMU has `raspi3b`/
+`raspi4b` machines, so Pi bring-up needn't wait for boards.
+
+**Identity (step 1).** A uid/gid per task. The load-bearing decision — and a
+deliberate reversal of the roadmap's tentative "identity is probably a userland
+construct" note — was to put the binding **in the kernel** (`IDS`, one packed
+`(gid<<32)|uid` per slot, `SET_ID`/`GET_ID`). The reason is unforgeability: the
+kernel is the only thing that knows an IPC message's real sender, so it's the
+only trustworthy place to bind identity to a task. Names/passwords/policy stay
+100% userland. Root-gated (only root may change identity), inherited across
+spawn, with `/bin/id` and a `su` builtin, and the prompt showing `#`/`$`.
+
+**Login (step 2).** This is where the arc got interesting. I started building
+`login`-as-init (a separate boot process spawning a per-session shell, the
+classic getty model the user had picked) and hit a wall: the capability model
+bakes in "slot 0 = the shell" (`caps_for_slot`, `TO_SHELL = 1<<0`), so moving
+the shell to a spawned slot would mean rewiring the whole security policy and
+re-validating every IPC flow. I surfaced that and we switched to a **saved-uid**
+model instead: the shell stays task 0, `login` drops it to the user, and logout
+restores root (POSIX saved-set-uid: a non-root task may `SET_ID` back only to
+its saved identity) to re-prompt. Same login→session→logout→re-login experience,
+zero capability surgery. Passwords: `/etc/passwd` = `name:uid:gid:home:salt:hash`
+with `SHA-256(salt‖password)`, salts precomputed at build time so login only
+verifies. Two real bugs on the way: an **escalation hole** (the shell's saved id
+is root, so a logged-in user could `SET_ID(0)` — closed by making `su` root-only
+at the shell, since a user's children can't restore root and logout re-prompts),
+and a **`want=1024 > FS_DATA_MAX`** bug where login couldn't even read
+`/etc/passwd` (the shell's inline read caps at 512) — which I first misread as a
+mount race until the actual error code showed it was the buffer size.
+
+**Enforcement (step 3).** The payoff: `fsd`'s `check_access` finally *checks* the
+caller (via `GET_ID(sender)`) against the target's owner+mode and refuses with
+`FS_ERR_PERM`. Classic Unix — root bypasses, then owner→group→other; reads need
+`r`, writes `w` (on the file or the parent when creating), namespace changes `w`
+on the parent, `chmod` owner-only, `chown` root-only. ext2-only; the FAT boot
+disk stays open. A deliberate first cut: the object of the op and its parent are
+checked, but not the search (`x`) bit on every ancestor directory — kept out so
+the logic lives centrally in `fsd`'s dispatch rather than woven into each
+filesystem's path walk. No kernel change needed — `GET_ID` already existed.
+Verified on ext2: as root, set up `/secret` (600) and a user-owned `/u`, drop to
+the user — `cat /secret` and `touch` in root-owned `/` both denied, `touch /u/mine`
+succeeds, `/bin` programs still run.
+
+The arc is complete: mode/owner → chmod/chown → identity → login → enforcement.
+The roadmap's #1 gap — a single implicit user — is closed. Design retrospective:
+[the users-and-permissions postmortem](users-and-permissions-postmortem.md).
+
 ## 2026-08-27 (cont.) — exporting the environment to child programs
 
 The shell's env was a dead end: `set FOO=bar` and `$VAR` expansion worked, but
