@@ -7,6 +7,34 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/`; 
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## Shell: `a | b > file` — pipelines compose with redirection
+
+A pipeline and an output redirect can now be used together:
+`ls /bin | grep C > matches.txt`, `ps | grep runnable >> log.txt`. Before,
+this was refused (`can't combine | with output redirection`) because the
+last pipeline stage wrote straight to the console, with nothing capturing
+its output.
+
+The fix reorders `run_line`: it **parses the trailing `> file`/`>> file`
+redirect first**, leaving any `|` in the command part, then runs the
+pipeline. When a redirect is present, the last stage's stdout is pointed at
+the **shell itself** (`self_task()`) instead of `CON_TASK`, so the shell
+captures its output with the same `capture_program_output` →
+`finish_redirect` path a single `cmd > file` already uses (into the 256KB
+heap capture, then written to the file — create/replace for `>`, append for
+`>>`). Everything else about the pipeline is unchanged: stages still stream
+directly to one another, a builtin first stage is still captured-and-streamed,
+and the last stage just gets a different destination. No `FG` in the
+redirected case (the output goes to a file, so the last stage doesn't own the
+keyboard); on a capture error the producers are killed and reaped so nothing
+hangs.
+
+Verified on `make run-image`: `ls /bin | grep PW > pwout.txt` then
+`>> pwout.txt` produced a two-line file (read back both by the guest and by
+macOS mounting the image); `env | grep PATH > envout.txt` (a builtin-head
+pipeline) captured `PATH=/bin`; plain pipelines still print to the console.
+No faults.
+
 ## GPT: validate the CRC32s, fall back to the backup
 
 `fsd`'s `partition::discover` used to *trust* a GPT: it keyed off the "EFI

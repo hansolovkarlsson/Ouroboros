@@ -694,32 +694,40 @@ fn run_line(line: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize, env: &mut
         line
     };
 
-    // Pipelines first: standalone `|` tokens split the line into N stages.
-    // The first stage may be a builtin (its output captured and streamed) or a
-    // program; every later stage is a program reading its predecessor's output
-    // as stdin and writing to the next (or the console, for the last) - see
-    // cmd_pipeline. Combining with `>`/`>>` is refused: the last stage writes
-    // straight to the console, so there's no capture of *its* output to
-    // redirect.
-    if line.split_whitespace().any(|t| t == "|") {
-        if line.split_whitespace().any(|t| t == ">" || t == ">>") {
-            print_line("pipe: can't combine | with output redirection");
+    // Parse a trailing `> file` / `>> file` redirect *first*, so it composes
+    // with a pipeline: in `a | b > file` the redirect belongs to the whole
+    // line and applies to the last stage's output. `parse_redirect` splits at
+    // the (single, trailing) redirect operator, leaving any `|` in `cmd`.
+    let (cmd, redirect) = match parse_redirect(line) {
+        RedirectParse::Malformed(msg) => {
+            print_line(msg);
             return;
         }
+        RedirectParse::NoRedirect => (line, None),
+        RedirectParse::Redirect { cmd, target, append } => (cmd, Some((target, append))),
+    };
+
+    // A standalone `|` token in the command part makes it a pipeline: N stages,
+    // the first optionally a builtin (captured and streamed), every later stage
+    // a program reading its predecessor's output. The (optional) redirect
+    // applies to the last stage - its output is captured and written to the
+    // file instead of going to the console (see cmd_pipeline).
+    if cmd.split_whitespace().any(|t| t == "|") {
         let mut stages: [&str; MAX_STAGES] = [""; MAX_STAGES];
-        match split_pipeline(line, &mut stages) {
-            Ok(n) => cmd_pipeline(&stages[..n], cwd, cwd_len, env),
+        match split_pipeline(cmd, &mut stages) {
+            Ok(n) => cmd_pipeline(&stages[..n], cwd, cwd_len, env, redirect),
             Err(msg) => print_line(msg),
         }
         return;
     }
-    match parse_redirect(line) {
-        RedirectParse::NoRedirect => {
+
+    // A single command, with or without a redirect.
+    match redirect {
+        None => {
             let mut out = Output::Console;
-            dispatch_line(line, cwd, cwd_len, env, &mut out);
+            dispatch_line(cmd, cwd, cwd_len, env, &mut out);
         }
-        RedirectParse::Malformed(msg) => print_line(msg),
-        RedirectParse::Redirect { cmd, target, append } => {
+        Some((target, append)) => {
             let capture = get_heap();
             let mut out = Output::Capture { buf: capture, len: 0, overflowed: false };
             dispatch_line(cmd, cwd, cwd_len, env, &mut out);
@@ -868,7 +876,11 @@ fn spawn_stage(stage: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize, env: &Env, std
 /// Run an N-stage pipeline (`a | b | c`, N >= 2). The first stage may be a
 /// builtin (captured and streamed to stage 2) or a program; every later stage
 /// is a program reading its predecessor's output as stdin (`MSG_RECV`) and
-/// writing to the next stage, or to the console for the last one.
+/// writing to the next stage. The last stage writes to the console, unless a
+/// `redirect` (`Some((target, append))`) is present - then its stdout is
+/// pointed at the shell instead, captured, and written to `target` (the same
+/// capture-then-`finish_redirect` path a single `cmd > file` uses), so
+/// `a | b > file` works.
 ///
 /// Program stages are spawned right-to-left so each producer has a live
 /// consumer to point its stdout at; each adjacent producer->consumer link is
@@ -876,7 +888,13 @@ fn spawn_stage(stage: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize, env: &Env, std
 /// console and the shell, but not a sibling). A linear chain needs only the
 /// existing one-target-per-task delegation - each stage delegates to exactly
 /// one successor. The shell waits on (and reaps) every program stage.
-fn cmd_pipeline(stages: &[&str], cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize, env: &mut Env) {
+fn cmd_pipeline(
+    stages: &[&str],
+    cwd: &mut [u8; CWD_SIZE],
+    cwd_len: &mut usize,
+    env: &mut Env,
+    redirect: Option<(&str, bool)>,
+) {
     let head_cmd = stages[0].split_whitespace().next().unwrap_or("");
     let mut head_buf = [0u8; PATH_SIZE];
     let head_is_program = resolve_command(head_cmd, env, &mut head_buf).is_some();
@@ -894,10 +912,16 @@ fn cmd_pipeline(stages: &[&str], cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize, 
         return;
     }
 
-    // Spawn right-to-left: each stage's stdout is the next stage's slot, and
-    // the last stage writes to the console.
+    // Spawn right-to-left: each stage's stdout is the next stage's slot. The
+    // last stage's stdout is the console normally, or the shell itself (so its
+    // output can be captured) when the pipeline is being redirected to a file.
+    let last_target = if redirect.is_some() {
+        self_task()
+    } else {
+        syscall_abi::CON_TASK
+    };
     let mut slots = [0u64; MAX_STAGES];
-    let mut next_target = syscall_abi::CON_TASK;
+    let mut next_target = last_target;
     for i in (0..prog_stages.len()).rev() {
         match spawn_stage(prog_stages[i], cwd, *cwd_len, env, next_target) {
             Ok(slot) => {
@@ -973,12 +997,44 @@ fn cmd_pipeline(stages: &[&str], cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize, 
         }
     }
 
+    let last = prog_stages.len() - 1;
+
+    if let Some((target, append)) = redirect {
+        // Redirected: the last stage streamed its output back to the shell.
+        // Capture it (into the heap), then write it to the file - the exact
+        // path a single `cmd > file` uses. No `FG`: the output goes to a file,
+        // so the last stage doesn't own the keyboard.
+        let capture = get_heap();
+        let mut out = Output::Capture { buf: capture, len: 0, overflowed: false };
+        capture_program_output(slots[last], &mut out);
+        let failed = matches!(out, Output::Capture { overflowed: true, .. });
+        if failed {
+            // The capture killed the last stage (but didn't reap it); the
+            // producers are likely blocked feeding the now-dead consumer.
+            // Reap the last stage and kill the producers so nothing hangs.
+            let _ = syscall(syscall_abi::WAIT, slots[last]);
+            for s in &slots[..last] {
+                syscall(syscall_abi::KILL, *s);
+            }
+        }
+        for i in 0..last {
+            let cmd = prog_stages[i].split_whitespace().next().unwrap_or("stage");
+            wait_pipe_stage(cmd, slots[i]);
+        }
+        let (buf, len, overflowed) = match out {
+            Output::Capture { buf, len, overflowed } => (buf, len, overflowed),
+            Output::Console => return,
+        };
+        finish_redirect(&buf[..len], overflowed, target, append, cwd, *cwd_len);
+        return;
+    }
+
     // Hand the last stage the keyboard, so a pipeline whose consumer is
     // interactive (e.g. `ls -l | more`) can read paging keys - the same
     // foreground-owns-the-keyboard rule a single command gets. Harmless for a
     // non-interactive last stage (grep/wc): it owns the keyboard, never reads
     // it, and ownership reverts on exit. Ctrl+C then terminates that stage.
-    syscall(syscall_abi::FG, slots[prog_stages.len() - 1]);
+    syscall(syscall_abi::FG, slots[last]);
 
     // Reap every program stage (in order, so a producer that streamed and
     // exited is collected before we block on its consumer).

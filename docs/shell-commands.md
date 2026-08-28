@@ -237,10 +237,20 @@ exec /EFI/ORBS/HELLO.BIN > out.txt
 cat out.txt                          ->  Hello from a second program! ...
 ```
 
+**`a | b > file`** (and `>> file`) **redirects the pipeline's output to a
+file** — the last stage's output is captured by the shell and written to the
+file (create/replace for `>`, append for `>>`), exactly the way a single
+`cmd > file` is captured, and subject to the same 256KB-capture limit. The
+redirect is parsed off first, so the `|` chain runs normally with only its
+last stage's destination changed:
+
+```
+ls /bin | grep C > matches.txt
+ps | grep runnable >> log.txt
+```
+
 Limits: a pipeline is at most five program stages (the spawnable task slots -
-a longer chain fails with "no free task slot"); combining `|` with `>`/`>>`
-is refused (the last stage writes straight to the console, so there's no
-capture of its output to redirect); `exec > file` capture is bounded (512
+a longer chain fails with "no free task slot"); `exec > file` capture is bounded (512
 bytes, refuse-not-truncate - pipes themselves stream unbounded). A consumer
 that stops reading: a program producer gives up after its own ~3-second
 timeout and exits, and the shell's wait on the still-live consumer blocks

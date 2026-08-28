@@ -556,9 +556,6 @@ Known small gaps, not yet sequenced (the *completed* parking-lot entries — USB
 keyboard, GOP console, preemption, task destruction, driver isolation, etc. — are
 in [`roadmap-completed.md`](roadmap-completed.md)):
 
-- **Pipelines can't combine with `>`/`>>`.** `a | b > file` is refused (the last
-  stage writes straight to the console; there's no capture of its output). A real
-  fix routes the last stage's stdout into a file capture.
 - **`grep` is substring-only and case-sensitive** (no regex, no `-i`); **`head`
   relies on the producer's send-timeout** when it exits early rather than
   actively signalling upstream. Small filter follow-ups (and see North-star item

@@ -7,6 +7,27 @@ for the forward plan see [`roadmap.md`](roadmap.md).
 
 ---
 
+## 2026-08-27 (cont.) — `a | b > file`: pipelines compose with redirection
+
+Small, satisfying one: the shell refused `a | b > file` (pipeline plus
+redirect) because the last stage wrote straight to the console. The fix was
+mostly a reordering — `run_line` now parses the trailing `>`/`>>` redirect
+*first* (leaving the `|` in the command part), and when a redirect is present
+the pipeline's last stage is spawned with its stdout pointed at the shell
+instead of the console. From there it's the *exact* path a single `cmd > file`
+already uses: `capture_program_output` folds the stream into the 256KB heap
+capture, `finish_redirect` writes it to the file. So almost no new
+mechanism — the redirect capture and the pipeline machinery already existed;
+they just needed to meet. The only genuinely new handling is the error path
+(kill+reap the producers if the capture fails so nothing hangs) and *not*
+handing the last stage the keyboard when its output is going to a file.
+
+Verified on `make run-image`: `ls /bin | grep PW > pwout.txt` then a `>>`
+gave a two-line file (confirmed by the guest and by mounting the image on the
+Mac), and `env | grep PATH > envout.txt` proved a builtin-head pipeline
+redirects too (`PATH=/bin`). Plain pipelines still go to the console; no
+faults. Closes another of the small open-gaps.
+
 ## 2026-08-27 (cont.) — GPT CRC validation + backup fallback
 
 Closed the "GPT parsed but CRCs not validated on read" open gap. `fsd`'s
