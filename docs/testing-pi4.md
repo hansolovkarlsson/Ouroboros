@@ -345,6 +345,45 @@ entirely. **Connect both from the first boot**, before anything needs debugging.
 
 ---
 
+## Develop on QEMU first (raspi3b / raspi4b) — you don't have to wait for the boards
+
+QEMU emulates the Raspberry Pi, so Pi-specific bring-up can start on the fast dev
+loop before any hardware is on the bench. Confirmed available in this project's
+QEMU (`qemu-system-aarch64 -machine help` lists **`raspi3b`** and **`raspi4b`**,
+plus `raspi2b`, `raspi3ap`, …).
+
+**The nuance that decides how useful this is: our kernel is UEFI-native.** It
+builds as a UEFI application (`BOOTAA64.EFI`, target `aarch64-unknown-uefi`) and
+boots via firmware; QEMU's `raspi4b` machine, by contrast, boots the **raw**
+BCM2711 path — a `kernel8.img` loaded with `-kernel`, no UEFI underneath. So the
+two Pi routes map onto QEMU differently:
+
+- **The preferred route — UEFI (pftf firmware) — is already covered by QEMU's
+  `virt` + OVMF**, which is the *current* dev loop (`make run*`). Everything the
+  UEFI/ACPI/GOP/MADT stack does is exercised there today with no Pi machine at
+  all. The only Pi-UEFI-specific bits that `virt` can't show (the actual pftf
+  firmware's ACPI tables, real peripheral addresses) need the pftf image or real
+  hardware — see §1 and §6.
+- **The fallback route — raw `kernel8.img` — is what QEMU's `raspi3b`/`raspi4b`
+  emulate**, and that's where they earn their place: a rig for developing the
+  Pi's own peripheral drivers (the real PL011 base at the BCM2711 peripheral
+  window, GIC-400 = GICv2, the mailbox/GPIO) on QEMU before hardware. Using it
+  means a *raw-boot build variant* we don't have yet (link at the Pi load
+  address, no boot services), so it's a small project of its own — worth it only
+  if/when the UEFI route is abandoned (§7 Risk 1 is the trigger).
+
+A starting command for the raw path, for when that variant exists:
+
+```sh
+qemu-system-aarch64 -M raspi4b -kernel kernel8.img -serial stdio -display none
+```
+
+Caveats: peripheral coverage on the `raspi*` machines is **partial and varies by
+QEMU version** (networking and USB especially — the same "no NIC on this target"
+story as §2), so verify against the version in use. See the QEMU Arm docs
+(<https://www.qemu.org/docs/master/system/arm/raspi.html>) and
+[`resources.md`](resources.md) for the OSDev-wiki bare-metal-Pi references.
+
 ## 8. When the boards arrive
 
 The first session is not "run the test matrix." It is:
@@ -381,5 +420,11 @@ fix are all above, which is the whole reason for writing them down first.
 - [rust-embedded/rust-raspberrypi-OS-tutorials](https://github.com/rust-embedded/rust-raspberrypi-OS-tutorials) —
   the raw BCM2711 register facts, if the UEFI path ever has to be abandoned. See
   [`research-redox-and-pi.md`](research-redox-and-pi.md) Part 2.
+- [OSDev Wiki](https://wiki.osdev.org/) — bare-metal reference: the
+  *Raspberry_Pi_Bare_Bones* / *ARM_RaspberryPi* / *PL011* / *GIC* pages are the
+  register-level companion to the tutorials above. Curated with the other
+  external references in [`resources.md`](resources.md).
+- [QEMU Arm — Raspberry Pi boards](https://www.qemu.org/docs/master/system/arm/raspi.html) —
+  the `raspi3b`/`raspi4b` machine types (see "Develop on QEMU first" above).
 - This repository: `kernel/src/main.rs`, `virtio_mmio.rs`, `pci.rs`, `madt.rs`,
   `block.rs`, `loader.rs`, and the `Makefile`'s `esp`/`image` targets.
