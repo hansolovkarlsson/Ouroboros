@@ -292,15 +292,20 @@ killed after the same timeout.
   counts), `head [N]` (first N lines, default 10), `tail [N]` (last N lines,
   default 10 — the complement of `head`; capped at 64 retained lines), `nl`
   (numbers every line, right-aligned 6-column count + tab, like `cat -n`),
-  `rev` (reverses the character order of each line), and `uniq` (collapses
-  runs of *adjacent* identical lines). Each reads stdin and writes to its
+  `rev` (reverses the character order of each line), `uniq` (collapses
+  runs of *adjacent* identical lines), and `sort [-r] [-n] [-u] [-f]` (sorts
+  all input lines — `-r` reverse, `-n` numeric, `-u` unique, `-f` fold case;
+  flags combine, e.g. `-rn`). Each reads stdin and writes to its
   stdout target, so they chain: `cat FILE | grep x | wc`,
-  `ls /bin | tail 5`, `cat FILE | uniq | nl`, `echo hi | rev`. They only do
+  `ls /bin | tail 5`, `cat FILE | sort | uniq`, `echo hi | rev`. They only do
   anything as a pipeline stage (they read piped input); run bare, they just
-  wait for input that never comes (Ctrl+C to abort). Each is bounded to a
+  wait for input that never comes (Ctrl+C to abort). Most are bounded to a
   256-byte line buffer with no heap — a longer line is handled in pieces
-  (`tail` truncates it), the shared caveat of these fixed-buffer filters. See
-  the Pipelines section.
+  (`tail` truncates it), the shared caveat of these fixed-buffer filters.
+  `sort` is the exception: it *can't* stream (it must see every line before
+  emitting one), so it buffers the whole input in its 256KB heap and sorts an
+  in-place line index, with a documented size cap (a larger input is truncated
+  and a warning is printed to the console). See the Pipelines section.
 - **Write granularity: `write` full-replaces; `writeat`/`>>`/`cp` do
   offset writes.** The FAT32 layer has a real random-access offset-write
   primitive (`write_at`): `writeat` writes in place at any offset

@@ -2,15 +2,22 @@ NAME
     grep - keep lines matching a pattern
 
 SYNOPSIS
-    <input> | grep <pattern>
+    <input> | grep [-i] [-v] [-n] <pattern>
 
 DESCRIPTION
     Reads standard input and writes only the lines that contain <pattern>
     (a plain substring; no regular expressions). A pipeline filter.
 
+    -i  ignore case (ASCII)
+    -v  invert: print the lines that do NOT contain the pattern
+    -n  prefix each printed line with its 1-based input line number
+
+    Flags may be combined, e.g. -in, and come before the pattern.
+
 EXAMPLES
     cat log.txt | grep ERROR
-    ls /bin | grep P
+    ls /bin | grep -i cat
+    cat log.txt | grep -vn WARN
 
 SEE ALSO
-    wc, head, tail, uniq
+    wc, head, tail, uniq, sort

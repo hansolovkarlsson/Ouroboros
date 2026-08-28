@@ -93,9 +93,6 @@ The small open tails those arcs deliberately left:
   Plan 9 devfs direction); nothing to name yet with one block device.
 - **Exporting the environment into child programs** — a second argv-like ABI;
   the env is shell-local today.
-- **`sort`.** The one filter with a real wrinkle: it must buffer all input
-  before emitting (unlike the streaming filters), against the fixed-buffer/
-  no-alloc constraint — a bounded sort or a documented size cap.
 
 ## Testing infrastructure: scripted real-hardware round trips
 
@@ -281,9 +278,9 @@ keyboard-ownership arc (below/shipped) already cleared the "an interactive
 ### 2. Richer commands: flags, arguments, real option parsing (scoped, incremental)
 
 Today's `/bin` commands take mostly positional arguments, and several are
-deliberately minimal (the open-gaps list notes `grep` is
-substring-only/case-sensitive, and `sort` isn't written; `ls -l`/`-a` and a
-`-?` usage flag have since shipped).
+deliberately minimal (the open-gaps list notes `grep` is still substring-only;
+`ls -l`/`-a`, `grep -i/-v/-n`, `sort` (with `-r/-n/-u/-f`), and a `-?` usage
+flag have since shipped).
 The direction: give the existing commands the flags that make them actually
 usable — `ls -l`/`-a`, `grep -i`/`-r`/`-n` (and eventually real patterns),
 `rm -r`/`-f`, `cp -r`, `cat -n`, `head -n`/`tail`, `wc -l`/`-w`/`-c`
@@ -308,8 +305,7 @@ reads."
 ### 3. More `/bin` commands (scoped, incremental)
 
 The standard toolset still missing, roughly in cheapness order (`tail`, `nl`,
-`rev`, `uniq` already shipped): `sort` (already deferred — needs to buffer all
-input before emitting, unlike the streaming filters), `tee`, `tr`, `cut`,
+`rev`, `uniq`, and now `sort` already shipped): `tee`, `tr`, `cut`,
 `find`, `du`, `df`,
 `date`/`sleep` (both want a wall-clock the kernel already has via the timer
 counter and `MONOTONIC_US`), `env`-as-a-program, `true`/`false`/`yes`, and a
@@ -328,10 +324,9 @@ is complete and the pattern is turnkey (a filter reads `pipe_recv`, writes
 program (one that reads keys while running) can be a `/bin` binary — the pager
 is the existence proof. So most of these are genuinely small. The one that
 isn't: an **editor** (needs item 1's cursor addressing + item 4's richer
-input). `sort` is the one filter with a real design wrinkle (full-input
-buffering against the fixed-buffer/no-alloc constraint — a bounded
-external-ish sort, or a documented size cap). Cheap wins first; the editor
-last, gated on item 1.
+input). (`sort` — the one filter that can't stream — shipped by buffering the
+whole input in its heap and sorting an in-place line index, with a documented
+size cap.) Cheap wins first; the editor last, gated on item 1.
 
 ### 4. Login, users, security, file permissions (a substantial arc, medium-term)
 

@@ -7,6 +7,31 @@ for the forward plan see [`roadmap.md`](roadmap.md).
 
 ---
 
+## 2026-08-27 (cont.) — `sort`, the filter that can't stream
+
+Wrote the one standard filter that had been left for last, because it doesn't
+fit the shape of the others. Every existing filter (`grep`, `head`, `nl`, …)
+streams: fixed line buffer, emit as you go. `sort` fundamentally can't — it
+has to see the whole input before the first output line — so it needs to
+buffer everything, against this project's no-heap-allocator, fixed-buffer
+constraint.
+
+The fit was `ulib::heap` (the 256KB per-program region already used by the
+pager). I split it: input bytes in the front, and a line index (start+len per
+line) reinterpreted from the 4-aligned tail via `align_to_mut::<u32>()` — so
+the index costs no stack (the spawn stack is only 32KB with a guard page, so a
+big on-stack index was out). Sorting is an in-place **heapsort** over that
+index (iterative, no recursion, no scratch), which keeps the *working* memory
+O(1) on top of the input it has to hold anyway. Flags `-r/-n/-u/-f` are cheap
+additions on top. The "buffer everything" limit is a documented size cap:
+truncate past the heap and warn on the console (stderr-style, not into the
+sorted stream).
+
+All variants check out on QEMU — lexical, reverse, unique, and numeric
+(`100 30 9` → `9 30 100`) — no faults. Nice that the interesting constraint
+(can't stream) had a clean answer (heap + index + heapsort) rather than forcing
+an allocator. Closes the last of the small filter follow-ups.
+
 ## 2026-08-27 (cont.) — a builtin anywhere in a pipeline
 
 The last of the pipeline open-gaps: a non-first stage couldn't be a builtin, so

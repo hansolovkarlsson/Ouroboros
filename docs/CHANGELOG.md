@@ -7,6 +7,28 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/`; 
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## `/bin/sort` — the filter that can't stream
+
+The one standard filter that had been deferred, because it breaks the shape
+all the others share: it must read *every* line before it can emit one, so
+it can't work from a fixed line buffer. `sort` reads all of stdin into this
+program's 256KB heap (input bytes in the front), builds an in-place line
+index (start+len per line) reinterpreted from the heap's 4-aligned tail, and
+**heapsorts the index** (O(n log n), iterative, no scratch array — so its
+*working* memory stays O(1) beyond the input it necessarily holds).
+
+Flags (combinable, e.g. `-rn`): `-r` reverse, `-n` numeric (leading integer,
+ties broken lexicographically), `-u` unique (drop lines equal to the previous
+emitted one), `-f` fold case. Default is byte-lexicographic ascending. There's
+**no per-line length limit** (unlike the streaming filters), and the "buffer
+everything" constraint is handled with a **documented size cap**: an input
+larger than the heap is truncated, sorted, and emitted, with a one-line
+warning to the console (never into the sorted output).
+
+Verified on `make run-image`: `cat f | sort` / `-r` / `-u` and `sort` vs
+`sort -n` on numbers (`100 30 9` lexical → `9 30 100` numeric) all correct;
+no faults. A new `/bin/SORT` crate + `man sort`.
+
 ## Shell: a builtin may appear anywhere in a pipeline
 
 Only a pipeline's *first* stage could be a builtin (a later stage had to be a
