@@ -576,7 +576,13 @@ out of scope. **Consumer question, stated plainly:** nothing needs it yet — th
 framebuffer console suffices, and the terminal/editor work (items 1/c) lives
 happily on the plain framebuffer — so this is for an eventual windowing system /
 graphical apps, sequenced behind everything with a nearer consumer. Note
-virtio-gpu as the entry point when the time comes.
+virtio-gpu as the entry point when the time comes. **The whole GUI stack above
+this** — how far up toward SDL/GTK it could go, which layer actually blocks, and
+why a Plan 9 `/dev/draw`-shaped `drawd` server (not an `SDL_Surface` pixel-ship
+model) is the fit for a 768-byte inline ABI with no shared memory — is worked out
+in [`research-gui-stack.md`](research-gui-stack.md). Its finding: the mouse
+driver and a `drawd` draw server are the two steps that unlock everything else,
+and the pixel-transfer model is the day-one decision to get right.
 
 **g. Cluster data redundancy — documents failsafed across nodes (new, a later cluster phase).**
 The cluster (see [`roadmap-cluster.md`](roadmap-cluster.md)) shares disk and
