@@ -371,93 +371,49 @@ input). (`sort` — the one filter that can't stream — shipped by buffering th
 whole input in its heap and sorting an in-place line index, with a documented
 size cap.) Cheap wins first; the editor last, gated on item 1.
 
-### 4. Login, users, security, file permissions (a substantial arc, medium-term)
+### 4. Login, users, security, file permissions — DONE (2026-08-28)
 
-> **Progress (2026-08-28): steps 1 (*identity*) and 2 (*login*) are done.**
-> Step 1: a kernel-owned uid/gid per task (`SET_ID`/`GET_ID`, default root,
-> inherited across spawn, root-gated), observable via `/bin/id`, with the prompt
-> showing `#`/`$`. Kept the binding **in the kernel** (the unforgeable root of
-> trust), reversing this section's earlier "probably userland" lean. Step 2: the
-> shell **gates each session on a `login:` prompt**, authenticating against
-> `/etc/passwd` (`SHA-256(salt‖password)`) and dropping to that user — using a
-> POSIX **saved-uid** so logout restores root and re-prompts (chosen over a
-> `login`-as-init process to avoid rewiring the capability model's "slot 0 =
-> shell" assumption; a user can't escalate since `su` is root-only + children
-> can't restore root). See `CHANGELOG.md` and `docs/gap-analysis.md` §6.
-> Step 3 (*enforcement*) is now done too: `fsd`'s `check_access` gates every
-> file verb — the caller's uid/gid (`GET_ID(sender)`) vs. the inode owner/mode,
-> owner→group→other, root bypass, `FS_ERR_PERM` on refusal, `chmod` owner-only /
-> `chown` root-only. ext2-only (FAT/exFAT unrestricted).
->
-> **Step 4 (*account management*) is now done too (2026-08-28)** — the "close the
-> security arc" pass. A shared **`accounts`** crate (repo-root, pure/`no_std`,
-> host-unit-tested) holds `/etc/passwd` + `/etc/group` parsing/formatting, the
-> SHA-256 hashing, salt derivation, and name↔id lookups, so `login` and the new
-> `/bin` tools share one implementation (it also absorbed the shell's duplicated
-> `sha256`). Added: `/bin/passwd`, `/bin/useradd`, `/bin/groupadd`, `/bin/usermod`
-> (all **root-only** — the option-1 model: self-service `passwd` is deferred to a
-> later `accountd`/setuid tier the shared crate is built to slot into); `su
-> <username>` and `id` **name resolution**; `/etc/group` (`name:gid:members`) with
-> a **primary-gid** group model (`usermod -g` / `useradd -g` set the primary gid;
-> supplementary groups stay a kernel-identity tier); per-user home directories
-> under **`/Users`** with `~`→`$HOME` shell expansion (login sets `HOME`, the ext2
-> image chowns `/Users/user` to the user). Salts are **clock-derived** (`MONOTONIC_US`
-> + hash) — documented as weak, with a virtio-entropy `RANDOM` syscall the noted
-> upgrade. The account files are read chunked into a 2 KB buffer (~20 accounts).
->
-> **The arc is complete.** Deferred refinements (smaller, unsequenced): the
-> ancestor-directory search (`x`) traversal check, per-user *cluster* identity,
-> `/etc/shadow` (passwords out of the world-readable `passwd`), self-service
-> `passwd` (the `accountd`/setuid tier), a **virtio-entropy RNG** (for strong
-> salts), **supplementary group membership** (needs the kernel identity to carry
-> a group list), and symbolic-mode `chmod` / `useradd`-created dotfiles.
+**Complete.** The full arc — identity, login, enforcement, and account
+management — is finished; the sequenced plan-shaped record moved to
+[`roadmap-completed.md`](roadmap-completed.md) and the milestone log is in
+[`CHANGELOG.md`](CHANGELOG.md). Retrospectives:
+[`users-and-permissions-postmortem.md`](users-and-permissions-postmortem.md)
+(steps 1–3) and
+[`account-management-postmortem.md`](account-management-postmortem.md) (step 4).
+What shipped: a kernel-owned uid/gid per task; a `login:` gate over
+`/etc/passwd`; `fsd` permission enforcement (ext2); and the account tools
+(`passwd`/`useradd`/`groupadd`/`usermod`, `su`/`id` by name, `/etc/group`
+primary-gid groups, `/Users` homes + `~`) on a shared host-tested `accounts`
+crate, plus creator-owned new inodes.
 
-The biggest of these — the step from "single implicit user, whoever's at the
-keyboard" to a real **identity and permission model**. Pieces: a notion of
-*users* (uid/gid — **done**), a **login** prompt gating the shell, credential
-storage (a `/etc/passwd`-shaped file with hashed passwords), per-file
-**ownership + permission bits** actually *enforced* on `fsd` operations, and
-a privilege boundary for the operations that should need it (format, mount,
-kill another user's task, the cluster export).
+**Still open (deferred refinements, unsequenced):**
 
-**What exists to build on — more than it looks.** Three foundations are
-already in place: (a) **ext2 already carries uid/gid/mode on disk** — the
-metadata a permission check needs is read today and simply ignored above
-`fsd`; enforcing it is "check the caller's identity against the inode's mode
-in the `FSOP_*` dispatch," which is why item 2's stat surface is the natural
-precursor. (b) The **capability model** is already a per-task "who may do
-what" mechanism at the IPC boundary — a user/permission layer is its
-higher-level cousin, and the two want to be reconciled, not built in
-parallel (a logged-in user's tasks get a capability set derived from their
-identity). (c) **Cluster auth already has real crypto** — hand-rolled
-SHA-256/HMAC (`netd/src/hmac.rs`, NIST/RFC-validated) and a
-fail-closed key-file pattern (`CLUSTER.KEY` read once at boot via `fsd`) —
-so password *hashing* and a `/etc/passwd` read reuse machinery that exists.
-
-**The hard parts / open questions.** Who is the *kernel's* notion of a
-user — the kernel schedules tasks, not people, so identity is likely a
-userland construct (a login server / an identity carried in the capability
-set) rather than a uid field in the task struct, matching the "personality
-in userland" stance the POSIX section takes. FAT/exFAT can't store owners at
-all, so enforcement is inherently ext2-only (or a shadow permission store) —
-an honest per-filesystem degradation again. And the **cluster** angle is the
-interesting one: the export currently authenticates the *machine* (shared
-key), not a *user* — per-user identity across the cluster is explicitly a
-named future tier in the cluster-auth postmortem, and this arc is where it
-would land. This is a multi-milestone arc, not one task; sequence it *after*
-item 2's stat surface exists, since permission enforcement has nothing to
-check against until then.
+- **Self-service `passwd`** — a non-root user changing their own password needs
+  a privileged path: a dedicated **`accountd`** server (the `accounts` crate is
+  built to slot into it) or a setuid mechanism. Root-only tools ship today.
+- **A virtio-entropy RNG** — a `RANDOM` syscall backed by a virtio-rng driver,
+  to replace the weak clock-derived password salts (`accounts::make_salt`) with
+  real entropy.
+- **Supplementary group membership** — a user in several groups at once, checked
+  by `fsd`. Needs the kernel identity to carry a group *list* (it's one packed
+  gid today) plus an enforcement change; primary-gid (`usermod -g`) ships today.
+- **`/etc/shadow`** — move password hashes out of the world-readable `/etc/passwd`.
+- **Ancestor-directory `x`-traversal** — enforcement checks the object + its
+  parent, not search bits on every ancestor directory.
+- **Per-user cluster identity** — the 9P export authenticates the *machine*
+  (shared key), not a *user*; per-user identity across the cluster is a named
+  cluster-auth tier that would land here.
+- **Symbolic-mode `chmod`** (`u+x`) and a real `/etc/skel` for `useradd` — small
+  polish.
 
 **A mechanism to borrow from Redox: the namespace *is* the sandbox.** Redox
-sandboxes a process by restricting which schemes (resources) its namespace
-can *name*, down to a "null namespace" that leaves a daemon only its
-pre-opened handles after init. Ouroboros already has both halves — per-task
-namespaces (`bind`/NS_SET) and the capability send-mask — but hasn't joined
-them (an empty namespace today means "unchanged," not "no access"). Making
-the namespace the enforcement boundary is exactly the reconciliation point
-(b) above wants, and Redox is the working model. Its RedoxFS also boots the
-kernel off an **encrypted partition** — the reference for at-rest security
-when this arc reaches disk encryption. See `docs/research-redox-and-pi.md`.
+sandboxes a process by restricting which schemes its namespace can name (down to
+a "null namespace"). Ouroboros has both halves — per-task namespaces (`bind`/
+`NS_SET`) and the capability send-mask — but hasn't joined them (an empty
+namespace means "unchanged," not "no access"). Making the namespace the
+enforcement boundary is the reconciliation the self-service/privilege work wants;
+Redox is the working model (and RedoxFS's encrypted partition is the reference
+for at-rest security). See `docs/research-redox-and-pi.md`.
 
 ### 5. An on-device compiler: C and/or Rust (north-star, very large)
 
@@ -642,3 +598,15 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
 - **`grep` has no regex** (it now takes `-i`/`-v`/`-n`, but matching is still a
   plain substring). Real patterns are a separate, larger arc — see North-star
   item 2 for the shared `ulib` option parser and richer matching.
+- **`useradd` is not atomic** (code-review note, PR #22): it writes `/etc/passwd`
+  first, then best-effort creates the user-private group and home dir. A failure
+  after the passwd write leaves an account with no matching group and/or no home
+  yet still reports success. Low-impact for a root-only dev tool (the home-dir
+  failure already warns); a cleaner version would create the group + home before
+  committing the passwd line, or report a non-zero exit.
+- **Three near-identical small-file readers** (code-review note): `login::
+  read_passwd`, `shell::read_account_file`, and `ulib::read_file_all` each chunk
+  a small account file. The shell-vs-`ulib` boundary (the shell has its own fs
+  layer) makes full dedup awkward, but the two shell copies could share one
+  helper. Likewise `ulib::read_line` duplicates `login::read_field` (again the
+  shell/`ulib` split); consolidate if the shell ever gains a `ulib` dependency.

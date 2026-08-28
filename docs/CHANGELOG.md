@@ -57,6 +57,14 @@ rewrite.
   `~`, home-write allowed, `/`-write denied; login `root`: `useradd`/`groupadd`/
   `usermod`/`su carol` → `uid=1001(carol) gid=1002(staff)`), plus 8 `accounts`
   host unit tests (`cargo test -p accounts --target aarch64-apple-darwin`).
+- **Two code-review fixes before merge** (PR #22): ext2 `write_file`'s overwrite
+  branch preserved the old inode's `mode`/`links` but not its owner, so with
+  creator ownership live, *overwriting* an existing file re-owned it to the
+  writer (POSIX overwrite never chowns) — now preserves `uid`/`gid` too; and
+  `/bin/id` read `/etc/passwd` with the 512-byte inline read while
+  `login`/`su`/`useradd` read the full ~2 KB, so it couldn't resolve names past
+  ~5 accounts — switched to the bulk read. See
+  `docs/account-management-postmortem.md`.
 
 ## picolibc: the real C library (libc arc, step 6)
 
