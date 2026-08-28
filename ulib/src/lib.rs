@@ -108,6 +108,66 @@ pub fn arg(index: u64, buf: &mut [u8]) -> Option<usize> {
     }
 }
 
+/// Number of environment variables this program inherited from its spawner
+/// (`GET_ENVC`). `0` for a program not spawned by the shell (or spawned with no
+/// environment).
+pub fn env_count() -> u64 {
+    syscall(syscall_abi::GET_ENVC, 0)
+}
+
+/// Copy the `index`-th inherited environment entry - a `NAME=VALUE` string -
+/// into `buf`, returning its true length (which may exceed `buf.len()`), or
+/// `None` if `index` is out of range. Mirrors [`arg`]; the entry point for
+/// iterating the environment (e.g. `printenv`).
+pub fn env_at(index: u64, buf: &mut [u8]) -> Option<usize> {
+    let n = syscall4(
+        syscall_abi::GET_ENV,
+        index,
+        buf.as_mut_ptr() as u64,
+        buf.len() as u64,
+        0,
+    );
+    if n == syscall_abi::NO_ARG {
+        None
+    } else {
+        Some((n as usize).min(buf.len()))
+    }
+}
+
+/// Look up an inherited environment variable by `name`, copying its value into
+/// `buf` and returning the value's true length, or `None` if it isn't set.
+/// Scans the environment (`env_count`/`env_at`), splitting each entry on its
+/// first `=`. A `getenv`-shaped helper for programs that want one variable.
+pub fn getenv(name: &[u8], buf: &mut [u8]) -> Option<usize> {
+    // One entry at a time. 256 bytes holds any NAME=VALUE (a name plus a
+    // 128-byte value) and stays under the syscall's MAX_USER_LEN out-capacity
+    // (512) - the whole-blob ENV_MAX (2048) would be rejected by the range check.
+    let mut entry = [0u8; 256];
+    let n = env_count();
+    for i in 0..n {
+        let Some(len) = env_at(i, &mut entry) else {
+            continue;
+        };
+        // Split NAME=VALUE on the first '='.
+        let mut eq = None;
+        for (j, &b) in entry[..len].iter().enumerate() {
+            if b == b'=' {
+                eq = Some(j);
+                break;
+            }
+        }
+        if let Some(eq) = eq {
+            if &entry[..eq] == name {
+                let val = &entry[eq + 1..len];
+                let m = val.len().min(buf.len());
+                buf[..m].copy_from_slice(&val[..m]);
+                return Some(val.len());
+            }
+        }
+    }
+    None
+}
+
 /// Where this program's output should go: the console server by default, or -
 /// when the shell spawned us as a pipe producer or `exec … > file` source -
 /// the shell's own task, which relays or captures it.

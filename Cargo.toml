@@ -19,7 +19,7 @@ members = [
     "programs/shellutils/echo", "programs/shellutils/uptime", "programs/shellutils/clear",
     "programs/shellutils/args", "programs/shellutils/pwd", "programs/shellutils/readkey",
     "programs/shellutils/send", "programs/shellutils/recv", "programs/shellutils/selftest",
-    "programs/shellutils/man",
+    "programs/shellutils/man", "programs/shellutils/printenv",
 ]
 # `shell`, `hello`, and `pong` are built explicitly with `--target
 # aarch64-unknown-none` (see the Makefile) - they must never be pulled

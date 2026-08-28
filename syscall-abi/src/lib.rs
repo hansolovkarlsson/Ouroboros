@@ -597,6 +597,39 @@ pub const POWER: u64 = 56;
 /// fast. Harmless if nothing else is runnable (it just carries on).
 pub const YIELD: u64 = 57;
 
+/// `(blob pointer, blob length)` -> `0` on success, [`SPAWN_ERROR`] on a bad
+/// range or an over-long blob. Stages an **environment blob** to be attached
+/// to the **next** [`SPAWN`] (a pending latch consumed by that spawn - unlike
+/// argv/cwd, `SPAWN`'s four args are full, so the env has no length arg and is
+/// latched instead; staging again before the next spawn replaces it). The blob
+/// uses the *same* encoding as an argv blob - `[count: u32 LE]` then, for each
+/// variable, `[len: u32 LE][bytes]` - where each entry's bytes are a
+/// `NAME=VALUE` string. The child reads it via [`GET_ENVC`]/[`GET_ENV`] (and
+/// `ulib::getenv`). Bounded by [`ENV_MAX`]; delivered kernel-side (stored
+/// per-task) exactly like argv, so start-up register/stack state is unchanged.
+pub const ENV_STAGE: u64 = 58;
+
+/// `()` -> the number of environment variables the current task inherited (`0`
+/// for a task spawned with none - every boot-loaded task, or a [`SPAWN`] with
+/// no preceding [`ENV_STAGE`]).
+pub const GET_ENVC: u64 = 59;
+
+/// `(index, out pointer, out capacity)` -> the true length of environment
+/// entry `index` as a `NAME=VALUE` string (copying up to `out capacity` bytes
+/// into the buffer), or [`NO_ARG`] if `index >= envc`. Mirrors [`GET_ARG`];
+/// `ulib::getenv` splits the `NAME=VALUE` on the first `=`. Note the out buffer
+/// is validated like every user pointer, so its capacity must be `<=` the
+/// syscall boundary's user-range cap (512) - read **one entry at a time** into
+/// a small buffer, not one of [`ENV_MAX`] (which is the whole-blob store size).
+pub const GET_ENV: u64 = 60;
+
+/// Maximum size of a staged environment **blob** (and the per-task env store) -
+/// *not* a per-entry read size (see [`GET_ENV`]). The shell's env holds up to
+/// 16 vars of a name + a 128-byte value each; 2048 bytes covers a realistic
+/// environment (a maximally-full one truncates, dropping trailing vars,
+/// documented in `ulib`/the shell).
+pub const ENV_MAX: u64 = 2048;
+
 /// [`POWER`] mode: power the machine off.
 pub const POWER_OFF: u64 = 0;
 /// [`POWER`] mode: halt the CPU (stop, without cutting power).

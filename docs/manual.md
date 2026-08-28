@@ -163,8 +163,8 @@ $ set PATH=/bin ; env           # a real environment; $VAR expansion
   on `$PATH` (default `/bin`), spawned with arguments, and reaped:
   `ls  tree  cat  cp  mv  mkdir  rmdir  touch  rm  write  writeat  more` (files;
   `more`/`less` is the pager),
-  `echo  pwd  uptime  clear  args  send  recv  selftest  man` (basics/diagnostics),
-  `grep  wc  head  tail  nl  rev  uniq  upper` (pipeline filters),
+  `echo  pwd  uptime  clear  args  send  recv  selftest  man  printenv` (basics/diagnostics),
+  `grep  wc  head  tail  nl  rev  uniq  sort  upper` (pipeline filters),
   `ping  resolve  fetch` (network). You type them the same way (`ls`,
   `cat x`); the shell finds `/bin/LS` on PATH (FAT is case-insensitive).
   A `/bin` command resolves relative paths against the shell's working
@@ -183,7 +183,9 @@ it in, several extend to the common prefix and then list.
 **Output redirection & pipelines** work across both:
 `echo hi > f.txt` (replace), `>> f.txt` (append), and `a | b | c`
 (each stage a separate program; the filters
-`grep`/`wc`/`head`/`tail`/`nl`/`rev`/`uniq`/`upper` are built to chain).
+`grep`/`wc`/`head`/`tail`/`nl`/`rev`/`uniq`/`sort`/`upper` are built to chain).
+A single **builtin** may sit at any pipeline position, `a | b > file`
+redirects the pipeline's output, and `grep` takes `-i`/`-v`/`-n`.
 See [`shell-commands.md`](shell-commands.md).
 
 ### Spawning, job control, and IPC demos

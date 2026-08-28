@@ -686,6 +686,54 @@ pub(crate) fn clear_argv(task: usize) {
     argv.len = 0;
 }
 
+/// Per-task environment store: the env blob a task inherited at spawn (the
+/// same `[count][len][NAME=VALUE]...` encoding as argv), latched via
+/// `ENV_STAGE` and read back by the child via `GET_ENVC`/`GET_ENV`. Same
+/// deliver-kernel-side, fetch-by-child shape as argv; boot-loaded tasks get
+/// none (len 0). Cleared on death so a slot's next occupant can't read it.
+const ENV_CAP: usize = syscall_abi::ENV_MAX as usize;
+
+struct EnvBlob {
+    data: [u8; ENV_CAP],
+    len: usize,
+}
+
+impl EnvBlob {
+    const fn new() -> Self {
+        EnvBlob { data: [0; ENV_CAP], len: 0 }
+    }
+}
+
+struct EnvSlot(UnsafeCell<EnvBlob>);
+// SAFETY: single-core, non-reentrant - identical reasoning to ArgvSlot.
+unsafe impl Sync for EnvSlot {}
+static ENVS: [EnvSlot; NUM_TASKS] =
+    [const { EnvSlot(UnsafeCell::new(EnvBlob::new())) }; NUM_TASKS];
+
+/// Store a freshly spawned task's environment blob (from the `SPAWN` handler,
+/// which copies it out of the env staging buffer). Truncated to `ENV_CAP`.
+pub(crate) fn set_env(task: usize, blob: &[u8]) {
+    let env = unsafe { &mut *ENVS[task].0.get() };
+    let n = blob.len().min(ENV_CAP);
+    env.data[..n].copy_from_slice(&blob[..n]);
+    env.len = n;
+}
+
+/// The env blob for `task` (empty if it inherited none) - read by the
+/// `GET_ENVC`/`GET_ENV` syscall arms (which reuse the argv blob decoders).
+pub(crate) fn env_blob(task: usize) -> &'static [u8] {
+    // SAFETY: single-core, non-reentrant (see EnvSlot); static for the whole
+    // boot, and the caller copies from it immediately.
+    let env = unsafe { &*ENVS[task].0.get() };
+    &env.data[..env.len]
+}
+
+/// Drop a dead task's env, alongside `clear_argv`/`clear_cwd`.
+pub(crate) fn clear_env(task: usize) {
+    let env = unsafe { &mut *ENVS[task].0.get() };
+    env.len = 0;
+}
+
 /// Per-task working directory: the cwd a task was spawned with (the shell's
 /// cwd at spawn time), so a spawned command can resolve relative paths and
 /// default to the current directory. Delivered kernel-side and fetched via
@@ -1301,6 +1349,7 @@ pub(crate) unsafe fn exit_current_and_switch(frame: *mut Context, status: u64) -
     clear_delegate(current);
     clear_argv(current);
     clear_cwd(current);
+    clear_env(current);
     clear_namespace(current);
     reset_stdout_target(current);
     let next = next_runnable(current);
@@ -1328,6 +1377,7 @@ pub(crate) fn kill_task(i: usize) {
     clear_delegate(i);
     clear_argv(i);
     clear_cwd(i);
+    clear_env(i);
     clear_namespace(i);
     reset_stdout_target(i);
 }
@@ -1357,6 +1407,7 @@ pub(crate) unsafe fn kill_current_and_switch(frame: *mut Context) {
     clear_delegate(current);
     clear_argv(current);
     clear_cwd(current);
+    clear_env(current);
     clear_namespace(current);
     reset_stdout_target(current);
     let next = next_runnable(current);
