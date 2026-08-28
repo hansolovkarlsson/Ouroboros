@@ -66,7 +66,9 @@ pub fn login(cwd: &mut [u8; CWD_SIZE]) -> Session {
         crate::print_str("\r\nlogin: ");
         let mut ubuf = [0u8; 32];
         let ulen = read_field(&mut ubuf, true);
-        crate::print_str("password: ");
+        // read_field returns on Enter without echoing a newline, so move to the
+        // next line before the password prompt.
+        crate::print_str("\r\npassword: ");
         let mut wbuf = [0u8; 64];
         let wlen = read_field(&mut wbuf, false);
         crate::print_str("\r\n");
