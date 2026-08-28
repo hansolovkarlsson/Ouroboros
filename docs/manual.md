@@ -149,7 +149,9 @@ $ set PATH=/bin ; env           # a real environment; $VAR expansion
 
 - **Builtins** run inside the shell itself — a deliberately minimal set:
   `help  cd  bind  mount  unmount  erase  partition  format
-  exec  exit  shutdown  halt  ps  kill  fg  wait  env  set  unset  cpu`.
+  exec  exit  shutdown  halt  ps  kill  fg  wait  env  set  unset  su  cpu`.
+  `su` changes this session's user identity (a builtin because it acts on the
+  shell's own task; the prompt shows `#` for root, `$` for a normal user).
   Job control (`ps`/`kill`/`fg`/`wait`/`exec`), the disk-management trio
   (`erase`/`partition`/`format` — they must run when *nothing* is mounted,
   exactly when `/bin` can't be read), power control (`shutdown`/`halt` — same
@@ -163,7 +165,8 @@ $ set PATH=/bin ; env           # a real environment; $VAR expansion
   on `$PATH` (default `/bin`), spawned with arguments, and reaped:
   `ls  tree  cat  cp  mv  mkdir  rmdir  touch  rm  write  writeat  chmod  chown  more` (files;
   `more`/`less` is the pager; `chmod`/`chown` change mode/owner on ext2),
-  `echo  pwd  uptime  clear  args  send  recv  selftest  man  printenv` (basics/diagnostics),
+  `echo  pwd  uptime  clear  args  send  recv  selftest  man  printenv  id` (basics/diagnostics;
+  `id` prints this session's uid/gid),
   `grep  wc  head  tail  nl  rev  uniq  sort  upper` (pipeline filters),
   `ping  resolve  fetch` (network). You type them the same way (`ls`,
   `cat x`); the shell finds `/bin/LS` on PATH (FAT is case-insensitive).

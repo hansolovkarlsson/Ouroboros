@@ -7,6 +7,41 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/`; 
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## User identity: a uid/gid per task (the login arc, step 1)
+
+The first step of the users/permissions arc: **every task carries a user
+identity**, the unforgeable foundation a permission check (a later step) will
+build on. Login, passwords, `/etc/passwd`, and `/home` come next; this is just
+the primitive plus the ability to see and change it.
+
+- **Where it lives — the kernel, deliberately.** This *reverses* the roadmap's
+  tentative "identity is probably a userland construct" note, on security
+  grounds: the kernel is the only component that unforgeably knows an IPC
+  message's real sender, so it is the right root of trust for the
+  task→identity binding. One packed `(gid << 32) | uid` per task slot
+  (`tasks.rs`'s `IDS`, mirroring `STDOUT_TARGET`), default `0` (root:root) at
+  boot. Names/passwords/policy stay 100% userland — the kernel only knows
+  uid/gid are numbers.
+- **Two syscalls**: `SET_ID` (61, set the caller's uid+gid) and `GET_ID`
+  (62, read any task's packed identity). The privilege rule is the whole model
+  for now: **only root (uid 0) may change identity** — root can *drop* to any
+  user (a login's mechanism), a non-root task can't change its uid at all
+  (`SET_ID_DENIED`), so there's no escalation and `su`-back-to-root will need
+  authentication (the login step).
+- **Children inherit** their parent's identity at `SPAWN` (like the namespace),
+  so a command runs as whoever started it; identity resets to root on task
+  death alongside the other per-slot clears.
+- **`/bin/id`** prints `uid=N gid=M` (numeric — no names yet). **`su`** is a new
+  shell *builtin* (`su <uid>[:<gid>]`, chown-style, numeric) — a builtin because
+  `SET_ID` acts on the caller, so it must change the shell's *own* identity, not
+  a short-lived child's. The prompt now shows **`#` for root, `$` for a normal
+  user** — the most visible sign of the primitive.
+
+Verified on QEMU: boot prompt is `#`; `id` → `uid=0 gid=0`; `su 1000:1000` flips
+the prompt to `$` and `id` (a spawned child) then reports `uid=1000 gid=1000` —
+proving inheritance across spawn; `su 0` is refused ("only root may change
+identity") and `id` still shows `1000` — proving no escalation.
+
 ## `chmod` / `chown`: the write side of the mode/owner surface
 
 The `stat` surface made mode/owner *readable*; now they're *writable* too.

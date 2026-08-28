@@ -104,9 +104,9 @@ set; roadmap arcs are cited by their `roadmap.md` section.
 
 | Capability | Status | Notes / what it would take |
 |---|---|---|
-| User accounts / uid / gid | ✗ | Single implicit user (whoever's at the keyboard). Identity is likely a *userland* construct (login server + capability set), not a kernel uid — matching the "personality in userland" stance. Roadmap item 4. |
-| Login / authentication (passwords) | ✗ | No login prompt, no `/etc/passwd`. Password hashing could reuse the existing SHA-256/HMAC (`netd/src/hmac.rs`) and the fail-closed key-file pattern (`CLUSTER.KEY`). |
-| Enforced file permissions | ✗ | Metadata is stored, read, *and writable* on ext2 (`stat`/`chmod`/`chown`), but never **checked** — there's no caller identity to check it against yet. Needs the users/login arc (a uid per task) then a check in the `FSOP_*` dispatch. |
+| User accounts / uid / gid | ◐ | **A uid/gid per task now exists** (kernel-owned `SET_ID`/`GET_ID`; `/bin/id`, the `su` builtin, `#`/`$` prompt), default root, inherited across spawn, root-gated (no escalation). The kernel owns the binding as the unforgeable root of trust — a *deliberate reversal* of the earlier "probably userland" guess, on security grounds. What's missing is the *account model* above it: names, `/etc/passwd`, groups. Roadmap item 4. |
+| Login / authentication (passwords) | ✗ | The identity primitive exists, but there's still no login prompt gating the shell and no `/etc/passwd`. Next step: authenticate a user (password hashing can reuse the existing SHA-256/HMAC in `netd/src/hmac.rs` and the fail-closed key-file pattern) then `SET_ID` to that user + spawn the shell. |
+| Enforced file permissions | ✗ | Metadata is stored, read, *and writable* on ext2 (`stat`/`chmod`/`chown`), and a caller identity now exists (`GET_ID`) — but the two aren't joined yet. The remaining step is the check itself: compare the sender's uid/gid (the IPC layer hands `fsd` the sender) against the inode's mode/owner in the `FSOP_*` dispatch. |
 | Privilege boundary (root / sudo) | ◐ | A per-task **capability send-mask** governs who-may-call-whom (topological isolation) — the mechanism a privilege model would build on, but there's no user-facing privileged/unprivileged split. |
 | Cluster authentication | ◐ | **Machine-level**: a shared cluster key, mutually authenticated (HMAC) on the 9P export, fail-closed, `\NOEXEC`. **No per-user identity, no replay protection, no on-the-wire encryption** — each a named next tier (cluster-auth postmortem). Trusted-LAN by design. |
 | Cryptography | ◐ | Hand-rolled SHA-256 + HMAC-SHA256 (NIST/RFC-validated). No TLS, no public-key, no at-rest encryption. |
@@ -233,14 +233,15 @@ ps kill fg wait send recv selftest env set unset cpu`.
 Reading the map top-down, the highest-leverage missing pieces, each pointing
 at a roadmap arc:
 
-1. **A permission surface (landed) → enforcement + identity.**
-   The keystone `stat` op exposes size/mtime **and** ext2's real mode/uid/gid
-   (`NP_STAT`'s record grew a mode/owner triple + `mode_valid` byte; `ls -l`
-   renders `drwxr-xr-x` and owners), and the *write* side now exists too —
-   `chmod`/`chown` patch the ext2 inode in place (e2fsck-clean). What remains is
-   **enforcement**: there is no *identity* to check a mode against yet, so the
-   next step is the users/login arc (a uid per task/session) and then the
-   permission check in the `FSOP_*` dispatch. → roadmap item 4.
+1. **Permissions + identity → login → enforcement.**
+   The keystone `stat` op exposes mode/uid/gid and `chmod`/`chown` write them
+   back (ext2, e2fsck-clean); and a **kernel-owned uid/gid per task** now exists
+   (`SET_ID`/`GET_ID`, `id`, `su`, root-gated, inherited across spawn). Two of
+   the three pieces enforcement needs are in place — the metadata and the
+   caller identity. What's left: **(a) login/accounts** — a login prompt +
+   `/etc/passwd` (names, password hashing, `/home`) so a real user gets a uid;
+   **(b) the check** — compare the sender's uid/gid against the inode's
+   mode/owner in the `FSOP_*` dispatch. → roadmap item 4.
 2. **A userland libc personality.** POSIX/C portability is the single biggest
    thing given up across every comparison, and it gates the on-device
    compiler. Well-scoped (newlib stubs over existing servers), just large. →

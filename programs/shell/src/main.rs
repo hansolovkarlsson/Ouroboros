@@ -624,7 +624,10 @@ fn main() -> ! {
 }
 
 fn print_prompt() {
-    putc(b'$');
+    // Root's prompt is '#', a normal user's '$' - the conventional Unix signal
+    // of privilege, and the most visible sign of the identity primitive. The
+    // boot shell starts as root, so the default prompt is '#' until a `su`.
+    putc(if shell_uid() == 0 { b'#' } else { b'$' });
     putc(b' ');
 }
 
@@ -819,7 +822,7 @@ fn is_builtin(cmd: &str) -> bool {
         cmd,
         "help" | "cd" | "bind" | "mount" | "unmount" | "erase" | "partition" | "format"
             | "exec" | "exit" | "shutdown" | "poweroff" | "halt" | "ps" | "kill"
-            | "fg" | "wait" | "env" | "set" | "unset" | "cpu"
+            | "fg" | "wait" | "env" | "set" | "unset" | "cpu" | "su"
     )
 }
 
@@ -1411,6 +1414,7 @@ fn builtin_usage(cmd: &str) -> Option<&'static str> {
         "wait" => "usage: wait <task number>  (block until a task exits, then reap it)",
         "set" | "export" => "usage: set NAME=VALUE  (set an environment variable)",
         "unset" => "usage: unset NAME  (remove an environment variable)",
+        "su" => "usage: su <uid>[:<gid>]  (change this session's identity; root only, numeric)",
         _ => return None,
     })
 }
@@ -1429,7 +1433,7 @@ fn dispatch_line(line: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize, env:
     }
 
     match command {
-        "help" => out.put_line("builtins: help, exit, cd, bind, mount (-a/-r/-p/-c/-n), unmount, erase, partition, format, exec, cpu, ps, kill, fg, wait, shutdown, halt, env, set, unset. Everything else is a program in /bin (run `ls /bin` to see them). Add `-?` to any command for its usage, or `man <command>` for a full page (`man sh` for the shell itself). Also: $VAR expands; `> file`/`>> file` redirects, `| prog` pipes (`| more` to page)."),
+        "help" => out.put_line("builtins: help, exit, cd, bind, mount (-a/-r/-p/-c/-n), unmount, erase, partition, format, exec, cpu, ps, kill, fg, wait, shutdown, halt, env, set, unset, su. Everything else is a program in /bin (run `ls /bin` to see them). Add `-?` to any command for its usage, or `man <command>` for a full page (`man sh` for the shell itself). Also: $VAR expands; `> file`/`>> file` redirects, `| prog` pipes (`| more` to page)."),
         // echo, uptime, clear are externalized: they're /bin programs now
         // (found via PATH by the unknown-command arm), not builtins. See
         // "Standalone binaries, Stage 4".
@@ -1459,6 +1463,7 @@ fn dispatch_line(line: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize, env:
         "env" => cmd_env(env, out),
         "set" | "export" => cmd_set(arg, env),
         "unset" => cmd_unset(arg, env),
+        "su" => cmd_su(arg),
         _ => {
             // Not a builtin: try to run it as a program found on PATH
             // (`$PATH/<command>`). Only if that finds nothing is it "unknown".
@@ -1830,6 +1835,50 @@ fn cmd_unset(arg: &str, env: &mut Env) {
     env.unset(arg.as_bytes());
 }
 
+/// `su <uid>[:<gid>]`: change this session's user identity (numeric ids - there
+/// is no `/etc/passwd` yet). A builtin because it must change the shell's *own*
+/// task identity (`SET_ID` acts on the caller); a `/bin` program would only set
+/// its short-lived child's. Only root may do this - the kernel refuses a
+/// non-root caller (`SET_ID_DENIED`), the no-escalation rule. Commands spawned
+/// afterward inherit the new identity, and the prompt switches `#`<->`$`. A
+/// field left empty (`su :20`, `su 1000`) leaves that half unchanged, like
+/// `chown`.
+fn cmd_su(arg: &str) {
+    if arg.is_empty() {
+        print_line("usage: su <uid>[:<gid>]  (numeric; only root may change identity)");
+        return;
+    }
+    let (uid_s, gid_s) = match arg.split_once(':') {
+        Some((u, g)) => (u, g),
+        None => (arg, ""),
+    };
+    let uid = if uid_s.is_empty() {
+        shell_uid()
+    } else {
+        match parse_u64(uid_s) {
+            Some(v) => v as u32,
+            None => {
+                print_line("su: invalid uid");
+                return;
+            }
+        }
+    };
+    let gid = if gid_s.is_empty() {
+        shell_gid()
+    } else {
+        match parse_u64(gid_s) {
+            Some(v) => v as u32,
+            None => {
+                print_line("su: invalid gid");
+                return;
+            }
+        }
+    };
+    if syscall4(syscall_abi::SET_ID, uid as u64, gid as u64, 0, 0) == syscall_abi::SET_ID_DENIED {
+        print_line("su: denied (only root may change identity)");
+    }
+}
+
 /// Try to run an unknown command as a program found on `$PATH`:
 /// for each `:`-separated directory, probe `<dir>/<command>` and, on the
 /// first hit, spawn it with the whole line as its argv and run it in the
@@ -2127,6 +2176,18 @@ fn spawn_path(path: &str, argv: &[&str], cwd: &[u8; CWD_SIZE], cwd_len: usize, e
 /// producer's stdout target so its output routes back here. See `SELF`.
 fn self_task() -> u64 {
     syscall(syscall_abi::SELF, 0)
+}
+
+/// This shell's own uid (the user it runs as; `0` = root). `su` and the prompt
+/// read it. The kernel carries identity per task (`GET_ID`); the packed value
+/// is `(gid << 32) | uid`.
+fn shell_uid() -> u32 {
+    syscall(syscall_abi::GET_ID, self_task()) as u32
+}
+
+/// This shell's own gid (the high half of the packed identity).
+fn shell_gid() -> u32 {
+    (syscall(syscall_abi::GET_ID, self_task()) >> 32) as u32
 }
 
 /// Where a command's *output* goes: the console (the only choice before

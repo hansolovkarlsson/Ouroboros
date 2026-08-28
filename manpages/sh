@@ -6,9 +6,10 @@ SYNOPSIS
 
 DESCRIPTION
     The default interactive shell - a real userland program (EL0), loaded from
-    disk at boot, that reads a command line, runs it, and prompts again with
-    "$ ". It is "just a program": the same relocatable binary any /bin command
-    is, given the keyboard because it is task 0.
+    disk at boot, that reads a command line, runs it, and prompts again. The
+    prompt is "# " when running as root and "$ " as a normal user (see su). It
+    is "just a program": the same relocatable binary any /bin command is, given
+    the keyboard because it is task 0.
 
     A command is looked up in this order: first the shell's own BUILTINS
     (below), then a program on $PATH (default /bin) by bare name - so typing
@@ -27,6 +28,7 @@ BUILTINS
         env              list environment variables
         set NAME=VALUE   set a variable (also: export); $NAME expands it
         unset NAME       remove a variable
+        su <uid>[:<gid>] change this session's identity (root only; see man su)
         exit             end the shell (refused for the boot shell)
 
     Job control
