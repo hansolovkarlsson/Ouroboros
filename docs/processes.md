@@ -423,11 +423,20 @@ The **constraints are the loader's, and they bite C harder than Rust**:
 - **`_start` is the entry**, placed in `.text.start` (offset 0) via
   `__attribute__((section(".text.start")))`. The kernel has already set up the
   EL0 stack, so `_start` just calls `main` and then the `EXIT` syscall.
-- **No libc yet.** `hello.c` carries its own inline `svc` syscall stubs. The real
-  library grows from here as a set of POSIX syscall stubs (`_write` → `cond`,
-  `_read`/`_open` → `fsd`'s `NP_*`, `_sbrk` → the userland heap, `_exit` →
-  `EXIT`), then a ported `picolibc`/`newlib` on top — see `roadmap.md`'s "POSIX /
-  C-program portability."
+- **A minimal libc exists** under `libc/` (`make cdemo-bin`, staged as
+  `/bin/CDEMO`). A C program `#include`s standard-ish headers
+  (`<stdio.h>`/`<stdlib.h>`/`<string.h>`/`<unistd.h>` in `libc/include/`) and
+  links against `libc/src/` — `crt0` (`_start`), the syscall stubs in `os.c`
+  (`write`→console via `PUTC`, `read`→keyboard via `READ_CHAR`, `sbrk`→the
+  `HEAP_INFO` region, `_exit`→`EXIT`), `printf` (`%d`/`%u`/`%x`/`%c`/`%s`),
+  `malloc`/`free` (a bump allocator over `sbrk`; `free` is a no-op), and the
+  `string.h` essentials. The libc sources compile with `-fno-builtin` so the
+  optimizer doesn't rewrite `string.c`'s `memcpy`/`memset` loops into calls to
+  themselves. `libc/hello.c` remains the self-contained *no-libc* proof (its own
+  `svc` stubs) and the `.data`/`.bss` regression test. **Still to grow:** file
+  I/O (`open`/`read`/`close`/`fstat` via `fsd`'s `NP_*` — a fd table), a
+  stdout-target-aware `write` (for pipes/redirection), then a ported
+  `picolibc`/`newlib` — see `roadmap.md`'s "POSIX / C-program portability."
 - **Watch the relocations** the same way (`llvm-readobj --dyn-relocations`): an
   `R_AARCH64_ABS64` is unloadable. Simple code is PC-relative and needs none;
   richer code emits `R_AARCH64_RELATIVE`, which the loader handles. `memcpy`/
