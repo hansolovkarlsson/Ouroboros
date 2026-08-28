@@ -46,8 +46,31 @@ __attribute__((noreturn)) static void os_exit(int code) {
     } /* EXIT never returns; keep the compiler's control-flow analysis happy */
 }
 
+/* Globals exercise the loader's .data/.bss support: `g_data` proves an
+ * initialized global is loaded from the file (should read 7), `g_bss` proves an
+ * uninitialized one is zeroed (should read 0), and mutating both proves the
+ * region is writable. Before the loader supported these, the linker script's
+ * ASSERTs rejected any non-empty .data/.bss. */
+int g_data = 7;
+int g_bss;
+
 int main(void) {
     os_puts("hello from C on Ouroboros\r\n");
+
+    os_puts("data=");
+    os_putc('0' + g_data); /* 7, from .data */
+    os_puts(" bss=");
+    os_putc('0' + g_bss); /* 0, from .bss */
+    os_puts("\r\n");
+
+    g_data++;    /* mutate .data */
+    g_bss = 5;   /* write .bss  */
+
+    os_puts("after: data=");
+    os_putc('0' + g_data); /* 8 */
+    os_puts(" bss=");
+    os_putc('0' + g_bss); /* 5 */
+    os_puts("\r\n");
     return 0;
 }
 
