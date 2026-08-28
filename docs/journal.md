@@ -7,6 +7,33 @@ for the forward plan see [`roadmap.md`](roadmap.md).
 
 ---
 
+## 2026-08-27 (cont.) — a builtin anywhere in a pipeline
+
+The last of the pipeline open-gaps: a non-first stage couldn't be a builtin, so
+`cat f | ps` was refused. The roadmap had this filed as "reasonable, not worth
+changing," and it's true there's no *useful* builtin that transforms a stream —
+but the reason is the interesting part, and it's what made the fix clean. A
+builtin runs in the shell (not a task) and none of them read stdin, so a builtin
+can only ever be a pipeline *source*. A non-first builtin therefore reduces to:
+run everything upstream for side effects, throw its output away, and let the
+builtin source the rest. `ls | ps | grep runnable` = (ls drained) then
+(ps → grep).
+
+So I refactored `cmd_pipeline` into a classifier that finds the single builtin
+and a `run_head_pipeline(stages, …, sink)` core taking a `PipeSink` of
+`Console | Redirect | Drain`. A builtin at position k>0 runs `stages[..k]` with
+the Drain sink (a new no-limit discard loop — draining `cat bigfile | ps`
+shouldn't hit the 256KB redirect cap) then `stages[k..]` with the real sink.
+Nicely, the `> file` redirect from the previous change just became the Redirect
+sink, so console/file/drain are now one unified path. Two builtins are refused
+(only one source per pipeline).
+
+All the positions check out on QEMU — builtin last (`cat tf.txt | ps`), middle
+(`ls | ps | grep runnable`), first (unchanged), last+redirect
+(`cat tf.txt | ps > psout.txt` → the table in a file), and `env | ps` gets the
+"only one builtin" message. A case where the honest reduction ("a builtin
+discards its upstream") turned a "not worth it" into a small, uniform change.
+
 ## 2026-08-27 (cont.) — grep flags, and a YIELD syscall for prompt early-exit
 
 Two more open-gap filter follow-ups. `grep` gained `-i`/`-v`/`-n` (case-fold,

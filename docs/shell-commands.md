@@ -207,17 +207,25 @@ cat /notes.txt | upper                   ->  the file, uppercased
 ps | upper                               ->  the process list, uppercased
 ```
 
-- The **first stage** may be a **builtin** or a **program**. A builtin runs
-  with its output captured (the same capture the redirection machinery uses -
-  a bigger output refuses rather than truncating), then streamed to stage 2.
-  A program first stage streams its own output onward directly.
-- **Every later stage must be a program** (it reads its predecessor's output
-  as stdin); a builtin or unknown name there reports "not found (a pipeline
-  stage must be a program)".
+- **A single builtin may appear at any position.** A builtin runs *in the
+  shell*, not as a task, and no builtin reads stdin — so a builtin can only be a
+  pipeline's *source*, never a stream transformer. A non-first builtin therefore
+  means "run everything upstream for its side effects, discard its output, and
+  let the builtin be the source of the stages after it." So `ps | grep x`
+  (first), `cat f | ps` (last), and `ls | ps | grep x` (middle — `ls` drained,
+  `ps` feeds `grep`) all work, and a builtin last stage can be redirected
+  (`cat f | ps > out`). A builtin runs with its output captured (the same
+  capture the redirection machinery uses — a bigger output refuses rather than
+  truncating), then streamed on. **Two or more builtins** in one pipeline are
+  refused ("only one builtin per pipeline") — only one thing can be the source.
+- **Every *program* later stage reads its predecessor's output as stdin**; an
+  unknown name reports "not found (a pipeline stage must be a program)".
 - Programs stream **directly** to the next stage - the shell is not in the
   byte path (except for the one hop out of a builtin first stage). The shell
   spawns the stages, aims each one's stdout at the next (the last at the
-  console), and hands each producer a runtime capability to reach its
+  console, or — with a trailing `> file`/`>> file` — at the shell, which
+  captures it and writes it to the file), and hands each producer a runtime
+  capability to reach its
   consumer (`DELEGATE`); that sibling-to-sibling send is otherwise forbidden
   by the IPC send-mask, and the shell alone can grant it. A linear chain needs
   only one delegated target per task, so no special "general delegation" is

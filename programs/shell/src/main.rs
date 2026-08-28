@@ -873,21 +873,34 @@ fn spawn_stage(stage: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize, env: &Env, std
     spawn_path(path, &argv_buf[..n], cwd, cwd_len, stdout_target)
 }
 
-/// Run an N-stage pipeline (`a | b | c`, N >= 2). The first stage may be a
-/// builtin (captured and streamed to stage 2) or a program; every later stage
-/// is a program reading its predecessor's output as stdin (`MSG_RECV`) and
-/// writing to the next stage. The last stage writes to the console, unless a
-/// `redirect` (`Some((target, append))`) is present - then its stdout is
-/// pointed at the shell instead, captured, and written to `target` (the same
-/// capture-then-`finish_redirect` path a single `cmd > file` uses), so
-/// `a | b > file` works.
+/// Where a pipeline segment's final output goes ([`run_head_pipeline`]).
+enum PipeSink<'a> {
+    /// The last stage writes to the console (an interactive last stage is
+    /// foregrounded so it can read the keyboard).
+    Console,
+    /// The last stage's output is captured and written to `(path, append)`.
+    Redirect(&'a str, bool),
+    /// The last stage's output is drained and discarded - the program stages
+    /// that sit *before* a non-first builtin, which ignores their bytes but
+    /// must still run (for side effects), send here.
+    Drain,
+}
+
+/// Run an N-stage pipeline (`a | b | c`, N >= 2), routing the last stage's
+/// output per `redirect` (a trailing `> file`/`>> file`, else the console).
 ///
-/// Program stages are spawned right-to-left so each producer has a live
-/// consumer to point its stdout at; each adjacent producer->consumer link is
-/// authorized with one `DELEGATE` (a spawnable slot's static mask reaches the
-/// console and the shell, but not a sibling). A linear chain needs only the
-/// existing one-target-per-task delegation - each stage delegates to exactly
-/// one successor. The shell waits on (and reaps) every program stage.
+/// **Builtins in a pipeline.** A builtin runs *in the shell*, not as a task,
+/// and no builtin reads stdin - so a builtin can only ever be a pipeline's
+/// *source*, never a stream transformer. This function therefore allows a
+/// single builtin **anywhere** in the pipeline: the stages *before* it are run
+/// as a program pipeline whose output is drained and discarded (they run for
+/// side effects; the builtin ignores their bytes), and the builtin then becomes
+/// the effective source feeding the program stages *after* it. So `ps | grep x`
+/// (builtin first), `cat f | ps` (builtin last), and `foo | ps | grep x`
+/// (builtin in the middle - `foo` drained, `ps` feeds `grep`) all work. Two or
+/// more builtins are refused: only one thing in a pipeline can be the source.
+/// The heavy lifting is in [`run_head_pipeline`]; this classifies the stages
+/// and splits the pipeline at the (single) builtin.
 fn cmd_pipeline(
     stages: &[&str],
     cwd: &mut [u8; CWD_SIZE],
@@ -895,30 +908,107 @@ fn cmd_pipeline(
     env: &mut Env,
     redirect: Option<(&str, bool)>,
 ) {
+    // Classify: locate the builtin(s). A stage that resolves to a program is a
+    // program; one that doesn't must be a builtin (else it's unknown).
+    let mut last_builtin: Option<usize> = None;
+    let mut builtin_count = 0usize;
+    for (i, stage) in stages.iter().enumerate() {
+        let cmd = stage.split_whitespace().next().unwrap_or("");
+        let mut buf = [0u8; PATH_SIZE];
+        if resolve_command(cmd, env, &mut buf).is_none() {
+            if !is_builtin(cmd) {
+                print_str("unknown command: ");
+                print_line(cmd);
+                return;
+            }
+            last_builtin = Some(i);
+            builtin_count += 1;
+        }
+    }
+
+    let sink = match redirect {
+        Some((target, append)) => PipeSink::Redirect(target, append),
+        None => PipeSink::Console,
+    };
+
+    match last_builtin {
+        // All programs, or a builtin head (stage 0): one straight segment.
+        None | Some(0) => run_head_pipeline(stages, cwd, cwd_len, env, sink),
+        // A builtin at a later position: everything before it must be programs
+        // (a second builtin can't be the pipeline's source too).
+        Some(k) => {
+            if builtin_count > 1 {
+                print_line(
+                    "pipe: only one builtin per pipeline (a builtin can't transform piped input)",
+                );
+                return;
+            }
+            // Run the upstream programs for their side effects, discarding
+            // their output (the builtin ignores it), then run the builtin as
+            // the source of the remaining stages.
+            run_head_pipeline(&stages[..k], cwd, cwd_len, env, PipeSink::Drain);
+            run_head_pipeline(&stages[k..], cwd, cwd_len, env, sink);
+        }
+    }
+}
+
+/// Run one pipeline segment whose first stage may be a builtin (captured and
+/// streamed) or a program, with the final output sent per `sink`. The core the
+/// `cmd_pipeline` classifier calls: for the whole pipeline when the only
+/// builtin is at the head (or there's none), and twice when a later builtin
+/// splits it (the drained upstream, then the builtin-headed remainder).
+///
+/// Program stages are spawned right-to-left so each producer has a live
+/// consumer to point its stdout at; each adjacent producer->consumer link is
+/// authorized with one `DELEGATE` (a spawnable slot's static mask reaches the
+/// console and the shell, but not a sibling). The shell waits on (and reaps)
+/// every program stage.
+fn run_head_pipeline(
+    stages: &[&str],
+    cwd: &mut [u8; CWD_SIZE],
+    cwd_len: &mut usize,
+    env: &mut Env,
+    sink: PipeSink,
+) {
     let head_cmd = stages[0].split_whitespace().next().unwrap_or("");
     let mut head_buf = [0u8; PATH_SIZE];
-    let head_is_program = resolve_command(head_cmd, env, &mut head_buf).is_some();
-    let builtin_head = !head_is_program;
-    if builtin_head && !is_builtin(head_cmd) {
-        print_str("unknown command: ");
-        print_line(head_cmd);
+    let builtin_head = resolve_command(head_cmd, env, &mut head_buf).is_none();
+
+    // A lone builtin (no program stages after it): just run it, sending its
+    // output where the sink says. This is the terminating-builtin case
+    // (`… | ps`, `cat f | ps > out`).
+    if builtin_head && stages.len() == 1 {
+        match sink {
+            PipeSink::Console => {
+                let mut out = Output::Console;
+                dispatch_line(stages[0], cwd, cwd_len, env, &mut out);
+            }
+            PipeSink::Redirect(target, append) => {
+                let capture = get_heap();
+                let mut out = Output::Capture { buf: capture, len: 0, overflowed: false };
+                dispatch_line(stages[0], cwd, cwd_len, env, &mut out);
+                if let Output::Capture { buf, len, overflowed } = out {
+                    finish_redirect(&buf[..len], overflowed, target, append, cwd, *cwd_len);
+                }
+            }
+            PipeSink::Drain => {
+                // Run for side effects; its output is captured and discarded.
+                let capture = get_heap();
+                let mut out = Output::Capture { buf: capture, len: 0, overflowed: false };
+                dispatch_line(stages[0], cwd, cwd_len, env, &mut out);
+            }
+        }
         return;
     }
 
-    // The stages spawned as a program chain (all but a builtin head).
     let prog_stages: &[&str] = if builtin_head { &stages[1..] } else { stages };
-    if prog_stages.is_empty() {
-        print_line("pipe: missing program after |");
-        return;
-    }
 
-    // Spawn right-to-left: each stage's stdout is the next stage's slot. The
-    // last stage's stdout is the console normally, or the shell itself (so its
-    // output can be captured) when the pipeline is being redirected to a file.
-    let last_target = if redirect.is_some() {
-        self_task()
-    } else {
-        syscall_abi::CON_TASK
+    // The last stage writes to the console, or - for Redirect/Drain - back to
+    // the shell so its output can be captured (then written to a file, or
+    // discarded).
+    let last_target = match sink {
+        PipeSink::Console => syscall_abi::CON_TASK,
+        PipeSink::Redirect(..) | PipeSink::Drain => self_task(),
     };
     let mut slots = [0u64; MAX_STAGES];
     let mut next_target = last_target;
@@ -999,49 +1089,73 @@ fn cmd_pipeline(
 
     let last = prog_stages.len() - 1;
 
-    if let Some((target, append)) = redirect {
-        // Redirected: the last stage streamed its output back to the shell.
-        // Capture it (into the heap), then write it to the file - the exact
-        // path a single `cmd > file` uses. No `FG`: the output goes to a file,
-        // so the last stage doesn't own the keyboard.
-        let capture = get_heap();
-        let mut out = Output::Capture { buf: capture, len: 0, overflowed: false };
-        capture_program_output(slots[last], &mut out);
-        let failed = matches!(out, Output::Capture { overflowed: true, .. });
-        if failed {
-            // The capture killed the last stage (but didn't reap it); the
-            // producers are likely blocked feeding the now-dead consumer.
-            // Reap the last stage and kill the producers so nothing hangs.
-            let _ = syscall(syscall_abi::WAIT, slots[last]);
-            for s in &slots[..last] {
-                syscall(syscall_abi::KILL, *s);
+    match sink {
+        // Console: the last stage writes straight to the screen - hand it the
+        // keyboard (an interactive last stage, e.g. `ls -l | more`) and reap
+        // every stage in order.
+        PipeSink::Console => {
+            syscall(syscall_abi::FG, slots[last]);
+            for i in 0..prog_stages.len() {
+                let cmd = prog_stages[i].split_whitespace().next().unwrap_or("stage");
+                wait_pipe_stage(cmd, slots[i]);
             }
         }
-        for i in 0..last {
-            let cmd = prog_stages[i].split_whitespace().next().unwrap_or("stage");
-            wait_pipe_stage(cmd, slots[i]);
+        // Drain: the last stage streamed to the shell; discard it (no size cap,
+        // no message - these programs run only for side effects), then reap all.
+        PipeSink::Drain => {
+            drain_program_output(slots[last]);
+            for i in 0..last {
+                let cmd = prog_stages[i].split_whitespace().next().unwrap_or("stage");
+                wait_pipe_stage(cmd, slots[i]);
+            }
         }
-        let (buf, len, overflowed) = match out {
-            Output::Capture { buf, len, overflowed } => (buf, len, overflowed),
-            Output::Console => return,
-        };
-        finish_redirect(&buf[..len], overflowed, target, append, cwd, *cwd_len);
-        return;
+        // Redirect: the last stage streamed to the shell; capture it and write
+        // it to the file (the same path a single `cmd > file` uses). No `FG`:
+        // the output goes to a file, not the screen.
+        PipeSink::Redirect(target, append) => {
+            let capture = get_heap();
+            let mut out = Output::Capture { buf: capture, len: 0, overflowed: false };
+            capture_program_output(slots[last], &mut out);
+            if matches!(out, Output::Capture { overflowed: true, .. }) {
+                // The capture killed the last stage (but didn't reap it); the
+                // producers are likely blocked feeding the now-dead consumer.
+                // Reap the last stage and kill the producers so nothing hangs.
+                let _ = syscall(syscall_abi::WAIT, slots[last]);
+                for s in &slots[..last] {
+                    syscall(syscall_abi::KILL, *s);
+                }
+            }
+            for i in 0..last {
+                let cmd = prog_stages[i].split_whitespace().next().unwrap_or("stage");
+                wait_pipe_stage(cmd, slots[i]);
+            }
+            if let Output::Capture { buf, len, overflowed } = out {
+                finish_redirect(&buf[..len], overflowed, target, append, cwd, *cwd_len);
+            }
+        }
     }
+}
 
-    // Hand the last stage the keyboard, so a pipeline whose consumer is
-    // interactive (e.g. `ls -l | more`) can read paging keys - the same
-    // foreground-owns-the-keyboard rule a single command gets. Harmless for a
-    // non-interactive last stage (grep/wc): it owns the keyboard, never reads
-    // it, and ownership reverts on exit. Ctrl+C then terminates that stage.
-    syscall(syscall_abi::FG, slots[last]);
-
-    // Reap every program stage (in order, so a producer that streamed and
-    // exited is collected before we block on its consumer).
-    for i in 0..prog_stages.len() {
-        let cmd = prog_stages[i].split_whitespace().next().unwrap_or("stage");
-        wait_pipe_stage(cmd, slots[i]);
+/// Receive and **discard** a program's relayed output until its end-of-stream
+/// message, then reap it - what [`run_head_pipeline`]'s `Drain` sink uses for
+/// the program stages that sit before a non-first builtin (they run for side
+/// effects; the builtin ignores their bytes). Unlike
+/// [`capture_program_output`], there's no size cap and no error message - the
+/// bytes are thrown away regardless. On Ctrl+C or a relay error it kills the
+/// producer and returns.
+fn drain_program_output(slot: u64) {
+    let mut buf = [0u8; syscall_abi::MSG_MAX_LEN as usize];
+    loop {
+        let packed = syscall4(syscall_abi::MSG_RECV, buf.as_mut_ptr() as u64, buf.len() as u64, 0, 0);
+        if packed == RECV_INTERRUPTED || packed >= FS_ERR_MIN {
+            syscall(syscall_abi::KILL, slot);
+            return;
+        }
+        if (packed & 0xffff_ffff) == 0 {
+            break; // end of stream
+        }
     }
+    let _ = syscall(syscall_abi::WAIT, slot);
 }
 
 /// Wait for one stage of a program-to-program pipe and report how it ended.

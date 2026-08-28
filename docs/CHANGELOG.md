@@ -7,6 +7,37 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/`; 
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## Shell: a builtin may appear anywhere in a pipeline
+
+Only a pipeline's *first* stage could be a builtin (a later stage had to be a
+`/bin` program that reads stdin), so `cat f | ps`, `ls | ps | grep x`, and the
+like were refused. Now a **single** builtin may sit at **any** position.
+
+The enabling observation: a builtin runs *in the shell*, not as a task, and no
+builtin reads stdin — so a builtin can only ever be a pipeline's **source**,
+never a stream transformer. A non-first builtin therefore means "run everything
+upstream for its side effects, discard its output, and let the builtin be the
+source of whatever follows." `cmd_pipeline` now classifies the stages, and when
+the (single) builtin is at position `k > 0` it runs `stages[..k]` as a program
+pipeline whose output is **drained** (a new no-size-limit discard path,
+`drain_program_output`), then runs `stages[k..]` — the builtin as head, feeding
+the program stages after it — through the same `run_head_pipeline` core the
+first-stage-builtin case already used. A lone terminating builtin (`cat f | ps`)
+is just run to the console (or the redirect capture, so `cat f | ps > out`
+works). Two or more builtins are refused with a clear message — only one thing
+in a pipeline can be the source.
+
+The pipeline core was refactored to a `run_head_pipeline(stages, …, sink)` with
+a `PipeSink` of `Console | Redirect(path,append) | Drain`, unifying the console,
+`> file`, and drain destinations (the redirect path from the previous entry is
+now one of the three sinks).
+
+Verified on `make run-image`: `cat tf.txt | ps` (builtin last) prints the task
+table; `ls | ps | grep runnable` (builtin middle) filters it; `ps | grep x`
+(builtin first) still works; `cat tf.txt | ps > psout.txt` captures the table to
+a file; `env | ps` reports "only one builtin per pipeline"; plain pipelines are
+unchanged. No faults.
+
 ## Filters: `grep` flags, and a cooperative `YIELD` for prompt early-exit
 
 Two small filter follow-ups from the open-gaps list.

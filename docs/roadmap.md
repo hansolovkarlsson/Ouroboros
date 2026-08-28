@@ -559,6 +559,3 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
 - **`grep` has no regex** (it now takes `-i`/`-v`/`-n`, but matching is still a
   plain substring). Real patterns are a separate, larger arc — see North-star
   item 2 for the shared `ulib` option parser and richer matching.
-- **A pipeline stage other than the first can't be a builtin** (a later stage
-  must be a program that reads stdin) — so e.g. `cat x | ps` isn't meaningful.
-  Reasonable; documented, not likely worth changing.
