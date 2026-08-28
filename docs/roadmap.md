@@ -105,7 +105,7 @@ The small open tails those arcs deliberately left:
 > is now 2× Raspberry Pi 4** (real ARM hardware, ordered 2026-08-26): the Plan 9
 > resource-sharing mechanics are a better fit for genuine physical machines than a
 > VM, so a real two-node cluster on the Pis is the eventual real-hardware proof.
-> A concrete Pi test plan gets written **when the boards arrive**, not before. The
+> A concrete Pi test plan is now written -- [`testing-pi4.md`](testing-pi4.md), 2026-08-28, ahead of the boards, with every claim labelled (predicted) or (confirmed) so the first bench session turns it into a log. Note its headline finding: **the Pi's GENET NIC is not virtio either**, so 2x Pi 4 does not by itself deliver the two-node cluster proof -- that needs USB-Ethernet over the existing xHCI stack, or a GENET driver, first. The
 > `prlctl`/`make test-parallels` tooling below stays available but is no longer a
 > priority.
 >

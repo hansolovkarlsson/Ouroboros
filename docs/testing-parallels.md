@@ -6,8 +6,8 @@
 > for now, and Parallels can't prove the cluster anyway (no NIC transport; see the
 > caveat below). The intended physical target going forward is **2× Raspberry Pi
 > 4** (real ARM hardware, on order) — the Plan 9 mechanics fit genuine physical
-> machines better than a VM, and a concrete Pi test plan will be written when the
-> boards arrive. This document is kept as a **reference** (and because the
+> machines better than a VM, and the concrete Pi test plan is now written:
+> [`testing-pi4.md`](testing-pi4.md). This document is kept as a **reference** (and because the
 > single-machine matrix + the `netd` boot-race analysis stay valid if anyone does
 > boot Parallels), not as an active plan.
 
