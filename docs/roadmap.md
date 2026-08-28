@@ -91,8 +91,6 @@ The small open tails those arcs deliberately left:
   separate large arc, not a near-term ext2 follow-on.
 - **A `/dev` namespace.** Only if multi-disk/partition addressing arrives (the
   Plan 9 devfs direction); nothing to name yet with one block device.
-- **Exporting the environment into child programs** — a second argv-like ABI;
-  the env is shell-local today.
 
 ## Testing infrastructure: scripted real-hardware round trips
 

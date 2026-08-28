@@ -164,6 +164,39 @@ impl Env {
         self.count -= 1;
         true
     }
+
+    /// Serialize the environment into an `ENV_STAGE` blob: `[count: u32 LE]`
+    /// then, per variable, `[len: u32 LE][NAME=VALUE bytes]` - the same
+    /// encoding argv uses, so the kernel and child share the decoders. Bounded
+    /// by `buf`; a variable that wouldn't fit is dropped (the documented cap).
+    /// Returns the blob length. This is what makes a spawned command inherit
+    /// the shell's env (see `spawn_path`).
+    fn serialize(&self, buf: &mut [u8]) -> usize {
+        if buf.len() < 4 {
+            return 0;
+        }
+        let mut off = 4; // reserve the count header
+        let mut count = 0u32;
+        for i in 0..self.count {
+            let name = &self.names[i][..self.name_lens[i]];
+            let val = &self.vals[i][..self.val_lens[i]];
+            let entry = name.len() + 1 + val.len(); // NAME=VALUE
+            if off + 4 + entry > buf.len() {
+                break;
+            }
+            buf[off..off + 4].copy_from_slice(&(entry as u32).to_le_bytes());
+            off += 4;
+            buf[off..off + name.len()].copy_from_slice(name);
+            off += name.len();
+            buf[off] = b'=';
+            off += 1;
+            buf[off..off + val.len()].copy_from_slice(val);
+            off += val.len();
+            count += 1;
+        }
+        buf[0..4].copy_from_slice(&count.to_le_bytes());
+        off
+    }
 }
 
 /// Expand `$VAR` references in `line` into `out`, returning the expanded
@@ -870,7 +903,7 @@ fn spawn_stage(stage: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize, env: &Env, std
     let Ok(path) = core::str::from_utf8(&owned[..plen]) else {
         return Err(0);
     };
-    spawn_path(path, &argv_buf[..n], cwd, cwd_len, stdout_target)
+    spawn_path(path, &argv_buf[..n], cwd, cwd_len, env, stdout_target)
 }
 
 /// Where a pipeline segment's final output goes ([`run_head_pipeline`]).
@@ -1409,7 +1442,7 @@ fn dispatch_line(line: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize, env:
         // per-task state (cwd, namespace), which a spawned program can't touch.
         "cd" => cmd_cd(arg, cwd, cwd_len),
         "bind" => cmd_bind(line, cwd, *cwd_len, out),
-        "exec" => cmd_exec(line, cwd, *cwd_len, out),
+        "exec" => cmd_exec(line, cwd, *cwd_len, env, out),
         "exit" => cmd_exit(),
         "shutdown" | "poweroff" => cmd_power(syscall_abi::POWER_OFF),
         "halt" => cmd_power(syscall_abi::POWER_HALT),
@@ -1716,7 +1749,7 @@ fn cmd_bind(line: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize, out: &mut Output) 
 /// current-process. The new task keeps running after this command returns;
 /// there's no way yet to wait for it, stop it, or free its memory once
 /// started (see `tasks.rs`'s module doc comment).
-fn cmd_exec(line: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize, out: &mut Output) {
+fn cmd_exec(line: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize, env: &Env, out: &mut Output) {
     // argv = the tokens after "exec": [program path, args...]. argv[0] is both
     // the path to load and the program's own argv[0].
     let mut argv_buf: [&str; MAX_ARGS] = [""; MAX_ARGS];
@@ -1737,7 +1770,7 @@ fn cmd_exec(line: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize, out: &mut Output) 
     if out.is_console() {
         // Plain `exec prog [args]`: fire-and-forget, output straight to the
         // console.
-        match spawn_path(path, argv, cwd, cwd_len, syscall_abi::CON_TASK) {
+        match spawn_path(path, argv, cwd, cwd_len, env, syscall_abi::CON_TASK) {
             Ok(_slot) => {}
             Err(0) => print_line("exec: path too long"),
             Err(NO_FS) => print_no_fs(),
@@ -1748,7 +1781,7 @@ fn cmd_exec(line: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize, out: &mut Output) 
     // `exec prog [args] > file`: route the program's output back to this shell
     // and capture it into the redirect sink, then wait for the program - the
     // caller (`run_line`) writes the capture to the file (`finish_redirect`).
-    match spawn_path(path, argv, cwd, cwd_len, self_task()) {
+    match spawn_path(path, argv, cwd, cwd_len, env, self_task()) {
         Ok(slot) => capture_program_output(slot, out),
         Err(0) => print_line("exec: path too long"),
         Err(NO_FS) => print_no_fs(),
@@ -1854,7 +1887,7 @@ fn run_path_command(command: &str, line: &str, cwd: &[u8; CWD_SIZE], cwd_len: us
         if r == NO_FS || r >= FS_ERR_MIN {
             return false;
         }
-        run_found_command(candidate, command, argv, cwd, cwd_len, out);
+        run_found_command(candidate, command, argv, cwd, cwd_len, env, out);
         return true;
     }
 
@@ -1900,7 +1933,7 @@ fn run_path_command(command: &str, line: &str, cwd: &[u8; CWD_SIZE], cwd_len: us
         }
 
         // Found it. Run it - foreground (console) or captured (redirect).
-        run_found_command(candidate, command, argv, cwd, cwd_len, out);
+        run_found_command(candidate, command, argv, cwd, cwd_len, env, out);
         return true;
     }
     false
@@ -1917,10 +1950,11 @@ fn run_found_command(
     argv: &[&str],
     cwd: &[u8; CWD_SIZE],
     cwd_len: usize,
+    env: &Env,
     out: &mut Output,
 ) {
     if out.is_console() {
-        match spawn_path(candidate, argv, cwd, cwd_len, syscall_abi::CON_TASK) {
+        match spawn_path(candidate, argv, cwd, cwd_len, env, syscall_abi::CON_TASK) {
             Ok(slot) => {
                 delegate_net(slot);
                 // Hand the foreground program the keyboard so it can read input
@@ -1943,7 +1977,7 @@ fn run_found_command(
             Err(code) => print_fs_error(command, code),
         }
     } else {
-        match spawn_path(candidate, argv, cwd, cwd_len, self_task()) {
+        match spawn_path(candidate, argv, cwd, cwd_len, env, self_task()) {
             Ok(slot) => {
                 delegate_net(slot);
                 capture_program_output(slot, out);
@@ -2021,7 +2055,7 @@ fn stage_argv(argv: &[&str]) -> Result<u64, ()> {
     Ok(off as u64)
 }
 
-fn spawn_path(path: &str, argv: &[&str], cwd: &[u8; CWD_SIZE], cwd_len: usize, stdout_target: u64) -> Result<u64, u64> {
+fn spawn_path(path: &str, argv: &[&str], cwd: &[u8; CWD_SIZE], cwd_len: usize, env: &Env, stdout_target: u64) -> Result<u64, u64> {
     let mut path_buf = [0u8; PATH_SIZE];
     let Some(path_len) = resolve_path(cwd_str(cwd, cwd_len), path, &mut path_buf) else {
         return Err(0);
@@ -2073,6 +2107,15 @@ fn spawn_path(path: &str, argv: &[&str], cwd: &[u8; CWD_SIZE], cwd_len: usize, s
     } else {
         0
     };
+    // Stage the environment for this SPAWN (a pending latch the kernel consumes
+    // on spawn), so the spawned command inherits the shell's env vars and can
+    // read them via GET_ENV / ulib::getenv. A blob of only the 4-byte count
+    // header (no variables) is not worth staging.
+    let mut env_buf = [0u8; syscall_abi::ENV_MAX as usize];
+    let env_len = env.serialize(&mut env_buf);
+    if env_len > 4 {
+        let _ = syscall4(syscall_abi::ENV_STAGE, env_buf.as_ptr() as u64, env_len as u64, 0, 0);
+    }
     match syscall4(syscall_abi::SPAWN, offset, stdout_target, argv_len, cwd_stage_len) {
         code if code >= FS_ERR_MIN => Err(code),
         slot => Ok(slot),

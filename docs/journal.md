@@ -7,6 +7,36 @@ for the forward plan see [`roadmap.md`](roadmap.md).
 
 ---
 
+## 2026-08-27 (cont.) — exporting the environment to child programs
+
+The shell's env was a dead end: `set FOO=bar` and `$VAR` expansion worked, but
+a spawned program had no way to *read* the variables. Fixed by exporting the
+env at spawn — deliberately built as a near-exact copy of the argv ABI, since
+it's the same shape (a blob of length-prefixed entries delivered kernel-side
+and fetched by the child). Three syscalls (`ENV_STAGE`/`GET_ENVC`/`GET_ENV`),
+the same `[count][len][…]` encoding, a per-task store cleared on death, ulib
+helpers, and a `/bin/printenv` consumer to prove it.
+
+The one wrinkle: `SPAWN`'s four argument slots are already full (region offset,
+stdout target, argv length, cwd length), so there was no room for an env
+length. Rather than widen the ABI, `ENV_STAGE` *latches* the blob and the next
+`SPAWN` consumes the latch — clean, and the single-core sequential shell always
+stages immediately before spawning.
+
+Then a genuinely instructive bug. It all wired up, the kernel debug showed the
+env attached (`env_len=17`, then `28` after two `set`s), the child's `GET_ENVC`
+returned the right count — but `printenv` printed nothing. `GET_ENV` was
+returning "no such entry". The cause: I'd sized the read buffer at `ENV_MAX`
+(2048, the *whole-blob* size), but `GET_ENV`'s out-pointer is range-checked like
+every user pointer, and the boundary caps a user range at `MAX_USER_LEN` = 512.
+So a 2048-byte capacity failed the check and the syscall bailed before copying.
+The fix is to read one `NAME=VALUE` entry at a time into a small (256-byte)
+buffer — an entry is at most ~153 bytes. Worth a doc note on `GET_ENV`, because
+it's a non-obvious asymmetry (the *store* is big, each *read* is small).
+
+`printenv` (and `printenv | grep PATH`) now show the exported env; closes the
+last of the small roadmap follow-ups.
+
 ## 2026-08-27 (cont.) — `sort`, the filter that can't stream
 
 Wrote the one standard filter that had been left for last, because it doesn't

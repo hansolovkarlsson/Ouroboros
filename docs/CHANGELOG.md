@@ -7,6 +7,38 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/`; 
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## Environment export: spawned commands inherit the shell's env
+
+The shell's environment was **shell-local** — `set FOO=bar` and `$VAR`
+expansion worked, but a spawned program couldn't read the variables. Now the
+shell **exports its environment to every command it spawns**, an argv-shaped
+second ABI:
+
+- Three syscalls — **`ENV_STAGE` (58)**, **`GET_ENVC` (59)**, **`GET_ENV`
+  (60)** — mirroring `ARGS_STAGE`/`GET_ARGC`/`GET_ARG`. The env blob uses the
+  *same* `[count][len][…]` encoding as argv, where each entry is a
+  `NAME=VALUE` string, so the kernel and child share the decoders.
+- Because `SPAWN`'s four args are already full (offset/stdout/argv-len/cwd-len),
+  the env has no length arg: `ENV_STAGE` **latches** the blob (`PENDING_ENV_LEN`)
+  and the next `SPAWN` consumes it, attaching it to the new task's per-task env
+  store (`tasks::set_env`/`env_blob`/`clear_env`, cleared on death like argv).
+- The shell serializes its `Env` (`Env::serialize`) and stages it in
+  `spawn_path`, threaded through `run_found_command`/`spawn_stage`/`cmd_exec`.
+- `ulib` gains `env_count`/`env_at`/`getenv`; a new **`/bin/printenv`** prints
+  the inherited environment (the consumer that proves the ABI). It's a normal
+  pipeline stage, so `printenv | grep PATH` works.
+
+One gotcha worth recording: `GET_ENV`'s out-buffer is validated like every user
+pointer, so its capacity must be `<=` the syscall boundary's `MAX_USER_LEN`
+(512) — read **one entry at a time** into a small buffer; the whole-blob
+`ENV_MAX` (2048) is the store size, not a read cap. (A first attempt passed a
+2048-byte buffer and `GET_ENV` silently returned "no such entry" — caught by a
+`valid_user_range` debug print.)
+
+Verified on `make run-image`: `printenv` shows `PATH=/bin`; after
+`set FOO=bar; set GREETING=hello`, `printenv` shows all three; `printenv | grep
+FOO` filters to `FOO=bar`. No faults.
+
 ## `/bin/sort` — the filter that can't stream
 
 The one standard filter that had been deferred, because it breaks the shape

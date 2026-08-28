@@ -1,0 +1,22 @@
+NAME
+    printenv - print the inherited environment
+
+SYNOPSIS
+    printenv
+
+DESCRIPTION
+    Prints the environment variables this program inherited from the shell,
+    one NAME=VALUE per line. The shell exports its environment (the vars set
+    with `set`, plus PATH) to every command it spawns, so `printenv` shows
+    what a spawned program sees.
+
+    A pipeline stage like any other, so it can be filtered:
+    `printenv | grep PATH`.
+
+EXAMPLES
+    printenv
+    set FOO=bar
+    printenv | grep FOO
+
+SEE ALSO
+    env, set, unset

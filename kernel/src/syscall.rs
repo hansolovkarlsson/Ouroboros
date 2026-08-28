@@ -274,6 +274,22 @@ struct CwdStagingCell(core::cell::UnsafeCell<[u8; CWD_STAGING_SIZE]>);
 unsafe impl Sync for CwdStagingCell {}
 static CWD_STAGING: CwdStagingCell = CwdStagingCell(core::cell::UnsafeCell::new([0; CWD_STAGING_SIZE]));
 
+/// Staging buffer for a spawn's **environment** blob (`ENV_STAGE` writes it
+/// here). Unlike argv/cwd, `SPAWN`'s four args are already full, so the env
+/// isn't passed a length by `SPAWN` - instead `ENV_STAGE` latches the length
+/// in [`PENDING_ENV_LEN`], and the next `SPAWN` consumes and clears it.
+const ENV_STAGING_SIZE: usize = syscall_abi::ENV_MAX as usize;
+struct EnvStagingCell(core::cell::UnsafeCell<[u8; ENV_STAGING_SIZE]>);
+// SAFETY: single-core, non-reentrant - same as ARGS_STAGING.
+unsafe impl Sync for EnvStagingCell {}
+static ENV_STAGING: EnvStagingCell = EnvStagingCell(core::cell::UnsafeCell::new([0; ENV_STAGING_SIZE]));
+/// Length of the env blob staged for the *next* `SPAWN` (`0` = none). Set by
+/// `ENV_STAGE`, consumed and reset to `0` by the next `SPAWN` - a single-slot
+/// latch, safe because the shell always stages immediately before spawning and
+/// the kernel is single-core / non-reentrant across the SVC boundary.
+static PENDING_ENV_LEN: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+
 /// Upper bound for a namespace blob (matches the per-task store), used to bound
 /// the `NS_SET` copy. A task's namespace is set directly by `NS_SET` and a
 /// child inherits its parent's at spawn (no staging buffer needed).
@@ -312,6 +328,13 @@ fn argv_get(blob: &[u8], index: usize) -> Option<&[u8]> {
     None
 }
 
+/// Read and clear the env-staging latch ([`PENDING_ENV_LEN`]) - the length of
+/// the env blob `ENV_STAGE` staged for the next spawn, or `0` if none. Reset to
+/// `0` so each spawn consumes it exactly once.
+fn pending_env_len() -> usize {
+    PENDING_ENV_LEN.swap(0, core::sync::atomic::Ordering::Relaxed)
+}
+
 /// `syscall_abi::SPAWN`'s real work: parse+relocate the program image
 /// previously fed into [`SPAWN_STAGING`] chunk by chunk (the
 /// `SPAWN_STAGE` syscall - the kernel contains no filesystem to read a
@@ -332,6 +355,10 @@ fn argv_get(blob: &[u8], index: usize) -> Option<&[u8]> {
 /// here since a failed spawn's allocation is by construction the most
 /// recent one (the LIFO case).
 fn spawn_staged(total_len: u64, stdout_target: u64, argv_len: u64, cwd_len: u64) -> u64 {
+    // Consume the env latch up front so *any* outcome of this spawn (success or
+    // an early failure) clears it - a failed spawn must not leak its staged env
+    // onto the next one.
+    let staged_env_len = pending_env_len();
     let staging = unsafe { &mut *SPAWN_STAGING.0.get() };
     let size = total_len as usize;
     // A program bigger than the staging buffer can't have been staged
@@ -384,6 +411,15 @@ fn spawn_staged(total_len: u64, stdout_target: u64, argv_len: u64, cwd_len: u64)
             if cwd_len > 0 {
                 let staged = unsafe { &*CWD_STAGING.0.get() };
                 tasks::set_cwd(slot, &staged[..cwd_len]);
+            }
+            // Attach the environment latched by ENV_STAGE (its length isn't a
+            // SPAWN arg - the four are full - so it rode PENDING_ENV_LEN,
+            // captured into `staged_env_len` at the top). The child reads it via
+            // GET_ENVC/GET_ENV.
+            let env_len = staged_env_len.min(ENV_STAGING_SIZE);
+            if env_len > 0 {
+                let staged = unsafe { &*ENV_STAGING.0.get() };
+                tasks::set_env(slot, &staged[..env_len]);
             }
             // A child inherits its parent's (the spawning task's) namespace -
             // Plan 9 semantics. Copying it here means `bind` in the shell is
@@ -672,6 +708,44 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
                 return syscall_abi::NO_ARG;
             }
             let blob = tasks::argv_blob(tasks::current_task());
+            match argv_get(blob, arg0 as usize) {
+                Some(bytes) => {
+                    let n = (bytes.len() as u64).min(arg2) as usize;
+                    // SAFETY: out range validated above.
+                    let dst = unsafe { core::slice::from_raw_parts_mut(arg1 as *mut u8, n) };
+                    dst.copy_from_slice(&bytes[..n]);
+                    bytes.len() as u64
+                }
+                None => syscall_abi::NO_ARG,
+            }
+        }
+        syscall_abi::ENV_STAGE => {
+            // arg0 = blob pointer, arg1 = blob length. Copies the env blob into
+            // the env staging buffer and latches its length for the next SPAWN
+            // (SPAWN's four args are full, so unlike argv there's no length arg).
+            if !valid_user_range(arg0, arg1) {
+                return SPAWN_ERROR;
+            }
+            let len = arg1 as usize;
+            if len > ENV_STAGING_SIZE {
+                return SPAWN_ERROR;
+            }
+            let staging = unsafe { &mut *ENV_STAGING.0.get() };
+            // SAFETY: range sanity-checked above, same trust model as ARGS_STAGE.
+            let blob = unsafe { core::slice::from_raw_parts(arg0 as *const u8, len) };
+            staging[..len].copy_from_slice(blob);
+            PENDING_ENV_LEN.store(len, core::sync::atomic::Ordering::Relaxed);
+            0
+        }
+        syscall_abi::GET_ENVC => argv_count(tasks::env_blob(tasks::current_task())),
+        syscall_abi::GET_ENV => {
+            // arg0 = index, arg1 = out pointer, arg2 = out capacity. Same shape
+            // as GET_ARG (the env blob reuses the argv encoding), returning the
+            // index-th NAME=VALUE string or NO_ARG if out of range.
+            if !valid_user_range(arg1, arg2) {
+                return syscall_abi::NO_ARG;
+            }
+            let blob = tasks::env_blob(tasks::current_task());
             match argv_get(blob, arg0 as usize) {
                 Some(bytes) => {
                     let n = (bytes.len() as u64).min(arg2) as usize;
