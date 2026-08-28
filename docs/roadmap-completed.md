@@ -719,6 +719,70 @@ not-a-program error; `pwd | upper` → "/" (builtin head). Combining `|` with
 
 ---
 
+## A userland libc personality: C-program portability, ending at picolibc (2026-08-28)
+
+The arc that made Ouroboros run C — the mechanism half of the "POSIX / C-program
+portability" plan (that plan still lives in `roadmap.md` for its *remaining*,
+still-forward parts: `posix_spawn`/`fork`-in-userspace, `select`/`poll`/signals/
+`mmap`, and porting a real application). The full design retrospective is
+`docs/libc-arc-postmortem.md` (the twenty-first); the milestone facts are in
+`CHANGELOG.md` (libc arc steps 1–6).
+
+**The thesis, proven:** C portability is a *userland personality*, not a kernel
+property. Across all six steps the kernel and loader were touched exactly once —
+and that once was a deletion (two linker-script `ASSERT`s). A C program spawns
+like any `/bin` program, talks to `fsd` over the same ninep verbs, and exits
+through the same `EXIT`.
+
+**How it was sequenced (each step a small addition on the last):**
+
+1. **A first C program** (`libc/hello.c`, `make chello-bin`): clang →
+   `aarch64-unknown-none` ELF → Rust's LLD against `programs/linker.ld` → the
+   existing loader. Self-contained (its own `svc` stubs); no kernel/loader
+   change. This closed the one real uncertainty — the toolchain path — so the
+   rest was *growing a libc*, not inventing the mechanism.
+2. **`.data`/`.bss` loader support:** userland programs may now have mutable
+   globals/statics. The loader already loaded `p_filesz` and zeroed `p_memsz −
+   p_filesz` per PT_LOAD (it did so for the Rust programs); the only blocker was
+   `programs/linker.ld`'s `ASSERT(SIZEOF(.data/.bss)==0)` guards. The milestone
+   was removing them + a fresh-per-spawn regression test.
+3. **A minimal hand-rolled libc** (`libc/src`, `make cdemo-bin`): standard-ish
+   headers + `crt0`, syscall stubs (`write`→`cond`, `read`→keyboard, `sbrk`→the
+   heap, `_exit`→`EXIT`), `printf`, `malloc`/`free` over `sbrk`, `string.h`.
+4. **File I/O + pipe-aware output** (`libc/src/file.c`, `make cfile-bin`):
+   `open`/`read`/`write`/`close`/`lseek`/`fstat` over `fsd`, and a
+   stdout-target-aware `write` so a C program works in a pipeline — which forced
+   **buffered stdout** (flush on newline/full/exit) and **yield-retry on a full
+   consumer mailbox** (the impedance match between a byte-at-a-time C API and a
+   message-passing OS).
+5. **Fids** (server-side open-file handles in `fsd`): `NP_OPEN`/`NP_PREAD`/
+   `NP_PWRITE`/`NP_FSTAT`/`NP_CLUNK`, a per-client fid table, permission checked
+   once at open. A fid *is* a POSIX fd *and* a 9P fid — the cluster-Phase-0 fid
+   deferral cashed, one feature paying off twice.
+6. **picolibc — the real C library** (`make cpico-bin`, `/bin/CPICO`): picolibc
+   1.8.9 built `-fPIC` (self-relocates, zero `ABS64`) links against the *same*
+   porting stubs (its `posix-console` stdio bottoms out at `read`/`write`), plus
+   two carried compiler-rt 128-bit-shift builtins. Full `%f`/`%e`/`%g` float
+   formatting, `snprintf`, `qsort`, `strtol` — what the hand-rolled libc
+   couldn't do. Prebuilt lib committed under `third_party/picolibc-prebuilt`
+   (regenerate with `scripts/build-picolibc.sh`), so `make` needs no meson.
+
+**The load-bearing decision** was step 3–4's narrow waist of syscall stubs:
+because it existed, the picolibc port (step 6) needed *no new porting code* — it
+plugged into the same holes. **The one gate throughout** was the PIE relocation
+contract (`ABS64` unloadable, `RELATIVE` fine); `-fPIC` satisfies it for C
+exactly as `relocation-model=pic` does for Rust, and the whole picolibc port's
+viability reduced to "does `-fPIC` picolibc emit zero `ABS64`" (it does).
+
+**What is NOT done** (stays forward in `roadmap.md`): porting a real application
+(SQLite, a small C compiler) — "port one more program"; and the architectural
+mismatches (`fork`/`posix_spawn`, `select`/`poll`, signals, `mmap`). One open
+follow-up noted: picolibc's `posix-console` stdout is unbuffered (chatty console
+IPC) — line-buffer it.
+
+
+---
+
 ## Parking lot (known future work, not yet sequenced)
 
 Pulled from `docs/processes.md`'s "known rough edges" and `CLAUDE.md`'s

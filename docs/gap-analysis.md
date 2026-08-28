@@ -63,8 +63,8 @@ set; roadmap arcs are cited by their `roadmap.md` section.
 | Multiple filesystems | ✅ | FAT32, exFAT, ext2 — all read+write, behind fsd's `Filesystem` enum. |
 | GPT + MBR partitions, multi-mount | ✅ | `partition::discover`; several partitions mountable at once (`FSOP_MOUNT_AT` → a tree bound into the namespace). |
 | Mount / unmount / mkfs / partition / erase | ✅ | The disk-management arc: `FSOP_MOUNT`/`UNMOUNT`/`FORMAT`/`PARTITION`/`ERASE`. |
-| Integer file descriptors (open→fd, cursor, `dup`) | ✗ | Protocol is **path-per-op** (fids deferred in Phase 0). An fd table (`fd → server,handle,offset`) is a *userland/libc* construct buildable on today's servers — and a POSIX fd ≈ a 9P fid, so adding fids someday pays off twice (see the POSIX arc). |
-| `open`/`close`/`read`/`write`/`lseek` | ◐ | The *operations* exist (`FSOP_READ_AT`/`WRITE_AT`, a `read_cursor` for sequential resume), but not as a cursored open-file handle — every op re-sends the path. |
+| Integer file descriptors (open→fd, cursor, `dup`) | ◐ | **fids exist** (libc arc step 5): `fsd` has server-side open-file handles (`NP_OPEN`→fid≥3, `NP_PREAD`/`NP_PWRITE`/`NP_FSTAT`/`NP_CLUNK`, a per-client table), directly usable as a C fd — a POSIX fd *is* a 9P fid, paying off twice as predicted. The path-per-op verbs coexist. Still missing: `dup`/`dup2`, and fds for non-file objects (sockets/pipes). |
+| `open`/`close`/`read`/`write`/`lseek` | ✅ | Both as **fids** (a cursored open-file handle in `fsd`, the C libc's path) and as path-per-op verbs (`FSOP_READ_AT`/`WRITE_AT` + a `read_cursor`, the shell's path). |
 | `stat`/`fstat` (per-file metadata) | ◐ | A per-file **`stat` op** (`NP_STAT`): size, a directory flag, a broken-down calendar mtime, **and POSIX mode/uid/gid** (guarded by a `mode_valid` byte) — backs `ls -l`. ext2 surfaces its real on-disk `i_mode`/`i_uid`/`i_gid` (`ls -l` shows `drwx------ 0 0` for `lost+found`, real owners for user files); FAT32 decodes the timestamp; exFAT/ext2/`/proc` leave the time unset and FAT32/exFAT/`/proc` leave mode/owner unmodeled (`ls -l` synthesizes a conventional mode, `-` owner). Still no cursored `fstat` (path-per-op). |
 | File permissions (mode bits) | ◐ | **Stored, surfaced, and writable — not yet enforced**: ext2's uid/gid/mode are read *and written* (`stat`/`ls -l`/`chmod`/`chown`); FAT/exFAT can't model them. The one remaining step is *enforcement* — check caller identity vs. inode mode in the `FSOP_*` dispatch (roadmap item 4). |
 | `chmod`/`chown` | ◐ | **Present, ext2-only** (`NP_CHMOD`/`NP_CHOWN` → `/bin/chmod`, `/bin/chown`): numeric modes (`chmod 755`) and numeric owners (`chown uid:gid`); the on-disk inode fields are patched in place (e2fsck-clean). Symbolic modes (`u+x`) and name lookup (no `/etc/passwd` yet) are the follow-ups; FAT32/exFAT/`/proc` return `FS_ERR_NOT_SUPPORTED`. |
@@ -92,11 +92,11 @@ set; roadmap arcs are cited by their `roadmap.md` section.
 
 | Capability | Status | Notes / what it would take |
 |---|---|---|
-| A libc | ✗ | Planned as a **userland POSIX personality** (newlib/picolibc first), *not* a kernel ABI — the POSIX-portability arc. ~17–20 syscall stubs map onto existing server messages. |
-| `malloc`/`free` (real heap) | ◐ | A raw fixed **heap area** (`HEAP_INFO`) programs use as `&mut [u8]`; **no `alloc`-backed `Vec`/`Box`/`String`** — prebuilt `liballoc` isn't PIE-linkable on stable (`R_AARCH64_ABS64`; `-Z build-std` is nightly). A bump area, no free list. |
-| Dynamic linking / shared libraries | ✗ | Every program is a **static position-independent** `aarch64-none` binary (`R_AARCH64_RELATIVE` only). No `.so`, no `dlopen`. |
-| Threads (shared address space) | ✗ | One task = one thread of control in its own region. No `pthread`, no in-process threads. |
-| On-device compiler (C) | ✗ | A small C compiler (tcc/chibicc) is realistic **only atop the libc** (a compiler is a C program). Realistic *first* step: an **assembler** (text → the ELF the loader already parses). Roadmap item 5. |
+| A libc (C) | ◐→✓ | **Exists as a userland POSIX personality — picolibc is ported** (`/bin/CPICO`: float `printf`, `snprintf`, `qsort`, `malloc`, `strtol`), *not* a kernel ABI. Built `-fPIC` (self-relocates under the loader, zero `ABS64`), linked against ~8 syscall stubs (`write`/`read`/`open`/`close`/`lseek`/`fstat`/`sbrk`/`_exit`) that map onto existing server messages. A hand-rolled minimal libc (`libc/src`) preceded it. **Done:** the mechanism (unmodified C stdlib code runs). **Left:** porting a real *application* — see the libc-arc postmortem + `roadmap.md`. |
+| `malloc`/`free` (real heap) | ◐ | **C:** picolibc's `malloc`/`free`/`realloc` over the `sbrk` stub (`HEAP_INFO`) — a real allocator. **Rust:** a raw fixed **heap area** used as `&mut [u8]`; **no `alloc`-backed `Vec`/`Box`/`String`** — prebuilt `liballoc` isn't PIE-linkable on stable (`R_AARCH64_ABS64`; `-Z build-std` is nightly). |
+| Dynamic linking / shared libraries | ✗ | Every program is a **static position-independent** `aarch64-none` binary (`R_AARCH64_RELATIVE` only). No `.so`, no `dlopen`. picolibc is linked statically. |
+| Threads (shared address space) | ✗ | One task = one thread of control in its own region. No `pthread`, no in-process threads. picolibc built `-Dthread-local-storage=false`, global `errno`. |
+| On-device compiler (C) | ✗ | A small C compiler (tcc/chibicc) is realistic **atop the libc, which now exists** (a compiler is a C program) — it becomes "port one more program." Realistic *first* step is still an **assembler** (text → the ELF the loader already parses). Roadmap item 5. |
 | On-device compiler (Rust) | ✗ | Effectively out of reach near-term (rustc's scale + the `-Z build-std` wall). |
 | Self-hosting (builds itself) | ✗ | You cross-compile from macOS. The endgame the project's name points at, gated behind everything above. |
 
@@ -240,24 +240,25 @@ at a roadmap arc:
    caller uid/gid vs. inode owner/mode, root bypass, `FS_ERR_PERM`). What remains
    are *refinements*, not the arc: the ancestor-directory search (`x`) check,
    per-user *cluster* identity, `/etc/shadow`, `passwd`/`useradd`, per-user
-   `/home`, and groups. With this done, the highest-leverage remaining gap is
-   the libc personality (next).
-2. **A userland libc personality.** POSIX/C portability is the single biggest
-   thing given up across every comparison, and it gates the on-device
-   compiler. Well-scoped (newlib stubs over existing servers), just large. →
-   roadmap "POSIX / C-program portability" + item 5.
-3. **File descriptors / fids.** Path-per-op is the deepest structural
-   divergence; a cursored handle is *both* the 9P fid and the POSIX fd — one
-   feature, two payoffs. → POSIX arc, "the one connection worth remembering."
-4. **A user/identity + login model.** The step from single-implicit-user to a
-   real security boundary; reuses the capability mask + existing crypto. →
-   roadmap item 4.
-5. **A richer terminal + its first full-screen consumer.** VT100 color/cursor
+   `/home`, and groups. (The user/identity + login model — once ranked
+   separately — is part of this and likewise done.)
+2. **A userland libc personality — DONE, mechanism (2026-08-28).** POSIX/C
+   portability was the single biggest thing given up across every comparison.
+   The six-step libc arc built it: a C program runs, and **picolibc is ported**
+   (`/bin/CPICO`: float `printf`, `qsort`, `malloc`, `strtol`) — as a userland
+   personality, no kernel change. **fids** (the file-descriptor gap, once ranked
+   separately) landed as step 5: a cursored server-side handle that is *both* a
+   9P fid and a POSIX fd, one feature two payoffs. What *remains* and is now the
+   highest-leverage gap: **porting a real application** (SQLite, a small C
+   compiler) — "port one more program" — plus the architectural mismatches
+   (`posix_spawn`/`fork`, `select`/`poll`, signals, `mmap`). → roadmap "POSIX /
+   C-program portability", `roadmap-completed.md`, `docs/libc-arc-postmortem.md`.
+3. **A richer terminal + its first full-screen consumer.** VT100 color/cursor
    addressing, built alongside an editor or pager so the escape set is
    driven by a real need. → roadmap items 1 & 3.
-6. **General `select`/`poll`, signals, and a service manager.** Each unblocks
+4. **General `select`/`poll`, signals, and a service manager.** Each unblocks
    a class of "normal Unix program" (multiplexers, job control, daemons) —
-   medium arcs, lower immediate leverage than the above.
+   medium arcs, and the natural companions to porting real C applications.
 
 Two whole categories are deliberately *further off* and not near-term gaps to
 close: **SMP/multicore** and **swap/`mmap`/COW** — large, and nothing in the
