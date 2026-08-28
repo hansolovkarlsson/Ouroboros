@@ -110,10 +110,49 @@ pub const NP_CHMOD: u64 = NP_BASE + 13;
 /// or `FS_ERR_NOT_SUPPORTED` where owners can't be modeled. Backs `chown`.
 pub const NP_CHOWN: u64 = NP_BASE + 14;
 
+// --- fids: server-side open-file handles (a POSIX fd ≈ a 9P fid) ----------
+// These coexist with the path-per-op verbs above; the C libc uses them, other
+// clients (shell/ulib/cluster export) stay path-based. A fid is opened once
+// (NP_OPEN authorizes the access against the file's mode/owner), then read/
+// written by handle, and freed with NP_CLUNK. The cursor stays client-side and
+// rides each PREAD/PWRITE offset (authentic 9P: reads/writes carry the offset).
+
+/// **Open** a file, returning a fid (a small integer >= 3, usable directly as a
+/// C fd). `a0` = the [`OPEN_*`] flag bits, `a1` = path length; payload = the
+/// path. Status = the fid on success, or an `FS_ERR_*` code (permission is
+/// checked here, once, per the flags). The fid remembers the file for this
+/// client until [`NP_CLUNK`].
+pub const NP_OPEN: u64 = NP_BASE + 15;
+
+/// **Read** from a fid at an explicit offset: `a0` = fid, `a1` = offset,
+/// `a2` = count. The reply carries the bytes inline; status = bytes read
+/// (`0` at EOF). No per-op permission check - the fid was authorized at open.
+pub const NP_PREAD: u64 = NP_BASE + 16;
+
+/// **Write** to a fid at an explicit offset from the client's `GRANT_READ`
+/// buffer: `a0` = fid, `a1` = offset, `a2` = count. Status = bytes written.
+pub const NP_PWRITE: u64 = NP_BASE + 17;
+
+/// **Stat** a fid (the [`NP_STAT`] record for the open file): `a0` = fid.
+/// Status = [`STAT_INFO_LEN`], result = the record.
+pub const NP_FSTAT: u64 = NP_BASE + 18;
+
+/// **Close** a fid, freeing the server-side handle: `a0` = fid. Status = 0.
+pub const NP_CLUNK: u64 = NP_BASE + 19;
+
+/// [`NP_OPEN`] flag: open for reading (needs `r` on the file).
+pub const OPEN_READ: u64 = 1;
+/// [`NP_OPEN`] flag: open for writing (needs `w`).
+pub const OPEN_WRITE: u64 = 2;
+/// [`NP_OPEN`] flag: create the file if absent (needs `w` on the parent).
+pub const OPEN_CREATE: u64 = 4;
+/// [`NP_OPEN`] flag: truncate the file to empty on open.
+pub const OPEN_TRUNC: u64 = 8;
+
 /// One past the last defined verb — a server dispatches the `[NP_BASE, NP_LIMIT)`
 /// range to its verb handler and lets everything else (including `SYSOP_PING`)
 /// fall through to its existing path.
-pub const NP_LIMIT: u64 = NP_CHOWN + 1;
+pub const NP_LIMIT: u64 = NP_CLUNK + 1;
 
 // The `NP_STAT` result payload: a fixed 27-byte little-endian record. The time
 // is a broken-down calendar (not an epoch) so no filesystem's differing epoch
