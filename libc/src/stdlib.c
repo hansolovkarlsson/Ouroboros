@@ -2,6 +2,8 @@
 #include <unistd.h>
 
 void exit(int code) {
+    __libc_flush_stdout(); /* push any buffered stdout out first */
+    __libc_end_stdout();   /* then mark end-of-stream if our output is piped */
     _exit(code);
 }
 
