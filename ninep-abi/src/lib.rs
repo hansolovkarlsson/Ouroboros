@@ -93,21 +93,40 @@ pub const NP_WRITE_FILE: u64 = NP_BASE + 11;
 /// **Stat** a single path: `a0` = path length; payload = the path. On success
 /// the reply status is [`STAT_INFO_LEN`] and the result payload is a
 /// [`StatInfo`](the `STAT_*` field layout below); on failure it's an `FS_ERR_*`
-/// code. The per-file metadata behind `ls -l` (size, dir flag, modified time).
+/// code. The per-file metadata behind `ls -l` (size, dir flag, modified time,
+/// and — when the filesystem can model them — POSIX mode/owner).
 pub const NP_STAT: u64 = NP_BASE + 12;
+
+/// **Change mode** of a single path (the write side of `stat`'s mode field):
+/// `a0` = path length, `a1` = the new POSIX permission bits (the low 12 of
+/// `i_mode`; the `S_IFMT` type nibble is preserved by the server). Payload =
+/// the path. Status = 0, or `FS_ERR_NOT_SUPPORTED` on a filesystem that can't
+/// model a mode (FAT32/exFAT/`/proc`). Backs `chmod`.
+pub const NP_CHMOD: u64 = NP_BASE + 13;
+
+/// **Change owner** of a single path: `a0` = path length, `a1` = new uid,
+/// `a2` = new gid (each `u16`; `u64::MAX` means "leave unchanged", so uid-only
+/// and gid-only changes need no separate verb). Payload = the path. Status = 0,
+/// or `FS_ERR_NOT_SUPPORTED` where owners can't be modeled. Backs `chown`.
+pub const NP_CHOWN: u64 = NP_BASE + 14;
 
 /// One past the last defined verb — a server dispatches the `[NP_BASE, NP_LIMIT)`
 /// range to its verb handler and lets everything else (including `SYSOP_PING`)
 /// fall through to its existing path.
-pub const NP_LIMIT: u64 = NP_STAT + 1;
+pub const NP_LIMIT: u64 = NP_CHOWN + 1;
 
-// The `NP_STAT` result payload: a fixed 20-byte little-endian record. The time
+// The `NP_STAT` result payload: a fixed 27-byte little-endian record. The time
 // is a broken-down calendar (not an epoch) so no filesystem's differing epoch
 // leaks into the ABI and the client formats it without date math; `time_valid`
 // says whether the time fields are meaningful (a filesystem that doesn't yet
-// surface a timestamp sets it 0).
+// surface a timestamp sets it 0). The trailing mode/uid/gid triple carries POSIX
+// ownership+permission metadata, guarded by its own `mode_valid` byte: only ext2
+// stores it, so FAT32/exFAT/`/proc` set the byte 0 and leave the triple zero
+// (they can't model an owner or mode). The record grew from 20 to 27 bytes when
+// the mode/owner surface landed; the mode fields sit *after* the original 20 so
+// an old-length reader still decodes size/flags/time unchanged.
 /// Total length of the `NP_STAT` result record.
-pub const STAT_INFO_LEN: usize = 20;
+pub const STAT_INFO_LEN: usize = 27;
 /// `u64` file size in bytes (0 for a directory).
 pub const STAT_SIZE_OFF: usize = 0;
 /// `u32` flags; bit 0 ([`STAT_FLAG_DIR`]) = directory.
@@ -126,6 +145,17 @@ pub const STAT_MIN_OFF: usize = 17;
 pub const STAT_SEC_OFF: usize = 18;
 /// `u8` non-zero if the year..second fields are meaningful.
 pub const STAT_TIMEVALID_OFF: usize = 19;
+/// `u16` POSIX mode: the `S_IFMT` type nibble plus the 12 permission bits
+/// (`rwxrwxrwx` + setuid/setgid/sticky), exactly ext2's on-disk `i_mode`.
+/// Meaningful only when [`STAT_MODEVALID_OFF`] is non-zero.
+pub const STAT_MODE_OFF: usize = 20;
+/// `u16` owning user id (`i_uid`). Meaningful only when [`STAT_MODEVALID_OFF`].
+pub const STAT_UID_OFF: usize = 22;
+/// `u16` owning group id (`i_gid`). Meaningful only when [`STAT_MODEVALID_OFF`].
+pub const STAT_GID_OFF: usize = 24;
+/// `u8` non-zero if the mode/uid/gid fields are real on-disk metadata (ext2);
+/// zero when the filesystem can't model an owner or mode (FAT32/exFAT/`/proc`).
+pub const STAT_MODEVALID_OFF: usize = 26;
 /// [`STAT_FLAGS_OFF`] bit: the entry is a directory.
 pub const STAT_FLAG_DIR: u32 = 1 << 0;
 

@@ -112,6 +112,7 @@ impl Fs {
             size,
             is_dir,
             time: None,
+            mode: None, // synthetic: no owner/permission model
         })
     }
 

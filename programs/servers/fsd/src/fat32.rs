@@ -84,6 +84,11 @@ pub enum Error {
     /// never returns this. This is the shared `Error` type for every
     /// filesystem arm (see `vfs.rs`), so it lives here with the rest.
     ReadOnly,
+    /// A metadata write (`chmod`/`chown`) was attempted on a filesystem that
+    /// can't model mode/ownership (FAT32/exFAT/`/proc`). ext2 is the only arm
+    /// that supports it; the others return this so the client degrades honestly
+    /// rather than silently no-op'ing. Maps to `FS_ERR_NOT_SUPPORTED`.
+    Unsupported,
     UnsupportedSectorSize(u16),
     Io(DiskError),
     NotFound,
@@ -781,6 +786,7 @@ impl Fs {
             size: e.size as u64,
             is_dir: e.is_dir,
             time: decode_fat_time(e.mtime_date, e.mtime_time),
+            mode: None, // FAT has no owner/permission model
         })
     }
 

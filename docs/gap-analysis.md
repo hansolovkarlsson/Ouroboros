@@ -65,9 +65,9 @@ set; roadmap arcs are cited by their `roadmap.md` section.
 | Mount / unmount / mkfs / partition / erase | ✅ | The disk-management arc: `FSOP_MOUNT`/`UNMOUNT`/`FORMAT`/`PARTITION`/`ERASE`. |
 | Integer file descriptors (open→fd, cursor, `dup`) | ✗ | Protocol is **path-per-op** (fids deferred in Phase 0). An fd table (`fd → server,handle,offset`) is a *userland/libc* construct buildable on today's servers — and a POSIX fd ≈ a 9P fid, so adding fids someday pays off twice (see the POSIX arc). |
 | `open`/`close`/`read`/`write`/`lseek` | ◐ | The *operations* exist (`FSOP_READ_AT`/`WRITE_AT`, a `read_cursor` for sequential resume), but not as a cursored open-file handle — every op re-sends the path. |
-| `stat`/`fstat` (per-file metadata) | ◐ | A per-file **`stat` op exists now** (`NP_STAT`): size, a directory flag, and a broken-down calendar mtime — backs `ls -l`. FAT32 decodes the timestamp; exFAT/ext2/`/proc` return size+type with the time unset (a follow-up). Still no **mode/owner** in the record — that's the remaining precursor to permissions (roadmap item 4). |
-| File permissions (mode bits) | ◐ | **Stored, not enforced**: ext2 carries uid/gid/mode on disk (read today, ignored above fsd); FAT/exFAT can't model them. Enforcement = check caller identity vs. inode mode in the `FSOP_*` dispatch (roadmap item 4). |
-| `chmod`/`chown` | ✗ | No write path for mode/owner. Pairs with the stat surface above. |
+| `stat`/`fstat` (per-file metadata) | ◐ | A per-file **`stat` op** (`NP_STAT`): size, a directory flag, a broken-down calendar mtime, **and POSIX mode/uid/gid** (guarded by a `mode_valid` byte) — backs `ls -l`. ext2 surfaces its real on-disk `i_mode`/`i_uid`/`i_gid` (`ls -l` shows `drwx------ 0 0` for `lost+found`, real owners for user files); FAT32 decodes the timestamp; exFAT/ext2/`/proc` leave the time unset and FAT32/exFAT/`/proc` leave mode/owner unmodeled (`ls -l` synthesizes a conventional mode, `-` owner). Still no cursored `fstat` (path-per-op). |
+| File permissions (mode bits) | ◐ | **Stored, surfaced, and writable — not yet enforced**: ext2's uid/gid/mode are read *and written* (`stat`/`ls -l`/`chmod`/`chown`); FAT/exFAT can't model them. The one remaining step is *enforcement* — check caller identity vs. inode mode in the `FSOP_*` dispatch (roadmap item 4). |
+| `chmod`/`chown` | ◐ | **Present, ext2-only** (`NP_CHMOD`/`NP_CHOWN` → `/bin/chmod`, `/bin/chown`): numeric modes (`chmod 755`) and numeric owners (`chown uid:gid`); the on-disk inode fields are patched in place (e2fsck-clean). Symbolic modes (`u+x`) and name lookup (no `/etc/passwd` yet) are the follow-ups; FAT32/exFAT/`/proc` return `FS_ERR_NOT_SUPPORTED`. |
 | Symbolic links | ◐ | ext2 symlinks are **reported, not followed**; no creation. |
 | Hard links | ✗ | Not implemented (ext2 link counts are maintained for dirs, but no user-facing `ln`). |
 | Named pipes (FIFOs) / Unix domain sockets | ✗ | Pipes are shell-orchestrated IPC streams (below), not filesystem objects. |
@@ -106,7 +106,7 @@ set; roadmap arcs are cited by their `roadmap.md` section.
 |---|---|---|
 | User accounts / uid / gid | ✗ | Single implicit user (whoever's at the keyboard). Identity is likely a *userland* construct (login server + capability set), not a kernel uid — matching the "personality in userland" stance. Roadmap item 4. |
 | Login / authentication (passwords) | ✗ | No login prompt, no `/etc/passwd`. Password hashing could reuse the existing SHA-256/HMAC (`netd/src/hmac.rs`) and the fail-closed key-file pattern (`CLUSTER.KEY`). |
-| Enforced file permissions | ✗ | Metadata is stored (ext2), never checked. Needs the stat surface (§3) first. |
+| Enforced file permissions | ✗ | Metadata is stored, read, *and writable* on ext2 (`stat`/`chmod`/`chown`), but never **checked** — there's no caller identity to check it against yet. Needs the users/login arc (a uid per task) then a check in the `FSOP_*` dispatch. |
 | Privilege boundary (root / sudo) | ◐ | A per-task **capability send-mask** governs who-may-call-whom (topological isolation) — the mechanism a privilege model would build on, but there's no user-facing privileged/unprivileged split. |
 | Cluster authentication | ◐ | **Machine-level**: a shared cluster key, mutually authenticated (HMAC) on the 9P export, fail-closed, `\NOEXEC`. **No per-user identity, no replay protection, no on-the-wire encryption** — each a named next tier (cluster-auth postmortem). Trusted-LAN by design. |
 | Cryptography | ◐ | Hand-rolled SHA-256 + HMAC-SHA256 (NIST/RFC-validated). No TLS, no public-key, no at-rest encryption. |
@@ -199,7 +199,7 @@ ps kill fg wait send recv selftest env set unset cpu`.
 | `tee` `tr` `cut` | ✗ | The remaining small `ulib` filters (`tee` also needs an fsd write path for its file arg). |
 | `find` `du` `df` | ✗ | Client-side directory walking (new but small); `df` wants the volume info fsd already returns. |
 | `date` `sleep` | ✗ | Blocked on wall-clock (§12) and a per-task timer respectively. |
-| `chmod` `chown` `ln` | ✗ | Blocked on the stat surface + permissions arc (§3, §6). |
+| `chmod` `chown` `ln` | ◐ | `chmod`/`chown` **shipped** (ext2-only, numeric args); `ln`/`ln -s` are still open (the ext2 link foundation exists — `i_links_count` is maintained and symlinks are reported — so it's a small follow-up, see roadmap §b). |
 | Command flags (`ls -l`, `grep -i/-r`, `rm -r`, `cp -r`, real regex) | ◐ | `ls` takes `-l`/`-a` (on the `stat` op) and `grep` takes `-i`/`-v`/`-n`; the rest are still positional-only, and `grep` matching is still substring (no regex). A shared `ulib` option parser would generalize flag handling (roadmap item 2). |
 | An editor + a pager (`less`/`more`) | ✗ | The two consumers that justify the VT100 arc (§4) and general `select` — gated on items 1 & 3. |
 | `sed` `awk` `find … -exec` | ✗ | Larger; realistic once a libc/scripting layer exists. |
@@ -233,10 +233,14 @@ ps kill fg wait send recv selftest env set unset cpu`.
 Reading the map top-down, the highest-leverage missing pieces, each pointing
 at a roadmap arc:
 
-1. **Per-file `stat` + a permission surface.** The keystone: `ls -l`, richer
-   command flags, *and* the whole users/permissions arc all block on a
-   `FSOP_STAT` exposing size/mode/mtime that ext2 already stores. Smallest
-   change that unlocks the most. → roadmap items 2 & 4.
+1. **A permission surface (landed) → enforcement + identity.**
+   The keystone `stat` op exposes size/mtime **and** ext2's real mode/uid/gid
+   (`NP_STAT`'s record grew a mode/owner triple + `mode_valid` byte; `ls -l`
+   renders `drwxr-xr-x` and owners), and the *write* side now exists too —
+   `chmod`/`chown` patch the ext2 inode in place (e2fsck-clean). What remains is
+   **enforcement**: there is no *identity* to check a mode against yet, so the
+   next step is the users/login arc (a uid per task/session) and then the
+   permission check in the `FSOP_*` dispatch. → roadmap item 4.
 2. **A userland libc personality.** POSIX/C portability is the single biggest
    thing given up across every comparison, and it gates the on-device
    compiler. Well-scoped (newlib stubs over existing servers), just large. →

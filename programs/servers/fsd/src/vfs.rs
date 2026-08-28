@@ -37,12 +37,27 @@ pub struct CalTime {
     pub sec: u8,
 }
 
+/// POSIX ownership + permission bits for a path (ext2's `i_mode`/`i_uid`/
+/// `i_gid`). Only a filesystem that stores them surfaces this; FAT32/exFAT/
+/// `/proc` return `None` from [`Filesystem::stat`] since they can't model an
+/// owner or mode. Read-only for now - stored, not enforced, and no `chmod`
+/// write path yet (see `docs/gap-analysis.md`).
+#[derive(Clone, Copy)]
+pub struct FileMode {
+    /// The `S_IFMT` type nibble plus the 12 permission bits, verbatim.
+    pub mode: u16,
+    pub uid: u16,
+    pub gid: u16,
+}
+
 /// A path's metadata, from [`Filesystem::stat`] - what `ls -l` reports. `time`
-/// is `None` when the filesystem doesn't (yet) surface a modified time.
+/// is `None` when the filesystem doesn't (yet) surface a modified time; `mode`
+/// is `None` when it can't model an owner/permissions at all.
 pub struct Stat {
     pub size: u64,
     pub is_dir: bool,
     pub time: Option<CalTime>,
+    pub mode: Option<FileMode>,
 }
 
 /// A mounted filesystem, whatever its on-disk format.
@@ -243,6 +258,26 @@ impl Filesystem {
             Filesystem::ExFat(fs) => fs.mv(src, dst),
             Filesystem::Ext2(fs) => fs.mv(src, dst),
             Filesystem::Proc(fs) => fs.mv(src, dst),
+        }
+    }
+
+    /// Set a path's permission bits (the low 12 of the mode; the type nibble is
+    /// preserved). The write twin of [`stat`](Self::stat)'s mode field — ext2
+    /// only, since it's the one arm that stores a mode. FAT32/exFAT/`/proc`
+    /// return [`Error::Unsupported`] rather than pretend to succeed.
+    pub fn chmod(&mut self, path: &str, mode: u16) -> Result<(), Error> {
+        match self {
+            Filesystem::Ext2(fs) => fs.chmod(path, mode),
+            _ => Err(Error::Unsupported),
+        }
+    }
+
+    /// Set a path's owner uid and/or gid (`None` leaves that field unchanged).
+    /// ext2 only, same per-filesystem degradation as [`chmod`](Self::chmod).
+    pub fn chown(&mut self, path: &str, uid: Option<u16>, gid: Option<u16>) -> Result<(), Error> {
+        match self {
+            Filesystem::Ext2(fs) => fs.chown(path, uid, gid),
+            _ => Err(Error::Unsupported),
         }
     }
 }

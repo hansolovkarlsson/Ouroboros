@@ -91,6 +91,23 @@ out to `prl_disk_tool`, bundled with the app).
 Start the VM once attached — UEFI firmware should pick up `BOOTAA64.EFI`
 from the disk automatically, the same way it does in QEMU.
 
+## Testing on real ARM hardware (Raspberry Pi 4)
+
+The physical target is a **Raspberry Pi 4** running
+[pftf/RPi4](https://github.com/pftf/RPi4) EDK2 UEFI firmware — because the
+kernel boots as a UEFI application, the requirement is not "an ARM board" but
+"an ARM board with usable UEFI firmware," which is a much shorter list. Build
+the ESP tree with `make esp` and copy it onto a FAT32 card over the firmware
+release; do *not* `dd` `esp.img`, which has no room for the firmware.
+
+**[Full test plan → `docs/testing-pi4.md`](docs/testing-pi4.md)** — board
+selection, the bench rig and serial wiring, the firmware settings that matter,
+an ordered boot-checkpoint list, and the ranked risks. Two caveats up front: the
+Pi's GENET NIC is not virtio, so networking and the cluster are as unreachable
+there as on Parallels; and there is no SD-card driver, so the boot card goes
+invisible after `exit_boot_services` and runtime filesystem tests need a USB
+stick.
+
 ## Layout
 
 ```

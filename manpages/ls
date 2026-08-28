@@ -14,9 +14,13 @@ DESCRIPTION
     Takes any number of operands, so shell wildcards work: `ls *.txt`.
 
 OPTIONS
-    -l    Long form, one entry per line: type (d/-), size, and modified
-          YYYY-MM-DD HH:MM. The time is shown where the filesystem records
-          one (FAT32 does; others show a dash).
+    -l    Long form, one entry per line: a permission string (drwxr-xr-x),
+          owner uid and gid, size, and modified YYYY-MM-DD HH:MM. Mode and
+          owner are real on ext2 (the one filesystem that stores them - e.g.
+          lost+found shows drwx------ 0 0); FAT32/exFAT/proc cannot model an
+          owner, so a conventional mode is shown and the owner is a dash. The
+          time is shown where the filesystem records one (FAT32 does; others
+          show a dash).
     -a    Include dotfiles, and the . and .. entries.
 
 EXAMPLES

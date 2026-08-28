@@ -614,13 +614,17 @@ messages plus kernel-mediated copies — and the grant/safecopy primitive
 below is the second half.
 
 One later addition, the **stat** verb (`NP_STAT`): given a path, the server
-returns a fixed 20-byte metadata record — size, a directory flag, and a
-broken-down calendar modified time (`STAT_*` offsets in `ninep-abi`). The time
-is a calendar, not an epoch, so no filesystem's epoch leaks into the ABI and the
-client formats it with no date math; a `time_valid` byte says whether it's
-meaningful (only FAT32 decodes a timestamp today). It's the metadata behind
-`ls -l`, which reads the directory then stats each entry (`ulib::fs_stat` and the
-`stat_*` accessors).
+returns a fixed 27-byte metadata record — size, a directory flag, a broken-down
+calendar modified time, and a POSIX mode/uid/gid triple (`STAT_*` offsets in
+`ninep-abi`). The time is a calendar, not an epoch, so no filesystem's epoch
+leaks into the ABI and the client formats it with no date math; a `time_valid`
+byte says whether it's meaningful (only FAT32 decodes a timestamp today).
+Symmetrically, a `mode_valid` byte guards the mode/owner triple — only ext2
+stores an owner and permission bits, so FAT32/exFAT/`/proc` leave it zero and
+the client synthesizes a conventional mode for display. It's the metadata behind
+`ls -l` (permission string + owner + size + time), which reads the directory
+then stats each entry (`ulib::fs_stat` and the `stat_*` accessors, incl.
+`stat_mode`).
 
 ### IPC capabilities — who-may-call-whom
 

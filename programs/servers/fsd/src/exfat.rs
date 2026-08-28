@@ -650,6 +650,7 @@ impl Fs {
             size: e.size,
             is_dir: e.is_dir,
             time: None,
+            mode: None, // exFAT has no owner/permission model
         })
     }
 

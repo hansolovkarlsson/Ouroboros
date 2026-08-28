@@ -444,6 +444,15 @@ fn handle_ninep(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], sender: u64,
                         result[ninep_abi::STAT_SEC_OFF] = t.sec;
                         result[ninep_abi::STAT_TIMEVALID_OFF] = 1;
                     }
+                    if let Some(m) = st.mode {
+                        result[ninep_abi::STAT_MODE_OFF..ninep_abi::STAT_MODE_OFF + 2]
+                            .copy_from_slice(&m.mode.to_le_bytes());
+                        result[ninep_abi::STAT_UID_OFF..ninep_abi::STAT_UID_OFF + 2]
+                            .copy_from_slice(&m.uid.to_le_bytes());
+                        result[ninep_abi::STAT_GID_OFF..ninep_abi::STAT_GID_OFF + 2]
+                            .copy_from_slice(&m.gid.to_le_bytes());
+                        result[ninep_abi::STAT_MODEVALID_OFF] = 1;
+                    }
                     status_slot[..8].copy_from_slice(&(ninep_abi::STAT_INFO_LEN as u64).to_le_bytes());
                     REPLY_PAYLOAD + ninep_abi::STAT_INFO_LEN
                 }
@@ -591,6 +600,28 @@ fn handle_ninep(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], sender: u64,
                 Err(e) => status_reply(reply, error_code(&e)),
             }
         }
+        ninep_abi::NP_CHMOD => {
+            let Some(path) = path_from(payload, 0, p[0]) else {
+                return status_reply(reply, syscall_abi::FS_ERROR);
+            };
+            match fs.chmod(path, p[1] as u16) {
+                Ok(()) => status_reply(reply, 0),
+                Err(e) => status_reply(reply, error_code(&e)),
+            }
+        }
+        ninep_abi::NP_CHOWN => {
+            let Some(path) = path_from(payload, 0, p[0]) else {
+                return status_reply(reply, syscall_abi::FS_ERROR);
+            };
+            // u64::MAX in a field means "leave unchanged" (so uid-only and
+            // gid-only chowns share one verb).
+            let uid = if p[1] == u64::MAX { None } else { Some(p[1] as u16) };
+            let gid = if p[2] == u64::MAX { None } else { Some(p[2] as u16) };
+            match fs.chown(path, uid, gid) {
+                Ok(()) => status_reply(reply, 0),
+                Err(e) => status_reply(reply, error_code(&e)),
+            }
+        }
         _ => status_reply(reply, syscall_abi::FS_ERROR),
     }
 }
@@ -636,6 +667,7 @@ fn error_code(e: &fat32::Error) -> u64 {
         fat32::Error::CannotRemoveRoot => syscall_abi::FS_ERR_IS_ROOT,
         fat32::Error::DiskFull => syscall_abi::FS_ERR_DISK_FULL,
         fat32::Error::ReadOnly => syscall_abi::FS_ERR_READ_ONLY,
+        fat32::Error::Unsupported => syscall_abi::FS_ERR_NOT_SUPPORTED,
         fat32::Error::Io(_)
         | fat32::Error::NoFat32Partition
         | fat32::Error::NotFat32
@@ -656,6 +688,7 @@ fn error_name(e: &fat32::Error) -> &'static str {
         fat32::Error::NotExFat => "partition is not exFAT",
         fat32::Error::NotExt2 => "partition is not ext2",
         fat32::Error::ReadOnly => "read-only filesystem",
+        fat32::Error::Unsupported => "operation not supported by this filesystem",
         fat32::Error::UnsupportedSectorSize(_) => "unsupported sector size",
         fat32::Error::Io(_) => "disk I/O error",
         fat32::Error::NotFound => "not found",

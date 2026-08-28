@@ -102,6 +102,12 @@ const DELETION_TIME: u32 = 0x4000_0000;
 #[derive(Clone, Copy)]
 struct Inode {
     mode: u16,
+    /// Owning user id (`i_uid`) - read for the stat mode/owner surface; the
+    /// write path leaves created inodes root-owned (`0`), which `write_inode`'s
+    /// slot-zeroing already guarantees.
+    uid: u16,
+    /// Owning group id (`i_gid`), same treatment as [`uid`](Self::uid).
+    gid: u16,
     /// Hard-link count (`i_links_count`) - needed by the write path (`rm`
     /// decrements it and frees the inode at zero; `mkdir` bumps the parent's).
     links: u16,
@@ -486,7 +492,9 @@ impl Fs {
 
         let i = &win[within..within + 128];
         let mode = u16::from_le_bytes([i[0], i[1]]);
+        let uid = u16::from_le_bytes([i[2], i[3]]);
         let size = u32::from_le_bytes([i[4], i[5], i[6], i[7]]);
+        let gid = u16::from_le_bytes([i[24], i[25]]);
         let links = u16::from_le_bytes([i[26], i[27]]);
         let i_blocks = u32::from_le_bytes([i[28], i[29], i[30], i[31]]);
         let mut block = [0u32; INODE_BLOCK_PTRS];
@@ -496,6 +504,8 @@ impl Fs {
         }
         Ok(Inode {
             mode,
+            uid,
+            gid,
             links,
             size,
             i_blocks,
@@ -645,15 +655,80 @@ impl Fs {
         Ok(inode.size)
     }
 
-    /// Metadata for one path: size and directory flag. The inode's `i_mtime`
-    /// isn't parsed yet, so `time` is `None`. Backs `ls -l`.
+    /// Metadata for one path: size, directory flag, and the real POSIX
+    /// mode/owner from the inode (ext2 is the one arm that stores them). The
+    /// inode's `i_mtime` isn't parsed yet, so `time` is `None`. Backs `ls -l`.
     pub fn stat(&mut self, path: &str) -> Result<crate::vfs::Stat, Error> {
         let inode = self.find(path)?;
         Ok(crate::vfs::Stat {
             size: inode.size as u64,
             is_dir: inode.is_dir(),
             time: None,
+            mode: Some(crate::vfs::FileMode {
+                mode: inode.mode,
+                uid: inode.uid,
+                gid: inode.gid,
+            }),
         })
+    }
+
+    /// Set a path's permission bits (the write twin of [`stat`](Self::stat)'s
+    /// mode). Only the low 12 bits change; the `S_IFMT` type nibble is
+    /// preserved from the existing inode, so `chmod` can never turn a directory
+    /// into a file. Backs `/bin/chmod`.
+    pub fn chmod(&mut self, path: &str, mode: u16) -> Result<(), Error> {
+        let (ino, inode) = self.resolve(path)?;
+        let new_mode = (inode.mode & S_IFMT) | (mode & 0o7777);
+        self.patch_inode(ino, |slot| {
+            slot[0..2].copy_from_slice(&new_mode.to_le_bytes());
+        })
+    }
+
+    /// Set a path's owner uid and/or gid (`None` leaves that field unchanged, so
+    /// one op covers `chown user`, `chown :group`, and `chown user:group`).
+    /// Backs `/bin/chown`.
+    pub fn chown(&mut self, path: &str, uid: Option<u16>, gid: Option<u16>) -> Result<(), Error> {
+        let (ino, _inode) = self.resolve(path)?;
+        self.patch_inode(ino, |slot| {
+            if let Some(u) = uid {
+                slot[2..4].copy_from_slice(&u.to_le_bytes());
+            }
+            if let Some(g) = gid {
+                slot[24..26].copy_from_slice(&g.to_le_bytes());
+            }
+        })
+    }
+
+    /// Read-modify-write just the caller-patched bytes of an existing inode's
+    /// on-disk slot, preserving every other field. `chmod`/`chown` can't reuse
+    /// [`write_inode`](Self::write_inode) - that zeroes the whole slot for a
+    /// freshly-allocated inode, which would wipe a pre-existing file's
+    /// timestamps and flags. `f` receives the inode's 128-byte slice; the
+    /// mode/uid/gid fields it touches all live within it.
+    fn patch_inode<F: FnOnce(&mut [u8])>(&mut self, ino: u32, f: F) -> Result<(), Error> {
+        let group = (ino - 1) / self.inodes_per_group;
+        let index = (ino - 1) % self.inodes_per_group;
+        let inode_table = self.read_u32_at(self.desc_byte(group) + 8)?;
+        let inode_byte =
+            inode_table as u64 * self.block_size as u64 + index as u64 * self.inode_size as u64;
+        let lba = self.part_lba as u64 + inode_byte / SECTOR_SIZE as u64;
+        let within = (inode_byte % SECTOR_SIZE as u64) as usize;
+
+        let mut win = [0u8; SECTOR_SIZE * 2];
+        let mut sec = [0u8; SECTOR_SIZE];
+        self.disk.read_sector(lba, &mut sec)?;
+        win[..SECTOR_SIZE].copy_from_slice(&sec);
+        self.disk.read_sector(lba + 1, &mut sec)?;
+        win[SECTOR_SIZE..].copy_from_slice(&sec);
+
+        f(&mut win[within..within + 128]);
+
+        let mut out = [0u8; SECTOR_SIZE];
+        out.copy_from_slice(&win[..SECTOR_SIZE]);
+        self.disk.write_sector(lba, &out)?;
+        out.copy_from_slice(&win[SECTOR_SIZE..]);
+        self.disk.write_sector(lba + 1, &out)?;
+        Ok(())
     }
 
     /// Reads up to `buf.len()` bytes from byte `offset`, returning how many were
@@ -887,6 +962,8 @@ impl Fs {
         let slot = &mut win[within..within + sz];
         slot.fill(0);
         slot[0..2].copy_from_slice(&node.mode.to_le_bytes());
+        slot[2..4].copy_from_slice(&node.uid.to_le_bytes());
+        slot[24..26].copy_from_slice(&node.gid.to_le_bytes());
         slot[4..8].copy_from_slice(&node.size.to_le_bytes());
         slot[26..28].copy_from_slice(&node.links.to_le_bytes());
         slot[28..32].copy_from_slice(&node.i_blocks.to_le_bytes());
@@ -989,6 +1066,8 @@ impl Fs {
         let ino = self.alloc_inode(false)?;
         let node = Inode {
             mode: NEW_FILE_MODE,
+            uid: 0,
+            gid: 0,
             links: 1,
             size: 0,
             i_blocks: 0,
@@ -1115,6 +1194,8 @@ impl Fs {
         // Allocate + write the new data blocks first (nothing existing touched).
         let mut node = Inode {
             mode: NEW_FILE_MODE,
+            uid: 0,
+            gid: 0,
             links: 1,
             size: data.len() as u32,
             i_blocks: 0,
@@ -1282,6 +1363,8 @@ impl Fs {
 
         let mut node = Inode {
             mode: NEW_DIR_MODE,
+            uid: 0,
+            gid: 0,
             links: 2, // "." and the name in the parent
             size: bs as u32,
             i_blocks: (bs / SECTOR_SIZE) as u32,
@@ -1352,6 +1435,8 @@ impl Fs {
     fn mark_inode_deleted(&mut self, ino: u32, mode: u16) -> Result<(), Error> {
         let dead = Inode {
             mode,
+            uid: 0,
+            gid: 0,
             links: 0,
             size: 0,
             i_blocks: 0,

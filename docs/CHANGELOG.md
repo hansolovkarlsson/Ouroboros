@@ -7,6 +7,70 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/`; 
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## `chmod` / `chown`: the write side of the mode/owner surface
+
+The `stat` surface made mode/owner *readable*; now they're *writable* too.
+`chmod` and `chown` change an ext2 file's permission bits and owner — the write
+twin of `ls -l`'s new columns. Read-only on every other filesystem (they can't
+model it): **ext2 only**.
+
+- Two new verbs — **`NP_CHMOD`** (`a1` = mode) and **`NP_CHOWN`** (`a1` = uid,
+  `a2` = gid, `u64::MAX` = "leave unchanged", so uid-only/gid-only need no
+  separate verb). `fsd`'s `Filesystem::chmod`/`chown` dispatch to the ext2 arm;
+  the others return the new **`FS_ERR_NOT_SUPPORTED`** code (`ls -l`-style honest
+  per-filesystem degradation, not a silent no-op).
+- ext2 patches the inode field **in place** — a surgical read-modify-write of
+  just the mode (offset 0) or uid/gid (offsets 2/24), *not* the existing
+  `write_inode` (which zeroes the whole slot for a fresh inode and would wipe a
+  pre-existing file's timestamps/flags). `chmod` preserves the `S_IFMT` type
+  nibble, so it can't turn a directory into a file.
+- **`/bin/chmod`** (`chmod <octal> <file>`) and **`/bin/chown`**
+  (`chown <uid|uid:gid|:gid> <file>`) — numeric only (no symbolic `u+x`, no name
+  lookup: there's no `/etc/passwd` yet). All arg parsing works in bytes, never
+  slicing a `&str` by a runtime index (the PIE relocation trap).
+- The 9P **export relays both verbs** (a new `fsd_call3` forwards `chown`'s third
+  param), so a remote `chmod /mnt/a/f` works the same as local — mirroring the
+  already-proven touch/mkdir/stat relays.
+
+Verified on QEMU: `chmod 640` + `chown 7:8` on an ext2 file → `ls -l` shows
+`-rw-r----- 7 8`; `chmod 700` then shows `-rwx------ 7 8` (owner preserved);
+`chmod 2755` renders the setgid bit as `-rwxr-sr-x` (mode/owner each preserving
+the other). The foreign observer confirms it: **e2fsck -fn is clean** after the
+in-place edits, and macOS `debugfs` reads back `Mode: 0700 User: 7 Group: 8`
+exactly. On FAT32, `chmod`/`chown` report "not supported by this filesystem
+(mode/owner need ext2)". (Remote-over-cluster relays compile and mirror working
+code but weren't two-node-booted this session — the 2vm images are FAT32.)
+
+## `stat` mode/owner surface: `ls -l` shows permissions and owners
+
+The per-file `stat` op (`NP_STAT`) reported size, a directory flag, and an
+mtime. It now also carries **POSIX mode + owner** — the keystone the whole
+users/permissions arc was waiting on (see `docs/gap-analysis.md`). Read-only:
+*stored + surfaced, not enforced*, and no `chmod`/`chown` write path yet.
+
+- The `NP_STAT` result record grew from **20 → 27 bytes**: a `u16` mode (ext2's
+  `i_mode` — the `S_IFMT` type nibble + 12 permission bits), a `u16` uid, a
+  `u16` gid, and a `mode_valid` byte. The triple sits *after* the original 20,
+  so the record's size/flags/time fields are byte-for-byte unchanged.
+- `fsd`'s `vfs::Stat` gains an `Option<FileMode>`. **ext2** fills it from the
+  inode (`read_inode` now parses `i_uid`/`i_gid` alongside the mode it already
+  read; created files stay root-owned, uid/gid `0`). **FAT32/exFAT/`/proc`**
+  return `None` — they can't model an owner or mode.
+- `ulib::stat_mode` decodes the triple (mirroring `stat_time`); `mode_valid`
+  `0` → `None`.
+- **`ls -l`** renders a full permission string (`drwxr-xr-x`, incl.
+  setuid/setgid/sticky) plus numeric uid/gid columns. When the filesystem
+  models mode/owner (ext2) they're real; otherwise `ls` synthesizes a
+  conventional mode from the type and shows `-` for the owner (the way Linux
+  presents a mode-less mount like vfat).
+- `netd`'s export relays the record verbatim (buffers sized by `STAT_INFO_LEN`,
+  so remote `ls -l` picked up the new columns for free).
+
+Verified on QEMU: `run-image-ext2` shows `drwx------ 0 0 … lost+found/` (ext2's
+`lost+found` is mode `0700`, root-owned) and real owners for host-created files;
+`run-image` (FAT32) shows the synthesized `drwxr-xr-x`/`-rw-r--r--` with `-`
+owners and the real mtime intact — no regression to the existing time field.
+
 ## Environment export: spawned commands inherit the shell's env
 
 The shell's environment was **shell-local** — `set FOO=bar` and `$VAR`

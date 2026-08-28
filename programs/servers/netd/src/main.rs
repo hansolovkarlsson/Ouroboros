@@ -3086,9 +3086,9 @@ fn build_9p_reply(msg: &[u8], out: &mut [u8; PREFIX_MAX], dials: &mut [Option<Di
             let n = read_file_chunk(fspath, tree, 0, &mut buf[..want]);
             frame_reply(out, size, ok_data(n, &buf))
         }
-        // Stat: relay to fsd; status = STAT_INFO_LEN, data = the 20-byte record
-        // (size/dir-flag/mtime). Lets `ls -l` work across a remote mount, not
-        // just on the local disk.
+        // Stat: relay to fsd; status = STAT_INFO_LEN, data = the fixed record
+        // (size/dir-flag/mtime, plus mode/owner when the remote fs models it).
+        // Lets `ls -l` work across a remote mount, not just on the local disk.
         v if v == ninep_abi::NP_STAT => {
             let status = fsd_call(
                 ninep_abi::NP_STAT,
@@ -3109,6 +3109,17 @@ fn build_9p_reply(msg: &[u8], out: &mut [u8; PREFIX_MAX], dials: &mut [Option<Di
             || v == ninep_abi::NP_RM =>
         {
             let status = fsd_call(v, tree, fspath.len() as u64, 0, fspath, &mut []);
+            frame_reply(out, status, &[])
+        }
+        // chmod: a1 = mode. chown: a1 = uid, a2 = gid (u64::MAX = unchanged).
+        // Path-only scalars, so relay straight through (fsd degrades to
+        // FS_ERR_NOT_SUPPORTED on a non-ext2 tree, same as locally).
+        v if v == ninep_abi::NP_CHMOD => {
+            let status = fsd_call(v, tree, fspath.len() as u64, p1, fspath, &mut []);
+            frame_reply(out, status, &[])
+        }
+        v if v == ninep_abi::NP_CHOWN => {
+            let status = fsd_call3(v, tree, fspath.len() as u64, p1, p2, fspath, &mut []);
             frame_reply(out, status, &[])
         }
         // Rename: payload is src (p0 bytes) then dst (p1 bytes), inline; fsd's
@@ -3297,12 +3308,19 @@ fn set_prefix(c: &mut TcpConn, bytes: &[u8]) {
 /// `FS_ERR_*`/`TASK_ERR_*` code `>= FS_ERR_MIN`). The shell's `np_call`, pared
 /// to netd's two callers. `tree` is `0` for now (a single implicit mount).
 fn fsd_call(verb: u64, tree: u64, p0: u64, p1: u64, path: &[u8], result: &mut [u8]) -> u64 {
+    fsd_call3(verb, tree, p0, p1, 0, path, result)
+}
+
+/// Like [`fsd_call`] but also forwards the third param (`a2`) - the one verb
+/// that needs it across the export is `NP_CHOWN` (`a1` = uid, `a2` = gid).
+fn fsd_call3(verb: u64, tree: u64, p0: u64, p1: u64, p2: u64, path: &[u8], result: &mut [u8]) -> u64 {
     const HDR: usize = ninep_abi::NP_REQ_PAYLOAD as usize;
     let mut req = [0u8; syscall_abi::MSG_MAX_LEN as usize];
     req[0..8].copy_from_slice(&verb.to_le_bytes());
     req[8..16].copy_from_slice(&tree.to_le_bytes()); // 0 = disk; NS_PROC_TREE = /proc
     req[16..24].copy_from_slice(&p0.to_le_bytes());
     req[24..32].copy_from_slice(&p1.to_le_bytes());
+    req[32..40].copy_from_slice(&p2.to_le_bytes());
     let end = HDR + path.len();
     if end > req.len() {
         return syscall_abi::FS_ERROR;
