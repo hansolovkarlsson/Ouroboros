@@ -1,0 +1,25 @@
+NAME
+    id - print this session's user identity
+
+SYNOPSIS
+    id
+
+DESCRIPTION
+    Prints the calling task's user and group id as "uid=N gid=M". Numeric only
+    - there is no /etc/passwd yet, so names are not resolved (that arrives with
+    the login/users step).
+
+    Identity is carried by the kernel per task and inherited across spawn, so
+    running id after su reports the new user - the proof that a command runs as
+    whoever started it:
+
+        # id
+        uid=0 gid=0
+        # su 1000:1000
+        $ id
+        uid=1000 gid=1000
+
+    A pipeline stage like any other: `id | grep uid` works.
+
+SEE ALSO
+    su, sh

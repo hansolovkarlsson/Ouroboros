@@ -630,6 +630,39 @@ pub const GET_ENV: u64 = 60;
 /// documented in `ulib`/the shell).
 pub const ENV_MAX: u64 = 2048;
 
+/// **Set the calling task's user identity** (uid + gid): `arg0` = uid,
+/// `arg1` = gid (each a `u32` in the low bits). Returns `0` on success, or
+/// [`SET_ID_DENIED`] if the caller isn't root.
+///
+/// The privilege model is deliberately minimal: **only a task whose current
+/// uid is 0 (root) may change identity.** Root can *drop* to any user (the
+/// mechanism a `login` will use), but a non-root task can't change its uid at
+/// all - no escalation, and `su`-back-to-root needs authentication (the login
+/// step, not this one). Children inherit their parent's identity at [`SPAWN`],
+/// so a command runs as whoever started it.
+///
+/// The kernel owns this binding because it is the *only* component that
+/// unforgeably knows an IPC message's real sender - so it is the root of trust
+/// a permission check (a later step) builds on. Names, passwords, `/etc/passwd`,
+/// and `/home` are entirely userland; the kernel only knows uid/gid are numbers.
+pub const SET_ID: u64 = 61;
+
+/// **Read a task's user identity**: `arg0` = task index. Returns the packed
+/// `(gid << 32) | uid`, or [`GET_ID_ERR`] for an out-of-range task. A task reads
+/// its own by passing its [`SELF`] index (ulib's `getuid`/`getgid` wrap that).
+/// Backs `/bin/id` and, later, the permission check in `fsd` (which is handed
+/// the sender's task index by the IPC layer).
+pub const GET_ID: u64 = 62;
+
+/// [`SET_ID`] refused: the calling task isn't root (uid 0). Distinct from the
+/// `0` success return.
+pub const SET_ID_DENIED: u64 = u64::MAX;
+
+/// [`GET_ID`] with an out-of-range task index. No real packed identity reaches
+/// `u64::MAX` (that would be uid = gid = `0xFFFF_FFFF`), so it's an unambiguous
+/// sentinel.
+pub const GET_ID_ERR: u64 = u64::MAX;
+
 /// [`POWER`] mode: power the machine off.
 pub const POWER_OFF: u64 = 0;
 /// [`POWER`] mode: halt the CPU (stop, without cutting power).

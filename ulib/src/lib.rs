@@ -175,6 +175,34 @@ pub fn stdout_target() -> u64 {
     syscall(syscall_abi::STDOUT_TARGET, 0)
 }
 
+/// This task's own scheduler-slot index (`SELF`).
+pub fn self_task() -> u64 {
+    syscall(syscall_abi::SELF, 0)
+}
+
+/// Set the calling task's user identity (uid + gid). Returns `0`, or
+/// [`syscall_abi::SET_ID_DENIED`] if the caller isn't root. Only root may
+/// change identity; children inherit it at spawn. Backs the shell's `su`.
+pub fn set_id(uid: u32, gid: u32) -> u64 {
+    syscall4(syscall_abi::SET_ID, uid as u64, gid as u64, 0, 0)
+}
+
+/// The packed `(gid << 32) | uid` of task `task`, or [`syscall_abi::GET_ID_ERR`]
+/// for an out-of-range index. Use [`getuid`]/[`getgid`] for this task's own.
+pub fn task_id(task: u64) -> u64 {
+    syscall(syscall_abi::GET_ID, task)
+}
+
+/// This task's uid (the user it runs as; `0` = root).
+pub fn getuid() -> u32 {
+    task_id(self_task()) as u32
+}
+
+/// This task's gid.
+pub fn getgid() -> u32 {
+    (task_id(self_task()) >> 32) as u32
+}
+
 /// The preemption tick count since boot (`uptime`'s source).
 pub fn get_ticks() -> u64 {
     syscall(syscall_abi::GET_TICKS, 0)

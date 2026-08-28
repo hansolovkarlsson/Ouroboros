@@ -426,6 +426,10 @@ fn spawn_staged(total_len: u64, stdout_target: u64, argv_len: u64, cwd_len: u64)
             // seen by every command it spawns, and the child reads it via
             // GET_NS. An empty parent namespace copies as empty (the default).
             tasks::set_namespace(slot, tasks::namespace(tasks::current_task()));
+            // A child also inherits its parent's user identity (uid/gid) - a
+            // command runs as whoever started it. Unlike the staged attributes
+            // above, identity is carried, not chosen per-spawn.
+            tasks::inherit_id(slot, tasks::current_task());
             // SAFETY: called from an SVC handler with interrupts masked
             // throughout - single-core, so nothing else can observe the
             // table set mid-rebuild.
@@ -759,6 +763,29 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
         }
         syscall_abi::STDOUT_TARGET => tasks::stdout_target_of(tasks::current_task()),
         syscall_abi::SELF => tasks::current_task() as u64,
+        syscall_abi::SET_ID => {
+            // Only root (uid 0) may change identity - root can drop to any user
+            // (a login's mechanism), a non-root task can't change its uid at all
+            // (no escalation). This one check is the whole privilege model for
+            // now; `su`-back-to-root needs authentication (the login step).
+            if tasks::uid_of(tasks::current_task()) != 0 {
+                syscall_abi::SET_ID_DENIED
+            } else {
+                tasks::set_id(tasks::current_task(), arg0 as u32, arg1 as u32);
+                0
+            }
+        }
+        syscall_abi::GET_ID => {
+            // arg0 = task index -> its packed (gid << 32) | uid. Identity isn't
+            // secret (uid/gid aren't credentials), so any task may read any
+            // slot's - `ps` shows owners, `fsd` checks the sender's later.
+            let t = arg0 as usize;
+            if t >= tasks::NUM_TASKS {
+                syscall_abi::GET_ID_ERR
+            } else {
+                tasks::id_of(t)
+            }
+        }
         syscall_abi::HEAP_INFO => {
             let (base, size) = tasks::task_region(tasks::current_task());
             let (heap_base, heap_size) = loader::heap_area(base, size);

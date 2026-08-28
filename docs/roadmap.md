@@ -328,10 +328,22 @@ size cap.) Cheap wins first; the editor last, gated on item 1.
 
 ### 4. Login, users, security, file permissions (a substantial arc, medium-term)
 
+> **Progress (2026-08-28): step 1, *identity*, is done.** A kernel-owned
+> uid/gid per task now exists (`SET_ID`/`GET_ID`, default root, inherited across
+> spawn, root-gated — no escalation), observable via `/bin/id` and settable via
+> the `su` builtin, with the prompt showing `#`/`$`. The architectural call was
+> made to keep the binding **in the kernel** (the unforgeable root of trust),
+> reversing this section's earlier "probably userland" lean — see
+> `CHANGELOG.md` and `docs/gap-analysis.md` §6. **Remaining: (2) login +
+> accounts** (a login prompt, `/etc/passwd` with names + hashed passwords,
+> `/home`), and **(3) enforcement** (check the sender's uid vs. the inode
+> mode/owner in the `FSOP_*` dispatch — the metadata and the identity both exist
+> now, they just aren't joined).
+
 The biggest of these — the step from "single implicit user, whoever's at the
 keyboard" to a real **identity and permission model**. Pieces: a notion of
-*users* (uid/gid), a **login** prompt gating the shell, credential storage
-(a `/etc/passwd`-shaped file with hashed passwords), per-file
+*users* (uid/gid — **done**), a **login** prompt gating the shell, credential
+storage (a `/etc/passwd`-shaped file with hashed passwords), per-file
 **ownership + permission bits** actually *enforced* on `fsd` operations, and
 a privilege boundary for the operations that should need it (format, mount,
 kill another user's task, the cluster export).
