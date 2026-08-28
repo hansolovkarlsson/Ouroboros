@@ -572,10 +572,10 @@ esp: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin args
 	# Absent -> login falls back to root.
 	python3 scripts/mkpasswd.py > $(ESP_DIR)/etc/passwd
 	python3 scripts/mkgroup.py > $(ESP_DIR)/etc/group
-	# Per-user home directories under /User (the login home for `user`; `~`
+	# Per-user home directories under /Users (the login home for `user`; `~`
 	# expands to it). FAT can't record an owner, so it's world-usable here; on
 	# ext2 the image build chowns it (see the ext2-src staging).
-	mkdir -p $(ESP_DIR)/User/user
+	mkdir -p $(ESP_DIR)/Users/user
 
 # Boots the ESP directory directly in QEMU (no disk image needed) against
 # the aarch64 OVMF firmware installed by `brew install qemu`.
@@ -810,7 +810,7 @@ $(EXFAT_PART): esp
 	mkdir -p $(BUILD_DIR)/exfat-src/etc
 	python3 scripts/mkpasswd.py > $(BUILD_DIR)/exfat-src/etc/passwd
 	python3 scripts/mkgroup.py > $(BUILD_DIR)/exfat-src/etc/group
-	mkdir -p $(BUILD_DIR)/exfat-src/User/user
+	mkdir -p $(BUILD_DIR)/exfat-src/Users/user
 	printf 'hello from an exFAT volume\r\n' > $(BUILD_DIR)/exfat-src/HELLO.TXT
 	printf 'line one\r\nline two has several words\r\nthird and final line\r\n' > $(BUILD_DIR)/exfat-src/README.TXT
 	mkdir -p $(BUILD_DIR)/exfat-src/SUB
@@ -871,7 +871,7 @@ $(EXT2_PART): esp
 	mkdir -p $(BUILD_DIR)/ext2-src/etc
 	python3 scripts/mkpasswd.py > $(BUILD_DIR)/ext2-src/etc/passwd
 	python3 scripts/mkgroup.py > $(BUILD_DIR)/ext2-src/etc/group
-	mkdir -p $(BUILD_DIR)/ext2-src/User/user
+	mkdir -p $(BUILD_DIR)/ext2-src/Users/user
 	printf 'hello from an ext2 volume\n' > $(BUILD_DIR)/ext2-src/HELLO.TXT
 	printf 'line one\nline two has several words\nthird and final line\n' > $(BUILD_DIR)/ext2-src/README.TXT
 	mkdir -p $(BUILD_DIR)/ext2-src/sub
@@ -883,8 +883,8 @@ $(EXT2_PART): esp
 	# 1000) so a logged-in user can write in ~ - the permission-enforcement demo
 	# (login user; touch ~/f works, touch / is denied). ext2-only (FAT can't
 	# record an owner). debugfs ships with e2fsprogs alongside mke2fs.
-	"$(DEBUGFS)" -w -R "sif /User/user uid 1000" $(EXT2_PART) 2>/dev/null
-	"$(DEBUGFS)" -w -R "sif /User/user gid 1000" $(EXT2_PART) 2>/dev/null
+	"$(DEBUGFS)" -w -R "sif /Users/user uid 1000" $(EXT2_PART) 2>/dev/null
+	"$(DEBUGFS)" -w -R "sif /Users/user gid 1000" $(EXT2_PART) 2>/dev/null
 	rm -rf $(BUILD_DIR)/ext2-src
 
 # build/espext2.img: a two-partition MBR disk - partition 1 ext2 (fsd mounts it),

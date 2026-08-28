@@ -27,7 +27,7 @@ rewrite.
 - **`/bin/useradd <name> [-u uid] [-g group|gid]`** — create a user (root only):
   appends the account, prompts the initial password, creates a **user-private
   group** (`gid == uid`, the Linux default) when `-g` is absent, and makes +
-  chowns the home directory `/User/<name>`.
+  chowns the home directory `/Users/<name>`.
 - **`/bin/groupadd <name> [-g gid]`** and **`/bin/usermod <user> -g <group|gid>`**
   — create a group / set a user's **primary group** (root only). The group model
   is **primary-gid** (a task carries one kernel gid); full supplementary-group
@@ -36,9 +36,9 @@ rewrite.
   still works). A non-root `su` stays denied (the kernel escalation guard).
 - **`id` shows names** — `uid=1000(user) gid=1000(user)`, resolved via
   `/etc/passwd` + `/etc/group`, numeric fallback if unlisted.
-- **Per-user homes under `/User`** — the login home for `user` is `/User/user`;
+- **Per-user homes under `/Users`** — the login home for `user` is `/Users/user`;
   login exports `HOME`, and the shell expands a leading **`~`** to `$HOME`
-  (`cd ~`, `cat ~/f`). The ext2 image chowns `/User/user` to the user, so the
+  (`cd ~`, `cat ~/f`). The ext2 image chowns `/Users/user` to the user, so the
   permission-enforcement demo is real (a user writes in `~`, `/` is denied).
 - **`/etc/group`** (`name:gid:members`) staged by `scripts/mkgroup.py`; the
   account files are read chunked into a 2 KB buffer (~20 accounts), matching the

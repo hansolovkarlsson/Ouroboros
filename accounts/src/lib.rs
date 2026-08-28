@@ -429,7 +429,7 @@ mod tests {
 
     fn passwd() -> String {
         format!(
-            "root:0:0:/:00:{H}\nuser:1000:1000:/User/user:1122:{H}\nbob:1001:1001:/User/bob:aabb:{H}\n"
+            "root:0:0:/:00:{H}\nuser:1000:1000:/Users/user:1122:{H}\nbob:1001:1001:/Users/bob:aabb:{H}\n"
         )
     }
 
@@ -440,7 +440,7 @@ mod tests {
         let u = find_user_by_name(pw, b"user").unwrap();
         assert_eq!(u.uid, 1000);
         assert_eq!(u.gid, 1000);
-        assert_eq!(u.home, b"/User/user");
+        assert_eq!(u.home, b"/Users/user");
         assert_eq!(find_user_by_uid(pw, 1001).unwrap().name, b"bob");
         assert!(find_user_by_name(pw, b"nobody").is_none());
     }
@@ -467,7 +467,7 @@ mod tests {
         let salt = make_salt(123456789);
         let hash = hash_password(&salt, b"hunter2");
         let mut line = [0u8; 256];
-        let n = format_account_line(&mut line, b"carol", 1005, 1005, b"/User/carol", &salt, &hash)
+        let n = format_account_line(&mut line, b"carol", 1005, 1005, b"/Users/carol", &salt, &hash)
             .unwrap();
         let acct = find_user_by_name(&line[..n], b"carol").unwrap();
         assert_eq!(acct.uid, 1005);
@@ -486,7 +486,7 @@ mod tests {
     fn replace_line_rewrites_one() {
         let p = passwd();
         let pw = p.as_bytes();
-        let replacement = format!("user:1000:42:/User/user:1122:{H}");
+        let replacement = format!("user:1000:42:/Users/user:1122:{H}");
         let mut out = [0u8; 512];
         let (n, replaced) = replace_line(pw, &mut out, b"user", replacement.as_bytes()).unwrap();
         assert!(replaced);

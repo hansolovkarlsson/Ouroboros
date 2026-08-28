@@ -13,9 +13,9 @@ would generate its own. Passwords are the same as the usernames.
     root / root   (uid 0)
     user / user   (uid 1000)
 
-Home directories live under /User (this project's chosen home base): root keeps
-'/', a normal user gets '/User/<name>' (the login sets it as the initial cwd and
-exports HOME, so `~` expands to it). The image build stages /User/<name> and, on
+Home directories live under /Users (this project's chosen home base): root keeps
+'/', a normal user gets '/Users/<name>' (the login sets it as the initial cwd and
+exports HOME, so `~` expands to it). The image build stages /Users/<name> and, on
 ext2, chowns it to the user. Usage: mkpasswd.py > /path/to/passwd
 """
 import hashlib
@@ -25,7 +25,7 @@ import sys
 # (name, uid, gid, home, password)
 ACCOUNTS = [
     ("root", 0, 0, "/", "root"),
-    ("user", 1000, 1000, "/User/user", "user"),
+    ("user", 1000, 1000, "/Users/user", "user"),
 ]
 
 

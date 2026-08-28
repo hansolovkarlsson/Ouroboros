@@ -6,7 +6,7 @@ SYNOPSIS
 
 DESCRIPTION
     Adds an account to /etc/passwd and prompts (twice, no echo) for its initial
-    password. ROOT ONLY. Creates the home directory /User/<name> and, on ext2,
+    password. ROOT ONLY. Creates the home directory /Users/<name> and, on ext2,
     chowns it to the new user.
 
     -u <uid>          use this uid (default: the next free id at/above 1000)

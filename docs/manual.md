@@ -155,10 +155,10 @@ $ set PATH=/bin ; env           # a real environment; $VAR expansion
   shows `#` for root, `$` for a normal user. `logout` (or `exit`) ends the
   session and returns to the login prompt; `su <user>` (or `su <uid>`) lets
   **root** drop to a named user (a logged-in user can't escalate). A logged-in
-  user lands in their home under **`/User`**, and `~` expands to it
+  user lands in their home under **`/Users`**, and `~` expands to it
   (`cd ~`, `cat ~/notes`). See `man login`.
 - **Account management** (`/bin`, root only): `useradd <name> [-u uid]
-  [-g group|gid]` (creates the account, prompts a password, makes `/User/<name>`),
+  [-g group|gid]` (creates the account, prompts a password, makes `/Users/<name>`),
   `passwd [user]` (change a password), `groupadd <name>`, and `usermod <user> -g
   <group>` (set a primary group). `id` shows your uid/gid **with names**. On ext2,
   file permissions are enforced (owner→group→other; root bypasses), so a normal

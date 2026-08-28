@@ -3,7 +3,7 @@
 //!
 //! Appends a `name:uid:gid:home:salt:hash` line to `/etc/passwd`, prompting for
 //! the initial password (echo off, clock-derived salt). The home directory is
-//! `/User/<name>` - created (`mkdir`) and chowned to the new user (best-effort:
+//! `/Users/<name>` - created (`mkdir`) and chowned to the new user (best-effort:
 //! ext2 records the owner, FAT/exFAT can't and the "not supported" reply is
 //! ignored).
 //!
@@ -20,7 +20,7 @@
 
 const PASSWD_FILE: &str = "/etc/passwd";
 const GROUP_FILE: &str = "/etc/group";
-const HOME_ROOT: &[u8] = b"/User";
+const HOME_ROOT: &[u8] = b"/Users";
 const BUF: usize = syscall_abi::SAFECOPY_MAX as usize;
 
 #[no_mangle]
@@ -94,7 +94,7 @@ pub extern "C" fn _start() -> ! {
         uid // user-private group, gid == uid
     };
 
-    // Home path: /User/<name>.
+    // Home path: /Users/<name>.
     let mut homebuf = [0u8; 160];
     let mut hlen = 0usize;
     push(&mut homebuf, &mut hlen, HOME_ROOT);
@@ -150,7 +150,7 @@ pub extern "C" fn _start() -> ! {
 
     // Create and own the home directory (best-effort; chown/chmod are ext2-only).
     let home_str = core::str::from_utf8(home).unwrap_or("");
-    let _ = ulib::fs_op_path(syscall_abi::FSOP_MKDIR, "/User"); // ok if it exists
+    let _ = ulib::fs_op_path(syscall_abi::FSOP_MKDIR, "/Users"); // ok if it exists
     let mk = ulib::fs_op_path(syscall_abi::FSOP_MKDIR, home_str);
     if ulib::is_fs_error(mk) {
         ulib::con_write(b"useradd: account created, but home directory could not be made\r\n");

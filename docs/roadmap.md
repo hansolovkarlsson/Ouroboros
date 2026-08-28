@@ -400,8 +400,8 @@ size cap.) Cheap wins first; the editor last, gated on item 1.
 > <username>` and `id` **name resolution**; `/etc/group` (`name:gid:members`) with
 > a **primary-gid** group model (`usermod -g` / `useradd -g` set the primary gid;
 > supplementary groups stay a kernel-identity tier); per-user home directories
-> under **`/User`** with `~`→`$HOME` shell expansion (login sets `HOME`, the ext2
-> image chowns `/User/user` to the user). Salts are **clock-derived** (`MONOTONIC_US`
+> under **`/Users`** with `~`→`$HOME` shell expansion (login sets `HOME`, the ext2
+> image chowns `/Users/user` to the user). Salts are **clock-derived** (`MONOTONIC_US`
 > + hash) — documented as weak, with a virtio-entropy `RANDOM` syscall the noted
 > upgrade. The account files are read chunked into a 2 KB buffer (~20 accounts).
 >
