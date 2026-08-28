@@ -1,0 +1,27 @@
+# Meson cross-file TEMPLATE to build picolibc for Ouroboros: clang ->
+# aarch64-none-elf (compatible with our aarch64-unknown-none), -fPIC so its code
+# self-relocates (R_AARCH64_RELATIVE, not the unloadable ABS64), LLVM binutils
+# from the Rust toolchain. The @LLVM_BIN@ token is the Rust toolchain's LLVM
+# binutils dir; scripts/build-picolibc.sh substitutes it (via `rustc --print
+# sysroot`) into a resolved copy before invoking meson, so no host-specific path
+# is committed. See libc/ and docs/processes.md's "Writing a program in C".
+[binaries]
+c = ['clang', '-target', 'aarch64-none-elf', '-nostdlib', '-fPIC', '--ld-path=@LLVM_BIN@/gcc-ld/ld.lld']
+ar = '@LLVM_BIN@/llvm-ar'
+as = '@LLVM_BIN@/llvm-as'
+nm = '@LLVM_BIN@/llvm-nm'
+strip = '@LLVM_BIN@/llvm-strip'
+
+[host_machine]
+system = 'none'
+cpu_family = 'aarch64'
+cpu = 'aarch64'
+endian = 'little'
+
+[properties]
+skip_sanity_check = true
+
+# picolibc 1.8.9's tinystdio has a few implicit-function-declaration sites
+# (e.g. fcvtl.c -> fcvtl_r) that modern clang treats as a hard error; demote it.
+[built-in options]
+c_args = ['-Wno-error=implicit-function-declaration']

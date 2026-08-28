@@ -33,7 +33,9 @@ about the practical trade for a would-be user.**
   concurrent HTTP server.
 - **Preemptive multitasking**, round-robin, **single core** (no SMP), no
   priorities.
-- **Not POSIX, no `fork`** (a `spawn` model instead), **no libc yet**, no
+- **Not POSIX, no `fork`** (a `spawn` model instead); **a libc exists as a
+  userland personality — picolibc is ported** (C programs run: float `printf`,
+  `qsort`, `malloc`), though no real *application* is ported yet and there's no
   dynamic linking; programs are position-independent `aarch64-none`
   binaries.
 - **Single-user, no accounts, no per-user authentication** — the cluster has
@@ -52,7 +54,7 @@ that is *barely begun*.
 | Kernel model | Microkernel | Microkernel | Monolithic | Monolithic | Hybrid (file-server kernel) | Microkernel (layered, trait-based) |
 | Memory-safe impl language | **Rust** | C | C | C | C | **Rust** |
 | Fault isolation of drivers/servers | **Yes (MMU + supervised restart)** | Yes (reincarnation server) | No (in-kernel) | No | Partial | Yes (hot-reload focus) |
-| POSIX / C-program portability | **No** (planned via userland libc) | Yes | Yes | Yes (the standard) | Partial (APE) | No |
+| POSIX / C-program portability | **Partial** (userland libc: picolibc ported, no app yet) | Yes | Yes | Yes (the standard) | Partial (APE) | No |
 | "Everything is a file" / namespaces | **Yes (per-task ns + bind)** | Partial | Partial | Partial | **Yes (the origin)** | No |
 | Distributed / network-transparent | **Yes (9P-over-TCP, remote cpu)** | No | Add-on (NFS, etc.) | Add-on | **Yes (native 9P)** | No |
 | SMP / multicore | No | Yes | Yes | Yes | Yes | Varies |
@@ -135,10 +137,12 @@ structure.
   of code: a small, coherent, comprehensible whole where the boot path, the
   syscall boundary, the servers, and the cluster protocol all fit in your
   head.
-- **The single biggest thing you give up across the board is POSIX / C
-  portability** — and that's a *known, deliberately-parked* gap with a clear
-  plan (a userland libc personality, not a POSIX kernel — see
-  `docs/roadmap.md`), not a dead end.
+- **The biggest thing you give up across the board is POSIX / C portability**
+  — and that gap is *now half-closed*: the userland libc personality is built
+  (picolibc is ported, C programs run — see `docs/libc-arc-postmortem.md`), so
+  what's left is porting a real *application* and the `fork`/`select`/signals
+  mismatches, not inventing the mechanism. Deliberately a userland personality,
+  never a POSIX kernel — see `docs/roadmap.md`.
 
 See also: `docs/architecture.md` (how the pieces fit),
 `docs/roadmap-cluster.md` (where the distributed direction is headed), and

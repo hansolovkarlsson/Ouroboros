@@ -172,10 +172,20 @@ be reviewed after the fact from the saved screenshots.
 > `NP_FSTAT`/`NP_CLUNK`, a per-client fid table, permission checked once at open),
 > the C libc uses them, and they coexist with the path verbs — the
 > deferred-since-Phase-0 "a POSIX fd ≈ a 9P fid" feature, paying off for both C
-> portability and the 9P model. **Remaining:** port `picolibc`/`newlib` on top;
-> then C programs like SQLite and a small C compiler become "port one more
-> program." See `docs/processes.md`'s "Writing a program in C." The reasoning
-> below is the original parked plan, still accurate.
+> portability and the 9P model. **picolibc landed next** (sixth step, the real C
+> library): `picolibc` 1.8.9 is built `-fPIC` (so it self-relocates under our
+> loader — `R_AARCH64_RELATIVE` only, zero `ABS64`) and linked against OUR
+> porting layer — the same `crt0`/syscall stubs (`write`/`read`/`open`/`sbrk`/
+> `_exit`), which is exactly what picolibc's `posix-console` stdio bottoms out
+> at, plus two 128-bit-shift builtins its float printf needs (`libc/pico/
+> builtins.c`). `make cpico-bin`, `/bin/CPICO`: **full `%f`/`%e`/`%g` float
+> formatting** (ryu), `snprintf`, `qsort`, `malloc`, `strtol` — unmodified
+> standard C the hand-rolled libc couldn't run. The prebuilt static lib + headers
+> are committed under `third_party/picolibc-prebuilt` (regenerate with
+> `scripts/build-picolibc.sh`), so `make` needs no meson/ninja. **Remaining:**
+> port a real application on top (SQLite, a small C compiler) — now "port one
+> more program," not "invent the mechanism." See `docs/processes.md`'s "Writing a
+> program in C." The reasoning below is the original parked plan, still accurate.
 
 **The goal, restated honestly.** The original `notes.txt` intent was
 "POSIX-ish system calls." What actually got built is *not* POSIX and not
@@ -202,15 +212,18 @@ userland compat layer (musl + `fdio`); MINIX3 and Plan 9's APE do the
 same. A message-passing microkernel running unmodified C programs is
 normal.
 
-**Shape of the work, when it's eventually picked up:**
+**Shape of the work:**
 
-- **Port a small libc** — `newlib` or `picolibc` first (designed for
-  exactly this, a porting layer of ~17-20 "syscall stubs": `_open`,
-  `_read`, `_write`, `_close`, `_lseek`, `_fstat`, `_sbrk`, `_exit`, a
-  process-creation call). `musl` later for real completeness. Much of the
-  substrate already exists: `read`/`write`/`lseek`/stat map onto
-  `FSOP_READ_AT`/the `read_cursor`/`FSOP_MOUNT_INFO`; `_sbrk`/`malloc`
-  onto the existing userland heap (`heap_info`); `_exit` onto `EXIT`.
+- **~~Port a small libc~~ — DONE (picolibc, 2026-08-28).** `picolibc` is
+  ported and running (`/bin/CPICO`: `%f`/`%e`/`%g` float printf, `snprintf`,
+  `qsort`, `malloc`, `strtol`), built `-fPIC` so it self-relocates under the
+  existing loader with zero `ABS64`, linked against the same syscall stubs the
+  hand-rolled libc used (`write`/`read`/`open`/`sbrk`/`_exit` — picolibc's
+  `posix-console` stdio bottoms out at exactly those). No kernel/loader change.
+  The full six-step arc (first C program → `.data`/`.bss` → minimal libc → file
+  I/O + pipes → fids → picolibc) is recorded in `roadmap-completed.md` and
+  `docs/libc-arc-postmortem.md`. **The mechanism is done; the remaining bullets
+  below are the still-forward parts.**
 
 - **The architectural mismatches** (not just missing functions — think
   about these before they can bite):
@@ -231,16 +244,14 @@ normal.
     mostly get stubbed in a first port; anonymous `mmap` maps to region
     allocation, file-backed is harder.
 
-- **The one connection worth remembering: a POSIX fd ≈ a Plan 9 fid.**
-  Phase 0 *deferred* fids (verbs stayed path-based, which paid off over TCP
-  in Phase 1). But an open-file handle with a cursor is exactly what a 9P
-  fid is *and* exactly what a POSIX `fd` needs — so adding fids someday
-  serves the "proper" 9P model **and** POSIX portability in a single move.
-  Until then, the only thing to protect while the ABI is fluid is that the
-  server protocols stay *expressive enough to build fids/fds on* (stat, a
-  cursored handle, directory iteration, a poll-able wait) — which they
-  already are. So the design isn't painted into a corner; it has a clean
-  future step (fids) that pays off twice.
+- **~~The one connection worth remembering: a POSIX fd ≈ a Plan 9 fid~~ —
+  DONE (fids, libc arc step 5).** Phase 0 *deferred* fids (verbs stayed
+  path-based, which paid off over TCP in Phase 1). The libc arc cashed the
+  deferral: `fsd` now has server-side open-file handles (`NP_OPEN`/`NP_PREAD`/
+  `NP_PWRITE`/`NP_FSTAT`/`NP_CLUNK`, a per-client fid table, permission checked
+  once at open), a fid is directly usable as a C fd, and they coexist with the
+  path verbs — one feature serving the 9P model *and* POSIX portability, exactly
+  as predicted.
 
 - **The existence proof to read first: Redox OS's `relibc`.** Redox is a
   Rust microkernel with exactly this architecture (non-POSIX kernel, POSIX
@@ -253,9 +264,14 @@ normal.
   calls `fork()`" without putting `fork` back in the kernel. See
   `docs/research-redox-and-pi.md`.
 
-Not sequenced, not started — this is parked so the reasoning isn't lost.
-It only matters once running third-party C code is actually a goal, which
-is a long way off.
+**Status (2026-08-28): the mechanism is built, the arc's remainder is
+forward-looking.** The six-step libc arc is complete through a running picolibc
+(see `roadmap-completed.md` for the sequenced record and
+`docs/libc-arc-postmortem.md` for the retrospective). What remains is genuinely
+different in kind — "port one more program": a real application (SQLite, a small
+C compiler), plus the still-open architectural mismatches above (`posix_spawn`
+native / `fork` in userspace à la Redox's `redox-rt`, `select`/`poll`/signals/
+`mmap`). Those matter only once running third-party C code is an active goal.
 
 ## North-star directions ("Polaris" planning pass, 2026-08-26, not sequenced)
 

@@ -7,6 +7,55 @@ for the forward plan see [`roadmap.md`](roadmap.md).
 
 ---
 
+## 2026-08-28 (cont.) — the libc arc, ending at a real C library (picolibc)
+
+After the users/permissions arc, a second arc the same day: making Ouroboros run
+C. It went in six steps — (1) a first C program (clang → our loader, no kernel
+change), (2) `.data`/`.bss` loader support so C globals/statics work, (3) a
+hand-rolled minimal libc (`printf`/`malloc`/`string.h`), (4) file I/O + a
+stdout-target-aware `write` so a C program works in a pipeline, (5) fids
+(server-side open-file handles in `fsd` — a POSIX fd *is* a 9P fid), and (6) the
+one I'll write up here: **porting picolibc**, the real C library.
+
+The whole port turned out to be a build-and-link exercise with **no kernel or
+loader change** — which is the interesting part. The reason is that the porting
+layer was already built. picolibc's stdio, compiled with `-Dposix-console=true`,
+bottoms out at `write`/`read`/`open`/`sbrk`/`_exit` on fd 0/1/2 — exactly the
+syscall stubs steps 3–4 already wrote in `libc/src/os.c` and `file.c`. So
+picolibc's `libc.a` links against *our* `crt0` + stubs (recompiled against
+picolibc's own headers so `struct stat`/flag layouts match), we drop our own
+`stdio.c`/`stdlib.c`/`string.c`, and picolibc supplies `printf`/`malloc`/
+`memcpy`/`qsort`/…
+
+Two things had to be right. First, **the relocations**: picolibc had to be built
+`-fPIC` so it self-relocates the way every Ouroboros program does — the linked
+binary came out `static-pie` with 22–23 `R_AARCH64_RELATIVE` and **zero
+`ABS64`** (`llvm-objdump -R`), so the loader eats it unchanged. That the recurring
+ABS64 trap *didn't* bite here is precisely because `-fPIC` is the whole contract
+our loader depends on. Second, **two compiler-rt builtins**: the float-printf
+(ryu) path calls `__lshrti3`/`__ashlti3` (128-bit shifts), and macOS ships
+compiler-rt only as Mach-O — unusable for our ELF link. clang lowers a variable
+128-bit shift *to those very symbols*, so I couldn't implement them with `>>`
+(infinite recursion); they split the value into two 64-bit halves and shift
+those. Thirty lines in `libc/pico/builtins.c` and the link closed.
+
+The regeneration friction is worth recording: modern clang makes
+implicit-function-declaration a hard error, tripping a couple of picolibc 1.8.9
+tinystdio files, and Apple clang defaults to the Mach-O linker, which rejects
+meson's GNU-linker probe. Both are handled in `libc/picolibc-cross.txt` (demote
+the warning; `--ld-path=…/ld.lld` to force LLD). The built lib is committed
+stripped (`third_party/picolibc-prebuilt`, ~2.1 MB) so a checkout needs no
+meson; `scripts/build-picolibc.sh` regenerates it and the 39 MB source is
+gitignored.
+
+The proof: booted, logged in as root, ran `/bin/CPICO` (`libc/picodemo.c`) —
+`pi=3.14159  e=2.718e+00  g=1.23457e+06`, `qsort: 1 2 3 5 8 9`, `snprintf`,
+`malloc`, `strtol`, exit 0. Full float formatting the hand-rolled printf never
+had. What's left in the arc is no longer "invent the mechanism" — it's "port one
+more program" (SQLite, a small C compiler). One honest follow-up: picolibc's
+posix-console stdout is unbuffered, so console output is one IPC round trip per
+character — correct but chatty; line-buffering it is the natural next tidy-up.
+
 ## 2026-08-28 — the users/permissions arc: from stored metadata to an enforced login
 
 A full arc in one span: the step from "single implicit user, no permissions" to

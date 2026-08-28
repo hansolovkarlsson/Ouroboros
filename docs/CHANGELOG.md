@@ -7,6 +7,43 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/`; 
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## picolibc: the real C library (libc arc, step 6)
+
+Unmodified standard-C stdlib code now runs on Ouroboros through a **picolibc
+port** — `%f`/`%e`/`%g` float formatting, `snprintf`, `qsort`, `malloc`,
+`strtol`, the things the hand-rolled libc (steps 3–4) couldn't do. picolibc is
+the C library; our `libc/src` stubs are its *porting layer*.
+
+- **picolibc 1.8.9, built `-fPIC`** → it self-relocates under our existing PIE
+  loader with **`R_AARCH64_RELATIVE` only, zero `ABS64`** (the recurring
+  unloadable-relocation trap — checked with `llvm-objdump -R`). No loader or
+  kernel change was needed; the whole port is a build-and-link exercise.
+- **Its stdio bottoms out at our stubs.** Built with `-Dposix-console=true`,
+  picolibc wires `stdin`/`stdout`/`stderr` to fd 0/1/2 — i.e. to the
+  `write`/`read`/`open`/`close`/`lseek`/`fstat`/`sbrk`/`_exit` in `libc/src/`
+  (`os.c`, `file.c`), the same stubs the hand-rolled libc used. The porting
+  layer is compiled against picolibc's *own* headers so struct/ABI shapes
+  (`struct stat`, flags) match.
+- **Two compiler-rt builtins carried ourselves** (`libc/pico/builtins.c`):
+  `__lshrti3`/`__ashlti3`, the 128-bit shifts picolibc's exact-float (ryu) path
+  references. macOS ships compiler-rt only as Mach-O (unusable for our ELF
+  link), so these two are hand-written (split-into-64-bit-halves, since clang
+  lowers a variable 128-bit shift to these very calls).
+- **`-Dnewlib-global-errno=true`, no TLS, no picocrt** (we use our own `crt0`),
+  no semihosting/multilib/tests. See `libc/picolibc-cross.txt` (the meson
+  cross-file: clang `-target aarch64-none-elf` + `--ld-path=…/ld.lld`, LLVM
+  binutils from the Rust toolchain).
+- **`make cpico-bin` → `/bin/CPICO`** (`libc/picodemo.c`): booted, logged in,
+  ran it — `pi=3.14159  e=2.718e+00  g=1.23457e+06`, `qsort: 1 2 3 5 8 9`,
+  `snprintf`/`malloc`/`strtol` all correct, exit code 0.
+- **The prebuilt lib is committed** (`third_party/picolibc-prebuilt`, ~2.1 MB:
+  a debug-stripped `libc.a` + headers), so a fresh checkout needs no meson/ninja
+  to build. `scripts/build-picolibc.sh` regenerates it; the 39 MB source clone
+  and build trees are gitignored.
+
+Remaining in the arc: port a real application (SQLite, a small C compiler) — now
+"port one more program," not "invent the mechanism."
+
 ## Fids: server-side open-file handles (libc arc, step 5)
 
 `fsd` now has real **open-file handles** — a `fid`, which is exactly what a
