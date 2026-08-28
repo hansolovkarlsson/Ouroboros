@@ -447,14 +447,55 @@ The **constraints are the loader's, and they bite C harder than Rust**:
   (`MSG_SEND`) — so `cfile | grep hello` works. Two things that had to be right
   for pipes: stdout is **buffered** (flushed on newline / full / exit) rather
   than one `write` per char, and the pipe send **yields and retries** on a full
-  consumer mailbox (`MSG_ERR_FULL`) instead of dropping bytes. **Still to grow:**
-  a ported `picolibc`/`newlib` — see `roadmap.md`'s "POSIX / C-program
-  portability."
-- **Watch the relocations** the same way (`llvm-readobj --dyn-relocations`): an
-  `R_AARCH64_ABS64` is unloadable. Simple code is PC-relative and needs none;
-  richer code emits `R_AARCH64_RELATIVE`, which the loader handles. `memcpy`/
-  `memset` calls the compiler synthesizes for struct/array copies would be
-  *undefined symbols* — provide them (a few lines each) when they first appear.
+  consumer mailbox (`MSG_ERR_FULL`) instead of dropping bytes.
+- **Watch the relocations** the same way (`llvm-readobj --dyn-relocations`, or
+  `llvm-objdump -R`): an `R_AARCH64_ABS64` is unloadable. Simple code is
+  PC-relative and needs none; richer code emits `R_AARCH64_RELATIVE`, which the
+  loader handles. `memcpy`/`memset` calls the compiler synthesizes for
+  struct/array copies would be *undefined symbols* — provide them (a few lines
+  each) when they first appear.
+
+### The picolibc port (the real C library)
+
+The hand-rolled libc above is enough for simple programs; for unmodified
+standard-C code (float `printf`, `snprintf`, `qsort`, `strtol`, …) there is a
+**picolibc port** (`make cpico-bin` → `/bin/CPICO`, demo `libc/picodemo.c`). The
+key insight is that **picolibc slots on top of the *same* porting layer** — our
+`crt0` + `os.c`/`file.c` syscall stubs — with no new kernel work:
+
+- **picolibc is the C library; `libc/src` is its porting layer.** picolibc is
+  built `-fPIC`, so it produces the same self-relocating `ET_DYN`
+  (`R_AARCH64_RELATIVE` only, **zero `ABS64`** — verified with `llvm-objdump
+  -R`) our loader already handles. Built with `-Dposix-console=true`, its
+  `stdin`/`stdout`/`stderr` wire to fd 0/1/2 — i.e. straight to the
+  `write`/`read`/`open`/`close`/`lseek`/`fstat`/`sbrk`/`_exit` stubs we already
+  wrote. So a picolibc program links `picolibc.a` + `crt0.o os.o file.o` (the
+  stubs, compiled against picolibc's *own* headers so `struct stat`/flags match)
+  + `builtins.o`, and drops our `stdio.c`/`stdlib.c`/`string.c` (picolibc
+  supplies `printf`/`malloc`/`memcpy`/…).
+- **Two compiler-rt builtins we carry** (`libc/pico/builtins.c`):
+  `__lshrti3`/`__ashlti3`, the 128-bit shifts picolibc's exact-float (ryu) path
+  needs. macOS's compiler-rt is Mach-O (unusable for the ELF link), and clang
+  lowers a variable 128-bit shift *to these very calls*, so they're written by
+  splitting the value into two 64-bit halves (native shifts).
+- **The prebuilt lib is committed** at `third_party/picolibc-prebuilt` (a
+  debug-stripped `libc.a` + headers, ~2.1 MB), so `make` needs no meson/ninja.
+  `scripts/build-picolibc.sh` regenerates it (clone picolibc, meson/ninja with
+  `libc/picolibc-cross.txt`, strip, copy). Build options: `-fPIC`,
+  `-Dposix-console=true`, `-Dnewlib-global-errno=true` (one global `errno`, no
+  TLS — we have no threads), `-Dthread-local-storage=false`, `-Dpicocrt=false`
+  (our `crt0`), `-Dsemihost=false`, `-Dmultilib=false`, `-Dtests=false`.
+- **One friction point when regenerating:** modern clang makes
+  implicit-function-declaration a hard error, which trips a couple of picolibc
+  1.8.9 tinystdio files — the cross-file demotes it
+  (`-Wno-error=implicit-function-declaration`). And Apple clang defaults to the
+  Mach-O linker, which rejects meson's GNU-linker probe, so the cross-file's `c`
+  binary carries `--ld-path=…/gcc-ld/ld.lld` to force LLD.
+
+A follow-up worth noting: picolibc's `posix-console` stdout is *unbuffered*
+(one `write(1,&c,1)` per char), so console output is chatty over IPC — correct
+but many round trips. Line-buffering it (via `setvbuf`, or a buffering shim at
+the `write` boundary) is the natural refinement.
 
 ## Known rough edges
 

@@ -172,10 +172,20 @@ be reviewed after the fact from the saved screenshots.
 > `NP_FSTAT`/`NP_CLUNK`, a per-client fid table, permission checked once at open),
 > the C libc uses them, and they coexist with the path verbs — the
 > deferred-since-Phase-0 "a POSIX fd ≈ a 9P fid" feature, paying off for both C
-> portability and the 9P model. **Remaining:** port `picolibc`/`newlib` on top;
-> then C programs like SQLite and a small C compiler become "port one more
-> program." See `docs/processes.md`'s "Writing a program in C." The reasoning
-> below is the original parked plan, still accurate.
+> portability and the 9P model. **picolibc landed next** (sixth step, the real C
+> library): `picolibc` 1.8.9 is built `-fPIC` (so it self-relocates under our
+> loader — `R_AARCH64_RELATIVE` only, zero `ABS64`) and linked against OUR
+> porting layer — the same `crt0`/syscall stubs (`write`/`read`/`open`/`sbrk`/
+> `_exit`), which is exactly what picolibc's `posix-console` stdio bottoms out
+> at, plus two 128-bit-shift builtins its float printf needs (`libc/pico/
+> builtins.c`). `make cpico-bin`, `/bin/CPICO`: **full `%f`/`%e`/`%g` float
+> formatting** (ryu), `snprintf`, `qsort`, `malloc`, `strtol` — unmodified
+> standard C the hand-rolled libc couldn't run. The prebuilt static lib + headers
+> are committed under `third_party/picolibc-prebuilt` (regenerate with
+> `scripts/build-picolibc.sh`), so `make` needs no meson/ninja. **Remaining:**
+> port a real application on top (SQLite, a small C compiler) — now "port one
+> more program," not "invent the mechanism." See `docs/processes.md`'s "Writing a
+> program in C." The reasoning below is the original parked plan, still accurate.
 
 **The goal, restated honestly.** The original `notes.txt` intent was
 "POSIX-ish system calls." What actually got built is *not* POSIX and not

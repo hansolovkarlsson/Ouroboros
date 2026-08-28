@@ -7,3 +7,10 @@
 /scratch/
 /Parallels Error Reports/
 .DS_Store
+# picolibc: the upstream source clone and the meson/ninja build+install trees are
+# large and regenerable (scripts/build-picolibc.sh). Only the small prebuilt
+# static lib + headers (third_party/picolibc-prebuilt) is committed.
+/third_party/picolibc/
+/third_party/pico-build/
+/third_party/pico-install/
+/third_party/picolibc-cross.resolved.txt
