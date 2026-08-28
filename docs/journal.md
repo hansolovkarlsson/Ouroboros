@@ -7,6 +7,42 @@ for the forward plan see [`roadmap.md`](roadmap.md).
 
 ---
 
+## 2026-08-27 (cont.) — GPT CRC validation + backup fallback
+
+Closed the "GPT parsed but CRCs not validated on read" open gap. `fsd`'s
+`partition::discover` trusted the "EFI PART" signature and read the entry
+array without checking either CRC32. Now `try_gpt` validates the header CRC
+(over `HeaderSize` bytes, CRC field zeroed) and the entry-array CRC (a
+table-free bitwise CRC-32, reflected `0xEDB88320`, folded incrementally so
+the array is CRC'd sector-by-sector), and a corrupt *primary* falls back to
+the *backup* GPT at the last LBA; both corrupt → no partitions. Also detect a
+GPT by a `0xEE` protective-MBR entry, not just the header signature, so a
+disk whose primary signature is itself smashed is still recovered from the
+backup.
+
+The interesting part was *testing* it, because two layers of firmware get in
+the way. I flipped a bit in the primary header of `espgpt.img` and booted it:
+`fsd` mounted — but when I checked the on-disk image afterward, the primary
+header was *valid again*. EDK2/OVMF **auto-repairs a corrupt primary GPT from
+the backup during boot**, so by the time `fsd` reads the disk there's nothing
+wrong with the primary. And corrupting *both* copies just makes the firmware
+refuse to boot at all (`CheckCrc32: Crc check failed` → it drops to the EFI
+shell), so the kernel never runs. Either way a QEMU boot can't actually
+exercise `fsd`'s fallback. So I wrote a small host harness that `#[path]`-includes
+the **real `partition.rs`** and drives it through a mock `Disk` over the raw
+image bytes — no firmware in the loop. Five cases pass: clean → mounts on
+primary; corrupt-primary-header and corrupt-primary-array → both fall back to
+the backup; corrupt-both → zero; plain-MBR → still one partition (no
+regression). I also cross-checked the bitwise CRC against `zlib.crc32` and the
+values `mkgpt.py` writes — byte-identical for both the primary and backup
+headers. The clean `run-image-gpt` boot still mounts, so nothing regressed at
+the real-boot level either.
+
+Nice reminder that "test it on real hardware/firmware" isn't automatically the
+strongest test — here the firmware's own robustness (repair + reject) actively
+*hides* the code path under test, and a host harness driving the real module
+was the honest way to see `fsd`'s fallback actually fire.
+
 ## 2026-08-27 (cont.) — FAT32 long-filename *write*
 
 Closed the "FAT32 long-filename write" follow-up from the roadmap. LFN was

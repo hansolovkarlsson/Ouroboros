@@ -556,11 +556,6 @@ Known small gaps, not yet sequenced (the *completed* parking-lot entries — USB
 keyboard, GOP console, preemption, task destruction, driver isolation, etc. — are
 in [`roadmap-completed.md`](roadmap-completed.md)):
 
-- **GPT is parsed but not validated on read.** `fsd`'s `partition::discover`
-  trusts the "EFI PART" signature; it doesn't check the header/entry-array CRC32s
-  or fall back to the backup GPT on a corrupt primary. Fine for the clean images
-  we make; a robustness gap for a damaged disk. (The builder `scripts/mkgpt.py`
-  *does* write correct CRCs.)
 - **Pipelines can't combine with `>`/`>>`.** `a | b > file` is refused (the last
   stage writes straight to the console; there's no capture of its output). A real
   fix routes the last stage's stdout into a file capture.

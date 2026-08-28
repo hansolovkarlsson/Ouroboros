@@ -7,6 +7,48 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/`; 
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## GPT: validate the CRC32s, fall back to the backup
+
+`fsd`'s `partition::discover` used to *trust* a GPT: it keyed off the "EFI
+PART" signature and read the partition-entry array without checking either
+CRC32 the format carries. Now it **validates**, following the UEFI spec's
+GPT rules, and recovers from a damaged primary:
+
+- **Header CRC32** — over `HeaderSize` bytes with the 4-byte CRC field
+  taken as zero — and **partition-entry-array CRC32** — over
+  `NumberOfPartitionEntries * SizeOfPartitionEntry` bytes — are both
+  recomputed and checked against the header's stored values. A table-free
+  bitwise CRC-32 (reflected `0xEDB88320`, the same one `zlib.crc32`/GPT
+  use) does it, folded incrementally so the array is CRC'd sector-by-sector
+  with no large buffer. Bounded reads (array capped at 64 KiB) keep a
+  corrupt header from running the scan away.
+- **Backup fallback** — if the *primary* header or array fails validation,
+  discovery reads the **backup** GPT at the last LBA (its own header +
+  array) and uses that. Only if both copies fail does it report no
+  partitions, rather than trusting a corrupt table.
+- **Protective-MBR detection** — a GPT disk is now recognized by the
+  "EFI PART" signature *or* a `0xEE` protective-MBR entry, so a disk whose
+  primary header signature is itself corrupted is still recognized and
+  recovered from the backup.
+
+The clean path is unchanged: a valid primary validates and mounts, never
+touching the backup (verified booting `make run-image-gpt` under QEMU — the
+image `scripts/mkgpt.py` builds still mounts).
+
+**Testing note worth keeping:** this *can't* be tested through a normal UEFI
+boot — EDK2/OVMF validates the same CRCs and **auto-repairs a corrupt
+primary from the backup on boot**, so by the time `fsd` reads the disk the
+primary is healed (confirmed: a bit flipped in the primary header was back
+to its original value on disk after one boot); and a disk with *both* copies
+corrupt is rejected by the firmware (`CheckCrc32: Crc check failed` → EFI
+shell), so the kernel never runs. So `fsd`'s own logic was validated with a
+**host harness that runs the real `partition.rs` against a mock disk**: clean
+→ mounts on primary; corrupt-primary-header and corrupt-primary-array → both
+fall back to the backup; corrupt-both → zero partitions; plain-MBR → still
+one partition (no regression). The CRC implementation was separately
+cross-checked to produce byte-identical values to `zlib.crc32` and to the
+CRCs `mkgpt.py` stored, for both the primary and backup headers.
+
 ## FAT32: long-filename (LFN) *write*
 
 The guest can now **create** files and directories with long names, not
