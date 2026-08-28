@@ -20,9 +20,11 @@ pub extern "C" fn _start() -> ! {
     let uid = ulib::getuid();
     let gid = ulib::getgid();
 
-    let mut pbuf = [0u8; 512];
+    // Sized to the account-file cap (SAFECOPY_MAX, ~20 accounts), matching
+    // login/su/useradd so name resolution isn't truncated at 512 bytes.
+    let mut pbuf = [0u8; syscall_abi::SAFECOPY_MAX as usize];
     let plen = read_file("/etc/passwd", &mut pbuf);
-    let mut gbuf = [0u8; 512];
+    let mut gbuf = [0u8; syscall_abi::SAFECOPY_MAX as usize];
     let glen = read_file("/etc/group", &mut gbuf);
 
     let uname = accounts::find_user_by_uid(&pbuf[..plen], uid).map(|a| a.name);
@@ -44,14 +46,11 @@ pub extern "C" fn _start() -> ! {
 }
 
 /// Read a whole small file into `buf`, returning its length, or `0` on any error
-/// (missing file / no filesystem) - id degrades to numeric-only.
+/// (missing file / no filesystem) - id degrades to numeric-only. Uses the bulk
+/// read (up to `SAFECOPY_MAX`), matching login/su/useradd so a passwd file with
+/// more than ~5 accounts still resolves names past the 512-byte inline cap.
 fn read_file(path: &str, buf: &mut [u8]) -> usize {
-    let r = ulib::fs_read_file(path, buf);
-    if r < syscall_abi::FS_ERR_MIN {
-        (r as usize).min(buf.len())
-    } else {
-        0
-    }
+    ulib::read_file_all(path, buf)
 }
 
 /// Append `(name)` if resolved, nothing otherwise.

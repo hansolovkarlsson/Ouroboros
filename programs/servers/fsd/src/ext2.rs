@@ -1222,9 +1222,15 @@ impl Fs {
 
         match existing {
             Some((ino, _)) => {
+                // Overwriting existing content must NOT change the file's
+                // identity: preserve the old owner and mode+links (creator_uid/
+                // gid apply only to a freshly created inode, the None arm).
+                // POSIX: writing a file never chowns it.
                 let old = self.read_inode(ino)?;
                 node.mode = old.mode;
                 node.links = old.links;
+                node.uid = old.uid;
+                node.gid = old.gid;
                 self.write_inode(ino, &node)?;
                 self.free_all_blocks(&old)
             }
