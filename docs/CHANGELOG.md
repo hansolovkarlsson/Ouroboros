@@ -7,6 +7,33 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/`; 
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## Userland `.data`/`.bss` support: programs can have globals/statics
+
+The libc arc's second step, and the real unblock for non-trivial C: **userland
+programs may now have mutable statics/globals.** A C global or file-scope array,
+or a simple Rust `static mut`, lands in `.data` (initialized) or `.bss` (zeroed)
+— previously the linker script `ASSERT`ed both empty.
+
+- **The loader already had the mechanics.** `loader.rs`'s `copy_segments` copies
+  each `PT_LOAD` segment's `p_filesz` file bytes *and* zeroes the `p_memsz -
+  p_filesz` tail (a real `.bss`), and `elf_region_size` sizes the region to
+  `p_memsz` — in *both* the boot-load and runtime-spawn paths. So the change was
+  removing the two `ASSERT(SIZEOF(.data/.bss)==0)` guards in
+  `programs/linker.ld` (a deliberate scope-gate, not a technical gap) and
+  **verifying** it actually works. No kernel change.
+- **Verified fresh-per-spawn.** `libc/hello.c` now exercises an initialized
+  `.data` global (`g_data = 7`) and a `.bss` global (`g_bss`): it reads `data=7
+  bss=0`, mutates both to `data=8 bss=5`, and — run twice — starts at `data=7`
+  *both* times, proving each spawn loads a fresh copy of `.data` rather than
+  sharing a mutated region. A global holding a pointer emits an
+  `R_AARCH64_RELATIVE` the loader applies (confirmed: two RELATIVE, zero ABS64).
+- **Caveat for Rust:** this does *not* lift the separate liballoc ceiling —
+  `alloc`'s collections still fail to link on an `R_AARCH64_ABS64` in prebuilt
+  liballoc. Plain scalar/array `static`s are now fine, though.
+
+Next in the arc: a real libc (crt0 + POSIX syscall stubs), now that C programs
+can hold state. See `docs/processes.md`'s "Writing a program in C".
+
 ## The first C program runs on Ouroboros (userland-libc arc begins)
 
 The foundational milestone of the POSIX/C-portability arc: a **C program,

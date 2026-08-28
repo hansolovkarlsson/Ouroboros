@@ -90,9 +90,9 @@ Below the guard is a 256KB **raw heap area** the program reaches via the
 `heap_info` syscall (a `&mut [u8]`, not a `GlobalAlloc`-backed heap - see
 "Binary format" for why `alloc`'s `Vec`/`String` can't be used here) - the
 shell uses it to hold a redirect/pipe capture far larger than its stack, so
-`cat big > file` works. No `.bss`/`.data` support still (see "Binary
-format" below) — beyond code, the heap area, and a stack, a program has no
-static state today.
+`cat big > file` works. `.bss`/`.data` are now supported too (see "Binary
+format" below) — beyond code, the heap area, and a stack, a program can now
+have real static state.
 
 **Why the region is 2MB-aligned even though it's usually only a few KB:**
 `mmu.rs` gives a region fine-grained (4KB page) EL0 access by splitting
@@ -146,14 +146,17 @@ Consequences of "real ELF, real relocations, but still narrowly scoped
   *have* to be its first byte the way it did under the old flat loader;
   this project's own shell just still keeps it that way, out of
   convenience, not obligation.
-- **Still no `.bss`/`.data` for genuine static mutable state.**
-  `loader.rs`'s segment-loading code is now generic enough to zero a
-  real `.bss` region (any `PT_LOAD` segment where `p_memsz > p_filesz`)
-  — but `programs/linker.ld` still `ASSERT`s `.bss`/`.data` are empty, a
-  deliberate, separate decision not to expand this capability just
-  because the loading mechanism could support it. A program's "global
-  state" still has to be a local variable in `main`'s stack frame, the
-  same as before.
+- **`.bss`/`.data` are now supported** (the loader's `.data`/`.bss`
+  milestone). `loader.rs` loads initialized data (`p_filesz`) and zeroes
+  `.bss` (`p_memsz - p_filesz`) for every `PT_LOAD` segment, in both the
+  boot-load and runtime-spawn paths, re-initialized fresh per spawn; the
+  old `programs/linker.ld` ASSERTs that rejected them are gone. So a
+  userland program may have mutable statics/globals — a C global or
+  file-scope array, or a simple Rust `static mut`. **Caveat for Rust
+  programs specifically:** this does *not* lift the separate liballoc
+  ceiling — `alloc`'s collections still fail to link on an
+  `R_AARCH64_ABS64` in prebuilt liballoc (a different constraint; see the
+  heap milestone). Plain scalar/array `static`s are fine.
 - **Build with `relocation-model=pic` + `-pie` + `--no-dynamic-linker`**
   (`.cargo/config.toml`'s `[target.aarch64-unknown-none]`), not
   `relocation-model=static` anymore. This makes the compiler emit
@@ -408,12 +411,15 @@ toolchain path, all from tools already present (no cross-toolchain to install):
 
 The **constraints are the loader's, and they bite C harder than Rust**:
 
-- **No `.data`/`.bss`** (the linker script ASSERTs them empty — no loader support
-  for initialized or zeroed statics yet). In C that means **no globals and no
-  `static` variables with storage**: a `char buf[64]` at file scope, or a
-  `static int counter`, will fail the link. String *literals* are fine (they
-  live in `.rodata`). Until the loader grows `.data`/`.bss` support, C programs
-  keep their state on the stack.
+- **Globals/statics work** (the loader's `.data`/`.bss` milestone). Initialized
+  file-scope data (`int g = 7;`) lands in `.data` and is loaded from the file;
+  uninitialized data (`static int counter;`, `char buf[64];`) lands in `.bss`
+  and is zeroed — both per PT_LOAD segment, in both the boot-load and
+  runtime-spawn paths, and **re-initialized fresh on every spawn** (a mutation
+  from one run doesn't leak into the next). A global holding a pointer emits an
+  `R_AARCH64_RELATIVE` the loader applies. (String *literals* were always fine —
+  they live in `.rodata`.) The region is RW (in fact RWX — the W^X weakness noted
+  elsewhere), so statics are writable.
 - **`_start` is the entry**, placed in `.text.start` (offset 0) via
   `__attribute__((section(".text.start")))`. The kernel has already set up the
   EL0 stack, so `_start` just calls `main` and then the `EXIT` syscall.

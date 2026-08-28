@@ -13,12 +13,13 @@
  * `LoadedProgram::entry == LoadedProgram::base` trivially true, one
  * fewer thing to get wrong.
  *
- * Still no .bss/.data support (see the ASSERTs below) - the loader's own
- * segment-loading code is now generic enough to zero a real .bss region
- * (p_memsz - p_filesz per PT_LOAD segment), but *allowing* userland
- * static mutable state is a separate, deliberately-deferred capability
- * expansion, not a side effect of fixing the relocation bug - see
- * docs/processes.md's "Known rough edges".
+ * .data/.bss are now supported (the loader's .data/.bss milestone): the
+ * loader copies initialized data (p_filesz) and zeroes .bss (p_memsz -
+ * p_filesz) per PT_LOAD segment, in both the boot-load and runtime-spawn
+ * paths, so userland programs may have mutable statics/globals. The old
+ * ASSERTs that rejected them are gone (see the note where they were). C
+ * programs in particular need this - a C global or file-scope array is
+ * .data/.bss - see docs/processes.md's "Writing a program in C".
  */
 
 ENTRY(_start)
@@ -74,13 +75,19 @@ SECTIONS
         *(.data.rel.ro .data.rel.ro.*)
     }
 
-    /* Defined (not discarded) so an unexpected non-empty .data/.bss fails
-     * loudly via the ASSERT below rather than silently landing in an
-     * orphan-section default location. */
+    /* Initialized mutable statics/globals. Loaded like any other PT_LOAD
+     * content - loader.rs copies p_filesz bytes to region_base + p_vaddr - and
+     * relocated (a global holding a pointer emits an R_AARCH64_RELATIVE). Named
+     * explicitly (not swept into an orphan default) so its placement is
+     * deterministic. Supported since the loader's .data/.bss milestone; the old
+     * ASSERT(SIZEOF(.data)==0) guard is gone. */
     .data : {
         *(.data .data.*)
     }
 
+    /* Zero-initialized statics/globals. NOLOAD (no file bytes); the RW segment's
+     * p_memsz exceeds its p_filesz by exactly this, and loader.rs zeroes that
+     * tail (write_bytes 0). Supported since the loader's .data/.bss milestone. */
     .bss (NOLOAD) : {
         *(.bss .bss.*)
     }
@@ -95,5 +102,9 @@ SECTIONS
     }
 }
 
-ASSERT(SIZEOF(.data) == 0, "userland program has non-empty .data - no loader support for initialized statics yet")
-ASSERT(SIZEOF(.bss) == 0, "userland program has non-empty .bss - no loader support for zeroed statics yet")
+/* The ASSERTs that used to reject any non-empty .data/.bss are gone: the loader
+ * now loads initialized data (p_filesz) and zeroes .bss (p_memsz - p_filesz) for
+ * every PT_LOAD segment, in both the boot-load and runtime-spawn paths. Userland
+ * programs may now have mutable statics/globals. (This does NOT lift the
+ * separate liballoc-collections ceiling for Rust programs - those still fail to
+ * link on an R_AARCH64_ABS64 in prebuilt liballoc, a different constraint.) */
