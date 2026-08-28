@@ -153,8 +153,16 @@ $ set PATH=/bin ; env           # a real environment; $VAR expansion
   The shell **gates each session on a login** (username + password against
   `/etc/passwd`; DEV accounts `root`/`root` and `user`/`user`), and the prompt
   shows `#` for root, `$` for a normal user. `logout` (or `exit`) ends the
-  session and returns to the login prompt; `su <uid>` lets **root** drop to a
-  user (a logged-in user can't escalate). See `man login`.
+  session and returns to the login prompt; `su <user>` (or `su <uid>`) lets
+  **root** drop to a named user (a logged-in user can't escalate). A logged-in
+  user lands in their home under **`/User`**, and `~` expands to it
+  (`cd ~`, `cat ~/notes`). See `man login`.
+- **Account management** (`/bin`, root only): `useradd <name> [-u uid]
+  [-g group|gid]` (creates the account, prompts a password, makes `/User/<name>`),
+  `passwd [user]` (change a password), `groupadd <name>`, and `usermod <user> -g
+  <group>` (set a primary group). `id` shows your uid/gid **with names**. On ext2,
+  file permissions are enforced (owner→group→other; root bypasses), so a normal
+  user can write in `~` but not in `/`.
   Job control (`ps`/`kill`/`fg`/`wait`/`exec`), the disk-management trio
   (`erase`/`partition`/`format` — they must run when *nothing* is mounted,
   exactly when `/bin` can't be read), power control (`shutdown`/`halt` — same

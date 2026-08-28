@@ -3,6 +3,10 @@
 version = 4
 
 [[package]]
+name = "accounts"
+version = "0.1.0"
+
+[[package]]
 name = "args"
 version = "0.1.0"
 dependencies = [
@@ -124,6 +128,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "groupadd"
+version = "0.1.0"
+dependencies = [
+ "accounts",
+ "syscall-abi",
+ "ulib",
+]
+
+[[package]]
 name = "head"
 version = "0.1.0"
 dependencies = [
@@ -143,6 +156,7 @@ dependencies = [
 name = "id"
 version = "0.1.0"
 dependencies = [
+ "accounts",
  "syscall-abi",
  "ulib",
 ]
@@ -222,6 +236,15 @@ dependencies = [
  "log",
  "syscall-abi",
  "uefi",
+]
+
+[[package]]
+name = "passwd"
+version = "0.1.0"
+dependencies = [
+ "accounts",
+ "syscall-abi",
+ "ulib",
 ]
 
 [[package]]
@@ -371,6 +394,7 @@ dependencies = [
 name = "shell"
 version = "0.1.0"
 dependencies = [
+ "accounts",
  "ninep-abi",
  "syscall-abi",
 ]
@@ -519,6 +543,24 @@ dependencies = [
 name = "uptime"
 version = "0.1.0"
 dependencies = [
+ "syscall-abi",
+ "ulib",
+]
+
+[[package]]
+name = "useradd"
+version = "0.1.0"
+dependencies = [
+ "accounts",
+ "syscall-abi",
+ "ulib",
+]
+
+[[package]]
+name = "usermod"
+version = "0.1.0"
+dependencies = [
+ "accounts",
  "syscall-abi",
  "ulib",
 ]

@@ -63,7 +63,6 @@
 #![no_main]
 
 mod login;
-mod sha256;
 
 use core::arch::asm;
 use core::panic::PanicInfo;
@@ -238,6 +237,47 @@ fn expand_vars<'a>(line: &str, env: &Env, out: &'a mut [u8]) -> &'a str {
         }
         if n < out.len() {
             out[n] = bytes[i];
+            n += 1;
+        }
+        i += 1;
+    }
+    core::str::from_utf8(&out[..n]).unwrap_or("")
+}
+
+/// Expand a leading `~` in each word to `$HOME`. A `~` qualifies when it starts
+/// a word (line start, or after whitespace / a `|`) and is followed by `/`,
+/// whitespace, `|`, or the end of the line - so `~/x` and a bare `~` expand, but
+/// `foo~` (mid-word) and `~bob` (the `~user` form we don't support) stay
+/// literal. `HOME` defaults to `/` if unset (the no-`/etc/passwd` root session).
+/// Byte-only (PIE-safe), same shape as [`expand_vars`].
+fn expand_tilde<'a>(line: &str, env: &Env, out: &'a mut [u8]) -> &'a str {
+    let bytes = line.as_bytes();
+    let home = env.get(b"HOME").unwrap_or(b"/");
+    let mut n = 0;
+    let mut i = 0;
+    let mut at_word_start = true;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if c == b'~' && at_word_start {
+            let boundary = matches!(
+                bytes.get(i + 1),
+                None | Some(b'/') | Some(b' ') | Some(b'\t') | Some(b'|')
+            );
+            if boundary {
+                for &b in home {
+                    if n < out.len() {
+                        out[n] = b;
+                        n += 1;
+                    }
+                }
+                i += 1;
+                at_word_start = false;
+                continue;
+            }
+        }
+        at_word_start = matches!(c, b' ' | b'\t' | b'|');
+        if n < out.len() {
+            out[n] = c;
             n += 1;
         }
         i += 1;
@@ -618,6 +658,8 @@ fn main() -> ! {
         let session = login::login(&mut cwd);
         let mut cwd_len = session.cwd_len;
         let mut env = Env::new();
+        // Export HOME = the login home dir, so `~` expands and children see it.
+        env.set("HOME", &cwd[..cwd_len]);
         let mut len = 0usize;
 
         print_prompt();
@@ -736,6 +778,12 @@ fn run_line(line: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize, env: &mut
     // is only read here, so it's free to be borrowed mutably below.
     let mut ebuf = [0u8; EXPAND_SIZE];
     let line = expand_vars(line, env, &mut ebuf);
+
+    // Expand a leading `~` in each word to $HOME (login sets HOME to the user's
+    // home dir). After $VAR so `~$X` composes; before globbing so `~/dir/*`
+    // globs against the expanded path.
+    let mut tbuf = [0u8; EXPAND_SIZE];
+    let line = expand_tilde(line, env, &mut tbuf);
 
     // Filename globbing: expand `*`/`?` tokens against the filesystem (only if
     // the line has a wildcard at all - most don't, so skip the fs work). The
@@ -1431,7 +1479,7 @@ fn builtin_usage(cmd: &str) -> Option<&'static str> {
         "wait" => "usage: wait <task number>  (block until a task exits, then reap it)",
         "set" | "export" => "usage: set NAME=VALUE  (set an environment variable)",
         "unset" => "usage: unset NAME  (remove an environment variable)",
-        "su" => "usage: su <uid>[:<gid>]  (change this session's identity; root only, numeric)",
+        "su" => "usage: su <user> | <uid>[:<gid>]  (change this session's identity; root only)",
         _ => return None,
     })
 }
@@ -1854,9 +1902,13 @@ fn cmd_unset(arg: &str, env: &mut Env) {
     env.unset(arg.as_bytes());
 }
 
-/// `su <uid>[:<gid>]`: change this session's user identity (numeric ids). A
+/// `su <user>` or `su <uid>[:<gid>]`: change this session's user identity. A
 /// builtin because it must change the shell's *own* task identity (`SET_ID` acts
 /// on the caller); a `/bin` program would only set its short-lived child's.
+///
+/// A **username** is resolved against `/etc/passwd` and drops the session to that
+/// account's uid *and* gid (`su user`); the **numeric** form still works
+/// (`su 1000:1000`, an empty half left unchanged like `chown`).
 ///
 /// **Root-only, enforced here.** The kernel's `SET_ID` allows a task to *restore*
 /// its saved identity (root, for the shell's logout), so a logged-in user's
@@ -1864,15 +1916,23 @@ fn cmd_unset(arg: &str, env: &mut Env) {
 /// escalate past login. The shell is the login TCB, so it refuses `su` for a
 /// non-root session: the only saved-restore that ever happens is logout (which
 /// immediately re-prompts login), and a user's child programs can't restore root
-/// at all (their saved identity is their own uid). A field left empty (`su :20`,
-/// `su 1000`) leaves that half unchanged, like `chown`.
+/// at all (their saved identity is their own uid). So `su` here is a *root
+/// convenience* for dropping to a named user; a non-root user "becoming" another
+/// user with their password would need a kernel-level change (the escalation
+/// guard denies it) and is deliberately out of scope.
 fn cmd_su(arg: &str) {
     if shell_uid() != 0 {
         print_line("su: denied (only root may change identity - log in as root)");
         return;
     }
     if arg.is_empty() {
-        print_line("usage: su <uid>[:<gid>]  (numeric; only root may change identity)");
+        print_line("usage: su <user> | <uid>[:<gid>]  (root only)");
+        return;
+    }
+    // Username form: anything that isn't the pure numeric uid[:gid] shape.
+    let numeric = arg.bytes().all(|b| b.is_ascii_digit() || b == b':');
+    if !numeric {
+        su_by_name(arg);
         return;
     }
     let (uid_s, gid_s) = match arg.split_once(':') {
@@ -1903,6 +1963,46 @@ fn cmd_su(arg: &str) {
     };
     if syscall4(syscall_abi::SET_ID, uid as u64, gid as u64, 0, 0) == syscall_abi::SET_ID_DENIED {
         print_line("su: denied (only root may change identity)");
+    }
+}
+
+/// Read a small account file (`/etc/passwd`) in 512-byte chunks into `buf`,
+/// returning its length (`0` on any error). Same chunked read as
+/// `login::read_passwd`, since fsd caps one inline read at `FS_DATA_MAX`.
+fn read_account_file(path: &str, buf: &mut [u8]) -> usize {
+    const CHUNK: usize = syscall_abi::FS_DATA_MAX as usize;
+    let mut off = 0usize;
+    while off < buf.len() {
+        let end = (off + CHUNK).min(buf.len());
+        let r = fs_read_at(path, off as u64, &mut buf[off..end]);
+        if r >= FS_ERR_MIN {
+            break;
+        }
+        let n = (r as usize).min(end - off);
+        off += n;
+        if n < CHUNK {
+            break;
+        }
+    }
+    off
+}
+
+/// `su <user>`: resolve `user` in `/etc/passwd` and drop to its uid+gid. Root
+/// only (the caller is already checked in [`cmd_su`]). No password is prompted
+/// because only root reaches here, and root needs none to become a user.
+fn su_by_name(name: &str) {
+    let mut pbuf = [0u8; syscall_abi::SAFECOPY_MAX as usize];
+    let plen = read_account_file("/etc/passwd", &mut pbuf);
+    let passwd = &pbuf[..plen];
+    match accounts::find_user_by_name(passwd, name.as_bytes()) {
+        Some(acct) => {
+            if syscall4(syscall_abi::SET_ID, acct.uid as u64, acct.gid as u64, 0, 0)
+                == syscall_abi::SET_ID_DENIED
+            {
+                print_line("su: denied");
+            }
+        }
+        None => print_line("su: no such user"),
     }
 }
 

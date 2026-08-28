@@ -1,0 +1,16 @@
+[package]
+name = "accounts"
+version = "0.1.0"
+edition = "2021"
+
+# Pure, no_std, no I/O, no syscalls: the shared account-database logic
+# (/etc/passwd + /etc/group parsing/formatting, SHA-256 password hashing, salt
+# derivation, name<->id lookups) used by the shell's login and by the /bin
+# account tools (id/su/passwd/useradd/groupadd/usermod). Callers do their own
+# file I/O and pass in byte buffers, so this crate depends on nothing and links
+# cleanly for aarch64-unknown-none (PIE-safe: byte-only, no &str runtime slicing,
+# no relocations that a -pie link would reject).
+[lib]
+path = "src/lib.rs"
+
+[dependencies]

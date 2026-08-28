@@ -425,6 +425,13 @@ fn handle_ninep(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [
     if !check_access(fs, sender, verb, &p, payload) {
         return status_reply(reply, syscall_abi::FS_ERR_PERM);
     }
+    // New files/dirs are owned by their creator, not root: stamp the caller's
+    // identity onto the fs so touch/write/mkdir/open-create use it (ext2 only;
+    // other arms ignore it). Root -> (0,0), the default, so nothing changes for
+    // boot/format-time creation. Without this a user couldn't write in its own
+    // home - the created file would be root-owned and the follow-up write denied.
+    let (cuid, cgid) = caller_id(sender);
+    fs.set_creator(cuid as u16, cgid as u16);
     match verb {
         ninep_abi::NP_READDIR => {
             let Some(path) = path_from(payload, 0, p[0]) else {

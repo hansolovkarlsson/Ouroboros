@@ -158,6 +158,16 @@ impl Filesystem {
         }
     }
 
+    /// Set the owner (uid, gid) new inodes are created with, from the calling
+    /// task's identity. Only ext2 records owners; the other arms ignore it.
+    /// fsd calls this before each op so a created file/dir is owned by its
+    /// creator rather than root (the permission model needs it).
+    pub fn set_creator(&mut self, uid: u16, gid: u16) {
+        if let Filesystem::Ext2(fs) = self {
+            fs.set_creator(uid, gid);
+        }
+    }
+
     pub fn list_dir(&mut self, path: &str, f: impl FnMut(&str, bool, u32)) -> Result<(), Error> {
         match self {
             Filesystem::Fat32(fs) => fs.list_dir(path, f),

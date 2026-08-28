@@ -2,15 +2,17 @@ NAME
     su - change this session's user identity (root only)
 
 SYNOPSIS
+    su <user>
     su <uid>[:<gid>]
 
 DESCRIPTION
-    Sets the shell's own uid and/or gid (numeric). A builtin, because it changes
-    the shell's OWN task identity: a /bin program would only change its
-    short-lived child. Commands spawned afterward inherit the new identity, and
-    the prompt switches between # (root) and $ (a normal user).
+    Sets the shell's own uid and/or gid. A builtin, because it changes the
+    shell's OWN task identity: a /bin program would only change its short-lived
+    child. Commands spawned afterward inherit the new identity, and the prompt
+    switches between # (root) and $ (a normal user).
 
-    Forms, like chown:
+    A username is resolved against /etc/passwd and drops the session to that
+    account's uid AND gid. The numeric form still works:
         uid        set the user, leave the group
         uid:gid    set both
         :gid       set the group, leave the user
@@ -23,8 +25,9 @@ DESCRIPTION
     and a user's child programs can't restore root at all.)
 
 EXAMPLES
+    su user            (as root) become the account "user" (uid+gid)
     su 1000            (as root) become uid 1000, keep the group
     su 1000:1000       (as root) become uid 1000, gid 1000
 
 SEE ALSO
-    login, logout, id, sh
+    login, logout, id, useradd, sh

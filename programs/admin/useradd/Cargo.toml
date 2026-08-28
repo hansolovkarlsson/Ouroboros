@@ -1,5 +1,5 @@
 [package]
-name = "id"
+name = "useradd"
 version = "0.1.0"
 edition = "2021"
 
@@ -9,5 +9,5 @@ ulib = { path = "../../../ulib" }
 accounts = { path = "../../../accounts" }
 
 [[bin]]
-name = "id"
+name = "useradd"
 path = "src/main.rs"

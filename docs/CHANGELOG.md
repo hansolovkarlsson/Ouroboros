@@ -7,6 +7,57 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/`; 
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## Account management: passwd/useradd/groupadd/usermod, names, groups, homes (users arc, step 4 — "closing the security arc")
+
+The users/permissions arc's account layer above the kernel identity: tools to
+**create and manage users and groups**, name resolution, and per-user home
+directories. This is the "close the security update" pass — the model was
+**option 1** (root-only admin tools) built on a **shared helper** so a later
+self-service `passwd` (an `accountd` server or a setuid bit) slots in without a
+rewrite.
+
+- **New `accounts` crate** (repo-root, pure `no_std`, **host-unit-tested** —
+  `cargo test -p accounts --target aarch64-apple-darwin`, 8 tests): the single
+  home for `/etc/passwd` + `/etc/group` parsing/formatting, SHA-256 password
+  hashing, salt derivation, name↔id lookups, and the `replace_line`/`append_line`
+  file-rewrite helpers. `login` and every `/bin` account tool call it, so the
+  logic exists once; it also absorbed the shell's duplicated `sha256.rs`.
+- **`/bin/passwd [user]`** — set a password (root only): prompts twice (echo
+  off), fresh clock-derived salt, rewrites the one account line.
+- **`/bin/useradd <name> [-u uid] [-g group|gid]`** — create a user (root only):
+  appends the account, prompts the initial password, creates a **user-private
+  group** (`gid == uid`, the Linux default) when `-g` is absent, and makes +
+  chowns the home directory `/User/<name>`.
+- **`/bin/groupadd <name> [-g gid]`** and **`/bin/usermod <user> -g <group|gid>`**
+  — create a group / set a user's **primary group** (root only). The group model
+  is **primary-gid** (a task carries one kernel gid); full supplementary-group
+  membership stays a kernel-identity tier.
+- **`su <username>`** — root drops to a named account (numeric `su 1000:1000`
+  still works). A non-root `su` stays denied (the kernel escalation guard).
+- **`id` shows names** — `uid=1000(user) gid=1000(user)`, resolved via
+  `/etc/passwd` + `/etc/group`, numeric fallback if unlisted.
+- **Per-user homes under `/User`** — the login home for `user` is `/User/user`;
+  login exports `HOME`, and the shell expands a leading **`~`** to `$HOME`
+  (`cd ~`, `cat ~/f`). The ext2 image chowns `/User/user` to the user, so the
+  permission-enforcement demo is real (a user writes in `~`, `/` is denied).
+- **`/etc/group`** (`name:gid:members`) staged by `scripts/mkgroup.py`; the
+  account files are read chunked into a 2 KB buffer (~20 accounts), matching the
+  tools' write cap.
+- **Salts are clock-derived** (`MONOTONIC_US` + hash) — documented as weak; a
+  virtio-entropy `RANDOM` syscall is the noted upgrade. All tools are PIE-safe
+  (byte-only parsing; `llvm-readobj -r` shows zero `R_AARCH64_ABS64`).
+- **New files/dirs are owned by their creator** — a bug the arc *surfaced*: ext2
+  `touch`/`write_file`/`mkdir` hardcoded `uid/gid = 0`, so a logged-in user's new
+  file was root-owned and the follow-up data write was denied (a user couldn't
+  use its own home). fsd now stamps the caller's identity onto the fs
+  (`set_creator`, from `GET_ID(sender)`) before each op; ext2 creates with it
+  (root → `(0,0)`, unchanged for boot/format). Verified: a `user` session writes
+  `~/note.txt` and reads it back, while `touch /` stays `permission denied`.
+- **Verified end to end** on `run-image-ext2` (login `user`: `id` names, home,
+  `~`, home-write allowed, `/`-write denied; login `root`: `useradd`/`groupadd`/
+  `usermod`/`su carol` → `uid=1001(carol) gid=1002(staff)`), plus 8 `accounts`
+  host unit tests (`cargo test -p accounts --target aarch64-apple-darwin`).
+
 ## picolibc: the real C library (libc arc, step 6)
 
 Unmodified standard-C stdlib code now runs on Ouroboros through a **picolibc

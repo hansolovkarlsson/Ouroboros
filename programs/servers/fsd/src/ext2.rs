@@ -167,6 +167,13 @@ pub struct Fs {
     /// a directory entry is `file_type`; if not, it's the high byte of a u16
     /// `name_len` (so writes must leave it `0`). mke2fs sets this by default.
     has_filetype: bool,
+    /// The `(uid, gid)` new inodes are created with, set per-op by
+    /// [`set_creator`](Self::set_creator) from the calling task's identity so a
+    /// file/dir is owned by whoever creates it (the permission model needs this -
+    /// a user must own what it makes in its home). Defaults to root `(0, 0)` for
+    /// boot/format-time creation and any caller fsd doesn't set it for.
+    creator_uid: u16,
+    creator_gid: u16,
 }
 
 impl Fs {
@@ -231,7 +238,17 @@ impl Fs {
             groups_count: inodes_count.div_ceil(inodes_per_group),
             has_filetype: u32::from_le_bytes([sb[96], sb[97], sb[98], sb[99]]) & INCOMPAT_FILETYPE
                 != 0,
+            creator_uid: 0,
+            creator_gid: 0,
         })
+    }
+
+    /// Set the owner new inodes are created with (the calling task's uid/gid).
+    /// fsd calls this before each op so `touch`/`write_file`/`mkdir` produce
+    /// files owned by their creator, not root - the permission model requires it.
+    pub fn set_creator(&mut self, uid: u16, gid: u16) {
+        self.creator_uid = uid;
+        self.creator_gid = gid;
     }
 
     /// The volume's first sector - for `mount`-info reporting only.
@@ -1066,8 +1083,8 @@ impl Fs {
         let ino = self.alloc_inode(false)?;
         let node = Inode {
             mode: NEW_FILE_MODE,
-            uid: 0,
-            gid: 0,
+            uid: self.creator_uid,
+            gid: self.creator_gid,
             links: 1,
             size: 0,
             i_blocks: 0,
@@ -1194,8 +1211,8 @@ impl Fs {
         // Allocate + write the new data blocks first (nothing existing touched).
         let mut node = Inode {
             mode: NEW_FILE_MODE,
-            uid: 0,
-            gid: 0,
+            uid: self.creator_uid,
+            gid: self.creator_gid,
             links: 1,
             size: data.len() as u32,
             i_blocks: 0,
@@ -1363,8 +1380,8 @@ impl Fs {
 
         let mut node = Inode {
             mode: NEW_DIR_MODE,
-            uid: 0,
-            gid: 0,
+            uid: self.creator_uid,
+            gid: self.creator_gid,
             links: 2, // "." and the name in the parent
             size: bs as u32,
             i_blocks: (bs / SECTOR_SIZE) as u32,

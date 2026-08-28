@@ -1,0 +1,109 @@
+//! `passwd [user]` - set a user's password in `/etc/passwd` (root only).
+//!
+//! With no argument, changes the *current* user's password (resolved from the
+//! task's uid); with a `<user>` argument, that account's. Prompts for the new
+//! password twice (echo off), derives a fresh salt from the monotonic clock
+//! (`accounts::make_salt` - a weak, clock-derived salt; a virtio-entropy RNG is
+//! the documented upgrade), stores `SHA-256(salt || password)`, and rewrites the
+//! one account line.
+//!
+//! **Root only** (the option-1 model). A non-root user changing their *own*
+//! password needs a privileged path (a setuid bit or an `accountd` server) that
+//! this milestone deliberately defers - the shared `accounts` machinery here is
+//! exactly what that later path will reuse. Byte-only parsing (PIE-safe);
+//! interactive input works because the shell hands a foreground `/bin` program
+//! the keyboard.
+
+#![no_std]
+#![no_main]
+
+const PASSWD_FILE: &str = "/etc/passwd";
+const BUF: usize = syscall_abi::SAFECOPY_MAX as usize;
+
+#[no_mangle]
+#[link_section = ".text.start"]
+pub extern "C" fn _start() -> ! {
+    ulib::usage_if_requested(b"usage: passwd [user]  (set a password; root only)\r\n");
+    if ulib::getuid() != 0 {
+        die(b"passwd: only root may change passwords\r\n");
+    }
+
+    let mut src = [0u8; BUF];
+    let slen = ulib::read_file_all(PASSWD_FILE, &mut src);
+    if slen == 0 {
+        die(b"passwd: cannot read /etc/passwd\r\n");
+    }
+
+    // Target name: argv[1], else the current user (uid -> name).
+    let mut namebuf = [0u8; 33];
+    let mut name_len = 0usize;
+    if let Some(n) = ulib::arg(1, &mut namebuf) {
+        name_len = n;
+    } else {
+        let uid = ulib::getuid();
+        if let Some(acct) = accounts::find_user_by_uid(&src[..slen], uid) {
+            let l = acct.name.len().min(namebuf.len());
+            namebuf[..l].copy_from_slice(&acct.name[..l]);
+            name_len = l;
+        }
+    }
+    if name_len == 0 {
+        die(b"passwd: cannot determine the target user (give a name)\r\n");
+    }
+    let name = &namebuf[..name_len];
+
+    // Copy the target's uid/gid/home out before reusing the buffer.
+    let mut home = [0u8; 128];
+    let (uid, gid, home_len) = match accounts::find_user_by_name(&src[..slen], name) {
+        Some(acct) => {
+            let hl = acct.home.len().min(home.len());
+            home[..hl].copy_from_slice(&acct.home[..hl]);
+            (acct.uid, acct.gid, hl)
+        }
+        None => die(b"passwd: no such user\r\n"),
+    };
+
+    // Prompt for the new password twice (echo off).
+    ulib::con_write(b"New password: ");
+    let mut pw = [0u8; 64];
+    let pwl = ulib::read_line(&mut pw, false);
+    ulib::con_write(b"\r\nRetype new password: ");
+    let mut pw2 = [0u8; 64];
+    let pwl2 = ulib::read_line(&mut pw2, false);
+    ulib::con_write(b"\r\n");
+    if pw[..pwl] != pw2[..pwl2] {
+        die(b"passwd: passwords do not match\r\n");
+    }
+
+    let salt = accounts::make_salt(ulib::monotonic_us());
+    let hash = accounts::hash_password(&salt, &pw[..pwl]);
+
+    let mut line = [0u8; 256];
+    let Some(llen) = accounts::format_account_line(
+        &mut line, name, uid, gid, &home[..home_len], &salt, &hash,
+    ) else {
+        die(b"passwd: account line too long\r\n");
+    };
+    let mut out = [0u8; BUF];
+    let (olen, replaced) = match accounts::replace_line(&src[..slen], &mut out, name, &line[..llen]) {
+        Some(r) => r,
+        None => die(b"passwd: /etc/passwd full\r\n"),
+    };
+    if !replaced {
+        die(b"passwd: no such user\r\n");
+    }
+    let code = ulib::fs_write_bulk(PASSWD_FILE, &out[..olen]);
+    if ulib::is_fs_error(code) {
+        ulib::fs_error("passwd", code);
+        ulib::exit(1);
+    }
+    ulib::con_write(b"passwd: password updated for ");
+    ulib::con_write(name);
+    ulib::con_write(b"\r\n");
+    ulib::exit(0);
+}
+
+fn die(msg: &[u8]) -> ! {
+    ulib::con_write(msg);
+    ulib::exit(1);
+}

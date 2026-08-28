@@ -5,19 +5,20 @@ SYNOPSIS
     id
 
 DESCRIPTION
-    Prints the calling task's user and group id as "uid=N gid=M". Numeric only
-    - there is no /etc/passwd yet, so names are not resolved (that arrives with
-    the login/users step).
+    Prints the calling task's user and group id, with names resolved from
+    /etc/passwd and /etc/group (numeric fallback when a file or id is missing):
+
+        uid=1000(user) gid=1000(user)
 
     Identity is carried by the kernel per task and inherited across spawn, so
     running id after su reports the new user - the proof that a command runs as
     whoever started it:
 
         # id
-        uid=0 gid=0
-        # su 1000:1000
+        uid=0(root) gid=0(root)
+        # su user
         $ id
-        uid=1000 gid=1000
+        uid=1000(user) gid=1000(user)
 
     A pipeline stage like any other: `id | grep uid` works.
 

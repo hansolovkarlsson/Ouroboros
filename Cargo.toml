@@ -2,7 +2,7 @@
 resolver = "2"
 members = [
     # Kernel + shared libraries stay at the repo root.
-    "kernel", "ulib", "syscall-abi", "ninep-abi",
+    "kernel", "ulib", "syscall-abi", "ninep-abi", "accounts",
     # All userland programs live under programs/, grouped by role.
     "programs/shell",
     "programs/servers/fsd", "programs/servers/cond", "programs/servers/netd",
@@ -21,6 +21,8 @@ members = [
     "programs/shellutils/args", "programs/shellutils/pwd", "programs/shellutils/readkey",
     "programs/shellutils/send", "programs/shellutils/recv", "programs/shellutils/selftest",
     "programs/shellutils/man", "programs/shellutils/printenv", "programs/shellutils/id",
+    "programs/admin/passwd", "programs/admin/useradd",
+    "programs/admin/groupadd", "programs/admin/usermod",
 ]
 # `shell`, `hello`, and `pong` are built explicitly with `--target
 # aarch64-unknown-none` (see the Makefile) - they must never be pulled

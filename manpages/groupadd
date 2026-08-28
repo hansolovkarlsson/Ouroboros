@@ -1,0 +1,22 @@
+NAME
+    groupadd - create a group (root only)
+
+SYNOPSIS
+    groupadd <name> [-g <gid>]
+
+DESCRIPTION
+    Adds a group to /etc/group (format: name:gid:members). ROOT ONLY. The gid is
+    the given -g value or the next free id at/above 1000.
+
+    Groups here use a PRIMARY-GID model: a task carries one kernel-owned gid, and
+    "putting a user in a group" means setting that user's primary gid (see
+    usermod). The members list is recorded but not yet enforced - full
+    supplementary-group membership needs the kernel identity to carry a group
+    list, a later step.
+
+EXAMPLES
+    # groupadd staff
+    groupadd: created group staff
+
+SEE ALSO
+    usermod, useradd, id
