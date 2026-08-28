@@ -1194,6 +1194,13 @@ pub const FS_ERR_READ_ONLY: u64 = u64::MAX - 29;
 /// degradation the read side (`stat`'s `mode_valid` byte) already uses.
 pub const FS_ERR_NOT_SUPPORTED: u64 = u64::MAX - 31;
 
+/// **Permission denied**: the caller's uid/gid isn't allowed the requested
+/// access to a file by its owner + mode bits. Returned by `fsd`'s permission
+/// enforcement (the users/permissions arc, step 3) - ext2 only (the one arm
+/// that models an owner/mode; FAT32/exFAT/`/proc` stay unrestricted). Root
+/// (uid 0) bypasses the check, so this is only ever a *non-root* refusal.
+pub const FS_ERR_PERM: u64 = u64::MAX - 32;
+
 /// Floor of the reserved error band (with headroom for future codes):
 /// **any error-capable syscall's return value `>= FS_ERR_MIN` is an
 /// error**, everything below is a real result. The predicate callers
@@ -1201,10 +1208,10 @@ pub const FS_ERR_NOT_SUPPORTED: u64 = u64::MAX - 31;
 /// byte counts on success and can't enumerate every non-error value in
 /// a `match`. (Moved down from `MAX-15` when the `TASK_ERR_*` codes
 /// consumed the original headroom, then to `MAX-32` for
-/// [`FS_ERR_NOT_SUPPORTED`] - safe, since both sides of the ABI import
-/// this from the same crate and no real success value approaches it
-/// either way.)
-pub const FS_ERR_MIN: u64 = u64::MAX - 32;
+/// [`FS_ERR_NOT_SUPPORTED`], then `MAX-33` for [`FS_ERR_PERM`] - safe, since
+/// both sides of the ABI import this from the same crate and no real success
+/// value approaches it either way.)
+pub const FS_ERR_MIN: u64 = u64::MAX - 33;
 
 /// Generic failure sentinel for [`SPAWN`] - same bit pattern as
 /// [`FS_ERROR`] (a bad ELF, no free task slot, and a disk read failure

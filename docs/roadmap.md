@@ -339,10 +339,14 @@ size cap.) Cheap wins first; the editor last, gated on item 1.
 > `login`-as-init process to avoid rewiring the capability model's "slot 0 =
 > shell" assumption; a user can't escalate since `su` is root-only + children
 > can't restore root). See `CHANGELOG.md` and `docs/gap-analysis.md` §6.
-> **Remaining: (3) enforcement** — check the sender's uid vs. the inode
-> mode/owner in the `FSOP_*` dispatch (all three inputs — metadata, identity,
-> and a real logged-in user — now exist; they just aren't joined). Plus small
-> follow-ups: `passwd`/`useradd`, per-user `/home` (home is `/` today), groups.
+> Step 3 (*enforcement*) is now done too: `fsd`'s `check_access` gates every
+> file verb — the caller's uid/gid (`GET_ID(sender)`) vs. the inode owner/mode,
+> owner→group→other, root bypass, `FS_ERR_PERM` on refusal, `chmod` owner-only /
+> `chown` root-only. ext2-only (FAT/exFAT unrestricted). **The core arc is
+> complete.** Deferred refinements (smaller, unsequenced): the ancestor-directory
+> search (`x`) traversal check, per-user *cluster* identity, `/etc/shadow`
+> (passwords out of the world-readable `passwd`), `passwd`/`useradd`, per-user
+> `/home` (home is `/` today), and groups.
 
 The biggest of these — the step from "single implicit user, whoever's at the
 keyboard" to a real **identity and permission model**. Pieces: a notion of

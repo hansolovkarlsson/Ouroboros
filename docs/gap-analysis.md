@@ -106,7 +106,7 @@ set; roadmap arcs are cited by their `roadmap.md` section.
 |---|---|---|
 | User accounts / uid / gid | ◐ | **A uid/gid per task now exists** (kernel-owned `SET_ID`/`GET_ID`; `/bin/id`, the `su` builtin, `#`/`$` prompt), default root, inherited across spawn, root-gated (no escalation). The kernel owns the binding as the unforgeable root of trust — a *deliberate reversal* of the earlier "probably userland" guess, on security grounds. What's missing is the *account model* above it: names, `/etc/passwd`, groups. Roadmap item 4. |
 | Login / authentication (passwords) | ◐ | **Present**: the shell gates every session on a `login:` prompt, authenticating username + password against `/etc/passwd` (`name:uid:gid:home:salt:hash`, `hash = SHA-256(salt‖password)`; echo-off entry, constant-time check) then `SET_ID`-ing to that user. `logout` restores root (saved-uid) and re-prompts; `su` is root-only so a user can't escalate. What's thinner than Unix: accounts are a static file (no `passwd`/`useradd`), home is `/` (no per-user `/home` yet), and PAM/groups/sessions don't exist. |
-| Enforced file permissions | ✗ | Metadata is stored, read, *and writable* on ext2 (`stat`/`chmod`/`chown`), and a caller identity now exists (`GET_ID`) — but the two aren't joined yet. The remaining step is the check itself: compare the sender's uid/gid (the IPC layer hands `fsd` the sender) against the inode's mode/owner in the `FSOP_*` dispatch. |
+| Enforced file permissions | ◐ | **Enforced on ext2**: `fsd`'s `check_access` gates every file verb — the caller's uid/gid (`GET_ID(sender)`) vs. the inode owner/mode, owner→group→other, root bypasses, `FS_ERR_PERM` on refusal (`chmod` owner-only, `chown` root-only). FAT/exFAT stay unrestricted (no mode to check). Thinner than POSIX: the search (`x`) bit on ancestor directories isn't checked yet (only the object + its parent), and remote/cluster requests are still machine-authenticated (root), not per-user. |
 | Privilege boundary (root / sudo) | ◐ | A per-task **capability send-mask** governs who-may-call-whom (topological isolation) — the mechanism a privilege model would build on, but there's no user-facing privileged/unprivileged split. |
 | Cluster authentication | ◐ | **Machine-level**: a shared cluster key, mutually authenticated (HMAC) on the 9P export, fail-closed, `\NOEXEC`. **No per-user identity, no replay protection, no on-the-wire encryption** — each a named next tier (cluster-auth postmortem). Trusted-LAN by design. |
 | Cryptography | ◐ | Hand-rolled SHA-256 + HMAC-SHA256 (NIST/RFC-validated). No TLS, no public-key, no at-rest encryption. |
@@ -233,17 +233,15 @@ ps kill fg wait send recv selftest env set unset cpu`.
 Reading the map top-down, the highest-leverage missing pieces, each pointing
 at a roadmap arc:
 
-1. **Permissions + identity + login → enforcement.**
-   The keystone `stat` op exposes mode/uid/gid and `chmod`/`chown` write them
-   back (ext2, e2fsck-clean); a **kernel-owned uid/gid per task** exists
-   (`SET_ID`/`GET_ID`, saved-uid, root-gated, inherited across spawn); and the
-   shell now **authenticates a login** against `/etc/passwd` and runs the
-   session as that user (a user can't escalate). So all three inputs enforcement
-   needs — the metadata, a trustworthy caller identity, and a real user behind
-   it — are in place. **What's left is the check itself**: compare the sender's
-   uid/gid (the IPC layer hands `fsd` the sender) against the inode's mode/owner
-   in the `FSOP_*` dispatch. Smaller items alongside it: `passwd`/`useradd`,
-   per-user `/home`, and groups. → roadmap item 4.
+1. **The users/permissions arc — DONE (2026-08-28).** All four pieces landed:
+   the `stat` mode/owner surface + `chmod`/`chown` (ext2, e2fsck-clean); a
+   kernel-owned uid/gid per task (`SET_ID`/`GET_ID`, saved-uid); a `login` gate
+   against `/etc/passwd`; and **`fsd` permission enforcement** (`check_access` —
+   caller uid/gid vs. inode owner/mode, root bypass, `FS_ERR_PERM`). What remains
+   are *refinements*, not the arc: the ancestor-directory search (`x`) check,
+   per-user *cluster* identity, `/etc/shadow`, `passwd`/`useradd`, per-user
+   `/home`, and groups. With this done, the highest-leverage remaining gap is
+   the libc personality (next).
 2. **A userland libc personality.** POSIX/C portability is the single biggest
    thing given up across every comparison, and it gates the on-device
    compiler. Well-scoped (newlib stubs over existing servers), just large. →

@@ -17,6 +17,10 @@ DESCRIPTION
     succeed. This matches ls -l, which shows real modes on ext2 and a
     synthesized placeholder elsewhere.
 
+    The bits are ENFORCED (on ext2): the filesystem server checks them on every
+    access - a non-root user is denied read/write it isn't granted ("permission
+    denied"). Root bypasses. Only a file's owner (or root) may chmod it.
+
 EXAMPLES
     chmod 755 /bin/prog
     chmod 644 notes.txt

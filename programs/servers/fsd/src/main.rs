@@ -372,6 +372,13 @@ fn handle_ninep(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], sender: u64,
     let Some(fs) = mounts[tree].as_mut() else {
         return status_reply(reply, syscall_abi::NO_FS);
     };
+    // Permission enforcement (users/permissions arc, step 3): check the caller's
+    // uid/gid against the target's owner+mode before running the op. ext2-only
+    // (others return mode:None, which `check_access` treats as unrestricted);
+    // root bypasses. See `check_access`.
+    if !check_access(fs, sender, verb, &p, payload) {
+        return status_reply(reply, syscall_abi::FS_ERR_PERM);
+    }
     match verb {
         ninep_abi::NP_READDIR => {
             let Some(path) = path_from(payload, 0, p[0]) else {
@@ -650,6 +657,150 @@ fn want_len(want: u64) -> Option<usize> {
         return None;
     }
     Some(want)
+}
+
+// --- Permission enforcement (users/permissions arc, step 3) -----------------
+// The classic Unix check: given a caller's uid/gid and a file's owner + mode,
+// decide whether an operation is allowed. Enforced only on a filesystem that
+// models mode/owner (ext2 - `stat` returns `Some(FileMode)`); FAT32/exFAT/`/proc`
+// return `None` and stay unrestricted, the same honest per-FS degradation as
+// `chmod`/`chown`. Root (uid 0) bypasses everything. Path traversal (the search
+// bit on ancestor directories) is deliberately NOT checked yet - only the object
+// of the operation, and the parent directory for create/delete/rename - a
+// documented first-cut simplification.
+
+const PERM_R: u16 = 4;
+const PERM_W: u16 = 2;
+
+/// Whether a caller with `uid`/`gid` is allowed `need` (an `R`/`W`/`X` bit
+/// combination) on an object owned by `owner_uid`/`owner_gid` with `mode`.
+fn mode_allows(mode: u16, owner_uid: u32, owner_gid: u32, uid: u32, gid: u32, need: u16) -> bool {
+    if uid == 0 {
+        return true; // root bypasses permission checks
+    }
+    let triad = if uid == owner_uid {
+        (mode >> 6) & 7 // owner rwx
+    } else if gid == owner_gid {
+        (mode >> 3) & 7 // group rwx
+    } else {
+        mode & 7 // other rwx
+    };
+    triad & need == need
+}
+
+/// The calling task's `(uid, gid)` from the kernel (`GET_ID`). The identity is a
+/// packed `(gid << 32) | uid`; widened to `u32` to compare against the ext2
+/// inode's `u16` owner fields.
+fn caller_id(sender: u64) -> (u32, u32) {
+    let packed = syscall4(syscall_abi::GET_ID, sender, 0, 0, 0);
+    (packed as u32, (packed >> 32) as u32)
+}
+
+/// The parent directory of an absolute path (`/etc/passwd` -> `/etc`, `/foo` ->
+/// `/`). Works in bytes: slicing a `&str` by a runtime index would pull in
+/// `core::fmt` (the PIE relocation trap), so it slices the byte view and
+/// re-wraps.
+fn parent_of(path: &str) -> &str {
+    let b = path.as_bytes();
+    let mut i = b.len();
+    let mut cut = 0;
+    while i > 0 {
+        i -= 1;
+        if b[i] == b'/' {
+            cut = i;
+            break;
+        }
+    }
+    if cut == 0 {
+        "/"
+    } else {
+        core::str::from_utf8(&b[..cut]).unwrap_or("/")
+    }
+}
+
+/// Whether `path` (or, for namespace ops, the given directory) grants the caller
+/// `need`. A path that can't be stat'd (e.g. doesn't exist) or a filesystem that
+/// can't model permissions passes - the op then runs and fails on its own merits
+/// (not-found, etc.) rather than masquerading as a permission error.
+fn path_allows(fs: &mut vfs::Filesystem, path: &str, uid: u32, gid: u32, need: u16) -> bool {
+    match fs.stat(path) {
+        Ok(st) => match st.mode {
+            Some(m) => mode_allows(m.mode, m.uid as u32, m.gid as u32, uid, gid, need),
+            None => true, // filesystem doesn't model owner/mode -> unrestricted
+        },
+        Err(_) => true,
+    }
+}
+
+/// Enforce the caller's permission for `verb`. Returns `true` if allowed. Reads
+/// the object's owner+mode via `stat` and compares against the caller's uid/gid.
+fn check_access(fs: &mut vfs::Filesystem, sender: u64, verb: u64, p: &[u64; 4], payload: &[u8]) -> bool {
+    let (uid, gid) = caller_id(sender);
+    if uid == 0 {
+        return true; // root: skip the per-op work entirely
+    }
+    match verb {
+        // Reads: R on the target file/dir. Stat is left open (metadata is needed
+        // by `ls -l` for entries a readable directory already exposes).
+        ninep_abi::NP_STAT => true,
+        ninep_abi::NP_READDIR | ninep_abi::NP_READ_FILE | ninep_abi::NP_READ | ninep_abi::NP_READ_AT => {
+            match path_from(payload, 0, p[0]) {
+                Some(path) => path_allows(fs, path, uid, gid, PERM_R),
+                None => true,
+            }
+        }
+        // Writes: W on an existing file, else W on the parent dir (create).
+        ninep_abi::NP_WRITE | ninep_abi::NP_WRITE_FILE | ninep_abi::NP_WRITE_AT => {
+            match path_from(payload, 0, p[0]) {
+                Some(path) => {
+                    if fs.stat(path).is_ok() {
+                        path_allows(fs, path, uid, gid, PERM_W)
+                    } else {
+                        path_allows(fs, parent_of(path), uid, gid, PERM_W)
+                    }
+                }
+                None => true,
+            }
+        }
+        // Namespace changes: W on the parent directory.
+        ninep_abi::NP_TOUCH | ninep_abi::NP_MKDIR | ninep_abi::NP_RM | ninep_abi::NP_RMDIR => {
+            match path_from(payload, 0, p[0]) {
+                Some(path) => path_allows(fs, parent_of(path), uid, gid, PERM_W),
+                None => true,
+            }
+        }
+        // Rename: W on both the source and destination parent directories.
+        ninep_abi::NP_MV => {
+            match (path_from(payload, 0, p[0]), path_from(payload, p[0] as usize, p[1])) {
+                (Some(src), Some(dst)) => {
+                    path_allows(fs, parent_of(src), uid, gid, PERM_W)
+                        && path_allows(fs, parent_of(dst), uid, gid, PERM_W)
+                }
+                _ => true,
+            }
+        }
+        // chmod: owner-only (root already returned above).
+        ninep_abi::NP_CHMOD => match path_from(payload, 0, p[0]) {
+            Some(path) => match fs.stat(path) {
+                Ok(st) => match st.mode {
+                    Some(m) => uid == m.uid as u32,
+                    None => true,
+                },
+                Err(_) => true,
+            },
+            None => true,
+        },
+        // chown: root-only, so a non-root caller (we're past the root bypass) is
+        // always refused when the filesystem models ownership.
+        ninep_abi::NP_CHOWN => match path_from(payload, 0, p[0]) {
+            Some(path) => match fs.stat(path) {
+                Ok(st) => st.mode.is_none(), // unrestricted only if not modelled
+                Err(_) => true,
+            },
+            None => true,
+        },
+        _ => true,
+    }
 }
 
 /// The old kernel `fs_error_code`, unchanged: maps a `fat32::Error` to
