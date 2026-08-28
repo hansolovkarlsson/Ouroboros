@@ -7,6 +7,48 @@ for the forward plan see [`roadmap.md`](roadmap.md).
 
 ---
 
+## 2026-08-28 (cont.) — closing the security arc: account management
+
+After the libc arc, one more the same day: **closing out the users/permissions
+work** with the tools to actually manage accounts on-device. The earlier arc
+built identity + login + enforcement; this one built `passwd`, `useradd`,
+`groupadd`, `usermod`, name resolution (`id`/`su` by name), `/etc/group`, and
+per-user home directories.
+
+I started by scoping the gaps and putting the real design forks to the user:
+**who may mutate `/etc/passwd`** (a non-root user changing their own password
+needs a privileged path we don't have), **how deep groups should go**, and
+**where salt entropy comes from**. The decisions: root-only tools built on a
+*shared helper* (self-service `passwd` deferred to a later `accountd`/setuid tier
+the helper is built to slot into — option 1 is a strict subset of that server);
+**primary-gid** groups (the kernel identity is one packed word, so supplementary
+membership is a later tier); and a **clock-derived salt** (weak, documented, with
+a virtio-entropy RNG as the noted upgrade).
+
+Everything shared lives in a new pure `accounts` crate (no I/O, no syscalls),
+which made it **host-unit-testable** — and the tests immediately caught that my
+own fixtures used truncated hashes (the parser correctly rejects a non-32-byte
+hash). The tools are all root-only, PIE-safe, over `ulib` + `accounts`.
+
+The interesting part was what the arc *exposed*. Before this, everything ran as
+root; the moment a non-root `user` had a home under `/Users` it was meant to
+write in, `echo hi > ~/note.txt` was **denied** — ext2 created every new inode
+owned by root, so the file was born root-owned and the follow-up write correctly
+refused. Fixed by having `fsd` stamp the caller's identity (`set_creator`) onto
+new inodes. Then the code-review agent caught a second-order bug I'd introduced:
+`write_file`'s *overwrite* branch preserved the old file's mode/links but not its
+owner, so overwriting a file now chowned it to the writer — POSIX overwrite never
+chowns; fixed to preserve the old uid/gid.
+
+Testing was scripted end-to-end on `run-image-ext2` (a paced fifo feeding the
+guest shell after the login prompt — the PL011 has no RX FIFO, so input dropped
+at boot bit hard until I paced it). Login `user` → `id` names, `/Users/user`
+home, `~`, home-write allowed, `/`-write denied; login `root` →
+`useradd`/`groupadd`/`usermod`/`su carol` → `uid=1001(carol) gid=1002(staff)`.
+Shipped as PR #22 (merged), including the `/User` → `/Users` rename (a home-base
+spec call the user made). Full retrospective in
+[`account-management-postmortem.md`](account-management-postmortem.md).
+
 ## 2026-08-28 (cont.) — the libc arc, ending at a real C library (picolibc)
 
 After the users/permissions arc, a second arc the same day: making Ouroboros run

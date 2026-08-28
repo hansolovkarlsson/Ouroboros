@@ -1339,3 +1339,50 @@ phase:
   relayed through the shell), and runtime capability delegation (2026-08-21)
   then made `programA | programB` stream directly, shell out of the byte
   path. See the "Recently completed" notes above.**
+
+---
+
+## Users, permissions & account management arc — DONE (2026-08-28)
+
+Moved here from `roadmap.md` item 4 once complete. The step from "one implicit
+user, whoever's at the keyboard" to a real identity + permission model with
+on-device account management. Sequenced in four steps over the day, each a small
+surface joined to machinery that already existed:
+
+1. **Identity** — a kernel-owned uid/gid per task (`SET_ID`/`GET_ID`,
+   `IDS`/`SAVED_IDS`), default root, inherited across spawn, root-gated. Kept the
+   binding *in the kernel* (the only unforgeable task→sender source), a
+   deliberate reversal of this item's earlier "probably userland" lean. Surfaced
+   by `/bin/id`, the `su` builtin, and the `#`/`$` prompt.
+2. **Login** — the shell gates each session on a `login:` prompt, authenticating
+   username+password against `/etc/passwd` (`SHA-256(salt‖password)`) and
+   dropping to that user via a POSIX **saved-uid** (logout restores root and
+   re-prompts — chosen over a `login`-as-init process to avoid rewiring the
+   capability model's "slot 0 = shell").
+3. **Enforcement** — `fsd`'s `check_access` gates every file verb: caller uid/gid
+   vs. inode owner/mode, owner→group→other, root bypass, `FS_ERR_PERM`. ext2-only
+   (FAT/exFAT can't model owners); object + parent checked (ancestor-`x`
+   deferred).
+4. **Account management** ("close the security arc") — a shared, pure,
+   **host-unit-tested** `accounts` crate (all `/etc/passwd`+`/etc/group` logic,
+   hashing, salt, lookups, file rewrites) under `/bin/passwd`/`useradd`/
+   `groupadd`/`usermod` (root-only), `su`/`id` by name, `/etc/group` **primary-gid**
+   groups, and per-user **`/Users`** homes with `~`→`$HOME`. The arc also *fixed*
+   a latent bug it surfaced: ext2 created new inodes root-owned, so a non-root
+   user couldn't write its own home — `fsd` now stamps the creator's identity
+   (`set_creator`) onto new inodes.
+
+**How it was sequenced / what was learned.** The whole arc changed the kernel's
+identity primitive once (step 1) and otherwise reused what existed — ext2's
+on-disk mode/owner, the IPC sender, the cluster-auth SHA-256. The load-bearing
+call in step 4 was **option 1 on a shared helper** (root-only tools now, the
+`accounts` crate factored so a later `accountd`/setuid self-service tier is a
+repoint, not a rewrite — option 1 is a strict subset of the server). Groups are
+**primary-gid** because the kernel identity is one packed word; salts are
+**clock-derived** and documented as weak. Retrospectives:
+[`users-and-permissions-postmortem.md`](users-and-permissions-postmortem.md)
+(steps 1–3, the 20th) and
+[`account-management-postmortem.md`](account-management-postmortem.md) (step 4,
+the 22nd). The forward-looking deferred refinements (self-service `passwd`, a
+virtio-entropy RNG, supplementary groups, `/etc/shadow`, ancestor-`x`, per-user
+cluster identity, symbolic `chmod`) stay in [`roadmap.md`](roadmap.md) item 4.
