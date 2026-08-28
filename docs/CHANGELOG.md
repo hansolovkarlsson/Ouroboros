@@ -7,6 +7,34 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/`; 
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## A minimal libc: C programs with printf/malloc/strings
+
+The libc arc's third step — a real (if small) C standard library, so a C program
+is written *normally* (`#include <stdio.h>`, call `printf`/`malloc`) instead of
+hand-rolling syscalls. `# cdemo` prints formatted output, allocates memory, and
+sums 1..100 = 5050.
+
+- **`libc/`** now has standard-ish headers (`libc/include/{stdio,stdlib,string,
+  unistd}.h`) and sources (`libc/src/`): `crt0` (`_start`), `os.c` (the syscall
+  stubs — `write`→console via `PUTC`, `read`→keyboard via `READ_CHAR`,
+  `sbrk`→the `HEAP_INFO` region, `_exit`→`EXIT`), a minimal `printf`
+  (`%d`/`%i`/`%u`/`%x`/`%X`/`%c`/`%s`/`%%`), `malloc`/`free` (a bump allocator
+  over `sbrk`; `free` a no-op), and the `string.h` essentials. `make cdemo-bin`,
+  staged as `/bin/CDEMO`.
+- **This is where the last two steps pay off:** `sbrk` keeps its break pointer in
+  a `.bss` `static` (unlocked by the `.data`/`.bss` milestone), and the whole
+  thing rides the C-runs-on-Ouroboros toolchain path.
+- **`-fno-builtin` on the libc sources** so the optimizer doesn't rewrite
+  `string.c`'s `memcpy`/`memset` loops into calls to themselves (a classic
+  freestanding-libc self-recursion); user programs still get builtins, which
+  resolve to the libc's own `memcpy`. Zero `ABS64`, no undefined symbols.
+- Verified fresh-per-spawn (ran twice, identical output — the bump heap
+  re-initializes each spawn). `libc/hello.c` stays the self-contained no-libc
+  proof + `.data`/`.bss` regression test.
+
+Still to grow: file I/O (`open`/`read`/`close` via `fsd`, an fd table), a
+stdout-target-aware `write` (pipes/redirection), then picolibc/newlib.
+
 ## Userland `.data`/`.bss` support: programs can have globals/statics
 
 The libc arc's second step, and the real unblock for non-trivial C: **userland

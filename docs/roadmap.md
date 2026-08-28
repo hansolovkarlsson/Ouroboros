@@ -159,13 +159,16 @@ be reviewed after the fact from the saved screenshots.
 > already loaded initialized data and zeroed `.bss` per PT_LOAD segment, so this
 > was removing the linker-script ASSERTs and verifying (fresh-per-spawn,
 > `data=7 bss=0` → `data=8 bss=5`, RELATIVE relocs only). That was the real
-> blocker for non-trivial C. **Remaining steps, in order:** (1) structure a
-> minimal libc — a `crt0` + the POSIX syscall stubs (`_write`→`cond`,
-> `_read`/`_open`→`fsd`'s `NP_*`, `_sbrk`→the userland heap, `_exit`→`EXIT`,
-> `_fstat`), plus the `memcpy`/`memset` the compiler synthesizes; (2) port
-> `picolibc`/`newlib` on top; then C programs like SQLite and a small C compiler
-> become "port one more program." See `docs/processes.md`'s "Writing a program in
-> C." The reasoning below is the original parked plan, still accurate.
+> blocker for non-trivial C. **A minimal libc landed next** (third step):
+> `libc/` now has standard headers + sources (`crt0`, syscall stubs, `printf`,
+> `malloc`/`free` over `sbrk`, `string.h`) — a C program `#include`s `<stdio.h>`
+> and calls `printf`/`malloc` (`make cdemo-bin`, `/bin/CDEMO`: formatted output,
+> heap allocation, `sum(1..100)=5050`). **Remaining steps, in order:** (1) file
+> I/O — `open`/`read`/`close`/`fstat` over `fsd`'s `NP_*` with an fd table, plus a
+> stdout-target-aware `write` so a C program participates in pipes/redirection;
+> (2) port `picolibc`/`newlib` on top; then C programs like SQLite and a small C
+> compiler become "port one more program." See `docs/processes.md`'s "Writing a
+> program in C." The reasoning below is the original parked plan, still accurate.
 
 **The goal, restated honestly.** The original `notes.txt` intent was
 "POSIX-ish system calls." What actually got built is *not* POSIX and not
