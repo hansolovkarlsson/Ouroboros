@@ -167,12 +167,15 @@ be reviewed after the fact from the saved screenshots.
 > next** (fourth step): `open`/`read`/`write`/`close`/`lseek`/`fstat` over `fsd`
 > with an fd table, and a stdout-target-aware `write` so a C program works in a
 > pipeline (`make cfile-bin`, `/bin/CFILE`: writes a file, reads it back;
-> `cfile | grep hello` filters its output). **Remaining:** file descriptors as
-> real server handles (fids — a POSIX fd ≈ a 9P fid, the deferred-from-Phase-0
-> feature that pays off twice), then port `picolibc`/`newlib` on top; then C
-> programs like SQLite and a small C compiler become "port one more program."
-> See `docs/processes.md`'s "Writing a program in C." The reasoning below is the
-> original parked plan, still accurate.
+> `cfile | grep hello` filters its output). **Fids landed next** (fifth step): fsd
+> gained real server-side open-file handles (`NP_OPEN`/`NP_PREAD`/`NP_PWRITE`/
+> `NP_FSTAT`/`NP_CLUNK`, a per-client fid table, permission checked once at open),
+> the C libc uses them, and they coexist with the path verbs — the
+> deferred-since-Phase-0 "a POSIX fd ≈ a 9P fid" feature, paying off for both C
+> portability and the 9P model. **Remaining:** port `picolibc`/`newlib` on top;
+> then C programs like SQLite and a small C compiler become "port one more
+> program." See `docs/processes.md`'s "Writing a program in C." The reasoning
+> below is the original parked plan, still accurate.
 
 **The goal, restated honestly.** The original `notes.txt` intent was
 "POSIX-ish system calls." What actually got built is *not* POSIX and not

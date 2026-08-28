@@ -40,6 +40,17 @@
 #define NP_READ_AT (NP_BASE + 10)
 #define NP_WRITE_FILE (NP_BASE + 11)
 #define NP_STAT (NP_BASE + 12)
+/* fids: server-side open-file handles. */
+#define NP_OPEN (NP_BASE + 15)
+#define NP_PREAD (NP_BASE + 16)
+#define NP_PWRITE (NP_BASE + 17)
+#define NP_FSTAT (NP_BASE + 18)
+#define NP_CLUNK (NP_BASE + 19)
+#define OPEN_READ 1
+#define OPEN_WRITE 2
+#define OPEN_CREATE 4
+#define OPEN_TRUNC 8
+#define FID_BASE 3
 
 /* Message/payload limits. */
 #define NP_REQ_PAYLOAD 48u

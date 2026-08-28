@@ -434,20 +434,22 @@ The **constraints are the loader's, and they bite C harder than Rust**:
   optimizer doesn't rewrite `string.c`'s `memcpy`/`memset` loops into calls to
   themselves. `libc/hello.c` remains the self-contained *no-libc* proof (its own
   `svc` stubs) and the `.data`/`.bss` regression test.
-- **File I/O works** (`libc/src/file.c`, `make cfile-bin` → `/bin/CFILE`):
-  `open`/`read`/`write`/`close`/`lseek`/`fstat` over `fsd`'s `NP_*`, via a small
-  fd table (fds ≥ 3 hold a path + cursor, since `fsd` is path-per-op). Reads use
-  the inline `NP_READ_AT`; writes grant the buffer and `NP_WRITE_AT`; `fstat`
-  reads `NP_STAT`. Relative paths resolve against the cwd; **tree 0 (the default
-  disk mount) only** for now. And `write(1|2)` is **stdout-target-aware**: it
-  goes to the console (batched via `cond`) or, when the program is a pipe
-  producer, to the consumer via `MSG_SEND` — so `cfile | grep hello` works.
-  Two things that had to be right for pipes: stdout is **buffered** (flushed on
-  newline / full / exit) rather than one `write` per char, and the pipe send
-  **yields and retries** on a full consumer mailbox (`MSG_ERR_FULL`) instead of
-  dropping bytes — the same shape as `ulib::pipe_out`. **Still to grow:** file
-  descriptors as real server handles (fids), then a ported `picolibc`/`newlib` —
-  see `roadmap.md`'s "POSIX / C-program portability."
+- **File I/O works, via fids** (`libc/src/file.c`, `make cfile-bin` →
+  `/bin/CFILE`): `open`/`read`/`write`/`close`/`lseek`/`fstat`. A **fid** is a
+  server-side open-file handle (a POSIX fd *is* a 9P fid) — `open` establishes it
+  in `fsd` (`NP_OPEN`, which authorizes the access against the file's mode/owner
+  *once*), and the fd the C program holds *is* that fid; `read`/`write`/`fstat`/
+  `close` reference it (`NP_PREAD`/`NP_PWRITE`/`NP_FSTAT`/`NP_CLUNK`). The cursor
+  stays client-side and rides each read/write offset (authentic 9P). These
+  **coexist** with the path-per-op verbs (the shell/`cat` still use those). Paths
+  resolve against the cwd; tree 0 (the default disk mount) only. And `write(1|2)`
+  is **stdout-target-aware**: the console (batched via `cond`) or a pipe consumer
+  (`MSG_SEND`) — so `cfile | grep hello` works. Two things that had to be right
+  for pipes: stdout is **buffered** (flushed on newline / full / exit) rather
+  than one `write` per char, and the pipe send **yields and retries** on a full
+  consumer mailbox (`MSG_ERR_FULL`) instead of dropping bytes. **Still to grow:**
+  a ported `picolibc`/`newlib` — see `roadmap.md`'s "POSIX / C-program
+  portability."
 - **Watch the relocations** the same way (`llvm-readobj --dyn-relocations`): an
   `R_AARCH64_ABS64` is unloadable. Simple code is PC-relative and needs none;
   richer code emits `R_AARCH64_RELATIVE`, which the loader handles. `memcpy`/

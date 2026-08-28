@@ -53,6 +53,9 @@ fn main() -> ! {
     // auto-mount; FSOP_MOUNT_AT fills the rest. Filesystem isn't Copy, so build
     // the array of `None`s with a const block rather than `[None; N]`.
     let mut mounts: [Option<vfs::Filesystem>; MAX_MOUNTS] = [const { None }; MAX_MOUNTS];
+    // The open-file (fid) table - see the fid verbs. Lives here in main's frame
+    // like `mounts` (fsd keeps no static state).
+    let mut fids = [Fid::empty(); MAX_FIDS];
     // Auto-mount if the kernel already holds a device (QEMU's boot-time
     // virtio path; on Parallels the device arrives later, via the
     // `mount` command -> MOUNT syscall -> FSOP_MOUNT request).
@@ -82,7 +85,7 @@ fn main() -> ! {
         }
         let sender = packed >> 32;
         let len = ((packed & 0xffff_ffff) as usize).min(req.len());
-        let reply_len = handle(&mut mounts, sender, &req[..len], &mut reply);
+        let reply_len = handle(&mut mounts, &mut fids, sender, &req[..len], &mut reply);
         // A full/unreachable sender mailbox drops the reply - the
         // caller's MSG_CALL stays blocked until Ctrl+C; nothing better
         // exists to do with an undeliverable reply.
@@ -255,6 +258,39 @@ const DATA_MAX: usize = syscall_abi::FS_DATA_MAX as usize;
 /// `MAX_CONNS`, the VFS's `MAX_PARTITIONS`).
 const MAX_MOUNTS: usize = ninep_abi::NS_PROC_TREE as usize + 1;
 
+// --- fids: server-side open-file handles (see ninep-abi's NP_OPEN..NP_CLUNK) -
+/// How many files can be open at once, across all clients. Small and fixed - the
+/// table lives on `main`'s stack frame (fsd keeps no static state), and fsd's
+/// stack is guard-page-bounded, so this stays modest. If it fills, `NP_OPEN`
+/// first reaps fids whose owner task has died (`TASK_STATE`), then fails.
+const MAX_FIDS: usize = 8;
+/// Longest path a fid remembers (bounded, no heap). Enough for the paths a C
+/// program opens on the boot disk; a longer path fails `NP_OPEN`.
+const FID_PATH_MAX: usize = 96;
+/// Fids are numbered from 3 so they never collide with a C program's reserved
+/// stdin/stdout/stderr (0/1/2) and can be used directly as its fd.
+const FID_BASE: u64 = 3;
+
+/// One open file: which client owns it, which mount, and the path (fsd is
+/// path-based internally, so the fid re-resolves the path each op).
+#[derive(Clone, Copy)]
+struct Fid {
+    used: bool,
+    owner: u64,
+    tree: usize,
+    path_len: usize,
+    path: [u8; FID_PATH_MAX],
+}
+
+impl Fid {
+    const fn empty() -> Self {
+        Fid { used: false, owner: 0, tree: 0, path_len: 0, path: [0u8; FID_PATH_MAX] }
+    }
+    fn path_str(&self) -> Option<&str> {
+        core::str::from_utf8(&self.path[..self.path_len]).ok()
+    }
+}
+
 /// Decodes and executes one request from this server's own receive buffer,
 /// building the reply (status + inline result) in its own reply buffer. Returns
 /// the reply's total length. Every slice below is into `req`/`reply` -
@@ -262,7 +298,7 @@ const MAX_MOUNTS: usize = ninep_abi::NS_PROC_TREE as usize + 1;
 /// ops (`NP_READ`/`NP_WRITE`/`NP_WRITE_AT`) to `SAFECOPY` against the client's
 /// grant (they move their data directly between task regions rather than inline
 /// in the reply).
-fn handle(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], sender: u64, req: &[u8], reply: &mut [u8]) -> usize {
+fn handle(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [Fid; MAX_FIDS], sender: u64, req: &[u8], reply: &mut [u8]) -> usize {
     if req.len() < REQ_PAYLOAD {
         return status_reply(reply, syscall_abi::FS_ERROR);
     }
@@ -274,7 +310,7 @@ fn handle(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], sender: u64, req: 
     // FSOP_MOUNT_AT - fsd-specific, not uniform file verbs) plus the SYSOP_PING
     // fall-through.
     if (ninep_abi::NP_BASE..ninep_abi::NP_LIMIT).contains(&op) {
-        return handle_ninep(mounts, sender, op, req, reply);
+        return handle_ninep(mounts, fids, sender, op, req, reply);
     }
     let p = [read_u64(req, 8), read_u64(req, 16), read_u64(req, 24), read_u64(req, 32)];
 
@@ -356,7 +392,7 @@ fn handle(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], sender: u64, req: 
 /// namespace resolves it to a real mount in a later step.
 ///
 /// [`NP_REQ_PAYLOAD`]: ninep_abi::NP_REQ_PAYLOAD
-fn handle_ninep(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], sender: u64, verb: u64, req: &[u8], reply: &mut [u8]) -> usize {
+fn handle_ninep(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [Fid; MAX_FIDS], sender: u64, verb: u64, req: &[u8], reply: &mut [u8]) -> usize {
     const NP_HDR: usize = ninep_abi::NP_REQ_PAYLOAD as usize;
     if req.len() < NP_HDR {
         return status_reply(reply, syscall_abi::FS_ERROR);
@@ -364,6 +400,16 @@ fn handle_ninep(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], sender: u64,
     let tree = read_u64(req, 8) as usize;
     let p = [read_u64(req, 16), read_u64(req, 24), read_u64(req, 32), read_u64(req, 40)];
     let payload = &req[NP_HDR..];
+    // Fid ops (PREAD/PWRITE/FSTAT/CLUNK) resolve their mount from the fid (opened
+    // earlier), not the request's tree, and skip the per-op permission check -
+    // the fid was authorized once at NP_OPEN (POSIX semantics). NP_OPEN itself
+    // falls through to the normal path below (it has a tree + path + perm check).
+    if matches!(
+        verb,
+        ninep_abi::NP_PREAD | ninep_abi::NP_PWRITE | ninep_abi::NP_FSTAT | ninep_abi::NP_CLUNK
+    ) {
+        return handle_fid_op(mounts, fids, sender, verb, &p, reply);
+    }
     // The `tree` selector picks which mount (cluster Phase 0 multi-mount); an
     // out-of-range tree is a client bug. An unmounted tree replies NO_FS.
     if tree >= MAX_MOUNTS {
@@ -429,40 +475,7 @@ fn handle_ninep(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], sender: u64,
                 return status_reply(reply, syscall_abi::FS_ERROR);
             };
             match fs.stat(path) {
-                Ok(st) => {
-                    let (status_slot, result) =
-                        reply[..REPLY_PAYLOAD + ninep_abi::STAT_INFO_LEN].split_at_mut(REPLY_PAYLOAD);
-                    result.fill(0); // unset fields (time when absent) read as zero
-                    let mut flags: u32 = 0;
-                    if st.is_dir {
-                        flags |= ninep_abi::STAT_FLAG_DIR;
-                    }
-                    result[ninep_abi::STAT_SIZE_OFF..ninep_abi::STAT_SIZE_OFF + 8]
-                        .copy_from_slice(&st.size.to_le_bytes());
-                    result[ninep_abi::STAT_FLAGS_OFF..ninep_abi::STAT_FLAGS_OFF + 4]
-                        .copy_from_slice(&flags.to_le_bytes());
-                    if let Some(t) = st.time {
-                        result[ninep_abi::STAT_YEAR_OFF..ninep_abi::STAT_YEAR_OFF + 2]
-                            .copy_from_slice(&t.year.to_le_bytes());
-                        result[ninep_abi::STAT_MONTH_OFF] = t.month;
-                        result[ninep_abi::STAT_DAY_OFF] = t.day;
-                        result[ninep_abi::STAT_HOUR_OFF] = t.hour;
-                        result[ninep_abi::STAT_MIN_OFF] = t.min;
-                        result[ninep_abi::STAT_SEC_OFF] = t.sec;
-                        result[ninep_abi::STAT_TIMEVALID_OFF] = 1;
-                    }
-                    if let Some(m) = st.mode {
-                        result[ninep_abi::STAT_MODE_OFF..ninep_abi::STAT_MODE_OFF + 2]
-                            .copy_from_slice(&m.mode.to_le_bytes());
-                        result[ninep_abi::STAT_UID_OFF..ninep_abi::STAT_UID_OFF + 2]
-                            .copy_from_slice(&m.uid.to_le_bytes());
-                        result[ninep_abi::STAT_GID_OFF..ninep_abi::STAT_GID_OFF + 2]
-                            .copy_from_slice(&m.gid.to_le_bytes());
-                        result[ninep_abi::STAT_MODEVALID_OFF] = 1;
-                    }
-                    status_slot[..8].copy_from_slice(&(ninep_abi::STAT_INFO_LEN as u64).to_le_bytes());
-                    REPLY_PAYLOAD + ninep_abi::STAT_INFO_LEN
-                }
+                Ok(st) => write_stat_reply(reply, &st),
                 Err(e) => status_reply(reply, error_code(&e)),
             }
         }
@@ -629,8 +642,172 @@ fn handle_ninep(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], sender: u64,
                 Err(e) => status_reply(reply, error_code(&e)),
             }
         }
+        // Open a fid (permission already checked by check_access). `a0` = flags,
+        // `a1` = path length. Create/truncate per the flags, then record the fid.
+        ninep_abi::NP_OPEN => {
+            let Some(path) = path_from(payload, 0, p[1]) else {
+                return status_reply(reply, syscall_abi::FS_ERROR);
+            };
+            let flags = p[0];
+            if flags & ninep_abi::OPEN_TRUNC != 0 {
+                if let Err(e) = fs.write_file(path, &[]) {
+                    return status_reply(reply, error_code(&e));
+                }
+            } else if flags & ninep_abi::OPEN_CREATE != 0 && fs.stat(path).is_err() {
+                if let Err(e) = fs.touch(path) {
+                    return status_reply(reply, error_code(&e));
+                }
+            }
+            match alloc_fid(fids, sender, tree, path) {
+                Some(fid) => status_reply(reply, fid),
+                None => status_reply(reply, syscall_abi::FS_ERROR), // table full
+            }
+        }
         _ => status_reply(reply, syscall_abi::FS_ERROR),
     }
+}
+
+/// Reserve a fid for `owner` referring to `path` on `tree`. Returns the fid
+/// number (>= FID_BASE) or `None` if the table is full even after reaping fids
+/// whose owner task has died.
+fn alloc_fid(fids: &mut [Fid; MAX_FIDS], owner: u64, tree: usize, path: &str) -> Option<u64> {
+    let pb = path.as_bytes();
+    if pb.len() > FID_PATH_MAX {
+        return None;
+    }
+    let mut slot = fids.iter().position(|f| !f.used);
+    if slot.is_none() {
+        reap_dead_fids(fids);
+        slot = fids.iter().position(|f| !f.used);
+    }
+    let i = slot?;
+    fids[i].used = true;
+    fids[i].owner = owner;
+    fids[i].tree = tree;
+    fids[i].path_len = pb.len();
+    fids[i].path[..pb.len()].copy_from_slice(pb);
+    Some(i as u64 + FID_BASE)
+}
+
+/// Free any fid whose owner task no longer exists (a client that crashed or
+/// exited without `NP_CLUNK`) - the pragmatic answer to fsd not being notified
+/// of a client's death. Called only when the small fid table is full.
+fn reap_dead_fids(fids: &mut [Fid; MAX_FIDS]) {
+    for f in fids.iter_mut() {
+        if f.used {
+            let state = syscall4(syscall_abi::TASK_STATE, f.owner, 0, 0, 0);
+            if state == syscall_abi::TASK_STATE_UNUSED || state == syscall_abi::TASK_STATE_ZOMBIE {
+                f.used = false;
+            }
+        }
+    }
+}
+
+/// Handle a fid op (`a0` = fid): resolve the fid to its owner-checked path +
+/// mount, then read/write/stat/clunk. No per-op permission check - authorized at
+/// open.
+fn handle_fid_op(
+    mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS],
+    fids: &mut [Fid; MAX_FIDS],
+    sender: u64,
+    verb: u64,
+    p: &[u64; 4],
+    reply: &mut [u8],
+) -> usize {
+    let fid = p[0];
+    if fid < FID_BASE {
+        return status_reply(reply, syscall_abi::FS_ERROR);
+    }
+    let idx = (fid - FID_BASE) as usize;
+    if idx >= MAX_FIDS || !fids[idx].used || fids[idx].owner != sender {
+        return status_reply(reply, syscall_abi::FS_ERROR); // bad or not-yours
+    }
+    if verb == ninep_abi::NP_CLUNK {
+        fids[idx].used = false;
+        return status_reply(reply, 0);
+    }
+    let tree = fids[idx].tree;
+    let Some(path) = fids[idx].path_str() else {
+        return status_reply(reply, syscall_abi::FS_ERROR);
+    };
+    let Some(fs) = mounts[tree].as_mut() else {
+        return status_reply(reply, syscall_abi::NO_FS);
+    };
+    match verb {
+        ninep_abi::NP_PREAD => {
+            let Some(want) = want_len(p[2]) else {
+                return status_reply(reply, syscall_abi::FS_ERROR);
+            };
+            let (status_slot, result) = reply[..REPLY_PAYLOAD + want].split_at_mut(REPLY_PAYLOAD);
+            match fs.read_at(path, p[1], result) {
+                Ok(copied) => {
+                    status_slot[..8].copy_from_slice(&(copied as u64).to_le_bytes());
+                    REPLY_PAYLOAD + copied as usize
+                }
+                Err(e) => status_reply(reply, error_code(&e)),
+            }
+        }
+        ninep_abi::NP_PWRITE => {
+            let data_len = p[2] as usize;
+            if data_len > syscall_abi::SAFECOPY_MAX as usize {
+                return status_reply(reply, syscall_abi::FS_ERROR);
+            }
+            let mut databuf = [0u8; syscall_abi::SAFECOPY_MAX as usize];
+            if data_len > 0 {
+                let r = syscall5(
+                    syscall_abi::SAFECOPY,
+                    sender,
+                    0,
+                    databuf.as_mut_ptr() as u64,
+                    data_len as u64,
+                    syscall_abi::GRANT_READ,
+                );
+                if r >= syscall_abi::FS_ERR_MIN {
+                    return status_reply(reply, syscall_abi::FS_ERROR);
+                }
+            }
+            match fs.write_at(path, p[1], &databuf[..data_len]) {
+                Ok(()) => status_reply(reply, data_len as u64),
+                Err(e) => status_reply(reply, error_code(&e)),
+            }
+        }
+        ninep_abi::NP_FSTAT => match fs.stat(path) {
+            Ok(st) => write_stat_reply(reply, &st),
+            Err(e) => status_reply(reply, error_code(&e)),
+        },
+        _ => status_reply(reply, syscall_abi::FS_ERROR),
+    }
+}
+
+/// Build a stat reply (the [`ninep_abi::STAT_INFO_LEN`] record) from a `Stat`,
+/// shared by `NP_STAT` (path) and `NP_FSTAT` (fid).
+fn write_stat_reply(reply: &mut [u8], st: &vfs::Stat) -> usize {
+    let (status_slot, result) =
+        reply[..REPLY_PAYLOAD + ninep_abi::STAT_INFO_LEN].split_at_mut(REPLY_PAYLOAD);
+    result.fill(0); // unset fields (time when absent) read as zero
+    let mut flags: u32 = 0;
+    if st.is_dir {
+        flags |= ninep_abi::STAT_FLAG_DIR;
+    }
+    result[ninep_abi::STAT_SIZE_OFF..ninep_abi::STAT_SIZE_OFF + 8].copy_from_slice(&st.size.to_le_bytes());
+    result[ninep_abi::STAT_FLAGS_OFF..ninep_abi::STAT_FLAGS_OFF + 4].copy_from_slice(&flags.to_le_bytes());
+    if let Some(t) = st.time {
+        result[ninep_abi::STAT_YEAR_OFF..ninep_abi::STAT_YEAR_OFF + 2].copy_from_slice(&t.year.to_le_bytes());
+        result[ninep_abi::STAT_MONTH_OFF] = t.month;
+        result[ninep_abi::STAT_DAY_OFF] = t.day;
+        result[ninep_abi::STAT_HOUR_OFF] = t.hour;
+        result[ninep_abi::STAT_MIN_OFF] = t.min;
+        result[ninep_abi::STAT_SEC_OFF] = t.sec;
+        result[ninep_abi::STAT_TIMEVALID_OFF] = 1;
+    }
+    if let Some(m) = st.mode {
+        result[ninep_abi::STAT_MODE_OFF..ninep_abi::STAT_MODE_OFF + 2].copy_from_slice(&m.mode.to_le_bytes());
+        result[ninep_abi::STAT_UID_OFF..ninep_abi::STAT_UID_OFF + 2].copy_from_slice(&m.uid.to_le_bytes());
+        result[ninep_abi::STAT_GID_OFF..ninep_abi::STAT_GID_OFF + 2].copy_from_slice(&m.gid.to_le_bytes());
+        result[ninep_abi::STAT_MODEVALID_OFF] = 1;
+    }
+    status_slot[..8].copy_from_slice(&(ninep_abi::STAT_INFO_LEN as u64).to_le_bytes());
+    REPLY_PAYLOAD + ninep_abi::STAT_INFO_LEN
 }
 
 /// Writes a status-only reply and returns its length.
@@ -743,6 +920,29 @@ fn check_access(fs: &mut vfs::Filesystem, sender: u64, verb: u64, p: &[u64; 4], 
         // Reads: R on the target file/dir. Stat is left open (metadata is needed
         // by `ls -l` for entries a readable directory already exposes).
         ninep_abi::NP_STAT => true,
+        // open: the fid is authorized here, once. read-open needs R on the file;
+        // write/create-open needs W (on the file if it exists, else on the parent
+        // dir for a create). a0 = flags, a1 = path length.
+        ninep_abi::NP_OPEN => match path_from(payload, 0, p[1]) {
+            Some(path) => {
+                let flags = p[0];
+                if flags & ninep_abi::OPEN_READ != 0 && !path_allows(fs, path, uid, gid, PERM_R) {
+                    return false;
+                }
+                if flags & (ninep_abi::OPEN_WRITE | ninep_abi::OPEN_CREATE) != 0 {
+                    let ok = if fs.stat(path).is_ok() {
+                        path_allows(fs, path, uid, gid, PERM_W)
+                    } else {
+                        path_allows(fs, parent_of(path), uid, gid, PERM_W)
+                    };
+                    if !ok {
+                        return false;
+                    }
+                }
+                true
+            }
+            None => true,
+        },
         ninep_abi::NP_READDIR | ninep_abi::NP_READ_FILE | ninep_abi::NP_READ | ninep_abi::NP_READ_AT => {
             match path_from(payload, 0, p[0]) {
                 Some(path) => path_allows(fs, path, uid, gid, PERM_R),

@@ -7,6 +7,33 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/`; 
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## Fids: server-side open-file handles (libc arc, step 5)
+
+`fsd` now has real **open-file handles** — a `fid`, which is exactly what a
+POSIX fd is (and a 9P fid). The deferred-since-cluster-Phase-0 feature: *a POSIX
+fd ≈ a 9P fid*, one mechanism serving both C portability and the proper 9P
+model. The C libc's file I/O now uses them.
+
+- **Five new fsd verbs** (`ninep-abi`): `NP_OPEN` (path + flags → a fid ≥ 3,
+  usable directly as a C fd), `NP_PREAD`/`NP_PWRITE` (fid + offset), `NP_FSTAT`,
+  `NP_CLUNK`. A small per-client fid table lives on `fsd`'s stack (`MAX_FIDS`,
+  owner-checked); when full, `NP_OPEN` first reaps fids whose owner task has died
+  (`TASK_STATE`) — the pragmatic answer to fsd not being told when a client dies.
+- **Permission is checked once, at open** (POSIX semantics): `NP_OPEN` runs the
+  `check_access` gate (R for a read-open, W for a write/create-open); the
+  subsequent `NP_PREAD`/`NP_PWRITE` skip it — verified on ext2, where a
+  non-root user's `open` of the root-owned `/` for create is denied.
+- **They coexist** with the path-per-op verbs — no client migration. The C libc
+  (`file.c`) switched to fids; the shell/`ulib`/cluster export stay path-based
+  (`cat` reads the same file `cfile` wrote via a fid). The cursor stays
+  client-side and rides each read/write offset (authentic 9P).
+- **`NP_STAT`'s reply builder** was factored into a shared `write_stat_reply`
+  used by both the path `NP_STAT` and the fid `NP_FSTAT`.
+
+Verified: `cfile` writes/reads a file entirely through fids, `cat` confirms it's
+on disk, `cfile | grep hello` pipes cleanly, and the ext2 permission-at-open
+denial holds.
+
 ## C file I/O + pipe-aware output (libc arc, step 4)
 
 C programs can now **read and write files**, and their output **flows through
