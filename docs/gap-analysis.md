@@ -200,7 +200,7 @@ ps kill fg wait send recv selftest env set unset cpu`.
 | `find` `du` `df` | ✗ | Client-side directory walking (new but small); `df` wants the volume info fsd already returns. |
 | `date` `sleep` | ✗ | Blocked on wall-clock (§12) and a per-task timer respectively. |
 | `chmod` `chown` `ln` | ✗ | Blocked on the stat surface + permissions arc (§3, §6). |
-| Command flags (`ls -l`, `grep -i/-r`, `rm -r`, `cp -r`, real regex) | ◐ | `ls` now takes `-l`/`-a` (on the new `stat` op); the rest are still positional-only. A shared `ulib` option parser would generalize flag handling (roadmap item 2). |
+| Command flags (`ls -l`, `grep -i/-r`, `rm -r`, `cp -r`, real regex) | ◐ | `ls` takes `-l`/`-a` (on the `stat` op) and `grep` takes `-i`/`-v`/`-n`; the rest are still positional-only, and `grep` matching is still substring (no regex). A shared `ulib` option parser would generalize flag handling (roadmap item 2). |
 | An editor + a pager (`less`/`more`) | ✗ | The two consumers that justify the VT100 arc (§4) and general `select` — gated on items 1 & 3. |
 | `sed` `awk` `find … -exec` | ✗ | Larger; realistic once a libc/scripting layer exists. |
 

@@ -120,6 +120,14 @@ pub fn get_ticks() -> u64 {
     syscall(syscall_abi::GET_TICKS, 0)
 }
 
+/// Voluntarily give up the rest of this task's time slice (`YIELD`), letting
+/// another runnable task run before this one is resumed. Used to hand the CPU
+/// to a pipe consumer when its mailbox is momentarily full, rather than
+/// busy-spinning until the next tick - see [`pipe_out`].
+pub fn yield_now() {
+    syscall(syscall_abi::YIELD, 0);
+}
+
 /// Write `bytes` to this program's stdout target (console or the relaying
 /// shell). The one output call a command should use.
 pub fn write_out(target: u64, bytes: &[u8]) {
@@ -191,6 +199,14 @@ pub fn con_write(bytes: &[u8]) {
 /// Send `bytes` as raw `MSG_MAX_LEN`-chunked messages to `target` (the shell,
 /// when we're a pipe producer / capture source), with the same bounded retry
 /// on a full mailbox or a not-yet-delegated send as `hello`/`args`.
+///
+/// On a **full mailbox** (`MSG_ERR_FULL`) the producer can make no progress
+/// until the consumer drains, so it **yields** rather than busy-spinning: the
+/// consumer runs (draining, or exiting early like `head`, after which the next
+/// send fails fast with `TASK_ERR_NO_SUCH_TASK` and this returns). Without the
+/// yield the producer would spin re-sending until the next tick preempted it -
+/// up to a full second on hardware. A `MSG_ERR_DENIED` (the brief
+/// delegation-not-yet-applied window) just retries, no yield.
 pub fn pipe_out(target: u64, bytes: &[u8]) {
     let mut off = 0;
     while off < bytes.len() {
@@ -205,6 +221,9 @@ pub fn pipe_out(target: u64, bytes: &[u8]) {
             let transient = r == syscall_abi::MSG_ERR_FULL || r == syscall_abi::MSG_ERR_DENIED;
             if !transient || get_ticks() > deadline {
                 return;
+            }
+            if r == syscall_abi::MSG_ERR_FULL {
+                yield_now(); // let the consumer drain (or exit) before retrying
             }
         }
         off += n;
@@ -243,6 +262,9 @@ pub fn end_of_stream(target: u64) {
         let transient = r == syscall_abi::MSG_ERR_FULL || r == syscall_abi::MSG_ERR_DENIED;
         if r == 0 || !transient || get_ticks() > deadline {
             break;
+        }
+        if r == syscall_abi::MSG_ERR_FULL {
+            yield_now(); // as in pipe_out: let the consumer drain before retrying
         }
     }
 }

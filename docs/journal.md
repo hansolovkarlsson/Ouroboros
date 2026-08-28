@@ -7,6 +7,38 @@ for the forward plan see [`roadmap.md`](roadmap.md).
 
 ---
 
+## 2026-08-27 (cont.) — grep flags, and a YIELD syscall for prompt early-exit
+
+Two more open-gap filter follow-ups. `grep` gained `-i`/`-v`/`-n` (case-fold,
+invert, line-number) — the substantive "no longer case-sensitive" fix;
+substring matching stays (regex is a bigger arc). Straightforward, and all three
+plus the combined `-in` form check out on QEMU.
+
+The `head` half was more interesting than it looked. The gap said head "relies
+on the producer's send-timeout" when it exits early. Digging in, that turned out
+to be half-untrue: a send to an *exited* consumer already fails non-transiently
+(`task_exists` is false for a zombie), so `pipe_out` returns immediately, not on
+the 150-tick deadline — the old comment overstated it. The *real* residual cost
+was a busy-spin: while head is still draining its final buffer, a producer that
+fills head's mailbox gets `MSG_ERR_FULL` and re-sends in a tight loop until the
+next tick preempts it and lets head run. Under QEMU's ~37 ms ticks that's
+invisible, but at a 1-second hardware tick it's a real ~1 s stall — and a
+busy-spin burning the CPU the consumer needs.
+
+There was no way to hand the CPU to the consumer cooperatively — no yield
+primitive existed. So I added one: a `YIELD` syscall (57) that saves the caller
+as still-runnable and switches to another runnable task, *skipping idle unless
+it's the only thing runnable* (the subtlety — a naive yield could park on the
+always-runnable idle task and waste exactly the tick it was trying to save).
+`pipe_out` now yields on `MSG_ERR_FULL` instead of spinning, so the consumer
+runs, drains or exits, and the producer's retry then succeeds or fails fast. It
+benefits every pipe, not just head. `tree / | head 3` — a producer that would
+generate the whole filesystem tree feeding a consumer that wants three lines —
+returns promptly, no hang, no fault.
+
+Nice case of the gap note pointing at the symptom (head) when the fix belonged
+one layer down (the shared producer path + a missing scheduler primitive).
+
 ## 2026-08-27 (cont.) — `a | b > file`: pipelines compose with redirection
 
 Small, satisfying one: the shell refused `a | b > file` (pipeline plus

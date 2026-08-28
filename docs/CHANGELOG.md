@@ -7,6 +7,41 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/`; 
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## Filters: `grep` flags, and a cooperative `YIELD` for prompt early-exit
+
+Two small filter follow-ups from the open-gaps list.
+
+**`grep` gained `-i`/`-v`/`-n`.** It was substring-only *and* case-sensitive;
+now `-i` folds case (ASCII), `-v` inverts (print non-matching lines), and `-n`
+prefixes each printed line with its 1-based input line number. Flags may be
+separate (`-i -v`) or combined (`-in`), before the pattern. Matching is still a
+plain substring — real regex is a separate, larger arc. (Verified on
+`make run-image`: `grep -i cat` matched `CAT`, `grep -v P` printed exactly the
+`P`-free rows, `grep -in pw` numbered the case-folded `PWD` match.)
+
+**`head` no longer leans on the producer's send-timeout when it exits early.**
+When `head N` has its N lines it exits; the upstream producer discovers this on
+its next send. Two things make that prompt now:
+
+- A send to the exited (zombie) consumer already fails *non-transiently*
+  (`TASK_ERR_NO_SUCH_TASK`), so `pipe_out` returns at once — it never waits out
+  its retry deadline. (This was already true; the old comment overstated it.)
+- The remaining stall was the *busy-spin* while the consumer is still draining:
+  a producer that fills the consumer's mailbox got `MSG_ERR_FULL` and re-sent in
+  a tight loop until the next tick let the consumer run — up to a full second at
+  a 1-second hardware tick, burning a CPU that could have been running the
+  consumer. Fixed with a new **`YIELD` syscall** (57): on `MSG_ERR_FULL`,
+  `pipe_out` yields instead of spinning, and the kernel switches to another
+  runnable task — *preferring real work over the idle task* — so the consumer
+  runs, drains (or exits, at which point the next send fails fast). `YIELD`
+  saves the caller as still-runnable and switches like a block that doesn't
+  block; `end_of_stream` yields the same way. Benefits every producer/consumer
+  pair, not just `head`.
+
+Verified on `make run-image`: `tree / | head 3` (a high-volume producer feeding
+an early-exiting consumer) completes promptly with no hang and no fault; plain
+pipelines are unchanged.
+
 ## Shell: `a | b > file` — pipelines compose with redirection
 
 A pipeline and an output redirect can now be used together:

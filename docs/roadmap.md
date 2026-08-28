@@ -556,10 +556,9 @@ Known small gaps, not yet sequenced (the *completed* parking-lot entries — USB
 keyboard, GOP console, preemption, task destruction, driver isolation, etc. — are
 in [`roadmap-completed.md`](roadmap-completed.md)):
 
-- **`grep` is substring-only and case-sensitive** (no regex, no `-i`); **`head`
-  relies on the producer's send-timeout** when it exits early rather than
-  actively signalling upstream. Small filter follow-ups (and see North-star item
-  2 for a shared `ulib` option parser).
+- **`grep` has no regex** (it now takes `-i`/`-v`/`-n`, but matching is still a
+  plain substring). Real patterns are a separate, larger arc — see North-star
+  item 2 for the shared `ulib` option parser and richer matching.
 - **A pipeline stage other than the first can't be a builtin** (a later stage
   must be a program that reads stdin) — so e.g. `cat x | ps` isn't meaningful.
   Reasonable; documented, not likely worth changing.
