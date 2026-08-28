@@ -1,0 +1,34 @@
+NAME
+    sort - sort lines of text
+
+SYNOPSIS
+    <input> | sort [-r] [-n] [-u] [-f]
+
+DESCRIPTION
+    Reads all of standard input, sorts its lines, and writes them in order.
+    A pipeline filter. Unlike the streaming filters, sort must buffer the
+    whole input before it can emit anything, so it holds the input in its
+    heap and sorts an in-place line index (heapsort).
+
+    -r  reverse (descending) order
+    -n  numeric: compare a leading integer on each line (ties broken
+        lexicographically); a line with no number sorts as 0
+    -u  unique: drop lines that compare equal to the previous emitted line
+    -f  fold case (ASCII) when comparing
+
+    Flags may be combined, e.g. -rn. The default is a plain byte
+    (lexicographic) ascending sort.
+
+LIMITS
+    Bounded to the program's heap: a very large input is truncated at the
+    cap, sorted, and emitted, with a one-line warning on the console (never
+    into the sorted output).
+
+EXAMPLES
+    cat names.txt | sort
+    cat names.txt | sort -u
+    ps | sort
+    cat sizes.txt | sort -rn
+
+SEE ALSO
+    uniq, grep, head, tail, wc

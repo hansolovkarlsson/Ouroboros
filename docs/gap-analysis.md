@@ -194,7 +194,7 @@ ps kill fg wait send recv selftest env set unset cpu`.
 
 | Utility | Status | Notes |
 |---|---|---|
-| `sort` | ✗ | The one filter with a real wrinkle — must buffer all input before emitting, against the fixed-buffer/no-alloc constraint. |
+| `sort` | ✅ | `-r`/`-n`/`-u`/`-f`. The one filter that can't stream — buffers the whole input in its heap and heapsorts an in-place line index; a documented size cap (truncate + warn) handles the fixed-buffer/no-alloc constraint. |
 | `tail` `nl` `rev` `uniq` | ✅ | Shipped as `/bin` `ulib` filters (the turnkey pattern). `tail`/`uniq` bounded to a fixed line buffer; `nl` is `cat -n` style. |
 | `tee` `tr` `cut` | ✗ | The remaining small `ulib` filters (`tee` also needs an fsd write path for its file arg). |
 | `find` `du` `df` | ✗ | Client-side directory walking (new but small); `df` wants the volume info fsd already returns. |

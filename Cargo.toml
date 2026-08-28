@@ -13,7 +13,7 @@ members = [
     "programs/fileutils/tree", "programs/fileutils/write", "programs/fileutils/more",
     "programs/textutils/upper", "programs/textutils/wc", "programs/textutils/grep",
     "programs/textutils/head", "programs/textutils/tail", "programs/textutils/nl",
-    "programs/textutils/rev", "programs/textutils/uniq",
+    "programs/textutils/rev", "programs/textutils/uniq", "programs/textutils/sort",
     "programs/netutils/ping", "programs/netutils/resolve", "programs/netutils/fetch",
     "programs/netutils/dial", "programs/netutils/serve",
     "programs/shellutils/echo", "programs/shellutils/uptime", "programs/shellutils/clear",
