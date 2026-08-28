@@ -7,6 +7,43 @@ for the forward plan see [`roadmap.md`](roadmap.md).
 
 ---
 
+## 2026-08-27 (cont.) — FAT32 long-filename *write*
+
+Closed the "FAT32 long-filename write" follow-up from the roadmap. LFN was
+readable but not creatable: `fsd`'s FAT32 arm only ever wrote 8.3 short
+entries, so `touch archive.tar.gz` or `write LongFileName.txt …` failed with
+"invalid name". Now a name that doesn't fit 8.3 gets a generated `NAME~N`
+short alias plus a contiguous run of LFN entries carrying the real name;
+8.3-fitting names still take the old plain-short-entry path byte-for-byte, so
+nothing existing changed.
+
+The pieces, all self-contained in `fat32.rs`: `insert_named_entry` (the one
+funnel `mkdir`/`touch`/`write_file`/`mv` route through, deciding 8.3-vs-LFN),
+`generate_short_alias` (`~N` incremented until unique — the base trimmed so
+even `~999999` fits 8 chars), `build_name_entries`/`put_lfn_chars` (the
+on-disk entry run, checksum-stamped, written high-sequence-first), and
+`write_entry_run`/`place_entries` (find a physically-contiguous run of free
+slots, extend the directory by a zeroed cluster if needed). I also did the
+bonus the roadmap flagged: `free_entry_with_lfn` frees a deleted file's LFN
+run, so `rm`/`rmdir`/`mv` no longer strand orphaned LFN entries — it matches
+the target by exact on-disk location (so an `mv` dst inserted into the same
+directory isn't mistaken for it) and only frees a preceding run whose
+checksum matches.
+
+Testing leaned on the foreign-observer discipline this project keeps: drove
+the guest shell unattended over `make run-image` (the FIFO recipe), creating
+`longfilename1.txt`/`longfilename2.txt` (aliases collide →
+`LONGFI~1.TXT`/`LONGFI~2.TXT`), a long-named directory, a nested long-named
+file, then `rm` and `mv` of long names. The guest read every name back; then
+**macOS's own FAT driver** mounted the guest-written image and showed all the
+long names and contents; and **`fsck_msdos`** passed its directory phase with
+no orphaned-LFN/checksum/duplicate-short-name complaints — the real proof, an
+implementation that shares none of my code. Only wrinkle was a pre-existing,
+advisory FSInfo free-count warning (`fsd` never maintains that hint on
+writes), unrelated to LFN. No faults, no guard-page overflow. Left
+case-preservation for lowercase-8.3 names (`File.txt` → `FILE.TXT`) alone on
+purpose — the gap was `>8.3` names, and that's closed.
+
 ## 2026-08-27 (cont.) — reading the neighbours: Redox OS and the Pi-4 tutorials
 
 Not code — a research pass Hans asked for, on two outside resources: Redox OS

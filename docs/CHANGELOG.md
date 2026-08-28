@@ -7,6 +7,61 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/`; 
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## FAT32: long-filename (LFN) *write*
+
+The guest can now **create** files and directories with long names, not
+just read them. Before, `fsd`'s FAT32 arm only wrote 8.3 short entries
+(`make_short_name`), so any name too long, with extra dots, spaces, or a
+non-8.3 character was rejected with "invalid name"; the LFN *read* path
+(reconstructing a long name from the entries a real formatter wrote) had
+no write counterpart.
+
+**What was added, all in `fat32.rs`:**
+
+- **`insert_named_entry`** is the single funnel for a *named* create
+  (`mkdir`/`touch`/`write_file`/`mv` all route through it). A name that
+  fits 8.3 still becomes one plain short entry — **byte-for-byte the old
+  behavior, uppercased, no LFN** — so nothing about existing short-name
+  files changed. A name that doesn't fit gets the LFN treatment.
+- **`generate_short_alias`** builds the `NAME~N` basis name every long
+  name needs: a sanitized ≤8-char uppercase base + extension, with a `~1`,
+  `~2`, … numeric tail incremented until the 11-byte short name is unique
+  in that directory (`short_alias_exists` compares the raw 8.3 field, since
+  two different long names can share an alias base). The base is trimmed so
+  even `~999999` fits in 8 characters.
+- **`build_name_entries`/`put_lfn_chars`** lay out the on-disk run — the
+  LFN entries (highest sequence first, `0x40` on the last), each stamped
+  with the alias's `lfn_checksum` and 13 UTF-16LE characters at the same
+  field offsets the read path uses, then the short entry last.
+- **`write_entry_run`/`place_entries`** find a *physically contiguous* run
+  of that many free slots (spanning sectors/clusters via the chain,
+  reusing `0xE5` slots and the `0x00` tail), extending the directory by a
+  zeroed cluster if none exists, and write each affected sector once.
+- **`free_entry_with_lfn`** frees a deleted entry's LFN run alongside its
+  short entry, so `rm`/`rmdir`/`mv` no longer strand orphaned LFN entries
+  (an LFN entry's first byte is a sequence number, not `0xE5`, so the old
+  free-slot scan would never reclaim it — and `fsck` flags them). It
+  matches the target by exact on-disk location, so a freshly inserted `mv`
+  destination in the same directory is never mistaken for it, and frees the
+  preceding run only if its checksum matches (the same orphan guard the
+  read path uses).
+
+**Validation** (the project's foreign-observer discipline): driven from
+the guest shell over `make run-image` — created `longfilename1.txt` /
+`longfilename2.txt` (whose aliases collide → `LONGFI~1.TXT` /
+`LONGFI~2.TXT`), a long-named directory with a nested long-named file,
+then exercised `rm` and `mv` of long-named entries. The **guest** read
+every long name back correctly; **macOS's own FAT driver** then mounted the
+guest-written image and listed all long names and file contents; and
+**`fsck_msdos`** passed its directory-checking phase with no orphaned-LFN,
+checksum, or duplicate-short-name errors. (Its lone FSInfo free-count
+warning is pre-existing — `fsd` doesn't maintain the FSInfo hint on any
+write — and advisory.) No kernel faults or guard-page overflows.
+
+**Still open:** case-preservation for lowercase-but-8.3 names (e.g.
+`File.txt` still stores/reads as `FILE.TXT`) — deliberately left as the
+old behavior, since the gap this closes was specifically `>8.3` names.
+
 ## Shell: filename wildcards and tab completion
 
 Two interactive shell improvements.

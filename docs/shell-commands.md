@@ -66,16 +66,17 @@ machines that don't share the key are refused.
   error, since no path could ever resolve in that state. Use `make
   run-image` (or a Parallels boot plus `mount` with a USB stick) for
   disk commands to do anything.
-- **Long filenames are read, not created.** The FAT32 reader now
-  reconstructs long filenames (LFN) written by a real formatter, so a
-  file like `index.html` shows up in `ls`, opens with `cat`, and can be
-  navigated — by its real name. But *creating* one from the shell still
-  isn't supported: `mkdir`/`touch`/`write` accept only 8.3 names — ASCII
-  alphanumerics, `_`, and `-`, one optional `.` splitting an
-  up-to-8-character base from an up-to-3-character extension — so a file
-  the shell itself creates can't have a long name (yet). Deleting a
-  long-named file works but leaves its LFN entries behind (a harmless
-  space leak).
+- **Long filenames are read *and* created.** The FAT32 reader
+  reconstructs long filenames (LFN) written by any formatter, and the
+  shell can now *create* them too: `mkdir`/`touch`/`write`/`mv` accept a
+  name that doesn't fit 8.3 (too long, extra dots, spaces, non-8.3
+  characters) and lay down a generated `NAME~N` short alias plus the LFN
+  entries carrying the real name — so `index.html` both reads back and can
+  be created by its real name. A name that *does* fit 8.3 still becomes a
+  plain uppercased short entry (`File.txt` is stored and shown as
+  `FILE.TXT`; case-preservation for those is the one remaining nicety).
+  Deleting a long-named file frees its LFN entries too, so `rm`/`rmdir`/`mv`
+  leave no orphaned entries behind.
 
 ## Commands
 

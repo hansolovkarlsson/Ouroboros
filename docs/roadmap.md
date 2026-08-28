@@ -86,11 +86,6 @@ record is in [`CHANGELOG.md`](CHANGELOG.md):
 
 The small open tails those arcs deliberately left:
 
-- **FAT32 long-filename *write*.** LFN is read, not created; the guest can't
-  make a `>8.3` name yet (`make_short_name` only does 8.3). Needs `~N` alias
-  generation + the alias checksum + laying N+1 contiguous dir entries. A
-  self-contained `fat32.rs` addition; would also let a clean delete free the
-  orphaned LFN entries `rm` leaves.
 - **ext4.** Much larger (extents, journaling, htree, checksums, 64-bit) and
   the no-alloc fixed-buffer constraint makes a big FS genuinely harder — a
   separate large arc, not a near-term ext2 follow-on.

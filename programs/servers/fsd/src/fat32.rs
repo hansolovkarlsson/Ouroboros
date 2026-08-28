@@ -15,14 +15,18 @@
 //! is even stricter than the post-`exit_boot_services` kernel this
 //! code was written for.
 //!
-//! Long filenames (LFN) are **read** now (a name like `index.html` is
-//! reconstructed from the LFN entries a real formatter writes, and
-//! matched/listed by that long name), but not yet **written**:
-//! `make_short_name` still only creates 8.3 names, so a file the guest
-//! itself creates can't have a long name. Still first-FAT32-partition
-//! only, and `make run`'s vvfat disk is still FAT16 - so mounting
-//! fails there and every request answers `NO_FS`, same degradation as
-//! always.
+//! Long filenames (LFN) are **read and written** now. A name that fits an
+//! 8.3 short name still becomes a plain short entry (unchanged behavior,
+//! uppercased); a name that doesn't - too long, mixed dots, spaces, or
+//! any character 8.3 can't hold - gets a generated `NAME~N` short alias
+//! plus a run of LFN entries carrying the real name (see
+//! [`Fs::insert_named_entry`]). `make_short_name` is the 8.3 fast-path
+//! test; [`generate_short_alias`] builds the `~N` alias when it fails.
+//! Deleting an LFN-named file frees its LFN entries too (see
+//! [`Fs::free_entry_with_lfn`]), so `rm`/`rmdir`/`mv` no longer leave
+//! orphaned long-name entries behind. Still first-FAT32-partition only,
+//! and `make run`'s vvfat disk is still FAT16 - so mounting fails there
+//! and every request answers `NO_FS`, same degradation as always.
 
 use crate::disk::{Disk, DiskError};
 
@@ -39,6 +43,20 @@ const MAX_NAME_LEN: usize = 12; // 8 name + '.' + 3 ext, the most an 8.3 short n
 /// (LFN) is up to 255 UTF-16 chars; an 8.3 short name uses at most
 /// [`MAX_NAME_LEN`] of this buffer.
 const LONG_NAME_MAX: usize = 255;
+/// Characters one LFN directory entry carries (they live at three
+/// non-contiguous field ranges - see [`LFN_POS`]).
+const LFN_CHARS_PER_ENTRY: usize = 13;
+/// The `0x40` bit set in the sequence byte of the *last* LFN entry (the
+/// highest-numbered one, stored physically first), marking the start of a
+/// long-name run - the read side masks it off in [`walk_dir`](Fs::walk_dir).
+const LFN_LAST_MASK: u8 = 0x40;
+/// Most LFN entries a single name can need: `ceil(LONG_NAME_MAX / 13)`.
+/// A full name lays out `MAX_LFN_ENTRIES` LFN entries plus one short
+/// entry, so the run buffers below are sized `MAX_LFN_ENTRIES + 1`.
+const MAX_LFN_ENTRIES: usize = LONG_NAME_MAX.div_ceil(LFN_CHARS_PER_ENTRY); // 20
+/// The 13 within-entry byte offsets of an LFN entry's UTF-16LE characters
+/// (the write-side twin of the read-side positions in [`lfn_chars`]).
+const LFN_POS: [usize; 13] = [1, 3, 5, 7, 9, 14, 16, 18, 20, 22, 24, 28, 30];
 /// Cap on a single `write_at` gap zero-fill (`offset` past the old EOF).
 /// FAT32 has no sparse representation, so a gap is zero-filled sector by
 /// sector - fine for an editor/log, but a fat-fingered huge offset must not
@@ -213,9 +231,8 @@ fn lfn_checksum(short_name: &[u8]) -> u8 {
 /// `0xFFFF` padding. Returns how many were written. The 13 chars live at three
 /// non-contiguous field ranges within the 32-byte entry.
 fn lfn_chars(raw: &[u8], out: &mut [u8; 13]) -> usize {
-    const POS: [usize; 13] = [1, 3, 5, 7, 9, 14, 16, 18, 20, 22, 24, 28, 30];
     let mut n = 0;
-    for &p in &POS {
+    for &p in &LFN_POS {
         let c = u16::from_le_bytes([raw[p], raw[p + 1]]);
         if c == 0x0000 || c == 0xffff {
             break;
@@ -908,7 +925,10 @@ impl Fs {
     /// [`insert_dir_entry`](Self::insert_dir_entry).)
     pub fn mkdir(&mut self, path: &str) -> Result<(), Error> {
         let (parent_path, name) = split_parent(path).ok_or(Error::InvalidName)?;
-        let short_name = make_short_name(name).ok_or(Error::InvalidName)?;
+        // Validate the name up front, before any cluster is allocated - an
+        // invalid name must never leave orphaned clusters behind. Both the
+        // 8.3 and long-name paths are covered (see `validate_create_name`).
+        validate_create_name(name)?;
 
         let parent = self.find(parent_path)?;
         if !parent.is_dir {
@@ -960,7 +980,7 @@ impl Fs {
         let lba = self.cluster_to_lba(new_cluster);
         self.disk.write_sector(lba as u64, &first_sector)?;
 
-        self.insert_dir_entry(parent.cluster, &short_name, ATTR_DIRECTORY, new_cluster, 0)
+        self.insert_named_entry(parent.cluster, name, ATTR_DIRECTORY, new_cluster, 0)
     }
 
     /// Removes the empty subdirectory at `path`. Fails with
@@ -1018,11 +1038,9 @@ impl Fs {
         })?;
         let (lba, offset) = location.ok_or(Error::NotFound)?;
 
-        let mut sector = [0u8; SECTOR_SIZE];
-        self.disk.read_sector(lba, &mut sector)?;
-        sector[offset] = DIR_ENTRY_FREE;
-        self.disk.write_sector(lba, &sector)?;
-        Ok(())
+        // Free the short entry and its LFN run (a directory can have a long
+        // name too), same as `rm`.
+        self.free_entry_with_lfn(parent.cluster, lba, offset)
     }
 
     /// Creates an empty (zero-byte) file at `path`, or - unlike
@@ -1046,7 +1064,7 @@ impl Fs {
     /// directories.
     pub fn touch(&mut self, path: &str) -> Result<(), Error> {
         let (parent_path, name) = split_parent(path).ok_or(Error::InvalidName)?;
-        let short_name = make_short_name(name).ok_or(Error::InvalidName)?;
+        validate_create_name(name)?;
 
         let parent = self.find(parent_path)?;
         if !parent.is_dir {
@@ -1073,7 +1091,7 @@ impl Fs {
         // Attribute byte `0` - no directory bit, no volume-ID bit, just
         // an ordinary file (see `parse`'s `ATTR_DIRECTORY` check: this
         // makes `is_dir` false, which is all that matters here).
-        self.insert_dir_entry(parent.cluster, &short_name, 0, 0, 0)
+        self.insert_named_entry(parent.cluster, name, 0, 0, 0)
     }
 
     /// Removes the file at `path`. Rejects directories with
@@ -1107,11 +1125,9 @@ impl Fs {
         })?;
         let (lba, offset) = location.ok_or(Error::NotFound)?;
 
-        let mut sector = [0u8; SECTOR_SIZE];
-        self.disk.read_sector(lba, &mut sector)?;
-        sector[offset] = DIR_ENTRY_FREE;
-        self.disk.write_sector(lba, &sector)?;
-        Ok(())
+        // Free the short entry *and* any long-name (LFN) entries in front of
+        // it, so a removed long-named file leaves no orphaned LFN entries.
+        self.free_entry_with_lfn(parent.cluster, lba, offset)
     }
 
     /// Creates a file at `path` with exactly `data`'s contents, or
@@ -1159,11 +1175,9 @@ impl Fs {
         // existing file: whatever name is already on disk is already
         // valid by construction, and might not even fit this kernel's
         // own (conservative) creation charset if another tool wrote it.
-        let short_name = if existing.is_none() {
-            Some(make_short_name(name).ok_or(Error::InvalidName)?)
-        } else {
-            None
-        };
+        if existing.is_none() {
+            validate_create_name(name)?;
+        }
 
         let new_cluster = self.write_chain(data)?;
 
@@ -1173,13 +1187,7 @@ impl Fs {
             }
             self.patch_entry_cluster_size(lba, offset, new_cluster, data.len() as u32)
         } else {
-            self.insert_dir_entry(
-                parent.cluster,
-                &short_name.unwrap(),
-                0,
-                new_cluster,
-                data.len() as u32,
-            )
+            self.insert_named_entry(parent.cluster, name, 0, new_cluster, data.len() as u32)
         }
     }
 
@@ -1436,7 +1444,7 @@ impl Fs {
     pub fn mv(&mut self, src: &str, dst: &str) -> Result<(), Error> {
         let (src_parent_path, src_name) = split_parent(src).ok_or(Error::InvalidName)?;
         let (dst_parent_path, dst_name) = split_parent(dst).ok_or(Error::InvalidName)?;
-        let short_name = make_short_name(dst_name).ok_or(Error::InvalidName)?;
+        validate_create_name(dst_name)?;
 
         let src_parent = self.find(src_parent_path)?;
         if !src_parent.is_dir {
@@ -1475,18 +1483,19 @@ impl Fs {
         }
 
         let attr = if src_entry.is_dir { ATTR_DIRECTORY } else { 0 };
-        self.insert_dir_entry(
+        self.insert_named_entry(
             dst_parent.cluster,
-            &short_name,
+            dst_name,
             attr,
             src_entry.cluster,
             src_entry.size,
         )?;
 
-        let mut sector = [0u8; SECTOR_SIZE];
-        self.disk.read_sector(src_lba, &mut sector)?;
-        sector[src_offset] = DIR_ENTRY_FREE;
-        self.disk.write_sector(src_lba, &sector)?;
+        // Free src's short entry and its LFN run (src may have had a long
+        // name of its own). Matches by the exact location found above, so
+        // the dst entry just inserted - even into the same directory on a
+        // rename - is never mistaken for it.
+        self.free_entry_with_lfn(src_parent.cluster, src_lba, src_offset)?;
 
         if src_entry.is_dir && src_parent.cluster != dst_parent.cluster {
             let dotdot_cluster = if dst_parent.cluster == self.root_cluster {
@@ -1564,6 +1573,329 @@ impl Fs {
                 }
             }
         }
+    }
+
+    /// Inserts a directory entry for `name`, choosing the on-disk
+    /// representation by whether the name fits an 8.3 short name:
+    ///
+    /// - **Fits 8.3** ([`make_short_name`] succeeds): a single short entry,
+    ///   exactly as before - no LFN entries, the name uppercased. This is
+    ///   the common case and its on-disk shape is unchanged.
+    /// - **Doesn't fit** (too long, extra dots, spaces, mixed case that must
+    ///   be preserved, or any non-8.3 character): a generated `NAME~N` short
+    ///   alias ([`generate_short_alias`], unique within this directory) plus
+    ///   a run of LFN entries carrying the real name, laid down as one
+    ///   physically contiguous block via [`write_entry_run`]. The alias's
+    ///   [`lfn_checksum`] is stamped into every LFN entry, so the read side
+    ///   ([`walk_dir`](Self::walk_dir)) reconstructs and matches the long
+    ///   name.
+    ///
+    /// The single write-path entry point for a *named* create - `mkdir`,
+    /// `touch`, `write_file`, and `mv` all funnel through here. Callers must
+    /// have already validated the name with [`validate_create_name`] (before
+    /// allocating any clusters), so this only fails on a genuine disk error
+    /// or an exhausted alias space.
+    fn insert_named_entry(
+        &mut self,
+        dir_cluster: u32,
+        name: &str,
+        attr: u8,
+        cluster: u32,
+        size: u32,
+    ) -> Result<(), Error> {
+        if let Some(short) = make_short_name(name) {
+            // Fits 8.3 - plain short entry, no LFN (unchanged behavior).
+            return self.insert_dir_entry(dir_cluster, &short, attr, cluster, size);
+        }
+
+        let short = self.generate_short_alias(name, dir_cluster)?;
+        // Physical layout: the LFN entries (highest sequence first), then the
+        // short entry last - built into one buffer, written as a contiguous
+        // run. `name.len() <= LONG_NAME_MAX` is guaranteed by
+        // `validate_create_name`, so `count <= MAX_LFN_ENTRIES + 1`.
+        let mut entries = [0u8; (MAX_LFN_ENTRIES + 1) * DIR_ENTRY_SIZE];
+        let count = build_name_entries(name.as_bytes(), &short, attr, cluster, size, &mut entries);
+        self.write_entry_run(dir_cluster, &entries[..count * DIR_ENTRY_SIZE], count)
+    }
+
+    /// Generates a unique 8.3 short-name alias for the long `name` within the
+    /// directory at `dir_cluster` - the `PROGRA~1`-style basis name every
+    /// long name needs behind it. Derives a sanitized base (up to 6-8 valid
+    /// uppercase chars) and extension from `name`, then appends `~1`, `~2`, …
+    /// until the resulting 11-byte short name collides with nothing already
+    /// in the directory ([`short_alias_exists`](Self::short_alias_exists)).
+    /// The `~N` numeric tail grows the base is trimmed to keep the whole
+    /// thing within 8 characters (see [`compose_alias`]).
+    fn generate_short_alias(&mut self, name: &str, dir_cluster: u32) -> Result<[u8; 11], Error> {
+        let bytes = name.as_bytes();
+        // Split off an extension at the last '.', but only if it isn't the
+        // leading character (a name like ".config" is all base, no ext).
+        let mut dot = None;
+        let mut i = bytes.len();
+        while i > 0 {
+            i -= 1;
+            if bytes[i] == b'.' {
+                dot = Some(i);
+                break;
+            }
+        }
+        let (base_src, ext_src): (&[u8], &[u8]) = match dot {
+            Some(d) if d > 0 => (&bytes[..d], &bytes[d + 1..]),
+            _ => (bytes, &[]),
+        };
+
+        let mut base = [0u8; 8];
+        let mut base_len = 0;
+        for &b in base_src {
+            if base_len >= 8 {
+                break;
+            }
+            if let Some(c) = sanitize_short_char(b) {
+                base[base_len] = c;
+                base_len += 1;
+            }
+        }
+        if base_len == 0 {
+            base[0] = b'_'; // a name with no 8.3-legal base char still needs one
+            base_len = 1;
+        }
+        let mut ext = [0u8; 3];
+        let mut ext_len = 0;
+        for &b in ext_src {
+            if ext_len >= 3 {
+                break;
+            }
+            if let Some(c) = sanitize_short_char(b) {
+                ext[ext_len] = c;
+                ext_len += 1;
+            }
+        }
+
+        // `~1`..`~999999` - vastly more than any real directory needs; a
+        // bound rather than an unbounded loop on a pathological collision run.
+        for n in 1..=999_999u32 {
+            let short = compose_alias(&base[..base_len], &ext[..ext_len], n);
+            if !self.short_alias_exists(dir_cluster, &short)? {
+                return Ok(short);
+            }
+        }
+        Err(Error::AlreadyExists)
+    }
+
+    /// Whether an entry with the exact 11-byte short name `short` already
+    /// exists in the directory at `dir_cluster`. Compares the raw 8.3 field
+    /// (not the rendered/long name), because two different long names can map
+    /// to the same alias base - the collision that matters for
+    /// [`generate_short_alias`](Self::generate_short_alias) is at the short
+    /// name. LFN entries are skipped (they carry name *fragments*, not an 8.3
+    /// name in bytes 0..11).
+    fn short_alias_exists(&mut self, dir_cluster: u32, short: &[u8; 11]) -> Result<bool, Error> {
+        let mut cluster = dir_cluster;
+        loop {
+            let lba = self.cluster_to_lba(cluster);
+            for s in 0..self.sectors_per_cluster {
+                let mut buf = [0u8; SECTOR_SIZE];
+                self.disk.read_sector((lba + s) as u64, &mut buf)?;
+                for raw in buf.chunks_exact(DIR_ENTRY_SIZE) {
+                    match raw[0] {
+                        DIR_ENTRY_END => return Ok(false),
+                        DIR_ENTRY_FREE => continue,
+                        _ => {}
+                    }
+                    if raw[11] != ATTR_LFN && &raw[0..11] == short {
+                        return Ok(true);
+                    }
+                }
+            }
+            match self.next_cluster(cluster)? {
+                Some(next) => cluster = next,
+                None => return Ok(false),
+            }
+        }
+    }
+
+    /// Writes `count` prepared 32-byte directory entries (`entries`,
+    /// physical order) into a run of `count` *physically contiguous* free
+    /// slots in the directory at `dir_cluster`, extending the directory by
+    /// zeroed clusters if no such run exists yet. Contiguity is required: the
+    /// LFN entries and their short entry must be adjacent in directory order
+    /// for the read side to associate them.
+    ///
+    /// "Free" is a `0xE5` (deleted) or `0x00` (end-of-directory) slot. A run
+    /// may span sector and cluster boundaries (directory order follows the
+    /// cluster chain), and may begin in reclaimed `0xE5` slots and continue
+    /// through the `0x00` tail. Because a newly extended cluster is zeroed, a
+    /// short directory always grows enough contiguous free slots eventually.
+    fn write_entry_run(
+        &mut self,
+        dir_cluster: u32,
+        entries: &[u8],
+        count: usize,
+    ) -> Result<(), Error> {
+        let mut locs = [(0u64, 0usize); MAX_LFN_ENTRIES + 1];
+        let mut run = 0usize;
+        let mut cluster = dir_cluster;
+        loop {
+            let lba = self.cluster_to_lba(cluster);
+            for s in 0..self.sectors_per_cluster {
+                let mut buf = [0u8; SECTOR_SIZE];
+                self.disk.read_sector((lba + s) as u64, &mut buf)?;
+                for (i, raw) in buf.chunks_exact(DIR_ENTRY_SIZE).enumerate() {
+                    if raw[0] == DIR_ENTRY_FREE || raw[0] == DIR_ENTRY_END {
+                        if run < count {
+                            locs[run] = ((lba + s) as u64, i * DIR_ENTRY_SIZE);
+                        }
+                        run += 1;
+                        if run == count {
+                            return self.place_entries(entries, &locs, count);
+                        }
+                    } else {
+                        run = 0; // a used slot breaks the contiguous run
+                    }
+                }
+            }
+            match self.next_cluster(cluster)? {
+                Some(next) => cluster = next,
+                None => {
+                    // No run of `count` free slots in the existing chain - grow
+                    // it by one zeroed cluster (claim-before-link, same order
+                    // as `insert_dir_entry`) and let the scan continue into it;
+                    // the run accumulates across the boundary.
+                    let new = self.find_free_cluster()?;
+                    self.write_fat_entry(new, END_OF_CHAIN_MIN)?;
+                    self.zero_cluster(new)?;
+                    self.write_fat_entry(cluster, new)?;
+                    cluster = new;
+                }
+            }
+        }
+    }
+
+    /// Writes the `count` prepared entries in `entries` to the `count`
+    /// on-disk locations in `locs` (both in the same order), reading and
+    /// rewriting each affected sector exactly once. `locs` is ascending
+    /// (filled in scan order by [`write_entry_run`](Self::write_entry_run)),
+    /// so entries sharing a sector are contiguous in the array and grouped.
+    fn place_entries(
+        &mut self,
+        entries: &[u8],
+        locs: &[(u64, usize); MAX_LFN_ENTRIES + 1],
+        count: usize,
+    ) -> Result<(), Error> {
+        let mut i = 0;
+        while i < count {
+            let lba = locs[i].0;
+            let mut buf = [0u8; SECTOR_SIZE];
+            self.disk.read_sector(lba, &mut buf)?;
+            while i < count && locs[i].0 == lba {
+                let off = locs[i].1;
+                buf[off..off + DIR_ENTRY_SIZE]
+                    .copy_from_slice(&entries[i * DIR_ENTRY_SIZE..(i + 1) * DIR_ENTRY_SIZE]);
+                i += 1;
+            }
+            self.disk.write_sector(lba, &buf)?;
+        }
+        Ok(())
+    }
+
+    /// Frees the short directory entry at (`target_lba`, `target_off`) *and*
+    /// the contiguous run of LFN entries physically preceding it (its
+    /// long-name entries), marking every slot [`DIR_ENTRY_FREE`]. Without
+    /// this, deleting a long-named file would strand its LFN entries as
+    /// orphans - never reclaimed (an LFN entry's first byte is a sequence
+    /// number, not `0xE5`, so [`insert_dir_entry`](Self::insert_dir_entry)'s
+    /// free-slot scan skips it) and flagged by `fsck`.
+    ///
+    /// Matches the target by its exact on-disk location, not by name, so a
+    /// freshly inserted entry (even one just added to the same directory by
+    /// `mv`) is never confused for it. The preceding LFN run is freed only if
+    /// its stored checksum matches this short entry - the same orphan guard
+    /// the read path uses, so an already-orphaned run in front of the target
+    /// is left alone rather than wrongly attributed to it.
+    fn free_entry_with_lfn(
+        &mut self,
+        dir_cluster: u32,
+        target_lba: u64,
+        target_off: usize,
+    ) -> Result<(), Error> {
+        // Collected while walking: the current pending LFN run's slot
+        // locations, then (once the target is reached) everything to free.
+        let mut run = [(0u64, 0usize); MAX_LFN_ENTRIES];
+        let mut run_len = 0usize;
+        let mut run_sum = 0u8;
+        let mut to_free = [(0u64, 0usize); MAX_LFN_ENTRIES + 1];
+        let mut free_n = 0usize;
+        let mut found = false;
+
+        let mut cluster = dir_cluster;
+        'walk: loop {
+            let lba0 = self.cluster_to_lba(cluster);
+            for s in 0..self.sectors_per_cluster {
+                let mut buf = [0u8; SECTOR_SIZE];
+                self.disk.read_sector((lba0 + s) as u64, &mut buf)?;
+                for (i, raw) in buf.chunks_exact(DIR_ENTRY_SIZE).enumerate() {
+                    let this = ((lba0 + s) as u64, i * DIR_ENTRY_SIZE);
+                    match raw[0] {
+                        DIR_ENTRY_END => break 'walk, // reached the end without the target
+                        DIR_ENTRY_FREE => {
+                            run_len = 0;
+                            continue;
+                        }
+                        _ => {}
+                    }
+                    let attr = raw[11];
+                    if attr == ATTR_LFN {
+                        if run_len < MAX_LFN_ENTRIES {
+                            run[run_len] = this;
+                            run_len += 1;
+                        }
+                        run_sum = raw[13];
+                        continue;
+                    }
+                    if attr & ATTR_VOLUME_ID != 0 {
+                        run_len = 0;
+                        continue;
+                    }
+                    // A short entry.
+                    if this == (target_lba, target_off) {
+                        if run_len > 0 && run_sum == lfn_checksum(&raw[0..11]) {
+                            for &slot in run.iter().take(run_len) {
+                                to_free[free_n] = slot;
+                                free_n += 1;
+                            }
+                        }
+                        to_free[free_n] = this;
+                        free_n += 1;
+                        found = true;
+                        break 'walk;
+                    }
+                    run_len = 0; // a different short entry ends the pending run
+                }
+            }
+            match self.next_cluster(cluster)? {
+                Some(next) => cluster = next,
+                None => break 'walk,
+            }
+        }
+        if !found {
+            return Err(Error::NotFound);
+        }
+
+        // `to_free` is ascending (LFN run scanned before the target, within a
+        // sector by offset, across sectors by LBA), so slots sharing a sector
+        // are adjacent - one read-modify-write per sector.
+        let mut i = 0;
+        while i < free_n {
+            let lba = to_free[i].0;
+            let mut buf = [0u8; SECTOR_SIZE];
+            self.disk.read_sector(lba, &mut buf)?;
+            while i < free_n && to_free[i].0 == lba {
+                buf[to_free[i].1] = DIR_ENTRY_FREE;
+                i += 1;
+            }
+            self.disk.write_sector(lba, &buf)?;
+        }
+        Ok(())
     }
 }
 
@@ -1683,4 +2015,155 @@ fn make_short_name(name: &str) -> Option<[u8; 11]> {
 
 fn is_valid_short_name_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_' || b == b'-'
+}
+
+/// Validates a name a create op wants to lay down, covering *both* the 8.3
+/// and long-name paths - called by `mkdir`/`touch`/`write_file`/`mv` before
+/// any cluster is allocated, so an unrepresentable name fails cleanly rather
+/// than leaving orphaned clusters. Accepts anything [`make_short_name`]
+/// accepts (the 8.3 fast path), otherwise requires a valid long name
+/// ([`is_valid_lfn_name`]). The value it *adds* over the old
+/// `make_short_name(name).ok_or(InvalidName)` is that a legal-but-not-8.3
+/// name now passes here (and becomes an LFN) instead of being rejected.
+fn validate_create_name(name: &str) -> Result<(), Error> {
+    if make_short_name(name).is_some() || is_valid_lfn_name(name) {
+        Ok(())
+    } else {
+        Err(Error::InvalidName)
+    }
+}
+
+/// Whether `name` is a legal FAT long filename (LFN) this driver will create.
+/// Rejects the characters FAT reserves (`" * / : < > ? \ |`) and control
+/// bytes, anything longer than [`LONG_NAME_MAX`], the empty name, and a name
+/// made only of dots/spaces (which would sanitize to no usable short-alias
+/// base and isn't a meaningful filename). The read side is more permissive -
+/// it renders whatever a foreign formatter wrote; this is only the gate on
+/// what *we* create.
+fn is_valid_lfn_name(name: &str) -> bool {
+    if name.is_empty() || name.len() > LONG_NAME_MAX {
+        return false;
+    }
+    let mut all_dot_space = true;
+    for &b in name.as_bytes() {
+        match b {
+            b'"' | b'*' | b'/' | b':' | b'<' | b'>' | b'?' | b'\\' | b'|' => return false,
+            0..=0x1f => return false,
+            b'.' | b' ' => {}
+            _ => all_dot_space = false,
+        }
+    }
+    !all_dot_space
+}
+
+/// Maps a name byte to its 8.3 short-name form (uppercased) for alias
+/// generation, or `None` if it can't appear in a short name (dropped rather
+/// than substituted, so `"my file"` -> base `MYFILE`, not `MY_FILE`).
+fn sanitize_short_char(b: u8) -> Option<u8> {
+    let u = b.to_ascii_uppercase();
+    if is_valid_short_name_byte(u) {
+        Some(u)
+    } else {
+        None
+    }
+}
+
+/// Composes an `NAME~N`-style 11-byte 8.3 short name from a sanitized `base`
+/// (already uppercase, ≤ 8 valid bytes), `ext` (≤ 3 valid bytes), and the
+/// numeric tail `n`. The `~<n>` tail always fits: the base is trimmed so
+/// `base_take + 1 + digits(n) <= 8`, so even `~999999` (7 chars) leaves room
+/// for one base char.
+fn compose_alias(base: &[u8], ext: &[u8], n: u32) -> [u8; 11] {
+    // Decimal digits of `n`, high to low, into a fixed buffer (no fmt - a
+    // `write!` here would pull core::fmt's panic formatter, the documented
+    // PIE relocation wall this module keeps clear of; see `split_parent`).
+    let mut digits = [0u8; 7];
+    let ndig;
+    let mut v = n;
+    if v == 0 {
+        digits[0] = b'0';
+        ndig = 1;
+    } else {
+        // fill low-to-high, then reverse
+        let mut tmp = [0u8; 7];
+        let mut t = 0;
+        while v > 0 {
+            tmp[t] = b'0' + (v % 10) as u8;
+            v /= 10;
+            t += 1;
+        }
+        for k in 0..t {
+            digits[k] = tmp[t - 1 - k];
+        }
+        ndig = t;
+    }
+
+    let tail_len = 1 + ndig; // '~' + digits
+    let base_take = base.len().min(8 - tail_len);
+
+    let mut short = [b' '; 11];
+    short[..base_take].copy_from_slice(&base[..base_take]);
+    short[base_take] = b'~';
+    short[base_take + 1..base_take + 1 + ndig].copy_from_slice(&digits[..ndig]);
+    for (i, &b) in ext.iter().enumerate() {
+        short[8 + i] = b;
+    }
+    short
+}
+
+/// Builds the on-disk directory entries for a long `name`: the LFN entries
+/// (highest sequence number first, i.e. physical order) followed by the
+/// short entry carrying `short`/`attr`/`cluster`/`size`, all into `out`.
+/// Returns the number of 32-byte entries written (`num_lfn + 1`). The
+/// checksum binding the LFN run to its short entry ([`lfn_checksum`]) is
+/// stamped into every LFN entry, and each entry's 13 characters are placed
+/// with [`put_lfn_chars`] so the read side ([`lfn_chars`]) reconstructs the
+/// exact name.
+fn build_name_entries(
+    name: &[u8],
+    short: &[u8; 11],
+    attr: u8,
+    cluster: u32,
+    size: u32,
+    out: &mut [u8],
+) -> usize {
+    let checksum = lfn_checksum(short);
+    let num_lfn = name.len().div_ceil(LFN_CHARS_PER_ENTRY);
+    for idx in 0..num_lfn {
+        // Entries are stored in reverse: the highest sequence number (with the
+        // "last" bit) comes physically first, sequence 1 physically last.
+        let seq = num_lfn - idx;
+        let e = &mut out[idx * DIR_ENTRY_SIZE..(idx + 1) * DIR_ENTRY_SIZE];
+        e.fill(0);
+        e[0] = seq as u8 | if idx == 0 { LFN_LAST_MASK } else { 0 };
+        e[11] = ATTR_LFN;
+        // e[12] type = 0, e[13] checksum, e[26..28] first-cluster = 0.
+        e[13] = checksum;
+        put_lfn_chars(e, name, (seq - 1) * LFN_CHARS_PER_ENTRY);
+    }
+    let so = num_lfn * DIR_ENTRY_SIZE;
+    write_raw_entry(&mut out[so..so + DIR_ENTRY_SIZE], short, attr, cluster, size);
+    num_lfn + 1
+}
+
+/// Places up to 13 of `name`'s characters (starting at index `start`) into
+/// one LFN entry `e` as UTF-16LE, at the [`LFN_POS`] offsets. A `0x0000`
+/// terminator follows the last real character when it fits, and remaining
+/// slots are `0xFFFF` padding - exactly what [`lfn_chars`] expects when
+/// reading back. Only the low byte of each character is written (ASCII), the
+/// high byte left `0`; the shell produces ASCII names.
+fn put_lfn_chars(e: &mut [u8], name: &[u8], start: usize) {
+    for (k, &p) in LFN_POS.iter().enumerate() {
+        let ci = start + k;
+        if ci < name.len() {
+            e[p] = name[ci];
+            e[p + 1] = 0;
+        } else if ci == name.len() {
+            e[p] = 0x00; // null terminator
+            e[p + 1] = 0x00;
+        } else {
+            e[p] = 0xff; // padding past the terminator
+            e[p + 1] = 0xff;
+        }
+    }
 }
