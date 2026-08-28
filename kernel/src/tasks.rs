@@ -1135,6 +1135,61 @@ fn next_runnable(from: usize) -> usize {
     from
 }
 
+/// The idle task's slot (task 1 - see this module's doc comment). Named here so
+/// [`next_runnable_skip_idle`] doesn't hardcode a bare `1`.
+const IDLE_TASK: usize = 1;
+
+/// Like [`next_runnable`], but skips the idle task unless it's the only thing
+/// runnable. A *voluntary* yield ([`yield_current_and_switch`]) wants to hand
+/// the CPU to real work; parking on idle would just wait for the next tick,
+/// which is exactly the stall the yield exists to avoid.
+fn next_runnable_skip_idle(from: usize) -> usize {
+    for offset in 1..=NUM_TASKS {
+        let candidate = (from + offset) % NUM_TASKS;
+        if candidate != IDLE_TASK
+            && unsafe { *STATES[candidate].0.get() } == TaskState::Runnable
+        {
+            return candidate;
+        }
+    }
+    // Nothing else runnable - fall back (idle, or stay put).
+    next_runnable(from)
+}
+
+/// Voluntarily give up the CPU (the `YIELD` syscall): save the current task -
+/// which stays `Runnable`, this is a yield, not a block - and switch to another
+/// runnable task, preferring real work over idle ([`next_runnable_skip_idle`]).
+/// Returns `0` to the yielding task when it resumes.
+///
+/// The reason this exists: a pipe producer whose consumer's mailbox is full
+/// (`MSG_ERR_FULL`) otherwise busy-spins re-sending until the next tick lets
+/// the consumer run - at a 1-second tick, a real stall on hardware, and a waste
+/// of a CPU that could be running the consumer. Yielding hands the CPU straight
+/// to the consumer, which drains (or exits early, like `head`, at which point
+/// the producer's next send fails fast and it stops). Same trap-frame /
+/// return-value contract as [`block_current_and_switch`] (see `next_runnable`'s
+/// doc comment for why the return is `frame.gpr[0]`).
+///
+/// # Safety
+/// `frame` must be the live trap frame of the syscall currently being
+/// dispatched (true when called from `syscall::dispatch`, its only caller).
+pub(crate) unsafe fn yield_current_and_switch(frame: *mut Context) -> u64 {
+    let frame = unsafe { &mut *frame };
+    let current = CURRENT.load(Ordering::Relaxed);
+    let next = next_runnable_skip_idle(current);
+    if next == current {
+        return frame.gpr[0]; // nothing else to run - just carry on
+    }
+    // YIELD's own return value, seen by `current` when it is resumed later.
+    frame.gpr[0] = 0;
+    unsafe { *TASKS[current].0.get() = *frame };
+    // STATES[current] stays Runnable - a yield doesn't block.
+    *frame = unsafe { *TASKS[next].0.get() };
+    CURRENT.store(next, Ordering::Relaxed);
+    crate::mmu::activate_task(next);
+    frame.gpr[0]
+}
+
 /// Suspends the calling task (whichever one is live in `frame` right now)
 /// until `reason` is satisfied, and switches to another runnable task
 /// immediately - called from `syscall.rs`'s dispatch table when a

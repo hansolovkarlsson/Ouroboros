@@ -1,8 +1,14 @@
 //! `head [N]` - externalized line filter: prints the first `N` lines of its
 //! stdin (default 10) to its stdout target, then stops. Line-buffered like
 //! `grep`; once `N` complete lines are out it signals end-of-stream and exits
-//! early (the upstream producer's next send fails harmlessly - see `pipe_out`'s
-//! bounded retry - and it stops too).
+//! early. The upstream producer then stops **promptly**: its next `MSG_SEND` to
+//! this (now-exited) task fails non-transiently (`TASK_ERR_NO_SUCH_TASK`), so
+//! `pipe_out` returns at once rather than waiting out its retry deadline; and
+//! while this task is still draining, a producer that fills its mailbox
+//! *yields* (see `ulib::pipe_out`) instead of busy-spinning, so this task gets
+//! the CPU to finish and exit. So early exit costs the producer at most one
+//! extra send, not a timeout - the "actively hand off, don't spin on a timer"
+//! fix for what used to lean on the producer's retry window.
 
 #![no_std]
 #![no_main]

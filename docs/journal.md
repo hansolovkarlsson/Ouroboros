@@ -7,6 +7,159 @@ for the forward plan see [`roadmap.md`](roadmap.md).
 
 ---
 
+## 2026-08-27 (cont.) — a builtin anywhere in a pipeline
+
+The last of the pipeline open-gaps: a non-first stage couldn't be a builtin, so
+`cat f | ps` was refused. The roadmap had this filed as "reasonable, not worth
+changing," and it's true there's no *useful* builtin that transforms a stream —
+but the reason is the interesting part, and it's what made the fix clean. A
+builtin runs in the shell (not a task) and none of them read stdin, so a builtin
+can only ever be a pipeline *source*. A non-first builtin therefore reduces to:
+run everything upstream for side effects, throw its output away, and let the
+builtin source the rest. `ls | ps | grep runnable` = (ls drained) then
+(ps → grep).
+
+So I refactored `cmd_pipeline` into a classifier that finds the single builtin
+and a `run_head_pipeline(stages, …, sink)` core taking a `PipeSink` of
+`Console | Redirect | Drain`. A builtin at position k>0 runs `stages[..k]` with
+the Drain sink (a new no-limit discard loop — draining `cat bigfile | ps`
+shouldn't hit the 256KB redirect cap) then `stages[k..]` with the real sink.
+Nicely, the `> file` redirect from the previous change just became the Redirect
+sink, so console/file/drain are now one unified path. Two builtins are refused
+(only one source per pipeline).
+
+All the positions check out on QEMU — builtin last (`cat tf.txt | ps`), middle
+(`ls | ps | grep runnable`), first (unchanged), last+redirect
+(`cat tf.txt | ps > psout.txt` → the table in a file), and `env | ps` gets the
+"only one builtin" message. A case where the honest reduction ("a builtin
+discards its upstream") turned a "not worth it" into a small, uniform change.
+
+## 2026-08-27 (cont.) — grep flags, and a YIELD syscall for prompt early-exit
+
+Two more open-gap filter follow-ups. `grep` gained `-i`/`-v`/`-n` (case-fold,
+invert, line-number) — the substantive "no longer case-sensitive" fix;
+substring matching stays (regex is a bigger arc). Straightforward, and all three
+plus the combined `-in` form check out on QEMU.
+
+The `head` half was more interesting than it looked. The gap said head "relies
+on the producer's send-timeout" when it exits early. Digging in, that turned out
+to be half-untrue: a send to an *exited* consumer already fails non-transiently
+(`task_exists` is false for a zombie), so `pipe_out` returns immediately, not on
+the 150-tick deadline — the old comment overstated it. The *real* residual cost
+was a busy-spin: while head is still draining its final buffer, a producer that
+fills head's mailbox gets `MSG_ERR_FULL` and re-sends in a tight loop until the
+next tick preempts it and lets head run. Under QEMU's ~37 ms ticks that's
+invisible, but at a 1-second hardware tick it's a real ~1 s stall — and a
+busy-spin burning the CPU the consumer needs.
+
+There was no way to hand the CPU to the consumer cooperatively — no yield
+primitive existed. So I added one: a `YIELD` syscall (57) that saves the caller
+as still-runnable and switches to another runnable task, *skipping idle unless
+it's the only thing runnable* (the subtlety — a naive yield could park on the
+always-runnable idle task and waste exactly the tick it was trying to save).
+`pipe_out` now yields on `MSG_ERR_FULL` instead of spinning, so the consumer
+runs, drains or exits, and the producer's retry then succeeds or fails fast. It
+benefits every pipe, not just head. `tree / | head 3` — a producer that would
+generate the whole filesystem tree feeding a consumer that wants three lines —
+returns promptly, no hang, no fault.
+
+Nice case of the gap note pointing at the symptom (head) when the fix belonged
+one layer down (the shared producer path + a missing scheduler primitive).
+
+## 2026-08-27 (cont.) — `a | b > file`: pipelines compose with redirection
+
+Small, satisfying one: the shell refused `a | b > file` (pipeline plus
+redirect) because the last stage wrote straight to the console. The fix was
+mostly a reordering — `run_line` now parses the trailing `>`/`>>` redirect
+*first* (leaving the `|` in the command part), and when a redirect is present
+the pipeline's last stage is spawned with its stdout pointed at the shell
+instead of the console. From there it's the *exact* path a single `cmd > file`
+already uses: `capture_program_output` folds the stream into the 256KB heap
+capture, `finish_redirect` writes it to the file. So almost no new
+mechanism — the redirect capture and the pipeline machinery already existed;
+they just needed to meet. The only genuinely new handling is the error path
+(kill+reap the producers if the capture fails so nothing hangs) and *not*
+handing the last stage the keyboard when its output is going to a file.
+
+Verified on `make run-image`: `ls /bin | grep PW > pwout.txt` then a `>>`
+gave a two-line file (confirmed by the guest and by mounting the image on the
+Mac), and `env | grep PATH > envout.txt` proved a builtin-head pipeline
+redirects too (`PATH=/bin`). Plain pipelines still go to the console; no
+faults. Closes another of the small open-gaps.
+
+## 2026-08-27 (cont.) — GPT CRC validation + backup fallback
+
+Closed the "GPT parsed but CRCs not validated on read" open gap. `fsd`'s
+`partition::discover` trusted the "EFI PART" signature and read the entry
+array without checking either CRC32. Now `try_gpt` validates the header CRC
+(over `HeaderSize` bytes, CRC field zeroed) and the entry-array CRC (a
+table-free bitwise CRC-32, reflected `0xEDB88320`, folded incrementally so
+the array is CRC'd sector-by-sector), and a corrupt *primary* falls back to
+the *backup* GPT at the last LBA; both corrupt → no partitions. Also detect a
+GPT by a `0xEE` protective-MBR entry, not just the header signature, so a
+disk whose primary signature is itself smashed is still recovered from the
+backup.
+
+The interesting part was *testing* it, because two layers of firmware get in
+the way. I flipped a bit in the primary header of `espgpt.img` and booted it:
+`fsd` mounted — but when I checked the on-disk image afterward, the primary
+header was *valid again*. EDK2/OVMF **auto-repairs a corrupt primary GPT from
+the backup during boot**, so by the time `fsd` reads the disk there's nothing
+wrong with the primary. And corrupting *both* copies just makes the firmware
+refuse to boot at all (`CheckCrc32: Crc check failed` → it drops to the EFI
+shell), so the kernel never runs. Either way a QEMU boot can't actually
+exercise `fsd`'s fallback. So I wrote a small host harness that `#[path]`-includes
+the **real `partition.rs`** and drives it through a mock `Disk` over the raw
+image bytes — no firmware in the loop. Five cases pass: clean → mounts on
+primary; corrupt-primary-header and corrupt-primary-array → both fall back to
+the backup; corrupt-both → zero; plain-MBR → still one partition (no
+regression). I also cross-checked the bitwise CRC against `zlib.crc32` and the
+values `mkgpt.py` writes — byte-identical for both the primary and backup
+headers. The clean `run-image-gpt` boot still mounts, so nothing regressed at
+the real-boot level either.
+
+Nice reminder that "test it on real hardware/firmware" isn't automatically the
+strongest test — here the firmware's own robustness (repair + reject) actively
+*hides* the code path under test, and a host harness driving the real module
+was the honest way to see `fsd`'s fallback actually fire.
+
+## 2026-08-27 (cont.) — FAT32 long-filename *write*
+
+Closed the "FAT32 long-filename write" follow-up from the roadmap. LFN was
+readable but not creatable: `fsd`'s FAT32 arm only ever wrote 8.3 short
+entries, so `touch archive.tar.gz` or `write LongFileName.txt …` failed with
+"invalid name". Now a name that doesn't fit 8.3 gets a generated `NAME~N`
+short alias plus a contiguous run of LFN entries carrying the real name;
+8.3-fitting names still take the old plain-short-entry path byte-for-byte, so
+nothing existing changed.
+
+The pieces, all self-contained in `fat32.rs`: `insert_named_entry` (the one
+funnel `mkdir`/`touch`/`write_file`/`mv` route through, deciding 8.3-vs-LFN),
+`generate_short_alias` (`~N` incremented until unique — the base trimmed so
+even `~999999` fits 8 chars), `build_name_entries`/`put_lfn_chars` (the
+on-disk entry run, checksum-stamped, written high-sequence-first), and
+`write_entry_run`/`place_entries` (find a physically-contiguous run of free
+slots, extend the directory by a zeroed cluster if needed). I also did the
+bonus the roadmap flagged: `free_entry_with_lfn` frees a deleted file's LFN
+run, so `rm`/`rmdir`/`mv` no longer strand orphaned LFN entries — it matches
+the target by exact on-disk location (so an `mv` dst inserted into the same
+directory isn't mistaken for it) and only frees a preceding run whose
+checksum matches.
+
+Testing leaned on the foreign-observer discipline this project keeps: drove
+the guest shell unattended over `make run-image` (the FIFO recipe), creating
+`longfilename1.txt`/`longfilename2.txt` (aliases collide →
+`LONGFI~1.TXT`/`LONGFI~2.TXT`), a long-named directory, a nested long-named
+file, then `rm` and `mv` of long names. The guest read every name back; then
+**macOS's own FAT driver** mounted the guest-written image and showed all the
+long names and contents; and **`fsck_msdos`** passed its directory phase with
+no orphaned-LFN/checksum/duplicate-short-name complaints — the real proof, an
+implementation that shares none of my code. Only wrinkle was a pre-existing,
+advisory FSInfo free-count warning (`fsd` never maintains that hint on
+writes), unrelated to LFN. No faults, no guard-page overflow. Left
+case-preservation for lowercase-8.3 names (`File.txt` → `FILE.TXT`) alone on
+purpose — the gap was `>8.3` names, and that's closed.
+
 ## 2026-08-27 (cont.) — reading the neighbours: Redox OS and the Pi-4 tutorials
 
 Not code — a research pass Hans asked for, on two outside resources: Redox OS

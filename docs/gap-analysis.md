@@ -83,7 +83,7 @@ set; roadmap arcs are cited by their `roadmap.md` section.
 | Keyboard input | ✅ | USB HID (xHCI) on real hardware; kernel delivers bytes to the input owner. |
 | ANSI / VT100 escape codes | ◐ | cond has a **small** ANSI parser (cursor/wrap/scroll). No SGR color, cursor addressing, erase-region, scroll regions — and **no return channel** for query sequences. The terminal arc (roadmap item 1). |
 | Output redirection `>` / `>>` | ✅ | Shell-side, for every builtin/command. |
-| Pipelines `a \| b \| c` | ◐ | Real N-stage pipelines of `/bin` programs (IPC + capability delegation). **Can't combine with `>`/`>>`**; a non-first stage can't be a builtin. |
+| Pipelines `a \| b \| c` | ◐ | Real N-stage pipelines of `/bin` programs (IPC + capability delegation); **`a \| b > file`/`>> file` compose** (last stage captured to the file); and a **single builtin may sit at any position** (`cat f \| ps`, `ls \| ps \| grep x` — a non-first builtin drains its upstream and becomes the source). Still no job control / `&` backgrounding of a whole pipeline. |
 | `select`/`poll`/`epoll` (general multiplexing) | ✗ | Only `NET_WAIT` (netd's two sources). A program can't wait on "stdin *or* a socket." A pager/editor needs this (roadmap item 3). |
 | TTY line discipline (canonical mode, `^U`/`^W`, raw mode) | ◐ | The shell's own line editor handles backspace; there's no general TTY layer a program can put into raw mode. |
 | `isatty`/pseudo-terminals (ptys) | ✗ | No pty layer; nothing multiplexes a terminal. |
@@ -200,7 +200,7 @@ ps kill fg wait send recv selftest env set unset cpu`.
 | `find` `du` `df` | ✗ | Client-side directory walking (new but small); `df` wants the volume info fsd already returns. |
 | `date` `sleep` | ✗ | Blocked on wall-clock (§12) and a per-task timer respectively. |
 | `chmod` `chown` `ln` | ✗ | Blocked on the stat surface + permissions arc (§3, §6). |
-| Command flags (`ls -l`, `grep -i/-r`, `rm -r`, `cp -r`, real regex) | ◐ | `ls` now takes `-l`/`-a` (on the new `stat` op); the rest are still positional-only. A shared `ulib` option parser would generalize flag handling (roadmap item 2). |
+| Command flags (`ls -l`, `grep -i/-r`, `rm -r`, `cp -r`, real regex) | ◐ | `ls` takes `-l`/`-a` (on the `stat` op) and `grep` takes `-i`/`-v`/`-n`; the rest are still positional-only, and `grep` matching is still substring (no regex). A shared `ulib` option parser would generalize flag handling (roadmap item 2). |
 | An editor + a pager (`less`/`more`) | ✗ | The two consumers that justify the VT100 arc (§4) and general `select` — gated on items 1 & 3. |
 | `sed` `awk` `find … -exec` | ✗ | Larger; realistic once a libc/scripting layer exists. |
 

@@ -86,11 +86,6 @@ record is in [`CHANGELOG.md`](CHANGELOG.md):
 
 The small open tails those arcs deliberately left:
 
-- **FAT32 long-filename *write*.** LFN is read, not created; the guest can't
-  make a `>8.3` name yet (`make_short_name` only does 8.3). Needs `~N` alias
-  generation + the alias checksum + laying N+1 contiguous dir entries. A
-  self-contained `fat32.rs` addition; would also let a clean delete free the
-  orphaned LFN entries `rm` leaves.
 - **ext4.** Much larger (extents, journaling, htree, checksums, 64-bit) and
   the no-alloc fixed-buffer constraint makes a big FS genuinely harder — a
   separate large arc, not a near-term ext2 follow-on.
@@ -561,18 +556,6 @@ Known small gaps, not yet sequenced (the *completed* parking-lot entries — USB
 keyboard, GOP console, preemption, task destruction, driver isolation, etc. — are
 in [`roadmap-completed.md`](roadmap-completed.md)):
 
-- **GPT is parsed but not validated on read.** `fsd`'s `partition::discover`
-  trusts the "EFI PART" signature; it doesn't check the header/entry-array CRC32s
-  or fall back to the backup GPT on a corrupt primary. Fine for the clean images
-  we make; a robustness gap for a damaged disk. (The builder `scripts/mkgpt.py`
-  *does* write correct CRCs.)
-- **Pipelines can't combine with `>`/`>>`.** `a | b > file` is refused (the last
-  stage writes straight to the console; there's no capture of its output). A real
-  fix routes the last stage's stdout into a file capture.
-- **`grep` is substring-only and case-sensitive** (no regex, no `-i`); **`head`
-  relies on the producer's send-timeout** when it exits early rather than
-  actively signalling upstream. Small filter follow-ups (and see North-star item
-  2 for a shared `ulib` option parser).
-- **A pipeline stage other than the first can't be a builtin** (a later stage
-  must be a program that reads stdin) — so e.g. `cat x | ps` isn't meaningful.
-  Reasonable; documented, not likely worth changing.
+- **`grep` has no regex** (it now takes `-i`/`-v`/`-n`, but matching is still a
+  plain substring). Real patterns are a separate, larger arc — see North-star
+  item 2 for the shared `ulib` option parser and richer matching.

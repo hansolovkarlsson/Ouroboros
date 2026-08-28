@@ -7,6 +7,197 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/`; 
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## Shell: a builtin may appear anywhere in a pipeline
+
+Only a pipeline's *first* stage could be a builtin (a later stage had to be a
+`/bin` program that reads stdin), so `cat f | ps`, `ls | ps | grep x`, and the
+like were refused. Now a **single** builtin may sit at **any** position.
+
+The enabling observation: a builtin runs *in the shell*, not as a task, and no
+builtin reads stdin — so a builtin can only ever be a pipeline's **source**,
+never a stream transformer. A non-first builtin therefore means "run everything
+upstream for its side effects, discard its output, and let the builtin be the
+source of whatever follows." `cmd_pipeline` now classifies the stages, and when
+the (single) builtin is at position `k > 0` it runs `stages[..k]` as a program
+pipeline whose output is **drained** (a new no-size-limit discard path,
+`drain_program_output`), then runs `stages[k..]` — the builtin as head, feeding
+the program stages after it — through the same `run_head_pipeline` core the
+first-stage-builtin case already used. A lone terminating builtin (`cat f | ps`)
+is just run to the console (or the redirect capture, so `cat f | ps > out`
+works). Two or more builtins are refused with a clear message — only one thing
+in a pipeline can be the source.
+
+The pipeline core was refactored to a `run_head_pipeline(stages, …, sink)` with
+a `PipeSink` of `Console | Redirect(path,append) | Drain`, unifying the console,
+`> file`, and drain destinations (the redirect path from the previous entry is
+now one of the three sinks).
+
+Verified on `make run-image`: `cat tf.txt | ps` (builtin last) prints the task
+table; `ls | ps | grep runnable` (builtin middle) filters it; `ps | grep x`
+(builtin first) still works; `cat tf.txt | ps > psout.txt` captures the table to
+a file; `env | ps` reports "only one builtin per pipeline"; plain pipelines are
+unchanged. No faults.
+
+## Filters: `grep` flags, and a cooperative `YIELD` for prompt early-exit
+
+Two small filter follow-ups from the open-gaps list.
+
+**`grep` gained `-i`/`-v`/`-n`.** It was substring-only *and* case-sensitive;
+now `-i` folds case (ASCII), `-v` inverts (print non-matching lines), and `-n`
+prefixes each printed line with its 1-based input line number. Flags may be
+separate (`-i -v`) or combined (`-in`), before the pattern. Matching is still a
+plain substring — real regex is a separate, larger arc. (Verified on
+`make run-image`: `grep -i cat` matched `CAT`, `grep -v P` printed exactly the
+`P`-free rows, `grep -in pw` numbered the case-folded `PWD` match.)
+
+**`head` no longer leans on the producer's send-timeout when it exits early.**
+When `head N` has its N lines it exits; the upstream producer discovers this on
+its next send. Two things make that prompt now:
+
+- A send to the exited (zombie) consumer already fails *non-transiently*
+  (`TASK_ERR_NO_SUCH_TASK`), so `pipe_out` returns at once — it never waits out
+  its retry deadline. (This was already true; the old comment overstated it.)
+- The remaining stall was the *busy-spin* while the consumer is still draining:
+  a producer that fills the consumer's mailbox got `MSG_ERR_FULL` and re-sent in
+  a tight loop until the next tick let the consumer run — up to a full second at
+  a 1-second hardware tick, burning a CPU that could have been running the
+  consumer. Fixed with a new **`YIELD` syscall** (57): on `MSG_ERR_FULL`,
+  `pipe_out` yields instead of spinning, and the kernel switches to another
+  runnable task — *preferring real work over the idle task* — so the consumer
+  runs, drains (or exits, at which point the next send fails fast). `YIELD`
+  saves the caller as still-runnable and switches like a block that doesn't
+  block; `end_of_stream` yields the same way. Benefits every producer/consumer
+  pair, not just `head`.
+
+Verified on `make run-image`: `tree / | head 3` (a high-volume producer feeding
+an early-exiting consumer) completes promptly with no hang and no fault; plain
+pipelines are unchanged.
+
+## Shell: `a | b > file` — pipelines compose with redirection
+
+A pipeline and an output redirect can now be used together:
+`ls /bin | grep C > matches.txt`, `ps | grep runnable >> log.txt`. Before,
+this was refused (`can't combine | with output redirection`) because the
+last pipeline stage wrote straight to the console, with nothing capturing
+its output.
+
+The fix reorders `run_line`: it **parses the trailing `> file`/`>> file`
+redirect first**, leaving any `|` in the command part, then runs the
+pipeline. When a redirect is present, the last stage's stdout is pointed at
+the **shell itself** (`self_task()`) instead of `CON_TASK`, so the shell
+captures its output with the same `capture_program_output` →
+`finish_redirect` path a single `cmd > file` already uses (into the 256KB
+heap capture, then written to the file — create/replace for `>`, append for
+`>>`). Everything else about the pipeline is unchanged: stages still stream
+directly to one another, a builtin first stage is still captured-and-streamed,
+and the last stage just gets a different destination. No `FG` in the
+redirected case (the output goes to a file, so the last stage doesn't own the
+keyboard); on a capture error the producers are killed and reaped so nothing
+hangs.
+
+Verified on `make run-image`: `ls /bin | grep PW > pwout.txt` then
+`>> pwout.txt` produced a two-line file (read back both by the guest and by
+macOS mounting the image); `env | grep PATH > envout.txt` (a builtin-head
+pipeline) captured `PATH=/bin`; plain pipelines still print to the console.
+No faults.
+
+## GPT: validate the CRC32s, fall back to the backup
+
+`fsd`'s `partition::discover` used to *trust* a GPT: it keyed off the "EFI
+PART" signature and read the partition-entry array without checking either
+CRC32 the format carries. Now it **validates**, following the UEFI spec's
+GPT rules, and recovers from a damaged primary:
+
+- **Header CRC32** — over `HeaderSize` bytes with the 4-byte CRC field
+  taken as zero — and **partition-entry-array CRC32** — over
+  `NumberOfPartitionEntries * SizeOfPartitionEntry` bytes — are both
+  recomputed and checked against the header's stored values. A table-free
+  bitwise CRC-32 (reflected `0xEDB88320`, the same one `zlib.crc32`/GPT
+  use) does it, folded incrementally so the array is CRC'd sector-by-sector
+  with no large buffer. Bounded reads (array capped at 64 KiB) keep a
+  corrupt header from running the scan away.
+- **Backup fallback** — if the *primary* header or array fails validation,
+  discovery reads the **backup** GPT at the last LBA (its own header +
+  array) and uses that. Only if both copies fail does it report no
+  partitions, rather than trusting a corrupt table.
+- **Protective-MBR detection** — a GPT disk is now recognized by the
+  "EFI PART" signature *or* a `0xEE` protective-MBR entry, so a disk whose
+  primary header signature is itself corrupted is still recognized and
+  recovered from the backup.
+
+The clean path is unchanged: a valid primary validates and mounts, never
+touching the backup (verified booting `make run-image-gpt` under QEMU — the
+image `scripts/mkgpt.py` builds still mounts).
+
+**Testing note worth keeping:** this *can't* be tested through a normal UEFI
+boot — EDK2/OVMF validates the same CRCs and **auto-repairs a corrupt
+primary from the backup on boot**, so by the time `fsd` reads the disk the
+primary is healed (confirmed: a bit flipped in the primary header was back
+to its original value on disk after one boot); and a disk with *both* copies
+corrupt is rejected by the firmware (`CheckCrc32: Crc check failed` → EFI
+shell), so the kernel never runs. So `fsd`'s own logic was validated with a
+**host harness that runs the real `partition.rs` against a mock disk**: clean
+→ mounts on primary; corrupt-primary-header and corrupt-primary-array → both
+fall back to the backup; corrupt-both → zero partitions; plain-MBR → still
+one partition (no regression). The CRC implementation was separately
+cross-checked to produce byte-identical values to `zlib.crc32` and to the
+CRCs `mkgpt.py` stored, for both the primary and backup headers.
+
+## FAT32: long-filename (LFN) *write*
+
+The guest can now **create** files and directories with long names, not
+just read them. Before, `fsd`'s FAT32 arm only wrote 8.3 short entries
+(`make_short_name`), so any name too long, with extra dots, spaces, or a
+non-8.3 character was rejected with "invalid name"; the LFN *read* path
+(reconstructing a long name from the entries a real formatter wrote) had
+no write counterpart.
+
+**What was added, all in `fat32.rs`:**
+
+- **`insert_named_entry`** is the single funnel for a *named* create
+  (`mkdir`/`touch`/`write_file`/`mv` all route through it). A name that
+  fits 8.3 still becomes one plain short entry — **byte-for-byte the old
+  behavior, uppercased, no LFN** — so nothing about existing short-name
+  files changed. A name that doesn't fit gets the LFN treatment.
+- **`generate_short_alias`** builds the `NAME~N` basis name every long
+  name needs: a sanitized ≤8-char uppercase base + extension, with a `~1`,
+  `~2`, … numeric tail incremented until the 11-byte short name is unique
+  in that directory (`short_alias_exists` compares the raw 8.3 field, since
+  two different long names can share an alias base). The base is trimmed so
+  even `~999999` fits in 8 characters.
+- **`build_name_entries`/`put_lfn_chars`** lay out the on-disk run — the
+  LFN entries (highest sequence first, `0x40` on the last), each stamped
+  with the alias's `lfn_checksum` and 13 UTF-16LE characters at the same
+  field offsets the read path uses, then the short entry last.
+- **`write_entry_run`/`place_entries`** find a *physically contiguous* run
+  of that many free slots (spanning sectors/clusters via the chain,
+  reusing `0xE5` slots and the `0x00` tail), extending the directory by a
+  zeroed cluster if none exists, and write each affected sector once.
+- **`free_entry_with_lfn`** frees a deleted entry's LFN run alongside its
+  short entry, so `rm`/`rmdir`/`mv` no longer strand orphaned LFN entries
+  (an LFN entry's first byte is a sequence number, not `0xE5`, so the old
+  free-slot scan would never reclaim it — and `fsck` flags them). It
+  matches the target by exact on-disk location, so a freshly inserted `mv`
+  destination in the same directory is never mistaken for it, and frees the
+  preceding run only if its checksum matches (the same orphan guard the
+  read path uses).
+
+**Validation** (the project's foreign-observer discipline): driven from
+the guest shell over `make run-image` — created `longfilename1.txt` /
+`longfilename2.txt` (whose aliases collide → `LONGFI~1.TXT` /
+`LONGFI~2.TXT`), a long-named directory with a nested long-named file,
+then exercised `rm` and `mv` of long-named entries. The **guest** read
+every long name back correctly; **macOS's own FAT driver** then mounted the
+guest-written image and listed all long names and file contents; and
+**`fsck_msdos`** passed its directory-checking phase with no orphaned-LFN,
+checksum, or duplicate-short-name errors. (Its lone FSInfo free-count
+warning is pre-existing — `fsd` doesn't maintain the FSInfo hint on any
+write — and advisory.) No kernel faults or guard-page overflows.
+
+**Still open:** case-preservation for lowercase-but-8.3 names (e.g.
+`File.txt` still stores/reads as `FILE.TXT`) — deliberately left as the
+old behavior, since the gap this closes was specifically `>8.3` names.
+
 ## Shell: filename wildcards and tab completion
 
 Two interactive shell improvements.

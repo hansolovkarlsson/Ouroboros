@@ -806,6 +806,13 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
                 _ => syscall_abi::POWER_BAD_MODE,
             }
         }
+        syscall_abi::YIELD => {
+            // Cooperative yield: switch to another runnable task and resume
+            // this one later. The return value is the switched-in task's own
+            // (see block_current_and_switch's contract), passed through
+            // unmodified by the SVC trampoline.
+            unsafe { tasks::yield_current_and_switch(frame) }
+        }
         syscall_abi::KILL => {
             let i = arg0 as usize;
             if i <= 4 {

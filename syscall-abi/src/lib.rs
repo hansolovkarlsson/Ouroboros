@@ -586,6 +586,17 @@ pub const TASK_NO_EXIT_CODE: u64 = u64::MAX;
 /// single-user machine lets its shell turn itself off.
 pub const POWER: u64 = 56;
 
+/// `()` -> `0`. Voluntarily give up the rest of this task's time slice: the
+/// kernel saves the (still-runnable) caller and switches to another runnable
+/// task, preferring real work over the idle task, then resumes the caller on a
+/// later switch. A cooperative yield - not a block, so nothing has to wake it.
+/// Its purpose is to let a *consumer* run when a producer can't make progress:
+/// `pipe_out`, on a momentarily-full consumer mailbox (`MSG_ERR_FULL`), yields
+/// instead of busy-spinning until the next tick, so the consumer drains (or
+/// exits early, like `head`) and the producer's retry then succeeds or fails
+/// fast. Harmless if nothing else is runnable (it just carries on).
+pub const YIELD: u64 = 57;
+
 /// [`POWER`] mode: power the machine off.
 pub const POWER_OFF: u64 = 0;
 /// [`POWER`] mode: halt the CPU (stop, without cutting power).

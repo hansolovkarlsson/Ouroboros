@@ -66,16 +66,17 @@ machines that don't share the key are refused.
   error, since no path could ever resolve in that state. Use `make
   run-image` (or a Parallels boot plus `mount` with a USB stick) for
   disk commands to do anything.
-- **Long filenames are read, not created.** The FAT32 reader now
-  reconstructs long filenames (LFN) written by a real formatter, so a
-  file like `index.html` shows up in `ls`, opens with `cat`, and can be
-  navigated — by its real name. But *creating* one from the shell still
-  isn't supported: `mkdir`/`touch`/`write` accept only 8.3 names — ASCII
-  alphanumerics, `_`, and `-`, one optional `.` splitting an
-  up-to-8-character base from an up-to-3-character extension — so a file
-  the shell itself creates can't have a long name (yet). Deleting a
-  long-named file works but leaves its LFN entries behind (a harmless
-  space leak).
+- **Long filenames are read *and* created.** The FAT32 reader
+  reconstructs long filenames (LFN) written by any formatter, and the
+  shell can now *create* them too: `mkdir`/`touch`/`write`/`mv` accept a
+  name that doesn't fit 8.3 (too long, extra dots, spaces, non-8.3
+  characters) and lay down a generated `NAME~N` short alias plus the LFN
+  entries carrying the real name — so `index.html` both reads back and can
+  be created by its real name. A name that *does* fit 8.3 still becomes a
+  plain uppercased short entry (`File.txt` is stored and shown as
+  `FILE.TXT`; case-preservation for those is the one remaining nicety).
+  Deleting a long-named file frees its LFN entries too, so `rm`/`rmdir`/`mv`
+  leave no orphaned entries behind.
 
 ## Commands
 
@@ -206,17 +207,25 @@ cat /notes.txt | upper                   ->  the file, uppercased
 ps | upper                               ->  the process list, uppercased
 ```
 
-- The **first stage** may be a **builtin** or a **program**. A builtin runs
-  with its output captured (the same capture the redirection machinery uses -
-  a bigger output refuses rather than truncating), then streamed to stage 2.
-  A program first stage streams its own output onward directly.
-- **Every later stage must be a program** (it reads its predecessor's output
-  as stdin); a builtin or unknown name there reports "not found (a pipeline
-  stage must be a program)".
+- **A single builtin may appear at any position.** A builtin runs *in the
+  shell*, not as a task, and no builtin reads stdin — so a builtin can only be a
+  pipeline's *source*, never a stream transformer. A non-first builtin therefore
+  means "run everything upstream for its side effects, discard its output, and
+  let the builtin be the source of the stages after it." So `ps | grep x`
+  (first), `cat f | ps` (last), and `ls | ps | grep x` (middle — `ls` drained,
+  `ps` feeds `grep`) all work, and a builtin last stage can be redirected
+  (`cat f | ps > out`). A builtin runs with its output captured (the same
+  capture the redirection machinery uses — a bigger output refuses rather than
+  truncating), then streamed on. **Two or more builtins** in one pipeline are
+  refused ("only one builtin per pipeline") — only one thing can be the source.
+- **Every *program* later stage reads its predecessor's output as stdin**; an
+  unknown name reports "not found (a pipeline stage must be a program)".
 - Programs stream **directly** to the next stage - the shell is not in the
   byte path (except for the one hop out of a builtin first stage). The shell
   spawns the stages, aims each one's stdout at the next (the last at the
-  console), and hands each producer a runtime capability to reach its
+  console, or — with a trailing `> file`/`>> file` — at the shell, which
+  captures it and writes it to the file), and hands each producer a runtime
+  capability to reach its
   consumer (`DELEGATE`); that sibling-to-sibling send is otherwise forbidden
   by the IPC send-mask, and the shell alone can grant it. A linear chain needs
   only one delegated target per task, so no special "general delegation" is
@@ -236,10 +245,20 @@ exec /EFI/ORBS/HELLO.BIN > out.txt
 cat out.txt                          ->  Hello from a second program! ...
 ```
 
+**`a | b > file`** (and `>> file`) **redirects the pipeline's output to a
+file** — the last stage's output is captured by the shell and written to the
+file (create/replace for `>`, append for `>>`), exactly the way a single
+`cmd > file` is captured, and subject to the same 256KB-capture limit. The
+redirect is parsed off first, so the `|` chain runs normally with only its
+last stage's destination changed:
+
+```
+ls /bin | grep C > matches.txt
+ps | grep runnable >> log.txt
+```
+
 Limits: a pipeline is at most five program stages (the spawnable task slots -
-a longer chain fails with "no free task slot"); combining `|` with `>`/`>>`
-is refused (the last stage writes straight to the console, so there's no
-capture of its output to redirect); `exec > file` capture is bounded (512
+a longer chain fails with "no free task slot"); `exec > file` capture is bounded (512
 bytes, refuse-not-truncate - pipes themselves stream unbounded). A consumer
 that stops reading: a program producer gives up after its own ~3-second
 timeout and exits, and the shell's wait on the still-live consumer blocks
@@ -267,7 +286,9 @@ killed after the same timeout.
   `exec`, `exit`, the job-control commands (`ps`, `kill`, `wait`, `fg`), and
   `mount`/`selftest`/`help`.
 - **Pipeline filters live in `/bin` too:** `upper` (uppercases its input),
-  `grep <pattern>` (lines containing a substring), `wc` (line/word/byte
+  `grep [-i] [-v] [-n] <pattern>` (lines containing a substring — `-i` ignores
+  case, `-v` inverts to non-matching lines, `-n` prefixes the input line number;
+  flags may combine, e.g. `-in`; still substring, no regex), `wc` (line/word/byte
   counts), `head [N]` (first N lines, default 10), `tail [N]` (last N lines,
   default 10 — the complement of `head`; capped at 64 retained lines), `nl`
   (numbers every line, right-aligned 6-column count + tab, like `cat -n`),
