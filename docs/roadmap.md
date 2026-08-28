@@ -328,17 +328,21 @@ size cap.) Cheap wins first; the editor last, gated on item 1.
 
 ### 4. Login, users, security, file permissions (a substantial arc, medium-term)
 
-> **Progress (2026-08-28): step 1, *identity*, is done.** A kernel-owned
-> uid/gid per task now exists (`SET_ID`/`GET_ID`, default root, inherited across
-> spawn, root-gated — no escalation), observable via `/bin/id` and settable via
-> the `su` builtin, with the prompt showing `#`/`$`. The architectural call was
-> made to keep the binding **in the kernel** (the unforgeable root of trust),
-> reversing this section's earlier "probably userland" lean — see
-> `CHANGELOG.md` and `docs/gap-analysis.md` §6. **Remaining: (2) login +
-> accounts** (a login prompt, `/etc/passwd` with names + hashed passwords,
-> `/home`), and **(3) enforcement** (check the sender's uid vs. the inode
-> mode/owner in the `FSOP_*` dispatch — the metadata and the identity both exist
-> now, they just aren't joined).
+> **Progress (2026-08-28): steps 1 (*identity*) and 2 (*login*) are done.**
+> Step 1: a kernel-owned uid/gid per task (`SET_ID`/`GET_ID`, default root,
+> inherited across spawn, root-gated), observable via `/bin/id`, with the prompt
+> showing `#`/`$`. Kept the binding **in the kernel** (the unforgeable root of
+> trust), reversing this section's earlier "probably userland" lean. Step 2: the
+> shell **gates each session on a `login:` prompt**, authenticating against
+> `/etc/passwd` (`SHA-256(salt‖password)`) and dropping to that user — using a
+> POSIX **saved-uid** so logout restores root and re-prompts (chosen over a
+> `login`-as-init process to avoid rewiring the capability model's "slot 0 =
+> shell" assumption; a user can't escalate since `su` is root-only + children
+> can't restore root). See `CHANGELOG.md` and `docs/gap-analysis.md` §6.
+> **Remaining: (3) enforcement** — check the sender's uid vs. the inode
+> mode/owner in the `FSOP_*` dispatch (all three inputs — metadata, identity,
+> and a real logged-in user — now exist; they just aren't joined). Plus small
+> follow-ups: `passwd`/`useradd`, per-user `/home` (home is `/` today), groups.
 
 The biggest of these — the step from "single implicit user, whoever's at the
 keyboard" to a real **identity and permission model**. Pieces: a notion of

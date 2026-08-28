@@ -1,0 +1,45 @@
+NAME
+    login - the shell's authentication gate
+
+SYNOPSIS
+    (automatic - the shell prompts for login at boot and after each logout)
+
+DESCRIPTION
+    Before every session the shell prompts:
+
+        login: <username>
+        password: <not echoed>
+
+    and checks the credentials against /etc/passwd. On success it becomes that
+    user (uid/gid) for the session; the prompt is # for root, $ for anyone else.
+    A wrong username or password prints "Login incorrect" and re-prompts.
+
+    Type `logout` (or `exit`) to end a session: the shell restores root and
+    shows the login prompt again, so a different user can log in. Each session
+    starts clean (fresh environment, home directory), so nothing leaks between
+    users.
+
+    The shell itself never exits - it is task 0, the sole keyboard owner - so
+    "logout" ends the session, it does not stop the machine (use shutdown/halt
+    for that).
+
+CREDENTIALS
+    /etc/passwd holds one account per line:
+
+        name:uid:gid:home:salt:hash
+
+    where hash = SHA-256(salt || password). The salt+hash are precomputed at
+    build time (scripts/mkpasswd.py); login only verifies. The DEV image ships
+    two accounts (a real deployment would set its own):
+
+        root / root    (uid 0)
+        user / user    (uid 1000)
+
+    If /etc/passwd is missing (a freshly formatted disk, say), login falls back
+    to a single root session so the machine stays usable.
+
+    There is no `passwd` or `useradd` yet - accounts are the static file above.
+    Per-user home directories (home is / for now) are the next step.
+
+SEE ALSO
+    su, logout, id, sh

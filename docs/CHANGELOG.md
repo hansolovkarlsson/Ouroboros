@@ -7,6 +7,42 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/`; 
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## Login: authenticated sessions (the login arc, step 2)
+
+The shell now **gates every session on a login prompt** — username + password,
+checked against `/etc/passwd` — and runs the session as that user. Step 2 of the
+users/permissions arc, built on the identity primitive from step 1.
+
+- **Saved-uid, not a separate login process.** The shell stays task 0 and uses a
+  POSIX-style **saved identity**: root drops to the logged-in user, and on logout
+  restores root (`SET_ID` back to the saved identity) to re-prompt. Chosen over a
+  `login`-as-init process because that would have required rewiring the
+  capability model's "slot 0 = the shell" assumption (a security-sensitive
+  refactor); the saved-uid path delivers the same login → session → logout →
+  re-login UX with no capability changes. The kernel gained `SAVED_IDS` +
+  `apply_id`; a child's saved identity is its *own* uid (not the parent's), so a
+  user's programs can never restore root.
+- **Escalation is closed at the shell.** Because the shell's saved identity is
+  root (for logout), a naive `SET_ID(0)` from a logged-in user would escalate —
+  so `su` is now **root-only** (enforced in the shell, the login TCB). A user's
+  only route to root is `logout` + logging in as root; child programs can't
+  restore root at all. Verified: as `user`, `su 0` is denied and `id` stays 1000.
+- **Auth.** `/etc/passwd` is `name:uid:gid:home:salt:hash` with
+  `hash = SHA-256(salt‖password)` — salts/hashes precomputed at build time
+  (`scripts/mkpasswd.py`), so login only *verifies* (no runtime RNG). SHA-256 is
+  copied into the shell (`sha256.rs`, from netd's validated impl; a shared crate
+  is a noted follow-up). Passwords are read with echo off; the check is
+  constant-time. DEV accounts: `root`/`root`, `user`/`user`. No `/etc/passwd` →
+  login falls back to a root session (the "no accounts configured" bootstrap).
+- **`logout`** (and `exit`) end a session; the shell never exits (it's task 0).
+  Each session starts clean (fresh env + cwd). New `man login`.
+
+Verified on QEMU (FAT32 + ext2): boot shows `login:`; `user`/`user` → `$` prompt,
+`id` → `uid=1000`; a wrong password → "Login incorrect"; `logout` → back to the
+login prompt; `root`/`root` → `#` prompt, `id` → `uid=0`; and `su 0` as the user
+is refused. (Per-user `/home` and `passwd`/`useradd` are the next small steps;
+home is `/` for now.)
+
 ## User identity: a uid/gid per task (the login arc, step 1)
 
 The first step of the users/permissions arc: **every task carries a user

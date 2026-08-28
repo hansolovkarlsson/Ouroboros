@@ -105,7 +105,7 @@ set; roadmap arcs are cited by their `roadmap.md` section.
 | Capability | Status | Notes / what it would take |
 |---|---|---|
 | User accounts / uid / gid | ◐ | **A uid/gid per task now exists** (kernel-owned `SET_ID`/`GET_ID`; `/bin/id`, the `su` builtin, `#`/`$` prompt), default root, inherited across spawn, root-gated (no escalation). The kernel owns the binding as the unforgeable root of trust — a *deliberate reversal* of the earlier "probably userland" guess, on security grounds. What's missing is the *account model* above it: names, `/etc/passwd`, groups. Roadmap item 4. |
-| Login / authentication (passwords) | ✗ | The identity primitive exists, but there's still no login prompt gating the shell and no `/etc/passwd`. Next step: authenticate a user (password hashing can reuse the existing SHA-256/HMAC in `netd/src/hmac.rs` and the fail-closed key-file pattern) then `SET_ID` to that user + spawn the shell. |
+| Login / authentication (passwords) | ◐ | **Present**: the shell gates every session on a `login:` prompt, authenticating username + password against `/etc/passwd` (`name:uid:gid:home:salt:hash`, `hash = SHA-256(salt‖password)`; echo-off entry, constant-time check) then `SET_ID`-ing to that user. `logout` restores root (saved-uid) and re-prompts; `su` is root-only so a user can't escalate. What's thinner than Unix: accounts are a static file (no `passwd`/`useradd`), home is `/` (no per-user `/home` yet), and PAM/groups/sessions don't exist. |
 | Enforced file permissions | ✗ | Metadata is stored, read, *and writable* on ext2 (`stat`/`chmod`/`chown`), and a caller identity now exists (`GET_ID`) — but the two aren't joined yet. The remaining step is the check itself: compare the sender's uid/gid (the IPC layer hands `fsd` the sender) against the inode's mode/owner in the `FSOP_*` dispatch. |
 | Privilege boundary (root / sudo) | ◐ | A per-task **capability send-mask** governs who-may-call-whom (topological isolation) — the mechanism a privilege model would build on, but there's no user-facing privileged/unprivileged split. |
 | Cluster authentication | ◐ | **Machine-level**: a shared cluster key, mutually authenticated (HMAC) on the 9P export, fail-closed, `\NOEXEC`. **No per-user identity, no replay protection, no on-the-wire encryption** — each a named next tier (cluster-auth postmortem). Trusted-LAN by design. |
@@ -233,15 +233,17 @@ ps kill fg wait send recv selftest env set unset cpu`.
 Reading the map top-down, the highest-leverage missing pieces, each pointing
 at a roadmap arc:
 
-1. **Permissions + identity → login → enforcement.**
+1. **Permissions + identity + login → enforcement.**
    The keystone `stat` op exposes mode/uid/gid and `chmod`/`chown` write them
-   back (ext2, e2fsck-clean); and a **kernel-owned uid/gid per task** now exists
-   (`SET_ID`/`GET_ID`, `id`, `su`, root-gated, inherited across spawn). Two of
-   the three pieces enforcement needs are in place — the metadata and the
-   caller identity. What's left: **(a) login/accounts** — a login prompt +
-   `/etc/passwd` (names, password hashing, `/home`) so a real user gets a uid;
-   **(b) the check** — compare the sender's uid/gid against the inode's
-   mode/owner in the `FSOP_*` dispatch. → roadmap item 4.
+   back (ext2, e2fsck-clean); a **kernel-owned uid/gid per task** exists
+   (`SET_ID`/`GET_ID`, saved-uid, root-gated, inherited across spawn); and the
+   shell now **authenticates a login** against `/etc/passwd` and runs the
+   session as that user (a user can't escalate). So all three inputs enforcement
+   needs — the metadata, a trustworthy caller identity, and a real user behind
+   it — are in place. **What's left is the check itself**: compare the sender's
+   uid/gid (the IPC layer hands `fsd` the sender) against the inode's mode/owner
+   in the `FSOP_*` dispatch. Smaller items alongside it: `passwd`/`useradd`,
+   per-user `/home`, and groups. → roadmap item 4.
 2. **A userland libc personality.** POSIX/C portability is the single biggest
    thing given up across every comparison, and it gates the on-device
    compiler. Well-scoped (newlib stubs over existing servers), just large. →

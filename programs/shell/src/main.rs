@@ -62,6 +62,9 @@
 #![no_std]
 #![no_main]
 
+mod login;
+mod sha256;
+
 use core::arch::asm;
 use core::panic::PanicInfo;
 
@@ -102,6 +105,11 @@ struct Env {
     vals: [[u8; ENV_VALUE_SIZE]; MAX_ENV_VARS],
     val_lens: [usize; MAX_ENV_VARS],
     count: usize,
+    /// Set by the `exit`/`logout` builtin to end the current session (the shell
+    /// stays alive - `main`'s outer loop restores root and re-prompts login).
+    /// Rides in `Env` because it's already threaded `&mut` through the whole
+    /// dispatch path, and the shell can't use a mutable static (PIE/.bss).
+    logout: bool,
 }
 
 impl Env {
@@ -112,6 +120,7 @@ impl Env {
             vals: [[0; ENV_VALUE_SIZE]; MAX_ENV_VARS],
             val_lens: [0; MAX_ENV_VARS],
             count: 0,
+            logout: false,
         };
         e.set("PATH", DEFAULT_PATH.as_bytes());
         e
@@ -579,7 +588,7 @@ const LIST_SIZE: usize = 512;
 // Syscall numbers and sentinel values come from the shared `syscall-abi`
 // crate now, not hand-duplicated local consts - see its doc comment and
 // `kernel/src/syscall.rs`'s dispatch table, the other side of this ABI.
-use syscall_abi::{EXIT_DENIED, FS_ERR_MIN, FS_ERR_NOT_FOUND, MOUNT_ALREADY, MOUNT_NO_DEVICE, NO_FS, RECV_INTERRUPTED, TASK_KILLED_STATUS, TASK_STATE_BLOCKED, TASK_STATE_INVALID, TASK_STATE_RUNNABLE, TASK_STATE_UNUSED, TASK_STATE_ZOMBIE, WAIT_INTERRUPTED};
+use syscall_abi::{FS_ERR_MIN, FS_ERR_NOT_FOUND, MOUNT_ALREADY, MOUNT_NO_DEVICE, NO_FS, RECV_INTERRUPTED, TASK_KILLED_STATUS, TASK_STATE_BLOCKED, TASK_STATE_INVALID, TASK_STATE_RUNNABLE, TASK_STATE_UNUSED, TASK_STATE_ZOMBIE, WAIT_INTERRUPTED};
 
 /// Placed first in `.text` by `linker.ld` (`KEEP(*(.text.start))`) so it
 /// lands at file/VA offset 0 - `tasks.rs` sets a loaded program's
@@ -596,30 +605,34 @@ fn main() -> ! {
     }
 
     let mut buf = [0u8; BUFFER_SIZE];
-    let mut len = 0usize;
     let mut cwd = [0u8; CWD_SIZE];
-    cwd[0] = b'/';
-    let mut cwd_len = 1usize;
-    let mut env = Env::new();
 
-    print_prompt();
+    // The outer session loop: authenticate, run one interactive session as that
+    // user, and on logout restore root and loop back to the login prompt. The
+    // shell stays task 0 throughout (the saved-uid model - see login.rs and the
+    // kernel's SET_ID); each session gets a fresh Env + home cwd so nothing
+    // leaks between users.
     loop {
-        // Genuinely blocks now, rather than busy-polling `try_read_char`
-        // every iteration - `READ_CHAR` (kernel/src/syscall.rs) suspends
-        // this task at the scheduler level and switches to another
-        // runnable one (task 1's idle loop, today) until a byte is
-        // actually available, then resumes here with it already in hand.
-        // Not `wfe()`: real Parallels hardware has a confirmed,
-        // unresolved hang when an EL0 task executes `wfe` (see
-        // `tasks.rs`'s module doc comment) - this loop never does,
-        // deliberately, and never has to worry about whether a tick
-        // source exists this boot the way the old busy-poll comment here
-        // used to (before real MADT/GICv3 discovery made that concern
-        // moot anyway - see CLAUDE.md's "MADT/GICv3" section). The
-        // kernel-side blocking mechanism is what changed; this loop just
-        // calls a syscall that happens to take longer to return now.
-        let byte = read_char();
-        on_byte(byte, &mut buf, &mut len, &mut cwd, &mut cwd_len, &mut env);
+        // Gate the session on login: prompts until a valid user (or auto-roots
+        // if there's no /etc/passwd) and SET_IDs this task down to that user.
+        let session = login::login(&mut cwd);
+        let mut cwd_len = session.cwd_len;
+        let mut env = Env::new();
+        let mut len = 0usize;
+
+        print_prompt();
+        while !env.logout {
+            // Genuinely blocks (READ_CHAR suspends this task at the scheduler
+            // level until a byte is available) rather than busy-polling; never
+            // `wfe` (a confirmed real-Parallels EL0 hang - see tasks.rs).
+            let byte = read_char();
+            on_byte(byte, &mut buf, &mut len, &mut cwd, &mut cwd_len, &mut env);
+        }
+
+        // Logout: restore root (the kernel allows a non-root task to SET_ID back
+        // to its saved identity), so the next login prompt runs privileged.
+        syscall4(syscall_abi::SET_ID, 0, 0, 0, 0);
+        print_line("logout");
     }
 }
 
@@ -650,7 +663,11 @@ fn on_byte(byte: u8, buf: &mut [u8; BUFFER_SIZE], len: &mut usize, cwd: &mut [u8
                 Err(_) => print_line("input wasn't valid UTF-8"),
             }
             *len = 0;
-            print_prompt();
+            // On logout, don't reprint a prompt - main's session loop is about
+            // to break and re-run login.
+            if !env.logout {
+                print_prompt();
+            }
         }
         BACKSPACE | DEL => {
             if *len > 0 {
@@ -821,7 +838,7 @@ fn is_builtin(cmd: &str) -> bool {
     matches!(
         cmd,
         "help" | "cd" | "bind" | "mount" | "unmount" | "erase" | "partition" | "format"
-            | "exec" | "exit" | "shutdown" | "poweroff" | "halt" | "ps" | "kill"
+            | "exec" | "exit" | "logout" | "shutdown" | "poweroff" | "halt" | "ps" | "kill"
             | "fg" | "wait" | "env" | "set" | "unset" | "cpu" | "su"
     )
 }
@@ -1433,7 +1450,7 @@ fn dispatch_line(line: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize, env:
     }
 
     match command {
-        "help" => out.put_line("builtins: help, exit, cd, bind, mount (-a/-r/-p/-c/-n), unmount, erase, partition, format, exec, cpu, ps, kill, fg, wait, shutdown, halt, env, set, unset, su. Everything else is a program in /bin (run `ls /bin` to see them). Add `-?` to any command for its usage, or `man <command>` for a full page (`man sh` for the shell itself). Also: $VAR expands; `> file`/`>> file` redirects, `| prog` pipes (`| more` to page)."),
+        "help" => out.put_line("builtins: help, exit/logout, cd, bind, mount (-a/-r/-p/-c/-n), unmount, erase, partition, format, exec, cpu, ps, kill, fg, wait, shutdown, halt, env, set, unset, su. Everything else is a program in /bin (run `ls /bin` to see them). Add `-?` to any command for its usage, or `man <command>` for a full page (`man sh` for the shell itself). Also: $VAR expands; `> file`/`>> file` redirects, `| prog` pipes (`| more` to page)."),
         // echo, uptime, clear are externalized: they're /bin programs now
         // (found via PATH by the unknown-command arm), not builtins. See
         // "Standalone binaries, Stage 4".
@@ -1447,7 +1464,7 @@ fn dispatch_line(line: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize, env:
         "cd" => cmd_cd(arg, cwd, cwd_len),
         "bind" => cmd_bind(line, cwd, *cwd_len, out),
         "exec" => cmd_exec(line, cwd, *cwd_len, env, out),
-        "exit" => cmd_exit(),
+        "exit" | "logout" => cmd_exit(env),
         "shutdown" | "poweroff" => cmd_power(syscall_abi::POWER_OFF),
         "halt" => cmd_power(syscall_abi::POWER_HALT),
         "ps" => cmd_ps(out),
@@ -1835,15 +1852,23 @@ fn cmd_unset(arg: &str, env: &mut Env) {
     env.unset(arg.as_bytes());
 }
 
-/// `su <uid>[:<gid>]`: change this session's user identity (numeric ids - there
-/// is no `/etc/passwd` yet). A builtin because it must change the shell's *own*
-/// task identity (`SET_ID` acts on the caller); a `/bin` program would only set
-/// its short-lived child's. Only root may do this - the kernel refuses a
-/// non-root caller (`SET_ID_DENIED`), the no-escalation rule. Commands spawned
-/// afterward inherit the new identity, and the prompt switches `#`<->`$`. A
-/// field left empty (`su :20`, `su 1000`) leaves that half unchanged, like
-/// `chown`.
+/// `su <uid>[:<gid>]`: change this session's user identity (numeric ids). A
+/// builtin because it must change the shell's *own* task identity (`SET_ID` acts
+/// on the caller); a `/bin` program would only set its short-lived child's.
+///
+/// **Root-only, enforced here.** The kernel's `SET_ID` allows a task to *restore*
+/// its saved identity (root, for the shell's logout), so a logged-in user's
+/// shell *could* `SET_ID(0)` at the kernel level - but that would let a user
+/// escalate past login. The shell is the login TCB, so it refuses `su` for a
+/// non-root session: the only saved-restore that ever happens is logout (which
+/// immediately re-prompts login), and a user's child programs can't restore root
+/// at all (their saved identity is their own uid). A field left empty (`su :20`,
+/// `su 1000`) leaves that half unchanged, like `chown`.
 fn cmd_su(arg: &str) {
+    if shell_uid() != 0 {
+        print_line("su: denied (only root may change identity - log in as root)");
+        return;
+    }
     if arg.is_empty() {
         print_line("usage: su <uid>[:<gid>]  (numeric; only root may change identity)");
         return;
@@ -2803,14 +2828,6 @@ fn fs_write_at(path: &str, offset: u64, data: &[u8]) -> u64 {
     )
 }
 
-/// Asks the kernel to destroy this task (`EXIT` syscall). Never returns
-/// for a task that's allowed to exit; for this shell - always task 0,
-/// the designated keyboard owner - it always comes back [`EXIT_DENIED`]
-/// instead (see [`cmd_exit`]).
-fn task_exit(code: u64) -> u64 {
-    syscall(syscall_abi::EXIT, code)
-}
-
 /// Task `i`'s scheduler state (`TASK_STATE` syscall) - see [`cmd_ps`].
 fn task_state(i: u64) -> u64 {
     syscall(syscall_abi::TASK_STATE, i)
@@ -3534,11 +3551,13 @@ fn cmd_format(arg: &str) {
 /// anyway because a *replacement* program someone writes and spawns
 /// (see docs/processes.md) genuinely can exit - and the syscall wrapper
 /// here is the reference for how.
-fn cmd_exit() {
-    match task_exit(0) {
-        EXIT_DENIED => print_line("exit: refused - the boot shell can't exit (nothing would own the keyboard)"),
-        _ => print_line("exit: unexpected return"),
-    }
+/// `exit`/`logout`: end the current login session. The shell itself never
+/// exits (it's task 0 - the sole keyboard owner - so a real `EXIT` is refused);
+/// instead this signals `main`'s outer loop, which restores root identity
+/// (`SET_ID` back to the saved root) and re-prompts login. A fresh login starts
+/// a clean session (new env, home cwd), so nothing leaks between users.
+fn cmd_exit(env: &mut Env) {
+    env.logout = true;
 }
 
 /// `shutdown`/`poweroff` (mode `POWER_OFF`) and `halt` (mode `POWER_HALT`).
