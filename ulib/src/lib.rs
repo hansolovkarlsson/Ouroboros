@@ -1232,6 +1232,7 @@ pub fn fs_error(cmd: &str, code: u64) {
         syscall_abi::FS_ERR_DISK_FULL => b"disk full",
         syscall_abi::FS_ERR_READ_ONLY => b"read-only filesystem",
         syscall_abi::FS_ERR_NOT_SUPPORTED => b"not supported by this filesystem (mode/owner need ext2)",
+        syscall_abi::FS_ERR_PERM => b"permission denied",
         syscall_abi::FS_ERR_IO => b"device I/O error",
         syscall_abi::FS_ERR_AUTH => b"cluster authentication failed (wrong or missing cluster key)",
         _ => b"failed",

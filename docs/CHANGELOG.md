@@ -7,6 +7,42 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/`; 
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## Permission enforcement: the file mode/owner finally means something (arc step 3)
+
+The last piece of the users/permissions arc. The three inputs existed — file
+**mode/owner** (stat/chmod/chown), a per-task **identity** (login), and the IPC
+layer telling `fsd` **who sent** each request — but nothing joined them. Now
+`fsd` **checks** the caller against the target's owner + mode and refuses with
+**`FS_ERR_PERM`** ("permission denied") when the classic Unix rule says no.
+
+- **The check** (`fsd`'s `check_access`, gating every `NP_*` file verb): look up
+  the caller's uid/gid (`GET_ID(sender)`), then — **root (uid 0) bypasses** —
+  compare against the file's owner/mode via the owner→group→other triad. Reads
+  need `r` on the target; writes need `w` (on the file, or the parent dir when
+  creating); create/delete/rename need `w` on the parent dir; `chmod` is
+  owner-or-root; `chown` is root-only.
+- **ext2 only.** FAT32/exFAT/`/proc` return `mode: None` from `stat`, which the
+  check treats as unrestricted — the same honest per-FS degradation as
+  `chmod`/`chown`. So the FAT *boot* disk is unchanged; enforcement bites on an
+  ext2 disk (`run-image-ext2`).
+- **Deliberate first-cut scope:** the check covers the *object* of the operation
+  (and the parent dir for namespace changes), but **not** the search (`x`) bit on
+  every ancestor directory — that POSIX path-traversal check is a clean
+  follow-up, kept out so the whole thing lives centrally in `fsd`'s dispatch
+  rather than woven into each filesystem's path walk. Remote (cluster) requests
+  come through `netd` (a root server) and stay machine-authenticated by the
+  cluster key; per-user cluster identity remains a named future tier.
+- **Root bypass is the safety valve** — a bug in the check can only ever
+  *over*-restrict a non-root user, never lock root out.
+
+Verified on QEMU (ext2): as root, set up `/secret` (mode 600) and a user-owned
+`/u`, then drop to the user (`su 1000`) — `cat /secret` → "permission denied",
+`touch /nope` (writing root-owned `/`) → "permission denied", but `touch /u/mine`
+(a dir the user owns) succeeds and `ls /u` shows it; the user still runs `/bin`
+programs (755, world-executable). The FAT boot image is unaffected (a user
+`touch`es freely there). **This completes the users/permissions arc** — the
+roadmap's #1 gap.
+
 ## Login: authenticated sessions (the login arc, step 2)
 
 The shell now **gates every session on a login prompt** — username + password,
