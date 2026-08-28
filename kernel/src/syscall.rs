@@ -764,15 +764,19 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
         syscall_abi::STDOUT_TARGET => tasks::stdout_target_of(tasks::current_task()),
         syscall_abi::SELF => tasks::current_task() as u64,
         syscall_abi::SET_ID => {
-            // Only root (uid 0) may change identity - root can drop to any user
-            // (a login's mechanism), a non-root task can't change its uid at all
-            // (no escalation). This one check is the whole privilege model for
-            // now; `su`-back-to-root needs authentication (the login step).
-            if tasks::uid_of(tasks::current_task()) != 0 {
-                syscall_abi::SET_ID_DENIED
-            } else {
-                tasks::set_id(tasks::current_task(), arg0 as u32, arg1 as u32);
+            // Root (uid 0) may drop to any identity; a non-root task may only
+            // RESTORE to its saved identity (POSIX saved-set-uid) - the shell
+            // uses this to log a user in (root drops) and out (restore to root
+            // to re-prompt). Anything else is refused: no escalation, and a
+            // user's spawned children can't restore to root because their saved
+            // identity is their own (see tasks::inherit_id).
+            let cur = tasks::current_task();
+            let new = ((arg1 as u32 as u64) << 32) | (arg0 as u32 as u64);
+            if tasks::uid_of(cur) == 0 || new == tasks::saved_id_of(cur) {
+                tasks::apply_id(cur, new);
                 0
+            } else {
+                syscall_abi::SET_ID_DENIED
             }
         }
         syscall_abi::GET_ID => {

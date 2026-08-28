@@ -383,7 +383,7 @@ serve-bin:
 # CONFIG_PATH) naming which program to load - edit INIT.CFG and rebuild
 # just that program to swap it out, no kernel rebuild required.
 esp: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin id-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin tail-bin nl-bin rev-bin uniq-bin sort-bin
-	mkdir -p $(ESP_DIR)/EFI/BOOT $(ESP_DIR)/EFI/ORBS $(ESP_DIR)/bin $(ESP_DIR)/man
+	mkdir -p $(ESP_DIR)/EFI/BOOT $(ESP_DIR)/EFI/ORBS $(ESP_DIR)/bin $(ESP_DIR)/man $(ESP_DIR)/etc
 	cp $(KERNEL) $(ESP_DIR)/EFI/BOOT/BOOTAA64.EFI
 	cp $(SHELL_BIN) $(ESP_DIR)/EFI/ORBS/SH.BIN
 	cp $(HELLO_BIN) $(ESP_DIR)/EFI/ORBS/HELLO.BIN
@@ -450,6 +450,10 @@ esp: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin args
 	cp $(SORT_BIN) $(ESP_DIR)/bin/SORT
 	# Manual pages: plain-text files read by /bin/MAN as /man/<command>.
 	cp manpages/* $(ESP_DIR)/man/
+	# /etc/passwd: accounts the shell's login gate authenticates against
+	# (name:uid:gid:home:salt:hash, hashes precomputed - see scripts/mkpasswd.py;
+	# DEV creds root/root + user/user). Absent -> login falls back to root.
+	python3 scripts/mkpasswd.py > $(ESP_DIR)/etc/passwd
 
 # Boots the ESP directory directly in QEMU (no disk image needed) against
 # the aarch64 OVMF firmware installed by `brew install qemu`.
@@ -681,6 +685,8 @@ $(EXFAT_PART): esp
 	# insensitively, like FAT, so the lowercase source names stage as-is).
 	mkdir -p $(BUILD_DIR)/exfat-src/man
 	cp manpages/* $(BUILD_DIR)/exfat-src/man/
+	mkdir -p $(BUILD_DIR)/exfat-src/etc
+	python3 scripts/mkpasswd.py > $(BUILD_DIR)/exfat-src/etc/passwd
 	printf 'hello from an exFAT volume\r\n' > $(BUILD_DIR)/exfat-src/HELLO.TXT
 	printf 'line one\r\nline two has several words\r\nthird and final line\r\n' > $(BUILD_DIR)/exfat-src/README.TXT
 	mkdir -p $(BUILD_DIR)/exfat-src/SUB
@@ -738,6 +744,8 @@ $(EXT2_PART): esp
 	# (uppercase, lowercased above) - these stage as-is and resolve case-sensitively.
 	mkdir -p $(BUILD_DIR)/ext2-src/man
 	cp manpages/* $(BUILD_DIR)/ext2-src/man/
+	mkdir -p $(BUILD_DIR)/ext2-src/etc
+	python3 scripts/mkpasswd.py > $(BUILD_DIR)/ext2-src/etc/passwd
 	printf 'hello from an ext2 volume\n' > $(BUILD_DIR)/ext2-src/HELLO.TXT
 	printf 'line one\nline two has several words\nthird and final line\n' > $(BUILD_DIR)/ext2-src/README.TXT
 	mkdir -p $(BUILD_DIR)/ext2-src/sub

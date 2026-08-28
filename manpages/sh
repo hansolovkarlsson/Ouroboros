@@ -7,9 +7,14 @@ SYNOPSIS
 DESCRIPTION
     The default interactive shell - a real userland program (EL0), loaded from
     disk at boot, that reads a command line, runs it, and prompts again. The
-    prompt is "# " when running as root and "$ " as a normal user (see su). It
-    is "just a program": the same relocatable binary any /bin command is, given
-    the keyboard because it is task 0.
+    prompt is "# " when running as root and "$ " as a normal user. It is "just a
+    program": the same relocatable binary any /bin command is, given the keyboard
+    because it is task 0.
+
+    At boot and after each logout the shell gates the session on LOGIN: it
+    prompts for a username and password and checks them against /etc/passwd (see
+    login), then runs the session as that user. `logout` (or `exit`) ends the
+    session and returns to the login prompt.
 
     A command is looked up in this order: first the shell's own BUILTINS
     (below), then a program on $PATH (default /bin) by bare name - so typing
@@ -29,7 +34,7 @@ BUILTINS
         set NAME=VALUE   set a variable (also: export); $NAME expands it
         unset NAME       remove a variable
         su <uid>[:<gid>] change this session's identity (root only; see man su)
-        exit             end the shell (refused for the boot shell)
+        exit / logout    end the session and return to the login prompt
 
     Job control
         ps               list tasks, their names, and exit codes

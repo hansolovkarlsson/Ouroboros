@@ -858,13 +858,23 @@ fn reset_stdout_target(task: usize) {
 }
 
 /// Per-task **user identity**: each slot's owning `(gid << 32) | uid`, packed in
-/// one atomic. Default `0` (root:root) - every boot task starts privileged; a
-/// `login` (a later step) drops the shell to a real user via `SET_ID`, and
-/// children inherit it at `SPAWN` ([`inherit_id`]). The kernel is the
-/// unforgeable root of trust for the task->identity binding (only it knows an
-/// IPC message's real sender); names/passwords/policy are entirely userland.
-/// Mirrors [`STDOUT_TARGET`]'s atomic-per-slot shape.
+/// one atomic. Default `0` (root:root) - every boot task starts privileged; the
+/// shell's `login` drops itself to a real user via `SET_ID`, and children
+/// inherit it at `SPAWN` ([`inherit_id`]). The kernel is the unforgeable root of
+/// trust for the task->identity binding (only it knows an IPC message's real
+/// sender); names/passwords/policy are entirely userland. Mirrors
+/// [`STDOUT_TARGET`]'s atomic-per-slot shape.
 static IDS: [AtomicU64; NUM_TASKS] = [const { AtomicU64::new(0) }; NUM_TASKS];
+
+/// Per-task **saved identity** (POSIX saved-set-uid): the identity a task may
+/// *restore* to even once it is no longer root. When a task drops identity
+/// ([`apply_id`] saves its old current here), this remembers where it came
+/// from, so the shell can drop to a user for a login session and restore to
+/// root on logout to re-prompt - without the shell ever leaving slot 0. The
+/// escalation guard is [`inherit_id`]: a child's saved is set to its *own*
+/// (inherited) current, **not** the parent's saved, so a user's spawned
+/// programs can never restore to root. Default `0`.
+static SAVED_IDS: [AtomicU64; NUM_TASKS] = [const { AtomicU64::new(0) }; NUM_TASKS];
 
 /// `task`'s owning uid (the low half of its packed identity).
 pub(crate) fn uid_of(task: usize) -> u32 {
@@ -876,24 +886,39 @@ pub(crate) fn id_of(task: usize) -> u64 {
     IDS[task].load(Ordering::Relaxed)
 }
 
-/// Set `task`'s uid+gid. The privilege check (only a root caller may change
-/// identity) lives in the `SET_ID` syscall arm; this only records it.
-pub(crate) fn set_id(task: usize, uid: u32, gid: u32) {
-    IDS[task].store(((gid as u64) << 32) | uid as u64, Ordering::Relaxed);
+/// `task`'s packed *saved* identity - the value a non-root task is allowed to
+/// `SET_ID` back to (see [`apply_id`] and the `SET_ID` syscall arm).
+pub(crate) fn saved_id_of(task: usize) -> u64 {
+    SAVED_IDS[task].load(Ordering::Relaxed)
 }
 
-/// A child inherits its parent's identity at `SPAWN` - a task always runs as the
-/// user that started it. Unlike argv/cwd/env, identity isn't *staged* per-spawn;
-/// it's carried, so this copies rather than reads a staging buffer.
+/// Change `task`'s identity to `new` (packed `(gid << 32) | uid`), stashing the
+/// *old* current as the new saved identity. The permission decision (root may
+/// drop to anyone; a non-root task may only restore to its saved identity)
+/// lives in the `SET_ID` syscall arm; this performs the transition it approved.
+pub(crate) fn apply_id(task: usize, new: u64) {
+    SAVED_IDS[task].store(IDS[task].load(Ordering::Relaxed), Ordering::Relaxed);
+    IDS[task].store(new, Ordering::Relaxed);
+}
+
+/// A child inherits its parent's *current* identity at `SPAWN` - a task always
+/// runs as the user that started it. Its **saved** identity is set to that same
+/// inherited value (NOT the parent's saved), so a child can never restore to a
+/// privilege the parent held but had dropped - the escalation guard that makes
+/// the shell's drop-to-user safe. Unlike argv/cwd/env, identity isn't *staged*
+/// per-spawn; it's carried, so this copies rather than reads a staging buffer.
 pub(crate) fn inherit_id(child: usize, parent: usize) {
-    IDS[child].store(IDS[parent].load(Ordering::Relaxed), Ordering::Relaxed);
+    let cur = IDS[parent].load(Ordering::Relaxed);
+    IDS[child].store(cur, Ordering::Relaxed);
+    SAVED_IDS[child].store(cur, Ordering::Relaxed);
 }
 
-/// Reset `task`'s identity to root on death, alongside the other per-slot
-/// clears. A fresh spawn overwrites it via [`inherit_id`], but an `Unused` slot
-/// must not read back as some dead task's non-root user.
+/// Reset `task`'s identity (current *and* saved) to root on death, alongside the
+/// other per-slot clears. A fresh spawn overwrites it via [`inherit_id`], but an
+/// `Unused` slot must not read back as some dead task's non-root user.
 fn reset_id(task: usize) {
     IDS[task].store(0, Ordering::Relaxed);
+    SAVED_IDS[task].store(0, Ordering::Relaxed);
 }
 
 /// Runtime capability delegation (the `DELEGATE` syscall). The static

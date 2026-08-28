@@ -1,31 +1,30 @@
 NAME
-    su - change this session's user identity
+    su - change this session's user identity (root only)
 
 SYNOPSIS
     su <uid>[:<gid>]
 
 DESCRIPTION
-    Sets the shell's own uid and/or gid (numeric - there is no /etc/passwd yet,
-    so user names are not resolved). A builtin, because it changes the shell's
-    OWN task identity: a /bin program would only change its short-lived child.
-    Commands spawned afterward inherit the new identity, and the prompt switches
-    between # (root) and $ (a normal user).
+    Sets the shell's own uid and/or gid (numeric). A builtin, because it changes
+    the shell's OWN task identity: a /bin program would only change its
+    short-lived child. Commands spawned afterward inherit the new identity, and
+    the prompt switches between # (root) and $ (a normal user).
 
     Forms, like chown:
         uid        set the user, leave the group
         uid:gid    set both
         :gid       set the group, leave the user
-        uid:       set the user, leave the group (same as uid)
 
-    Only ROOT (uid 0) may change identity. Root can drop to any user; a non-root
-    session cannot change its uid at all - there is no way back up without
-    authentication (which is the login step, not yet built), so this is a
-    one-way drop. That is the whole privilege rule for now: no escalation.
+    ROOT ONLY. su lets root drop to a user (for testing); a non-root session is
+    refused. This is what makes login meaningful: once you log in as a user you
+    cannot su back to root - the way back is `logout` and logging in as root.
+    (See login. Under the hood the kernel lets a task restore its saved identity,
+    but that path is reserved for the shell's own logout; su enforces root-only,
+    and a user's child programs can't restore root at all.)
 
 EXAMPLES
-    su 1000            become uid 1000, keep the current group
-    su 1000:1000       become uid 1000, gid 1000
-    su :20             change only the group to 20
+    su 1000            (as root) become uid 1000, keep the group
+    su 1000:1000       (as root) become uid 1000, gid 1000
 
 SEE ALSO
-    id, sh
+    login, logout, id, sh

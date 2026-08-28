@@ -149,9 +149,12 @@ $ set PATH=/bin ; env           # a real environment; $VAR expansion
 
 - **Builtins** run inside the shell itself — a deliberately minimal set:
   `help  cd  bind  mount  unmount  erase  partition  format
-  exec  exit  shutdown  halt  ps  kill  fg  wait  env  set  unset  su  cpu`.
-  `su` changes this session's user identity (a builtin because it acts on the
-  shell's own task; the prompt shows `#` for root, `$` for a normal user).
+  exec  exit/logout  shutdown  halt  ps  kill  fg  wait  env  set  unset  su  cpu`.
+  The shell **gates each session on a login** (username + password against
+  `/etc/passwd`; DEV accounts `root`/`root` and `user`/`user`), and the prompt
+  shows `#` for root, `$` for a normal user. `logout` (or `exit`) ends the
+  session and returns to the login prompt; `su <uid>` lets **root** drop to a
+  user (a logged-in user can't escalate). See `man login`.
   Job control (`ps`/`kill`/`fg`/`wait`/`exec`), the disk-management trio
   (`erase`/`partition`/`format` — they must run when *nothing* is mounted,
   exactly when `/bin` can't be read), power control (`shutdown`/`halt` — same
