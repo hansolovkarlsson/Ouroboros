@@ -147,13 +147,22 @@ PDT          := /Applications/Parallels Desktop.app/Contents/MacOS/prl_disk_tool
 # a fixed, discoverable path under the toolchain's own sysroot instead.
 HOST_TRIPLE  := $(shell rustc -vV | sed -n 's/^host: //p')
 OBJCOPY      := $(shell rustc --print sysroot)/lib/rustlib/$(HOST_TRIPLE)/bin/llvm-objcopy
+# C toolchain for the userland-libc arc: clang (aarch64-none ELF codegen) and
+# Rust's bundled LLD as the ELF linker - so a C program builds into the same
+# self-relocating PIE format the Rust programs use (programs/linker.ld), with no
+# extra cross-toolchain to install. See libc/ and docs/processes.md.
+CC           := clang
+LD_LLD       := $(shell rustc --print sysroot)/lib/rustlib/$(HOST_TRIPLE)/bin/gcc-ld/ld.lld
+CFLAGS_OS    := --target=aarch64-unknown-none -ffreestanding -fPIC -fno-stack-protector -O2 -Wall
+LDFLAGS_OS   := -Tprograms/linker.ld -pie --no-dynamic-linker -z max-page-size=4096
+CHELLO_BIN   := $(BUILD_DIR)/chello.bin
 
 CARGO_FLAGS :=
 ifeq ($(PROFILE),release)
 CARGO_FLAGS += --release
 endif
 
-.PHONY: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin id-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin sort-bin esp run run-virtio-console run-usb-kbd run-usb-multi run-gicv3 image run-image run-image-9p run-image-9p-client run-image-2vm-a run-image-2vm-b image-gpt run-image-gpt image-exfat run-image-exfat image-ext2 run-image-ext2 parallels-hdd release test-parallels clean
+.PHONY: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin id-bin chello-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin sort-bin esp run run-virtio-console run-usb-kbd run-usb-multi run-gicv3 image run-image run-image-9p run-image-9p-client run-image-2vm-a run-image-2vm-b image-gpt run-image-gpt image-exfat run-image-exfat image-ext2 run-image-ext2 parallels-hdd release test-parallels clean
 
 # Overridable by `make test-parallels VM_NAME=... CMDS=... BOOT_WAIT=...`.
 VM_NAME     ?= Ouroboros
@@ -294,6 +303,16 @@ id-bin:
 	cargo build -p id --target $(USER_TARGET) --release
 	"$(OBJCOPY)" --strip-all $(ID_ELF) $(ID_BIN)
 
+# The first C program (userland-libc arc): compile with clang, link with LLD to
+# the shared PIE linker script, strip to the same .bin shape a Rust program has.
+# Self-contained for now (libc/hello.c has its own _start + syscall stubs); the
+# real libc grows from here. See docs/processes.md's C-program section.
+chello-bin:
+	mkdir -p $(BUILD_DIR)
+	$(CC) $(CFLAGS_OS) -c libc/hello.c -o $(BUILD_DIR)/chello.o
+	"$(LD_LLD)" $(LDFLAGS_OS) -o $(BUILD_DIR)/chello.elf $(BUILD_DIR)/chello.o
+	"$(OBJCOPY)" --strip-all $(BUILD_DIR)/chello.elf $(CHELLO_BIN)
+
 write-bin:
 	cargo build -p write --target $(USER_TARGET) --release
 	"$(OBJCOPY)" --strip-all $(WRITE_ELF) $(WRITE_BIN)
@@ -382,7 +401,7 @@ serve-bin:
 # itself: the default shell binary and the config file (loader.rs's
 # CONFIG_PATH) naming which program to load - edit INIT.CFG and rebuild
 # just that program to swap it out, no kernel rebuild required.
-esp: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin id-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin tail-bin nl-bin rev-bin uniq-bin sort-bin
+esp: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin id-bin chello-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin tail-bin nl-bin rev-bin uniq-bin sort-bin
 	mkdir -p $(ESP_DIR)/EFI/BOOT $(ESP_DIR)/EFI/ORBS $(ESP_DIR)/bin $(ESP_DIR)/man $(ESP_DIR)/etc
 	cp $(KERNEL) $(ESP_DIR)/EFI/BOOT/BOOTAA64.EFI
 	cp $(SHELL_BIN) $(ESP_DIR)/EFI/ORBS/SH.BIN
@@ -427,6 +446,7 @@ esp: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin args
 	cp $(PWD_BIN) $(ESP_DIR)/bin/PWD
 	cp $(PRINTENV_BIN) $(ESP_DIR)/bin/PRINTENV
 	cp $(ID_BIN) $(ESP_DIR)/bin/ID
+	cp $(CHELLO_BIN) $(ESP_DIR)/bin/CHELLO
 	cp $(WRITE_BIN) $(ESP_DIR)/bin/WRITE
 	cp $(READKEY_BIN) $(ESP_DIR)/bin/READKEY
 	cp $(MORE_BIN) $(ESP_DIR)/bin/MORE

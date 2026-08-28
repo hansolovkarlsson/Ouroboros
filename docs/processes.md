@@ -388,6 +388,46 @@ write your own:
    `.bin` (still a real, stripped ELF despite the extension) onto the
    ESP and point `INIT.CFG` at it.
 
+## Writing a program in C (the userland-libc arc)
+
+A program doesn't have to be Rust — the loader only cares about the ELF, not the
+source language. The first C program (`libc/hello.c`, built by `make
+chello-bin`) runs through the identical loader and syscall boundary. The
+toolchain path, all from tools already present (no cross-toolchain to install):
+
+1. **Compile with `clang`** targeting `aarch64-unknown-none` (ELF, not the host
+   Mach-O): `--target=aarch64-unknown-none -ffreestanding -fPIC
+   -fno-stack-protector`. `-fPIC` is the C equivalent of the Rust build's
+   `relocation-model=pic`.
+2. **Link with Rust's bundled LLD** (`ld.lld`, found in the toolchain's
+   `gcc-ld/` dir) against the *same* `programs/linker.ld` and PIE flags the Rust
+   programs use (`-pie --no-dynamic-linker -z max-page-size=4096`) — producing
+   the same self-relocating `ET_DYN`.
+3. **`llvm-objcopy --strip-all`** to the `.bin` (a stripped ELF), staged like any
+   other `/bin` program.
+
+The **constraints are the loader's, and they bite C harder than Rust**:
+
+- **No `.data`/`.bss`** (the linker script ASSERTs them empty — no loader support
+  for initialized or zeroed statics yet). In C that means **no globals and no
+  `static` variables with storage**: a `char buf[64]` at file scope, or a
+  `static int counter`, will fail the link. String *literals* are fine (they
+  live in `.rodata`). Until the loader grows `.data`/`.bss` support, C programs
+  keep their state on the stack.
+- **`_start` is the entry**, placed in `.text.start` (offset 0) via
+  `__attribute__((section(".text.start")))`. The kernel has already set up the
+  EL0 stack, so `_start` just calls `main` and then the `EXIT` syscall.
+- **No libc yet.** `hello.c` carries its own inline `svc` syscall stubs. The real
+  library grows from here as a set of POSIX syscall stubs (`_write` → `cond`,
+  `_read`/`_open` → `fsd`'s `NP_*`, `_sbrk` → the userland heap, `_exit` →
+  `EXIT`), then a ported `picolibc`/`newlib` on top — see `roadmap.md`'s "POSIX /
+  C-program portability."
+- **Watch the relocations** the same way (`llvm-readobj --dyn-relocations`): an
+  `R_AARCH64_ABS64` is unloadable. Simple code is PC-relative and needs none;
+  richer code emits `R_AARCH64_RELATIVE`, which the loader handles. `memcpy`/
+  `memset` calls the compiler synthesizes for struct/array copies would be
+  *undefined symbols* — provide them (a few lines each) when they first appear.
+
 ## Known rough edges
 
 Worth knowing before building further on this:
