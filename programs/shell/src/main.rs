@@ -1429,7 +1429,7 @@ fn dispatch_line(line: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize, env:
     }
 
     match command {
-        "help" => out.put_line("builtins: help, exit, cd, bind, mount (-a/-r/-p/-c/-n), unmount, erase, partition, format, exec, cpu, ps, kill, fg, wait, shutdown, halt, env, set, unset. Everything else is a program in /bin (run `ls /bin`): echo, pwd, cat, ls, tree, write, cp, mv, grep, more, ping, send, recv, ... Add `-?` to a command for its usage, or `man <command>` for a full page. Also: $VAR expands; `> file`/`>> file` redirects, `| prog` pipes (`| more` to page)."),
+        "help" => out.put_line("builtins: help, exit, cd, bind, mount (-a/-r/-p/-c/-n), unmount, erase, partition, format, exec, cpu, ps, kill, fg, wait, shutdown, halt, env, set, unset. Everything else is a program in /bin (run `ls /bin` to see them). Add `-?` to any command for its usage, or `man <command>` for a full page (`man sh` for the shell itself). Also: $VAR expands; `> file`/`>> file` redirects, `| prog` pipes (`| more` to page)."),
         // echo, uptime, clear are externalized: they're /bin programs now
         // (found via PATH by the unknown-command arm), not builtins. See
         // "Standalone binaries, Stage 4".

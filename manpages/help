@@ -5,9 +5,10 @@ SYNOPSIS
     help
 
 DESCRIPTION
-    Lists the shell's builtin commands and points to /bin (ls /bin) for the
-    externalized programs. Append -? to any command for its usage; man <cmd>
-    for a full page.
+    Lists the shell's builtin commands only, and points to /bin (ls /bin) for
+    the externalized programs. Append -? to any command for its usage; man <cmd>
+    for a full page. See `man sh` for an overview of the shell itself - the
+    builtins in full, plus pipes, redirection, wildcards, and $VAR.
 
 SEE ALSO
-    man
+    sh, man

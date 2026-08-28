@@ -1,0 +1,27 @@
+NAME
+    chown - change a file's owner and/or group
+
+SYNOPSIS
+    chown <uid|uid:gid|:gid> <file>
+
+DESCRIPTION
+    Sets the owning user and/or group of <file>. The owner is NUMERIC - there
+    is no /etc/passwd yet, so user and group names are not resolved (that comes
+    with the login/permissions arc). Forms:
+
+        uid        set the user, leave the group
+        uid:gid    set both
+        :gid       set the group, leave the user
+        uid:       set the user, leave the group (same as uid)
+
+    ext2 ONLY. Ownership is an ext2 concept; on FAT32, exFAT, or /proc chown
+    reports "not supported by this filesystem". ls -l shows the numeric owner
+    on ext2 and a dash elsewhere.
+
+EXAMPLES
+    chown 0 file          set owner to uid 0 (root)
+    chown 501:20 file     set owner 501, group 20
+    chown :20 file        set group 20, leave the owner
+
+SEE ALSO
+    chmod, ls, stat

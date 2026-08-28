@@ -823,6 +823,33 @@ pub fn fs_op_path(op: u64, path: &str) -> u64 {
     np_dispatch(&r, verb, [r.len as u64, 0, 0, 0], &fsp[..r.len], &[], &mut [])
 }
 
+/// Set `path`'s permission bits (the low 12 of the POSIX mode). Returns `0`,
+/// [`NO_FS`], or an `FS_ERR_*` code - notably [`FS_ERR_NOT_SUPPORTED`] on a
+/// filesystem that can't model a mode (FAT32/exFAT/`/proc`). Backs `chmod`.
+///
+/// [`NO_FS`]: syscall_abi::NO_FS
+/// [`FS_ERR_NOT_SUPPORTED`]: syscall_abi::FS_ERR_NOT_SUPPORTED
+pub fn fs_chmod(path: &str, mode: u16) -> u64 {
+    let mut fsp = [0u8; FSP_MAX];
+    let r = mount_resolve(path, &mut fsp);
+    np_dispatch(&r, ninep_abi::NP_CHMOD, [r.len as u64, mode as u64, 0, 0], &fsp[..r.len], &[], &mut [])
+}
+
+/// Set `path`'s owner uid and/or gid; `None` leaves that field unchanged (so
+/// `chown user`, `chown :group`, and `chown user:group` all go through here).
+/// Returns `0`, [`NO_FS`], or an `FS_ERR_*` code ([`FS_ERR_NOT_SUPPORTED`] off
+/// ext2). The wire encodes "unchanged" as `u64::MAX`. Backs `chown`.
+///
+/// [`NO_FS`]: syscall_abi::NO_FS
+/// [`FS_ERR_NOT_SUPPORTED`]: syscall_abi::FS_ERR_NOT_SUPPORTED
+pub fn fs_chown(path: &str, uid: Option<u16>, gid: Option<u16>) -> u64 {
+    let mut fsp = [0u8; FSP_MAX];
+    let r = mount_resolve(path, &mut fsp);
+    let uid = uid.map_or(u64::MAX, |u| u as u64);
+    let gid = gid.map_or(u64::MAX, |g| g as u64);
+    np_dispatch(&r, ninep_abi::NP_CHOWN, [r.len as u64, uid, gid, 0], &fsp[..r.len], &[], &mut [])
+}
+
 /// Read up to `buf.len()` bytes of `path` from `offset` into `buf` via the
 /// grant/safecopy bulk path (the server SAFECOPYs straight into `buf`).
 /// Returns the byte count (0 at EOF), [`NO_FS`], or an `FS_ERR_*` code.
@@ -945,6 +972,19 @@ pub fn stat_time(info: &[u8]) -> Option<(u16, u8, u8, u8, u8, u8)> {
         info[ninep_abi::STAT_MIN_OFF],
         info[ninep_abi::STAT_SEC_OFF],
     ))
+}
+
+/// The POSIX `(mode, uid, gid)` of a stat record - `mode` is the `S_IFMT` type
+/// nibble plus the 12 permission bits - or `None` when the filesystem can't
+/// model an owner/permissions (`mode_valid` == 0: FAT32/exFAT/`/proc`).
+pub fn stat_mode(info: &[u8]) -> Option<(u16, u16, u16)> {
+    if info[ninep_abi::STAT_MODEVALID_OFF] == 0 {
+        return None;
+    }
+    let mode = u16::from_le_bytes([info[ninep_abi::STAT_MODE_OFF], info[ninep_abi::STAT_MODE_OFF + 1]]);
+    let uid = u16::from_le_bytes([info[ninep_abi::STAT_UID_OFF], info[ninep_abi::STAT_UID_OFF + 1]]);
+    let gid = u16::from_le_bytes([info[ninep_abi::STAT_GID_OFF], info[ninep_abi::STAT_GID_OFF + 1]]);
+    Some((mode, uid, gid))
 }
 
 /// Create or fully overwrite `path` with `data` via the grant/safecopy bulk
@@ -1163,6 +1203,7 @@ pub fn fs_error(cmd: &str, code: u64) {
         syscall_abi::FS_ERR_IS_ROOT => b"can't remove the root directory",
         syscall_abi::FS_ERR_DISK_FULL => b"disk full",
         syscall_abi::FS_ERR_READ_ONLY => b"read-only filesystem",
+        syscall_abi::FS_ERR_NOT_SUPPORTED => b"not supported by this filesystem (mode/owner need ext2)",
         syscall_abi::FS_ERR_IO => b"device I/O error",
         syscall_abi::FS_ERR_AUTH => b"cluster authentication failed (wrong or missing cluster key)",
         _ => b"failed",

@@ -11,6 +11,7 @@ members = [
     "programs/fileutils/rmdir", "programs/fileutils/touch", "programs/fileutils/rm",
     "programs/fileutils/cp", "programs/fileutils/mv", "programs/fileutils/writeat",
     "programs/fileutils/tree", "programs/fileutils/write", "programs/fileutils/more",
+    "programs/fileutils/chmod", "programs/fileutils/chown",
     "programs/textutils/upper", "programs/textutils/wc", "programs/textutils/grep",
     "programs/textutils/head", "programs/textutils/tail", "programs/textutils/nl",
     "programs/textutils/rev", "programs/textutils/uniq", "programs/textutils/sort",

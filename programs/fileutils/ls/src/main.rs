@@ -3,8 +3,11 @@
 //!
 //! - **default**: names in columns (like a terminal `ls`), directories marked
 //!   with a trailing `/`.
-//! - **`-l`**: one entry per line with its type, size, and modified date/time
-//!   (from the `stat` op - `fs_stat`), the long form.
+//! - **`-l`**: one entry per line - permission string (`drwxr-xr-x`), owner
+//!   uid/gid, size, and modified date/time (from the `stat` op - `fs_stat`),
+//!   the long form. The mode/owner columns are real on ext2 (the one arm that
+//!   stores them); on FAT32/exFAT/`/proc` a conventional mode is synthesized
+//!   and the owner shown as `-` (they can't model an owner/permissions).
 //!
 //! Takes any number of operands (so shell globs like `ls *.txt` work): each is
 //! `stat`ed and classified. **File** operands are listed together as a group (a
@@ -270,11 +273,27 @@ fn print_long(target: u64, dir: &str, entries: &[Entry], data: &[u8]) {
             }
         }
 
-        let mut line = [0u8; ulib::PATH_MAX + 48];
+        let mut line = [0u8; ulib::PATH_MAX + 72];
         let mut w = 0usize;
 
-        // Type: 'd' for a directory, '-' for a file.
-        append(&mut line, &mut w, if e.is_dir { b"d " } else { b"- " });
+        // Type + permission bits (drwxr-xr-x): the real mode when the filesystem
+        // models it (ext2), else a conventional default synthesized from type.
+        let md = if have { ulib::stat_mode(&info) } else { None };
+        let mut perm = [0u8; 10];
+        perm_string(&mut perm, md, e.is_dir);
+        append(&mut line, &mut w, &perm);
+        append(&mut line, &mut w, b" ");
+
+        // Owner uid/gid (numeric), or dashes when the filesystem can't model one.
+        match md {
+            Some((_, uid, gid)) => {
+                emit_right(&mut line, &mut w, uid as u64, 4);
+                append(&mut line, &mut w, b" ");
+                emit_right(&mut line, &mut w, gid as u64, 4);
+            }
+            None => append(&mut line, &mut w, b"   -    -"),
+        }
+        append(&mut line, &mut w, b" ");
 
         // Size, right-aligned in 9 columns.
         let size = if have { ulib::stat_size(&info) } else { 0 };
@@ -347,6 +366,42 @@ fn append(buf: &mut [u8], n: &mut usize, src: &[u8]) {
             buf[*n] = b;
             *n += 1;
         }
+    }
+}
+
+/// Render the 10-char type+permission string (`drwxr-xr-x`) into `out`. `md` is
+/// the real `(mode, uid, gid)` when the filesystem models it; otherwise a
+/// conventional default is synthesized from `is_dir` (the way Linux presents a
+/// mode-less mount like vfat). `mode` is ext2's `i_mode`: the `S_IFMT` type
+/// nibble plus the 12 permission bits (`rwx` + setuid/setgid/sticky).
+fn perm_string(out: &mut [u8; 10], md: Option<(u16, u16, u16)>, is_dir: bool) {
+    let mode = match md {
+        Some((m, _, _)) => m,
+        None if is_dir => 0x4000 | 0o755, // S_IFDIR | rwxr-xr-x
+        None => 0x8000 | 0o644,           // S_IFREG | rw-r--r--
+    };
+    out[0] = match mode & 0xF000 {
+        0x4000 => b'd',
+        0xA000 => b'l',
+        0x2000 => b'c',
+        0x6000 => b'b',
+        0x1000 => b'p',
+        0xC000 => b's',
+        _ => b'-',
+    };
+    let rwx = *b"rwx";
+    for i in 0..9 {
+        out[1 + i] = if mode & (1 << (8 - i)) != 0 { rwx[i % 3] } else { b'-' };
+    }
+    // setuid/setgid/sticky overlay the three exec positions (s/S, s/S, t/T).
+    if mode & 0o4000 != 0 {
+        out[3] = if out[3] == b'x' { b's' } else { b'S' };
+    }
+    if mode & 0o2000 != 0 {
+        out[6] = if out[6] == b'x' { b's' } else { b'S' };
+    }
+    if mode & 0o1000 != 0 {
+        out[9] = if out[9] == b'x' { b't' } else { b'T' };
     }
 }
 

@@ -1,0 +1,26 @@
+NAME
+    chmod - change a file's permission bits
+
+SYNOPSIS
+    chmod <octal-mode> <file>
+
+DESCRIPTION
+    Sets the permission bits of <file> to <octal-mode>, an octal number such
+    as 755, 0644, or 600. Only the low 12 bits are used (rwx for owner/group/
+    other, plus setuid/setgid/sticky); the file's type is preserved, so chmod
+    can never turn a directory into a file.
+
+    Numeric modes only - there is no symbolic form (u+x) yet.
+
+    ext2 ONLY. Permission bits are an ext2 concept; on FAT32, exFAT, or /proc
+    chmod reports "not supported by this filesystem" rather than pretend to
+    succeed. This matches ls -l, which shows real modes on ext2 and a
+    synthesized placeholder elsewhere.
+
+EXAMPLES
+    chmod 755 /bin/prog
+    chmod 644 notes.txt
+    chmod 700 secret
+
+SEE ALSO
+    chown, ls, stat

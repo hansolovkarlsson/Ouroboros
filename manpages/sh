@@ -1,0 +1,73 @@
+NAME
+    sh - the Ouroboros shell
+
+SYNOPSIS
+    sh    (the boot shell; started automatically, not run by hand)
+
+DESCRIPTION
+    The default interactive shell - a real userland program (EL0), loaded from
+    disk at boot, that reads a command line, runs it, and prompts again with
+    "$ ". It is "just a program": the same relocatable binary any /bin command
+    is, given the keyboard because it is task 0.
+
+    A command is looked up in this order: first the shell's own BUILTINS
+    (below), then a program on $PATH (default /bin) by bare name - so typing
+    `ls` runs /bin/LS. A /bin command runs as a separate task, spawned with the
+    arguments and the shell's current directory, then reaped; its exit status is
+    shown by `ps`. Unknown names report "unknown command".
+
+BUILTINS
+    The commands the shell runs itself, because each touches shell-only state,
+    job control, an unmounted disk, or machine power - things a spawned program
+    cannot do. Everything else lives in /bin (run `ls /bin`).
+
+    Shell state
+        cd [path]        change the working directory (default /)
+        bind ...         graft one path onto another in this task's namespace
+        env              list environment variables
+        set NAME=VALUE   set a variable (also: export); $NAME expands it
+        unset NAME       remove a variable
+        exit             end the shell (refused for the boot shell)
+
+    Job control
+        ps               list tasks, their names, and exit codes
+        kill <n>         destroy task <n>
+        fg <n>           hand the keyboard to a task (reverts on its death, ^C)
+        wait <n>         block until task <n> exits
+        exec <prog> ...  spawn a program explicitly (same as typing its name)
+
+    Disk management (run with nothing mounted)
+        mount            list mounts; mount -a mount the disk; -r host:port,
+                         -p, -c, -n bind a remote/proc/console/net resource
+        unmount          drop the current mount
+        erase            zero a disk's leading sectors
+        partition [fs]   write a single-partition MBR (fat32|exfat|ext2)
+        format [fs]      lay a filesystem into the partition (mkfs)
+
+    Cluster
+        cpu host:port <command>   run <command> on another machine, reading
+                                  this machine's files at /host (Plan 9 cpu)
+
+    Power
+        shutdown / poweroff       power the machine off (PSCI)
+        halt                      mask interrupts and stop
+
+    help                 list the builtins
+
+SYNTAX
+    $VAR              expand a variable (set with `set`); $PATH drives lookup
+    cmd > file        redirect output to a file (truncate)
+    cmd >> file       redirect output, appending
+    a | b | c         pipe: each stage a program, one builtin allowed anywhere
+    a | b > file      pipe then redirect the last stage
+    *  ?              filename wildcards, expanded against the filesystem
+    Tab               complete the last word as a filename
+    <command> -?      one-line usage for any command, builtin or /bin
+    man <command>     the full manual page (this is `man sh`)
+
+    Interactive commands that read the keyboard (the pager, `more`/`less`) run
+    as /bin programs because the foreground task owns the keyboard; a pipeline's
+    last stage is given the keyboard, so `ls | more` pages correctly.
+
+SEE ALSO
+    help, man, ls, mount, cpu, ps
