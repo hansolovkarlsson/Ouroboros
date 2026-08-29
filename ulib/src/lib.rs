@@ -1212,6 +1212,50 @@ pub fn fs_write_bulk(path: &str, data: &[u8]) -> u64 {
     )
 }
 
+/// Write `data` to `path` as a **private** file (mode `0600`), creating it if
+/// absent and asserting the mode *before* any content lands.
+///
+/// The ordering is the whole point, and it is easy to get subtly wrong in three
+/// different ways - which is why this exists once instead of at each call site:
+///
+/// * `fsd` creates a new file world-readable (ext2's `NEW_FILE_MODE` is 0644),
+///   so create-then-write-then-`chmod` publishes the secrets for the width of
+///   two IPC round trips.
+/// * An *existing* file's mode must be re-asserted too. An interrupted earlier
+///   run, an admin's `touch`, or a tool that once got the order wrong can leave
+///   a 0644 file that no later write would ever have repaired - the content
+///   overwrite preserves the mode it finds, including a wrong one.
+/// * Re-asserting it must not TRUNCATE: an unconditional empty write to fix a
+///   mode would stake the whole database on the calls after it succeeding.
+///   `chmod` needs no truncation, so the file is only ever created empty when
+///   it genuinely does not exist yet.
+///
+/// A filesystem that models no mode at all (FAT32, exFAT) answers
+/// [`syscall_abi::FS_ERR_NOT_SUPPORTED`], which is expected rather than a
+/// failure - there is no privacy to be had there and `login` says so at the
+/// prompt. Any other refusal is real and is returned.
+///
+/// Returns `0` on success, or an `FS_ERR_*` code (see [`is_fs_error`]).
+pub fn write_private_file(path: &str, data: &[u8]) -> u64 {
+    // 1. Make sure it exists - but only create when it is genuinely absent, so
+    //    this never truncates a database it is about to rewrite from a buffer.
+    let mut info = [0u8; ninep_abi::STAT_INFO_LEN];
+    if is_fs_error(fs_stat(path, &mut info)) {
+        let code = fs_write_bulk(path, &[]);
+        if is_fs_error(code) {
+            return code;
+        }
+    }
+    // 2. Restrict it while it is still empty (or still holds only the old
+    //    content), never after the new secrets have landed.
+    let code = fs_chmod(path, 0o600);
+    if is_fs_error(code) && code != syscall_abi::FS_ERR_NOT_SUPPORTED {
+        return code;
+    }
+    // 3. Only now the content.
+    fs_write_bulk(path, data)
+}
+
 /// Write `data` to `path` with the data carried **inline** in the request
 /// (`NP_WRITE_FILE`, bounded by [`syscall_abi::FS_DATA_MAX`]), routed through the
 /// namespace like any fs op. Unlike [`fs_write_bulk`] (grant/safecopy, and it

@@ -53,16 +53,41 @@ pub struct Account<'a> {
     pub uid: u32,
     pub gid: u32,
     pub home: &'a [u8],
+    /// The account's password secret, when the `/etc/passwd` line carries one
+    /// inline. `None` in the `/etc/shadow` era, where the secret lives in the
+    /// root-only file and is looked up with [`find_secret_by_name`].
+    pub secret: Option<Secret>,
+}
+
+/// A password secret: the salt and the hash of `salt || password`. Split out of
+/// [`Account`] so it can live in `/etc/shadow` instead of the world-readable
+/// `/etc/passwd`.
+#[derive(Clone, Copy)]
+pub struct Secret {
     pub salt: [u8; SALT_MAX],
     pub salt_len: usize,
     pub hash: [u8; DIGEST],
 }
 
-impl Account<'_> {
-    /// Constant-time check of `password` against this account's stored salt+hash.
+impl Secret {
+    /// Constant-time check of `password` against this salt+hash.
     pub fn verify(&self, password: &[u8]) -> bool {
         let digest = sha256_two(&self.salt[..self.salt_len], password);
         digest_eq(&digest, &self.hash)
+    }
+}
+
+impl Account<'_> {
+    /// Constant-time check against an *inline* secret. Only legacy
+    /// (pre-`/etc/shadow`) passwd lines have one; with the secret in
+    /// `/etc/shadow` this is `false` and the caller must use
+    /// [`find_secret_by_name`] instead. Never returns `true` for an account
+    /// with no secret - "no password recorded" must not mean "any password".
+    pub fn verify(&self, password: &[u8]) -> bool {
+        match &self.secret {
+            Some(s) => s.verify(password),
+            None => false,
+        }
     }
 }
 
@@ -77,6 +102,13 @@ pub struct Group<'a> {
 /// Iterate `/etc/passwd` accounts, skipping blank lines. Returns `None` for a
 /// malformed line rather than erroring the whole file — callers use the finder
 /// helpers, which just skip a bad line.
+/// Parse one `/etc/passwd` line. Two shapes are accepted:
+///
+/// - `name:uid:gid:home` - the current format. The password secret lives in
+///   `/etc/shadow`, so `secret` is `None`.
+/// - `name:uid:gid:home:salt:hash` - the legacy format, secret inline. Still
+///   read so a disk written before `/etc/shadow` still logs in; nothing writes
+///   that shape any more.
 fn parse_account(line: &[u8]) -> Option<Account<'_>> {
     let mut f = line.split(|&c| c == b':');
     let name = f.next()?;
@@ -86,15 +118,59 @@ fn parse_account(line: &[u8]) -> Option<Account<'_>> {
     let uid = parse_dec(f.next()?)? as u32;
     let gid = parse_dec(f.next()?)? as u32;
     let home = f.next()?;
-    let salt_hex = f.next()?;
-    let hash_hex = f.next()?;
+    let secret = match (f.next(), f.next()) {
+        (Some(salt_hex), Some(hash_hex)) => Some(decode_secret(salt_hex, hash_hex)?),
+        _ => None,
+    };
+    Some(Account { name, uid, gid, home, secret })
+}
+
+/// Decode a hex salt + hex hash pair into a [`Secret`], rejecting a hash that
+/// isn't exactly [`DIGEST`] bytes (a truncated line must not verify).
+fn decode_secret(salt_hex: &[u8], hash_hex: &[u8]) -> Option<Secret> {
     let mut salt = [0u8; SALT_MAX];
     let salt_len = hex_decode(salt_hex, &mut salt)?;
     let mut hash = [0u8; DIGEST];
     if hex_decode(hash_hex, &mut hash)? != DIGEST {
         return None;
     }
-    Some(Account { name, uid, gid, home, salt, salt_len, hash })
+    Some(Secret { salt, salt_len, hash })
+}
+
+/// Parse one `/etc/shadow` line: `name:salt_hex:hash_hex`.
+fn parse_shadow(line: &[u8]) -> Option<(&[u8], Secret)> {
+    let mut f = line.split(|&c| c == b':');
+    let name = f.next()?;
+    if name.is_empty() {
+        return None;
+    }
+    Some((name, decode_secret(f.next()?, f.next()?)?))
+}
+
+/// Find `name`'s password secret in an `/etc/shadow` buffer.
+pub fn find_secret_by_name(shadow: &[u8], name: &[u8]) -> Option<Secret> {
+    for line in shadow.split(|&c| c == b'\n') {
+        if line.is_empty() {
+            continue;
+        }
+        if let Some((n, secret)) = parse_shadow(line) {
+            if n == name {
+                return Some(secret);
+            }
+        }
+    }
+    None
+}
+
+/// Format one `/etc/shadow` line (no trailing newline): `name:salt:hash`.
+pub fn format_shadow_line(buf: &mut [u8], name: &[u8], salt: &[u8], hash: &[u8]) -> Option<usize> {
+    let mut w = Writer::new(buf);
+    w.bytes(name)?;
+    w.byte(b':')?;
+    w.hex(salt)?;
+    w.byte(b':')?;
+    w.hex(hash)?;
+    Some(w.len)
 }
 
 fn parse_group(line: &[u8]) -> Option<Group<'_>> {
@@ -261,8 +337,6 @@ pub fn format_account_line(
     uid: u32,
     gid: u32,
     home: &[u8],
-    salt: &[u8],
-    hash: &[u8],
 ) -> Option<usize> {
     let mut w = Writer::new(buf);
     w.bytes(name)?;
@@ -272,10 +346,6 @@ pub fn format_account_line(
     w.dec(gid as u64)?;
     w.byte(b':')?;
     w.bytes(home)?;
-    w.byte(b':')?;
-    w.hex(salt)?;
-    w.byte(b':')?;
-    w.hex(hash)?;
     Some(w.len)
 }
 
@@ -508,18 +578,62 @@ mod tests {
     }
 
     #[test]
-    fn hash_verify_roundtrip() {
-        // Format an account with a fresh salt+hash, parse it back, verify.
+    fn shadow_roundtrip() {
+        // The current shape: passwd carries no secret, /etc/shadow does.
         let salt = make_salt(123456789);
         let hash = hash_password(&salt, b"hunter2");
         let mut line = [0u8; 256];
-        let n = format_account_line(&mut line, b"carol", 1005, 1005, b"/Users/carol", &salt, &hash)
-            .unwrap();
+        let n = format_account_line(&mut line, b"carol", 1005, 1005, b"/Users/carol").unwrap();
         let acct = find_user_by_name(&line[..n], b"carol").unwrap();
         assert_eq!(acct.uid, 1005);
+        assert_eq!(acct.home, b"/Users/carol");
+        // No inline secret - and "no secret" must never verify as "any password".
+        assert!(acct.secret.is_none());
+        assert!(!acct.verify(b"hunter2"));
+        assert!(!acct.verify(b""));
+
+        let mut sline = [0u8; 256];
+        let sn = format_shadow_line(&mut sline, b"carol", &salt, &hash).unwrap();
+        let secret = find_secret_by_name(&sline[..sn], b"carol").unwrap();
+        assert!(secret.verify(b"hunter2"));
+        assert!(!secret.verify(b"wrong"));
+        assert!(find_secret_by_name(&sline[..sn], b"nobody").is_none());
+    }
+
+    #[test]
+    fn legacy_inline_secret_still_reads() {
+        // A disk written before /etc/shadow keeps working: a 6-field passwd line
+        // still parses, with its secret inline.
+        let salt = make_salt(42);
+        let hash = hash_password(&salt, b"hunter2");
+        let mut line = [0u8; 256];
+        let mut w = 0usize;
+        for part in [b"dave".as_slice(), b":1006:1006:/Users/dave:"] {
+            line[w..w + part.len()].copy_from_slice(part);
+            w += part.len();
+        }
+        for b in salt.iter() {
+            let hx = b"0123456789abcdef";
+            line[w] = hx[(b >> 4) as usize];
+            line[w + 1] = hx[(b & 0xf) as usize];
+            w += 2;
+        }
+        line[w] = b':';
+        w += 1;
+        for b in hash.iter() {
+            let hx = b"0123456789abcdef";
+            line[w] = hx[(b >> 4) as usize];
+            line[w + 1] = hx[(b & 0xf) as usize];
+            w += 2;
+        }
+        let acct = find_user_by_name(&line[..w], b"dave").unwrap();
+        assert_eq!(acct.uid, 1006);
+        assert!(acct.secret.is_some());
         assert!(acct.verify(b"hunter2"));
         assert!(!acct.verify(b"wrong"));
     }
+
+
 
     #[test]
     fn salt_from_prefers_hardware_entropy() {

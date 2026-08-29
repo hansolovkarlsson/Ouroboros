@@ -19,6 +19,7 @@
 #![no_main]
 
 const PASSWD_FILE: &str = "/etc/passwd";
+const SHADOW_FILE: &str = "/etc/shadow";
 const BUF: usize = syscall_abi::SAFECOPY_MAX as usize;
 
 #[no_mangle]
@@ -53,16 +54,11 @@ pub extern "C" fn _start() -> ! {
     }
     let name = &namebuf[..name_len];
 
-    // Copy the target's uid/gid/home out before reusing the buffer.
-    let mut home = [0u8; 128];
-    let (uid, gid, home_len) = match accounts::find_user_by_name(&src[..slen], name) {
-        Some(acct) => {
-            let hl = acct.home.len().min(home.len());
-            home[..hl].copy_from_slice(&acct.home[..hl]);
-            (acct.uid, acct.gid, hl)
-        }
-        None => die(b"passwd: no such user\r\n"),
-    };
+    // The account must exist - but nothing of it is needed beyond that, since
+    // only /etc/shadow is rewritten now.
+    if accounts::find_user_by_name(&src[..slen], name).is_none() {
+        die(b"passwd: no such user\r\n");
+    }
 
     // Prompt for the new password twice (echo off).
     ulib::con_write(b"New password: ");
@@ -84,21 +80,35 @@ pub extern "C" fn _start() -> ! {
     }
     let hash = accounts::hash_password(&salt, &pw[..pwl]);
 
+    // Only /etc/shadow changes: the passwd line holds no secret any more, so a
+    // password change never rewrites it (and cannot disturb uid/gid/home).
     let mut line = [0u8; 256];
-    let Some(llen) = accounts::format_account_line(
-        &mut line, name, uid, gid, &home[..home_len], &salt, &hash,
-    ) else {
-        die(b"passwd: account line too long\r\n");
+    let Some(llen) = accounts::format_shadow_line(&mut line, name, &salt, &hash) else {
+        die(b"passwd: shadow line too long\r\n");
+    };
+    let mut sbuf = [0u8; BUF];
+    let Some(sslen) = ulib::read_file_checked(SHADOW_FILE, &mut sbuf) else {
+        die(b"passwd: could not read /etc/shadow - refusing to rewrite it\r\n");
     };
     let mut out = [0u8; BUF];
-    let (olen, replaced) = match accounts::replace_line(&src[..slen], &mut out, name, &line[..llen]) {
+    // Replace the user's line if present, else append one (an account created
+    // before /etc/shadow existed, or one whose secret was never set).
+    let (olen, replaced) = match accounts::replace_line(&sbuf[..sslen], &mut out, name, &line[..llen]) {
         Some(r) => r,
-        None => die(b"passwd: /etc/passwd full\r\n"),
+        None => die(b"passwd: /etc/shadow full\r\n"),
     };
-    if !replaced {
-        die(b"passwd: no such user\r\n");
-    }
-    let code = ulib::fs_write_bulk(PASSWD_FILE, &out[..olen]);
+    let olen = if replaced {
+        olen
+    } else {
+        match accounts::append_line(&sbuf[..sslen], &mut out, &line[..llen]) {
+            Some(n) => n,
+            None => die(b"passwd: /etc/shadow full\r\n"),
+        }
+    };
+    // 0600 before the secrets land - on a file that already exists as well as
+    // one being created, and without truncating to get there. See
+    // ulib::write_private_file for the three orderings that has to satisfy.
+    let code = ulib::write_private_file(SHADOW_FILE, &out[..olen]);
     if ulib::is_fs_error(code) {
         ulib::fs_error("passwd", code);
         ulib::exit(1);

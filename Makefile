@@ -571,6 +571,8 @@ esp: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin args
 	# scripts/mkpasswd.py + scripts/mkgroup.py; DEV creds root/root + user/user).
 	# Absent -> login falls back to root.
 	python3 scripts/mkpasswd.py > $(ESP_DIR)/etc/passwd
+	python3 scripts/mkpasswd.py --shadow > $(ESP_DIR)/etc/shadow
+	chmod 600 $(ESP_DIR)/etc/shadow
 	python3 scripts/mkgroup.py > $(ESP_DIR)/etc/group
 	# Per-user home directories under /Users (the login home for `user`; `~`
 	# expands to it). FAT can't record an owner, so it's world-usable here; on
@@ -817,6 +819,12 @@ $(EXFAT_PART): esp
 	cp manpages/* $(BUILD_DIR)/exfat-src/man/
 	mkdir -p $(BUILD_DIR)/exfat-src/etc
 	python3 scripts/mkpasswd.py > $(BUILD_DIR)/exfat-src/etc/passwd
+	# /etc/shadow must be staged wherever /etc/passwd is: passwd no longer
+	# carries the secret, so an image with one and not the other boots to a
+	# login prompt NO password can satisfy (the file is non-empty, so login's
+	# root-session fallback doesn't fire either). exFAT records no mode - see
+	# the login-time warning.
+	python3 scripts/mkpasswd.py --shadow > $(BUILD_DIR)/exfat-src/etc/shadow
 	python3 scripts/mkgroup.py > $(BUILD_DIR)/exfat-src/etc/group
 	mkdir -p $(BUILD_DIR)/exfat-src/Users/user
 	printf 'hello from an exFAT volume\r\n' > $(BUILD_DIR)/exfat-src/HELLO.TXT
@@ -879,6 +887,11 @@ $(EXT2_PART): esp
 	cp manpages/* $(BUILD_DIR)/ext2-src/man/
 	mkdir -p $(BUILD_DIR)/ext2-src/etc
 	python3 scripts/mkpasswd.py > $(BUILD_DIR)/ext2-src/etc/passwd
+	# mke2fs -d copies the host mode across, which is how /etc/shadow ends up
+	# 0600 on the guest - and, with fsd's enforcement live, actually unreadable
+	# to a non-root user rather than merely marked so.
+	python3 scripts/mkpasswd.py --shadow > $(BUILD_DIR)/ext2-src/etc/shadow
+	chmod 600 $(BUILD_DIR)/ext2-src/etc/shadow
 	python3 scripts/mkgroup.py > $(BUILD_DIR)/ext2-src/etc/group
 	mkdir -p $(BUILD_DIR)/ext2-src/Users/user
 	printf 'hello from an ext2 volume\n' > $(BUILD_DIR)/ext2-src/HELLO.TXT
