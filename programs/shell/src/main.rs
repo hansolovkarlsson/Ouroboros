@@ -1981,7 +1981,32 @@ fn cmd_su(arg: &str) {
             }
         }
     };
-    if syscall4(syscall_abi::SET_ID, uid as u64, gid as u64, 0, 0) == syscall_abi::SET_ID_DENIED {
+    // The numeric form must grant the same memberships as the by-name form.
+    // `su alice` and `su 1000:1000` name the same session - manpages/su
+    // documents them as equivalent - but arg2/arg3 are the supplementary group
+    // list, so passing 0/0 here CLEARS it (see the kernel's SET_ID). The two
+    // spellings therefore produced different effective permissions from the
+    // same shell: `su alice` could read a root:staff 0640 file and
+    // `su 1000:1000` could not, with nothing refusing either.
+    //
+    // Resolve the uid back to a name and take the same path. An unknown uid has
+    // no memberships to grant, and an empty list is then the honest answer
+    // rather than a leftover one.
+    let mut gids = [0u32; syscall_abi::MAX_SUPP_GROUPS];
+    let mut ngids = 0usize;
+    let mut pbuf = [0u8; syscall_abi::SAFECOPY_MAX as usize];
+    let plen = read_account_file("/etc/passwd", &mut pbuf);
+    if let Some(acct) = accounts::find_user_by_uid(&pbuf[..plen], uid) {
+        ngids = login::supplementary_groups(acct.name, gid, &mut gids);
+    }
+    if syscall4(
+        syscall_abi::SET_ID,
+        uid as u64,
+        gid as u64,
+        gids.as_ptr() as u64,
+        ngids as u64,
+    ) == syscall_abi::SET_ID_DENIED
+    {
         print_line("su: denied (only root may change identity)");
     }
 }
@@ -2123,10 +2148,8 @@ fn su_by_name(name: &str) {
         Some(acct) => {
             // Identity + memberships in one call, so the new identity cannot end
             // up carrying the previous session's groups.
-            let mut gbuf = [0u8; syscall_abi::SAFECOPY_MAX as usize];
-            let glen = read_account_file("/etc/group", &mut gbuf);
             let mut gids = [0u32; syscall_abi::MAX_SUPP_GROUPS];
-            let n = accounts::supplementary_gids(&gbuf[..glen], name.as_bytes(), acct.gid, &mut gids);
+            let n = login::supplementary_groups(name.as_bytes(), acct.gid, &mut gids);
             if syscall4(
                 syscall_abi::SET_ID,
                 acct.uid as u64,

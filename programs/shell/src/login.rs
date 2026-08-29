@@ -129,8 +129,12 @@ fn write_cwd(cwd: &mut [u8; CWD_SIZE], home: &[u8]) -> usize {
 /// simply means none.
 ///
 /// `#[inline(never)]`: the group file is a 2 KB stack buffer.
+///
+/// `pub(crate)` because `su` needs exactly this: both spellings of `su` and the
+/// login gate must derive memberships identically, or the same user ends up
+/// with different effective permissions depending on how the session started.
 #[inline(never)]
-fn supplementary_groups(name: &[u8], primary_gid: u32, out: &mut [u32]) -> usize {
+pub(crate) fn supplementary_groups(name: &[u8], primary_gid: u32, out: &mut [u32]) -> usize {
     let mut gbuf = [0u8; PASSWD_MAX];
     let glen = crate::read_account_file(GROUP_PATH, &mut gbuf);
     accounts::supplementary_gids(&gbuf[..glen], name, primary_gid, out)

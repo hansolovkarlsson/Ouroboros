@@ -180,11 +180,28 @@ pub fn self_task() -> u64 {
     syscall(syscall_abi::SELF, 0)
 }
 
-/// Set the calling task's user identity (uid + gid). Returns `0`, or
-/// [`syscall_abi::SET_ID_DENIED`] if the caller isn't root. Only root may
-/// change identity; children inherit it at spawn. Backs the shell's `su`.
-pub fn set_id(uid: u32, gid: u32) -> u64 {
-    syscall4(syscall_abi::SET_ID, uid as u64, gid as u64, 0, 0)
+/// Set the calling task's user identity - uid, gid, **and** the supplementary
+/// group list, which change together in one call. Returns `0`, or
+/// [`syscall_abi::SET_ID_DENIED`].
+///
+/// `gids` must be passed explicitly, including the empty slice, because the
+/// group list is not optional at the ABI: the kernel reads a (pointer, count)
+/// pair, so omitting it does not mean "leave the groups alone" - it means
+/// **clear them**. A two-argument wrapper hid that behind a default and let a
+/// caller silently drop a user's memberships while believing it had only
+/// changed the uid; `su <uid>:<gid>` did exactly that. Making the parameter
+/// mandatory is the point of this signature.
+///
+/// Only root may change identity, and only root may set a NON-empty list
+/// (membership is a privilege grant). Children inherit both at spawn.
+pub fn set_id(uid: u32, gid: u32, gids: &[u32]) -> u64 {
+    syscall4(
+        syscall_abi::SET_ID,
+        uid as u64,
+        gid as u64,
+        gids.as_ptr() as u64,
+        gids.len() as u64,
+    )
 }
 
 /// The packed `(gid << 32) | uid` of task `task`, or [`syscall_abi::GET_ID_ERR`]

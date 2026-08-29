@@ -42,19 +42,21 @@ pub extern "C" fn _start() -> ! {
         let tok = &a[..n];
         if tok == b"-g" {
             i += 1;
-            g_len = ulib::arg(i, &mut gbuf).unwrap_or(0);
+            g_len = operand(i, &mut gbuf, b"-g");
         } else if tok == b"-G" {
             i += 1;
-            // A MISSING operand is not an empty list: `usermod alice -G` must not
-            // read as `-G ""` and silently strip every membership. An explicit
-            // `-G ""` still clears, deliberately.
-            match ulib::arg(i, &mut bigg) {
-                Some(n) => {
-                    bigg_len = n;
-                    have_bigg = true;
-                }
-                None => die(b"usermod: -G needs a group list (use -G \"\" to clear)\r\n"),
+            bigg_len = operand(i, &mut bigg, b"-G");
+            // The shell does no quote handling, so `-G ""` arrives as the literal
+            // two-character token `""` rather than as an empty argument. It did
+            // clear the list - but only by accident, because no group is named
+            // `""` so nothing was added back - while printing
+            // `no such group (skipped): ""` and exiting 0, which reads as a
+            // failure that in fact succeeded. Recognise the spelling the usage
+            // text documents and mean it.
+            if bigg[..bigg_len] == b"\"\""[..] || bigg[..bigg_len] == b"''"[..] {
+                bigg_len = 0;
             }
+            have_bigg = true;
         } else if name_len == 0 && !tok.is_empty() {
             namebuf[..n].copy_from_slice(tok);
             name_len = n;
@@ -259,6 +261,31 @@ fn resolve_gid(spec: &[u8]) -> u32 {
     match accounts::find_group_by_name(&gbuf[..glen], spec) {
         Some(g) => g.gid,
         None => die(b"usermod: no such group\r\n"),
+    }
+}
+
+/// Fetch the operand following a flag, refusing one that is itself a flag.
+///
+/// `ulib::arg` reports only "present" or "absent", so the old guard caught
+/// `usermod alice -G` but not `usermod alice -G -g staff` - there the NEXT FLAG
+/// was consumed as the value. The damage was silent and total: `-G` rewrote
+/// alice's memberships to the single group "-g", which meant dropping every
+/// real one (the rewrite removes from all groups before it adds), the `-g`
+/// change was discarded because the name slot was already filled, and usermod
+/// printed "updated alice" and exited 0.
+///
+/// A group name or gid never begins with '-', so a leading '-' means the
+/// operand is missing. An explicitly EMPTY operand still clears, deliberately -
+/// that is `-G ""`, distinct from `-G` with nothing after it.
+fn operand(i: u64, buf: &mut [u8], flag: &[u8]) -> usize {
+    match ulib::arg(i, buf) {
+        Some(n) if n == 0 || buf[0] != b'-' => n,
+        _ => {
+            ulib::con_write(b"usermod: ");
+            ulib::con_write(flag);
+            ulib::con_write(b" needs a value (use -G \"\" to clear all groups)\r\n");
+            ulib::exit(1);
+        }
     }
 }
 
