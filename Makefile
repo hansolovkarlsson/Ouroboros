@@ -598,6 +598,7 @@ run: esp
 		-bios $(OVMF) \
 		-drive file=fat:rw:$(ESP_DIR),format=raw,media=disk,if=none,id=hd0 \
 		-device virtio-blk-device,drive=hd0 \
+		-device virtio-rng-device \
 		-global virtio-mmio.force-legacy=false \
 		-nographic
 
@@ -616,6 +617,7 @@ run-net: esp
 		-bios $(OVMF) \
 		-drive file=fat:rw:$(ESP_DIR),format=raw,media=disk,if=none,id=hd0 \
 		-device virtio-blk-device,drive=hd0 \
+		-device virtio-rng-device \
 		-netdev user,id=net0 \
 		-device virtio-net-device,netdev=net0 \
 		-object filter-dump,id=f0,netdev=net0,file=$(NET_PCAP) \
@@ -642,6 +644,7 @@ run-virtio-console: esp
 		-bios $(OVMF) \
 		-drive file=fat:rw:$(ESP_DIR),format=raw,media=disk,if=none,id=hd0 \
 		-device virtio-blk-device,drive=hd0 \
+		-device virtio-rng-device \
 		-global virtio-mmio.force-legacy=false \
 		-device virtio-serial-device \
 		-device virtconsole,chardev=vcon0 \
@@ -664,6 +667,7 @@ run-usb-kbd: esp
 		-bios $(OVMF) \
 		-drive file=fat:rw:$(ESP_DIR),format=raw,media=disk,if=none,id=hd0 \
 		-device virtio-blk-device,drive=hd0 \
+		-device virtio-rng-device \
 		-global virtio-mmio.force-legacy=false \
 		-device qemu-xhci,id=xhci0 \
 		-device usb-kbd,bus=xhci0.0 \
@@ -699,6 +703,7 @@ run-usb-multi: esp $(USBSTICK_IMG)
 		-bios $(OVMF) \
 		-drive file=fat:rw:$(ESP_DIR),format=raw,media=disk,if=none,id=hd0 \
 		-device virtio-blk-device,drive=hd0 \
+		-device virtio-rng-device \
 		-global virtio-mmio.force-legacy=false \
 		-device qemu-xhci,id=xhci0 \
 		-device usb-kbd,bus=xhci0.0 \
@@ -727,6 +732,7 @@ run-gicv3: esp
 		-bios $(OVMF) \
 		-drive file=fat:rw:$(ESP_DIR),format=raw,media=disk,if=none,id=hd0 \
 		-device virtio-blk-device,drive=hd0 \
+		-device virtio-rng-device \
 		-global virtio-mmio.force-legacy=false \
 		-nographic
 
@@ -793,6 +799,7 @@ run-image-gpt: image-gpt
 		-bios $(OVMF) \
 		-drive file=$(GPT_IMG),format=raw,if=none,id=hd0 \
 		-device virtio-blk-device,drive=hd0 \
+		-device virtio-rng-device \
 		-global virtio-mmio.force-legacy=false \
 		-nographic
 
@@ -846,6 +853,7 @@ run-image-exfat: image-exfat
 		-bios $(OVMF) \
 		-drive file=$(EXFAT_IMG),format=raw,if=none,id=hd0 \
 		-device virtio-blk-device,drive=hd0 \
+		-device virtio-rng-device \
 		-global virtio-mmio.force-legacy=false \
 		-nographic
 
@@ -922,6 +930,7 @@ run-image-net: image
 		-bios $(OVMF) \
 		-drive file=$(ESP_DIR).img,format=raw,if=none,id=hd0 \
 		-device virtio-blk-device,drive=hd0 \
+		-device virtio-rng-device \
 		-netdev user,id=net0 \
 		-device virtio-net-device,netdev=net0 \
 		-object filter-dump,id=f0,netdev=net0,file=$(NET_PCAP) \
@@ -942,6 +951,7 @@ run-image-server: image
 		-bios $(OVMF) \
 		-drive file=$(ESP_DIR).img,format=raw,if=none,id=hd0 \
 		-device virtio-blk-device,drive=hd0 \
+		-device virtio-rng-device \
 		-netdev user,id=net0,hostfwd=tcp::5555-:80 \
 		-device virtio-net-device,netdev=net0 \
 		-object filter-dump,id=f0,netdev=net0,file=$(NET_PCAP) \
@@ -961,6 +971,7 @@ run-image-9p: image
 		-bios $(OVMF) \
 		-drive file=$(ESP_DIR).img,format=raw,if=none,id=hd0 \
 		-device virtio-blk-device,drive=hd0 \
+		-device virtio-rng-device \
 		-netdev user,id=net0,hostfwd=tcp::5555-:80,hostfwd=tcp::5640-:564,hostfwd=tcp::5900-:9000 \
 		-device virtio-net-device,netdev=net0 \
 		-object filter-dump,id=f0,netdev=net0,file=$(NET_PCAP) \
@@ -984,6 +995,7 @@ run-image-9p-client: image
 		-bios $(OVMF) \
 		-drive file=$(ESP_DIR).img,format=raw,if=none,id=hd0 \
 		-device virtio-blk-device,drive=hd0 \
+		-device virtio-rng-device \
 		-netdev user,id=net0 \
 		-device virtio-net-device,netdev=net0 \
 		-object filter-dump,id=f0,netdev=net0,file=$(NET_PCAP) \
@@ -1013,6 +1025,7 @@ run-image-2vm-a: image
 		-bios $(OVMF) \
 		-drive file=$(ESP_DIR)-a.img,format=raw,if=none,id=hd0 \
 		-device virtio-blk-device,drive=hd0 \
+		-device virtio-rng-device \
 		-netdev socket,id=net0,listen=127.0.0.1:12340 \
 		-device virtio-net-device,netdev=net0,mac=52:54:00:12:34:0a \
 		-object filter-dump,id=f0,netdev=net0,file=$(BUILD_DIR)/net-a.pcap \
@@ -1028,6 +1041,7 @@ run-image-2vm-b: image
 		-bios $(OVMF) \
 		-drive file=$(ESP_DIR)-b.img,format=raw,if=none,id=hd0 \
 		-device virtio-blk-device,drive=hd0 \
+		-device virtio-rng-device \
 		-netdev socket,id=net0,connect=127.0.0.1:12340 \
 		-device virtio-net-device,netdev=net0,mac=52:54:00:12:34:0b \
 		-object filter-dump,id=f0,netdev=net0,file=$(BUILD_DIR)/net-b.pcap \

@@ -1148,8 +1148,13 @@ fn run_head_pipeline(
             // went wrong, so adding "could not authorize the stream" on top
             // only obscures it. Anything else is a real failure and still says
             // so.
-            let died = syscall(syscall_abi::TASK_STATE, slots[i + 1])
-                != syscall_abi::TASK_STATE_RUNNABLE;
+            // "Already exited" means zombie or unused - NOT merely not-runnable:
+            // a healthy consumer parked in pipe_recv is BLOCKED, so testing
+            // `!= RUNNABLE` would swallow a genuine delegation failure and kill
+            // the pipeline with no message at all.
+            let state = syscall(syscall_abi::TASK_STATE, slots[i + 1]);
+            let died = state == syscall_abi::TASK_STATE_ZOMBIE
+                || state == syscall_abi::TASK_STATE_UNUSED;
             for s in &slots[..prog_stages.len()] {
                 syscall(syscall_abi::KILL, *s);
             }
@@ -2008,6 +2013,17 @@ pub(crate) fn read_account_file(path: &str, buf: &mut [u8]) -> usize {
         if n < CHUNK {
             break;
         }
+    }
+    // A buffer filled to the brim means the file is at least this long and may
+    // be longer - so the database was CUT, and a cut one must not read as a
+    // complete one. A line split by the cut still parses (four colon-fields is
+    // enough), so login would accept a truncated home; an account past the cut
+    // is simply invisible and its correct password is rejected. Report nothing
+    // rather than something wrong; the caller falls back to a root session,
+    // which is the same answer as "no /etc/passwd".
+    if off == buf.len() {
+        print_line("warning: the account file is larger than this shell can read - ignoring it");
+        return 0;
     }
     off
 }

@@ -52,9 +52,21 @@ TYPING A PATTERN AT THIS SHELL
         spaces, so grep a|b works as alternation. Write grep "a | b" - with
         spaces - and the shell splits it into pipeline stages instead.
       - The shell expands * and ? against the filesystem before grep sees
-        them. A pattern matching no filename is passed through unchanged
-        (the usual case), but in a directory where it DOES match, the
-        filename arrives instead of the pattern.
+        them, and there are no quotes to prevent it. A pattern matching no
+        filename is passed through unchanged (the usual case), but in a
+        directory where it DOES match, the FILENAMES arrive instead of the
+        pattern - and the extra ones are silently discarded, so the same
+        command searches for different things depending on the cwd:
+
+            $ cd /bin
+            $ echo hello | grep C*      # C* becomes CAT CHMOD CHOWN ...
+                                        # grep searches for "CAT"
+
+        -F does not help: the token is already rewritten before grep runs.
+        Until the shell has quoting, avoid bare * and ? in a pattern, or run
+        from a directory where they match nothing. A pattern needing a literal
+        star can escape it (\*), which is not a glob character to the shell
+        either.
 
 EXAMPLES
     cat log.txt | grep ERROR

@@ -123,11 +123,29 @@ pub extern "C" fn _start() -> ! {
     let primary;
     {
         let mut pbuf = [0u8; BUF];
-        let plen = ulib::read_file_all(PASSWD_FILE, &mut pbuf);
+        // Checked: `out` is built from this and written back over /etc/passwd, so
+        // a 0 from a transient error would rebuild the file from nothing.
+        let Some(plen) = ulib::read_file_checked(PASSWD_FILE, &mut pbuf) else {
+            die(b"useradd: could not read /etc/passwd - refusing to rewrite it\r\n");
+        };
         if accounts::user_exists(&pbuf[..plen], name) {
             die(b"useradd: user already exists\r\n");
         }
-        uid = uid_opt.unwrap_or_else(|| accounts::next_free_uid(&pbuf[..plen]));
+        uid = match uid_opt {
+            None => accounts::next_free_uid(&pbuf[..plen]),
+            Some(0) => {
+                // A SECOND root account, created by a tool that then reports
+                // success. root already exists; making another is never the
+                // intent, and tools that resolve by uid could not tell them apart.
+                die(b"useradd: uid 0 is root's - refusing to create a second root account\r\n")
+            }
+            Some(v) => {
+                if accounts::find_user_by_uid(&pbuf[..plen], v).is_some() {
+                    die(b"useradd: that uid is already in use\r\n");
+                }
+                v
+            }
+        };
         primary = resolve_group(if g_len > 0 { Some(&gbuf[..g_len]) } else { None }, name, uid);
         let gid = match primary {
             Primary::Existing(g) | Primary::Create(g) => g,
@@ -349,7 +367,9 @@ fn resolve_group(gspec: Option<&[u8]>, name: &[u8], uid: u32) -> Primary {
 #[inline(never)]
 fn add_group(name: &[u8], gid: u32) -> Result<(), u64> {
     let mut grbuf = [0u8; BUF];
-    let grlen = ulib::read_file_all(GROUP_FILE, &mut grbuf);
+    let Some(grlen) = ulib::read_file_checked(GROUP_FILE, &mut grbuf) else {
+        return Err(syscall_abi::FS_ERR_IO);
+    };
     let mut gline = [0u8; 64];
     let Some(gll) = accounts::format_group_line(&mut gline, name, gid, b"") else {
         return Err(syscall_abi::FS_ERROR);
@@ -371,7 +391,9 @@ fn add_group(name: &[u8], gid: u32) -> Result<(), u64> {
 #[inline(never)]
 fn remove_group(name: &[u8]) {
     let mut grbuf = [0u8; BUF];
-    let grlen = ulib::read_file_all(GROUP_FILE, &mut grbuf);
+    let Some(grlen) = ulib::read_file_checked(GROUP_FILE, &mut grbuf) else {
+        return; // can't read it reliably - leave it alone rather than truncate
+    };
     let mut gout = [0u8; BUF];
     if let Some((n, removed)) = accounts::remove_line(&grbuf[..grlen], &mut gout, name) {
         if removed {
@@ -406,8 +428,17 @@ fn make_home(home: &str, uid: u32, gid: u32) -> Result<bool, u64> {
     } else {
         return Err(mk);
     };
-    let _ = ulib::fs_chown(home, Some(uid as u16), Some(gid as u16));
-    let _ = ulib::fs_chmod(home, 0o755);
+    // Only take ownership of a directory we CREATED. Adopting a pre-existing one
+    // and chowning it hands away whatever it holds (and chmod 0755 re-opens a
+    // deliberately-private 0700 directory), silently and with exit 0.
+    if created {
+        let _ = ulib::fs_chown(home, Some(uid as u16), Some(gid as u16));
+        let _ = ulib::fs_chmod(home, 0o755);
+    } else {
+        ulib::con_write(
+            b"useradd: the existing home directory's owner and mode were left as they are\r\n",
+        );
+    }
     Ok(created)
 }
 
