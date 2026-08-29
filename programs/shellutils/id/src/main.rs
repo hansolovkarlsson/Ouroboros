@@ -30,7 +30,7 @@ pub extern "C" fn _start() -> ! {
     let uname = accounts::find_user_by_uid(&pbuf[..plen], uid).map(|a| a.name);
     let gname = accounts::find_group_by_gid(&gbuf[..glen], gid).map(|g| g.name);
 
-    let mut line = [0u8; 96];
+    let mut line = [0u8; 256];
     let mut w = 0usize;
     append(&mut line, &mut w, b"uid=");
     ulib::emit_dec(&mut line, &mut w, uid as u64);
@@ -38,6 +38,22 @@ pub extern "C" fn _start() -> ! {
     append(&mut line, &mut w, b" gid=");
     ulib::emit_dec(&mut line, &mut w, gid as u64);
     append_name(&mut line, &mut w, gname);
+
+    // Supplementary groups, when the session has any (login/su fill them from
+    // /etc/group's member lists). Printed like `id` everywhere else: the
+    // primary first, then the extras, each named where it resolves.
+    let mut extra = [0u32; syscall_abi::MAX_SUPP_GROUPS];
+    let n = ulib::groups_of(ulib::self_task(), &mut extra).min(extra.len());
+    if n > 0 {
+        append(&mut line, &mut w, b" groups=");
+        ulib::emit_dec(&mut line, &mut w, gid as u64);
+        append_name(&mut line, &mut w, gname);
+        for g in &extra[..n] {
+            append(&mut line, &mut w, b",");
+            ulib::emit_dec(&mut line, &mut w, *g as u64);
+            append_name(&mut line, &mut w, accounts::find_group_by_gid(&gbuf[..glen], *g).map(|x| x.name));
+        }
+    }
     append(&mut line, &mut w, b"\r\n");
 
     ulib::write_out(target, &line[..w]);

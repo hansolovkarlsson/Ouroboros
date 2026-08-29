@@ -674,6 +674,12 @@ fn main() -> ! {
         // Logout: restore root (the kernel allows a non-root task to SET_ID back
         // to its saved identity), so the next login prompt runs privileged.
         syscall4(syscall_abi::SET_ID, 0, 0, 0, 0);
+        // ...and drop the old session's supplementary groups. SET_GROUPS is
+        // root-only, so this has to come *after* the restore - and it has to
+        // happen at all, or the next user would inherit the last one's group
+        // memberships. (The kernel clears them on task death, but the shell
+        // never dies.)
+        syscall4(syscall_abi::SET_GROUPS, 0, 0, 0, 0);
         print_line("logout");
     }
 }
@@ -2021,6 +2027,13 @@ fn su_by_name(name: &str) {
     let passwd = &pbuf[..plen];
     match accounts::find_user_by_name(passwd, name.as_bytes()) {
         Some(acct) => {
+            // Groups first, while still root (SET_GROUPS is root-only), so the
+            // new identity carries the same memberships a login would give it.
+            let mut gbuf = [0u8; syscall_abi::SAFECOPY_MAX as usize];
+            let glen = read_account_file("/etc/group", &mut gbuf);
+            let mut gids = [0u32; syscall_abi::MAX_SUPP_GROUPS];
+            let n = accounts::supplementary_gids(&gbuf[..glen], name.as_bytes(), acct.gid, &mut gids);
+            syscall4(syscall_abi::SET_GROUPS, gids.as_ptr() as u64, n as u64, 0, 0);
             if syscall4(syscall_abi::SET_ID, acct.uid as u64, acct.gid as u64, 0, 0)
                 == syscall_abi::SET_ID_DENIED
             {

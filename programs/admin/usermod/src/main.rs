@@ -1,12 +1,16 @@
-//! `usermod <user> -g <group|gid>` - change a user's **primary group** in
-//! `/etc/passwd` (root only). This is the "assign a user to a group" operation
-//! in the primary-gid model: a task carries one kernel-owned gid, so group
-//! membership *is* the passwd `gid` field. `<group>` may be a name (resolved via
-//! `/etc/group`) or a numeric gid. Full supplementary-group membership is a
-//! deferred tier (it needs the kernel identity to carry a group list).
+//! `usermod <user> [-g <group|gid>] [-G <group>[,<group>...]]` - change a user's
+//! group memberships (root only).
 //!
-//! Root only. Byte-only parsing (PIE-safe). Rewrites the one account line,
-//! preserving uid/home/salt/hash.
+//! - **`-g`** sets the **primary** group, the gid the kernel carries in the
+//!   task's identity word. `<group>` may be a name (resolved via `/etc/group`)
+//!   or a numeric gid. Rewrites the one `/etc/passwd` line, preserving
+//!   uid/home/salt/hash.
+//! - **`-G`** sets the **supplementary** groups: the comma-separated list
+//!   becomes the user's complete membership in `/etc/group` (so it removes them
+//!   from groups not listed), and `login`/`su` hand that list to the kernel via
+//!   `SET_GROUPS`. An empty `-G ""` clears them.
+//!
+//! Either flag alone, or both together. Root only. Byte-only parsing (PIE-safe).
 
 #![no_std]
 #![no_main]
@@ -18,7 +22,9 @@ const BUF: usize = syscall_abi::SAFECOPY_MAX as usize;
 #[no_mangle]
 #[link_section = ".text.start"]
 pub extern "C" fn _start() -> ! {
-    ulib::usage_if_requested(b"usage: usermod <user> -g <group|gid>  (root only)\r\n");
+    ulib::usage_if_requested(
+        b"usage: usermod <user> [-g <group|gid>] [-G <grp>[,<grp>...]]  (-g primary, -G supplementary; root only)\r\n",
+    );
     if ulib::getuid() != 0 {
         die(b"usermod: only root may modify accounts\r\n");
     }
@@ -28,6 +34,9 @@ pub extern "C" fn _start() -> ! {
     let mut name_len = 0usize;
     let mut gbuf = [0u8; 33];
     let mut g_len = 0usize;
+    let mut bigg = [0u8; 128];
+    let mut bigg_len = 0usize;
+    let mut have_bigg = false;
     let mut i = 1u64;
     let argc = ulib::argc();
     while i < argc {
@@ -37,16 +46,32 @@ pub extern "C" fn _start() -> ! {
         if tok == b"-g" {
             i += 1;
             g_len = ulib::arg(i, &mut gbuf).unwrap_or(0);
+        } else if tok == b"-G" {
+            i += 1;
+            bigg_len = ulib::arg(i, &mut bigg).unwrap_or(0);
+            have_bigg = true;
         } else if name_len == 0 && !tok.is_empty() {
             namebuf[..n].copy_from_slice(tok);
             name_len = n;
         }
         i += 1;
     }
-    if name_len == 0 || g_len == 0 {
-        die(b"usage: usermod <user> -g <group|gid>\r\n");
+    if name_len == 0 || (g_len == 0 && !have_bigg) {
+        die(b"usage: usermod <user> [-g <group|gid>] [-G <grp>[,<grp>...]]\r\n");
     }
     let name = &namebuf[..name_len];
+
+    // -G first: it rewrites /etc/group, which -g's name lookup reads. Doing it
+    // in this order means `usermod u -g staff -G staff` sees a consistent file.
+    if have_bigg {
+        set_supplementary(name, &bigg[..bigg_len]);
+    }
+    if g_len == 0 {
+        ulib::con_write(b"usermod: updated ");
+        ulib::con_write(name);
+        ulib::con_write(b"\r\n");
+        ulib::exit(0);
+    }
     let gspec = &gbuf[..g_len];
 
     let mut src = [0u8; BUF];
@@ -90,6 +115,53 @@ pub extern "C" fn _start() -> ! {
     ulib::con_write(name);
     ulib::con_write(b"\r\n");
     ulib::exit(0);
+}
+
+/// Make `list` (comma-separated group names) the user's complete supplementary
+/// membership: drop it from every group first, then add it to each named one.
+/// A name that doesn't exist is reported and skipped rather than aborting the
+/// whole change - the other memberships are still worth applying.
+///
+/// `#[inline(never)]`: two `SAFECOPY_MAX` buffers, kept off the caller's frame.
+#[inline(never)]
+fn set_supplementary(name: &[u8], list: &[u8]) {
+    let mut cur = [0u8; BUF];
+    let mut clen = ulib::read_file_all(GROUP_FILE, &mut cur);
+    // Remove from every group, so the list given is the complete membership.
+    let mut out = [0u8; BUF];
+    if let Some((n, changed)) = accounts::remove_group_member_everywhere(&cur[..clen], &mut out, name) {
+        if changed {
+            let code = ulib::fs_write_bulk(GROUP_FILE, &out[..n]);
+            if ulib::is_fs_error(code) {
+                ulib::fs_error("usermod", code);
+                ulib::exit(1);
+            }
+            cur[..n].copy_from_slice(&out[..n]);
+            clen = n;
+        }
+    }
+    // Then add to each named group, one rewrite per name.
+    for g in list.split(|&c| c == b',') {
+        if g.is_empty() {
+            continue;
+        }
+        match accounts::add_group_member(&cur[..clen], &mut out, g, name) {
+            Some((n, true)) => {
+                let code = ulib::fs_write_bulk(GROUP_FILE, &out[..n]);
+                if ulib::is_fs_error(code) {
+                    ulib::fs_error("usermod", code);
+                    ulib::exit(1);
+                }
+                cur[..n].copy_from_slice(&out[..n]);
+                clen = n;
+            }
+            _ => {
+                ulib::con_write(b"usermod: no such group (skipped): ");
+                ulib::con_write(g);
+                ulib::con_write(b"\r\n");
+            }
+        }
+    }
 }
 
 /// Resolve a `-g` value (a numeric gid, or a group name looked up in

@@ -430,8 +430,8 @@ fn handle_ninep(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [
     // other arms ignore it). Root -> (0,0), the default, so nothing changes for
     // boot/format-time creation. Without this a user couldn't write in its own
     // home - the created file would be root-owned and the follow-up write denied.
-    let (cuid, cgid) = caller_id(sender);
-    fs.set_creator(cuid as u16, cgid as u16);
+    let creator = caller_id(sender);
+    fs.set_creator(creator.uid as u16, creator.gid as u16);
     match verb {
         ninep_abi::NP_READDIR => {
             let Some(path) = path_from(payload, 0, p[0]) else {
@@ -855,29 +855,66 @@ fn want_len(want: u64) -> Option<usize> {
 
 const PERM_R: u16 = 4;
 const PERM_W: u16 = 2;
+/// Search permission on a directory - the right to *resolve a path through* it,
+/// which is a different thing from reading it (`r` lists the names; `x` lets you
+/// reach what they refer to).
+const PERM_X: u16 = 1;
 
-/// Whether a caller with `uid`/`gid` is allowed `need` (an `R`/`W`/`X` bit
-/// combination) on an object owned by `owner_uid`/`owner_gid` with `mode`.
-fn mode_allows(mode: u16, owner_uid: u32, owner_gid: u32, uid: u32, gid: u32, need: u16) -> bool {
-    if uid == 0 {
+/// The caller's identity for a permission decision: the uid, the primary gid,
+/// and the supplementary groups the kernel carries for that task.
+#[derive(Clone, Copy)]
+struct Caller {
+    uid: u32,
+    gid: u32,
+    groups: [u32; syscall_abi::MAX_SUPP_GROUPS],
+    n_groups: usize,
+}
+
+impl Caller {
+    /// Whether this caller is in `owner_gid` - as its primary group, or through
+    /// any supplementary group. This is the whole of what supplementary groups
+    /// buy: the group triad now applies to every group the user belongs to, not
+    /// only the one packed into its identity word.
+    fn in_group(&self, owner_gid: u32) -> bool {
+        self.gid == owner_gid || self.groups[..self.n_groups].contains(&owner_gid)
+    }
+}
+
+/// Whether `caller` is allowed `need` (an `R`/`W`/`X` bit combination) on an
+/// object owned by `owner_uid`/`owner_gid` with `mode`.
+fn mode_allows(mode: u16, owner_uid: u32, owner_gid: u32, caller: &Caller, need: u16) -> bool {
+    if caller.uid == 0 {
         return true; // root bypasses permission checks
     }
-    let triad = if uid == owner_uid {
+    let triad = if caller.uid == owner_uid {
         (mode >> 6) & 7 // owner rwx
-    } else if gid == owner_gid {
-        (mode >> 3) & 7 // group rwx
+    } else if caller.in_group(owner_gid) {
+        (mode >> 3) & 7 // group rwx - primary or supplementary
     } else {
         mode & 7 // other rwx
     };
     triad & need == need
 }
 
-/// The calling task's `(uid, gid)` from the kernel (`GET_ID`). The identity is a
-/// packed `(gid << 32) | uid`; widened to `u32` to compare against the ext2
-/// inode's `u16` owner fields.
-fn caller_id(sender: u64) -> (u32, u32) {
+/// The calling task's identity from the kernel: the packed `(gid << 32) | uid`
+/// (`GET_ID`) plus its supplementary group list (`GET_GROUPS`). Widened to `u32`
+/// to compare against the ext2 inode's `u16` owner fields.
+fn caller_id(sender: u64) -> Caller {
     let packed = syscall4(syscall_abi::GET_ID, sender, 0, 0, 0);
-    (packed as u32, (packed >> 32) as u32)
+    let mut groups = [0u32; syscall_abi::MAX_SUPP_GROUPS];
+    let n = syscall4(
+        syscall_abi::GET_GROUPS,
+        sender,
+        groups.as_mut_ptr() as u64,
+        groups.len() as u64,
+        0,
+    );
+    let n_groups = if n == syscall_abi::GET_ID_ERR {
+        0
+    } else {
+        (n as usize).min(groups.len())
+    };
+    Caller { uid: packed as u32, gid: (packed >> 32) as u32, groups, n_groups }
 }
 
 /// The parent directory of an absolute path (`/etc/passwd` -> `/etc`, `/foo` ->
@@ -902,14 +939,80 @@ fn parent_of(path: &str) -> &str {
     }
 }
 
+/// Whether one directory grants the caller search (`x`) permission. Shared by
+/// the ancestor walk; a directory that can't be stat'd or whose filesystem has
+/// no modes passes, same rule as [`path_allows`].
+fn dir_searchable(fs: &mut vfs::Filesystem, dir: &str, who: &Caller) -> bool {
+    match fs.stat(dir) {
+        Ok(st) => match st.mode {
+            Some(m) => mode_allows(m.mode, m.uid as u32, m.gid as u32, who, PERM_X),
+            None => true,
+        },
+        Err(_) => true,
+    }
+}
+
+/// Whether every **ancestor directory** of `path` grants the caller search
+/// (`x`) permission - POSIX path resolution.
+///
+/// This is what makes `chmod 700 ~` mean something. Without it, a mode on a
+/// *directory* only protected the directory's own listing: a caller who already
+/// knew the name of a world-readable file inside could still open it by full
+/// path, because only the object and its immediate parent were ever checked.
+/// Closing that was the deliberate "first cut" the users arc left open.
+///
+/// Walks `/` first (everything resolves through it), then each `/`-terminated
+/// prefix, which yields exactly the ancestors and never the final component.
+/// Byte-only: slicing a `&str` by a runtime index pulls in `core::fmt` and an
+/// `R_AARCH64_ABS64` the `-pie` link rejects (the recurring trap), so this
+/// slices the byte view and re-wraps.
+///
+/// Cost: one `stat` per ancestor level, on every path op by a non-root caller.
+/// Paths here are shallow (`/etc/passwd` is two levels) and root skips the whole
+/// check, so this is a small constant, not a walk of the disk.
+///
+/// A non-directory in the middle of a path passes if its `x` bit happens to be
+/// set (an executable, say). POSIX would answer `ENOTDIR`; here the op then
+/// fails on its own merits when the filesystem can't walk through a file, which
+/// is the same outcome by a different route.
+fn ancestors_searchable(fs: &mut vfs::Filesystem, path: &str, who: &Caller) -> bool {
+    if !dir_searchable(fs, "/", who) {
+        return false;
+    }
+    let b = path.as_bytes();
+    let mut i = 1usize;
+    while i < b.len() {
+        if b[i] == b'/' {
+            match core::str::from_utf8(&b[..i]) {
+                Ok(prefix) => {
+                    if !dir_searchable(fs, prefix, who) {
+                        return false;
+                    }
+                }
+                Err(_) => return true, // not a path we can reason about
+            }
+        }
+        i += 1;
+    }
+    true
+}
+
 /// Whether `path` (or, for namespace ops, the given directory) grants the caller
 /// `need`. A path that can't be stat'd (e.g. doesn't exist) or a filesystem that
 /// can't model permissions passes - the op then runs and fails on its own merits
 /// (not-found, etc.) rather than masquerading as a permission error.
-fn path_allows(fs: &mut vfs::Filesystem, path: &str, uid: u32, gid: u32, need: u16) -> bool {
+///
+/// Every ancestor directory must also be searchable: an object you cannot reach
+/// is one you cannot use, whatever its own mode says. Checking it here rather
+/// than in each verb's arm means every path that goes through this function -
+/// which is every path operand except `stat`'s - gets the traversal for free.
+fn path_allows(fs: &mut vfs::Filesystem, path: &str, who: &Caller, need: u16) -> bool {
+    if !ancestors_searchable(fs, path, who) {
+        return false;
+    }
     match fs.stat(path) {
         Ok(st) => match st.mode {
-            Some(m) => mode_allows(m.mode, m.uid as u32, m.gid as u32, uid, gid, need),
+            Some(m) => mode_allows(m.mode, m.uid as u32, m.gid as u32, who, need),
             None => true, // filesystem doesn't model owner/mode -> unrestricted
         },
         Err(_) => true,
@@ -919,7 +1022,8 @@ fn path_allows(fs: &mut vfs::Filesystem, path: &str, uid: u32, gid: u32, need: u
 /// Enforce the caller's permission for `verb`. Returns `true` if allowed. Reads
 /// the object's owner+mode via `stat` and compares against the caller's uid/gid.
 fn check_access(fs: &mut vfs::Filesystem, sender: u64, verb: u64, p: &[u64; 4], payload: &[u8]) -> bool {
-    let (uid, gid) = caller_id(sender);
+    let who = caller_id(sender);
+    let uid = who.uid;
     if uid == 0 {
         return true; // root: skip the per-op work entirely
     }
@@ -933,14 +1037,14 @@ fn check_access(fs: &mut vfs::Filesystem, sender: u64, verb: u64, p: &[u64; 4], 
         ninep_abi::NP_OPEN => match path_from(payload, 0, p[1]) {
             Some(path) => {
                 let flags = p[0];
-                if flags & ninep_abi::OPEN_READ != 0 && !path_allows(fs, path, uid, gid, PERM_R) {
+                if flags & ninep_abi::OPEN_READ != 0 && !path_allows(fs, path, &who, PERM_R) {
                     return false;
                 }
                 if flags & (ninep_abi::OPEN_WRITE | ninep_abi::OPEN_CREATE) != 0 {
                     let ok = if fs.stat(path).is_ok() {
-                        path_allows(fs, path, uid, gid, PERM_W)
+                        path_allows(fs, path, &who, PERM_W)
                     } else {
-                        path_allows(fs, parent_of(path), uid, gid, PERM_W)
+                        path_allows(fs, parent_of(path), &who, PERM_W)
                     };
                     if !ok {
                         return false;
@@ -952,7 +1056,7 @@ fn check_access(fs: &mut vfs::Filesystem, sender: u64, verb: u64, p: &[u64; 4], 
         },
         ninep_abi::NP_READDIR | ninep_abi::NP_READ_FILE | ninep_abi::NP_READ | ninep_abi::NP_READ_AT => {
             match path_from(payload, 0, p[0]) {
-                Some(path) => path_allows(fs, path, uid, gid, PERM_R),
+                Some(path) => path_allows(fs, path, &who, PERM_R),
                 None => true,
             }
         }
@@ -961,9 +1065,9 @@ fn check_access(fs: &mut vfs::Filesystem, sender: u64, verb: u64, p: &[u64; 4], 
             match path_from(payload, 0, p[0]) {
                 Some(path) => {
                     if fs.stat(path).is_ok() {
-                        path_allows(fs, path, uid, gid, PERM_W)
+                        path_allows(fs, path, &who, PERM_W)
                     } else {
-                        path_allows(fs, parent_of(path), uid, gid, PERM_W)
+                        path_allows(fs, parent_of(path), &who, PERM_W)
                     }
                 }
                 None => true,
@@ -972,7 +1076,7 @@ fn check_access(fs: &mut vfs::Filesystem, sender: u64, verb: u64, p: &[u64; 4], 
         // Namespace changes: W on the parent directory.
         ninep_abi::NP_TOUCH | ninep_abi::NP_MKDIR | ninep_abi::NP_RM | ninep_abi::NP_RMDIR => {
             match path_from(payload, 0, p[0]) {
-                Some(path) => path_allows(fs, parent_of(path), uid, gid, PERM_W),
+                Some(path) => path_allows(fs, parent_of(path), &who, PERM_W),
                 None => true,
             }
         }
@@ -980,14 +1084,17 @@ fn check_access(fs: &mut vfs::Filesystem, sender: u64, verb: u64, p: &[u64; 4], 
         ninep_abi::NP_MV => {
             match (path_from(payload, 0, p[0]), path_from(payload, p[0] as usize, p[1])) {
                 (Some(src), Some(dst)) => {
-                    path_allows(fs, parent_of(src), uid, gid, PERM_W)
-                        && path_allows(fs, parent_of(dst), uid, gid, PERM_W)
+                    path_allows(fs, parent_of(src), &who, PERM_W)
+                        && path_allows(fs, parent_of(dst), &who, PERM_W)
                 }
                 _ => true,
             }
         }
-        // chmod: owner-only (root already returned above).
+        // chmod: owner-only (root already returned above). These two stat the
+        // object directly rather than going through path_allows, so they need
+        // the ancestor walk spelled out.
         ninep_abi::NP_CHMOD => match path_from(payload, 0, p[0]) {
+            Some(path) if !ancestors_searchable(fs, path, &who) => false,
             Some(path) => match fs.stat(path) {
                 Ok(st) => match st.mode {
                     Some(m) => uid == m.uid as u32,
@@ -1000,6 +1107,7 @@ fn check_access(fs: &mut vfs::Filesystem, sender: u64, verb: u64, p: &[u64; 4], 
         // chown: root-only, so a non-root caller (we're past the root bypass) is
         // always refused when the filesystem models ownership.
         ninep_abi::NP_CHOWN => match path_from(payload, 0, p[0]) {
+            Some(path) if !ancestors_searchable(fs, path, &who) => false,
             Some(path) => match fs.stat(path) {
                 Ok(st) => st.mode.is_none(), // unrestricted only if not modelled
                 Err(_) => true,

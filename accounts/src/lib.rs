@@ -170,6 +170,122 @@ pub fn find_group_by_gid(group: &[u8], gid: u32) -> Option<Group<'_>> {
     None
 }
 
+/// Collect the gids of every group in `group` whose member list contains
+/// `name`, skipping `primary_gid` (already carried as the task's primary) and
+/// any duplicate. Writes into `out` and returns how many were written; a user in
+/// more groups than `out` holds keeps the first ones, in file order.
+///
+/// This is the `/etc/group` half of supplementary group membership: the members
+/// field stopped being informational the moment the kernel could carry a group
+/// *list*, and this is what turns it into one.
+pub fn supplementary_gids(group: &[u8], name: &[u8], primary_gid: u32, out: &mut [u32]) -> usize {
+    let mut n = 0usize;
+    for line in group.split(|&c| c == b'\n') {
+        if line.is_empty() || n == out.len() {
+            continue;
+        }
+        let Some(g) = parse_group(line) else { continue };
+        if g.gid == primary_gid || out[..n].contains(&g.gid) {
+            continue;
+        }
+        if members_contain(g.members, name) {
+            out[n] = g.gid;
+            n += 1;
+        }
+    }
+    n
+}
+
+/// Whether a comma-separated member list contains exactly `name` (not merely as
+/// a substring - `bob` must not match `bobby`).
+fn members_contain(members: &[u8], name: &[u8]) -> bool {
+    members.split(|&c| c == b',').any(|m| m == name)
+}
+
+/// Add `name` to `group_name`'s member list, returning the rewritten file in
+/// `out` and whether anything changed (`false` if the group doesn't exist or
+/// already lists the user). The `/etc/group` write behind `usermod -G`.
+pub fn add_group_member(
+    group: &[u8],
+    out: &mut [u8],
+    group_name: &[u8],
+    name: &[u8],
+) -> Option<(usize, bool)> {
+    let Some(g) = find_group_by_name(group, group_name) else {
+        return Some((0, false));
+    };
+    if members_contain(g.members, name) {
+        return Some((0, false));
+    }
+    let mut line = [0u8; 256];
+    let mut w = Writer::new(&mut line);
+    w.bytes(g.name)?;
+    w.byte(b':')?;
+    w.dec(g.gid as u64)?;
+    w.byte(b':')?;
+    if !g.members.is_empty() {
+        w.bytes(g.members)?;
+        w.byte(b',')?;
+    }
+    w.bytes(name)?;
+    let len = w.len;
+    let (n, replaced) = replace_line(group, out, group_name, &line[..len])?;
+    Some((n, replaced))
+}
+
+/// Remove `name` from every group's member list, returning the rewritten file
+/// and whether anything changed. Used by `usermod -G` to make the given list the
+/// user's *complete* supplementary membership rather than an addition.
+pub fn remove_group_member_everywhere(
+    group: &[u8],
+    out: &mut [u8],
+    name: &[u8],
+) -> Option<(usize, bool)> {
+    let mut w = 0usize;
+    let mut changed = false;
+    for line in group.split(|&c| c == b'\n') {
+        if line.is_empty() {
+            continue;
+        }
+        match parse_group(line) {
+            Some(g) if members_contain(g.members, name) => {
+                changed = true;
+                let mut buf = [0u8; 256];
+                let mut lw = Writer::new(&mut buf);
+                lw.bytes(g.name)?;
+                lw.byte(b':')?;
+                lw.dec(g.gid as u64)?;
+                lw.byte(b':')?;
+                let mut first = true;
+                for m in g.members.split(|&c| c == b',') {
+                    if m.is_empty() || m == name {
+                        continue;
+                    }
+                    if !first {
+                        lw.byte(b',')?;
+                    }
+                    first = false;
+                    lw.bytes(m)?;
+                }
+                let len = lw.len;
+                for &b in &buf[..len] {
+                    *out.get_mut(w)? = b;
+                    w += 1;
+                }
+            }
+            _ => {
+                for &b in line {
+                    *out.get_mut(w)? = b;
+                    w += 1;
+                }
+            }
+        }
+        *out.get_mut(w)? = b'\n';
+        w += 1;
+    }
+    Some((w, changed))
+}
+
 /// True if `passwd` already has an account named `name` (useradd's collision
 /// check).
 pub fn user_exists(passwd: &[u8], name: &[u8]) -> bool {
@@ -519,6 +635,53 @@ mod tests {
         assert_eq!(acct.uid, 1005);
         assert!(acct.verify(b"hunter2"));
         assert!(!acct.verify(b"wrong"));
+    }
+
+    #[test]
+    fn supplementary_group_membership() {
+        const G: &[u8] = b"root:0:\nuser:1000:\nstaff:1500:alice,bob\ndevs:1600:bob\nbobby:1700:bobby\n";
+        let mut out = [0u32; 8];
+        // bob is in staff and devs; his primary (1000) is skipped, and the
+        // group literally named "bobby" must not match the user "bob".
+        let n = supplementary_gids(G, b"bob", 1000, &mut out);
+        assert_eq!(&out[..n], &[1500, 1600]);
+        // alice is only in staff; her own primary group is excluded.
+        let n = supplementary_gids(G, b"alice", 1500, &mut out);
+        assert_eq!(n, 0);
+        let n = supplementary_gids(G, b"alice", 1000, &mut out);
+        assert_eq!(&out[..n], &[1500]);
+        // Someone in no group at all.
+        assert_eq!(supplementary_gids(G, b"nobody", 1000, &mut out), 0);
+        // A tight output buffer keeps the first ones rather than overflowing.
+        let mut one = [0u32; 1];
+        assert_eq!(supplementary_gids(G, b"bob", 1000, &mut one), 1);
+        assert_eq!(one[0], 1500);
+    }
+
+    #[test]
+    fn group_membership_edits() {
+        const G: &[u8] = b"root:0:\nstaff:1500:alice\ndevs:1600:\n";
+        let mut out = [0u8; 512];
+        // Append to a non-empty list, and to an empty one.
+        let (n, changed) = add_group_member(G, &mut out, b"staff", b"bob").unwrap();
+        assert!(changed);
+        assert_eq!(find_group_by_name(&out[..n], b"staff").unwrap().members, b"alice,bob");
+        let (n, changed) = add_group_member(G, &mut out, b"devs", b"bob").unwrap();
+        assert!(changed);
+        assert_eq!(find_group_by_name(&out[..n], b"devs").unwrap().members, b"bob");
+        // Already a member, or no such group: no change.
+        assert_eq!(add_group_member(G, &mut out, b"staff", b"alice").unwrap().1, false);
+        assert_eq!(add_group_member(G, &mut out, b"ghosts", b"bob").unwrap().1, false);
+        // Removal everywhere, leaving the other members intact.
+        const G2: &[u8] = b"root:0:\nstaff:1500:alice,bob\ndevs:1600:bob\n";
+        let (n, changed) = remove_group_member_everywhere(G2, &mut out, b"bob").unwrap();
+        assert!(changed);
+        let rebuilt = &out[..n];
+        assert_eq!(find_group_by_name(rebuilt, b"staff").unwrap().members, b"alice");
+        assert_eq!(find_group_by_name(rebuilt, b"devs").unwrap().members, b"");
+        assert_eq!(find_group_by_name(rebuilt, b"root").unwrap().gid, 0);
+        // A user in no group leaves the file untouched.
+        assert_eq!(remove_group_member_everywhere(G2, &mut out, b"carol").unwrap().1, false);
     }
 
     #[test]

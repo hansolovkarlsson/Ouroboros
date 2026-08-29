@@ -407,12 +407,16 @@ crate, plus creator-owned new inodes.
   the other targets deliberately don't, so the degradation path stays exercised.
   Verified by creating the same account on three boots: the two with the device
   produced different salts, the one without printed the warning.
-- **Supplementary group membership** — a user in several groups at once, checked
-  by `fsd`. Needs the kernel identity to carry a group *list* (it's one packed
-  gid today) plus an enforcement change; primary-gid (`usermod -g`) ships today.
+- ~~**Supplementary group membership**~~ — **shipped 2026-08-29.** The kernel
+  identity carries a list (`SET_GROUPS`/`GET_GROUPS`, 8 per task, root-only to
+  set, inherited at spawn, cleared on death and on logout); `fsd`'s group triad
+  accepts primary *or* supplementary; `usermod -G` configures it and `id` shows
+  it. `/etc/group`'s member list is now load-bearing rather than informational.
 - **`/etc/shadow`** — move password hashes out of the world-readable `/etc/passwd`.
-- **Ancestor-directory `x`-traversal** — enforcement checks the object + its
-  parent, not search bits on every ancestor directory.
+- ~~**Ancestor-directory `x`-traversal**~~ — **shipped 2026-08-29.** Every
+  ancestor directory of a path operand must grant search (`x`), so `chmod 700` on
+  a directory now protects its contents and not just its listing (the hole was
+  demonstrated against the old `fsd` before fixing). `stat` stays open by design.
 - **Per-user cluster identity** — the 9P export authenticates the *machine*
   (shared key), not a *user*; per-user identity across the cluster is a named
   cluster-auth tier that would land here.

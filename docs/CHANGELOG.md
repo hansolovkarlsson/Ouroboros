@@ -7,6 +7,59 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/`; 
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## Permission model: ancestor-`x` traversal and supplementary groups (2026-08-29)
+
+The two enforcement gaps the users arc left explicitly open, closed together
+because both live in `fsd`'s one `check_access`.
+
+**Ancestor-`x` traversal.** Enforcement checked the object and (for writes) its
+parent — never the directories a path resolves *through*. So `chmod 700` on a
+directory protected its listing but not its contents: a caller who knew the name
+of a world-readable file inside could still open it by full path. Demonstrated
+before fixing, by running the same script against the old `fsd`: as `user`,
+`cat /secret/inside` on a `0644` file inside a `drwx------` root-owned directory
+printed `classified`. With the walk it prints `permission denied`, while
+`cat /HELLO.TXT` through `0755` ancestors still works.
+
+- The walk lives in `path_allows`, so every path operand that already went
+  through it gets traversal for free; `chmod`/`chown` stat directly and got the
+  call spelled out. `stat` stays deliberately open (`ls -l` needs metadata for
+  entries a readable directory already exposes).
+- Cost is one `stat` per ancestor level, on non-root callers only — paths here
+  are shallow and root skips the whole check.
+- A non-directory mid-path passes if its `x` bit happens to be set; POSIX would
+  say `ENOTDIR`, and the op then fails on its own merits instead. Noted rather
+  than pretended away.
+
+**Supplementary groups.** The kernel identity carried exactly one gid, so a user
+could belong to one group. It now carries a list:
+
+- **`SET_GROUPS` (64) / `GET_GROUPS` (65)**, with `MAX_SUPP_GROUPS = 8` per task.
+  `SET_GROUPS` is **root-only**, like POSIX `setgroups` and for the same reason:
+  membership is a permission grant, so a task that could add its own groups could
+  grant itself any group-readable file. That forces the ordering — the trusted
+  shell sets groups *while still root*, then drops identity. `GET_GROUPS` is
+  ungated like `GET_ID` (membership isn't secret, and `fsd` needs the sender's
+  list on every op). Children inherit the list at `SPAWN` exactly as they inherit
+  uid/gid; the kernel clears it on task death, and the shell clears it on logout
+  — the shell never dies, so the next user must not inherit the last one's
+  memberships.
+- **`fsd`** replaces the `(uid, gid)` pair with a `Caller` carrying the list; the
+  group triad now applies if the object's gid is the caller's primary **or** any
+  supplementary group.
+- **`/etc/group`'s member list stopped being informational** — `accounts::
+  supplementary_gids` turns it into the real thing (matching whole names, so the
+  group `bobby` doesn't make `bob` a member), and **`usermod -G`** makes it
+  configurable on-device: the comma-separated list becomes the user's complete
+  membership (it removes them from groups not listed). `login` and `su` both hand
+  the resulting list to the kernel.
+- **`id` shows them**: `uid=1000(user) gid=1000(user) groups=1000(user),1500(staff)`.
+- **Verified end to end** on `run-image-ext2` with no code change between the two
+  halves — only the membership: a `-rw-r-----` file owned `root:staff` is
+  `permission denied` to `user`, then after `usermod user -G staff` and a fresh
+  login the same `cat` prints its contents. 12 `accounts` host tests (two new:
+  membership parsing and the `/etc/group` edits).
+
 ## A virtio-entropy RNG: the `RANDOM` syscall, and real password salts (2026-08-29)
 
 Password salts were derived from the monotonic clock and documented as weak from

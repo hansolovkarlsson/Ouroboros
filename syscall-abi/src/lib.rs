@@ -671,6 +671,39 @@ pub const GET_ID: u64 = 62;
 /// is the quiet weakness this device exists to remove.
 pub const RANDOM: u64 = 63;
 
+/// Most supplementary groups a task may carry, on top of its primary gid.
+/// Bounds the per-task kernel array; a user in more groups than this keeps the
+/// first [`MAX_SUPP_GROUPS`] (`login` fills them in `/etc/group` order).
+pub const MAX_SUPP_GROUPS: usize = 8;
+
+/// **Set the calling task's supplementary groups**: `arg0` = pointer to an array
+/// of `u32` gids, `arg1` = how many (capped at [`MAX_SUPP_GROUPS`]). Returns `0`,
+/// or [`SET_GROUPS_DENIED`] for a non-root caller.
+///
+/// **Root only**, like POSIX `setgroups`, and for the same reason: group
+/// membership is a permission grant, so a task that could add its own groups
+/// could grant itself access to any group-readable file. The trusted shell calls
+/// this *before* dropping to the user (while it is still root) and clears it
+/// again on logout; children inherit the list at [`SPAWN`] exactly as they
+/// inherit uid/gid.
+///
+/// The primary gid stays in the packed [`SET_ID`] word - this is strictly the
+/// *additional* list, so `fsd`'s group check is "owner gid == primary gid, or
+/// owner gid is in this list".
+pub const SET_GROUPS: u64 = 64;
+
+/// **Read a task's supplementary groups**: `arg0` = task index, `arg1` = out
+/// pointer, `arg2` = out capacity in **gids** (not bytes). Copies up to that
+/// many `u32` gids and returns the task's true count, or [`GET_ID_ERR`] for an
+/// out-of-range task.
+///
+/// Ungated like [`GET_ID`] - group membership is not a secret, and `fsd` needs
+/// the *sender's* list to decide the group triad on every op.
+pub const GET_GROUPS: u64 = 65;
+
+/// [`SET_GROUPS`] refused: the calling task isn't root.
+pub const SET_GROUPS_DENIED: u64 = u64::MAX;
+
 /// [`RANDOM`] on a machine with no entropy device (or with an invalid output
 /// buffer). Distinct from `0`, which would mean "a device answered, with
 /// nothing" - the caller should treat this one as "there is no RNG here".

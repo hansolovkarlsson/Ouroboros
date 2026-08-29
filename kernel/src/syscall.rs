@@ -811,6 +811,59 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
                 tasks::id_of(t)
             }
         }
+        syscall_abi::SET_GROUPS => {
+            // arg0 = pointer to u32 gids, arg1 = count. Root only: group
+            // membership is a permission grant, so a task that could add its own
+            // groups could grant itself access to any group-readable file. The
+            // trusted shell calls this while still root, before dropping to the
+            // user, and clears it again on logout.
+            let me = tasks::current_task();
+            if tasks::uid_of(me) != 0 {
+                return syscall_abi::SET_GROUPS_DENIED;
+            }
+            let n = (arg1 as usize).min(syscall_abi::MAX_SUPP_GROUPS);
+            let bytes = (n * core::mem::size_of::<u32>()) as u64;
+            if n > 0 && !valid_user_range(arg0, bytes) {
+                return syscall_abi::SET_GROUPS_DENIED;
+            }
+            let mut gids = [0u32; syscall_abi::MAX_SUPP_GROUPS];
+            for (i, g) in gids.iter_mut().enumerate().take(n) {
+                // SAFETY: range validated above; u32-aligned reads from a
+                // caller pointer are done bytewise to avoid an alignment
+                // assumption about where userland put the array.
+                let mut b = [0u8; 4];
+                for (k, byte) in b.iter_mut().enumerate() {
+                    *byte = unsafe { core::ptr::read((arg0 as *const u8).add(i * 4 + k)) };
+                }
+                *g = u32::from_le_bytes(b);
+            }
+            tasks::set_groups(me, &gids[..n]);
+            0
+        }
+        syscall_abi::GET_GROUPS => {
+            // arg0 = task index, arg1 = out pointer, arg2 = capacity in gids.
+            // Ungated like GET_ID - membership isn't secret, and fsd needs the
+            // sender's list on every permission check.
+            let t = arg0 as usize;
+            if t >= tasks::NUM_TASKS {
+                return syscall_abi::GET_ID_ERR;
+            }
+            let cap = (arg2 as usize).min(syscall_abi::MAX_SUPP_GROUPS);
+            let bytes = (cap * core::mem::size_of::<u32>()) as u64;
+            if cap > 0 && !valid_user_range(arg1, bytes) {
+                return syscall_abi::GET_ID_ERR;
+            }
+            let mut gids = [0u32; syscall_abi::MAX_SUPP_GROUPS];
+            let total = tasks::groups_of(t, &mut gids[..cap]);
+            for (i, g) in gids.iter().enumerate().take(cap.min(total)) {
+                let b = g.to_le_bytes();
+                for (k, byte) in b.iter().enumerate() {
+                    // SAFETY: range validated above.
+                    unsafe { core::ptr::write((arg1 as *mut u8).add(i * 4 + k), *byte) };
+                }
+            }
+            total as u64
+        }
         syscall_abi::RANDOM => {
             // arg0 = out pointer, arg1 = out capacity. Fills the caller's buffer
             // with hardware entropy, returning the byte count written - or
