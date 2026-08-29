@@ -10,6 +10,15 @@ DESCRIPTION
 
         uid=1000(user) gid=1000(user)
 
+    When the session has SUPPLEMENTARY groups (set by usermod -G and handed to
+    the kernel by login/su), they are listed too - the primary first, then the
+    extras:
+
+        uid=1000(user) gid=1000(user) groups=1000(user),1500(staff)
+
+    Those are real permissions: the filesystem server grants a file's group
+    triad if its group is the primary OR any of these.
+
     Identity is carried by the kernel per task and inherited across spawn, so
     running id after su reports the new user - the proof that a command runs as
     whoever started it:

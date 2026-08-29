@@ -261,6 +261,17 @@ pub fn monotonic_us() -> u64 {
     syscall(syscall_abi::MONOTONIC_US, 0)
 }
 
+/// Read `task`'s supplementary gids into `out`, returning the task's true count
+/// (which may exceed what fitted). Pass [`self_task`] for one's own.
+pub fn groups_of(task: u64, out: &mut [u32]) -> usize {
+    let r = syscall4(syscall_abi::GET_GROUPS, task, out.as_mut_ptr() as u64, out.len() as u64, 0);
+    if r == syscall_abi::GET_ID_ERR {
+        0
+    } else {
+        r as usize
+    }
+}
+
 /// Fill `buf` with hardware entropy (`RANDOM`), returning how many bytes were
 /// written — `0` when this machine has no entropy device, which is the ordinary
 /// case rather than an error (only a QEMU run with `-device virtio-rng-device`

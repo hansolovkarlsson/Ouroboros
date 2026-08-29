@@ -791,14 +791,71 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
             // to re-prompt). Anything else is refused: no escalation, and a
             // user's spawned children can't restore to root because their saved
             // identity is their own (see tasks::inherit_id).
+            //
+            // arg2/arg3 carry the supplementary group list, so identity and
+            // membership change together. TWO permission rules, and combining
+            // the call must not combine the gates: the identity half is the rule
+            // above; the group half is ROOT ONLY (membership is a permission
+            // grant, so a task that could add its own groups could hand itself
+            // any group-readable file). A non-root caller may pass only an EMPTY
+            // list - dropping memberships only removes privilege, which is what
+            // logout does. Every pre-existing caller passes 0/0 and so clears
+            // them, which is the right default: an identity change carrying a
+            // stale group list is a privilege leak.
             let cur = tasks::current_task();
             let new = ((arg1 as u32 as u64) << 32) | (arg0 as u32 as u64);
-            if tasks::uid_of(cur) == 0 || new == tasks::saved_id_of(cur) {
-                tasks::apply_id(cur, new);
-                0
-            } else {
-                syscall_abi::SET_ID_DENIED
+            let is_root = tasks::uid_of(cur) == 0;
+            if !is_root && new != tasks::saved_id_of(cur) {
+                return syscall_abi::SET_ID_DENIED;
             }
+            let n = (arg3 as usize).min(syscall_abi::MAX_SUPP_GROUPS);
+            if !is_root && n > 0 {
+                return syscall_abi::SET_ID_DENIED;
+            }
+            let mut gids = [0u32; syscall_abi::MAX_SUPP_GROUPS];
+            if n > 0 {
+                let bytes = (n * core::mem::size_of::<u32>()) as u64;
+                if !valid_user_range(arg2, bytes) {
+                    return syscall_abi::SET_ID_DENIED;
+                }
+                for (i, g) in gids.iter_mut().enumerate().take(n) {
+                    // Read bytewise: nothing guarantees userland aligned the array.
+                    let mut b = [0u8; 4];
+                    for (k, byte) in b.iter_mut().enumerate() {
+                        // SAFETY: range validated above.
+                        *byte = unsafe { core::ptr::read((arg2 as *const u8).add(i * 4 + k)) };
+                    }
+                    *g = u32::from_le_bytes(b);
+                }
+            }
+            tasks::set_groups(cur, &gids[..n]);
+            tasks::apply_id(cur, new);
+            0
+        }
+        syscall_abi::GET_GROUPS => {
+            // arg0 = task index, arg1 = out pointer, arg2 = capacity in gids.
+            // Ungated like GET_ID - membership isn't secret, and fsd needs the
+            // sender's list on every permission check. A dead slot reports no
+            // identity (see GET_ID), so it reports no groups either.
+            let t = arg0 as usize;
+            if t >= tasks::NUM_TASKS || !tasks::is_live(t) {
+                return syscall_abi::GET_ID_ERR;
+            }
+            let cap = (arg2 as usize).min(syscall_abi::MAX_SUPP_GROUPS);
+            let bytes = (cap * core::mem::size_of::<u32>()) as u64;
+            if cap > 0 && !valid_user_range(arg1, bytes) {
+                return syscall_abi::GET_ID_ERR;
+            }
+            let mut gids = [0u32; syscall_abi::MAX_SUPP_GROUPS];
+            let total = tasks::groups_of(t, &mut gids[..cap]);
+            for (i, g) in gids.iter().enumerate().take(cap.min(total)) {
+                let b = g.to_le_bytes();
+                for (k, byte) in b.iter().enumerate() {
+                    // SAFETY: range validated above.
+                    unsafe { core::ptr::write((arg1 as *mut u8).add(i * 4 + k), *byte) };
+                }
+            }
+            total as u64
         }
         syscall_abi::GET_ID => {
             // arg0 = task index -> its packed (gid << 32) | uid. Identity isn't
