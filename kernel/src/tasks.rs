@@ -65,7 +65,7 @@
 use core::arch::{asm, global_asm};
 use core::cell::UnsafeCell;
 use core::ffi::c_void;
-use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 use crate::exceptions::Context;
 use crate::loader::LoadedProgram;
@@ -888,6 +888,36 @@ pub(crate) fn is_live(task: usize) -> bool {
     )
 }
 
+/// Per-task **supplementary groups**: the gids a task belongs to *in addition*
+/// to the primary gid packed into [`IDS`]. Written only by the root-gated group
+/// half of `SET_ID`, inherited at spawn ([`inherit_id`]), cleared on death.
+static GROUPS: [[AtomicU32; syscall_abi::MAX_SUPP_GROUPS]; NUM_TASKS] =
+    [const { [const { AtomicU32::new(0) }; syscall_abi::MAX_SUPP_GROUPS] }; NUM_TASKS];
+
+/// How many entries of each task's [`GROUPS`] row are live.
+static GROUP_COUNTS: [AtomicU32; NUM_TASKS] = [const { AtomicU32::new(0) }; NUM_TASKS];
+
+/// Replace `task`'s supplementary group list. The root-only permission decision
+/// belongs to the caller (the `SET_ID` syscall arm).
+pub(crate) fn set_groups(task: usize, gids: &[u32]) {
+    let n = gids.len().min(syscall_abi::MAX_SUPP_GROUPS);
+    for (i, g) in gids[..n].iter().enumerate() {
+        GROUPS[task][i].store(*g, Ordering::Relaxed);
+    }
+    GROUP_COUNTS[task].store(n as u32, Ordering::Relaxed);
+}
+
+/// Copy `task`'s supplementary gids into `out`, returning the task's true count
+/// (which may exceed what fitted).
+pub(crate) fn groups_of(task: usize, out: &mut [u32]) -> usize {
+    let n = GROUP_COUNTS[task].load(Ordering::Relaxed) as usize;
+    let copy = n.min(out.len());
+    for (i, slot) in out.iter_mut().enumerate().take(copy) {
+        *slot = GROUPS[task][i].load(Ordering::Relaxed);
+    }
+    n
+}
+
 /// `task`'s owning uid (the low half of its packed identity).
 pub(crate) fn uid_of(task: usize) -> u32 {
     IDS[task].load(Ordering::Relaxed) as u32
@@ -923,6 +953,14 @@ pub(crate) fn inherit_id(child: usize, parent: usize) {
     let cur = IDS[parent].load(Ordering::Relaxed);
     IDS[child].store(cur, Ordering::Relaxed);
     SAVED_IDS[child].store(cur, Ordering::Relaxed);
+    // Supplementary groups travel with the identity: a command run by a user in
+    // `staff` must reach the group's files exactly as the user can.
+    let n = GROUP_COUNTS[parent].load(Ordering::Relaxed);
+    let live = (n as usize).min(syscall_abi::MAX_SUPP_GROUPS);
+    for (dst, src) in GROUPS[child].iter().zip(GROUPS[parent].iter()).take(live) {
+        dst.store(src.load(Ordering::Relaxed), Ordering::Relaxed);
+    }
+    GROUP_COUNTS[child].store(n, Ordering::Relaxed);
 }
 
 /// Reset `task`'s identity (current *and* saved) to root on death, alongside the
@@ -931,6 +969,9 @@ pub(crate) fn inherit_id(child: usize, parent: usize) {
 fn reset_id(task: usize) {
     IDS[task].store(0, Ordering::Relaxed);
     SAVED_IDS[task].store(0, Ordering::Relaxed);
+    // An Unused slot must not read back as some dead task's memberships any more
+    // than as its uid.
+    GROUP_COUNTS[task].store(0, Ordering::Relaxed);
 }
 
 /// Runtime capability delegation (the `DELEGATE` syscall). The static

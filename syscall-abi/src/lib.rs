@@ -641,11 +641,39 @@ pub const ENV_MAX: u64 = 2048;
 /// step, not this one). Children inherit their parent's identity at [`SPAWN`],
 /// so a command runs as whoever started it.
 ///
+/// **Supplementary groups travel with the identity**, in the same call: `arg2` =
+/// pointer to an array of `u32` gids, `arg3` = how many (capped at
+/// [`MAX_SUPP_GROUPS`]). Passing `0, 0` - which every pre-existing caller does -
+/// clears them, and that is the right default: an identity change with a stale
+/// group list attached is a privilege leak, and making the caller remember a
+/// second call is how that leak happens.
+///
+/// The two halves have **different permission rules**, and combining the call
+/// does not combine the gates. The identity half is the rule above. The group
+/// half is **root only**, like POSIX `setgroups`: membership is a permission
+/// grant, so a task that could add its own groups could hand itself any
+/// group-readable file. A non-root caller may therefore pass only an *empty*
+/// list (dropping memberships only ever removes privilege - that is logout).
+///
 /// The kernel owns this binding because it is the *only* component that
 /// unforgeably knows an IPC message's real sender - so it is the root of trust
 /// a permission check (a later step) builds on. Names, passwords, `/etc/passwd`,
 /// and `/home` are entirely userland; the kernel only knows uid/gid are numbers.
 pub const SET_ID: u64 = 61;
+
+/// Most supplementary groups a task may carry, on top of its primary gid.
+/// Bounds the per-task kernel array; a user in more groups than this keeps the
+/// first [`MAX_SUPP_GROUPS`] (`login` fills them in `/etc/group` order).
+pub const MAX_SUPP_GROUPS: usize = 8;
+
+/// **Read a task's supplementary groups**: `arg0` = task index, `arg1` = out
+/// pointer, `arg2` = out capacity in **gids** (not bytes). Copies up to that
+/// many `u32` gids and returns the task's true count, or [`GET_ID_ERR`] for an
+/// out-of-range or dead task.
+///
+/// Ungated like [`GET_ID`] - group membership is not a secret, and `fsd` needs
+/// the *sender's* list to decide the group triad on every op.
+pub const GET_GROUPS: u64 = 64;
 
 /// **Read a task's user identity**: `arg0` = task index. Returns the packed
 /// `(gid << 32) | uid`, or [`GET_ID_ERR`] for an out-of-range task. A task reads
