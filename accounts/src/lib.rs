@@ -224,6 +224,22 @@ pub fn next_free_gid(group: &[u8]) -> u32 {
 /// virtio-entropy driver + a `RANDOM` syscall (a noted follow-up); this keeps
 /// the salt *per-account-unique* meanwhile, which is what defeats a shared
 /// rainbow table across our own accounts.
+/// Build a password salt from the best entropy the caller could obtain, and say
+/// which it was: `(salt, strong)`.
+///
+/// `random` is eight bytes from a hardware RNG (`ulib::random_bytes8`) when the
+/// machine has one — those *are* the salt, used directly, since they are already
+/// uniform. `None` falls back to [`make_salt`]'s clock derivation, and `strong`
+/// comes back `false` so the caller can **say so out loud** rather than quietly
+/// storing a guessable salt. This crate stays pure: the caller does the syscall
+/// and passes the result in.
+pub fn salt_from(random: Option<[u8; 8]>, clock: u64) -> ([u8; 8], bool) {
+    match random {
+        Some(bytes) => (bytes, true),
+        None => (make_salt(clock), false),
+    }
+}
+
 pub fn make_salt(entropy: u64) -> [u8; 8] {
     let digest = sha256_two(&entropy.to_le_bytes(), b"ouroboros-salt");
     let mut salt = [0u8; 8];
@@ -503,6 +519,22 @@ mod tests {
         assert_eq!(acct.uid, 1005);
         assert!(acct.verify(b"hunter2"));
         assert!(!acct.verify(b"wrong"));
+    }
+
+    #[test]
+    fn salt_from_prefers_hardware_entropy() {
+        // Real entropy is used verbatim - it is already uniform, so hashing it
+        // would only lose the property we went to the device for.
+        let bytes = [1u8, 2, 3, 4, 5, 6, 7, 8];
+        let (salt, strong) = salt_from(Some(bytes), 12345);
+        assert_eq!(salt, bytes);
+        assert!(strong);
+        // With no device, the clock fallback is used and flagged as weak.
+        let (weak_salt, strong) = salt_from(None, 12345);
+        assert_eq!(weak_salt, make_salt(12345));
+        assert!(!strong);
+        // The fallback still differs per call, which is what it is for.
+        assert_ne!(salt_from(None, 12345).0, salt_from(None, 12346).0);
     }
 
     #[test]

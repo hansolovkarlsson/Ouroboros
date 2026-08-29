@@ -31,6 +31,7 @@ mod virtio_blk;
 mod virtio_console;
 mod virtio_mmio;
 mod virtio_net;
+mod virtio_rng;
 mod xhci;
 
 use uefi::boot;
@@ -494,6 +495,11 @@ fn main() -> Status {
         // doesn't have yet). Silent when no NIC is attached (only
         // `make run-net` attaches one).
         init_net();
+        // The entropy source behind the RANDOM syscall (password salts). Same
+        // gate and the same "silent when absent" rule as the NIC: only a QEMU
+        // run started with `-device virtio-rng-device` has one, and userland is
+        // built to degrade loudly without it.
+        init_entropy();
     } else {
         console::println!("Ouroboros kernel: skipping virtio-blk (unconfirmed-safe virtio-mmio scan on this platform) - disk commands won't work this boot");
     }
@@ -779,6 +785,35 @@ fn init_net() {
     // function no longer sends anything itself.
     syscall::install_net_device(device);
     console::println!("Ouroboros kernel: NIC installed for the network server");
+}
+
+/// Discovers and installs the virtio-rng entropy device the `RANDOM` syscall
+/// serves. Absence is the ordinary case (only `-device virtio-rng-device`
+/// provides one), so `NotFound` returns quietly - userland then sees
+/// `RANDOM_UNAVAILABLE` and falls back to its documented weak path.
+fn init_entropy() {
+    let mut device = match unsafe { virtio_rng::Device::discover() } {
+        Ok(d) => d,
+        Err(virtio_rng::Error::NotFound) => return, // no RNG this boot - stay quiet
+        Err(e) => {
+            console::println!("Ouroboros kernel: virtio-rng discovery failed ({e})");
+            return;
+        }
+    };
+    if let Err(e) = unsafe { device.init() } {
+        console::println!("Ouroboros kernel: virtio-rng init failed ({e})");
+        return;
+    }
+    // Prove the device actually answers before advertising it: a driver that
+    // initializes but returns nothing would hand userland a silent zero salt,
+    // which is worse than having no device at all.
+    match unsafe { device.next_u64() } {
+        Some(_) => {
+            syscall::install_rng_device(device);
+            console::println!("Ouroboros kernel: virtio-rng ready, entropy available to userland");
+        }
+        None => console::println!("Ouroboros kernel: virtio-rng returned no entropy - not installed"),
+    }
 }
 
 /// Parks the core forever instead of returning to firmware. `wfe` is a

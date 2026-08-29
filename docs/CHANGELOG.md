@@ -7,6 +7,46 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/`; 
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## A virtio-entropy RNG: the `RANDOM` syscall, and real password salts (2026-08-29)
+
+Password salts were derived from the monotonic clock and documented as weak from
+the day they shipped — an attacker who can bound when an account was created can
+bound its salt, which is most of what a salt is meant to prevent. This closes
+that, the users arc's named upgrade.
+
+- **`kernel/src/virtio_rng.rs`** — the simplest virtio device in the spec and the
+  simplest driver here: one virtqueue, no config space, no device-specific
+  feature bits. Modeled on `virtio_console.rs` (discover / init / one queue /
+  polled completion). The one structural difference: the descriptor is
+  device-**writable** (`VIRTQ_DESC_F_WRITE`), so the **used ring's `len` says how
+  many bytes the device actually wrote** — which the spec permits to be fewer
+  than asked for, and the driver returns that count rather than assuming a full
+  buffer. The device DMAs into a kernel static, never a caller's memory (the
+  same "DMA owner stays in the kernel" rule the block and NIC drivers follow).
+- **`RANDOM` (syscall 63)** — `(out ptr, out capacity)` → bytes written, or
+  `RANDOM_UNAVAILABLE`. Deliberately **not** gated to one task the way `BLOCK_*`
+  and `NET_*` are: entropy has no state to corrupt, nothing is leaked by reading
+  it, and every account tool needs it.
+- **Absence is the ordinary case, not an error.** Only a QEMU run with `-device
+  virtio-rng-device` has one; Parallels and the Pi expose no virtio-mmio at all.
+  So discovery is silent when there is nothing there, and callers **degrade
+  loudly**: `accounts::salt_from(random, clock)` returns `(salt, strong)`, and
+  `passwd`/`useradd` print `no hardware RNG - using a weaker clock-derived salt`
+  rather than quietly storing a guessable one. Hardware bytes are used *verbatim*
+  — they are already uniform, so hashing them would only lose what the device was
+  consulted for.
+- **The kernel proves the device answers before advertising it**: `init_entropy`
+  draws one `u64` and only then installs it, because a device that initializes
+  but returns nothing would hand userland a silent zero salt — worse than having
+  no device at all.
+- **Verified by running the same account creation on three boots** (fresh disk
+  image each time, identical script): without the device, the warning appears and
+  the account is still created; with it, no warning and the two runs produced
+  **different** salts (`c260a909…` vs `f6850713…`) — which is the actual evidence
+  the bytes are entropy rather than a deterministic function of the boot.
+  `run-image` and `run-image-ext2` now attach the device; the other targets
+  deliberately don't, so the degradation path stays exercised.
+
 ## picolibc stdout: buffered at the write boundary, and a pipeline hang fixed (2026-08-29)
 
 The libc arc's one stated open follow-up, closed - plus a real bug it uncovered

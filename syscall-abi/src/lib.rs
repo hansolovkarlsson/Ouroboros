@@ -654,6 +654,28 @@ pub const SET_ID: u64 = 61;
 /// the sender's task index by the IPC layer).
 pub const GET_ID: u64 = 62;
 
+/// **Fill a buffer with hardware entropy**: `arg0` = out pointer, `arg1` = out
+/// capacity (bounded like every user pointer). Returns the number of bytes
+/// written, or [`RANDOM_UNAVAILABLE`] when this machine has no entropy device.
+///
+/// Backed by a virtio-rng device (`kernel/src/virtio_rng.rs`), which QEMU only
+/// has when `-device virtio-rng-device` is passed and which Parallels and the
+/// Pi do not expose at all. **"No entropy device" is therefore the ordinary
+/// case, not an error**: callers are expected to degrade *loudly* (say the
+/// value is weak) rather than fail, which is what `accounts::make_salt`'s
+/// clock-derived fallback does.
+///
+/// The device may legitimately return fewer bytes than asked for, so a caller
+/// needing exactly N must loop or treat a short read as unavailable - the
+/// kernel does not pad, because a partly-random value presented as a full one
+/// is the quiet weakness this device exists to remove.
+pub const RANDOM: u64 = 63;
+
+/// [`RANDOM`] on a machine with no entropy device (or with an invalid output
+/// buffer). Distinct from `0`, which would mean "a device answered, with
+/// nothing" - the caller should treat this one as "there is no RNG here".
+pub const RANDOM_UNAVAILABLE: u64 = u64::MAX;
+
 /// [`SET_ID`] refused: the calling task isn't root (uid 0). Distinct from the
 /// `0` success return.
 pub const SET_ID_DENIED: u64 = u64::MAX;

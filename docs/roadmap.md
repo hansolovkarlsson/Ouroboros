@@ -398,9 +398,15 @@ crate, plus creator-owned new inodes.
 - **Self-service `passwd`** — a non-root user changing their own password needs
   a privileged path: a dedicated **`accountd`** server (the `accounts` crate is
   built to slot into it) or a setuid mechanism. Root-only tools ship today.
-- **A virtio-entropy RNG** — a `RANDOM` syscall backed by a virtio-rng driver,
-  to replace the weak clock-derived password salts (`accounts::make_salt`) with
-  real entropy.
+- ~~**A virtio-entropy RNG**~~ — **shipped 2026-08-29.** A `virtio_rng.rs` driver
+  (one virtqueue, device-writable descriptor, polled) behind a `RANDOM` syscall;
+  `accounts::salt_from` takes the bytes and reports whether the salt is strong,
+  so `passwd`/`useradd` use real entropy where a device exists and say "no
+  hardware RNG - using a weaker clock-derived salt" where it doesn't. `make esp`
+  targets `run-image`/`run-image-ext2` now attach `-device virtio-rng-device`;
+  the other targets deliberately don't, so the degradation path stays exercised.
+  Verified by creating the same account on three boots: the two with the device
+  produced different salts, the one without printed the warning.
 - **Supplementary group membership** — a user in several groups at once, checked
   by `fsd`. Needs the kernel identity to carry a group *list* (it's one packed
   gid today) plus an enforcement change; primary-gid (`usermod -g`) ships today.
