@@ -407,12 +407,24 @@ crate, plus creator-owned new inodes.
   the other targets deliberately don't, so the degradation path stays exercised.
   Verified by creating the same account on three boots: the two with the device
   produced different salts, the one without printed the warning.
-- **Supplementary group membership** — a user in several groups at once, checked
-  by `fsd`. Needs the kernel identity to carry a group *list* (it's one packed
-  gid today) plus an enforcement change; primary-gid (`usermod -g`) ships today.
-- **`/etc/shadow`** — move password hashes out of the world-readable `/etc/passwd`.
-- **Ancestor-directory `x`-traversal** — enforcement checks the object + its
-  parent, not search bits on every ancestor directory.
+- ~~**Supplementary group membership**~~ — **shipped 2026-08-29.** `SET_ID`'s
+  `arg2`/`arg3` carry a supplementary gid list (`MAX_SUPP_GROUPS` 8) alongside
+  the packed identity word, so identity and membership change in ONE call and a
+  session can never keep the previous user's groups; `GET_GROUPS` reads it back,
+  a child inherits it at spawn, and `fsd` grants the group triad on a primary OR
+  supplementary match. `usermod -G` sets the list, `id` prints it. Setting a
+  non-empty list is root-only — membership is a privilege grant, so it is gated
+  separately from the identity change it travels with.
+- ~~**`/etc/shadow`**~~ — **shipped 2026-08-29.** The salts and hashes moved out
+  of the world-readable `/etc/passwd` (now four fields) into `/etc/shadow`, mode
+  0600 root-owned, which `fsd`'s enforcement makes genuinely unreadable to a
+  non-root user on ext2. Legacy 6-field lines still verify and `usermod`
+  migrates them. The lookup STREAMS one line rather than reading the whole file:
+  a whole-file read reports 0 on overflow, which for `/etc/passwd` safely means
+  "no accounts, start a root session" but for `/etc/shadow` means "no secret"
+  and locked out every account, root included, at ~23 accounts.
+- ~~**Ancestor-directory `x`-traversal**~~ — **shipped 2026-08-29.** Enforcement
+  walks every ancestor's search bit, not just the object and its parent.
 - **Per-user cluster identity** — the 9P export authenticates the *machine*
   (shared key), not a *user*; per-user identity across the cluster is a named
   cluster-auth tier that would land here.
