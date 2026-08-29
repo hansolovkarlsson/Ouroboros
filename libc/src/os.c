@@ -3,6 +3,11 @@
 #include "sys.h"
 #include <unistd.h>
 
+/* Weakly declared: our stdio.c defines it, picolibc programs don't link that
+ * file at all. A weak undefined symbol resolves to 0, so the call below is
+ * skipped when there is no such buffer to drain. */
+extern void __libc_flush_stdout(void) __attribute__((weak));
+
 void _exit(int code) {
     /* The one exit path every C library reaches. Our own stdlib.c's exit()
      * already flushes and marks end-of-stream before getting here, but a
@@ -10,6 +15,13 @@ void _exit(int code) {
      * which comes straight here. So do it here too (both calls are idempotent):
      * without this, a picolibc program in a pipeline would leave its buffered
      * last line unsent and never signal end-of-stream to the consumer. */
+    /* TWO buffers stack here: stdio's (if linked) sits above the write-boundary
+     * one in file.c. Draining only the lower one meant a program calling _exit()
+     * directly - rather than exit() - sent its end-of-stream marker with data
+     * still sitting in stdio, and the consumer never saw it. Top down. */
+    if (__libc_flush_stdout) {
+        __libc_flush_stdout();
+    }
     __libc_end_stdout();
     __os_syscall1(SYS_EXIT, code);
     for (;;) {

@@ -784,6 +784,41 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
         }
         syscall_abi::STDOUT_TARGET => tasks::stdout_target_of(tasks::current_task()),
         syscall_abi::SELF => tasks::current_task() as u64,
+        syscall_abi::SET_ID_GROUPS => {
+            // arg0 = uid, arg1 = gid, arg2 = gids ptr, arg3 = count. One
+            // operation, because identity and group membership are one thing:
+            // the two-call sequence (SET_GROUPS then SET_ID) is only correct in
+            // that order, only from root, and every caller had to remember both
+            // - which is why `su <uid>` silently carried the previous session's
+            // groups into the new identity. Same permission rule as SET_ID.
+            let me = tasks::current_task();
+            let target = ((arg1 & 0xffff_ffff) << 32) | (arg0 & 0xffff_ffff);
+            let is_root = tasks::uid_of(me) == 0;
+            if !is_root && target != tasks::saved_id_of(me) {
+                return syscall_abi::SET_ID_DENIED;
+            }
+            let n = (arg3 as usize).min(syscall_abi::MAX_SUPP_GROUPS);
+            let mut gids = [0u32; syscall_abi::MAX_SUPP_GROUPS];
+            if n > 0 {
+                let bytes = (n * core::mem::size_of::<u32>()) as u64;
+                if !valid_user_range(arg2, bytes) {
+                    return syscall_abi::SET_ID_DENIED;
+                }
+                for (i, g) in gids.iter_mut().enumerate().take(n) {
+                    let mut b = [0u8; 4];
+                    for (k, byte) in b.iter_mut().enumerate() {
+                        // SAFETY: range validated above.
+                        *byte = unsafe { core::ptr::read((arg2 as *const u8).add(i * 4 + k)) };
+                    }
+                    *g = u32::from_le_bytes(b);
+                }
+            }
+            // Groups first, then the identity - both here, so no caller can get
+            // the order wrong and no window exists between them.
+            tasks::set_groups(me, &gids[..n]);
+            tasks::apply_id(me, target);
+            0
+        }
         syscall_abi::SET_ID => {
             // Root (uid 0) may drop to any identity; a non-root task may only
             // RESTORE to its saved identity (POSIX saved-set-uid) - the shell

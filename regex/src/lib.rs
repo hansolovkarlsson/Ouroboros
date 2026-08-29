@@ -113,6 +113,9 @@ pub enum Error {
     TrailingBackslash,
     /// `*`, `+` or `?` with nothing before it to repeat.
     NothingToRepeat,
+    /// A character-class range whose endpoints are the wrong way round
+    /// (`[z-a]`) - almost always a typo, and never worth guessing at.
+    BadRange,
     /// A `*` or `+` applied to something that can match the empty string
     /// (`(a*)*`, `(a|)*`). POSIX allows it; this engine refuses it, because a
     /// loop body that consumes nothing is the one way a backtracking matcher
@@ -134,6 +137,7 @@ impl Error {
             Error::UnterminatedClass => b"unterminated [ ] class",
             Error::TrailingBackslash => b"trailing backslash",
             Error::NothingToRepeat => b"nothing to repeat",
+            Error::BadRange => b"character-class range is reversed",
             Error::EmptyRepeat => b"repeat of a possibly-empty expression",
         }
     }
@@ -436,7 +440,13 @@ impl<'a> Parser<'a> {
                     Some(h) => h,
                 };
                 self.pos += 1;
-                let (lo, hi) = if lo <= hi { (lo, hi) } else { (hi, lo) };
+                // REJECT rather than silently swap. `[z-a]` is a typo, and this
+                // crate's contract (which grep states out loud) is that a bad
+                // pattern is an error, not a fallback to something else that
+                // happens to compile.
+                if lo > hi {
+                    return Err(Error::BadRange);
+                }
                 for b in lo..=hi {
                     bits[(b >> 3) as usize] |= 1 << (b & 7);
                 }
@@ -594,9 +604,18 @@ impl Regex {
         if text.len() > MAX_TEXT {
             return Match::Limit;
         }
+        // The stack is allocated ONCE for the whole search, not per start offset.
+        // `run` used to declare it locally, so an unanchored scan over a
+        // non-matching 256-byte line zeroed 4 KB per offset - a quarter of a
+        // megabyte of memset to decide one line.
+        let mut stack = [(0u16, 0u16); MAX_STACK];
+        // ...and ONE step budget across the whole search, for the same reason a
+        // budget exists at all: resetting it per offset multiplied the real
+        // worst case by the text length, so "bounded" was bounded by n * MAX_STEPS.
+        let mut steps = 0u32;
         let mut start = 0usize;
         loop {
-            match self.run(text, start, fold) {
+            match self.run(text, start, fold, &mut stack, &mut steps) {
                 Match::Yes => return Match::Yes,
                 Match::Limit => return Match::Limit,
                 Match::No => {}
@@ -611,18 +630,23 @@ impl Regex {
     /// Run the program from one start offset, backtracking on an explicit
     /// stack. Returns [`Match::Limit`] if the step budget or the stack runs
     /// out - never a silent "no".
-    fn run(&self, text: &[u8], start: usize, fold: bool) -> Match {
-        let mut stack = [(0u16, 0u16); MAX_STACK];
+    fn run(
+        &self,
+        text: &[u8],
+        start: usize,
+        fold: bool,
+        stack: &mut [(u16, u16); MAX_STACK],
+        steps: &mut u32,
+    ) -> Match {
         let mut sp_top = 0usize;
         let mut pc = 0u16;
         let mut sp = start as u16;
-        let mut steps = 0u32;
 
         loop {
             // Execute straight-line until this thread matches or fails.
             let failed = loop {
-                steps += 1;
-                if steps > MAX_STEPS {
+                *steps += 1;
+                if *steps > MAX_STEPS {
                     return Match::Limit;
                 }
                 match self.prog[pc as usize] {
@@ -822,8 +846,8 @@ mod tests {
         assert!(m("[]]", "]"));
         assert!(m("[a-]", "-"));
         assert!(m("[a-]", "a"));
-        // A reversed range is accepted as the range it obviously means.
-        assert!(m("[z-a]", "m"));
+        // A reversed range is a typo, and is refused rather than guessed at.
+        assert_eq!(err("[z-a]"), Error::BadRange);
     }
 
     #[test]
@@ -896,9 +920,14 @@ mod tests {
         assert!(!m(r"[\t-\n]", "A"));
         assert!(!m(r"[\t-\n]", "5"));
         assert!(!m(r"[\t-\n]", "n"));
-        // An escaped ']' as the upper endpoint closes nothing.
-        assert!(m(r"[a-\]]", "^"));
-        assert!(!m(r"[a-\]]", "z"));
+        // An escaped ']' as the upper endpoint closes nothing - it is the range's
+        // end. ('Z'..']' is 0x5A..0x5D, so it covers '[' and '\'.)
+        assert!(m(r"[Z-\]]", "["));
+        assert!(m(r"[Z-\]]", "\\"));
+        assert!(!m(r"[Z-\]]", "a"));
+        // ...and `[a-\]]` really is reversed ('a' is 0x61, ']' is 0x5D), so it is
+        // refused rather than quietly swapped into something that compiles.
+        assert_eq!(err(r"[a-\]]"), Error::BadRange);
     }
 
     #[test]

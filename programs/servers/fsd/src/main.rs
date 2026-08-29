@@ -277,6 +277,17 @@ const FID_BASE: u64 = 3;
 struct Fid {
     used: bool,
     owner: u64,
+    /// The uid the owner held when the fid was opened.
+    ///
+    /// `owner` is a task SLOT, and slots are recycled: a task can open a fid,
+    /// exit without clunking it (nothing forces a clunk - the C `_exit` doesn't),
+    /// and a later task spawned into the same slot then matches the ownership
+    /// check and inherits the open file, with whatever access it was opened for.
+    /// Across a privilege boundary that is an escalation - a root program's
+    /// leaked fid handed to whoever lands in the slot next. Requiring the uid to
+    /// match too means a recycled slot can only ever reuse a fid belonging to the
+    /// same user, which grants nothing they could not open themselves.
+    owner_uid: u32,
     tree: usize,
     /// The access the fid was OPENED for (`OPEN_READ`/`OPEN_WRITE`/...).
     ///
@@ -294,7 +305,7 @@ struct Fid {
 
 impl Fid {
     const fn empty() -> Self {
-        Fid { used: false, owner: 0, tree: 0, flags: 0, path_len: 0, path: [0u8; FID_PATH_MAX] }
+        Fid { used: false, owner: 0, owner_uid: 0, tree: 0, flags: 0, path_len: 0, path: [0u8; FID_PATH_MAX] }
     }
     fn path_str(&self) -> Option<&str> {
         core::str::from_utf8(&self.path[..self.path_len]).ok()
@@ -697,7 +708,8 @@ fn handle_ninep(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [
                     return status_reply(reply, error_code(&e));
                 }
             }
-            match alloc_fid(fids, sender, tree, path, flags) {
+            let opener_uid = caller_id(sender).map_or(u32::MAX, |c| c.uid);
+            match alloc_fid(fids, sender, opener_uid, tree, path, flags) {
                 Some(fid) => status_reply(reply, fid),
                 None => status_reply(reply, syscall_abi::FS_ERROR), // table full
             }
@@ -712,6 +724,7 @@ fn handle_ninep(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [
 fn alloc_fid(
     fids: &mut [Fid; MAX_FIDS],
     owner: u64,
+    owner_uid: u32,
     tree: usize,
     path: &str,
     flags: u64,
@@ -728,6 +741,7 @@ fn alloc_fid(
     let i = slot?;
     fids[i].used = true;
     fids[i].owner = owner;
+    fids[i].owner_uid = owner_uid;
     fids[i].tree = tree;
     fids[i].flags = flags;
     fids[i].path_len = pb.len();
@@ -767,6 +781,16 @@ fn handle_fid_op(
     let idx = (fid - FID_BASE) as usize;
     if idx >= MAX_FIDS || !fids[idx].used || fids[idx].owner != sender {
         return status_reply(reply, syscall_abi::FS_ERROR); // bad or not-yours
+    }
+    // ...and the slot must still be held by the same USER - see Fid::owner_uid.
+    // A slot is recycled; an identity crossing is what would make that a
+    // privilege escalation rather than untidiness.
+    match caller_id(sender) {
+        Some(c) if c.uid == fids[idx].owner_uid => {}
+        _ => {
+            fids[idx].used = false; // stale: drop it rather than leave it lying about
+            return status_reply(reply, syscall_abi::FS_ERR_PERM);
+        }
     }
     if verb == ninep_abi::NP_CLUNK {
         fids[idx].used = false;

@@ -246,11 +246,16 @@ see [`manual.md`](manual.md)'s Parallels section.
 | `run-gicv3` | force GICv3 |
 | `test-parallels` | scripted real-hardware smoke test (Parallels, not QEMU) |
 
-**A note on `virtio-rng`.** `run-image` and `run-image-ext2` attach `-device
-virtio-rng-device`, so the `RANDOM` syscall works there and `passwd`/`useradd`
-produce real random password salts (the boot log says `virtio-rng ready,
-entropy available to userland`). Every *other* target deliberately leaves it off
-— that is the configuration Parallels and the Pi are permanently in (no
-virtio-mmio at all), so keeping most targets without it means the degradation
-path stays exercised rather than rotting. There you will see `no hardware RNG -
-using a weaker clock-derived salt`, which is correct behaviour, not a failure.
+**A note on `virtio-rng`.** **Every** target that attaches a disk also attaches
+`-device virtio-rng-device`, so the `RANDOM` syscall works and `passwd`/`useradd`
+produce real random password salts (the boot log says `virtio-rng ready, entropy
+available to userland`).
+
+It was briefly only two targets, on the theory that leaving it off elsewhere kept
+the degradation path exercised. That was the wrong trade and a code review said
+so: the default dev loop (`make run`) was then producing exactly the guessable
+clock-derived salt this device exists to replace, which is a poor default to
+ship and a poor one to develop against. The degradation path does not need a
+QEMU target to stay honest - Parallels and the Pi have no virtio-mmio at all, so
+it is the *permanent* state on every real machine, and `accounts::salt_from`
+reports it out loud (`no hardware RNG - using a weaker clock-derived salt`).

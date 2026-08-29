@@ -135,7 +135,25 @@ pub extern "C" fn _start() -> ! {
         if accounts::user_exists(&pbuf[..plen], name) {
             die(b"useradd: user already exists\r\n");
         }
-        uid = uid_opt.unwrap_or_else(|| accounts::next_free_uid(&pbuf[..plen]));
+        uid = match uid_opt {
+            None => accounts::next_free_uid(&pbuf[..plen]),
+            Some(0) => {
+                // A SECOND root account, created by a tool that then reports
+                // success. root already exists; making another is never the
+                // intent, and `su`/`passwd` resolve by uid so the two would be
+                // indistinguishable afterwards.
+                die(b"useradd: uid 0 is root's - refusing to create a second root account\r\n")
+            }
+            Some(v) => {
+                // A duplicate uid is not merely untidy: `passwd` with no argument
+                // resolves "me" by uid, so two accounts sharing one would let a
+                // password change land on the wrong account.
+                if accounts::find_user_by_uid(&pbuf[..plen], v).is_some() {
+                    die(b"useradd: that uid is already in use\r\n");
+                }
+                v
+            }
+        };
         primary = resolve_group(if g_len > 0 { Some(&gbuf[..g_len]) } else { None }, name, uid);
         let gid = match primary {
             Primary::Existing(g) | Primary::Create(g) => g,
@@ -408,18 +426,36 @@ fn add_secret(name: &[u8], salt: &[u8], hash: &[u8]) -> Result<(), u64> {
     let Some(olen) = accounts::append_line(&cur[..clen], &mut out, &line[..llen]) else {
         return Err(syscall_abi::FS_ERR_DISK_FULL);
     };
+    // ORDER MATTERS. A file fsd creates gets ext2's default 0644, so writing the
+    // hashes first and chmod-ing after leaves a window in which they are
+    // world-readable - and on a disk where /etc/shadow doesn't already exist
+    // (one formatted in-guest, or any not staged by the Makefile) that is the
+    // very first useradd. Create it EMPTY, restrict it, then fill it: the window
+    // now contains nothing worth reading.
+    let code = ulib::fs_write_bulk(SHADOW_FILE, &[]);
+    if ulib::is_fs_error(code) {
+        return Err(code);
+    }
+    if let Err(e) = restrict_shadow() {
+        return Err(e);
+    }
     let code = ulib::fs_write_bulk(SHADOW_FILE, &out[..olen]);
     if ulib::is_fs_error(code) {
         return Err(code);
     }
-    // A file fsd CREATES gets ext2's default 0644, so on any disk where
-    // /etc/shadow doesn't already exist - one formatted in-guest, or any not
-    // staged by the Makefile - the very first useradd would leave the password
-    // hashes world-readable, defeating the entire point of the split. The
-    // shipped images pre-create it 0600, which is exactly what hides this.
-    // Best-effort: FAT/exFAT answer "not supported", and there the file is
-    // unrestricted regardless.
-    let _ = ulib::fs_chmod(SHADOW_FILE, 0o600);
+    Ok(())
+}
+
+/// Restrict `/etc/shadow` to 0600. A filesystem that models no mode answers
+/// `FS_ERR_NOT_SUPPORTED`, which is expected (and warned about at login) rather
+/// than a failure - but any OTHER error means a mode-capable filesystem refused
+/// to restrict the file, and writing secrets into it anyway is not acceptable.
+/// The previous `let _ =` discarded exactly that distinction.
+fn restrict_shadow() -> Result<(), u64> {
+    let code = ulib::fs_chmod(SHADOW_FILE, 0o600);
+    if ulib::is_fs_error(code) && code != syscall_abi::FS_ERR_NOT_SUPPORTED {
+        return Err(code);
+    }
     Ok(())
 }
 

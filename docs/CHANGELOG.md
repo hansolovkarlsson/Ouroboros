@@ -7,6 +7,67 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/`; 
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## The review's cut list, worked through (2026-08-29)
+
+The `max` review reported fifteen findings and **cut about ten more** for its
+item cap, listing them "in the order I'd add them next". Those are done now too.
+Two were privilege bugs in their own right.
+
+- **`useradd -u` validated.** It accepted any uid: `useradd bob -u 0` created a
+  **second root account** and reported success, and a duplicate uid made
+  `passwd`'s find-by-uid ("change my own") resolve to the wrong account. Both
+  refused now.
+- **Fids are bound to the owner's identity, not just its slot.** `Fid.owner` is a
+  task slot, slots are recycled, and nothing forces a clunk (the C `_exit`
+  doesn't), so a task could open a fid, exit, and a later task in the same slot
+  would pass the ownership check and inherit the open file - with write access,
+  after the earlier fix. Across a privilege boundary that is an escalation. The
+  fid now records the opener's uid and a mismatch drops it.
+- **`/etc/shadow` is restricted before the secrets land.** It was written and
+  *then* `chmod`ed, so on a disk where the file didn't already exist it briefly
+  held every hash at ext2's default 0644. Now created empty, restricted, then
+  filled - and the `chmod` result is checked rather than discarded with `let _`
+  (`FS_ERR_NOT_SUPPORTED` from a modeless filesystem stays fine; anything else is
+  a real failure).
+- **`SET_ID_GROUPS` (syscall 66)** replaces the two-step "set groups, then drop
+  identity" dance. `SET_GROUPS` is root-only, so the sequence was only correct in
+  one order with nothing enforcing it - which is exactly how `su <uid>` came to
+  carry the previous session's memberships into the new identity. One call cannot
+  be got half-right. `login`, `su` (both forms) and `logout` use it.
+- **`RANDOM` can no longer hang the machine.** The virtio-rng driver spun
+  unboundedly on the used ring, inside a syscall reachable by every task, so a
+  device that never answered would wedge the kernel rather than the caller. Now
+  bounded, reporting a short read.
+- **The `ACCT_ERR_*` codes were numerically identical to `NO_FS`,
+  `FS_ERR_NOT_FOUND` and neighbours** - an account error and a filesystem error
+  were literally the same value. Moved to the bottom of the reserved band, with
+  `FS_ERR_MIN` shifted to cover them (the same move the band made once before,
+  for `FS_ERR_PERM`).
+- **virtio-rng now rides every target that attaches a disk**, not two of sixteen.
+  The previous split was deliberate - keep the degradation path exercised - and it
+  was the wrong trade: the *default* dev loop was producing exactly the guessable
+  clock salt this device exists to replace. The degradation path needs no QEMU
+  target to stay honest, since Parallels and the Pi have no virtio-mmio at all.
+- **`regex`: the backtracking stack is allocated once per search**, not per start
+  offset (an unanchored scan of a non-matching 256-byte line was memsetting a
+  quarter of a megabyte), and **one step budget spans the whole search** instead
+  of resetting per offset, which had quietly made the "bound" `n × MAX_STEPS`.
+- **A reversed class range is now an error** (`[z-a]` → "range is reversed")
+  rather than silently swapped. `grep`'s stated contract is that a bad pattern is
+  an error, not a guess, and a swap is a guess.
+- **`_exit` drains both libc buffers.** stdio's sits above the write-boundary one;
+  flushing only the lower meant a program calling `_exit()` directly sent its
+  end-of-stream marker with data still queued above it. A weak symbol keeps this
+  working for picolibc programs, which don't link our `stdio.c` at all.
+
+**Verified** on `run-image-ext2`: `-u 0` and duplicate-uid refusals, groups
+carried correctly through `su`/login and cleared on logout, self-service `passwd`
+and re-login, `cpico | wc` still streaming, `grep -i [^a]`, and the reversed-range
+error. Not directly observable in-guest and therefore reviewed rather than
+demonstrated: the fid identity binding (needs slot recycling across two users),
+the shadow creation ordering (needs a disk without the file), and the RNG poll
+bound (needs a broken device).
+
 ## A `max` review pass, and four escalations that were already on `main` (2026-08-29)
 
 The cloud ultrareview died without reporting (an hour idle, nothing posted), so

@@ -673,13 +673,10 @@ fn main() -> ! {
 
         // Logout: restore root (the kernel allows a non-root task to SET_ID back
         // to its saved identity), so the next login prompt runs privileged.
-        syscall4(syscall_abi::SET_ID, 0, 0, 0, 0);
-        // ...and drop the old session's supplementary groups. SET_GROUPS is
-        // root-only, so this has to come *after* the restore - and it has to
-        // happen at all, or the next user would inherit the last one's group
-        // memberships. (The kernel clears them on task death, but the shell
-        // never dies.)
-        syscall4(syscall_abi::SET_GROUPS, 0, 0, 0, 0);
+        // Restore root AND drop the old session's memberships in one step - the
+        // shell never dies, so nothing else would clear them before the next
+        // user logs in.
+        syscall4(syscall_abi::SET_ID_GROUPS, 0, 0, 0, 0);
         print_line("logout");
     }
 }
@@ -1986,16 +1983,13 @@ fn cmd_su(arg: &str) {
             }
         }
     };
-    // Clear the supplementary groups before dropping identity. The numeric form
-    // names no account, so there is no /etc/group entry to look membership up
-    // from - and leaving the list alone would hand the target uid whatever
-    // groups the CURRENT session holds. Since `su` is root-only, that is root's
-    // memberships: `su 1000:1000` would leave a uid-1000 shell carrying them,
-    // and fsd's group triad would honour them. Root-only still means the caller
-    // could have set anything, so this clears rather than trusts.
-    // (`su <name>` above sets the target's real list instead.)
-    syscall4(syscall_abi::SET_GROUPS, 0, 0, 0, 0);
-    if syscall4(syscall_abi::SET_ID, uid as u64, gid as u64, 0, 0) == syscall_abi::SET_ID_DENIED {
+    // The numeric form names no account, so there is no /etc/group entry to draw
+    // memberships from - and an empty list is the right answer, not "whatever the
+    // current session holds". Passing it with the identity makes that explicit
+    // and atomic. (`su <name>` above sets the target's real list instead.)
+    if syscall4(syscall_abi::SET_ID_GROUPS, uid as u64, gid as u64, 0, 0)
+        == syscall_abi::SET_ID_DENIED
+    {
         print_line("su: denied (only root may change identity)");
     }
 }
@@ -2044,15 +2038,19 @@ fn su_by_name(name: &str) {
     let passwd = &pbuf[..plen];
     match accounts::find_user_by_name(passwd, name.as_bytes()) {
         Some(acct) => {
-            // Groups first, while still root (SET_GROUPS is root-only), so the
-            // new identity carries the same memberships a login would give it.
+            // Identity + memberships in one call, so the new identity can't end
+            // up carrying the previous session's groups.
             let mut gbuf = [0u8; syscall_abi::SAFECOPY_MAX as usize];
             let glen = read_account_file("/etc/group", &mut gbuf);
             let mut gids = [0u32; syscall_abi::MAX_SUPP_GROUPS];
             let n = accounts::supplementary_gids(&gbuf[..glen], name.as_bytes(), acct.gid, &mut gids);
-            syscall4(syscall_abi::SET_GROUPS, gids.as_ptr() as u64, n as u64, 0, 0);
-            if syscall4(syscall_abi::SET_ID, acct.uid as u64, acct.gid as u64, 0, 0)
-                == syscall_abi::SET_ID_DENIED
+            if syscall4(
+                syscall_abi::SET_ID_GROUPS,
+                acct.uid as u64,
+                acct.gid as u64,
+                gids.as_ptr() as u64,
+                n as u64,
+            ) == syscall_abi::SET_ID_DENIED
             {
                 print_line("su: denied");
             }

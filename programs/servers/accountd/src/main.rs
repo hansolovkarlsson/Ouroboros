@@ -234,13 +234,21 @@ fn change_password(caller_uid: u32, name: &[u8], old: &[u8], new: &[u8]) -> u64 
             None => return syscall_abi::ACCT_ERR_IO,
         }
     };
+    // Restrict BEFORE the secrets land, not after: a file this call creates
+    // carries ext2's default 0644, and chmod-ing afterwards leaves a window in
+    // which every hash is world-readable. An empty file in that window says
+    // nothing. FS_ERR_NOT_SUPPORTED means the filesystem models no mode at all
+    // (login warns about that separately); any other refusal is a real failure.
+    if ulib::is_fs_error(ulib::fs_write_bulk(SHADOW_FILE, &[])) {
+        return syscall_abi::ACCT_ERR_IO;
+    }
+    let code = ulib::fs_chmod(SHADOW_FILE, 0o600);
+    if ulib::is_fs_error(code) && code != syscall_abi::FS_ERR_NOT_SUPPORTED {
+        return syscall_abi::ACCT_ERR_IO;
+    }
     if ulib::is_fs_error(ulib::fs_write_bulk(SHADOW_FILE, &out[..olen])) {
         return syscall_abi::ACCT_ERR_IO;
     }
-    // Same reason as useradd's add_secret: if this call CREATED the file it
-    // carries ext2's default 0644, which would publish every hash. Best-effort
-    // (FAT/exFAT model no mode).
-    let _ = ulib::fs_chmod(SHADOW_FILE, 0o600);
     0
 }
 

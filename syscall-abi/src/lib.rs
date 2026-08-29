@@ -710,17 +710,24 @@ pub const RANDOM: u64 = 63;
 /// Replies `0`, or one of the `ACCT_ERR_*` codes.
 pub const ACCTOP_PASSWD: u64 = 1;
 
+// The account server's error codes live at the BOTTOM of the reserved error
+// band, not the top. Their first home (`MAX - 1` down) put them numerically
+// on top of [`NO_FS`], [`FS_ERR_NOT_FOUND`] and their neighbours - so an
+// account error and a filesystem error were literally the same value, and any
+// client that saw one could not tell which it had. Distinct values cost
+// nothing; a collision costs a wrong diagnosis at exactly the wrong moment.
+
 /// [`ACCTOP_PASSWD`]: the caller may not change that account's password (a
 /// non-root caller naming someone else).
-pub const ACCT_ERR_DENIED: u64 = u64::MAX - 1;
+pub const ACCT_ERR_DENIED: u64 = u64::MAX - 34;
 /// [`ACCTOP_PASSWD`]: no such account in `/etc/passwd`.
-pub const ACCT_ERR_NO_USER: u64 = u64::MAX - 2;
+pub const ACCT_ERR_NO_USER: u64 = u64::MAX - 35;
 /// [`ACCTOP_PASSWD`]: the supplied current password is wrong.
-pub const ACCT_ERR_WRONG_PASSWORD: u64 = u64::MAX - 3;
+pub const ACCT_ERR_WRONG_PASSWORD: u64 = u64::MAX - 36;
 /// [`ACCTOP_PASSWD`]: the account database could not be read or written.
-pub const ACCT_ERR_IO: u64 = u64::MAX - 4;
+pub const ACCT_ERR_IO: u64 = u64::MAX - 37;
 /// [`ACCTOP_PASSWD`]: the request was malformed (lengths past the payload).
-pub const ACCT_ERR_BAD_REQUEST: u64 = u64::MAX - 5;
+pub const ACCT_ERR_BAD_REQUEST: u64 = u64::MAX - 38;
 
 /// Most supplementary groups a task may carry, on top of its primary gid.
 /// Bounds the per-task kernel array; a user in more groups than this keeps the
@@ -742,6 +749,18 @@ pub const MAX_SUPP_GROUPS: usize = 8;
 /// *additional* list, so `fsd`'s group check is "owner gid == primary gid, or
 /// owner gid is in this list".
 pub const SET_GROUPS: u64 = 64;
+
+/// **Change identity and supplementary groups together**: `arg0` = uid,
+/// `arg1` = gid, `arg2` = pointer to `u32` gids, `arg3` = count. Returns `0` or
+/// [`SET_ID_DENIED`]; the permission rule is [`SET_ID`]'s exactly (root may
+/// become anyone, anyone may restore their saved identity).
+///
+/// Exists because the two-step sequence is a trap. [`SET_GROUPS`] is root-only,
+/// so it must come *before* the drop to a user - an order every caller had to
+/// know, with nothing enforcing it. `su <uid>` didn't, and silently carried the
+/// previous session's group memberships (root's) into the new identity. One
+/// call cannot be got half-right.
+pub const SET_ID_GROUPS: u64 = 66;
 
 /// **Read a task's supplementary groups**: `arg0` = task index, `arg1` = out
 /// pointer, `arg2` = out capacity in **gids** (not bytes). Copies up to that
@@ -1314,10 +1333,12 @@ pub const FS_ERR_PERM: u64 = u64::MAX - 32;
 /// byte counts on success and can't enumerate every non-error value in
 /// a `match`. (Moved down from `MAX-15` when the `TASK_ERR_*` codes
 /// consumed the original headroom, then to `MAX-32` for
-/// [`FS_ERR_NOT_SUPPORTED`], then `MAX-33` for [`FS_ERR_PERM`] - safe, since
+/// [`FS_ERR_NOT_SUPPORTED`], then `MAX-33` for [`FS_ERR_PERM`], and now `MAX-38`
+/// so the `ACCT_ERR_*` codes fit below the filesystem ones instead of colliding
+/// with them - safe each time, since
 /// both sides of the ABI import this from the same crate and no real success
 /// value approaches it either way.)
-pub const FS_ERR_MIN: u64 = u64::MAX - 33;
+pub const FS_ERR_MIN: u64 = u64::MAX - 38;
 
 /// Generic failure sentinel for [`SPAWN`] - same bit pattern as
 /// [`FS_ERROR`] (a bad ELF, no free task slot, and a disk read failure

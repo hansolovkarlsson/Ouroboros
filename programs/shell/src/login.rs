@@ -78,19 +78,17 @@ pub fn login(cwd: &mut [u8; CWD_SIZE]) -> Session {
             // at all. A legacy passwd line with the hash inline still verifies,
             // so a disk written before /etc/shadow still logs in.
             if verify_password(&acct, &ubuf[..ulen], &wbuf[..wlen]) {
-                // Supplementary groups FIRST, while this task is still root:
-                // SET_GROUPS is root-only (membership is a permission grant), so
-                // the order is forced - drop the identity afterwards, never
-                // before. Children inherit the list at spawn.
-                set_supplementary_groups(&ubuf[..ulen], acct.gid);
-                // Drop from root to the user. The kernel saves root as this
-                // task's saved identity, so logout can restore it.
+                // Identity and groups in ONE call: SET_GROUPS is root-only, so
+                // the two-step form only works in one order, and nothing
+                // enforced it. Children inherit both at spawn.
+                let mut gids = [0u32; syscall_abi::MAX_SUPP_GROUPS];
+                let n = supplementary_groups(&ubuf[..ulen], acct.gid, &mut gids);
                 crate::syscall4(
-                    syscall_abi::SET_ID,
+                    syscall_abi::SET_ID_GROUPS,
                     acct.uid as u64,
                     acct.gid as u64,
-                    0,
-                    0,
+                    gids.as_ptr() as u64,
+                    n as u64,
                 );
                 let hlen = write_cwd(cwd, acct.home);
                 return Session { cwd_len: hlen };
@@ -155,23 +153,16 @@ fn verify_password(acct: &accounts::Account<'_>, name: &[u8], password: &[u8]) -
     acct.verify(password) // legacy inline secret, or false when there is none
 }
 
-/// Look `name` up in `/etc/group` and hand the kernel the gids it belongs to,
-/// beyond its primary. Best-effort: no `/etc/group` (or no memberships) simply
-/// means no supplementary groups, which is the previous behaviour exactly.
+/// Look `name` up in `/etc/group` and collect the gids it belongs to beyond its
+/// primary, into `out`. Returns how many. No `/etc/group` (or no memberships)
+/// simply means none.
 ///
-/// Must be called while still root - see the caller.
-fn set_supplementary_groups(name: &[u8], primary_gid: u32) {
+/// `#[inline(never)]`: the group file is a 2 KB stack buffer.
+#[inline(never)]
+fn supplementary_groups(name: &[u8], primary_gid: u32, out: &mut [u32]) -> usize {
     let mut gbuf = [0u8; PASSWD_MAX];
     let glen = crate::read_account_file(GROUP_PATH, &mut gbuf);
-    let mut gids = [0u32; syscall_abi::MAX_SUPP_GROUPS];
-    let n = accounts::supplementary_gids(&gbuf[..glen], name, primary_gid, &mut gids);
-    crate::syscall4(
-        syscall_abi::SET_GROUPS,
-        gids.as_ptr() as u64,
-        n as u64,
-        0,
-        0,
-    );
+    accounts::supplementary_gids(&gbuf[..glen], name, primary_gid, out)
 }
 
 /// Read one line of keyboard input into `buf` (up to its length), returning the

@@ -55,6 +55,11 @@ const VIRTQ_DESC_F_WRITE: u16 = 2;
 /// "DMA owner stays in the kernel" rule the block and NIC drivers follow.
 const BUF_LEN: usize = 64;
 
+/// Iterations to wait for the device to complete a request before giving up.
+/// Generous for a device answering in microseconds, and finite so a broken or
+/// absent-but-probed device cannot wedge the kernel from an ungated syscall.
+const POLL_LIMIT: u32 = 10_000_000;
+
 #[derive(Debug)]
 pub enum Error {
     NotFound,
@@ -285,12 +290,22 @@ impl Device {
             write_reg(self.base, virtio_mmio::REG_QUEUE_NOTIFY, REQUEST_QUEUE);
         }
 
+        // BOUNDED. This runs inside a syscall, on the kernel's stack, with the
+        // caller blocked - and `RANDOM` is reachable by every task. An unbounded
+        // spin on a device that never answers would hang the whole machine, not
+        // just the caller, so give up and report a short read instead. The device
+        // completes a request in microseconds when it is working at all.
+        let mut spins = 0u32;
         loop {
             unsafe {
                 core::arch::asm!("dmb sy", options(nostack, preserves_flags));
             }
             if unsafe { read_volatile(&used.idx) } != seen_used_idx {
                 break;
+            }
+            spins += 1;
+            if spins > POLL_LIMIT {
+                return 0; // caller sees a short read -> RANDOM_UNAVAILABLE
             }
         }
 
