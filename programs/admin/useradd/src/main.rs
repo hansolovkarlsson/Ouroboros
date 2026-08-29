@@ -2,7 +2,9 @@
 //! (root only).
 //!
 //! Appends a `name:uid:gid:home:salt:hash` line to `/etc/passwd`, prompting for
-//! the initial password (echo off, clock-derived salt). The home directory is
+//! the initial password (echo off; the salt comes from the hardware RNG via
+//! `accounts::salt_from`, falling back - loudly - to the clock where there is no
+//! entropy device). The home directory is
 //! `/Users/<name>` - created (`mkdir`) and chowned to the new user (the chown/
 //! chmod themselves are best-effort: ext2 records the owner, FAT/exFAT can't and
 //! the "not supported" reply is ignored).
@@ -142,7 +144,13 @@ pub extern "C" fn _start() -> ! {
         if pw[..pwl] != pw2[..pwl2] {
             die(b"useradd: passwords do not match\r\n");
         }
-        let salt = accounts::make_salt(ulib::monotonic_us());
+
+        // Hardware entropy if this machine has an RNG; the clock fallback
+        // otherwise, said out loud rather than stored quietly (salt_from).
+        let (salt, strong) = accounts::salt_from(ulib::random_bytes8(), ulib::monotonic_us());
+        if !strong {
+            ulib::con_write(b"useradd: no hardware RNG - using a weaker clock-derived salt\r\n");
+        }
         let hash = accounts::hash_password(&salt, &pw[..pwl]);
 
         let mut line = [0u8; 256];

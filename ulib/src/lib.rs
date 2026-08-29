@@ -254,11 +254,43 @@ pub fn read_char() -> u8 {
 }
 
 /// A microsecond-resolution monotonic timestamp since boot (`MONOTONIC_US`).
-/// The same clock netd's RTT estimator uses; the account tools use it as the
-/// (weak, clock-derived) entropy for a new password salt — see
-/// `accounts::make_salt`.
+/// The same clock netd's RTT estimator uses; the account tools fall back to it
+/// as (weak, clock-derived) salt entropy when there is no hardware RNG — see
+/// [`random_bytes8`] and `accounts::salt_from`.
 pub fn monotonic_us() -> u64 {
     syscall(syscall_abi::MONOTONIC_US, 0)
+}
+
+/// Fill `buf` with hardware entropy (`RANDOM`), returning how many bytes were
+/// written — `0` when this machine has no entropy device, which is the ordinary
+/// case rather than an error (only a QEMU run with `-device virtio-rng-device`
+/// has one). `buf` is bounded by `MAX_USER_LEN` (512) like every user pointer.
+///
+/// The device may legitimately return fewer bytes than asked for, so a caller
+/// needing exactly N must check the count — see [`random_bytes8`].
+pub fn random(buf: &mut [u8]) -> usize {
+    if buf.is_empty() {
+        return 0;
+    }
+    let r = syscall4(syscall_abi::RANDOM, buf.as_mut_ptr() as u64, buf.len() as u64, 0, 0);
+    if r == syscall_abi::RANDOM_UNAVAILABLE {
+        0
+    } else {
+        (r as usize).min(buf.len())
+    }
+}
+
+/// Eight bytes of hardware entropy, or `None` when there is no entropy device
+/// (or it returned short). `None` is a normal answer: the caller is expected to
+/// degrade *loudly* — `accounts::salt_from` takes exactly this `Option` and
+/// reports whether the salt it built is strong.
+pub fn random_bytes8() -> Option<[u8; 8]> {
+    let mut b = [0u8; 8];
+    if random(&mut b) == 8 {
+        Some(b)
+    } else {
+        None
+    }
 }
 
 /// Read one line of keyboard input into `buf` (up to its length), returning the

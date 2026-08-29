@@ -15,9 +15,14 @@ DESCRIPTION
                       gid == uid, the usual convention; if a group of that name
                       already exists, its gid is used instead)
 
-    The password salt is derived from the monotonic clock (there is no hardware
-    RNG yet), so it is weak but per-account unique. Account files hold ~20
-    entries (a 2 KB read cap).
+    The password salt comes from the machine's hardware RNG (a virtio-rng
+    device, via the RANDOM syscall). Where there is no such device - which is
+    most machines; QEMU needs -device virtio-rng-device, and Parallels and the
+    Pi have none at all - useradd falls back to a weaker salt derived from the
+    monotonic clock and prints "no hardware RNG - using a weaker clock-derived
+    salt". That salt is still per-account unique, but an attacker who can bound
+    when the account was created can bound it. Account files hold ~20 entries
+    (a 2 KB read cap).
 
 ORDER OF OPERATIONS
     useradd writes three things - /etc/group, the home directory, and

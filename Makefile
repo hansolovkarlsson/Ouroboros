@@ -771,6 +771,7 @@ run-image: image
 		-bios $(OVMF) \
 		-drive file=$(ESP_DIR).img,format=raw,if=none,id=hd0 \
 		-device virtio-blk-device,drive=hd0 \
+		-device virtio-rng-device \
 		-global virtio-mmio.force-legacy=false \
 		-nographic
 
@@ -905,6 +906,7 @@ run-image-ext2: image-ext2
 		-bios $(OVMF) \
 		-drive file=$(EXT2_IMG),format=raw,if=none,id=hd0 \
 		-device virtio-blk-device,drive=hd0 \
+		-device virtio-rng-device \
 		-global virtio-mmio.force-legacy=false \
 		-nographic
 
