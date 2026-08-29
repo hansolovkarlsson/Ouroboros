@@ -601,9 +601,17 @@ Known small gaps, not yet sequenced (the *completed* parking-lot entries — USB
 keyboard, GOP console, preemption, task destruction, driver isolation, etc. — are
 in [`roadmap-completed.md`](roadmap-completed.md)):
 
-- **`grep` has no regex** (it now takes `-i`/`-v`/`-n`, but matching is still a
-  plain substring). Real patterns are a separate, larger arc — see North-star
-  item 2 for the shared `ulib` option parser and richer matching.
+- ~~**`grep` has no regex**~~ — **shipped 2026-08-29.** Patterns are POSIX
+  **extended** regular expressions (`.` `*` `+` `?` `[...]` `^` `$` `|` `(...)`),
+  via a new pure, host-tested **`regex` crate** at the repo root; `-F` keeps the
+  old literal-substring behaviour. Bounded by design (an explicit backtracking
+  stack, not recursion; empty-body repeats refused so every accepted pattern
+  terminates; a step budget whose exhaustion reports `Limit`, never a silent
+  "no"). Still open, each a real addition rather than a tweak: back-references,
+  `{n,m}` counted repetition, `[:alpha:]` class names, and submatch capture —
+  plus the shared `ulib` option parser of North-star item 2, still unbuilt. The
+  `regex` crate is deliberately reusable: an editor's search and a `find` are
+  the next consumers.
 - ~~**`useradd` is not atomic**~~ — **fixed 2026-08-29.** The `/etc/passwd` write
   is now the single commit point: the group entry and home directory are prepared
   first, a failed prep commits nothing and exits non-zero, and a failed commit
