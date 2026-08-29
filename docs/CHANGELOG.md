@@ -7,6 +7,57 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/`; 
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## `/etc/shadow` and `accountd`: self-service passwords (2026-08-29)
+
+The last two items of the users/permissions arc, done together because neither
+is complete alone: moving the hashes out of the world-readable file is what
+*creates* the need for a privileged way to change them.
+
+**`/etc/shadow`.** `/etc/passwd` is now `name:uid:gid:home` — public, because
+every `id`, `ls -l` and `chown` needs the name↔id map — and the secrets live in
+`/etc/shadow` (`name:salt:hash`, mode 0600 root). The `accounts` crate splits
+`Secret` out of `Account`, and `Account::verify` returns **false** when there is
+no secret: "no password recorded" must never read as "any password". A **legacy
+six-field passwd line still parses**, so a disk written before this keeps
+logging in; nothing writes that shape any more.
+
+- `login` reads the shadow file *because it runs as root*, before the `SET_ID`
+  that drops to the user — the ordering was already right for this.
+- Verified: as `user`, `cat /etc/passwd` works and `cat /etc/shadow` is
+  **permission denied**. That denial is enforcement doing its job — the same
+  `check_access` the ancestor-`x` work above went through.
+
+**`accountd`, the fifth protected server** (task slot 5). A normal user changing
+their own password means writing a file they cannot write. Unix answers with a
+setuid `passwd`; **that answer does not fit here**, and the reason is worth
+recording: the kernel does not read files, `fsd` does, so a `/bin` binary is
+read by the *shell* and handed to `SPAWN` — "this binary is setuid" would be an
+assertion by a user-controlled task the kernel cannot verify, an escalation path
+through exactly the component the capability model distrusts. A server inverts
+it: `accountd` asks the kernel who sent the message (`GET_ID` on the sender, a
+binding only the kernel can make) and decides for itself.
+
+- **Policy, entire**: root may set any password without the old one; anyone else
+  may change only their own and must supply the current one.
+- **Every spawnable slot holds `TO_ACCT`**, deliberately — the same reasoning
+  that lets every slot call `fsd`: holding the right to *ask* is not permission
+  to succeed, and the check lives in the server.
+- **`NUM_TASKS` 10 → 11, `FIRST_SPAWNABLE` 5 → 6.** A fifth server would
+  otherwise have eaten one of the five spawnable slots, which is the pool a
+  pipeline's stages come from. (`STATES` turned out to be an explicit literal
+  rather than an auto-scaling repeat — the one place the slot count isn't a
+  single constant.) `MAX_EL0_REGIONS` follows it, as its doc comment requires.
+- **`/bin/passwd` no longer writes anything** and is no longer root-only: it
+  prompts and sends `ACCTOP_PASSWD`. `accountd` holds no device capability at
+  all — its privilege is policy, not a resource.
+- **Verified** on `run-image-ext2`: `ps` shows 11 slots with `accountd` at 5 and
+  five spawnable; as `user`, `passwd` with the wrong current password is
+  refused, with the right one succeeds, and the new password then logs in; as
+  root, `passwd user` works without the old one. And the security-critical case
+  on its own run — `user` running `passwd root` gets *"only root may change
+  another user's password"*, after which `root` still logs in with its original
+  password.
+
 ## Permission model: ancestor-`x` traversal and supplementary groups (2026-08-29)
 
 The two enforcement gaps the users arc left explicitly open, closed together

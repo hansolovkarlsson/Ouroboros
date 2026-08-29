@@ -281,6 +281,22 @@ pub const CON_TASK: u64 = 3;
 /// pattern). Inserting it here shifted the spawnable slots up to 5-6.
 pub const NET_TASK: u64 = 4;
 
+/// The **account server**'s task slot: the fifth boot-loaded, supervised,
+/// protected server. It owns `/etc/passwd` and `/etc/shadow` *as a policy
+/// matter* - not exclusively (the files still live on `fsd`'s disk), but it is
+/// the only component that will write a password on behalf of a caller who
+/// could not write `/etc/shadow` themselves.
+///
+/// It exists because `/etc/shadow` is mode 0600 root: with the secrets out of
+/// the world-readable file, a normal user changing their *own* password needs
+/// something privileged to do it for them. A kernel setuid bit was the
+/// alternative and doesn't fit here - the kernel doesn't read files, so "this
+/// binary is setuid" would be asserted by the user-controlled shell that loads
+/// it, which the capability model exists to distrust. A server can instead ask
+/// the kernel *who is calling* ([`GET_ID`] on the message sender), which is
+/// unforgeable, and decide for itself.
+pub const ACCT_TASK: u64 = 5;
+
 /// `(offset, chunk ptr, chunk len)` -> `0` on success or
 /// [`SPAWN_ERROR`]. Copies one chunk of a program image into the
 /// kernel's fixed 128KB spawn staging buffer at `offset` - the feed
@@ -670,6 +686,41 @@ pub const GET_ID: u64 = 62;
 /// kernel does not pad, because a partly-random value presented as a full one
 /// is the quiet weakness this device exists to remove.
 pub const RANDOM: u64 = 63;
+
+// --- The account server's request protocol (`ACCTOP_*`) -------------------
+//
+// One op today. The shape follows `NETOP_*` (a small numbered op set with
+// inline payloads) rather than the `NP_*` file verbs, because this is not a
+// filesystem: there is no path, and the interesting argument is *who is asking*,
+// which the kernel supplies rather than the message.
+
+/// **Change a password.** params: `(name len, old len, new len)`; payload:
+/// `name || old_password || new_password`, in that order.
+///
+/// An empty `name` means "my own account", resolved from the caller's uid.
+///
+/// Policy, enforced by the server against [`GET_ID`] of the *sender* (which the
+/// kernel binds, so it cannot be spoofed):
+/// - **root** may set anyone's password and need not supply the old one.
+/// - **anyone else** may change only their own, and must supply the correct
+///   current password. That last check is what makes the server safe to expose
+///   to every spawnable slot: holding the capability to *ask* is not the same as
+///   being allowed.
+///
+/// Replies `0`, or one of the `ACCT_ERR_*` codes.
+pub const ACCTOP_PASSWD: u64 = 1;
+
+/// [`ACCTOP_PASSWD`]: the caller may not change that account's password (a
+/// non-root caller naming someone else).
+pub const ACCT_ERR_DENIED: u64 = u64::MAX - 1;
+/// [`ACCTOP_PASSWD`]: no such account in `/etc/passwd`.
+pub const ACCT_ERR_NO_USER: u64 = u64::MAX - 2;
+/// [`ACCTOP_PASSWD`]: the supplied current password is wrong.
+pub const ACCT_ERR_WRONG_PASSWORD: u64 = u64::MAX - 3;
+/// [`ACCTOP_PASSWD`]: the account database could not be read or written.
+pub const ACCT_ERR_IO: u64 = u64::MAX - 4;
+/// [`ACCTOP_PASSWD`]: the request was malformed (lengths past the payload).
+pub const ACCT_ERR_BAD_REQUEST: u64 = u64::MAX - 5;
 
 /// Most supplementary groups a task may carry, on top of its primary gid.
 /// Bounds the per-task kernel array; a user in more groups than this keeps the

@@ -33,6 +33,8 @@ COND_ELF     := target/$(USER_TARGET)/release/cond
 COND_BIN     := target/$(USER_TARGET)/release/cond.bin
 NETD_ELF     := target/$(USER_TARGET)/release/netd
 NETD_BIN     := target/$(USER_TARGET)/release/netd.bin
+ACCTD_ELF    := target/$(USER_TARGET)/release/accountd
+ACCTD_BIN    := target/$(USER_TARGET)/release/accountd.bin
 ARGS_ELF     := target/$(USER_TARGET)/release/args
 ARGS_BIN     := target/$(USER_TARGET)/release/args.bin
 ECHO_ELF     := target/$(USER_TARGET)/release/echo
@@ -191,7 +193,7 @@ ifeq ($(PROFILE),release)
 CARGO_FLAGS += --release
 endif
 
-.PHONY: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin id-bin passwd-bin useradd-bin groupadd-bin usermod-bin chello-bin cdemo-bin cfile-bin cpico-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin sort-bin esp run run-virtio-console run-usb-kbd run-usb-multi run-gicv3 image run-image run-image-9p run-image-9p-client run-image-2vm-a run-image-2vm-b image-gpt run-image-gpt image-exfat run-image-exfat image-ext2 run-image-ext2 parallels-hdd release test-parallels clean
+.PHONY: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin accountd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin id-bin passwd-bin useradd-bin groupadd-bin usermod-bin chello-bin cdemo-bin cfile-bin cpico-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin sort-bin esp run run-virtio-console run-usb-kbd run-usb-multi run-gicv3 image run-image run-image-9p run-image-9p-client run-image-2vm-a run-image-2vm-b image-gpt run-image-gpt image-exfat run-image-exfat image-ext2 run-image-ext2 parallels-hdd release test-parallels clean
 
 # Overridable by `make test-parallels VM_NAME=... CMDS=... BOOT_WAIT=...`.
 VM_NAME     ?= Ouroboros
@@ -250,6 +252,13 @@ cond-bin:
 netd-bin:
 	cargo build -p netd --target $(USER_TARGET) --release
 	"$(OBJCOPY)" --strip-all $(NETD_ELF) $(NETD_BIN)
+
+# The account server (programs/servers/accountd) - the fifth protected server,
+# task slot 5. Holds the policy for changing a password now that /etc/shadow is
+# root-only, so a normal user's `passwd` has something privileged to ask.
+accountd-bin:
+	cargo build -p accountd --target $(USER_TARGET) --release
+	"$(OBJCOPY)" --strip-all $(ACCTD_ELF) $(ACCTD_BIN)
 
 # The argv proof program (args/) - spawned via `exec`, prints its argument
 # vector. Same recipe as every other userland program.
@@ -489,7 +498,7 @@ serve-bin:
 # itself: the default shell binary and the config file (loader.rs's
 # CONFIG_PATH) naming which program to load - edit INIT.CFG and rebuild
 # just that program to swap it out, no kernel rebuild required.
-esp: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin id-bin passwd-bin useradd-bin groupadd-bin usermod-bin chello-bin cdemo-bin cfile-bin cpico-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin tail-bin nl-bin rev-bin uniq-bin sort-bin
+esp: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin accountd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin id-bin passwd-bin useradd-bin groupadd-bin usermod-bin chello-bin cdemo-bin cfile-bin cpico-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin tail-bin nl-bin rev-bin uniq-bin sort-bin
 	mkdir -p $(ESP_DIR)/EFI/BOOT $(ESP_DIR)/EFI/ORBS $(ESP_DIR)/bin $(ESP_DIR)/man $(ESP_DIR)/etc
 	cp $(KERNEL) $(ESP_DIR)/EFI/BOOT/BOOTAA64.EFI
 	cp $(SHELL_BIN) $(ESP_DIR)/EFI/ORBS/SH.BIN
@@ -500,6 +509,7 @@ esp: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin args
 	cp $(UPPER_BIN) $(ESP_DIR)/bin/UPPER
 	cp $(COND_BIN) $(ESP_DIR)/EFI/ORBS/COND.BIN
 	cp $(NETD_BIN) $(ESP_DIR)/EFI/ORBS/NETD.BIN
+	cp $(ACCTD_BIN) $(ESP_DIR)/EFI/ORBS/ACCOUNTD.BIN
 	cp $(ARGS_BIN) $(ESP_DIR)/EFI/ORBS/ARGS.BIN
 	printf '\\EFI\\ORBS\\SH.BIN' > $(ESP_DIR)/EFI/ORBS/INIT.CFG
 	# The cluster secret netd reads at boot to authenticate the 9P export
@@ -565,12 +575,16 @@ esp: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin args
 	cp $(SORT_BIN) $(ESP_DIR)/bin/SORT
 	# Manual pages: plain-text files read by /bin/MAN as /man/<command>.
 	cp manpages/* $(ESP_DIR)/man/
-	# /etc/passwd + /etc/group: the account database the shell's login gate and
-	# the /bin account tools (id/su/passwd/useradd/groupadd/usermod) use
-	# (name:uid:gid:home:salt:hash / name:gid:members, hashes precomputed - see
-	# scripts/mkpasswd.py + scripts/mkgroup.py; DEV creds root/root + user/user).
-	# Absent -> login falls back to root.
+	# /etc/passwd + /etc/shadow + /etc/group: the account database the shell's
+	# login gate and the /bin account tools (id/su/passwd/useradd/groupadd/
+	# usermod) use. passwd is name:uid:gid:home (PUBLIC - every id/ls -l/chown
+	# reads it); shadow is name:salt:hash, mode 0600 and root-owned, so the
+	# hashes an offline cracker wants are not world-readable; group is
+	# name:gid:members. See scripts/mkpasswd.py + scripts/mkgroup.py; DEV creds
+	# root/root + user/user. Absent passwd -> login falls back to root.
 	python3 scripts/mkpasswd.py > $(ESP_DIR)/etc/passwd
+	python3 scripts/mkpasswd.py --shadow > $(ESP_DIR)/etc/shadow
+	chmod 600 $(ESP_DIR)/etc/shadow
 	python3 scripts/mkgroup.py > $(ESP_DIR)/etc/group
 	# Per-user home directories under /Users (the login home for `user`; `~`
 	# expands to it). FAT can't record an owner, so it's world-usable here; on
@@ -871,6 +885,11 @@ $(EXT2_PART): esp
 	cp manpages/* $(BUILD_DIR)/ext2-src/man/
 	mkdir -p $(BUILD_DIR)/ext2-src/etc
 	python3 scripts/mkpasswd.py > $(BUILD_DIR)/ext2-src/etc/passwd
+	# mke2fs -d copies the host mode across, which is how /etc/shadow ends up
+	# 0600 on the guest - and, with fsd's enforcement live, actually unreadable
+	# to a non-root user rather than merely marked so.
+	python3 scripts/mkpasswd.py --shadow > $(BUILD_DIR)/ext2-src/etc/shadow
+	chmod 600 $(BUILD_DIR)/ext2-src/etc/shadow
 	python3 scripts/mkgroup.py > $(BUILD_DIR)/ext2-src/etc/group
 	mkdir -p $(BUILD_DIR)/ext2-src/Users/user
 	printf 'hello from an ext2 volume\n' > $(BUILD_DIR)/ext2-src/HELLO.TXT

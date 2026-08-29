@@ -3,8 +3,8 @@
 //!
 //! - **`-g`** sets the **primary** group, the gid the kernel carries in the
 //!   task's identity word. `<group>` may be a name (resolved via `/etc/group`)
-//!   or a numeric gid. Rewrites the one `/etc/passwd` line, preserving
-//!   uid/home/salt/hash.
+//!   or a numeric gid. Rewrites the one `/etc/passwd` line, preserving uid and
+//!   home (the password secret lives in `/etc/shadow` and is never touched).
 //! - **`-G`** sets the **supplementary** groups: the comma-separated list
 //!   becomes the user's complete membership in `/etc/group` (so it removes them
 //!   from groups not listed), and `login`/`su` hand that list to the kernel via
@@ -80,11 +80,11 @@ pub extern "C" fn _start() -> ! {
     // Copy the target account's fields out (the borrow of `src` ends here so the
     // rebuild below can reuse the buffer space).
     let mut home = [0u8; 128];
-    let (uid, home_len, salt, salt_len, hash) = match accounts::find_user_by_name(&src[..slen], name) {
+    let (uid, home_len) = match accounts::find_user_by_name(&src[..slen], name) {
         Some(acct) => {
             let hl = acct.home.len().min(home.len());
             home[..hl].copy_from_slice(&acct.home[..hl]);
-            (acct.uid, hl, acct.salt, acct.salt_len, acct.hash)
+            (acct.uid, hl)
         }
         None => die(b"usermod: no such user\r\n"),
     };
@@ -93,9 +93,8 @@ pub extern "C" fn _start() -> ! {
 
     // Build the rewritten line and splice it in.
     let mut line = [0u8; 256];
-    let Some(llen) = accounts::format_account_line(
-        &mut line, name, uid, new_gid, &home[..home_len], &salt[..salt_len], &hash,
-    ) else {
+    let Some(llen) = accounts::format_account_line(&mut line, name, uid, new_gid, &home[..home_len])
+    else {
         die(b"usermod: account line too long\r\n");
     };
     let mut out = [0u8; BUF];

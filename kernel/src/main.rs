@@ -301,6 +301,22 @@ fn main() -> Status {
         }
     };
 
+    let accountd = match loader::load_accountd() {
+        Ok(accountd) => {
+            log::info!(
+                "Ouroboros kernel: loaded account server, region {:#x}-{:#x}, entry {:#x}",
+                accountd.base,
+                accountd.base + accountd.size,
+                accountd.entry
+            );
+            Some(accountd)
+        }
+        Err(e) => {
+            log::warn!("Ouroboros kernel: no account server ({e}) - no self-service passwd this boot");
+            None
+        }
+    };
+
     // SAFETY: no boot-services protocol references (console, allocator, or
     // otherwise) are held past this call. Nothing below this point may use
     // log::*, alloc, or UEFI protocols — only the raw MMIO in `uart`/
@@ -375,6 +391,7 @@ fn main() -> Status {
     el0_regions[2] = fsd.as_ref().map_or((0, 0), |f| (f.base, f.size));
     el0_regions[3] = cond.as_ref().map_or((0, 0), |c| (c.base, c.size));
     el0_regions[4] = netd.as_ref().map_or((0, 0), |n| (n.base, n.size));
+    el0_regions[5] = accountd.as_ref().map_or((0, 0), |a| (a.base, a.size));
     unsafe {
         mmu::install_identity_map(
             memory_map,
@@ -604,7 +621,7 @@ fn main() -> Status {
     }
 
     // SAFETY: every loaded EL0 region was just mapped EL0-accessible above.
-    unsafe { tasks::init(&program, fsd.as_ref(), cond.as_ref(), netd.as_ref()) };
+    unsafe { tasks::init(&program, fsd.as_ref(), cond.as_ref(), netd.as_ref(), accountd.as_ref()) };
 
     console::println!("Ouroboros kernel: shell ready - type and press Enter");
 

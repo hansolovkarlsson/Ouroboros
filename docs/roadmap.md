@@ -395,9 +395,12 @@ crate, plus creator-owned new inodes.
 
 **Still open (deferred refinements, unsequenced):**
 
-- **Self-service `passwd`** — a non-root user changing their own password needs
-  a privileged path: a dedicated **`accountd`** server (the `accounts` crate is
-  built to slot into it) or a setuid mechanism. Root-only tools ship today.
+- ~~**Self-service `passwd`**~~ — **shipped 2026-08-29** as **`accountd`**, the
+  fifth protected server (slot 5; `NUM_TASKS` 10→11 so the five spawnable slots
+  survive). A setuid mechanism was rejected with a reason worth keeping: the
+  kernel doesn't read files, so "this binary is setuid" would be asserted by the
+  user-controlled shell that loads it. A server can instead ask the kernel who
+  sent the message. `/bin/passwd` is now a client and no longer root-only.
 - ~~**A virtio-entropy RNG**~~ — **shipped 2026-08-29.** A `virtio_rng.rs` driver
   (one virtqueue, device-writable descriptor, polled) behind a `RANDOM` syscall;
   `accounts::salt_from` takes the bytes and reports whether the salt is strong,
@@ -412,7 +415,10 @@ crate, plus creator-owned new inodes.
   set, inherited at spawn, cleared on death and on logout); `fsd`'s group triad
   accepts primary *or* supplementary; `usermod -G` configures it and `id` shows
   it. `/etc/group`'s member list is now load-bearing rather than informational.
-- **`/etc/shadow`** — move password hashes out of the world-readable `/etc/passwd`.
+- ~~**`/etc/shadow`**~~ — **shipped 2026-08-29.** `/etc/passwd` is
+  `name:uid:gid:home` (public); the secrets are in `/etc/shadow`, mode 0600 root
+  and genuinely unreadable to a non-root user now that enforcement is real. A
+  legacy six-field passwd line still parses, so an older disk still logs in.
 - ~~**Ancestor-directory `x`-traversal**~~ — **shipped 2026-08-29.** Every
   ancestor directory of a path operand must grant search (`x`), so `chmod 700` on
   a directory now protects its contents and not just its listing (the hole was

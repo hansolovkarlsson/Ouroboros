@@ -45,6 +45,7 @@
 
 const PASSWD_FILE: &str = "/etc/passwd";
 const GROUP_FILE: &str = "/etc/group";
+const SHADOW_FILE: &str = "/etc/shadow";
 const HOME_ROOT: &str = "/Users";
 /// Template directory whose files are copied into a newly created home. Absent
 /// by default - a deployment creates it if it wants one.
@@ -121,6 +122,10 @@ pub extern "C" fn _start() -> ! {
     let olen;
     let uid;
     let primary;
+    // The password secret goes to /etc/shadow, which is written as the last prep
+    // step before the /etc/passwd commit - see the ordering note above.
+    let secret_salt;
+    let secret_hash;
     {
         let mut pbuf = [0u8; BUF];
         let plen = ulib::read_file_all(PASSWD_FILE, &mut pbuf);
@@ -154,15 +159,15 @@ pub extern "C" fn _start() -> ! {
         let hash = accounts::hash_password(&salt, &pw[..pwl]);
 
         let mut line = [0u8; 256];
-        let Some(llen) =
-            accounts::format_account_line(&mut line, name, uid, gid, home, &salt, &hash)
-        else {
+        let Some(llen) = accounts::format_account_line(&mut line, name, uid, gid, home) else {
             die(b"useradd: account line too long\r\n");
         };
         let Some(n) = accounts::append_line(&pbuf[..plen], &mut out, &line[..llen]) else {
             die(b"useradd: /etc/passwd full (raise the account-file cap)\r\n");
         };
         olen = n;
+        secret_salt = salt;
+        secret_hash = hash;
     }
     let gid = match primary {
         Primary::Existing(g) | Primary::Create(g) => g,
@@ -189,10 +194,26 @@ pub extern "C" fn _start() -> ! {
         }
     };
 
+    // --- Prep step 3: the password secret ----------------------------------
+    // /etc/shadow before /etc/passwd, so the account never exists without a
+    // secret (which would be an account nobody can log into, and which `passwd`
+    // would then have to repair).
+    if let Err(code) = add_secret(name, &secret_salt, &secret_hash) {
+        if made_home {
+            let _ = ulib::fs_op_path(syscall_abi::FSOP_RMDIR, home_str);
+        }
+        if made_group {
+            remove_group(name);
+        }
+        ulib::fs_error("useradd", code);
+        die(b"useradd: could not write the password secret; no account was created\r\n");
+    }
+
     // --- Commit: the account line ------------------------------------------
     let code = ulib::fs_write_bulk(PASSWD_FILE, &out[..olen]);
     if ulib::is_fs_error(code) {
         // Undo the prep so a failed run leaves nothing behind.
+        remove_secret(name);
         if made_home {
             let _ = ulib::fs_op_path(syscall_abi::FSOP_RMDIR, home_str);
         }
@@ -363,6 +384,39 @@ fn add_group(name: &[u8], gid: u32) -> Result<(), u64> {
         return Err(code);
     }
     Ok(())
+}
+
+/// Append the account's `name:salt:hash` line to `/etc/shadow`.
+#[inline(never)]
+fn add_secret(name: &[u8], salt: &[u8], hash: &[u8]) -> Result<(), u64> {
+    let mut cur = [0u8; BUF];
+    let clen = ulib::read_file_all(SHADOW_FILE, &mut cur);
+    let mut line = [0u8; 256];
+    let Some(llen) = accounts::format_shadow_line(&mut line, name, salt, hash) else {
+        return Err(syscall_abi::FS_ERROR);
+    };
+    let mut out = [0u8; BUF];
+    let Some(olen) = accounts::append_line(&cur[..clen], &mut out, &line[..llen]) else {
+        return Err(syscall_abi::FS_ERR_DISK_FULL);
+    };
+    let code = ulib::fs_write_bulk(SHADOW_FILE, &out[..olen]);
+    if ulib::is_fs_error(code) {
+        return Err(code);
+    }
+    Ok(())
+}
+
+/// Roll back [`add_secret`]: rewrite `/etc/shadow` without the line we added.
+#[inline(never)]
+fn remove_secret(name: &[u8]) {
+    let mut cur = [0u8; BUF];
+    let clen = ulib::read_file_all(SHADOW_FILE, &mut cur);
+    let mut out = [0u8; BUF];
+    if let Some((n, removed)) = accounts::remove_line(&cur[..clen], &mut out, name) {
+        if removed {
+            let _ = ulib::fs_write_bulk(SHADOW_FILE, &out[..n]);
+        }
+    }
 }
 
 /// Roll back [`add_group`]: rewrite `/etc/group` without the line we added.

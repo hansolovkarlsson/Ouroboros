@@ -24,6 +24,11 @@ use crate::CWD_SIZE;
 
 const PASSWD_PATH: &str = "/etc/passwd";
 const GROUP_PATH: &str = "/etc/group";
+/// The password secrets, `name:salt_hex:hash_hex`, mode 0600 and root-owned -
+/// which is the point: `/etc/passwd` stays world-readable (every `id`, `ls -l`
+/// and `chown` needs the name/uid map) while the hashes an offline cracker
+/// wants do not.
+const SHADOW_PATH: &str = "/etc/shadow";
 /// Read cap for `/etc/passwd`, matching the account tools' write cap
 /// ([`accounts`]/`useradd` bound writes to `SAFECOPY_MAX`). fsd caps a single
 /// inline read at `FS_DATA_MAX` (512), so the shared `read_account_file` loops
@@ -67,7 +72,11 @@ pub fn login(cwd: &mut [u8; CWD_SIZE]) -> Session {
         crate::print_str("\r\n");
 
         if let Some(acct) = accounts::find_user_by_name(passwd, &ubuf[..ulen]) {
-            if acct.verify(&wbuf[..wlen]) {
+            // The secret lives in /etc/shadow (mode 0600, root): login runs as
+            // root, before the SET_ID below, which is exactly why it can read it
+            // at all. A legacy passwd line with the hash inline still verifies,
+            // so a disk written before /etc/shadow still logs in.
+            if verify_password(&acct, &ubuf[..ulen], &wbuf[..wlen]) {
                 // Supplementary groups FIRST, while this task is still root:
                 // SET_GROUPS is root-only (membership is a permission grant), so
                 // the order is forced - drop the identity afterwards, never
@@ -103,6 +112,22 @@ fn write_cwd(cwd: &mut [u8; CWD_SIZE], home: &[u8]) -> usize {
     let n = home.len().min(cwd.len());
     cwd[..n].copy_from_slice(&home[..n]);
     n
+}
+
+/// Check `password` for `acct`: against `/etc/shadow`'s entry if there is one,
+/// else against a legacy inline secret in the passwd line. An account with
+/// neither never verifies - "no password recorded" must not mean "any password".
+///
+/// `#[inline(never)]`: the shadow file is a 2 KB stack buffer, kept out of the
+/// caller's frame.
+#[inline(never)]
+fn verify_password(acct: &accounts::Account<'_>, name: &[u8], password: &[u8]) -> bool {
+    let mut sbuf = [0u8; PASSWD_MAX];
+    let slen = crate::read_account_file(SHADOW_PATH, &mut sbuf);
+    if let Some(secret) = accounts::find_secret_by_name(&sbuf[..slen], name) {
+        return secret.verify(password);
+    }
+    acct.verify(password) // legacy inline secret, or false when there is none
 }
 
 /// Look `name` up in `/etc/group` and hand the kernel the gids it belongs to,

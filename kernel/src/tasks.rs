@@ -77,7 +77,7 @@ use crate::loader::LoadedProgram;
 /// (`syscall_abi::NET_TASK`). Each server stays `Unused` if its `*.BIN`
 /// doesn't exist, and `spawn` never fills a reserved slot: a spawned program
 /// landing in one would inherit its role. Slots [`FIRST_SPAWNABLE`]..NUM_TASKS
-/// (5..10) start `Unused` and are only ever filled by `spawn` (dynamic task
+/// (6..11) start `Unused` and are only ever filled by `spawn` (dynamic task
 /// creation) - the pool a foreground command, a background task, and a
 /// pipeline draw from. A small, fixed bound rather than anything growable -
 /// "generous but bounded," the same philosophy `mmu.rs`'s
@@ -85,19 +85,25 @@ use crate::loader::LoadedProgram;
 /// we need" question. Raising it is a one-constant change now (`spawn` just
 /// fails with `SpawnError::NoFreeSlot` past this): the per-task arrays and the
 /// `mmu.rs` table pool (`MAX_EL0_REGIONS`, which must stay equal) auto-scale.
-pub const NUM_TASKS: usize = 10;
+pub const NUM_TASKS: usize = 11;
 
 /// The first slot `spawn` may use - everything below it is fixed
 /// infrastructure (boot shell, idle, filesystem server, console server,
-/// network server).
-const FIRST_SPAWNABLE: usize = 5;
+/// network server, account server).
+///
+/// Adding the account server raised this from 5 to 6, and `NUM_TASKS` from 10
+/// to 11 with it: a fifth server would otherwise have eaten one of the five
+/// spawnable slots, which is the pool a pipeline's stages come from. Keeping
+/// five spawnable was worth one more slot's worth of fixed arrays.
+const FIRST_SPAWNABLE: usize = 6;
 
 // Per-slot capabilities (the capability model for who-may-do-what).
 // Because task-slot roles are static (see `NUM_TASKS`'s doc comment - 0
 // shell, 1 idle, 2 fsd, 3 cond, 4 netd, 5..10 spawnable), a task's
 // capabilities are a pure function of its slot: no stored table, no mutable
 // state, and a restarted server or a spawned child automatically gets the
-// right caps. The whole policy lives in `caps_for_slot`. Packed in one `u32`:
+// right caps. (0 shell, 1 idle, 2 fsd, 3 cond, 4 netd, 5 accountd,
+// 6..11 spawnable.) The whole policy lives in `caps_for_slot`. Packed in one `u32`:
 // the low `NUM_TASKS` bits are the IPC send-mask (added in the who-may-call-
 // whom stage), and the resource caps live at bit 16 and up - clear of the
 // send-mask for any `NUM_TASKS` up to 16, so raising the slot count can't
@@ -123,6 +129,7 @@ const TO_SHELL: u32 = 1 << 0; // slot 0
 const TO_FSD: u32 = 1 << (syscall_abi::FSD_TASK as u32); // slot 2
 const TO_CON: u32 = 1 << (syscall_abi::CON_TASK as u32); // slot 3
 const TO_NET: u32 = 1 << (syscall_abi::NET_TASK as u32); // slot 4
+const TO_ACCT: u32 = 1 << (syscall_abi::ACCT_TASK as u32); // slot 5
 /// Every spawnable slot's bit ([`FIRST_SPAWNABLE`]..NUM_TASKS) - the shell's
 /// send-mask so it can relay pipe input to any child it spawns. Computed from
 /// the two constants, so raising `NUM_TASKS` widens it automatically.
@@ -155,11 +162,24 @@ fn caps_for_slot(slot: usize) -> u32 {
         // child it spawns - the remote-exec (Plan 9 `cpu`, cluster Phase 4a)
         // child whose stdout it captures, which pipes its output back to netd.
         syscall_abi::NET_TASK => TO_FSD | TO_CON | TO_NET | CAP_NET,
+        // Account server: reads and writes /etc/passwd + /etc/shadow through
+        // the filesystem server, and logs to the console. It holds no device
+        // capability at all - its privilege is not a resource but a *policy*
+        // one (it will write a password for a caller who cannot write
+        // /etc/shadow), and that lives in its own code, gated on the caller
+        // identity the kernel reports. (Replies ride the reply exemption.)
+        syscall_abi::ACCT_TASK => TO_FSD | TO_CON,
         // Spawnable slots: may reach the servers a program legitimately needs
-        // (fsd for a nested shell, cond for output) and message the shell
-        // (e.g. pong's unsolicited echo). Not the NIC, not each other, not
-        // idle, no devices.
-        _ => TO_SHELL | TO_FSD | TO_CON,
+        // (fsd for a nested shell, cond for output, accountd to change one's
+        // own password) and message the shell (e.g. pong's unsolicited echo).
+        // Not the NIC, not each other, not idle, no devices.
+        //
+        // TO_ACCT is deliberately given to *every* spawnable slot rather than
+        // delegated per-command: `passwd` is a program any user may run, and
+        // holding the capability to ASK is not permission to succeed - the
+        // server checks the caller's identity itself. Same reasoning that lets
+        // every slot reach fsd, which then enforces file permissions.
+        _ => TO_SHELL | TO_FSD | TO_CON | TO_ACCT,
     }
 }
 
@@ -644,7 +664,8 @@ pub(crate) fn set_argv(task: usize, blob: &[u8]) {
     argv.len = n;
 }
 
-/// The fixed name of a supervised server slot (`fsd`/`cond`/`netd`), or `None`
+/// The fixed name of a supervised server slot (`fsd`/`cond`/`netd`/`accountd`),
+/// or `None`
 /// for any other slot. One source of truth for both the boot naming (`init`)
 /// and the re-naming a supervised restart needs (`supervisor::restart`, since a
 /// crash teardown clears the argv store this reads).
@@ -653,6 +674,7 @@ pub(crate) fn server_name(slot: usize) -> Option<&'static [u8]> {
         s if s == syscall_abi::FSD_TASK as usize => Some(b"fsd"),
         s if s == syscall_abi::CON_TASK as usize => Some(b"cond"),
         s if s == syscall_abi::NET_TASK as usize => Some(b"netd"),
+        s if s == syscall_abi::ACCT_TASK as usize => Some(b"accountd"),
         _ => None,
     }
 }
@@ -1273,6 +1295,7 @@ static STATES: [StateSlot; NUM_TASKS] = [
     StateSlot(UnsafeCell::new(TaskState::Unused)),
     StateSlot(UnsafeCell::new(TaskState::Unused)),
     StateSlot(UnsafeCell::new(TaskState::Unused)),
+    StateSlot(UnsafeCell::new(TaskState::Unused)),
 ];
 
 /// Scans forward from `from` (exclusive), wrapping, for the next
@@ -1648,6 +1671,7 @@ pub unsafe fn init(
     fsd: Option<&LoadedProgram>,
     cond: Option<&LoadedProgram>,
     netd: Option<&LoadedProgram>,
+    accountd: Option<&LoadedProgram>,
 ) {
     // Task 0: entry is the program's real ELF entry point, not just its
     // load base - loader.rs computes `entry = base + e_entry` (they
@@ -1743,6 +1767,24 @@ pub unsafe fn init(
             set_name(4, n);
         }
         clean_dcache_range(netd.base, netd.size);
+    }
+
+    // Task 5: the account server, same shape again. Absent (no ACCOUNTD.BIN)
+    // leaves the slot `Unused` and the system boots without self-service
+    // password changes - exactly as it did before there was one.
+    if let Some(accountd) = accountd {
+        *unsafe { &mut *TASKS[5].0.get() } = Context {
+            gpr: [0; 31],
+            sp_el0: accountd.base + accountd.size,
+            elr_el1: accountd.entry,
+            spsr_el1: 0,
+        };
+        unsafe { *REGIONS[5].0.get() = (accountd.base, accountd.size) };
+        unsafe { *STATES[5].0.get() = TaskState::Runnable };
+        if let Some(n) = server_name(5) {
+            set_name(5, n);
+        }
+        clean_dcache_range(accountd.base, accountd.size);
     }
 
     unsafe {
