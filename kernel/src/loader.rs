@@ -429,10 +429,9 @@ const NET_PATH: &str = "\\EFI\\ORBS\\NETD.BIN";
 /// the console server, and registers it with the supervisor for crash/wedge
 /// recovery too. A missing/broken NETD.BIN is not fatal (the caller logs and
 /// boots on with no network - `ping` reports no server).
-/// The account server, loaded into [`syscall_abi::ACCT_TASK`] the same way as
-/// the other three servers. Missing ACCOUNTD.BIN is not fatal: the system boots
-/// without self-service password changes, exactly as it did before there was an
-/// account server.
+/// The account server's image. Missing ACCOUNTD.BIN is not fatal: the system
+/// boots without self-service password changes, exactly as it did before there
+/// was an account server.
 const ACCT_PATH: &str = "\\EFI\\ORBS\\ACCOUNTD.BIN";
 
 /// Loads the account server ([`ACCT_PATH`]) - the `load_netd` shape exactly.

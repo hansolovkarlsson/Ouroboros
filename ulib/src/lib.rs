@@ -987,6 +987,32 @@ pub fn fs_chown(path: &str, uid: Option<u16>, gid: Option<u16>) -> u64 {
 /// (missing file / no filesystem). A convenience over [`fs_read_bulk`] for
 /// config-sized files like `/etc/passwd` / `/etc/group` (the account tools use
 /// it); `buf` should be `<= SAFECOPY_MAX` so one bulk read covers it.
+/// Read a whole small file, distinguishing **"could not read it"** from
+/// **"it is empty or absent"**: `None` on a read error or a file that did not
+/// fit `buf`, `Some(len)` otherwise (`Some(0)` for a genuinely missing file).
+///
+/// [`read_file_all`] collapses every one of those into `0`, which is fine for a
+/// reader that just degrades - but catastrophic for a **read-modify-write** of
+/// the account database. There, a `0` from a transient error or a file larger
+/// than the buffer means the rewrite is built from *nothing* and replaces the
+/// real file with a single line, silently discarding every other account. Any
+/// caller that writes the file back must use this and refuse on `None`.
+pub fn read_file_checked(path: &str, buf: &mut [u8]) -> Option<usize> {
+    let r = fs_read_bulk(path, 0, buf);
+    if r >= syscall_abi::FS_ERR_MIN {
+        // A missing file is a legitimate empty; anything else is a real failure
+        // and must not be mistaken for one.
+        return if r == syscall_abi::FS_ERR_NOT_FOUND { Some(0) } else { None };
+    }
+    let n = r as usize;
+    // Exactly filling the buffer means the file may be longer than we can see,
+    // so a rewrite from it would truncate the tail. Refuse rather than guess.
+    if n >= buf.len() {
+        return None;
+    }
+    Some(n)
+}
+
 pub fn read_file_all(path: &str, buf: &mut [u8]) -> usize {
     let r = fs_read_bulk(path, 0, buf);
     if r < syscall_abi::FS_ERR_MIN {

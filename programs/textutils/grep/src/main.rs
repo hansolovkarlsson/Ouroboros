@@ -227,7 +227,7 @@ pub extern "C" fn _start() -> ! {
             // line tested in pieces).
             if b == b'\n' || ll == line.len() {
                 lineno += 1;
-                if test(&matcher, &line[..ll], pattern, fold, &mut warned) != invert {
+                if test(&matcher, &line[..ll], pattern, fold, &mut warned) == Some(!invert) {
                     emit(target, &line[..ll], numbered, lineno);
                 }
                 ll = 0;
@@ -237,7 +237,7 @@ pub extern "C" fn _start() -> ! {
     // A trailing line with no final newline.
     if ll > 0 {
         lineno += 1;
-        if test(&matcher, &line[..ll], pattern, fold, &mut warned) != invert {
+        if test(&matcher, &line[..ll], pattern, fold, &mut warned) == Some(!invert) {
             emit(target, &line[..ll], numbered, lineno);
         }
     }
@@ -245,15 +245,21 @@ pub extern "C" fn _start() -> ! {
     ulib::exit(0);
 }
 
-/// Test one line. `warned` makes the bounded-engine notice a one-time message
-/// rather than one per line.
-fn test(m: &Matcher, line: &[u8], pattern: &[u8], fold: bool, warned: &mut bool) -> bool {
+/// Test one line: `Some(true)`/`Some(false)` for a decided match, `None` when
+/// the engine ran out of budget. `warned` makes the bounded-engine notice a
+/// one-time message rather than one per line.
+///
+/// `None` is deliberately NOT a `false`. Collapsing it to one meant `-v` XORed
+/// it and *printed* the line - so grep announced it was skipping lines while
+/// emitting them, and an exclusion filter passed through the very lines that
+/// match. An undecidable line is skipped under both polarities.
+fn test(m: &Matcher, line: &[u8], pattern: &[u8], fold: bool, warned: &mut bool) -> Option<bool> {
     let text = trim_eol(line);
     match m {
-        Matcher::Fixed => contains(text, pattern, fold),
+        Matcher::Fixed => Some(contains(text, pattern, fold)),
         Matcher::Re(re) => match re.is_match(text, fold) {
-            regex::Match::Yes => true,
-            regex::Match::No => false,
+            regex::Match::Yes => Some(true),
+            regex::Match::No => Some(false),
             regex::Match::Limit => {
                 if !*warned {
                     ulib::con_write(
@@ -261,7 +267,7 @@ fn test(m: &Matcher, line: &[u8], pattern: &[u8], fold: bool, warned: &mut bool)
                     );
                     *warned = true;
                 }
-                false
+                None
             }
         },
     }

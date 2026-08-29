@@ -129,7 +129,18 @@ fn handle(sender: u64, req: &[u8]) -> u64 {
     // Who is actually asking. The kernel binds this to the message's real
     // sender slot, so it cannot be spoofed by the request's contents - which is
     // the entire reason this server can be trusted to make the decision.
-    let caller_uid = (ulib::task_id(sender) & 0xffff_ffff) as u32;
+    //
+    // FAIL CLOSED when the kernel has no identity to report. A slot's identity
+    // is reset to root when its task dies, so a caller could otherwise send
+    // "change root's password" and immediately exit: by the time this server ran,
+    // GET_ID would answer 0 and the old-password check would be skipped
+    // entirely. The kernel now reports GET_ID_ERR for a dead slot, and a request
+    // whose sender is gone is authorized as nobody, not as root.
+    let packed = ulib::task_id(sender);
+    if packed == syscall_abi::GET_ID_ERR {
+        return syscall_abi::ACCT_ERR_DENIED;
+    }
+    let caller_uid = (packed & 0xffff_ffff) as u32;
 
     change_password(caller_uid, name, old, new)
 }
@@ -165,8 +176,14 @@ fn change_password(caller_uid: u32, name: &[u8], old: &[u8], new: &[u8]) -> u64 
     let target_name = &tname[..tn];
     let legacy_secret = target.secret;
 
+    // read_file_checked, not read_file_all: this buffer is rewritten back over
+    // /etc/shadow below, so a read error or an over-long file returning 0 would
+    // replace the whole database with one line and wipe every other account's
+    // secret - while cheerfully reporting success.
     let mut sbuf = [0u8; BUF];
-    let slen = ulib::read_file_all(SHADOW_FILE, &mut sbuf);
+    let Some(slen) = ulib::read_file_checked(SHADOW_FILE, &mut sbuf) else {
+        return syscall_abi::ACCT_ERR_IO;
+    };
 
     if caller_uid != 0 {
         // A non-root caller may only change their own password...

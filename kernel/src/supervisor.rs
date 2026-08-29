@@ -65,8 +65,8 @@ use crate::tasks;
 const IMG_CAP: usize = 192 * 1024;
 
 /// How many servers can be supervised at once. **Exactly saturated today** by
-/// fsd/cond/netd/accountd, so a sixth server needs this raised - each entry
-/// costs [`IMG_CAP`] (128 KB) of kernel `.bss`, which is why it is not simply
+/// fsd/cond/netd/accountd, so a **fifth** server needs this raised - each entry
+/// costs [`IMG_CAP`] (192 KB) of kernel `.bss`, which is why it is not simply
 /// set higher "just in case". [`register`] reports a full registry distinctly
 /// from an oversized image so that limit announces itself rather than being
 /// mistaken for a file-size problem.
@@ -200,7 +200,7 @@ pub enum Registered {
     /// The image is empty or larger than [`IMG_CAP`].
     ImageTooLarge,
     /// All [`MAX_SUPERVISED`] entries are taken - raise it (each entry costs
-    /// `IMG_CAP`, 128 KB, so this is a deliberate memory trade, not a typo).
+    /// `IMG_CAP`, 192 KB, so this is a deliberate memory trade, not a typo).
     RegistryFull,
 }
 

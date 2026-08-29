@@ -159,7 +159,8 @@ $ set PATH=/bin ; env           # a real environment; $VAR expansion
   (`cd ~`, `cat ~/notes`). See `man login`.
 - **Account management** (`/bin`, root only): `useradd <name> [-u uid]
   [-g group|gid]` (creates the account, prompts a password, makes `/Users/<name>`),
-  `passwd [user]` (change a password), `groupadd <name>`, and `usermod <user> -g
+  `passwd [user]` (change a password - any user may change their own via the
+  account server; only root may change another's), `groupadd <name>`, and `usermod <user> -g
   <group>` (set a primary group). `id` shows your uid/gid **with names**. On ext2,
   file permissions are enforced (owner→group→other; root bypasses), so a normal
   user can write in `~` but not in `/`.

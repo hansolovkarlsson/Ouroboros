@@ -824,6 +824,12 @@ $(EXFAT_PART): esp
 	cp manpages/* $(BUILD_DIR)/exfat-src/man/
 	mkdir -p $(BUILD_DIR)/exfat-src/etc
 	python3 scripts/mkpasswd.py > $(BUILD_DIR)/exfat-src/etc/passwd
+	# /etc/shadow must be staged wherever /etc/passwd is: passwd no longer
+	# carries the secret, so an image with one and not the other boots to a
+	# login prompt that NO password can satisfy (the file is non-empty, so
+	# login's root-session fallback doesn't fire either). exFAT can't record the
+	# 0600 mode - see the note in the `esp:` target.
+	python3 scripts/mkpasswd.py --shadow > $(BUILD_DIR)/exfat-src/etc/shadow
 	python3 scripts/mkgroup.py > $(BUILD_DIR)/exfat-src/etc/group
 	mkdir -p $(BUILD_DIR)/exfat-src/Users/user
 	printf 'hello from an exFAT volume\r\n' > $(BUILD_DIR)/exfat-src/HELLO.TXT

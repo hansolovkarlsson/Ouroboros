@@ -3540,6 +3540,20 @@ fn cmd_mount_at(line: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize, out: &mut Outp
 }
 
 /// `mount` with no argument: ask the filesystem server what's mounted
+/// Whether the mounted filesystem cannot model permissions - anything but ext2
+/// today. Used by `login` to say out loud that the account database is
+/// unprotected here (FAT32/exFAT record no mode, so `fsd` lets every access
+/// through and `/etc/shadow` is world-writable however it was chmod'd at build
+/// time). `false` when nothing is mounted: the root-session fallback covers it.
+pub(crate) fn mounted_fs_unprotected() -> bool {
+    let mut info = [0u8; 32];
+    if fs_call(syscall_abi::FSOP_MOUNT_INFO, [0; 4], &[], &[], &mut info) != 0 {
+        return false;
+    }
+    let name_end = info[16..].iter().position(|&b| b == 0).unwrap_or(16) + 16;
+    &info[16..name_end] != b"ext2"
+}
+
 /// (FSOP_MOUNT_INFO) and print the format, its partition's first sector,
 /// and the disk's capacity - or that nothing is mounted.
 fn mount_info(out: &mut Output) {
@@ -3629,6 +3643,9 @@ fn cmd_unmount() {
     match fs_call(syscall_abi::FSOP_UNMOUNT, [0; 4], &[], &[], &mut []) {
         0 => print_line("unmounted"),
         NO_FS => print_line("unmount: nothing was mounted"),
+        // These are root-only in fsd now, so a refusal is the ordinary answer
+        // for a normal user - it deserves the real reason, not "unexpected".
+        syscall_abi::FS_ERR_PERM => print_line("unmount: permission denied (only root may unmount)"),
         _ => print_line("unmount: unexpected return"),
     }
 }

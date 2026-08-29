@@ -945,6 +945,17 @@ pub(crate) fn groups_of(task: usize, out: &mut [u32]) -> usize {
     n
 }
 
+/// Whether `task` is a live task - one that could actually have sent a message
+/// that is still worth authorizing. A `Zombie` has run and died; an `Unused`
+/// slot has had its identity reset to root by [`reset_id`], which is precisely
+/// why `GET_ID` must not answer for either (see the `GET_ID` syscall arm).
+pub(crate) fn is_live(task: usize) -> bool {
+    !matches!(
+        unsafe { *STATES[task].0.get() },
+        TaskState::Unused | TaskState::Zombie(_)
+    )
+}
+
 /// `task`'s owning uid (the low half of its packed identity).
 pub(crate) fn uid_of(task: usize) -> u32 {
     IDS[task].load(Ordering::Relaxed) as u32
@@ -983,8 +994,9 @@ pub(crate) fn inherit_id(child: usize, parent: usize) {
     // Supplementary groups travel with the identity: a command run by a user in
     // `staff` must be able to touch the group's files, exactly as the user can.
     let n = GROUP_COUNTS[parent].load(Ordering::Relaxed);
-    for i in 0..(n as usize).min(syscall_abi::MAX_SUPP_GROUPS) {
-        GROUPS[child][i].store(GROUPS[parent][i].load(Ordering::Relaxed), Ordering::Relaxed);
+    let live = (n as usize).min(syscall_abi::MAX_SUPP_GROUPS);
+    for (dst, src) in GROUPS[child].iter().zip(GROUPS[parent].iter()).take(live) {
+        dst.store(src.load(Ordering::Relaxed), Ordering::Relaxed);
     }
     GROUP_COUNTS[child].store(n, Ordering::Relaxed);
 }

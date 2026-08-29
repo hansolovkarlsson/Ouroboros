@@ -128,7 +128,10 @@ pub extern "C" fn _start() -> ! {
     let secret_hash;
     {
         let mut pbuf = [0u8; BUF];
-        let plen = ulib::read_file_all(PASSWD_FILE, &mut pbuf);
+        // Checked: `out` is built from this and written back over /etc/passwd.
+        let Some(plen) = ulib::read_file_checked(PASSWD_FILE, &mut pbuf) else {
+            die(b"useradd: could not read /etc/passwd - refusing to rewrite it\r\n");
+        };
         if accounts::user_exists(&pbuf[..plen], name) {
             die(b"useradd: user already exists\r\n");
         }
@@ -370,7 +373,11 @@ fn resolve_group(gspec: Option<&[u8]>, name: &[u8], uid: u32) -> Primary {
 #[inline(never)]
 fn add_group(name: &[u8], gid: u32) -> Result<(), u64> {
     let mut grbuf = [0u8; BUF];
-    let grlen = ulib::read_file_all(GROUP_FILE, &mut grbuf);
+    // Checked: this file is written back, so a failed read must not become an
+    // empty one that replaces every other group with this line.
+    let Some(grlen) = ulib::read_file_checked(GROUP_FILE, &mut grbuf) else {
+        return Err(syscall_abi::FS_ERR_IO);
+    };
     let mut gline = [0u8; 64];
     let Some(gll) = accounts::format_group_line(&mut gline, name, gid, b"") else {
         return Err(syscall_abi::FS_ERROR);
@@ -390,7 +397,9 @@ fn add_group(name: &[u8], gid: u32) -> Result<(), u64> {
 #[inline(never)]
 fn add_secret(name: &[u8], salt: &[u8], hash: &[u8]) -> Result<(), u64> {
     let mut cur = [0u8; BUF];
-    let clen = ulib::read_file_all(SHADOW_FILE, &mut cur);
+    let Some(clen) = ulib::read_file_checked(SHADOW_FILE, &mut cur) else {
+        return Err(syscall_abi::FS_ERR_IO);
+    };
     let mut line = [0u8; 256];
     let Some(llen) = accounts::format_shadow_line(&mut line, name, salt, hash) else {
         return Err(syscall_abi::FS_ERROR);
@@ -418,7 +427,9 @@ fn add_secret(name: &[u8], salt: &[u8], hash: &[u8]) -> Result<(), u64> {
 #[inline(never)]
 fn remove_secret(name: &[u8]) {
     let mut cur = [0u8; BUF];
-    let clen = ulib::read_file_all(SHADOW_FILE, &mut cur);
+    let Some(clen) = ulib::read_file_checked(SHADOW_FILE, &mut cur) else {
+        return; // can't read it reliably - leave it alone rather than truncate
+    };
     let mut out = [0u8; BUF];
     if let Some((n, removed)) = accounts::remove_line(&cur[..clen], &mut out, name) {
         if removed {
@@ -433,7 +444,9 @@ fn remove_secret(name: &[u8]) {
 #[inline(never)]
 fn remove_group(name: &[u8]) {
     let mut grbuf = [0u8; BUF];
-    let grlen = ulib::read_file_all(GROUP_FILE, &mut grbuf);
+    let Some(grlen) = ulib::read_file_checked(GROUP_FILE, &mut grbuf) else {
+        return; // can't read it reliably - leave it alone rather than truncate
+    };
     let mut gout = [0u8; BUF];
     if let Some((n, removed)) = accounts::remove_line(&grbuf[..grlen], &mut gout, name) {
         if removed {

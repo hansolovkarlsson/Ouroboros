@@ -52,6 +52,7 @@ pub struct Session {
 /// returns its length; on return this task's identity is the logged-in user
 /// (or root, if there is no `/etc/passwd`). Loops until authentication succeeds.
 pub fn login(cwd: &mut [u8; CWD_SIZE]) -> Session {
+    warn_if_unprotected();
     let mut pbuf = [0u8; PASSWD_MAX];
     let plen = crate::read_account_file(PASSWD_PATH, &mut pbuf);
     if plen == 0 {
@@ -112,6 +113,30 @@ fn write_cwd(cwd: &mut [u8; CWD_SIZE], home: &[u8]) -> usize {
     let n = home.len().min(cwd.len());
     cwd[..n].copy_from_slice(&home[..n]);
     n
+}
+
+/// Say so when the filesystem holding the account database cannot protect it.
+///
+/// `/etc/shadow` is mode 0600 root **on ext2**. FAT32 and exFAT model no mode at
+/// all, so `fsd`'s permission check passes everything there: any user can read
+/// the hashes, and - worse - overwrite root's entry with their own and log in as
+/// root. `chmod 600` at image-build time is a host-side mode those filesystems
+/// simply do not record.
+///
+/// This is not a regression and not fixable *on* those filesystems: with no
+/// modes there is no permission model to enforce, and `/etc/passwd` was equally
+/// writable before the secrets moved out of it. What was wrong was claiming
+/// otherwise, so the guarantee now announces its own absence at the one moment
+/// someone is thinking about credentials.
+fn warn_if_unprotected() {
+    if crate::mounted_fs_unprotected() {
+        crate::print_line(
+            "warning: this filesystem cannot enforce permissions - /etc/shadow is readable and",
+        );
+        crate::print_line(
+            "         writable by any user here, so accounts are NOT secure (ext2 enforces them)",
+        );
+    }
 }
 
 /// Check `password` for `acct`: against `/etc/shadow`'s entry if there is one,

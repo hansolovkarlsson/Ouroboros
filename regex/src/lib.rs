@@ -75,12 +75,17 @@ pub const MAX_PROG: usize = 192;
 pub const MAX_CLASSES: usize = 8;
 /// Deepest `(` nesting accepted - bounds the parser's recursion.
 pub const MAX_DEPTH: usize = 16;
-/// Backtracking stack entries. The matcher's worst case is a fixed array of
-/// this many `(pc, sp)` pairs (4 bytes each, so 2 KB) rather than unbounded
-/// host recursion. A greedy `*` pushes one entry per byte it consumes, so this
-/// has to exceed the longest text a caller will match - `grep`'s line buffer is
-/// 256 bytes, leaving room for several stacked repeats on one line.
-pub const MAX_STACK: usize = 512;
+/// Backtracking stack entries: `(pc, sp)` pairs, 4 bytes each, so 4 KB - a
+/// fixed array rather than unbounded host recursion.
+///
+/// **Sized from the real worst case, which is not one entry per byte.** Every
+/// executed `Split` pushes, and nothing pops while a scan is succeeding, so a
+/// repeat wrapping an *alternation* pushes one entry per branch per byte:
+/// `^(a|b|c)*$` costs ~3 per byte. At 512 this failed on a 170-byte line -
+/// well inside `grep`'s own 256-byte buffer - and reported `Match::Limit` for a
+/// pattern nobody would call pathological. 1024 covers ~4 branches across a full
+/// line; deeper nesting still reports `Limit`, honestly, rather than guessing.
+pub const MAX_STACK: usize = 1024;
 /// Longest text one match attempt accepts. Positions are `u16` on the
 /// backtracking stack, so a longer text reports [`Match::Limit`] rather than
 /// wrapping around silently.
@@ -189,6 +194,10 @@ pub struct Regex {
     prog_len: usize,
     /// One 256-bit membership bitmap per `[...]` class.
     classes: [[u8; 32]; MAX_CLASSES],
+    /// Whether each class was written negated (`[^...]`). Needed only for
+    /// case-insensitive matching: folding *widens* a positive class but must
+    /// *narrow* a negated one - see the `Inst::Class` arm.
+    class_negated: [bool; MAX_CLASSES],
     n_classes: usize,
     /// An empty pattern matches every text (grep's behaviour).
     empty: bool,
@@ -201,6 +210,7 @@ struct Parser<'a> {
     nodes: [Node; MAX_NODES],
     n_nodes: usize,
     classes: [[u8; 32]; MAX_CLASSES],
+    class_negated: [bool; MAX_CLASSES],
     n_classes: usize,
 }
 
@@ -212,6 +222,7 @@ impl<'a> Parser<'a> {
             nodes: [Node::Empty; MAX_NODES],
             n_nodes: 0,
             classes: [[0u8; 32]; MAX_CLASSES],
+            class_negated: [false; MAX_CLASSES],
             n_classes: 0,
         }
     }
@@ -405,8 +416,23 @@ impl<'a> Parser<'a> {
             // A range, unless the '-' is the last character before ']'.
             if self.peek() == Some(b'-') && self.pat.get(self.pos + 1).copied() != Some(b']') {
                 self.pos += 1; // consume '-'
+                // The upper endpoint takes an escape exactly as the lower one
+                // does. Reading it raw made `[\t-\n]` compile as 0x09..=0x5C
+                // ('\\') plus a literal 'n' - a class matching most of ASCII
+                // instead of two control characters, and silently.
                 let hi = match self.peek() {
                     None => return Err(Error::UnterminatedClass),
+                    Some(b'\\') => {
+                        self.pos += 1;
+                        match self.peek() {
+                            None => return Err(Error::TrailingBackslash),
+                            Some(e) => match e {
+                                b'n' => b'\n',
+                                b't' => b'\t',
+                                other => other,
+                            },
+                        }
+                    }
                     Some(h) => h,
                 };
                 self.pos += 1;
@@ -424,6 +450,7 @@ impl<'a> Parser<'a> {
             }
         }
         self.classes[self.n_classes] = bits;
+        self.class_negated[self.n_classes] = negate;
         self.n_classes += 1;
         self.push(Node::Class((self.n_classes - 1) as u8))
     }
@@ -530,6 +557,7 @@ impl Regex {
                 prog: [Inst::Match; MAX_PROG],
                 prog_len: 1,
                 classes: [[0u8; 32]; MAX_CLASSES],
+                class_negated: [false; MAX_CLASSES],
                 n_classes: 0,
                 empty: true,
             });
@@ -547,6 +575,7 @@ impl Regex {
             prog: e.prog,
             prog_len: e.len,
             classes: p.classes,
+            class_negated: p.class_negated,
             n_classes: p.n_classes,
             empty: false,
         })
@@ -626,10 +655,19 @@ impl Regex {
                         }
                         let bits = &self.classes[i as usize];
                         let b = text[at];
-                        let mut ok = bits[(b >> 3) as usize] & (1 << (b & 7)) != 0;
-                        if fold && !ok {
-                            // Try the other case, so [a-z] with -i also accepts
-                            // 'A' without rewriting the compiled bitmap.
+                        let member = |c: u8| bits[(c >> 3) as usize] & (1 << (c & 7)) != 0;
+                        let ok = if !fold {
+                            member(b)
+                        } else {
+                            // Case folding asks "does EITHER case match the class
+                            // the user wrote". For a positive class the stored
+                            // bitmap *is* that class, so either case suffices.
+                            // For a NEGATED class the bitmap is already the
+                            // complement, so "either case is outside the original
+                            // set" means BOTH cases must be inside the stored one.
+                            // Testing either way round there made `[^a]` match 'a'
+                            // under -i - a negated class matching the very
+                            // character it was written to exclude.
                             let alt = if b.is_ascii_lowercase() {
                                 b - 32
                             } else if b.is_ascii_uppercase() {
@@ -637,8 +675,12 @@ impl Regex {
                             } else {
                                 b
                             };
-                            ok = bits[(alt >> 3) as usize] & (1 << (alt & 7)) != 0;
-                        }
+                            if self.class_negated[i as usize] {
+                                member(b) && member(alt)
+                            } else {
+                                member(b) || member(alt)
+                            }
+                        };
                         if !ok {
                             break true;
                         }
@@ -825,6 +867,50 @@ mod tests {
         assert!(mi("[a-z]+", "ABC"));
         assert!(mi("^[A-Z]+$", "abc"));
         assert!(!mi("[0-9]", "a"));
+    }
+
+    #[test]
+    fn negated_classes_narrow_under_folding() {
+        // The bug this guards: folding used to widen every class, so a negated
+        // one matched the character it was written to exclude.
+        assert!(!mi("[^a]", "a"));
+        assert!(!mi("[^a]", "A"));
+        assert!(mi("[^a]", "b"));
+        assert!(!mi("^[^a-z]+$", "ABC")); // -i: A..Z fold into the excluded set
+        assert!(mi("^[^a-z]+$", "123"));
+        // ...while a positive class still widens, as it must.
+        assert!(mi("[a-z]", "A"));
+        assert!(mi("^[a-z]+$", "AbC"));
+        // Case-insensitive matching of a class with no letters is unaffected.
+        assert!(!mi("[^0-9]", "5"));
+        assert!(mi("[^0-9]", "x"));
+    }
+
+    #[test]
+    fn class_range_endpoints_both_take_escapes() {
+        // `[\t-\n]` is tab..newline - not 0x09..=0x5C plus a stray 'n', which
+        // is what reading the upper endpoint raw produced (and which matched
+        // most of ASCII, silently).
+        assert!(m(r"[\t-\n]", "\t"));
+        assert!(m(r"[\t-\n]", "\n"));
+        assert!(!m(r"[\t-\n]", "A"));
+        assert!(!m(r"[\t-\n]", "5"));
+        assert!(!m(r"[\t-\n]", "n"));
+        // An escaped ']' as the upper endpoint closes nothing.
+        assert!(m(r"[a-\]]", "^"));
+        assert!(!m(r"[a-\]]", "z"));
+    }
+
+    #[test]
+    fn ordinary_patterns_fit_the_backtracking_stack() {
+        // A repeat around an alternation pushes ~one entry per branch per byte,
+        // so this is the shape that used to exhaust the stack well inside grep's
+        // own 256-byte line buffer and report Limit for a normal pattern.
+        let re = Regex::compile(b"^(a|b|c)*$").unwrap();
+        for n in [8usize, 64, 170, 256] {
+            let text = vec![b'a'; n];
+            assert_eq!(re.is_match(&text, false), Match::Yes, "n = {n}");
+        }
     }
 
     #[test]

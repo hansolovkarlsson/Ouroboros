@@ -86,8 +86,10 @@ pub extern "C" fn _start() -> ! {
     }
     // The reply length must actually cover a status word: `reply` is zeroed, so
     // a short/empty reply would otherwise decode as status 0 and report a change
-    // that never happened.
-    if (packed as usize) < 8 {
+    // that never happened. MSG_CALL returns `(sender << 32) | len`, so the length
+    // is the LOW half - testing the packed word (as this did on its first
+    // attempt) compares the sender too and can never fire.
+    if (packed & 0xffff_ffff) < 8 {
         die(b"passwd: the account server sent no answer\r\n");
     }
     let status = read_u64(&reply, 0);

@@ -7,6 +7,80 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/`; 
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## A `max` review pass, and four escalations that were already on `main` (2026-08-29)
+
+The cloud ultrareview died without reporting (an hour idle, nothing posted), so
+a local `/code-review max` ran in its place. It is a substantially deeper pass
+than the `high` one: fifteen findings, several reproduced end-to-end by booting
+the real images. All fixed.
+
+**The four escalations — and three of them predate this branch.** Worth stating
+plainly, because it changes what the branch *is*: it did not introduce them, it
+attracted the review that found them.
+
+- **A fid served writes it was never opened for.** `struct Fid` recorded
+  used/owner/tree/path but *not the access mode*, and the fid ops skip
+  `check_access` on the grounds that the open was authorized. So
+  `open("/etc/passwd", O_RDONLY)` — permitted by a 0644 root-owned file — handed
+  back a fid that `NP_PWRITE` then wrote through, letting any user add a uid-0
+  line. Fids now record their open flags and enforce them.
+- **`NP_OPEN`'s flag mask was wrong twice.** `OPEN_TRUNC` was missing from the
+  write mask, so `open(path, O_RDONLY|O_TRUNC)` truncated a root-owned file with
+  only read permission; and `flags == 0` matched neither branch and fell through
+  to *allow*. Now default-deny, with `TRUNC` counted as a write.
+- **A dead sender was authorized as root.** `reset_id` sets a slot's identity to
+  root on task death and `GET_ID` had no liveness check — so a task could send
+  "change root's password", exit, and be authorized as root when `accountd` got
+  round to it. `GET_ID` now reports `GET_ID_ERR` for a dead slot; `accountd` and
+  `fsd` fail closed on it.
+- **The disk-management ops had no caller check at all.** `check_access` guards
+  the `NP_*` file verbs; `FSOP_UNMOUNT`/`ERASE`/`PARTITION`/`FORMAT` are
+  dispatched elsewhere and were guarded by nothing, so any user could unmount the
+  filesystem (reproduced in the guest). Now root-only — and the "is anything
+  mounted" test no longer counts the auto-mounted `/proc`, which had made
+  `erase`/`format` unreachable for everyone, root included.
+
+**Data-loss and lockout bugs.** `usermod -g` rewrote a *legacy* passwd line into
+the new 4-field format and dropped its inline secret on the floor — permanent
+lockout on exactly the disks the branch promises to keep working; it now migrates
+the secret to `/etc/shadow` first. `ulib::read_file_all` returns `0` for *any*
+failure, and six read-modify-write sites rebuilt the whole account database from
+that — one transient error and every other account's secret is gone. A new
+`read_file_checked` distinguishes "empty" from "could not read", and every
+rewrite refuses on the latter. The exFAT image staged `/etc/passwd` but not
+`/etc/shadow`, so `make run-image-exfat` booted to a login prompt no password
+could satisfy (verified fixed: it logs in again).
+
+**Three real `regex` bugs**, each now with the regression test that would have
+caught it: `[^a]` matched `a` under `-i` (folding *widens* a class, which is
+backwards for a negated one — it must narrow); a range's upper endpoint ignored
+escapes, so `[\t-\n]` compiled to `0x09..=0x5C` plus a stray `n` and matched most
+of ASCII; and `MAX_STACK` was half what an ordinary pattern needs — `^(a|b|c)*$`
+pushes ~3 entries per byte and gave up at 170 characters, inside `grep`'s own
+256-byte line. Relatedly, `grep` collapsed `Match::Limit` to `false` and then
+XORed it with `-v`, so an undecidable line was *printed* by the very flag meant
+to exclude it; `Limit` is now skipped under both polarities.
+
+**Two that cannot be fixed, only told the truth about.** On FAT32/exFAT there is
+no mode to enforce, so `/etc/shadow`'s `chmod 600` is a host-side no-op and any
+user can overwrite root's entry — a full escalation, reproduced in the guest. It
+is not new (`/etc/passwd` was equally writable before the secrets moved) and not
+fixable on a filesystem with no permission model, so `login` now **says so at the
+prompt** on such a volume and the man page states it. Likewise the shell's glob
+expansion rewrites `grep`'s new ERE metacharacters into filenames before `grep`
+sees them; the real fix is shell quoting, so for now the man page documents it
+with a worked example.
+
+Also: `usermod -G` with a missing operand silently stripped every group
+membership (now refused; `-G ""` still clears deliberately), `-G` never checked
+the user existed, and it reported "no such group" for a group it had just
+written to; `ancestors_searchable` walked *lexical* prefixes while ext2 resolves
+`..` as a real directory entry, so `/bin/../priv/x` bypassed the check (`..` is
+now refused outright — no legitimate caller sends an unnormalized path, and the
+C libc does not normalize); and the `passwd` short-reply guard added in the
+*previous* review round tested the packed `(sender << 32) | len` and could never
+fire.
+
 ## Code-review pass over the account/permissions branch (2026-08-29)
 
 A `/code-review high` over the whole branch, after a self-check that had already
