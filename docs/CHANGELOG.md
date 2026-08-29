@@ -7,6 +7,58 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/`; 
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## Users, part two: `/etc/shadow`, supplementary groups, ancestor-`x` (2026-08-29)
+
+Three of the users arc's named follow-ups, merged as #27/#28/#31. Each was
+built as its own branch after the original combined change proved too large to
+review as one thing — a split that paid for itself immediately, since reviewing
+the modules separately found bugs in each that three passes over the combined
+diff had missed.
+
+- **Ancestor-directory `x`-traversal (#27)** — permission enforcement walks
+  every ancestor's search bit, not just the object and its parent. The
+  deliberate first cut from the users arc, closed.
+- **`/etc/shadow` (#28)** — salts and hashes moved out of the world-readable
+  `/etc/passwd` (now four fields: `name:uid:gid:home`) into `/etc/shadow`, mode
+  0600 root-owned, which `fsd`'s enforcement makes genuinely unreadable to a
+  non-root user on ext2 rather than merely marked so. Legacy 6-field lines still
+  verify, and `usermod` migrates them on write.
+- **Supplementary groups (#31)** — `SET_ID`'s `arg2`/`arg3` carry a gid list
+  (`MAX_SUPP_GROUPS` 8) alongside the packed identity word, so identity and
+  membership change together; `GET_GROUPS` reads it back, children inherit it at
+  spawn, and `fsd` grants the group triad on a primary **or** supplementary
+  match. `usermod -G` sets it, `id` prints it. Setting a non-empty list is
+  root-only, gated separately from the identity change it rides with, because
+  membership is a privilege grant.
+
+**The bug worth remembering is the one the split found in `/etc/shadow`.** The
+shell reads an account file into a fixed buffer and reports `0` on overflow.
+For `/etc/passwd` that is safe — `0` means "no accounts", and `login` starts a
+root session. For `/etc/shadow` the identical `0` means "this user has no
+secret", so every password is refused, root's included, with no fallback and no
+way to repair it from the machine itself. The two halves of one database had
+**opposite failure modes for the same overflow**, and the shadow half crosses
+first: its lines are ~90 bytes against a four-field passwd line's ~30, so it
+passes 2 KB at ~23 accounts while `/etc/passwd` is still under 700. The secret
+lookup now streams one line at a time, which makes the size of the credential
+database irrelevant to whether anyone can log in. Verified in both directions —
+with the fix a 3814-byte shadow logs in fine; reverting only that change locks
+root out with a correct password.
+
+Two smaller ones from the same reviews: `su <uid>:<gid>` **cleared** the group
+list while `su <user>` granted it (the numeric branch passed `0, 0`, which at
+this ABI means "clear", not "leave alone" — and `manpages/su` documented the two
+spellings as equivalent), and `usermod alice -G -g staff` consumed the **next
+flag** as its operand, wiping every real membership and exiting 0 reporting
+success.
+
+And one that had been true for a while without anyone noticing: **`fsd` was
+unsupervised.** Its image had outgrown `supervisor::IMG_CAP` (137 KB against a
+128 KB cap), which is not an error — it silently costs the server its
+restartability, announced by a single boot warning easy to read past. `register`
+now also distinguishes "image too large" from "registry full", because they call
+for different fixes and the shared message could name the wrong one.
+
 ## A virtio-entropy RNG: the `RANDOM` syscall, and real password salts (2026-08-29)
 
 Password salts were derived from the monotonic clock and documented as weak from
