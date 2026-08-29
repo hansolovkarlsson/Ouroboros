@@ -1,23 +1,81 @@
 NAME
-    grep - keep lines matching a pattern
+    grep - keep lines matching a regular expression
 
 SYNOPSIS
-    <input> | grep [-i] [-v] [-n] <pattern>
+    <input> | grep [-i] [-v] [-n] [-F] <pattern>
 
 DESCRIPTION
-    Reads standard input and writes only the lines that contain <pattern>
-    (a plain substring; no regular expressions). A pipeline filter.
+    Reads standard input and writes only the lines that match <pattern>, an
+    extended regular expression (the egrep dialect). A pipeline filter.
 
     -i  ignore case (ASCII)
-    -v  invert: print the lines that do NOT contain the pattern
+    -v  invert: print the lines that do NOT match
     -n  prefix each printed line with its 1-based input line number
+    -F  fixed string: match <pattern> as a literal substring, no regex
 
     Flags may be combined, e.g. -in, and come before the pattern.
 
+PATTERNS
+    c           the literal character c
+    .           any single character
+    [abc]       any one of a, b, c        [a-z] a range      [^0-9] negated
+    ^   $       start / end of the line
+    e*  e+  e?  zero-or-more, one-or-more, zero-or-one of e
+    ab          a followed by b
+    a|b         a or b
+    (e)         grouping
+    \c          the literal c (\. \* \[ \\ ...); \n and \t are newline and tab
+
+    Alternation binds loosest: ^a|b$ means "starts with a" OR "ends with b",
+    not ^(a|b)$. The line terminator is stripped before matching, so $ anchors
+    to the end of the visible text.
+
+    Not supported: back-references, {n,m} counted repetition, POSIX class names
+    like [:alpha:], and submatch capture.
+
+    A repeat whose body can match nothing - (a*)* or (a|)* - is REFUSED with
+    "repeat of a possibly-empty expression". POSIX allows it; this engine does
+    not, because an empty loop body is the one way a backtracking matcher can
+    spin forever. Refusing it is what makes every accepted pattern terminate.
+    Write a* instead of (a*)*.
+
+    A bad pattern is an error, not a fallback: grep says what is wrong and
+    exits rather than quietly searching for something else. Very costly
+    patterns can exhaust the matcher's bounded budget on a given line; those
+    lines are skipped and a one-time warning says so.
+
+TYPING A PATTERN AT THIS SHELL
+    There are no quotes yet, so a pattern is a single whitespace-free word.
+    Two consequences worth knowing:
+
+      - A pipe is only a pipeline separator when it stands alone between
+        spaces, so grep a|b works as alternation. Write grep "a | b" - with
+        spaces - and the shell splits it into pipeline stages instead.
+      - The shell expands * and ? against the filesystem before grep sees
+        them, and there are no quotes to prevent it. A pattern matching no
+        filename is passed through unchanged (the usual case), but in a
+        directory where it DOES match, the FILENAMES arrive instead of the
+        pattern - and the extra ones are silently discarded, so the same
+        command searches for different things depending on the cwd:
+
+            $ cd /bin
+            $ echo hello | grep C*      # C* becomes CAT CHMOD CHOWN ...
+                                        # grep searches for "CAT"
+
+        -F does not help: the token is already rewritten before grep runs.
+        Until the shell has quoting, avoid bare * and ? in a pattern, or run
+        from a directory where they match nothing. A pattern needing a literal
+        star can escape it (\*), which is not a glob character to the shell
+        either.
+
 EXAMPLES
     cat log.txt | grep ERROR
+    cat log.txt | grep ERROR|WARN|FATAL
+    cat /etc/passwd | grep ^root
+    cat /etc/passwd | grep -n ^[a-z]+:
     ls /bin | grep -i cat
     cat log.txt | grep -vn WARN
+    cat notes.txt | grep -F a.b          the literal text a.b
 
 SEE ALSO
     wc, head, tail, uniq, sort

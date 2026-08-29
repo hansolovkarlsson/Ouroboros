@@ -175,7 +175,9 @@ $ set PATH=/bin ; env           # a real environment; $VAR expansion
 - **`/bin` programs** are real standalone binaries loaded from disk, found
   on `$PATH` (default `/bin`), spawned with arguments, and reaped:
   `ls  tree  cat  cp  mv  mkdir  rmdir  touch  rm  write  writeat  chmod  chown  more` (files;
-  `more`/`less` is the pager; `chmod`/`chown` change mode/owner on ext2),
+  `more`/`less` is the pager; `chmod`/`chown` change mode/owner on ext2 -
+  `chmod` takes octal or symbolic modes, `chmod u+x prog`; `chown` takes
+  names or ids, `chown alice:staff f`),
   `echo  pwd  uptime  clear  args  send  recv  selftest  man  printenv  id` (basics/diagnostics;
   `id` prints this session's uid/gid),
   `grep  wc  head  tail  nl  rev  uniq  sort  upper` (pipeline filters),

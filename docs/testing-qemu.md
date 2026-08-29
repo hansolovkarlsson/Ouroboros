@@ -230,10 +230,10 @@ see [`manual.md`](manual.md)'s Parallels section.
 | Target | What it adds |
 |---|---|
 | `run` | fastest loop; vvfat FAT16 disk (no real FS) |
-| `run-image` | real FAT32 disk (`build/esp.img`) — disk commands work |
+| `run-image` | real FAT32 disk (`build/esp.img`) — disk commands work; **+ virtio-rng** |
 | `run-image-gpt` | FAT32 inside a bootable GPT (GPT discovery) |
 | `run-image-exfat` | exFAT partition + FAT32 ESP (`fsd` mounts exFAT) |
-| `run-image-ext2` | ext2 partition + FAT32 ESP (needs `e2fsprogs`) |
+| `run-image-ext2` | ext2 partition + FAT32 ESP (needs `e2fsprogs`); **+ virtio-rng** |
 | `run-net` | virtio-net + SLIRP + `net.pcap` |
 | `run-image-net` | real FAT32 **and** the NIC |
 | `run-image-server` | + `hostfwd tcp::5555->:80` (host `curl` reaches netd) |
@@ -245,3 +245,17 @@ see [`manual.md`](manual.md)'s Parallels section.
 | `run-usb-multi` | xHCI + tablet + storage stick |
 | `run-gicv3` | force GICv3 |
 | `test-parallels` | scripted real-hardware smoke test (Parallels, not QEMU) |
+
+**A note on `virtio-rng`.** **Every** target that attaches a disk also attaches
+`-device virtio-rng-device`, so the `RANDOM` syscall works and `passwd`/`useradd`
+produce real random password salts (the boot log says `virtio-rng ready, entropy
+available to userland`).
+
+It was briefly only two targets, on the theory that leaving it off elsewhere kept
+the degradation path exercised. That was the wrong trade and a code review said
+so: the default dev loop (`make run`) was then producing exactly the guessable
+clock-derived salt this device exists to replace, which is a poor default to
+ship and a poor one to develop against. The degradation path does not need a
+QEMU target to stay honest - Parallels and the Pi have no virtio-mmio at all, so
+it is the *permanent* state on every real machine, and `accounts::salt_from`
+reports it out loud (`no hardware RNG - using a weaker clock-derived salt`).

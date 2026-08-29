@@ -25,9 +25,10 @@ use crate::CWD_SIZE;
 const PASSWD_PATH: &str = "/etc/passwd";
 /// Read cap for `/etc/passwd`, matching the account tools' write cap
 /// ([`accounts`]/`useradd` bound writes to `SAFECOPY_MAX`). fsd caps a single
-/// inline read at `FS_DATA_MAX` (512), so [`read_passwd`] loops `fs_read_at` to
-/// fill this buffer in 512-byte chunks. 2 KB holds ~20 accounts (each line is
-/// ~90 bytes); beyond that a bigger buffer + the same loop is all it takes.
+/// inline read at `FS_DATA_MAX` (512), so the shared `read_account_file` loops
+/// `fs_read_at` to fill this buffer in 512-byte chunks. 2 KB holds ~20 accounts
+/// (each line is ~90 bytes); beyond that a bigger buffer + the same loop is all
+/// it takes.
 const PASSWD_MAX: usize = syscall_abi::SAFECOPY_MAX as usize;
 const CR: u8 = 13;
 const LF: u8 = 10;
@@ -46,13 +47,11 @@ pub struct Session {
 /// (or root, if there is no `/etc/passwd`). Loops until authentication succeeds.
 pub fn login(cwd: &mut [u8; CWD_SIZE]) -> Session {
     let mut pbuf = [0u8; PASSWD_MAX];
-    let plen = match read_passwd(&mut pbuf) {
-        Some(n) => n,
-        None => {
-            crate::print_line("login: no /etc/passwd - starting a root session");
-            return root_at(cwd);
-        }
-    };
+    let plen = crate::read_account_file(PASSWD_PATH, &mut pbuf);
+    if plen == 0 {
+        crate::print_line("login: no /etc/passwd - starting a root session");
+        return root_at(cwd);
+    }
     let passwd = &pbuf[..plen];
 
     loop {
@@ -98,37 +97,6 @@ fn write_cwd(cwd: &mut [u8; CWD_SIZE], home: &[u8]) -> usize {
     let n = home.len().min(cwd.len());
     cwd[..n].copy_from_slice(&home[..n]);
     n
-}
-
-/// Read `/etc/passwd` into `buf`, returning its length, or `None` if there's no
-/// such file. The first read retries a bounded number of times while the reply
-/// is `NO_FS` (fsd may still be mounting the disk at boot); a real "not found"
-/// returns `None` immediately (the root fallback). Since fsd caps one inline
-/// read at `FS_DATA_MAX` (512), the file is read in 512-byte chunks via
-/// `fs_read_at` at a rising offset until a short read signals end-of-file.
-fn read_passwd(buf: &mut [u8]) -> Option<usize> {
-    const CHUNK: usize = syscall_abi::FS_DATA_MAX as usize;
-    let mut off = 0usize;
-    let mut tries = 0;
-    while off < buf.len() {
-        let end = (off + CHUNK).min(buf.len());
-        let r = crate::fs_read_at(PASSWD_PATH, off as u64, &mut buf[off..end]);
-        if r >= syscall_abi::FS_ERR_MIN {
-            // An error on the *first* chunk means no file (or fsd still
-            // mounting -> retry); on a later chunk, keep what we have.
-            if off == 0 && r == syscall_abi::NO_FS && tries < 200 {
-                tries += 1;
-                continue;
-            }
-            return if off == 0 { None } else { Some(off) };
-        }
-        let n = (r as usize).min(end - off);
-        off += n;
-        if n < CHUNK {
-            break; // short read = end of file
-        }
-    }
-    Some(off)
 }
 
 /// Read one line of keyboard input into `buf` (up to its length), returning the

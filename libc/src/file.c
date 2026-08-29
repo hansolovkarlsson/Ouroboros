@@ -265,7 +265,66 @@ static void pipe_write(long target, const unsigned char *buf, size_t n) {
     }
 }
 
+/* ---- stdout buffering ----------------------------------------------------
+ *
+ * Every write(1) is one IPC round trip - an MSG_CALL to the console server, or
+ * an MSG_SEND to a pipe consumer. An unbuffered stdio therefore costs one round
+ * trip PER CHARACTER, which is what picolibc's posix-console stdio does (our
+ * own stdio.c buffers, so the hand-rolled libc never felt it). Buffering here,
+ * at the write boundary rather than in one stdio, fixes it for whichever C
+ * library is linked - and for a program calling write(1, ...) directly.
+ *
+ * LINE buffered, not fully buffered: a flush per line keeps output interactive
+ * and matches the line-oriented filters on the other end of a pipe, while still
+ * collapsing a per-character printf into one message per line.
+ *
+ * Three things are deliberately NOT buffered, because buffering them would
+ * change observable behaviour rather than just batch it:
+ *   - fd 2 (stderr) writes straight through, after flushing fd 1, so a message
+ *     printed just before a crash is actually out, and in order.
+ *   - a read from fd 0 flushes first, so a prompt without a trailing newline
+ *     appears before the program waits for the answer (the stdin/stdout tie).
+ *   - exit flushes, via _exit, which is the one path EVERY libc's exit reaches.
+ */
+#define OUT_BUF_SIZE 512
+static unsigned char g_out[OUT_BUF_SIZE];
+static size_t g_out_len;
+
+/* Push whatever is buffered to the real destination. */
+static void out_flush(void) {
+    if (g_out_len == 0) {
+        return;
+    }
+    size_t n = g_out_len;
+    g_out_len = 0; /* cleared first: the write below must not re-enter this */
+    long t = stdout_target();
+    if (t == CON_TASK) {
+        console_write(g_out, n);
+    } else {
+        pipe_write(t, g_out, n);
+    }
+}
+
+/* Buffer a run of bytes destined for fd 1, flushing on a newline or a full
+ * buffer. A line longer than the buffer is flushed in buffer-sized pieces. */
+static void out_buffer(const unsigned char *buf, size_t n) {
+    for (size_t i = 0; i < n; i++) {
+        g_out[g_out_len++] = buf[i];
+        if (buf[i] == '\n' || g_out_len == OUT_BUF_SIZE) {
+            out_flush();
+        }
+    }
+}
+
 void __libc_end_stdout(void) {
+    /* Idempotent: the hand-rolled libc's exit() calls this, and _exit calls it
+     * again for the picolibc path where that exit() is not linked. */
+    static int ended;
+    out_flush(); /* the end-of-stream marker must not overtake the data */
+    if (ended) {
+        return;
+    }
+    ended = 1;
     long t = stdout_target();
     if (t == CON_TASK) {
         return;
@@ -278,7 +337,12 @@ void __libc_end_stdout(void) {
 
 ssize_t write(int fd, const void *buf, size_t count) {
     const unsigned char *p = (const unsigned char *)buf;
-    if (fd == 1 || fd == 2) {
+    if (fd == 1) {
+        out_buffer(p, count);
+        return (ssize_t)count;
+    }
+    if (fd == 2) {
+        out_flush(); /* keep stderr in order with anything already buffered */
         long t = stdout_target();
         if (t == CON_TASK) {
             console_write(p, count);
@@ -313,6 +377,8 @@ ssize_t read(int fd, void *buf, size_t count) {
         if (count == 0) {
             return 0;
         }
+        /* The stdin/stdout tie: show the prompt before waiting for the answer. */
+        out_flush();
         long c = __os_syscall1(SYS_READ_CHAR, 0);
         ((unsigned char *)buf)[0] = (unsigned char)c;
         return 1;

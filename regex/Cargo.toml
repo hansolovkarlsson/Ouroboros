@@ -1,0 +1,17 @@
+[package]
+name = "regex"
+version = "0.1.0"
+edition = "2021"
+
+# Pure, no_std, no I/O, no syscalls, no heap: a small POSIX-ERE engine (parse to
+# a fixed node array, emit a fixed instruction program, run it with an explicit
+# backtracking stack). Everything is a fixed-size array inside one `Regex`
+# value, so the crate depends on nothing and links cleanly for
+# aarch64-unknown-none (PIE-safe: byte-only, no &str runtime slicing, no
+# relocations that a -pie link would reject).
+#
+# Host-testable like `accounts`: cargo test -p regex --target aarch64-apple-darwin
+[lib]
+path = "src/lib.rs"
+
+[dependencies]

@@ -1141,10 +1141,26 @@ fn run_head_pipeline(
     // Authorize each adjacent producer->consumer link.
     for i in 0..prog_stages.len() - 1 {
         if syscall4(syscall_abi::DELEGATE, slots[i], slots[i + 1], 0, 0) != 0 {
+            // A consumer that has ALREADY exited is the ordinary case, not a
+            // capability failure: a stage that rejects its own arguments (a bad
+            // `grep` pattern, an unknown flag) prints its reason and exits
+            // before the shell gets here. It has already told the user what
+            // went wrong, so adding "could not authorize the stream" on top
+            // only obscures it. Anything else is a real failure and still says
+            // so.
+            // "Already exited" means zombie or unused - NOT merely not-runnable:
+            // a healthy consumer parked in pipe_recv is BLOCKED, so testing
+            // `!= RUNNABLE` would swallow a genuine delegation failure and kill
+            // the pipeline with no message at all.
+            let state = syscall(syscall_abi::TASK_STATE, slots[i + 1]);
+            let died = state == syscall_abi::TASK_STATE_ZOMBIE
+                || state == syscall_abi::TASK_STATE_UNUSED;
             for s in &slots[..prog_stages.len()] {
                 syscall(syscall_abi::KILL, *s);
             }
-            print_line("pipe: could not authorize the stream");
+            if !died {
+                print_line("pipe: could not authorize the stream");
+            }
             return;
         }
     }
@@ -1966,23 +1982,48 @@ fn cmd_su(arg: &str) {
     }
 }
 
-/// Read a small account file (`/etc/passwd`) in 512-byte chunks into `buf`,
-/// returning its length (`0` on any error). Same chunked read as
-/// `login::read_passwd`, since fsd caps one inline read at `FS_DATA_MAX`.
-fn read_account_file(path: &str, buf: &mut [u8]) -> usize {
+/// Read a small account file (`/etc/passwd`, `/etc/group`) into `buf`,
+/// returning its length (`0` if there's no such file). fsd caps one inline read
+/// at `FS_DATA_MAX` (512), so the file is read in 512-byte chunks at a rising
+/// offset until a short read signals end of file.
+///
+/// The *first* chunk retries a bounded number of times while the reply is
+/// `NO_FS` - at boot, `login` runs before fsd has necessarily finished mounting
+/// the disk, and "no filesystem yet" must not be mistaken for "no accounts". A
+/// real not-found returns `0` immediately (login's root-session fallback).
+///
+/// The single copy of this loop for the whole shell: `login` and `su`/`id`'s
+/// name lookups all come through here.
+pub(crate) fn read_account_file(path: &str, buf: &mut [u8]) -> usize {
     const CHUNK: usize = syscall_abi::FS_DATA_MAX as usize;
     let mut off = 0usize;
+    let mut tries = 0;
     while off < buf.len() {
         let end = (off + CHUNK).min(buf.len());
         let r = fs_read_at(path, off as u64, &mut buf[off..end]);
         if r >= FS_ERR_MIN {
-            break;
+            if off == 0 && r == syscall_abi::NO_FS && tries < 200 {
+                tries += 1;
+                continue;
+            }
+            break; // no file, or a later chunk failed - keep what we have
         }
         let n = (r as usize).min(end - off);
         off += n;
         if n < CHUNK {
             break;
         }
+    }
+    // A buffer filled to the brim means the file is at least this long and may
+    // be longer - so the database was CUT, and a cut one must not read as a
+    // complete one. A line split by the cut still parses (four colon-fields is
+    // enough), so login would accept a truncated home; an account past the cut
+    // is simply invisible and its correct password is rejected. Report nothing
+    // rather than something wrong; the caller falls back to a root session,
+    // which is the same answer as "no /etc/passwd".
+    if off == buf.len() {
+        print_line("warning: the account file is larger than this shell can read - ignoring it");
+        return 0;
     }
     off
 }

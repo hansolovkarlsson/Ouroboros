@@ -182,7 +182,14 @@ be reviewed after the fact from the saved screenshots.
 > formatting** (ryu), `snprintf`, `qsort`, `malloc`, `strtol` — unmodified
 > standard C the hand-rolled libc couldn't run. The prebuilt static lib + headers
 > are committed under `third_party/picolibc-prebuilt` (regenerate with
-> `scripts/build-picolibc.sh`), so `make` needs no meson/ninja. **Remaining:**
+> `scripts/build-picolibc.sh`), so `make` needs no meson/ninja. **The arc's one
+> open follow-up — picolibc's unbuffered console stdout — closed 2026-08-29**:
+> stdout is line-buffered at the `write` boundary (in `file.c`, so it serves
+> whichever C library is linked), stderr and a read-from-stdin stay unbuffered,
+> and exit flushes from `_exit` — which also fixed a real hang, since a picolibc
+> program links picolibc's `exit()`, not our `stdlib.c`'s, so it had never been
+> sending a pipe consumer its end-of-stream marker (`cpico | wc` hung). See
+> `CHANGELOG.md`. **Remaining:**
 > port a real application on top (SQLite, a small C compiler) — now "port one
 > more program," not "invent the mechanism." See `docs/processes.md`'s "Writing a
 > program in C." The reasoning below is the original parked plan, still accurate.
@@ -391,9 +398,15 @@ crate, plus creator-owned new inodes.
 - **Self-service `passwd`** — a non-root user changing their own password needs
   a privileged path: a dedicated **`accountd`** server (the `accounts` crate is
   built to slot into it) or a setuid mechanism. Root-only tools ship today.
-- **A virtio-entropy RNG** — a `RANDOM` syscall backed by a virtio-rng driver,
-  to replace the weak clock-derived password salts (`accounts::make_salt`) with
-  real entropy.
+- ~~**A virtio-entropy RNG**~~ — **shipped 2026-08-29.** A `virtio_rng.rs` driver
+  (one virtqueue, device-writable descriptor, polled) behind a `RANDOM` syscall;
+  `accounts::salt_from` takes the bytes and reports whether the salt is strong,
+  so `passwd`/`useradd` use real entropy where a device exists and say "no
+  hardware RNG - using a weaker clock-derived salt" where it doesn't. `make esp`
+  targets `run-image`/`run-image-ext2` now attach `-device virtio-rng-device`;
+  the other targets deliberately don't, so the degradation path stays exercised.
+  Verified by creating the same account on three boots: the two with the device
+  produced different salts, the one without printed the warning.
 - **Supplementary group membership** — a user in several groups at once, checked
   by `fsd`. Needs the kernel identity to carry a group *list* (it's one packed
   gid today) plus an enforcement change; primary-gid (`usermod -g`) ships today.
@@ -403,8 +416,14 @@ crate, plus creator-owned new inodes.
 - **Per-user cluster identity** — the 9P export authenticates the *machine*
   (shared key), not a *user*; per-user identity across the cluster is a named
   cluster-auth tier that would land here.
-- **Symbolic-mode `chmod`** (`u+x`) and a real `/etc/skel` for `useradd` — small
-  polish.
+- ~~**Symbolic-mode `chmod`** (`u+x`)~~ — **shipped 2026-08-29** (`u+x`, `go-w`,
+  `a=rx`, `u+rw,go+r`, copy-source `g=u`, conditional `X`, `s`/`t`; octal still
+  works and stays absolute). A real `/etc/skel` for `useradd` **also shipped
+  2026-08-29** (top-level files copied into a newly created home, owner + mode
+  carried across; absent by default, subdirectories skipped). Its twin, **`chown` by name**
+  (`chown alice:staff`, resolved via the `accounts` crate like `su`/`id`), also
+  **shipped 2026-08-29** - numeric ids still work, and an all-digits field stays
+  an id.
 
 **A mechanism to borrow from Redox: the namespace *is* the sandbox.** Redox
 sandboxes a process by restricting which schemes its namespace can name (down to
@@ -595,18 +614,25 @@ Known small gaps, not yet sequenced (the *completed* parking-lot entries — USB
 keyboard, GOP console, preemption, task destruction, driver isolation, etc. — are
 in [`roadmap-completed.md`](roadmap-completed.md)):
 
-- **`grep` has no regex** (it now takes `-i`/`-v`/`-n`, but matching is still a
-  plain substring). Real patterns are a separate, larger arc — see North-star
-  item 2 for the shared `ulib` option parser and richer matching.
-- **`useradd` is not atomic** (code-review note, PR #22): it writes `/etc/passwd`
-  first, then best-effort creates the user-private group and home dir. A failure
-  after the passwd write leaves an account with no matching group and/or no home
-  yet still reports success. Low-impact for a root-only dev tool (the home-dir
-  failure already warns); a cleaner version would create the group + home before
-  committing the passwd line, or report a non-zero exit.
-- **Three near-identical small-file readers** (code-review note): `login::
-  read_passwd`, `shell::read_account_file`, and `ulib::read_file_all` each chunk
-  a small account file. The shell-vs-`ulib` boundary (the shell has its own fs
-  layer) makes full dedup awkward, but the two shell copies could share one
-  helper. Likewise `ulib::read_line` duplicates `login::read_field` (again the
-  shell/`ulib` split); consolidate if the shell ever gains a `ulib` dependency.
+- ~~**`grep` has no regex**~~ — **shipped 2026-08-29.** Patterns are POSIX
+  **extended** regular expressions (`.` `*` `+` `?` `[...]` `^` `$` `|` `(...)`),
+  via a new pure, host-tested **`regex` crate** at the repo root; `-F` keeps the
+  old literal-substring behaviour. Bounded by design (an explicit backtracking
+  stack, not recursion; empty-body repeats refused so every accepted pattern
+  terminates; a step budget whose exhaustion reports `Limit`, never a silent
+  "no"). Still open, each a real addition rather than a tweak: back-references,
+  `{n,m}` counted repetition, `[:alpha:]` class names, and submatch capture —
+  plus the shared `ulib` option parser of North-star item 2, still unbuilt. The
+  `regex` crate is deliberately reusable: an editor's search and a `find` are
+  the next consumers.
+- ~~**`useradd` is not atomic**~~ — **fixed 2026-08-29.** The `/etc/passwd` write
+  is now the single commit point: the group entry and home directory are prepared
+  first, a failed prep commits nothing and exits non-zero, and a failed commit
+  rolls the prep back (`accounts::remove_line`, `rmdir`). See `CHANGELOG.md`.
+- ~~**Three near-identical small-file readers**~~ — **the two shell copies merged
+  2026-08-29** into one `read_account_file` (carrying login's boot-time `NO_FS`
+  retry), used by `login`, `su`, and `id`'s name lookups. `ulib::read_file_all`
+  stays separate by design — it lives in the `/bin` programs, and the shell has
+  its own fs layer. Likewise `ulib::read_line` still duplicates
+  `login::read_field` (the same split); consolidate if the shell ever gains a
+  `ulib` dependency.

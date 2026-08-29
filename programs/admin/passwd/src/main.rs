@@ -2,10 +2,11 @@
 //!
 //! With no argument, changes the *current* user's password (resolved from the
 //! task's uid); with a `<user>` argument, that account's. Prompts for the new
-//! password twice (echo off), derives a fresh salt from the monotonic clock
-//! (`accounts::make_salt` - a weak, clock-derived salt; a virtio-entropy RNG is
-//! the documented upgrade), stores `SHA-256(salt || password)`, and rewrites the
-//! one account line.
+//! password twice (echo off), draws a fresh salt from the hardware RNG
+//! (`RANDOM` -> `accounts::salt_from`), stores `SHA-256(salt || password)`, and
+//! rewrites the one account line. On a machine with no entropy device - the
+//! ordinary case off QEMU - it falls back to the weaker clock-derived salt and
+//! **says so** rather than storing a guessable one quietly.
 //!
 //! **Root only** (the option-1 model). A non-root user changing their *own*
 //! password needs a privileged path (a setuid bit or an `accountd` server) that
@@ -75,7 +76,12 @@ pub extern "C" fn _start() -> ! {
         die(b"passwd: passwords do not match\r\n");
     }
 
-    let salt = accounts::make_salt(ulib::monotonic_us());
+    // Hardware entropy if this machine has an RNG; the clock fallback otherwise,
+    // said out loud rather than stored quietly (see accounts::salt_from).
+    let (salt, strong) = accounts::salt_from(ulib::random_bytes8(), ulib::monotonic_us());
+    if !strong {
+        ulib::con_write(b"passwd: no hardware RNG - using a weaker clock-derived salt\r\n");
+    }
     let hash = accounts::hash_password(&salt, &pw[..pwl]);
 
     let mut line = [0u8; 256];

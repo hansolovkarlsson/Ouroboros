@@ -87,6 +87,27 @@ struct NetCell(core::cell::UnsafeCell<Option<crate::virtio_net::Device>>);
 unsafe impl Sync for NetCell {}
 static NET: NetCell = NetCell(core::cell::UnsafeCell::new(None));
 
+/// The virtio-rng device the `RANDOM` syscall draws from. `None` whenever the
+/// machine has no entropy device - the ordinary case on every platform except a
+/// QEMU run started with `-device virtio-rng-device`, which is why `RANDOM`
+/// answers `RANDOM_UNAVAILABLE` rather than treating absence as a failure.
+///
+/// Unlike `BLOCK`/`NET`, this one is **not** gated to a single privileged task:
+/// entropy is not a device anybody can misuse by reading it, there is no state
+/// to corrupt, and every account tool needs it. The cost of a hostile caller is
+/// draining the host's entropy pool, which QEMU's device does not meaningfully
+/// suffer from.
+struct RngCell(core::cell::UnsafeCell<Option<crate::virtio_rng::Device>>);
+// SAFETY: same single-core, non-reentrant-dispatch reasoning as BlockCell.
+unsafe impl Sync for RngCell {}
+static RNG: RngCell = RngCell(core::cell::UnsafeCell::new(None));
+
+/// Installs the entropy source the `RANDOM` syscall serves (from
+/// `main.rs::init_entropy`).
+pub fn install_rng_device(device: crate::virtio_rng::Device) {
+    unsafe { *RNG.0.get() = Some(device) };
+}
+
 /// Installs the NIC the `NET_*` syscalls serve (from `main.rs::init_net`).
 pub fn install_net_device(device: crate::virtio_net::Device) {
     unsafe { *NET.0.get() = Some(device) };
@@ -793,6 +814,26 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
                 syscall_abi::GET_ID_ERR
             } else {
                 tasks::id_of(t)
+            }
+        }
+        syscall_abi::RANDOM => {
+            // arg0 = out pointer, arg1 = out capacity. Fills the caller's buffer
+            // with hardware entropy, returning the byte count written - or
+            // RANDOM_UNAVAILABLE when this machine has no entropy device, which
+            // is the ordinary case rather than an error (see the ABI doc).
+            if !valid_user_range(arg0, arg1) {
+                return syscall_abi::RANDOM_UNAVAILABLE;
+            }
+            // SAFETY: single-core, dispatch is not re-entrant.
+            let cell = unsafe { &mut *RNG.0.get() };
+            match cell {
+                None => syscall_abi::RANDOM_UNAVAILABLE,
+                Some(dev) => {
+                    // SAFETY: out range validated above.
+                    let out = unsafe { core::slice::from_raw_parts_mut(arg0 as *mut u8, arg1 as usize) };
+                    // SAFETY: the device was installed after a successful init.
+                    unsafe { dev.fill(out) as u64 }
+                }
             }
         }
         syscall_abi::HEAP_INFO => {

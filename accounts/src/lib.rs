@@ -224,6 +224,22 @@ pub fn next_free_gid(group: &[u8]) -> u32 {
 /// virtio-entropy driver + a `RANDOM` syscall (a noted follow-up); this keeps
 /// the salt *per-account-unique* meanwhile, which is what defeats a shared
 /// rainbow table across our own accounts.
+/// Build a password salt from the best entropy the caller could obtain, and say
+/// which it was: `(salt, strong)`.
+///
+/// `random` is eight bytes from a hardware RNG (`ulib::random_bytes8`) when the
+/// machine has one — those *are* the salt, used directly, since they are already
+/// uniform. `None` falls back to [`make_salt`]'s clock derivation, and `strong`
+/// comes back `false` so the caller can **say so out loud** rather than quietly
+/// storing a guessable salt. This crate stays pure: the caller does the syscall
+/// and passes the result in.
+pub fn salt_from(random: Option<[u8; 8]>, clock: u64) -> ([u8; 8], bool) {
+    match random {
+        Some(bytes) => (bytes, true),
+        None => (make_salt(clock), false),
+    }
+}
+
 pub fn make_salt(entropy: u64) -> [u8; 8] {
     let digest = sha256_two(&entropy.to_le_bytes(), b"ouroboros-salt");
     let mut salt = [0u8; 8];
@@ -306,6 +322,36 @@ pub fn replace_line(
         w += 1;
     }
     Some((w, replaced))
+}
+
+/// Rebuild an account/group file into `out` with the **first** line whose
+/// leading colon-field equals `name` removed. Returns `(new_len, removed)`, or
+/// `None` if it wouldn't fit. Output is normalized to one `\n` per line, like
+/// [`replace_line`].
+///
+/// The inverse of [`append_line`]: `useradd` uses it to roll back a group it
+/// added when a later step fails, so a half-made account never reaches the
+/// database.
+pub fn remove_line(src: &[u8], out: &mut [u8], name: &[u8]) -> Option<(usize, bool)> {
+    let mut w = 0usize;
+    let mut removed = false;
+    for line in src.split(|&c| c == b'\n') {
+        if line.is_empty() {
+            continue;
+        }
+        let first = line.split(|&c| c == b':').next().unwrap_or(b"");
+        if !removed && first == name {
+            removed = true;
+            continue;
+        }
+        for &b in line {
+            *out.get_mut(w)? = b;
+            w += 1;
+        }
+        *out.get_mut(w)? = b'\n';
+        w += 1;
+    }
+    Some((w, removed))
 }
 
 /// Copy `src` into `out` and append `line` (with a trailing newline), ensuring
@@ -476,6 +522,22 @@ mod tests {
     }
 
     #[test]
+    fn salt_from_prefers_hardware_entropy() {
+        // Real entropy is used verbatim - it is already uniform, so hashing it
+        // would only lose the property we went to the device for.
+        let bytes = [1u8, 2, 3, 4, 5, 6, 7, 8];
+        let (salt, strong) = salt_from(Some(bytes), 12345);
+        assert_eq!(salt, bytes);
+        assert!(strong);
+        // With no device, the clock fallback is used and flagged as weak.
+        let (weak_salt, strong) = salt_from(None, 12345);
+        assert_eq!(weak_salt, make_salt(12345));
+        assert!(!strong);
+        // The fallback still differs per call, which is what it is for.
+        assert_ne!(salt_from(None, 12345).0, salt_from(None, 12346).0);
+    }
+
+    #[test]
     fn salt_is_per_call_unique() {
         // Two different clock samples give different salts (defeats a shared
         // rainbow table across accounts, the point of the weak salt).
@@ -510,6 +572,27 @@ mod tests {
         // Appending to an empty file yields just the one line.
         let n2 = append_line(b"", &mut out, b"solo:5:").unwrap();
         assert_eq!(&out[..n2], b"solo:5:\n");
+    }
+
+    #[test]
+    fn remove_line_drops_one() {
+        let mut out = [0u8; 512];
+        let (n, removed) = remove_line(GROUP, &mut out, b"user").unwrap();
+        assert!(removed);
+        let rebuilt = &out[..n];
+        assert!(find_group_by_name(rebuilt, b"user").is_none());
+        assert_eq!(find_group_by_name(rebuilt, b"staff").unwrap().gid, 1001);
+        assert!(find_group_by_name(rebuilt, b"root").is_some());
+        // A name that isn't present leaves the file intact, reporting false.
+        let (n2, r2) = remove_line(GROUP, &mut out, b"ghost").unwrap();
+        assert!(!r2);
+        assert_eq!(&out[..n2], GROUP);
+        // append_line then remove_line is a round trip (the rollback useradd needs).
+        let mut added = [0u8; 512];
+        let an = append_line(GROUP, &mut added, b"wheel:1002:").unwrap();
+        let (bn, back) = remove_line(&added[..an], &mut out, b"wheel").unwrap();
+        assert!(back);
+        assert_eq!(&out[..bn], GROUP);
     }
 
     #[test]

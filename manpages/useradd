@@ -12,11 +12,43 @@ DESCRIPTION
     -u <uid>          use this uid (default: the next free id at/above 1000)
     -g <group|gid>    primary group by name or number (default: a user-private
                       group named after the user, created in /etc/group with
-                      gid == uid, the usual convention)
+                      gid == uid, the usual convention; if a group of that name
+                      already exists, its gid is used instead)
 
-    The password salt is derived from the monotonic clock (there is no hardware
-    RNG yet), so it is weak but per-account unique. Account files hold ~20
-    entries (a 2 KB read cap).
+    The password salt comes from the machine's hardware RNG (a virtio-rng
+    device, via the RANDOM syscall). Where there is no such device - which is
+    most machines; QEMU needs -device virtio-rng-device, and Parallels and the
+    Pi have none at all - useradd falls back to a weaker salt derived from the
+    monotonic clock and prints "no hardware RNG - using a weaker clock-derived
+    salt". That salt is still per-account unique, but an attacker who can bound
+    when the account was created can bound it. Account files hold ~20 entries
+    (a 2 KB read cap).
+
+ORDER OF OPERATIONS
+    useradd writes three things - /etc/group, the home directory, and
+    /etc/passwd - and there is no multi-file transaction here. The account line
+    is written LAST, so it is the single commit point: if the group or the home
+    directory can't be made, nothing is committed and useradd exits non-zero;
+    if the account write itself fails, the group entry and home directory it
+    just made are removed again. A half-made account is never reported as
+    success.
+
+/etc/skel
+    If /etc/skel exists, its top-level FILES are copied into a home directory
+    this run created - each chowned to the new user, carrying the template
+    file's mode. There is no /etc/skel by default; create one to have new
+    accounts start with a set of files:
+
+        # mkdir /etc/skel
+        # write /etc/skel/README welcome to Ouroboros
+
+    Subdirectories inside /etc/skel are reported and skipped (not copied
+    recursively). An existing home directory that useradd merely adopts is
+    left alone - skel files only go into a home useradd itself created.
+
+    The copy happens after the account is committed, and a file that fails to
+    copy is a WARNING, not an error: the account, its group, and its home are
+    already complete without it.
 
 EXAMPLES
     # useradd alice

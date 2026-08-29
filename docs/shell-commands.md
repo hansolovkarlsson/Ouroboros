@@ -288,9 +288,15 @@ killed after the same timeout.
   `exec`, `exit`, the job-control commands (`ps`, `kill`, `wait`, `fg`), and
   `mount`/`selftest`/`help`.
 - **Pipeline filters live in `/bin` too:** `upper` (uppercases its input),
-  `grep [-i] [-v] [-n] <pattern>` (lines containing a substring — `-i` ignores
-  case, `-v` inverts to non-matching lines, `-n` prefixes the input line number;
-  flags may combine, e.g. `-in`; still substring, no regex), `wc` (line/word/byte
+  `grep [-i] [-v] [-n] [-F] <pattern>` (lines matching an **extended regular
+  expression** — `.` `*` `+` `?` `[a-z]` `[^0-9]` `^` `$` `|` `(...)` and `\`
+  escapes, via the shared `regex` crate; `-i` ignores case, `-v` inverts to
+  non-matching lines, `-n` prefixes the input line number, `-F` matches the
+  pattern literally instead; flags may combine, e.g. `-in`. The line terminator
+  is stripped before matching, so `$` anchors to the visible end of the line. A
+  bad pattern is reported and `grep` exits rather than falling back to a
+  substring search. Note there are no quotes yet: a bare `|` between spaces is a
+  pipeline separator, so write alternation without spaces — `grep a|b`), `wc` (line/word/byte
   counts), `head [N]` (first N lines, default 10), `tail [N]` (last N lines,
   default 10 — the complement of `head`; capped at 64 retained lines), `nl`
   (numbers every line, right-aligned 6-column count + tab, like `cat -n`),

@@ -50,7 +50,11 @@ pub extern "C" fn _start() -> ! {
     let name = &namebuf[..name_len];
 
     let mut src = [0u8; BUF];
-    let slen = ulib::read_file_all(GROUP_FILE, &mut src);
+    let Some(slen) = ulib::read_file_checked(GROUP_FILE, &mut src) else {
+        // This buffer is rewritten back over /etc/group: a 0 from a transient
+        // error or an over-long file would replace every group with one line.
+        die(b"groupadd: could not read /etc/group - refusing to rewrite it\r\n");
+    };
     if accounts::group_exists(&src[..slen], name) {
         die(b"groupadd: group already exists\r\n");
     }
