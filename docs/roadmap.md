@@ -182,7 +182,14 @@ be reviewed after the fact from the saved screenshots.
 > formatting** (ryu), `snprintf`, `qsort`, `malloc`, `strtol` — unmodified
 > standard C the hand-rolled libc couldn't run. The prebuilt static lib + headers
 > are committed under `third_party/picolibc-prebuilt` (regenerate with
-> `scripts/build-picolibc.sh`), so `make` needs no meson/ninja. **Remaining:**
+> `scripts/build-picolibc.sh`), so `make` needs no meson/ninja. **The arc's one
+> open follow-up — picolibc's unbuffered console stdout — closed 2026-08-29**:
+> stdout is line-buffered at the `write` boundary (in `file.c`, so it serves
+> whichever C library is linked), stderr and a read-from-stdin stay unbuffered,
+> and exit flushes from `_exit` — which also fixed a real hang, since a picolibc
+> program links picolibc's `exit()`, not our `stdlib.c`'s, so it had never been
+> sending a pipe consumer its end-of-stream marker (`cpico | wc` hung). See
+> `CHANGELOG.md`. **Remaining:**
 > port a real application on top (SQLite, a small C compiler) — now "port one
 > more program," not "invent the mechanism." See `docs/processes.md`'s "Writing a
 > program in C." The reasoning below is the original parked plan, still accurate.

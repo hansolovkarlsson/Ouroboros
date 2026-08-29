@@ -4,6 +4,13 @@
 #include <unistd.h>
 
 void _exit(int code) {
+    /* The one exit path every C library reaches. Our own stdlib.c's exit()
+     * already flushes and marks end-of-stream before getting here, but a
+     * picolibc program does not link that stdlib.c - picolibc supplies exit(),
+     * which comes straight here. So do it here too (both calls are idempotent):
+     * without this, a picolibc program in a pipeline would leave its buffered
+     * last line unsent and never signal end-of-stream to the consumer. */
+    __libc_end_stdout();
     __os_syscall1(SYS_EXIT, code);
     for (;;) {
     } /* EXIT never returns */
