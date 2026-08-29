@@ -7,6 +7,65 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/`; 
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## Code-review pass over the account/permissions branch (2026-08-29)
+
+A `/code-review high` over the whole branch, after a self-check that had already
+found one bug. Ten findings, all fixed; the three worst were a single mistake
+with three faces.
+
+**The headline: a new server slot escaped every old guard.** Adding `accountd`
+moved `FIRST_SPAWNABLE` 5→6, but `syscall.rs` spelled the protected-slot bound
+as a **literal** in four places (`EXIT`, `KILL`, `WAIT` at `<= 4`, `FG` at
+`(1..=4)`). Slot 5 silently fell outside all of them, so from an unprivileged
+shell:
+
+- `fg 5` handed the keyboard to `accountd`, which never reads it — and there is
+  no recovery, because the Ctrl+C detector only polls when the owner is the
+  current task and the tick's kill is gated to spawnable slots. Reboot only.
+- `kill 5` ran the full teardown on a boot-loaded region; four of them exhaust
+  the supervisor's `MAX_RESTARTS = 3` and disable self-service `passwd` for the
+  boot.
+- `EXIT` let `accountd` exit itself, and `wait 5` blocked the shell forever.
+
+This is the **exact** failure the interactive-shell postmortem already named —
+"a new task-number lever inherits every old guard" — recurring because the
+invariant lived in four literals instead of one constant. `FIRST_SPAWNABLE` is
+now `pub` and all four sites derive from it, with the reason recorded on the
+constant itself so the next server doesn't repeat it.
+
+**Also fixed:**
+
+- **A newly created `/etc/shadow` was world-readable.** `fsd` creates files
+  `0644`, so on any disk where the file didn't already exist — one formatted
+  in-guest, or any not staged by the Makefile — the first `useradd` published
+  every hash. The shipped images pre-create it `0600`, which is precisely what
+  hid this. `useradd` and `accountd` now `chmod 600` after writing.
+- **`su <uid>` leaked the previous session's groups.** The by-name path set the
+  target's supplementary list, but the numeric path fell straight through to
+  `SET_ID` — and since `su` is root-only, that left a uid-1000 shell holding
+  *root's* memberships, which `fsd`'s new group triad would honour. It now
+  clears the list.
+- **`NP_STAT` bypassed the ancestor walk**, so `chmod 700 <dir>` still leaked
+  size/owner/mode/mtime for a guessed path inside it. Stat now takes the walk
+  (the object's own mode stays unchecked — that is what `ls -l` is for).
+- A "consumer already exited" test that read `!= RUNNABLE` and so matched a
+  *blocked* (healthy) stage, swallowing genuine delegation failures; `passwd`
+  decoding a short reply as success; `id`'s 256-byte line truncating with eight
+  groups; `ulib::random` reporting an oversized buffer as "no entropy device";
+  and the protected-task message still naming a stale subset of servers.
+
+**Found before the review, in the same spirit:** `accountd`'s request decode did
+`name_len + old_len + new_len > payload.len()` on three lengths straight off the
+wire. Release builds don't check overflow, so `u64::MAX` wrapped past the bound
+and panicked on the slice — and `ulib`'s panic handler parks, so any task
+holding `TO_ACCT` could wedge the account server with one message. Now
+`checked_add`, with each length bounded.
+
+**Clean under review:** the `regex` engine (fuzz-compared against Python's `re`
+over 4500 pattern/text pairs, zero mismatches), the `accounts` crate, the
+virtio-rng driver, the libc stdout buffering, and the symbolic-`chmod` parser.
+Zero `R_AARCH64_ABS64` across every rebuilt binary.
+
 ## `/etc/shadow` and `accountd`: self-service passwords (2026-08-29)
 
 The last two items of the users/permissions arc, done together because neither

@@ -84,6 +84,12 @@ pub extern "C" fn _start() -> ! {
     if packed >= syscall_abi::FS_ERR_MIN {
         die(b"passwd: no account server (is ACCOUNTD.BIN staged?)\r\n");
     }
+    // The reply length must actually cover a status word: `reply` is zeroed, so
+    // a short/empty reply would otherwise decode as status 0 and report a change
+    // that never happened.
+    if (packed as usize) < 8 {
+        die(b"passwd: the account server sent no answer\r\n");
+    }
     let status = read_u64(&reply, 0);
     match status {
         0 => {

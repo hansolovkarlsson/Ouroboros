@@ -95,7 +95,19 @@ pub const NUM_TASKS: usize = 11;
 /// to 11 with it: a fifth server would otherwise have eaten one of the five
 /// spawnable slots, which is the pool a pipeline's stages come from. Keeping
 /// five spawnable was worth one more slot's worth of fixed arrays.
-const FIRST_SPAWNABLE: usize = 6;
+///
+/// **`pub` on purpose, and load-bearing.** Every "is this slot protected?" guard
+/// in `syscall.rs` (`EXIT`/`KILL`/`WAIT`/`FG`) must derive from this constant
+/// rather than spell out a literal. They used to say `<= 4`, and when the
+/// account server took slot 5 those literals silently stopped covering it - a
+/// code review found `fg 5` could hand the keyboard to a task that never reads
+/// it (unrecoverable: the Ctrl+C detector only polls for the owner, and the
+/// tick's kill is gated to spawnable slots) and `kill 5` could take the server
+/// down four times over, past the supervisor's restart cap. That is the same
+/// "a new task-number lever inherits every old guard" failure the
+/// interactive-shell arc already wrote a postmortem about; the fix is that the
+/// bound has exactly one definition.
+pub const FIRST_SPAWNABLE: usize = 6;
 
 // Per-slot capabilities (the capability model for who-may-do-what).
 // Because task-slot roles are static (see `NUM_TASKS`'s doc comment - 0

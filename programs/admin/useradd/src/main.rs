@@ -403,6 +403,14 @@ fn add_secret(name: &[u8], salt: &[u8], hash: &[u8]) -> Result<(), u64> {
     if ulib::is_fs_error(code) {
         return Err(code);
     }
+    // A file fsd CREATES gets ext2's default 0644, so on any disk where
+    // /etc/shadow doesn't already exist - one formatted in-guest, or any not
+    // staged by the Makefile - the very first useradd would leave the password
+    // hashes world-readable, defeating the entire point of the split. The
+    // shipped images pre-create it 0600, which is exactly what hides this.
+    // Best-effort: FAT/exFAT answer "not supported", and there the file is
+    // unrestricted regardless.
+    let _ = ulib::fs_chmod(SHADOW_FILE, 0o600);
     Ok(())
 }
 

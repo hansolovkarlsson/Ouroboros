@@ -293,11 +293,16 @@ pub fn random(buf: &mut [u8]) -> usize {
     if buf.is_empty() {
         return 0;
     }
-    let r = syscall4(syscall_abi::RANDOM, buf.as_mut_ptr() as u64, buf.len() as u64, 0, 0);
+    // Ask for at most what a user pointer may carry (MAX_USER_LEN, 512). The
+    // syscall rejects anything larger with RANDOM_UNAVAILABLE, which would read
+    // as "this machine has no entropy device" - the one distinction the ABI
+    // says matters. Clamping keeps a big request a *short* read instead.
+    let want = buf.len().min(512);
+    let r = syscall4(syscall_abi::RANDOM, buf.as_mut_ptr() as u64, want as u64, 0, 0);
     if r == syscall_abi::RANDOM_UNAVAILABLE {
         0
     } else {
-        (r as usize).min(buf.len())
+        (r as usize).min(want)
     }
 }
 

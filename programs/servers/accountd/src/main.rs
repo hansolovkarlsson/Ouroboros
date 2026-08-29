@@ -50,6 +50,9 @@ const BUF: usize = syscall_abi::SAFECOPY_MAX as usize;
 /// layout every other server here uses.
 const REQ_HDR: usize = 40;
 const REPLY_LEN: usize = syscall_abi::FS_REPLY_PAYLOAD as usize;
+/// Longest account name this server will accept - the same bound the copy
+/// buffer in [`change_password`] uses.
+const NAME_MAX: usize = 64;
 /// Longest password this server will accept. Bounds the request decode; the
 /// hash is fixed-size regardless.
 const PW_MAX: usize = 128;
@@ -101,7 +104,18 @@ fn handle(sender: u64, req: &[u8]) -> u64 {
     let old_len = read_u64(req, 16) as usize;
     let new_len = read_u64(req, 24) as usize;
     let payload = &req[REQ_HDR..];
-    if name_len + old_len + new_len > payload.len()
+    // CHECKED addition, not `a + b + c > len`: all three lengths come straight
+    // from an untrusted request, and release builds wrap silently - so
+    // `name_len = u64::MAX` would pass a naive bounds check and then panic on
+    // the slice below, parking this server for good (the panic handler parks;
+    // there is nowhere to unwind to). Any task holding TO_ACCT could wedge the
+    // account server with one message. Every length is bounded individually too.
+    let total = match name_len.checked_add(old_len).and_then(|v| v.checked_add(new_len)) {
+        Some(t) => t,
+        None => return syscall_abi::ACCT_ERR_BAD_REQUEST,
+    };
+    if total > payload.len()
+        || name_len > NAME_MAX
         || old_len > PW_MAX
         || new_len > PW_MAX
         || new_len == 0
@@ -206,6 +220,10 @@ fn change_password(caller_uid: u32, name: &[u8], old: &[u8], new: &[u8]) -> u64 
     if ulib::is_fs_error(ulib::fs_write_bulk(SHADOW_FILE, &out[..olen])) {
         return syscall_abi::ACCT_ERR_IO;
     }
+    // Same reason as useradd's add_secret: if this call CREATED the file it
+    // carries ext2's default 0644, which would publish every hash. Best-effort
+    // (FAT/exFAT model no mode).
+    let _ = ulib::fs_chmod(SHADOW_FILE, 0o600);
     0
 }
 

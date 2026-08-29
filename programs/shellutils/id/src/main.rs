@@ -30,7 +30,10 @@ pub extern "C" fn _start() -> ! {
     let uname = accounts::find_user_by_uid(&pbuf[..plen], uid).map(|a| a.name);
     let gname = accounts::find_group_by_gid(&gbuf[..glen], gid).map(|g| g.name);
 
-    let mut line = [0u8; 256];
+    // Worst case: uid= and gid= with names, then `groups=` plus MAX_SUPP_GROUPS
+    // entries of ",<10 digits>(<name>)". `append` drops overflow silently, so an
+    // undersized buffer would truncate the line - trailing CRLF included.
+    let mut line = [0u8; 640];
     let mut w = 0usize;
     append(&mut line, &mut w, b"uid=");
     ulib::emit_dec(&mut line, &mut w, uid as u64);

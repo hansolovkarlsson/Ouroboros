@@ -1154,8 +1154,13 @@ fn run_head_pipeline(
             // went wrong, so adding "could not authorize the stream" on top
             // only obscures it. Anything else is a real failure and still says
             // so.
-            let died = syscall(syscall_abi::TASK_STATE, slots[i + 1])
-                != syscall_abi::TASK_STATE_RUNNABLE;
+            // "Already exited" means zombie or unused - NOT merely not-runnable:
+            // a healthy consumer parked in pipe_recv is BLOCKED, so testing
+            // `!= RUNNABLE` would swallow a genuine delegation failure and kill
+            // the pipeline with no message at all.
+            let state = syscall(syscall_abi::TASK_STATE, slots[i + 1]);
+            let died = state == syscall_abi::TASK_STATE_ZOMBIE
+                || state == syscall_abi::TASK_STATE_UNUSED;
             for s in &slots[..prog_stages.len()] {
                 syscall(syscall_abi::KILL, *s);
             }
@@ -1739,7 +1744,10 @@ fn print_fs_error(cmd: &str, code: u64) {
         syscall_abi::SPAWN_ERR_TOO_LARGE => "program too large for the kernel's staging buffer (or empty)",
         syscall_abi::SPAWN_ERR_NO_FREE_SLOT => "no free task slot",
         syscall_abi::TASK_ERR_NO_SUCH_TASK => "no such task (see ps)",
-        syscall_abi::TASK_ERR_PROTECTED => "that task is protected (the boot shell, idle, and the filesystem server are permanent)",
+        // Names the whole protected set rather than the three it used to have:
+        // the boundary is now `< FIRST_SPAWNABLE`, and a message that lists a
+        // stale subset is how a reader concludes a new server is fair game.
+        syscall_abi::TASK_ERR_PROTECTED => "that task is protected (the boot shell, idle, and the fsd/cond/netd/accountd servers are permanent)",
         _ => "failed",
     });
 }
@@ -1978,6 +1986,15 @@ fn cmd_su(arg: &str) {
             }
         }
     };
+    // Clear the supplementary groups before dropping identity. The numeric form
+    // names no account, so there is no /etc/group entry to look membership up
+    // from - and leaving the list alone would hand the target uid whatever
+    // groups the CURRENT session holds. Since `su` is root-only, that is root's
+    // memberships: `su 1000:1000` would leave a uid-1000 shell carrying them,
+    // and fsd's group triad would honour them. Root-only still means the caller
+    // could have set anything, so this clears rather than trusts.
+    // (`su <name>` above sets the target's real list instead.)
+    syscall4(syscall_abi::SET_GROUPS, 0, 0, 0, 0);
     if syscall4(syscall_abi::SET_ID, uid as u64, gid as u64, 0, 0) == syscall_abi::SET_ID_DENIED {
         print_line("su: denied (only root may change identity)");
     }

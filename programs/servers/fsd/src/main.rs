@@ -1028,9 +1028,18 @@ fn check_access(fs: &mut vfs::Filesystem, sender: u64, verb: u64, p: &[u64; 4], 
         return true; // root: skip the per-op work entirely
     }
     match verb {
-        // Reads: R on the target file/dir. Stat is left open (metadata is needed
-        // by `ls -l` for entries a readable directory already exposes).
-        ninep_abi::NP_STAT => true,
+        // Stat: the object's own mode is NOT checked - `ls -l` needs metadata
+        // for entries a readable directory already exposes, and the mode is
+        // what it is about to print. But the ancestor walk DOES apply, or
+        // `chmod 700 <dir>` would still leak the size, owner, mode and mtime of
+        // any path inside it to someone who can guess the name - which is the
+        // very thing the traversal check exists to stop. (A directory that is
+        // readable but not searchable therefore lists names and refuses `-l`,
+        // which is what POSIX does too.)
+        ninep_abi::NP_STAT => match path_from(payload, 0, p[0]) {
+            Some(path) => ancestors_searchable(fs, path, &who),
+            None => true,
+        },
         // open: the fid is authorized here, once. read-open needs R on the file;
         // write/create-open needs W (on the file if it exists, else on the parent
         // dir for a create). a0 = flags, a1 = path length.
