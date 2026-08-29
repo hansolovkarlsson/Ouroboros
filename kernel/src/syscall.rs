@@ -784,7 +784,12 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
             // secret (uid/gid aren't credentials), so any task may read any
             // slot's - `ps` shows owners, `fsd` checks the sender's later.
             let t = arg0 as usize;
-            if t >= tasks::NUM_TASKS {
+            // A DEAD slot must not report an identity. `reset_id` stores 0
+            // (root) into a slot on task death, so a server that authorizes on
+            // GET_ID of the message sender would read a caller who sent a
+            // request and then exited as ROOT - send it, exit, be authorized.
+            // Report unavailable and let the caller fail closed.
+            if t >= tasks::NUM_TASKS || !tasks::is_live(t) {
                 syscall_abi::GET_ID_ERR
             } else {
                 tasks::id_of(t)

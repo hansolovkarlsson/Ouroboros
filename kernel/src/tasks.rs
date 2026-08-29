@@ -876,6 +876,18 @@ static IDS: [AtomicU64; NUM_TASKS] = [const { AtomicU64::new(0) }; NUM_TASKS];
 /// programs can never restore to root. Default `0`.
 static SAVED_IDS: [AtomicU64; NUM_TASKS] = [const { AtomicU64::new(0) }; NUM_TASKS];
 
+/// Whether `task` is a live task - one that could actually have sent a message
+/// worth authorizing. A `Zombie` has run and died; an `Unused` slot has had its
+/// identity reset to root by [`reset_id`], which is precisely why `GET_ID` must
+/// not answer for either: a server that authorizes on the sender's identity
+/// would read a caller that exited as ROOT.
+pub(crate) fn is_live(task: usize) -> bool {
+    !matches!(
+        unsafe { *STATES[task].0.get() },
+        TaskState::Unused | TaskState::Zombie(_)
+    )
+}
+
 /// `task`'s owning uid (the low half of its packed identity).
 pub(crate) fn uid_of(task: usize) -> u32 {
     IDS[task].load(Ordering::Relaxed) as u32

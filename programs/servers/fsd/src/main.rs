@@ -277,6 +277,22 @@ const FID_BASE: u64 = 3;
 struct Fid {
     used: bool,
     owner: u64,
+    /// The access the fid was OPENED for (`OPEN_READ`/`OPEN_WRITE`/...).
+    ///
+    /// Load-bearing. The fid ops skip the per-op permission check because the
+    /// fid was authorized once at open - which is only sound if the fid also
+    /// remembers *what it was authorized for*. Without this a read-only open of
+    /// a root-owned 0644 file (`/etc/passwd`) returned a fid that `NP_PWRITE`
+    /// would write through, since the client picks the verb and nothing
+    /// re-checked.
+    flags: u64,
+    /// The uid the owner held when the fid was opened.
+    ///
+    /// `owner` is a task SLOT, and slots are recycled: a task can open a fid,
+    /// exit without clunking it, and a later task in the same slot would match
+    /// the ownership check and inherit the open file. Across a privilege
+    /// boundary that is an escalation.
+    owner_uid: u32,
     tree: usize,
     path_len: usize,
     path: [u8; FID_PATH_MAX],
@@ -284,7 +300,7 @@ struct Fid {
 
 impl Fid {
     const fn empty() -> Self {
-        Fid { used: false, owner: 0, tree: 0, path_len: 0, path: [0u8; FID_PATH_MAX] }
+        Fid { used: false, owner: 0, flags: 0, owner_uid: 0, tree: 0, path_len: 0, path: [0u8; FID_PATH_MAX] }
     }
     fn path_str(&self) -> Option<&str> {
         core::str::from_utf8(&self.path[..self.path_len]).ok()
@@ -315,6 +331,15 @@ fn handle(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [Fid; M
     let p = [read_u64(req, 8), read_u64(req, 16), read_u64(req, 24), read_u64(req, 32)];
 
     if op == syscall_abi::FSOP_MOUNT {
+        // ROOT ONLY. check_access guards the NP_* file verbs; these FSOP_*
+        // control ops are dispatched here and were guarded by nothing at all -
+        // so any user could attach or detach a volume. Attaching one matters as
+        // much as detaching: a user could mount a partition deliberately left
+        // unmounted (unenforced entirely on FAT/exFAT), or an attacker-authored
+        // ext2 image carrying chosen uid/gid/mode metadata.
+        if !caller_is_root(sender) {
+            return status_reply(reply, syscall_abi::FS_ERR_PERM);
+        }
         // The auto-mount at tree 0 (the default the shell's `mount -a` triggers).
         if mounts[0].is_some() {
             return status_reply(reply, syscall_abi::MOUNT_ALREADY);
@@ -325,6 +350,10 @@ fn handle(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [Fid; M
     }
 
     if op == syscall_abi::FSOP_MOUNT_AT {
+        // ROOT ONLY - same reasoning as FSOP_MOUNT above.
+        if !caller_is_root(sender) {
+            return status_reply(reply, syscall_abi::FS_ERR_PERM);
+        }
         // Multi-mount: mount the p[0]-th partition into a fresh tree slot and
         // return the tree id, so a client can bind a namespace prefix to it.
         let index = p[0] as usize;
@@ -353,6 +382,11 @@ fn handle(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [Fid; M
         reply[24..24 + name.len()].copy_from_slice(name);
         24 + name.len()
     } else if op == syscall_abi::FSOP_UNMOUNT {
+        // ROOT ONLY - taking the disk away is at least as privileged as writing
+        // to it. Confirmed reachable: `unmount` as an ordinary user succeeded.
+        if !caller_is_root(sender) {
+            return status_reply(reply, syscall_abi::FS_ERR_PERM);
+        }
         // Unmount tree 0 (the primary mount).
         if mounts[0].is_none() {
             return status_reply(reply, syscall_abi::NO_FS);
@@ -363,6 +397,10 @@ fn handle(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [Fid; M
         || op == syscall_abi::FSOP_PARTITION
         || op == syscall_abi::FSOP_FORMAT
     {
+        // ROOT ONLY - these rewrite the raw disk.
+        if !caller_is_root(sender) {
+            return status_reply(reply, syscall_abi::FS_ERR_PERM);
+        }
         // Raw-disk ops (erase/partition/format) rewrite disk structures, so they
         // refuse while *any* tree is mounted - unmount everything first.
         if mounts.iter().any(|m| m.is_some()) {
@@ -430,7 +468,9 @@ fn handle_ninep(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [
     // other arms ignore it). Root -> (0,0), the default, so nothing changes for
     // boot/format-time creation. Without this a user couldn't write in its own
     // home - the created file would be root-owned and the follow-up write denied.
-    let (cuid, cgid) = caller_id(sender);
+    // No identity (a dead sender) must not stamp new inodes as root; the verb
+    // itself is denied by check_access below, this is just the safe default.
+    let (cuid, cgid) = caller_id(sender).unwrap_or((u32::MAX, u32::MAX));
     fs.set_creator(cuid as u16, cgid as u16);
     match verb {
         ninep_abi::NP_READDIR => {
@@ -665,7 +705,8 @@ fn handle_ninep(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [
                     return status_reply(reply, error_code(&e));
                 }
             }
-            match alloc_fid(fids, sender, tree, path) {
+            let opener_uid = caller_id(sender).map_or(u32::MAX, |(u, _)| u);
+            match alloc_fid(fids, sender, opener_uid, tree, path, flags) {
                 Some(fid) => status_reply(reply, fid),
                 None => status_reply(reply, syscall_abi::FS_ERROR), // table full
             }
@@ -677,7 +718,14 @@ fn handle_ninep(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [
 /// Reserve a fid for `owner` referring to `path` on `tree`. Returns the fid
 /// number (>= FID_BASE) or `None` if the table is full even after reaping fids
 /// whose owner task has died.
-fn alloc_fid(fids: &mut [Fid; MAX_FIDS], owner: u64, tree: usize, path: &str) -> Option<u64> {
+fn alloc_fid(
+    fids: &mut [Fid; MAX_FIDS],
+    owner: u64,
+    owner_uid: u32,
+    tree: usize,
+    path: &str,
+    flags: u64,
+) -> Option<u64> {
     let pb = path.as_bytes();
     if pb.len() > FID_PATH_MAX {
         return None;
@@ -690,6 +738,8 @@ fn alloc_fid(fids: &mut [Fid; MAX_FIDS], owner: u64, tree: usize, path: &str) ->
     let i = slot?;
     fids[i].used = true;
     fids[i].owner = owner;
+    fids[i].owner_uid = owner_uid;
+    fids[i].flags = flags;
     fids[i].tree = tree;
     fids[i].path_len = pb.len();
     fids[i].path[..pb.len()].copy_from_slice(pb);
@@ -732,6 +782,28 @@ fn handle_fid_op(
     if verb == ninep_abi::NP_CLUNK {
         fids[idx].used = false;
         return status_reply(reply, 0);
+    }
+    // The slot must still be held by the same USER - see Fid::owner_uid.
+    match caller_id(sender) {
+        Some((u, _)) if u == fids[idx].owner_uid => {}
+        _ => {
+            fids[idx].used = false; // stale: drop it rather than leave it lying about
+            return status_reply(reply, syscall_abi::FS_ERR_PERM);
+        }
+    }
+    // Honour what the fid was opened FOR. These ops skip check_access on the
+    // grounds that the open was authorized - so the open's access mode IS the
+    // authorization, and writing through a read-only fid was never authorized.
+    let flags = fids[idx].flags;
+    let allowed = match verb {
+        ninep_abi::NP_PREAD => flags & ninep_abi::OPEN_READ != 0,
+        ninep_abi::NP_PWRITE => {
+            flags & (ninep_abi::OPEN_WRITE | ninep_abi::OPEN_CREATE | ninep_abi::OPEN_TRUNC) != 0
+        }
+        _ => true, // NP_FSTAT: metadata, like NP_STAT
+    };
+    if !allowed {
+        return status_reply(reply, syscall_abi::FS_ERR_PERM);
     }
     let tree = fids[idx].tree;
     let Some(path) = fids[idx].path_str() else {
@@ -875,9 +947,23 @@ fn mode_allows(mode: u16, owner_uid: u32, owner_gid: u32, uid: u32, gid: u32, ne
 /// The calling task's `(uid, gid)` from the kernel (`GET_ID`). The identity is a
 /// packed `(gid << 32) | uid`; widened to `u32` to compare against the ext2
 /// inode's `u16` owner fields.
-fn caller_id(sender: u64) -> (u32, u32) {
+fn caller_id(sender: u64) -> Option<(u32, u32)> {
     let packed = syscall4(syscall_abi::GET_ID, sender, 0, 0, 0);
-    (packed as u32, (packed >> 32) as u32)
+    // The kernel reports GET_ID_ERR for a slot that is not a live task. A dead
+    // slot's identity has been reset to root, so believing it would authorize a
+    // request whose sender already exited as if root had sent it. No identity,
+    // no decision.
+    if packed == syscall_abi::GET_ID_ERR {
+        return None;
+    }
+    Some((packed as u32, (packed >> 32) as u32))
+}
+
+/// Whether the message's sender is root - the gate on the disk-management
+/// control ops, which never pass through [`check_access`]. A sender with no
+/// identity (already dead) is not root.
+fn caller_is_root(sender: u64) -> bool {
+    matches!(caller_id(sender), Some((0, _)))
 }
 
 /// The parent directory of an absolute path (`/etc/passwd` -> `/etc`, `/foo` ->
@@ -919,7 +1005,9 @@ fn path_allows(fs: &mut vfs::Filesystem, path: &str, uid: u32, gid: u32, need: u
 /// Enforce the caller's permission for `verb`. Returns `true` if allowed. Reads
 /// the object's owner+mode via `stat` and compares against the caller's uid/gid.
 fn check_access(fs: &mut vfs::Filesystem, sender: u64, verb: u64, p: &[u64; 4], payload: &[u8]) -> bool {
-    let (uid, gid) = caller_id(sender);
+    let Some((uid, gid)) = caller_id(sender) else {
+        return false; // sender is gone - nothing to authorize
+    };
     if uid == 0 {
         return true; // root: skip the per-op work entirely
     }
@@ -933,10 +1021,24 @@ fn check_access(fs: &mut vfs::Filesystem, sender: u64, verb: u64, p: &[u64; 4], 
         ninep_abi::NP_OPEN => match path_from(payload, 0, p[1]) {
             Some(path) => {
                 let flags = p[0];
-                if flags & ninep_abi::OPEN_READ != 0 && !path_allows(fs, path, uid, gid, PERM_R) {
+                // OPEN_TRUNC is a WRITE: the handler acts on it by truncating
+                // the file, so leaving it out of this mask let
+                // `open(path, O_RDONLY | O_TRUNC)` destroy a root-owned file
+                // with only read permission.
+                let wants_write = flags
+                    & (ninep_abi::OPEN_WRITE | ninep_abi::OPEN_CREATE | ninep_abi::OPEN_TRUNC)
+                    != 0;
+                let wants_read = flags & ninep_abi::OPEN_READ != 0;
+                // DEFAULT-DENY on a flag word that asks for nothing recognisable:
+                // `flags == 0` satisfied neither branch and fell through to
+                // `true`, handing out a fid the fid ops would then serve.
+                if !wants_read && !wants_write {
                     return false;
                 }
-                if flags & (ninep_abi::OPEN_WRITE | ninep_abi::OPEN_CREATE) != 0 {
+                if wants_read && !path_allows(fs, path, uid, gid, PERM_R) {
+                    return false;
+                }
+                if wants_write {
                     let ok = if fs.stat(path).is_ok() {
                         path_allows(fs, path, uid, gid, PERM_W)
                     } else {
