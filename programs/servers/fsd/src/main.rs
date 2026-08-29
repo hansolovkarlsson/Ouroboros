@@ -927,6 +927,16 @@ fn want_len(want: u64) -> Option<usize> {
 
 const PERM_R: u16 = 4;
 const PERM_W: u16 = 2;
+/// Search permission on a directory - the right to *resolve a path through* it,
+/// which is a different thing from reading it (`r` lists the names; `x` lets you
+/// reach what they refer to).
+const PERM_X: u16 = 1;
+/// What modifying a directory's entries requires: write **and** search on that
+/// directory. `PERM_W` alone is not enough - the ancestor walk below checks a
+/// parent's *ancestors*, never the parent itself, so `chmod 0300 dir` (write, no
+/// search) would still allow `touch dir/f`, `rm dir/f` and `mkdir dir/d` inside a
+/// directory the caller cannot resolve a path through. POSIX requires both.
+const PERM_WX: u16 = PERM_W | PERM_X;
 
 /// Whether a caller with `uid`/`gid` is allowed `need` (an `R`/`W`/`X` bit
 /// combination) on an object owned by `owner_uid`/`owner_gid` with `mode`.
@@ -988,11 +998,103 @@ fn parent_of(path: &str) -> &str {
     }
 }
 
+/// Whether one directory grants the caller search (`x`) permission. Shared by
+/// the ancestor walk; a directory that can't be stat'd or whose filesystem has
+/// no modes passes, the same rule [`path_allows`] uses.
+fn dir_searchable(fs: &mut vfs::Filesystem, dir: &str, uid: u32, gid: u32) -> bool {
+    match fs.stat(dir) {
+        Ok(st) => match st.mode {
+            Some(m) => mode_allows(m.mode, m.uid as u32, m.gid as u32, uid, gid, PERM_X),
+            None => true,
+        },
+        Err(_) => true,
+    }
+}
+
+/// Whether `path` contains a `..` component (not merely the two characters - a
+/// file named `..foo` is fine). Byte-only, like every path helper here.
+fn has_dotdot(path: &str) -> bool {
+    let b = path.as_bytes();
+    let mut start = 0usize;
+    for i in 0..=b.len() {
+        if i == b.len() || b[i] == b'/' {
+            if &b[start..i] == b".." {
+                return true;
+            }
+            start = i + 1;
+        }
+    }
+    false
+}
+
+/// Whether every **ancestor directory** of `path` grants the caller search
+/// (`x`) permission - POSIX path resolution.
+///
+/// This is what makes `chmod 700 <dir>` mean something. Without it a mode on a
+/// *directory* only protected the directory's own listing: a caller who already
+/// knew the name of a world-readable file inside could still open it by full
+/// path, because only the object and (for writes) its immediate parent were ever
+/// checked. Demonstrated before fixing: as an ordinary user, `cat
+/// /secret/inside` on a 0644 file inside a `drwx------` root-owned directory
+/// printed its contents.
+///
+/// Walks `/` first (everything resolves through it), then each `/`-terminated
+/// prefix, which yields exactly the ancestors and never the final component.
+/// Byte-only: slicing a `&str` by a runtime index pulls in `core::fmt` and an
+/// `R_AARCH64_ABS64` the `-pie` link rejects (the recurring trap).
+///
+/// A `..` component is REFUSED rather than resolved. This walk checks lexical
+/// prefixes, while ext2 resolves `..` as a real directory entry - so
+/// `/bin/../priv/x` would never consult `/priv`. The `/bin` tools normalize
+/// client-side, but the C libc does not and a remote 9P client need not, so the
+/// server cannot rely on that. No legitimate caller sends an unnormalized path.
+///
+/// Cost: one `stat` per ancestor level, on non-root callers only, and a
+/// filesystem with no modes short-circuits before reaching here. Each `stat`
+/// re-resolves from the root inode, so a deep path is proportionally dearer;
+/// resolving once and collecting modes on the way down is the obvious
+/// refinement if that ever shows up in a profile.
+fn ancestors_searchable(fs: &mut vfs::Filesystem, path: &str, uid: u32, gid: u32) -> bool {
+    if has_dotdot(path) {
+        return false;
+    }
+    if !dir_searchable(fs, "/", uid, gid) {
+        return false;
+    }
+    let b = path.as_bytes();
+    let mut i = 1usize;
+    while i < b.len() {
+        if b[i] == b'/' {
+            match core::str::from_utf8(&b[..i]) {
+                Ok(prefix) => {
+                    if !dir_searchable(fs, prefix, uid, gid) {
+                        return false;
+                    }
+                }
+                Err(_) => return true, // not a path we can reason about
+            }
+        }
+        i += 1;
+    }
+    true
+}
+
 /// Whether `path` (or, for namespace ops, the given directory) grants the caller
 /// `need`. A path that can't be stat'd (e.g. doesn't exist) or a filesystem that
 /// can't model permissions passes - the op then runs and fails on its own merits
 /// (not-found, etc.) rather than masquerading as a permission error.
 fn path_allows(fs: &mut vfs::Filesystem, path: &str, uid: u32, gid: u32, need: u16) -> bool {
+    // ONE stat answers "does this filesystem model permissions at all?" - on
+    // FAT32/exFAT//proc it does not, and the ancestor walk below would run only
+    // to return an inevitable `true`. Ask once, up front.
+    if let Ok(st) = fs.stat("/") {
+        if st.mode.is_none() {
+            return true;
+        }
+    }
+    if !ancestors_searchable(fs, path, uid, gid) {
+        return false;
+    }
     match fs.stat(path) {
         Ok(st) => match st.mode {
             Some(m) => mode_allows(m.mode, m.uid as u32, m.gid as u32, uid, gid, need),
@@ -1012,9 +1114,17 @@ fn check_access(fs: &mut vfs::Filesystem, sender: u64, verb: u64, p: &[u64; 4], 
         return true; // root: skip the per-op work entirely
     }
     match verb {
-        // Reads: R on the target file/dir. Stat is left open (metadata is needed
-        // by `ls -l` for entries a readable directory already exposes).
-        ninep_abi::NP_STAT => true,
+        // Stat: the object's own mode is NOT checked - `ls -l` needs metadata for
+        // entries a readable directory already exposes, and the mode is what it
+        // is about to print. But the ancestor walk DOES apply, or `chmod 700
+        // <dir>` would still leak the size, owner, mode and mtime of any path
+        // inside it to someone who can guess the name. (A directory that is
+        // readable but not searchable therefore lists names and refuses `-l`,
+        // which is what POSIX does too.)
+        ninep_abi::NP_STAT => match path_from(payload, 0, p[0]) {
+            Some(path) => ancestors_searchable(fs, path, uid, gid),
+            None => true,
+        },
         // open: the fid is authorized here, once. read-open needs R on the file;
         // write/create-open needs W (on the file if it exists, else on the parent
         // dir for a create). a0 = flags, a1 = path length.
@@ -1042,7 +1152,7 @@ fn check_access(fs: &mut vfs::Filesystem, sender: u64, verb: u64, p: &[u64; 4], 
                     let ok = if fs.stat(path).is_ok() {
                         path_allows(fs, path, uid, gid, PERM_W)
                     } else {
-                        path_allows(fs, parent_of(path), uid, gid, PERM_W)
+                        path_allows(fs, parent_of(path), uid, gid, PERM_WX)
                     };
                     if !ok {
                         return false;
@@ -1065,7 +1175,7 @@ fn check_access(fs: &mut vfs::Filesystem, sender: u64, verb: u64, p: &[u64; 4], 
                     if fs.stat(path).is_ok() {
                         path_allows(fs, path, uid, gid, PERM_W)
                     } else {
-                        path_allows(fs, parent_of(path), uid, gid, PERM_W)
+                        path_allows(fs, parent_of(path), uid, gid, PERM_WX)
                     }
                 }
                 None => true,
@@ -1074,7 +1184,7 @@ fn check_access(fs: &mut vfs::Filesystem, sender: u64, verb: u64, p: &[u64; 4], 
         // Namespace changes: W on the parent directory.
         ninep_abi::NP_TOUCH | ninep_abi::NP_MKDIR | ninep_abi::NP_RM | ninep_abi::NP_RMDIR => {
             match path_from(payload, 0, p[0]) {
-                Some(path) => path_allows(fs, parent_of(path), uid, gid, PERM_W),
+                Some(path) => path_allows(fs, parent_of(path), uid, gid, PERM_WX),
                 None => true,
             }
         }
@@ -1082,14 +1192,18 @@ fn check_access(fs: &mut vfs::Filesystem, sender: u64, verb: u64, p: &[u64; 4], 
         ninep_abi::NP_MV => {
             match (path_from(payload, 0, p[0]), path_from(payload, p[0] as usize, p[1])) {
                 (Some(src), Some(dst)) => {
-                    path_allows(fs, parent_of(src), uid, gid, PERM_W)
-                        && path_allows(fs, parent_of(dst), uid, gid, PERM_W)
+                    path_allows(fs, parent_of(src), uid, gid, PERM_WX)
+                        && path_allows(fs, parent_of(dst), uid, gid, PERM_WX)
                 }
                 _ => true,
             }
         }
         // chmod: owner-only (root already returned above).
+        // chmod: owner-only (root already returned above). These two stat the
+        // object directly rather than going through path_allows, so they need
+        // the ancestor walk spelled out.
         ninep_abi::NP_CHMOD => match path_from(payload, 0, p[0]) {
+            Some(path) if !ancestors_searchable(fs, path, uid, gid) => false,
             Some(path) => match fs.stat(path) {
                 Ok(st) => match st.mode {
                     Some(m) => uid == m.uid as u32,
@@ -1102,6 +1216,7 @@ fn check_access(fs: &mut vfs::Filesystem, sender: u64, verb: u64, p: &[u64; 4], 
         // chown: root-only, so a non-root caller (we're past the root bypass) is
         // always refused when the filesystem models ownership.
         ninep_abi::NP_CHOWN => match path_from(payload, 0, p[0]) {
+            Some(path) if !ancestors_searchable(fs, path, uid, gid) => false,
             Some(path) => match fs.stat(path) {
                 Ok(st) => st.mode.is_none(), // unrestricted only if not modelled
                 Err(_) => true,
