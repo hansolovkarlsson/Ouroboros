@@ -755,6 +755,11 @@ pub const SET_GROUPS: u64 = 64;
 /// [`SET_ID_DENIED`]; the permission rule is [`SET_ID`]'s exactly (root may
 /// become anyone, anyone may restore their saved identity).
 ///
+/// **Two permission rules, not one.** The identity half follows [`SET_ID`]; the
+/// group half follows [`SET_GROUPS`] and is **root only**. A non-root caller may
+/// pass an empty list (dropping memberships only removes privilege - that is
+/// logout), but never a populated one.
+///
 /// Exists because the two-step sequence is a trap. [`SET_GROUPS`] is root-only,
 /// so it must come *before* the drop to a user - an order every caller had to
 /// know, with nothing enforcing it. `su <uid>` didn't, and silently carried the

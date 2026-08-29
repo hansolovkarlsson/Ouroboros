@@ -194,7 +194,14 @@ fn set_supplementary(name: &[u8], list: &[u8]) {
     };
     // Remove from every group, so the list given is the complete membership.
     let mut out = [0u8; BUF];
-    if let Some((n, changed)) = accounts::remove_group_member_everywhere(&cur[..clen], &mut out, name) {
+    let Some((n, changed)) = accounts::remove_group_member_everywhere(&cur[..clen], &mut out, name)
+    else {
+        // None means the rewrite did not fit. Swallowing it left the user in
+        // groups -G was supposed to remove them from, and still reported success
+        // - the exact inverse of the "complete membership" contract.
+        die(b"usermod: /etc/group rewrite does not fit - no memberships were changed\r\n");
+    };
+    {
         if changed {
             let code = ulib::fs_write_bulk(GROUP_FILE, &out[..n]);
             if ulib::is_fs_error(code) {
@@ -224,7 +231,16 @@ fn set_supplementary(name: &[u8], list: &[u8]) {
                 cur[..n].copy_from_slice(&out[..n]);
                 clen = n;
             }
-            _ if exists => {} // already a member - nothing to do, nothing to say
+            // A None from add_group_member is "the rewrite did not fit", not
+            // "already a member" - distinguishing them matters, because one is a
+            // silent failure to apply what was asked.
+            None if exists => {
+                ulib::con_write(b"usermod: /etc/group rewrite does not fit - not added to: ");
+                ulib::con_write(g);
+                ulib::con_write(b"\r\n");
+                ulib::exit(1);
+            }
+            Some((_, false)) if exists => {} // already a member - nothing to do
             _ => {
                 ulib::con_write(b"usermod: no such group (skipped): ");
                 ulib::con_write(g);

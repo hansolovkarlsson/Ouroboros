@@ -7,6 +7,7 @@
  * file at all. A weak undefined symbol resolves to 0, so the call below is
  * skipped when there is no such buffer to drain. */
 extern void __libc_flush_stdout(void) __attribute__((weak));
+extern void __libc_close_all(void);
 
 void _exit(int code) {
     /* The one exit path every C library reaches. Our own stdlib.c's exit()
@@ -23,6 +24,9 @@ void _exit(int code) {
         __libc_flush_stdout();
     }
     __libc_end_stdout();
+    /* Release the server-side fids too: nothing else does, and a leaked one is
+     * unreapable once the task's slot is recycled. */
+    __libc_close_all();
     __os_syscall1(SYS_EXIT, code);
     for (;;) {
     } /* EXIT never returns */

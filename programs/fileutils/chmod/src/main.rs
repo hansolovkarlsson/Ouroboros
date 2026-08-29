@@ -185,9 +185,17 @@ pub extern "C" fn _start() -> ! {
         b"usage: chmod <mode> <file>  (octal 755, or symbolic u+x / go-w / a=rx; ext2 only)\r\n",
     );
 
-    let mut modebuf = [0u8; 32];
+    // Sized for a symbolic expression, not just an octal number: ulib::arg
+    // clamps to the buffer rather than reporting the true length, so a longer
+    // mode was silently truncated - and a truncated symbolic expression usually
+    // still parses, applying different bits and exiting 0.
+    let mut modebuf = [0u8; 128];
     let mode_len = match ulib::arg(1, &mut modebuf) {
-        Some(len) if len > 0 => len,
+        Some(len) if len > 0 && len < modebuf.len() => len,
+        Some(_) => {
+            ulib::con_write(b"chmod: mode is too long\r\n");
+            ulib::exit(1);
+        }
         _ => {
             ulib::con_write(b"chmod: usage: chmod <mode> <file>\r\n");
             ulib::exit(1);

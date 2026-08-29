@@ -336,6 +336,15 @@ fn handle(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [Fid; M
     let p = [read_u64(req, 8), read_u64(req, 16), read_u64(req, 24), read_u64(req, 32)];
 
     if op == syscall_abi::FSOP_MOUNT {
+        // ROOT ONLY, for the same reason unmount is: attaching a volume is at
+        // least as privileged as detaching one. A user could otherwise mount a
+        // partition root left unmounted (unenforced entirely on FAT/exFAT), or
+        // attach an attacker-authored ext2 image carrying chosen uid/gid/mode
+        // metadata - and since FSOP_UNMOUNT only ever clears tree 0, slots taken
+        // this way could never be released.
+        if !caller_is_root(sender) {
+            return status_reply(reply, syscall_abi::FS_ERR_PERM);
+        }
         // The auto-mount at tree 0 (the default the shell's `mount -a` triggers).
         if mounts[0].is_some() {
             return status_reply(reply, syscall_abi::MOUNT_ALREADY);
@@ -346,6 +355,10 @@ fn handle(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [Fid; M
     }
 
     if op == syscall_abi::FSOP_MOUNT_AT {
+        // ROOT ONLY - same reasoning as FSOP_MOUNT above.
+        if !caller_is_root(sender) {
+            return status_reply(reply, syscall_abi::FS_ERR_PERM);
+        }
         // Multi-mount: mount the p[0]-th partition into a fresh tree slot and
         // return the tree id, so a client can bind a namespace prefix to it.
         let index = p[0] as usize;
@@ -938,6 +951,14 @@ const PERM_W: u16 = 2;
 /// reach what they refer to).
 const PERM_X: u16 = 1;
 
+/// What modifying a directory's entries requires: write **and** search on that
+/// directory. `PERM_W` alone was wrong - the ancestor walk checks the parent's
+/// *ancestors*, never the parent itself, so `chmod 0300 dir` (write, no search)
+/// still allowed `touch dir/f`, `rm dir/f` and `mkdir dir/d` on a directory the
+/// caller cannot resolve a path through. Read paths were always right, because
+/// there the operand *is* the real path and its own ancestors get walked.
+const PERM_WX: u16 = PERM_W | PERM_X;
+
 /// The caller's identity for a permission decision: the uid, the primary gid,
 /// and the supplementary groups the kernel carries for that task.
 #[derive(Clone, Copy)]
@@ -1076,8 +1097,18 @@ fn dir_searchable(fs: &mut vfs::Filesystem, dir: &str, who: &Caller) -> bool {
 /// slices the byte view and re-wraps.
 ///
 /// Cost: one `stat` per ancestor level, on every path op by a non-root caller.
-/// Paths here are shallow (`/etc/passwd` is two levels) and root skips the whole
-/// check, so this is a small constant, not a walk of the disk.
+/// Root skips it entirely, and a filesystem with no modes short-circuits before
+/// reaching here (see [`path_allows`]). What remains is real but bounded: each
+/// `stat` re-resolves from the root inode, so a depth-3 path costs ~4x the inode
+/// reads of the op itself, *per request* - and `ulib`'s bulk reads chunk at 2 KB,
+/// so a large read repeats the identical walk for every chunk.
+///
+/// **Known follow-up, deliberately not fixed here:** resolve once and collect
+/// each ancestor's mode on the way down, or memoize the last (uid, path) that
+/// passed. Either is a real change to the resolver, and this file has already
+/// absorbed a lot today; the shape to watch is `docs/CHANGELOG.md`'s "Large-read
+/// fsd restart", where per-chunk re-walking is exactly what ran past the
+/// supervisor's wedge detector.
 ///
 /// A non-directory in the middle of a path passes if its `x` bit happens to be
 /// set (an executable, say). POSIX would answer `ENOTDIR`; here the op then
@@ -1125,6 +1156,14 @@ fn ancestors_searchable(fs: &mut vfs::Filesystem, path: &str, who: &Caller) -> b
 /// than in each verb's arm means every path that goes through this function -
 /// which is every path operand except `stat`'s - gets the traversal for free.
 fn path_allows(fs: &mut vfs::Filesystem, path: &str, who: &Caller, need: u16) -> bool {
+    // ONE stat answers "does this filesystem model permissions at all?" - on
+    // FAT32/exFAT//proc it does not, and the whole ancestor walk below would run
+    // only to return an inevitable `true`. Ask once, up front.
+    if let Ok(st) = fs.stat("/") {
+        if st.mode.is_none() {
+            return true;
+        }
+    }
     if !ancestors_searchable(fs, path, who) {
         return false;
     }
@@ -1186,7 +1225,7 @@ fn check_access(fs: &mut vfs::Filesystem, sender: u64, verb: u64, p: &[u64; 4], 
                     let ok = if fs.stat(path).is_ok() {
                         path_allows(fs, path, &who, PERM_W)
                     } else {
-                        path_allows(fs, parent_of(path), &who, PERM_W)
+                        path_allows(fs, parent_of(path), &who, PERM_WX)
                     };
                     if !ok {
                         return false;
@@ -1209,7 +1248,7 @@ fn check_access(fs: &mut vfs::Filesystem, sender: u64, verb: u64, p: &[u64; 4], 
                     if fs.stat(path).is_ok() {
                         path_allows(fs, path, &who, PERM_W)
                     } else {
-                        path_allows(fs, parent_of(path), &who, PERM_W)
+                        path_allows(fs, parent_of(path), &who, PERM_WX)
                     }
                 }
                 None => true,
@@ -1218,7 +1257,7 @@ fn check_access(fs: &mut vfs::Filesystem, sender: u64, verb: u64, p: &[u64; 4], 
         // Namespace changes: W on the parent directory.
         ninep_abi::NP_TOUCH | ninep_abi::NP_MKDIR | ninep_abi::NP_RM | ninep_abi::NP_RMDIR => {
             match path_from(payload, 0, p[0]) {
-                Some(path) => path_allows(fs, parent_of(path), &who, PERM_W),
+                Some(path) => path_allows(fs, parent_of(path), &who, PERM_WX),
                 None => true,
             }
         }
@@ -1226,8 +1265,8 @@ fn check_access(fs: &mut vfs::Filesystem, sender: u64, verb: u64, p: &[u64; 4], 
         ninep_abi::NP_MV => {
             match (path_from(payload, 0, p[0]), path_from(payload, p[0] as usize, p[1])) {
                 (Some(src), Some(dst)) => {
-                    path_allows(fs, parent_of(src), &who, PERM_W)
-                        && path_allows(fs, parent_of(dst), &who, PERM_W)
+                    path_allows(fs, parent_of(src), &who, PERM_WX)
+                        && path_allows(fs, parent_of(dst), &who, PERM_WX)
                 }
                 _ => true,
             }

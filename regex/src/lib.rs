@@ -96,6 +96,12 @@ pub const MAX_TEXT: usize = u16::MAX as usize;
 /// (`(a|aa)*b`), not against non-termination.
 pub const MAX_STEPS: u32 = 20_000;
 
+/// Total instructions across *all* start offsets of one unanchored search. The
+/// per-offset [`MAX_STEPS`] keeps each attempt honest; this keeps the whole
+/// search finite without making an ordinary pattern's budget shrink as the line
+/// grows (which is what a single shared budget did).
+pub const MAX_TOTAL_STEPS: u32 = 2_000_000;
+
 /// Why a pattern could not be compiled. Every variant is a user error in the
 /// pattern except [`Error::TooComplex`], which is this engine's fixed limits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -609,13 +615,27 @@ impl Regex {
         // non-matching 256-byte line zeroed 4 KB per offset - a quarter of a
         // megabyte of memset to decide one line.
         let mut stack = [(0u16, 0u16); MAX_STACK];
-        // ...and ONE step budget across the whole search, for the same reason a
-        // budget exists at all: resetting it per offset multiplied the real
-        // worst case by the text length, so "bounded" was bounded by n * MAX_STEPS.
-        let mut steps = 0u32;
+        // The budget is PER START OFFSET, with a separate total cap below.
+        //
+        // Sharing one budget across every offset looked tighter and was wrong in
+        // practice: an unanchored search retries at each offset, so a pattern
+        // like `.*zzz` against a non-matching line spends budget linearly in the
+        // line length and exhausted 20,000 steps by ~99 bytes - well inside
+        // grep's 256-byte line - reporting `Limit` for an entirely ordinary
+        // pattern. grep then *drops* that line under both polarities, so `-v`
+        // silently stops printing long lines it was meant to print. A per-offset
+        // budget keeps the answer correct for real patterns; MAX_TOTAL_STEPS
+        // keeps the whole search finite for pathological ones.
+        let mut total = 0u32;
         let mut start = 0usize;
         loop {
-            match self.run(text, start, fold, &mut stack, &mut steps) {
+            let mut steps = 0u32;
+            let outcome = self.run(text, start, fold, &mut stack, &mut steps);
+            total = total.saturating_add(steps);
+            if total > MAX_TOTAL_STEPS {
+                return Match::Limit;
+            }
+            match outcome {
                 Match::Yes => return Match::Yes,
                 Match::Limit => return Match::Limit,
                 Match::No => {}
@@ -928,6 +948,20 @@ mod tests {
         // ...and `[a-\]]` really is reversed ('a' is 0x61, ']' is 0x5D), so it is
         // refused rather than quietly swapped into something that compiles.
         assert_eq!(err(r"[a-\]]"), Error::BadRange);
+    }
+
+    #[test]
+    fn ordinary_patterns_decide_non_matching_lines() {
+        // A MATCH short-circuits, so only non-matching input actually spends the
+        // budget - which is why the stack test below could not catch the shared
+        // budget making these return Limit at ~99 bytes.
+        for pat in [".*zzz", "[a-z]*zzz", "a*b", "^(a|b|c)*$x"] {
+            let re = Regex::compile(pat.as_bytes()).unwrap();
+            for n in [8usize, 99, 170, 256] {
+                let text = vec![b'a'; n];
+                assert_eq!(re.is_match(&text, false), Match::No, "{pat} at n = {n}");
+            }
+        }
     }
 
     #[test]

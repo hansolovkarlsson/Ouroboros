@@ -23,6 +23,9 @@ void _exit(int code) __attribute__((noreturn));
  * idempotent and _exit calls it, so it runs for a picolibc program too - that
  * build links picolibc's exit(), not our stdlib.c's. */
 void __libc_flush_stdout(void);
+/* Close every open fd - called by _exit, because a fid is server-side state
+ * that nothing else releases. */
+void __libc_close_all(void);
 void __libc_end_stdout(void);
 
 #endif

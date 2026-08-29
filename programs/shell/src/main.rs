@@ -677,6 +677,15 @@ fn main() -> ! {
         // shell never dies, so nothing else would clear them before the next
         // user logs in.
         syscall4(syscall_abi::SET_ID_GROUPS, 0, 0, 0, 0);
+        // ...and the NAMESPACE, which has exactly the same lifetime and exactly
+        // the same problem. `bind` is not privileged (it only ever narrows what
+        // THIS task can name), but a binding installed by an unprivileged session
+        // that outlives the session is a different thing entirely: the next
+        // `login` reads /etc/passwd and /etc/shadow AS ROOT, and would read them
+        // through the old session's binding. `bind /etc <somewhere writable>`
+        // then logout is a root shell. Reset to the empty (identity) namespace,
+        // which is what a fresh boot has.
+        syscall4(syscall_abi::NS_SET, 0, 0, 0, 0);
         print_line("logout");
     }
 }
@@ -2025,6 +2034,17 @@ pub(crate) fn read_account_file(path: &str, buf: &mut [u8]) -> usize {
         if n < CHUNK {
             break;
         }
+    }
+    // A buffer filled to the brim means the file is at least this long and may
+    // be longer - so the database was CUT, and a cut one must not read as a
+    // complete one. A line split by the cut still parses (four colon-fields is
+    // enough), so login would accept a truncated home; an account past the cut
+    // is simply invisible and its correct password is rejected. Report nothing
+    // rather than something wrong; the caller falls back to a root session,
+    // which is the same answer as "no /etc/passwd".
+    if off == buf.len() {
+        print_line("warning: the account file is larger than this shell can read - ignoring it");
+        return 0;
     }
     off
 }

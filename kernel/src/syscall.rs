@@ -679,11 +679,22 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
         syscall_abi::NS_SET => {
             // arg0 = namespace-blob pointer, arg1 = length. Sets the calling
             // task's own namespace directly; children inherit it at SPAWN.
-            if !valid_user_range(arg0, arg1) {
-                return SPAWN_ERROR;
-            }
             let len = arg1 as usize;
             if len > NS_MAX_SIZE {
+                return SPAWN_ERROR;
+            }
+            // A ZERO length is a legitimate value, not a bad pointer: the empty
+            // namespace is the identity mapping every task boots with, and
+            // "clear my namespace" has to be expressible. `valid_user_range`
+            // rejects (0, 0), so routing the empty case through it silently
+            // turned the shell's logout reset into a no-op - which left an
+            // unprivileged session's `bind /etc ...` in place for the next,
+            // root-privileged login to read the account database through.
+            if len == 0 {
+                tasks::set_namespace(tasks::current_task(), &[]);
+                return 0;
+            }
+            if !valid_user_range(arg0, arg1) {
                 return SPAWN_ERROR;
             }
             // SAFETY: range sanity-checked above, same trust model as every
@@ -790,7 +801,18 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
             // the two-call sequence (SET_GROUPS then SET_ID) is only correct in
             // that order, only from root, and every caller had to remember both
             // - which is why `su <uid>` silently carried the previous session's
-            // groups into the new identity. Same permission rule as SET_ID.
+            // groups into the new identity.
+            //
+            // TWO permission rules, not one. Combining the calls does not
+            // combine their gates: the identity half follows SET_ID (root may
+            // become anyone; anyone may restore their saved identity), and the
+            // group half follows SET_GROUPS (**root only** - membership is a
+            // permission grant). Carrying only the first was an escalation:
+            // `inherit_id` gives every spawned child `target == saved`, so any
+            // /bin program could pass the identity test and then hand itself
+            // arbitrary gids, which fsd's group triad honours on every object.
+            // A non-root caller may still pass an EMPTY list, because dropping
+            // memberships only ever removes privilege - that is what logout does.
             let me = tasks::current_task();
             let target = ((arg1 & 0xffff_ffff) << 32) | (arg0 & 0xffff_ffff);
             let is_root = tasks::uid_of(me) == 0;
@@ -798,6 +820,9 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
                 return syscall_abi::SET_ID_DENIED;
             }
             let n = (arg3 as usize).min(syscall_abi::MAX_SUPP_GROUPS);
+            if !is_root && n > 0 {
+                return syscall_abi::SET_ID_DENIED;
+            }
             let mut gids = [0u32; syscall_abi::MAX_SUPP_GROUPS];
             if n > 0 {
                 let bytes = (n * core::mem::size_of::<u32>()) as u64;

@@ -381,7 +381,20 @@ fn resolve_group(gspec: Option<&[u8]>, name: &[u8], uid: u32) -> Primary {
         }
         None => match accounts::find_group_by_name(group, name) {
             Some(g) => Primary::Existing(g.gid),
-            None => Primary::Create(uid),
+            None => {
+                // The user-private-group convention is `gid == uid`, but the uid
+                // counter scans /etc/passwd and the gid counter /etc/group, so
+                // the two drift and `uid` may already belong to an unrelated
+                // group. Creating a second group at that gid would silently give
+                // the new account every file that group can reach (and `id`
+                // would print the other group's name). Fall back to a genuinely
+                // free gid instead.
+                if accounts::find_group_by_gid(group, uid).is_some() {
+                    Primary::Create(accounts::next_free_gid(group))
+                } else {
+                    Primary::Create(uid)
+                }
+            }
         },
     }
 }
@@ -422,22 +435,42 @@ fn add_secret(name: &[u8], salt: &[u8], hash: &[u8]) -> Result<(), u64> {
     let Some(llen) = accounts::format_shadow_line(&mut line, name, salt, hash) else {
         return Err(syscall_abi::FS_ERROR);
     };
+    // REPLACE-then-append, not append. Every reader (find_secret_by_name) and
+    // the rollback (remove_line) take the FIRST match, so a stale entry for this
+    // name - left behind by a hand-removed account, since there is no userdel -
+    // would outrank the one being written: the new password would be rejected
+    // and the old one would still work, and a rollback would delete the wrong
+    // line. accountd already does it this way; this was the odd one out.
     let mut out = [0u8; BUF];
-    let Some(olen) = accounts::append_line(&cur[..clen], &mut out, &line[..llen]) else {
+    let Some((olen, replaced)) =
+        accounts::replace_line(&cur[..clen], &mut out, name, &line[..llen])
+    else {
         return Err(syscall_abi::FS_ERR_DISK_FULL);
     };
-    // ORDER MATTERS. A file fsd creates gets ext2's default 0644, so writing the
-    // hashes first and chmod-ing after leaves a window in which they are
-    // world-readable - and on a disk where /etc/shadow doesn't already exist
-    // (one formatted in-guest, or any not staged by the Makefile) that is the
-    // very first useradd. Create it EMPTY, restrict it, then fill it: the window
-    // now contains nothing worth reading.
-    let code = ulib::fs_write_bulk(SHADOW_FILE, &[]);
-    if ulib::is_fs_error(code) {
-        return Err(code);
-    }
-    if let Err(e) = restrict_shadow() {
-        return Err(e);
+    let olen = if replaced {
+        olen
+    } else {
+        match accounts::append_line(&cur[..clen], &mut out, &line[..llen]) {
+            Some(n) => n,
+            None => return Err(syscall_abi::FS_ERR_DISK_FULL),
+        }
+    };
+    // ORDER MATTERS when CREATING: a file fsd creates gets ext2's default 0644,
+    // so writing the hashes first and chmod-ing after leaves a window in which
+    // they are world-readable - and on a disk where /etc/shadow doesn't already
+    // exist that is the very first useradd. Create it empty, restrict it, then
+    // fill it.
+    //
+    // Only when creating, though. An unconditional empty write TRUNCATES an
+    // existing file (ext2's overwrite branch frees its blocks) and stakes the
+    // whole database on the following calls succeeding, to fix a mode the
+    // overwrite branch already preserves.
+    if clen == 0 && ulib::is_fs_error(ulib::fs_stat(SHADOW_FILE, &mut [0u8; 64])) {
+        let code = ulib::fs_write_bulk(SHADOW_FILE, &[]);
+        if ulib::is_fs_error(code) {
+            return Err(code);
+        }
+        restrict_shadow()?;
     }
     let code = ulib::fs_write_bulk(SHADOW_FILE, &out[..olen]);
     if ulib::is_fs_error(code) {
@@ -517,8 +550,19 @@ fn make_home(home: &str, uid: u32, gid: u32) -> Result<bool, u64> {
     } else {
         return Err(mk);
     };
-    let _ = ulib::fs_chown(home, Some(uid as u16), Some(gid as u16));
-    let _ = ulib::fs_chmod(home, 0o755);
+    // Only take ownership of a directory we CREATED. Adopting a pre-existing
+    // one and chowning it to the new user hands away whatever it holds (and
+    // chmod 0755 re-opens a deliberately-private 0700 directory), silently and
+    // with exit 0. The /etc/skel copy is already gated on `created`; this is the
+    // same reasoning applied to the metadata.
+    if created {
+        let _ = ulib::fs_chown(home, Some(uid as u16), Some(gid as u16));
+        let _ = ulib::fs_chmod(home, 0o755);
+    } else {
+        ulib::con_write(
+            b"useradd: the existing home directory's owner and mode were left as they are\r\n",
+        );
+    }
     Ok(created)
 }
 

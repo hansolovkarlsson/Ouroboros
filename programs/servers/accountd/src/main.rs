@@ -234,17 +234,28 @@ fn change_password(caller_uid: u32, name: &[u8], old: &[u8], new: &[u8]) -> u64 
             None => return syscall_abi::ACCT_ERR_IO,
         }
     };
-    // Restrict BEFORE the secrets land, not after: a file this call creates
-    // carries ext2's default 0644, and chmod-ing afterwards leaves a window in
-    // which every hash is world-readable. An empty file in that window says
-    // nothing. FS_ERR_NOT_SUPPORTED means the filesystem models no mode at all
-    // (login warns about that separately); any other refusal is a real failure.
-    if ulib::is_fs_error(ulib::fs_write_bulk(SHADOW_FILE, &[])) {
-        return syscall_abi::ACCT_ERR_IO;
-    }
-    let code = ulib::fs_chmod(SHADOW_FILE, 0o600);
-    if ulib::is_fs_error(code) && code != syscall_abi::FS_ERR_NOT_SUPPORTED {
-        return syscall_abi::ACCT_ERR_IO;
+    // Restrict a file we are CREATING before the secrets land - it would carry
+    // ext2's default 0644 otherwise, and chmod-ing afterwards leaves a window in
+    // which every hash is world-readable.
+    //
+    // But only when creating. Truncating an EXISTING /etc/shadow first (which is
+    // what an unconditional empty write does - ext2's overwrite branch frees the
+    // blocks) buys nothing, because that branch already preserves the old mode,
+    // and it stakes the entire account database on the next two calls
+    // succeeding: a disk-full, an I/O error or an fsd restart in that window
+    // leaves the file EMPTY and every account - root included - unable to log in.
+    // Never risk the database to fix a mode it already has.
+    let creating = slen == 0 && ulib::is_fs_error(ulib::fs_stat(SHADOW_FILE, &mut [0u8; 64]));
+    if creating {
+        if ulib::is_fs_error(ulib::fs_write_bulk(SHADOW_FILE, &[])) {
+            return syscall_abi::ACCT_ERR_IO;
+        }
+        // FS_ERR_NOT_SUPPORTED means the filesystem models no mode at all (login
+        // warns about that separately); any other refusal is a real failure.
+        let code = ulib::fs_chmod(SHADOW_FILE, 0o600);
+        if ulib::is_fs_error(code) && code != syscall_abi::FS_ERR_NOT_SUPPORTED {
+            return syscall_abi::ACCT_ERR_IO;
+        }
     }
     if ulib::is_fs_error(ulib::fs_write_bulk(SHADOW_FILE, &out[..olen])) {
         return syscall_abi::ACCT_ERR_IO;
