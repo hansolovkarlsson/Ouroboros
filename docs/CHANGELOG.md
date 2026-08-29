@@ -7,6 +7,43 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/`; 
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## picolibc stdout: buffered at the write boundary, and a pipeline hang fixed (2026-08-29)
+
+The libc arc's one stated open follow-up, closed - plus a real bug it uncovered
+next door.
+
+- **One IPC round trip per line, not per character.** Every `write(1, ...)` is an
+  IPC round trip (an `MSG_CALL` to `cond`, or an `MSG_SEND` to a pipe consumer),
+  and picolibc's `posix-console` stdio is *unbuffered*, so `printf` cost one
+  round trip **per character**. Our own `stdio.c` buffers, which is why the
+  hand-rolled libc never felt this. The buffer now lives in `file.c` at the
+  **`write` boundary** rather than in one stdio, so it works for whichever C
+  library is linked - and for a program calling `write(1, ...)` directly.
+- **Line buffered, not fully buffered** - a flush per line keeps output
+  interactive and matches the line-oriented filters on the other end of a pipe,
+  while still collapsing a per-character `printf` into one message per line.
+- **Three things stay unbuffered on purpose**, because buffering them would
+  change observable behaviour rather than just batch it: `fd 2` (stderr) writes
+  straight through *after* flushing fd 1, so a message printed just before a
+  crash is out and in order; a `read` from fd 0 flushes first, so a prompt with
+  no trailing newline appears before the program waits for the answer (the
+  stdin/stdout tie); and exit flushes.
+- **The bug next door: a picolibc program in a pipeline hung.** Exit flushing has
+  to happen in `_exit` - the one path *every* C library's `exit` reaches -
+  because a picolibc program does **not** link our `stdlib.c`; picolibc supplies
+  `exit()`. Which meant `__libc_end_stdout()` (the end-of-stream marker a pipe
+  consumer waits for) was never called on that path at all. Demonstrated rather
+  than assumed, by rebuilding without the new hook: `cpico | wc` printed
+  **nothing**, `wc` stayed blocked forever, and the shell never returned to a
+  prompt. With the hook: `9 41 243`. `__libc_end_stdout` is now idempotent
+  (our `exit()` still calls it) and flushes before sending the marker, so the
+  marker can never overtake the data.
+- **Verified** on `run-image-ext2`: `cpico` renders identically on the console;
+  `cpico | grep ^s` and `cpico | wc` both work (a picolibc program as a pipeline
+  stage, which had never actually been tested); `cdemo | grep sum` and
+  `cfile | grep hello` confirm the hand-rolled libc still works through the new
+  buffer. Zero `R_AARCH64_ABS64` across all four C binaries.
+
 ## `grep` gets real regular expressions - a shared `regex` crate (2026-08-29)
 
 The last of the roadmap's "Open gaps" small items, and the one it called *"a

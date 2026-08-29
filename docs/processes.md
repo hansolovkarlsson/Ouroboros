@@ -445,9 +445,10 @@ The **constraints are the loader's, and they bite C harder than Rust**:
   resolve against the cwd; tree 0 (the default disk mount) only. And `write(1|2)`
   is **stdout-target-aware**: the console (batched via `cond`) or a pipe consumer
   (`MSG_SEND`) — so `cfile | grep hello` works. Two things that had to be right
-  for pipes: stdout is **buffered** (flushed on newline / full / exit) rather
-  than one `write` per char, and the pipe send **yields and retries** on a full
-  consumer mailbox (`MSG_ERR_FULL`) instead of dropping bytes.
+  for pipes: stdout is **buffered** (line-buffered at the `write` boundary —
+  flushed on newline / full buffer / a read from stdin / exit) rather than one
+  `write` per char, and the pipe send **yields and retries** on a full consumer
+  mailbox (`MSG_ERR_FULL`) instead of dropping bytes.
 - **Watch the relocations** the same way (`llvm-readobj --dyn-relocations`, or
   `llvm-objdump -R`): an `R_AARCH64_ABS64` is unloadable. Simple code is
   PC-relative and needs none; richer code emits `R_AARCH64_RELATIVE`, which the
@@ -492,10 +493,24 @@ key insight is that **picolibc slots on top of the *same* porting layer** — ou
   Mach-O linker, which rejects meson's GNU-linker probe, so the cross-file's `c`
   binary carries `--ld-path=…/gcc-ld/ld.lld` to force LLD.
 
-A follow-up worth noting: picolibc's `posix-console` stdout is *unbuffered*
-(one `write(1,&c,1)` per char), so console output is chatty over IPC — correct
-but many round trips. Line-buffering it (via `setvbuf`, or a buffering shim at
-the `write` boundary) is the natural refinement.
+**Closed 2026-08-29** (this was the arc's one open follow-up): picolibc's
+`posix-console` stdout is *unbuffered* — one `write(1,&c,1)` per char, so console
+output cost one IPC round trip **per character**. It is now line-buffered by a
+shim at the **`write` boundary** (`libc/src/file.c`) rather than inside one
+stdio, so the same buffer serves picolibc, our hand-rolled `stdio.c`, and a
+program calling `write(1, …)` directly. Deliberately still unbuffered: `fd 2`
+(stderr writes through, after flushing fd 1, so a message before a crash is out
+and in order) and a `read` from fd 0 (flushes first — the stdin/stdout tie, so a
+prompt without a newline shows before the program blocks).
+
+The exit flush had to go in **`_exit`**, the one path every C library's `exit`
+reaches, and that turned out to matter for more than buffering: a picolibc
+program does *not* link our `stdlib.c`, so picolibc's `exit()` meant
+`__libc_end_stdout()` — the end-of-stream marker a pipe consumer waits for — was
+never called at all. `cpico | wc` hung: the program exited, `wc` blocked forever,
+the shell never came back. `_exit` now flushes and sends the marker
+(idempotently, since our own `exit()` still calls it), and the flush happens
+*first* so the marker can never overtake the data.
 
 ## Known rough edges
 
