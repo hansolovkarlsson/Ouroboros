@@ -7,6 +7,111 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/`; 
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## Symbolic-mode `chmod`, `chown` by name (2026-08-29)
+
+The two write halves of the mode/owner surface, finishing the "small polish"
+the users/permissions arc left behind.
+
+**`/bin/chmod` takes POSIX symbolic modes** as well as octal.
+
+- **`[ugoa...][+-=][rwxXst...][,...]`**: `chmod u+x script`, `go-w`, `a=rx`,
+  `u+rw,go+r` (comma clauses applied left to right, each seeing the last one's
+  result), multi-op clauses (`u+x-w`), and the copy form `g=u` ("give group what
+  the owner has"). `X` is the conditional execute — set only if the target is a
+  directory or already carries some execute bit. `s`/`t` set setuid/setgid/sticky;
+  those bits are **stored** (ext2 keeps the full low 12) but nothing acts on them
+  yet — this system has no setuid execution, and the man page says so.
+- **Naming no "who" means `a`.** There is no umask here, so a bare `+x` really is
+  all three fields, where POSIX would mask it. Documented rather than silently
+  divergent.
+- **Symbolic is relative, so it stats first.** An octal mode is absolute and goes
+  straight to `NP_CHMOD`; a symbolic one needs the current bits (and the
+  directory flag for `X`), so `chmod` reads them with `fs_stat` and applies the
+  expression to what it finds. A filesystem with no mode to build on (FAT32/
+  exFAT/`/proc`, `mode_valid == 0`) gets the same "not supported by this
+  filesystem" refusal the write itself would have given.
+- **Tested twice over.** The parser is pure (bytes + current mode → new bits), so
+  it was developed against a **host harness** — 27 cases including every operator,
+  the copy form, `X` on a file vs a directory, clause chaining, and six malformed
+  expressions that must be rejected — before being wired in (the same
+  "host-harness the pure part" move the GPT-CRC work used). Then end to end on
+  `run-image-ext2`: `644` → `u+x` → `744`, `a=rx` → `555`, `u+rw,go+r` + `g=u` →
+  `775`, `a+X` leaves a plain file alone but takes a directory `644` → `755`, and
+  `chmod q+z` / `chmod u` are rejected while `chmod 755` still works.
+
+**`/bin/chown` takes names** as well as numeric ids — the twin gap the `chmod`
+work surfaced (its module doc still claimed "there is no `/etc/passwd` yet",
+written before the users arc shipped).
+
+- **`chown alice:staff f`**, `chown alice f`, `chown :staff f` — each field
+  resolved through `/etc/passwd`/`/etc/group` with the shared `accounts` lookups,
+  the same parser `login`/`su`/`id` use. Numeric ids still work unchanged.
+- **An all-digits field is always an id**, never a name lookup — the rule `su`
+  and `useradd -g` already follow, so `chown 1000 f` can't be hijacked by an
+  account literally named `1000`.
+- **Both fields resolve before anything is written.** An unknown name exits with
+  `no such user: bob` / `no such group: nogroup` *before* the single `NP_CHOWN`,
+  so a half-applied `chown user:nogroup` (uid changed, group not) is impossible —
+  the same prepare-then-commit shape as the `useradd` fix below.
+- **One deliberate POSIX divergence, documented:** GNU's trailing colon
+  (`chown alice: f`) also sets the group to alice's login group; here it leaves
+  the group alone, matching what the numeric form has always done. The man page
+  says so rather than diverging silently.
+- **Verified** on `run-image-ext2`: `user` → `1000:0`, `user:staff` → `1000:1500`,
+  `:0` → group only, `501:20` numeric, and `nobody` / `user:nogroup` / `:`
+  rejected with the file left untouched.
+
+## Small-gaps cleanup: `useradd` is atomic + `/etc/skel`, one account-file reader (2026-08-29)
+
+Two of the roadmap's small open items, both code-review notes left by PR #22.
+
+- **`useradd` no longer half-creates an account.** It writes three things —
+  `/etc/group`, the home directory, `/etc/passwd` — with no multi-file
+  transaction to lean on, and it used to write the *account line first*, then
+  best-effort the group and home, reporting success either way. A failure after
+  the passwd write left an account whose primary group or home never got made.
+  The order is now chosen so the **`/etc/passwd` write is the single commit
+  point**: group and home are prepared first, and if either fails nothing is
+  committed and the tool exits non-zero; if the commit itself fails, the prep is
+  **rolled back** (the group line removed via a new `accounts::remove_line`, a
+  home directory we created removed). Two latent siblings of the same bug went
+  with it: a user-private group whose name already existed left the account's gid
+  naming *nothing* (now the existing group's gid is adopted), and an existing
+  *file* where the home should go was silently `chmod`ed as if it were the home
+  (now refused, `FS_ERR_NOT_A_DIRECTORY`).
+- **`/etc/skel`.** If it exists, its **top-level files** are copied into a home
+  `useradd` just created — each chowned to the new user and carrying the template
+  file's mode (a `600` template lands as `600`). There is no `/etc/skel` by
+  default and its absence is silent; subdirectories are reported and skipped (a
+  first cut — recursion wants a path stack this fixed frame doesn't have); and a
+  home that `useradd` merely *adopts* is left alone, since dropping files into a
+  directory someone else made is not this tool's call. The copy runs **after** the
+  commit and its failures are **warnings**: skel content is a convenience, the
+  account/group/home are already complete without it, and keeping it post-commit
+  leaves the rollback above a plain `rmdir` (which would fail on a directory we
+  had already filled). The copy loop is `/bin/cp`'s shape — truncate, then
+  `fs_read_bulk`/`fs_write_at` by chunk — repeated rather than shared, since a
+  `/bin` program can't spawn another.
+- **One account-file reader in the shell.** `login::read_passwd` and
+  `read_account_file` were the same chunked `FS_DATA_MAX` loop, differing only in
+  login's bounded `NO_FS` retry (fsd may still be mounting at boot). Merged into
+  one `read_account_file` carrying the retry; `login`, `su`, and `id`'s name
+  lookups all come through it. (`ulib::read_file_all` stays separate — it's in
+  the `/bin` programs, and the shell has its own fs layer.)
+- **Verified** on `run-image-ext2` over two unattended QEMU sessions (the
+  paced-stdin recipe): `useradd -g nosuchgroup` refuses before writing anything;
+  `useradd dave` with `/Users/dave` a file fails at the home step and leaves
+  **neither** `/etc/passwd` nor `/etc/group` touched (the rollback); `useradd
+  alice` still creates account + group + home owned `1001:1001`; `useradd -g devs
+  bob` uses `devs` and invents no second group; `useradd carol` with an existing
+  `carol` group adopts its gid (2000); `useradd erin` adopts an existing home and
+  chowns it; and `login` + `su bob` + `id` confirm the merged reader. For
+  `/etc/skel`: no skel dir → empty home, silently; with `README` (644) and
+  `NOTES` (600) → both copied to `alice`, owned `1002:1002`, modes preserved,
+  contents intact; a `sub/` directory reported and skipped; and `bob`, whose home
+  already existed, left empty. Plus the
+  `accounts` host tests (now 9 — `remove_line` round-trips with `append_line`).
+
 ## Account management: passwd/useradd/groupadd/usermod, names, groups, homes (users arc, step 4 — "closing the security arc")
 
 The users/permissions arc's account layer above the kernel identity: tools to

@@ -1966,17 +1966,31 @@ fn cmd_su(arg: &str) {
     }
 }
 
-/// Read a small account file (`/etc/passwd`) in 512-byte chunks into `buf`,
-/// returning its length (`0` on any error). Same chunked read as
-/// `login::read_passwd`, since fsd caps one inline read at `FS_DATA_MAX`.
-fn read_account_file(path: &str, buf: &mut [u8]) -> usize {
+/// Read a small account file (`/etc/passwd`, `/etc/group`) into `buf`,
+/// returning its length (`0` if there's no such file). fsd caps one inline read
+/// at `FS_DATA_MAX` (512), so the file is read in 512-byte chunks at a rising
+/// offset until a short read signals end of file.
+///
+/// The *first* chunk retries a bounded number of times while the reply is
+/// `NO_FS` - at boot, `login` runs before fsd has necessarily finished mounting
+/// the disk, and "no filesystem yet" must not be mistaken for "no accounts". A
+/// real not-found returns `0` immediately (login's root-session fallback).
+///
+/// The single copy of this loop for the whole shell: `login` and `su`/`id`'s
+/// name lookups all come through here.
+pub(crate) fn read_account_file(path: &str, buf: &mut [u8]) -> usize {
     const CHUNK: usize = syscall_abi::FS_DATA_MAX as usize;
     let mut off = 0usize;
+    let mut tries = 0;
     while off < buf.len() {
         let end = (off + CHUNK).min(buf.len());
         let r = fs_read_at(path, off as u64, &mut buf[off..end]);
         if r >= FS_ERR_MIN {
-            break;
+            if off == 0 && r == syscall_abi::NO_FS && tries < 200 {
+                tries += 1;
+                continue;
+            }
+            break; // no file, or a later chunk failed - keep what we have
         }
         let n = (r as usize).min(end - off);
         off += n;
