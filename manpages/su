@@ -17,6 +17,13 @@ DESCRIPTION
         uid:gid    set both
         :gid       set the group, leave the user
 
+    BOTH FORMS also carry the SUPPLEMENTARY groups: the identity and the group
+    list change together in one kernel call, so a session never keeps the
+    previous user's memberships. The numeric form resolves the uid back to a
+    name in /etc/passwd to find them, so `su alice` and `su 1000:1000` give the
+    same effective permissions. A uid with no /etc/passwd entry has no
+    memberships to grant and gets an empty list. See id to check.
+
     ROOT ONLY. su lets root drop to a user (for testing); a non-root session is
     refused. This is what makes login meaningful: once you log in as a user you
     cannot su back to root - the way back is `logout` and logging in as root.

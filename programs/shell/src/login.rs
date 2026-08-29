@@ -28,6 +28,7 @@ const PASSWD_PATH: &str = "/etc/passwd";
 /// and `chown` needs the name/uid map) while the hashes an offline cracker
 /// wants do not.
 const SHADOW_PATH: &str = "/etc/shadow";
+const GROUP_PATH: &str = "/etc/group";
 /// Read cap for `/etc/passwd`, matching the account tools' write cap
 /// ([`accounts`]/`useradd` bound writes to `SAFECOPY_MAX`). fsd caps a single
 /// inline read at `FS_DATA_MAX` (512), so the shared `read_account_file` loops
@@ -88,12 +89,17 @@ pub fn login(cwd: &mut [u8; CWD_SIZE]) -> Session {
             if verify_password(&acct, &ubuf[..ulen], &wbuf[..wlen]) {
                 // Drop from root to the user. The kernel saves root as this
                 // task's saved identity, so logout can restore it.
+                // Identity and memberships in ONE call: the group half of
+                // SET_ID is root-only, so a two-step form would only work in one
+                // order with nothing enforcing it. Children inherit both at spawn.
+                let mut gids = [0u32; syscall_abi::MAX_SUPP_GROUPS];
+                let n = supplementary_groups(&ubuf[..ulen], acct.gid, &mut gids);
                 crate::syscall4(
                     syscall_abi::SET_ID,
                     acct.uid as u64,
                     acct.gid as u64,
-                    0,
-                    0,
+                    gids.as_ptr() as u64,
+                    n as u64,
                 );
                 let hlen = write_cwd(cwd, acct.home);
                 return Session { cwd_len: hlen };
@@ -116,6 +122,22 @@ fn write_cwd(cwd: &mut [u8; CWD_SIZE], home: &[u8]) -> usize {
     let n = home.len().min(cwd.len());
     cwd[..n].copy_from_slice(&home[..n]);
     n
+}
+
+/// Look `name` up in `/etc/group` and collect the gids it belongs to beyond its
+/// primary, into `out`. Returns how many. No `/etc/group` (or no memberships)
+/// simply means none.
+///
+/// `#[inline(never)]`: the group file is a 2 KB stack buffer.
+///
+/// `pub(crate)` because `su` needs exactly this: both spellings of `su` and the
+/// login gate must derive memberships identically, or the same user ends up
+/// with different effective permissions depending on how the session started.
+#[inline(never)]
+pub(crate) fn supplementary_groups(name: &[u8], primary_gid: u32, out: &mut [u32]) -> usize {
+    let mut gbuf = [0u8; PASSWD_MAX];
+    let glen = crate::read_account_file(GROUP_PATH, &mut gbuf);
+    accounts::supplementary_gids(&gbuf[..glen], name, primary_gid, out)
 }
 
 /// Check `password` for `acct`: against `/etc/shadow`'s entry if there is one,

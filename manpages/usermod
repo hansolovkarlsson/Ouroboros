@@ -1,23 +1,39 @@
 NAME
-    usermod - modify a user account (root only)
+    usermod - modify a user's group memberships (root only)
 
 SYNOPSIS
-    usermod <user> -g <group|gid>
+    usermod <user> [-g <group|gid>] [-G <group>[,<group>...]]
 
 DESCRIPTION
-    Changes a user's PRIMARY group in /etc/passwd. ROOT ONLY. The group may be a
-    name (resolved via /etc/group) or a numeric gid. This is the "assign a user
-    to a group" operation in the primary-gid model - a task carries one
-    kernel-owned gid, so the primary group IS the passwd gid field.
+    ROOT ONLY. Either flag alone, or both together.
 
-    The account's uid, home, and password are preserved; only the gid changes.
-    Full supplementary-group membership (a user in several groups at once) is a
-    later step that needs the kernel identity to carry a group list.
+    -g <group|gid>   Set the PRIMARY group, in /etc/passwd. This is the gid the
+                     kernel carries in the task's identity word. The group may
+                     be a name (resolved via /etc/group) or a number. The
+                     account's uid, home, and password are preserved.
+
+    -G <list>        Set the SUPPLEMENTARY groups, in /etc/group. The
+                     comma-separated list becomes the user's COMPLETE
+                     membership: they are removed from any group not listed.
+                     `-G ""` clears them. A name that doesn't exist is reported
+                     and skipped; the rest still apply.
+
+    Supplementary groups are real permissions, not bookkeeping: login and su
+    hand the list to the kernel (SET_GROUPS), a spawned command inherits it, and
+    the filesystem server grants the group triad if a file's group is the
+    caller's primary group OR any supplementary one. Up to 8 per user.
+
+    A change takes effect at the user's next login (or su) - it sets the group
+    list on the task, so a session already running keeps the list it started
+    with.
 
 EXAMPLES
     # groupadd staff
-    # usermod user -g staff
-    usermod: updated user
+    # usermod user -g staff              make staff the primary group
+    # usermod user -G staff,devs         member of staff and devs as well
+    # usermod user -G ""                 no supplementary groups
+    # id                                 (as that user, after logging in again)
+    uid=1000(user) gid=1000(user) groups=1000(user),1500(staff)
 
 SEE ALSO
     useradd, groupadd, passwd, id
