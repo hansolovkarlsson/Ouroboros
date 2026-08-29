@@ -23,6 +23,11 @@
 use crate::CWD_SIZE;
 
 const PASSWD_PATH: &str = "/etc/passwd";
+/// The password secrets, `name:salt_hex:hash_hex`, mode 0600 and root-owned -
+/// which is the point: `/etc/passwd` stays world-readable (every `id`, `ls -l`
+/// and `chown` needs the name/uid map) while the hashes an offline cracker
+/// wants do not.
+const SHADOW_PATH: &str = "/etc/shadow";
 /// Read cap for `/etc/passwd`, matching the account tools' write cap
 /// ([`accounts`]/`useradd` bound writes to `SAFECOPY_MAX`). fsd caps a single
 /// inline read at `FS_DATA_MAX` (512), so the shared `read_account_file` loops
@@ -46,6 +51,7 @@ pub struct Session {
 /// returns its length; on return this task's identity is the logged-in user
 /// (or root, if there is no `/etc/passwd`). Loops until authentication succeeds.
 pub fn login(cwd: &mut [u8; CWD_SIZE]) -> Session {
+    warn_if_unprotected();
     let mut pbuf = [0u8; PASSWD_MAX];
     let plen = crate::read_account_file(PASSWD_PATH, &mut pbuf);
     if plen == 0 {
@@ -66,7 +72,11 @@ pub fn login(cwd: &mut [u8; CWD_SIZE]) -> Session {
         crate::print_str("\r\n");
 
         if let Some(acct) = accounts::find_user_by_name(passwd, &ubuf[..ulen]) {
-            if acct.verify(&wbuf[..wlen]) {
+            // The secret lives in /etc/shadow (mode 0600, root): login runs as
+            // root, before the SET_ID below, which is exactly why it can read it
+            // at all. A legacy passwd line with the hash inline still verifies,
+            // so a disk written before /etc/shadow still logs in.
+            if verify_password(&acct, &ubuf[..ulen], &wbuf[..wlen]) {
                 // Drop from root to the user. The kernel saves root as this
                 // task's saved identity, so logout can restore it.
                 crate::syscall4(
@@ -97,6 +107,46 @@ fn write_cwd(cwd: &mut [u8; CWD_SIZE], home: &[u8]) -> usize {
     let n = home.len().min(cwd.len());
     cwd[..n].copy_from_slice(&home[..n]);
     n
+}
+
+/// Check `password` for `acct`: against `/etc/shadow`'s entry if there is one,
+/// else against a legacy inline secret in the passwd line. An account with
+/// neither never verifies - "no password recorded" must not mean "any password".
+///
+/// `#[inline(never)]`: the shadow file is a 2 KB stack buffer, kept out of the
+/// caller's frame.
+#[inline(never)]
+fn verify_password(acct: &accounts::Account<'_>, name: &[u8], password: &[u8]) -> bool {
+    let mut sbuf = [0u8; PASSWD_MAX];
+    let slen = crate::read_account_file(SHADOW_PATH, &mut sbuf);
+    if let Some(secret) = accounts::find_secret_by_name(&sbuf[..slen], name) {
+        return secret.verify(password);
+    }
+    acct.verify(password) // legacy inline secret, or false when there is none
+}
+
+/// Say so when the filesystem holding the account database cannot protect it.
+///
+/// `/etc/shadow` is mode 0600 root **on ext2**. FAT32 and exFAT model no mode at
+/// all, so `fsd` has nothing to enforce: there, any user can read the hashes
+/// and - worse - overwrite root's entry with their own and log in as root. The
+/// `chmod 600` at image-build time is a host-side mode those filesystems simply
+/// do not record.
+///
+/// This is not a regression and not fixable *on* those filesystems: with no
+/// modes there is no permission model, and `/etc/passwd` was equally writable
+/// before the secrets moved out of it. What would be wrong is claiming
+/// otherwise, so the guarantee announces its own absence at the one moment
+/// someone is thinking about credentials.
+fn warn_if_unprotected() {
+    if crate::mounted_fs_unprotected() {
+        crate::print_line(
+            "warning: this filesystem cannot enforce permissions - /etc/shadow is readable and",
+        );
+        crate::print_line(
+            "         writable by any user here, so accounts are NOT secure (ext2 enforces them)",
+        );
+    }
 }
 
 /// Read one line of keyboard input into `buf` (up to its length), returning the
