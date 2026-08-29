@@ -2,26 +2,43 @@ NAME
     chown - change a file's owner and/or group
 
 SYNOPSIS
-    chown <uid|uid:gid|:gid> <file>
+    chown <user|user:group|:group> <file>
 
 DESCRIPTION
-    Sets the owning user and/or group of <file>. The owner is NUMERIC - there
-    is no /etc/passwd yet, so user and group names are not resolved (that comes
-    with the login/permissions arc). Forms:
+    Sets the owning user and/or group of <file>. Each field is either a NAME,
+    resolved through /etc/passwd (users) and /etc/group (groups), or a NUMERIC
+    id. Forms:
 
-        uid        set the user, leave the group
-        uid:gid    set both
-        :gid       set the group, leave the user
-        uid:       set the user, leave the group (same as uid)
+        user         set the user, leave the group
+        user:group   set both
+        :group       set the group, leave the user
+        user:        set the user, leave the group (same as user)
+
+    A field made entirely of digits is taken as an id and is never looked up as
+    a name - the same rule su and useradd -g follow, so "chown 1000 f" always
+    means uid 1000 even if some account is literally named "1000".
+
+    An unknown name is an error ("no such user: bob"); nothing is changed.
+
+    DIVERGENCE, on purpose: in POSIX/GNU chown a trailing colon ("chown alice:
+    f") also sets the group to alice's login group. Here it leaves the group
+    alone, matching the numeric form's behaviour. Write "chown alice:alice" to
+    set both.
 
     ext2 ONLY. Ownership is an ext2 concept; on FAT32, exFAT, or /proc chown
     reports "not supported by this filesystem". ls -l shows the numeric owner
     on ext2 and a dash elsewhere.
 
+    ROOT ONLY (enforced by the filesystem server): changing a file's owner is
+    exactly the operation that could give a file away, so a non-root caller is
+    refused with "permission denied".
+
 EXAMPLES
-    chown 0 file          set owner to uid 0 (root)
-    chown 501:20 file     set owner 501, group 20
-    chown :20 file        set group 20, leave the owner
+    chown root file            set owner to root
+    chown alice:staff file     set owner alice, group staff
+    chown :staff file          set group staff, leave the owner
+    chown 0 file               set owner to uid 0 (numeric still works)
+    chown 501:20 file          set owner 501, group 20
 
 SEE ALSO
-    chmod, ls, stat
+    chmod, ls, id, passwd, stat

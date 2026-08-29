@@ -403,8 +403,14 @@ crate, plus creator-owned new inodes.
 - **Per-user cluster identity** — the 9P export authenticates the *machine*
   (shared key), not a *user*; per-user identity across the cluster is a named
   cluster-auth tier that would land here.
-- **Symbolic-mode `chmod`** (`u+x`) and a real `/etc/skel` for `useradd` — small
-  polish.
+- ~~**Symbolic-mode `chmod`** (`u+x`)~~ — **shipped 2026-08-29** (`u+x`, `go-w`,
+  `a=rx`, `u+rw,go+r`, copy-source `g=u`, conditional `X`, `s`/`t`; octal still
+  works and stays absolute). A real `/etc/skel` for `useradd` **also shipped
+  2026-08-29** (top-level files copied into a newly created home, owner + mode
+  carried across; absent by default, subdirectories skipped). Its twin, **`chown` by name**
+  (`chown alice:staff`, resolved via the `accounts` crate like `su`/`id`), also
+  **shipped 2026-08-29** - numeric ids still work, and an all-digits field stays
+  an id.
 
 **A mechanism to borrow from Redox: the namespace *is* the sandbox.** Redox
 sandboxes a process by restricting which schemes its namespace can name (down to
@@ -598,15 +604,14 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
 - **`grep` has no regex** (it now takes `-i`/`-v`/`-n`, but matching is still a
   plain substring). Real patterns are a separate, larger arc — see North-star
   item 2 for the shared `ulib` option parser and richer matching.
-- **`useradd` is not atomic** (code-review note, PR #22): it writes `/etc/passwd`
-  first, then best-effort creates the user-private group and home dir. A failure
-  after the passwd write leaves an account with no matching group and/or no home
-  yet still reports success. Low-impact for a root-only dev tool (the home-dir
-  failure already warns); a cleaner version would create the group + home before
-  committing the passwd line, or report a non-zero exit.
-- **Three near-identical small-file readers** (code-review note): `login::
-  read_passwd`, `shell::read_account_file`, and `ulib::read_file_all` each chunk
-  a small account file. The shell-vs-`ulib` boundary (the shell has its own fs
-  layer) makes full dedup awkward, but the two shell copies could share one
-  helper. Likewise `ulib::read_line` duplicates `login::read_field` (again the
-  shell/`ulib` split); consolidate if the shell ever gains a `ulib` dependency.
+- ~~**`useradd` is not atomic**~~ — **fixed 2026-08-29.** The `/etc/passwd` write
+  is now the single commit point: the group entry and home directory are prepared
+  first, a failed prep commits nothing and exits non-zero, and a failed commit
+  rolls the prep back (`accounts::remove_line`, `rmdir`). See `CHANGELOG.md`.
+- ~~**Three near-identical small-file readers**~~ — **the two shell copies merged
+  2026-08-29** into one `read_account_file` (carrying login's boot-time `NO_FS`
+  retry), used by `login`, `su`, and `id`'s name lookups. `ulib::read_file_all`
+  stays separate by design — it lives in the `/bin` programs, and the shell has
+  its own fs layer. Likewise `ulib::read_line` still duplicates
+  `login::read_field` (the same split); consolidate if the shell ever gains a
+  `ulib` dependency.

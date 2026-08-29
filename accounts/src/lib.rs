@@ -308,6 +308,36 @@ pub fn replace_line(
     Some((w, replaced))
 }
 
+/// Rebuild an account/group file into `out` with the **first** line whose
+/// leading colon-field equals `name` removed. Returns `(new_len, removed)`, or
+/// `None` if it wouldn't fit. Output is normalized to one `\n` per line, like
+/// [`replace_line`].
+///
+/// The inverse of [`append_line`]: `useradd` uses it to roll back a group it
+/// added when a later step fails, so a half-made account never reaches the
+/// database.
+pub fn remove_line(src: &[u8], out: &mut [u8], name: &[u8]) -> Option<(usize, bool)> {
+    let mut w = 0usize;
+    let mut removed = false;
+    for line in src.split(|&c| c == b'\n') {
+        if line.is_empty() {
+            continue;
+        }
+        let first = line.split(|&c| c == b':').next().unwrap_or(b"");
+        if !removed && first == name {
+            removed = true;
+            continue;
+        }
+        for &b in line {
+            *out.get_mut(w)? = b;
+            w += 1;
+        }
+        *out.get_mut(w)? = b'\n';
+        w += 1;
+    }
+    Some((w, removed))
+}
+
 /// Copy `src` into `out` and append `line` (with a trailing newline), ensuring
 /// exactly one newline joins them. Returns the new length or `None` if it
 /// wouldn't fit - used by `useradd`/`groupadd` to add an entry.
@@ -510,6 +540,27 @@ mod tests {
         // Appending to an empty file yields just the one line.
         let n2 = append_line(b"", &mut out, b"solo:5:").unwrap();
         assert_eq!(&out[..n2], b"solo:5:\n");
+    }
+
+    #[test]
+    fn remove_line_drops_one() {
+        let mut out = [0u8; 512];
+        let (n, removed) = remove_line(GROUP, &mut out, b"user").unwrap();
+        assert!(removed);
+        let rebuilt = &out[..n];
+        assert!(find_group_by_name(rebuilt, b"user").is_none());
+        assert_eq!(find_group_by_name(rebuilt, b"staff").unwrap().gid, 1001);
+        assert!(find_group_by_name(rebuilt, b"root").is_some());
+        // A name that isn't present leaves the file intact, reporting false.
+        let (n2, r2) = remove_line(GROUP, &mut out, b"ghost").unwrap();
+        assert!(!r2);
+        assert_eq!(&out[..n2], GROUP);
+        // append_line then remove_line is a round trip (the rollback useradd needs).
+        let mut added = [0u8; 512];
+        let an = append_line(GROUP, &mut added, b"wheel:1002:").unwrap();
+        let (bn, back) = remove_line(&added[..an], &mut out, b"wheel").unwrap();
+        assert!(back);
+        assert_eq!(&out[..bn], GROUP);
     }
 
     #[test]

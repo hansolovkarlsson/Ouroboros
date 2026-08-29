@@ -3,14 +3,38 @@ NAME
 
 SYNOPSIS
     chmod <octal-mode> <file>
+    chmod <symbolic-mode> <file>
 
 DESCRIPTION
-    Sets the permission bits of <file> to <octal-mode>, an octal number such
-    as 755, 0644, or 600. Only the low 12 bits are used (rwx for owner/group/
-    other, plus setuid/setgid/sticky); the file's type is preserved, so chmod
-    can never turn a directory into a file.
+    Sets the permission bits of <file>. Only the low 12 bits are used (rwx for
+    owner/group/other, plus setuid/setgid/sticky); the file's type is preserved,
+    so chmod can never turn a directory into a file.
 
-    Numeric modes only - there is no symbolic form (u+x) yet.
+    An OCTAL mode is absolute: an octal number such as 755, 0644, or 600.
+
+    A SYMBOLIC mode is relative to what the file already has - chmod stats the
+    file and applies the expression to its current bits. The form is
+
+        [ugoa...][+-=][rwxXst...][,...]
+
+    who   u = owner, g = group, o = other, a = all three.
+          Naming no one means a. (There is no umask on this system, so a bare
+          +x really is all three fields; POSIX would mask it.)
+    op    + adds bits, - removes them, = sets exactly those and clears the rest
+          of what the named fields own.
+    perm  r read, w write, x execute,
+          X execute only if the target is a directory or already has some
+            execute bit (the "don't make data files executable" form),
+          s setuid (with u) / setgid (with g), t sticky.
+          Instead of letters, a single u, g, or o COPIES that field's current
+          permissions (g=u gives group what the owner has).
+
+    Comma-separated clauses are applied left to right, so a later clause sees
+    the earlier one's result.
+
+    NOTE: setuid/setgid/sticky bits are STORED but nothing acts on them yet -
+    this system has no setuid execution (see the roadmap's self-service passwd
+    item). Setting them changes the mode, not the behaviour.
 
     ext2 ONLY. Permission bits are an ext2 concept; on FAT32, exFAT, or /proc
     chmod reports "not supported by this filesystem" rather than pretend to
@@ -24,7 +48,11 @@ DESCRIPTION
 EXAMPLES
     chmod 755 /bin/prog
     chmod 644 notes.txt
-    chmod 700 secret
+    chmod u+x script
+    chmod go-w shared
+    chmod a=rx /bin/prog
+    chmod u+rw,go+r notes.txt
+    chmod g=u notes.txt
 
 SEE ALSO
     chown, ls, stat
