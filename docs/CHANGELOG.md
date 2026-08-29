@@ -66,6 +66,19 @@ over 4500 pattern/text pairs, zero mismatches), the `accounts` crate, the
 virtio-rng driver, the libc stdout buffering, and the symbolic-`chmod` parser.
 Zero `R_AARCH64_ABS64` across every rebuilt binary.
 
+**And the review's one *note* turned out to be the biggest find of all.** It
+observed that `MAX_SUPERVISED = 4` was "exactly saturated" and a fifth server
+would register unsupervised — *silently*, because `register()` returned a bare
+`false` for two unrelated failures (image too large, registry full) and all four
+loader sites printed "too large". Making that message honest revealed the actual
+state: **`fsd` was not supervised at all.** `FSD.BIN` had grown to ~136 KB
+against a 128 KB `IMG_CAP`, so the filesystem server — the one whose crash
+recovery the entire isolation arc was built around — had been silently
+unrestartable, announced only by a boot-log line easy to read past. (The registry
+was therefore never saturated either: three of four.) `IMG_CAP` is now 192 KB,
+sized from the real binaries with a note to check them when a server gains
+weight, and a boot now logs **no** registration warnings at all.
+
 ## `/etc/shadow` and `accountd`: self-service passwords (2026-08-29)
 
 The last two items of the users/permissions arc, done together because neither

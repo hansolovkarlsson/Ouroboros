@@ -388,9 +388,9 @@ pub fn load_fsd() -> Result<LoadedProgram, LoaderError> {
     // server from this copy without needing a filesystem to load it from
     // (see supervisor::restart). A too-big image just means no restart
     // capability, logged, not a failure.
-    if !crate::supervisor::register(syscall_abi::FSD_TASK as usize, &program_bytes) {
+    if let Some(why) = crate::supervisor::register(syscall_abi::FSD_TASK as usize, &program_bytes).why() {
         log::warn!(
-            "Ouroboros kernel: FSD.BIN too large to keep for crash recovery - the server won't be restartable this boot"
+            "Ouroboros kernel: filesystem server not registered for crash recovery ({why}) - it won't be restartable this boot"
         );
     }
     load_elf_into_el0_region(&program_bytes)
@@ -415,9 +415,9 @@ pub fn load_cond() -> Result<LoadedProgram, LoaderError> {
     if program_bytes.is_empty() {
         return Err(LoaderError::ProgramEmpty);
     }
-    if !crate::supervisor::register(syscall_abi::CON_TASK as usize, &program_bytes) {
+    if let Some(why) = crate::supervisor::register(syscall_abi::CON_TASK as usize, &program_bytes).why() {
         log::warn!(
-            "Ouroboros kernel: COND.BIN too large to keep for crash recovery - the console server won't be restartable this boot"
+            "Ouroboros kernel: console server not registered for crash recovery ({why}) - it won't be restartable this boot"
         );
     }
     load_elf_into_el0_region(&program_bytes)
@@ -444,9 +444,9 @@ pub fn load_accountd() -> Result<LoadedProgram, LoaderError> {
     if program_bytes.is_empty() {
         return Err(LoaderError::ProgramEmpty);
     }
-    if !crate::supervisor::register(syscall_abi::ACCT_TASK as usize, &program_bytes) {
+    if let Some(why) = crate::supervisor::register(syscall_abi::ACCT_TASK as usize, &program_bytes).why() {
         log::warn!(
-            "Ouroboros kernel: ACCOUNTD.BIN too large to keep for crash recovery - the account server won't be restartable this boot"
+            "Ouroboros kernel: account server not registered for crash recovery ({why}) - it won't be restartable this boot"
         );
     }
     load_elf_into_el0_region(&program_bytes)
@@ -460,9 +460,9 @@ pub fn load_netd() -> Result<LoadedProgram, LoaderError> {
     if program_bytes.is_empty() {
         return Err(LoaderError::ProgramEmpty);
     }
-    if !crate::supervisor::register(syscall_abi::NET_TASK as usize, &program_bytes) {
+    if let Some(why) = crate::supervisor::register(syscall_abi::NET_TASK as usize, &program_bytes).why() {
         log::warn!(
-            "Ouroboros kernel: NETD.BIN too large to keep for crash recovery - the network server won't be restartable this boot"
+            "Ouroboros kernel: network server not registered for crash recovery ({why}) - it won't be restartable this boot"
         );
     }
     load_elf_into_el0_region(&program_bytes)

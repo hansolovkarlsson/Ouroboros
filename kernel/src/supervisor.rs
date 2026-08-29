@@ -51,11 +51,25 @@ use crate::loader;
 use crate::tasks;
 
 /// Largest supervised-server image kept for restart (was `FSD_IMAGE_SIZE`).
-/// fsd is the biggest today (tens of KB); cond is a few KB.
-const IMG_CAP: usize = 128 * 1024;
+///
+/// **Sized from the real binaries, not a guess.** This was 128 KB, and `fsd` -
+/// the server whose crash recovery the whole isolation arc was built around -
+/// had quietly outgrown it (~136 KB as of 2026-08-29), so it registered as
+/// "image too large" and was **not restartable at all**. Nothing failed loudly:
+/// the boot log said so, in a line easy to read past, and a crash simply killed
+/// the filesystem for that boot instead of restarting it.
+///
+/// Kept well above the largest server with room to grow, and checked against
+/// `ls -l build/esp/EFI/ORBS/*.BIN` when a server gains weight. The cost is
+/// [`MAX_SUPERVISED`] × this, in kernel `.bss`.
+const IMG_CAP: usize = 192 * 1024;
 
-/// How many servers can be supervised at once - fsd, cond, and headroom
-/// for whatever moves out of the kernel next.
+/// How many servers can be supervised at once. **Exactly saturated today** by
+/// fsd/cond/netd/accountd, so a sixth server needs this raised - each entry
+/// costs [`IMG_CAP`] (128 KB) of kernel `.bss`, which is why it is not simply
+/// set higher "just in case". [`register`] reports a full registry distinctly
+/// from an oversized image so that limit announces itself rather than being
+/// mistaken for a file-size problem.
 const MAX_SUPERVISED: usize = 4;
 
 /// Per-boot restart cap per server (covers crashes *and* wedges together):
@@ -154,9 +168,9 @@ static REGISTRY: Registry = Registry(UnsafeCell::new([const { Entry::empty() }; 
 /// by `loader.rs` during boot services (`load_fsd`/`load_cond`). Returns
 /// whether the image fit; a too-big image (or a full registry) just means
 /// that server won't be restartable this boot, not a boot failure.
-pub fn register(slot: usize, image: &[u8]) -> bool {
+pub fn register(slot: usize, image: &[u8]) -> Registered {
     if image.is_empty() || image.len() > IMG_CAP {
-        return false;
+        return Registered::ImageTooLarge;
     }
     let reg = unsafe { &mut *REGISTRY.0.get() };
     let idx = reg
@@ -164,7 +178,7 @@ pub fn register(slot: usize, image: &[u8]) -> bool {
         .position(|e| e.slot == Some(slot))
         .or_else(|| reg.iter().position(|e| e.slot.is_none()));
     let Some(idx) = idx else {
-        return false;
+        return Registered::RegistryFull;
     };
     let e = &mut reg[idx];
     e.slot = Some(slot);
@@ -172,7 +186,36 @@ pub fn register(slot: usize, image: &[u8]) -> bool {
     e.image_len = image.len();
     e.restarts = 0;
     e.reset_liveness();
-    true
+    Registered::Ok
+}
+
+/// The outcome of [`register`]. Two failures that used to be one `false`: the
+/// image not fitting [`IMG_CAP`], and the registry being full. They call for
+/// completely different fixes, and with [`MAX_SUPERVISED`] now exactly
+/// saturated (fsd/cond/netd/accountd) the second one is the live risk - a sixth
+/// server would otherwise boot unsupervised while the log blamed its file size.
+#[derive(PartialEq, Eq, Clone, Copy)]
+pub enum Registered {
+    Ok,
+    /// The image is empty or larger than [`IMG_CAP`].
+    ImageTooLarge,
+    /// All [`MAX_SUPERVISED`] entries are taken - raise it (each entry costs
+    /// `IMG_CAP`, 128 KB, so this is a deliberate memory trade, not a typo).
+    RegistryFull,
+}
+
+impl Registered {
+    /// Why registration failed, for the loader's boot warning - or `None` on
+    /// success.
+    pub fn why(self) -> Option<&'static str> {
+        match self {
+            Registered::Ok => None,
+            Registered::ImageTooLarge => Some("image too large to keep for crash recovery"),
+            Registered::RegistryFull => {
+                Some("the supervision registry is full (raise MAX_SUPERVISED)")
+            }
+        }
+    }
 }
 
 /// Whether `slot` is a supervised server - the generic replacement for the
