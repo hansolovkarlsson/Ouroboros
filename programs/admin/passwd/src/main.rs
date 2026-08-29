@@ -1,122 +1,119 @@
-//! `passwd [user]` - set a user's password in `/etc/passwd` (root only).
+//! `passwd [user]` - change a password.
 //!
-//! With no argument, changes the *current* user's password (resolved from the
-//! task's uid); with a `<user>` argument, that account's. Prompts for the new
-//! password twice (echo off), draws a fresh salt from the hardware RNG
-//! (`RANDOM` -> `accounts::salt_from`), stores `SHA-256(salt || password)`, and
-//! rewrites the one account line. On a machine with no entropy device - the
-//! ordinary case off QEMU - it falls back to the weaker clock-derived salt and
-//! **says so** rather than storing a guessable one quietly.
+//! **Any user may change their own**; only root may change someone else's. That
+//! is a change from this tool's first version, which was root-only because it
+//! wrote `/etc/shadow` itself - a file a normal user cannot write.
 //!
-//! **Root only** (the option-1 model). A non-root user changing their *own*
-//! password needs a privileged path (a setuid bit or an `accountd` server) that
-//! this milestone deliberately defers - the shared `accounts` machinery here is
-//! exactly what that later path will reuse. Byte-only parsing (PIE-safe);
-//! interactive input works because the shell hands a foreground `/bin` program
-//! the keyboard.
+//! It no longer writes anything. It prompts, and sends the answer to the
+//! **account server** (`accountd`, task slot [`syscall_abi::ACCT_TASK`]), which
+//! holds the policy: root may set any password without knowing the old one;
+//! anyone else must supply their current password and may only change their
+//! own. The server asks the kernel who sent the message rather than trusting
+//! anything in it, so this program having the right to *ask* grants nothing.
+//!
+//! With no argument, changes the calling user's own password (resolved by uid
+//! on the server side, so no name has to be guessed here).
+//!
+//! Byte-only handling (PIE-safe); the password never touches the console (echo
+//! off) and never reaches a file from this process.
 
 #![no_std]
 #![no_main]
 
-const PASSWD_FILE: &str = "/etc/passwd";
-const SHADOW_FILE: &str = "/etc/shadow";
-const BUF: usize = syscall_abi::SAFECOPY_MAX as usize;
+/// Request header: op word plus four parameter words - the layout every server
+/// here uses.
+const REQ_HDR: usize = 40;
+const PW_MAX: usize = 64;
 
 #[no_mangle]
 #[link_section = ".text.start"]
 pub extern "C" fn _start() -> ! {
-    ulib::usage_if_requested(b"usage: passwd [user]  (set a password; root only)\r\n");
-    if ulib::getuid() != 0 {
-        die(b"passwd: only root may change passwords\r\n");
-    }
+    ulib::usage_if_requested(
+        b"usage: passwd [user]  (change a password; only root may change another user's)\r\n",
+    );
 
-    let mut src = [0u8; BUF];
-    let slen = ulib::read_file_all(PASSWD_FILE, &mut src);
-    if slen == 0 {
-        die(b"passwd: cannot read /etc/passwd\r\n");
-    }
-
-    // Target name: argv[1], else the current user (uid -> name).
-    let mut namebuf = [0u8; 33];
-    let mut name_len = 0usize;
-    if let Some(n) = ulib::arg(1, &mut namebuf) {
-        name_len = n;
-    } else {
-        let uid = ulib::getuid();
-        if let Some(acct) = accounts::find_user_by_uid(&src[..slen], uid) {
-            let l = acct.name.len().min(namebuf.len());
-            namebuf[..l].copy_from_slice(&acct.name[..l]);
-            name_len = l;
-        }
-    }
-    if name_len == 0 {
-        die(b"passwd: cannot determine the target user (give a name)\r\n");
-    }
+    let mut namebuf = [0u8; 64];
+    let name_len = ulib::arg(1, &mut namebuf).unwrap_or(0);
     let name = &namebuf[..name_len];
+    let am_root = ulib::getuid() == 0;
 
-    // The account must exist - but nothing of it is needed beyond that, since
-    // only /etc/shadow is rewritten now.
-    if accounts::find_user_by_name(&src[..slen], name).is_none() {
-        die(b"passwd: no such user\r\n");
+    // Root never needs the old password; anyone else always does - including
+    // when changing their own, which is the only thing they may change.
+    let mut old = [0u8; PW_MAX];
+    let mut old_len = 0usize;
+    if !am_root {
+        ulib::con_write(b"Current password: ");
+        old_len = ulib::read_line(&mut old, false);
+        ulib::con_write(b"\r\n");
     }
 
-    // Prompt for the new password twice (echo off).
     ulib::con_write(b"New password: ");
-    let mut pw = [0u8; 64];
+    let mut pw = [0u8; PW_MAX];
     let pwl = ulib::read_line(&mut pw, false);
     ulib::con_write(b"\r\nRetype new password: ");
-    let mut pw2 = [0u8; 64];
+    let mut pw2 = [0u8; PW_MAX];
     let pwl2 = ulib::read_line(&mut pw2, false);
     ulib::con_write(b"\r\n");
     if pw[..pwl] != pw2[..pwl2] {
         die(b"passwd: passwords do not match\r\n");
     }
-
-    // Hardware entropy if this machine has an RNG; the clock fallback otherwise,
-    // said out loud rather than stored quietly (see accounts::salt_from).
-    let (salt, strong) = accounts::salt_from(ulib::random_bytes8(), ulib::monotonic_us());
-    if !strong {
-        ulib::con_write(b"passwd: no hardware RNG - using a weaker clock-derived salt\r\n");
+    if pwl == 0 {
+        die(b"passwd: password may not be empty\r\n");
     }
-    let hash = accounts::hash_password(&salt, &pw[..pwl]);
 
-    // Only /etc/shadow changes: the passwd line holds no secret any more, so a
-    // password change never rewrites it (and cannot disturb uid/gid/home).
-    let mut line = [0u8; 256];
-    let Some(llen) = accounts::format_shadow_line(&mut line, name, &salt, &hash) else {
-        die(b"passwd: shadow line too long\r\n");
-    };
-    let mut sbuf = [0u8; BUF];
-    let Some(sslen) = ulib::read_file_checked(SHADOW_FILE, &mut sbuf) else {
-        die(b"passwd: could not read /etc/shadow - refusing to rewrite it\r\n");
-    };
-    let mut out = [0u8; BUF];
-    // Replace the user's line if present, else append one (an account created
-    // before /etc/shadow existed, or one whose secret was never set).
-    let (olen, replaced) = match accounts::replace_line(&sbuf[..sslen], &mut out, name, &line[..llen]) {
-        Some(r) => r,
-        None => die(b"passwd: /etc/shadow full\r\n"),
-    };
-    let olen = if replaced {
-        olen
-    } else {
-        match accounts::append_line(&sbuf[..sslen], &mut out, &line[..llen]) {
-            Some(n) => n,
-            None => die(b"passwd: /etc/shadow full\r\n"),
+    // ACCTOP_PASSWD: (name len, old len, new len), payload name || old || new.
+    let mut req = [0u8; syscall_abi::MSG_MAX_LEN as usize];
+    write_u64(&mut req, 0, syscall_abi::ACCTOP_PASSWD);
+    write_u64(&mut req, 8, name_len as u64);
+    write_u64(&mut req, 16, old_len as u64);
+    write_u64(&mut req, 24, pwl as u64);
+    let mut w = REQ_HDR;
+    for src in [name, &old[..old_len], &pw[..pwl]] {
+        req[w..w + src.len()].copy_from_slice(src);
+        w += src.len();
+    }
+
+    let mut reply = [0u8; syscall_abi::MSG_MAX_LEN as usize];
+    let packed = ulib::syscall4(
+        syscall_abi::MSG_CALL,
+        syscall_abi::ACCT_TASK,
+        req.as_ptr() as u64,
+        w as u64,
+        reply.as_mut_ptr() as u64,
+    );
+    if packed >= syscall_abi::FS_ERR_MIN {
+        die(b"passwd: no account server (is ACCOUNTD.BIN staged?)\r\n");
+    }
+    // The reply length must actually cover a status word: `reply` is zeroed, so
+    // a short/empty reply would otherwise decode as status 0 and report a change
+    // that never happened. MSG_CALL returns `(sender << 32) | len`, so the length
+    // is the LOW half - testing the packed word (as this did on its first
+    // attempt) compares the sender too and can never fire.
+    if (packed & 0xffff_ffff) < 8 {
+        die(b"passwd: the account server sent no answer\r\n");
+    }
+    let status = read_u64(&reply, 0);
+    match status {
+        0 => {
+            ulib::con_write(b"passwd: password updated\r\n");
+            ulib::exit(0)
         }
-    };
-    // 0600 before the secrets land - on a file that already exists as well as
-    // one being created, and without truncating to get there. See
-    // ulib::write_private_file for the three orderings that has to satisfy.
-    let code = ulib::write_private_file(SHADOW_FILE, &out[..olen]);
-    if ulib::is_fs_error(code) {
-        ulib::fs_error("passwd", code);
-        ulib::exit(1);
+        syscall_abi::ACCT_ERR_DENIED => die(b"passwd: only root may change another user's password\r\n"),
+        syscall_abi::ACCT_ERR_NO_USER => die(b"passwd: no such user\r\n"),
+        syscall_abi::ACCT_ERR_WRONG_PASSWORD => die(b"passwd: current password is wrong\r\n"),
+        syscall_abi::ACCT_ERR_IO => die(b"passwd: could not update the account database\r\n"),
+        _ => die(b"passwd: the account server rejected the request\r\n"),
     }
-    ulib::con_write(b"passwd: password updated for ");
-    ulib::con_write(name);
-    ulib::con_write(b"\r\n");
-    ulib::exit(0);
+}
+
+fn write_u64(b: &mut [u8], off: usize, v: u64) {
+    b[off..off + 8].copy_from_slice(&v.to_le_bytes());
+}
+
+fn read_u64(b: &[u8], off: usize) -> u64 {
+    let mut v = [0u8; 8];
+    v.copy_from_slice(&b[off..off + 8]);
+    u64::from_le_bytes(v)
 }
 
 fn die(msg: &[u8]) -> ! {

@@ -281,6 +281,22 @@ pub const CON_TASK: u64 = 3;
 /// pattern). Inserting it here shifted the spawnable slots up to 5-6.
 pub const NET_TASK: u64 = 4;
 
+/// The **account server**'s task slot: the fifth boot-loaded, supervised,
+/// protected server. It owns `/etc/passwd` and `/etc/shadow` *as a policy
+/// matter* - not exclusively (the files still live on `fsd`'s disk), but it is
+/// the only component that will write a password on behalf of a caller who
+/// could not write `/etc/shadow` themselves.
+///
+/// It exists because `/etc/shadow` is mode 0600 root: with the secrets out of
+/// the world-readable file, a normal user changing their *own* password needs
+/// something privileged to do it for them. A kernel setuid bit was the
+/// alternative and does not fit here - the kernel does not read files, so "this
+/// binary is setuid" would be asserted by the user-controlled shell that loads
+/// it, which the capability model exists to distrust. A server can instead ask
+/// the kernel *who is calling* ([`GET_ID`] on the message sender), which is
+/// unforgeable, and decide for itself.
+pub const ACCT_TASK: u64 = 5;
+
 /// `(offset, chunk ptr, chunk len)` -> `0` on success or
 /// [`SPAWN_ERROR`]. Copies one chunk of a program image into the
 /// kernel's fixed 128KB spawn staging buffer at `offset` - the feed
@@ -734,6 +750,47 @@ pub const SENDER_ID: u64 = 65;
 /// credential, so reading a fresh identity against a stale group list would
 /// reintroduce the same hole one field at a time.
 pub const SENDER_GROUPS: u64 = 66;
+
+// --- The account server's request protocol (`ACCTOP_*`) -------------------
+//
+// One op today. The shape follows `NETOP_*` (a small numbered op set with inline
+// payloads) rather than the `NP_*` file verbs, because this is not a filesystem:
+// there is no path, and the interesting argument is *who is asking*, which the
+// kernel supplies rather than the message.
+
+/// **Change a password.** params: `(name len, old len, new len)`; payload:
+/// `name || old_password || new_password`, in that order.
+///
+/// An empty `name` means "my own account", resolved from the caller's uid.
+///
+/// Policy, enforced by the server against [`GET_ID`] of the *sender* (which the
+/// kernel binds, so it cannot be spoofed):
+/// - **root** may set anyone's password and need not supply the old one.
+/// - **anyone else** may change only their own, and must supply the correct
+///   current password. That last check is what makes the server safe to expose
+///   to every spawnable slot: holding the right to *ask* is not permission to
+///   succeed.
+///
+/// Replies `0`, or one of the `ACCT_ERR_*` codes.
+pub const ACCTOP_PASSWD: u64 = 1;
+
+// The account server's error codes sit at the BOTTOM of the reserved error
+// band. Their obvious home (`MAX - 1` downwards) is already occupied by
+// [`NO_FS`], [`FS_ERR_NOT_FOUND`] and their neighbours - an account error and a
+// filesystem error would be literally the same value, and a client seeing one
+// could not tell which it had.
+
+/// [`ACCTOP_PASSWD`]: the caller may not change that account's password (a
+/// non-root caller naming someone else).
+pub const ACCT_ERR_DENIED: u64 = u64::MAX - 34;
+/// [`ACCTOP_PASSWD`]: no such account in `/etc/passwd`.
+pub const ACCT_ERR_NO_USER: u64 = u64::MAX - 35;
+/// [`ACCTOP_PASSWD`]: the supplied current password is wrong.
+pub const ACCT_ERR_WRONG_PASSWORD: u64 = u64::MAX - 36;
+/// [`ACCTOP_PASSWD`]: the account database could not be read or written.
+pub const ACCT_ERR_IO: u64 = u64::MAX - 37;
+/// [`ACCTOP_PASSWD`]: the request was malformed (lengths past the payload).
+pub const ACCT_ERR_BAD_REQUEST: u64 = u64::MAX - 38;
 
 /// [`RANDOM`] on a machine with no entropy device (or with an invalid output
 /// buffer). Distinct from `0`, which would mean "a device answered, with
@@ -1294,10 +1351,12 @@ pub const FS_ERR_PERM: u64 = u64::MAX - 32;
 /// byte counts on success and can't enumerate every non-error value in
 /// a `match`. (Moved down from `MAX-15` when the `TASK_ERR_*` codes
 /// consumed the original headroom, then to `MAX-32` for
-/// [`FS_ERR_NOT_SUPPORTED`], then `MAX-33` for [`FS_ERR_PERM`] - safe, since
+/// [`FS_ERR_NOT_SUPPORTED`], then `MAX-33` for [`FS_ERR_PERM`], and now `MAX-38`
+/// so the `ACCT_ERR_*` codes fit below the filesystem ones instead of colliding
+/// with them - safe each time, since
 /// both sides of the ABI import this from the same crate and no real success
 /// value approaches it either way.)
-pub const FS_ERR_MIN: u64 = u64::MAX - 33;
+pub const FS_ERR_MIN: u64 = u64::MAX - 38;
 
 /// Generic failure sentinel for [`SPAWN`] - same bit pattern as
 /// [`FS_ERROR`] (a bad ELF, no free task slot, and a disk read failure

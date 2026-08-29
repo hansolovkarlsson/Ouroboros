@@ -1742,7 +1742,9 @@ fn print_fs_error(cmd: &str, code: u64) {
         syscall_abi::SPAWN_ERR_TOO_LARGE => "program too large for the kernel's staging buffer (or empty)",
         syscall_abi::SPAWN_ERR_NO_FREE_SLOT => "no free task slot",
         syscall_abi::TASK_ERR_NO_SUCH_TASK => "no such task (see ps)",
-        syscall_abi::TASK_ERR_PROTECTED => "that task is protected (the boot shell, idle, and the filesystem server are permanent)",
+        // Names the whole protected set: a message listing a stale subset is how
+        // a reader concludes a newly added server is fair game.
+        syscall_abi::TASK_ERR_PROTECTED => "that task is protected (the boot shell, idle, and the fsd/cond/netd/accountd servers are permanent)",
         _ => "failed",
     });
 }

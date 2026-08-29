@@ -952,7 +952,7 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
         }
         syscall_abi::EXIT => {
             let current = tasks::current_task();
-            if current <= 4 {
+            if current < tasks::FIRST_SPAWNABLE {
                 // Task 0 (the boot shell - nothing would own the
                 // keyboard, see tasks::INPUT_OWNER_TASK), task 1
                 // (idle - never makes syscalls, refused for
@@ -1051,7 +1051,7 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
         }
         syscall_abi::KILL => {
             let i = arg0 as usize;
-            if i <= 4 {
+            if i < tasks::FIRST_SPAWNABLE {
                 // The boot shell (the permanent keyboard owner), idle,
                 // the filesystem server, the console server, and the
                 // network server are
@@ -1078,7 +1078,7 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
         }
         syscall_abi::WAIT => {
             let i = arg0 as usize;
-            if i <= 4 || i == tasks::current_task() {
+            if i < tasks::FIRST_SPAWNABLE || i == tasks::current_task() {
                 // Waiting on task 0/1/2/3/4 (they never die - the boot
                 // shell, idle, the filesystem server, the console server,
                 // and the network server are all exit/kill-protected) or
@@ -1375,7 +1375,7 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
         }
         syscall_abi::FG => {
             let i = arg0 as usize;
-            if (1..=4).contains(&i) {
+            if (1..tasks::FIRST_SPAWNABLE).contains(&i) {
                 // Foregrounding idle (1) or a supervised server (2/3/4 -
                 // fsd/cond/netd) is refused, same protected set as KILL/EXIT:
                 // idle would strand the keyboard on a task that never reads it,
