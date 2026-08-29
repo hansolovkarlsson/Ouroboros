@@ -453,9 +453,16 @@ pub fn load_accountd() -> Result<LoadedProgram, LoaderError> {
     if program_bytes.is_empty() {
         return Err(LoaderError::ProgramEmpty);
     }
-    if !crate::supervisor::register(syscall_abi::ACCT_TASK as usize, &program_bytes) {
+    // Report WHY: a full registry and an oversized image are different
+    // problems with different fixes, and naming the wrong one sends the
+    // reader to measure a binary that was never too big. accountd takes the
+    // LAST free MAX_SUPERVISED slot, so this is the call site where a full
+    // registry stops being theoretical.
+    if let Some(why) = crate::supervisor::register(syscall_abi::ACCT_TASK as usize, &program_bytes).why()
+    {
         log::warn!(
-            "Ouroboros kernel: ACCOUNTD.BIN too large to keep for crash recovery - the account server won't be restartable this boot"
+            "Ouroboros kernel: ACCOUNTD.BIN - {} - the account server won't be restartable this boot",
+            why
         );
     }
     load_elf_into_el0_region(&program_bytes)

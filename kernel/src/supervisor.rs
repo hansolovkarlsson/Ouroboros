@@ -64,15 +64,15 @@ use crate::tasks;
 /// the process whose mid-write restart the account tools cannot survive.
 const IMG_CAP: usize = 192 * 1024;
 
-/// How many servers can be supervised at once. Three are used today (fsd, cond,
-/// netd), leaving ONE spare - each entry costs [`IMG_CAP`] (192 KB) of kernel
-/// `.bss`, which is why this is not simply set higher "just in case".
+/// How many servers can be supervised at once. **Exactly saturated today** by
+/// fsd/cond/netd/accountd, so a FIFTH server needs this raised - each entry
+/// costs [`IMG_CAP`] (192 KB) of kernel `.bss`, which is why it is not simply
+/// set higher "just in case".
 ///
-/// [`register`] reports a full registry distinctly from an oversized image, so
-/// that limit announces itself rather than being mistaken for a file-size
-/// problem: the next server to move out of the kernel takes the last slot, and
-/// the one after that would otherwise boot unsupervised behind a misleading
-/// warning.
+/// [`register`] reports a full registry distinctly from an oversized image
+/// precisely because of that: with no slack left, the next server to move out
+/// of the kernel is the one that hits this, and it would otherwise boot
+/// unsupervised behind a warning blaming its file size.
 const MAX_SUPERVISED: usize = 4;
 
 /// Per-boot restart cap per server (covers crashes *and* wedges together):
