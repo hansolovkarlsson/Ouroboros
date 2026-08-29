@@ -3,7 +3,12 @@
 #include "sys.h"
 #include <unistd.h>
 
+extern void __libc_close_all(void);
+
 void _exit(int code) {
+    /* Release the server-side fids: nothing else does, and a leaked one is
+     * unreapable once the task's slot is recycled. */
+    __libc_close_all();
     __os_syscall1(SYS_EXIT, code);
     for (;;) {
     } /* EXIT never returns */

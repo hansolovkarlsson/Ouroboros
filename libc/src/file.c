@@ -140,6 +140,22 @@ static struct file_state *file_for(int fd) {
     return &g_files[idx];
 }
 
+/* Close every open fd at exit.
+ *
+ * A fid is server-side state in fsd, and nothing else releases it: fsd reaps a
+ * fid only when its owner SLOT reads dead, but slots are recycled and the shell
+ * reuses the same one for every foreground command - so a C program that relies
+ * on exit to close its files (standard practice, and what picolibc's exit does)
+ * leaks a fid permanently. Eight of those exhaust fsd's table and every
+ * subsequent open fails, for every program, until fsd restarts. */
+void __libc_close_all(void) {
+    for (int i = 0; i < MAX_FILES; i++) {
+        if (g_files[i].used) {
+            close(i + FID_BASE);
+        }
+    }
+}
+
 int close(int fd) {
     struct file_state *f = file_for(fd);
     if (!f) {

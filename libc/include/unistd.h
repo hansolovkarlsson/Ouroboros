@@ -20,6 +20,9 @@ void _exit(int code) __attribute__((noreturn));
 /* Internal (called by exit): flush the stdout buffer, then, if stdout is piped,
  * send the end-of-stream marker. */
 void __libc_flush_stdout(void);
+/* Close every open fd - called by _exit, because a fid is server-side state in
+ * fsd that nothing else releases. */
+void __libc_close_all(void);
 void __libc_end_stdout(void);
 
 #endif
