@@ -129,11 +129,10 @@ fn migrate_secret(name: &[u8], secret: &accounts::Secret) -> bool {
     let Some(olen) = accounts::append_line(&cur[..clen], &mut out, &line[..llen]) else {
         return false;
     };
-    if ulib::is_fs_error(ulib::fs_write_bulk(SHADOW_FILE, &out[..olen])) {
-        return false;
-    }
-    let code = ulib::fs_chmod(SHADOW_FILE, 0o600);
-    if ulib::is_fs_error(code) && code != syscall_abi::FS_ERR_NOT_SUPPORTED {
+    // 0600 BEFORE the hash lands, not after: this used to write the secrets and
+    // then chmod, which on a disk with no /etc/shadow created it world-readable
+    // with a real hash already inside it. See ulib::write_private_file.
+    if ulib::is_fs_error(ulib::write_private_file(SHADOW_FILE, &out[..olen])) {
         return false;
     }
     true

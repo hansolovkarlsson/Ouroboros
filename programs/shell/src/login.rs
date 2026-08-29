@@ -31,10 +31,19 @@ const SHADOW_PATH: &str = "/etc/shadow";
 /// Read cap for `/etc/passwd`, matching the account tools' write cap
 /// ([`accounts`]/`useradd` bound writes to `SAFECOPY_MAX`). fsd caps a single
 /// inline read at `FS_DATA_MAX` (512), so the shared `read_account_file` loops
-/// `fs_read_at` to fill this buffer in 512-byte chunks. 2 KB holds ~20 accounts
-/// (each line is ~90 bytes); beyond that a bigger buffer + the same loop is all
-/// it takes.
+/// `fs_read_at` to fill this buffer in 512-byte chunks.
+///
+/// Overflowing this is survivable *here* and only here: too many accounts to
+/// read means `login` starts a root session, the same answer as no
+/// `/etc/passwd` at all. The secrets in `/etc/shadow` deliberately do NOT come
+/// through this path - overflowing there would refuse every password instead of
+/// falling back, so they are looked up one streamed line at a time (see
+/// `crate::find_account_line`).
 const PASSWD_MAX: usize = syscall_abi::SAFECOPY_MAX as usize;
+/// Room for one `/etc/shadow` line: a 32-byte name, a hex salt and a 64-char hex
+/// hash with their colons come to ~130, so this is generous on purpose - an
+/// entry that does not fit is skipped rather than truncated.
+const SHADOW_LINE_MAX: usize = 256;
 const CR: u8 = 13;
 const LF: u8 = 10;
 const BS: u8 = 8;
@@ -117,10 +126,14 @@ fn write_cwd(cwd: &mut [u8; CWD_SIZE], home: &[u8]) -> usize {
 /// caller's frame.
 #[inline(never)]
 fn verify_password(acct: &accounts::Account<'_>, name: &[u8], password: &[u8]) -> bool {
-    let mut sbuf = [0u8; PASSWD_MAX];
-    let slen = crate::read_account_file(SHADOW_PATH, &mut sbuf);
-    if let Some(secret) = accounts::find_secret_by_name(&sbuf[..slen], name) {
-        return secret.verify(password);
+    // ONE line, streamed off the disk rather than the whole file into a buffer:
+    // the size of /etc/shadow must not decide whether anyone can log in. See
+    // find_account_line for the lockout that a whole-file read caused here.
+    let mut sline = [0u8; SHADOW_LINE_MAX];
+    if let Some(n) = crate::find_account_line(SHADOW_PATH, name, &mut sline) {
+        if let Some(secret) = accounts::find_secret_by_name(&sline[..n], name) {
+            return secret.verify(password);
+        }
     }
     acct.verify(password) // legacy inline secret, or false when there is none
 }

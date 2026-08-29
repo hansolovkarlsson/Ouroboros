@@ -2028,6 +2028,86 @@ pub(crate) fn read_account_file(path: &str, buf: &mut [u8]) -> usize {
     off
 }
 
+/// Find the one line of a colon-separated account database whose first field is
+/// `name`, copying it into `out` and returning its length.
+///
+/// [`read_account_file`] holds a whole file at once and reports `0` when it
+/// overflows the buffer. For `/etc/passwd` that is a safe answer - `0` means
+/// "no accounts", and `login` starts a root session. For `/etc/shadow` the same
+/// `0` means "this user has no secret", which is not a fallback but a **total
+/// lockout**: every password becomes wrong, root's included, and the login loop
+/// has nowhere to go. The two halves of one database had opposite failure modes
+/// for the same overflow, and the shadow half crosses first (a `name:salt:hash`
+/// line is ~90 bytes against a 4-field passwd line's ~30).
+///
+/// So the secret lookup does not hold the file at all. It reads
+/// [`syscall_abi::FS_DATA_MAX`] chunks at a rising offset, reassembles lines
+/// across the chunk boundaries, and keeps only the line it was asked for - which
+/// makes the size of the credential database irrelevant to whether anyone can
+/// log in.
+///
+/// Returns `None` when the file cannot be read or holds no such entry; the
+/// caller must treat that as "cannot verify" and refuse, never as "no password".
+/// A line too long for `out` is skipped rather than truncated, so a mangled
+/// entry can never half-match a shorter name.
+pub(crate) fn find_account_line(path: &str, name: &[u8], out: &mut [u8]) -> Option<usize> {
+    const CHUNK: usize = syscall_abi::FS_DATA_MAX as usize;
+    let mut chunk = [0u8; CHUNK];
+    let mut len = 0usize;
+    let mut overlong = false;
+    let mut off = 0u64;
+    let mut tries = 0;
+
+    loop {
+        let r = fs_read_at(path, off, &mut chunk);
+        if r >= FS_ERR_MIN {
+            // Same bounded boot race read_account_file guards: login can run
+            // before fsd has finished mounting, and "no filesystem yet" must
+            // not read as "no such account".
+            if off == 0 && r == syscall_abi::NO_FS && tries < 200 {
+                tries += 1;
+                continue;
+            }
+            return None;
+        }
+        let n = (r as usize).min(CHUNK);
+        off += n as u64;
+        for &b in &chunk[..n] {
+            if b == b'\n' {
+                if !overlong && line_names(&out[..len], name) {
+                    return Some(len);
+                }
+                len = 0;
+                overlong = false;
+            } else if b == b'\r' {
+                // tolerate a CRLF database
+            } else if len < out.len() {
+                out[len] = b;
+                len += 1;
+            } else {
+                overlong = true;
+            }
+        }
+        if n < CHUNK {
+            break; // short read = end of file
+        }
+    }
+    // A final line with no trailing newline.
+    if !overlong && len > 0 && line_names(&out[..len], name) {
+        return Some(len);
+    }
+    None
+}
+
+/// Whether `line`'s first colon-field is exactly `name`.
+fn line_names(line: &[u8], name: &[u8]) -> bool {
+    let end = match line.iter().position(|&c| c == b':') {
+        Some(i) => i,
+        None => line.len(),
+    };
+    &line[..end] == name
+}
+
 /// `su <user>`: resolve `user` in `/etc/passwd` and drop to its uid+gid. Root
 /// only (the caller is already checked in [`cmd_su`]). No password is prompted
 /// because only root reaches here, and root needs none to become a user.

@@ -438,23 +438,10 @@ fn add_secret(name: &[u8], salt: &[u8], hash: &[u8]) -> Result<(), u64> {
             None => return Err(syscall_abi::FS_ERR_DISK_FULL),
         }
     };
-    // Restrict a file we are CREATING before the secrets land (it carries ext2's
-    // default 0644 otherwise). Only when creating: an unconditional empty write
-    // would TRUNCATE an existing file and stake the whole database on the
-    // following calls, to fix a mode the overwrite branch already preserves.
-    if clen == 0 && ulib::is_fs_error(ulib::fs_stat(SHADOW_FILE, &mut [0u8; 64])) {
-        let code = ulib::fs_write_bulk(SHADOW_FILE, &[]);
-        if ulib::is_fs_error(code) {
-            return Err(code);
-        }
-        let code = ulib::fs_chmod(SHADOW_FILE, 0o600);
-        // A filesystem that models no mode answers NOT_SUPPORTED - expected, and
-        // warned about at login. Any other refusal is a real failure.
-        if ulib::is_fs_error(code) && code != syscall_abi::FS_ERR_NOT_SUPPORTED {
-            return Err(code);
-        }
-    }
-    let code = ulib::fs_write_bulk(SHADOW_FILE, &out[..olen]);
+    // 0600 before the secrets land - on a file that already exists as well as
+    // one being created, and without truncating to get there. See
+    // ulib::write_private_file for the three orderings that has to satisfy.
+    let code = ulib::write_private_file(SHADOW_FILE, &out[..olen]);
     if ulib::is_fs_error(code) {
         return Err(code);
     }

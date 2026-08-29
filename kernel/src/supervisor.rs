@@ -51,8 +51,18 @@ use crate::loader;
 use crate::tasks;
 
 /// Largest supervised-server image kept for restart (was `FSD_IMAGE_SIZE`).
-/// fsd is the biggest today (tens of KB); cond is a few KB.
-const IMG_CAP: usize = 128 * 1024;
+///
+/// fsd is the biggest by far and it GREW past the old 128 KB cap (137 KB at the
+/// time of writing, as permission enforcement and a third filesystem landed in
+/// it). Exceeding this is not an error - it silently costs the server its
+/// restartability, announced only by a boot warning that scrolls past - so the
+/// cap carries real headroom rather than tracking the current size. Costs
+/// `MAX_SUPERVISED * IMG_CAP` of kernel `.bss` (768 KB), which is noise against
+/// the 512 MB the machine boots with.
+///
+/// If fsd approaches this again, raise it again: an unsupervised fsd is exactly
+/// the process whose mid-write restart the account tools cannot survive.
+const IMG_CAP: usize = 192 * 1024;
 
 /// How many servers can be supervised at once - fsd, cond, and headroom
 /// for whatever moves out of the kernel next.
