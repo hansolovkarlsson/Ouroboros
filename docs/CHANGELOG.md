@@ -7,6 +7,57 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/`; 
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## `grep` gets real regular expressions - a shared `regex` crate (2026-08-29)
+
+The last of the roadmap's "Open gaps" small items, and the one it called *"a
+separate, larger arc"*: `/bin/grep`'s pattern is a **POSIX extended regular
+expression** now, not a plain substring.
+
+- **A new pure `regex` crate** at the repo root, the `accounts` shape: `no_std`,
+  no I/O, no syscalls, **no heap**, and **host-unit-tested** (`cargo test -p
+  regex --target aarch64-apple-darwin`, 13 test groups / ~90 assertions). A
+  regex engine is the strongest case this codebase has for a foreign observer,
+  and a pure crate is the cheapest one available. It is also reusable: an
+  editor's search and a future `find` want exactly this.
+- **Syntax** (ERE / the `egrep` dialect): `.` `*` `+` `?` `[a-z]` `[^0-9]` `^`
+  `$` `|` `(...)` and `\` escapes, all unescaped-by-default. Not supported,
+  deliberately: back-references, `{n,m}`, `[:alpha:]`, submatch capture.
+- **`-F` keeps the old behaviour** (literal substring). ERE is the default,
+  chosen over POSIX's BRE-by-default-plus-`-E` to avoid carrying two escaping
+  dialects; it does mean `grep 1.2` now matches `132`.
+- **Shape: AST → program → explicit stack.** Parse to a fixed node array, emit a
+  fixed instruction program with absolute jump targets (emitting *from an AST*
+  is what keeps those valid - nothing is ever shifted), then run it with an
+  **explicit backtracking stack** rather than host recursion. That last one is
+  load-bearing for this OS: a recursive matcher's depth grows with the *input*
+  (`a*` over a 256-byte line is 256 frames), and a userland program here has a
+  32 KB guarded stack. An explicit stack makes the worst case a fixed 2 KB array
+  - the sixth time this arc's stack ceiling has shaped a design.
+- **Non-termination is designed out, not budgeted around.** A `*`/`+` whose body
+  can match empty (`(a*)*`, `(a|)*`) is the one construct that lets a
+  backtracking matcher spin without progress, so it is **rejected at compile
+  time** with a named error. POSIX allows such patterns; refusing them buys the
+  guarantee that every *accepted* pattern terminates, since each repeat
+  iteration now consumes at least one byte. The step budget is left as a
+  backstop against merely *exponential* patterns (`(a|aa)+b`), and when it runs
+  out the answer is `Match::Limit` - **not** a silent "no match". `grep` skips
+  that line and says so once.
+- **The line terminator is stripped before matching**, so `$` anchors to the end
+  of the visible text rather than to a `\n` the user never typed.
+- **A bad pattern is an error, not a fallback**: `grep (` prints
+  `bad pattern: unbalanced parenthesis` and exits. Quietly searching for
+  something other than what was asked is worse than failing.
+- **Shell fix found by the new failure path.** A stage that rejects its own
+  arguments now exits *before* the shell delegates the pipe capability, so every
+  bad pattern printed a second, misleading `pipe: could not authorize the
+  stream` on top of the real message. The shell now checks whether the consumer
+  had already exited - in which case it has explained itself - and stays quiet;
+  a genuine delegation failure still reports.
+- **Verified** on `run-image-ext2` across three sessions: `^root`, `root|user`,
+  `-v ^root`, `-n ^[a-z]+:`, `/Users/[a-z]+:`, `.`, `-i`, `:$` and `^r.*:$`
+  anchoring, `-F [a-z]` staying literal, and all three compile errors
+  (unbalanced parenthesis, unterminated class, empty repeat) reported cleanly.
+
 ## Symbolic-mode `chmod`, `chown` by name (2026-08-29)
 
 The two write halves of the mode/owner surface, finishing the "small polish"

@@ -1141,10 +1141,21 @@ fn run_head_pipeline(
     // Authorize each adjacent producer->consumer link.
     for i in 0..prog_stages.len() - 1 {
         if syscall4(syscall_abi::DELEGATE, slots[i], slots[i + 1], 0, 0) != 0 {
+            // A consumer that has ALREADY exited is the ordinary case, not a
+            // capability failure: a stage that rejects its own arguments (a bad
+            // `grep` pattern, an unknown flag) prints its reason and exits
+            // before the shell gets here. It has already told the user what
+            // went wrong, so adding "could not authorize the stream" on top
+            // only obscures it. Anything else is a real failure and still says
+            // so.
+            let died = syscall(syscall_abi::TASK_STATE, slots[i + 1])
+                != syscall_abi::TASK_STATE_RUNNABLE;
             for s in &slots[..prog_stages.len()] {
                 syscall(syscall_abi::KILL, *s);
             }
-            print_line("pipe: could not authorize the stream");
+            if !died {
+                print_line("pipe: could not authorize the stream");
+            }
             return;
         }
     }

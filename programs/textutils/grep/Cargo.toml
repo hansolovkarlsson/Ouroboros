@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 syscall-abi = { path = "../../../syscall-abi" }
 ulib = { path = "../../../ulib" }
+regex = { path = "../../../regex" }
 
 [[bin]]
 name = "grep"
