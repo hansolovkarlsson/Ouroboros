@@ -152,7 +152,76 @@ derived, in prose that nothing checks. The arc that started with "the OS has no 
 finished; the only thing left in it is per-user *cluster* identity, which is
 the one place a remote request still arrives as root.
 
+
 ---
+
+The afternoon was a second day's worth, and it went differently.
+
+`ls -a` was reported as broken by the one mechanism that has caught nothing else
+all week: someone using the system. It turned out never to have worked — the
+manpage promised `.` and `..` from the day it was written and no filesystem arm
+ever returned them. Worth keeping the promise rather than deleting it, because
+with enforcement live `ls -la` is the only way to see a directory's *own* mode.
+Synthesized in `ls`, not `fsd`, since every arm's dot-filter is load-bearing for
+`tree`, globbing, and any future recursive `cp`.
+
+Then per-user cluster identity, the users arc's last item, promoted that morning
+because `accountd` had put a privileged writer on the far end of a hole that
+until then only exposed a readable file. The design questions were real and I
+think the answers were right: send the **name** rather than the number, because
+two nodes number their users independently; put it inside the MAC, which cost
+nothing because the MAC was already there; and let the far side resolve it
+through its own `/etc/passwd` and refuse a stranger.
+
+The implementation was wrong, and a review found fifteen things.
+
+Five of them were independent ways a remote request still reached `fsd` with
+root authority. The demo I had led the PR with — an unprivileged user refused
+another node's `/etc/shadow` — passed with **all five present**, because `chown`,
+`writeat` and `cpu` each defeated it by a different route. My verification had
+been a live two-node run with a negative control, which is the strongest
+evidence I know how to produce, and it certified a branch whose central claim
+was false.
+
+The lesson is not "test more". It is that **four of the five traced to one
+design decision**: opt-in `_as` twins plus a mutable latch. Opt-in means a
+missed call site is silent. A latch means anything else touching `fsd` destroys
+it. I had even written down the invariant — "is every export-path call
+proxied? is one grep" — and then run that grep against the four helper names I
+knew about rather than against the property, missing a fifth path I had
+forgotten existed. A safety property you have to remember at each call site is
+not a safety property. The rebuild makes the wrong thing *unspellable*: identity
+as a required parameter, carried in the request rather than latched.
+
+Three things in the review's list were about the test infrastructure, and one of
+those was worse than the feature bugs. My own refactor of the console harness
+had dropped `SError` from the health bar — so every "0 aborts" I had reported
+after that point, including on the feature under review, was a weaker claim than
+the ones before it. The number had not changed; what it meant had. That is the
+same failure as the day's other six, in the one place I was leaning hardest.
+
+So the rig was split out and landed first: an ext2 two-node pair (the FAT32 one
+records no mode, so a permission test on it passes before a fix and after it),
+`CLUSTER.KEY` at 0600 on the disk where modes are enforced, the health bar
+restored, and a harness that can no longer report success having typed nothing.
+
+Last, a live crash the review had noticed in passing: one malformed export frame
+panicked `netd`, and three of them take the network down for the boot. Two more
+of the same class turned up in the sweep, by a different mechanism — a wrapping
+add rather than an unclamped start. Fixed as a class, and proven both ways with
+the host-side Python peer, which is the only thing that can reach that code path
+at all. Worth noticing that the foreign observer earned its keep on the same day
+I argued for keeping it alive.
+
+Two things I want to remember from the afternoon rather than the morning. The
+first: I nearly merged the crash fix on a verification that never touched the
+code I had changed — I altered write paths and tested reads. Going back to
+exercise writes properly is what surfaced an intermittent remote `cp` failure,
+now recorded rather than dismissed. The second: a green test suite, a live
+two-node run, and a negative control all agreed the cluster branch was good, and
+a foreign reader disagreed fifteen times. The reviews are not a formality at the
+end of the work. On a security boundary they are part of the work.
+
 
 ## 2026-08-29 — finishing the security tier, and learning to distrust green
 
