@@ -658,15 +658,33 @@ review. Recorded here so they are not lost with the review transcript.
   `ls -l ../f` is refused. Every `ls -l` entry also pays a guaranteed-useless
   ancestor walk. Note `check_access` is **default-allow** (`_ => true`), so a
   future `NP_` verb added without an arm here ships unauthenticated.
-- **`warn_if_unprotected` fails open.** Any non-zero `FSOP_MOUNT_INFO` status
-  reads as "this filesystem enforces permissions", and it runs as the first
-  statement of `login()` — *before* the bounded `NO_FS` retry that exists
-  precisely because login can beat `fsd`'s mount. So on a FAT32 or exFAT boot,
-  where `/etc/shadow` really is world-readable and world-writable, the warning
-  that is the entire mitigation may never appear. It also inspects only tree 0
-  and string-matches `"ext2"`, so a multi-mount or a future mode-modelling
-  filesystem misreports. `fsd` already derives this structurally from
-  `stat().mode.is_some()`. **Unverified on a FAT32 boot.**
+- **`warn_if_unprotected` fails open** — but does *not* misfire today, which is
+  a distinction worth keeping straight. **Tested 2026-08-29 on all three
+  images**: the warning correctly appears on FAT32 and exFAT and correctly stays
+  silent on ext2, so the mitigation works as designed and this is not a live
+  hole.
+
+  The structure is still wrong, and it is the *reason* it works that should
+  worry us. `mounted_fs_unprotected` returns `false` — "this filesystem enforces
+  permissions" — for **any** non-zero `FSOP_MOUNT_INFO` status, including the
+  `NO_FS` that means "`fsd` has not finished mounting yet". It is the first
+  statement of `login()`, and it has **no retry**, while `read_account_file` in
+  the same file carries a bounded 200-try `NO_FS` retry *precisely because login
+  can beat the mount*. One of those two functions is defended against a race the
+  other ignores.
+
+  It passes on QEMU because virtio-blk mounts before login asks. The device that
+  would lose that race is USB-MSD on real Parallels, which is measurably slower
+  and where [`testing-parallels.md`](testing-parallels.md) already flags a
+  `netd` boot-race risk for the same reason — and where the failure is silent,
+  since the whole symptom is a warning that *doesn't* print. Same shape as the
+  xHCI keyboard↔storage contention: invisible on the emulator, real on hardware.
+
+  Two further defects in the same three lines, both unexercised today: it
+  inspects only tree 0 (a multi-mount with `/etc` on a different tree
+  misreports) and string-matches `"ext2"` (a future mode-modelling filesystem
+  would raise a false alarm). `fsd` already derives this structurally from
+  `stat().mode.is_some()`, which is what this should ask instead.
 - **`useradd` accepts an empty password** while `passwd` now rejects one, so an
   account created by pressing Enter twice is loginable by pressing Enter. It is
   the only writer of an *initial* secret, so it is the one that most needs the
