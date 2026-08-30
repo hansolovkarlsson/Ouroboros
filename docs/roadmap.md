@@ -672,7 +672,8 @@ review. Recorded here so they are not lost with the review transcript.
   generation. The kernel now binds the sender's credential at send
   (`SENDER_ID`/`SENDER_GROUPS`) — see `docs/architecture.md`'s syscall table.
   Raised against the unmerged account server, but it was `fsd`, in shipped
-  code, that had it on every permission check and every fid op.
+  code, that had it on every permission check and every fid op. Written up in
+  [`asking-the-right-question-postmortem.md`](asking-the-right-question-postmortem.md).
 - **`warn_if_unprotected` fails open** — but does *not* misfire today, which is
   a distinction worth keeping straight. **Tested 2026-08-29 on all three
   images**: the warning correctly appears on FAT32 and exFAT and correctly stays
