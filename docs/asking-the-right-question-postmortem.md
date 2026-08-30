@@ -2,7 +2,7 @@
 
 *Design/bug retrospective, a twenty-fourth piece, 2026-08-30. The day the
 users/permissions arc closed for good: the five outstanding review findings on
-the account server fixed, `accountd` merged as the fifth protected server, and
+the account server fixed, `accountd` merged as the fourth server, and
 a kernel-level hole in **shipped** code closed underneath it. Two threads run
 through it, and neither is about accounts. The first is that three of the five
 findings were mechanisms answering a question **adjacent to** the one being
@@ -14,7 +14,7 @@ five was visible to the compiler or to any test.*
 
 - **#36** — the kernel binds a message's credential at **send**
   (`SENDER_ID` 65 / `SENDER_GROUPS` 66); `fsd` authorizes on that.
-- **#30** — `accountd`, the fifth protected server (slot 5), so a user can
+- **#30** — `accountd`, the fourth server (protected slot 5), so a user can
   change their own password. All five prior review findings fixed.
 - **#37 / #38** — the documentation drift the above exposed.
 - **#24** — the original over-large branch, reconciled and closed.
@@ -168,6 +168,12 @@ other ways:
 | A doc link to `SENDER_IDS`, which never existed | ultra review | a reader chasing the security rationale |
 | A manpage naming `SET_GROUPS`, a syscall designed and never shipped | reconciling #24 | a user, directly |
 | `CLAUDE.md`: ten slots, four servers, two disagreeing crate counts | reading it | the next session, before it writes a line |
+| "the fifth server" — `accountd` is the **fourth**; 5 is its slot number | counting them during the doc pass | anyone reasoning about the server fleet |
+
+The last row was written *into this postmortem* an hour before it was caught,
+and had reached ten places including merged code comments. Restating a number
+from memory instead of deriving it is the same failure the rest of this section
+describes, and knowing about the failure is evidently not protection from it.
 
 **None were visible to the compiler or to any test.** That is the category, not
 bad luck: a comment, a manpage, a doc link, an unused C constant and a prose

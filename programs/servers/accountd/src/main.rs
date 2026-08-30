@@ -1,5 +1,7 @@
-//! `accountd` - the **account server**, the fifth protected server (task slot
-//! [`syscall_abi::ACCT_TASK`], 5).
+//! `accountd` - the **account server**: the fourth of them
+//! (`fsd`/`cond`/`netd`/`accountd`), in protected task slot
+//! [`syscall_abi::ACCT_TASK`], 5. The slot number is not the count - protected
+//! slots 0 and 1 are the boot shell and idle, which are not servers.
 //!
 //! ## Why a server, and not a setuid bit
 //!

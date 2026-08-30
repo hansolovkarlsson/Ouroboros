@@ -137,7 +137,18 @@ returning zero is now one small piece of machinery that will notice — for one
 of the five kinds.
 
 Written up as `docs/asking-the-right-question-postmortem.md`, the
-twenty-fourth. The arc that started with "the OS has no idea who you are" is
+twenty-fourth.
+
+A sixth instance turned up during the documentation pass that followed, and
+this one was mine from the same day: I had been calling `accountd` "the fifth
+server" everywhere, because it sits in protected slot 5. It is the **fourth**
+server — `fsd`, `cond`, `netd`, `accountd` — and slot 5 is its task number.
+Protected slots 0 and 1 are the boot shell and idle, which are not servers. The
+phrase had reached ten places, including merged code comments and the
+postmortem written an hour earlier, before counting the servers instead of
+trusting the phrase caught it. Exactly the failure the postmortem describes,
+committed while describing it: a number restated from memory rather than
+derived, in prose that nothing checks. The arc that started with "the OS has no idea who you are" is
 finished; the only thing left in it is per-user *cluster* identity, which is
 the one place a remote request still arrives as root.
 

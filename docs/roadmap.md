@@ -25,9 +25,35 @@ the **console** (`cond`), and the **network** server (`netd`) all run as
 supervised, MMU-isolated userland servers, with a capability model, crash
 recovery, and grant/safecopy bulk IPC (all in
 [`roadmap-completed.md`](roadmap-completed.md) / [`CHANGELOG.md`](CHANGELOG.md)).
-What's still open on that arc, in rough order of value:
+So is the users/permissions arc, as of 2026-08-30 — bar one item, which is why
+that item leads this list rather than sitting in the north-star section it came
+from. In rough order of value (item 1 is the next *arc*; 2 and 3 are what the
+microkernel arc itself still leaves open):
 
-1. **General / transitive capability delegation.** The delegation shipped
+1. **Per-user cluster identity — the users arc's last item, and the next arc.**
+   The 9P export authenticates the *machine* (a shared cluster key), never a
+   *user*, and `netd` relays every remote request under its **own root
+   identity** — so `fsd`'s `check_access` hits its root bypass and
+   short-circuits before any mode is consulted. Concretely, today: an
+   unprivileged user on node B can `mount -r <A> /mnt/a` and read every hash in
+   node A's `/etc/shadow`, and `cpu A passwd root` reaches node A's account
+   server with root authority.
+
+   **Not a regression** — the export has been machine- rather than
+   user-authenticated since it was built, and `mount -r` is not root-gated.
+   What changed on 2026-08-30 is the payload: before `accountd` there was no
+   privileged writer on the far end of that hole.
+
+   The design forks are real and unpicked, which is why this is an arc and not
+   a follow-up: whether identity travels **in the 9P frame** (per request) or
+   is negotiated **once per connection**; whether the cluster key stays a
+   single shared secret or becomes **per-user**; and what a remote uid even
+   *means* between two machines with independent `/etc/passwd` files (map by
+   name? by number? a per-node translation table? refuse and require an
+   explicit mapping?). The cluster-auth postmortem already named per-peer
+   identity as a deliberate later tier — this is that tier.
+
+2. **General / transitive capability delegation.** The delegation shipped
    2026-08-21 is deliberately coarse: one delegated target per task,
    non-transitive, in practice shell-only. Making it general (any task hands
    any held capability onward, revocably — MINIX's full grant model) would
@@ -38,7 +64,7 @@ What's still open on that arc, in rough order of value:
    delegation itself. Build the consumer first, or wait until one is
    actually wanted.
 
-2. **Per-task ASIDs, revisited** — a pure TLB-flush-per-switch optimization
+3. **Per-task ASIDs, revisited** — a pure TLB-flush-per-switch optimization
    that passed on QEMU but faulted the idle task on real Parallels and was
    reverted (see the isolation postmortem for the decoded fault evidence);
    needs a proven break-before-make sequence. Low value — a context switch
@@ -81,6 +107,14 @@ record is in [`CHANGELOG.md`](CHANGELOG.md):
 - **Shell interactive features** — output redirection, filename wildcards,
   tab completion, `-?` usage help, `man` pages, and the keyboard-ownership arc
   that lets interactive programs be `/bin` binaries.
+- **Users, permissions & account management** (2026-08-28 → 2026-08-30) — a
+  kernel-owned identity per task, a login gate, `fsd` permission enforcement
+  with ancestor-`x` traversal, `/etc/shadow`, supplementary groups, the
+  on-device account tools over a shared pure `accounts` crate, and finally
+  `accountd` — a fourth server (protected slot 5) so a user can change their *own*
+  password — with the message credential bound at **send** underneath it.
+  **One item remains and it is the next arc, promoted to the frontier below:
+  per-user cluster identity.**
 
 ## Remaining follow-ups from completed arcs (small, unsequenced)
 
@@ -431,9 +465,10 @@ crate, plus creator-owned new inodes.
   and locked out every account, root included, at ~23 accounts.
 - ~~**Ancestor-directory `x`-traversal**~~ — **shipped 2026-08-29.** Enforcement
   walks every ancestor's search bit, not just the object and its parent.
-- **Per-user cluster identity** — the 9P export authenticates the *machine*
-  (shared key), not a *user*; per-user identity across the cluster is a named
-  cluster-auth tier that would land here.
+- **Per-user cluster identity** — **the only item of this arc still open, and
+  promoted to "What's next" above on 2026-08-30** once `accountd` gave the hole
+  a privileged writer on the far end. The 9P export authenticates the *machine*
+  (shared key), not a *user*.
 - ~~**Symbolic-mode `chmod`** (`u+x`)~~ — **shipped 2026-08-29** (`u+x`, `go-w`,
   `a=rx`, `u+rw,go+r`, copy-source `g=u`, conditional `X`, `s`/`t`; octal still
   works and stays absolute). A real `/etc/skel` for `useradd` **also shipped
@@ -626,11 +661,16 @@ on the device) *and* an excellent libc **test case** — it exercises a large sl
 of the file API and its own test suite is exhaustive. Recorded as a concrete,
 motivating milestone for the libc arc: "the libc is real when SQLite runs on it."
 
-## Unfixed review findings against shipped code (2026-08-29)
+## Review findings against shipped code (2026-08-29 →)
 
-Raised by a code review of the security tier and **verified**, but left unfixed
-because they concern code that is already on `main` rather than the branch under
-review. Recorded here so they are not lost with the review transcript.
+Raised by code review of the security tier and **verified**, but left unfixed
+at the time because they concern code already on `main` rather than the branch
+under review. Recorded here so they are not lost with the review transcript.
+
+Kept as a **ledger**: an item that gets fixed is struck through with the date
+and left in place, rather than deleted. Two reasons. A reader wants to know a
+hazard was *considered*, not just that it is absent today; and the section
+would otherwise silently shrink into looking like nothing was ever found.
 
 - **The 9P export bypasses permissions entirely.** `netd` relays a remote
   request to `fsd` under its *own* root identity, so `check_access`'s
@@ -641,15 +681,22 @@ review. Recorded here so they are not lost with the review transcript.
   `cpu A passwd root` is a second door, since a spawned remote child inherits
   netd's root. **Not a regression** — the export has always been
   machine-authenticated rather than user-authenticated — but `/etc/shadow` gives
-  it a payload it did not have before. This is the concrete argument for
-  **per-user cluster identity**, above.
+  it a payload it did not have before — and `accountd` (2026-08-30) sharpened
+  that considerably: `cpu A passwd root` now reaches a *privileged writer* on
+  the far end, not just a readable file. This is the concrete argument for
+  **per-user cluster identity**, which was promoted out of the north-star
+  section to the top of "What's next" on 2026-08-30 precisely because of it.
+  **This finding is the specification for that arc**, and closes with it.
 - **`fsd`'s per-request cost multiplied** when ancestor-`x` traversal landed:
   `path_allows` now costs 2 + (ancestors + 1) + 1 path resolutions where it cost
   1, `NP_OPEN` with `O_RDWR` does three ancestor walks, and `caller_id` issues
   both credential syscalls (`SENDER_ID`/`SENDER_GROUPS` since 2026-08-30, when
   the recycled-slot escalation below was closed; `GET_ID`/`GET_GROUPS` before
   that) two or three times per request — including fetching an 8-gid list for a
-  root caller that returns immediately. Same shape
+  root caller that returns immediately. (2026-08-30: those two calls are now
+  `SENDER_ID`/`SENDER_GROUPS`, which read a captured cell rather than
+  validating a live slot — marginally cheaper, but the *count* is unchanged, so
+  this finding stands.) Same shape
   as the v0.4.1 FAT32 O(n²) read that ran past the supervisor's runnable-wedge
   and got `fsd` restarted mid-read; the cost is milliseconds per sector on real
   USB-MSD, not QEMU virtio-blk. **Unmeasured on hardware.**
@@ -701,6 +748,15 @@ review. Recorded here so they are not lost with the review transcript.
   misreports) and string-matches `"ext2"` (a future mode-modelling filesystem
   would raise a false alarm). `fsd` already derives this structurally from
   `stat().mode.is_some()`, which is what this should ask instead.
+- ~~**`libc/include/sys.h`'s `FS_ERR_MIN` had drifted from the Rust
+  constant.**~~ **Fixed 2026-08-30** (#37). The C header hand-mirrored the
+  reserved-error floor at `MAX-33` while `accountd`'s codes moved it to
+  `MAX-38`, so a C caller would have read `ACCT_ERR_IO` as a *successful*
+  return value. No live consumer (no C program calls `accountd`), which is
+  exactly why nothing caught it. The Rust definition now carries a note back to
+  the mirror, since the definition is what gets edited next. *Recorded as a
+  strike-through rather than deleted, per the ledger note above — it was
+  removed outright when fixed, which was the wrong call and is corrected here.*
 - **`useradd` accepts an empty password** while `passwd` now rejects one, so an
   account created by pressing Enter twice is loginable by pressing Enter. It is
   the only writer of an *initial* secret, so it is the one that most needs the

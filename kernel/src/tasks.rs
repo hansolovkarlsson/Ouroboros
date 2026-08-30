@@ -92,7 +92,7 @@ pub const NUM_TASKS: usize = 11;
 /// server).
 ///
 /// Adding the account server raised this from 5 to 6, and `NUM_TASKS` from 10 to
-/// 11 with it: a fifth server would otherwise have eaten one of the five
+/// 11 with it: a fourth server would otherwise have eaten one of the five
 /// spawnable slots, which is the pool a pipeline's stages come from.
 ///
 /// **`pub` on purpose, and load-bearing.** Every "is this slot protected?" guard
