@@ -210,6 +210,38 @@ pub fn task_id(task: u64) -> u64 {
     syscall(syscall_abi::GET_ID, task)
 }
 
+/// The packed `(gid << 32) | uid` of whoever sent the message this task most
+/// recently received - **bound by the kernel at send time**, not read back off
+/// the sender's slot afterwards. [`syscall_abi::GET_ID_ERR`] if no message has
+/// been received.
+///
+/// This is the call a server authorizing a request wants, and [`task_id`] is
+/// not: by the time a server drains its mailbox the sender may have exited and
+/// its slot been re-spawned, so `task_id(sender)` can report the *new*
+/// occupant's identity - root, if that is what landed there. See
+/// [`syscall_abi::SENDER_ID`].
+pub fn sender_id() -> u64 {
+    syscall(syscall_abi::SENDER_ID, 0)
+}
+
+/// The supplementary group list captured alongside [`sender_id`]. Returns how
+/// many gids the sender actually had (which may exceed `out`), or `None` if no
+/// message has been received.
+pub fn sender_groups(out: &mut [u32]) -> Option<usize> {
+    let n = syscall4(
+        syscall_abi::SENDER_GROUPS,
+        out.as_mut_ptr() as u64,
+        out.len() as u64,
+        0,
+        0,
+    );
+    if n == syscall_abi::GET_ID_ERR {
+        None
+    } else {
+        Some(n as usize)
+    }
+}
+
 /// This task's uid (the user it runs as; `0` = root).
 pub fn getuid() -> u32 {
     task_id(self_task()) as u32

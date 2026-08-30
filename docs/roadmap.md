@@ -646,8 +646,10 @@ review. Recorded here so they are not lost with the review transcript.
 - **`fsd`'s per-request cost multiplied** when ancestor-`x` traversal landed:
   `path_allows` now costs 2 + (ancestors + 1) + 1 path resolutions where it cost
   1, `NP_OPEN` with `O_RDWR` does three ancestor walks, and `caller_id` issues
-  both `GET_ID` and `GET_GROUPS` two or three times per request — including
-  fetching an 8-gid list for a root caller that returns immediately. Same shape
+  both credential syscalls (`SENDER_ID`/`SENDER_GROUPS` since 2026-08-30, when
+  the recycled-slot escalation below was closed; `GET_ID`/`GET_GROUPS` before
+  that) two or three times per request — including fetching an 8-gid list for a
+  root caller that returns immediately. Same shape
   as the v0.4.1 FAT32 O(n²) read that ran past the supervisor's runnable-wedge
   and got `fsd` restarted mid-read; the cost is milliseconds per sector on real
   USB-MSD, not QEMU virtio-blk. **Unmeasured on hardware.**
@@ -658,6 +660,19 @@ review. Recorded here so they are not lost with the review transcript.
   `ls -l ../f` is refused. Every `ls -l` entry also pays a guaranteed-useless
   ancestor walk. Note `check_access` is **default-allow** (`_ => true`), so a
   future `NP_` verb added without an arm here ships unauthenticated.
+- ~~**A server authorized on the *current* occupant of the sender's slot.**~~
+  **Fixed 2026-08-30.** `GET_ID(sender)` answered "who occupies slot N now",
+  not "who sent this": a non-root task could `MSG_SEND` (non-blocking), `EXIT`,
+  and have its slot reaped and re-spawned before `fsd` drained its mailbox, at
+  which point the request was authorized as whatever landed there — root, if a
+  root command did. Slots 5+ are the pool the shell recycles for every command,
+  so this was the ordinary path, not an exotic one. The earlier `is_live` guard
+  closed only the *dead*-slot half; a recycled slot is alive and
+  indistinguishable, because a message carries a bare `u8` slot number with no
+  generation. The kernel now binds the sender's credential at send
+  (`SENDER_ID`/`SENDER_GROUPS`) — see `docs/architecture.md`'s syscall table.
+  Raised against the unmerged account server, but it was `fsd`, in shipped
+  code, that had it on every permission check and every fid op.
 - **`warn_if_unprotected` fails open** — but does *not* misfire today, which is
   a distinction worth keeping straight. **Tested 2026-08-29 on all three
   images**: the warning correctly appears on FAT32 and exFAT and correctly stays

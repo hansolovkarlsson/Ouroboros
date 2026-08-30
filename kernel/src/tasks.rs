@@ -462,7 +462,47 @@ struct Message {
     /// protocol's payloads moved inline (see syscall-abi's
     /// MSG_MAX_LEN doc).
     len: u16,
+    /// The sender's credential **as of the moment it sent this**, not as of
+    /// the moment the receiver gets around to looking. See [`SENDER_IDS`] for
+    /// why the difference is a privilege escalation and not a nicety.
+    cred: Cred,
     data: [u8; MSG_MAX],
+}
+
+/// A task's full credential: packed `(gid << 32) | uid` plus the supplementary
+/// group list, which travels with it (the `SET_ID` group half exists precisely
+/// so identity and membership can never be set out of step - so they must never
+/// be *captured* out of step either).
+#[derive(Clone, Copy)]
+struct Cred {
+    id: u64,
+    groups: [u32; syscall_abi::MAX_SUPP_GROUPS],
+    n_groups: u8,
+    /// False for the initial value: "this task has not received a message", as
+    /// distinct from "its sender was root with no groups".
+    present: bool,
+}
+
+impl Cred {
+    const fn none() -> Self {
+        Cred { id: 0, groups: [0; syscall_abi::MAX_SUPP_GROUPS], n_groups: 0, present: false }
+    }
+}
+
+/// Snapshot `task`'s credential, for capture at send time.
+///
+/// Not every sender is a task: the supervisor's health ping is sent as
+/// [`syscall_abi::KERNEL_SENDER`] (0xFE), which indexes nothing. Such a message
+/// carries NO credential rather than a synthesized root one - a server that
+/// tried to authorize it would then fail closed, which is the right answer for
+/// a message the kernel sent on nobody's behalf.
+fn cred_of(task: usize) -> Cred {
+    if task >= NUM_TASKS {
+        return Cred::none();
+    }
+    let mut groups = [0u32; syscall_abi::MAX_SUPP_GROUPS];
+    let n = groups_of(task, &mut groups).min(syscall_abi::MAX_SUPP_GROUPS);
+    Cred { id: id_of(task), groups, n_groups: n as u8, present: true }
 }
 
 const MSG_MAX: usize = syscall_abi::MSG_MAX_LEN as usize;
@@ -478,7 +518,8 @@ struct Mailbox {
 impl Mailbox {
     const fn new() -> Self {
         Mailbox {
-            msgs: [Message { sender: 0, len: 0, data: [0; MSG_MAX] }; MSG_QUEUE_DEPTH],
+            msgs: [Message { sender: 0, len: 0, cred: Cred::none(), data: [0; MSG_MAX] };
+                MSG_QUEUE_DEPTH],
             head: 0,
             count: 0,
         }
@@ -526,6 +567,12 @@ pub(crate) fn send_message(sender: usize, dest: usize, data: &[u8]) -> u64 {
                 unsafe { core::ptr::write_volatile(dst.add(i), b) };
             }
             unsafe { (*TASKS[dest].0.get()).gpr[0] = ((sender as u64) << 32) | copy_len as u64 };
+            // No Message exists on this path, so the credential goes straight
+            // into the receiver's cell - captured here, at send time, which is
+            // the same instant it would have been captured into the queue.
+            if from.is_none() {
+                record_sender_cred(dest, cred_of(sender));
+            }
             unsafe { *STATES[dest].0.get() = TaskState::Runnable };
             return 0;
         }
@@ -538,6 +585,9 @@ pub(crate) fn send_message(sender: usize, dest: usize, data: &[u8]) -> u64 {
     let msg = &mut mailbox.msgs[slot];
     msg.sender = sender as u8;
     msg.len = data.len() as u16;
+    // Bind the sender's credential to the message NOW. Reading it back at
+    // dequeue would read whoever occupies the slot by then - see SENDER_CREDS.
+    msg.cred = cred_of(sender);
     msg.data[..data.len()].copy_from_slice(data);
     mailbox.count += 1;
     // A destination parked in NET_WAIT isn't in a Message wait, so the
@@ -594,6 +644,16 @@ pub(crate) fn try_recv_message_from(
     let dst = buf as *mut u8;
     for (k, &b) in msg.data[..copy_len].iter().enumerate() {
         unsafe { core::ptr::write_volatile(dst.add(k), b) };
+    }
+    // Only an UNFILTERED receive updates the captured credential. A filtered
+    // one is a `MSG_CALL` collecting the reply to a request this task made
+    // itself, and letting that overwrite the cell would be a live footgun: a
+    // server that logs to `cond` or reads a file through `fsd` mid-request
+    // would silently start authorizing against the credential of the server it
+    // just called. A request always arrives on an unfiltered receive; a reply
+    // never does.
+    if from.is_none() {
+        record_sender_cred(task, msg.cred);
     }
     Some(((msg.sender as u64) << 32) | copy_len as u64)
 }
@@ -916,6 +976,73 @@ pub(crate) fn groups_of(task: usize, out: &mut [u32]) -> usize {
         *slot = GROUPS[task][i].load(Ordering::Relaxed);
     }
     n
+}
+
+/// The credential of the sender of the **last message `task` received**, bound
+/// at the instant that message was sent.
+///
+/// `GET_ID(sender)` answers "who occupies slot N *now*", which is not the
+/// question a server authorizing a request is asking. A non-root task can
+/// `MSG_SEND` (which does not block), `EXIT` immediately, and have its slot
+/// reaped and re-spawned before the server drains its mailbox - at which point
+/// `GET_ID` reports the *new* occupant. If that occupant is root, the request
+/// is authorized as root. The dead-slot half of this window was already closed
+/// (`is_live` makes `GET_ID` refuse a slot with no live task); the *recycled*
+/// slot is indistinguishable from the original, because a message carries a
+/// bare `u8` slot number and nothing else.
+///
+/// So the kernel captures the credential at `send_message` instead - into the
+/// queued [`Message`] when it queues, or straight into this cell on the
+/// direct-delivery fast path where no `Message` ever exists - and hands it to
+/// the receiver through `SENDER_ID`/`SENDER_GROUPS`.
+///
+/// Only an **unfiltered** receive updates this. A filtered one collects the
+/// reply to a `MSG_CALL` this task made itself, and a request never arrives
+/// that way - so a server may call another server mid-request (log to `cond`,
+/// read a file through `fsd`) without the reply quietly replacing the
+/// credential it is about to authorize against. That, plus the fact that
+/// neither delivery point can fire for a task that is awake and running, is
+/// what makes the value safe to read at any point while handling a request
+/// rather than only immediately after the receive.
+static SENDER_CREDS: [SenderCredSlot; NUM_TASKS] =
+    [const { SenderCredSlot(UnsafeCell::new(Cred::none())) }; NUM_TASKS];
+
+struct SenderCredSlot(UnsafeCell<Cred>);
+// SAFETY: single-core, written only from SVC dispatch (the two delivery
+// points) - the same never-reentrant reasoning as every other per-task cell.
+unsafe impl Sync for SenderCredSlot {}
+
+/// Record `cred` as the credential behind `dest`'s newly delivered message.
+fn record_sender_cred(dest: usize, cred: Cred) {
+    unsafe { *SENDER_CREDS[dest].0.get() = cred };
+}
+
+/// `task`'s captured sender identity, or `None` if it has received nothing.
+pub(crate) fn sender_id_of(task: usize) -> Option<u64> {
+    let cred = unsafe { *SENDER_CREDS[task].0.get() };
+    cred.present.then_some(cred.id)
+}
+
+/// Copy `task`'s captured sender groups into `out`, returning the true count -
+/// or `None` if it has received nothing.
+pub(crate) fn sender_groups_of(task: usize, out: &mut [u32]) -> Option<usize> {
+    let cred = unsafe { *SENDER_CREDS[task].0.get() };
+    if !cred.present {
+        return None;
+    }
+    let n = cred.n_groups as usize;
+    let copy = n.min(out.len());
+    for (i, slot) in out.iter_mut().enumerate().take(copy) {
+        *slot = cred.groups[i];
+    }
+    Some(n)
+}
+
+/// Forget a dead task's captured sender credential, so a later occupant of the
+/// slot can never read its predecessor's - wired into every teardown path
+/// alongside `clear_mailbox`.
+pub(crate) fn clear_sender_cred(task: usize) {
+    unsafe { *SENDER_CREDS[task].0.get() = Cred::none() };
 }
 
 /// `task`'s owning uid (the low half of its packed identity).
@@ -1462,6 +1589,7 @@ pub(crate) unsafe fn exit_current_and_switch(frame: *mut Context, status: u64) -
     unsafe { *STATES[current].0.get() = TaskState::Zombie(status & 0xff) };
     unsafe { *REGIONS[current].0.get() = (0, 0) };
     clear_mailbox(current);
+    clear_sender_cred(current);
     clear_grant(current);
     clear_delegate(current);
     clear_argv(current);
@@ -1491,6 +1619,7 @@ pub(crate) fn kill_task(i: usize) {
     unsafe { *STATES[i].0.get() = TaskState::Unused };
     unsafe { *REGIONS[i].0.get() = (0, 0) };
     clear_mailbox(i);
+    clear_sender_cred(i);
     clear_grant(i);
     clear_delegate(i);
     clear_argv(i);
@@ -1522,6 +1651,7 @@ pub(crate) unsafe fn kill_current_and_switch(frame: *mut Context) {
     unsafe { *STATES[current].0.get() = TaskState::Unused };
     unsafe { *REGIONS[current].0.get() = (0, 0) };
     clear_mailbox(current);
+    clear_sender_cred(current);
     clear_grant(current);
     clear_delegate(current);
     clear_argv(current);

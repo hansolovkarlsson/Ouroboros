@@ -7,6 +7,41 @@ for the forward plan see [`roadmap.md`](roadmap.md).
 
 ---
 
+## 2026-08-30 — the question a server is actually asking
+
+Picked up the review findings recorded against the account server. The one that
+needed a kernel change turned out not to be about the account server at all.
+
+`GET_ID(sender)` answers *"who occupies slot N now."* A server authorizing a
+request is asking *"who occupied it when the request was made."* Those come
+apart exactly when a caller sends and exits — `MSG_SEND` does not block — and
+its slot is reaped and re-spawned before the server drains its mailbox. An
+earlier fix had made `GET_ID` refuse a *dead* slot, which felt like closing
+this and wasn't: a recycled slot is alive, and the message carries a bare `u8`
+with no generation, so nothing distinguishes the two. And the recycled case is
+not exotic — slots 5+ are the pool the shell reuses for every command. The hole
+was raised against the unmerged server, but `fsd` had it too, in shipped code,
+on every permission check and every fid op.
+
+So the kernel captures the credential at send. That is a small change, and it
+made two further things obvious only once it existed. Groups have to travel
+*with* the identity, because `SET_ID`'s group half exists precisely so the two
+can't be set out of step — capturing them separately would rebuild the hole one
+field at a time. And a reply must not overwrite the captured value: `fsd` logs
+to `cond` through a blocking `MSG_CALL`, so a single print mid-request would
+have had it authorize against `cond`. Restricting the capture to *unfiltered*
+receives turns "read it immediately, before you call anyone" from an invariant
+every future server has to remember into a property of the mechanism.
+
+The first boot hung one second in. The supervisor's health ping sends as
+`KERNEL_SENDER` (0xFE), which indexes no task slot — so the credential snapshot
+ran off the end of the array and panicked in the tick handler. Worth recording
+*how* that was found: the same script had been run against `main` first, and
+passed. A green run means nothing without a red one, and this is the second day
+running that the practice has earned its keep.
+
+---
+
 ## 2026-08-29 — finishing the security tier, and learning to distrust green
 
 A day of *finishing* rather than building: the follow-ups the users arc had

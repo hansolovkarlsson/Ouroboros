@@ -873,6 +873,34 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
                 tasks::id_of(t)
             }
         }
+        syscall_abi::SENDER_ID => {
+            // No arguments: the credential of whoever sent the message this
+            // task last received, captured by the kernel at SEND time. See the
+            // ABI doc and tasks::SENDER_CREDS for why GET_ID(sender) is the
+            // wrong question for a server that is authorizing a request.
+            tasks::sender_id_of(tasks::current_task()).unwrap_or(syscall_abi::GET_ID_ERR)
+        }
+        syscall_abi::SENDER_GROUPS => {
+            // arg0 = out pointer, arg1 = capacity in gids - GET_GROUPS' shape,
+            // against the captured credential rather than the live slot.
+            let cap = (arg1 as usize).min(syscall_abi::MAX_SUPP_GROUPS);
+            let bytes = (cap * core::mem::size_of::<u32>()) as u64;
+            if cap > 0 && !valid_user_range(arg0, bytes) {
+                return syscall_abi::GET_ID_ERR;
+            }
+            let mut gids = [0u32; syscall_abi::MAX_SUPP_GROUPS];
+            let Some(total) = tasks::sender_groups_of(tasks::current_task(), &mut gids[..cap]) else {
+                return syscall_abi::GET_ID_ERR;
+            };
+            for (i, g) in gids.iter().enumerate().take(cap.min(total)) {
+                let b = g.to_le_bytes();
+                for (k, byte) in b.iter().enumerate() {
+                    // SAFETY: range validated above.
+                    unsafe { core::ptr::write((arg0 as *mut u8).add(i * 4 + k), *byte) };
+                }
+            }
+            total as u64
+        }
         syscall_abi::RANDOM => {
             // arg0 = out pointer, arg1 = out capacity. Fills the caller's buffer
             // with hardware entropy, returning the byte count written - or
