@@ -61,8 +61,12 @@
 #define STAT_MODE_OFF 20u
 
 /* Floor of the reserved error band: any syscall/fs return >= this is an error
- * (mirrors syscall-abi's FS_ERR_MIN = u64::MAX - 33). */
-#define FS_ERR_MIN (~0UL - 33UL)
+ * (mirrors syscall-abi's FS_ERR_MIN = u64::MAX - 38). Hand-mirrored, so it can
+ * drift: the Rust constant moves DOWN whenever a new error code is reserved,
+ * and a C caller compiled against a stale floor reads those new codes as
+ * successful return values. syscall-abi's own definition carries a note back
+ * to this line for that reason. */
+#define FS_ERR_MIN (~0UL - 38UL)
 
 static inline long __os_syscall1(long num, long a0) {
     register long x8 asm("x8") = num;

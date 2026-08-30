@@ -270,6 +270,9 @@ pub enum LoaderError {
     /// [`NET_PATH`] couldn't be read - kept distinct so a missing network
     /// server is named for what it is.
     Netd(uefi::fs::Error),
+    /// [`ACCT_PATH`] couldn't be read - kept distinct so a missing account
+    /// server is named for what it is.
+    Accountd(uefi::fs::Error),
     Alloc(uefi::Error),
     /// File is smaller than a bare ELF header, or a header/table field
     /// points past the end of the file - either a corrupt/truncated file
@@ -308,6 +311,7 @@ impl core::fmt::Display for LoaderError {
             LoaderError::Fsd(e) => write!(f, "couldn't read {FSD_PATH}: {e}"),
             LoaderError::Cond(e) => write!(f, "couldn't read {CON_PATH}: {e}"),
             LoaderError::Netd(e) => write!(f, "couldn't read {NET_PATH}: {e}"),
+            LoaderError::Accountd(e) => write!(f, "couldn't read {ACCT_PATH}: {e}"),
             LoaderError::ProgramEmpty => write!(f, "program named in {CONFIG_PATH} is empty"),
             LoaderError::Alloc(e) => write!(f, "couldn't allocate memory for the program: {e}"),
             LoaderError::Truncated => write!(f, "program file is truncated or has an invalid ELF header/table offset"),
@@ -435,6 +439,35 @@ const NET_PATH: &str = "\\EFI\\ORBS\\NETD.BIN";
 /// the console server, and registers it with the supervisor for crash/wedge
 /// recovery too. A missing/broken NETD.BIN is not fatal (the caller logs and
 /// boots on with no network - `ping` reports no server).
+/// The account server's image. Missing ACCOUNTD.BIN is not fatal: the system
+/// boots without self-service password changes, exactly as it did before there
+/// was an account server.
+const ACCT_PATH: &str = "\\EFI\\ORBS\\ACCOUNTD.BIN";
+
+/// Loads the account server ([`ACCT_PATH`]) - the [`load_netd`] shape exactly.
+pub fn load_accountd() -> Result<LoadedProgram, LoaderError> {
+    let fs_proto = boot::get_image_file_system(boot::image_handle()).map_err(LoaderError::Protocol)?;
+    let mut fs = FileSystem::new(fs_proto);
+    let path = CString16::try_from(ACCT_PATH).unwrap();
+    let program_bytes = fs.read(path.as_ref()).map_err(LoaderError::Accountd)?;
+    if program_bytes.is_empty() {
+        return Err(LoaderError::ProgramEmpty);
+    }
+    // Report WHY: a full registry and an oversized image are different
+    // problems with different fixes, and naming the wrong one sends the
+    // reader to measure a binary that was never too big. accountd takes the
+    // LAST free MAX_SUPERVISED slot, so this is the call site where a full
+    // registry stops being theoretical.
+    if let Some(why) = crate::supervisor::register(syscall_abi::ACCT_TASK as usize, &program_bytes).why()
+    {
+        log::warn!(
+            "Ouroboros kernel: ACCOUNTD.BIN - {} - the account server won't be restartable this boot",
+            why
+        );
+    }
+    load_elf_into_el0_region(&program_bytes)
+}
+
 pub fn load_netd() -> Result<LoadedProgram, LoaderError> {
     let fs_proto = boot::get_image_file_system(boot::image_handle()).map_err(LoaderError::Protocol)?;
     let mut fs = FileSystem::new(fs_proto);

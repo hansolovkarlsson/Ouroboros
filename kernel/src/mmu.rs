@@ -164,7 +164,7 @@ unsafe impl Sync for Table {}
 /// independently guaranteed to fit within one 2MB-aligned slot (see
 /// the safety comments on `install_identity_map`), so a view needs
 /// exactly one L2 split and one L3 split - its own region's.
-const MAX_EL0_REGIONS: usize = 10;
+const MAX_EL0_REGIONS: usize = 11;
 
 // Per-task translation-table views (the per-task page-tables
 // milestone): view i is the table set task i runs under - identical

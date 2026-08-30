@@ -1316,6 +1316,31 @@ pub fn write_private_file(path: &str, data: &[u8]) -> u64 {
     fs_write_bulk(path, data)
 }
 
+/// Write `data` at `offset` into an **existing** private file, asserting mode
+/// 0600 first. The partner of [`write_private_file`], for the case where only
+/// part of a file changed.
+///
+/// The difference that matters is that this **never truncates**. A whole-file
+/// write is truncate-then-write - `ext2`'s overwrite branch frees the old blocks
+/// before the new ones land - so an `fsd` restart or a power loss in that window
+/// leaves a credential database EMPTY and every account, root included, unable
+/// to log in. Writing only the bytes that changed cannot do that: the worst an
+/// interruption leaves behind is a damaged copy of the one entry being
+/// rewritten, with every other account's line untouched.
+///
+/// Use [`accounts::changed_span`]-style logic to find the range; this only does
+/// the mode + write half, so it stays free of any notion of what the file holds.
+pub fn write_private_at(path: &str, offset: u64, data: &[u8]) -> u64 {
+    // The mode goes first, as in write_private_file: an existing file that is
+    // somehow world-readable is repaired before more secrets land in it, never
+    // after. FS_ERR_NOT_SUPPORTED means the filesystem models no mode at all.
+    let code = fs_chmod(path, 0o600);
+    if is_fs_error(code) && code != syscall_abi::FS_ERR_NOT_SUPPORTED {
+        return code;
+    }
+    fs_write_at(path, offset, data)
+}
+
 /// Write `data` to `path` with the data carried **inline** in the request
 /// (`NP_WRITE_FILE`, bounded by [`syscall_abi::FS_DATA_MAX`]), routed through the
 /// namespace like any fs op. Unlike [`fs_write_bulk`] (grant/safecopy, and it

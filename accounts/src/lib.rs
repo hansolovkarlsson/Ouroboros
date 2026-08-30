@@ -510,6 +510,44 @@ pub fn replace_line(
     Some((w, replaced))
 }
 
+/// The single byte range in which `new` differs from `old`, as `(offset, len)` -
+/// or `None` when the two are the same length but identical, or differ in
+/// length at all.
+///
+/// This is what makes a credential-database update **non-destructive**. Writing
+/// a rebuilt buffer over the file means truncate-then-write: `ext2`'s overwrite
+/// branch frees the old blocks first, so an `fsd` restart (documented to
+/// happen) or a power loss in that window leaves `/etc/shadow` empty and locks
+/// every account out, root included. Writing only the changed bytes at their
+/// offset never truncates and never touches another account's line - the worst
+/// an interruption can do is damage the one entry being changed.
+///
+/// A password change is exactly the case this covers: a shadow line's salt and
+/// hash are fixed-width hex, so replacing one leaves the file the same length
+/// and every other byte identical. Anything that changes the length (appending
+/// a first entry, rewriting a legacy line) returns `None` and the caller falls
+/// back to the whole-file write - correct, just not as safe, and never silent.
+pub fn changed_span(old: &[u8], new: &[u8]) -> Option<(usize, usize)> {
+    if old.len() != new.len() {
+        return None;
+    }
+    let mut start = 0usize;
+    while start < old.len() && old[start] == new[start] {
+        start += 1;
+    }
+    if start == old.len() {
+        return None; // byte-identical: nothing to write
+    }
+    // The backward scan cannot reach `start`: that byte differs, which is how
+    // the forward scan stopped there. The bound is kept anyway so the
+    // subtraction below is obviously non-negative to a reader.
+    let mut tail = 0usize;
+    while tail < old.len() - start && old[old.len() - 1 - tail] == new[new.len() - 1 - tail] {
+        tail += 1;
+    }
+    Some((start, old.len() - tail - start))
+}
+
 /// Rebuild an account/group file into `out` with the **first** line whose
 /// leading colon-field equals `name` removed. Returns `(new_len, removed)`, or
 /// `None` if it wouldn't fit. Output is normalized to one `\n` per line, like
@@ -652,6 +690,106 @@ fn hex_val(c: u8) -> Option<u8> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn changed_span_finds_the_one_line_a_password_change_touches() {
+        // The realistic shape: two accounts, the second one's hash replaced.
+        // Same length, so only that line's bytes may be written.
+        let old = b"root:aaaa:1111\nuser:bbbb:2222\n";
+        let new = b"root:aaaa:1111\nuser:cccc:3333\n";
+        let (off, len) = changed_span(old, new).unwrap();
+        assert_eq!(&new[off..off + len], b"cccc:3333");
+        // and root's line is entirely outside the range that gets written
+        assert!(off > old.iter().position(|&c| c == b'\n').unwrap());
+    }
+
+    #[test]
+    fn a_real_shadow_rewrite_stays_the_same_length() {
+        // The claim the non-destructive write rests on: because a shadow line's
+        // salt and hash are FIXED-WIDTH hex, replacing one entry leaves the file
+        // byte-for-byte the same length, so changed_span always finds a span and
+        // the truncating whole-file path is never taken for a password change.
+        // Written against the real formatter rather than a hand-typed fixture,
+        // so a change to the line format fails here instead of silently sending
+        // every password change down the destructive path.
+        // Through salt_from, so the test uses whatever a real caller produces.
+        let (salt_a, _) = salt_from(Some([0x11; 8]), 0);
+        let (salt_b, _) = salt_from(Some([0xEF; 8]), 0);
+        let hash_a = hash_password(&salt_a, b"before");
+        let hash_b = hash_password(&salt_b, b"after");
+
+        let mut one = [0u8; 256];
+        let n1 = format_shadow_line(&mut one, b"user", &salt_a, &hash_a).unwrap();
+        let mut two = [0u8; 256];
+        let n2 = format_shadow_line(&mut two, b"user", &salt_b, &hash_b).unwrap();
+        assert_eq!(n1, n2, "a shadow line's width must not depend on its content");
+
+        // Now the whole-file shape: root's entry ahead of the one being changed.
+        let mut root_line = [0u8; 256];
+        let rn = format_shadow_line(&mut root_line, b"root", &salt_a, &hash_a).unwrap();
+        let mut old = Vec::new();
+        old.extend_from_slice(&root_line[..rn]);
+        old.push(b'\n');
+        old.extend_from_slice(&one[..n1]);
+        old.push(b'\n');
+
+        let mut out = [0u8; 512];
+        let (olen, replaced) = replace_line(&old, &mut out, b"user", &two[..n2]).unwrap();
+        assert!(replaced);
+
+        let (off, len) = changed_span(&old, &out[..olen])
+            .expect("a same-length rewrite must be writable in place");
+        // Only the salt+hash of the changed account may be in the written range.
+        assert!(off > rn, "root's line must lie entirely before the written range");
+        assert_eq!(off + len, olen - 1, "nothing past the changed line's newline");
+    }
+
+    #[test]
+    fn changed_span_refuses_a_length_change() {
+        // An appended entry, or a legacy line rewritten to the modern format:
+        // no in-place update is possible, so the caller must rewrite wholesale.
+        assert_eq!(changed_span(b"a:1\n", b"a:1\nb:2\n"), None);
+        assert_eq!(changed_span(b"a:1\nb:2\n", b"a:1\n"), None);
+    }
+
+    #[test]
+    fn changed_span_reports_nothing_for_identical_buffers() {
+        assert_eq!(changed_span(b"root:aaaa:1111\n", b"root:aaaa:1111\n"), None);
+        assert_eq!(changed_span(b"", b""), None);
+    }
+
+    #[test]
+    fn changed_span_covers_a_first_and_a_last_byte_change() {
+        // No common prefix, and no common suffix - the span must still be tight.
+        assert_eq!(changed_span(b"abc", b"xbc"), Some((0, 1)));
+        assert_eq!(changed_span(b"abc", b"abx"), Some((2, 1)));
+        assert_eq!(changed_span(b"abc", b"xyz"), Some((0, 3)));
+    }
+
+    #[test]
+    fn changed_span_is_tight_when_bytes_repeat() {
+        // Repeated bytes are where a sloppy two-ended scan goes wrong. It can't
+        // here - the backward scan is stopped by the very byte the forward scan
+        // stopped on, since that one differs by definition - so the explicit
+        // bound in the loop is belt-and-braces, not the thing doing the work.
+        // (Confirmed by mutating that bound away: these still pass. Said out
+        // loud because a test that cannot fail is worse than no test.)
+        assert_eq!(changed_span(b"aaaa", b"aaba"), Some((2, 1)));
+        assert_eq!(changed_span(b"aaaa", b"abaa"), Some((1, 1)));
+        assert_eq!(changed_span(b"aaaa", b"abba"), Some((1, 2)));
+    }
+
+    #[test]
+    fn changed_span_applied_to_a_buffer_reproduces_the_new_one() {
+        // The property the caller actually relies on: writing just this span
+        // over the old bytes yields the new file exactly.
+        let old = b"root:aaaa:1111\nuser:bbbb:2222\nthird:cccc:3333\n";
+        let new = b"root:aaaa:1111\nuser:bZbb:2222\nthird:cccc:3333\n";
+        let (off, len) = changed_span(old, new).unwrap();
+        let mut patched = old.to_vec();
+        patched[off..off + len].copy_from_slice(&new[off..off + len]);
+        assert_eq!(&patched[..], &new[..]);
+    }
     use super::*;
 
     // A stored hash is always exactly 32 bytes (64 hex chars); the parser skips a

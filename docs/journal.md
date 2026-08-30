@@ -40,6 +40,64 @@ ran off the end of the array and panicked in the tick handler. Worth recording
 passed. A green run means nothing without a red one, and this is the second day
 running that the practice has earned its keep.
 
+The other four findings were the account server's own. Three were contained:
+`/etc/shadow`'s mode was only asserted when *creating* the file, so an existing
+world-readable one was never repaired and every later write landed secrets in
+it while reporting success; the resolved target name was silently truncated
+into a 64-byte buffer and then used as the rewrite key; and `/etc/passwd` was
+read with a helper that folds an I/O error into zero bytes, which then reads as
+"no such user" and sends the operator after a typo in a name that is present.
+
+The fourth was the one where the review's suggested fix did not exist. Writing
+the credential database as one whole-file write is truncate-then-write, so an
+`fsd` restart or a power loss in that window leaves `/etc/shadow` empty and
+locks everyone out, root included. The review said to use a temp file and
+`NP_MV` — except `mv` refuses an existing destination on all three filesystems,
+so replace-on-rename would be a filesystem arc of its own.
+
+It turned out not to be needed, and the reason is a property of the *data*
+rather than of the filesystem: a shadow line's salt and hash are fixed-width
+hex, so changing a password leaves the file **exactly as long, with every other
+byte identical**. The update can therefore be written as just the bytes that
+differ, at their offset — no truncation anywhere, and the worst an interruption
+can do is damage the one entry being changed while every other account still
+logs in. That is a smaller guarantee than atomic rename and a much cheaper one,
+and it is the right trade here: the property that matters is not "the change is
+all-or-nothing", it is "a failed change never locks anyone out".
+
+The ultra review came back with two findings, both nits — against fifteen on
+the combined branch yesterday. Encouraging, and the shape of what it found is
+the interesting part: both were **drift between a fact and its restatement
+elsewhere**, not logic errors.
+
+The four protected-slot guards in `syscall.rs` were correctly generalized to
+`FIRST_SPAWNABLE`, but all four comments beside them still enumerated "tasks
+0-4". They had been rewritten once already when netd became the fourth server;
+they would need it again for a sixth. So they now state the *bound* rather than
+the list, which is the only version that stops going stale.
+
+The second was better still. `libc/include/sys.h` hand-mirrors the reserved
+error band's floor, and this branch moved that floor from `MAX-33` to `MAX-38`
+to fit the `ACCT_ERR_*` codes — so a C program compiled against the stale
+header would read `ACCT_ERR_IO` as a *successful* return value. No live
+consumer today (no C program calls `accountd`), which is exactly why nothing
+caught it. Fixed both sides, and put a note at the Rust definition pointing
+back at the mirror, since the definition is what someone edits next.
+
+And a small "splitting isn't free" artifact fell out of checking it: the
+roadmap already carried a note saying this header had drifted — on `main`,
+where the two values actually still *matched*. The note had been written during
+the combined branch's review and went to `main` in the docs split while the
+code change it described stayed here. A deferral note that arrives before the
+thing it defers is just a false statement with a good alibi. Removed, now that
+it is genuinely fixed.
+
+One of the tests written for it turned out to be worthless, and only mutating
+the code showed it — a test named for a bound that guards nothing, because the
+backward scan is already stopped by the byte the forward scan stopped on.
+Renamed and re-commented to say so. A test that cannot fail is worse than no
+test, because it gets counted.
+
 ---
 
 ## 2026-08-29 — finishing the security tier, and learning to distrust green
