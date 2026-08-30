@@ -127,7 +127,7 @@
 //! `recover_from_stall` - but an interrupt-endpoint Stall just logs and
 //! re-arms the ring, without the Reset Endpoint/Set TR Dequeue Pointer
 //! sequence real recovery needs); no auto-repeat (a held key reports once
-//! per press, not repeatedly, by design - see [`Device::poll_key`]);
+//! per press, not repeatedly, by design - see [`poll_key`]);
 //! unmapped keys (function keys, arrows, ...) are silently ignored; only
 //! the first of up to 6 simultaneously-pressed keys in a report is ever
 //! surfaced; only the *first* interrupt IN endpoint found in the

@@ -324,7 +324,7 @@ fn kernel_block_2m(base: u64) -> u64 {
 /// 4KB page, EL1-only - same permissions as `kernel_block_2m`, just at L3
 /// granularity. Used for every page in the one L2 slot that gets split for
 /// `tasks::el0_region()`, except the page(s) the region itself occupies.
-/// Valid L3 entries always have bits[1:0] = 0b11 - the same bit pattern
+/// Valid L3 entries always have `bits[1:0]` = 0b11 - the same bit pattern
 /// `DESC_TABLE` uses at L0-L2 to mean "table", reinterpreted by hardware
 /// as "page" at the last level. Reusing the constant here is intentional,
 /// not a copy-paste mistake.
