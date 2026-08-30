@@ -38,7 +38,16 @@ struct Entry {
     start: u16,
     len: u16,
     is_dir: bool,
+    /// A `.`/`..` entry this program invented rather than one the server
+    /// listed - `start` means nothing for these, and `len` (1 or 2) selects
+    /// the name out of [`DOTS`]. See `show_listing` for why they are invented
+    /// here instead of being returned by `fsd`.
+    synth: bool,
 }
+
+/// The two synthetic names, overlapping: `.` is `DOTS[..1]`, `..` is
+/// `DOTS[..2]`.
+const DOTS: &[u8] = b"..";
 
 #[no_mangle]
 #[link_section = ".text.start"]
@@ -121,7 +130,7 @@ pub extern "C" fn _start() -> ! {
 
     // File operands are always shown (they were named), so `all` = true here.
     if filelen > 0 {
-        show_listing(target, cwd, &filedata[..filelen], true, long);
+        show_listing(target, cwd, &filedata[..filelen], true, false, long);
     }
 
     // Each directory operand's contents, headed by its name when there's more
@@ -146,7 +155,7 @@ pub extern "C" fn _start() -> ! {
             ls_err(argstr);
             continue;
         }
-        show_listing(target, dirpath, &listing[..n as usize], all, long);
+        show_listing(target, dirpath, &listing[..n as usize], all, all, long);
     }
 
     ulib::end_of_stream(target);
@@ -162,10 +171,27 @@ fn ls_err(arg: &str) {
 
 /// Collect a `name\n`/`name/\n` listing into entries, sort by name, and display
 /// it - columns (default) or the long form (`-l`). `dir` is the path the entries
-/// are relative to (for `-l`'s per-entry `stat`); `all` keeps dotfiles.
-fn show_listing(target: u64, dir: &str, data: &[u8], all: bool, long: bool) {
-    let mut entries = [Entry { start: 0, len: 0, is_dir: false }; MAX_ENTRIES];
+/// are relative to (for `-l`'s per-entry `stat`); `all` keeps dotfiles, and
+/// `dots` additionally shows `.` and `..`.
+///
+/// **`.` and `..` are invented here, not listed by the server.** Every
+/// filesystem arm in `fsd` filters them out of a directory listing, and that
+/// filter is load-bearing for every other client: `tree` would recurse
+/// forever, glob expansion would match them, and a future recursive `cp`/`rm`
+/// would walk in circles. Only `ls -a` wants them, so only `ls -a` makes them.
+///
+/// `-l` then stats them like any other name, and `ulib::resolve` normalizes
+/// `<dir>/.` and `<dir>/..` before the call - so the modes shown are the real
+/// ones for this directory and its parent, which is the whole point of asking.
+fn show_listing(target: u64, dir: &str, data: &[u8], all: bool, dots: bool, long: bool) {
+    let mut entries = [Entry { start: 0, len: 0, is_dir: false, synth: false }; MAX_ENTRIES];
     let mut count = 0usize;
+    if dots {
+        for len in [1u16, 2] {
+            entries[count] = Entry { start: 0, len, is_dir: true, synth: true };
+            count += 1;
+        }
+    }
     let mut pos = 0usize;
     while pos < data.len() && count < MAX_ENTRIES {
         let start = pos;
@@ -191,6 +217,7 @@ fn show_listing(target: u64, dir: &str, data: &[u8], all: bool, long: bool) {
             start: start as u16,
             len: name_len as u16,
             is_dir,
+            synth: false,
         };
         count += 1;
     }
@@ -237,7 +264,7 @@ fn print_columns(target: u64, entries: &[Entry], data: &[u8]) {
                 break;
             }
             let e = &entries[idx];
-            let name = &data[e.start as usize..e.start as usize + e.len as usize];
+            let name = entry_name(*e, data);
             append(&mut line, &mut w, name);
             if e.is_dir {
                 append(&mut line, &mut w, b"/");
@@ -259,7 +286,7 @@ fn print_columns(target: u64, entries: &[Entry], data: &[u8]) {
 /// the size and modified time from a `stat` of each entry.
 fn print_long(target: u64, dir: &str, entries: &[Entry], data: &[u8]) {
     for e in entries {
-        let name = &data[e.start as usize..e.start as usize + e.len as usize];
+        let name = entry_name(*e, data);
 
         // Stat the entry (dir/name) for size + modified time.
         let mut childbuf = [0u8; ulib::PATH_MAX];
@@ -340,6 +367,9 @@ fn sort_entries(entries: &mut [Entry], data: &[u8]) {
 }
 
 fn entry_name(e: Entry, data: &[u8]) -> &[u8] {
+    if e.synth {
+        return &DOTS[..e.len as usize];
+    }
     &data[e.start as usize..e.start as usize + e.len as usize]
 }
 
