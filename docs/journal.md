@@ -136,6 +136,41 @@ step, and the drift is invisible until someone goes looking. `cargo doc`
 returning zero is now one small piece of machinery that will notice — for one
 of the five kinds.
 
+Then the next arc, started the same day because the previous one had sharpened
+it: per-user cluster identity. The design question that decides the rest is what
+a remote uid *means* between two machines with independent `/etc/passwd` files —
+and the answer is that it means nothing, so send the **name** and let the far
+side resolve it through its own database. NFS's `AUTH_SYS` sends the number, and
+silently maps one user onto another the moment the numbering differs.
+
+Three things fell out that were not visible from the design.
+
+The auth header already had a MAC over `nonce ‖ message`, so putting the name
+inside it cost *nothing* — no new machinery, and the claimed user becomes
+untamperable for free. The architecture chose the design again, the way the
+one-connection-per-request shape had already ruled out per-connection
+negotiation.
+
+`netd` cannot `SET_ID` to the caller — it serves many connections from one task
+— so the identity has to travel as data, and the question becomes who may say
+it. `fsd` accepts it from `NET_TASK` and nowhere else, and checking the *slot*
+is sound in a way checking a credential would not be, because protected slots
+are never recycled. Which is where the morning's work turned out to be a
+**precondition** rather than a neighbour: before credentials were bound at send,
+"only `NET_TASK` may assert an identity" would itself have been reachable by
+recycling into that slot. Two changes, one story.
+
+And the rig could not test it. The two-node targets use the FAT32 image, which
+records no mode, so `fsd` has nothing to enforce and every remote request looks
+permitted there regardless of who sent it — the test would have passed before
+the fix and after it, meaning nothing either time. Building an ext2 two-node rig
+was most of the work, and it paid immediately: reverting only the source changes
+reproduced the original leak (an unprivileged user on B reading every hash on A)
+and putting them back turned it into a refusal, minutes apart on the same
+script. That is the shape of evidence this project has been converging on all
+week — not "it works" but "here is it not working, and here is the one change
+that fixes it".
+
 Written up as `docs/asking-the-right-question-postmortem.md`, the
 twenty-fourth.
 

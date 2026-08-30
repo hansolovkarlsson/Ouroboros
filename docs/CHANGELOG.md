@@ -7,6 +7,52 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/`; 
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## A remote request says *who*, not just *which machine* (2026-08-30)
+
+The 9P export authenticated a **machine** with the shared cluster key and then
+relayed every request to `fsd` under `netd`'s **own root identity** — so
+`check_access` hit its root bypass and short-circuited before any mode was read.
+On the two-node rig that meant an unprivileged user on node B could
+`mount -r <A> /mnt/a; cat /mnt/a/etc/shadow` and read every password hash on
+node A. That is now refused.
+
+**The name, not the number.** The auth header gained a 32-byte user name, and
+the magic moved to `AUTHNP02` — a deliberate flag day, since an `01` peer's
+first 32 message bytes would otherwise be read as a username. Two nodes have
+independent `/etc/passwd` files, so uid 1000 need not be the same person on
+both; NFS's `AUTH_SYS` sends the number and silently maps one user onto another
+whenever the numbering differs. The far side resolves the **name** through its
+own database and refuses one it does not know. The name rides **inside the
+MAC**, which costs nothing (the MAC was already there) and means it cannot be
+edited in flight without the key.
+
+**The one place a claimed identity is honoured.** `netd` cannot `SET_ID` to the
+caller — that changes its own task identity, and it serves many connections from
+one task — so the identity travels as data: `NP_PROXY_ID`, which `fsd` accepts
+**only from `NET_TASK`**. Checking the *slot* there is sound in a way checking a
+credential would not be: protected slots are never recycled, so `NET_TASK` is
+`netd` for the life of the boot.
+
+That check is only trustworthy because of the same day's send-bound credentials
+(below): before those, "only `NET_TASK` may assert an identity" would itself
+have been reachable by slot recycling. The two changes are one story, not two.
+
+**Scope, stated.** This defends against the *users* of a trusted node — the real
+exposure, since a node's own users are not all trusted even when the node is. A
+peer holding the cluster key can still claim any name; that needs per-user keys.
+And `cpu`'s spawned child still runs as root on the far side: the run is
+authenticated as the calling user, but the child's identity is the second half
+of the arc.
+
+**The rig could not have tested this.** The existing two-node targets use the
+FAT32 image, which records no mode — so `fsd` has nothing to enforce and every
+remote request looks permitted there whatever identity it carries. Added
+`run-image-2vm-ext2-a/b`, staged `CLUSTER.KEY` into the ext2 image (without it
+the export is fail-closed and the rig cannot come up), and
+`scripts/drive-2vm.py` to drive both guests unattended. Verified by reproducing
+the original leak with only the source changes reverted, then watching the same
+script turn it into a refusal.
+
 ## The users/permissions arc, closed (2026-08-30)
 
 The arc that began on 2026-08-28 with "the OS has no idea who you are" is

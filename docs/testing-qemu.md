@@ -189,6 +189,43 @@ gateway, no DNS. Each guest gets its own disk copy (`build/esp-a.img` /
 `esp-b.img`, since two QEMU write-locks can't share one file) and its own pcap
 (`build/net-a.pcap` / `net-b.pcap`).
 
+**FAT32 or ext2?** The `run-image-2vm-a`/`-b` pair boots the **FAT32** image,
+which is right for everything except permissions — FAT32 records no mode, so
+`fsd` has nothing to enforce and **every remote request looks permitted there
+regardless of who sent it**. That is not a bug in the rig, but it does mean a
+permission test on it passes before a fix and after it, proving nothing either
+time. For anything about *who may read what across the cluster*, use the ext2
+pair instead:
+
+```sh
+make run-image-2vm-ext2-a      # terminal 1, listens
+make run-image-2vm-ext2-b      # terminal 2
+```
+
+`make image-ext2` stages `CLUSTER.KEY` onto the ext2 disk for exactly this
+reason — without it `netd`'s export is fail-closed and the rig cannot come up
+at all.
+
+**Driving both nodes unattended.** `scripts/drive-2vm.py` starts A, runs its
+steps, then starts B and runs its steps while A stays alive — printing both
+transcripts and both abort counts:
+
+```sh
+cp build/espext2.img build/espext2-a.img
+cp build/espext2.img build/espext2-b.img
+python3 scripts/drive-2vm.py build/espext2-a.img build/espext2-b.img \
+  --a 'login@@root' 'assword@@root' '# @@' \
+  --b 'login@@user' 'assword@@user' \
+     '\$ @@mount -r 10.0.2.10:564 /mnt/a' \
+     '\$ @@cat /mnt/a/etc/shadow'
+```
+
+That exact script is what verified per-user cluster identity: it prints the
+hashes when run against the code *before* the fix and `cat: failed` after it.
+It shares `drive-qemu.py`'s `Guest` class rather than copying the console rules
+— the paced typing and the match-only-new-output high-water mark are the
+load-bearing parts, and a second copy of them would drift.
+
 **How the IPs work.** `netd` derives each guest's IPv4 from its NIC's MAC (last
 octet): the two-VM targets set MAC `…:0a` → **10.0.2.10** (machine A) and `…:0b` →
 **10.0.2.11** (machine B). (The default QEMU MAC `…:56` maps back to `.15`, so the
@@ -270,6 +307,8 @@ see [`manual.md`](manual.md)'s Parallels section.
 | `run-image-9p-client` | NIC only; guest mounts a host-run 9P server |
 | `run-image-2vm-a` | machine A of the two-node cluster (listen, IP `.10`) |
 | `run-image-2vm-b` | machine B of the two-node cluster (connect, IP `.11`) |
+| `run-image-2vm-ext2-a` | machine A on **ext2** — the only rig that can test cluster *permissions* |
+| `run-image-2vm-ext2-b` | machine B on ext2 (connect, IP `.11`) |
 | `run-usb-kbd` | xHCI + USB keyboard |
 | `run-usb-multi` | xHCI + tablet + storage stick |
 | `run-gicv3` | force GICv3 |

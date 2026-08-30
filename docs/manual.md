@@ -267,13 +267,34 @@ so the secret never crosses the wire, and a peer without the key gets nothing
 and are refused between machines that don't. Since v0.13.0 the exchange is
 **mutually authenticated** — replies are MAC'd too, so a client rejects a forged
 reply — but this is **integrity, not secrecy**: bytes still cross the wire in
-cleartext. This is **cluster-membership** auth, not per-peer identity, and it
-assumes a **trusted LAN** for the parts still deferred (a passive sniffer reads
-your files and can replay an observed request; encryption and per-peer identity
-are gated behind a "leaving a trusted network" trigger on the roadmap). Two knobs: no `\CLUSTER.KEY` = the export is closed
-entirely; a `\NOEXEC` flag file = the machine shares its disk but refuses remote
-`cpu` execution. Don't expose an Ouroboros export to a genuinely hostile network
-yet — per-peer auth, encryption, and replay protection are named next steps.
+cleartext.
+
+**Since 2026-08-30 a request also says *which user* is asking**, so the far side
+applies its own permissions instead of serving everything as root. Your **name**
+crosses the wire (inside the MAC, so it cannot be edited in flight) and the far
+machine resolves it through **its own** `/etc/passwd`, refusing a name it does
+not know. A name, not a number, because two machines number their users
+independently — uid 1000 need not be the same person on both. So on a remote
+mount you are *you*: you can read what your account may read there and no more,
+and a normal user can no longer read another machine's `/etc/shadow`. The
+account must exist on both machines, with the same name.
+
+**What that does and does not buy.** It protects against the **users** of a
+machine you trust — the real exposure, since a machine's own users are not all
+trusted even when the machine is. It does **not** protect against a compromised
+machine: anything holding the cluster key can claim any name. That needs
+per-user keys, which are a further step. The one gap left inside this: a `cpu`
+run is authenticated as you, but the command still *executes* as root on the far
+side.
+
+This remains **cluster-membership** auth for the machine, and it assumes a
+**trusted LAN** for the parts still deferred (a passive sniffer reads your files
+and can replay an observed request; encryption is gated behind a "leaving a
+trusted network" trigger on the roadmap). Two knobs: no `\CLUSTER.KEY` = the
+export is closed entirely; a `\NOEXEC` flag file = the machine shares its disk
+but refuses remote `cpu` execution. Don't expose an Ouroboros export to a
+genuinely hostile network yet — per-user keys, encryption, and replay protection
+are named next steps.
 
 **Config files (both optional, on the boot disk root), read by `netd` at boot:**
 

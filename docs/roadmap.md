@@ -30,9 +30,25 @@ that item leads this list rather than sitting in the north-star section it came
 from. In rough order of value (item 1 is the next *arc*; 2 and 3 are what the
 microkernel arc itself still leaves open):
 
-1. **Per-user cluster identity — the users arc's last item, and the next arc.**
-   The 9P export authenticates the *machine* (a shared cluster key), never a
-   *user*, and `netd` relays every remote request under its **own root
+1. **Per-user cluster identity — file access SHIPPED 2026-08-30, remote
+   execution still open.** A remote *file* request now carries the caller's
+   name, and the far side resolves it through its own `/etc/passwd` and applies
+   its own permissions; a non-root user can no longer read another node's
+   `/etc/shadow`. What remains is the **`cpu`** half: a remote run is
+   authenticated as the calling user, but the spawned command still executes as
+   root on the far side. That needs an identity for the child, and `SPAWN`'s
+   four argument slots are full — so it wants an `ID_STAGE` latch, exactly the
+   shape `ENV_STAGE` already uses for the same reason.
+
+   Also still open, and deliberately: **per-user keys**. What shipped defends
+   against the *users* of a trusted node, which is the real exposure — a node's
+   own users are not all trusted even when the node is. A peer holding the
+   shared cluster key can still claim any name, so this is not a defence
+   against a compromised *node*.
+
+   The original statement of the problem, kept because it is what the fix had
+   to undo: the 9P export authenticated the *machine* (a shared cluster key),
+   never a *user*, and `netd` relayed every remote request under its **own root
    identity** — so `fsd`'s `check_access` hits its root bypass and
    short-circuits before any mode is consulted. Concretely, today: an
    unprivileged user on node B can `mount -r <A> /mnt/a` and read every hash in
@@ -752,7 +768,15 @@ would otherwise silently shrink into looking like nothing was ever found.
   the far end, not just a readable file. This is the concrete argument for
   **per-user cluster identity**, which was promoted out of the north-star
   section to the top of "What's next" on 2026-08-30 precisely because of it.
-  **This finding is the specification for that arc**, and closes with it.
+  **This finding is the specification for that arc.**
+
+  **Mostly discharged 2026-08-30**: the *file* half is fixed — a remote request
+  carries the caller's name, the far side maps it through its own
+  `/etc/passwd`, and `check_access` runs against that user rather than `netd`'s
+  root. Verified by reproducing the original leak on the two-node rig and then
+  watching it turn into a refusal. `cpu A passwd root` remains: the run is
+  authenticated as the calling user, but the spawned child still executes as
+  root there.
 - **`fsd`'s per-request cost multiplied** when ancestor-`x` traversal landed:
   `path_allows` now costs 2 + (ancestors + 1) + 1 path resolutions where it cost
   1, `NP_OPEN` with `O_RDWR` does three ancestor walks, and `caller_id` issues
