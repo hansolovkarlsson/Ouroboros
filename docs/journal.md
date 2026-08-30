@@ -40,6 +40,37 @@ ran off the end of the array and panicked in the tick handler. Worth recording
 passed. A green run means nothing without a red one, and this is the second day
 running that the practice has earned its keep.
 
+The other four findings were the account server's own. Three were contained:
+`/etc/shadow`'s mode was only asserted when *creating* the file, so an existing
+world-readable one was never repaired and every later write landed secrets in
+it while reporting success; the resolved target name was silently truncated
+into a 64-byte buffer and then used as the rewrite key; and `/etc/passwd` was
+read with a helper that folds an I/O error into zero bytes, which then reads as
+"no such user" and sends the operator after a typo in a name that is present.
+
+The fourth was the one where the review's suggested fix did not exist. Writing
+the credential database as one whole-file write is truncate-then-write, so an
+`fsd` restart or a power loss in that window leaves `/etc/shadow` empty and
+locks everyone out, root included. The review said to use a temp file and
+`NP_MV` — except `mv` refuses an existing destination on all three filesystems,
+so replace-on-rename would be a filesystem arc of its own.
+
+It turned out not to be needed, and the reason is a property of the *data*
+rather than of the filesystem: a shadow line's salt and hash are fixed-width
+hex, so changing a password leaves the file **exactly as long, with every other
+byte identical**. The update can therefore be written as just the bytes that
+differ, at their offset — no truncation anywhere, and the worst an interruption
+can do is damage the one entry being changed while every other account still
+logs in. That is a smaller guarantee than atomic rename and a much cheaper one,
+and it is the right trade here: the property that matters is not "the change is
+all-or-nothing", it is "a failed change never locks anyone out".
+
+One of the tests written for it turned out to be worthless, and only mutating
+the code showed it — a test named for a bound that guards nothing, because the
+backward scan is already stopped by the byte the forward scan stopped on.
+Renamed and re-commented to say so. A test that cannot fail is worse than no
+test, because it gets counted.
+
 ---
 
 ## 2026-08-29 — finishing the security tier, and learning to distrust green
