@@ -713,6 +713,21 @@ Known small gaps, not yet sequenced (the *completed* parking-lot entries — USB
 keyboard, GOP console, preemption, task destruction, driver isolation, etc. — are
 in [`roadmap-completed.md`](roadmap-completed.md)):
 
+- **`mv` cannot replace an existing destination.** All three filesystem arms
+  return `AlreadyExists` if the target name is taken, so `mv a b` fails where
+  every Unix would overwrite `b`. Found 2026-08-30 while fixing the account
+  server's destructive-rewrite finding, whose obvious fix — write a temp file,
+  rename over the target — has nowhere to land because of this. (That finding
+  got a better fix anyway: write only the bytes that differ. But the *general*
+  "update a file without a window in which it is empty" pattern still has no
+  primitive.) The user-visible half is a one-line surprise; the interesting half
+  is that a real replace should be **atomic**, and `ext2` can very nearly manage
+  it — replacing a name means overwriting one directory entry's inode number in
+  place, a single block write, after which the name resolves to the new content
+  and the old inode is merely orphaned (leaked blocks, `e2fsck`-fixable) rather
+  than the name being briefly absent. FAT32/exFAT have no inode indirection, so
+  there it is unavoidably delete-then-rename with a window, and that difference
+  should be stated rather than papered over.
 - ~~**`grep` has no regex**~~ — **shipped 2026-08-29.** Patterns are POSIX
   **extended** regular expressions (`.` `*` `+` `?` `[...]` `^` `$` `|` `(...)`),
   via a new pure, host-tested **`regex` crate** at the repo root; `-F` keeps the
