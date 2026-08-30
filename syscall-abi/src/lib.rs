@@ -699,6 +699,42 @@ pub const GET_ID: u64 = 62;
 /// is the quiet weakness this device exists to remove.
 pub const RANDOM: u64 = 63;
 
+/// **Sender identity, bound at send time** - the packed `(gid << 32) | uid` of
+/// the task that sent the message this one most recently received, or
+/// [`GET_ID_ERR`] if it has received none. No arguments: it answers about the
+/// last delivery, which is the only message a server is ever authorizing.
+///
+/// This exists because [`GET_ID`] cannot answer the question a server actually
+/// has. `GET_ID(sender)` reports who occupies that slot **now**; a request was
+/// made by whoever occupied it **then**. A non-root task can `MSG_SEND` (which
+/// does not block), `EXIT`, and have its slot reaped and re-spawned before the
+/// server drains its mailbox - and if the new occupant is root, the request is
+/// authorized as root. Refusing a *dead* slot does not close this: a recycled
+/// slot is perfectly alive, and a message carries a bare slot number with no
+/// generation, so nothing in it distinguishes the two.
+///
+/// The kernel therefore captures the sender's credential when the message is
+/// sent and hands that to the receiver here. Use this - not `GET_ID(sender)` -
+/// wherever an identity is being used to authorize a request.
+///
+/// Only an **unfiltered** receive ([`MSG_RECV`]/[`MSG_TRY_RECV`] with no sender
+/// filter) updates it. The reply to your own [`MSG_CALL`] does not, so a server
+/// may log to `cond` or read a file through `fsd` in the middle of handling a
+/// request without the reply replacing the credential it is authorizing
+/// against - a request only ever arrives on an unfiltered receive.
+pub const SENDER_ID: u64 = 65;
+
+/// The supplementary group list captured alongside [`SENDER_ID`], with the same
+/// `(out pointer, capacity)` arguments and return value as [`GET_GROUPS`]:
+/// the sender's true count (which may exceed the capacity), or [`GET_ID_ERR`]
+/// if no message has been received.
+///
+/// Separate from `SENDER_ID` only because one syscall returns one word. The
+/// two are captured together and never drift: membership is part of a
+/// credential, so reading a fresh identity against a stale group list would
+/// reintroduce the same hole one field at a time.
+pub const SENDER_GROUPS: u64 = 66;
+
 /// [`RANDOM`] on a machine with no entropy device (or with an invalid output
 /// buffer). Distinct from `0`, which would mean "a device answered, with
 /// nothing" - the caller should treat this one as "there is no RNG here".

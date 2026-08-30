@@ -337,7 +337,7 @@ fn handle(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [Fid; M
         // much as detaching: a user could mount a partition deliberately left
         // unmounted (unenforced entirely on FAT/exFAT), or an attacker-authored
         // ext2 image carrying chosen uid/gid/mode metadata.
-        if !caller_is_root(sender) {
+        if !caller_is_root() {
             return status_reply(reply, syscall_abi::FS_ERR_PERM);
         }
         // The auto-mount at tree 0 (the default the shell's `mount -a` triggers).
@@ -351,7 +351,7 @@ fn handle(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [Fid; M
 
     if op == syscall_abi::FSOP_MOUNT_AT {
         // ROOT ONLY - same reasoning as FSOP_MOUNT above.
-        if !caller_is_root(sender) {
+        if !caller_is_root() {
             return status_reply(reply, syscall_abi::FS_ERR_PERM);
         }
         // Multi-mount: mount the p[0]-th partition into a fresh tree slot and
@@ -384,7 +384,7 @@ fn handle(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [Fid; M
     } else if op == syscall_abi::FSOP_UNMOUNT {
         // ROOT ONLY - taking the disk away is at least as privileged as writing
         // to it. Confirmed reachable: `unmount` as an ordinary user succeeded.
-        if !caller_is_root(sender) {
+        if !caller_is_root() {
             return status_reply(reply, syscall_abi::FS_ERR_PERM);
         }
         // Unmount tree 0 (the primary mount).
@@ -398,7 +398,7 @@ fn handle(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [Fid; M
         || op == syscall_abi::FSOP_FORMAT
     {
         // ROOT ONLY - these rewrite the raw disk.
-        if !caller_is_root(sender) {
+        if !caller_is_root() {
             return status_reply(reply, syscall_abi::FS_ERR_PERM);
         }
         // Raw-disk ops (erase/partition/format) rewrite disk structures, so they
@@ -460,7 +460,7 @@ fn handle_ninep(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [
     // uid/gid against the target's owner+mode before running the op. ext2-only
     // (others return mode:None, which `check_access` treats as unrestricted);
     // root bypasses. See `check_access`.
-    if !check_access(fs, sender, verb, &p, payload) {
+    if !check_access(fs, verb, &p, payload) {
         return status_reply(reply, syscall_abi::FS_ERR_PERM);
     }
     // New files/dirs are owned by their creator, not root: stamp the caller's
@@ -470,7 +470,7 @@ fn handle_ninep(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [
     // home - the created file would be root-owned and the follow-up write denied.
     // No identity (a dead sender) must not stamp new inodes as root; the verb
     // itself is denied by check_access below, this is just the safe default.
-    let (cuid, cgid) = caller_id(sender).map_or((u32::MAX, u32::MAX), |c| (c.uid, c.gid));
+    let (cuid, cgid) = caller_id().map_or((u32::MAX, u32::MAX), |c| (c.uid, c.gid));
     fs.set_creator(cuid as u16, cgid as u16);
     match verb {
         ninep_abi::NP_READDIR => {
@@ -705,7 +705,7 @@ fn handle_ninep(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [
                     return status_reply(reply, error_code(&e));
                 }
             }
-            let opener_uid = caller_id(sender).map_or(u32::MAX, |c| c.uid);
+            let opener_uid = caller_id().map_or(u32::MAX, |c| c.uid);
             match alloc_fid(fids, sender, opener_uid, tree, path, flags) {
                 Some(fid) => status_reply(reply, fid),
                 None => status_reply(reply, syscall_abi::FS_ERROR), // table full
@@ -784,7 +784,7 @@ fn handle_fid_op(
         return status_reply(reply, 0);
     }
     // The slot must still be held by the same USER - see Fid::owner_uid.
-    match caller_id(sender) {
+    match caller_id() {
         Some(c) if c.uid == fids[idx].owner_uid => {}
         _ => {
             fids[idx].used = false; // stale: drop it rather than leave it lying about
@@ -974,35 +974,43 @@ fn mode_allows(mode: u16, owner_uid: u32, owner_gid: u32, who: &Caller, need: u1
     triad & need == need
 }
 
-/// The calling task's `(uid, gid)` from the kernel (`GET_ID`). The identity is a
-/// packed `(gid << 32) | uid`; widened to `u32` to compare against the ext2
-/// inode's `u16` owner fields.
-fn caller_id(sender: u64) -> Option<Caller> {
-    let packed = syscall4(syscall_abi::GET_ID, sender, 0, 0, 0);
-    // The kernel reports GET_ID_ERR for a slot that is not a live task. A dead
-    // slot's identity has been reset to root, so believing it would authorize a
-    // request whose sender already exited as if root had sent it. No identity,
-    // no decision.
+/// The requesting task's `(uid, gid)` and group list, as **captured by the
+/// kernel when the request was sent** (`SENDER_ID`/`SENDER_GROUPS`). The
+/// identity is a packed `(gid << 32) | uid`; widened to `u32` to compare
+/// against the ext2 inode's `u16` owner fields.
+///
+/// Deliberately NOT `GET_ID(sender)`, which answers who occupies that slot
+/// *now*. A caller can send a request (`MSG_SEND` does not block), exit, and
+/// have its slot reaped and re-spawned before this server drains its mailbox -
+/// and if the new occupant is root, the request would be authorized as root.
+/// Refusing a *dead* slot never closed that: a recycled slot is alive, and the
+/// message carries a bare slot number with nothing to tell the two apart. The
+/// kernel binds the credential at send instead; this reads that.
+///
+/// `None` when the kernel has no captured credential to report, and every
+/// caller fails closed on it.
+fn caller_id() -> Option<Caller> {
+    let packed = syscall4(syscall_abi::SENDER_ID, 0, 0, 0, 0);
     if packed == syscall_abi::GET_ID_ERR {
         return None;
     }
     let mut groups = [0u32; syscall_abi::MAX_SUPP_GROUPS];
     let n = syscall4(
-        syscall_abi::GET_GROUPS,
-        sender,
+        syscall_abi::SENDER_GROUPS,
         groups.as_mut_ptr() as u64,
         groups.len() as u64,
+        0,
         0,
     );
     let n_groups = if n == syscall_abi::GET_ID_ERR { 0 } else { (n as usize).min(groups.len()) };
     Some(Caller { uid: packed as u32, gid: (packed >> 32) as u32, groups, n_groups })
 }
 
-/// Whether the message's sender is root - the gate on the disk-management
-/// control ops, which never pass through [`check_access`]. A sender with no
-/// identity (already dead) is not root.
-fn caller_is_root(sender: u64) -> bool {
-    matches!(caller_id(sender), Some(c) if c.uid == 0)
+/// Whether the request's sender was root **when it sent** - the gate on the
+/// disk-management control ops, which never pass through [`check_access`]. A
+/// sender the kernel has no captured credential for is not root.
+fn caller_is_root() -> bool {
+    matches!(caller_id(), Some(c) if c.uid == 0)
 }
 
 /// The parent directory of an absolute path (`/etc/passwd` -> `/etc`, `/foo` ->
@@ -1135,8 +1143,8 @@ fn path_allows(fs: &mut vfs::Filesystem, path: &str, who: &Caller, need: u16) ->
 
 /// Enforce the caller's permission for `verb`. Returns `true` if allowed. Reads
 /// the object's owner+mode via `stat` and compares against the caller's uid/gid.
-fn check_access(fs: &mut vfs::Filesystem, sender: u64, verb: u64, p: &[u64; 4], payload: &[u8]) -> bool {
-    let Some(who) = caller_id(sender) else {
+fn check_access(fs: &mut vfs::Filesystem, verb: u64, p: &[u64; 4], payload: &[u8]) -> bool {
+    let Some(who) = caller_id() else {
         return false; // sender is gone - nothing to authorize
     };
     let uid = who.uid;
