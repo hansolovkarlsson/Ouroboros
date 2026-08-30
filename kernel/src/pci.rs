@@ -14,7 +14,7 @@
 //! 8250/16450/16550 family, per the PCI Code and ID Assignment spec — never
 //! how a PL011 would be identified over PCI. A match here means the console
 //! is a completely different device to the ones `devicetree.rs`/`acpi.rs`
-//! look for, hence returning [`uart16550::Uart16550`]'s base address, not a
+//! look for, hence returning [`crate::uart16550::Uart16550`]'s base address, not a
 //! PL011 one.
 
 use uefi::proto::pci::root_bridge::PciRootBridgeIo;

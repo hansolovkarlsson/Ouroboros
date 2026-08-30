@@ -484,7 +484,7 @@ struct Message {
     /// MSG_MAX_LEN doc).
     len: u16,
     /// The sender's credential **as of the moment it sent this**, not as of
-    /// the moment the receiver gets around to looking. See [`SENDER_IDS`] for
+    /// the moment the receiver gets around to looking. See [`SENDER_CREDS`] for
     /// why the difference is a privilege escalation and not a nicety.
     cred: Cred,
     data: [u8; MSG_MAX],

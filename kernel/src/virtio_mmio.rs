@@ -65,7 +65,7 @@
 //! reads (and the firmware's own boot process, which is how it finds and
 //! loads this kernel to begin with) go through EDK2's own bundled
 //! virtio-blk driver talking to this exact device, entirely during boot
-//! services, before our kernel exists. [`Device::init`] therefore resets
+//! services, before our kernel exists. `find_device` therefore resets
 //! the device (`Status = 0`) as its first step unconditionally, per the
 //! virtio spec's own requirement for a driver taking ownership of a
 //! device - not assuming a clean slate.

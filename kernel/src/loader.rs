@@ -260,12 +260,13 @@ pub enum LoaderError {
     PathEncoding,
     Program(uefi::fs::Error),
     ProgramEmpty,
-    /// [`FSD_PATH`] couldn't be read - kept distinct from [`Program`]
+    /// [`FSD_PATH`] couldn't be read - kept distinct from [`LoaderError::Program`]
     /// so the boot log doesn't misleadingly blame `INIT.CFG` for a
     /// missing filesystem server.
     Fsd(uefi::fs::Error),
-    /// [`CON_PATH`] couldn't be read - kept distinct from [`Program`]/
-    /// [`Fsd`] so a missing console server is named for what it is.
+    /// [`CON_PATH`] couldn't be read - kept distinct from
+    /// [`LoaderError::Program`]/[`LoaderError::Fsd`] so a missing console
+    /// server is named for what it is.
     Cond(uefi::fs::Error),
     /// [`NET_PATH`] couldn't be read - kept distinct so a missing network
     /// server is named for what it is.
