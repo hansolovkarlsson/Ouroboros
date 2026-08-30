@@ -53,6 +53,52 @@ microkernel arc itself still leaves open):
    explicit mapping?). The cluster-auth postmortem already named per-peer
    identity as a deliberate later tier — this is that tier.
 
+   **Considered and not taken: a per-user `~/.shadow`.** Recorded here because per-user credential records are exactly what this arc
+   will reach for, and the reasoning below is the thing to re-read when it does.
+
+   The question: `/etc/shadow` is mode 0600 root, so a user cannot write their
+   own password — which is the entire reason `accountd` exists. What if each
+   user's secret lived in `~/.shadow` instead, owned by them at 0600? Then a
+   user can write it with no privilege at all, root still reads it through the
+   root bypass, and the server is unnecessary.
+
+   **It works.** `login` already learns the home directory from the
+   world-readable `/etc/passwd` before it knows who you are, so it can find the
+   file; `passwd` becomes an ordinary program; a task slot, an IPC protocol and
+   ~270 lines disappear. This is not a bad idea, and it is worth understanding
+   why it was not taken rather than assuming it was never thought of.
+
+   **What it costs is the property that makes a credential store worth having:
+   the record stops being outside the control of the principal it
+   authenticates.** Three consequences, ascending:
+
+   - **`passwd`'s policy becomes advisory.** Its empty-password rejection — and
+     any future length or complexity rule — is enforced in a program the user
+     need not run. They can write the file directly with `writeat`, or compute
+     a hash with their own program (there is a C toolchain). With a server, the
+     server is the *only* writer and policy sits at a choke point.
+   - **The old-password proof becomes unenforceable**, and that check's whole
+     point is lost with it. It never protected against the user — they are
+     already authenticated as themselves. It protects against *someone at their
+     unattended terminal*, for whom overwriting a user-writable file is a
+     one-liner.
+   - **Disabling, expiry and lockout become impossible.** Root disables an
+     account; the account's owner edits it back. Ouroboros has none of these
+     today, so the cost is entirely future — but it forecloses the category
+     rather than deferring it.
+
+   Smaller structural warts: root's home is `/`, so root's record would be
+   `/.shadow`; a service account with no home has nowhere to put one; and
+   `useradd` grows more fragile, since the home would have to exist and be
+   chowned *before* the password commits, undoing the ordering that makes
+   `/etc/passwd` the single commit point.
+
+   **The good idea inside it is separable, and worth keeping** — see the
+   `/etc/shadow.d/` follow-up below. The *split* (one record per user) is sound
+   on its own; it is putting the split somewhere the user **owns** that gives
+   away the guarantee. Split and ownership are independent choices, and only
+   the second one is the problem.
+
 2. **General / transitive capability delegation.** The delegation shipped
    2026-08-21 is deliberately coarse: one delegated target per task,
    non-transitive, in practice shell-only. Making it general (any task hands
@@ -125,6 +171,26 @@ The small open tails those arcs deliberately left:
   separate large arc, not a near-term ext2 follow-on.
 - **A `/dev` namespace.** Only if multi-disk/partition addressing arrives (the
   Plan 9 devfs direction); nothing to name yet with one block device.
+- **`/etc/shadow.d/<name>` — one credential record per user, in a *root-owned*
+  directory** (dir 0755 root, files 0600 root). The salvageable half of the
+  `~/.shadow` idea above: it keeps the per-user split and drops the per-user
+  ownership, so `accountd` remains the only writer and every policy check stays
+  at its choke point. Three concrete wins, none of them speculative:
+  - **It bounds the read by construction.** A whole-file read of `/etc/shadow`
+    reporting `0` on overflow is what locked out every account *including root*
+    at ~23 entries (see the ledger below). That was fixed by streaming one line;
+    a per-user file makes the bug unrepresentable instead of handled.
+  - **It removes the whole-file rewrite**, and with it the reason
+    `accounts::changed_span` and the write-only-the-differing-bytes path had to
+    exist — those were written because truncating the shared file would lock
+    everyone out mid-update.
+  - **It is probably the shape per-user cluster identity wants**, since a
+    credential that must be named per user across machines is already a
+    per-user record.
+
+  Not urgent: the streaming read and the non-destructive write already close the
+  failure modes it would prevent. It is a simplification with a security
+  argument, not a fix.
 
 ## Testing infrastructure: scripted real-hardware round trips
 
