@@ -98,6 +98,44 @@ backward scan is already stopped by the byte the forward scan stopped on.
 Renamed and re-commented to say so. A test that cannot fail is worse than no
 test, because it gets counted.
 
+Both branches then went through their own ultra review, one at a time rather
+than bundled — the combined-branch mistake was still fresh enough not to
+repeat. The account server came back with two findings; the kernel change with
+one. All three were nits, against fifteen on the combined branch the day
+before, which is about as direct a measurement of the split's value as we are
+going to get.
+
+What is worth recording is not the count but the *shape*. Not one of the three
+was a logic error. Every one was a fact correctly changed in one place and left
+standing in its restatement somewhere else: four comments that still enumerated
+"tasks 0-4" beside a guard that now covers 0-5; a C header still pinning the
+reserved-error floor at `MAX-33` while the Rust constant had moved to `MAX-38`,
+so a C caller would read `ACCT_ERR_IO` as a *successful* return value; and a
+doc link pointing at `SENDER_IDS`, which does not exist.
+
+Then the same failure turned up twice more, found two other ways. Reconciling
+the old combined branch before closing it — 207 identifiers introduced, 203
+present on `main`, the four absent all verified renames — surfaced a manpage
+still telling users the group list reaches the kernel via `SET_GROUPS`, a
+syscall that was designed and never shipped. And chasing the broken doc link
+meant running `cargo doc`, which reported **nine** unresolved links, eight
+older than this week. Nine had accumulated for the obvious reason: nothing
+reads that output, so the signal was already useless by the time the ninth
+arrived. Fixed all of them, so the next one is visible rather than buried.
+Finally `CLAUDE.md` — the file that exists to be read before touching the code
+— still described ten task slots, four servers, and two different, both wrong,
+crate counts.
+
+Five instances in one day, found five different ways, and **none** were visible
+to the compiler or to any test. That is not a coincidence, it is the category:
+a comment, a manpage, a doc link, an unused C constant and a prose count are
+precisely what neither checks. Yesterday's lesson was that a green signal is a
+claim rather than evidence. Today's is narrower and, I think, more useful: the
+code has one copy of each fact and the prose has several, nothing keeps them in
+step, and the drift is invisible until someone goes looking. `cargo doc`
+returning zero is now one small piece of machinery that will notice — for one
+of the five kinds.
+
 ---
 
 ## 2026-08-29 — finishing the security tier, and learning to distrust green
