@@ -1342,7 +1342,7 @@ phase:
 
 ---
 
-## Users, permissions & account management arc — DONE (2026-08-28)
+## Users, permissions & account management arc — DONE (2026-08-28 → 2026-08-30)
 
 Moved here from `roadmap.md` item 4 once complete. The step from "one implicit
 user, whoever's at the keyboard" to a real identity + permission model with
@@ -1383,6 +1383,50 @@ repoint, not a rewrite — option 1 is a strict subset of the server). Groups ar
 [`users-and-permissions-postmortem.md`](users-and-permissions-postmortem.md)
 (steps 1–3, the 20th) and
 [`account-management-postmortem.md`](account-management-postmortem.md) (step 4,
-the 22nd). The forward-looking deferred refinements (self-service `passwd`, a
-virtio-entropy RNG, supplementary groups, `/etc/shadow`, ancestor-`x`, per-user
-cluster identity, symbolic `chmod`) stay in [`roadmap.md`](roadmap.md) item 4.
+the 22nd).
+
+### Steps 5–6: the deferred tier, closed (2026-08-29 → 2026-08-30)
+
+Every refinement this arc deferred was closed within two days, **except one**.
+The write-up above listed them as staying in `roadmap.md`; they did not stay
+long, so here is where each went:
+
+5. **The security follow-ups (2026-08-29)** — `/etc/shadow` (#28), supplementary
+   groups (#31), ancestor-`x` traversal (#27), plus a virtio-entropy RNG,
+   symbolic `chmod`, `chown` by name and `/etc/skel` (#26), and the docs and a
+   supervisor fix the split had dropped (#32). Notable less for the code than
+   for the *process*: the work began as one branch too large to review, and
+   splitting it into one module per PR immediately found bugs in each that
+   three passes over the combined diff had missed — including
+   `read_account_file`'s deliberate overflow-returns-`0`, correct for
+   `/etc/passwd` ("no accounts, root session") and a **total lockout** for
+   `/etc/shadow` ("no secret", root included). See
+   [`review-and-split-postmortem.md`](review-and-split-postmortem.md) (the
+   23rd).
+
+6. **Self-service passwords, and a hole underneath them (2026-08-30)** —
+   `accountd` (#30), the **fourth** server — `fsd`/`cond`/`netd`/`accountd` —
+   in protected slot 5 (`NUM_TASKS` 10→11 and
+   `FIRST_SPAWNABLE` 5→6, so it does not eat a spawnable slot). **A server, not
+   a setuid bit**: the kernel does not read files, `fsd` does, so a `/bin`
+   binary is read by the *shell* and handed to `SPAWN` — "this binary is
+   setuid" would be an unverifiable claim by a user-controlled task, an
+   escalation path straight through the component the capability model exists
+   to distrust. The server asks the kernel who *sent* the message instead.
+
+   Which turned out to be the harder half. `GET_ID(sender)` answers "who
+   occupies slot N **now**"; a server authorizing a request is asking who
+   occupied it **then**, and a caller can `MSG_SEND` (non-blocking), `EXIT`,
+   and have its slot re-spawned first. `fsd` had that hole in **shipped** code
+   on every permission check and every fid op, so it was fixed and merged
+   separately (#36): the kernel binds the credential at *send*
+   (`SENDER_ID`/`SENDER_GROUPS`). See
+   [`asking-the-right-question-postmortem.md`](asking-the-right-question-postmortem.md)
+   (the 24th).
+
+**What is left, and it is the whole of what is left:** per-user **cluster**
+identity, promoted from a north-star note to the frontier in
+[`roadmap.md`](roadmap.md) on 2026-08-30 — the 9P export authenticates a
+machine, not a user, and `netd` relays remote requests as root, which
+`accountd` turned from a theoretical gap into one with a privileged writer on
+the far end.

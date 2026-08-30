@@ -7,7 +7,34 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/`; 
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
-## `accountd`: the fifth server, and self-service passwords (2026-08-30)
+## The users/permissions arc, closed (2026-08-30)
+
+The arc that began on 2026-08-28 with "the OS has no idea who you are" is
+finished, bar one item. Today's two code entries are below; what they complete
+is the whole chain — identity, login, enforcement, secrets, groups, on-device
+account tools, and finally a user who can change their own password without
+being able to read the file it lives in.
+
+**One item remains, and it is the next arc**: per-user *cluster* identity. The
+9P export authenticates the machine, not the user, and `netd` relays remote
+requests under its own root identity — so `check_access` short-circuits on the
+root bypass before any mode is read. Not a regression, but `accountd` put a
+privileged writer on the far end of it. Promoted from a north-star note to the
+top of `roadmap.md`'s frontier.
+
+**One ABI fix worth recording here rather than only in the PR:**
+`libc/include/sys.h` hand-mirrors the reserved-error floor `FS_ERR_MIN`, and
+`accountd`'s new codes moved it from `u64::MAX - 33` to `u64::MAX - 38`. A C
+program compiled against the stale header would read `ACCT_ERR_IO` as a
+*successful* return value. No C program calls `accountd` today, which is
+precisely why nothing caught it; the Rust definition now carries a note back to
+the mirror.
+
+Retrospective:
+[`asking-the-right-question-postmortem.md`](asking-the-right-question-postmortem.md)
+(the 24th).
+
+## `accountd`: a fourth server, and self-service passwords (2026-08-30)
 
 A normal user can change their own password. `/etc/shadow` is mode 0600 root,
 which is the point of it — and which is exactly what made this impossible: the
@@ -30,7 +57,7 @@ permission to succeed, and the check is in the server. The server holds no
 device capability at all: its privilege is policy, not a resource.
 
 - **The slot guards were generalized before the slot existed.** `NUM_TASKS`
-  10 → 11 and `FIRST_SPAWNABLE` 5 → 6, so the fifth server does not eat one of
+  10 → 11 and `FIRST_SPAWNABLE` 5 → 6, so the new server does not eat one of
   the five spawnable slots. The four protected-slot guards in `syscall.rs`
   spelled the bound as the literal `<= 4`, which would have left slot 5
   unguarded — `fg 5` hands the keyboard to a task that never reads it,

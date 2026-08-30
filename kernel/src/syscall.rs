@@ -956,7 +956,7 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
                 // No slot below FIRST_SPAWNABLE may exit. Stated as the
                 // bound rather than as a list, because the list is what
                 // goes stale: every one of these comments enumerated
-                // "0-4" until a fifth server arrived, and a sixth will
+                // "0-4" until a fourth server arrived, and a fifth will
                 // do it again. Today that set is the boot shell (0 -
                 // nothing would own the keyboard, see
                 // tasks::INPUT_OWNER_TASK), idle (1 - never makes

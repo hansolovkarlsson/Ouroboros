@@ -157,12 +157,19 @@ $ set PATH=/bin ; env           # a real environment; $VAR expansion
   **root** drop to a named user (a logged-in user can't escalate). A logged-in
   user lands in their home under **`/Users`**, and `~` expands to it
   (`cd ~`, `cat ~/notes`). See `man login`.
-- **Account management** (`/bin`, root only): `useradd <name> [-u uid]
-  [-g group|gid]` (creates the account, prompts a password, makes `/Users/<name>`),
-  `passwd [user]` (change a password), `groupadd <name>`, and `usermod <user> -g
-  <group>` (set a primary group). `id` shows your uid/gid **with names**. On ext2,
-  file permissions are enforced (owner→group→other; root bypasses), so a normal
-  user can write in `~` but not in `/`.
+- **Account management** (`/bin`): `useradd <name> [-u uid] [-g group|gid]`
+  (creates the account, prompts a password, makes `/Users/<name>`),
+  `groupadd <name>`, and `usermod <user> [-g <group>] [-G <list>]` (primary and
+  supplementary groups) — all **root only**. `passwd [user]` is the exception:
+  **any user may change their own password**, and must supply the current one;
+  only root may set someone else's, and need not. That works because the check
+  lives in a *server* (`accountd`) which asks the kernel who sent the request,
+  rather than in a setuid bit on a file — see `man passwd`. `id` shows your
+  uid/gid and groups **with names**. On ext2, file permissions are enforced
+  (owner→group→other, matching a **primary or any supplementary** group; root
+  bypasses; every ancestor directory's search bit is checked), so a normal user
+  can write in `~` but not in `/`, and cannot read `/etc/shadow` at all. On
+  FAT32/exFAT there are no modes to enforce and `login` says so at the prompt.
   Job control (`ps`/`kill`/`fg`/`wait`/`exec`), the disk-management trio
   (`erase`/`partition`/`format` — they must run when *nothing* is mounted,
   exactly when `/bin` can't be read), power control (`shutdown`/`halt` — same
