@@ -19,7 +19,8 @@ DESCRIPTION
                      and skipped; the rest still apply.
 
     Supplementary groups are real permissions, not bookkeeping: login and su
-    hand the list to the kernel (SET_GROUPS), a spawned command inherits it, and
+    hand the list to the kernel (as SET_ID's group half, which carries identity
+    and membership in one call), a spawned command inherits it, and
     the filesystem server grants the group triad if a file's group is the
     caller's primary group OR any supplementary one. Up to 8 per user.
 
