@@ -626,6 +626,54 @@ on the device) *and* an excellent libc **test case** — it exercises a large sl
 of the file API and its own test suite is exhaustive. Recorded as a concrete,
 motivating milestone for the libc arc: "the libc is real when SQLite runs on it."
 
+## Unfixed review findings against shipped code (2026-08-29)
+
+Raised by a code review of the security tier and **verified**, but left unfixed
+because they concern code that is already on `main` rather than the branch under
+review. Recorded here so they are not lost with the review transcript.
+
+- **The 9P export bypasses permissions entirely.** `netd` relays a remote
+  request to `fsd` under its *own* root identity, so `check_access`'s
+  `if uid == 0 { return true }` short-circuits before any mode is consulted —
+  and `mount -r` is not root-gated (the shell's only `shell_uid() != 0` check is
+  `cmd_su`). On the two-node rig, an unprivileged user on node B can
+  `mount -r <A> /mnt/a; cat /mnt/a/etc/shadow` and read every hash on node A;
+  `cpu A passwd root` is a second door, since a spawned remote child inherits
+  netd's root. **Not a regression** — the export has always been
+  machine-authenticated rather than user-authenticated — but `/etc/shadow` gives
+  it a payload it did not have before. This is the concrete argument for
+  **per-user cluster identity**, above.
+- **`fsd`'s per-request cost multiplied** when ancestor-`x` traversal landed:
+  `path_allows` now costs 2 + (ancestors + 1) + 1 path resolutions where it cost
+  1, `NP_OPEN` with `O_RDWR` does three ancestor walks, and `caller_id` issues
+  both `GET_ID` and `GET_GROUPS` two or three times per request — including
+  fetching an 8-gid list for a root caller that returns immediately. Same shape
+  as the v0.4.1 FAT32 O(n²) read that ran past the supervisor's runnable-wedge
+  and got `fsd` restarted mid-read; the cost is milliseconds per sector on real
+  USB-MSD, not QEMU virtio-blk. **Unmeasured on hardware.**
+- **`NP_STAT`/`NP_CHMOD`/`NP_CHOWN` skip the "does this filesystem model modes?"
+  short-circuit**, calling `ancestors_searchable` directly instead of going
+  through `path_allows`. On FAT32/exFAT — which record no mode, so every other
+  verb short-circuits to allow — a non-root `cat ../f` succeeds while
+  `ls -l ../f` is refused. Every `ls -l` entry also pays a guaranteed-useless
+  ancestor walk. Note `check_access` is **default-allow** (`_ => true`), so a
+  future `NP_` verb added without an arm here ships unauthenticated.
+- **`warn_if_unprotected` fails open.** Any non-zero `FSOP_MOUNT_INFO` status
+  reads as "this filesystem enforces permissions", and it runs as the first
+  statement of `login()` — *before* the bounded `NO_FS` retry that exists
+  precisely because login can beat `fsd`'s mount. So on a FAT32 or exFAT boot,
+  where `/etc/shadow` really is world-readable and world-writable, the warning
+  that is the entire mitigation may never appear. It also inspects only tree 0
+  and string-matches `"ext2"`, so a multi-mount or a future mode-modelling
+  filesystem misreports. `fsd` already derives this structurally from
+  `stat().mode.is_some()`. **Unverified on a FAT32 boot.**
+- **`useradd` accepts an empty password** while `passwd` now rejects one, so an
+  account created by pressing Enter twice is loginable by pressing Enter. It is
+  the only writer of an *initial* secret, so it is the one that most needs the
+  check. Pre-existing.
+- **`libc/include/sys.h`'s `FS_ERR_MIN`** is still `~0UL - 33UL` with a comment
+  claiming it mirrors the Rust constant, which has since moved.
+
 ## Open gaps (small, from the old parking lot)
 
 Known small gaps, not yet sequenced (the *completed* parking-lot entries — USB
