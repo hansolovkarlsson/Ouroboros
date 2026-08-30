@@ -152,8 +152,15 @@ fn handle(sender: u64, req: &[u8]) -> u64 {
 /// loop's frame.
 #[inline(never)]
 fn change_password(caller_uid: u32, name: &[u8], old: &[u8], new: &[u8]) -> u64 {
+    // read_file_checked, not read_file_all: the latter folds every failure -
+    // an I/O error, a database larger than this buffer - into 0 bytes, which
+    // then resolves as ACCT_ERR_NO_USER. That sends the operator after a typo
+    // in a name that is actually present, and hides the real fault. The same
+    // hazard is why the shadow read below is checked; both deserve it.
     let mut pbuf = [0u8; BUF];
-    let plen = ulib::read_file_all(PASSWD_FILE, &mut pbuf);
+    let Some(plen) = ulib::read_file_checked(PASSWD_FILE, &mut pbuf) else {
+        return syscall_abi::ACCT_ERR_IO;
+    };
     let passwd = &pbuf[..plen];
 
     // Resolve the target: an empty name means "me", by uid.
@@ -170,9 +177,19 @@ fn change_password(caller_uid: u32, name: &[u8], old: &[u8], new: &[u8]) -> u64 
     };
     let target_uid = target.uid;
     // Copy the name out: the rewrite below reuses the buffer `target` borrows.
-    let mut tname = [0u8; 64];
-    let tn = target.name.len().min(tname.len());
-    tname[..tn].copy_from_slice(&target.name[..tn]);
+    //
+    // REFUSE rather than truncate. NAME_MAX bounds the name in the *request*,
+    // but this one comes from /etc/passwd and is bounded by nothing - and it is
+    // the key the /etc/shadow rewrite matches on. A silently shortened key
+    // appends a junk entry under a prefix while reporting success: the old
+    // password keeps working, the new one never does, and two accounts sharing
+    // a NAME_MAX-byte prefix collide onto one entry.
+    let mut tname = [0u8; NAME_MAX];
+    if target.name.len() > tname.len() {
+        return syscall_abi::ACCT_ERR_IO;
+    }
+    let tn = target.name.len();
+    tname[..tn].copy_from_slice(target.name);
     let target_name = &tname[..tn];
     let legacy_secret = target.secret;
 
@@ -234,30 +251,22 @@ fn change_password(caller_uid: u32, name: &[u8], old: &[u8], new: &[u8]) -> u64 
             None => return syscall_abi::ACCT_ERR_IO,
         }
     };
-    // Restrict a file we are CREATING before the secrets land - it would carry
-    // ext2's default 0644 otherwise, and chmod-ing afterwards leaves a window in
-    // which every hash is world-readable.
+    // ulib::write_private_file: create-only-if-absent, then chmod 0600, then the
+    // content. The chmod is UNCONDITIONAL, which is the point - an /etc/shadow
+    // that already exists world-readable (a legacy disk, an interrupted earlier
+    // run, an admin's `touch`) is repaired here rather than quietly filled with
+    // secrets under 0644 while this returns success.
     //
-    // But only when creating. Truncating an EXISTING /etc/shadow first (which is
-    // what an unconditional empty write does - ext2's overwrite branch frees the
-    // blocks) buys nothing, because that branch already preserves the old mode,
-    // and it stakes the entire account database on the next two calls
+    // What it deliberately does NOT do is truncate first. An unconditional empty
+    // write would stake the whole account database on the next two calls
     // succeeding: a disk-full, an I/O error or an fsd restart in that window
-    // leaves the file EMPTY and every account - root included - unable to log in.
-    // Never risk the database to fix a mode it already has.
-    let creating = slen == 0 && ulib::is_fs_error(ulib::fs_stat(SHADOW_FILE, &mut [0u8; 64]));
-    if creating {
-        if ulib::is_fs_error(ulib::fs_write_bulk(SHADOW_FILE, &[])) {
-            return syscall_abi::ACCT_ERR_IO;
-        }
-        // FS_ERR_NOT_SUPPORTED means the filesystem models no mode at all (login
-        // warns about that separately); any other refusal is a real failure.
-        let code = ulib::fs_chmod(SHADOW_FILE, 0o600);
-        if ulib::is_fs_error(code) && code != syscall_abi::FS_ERR_NOT_SUPPORTED {
-            return syscall_abi::ACCT_ERR_IO;
-        }
-    }
-    if ulib::is_fs_error(ulib::fs_write_bulk(SHADOW_FILE, &out[..olen])) {
+    // leaves the file EMPTY and every account - root included - unable to log
+    // in. Tightening a mode is never worth risking the database it protects.
+    //
+    // FS_ERR_NOT_SUPPORTED is tolerated inside the helper: a filesystem that
+    // models no mode at all cannot fail to set one (login warns about that
+    // separately - see `warn_if_unprotected`).
+    if ulib::is_fs_error(ulib::write_private_file(SHADOW_FILE, &out[..olen])) {
         return syscall_abi::ACCT_ERR_IO;
     }
     0
