@@ -48,6 +48,129 @@ TIMEOUT = 90        # per step
 LINGER = 4          # after the last step, to capture trailing output
 
 
+class Guest:
+    """One QEMU guest, driven over its -nographic console.
+
+    The paced typing and the "match only NEW output" high-water mark are the
+    load-bearing parts (see the module docstring); anything driving a guest
+    should reuse this rather than copy them.
+    """
+
+    def __init__(self, image, extra_args=(), intlog=None, label=""):
+        prefix = subprocess.run(
+            ["brew", "--prefix", "qemu"], capture_output=True, text=True
+        ).stdout.strip()
+        ovmf = os.path.join(prefix, "share/qemu/edk2-aarch64-code.fd")
+        self.label = label
+        self.intlog = intlog or os.path.join(
+            os.path.dirname(os.path.abspath(image)), "qemu-int.log"
+        )
+        cmd = [
+            "qemu-system-aarch64", "-machine", "virt", "-cpu", "cortex-a72",
+            "-m", "512M", "-bios", ovmf,
+            "-drive", f"file={image},format=raw,if=none,id=hd0",
+            "-device", "virtio-blk-device,drive=hd0",
+            "-device", "virtio-rng-device",
+            "-global", "virtio-mmio.force-legacy=false",
+            *extra_args,
+            "-nographic", "-d", "int", "-D", self.intlog,
+        ]
+        self.proc = subprocess.Popen(
+            cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT, bufsize=0,
+        )
+        self.buf = bytearray()
+        self.lock = threading.Lock()
+        self.seen = 0
+        threading.Thread(target=self._reader, daemon=True).start()
+
+    def _reader(self):
+        while True:
+            b = self.proc.stdout.read(1)
+            if not b:
+                break
+            with self.lock:
+                self.buf.extend(b)
+
+    def wait_for(self, pattern, timeout=TIMEOUT):
+        rx = re.compile(pattern.encode())
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            with self.lock:
+                cur = bytes(self.buf)
+            if rx.search(cur, self.seen):
+                time.sleep(SETTLE)
+                with self.lock:
+                    self.seen = len(self.buf)
+                return True
+            time.sleep(0.15)
+        return False
+
+    def type_line(self, text):
+        for ch in text.encode() + b"\n":
+            self.proc.stdin.write(bytes([ch]))
+            self.proc.stdin.flush()
+            time.sleep(TYPE_DELAY)
+
+    def run(self, steps):
+        """Each step is (wait_pattern, text_to_type). Returns True if all matched."""
+        for pattern, text in steps:
+            if pattern and not self.wait_for(pattern):
+                self.report(f"!!! TIMEOUT waiting for {pattern!r}")
+                return False
+            if text:
+                self.type_line(text)
+        return True
+
+    def report(self, msg):
+        # stderr: a diagnostic interleaved into the transcript on stdout is
+        # indistinguishable from guest output when the transcript is read later.
+        print(f"{self.label}{msg}" if self.label else msg, file=sys.stderr)
+
+    def transcript(self):
+        with self.lock:
+            return bytes(self.buf).decode(errors="replace")
+
+    def aborts(self):
+        """Count fault LINES in QEMU's own -d int trace, or None if there is no
+        trace to read.
+
+        Three properties, each of which this lost once in a refactor and each of
+        which makes the number mean less when it is missing:
+
+        - **`SError` counts.** It is the asynchronous fault class a DMA or MMU
+          bug produces - including a server overrunning its guard page - so
+          dropping it turns exactly the runs worth catching into clean ones.
+          docs/testing-qemu.md defines the bar as
+          `Data Abort|Prefetch Abort|SError`, and this must not disagree with it.
+        - **Lines, not substring occurrences.** Two faults reported on one line
+          are two faults, and one line mentioning `Abort` twice is not.
+        - **A missing log is `None`, not `0`.** No trace is "I did not check",
+          which reads identically to "I checked and it was clean" if both are 0 -
+          and that is the single signal a two-node run has.
+        """
+        try:
+            with open(self.intlog, "rb") as fh:
+                return sum(
+                    1 for line in fh
+                    if b"Abort" in line or b"SError" in line
+                )
+        except OSError:
+            return None
+
+    def stop(self):
+        self.proc.kill()
+        self.proc.wait()
+
+
+def fault_line(guest) -> str:
+    """The health bar, worded so a missing trace never reads as a clean run."""
+    n = guest.aborts()
+    if n is None:
+        return "NO TRACE (health bar unavailable - this is not a pass)"
+    return f"{n} fault lines (Abort/SError)"
+
+
 def main() -> int:
     if len(sys.argv) < 2:
         print(__doc__)
@@ -59,80 +182,18 @@ def main() -> int:
         wait, _, text = a.partition("@@")
         steps.append((wait, text))
 
-    prefix = subprocess.run(
-        ["brew", "--prefix", "qemu"], capture_output=True, text=True
-    ).stdout.strip()
-    ovmf = os.path.join(prefix, "share/qemu/edk2-aarch64-code.fd")
-    intlog = os.path.join(os.path.dirname(os.path.abspath(image)), "qemu-int.log")
-
-    cmd = [
-        "qemu-system-aarch64", "-machine", "virt", "-cpu", "cortex-a72",
-        "-m", "512M", "-bios", ovmf,
-        "-drive", f"file={image},format=raw,if=none,id=hd0",
-        "-device", "virtio-blk-device,drive=hd0",
-        "-device", "virtio-rng-device",
-        "-global", "virtio-mmio.force-legacy=false",
-        "-nographic", "-d", "int", "-D", intlog,
-    ]
-
-    proc = subprocess.Popen(
-        cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT, bufsize=0,
-    )
-    buf = bytearray()
-    lock = threading.Lock()
-
-    def reader():
-        while True:
-            b = proc.stdout.read(1)
-            if not b:
-                break
-            with lock:
-                buf.extend(b)
-
-    threading.Thread(target=reader, daemon=True).start()
-
-    seen = 0  # high-water mark: never match output from a previous step
-
-    def wait_for(pattern):
-        nonlocal seen
-        rx = re.compile(pattern.encode())
-        deadline = time.time() + TIMEOUT
-        while time.time() < deadline:
-            with lock:
-                cur = bytes(buf)
-            if rx.search(cur, seen):
-                time.sleep(SETTLE)
-                with lock:
-                    seen = len(buf)
-                return True
-            time.sleep(0.15)
-        return False
-
-    def type_line(text):
-        for ch in text.encode() + b"\n":
-            proc.stdin.write(bytes([ch]))
-            proc.stdin.flush()
-            time.sleep(TYPE_DELAY)
-
-    ok = True
-    for pattern, text in steps:
-        if pattern and not wait_for(pattern):
-            print(f"\n!!! TIMEOUT waiting for {pattern!r}\n", file=sys.stderr)
-            ok = False
-            break
-        if text:
-            type_line(text)
-
-    time.sleep(LINGER)
-    proc.kill()
-    proc.wait()
-
-    print(bytes(buf).decode("utf-8", "replace"))
-    if os.path.exists(intlog):
-        with open(intlog, errors="replace") as fh:
-            aborts = sum(1 for line in fh if "Abort" in line or "SError" in line)
-        print(f"\n--- qemu -d int: {aborts} abort lines ---")
+    g = Guest(image)
+    try:
+        ok = g.run(steps)
+        time.sleep(LINGER)
+        transcript = g.transcript()
+    finally:
+        # BEFORE reading the trace (QEMU buffers it) and before printing, which
+        # can raise BrokenPipeError under `| head` and would otherwise leak a
+        # live QEMU still holding the image's write lock.
+        g.stop()
+    print(transcript)
+    print(f"\n--- qemu -d int: {fault_line(g)} ---")
     return 0 if ok else 1
 
 
