@@ -260,22 +260,34 @@ fn change_password(caller_uid: u32, name: &[u8], old: &[u8], new: &[u8]) -> u64 
             None => return syscall_abi::ACCT_ERR_IO,
         }
     };
-    // ulib::write_private_file: create-only-if-absent, then chmod 0600, then the
-    // content. The chmod is UNCONDITIONAL, which is the point - an /etc/shadow
-    // that already exists world-readable (a legacy disk, an interrupted earlier
-    // run, an admin's `touch`) is repaired here rather than quietly filled with
-    // secrets under 0644 while this returns success.
+    // NON-DESTRUCTIVE where it can be. A whole-file write is truncate-then-
+    // write (ext2's overwrite branch frees the old blocks first), which stakes
+    // the entire credential database on the following write landing: an fsd
+    // restart - documented to happen - or a power loss in that window leaves
+    // /etc/shadow EMPTY and locks every account out, root included.
     //
-    // What it deliberately does NOT do is truncate first. An unconditional empty
-    // write would stake the whole account database on the next two calls
-    // succeeding: a disk-full, an I/O error or an fsd restart in that window
-    // leaves the file EMPTY and every account - root included - unable to log
-    // in. Tightening a mode is never worth risking the database it protects.
+    // A password change never needs that. A shadow line's salt and hash are
+    // fixed-width hex, so replacing one leaves the file the same length with
+    // every other byte identical - and writing just that range at its offset
+    // never truncates and never touches another account's line. The worst an
+    // interruption can now do is damage the one entry being changed.
     //
-    // FS_ERR_NOT_SUPPORTED is tolerated inside the helper: a filesystem that
-    // models no mode at all cannot fail to set one (login warns about that
-    // separately - see `warn_if_unprotected`).
-    if ulib::is_fs_error(ulib::write_private_file(SHADOW_FILE, &out[..olen])) {
+    // Only a length change (appending the first entry for an account, or
+    // rewriting a legacy inline-secret line) still needs the whole-file path.
+    // That is the rarer case, it is what write_private_file exists for, and
+    // falling back is explicit rather than silent.
+    let code = match accounts::changed_span(&sbuf[..slen], &out[..olen]) {
+        Some((off, n)) => ulib::write_private_at(SHADOW_FILE, off as u64, &out[off..off + n]),
+        // changed_span also reports None for byte-identical buffers. A fresh
+        // salt makes that practically unreachable, but "no change" must mean
+        // "write nothing", not "rewrite the database".
+        None if sbuf[..slen] == out[..olen] => 0,
+        // Length changed: create-if-absent, chmod 0600, then the content. The
+        // chmod is unconditional, so an /etc/shadow that already exists
+        // world-readable is repaired rather than quietly filled with secrets.
+        None => ulib::write_private_file(SHADOW_FILE, &out[..olen]),
+    };
+    if ulib::is_fs_error(code) {
         return syscall_abi::ACCT_ERR_IO;
     }
     0
