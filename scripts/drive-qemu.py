@@ -48,6 +48,99 @@ TIMEOUT = 90        # per step
 LINGER = 4          # after the last step, to capture trailing output
 
 
+class Guest:
+    """One QEMU guest, driven over its -nographic console.
+
+    The paced typing and the "match only NEW output" high-water mark are the
+    load-bearing parts (see the module docstring); anything driving a guest
+    should reuse this rather than copy them.
+    """
+
+    def __init__(self, image, extra_args=(), intlog=None, label=""):
+        prefix = subprocess.run(
+            ["brew", "--prefix", "qemu"], capture_output=True, text=True
+        ).stdout.strip()
+        ovmf = os.path.join(prefix, "share/qemu/edk2-aarch64-code.fd")
+        self.label = label
+        self.intlog = intlog or os.path.join(
+            os.path.dirname(os.path.abspath(image)), "qemu-int.log"
+        )
+        cmd = [
+            "qemu-system-aarch64", "-machine", "virt", "-cpu", "cortex-a72",
+            "-m", "512M", "-bios", ovmf,
+            "-drive", f"file={image},format=raw,if=none,id=hd0",
+            "-device", "virtio-blk-device,drive=hd0",
+            "-device", "virtio-rng-device",
+            "-global", "virtio-mmio.force-legacy=false",
+            *extra_args,
+            "-nographic", "-d", "int", "-D", self.intlog,
+        ]
+        self.proc = subprocess.Popen(
+            cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT, bufsize=0,
+        )
+        self.buf = bytearray()
+        self.lock = threading.Lock()
+        self.seen = 0
+        threading.Thread(target=self._reader, daemon=True).start()
+
+    def _reader(self):
+        while True:
+            b = self.proc.stdout.read(1)
+            if not b:
+                break
+            with self.lock:
+                self.buf.extend(b)
+
+    def wait_for(self, pattern, timeout=TIMEOUT):
+        rx = re.compile(pattern.encode())
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            with self.lock:
+                cur = bytes(self.buf)
+            if rx.search(cur, self.seen):
+                time.sleep(SETTLE)
+                with self.lock:
+                    self.seen = len(self.buf)
+                return True
+            time.sleep(0.15)
+        return False
+
+    def type_line(self, text):
+        for ch in text.encode() + b"\n":
+            self.proc.stdin.write(bytes([ch]))
+            self.proc.stdin.flush()
+            time.sleep(TYPE_DELAY)
+
+    def run(self, steps):
+        """Each step is (wait_pattern, text_to_type). Returns True if all matched."""
+        for pattern, text in steps:
+            if pattern and not self.wait_for(pattern):
+                self.report(f"!!! TIMEOUT waiting for {pattern!r}")
+                return False
+            if text:
+                self.type_line(text)
+        return True
+
+    def report(self, msg):
+        print(f"{self.label}{msg}" if self.label else msg)
+
+    def transcript(self):
+        with self.lock:
+            return bytes(self.buf).decode(errors="replace")
+
+    def aborts(self):
+        try:
+            with open(self.intlog, "rb") as fh:
+                return fh.read().count(b"Abort")
+        except OSError:
+            return 0
+
+    def stop(self):
+        self.proc.kill()
+        self.proc.wait()
+
+
 def main() -> int:
     if len(sys.argv) < 2:
         print(__doc__)
@@ -59,80 +152,12 @@ def main() -> int:
         wait, _, text = a.partition("@@")
         steps.append((wait, text))
 
-    prefix = subprocess.run(
-        ["brew", "--prefix", "qemu"], capture_output=True, text=True
-    ).stdout.strip()
-    ovmf = os.path.join(prefix, "share/qemu/edk2-aarch64-code.fd")
-    intlog = os.path.join(os.path.dirname(os.path.abspath(image)), "qemu-int.log")
-
-    cmd = [
-        "qemu-system-aarch64", "-machine", "virt", "-cpu", "cortex-a72",
-        "-m", "512M", "-bios", ovmf,
-        "-drive", f"file={image},format=raw,if=none,id=hd0",
-        "-device", "virtio-blk-device,drive=hd0",
-        "-device", "virtio-rng-device",
-        "-global", "virtio-mmio.force-legacy=false",
-        "-nographic", "-d", "int", "-D", intlog,
-    ]
-
-    proc = subprocess.Popen(
-        cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT, bufsize=0,
-    )
-    buf = bytearray()
-    lock = threading.Lock()
-
-    def reader():
-        while True:
-            b = proc.stdout.read(1)
-            if not b:
-                break
-            with lock:
-                buf.extend(b)
-
-    threading.Thread(target=reader, daemon=True).start()
-
-    seen = 0  # high-water mark: never match output from a previous step
-
-    def wait_for(pattern):
-        nonlocal seen
-        rx = re.compile(pattern.encode())
-        deadline = time.time() + TIMEOUT
-        while time.time() < deadline:
-            with lock:
-                cur = bytes(buf)
-            if rx.search(cur, seen):
-                time.sleep(SETTLE)
-                with lock:
-                    seen = len(buf)
-                return True
-            time.sleep(0.15)
-        return False
-
-    def type_line(text):
-        for ch in text.encode() + b"\n":
-            proc.stdin.write(bytes([ch]))
-            proc.stdin.flush()
-            time.sleep(TYPE_DELAY)
-
-    ok = True
-    for pattern, text in steps:
-        if pattern and not wait_for(pattern):
-            print(f"\n!!! TIMEOUT waiting for {pattern!r}\n", file=sys.stderr)
-            ok = False
-            break
-        if text:
-            type_line(text)
-
+    g = Guest(image)
+    ok = g.run(steps)
     time.sleep(LINGER)
-    proc.kill()
-    proc.wait()
-
-    print(bytes(buf).decode("utf-8", "replace"))
-    if os.path.exists(intlog):
-        with open(intlog, errors="replace") as fh:
-            aborts = sum(1 for line in fh if "Abort" in line or "SError" in line)
-        print(f"\n--- qemu -d int: {aborts} abort lines ---")
+    print(g.transcript())
+    print(f"\n--- qemu -d int: {g.aborts()} abort lines ---")
+    g.stop()
     return 0 if ok else 1
 
 

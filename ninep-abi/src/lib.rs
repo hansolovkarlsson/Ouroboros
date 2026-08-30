@@ -140,6 +140,34 @@ pub const NP_FSTAT: u64 = NP_BASE + 18;
 /// **Close** a fid, freeing the server-side handle: `a0` = fid. Status = 0.
 pub const NP_CLUNK: u64 = NP_BASE + 19;
 
+/// **Act as this user for the next request** — `a0` = uid, `a1` = gid,
+/// `a2` = supplementary gid count, payload = that many `u32` gids.
+///
+/// The one verb `fsd` accepts a *claimed* identity on, and it accepts it from
+/// exactly one sender: `NET_TASK`. Everything else authorizes on the credential
+/// the kernel bound at send (`SENDER_ID`), which cannot be claimed at all.
+///
+/// **Why an exception has to exist.** A remote request arrives at `netd`, which
+/// forwards it to `fsd` — so `fsd` sees `netd`'s credential, which is root, and
+/// the root bypass serves every remote request with no permission check at all.
+/// `netd` cannot `SET_ID` to the user instead: that changes its *own* task
+/// identity, and it serves many connections from one task. So the identity has
+/// to travel as data, and the question becomes who may send it.
+///
+/// **Why the exception is safe.** `SENDER_ID` binds the caller at send, so
+/// "only `NET_TASK` may say this" is a fact the kernel guarantees rather than a
+/// claim in the message — a task cannot occupy `netd`'s slot, and (since the
+/// send-bound credential landed) cannot even inherit its authority by
+/// recycling into a slot it once used. The trust placed in `netd` here is the
+/// same trust already placed in it to hold the cluster key.
+///
+/// **Scope: it applies to the NEXT request from that sender and is then
+/// cleared.** Not a session, not a mode — a latch, so a failure to set it can
+/// only ever under-privilege a request (falling back to `netd`'s own
+/// credential... which is root — see `fsd`'s handling, where an unset latch on
+/// a `NET_TASK` request is refused outright rather than allowed to fall back).
+pub const NP_PROXY_ID: u64 = NP_BASE + 20;
+
 /// [`NP_OPEN`] flag: open for reading (needs `r` on the file).
 pub const OPEN_READ: u64 = 1;
 /// [`NP_OPEN`] flag: open for writing (needs `w`).
@@ -322,7 +350,31 @@ pub const NP_REMOTE_CHUNK: usize = 512;
 /// Magic at the head of an authenticated framed request, distinguishing it from
 /// an unauthenticated (legacy) frame. When the exporter has a key configured it
 /// requires this; a frame without it is refused (fail-closed).
-pub const NP_AUTH_MAGIC: u64 = 0x4155_5448_4E50_3031; // "AUTHNP01" (big-endian ASCII)
+///
+/// **Bumped to `02` when the requesting user's name joined the header.** This is
+/// a deliberate flag day: an `01` peer's frame is now *refused* rather than
+/// misparsed, because the old layout's first 32 message bytes would otherwise be
+/// read as a username. Both nodes of a cluster are built from one tree, so the
+/// cost is nil and the alternative — a silently misread identity — is not a
+/// trade worth making.
+pub const NP_AUTH_MAGIC: u64 = 0x4155_5448_4E50_3032; // "AUTHNP02" (big-endian ASCII)
+
+/// Bytes of **requesting user name** in the auth header, NUL-padded.
+///
+/// The cluster authenticates a *machine* with the shared key; this says which
+/// of that machine's users is asking, so the far side can apply its own
+/// permission model instead of serving everything as root.
+///
+/// **A name, not a uid.** Two nodes have independent `/etc/passwd` files, so
+/// uid 1000 need not be the same person on both — numeric identity (NFS's
+/// `AUTH_SYS`) silently maps one user onto another whenever the numbering
+/// differs. Names are what this account model already keys on (`su alice`,
+/// `chown alice:staff`, `login`), and the far side resolves the name through
+/// **its own** `/etc/passwd`, refusing a name it does not know.
+///
+/// 32 bytes matches the shell's `login` username field, so a name that can be
+/// typed at a prompt can cross the cluster.
+pub const NP_NAME_LEN: usize = 32;
 
 /// Bytes of nonce in the auth header (a fresh, non-repeating value per request:
 /// the client's `MONOTONIC_US` clock, plus its packed IP for cross-machine
@@ -333,13 +385,26 @@ pub const NP_NONCE_LEN: usize = 16;
 pub const NP_MAC_LEN: usize = 32;
 
 /// The auth header size prepended to a framed request body: `magic`(8) +
-/// `nonce`([`NP_NONCE_LEN`]) + `mac`([`NP_MAC_LEN`]).
-pub const NP_AUTH_HDR: usize = 8 + NP_NONCE_LEN + NP_MAC_LEN;
+/// `nonce`([`NP_NONCE_LEN`]) + `name`([`NP_NAME_LEN`]) + `mac`([`NP_MAC_LEN`]).
+pub const NP_AUTH_HDR: usize = 8 + NP_NONCE_LEN + NP_NAME_LEN + NP_MAC_LEN;
 
 /// Offset of the nonce within the auth header (right after the 8-byte magic).
 pub const NP_AUTH_NONCE_OFF: usize = 8;
-/// Offset of the MAC within the auth header (after magic + nonce).
-pub const NP_AUTH_MAC_OFF: usize = 8 + NP_NONCE_LEN;
+/// Offset of the requesting user's name within the auth header.
+pub const NP_AUTH_NAME_OFF: usize = 8 + NP_NONCE_LEN;
+/// Offset of the MAC within the auth header (after magic + nonce + name).
+pub const NP_AUTH_MAC_OFF: usize = 8 + NP_NONCE_LEN + NP_NAME_LEN;
+
+/// The bytes the request MAC covers *before* the NP message:
+/// `nonce` ‖ `name`. Kept as one constant because both sides must agree, and
+/// because it lets the MAC stay a two-part call (this prefix, then the
+/// message) rather than growing a three-part variant.
+///
+/// **The name is inside the MAC, which is the whole point.** It costs nothing —
+/// the MAC was already there — and it means the claimed user cannot be edited
+/// in flight by anything that does not hold the cluster key. A tamper attempt
+/// fails verification exactly as a tampered path or offset already does.
+pub const NP_MAC_PREFIX_LEN: usize = NP_NONCE_LEN + NP_NAME_LEN;
 
 /// Largest fully-framed request buffer: the 4-byte length prefix + the auth
 /// header + the biggest NP message. Buffers that build or receive a framed

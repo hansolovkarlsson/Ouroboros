@@ -75,6 +75,10 @@ fn main() -> ! {
     // reply is built, hence two separate arrays.
     let mut req = [0u8; syscall_abi::MSG_MAX_LEN as usize];
     let mut reply = [0u8; syscall_abi::MSG_MAX_LEN as usize];
+    // The proxy-identity latch (cluster per-user identity): set by NP_PROXY_ID
+    // from netd, consumed by exactly the next request, and never a static -
+    // this server keeps all its state on this frame, deliberately.
+    let mut proxy: Option<Caller> = None;
     loop {
         let packed = syscall4(syscall_abi::MSG_RECV, req.as_mut_ptr() as u64, req.len() as u64, 0, 0);
         if packed >= syscall_abi::FS_ERR_MIN {
@@ -85,7 +89,7 @@ fn main() -> ! {
         }
         let sender = packed >> 32;
         let len = ((packed & 0xffff_ffff) as usize).min(req.len());
-        let reply_len = handle(&mut mounts, &mut fids, sender, &req[..len], &mut reply);
+        let reply_len = handle(&mut mounts, &mut fids, sender, &req[..len], &mut reply, &mut proxy);
         // A full/unreachable sender mailbox drops the reply - the
         // caller's MSG_CALL stays blocked until Ctrl+C; nothing better
         // exists to do with an undeliverable reply.
@@ -314,11 +318,44 @@ impl Fid {
 /// ops (`NP_READ`/`NP_WRITE`/`NP_WRITE_AT`) to `SAFECOPY` against the client's
 /// grant (they move their data directly between task regions rather than inline
 /// in the reply).
-fn handle(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [Fid; MAX_FIDS], sender: u64, req: &[u8], reply: &mut [u8]) -> usize {
+fn handle(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [Fid; MAX_FIDS], sender: u64, req: &[u8], reply: &mut [u8], proxy: &mut Option<Caller>) -> usize {
     if req.len() < REQ_PAYLOAD {
         return status_reply(reply, syscall_abi::FS_ERROR);
     }
     let op = read_u64(req, 0);
+
+    // NP_PROXY_ID: "run my next request as this user". The ONE verb that takes
+    // a claimed identity, and only from NET_TASK - see the ABI doc for why the
+    // exception must exist (netd forwards remote requests, so without it every
+    // one of them is served under netd's own root) and why it is safe.
+    //
+    // Checking the SLOT here, not a credential, is deliberate and sound: slots
+    // below FIRST_SPAWNABLE are protected, so NET_TASK is netd for the life of
+    // the boot and can never be recycled to anything else. That is a different
+    // question from "who sent this", which is why it is answered differently.
+    if op == ninep_abi::NP_PROXY_ID {
+        if sender != syscall_abi::NET_TASK {
+            *proxy = None;
+            return status_reply(reply, syscall_abi::FS_ERR_PERM);
+        }
+        let uid = read_u64(req, 16) as u32;
+        let gid = read_u64(req, 24) as u32;
+        let n = (read_u64(req, 32) as usize).min(syscall_abi::MAX_SUPP_GROUPS);
+        let mut groups = [0u32; syscall_abi::MAX_SUPP_GROUPS];
+        let body = &req[REQ_PAYLOAD..];
+        let n = n.min(body.len() / 4);
+        for (i, g) in groups.iter_mut().enumerate().take(n) {
+            *g = u32::from_le_bytes([body[i * 4], body[i * 4 + 1], body[i * 4 + 2], body[i * 4 + 3]]);
+        }
+        *proxy = Some(Caller { uid, gid, groups, n_groups: n });
+        return status_reply(reply, 0);
+    }
+
+    // The caller, resolved ONCE per request rather than re-read at each check -
+    // so every check in this request sees the same identity, and the latch is
+    // consumed by exactly the request that follows it and never the one after.
+    let who = effective_caller(sender, proxy);
+    *proxy = None;
     // File operations travel over the uniform verb set (ninep-abi, the Phase 0
     // cluster protocol), carrying a `tree` selector that picks which mount -
     // dispatched to handle_ninep. What remains below is the FSOP_* disk-
@@ -326,7 +363,7 @@ fn handle(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [Fid; M
     // FSOP_MOUNT_AT - fsd-specific, not uniform file verbs) plus the SYSOP_PING
     // fall-through.
     if (ninep_abi::NP_BASE..ninep_abi::NP_LIMIT).contains(&op) {
-        return handle_ninep(mounts, fids, sender, op, req, reply);
+        return handle_ninep(mounts, fids, sender, who, op, req, reply);
     }
     let p = [read_u64(req, 8), read_u64(req, 16), read_u64(req, 24), read_u64(req, 32)];
 
@@ -337,7 +374,7 @@ fn handle(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [Fid; M
         // much as detaching: a user could mount a partition deliberately left
         // unmounted (unenforced entirely on FAT/exFAT), or an attacker-authored
         // ext2 image carrying chosen uid/gid/mode metadata.
-        if !caller_is_root() {
+        if !is_root(&who) {
             return status_reply(reply, syscall_abi::FS_ERR_PERM);
         }
         // The auto-mount at tree 0 (the default the shell's `mount -a` triggers).
@@ -351,7 +388,7 @@ fn handle(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [Fid; M
 
     if op == syscall_abi::FSOP_MOUNT_AT {
         // ROOT ONLY - same reasoning as FSOP_MOUNT above.
-        if !caller_is_root() {
+        if !is_root(&who) {
             return status_reply(reply, syscall_abi::FS_ERR_PERM);
         }
         // Multi-mount: mount the p[0]-th partition into a fresh tree slot and
@@ -384,7 +421,7 @@ fn handle(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [Fid; M
     } else if op == syscall_abi::FSOP_UNMOUNT {
         // ROOT ONLY - taking the disk away is at least as privileged as writing
         // to it. Confirmed reachable: `unmount` as an ordinary user succeeded.
-        if !caller_is_root() {
+        if !is_root(&who) {
             return status_reply(reply, syscall_abi::FS_ERR_PERM);
         }
         // Unmount tree 0 (the primary mount).
@@ -398,7 +435,7 @@ fn handle(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [Fid; M
         || op == syscall_abi::FSOP_FORMAT
     {
         // ROOT ONLY - these rewrite the raw disk.
-        if !caller_is_root() {
+        if !is_root(&who) {
             return status_reply(reply, syscall_abi::FS_ERR_PERM);
         }
         // Raw-disk ops (erase/partition/format) rewrite disk structures, so they
@@ -430,7 +467,7 @@ fn handle(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [Fid; M
 /// namespace resolves it to a real mount in a later step.
 ///
 /// [`NP_REQ_PAYLOAD`]: ninep_abi::NP_REQ_PAYLOAD
-fn handle_ninep(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [Fid; MAX_FIDS], sender: u64, verb: u64, req: &[u8], reply: &mut [u8]) -> usize {
+fn handle_ninep(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [Fid; MAX_FIDS], sender: u64, who: Option<Caller>, verb: u64, req: &[u8], reply: &mut [u8]) -> usize {
     const NP_HDR: usize = ninep_abi::NP_REQ_PAYLOAD as usize;
     if req.len() < NP_HDR {
         return status_reply(reply, syscall_abi::FS_ERROR);
@@ -446,7 +483,7 @@ fn handle_ninep(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [
         verb,
         ninep_abi::NP_PREAD | ninep_abi::NP_PWRITE | ninep_abi::NP_FSTAT | ninep_abi::NP_CLUNK
     ) {
-        return handle_fid_op(mounts, fids, sender, verb, &p, reply);
+        return handle_fid_op(mounts, fids, sender, who, verb, &p, reply);
     }
     // The `tree` selector picks which mount (cluster Phase 0 multi-mount); an
     // out-of-range tree is a client bug. An unmounted tree replies NO_FS.
@@ -460,7 +497,7 @@ fn handle_ninep(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [
     // uid/gid against the target's owner+mode before running the op. ext2-only
     // (others return mode:None, which `check_access` treats as unrestricted);
     // root bypasses. See `check_access`.
-    if !check_access(fs, verb, &p, payload) {
+    if !check_access(fs, who, verb, &p, payload) {
         return status_reply(reply, syscall_abi::FS_ERR_PERM);
     }
     // New files/dirs are owned by their creator, not root: stamp the caller's
@@ -470,7 +507,7 @@ fn handle_ninep(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [
     // home - the created file would be root-owned and the follow-up write denied.
     // No identity (a dead sender) must not stamp new inodes as root; the verb
     // itself is denied by check_access below, this is just the safe default.
-    let (cuid, cgid) = caller_id().map_or((u32::MAX, u32::MAX), |c| (c.uid, c.gid));
+    let (cuid, cgid) = who.map_or((u32::MAX, u32::MAX), |c| (c.uid, c.gid));
     fs.set_creator(cuid as u16, cgid as u16);
     match verb {
         ninep_abi::NP_READDIR => {
@@ -705,7 +742,7 @@ fn handle_ninep(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [
                     return status_reply(reply, error_code(&e));
                 }
             }
-            let opener_uid = caller_id().map_or(u32::MAX, |c| c.uid);
+            let opener_uid = who.map_or(u32::MAX, |c| c.uid);
             match alloc_fid(fids, sender, opener_uid, tree, path, flags) {
                 Some(fid) => status_reply(reply, fid),
                 None => status_reply(reply, syscall_abi::FS_ERROR), // table full
@@ -767,6 +804,7 @@ fn handle_fid_op(
     mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS],
     fids: &mut [Fid; MAX_FIDS],
     sender: u64,
+    who: Option<Caller>,
     verb: u64,
     p: &[u64; 4],
     reply: &mut [u8],
@@ -784,7 +822,7 @@ fn handle_fid_op(
         return status_reply(reply, 0);
     }
     // The slot must still be held by the same USER - see Fid::owner_uid.
-    match caller_id() {
+    match who {
         Some(c) if c.uid == fids[idx].owner_uid => {}
         _ => {
             fids[idx].used = false; // stale: drop it rather than leave it lying about
@@ -1006,11 +1044,26 @@ fn caller_id() -> Option<Caller> {
     Some(Caller { uid: packed as u32, gid: (packed >> 32) as u32, groups, n_groups })
 }
 
-/// Whether the request's sender was root **when it sent** - the gate on the
-/// disk-management control ops, which never pass through [`check_access`]. A
-/// sender the kernel has no captured credential for is not root.
-fn caller_is_root() -> bool {
-    matches!(caller_id(), Some(c) if c.uid == 0)
+/// Whether the resolved caller is root - the gate on the disk-management
+/// control ops, which never pass through [`check_access`]. A caller the kernel
+/// has no captured credential for is not root.
+fn is_root(who: &Option<Caller>) -> bool {
+    matches!(who, Some(c) if c.uid == 0)
+}
+
+/// The identity this request is authorized against: a proxy identity when
+/// `netd` set one for it, otherwise the credential the kernel bound at send.
+///
+/// The proxy is *peeked*, not consumed - `handle` clears it once, after
+/// resolving, so every check within one request sees one identity and the
+/// latch can never carry into a later request.
+fn effective_caller(sender: u64, proxy: &Option<Caller>) -> Option<Caller> {
+    if sender == syscall_abi::NET_TASK {
+        if let Some(c) = proxy {
+            return Some(*c);
+        }
+    }
+    caller_id()
 }
 
 /// The parent directory of an absolute path (`/etc/passwd` -> `/etc`, `/foo` ->
@@ -1129,7 +1182,7 @@ fn path_allows(fs: &mut vfs::Filesystem, path: &str, who: &Caller, need: u16) ->
             return true;
         }
     }
-    if !ancestors_searchable(fs, path, &who) {
+    if !ancestors_searchable(fs, path, who) {
         return false;
     }
     match fs.stat(path) {
@@ -1143,8 +1196,8 @@ fn path_allows(fs: &mut vfs::Filesystem, path: &str, who: &Caller, need: u16) ->
 
 /// Enforce the caller's permission for `verb`. Returns `true` if allowed. Reads
 /// the object's owner+mode via `stat` and compares against the caller's uid/gid.
-fn check_access(fs: &mut vfs::Filesystem, verb: u64, p: &[u64; 4], payload: &[u8]) -> bool {
-    let Some(who) = caller_id() else {
+fn check_access(fs: &mut vfs::Filesystem, who: Option<Caller>, verb: u64, p: &[u64; 4], payload: &[u8]) -> bool {
+    let Some(who) = who else {
         return false; // sender is gone - nothing to authorize
     };
     let uid = who.uid;

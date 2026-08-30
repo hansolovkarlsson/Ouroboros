@@ -903,6 +903,10 @@ $(EXT2_PART): esp
 	python3 scripts/mkpasswd.py --shadow > $(BUILD_DIR)/ext2-src/etc/shadow
 	chmod 600 $(BUILD_DIR)/ext2-src/etc/shadow
 	python3 scripts/mkgroup.py > $(BUILD_DIR)/ext2-src/etc/group
+	# The shared cluster secret. Without it netd's export is fail-closed, so the
+	# ext2 two-node rig (the only one that can show PERMISSIONS crossing the
+	# cluster - FAT32 models no mode at all) could not come up.
+	printf '%s' '$(CLUSTER_KEY)' > $(BUILD_DIR)/ext2-src/CLUSTER.KEY
 	mkdir -p $(BUILD_DIR)/ext2-src/Users/user
 	printf 'hello from an ext2 volume\n' > $(BUILD_DIR)/ext2-src/HELLO.TXT
 	printf 'line one\nline two has several words\nthird and final line\n' > $(BUILD_DIR)/ext2-src/README.TXT
@@ -1039,6 +1043,41 @@ run-image-9p-client: image
 #   cat /mnt/a/EFI/ORBS/INIT.CFG
 # Each VM gets its own disk copy (two QEMU write-locks can't share one file) and
 # its own pcap (build/net-a.pcap / build/net-b.pcap) for tcpdump inspection.
+# The two-node cluster on EXT2 rather than FAT32 - the only rig that can show
+# per-user identity crossing the cluster, because FAT32 records no mode for fsd
+# to enforce, so every remote request looks permitted there whatever identity it
+# carries. Same socket link and MAC-derived IPs as the FAT32 pair above; each
+# node gets its own copy of the disk, since both write to it.
+run-image-2vm-ext2-a: image-ext2
+	cp $(EXT2_IMG) $(BUILD_DIR)/espext2-a.img
+	qemu-system-aarch64 \
+		-machine virt \
+		-cpu cortex-a72 \
+		-m 512M \
+		-bios $(OVMF) \
+		-drive file=$(BUILD_DIR)/espext2-a.img,format=raw,if=none,id=hd0 \
+		-device virtio-blk-device,drive=hd0 \
+		-device virtio-rng-device \
+		-netdev socket,id=net0,listen=127.0.0.1:12340 \
+		-device virtio-net-device,netdev=net0,mac=52:54:00:12:34:0a \
+		-global virtio-mmio.force-legacy=false \
+		-nographic
+
+run-image-2vm-ext2-b: image-ext2
+	cp $(EXT2_IMG) $(BUILD_DIR)/espext2-b.img
+	qemu-system-aarch64 \
+		-machine virt \
+		-cpu cortex-a72 \
+		-m 512M \
+		-bios $(OVMF) \
+		-drive file=$(BUILD_DIR)/espext2-b.img,format=raw,if=none,id=hd0 \
+		-device virtio-blk-device,drive=hd0 \
+		-device virtio-rng-device \
+		-netdev socket,id=net0,connect=127.0.0.1:12340 \
+		-device virtio-net-device,netdev=net0,mac=52:54:00:12:34:0b \
+		-global virtio-mmio.force-legacy=false \
+		-nographic
+
 run-image-2vm-a: image
 	cp $(ESP_DIR).img $(ESP_DIR)-a.img
 	qemu-system-aarch64 \
