@@ -59,6 +59,16 @@ restartability, announced by a single boot warning easy to read past. `register`
 now also distinguishes "image too large" from "registry full", because they call
 for different fixes and the shared message could name the wrong one.
 
+**#32** then caught the documentation up with all of it — `CLAUDE.md` had still
+been describing `/etc/passwd` as `name:uid:gid:home:salt:hash`, the format #28
+replaced — and carried the supervisor change, which the branch split had
+dropped along with nine doc files.
+
+The day's process lessons, which outlived its code, are in
+[`review-and-split-postmortem.md`](review-and-split-postmortem.md): six primary
+signals that reported success while something was wrong, and the one habit that
+caught them (construct the failure before trusting the fix).
+
 ## A virtio-entropy RNG: the `RANDOM` syscall, and real password salts (2026-08-29)
 
 Password salts were derived from the monotonic clock and documented as weak from
