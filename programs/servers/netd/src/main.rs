@@ -3376,7 +3376,9 @@ fn fsd_call(verb: u64, tree: u64, p0: u64, p1: u64, path: &[u8], result: &mut [u
 /// for the name lookups, the HTTP file server) call those, and therefore cannot
 /// pick up a caller's identity even by mistake. Proxying is opt-in per call.
 fn fsd_call_as(proxy: &Proxy, verb: u64, tree: u64, p0: u64, p1: u64, path: &[u8], result: &mut [u8]) -> u64 {
-    send_proxy(proxy);
+    if !send_proxy(proxy) {
+        return syscall_abi::FS_ERR_PERM; // never proceed unproxied - see send_proxy
+    }
     fsd_call3(verb, tree, p0, p1, 0, path, result)
 }
 
@@ -3834,7 +3836,7 @@ fn map_user(who: &[u8; ninep_abi::NP_NAME_LEN]) -> Option<Proxy> {
 
 /// Tell `fsd` to run the **next** request from us as `p`. See
 /// `ninep_abi::NP_PROXY_ID` for why this exception exists and why it is safe.
-fn send_proxy(p: &Proxy) {
+fn send_proxy(p: &Proxy) -> bool {
     const HDR: usize = ninep_abi::NP_REQ_PAYLOAD as usize;
     let mut req = [0u8; HDR + syscall_abi::MAX_SUPP_GROUPS * 4];
     req[0..8].copy_from_slice(&ninep_abi::NP_PROXY_ID.to_le_bytes());
@@ -3844,14 +3846,31 @@ fn send_proxy(p: &Proxy) {
     for (i, g) in p.groups[..p.n].iter().enumerate() {
         req[HDR + i * 4..HDR + i * 4 + 4].copy_from_slice(&g.to_le_bytes());
     }
-    let mut reply = [0u8; 16];
-    syscall4(
+    // MSG_MAX_LEN, NOT a small buffer sized to the reply we expect. The
+    // 4-argument syscall ABI is exactly full, so the reply buffer's length is
+    // not passed - the kernel writes up to MSG_MAX_LEN and the range check
+    // validates the caller's REGION, not the array. A 16-byte buffer here
+    // passed that check and smashed netd's stack, invisibly, because nothing
+    // read the reply until this call started checking for failure.
+    let mut reply = [0u8; syscall_abi::MSG_MAX_LEN as usize];
+    let packed = syscall4(
         syscall_abi::MSG_CALL,
         syscall_abi::FSD_TASK,
         req.as_ptr() as u64,
         (HDR + p.n * 4) as u64,
         reply.as_mut_ptr() as u64,
     );
+    // FAIL CLOSED, and this is the whole reason the result is checked. If the
+    // latch is not set, the request that follows carries no proxy identity - and
+    // `fsd` then authorizes it against netd's own credential, which is ROOT.
+    // That is exactly the hole this feature exists to close, reappearing on an
+    // error path. An `fsd` restart between these two calls is not hypothetical:
+    // the supervisor restarts it on a wedge, and long remote reads are what
+    // historically caused one (the v0.4.1 large-read restart).
+    if packed >= syscall_abi::FS_ERR_MIN || (packed & 0xffff_ffff) < 8 {
+        return false;
+    }
+    read_u64(&reply, 0) == 0
 }
 
 /// Scan `/etc/passwd` for `uid` and copy that account's name into `out`
@@ -3891,7 +3910,9 @@ fn name_for_uid(uid: u32, out: &mut [u8; ninep_abi::NP_NAME_LEN]) -> bool {
 }
 
 fn read_file_chunk_as(proxy: &Proxy, path: &[u8], tree: u64, offset: u64, buf: &mut [u8]) -> u64 {
-    send_proxy(proxy);
+    if !send_proxy(proxy) {
+        return syscall_abi::FS_ERR_PERM; // never proceed unproxied - see send_proxy
+    }
     read_file_chunk(path, tree, offset, buf)
 }
 
