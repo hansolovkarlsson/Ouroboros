@@ -7,6 +7,49 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/`; 
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## `accountd`: the fifth server, and self-service passwords (2026-08-30)
+
+A normal user can change their own password. `/etc/shadow` is mode 0600 root,
+which is the point of it — and which is exactly what made this impossible: the
+change means writing a file the user cannot write.
+
+Unix answers that with a setuid `passwd` binary. **That answer cannot work
+here.** The kernel does not read files, `fsd` does — so a `/bin` binary is read
+by the *shell* and handed to `SPAWN`, and "this binary is setuid" would be an
+assertion made by a user-controlled task the kernel has no way to verify. It is
+an escalation path straight through the component the capability model exists
+to distrust.
+
+A server inverts it. `accountd` never asks who a program *claims* to be: it
+asks the kernel who **sent the message**, a binding only the kernel can make,
+and decides for itself. root may set any account's password without supplying
+the old one; anyone else may change only their own, and must prove they know
+the current one. Every spawnable slot statically holds `TO_ACCT`, safe for the
+same reason every slot may call `fsd` — holding the right to *ask* is not
+permission to succeed, and the check is in the server. The server holds no
+device capability at all: its privilege is policy, not a resource.
+
+- **The slot guards were generalized before the slot existed.** `NUM_TASKS`
+  10 → 11 and `FIRST_SPAWNABLE` 5 → 6, so the fifth server does not eat one of
+  the five spawnable slots. The four protected-slot guards in `syscall.rs`
+  spelled the bound as the literal `<= 4`, which would have left slot 5
+  unguarded — `fg 5` hands the keyboard to a task that never reads it,
+  `kill 5` exhausts the supervisor's restart cap. Exactly the failure the
+  interactive-shell postmortem named, recurring as predicted.
+- **`/etc/shadow` is rewritten without ever being truncated.** A whole-file
+  write is truncate-then-write — `ext2` frees the old blocks first — so an
+  `fsd` restart or a power loss in that window leaves the file *empty*, which
+  locks every account out, root included. The obvious fix (temp file +
+  `NP_MV`) is unavailable: `mv` refuses an existing destination on all three
+  filesystems. It is not needed either. A shadow line's salt and hash are
+  fixed-width, so a password change leaves the file exactly as long with every
+  other byte identical, and only the differing range is written. A smaller
+  guarantee than atomic rename, and the right one: what matters is not that
+  the change is all-or-nothing, but that a failed change never locks anyone
+  out.
+- **Authorization goes through `SENDER_ID`**, never `GET_ID` of the sender
+  slot — see the entry below.
+
 ## Message credentials: bound at send, not read at dequeue (2026-08-30)
 
 The kernel now captures the *sender's* credential when a message is **sent**,
