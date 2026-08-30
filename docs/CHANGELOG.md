@@ -7,6 +7,41 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/`; 
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## Message credentials: bound at send, not read at dequeue (2026-08-30)
+
+The kernel now captures the *sender's* credential when a message is **sent**,
+and hands it to the receiver through two new syscalls, `SENDER_ID` (65) and
+`SENDER_GROUPS` (66). `fsd` authorizes on that instead of `GET_ID(sender)`.
+
+The hole this closes was found by a code review of the (unmerged) account
+server, but it lived in `fsd`, in shipped code, on **every** permission check
+and every fid op. `GET_ID(sender)` answers "who occupies slot N *now*"; a
+server authorizing a request is asking who occupied it *then*. A non-root task
+can `MSG_SEND` — which does not block — `EXIT`, and have its slot reaped and
+re-spawned before the server drains its mailbox, at which point the request is
+authorized as whatever landed in the slot. Slots 5+ are exactly the pool the
+shell recycles for every command, so this was the ordinary path. The earlier
+`is_live` guard closed only the *dead*-slot half: a **recycled** slot is
+perfectly alive, and a message carries a bare `u8` slot number with no
+generation to tell the two apart.
+
+Three details that fell out of getting it right:
+
+- **Identity and groups are captured together.** The `SET_ID` group half exists
+  precisely so the two cannot be *set* out of step; capturing them out of step
+  would have reintroduced the hole one field at a time.
+- **Only an unfiltered receive updates the cell.** A filtered one is a
+  `MSG_CALL` collecting the reply to a request the server made itself — and
+  `fsd` logs to `cond` through exactly that, so a single print mid-request
+  would have had it authorize against `cond`'s identity. A request only ever
+  arrives on an unfiltered receive, which turns a rule every future server
+  would have to remember into a property of the mechanism.
+- **Not every sender is a task.** The supervisor's health ping sends as
+  `KERNEL_SENDER` (0xFE), which indexes no slot; it now carries no credential
+  rather than a synthesized root one. Missing that guard panicked the tick
+  handler and hung the machine a second into boot — found because the same
+  test script had been run against `main` first and passed.
+
 ## Users, part two: `/etc/shadow`, supplementary groups, ancestor-`x` (2026-08-29)
 
 Three of the users arc's named follow-ups, merged as #27/#28/#31. Each was
