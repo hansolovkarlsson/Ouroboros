@@ -35,6 +35,7 @@ NP_READDIR = NP_BASE + 0
 NP_READ_FILE = NP_BASE + 1
 NP_READ = NP_BASE + 2
 NP_WRITE_FILE = NP_BASE + 11
+NP_WRITE_AT = NP_BASE + 4
 NP_READ_AT = NP_BASE + 10
 FS_ERR_MIN = (1 << 64) - 64  # errors are a small band just below u64::MAX
 FS_ERR_AUTH = (1 << 64) - 1 - 30  # u64::MAX - 30
@@ -249,6 +250,28 @@ def main():
         announce_port, extern_port = int(args[3]), int(args[4])
         response = ((" ".join(args[5:]) if len(args) > 5 else "HELLO-SERVED-VIA-GUEST") + "\r\n").encode()
         do_serve(host, port, key, announce_port, extern_port, response)
+        return
+
+    if op == "badwrite":
+        # badwrite <host> <port> badwrite [path]
+        #
+        # A deliberately MALFORMED but correctly-SIGNED NP_WRITE_AT: a0 (the
+        # path length) is 0xFFFF against a payload of a dozen bytes. The export
+        # used to slice `&payload[a0..a0 + dlen]` without clamping the range
+        # START, so this panicked netd - killing every live TCP connection,
+        # dial slot and export session, and burning a supervisor restart.
+        #
+        # It needs a valid MAC, so it is a trusted-peer fault rather than an
+        # open one - but a truncated or mis-built frame arrives here by
+        # accident, which is the likelier way to meet it. Kept as a regression
+        # probe: run it and the guest should answer an error and stay up.
+        path = (args[3] if len(args) > 3 else "/HELLO.TXT").encode()
+        np = build_frame(NP_WRITE_AT, 0, [0xFFFF, 0, 0, 0], path)
+        try:
+            status, data = one_op(host, port, key, np)
+            print(f"guest answered status=0x{status:x} ({len(data)} bytes) - it survived")
+        except Exception as exc:
+            print(f"no usable answer: {exc!r}")
         return
 
     if op == "dial":

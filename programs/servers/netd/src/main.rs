@@ -2982,6 +2982,33 @@ fn hex_digit(v: u8) -> u8 {
     }
 }
 
+/// The `len` bytes of `payload` starting at `off`, clamped to what is actually
+/// there — the one way this server slices a wire-supplied range.
+///
+/// Both numbers come straight off the network. `off` is a `usize` and `len` a
+/// `u64`, so the obvious spellings are both wrong in release builds, in
+/// different ways:
+///
+/// - `&payload[off..off + n]` does not clamp the range **START**. A frame with
+///   `a0 = 0xFFFF` against a 100-byte payload panics on "range start index out
+///   of range" — and a panic here kills `netd`, tearing down every live TCP
+///   connection, dial slot and export session; repeat it and the per-boot
+///   restart cap is gone, taking the network stack down for the boot.
+/// - `(off + len as usize).min(payload.len())` **wraps** rather than
+///   saturating, so a large `off` can produce an `end` *below* `start`, which
+///   panics on a slice whose start clamp looked sufficient.
+///
+/// Computing the start first and the length from what remains makes
+/// `start + n <= payload.len()` true by construction, with no arithmetic that
+/// can overflow. Reaching this at all needs a valid MAC, so it is a
+/// trusted-peer fault — but a truncated or mis-built frame gets here by
+/// accident, which is the likelier way to meet it.
+fn wire_slice(payload: &[u8], off: usize, len: u64) -> &[u8] {
+    let start = off.min(payload.len());
+    let n = (len as usize).min(payload.len() - start);
+    &payload[start..start + n]
+}
+
 /// Decode a framed NP request and build its framed reply into `out`. See
 /// `ninep_abi`'s frame doc: request = `[u32 len][verb][tree][a0..a3][payload]`.
 fn build_9p_reply(msg: &[u8], out: &mut [u8; PREFIX_MAX], dials: &mut [Option<DialConn>; MAX_DIAL], mac: &[u8; 6]) -> usize {
@@ -3011,13 +3038,11 @@ fn build_9p_reply(msg: &[u8], out: &mut [u8; PREFIX_MAX], dials: &mut [Option<Di
         ninep_abi::NsTarget::Console => {
             let status = match verb {
                 v if v == ninep_abi::NP_WRITE || v == ninep_abi::NP_WRITE_FILE => {
-                    let end = (p0 + p1 as usize).min(payload.len());
-                    log(&payload[p0.min(payload.len())..end]);
+                    log(wire_slice(payload, p0, p1));
                     0
                 }
                 v if v == ninep_abi::NP_WRITE_AT => {
-                    let end = (p0 + p2 as usize).min(payload.len());
-                    log(&payload[p0.min(payload.len())..end]);
+                    log(wire_slice(payload, p0, p2));
                     0
                 }
                 _ => syscall_abi::FS_ERROR, // console is write-only
@@ -3037,8 +3062,7 @@ fn build_9p_reply(msg: &[u8], out: &mut [u8; PREFIX_MAX], dials: &mut [Option<Di
             // A write's payload follows the path (p1 = data length for the inline
             // write verbs) - the /net/tcp ctl/data writes.
             let data_in: &[u8] = if verb == ninep_abi::NP_WRITE || verb == ninep_abi::NP_WRITE_FILE {
-                let end = (p0 + p1 as usize).min(payload.len());
-                &payload[p0.min(payload.len())..end]
+                wire_slice(payload, p0, p1)
             } else {
                 &[]
             };
@@ -3126,7 +3150,7 @@ fn build_9p_reply(msg: &[u8], out: &mut [u8; PREFIX_MAX], dials: &mut [Option<Di
         // NP_MV takes exactly that. Only the disk (tree 0) mounts are writable, so
         // the payload (with its original, unstripped paths) is passed as-is.
         v if v == ninep_abi::NP_MV => {
-            let both = (p0 + p1 as usize).min(payload.len());
+            let both = p0.saturating_add(p1 as usize).min(payload.len());
             let status = fsd_call(ninep_abi::NP_MV, tree, p0 as u64, p1, &payload[..both], &mut []);
             frame_reply(out, status, &[])
         }
@@ -3134,7 +3158,7 @@ fn build_9p_reply(msg: &[u8], out: &mut [u8; PREFIX_MAX], dials: &mut [Option<Di
         // inline. Relay as fsd's inline NP_WRITE_FILE - same create/overwrite
         // semantics for a <=512 chunk, no grant needed (0 data = truncate).
         v if v == ninep_abi::NP_WRITE || v == ninep_abi::NP_WRITE_FILE => {
-            let both = (p0 + p1 as usize).min(payload.len());
+            let both = p0.saturating_add(p1 as usize).min(payload.len());
             let status = fsd_call(ninep_abi::NP_WRITE_FILE, tree, p0 as u64, p1, &payload[..both], &mut []);
             frame_reply(out, status, &[])
         }
@@ -3142,8 +3166,7 @@ fn build_9p_reply(msg: &[u8], out: &mut [u8; PREFIX_MAX], dials: &mut [Option<Di
         // p1. fsd's NP_WRITE_AT is grant-only, so bridge wire-inline -> a local
         // GRANT_READ buffer (the mirror of read_file_chunk's GRANT_WRITE).
         v if v == ninep_abi::NP_WRITE_AT => {
-            let dlen = (p2 as usize).min(payload.len().saturating_sub(p0));
-            let data = &payload[p0..p0 + dlen];
+            let data = wire_slice(payload, p0, p2);
             let status = fsd_write_at(fspath, tree, p1, data);
             frame_reply(out, status, &[])
         }
