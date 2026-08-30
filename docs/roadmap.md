@@ -834,6 +834,22 @@ Known small gaps, not yet sequenced (the *completed* parking-lot entries — USB
 keyboard, GOP console, preemption, task destruction, driver isolation, etc. — are
 in [`roadmap-completed.md`](roadmap-completed.md)):
 
+- **An intermittent failure of `cp` across a remote mount, observed once.**
+  2026-08-30, on the two-node ext2 rig: `cp /mnt/a/README.TXT /mnt/a/COPY.TXT`
+  returned `cp: failed` in one run and succeeded in the two that followed,
+  including a re-run of the byte-identical script. Recorded rather than
+  dismissed, because an intermittent failure that is not written down is
+  indistinguishable from one nobody has hit yet.
+
+  **Not the wire-clamp change** (`wire_slice`, the same day): that rewrite is
+  provably a no-op on every input the old expression did not panic on — for
+  `off <= len` the two produce the same range, since `len - start` *is* the
+  old `saturating_sub`, and they diverge only where the old form's range start
+  was out of bounds. So the cause is older than that fix and still unknown.
+  Suspicion, untested: the export is stop-and-wait, and a remote `cp` is the
+  longest chain of round trips any command makes — a dropped segment plus the
+  RTO is the obvious candidate, and `net-ext2-*.pcap` from a failing run would
+  settle it. Reproducing it is the first step, and may take a loop.
 - **`mv` cannot replace an existing destination.** All three filesystem arms
   return `AlreadyExists` if the target name is taken, so `mv a b` fails where
   every Unix would overwrite `b`. Found 2026-08-30 while fixing the account
