@@ -7,6 +7,82 @@ for the forward plan see [`roadmap.md`](roadmap.md).
 
 ---
 
+## 2026-08-29 — finishing the security tier, and learning to distrust green
+
+A day of *finishing* rather than building: the follow-ups the users arc had
+deferred, plus the small parking-lot items left over from the day before. It
+started as one branch and ended as six pull requests, which is the whole story.
+
+The morning was features. A real **`regex` crate** (pure, `no_std`, no heap,
+host-unit-tested) behind `grep`'s patterns — with an explicit backtracking stack
+rather than host recursion, because a recursive matcher's depth grows with the
+*input*, and `a*` over a 256-byte line is 256 frames against a 32 KB guarded
+stack. Then **symbolic `chmod`** (`u+x`, `go-w`, `a=rx`, copy-form `g=u`,
+conditional `X`), **`chown` by name**, **`/etc/skel`**, an **atomic `useradd`**
+(ordered so the `/etc/passwd` write is the single commit point, with rollback
+before it and warn-only convenience after), one shared account-file reader
+replacing three near-identical copies, the **picolibc stdout** follow-up, and a
+**virtio-rng** driver behind a `RANDOM` syscall so password salts stop being
+clock-derived. That half merged cleanly as #26.
+
+Then the security tier — `/etc/shadow`, supplementary groups, ancestor-`x`
+traversal, an `accountd` server so a user can change their own password — and
+this is where the day turned. A local code review found 10 findings. Fixing them
+and re-running found 15. Fixing *those* found 15 again, and two separate
+`max`-effort passes over the same diff returned **largely disjoint sets**. Worse,
+my own fixing was producing roughly **one new bug per round**: a group escalation
+introduced while closing a group finding, a truncation window opened while fixing
+an ordering bug, and one "fix" that was a silent no-op the kernel's own range
+check rejected — caught only by booting it.
+
+The user asked whether to roll the branch back entirely. Checking the history
+said no: the *worst* findings pre-dated the branch. But the non-convergence was
+real, and the diagnosis was that **a diff too big to review is also too big to
+fix** — every fix lands in a context nobody is holding any more. So we split it,
+one module per PR, and merged them in order.
+
+The split paid immediately. Reviewing `/etc/shadow` alone surfaced a **lockout**
+three passes over the combined diff had missed: the shell reads an account file
+into a 2 KB buffer and returns `0` on overflow, which for `/etc/passwd` correctly
+means "no accounts, start a root session" — and for `/etc/shadow` means "this
+user has no secret", refusing every password, root's included, with no way back
+in. Shadow lines are ~90 bytes to passwd's ~30, so shadow crosses first, at ~23
+accounts. The function's comment justifying the behaviour was written for its
+first caller and was false for its second, word for word. Fixed by streaming the
+lookup one line at a time, so the size of the database stops deciding whether
+anyone can log in — and verified in *both* directions, reverting only that change
+to watch root get locked out with a correct password.
+
+The split also **dropped** things, which is the other half of the lesson: nine
+documentation files and a one-constant fix raising `IMG_CAP`, without which
+`FSD.BIN` (137 KB against a 128 KB cap) meant **`fsd` had not been restartable at
+all** — announced by one boot warning among forty, scrolling past before the login
+prompt. I found it by accident, reading unrelated output. Nothing else would
+have. Reconciling the original branch against the union of the pieces, before
+closing it, is now the rule.
+
+Two more green signals lied before the day was out. `usermod -G ""` cleared the
+group list *by accident* — only because no group is named `""` — while printing
+an error-shaped message and exiting 0. And GitHub called #30 `MERGEABLE` when the
+merged tree did not compile: #32 changed a function's return type, #30 added a
+fourth call site on lines #32 never touched, so there was no textual conflict and
+no meaning either. Ninety seconds of merging-and-building locally caught it.
+
+Also learned, expensively: squash-merging a PR whose branch is the *base* of
+another does not retarget the stacked PR — it **closes** it, and GitHub then
+refuses to reopen it. #29 lost its number that way (its work is #31). The fix is
+ordering: merge without deleting the branch, rebase the stacked branch, retarget
+it, *then* delete. Applied to #31 → #30 it worked with nothing lost.
+
+Ended with `main` carrying #26/#27/#28/#31/#32 and the docs caught up to what
+the system actually is. `accountd` (#30) is rebased, builds and boots, with five
+review findings deliberately left for a fresh session — it has the largest new
+surface, and the day had already demonstrated what fixing under pressure
+produces. Full write-up in
+[`review-and-split-postmortem.md`](review-and-split-postmortem.md).
+
+---
+
 ## 2026-08-28 (cont.) — closing the security arc: account management
 
 After the libc arc, one more the same day: **closing out the users/permissions

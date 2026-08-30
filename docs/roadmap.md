@@ -398,6 +398,12 @@ crate, plus creator-owned new inodes.
 - **Self-service `passwd`** — a non-root user changing their own password needs
   a privileged path: a dedicated **`accountd`** server (the `accounts` crate is
   built to slot into it) or a setuid mechanism. Root-only tools ship today.
+  **In flight** as PR #30: the server exists, builds and boots, and `passwd`
+  becomes a pure IPC client of it — held back with five code-review findings
+  outstanding, including a `/etc/shadow` mode predicate and a recycled-slot
+  TOCTOU (the kernel's message carries a bare slot number with no generation
+  counter, so a sender that exits and is replaced between send and dequeue is
+  authorised as its successor).
 - ~~**A virtio-entropy RNG**~~ — **shipped 2026-08-29.** A `virtio_rng.rs` driver
   (one virtqueue, device-writable descriptor, polled) behind a `RANDOM` syscall;
   `accounts::salt_from` takes the bytes and reports whether the salt is strong,
