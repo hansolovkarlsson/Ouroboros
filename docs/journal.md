@@ -136,6 +136,11 @@ step, and the drift is invisible until someone goes looking. `cargo doc`
 returning zero is now one small piece of machinery that will notice — for one
 of the five kinds.
 
+Written up as `docs/asking-the-right-question-postmortem.md`, the
+twenty-fourth. The arc that started with "the OS has no idea who you are" is
+finished; the only thing left in it is per-user *cluster* identity, which is
+the one place a remote request still arrives as root.
+
 ---
 
 ## 2026-08-29 — finishing the security tier, and learning to distrust green
