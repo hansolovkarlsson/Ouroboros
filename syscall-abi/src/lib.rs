@@ -1356,6 +1356,11 @@ pub const FS_ERR_PERM: u64 = u64::MAX - 32;
 /// with them - safe each time, since
 /// both sides of the ABI import this from the same crate and no real success
 /// value approaches it either way.)
+///
+/// **`libc/include/sys.h` hand-mirrors this value.** It moves down every time a
+/// new error code is reserved, and a C program compiled against a stale floor
+/// reads the newly reserved codes as ordinary success values - so change both,
+/// in the same commit.
 pub const FS_ERR_MIN: u64 = u64::MAX - 38;
 
 /// Generic failure sentinel for [`SPAWN`] - same bit pattern as

@@ -953,18 +953,23 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
         syscall_abi::EXIT => {
             let current = tasks::current_task();
             if current < tasks::FIRST_SPAWNABLE {
-                // Task 0 (the boot shell - nothing would own the
-                // keyboard, see tasks::INPUT_OWNER_TASK), task 1
-                // (idle - never makes syscalls, refused for
-                // completeness), task 2 (the filesystem server -
-                // its death would strand the disk for the rest of the
-                // boot, and its slot is block-syscall-privileged),
-                // task 3 (the console server - its death would strand
-                // steady-state output; the kernel's emergency console
-                // still works, but the shell wouldn't render), and task 4
-                // (the network server - block-syscall-privileged for the
-                // NIC) may not exit. The only case where EXIT returns to
-                // its caller.
+                // No slot below FIRST_SPAWNABLE may exit. Stated as the
+                // bound rather than as a list, because the list is what
+                // goes stale: every one of these comments enumerated
+                // "0-4" until a fifth server arrived, and a sixth will
+                // do it again. Today that set is the boot shell (0 -
+                // nothing would own the keyboard, see
+                // tasks::INPUT_OWNER_TASK), idle (1 - never makes
+                // syscalls, refused for completeness), the filesystem
+                // server (2 - its death would strand the disk for the
+                // rest of the boot, and its slot is
+                // block-syscall-privileged), the console server (3 - its
+                // death would strand steady-state output; the kernel's
+                // emergency console still works, but the shell wouldn't
+                // render), the network server (4 -
+                // block-syscall-privileged for the NIC), and the account
+                // server (5 - the only task that may write /etc/shadow).
+                // The only case where EXIT returns to its caller.
                 return syscall_abi::EXIT_DENIED;
             }
             console::println!("Ouroboros kernel: task {current} exited (code {arg0})");
@@ -1052,11 +1057,11 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
         syscall_abi::KILL => {
             let i = arg0 as usize;
             if i < tasks::FIRST_SPAWNABLE {
-                // The boot shell (the permanent keyboard owner), idle,
-                // the filesystem server, the console server, and the
-                // network server are
-                // protected - same reasoning as EXIT's own refusal of
-                // them.
+                // Every slot below FIRST_SPAWNABLE is protected - the
+                // boot shell (the permanent keyboard owner), idle, and
+                // the supervised servers - same reasoning as EXIT's own
+                // refusal of them, and see EXIT for why this is phrased
+                // as the bound and not as a list.
                 return syscall_abi::TASK_ERR_PROTECTED;
             }
             if !tasks::task_exists(i) {
@@ -1079,10 +1084,10 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
         syscall_abi::WAIT => {
             let i = arg0 as usize;
             if i < tasks::FIRST_SPAWNABLE || i == tasks::current_task() {
-                // Waiting on task 0/1/2/3/4 (they never die - the boot
-                // shell, idle, the filesystem server, the console server,
-                // and the network server are all exit/kill-protected) or
-                // on yourself is a guaranteed deadlock - refused up front.
+                // Waiting on any slot below FIRST_SPAWNABLE (they never
+                // die - the boot shell, idle, and the supervised servers
+                // are all exit/kill-protected) or on yourself is a
+                // guaranteed deadlock - refused up front.
                 return syscall_abi::TASK_ERR_PROTECTED;
             }
             if i >= tasks::NUM_TASKS {
@@ -1376,8 +1381,9 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
         syscall_abi::FG => {
             let i = arg0 as usize;
             if (1..tasks::FIRST_SPAWNABLE).contains(&i) {
-                // Foregrounding idle (1) or a supervised server (2/3/4 -
-                // fsd/cond/netd) is refused, same protected set as KILL/EXIT:
+                // Foregrounding idle (1) or any supervised server (every
+                // slot from 2 up to FIRST_SPAWNABLE) is refused, same
+                // protected set as KILL/EXIT:
                 // idle would strand the keyboard on a task that never reads it,
                 // and a server has no reason to own the terminal - worse,
                 // foregrounding one then hitting Ctrl+C would route the

@@ -65,6 +65,33 @@ logs in. That is a smaller guarantee than atomic rename and a much cheaper one,
 and it is the right trade here: the property that matters is not "the change is
 all-or-nothing", it is "a failed change never locks anyone out".
 
+The ultra review came back with two findings, both nits — against fifteen on
+the combined branch yesterday. Encouraging, and the shape of what it found is
+the interesting part: both were **drift between a fact and its restatement
+elsewhere**, not logic errors.
+
+The four protected-slot guards in `syscall.rs` were correctly generalized to
+`FIRST_SPAWNABLE`, but all four comments beside them still enumerated "tasks
+0-4". They had been rewritten once already when netd became the fourth server;
+they would need it again for a sixth. So they now state the *bound* rather than
+the list, which is the only version that stops going stale.
+
+The second was better still. `libc/include/sys.h` hand-mirrors the reserved
+error band's floor, and this branch moved that floor from `MAX-33` to `MAX-38`
+to fit the `ACCT_ERR_*` codes — so a C program compiled against the stale
+header would read `ACCT_ERR_IO` as a *successful* return value. No live
+consumer today (no C program calls `accountd`), which is exactly why nothing
+caught it. Fixed both sides, and put a note at the Rust definition pointing
+back at the mirror, since the definition is what someone edits next.
+
+And a small "splitting isn't free" artifact fell out of checking it: the
+roadmap already carried a note saying this header had drifted — on `main`,
+where the two values actually still *matched*. The note had been written during
+the combined branch's review and went to `main` in the docs split while the
+code change it described stayed here. A deferral note that arrives before the
+thing it defers is just a false statement with a good alibi. Removed, now that
+it is genuinely fixed.
+
 One of the tests written for it turned out to be worthless, and only mutating
 the code showed it — a test named for a bound that guards nothing, because the
 backward scan is already stopped by the byte the forward scan stopped on.

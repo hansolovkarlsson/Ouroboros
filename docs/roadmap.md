@@ -704,8 +704,6 @@ review. Recorded here so they are not lost with the review transcript.
   account created by pressing Enter twice is loginable by pressing Enter. It is
   the only writer of an *initial* secret, so it is the one that most needs the
   check. Pre-existing.
-- **`libc/include/sys.h`'s `FS_ERR_MIN`** is still `~0UL - 33UL` with a comment
-  claiming it mirrors the Rust constant, which has since moved.
 
 ## Open gaps (small, from the old parking lot)
 
