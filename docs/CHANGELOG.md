@@ -7,6 +7,68 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/`; 
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## `netd`: one malformed export frame could kill the network for the boot (2026-08-30)
+
+The `NP_WRITE_AT` export arm sliced `&payload[p0..p0 + dlen]` with `p0` taken
+straight off the wire. `saturating_sub` clamped the **length** and did nothing
+for the range **start**, so a frame with `a0 = 0xFFFF` panicked — and a panic in
+`netd` parks it, taking every live TCP connection, dial slot and export session
+with it, then burning a supervisor restart. Three of those and the network stack
+is gone for the boot.
+
+Two more of the same class turned up in the sweep, and they are a *different*
+mistake: `(p0 + p1 as usize)` **wraps** in release rather than saturating, so a
+large `p0` puts `end` below a correctly-clamped `start` and the slice panics
+anyway. Both `/dev/cons` write arms and the `/net/tcp` write arm had it.
+
+Fixed as a class, not as instances: one `wire_slice(payload, off, len)` computes
+the start first and the length from what remains, making
+`start + n <= payload.len()` true by construction with no arithmetic that can
+overflow.
+
+Proven both directions with `np9p_client.py`'s new `badwrite` op — a correctly
+signed but malformed frame. Against the old code the guest prints *"server slot
+4 wedged … restarted (attempt 1/3)"*; against the fix it answers and stays up.
+
+**What did not catch it:** the `-d int` health bar reads `0` either way, because
+a userland panic *parks* a task rather than raising a CPU exception. The signal
+is the supervisor's restart line. A guest that "still boots and prints 0 aborts"
+can have had its network server killed and restarted underneath it.
+
+## A two-node rig that can fail, and a health bar that means something (2026-08-30)
+
+Test infrastructure, split out ahead of the feature it was built for — because
+the feature's review showed the rig has to be trustworthy first.
+
+**The FAT32 two-node rig cannot test permissions.** It records no mode, so `fsd`
+has nothing to enforce and every remote request looks permitted there *whatever
+identity it carries*: a permission test on it passes before a fix and after it.
+Added `run-image-2vm-ext2-a`/`-b` on their own link port, and
+`scripts/drive-2vm.py` to drive both guests unattended.
+
+**`CLUSTER.KEY` now ships 0600** on the ext2 disk — the one image where modes are
+enforced, and the key is what the whole cluster mechanism rests on.
+
+**The health bar had lost `SError`.** Extracting the console machinery into a
+reusable `Guest` class dropped it from the fault predicate, counted substring
+occurrences rather than lines, and turned a *missing* trace into `0`. `SError`
+is the asynchronous class a guard-page overrun produces — which this project has
+hit five times — so dropping it turned exactly the runs worth catching into
+clean ones. Restored, with a missing trace now reported as
+*"NO TRACE (health bar unavailable — this is not a pass)"*.
+
+## `ls -a` shows `.` and `..`, which it never did (2026-08-30)
+
+`manpages/ls` promised *"Include dotfiles, and the . and .. entries"* from the
+commit that introduced it, and no filesystem arm ever returned them. The promise
+was worth keeping rather than deleting: with enforcement live, `ls -la` is the
+only way to see a directory's **own** mode — the parent's listing shows it, but
+you cannot always read the parent.
+
+Synthesized in `ls`, deliberately not in `fsd`: every arm filters `.`/`..` out of
+a listing and that filter is load-bearing for `tree` (which would recurse
+forever), glob expansion, and any future recursive `cp`/`rm`.
+
 ## The users/permissions arc, closed (2026-08-30)
 
 The arc that began on 2026-08-28 with "the OS has no idea who you are" is

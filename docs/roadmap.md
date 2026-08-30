@@ -30,8 +30,39 @@ that item leads this list rather than sitting in the north-star section it came
 from. In rough order of value (item 1 is the next *arc*; 2 and 3 are what the
 microkernel arc itself still leaves open):
 
-1. **Per-user cluster identity — the users arc's last item, and the next arc.**
-   The 9P export authenticates the *machine* (a shared cluster key), never a
+1. **Per-user cluster identity — ATTEMPTED and REJECTED 2026-08-30; rebuild
+   pending, design settled.**
+
+   A first implementation (PR #42, kept open and marked *do not merge*) was
+   rejected by review with fifteen findings, **five of them independent ways a
+   remote request still reached `fsd` with root authority**. The wire design was
+   right and survives: send the caller's **name** (not a uid — two nodes number
+   users independently), **inside the MAC** (free, since the MAC was already
+   there), resolved on the far side through its own `/etc/passwd`, refusing a
+   name it does not know.
+
+   **The mechanism was wrong, in a way worth stating before rebuilding.**
+   Identity was attached by *opt-in* wrapper functions and held in a *latch*
+   between two messages. Opt-in meant a missed call site was silent — one path
+   (`fsd_write_at`) was simply forgotten, so remote `cp`/`>>`/`writeat` ran as
+   root. The latch meant any other task's request to `fsd` cleared it, falling
+   back to `netd`'s root. Four of the five holes came from those two properties,
+   not from four separate slips.
+
+   **The rebuild:** identity as a **required parameter** of the two chokepoints
+   (`fsd_call3`, `read_file_chunk`/`fsd_write_at`) with an explicit
+   `FirstParty` value for `netd`'s own reads — so "unproxied" does not compile —
+   and carried **in the NP request** (offset 40 / `a3` is free) rather than
+   latched, which removes the interleaving hole and covers `NP_RUN` at once.
+   See [`unspellable-postmortem.md`](unspellable-postmortem.md).
+
+   Two things the attempt did land, merged separately: the **ext2 two-node test
+   rig** (the FAT32 pair cannot test permissions at all) and the `NP_WRITE_AT`
+   **crash fix**. Also still open beyond the rebuild: **per-user keys** — what
+   was attempted defends against the *users* of a trusted node, but a peer
+   holding the shared key can claim any name.
+
+   *The problem, unchanged:* the 9P export authenticates the *machine* (a shared cluster key), never a
    *user*, and `netd` relays every remote request under its **own root
    identity** — so `fsd`'s `check_access` hits its root bypass and
    short-circuits before any mode is consulted. Concretely, today: an
@@ -787,6 +818,15 @@ would otherwise silently shrink into looking like nothing was ever found.
   Raised against the unmerged account server, but it was `fsd`, in shipped
   code, that had it on every permission check and every fid op. Written up in
   [`asking-the-right-question-postmortem.md`](asking-the-right-question-postmortem.md).
+- ~~**One malformed export frame could kill the network for the boot.**~~
+  **Fixed 2026-08-30** (#44). `NP_WRITE_AT` sliced `&payload[p0..p0 + dlen]`
+  with the range *start* unclamped, and two sibling arms had a wrapping add that
+  put `end` below a clamped `start` — both panic, and a panic in `netd` parks it
+  and burns a supervisor restart. Fixed as a class with one clamping helper.
+  Raised by the review of #42 as pre-existing; proven both directions with the
+  host-side Python peer. Note the `-d int` health bar reads `0` either way: a
+  userland panic parks a task rather than raising a CPU exception, so the signal
+  is the supervisor's restart line.
 - **`warn_if_unprotected` fails open** — but does *not* misfire today, which is
   a distinction worth keeping straight. **Tested 2026-08-29 on all three
   images**: the warning correctly appears on FAT32 and exFAT and correctly stays
