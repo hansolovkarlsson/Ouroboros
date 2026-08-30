@@ -193,7 +193,7 @@ ifeq ($(PROFILE),release)
 CARGO_FLAGS += --release
 endif
 
-.PHONY: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin accountd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin id-bin passwd-bin useradd-bin groupadd-bin usermod-bin chello-bin cdemo-bin cfile-bin cpico-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin sort-bin esp run run-virtio-console run-usb-kbd run-usb-multi run-gicv3 image run-image run-image-9p run-image-9p-client run-image-2vm-a run-image-2vm-b image-gpt run-image-gpt image-exfat run-image-exfat image-ext2 run-image-ext2 parallels-hdd release test-parallels clean
+.PHONY: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin accountd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin id-bin passwd-bin useradd-bin groupadd-bin usermod-bin chello-bin cdemo-bin cfile-bin cpico-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin sort-bin esp run run-virtio-console run-usb-kbd run-usb-multi run-gicv3 image run-image run-image-9p run-image-9p-client run-image-2vm-a run-image-2vm-b run-image-2vm-ext2-a run-image-2vm-ext2-b image-gpt run-image-gpt image-exfat run-image-exfat image-ext2 run-image-ext2 parallels-hdd release test-parallels clean
 
 # Overridable by `make test-parallels VM_NAME=... CMDS=... BOOT_WAIT=...`.
 VM_NAME     ?= Ouroboros
@@ -903,6 +903,18 @@ $(EXT2_PART): esp
 	python3 scripts/mkpasswd.py --shadow > $(BUILD_DIR)/ext2-src/etc/shadow
 	chmod 600 $(BUILD_DIR)/ext2-src/etc/shadow
 	python3 scripts/mkgroup.py > $(BUILD_DIR)/ext2-src/etc/group
+	# The shared cluster secret. Without it netd's export is fail-closed, so the
+	# ext2 two-node rig (the only one that can show PERMISSIONS crossing the
+	# cluster - FAT32 records no mode at all) could not come up.
+	#
+	# chmod 600 for the same reason /etc/shadow above gets it, and it matters
+	# MORE here: this is the one image where fsd actually enforces modes, and
+	# the key is what the whole cluster mechanism rests on - anyone who can read
+	# it can present any user name from anywhere. netd runs as root, so 0600
+	# costs nothing. Shipping the permission demo and the secret that makes it
+	# meaningful on one disk with opposite protections would be a self-own.
+	printf '%s' '$(CLUSTER_KEY)' > $(BUILD_DIR)/ext2-src/CLUSTER.KEY
+	chmod 600 $(BUILD_DIR)/ext2-src/CLUSTER.KEY
 	mkdir -p $(BUILD_DIR)/ext2-src/Users/user
 	printf 'hello from an ext2 volume\n' > $(BUILD_DIR)/ext2-src/HELLO.TXT
 	printf 'line one\nline two has several words\nthird and final line\n' > $(BUILD_DIR)/ext2-src/README.TXT
@@ -1068,6 +1080,45 @@ run-image-2vm-b: image
 		-netdev socket,id=net0,connect=127.0.0.1:12340 \
 		-device virtio-net-device,netdev=net0,mac=52:54:00:12:34:0b \
 		-object filter-dump,id=f0,netdev=net0,file=$(BUILD_DIR)/net-b.pcap \
+		-global virtio-mmio.force-legacy=false \
+		-nographic
+
+# The two-node cluster on EXT2 rather than FAT32 - the only rig that can show
+# PERMISSIONS crossing the cluster, because FAT32 records no mode for fsd to
+# enforce, so every remote request looks permitted there whatever identity it
+# carries (a permission test on the FAT32 pair passes before a fix AND after
+# it). Same MAC-derived IPs as that pair, but its OWN link port, so both rigs
+# can be up at once instead of colliding as an unrelated guest-side timeout.
+# Each node gets its own disk copy, since both write to it.
+run-image-2vm-ext2-a: image-ext2
+	cp $(EXT2_IMG) $(BUILD_DIR)/espext2-a.img
+	qemu-system-aarch64 \
+		-machine virt \
+		-cpu cortex-a72 \
+		-m 512M \
+		-bios $(OVMF) \
+		-drive file=$(BUILD_DIR)/espext2-a.img,format=raw,if=none,id=hd0 \
+		-device virtio-blk-device,drive=hd0 \
+		-device virtio-rng-device \
+		-netdev socket,id=net0,listen=127.0.0.1:12341 \
+		-device virtio-net-device,netdev=net0,mac=52:54:00:12:34:0a \
+		-object filter-dump,id=f0,netdev=net0,file=$(BUILD_DIR)/net-ext2-a.pcap \
+		-global virtio-mmio.force-legacy=false \
+		-nographic
+
+run-image-2vm-ext2-b: image-ext2
+	cp $(EXT2_IMG) $(BUILD_DIR)/espext2-b.img
+	qemu-system-aarch64 \
+		-machine virt \
+		-cpu cortex-a72 \
+		-m 512M \
+		-bios $(OVMF) \
+		-drive file=$(BUILD_DIR)/espext2-b.img,format=raw,if=none,id=hd0 \
+		-device virtio-blk-device,drive=hd0 \
+		-device virtio-rng-device \
+		-netdev socket,id=net0,connect=127.0.0.1:12341 \
+		-device virtio-net-device,netdev=net0,mac=52:54:00:12:34:0b \
+		-object filter-dump,id=f0,netdev=net0,file=$(BUILD_DIR)/net-ext2-b.pcap \
 		-global virtio-mmio.force-legacy=false \
 		-nographic
 

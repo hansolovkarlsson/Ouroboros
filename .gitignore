@@ -14,3 +14,4 @@
 /third_party/pico-build/
 /third_party/pico-install/
 /third_party/picolibc-cross.resolved.txt
+__pycache__/

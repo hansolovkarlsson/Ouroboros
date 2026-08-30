@@ -189,6 +189,53 @@ gateway, no DNS. Each guest gets its own disk copy (`build/esp-a.img` /
 `esp-b.img`, since two QEMU write-locks can't share one file) and its own pcap
 (`build/net-a.pcap` / `net-b.pcap`).
 
+**FAT32 or ext2? This one matters.** The `run-image-2vm-a`/`-b` pair boots the
+**FAT32** image, which is right for everything except permissions — FAT32
+records no mode, so `fsd` has nothing to enforce and **every remote request
+looks permitted there regardless of who sent it**. That is not a bug in the rig,
+but it means a permission test on it passes *before* a fix and *after* it,
+proving nothing either time. For anything about who may read what across the
+cluster, use the ext2 pair:
+
+```sh
+make run-image-2vm-ext2-a      # terminal 1, listens (port 12341)
+make run-image-2vm-ext2-b      # terminal 2
+```
+
+It has its **own link port**, so it can run alongside the FAT32 pair rather than
+colliding with it (a collision shows up as an unrelated guest-side timeout,
+which is a miserable thing to debug). `make image-ext2` stages `CLUSTER.KEY`
+onto that disk — without it `netd`'s export is fail-closed and the rig cannot
+come up — at **mode 0600**, because ext2 is the one image where `fsd` enforces
+modes and the key is what the whole cluster mechanism rests on: anyone who can
+read it can present any user name from anywhere.
+
+**Driving both nodes unattended.** `scripts/drive-2vm.py` starts A, runs its
+steps, then starts B and runs its steps while A stays alive — printing both
+transcripts and both health bars:
+
+```sh
+cp build/espext2.img build/espext2-a.img
+cp build/espext2.img build/espext2-b.img
+python3 scripts/drive-2vm.py build/espext2-a.img build/espext2-b.img \
+  --a 'login@@root' 'assword@@root' '# @@' \
+  --b 'login@@user' 'assword@@user' \
+     '\$ @@mount -r 10.0.2.10:564 /mnt/a' \
+     '\$ @@cat /mnt/a/etc/shadow' \
+     '\$ @@'
+```
+
+**Note the trailing `'\$ @@'`** — a wait with nothing typed. Without it only the
+4-second linger separates the last keystroke from the transcript print, and a
+remote mount plus read under TCG routinely takes longer; the empty tail then
+looks exactly like the refusal you were trying to observe. Both `--a` and `--b`
+are required and each needs at least one step, because a run that types nothing
+and exits 0 is worse than no run at all.
+
+It shares `drive-qemu.py`'s `Guest` class rather than copying the console rules
+— the paced typing and the match-only-new-output high-water mark are the
+load-bearing parts, and a second copy would drift from the first.
+
 **How the IPs work.** `netd` derives each guest's IPv4 from its NIC's MAC (last
 octet): the two-VM targets set MAC `…:0a` → **10.0.2.10** (machine A) and `…:0b` →
 **10.0.2.11** (machine B). (The default QEMU MAC `…:56` maps back to `.15`, so the
@@ -268,8 +315,10 @@ see [`manual.md`](manual.md)'s Parallels section.
 | `run-image-server` | + `hostfwd tcp::5555->:80` (host `curl` reaches netd) |
 | `run-image-9p` | + `hostfwd tcp::5640->:564` (host reads guest's disk over 9P) |
 | `run-image-9p-client` | NIC only; guest mounts a host-run 9P server |
-| `run-image-2vm-a` | machine A of the two-node cluster (listen, IP `.10`) |
-| `run-image-2vm-b` | machine B of the two-node cluster (connect, IP `.11`) |
+| `run-image-2vm-a` | machine A of the two-node cluster on FAT32 (listen, IP `.10`, port 12340) |
+| `run-image-2vm-b` | machine B of the FAT32 pair (connect, IP `.11`) |
+| `run-image-2vm-ext2-a` | machine A on **ext2** — the only rig that can test cluster *permissions* (port 12341) |
+| `run-image-2vm-ext2-b` | machine B of the ext2 pair (connect, IP `.11`) |
 | `run-usb-kbd` | xHCI + USB keyboard |
 | `run-usb-multi` | xHCI + tablet + storage stick |
 | `run-gicv3` | force GICv3 |
