@@ -32,6 +32,35 @@ on it, so they rebuild it as needed.
 
 ---
 
+## 1b. Driving the shell unattended (`scripts/drive-qemu.py`)
+
+Every run above expects a human at the keyboard. `scripts/drive-qemu.py` removes
+that: each argument is a `WAIT@@TYPE` step — wait for a regex to appear in *new*
+guest output, then type a line — and it prints the transcript followed by the
+abort count from QEMU's own `-d int` trace.
+
+```sh
+python3 scripts/drive-qemu.py build/espext2.img \
+    'login@@root' 'assword@@root' '# @@id' '# @@cat /etc/shadow'
+```
+
+This is what makes login, permission enforcement and `cpu` testable in a loop.
+
+**Why it types one character at a time.** The PL011 the guest reads has **no RX
+FIFO**, so a byte arriving while the guest is not polling is not queued — it is
+gone. Piping a script straight into QEMU loses most of it. Two consequences,
+both load-bearing:
+
+1. Characters go out individually with a delay.
+2. Each step matches only output produced **since the previous step**. Searching
+   the whole buffer matches an *earlier* prompt and starts typing while the
+   guest is still printing, which silently eats the first characters of the
+   command — `cat /etc/shadow` arrives as `t /etc/shadow`, and the test fails
+   for a reason that has nothing to do with the code under test.
+
+A timeout prints which pattern it was waiting for, which is usually enough to
+see whether the guest died or the prompt simply differs from the regex.
+
 ## 2. Disk-format test images
 
 Ouroboros's filesystem server (`fsd`) mounts FAT32, exFAT, and ext2, and discovers
