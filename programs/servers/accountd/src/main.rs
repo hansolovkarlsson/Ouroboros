@@ -76,7 +76,7 @@ pub extern "C" fn _start() -> ! {
         }
         let sender = packed >> 32;
         let len = ((packed & 0xffff_ffff) as usize).min(req.len());
-        let status = handle(sender, &req[..len]);
+        let status = handle(&req[..len]);
         reply[..REPLY_LEN].copy_from_slice(&status.to_le_bytes());
         ulib::syscall4(
             syscall_abi::MSG_SEND,
@@ -92,7 +92,11 @@ pub extern "C" fn _start() -> ! {
 }
 
 /// Decode one request and carry it out, returning the status word to reply.
-fn handle(sender: u64, req: &[u8]) -> u64 {
+///
+/// Takes no sender: the authorization identity comes from the kernel's captured
+/// credential (`SENDER_ID`), not from the slot number, which is exactly the
+/// point. `_start` still needs the slot to address the reply.
+fn handle(req: &[u8]) -> u64 {
     if req.len() < REQ_HDR {
         return syscall_abi::ACCT_ERR_BAD_REQUEST;
     }
@@ -126,17 +130,22 @@ fn handle(sender: u64, req: &[u8]) -> u64 {
     let old = &payload[name_len..name_len + old_len];
     let new = &payload[name_len + old_len..name_len + old_len + new_len];
 
-    // Who is actually asking. The kernel binds this to the message's real
-    // sender slot, so it cannot be spoofed by the request's contents - which is
+    // Who is actually asking. The kernel binds a credential to each message when
+    // it is SENT, so it cannot be spoofed by the request's contents - which is
     // the entire reason this server can be trusted to make the decision.
     //
-    // FAIL CLOSED when the kernel has no identity to report. A slot's identity
-    // is reset to root when its task dies, so a caller could otherwise send
-    // "change root's password" and immediately exit: by the time this server ran,
-    // GET_ID would answer 0 and the old-password check would be skipped
-    // entirely. The kernel now reports GET_ID_ERR for a dead slot, and a request
-    // whose sender is gone is authorized as nobody, not as root.
-    let packed = ulib::task_id(sender);
+    // SENDER_ID, not GET_ID(sender): the latter answers who occupies that slot
+    // *now*. A caller could send "change root's password" and immediately exit
+    // (MSG_SEND does not block), and by the time this server drained its
+    // mailbox the slot could hold a different task altogether. Refusing a DEAD
+    // slot - which is all the earlier fix did - does not help, because a
+    // RE-SPAWNED slot is perfectly alive and the message carries a bare slot
+    // number with nothing to tell the two apart. If root landed there, the
+    // old-password proof would be skipped entirely.
+    //
+    // FAIL CLOSED when the kernel has no captured credential: authorized as
+    // nobody, never as root.
+    let packed = ulib::sender_id();
     if packed == syscall_abi::GET_ID_ERR {
         return syscall_abi::ACCT_ERR_DENIED;
     }
