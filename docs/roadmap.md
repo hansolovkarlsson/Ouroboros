@@ -50,6 +50,80 @@ the microkernel arc itself still leaves open):
    worth building before Ouroboros leaves a trusted network, which is the
    trigger the rest of the security tier already sits behind.
 
+   **A designated auth server — the Plan 9 answer, evaluated 2026-08-31.** Hans
+   asked whether one machine could be the cluster's identity master, with the
+   others obtaining authentication from it. Recorded here in full because it is
+   the natural next question, the answer is "yes, and it is what Plan 9 does",
+   and the reasoning for *not building it yet* is the part that will be needed
+   again.
+
+   Plan 9 has exactly this: `authsrv` issues tickets, `factotum` holds a user's
+   keys, `secstore` keeps the shared secrets. It is the Kerberos family
+   (Needham-Schroeder). So the shape is well-trodden, and it fits this project's
+   lineage rather than fighting it.
+
+   **The detail that decides whether it works at all.** If the master's role is
+   "B asks the master, the master says yes, B tells A it was approved", it fixes
+   **nothing** — A is still trusting B's word, which is the whole of the current
+   gap. It works only when the master's answer is a **ticket A can verify without
+   trusting B**: the master shares a key with *each* machine and issues B a
+   ticket MAC'd under **A's** key, naming the user. B cannot forge it, A verifies
+   it against a key it already shares with the master, and the username becomes
+   *attested* rather than *asserted*. Any design discussion that skips this
+   distinction is discussing something that does not close the hole.
+
+   **What it would buy.** N keys instead of N² — every machine shares one key
+   with the master and none with its peers, which is the real argument at three
+   or more nodes. One place to add or revoke a user, against today's model where
+   `map_user` resolves through *each* node's `/etc/passwd`, so a user must exist
+   everywhere and revocation means visiting every machine. And, in its strongest
+   form — the *user* authenticating to the master at `login` and receiving a
+   ticket — the user's secret stops living on the asking machine, which is the
+   one thing that would defend against a **compromised node**. Neither the
+   shipped design nor per-user keys stored on each node manage that.
+
+   **What it would cost here specifically**, which is where it stops being cheap:
+
+   - **A clock.** Tickets need lifetimes; this OS has `MONOTONIC_US` (per boot),
+     no wall clock and no time sync, so two machines cannot agree on "expires
+     at". Either build time sync, or replace expiry with a challenge nonce — an
+     extra round trip.
+   - **Which collides with the export's shape.** The export is **one TCP
+     connection per request**, which is precisely why v0.10.0 chose a
+     client-nonce MAC over challenge-response. Per-op ticket handshakes would be
+     brutal, so it wants a ticket cache in `netd` — the task with no heap, a
+     32 KB stack that has hit the guard page five times, and no mutable statics
+     (the cluster key already threads as `&Auth` for that reason).
+   - **A single point of failure that is also the highest-value target.** Master
+     down = no new sessions; master compromised = the whole cluster. Plan 9 lives
+     with this; it is a real cost, not a footnote.
+   - **A new machine role** in a design that is currently peer-symmetric —
+     though Plan 9 was itself role-split (cpu / file / auth servers), so this is
+     consistent with the model rather than against it.
+
+   **The fork to settle before writing any code**, and it is bigger than the
+   crypto: a master changes **where identity lives**. Today each node is
+   autonomous — it resolves a name through its own `/etc/passwd` and may refuse a
+   stranger. With a master, identity becomes cluster-wide and node-local accounts
+   become secondary. That is a philosophical change to the cluster, not just an
+   authentication mechanism, and it should be decided deliberately rather than
+   arrived at.
+
+   **The cheaper step that should come first: per-machine keypairs.** Each node
+   holds its own key and lists the peer keys it accepts (SSH's `authorized_keys`
+   model). No new server, no clock, no ticket cache, no single point of failure.
+   It kills "one shared secret = interchangeable members" and gives per-peer
+   revocation, which is the largest single weakness of what shipped in v0.15.0.
+   It deliberately leaves "B can claim any of *its own* users" open — which is
+   exactly the residual a master exists to close, so building this first makes
+   the master's value precise instead of assumed.
+
+   All of it stays behind the **"leaving a trusted network" trigger**. Today's
+   deployment is two QEMU VMs and, soon, two Raspberry Pi 4s on a home network,
+   where the shipped machine-key model is proportionate. The master earns its
+   cost when there is a node that is not fully trusted, or enough nodes that N²
+   key distribution genuinely hurts.
+
    Two smaller follow-ups from the same arc, both deliberate scope calls rather
    than oversights:
 

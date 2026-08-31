@@ -9,6 +9,36 @@ for the forward plan see [`roadmap.md`](roadmap.md).
 
 ## 2026-08-31 — a remote request now says who is asking
 
+*(Later the same day: v0.15.0 cut, and a design question answered on paper.)*
+
+Hans asked whether a designated master auth server would close the remaining
+gap — one machine as the cluster's identity authority, the others obtaining
+authentication from it. The answer is yes, and it is precisely what Plan 9 does
+(`authsrv`, `factotum`, `secstore` — the Kerberos family), which makes it a fit
+for this project rather than a departure.
+
+The part worth writing down is the detail that decides whether it works: a master
+whose answer is relayed *by the peer* fixes nothing, because the exporter is still
+trusting the peer's word, which is the entire current gap. It closes only when the
+ticket is verifiable by the exporter against a key **it** shares with the master.
+Everything else — N keys instead of N², one place to revoke a user, and (in the
+strong form, where the user authenticates to the master at login) a defence
+against a compromised node rather than only its users — follows from that one
+property.
+
+What stopped it being built today is cost that is specific to this system rather
+than to the idea: tickets want lifetimes and this OS has no wall clock or time
+sync; the export is one TCP connection per request, which is exactly why v0.10.0
+avoided challenge-response, so a ticket wants a cache in the one task with no heap
+and a stack that has hit its guard page five times; and it makes identity
+cluster-wide rather than node-autonomous, which is a change to what the cluster
+*is*, not just to how it authenticates. Per-machine keypairs come first: no
+server, no clock, no single point of failure, and they kill the interchangeable-
+members problem that is the real weakness of what shipped this morning.
+
+Recorded under roadmap item 1 rather than built. The trigger is unchanged — this
+is for when Ouroboros leaves a trusted network.
+
 The rejected design came back, built the other way round.
 
 Yesterday's attempt at per-user cluster identity was turned down by review with

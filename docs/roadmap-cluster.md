@@ -338,7 +338,12 @@ netd holding the run's output in a `PendingRun` buffer), lifting the cap to ~2 K
       members; no per-machine access control or key rotation, and (since tier 3)
       a peer that holds the key can claim any *user* name. Fix: per-machine — and
       ultimately per-user — identities, properly wanting **asymmetric crypto**
-      (Ed25519-class) — the heavy lift.
+      (Ed25519-class) — the heavy lift. **A designated auth server (Plan 9's
+      `authsrv` + tickets) is evaluated in full under item 1 of
+      [`roadmap.md`](roadmap.md)**: it is the right long-term shape, it is what
+      Plan 9 does, and the note records both the detail that decides whether it
+      closes the hole at all (the ticket must be verifiable by the *exporter*
+      without trusting the peer) and why per-machine keypairs should come first.
     - **Confidentiality (encryption)** — the important honest one: authentication
       (tiers 1–2) protects *integrity and who-may-act*, **not secrecy**. Every
       byte still crosses the wire in **cleartext** — a sniffer reads your files
