@@ -137,6 +137,12 @@ ESP_HDD      := $(ESP_DIR).hdd
 # real secret; overridable on the command line for a mismatched-key test, e.g.
 # `make run-image-2vm-b CLUSTER_KEY=wrong-key` to prove the export refuses.
 CLUSTER_KEY  ?= ouroboros-dev-cluster-key-v1
+# WHICH MACHINE an image is built as. Per-machine keypairs mean an image carries
+# an identity, so the two-node rig cannot boot one image twice any more: node A's
+# disk and node B's disk hold different private keys and the same `authorized`
+# file. Override to build a differently-identified disk:
+#     make image-ext2 CLUSTER_NODE=node-b
+CLUSTER_NODE ?= node-a
 GPT_IMG      := $(BUILD_DIR)/espgpt.img
 EXFAT_IMG    := $(BUILD_DIR)/espexfat.img
 EXFAT_PART   := $(BUILD_DIR)/exfatpart.img
@@ -195,7 +201,7 @@ ifeq ($(PROFILE),release)
 CARGO_FLAGS += --release
 endif
 
-.PHONY: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin accountd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin id-bin passwd-bin useradd-bin groupadd-bin usermod-bin chello-bin cdemo-bin cfile-bin cpico-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin edtest-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin sort-bin esp run run-virtio-console run-usb-kbd run-usb-multi run-gicv3 image run-image run-image-9p run-image-9p-client run-image-2vm-a run-image-2vm-b run-image-2vm-ext2-a run-image-2vm-ext2-b image-gpt run-image-gpt image-exfat run-image-exfat image-ext2 run-image-ext2 parallels-hdd release test check-relocs test-parallels clean
+.PHONY: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin accountd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin id-bin passwd-bin useradd-bin groupadd-bin usermod-bin chello-bin cdemo-bin cfile-bin cpico-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin edtest-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin sort-bin esp run run-virtio-console run-usb-kbd run-usb-multi run-gicv3 image run-image run-image-9p run-image-9p-client run-image-2vm-a run-image-2vm-b run-image-2vm-ext2-a run-image-2vm-ext2-b image-gpt run-image-gpt image-exfat run-image-exfat image-ext2 run-image-ext2 images-2vm images-2vm-ext2 parallels-hdd release test check-relocs test-parallels clean
 
 # Overridable by `make test-parallels VM_NAME=... CMDS=... BOOT_WAIT=...`.
 VM_NAME     ?= Ouroboros
@@ -585,6 +591,12 @@ esp: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin acco
 	cp $(SORT_BIN) $(ESP_DIR)/bin/SORT
 	# Manual pages: plain-text files read by /bin/MAN as /man/<command>.
 	cp manpages/* $(ESP_DIR)/man/
+	# /etc/cluster: this machine's Ed25519 identity and the peers it accepts
+	# (docs/roadmap-cluster-keys.md). NOTHING READS THESE YET - step 6 stages
+	# them so that the wire steps have something to read, and so a bad format
+	# shows up as a file you can `cat` rather than as a failed handshake.
+	mkdir -p $(ESP_DIR)/etc/cluster
+	python3 scripts/mkclusterkeys.py $(ESP_DIR)/etc/cluster $(CLUSTER_NODE)
 	# /etc/passwd + /etc/group: the account database the shell's login gate and
 	# the /bin account tools (id/su/passwd/useradd/groupadd/usermod) use
 	# (name:uid:gid:home:salt:hash / name:gid:members, hashes precomputed - see
@@ -925,6 +937,11 @@ $(EXT2_PART): esp
 	# meaningful on one disk with opposite protections would be a self-own.
 	printf '%s' '$(CLUSTER_KEY)' > $(BUILD_DIR)/ext2-src/CLUSTER.KEY
 	chmod 600 $(BUILD_DIR)/ext2-src/CLUSTER.KEY
+	# /etc/cluster: the per-machine identity. ext2 is the one image where fsd
+	# ENFORCES modes, so it is also the only one where `id` being 0600 means
+	# anything - and mke2fs -d carries the host's mode onto the guest.
+	mkdir -p $(BUILD_DIR)/ext2-src/etc/cluster
+	python3 scripts/mkclusterkeys.py $(BUILD_DIR)/ext2-src/etc/cluster $(CLUSTER_NODE)
 	mkdir -p $(BUILD_DIR)/ext2-src/Users/user
 	printf 'hello from an ext2 volume\n' > $(BUILD_DIR)/ext2-src/HELLO.TXT
 	printf 'line one\nline two has several words\nthird and final line\n' > $(BUILD_DIR)/ext2-src/README.TXT
@@ -1061,8 +1078,24 @@ run-image-9p-client: image
 #   cat /mnt/a/EFI/ORBS/INIT.CFG
 # Each VM gets its own disk copy (two QEMU write-locks can't share one file) and
 # its own pcap (build/net-a.pcap / build/net-b.pcap) for tcpdump inspection.
-run-image-2vm-a: image
+# The FAT32 pair, with the same per-node identity split as the ext2 pair above.
+# It would otherwise boot one image twice and give BOTH nodes node-a's private
+# key while `authorized` says .11 is node-b - harmless while nothing reads the
+# files, and a confusing authentication failure the moment step 7 lands.
+images-2vm:
+	rm -f $(ESP_DIR)-a.img $(ESP_DIR)-b.img $(ESP_DIR).img
+	$(MAKE) image CLUSTER_NODE=node-a
 	cp $(ESP_DIR).img $(ESP_DIR)-a.img
+	rm -f $(ESP_DIR).img
+	$(MAKE) image CLUSTER_NODE=node-b
+	cp $(ESP_DIR).img $(ESP_DIR)-b.img
+	@echo "images-2vm: built node-a and node-b FAT32 disks with distinct identities"
+
+$(ESP_DIR)-a.img $(ESP_DIR)-b.img:
+	@echo "$@ is missing - run 'make images-2vm' first."; \
+	 echo "(The two nodes hold different keys and must be built together.)"; exit 1
+
+run-image-2vm-a: $(ESP_DIR)-a.img
 	qemu-system-aarch64 \
 		-machine virt \
 		-cpu cortex-a72 \
@@ -1077,8 +1110,7 @@ run-image-2vm-a: image
 		-global virtio-mmio.force-legacy=false \
 		-nographic
 
-run-image-2vm-b: image
-	cp $(ESP_DIR).img $(ESP_DIR)-b.img
+run-image-2vm-b: $(ESP_DIR)-b.img
 	qemu-system-aarch64 \
 		-machine virt \
 		-cpu cortex-a72 \
@@ -1100,8 +1132,43 @@ run-image-2vm-b: image
 # it). Same MAC-derived IPs as that pair, but its OWN link port, so both rigs
 # can be up at once instead of colliding as an unrelated guest-side timeout.
 # Each node gets its own disk copy, since both write to it.
-run-image-2vm-ext2-a: image-ext2
+# The two nodes hold DIFFERENT private keys, so they can no longer be one image
+# copied twice - each is a full rebuild with its own CLUSTER_NODE. The
+# `authorized` file is identical in both (every node accepts the same peers);
+# only `/etc/cluster/id` differs.
+#
+# BUILT BY ONE TARGET, SEQUENTIALLY, AND NEVER BY THE RUN TARGETS. Two reasons,
+# both learned the hard way:
+#
+#  - Both builds pass through the SAME intermediates ($(EXT2_PART), $(EXT2_IMG),
+#    build/ext2-src). The documented workflow runs node A in one terminal and
+#    node B in another, and if each `make run-…` built its own image those two
+#    invocations would interleave over those shared paths - B's `cp` could copy
+#    the node-A image and both guests would silently boot as node-a, which is
+#    the exact condition per-machine keys exist to prevent.
+#  - A run target that rebuilds would also rewrite the disk a running QEMU has
+#    open.
+#
+# So: `make images-2vm-ext2` builds the pair, and the run targets refuse if it
+# has not been run. Re-run it after changing any source you want on the nodes -
+# that is the cost of removing the race, and it is visible rather than silent.
+images-2vm-ext2: esp
+	rm -f $(BUILD_DIR)/espext2-a.img $(BUILD_DIR)/espext2-b.img $(EXT2_PART) $(EXT2_IMG)
+	$(MAKE) image-ext2 CLUSTER_NODE=node-a
 	cp $(EXT2_IMG) $(BUILD_DIR)/espext2-a.img
+	rm -f $(EXT2_PART) $(EXT2_IMG)
+	$(MAKE) image-ext2 CLUSTER_NODE=node-b
+	cp $(EXT2_IMG) $(BUILD_DIR)/espext2-b.img
+	@echo "images-2vm-ext2: built node-a and node-b disks with distinct identities"
+
+# A missing per-node image is an instruction, not a build: see above for why
+# these must not be produced by the run targets.
+$(BUILD_DIR)/espext2-a.img $(BUILD_DIR)/espext2-b.img:
+	@echo "$@ is missing - run 'make images-2vm-ext2' first."; \
+	 echo "(The two nodes hold different keys and must be built together, once,"; \
+	 echo " not by each run target - see the comment in the Makefile.)"; exit 1
+
+run-image-2vm-ext2-a: $(BUILD_DIR)/espext2-a.img
 	qemu-system-aarch64 \
 		-machine virt \
 		-cpu cortex-a72 \
@@ -1116,8 +1183,7 @@ run-image-2vm-ext2-a: image-ext2
 		-global virtio-mmio.force-legacy=false \
 		-nographic
 
-run-image-2vm-ext2-b: image-ext2
-	cp $(EXT2_IMG) $(BUILD_DIR)/espext2-b.img
+run-image-2vm-ext2-b: $(BUILD_DIR)/espext2-b.img
 	qemu-system-aarch64 \
 		-machine virt \
 		-cpu cortex-a72 \

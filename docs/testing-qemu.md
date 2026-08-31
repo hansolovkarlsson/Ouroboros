@@ -198,9 +198,19 @@ proving nothing either time. For anything about who may read what across the
 cluster, use the ext2 pair:
 
 ```sh
+make images-2vm-ext2           # build BOTH node images first - see below
 make run-image-2vm-ext2-a      # terminal 1, listens (port 12341)
 make run-image-2vm-ext2-b      # terminal 2
 ```
+
+**The two ext2 node images are no longer one disk copied twice.** They were, for
+as long as the cluster shared a single symmetric key. Since per-machine keypairs
+(2026-08-31) each node carries its own `/etc/cluster/id`, so `-a` and `-b` are
+separate builds (`CLUSTER_NODE=node-a` / `node-b`) and `make images-2vm-ext2`
+produces the pair. Their `authorized` files are identical — every node accepts
+the same peers — so the only difference is which private key each holds. The dev
+identities come from fixed seeds, so rebuilding one of them reproduces the same
+keys rather than desynchronising the pair.
 
 It has its **own link port**, so it can run alongside the FAT32 pair rather than
 colliding with it (a collision shows up as an unrelated guest-side timeout,
@@ -215,8 +225,7 @@ steps, then starts B and runs its steps while A stays alive — printing both
 transcripts and both health bars:
 
 ```sh
-cp build/espext2.img build/espext2-a.img
-cp build/espext2.img build/espext2-b.img
+make images-2vm-ext2      # the two nodes hold different keys: build them together
 python3 scripts/drive-2vm.py build/espext2-a.img build/espext2-b.img \
   --a 'login@@root' 'assword@@root' '# @@' \
   --b 'login@@user' 'assword@@user' \
@@ -368,6 +377,7 @@ see [`manual.md`](manual.md)'s Parallels section.
 | `run-image-9p-client` | NIC only; guest mounts a host-run 9P server |
 | `run-image-2vm-a` | machine A of the two-node cluster on FAT32 (listen, IP `.10`, port 12340) |
 | `run-image-2vm-b` | machine B of the FAT32 pair (connect, IP `.11`) |
+| `images-2vm-ext2` | build both ext2 node images (they differ: per-machine keypairs) |
 | `run-image-2vm-ext2-a` | machine A on **ext2** — the only rig that can test cluster *permissions* (port 12341) |
 | `run-image-2vm-ext2-b` | machine B of the ext2 pair (connect, IP `.11`) |
 | `run-usb-kbd` | xHCI + USB keyboard |
