@@ -294,6 +294,13 @@ observed request; encryption, replay protection and per-user *keys* are gated
 behind a "leaving a trusted network" trigger on the roadmap). Don't expose an
 Ouroboros export to a genuinely hostile network yet.
 
+**The built-in HTTP server is anonymous, and unprivileged.** `netd` also serves
+the disk over plain HTTP on port 80 (`make run-image-server`), which has no user
+model at all — so it reads files as **`nobody`**, never as root: world-readable
+files are served, anything else gets **403 Forbidden**. On FAT32/exFAT, which
+record no mode, everything remains readable. Do not treat that server as a
+private one: it requires no key and no account.
+
 **Config files (both optional, on the boot disk root), read by `netd` at boot:**
 
 | File | Effect |

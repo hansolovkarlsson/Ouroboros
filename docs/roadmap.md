@@ -110,7 +110,21 @@ the microkernel arc itself still leaves open):
    away the guarantee. Split and ownership are independent choices, and only
    the second one is the problem.
 
-2. **General / transitive capability delegation.** The delegation shipped
+2. **The two-node remote-read flake.** Roughly one remote op in six fails on the
+   shared QEMU socket link, reported to the caller as a generic failure. Measured
+   2026-08-31 across scripted runs — **2 of 6 ops on `main`, 1 of 6 on a branch**
+   — so it is not new, and it is the same intermittent the Phase 2 notes called
+   "intermittent first-ls on two-VM", which the 4-try SYN retransmit reduced but
+   did not remove. Suspects, in order: the SYN retransmit budget still being too
+   small for a cold link; source-port/ISN reuse landing in the peer's `TIME_WAIT`
+   (fixed once for back-to-back connections, but every op opens a new connection);
+   and no retransmit at all on the *request* segment after the handshake. It
+   matters more than a flake usually would, because it is the rig the cluster's
+   permission tests run on — see the message table in
+   [`testing-qemu.md`](testing-qemu.md) for telling it apart from a real refusal.
+   The fix wants a packet trace first, not a guess.
+
+3. **General / transitive capability delegation.** The delegation shipped
    2026-08-21 is deliberately coarse: one delegated target per task,
    non-transitive, in practice shell-only. Making it general (any task hands
    any held capability onward, revocably — MINIX's full grant model) would
@@ -121,7 +135,7 @@ the microkernel arc itself still leaves open):
    delegation itself. Build the consumer first, or wait until one is
    actually wanted.
 
-3. **Per-task ASIDs, revisited** — a pure TLB-flush-per-switch optimization
+4. **Per-task ASIDs, revisited** — a pure TLB-flush-per-switch optimization
    that passed on QEMU but faulted the idle task on real Parallels and was
    reverted (see the isolation postmortem for the decoded fault evidence);
    needs a proven break-before-make sequence. Low value — a context switch

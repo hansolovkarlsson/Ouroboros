@@ -63,6 +63,18 @@ and reports `uid=0(root)`. Zero fault lines on both nodes, no supervisor
 restarts; the host Python peer (`np9p_client.py --user <name>`) confirms the
 header cross-implementation, including an unknown name refused.
 
+**The HTTP server was the other door, and review found it open.** `netd`'s
+static-file server has no user model, so it read files with `netd`'s own root
+credential — and `fsd`'s root bypass served them. An unauthenticated
+`GET /etc/shadow` on port 80 returned the hashes: no cluster key, no username, no
+`mount -r`. Pre-existing, but it made this change's headline claim false, so it
+is fixed here: HTTP is served as **anonymous** (`nobody`, uid/gid 65534), which
+gets the `other` triad and nothing more. A file it may not read is now **403**
+rather than 404 — saying "not found" about a file that is there costs an operator
+an hour. Verified: `/etc/shadow` → 403, `/etc/passwd` (0644) → 200, `/bin/ls`
+(0755) → 200 and byte-complete, the browsable index unchanged, and FAT32/exFAT
+(which model no mode) unaffected.
+
 **What this does not do**, stated where it is decided: a peer holding the cluster
 key can claim any name. This defends against the *users* of a trusted node —
 the real exposure, since a node's own users are not all trusted even when the
@@ -71,7 +83,12 @@ groups do not cross the cluster (one word has no room, and a group list arriving
 out of step with its identity is the shape of bug this design removes); a remote
 caller is authorized on uid and primary gid alone, which can only under-privilege.
 The console and `/net/tcp` arms consult no identity, because neither is
-permission-modelled for local users either. And both ends now need an
+permission-modelled for local users either. A refusal now distinguishes its two
+causes — an account this machine has never heard of (`FS_ERR_AUTH`, and an
+accurate line for a `cpu` caller instead of one blaming the cluster key) from an
+account database it could not read at all (`NO_FS`, which is transient and worth
+retrying) — because folding a mount race into "authentication failed" sends the
+operator after the wrong thing. And both ends now need an
 `/etc/passwd`: a machine that cannot name its caller refuses to send, and one
 that cannot resolve the name refuses to serve.
 

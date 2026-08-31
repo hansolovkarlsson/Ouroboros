@@ -265,6 +265,23 @@ report `uid=0(root)`. A permission test that has never been seen to fail is a
 test whose passing means nothing — and on the FAT32 rig it *cannot* fail, which
 is the whole reason this section says to use ext2.
 
+**A remote op fails spuriously now and then — know which message is which.**
+Measured 2026-08-31 on this rig: roughly one remote read in six fails on the
+shared socket link, on `main` as much as on any branch (3 scripted runs each:
+2/6 failed ops on `main`, 1/6 on the branch under test). It is the same
+intermittent the Phase 2 notes recorded as "intermittent first-ls on two-VM",
+which the 4-try SYN retransmit reduced but did not eliminate. It is *not* a
+permission result, and the two are told apart by the message:
+
+| message | meaning |
+|---|---|
+| `cat: failed` | transport flake — **retry the step** |
+| `cat: permission denied` | the far side enforced a mode; this is a real result |
+
+Read the specific message, never just "the command failed" — a permission test
+whose refusal you cannot distinguish from a dropped packet proves nothing. When
+in doubt, repeat the step: the flake does not repeat, a refusal does.
+
 **A `cpu` command's errors print on the machine that ran it.** Only the child's
 *stdout* streams back over the cluster, so a denied `cpu A cat /etc/shadow` looks
 empty on B and prints `cat: permission denied` on **A's** console. Read both
