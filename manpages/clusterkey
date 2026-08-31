@@ -1,0 +1,41 @@
+NAME
+    clusterkey - this machine's cluster identity
+
+SYNOPSIS
+    clusterkey
+    clusterkey new [-f]
+    clusterkey peers
+    clusterkey line <name> <ip>
+
+DESCRIPTION
+    Shows, generates and inspects the Ed25519 identity a machine uses to
+    authenticate itself to the rest of the cluster. The files live in
+    /etc/cluster: id (this machine's private key, mode 0600), id.pub, and
+    authorized (the peers this machine accepts).
+
+    With no arguments, prints this machine's public key.
+
+    new generates a fresh keypair. It REFUSES if the machine has no entropy
+    device, rather than falling back to something weaker: a guessable machine
+    key is worse than none, because it looks like security. On QEMU that means
+    booting with -device virtio-rng-device; on hardware without one, generate
+    the key elsewhere and copy /etc/cluster/id in.
+
+    It also refuses to replace an existing identity unless given -f. Replacing
+    it makes every peer's authorized file stale and this machine unreachable
+    until they are all updated.
+
+    peers lists the authorized peers, and reports any line it cannot read - a
+    mistyped key is a peer that is silently unauthorized in a file that still
+    looks correct.
+
+    line prints the authorized line another machine should hold for this one,
+    ready to paste into its /etc/cluster/authorized.
+
+EXIT STATUS
+    0   success
+    1   no identity, no entropy, or an unreadable authorized line
+    2   bad usage
+
+SEE ALSO
+    id - the calling task's user identity, a different thing entirely

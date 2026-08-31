@@ -76,6 +76,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "clusterkey"
+version = "0.1.0"
+dependencies = [
+ "clusterkeys",
+ "ed25519",
+ "syscall-abi",
+ "ulib",
+]
+
+[[package]]
 name = "clusterkeys"
 version = "0.1.0"
 

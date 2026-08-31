@@ -1,0 +1,17 @@
+[package]
+name = "clusterkey"
+version = "0.1.0"
+edition = "2021"
+
+# On-device cluster identity: generate this machine's Ed25519 keypair, show its
+# public half, and list the peers it accepts. Step 6c of
+# docs/roadmap-cluster-keys.md.
+[dependencies]
+syscall-abi = { path = "../../../syscall-abi" }
+ulib = { path = "../../../ulib" }
+ed25519 = { path = "../../../ed25519" }
+clusterkeys = { path = "../../../clusterkeys" }
+
+[[bin]]
+name = "clusterkey"
+path = "src/main.rs"
