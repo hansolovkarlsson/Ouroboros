@@ -109,9 +109,13 @@ the microkernel arc itself still leaves open):
    authentication mechanism, and it should be decided deliberately rather than
    arrived at.
 
-   **The cheaper step that should come first: per-machine keypairs.** Each node
-   holds its own key and lists the peer keys it accepts (SSH's `authorized_keys`
-   model). No new server, no clock, no ticket cache, no single point of failure.
+   **The cheaper step that should come first: per-machine keypairs** — now
+   designed in [`roadmap-cluster-keys.md`](roadmap-cluster-keys.md), which also
+   records why the *symmetric* version of this was rejected (with a symmetric
+   key, the ability to verify is the ability to forge). Each node holds its own
+   Ed25519 keypair and lists the peer *public* keys it accepts (SSH's
+   `authorized_keys` model). No new server, no clock, no ticket cache, no single
+   point of failure.
    It kills "one shared secret = interchangeable members" and gives per-peer
    revocation, which is the largest single weakness of what shipped in v0.15.0.
    It deliberately leaves "B can claim any of *its own* users" open — which is
