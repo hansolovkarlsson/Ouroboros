@@ -324,6 +324,46 @@ impl Fe {
         diff == 0
     }
 
+    /// Whether these 32 bytes are the **canonical** encoding of a field element:
+    /// the value they hold, with bit 255 masked off, is strictly below p.
+    ///
+    /// [`decode`](Fe::decode) deliberately accepts non-canonical input and
+    /// reduces it, which is right for a field element. It is **wrong for a
+    /// compressed point**: RFC 8032 §5.1.3 requires decoding to fail when y ≥ p,
+    /// and without that check each point has 19 distinct byte encodings that all
+    /// verify. That is signature malleability, and worse here than usual —
+    /// the Python peer that checks this cluster's wire rejects them, so the two
+    /// implementations would disagree about whether a frame is valid, which no
+    /// vector of valid inputs can catch.
+    ///
+    /// Compares by borrowing subtraction rather than short-circuiting on the
+    /// first differing byte, so the work does not depend on the input.
+    pub(crate) fn is_canonical(bytes: &[u8; ELEM_LEN]) -> bool {
+        /// p = 2²⁵⁵ − 19 as four little-endian 64-bit words.
+        const P_WORDS: [u64; 4] = [
+            0xffff_ffff_ffff_ffed,
+            0xffff_ffff_ffff_ffff,
+            0xffff_ffff_ffff_ffff,
+            0x7fff_ffff_ffff_ffff,
+        ];
+        let mut w = [0u64; 4];
+        for (i, word) in w.iter_mut().enumerate() {
+            let mut b = [0u8; 8];
+            b.copy_from_slice(&bytes[i * 8..i * 8 + 8]);
+            *word = u64::from_le_bytes(b);
+        }
+        w[3] &= 0x7fff_ffff_ffff_ffff; // bit 255 is the sign of x, not magnitude
+
+        // w - p, tracking the borrow. A borrow out of the top means w < p.
+        let mut borrow = 0u64;
+        for i in 0..4 {
+            let (d, b1) = w[i].overflowing_sub(P_WORDS[i]);
+            let (_, b2) = d.overflowing_sub(borrow);
+            borrow = (b1 as u64) | (b2 as u64);
+        }
+        borrow == 1
+    }
+
     /// Branchless select: `b` when `choice` is 1, `a` when it is 0.
     ///
     /// Scalar multiplication drives this with **bits of a secret key**, so it

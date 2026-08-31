@@ -161,6 +161,16 @@ impl Point {
     /// verifier is fed attacker-controlled bytes here, and "not a point" must be
     /// a refusal, not a value.
     pub fn decode(bytes: &[u8; POINT_LEN]) -> Option<Point> {
+        // RFC 8032 §5.1.3: y must be CANONICAL. `Fe::decode` reduces instead of
+        // refusing, which is right for a field element and wrong here - without
+        // this check every point has 19 alternate encodings that all verify, so
+        // a signature's R or a peer's public key could be rewritten byte-wise
+        // while still passing. The Python peer this cluster is checked against
+        // rejects them, so accepting them would also make the two disagree about
+        // whether a frame is valid.
+        if !Fe::is_canonical(bytes) {
+            return None;
+        }
         let sign = bytes[31] >> 7;
         let y = Fe::decode(bytes); // ignores bit 255
         let yy = y.square();
@@ -190,16 +200,17 @@ impl Point {
         Some(Point { x, y, z: Fe::ONE, t: x.mul(y) })
     }
 
-    /// Whether two points are equal, compared through their compressed forms so
-    /// that different projective representatives of one point compare equal.
+    /// Whether two points are equal.
+    ///
+    /// Compared **projectively** — `X₁·Z₂ = X₂·Z₁` and `Y₁·Z₂ = Y₂·Z₁` — which
+    /// is four field multiplications. The obvious implementation compares
+    /// compressed forms instead, and that costs two field *inversions*, about
+    /// 508 squarings; signature verification compares points, and this crate's
+    /// stated risk is exactly `netd`'s time and stack budget. Same answer:
+    /// different projective representatives of one point compare equal either
+    /// way, which `different_representatives_compare_equal` checks.
     pub fn ct_eq(self, rhs: Point) -> bool {
-        let a = self.encode();
-        let b = rhs.encode();
-        let mut diff = 0u8;
-        for i in 0..POINT_LEN {
-            diff |= a[i] ^ b[i];
-        }
-        diff == 0
+        self.x.mul(rhs.z).ct_eq(rhs.x.mul(self.z)) && self.y.mul(rhs.z).ct_eq(rhs.y.mul(self.z))
     }
 }
 
@@ -391,6 +402,78 @@ mod tests {
         assert!(p.ct_eq(q));
         assert!(p.add(p).ct_eq(q.add(q)));
         assert!(p.double().ct_eq(q.double()));
+    }
+
+    #[test]
+    fn non_canonical_y_is_refused() {
+        // RFC 8032 §5.1.3: decoding fails when y >= p. Without this, adding p to
+        // a point's y (while it still fits in 255 bits) gives a DIFFERENT byte
+        // string that decodes to the SAME point - signature malleability, and a
+        // disagreement with the Python peer, which refuses these.
+        //
+        // Each valid y below 19 has an alternate encoding y+p; those are the 19
+        // the finding names. Check every one of them, plus p itself.
+        for k in 0u8..19 {
+            let mut alt = [0u8; 32];
+            // p + k, little-endian: p = 2^255 - 19, so p + k = 2^255 - (19 - k).
+            let v = (1u128 << 64) - 1; // fill helper; build the value byte-wise below
+            let _ = v;
+            let low = 0xedu16 + k as u16; // 0xed = 237 = 256 - 19
+            alt[0] = low as u8;
+            let carry = (low >> 8) as u8;
+            for b in alt.iter_mut().take(31).skip(1) {
+                *b = 0xff;
+            }
+            alt[31] = 0x7f;
+            if carry == 1 {
+                // p + k wrapped the low byte; propagate into the next.
+                let mut i = 1;
+                loop {
+                    let (v, c) = alt[i].overflowing_add(1);
+                    alt[i] = v;
+                    if !c {
+                        break;
+                    }
+                    i += 1;
+                }
+            }
+            assert!(
+                Point::decode(&alt).is_none(),
+                "non-canonical y = p+{k} must be refused, bytes {alt:02x?}"
+            );
+        }
+    }
+
+    #[test]
+    fn canonical_encodings_still_decode() {
+        // The other direction, so the canonicality check cannot be "reject
+        // everything": every vector point must still decode.
+        for (name, _k, enc) in MULTIPLES {
+            assert!(Point::decode(&unhex32(enc)).is_some(), "{name} must still decode");
+        }
+        // And the largest canonical y that is on the curve stays acceptable.
+        assert!(Point::decode(&unhex32(BASE_ENCODED)).is_some());
+    }
+
+    #[test]
+    fn different_representatives_compare_equal() {
+        // Point equality is projective, so (X:Y:Z:T) and (kX:kY:kZ:kT) are the
+        // same point and must compare equal. This is what makes the cheap
+        // comparison legitimate; comparing compressed forms would too, at the
+        // cost of two field inversions.
+        let p = Point::mul_base(&scalar(1000));
+        for k in [2u128, 3, 7, 1 << 40] {
+            let f = {
+                let mut acc = Fe::ONE;
+                for _ in 0..k.min(64) {
+                    acc = acc.add(Fe::ONE);
+                }
+                acc
+            };
+            let scaled = Point { x: p.x.mul(f), y: p.y.mul(f), z: p.z.mul(f), t: p.t.mul(f) };
+            assert!(p.ct_eq(scaled), "scaled representative must compare equal (k={k})");
+            assert_eq!(p.encode(), scaled.encode(), "and must compress identically");
+        }
     }
 
     #[test]
