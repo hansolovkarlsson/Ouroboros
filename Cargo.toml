@@ -22,6 +22,7 @@ members = [
     "programs/shellutils/args", "programs/shellutils/pwd", "programs/shellutils/readkey",
     "programs/shellutils/send", "programs/shellutils/recv", "programs/shellutils/selftest",
     "programs/shellutils/man", "programs/shellutils/printenv", "programs/shellutils/id",
+    "programs/shellutils/edtest",
     "programs/admin/passwd", "programs/admin/useradd",
     "programs/admin/groupadd", "programs/admin/usermod",
 ]

@@ -1,0 +1,16 @@
+[package]
+name = "edtest"
+version = "0.1.0"
+edition = "2021"
+
+# The on-target check for the `ed25519` crate: the same RFC 8032 vectors the host
+# tests run, plus the two measurements this arc's design depends on - peak stack
+# and per-operation time. Step 5 of docs/roadmap-cluster-keys.md.
+[dependencies]
+syscall-abi = { path = "../../../syscall-abi" }
+ulib = { path = "../../../ulib" }
+ed25519 = { path = "../../../ed25519" }
+
+[[bin]]
+name = "edtest"
+path = "src/main.rs"
