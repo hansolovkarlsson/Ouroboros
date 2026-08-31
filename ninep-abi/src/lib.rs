@@ -423,6 +423,25 @@ pub const NP_ID_FIRST_PARTY: u64 = 1;
 /// request is refused rather than truncated onto a different account.
 pub const NP_ID_PROXY: u64 = 1 << 63;
 
+/// The uid *and* gid an **anonymous** request is authorized as - one that
+/// arrived with no identity at all, which today means an HTTP request to
+/// `netd`'s static-file server.
+///
+/// 65534 is the conventional `nobody`. The point is only that it is **not
+/// root**: an anonymous reader gets the `other` triad and nothing else, so a
+/// mode-0600 file is refused rather than served by the root bypass. Nothing
+/// needs an account of this name to exist - `fsd` authorizes on the number, and
+/// no name is ever resolved for it. (If a deployment does create an account with
+/// uid 65534, anonymous HTTP inherits exactly that account's access, which is
+/// why picking a normally-unused id matters.)
+pub const NP_ID_ANON_ID: u32 = 65534;
+
+/// The ready-made `a3` word for an anonymous request - [`NP_ID_ANON_ID`] as both
+/// uid and gid. A constant rather than a `proxy_id` call so it cannot silently
+/// become [`NP_ID_NONE`] at a call site that forgets to handle `None`.
+pub const NP_ID_ANON: u64 =
+    NP_ID_PROXY | ((NP_ID_ANON_ID as u64) << 16) | NP_ID_ANON_ID as u64;
+
 /// Pack a resolved remote caller into the `a3` identity word. `None` when
 /// either id is too large to carry, which the caller must treat as a refusal
 /// (truncating would silently authorize a *different* account).
@@ -605,6 +624,16 @@ mod tests {
         // distinct: the refusal must mean "stated nothing", never "stated root".
         assert_ne!(proxy_id(0, 0).unwrap(), NP_ID_NONE);
         assert_ne!(proxy_id(0, 0).unwrap(), NP_ID_FIRST_PARTY);
+    }
+
+    #[test]
+    fn the_anonymous_word_is_a_proxy_and_is_not_root() {
+        // The HTTP server serves with this. If it ever decoded as root, or as
+        // NP_ID_NONE (refused), the static-file server would either bypass every
+        // mode or stop working - and both have been true of it at some point.
+        assert_eq!(proxy_parts(NP_ID_ANON), Some((NP_ID_ANON_ID, NP_ID_ANON_ID)));
+        assert_ne!(NP_ID_ANON_ID, 0);
+        assert_eq!(proxy_id(NP_ID_ANON_ID, NP_ID_ANON_ID), Some(NP_ID_ANON));
     }
 
     #[test]

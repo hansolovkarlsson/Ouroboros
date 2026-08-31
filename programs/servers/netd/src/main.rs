@@ -107,6 +107,10 @@ const MAX_SACK: usize = 4;
 /// Full responses for the two failure cases.
 const RESP_404: &[u8] =
     b"HTTP/1.0 404 Not Found\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nNot Found\r\n";
+// An anonymous reader may not have this file (it is served as `nobody`, never
+// as root - see `As::Anonymous`). 403 rather than 404: the file is there.
+const RESP_403: &[u8] =
+    b"HTTP/1.0 403 Forbidden\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nForbidden\r\n";
 const RESP_503: &[u8] = b"HTTP/1.0 503 Service Unavailable\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nNo filesystem mounted\r\n";
 // Only GET and HEAD are implemented; any other method gets a 405 with an
 // Allow header naming the two that work (RFC 7231 requires Allow on a 405).
@@ -1132,8 +1136,17 @@ fn handle_run(packed_mac: u64, sender: u64, buf: &[u8], len: usize, out: &mut [u
     // send an unnamed request; the far side would refuse it anyway, and failing
     // here reports the real reason rather than the peer's.
     let mut who = [0u8; ninep_abi::NP_NAME_LEN];
-    if !caller_name(&mut who) {
-        return fail(out, b"cpu: this machine cannot name the calling user\r\n");
+    match caller_name(&mut who) {
+        LineScan::Found => {}
+        // Transient (no disk mounted yet, or fsd restarting) vs settled (this
+        // machine genuinely has no account for the calling uid). Same refusal,
+        // different thing to go and fix.
+        LineScan::Unreadable => {
+            return fail(out, b"cpu: cannot read /etc/passwd to name the calling user\r\n")
+        }
+        LineScan::NotFound => {
+            return fail(out, b"cpu: this machine has no account for the calling user\r\n")
+        }
     }
 
     // Frame + sign it (the export-hardening phase). A no-key client can't sign.
@@ -1195,11 +1208,15 @@ fn handle_rmount(packed_mac: u64, buf: &[u8], len: usize, out: &mut [u8], auth: 
     // buffers off the stack before the frame and response buffers go live, which
     // is where netd's peak is.
     let mut who = [0u8; ninep_abi::NP_NAME_LEN];
-    if !caller_name(&mut who) {
-        // No name for the caller means this machine cannot say who is asking:
-        // no /etc/passwd, or a uid with no account. Refuse rather than send an
-        // unnamed request.
-        return fail(out, syscall_abi::FS_ERR_AUTH);
+    match caller_name(&mut who) {
+        LineScan::Found => {}
+        // No name for the caller means this machine cannot say who is asking, so
+        // it refuses to send rather than send an unnamed request. The two causes
+        // report differently: NO_FS for the transient one (the shell surfaces it
+        // as "no filesystem", which is both true and worth retrying), AUTH for a
+        // uid this machine has no account for.
+        LineScan::Unreadable => return fail(out, syscall_abi::NO_FS),
+        LineScan::NotFound => return fail(out, syscall_abi::FS_ERR_AUTH),
     }
 
     let mut req = [0u8; ninep_abi::NP_FRAME_MAX];
@@ -1988,10 +2005,7 @@ fn retransmit_one(mac: &[u8; 6], c: &mut TcpConn, seq: u32, n: usize) {
         send_seg_at(mac, c, seq, TCP_PSH | TCP_ACK, &buf[..take]);
     } else if c.file {
         let foff = (off - c.prefix_len) as u64;
-        // The HTTP server has no notion of a user: an anonymous request is
-        // served with netd's own authority, as it always has been. Stated
-        // rather than defaulted - see the boundary note in `start_response`.
-        let r = read_file_chunk(As::FirstParty, &c.path[..c.path_len], 0, foff, &mut buf[..n]);
+        let r = read_file_chunk(As::Anonymous, &c.path[..c.path_len], 0, foff, &mut buf[..n]);
         if r < syscall_abi::FS_ERR_MIN {
             let got = r as usize;
             send_seg_at(mac, c, seq, TCP_PSH | TCP_ACK, &buf[..got]);
@@ -2078,9 +2092,19 @@ fn handle_9p(c: &mut TcpConn, request: &[u8], dials: &mut [Option<DialConn>; MAX
     // node, which is the real exposure - a node's own users are not all trusted
     // even when the node is. Defending against a compromised node needs
     // per-user keys, a further tier (docs/roadmap.md).
-    let Some(proxy) = map_user(&name) else {
-        deny_9p(c, request);
-        return;
+    let proxy = match map_user(&name) {
+        Ok(p) => p,
+        Err(cause) => {
+            // NOT deny_9p: that reports a key failure, and the key verified
+            // fine - sending an operator after \CLUSTER.KEY when the real cause
+            // is a missing account costs them the afternoon. Naming the cause is
+            // safe HERE and only here, because this peer has already proved it
+            // holds the cluster key; the pre-auth path stays deliberately
+            // ambiguous so an unauthenticated stranger cannot enumerate
+            // accounts.
+            deny_unknown_user(c, request, cause);
+            return;
+        }
     };
     // Route: a remote-run request (cluster Phase 4a) vs a normal fs verb. `msg`
     // is the NP message (verb at offset 0), framing + auth already stripped.
@@ -2192,6 +2216,35 @@ fn deny_9p(c: &mut TcpConn, request: &[u8]) {
         c.prefix_len = n;
     } else {
         c.prefix_len = frame_reply(&mut c.prefix, syscall_abi::FS_ERR_AUTH, &[]);
+    }
+}
+
+/// Refuse a request whose MAC verified but whose *user* this machine has never
+/// heard of. Distinct from [`deny_9p`] only in what it says: same `FS_ERR_AUTH`
+/// on the wire (one refusal code, so a client needs no new case), an accurate
+/// line for the `cpu` caller, who reads the reply as raw output.
+fn deny_unknown_user(c: &mut TcpConn, request: &[u8], cause: LineScan) {
+    let voff = ninep_abi::NP_NET_LEN_PREFIX + ninep_abi::NP_AUTH_HDR;
+    let is_run = request.len() >= voff + 8 && read_u64(request, voff) == ninep_abi::NP_RUN;
+    c.file = false;
+    c.prefix_off = 0;
+    c.cpu_child = CPU_NONE;
+    let unreadable = cause == LineScan::Unreadable;
+    if is_run {
+        let m: &[u8] = if unreadable {
+            b"cpu: this host cannot read its account database right now\r\n"
+        } else {
+            b"cpu: no account of that name on this host (the cluster key was accepted)\r\n"
+        };
+        let n = m.len().min(c.prefix.len());
+        c.prefix[..n].copy_from_slice(&m[..n]);
+        c.prefix_len = n;
+    } else {
+        // NO_FS for the transient case: the shell already surfaces that as "no
+        // filesystem" rather than an auth failure, which is both true and the
+        // thing to retry. FS_ERR_AUTH stays the answer for a real stranger.
+        let status = if unreadable { syscall_abi::NO_FS } else { syscall_abi::FS_ERR_AUTH };
+        c.prefix_len = frame_reply(&mut c.prefix, status, &[]);
     }
 }
 
@@ -3411,7 +3464,11 @@ fn start_response(c: &mut TcpConn, request: &[u8]) {
     let path: &[u8] = if path.is_empty() { b"/" } else { path };
 
     // A file? (stat succeeds and returns a size.)
-    let size = stat_size(As::FirstParty, path, 0);
+    // ANONYMOUS, not netd. An HTTP request carries no identity, and the
+    // authority it gets must reflect that: `nobody` sees the `other` triad, so a
+    // root-owned 0600 file is refused here rather than served by fsd's root
+    // bypass. (Unchanged on FAT32/exFAT, which model no mode at all.)
+    let size = stat_size(As::Anonymous, path, 0);
     if size < syscall_abi::FS_ERR_MIN {
         // 200 header (Content-Type by extension, Content-Length = size), then
         // the body streamed from offset 0.
@@ -3425,9 +3482,14 @@ fn start_response(c: &mut TcpConn, request: &[u8]) {
     } else {
         // A directory? (list succeeds.) Build a browsable HTML index.
         let mut names = [0u8; syscall_abi::FS_DATA_MAX as usize];
-        let listed = list_dir(As::FirstParty, path, 0, &mut names);
+        let listed = list_dir(As::Anonymous, path, 0, &mut names);
         if listed < syscall_abi::FS_ERR_MIN {
             c.prefix_len = build_listing(path, &names[..listed as usize], &mut c.prefix);
+        } else if size == syscall_abi::FS_ERR_PERM || listed == syscall_abi::FS_ERR_PERM {
+            // It exists; anonymous just may not have it. 403, not 404 - saying
+            // "not found" about a file that is there is the kind of small lie
+            // that costs an operator an hour.
+            set_prefix(c, RESP_403);
         } else {
             // Neither a file nor a directory.
             set_prefix(c, RESP_404);
@@ -3497,7 +3559,7 @@ fn set_prefix(c: &mut TcpConn, bytes: &[u8]) {
 /// A line too long for the buffer is skipped rather than truncated: a prefix of
 /// an account line could match the wrong account.
 #[inline(never)]
-fn for_each_line(path: &[u8], mut f: impl FnMut(&[u8]) -> bool) -> bool {
+fn for_each_line(path: &[u8], mut f: impl FnMut(&[u8]) -> bool) -> LineScan {
     const CHUNK: usize = 512;
     let mut chunk = [0u8; CHUNK];
     let mut line = [0u8; 128];
@@ -3509,7 +3571,13 @@ fn for_each_line(path: &[u8], mut f: impl FnMut(&[u8]) -> bool) -> bool {
         // the caller's - the caller is precisely what it is being read to learn.
         let r = read_file_chunk(As::FirstParty, path, 0, off, &mut chunk);
         if r >= syscall_abi::FS_ERR_MIN {
-            return false;
+            // A read failure is NOT "no such user". `NO_FS` (the disk not
+            // mounted yet) and a `TASK_ERR_*` from an fsd restart are transient,
+            // and folding them into a refusal reports "authentication failed"
+            // for a condition that would succeed a moment later - sending the
+            // operator after the cluster key again. `load_auth` already retries
+            // NO_FS for exactly this reason; this reports it so callers can.
+            return LineScan::Unreadable;
         }
         let n = (r as usize).min(CHUNK);
         off += n as u64;
@@ -3517,7 +3585,7 @@ fn for_each_line(path: &[u8], mut f: impl FnMut(&[u8]) -> bool) -> bool {
             match b {
                 b'\n' => {
                     if !overlong && ll > 0 && f(&line[..ll]) {
-                        return true;
+                        return LineScan::Found;
                     }
                     ll = 0;
                     overlong = false;
@@ -3534,7 +3602,26 @@ fn for_each_line(path: &[u8], mut f: impl FnMut(&[u8]) -> bool) -> bool {
             break;
         }
     }
-    !overlong && ll > 0 && f(&line[..ll])
+    if !overlong && ll > 0 && f(&line[..ll]) {
+        LineScan::Found
+    } else {
+        LineScan::NotFound
+    }
+}
+
+/// What a scan of an account file actually concluded. Three outcomes, because
+/// two of them are refusals for opposite reasons: `NotFound` is an answer (this
+/// machine has no such account, refuse and mean it), `Unreadable` is the absence
+/// of one (ask again).
+#[derive(Clone, Copy, PartialEq)]
+enum LineScan {
+    /// The callback accepted a line.
+    Found,
+    /// Every line was read; none matched.
+    NotFound,
+    /// The file could not be read at all - no filesystem yet, or `fsd` was
+    /// restarted mid-scan. Transient.
+    Unreadable,
 }
 
 /// Strip a fixed-width header name's NUL padding.
@@ -3556,24 +3643,21 @@ fn trim_nul(b: &[u8]) -> &[u8] {
 /// `MSG_CALL` (a filtered one). It is NOT safe after the exchange begins, which
 /// is why both callers resolve the name first.
 #[inline(never)]
-fn caller_name(out: &mut [u8; ninep_abi::NP_NAME_LEN]) -> bool {
+fn caller_name(out: &mut [u8; ninep_abi::NP_NAME_LEN]) -> LineScan {
     let packed = syscall4(syscall_abi::SENDER_ID, 0, 0, 0, 0);
     if packed == syscall_abi::GET_ID_ERR {
-        return false;
+        return LineScan::NotFound;
     }
     let uid = packed as u32;
-    let mut got = false;
     for_each_line(b"/etc/passwd", |line| match accounts::find_user_by_uid(line, uid) {
         // A name too long for the header cannot cross the cluster, and must not
         // cross TRUNCATED - a prefix could name a different account over there.
         Some(a) if !a.name.is_empty() && a.name.len() <= out.len() => {
             out[..a.name.len()].copy_from_slice(a.name);
-            got = true;
             true
         }
         _ => false,
-    });
-    got
+    })
 }
 
 /// Resolve a remote caller's **name** through this machine's `/etc/passwd`.
@@ -3592,13 +3676,13 @@ fn caller_name(out: &mut [u8; ninep_abi::NP_NAME_LEN]) -> bool {
 /// there is a misauthorization. If the cost ever matters, that is the question
 /// to answer first.
 #[inline(never)]
-fn map_user(who: &[u8; ninep_abi::NP_NAME_LEN]) -> Option<Proxy> {
+fn map_user(who: &[u8; ninep_abi::NP_NAME_LEN]) -> Result<Proxy, LineScan> {
     let name = trim_nul(who);
     if name.is_empty() {
-        return None;
+        return Err(LineScan::NotFound);
     }
     let mut found: Option<Proxy> = None;
-    for_each_line(b"/etc/passwd", |line| match accounts::find_user_by_name(line, name) {
+    let scan = for_each_line(b"/etc/passwd", |line| match accounts::find_user_by_name(line, name) {
         Some(a) => {
             found = Some(Proxy { uid: a.uid, gid: a.gid });
             true
@@ -3607,7 +3691,13 @@ fn map_user(who: &[u8; ninep_abi::NP_NAME_LEN]) -> Option<Proxy> {
     });
     // An id too large for the identity word cannot be carried, and truncating it
     // would authorize a different account. Refuse instead.
-    found.filter(|p| ninep_abi::proxy_id(p.uid, p.gid).is_some())
+    match found.filter(|p| ninep_abi::proxy_id(p.uid, p.gid).is_some()) {
+        Some(p) => Ok(p),
+        // A scan that could not read the file has not established that the
+        // account is absent - only that we cannot tell. Two different refusals.
+        None if scan == LineScan::Unreadable => Err(LineScan::Unreadable),
+        None => Err(LineScan::NotFound),
+    }
 }
 
 /// WHO a call to `fsd` is made on behalf of - a **required parameter** of every
@@ -3630,6 +3720,17 @@ enum As {
     FirstParty,
     /// A remote caller, already resolved through THIS machine's `/etc/passwd`.
     Remote(Proxy),
+    /// An **anonymous** request - one that arrived over the network with no
+    /// identity at all, which today means the HTTP static-file server. Served
+    /// as `nobody` ([`NP_ID_ANON`](ninep_abi::NP_ID_ANON)), NOT as netd.
+    ///
+    /// This is the other listener, and it needs saying: HTTP has no user model,
+    /// so before this it read files with netd's own root credential and `fsd`'s
+    /// root bypass served them - an unauthenticated `GET /etc/shadow` on port 80
+    /// returned the hashes, no cluster key and no username involved. That is the
+    /// same exposure the cluster identity work closes, reachable through the
+    /// door next to it. Anonymous means `other`-triad access and nothing more.
+    Anonymous,
 }
 
 impl As {
@@ -3641,6 +3742,7 @@ impl As {
         match self {
             As::FirstParty => ninep_abi::NP_ID_FIRST_PARTY,
             As::Remote(p) => ninep_abi::proxy_id(p.uid, p.gid).unwrap_or(ninep_abi::NP_ID_NONE),
+            As::Anonymous => ninep_abi::NP_ID_ANON,
         }
     }
 }
@@ -3919,7 +4021,7 @@ fn pump_send(mac: &[u8; 6], c: &mut TcpConn) {
         if c.file && !c.eof {
             let want = SERVE_CHUNK.min(avail as usize);
             let mut chunk = [0u8; SERVE_CHUNK];
-            let r = read_file_chunk(As::FirstParty, &c.path[..c.path_len], 0, c.read_off, &mut chunk[..want]);
+            let r = read_file_chunk(As::Anonymous, &c.path[..c.path_len], 0, c.read_off, &mut chunk[..want]);
             if r >= syscall_abi::FS_ERR_MIN {
                 c.eof = true; // a mid-stream read error just ends the body
                 continue;
