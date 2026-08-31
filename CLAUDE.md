@@ -638,8 +638,9 @@ The kernel and the userland programs have no unit test suite — they are
 pre-alpha code that mostly proves it boots, and most of it can only run on
 the target. The **pure crates are the exception and now have one**:
 `make test` runs the host unit tests for every crate with no I/O, no
-syscalls and no target dependency (`accounts`, `regex`, `ed25519` — 42
-tests as of 2026-08-31). It exists because such a crate can otherwise have
+syscalls and no target dependency (`accounts`, `regex`, `ed25519` — 53
+tests as of 2026-08-31, and the number is checked by running it, not by
+incrementing). It exists because such a crate can otherwise have
 **no build coverage at all**: it is a workspace member but not a
 default-member, so until something depends on it, `cargo build`, `make
 build` and `make esp` all stay green while it is broken. Run it before
