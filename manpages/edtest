@@ -1,0 +1,30 @@
+NAME
+    edtest - ed25519 on-target check and measurement
+
+SYNOPSIS
+    edtest
+
+DESCRIPTION
+    Runs the RFC 8032 test vectors for the ed25519 crate on this machine, and
+    measures the two things a host test cannot answer: how much stack a
+    signature costs, and how long one takes.
+
+    The vectors are the published ones, so a disagreement between this machine
+    and the host build shows up as a disagreement about a value neither of them
+    invented.
+
+    The stack figure is only printed when the probe has been CALIBRATED: the
+    same measurement is run around a function with a known extra 4KB frame and
+    must read about 4KB higher. A probe that silently measured nothing would
+    otherwise report a small, plausible number.
+
+    Timings are measured with the monotonic clock. Under QEMU they are emulated
+    and pessimistic against real hardware by roughly an order of magnitude, so
+    read them as a ceiling.
+
+EXIT STATUS
+    0   every check passed
+    1   a vector failed, or the stack probe did not calibrate
+
+SEE ALSO
+    selftest - the relocating-loader regression check

@@ -56,42 +56,52 @@ const SIG2: [u8; 64] = [
 /// by accident.
 const PAINT: u8 = 0xA5;
 
+/// The loader jumps to the region's base, so `_start` must be the first thing in
+/// `.text` - the invariant `programs/linker.ld` keeps trivially true and which
+/// `docs/processes.md` lists as a required step. It works without this only
+/// because the loader happens to add `e_entry`; anything assuming entry-at-zero
+/// (a raw-image path, the Pi bring-up) would jump into the middle of `.text`.
+#[link_section = ".text.start"]
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
-    ulib::con_write(b"edtest: ed25519 on the target\r\n");
+    // Write through `stdout_target`, not straight to the console: a program that
+    // only ever calls `con_write` and never sends end-of-stream leaves
+    // `edtest | grep peak` hanging forever in the consumer's `pipe_recv`.
+    let target = ulib::stdout_target();
+    out(target, b"edtest: ed25519 on the target\r\n");
     let mut failures = 0u32;
 
     // --- 1. the published vectors, on this machine -------------------------
     if public_key(&SK1) == PK1 {
-        ulib::con_write(b"  [ok]   public key matches RFC 8032 TEST 1\r\n");
+        out(target, b"  [ok]   public key matches RFC 8032 TEST 1\r\n");
     } else {
-        ulib::con_write(b"  [FAIL] public key differs from RFC 8032 TEST 1\r\n");
+        out(target, b"  [FAIL] public key differs from RFC 8032 TEST 1\r\n");
         failures += 1;
     }
     if sign(&SK1, b"") == SIG1 {
-        ulib::con_write(b"  [ok]   signature matches RFC 8032 TEST 1 (empty message)\r\n");
+        out(target, b"  [ok]   signature matches RFC 8032 TEST 1 (empty message)\r\n");
     } else {
-        ulib::con_write(b"  [FAIL] signature differs from RFC 8032 TEST 1\r\n");
+        out(target, b"  [FAIL] signature differs from RFC 8032 TEST 1\r\n");
         failures += 1;
     }
     if sign(&SK2, &[0x72]) == SIG2 {
-        ulib::con_write(b"  [ok]   signature matches RFC 8032 TEST 2 (one-byte message)\r\n");
+        out(target, b"  [ok]   signature matches RFC 8032 TEST 2 (one-byte message)\r\n");
     } else {
-        ulib::con_write(b"  [FAIL] signature differs from RFC 8032 TEST 2\r\n");
+        out(target, b"  [FAIL] signature differs from RFC 8032 TEST 2\r\n");
         failures += 1;
     }
     if verify(&PK1, b"", &SIG1) {
-        ulib::con_write(b"  [ok]   verify accepts a good signature\r\n");
+        out(target, b"  [ok]   verify accepts a good signature\r\n");
     } else {
-        ulib::con_write(b"  [FAIL] verify rejected a good signature\r\n");
+        out(target, b"  [FAIL] verify rejected a good signature\r\n");
         failures += 1;
     }
     let mut bad = SIG1;
     bad[0] ^= 1;
     if !verify(&PK1, b"", &bad) {
-        ulib::con_write(b"  [ok]   verify rejects a flipped bit\r\n");
+        out(target, b"  [ok]   verify rejects a flipped bit\r\n");
     } else {
-        ulib::con_write(b"  [FAIL] verify accepted a tampered signature\r\n");
+        out(target, b"  [FAIL] verify accepted a tampered signature\r\n");
         failures += 1;
     }
 
@@ -101,32 +111,32 @@ pub extern "C" fn _start() -> ! {
     // of magnitude against real silicon; the number is a ceiling, not a
     // prediction. What it is good for is comparison - signing against verifying,
     // and a cached key against a recomputed one.
-    ulib::con_write(b"\r\n  timings (QEMU/TCG - a ceiling, not real hardware):\r\n");
+    out(target, b"\r\n  timings (QEMU/TCG - a ceiling, not real hardware):\r\n");
 
     let key = SigningKey::from_secret(&SK1);
     let t0 = ulib::monotonic_us();
     let sig = key.sign(b"a cluster frame");
     let t1 = ulib::monotonic_us();
-    report_us(b"    sign (cached key)      ", t1 - t0);
+    report_us(target, b"    sign (cached key)      ", t1 - t0);
 
     let t0 = ulib::monotonic_us();
     let _ = sign(&SK1, b"a cluster frame");
     let t1 = ulib::monotonic_us();
-    report_us(b"    sign (one-shot)        ", t1 - t0);
+    report_us(target, b"    sign (one-shot)        ", t1 - t0);
 
     let t0 = ulib::monotonic_us();
     let ok = verify(&PK1, b"a cluster frame", &sig);
     let t1 = ulib::monotonic_us();
-    report_us(b"    verify                 ", t1 - t0);
+    report_us(target, b"    verify                 ", t1 - t0);
     if !ok {
-        ulib::con_write(b"  [FAIL] round-trip signature did not verify\r\n");
+        out(target, b"  [FAIL] round-trip signature did not verify\r\n");
         failures += 1;
     }
 
     let t0 = ulib::monotonic_us();
     let _ = SigningKey::from_secret(&SK1);
     let t1 = ulib::monotonic_us();
-    report_us(b"    key expansion          ", t1 - t0);
+    report_us(target, b"    key expansion          ", t1 - t0);
 
     // --- 3. how much stack it uses -----------------------------------------
     //
@@ -139,56 +149,69 @@ pub extern "C" fn _start() -> ! {
     let padded = measure_stack_padded(&SK1);
     match (plain, padded) {
         (Some(a), Some(b)) if b > a + 3072 && b < a + 8192 => {
-            ulib::con_write(b"\r\n  [ok]   stack probe responds to a known 4KB frame (+");
-            put_dec((b - a) as u64);
-            ulib::con_write(b" bytes)\r\n");
+            out(target, b"\r\n  [ok]   stack probe responds to a known 4KB frame (+");
+            put_dec(target, (b - a) as u64);
+            out(target, b" bytes)\r\n");
         }
         (Some(a), Some(b)) => {
-            ulib::con_write(b"\r\n  [FAIL] stack probe did not respond as expected: ");
-            put_dec(a as u64);
-            ulib::con_write(b" then ");
-            put_dec(b as u64);
-            ulib::con_write(b"\r\n");
+            out(target, b"\r\n  [FAIL] stack probe did not respond as expected: ");
+            put_dec(target, a as u64);
+            out(target, b" then ");
+            put_dec(target, b as u64);
+            out(target, b"\r\n");
             failures += 1;
         }
-        _ => ulib::con_write(b"\r\n  [warn] stack measurement unavailable\r\n"),
+        _ => out(target, b"\r\n  [warn] stack measurement unavailable\r\n"),
     }
 
+    let calibrated = matches!((plain, padded), (Some(a), Some(b)) if b > a + 3072 && b < a + 8192);
     match plain {
-        Some(used) => {
-            ulib::con_write(b"\r\n  peak stack for sign+verify: ");
-            put_dec(used as u64);
-            ulib::con_write(b" bytes of 32768 (");
-            put_dec((used as u64 * 100) / 32768);
-            ulib::con_write(b"%)\r\n");
+        Some(used) if calibrated => {
+            out(target, b"\r\n  peak stack for sign+verify: ");
+            put_dec(target, used as u64);
+            out(target, b" bytes of 32768 (");
+            put_dec(target, (used as u64 * 100) / 32768);
+            out(target, b"%)\r\n");
         }
-        None => ulib::con_write(b"\r\n  [warn] stack measurement unavailable\r\n"),
+        // Deliberately NOT printed in the usual format when the probe did not
+        // calibrate: a plausible-looking number is exactly what gets transcribed
+        // into a document and believed.
+        Some(_) => out(target, b"\r\n  peak stack: NOT REPORTED (probe uncalibrated)\r\n"),
+        None => out(target, b"\r\n  [warn] stack measurement unavailable\r\n"),
     }
 
     if failures == 0 {
-        ulib::con_write(b"\r\nedtest: all checks passed\r\n");
+        out(target, b"\r\nedtest: all checks passed\r\n");
+        ulib::end_of_stream(target);
         ulib::exit(0);
     }
-    ulib::con_write(b"\r\nedtest: FAILURES\r\n");
+    out(target, b"\r\nedtest: FAILURES\r\n");
+    ulib::end_of_stream(target);
     ulib::exit(1);
 }
 
+/// Write to wherever this program's output belongs - the console, or a pipeline
+/// consumer.
+fn out(target: u64, bytes: &[u8]) {
+    ulib::write_out(target, bytes);
+}
+
 /// Print a labelled microsecond count.
-fn report_us(label: &[u8], us: u64) {
+fn report_us(target: u64, label: &[u8], us: u64) {
     let mut buf = [0u8; 32];
     let mut n = 0usize;
     ulib::emit_dec(&mut buf, &mut n, us);
-    ulib::con_write(label);
-    ulib::con_write(&buf[..n]);
-    ulib::con_write(b" us\r\n");
+    out(target, label);
+    out(target, &buf[..n]);
+    out(target, b" us\r\n");
 }
 
 /// Print a decimal number.
-fn put_dec(v: u64) {
+fn put_dec(target: u64, v: u64) {
     let mut buf = [0u8; 32];
     let mut n = 0usize;
     ulib::emit_dec(&mut buf, &mut n, v);
-    ulib::con_write(&buf[..n]);
+    out(target, &buf[..n]);
 }
 
 /// Peak stack bytes used by a sign followed by a verify.
