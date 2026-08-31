@@ -225,8 +225,7 @@ steps, then starts B and runs its steps while A stays alive — printing both
 transcripts and both health bars:
 
 ```sh
-cp build/espext2.img build/espext2-a.img
-cp build/espext2.img build/espext2-b.img
+make images-2vm-ext2      # the two nodes hold different keys: build them together
 python3 scripts/drive-2vm.py build/espext2-a.img build/espext2-b.img \
   --a 'login@@root' 'assword@@root' '# @@' \
   --b 'login@@user' 'assword@@user' \

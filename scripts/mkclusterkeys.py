@@ -18,9 +18,12 @@ Makefile a fixed CLUSTER_KEY.
 
 WHICH MEANS THE DEV PRIVATE KEYS ARE IN THIS REPOSITORY, and anyone can sign as
 these nodes. That is the same trade the existing dev CLUSTER_KEY already makes
-and it is fine for QEMU rigs; it is NOT fine for anything real. A deployment runs
-this with --random, or generates on the device (which requires real entropy and
-refuses without it).
+and it is fine for QEMU rigs; it is NOT fine for anything real. A deployment
+generates on the device (`/bin/clusterkey`, which requires real entropy and
+refuses without it) and distributes the PUBLIC halves by hand. `--random` here
+writes one real identity for THIS node and an `authorized` naming only itself,
+because a build machine cannot know other machines' keys - it does not, and
+cannot, produce a whole working cluster on its own.
 
 The Ed25519 maths is imported from gen-sign-vectors.py rather than copied: that
 reference asserts itself against RFC 8032's published signatures when loaded, and
@@ -73,16 +76,34 @@ def main():
 
     keys = {}
     for name, ip, label in DEV_PEERS:
-        seed = os.urandom(32) if random_keys else seed_from(label)
+        seed = seed_from(label)
         keys[name] = (seed, edref.public_key(seed), ip)
+    if random_keys:
+        # --random replaces THIS NODE'S key with a real one, and nothing else.
+        #
+        # It used to draw a fresh seed for every peer while writing only this
+        # node's `id`, so the other peers' private keys existed nowhere - and two
+        # nodes built by separate invocations each got an `authorized` naming the
+        # other's WRONG public key. A deployment path that cannot produce a
+        # working cluster is worse than none, because it looks like one.
+        my_ip = dict((n, i) for n, i, _ in DEV_PEERS)[me]
+        seed = os.urandom(32)
+        keys = {me: (seed, edref.public_key(seed), my_ip)}
 
     os.makedirs(out_dir, exist_ok=True)
     my_seed, my_pub, _ = keys[me]
 
     id_path = os.path.join(out_dir, "id")
-    with open(id_path, "w") as f:
+    # Created 0600 rather than written and then chmod'd: the naive order leaves a
+    # real secret world-readable for the length of the write. Immaterial for the
+    # deterministic dev keys, which are public by design - but this is the same
+    # code path a --random key takes, and that one is genuinely secret. The mode
+    # is carried onto the guest by mke2fs -d.
+    if os.path.exists(id_path):
+        os.unlink(id_path)
+    fd = os.open(id_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w") as f:
         f.write(my_seed.hex() + "\n")
-    os.chmod(id_path, 0o600)  # carried onto the guest by mke2fs -d
 
     with open(os.path.join(out_dir, "id.pub"), "w") as f:
         f.write(my_pub.hex() + "\n")
@@ -91,7 +112,12 @@ def main():
         f.write("# Peers this machine accepts. One line per peer:\n")
         f.write("#   <name> <ipv4> <public-key-hex>\n")
         f.write("# Delete or comment out a line to revoke that peer.\n")
-        f.write("# DEV KEYS: derived from fixed seeds, so they are public. Not for real use.\n")
+        if random_keys:
+            f.write("# This key was generated randomly, so no other machine's public key is\n")
+            f.write("# known here. Append one line per peer, copied from that machine's\n")
+            f.write("# /etc/cluster/id.pub - see `clusterkey` on the device.\n")
+        else:
+            f.write("# DEV KEYS: derived from fixed seeds, so they are public. Not for real use.\n")
         for name, (_seed, pub, ip) in keys.items():
             f.write(f"{name} {ip} {pub.hex()}\n")
 

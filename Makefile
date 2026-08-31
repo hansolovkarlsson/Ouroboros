@@ -201,7 +201,7 @@ ifeq ($(PROFILE),release)
 CARGO_FLAGS += --release
 endif
 
-.PHONY: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin accountd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin id-bin passwd-bin useradd-bin groupadd-bin usermod-bin chello-bin cdemo-bin cfile-bin cpico-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin edtest-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin sort-bin esp run run-virtio-console run-usb-kbd run-usb-multi run-gicv3 image run-image run-image-9p run-image-9p-client run-image-2vm-a run-image-2vm-b run-image-2vm-ext2-a run-image-2vm-ext2-b image-gpt run-image-gpt image-exfat run-image-exfat image-ext2 run-image-ext2 images-2vm-ext2 parallels-hdd release test check-relocs test-parallels clean
+.PHONY: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin accountd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin id-bin passwd-bin useradd-bin groupadd-bin usermod-bin chello-bin cdemo-bin cfile-bin cpico-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin edtest-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin sort-bin esp run run-virtio-console run-usb-kbd run-usb-multi run-gicv3 image run-image run-image-9p run-image-9p-client run-image-2vm-a run-image-2vm-b run-image-2vm-ext2-a run-image-2vm-ext2-b image-gpt run-image-gpt image-exfat run-image-exfat image-ext2 run-image-ext2 images-2vm images-2vm-ext2 parallels-hdd release test check-relocs test-parallels clean
 
 # Overridable by `make test-parallels VM_NAME=... CMDS=... BOOT_WAIT=...`.
 VM_NAME     ?= Ouroboros
@@ -1078,8 +1078,24 @@ run-image-9p-client: image
 #   cat /mnt/a/EFI/ORBS/INIT.CFG
 # Each VM gets its own disk copy (two QEMU write-locks can't share one file) and
 # its own pcap (build/net-a.pcap / build/net-b.pcap) for tcpdump inspection.
-run-image-2vm-a: image
+# The FAT32 pair, with the same per-node identity split as the ext2 pair above.
+# It would otherwise boot one image twice and give BOTH nodes node-a's private
+# key while `authorized` says .11 is node-b - harmless while nothing reads the
+# files, and a confusing authentication failure the moment step 7 lands.
+images-2vm:
+	rm -f $(ESP_DIR)-a.img $(ESP_DIR)-b.img $(ESP_DIR).img
+	$(MAKE) image CLUSTER_NODE=node-a
 	cp $(ESP_DIR).img $(ESP_DIR)-a.img
+	rm -f $(ESP_DIR).img
+	$(MAKE) image CLUSTER_NODE=node-b
+	cp $(ESP_DIR).img $(ESP_DIR)-b.img
+	@echo "images-2vm: built node-a and node-b FAT32 disks with distinct identities"
+
+$(ESP_DIR)-a.img $(ESP_DIR)-b.img:
+	@echo "$@ is missing - run 'make images-2vm' first."; \
+	 echo "(The two nodes hold different keys and must be built together.)"; exit 1
+
+run-image-2vm-a: $(ESP_DIR)-a.img
 	qemu-system-aarch64 \
 		-machine virt \
 		-cpu cortex-a72 \
@@ -1094,8 +1110,7 @@ run-image-2vm-a: image
 		-global virtio-mmio.force-legacy=false \
 		-nographic
 
-run-image-2vm-b: image
-	cp $(ESP_DIR).img $(ESP_DIR)-b.img
+run-image-2vm-b: $(ESP_DIR)-b.img
 	qemu-system-aarch64 \
 		-machine virt \
 		-cpu cortex-a72 \
@@ -1117,26 +1132,41 @@ run-image-2vm-b: image
 # it). Same MAC-derived IPs as that pair, but its OWN link port, so both rigs
 # can be up at once instead of colliding as an unrelated guest-side timeout.
 # Each node gets its own disk copy, since both write to it.
-# The two nodes now hold DIFFERENT private keys, so they can no longer be one
-# image copied twice - each is a full rebuild with its own CLUSTER_NODE. The
+# The two nodes hold DIFFERENT private keys, so they can no longer be one image
+# copied twice - each is a full rebuild with its own CLUSTER_NODE. The
 # `authorized` file is identical in both (every node accepts the same peers);
-# only `/etc/cluster/id` differs. The intermediates are removed first because
-# make would otherwise consider the previous node's image up to date.
-$(BUILD_DIR)/espext2-a.img:
-	rm -f $(EXT2_PART) $(EXT2_IMG)
+# only `/etc/cluster/id` differs.
+#
+# BUILT BY ONE TARGET, SEQUENTIALLY, AND NEVER BY THE RUN TARGETS. Two reasons,
+# both learned the hard way:
+#
+#  - Both builds pass through the SAME intermediates ($(EXT2_PART), $(EXT2_IMG),
+#    build/ext2-src). The documented workflow runs node A in one terminal and
+#    node B in another, and if each `make run-…` built its own image those two
+#    invocations would interleave over those shared paths - B's `cp` could copy
+#    the node-A image and both guests would silently boot as node-a, which is
+#    the exact condition per-machine keys exist to prevent.
+#  - A run target that rebuilds would also rewrite the disk a running QEMU has
+#    open.
+#
+# So: `make images-2vm-ext2` builds the pair, and the run targets refuse if it
+# has not been run. Re-run it after changing any source you want on the nodes -
+# that is the cost of removing the race, and it is visible rather than silent.
+images-2vm-ext2: esp
+	rm -f $(BUILD_DIR)/espext2-a.img $(BUILD_DIR)/espext2-b.img $(EXT2_PART) $(EXT2_IMG)
 	$(MAKE) image-ext2 CLUSTER_NODE=node-a
-	cp $(EXT2_IMG) $@
-
-$(BUILD_DIR)/espext2-b.img:
+	cp $(EXT2_IMG) $(BUILD_DIR)/espext2-a.img
 	rm -f $(EXT2_PART) $(EXT2_IMG)
 	$(MAKE) image-ext2 CLUSTER_NODE=node-b
-	cp $(EXT2_IMG) $@
+	cp $(EXT2_IMG) $(BUILD_DIR)/espext2-b.img
+	@echo "images-2vm-ext2: built node-a and node-b disks with distinct identities"
 
-# Rebuild both, in the order that leaves each with its own identity.
-images-2vm-ext2:
-	rm -f $(BUILD_DIR)/espext2-a.img $(BUILD_DIR)/espext2-b.img
-	$(MAKE) $(BUILD_DIR)/espext2-a.img
-	$(MAKE) $(BUILD_DIR)/espext2-b.img
+# A missing per-node image is an instruction, not a build: see above for why
+# these must not be produced by the run targets.
+$(BUILD_DIR)/espext2-a.img $(BUILD_DIR)/espext2-b.img:
+	@echo "$@ is missing - run 'make images-2vm-ext2' first."; \
+	 echo "(The two nodes hold different keys and must be built together, once,"; \
+	 echo " not by each run target - see the comment in the Makefile.)"; exit 1
 
 run-image-2vm-ext2-a: $(BUILD_DIR)/espext2-a.img
 	qemu-system-aarch64 \
