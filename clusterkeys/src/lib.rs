@@ -146,17 +146,54 @@ pub fn format_ip(ip: &[u8; 4], out: &mut [u8; 15]) -> usize {
     n
 }
 
+/// What a line of `authorized` turned out to be.
+///
+/// [`parse_line`] collapses everything that is not a peer into `None`, which is
+/// the right thing for a lookup and useless for a tool that wants to *tell*
+/// someone their file has a broken line in it. An operator who mistypes a key
+/// gets a peer that is silently unauthorized and a file that still looks
+/// correct; distinguishing the cases is what lets `clusterkey peers` say so.
+pub enum LineKind<'a> {
+    /// Nothing on the line.
+    Blank,
+    /// A `#` comment — including a peer deliberately commented out.
+    Comment,
+    /// A well-formed peer.
+    Peer(Peer<'a>),
+    /// Something was meant here, and it could not be read.
+    Malformed,
+}
+
+/// Classify one line of `authorized`.
+pub fn classify(line: &[u8]) -> LineKind<'_> {
+    let trimmed = trim(line);
+    if trimmed.is_empty() {
+        return LineKind::Blank;
+    }
+    if trimmed[0] == b'#' {
+        return LineKind::Comment;
+    }
+    match parse_peer(trimmed) {
+        Some(p) => LineKind::Peer(p),
+        None => LineKind::Malformed,
+    }
+}
+
 /// Parse one line of `authorized`.
 ///
 /// Returns `None` for a blank line, a `#` comment, or anything malformed. A
 /// malformed line is **skipped, never guessed at**: a line this cannot read is
 /// one whose meaning is unknown, and inventing a peer from it is the one outcome
-/// worse than ignoring it.
+/// worse than ignoring it. Use [`classify`] where the difference matters.
 pub fn parse_line(line: &[u8]) -> Option<Peer<'_>> {
-    let line = trim(line);
-    if line.is_empty() || line[0] == b'#' {
-        return None;
+    match classify(line) {
+        LineKind::Peer(p) => Some(p),
+        _ => None,
     }
+}
+
+/// The peer on an already-trimmed, non-blank, non-comment line.
+fn parse_peer(line: &[u8]) -> Option<Peer<'_>> {
     let (name, rest) = split_field(line)?;
     let (ip_text, rest) = split_field(rest)?;
     let (key_text, rest) = split_field(rest)?;
@@ -412,6 +449,39 @@ mod tests {
             assert!(find_by_key(&buf, &KEY_A).is_none(), "a commented-out peer is revoked");
             assert!(find_by_ip(&buf, &[10, 0, 2, 10]).is_none());
         }
+    }
+
+    #[test]
+    fn classify_tells_the_four_cases_apart() {
+        // The distinction parse_line cannot make: a MALFORMED line is an
+        // operator's mistake worth reporting, while a blank or a comment is not.
+        let good = b"node-a 10.0.2.10 d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a";
+        assert!(matches!(classify(good), LineKind::Peer(_)));
+        assert!(matches!(classify(b""), LineKind::Blank));
+        assert!(matches!(classify(b"   "), LineKind::Blank));
+        assert!(matches!(classify(b"\0\0\0"), LineKind::Blank), "NUL padding is blank, not broken");
+        assert!(matches!(classify(b"# a note"), LineKind::Comment));
+        assert!(matches!(classify(b"#node-a 10.0.2.10 dead"), LineKind::Comment));
+        // The ones an operator wants told about: a typo'd key, a bad address, a
+        // half-written line.
+        for line in [
+            &b"node-a 10.0.2.10 nothexnothexnothexnothexnothexnothexnothexnothexnothexnothexnothe"[..],
+            &b"node-a 10.0.2.999 d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a"[..],
+            &b"node-a 10.0.2.10"[..],
+        ] {
+            assert!(matches!(classify(line), LineKind::Malformed), "must be malformed: {line:?}");
+        }
+    }
+
+    #[test]
+    fn a_malformed_line_is_distinguishable_from_a_revoked_one() {
+        // Both are "not a peer" to a lookup, and they mean opposite things to a
+        // person: one is deliberate, the other is a mistake nobody has noticed.
+        let commented = b"#node-a 10.0.2.10 d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a";
+        let typo = b"node-a 10.0.2.10 d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f7075";
+        assert!(parse_line(commented).is_none() && parse_line(typo).is_none());
+        assert!(matches!(classify(commented), LineKind::Comment));
+        assert!(matches!(classify(typo), LineKind::Malformed));
     }
 
     #[test]
