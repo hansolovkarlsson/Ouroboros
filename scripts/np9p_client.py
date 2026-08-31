@@ -11,8 +11,9 @@ Usage:
     python3 scripts/np9p_client.py <host> <port> stat    <path>
 
 The export now REQUIRES cluster authentication (the export-hardening phase):
-every request carries an auth header `[magic:8][nonce:16][mac:32]` in front of
-the NP message, where `mac = HMAC-SHA256(cluster_key, nonce || np)`. This client
+every request carries an auth header `[magic:8][nonce:16][name:32][mac:32]` in
+front of the NP message, where `mac = HMAC-SHA256(cluster_key, nonce || name ||
+np)` and `name` is the user the request is made on behalf of. This client
 signs with the shared dev key by default; pass `--key <k>` to use another (e.g.
 to prove the export refuses a wrong key). The key must match the guest's
 `\CLUSTER.KEY` (Makefile `CLUSTER_KEY`, default below).
@@ -21,6 +22,7 @@ e.g. after `make run-image-9p`:
     python3 scripts/np9p_client.py localhost 5640 readdir /
     python3 scripts/np9p_client.py localhost 5640 read /EFI/ORBS/INIT.CFG
     python3 scripts/np9p_client.py localhost 5640 readdir / --key wrong  # -> AUTH error
+    python3 scripts/np9p_client.py localhost 5640 read /etc/shadow --user user  # -> refused
 """
 import hashlib
 import hmac
@@ -41,9 +43,16 @@ FS_ERR_MIN = (1 << 64) - 64  # errors are a small band just below u64::MAX
 FS_ERR_AUTH = (1 << 64) - 1 - 30  # u64::MAX - 30
 
 # Cluster auth wire constants (ninep-abi). Must match the guest's CLUSTER.KEY.
-NP_AUTH_MAGIC = int.from_bytes(b"AUTHNP01", "big")  # ninep-abi NP_AUTH_MAGIC
+NP_AUTH_MAGIC = int.from_bytes(b"AUTHNP02", "big")  # ninep-abi NP_AUTH_MAGIC
 NP_NONCE_LEN = 16
+NP_NAME_LEN = 32  # requesting user's name, NUL-padded - ninep-abi NP_NAME_LEN
 DEFAULT_KEY = b"ouroboros-dev-cluster-key-v1"  # Makefile CLUSTER_KEY default
+
+# WHICH USER this client claims to be. The key authenticates the machine; the
+# name says who on it is asking, and the guest resolves it through its OWN
+# /etc/passwd - so a name it does not know is refused outright. Overridden with
+# `--user <name>`; `root` keeps the pre-identity behaviour.
+USER = b"root"
 
 
 def build_frame(verb, tree, params, payload):
@@ -54,13 +63,19 @@ def build_frame(verb, tree, params, payload):
     return hdr + payload
 
 
-def sign_frame(np_msg, key):
-    # [u32 len][magic:8][nonce:16][mac:32][np]; len = bytes after the prefix.
-    # mac = HMAC-SHA256(key, nonce || np). Returns (frame, nonce) - the caller
-    # verifies the reply's MAC against the same nonce (reply-auth).
+def sign_frame(np_msg, key, user=None):
+    # [u32 len][magic:8][nonce:16][name:32][mac:32][np]; len = bytes after the
+    # prefix. mac = HMAC-SHA256(key, nonce || name || np) - the name is INSIDE
+    # the MAC, so the guest can trust which user is asking. Returns (frame,
+    # nonce); the caller verifies the reply's MAC against the same nonce
+    # (reply-auth).
     nonce = os.urandom(NP_NONCE_LEN)
-    mac = hmac.new(key, nonce + np_msg, hashlib.sha256).digest()
-    auth = struct.pack("<Q", NP_AUTH_MAGIC) + nonce + mac
+    user = USER if user is None else user
+    if len(user) > NP_NAME_LEN:
+        sys.exit(f"user name too long (max {NP_NAME_LEN})")
+    name = user.ljust(NP_NAME_LEN, b"\0")
+    mac = hmac.new(key, nonce + name + np_msg, hashlib.sha256).digest()
+    auth = struct.pack("<Q", NP_AUTH_MAGIC) + nonce + name + mac
     body = auth + np_msg
     return struct.pack("<I", len(body)) + body, nonce
 
@@ -237,6 +252,14 @@ def main():
         i = args.index("--key")
         key = args[i + 1].encode()
         del args[i:i + 2]
+    # `--user <name>`: who this request claims to be (default root). The guest
+    # applies ITS permission model to that name, so this is what makes an
+    # unprivileged remote read testable from the host.
+    if "--user" in args:
+        global USER
+        i = args.index("--user")
+        USER = args[i + 1].encode()
+        del args[i:i + 2]
     if len(args) < 4:
         print(__doc__)
         sys.exit(2)
@@ -302,7 +325,9 @@ def main():
     status, data = one_op(host, port, key, np_msg)
 
     if status == FS_ERR_AUTH:
-        print("status: AUTH FAILED (export rejected the cluster key)")
+        # The wire cannot say WHICH half failed, and deliberately so - telling a
+        # caller "the key was fine, the name was wrong" would enumerate accounts.
+        print("status: AUTH FAILED (export refused the cluster key or the --user name)")
         sys.exit(1)
     if status >= FS_ERR_MIN:
         print(f"status: ERROR 0x{status:016x}")

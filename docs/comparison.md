@@ -38,10 +38,13 @@ about the practical trade for a would-be user.**
   `qsort`, `malloc`), though no real *application* is ported yet and there's no
   dynamic linking; programs are position-independent `aarch64-none`
   binaries.
-- **Single-user, no accounts, no per-user authentication** — the cluster has
-  *machine-level* auth (a shared cluster key, mutually authenticated on the 9P
-  export), but no user model, per-peer identity, or on-the-wire encryption, and
-  is trusted-LAN by design. Not self-hosting (you cross-compile from macOS).
+- **Accounts and permissions exist, but the cluster key is per-machine** — there
+  is a real user model (`/etc/passwd`, `/etc/shadow`, groups, `login`, enforced
+  file modes on ext2), and a remote request carries the requesting user's name so
+  the far side applies its own permissions to it. What is missing is per-user
+  *keys*: the shared cluster key authenticates the machine, so a peer holding it
+  can claim any name — and there is no on-the-wire encryption. Trusted-LAN by
+  design. Not self-hosting (you cross-compile from macOS).
 
 Keep that list in mind: the "you gain" columns are real, but every "you
 give up" column is measured against a system that is *finished* and one
@@ -104,7 +107,7 @@ isolated, comprehensible microkernel you can read in an afternoon.
 | You gain | You give up |
 |---|---|
 | **Rust** memory safety (Plan 9 is C). | **Completeness and coherence** — Plan 9 is a finished OS: 9P everywhere, a real window system (rio/acme), a full toolchain, self-hosting, multiple architectures. |
-| **MMU-enforced isolation + supervision/self-heal** across process boundaries, plus a **capability send-mask** governing who-may-call-whom. | A real **user model** and per-user/keyed **authentication** (factotum/secstore) — Ouroboros is single-user with only machine-level cluster-key auth (no user accounts, no on-the-wire encryption), trusted-LAN by design. |
+| **MMU-enforced isolation + supervision/self-heal** across process boundaries, plus a **capability send-mask** governing who-may-call-whom. | Per-user **keyed** authentication (factotum/secstore) — Ouroboros has the user model (accounts, groups, enforced modes, and a remote request that carries who is asking), but the cluster *key* is per-machine, so a peer holding it can claim any name; no on-the-wire encryption, trusted-LAN by design. |
 | Runs on **modern ARM64/UEFI/Apple Silicon** and real hardware, actively built. | The **finished namespace model** — Plan 9 has fids, union mounts, and full per-process namespaces; Ouroboros **deferred fids** (path-per-op) and has a subset. |
 
 *In one line:* Ouroboros has the *shape* of Plan 9 with a fraction of its

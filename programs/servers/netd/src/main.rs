@@ -107,6 +107,10 @@ const MAX_SACK: usize = 4;
 /// Full responses for the two failure cases.
 const RESP_404: &[u8] =
     b"HTTP/1.0 404 Not Found\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nNot Found\r\n";
+// An anonymous reader may not have this file (it is served as `nobody`, never
+// as root - see `As::Anonymous`). 403 rather than 404: the file is there.
+const RESP_403: &[u8] =
+    b"HTTP/1.0 403 Forbidden\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nForbidden\r\n";
 const RESP_503: &[u8] = b"HTTP/1.0 503 Service Unavailable\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nNo filesystem mounted\r\n";
 // Only GET and HEAD are implemented; any other method gets a 405 with an
 // Allow header naming the two that work (RFC 7231 requires Allow on a 405).
@@ -219,7 +223,7 @@ fn load_auth() -> Auth {
     // Up to ~2s of retries at 40ms, only for the transient "disk not mounted
     // yet" case; a definitively-absent key file returns immediately.
     for _ in 0..50 {
-        let n = read_file_chunk(KEY_PATH, 0, 0, &mut buf);
+        let n = read_file_chunk(As::FirstParty, KEY_PATH, 0, 0, &mut buf);
         if n == syscall_abi::NO_FS {
             syscall(syscall_abi::NET_WAIT, 40);
             continue;
@@ -239,7 +243,7 @@ fn load_auth() -> Auth {
     // The no-exec flag is presence-only: any successful read (even 0 bytes)
     // means the file exists; FS_ERR_* means it doesn't.
     let mut one = [0u8; 1];
-    let m = read_file_chunk(NOEXEC_PATH, 0, 0, &mut one);
+    let m = read_file_chunk(As::FirstParty, NOEXEC_PATH, 0, 0, &mut one);
     auth.noexec = m < syscall_abi::FS_ERR_MIN;
     if auth.enabled() {
         log(b"netd: cluster auth enabled (export requires the cluster key)\r\n");
@@ -1127,11 +1131,29 @@ fn handle_run(packed_mac: u64, sender: u64, buf: &[u8], len: usize, out: &mut [u
     np[32..40].copy_from_slice(&(ninep_abi::NP_NET_PORT as u64).to_le_bytes()); // a2 = our port
     np[hdr..hdr + clen].copy_from_slice(&cmdline[..clen]);
 
+    // WHO is asking, resolved to a name FIRST - see the ordering note in
+    // `handle_rmount`. A machine that cannot name its own caller does not get to
+    // send an unnamed request; the far side would refuse it anyway, and failing
+    // here reports the real reason rather than the peer's.
+    let mut who = [0u8; ninep_abi::NP_NAME_LEN];
+    match caller_name(&mut who) {
+        LineScan::Found => {}
+        // Transient (no disk mounted yet, or fsd restarting) vs settled (this
+        // machine genuinely has no account for the calling uid). Same refusal,
+        // different thing to go and fix.
+        LineScan::Unreadable => {
+            return fail(out, b"cpu: cannot read /etc/passwd to name the calling user\r\n")
+        }
+        LineScan::NotFound => {
+            return fail(out, b"cpu: this machine has no account for the calling user\r\n")
+        }
+    }
+
     // Frame + sign it (the export-hardening phase). A no-key client can't sign.
     let mut req = [0u8; ninep_abi::NP_FRAME_MAX];
     // (cpu output is a stream, not a framed reply - reply-auth deferred, so the
     // nonce is unused here.)
-    let (total, _nonce) = frame_signed(auth, &np[..hdr + clen], &mut req);
+    let (total, _nonce) = frame_signed(auth, &who, &np[..hdr + clen], &mut req);
     if total == 0 {
         return fail(out, b"cpu: no cluster key (cannot authenticate)\r\n");
     }
@@ -1178,9 +1200,28 @@ fn handle_rmount(packed_mac: u64, buf: &[u8], len: usize, out: &mut [u8], auth: 
     // Frame + sign the NP message (the export-hardening phase): a no-key client
     // can't sign, so it fails with FS_ERR_AUTH rather than sending an unsigned
     // request the remote would reject anyway.
+    //
+    // WHO is asking, resolved to a name BEFORE any TCP work. Two reasons for the
+    // ordering. The credential comes from `SENDER_ID`, which reports the sender
+    // of the last message this task received - and the TCP path below re-enters
+    // the event loop, which receives more. And the `/etc/passwd` lookup wants its
+    // buffers off the stack before the frame and response buffers go live, which
+    // is where netd's peak is.
+    let mut who = [0u8; ninep_abi::NP_NAME_LEN];
+    match caller_name(&mut who) {
+        LineScan::Found => {}
+        // No name for the caller means this machine cannot say who is asking, so
+        // it refuses to send rather than send an unnamed request. The two causes
+        // report differently: NO_FS for the transient one (the shell surfaces it
+        // as "no filesystem", which is both true and worth retrying), AUTH for a
+        // uid this machine has no account for.
+        LineScan::Unreadable => return fail(out, syscall_abi::NO_FS),
+        LineScan::NotFound => return fail(out, syscall_abi::FS_ERR_AUTH),
+    }
+
     let mut req = [0u8; ninep_abi::NP_FRAME_MAX];
     let np = &msg[..msg.len().min(ninep_abi::NP_NET_MAX)];
-    let (total, nonce) = frame_signed(auth, np, &mut req);
+    let (total, nonce) = frame_signed(auth, &who, np, &mut req);
     if total == 0 {
         return fail(out, syscall_abi::FS_ERR_AUTH);
     }
@@ -1964,7 +2005,7 @@ fn retransmit_one(mac: &[u8; 6], c: &mut TcpConn, seq: u32, n: usize) {
         send_seg_at(mac, c, seq, TCP_PSH | TCP_ACK, &buf[..take]);
     } else if c.file {
         let foff = (off - c.prefix_len) as u64;
-        let r = read_file_chunk(&c.path[..c.path_len], 0, foff, &mut buf[..n]);
+        let r = read_file_chunk(As::Anonymous, &c.path[..c.path_len], 0, foff, &mut buf[..n]);
         if r < syscall_abi::FS_ERR_MIN {
             let got = r as usize;
             send_seg_at(mac, c, seq, TCP_PSH | TCP_ACK, &buf[..got]);
@@ -2034,18 +2075,45 @@ fn handle_9p(c: &mut TcpConn, request: &[u8], dials: &mut [Option<DialConn>; MAX
     // MAC over the request and recover the bare NP message. A failure (wrong or
     // missing cluster key, or an unconfigured export) is refused before any verb
     // runs - fail-closed. `authenticate` returns the NP message slice on success.
-    let Some((msg, nonce)) = authenticate(auth, request) else {
+    let Some((msg, nonce, name)) = authenticate(auth, request) else {
         deny_9p(c, request);
         return;
+    };
+    // WHO is asking, mapped onto THIS machine's accounts - resolved BEFORE the
+    // routing decision below, so that `cpu` (NP_RUN) cannot slip past it the way
+    // it did when the check lived on the fs path only.
+    //
+    // REFUSE an unknown name. The alternative - serving it as netd, which is
+    // root - is exactly the hole this closes, and a "map the stranger onto
+    // nobody" fallback would just be a quieter way of guessing.
+    //
+    // The honest limit, stated where it is decided: a peer holding the cluster
+    // key can claim ANY name. This defends against the *users* of a trusted
+    // node, which is the real exposure - a node's own users are not all trusted
+    // even when the node is. Defending against a compromised node needs
+    // per-user keys, a further tier (docs/roadmap.md).
+    let proxy = match map_user(&name) {
+        Ok(p) => p,
+        Err(cause) => {
+            // NOT deny_9p: that reports a key failure, and the key verified
+            // fine - sending an operator after \CLUSTER.KEY when the real cause
+            // is a missing account costs them the afternoon. Naming the cause is
+            // safe HERE and only here, because this peer has already proved it
+            // holds the cluster key; the pre-auth path stays deliberately
+            // ambiguous so an unauthenticated stranger cannot enumerate
+            // accounts.
+            deny_unknown_user(c, request, cause);
+            return;
+        }
     };
     // Route: a remote-run request (cluster Phase 4a) vs a normal fs verb. `msg`
     // is the NP message (verb at offset 0), framing + auth already stripped.
     let verb = if msg.len() >= 8 { read_u64(msg, 0) } else { 0 };
     if verb == ninep_abi::NP_RUN {
-        handle_cpu_run(c, msg, auth);
+        handle_cpu_run(c, msg, auth, proxy);
         return;
     }
-    let n = build_9p_reply(msg, &mut c.prefix, dials, mac);
+    let n = build_9p_reply(msg, &mut c.prefix, dials, mac, As::Remote(proxy));
     // Reply-auth (mutual authentication): MAC the reply against the request nonce
     // so the client can prove it came from a holder of the cluster key.
     let n = seal_reply(c, auth, &nonce, n);
@@ -2064,28 +2132,41 @@ fn handle_9p(c: &mut TcpConn, request: &[u8], dials: &mut [Option<DialConn>; MAX
 /// key / forgery). Constant-time MAC compare (`hmac::mac_eq`). On success also
 /// returns a copy of the request nonce, which the reply is MAC'd against
 /// (reply-auth, mutual authentication - see `seal_reply`).
-fn authenticate<'a>(auth: &Auth, request: &'a [u8]) -> Option<(&'a [u8], [u8; ninep_abi::NP_NONCE_LEN])> {
+fn authenticate<'a>(
+    auth: &Auth,
+    request: &'a [u8],
+) -> Option<(&'a [u8], [u8; ninep_abi::NP_NONCE_LEN], [u8; ninep_abi::NP_NAME_LEN])> {
     if !auth.enabled() {
         return None; // no cluster key configured: export closed
     }
     let p = ninep_abi::NP_NET_LEN_PREFIX; // 4
-    let need = p + ninep_abi::NP_AUTH_HDR; // 4 + 56 = 60
+    let need = p + ninep_abi::NP_AUTH_HDR;
     if request.len() < need {
         return None;
     }
+    // The magic is a FORMAT discriminator, and it moved to 02 when the user's
+    // name joined the header. A 01 peer is refused here rather than having the
+    // first 32 bytes of its message read as a username.
     if read_u64(request, p) != ninep_abi::NP_AUTH_MAGIC {
         return None;
     }
     let noff = p + ninep_abi::NP_AUTH_NONCE_OFF;
+    let woff = p + ninep_abi::NP_AUTH_NAME_OFF;
     let moff = p + ninep_abi::NP_AUTH_MAC_OFF;
-    let nonce = &request[noff..noff + ninep_abi::NP_NONCE_LEN];
     let mac = &request[moff..moff + ninep_abi::NP_MAC_LEN];
     let np = &request[need..];
-    let computed = hmac::hmac_sha256(auth.key(), nonce, np);
+    // The MAC covers nonce || name || message, so verifying it is what makes the
+    // claimed user trustworthy: without the key an attacker can neither forge a
+    // name nor edit one in flight.
+    let mut prefix = [0u8; ninep_abi::NP_MAC_PREFIX_LEN];
+    prefix.copy_from_slice(&request[noff..noff + ninep_abi::NP_MAC_PREFIX_LEN]);
+    let computed = hmac::hmac_sha256(auth.key(), &prefix, np);
     if hmac::mac_eq(mac, &computed) {
         let mut nonce_copy = [0u8; ninep_abi::NP_NONCE_LEN];
-        nonce_copy.copy_from_slice(nonce);
-        Some((np, nonce_copy))
+        nonce_copy.copy_from_slice(&request[noff..noff + ninep_abi::NP_NONCE_LEN]);
+        let mut who = [0u8; ninep_abi::NP_NAME_LEN];
+        who.copy_from_slice(&request[woff..woff + ninep_abi::NP_NAME_LEN]);
+        Some((np, nonce_copy, who))
     } else {
         None
     }
@@ -2138,6 +2219,35 @@ fn deny_9p(c: &mut TcpConn, request: &[u8]) {
     }
 }
 
+/// Refuse a request whose MAC verified but whose *user* this machine has never
+/// heard of. Distinct from [`deny_9p`] only in what it says: same `FS_ERR_AUTH`
+/// on the wire (one refusal code, so a client needs no new case), an accurate
+/// line for the `cpu` caller, who reads the reply as raw output.
+fn deny_unknown_user(c: &mut TcpConn, request: &[u8], cause: LineScan) {
+    let voff = ninep_abi::NP_NET_LEN_PREFIX + ninep_abi::NP_AUTH_HDR;
+    let is_run = request.len() >= voff + 8 && read_u64(request, voff) == ninep_abi::NP_RUN;
+    c.file = false;
+    c.prefix_off = 0;
+    c.cpu_child = CPU_NONE;
+    let unreadable = cause == LineScan::Unreadable;
+    if is_run {
+        let m: &[u8] = if unreadable {
+            b"cpu: this host cannot read its account database right now\r\n"
+        } else {
+            b"cpu: no account of that name on this host (the cluster key was accepted)\r\n"
+        };
+        let n = m.len().min(c.prefix.len());
+        c.prefix[..n].copy_from_slice(&m[..n]);
+        c.prefix_len = n;
+    } else {
+        // NO_FS for the transient case: the shell already surfaces that as "no
+        // filesystem" rather than an auth failure, which is both true and the
+        // thing to retry. FS_ERR_AUTH stays the answer for a real stranger.
+        let status = if unreadable { syscall_abi::NO_FS } else { syscall_abi::FS_ERR_AUTH };
+        c.prefix_len = frame_reply(&mut c.prefix, status, &[]);
+    }
+}
+
 /// Frame **and sign** an NP message for an outbound export request (the
 /// export-hardening phase - the client-side counterpart of [`authenticate`]).
 /// Writes `[len:4][magic:8][nonce:16][mac:32][np]` into `out` and returns the
@@ -2145,7 +2255,12 @@ fn deny_9p(c: &mut TcpConn, request: &[u8]) {
 /// **and the nonce it used** - the client verifies the reply's MAC against that
 /// same nonce (reply-auth). The nonce is a fresh, non-repeating value: the
 /// `MONOTONIC_US` clock plus our packed IP. `mac = HMAC(cluster_key, nonce || np)`.
-fn frame_signed(auth: &Auth, np: &[u8], out: &mut [u8]) -> (usize, [u8; ninep_abi::NP_NONCE_LEN]) {
+fn frame_signed(
+    auth: &Auth,
+    who: &[u8; ninep_abi::NP_NAME_LEN],
+    np: &[u8],
+    out: &mut [u8],
+) -> (usize, [u8; ninep_abi::NP_NONCE_LEN]) {
     let zero_nonce = [0u8; ninep_abi::NP_NONCE_LEN];
     if !auth.enabled() {
         return (0, zero_nonce);
@@ -2169,10 +2284,18 @@ fn frame_signed(auth: &Auth, np: &[u8], out: &mut [u8]) -> (usize, [u8; ninep_ab
     out[p..p + 8].copy_from_slice(&ninep_abi::NP_AUTH_MAGIC.to_le_bytes());
     let noff = p + ninep_abi::NP_AUTH_NONCE_OFF;
     out[noff..noff + ninep_abi::NP_NONCE_LEN].copy_from_slice(&nonce);
+    let woff = p + ninep_abi::NP_AUTH_NAME_OFF;
+    out[woff..woff + ninep_abi::NP_NAME_LEN].copy_from_slice(who);
     let npoff = p + ninep_abi::NP_AUTH_HDR;
     out[npoff..npoff + np.len()].copy_from_slice(np);
-    // MAC over nonce || np, written into the header's mac slot.
-    let mac = hmac::hmac_sha256(auth.key(), &nonce, np);
+    // MAC over nonce || name || np. The name is INSIDE the MAC, which is the
+    // point: protecting the claimed user costs nothing extra (the MAC was
+    // already here) and it cannot be edited in flight without the key. Built as
+    // one prefix so the MAC stays a two-part call.
+    let mut prefix = [0u8; ninep_abi::NP_MAC_PREFIX_LEN];
+    prefix[..ninep_abi::NP_NONCE_LEN].copy_from_slice(&nonce);
+    prefix[ninep_abi::NP_NONCE_LEN..].copy_from_slice(who);
+    let mac = hmac::hmac_sha256(auth.key(), &prefix, np);
     let moff = p + ninep_abi::NP_AUTH_MAC_OFF;
     out[moff..moff + ninep_abi::NP_MAC_LEN].copy_from_slice(&mac);
     (total, nonce)
@@ -2184,7 +2307,7 @@ fn frame_signed(auth: &Auth, np: &[u8], out: &mut [u8]) -> (usize, [u8; ninep_ab
 /// `c.prefix` as it runs (see the cpu-child routing in `drain_client_messages`);
 /// its end-of-stream reaps it and releases the connection to stream the output
 /// then FIN. On a spawn failure the connection streams an error line immediately.
-fn handle_cpu_run(c: &mut TcpConn, msg: &[u8], auth: &Auth) {
+fn handle_cpu_run(c: &mut TcpConn, msg: &[u8], auth: &Auth, who: Proxy) {
     c.file = false;
     c.prefix_off = 0;
     c.prefix_len = 0;
@@ -2226,6 +2349,28 @@ fn handle_cpu_run(c: &mut TcpConn, msg: &[u8], auth: &Auth) {
         ];
         set_host_ns(ip, caller_port);
     }
+    // Run the command AS the remote user, not as netd.
+    //
+    // The identity word carries the caller into `fsd` for a file verb, but a
+    // spawned program is not our request - it makes its own, with its own task
+    // identity, and a child inherits the SPAWNER's. Without this, `cpu A passwd
+    // root` would reach A's account server with netd's root authority.
+    //
+    // So netd becomes the user for the length of the spawn, and the child
+    // inherits that. Restoring is a `Drop`, not a line at the end: the spawn
+    // path has several early returns, and "remember to change back" is the class
+    // of invariant this whole rebuild exists to stop relying on. Safe against the
+    // POSIX saved-uid rule (`SET_ID` back to root is allowed because root is
+    // netd's saved id), while the CHILD's saved id is the user - so it can never
+    // restore root. Nothing else is served inside the window: `cpu_spawn` is
+    // synchronous and never re-enters the event loop.
+    let Some(_as_user) = AsUser::enter(who) else {
+        let m: &[u8] = b"cpu: cannot assume the calling user's identity\r\n";
+        let n = m.len().min(c.prefix.len());
+        c.prefix[..n].copy_from_slice(&m[..n]);
+        c.prefix_len = n;
+        return;
+    };
     match cpu_spawn(cmdline) {
         Some(slot) => {
             // Capture: hold the response until the child's output completes.
@@ -2265,6 +2410,46 @@ fn set_host_ns(ip: [u8; 4], port: u16) {
     ns[12..14].copy_from_slice(&port.to_le_bytes());
     ns[14] = b'/';
     let _ = syscall4(syscall_abi::NS_SET, ns.as_ptr() as u64, ns.len() as u64, 0, 0);
+}
+
+/// netd running as a remote user for the length of one `cpu` spawn, so the
+/// spawned child inherits that identity instead of netd's root.
+///
+/// A guard rather than a pair of calls: `Drop` restores root on every path out
+/// of the spawn, including the early returns. If the restore itself ever failed
+/// netd would be left as that user - which denies netd its own later reads
+/// (fail-closed) rather than granting anything, so the failure direction is the
+/// safe one; it is reported because a server quietly losing its authority is
+/// worth seeing in the log.
+struct AsUser;
+
+impl AsUser {
+    /// Become `who`. `None` if the kernel refuses, in which case the caller must
+    /// NOT spawn - running the command as root is the thing being prevented.
+    fn enter(who: Proxy) -> Option<Self> {
+        // uid and gid are SEPARATE arguments (arg0/arg1), not the packed word
+        // GET_ID/SENDER_ID return - the same shape `login` and `su` use. Passing
+        // the packed word here set the uid correctly and silently left the gid
+        // at 0, which a `cpu <host> id` reported as `uid=1000(user) gid=0(root)`.
+        // Groups are cleared with the identity (the 0/0 group argument): none
+        // travel over the cluster, and leaving netd's own behind would attach
+        // them to a user they do not belong to.
+        if syscall4(syscall_abi::SET_ID, who.uid as u64, who.gid as u64, 0, 0) != 0 {
+            return None;
+        }
+        Some(AsUser)
+    }
+}
+
+impl Drop for AsUser {
+    fn drop(&mut self) {
+        // Back to root. Permitted because root is netd's SAVED identity, which
+        // is the POSIX saved-set-uid rule the kernel implements - and which the
+        // child deliberately does not get (its saved id is the user's).
+        if syscall4(syscall_abi::SET_ID, 0, 0, 0, 0) != 0 {
+            log(b"netd: WARNING could not restore root identity after a cpu run\r\n");
+        }
+    }
 }
 
 fn cpu_spawn(cmdline: &[u8]) -> Option<u8> {
@@ -2319,7 +2504,10 @@ fn cpu_spawn(cmdline: &[u8]) -> Option<u8> {
     let mut chunk = [0u8; 512];
     let mut offset = 0u64;
     loop {
-        let n = read_file_chunk(&path[..plen], 0, offset, &mut chunk);
+        // FirstParty = netd's own credential - which, for the length of a
+        // `cpu` spawn, IS the remote user (see `AsUser`), so a user who may
+        // not read the binary cannot run it.
+        let n = read_file_chunk(As::FirstParty, &path[..plen], 0, offset, &mut chunk);
         if n >= syscall_abi::FS_ERR_MIN {
             return None; // no such program, or a read error
         }
@@ -3011,7 +3199,7 @@ fn wire_slice(payload: &[u8], off: usize, len: u64) -> &[u8] {
 
 /// Decode a framed NP request and build its framed reply into `out`. See
 /// `ninep_abi`'s frame doc: request = `[u32 len][verb][tree][a0..a3][payload]`.
-fn build_9p_reply(msg: &[u8], out: &mut [u8; PREFIX_MAX], dials: &mut [Option<DialConn>; MAX_DIAL], mac: &[u8; 6]) -> usize {
+fn build_9p_reply(msg: &[u8], out: &mut [u8; PREFIX_MAX], dials: &mut [Option<DialConn>; MAX_DIAL], mac: &[u8; 6], who: As) -> usize {
     let hdr = ninep_abi::NP_REQ_PAYLOAD as usize; // 48
     // `msg` is the bare NP message (verb at offset 0); framing + auth were
     // stripped by handle_9p/authenticate. Reject a runt.
@@ -3035,6 +3223,12 @@ fn build_9p_reply(msg: &[u8], out: &mut [u8; PREFIX_MAX], dials: &mut [Option<Di
     let tree: u64 = match resolved.target {
         // The console (/dev/cons) is a different server (CON_TASK): a write verb
         // emits the inline bytes to the console, reads are refused (write-only).
+        //
+        // `who` is deliberately not consulted here, and the boundary is worth
+        // stating rather than leaving as an omission: the console has no
+        // permission model on this machine either, so a remote user gets exactly
+        // what a local one has - the ability to print. Nothing here reaches the
+        // filesystem, which is where identity decides anything.
         ninep_abi::NsTarget::Console => {
             let status = match verb {
                 v if v == ninep_abi::NP_WRITE || v == ninep_abi::NP_WRITE_FILE => {
@@ -3051,6 +3245,12 @@ fn build_9p_reply(msg: &[u8], out: &mut [u8; PREFIX_MAX], dials: &mut [Option<Di
         }
         // /net: this machine's network identity (read-only) AND /net/tcp dial-out
         // (the connection files - read-write). Served by netd itself.
+        //
+        // Same boundary as the console arm above: `who` is not consulted because
+        // dialling is not permission-modelled for local users either. A remote
+        // user can therefore open a connection out of this machine's NIC exactly
+        // as a local one can. If /net ever grows a per-user policy, it belongs
+        // here - and the identity is already in hand for it.
         ninep_abi::NsTarget::NetLocal => {
             let mut ndata = [0u8; 544];
             // readdir/read_file take the result window in a1; read/read_at in a2.
@@ -3092,22 +3292,22 @@ fn build_9p_reply(msg: &[u8], out: &mut [u8; PREFIX_MAX], dials: &mut [Option<Di
             // The inline verbs (readdir / read_file) are capped at fsd's inline
             // reply size (FS_DATA_MAX 512); fsd rejects a larger `want`.
             let want = (p1 as usize).min(DATA_INLINE);
-            let status = list_dir(fspath, tree, &mut buf[..want]);
+            let status = list_dir(who, fspath, tree, &mut buf[..want]);
             frame_reply(out, status, ok_data(status, &buf))
         }
         v if v == ninep_abi::NP_READ || v == ninep_abi::NP_READ_AT => {
             let want = (p2 as usize).min(buf.len());
-            let status = read_file_chunk(fspath, tree, p1, &mut buf[..want]);
+            let status = read_file_chunk(who, fspath, tree, p1, &mut buf[..want]);
             frame_reply(out, status, ok_data(status, &buf))
         }
         v if v == ninep_abi::NP_READ_FILE => {
             // Status = the file's real size; data = its first min(size, want) bytes.
             let want = (p1 as usize).min(DATA_INLINE);
-            let size = stat_size(fspath, tree);
+            let size = stat_size(who, fspath, tree);
             if size >= syscall_abi::FS_ERR_MIN {
                 return frame_reply(out, size, &[]);
             }
-            let n = read_file_chunk(fspath, tree, 0, &mut buf[..want]);
+            let n = read_file_chunk(who, fspath, tree, 0, &mut buf[..want]);
             frame_reply(out, size, ok_data(n, &buf))
         }
         // Stat: relay to fsd; status = STAT_INFO_LEN, data = the fixed record
@@ -3115,6 +3315,7 @@ fn build_9p_reply(msg: &[u8], out: &mut [u8; PREFIX_MAX], dials: &mut [Option<Di
         // Lets `ls -l` work across a remote mount, not just on the local disk.
         v if v == ninep_abi::NP_STAT => {
             let status = fsd_call(
+                who,
                 ninep_abi::NP_STAT,
                 tree,
                 fspath.len() as u64,
@@ -3132,18 +3333,18 @@ fn build_9p_reply(msg: &[u8], out: &mut [u8; PREFIX_MAX], dials: &mut [Option<Di
             || v == ninep_abi::NP_RMDIR
             || v == ninep_abi::NP_RM =>
         {
-            let status = fsd_call(v, tree, fspath.len() as u64, 0, fspath, &mut []);
+            let status = fsd_call(who, v, tree, fspath.len() as u64, 0, fspath, &mut []);
             frame_reply(out, status, &[])
         }
         // chmod: a1 = mode. chown: a1 = uid, a2 = gid (u64::MAX = unchanged).
         // Path-only scalars, so relay straight through (fsd degrades to
         // FS_ERR_NOT_SUPPORTED on a non-ext2 tree, same as locally).
         v if v == ninep_abi::NP_CHMOD => {
-            let status = fsd_call(v, tree, fspath.len() as u64, p1, fspath, &mut []);
+            let status = fsd_call(who, v, tree, fspath.len() as u64, p1, fspath, &mut []);
             frame_reply(out, status, &[])
         }
         v if v == ninep_abi::NP_CHOWN => {
-            let status = fsd_call3(v, tree, fspath.len() as u64, p1, p2, fspath, &mut []);
+            let status = fsd_call3(who, v, tree, fspath.len() as u64, p1, p2, fspath, &mut []);
             frame_reply(out, status, &[])
         }
         // Rename: payload is src (p0 bytes) then dst (p1 bytes), inline; fsd's
@@ -3151,7 +3352,7 @@ fn build_9p_reply(msg: &[u8], out: &mut [u8; PREFIX_MAX], dials: &mut [Option<Di
         // the payload (with its original, unstripped paths) is passed as-is.
         v if v == ninep_abi::NP_MV => {
             let both = p0.saturating_add(p1 as usize).min(payload.len());
-            let status = fsd_call(ninep_abi::NP_MV, tree, p0 as u64, p1, &payload[..both], &mut []);
+            let status = fsd_call(who, ninep_abi::NP_MV, tree, p0 as u64, p1, &payload[..both], &mut []);
             frame_reply(out, status, &[])
         }
         // Full create/overwrite: wire payload is path (p0) then data (p1),
@@ -3159,7 +3360,7 @@ fn build_9p_reply(msg: &[u8], out: &mut [u8; PREFIX_MAX], dials: &mut [Option<Di
         // semantics for a <=512 chunk, no grant needed (0 data = truncate).
         v if v == ninep_abi::NP_WRITE || v == ninep_abi::NP_WRITE_FILE => {
             let both = p0.saturating_add(p1 as usize).min(payload.len());
-            let status = fsd_call(ninep_abi::NP_WRITE_FILE, tree, p0 as u64, p1, &payload[..both], &mut []);
+            let status = fsd_call(who, ninep_abi::NP_WRITE_FILE, tree, p0 as u64, p1, &payload[..both], &mut []);
             frame_reply(out, status, &[])
         }
         // Offset write: wire payload is path (p0) then data (p2 bytes) at offset
@@ -3167,7 +3368,7 @@ fn build_9p_reply(msg: &[u8], out: &mut [u8; PREFIX_MAX], dials: &mut [Option<Di
         // GRANT_READ buffer (the mirror of read_file_chunk's GRANT_WRITE).
         v if v == ninep_abi::NP_WRITE_AT => {
             let data = wire_slice(payload, p0, p2);
-            let status = fsd_write_at(fspath, tree, p1, data);
+            let status = fsd_write_at(who, fspath, tree, p1, data);
             frame_reply(out, status, &[])
         }
         _ => frame_reply(out, syscall_abi::FS_ERROR, &[]),
@@ -3180,7 +3381,7 @@ fn build_9p_reply(msg: &[u8], out: &mut [u8; PREFIX_MAX], dials: &mut [Option<Di
 /// the exact mirror of `read_file_chunk`'s `GRANT_WRITE` read bridge, the other
 /// way. `data.len()` is bounded by `NP_REMOTE_CHUNK` (the client's inline cap).
 /// Returns fsd's status (0, or an `FS_ERR_*`/`TASK_ERR_*` code).
-fn fsd_write_at(path: &[u8], tree: u64, offset: u64, data: &[u8]) -> u64 {
+fn fsd_write_at(who: As, path: &[u8], tree: u64, offset: u64, data: &[u8]) -> u64 {
     if data.is_empty() {
         return 0;
     }
@@ -3204,6 +3405,7 @@ fn fsd_write_at(path: &[u8], tree: u64, offset: u64, data: &[u8]) -> u64 {
     req[16..24].copy_from_slice(&(path.len() as u64).to_le_bytes()); // p0: path len
     req[24..32].copy_from_slice(&offset.to_le_bytes()); // p1: offset
     req[32..40].copy_from_slice(&(dlen as u64).to_le_bytes()); // p2: data len
+    req[40..48].copy_from_slice(&who.word().to_le_bytes()); // a3: WHO this is for
     let end = HDR + path.len();
     if end > req.len() {
         return syscall_abi::FS_ERROR;
@@ -3262,7 +3464,11 @@ fn start_response(c: &mut TcpConn, request: &[u8]) {
     let path: &[u8] = if path.is_empty() { b"/" } else { path };
 
     // A file? (stat succeeds and returns a size.)
-    let size = stat_size(path, 0);
+    // ANONYMOUS, not netd. An HTTP request carries no identity, and the
+    // authority it gets must reflect that: `nobody` sees the `other` triad, so a
+    // root-owned 0600 file is refused here rather than served by fsd's root
+    // bypass. (Unchanged on FAT32/exFAT, which model no mode at all.)
+    let size = stat_size(As::Anonymous, path, 0);
     if size < syscall_abi::FS_ERR_MIN {
         // 200 header (Content-Type by extension, Content-Length = size), then
         // the body streamed from offset 0.
@@ -3276,9 +3482,14 @@ fn start_response(c: &mut TcpConn, request: &[u8]) {
     } else {
         // A directory? (list succeeds.) Build a browsable HTML index.
         let mut names = [0u8; syscall_abi::FS_DATA_MAX as usize];
-        let listed = list_dir(path, 0, &mut names);
+        let listed = list_dir(As::Anonymous, path, 0, &mut names);
         if listed < syscall_abi::FS_ERR_MIN {
             c.prefix_len = build_listing(path, &names[..listed as usize], &mut c.prefix);
+        } else if size == syscall_abi::FS_ERR_PERM || listed == syscall_abi::FS_ERR_PERM {
+            // It exists; anonymous just may not have it. 403, not 404 - saying
+            // "not found" about a file that is there is the kind of small lie
+            // that costs an operator an hour.
+            set_prefix(c, RESP_403);
         } else {
             // Neither a file nor a directory.
             set_prefix(c, RESP_404);
@@ -3323,6 +3534,226 @@ fn set_prefix(c: &mut TcpConn, bytes: &[u8]) {
     c.prefix_len = n;
 }
 
+// --- naming the caller ------------------------------------------------------
+//
+// Both directions of the cluster's per-user identity bottom out in the account
+// database, and both go through the shared `accounts` crate so a cluster caller
+// is resolved by exactly the rules `login`, `su` and `id` use:
+//
+// - **Outbound** (this machine is asking): `caller_name` turns the local
+//   sender's uid into the name that goes in the auth header.
+// - **Inbound** (this machine is serving): `map_user` turns a name from the
+//   header into ids in *our* `/etc/passwd`, or refuses.
+
+/// Feed every line of `path` to `f`, stopping early when it returns `true`
+/// (which this then returns).
+///
+/// STREAMED, not read whole. A whole-file read reports `0` on overflow, so a
+/// database larger than the buffer would silently read as empty - which for
+/// `/etc/shadow` once meant every account, root included, locked out. The same
+/// trap is one buffer away here. Streaming also keeps netd's stack small: this
+/// is the task whose 32 KB has hit the guard page five times, so a 512-byte
+/// chunk plus a 128-byte line beats a 2 KB whole-file buffer - in a frame that
+/// finishes before the request and response buffers go live.
+///
+/// A line too long for the buffer is skipped rather than truncated: a prefix of
+/// an account line could match the wrong account.
+#[inline(never)]
+fn for_each_line(path: &[u8], mut f: impl FnMut(&[u8]) -> bool) -> LineScan {
+    const CHUNK: usize = 512;
+    let mut chunk = [0u8; CHUNK];
+    let mut line = [0u8; 128];
+    let mut ll = 0usize;
+    let mut overlong = false;
+    let mut off = 0u64;
+    loop {
+        // FirstParty: reading the account database is netd's own business, not
+        // the caller's - the caller is precisely what it is being read to learn.
+        let r = read_file_chunk(As::FirstParty, path, 0, off, &mut chunk);
+        if r >= syscall_abi::FS_ERR_MIN {
+            // A read failure is NOT "no such user". `NO_FS` (the disk not
+            // mounted yet) and a `TASK_ERR_*` from an fsd restart are transient,
+            // and folding them into a refusal reports "authentication failed"
+            // for a condition that would succeed a moment later - sending the
+            // operator after the cluster key again. `load_auth` already retries
+            // NO_FS for exactly this reason; this reports it so callers can.
+            return LineScan::Unreadable;
+        }
+        let n = (r as usize).min(CHUNK);
+        off += n as u64;
+        for &b in &chunk[..n] {
+            match b {
+                b'\n' => {
+                    if !overlong && ll > 0 && f(&line[..ll]) {
+                        return LineScan::Found;
+                    }
+                    ll = 0;
+                    overlong = false;
+                }
+                b'\r' => {}
+                _ if ll < line.len() => {
+                    line[ll] = b;
+                    ll += 1;
+                }
+                _ => overlong = true,
+            }
+        }
+        if n < CHUNK {
+            break;
+        }
+    }
+    if !overlong && ll > 0 && f(&line[..ll]) {
+        LineScan::Found
+    } else {
+        LineScan::NotFound
+    }
+}
+
+/// What a scan of an account file actually concluded. Three outcomes, because
+/// two of them are refusals for opposite reasons: `NotFound` is an answer (this
+/// machine has no such account, refuse and mean it), `Unreadable` is the absence
+/// of one (ask again).
+#[derive(Clone, Copy, PartialEq)]
+enum LineScan {
+    /// The callback accepted a line.
+    Found,
+    /// Every line was read; none matched.
+    NotFound,
+    /// The file could not be read at all - no filesystem yet, or `fsd` was
+    /// restarted mid-scan. Transient.
+    Unreadable,
+}
+
+/// Strip a fixed-width header name's NUL padding.
+fn trim_nul(b: &[u8]) -> &[u8] {
+    let mut n = b.len();
+    while n > 0 && b[n - 1] == 0 {
+        n -= 1;
+    }
+    &b[..n]
+}
+
+/// The name of the user whose request we are forwarding, from **this** machine's
+/// `/etc/passwd`. `false` if there is no name to be had.
+///
+/// The uid comes from `SENDER_ID` - the credential the kernel bound when the
+/// client sent its request, not whoever occupies that slot by now. Reading it is
+/// safe anywhere before the TCP exchange, because only an *unfiltered* receive
+/// replaces the captured credential and every call this makes to `fsd` is a
+/// `MSG_CALL` (a filtered one). It is NOT safe after the exchange begins, which
+/// is why both callers resolve the name first.
+#[inline(never)]
+fn caller_name(out: &mut [u8; ninep_abi::NP_NAME_LEN]) -> LineScan {
+    let packed = syscall4(syscall_abi::SENDER_ID, 0, 0, 0, 0);
+    if packed == syscall_abi::GET_ID_ERR {
+        return LineScan::NotFound;
+    }
+    let uid = packed as u32;
+    for_each_line(b"/etc/passwd", |line| match accounts::find_user_by_uid(line, uid) {
+        // A name too long for the header cannot cross the cluster, and must not
+        // cross TRUNCATED - a prefix could name a different account over there.
+        Some(a) if !a.name.is_empty() && a.name.len() <= out.len() => {
+            out[..a.name.len()].copy_from_slice(a.name);
+            true
+        }
+        _ => false,
+    })
+}
+
+/// Resolve a remote caller's **name** through this machine's `/etc/passwd`.
+/// `None` when there is no such account here, which the caller must treat as a
+/// refusal.
+///
+/// This is where "name, not number" earns itself: the two nodes have independent
+/// databases, so uid 1000 need not be the same person on both. Resolving the
+/// name locally means our permission model applies to *our* idea of who that
+/// is, and an account we have never heard of gets nothing rather than silently
+/// landing on whoever holds that number here.
+///
+/// No cache: this costs a few local IPC round trips per remote operation,
+/// against a network round trip that dominates them. A cache would also have to
+/// answer when it goes stale relative to `useradd`/`usermod`, and a wrong answer
+/// there is a misauthorization. If the cost ever matters, that is the question
+/// to answer first.
+#[inline(never)]
+fn map_user(who: &[u8; ninep_abi::NP_NAME_LEN]) -> Result<Proxy, LineScan> {
+    let name = trim_nul(who);
+    if name.is_empty() {
+        return Err(LineScan::NotFound);
+    }
+    let mut found: Option<Proxy> = None;
+    let scan = for_each_line(b"/etc/passwd", |line| match accounts::find_user_by_name(line, name) {
+        Some(a) => {
+            found = Some(Proxy { uid: a.uid, gid: a.gid });
+            true
+        }
+        None => false,
+    });
+    // An id too large for the identity word cannot be carried, and truncating it
+    // would authorize a different account. Refuse instead.
+    match found.filter(|p| ninep_abi::proxy_id(p.uid, p.gid).is_some()) {
+        Some(p) => Ok(p),
+        // A scan that could not read the file has not established that the
+        // account is absent - only that we cannot tell. Two different refusals.
+        None if scan == LineScan::Unreadable => Err(LineScan::Unreadable),
+        None => Err(LineScan::NotFound),
+    }
+}
+
+/// WHO a call to `fsd` is made on behalf of - a **required parameter** of every
+/// one of the helpers below, and the reason a remote request can no longer
+/// reach `fsd` with `netd`'s own root authority.
+///
+/// It is a parameter rather than a wrapper function, and that is the whole
+/// design. An earlier attempt attached identity with opt-in `_as` twins and
+/// wrote down the invariant *"is every export-path call proxied? - one grep."*
+/// One path (`fsd_write_at`) was simply forgotten, so remote `cp`, `>>` and
+/// `writeat` ran as root, and the grep never saw it because it searched for the
+/// helper names that were known rather than for the property. A required
+/// parameter cannot be forgotten: a new export verb that calls `fsd` does not
+/// compile until it says who it is for. See docs/unspellable-postmortem.md.
+#[derive(Clone, Copy)]
+enum As {
+    /// `netd`'s own business: the cluster key, the `/etc/passwd` lookups behind
+    /// name resolution, the HTTP server's file reads. Authorized against
+    /// `netd`'s own kernel-bound credential, exactly as before this existed.
+    FirstParty,
+    /// A remote caller, already resolved through THIS machine's `/etc/passwd`.
+    Remote(Proxy),
+    /// An **anonymous** request - one that arrived over the network with no
+    /// identity at all, which today means the HTTP static-file server. Served
+    /// as `nobody` ([`NP_ID_ANON`](ninep_abi::NP_ID_ANON)), NOT as netd.
+    ///
+    /// This is the other listener, and it needs saying: HTTP has no user model,
+    /// so before this it read files with netd's own root credential and `fsd`'s
+    /// root bypass served them - an unauthenticated `GET /etc/shadow` on port 80
+    /// returned the hashes, no cluster key and no username involved. That is the
+    /// same exposure the cluster identity work closes, reachable through the
+    /// door next to it. Anonymous means `other`-triad access and nothing more.
+    Anonymous,
+}
+
+impl As {
+    /// The `a3` identity word this puts in the request. A [`Proxy`] whose ids
+    /// cannot be packed yields [`NP_ID_NONE`](ninep_abi::NP_ID_NONE), which
+    /// `fsd` refuses - the safe direction, since the alternative would be
+    /// truncating onto some other account.
+    fn word(self) -> u64 {
+        match self {
+            As::FirstParty => ninep_abi::NP_ID_FIRST_PARTY,
+            As::Remote(p) => ninep_abi::proxy_id(p.uid, p.gid).unwrap_or(ninep_abi::NP_ID_NONE),
+            As::Anonymous => ninep_abi::NP_ID_ANON,
+        }
+    }
+}
+
+/// A remote caller mapped onto **this** machine's account model.
+#[derive(Clone, Copy)]
+struct Proxy {
+    uid: u32,
+    gid: u32,
+}
+
 /// One request/response round trip to the filesystem server over the uniform
 /// verb set ([`ninep-abi`], the Phase 0 cluster protocol): build a request
 /// (verb + `tree` selector + two u64 params + the path payload), `MSG_CALL`
@@ -3330,13 +3761,18 @@ fn set_prefix(c: &mut TcpConn, bytes: &[u8]) {
 /// `result`. Returns the status (a byte count / size on success, or an
 /// `FS_ERR_*`/`TASK_ERR_*` code `>= FS_ERR_MIN`). The shell's `np_call`, pared
 /// to netd's two callers. `tree` is `0` for now (a single implicit mount).
-fn fsd_call(verb: u64, tree: u64, p0: u64, p1: u64, path: &[u8], result: &mut [u8]) -> u64 {
-    fsd_call3(verb, tree, p0, p1, 0, path, result)
+fn fsd_call(who: As, verb: u64, tree: u64, p0: u64, p1: u64, path: &[u8], result: &mut [u8]) -> u64 {
+    fsd_call3(who, verb, tree, p0, p1, 0, path, result)
 }
 
 /// Like [`fsd_call`] but also forwards the third param (`a2`) - the one verb
 /// that needs it across the export is `NP_CHOWN` (`a1` = uid, `a2` = gid).
-fn fsd_call3(verb: u64, tree: u64, p0: u64, p1: u64, p2: u64, path: &[u8], result: &mut [u8]) -> u64 {
+// One over clippy's argument limit, and the one over is `who` - the parameter
+// whose whole purpose is that it cannot be omitted. Bundling params into a
+// struct to satisfy the lint would make the call sites shorter and the omission
+// spellable again.
+#[allow(clippy::too_many_arguments)]
+fn fsd_call3(who: As, verb: u64, tree: u64, p0: u64, p1: u64, p2: u64, path: &[u8], result: &mut [u8]) -> u64 {
     const HDR: usize = ninep_abi::NP_REQ_PAYLOAD as usize;
     let mut req = [0u8; syscall_abi::MSG_MAX_LEN as usize];
     req[0..8].copy_from_slice(&verb.to_le_bytes());
@@ -3344,6 +3780,7 @@ fn fsd_call3(verb: u64, tree: u64, p0: u64, p1: u64, p2: u64, path: &[u8], resul
     req[16..24].copy_from_slice(&p0.to_le_bytes());
     req[24..32].copy_from_slice(&p1.to_le_bytes());
     req[32..40].copy_from_slice(&p2.to_le_bytes());
+    req[40..48].copy_from_slice(&who.word().to_le_bytes()); // a3: WHO this is for
     let end = HDR + path.len();
     if end > req.len() {
         return syscall_abi::FS_ERROR;
@@ -3372,15 +3809,16 @@ fn fsd_call3(verb: u64, tree: u64, p0: u64, p1: u64, p2: u64, path: &[u8], resul
 /// Stat a file: `NP_READ_FILE`'s status is the file's *real* size regardless
 /// of how much was copied, so a `want` of 1 (the smallest fsd accepts - it
 /// rejects 0) gets the size in one call; the returned byte is ignored.
-fn stat_size(path: &[u8], tree: u64) -> u64 {
-    fsd_call(ninep_abi::NP_READ_FILE, tree, path.len() as u64, 1, path, &mut [])
+fn stat_size(who: As, path: &[u8], tree: u64) -> u64 {
+    fsd_call(who, ninep_abi::NP_READ_FILE, tree, path.len() as u64, 1, path, &mut [])
 }
 
 /// List a directory's entries into `out` as newline-separated names (dirs
 /// suffixed `/`, the same format the shell's `ls` uses); status is the byte
 /// count, or an error code. Bounded by fsd's inline reply cap.
-fn list_dir(path: &[u8], tree: u64, out: &mut [u8]) -> u64 {
+fn list_dir(who: As, path: &[u8], tree: u64, out: &mut [u8]) -> u64 {
     fsd_call(
+        who,
         ninep_abi::NP_READDIR,
         tree,
         path.len() as u64,
@@ -3583,7 +4021,7 @@ fn pump_send(mac: &[u8; 6], c: &mut TcpConn) {
         if c.file && !c.eof {
             let want = SERVE_CHUNK.min(avail as usize);
             let mut chunk = [0u8; SERVE_CHUNK];
-            let r = read_file_chunk(&c.path[..c.path_len], 0, c.read_off, &mut chunk[..want]);
+            let r = read_file_chunk(As::Anonymous, &c.path[..c.path_len], 0, c.read_off, &mut chunk[..want]);
             if r >= syscall_abi::FS_ERR_MIN {
                 c.eof = true; // a mid-stream read error just ends the body
                 continue;
@@ -3648,7 +4086,7 @@ fn parse_path<'a>(request: &[u8], buf: &'a mut [u8]) -> &'a [u8] {
 /// Returns the byte count copied into `buf` (`0` at/past EOF), or an
 /// `FS_ERR_*`/`TASK_ERR_*` code (`>= FS_ERR_MIN`). `buf.len()` must be
 /// `<= SAFECOPY_MAX`.
-fn read_file_chunk(path: &[u8], tree: u64, offset: u64, buf: &mut [u8]) -> u64 {
+fn read_file_chunk(who: As, path: &[u8], tree: u64, offset: u64, buf: &mut [u8]) -> u64 {
     let want = buf.len() as u64;
     // Grant the buffer to fsd (GRANT_WRITE - the server writes file bytes into
     // it via SAFECOPY during the call).
@@ -3669,7 +4107,7 @@ fn read_file_chunk(path: &[u8], tree: u64, offset: u64, buf: &mut [u8]) -> u64 {
     req[16..24].copy_from_slice(&(path.len() as u64).to_le_bytes()); // param0: path len
     req[24..32].copy_from_slice(&offset.to_le_bytes()); // param1: offset
     req[32..40].copy_from_slice(&want.to_le_bytes()); // param2: want
-                                                      // param3 (0) already zeroed
+    req[40..48].copy_from_slice(&who.word().to_le_bytes()); // a3: WHO this is for
     let end = HDR + path.len();
     if end > req.len() {
         return syscall_abi::FS_ERROR;

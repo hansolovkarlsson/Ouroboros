@@ -43,8 +43,9 @@ HDR = 48  # NP_REQ_PAYLOAD
 # Cluster auth (the export-hardening phase): the guest signs every request, so
 # this server must verify the client-nonce MAC before serving it. Must match the
 # guest's \CLUSTER.KEY (Makefile CLUSTER_KEY); override with `--key <k>`.
-NP_AUTH_MAGIC = int.from_bytes(b"AUTHNP01", "big")  # ninep-abi NP_AUTH_MAGIC
-NP_AUTH_HDR = 56  # magic(8) + nonce(16) + mac(32)
+NP_AUTH_MAGIC = int.from_bytes(b"AUTHNP02", "big")  # ninep-abi NP_AUTH_MAGIC
+NP_NAME_LEN = 32  # requesting user's name, NUL-padded
+NP_AUTH_HDR = 8 + 16 + NP_NAME_LEN + 32  # magic + nonce + name + mac
 DEFAULT_KEY = b"ouroboros-dev-cluster-key-v1"
 KEY = DEFAULT_KEY  # replaced from argv in main()
 
@@ -58,9 +59,10 @@ def verify(body):
     if magic != NP_AUTH_MAGIC:
         return None
     nonce = body[8:24]
-    mac = body[24:56]
-    np = body[56:]
-    expected = hmac.new(KEY, nonce + np, hashlib.sha256).digest()
+    name = body[24 : 24 + NP_NAME_LEN]  # the requesting user, inside the MAC
+    mac = body[24 + NP_NAME_LEN : NP_AUTH_HDR]
+    np = body[NP_AUTH_HDR:]
+    expected = hmac.new(KEY, nonce + name + np, hashlib.sha256).digest()
     if not hmac.compare_digest(mac, expected):
         return None
     return np, nonce

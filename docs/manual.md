@@ -267,13 +267,39 @@ so the secret never crosses the wire, and a peer without the key gets nothing
 and are refused between machines that don't. Since v0.13.0 the exchange is
 **mutually authenticated** — replies are MAC'd too, so a client rejects a forged
 reply — but this is **integrity, not secrecy**: bytes still cross the wire in
-cleartext. This is **cluster-membership** auth, not per-peer identity, and it
-assumes a **trusted LAN** for the parts still deferred (a passive sniffer reads
-your files and can replay an observed request; encryption and per-peer identity
-are gated behind a "leaving a trusted network" trigger on the roadmap). Two knobs: no `\CLUSTER.KEY` = the export is closed
-entirely; a `\NOEXEC` flag file = the machine shares its disk but refuses remote
-`cpu` execution. Don't expose an Ouroboros export to a genuinely hostile network
-yet — per-peer auth, encryption, and replay protection are named next steps.
+cleartext. Two knobs: no `\CLUSTER.KEY` = the export is closed entirely; a
+`\NOEXEC` flag file = the machine shares its disk but refuses remote `cpu`
+execution.
+
+**Who is asking, not just which machine** (since 2026-08-31). Each request also
+carries the **name** of the user making it, inside the MAC so it cannot be
+altered without the key. The far side resolves that name through **its own**
+`/etc/passwd` and applies its own permissions to it, refusing a name it does not
+know — so an unprivileged user reading a remote mount gets exactly what that
+account may read there, and `cpu` runs the command as that user rather than as
+root. Two consequences worth knowing:
+
+- **Both machines need an `/etc/passwd`**, and an account is matched by *name*:
+  the same person should have the same username on both, though the uid numbers
+  need not match (that is why the name travels rather than the number).
+- **Supplementary groups do not cross.** A remote caller is judged on its uid and
+  primary group only, so a file reachable *only* through a supplementary group is
+  refused remotely and allowed locally.
+
+This is still **cluster-membership** auth at the machine level: a peer that holds
+the key can claim any name, so this protects you from the *users* of a machine
+you trust, not from a machine you don't. It assumes a **trusted LAN** for the
+parts still deferred (a passive sniffer reads your files and can replay an
+observed request; encryption, replay protection and per-user *keys* are gated
+behind a "leaving a trusted network" trigger on the roadmap). Don't expose an
+Ouroboros export to a genuinely hostile network yet.
+
+**The built-in HTTP server is anonymous, and unprivileged.** `netd` also serves
+the disk over plain HTTP on port 80 (`make run-image-server`), which has no user
+model at all — so it reads files as **`nobody`**, never as root: world-readable
+files are served, anything else gets **403 Forbidden**. On FAT32/exFAT, which
+record no mode, everything remains readable. Do not treat that server as a
+private one: it requires no key and no account.
 
 **Config files (both optional, on the boot disk root), read by `netd` at boot:**
 

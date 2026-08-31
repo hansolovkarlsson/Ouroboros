@@ -25,7 +25,8 @@
 //! |--------|------------------|------------------------------------------------|
 //! | 0      | `verb: u64`      | one of the `NP_*` constants below              |
 //! | 8      | `tree: u64`      | which mount (multi-mount key / remote handle)  |
-//! | 16..48 | `a0..a3: u64`    | op params (path len, offset, want, 2nd-path…)  |
+//! | 16..40 | `a0..a2: u64`    | op params (path len, offset, want, 2nd-path…)  |
+//! | 40     | `a3: u64`        | WHO the request is for (see `NP_ID_*`)         |
 //! | 48..   | payload          | path bytes, then any inline data               |
 //!
 //! Reply: `status: u64` at offset 0, result payload from [`NP_REPLY_PAYLOAD`] —
@@ -36,7 +37,8 @@
 //! payload cap stays `FS_DATA_MAX` (512), all within `MSG_MAX_LEN` (768).
 #![no_std]
 
-/// Request header size: `verb`(8) + `tree`(8) + four `u64` params(32). The
+/// Request header size: `verb`(8) + `tree`(8) + four `u64` params(32) - the
+/// last of which (`a3`) is the identity word, not an op param. The
 /// inline payload (path, then any data) starts here. One `u64` larger than
 /// `FSOP_*`'s `FS_REQ_PAYLOAD` (40) — that extra word is the `tree` selector.
 pub const NP_REQ_PAYLOAD: u64 = 48;
@@ -322,7 +324,14 @@ pub const NP_REMOTE_CHUNK: usize = 512;
 /// Magic at the head of an authenticated framed request, distinguishing it from
 /// an unauthenticated (legacy) frame. When the exporter has a key configured it
 /// requires this; a frame without it is refused (fail-closed).
-pub const NP_AUTH_MAGIC: u64 = 0x4155_5448_4E50_3031; // "AUTHNP01" (big-endian ASCII)
+///
+/// **Bumped to `02` when the requesting user's name joined the header** (the
+/// per-user cluster identity arc). A deliberate flag day: an `01` peer's frame
+/// is *refused* rather than misparsed, because the old layout's first 32
+/// message bytes would otherwise be read as a username. Both nodes of a cluster
+/// are built from one tree, so the cost is nil, and the alternative - a
+/// silently misread identity - is not a trade worth making.
+pub const NP_AUTH_MAGIC: u64 = 0x4155_5448_4E50_3032; // "AUTHNP02" (big-endian ASCII)
 
 /// Bytes of nonce in the auth header (a fresh, non-repeating value per request:
 /// the client's `MONOTONIC_US` clock, plus its packed IP for cross-machine
@@ -332,14 +341,132 @@ pub const NP_NONCE_LEN: usize = 16;
 /// Bytes of MAC in the auth header (one HMAC-SHA256 digest).
 pub const NP_MAC_LEN: usize = 32;
 
+/// Bytes of **requesting user name** in the auth header, NUL-padded.
+///
+/// The shared key authenticates a *machine*; this says which of that machine's
+/// users is asking, so the far side can apply its own permission model instead
+/// of serving every remote request as root.
+///
+/// **A name, not a uid.** Two nodes have independent `/etc/passwd` files, so
+/// uid 1000 need not be the same person on both - numeric identity (NFS's
+/// `AUTH_SYS`) silently maps one user onto another whenever the numbering
+/// differs. Names are what this account model already keys on (`su alice`,
+/// `chown alice:staff`, `login`), and the far side resolves the name through
+/// **its own** `/etc/passwd`, refusing a name it does not know.
+///
+/// 32 bytes matches the shell's `login` username field, so any name that can be
+/// typed at a prompt can cross the cluster.
+pub const NP_NAME_LEN: usize = 32;
+
 /// The auth header size prepended to a framed request body: `magic`(8) +
-/// `nonce`([`NP_NONCE_LEN`]) + `mac`([`NP_MAC_LEN`]).
-pub const NP_AUTH_HDR: usize = 8 + NP_NONCE_LEN + NP_MAC_LEN;
+/// `nonce`([`NP_NONCE_LEN`]) + `name`([`NP_NAME_LEN`]) + `mac`([`NP_MAC_LEN`]).
+pub const NP_AUTH_HDR: usize = 8 + NP_NONCE_LEN + NP_NAME_LEN + NP_MAC_LEN;
 
 /// Offset of the nonce within the auth header (right after the 8-byte magic).
 pub const NP_AUTH_NONCE_OFF: usize = 8;
-/// Offset of the MAC within the auth header (after magic + nonce).
-pub const NP_AUTH_MAC_OFF: usize = 8 + NP_NONCE_LEN;
+/// Offset of the requesting user's name within the auth header.
+pub const NP_AUTH_NAME_OFF: usize = 8 + NP_NONCE_LEN;
+/// Offset of the MAC within the auth header (after magic + nonce + name).
+pub const NP_AUTH_MAC_OFF: usize = 8 + NP_NONCE_LEN + NP_NAME_LEN;
+
+/// The bytes the request MAC covers *before* the NP message: `nonce` || `name`.
+/// One constant because both sides must agree, and because it keeps the MAC a
+/// two-part call rather than growing a three-part variant.
+///
+/// **The name is inside the MAC, which is the whole point.** It costs nothing -
+/// the MAC was already there - and it means the claimed user cannot be edited
+/// in flight by anything that does not hold the cluster key. A tamper attempt
+/// fails verification exactly as a tampered path or offset already does.
+pub const NP_MAC_PREFIX_LEN: usize = NP_NONCE_LEN + NP_NAME_LEN;
+
+// --- the in-request identity word (`a3`) ----------------------------------
+//
+// WHO a request to `fsd` is made on behalf of, carried in the request itself at
+// offset 40 (`a3`, the one param no verb uses). It exists because `netd`
+// forwards remote requests: `fsd` would otherwise see `netd`'s own credential,
+// which is root, and its root bypass would serve every remote request with no
+// permission check at all. `netd` cannot `SET_ID` to the caller for this -
+// that changes its own task identity, and it serves many connections from one
+// task - so the identity has to travel as data.
+//
+// **In the request, not a latch.** An earlier attempt sent the identity as a
+// separate message that `fsd` held until the next request arrived. Any other
+// task's request interleaving between the two dropped it, and the fallback was
+// `netd`'s root. A field of the request it authorizes cannot be separated from
+// it by anything. See docs/unspellable-postmortem.md.
+//
+// **Who may set it.** `fsd` honours this field on a request from `NET_TASK` and
+// from nowhere else, so no other task can claim an identity by writing to
+// `a3`. That is a fact about the *slot*, not a credential: slots below
+// `FIRST_SPAWNABLE` are protected boot servers and cannot be recycled, so
+// `NET_TASK` is `netd` for the life of the boot.
+//
+// **And it is required.** A request from `NET_TASK` carrying [`NP_ID_NONE`] is
+// REFUSED rather than served under `netd`'s own identity - the fallback that
+// was the hole. Every path, including `netd`'s own reads, states which it is.
+
+/// No identity stated. Legal from any task except `NET_TASK`, whose requests
+/// are refused when they carry it (fail-closed - there is no "unstated means
+/// netd's own" fallback, because that fallback is root).
+pub const NP_ID_NONE: u64 = 0;
+
+/// **`netd`'s own business**, stated explicitly: the cluster key, the
+/// `/etc/passwd` lookups behind name resolution, the HTTP server's file reads.
+/// Authorized against `netd`'s own kernel-bound credential, exactly as before
+/// this field existed. Spelling it is what makes a forgotten export path a
+/// compile error rather than a silent root escalation.
+pub const NP_ID_FIRST_PARTY: u64 = 1;
+
+/// Flag bit marking the word as a proxied identity; the low bits then carry
+/// `(gid << 16) | uid`. `u16` halves match ext2's on-disk owner fields and
+/// [`NP_CHOWN`]'s params; an id that does not fit cannot be proxied and the
+/// request is refused rather than truncated onto a different account.
+pub const NP_ID_PROXY: u64 = 1 << 63;
+
+/// The uid *and* gid an **anonymous** request is authorized as - one that
+/// arrived with no identity at all, which today means an HTTP request to
+/// `netd`'s static-file server.
+///
+/// 65534 is the conventional `nobody`. The point is only that it is **not
+/// root**: an anonymous reader gets the `other` triad and nothing else, so a
+/// mode-0600 file is refused rather than served by the root bypass. Nothing
+/// needs an account of this name to exist - `fsd` authorizes on the number, and
+/// no name is ever resolved for it. (If a deployment does create an account with
+/// uid 65534, anonymous HTTP inherits exactly that account's access, which is
+/// why picking a normally-unused id matters.)
+pub const NP_ID_ANON_ID: u32 = 65534;
+
+/// The ready-made `a3` word for an anonymous request - [`NP_ID_ANON_ID`] as both
+/// uid and gid. A constant rather than a `proxy_id` call so it cannot silently
+/// become [`NP_ID_NONE`] at a call site that forgets to handle `None`.
+pub const NP_ID_ANON: u64 =
+    NP_ID_PROXY | ((NP_ID_ANON_ID as u64) << 16) | NP_ID_ANON_ID as u64;
+
+/// Pack a resolved remote caller into the `a3` identity word. `None` when
+/// either id is too large to carry, which the caller must treat as a refusal
+/// (truncating would silently authorize a *different* account).
+///
+/// Note what is NOT carried: supplementary groups. One word has no room, and a
+/// group list arriving out of step with the identity it belongs to is the exact
+/// shape of bug this design exists to prevent. The cost is that a remote caller
+/// is authorized on its uid and primary gid alone - which can only ever *deny*
+/// access a local session would grant, never grant one it would deny.
+#[inline]
+pub fn proxy_id(uid: u32, gid: u32) -> Option<u64> {
+    if uid > u16::MAX as u32 || gid > u16::MAX as u32 {
+        return None;
+    }
+    Some(NP_ID_PROXY | ((gid as u64) << 16) | uid as u64)
+}
+
+/// The `(uid, gid)` a proxy identity word carries, or `None` if it is not one.
+#[inline]
+pub fn proxy_parts(word: u64) -> Option<(u32, u32)> {
+    if word & NP_ID_PROXY == 0 {
+        return None;
+    }
+    Some(((word & 0xffff) as u32, ((word >> 16) & 0xffff) as u32))
+}
 
 /// Largest fully-framed request buffer: the 4-byte length prefix + the auth
 /// header + the biggest NP message. Buffers that build or receive a framed
@@ -460,4 +587,86 @@ pub fn resolve_ns(ns: &[u8], path: &[u8], out: &mut [u8]) -> NsResolved {
         NsTarget::Fsd(best_tree)
     };
     NsResolved { target, len: n }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Host tests for the pure parts of the ABI (`cargo test -p ninep-abi
+    //! --target aarch64-apple-darwin`). No I/O, no syscalls - the cheapest
+    //! foreign observer this project has.
+    use super::*;
+
+    #[test]
+    fn proxy_id_round_trips() {
+        let w = proxy_id(1000, 1000).unwrap();
+        assert_eq!(proxy_parts(w), Some((1000, 1000)));
+        let w = proxy_id(0, 0).unwrap();
+        assert_eq!(proxy_parts(w), Some((0, 0)));
+        let w = proxy_id(65535, 65535).unwrap();
+        assert_eq!(proxy_parts(w), Some((65535, 65535)));
+    }
+
+    #[test]
+    fn uid_and_gid_do_not_bleed_into_each_other() {
+        // The bug this catches is a shift/mask slip putting the gid where the
+        // uid is read - which authorizes the wrong account rather than failing.
+        let w = proxy_id(1000, 0).unwrap();
+        assert_eq!(proxy_parts(w), Some((1000, 0)));
+        let w = proxy_id(0, 1000).unwrap();
+        assert_eq!(proxy_parts(w), Some((0, 1000)));
+    }
+
+    #[test]
+    fn root_proxy_is_not_none() {
+        // THE load-bearing property of the flag bit. Root is uid 0 / gid 0, so
+        // without a tag bit a proxied root would encode as 0 - indistinguishable
+        // from NP_ID_NONE, which `fsd` refuses. Both must stay spellable and
+        // distinct: the refusal must mean "stated nothing", never "stated root".
+        assert_ne!(proxy_id(0, 0).unwrap(), NP_ID_NONE);
+        assert_ne!(proxy_id(0, 0).unwrap(), NP_ID_FIRST_PARTY);
+    }
+
+    #[test]
+    fn the_anonymous_word_is_a_proxy_and_is_not_root() {
+        // The HTTP server serves with this. If it ever decoded as root, or as
+        // NP_ID_NONE (refused), the static-file server would either bypass every
+        // mode or stop working - and both have been true of it at some point.
+        assert_eq!(proxy_parts(NP_ID_ANON), Some((NP_ID_ANON_ID, NP_ID_ANON_ID)));
+        assert_ne!(NP_ID_ANON_ID, 0);
+        assert_eq!(proxy_id(NP_ID_ANON_ID, NP_ID_ANON_ID), Some(NP_ID_ANON));
+    }
+
+    #[test]
+    fn none_and_first_party_are_not_proxies() {
+        // `fsd` reads the word as: FIRST_PARTY, else a proxy, else refuse. If
+        // either sentinel parsed as a proxy it would authorize uid 0 - root.
+        assert_eq!(proxy_parts(NP_ID_NONE), None);
+        assert_eq!(proxy_parts(NP_ID_FIRST_PARTY), None);
+    }
+
+    #[test]
+    fn oversized_ids_are_refused_not_truncated() {
+        // Truncating would silently authorize a DIFFERENT account.
+        assert_eq!(proxy_id(65536, 0), None);
+        assert_eq!(proxy_id(0, 65536), None);
+        assert_eq!(proxy_id(u32::MAX, u32::MAX), None);
+    }
+
+    #[test]
+    fn the_mac_covers_exactly_the_nonce_and_the_name() {
+        // Both peers build the MAC input from NP_MAC_PREFIX_LEN and read the
+        // fields by offset. If those disagreed, either the name would fall
+        // outside the MAC (forgeable) or every verification would fail.
+        assert_eq!(NP_AUTH_NAME_OFF, NP_AUTH_NONCE_OFF + NP_NONCE_LEN);
+        assert_eq!(NP_AUTH_MAC_OFF, NP_AUTH_NAME_OFF + NP_NAME_LEN);
+        assert_eq!(NP_MAC_PREFIX_LEN, NP_AUTH_MAC_OFF - NP_AUTH_NONCE_OFF);
+        assert_eq!(NP_AUTH_HDR, 8 + NP_NONCE_LEN + NP_NAME_LEN + NP_MAC_LEN);
+    }
+
+    #[test]
+    fn the_identity_word_sits_past_every_op_param() {
+        // `a3` is the identity field, so the header must still have room for it
+        // after a0..a2 - i.e. nothing may grow the params into offset 40.
+        assert_eq!(NP_REQ_PAYLOAD, 48);
+    }
 }
