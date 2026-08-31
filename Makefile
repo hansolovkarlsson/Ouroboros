@@ -91,6 +91,8 @@ SEND_ELF     := target/$(USER_TARGET)/release/send
 SEND_BIN     := target/$(USER_TARGET)/release/send.bin
 RECV_ELF     := target/$(USER_TARGET)/release/recv
 RECV_BIN     := target/$(USER_TARGET)/release/recv.bin
+EDTEST_ELF   := target/$(USER_TARGET)/release/edtest
+EDTEST_BIN   := target/$(USER_TARGET)/release/edtest.bin
 SELFTEST_ELF := target/$(USER_TARGET)/release/selftest
 SELFTEST_BIN := target/$(USER_TARGET)/release/selftest.bin
 MAN_ELF      := target/$(USER_TARGET)/release/man
@@ -193,7 +195,7 @@ ifeq ($(PROFILE),release)
 CARGO_FLAGS += --release
 endif
 
-.PHONY: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin accountd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin id-bin passwd-bin useradd-bin groupadd-bin usermod-bin chello-bin cdemo-bin cfile-bin cpico-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin sort-bin esp run run-virtio-console run-usb-kbd run-usb-multi run-gicv3 image run-image run-image-9p run-image-9p-client run-image-2vm-a run-image-2vm-b run-image-2vm-ext2-a run-image-2vm-ext2-b image-gpt run-image-gpt image-exfat run-image-exfat image-ext2 run-image-ext2 parallels-hdd release test test-parallels clean
+.PHONY: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin accountd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin id-bin passwd-bin useradd-bin groupadd-bin usermod-bin chello-bin cdemo-bin cfile-bin cpico-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin edtest-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin sort-bin esp run run-virtio-console run-usb-kbd run-usb-multi run-gicv3 image run-image run-image-9p run-image-9p-client run-image-2vm-a run-image-2vm-b run-image-2vm-ext2-a run-image-2vm-ext2-b image-gpt run-image-gpt image-exfat run-image-exfat image-ext2 run-image-ext2 parallels-hdd release test test-parallels clean
 
 # Overridable by `make test-parallels VM_NAME=... CMDS=... BOOT_WAIT=...`.
 VM_NAME     ?= Ouroboros
@@ -434,6 +436,13 @@ selftest-bin:
 	cargo build -p selftest --target $(USER_TARGET) --release
 	"$(OBJCOPY)" --strip-all $(SELFTEST_ELF) $(SELFTEST_BIN)
 
+# The ed25519 on-target check (docs/roadmap-cluster-keys.md step 5): the same RFC
+# 8032 vectors the host tests run, plus peak-stack and per-operation timing,
+# which only the target can answer.
+edtest-bin:
+	cargo build -p edtest --target $(USER_TARGET) --release
+	"$(OBJCOPY)" --strip-all $(EDTEST_ELF) $(EDTEST_BIN)
+
 man-bin:
 	cargo build -p man --target $(USER_TARGET) --release
 	"$(OBJCOPY)" --strip-all $(MAN_ELF) $(MAN_BIN)
@@ -498,7 +507,7 @@ serve-bin:
 # itself: the default shell binary and the config file (loader.rs's
 # CONFIG_PATH) naming which program to load - edit INIT.CFG and rebuild
 # just that program to swap it out, no kernel rebuild required.
-esp: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin accountd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin id-bin passwd-bin useradd-bin groupadd-bin usermod-bin chello-bin cdemo-bin cfile-bin cpico-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin tail-bin nl-bin rev-bin uniq-bin sort-bin
+esp: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin accountd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin id-bin passwd-bin useradd-bin groupadd-bin usermod-bin chello-bin cdemo-bin cfile-bin cpico-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin edtest-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin tail-bin nl-bin rev-bin uniq-bin sort-bin
 	mkdir -p $(ESP_DIR)/EFI/BOOT $(ESP_DIR)/EFI/ORBS $(ESP_DIR)/bin $(ESP_DIR)/man $(ESP_DIR)/etc
 	cp $(KERNEL) $(ESP_DIR)/EFI/BOOT/BOOTAA64.EFI
 	cp $(SHELL_BIN) $(ESP_DIR)/EFI/ORBS/SH.BIN
@@ -559,6 +568,7 @@ esp: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin acco
 	cp $(SEND_BIN) $(ESP_DIR)/bin/SEND
 	cp $(RECV_BIN) $(ESP_DIR)/bin/RECV
 	cp $(SELFTEST_BIN) $(ESP_DIR)/bin/SELFTEST
+	cp $(EDTEST_BIN) $(ESP_DIR)/bin/EDTEST
 	cp $(MAN_BIN) $(ESP_DIR)/bin/MAN
 	cp $(PING_BIN) $(ESP_DIR)/bin/PING
 	cp $(RESOLVE_BIN) $(ESP_DIR)/bin/RESOLVE
