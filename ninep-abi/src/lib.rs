@@ -369,6 +369,40 @@ pub const NP_AUTH_NAME_OFF: usize = 8 + NP_NONCE_LEN;
 /// Offset of the MAC within the auth header (after magic + nonce + name).
 pub const NP_AUTH_MAC_OFF: usize = 8 + NP_NONCE_LEN + NP_NAME_LEN;
 
+/// Magic marking a **signed** framed request — the per-machine-keypair format
+/// (`docs/roadmap-cluster-keys.md`). Accepted alongside [`NP_AUTH_MAGIC`]
+/// during the transition, which is what lets the exporter learn to verify
+/// signatures before any client learns to make them.
+///
+/// The layout keeps `nonce` and `name` where the MAC'd format has them and
+/// replaces the 32-byte MAC with a 32-byte **public key** plus a 64-byte
+/// **signature**:
+///
+/// ```text
+/// [len:4][magic:8][nonce:16][name:32][pubkey:32][sig:64][NP message]
+/// ```
+///
+/// The signature covers `nonce ‖ name ‖ message` — the same bytes the MAC
+/// covered. What changed is not *what* is authenticated but *who can produce
+/// it*: a secret every machine holds, or a private key only one machine holds.
+pub const NP_AUTH_MAGIC_SIGNED: u64 = 0x4155_5448_4E50_3033; // "AUTHNP03"
+
+/// Bytes of Ed25519 public key in a signed auth header.
+pub const NP_PUBKEY_LEN: usize = 32;
+/// Bytes of Ed25519 signature in a signed auth header.
+pub const NP_SIG_LEN: usize = 64;
+
+/// Offset of the offered public key within a signed auth header — where the
+/// MAC'd format keeps its MAC.
+pub const NP_AUTH_PUBKEY_OFF: usize = 8 + NP_NONCE_LEN + NP_NAME_LEN;
+/// Offset of the signature within a signed auth header.
+pub const NP_AUTH_SIG_OFF: usize = NP_AUTH_PUBKEY_OFF + NP_PUBKEY_LEN;
+/// Size of a signed auth header: `magic`(8) + `nonce` + `name` + `pubkey` +
+/// `sig`. Larger than the MAC'd header, so [`NP_FRAME_MAX`] is sized from this
+/// one.
+pub const NP_AUTH_HDR_SIGNED: usize =
+    8 + NP_NONCE_LEN + NP_NAME_LEN + NP_PUBKEY_LEN + NP_SIG_LEN;
+
 /// The bytes the request MAC covers *before* the NP message: `nonce` || `name`.
 /// One constant because both sides must agree, and because it keeps the MAC a
 /// two-part call rather than growing a three-part variant.
@@ -378,6 +412,12 @@ pub const NP_AUTH_MAC_OFF: usize = 8 + NP_NONCE_LEN + NP_NAME_LEN;
 /// in flight by anything that does not hold the cluster key. A tamper attempt
 /// fails verification exactly as a tampered path or offset already does.
 pub const NP_MAC_PREFIX_LEN: usize = NP_NONCE_LEN + NP_NAME_LEN;
+
+/// The bytes an Ed25519 **signature** covers before the NP message. The same
+/// `nonce ‖ name` the MAC covers, deliberately: the two formats authenticate
+/// identical bytes and differ only in who can produce the authenticator, so a
+/// reader comparing them has one fewer difference to hold in mind.
+pub const NP_SIG_PREFIX_LEN: usize = NP_MAC_PREFIX_LEN;
 
 // --- the in-request identity word (`a3`) ----------------------------------
 //
@@ -471,7 +511,17 @@ pub fn proxy_parts(word: u64) -> Option<(u32, u32)> {
 /// Largest fully-framed request buffer: the 4-byte length prefix + the auth
 /// header + the biggest NP message. Buffers that build or receive a framed
 /// export request are sized to this.
-pub const NP_FRAME_MAX: usize = NP_NET_LEN_PREFIX + NP_AUTH_HDR + NP_NET_MAX;
+pub const NP_FRAME_MAX: usize =
+    NP_NET_LEN_PREFIX + max_usize(NP_AUTH_HDR, NP_AUTH_HDR_SIGNED) + NP_NET_MAX;
+
+/// `max` for `usize` in a `const` context.
+const fn max_usize(a: usize, b: usize) -> usize {
+    if a > b {
+        a
+    } else {
+        b
+    }
+}
 
 // ---------------------------------------------------------------------------
 // The shared namespace resolver. A namespace is a sequence of bindings
@@ -650,6 +700,39 @@ mod tests {
         assert_eq!(proxy_id(65536, 0), None);
         assert_eq!(proxy_id(0, 65536), None);
         assert_eq!(proxy_id(u32::MAX, u32::MAX), None);
+    }
+
+    #[test]
+    fn the_signed_header_lays_out_as_both_sides_expect() {
+        // Two implementations read these offsets - netd and the Python peer -
+        // and a disagreement shows up as "signature invalid", which looks like a
+        // crypto bug rather than a layout one.
+        assert_eq!(NP_AUTH_PUBKEY_OFF, 8 + NP_NONCE_LEN + NP_NAME_LEN);
+        assert_eq!(NP_AUTH_SIG_OFF, NP_AUTH_PUBKEY_OFF + NP_PUBKEY_LEN);
+        assert_eq!(NP_AUTH_HDR_SIGNED, NP_AUTH_SIG_OFF + NP_SIG_LEN);
+        assert_eq!(NP_AUTH_HDR_SIGNED, 152);
+        // nonce and name sit where the MAC'd format keeps them, so the shared
+        // prefix really is shared.
+        assert_eq!(NP_AUTH_NONCE_OFF, 8);
+        assert_eq!(NP_AUTH_NAME_OFF, 8 + NP_NONCE_LEN);
+        assert_eq!(NP_SIG_PREFIX_LEN, NP_MAC_PREFIX_LEN);
+    }
+
+    #[test]
+    fn a_frame_buffer_fits_the_larger_of_the_two_headers() {
+        // The signed header is bigger; a buffer sized from the MAC'd one would
+        // truncate every signed frame at the maximum message size.
+        assert!(NP_AUTH_HDR_SIGNED > NP_AUTH_HDR);
+        assert_eq!(NP_FRAME_MAX, NP_NET_LEN_PREFIX + NP_AUTH_HDR_SIGNED + NP_NET_MAX);
+    }
+
+    #[test]
+    fn the_two_magics_differ() {
+        // A signed frame must never be read as a MAC'd one: the MAC'd reader
+        // would take the first 32 bytes of the public key as a MAC and refuse,
+        // which is safe, but the reverse (a MAC'd frame read as signed) would
+        // read message bytes as a signature.
+        assert_ne!(NP_AUTH_MAGIC, NP_AUTH_MAGIC_SIGNED);
     }
 
     #[test]

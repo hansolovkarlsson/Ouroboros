@@ -252,6 +252,8 @@ name = "netd"
 version = "0.1.0"
 dependencies = [
  "accounts",
+ "clusterkeys",
+ "ed25519",
  "ninep-abi",
  "syscall-abi",
 ]

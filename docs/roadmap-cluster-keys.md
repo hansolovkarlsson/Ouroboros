@@ -165,7 +165,7 @@ if the curve arithmetic does not come together, nothing has been built on it.
 | 6a ✅ | The **format**, as a pure `clusterkeys` crate | host tests; refusals tested harder than acceptances | mutation testing found `#node-a` (no space) parsing as a peer **holding a valid key** — commenting a line out has to revoke it |
 | 6b ✅ | Host **generator** + image staging | `/etc/cluster/{id,id.pub,authorized}` on the guest, `id` at **0600**; the Rust parser reads the Python generator's *verbatim* output as a host fixture; export unchanged | nothing reads the files yet, so a format error shows up as a file you can `cat` rather than a failed handshake |
 | 6c ✅ | **On-device** key generation (`/bin/clusterkey`) | refuses without real entropy — verified by booting a guest with the entropy device *removed*; the existing identity survives the refusal | also refuses to replace an identity without `-f`, and reports unreadable `authorized` lines, which a lookup cannot |
-| 7 | Exporter **accepts** signed frames alongside old ones | **the Python peer signs and the guest verifies** — the wire is proven by a foreign implementation before a guest client exists | wrong key, unknown key, tampered frame each refused |
+| 7 ✅ | Exporter **accepts** signed frames alongside old ones | **the Python peer signs and the guest verifies** — the wire proven by a foreign implementation before a guest client exists; MAC'd frames unregressed; 25 signed ops with **no supervisor restart**, which is the only signal a userland panic gives | unauthorized key, tampered message, tampered signature, a *different authorized* key swapped in, and a truncated frame — each refused |
 | 8 | Client **sends** signed frames | two-node matrix both directions; Python verifies guest signatures | |
 | 9 | Reply signing (mutual auth over the new primitive) | Python verifies guest replies | tampered reply rejected |
 | 10 | **Flag day**: drop the shared key everywhere | old-format peer refused; keyless node fail-closed; **revocation works** — delete a line, the peer stops being served | |
@@ -237,6 +237,28 @@ symptom (authentication refused) that looks nothing like the cause (the images
 disagree about who the peers are). It does mean **the dev private keys are in the
 repository**, the same trade the existing dev `CLUSTER_KEY` already makes; a real
 deployment uses `--random` or generates on the device.
+
+## What step 7 settled
+
+The exporter verifies signatures now, and the thing that verified *it* was a
+Python signer — no guest client existed yet, which is the whole reason the step
+was ordered this way. A format both ends of which are mine would have proven
+only that I am consistent.
+
+**netd's stack held.** The 1 KB `authorized` buffer lives in `Auth` on `serve`'s
+frame and an Ed25519 verification runs inside `handle_9p`, on the server whose
+32 KB has hit its guard page five times in this project's history. Twenty-five
+signed operations produced **zero supervisor restarts** — which is the check that
+matters, because `-d int` reads 0 either way: a userland panic *parks* a task
+rather than raising a CPU exception, so a guest that "still boots and prints 0
+aborts" can have had netd killed and restarted underneath it.
+
+**The order of checks in the verifier is deliberate.** The offered key is looked
+up in `authorized` *before* the signature is verified. Partly cost — an unknown
+key never gets a scalar multiplication spent on it — but mostly separation: "is
+this key allowed here" and "does this signature check out" are different
+questions, and a valid signature by a key nobody authorized is exactly as
+unwelcome as an invalid one.
 
 ## Risks, named in advance
 
