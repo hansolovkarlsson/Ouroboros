@@ -25,67 +25,47 @@ the **console** (`cond`), and the **network** server (`netd`) all run as
 supervised, MMU-isolated userland servers, with a capability model, crash
 recovery, and grant/safecopy bulk IPC (all in
 [`roadmap-completed.md`](roadmap-completed.md) / [`CHANGELOG.md`](CHANGELOG.md)).
-So is the users/permissions arc, as of 2026-08-30 — bar one item, which is why
-that item leads this list rather than sitting in the north-star section it came
-from. In rough order of value (item 1 is the next *arc*; 2 and 3 are what the
-microkernel arc itself still leaves open):
+So is the users/permissions arc, whose last item — per-user *cluster* identity —
+shipped 2026-08-31. What is left of it is the tier below: the cluster key is
+still per-*machine*, which is item 1. In rough order of value (2 and 3 are what
+the microkernel arc itself still leaves open):
 
-1. **Per-user cluster identity — ATTEMPTED and REJECTED 2026-08-30; rebuild
-   pending, design settled.**
+1. **Per-user keys for the cluster.** Per-user cluster *identity* shipped
+   2026-08-31 (see [`CHANGELOG.md`](CHANGELOG.md) and
+   [`unspellable-postmortem.md`](unspellable-postmortem.md)): a remote request
+   carries the requesting user's **name** inside the MAC, the far side resolves
+   it through its own `/etc/passwd` and refuses a stranger, and the identity
+   reaches `fsd` as a **required parameter** carried in the request rather than
+   an opt-in wrapper and a latch. `cpu` is covered too — `netd` assumes the
+   mapped user's identity for the spawn, so a remote command inherits it.
 
-   A first implementation (PR #42, kept open and marked *do not merge*) was
-   rejected by review with fifteen findings, **five of them independent ways a
-   remote request still reached `fsd` with root authority**. The wire design was
-   right and survives: send the caller's **name** (not a uid — two nodes number
-   users independently), **inside the MAC** (free, since the MAC was already
-   there), resolved on the far side through its own `/etc/passwd`, refusing a
-   name it does not know.
+   **What is left is the tier below it: the key is still per-machine.** A peer
+   holding the cluster key can claim *any* name, so the model defends against
+   the users of a trusted node — the real exposure — but not against a
+   compromised node. Per-user keys would close that, and the design forks are
+   real: whether each user gets a key or the machine key signs a per-user
+   credential; where those live (`/etc/cluster/keys/<name>`? a factotum-style
+   agent, as Plan 9 does it?); how a node learns a peer user's key without a
+   distribution mechanism this project does not have; and whether any of it is
+   worth building before Ouroboros leaves a trusted network, which is the
+   trigger the rest of the security tier already sits behind.
 
-   **The mechanism was wrong, in a way worth stating before rebuilding.**
-   Identity was attached by *opt-in* wrapper functions and held in a *latch*
-   between two messages. Opt-in meant a missed call site was silent — one path
-   (`fsd_write_at`) was simply forgotten, so remote `cp`/`>>`/`writeat` ran as
-   root. The latch meant any other task's request to `fsd` cleared it, falling
-   back to `netd`'s root. Four of the five holes came from those two properties,
-   not from four separate slips.
+   Two smaller follow-ups from the same arc, both deliberate scope calls rather
+   than oversights:
 
-   **The rebuild:** identity as a **required parameter** of the two chokepoints
-   (`fsd_call3`, `read_file_chunk`/`fsd_write_at`) with an explicit
-   `FirstParty` value for `netd`'s own reads — so "unproxied" does not compile —
-   and carried **in the NP request** (offset 40 / `a3` is free) rather than
-   latched, which removes the interleaving hole and covers `NP_RUN` at once.
-   See [`unspellable-postmortem.md`](unspellable-postmortem.md).
+   - **Supplementary groups do not cross the cluster.** The identity word is one
+     `u64` (uid + primary gid), so a remote caller is authorized on its primary
+     group alone. This can only ever *deny* access a local session would grant,
+     never grant one it would deny. Carrying the list needs either a second word
+     or a payload extension, and the thing to preserve is that the groups can
+     never arrive out of step with the identity they belong to.
+   - **Both ends now require an `/etc/passwd`.** A machine that cannot name its
+     own caller refuses to send; one that cannot resolve the name refuses to
+     serve. Fail-closed and consistent with the key being required, but it does
+     mean a disk without an account database cannot join a cluster.
 
-   Two things the attempt did land, merged separately: the **ext2 two-node test
-   rig** (the FAT32 pair cannot test permissions at all) and the `NP_WRITE_AT`
-   **crash fix**. Also still open beyond the rebuild: **per-user keys** — what
-   was attempted defends against the *users* of a trusted node, but a peer
-   holding the shared key can claim any name.
-
-   *The problem, unchanged:* the 9P export authenticates the *machine* (a shared cluster key), never a
-   *user*, and `netd` relays every remote request under its **own root
-   identity** — so `fsd`'s `check_access` hits its root bypass and
-   short-circuits before any mode is consulted. Concretely, today: an
-   unprivileged user on node B can `mount -r <A> /mnt/a` and read every hash in
-   node A's `/etc/shadow`, and `cpu A passwd root` reaches node A's account
-   server with root authority.
-
-   **Not a regression** — the export has been machine- rather than
-   user-authenticated since it was built, and `mount -r` is not root-gated.
-   What changed on 2026-08-30 is the payload: before `accountd` there was no
-   privileged writer on the far end of that hole.
-
-   The design forks are real and unpicked, which is why this is an arc and not
-   a follow-up: whether identity travels **in the 9P frame** (per request) or
-   is negotiated **once per connection**; whether the cluster key stays a
-   single shared secret or becomes **per-user**; and what a remote uid even
-   *means* between two machines with independent `/etc/passwd` files (map by
-   name? by number? a per-node translation table? refuse and require an
-   explicit mapping?). The cluster-auth postmortem already named per-peer
-   identity as a deliberate later tier — this is that tier.
-
-   **Considered and not taken: a per-user `~/.shadow`.** Recorded here because per-user credential records are exactly what this arc
-   will reach for, and the reasoning below is the thing to re-read when it does.
+   **Considered and not taken: a per-user `~/.shadow`.** Recorded here because per-user credential records are exactly what the
+   per-user-key tier above will reach for, and the reasoning below is the thing to re-read when it does.
 
    The question: `/etc/shadow` is mode 0600 root, so a user cannot write their
    own password — which is the entire reason `accountd` exists. What if each

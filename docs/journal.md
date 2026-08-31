@@ -7,6 +7,45 @@ for the forward plan see [`roadmap.md`](roadmap.md).
 
 ---
 
+## 2026-08-31 — a remote request now says who is asking
+
+The rejected design came back, built the other way round.
+
+Yesterday's attempt at per-user cluster identity was turned down by review with
+fifteen findings, five of them independent routes by which a remote request still
+reached `fsd` with root authority. The wire design was right and survived intact:
+send the caller's **name** (not a uid — two nodes number their users
+independently), put it **inside the MAC** (free, the MAC was already there), and
+resolve it on the far side through that machine's own `/etc/passwd`, refusing a
+name it does not know.
+
+What changed is how the identity gets from `netd` to `fsd`. It was an *opt-in*
+wrapper function plus a *latch* held between two messages; it is now a
+**required parameter** carried **in the request**. That is the whole difference,
+and it is the difference between a convention and a rule: a new export verb that
+calls `fsd` does not compile until it says who it is for, and nothing can
+interleave between a request and a field of that request. `fsd` refuses a
+`NET_TASK` request that states nothing rather than falling back to `netd`'s own
+credential — the fallback being root is what made a forgotten call site an
+escalation rather than a failure.
+
+`cpu` needed a second mechanism, because a spawned program is not `netd`'s
+request: it makes its own, with its own task identity. So `netd` becomes the
+mapped user for the length of the spawn and the child inherits that, restored by
+a `Drop` guard rather than a line at the end. The kernel's saved-uid rule makes
+it safe in both directions — `netd` may return to root because root is its saved
+id, and the child cannot, because its saved id is the user's.
+
+The verification was the interesting part of the day. The two-node ext2 rig now
+shows a four-way matrix: `user` on B is refused A's `/etc/shadow` but served
+`HELLO.TXT`, and `root` on B gets both — so the mechanism *discriminates* rather
+than merely denying. The same script against `main` prints the hashes, which is
+the negative control the last attempt's evidence lacked in the places that
+mattered. And reading the output rather than the exit status caught a bug of my
+own: `cpu A id` printed `uid=1000(user) gid=0(root)`, because `SET_ID` takes uid
+and gid as separate arguments and I had handed it the packed word that
+`GET_ID` returns. The uid was right by luck — it is the low half.
+
 ## 2026-08-30 — the question a server is actually asking
 
 Picked up the review findings recorded against the account server. The one that

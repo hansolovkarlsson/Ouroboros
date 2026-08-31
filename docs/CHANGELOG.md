@@ -7,6 +7,74 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/`; 
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## Per-user cluster identity: a remote request now carries *who* (2026-08-31)
+
+The 9P export authenticated a **machine** — a shared cluster key — and then
+relayed every request to `fsd` under `netd`'s own root identity, so
+`check_access` hit its root bypass before any mode was read. An unprivileged
+user on node B could `mount -r <A> /mnt/a; cat /mnt/a/etc/shadow` and read every
+password hash on node A, or reach A's account server with `cpu A passwd root`.
+
+**The wire.** The auth header carries the requesting user's **name**, NUL-padded
+to 32 bytes, and the MAC now covers `nonce || name || message` — so the claimed
+user cannot be edited in flight by anything without the key, at no cost, because
+the MAC was already there. A *name*, not a uid: two nodes have independent
+`/etc/passwd` files, so uid 1000 need not be the same person on both, and NFS's
+`AUTH_SYS` silently maps one user onto another whenever the numbering differs.
+The far side resolves the name through **its own** `/etc/passwd` and **refuses a
+name it does not know** — no "map the stranger to nobody" fallback, which would
+just be a quieter way of guessing. The magic is bumped to `AUTHNP02`: a deliberate
+flag day, since an `01` peer's first 32 message bytes would otherwise be read as
+a username.
+
+**The mechanism, which is the part a review rejected the first time.** Identity
+is a **required parameter** of every `netd` helper that calls `fsd`
+(`fsd_call`/`fsd_call3`/`read_file_chunk`/`fsd_write_at`/`list_dir`/`stat_size`),
+with an explicit `As::FirstParty` for `netd`'s own reads — the cluster key, the
+`/etc/passwd` lookups, the HTTP server's files. It travels **in the request**
+(`a3`, offset 40 — the one param no verb uses), not in a latch between two
+messages. `fsd` honours that field on a request from `NET_TASK` and nowhere
+else, and **refuses a `NET_TASK` request that states nothing** rather than
+falling back to `netd`'s credential, which is root.
+
+The first attempt did the same job with opt-in `_as` wrapper functions and a
+latch, and both properties were the bug: a forgotten call site (`fsd_write_at`)
+silently ran remote `cp`/`>>`/`writeat` as root, and any other task's request
+interleaving between the two messages dropped the latch. Now an unproxied export
+path does not compile, and nothing can come between a request and the identity
+that is a field of it. See [`unspellable-postmortem.md`](unspellable-postmortem.md).
+
+**`cpu` too, and by a different mechanism.** A spawned program is not `netd`'s
+request — it makes its own, with its own task identity, and a child inherits the
+spawner's. So `netd` `SET_ID`s to the mapped user for the length of the spawn and
+the child inherits that, restored by a `Drop` guard rather than a line at the end
+(the spawn path has several early returns). The kernel's saved-uid rule makes this
+safe in both directions: `netd` may return to root because root is its saved id,
+while the child's saved id is the *user's*, so a remote command can never restore
+root.
+
+**Verified on the two-node ext2 rig** — the only one that can show this, since
+FAT32 records no mode and every remote request looks permitted there whatever
+identity it carries. As `user` on B: `cat /mnt/a/etc/shadow` → *permission
+denied*, `cat /mnt/a/HELLO.TXT` → served, `cpu A id` → `uid=1000(user)
+gid=1000(user)`, `cpu A cat /etc/shadow` → refused. As `root` on B, all four
+succeed. **Negative control:** the same script against `main` prints the hashes
+and reports `uid=0(root)`. Zero fault lines on both nodes, no supervisor
+restarts; the host Python peer (`np9p_client.py --user <name>`) confirms the
+header cross-implementation, including an unknown name refused.
+
+**What this does not do**, stated where it is decided: a peer holding the cluster
+key can claim any name. This defends against the *users* of a trusted node —
+the real exposure, since a node's own users are not all trusted even when the
+node is — not against a compromised node, which needs per-user keys. Supplementary
+groups do not cross the cluster (one word has no room, and a group list arriving
+out of step with its identity is the shape of bug this design removes); a remote
+caller is authorized on uid and primary gid alone, which can only under-privilege.
+The console and `/net/tcp` arms consult no identity, because neither is
+permission-modelled for local users either. And both ends now need an
+`/etc/passwd`: a machine that cannot name its caller refuses to send, and one
+that cannot resolve the name refuses to serve.
+
 ## `netd`: one malformed export frame could kill the network for the boot (2026-08-30)
 
 The `NP_WRITE_AT` export arm sliced `&payload[p0..p0 + dlen]` with `p0` taken

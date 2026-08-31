@@ -236,6 +236,40 @@ It shares `drive-qemu.py`'s `Guest` class rather than copying the console rules
 — the paced typing and the match-only-new-output high-water mark are the
 load-bearing parts, and a second copy would drift from the first.
 
+**What the permission test should show, and why one line is not enough.** Since
+2026-08-31 a remote request carries the requesting user's name, so the run above
+prints `cat: permission denied` where it once printed A's password hashes. A
+refusal on its own is weak evidence, though — a broken export refuses too — so
+run the matrix, which needs the *served* cases as well as the denied one:
+
+```sh
+python3 scripts/drive-2vm.py build/espext2-a.img build/espext2-b.img \
+  --a 'login:@@root' 'assword:@@root' '# @@ls /' \
+  --b 'login:@@user' 'assword:@@user' \
+     '\$ @@mount -r 10.0.2.10:564 /mnt/a' \
+     '\$ @@cat /mnt/a/HELLO.TXT' \
+     '\$ @@cat /mnt/a/etc/shadow' \
+     '\$ @@cpu 10.0.2.10:564 id' \
+     '\$ @@'
+```
+
+Expected: `HELLO.TXT` served, `/etc/shadow` refused, and `cpu … id` reporting
+`uid=1000(user) gid=1000(user)` — the last of these is what proves identity
+reaches a *spawned* command and not just a file verb. Repeat the same steps after
+`logout` and a `root` login and all three should succeed, which is what
+distinguishes "the far side enforces permissions" from "the far side is broken".
+
+**Run the negative control too.** `git stash` the change (or check out `main`),
+rebuild the image, and run the identical script: it should print the hashes and
+report `uid=0(root)`. A permission test that has never been seen to fail is a
+test whose passing means nothing — and on the FAT32 rig it *cannot* fail, which
+is the whole reason this section says to use ext2.
+
+**A `cpu` command's errors print on the machine that ran it.** Only the child's
+*stdout* streams back over the cluster, so a denied `cpu A cat /etc/shadow` looks
+empty on B and prints `cat: permission denied` on **A's** console. Read both
+transcripts before concluding a step did nothing.
+
 **How the IPs work.** `netd` derives each guest's IPv4 from its NIC's MAC (last
 octet): the two-VM targets set MAC `…:0a` → **10.0.2.10** (machine A) and `…:0b` →
 **10.0.2.11** (machine B). (The default QEMU MAC `…:56` maps back to `.15`, so the

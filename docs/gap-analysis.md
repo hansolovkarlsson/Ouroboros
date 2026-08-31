@@ -104,11 +104,11 @@ set; roadmap arcs are cited by their `roadmap.md` section.
 
 | Capability | Status | Notes / what it would take |
 |---|---|---|
-| User accounts / uid / gid | ● | **A full account model now exists.** A kernel-owned uid/gid per task (`SET_ID`/`GET_ID`, default root, inherited across spawn, root-gated) *plus* the userland account layer: `/etc/passwd` + `/etc/group` + `/etc/shadow`, a shared pure `accounts` crate, `/bin/{passwd,useradd,groupadd,usermod}`, `su <name>`, `id` with names, per-user `/Users/<name>` homes. **Supplementary groups shipped 2026-08-29**: `SET_ID` carries a gid list in `arg2`/`arg3` (root-only to set a non-empty one, `MAX_SUPP_GROUPS` 8), inherited at spawn, and `fsd` grants the group triad on a primary **or** any supplementary match. Remaining gap vs Unix: identity is per-*task* and never crosses a machine — see the cluster row. |
+| User accounts / uid / gid | ● | **A full account model now exists.** A kernel-owned uid/gid per task (`SET_ID`/`GET_ID`, default root, inherited across spawn, root-gated) *plus* the userland account layer: `/etc/passwd` + `/etc/group` + `/etc/shadow`, a shared pure `accounts` crate, `/bin/{passwd,useradd,groupadd,usermod}`, `su <name>`, `id` with names, per-user `/Users/<name>` homes. **Supplementary groups shipped 2026-08-29**: `SET_ID` carries a gid list in `arg2`/`arg3` (root-only to set a non-empty one, `MAX_SUPP_GROUPS` 8), inherited at spawn, and `fsd` grants the group triad on a primary **or** any supplementary match. Since 2026-08-31 identity also **crosses a machine**: a remote request carries the caller's name and the far side resolves it through its own `/etc/passwd` — see the cluster row for what that still does not cover. |
 | Login / authentication (passwords) | ● | **Present**: the shell gates every session on a `login:` prompt, authenticating username + password, then `SET_ID`-ing to that user (identity *and* group list in one call, so a session never carries the previous user's groups); `logout` restores root (saved-uid) and re-prompts. `/etc/passwd` is four fields (`name:uid:gid:home`) and **world-readable on purpose** — every `id`, `ls -l` and `chown` needs the name↔id map; the secrets moved to **`/etc/shadow`** (`name:salt:hash`, `hash = SHA-256(salt‖password)`, mode 0600 root) on 2026-08-29, and the lookup **streams one line** rather than reading the file, because a whole-file read reports `0` on overflow — harmless for `passwd` ("no accounts, root session"), a **total lockout including root** for `shadow`. Salts use **hardware entropy** where the machine has a virtio-rng, and say so loudly when they fall back to the clock. Accounts are managed on-device, and **a non-root user can change their own password** (`passwd` → `accountd`, 2026-08-30). Thinner than Unix: no PAM, no sessions, no password ageing or lockout, and a filesystem without modes (FAT32/exFAT) can enforce none of it — which `login` warns about at the prompt. |
-| Enforced file permissions | ◐ | **Enforced on ext2**: `fsd`'s `check_access` gates every file verb — the caller's uid/gid (`GET_ID(sender)`) vs. the inode owner/mode, owner→group→other, root bypasses, `FS_ERR_PERM` on refusal (`chmod` owner-only, `chown` root-only). FAT/exFAT stay unrestricted (no mode to check). Thinner than POSIX: the search (`x`) bit on ancestor directories isn't checked yet (only the object + its parent), and remote/cluster requests are still machine-authenticated (root), not per-user. |
+| Enforced file permissions | ◐ | **Enforced on ext2**: `fsd`'s `check_access` gates every file verb — the caller's uid/gid (`GET_ID(sender)`) vs. the inode owner/mode, owner→group→other, root bypasses, `FS_ERR_PERM` on refusal (`chmod` owner-only, `chown` root-only). FAT/exFAT stay unrestricted (no mode to check). Thinner than POSIX: the search (`x`) bit on ancestor directories isn't checked yet (only the object + its parent), and a remote caller is judged on uid + primary gid only (supplementary groups do not cross the cluster, which can only under-privilege). Remote requests are **no longer served as root**: the caller's name travels in the authenticated header and `fsd` authorizes it as the local account of that name. |
 | Privilege boundary (root / sudo) | ◐ | A per-task **capability send-mask** governs who-may-call-whom (topological isolation) — the mechanism a privilege model would build on, but there's no user-facing privileged/unprivileged split. |
-| Cluster authentication | ◐ | **Machine-level**: a shared cluster key, mutually authenticated (HMAC) on the 9P export, fail-closed, `\NOEXEC`. **No per-user identity, no replay protection, no on-the-wire encryption** — each a named next tier (cluster-auth postmortem). Trusted-LAN by design. |
+| Cluster authentication | ◐ | **Machine-level key + per-user identity**: a shared cluster key, mutually authenticated (HMAC) on the 9P export, fail-closed, `\NOEXEC` — and, since 2026-08-31, the requesting user's **name** inside the MAC, resolved through the far side's own `/etc/passwd` (a stranger is refused) and carried into `fsd` as a required request field, so remote file access and `cpu` run as that user rather than root. **No per-user *keys*** (a peer holding the machine key can claim any name), **no replay protection, no on-the-wire encryption** — each a named next tier. Trusted-LAN by design. |
 | Cryptography | ◐ | Hand-rolled SHA-256 + HMAC-SHA256 (NIST/RFC-validated). No TLS, no public-key, no at-rest encryption. |
 | Sandboxing beyond MMU isolation (seccomp/cgroups/quotas) | ✗ | Isolation is per-task MMU + the capability mask; no resource quotas or syscall filtering. |
 
@@ -234,7 +234,7 @@ Reading the map top-down, the highest-leverage missing pieces, each pointing
 at a roadmap arc:
 
 1. **The users/permissions arc — DONE, refinements included (2026-08-28 →
-   2026-08-30).** The four original pieces landed on day one: the `stat`
+   2026-08-31).** The four original pieces landed on day one: the `stat`
    mode/owner surface + `chmod`/`chown` (ext2, e2fsck-clean); a kernel-owned
    uid/gid per task (`SET_ID`/`GET_ID`, saved-uid); a `login` gate; and **`fsd`
    permission enforcement** (`check_access` — caller uid/gid vs. inode
@@ -245,12 +245,15 @@ at a roadmap arc:
    passwords via `accountd`, with the message credential bound at **send**
    underneath it, closing a privilege escalation that was live in `fsd`.
 
-   **One item is left, and it is the next arc: per-user *cluster* identity.**
-   The 9P export authenticates a machine, not a user, and `netd` relays remote
-   requests under its own root identity — so `check_access` short-circuits on
-   the root bypass before any mode is read. An unprivileged user on node B can
-   `mount -r <A> /mnt/a` and read node A's `/etc/shadow`. Not a regression, but
-   `accountd` put a *privileged writer* on the far end of it.
+   **The last item — per-user *cluster* identity — shipped 2026-08-31.** The 9P
+   export used to authenticate a machine and nothing else, with `netd` relaying
+   remote requests under its own root identity, so `check_access` short-circuited
+   on the root bypass before any mode was read: an unprivileged user on node B
+   could `mount -r <A> /mnt/a` and read node A's `/etc/shadow`. A request now
+   carries the caller's **name** inside the MAC, resolved through the far side's
+   own `/etc/passwd`, and reaches `fsd` as a required field of the request. What
+   remains is the tier below it: the key is still per-*machine*, so a peer that
+   holds it can claim any name.
 2. **A userland libc personality — DONE, mechanism (2026-08-28).** POSIX/C
    portability was the single biggest thing given up across every comparison.
    The six-step libc arc built it: a C program runs, and **picolibc is ported**

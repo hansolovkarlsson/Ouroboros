@@ -309,6 +309,21 @@ netd holding the run's output in a `PendingRun` buffer), lifting the cap to ~2 K
     reply) is left with the untrusted-network work below. Banked as defense-in
     -depth under trusted-LAN because the symmetric key made it nearly free. See the
     tier-2 addendum in [`cluster-auth-postmortem.md`](cluster-auth-postmortem.md).
+  - **Tier 3 — per-user identity ✅ DONE (2026-08-31).** The tiers above
+    authenticate a *machine*; this says which of that machine's **users** is
+    asking. The auth header carries the caller's **name** (32 bytes, NUL-padded),
+    inside the MAC (`mac = HMAC(key, nonce ‖ name ‖ message)`) so it cannot be
+    altered without the key; the exporter resolves it through **its own**
+    `/etc/passwd` and refuses a name it does not know. A *name*, not a uid: two
+    nodes number their users independently, and NFS's `AUTH_SYS` shows what
+    sending the number does. The identity reaches `fsd` as a **required
+    parameter** carried in the request (`a3`), never an opt-in wrapper or a latch
+    — see [`unspellable-postmortem.md`](unspellable-postmortem.md) for the
+    attempt that did it the other way and what that cost. `cpu` is covered by a
+    second mechanism: `netd` assumes the mapped user for the length of the spawn
+    so the child inherits it. **Still machine-keyed**, which is the point of the
+    per-user-*key* item below: a peer holding the cluster key can claim any name,
+    so this protects against the users of a trusted node, not a compromised one.
   - **Tier 2+, TRIGGER-GATED — activate only when Ouroboros leaves a trusted
     network.** These are real hardening but **deliberately not built while the
     deployment is a trusted LAN** (two QEMU VMs, or Hans's own Raspberry Pi
@@ -319,9 +334,11 @@ netd holding the run's output in a `PendingRun` buffer), lifting the cap to ~2 K
     - **Replay protection** — a captured request can be replayed verbatim today
       (forgery of a *new* one cannot). Fix: a server nonce (costs a per-op round
       trip) or a bounded seen-nonce cache (needs bounded state under no-heap).
-    - **Per-peer identity** — one shared secret = interchangeable members; no
-      per-machine access control or key rotation. Fix: per-machine identities,
-      properly wanting **asymmetric crypto** (Ed25519-class) — the heavy lift.
+    - **Per-peer and per-user keys** — one shared secret = interchangeable
+      members; no per-machine access control or key rotation, and (since tier 3)
+      a peer that holds the key can claim any *user* name. Fix: per-machine — and
+      ultimately per-user — identities, properly wanting **asymmetric crypto**
+      (Ed25519-class) — the heavy lift.
     - **Confidentiality (encryption)** — the important honest one: authentication
       (tiers 1–2) protects *integrity and who-may-act*, **not secrecy**. Every
       byte still crosses the wire in **cleartext** — a sniffer reads your files

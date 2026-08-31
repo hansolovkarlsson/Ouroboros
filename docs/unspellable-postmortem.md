@@ -145,3 +145,20 @@ The rebuild. The design is settled — identity as a required parameter of
 request (offset 40 / `a3` is free) rather than latched, which covers `NP_RUN` at
 the same time. PR #42 is kept open, marked *do not merge*, with the five
 root-authority holes tabulated, so none of it needs re-deriving.
+
+**Postscript (2026-08-31): the rebuild shipped, to that design.** Both properties
+are gone — `As` is a required parameter of all six `fsd` helpers, so an unproxied
+export path does not compile, and the identity is a field of the request it
+authorizes, so nothing can interleave between them. `fsd` refuses a `NET_TASK`
+request that states no identity rather than falling back to `netd`'s root, which
+turns the failure mode of a missed path from *escalation* into *refusal*.
+
+Two things the rebuild learned that the rejected branch had not. `cpu` needed a
+**second** mechanism, not the same one: a spawned child makes its own requests
+with its own task identity, so `netd` assumes the mapped user for the length of
+the spawn (a `Drop` guard, because the spawn path has early returns). And reading
+the *output* rather than the exit status caught a bug in the fix itself —
+`cpu A id` printed `uid=1000(user) gid=0(root)`, because `SET_ID` takes uid and
+gid as separate arguments and it had been handed the packed word `GET_ID`
+returns. The uid was right by luck: it is the low half. A test asserting only
+"the exploit is refused" would have passed with the gid wrong.
