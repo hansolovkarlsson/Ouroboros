@@ -1190,7 +1190,7 @@ test-parallels:
 # Native target, not the workspace default (aarch64-unknown-uefi), which cannot
 # run a test binary.
 HOST_TARGET := $(shell rustc -vV | sed -n 's/^host: //p')
-PURE_CRATES := accounts regex ed25519
+PURE_CRATES := accounts regex ed25519 clusterkeys
 
 # The PIE relocation contract, checked mechanically over every userland binary:
 # ABS64 is unloadable by this project's loader. See scripts/check-relocs.sh for
