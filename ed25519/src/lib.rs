@@ -10,8 +10,11 @@
 //!   is what makes signing deterministic and so needs no randomness), and the
 //!   challenge scalar is a hash of `R ‖ A ‖ M`.
 //!
-//! Still to come: field arithmetic mod 2²⁵⁵−19 (step 2), curve points and
-//! scalar multiplication (step 3), sign/verify (step 4, the go/no-go gate).
+//! - **Field arithmetic mod 2²⁵⁵−19** (step 2). Five 51-bit limbs, lazy
+//!   reduction, and the inversion chain the curve layer needs.
+//!
+//! Still to come: curve points and scalar multiplication (step 3), sign/verify
+//! (step 4, the go/no-go gate).
 //!
 //! ## House rules for this crate
 //!
@@ -28,6 +31,8 @@
 
 #![no_std]
 
+mod field;
 mod sha512;
 
+pub use field::{Fe, ELEM_LEN};
 pub use sha512::{sha512, Sha512, DIGEST_LEN};
