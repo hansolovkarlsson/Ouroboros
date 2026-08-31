@@ -37,11 +37,18 @@ pub const ELEM_LEN: usize = 32;
 
 /// A field element as five radix-2⁵¹ limbs.
 ///
+/// The limbs are `pub(crate)`, not `pub`: the curve layer above needs them, but
+/// an outside caller must not be able to build an `Fe` the invariant does not
+/// cover. `Fe([u64::MAX; 5])` is representable but not *valid* — `mul` would
+/// overflow computing `19 * limb`, which on the target means a userland panic or
+/// a silently wrong signature rather than a failed test. `decode` is the only
+/// way in from bytes.
+///
 /// `Copy`, and only 40 bytes: these are passed by value everywhere, which keeps
 /// the curve layer above free of borrows and keeps stack traffic predictable on
 /// a task whose stack has hit its guard page five times.
 #[derive(Clone, Copy, Debug)]
-pub struct Fe(pub [u64; 5]);
+pub struct Fe(pub(crate) [u64; 5]);
 
 /// 2⁵¹ − 1: one limb, all bits set.
 const MASK: u64 = (1u64 << 51) - 1;
@@ -144,9 +151,14 @@ impl Fe {
         reduce128([c0, c1, c2, c3, c4])
     }
 
-    /// `self * self`. Same shape as `mul` with the symmetric terms doubled once
-    /// instead of computed twice — kept as its own function because squaring is
-    /// most of the work in an inversion (250 of the 254 steps below).
+    /// `self * self`.
+    ///
+    /// A thin alias for `mul` today, and named separately because squaring is
+    /// most of the work in an inversion (250 of its 254 steps) and is therefore
+    /// the one place a dedicated implementation — the symmetric cross terms
+    /// doubled once rather than computed twice, roughly a 30% saving — would be
+    /// worth having. That is deferred until step 5 measures whether signing cost
+    /// matters at all on the target; optimising before then would be guessing.
     pub fn square(self) -> Fe {
         self.mul(self)
     }
@@ -204,18 +216,24 @@ impl Fe {
     /// Propagate carries so every limb is below 2⁵¹, folding the top carry back
     /// in times 19. The result is congruent to the input but not necessarily the
     /// *canonical* residue — `encode` does that last step.
+    ///
+    /// **Two full passes, and the second one is not optional.** The first
+    /// version of this did one pass plus a single extra step on limb 0, on the
+    /// argument that the top fold can only overflow limb 0. That is true and
+    /// insufficient: adding that carry to limb 1 can leave it at *exactly* 2⁵¹
+    /// when it was already `MASK`, and nothing then re-masks it. `32 - 1`
+    /// produces it — an ordinary subtraction, not an exotic input. The values
+    /// stayed correct (everything downstream tolerates limbs below 2⁵²), but the
+    /// invariant this module advertises was false, which is worse than a wrong
+    /// bound: step 3 would have been written against it.
+    ///
+    /// Two passes provably settle for any input below 2⁵³, which is the most any
+    /// operation here produces. In the worst case the second pass ripples all
+    /// the way to limb 4 and folds 19 back into limb 0 — but a limb 0 that
+    /// carried in the first place is left below 2⁷ by its own masking, so
+    /// adding 19 cannot overflow it again.
     fn carry(self) -> Fe {
-        let mut l = self.0;
-        let mut c;
-        c = l[0] >> 51; l[0] &= MASK; l[1] = l[1].wrapping_add(c);
-        c = l[1] >> 51; l[1] &= MASK; l[2] = l[2].wrapping_add(c);
-        c = l[2] >> 51; l[2] &= MASK; l[3] = l[3].wrapping_add(c);
-        c = l[3] >> 51; l[3] &= MASK; l[4] = l[4].wrapping_add(c);
-        c = l[4] >> 51; l[4] &= MASK; l[0] = l[0].wrapping_add(c.wrapping_mul(19));
-        // One more pass: the fold above can push limb 0 over 2^51 again, but at
-        // most once, since c <= 2^13 and 19*2^13 is far below 2^51.
-        c = l[0] >> 51; l[0] &= MASK; l[1] = l[1].wrapping_add(c);
-        Fe(l)
+        Fe(carry_pass(carry_pass(self.0)))
     }
 
     /// The canonical 32-byte little-endian encoding.
@@ -297,6 +315,22 @@ impl Fe {
     }
 }
 
+/// One carry pass over five limbs: mask each to 51 bits, add its overflow to the
+/// next, and fold the top limb's overflow back into limb 0 times 19 (which is
+/// what `2²⁵⁵ ≡ 19` means operationally).
+///
+/// A single pass does NOT guarantee every limb ends below 2⁵¹ — the fold into
+/// limb 0, and the ripple it can start, are why `carry` runs this twice.
+fn carry_pass(mut l: [u64; 5]) -> [u64; 5] {
+    let mut c;
+    c = l[0] >> 51; l[0] &= MASK; l[1] = l[1].wrapping_add(c);
+    c = l[1] >> 51; l[1] &= MASK; l[2] = l[2].wrapping_add(c);
+    c = l[2] >> 51; l[2] &= MASK; l[3] = l[3].wrapping_add(c);
+    c = l[3] >> 51; l[3] &= MASK; l[4] = l[4].wrapping_add(c);
+    c = l[4] >> 51; l[4] &= MASK; l[0] = l[0].wrapping_add(c.wrapping_mul(19));
+    l
+}
+
 /// Fold a set of 128-bit column sums back into five 51-bit limbs, carrying the
 /// overflow past 2²⁵⁵ into limb 0 times 19.
 fn reduce128(c: [u128; 5]) -> Fe {
@@ -313,10 +347,10 @@ fn reduce128(c: [u128; 5]) -> Fe {
     let carry = (c[4] >> 51) as u64;
     let l4 = (c[4] as u64) & MASK;
     l0 = l0.wrapping_add(carry.wrapping_mul(19));
-    // That fold can push limb 0 past 2^51 once; one carry pass settles it.
-    let l1 = l1 + (l0 >> 51);
-    l0 &= MASK;
-    Fe([l0, l1, l2, l3, l4])
+    // Then settle, for the same reason `carry` runs two passes: folding into
+    // limb 0 can push limb 1 to exactly 2^51 and a single un-masked step leaves
+    // it there. `Fe(16).mul(...)` reaches it.
+    Fe(carry_pass([l0, l1, l2, l3, l4]))
 }
 
 #[cfg(test)]
@@ -358,10 +392,7 @@ mod tests {
     ("limb_boundary_2_51_minus_1", "ffffffffffff0700000000000000000000000000000000000000000000000000", "010000000000f0ffffffffff3f00000000000000000000000000000000000000", "89e3388ee338721cc7711cc791e3388ee3388e1cc7711cc771e4388ee3388e23"),
     ("limb_boundary_2_102", "0000000000000000000000004000000000000000000000000000000000000000", "0000000000000000000000000000000000000000000000000010000000000000", "f4ffffffffffffffffffffffffffffffffffff3594d7505e43790de53594d750"),
     ("two_204", "0000000000000000000000000000000000000000000000000010000000000000", "0000000000000000000000000000000000000026000000000000000000000000", "f8ffffffffffd7505e43790de53594d7505e43790de53594d7505e43790de535"),
-    ("just_under_2_255", "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f", "0100000000000000000000000000000000000000000000000000000000000000", "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"),
-    ("high_bit_pattern", "1200000000000000000000000000000000000000000000000000000000000000", "4401000000000000000000000000000000000000000000000000000000000000", "89e3388ee3388ee3388ee3388ee3388ee3388ee3388ee3388ee3388ee3388e23"),
     ("alternating", "5555555555555555555555555555555555555555555555555555555555555555", "aac7711cc7711cc7711cc7711cc7711cc7711cc7711cc7711cc7711cc7711c47", "26f2593798229f758329f2593798229f758329f2593798229f758329f2593718"),
-    ("alternating_aa", "bdaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa2a", "ce1ec7711cc7711cc7711cc7711cc7711cc7711cc7711cc7711cc7711cc7711c", "13f9ac1b4c91cfbac114f9ac1b4c91cfbac114f9ac1b4c91cfbac114f9ac1b0c"),
     ("rand_0", "19790933728a14fc1d5d4330d952cde6712a63830705bf4bd56b6a740ddb3656", "7fe521061618bba8d4cc0e225469849ac7f0798305f42d5ff99cae5ff6c16e76", "76cb8739bee558aaeae75e61cdb7568f343f8c9961d83c5768a249e9813ac919"),
     ("rand_1", "b68c0314900df270528de98f697086c4eed4a7c9297103d30b6883ae3b588574", "023f5e479f94f85b2b01ac4e357981ed0dc55f171d912061c686261a7517be61", "3d50401706fe5fc04e4997bbb55c8d508dc3f2a81b7eb5188849112f80e3ad57"),
     ("rand_2", "b554d2900095bbbe8160666812b6dfd61fc61ac1c21c72a21e6bca158a94d372", "d2ef7b2e44f270fc4666ab0d0d7ef9f4fe90966164c3a692e8ece6c07188f861", "db2043f8fecc97ee5d7f48f706eae374d1170cd02bd29d61ccff824bd62f211e"),
@@ -510,24 +541,77 @@ mod tests {
 
     #[test]
     fn limbs_stay_bounded_after_every_operation() {
-        // The invariant the module documents, checked directly rather than only
-        // through its consequences: no operation may leave a limb at or above
-        // 2^51. This is what makes "how many adds before you must reduce" not a
-        // question a caller has to answer.
-        let big = fe("ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"); // p-1
-        let cases = [
-            big.add(big),
-            big.sub(Fe::ZERO),
-            Fe::ZERO.sub(big),
-            big.mul(big),
-            big.square(),
-            big.invert(),
-            big.neg(),
-        ];
-        for (i, c) in cases.iter().enumerate() {
+        // The invariant the module documents, checked directly.
+        //
+        // THIS TEST FAILED TO FAIL ONCE. Its first version used seven cases all
+        // derived from p-1, none of which triggers the carry ripple that broke
+        // the invariant - so it passed while the property it names was false,
+        // and a review's random harness found what it could not. It now sweeps
+        // every vector against every vector, and includes the specific
+        // counterexample (32 - 1) that the hand-picked cases missed.
+        fn check(c: Fe, what: &str) {
             for (j, limb) in c.0.iter().enumerate() {
-                assert!(*limb < (1u64 << 51), "case {i} limb {j} = {limb:#x} >= 2^51");
+                assert!(*limb < (1u64 << 51), "{what}: limb {j} = {limb:#x} >= 2^51");
             }
+        }
+
+        // The case the old version missed: an ordinary small subtraction.
+        let thirty_two = fe("2000000000000000000000000000000000000000000000000000000000000000");
+        check(thirty_two.sub(Fe::ONE), "32 - 1");
+
+        // And a sweep: every single-element vector combined with every other,
+        // through every operation that produces an Fe.
+        for (na, a, _, _) in SINGLES {
+            let x = fe(a);
+            check(x, na);
+            check(x.square(), "square");
+            check(x.invert(), "invert");
+            check(x.neg(), "neg");
+            for (nb, b, _, _) in SINGLES {
+                let y = fe(b);
+                check(x.add(y), "add");
+                check(x.sub(y), "sub");
+                check(x.mul(y), "mul");
+                let _ = (na, nb);
+            }
+        }
+        // Plus chains, since a single operation on canonical inputs is the easy
+        // case - the ripple needs a value that is already near a limb boundary.
+        let mut acc = Fe::ONE;
+        for _ in 0..64 {
+            acc = acc.add(acc);
+            check(acc, "repeated doubling");
+            acc = acc.sub(Fe::ONE);
+            check(acc, "doubling then subtracting one");
+            acc = acc.mul(acc);
+            check(acc, "squaring a chained value");
+        }
+    }
+
+    /// `(name, raw 32 bytes, the value a decoder must produce)`
+    const NONCANONICAL: &[(&str, &str, &str)] = &[
+    ("p_itself", "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f", "0000000000000000000000000000000000000000000000000000000000000000"),
+    ("p_plus_1", "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f", "0100000000000000000000000000000000000000000000000000000000000000"),
+    ("two_255_minus_1", "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f", "1200000000000000000000000000000000000000000000000000000000000000"),
+    ("high_bit_set_on_one", "0100000000000000000000000000000000000000000000000000000000000080", "0100000000000000000000000000000000000000000000000000000000000000"),
+    ("all_ff", "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", "1200000000000000000000000000000000000000000000000000000000000000"),
+    ("alternating_aa", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa2a"),
+    ("high_bit_on_p_minus_1", "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"),
+    ];
+
+    #[test]
+    fn non_canonical_inputs_decode_to_the_right_value() {
+        // These are the boundary cases the single-element vectors CANNOT carry,
+        // because those are emitted through a canonical encoder: p, p+1, 2^255-1,
+        // all-ones, and values with bit 255 set. A decoder is the only thing that
+        // can tell them apart from their reduced forms.
+        //
+        // The expectations model MASK-THEN-REDUCE, which is the ordering Ed25519
+        // requires (bit 255 carries the sign of x, not magnitude). Reducing the
+        // full 256-bit integer instead would expect 37 for all-ones where a
+        // correct implementation gives 18 - the generator did that at first.
+        for (name, raw, want) in NONCANONICAL {
+            assert_eq!(Fe::decode(&unhex(raw)).encode(), unhex(want), "decode {name}");
         }
     }
 
@@ -537,7 +621,12 @@ mod tests {
         // silently matched nothing would leave the three vector tests below
         // iterating over an empty list and passing vacuously. That happened once
         // while writing this; it now cannot happen quietly.
-        assert!(SINGLES.len() >= 20, "single-element vectors missing: {}", SINGLES.len());
-        assert!(PAIRS.len() >= 12, "pair vectors missing: {}", PAIRS.len());
+        // Floors, matching what scripts/gen-field-vectors.py currently emits. A
+        // splice that silently matched nothing is the failure this catches (it
+        // has happened twice); a generator change that REDUCES coverage trips it
+        // too, which is also worth noticing rather than absorbing.
+        assert!(SINGLES.len() >= 18, "single-element vectors missing: {}", SINGLES.len());
+        assert!(PAIRS.len() >= 13, "pair vectors missing: {}", PAIRS.len());
+        assert!(NONCANONICAL.len() >= 7, "non-canonical vectors missing: {}", NONCANONICAL.len());
     }
 }

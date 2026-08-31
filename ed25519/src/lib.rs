@@ -10,8 +10,10 @@
 //!   is what makes signing deterministic and so needs no randomness), and the
 //!   challenge scalar is a hash of `R ‖ A ‖ M`.
 //!
-//! - **Field arithmetic mod 2²⁵⁵−19** (step 2). Five 51-bit limbs, lazy
-//!   reduction, and the inversion chain the curve layer needs.
+//! - **Field arithmetic mod 2²⁵⁵−19** (step 2). Five 51-bit limbs, carried on
+//!   **every** operation (deliberately *not* the usual lazy reduction — see
+//!   `field.rs` for why a rule the caller must remember was the wrong trade),
+//!   and the inversion chain the curve layer needs.
 //!
 //! Still to come: curve points and scalar multiplication (step 3), sign/verify
 //! (step 4, the go/no-go gate).
