@@ -922,8 +922,8 @@ mod tests {
         assert!(changed);
         assert_eq!(find_group_by_name(&out[..n], b"devs").unwrap().members, b"bob");
         // Already a member, or no such group: no change.
-        assert_eq!(add_group_member(G, &mut out, b"staff", b"alice").unwrap().1, false);
-        assert_eq!(add_group_member(G, &mut out, b"ghosts", b"bob").unwrap().1, false);
+        assert!(!add_group_member(G, &mut out, b"staff", b"alice").unwrap().1);
+        assert!(!add_group_member(G, &mut out, b"ghosts", b"bob").unwrap().1);
         // Removal everywhere, leaving the other members intact.
         const G2: &[u8] = b"root:0:\nstaff:1500:alice,bob\ndevs:1600:bob\n";
         let (n, changed) = remove_group_member_everywhere(G2, &mut out, b"bob").unwrap();
@@ -933,7 +933,7 @@ mod tests {
         assert_eq!(find_group_by_name(rebuilt, b"devs").unwrap().members, b"");
         assert_eq!(find_group_by_name(rebuilt, b"root").unwrap().gid, 0);
         // A user in no group leaves the file untouched.
-        assert_eq!(remove_group_member_everywhere(G2, &mut out, b"carol").unwrap().1, false);
+        assert!(!remove_group_member_everywhere(G2, &mut out, b"carol").unwrap().1);
     }
 
     #[test]

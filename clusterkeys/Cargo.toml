@@ -1,0 +1,15 @@
+[package]
+name = "clusterkeys"
+version = "0.1.0"
+edition = "2021"
+
+# Pure, no_std, no I/O, no syscalls, no heap: the on-disk format for per-machine
+# cluster identity (docs/roadmap-cluster-keys.md step 6). Callers do their own
+# file reading and pass byte buffers in, exactly like `accounts`.
+#
+# Host-testable: cargo test -p clusterkeys --target aarch64-apple-darwin, or
+# `make test`.
+[lib]
+path = "src/lib.rs"
+
+[dependencies]

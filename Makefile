@@ -1190,7 +1190,7 @@ test-parallels:
 # Native target, not the workspace default (aarch64-unknown-uefi), which cannot
 # run a test binary.
 HOST_TARGET := $(shell rustc -vV | sed -n 's/^host: //p')
-PURE_CRATES := accounts regex ed25519
+PURE_CRATES := accounts regex ed25519 clusterkeys
 
 # The PIE relocation contract, checked mechanically over every userland binary:
 # ABS64 is unloadable by this project's loader. See scripts/check-relocs.sh for
@@ -1203,7 +1203,15 @@ test:
 		echo "== cargo test -p $$c"; \
 		cargo test -p $$c --target $(HOST_TARGET) || exit 1; \
 	done
-	@echo "== all pure-crate host tests passed"
+	@# Lint the TESTS too. Plain `cargo clippy -p <crate>` does not build test
+	@# targets, so a warning inside a #[cfg(test)] module (a dead fixture
+	@# constant, say) goes unreported - and "clippy clean" then means less than
+	@# it sounds like. This has been claimed too broadly twice, so it is checked
+	@# here rather than remembered.
+	@for c in $(PURE_CRATES); do \
+		cargo clippy -p $$c --all-targets --target $(HOST_TARGET) -- -D warnings || exit 1; \
+	done
+	@echo "== all pure-crate host tests passed, and clippy clean including tests"
 
 clean:
 	cargo clean
