@@ -1,0 +1,17 @@
+[package]
+name = "ed25519"
+version = "0.1.0"
+edition = "2021"
+
+# Pure, no_std, no I/O, no syscalls, NO HEAP: the signature primitive behind
+# per-machine cluster keypairs (docs/roadmap-cluster-keys.md). Everything is a
+# fixed-size array or a scalar, so it links cleanly for aarch64-unknown-none and
+# emits no relocations a -pie link would reject - lookup tables in this crate
+# must stay arrays of plain integers, never of references (see the crate docs).
+#
+# Host-testable like `accounts` and `regex`:
+#   cargo test -p ed25519 --target aarch64-apple-darwin
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
