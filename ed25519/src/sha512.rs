@@ -90,17 +90,21 @@ impl Sha512 {
             self.buf_len += take;
             rest = &rest[take..];
             if self.buf_len == BLOCK_LEN {
-                let block = self.buf;
-                self.compress(&block);
+                compress(&mut self.state, &self.buf);
                 self.buf_len = 0;
             }
         }
-        // Then whole blocks straight out of the input, no copying.
+        // Then whole blocks straight out of the input - genuinely no copy now.
+        // `split_at` has already guaranteed the length, so the array conversion
+        // cannot fail; `compress` taking the state by itself is what lets the
+        // block stay borrowed from the caller's slice instead of being memcpy'd
+        // into a local first (one 128-byte copy per block, ~7,800 of them in the
+        // million-byte test - and a comment that said otherwise from the day it
+        // was written).
         while rest.len() >= BLOCK_LEN {
             let (block, tail) = rest.split_at(BLOCK_LEN);
-            let mut b = [0u8; BLOCK_LEN];
-            b.copy_from_slice(block);
-            self.compress(&b);
+            let block: &[u8; BLOCK_LEN] = block.try_into().expect("split_at guarantees 128 bytes");
+            compress(&mut self.state, block);
             rest = tail;
         }
         // Whatever is left is shorter than a block.
@@ -135,8 +139,7 @@ impl Sha512 {
             self.buf_len += take;
             rest = &rest[take..];
             if self.buf_len == BLOCK_LEN {
-                let block = self.buf;
-                self.compress(&block);
+                compress(&mut self.state, &self.buf);
                 self.buf_len = 0;
             }
             if rest.is_empty() {
@@ -150,52 +153,57 @@ impl Sha512 {
         }
         out
     }
+}
 
-    /// The FIPS 180-4 §6.4.2 compression function over one 128-byte block.
-    fn compress(&mut self, block: &[u8; BLOCK_LEN]) {
-        // Message schedule. 80 words: the first 16 are the block, the rest are
-        // derived. Held in a fixed array - no heap, and bounded stack.
-        let mut w = [0u64; 80];
-        for i in 0..16 {
-            let mut b = [0u8; 8];
-            b.copy_from_slice(&block[i * 8..i * 8 + 8]);
-            w[i] = u64::from_be_bytes(b);
-        }
-        for i in 16..80 {
-            let s0 = w[i - 15].rotate_right(1) ^ w[i - 15].rotate_right(8) ^ (w[i - 15] >> 7);
-            let s1 = w[i - 2].rotate_right(19) ^ w[i - 2].rotate_right(61) ^ (w[i - 2] >> 6);
-            w[i] = w[i - 16]
-                .wrapping_add(s0)
-                .wrapping_add(w[i - 7])
-                .wrapping_add(s1);
-        }
+/// The FIPS 180-4 §6.4.2 compression function over one 128-byte block.
+///
+/// A free function over the state rather than a method, so a caller can pass
+/// `&mut self.state` and `&self.buf` at once - two disjoint field borrows, which
+/// the borrow checker allows and `&mut self` would not. That is what removes the
+/// per-block copy.
+fn compress(state: &mut [u64; 8], block: &[u8; BLOCK_LEN]) {
+    // Message schedule. 80 words: the first 16 are the block, the rest are
+    // derived. Held in a fixed array - no heap, and bounded stack.
+    let mut w = [0u64; 80];
+    for i in 0..16 {
+        let mut b = [0u8; 8];
+        b.copy_from_slice(&block[i * 8..i * 8 + 8]);
+        w[i] = u64::from_be_bytes(b);
+    }
+    for i in 16..80 {
+        let s0 = w[i - 15].rotate_right(1) ^ w[i - 15].rotate_right(8) ^ (w[i - 15] >> 7);
+        let s1 = w[i - 2].rotate_right(19) ^ w[i - 2].rotate_right(61) ^ (w[i - 2] >> 6);
+        w[i] = w[i - 16]
+            .wrapping_add(s0)
+            .wrapping_add(w[i - 7])
+            .wrapping_add(s1);
+    }
 
-        let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut h] = self.state;
-        for i in 0..80 {
-            let big_s1 = e.rotate_right(14) ^ e.rotate_right(18) ^ e.rotate_right(41);
-            let ch = (e & f) ^ ((!e) & g);
-            let t1 = h
-                .wrapping_add(big_s1)
-                .wrapping_add(ch)
-                .wrapping_add(K[i])
-                .wrapping_add(w[i]);
-            let big_s0 = a.rotate_right(28) ^ a.rotate_right(34) ^ a.rotate_right(39);
-            let maj = (a & b) ^ (a & c) ^ (b & c);
-            let t2 = big_s0.wrapping_add(maj);
-            h = g;
-            g = f;
-            f = e;
-            e = d.wrapping_add(t1);
-            d = c;
-            c = b;
-            b = a;
-            a = t1.wrapping_add(t2);
-        }
+    let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut h] = *state;
+    for i in 0..80 {
+        let big_s1 = e.rotate_right(14) ^ e.rotate_right(18) ^ e.rotate_right(41);
+        let ch = (e & f) ^ ((!e) & g);
+        let t1 = h
+            .wrapping_add(big_s1)
+            .wrapping_add(ch)
+            .wrapping_add(K[i])
+            .wrapping_add(w[i]);
+        let big_s0 = a.rotate_right(28) ^ a.rotate_right(34) ^ a.rotate_right(39);
+        let maj = (a & b) ^ (a & c) ^ (b & c);
+        let t2 = big_s0.wrapping_add(maj);
+        h = g;
+        g = f;
+        f = e;
+        e = d.wrapping_add(t1);
+        d = c;
+        c = b;
+        b = a;
+        a = t1.wrapping_add(t2);
+    }
 
-        let add = [a, b, c, d, e, f, g, h];
-        for (s, v) in self.state.iter_mut().zip(add.iter()) {
-            *s = s.wrapping_add(*v);
-        }
+    let add = [a, b, c, d, e, f, g, h];
+    for (s, v) in state.iter_mut().zip(add.iter()) {
+        *s = s.wrapping_add(*v);
     }
 }
 

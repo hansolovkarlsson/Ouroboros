@@ -193,7 +193,7 @@ ifeq ($(PROFILE),release)
 CARGO_FLAGS += --release
 endif
 
-.PHONY: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin accountd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin id-bin passwd-bin useradd-bin groupadd-bin usermod-bin chello-bin cdemo-bin cfile-bin cpico-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin sort-bin esp run run-virtio-console run-usb-kbd run-usb-multi run-gicv3 image run-image run-image-9p run-image-9p-client run-image-2vm-a run-image-2vm-b run-image-2vm-ext2-a run-image-2vm-ext2-b image-gpt run-image-gpt image-exfat run-image-exfat image-ext2 run-image-ext2 parallels-hdd release test-parallels clean
+.PHONY: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin accountd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin id-bin passwd-bin useradd-bin groupadd-bin usermod-bin chello-bin cdemo-bin cfile-bin cpico-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin sort-bin esp run run-virtio-console run-usb-kbd run-usb-multi run-gicv3 image run-image run-image-9p run-image-9p-client run-image-2vm-a run-image-2vm-b run-image-2vm-ext2-a run-image-2vm-ext2-b image-gpt run-image-gpt image-exfat run-image-exfat image-ext2 run-image-ext2 parallels-hdd release test test-parallels clean
 
 # Overridable by `make test-parallels VM_NAME=... CMDS=... BOOT_WAIT=...`.
 VM_NAME     ?= Ouroboros
@@ -1168,6 +1168,26 @@ release:
 #   make test-parallels VM_NAME="Ouroboros" BOOT_WAIT=15
 test-parallels:
 	VM_NAME="$(VM_NAME)" CMDS="$(CMDS)" BOOT_WAIT="$(BOOT_WAIT)" ./scripts/test-parallels.sh
+
+# Host unit tests for the PURE crates - the ones with no I/O, no syscalls and no
+# target dependency, so they run natively on the build machine. This exists
+# because a pure crate can otherwise have NO build coverage at all: it is a
+# workspace member but not a default-member, and until something depends on it a
+# bare `cargo build`, `make build` and `make esp` all stay green while it is
+# broken. `ed25519` is exactly that case for the length of its arc, which is
+# several PRs.
+#
+# Native target, not the workspace default (aarch64-unknown-uefi), which cannot
+# run a test binary.
+HOST_TARGET := $(shell rustc -vV | sed -n 's/^host: //p')
+PURE_CRATES := accounts regex ed25519
+
+test:
+	@for c in $(PURE_CRATES); do \
+		echo "== cargo test -p $$c"; \
+		cargo test -p $$c --target $(HOST_TARGET) || exit 1; \
+	done
+	@echo "== all pure-crate host tests passed"
 
 clean:
 	cargo clean
