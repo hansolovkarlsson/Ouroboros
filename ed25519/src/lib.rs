@@ -15,8 +15,11 @@
 //!   `field.rs` for why a rule the caller must remember was the wrong trade),
 //!   and the inversion chain the curve layer needs.
 //!
-//! Still to come: curve points and scalar multiplication (step 3), sign/verify
-//! (step 4, the go/no-go gate).
+//! - **Curve points and scalar multiplication** (step 3). Extended coordinates,
+//!   a unified addition formula with no special cases, and a double-and-add that
+//!   does the same work for every scalar bit.
+//!
+//! Still to come: sign/verify (step 4, the go/no-go gate).
 //!
 //! ## House rules for this crate
 //!
@@ -33,8 +36,10 @@
 
 #![no_std]
 
+mod curve;
 mod field;
 mod sha512;
 
+pub use curve::{Point, POINT_LEN};
 pub use field::{Fe, ELEM_LEN};
 pub use sha512::{sha512, Sha512, DIGEST_LEN};

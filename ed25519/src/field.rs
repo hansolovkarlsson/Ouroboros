@@ -180,6 +180,22 @@ impl Fe {
     /// implementation does, so a caller that forgets to check gets a wrong
     /// answer rather than a panic. Callers that care must check.
     pub fn invert(self) -> Fe {
+        let (z_250_0, z11) = self.pow_chain();
+        // x^(2^255 - 21) = x^(p-2)
+        z_250_0.square_n(5).mul(z11)
+    }
+
+    /// `self^((p-5)/8)` = `self^(2²⁵² − 3)`, the exponent that recovers a square
+    /// root candidate on this curve. Shares its addition chain with [`invert`],
+    /// which is most of the cost of both.
+    pub fn pow_p58(self) -> Fe {
+        let (z_250_0, _) = self.pow_chain();
+        z_250_0.square_n(2).mul(self)
+    }
+
+    /// The shared part of the two exponentiations above: returns
+    /// `(self^(2²⁵⁰ − 1), self^11)`.
+    fn pow_chain(self) -> (Fe, Fe) {
         // x^(2^5 - 1)
         let z2 = self.square();
         let z4 = z2.square();
@@ -209,8 +225,7 @@ impl Fe {
         // x^(2^250 - 1)
         let z_250_50 = z_200_0.square_n(50);
         let z_250_0 = z_250_50.mul(z_50_0);
-        // x^(2^255 - 21) = x^(p-2)
-        z_250_0.square_n(5).mul(z11)
+        (z_250_0, z11)
     }
 
     /// Propagate carries so every limb is below 2⁵¹, folding the top carry back
@@ -307,6 +322,30 @@ impl Fe {
             diff |= a[i] ^ b[i];
         }
         diff == 0
+    }
+
+    /// Branchless select: `b` when `choice` is 1, `a` when it is 0.
+    ///
+    /// Scalar multiplication drives this with **bits of a secret key**, so it
+    /// must not become a branch: the whole point is that the sequence of
+    /// operations does not depend on the scalar. `choice` must be exactly 0 or 1
+    /// — anything else produces a nonsense mask, which is why it is not a `bool`
+    /// crossing an API boundary but a value this crate produces itself.
+    pub(crate) fn ct_select(a: Fe, b: Fe, choice: u8) -> Fe {
+        debug_assert!(choice == 0 || choice == 1);
+        let mask = 0u64.wrapping_sub(choice as u64); // 0 or all-ones
+        let mut out = [0u64; 5];
+        for ((o, x), y) in out.iter_mut().zip(a.0.iter()).zip(b.0.iter()) {
+            *o = x ^ (mask & (x ^ y));
+        }
+        Fe(out)
+    }
+
+    /// The low bit of the canonical encoding — Ed25519's notion of a field
+    /// element being "negative", which is what a point's compressed form stores
+    /// as the sign of x.
+    pub(crate) fn is_negative(self) -> u8 {
+        self.encode()[0] & 1
     }
 
     /// Whether this is the zero element.
