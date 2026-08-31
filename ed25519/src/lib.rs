@@ -19,7 +19,11 @@
 //!   a unified addition formula with no special cases, and a double-and-add that
 //!   does the same work for every scalar bit.
 //!
-//! Still to come: sign/verify (step 4, the go/no-go gate).
+//! - **Scalar arithmetic mod L, and sign/verify** (step 4 — the arc's go/no-go
+//!   gate). RFC 8032 §5.1 with no variations, deterministic, no randomness.
+//!
+//! The primitive is complete. What remains is putting it on the target (step 5)
+//! and then on the wire (steps 6-10).
 //!
 //! ## House rules for this crate
 //!
@@ -38,8 +42,12 @@
 
 mod curve;
 mod field;
+mod scalar;
+mod sign;
 mod sha512;
 
 pub use curve::{Point, POINT_LEN};
 pub use field::{Fe, ELEM_LEN};
+pub use scalar::{Scalar, SCALAR_LEN};
+pub use sign::{public_key, sign, verify, PUBLIC_LEN, SECRET_LEN, SIGNATURE_LEN};
 pub use sha512::{sha512, Sha512, DIGEST_LEN};
