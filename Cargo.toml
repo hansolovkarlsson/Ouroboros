@@ -2,7 +2,7 @@
 resolver = "2"
 members = [
     # Kernel + shared libraries stay at the repo root.
-    "kernel", "ulib", "syscall-abi", "ninep-abi", "accounts", "regex",
+    "kernel", "ulib", "syscall-abi", "ninep-abi", "accounts", "regex", "ed25519",
     # All userland programs live under programs/, grouped by role.
     "programs/shell",
     "programs/servers/fsd", "programs/servers/cond", "programs/servers/netd",
