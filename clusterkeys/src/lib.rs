@@ -536,3 +536,75 @@ mod tests {
         assert_eq!(find_by_ip(&buf, &[10, 0, 2, 10]).expect("by ip").name, b"node-a");
     }
 }
+
+#[cfg(test)]
+mod generator_agreement {
+    //! **The Python generator writes these files; this crate reads them.** Two
+    //! implementations, one format, and nothing but a test between them.
+    //!
+    //! The fixtures below are `scripts/mkclusterkeys.py`'s real output, pasted
+    //! verbatim — not a hand-written approximation of it, which would test only
+    //! that this parser agrees with my idea of the generator. Regenerate with:
+    //!
+    //! ```text
+    //! python3 scripts/mkclusterkeys.py <dir> node-a
+    //! ```
+    //!
+    //! If the generator's format ever drifts, this fails on the host rather than
+    //! becoming a guest that silently authorizes nobody.
+    use super::*;
+
+    const GENERATED_AUTHORIZED: &str = "# Peers this machine accepts. One line per peer:\n#   <name> <ipv4> <public-key-hex>\n# Delete or comment out a line to revoke that peer.\n# DEV KEYS: derived from fixed seeds, so they are public. Not for real use.\nnode-a 10.0.2.10 de5317f86f9d763d9fc5c4589a85dda15d136d5c31d4c7d6bba980dfca37d4e6\nnode-b 10.0.2.11 e9e1630da4a29b961703d42eb3300448078ff0f1c1c7d37dde269f132d53b81d\nhost 10.0.2.2 3e71226a69d738c5921acfcad1e823d28c1d3e0b047b0af245b220b436bee964\n";
+    const GENERATED_ID: &str = "92c8e58c772b748688638ab47c61185a8aaa12ff690c61caeab9e98ca44f9e9f\n";
+    const GENERATED_ID_PUB: &str = "de5317f86f9d763d9fc5c4589a85dda15d136d5c31d4c7d6bba980dfca37d4e6\n";
+
+    #[test]
+    fn every_generated_peer_parses() {
+        let bytes = GENERATED_AUTHORIZED.as_bytes();
+        let mut found = 0;
+        for line in bytes.split(|&c| c == b'\n') {
+            if parse_line(line).is_some() {
+                found += 1;
+            }
+        }
+        assert_eq!(found, 3, "the generator writes three dev peers; parsed {found}");
+    }
+
+    #[test]
+    fn the_generated_peers_are_findable_by_key_and_address() {
+        let bytes = GENERATED_AUTHORIZED.as_bytes();
+        for (name, ip) in [
+            (&b"node-a"[..], [10u8, 0, 2, 10]),
+            (&b"node-b"[..], [10, 0, 2, 11]),
+            (&b"host"[..], [10, 0, 2, 2]),
+        ] {
+            let by_ip = find_by_ip(bytes, &ip).unwrap_or_else(|| panic!("{name:?} by address"));
+            assert_eq!(by_ip.name, name);
+            let by_key = find_by_key(bytes, &by_ip.key).expect("and back by its key");
+            assert_eq!(by_key.name, name);
+        }
+    }
+
+    #[test]
+    fn the_generated_key_files_parse_and_correspond() {
+        // `id` is the private seed and `id.pub` the public key; this crate does
+        // not do curve maths, so what it can check is that both are well-formed
+        // and that the public one is the peer entry for this node.
+        let secret = parse_key_file(GENERATED_ID.as_bytes()).expect("id parses");
+        let public = parse_key_file(GENERATED_ID_PUB.as_bytes()).expect("id.pub parses");
+        assert_ne!(secret, public, "the private and public halves must differ");
+        let me = find_by_key(GENERATED_AUTHORIZED.as_bytes(), &public)
+            .expect("this node's own public key must appear in its authorized file");
+        assert_eq!(me.name, b"node-a");
+    }
+
+    #[test]
+    fn the_generators_comment_header_is_skipped_not_parsed() {
+        // The file opens with four comment lines. If any became a peer, the
+        // count in `every_generated_peer_parses` would be wrong - but check the
+        // intent directly too, since that is the property that matters.
+        let first = GENERATED_AUTHORIZED.as_bytes().split(|&c| c == b'\n').next().expect("a line");
+        assert!(first.starts_with(b"#"));
+        assert!(parse_line(first).is_none());
+    }
+}

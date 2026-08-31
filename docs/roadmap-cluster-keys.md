@@ -162,7 +162,9 @@ if the curve arithmetic does not come together, nothing has been built on it.
 | 3 | Curve points + scalar multiplication | derive public keys from RFC 8032 secret keys and compare | one wrong limb changes the key completely |
 | 4 | **Sign/verify — the go/no-go gate** | every RFC 8032 §7.1 vector + cross-check against an independent Python implementation | tampered message, signature and key must each be rejected |
 | 5 ✅ | It runs on the **guest** (`/bin/edtest`) | same vectors pass on-device; **3,392 B stack, ~1.4 ms sign+verify**; zero `ABS64` in the linked binary (`RELATIVE` entries are present and expected — the loader applies those) | probe calibrated against a known 4 KB frame, so a silently-dead measurement cannot pass; relocations checked by `scripts/check-relocs.sh`, which fails if the tool reports none at all |
-| 6 | Key files + generator, **no wire change** | parse round-trips as host tests; correct modes on-device; export still behaves exactly as before | nothing reads the new files yet |
+| 6a ✅ | The **format**, as a pure `clusterkeys` crate | host tests; refusals tested harder than acceptances | mutation testing found `#node-a` (no space) parsing as a peer **holding a valid key** — commenting a line out has to revoke it |
+| 6b ✅ | Host **generator** + image staging | `/etc/cluster/{id,id.pub,authorized}` on the guest, `id` at **0600**; the Rust parser reads the Python generator's *verbatim* output as a host fixture; export unchanged | nothing reads the files yet, so a format error shows up as a file you can `cat` rather than a failed handshake |
+| 6c | **On-device** key generation | refuses without real entropy | |
 | 7 | Exporter **accepts** signed frames alongside old ones | **the Python peer signs and the guest verifies** — the wire is proven by a foreign implementation before a guest client exists | wrong key, unknown key, tampered frame each refused |
 | 8 | Client **sends** signed frames | two-node matrix both directions; Python verifies guest signatures | |
 | 9 | Reply signing (mutual auth over the new primitive) | Python verifies guest replies | tampered reply rejected |
@@ -216,6 +218,25 @@ probe run around a function with a deliberate extra 4 KB frame reads 4,160 bytes
 higher. A probe that silently measured nothing would have reported a small,
 plausible number, and a plausible number is exactly what this step must not
 accept on faith.
+
+## A consequence found while staging (step 6b)
+
+**The two-node rig can no longer boot one image twice.** It did, for as long as
+the cluster shared one symmetric key: `run-image-2vm-ext2-a` and `-b` each copied
+`espext2.img`. Per-machine keypairs make that impossible — the two nodes must
+hold *different* private keys — so each is now a full rebuild with its own
+`CLUSTER_NODE`, and `make images-2vm-ext2` builds the pair. Only
+`/etc/cluster/id` differs between them; `authorized` is identical, because every
+node accepts the same peers.
+
+The dev keys are **deterministic**, derived from fixed seed strings rather than
+generated randomly per build. That is not laziness: A's disk and B's disk are
+built by separate `make` invocations, and random keys would give them
+disagreeing `authorized` files — a cluster that fails to talk to itself, with a
+symptom (authentication refused) that looks nothing like the cause (the images
+disagree about who the peers are). It does mean **the dev private keys are in the
+repository**, the same trade the existing dev `CLUSTER_KEY` already makes; a real
+deployment uses `--random` or generates on the device.
 
 ## Risks, named in advance
 
