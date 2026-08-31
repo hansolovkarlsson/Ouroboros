@@ -59,15 +59,63 @@ pub fn public_key(secret: &[u8; SECRET_LEN]) -> [u8; PUBLIC_LEN] {
     Point::mul_base(&a).encode()
 }
 
-/// Sign `message` with `secret`, returning `R ‖ s`.
-pub fn sign(secret: &[u8; SECRET_LEN], message: &[u8]) -> [u8; SIGNATURE_LEN] {
-    let (a, prefix) = expand(secret);
-    let public = Point::mul_base(&a).encode();
+/// A secret key with its expansion and public key computed once.
+///
+/// **This is what a repeated signer should hold.** A scalar multiplication is
+/// ~4,600 field multiplications, and a signature inherently needs one (for `R`).
+/// Deriving `A` needs a second — but `A` never changes, so recomputing it per
+/// signature doubles the cost of every signature for nothing. `netd` reads its
+/// key once at boot and signs per frame, which is exactly the shape this serves;
+/// with the free `sign` below it would have paid twice on every frame, and step
+/// 5's measurement would have been of the wrong thing.
+#[derive(Clone, Copy)]
+pub struct SigningKey {
+    /// The clamped secret scalar.
+    a: [u8; 32],
+    /// The nonce prefix, the high half of the expanded seed.
+    prefix: [u8; 32],
+    /// `A = a·B`, compressed — computed once here.
+    public: [u8; PUBLIC_LEN],
+}
 
+impl SigningKey {
+    /// Expand a secret seed. One scalar multiplication, paid once.
+    pub fn from_secret(secret: &[u8; SECRET_LEN]) -> SigningKey {
+        let (a, prefix) = expand(secret);
+        let public = Point::mul_base(&a).encode();
+        SigningKey { a, prefix, public }
+    }
+
+    /// The public key, already computed.
+    pub fn public(&self) -> [u8; PUBLIC_LEN] {
+        self.public
+    }
+
+    /// Sign `message`, returning `R ‖ s`. One scalar multiplication.
+    pub fn sign(&self, message: &[u8]) -> [u8; SIGNATURE_LEN] {
+        sign_inner(&self.a, &self.prefix, &self.public, message)
+    }
+}
+
+/// Sign `message` with `secret`, returning `R ‖ s`.
+///
+/// Convenience for a one-off signature and for the test vectors. It expands the
+/// key and derives the public key on every call, so a caller that signs more
+/// than once should hold a [`SigningKey`] instead.
+pub fn sign(secret: &[u8; SECRET_LEN], message: &[u8]) -> [u8; SIGNATURE_LEN] {
+    SigningKey::from_secret(secret).sign(message)
+}
+
+fn sign_inner(
+    a: &[u8; 32],
+    prefix: &[u8; 32],
+    public: &[u8; PUBLIC_LEN],
+    message: &[u8],
+) -> [u8; SIGNATURE_LEN] {
     // r = H(prefix ‖ M), the deterministic nonce. Hashed incrementally because
     // the message is not adjacent to the prefix in memory and may be any length.
     let mut h = Sha512::new();
-    h.update(&prefix);
+    h.update(prefix);
     h.update(message);
     let r = Scalar::from_hash(&h.finalize());
     let r_point = Point::mul_base(&r.to_bytes()).encode();
@@ -75,12 +123,12 @@ pub fn sign(secret: &[u8; SECRET_LEN], message: &[u8]) -> [u8; SIGNATURE_LEN] {
     // k = H(R ‖ A ‖ M)
     let mut h = Sha512::new();
     h.update(&r_point);
-    h.update(&public);
+    h.update(public);
     h.update(message);
     let k = Scalar::from_hash(&h.finalize());
 
     // s = r + k·a
-    let s = Scalar::mul_add(k, Scalar::from_bytes_mod_order(&a), r);
+    let s = Scalar::mul_add(k, Scalar::from_bytes_mod_order(a), r);
 
     let mut sig = [0u8; SIGNATURE_LEN];
     sig[..32].copy_from_slice(&r_point);
@@ -305,13 +353,36 @@ mod tests {
         let msg = b"anything";
         for seed in 0u8..64 {
             let mut sig = [seed; SIGNATURE_LEN];
-            sig[63] = seed;
+            // MASK THE TOP BYTE of s, so s < L and verification gets PAST
+            // `from_canonical_bytes` into point decoding, the challenge hash and
+            // the equation - the paths "no path may panic" is actually about.
+            // This line used to be `sig[63] = seed`, a no-op on an array already
+            // filled with `seed`, which meant 48 of these 64 cases were refused
+            // at the very first line of `verify` and proved nothing about the
+            // rest of it.
+            sig[63] = seed & 0x0f;
             assert!(!verify(&pk, msg, &sig));
             let bad_pk = [seed; PUBLIC_LEN];
             assert!(!verify(&bad_pk, msg, &sig));
         }
         assert!(!verify(&[0xff; PUBLIC_LEN], msg, &[0xff; SIGNATURE_LEN]));
         assert!(!verify(&[0x00; PUBLIC_LEN], msg, &[0x00; SIGNATURE_LEN]));
+    }
+
+    #[test]
+    fn a_signing_key_agrees_with_the_one_shot_form() {
+        // SigningKey caches the public key instead of deriving it per signature.
+        // The bug that would introduce is a cached value that does not match what
+        // the one-shot path computes, so check both halves: the key it reports
+        // and the signatures it produces.
+        let mut buf = [0u8; 256];
+        for (name, sk, pk, msg, sig) in VECTORS {
+            let key = SigningKey::from_secret(&unhex(sk));
+            assert_eq!(key.public(), unhex(pk), "cached public key for {name}");
+            let m = unhex_msg(msg, &mut buf);
+            assert_eq!(key.sign(m), unhex_sig(sig), "SigningKey signature for {name}");
+            assert_eq!(key.sign(m), sign(&unhex(sk), m), "must match the one-shot form");
+        }
     }
 
     #[test]
