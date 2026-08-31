@@ -160,8 +160,13 @@ pub fn parse_line(line: &[u8]) -> Option<Peer<'_>> {
     let (name, rest) = split_field(line)?;
     let (ip_text, rest) = split_field(rest)?;
     let (key_text, rest) = split_field(rest)?;
-    // A trailing field means the line is not what this parser thinks it is.
-    if !trim(rest).is_empty() {
+    // A trailing `# note` is accepted - it is how people annotate this kind of
+    // file, and rejecting it would silently unauthorize a peer whose line still
+    // looks correct. Anything else trailing means the line is not what this
+    // parser thinks it is, and a line whose meaning is unclear must not become a
+    // peer.
+    let rest = trim(rest);
+    if !rest.is_empty() && rest[0] != b'#' {
         return None;
     }
     if name.is_empty() || name.len() > NAME_MAX {
@@ -204,7 +209,10 @@ pub fn format_line(
     ip: &[u8; 4],
     key: &[u8; KEY_LEN],
 ) -> Option<usize> {
-    if name.is_empty() || name.len() > NAME_MAX || contains_space(name) {
+    // A name that would make the line unreadable is refused rather than written.
+    // A leading `#` is the subtle one: the line would look authorized to anyone
+    // reading the file and be skipped as a comment by every lookup.
+    if name.is_empty() || name.len() > NAME_MAX || contains_space(name) || name[0] == b'#' {
         return None;
     }
     let mut ip_buf = [0u8; 15];
@@ -250,8 +258,18 @@ fn trim(s: &[u8]) -> &[u8] {
     &s[a..b]
 }
 
+/// Whitespace for this format — **including NUL**.
+///
+/// A consumer reads `authorized` into a fixed zero-initialised buffer, and if it
+/// passes the whole buffer rather than just the bytes read, the trailing NUL run
+/// would otherwise become a line of its own. That line is skipped as malformed,
+/// which sounds harmless — except that without a trailing newline the NULs join
+/// the LAST peer's line and take it with them. For a one-line file that is every
+/// peer, silently. It fails closed, so it is availability rather than
+/// authorization, but it is invisible, and treating NUL as whitespace removes
+/// the whole class.
 fn is_space(c: u8) -> bool {
-    c == b' ' || c == b'\t' || c == b'\r' || c == b'\n'
+    c == b' ' || c == b'\t' || c == b'\r' || c == b'\n' || c == 0
 }
 
 /// Split off the first whitespace-delimited field, returning it and the rest.
@@ -297,7 +315,11 @@ mod tests {
     /// A realistic file, including the shapes a hand-edited one grows: a comment,
     /// a blank line, indentation, and a trailing newline.
     fn sample() -> [u8; 256] {
-        let mut buf = [b'\n'; 256];
+        // Padded with NUL, not newlines. A consumer reads this file into a
+        // zero-initialised buffer, so NUL padding is the realistic fixture - and
+        // newline padding is the one byte that would hide a parser which cannot
+        // cope with it.
+        let mut buf = [0u8; 256];
         let text = b"# the cluster\nnode-a 10.0.2.10 d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a\n\n  node-b 10.0.2.11 3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c  \n";
         buf[..text.len()].copy_from_slice(text);
         buf
@@ -340,7 +362,7 @@ mod tests {
         let f = sample();
         assert!(find_by_key(&f, &KEY_B).is_some());
         let text = b"# the cluster\nnode-a 10.0.2.10 d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a\n";
-        let mut without = [b'\n'; 256];
+        let mut without = [0u8; 256];
         without[..text.len()].copy_from_slice(text);
         assert!(find_by_key(&without, &KEY_A).is_some(), "node-a still authorized");
         assert!(find_by_key(&without, &KEY_B).is_none(), "node-b revoked");
@@ -385,11 +407,45 @@ mod tests {
             &b"# node-a 10.0.2.10 d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a\n"[..],
             &b"  #node-a 10.0.2.10 d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a\n"[..],
         ] {
-            let mut buf = [b'\n'; 256];
+            let mut buf = [0u8; 256];
             buf[..text.len()].copy_from_slice(text);
             assert!(find_by_key(&buf, &KEY_A).is_none(), "a commented-out peer is revoked");
             assert!(find_by_ip(&buf, &[10, 0, 2, 10]).is_none());
         }
+    }
+
+    #[test]
+    fn a_zero_padded_buffer_does_not_swallow_the_last_peer() {
+        // The realistic consumer mistake: read the file into a fixed buffer and
+        // pass the WHOLE buffer. Without a trailing newline the NUL run joins the
+        // last line; for a one-line file that is every peer, silently.
+        let text = b"node-a 10.0.2.10 d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a";
+        let mut buf = [0u8; 256];
+        buf[..text.len()].copy_from_slice(text);
+        assert!(find_by_key(&buf, &KEY_A).is_some(), "no trailing newline must still parse");
+        assert!(find_by_ip(&buf, &[10, 0, 2, 10]).is_some());
+    }
+
+    #[test]
+    fn a_trailing_comment_is_allowed() {
+        // How people annotate a file like this. Rejecting it would silently
+        // unauthorize a peer whose line still looks perfectly correct.
+        let text = b"node-a 10.0.2.10 d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a  # primary\n";
+        let mut buf = [0u8; 256];
+        buf[..text.len()].copy_from_slice(text);
+        let p = find_by_key(&buf, &KEY_A).expect("annotated line must still authorize");
+        assert_eq!(p.name, b"node-a");
+        // But a trailing field that is NOT a comment is still refused.
+        let bad = b"node-a 10.0.2.10 d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a rubbish";
+        assert!(parse_line(bad).is_none());
+    }
+
+    #[test]
+    fn format_line_refuses_a_name_that_would_read_as_a_comment() {
+        // format/parse must agree: writing `#node-a` would produce a line that
+        // looks authorized in the file and is skipped by every lookup.
+        let mut buf = [0u8; 160];
+        assert!(format_line(&mut buf, b"#node-a", &[10, 0, 2, 10], &KEY_A).is_none());
     }
 
     #[test]
@@ -406,6 +462,10 @@ mod tests {
     #[test]
     fn hex_round_trips_both_ways() {
         assert_eq!(decode_key(KEY_A_HEX.as_bytes()).expect("decode"), KEY_A);
+        assert_eq!(decode_key(KEY_B_HEX.as_bytes()).expect("decode"), KEY_B);
+        let mut b_out = [0u8; KEY_HEX_LEN];
+        encode_key(&KEY_B, &mut b_out);
+        assert_eq!(&b_out, KEY_B_HEX.as_bytes());
         let mut out = [0u8; KEY_HEX_LEN];
         encode_key(&KEY_A, &mut out);
         assert_eq!(&out, KEY_A_HEX.as_bytes());
@@ -471,7 +531,7 @@ mod tests {
         // A duplicate is a hand-editing mistake; the behaviour just has to be
         // defined and documented rather than surprising.
         let text = b"node-a 10.0.2.10 d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a\nnode-dup 10.0.2.10 3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c\n";
-        let mut buf = [b'\n'; 300];
+        let mut buf = [0u8; 300];
         buf[..text.len()].copy_from_slice(text);
         assert_eq!(find_by_ip(&buf, &[10, 0, 2, 10]).expect("by ip").name, b"node-a");
     }
