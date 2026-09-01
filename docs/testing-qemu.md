@@ -144,6 +144,44 @@ python3 scripts/np9p_client.py localhost 5640 readdir / --legacy-mac      # -> A
 python3 scripts/np9p_client.py localhost 5640 readdir / --peer=node-b     # -> REPLY NOT VERIFIED
 ```
 
+`run` drives the `cpu` path from the host, which is the only surface where the
+export's refusals are *prose* rather than a status code — a remote-run reply is
+an output stream, not a framed reply:
+
+```sh
+python3 scripts/np9p_client.py localhost 5640 run "uptime"                # the guest's output
+python3 scripts/np9p_client.py localhost 5640 run "uptime" --sign=nobody  # cpu: authentication failed ...
+```
+
+**A REFUSAL MUST NOT REVEAL THIS MACHINE'S OWN STATE.** The gate that answers an
+unusable frame runs *before* authentication, on nothing but the magic number, so
+whatever it says is said to a stranger. To check that, run the same refused
+command against a configured node and one with no `/etc/cluster/id`, and compare
+the two lines — they must be byte-identical:
+
+```sh
+# a second image with no identity (nothing stages this; do it by hand)
+make esp && rm build/esp/etc/cluster/id
+hdiutil create -size 64m -fs FAT32 -volname OUROBOROS -srcfolder build/esp \
+    -format UDTO -ov build/noid.cdr && mv build/noid.cdr build/noid.img
+make image        # restores the identity and rebuilds the normal image
+
+# boot both with their own hostfwd, then:
+python3 scripts/np9p_client.py localhost 5640 run "uptime" --sign=nobody   # configured
+python3 scripts/np9p_client.py localhost 5642 run "uptime" --sign=nobody   # no identity
+```
+
+Until 2026-09-01 these differed — the second said "the remote machine cannot
+serve signed requests (no identity of its own, or no authorized peers)" — so
+anyone who could reach port 564 could fingerprint every node's configuration
+while holding no key at all. The distinction now lives only in each machine's own
+boot log, where it is useful and where nobody else can ask for it.
+
+`--legacy-mac` is refused on the `run` path: the export does not parse the
+retired format, so it cannot tell a `cpu` request from an fs one and answers with
+a framed status either way, which this path would print as binary. Use it with
+`readdir`/`read`/`stat`, where the reply is decoded.
+
 The shared `\CLUSTER.KEY` (v0.10.0–v0.15.0) authenticates nothing now and is no
 longer staged onto any image; `--legacy-mac` exists only so its refusal is
 demonstrable rather than assumed.
