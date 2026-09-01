@@ -144,7 +144,42 @@ def main() -> int:
     print(tb)
     print(f"\n--- A: {drive_qemu.fault_line(a)}")
     print(f"--- B: {drive_qemu.fault_line(b)}")
+    print(f"--- A: {auth_census(os.path.join(build, 'net-2vm-a.pcap'))}")
+    print(f"--- B: {auth_census(os.path.join(build, 'net-2vm-b.pcap'))}")
     return 0 if ok_b else 1
+
+
+# The two export frame formats, as they appear ON THE WIRE. The magic is written
+# as a little-endian u64 of the big-endian integer the tag spells, so the bytes
+# arrive REVERSED - which is why searching a capture for "AUTHNP03" finds
+# nothing and looks like "the cluster used neither format".
+AUTH_FORMATS = (
+    ("signed", b"AUTHNP03"[::-1]),
+    ("MAC'd", b"AUTHNP02"[::-1]),
+)
+
+
+def auth_census(pcap) -> str:
+    """Which export auth format this node's traffic actually used.
+
+    The capture is taken on every run precisely because a transcript cannot
+    answer this - and until this existed, nothing read it. A two-node run whose
+    wire carried five SIGNED frames and zero MAC'd ones still printed
+    "remote-mounted (cluster-key auth)", and the transcript looked perfect. The
+    health bar says the run did not fault; this says what it did.
+    """
+    try:
+        with open(pcap, "rb") as f:
+            data = f.read()
+    except OSError as e:
+        return f"auth format: capture unreadable ({e.strerror})"
+    counts = [(name, data.count(tag)) for name, tag in AUTH_FORMATS]
+    seen = [f"{n} {name}" for name, n in counts if n]
+    if not seen:
+        # Not necessarily wrong - a node that was never asked for anything
+        # exports nothing - but never silently "fine" either.
+        return "auth format: NO export frames seen in the capture"
+    return "auth format: " + ", ".join(seen) + " frame(s)"
 
 
 if __name__ == "__main__":

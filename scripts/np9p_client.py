@@ -42,6 +42,18 @@ NP_READ_AT = NP_BASE + 10
 FS_ERR_MIN = (1 << 64) - 64  # errors are a small band just below u64::MAX
 FS_ERR_AUTH = (1 << 64) - 1 - 30  # u64::MAX - 30
 
+# NOT a wire value: what `recv_reply` returns when THIS CLIENT would not trust
+# the reply it got - the exporter's signature did not verify against the key we
+# expect for the host we dialled. Distinct from FS_ERR_AUTH because those are
+# opposite failures, and reporting both as "AUTH FAILED" made this script agree
+# with whatever the reader already believed. A negative control that cannot tell
+# "the export refused me" from "I refused the export" proves neither.
+# Deliberately ONE PAST the u64 range: it can never collide with a status the
+# wire can carry, and it still compares `>= FS_ERR_MIN`, so every existing
+# "is this an error?" branch in this script keeps treating it as one instead of
+# falling through to the success path or raising a TypeError.
+REPLY_UNVERIFIED = 1 << 64
+
 # Cluster auth wire constants (ninep-abi). Must match the guest's CLUSTER.KEY.
 NP_AUTH_MAGIC = int.from_bytes(b"AUTHNP02", "big")  # ninep-abi NP_AUTH_MAGIC
 NP_AUTH_MAGIC_SIGNED = int.from_bytes(b"AUTHNP03", "big")  # the per-machine-keypair format
@@ -105,7 +117,22 @@ USER = b"root"
 # i.e. the key for the host being dialled. Defaults to the dev node-a identity,
 # which is what every image stages as its own; `--peer=<label>` picks another,
 # including a wrong one, to prove the check bites.
-PEER_KEY = None
+#
+# Held as a LABEL and derived on demand. Deriving it is a scalar multiplication
+# in pure Python, and loading the reference runs its RFC 8032 self-check first -
+# together about a second, which used to be paid by every invocation including
+# `np9p_client.py` with no arguments at all. It is only ever needed to verify a
+# SIGNED reply, so an unsigned run (and a usage error) now pays nothing.
+PEER_LABEL = "ouroboros-dev-node-a"
+_PEER_KEY = None
+
+
+def peer_key():
+    """The expected exporter public key, derived once, on first use."""
+    global _PEER_KEY
+    if _PEER_KEY is None:
+        _PEER_KEY = load_ed_reference().public_key(dev_seed(PEER_LABEL))
+    return _PEER_KEY
 
 
 def build_frame(verb, tree, params, payload):
@@ -172,18 +199,29 @@ def recv_reply(sock, key, nonce, expect_signed=False, peer_key=None):
         # against the key expected for the HOST WE DIALLED, not against any key
         # we happen to authorize. Accepting the latter would authenticate "some
         # cluster member" rather than "the machine I asked".
+        # A body too short to hold a signature is not a mangled reply, it is
+        # the DENIAL shape: the export refuses an unauthorized request with a
+        # bare `[len=8][FS_ERR_AUTH]` and no signature, because it has nothing
+        # to sign with on behalf of a caller it just rejected. Confirmed on the
+        # wire: 12 bytes total. So report the export's refusal, not ours.
+        #
+        # A hostile middlebox could truncate a real reply into this shape and
+        # make us print "refused" for something else. That costs a diagnostic,
+        # not a trust decision - both paths refuse the reply either way.
         if len(body) < NP_SIG_LEN + 8:
             return FS_ERR_AUTH, b""
         sig, np = body[:NP_SIG_LEN], body[NP_SIG_LEN:]
         if peer_key is None or not load_ed_reference().verify(peer_key, SIG_DOMAIN_REPLY + nonce + np, sig):
-            return FS_ERR_AUTH, b""
+            return REPLY_UNVERIFIED, b""
         (status,) = struct.unpack("<Q", np[:8])
         return status, np[8:]
     if len(body) < 32 + 8:
-        return FS_ERR_AUTH, b""  # too short to be a sealed reply (or a denial)
+        # Too short to be a sealed reply. This IS the shape of an export denial,
+        # so it stays FS_ERR_AUTH rather than becoming a local-refusal report.
+        return FS_ERR_AUTH, b""
     reply_mac, np = body[:32], body[32:]
     if not hmac.compare_digest(reply_mac, hmac.new(key, nonce + np, hashlib.sha256).digest()):
-        return FS_ERR_AUTH, b""  # reply not authenticated
+        return REPLY_UNVERIFIED, b""  # we would not trust this reply
     (status,) = struct.unpack("<Q", np[:8])
     data = np[8:]
     return status, data
@@ -200,7 +238,7 @@ def one_op(host, port, key, np_msg, timeout=10):
         status, data = recv_reply(
             s, key, nonce,
             expect_signed=SIGN_KEY is not None,
-            peer_key=PEER_KEY,
+            peer_key=peer_key() if SIGN_KEY is not None else None,
         )
     return status, data
 
@@ -223,6 +261,8 @@ def do_dial(host, port, key, dst_ip, dst_port, request):
     import time
     base = "/net/tcp"
     st, data = np_readfile(host, port, key, base + "/clone")
+    if st == REPLY_UNVERIFIED:
+        print("status: REPLY NOT VERIFIED"); sys.exit(1)
     if st == FS_ERR_AUTH:
         print("status: AUTH FAILED"); sys.exit(1)
     if st >= FS_ERR_MIN or not data.strip().isdigit():
@@ -368,15 +408,14 @@ def main():
             SIGN_KEY = dev_seed(a[len("--sign="):])
             del args[i]
             break
-    # `--peer=<label>`: whose signature to expect on the reply.
-    global PEER_KEY
+    # `--peer=<label>`: whose signature to expect on the reply. Recorded, not
+    # derived - see `peer_key()`.
+    global PEER_LABEL
     for i, a in enumerate(list(args)):
         if a.startswith("--peer="):
-            PEER_KEY = load_ed_reference().public_key(dev_seed(a[len("--peer="):]))
+            PEER_LABEL = a[len("--peer="):]
             del args[i]
             break
-    if PEER_KEY is None:
-        PEER_KEY = load_ed_reference().public_key(dev_seed("ouroboros-dev-node-a"))
     if "--user" in args:
         global USER
         i = args.index("--user")
@@ -446,6 +485,10 @@ def main():
     # one_op signs, sends, reads the reply, and verifies the reply MAC (reply-auth).
     status, data = one_op(host, port, key, np_msg)
 
+    if status == REPLY_UNVERIFIED:
+        print("status: REPLY NOT VERIFIED (the export answered, but not with the "
+              "signature we expect from the host we dialled)")
+        sys.exit(1)
     if status == FS_ERR_AUTH:
         # The wire cannot say WHICH half failed, and deliberately so - telling a
         # caller "the key was fine, the name was wrong" would enumerate accounts.

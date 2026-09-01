@@ -264,11 +264,20 @@ fn load_auth() -> Auth {
         authorized_len: 0,
     };
     let mut buf = [0u8; hmac::BLOCK];
-    // Up to ~2s of retries at 40ms, only for the transient "disk not mounted
-    // yet" case; a definitively-absent key file returns immediately.
-    for _ in 0..50 {
+    // ONE retry budget across all three reads, not one each.
+    //
+    // Each read waits for the same event - the disk mounting - so three separate
+    // 2s budgets do not make the race three times more winnable, they make a
+    // DISKLESS boot spend three times as long not draining netd's mailbox.
+    // Parallels with no USB stick, and a Pi with no card, are both supported
+    // configurations where nothing ever mounts; at ~6s of silence the supervisor
+    // health ping (160ms) times out often enough to burn all three restarts and
+    // disable netd for the boot. Up to ~2s total, at 40ms a try.
+    let mut budget = 50u32;
+    while budget > 0 {
         let n = read_file_chunk(As::FirstParty, KEY_PATH, 0, 0, &mut buf);
         if n == syscall_abi::NO_FS {
+            budget -= 1;
             syscall(syscall_abi::NET_WAIT, 40);
             continue;
         }
@@ -298,11 +307,12 @@ fn load_auth() -> Auth {
     // otherwise be the one file that silently did not load - and a machine that
     // silently MACs works today and stops working at step 10.
     let mut idn = syscall_abi::NO_FS;
-    for _ in 0..50 {
+    while budget > 0 {
         idn = read_file_chunk(As::FirstParty, ID_PATH, 0, 0, &mut idbuf);
         if idn != syscall_abi::NO_FS {
             break;
         }
+        budget -= 1;
         syscall(syscall_abi::NET_WAIT, 40);
     }
     if idn >= syscall_abi::FS_ERR_MIN && idn != syscall_abi::FS_ERR_NOT_FOUND {
@@ -321,6 +331,8 @@ fn load_auth() -> Auth {
                 auth.signing = Some(key);
             }
             // A key file that exists and is not a key is a mistake worth naming:
+            // said here rather than per request, because a per-request line is
+            // something a stranger can make this machine print.
             // the machine will silently fall back to MAC'ing, which works today
             // and stops working at step 10.
             None => log(b"netd: WARNING /etc/cluster/id is not a key; not signing\r\n"),
@@ -335,11 +347,12 @@ fn load_auth() -> Auth {
     // list produces "authentication failed" for every signed frame, which is
     // indistinguishable from a wrong key.
     let mut n = syscall_abi::NO_FS;
-    for _ in 0..50 {
+    while budget > 0 {
         n = read_file_chunk(As::FirstParty, AUTHORIZED_PATH, 0, 0, &mut auth.authorized);
         if n != syscall_abi::NO_FS {
             break;
         }
+        budget -= 1;
         syscall(syscall_abi::NET_WAIT, 40);
     }
     if n < syscall_abi::FS_ERR_MIN {
@@ -2262,10 +2275,16 @@ fn handle_9p(c: &mut TcpConn, request: &[u8], dials: &mut [Option<DialConn>; MAX
     // honest outcome, and it is reachable only in the half-migrated state that
     // step 10 ends.
     if signed_request && auth.signing.is_none() {
-        // Not the caller's key: OUR missing identity. Saying "wrong or missing
-        // cluster key" would send an operator to the other machine, and the one
-        // with the problem would say nothing at all.
-        log(b"netd: refusing a signed request - this machine has no /etc/cluster/id\r\n");
+        // Refused WITHOUT LOGGING, like every other pre-authentication refusal.
+        //
+        // A log line here is reachable by anyone who can send eight bytes to
+        // port 564: `log` is a blocking MSG_CALL to `cond`, which on the
+        // framebuffer backend blits glyphs, so a host looping connect/send/close
+        // would drive unbounded console output and blocking IPC inside netd's
+        // frame-drain loop - an unusable screen, and plausibly a supervisor
+        // wedge. The diagnostic is worth having and is worth having ONCE, so it
+        // is emitted at boot instead (see load_auth), where the machine says its
+        // own state without anyone else being able to ask.
         deny_no_identity(c, request);
         return;
     }
@@ -2444,6 +2463,21 @@ fn authenticate_signed<'a>(
     offered.copy_from_slice(&request[koff..koff + ninep_abi::NP_PUBKEY_LEN]);
 
     // Is this key allowed here at all? An unknown key never reaches the verifier.
+    //
+    // THE MATCHED PEER IS DELIBERATELY DISCARDED, and that is worth stating
+    // because a lookup whose result is thrown away reads like a mistake. Two
+    // reasons, both design:
+    //
+    //  - The peer's `name` is the MACHINE's name; the `name` in this frame is
+    //    the requesting USER's. They are different namespaces, and the machine
+    //    name is not consulted by anything downstream - `map_user` resolves the
+    //    user through this machine's own /etc/passwd.
+    //  - The peer's `ip` is not checked against this connection's source
+    //    address either. Inbound authorizes BY KEY, outbound BY ADDRESS (see
+    //    docs/roadmap-cluster-keys.md, decision 3): an exporter is offered a key
+    //    and need only decide whether it is allowed, so pinning the address as
+    //    well would refuse an authorized machine that dialled from a second
+    //    interface without making any forgery harder - the key is the claim.
     clusterkeys::find_by_key(auth.authorized(), &offered)?;
 
     let np = &request[need..];

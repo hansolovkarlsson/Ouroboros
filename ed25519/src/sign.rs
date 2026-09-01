@@ -99,6 +99,26 @@ impl SigningKey {
 
 /// Sign over `prefix ‖ message` without joining them — the counterpart of
 /// [`verify_prefixed`].
+///
+/// # Precondition: the prefix must be FIXED-LENGTH for a given signature use
+///
+/// The signed input is the plain concatenation `prefix ‖ message`, with no
+/// length delimiter between them. So `("ab", "c")` and `("a", "bc")` produce
+/// byte-identical signatures, and a caller that lets an attacker choose where
+/// the split falls has an ambiguity a signature cannot see.
+///
+/// Every caller here satisfies this the same way, and it is not a coincidence:
+/// the verifier builds the prefix ITSELF out of fixed-width fields it reads at
+/// fixed offsets (a domain tag, a 16-byte nonce, a 32-byte name), so there is no
+/// split for a peer to shift — the only thing it supplies is the message tail.
+/// A future caller whose prefix length varies with attacker-controlled data must
+/// frame the parts (a length prefix, or a delimiter that cannot occur inside
+/// them) before using this. `SIG_DOMAIN_REQUEST` in `ninep-abi` is how the tags
+/// themselves are kept distinct and NUL-terminated.
+///
+/// The property is pinned by `splitting_the_signed_bytes_changes_nothing`: if a
+/// future change ever adds framing, that test is what says so.
+///
 pub fn sign_prefixed(
     key: &SigningKey,
     prefix: &[u8],
@@ -180,6 +200,26 @@ pub fn verify(public: &[u8; PUBLIC_LEN], message: &[u8], signature: &[u8; SIGNAT
 /// It is not needed: the challenge is a *hash* of `R ‖ A ‖ M`, and SHA-512 here
 /// is incremental, so the two halves are simply fed in turn — exactly what
 /// signing already does with its own prefix.
+///
+/// # Precondition: the prefix must be FIXED-LENGTH for a given signature use
+///
+/// The signed input is the plain concatenation `prefix ‖ message`, with no
+/// length delimiter between them. So `("ab", "c")` and `("a", "bc")` produce
+/// byte-identical signatures, and a caller that lets an attacker choose where
+/// the split falls has an ambiguity a signature cannot see.
+///
+/// Every caller here satisfies this the same way, and it is not a coincidence:
+/// the verifier builds the prefix ITSELF out of fixed-width fields it reads at
+/// fixed offsets (a domain tag, a 16-byte nonce, a 32-byte name), so there is no
+/// split for a peer to shift — the only thing it supplies is the message tail.
+/// A future caller whose prefix length varies with attacker-controlled data must
+/// frame the parts (a length prefix, or a delimiter that cannot occur inside
+/// them) before using this. `SIG_DOMAIN_REQUEST` in `ninep-abi` is how the tags
+/// themselves are kept distinct and NUL-terminated.
+///
+/// The property is pinned by `splitting_the_signed_bytes_changes_nothing`: if a
+/// future change ever adds framing, that test is what says so.
+///
 pub fn verify_prefixed(
     public: &[u8; PUBLIC_LEN],
     prefix: &[u8],
