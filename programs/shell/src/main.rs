@@ -1734,7 +1734,7 @@ fn print_fs_error(cmd: &str, code: u64) {
         syscall_abi::FS_ERR_IO => "device I/O error",
         syscall_abi::FS_ERR_PERM => "permission denied",
         syscall_abi::FS_ERR_NOT_SUPPORTED => "not supported by this filesystem (mode/owner need ext2)",
-        syscall_abi::FS_ERR_AUTH => "cluster authentication failed (wrong or missing cluster key)",
+        syscall_abi::FS_ERR_AUTH => "cluster authentication failed (peer not authorized, or bad key/signature)",
         syscall_abi::MSG_ERR_FULL => "mailbox full",
         syscall_abi::MSG_ERR_TOO_BIG => "message too big (64-byte limit)",
         syscall_abi::MSG_ERR_DENIED => "permission denied (the IPC capability policy doesn't permit reaching that task)",

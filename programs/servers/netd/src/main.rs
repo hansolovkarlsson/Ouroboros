@@ -224,10 +224,59 @@ struct Auth {
 }
 
 impl Auth {
-    /// Whether authentication is configured (a key is present). Unconfigured =
-    /// export closed.
-    fn enabled(&self) -> bool {
+    /// Whether this machine holds the shared cluster secret.
+    ///
+    /// This used to be spelled `enabled()` and meant "authentication is
+    /// configured", which was true when the shared key was the ONLY way to
+    /// authenticate anything. It stopped being true at step 7, and the name
+    /// kept the old meaning: a machine with a perfectly good keypair and a full
+    /// `authorized` file reported its export CLOSED, because the question being
+    /// asked was "is there a shared key" while the question that mattered was
+    /// "can this machine authenticate anything".
+    ///
+    /// Renamed rather than redefined, so every old call site had to be looked at
+    /// rather than silently inheriting a new meaning.
+    fn has_key(&self) -> bool {
         self.key_len > 0
+    }
+
+    /// Whether this machine can serve a **signed** request.
+    ///
+    /// Two conditions, and the second is the one that is easy to forget: it
+    /// needs peers to verify against, AND an identity of its own, because a
+    /// signed request gets a signed REPLY - a machine that cannot sign refuses
+    /// rather than answering with a MAC the caller cannot check (see
+    /// `seal_reply`). Stated once here because it is read in two places, and a
+    /// boot message that disagreed with the gate is exactly what this arc keeps
+    /// finding: the first version of this said "accepts signed requests" on a
+    /// node that refused every one of them.
+    fn accepts_signed(&self) -> bool {
+        self.signing.is_some() && !self.authorized().is_empty()
+    }
+
+    /// Whether this machine can serve a **MAC'd** request — it holds the shared
+    /// key. (The reply is MAC'd under the same key, so there is no second
+    /// condition here.)
+    fn accepts_mac(&self) -> bool {
+        self.has_key()
+    }
+
+    /// Whether the export is open at all: it can serve at least one format.
+    /// Neither is the fail-closed case.
+    fn can_verify(&self) -> bool {
+        self.accepts_signed() || self.accepts_mac()
+    }
+
+    /// Whether this machine can authenticate an **outbound** request — sign it
+    /// with its own identity, or MAC it under the shared key.
+    ///
+    /// Separate from [`Auth::can_verify`] because the two really are different
+    /// preconditions: a machine that lists peers but has no identity of its own
+    /// can serve requests it cannot make, and one with an identity but an empty
+    /// `authorized` file is the reverse. One boolean could only be wrong about
+    /// one of them.
+    fn can_send(&self) -> bool {
+        self.signing.is_some() || self.has_key()
     }
     /// The peers this machine accepts, as `clusterkeys` expects them.
     fn authorized(&self) -> &[u8] {
@@ -384,13 +433,34 @@ fn load_auth() -> Auth {
         log_dec(u64::MAX - n);
         log(b" below the error ceiling); no peer can be verified by signature\r\n");
     }
-    if auth.enabled() {
-        log(b"netd: cluster auth enabled (export requires the cluster key)\r\n");
+    // REPORTED PER DIRECTION, because they now have different preconditions and
+    // a machine can be able to do one and not the other. The single old line
+    // ("export requires the cluster key") was the visible half of the conflated
+    // gate: it printed on a node whose wire carried only signatures, and it
+    // printed CLOSED on a node that held every key it needed except that one.
+    if auth.can_verify() {
+        log(b"netd: export open, accepts ");
+        if auth.accepts_signed() {
+            log(b"signed");
+            if auth.accepts_mac() {
+                log(b" and ");
+            }
+        }
+        if auth.accepts_mac() {
+            log(b"MAC'd");
+        }
+        log(b" requests\r\n");
         if auth.noexec {
             log(b"netd: no-exec set (remote-run refused; disk-share allowed)\r\n");
         }
     } else {
-        log(b"netd: no cluster key - export CLOSED to remote clients (fail-closed)\r\n");
+        log(b"netd: export CLOSED - no authorized peers and no cluster key (fail-closed)\r\n");
+    }
+    if !auth.can_send() {
+        // Says nothing about the export: this machine can still SERVE. It just
+        // cannot ask anyone else for anything, which is a different outage and
+        // would otherwise be discovered one failed `mount -r` at a time.
+        log(b"netd: no identity and no cluster key - cannot make remote requests\r\n");
     }
     auth
 }
@@ -2274,7 +2344,7 @@ fn handle_9p(c: &mut TcpConn, request: &[u8], dials: &mut [Option<DialConn>; MAX
     // not be answered with a MAC its caller has no way to check. Refusing is the
     // honest outcome, and it is reachable only in the half-migrated state that
     // step 10 ends.
-    if signed_request && auth.signing.is_none() {
+    if signed_request && !auth.accepts_signed() {
         // Refused WITHOUT LOGGING, like every other pre-authentication refusal.
         //
         // A log line here is reachable by anyone who can send eight bytes to
@@ -2367,9 +2437,6 @@ fn authenticate<'a>(
     auth: &Auth,
     request: &'a [u8],
 ) -> Option<(&'a [u8], [u8; ninep_abi::NP_NONCE_LEN], [u8; ninep_abi::NP_NAME_LEN])> {
-    if !auth.enabled() {
-        return None; // no cluster key configured: export closed
-    }
     let p = ninep_abi::NP_NET_LEN_PREFIX; // 4
     if request.len() < p + 8 {
         return None;
@@ -2380,7 +2447,20 @@ fn authenticate<'a>(
     // exporter learn to verify signatures before any client learns to make them.
     // Anything else is refused rather than misparsed.
     if read_u64(request, p) == ninep_abi::NP_AUTH_MAGIC_SIGNED {
+        // Precondition enforced by the lookup inside: an empty `authorized`
+        // file matches no offered key, so every signed request is refused.
         return authenticate_signed(auth, request);
+    }
+    // THE MAC ARM CARRIES ITS OWN KEY CHECK, and it is not a leftover of the
+    // gate that used to sit at the top of this function.
+    //
+    // HMAC WITH A ZERO-LENGTH KEY IS A PERFECTLY VALID HMAC. Without this line
+    // an unconfigured machine would not refuse MAC'd requests - it would accept
+    // the ones computed under the empty key, which every attacker also has. So
+    // "no cluster key" has to mean "refuse", explicitly, and cannot be left to
+    // fall out of the verification: the verification SUCCEEDS.
+    if !auth.accepts_mac() {
+        return None;
     }
     let need = p + ninep_abi::NP_AUTH_HDR;
     if request.len() < need {
@@ -2616,7 +2696,7 @@ fn deny_9p(c: &mut TcpConn, request: &[u8]) {
     c.prefix_off = 0;
     c.cpu_child = CPU_NONE;
     if is_run {
-        let m: &[u8] = b"cpu: authentication failed (wrong or missing cluster key)\r\n";
+        let m: &[u8] = b"cpu: authentication failed (peer not authorized, or bad key/signature)\r\n";
         let n = m.len().min(c.prefix.len());
         c.prefix[..n].copy_from_slice(&m[..n]);
         c.prefix_len = n;
@@ -2670,20 +2750,17 @@ fn frame_signed(
     out: &mut [u8],
 ) -> (usize, [u8; ninep_abi::NP_NONCE_LEN]) {
     let zero_nonce = [0u8; ninep_abi::NP_NONCE_LEN];
-    // A cluster key is STILL REQUIRED to send anything, even now that both
-    // directions are signed.
+    // Refuse only when this machine can authenticate an outbound request by
+    // NEITHER route. It used to refuse whenever the shared key was absent, which
+    // by step 8 meant a machine that could sign perfectly well was refused
+    // because of a secret its signature does not use.
     //
-    // Not because the signatures need it - they do not - but because
-    // `authenticate` still refuses an unkeyed export, so a keyless machine could
-    // sign a request nobody will answer. Step 10 removes both halves together;
-    // removing this one alone would let a machine send requests its peers refuse
-    // and call that progress.
-    //
-    // The gate itself exists because a request cannot be taken back: a node that
-    // sends something the exporter ACCEPTS AND EXECUTES - NP_WRITE, NP_MKDIR,
-    // NP_RM all land - and only then discovers it cannot check the answer, tells
-    // the user "authentication failed" about a write that happened.
-    if !auth.enabled() {
+    // The gate itself stays, and for the original reason: a request cannot be
+    // taken back. A node that sends something the exporter ACCEPTS AND EXECUTES
+    // - NP_WRITE, NP_MKDIR, NP_RM all land - and only then discovers it cannot
+    // authenticate the exchange tells the user "authentication failed" about a
+    // write that happened. Refusing before the send is the only honest answer.
+    if !auth.can_send() {
         return (0, zero_nonce);
     }
     // SIGN WHEN THIS MACHINE HAS AN IDENTITY, MAC otherwise.

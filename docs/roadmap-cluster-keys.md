@@ -168,8 +168,29 @@ if the curve arithmetic does not come together, nothing has been built on it.
 | 7 ✅ | Exporter **accepts** signed frames alongside old ones | **the Python peer signs and the guest verifies** — the wire proven by a foreign implementation before a guest client exists; MAC'd frames unregressed; 25 signed ops with **no supervisor restart**, which is the only signal a userland panic gives | unauthorized key, tampered message, tampered signature, a *different authorized* key swapped in, and a truncated frame — each refused |
 | 8 ✅ | Client **sends** signed frames | two-node matrix both directions, **and the captured link carries only `AUTHNP03`** — a run that succeeds proves the cluster works, not that it did so the way you believe | a machine with no `/etc/cluster/id` falls back to the MAC'd format and still serves, verified by removing the file from an image |
 | 9 ✅ | Reply signing, **domain-separated** | Python verifies guest replies **and signs its own**, so both halves of the exchange are checked by an independent implementation; a client verifying against a *different authorized peer's* key is refused | the shared key now authenticates nothing — step 10 deletes it |
-| 10 | **Flag day**: drop the shared key everywhere | old-format peer refused; keyless node fail-closed; **revocation works** — delete a line, the peer stops being served | |
+| 10a ✅ | **Decouple the gate** from the shared key: each format checks its own precondition, both directions reported separately | a node with a keypair and **no shared key at all** serves a full cluster (mount, cat, cpu, per-user permissions); a keyed node still accepts both formats; all four key/identity combinations behave as reported | the shared key is proven **not load-bearing**, before anything is deleted |
+| 10b | **Flag day**: delete the shared key everywhere (staging, MAC paths, `hmac.rs`, both Python peers) | old-format peer refused; **revocation works** — delete a line, the peer stops being served | |
 | 11 | Docs, postmortem, release | | |
+
+**Step 10 was split after asking what could go wrong.** `Auth::enabled()` was
+literally `key_len > 0` and gated three things — the export, inbound auth, and
+*outbound* signing — so deleting the key file without moving that gate takes the
+cluster dark even though every node holds a good keypair. Confirmed on two
+guests before touching anything: node A loaded its identity, logged
+`export CLOSED`, and refused its peer.
+
+Splitting puts the reversible half first. 10a changes no file format and deletes
+nothing, so its acceptance test — a cluster running with **no shared key
+anywhere** — is what proves the key is not load-bearing. 10b is then subtraction
+whose correctness 10a already established, rather than a deletion and a
+behaviour change failing together with no way to tell which broke.
+
+10a also surfaced a hole that the obvious version of the refactor would have
+shipped: **HMAC with a zero-length key is a valid HMAC.** Removing the
+top-level gate without moving a key check into the MAC arm does not make an
+unconfigured export refuse MAC'd requests — it makes it accept the ones computed
+under the empty key, which every attacker also has. Verified by removing the
+guard and reading a guest's disk from the host with no secret at all.
 
 ## What step 5 measured (2026-08-31)
 
