@@ -1358,7 +1358,10 @@ fn handle_run(packed_mac: u64, sender: u64, buf: &[u8], len: usize, out: &mut [u
         // machine genuinely has no account for the calling uid). Same refusal,
         // different thing to go and fix.
         LineScan::Unreadable => {
-            return fail(out, b"cpu: cannot read /etc/passwd to name the calling user\r\n")
+            return fail(out, b"cpu: cannot read /etc/passwd yet to name the calling user (try again)\r\n")
+        }
+        LineScan::NoDatabase => {
+            return fail(out, b"cpu: this machine has no readable /etc/passwd, so it cannot name the calling user\r\n")
         }
         LineScan::NotFound => {
             return fail(out, b"cpu: this machine has no account for the calling user\r\n")
@@ -1432,6 +1435,9 @@ fn handle_rmount(packed_mac: u64, buf: &[u8], len: usize, out: &mut [u8], auth: 
         // as "no filesystem", which is both true and worth retrying), AUTH for a
         // uid this machine has no account for.
         LineScan::Unreadable => return fail(out, syscall_abi::NO_FS),
+        // NOT `NO_FS`: the shell renders that as "no filesystem", which reads as
+        // "not mounted yet, try again" - wrong for a file that is never coming.
+        LineScan::NoDatabase => return fail(out, syscall_abi::FS_ERR_NOT_FOUND),
         LineScan::NotFound => return fail(out, syscall_abi::FS_ERR_AUTH),
     }
 
@@ -2720,21 +2726,29 @@ fn deny_unknown_user(c: &mut TcpConn, request: &[u8], cause: LineScan) {
     c.file = false;
     c.prefix_off = 0;
     c.cpu_child = CPU_NONE;
-    let unreadable = cause == LineScan::Unreadable;
+    // MATCHED, NOT COMPARED. This was `cause == LineScan::Unreadable`, so when
+    // the scan gained a third answer the new one silently took the "no such
+    // account" branch - telling a correctly-named caller it is a stranger
+    // because THIS machine has no account database. A match makes a future
+    // fourth state a compile error instead.
     if is_run {
-        let m: &[u8] = if unreadable {
-            b"cpu: this host cannot read its account database right now\r\n"
-        } else {
-            b"cpu: no account of that name on this host (the signature was accepted)\r\n"
+        let m: &[u8] = match cause {
+            LineScan::Unreadable => b"cpu: this host cannot read its account database right now\r\n",
+            LineScan::NoDatabase => b"cpu: this host has no readable account database\r\n",
+            _ => b"cpu: no account of that name on this host (the signature was accepted)\r\n",
         };
         let n = m.len().min(c.prefix.len());
         c.prefix[..n].copy_from_slice(&m[..n]);
         c.prefix_len = n;
     } else {
-        // NO_FS for the transient case: the shell already surfaces that as "no
-        // filesystem" rather than an auth failure, which is both true and the
-        // thing to retry. FS_ERR_AUTH stays the answer for a real stranger.
-        let status = if unreadable { syscall_abi::NO_FS } else { syscall_abi::FS_ERR_AUTH };
+        // NO_FS only for the transient case: the shell surfaces it as "no
+        // filesystem", which is true AND worth retrying. A missing database is
+        // not worth retrying, and a real stranger is neither.
+        let status = match cause {
+            LineScan::Unreadable => syscall_abi::NO_FS,
+            LineScan::NoDatabase => syscall_abi::FS_ERR_NOT_FOUND,
+            _ => syscall_abi::FS_ERR_AUTH,
+        };
         c.prefix_len = frame_reply(&mut c.prefix, status, &[]);
     }
 }
@@ -4106,13 +4120,19 @@ fn for_each_line(path: &[u8], mut f: impl FnMut(&[u8]) -> bool) -> LineScan {
         // the caller's - the caller is precisely what it is being read to learn.
         let r = read_file_chunk(As::FirstParty, path, 0, off, &mut chunk);
         if r >= syscall_abi::FS_ERR_MIN {
-            // A read failure is NOT "no such user". `NO_FS` (the disk not
-            // mounted yet) and a `TASK_ERR_*` from an fsd restart are transient,
-            // and folding them into a refusal reports "authentication failed"
-            // for a condition that would succeed a moment later - sending the
-            // operator after the cluster identity again. `load_auth` already retries
-            // NO_FS for exactly this reason; this reports it so callers can.
-            return LineScan::Unreadable;
+            // A read failure is NOT "no such user", and the two KINDS of failure
+            // are not the same either. `NO_FS` and a `TASK_ERR_*` from an `fsd`
+            // restart clear on their own, so reporting them as a refusal sends
+            // the operator after the cluster identity for something that would
+            // have succeeded a moment later. An absent `/etc/passwd` never
+            // clears, so inviting a retry for THAT is the mirror mistake.
+            // `transient_fs_failure` is the same classifier `load_auth` retries
+            // on, so the two cannot drift apart.
+            return if transient_fs_failure(r) {
+                LineScan::Unreadable
+            } else {
+                LineScan::NoDatabase
+            };
         }
         let n = (r as usize).min(CHUNK);
         off += n as u64;
@@ -4154,9 +4174,19 @@ enum LineScan {
     Found,
     /// Every line was read; none matched.
     NotFound,
-    /// The file could not be read at all - no filesystem yet, or `fsd` was
-    /// restarted mid-scan. Transient.
+    /// The file could not be read at all, and RETRYING MAY HELP - no filesystem
+    /// mounted yet, or `fsd` restarted mid-scan.
     Unreadable,
+    /// The file could not be read at all, and retrying will NOT help - it is
+    /// absent, or is a directory, or the read was refused.
+    ///
+    /// Split out because folding it into [`LineScan::Unreadable`] made every
+    /// caller invite a retry that could never succeed. A machine with no
+    /// `/etc/passwd` is a SUPPORTED state (`login` documents its root-session
+    /// fallback for exactly that), so this is reachable by configuration, not
+    /// only by breakage: the far side was told "no filesystem, try again" about
+    /// a disk that is mounted and a file that will never appear.
+    NoDatabase,
 }
 
 /// Strip a fixed-width header name's NUL padding.
@@ -4229,8 +4259,14 @@ fn map_user(who: &[u8; ninep_abi::NP_NAME_LEN]) -> Result<Proxy, LineScan> {
     match found.filter(|p| ninep_abi::proxy_id(p.uid, p.gid).is_some()) {
         Some(p) => Ok(p),
         // A scan that could not read the file has not established that the
-        // account is absent - only that we cannot tell. Two different refusals.
-        None if scan == LineScan::Unreadable => Err(LineScan::Unreadable),
+        // account is absent - only that we cannot tell, and there are two ways
+        // of not telling. PROPAGATED, not flattened: this arm was
+        // `scan == LineScan::Unreadable`, so a third answer collapsed into
+        // "no such account" one level ABOVE the code that distinguishes them,
+        // and a correctly-named caller was called a stranger because THIS
+        // machine has no account database. Found by running it against a node
+        // with no `/etc/passwd`, not by reading it.
+        None if scan != LineScan::Found => Err(scan),
         None => Err(LineScan::NotFound),
     }
 }
