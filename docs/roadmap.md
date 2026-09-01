@@ -113,18 +113,26 @@ the microkernel arc itself still leaves open):
    authentication mechanism, and it should be decided deliberately rather than
    arrived at.
 
-   **The cheaper step that should come first: per-machine keypairs** — now
-   designed in [`roadmap-cluster-keys.md`](roadmap-cluster-keys.md), which also
-   records why the *symmetric* version of this was rejected (with a symmetric
-   key, the ability to verify is the ability to forge). Each node holds its own
-   Ed25519 keypair and lists the peer *public* keys it accepts (SSH's
-   `authorized_keys` model). No new server, no clock, no ticket cache, no single
-   point of failure.
-   It kills "one shared secret = interchangeable members" and gives per-peer
-   revocation, which is the largest single weakness of what shipped in v0.15.0.
-   It deliberately leaves "B can claim any of *its own* users" open — which is
-   exactly the residual a master exists to close, so building this first makes
-   the master's value precise instead of assumed.
+   **The cheaper step that came first: per-machine keypairs — ✅ BUILT
+   2026-08-31.** Each node holds its own Ed25519 keypair and lists the peer
+   *public* keys it accepts (SSH's `authorized_keys` model); the shared secret
+   is deleted. No new server, no clock, no ticket cache, no single point of
+   failure. See [`roadmap-cluster-keys.md`](roadmap-cluster-keys.md) for the
+   step log (and for why the *symmetric* version was rejected: with a symmetric
+   key, the ability to verify is the ability to forge),
+   [`roadmap-completed.md`](roadmap-completed.md) for the plan-shaped summary,
+   and [`cluster-keys-postmortem.md`](cluster-keys-postmortem.md) for what it
+   cost to learn.
+
+   It killed "one shared secret = interchangeable members" and gave per-peer
+   revocation — the largest single weakness of what shipped in v0.15.0. It
+   deliberately left **"B can claim any of its own users"** open, which is
+   exactly the residual a master exists to close: that is now a *measured*
+   remainder rather than an assumed one, which was the point of building this
+   first. Two costs it introduced, worth weighing against a master: a peer list
+   caps a cluster at about a dozen nodes (`AUTHORIZED_MAX`), where one secret
+   scaled without limit, and key generation **refuses without real entropy**, so
+   platforms with no RNG (Parallels, the Pi) need keys staged at build time.
 
    All of it stays behind the **"leaving a trusted network" trigger**. Today's
    deployment is two QEMU VMs and, soon, two Raspberry Pi 4s on a home network,
