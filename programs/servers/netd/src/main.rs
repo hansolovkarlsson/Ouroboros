@@ -1345,6 +1345,24 @@ fn handle_rmount(packed_mac: u64, buf: &[u8], len: usize, out: &mut [u8], auth: 
         LineScan::NotFound => return fail(out, syscall_abi::FS_ERR_AUTH),
     }
 
+    // WHOSE SIGNATURE WILL WE ACCEPT ON THE REPLY? Resolved BEFORE sending.
+    //
+    // This check used to run after `tcp_get`, which meant a stale or missing
+    // line for the dialled address let an NP_WRITE / NP_MKDIR / NP_RM land on
+    // the exporter and then reported FS_ERR_AUTH: the write happened, the shell
+    // said it did not. That is the same failure shape the send gate below was
+    // added for, on a different trigger - so it gets the same treatment. The
+    // lookup is a pure function of the authorized file and the address, so
+    // hoisting it costs nothing.
+    let expect_key = if auth.signing.is_some() {
+        match clusterkeys::find_by_ip(auth.authorized(), &ip) {
+            Some(peer) => Some(peer.key),
+            None => return fail(out, syscall_abi::FS_ERR_AUTH),
+        }
+    } else {
+        None
+    };
+
     let mut req = [0u8; ninep_abi::NP_FRAME_MAX];
     let np = &msg[..msg.len().min(ninep_abi::NP_NET_MAX)];
     let (total, nonce) = frame_signed(auth, &who, np, &mut req);
@@ -1366,19 +1384,55 @@ fn handle_rmount(packed_mac: u64, buf: &[u8], len: usize, out: &mut [u8], auth: 
     // `[mac:32][status:u64][data]` (reply-auth). Verify the MAC against the nonce
     // WE signed the request with before trusting a single byte of the reply - an
     // injected/forged reply (or one from a peer without the key) fails here.
-    let ml = ninep_abi::NP_MAC_LEN;
     let body_len = u32::from_le_bytes([resp[0], resp[1], resp[2], resp[3]]) as usize;
     let body_end = (ninep_abi::NP_NET_LEN_PREFIX + body_len).min(got);
     let body = &resp[ninep_abi::NP_NET_LEN_PREFIX..body_end];
-    if body.len() < ml + 8 {
-        return fail(out, syscall_abi::FS_ERR_AUTH); // too short to be a sealed reply
-    }
-    let reply_mac = &body[..ml];
-    let reply_np = &body[ml..]; // [status:u64][data]
-    let computed = hmac::hmac_sha256(auth.key(), &nonce, reply_np);
-    if !hmac::mac_eq(reply_mac, &computed) {
-        return fail(out, syscall_abi::FS_ERR_AUTH); // reply not authenticated
-    }
+
+    // We signed the request, so the reply is signed - the formats travel in
+    // pairs (see `seal_reply`), and neither side has to be told which.
+    let reply_np = if auth.signing.is_some() {
+        let sl = ninep_abi::NP_SIG_LEN;
+        if body.len() < sl + 8 {
+            return fail(out, syscall_abi::FS_ERR_AUTH);
+        }
+        let mut sig = [0u8; ninep_abi::NP_SIG_LEN];
+        sig.copy_from_slice(&body[..sl]);
+        let reply_np = &body[sl..];
+
+        // THE KEY WE EXPECT FOR THE ADDRESS WE DIALLED - not merely some key
+        // this machine authorizes.
+        //
+        // This is the asymmetry the design doc calls Decision 3, and it is the
+        // whole reason `authorized` carries an address as well as a key. An
+        // exporter looks a client up BY KEY, because the client offers one and
+        // the only question is whether it is allowed. A client has no key
+        // offered to it: accepting any authorized signature here would
+        // authenticate "some cluster member", when the claim that matters is
+        // "the machine I asked". Any other member could otherwise answer for it.
+        let Some(peer_key) = expect_key else {
+            return fail(out, syscall_abi::FS_ERR_AUTH);
+        };
+        let mut pfx = [0u8; ninep_abi::SIG_DOMAIN_MAX + ninep_abi::NP_NONCE_LEN];
+        let tag = ninep_abi::SIG_DOMAIN_REPLY;
+        pfx[..tag.len()].copy_from_slice(tag);
+        pfx[tag.len()..tag.len() + nonce.len()].copy_from_slice(&nonce);
+        if !ed25519::verify_prefixed(&peer_key, &pfx[..tag.len() + nonce.len()], reply_np, &sig) {
+            return fail(out, syscall_abi::FS_ERR_AUTH);
+        }
+        reply_np
+    } else {
+        let ml = ninep_abi::NP_MAC_LEN;
+        if body.len() < ml + 8 {
+            return fail(out, syscall_abi::FS_ERR_AUTH); // too short to be a sealed reply
+        }
+        let reply_mac = &body[..ml];
+        let reply_np = &body[ml..]; // [status:u64][data]
+        let computed = hmac::hmac_sha256(auth.key(), &nonce, reply_np);
+        if !hmac::mac_eq(reply_mac, &computed) {
+            return fail(out, syscall_abi::FS_ERR_AUTH); // reply not authenticated
+        }
+        reply_np
+    };
     let n = reply_np.len().min(out.len());
     out[..n].copy_from_slice(&reply_np[..n]);
     n
@@ -2201,6 +2255,20 @@ fn handle_9p(c: &mut TcpConn, request: &[u8], dials: &mut [Option<DialConn>; MAX
     // MAC over the request and recover the bare NP message. A failure (wrong or
     // missing cluster key, or an unconfigured export) is refused before any verb
     // runs - fail-closed. `authenticate` returns the NP message slice on success.
+    let signed_request = request.len() >= ninep_abi::NP_NET_LEN_PREFIX + 8
+        && read_u64(request, ninep_abi::NP_NET_LEN_PREFIX) == ninep_abi::NP_AUTH_MAGIC_SIGNED;
+    // A machine with no identity cannot sign a reply, and a signed request must
+    // not be answered with a MAC its caller has no way to check. Refusing is the
+    // honest outcome, and it is reachable only in the half-migrated state that
+    // step 10 ends.
+    if signed_request && auth.signing.is_none() {
+        // Not the caller's key: OUR missing identity. Saying "wrong or missing
+        // cluster key" would send an operator to the other machine, and the one
+        // with the problem would say nothing at all.
+        log(b"netd: refusing a signed request - this machine has no /etc/cluster/id\r\n");
+        deny_no_identity(c, request);
+        return;
+    }
     let Some((msg, nonce, name)) = authenticate(auth, request) else {
         deny_9p(c, request);
         return;
@@ -2242,7 +2310,7 @@ fn handle_9p(c: &mut TcpConn, request: &[u8], dials: &mut [Option<DialConn>; MAX
     let n = build_9p_reply(msg, &mut c.prefix, dials, mac, As::Remote(proxy));
     // Reply-auth (mutual authentication): MAC the reply against the request nonce
     // so the client can prove it came from a holder of the cluster key.
-    let n = seal_reply(c, auth, &nonce, n);
+    let n = seal_reply(c, auth, &nonce, n, signed_request);
     c.prefix_len = n;
     c.prefix_off = 0;
     c.file = false;
@@ -2382,8 +2450,14 @@ fn authenticate_signed<'a>(
     // The signed bytes: nonce ‖ name ‖ message. Built into one buffer because
     // the signature is over a concatenation the frame does not store adjacently
     // - the prefix and the message are separated by the key and signature.
-    let mut prefix = [0u8; ninep_abi::NP_SIG_PREFIX_LEN];
-    prefix.copy_from_slice(&request[noff..noff + ninep_abi::NP_SIG_PREFIX_LEN]);
+    // Domain-separated: the signed input is TAG ‖ nonce ‖ name, so a signature
+    // made as a REPLY cannot be replayed as a request.
+    let mut prefix = [0u8; ninep_abi::SIG_DOMAIN_MAX + ninep_abi::NP_SIG_PREFIX_LEN];
+    let tag = ninep_abi::SIG_DOMAIN_REQUEST;
+    prefix[..tag.len()].copy_from_slice(tag);
+    prefix[tag.len()..tag.len() + ninep_abi::NP_SIG_PREFIX_LEN]
+        .copy_from_slice(&request[noff..noff + ninep_abi::NP_SIG_PREFIX_LEN]);
+    let prefix = &prefix[..tag.len() + ninep_abi::NP_SIG_PREFIX_LEN];
 
     let mut sig = [0u8; ninep_abi::NP_SIG_LEN];
     sig.copy_from_slice(&request[soff..soff + ninep_abi::NP_SIG_LEN]);
@@ -2391,7 +2465,7 @@ fn authenticate_signed<'a>(
     // The crate verifies over `prefix ‖ message` without joining them, so netd
     // does not carry a second buffer the size of the largest message on the
     // frame of its most stack-constrained server.
-    if !ed25519::verify_prefixed(&offered, &prefix, np, &sig) {
+    if !ed25519::verify_prefixed(&offered, prefix, np, &sig) {
         return None;
     }
 
@@ -2410,7 +2484,20 @@ fn authenticate_signed<'a>(
 /// request (so a captured reply can't be replayed against another). Returns the
 /// new framed length. (The `cpu`-run output *stream* is not framed and stays
 /// reply-unauthenticated - the harder streaming-MAC case, deferred.)
-fn seal_reply(c: &mut TcpConn, auth: &Auth, nonce: &[u8], n: usize) -> usize {
+fn seal_reply(c: &mut TcpConn, auth: &Auth, nonce: &[u8], n: usize, signed: bool) -> usize {
+    // THE REPLY FORMAT FOLLOWS THE REQUEST FORMAT, and no discriminator byte is
+    // needed for it: the exporter knows which kind of request it verified, and
+    // the client knows which kind it sent. Inventing a tag would add a field
+    // both sides must agree about for no information either lacks.
+    //
+    // A signed request therefore gets a signed reply - which is why a machine
+    // that cannot sign refuses a signed request outright (see `handle_9p`)
+    // rather than answering it with a MAC the caller cannot check.
+    if signed {
+        if let Some(key) = auth.signing.as_ref() {
+            return seal_reply_signed(c, key, nonce, n);
+        }
+    }
     let ml = ninep_abi::NP_MAC_LEN; // 32
     let body_start = ninep_abi::NP_NET_LEN_PREFIX; // 4
     if n < body_start || n + ml > c.prefix.len() {
@@ -2425,6 +2512,61 @@ fn seal_reply(c: &mut TcpConn, auth: &Auth, nonce: &[u8], n: usize) -> usize {
     let new_body = ml + body_len;
     c.prefix[0..4].copy_from_slice(&(new_body as u32).to_le_bytes());
     body_start + new_body // = n + ml
+}
+
+/// Refuse a signed request because THIS machine has no identity to answer with.
+///
+/// Separate from [`deny_9p`] only in what it says. The wire answer is the same
+/// `FS_ERR_AUTH`, because a caller has no business learning why; the difference
+/// is that a `cpu` caller reads its reply as text, and "wrong or missing cluster
+/// key" would point at the wrong machine entirely.
+fn deny_no_identity(c: &mut TcpConn, request: &[u8]) {
+    let voff = np_offset(request);
+    let is_run = request.len() >= voff + 8 && read_u64(request, voff) == ninep_abi::NP_RUN;
+    c.file = false;
+    c.prefix_off = 0;
+    c.cpu_child = CPU_NONE;
+    if is_run {
+        let m: &[u8] = b"cpu: the remote machine has no cluster identity of its own\r\n";
+        let n = m.len().min(c.prefix.len());
+        c.prefix[..n].copy_from_slice(&m[..n]);
+        c.prefix_len = n;
+    } else {
+        c.prefix_len = frame_reply(&mut c.prefix, syscall_abi::FS_ERR_AUTH, &[]);
+    }
+}
+
+/// Sign a framed export reply with this machine's private key - the mirror of
+/// [`seal_reply`]'s MAC, and the last thing the shared cluster key was doing.
+///
+/// `[len][sig:64][status][result]`, signed over `request_nonce ‖ body`. Binding
+/// to the request's nonce is what ties this reply to *that* request, so a
+/// captured reply cannot be replayed against a different one - the same property
+/// the MAC had, carried over unchanged.
+fn seal_reply_signed(
+    c: &mut TcpConn,
+    key: &ed25519::SigningKey,
+    nonce: &[u8],
+    n: usize,
+) -> usize {
+    let sl = ninep_abi::NP_SIG_LEN; // 64
+    let body_start = ninep_abi::NP_NET_LEN_PREFIX;
+    if n < body_start || n + sl > c.prefix.len() {
+        return n; // no room - leave unsealed, as the MAC path does
+    }
+    let body_len = n - body_start;
+    // Signed over nonce ‖ body via the two-part entry point, so the
+    // concatenation is never built on this server's stack.
+    let mut pfx = [0u8; ninep_abi::SIG_DOMAIN_MAX + ninep_abi::NP_NONCE_LEN];
+    let tag = ninep_abi::SIG_DOMAIN_REPLY;
+    pfx[..tag.len()].copy_from_slice(tag);
+    pfx[tag.len()..tag.len() + nonce.len()].copy_from_slice(nonce);
+    let sig = ed25519::sign_prefixed(key, &pfx[..tag.len() + nonce.len()], &c.prefix[body_start..n]);
+    c.prefix.copy_within(body_start..n, body_start + sl);
+    c.prefix[body_start..body_start + sl].copy_from_slice(&sig);
+    let new_body = sl + body_len;
+    c.prefix[0..4].copy_from_slice(&(new_body as u32).to_le_bytes());
+    body_start + new_body
 }
 
 /// Stage an auth-denied response on the export connection (the request failed
@@ -2494,16 +2636,19 @@ fn frame_signed(
     out: &mut [u8],
 ) -> (usize, [u8; ninep_abi::NP_NONCE_LEN]) {
     let zero_nonce = [0u8; ninep_abi::NP_NONCE_LEN];
-    // THE REPLY IS STILL MAC'D (until step 9), so a machine that cannot verify a
-    // reply must not send a request it can no longer take back.
+    // A cluster key is STILL REQUIRED to send anything, even now that both
+    // directions are signed.
     //
-    // This gate used to sit only on the MAC path, and moving signing above it
-    // was wrong in a way worth stating: a node with an identity but no cluster
-    // key would send a signed request the exporter ACCEPTS AND EXECUTES -
-    // NP_WRITE, NP_MKDIR, NP_RM all land - and then fail to verify the reply and
-    // report "authentication failed" to the user. The write happened; the shell
-    // said it did not. Refusing before sending keeps the failure honest, and
-    // step 9 removes the dependency rather than the check.
+    // Not because the signatures need it - they do not - but because
+    // `authenticate` still refuses an unkeyed export, so a keyless machine could
+    // sign a request nobody will answer. Step 10 removes both halves together;
+    // removing this one alone would let a machine send requests its peers refuse
+    // and call that progress.
+    //
+    // The gate itself exists because a request cannot be taken back: a node that
+    // sends something the exporter ACCEPTS AND EXECUTES - NP_WRITE, NP_MKDIR,
+    // NP_RM all land - and only then discovers it cannot check the answer, tells
+    // the user "authentication failed" about a write that happened.
     if !auth.enabled() {
         return (0, zero_nonce);
     }
@@ -2596,10 +2741,13 @@ fn frame_signed_ed25519(
 
     // Signed over nonce ‖ name ‖ np, the same bytes the MAC covers - and via the
     // two-part entry point, so the concatenation is never built in memory.
-    let mut prefix = [0u8; ninep_abi::NP_SIG_PREFIX_LEN];
-    prefix[..ninep_abi::NP_NONCE_LEN].copy_from_slice(&nonce);
-    prefix[ninep_abi::NP_NONCE_LEN..].copy_from_slice(who);
-    let sig = ed25519::sign_prefixed(key, &prefix, np);
+    let mut prefix = [0u8; ninep_abi::SIG_DOMAIN_MAX + ninep_abi::NP_SIG_PREFIX_LEN];
+    let tag = ninep_abi::SIG_DOMAIN_REQUEST;
+    prefix[..tag.len()].copy_from_slice(tag);
+    prefix[tag.len()..tag.len() + ninep_abi::NP_NONCE_LEN].copy_from_slice(&nonce);
+    prefix[tag.len() + ninep_abi::NP_NONCE_LEN..tag.len() + ninep_abi::NP_SIG_PREFIX_LEN]
+        .copy_from_slice(who);
+    let sig = ed25519::sign_prefixed(key, &prefix[..tag.len() + ninep_abi::NP_SIG_PREFIX_LEN], np);
     let soff = p + ninep_abi::NP_AUTH_SIG_OFF;
     out[soff..soff + ninep_abi::NP_SIG_LEN].copy_from_slice(&sig);
     (total, nonce)

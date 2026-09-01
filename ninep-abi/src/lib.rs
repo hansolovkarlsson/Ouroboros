@@ -413,6 +413,30 @@ pub const NP_AUTH_HDR_SIGNED: usize =
 /// fails verification exactly as a tampered path or offset already does.
 pub const NP_MAC_PREFIX_LEN: usize = NP_NONCE_LEN + NP_NAME_LEN;
 
+/// Domain tag prefixed to the bytes a **request** signature covers.
+///
+/// Without it a request signature and a reply signature are the same shape -
+/// one key, `nonce ‖ rest`, no context - so a signature produced in one role is
+/// structurally valid in the other. An attacker who observes a signed reply (the
+/// wire is cleartext) could reframe it as a request from the same machine,
+/// offering that machine's public key, the same nonce, and the reply's own bytes
+/// split across the `name` and message fields.
+///
+/// Nothing on the wire changes: both tags are constants both sides already know,
+/// prepended to the *signed input* only. It costs a few bytes of stack and
+/// removes the whole class, rather than relying on the incidental barrier that
+/// stopped it before (the reframed `name` had to happen to match a local
+/// account, which for many replies means a one-character username).
+pub const SIG_DOMAIN_REQUEST: &[u8] = b"ouroboros-cluster-request-v1 ";
+
+/// Domain tag prefixed to the bytes a **reply** signature covers. See
+/// [`SIG_DOMAIN_REQUEST`] — tagging only one side would leave the other
+/// direction open, because the tag would then be forgeable by choosing a nonce.
+pub const SIG_DOMAIN_REPLY: &[u8] = b"ouroboros-cluster-reply-v1 ";
+
+/// The longest domain tag, so a caller can size a buffer for either.
+pub const SIG_DOMAIN_MAX: usize = 29;
+
 /// The bytes an Ed25519 **signature** covers before the NP message. The same
 /// `nonce ‖ name` the MAC covers, deliberately: the two formats authenticate
 /// identical bytes and differ only in who can produce the authenticator, so a
@@ -700,6 +724,18 @@ mod tests {
         assert_eq!(proxy_id(65536, 0), None);
         assert_eq!(proxy_id(0, 65536), None);
         assert_eq!(proxy_id(u32::MAX, u32::MAX), None);
+    }
+
+    #[test]
+    fn the_two_signature_domains_differ_and_fit() {
+        // If these were equal, or one were a prefix of the other, a signature
+        // made in one role would verify in the other - which is the whole reason
+        // they exist.
+        assert_ne!(SIG_DOMAIN_REQUEST, SIG_DOMAIN_REPLY);
+        assert!(!SIG_DOMAIN_REQUEST.starts_with(SIG_DOMAIN_REPLY));
+        assert!(!SIG_DOMAIN_REPLY.starts_with(SIG_DOMAIN_REQUEST));
+        assert!(SIG_DOMAIN_REQUEST.len() <= SIG_DOMAIN_MAX);
+        assert!(SIG_DOMAIN_REPLY.len() <= SIG_DOMAIN_MAX);
     }
 
     #[test]

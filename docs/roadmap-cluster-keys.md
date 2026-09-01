@@ -167,7 +167,7 @@ if the curve arithmetic does not come together, nothing has been built on it.
 | 6c ✅ | **On-device** key generation (`/bin/clusterkey`) | refuses without real entropy — verified by booting a guest with the entropy device *removed*; the existing identity survives the refusal | also refuses to replace an identity without `-f`, and reports unreadable `authorized` lines, which a lookup cannot |
 | 7 ✅ | Exporter **accepts** signed frames alongside old ones | **the Python peer signs and the guest verifies** — the wire proven by a foreign implementation before a guest client exists; MAC'd frames unregressed; 25 signed ops with **no supervisor restart**, which is the only signal a userland panic gives | unauthorized key, tampered message, tampered signature, a *different authorized* key swapped in, and a truncated frame — each refused |
 | 8 ✅ | Client **sends** signed frames | two-node matrix both directions, **and the captured link carries only `AUTHNP03`** — a run that succeeds proves the cluster works, not that it did so the way you believe | a machine with no `/etc/cluster/id` falls back to the MAC'd format and still serves, verified by removing the file from an image |
-| 9 | Reply signing (mutual auth over the new primitive) | Python verifies guest replies | tampered reply rejected |
+| 9 ✅ | Reply signing, **domain-separated** | Python verifies guest replies **and signs its own**, so both halves of the exchange are checked by an independent implementation; a client verifying against a *different authorized peer's* key is refused | the shared key now authenticates nothing — step 10 deletes it |
 | 10 | **Flag day**: drop the shared key everywhere | old-format peer refused; keyless node fail-closed; **revocation works** — delete a line, the peer stops being served | |
 | 11 | Docs, postmortem, release | | |
 
@@ -259,6 +259,43 @@ key never gets a scalar multiplication spent on it — but mostly separation: "i
 this key allowed here" and "does this signature check out" are different
 questions, and a valid signature by a key nobody authorized is exactly as
 unwelcome as an invalid one.
+
+## What step 9 settled
+
+Replies are signed by the exporter's private key and verified by the client
+against **the key it expects for the address it dialled** — `find_by_ip`, not
+`find_by_key`. That asymmetry is Decision 3, and it is the whole reason a line in
+`authorized` carries an address as well as a key: an exporter is *offered* a key
+and only has to decide whether it is allowed, while a client is offered nothing
+and must know in advance whose signature will do. Accepting any authorized
+signature would authenticate "some cluster member" when the claim that matters is
+"the machine I asked" — any other member could answer for it.
+
+**The reply format follows the request format**, with no discriminator byte: the
+exporter knows which kind of request it verified and the client knows which kind
+it sent, so a tag would be a field both sides must agree about for information
+neither lacks. The corollary is that a machine which cannot sign refuses a signed
+request outright, rather than answering with a MAC the caller cannot check.
+
+**A rig failure that looked exactly like a protocol failure.** Signing replies
+made the host Python peer ~0.2s slower per request, on top of ~1s to import a
+reference whose self-assertions are two full pure-Python signatures. Paid lazily,
+that landed on the first client request and pushed it past what the guest's
+`tcp_get` waits for — and the guest reported "no filesystem", which reads as a
+transport bug. It was a stopwatch. The server warms its signer before accepting
+connections now. Worth recording because the diagnosis took several wrong turns:
+the symptom pointed at the wire, the packet capture was nearly empty, and only
+timing the reference located it.
+
+**Signatures are domain-separated**, added after review pointed out that a
+request and a reply were the same shape — one key, `nonce ‖ rest`, no context —
+so a signature made in one role was structurally valid in the other. An attacker
+who observed a signed reply could reframe it as a *request* from that machine.
+It was stopped only incidentally, by the reframed `name` field having to match a
+local account. The signed input now carries a distinct constant per role; nothing
+on the wire changes. Verified three ways: a correctly tagged request is served,
+an untagged one (the shape a reply signature has) is refused, and a
+reply-domain signature offered as a request is refused.
 
 ## Risks, named in advance
 

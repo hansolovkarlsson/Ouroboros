@@ -49,6 +49,13 @@ NP_AUTH_MAGIC_SIGNED = int.from_bytes(b"AUTHNP03", "big")  # per-machine keypair
 NP_NAME_LEN = 32  # requesting user's name, NUL-padded
 NP_KEY_LEN = 32
 NP_SIG_LEN = 64
+# Signature DOMAIN TAGS - must match ninep-abi's SIG_DOMAIN_* byte for byte.
+# They keep a signature made in one role from verifying in the other: without
+# them a captured reply signature is structurally a valid request signature from
+# the same key.
+SIG_DOMAIN_REQUEST = b"ouroboros-cluster-request-v1\0"
+SIG_DOMAIN_REPLY = b"ouroboros-cluster-reply-v1\0"
+
 NP_AUTH_HDR = 8 + 16 + NP_NAME_LEN + 32  # magic + nonce + name + mac
 NP_AUTH_HDR_SIGNED = 8 + 16 + NP_NAME_LEN + NP_KEY_LEN + NP_SIG_LEN
 DEFAULT_KEY = b"ouroboros-dev-cluster-key-v1"
@@ -77,10 +84,19 @@ def ed():
     return _ED
 
 
+_AUTHORIZED = None
+
+
 def dev_authorized():
-    """The dev peers' public keys, as bytes."""
-    labels = ["ouroboros-dev-node-a", "ouroboros-dev-node-b", "ouroboros-dev-host-peer"]
-    return {ed().public_key(hashlib.sha256(l.encode()).digest()) for l in labels}
+    """The dev peers' public keys, as bytes. Memoized: deriving them is three
+    scalar multiplications in a naive pure-Python reference, and doing that per
+    request sits squarely inside the ~1s budget the guest allows for a reply -
+    the budget this rig was just found to be marginal against."""
+    global _AUTHORIZED
+    if _AUTHORIZED is None:
+        labels = ["ouroboros-dev-node-a", "ouroboros-dev-node-b", "ouroboros-dev-host-peer"]
+        _AUTHORIZED = {ed().public_key(hashlib.sha256(l.encode()).digest()) for l in labels}
+    return _AUTHORIZED
 
 
 def verify_signed(body):
@@ -101,9 +117,33 @@ def verify_signed(body):
     np = body[NP_AUTH_HDR_SIGNED:]
     if pub not in dev_authorized():
         return None
-    if not ed().verify(pub, nonce + name + np, sig):
+    if not ed().verify(pub, SIG_DOMAIN_REQUEST + nonce + name + np, sig):
         return None
     return np, nonce
+
+
+# The host peer's own identity - the "host" dev key, which every image's
+# authorized file already lists, so a guest built from this tree accepts its
+# signed replies without any copying.
+def host_seed():
+    return hashlib.sha256(b"ouroboros-dev-host-peer").digest()
+
+
+def warm_up():
+    """Do the slow Ed25519 work BEFORE accepting connections.
+
+    This reference is deliberately naive - affine arithmetic with a modular
+    inversion per point addition - which costs about 0.2s to sign, 0.3s to
+    verify, and a further second to import (its RFC 8032 self-assertions are two
+    full signatures). Paid lazily, that lands on the FIRST client request and
+    pushes it past what the guest's `tcp_get` will wait for: the guest reports
+    "no filesystem", which looks like a protocol failure and is a stopwatch.
+    Paid here, the first request costs the same as every other.
+    """
+    seed = host_seed()
+    sig = ed().sign(seed, b"warm")
+    assert ed().verify(ed().public_key(seed), b"warm", sig), "reference disagrees with itself"
+    return dev_authorized()
 
 
 def verify(body):
@@ -181,6 +221,7 @@ def serve_request(body):
     # Authenticate first (the export-hardening phase): reject a wrong/missing
     # cluster key before serving any verb - the guest surfaces FS_ERR_AUTH. A
     # denial is unsealed (the client's reply-verify fails -> auth error anyway).
+    signed_request = len(body) >= 8 and struct.unpack("<Q", body[:8])[0] == NP_AUTH_MAGIC_SIGNED
     verified = verify(body)
     if verified is None:
         return frame_reply(FS_ERR_AUTH)
@@ -190,8 +231,14 @@ def serve_request(body):
     # mac = HMAC(key, request_nonce || [status][data]).
     def sealed(status, data=b""):
         inner = struct.pack("<Q", status) + data
-        mac = hmac.new(KEY, nonce + inner, hashlib.sha256).digest()
-        framed = mac + inner
+        # The reply format follows the request format, as netd does it: a signed
+        # request gets a reply signed with this peer's own key, which every
+        # image's authorized file already lists at 10.0.2.2.
+        if signed_request:
+            seal = ed().sign(host_seed(), SIG_DOMAIN_REPLY + nonce + inner)
+        else:
+            seal = hmac.new(KEY, nonce + inner, hashlib.sha256).digest()
+        framed = seal + inner
         return struct.pack("<I", len(framed)) + framed
 
     if len(body) < HDR:
@@ -239,9 +286,13 @@ def main():
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     srv.bind(("0.0.0.0", port))
+    # Warm the signer BEFORE listening, not just before the first request: a
+    # client connecting during the ~1s warm-up would otherwise wait it out.
+    peers = warm_up()
     srv.listen(8)
     print(f"9P test server listening on 0.0.0.0:{port} "
           f"(guest reaches it at 10.0.2.2:{port} over SLIRP)")
+    print(f"  signing replies as the dev 'host' identity; {len(peers)} peer key(s) authorized")
     while True:
         conn, addr = srv.accept()
         try:

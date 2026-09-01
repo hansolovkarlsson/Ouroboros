@@ -199,8 +199,12 @@ the microkernel arc itself still leaves open):
    `docs/testing-qemu.md` both show `ls /mnt/a` in that recipe, so the docs
    promise something that has not worked for some time.
 
-3. **The two-node remote-read flake.** Roughly one remote op in six fails on the
-   shared QEMU socket link, reported to the caller as a generic failure. Measured
+3. **The remote-read flake, on both transports.** Roughly one remote op in six
+   fails, reported to the caller as a generic failure (`cat: failed`). Originally
+   measured on the two-VM socket link; observed again 2026-08-31 on the
+   **SLIRP** path of `run-image-9p-client`, one run in two, so it is not specific
+   to the socket netdev — which makes a QEMU-link explanation less likely and a
+   guest-side one more so. Measured
    2026-08-31 across scripted runs — **2 of 6 ops on `main`, 1 of 6 on a branch**
    — so it is not new, and it is the same intermittent the Phase 2 notes called
    "intermittent first-ls on two-VM", which the 4-try SYN retransmit reduced but

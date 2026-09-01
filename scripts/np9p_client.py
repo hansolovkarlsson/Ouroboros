@@ -47,6 +47,13 @@ NP_AUTH_MAGIC = int.from_bytes(b"AUTHNP02", "big")  # ninep-abi NP_AUTH_MAGIC
 NP_AUTH_MAGIC_SIGNED = int.from_bytes(b"AUTHNP03", "big")  # the per-machine-keypair format
 NP_PUBKEY_LEN = 32
 NP_SIG_LEN = 64
+# Signature DOMAIN TAGS - must match ninep-abi's SIG_DOMAIN_* byte for byte.
+# They keep a signature made in one role from verifying in the other: without
+# them a captured reply signature is structurally a valid request signature from
+# the same key.
+SIG_DOMAIN_REQUEST = b"ouroboros-cluster-request-v1\0"
+SIG_DOMAIN_REPLY = b"ouroboros-cluster-reply-v1\0"
+
 NP_NONCE_LEN = 16
 NP_NAME_LEN = 32  # requesting user's name, NUL-padded - ninep-abi NP_NAME_LEN
 DEFAULT_KEY = b"ouroboros-dev-cluster-key-v1"  # Makefile CLUSTER_KEY default
@@ -94,6 +101,12 @@ def load_ed_reference():
 # `--user <name>`; `root` keeps the pre-identity behaviour.
 USER = b"root"
 
+# The public key this client expects the EXPORTER to sign its replies with -
+# i.e. the key for the host being dialled. Defaults to the dev node-a identity,
+# which is what every image stages as its own; `--peer=<label>` picks another,
+# including a wrong one, to prove the check bites.
+PEER_KEY = None
+
 
 def build_frame(verb, tree, params, payload):
     # The bare NP message: [verb u64][tree u64][a0..a3 u64][payload].
@@ -118,7 +131,7 @@ def signed_frame(np_msg, seed, user=None):
     nonce = os.urandom(NP_NONCE_LEN)
     name = user.ljust(NP_NAME_LEN, b"\0")
     public = ed.public_key(seed)
-    sig = ed.sign(seed, nonce + name + np_msg)
+    sig = ed.sign(seed, SIG_DOMAIN_REQUEST + nonce + name + np_msg)
     body = struct.pack("<Q", NP_AUTH_MAGIC_SIGNED) + nonce + name + public + sig + np_msg
     return struct.pack("<I", len(body)) + body, nonce
 
@@ -140,7 +153,7 @@ def sign_frame(np_msg, key, user=None):
     return struct.pack("<I", len(body)) + body, nonce
 
 
-def recv_reply(sock, key, nonce):
+def recv_reply(sock, key, nonce, expect_signed=False, peer_key=None):
     # The server frames [u32 len][mac:32][status u64][data] then FINs (reply-auth).
     # Verify mac = HMAC(key, req_nonce || [status][data]) before trusting a byte;
     # a failure (tamper, or a wrong/denied key) -> FS_ERR_AUTH.
@@ -154,6 +167,18 @@ def recv_reply(sock, key, nonce):
         raise RuntimeError(f"short reply ({len(buf)} bytes)")
     (flen,) = struct.unpack("<I", buf[:4])
     body = buf[4:4 + flen]
+    if expect_signed:
+        # We signed the request, so the reply is signed - and it must verify
+        # against the key expected for the HOST WE DIALLED, not against any key
+        # we happen to authorize. Accepting the latter would authenticate "some
+        # cluster member" rather than "the machine I asked".
+        if len(body) < NP_SIG_LEN + 8:
+            return FS_ERR_AUTH, b""
+        sig, np = body[:NP_SIG_LEN], body[NP_SIG_LEN:]
+        if peer_key is None or not load_ed_reference().verify(peer_key, SIG_DOMAIN_REPLY + nonce + np, sig):
+            return FS_ERR_AUTH, b""
+        (status,) = struct.unpack("<Q", np[:8])
+        return status, np[8:]
     if len(body) < 32 + 8:
         return FS_ERR_AUTH, b""  # too short to be a sealed reply (or a denial)
     reply_mac, np = body[:32], body[32:]
@@ -172,7 +197,11 @@ def one_op(host, port, key, np_msg, timeout=10):
         frame, nonce = sign_frame(np_msg, key)
     with socket.create_connection((host, port), timeout=timeout) as s:
         s.sendall(frame)
-        status, data = recv_reply(s, key, nonce)
+        status, data = recv_reply(
+            s, key, nonce,
+            expect_signed=SIGN_KEY is not None,
+            peer_key=PEER_KEY,
+        )
     return status, data
 
 
@@ -339,6 +368,15 @@ def main():
             SIGN_KEY = dev_seed(a[len("--sign="):])
             del args[i]
             break
+    # `--peer=<label>`: whose signature to expect on the reply.
+    global PEER_KEY
+    for i, a in enumerate(list(args)):
+        if a.startswith("--peer="):
+            PEER_KEY = load_ed_reference().public_key(dev_seed(a[len("--peer="):]))
+            del args[i]
+            break
+    if PEER_KEY is None:
+        PEER_KEY = load_ed_reference().public_key(dev_seed("ouroboros-dev-node-a"))
     if "--user" in args:
         global USER
         i = args.index("--user")
