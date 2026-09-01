@@ -282,19 +282,23 @@ def run_op(host, port, command, timeout=10):
     line two different machines send is how you check that an unauthenticated
     caller cannot tell them apart.
 
-    Honours `--legacy-mac` the same way [`one_op`] does, so the retired format
-    can be pointed at this path too.
+    `--legacy-mac` is REFUSED here rather than supported. The export cannot peek
+    the verb of a retired frame - it does not parse that format at all - so it
+    answers with a *framed* reply whichever verb was inside, and this function
+    would print those bytes raw, as binary. The retired-format control belongs
+    on the fs path, where the reply is decoded and the refusal is legible.
     """
+    if LEGACY_MAC_KEY is not None:
+        sys.exit("run: --legacy-mac has no readable answer on this path (the "
+                 "export replies to a retired frame with a framed status, not "
+                 "text); use it with readdir/read/stat instead")
     cmd = command.encode()
     # a0 = command-line length; a1/a2 would be the caller's endpoint for the
     # /host namespace import (cluster Phase 4b), which a host peer does not
     # offer - it exports nothing back - so they stay zero and the command runs
     # with the remote's own namespace only.
     np_msg = build_frame(NP_RUN, 0, [len(cmd), 0, 0, 0], cmd)
-    if LEGACY_MAC_KEY is not None:
-        frame, _nonce = legacy_mac_frame(np_msg, LEGACY_MAC_KEY)
-    else:
-        frame, _nonce = signed_frame(np_msg, SIGN_KEY)
+    frame, _nonce = signed_frame(np_msg, SIGN_KEY)
     out = b""
     with socket.create_connection((host, port), timeout=timeout) as s:
         s.sendall(frame)
