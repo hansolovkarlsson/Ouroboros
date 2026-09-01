@@ -106,6 +106,30 @@ def verify_signed(body):
     return np, nonce
 
 
+# The host peer's own identity - the "host" dev key, which every image's
+# authorized file already lists, so a guest built from this tree accepts its
+# signed replies without any copying.
+def host_seed():
+    return hashlib.sha256(b"ouroboros-dev-host-peer").digest()
+
+
+def warm_up():
+    """Do the slow Ed25519 work BEFORE accepting connections.
+
+    This reference is deliberately naive - affine arithmetic with a modular
+    inversion per point addition - which costs about 0.2s to sign, 0.3s to
+    verify, and a further second to import (its RFC 8032 self-assertions are two
+    full signatures). Paid lazily, that lands on the FIRST client request and
+    pushes it past what the guest's `tcp_get` will wait for: the guest reports
+    "no filesystem", which looks like a protocol failure and is a stopwatch.
+    Paid here, the first request costs the same as every other.
+    """
+    seed = host_seed()
+    sig = ed().sign(seed, b"warm")
+    assert ed().verify(ed().public_key(seed), b"warm", sig), "reference disagrees with itself"
+    return dev_authorized()
+
+
 def verify(body):
     """Strip + verify the auth header; return (NP message, nonce), or None. The
     nonce is what the reply is MAC'd against (reply-auth)."""
@@ -181,6 +205,7 @@ def serve_request(body):
     # Authenticate first (the export-hardening phase): reject a wrong/missing
     # cluster key before serving any verb - the guest surfaces FS_ERR_AUTH. A
     # denial is unsealed (the client's reply-verify fails -> auth error anyway).
+    signed_request = len(body) >= 8 and struct.unpack("<Q", body[:8])[0] == NP_AUTH_MAGIC_SIGNED
     verified = verify(body)
     if verified is None:
         return frame_reply(FS_ERR_AUTH)
@@ -190,8 +215,14 @@ def serve_request(body):
     # mac = HMAC(key, request_nonce || [status][data]).
     def sealed(status, data=b""):
         inner = struct.pack("<Q", status) + data
-        mac = hmac.new(KEY, nonce + inner, hashlib.sha256).digest()
-        framed = mac + inner
+        # The reply format follows the request format, as netd does it: a signed
+        # request gets a reply signed with this peer's own key, which every
+        # image's authorized file already lists at 10.0.2.2.
+        if signed_request:
+            seal = ed().sign(host_seed(), nonce + inner)
+        else:
+            seal = hmac.new(KEY, nonce + inner, hashlib.sha256).digest()
+        framed = seal + inner
         return struct.pack("<I", len(framed)) + framed
 
     if len(body) < HDR:
@@ -240,8 +271,11 @@ def main():
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     srv.bind(("0.0.0.0", port))
     srv.listen(8)
+    # Warm the signer before the first client arrives - see warm_up().
+    peers = warm_up()
     print(f"9P test server listening on 0.0.0.0:{port} "
           f"(guest reaches it at 10.0.2.2:{port} over SLIRP)")
+    print(f"  signing replies as the dev 'host' identity; {len(peers)} peer key(s) authorized")
     while True:
         conn, addr = srv.accept()
         try:

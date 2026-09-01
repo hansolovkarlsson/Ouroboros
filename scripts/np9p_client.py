@@ -94,6 +94,12 @@ def load_ed_reference():
 # `--user <name>`; `root` keeps the pre-identity behaviour.
 USER = b"root"
 
+# The public key this client expects the EXPORTER to sign its replies with -
+# i.e. the key for the host being dialled. Defaults to the dev node-a identity,
+# which is what every image stages as its own; `--peer=<label>` picks another,
+# including a wrong one, to prove the check bites.
+PEER_KEY = None
+
 
 def build_frame(verb, tree, params, payload):
     # The bare NP message: [verb u64][tree u64][a0..a3 u64][payload].
@@ -140,7 +146,7 @@ def sign_frame(np_msg, key, user=None):
     return struct.pack("<I", len(body)) + body, nonce
 
 
-def recv_reply(sock, key, nonce):
+def recv_reply(sock, key, nonce, expect_signed=False, peer_key=None):
     # The server frames [u32 len][mac:32][status u64][data] then FINs (reply-auth).
     # Verify mac = HMAC(key, req_nonce || [status][data]) before trusting a byte;
     # a failure (tamper, or a wrong/denied key) -> FS_ERR_AUTH.
@@ -154,6 +160,18 @@ def recv_reply(sock, key, nonce):
         raise RuntimeError(f"short reply ({len(buf)} bytes)")
     (flen,) = struct.unpack("<I", buf[:4])
     body = buf[4:4 + flen]
+    if expect_signed:
+        # We signed the request, so the reply is signed - and it must verify
+        # against the key expected for the HOST WE DIALLED, not against any key
+        # we happen to authorize. Accepting the latter would authenticate "some
+        # cluster member" rather than "the machine I asked".
+        if len(body) < NP_SIG_LEN + 8:
+            return FS_ERR_AUTH, b""
+        sig, np = body[:NP_SIG_LEN], body[NP_SIG_LEN:]
+        if peer_key is None or not load_ed_reference().verify(peer_key, nonce + np, sig):
+            return FS_ERR_AUTH, b""
+        (status,) = struct.unpack("<Q", np[:8])
+        return status, np[8:]
     if len(body) < 32 + 8:
         return FS_ERR_AUTH, b""  # too short to be a sealed reply (or a denial)
     reply_mac, np = body[:32], body[32:]
@@ -172,7 +190,11 @@ def one_op(host, port, key, np_msg, timeout=10):
         frame, nonce = sign_frame(np_msg, key)
     with socket.create_connection((host, port), timeout=timeout) as s:
         s.sendall(frame)
-        status, data = recv_reply(s, key, nonce)
+        status, data = recv_reply(
+            s, key, nonce,
+            expect_signed=SIGN_KEY is not None,
+            peer_key=PEER_KEY,
+        )
     return status, data
 
 
@@ -339,6 +361,15 @@ def main():
             SIGN_KEY = dev_seed(a[len("--sign="):])
             del args[i]
             break
+    # `--peer=<label>`: whose signature to expect on the reply.
+    global PEER_KEY
+    for i, a in enumerate(list(args)):
+        if a.startswith("--peer="):
+            PEER_KEY = load_ed_reference().public_key(dev_seed(a[len("--peer="):]))
+            del args[i]
+            break
+    if PEER_KEY is None:
+        PEER_KEY = load_ed_reference().public_key(dev_seed("ouroboros-dev-node-a"))
     if "--user" in args:
         global USER
         i = args.index("--user")
