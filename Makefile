@@ -517,6 +517,17 @@ serve-bin:
 # just that program to swap it out, no kernel rebuild required.
 esp: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin accountd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin id-bin passwd-bin useradd-bin groupadd-bin usermod-bin clusterkey-bin chello-bin cdemo-bin cfile-bin cpico-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin edtest-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin tail-bin nl-bin rev-bin uniq-bin sort-bin
 	mkdir -p $(ESP_DIR)/EFI/BOOT $(ESP_DIR)/EFI/ORBS $(ESP_DIR)/bin $(ESP_DIR)/man $(ESP_DIR)/etc
+	@# THIS TARGET ONLY EVER ADDS FILES, so deleting a staging line does not
+	@# delete what it already wrote: only `make clean` does. The shared cluster
+	@# key was staged here until the flag day, so any tree built before it still
+	@# holds \CLUSTER.KEY, and `make image` would keep baking the dev secret
+	@# into esp.img, esp.hdd and both two-node images - while the flag day's
+	@# headline check is "an image with no CLUSTER.KEY anywhere on it".
+	@#
+	@# Not hypothetical: this tree still carried build/esp/User/ from the
+	@# /User -> /Users rename weeks earlier, which is the same mechanism with a
+	@# harmless payload. Retired staging paths get swept here.
+	rm -rf $(ESP_DIR)/CLUSTER.KEY $(ESP_DIR)/User
 	cp $(KERNEL) $(ESP_DIR)/EFI/BOOT/BOOTAA64.EFI
 	cp $(SHELL_BIN) $(ESP_DIR)/EFI/ORBS/SH.BIN
 	cp $(HELLO_BIN) $(ESP_DIR)/EFI/ORBS/HELLO.BIN
@@ -1239,7 +1250,13 @@ test-parallels:
 # Native target, not the workspace default (aarch64-unknown-uefi), which cannot
 # run a test binary.
 HOST_TARGET := $(shell rustc -vV | sed -n 's/^host: //p')
-PURE_CRATES := accounts regex ed25519 clusterkeys
+PURE_CRATES := accounts regex ed25519 clusterkeys ninep-abi
+# `ninep-abi` joined the list at the flag day. It had always qualified - pure
+# consts plus `resolve_ns`, no I/O and no syscalls - and was simply never listed,
+# so its thirteen assertions about the WIRE FORMAT, including the one pinning
+# `NP_FRAME_MAX`, were compiled by nothing at all. That is precisely the failure
+# this variable's comment above describes, sitting on the crate that defines the
+# format both Python peers transcribe from.
 
 # The PIE relocation contract, checked mechanically over every userland binary:
 # ABS64 is unloadable by this project's loader. See scripts/check-relocs.sh for

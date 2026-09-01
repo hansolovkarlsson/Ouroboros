@@ -258,7 +258,8 @@ const AUTHORIZED_PATH: &[u8] = b"/etc/cluster/authorized";
 /// its outbound requests rather than MAC them.
 const ID_PATH: &[u8] = b"/etc/cluster/id";
 
-/// Load the cluster auth config from disk via `fsd` at boot. The key file's
+/// Load the cluster auth config from disk via `fsd` at boot.
+///
 /// Retries while `fsd` reports `NO_FS` (its disk isn't mounted yet - a
 /// boot-order race, since netd and fsd start together), but stops immediately
 /// on `FS_ERR_NOT_FOUND` (the file is definitively absent = run unconfigured).
@@ -269,15 +270,16 @@ fn load_auth() -> Auth {
         authorized: [0u8; AUTHORIZED_MAX],
         authorized_len: 0,
     };
-    // ONE retry budget across both reads, not one each.
+    // ONE retry budget across all three reads, not one each.
     //
-    // Each waits for the same event - the disk mounting - so two separate 2s
-    // budgets do not make the race twice as winnable, they make a DISKLESS boot
-    // spend twice as long not draining netd's mailbox. Parallels with no USB
-    // stick, and a Pi with no card, are both supported configurations where
-    // nothing ever mounts; at several seconds of silence the supervisor health
-    // ping (160ms) times out often enough to burn all three restarts and
-    // disable netd for the boot. Up to ~2s total, at 40ms a try.
+    // Each waits for the same event - the disk mounting - so three separate 2s
+    // budgets do not make the race three times as winnable, they make a
+    // DISKLESS boot spend three times as long not draining netd's mailbox.
+    // Parallels with no USB stick, and a Pi with no card, are both supported
+    // configurations where nothing ever mounts; at several seconds of silence
+    // the supervisor health ping (160ms) times out often enough to burn all
+    // three restarts and disable netd for the boot. Up to ~2s total, at 40ms
+    // a try.
     //
     // THE BUDGET GATES THE RETRY, NEVER THE FIRST ATTEMPT: written first as
     // `while budget > 0`, which meant that exhausting it on the first read left
@@ -286,8 +288,34 @@ fn load_auth() -> Auth {
     let mut budget = 50u32;
     // The no-exec flag is presence-only: any successful read (even 0 bytes)
     // means the file exists; FS_ERR_* means it doesn't.
+    //
+    // RETRIED ON `NO_FS` LIKE THE TWO READS BELOW, AND THIS ONE MATTERS MOST,
+    // BECAUSE IT IS THE ONLY ONE THAT FAILS *OPEN*. An unread id or peer list
+    // closes the export; an unread `\NOEXEC` leaves `noexec` false, which is
+    // indistinguishable from "the operator did not ask for it" - and
+    // `handle_cpu_run`'s `if auth.noexec` is the only gate on remote execution
+    // past authentication, so a node configured to share its disk while
+    // refusing `cpu` would spawn remote commands for the whole boot, silently
+    // (the boot line prints only inside the true branch).
+    //
+    // Until step 10b this read was third, behind the retried `CLUSTER.KEY`
+    // read, whose loop absorbed the mount race on its behalf; deleting that
+    // read promoted this one to netd's FIRST `fsd` call and left it bare. The
+    // race is real wherever the disk is slower than QEMU's virtio-blk - USB-MSD
+    // on Parallels and the Pi, which is to say the platforms least likely to be
+    // the ones you test on.
     let mut one = [0u8; 1];
-    let m = read_file_chunk(As::FirstParty, NOEXEC_PATH, 0, 0, &mut one);
+    let m;
+    loop {
+        let r = read_file_chunk(As::FirstParty, NOEXEC_PATH, 0, 0, &mut one);
+        if r == syscall_abi::NO_FS && budget > 0 {
+            budget -= 1;
+            syscall(syscall_abi::NET_WAIT, 40);
+            continue;
+        }
+        m = r;
+        break;
+    }
     auth.noexec = m < syscall_abi::FS_ERR_MIN;
 
     // This machine's own key. Absent is not an error either - it means netd
@@ -2549,7 +2577,21 @@ fn seal_reply_signed(
     let sl = ninep_abi::NP_SIG_LEN; // 64
     let body_start = ninep_abi::NP_NET_LEN_PREFIX;
     if n < body_start || n + sl > c.prefix.len() {
-        return n; // no room - leave unsealed, as the MAC path does
+        // NO ROOM: refuse, exactly as [`seal_reply`]'s keyless arm does.
+        //
+        // Returning `n` here - which it did until this was caught - stages the
+        // body with no signature over it, and `handle_9p` then transmits it: an
+        // authenticated request answered by an unauthenticated reply, which is
+        // the one thing reply-signing exists to prevent. The client rejects it
+        // as `FS_ERR_AUTH`, so the symptom would be "authentication failed on
+        // large reads" between two machines that are correctly keyed.
+        //
+        // Unreachable today, but only by a margin nothing asserts: `PREFIX_MAX`
+        // is 2048 and the largest `build_9p_reply` is 12 + `EXPORT_CHUNK`
+        // (1400) = 1412, leaving 572 bytes spare after the signature. Raising
+        // `EXPORT_CHUNK` past 1972, shrinking `PREFIX_MAX`, or adding a verb
+        // with a bigger reply would each reach it.
+        return 0;
     }
     let body_len = n - body_start;
     // Signed over nonce ‖ body via the two-part entry point, so the
