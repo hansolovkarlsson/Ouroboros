@@ -2415,7 +2415,7 @@ fn handle_9p(c: &mut TcpConn, request: &[u8], dials: &mut [Option<DialConn>; MAX
             // this peer has already proved it holds an authorized private key;
             // the pre-auth path stays deliberately ambiguous so an
             // unauthenticated stranger cannot enumerate accounts.
-            deny_unknown_user(c, request, cause);
+            deny_unknown_user(c, request, cause, auth, &nonce);
             return;
         }
     };
@@ -2733,7 +2733,7 @@ fn deny_9p(c: &mut TcpConn, request: &[u8]) {
 /// heard of. Distinct from [`deny_9p`] only in what it says: same `FS_ERR_AUTH`
 /// on the wire (one refusal code, so a client needs no new case), an accurate
 /// line for the `cpu` caller, who reads the reply as raw output.
-fn deny_unknown_user(c: &mut TcpConn, request: &[u8], cause: LineScan) {
+fn deny_unknown_user(c: &mut TcpConn, request: &[u8], cause: LineScan, auth: &Auth, nonce: &[u8]) {
     let is_run = matches!(np_offset(request),
         Some(voff) if request.len() >= voff + 8 && read_u64(request, voff) == ninep_abi::NP_RUN);
     c.file = false;
@@ -2762,7 +2762,20 @@ fn deny_unknown_user(c: &mut TcpConn, request: &[u8], cause: LineScan) {
             LineScan::NoDatabase => syscall_abi::FS_ERR_NOT_FOUND,
             _ => syscall_abi::FS_ERR_AUTH,
         };
-        c.prefix_len = frame_reply(&mut c.prefix, status, &[]);
+        // SEALED, or the three statuses above are a distinction no client can
+        // observe. An unsealed refusal is 12 bytes - `[len][status]` - and every
+        // client checks the length before the status, precisely because an
+        // unsigned reply must not be trusted; the Rust one returns a hard-coded
+        // FS_ERR_AUTH and `np9p_client.py` documents doing the same. So a
+        // transient failure on the exporter arrived as "authentication failed"
+        // and sent the operator to the keys.
+        //
+        // Signing it is possible HERE and not on the pre-auth paths: this peer
+        // has already proved it holds an authorized private key, which means
+        // `accepts_signed()` was true, which means we hold one too. An
+        // authenticated request gets an authenticated answer, refusal included.
+        let n = frame_reply(&mut c.prefix, status, &[]);
+        c.prefix_len = seal_reply(c, auth, nonce, n);
     }
 }
 
