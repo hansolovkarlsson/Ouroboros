@@ -263,28 +263,38 @@ const ID_PATH: &[u8] = b"/etc/cluster/id";
 /// Whether an `fsd` reply is a TRANSIENT failure that a boot-time read should
 /// retry, rather than a real answer.
 ///
-/// INVERTED ON PURPOSE: this asks what a DEFINITIVE answer looks like, and
-/// treats everything else as "ask again". The enumerate-the-transients version
-/// was written twice and was wrong both times, because the interesting failures
-/// are the ones nobody thought to list:
+/// The list is of codes that mean **the server could not answer**, which is a
+/// different question from "was this an error":
 ///
-/// - First it was `r == NO_FS` only, which missed `TASK_ERR_NO_SUCH_TASK` from
-///   an `fsd` restart (`tasks::fail_calls_to` fails every in-flight `MSG_CALL`
-///   to a slot being torn down).
-/// - Then it was those two, which STILL missed the restart window it was
-///   written for: [`read_file_chunk`] issues its `GRANT` *before* the
-///   `MSG_CALL`, the kernel refuses a grant to a non-existent task, and netd
-///   turns that into `FS_ERROR` — so the real restart path never produced
-///   either listed value.
+/// - `NO_FS` — the disk is not mounted yet. `netd` and `fsd` start together, so
+///   the first reads race the mount.
+/// - `TASK_ERR_NO_SUCH_TASK` — `fsd` is being restarted underneath us
+///   (`tasks::fail_calls_to` fails every in-flight `MSG_CALL` to a slot being
+///   torn down); the supervisor reinstalls it in the same handler.
+/// - `FS_ERROR` — how `read_file_chunk` reports a refused `GRANT`. It grants
+///   BEFORE it calls, and the kernel refuses a grant to a non-existent task, so
+///   this — not `TASK_ERR_NO_SUCH_TASK` — is what the restart window actually
+///   produces. Two earlier versions of this function missed it by enumerating
+///   the codes they expected rather than the ones the path emits.
+/// - `MSG_ERR_FULL` — `fsd`'s mailbox was momentarily full.
 ///
-/// A definitive answer is success (below `FS_ERR_MIN`), or `FS_ERR_NOT_FOUND`
-/// ("the disk is there and the file is not"). Anything else — an unmounted
-/// disk, a restarting server, a refused grant, a full mailbox, a code added
-/// next year — means we did not get an answer, and the caller decides what to
-/// do about that. A new failure mode now defaults to being retried instead of
-/// being silently believed.
+/// WHY NOT "EVERYTHING EXCEPT A DEFINITIVE ANSWER", which this briefly was:
+/// because a PERMANENT error is then retried forever. `mkdir /NOEXEC` — a
+/// plausible way to reach for the flag — makes `read_at` return
+/// `FS_ERR_NOT_A_FILE`, and this read is netd's first, so the whole shared
+/// budget is spent sleeping in `NET_WAIT` with the mailbox undrained, for a
+/// condition waiting cannot change. That starves the two reads that configure
+/// the cluster AND leaves the supervisor's 160ms health ping unacked, which is
+/// the restart loop `testing-parallels.md` Risk #1 is about. Fail-safe applies
+/// to the DECISION (see `noexec` below), not to how long to wait for one.
 fn transient_fs_failure(r: u64) -> bool {
-    r >= syscall_abi::FS_ERR_MIN && r != syscall_abi::FS_ERR_NOT_FOUND
+    matches!(
+        r,
+        syscall_abi::NO_FS
+            | syscall_abi::TASK_ERR_NO_SUCH_TASK
+            | syscall_abi::FS_ERROR
+            | syscall_abi::MSG_ERR_FULL
+    )
 }
 
 /// Load the cluster auth config from disk via `fsd` at boot.

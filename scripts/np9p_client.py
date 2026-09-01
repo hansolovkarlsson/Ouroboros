@@ -404,6 +404,9 @@ def do_serve(host, port, announce_port, extern_port, response):
 
 
 def main():
+    if "--help" in sys.argv or "-h" in sys.argv:
+        print(__doc__)
+        return
     args = sys.argv[1:]
     # `--legacy-mac[=<key>]`: send a frame in the RETIRED shared-key format,
     # which the guest must refuse. This is the flag day's negative control - a
@@ -432,6 +435,17 @@ def main():
     global SIGN_LABEL, SIGN_KEY
     for i, a in enumerate(list(args)):
         if a == "--sign":
+            # A bare `--sign` means the default identity. But `--sign nobody`
+            # is the likeliest typo for the documented control, and it used to
+            # leave "nobody" as an ignored positional and sign with the DEFAULT
+            # key - so a run meant to prove an unauthorized key is refused
+            # instead proved an authorized one is served, silently. The
+            # `leftover` check below cannot catch it: the orphan is not a flag.
+            # Refuse rather than guess which was meant.
+            if i + 1 < len(args) and not args[i + 1].startswith("-"):
+                sys.exit(f"--sign takes no separate argument; write "
+                         f"--sign={args[i + 1]} (or a bare --sign for the "
+                         f"default identity)")
             del args[i]
             break
         if a.startswith("--sign="):
@@ -483,7 +497,11 @@ def main():
     # for exactly that until the flag day removed the flag, and it did not start
     # failing, it started SUCCEEDING. A typo (`--sing=nobody`) does the same,
     # and so does a repeated flag, since each loop above deletes one and breaks.
-    leftover = [a for a in args if a.startswith("--")]
+    # `dial` and `serve` forward args[5:] to the guest as arbitrary text, so a
+    # `--`-prefixed word there is payload, not a flag. Everything up to the
+    # fixed positionals is checked for every op.
+    checked = args[:5] if (len(args) > 2 and args[2] in ("dial", "serve")) else args
+    leftover = [a for a in checked if a.startswith("--")]
     if leftover:
         sys.exit(f"unknown or repeated option(s): {' '.join(leftover)}")
     if len(args) < 4:
