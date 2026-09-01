@@ -23,6 +23,7 @@ Then in the guest (SLIRP maps the host to 10.0.2.2):
 """
 import hashlib
 import hmac
+import os
 import socket
 import struct
 import sys
@@ -44,18 +45,77 @@ HDR = 48  # NP_REQ_PAYLOAD
 # this server must verify the client-nonce MAC before serving it. Must match the
 # guest's \CLUSTER.KEY (Makefile CLUSTER_KEY); override with `--key <k>`.
 NP_AUTH_MAGIC = int.from_bytes(b"AUTHNP02", "big")  # ninep-abi NP_AUTH_MAGIC
+NP_AUTH_MAGIC_SIGNED = int.from_bytes(b"AUTHNP03", "big")  # per-machine keypairs
 NP_NAME_LEN = 32  # requesting user's name, NUL-padded
+NP_KEY_LEN = 32
+NP_SIG_LEN = 64
 NP_AUTH_HDR = 8 + 16 + NP_NAME_LEN + 32  # magic + nonce + name + mac
+NP_AUTH_HDR_SIGNED = 8 + 16 + NP_NAME_LEN + NP_KEY_LEN + NP_SIG_LEN
 DEFAULT_KEY = b"ouroboros-dev-cluster-key-v1"
 KEY = DEFAULT_KEY  # replaced from argv in main()
+
+# Public keys this server accepts, by hex. The dev cluster's three identities,
+# derived the same way scripts/mkclusterkeys.py derives them - so a guest built
+# from this tree is authorized here without any copying.
+#
+# THIS SERVER IS THE FOREIGN OBSERVER FOR THE CLIENT HALF. The guest signing its
+# own requests is checked by something that shares none of its code; a guest
+# whose signatures only its own exporter verifies is a closed loop.
+_ED = None
+
+
+def ed():
+    """The Ed25519 reference, memoized. Asserts itself against RFC 8032 on load."""
+    global _ED
+    if _ED is None:
+        import importlib.util
+        here = os.path.dirname(os.path.abspath(__file__))
+        spec = importlib.util.spec_from_file_location("edref", os.path.join(here, "gen-sign-vectors.py"))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _ED = mod
+    return _ED
+
+
+def dev_authorized():
+    """The dev peers' public keys, as bytes."""
+    labels = ["ouroboros-dev-node-a", "ouroboros-dev-node-b", "ouroboros-dev-host-peer"]
+    return {ed().public_key(hashlib.sha256(l.encode()).digest()) for l in labels}
+
+
+def verify_signed(body):
+    """Verify an AUTHNP03 frame: [magic][nonce][name][pubkey][sig][np].
+
+    The offered key must be one this server authorizes BEFORE the signature is
+    checked - the same order netd uses, and for the same reason: a valid
+    signature by a key nobody authorized is exactly as unwelcome as an invalid
+    one.
+    """
+    if len(body) < NP_AUTH_HDR_SIGNED:
+        return None
+    nonce = body[8:24]
+    name = body[24 : 24 + NP_NAME_LEN]
+    koff = 24 + NP_NAME_LEN
+    pub = body[koff : koff + NP_KEY_LEN]
+    sig = body[koff + NP_KEY_LEN : NP_AUTH_HDR_SIGNED]
+    np = body[NP_AUTH_HDR_SIGNED:]
+    if pub not in dev_authorized():
+        return None
+    if not ed().verify(pub, nonce + name + np, sig):
+        return None
+    return np, nonce
 
 
 def verify(body):
     """Strip + verify the auth header; return (NP message, nonce), or None. The
     nonce is what the reply is MAC'd against (reply-auth)."""
-    if len(body) < NP_AUTH_HDR:
+    if len(body) < 8:
         return None
     (magic,) = struct.unpack("<Q", body[:8])
+    if magic == NP_AUTH_MAGIC_SIGNED:
+        return verify_signed(body)
+    if len(body) < NP_AUTH_HDR:
+        return None
     if magic != NP_AUTH_MAGIC:
         return None
     nonce = body[8:24]

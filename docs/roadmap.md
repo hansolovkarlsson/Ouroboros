@@ -188,7 +188,18 @@ the microkernel arc itself still leaves open):
    away the guarantee. Split and ownership are independent choices, and only
    the second one is the problem.
 
-2. **The two-node remote-read flake.** Roughly one remote op in six fails on the
+2. **`ls` of a remote-mount ROOT fails against the host Python peer.** On the
+   `run-image-9p-client` rig, `mount -r 10.0.2.2:5641 /mnt/a` then `ls /mnt/a`
+   reports "no such file or directory", while `cat /mnt/a/HELLO.TXT` works and
+   `readdir /` from the host client works. So it is the guest's resolution of the
+   mount *root* — probably an empty path where the server expects `/` — not the
+   transport or the server. **Pre-existing**, confirmed by running the same steps
+   against `main` before per-machine keys existed; found while restoring that
+   rig as the foreign observer for the client half. `CLAUDE.md` and
+   `docs/testing-qemu.md` both show `ls /mnt/a` in that recipe, so the docs
+   promise something that has not worked for some time.
+
+3. **The two-node remote-read flake.** Roughly one remote op in six fails on the
    shared QEMU socket link, reported to the caller as a generic failure. Measured
    2026-08-31 across scripted runs — **2 of 6 ops on `main`, 1 of 6 on a branch**
    — so it is not new, and it is the same intermittent the Phase 2 notes called
@@ -202,7 +213,7 @@ the microkernel arc itself still leaves open):
    [`testing-qemu.md`](testing-qemu.md) for telling it apart from a real refusal.
    The fix wants a packet trace first, not a guess.
 
-3. **General / transitive capability delegation.** The delegation shipped
+4. **General / transitive capability delegation.** The delegation shipped
    2026-08-21 is deliberately coarse: one delegated target per task,
    non-transitive, in practice shell-only. Making it general (any task hands
    any held capability onward, revocably — MINIX's full grant model) would
@@ -213,7 +224,7 @@ the microkernel arc itself still leaves open):
    delegation itself. Build the consumer first, or wait until one is
    actually wanted.
 
-4. **Per-task ASIDs, revisited** — a pure TLB-flush-per-switch optimization
+5. **Per-task ASIDs, revisited** — a pure TLB-flush-per-switch optimization
    that passed on QEMU but faulted the idle task on real Parallels and was
    reverted (see the isolation postmortem for the decoded fault evidence);
    needs a proven break-before-make sequence. Low value — a context switch

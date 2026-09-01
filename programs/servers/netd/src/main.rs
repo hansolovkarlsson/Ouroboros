@@ -207,6 +207,15 @@ struct Auth {
     /// The no-exec lever: a machine may share its disk (mounts allowed) while
     /// refusing remote code execution (`NP_RUN`). Set by a `\NOEXEC` flag file.
     noexec: bool,
+    /// This machine's own signing key, expanded once at boot.
+    ///
+    /// `SigningKey` rather than the raw seed: expanding derives the public key
+    /// with a scalar multiplication, and doing that per frame would double the
+    /// cost of every signature for a value that never changes. `None` means this
+    /// machine has no identity, and outbound requests fall back to the MAC'd
+    /// format - which is what keeps a keyless single-machine setup working right
+    /// up until step 10 retires that format.
+    signing: Option<ed25519::SigningKey>,
     /// `/etc/cluster/authorized`: the peers this machine accepts, by public key.
     /// Empty means no peer can be verified by signature, which is fail-closed
     /// for the signed format and leaves the MAC'd one unaffected.
@@ -236,6 +245,9 @@ const NOEXEC_PATH: &[u8] = b"/NOEXEC";
 /// The peers this machine accepts, by public key (step 7 of
 /// docs/roadmap-cluster-keys.md). Absent means it verifies no signatures.
 const AUTHORIZED_PATH: &[u8] = b"/etc/cluster/authorized";
+/// This machine's own private key (step 8). Its presence is what makes netd sign
+/// its outbound requests rather than MAC them.
+const ID_PATH: &[u8] = b"/etc/cluster/id";
 
 /// Load the cluster auth config from disk via `fsd` at boot. The key file's
 /// trailing whitespace/newline is trimmed (so an editor-saved one-line secret
@@ -247,6 +259,7 @@ fn load_auth() -> Auth {
         key: [0u8; hmac::BLOCK],
         key_len: 0,
         noexec: false,
+        signing: None,
         authorized: [0u8; AUTHORIZED_MAX],
         authorized_len: 0,
     };
@@ -277,6 +290,43 @@ fn load_auth() -> Auth {
     let m = read_file_chunk(As::FirstParty, NOEXEC_PATH, 0, 0, &mut one);
     auth.noexec = m < syscall_abi::FS_ERR_MIN;
 
+    // This machine's own key. Absent is not an error either - it means netd
+    // signs nothing and falls back to the shared-key MAC.
+    let mut idbuf = [0u8; 128];
+    // Retried on NO_FS like the two reads around it: if the key loop above
+    // exhausts its budget and the disk mounts a moment later, this would
+    // otherwise be the one file that silently did not load - and a machine that
+    // silently MACs works today and stops working at step 10.
+    let mut idn = syscall_abi::NO_FS;
+    for _ in 0..50 {
+        idn = read_file_chunk(As::FirstParty, ID_PATH, 0, 0, &mut idbuf);
+        if idn != syscall_abi::NO_FS {
+            break;
+        }
+        syscall(syscall_abi::NET_WAIT, 40);
+    }
+    if idn >= syscall_abi::FS_ERR_MIN && idn != syscall_abi::FS_ERR_NOT_FOUND {
+        log(b"netd: WARNING could not read /etc/cluster/id; not signing\r\n");
+    } else if idn == 0 {
+        log(b"netd: WARNING /etc/cluster/id is empty; not signing\r\n");
+    }
+    if idn < syscall_abi::FS_ERR_MIN && idn > 0 {
+        let len = (idn as usize).min(idbuf.len());
+        match clusterkeys::parse_key_file(&idbuf[..len]) {
+            Some(seed) => {
+                let key = ed25519::SigningKey::from_secret(&seed);
+                log(b"netd: cluster identity: signing as ");
+                log_hex(&key.public());
+                log(b"\r\n");
+                auth.signing = Some(key);
+            }
+            // A key file that exists and is not a key is a mistake worth naming:
+            // the machine will silently fall back to MAC'ing, which works today
+            // and stops working at step 10.
+            None => log(b"netd: WARNING /etc/cluster/id is not a key; not signing\r\n"),
+        }
+    }
+
     // The authorized-peer list. Absent is not an error: a machine with no peers
     // simply verifies no signatures, which is what a single-machine run wants.
     //
@@ -298,7 +348,11 @@ fn load_auth() -> Auth {
         // bytes is fully read, and warning about it would be a false alarm. One
         // byte past the end answers the question the fill level cannot.
         let mut probe = [0u8; 1];
-        let more = read_file_chunk(As::FirstParty, AUTHORIZED_PATH, AUTHORIZED_MAX as u64, 0, &mut probe);
+        // (tree, offset) - the offset is the SECOND of the pair. Passing it as
+        // the tree made fsd reject every probe as an out-of-range mount, so this
+        // warning could never fire: a check that could not fail, inside the fix
+        // for a check that could not fail.
+        let more = read_file_chunk(As::FirstParty, AUTHORIZED_PATH, 0, AUTHORIZED_MAX as u64, &mut probe);
         if more < syscall_abi::FS_ERR_MIN && more > 0 {
             log(b"netd: WARNING /etc/cluster/authorized is larger than netd can read (");
             log_dec(AUTHORIZED_MAX as u64);
@@ -1227,7 +1281,7 @@ fn handle_run(packed_mac: u64, sender: u64, buf: &[u8], len: usize, out: &mut [u
     // nonce is unused here.)
     let (total, _nonce) = frame_signed(auth, &who, &np[..hdr + clen], &mut req);
     if total == 0 {
-        return fail(out, b"cpu: no cluster key (cannot authenticate)\r\n");
+        return fail(out, b"cpu: cannot authenticate (no cluster key, or the request does not fit)\r\n");
     }
 
     let mac = unpack_mac(packed_mac);
@@ -2194,6 +2248,13 @@ fn handle_9p(c: &mut TcpConn, request: &[u8], dials: &mut [Option<DialConn>; MAX
     c.file = false;
 }
 
+/// Log a 32-byte key as hex.
+fn log_hex(key: &[u8; 32]) {
+    let mut hex = [0u8; 64];
+    clusterkeys::encode_key(key, &mut hex);
+    log(&hex);
+}
+
 /// How many well-formed peers an authorized file lists.
 fn count_peers(authorized: &[u8]) -> usize {
     let mut n = 0;
@@ -2419,8 +2480,10 @@ fn deny_unknown_user(c: &mut TcpConn, request: &[u8], cause: LineScan) {
 
 /// Frame **and sign** an NP message for an outbound export request (the
 /// export-hardening phase - the client-side counterpart of [`authenticate`]).
-/// Writes `[len:4][magic:8][nonce:16][mac:32][np]` into `out` and returns the
-/// total framed length (or `0` if there's no cluster key or `out` is too small)
+/// Writes either format - `[len][magic][nonce][name][pubkey][sig][np]` when this
+/// machine has a signing identity, `[len][magic][nonce][name][mac][np]` when it
+/// does not - and returns the total framed length (or `0` if there is no cluster
+/// key, or `out` is too small)
 /// **and the nonce it used** - the client verifies the reply's MAC against that
 /// same nonce (reply-auth). The nonce is a fresh, non-repeating value: the
 /// `MONOTONIC_US` clock plus our packed IP. `mac = HMAC(cluster_key, nonce || np)`.
@@ -2431,8 +2494,27 @@ fn frame_signed(
     out: &mut [u8],
 ) -> (usize, [u8; ninep_abi::NP_NONCE_LEN]) {
     let zero_nonce = [0u8; ninep_abi::NP_NONCE_LEN];
+    // THE REPLY IS STILL MAC'D (until step 9), so a machine that cannot verify a
+    // reply must not send a request it can no longer take back.
+    //
+    // This gate used to sit only on the MAC path, and moving signing above it
+    // was wrong in a way worth stating: a node with an identity but no cluster
+    // key would send a signed request the exporter ACCEPTS AND EXECUTES -
+    // NP_WRITE, NP_MKDIR, NP_RM all land - and then fail to verify the reply and
+    // report "authentication failed" to the user. The write happened; the shell
+    // said it did not. Refusing before sending keeps the failure honest, and
+    // step 9 removes the dependency rather than the check.
     if !auth.enabled() {
         return (0, zero_nonce);
+    }
+    // SIGN WHEN THIS MACHINE HAS AN IDENTITY, MAC otherwise.
+    //
+    // The fallback is what lets a machine with no `/etc/cluster/id` keep working
+    // while the cluster is half-migrated, and it is deliberately the *older*
+    // format rather than a refusal: step 10 retires the MAC and this branch
+    // becomes a deletion rather than a redesign.
+    if let Some(key) = auth.signing.as_ref() {
+        return frame_signed_ed25519(key, who, np, out);
     }
     let p = ninep_abi::NP_NET_LEN_PREFIX;
     let body = ninep_abi::NP_AUTH_HDR + np.len();
@@ -2467,6 +2549,59 @@ fn frame_signed(
     let mac = hmac::hmac_sha256(auth.key(), &prefix, np);
     let moff = p + ninep_abi::NP_AUTH_MAC_OFF;
     out[moff..moff + ninep_abi::NP_MAC_LEN].copy_from_slice(&mac);
+    (total, nonce)
+}
+
+/// Frame and **sign** an outbound export request with this machine's private
+/// key - the mirror of [`authenticate_signed`].
+///
+/// Writes `[len][magic][nonce][name][pubkey][sig][np]` and returns the framed
+/// length and the nonce. The nonce still matters: until step 9 the *reply* is
+/// MAC'd against it, so both halves of the exchange remain checkable while only
+/// one of them has moved to signatures.
+fn frame_signed_ed25519(
+    key: &ed25519::SigningKey,
+    who: &[u8; ninep_abi::NP_NAME_LEN],
+    np: &[u8],
+    out: &mut [u8],
+) -> (usize, [u8; ninep_abi::NP_NONCE_LEN]) {
+    let zero_nonce = [0u8; ninep_abi::NP_NONCE_LEN];
+    let p = ninep_abi::NP_NET_LEN_PREFIX;
+    let body = ninep_abi::NP_AUTH_HDR_SIGNED + np.len();
+    let total = p + body;
+    if total > out.len() || np.len() > ninep_abi::NP_NET_MAX {
+        return (0, zero_nonce);
+    }
+    // Fresh nonce: [monotonic_us:8][our_ip_packed:8], as the MAC'd path uses.
+    // Only freshness is required of it, not secrecy - and with a signature the
+    // nonce is no longer what stops a forgery, only what ties a reply to its
+    // request.
+    let us = syscall(syscall_abi::MONOTONIC_US, 0);
+    let ip = our_ip();
+    let ipp = (ip[0] as u64) | ((ip[1] as u64) << 8) | ((ip[2] as u64) << 16) | ((ip[3] as u64) << 24);
+    let mut nonce = [0u8; ninep_abi::NP_NONCE_LEN];
+    nonce[0..8].copy_from_slice(&us.to_le_bytes());
+    nonce[8..16].copy_from_slice(&ipp.to_le_bytes());
+
+    out[0..4].copy_from_slice(&(body as u32).to_le_bytes());
+    out[p..p + 8].copy_from_slice(&ninep_abi::NP_AUTH_MAGIC_SIGNED.to_le_bytes());
+    let noff = p + ninep_abi::NP_AUTH_NONCE_OFF;
+    out[noff..noff + ninep_abi::NP_NONCE_LEN].copy_from_slice(&nonce);
+    let woff = p + ninep_abi::NP_AUTH_NAME_OFF;
+    out[woff..woff + ninep_abi::NP_NAME_LEN].copy_from_slice(who);
+    let koff = p + ninep_abi::NP_AUTH_PUBKEY_OFF;
+    out[koff..koff + ninep_abi::NP_PUBKEY_LEN].copy_from_slice(&key.public());
+    let npoff = p + ninep_abi::NP_AUTH_HDR_SIGNED;
+    out[npoff..npoff + np.len()].copy_from_slice(np);
+
+    // Signed over nonce ‖ name ‖ np, the same bytes the MAC covers - and via the
+    // two-part entry point, so the concatenation is never built in memory.
+    let mut prefix = [0u8; ninep_abi::NP_SIG_PREFIX_LEN];
+    prefix[..ninep_abi::NP_NONCE_LEN].copy_from_slice(&nonce);
+    prefix[ninep_abi::NP_NONCE_LEN..].copy_from_slice(who);
+    let sig = ed25519::sign_prefixed(key, &prefix, np);
+    let soff = p + ninep_abi::NP_AUTH_SIG_OFF;
+    out[soff..soff + ninep_abi::NP_SIG_LEN].copy_from_slice(&sig);
     (total, nonce)
 }
 
