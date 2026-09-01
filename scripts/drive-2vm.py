@@ -86,7 +86,22 @@ def parse(argv):
 def main() -> int:
     images, a_steps, b_steps = parse(sys.argv[1:])
     img_a, img_b = images
+    # BOTH captures land beside image A, so a run whose two images live in
+    # different directories still puts them together - and `auth_census` below
+    # looks in exactly one place rather than guessing per image.
     build = os.path.dirname(os.path.abspath(img_a))
+
+    # Delete last run's captures FIRST. If QEMU fails to write one (a bad path,
+    # a guest that never started), a stale file from a previous run is still
+    # sitting there, and every reader of it - `auth_census`, a human with
+    # tcpdump - gets a confident answer about a run that did not happen. That
+    # is the same stale-evidence trap as a check that cannot fail, and it has
+    # already produced one wrong reading in this project.
+    for stale in ("net-2vm-a.pcap", "net-2vm-b.pcap"):
+        try:
+            os.remove(os.path.join(build, stale))
+        except FileNotFoundError:
+            pass
 
     a = b = None
     try:
