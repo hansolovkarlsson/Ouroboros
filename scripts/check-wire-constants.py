@@ -86,7 +86,7 @@ PEER_BASELINE = {
 
 
 def check_dev_peer_labels(problems):
-    """`np9p_client.py`'s short-name map must match `mkclusterkeys.py`'s dev peers.
+    """BOTH peers' short-name maps must match `mkclusterkeys.py`'s dev peers.
 
     Same shape of hazard as the constants above, in a place a reader would not
     look: `mkclusterkeys.py` derives each dev node's key from a seed LABEL
@@ -103,7 +103,6 @@ def check_dev_peer_labels(problems):
     which is the cost the client's own lazy loading was written to avoid.
     """
     mk = open(os.path.join(HERE, "mkclusterkeys.py")).read()
-    cl = open(os.path.join(HERE, "np9p_client.py")).read()
 
     block = re.search(r"DEV_PEERS = \[(.*?)\]", mk, re.S)
     if not block:
@@ -111,20 +110,42 @@ def check_dev_peer_labels(problems):
         return
     want = {n: l for n, _ip, l in re.findall(
         r'\(\s*"([^"]+)"\s*,\s*"([^"]+)"\s*,\s*"([^"]+)"\s*\)', block.group(1))}
-
-    block = re.search(r"DEV_PEER_LABELS = \{(.*?)\}", cl, re.S)
-    if not block:
-        problems.append("np9p_client.py: DEV_PEER_LABELS not found (renamed?)")
-        return
-    got = dict(re.findall(r'"([^"]+)"\s*:\s*"([^"]+)"', block.group(1)))
-
     if not want:
         problems.append("mkclusterkeys.py: DEV_PEERS parsed empty - a check over nothing")
         return
-    if want != got:
-        problems.append(
-            f"dev peer labels disagree: mkclusterkeys.py has {want}, "
-            f"np9p_client.py has {got}")
+
+    # BOTH peers, not one. This compared only the client, so renaming a dev
+    # identity passed the check and broke the SERVER silently - the half that
+    # decides which guests `make run-image-9p-client` serves.
+    for peer in ("np9p_client.py", "np9p_server.py"):
+        src = open(os.path.join(HERE, peer)).read()
+        block = re.search(r"DEV_PEER_LABELS = \{(.*?)\}", src, re.S)
+        if not block:
+            problems.append(f"{peer}: DEV_PEER_LABELS not found (renamed?)")
+            continue
+        got = dict(re.findall(r'"([^"]+)"\s*:\s*"([^"]+)"', block.group(1)))
+        if want != got:
+            problems.append(
+                f"dev peer labels disagree: mkclusterkeys.py has {want}, "
+                f"{peer} has {got}")
+        # A REAL seed label spelled anywhere OUTSIDE the table is a copy the
+        # table cannot govern - which is exactly how the server held two of
+        # them. Matched against the labels `mkclusterkeys.py` actually derives
+        # keys from, not an `ouroboros-dev-` prefix: the retired MAC key
+        # `ouroboros-dev-cluster-key-v1` shares that prefix and is not a peer.
+        #
+        # THE TABLE REGION IS CUT OUT FIRST. Written at first as "a label not in
+        # the table", which could not fail for its stated reason: the bug is a
+        # label that IS in the table and is ALSO copied somewhere else, so the
+        # condition excluded exactly the case it was written to catch. Found by
+        # reverting `host_seed()` to its literal and watching this pass.
+        outside = src.replace(block.group(0), "")
+        stray = sorted({l for l in want.values()
+                        if f'"{l}"' in outside or f'b"{l}"' in outside})
+        if stray:
+            problems.append(
+                f"{peer}: dev seed label(s) spelled outside DEV_PEER_LABELS: "
+                f"{', '.join(stray)}")
 
 
 def main():
