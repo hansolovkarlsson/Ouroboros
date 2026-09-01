@@ -49,5 +49,8 @@ mod sha512;
 pub use curve::{Point, POINT_LEN};
 pub use field::{Fe, ELEM_LEN};
 pub use scalar::{Scalar, SCALAR_LEN};
-pub use sign::{public_key, sign, verify, SigningKey, PUBLIC_LEN, SECRET_LEN, SIGNATURE_LEN};
+pub use sign::{
+    public_key, sign, sign_prefixed, verify, verify_prefixed, SigningKey, PUBLIC_LEN,
+    SECRET_LEN, SIGNATURE_LEN,
+};
 pub use sha512::{sha512, Sha512, DIGEST_LEN};

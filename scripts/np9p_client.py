@@ -44,9 +44,49 @@ FS_ERR_AUTH = (1 << 64) - 1 - 30  # u64::MAX - 30
 
 # Cluster auth wire constants (ninep-abi). Must match the guest's CLUSTER.KEY.
 NP_AUTH_MAGIC = int.from_bytes(b"AUTHNP02", "big")  # ninep-abi NP_AUTH_MAGIC
+NP_AUTH_MAGIC_SIGNED = int.from_bytes(b"AUTHNP03", "big")  # the per-machine-keypair format
+NP_PUBKEY_LEN = 32
+NP_SIG_LEN = 64
 NP_NONCE_LEN = 16
 NP_NAME_LEN = 32  # requesting user's name, NUL-padded - ninep-abi NP_NAME_LEN
 DEFAULT_KEY = b"ouroboros-dev-cluster-key-v1"  # Makefile CLUSTER_KEY default
+
+# WHICH MACHINE KEY this client signs with, when signing (--sign).
+#
+# THIS SCRIPT IS THE FOREIGN OBSERVER FOR STEP 7. The guest has no signing client
+# yet, so the only thing that can prove its verifier works is a signer that
+# shares none of its code - a Python one, against a Rust one, agreeing about a
+# format neither of them can quietly redefine.
+SIGN_KEY = None  # set by --sign; the dev seed for the "host" peer
+
+
+def dev_seed(label):
+    """The same fixed dev seeds scripts/mkclusterkeys.py derives its keys from."""
+    return hashlib.sha256(label.encode()).digest()
+
+
+_ED_REFERENCE = None
+
+
+def load_ed_reference():
+    """The Ed25519 reference, which asserts itself against RFC 8032 when loaded.
+
+    Memoized: loading it re-runs those self-assertions, which are two full
+    pure-Python signatures. Once is the point (it proves the reference before
+    anything trusts it); once PER FRAME made `dial` and `serve`, which issue
+    several ops each, needlessly slow.
+    """
+    global _ED_REFERENCE
+    if _ED_REFERENCE is None:
+        import importlib.util
+        import os.path
+        here = os.path.dirname(os.path.abspath(__file__))
+        spec = importlib.util.spec_from_file_location("edref", os.path.join(here, "gen-sign-vectors.py"))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _ED_REFERENCE = mod
+    return _ED_REFERENCE
+
 
 # WHICH USER this client claims to be. The key authenticates the machine; the
 # name says who on it is asking, and the guest resolves it through its OWN
@@ -61,6 +101,26 @@ def build_frame(verb, tree, params, payload):
     for i in range(4):
         hdr += struct.pack("<Q", params[i] if i < len(params) else 0)
     return hdr + payload
+
+
+def signed_frame(np_msg, seed, user=None):
+    """[u32 len][magic:8][nonce:16][name:32][pubkey:32][sig:64][np]
+
+    The signature covers nonce || name || np - the same bytes the MAC covers, so
+    the only thing that changed is who can produce the authenticator. The public
+    key travels in the frame the way SSH offers one; the exporter decides whether
+    that key is authorized BEFORE it verifies anything.
+    """
+    ed = load_ed_reference()
+    user = USER if user is None else user
+    if len(user) > NP_NAME_LEN:
+        sys.exit(f"user name too long (max {NP_NAME_LEN})")
+    nonce = os.urandom(NP_NONCE_LEN)
+    name = user.ljust(NP_NAME_LEN, b"\0")
+    public = ed.public_key(seed)
+    sig = ed.sign(seed, nonce + name + np_msg)
+    body = struct.pack("<Q", NP_AUTH_MAGIC_SIGNED) + nonce + name + public + sig + np_msg
+    return struct.pack("<I", len(body)) + body, nonce
 
 
 def sign_frame(np_msg, key, user=None):
@@ -105,8 +165,11 @@ def recv_reply(sock, key, nonce):
 
 
 def one_op(host, port, key, np_msg, timeout=10):
-    """Run one signed NP op over a fresh export connection; return (status, data)."""
-    frame, nonce = sign_frame(np_msg, key)
+    """Run one authenticated NP op over a fresh export connection; return (status, data)."""
+    if SIGN_KEY is not None:
+        frame, nonce = signed_frame(np_msg, SIGN_KEY)
+    else:
+        frame, nonce = sign_frame(np_msg, key)
     with socket.create_connection((host, port), timeout=timeout) as s:
         s.sendall(frame)
         status, data = recv_reply(s, key, nonce)
@@ -255,6 +318,27 @@ def main():
     # `--user <name>`: who this request claims to be (default root). The guest
     # applies ITS permission model to that name, so this is what makes an
     # unprivileged remote read testable from the host.
+    # `--sign [seed-label]`: use the SIGNED frame format (per-machine keypairs)
+    # instead of the shared-key MAC. Defaults to the dev "host" identity, which
+    # is what `mkclusterkeys.py` puts in every image's authorized file; pass a
+    # label to sign with a key the guest does NOT authorize.
+    # `--sign` alone uses the dev "host" identity; `--sign=<label>` uses another
+    # seed label, which is how a key the guest does NOT authorize is tested.
+    #
+    # NOT `--sign <label>` with a heuristic: guessing whether the next token is a
+    # label or a positional silently swallowed arguments. `read --sign FILE 0 100`
+    # signed with the label "FILE" and read the path "0" - a test that would have
+    # "proved" a refusal for entirely the wrong reason.
+    global SIGN_KEY
+    for i, a in enumerate(list(args)):
+        if a == "--sign":
+            SIGN_KEY = dev_seed("ouroboros-dev-host-peer")
+            del args[i]
+            break
+        if a.startswith("--sign="):
+            SIGN_KEY = dev_seed(a[len("--sign="):])
+            del args[i]
+            break
     if "--user" in args:
         global USER
         i = args.index("--user")

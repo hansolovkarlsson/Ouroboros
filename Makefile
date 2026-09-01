@@ -600,9 +600,9 @@ esp: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin acco
 	# Manual pages: plain-text files read by /bin/MAN as /man/<command>.
 	cp manpages/* $(ESP_DIR)/man/
 	# /etc/cluster: this machine's Ed25519 identity and the peers it accepts
-	# (docs/roadmap-cluster-keys.md). NOTHING READS THESE YET - step 6 stages
-	# them so that the wire steps have something to read, and so a bad format
-	# shows up as a file you can `cat` rather than as a failed handshake.
+	# (docs/roadmap-cluster-keys.md). netd READS `authorized` at boot as of
+	# step 7 and verifies signed frames against it; `id` becomes load-bearing at
+	# step 8, when this machine starts signing its own outbound requests.
 	mkdir -p $(ESP_DIR)/etc/cluster
 	python3 scripts/mkclusterkeys.py $(ESP_DIR)/etc/cluster $(CLUSTER_NODE)
 	# /etc/passwd + /etc/group: the account database the shell's login gate and

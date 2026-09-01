@@ -9,6 +9,10 @@ ninep-abi = { path = "../../../ninep-abi" }
 # Account-file field parsing, shared with `login` and the /bin account tools, so
 # the cluster resolves a name by exactly the rules a local session uses.
 accounts = { path = "../../../accounts" }
+# Per-machine cluster keys: the signature primitive and the authorized-peer
+# file format (docs/roadmap-cluster-keys.md step 7).
+ed25519 = { path = "../../../ed25519" }
+clusterkeys = { path = "../../../clusterkeys" }
 
 [[bin]]
 name = "netd"

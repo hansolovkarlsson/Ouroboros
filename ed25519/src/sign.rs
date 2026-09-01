@@ -97,6 +97,16 @@ impl SigningKey {
     }
 }
 
+/// Sign over `prefix ‖ message` without joining them — the counterpart of
+/// [`verify_prefixed`].
+pub fn sign_prefixed(
+    key: &SigningKey,
+    prefix: &[u8],
+    message: &[u8],
+) -> [u8; SIGNATURE_LEN] {
+    sign_two_part(&key.a, &key.prefix, &key.public, prefix, message)
+}
+
 /// Sign `message` with `secret`, returning `R ‖ s`.
 ///
 /// Convenience for a one-off signature and for the test vectors. It expands the
@@ -112,10 +122,22 @@ fn sign_inner(
     public: &[u8; PUBLIC_LEN],
     message: &[u8],
 ) -> [u8; SIGNATURE_LEN] {
+    sign_two_part(a, prefix, public, &[], message)
+}
+
+/// The signing core, over `extra ‖ message`.
+fn sign_two_part(
+    a: &[u8; 32],
+    prefix: &[u8; 32],
+    public: &[u8; PUBLIC_LEN],
+    extra: &[u8],
+    message: &[u8],
+) -> [u8; SIGNATURE_LEN] {
     // r = H(prefix ‖ M), the deterministic nonce. Hashed incrementally because
     // the message is not adjacent to the prefix in memory and may be any length.
     let mut h = Sha512::new();
     h.update(prefix);
+    h.update(extra);
     h.update(message);
     let r = Scalar::from_hash(&h.finalize());
     let r_point = Point::mul_base(&r.to_bytes()).encode();
@@ -124,6 +146,7 @@ fn sign_inner(
     let mut h = Sha512::new();
     h.update(&r_point);
     h.update(public);
+    h.update(extra);
     h.update(message);
     let k = Scalar::from_hash(&h.finalize());
 
@@ -143,6 +166,26 @@ fn sign_inner(
 /// hold. Every input here is attacker-controlled, so there is no path that
 /// panics and none that returns a value other than a verdict.
 pub fn verify(public: &[u8; PUBLIC_LEN], message: &[u8], signature: &[u8; SIGNATURE_LEN]) -> bool {
+    verify_prefixed(public, &[], message, signature)
+}
+
+/// Verify a signature over `prefix ‖ message` **without joining them in memory**.
+///
+/// Signed data is often a concatenation a caller does not hold contiguously —
+/// the cluster's frames carry a nonce and a user name in a header, and the
+/// message after a public key and the signature itself. Joining them means a
+/// second buffer as large as the biggest message, which for `netd` is 2 KB on a
+/// 32 KB stack that has hit its guard page five times.
+///
+/// It is not needed: the challenge is a *hash* of `R ‖ A ‖ M`, and SHA-512 here
+/// is incremental, so the two halves are simply fed in turn — exactly what
+/// signing already does with its own prefix.
+pub fn verify_prefixed(
+    public: &[u8; PUBLIC_LEN],
+    prefix: &[u8],
+    message: &[u8],
+    signature: &[u8; SIGNATURE_LEN],
+) -> bool {
     let mut r_bytes = [0u8; 32];
     r_bytes.copy_from_slice(&signature[..32]);
     let mut s_bytes = [0u8; 32];
@@ -161,6 +204,7 @@ pub fn verify(public: &[u8; PUBLIC_LEN], message: &[u8], signature: &[u8; SIGNAT
     let mut h = Sha512::new();
     h.update(&r_bytes);
     h.update(public);
+    h.update(prefix);
     h.update(message);
     let k = Scalar::from_hash(&h.finalize());
 
@@ -383,6 +427,39 @@ mod tests {
             assert_eq!(key.sign(m), unhex_sig(sig), "SigningKey signature for {name}");
             assert_eq!(key.sign(m), sign(&unhex(sk), m), "must match the one-shot form");
         }
+    }
+
+    #[test]
+    fn splitting_the_signed_bytes_changes_nothing() {
+        // The property the two-part entry points rest on: signing or verifying
+        // `prefix ‖ message` must equal doing it over the concatenation. If it
+        // did not, netd would be verifying different bytes than a peer signed -
+        // which looks like a crypto bug and is a plumbing one.
+        let key = SigningKey::from_secret(&unhex(
+            "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
+        ));
+        let whole = b"nonce-and-name-then-the-message";
+        for split in 0..=whole.len() {
+            let (a, b) = whole.split_at(split);
+            let sig = sign_prefixed(&key, a, b);
+            assert_eq!(sig, key.sign(whole), "split at {split} must sign the same bytes");
+            assert!(verify_prefixed(&key.public(), a, b, &sig), "and verify");
+            assert!(verify(&key.public(), whole, &sig), "and verify as one piece");
+        }
+    }
+
+    #[test]
+    fn a_prefix_is_not_interchangeable_with_the_message() {
+        // Moving a byte across the boundary must not change the signed bytes -
+        // checked above - but a DIFFERENT prefix must not verify.
+        let key = SigningKey::from_secret(&unhex(
+            "4ccd089b28ff96da9db6c346ec114e0f5b8a319f35aba624da8cf6ed4fb8a6fb",
+        ));
+        let sig = sign_prefixed(&key, b"nonce-A", b"message");
+        assert!(verify_prefixed(&key.public(), b"nonce-A", b"message", &sig));
+        assert!(!verify_prefixed(&key.public(), b"nonce-B", b"message", &sig));
+        assert!(!verify_prefixed(&key.public(), b"nonce-A", b"messagf", &sig));
+        assert!(!verify_prefixed(&key.public(), b"", b"message", &sig));
     }
 
     #[test]
