@@ -45,6 +45,12 @@ NP_WRITE_AT = NP_BASE + 4
 NP_READ_AT = NP_BASE + 10
 FS_ERR_MIN = (1 << 64) - 64  # errors are a small band just below u64::MAX
 FS_ERR_AUTH = (1 << 64) - 1 - 30  # u64::MAX - 30
+# The two statuses a SEALED post-authentication refusal can carry. They became
+# worth naming when the exporter started signing that refusal: before, every
+# client rejected the 12-byte unsealed denial on length and reported AUTH
+# FAILED, so these values could not reach a caller at all.
+NO_FS = (1 << 64) - 1 - 1  # u64::MAX - 1: no filesystem mounted (transient)
+FS_ERR_NOT_FOUND = (1 << 64) - 1 - 2  # u64::MAX - 2: definitively absent
 
 # NOT a wire value: what `recv_reply` returns when THIS CLIENT would not trust
 # the reply it got - the exporter's signature did not verify against the key we
@@ -626,6 +632,15 @@ def main():
         # caller "the key was fine, the name was wrong" would enumerate accounts.
         print("status: AUTH FAILED (export refused our key, our --user name, "
               "or the frame format)")
+        sys.exit(1)
+    if status == NO_FS:
+        print("status: NO FILESYSTEM on the export (its disk is not mounted, or "
+              "fsd is restarting) - this one is worth retrying")
+        sys.exit(1)
+    if status == FS_ERR_NOT_FOUND:
+        print("status: NOT FOUND on the export - for a whole request this means "
+              "it has no readable /etc/passwd to resolve our name, which will "
+              "not clear by itself")
         sys.exit(1)
     if status >= FS_ERR_MIN:
         print(f"status: ERROR 0x{status:016x}")
