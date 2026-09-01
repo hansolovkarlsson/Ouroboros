@@ -209,6 +209,10 @@ impl Point {
     /// stated risk is exactly `netd`'s time and stack budget. Same answer:
     /// different projective representatives of one point compare equal either
     /// way, which `different_representatives_compare_equal` checks.
+    pub fn ct_eq(self, rhs: Point) -> bool {
+        self.x.mul(rhs.z).ct_eq(rhs.x.mul(self.z)) && self.y.mul(rhs.z).ct_eq(rhs.y.mul(self.z))
+    }
+
     /// Whether this point has **small order** — that is, whether multiplying it
     /// by the cofactor 8 gives the identity.
     ///
@@ -228,9 +232,6 @@ impl Point {
         self.double().double().double().ct_eq(Point::IDENTITY)
     }
 
-    pub fn ct_eq(self, rhs: Point) -> bool {
-        self.x.mul(rhs.z).ct_eq(rhs.x.mul(self.z)) && self.y.mul(rhs.z).ct_eq(rhs.y.mul(self.z))
-    }
 }
 
 #[cfg(test)]

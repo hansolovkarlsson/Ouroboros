@@ -227,6 +227,33 @@ fn peers(target: u64) -> u64 {
                 clusterkeys::encode_key(&p.key, &mut hex);
                 out(target, &hex);
                 out(target, b"\r\n");
+                // A well-formed line can still carry a key that cannot ever
+                // authenticate anything, and the parser deliberately does not
+                // judge that - `decode_key` reads hex, and whether a key is
+                // USABLE is a curve question answered in `ed25519`. But a peer
+                // that is silently unauthorized in a file that lists it is the
+                // invisible half this whole subcommand exists to expose, so it
+                // is reported HERE, in the tool whose job is reporting.
+                //
+                // Two ways a key gets here: not a point at all (a corrupted
+                // copy), or a small-order point (an all-zero placeholder from a
+                // half-finished keygen). `verify` refuses both, so this is a
+                // diagnostic, not a gate.
+                match ed25519::Point::decode(&p.key) {
+                    None => {
+                        broken += 1;
+                        out(target, b"  line ");
+                        put_dec(target, lineno as u64);
+                        out(target, b": that key is not a valid public key, so this peer is NOT authorized\r\n");
+                    }
+                    Some(pt) if pt.is_small_order() => {
+                        broken += 1;
+                        out(target, b"  line ");
+                        put_dec(target, lineno as u64);
+                        out(target, b": that key is degenerate (small order) and can never authenticate\r\n");
+                    }
+                    Some(_) => {}
+                }
             }
             // The reason `classify` exists. A mistyped key is a peer that is
             // silently unauthorized, in a file that still looks right.

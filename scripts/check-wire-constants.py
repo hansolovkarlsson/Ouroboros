@@ -67,6 +67,18 @@ CHECKED = [
 # does not exist on one side, and the wrong way to record a nit about the peers.
 
 
+# How many of CHECKED each peer is known to spell TODAY. A bare "more than
+# zero" is not enough: breaking three of a peer's four declarations still leaves
+# one match, and the total stays above the floor because the other peer covers
+# the same names - so the script reports success while checking a quarter of
+# what it is named for. Confirmed, which is why these are numbers and not a
+# truthiness test. Raise a baseline when a peer learns a new constant.
+PEER_BASELINE = {
+    "np9p_client.py": 6,
+    "np9p_server.py": 4,
+}
+
+
 def main():
     rust = rust_consts(os.path.join(ROOT, "ninep-abi", "src", "lib.rs"))
     peers = {
@@ -105,8 +117,12 @@ def main():
     # would leave 6 >= 6 and this would report success while checking half of
     # what it is named for.
     for peer, n in per_peer.items():
-        if n == 0:
-            problems.append(f"{peer}: no constants matched at all - did its formatting change?")
+        want = PEER_BASELINE.get(peer, 1)
+        if n < want:
+            problems.append(
+                f"{peer}: matched {n} constant(s), expected at least {want} - "
+                "did its formatting change, or was a constant renamed?"
+            )
     if compared < len(CHECKED):
         problems.append(f"only {compared} constant(s) compared, expected at least {len(CHECKED)}")
 
