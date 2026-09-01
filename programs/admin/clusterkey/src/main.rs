@@ -176,7 +176,11 @@ fn generate(target: u64) -> u64 {
 
 /// List the peers this machine accepts, and say so when a line is broken.
 fn peers(target: u64) -> u64 {
-    let mut buf = [0u8; 2048];
+    // EXACTLY WHAT `netd` AUTHORIZES, from the constant it also sizes from.
+    // This was 2048, twice netd's cap, so a peer added past byte 1024 was listed
+    // here with the right key and address and refused by the export - and the
+    // warning below told the operator it "may still be authorized".
+    let mut buf = [0u8; clusterkeys::AUTHORIZED_MAX];
     let n = match read_file(AUTHORIZED_PATH, &mut buf) {
         FileRead::Bytes(n) => n,
         FileRead::Absent => {
@@ -205,9 +209,9 @@ fn peers(target: u64) -> u64 {
     };
     let n = end;
     if truncated {
-        out(target, b"clusterkey: WARNING the peer list is longer than this tool can read.\r\n");
-        out(target, b"  Showing only what fits; lines beyond it are NOT listed and may\r\n");
-        out(target, b"  still be authorized. Trim the file or read it with 'cat'.\r\n");
+        out(target, b"clusterkey: WARNING the peer list is longer than this machine reads.\r\n");
+        out(target, b"  Lines beyond this point are NOT listed and are NOT authorized -\r\n");
+        out(target, b"  the export ignores them too. Trim the file.\r\n");
     }
     let mut found = 0u32;
     let mut broken = 0u32;

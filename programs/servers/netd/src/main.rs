@@ -186,7 +186,7 @@ fn main() -> ! {
 /// longer than this is REPORTED at boot rather than silently half-read: the
 /// peers past the cut would simply not be authorized, which is safe and
 /// invisible, and invisible is the half worth fixing.
-const AUTHORIZED_MAX: usize = 1024;
+const AUTHORIZED_MAX: usize = clusterkeys::AUTHORIZED_MAX;
 
 /// The cluster authentication config, loaded once from disk at boot (see
 /// `docs/roadmap-cluster-keys.md`). A *per-machine keypair*: this machine holds
@@ -2321,6 +2321,19 @@ fn sack_retransmit(mac: &[u8; 6], c: &mut TcpConn, seg: &TcpIn) {
 /// Largest inline data chunk an exported bulk read returns per request - fits
 /// the prefix buffer with the 12-byte frame header, and about one TCP segment.
 const EXPORT_CHUNK: usize = 1400;
+
+/// A framed NP message must hold a request header plus a full bulk chunk.
+///
+/// HERE RATHER THAN IN `ninep-abi` because this is the only place both real
+/// constants are in scope. `ninep-abi` asserted it against a hand-copied
+/// `SAFECOPY_MAX = 2048`, so raising `syscall_abi::SAFECOPY_MAX` — which its own
+/// doc invites — left the assertion comparing against the stale copy and
+/// passing, while export reads silently stopped fitting. There is zero slack
+/// today (2096 == 48 + 2048), so this is not a theoretical margin.
+const _: () = assert!(
+    ninep_abi::NP_NET_MAX >= ninep_abi::NP_REQ_PAYLOAD as usize + syscall_abi::SAFECOPY_MAX as usize,
+    "NP_NET_MAX cannot hold an NP request header plus a full SAFECOPY_MAX chunk"
+);
 
 /// The reply prefix must have room for the largest reply AND its signature.
 ///

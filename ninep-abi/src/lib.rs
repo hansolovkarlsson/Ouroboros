@@ -239,8 +239,12 @@ pub const NP_NET_LEN_PREFIX: usize = 4;
 /// segments. A large file streams a chunk per round trip, as `cat` does locally.
 pub const NP_NET_MAX: usize = 48 + 2048;
 
-/// The NP message header: `verb`, `tree`, and the four params.
-const NP_MSG_HDR: usize = 6 * 8;
+/// The NP message header as a `usize`: [`NP_REQ_PAYLOAD`], which every encoder
+/// already sizes from.
+///
+/// Was `6 * 8` — a second spelling of the same 48, in the same file, so adding a
+/// seventh header word would have moved one and not the other.
+const NP_MSG_HDR: usize = NP_REQ_PAYLOAD as usize;
 
 /// WHAT [`NP_NET_MAX`] IS FOR, as opposed to what it equals: one NP message
 /// header plus a full bulk-transfer chunk.
@@ -254,17 +258,23 @@ const NP_MSG_HDR: usize = 6 * 8;
 ///
 /// `syscall-abi` is deliberately not a dependency of this crate (see the note
 /// at the `NsTarget` definition), so `SAFECOPY_MAX` is spelled out here.
-const _: () = {
-    const SAFECOPY_MAX: usize = 2048; // syscall-abi's bulk-transfer cap
-    assert!(
-        NP_NET_MAX >= NP_MSG_HDR + SAFECOPY_MAX,
-        "NP_NET_MAX must hold an NP header plus a full bulk chunk"
-    );
-    assert!(
-        NP_NET_MAX >= NP_MSG_HDR + NP_REMOTE_CHUNK,
-        "NP_NET_MAX must hold an NP header plus a remote read chunk"
-    );
-};
+const _: () = assert!(
+    NP_NET_MAX >= NP_MSG_HDR + NP_REMOTE_CHUNK,
+    "NP_NET_MAX must hold an NP header plus a remote read chunk"
+);
+
+// THE BULK-CHUNK HALF OF THIS BOUND LIVES IN `netd`, not here.
+//
+// It used to be asserted here against a local `const SAFECOPY_MAX = 2048` — a
+// hand-copy of `syscall_abi::SAFECOPY_MAX`, which made the check unable to fail
+// for the cross-crate drift its own comment claimed to catch: raise the real
+// constant to 4096 and this still compared against the stale copy and passed,
+// while a frame could no longer hold a header plus one bulk chunk.
+//
+// This crate is deliberately free of a `syscall-abi` dependency (see the
+// `resolve_ns` note below: it stays task-id-neutral), and adding one for a
+// single assertion is more coupling than the bound is worth. `netd` imports
+// both crates already, so the assertion sits there against the real values.
 
 /// The namespace `tree` sentinel marking a **remote** binding (cluster Phase 1c).
 /// A local binding's `tree` selects a mount *within* `fsd` (0 = the boot mount);
