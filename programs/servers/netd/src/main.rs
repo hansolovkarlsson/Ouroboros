@@ -293,7 +293,23 @@ fn load_auth() -> Auth {
     // This machine's own key. Absent is not an error either - it means netd
     // signs nothing and falls back to the shared-key MAC.
     let mut idbuf = [0u8; 128];
-    let idn = read_file_chunk(As::FirstParty, ID_PATH, 0, 0, &mut idbuf);
+    // Retried on NO_FS like the two reads around it: if the key loop above
+    // exhausts its budget and the disk mounts a moment later, this would
+    // otherwise be the one file that silently did not load - and a machine that
+    // silently MACs works today and stops working at step 10.
+    let mut idn = syscall_abi::NO_FS;
+    for _ in 0..50 {
+        idn = read_file_chunk(As::FirstParty, ID_PATH, 0, 0, &mut idbuf);
+        if idn != syscall_abi::NO_FS {
+            break;
+        }
+        syscall(syscall_abi::NET_WAIT, 40);
+    }
+    if idn >= syscall_abi::FS_ERR_MIN && idn != syscall_abi::FS_ERR_NOT_FOUND {
+        log(b"netd: WARNING could not read /etc/cluster/id; not signing\r\n");
+    } else if idn == 0 {
+        log(b"netd: WARNING /etc/cluster/id is empty; not signing\r\n");
+    }
     if idn < syscall_abi::FS_ERR_MIN && idn > 0 {
         let len = (idn as usize).min(idbuf.len());
         match clusterkeys::parse_key_file(&idbuf[..len]) {
@@ -332,7 +348,11 @@ fn load_auth() -> Auth {
         // bytes is fully read, and warning about it would be a false alarm. One
         // byte past the end answers the question the fill level cannot.
         let mut probe = [0u8; 1];
-        let more = read_file_chunk(As::FirstParty, AUTHORIZED_PATH, AUTHORIZED_MAX as u64, 0, &mut probe);
+        // (tree, offset) - the offset is the SECOND of the pair. Passing it as
+        // the tree made fsd reject every probe as an out-of-range mount, so this
+        // warning could never fire: a check that could not fail, inside the fix
+        // for a check that could not fail.
+        let more = read_file_chunk(As::FirstParty, AUTHORIZED_PATH, 0, AUTHORIZED_MAX as u64, &mut probe);
         if more < syscall_abi::FS_ERR_MIN && more > 0 {
             log(b"netd: WARNING /etc/cluster/authorized is larger than netd can read (");
             log_dec(AUTHORIZED_MAX as u64);
@@ -1261,7 +1281,7 @@ fn handle_run(packed_mac: u64, sender: u64, buf: &[u8], len: usize, out: &mut [u
     // nonce is unused here.)
     let (total, _nonce) = frame_signed(auth, &who, &np[..hdr + clen], &mut req);
     if total == 0 {
-        return fail(out, b"cpu: no cluster key (cannot authenticate)\r\n");
+        return fail(out, b"cpu: cannot authenticate (no cluster key, or the request does not fit)\r\n");
     }
 
     let mac = unpack_mac(packed_mac);
@@ -2460,8 +2480,10 @@ fn deny_unknown_user(c: &mut TcpConn, request: &[u8], cause: LineScan) {
 
 /// Frame **and sign** an NP message for an outbound export request (the
 /// export-hardening phase - the client-side counterpart of [`authenticate`]).
-/// Writes `[len:4][magic:8][nonce:16][mac:32][np]` into `out` and returns the
-/// total framed length (or `0` if there's no cluster key or `out` is too small)
+/// Writes either format - `[len][magic][nonce][name][pubkey][sig][np]` when this
+/// machine has a signing identity, `[len][magic][nonce][name][mac][np]` when it
+/// does not - and returns the total framed length (or `0` if there is no cluster
+/// key, or `out` is too small)
 /// **and the nonce it used** - the client verifies the reply's MAC against that
 /// same nonce (reply-auth). The nonce is a fresh, non-repeating value: the
 /// `MONOTONIC_US` clock plus our packed IP. `mac = HMAC(cluster_key, nonce || np)`.
@@ -2471,6 +2493,20 @@ fn frame_signed(
     np: &[u8],
     out: &mut [u8],
 ) -> (usize, [u8; ninep_abi::NP_NONCE_LEN]) {
+    let zero_nonce = [0u8; ninep_abi::NP_NONCE_LEN];
+    // THE REPLY IS STILL MAC'D (until step 9), so a machine that cannot verify a
+    // reply must not send a request it can no longer take back.
+    //
+    // This gate used to sit only on the MAC path, and moving signing above it
+    // was wrong in a way worth stating: a node with an identity but no cluster
+    // key would send a signed request the exporter ACCEPTS AND EXECUTES -
+    // NP_WRITE, NP_MKDIR, NP_RM all land - and then fail to verify the reply and
+    // report "authentication failed" to the user. The write happened; the shell
+    // said it did not. Refusing before sending keeps the failure honest, and
+    // step 9 removes the dependency rather than the check.
+    if !auth.enabled() {
+        return (0, zero_nonce);
+    }
     // SIGN WHEN THIS MACHINE HAS AN IDENTITY, MAC otherwise.
     //
     // The fallback is what lets a machine with no `/etc/cluster/id` keep working
@@ -2479,10 +2515,6 @@ fn frame_signed(
     // becomes a deletion rather than a redesign.
     if let Some(key) = auth.signing.as_ref() {
         return frame_signed_ed25519(key, who, np, out);
-    }
-    let zero_nonce = [0u8; ninep_abi::NP_NONCE_LEN];
-    if !auth.enabled() {
-        return (0, zero_nonce);
     }
     let p = ninep_abi::NP_NET_LEN_PREFIX;
     let body = ninep_abi::NP_AUTH_HDR + np.len();

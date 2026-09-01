@@ -87,6 +87,32 @@ def sign(sk, msg):
     return R + int.to_bytes(s, 32, "little")
 
 
+def verify(public, msg, sig):
+    """Verify a signature - the mirror of sign(), used by np9p_server.py to check
+    the GUEST's signatures. Cofactorless, like the Rust: s*B == R + k*A."""
+    if len(sig) != 64 or len(public) != 32:
+        return False
+    R = point_decode(sig[:32])
+    A = point_decode(public)
+    if R is None or A is None:
+        return False
+    s_int = int.from_bytes(sig[32:], "little")
+    if s_int >= L:
+        return False           # non-canonical s: refused, not reduced
+    k = int.from_bytes(hashlib.sha512(sig[:32] + public + msg).digest(), "little") % L
+    return mul(B, s_int) == add(R, mul(A, k))
+
+
+def point_decode(b):
+    y = int.from_bytes(b, "little")
+    sign = (y >> 255) & 1
+    y &= (1 << 255) - 1
+    if y >= P:
+        return None            # non-canonical y, per RFC 8032 5.1.3
+    x = recover_x(y, sign)
+    return None if x is None else (x, y)
+
+
 # --- self-check against PUBLISHED values, before emitting anything ----------
 _RFC1_SK = "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60"
 _RFC1_SIG = ("e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e06522490155"
@@ -96,6 +122,10 @@ _RFC2_SIG = ("92a009a9f0d4cab8720e820b5f642540a2b27b5416503f8fb3762223ebdb69da"
              "085ac1e43e15996e458f3613d0f11d8c387b2eaeb4302aeeb00d291612bb0c00")
 assert sign(bytes.fromhex(_RFC1_SK), b"").hex() == _RFC1_SIG, "reference fails RFC 8032 TEST 1"
 assert sign(bytes.fromhex(_RFC2_SK), bytes([0x72])).hex() == _RFC2_SIG, "reference fails RFC 8032 TEST 2"
+# And that the verifier agrees with the signer, on a published pair and on a
+# tampered one - a verifier that accepts everything would pass the first alone.
+assert verify(public_key(bytes.fromhex(_RFC1_SK)), b"", bytes.fromhex(_RFC1_SIG)), "reference verify rejects a valid signature"
+assert not verify(public_key(bytes.fromhex(_RFC1_SK)), b"x", bytes.fromhex(_RFC1_SIG)), "reference verify accepts a tampered message"
 
 if __name__ == "__main__":
     # RFC 8032 section 7.1, plus messages that exercise the SHA-512 block

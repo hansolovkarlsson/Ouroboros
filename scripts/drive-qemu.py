@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Drive the Ouroboros guest shell unattended, over QEMU's -nographic console.
 
-    python3 scripts/drive-qemu.py <disk-image> 'WAIT@@TYPE' ['WAIT@@TYPE' ...]
+    python3 scripts/drive-qemu.py [--slirp] <disk-image> 'WAIT@@TYPE' [...]
 
 Each argument is a step: wait for WAIT (a regex) to appear in *new* guest
 output, then type TYPE followed by Enter. An empty TYPE just waits. Example:
@@ -176,13 +176,27 @@ def main() -> int:
         print(__doc__)
         return 2
 
-    image = sys.argv[1]
+    argv = sys.argv[1:]
+
+    # `--slirp` gives the guest QEMU user-mode networking, so it can reach a
+    # server on the host at 10.0.2.2 - which is how the guest-signs /
+    # host-verifies half of the cluster is tested. Without it this harness has no
+    # networking at all, which is why that half was never run unattended.
+    extra = ()
+    if "--slirp" in argv:
+        argv.remove("--slirp")
+        extra = (
+            "-netdev", "user,id=net0",
+            "-device", "virtio-net-device,netdev=net0",
+        )
+
+    image = argv[0]
     steps = []
-    for a in sys.argv[2:]:
+    for a in argv[1:]:
         wait, _, text = a.partition("@@")
         steps.append((wait, text))
 
-    g = Guest(image)
+    g = Guest(image, extra_args=extra)
     try:
         ok = g.run(steps)
         time.sleep(LINGER)
