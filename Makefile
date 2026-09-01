@@ -1285,6 +1285,12 @@ test:
 	@for c in $(PURE_CRATES); do \
 		cargo clippy -p $$c --all-targets --target $(HOST_TARGET) -- -D warnings || exit 1; \
 	done
+	@# The protocol constants are spelled independently in Rust and in the two
+	@# Python peers - there is no shared header across that boundary - so they
+	@# can drift, and a drift surfaces as "authentication failed", which reads
+	@# as a key problem rather than a constant problem.
+	@echo "== cross-language wire constants"
+	@python3 scripts/check-wire-constants.py || exit 1
 	@echo "== all pure-crate host tests passed, and clippy clean including tests"
 
 clean:

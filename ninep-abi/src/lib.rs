@@ -427,12 +427,12 @@ pub const NP_MAC_PREFIX_LEN: usize = NP_NONCE_LEN + NP_NAME_LEN;
 /// removes the whole class, rather than relying on the incidental barrier that
 /// stopped it before (the reframed `name` had to happen to match a local
 /// account, which for many replies means a one-character username).
-pub const SIG_DOMAIN_REQUEST: &[u8] = b"ouroboros-cluster-request-v1 ";
+pub const SIG_DOMAIN_REQUEST: &[u8] = b"ouroboros-cluster-request-v1\0";
 
 /// Domain tag prefixed to the bytes a **reply** signature covers. See
 /// [`SIG_DOMAIN_REQUEST`] — tagging only one side would leave the other
 /// direction open, because the tag would then be forgeable by choosing a nonce.
-pub const SIG_DOMAIN_REPLY: &[u8] = b"ouroboros-cluster-reply-v1 ";
+pub const SIG_DOMAIN_REPLY: &[u8] = b"ouroboros-cluster-reply-v1\0";
 
 /// The longest domain tag, so a caller can size a buffer for either.
 pub const SIG_DOMAIN_MAX: usize = 29;
@@ -724,6 +724,24 @@ mod tests {
         assert_eq!(proxy_id(65536, 0), None);
         assert_eq!(proxy_id(0, 65536), None);
         assert_eq!(proxy_id(u32::MAX, u32::MAX), None);
+    }
+
+    #[test]
+    fn the_domain_tags_are_exactly_these_bytes() {
+        // Pinned, because these constants are half of a cross-language
+        // agreement and the failure mode is silent. They were once written with
+        // a RAW NUL in the source rather than the `\0` escape, which made `grep`
+        // treat this file as binary (so the grep-based invariant checks this
+        // project relies on found nothing here) and made the byte render as a
+        // TRAILING SPACE in diffs and editors - one whitespace-stripping hook
+        // away from changing the signed bytes, after which every Rust-to-Python
+        // signature fails as "authentication failed" and looks like a wrong key.
+        assert_eq!(SIG_DOMAIN_REQUEST, b"ouroboros-cluster-request-v1\0");
+        assert_eq!(SIG_DOMAIN_REPLY, b"ouroboros-cluster-reply-v1\0");
+        assert_eq!(SIG_DOMAIN_REQUEST.len(), 29);
+        assert_eq!(SIG_DOMAIN_REPLY.len(), 27);
+        assert_eq!(*SIG_DOMAIN_REQUEST.last().expect("non-empty"), 0);
+        assert_eq!(*SIG_DOMAIN_REPLY.last().expect("non-empty"), 0);
     }
 
     #[test]

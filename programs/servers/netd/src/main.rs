@@ -224,10 +224,65 @@ struct Auth {
 }
 
 impl Auth {
-    /// Whether authentication is configured (a key is present). Unconfigured =
-    /// export closed.
-    fn enabled(&self) -> bool {
+    /// Whether this machine holds the shared cluster secret.
+    ///
+    /// This used to be spelled `enabled()` and meant "authentication is
+    /// configured", which was true when the shared key was the ONLY way to
+    /// authenticate anything. It stopped being true at step 7, and the name
+    /// kept the old meaning: a machine with a perfectly good keypair and a full
+    /// `authorized` file reported its export CLOSED, because the question being
+    /// asked was "is there a shared key" while the question that mattered was
+    /// "can this machine authenticate anything".
+    ///
+    /// Renamed rather than redefined, so every old call site had to be looked at
+    /// rather than silently inheriting a new meaning.
+    fn has_key(&self) -> bool {
         self.key_len > 0
+    }
+
+    /// Whether this machine can serve a **signed** request.
+    ///
+    /// Two conditions, and the second is the one that is easy to forget: it
+    /// needs peers to verify against, AND an identity of its own, because a
+    /// signed request gets a signed REPLY - a machine that cannot sign refuses
+    /// rather than answering with a MAC the caller cannot check (see
+    /// `seal_reply`). Stated once here because it is read in two places, and a
+    /// boot message that disagreed with the gate is exactly what this arc keeps
+    /// finding: the first version of this said "accepts signed requests" on a
+    /// node that refused every one of them.
+    fn accepts_signed(&self) -> bool {
+        // PARSEABLE PEERS, not merely bytes. `clusterkeys` documents commenting
+        // a line out as a supported revocation, so a file with its last peer
+        // commented out is non-empty and authorizes nobody - and the byte test
+        // made this print "accepts signed requests" on a node that refuses
+        // every one of them, which is the exact gate-vs-message disagreement
+        // this predicate was introduced to prevent.
+        self.signing.is_some() && count_peers(self.authorized()) > 0
+    }
+
+    /// Whether this machine can serve a **MAC'd** request — it holds the shared
+    /// key. (The reply is MAC'd under the same key, so there is no second
+    /// condition here.)
+    fn accepts_mac(&self) -> bool {
+        self.has_key()
+    }
+
+    /// Whether the export is open at all: it can serve at least one format.
+    /// Neither is the fail-closed case.
+    fn can_verify(&self) -> bool {
+        self.accepts_signed() || self.accepts_mac()
+    }
+
+    /// Whether this machine can authenticate an **outbound** request — sign it
+    /// with its own identity, or MAC it under the shared key.
+    ///
+    /// Separate from [`Auth::can_verify`] because the two really are different
+    /// preconditions: a machine that lists peers but has no identity of its own
+    /// can serve requests it cannot make, and one with an identity but an empty
+    /// `authorized` file is the reverse. One boolean could only be wrong about
+    /// one of them.
+    fn can_send(&self) -> bool {
+        self.signing.is_some() || self.has_key()
     }
     /// The peers this machine accepts, as `clusterkeys` expects them.
     fn authorized(&self) -> &[u8] {
@@ -264,11 +319,27 @@ fn load_auth() -> Auth {
         authorized_len: 0,
     };
     let mut buf = [0u8; hmac::BLOCK];
-    // Up to ~2s of retries at 40ms, only for the transient "disk not mounted
-    // yet" case; a definitively-absent key file returns immediately.
-    for _ in 0..50 {
+    // ONE retry budget across all three reads, not one each.
+    //
+    // Each read waits for the same event - the disk mounting - so three separate
+    // 2s budgets do not make the race three times more winnable, they make a
+    // DISKLESS boot spend three times as long not draining netd's mailbox.
+    // Parallels with no USB stick, and a Pi with no card, are both supported
+    // configurations where nothing ever mounts; at ~6s of silence the supervisor
+    // health ping (160ms) times out often enough to burn all three restarts and
+    // disable netd for the boot. Up to ~2s total, at 40ms a try.
+    //
+    // THE BUDGET GATES THE RETRY, NEVER THE FIRST ATTEMPT. Written first as
+    // `while budget > 0`, which meant that if this read exhausted it, the two
+    // below never ran ONCE - so a disk that mounted late gave a node with no
+    // identity and no peers for the whole boot, which is exactly the
+    // configuration step 10a exists to make work. The comment on the id read
+    // claimed to prevent that while the code caused it.
+    let mut budget = 50u32;
+    loop {
         let n = read_file_chunk(As::FirstParty, KEY_PATH, 0, 0, &mut buf);
-        if n == syscall_abi::NO_FS {
+        if n == syscall_abi::NO_FS && budget > 0 {
+            budget -= 1;
             syscall(syscall_abi::NET_WAIT, 40);
             continue;
         }
@@ -293,17 +364,19 @@ fn load_auth() -> Auth {
     // This machine's own key. Absent is not an error either - it means netd
     // signs nothing and falls back to the shared-key MAC.
     let mut idbuf = [0u8; 128];
-    // Retried on NO_FS like the two reads around it: if the key loop above
-    // exhausts its budget and the disk mounts a moment later, this would
-    // otherwise be the one file that silently did not load - and a machine that
-    // silently MACs works today and stops working at step 10.
-    let mut idn = syscall_abi::NO_FS;
-    for _ in 0..50 {
+    // Retried on NO_FS like the two reads around it, sharing their budget - but
+    // ALWAYS ATTEMPTED, even with the budget spent. A machine that silently MACs
+    // works today and stops working at step 10b, so "never read at all" is the
+    // one outcome this must not have.
+    let mut idn;
+    loop {
         idn = read_file_chunk(As::FirstParty, ID_PATH, 0, 0, &mut idbuf);
-        if idn != syscall_abi::NO_FS {
-            break;
+        if idn == syscall_abi::NO_FS && budget > 0 {
+            budget -= 1;
+            syscall(syscall_abi::NET_WAIT, 40);
+            continue;
         }
-        syscall(syscall_abi::NET_WAIT, 40);
+        break;
     }
     if idn >= syscall_abi::FS_ERR_MIN && idn != syscall_abi::FS_ERR_NOT_FOUND {
         log(b"netd: WARNING could not read /etc/cluster/id; not signing\r\n");
@@ -320,9 +393,9 @@ fn load_auth() -> Auth {
                 log(b"\r\n");
                 auth.signing = Some(key);
             }
-            // A key file that exists and is not a key is a mistake worth naming:
-            // the machine will silently fall back to MAC'ing, which works today
-            // and stops working at step 10.
+            // A key file that exists and is not a key is a mistake worth
+            // naming: the machine silently falls back to MAC'ing, which works
+            // today and stops working at step 10b.
             None => log(b"netd: WARNING /etc/cluster/id is not a key; not signing\r\n"),
         }
     }
@@ -334,13 +407,15 @@ fn load_auth() -> Auth {
     // before the disk is mounted - and unlike the key, a silently-empty peer
     // list produces "authentication failed" for every signed frame, which is
     // indistinguishable from a wrong key.
-    let mut n = syscall_abi::NO_FS;
-    for _ in 0..50 {
+    let mut n;
+    loop {
         n = read_file_chunk(As::FirstParty, AUTHORIZED_PATH, 0, 0, &mut auth.authorized);
-        if n != syscall_abi::NO_FS {
-            break;
+        if n == syscall_abi::NO_FS && budget > 0 {
+            budget -= 1;
+            syscall(syscall_abi::NET_WAIT, 40);
+            continue;
         }
-        syscall(syscall_abi::NET_WAIT, 40);
+        break;
     }
     if n < syscall_abi::FS_ERR_MIN {
         auth.authorized_len = (n as usize).min(AUTHORIZED_MAX);
@@ -371,13 +446,34 @@ fn load_auth() -> Auth {
         log_dec(u64::MAX - n);
         log(b" below the error ceiling); no peer can be verified by signature\r\n");
     }
-    if auth.enabled() {
-        log(b"netd: cluster auth enabled (export requires the cluster key)\r\n");
+    // REPORTED PER DIRECTION, because they now have different preconditions and
+    // a machine can be able to do one and not the other. The single old line
+    // ("export requires the cluster key") was the visible half of the conflated
+    // gate: it printed on a node whose wire carried only signatures, and it
+    // printed CLOSED on a node that held every key it needed except that one.
+    if auth.can_verify() {
+        log(b"netd: export open, accepts ");
+        if auth.accepts_signed() {
+            log(b"signed");
+            if auth.accepts_mac() {
+                log(b" and ");
+            }
+        }
+        if auth.accepts_mac() {
+            log(b"MAC'd");
+        }
+        log(b" requests\r\n");
         if auth.noexec {
             log(b"netd: no-exec set (remote-run refused; disk-share allowed)\r\n");
         }
     } else {
-        log(b"netd: no cluster key - export CLOSED to remote clients (fail-closed)\r\n");
+        log(b"netd: export CLOSED - no authorized peers and no cluster key (fail-closed)\r\n");
+    }
+    if !auth.can_send() {
+        // Says nothing about the export: this machine can still SERVE. It just
+        // cannot ask anyone else for anything, which is a different outage and
+        // would otherwise be discovered one failed `mount -r` at a time.
+        log(b"netd: no identity and no cluster key - cannot make remote requests\r\n");
     }
     auth
 }
@@ -2261,11 +2357,17 @@ fn handle_9p(c: &mut TcpConn, request: &[u8], dials: &mut [Option<DialConn>; MAX
     // not be answered with a MAC its caller has no way to check. Refusing is the
     // honest outcome, and it is reachable only in the half-migrated state that
     // step 10 ends.
-    if signed_request && auth.signing.is_none() {
-        // Not the caller's key: OUR missing identity. Saying "wrong or missing
-        // cluster key" would send an operator to the other machine, and the one
-        // with the problem would say nothing at all.
-        log(b"netd: refusing a signed request - this machine has no /etc/cluster/id\r\n");
+    if signed_request && !auth.accepts_signed() {
+        // Refused WITHOUT LOGGING, like every other pre-authentication refusal.
+        //
+        // A log line here is reachable by anyone who can send eight bytes to
+        // port 564: `log` is a blocking MSG_CALL to `cond`, which on the
+        // framebuffer backend blits glyphs, so a host looping connect/send/close
+        // would drive unbounded console output and blocking IPC inside netd's
+        // frame-drain loop - an unusable screen, and plausibly a supervisor
+        // wedge. The diagnostic is worth having and is worth having ONCE, so it
+        // is emitted at boot instead (see load_auth), where the machine says its
+        // own state without anyone else being able to ask.
         deny_no_identity(c, request);
         return;
     }
@@ -2348,9 +2450,6 @@ fn authenticate<'a>(
     auth: &Auth,
     request: &'a [u8],
 ) -> Option<(&'a [u8], [u8; ninep_abi::NP_NONCE_LEN], [u8; ninep_abi::NP_NAME_LEN])> {
-    if !auth.enabled() {
-        return None; // no cluster key configured: export closed
-    }
     let p = ninep_abi::NP_NET_LEN_PREFIX; // 4
     if request.len() < p + 8 {
         return None;
@@ -2361,7 +2460,20 @@ fn authenticate<'a>(
     // exporter learn to verify signatures before any client learns to make them.
     // Anything else is refused rather than misparsed.
     if read_u64(request, p) == ninep_abi::NP_AUTH_MAGIC_SIGNED {
+        // Precondition enforced by the lookup inside: an empty `authorized`
+        // file matches no offered key, so every signed request is refused.
         return authenticate_signed(auth, request);
+    }
+    // THE MAC ARM CARRIES ITS OWN KEY CHECK, and it is not a leftover of the
+    // gate that used to sit at the top of this function.
+    //
+    // HMAC WITH A ZERO-LENGTH KEY IS A PERFECTLY VALID HMAC. Without this line
+    // an unconfigured machine would not refuse MAC'd requests - it would accept
+    // the ones computed under the empty key, which every attacker also has. So
+    // "no cluster key" has to mean "refuse", explicitly, and cannot be left to
+    // fall out of the verification: the verification SUCCEEDS.
+    if !auth.accepts_mac() {
+        return None;
     }
     let need = p + ninep_abi::NP_AUTH_HDR;
     if request.len() < need {
@@ -2444,6 +2556,21 @@ fn authenticate_signed<'a>(
     offered.copy_from_slice(&request[koff..koff + ninep_abi::NP_PUBKEY_LEN]);
 
     // Is this key allowed here at all? An unknown key never reaches the verifier.
+    //
+    // THE MATCHED PEER IS DELIBERATELY DISCARDED, and that is worth stating
+    // because a lookup whose result is thrown away reads like a mistake. Two
+    // reasons, both design:
+    //
+    //  - The peer's `name` is the MACHINE's name; the `name` in this frame is
+    //    the requesting USER's. They are different namespaces, and the machine
+    //    name is not consulted by anything downstream - `map_user` resolves the
+    //    user through this machine's own /etc/passwd.
+    //  - The peer's `ip` is not checked against this connection's source
+    //    address either. Inbound authorizes BY KEY, outbound BY ADDRESS (see
+    //    docs/roadmap-cluster-keys.md, decision 3): an exporter is offered a key
+    //    and need only decide whether it is allowed, so pinning the address as
+    //    well would refuse an authorized machine that dialled from a second
+    //    interface without making any forgery harder - the key is the claim.
     clusterkeys::find_by_key(auth.authorized(), &offered)?;
 
     let np = &request[need..];
@@ -2527,7 +2654,8 @@ fn deny_no_identity(c: &mut TcpConn, request: &[u8]) {
     c.prefix_off = 0;
     c.cpu_child = CPU_NONE;
     if is_run {
-        let m: &[u8] = b"cpu: the remote machine has no cluster identity of its own\r\n";
+        let m: &[u8] =
+            b"cpu: the remote machine cannot serve signed requests (no identity of its own, or no authorized peers)\r\n";
         let n = m.len().min(c.prefix.len());
         c.prefix[..n].copy_from_slice(&m[..n]);
         c.prefix_len = n;
@@ -2582,7 +2710,7 @@ fn deny_9p(c: &mut TcpConn, request: &[u8]) {
     c.prefix_off = 0;
     c.cpu_child = CPU_NONE;
     if is_run {
-        let m: &[u8] = b"cpu: authentication failed (wrong or missing cluster key)\r\n";
+        let m: &[u8] = b"cpu: authentication failed (peer not authorized, or bad key/signature)\r\n";
         let n = m.len().min(c.prefix.len());
         c.prefix[..n].copy_from_slice(&m[..n]);
         c.prefix_len = n;
@@ -2636,20 +2764,17 @@ fn frame_signed(
     out: &mut [u8],
 ) -> (usize, [u8; ninep_abi::NP_NONCE_LEN]) {
     let zero_nonce = [0u8; ninep_abi::NP_NONCE_LEN];
-    // A cluster key is STILL REQUIRED to send anything, even now that both
-    // directions are signed.
+    // Refuse only when this machine can authenticate an outbound request by
+    // NEITHER route. It used to refuse whenever the shared key was absent, which
+    // by step 8 meant a machine that could sign perfectly well was refused
+    // because of a secret its signature does not use.
     //
-    // Not because the signatures need it - they do not - but because
-    // `authenticate` still refuses an unkeyed export, so a keyless machine could
-    // sign a request nobody will answer. Step 10 removes both halves together;
-    // removing this one alone would let a machine send requests its peers refuse
-    // and call that progress.
-    //
-    // The gate itself exists because a request cannot be taken back: a node that
-    // sends something the exporter ACCEPTS AND EXECUTES - NP_WRITE, NP_MKDIR,
-    // NP_RM all land - and only then discovers it cannot check the answer, tells
-    // the user "authentication failed" about a write that happened.
-    if !auth.enabled() {
+    // The gate itself stays, and for the original reason: a request cannot be
+    // taken back. A node that sends something the exporter ACCEPTS AND EXECUTES
+    // - NP_WRITE, NP_MKDIR, NP_RM all land - and only then discovers it cannot
+    // authenticate the exchange tells the user "authentication failed" about a
+    // write that happened. Refusing before the send is the only honest answer.
+    if !auth.can_send() {
         return (0, zero_nonce);
     }
     // SIGN WHEN THIS MACHINE HAS AN IDENTITY, MAC otherwise.

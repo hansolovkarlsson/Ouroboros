@@ -1486,7 +1486,7 @@ pub fn fs_error(cmd: &str, code: u64) {
         syscall_abi::FS_ERR_NOT_SUPPORTED => b"not supported by this filesystem (mode/owner need ext2)",
         syscall_abi::FS_ERR_PERM => b"permission denied",
         syscall_abi::FS_ERR_IO => b"device I/O error",
-        syscall_abi::FS_ERR_AUTH => b"cluster authentication failed (wrong or missing cluster key)",
+        syscall_abi::FS_ERR_AUTH => b"cluster authentication failed (peer not authorized, or bad key/signature)",
         _ => b"failed",
     };
     con_write(msg);

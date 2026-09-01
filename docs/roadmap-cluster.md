@@ -322,8 +322,9 @@ netd holding the run's output in a `PendingRun` buffer), lifting the cap to ~2 K
     attempt that did it the other way and what that cost. `cpu` is covered by a
     second mechanism: `netd` assumes the mapped user for the length of the spawn
     so the child inherits it. **Still machine-keyed**, which is the point of the
-    per-user-*key* item below: a peer holding the cluster key can claim any name,
-    so this protects against the users of a trusted node, not a compromised one.
+    per-user-*key* item below: an authorized machine can claim any of its own
+    users' names, so this protects against the users of a trusted node, not a
+    compromised one.
   - **Tier 2+, TRIGGER-GATED — activate only when Ouroboros leaves a trusted
     network.** These are real hardening but **deliberately not built while the
     deployment is a trusted LAN** (two QEMU VMs, or Hans's own Raspberry Pi

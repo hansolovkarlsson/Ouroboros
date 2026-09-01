@@ -10,7 +10,23 @@
 //! instruction and Rust's `u128` maps straight onto it, so five limbs do
 //! roughly half the work.
 //!
-//! **Every operation carries, so every `Fe` always has limbs below 2⁵¹.** The
+//! **Every operation carries.** There are two tiers, and the difference is
+//! deliberate rather than an inconsistency:
+//!
+//! - `Fe::carry` normalises to limbs **below 2⁵¹**, in two full passes. That
+//!   is the strong form, and `encode` needs it before it can conditionally
+//!   subtract p.
+//! - `reduce128` — the fold behind `mul`/`square` — settles in ONE pass, giving
+//!   limbs **below 2⁵²**: limb 0 alone can exceed 2⁵¹, by at most 19, because
+//!   the top carry is folded into it without a re-mask. Every operation here
+//!   accepts inputs below 2⁵², so that is sufficient, and the second pass would
+//!   cost ~5 operations on a path taken ~2,000 times per scalar multiplication.
+//!
+//! Stated in both places on purpose: an earlier version of this file asserted
+//! the ≤2⁵¹ bound universally while `reduce128` did not establish it, which is
+//! the "the advertised invariant was false and nothing noticed" failure this
+//! module has already had once. `reduce128_leaves_limbs_below_2_52` pins the
+//! weaker bound so neither claim rests on prose. The
 //! textbook version of this representation reduces lazily — `add` leaves limbs
 //! oversized and the next multiply cleans up — which is faster and requires
 //! every caller to know how many additions it may do before it must reduce. A
@@ -36,6 +52,10 @@
 pub const ELEM_LEN: usize = 32;
 
 /// A field element as five radix-2⁵¹ limbs.
+///
+/// Limbs are always below **2⁵²** (see the module doc for the two tiers: only
+/// the internal `carry` promises the tighter below-2⁵¹, and only `encode`
+/// needs it).
 ///
 /// The limbs are `pub(crate)`, not `pub`: the curve layer above needs them, but
 /// an outside caller must not be able to build an `Fe` the invariant does not
@@ -186,7 +206,7 @@ impl Fe {
     }
 
     /// `self^((p-5)/8)` = `self^(2²⁵² − 3)`, the exponent that recovers a square
-    /// root candidate on this curve. Shares its addition chain with [`invert`],
+    /// root candidate on this curve. Shares its addition chain with [`Fe::invert`],
     /// which is most of the cost of both.
     pub fn pow_p58(self) -> Fe {
         let (z_250_0, _) = self.pow_chain();
@@ -426,9 +446,21 @@ fn reduce128(c: [u128; 5]) -> Fe {
     let carry = (c[4] >> 51) as u64;
     let l4 = (c[4] as u64) & MASK;
     l0 = l0.wrapping_add(carry.wrapping_mul(19));
-    // Then settle, for the same reason `carry` runs two passes: folding into
-    // limb 0 can push limb 1 to exactly 2^51 and a single un-masked step leaves
-    // it there. `Fe(16).mul(...)` reaches it.
+    // Then settle - ONE pass, and the difference from [`Fe::carry`]'s two is
+    // deliberate rather than an oversight, because the two establish DIFFERENT
+    // invariants and this one is all multiplication needs:
+    //
+    //  - `carry` promises every limb below 2^51. That is the strong form, and
+    //    `encode` needs it before it can conditionally subtract p.
+    //  - `reduce128` promises every limb below 2^52. The pass below masks limbs
+    //    0..=3 outright; limb 4's carry is then folded into limb 0 times 19
+    //    WITHOUT a re-mask, so limb 0 alone can exceed 2^51 - by at most 19.
+    //
+    // Every operation in this module accepts inputs below 2^52 (`mul`'s column
+    // sums stay well inside u128, `add`/`sub` inside u64), so the weaker
+    // invariant is sufficient here and the second pass would be ~5 operations
+    // per multiplication - paid roughly 2,000 times per scalar multiplication -
+    // buying nothing. `reduce128_leaves_limbs_below_2_52` pins the bound.
     Fe(carry_pass([l0, l1, l2, l3, l4]))
 }
 
@@ -498,6 +530,44 @@ mod tests {
     ("rand_pair_4", "e6387bff4b63044f95a43d850e8f49f17267dce7d3dd13d87480376b48983217", "f2489a5f2c8fd5743b59829a32ed2b10cc7088558c0ffb1cd0c0936c35241053", "d881155f78f2d9c3d0fdbf1f417c75013fd8643d60ed0ef54441cbd77dbc426a", "e1efe09f1fd42eda594bbbeadba11de1a6f6539247ce18bba4bfa3fe12742244", "ba49f3f6de85dae2aca73311787790c08a8e44465a930d8dedd47489ae23561b"),
     ("rand_pair_5", "99101fb8cfadbf9db19d2d889fc502c81773a8baba11db031444dbb3a924d715", "6962c0b24ee6e819e790b1844448fda950a6d59b65b77d051ea8cfde425e3832", "0273df6a1e94a8b7982edf0ce40d007268197e5620c9580932ecaa92ec820f48", "1dae5e0581c7d683ca0c7c035b7d051ec7ccd21e555a5dfef59b0bd566c69e63", "ffd0022b82a84b79011ce1504b0fb712d8f2dfc1924cb881c7981ba4c2370501"),
     ];
+
+    /// `reduce128` promises limbs below 2^52, not `carry`'s below-2^51 (see the
+    /// comment there). A promise no test checks is where the last version of
+    /// this module went wrong - its stated invariant was false for two steps
+    /// and nothing noticed, because the VALUES stayed right. So check the bound
+    /// itself, on the raw limbs, over every multiplication the vectors reach
+    /// plus the shapes most likely to push limb 0 over: the top fold happens
+    /// when limb 4 carries.
+    #[test]
+    fn reduce128_leaves_limbs_below_2_52() {
+        const BOUND: u64 = 1 << 52;
+        let mut checked = 0usize;
+        let mut check = |f: Fe, what: &str| {
+            for (i, &l) in f.0.iter().enumerate() {
+                assert!(l < BOUND, "{what}: limb {i} = {l} >= 2^52");
+            }
+            checked += 1;
+        };
+        for (name, a, b, _, _, _) in PAIRS {
+            check(fe(a).mul(fe(b)), name);
+            check(fe(a).square(), name);
+        }
+        for (name, x, _, _) in SINGLES {
+            check(fe(x).square(), name);
+            // A chain, so the outputs feed back in as inputs rather than only
+            // ever multiplying freshly-decoded (and therefore tame) limbs.
+            let mut acc = fe(x);
+            for _ in 0..8 {
+                acc = acc.mul(acc).mul(fe(x));
+                check(acc, name);
+            }
+        }
+        // The all-ones-ish element maximises the column sums.
+        let big = Fe([MASK, MASK, MASK, MASK, MASK]);
+        check(big.mul(big), "max_limbs_squared");
+        check(big.mul(Fe([19, 0, 0, 0, 0])), "max_limbs_times_19");
+        assert!(checked > 100, "the bound was checked on {checked} values only");
+    }
 
     #[test]
     fn square_matches_python() {

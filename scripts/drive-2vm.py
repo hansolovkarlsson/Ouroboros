@@ -86,7 +86,22 @@ def parse(argv):
 def main() -> int:
     images, a_steps, b_steps = parse(sys.argv[1:])
     img_a, img_b = images
+    # BOTH captures land beside image A, so a run whose two images live in
+    # different directories still puts them together - and `auth_census` below
+    # looks in exactly one place rather than guessing per image.
     build = os.path.dirname(os.path.abspath(img_a))
+
+    # Delete last run's captures FIRST. If QEMU fails to write one (a bad path,
+    # a guest that never started), a stale file from a previous run is still
+    # sitting there, and every reader of it - `auth_census`, a human with
+    # tcpdump - gets a confident answer about a run that did not happen. That
+    # is the same stale-evidence trap as a check that cannot fail, and it has
+    # already produced one wrong reading in this project.
+    for stale in ("net-2vm-a.pcap", "net-2vm-b.pcap"):
+        try:
+            os.remove(os.path.join(build, stale))
+        except FileNotFoundError:
+            pass
 
     a = b = None
     try:
@@ -144,7 +159,42 @@ def main() -> int:
     print(tb)
     print(f"\n--- A: {drive_qemu.fault_line(a)}")
     print(f"--- B: {drive_qemu.fault_line(b)}")
+    print(f"--- A: {auth_census(os.path.join(build, 'net-2vm-a.pcap'))}")
+    print(f"--- B: {auth_census(os.path.join(build, 'net-2vm-b.pcap'))}")
     return 0 if ok_b else 1
+
+
+# The two export frame formats, as they appear ON THE WIRE. The magic is written
+# as a little-endian u64 of the big-endian integer the tag spells, so the bytes
+# arrive REVERSED - which is why searching a capture for "AUTHNP03" finds
+# nothing and looks like "the cluster used neither format".
+AUTH_FORMATS = (
+    ("signed", b"AUTHNP03"[::-1]),
+    ("MAC'd", b"AUTHNP02"[::-1]),
+)
+
+
+def auth_census(pcap) -> str:
+    """Which export auth format this node's traffic actually used.
+
+    The capture is taken on every run precisely because a transcript cannot
+    answer this - and until this existed, nothing read it. A two-node run whose
+    wire carried five SIGNED frames and zero MAC'd ones still printed
+    "remote-mounted (cluster-key auth)", and the transcript looked perfect. The
+    health bar says the run did not fault; this says what it did.
+    """
+    try:
+        with open(pcap, "rb") as f:
+            data = f.read()
+    except OSError as e:
+        return f"auth format: capture unreadable ({e.strerror})"
+    counts = [(name, data.count(tag)) for name, tag in AUTH_FORMATS]
+    seen = [f"{n} {name}" for name, n in counts if n]
+    if not seen:
+        # Not necessarily wrong - a node that was never asked for anything
+        # exports nothing - but never silently "fine" either.
+        return "auth format: NO export frames seen in the capture"
+    return "auth format: " + ", ".join(seen) + " frame(s)"
 
 
 if __name__ == "__main__":

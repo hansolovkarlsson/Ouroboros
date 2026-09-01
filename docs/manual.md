@@ -286,9 +286,9 @@ root. Two consequences worth knowing:
   primary group only, so a file reachable *only* through a supplementary group is
   refused remotely and allowed locally.
 
-This is still **cluster-membership** auth at the machine level: a peer that holds
-the key can claim any name, so this protects you from the *users* of a machine
-you trust, not from a machine you don't. It assumes a **trusted LAN** for the
+This is still auth at the **machine** level: a machine the cluster authorizes
+can claim any of its own users' names, so this protects you from the *users* of a
+machine you trust, not from a machine you don't. It assumes a **trusted LAN** for the
 parts still deferred (a passive sniffer reads your files and can replay an
 observed request; encryption, replay protection and per-user *keys* are gated
 behind a "leaving a trusted network" trigger on the roadmap). Don't expose an

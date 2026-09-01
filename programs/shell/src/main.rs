@@ -1734,7 +1734,7 @@ fn print_fs_error(cmd: &str, code: u64) {
         syscall_abi::FS_ERR_IO => "device I/O error",
         syscall_abi::FS_ERR_PERM => "permission denied",
         syscall_abi::FS_ERR_NOT_SUPPORTED => "not supported by this filesystem (mode/owner need ext2)",
-        syscall_abi::FS_ERR_AUTH => "cluster authentication failed (wrong or missing cluster key)",
+        syscall_abi::FS_ERR_AUTH => "cluster authentication failed (peer not authorized, or bad key/signature)",
         syscall_abi::MSG_ERR_FULL => "mailbox full",
         syscall_abi::MSG_ERR_TOO_BIG => "message too big (64-byte limit)",
         syscall_abi::MSG_ERR_DENIED => "permission denied (the IPC capability policy doesn't permit reaching that task)",
@@ -3445,7 +3445,14 @@ fn cmd_mount_remote(line: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize, out: &mut 
     target[4..6].copy_from_slice(&port.to_le_bytes());
     target[6] = b'/';
     if ns_add(prefix, &target, ninep_abi::NS_REMOTE_TREE) {
-        out.put_str("remote-mounted (cluster-key auth) at ");
+        // NOT "(cluster-key auth)". The shell does not choose the mechanism -
+        // netd does, per frame, from whether this machine has an /etc/cluster/id
+        // to sign with - so naming one here was a restatement of a fact owned
+        // elsewhere, and it drifted: a two-node run whose wire carried five
+        // SIGNED frames and zero MAC'd ones still printed "cluster-key auth".
+        // netd already logs which identity it holds at boot; the shell reports
+        // only what it did.
+        out.put_str("remote-mounted at ");
         if let Ok(p) = core::str::from_utf8(prefix) {
             out.put_line(p);
         } else {
