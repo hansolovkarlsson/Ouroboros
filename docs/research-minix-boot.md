@@ -2,7 +2,7 @@
 
 A comparative research note, not reference documentation for our own
 system (see [`architecture.md`](architecture.md) for that) — MINIX is one
-of this project's stated influences (`notes.txt`: "draw ideas from Linux,
+of this project's stated influences (the original brief: "draw ideas from Linux,
 Minix, and Plan 9"), so this looks at how a real, decades-mature
 microkernel actually boots and starts its first processes, and where
 Ouroboros's current boot sequence already resembles or diverges from that,
@@ -128,8 +128,8 @@ no process trees), not the absence of the model. See
 [`research-directions.md`](research-directions.md) for the current
 synthesis and where the influences point next. The original text follows.
 
-Worth being honest about, not just cataloguing differences: `notes.txt`
-states a microkernel goal, but the *current* implementation is
+Worth being honest about, not just cataloguing differences: the original
+brief stated a microkernel goal, but the *current* implementation is
 considerably more monolithic than either MINIX platform. MMU management,
 exception handling, console drivers, and scheduling all run as
 undifferentiated kernel code at EL1 — there is no process/server boundary

@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Ouroboros is an ARM64 (aarch64) operating system written in Rust (plus some
 assembly where needed), still in its earliest stages. Design goals, taken
-from `notes.txt` and `README.md`:
+from the project's original brief and `README.md`:
 
 - Microkernel architecture
 - POSIX-ish system calls

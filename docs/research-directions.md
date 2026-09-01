@@ -1,7 +1,7 @@
 # Research: comparative directions — MINIX, Linux, Plan 9, Helix, and where they point Ouroboros next
 
 A synthesis note across this project's four stated design influences
-(`notes.txt`: "draw ideas from Linux, Minix, and Plan 9", plus Helix as a
+(the original brief: "draw ideas from Linux, Minix, and Plan 9", plus Helix as a
 later fault-tolerance reference). Unlike the per-influence notes
 ([`research-minix-boot.md`](research-minix-boot.md),
 [`research-helix-os.md`](research-helix-os.md)), which each look at one

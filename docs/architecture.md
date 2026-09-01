@@ -16,7 +16,8 @@ microkernel's (MINIX), see
 
 ## Design goals
 
-From `notes.txt`, the original brief:
+The original brief — a `notes.txt` at the repo root, since removed, whose
+goals are reproduced here in full:
 
 - Microkernel architecture
 - POSIX-ish system calls (not ABI-compatible with Linux, just
