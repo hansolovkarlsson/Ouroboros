@@ -9,6 +9,7 @@ Usage:
     python3 scripts/np9p_client.py <host> <port> readdir <path>
     python3 scripts/np9p_client.py <host> <port> read    <path> [offset] [want]
     python3 scripts/np9p_client.py <host> <port> stat    <path>
+    python3 scripts/np9p_client.py <host> <port> run     <command>
 
 Every request is SIGNED with a per-machine Ed25519 key: the auth header is
 `[magic:8][nonce:16][name:32][pubkey:32][sig:64]` in front of the NP message,
@@ -63,6 +64,7 @@ REPLY_UNVERIFIED = 1 << 64
 # the guest must refuse. It is not a format this client speaks any more.
 RETIRED_MAC_MAGIC = int.from_bytes(b"AUTHNP02", "big")
 NP_AUTH_MAGIC_SIGNED = int.from_bytes(b"AUTHNP03", "big")  # the per-machine-keypair format
+NP_RUN = 0x100 + 0x20  # ninep-abi's NP_BASE + 0x20 - remote execution (`cpu`)
 NP_PUBKEY_LEN = 32
 NP_SIG_LEN = 64
 # Signature DOMAIN TAGS - must match ninep-abi's SIG_DOMAIN_* byte for byte.
@@ -268,6 +270,43 @@ def one_op(host, port, np_msg, timeout=10):
         s.sendall(frame)
         status, data = recv_reply(s, nonce, peer_key=peer_key())
     return status, data
+
+
+def run_op(host, port, command, timeout=10):
+    """Send an NP_RUN (`cpu`) frame and return the export's RAW reply bytes.
+
+    Not `one_op`: a remote-run reply is an output STREAM, not a framed
+    `[len][sig][status][data]`, so there is nothing to parse or verify - the
+    caller gets exactly what crossed the wire. That is what makes this usable as
+    a probe: a refusal on this path is a human-readable line, and comparing the
+    line two different machines send is how you check that an unauthenticated
+    caller cannot tell them apart.
+
+    Honours `--legacy-mac` the same way [`one_op`] does, so the retired format
+    can be pointed at this path too.
+    """
+    cmd = command.encode()
+    # a0 = command-line length; a1/a2 would be the caller's endpoint for the
+    # /host namespace import (cluster Phase 4b), which a host peer does not
+    # offer - it exports nothing back - so they stay zero and the command runs
+    # with the remote's own namespace only.
+    np_msg = build_frame(NP_RUN, 0, [len(cmd), 0, 0, 0], cmd)
+    if LEGACY_MAC_KEY is not None:
+        frame, _nonce = legacy_mac_frame(np_msg, LEGACY_MAC_KEY)
+    else:
+        frame, _nonce = signed_frame(np_msg, SIGN_KEY)
+    out = b""
+    with socket.create_connection((host, port), timeout=timeout) as s:
+        s.sendall(frame)
+        try:
+            while True:
+                b = s.recv(4096)
+                if not b:
+                    break
+                out += b
+        except socket.timeout:
+            pass
+    return out
 
 
 def np_readfile(host, port, path, want=512):
@@ -554,6 +593,11 @@ def main():
     path = args[3]
     pb = path.encode()
 
+    if op == "run":
+        # `<path>` is the command line here. The reply is raw text, so this
+        # returns before any of the framed-reply handling below.
+        sys.stdout.write(run_op(host, port, path).decode("utf-8", "replace"))
+        return
     if op == "readdir":
         np_msg = build_frame(NP_READDIR, 0, [len(pb), 4096], pb)
     elif op == "read":

@@ -2366,7 +2366,7 @@ fn handle_9p(c: &mut TcpConn, request: &[u8], dials: &mut [Option<DialConn>; MAX
         // wedge. The diagnostic is worth having and is worth having ONCE, so it
         // is emitted at boot instead (see load_auth), where the machine says its
         // own state without anyone else being able to ask.
-        deny_no_identity(c, request);
+        deny_9p(c, request);
         return;
     }
     let Some((msg, nonce, name)) = authenticate(auth, request) else {
@@ -2611,34 +2611,11 @@ fn seal_reply(c: &mut TcpConn, auth: &Auth, nonce: &[u8], n: usize) -> usize {
 /// Twelve bytes (`[len][status]`) instead: too short to carry a signature, which
 /// is exactly what the client's next check tests, so it maps to `FS_ERR_AUTH`
 /// and the operator is sent to the keys rather than to the network. This is the
-/// same unsealed shape `deny_9p` and `deny_no_identity` already stage - a
-/// refusal carries no data to authenticate, and an attacker who could forge it
-/// could equally drop the connection.
+/// same unsealed shape [`deny_9p`] already stages - a refusal carries no data
+/// to authenticate, and an attacker who could forge it could equally drop the
+/// connection.
 fn refuse_reply(c: &mut TcpConn) -> usize {
     frame_reply(&mut c.prefix, syscall_abi::FS_ERR_AUTH, &[])
-}
-
-/// Refuse a signed request because THIS machine has no identity to answer with.
-///
-/// Separate from [`deny_9p`] only in what it says. The wire answer is the same
-/// `FS_ERR_AUTH`, because a caller has no business learning why; the difference
-/// is that a `cpu` caller reads its reply as text, and "wrong or missing cluster
-/// key" would point at the wrong machine entirely.
-fn deny_no_identity(c: &mut TcpConn, request: &[u8]) {
-    let is_run = matches!(np_offset(request),
-        Some(voff) if request.len() >= voff + 8 && read_u64(request, voff) == ninep_abi::NP_RUN);
-    c.file = false;
-    c.prefix_off = 0;
-    c.cpu_child = CPU_NONE;
-    if is_run {
-        let m: &[u8] =
-            b"cpu: the remote machine cannot serve signed requests (no identity of its own, or no authorized peers)\r\n";
-        let n = m.len().min(c.prefix.len());
-        c.prefix[..n].copy_from_slice(&m[..n]);
-        c.prefix_len = n;
-    } else {
-        c.prefix_len = frame_reply(&mut c.prefix, syscall_abi::FS_ERR_AUTH, &[]);
-    }
 }
 
 /// Sign a framed export reply with this machine's private key - the reply half
@@ -2690,12 +2667,32 @@ fn seal_reply_signed(
     body_start + new_body
 }
 
-/// Stage an auth-denied response on the export connection (the request failed
-/// [`authenticate`]). For a remote-run (`cpu`) client - which reads the reply as
-/// a raw output stream - a human-readable denial line prints on the caller's
-/// screen; for an fs client (a remote mount) a framed `FS_ERR_AUTH` reply is
-/// staged, which the shell surfaces as "authentication failed". The verb peek
-/// is only used to pick the reply *format* (untrusted, but harmless either way).
+/// Stage an auth-denied response on the export connection.
+///
+/// For a remote-run (`cpu`) client - which reads the reply as a raw output
+/// stream - a human-readable denial line prints on the caller's screen; for an
+/// fs client (a remote mount) a framed `FS_ERR_AUTH` reply is staged, which the
+/// shell surfaces as "authentication failed". The verb peek is only used to pick
+/// the reply *format* (untrusted, but harmless either way).
+///
+/// ONE REFUSAL FOR EVERY PRE-AUTHENTICATION REASON, and the wording is the
+/// security property, not a nicety. There used to be a second function,
+/// `deny_no_identity`, for the case where THIS machine has no keypair or no
+/// authorized peers; it staged the same `FS_ERR_AUTH` on the wire and differed
+/// only in the text it printed to a `cpu` caller - "the remote machine cannot
+/// serve signed requests (no identity of its own, or no authorized peers)".
+///
+/// That text answered a question the asker had not authenticated to ask. The
+/// gate reaching it runs BEFORE `authenticate`, on nothing more than a magic
+/// number, so anyone who could reach port 564 could send eight bytes and learn
+/// whether a machine was configured - fingerprinting every node in a cluster
+/// while holding no key at all. The caller's own gate says the rule it broke:
+/// the diagnostic "is emitted at boot instead, where the machine says its own
+/// state without anyone else being able to ask".
+///
+/// So the message names no machine's state. It points at the configuration both
+/// ends share, which is where the answer is either way, and the node that is
+/// actually misconfigured has already said so on its own console at boot.
 fn deny_9p(c: &mut TcpConn, request: &[u8]) {
     let is_run = matches!(np_offset(request),
         Some(voff) if request.len() >= voff + 8 && read_u64(request, voff) == ninep_abi::NP_RUN);
@@ -2703,7 +2700,8 @@ fn deny_9p(c: &mut TcpConn, request: &[u8]) {
     c.prefix_off = 0;
     c.cpu_child = CPU_NONE;
     if is_run {
-        let m: &[u8] = b"cpu: authentication failed (peer not authorized, or bad key/signature)\r\n";
+        let m: &[u8] =
+            b"cpu: authentication failed (check /etc/cluster/id and authorized on both machines)\r\n";
         let n = m.len().min(c.prefix.len());
         c.prefix[..n].copy_from_slice(&m[..n]);
         c.prefix_len = n;
