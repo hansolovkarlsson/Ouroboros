@@ -42,6 +42,21 @@ pub const KEY_HEX_LEN: usize = KEY_LEN * 2;
 /// two are not gratuitously different sizes.
 pub const NAME_MAX: usize = 32;
 
+/// How many bytes of `authorized` a machine actually reads, and therefore the
+/// most it can ever authorize.
+///
+/// LIVES HERE BECAUSE TWO PROGRAMS MUST AGREE ON IT. `netd` reads this much into
+/// a buffer on `serve`'s stack and authorizes only what fits; `clusterkey peers`
+/// exists to answer "which peers does this machine accept", and read 2048 —
+/// twice as much — so it listed peers with the right key and address that the
+/// export would refuse, and its truncation warning said they "may still be
+/// authorized", which was the opposite of true. One constant, both readers.
+///
+/// About fourteen peers at 72 bytes a line. It is a stack budget, not a format
+/// limit: `netd` has no heap and a 32 KB stack that has hit its guard page five
+/// times.
+pub const AUTHORIZED_MAX: usize = 1024;
+
 /// One authorized peer.
 #[derive(Clone, Copy)]
 pub struct Peer<'a> {
