@@ -38,6 +38,12 @@ Guest = drive_qemu.Guest
 # coexist instead of failing as an unrelated guest-side timeout.
 LINK_PORT = 12342
 
+# Where each node's traffic is captured. Written on every run, because the
+# question "did it use the format I think it used?" cannot be answered from a
+# transcript that only shows the operation succeeding.
+PCAP_A = "build/net-2vm-a.pcap"
+PCAP_B = "build/net-2vm-b.pcap"
+
 
 def parse(argv):
     """Split argv into two images and the two guests' step lists.
@@ -86,6 +92,10 @@ def main() -> int:
             extra_args=[
                 "-netdev", f"socket,id=net0,listen=127.0.0.1:{LINK_PORT}",
                 "-device", "virtio-net-device,netdev=net0,mac=52:54:00:12:34:0a",
+                # Capture the link. What crosses it is the only evidence of which
+                # wire format was actually used: a run that succeeds proves the
+                # cluster works, not that it did so the way you believe.
+                "-object", f"filter-dump,id=f0,netdev=net0,file={PCAP_A}",
             ],
             intlog=os.path.join(build, "qemu-int-a.log"),
             label="[A] ",
@@ -103,6 +113,7 @@ def main() -> int:
             extra_args=[
                 "-netdev", f"socket,id=net0,connect=127.0.0.1:{LINK_PORT}",
                 "-device", "virtio-net-device,netdev=net0,mac=52:54:00:12:34:0b",
+                "-object", f"filter-dump,id=f1,netdev=net0,file={PCAP_B}",
             ],
             intlog=os.path.join(build, "qemu-int-b.log"),
             label="[B] ",
