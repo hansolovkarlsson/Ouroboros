@@ -270,6 +270,26 @@ fn peers(target: u64) -> u64 {
             _ => {}
         }
     }
+    // A DUPLICATE ADDRESS IS NOT A MALFORMED LINE, and that is why it needed
+    // its own report: both lines parse, both name a real key, and `classify`
+    // calls the file perfectly well-formed. But a client resolves a reply's
+    // expected key BY ADDRESS, so two lines claiming one address means it
+    // cannot tell which key to expect - `find_by_ip` now refuses rather than
+    // taking the first, which is safe and completely silent. This is the voice.
+    //
+    // Reachable by the documented workflow: revocation is "delete a line", so
+    // re-keying a node by APPENDING its new line is the natural mistake. Until
+    // now the exporter kept accepting that peer (it looks up by key, scanning
+    // every line) while every reply it sent failed to verify - one file working
+    // in one direction only.
+    let mut dups = [0u32; 8];
+    let ndup = clusterkeys::duplicate_ip_lines(&buf[..n], &mut dups);
+    for &l in dups.iter().take(ndup.min(dups.len())) {
+        out(target, b"  line ");
+        put_dec(target, l as u64);
+        out(target, b": duplicate address - this address is AMBIGUOUS, so replies\r\n");
+        out(target, b"          from it cannot be verified. Delete the stale line.\r\n");
+    }
     out(target, b"clusterkey: ");
     put_dec(target, found as u64);
     out(target, b" peer(s)");
@@ -278,8 +298,13 @@ fn peers(target: u64) -> u64 {
         put_dec(target, broken as u64);
         out(target, b" unreadable line(s)");
     }
+    if ndup > 0 {
+        out(target, b", ");
+        put_dec(target, ndup as u64);
+        out(target, b" duplicate address line(s)");
+    }
     out(target, b"\r\n");
-    if broken > 0 || truncated {
+    if broken > 0 || truncated || ndup > 0 {
         1
     } else {
         0

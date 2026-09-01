@@ -243,14 +243,55 @@ pub fn find_by_key<'a>(authorized: &'a [u8], key: &[u8; KEY_LEN]) -> Option<Peer
 /// The peer expected at an **address** — what a client asks before trusting a
 /// reply from the host it dialled.
 pub fn find_by_ip<'a>(authorized: &'a [u8], ip: &[u8; 4]) -> Option<Peer<'a>> {
+    let mut hit = None;
     for line in authorized.split(|&c| c == b'\n') {
         if let Some(p) = parse_line(line) {
             if &p.ip == ip {
-                return Some(p);
+                // AMBIGUOUS IS NOT A MATCH. Two lines claiming one address is
+                // not a peer, it is a question this file cannot answer, and
+                // answering it with "the first one" is how a stale line wins.
+                //
+                // The two directions used to disagree from one file:
+                // [`find_by_key`] scans every line, so an exporter kept
+                // accepting a re-keyed peer's requests, while this took the
+                // FIRST line - the old key - so every reply from that peer
+                // failed to verify. Revocation is documented as "delete a
+                // line", so appending the new line and leaving the old is the
+                // natural mistake, and nothing reported it.
+                if hit.is_some() {
+                    return None;
+                }
+                hit = Some(p);
             }
         }
     }
-    None
+    hit
+}
+
+/// Addresses claimed by more than one peer line, reported as the 1-based line
+/// number of each duplicate after the first. Returns how many there are.
+///
+/// Exists because [`find_by_ip`] refusing an ambiguous address is safe but
+/// silent: the operator sees "authentication failed" for a file that looks
+/// right. `clusterkey peers` reports this, so the condition is named where it
+/// can be acted on.
+pub fn duplicate_ip_lines(authorized: &[u8], out: &mut [u32]) -> usize {
+    let mut n = 0usize;
+    for (i, line) in authorized.split(|&c| c == b'\n').enumerate() {
+        let Some(p) = parse_line(line) else { continue };
+        let earlier = authorized
+            .split(|&c| c == b'\n')
+            .take(i)
+            .filter_map(parse_line)
+            .any(|q| q.ip == p.ip);
+        if earlier {
+            if n < out.len() {
+                out[n] = (i + 1) as u32;
+            }
+            n += 1;
+        }
+    }
+    n
 }
 
 /// Format an `authorized` line (without a trailing newline) into `out`,
@@ -612,13 +653,39 @@ mod tests {
     }
 
     #[test]
-    fn the_first_matching_line_wins_and_later_duplicates_do_not_override() {
-        // A duplicate is a hand-editing mistake; the behaviour just has to be
-        // defined and documented rather than surprising.
+    fn a_duplicate_address_is_refused_not_resolved_to_the_first_line() {
+        // OVERRULES an earlier rule, deliberately: "a duplicate is a
+        // hand-editing mistake; the behaviour just has to be defined and
+        // documented rather than surprising." Defined is not enough when the two
+        // directions define it DIFFERENTLY - `find_by_key` scans every line, so
+        // an exporter kept accepting a re-keyed peer while this resolved replies
+        // against the stale key. Refusing is the only answer both directions
+        // agree on: the file does not say which key belongs to that address.
         let text = b"node-a 10.0.2.10 d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a\nnode-dup 10.0.2.10 3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c\n";
         let mut buf = [0u8; 300];
         buf[..text.len()].copy_from_slice(text);
-        assert_eq!(find_by_ip(&buf, &[10, 0, 2, 10]).expect("by ip").name, b"node-a");
+        assert!(find_by_ip(&buf, &[10, 0, 2, 10]).is_none());
+        // Both keys are still accepted INBOUND - the asymmetry is real, and the
+        // fix is that the client no longer silently picks one of them.
+        let a = decode_key(b"d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a").expect("hex");
+        assert!(find_by_key(&buf, &a).is_some());
+        // Reported by line number, so it is findable.
+        let mut dups = [0u32; 4];
+        assert_eq!(duplicate_ip_lines(&buf, &mut dups), 1);
+        assert_eq!(dups[0], 2);
+    }
+
+    /// One line for an address still resolves - this refuses AMBIGUITY, not
+    /// duplicates in general, and a comment or a malformed line is not a peer.
+    #[test]
+    fn a_single_line_still_resolves_and_non_peers_do_not_count() {
+        let text = b"# node-a 10.0.2.10 d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a\nnode-a 10.0.2.10 d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a\ngarbage\nnode-b 10.0.2.11 3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c\n";
+        let mut buf = [0u8; 400];
+        buf[..text.len()].copy_from_slice(text);
+        assert!(find_by_ip(&buf, &[10, 0, 2, 10]).is_some());
+        assert!(find_by_ip(&buf, &[10, 0, 2, 11]).is_some());
+        let mut dups = [0u32; 4];
+        assert_eq!(duplicate_ip_lines(&buf, &mut dups), 0);
     }
 }
 
