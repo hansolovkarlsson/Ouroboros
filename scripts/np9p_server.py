@@ -45,6 +45,21 @@ HDR = 48  # NP_REQ_PAYLOAD
 # serving anything. The shared \CLUSTER.KEY it used to verify a MAC against
 # authenticates nothing since the flag day.
 NP_AUTH_MAGIC_SIGNED = int.from_bytes(b"AUTHNP03", "big")  # per-machine keypairs
+# The dev cluster's identities, by the short name an `authorized` line carries,
+# mapped to the seed label `scripts/mkclusterkeys.py` derives that key from.
+#
+# SPELLED ONCE, AND CHECKED. These labels used to be a literal list inside
+# `dev_authorized()` and a second literal inside `host_seed()`, neither of which
+# `check-wire-constants.py` could see - it compared `mkclusterkeys.py` against
+# `np9p_client.py` only. Renaming a dev identity therefore passed the check and
+# broke this server silently, so `make run-image-9p-client` failed every request
+# with a bare FS_ERR_AUTH that reads as a guest-side crypto bug.
+DEV_PEER_LABELS = {
+    "node-a": "ouroboros-dev-node-a",
+    "node-b": "ouroboros-dev-node-b",
+    "host": "ouroboros-dev-host-peer",
+}
+
 NP_NONCE_LEN = 16  # fresh per-request value the reply signature is bound to
 NP_NAME_LEN = 32  # requesting user's name, NUL-padded
 NP_PUBKEY_LEN = 32  # named as ninep-abi and np9p_client.py name it - see below
@@ -98,8 +113,10 @@ def dev_authorized():
     the budget this rig was just found to be marginal against."""
     global _AUTHORIZED
     if _AUTHORIZED is None:
-        labels = ["ouroboros-dev-node-a", "ouroboros-dev-node-b", "ouroboros-dev-host-peer"]
-        _AUTHORIZED = {ed().public_key(hashlib.sha256(l.encode()).digest()) for l in labels}
+        _AUTHORIZED = {
+            ed().public_key(hashlib.sha256(l.encode()).digest())
+            for l in DEV_PEER_LABELS.values()
+        }
     return _AUTHORIZED
 
 
@@ -113,8 +130,15 @@ def verify_signed(body):
     """
     if len(body) < NP_AUTH_HDR_SIGNED:
         return None
-    nonce = body[8:24]
     noff = 8 + NP_NONCE_LEN  # past the magic and the nonce
+    # SLICED BY THE CONSTANT, not by 8:24. This was the one field still spelled
+    # as literals, on the line above a comment asserting the parameterisation it
+    # did not have - and it is the value fed straight into the signature and
+    # reused for the reply. Change NP_NONCE_LEN everywhere and the header, name,
+    # key and signature offsets all follow while this kept reading 16 bytes, so
+    # every correctly-keyed guest would be refused and check-wire-constants.py
+    # would still report agreement.
+    nonce = body[8:noff]
     name = body[noff : noff + NP_NAME_LEN]
     koff = noff + NP_NAME_LEN
     pub = body[koff : koff + NP_PUBKEY_LEN]
@@ -131,7 +155,7 @@ def verify_signed(body):
 # authorized file already lists, so a guest built from this tree accepts its
 # signed replies without any copying.
 def host_seed():
-    return hashlib.sha256(b"ouroboros-dev-host-peer").digest()
+    return hashlib.sha256(DEV_PEER_LABELS["host"].encode()).digest()
 
 
 def warm_up():

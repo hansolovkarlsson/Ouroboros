@@ -84,7 +84,24 @@ NP_NAME_LEN = 32  # requesting user's name, NUL-padded - ninep-abi NP_NAME_LEN
 # code - Python against Rust - agreeing about a format neither can quietly
 # redefine, is the only thing that can show the verifier is right rather than
 # merely self-consistent.
-SIGN_LABEL = "ouroboros-dev-host-peer"
+# The dev nodes, by the SHORT NAME an `authorized` line carries, mapped to the
+# seed label `mkclusterkeys.py` actually derives that node's key from.
+#
+# This map exists because the short name is the one a person reaches for, and
+# passing it raw produced a control THAT COULD NOT FAIL FOR ITS STATED REASON:
+# `--peer=node-b` derived sha256(b"node-b"), a key belonging to no machine in the
+# cluster, so the run printed REPLY NOT VERIFIED whether or not the client checks
+# the key for the address it dialled - it would print the same thing against an
+# exporter that accepted ANY authorized signature, which is exactly the bug the
+# control is meant to catch. Only a real other node's key distinguishes "a key I
+# authorize" from "the key for the host I asked".
+DEV_PEER_LABELS = {
+    "node-a": "ouroboros-dev-node-a",
+    "node-b": "ouroboros-dev-node-b",
+    "host": "ouroboros-dev-host-peer",
+}
+
+SIGN_LABEL = DEV_PEER_LABELS["host"]
 SIGN_KEY = None  # derived in main() from SIGN_LABEL, or --sign=<label>
 
 # The retired shared key, set ONLY by `--legacy-mac[=<key>]`. When set, this
@@ -137,25 +154,9 @@ USER = b"root"
 # together about a second, which used to be paid by every invocation including
 # `np9p_client.py` with no arguments at all. It is only ever needed to verify a
 # SIGNED reply, so an unsigned run (and a usage error) now pays nothing.
-PEER_LABEL = "ouroboros-dev-node-a"
+PEER_LABEL = DEV_PEER_LABELS["node-a"]
 _PEER_KEY = None
 
-# The dev nodes, by the SHORT NAME an `authorized` line carries, mapped to the
-# seed label `mkclusterkeys.py` actually derives that node's key from.
-#
-# This map exists because the short name is the one a person reaches for, and
-# passing it raw produced a control THAT COULD NOT FAIL FOR ITS STATED REASON:
-# `--peer=node-b` derived sha256(b"node-b"), a key belonging to no machine in the
-# cluster, so the run printed REPLY NOT VERIFIED whether or not the client checks
-# the key for the address it dialled - it would print the same thing against an
-# exporter that accepted ANY authorized signature, which is exactly the bug the
-# control is meant to catch. Only a real other node's key distinguishes "a key I
-# authorize" from "the key for the host I asked".
-DEV_PEER_LABELS = {
-    "node-a": "ouroboros-dev-node-a",
-    "node-b": "ouroboros-dev-node-b",
-    "host": "ouroboros-dev-host-peer",
-}
 
 
 def peer_key():
