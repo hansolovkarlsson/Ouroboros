@@ -237,6 +237,23 @@ pub fn verify_prefixed(
     let Some(a_point) = Point::decode(public) else {
         return false;
     };
+    // REFUSE A SMALL-ORDER PUBLIC KEY.
+    //
+    // The module doc used to say this check was unnecessary because "this
+    // cluster generates its own keys". That stopped being true the moment a
+    // public key could arrive from outside: a peer offers one in every signed
+    // frame, and `/etc/cluster/authorized` is a text file someone edits.
+    //
+    // Against a small-order `A` the cofactorless equation `s·B == R + k·A`
+    // becomes satisfiable without knowing any secret — `s = 0` with a matching
+    // small-order `R` verifies whenever `k` lands in the right residue, which
+    // for an attacker who can choose or grind the message is simply a retry.
+    // Such a key is not a weak credential, it is a UNIVERSAL FORGERY, so it is
+    // refused here rather than at the one call site that happened to think of
+    // it. A genuine key has prime order L and is unaffected.
+    if a_point.is_small_order() {
+        return false;
+    }
     let Some(r_point) = Point::decode(&r_bytes) else {
         return false;
     };
@@ -397,6 +414,110 @@ mod tests {
         let sig = sign(&sk_a, msg);
         assert!(verify(&public_key(&sk_a), msg, &sig));
         assert!(!verify(&public_key(&sk_b), msg, &sig), "B must not verify A's signature");
+    }
+
+    /// A small-order public key is a UNIVERSAL FORGERY, and must never verify.
+    ///
+    /// THE TEST DATA CHECKS ITSELF. Every candidate below is first asserted to
+    /// BE small order using the curve arithmetic, then asserted to be refused.
+    /// That ordering is the point: the guard this replaced was a hand-written
+    /// table of these same encodings, three entries of which were wrong, and
+    /// its test only exercised the two that happened to be right — so a
+    /// mistyped constant weakened the test invisibly. Here a mistyped constant
+    /// decodes to some ordinary point, fails the `is_small_order` assertion,
+    /// and says so.
+    ///
+    /// The first four are DERIVED rather than typed, so they cannot be mistyped
+    /// at all.
+    #[test]
+    fn a_small_order_public_key_never_verifies() {
+        let mut candidates: [[u8; 32]; 7] = [[0u8; 32]; 7];
+        // Derived: the identity (y = 1), the order-2 point (y = -1), and the
+        // two order-4 points (y = 0, either sign of x).
+        candidates[0] = Point::IDENTITY.encode();
+        candidates[1] = {
+            let mut e = crate::Fe::ZERO.sub(crate::Fe::ONE).encode();
+            e[31] &= 0x7f; // sign bit of x, not part of y
+            e
+        };
+        candidates[2] = [0u8; 32];
+        candidates[3] = {
+            let mut e = [0u8; 32];
+            e[31] = 0x80;
+            e
+        };
+        // Typed: the two order-8 points and one sign-variant. Data, not
+        // constants - the assertion below is what makes them trustworthy.
+        for (i, hex) in [
+            "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05",
+            "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a",
+            "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc85",
+        ]
+        .iter()
+        .enumerate()
+        {
+            candidates[4 + i] = unhex(hex);
+        }
+
+        for (i, a) in candidates.iter().enumerate() {
+            let a_pt = Point::decode(a).unwrap_or_else(|| panic!("candidate {i} is not a point"));
+            assert!(a_pt.is_small_order(), "candidate {i} is not actually small order");
+
+            // BUILD A FORGERY THAT ACTUALLY WORKS, then assert it is refused.
+            //
+            // The first version of this test asserted `!verify(...)` on a
+            // signature that would never have verified anyway - so it passed
+            // with the guard REMOVED, which is the one thing a security test
+            // must not do. Mutation testing is what caught it.
+            //
+            // With `s = 0` the equation `s·B == R + k·A` reduces to
+            // `R + k·A == identity`. `k` depends on the message, but `k·A`
+            // depends only on `k` mod the order of `A` - at most 8 values - so
+            // a handful of messages finds one that satisfies it. That is the
+            // whole attack: no secret anywhere, just a retry.
+            let mut forgery = None;
+            'search: for r in candidates.iter() {
+                let Some(r_pt) = Point::decode(r) else { continue };
+                for n in 0..64u8 {
+                    let msg = [b'm', n];
+                    let mut h = Sha512::new();
+                    h.update(r);
+                    h.update(a);
+                    h.update(&msg);
+                    let k = Scalar::from_hash(&h.finalize());
+                    if r_pt.add(a_pt.mul(&k.to_bytes())).ct_eq(Point::IDENTITY) {
+                        let mut sig = [0u8; SIGNATURE_LEN];
+                        sig[..32].copy_from_slice(r); // s stays zero
+                        forgery = Some((msg, sig));
+                        break 'search;
+                    }
+                }
+            }
+            let (msg, sig) = forgery
+                .unwrap_or_else(|| panic!("candidate {i}: no forgery found - test is vacuous"));
+            assert!(!verify(a, &msg, &sig), "candidate {i}: FORGERY VERIFIED");
+        }
+    }
+
+    /// The guard must not OVER-refuse. The table it replaced rejected `13e8…`,
+    /// an ordinary valid point, which no "bad keys are refused" test could
+    /// notice - so this checks the other direction, over every published key
+    /// the RFC gives us.
+    #[test]
+    fn ordinary_public_keys_are_unaffected() {
+        let mut buf = [0u8; 256];
+        let mut checked = 0;
+        for (name, _secret, public, message, signature) in VECTORS {
+            let pk = unhex(public);
+            assert!(
+                !Point::decode(&pk).expect("a public key is a point").is_small_order(),
+                "{name}: an ordinary public key was called small-order"
+            );
+            let m = unhex_msg(message, &mut buf);
+            assert!(verify(&pk, m, &unhex_sig(signature)), "{name} stopped verifying");
+            checked += 1;
+        }
+        assert!(checked >= 3, "only {checked} keys checked");
     }
 
     #[test]

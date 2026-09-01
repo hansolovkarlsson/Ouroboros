@@ -209,6 +209,25 @@ impl Point {
     /// stated risk is exactly `netd`'s time and stack budget. Same answer:
     /// different projective representatives of one point compare equal either
     /// way, which `different_representatives_compare_equal` checks.
+    /// Whether this point has **small order** — that is, whether multiplying it
+    /// by the cofactor 8 gives the identity.
+    ///
+    /// COMPUTED, NOT ENUMERATED, and that is the whole point. The usual way to
+    /// write this is a table of the eight small-order encodings, and the first
+    /// version of this guard in `clusterkeys` was exactly that table, written
+    /// out by hand. Three of its entries were wrong: it missed three genuine
+    /// small-order keys (which it therefore accepted) and blocked one ordinary
+    /// valid key and one string that is not a curve point at all. The values
+    /// look plausible either way — nobody reads 32 bytes of hex and notices
+    /// that `13e8…` should have been `26e8…` — and the test that was supposed
+    /// to cover it only exercised the two entries that happened to be right.
+    ///
+    /// `[8]P == identity` IS the definition, costs three doublings, and cannot
+    /// be transcribed wrongly.
+    pub fn is_small_order(self) -> bool {
+        self.double().double().double().ct_eq(Point::IDENTITY)
+    }
+
     pub fn ct_eq(self, rhs: Point) -> bool {
         self.x.mul(rhs.z).ct_eq(rhs.x.mul(self.z)) && self.y.mul(rhs.z).ct_eq(rhs.y.mul(self.z))
     }

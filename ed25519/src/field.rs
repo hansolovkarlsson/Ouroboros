@@ -10,7 +10,23 @@
 //! instruction and Rust's `u128` maps straight onto it, so five limbs do
 //! roughly half the work.
 //!
-//! **Every operation carries, so every `Fe` always has limbs below 2⁵¹.** The
+//! **Every operation carries.** There are two tiers, and the difference is
+//! deliberate rather than an inconsistency:
+//!
+//! - `Fe::carry` normalises to limbs **below 2⁵¹**, in two full passes. That
+//!   is the strong form, and `encode` needs it before it can conditionally
+//!   subtract p.
+//! - `reduce128` — the fold behind `mul`/`square` — settles in ONE pass, giving
+//!   limbs **below 2⁵²**: limb 0 alone can exceed 2⁵¹, by at most 19, because
+//!   the top carry is folded into it without a re-mask. Every operation here
+//!   accepts inputs below 2⁵², so that is sufficient, and the second pass would
+//!   cost ~5 operations on a path taken ~2,000 times per scalar multiplication.
+//!
+//! Stated in both places on purpose: an earlier version of this file asserted
+//! the ≤2⁵¹ bound universally while `reduce128` did not establish it, which is
+//! the "the advertised invariant was false and nothing noticed" failure this
+//! module has already had once. `reduce128_leaves_limbs_below_2_52` pins the
+//! weaker bound so neither claim rests on prose. The
 //! textbook version of this representation reduces lazily — `add` leaves limbs
 //! oversized and the next multiply cleans up — which is faster and requires
 //! every caller to know how many additions it may do before it must reduce. A
@@ -36,6 +52,10 @@
 pub const ELEM_LEN: usize = 32;
 
 /// A field element as five radix-2⁵¹ limbs.
+///
+/// Limbs are always below **2⁵²** (see the module doc for the two tiers: only
+/// the internal `carry` promises the tighter below-2⁵¹, and only `encode`
+/// needs it).
 ///
 /// The limbs are `pub(crate)`, not `pub`: the curve layer above needs them, but
 /// an outside caller must not be able to build an `Fe` the invariant does not

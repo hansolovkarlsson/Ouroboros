@@ -68,75 +68,7 @@ pub fn decode_key(hex: &[u8]) -> Option<[u8; KEY_LEN]> {
         let lo = hex_digit(hex[i * 2 + 1])?;
         out[i] = (hi << 4) | lo;
     }
-    if is_small_order(&out) {
-        return None;
-    }
     Some(out)
-}
-
-/// The eight small-order point encodings, including the identity.
-///
-/// These are refused as peer keys because they are not merely useless, they are
-/// dangerous: Ed25519 verification accepts the identity as a public key, and
-/// against `A = 0100…00` the signature `R = 0100…00, s = 0` verifies for EVERY
-/// message. An `authorized` line carrying one is therefore a universal-forgery
-/// credential rather than an inert mistake - and it is a plausible mistake, from
-/// a placeholder written by a half-finished keygen or a line copied wrong.
-///
-/// Refusing them here makes that line unspellable rather than merely unlikely.
-/// (List per RFC 8032 §5.1.7 / the standard small-order set.)
-const SMALL_ORDER: [[u8; KEY_LEN]; 8] = [
-    [0; 32],
-    {
-        let mut k = [0u8; 32];
-        k[0] = 1;
-        k
-    },
-    [
-        0x26, 0xe8, 0x95, 0x8f, 0xc2, 0xb2, 0x27, 0xb0, 0x45, 0xc3, 0xf4, 0x89, 0xf2, 0xef, 0x98,
-        0xf0, 0xd5, 0xdf, 0xac, 0x05, 0xd3, 0xc6, 0x33, 0x39, 0xb1, 0x38, 0x02, 0x88, 0x6d, 0x53,
-        0xfc, 0x05,
-    ],
-    [
-        0xc7, 0x17, 0x6a, 0x70, 0x3d, 0x4d, 0xd8, 0x4f, 0xba, 0x3c, 0x0b, 0x76, 0x0d, 0x10, 0x67,
-        0x0f, 0x2a, 0x20, 0x53, 0xfa, 0x2c, 0x39, 0xcc, 0xc6, 0x4e, 0xc7, 0xfd, 0x77, 0x92, 0xac,
-        0x03, 0x7a,
-    ],
-    [
-        0x13, 0xe8, 0x95, 0x8f, 0xc2, 0xb2, 0x27, 0xb0, 0x45, 0xc3, 0xf4, 0x89, 0xf2, 0xef, 0x98,
-        0xf0, 0xd5, 0xdf, 0xac, 0x05, 0xd3, 0xc6, 0x33, 0x39, 0xb1, 0x38, 0x02, 0x88, 0x6d, 0x53,
-        0xfc, 0x85,
-    ],
-    [
-        0xb4, 0x17, 0x6a, 0x70, 0x3d, 0x4d, 0xd8, 0x4f, 0xba, 0x3c, 0x0b, 0x76, 0x0d, 0x10, 0x67,
-        0x0f, 0x2a, 0x20, 0x53, 0xfa, 0x2c, 0x39, 0xcc, 0xc6, 0x4e, 0xc7, 0xfd, 0x77, 0x92, 0xac,
-        0x03, 0xfa,
-    ],
-    [
-        0xec, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-        0xff, 0x7f,
-    ],
-    [
-        0xed, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-        0xff, 0x7f,
-    ],
-];
-
-/// Whether these bytes encode a small-order point (see [`SMALL_ORDER`]).
-pub fn is_small_order(key: &[u8; KEY_LEN]) -> bool {
-    // Compares against all eight without short-circuiting on the first
-    // difference, so the work does not depend on which one it is.
-    let mut hit = 0u8;
-    for candidate in SMALL_ORDER.iter() {
-        let mut diff = 0u8;
-        for i in 0..KEY_LEN {
-            diff |= candidate[i] ^ key[i];
-        }
-        hit |= (diff == 0) as u8;
-    }
-    hit != 0
 }
 
 /// Hex-encode a key (lowercase) into `out`.
@@ -584,32 +516,6 @@ mod tests {
         // looks authorized in the file and is skipped by every lookup.
         let mut buf = [0u8; 160];
         assert!(format_line(&mut buf, b"#node-a", &[10, 0, 2, 10], &KEY_A).is_none());
-    }
-
-    #[test]
-    fn small_order_keys_are_refused_as_peers() {
-        // These are not inert bad keys: ed25519 verification accepts the
-        // identity as a public key, and against A = 0100..00 the signature
-        // R = 0100..00, s = 0 verifies for EVERY message. An authorized line
-        // carrying one would be a universal-forgery credential.
-        let identity = "0100000000000000000000000000000000000000000000000000000000000000";
-        let zero = "0000000000000000000000000000000000000000000000000000000000000000";
-        for hex in [identity, zero] {
-            assert!(decode_key(hex.as_bytes()).is_none(), "small-order key must be refused: {hex}");
-            let line = alloc_line(hex);
-            assert!(parse_line(&line).is_none(), "and a line carrying one is not a peer");
-        }
-        // A real key is unaffected.
-        assert!(decode_key(KEY_A_HEX.as_bytes()).is_some());
-    }
-
-    /// Build `node-x 10.0.0.9 <hex>` into a fixed buffer, for the test above.
-    fn alloc_line(hex: &str) -> [u8; 128] {
-        let mut buf = [b' '; 128];
-        let head = b"node-x 10.0.0.9 ";
-        buf[..head.len()].copy_from_slice(head);
-        buf[head.len()..head.len() + hex.len()].copy_from_slice(hex.as_bytes());
-        buf
     }
 
     #[test]

@@ -251,7 +251,13 @@ impl Auth {
     /// finding: the first version of this said "accepts signed requests" on a
     /// node that refused every one of them.
     fn accepts_signed(&self) -> bool {
-        self.signing.is_some() && !self.authorized().is_empty()
+        // PARSEABLE PEERS, not merely bytes. `clusterkeys` documents commenting
+        // a line out as a supported revocation, so a file with its last peer
+        // commented out is non-empty and authorizes nobody - and the byte test
+        // made this print "accepts signed requests" on a node that refuses
+        // every one of them, which is the exact gate-vs-message disagreement
+        // this predicate was introduced to prevent.
+        self.signing.is_some() && count_peers(self.authorized()) > 0
     }
 
     /// Whether this machine can serve a **MAC'd** request — it holds the shared
@@ -322,10 +328,17 @@ fn load_auth() -> Auth {
     // configurations where nothing ever mounts; at ~6s of silence the supervisor
     // health ping (160ms) times out often enough to burn all three restarts and
     // disable netd for the boot. Up to ~2s total, at 40ms a try.
+    //
+    // THE BUDGET GATES THE RETRY, NEVER THE FIRST ATTEMPT. Written first as
+    // `while budget > 0`, which meant that if this read exhausted it, the two
+    // below never ran ONCE - so a disk that mounted late gave a node with no
+    // identity and no peers for the whole boot, which is exactly the
+    // configuration step 10a exists to make work. The comment on the id read
+    // claimed to prevent that while the code caused it.
     let mut budget = 50u32;
-    while budget > 0 {
+    loop {
         let n = read_file_chunk(As::FirstParty, KEY_PATH, 0, 0, &mut buf);
-        if n == syscall_abi::NO_FS {
+        if n == syscall_abi::NO_FS && budget > 0 {
             budget -= 1;
             syscall(syscall_abi::NET_WAIT, 40);
             continue;
@@ -351,18 +364,19 @@ fn load_auth() -> Auth {
     // This machine's own key. Absent is not an error either - it means netd
     // signs nothing and falls back to the shared-key MAC.
     let mut idbuf = [0u8; 128];
-    // Retried on NO_FS like the two reads around it: if the key loop above
-    // exhausts its budget and the disk mounts a moment later, this would
-    // otherwise be the one file that silently did not load - and a machine that
-    // silently MACs works today and stops working at step 10.
-    let mut idn = syscall_abi::NO_FS;
-    while budget > 0 {
+    // Retried on NO_FS like the two reads around it, sharing their budget - but
+    // ALWAYS ATTEMPTED, even with the budget spent. A machine that silently MACs
+    // works today and stops working at step 10b, so "never read at all" is the
+    // one outcome this must not have.
+    let mut idn;
+    loop {
         idn = read_file_chunk(As::FirstParty, ID_PATH, 0, 0, &mut idbuf);
-        if idn != syscall_abi::NO_FS {
-            break;
+        if idn == syscall_abi::NO_FS && budget > 0 {
+            budget -= 1;
+            syscall(syscall_abi::NET_WAIT, 40);
+            continue;
         }
-        budget -= 1;
-        syscall(syscall_abi::NET_WAIT, 40);
+        break;
     }
     if idn >= syscall_abi::FS_ERR_MIN && idn != syscall_abi::FS_ERR_NOT_FOUND {
         log(b"netd: WARNING could not read /etc/cluster/id; not signing\r\n");
@@ -379,11 +393,9 @@ fn load_auth() -> Auth {
                 log(b"\r\n");
                 auth.signing = Some(key);
             }
-            // A key file that exists and is not a key is a mistake worth naming:
-            // said here rather than per request, because a per-request line is
-            // something a stranger can make this machine print.
-            // the machine will silently fall back to MAC'ing, which works today
-            // and stops working at step 10.
+            // A key file that exists and is not a key is a mistake worth
+            // naming: the machine silently falls back to MAC'ing, which works
+            // today and stops working at step 10b.
             None => log(b"netd: WARNING /etc/cluster/id is not a key; not signing\r\n"),
         }
     }
@@ -395,14 +407,15 @@ fn load_auth() -> Auth {
     // before the disk is mounted - and unlike the key, a silently-empty peer
     // list produces "authentication failed" for every signed frame, which is
     // indistinguishable from a wrong key.
-    let mut n = syscall_abi::NO_FS;
-    while budget > 0 {
+    let mut n;
+    loop {
         n = read_file_chunk(As::FirstParty, AUTHORIZED_PATH, 0, 0, &mut auth.authorized);
-        if n != syscall_abi::NO_FS {
-            break;
+        if n == syscall_abi::NO_FS && budget > 0 {
+            budget -= 1;
+            syscall(syscall_abi::NET_WAIT, 40);
+            continue;
         }
-        budget -= 1;
-        syscall(syscall_abi::NET_WAIT, 40);
+        break;
     }
     if n < syscall_abi::FS_ERR_MIN {
         auth.authorized_len = (n as usize).min(AUTHORIZED_MAX);
@@ -2641,7 +2654,8 @@ fn deny_no_identity(c: &mut TcpConn, request: &[u8]) {
     c.prefix_off = 0;
     c.cpu_child = CPU_NONE;
     if is_run {
-        let m: &[u8] = b"cpu: the remote machine has no cluster identity of its own\r\n";
+        let m: &[u8] =
+            b"cpu: the remote machine cannot serve signed requests (no identity of its own, or no authorized peers)\r\n";
         let n = m.len().min(c.prefix.len());
         c.prefix[..n].copy_from_slice(&m[..n]);
         c.prefix_len = n;

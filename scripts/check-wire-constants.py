@@ -76,6 +76,7 @@ def main():
 
     problems = []
     compared = 0
+    per_peer = {name: 0 for name in peers}
     for const in CHECKED:
         if const not in rust:
             problems.append(f"{const}: not found in ninep-abi (renamed? then update this list)")
@@ -86,6 +87,7 @@ def main():
                 continue
             seen_anywhere = True
             compared += 1
+            per_peer[peer] += 1
             if consts[const] != rust[const]:
                 problems.append(
                     f"{const}: ninep-abi has {rust[const]!r}, {peer} has {consts[const]!r}"
@@ -96,6 +98,15 @@ def main():
     # A check that compared nothing passes for the wrong reason. The regexes
     # above are the fragile part - a formatting change to either language could
     # make them match zero constants - so refuse to report success on silence.
+    #
+    # PER PEER, not just in total. A single total lets one peer drop out
+    # entirely and still clear the bar on the other's matches: today the client
+    # spells 6 of these names and the server 4, so a server that stopped parsing
+    # would leave 6 >= 6 and this would report success while checking half of
+    # what it is named for.
+    for peer, n in per_peer.items():
+        if n == 0:
+            problems.append(f"{peer}: no constants matched at all - did its formatting change?")
     if compared < len(CHECKED):
         problems.append(f"only {compared} constant(s) compared, expected at least {len(CHECKED)}")
 
