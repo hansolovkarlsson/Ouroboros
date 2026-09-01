@@ -633,7 +633,7 @@ make run-image-exfat         # build build/espexfat.img (two-partition MBR: exFA
 make run-image-ext2          # build build/espext2.img (two-partition MBR: ext2 partition 1 + FAT32 ESP partition 2, via e2fsprogs' mke2fs + scripts/mkext2.py) and boot it - fsd mounts the ext2 partition (FAT32 + exFAT probes fail, ext2 succeeds), UEFI boots the FAT32 ESP; exercises fsd/src/ext2.rs (the ext2 read-write arm). Needs `brew install e2fsprogs`
 make parallels-hdd          # wrap build/esp.img into build/esp.hdd, a Parallels-native virtual hard disk
 make test-parallels          # scripted real-hardware round trip via prlctl - see below
-make test                   # host unit tests + clippy --all-targets for the pure crates (accounts, regex, ed25519, clusterkeys)
+make test                   # host unit tests + clippy --all-targets for the pure crates (accounts, regex, ed25519, clusterkeys, ninep-abi) + the cross-language wire-constant check
 make check-relocs           # the PIE contract: no R_AARCH64_ABS64 in any userland binary
 make clean
 ```
@@ -650,9 +650,9 @@ The kernel and the userland programs have no unit test suite — they are
 pre-alpha code that mostly proves it boots, and most of it can only run on
 the target. The **pure crates are the exception and now have one**:
 `make test` runs the host unit tests for every crate with no I/O, no
-syscalls and no target dependency (`accounts`, `regex`, `ed25519`, `clusterkeys` — 107
-tests as of 2026-08-31, and the number is checked by running it, not by
-incrementing). It exists because such a crate can otherwise have
+syscalls and no target dependency (`accounts`, `regex`, `ed25519`,
+`clusterkeys`, `ninep-abi` — 128 tests as of 2026-09-01, and the number is
+checked by running it, not by incrementing). It exists because such a crate can otherwise have
 **no build coverage at all**: it is a workspace member but not a
 default-member, so until something depends on it, `cargo build`, `make
 build` and `make esp` all stay green while it is broken. Run it before

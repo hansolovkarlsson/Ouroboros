@@ -45,8 +45,9 @@ HDR = 48  # NP_REQ_PAYLOAD
 # serving anything. The shared \CLUSTER.KEY it used to verify a MAC against
 # authenticates nothing since the flag day.
 NP_AUTH_MAGIC_SIGNED = int.from_bytes(b"AUTHNP03", "big")  # per-machine keypairs
+NP_NONCE_LEN = 16  # fresh per-request value the reply signature is bound to
 NP_NAME_LEN = 32  # requesting user's name, NUL-padded
-NP_KEY_LEN = 32
+NP_PUBKEY_LEN = 32  # named as ninep-abi and np9p_client.py name it - see below
 NP_SIG_LEN = 64
 # Signature DOMAIN TAGS - must match ninep-abi's SIG_DOMAIN_* byte for byte.
 # They keep a signature made in one role from verifying in the other: without
@@ -55,7 +56,14 @@ NP_SIG_LEN = 64
 SIG_DOMAIN_REQUEST = b"ouroboros-cluster-request-v1\0"
 SIG_DOMAIN_REPLY = b"ouroboros-cluster-reply-v1\0"
 
-NP_AUTH_HDR_SIGNED = 8 + 16 + NP_NAME_LEN + NP_KEY_LEN + NP_SIG_LEN
+# NAMES MATTER HERE, not just values: scripts/check-wire-constants.py compares
+# these against ninep-abi BY NAME, so a constant this file spells differently is
+# silently skipped rather than checked. The public-key length was spelled with a
+# private name and the nonce as a bare literal, so the two fields that decide
+# which guests are served were the two the cross-language check never looked at:
+# changing that length to 33 shifted every slice below and the checker still
+# reported "10 constants agree".
+NP_AUTH_HDR_SIGNED = 8 + NP_NONCE_LEN + NP_NAME_LEN + NP_PUBKEY_LEN + NP_SIG_LEN
 
 # Public keys this server accepts, by hex. The dev cluster's three identities,
 # derived the same way scripts/mkclusterkeys.py derives them - so a guest built
@@ -106,10 +114,11 @@ def verify_signed(body):
     if len(body) < NP_AUTH_HDR_SIGNED:
         return None
     nonce = body[8:24]
-    name = body[24 : 24 + NP_NAME_LEN]
-    koff = 24 + NP_NAME_LEN
-    pub = body[koff : koff + NP_KEY_LEN]
-    sig = body[koff + NP_KEY_LEN : NP_AUTH_HDR_SIGNED]
+    noff = 8 + NP_NONCE_LEN  # past the magic and the nonce
+    name = body[noff : noff + NP_NAME_LEN]
+    koff = noff + NP_NAME_LEN
+    pub = body[koff : koff + NP_PUBKEY_LEN]
+    sig = body[koff + NP_PUBKEY_LEN : NP_AUTH_HDR_SIGNED]
     np = body[NP_AUTH_HDR_SIGNED:]
     if pub not in dev_authorized():
         return None

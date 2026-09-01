@@ -260,6 +260,28 @@ const AUTHORIZED_PATH: &[u8] = b"/etc/cluster/authorized";
 /// outbound requests at all; without it, it can neither serve nor dial.
 const ID_PATH: &[u8] = b"/etc/cluster/id";
 
+/// Whether an `fsd` reply is a TRANSIENT failure that a boot-time read should
+/// retry, rather than a real answer.
+///
+/// Two causes, both of which clear on their own:
+///
+/// - `NO_FS` — the disk is not mounted yet. `netd` and `fsd` start together, so
+///   the first reads race the mount.
+/// - `TASK_ERR_NO_SUCH_TASK` — `fsd` is being restarted underneath us. The
+///   kernel fails every in-flight `MSG_CALL` to a slot it is tearing down
+///   (`tasks::fail_calls_to`), and the supervisor reinstalls `fsd` in the same
+///   handler, so the very next attempt can succeed.
+///
+/// EXISTS BECAUSE THE `NO_FS`-ONLY VERSION LEFT HALF THE HOLE OPEN. Every
+/// `TASK_ERR_*` is numerically above `FS_ERR_MIN`, so a hand-written
+/// `r == NO_FS` retry treats "fsd restarted mid-call" as a definitive answer —
+/// which for the `\NOEXEC` probe means `noexec = false`, the one outcome that
+/// fails OPEN. `for_each_line` already documented both as transient and cited
+/// this function's callers as the precedent; the precedent did not cover it.
+fn transient_fs_failure(r: u64) -> bool {
+    r == syscall_abi::NO_FS || r == syscall_abi::TASK_ERR_NO_SUCH_TASK
+}
+
 /// Load the cluster auth config from disk via `fsd` at boot.
 ///
 /// Retries while `fsd` reports `NO_FS` (its disk isn't mounted yet - a
@@ -291,7 +313,8 @@ fn load_auth() -> Auth {
     // The no-exec flag is presence-only: any successful read (even 0 bytes)
     // means the file exists; FS_ERR_* means it doesn't.
     //
-    // RETRIED ON `NO_FS` LIKE THE TWO READS BELOW, AND THIS ONE MATTERS MOST,
+    // RETRIED ON A TRANSIENT FAILURE LIKE THE TWO READS BELOW, AND THIS ONE
+    // MATTERS MOST,
     // BECAUSE IT IS THE ONLY ONE THAT FAILS *OPEN*. An unread id or peer list
     // closes the export; an unread `\NOEXEC` leaves `noexec` false, which is
     // indistinguishable from "the operator did not ask for it" - and
@@ -310,7 +333,7 @@ fn load_auth() -> Auth {
     let m;
     loop {
         let r = read_file_chunk(As::FirstParty, NOEXEC_PATH, 0, 0, &mut one);
-        if r == syscall_abi::NO_FS && budget > 0 {
+        if transient_fs_failure(r) && budget > 0 {
             budget -= 1;
             syscall(syscall_abi::NET_WAIT, 40);
             continue;
@@ -330,7 +353,7 @@ fn load_auth() -> Auth {
     let mut idn;
     loop {
         idn = read_file_chunk(As::FirstParty, ID_PATH, 0, 0, &mut idbuf);
-        if idn == syscall_abi::NO_FS && budget > 0 {
+        if transient_fs_failure(idn) && budget > 0 {
             budget -= 1;
             syscall(syscall_abi::NET_WAIT, 40);
             continue;
@@ -369,7 +392,7 @@ fn load_auth() -> Auth {
     let mut n;
     loop {
         n = read_file_chunk(As::FirstParty, AUTHORIZED_PATH, 0, 0, &mut auth.authorized);
-        if n == syscall_abi::NO_FS && budget > 0 {
+        if transient_fs_failure(n) && budget > 0 {
             budget -= 1;
             syscall(syscall_abi::NET_WAIT, 40);
             continue;
@@ -2272,6 +2295,22 @@ fn sack_retransmit(mac: &[u8; 6], c: &mut TcpConn, seg: &TcpIn) {
 /// the prefix buffer with the 12-byte frame header, and about one TCP segment.
 const EXPORT_CHUNK: usize = 1400;
 
+/// The reply prefix must have room for the largest reply AND its signature.
+///
+/// A COMPILE-TIME ASSERTION, not a test, because it is a relationship between
+/// three constants in two crates and the thing that breaks it is editing one of
+/// them. `seal_reply_signed`'s no-room arm is correct but degrades the export to
+/// refusing every large read with `FS_ERR_AUTH` - a failure that looks like a key
+/// problem between two correctly-keyed machines - so it must stay unreachable,
+/// and "unreachable by 572 bytes of slack nobody re-derives" is not a guarantee.
+///
+/// The largest `build_9p_reply` is `frame_reply`'s header (`NP_NET_LEN_PREFIX` +
+/// an 8-byte status) plus a full `EXPORT_CHUNK` of file data.
+const _: () = assert!(
+    ninep_abi::NP_NET_LEN_PREFIX + 8 + EXPORT_CHUNK + ninep_abi::NP_SIG_LEN <= PREFIX_MAX,
+    "PREFIX_MAX cannot hold a full EXPORT_CHUNK reply plus its signature"
+);
+
 /// The inline-reply cap fsd enforces on `readdir`/`read_file` (`FS_DATA_MAX`);
 /// a larger `want` is rejected, so the export clamps to it for those verbs.
 const DATA_INLINE: usize = syscall_abi::FS_DATA_MAX as usize;
@@ -2532,9 +2571,30 @@ fn seal_reply(c: &mut TcpConn, auth: &Auth, nonce: &[u8], n: usize) -> usize {
         // Unreachable in practice: `accepts_signed` requires a signing key, so
         // a request that authenticated implies one exists. Left as a refusal
         // rather than an `expect` because an unsealed reply must never go out -
-        // returning `n` here would send the body unauthenticated.
-        None => 0,
+        // returning `n` here would send the BODY unauthenticated.
+        None => refuse_reply(c),
     }
+}
+
+/// Stage a bare `FS_ERR_AUTH` in place of a reply this machine cannot sign.
+///
+/// A STATUS-ONLY FRAME, DELIBERATELY, and it is not the same thing as sending
+/// nothing. Both arms of [`seal_reply`] used to return `0`, which leaves
+/// `prefix_len` at zero, and `pump_send` then closes the connection with a bare
+/// FIN carrying no payload. The client's `handle_rmount` rejects that on LENGTH
+/// (`got < NP_NET_LEN_PREFIX + 8`) and reports `NO_FS`, so the shell prints "no
+/// filesystem" - the message an unreachable peer gives - about a machine that is
+/// up, listening, and simply unable to sign. `np9p_client.py` raises an
+/// unhandled `RuntimeError` on the same reply.
+///
+/// Twelve bytes (`[len][status]`) instead: too short to carry a signature, which
+/// is exactly what the client's next check tests, so it maps to `FS_ERR_AUTH`
+/// and the operator is sent to the keys rather than to the network. This is the
+/// same unsealed shape `deny_9p` and `deny_no_identity` already stage - a
+/// refusal carries no data to authenticate, and an attacker who could forge it
+/// could equally drop the connection.
+fn refuse_reply(c: &mut TcpConn) -> usize {
+    frame_reply(&mut c.prefix, syscall_abi::FS_ERR_AUTH, &[])
 }
 
 /// Refuse a signed request because THIS machine has no identity to answer with.
@@ -2581,16 +2641,18 @@ fn seal_reply_signed(
         // Returning `n` here - which it did until this was caught - stages the
         // body with no signature over it, and `handle_9p` then transmits it: an
         // authenticated request answered by an unauthenticated reply, which is
-        // the one thing reply-signing exists to prevent. The client rejects it
-        // as `FS_ERR_AUTH`, so the symptom would be "authentication failed on
-        // large reads" between two machines that are correctly keyed.
+        // the one thing reply-signing exists to prevent. The caller sees
+        // `FS_ERR_AUTH`, so the symptom is "authentication failed on large
+        // reads" between two machines that are correctly keyed.
         //
         // Unreachable today, but only by a margin nothing asserts: `PREFIX_MAX`
         // is 2048 and the largest `build_9p_reply` is 12 + `EXPORT_CHUNK`
         // (1400) = 1412, leaving 572 bytes spare after the signature. Raising
         // `EXPORT_CHUNK` past 1972, shrinking `PREFIX_MAX`, or adding a verb
-        // with a bigger reply would each reach it.
-        return 0;
+        // with a bigger reply would each reach it - so the margin is pinned by
+        // a compile-time assertion beside `EXPORT_CHUNK` rather than left to
+        // arithmetic nobody re-does.
+        return refuse_reply(c);
     }
     let body_len = n - body_start;
     // Signed over nonce ‖ body via the two-part entry point, so the

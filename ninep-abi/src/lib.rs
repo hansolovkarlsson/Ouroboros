@@ -239,6 +239,33 @@ pub const NP_NET_LEN_PREFIX: usize = 4;
 /// segments. A large file streams a chunk per round trip, as `cat` does locally.
 pub const NP_NET_MAX: usize = 48 + 2048;
 
+/// The NP message header: `verb`, `tree`, and the four params.
+const NP_MSG_HDR: usize = 6 * 8;
+
+/// WHAT [`NP_NET_MAX`] IS FOR, as opposed to what it equals: one NP message
+/// header plus a full bulk-transfer chunk.
+///
+/// A COMPILE-TIME ASSERTION rather than a test, on clippy's advice
+/// (`assertions_on_constants`) and because it is strictly stronger - it fails
+/// the BUILD, so it holds for `make esp` and every image target, not only for
+/// someone who ran `make test`. The paired test in this module pins these
+/// numbers by VALUE; this pins them by MEANING, so a deliberate resize has to
+/// satisfy the requirement instead of just updating a literal.
+///
+/// `syscall-abi` is deliberately not a dependency of this crate (see the note
+/// at the `NsTarget` definition), so `SAFECOPY_MAX` is spelled out here.
+const _: () = {
+    const SAFECOPY_MAX: usize = 2048; // syscall-abi's bulk-transfer cap
+    assert!(
+        NP_NET_MAX >= NP_MSG_HDR + SAFECOPY_MAX,
+        "NP_NET_MAX must hold an NP header plus a full bulk chunk"
+    );
+    assert!(
+        NP_NET_MAX >= NP_MSG_HDR + NP_REMOTE_CHUNK,
+        "NP_NET_MAX must hold an NP header plus a remote read chunk"
+    );
+};
+
 /// The namespace `tree` sentinel marking a **remote** binding (cluster Phase 1c).
 /// A local binding's `tree` selects a mount *within* `fsd` (0 = the boot mount);
 /// `0xFF` instead means the binding's `target` begins with a 6-byte endpoint
@@ -775,6 +802,20 @@ mod tests {
 
     #[test]
     fn a_frame_buffer_fits_the_whole_header() {
+        // PINNED AS LITERALS, INDEPENDENTLY OF THE DEFINITIONS ABOVE. This test
+        // used to assert `NP_FRAME_MAX == NP_NET_LEN_PREFIX + NP_AUTH_HDR_SIGNED
+        // + NP_NET_MAX`, which is `NP_FRAME_MAX`'s own definition token-for-token
+        // - it tracked any edit instead of catching one. Mutation-proven at the
+        // time: `NP_NET_MAX = 7` left all thirteen tests in this crate green,
+        // and the Makefile cited THIS test by name as the reason the crate was
+        // added to `make test`. A second, independent spelling of each number is
+        // what makes the sum mean something.
+        assert_eq!(NP_NET_LEN_PREFIX, 4);
+        assert_eq!(NP_AUTH_HDR_SIGNED, 152);
+        assert_eq!(NP_NET_MAX, 2096);
+        assert_eq!(NP_FRAME_MAX, 2252);
+        // And the composition still holds, so a buffer sized from `NP_FRAME_MAX`
+        // cannot truncate a maximal frame.
         assert_eq!(NP_FRAME_MAX, NP_NET_LEN_PREFIX + NP_AUTH_HDR_SIGNED + NP_NET_MAX);
     }
 
@@ -784,8 +825,17 @@ mod tests {
         // accident: `authenticate` refuses anything that is not the signed
         // magic, and this pins that the retired value is genuinely a different
         // 8 bytes rather than something a stale peer's frame could satisfy.
-        const RETIRED_MAC_MAGIC: u64 = 0x4155_5448_4E50_3032; // "AUTHNP02"
-        assert_ne!(RETIRED_MAC_MAGIC, NP_AUTH_MAGIC_SIGNED);
+        // COMPUTED FROM THE ASCII, NOT TRANSCRIBED. Both values used to be
+        // hand-written hex, so this compared two literals and a digit
+        // transposition in either still passed - while the three other
+        // spellings of the magic (both Python peers, drive-2vm.py) all derive
+        // it from the bytes. A transposition would keep the two Rust ends
+        // agreeing, so a two-VM cluster still mounts and `make test` stays
+        // green, while every foreign observer is refused with AUTH FAILED and
+        // reads as a key problem. Same class as the small-order-key table this
+        // arc replaced with `[8]P == identity`.
+        assert_eq!(NP_AUTH_MAGIC_SIGNED, u64::from_be_bytes(*b"AUTHNP03"));
+        assert_ne!(u64::from_be_bytes(*b"AUTHNP02"), NP_AUTH_MAGIC_SIGNED);
     }
 
     #[test]

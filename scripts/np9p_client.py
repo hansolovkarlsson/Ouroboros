@@ -188,6 +188,13 @@ def signed_frame(np_msg, seed, user=None):
     name = user.ljust(NP_NAME_LEN, b"\0")
     public = ed.public_key(seed)
     sig = ed.sign(seed, SIG_DOMAIN_REQUEST + nonce + name + np_msg)
+    # ASSERTED, NOT ASSUMED. `NP_PUBKEY_LEN` and `NP_SIG_LEN` are two of the
+    # names check-wire-constants.py compares against ninep-abi, and until these
+    # lines existed this function built its header by concatenation and consulted
+    # neither - so a reported disagreement could be "fixed" by editing a constant
+    # no code reads, turning the check green over an unchanged frame.
+    assert len(public) == NP_PUBKEY_LEN, "public key is not NP_PUBKEY_LEN bytes"
+    assert len(sig) == NP_SIG_LEN, "signature is not NP_SIG_LEN bytes"
     body = struct.pack("<Q", NP_AUTH_MAGIC_SIGNED) + nonce + name + public + sig + np_msg
     return struct.pack("<I", len(body)) + body, nonce
 

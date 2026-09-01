@@ -515,19 +515,29 @@ serve-bin:
 # itself: the default shell binary and the config file (loader.rs's
 # CONFIG_PATH) naming which program to load - edit INIT.CFG and rebuild
 # just that program to swap it out, no kernel rebuild required.
+# STAGED FROM SCRATCH, NOT ACCRETED, and that is the whole point of the `rm -rf`.
+#
+# This recipe only ever ADDS files, so deleting a staging line does not delete
+# what it already wrote - only `make clean` did. The shared cluster key was
+# staged here until the flag day, so any tree built before it still held
+# \CLUSTER.KEY and `make image` kept baking the dev secret into esp.img,
+# esp.hdd and both two-node images, while the flag day's headline check is
+# "an image with no CLUSTER.KEY anywhere on it".
+#
+# The first fix was a two-entry blocklist (CLUSTER.KEY and a stale `User/` from
+# the /User -> /Users rename). It was ALREADY INCOMPLETE when it was written:
+# build/esp/bin/PONG was staged by no line in this file - a survivor of an older
+# path - and because $(EXT2_PART)/$(EXFAT_PART) copy $(ESP_DIR)/bin/* wholesale,
+# it had propagated into the payload images too. Naming the survivors you happen
+# to know is not a fix for "the directory remembers everything"; regenerating it
+# is. Every path below is written by this recipe, and the run targets that mount
+# $(ESP_DIR) with QEMU's `fat:rw:` can add files of their own, which is a second
+# way in that a blocklist would never have covered.
+#
+# ESP_DIR is a literal (build/esp), never empty or user-supplied.
 esp: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin accountd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin id-bin passwd-bin useradd-bin groupadd-bin usermod-bin clusterkey-bin chello-bin cdemo-bin cfile-bin cpico-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin edtest-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin tail-bin nl-bin rev-bin uniq-bin sort-bin
+	rm -rf $(ESP_DIR)
 	mkdir -p $(ESP_DIR)/EFI/BOOT $(ESP_DIR)/EFI/ORBS $(ESP_DIR)/bin $(ESP_DIR)/man $(ESP_DIR)/etc
-	@# THIS TARGET ONLY EVER ADDS FILES, so deleting a staging line does not
-	@# delete what it already wrote: only `make clean` does. The shared cluster
-	@# key was staged here until the flag day, so any tree built before it still
-	@# holds \CLUSTER.KEY, and `make image` would keep baking the dev secret
-	@# into esp.img, esp.hdd and both two-node images - while the flag day's
-	@# headline check is "an image with no CLUSTER.KEY anywhere on it".
-	@#
-	@# Not hypothetical: this tree still carried build/esp/User/ from the
-	@# /User -> /Users rename weeks earlier, which is the same mechanism with a
-	@# harmless payload. Retired staging paths get swept here.
-	rm -rf $(ESP_DIR)/CLUSTER.KEY $(ESP_DIR)/User
 	cp $(KERNEL) $(ESP_DIR)/EFI/BOOT/BOOTAA64.EFI
 	cp $(SHELL_BIN) $(ESP_DIR)/EFI/ORBS/SH.BIN
 	cp $(HELLO_BIN) $(ESP_DIR)/EFI/ORBS/HELLO.BIN

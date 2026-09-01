@@ -75,7 +75,13 @@ CHECKED = [
 # truthiness test. Raise a baseline when a peer learns a new constant.
 PEER_BASELINE = {
     "np9p_client.py": 6,
-    "np9p_server.py": 4,
+    # Was 4, which BAKED THE GAP IN AS CORRECT: the server spelled the
+    # public-key length with a private name and the nonce as a bare literal, so
+    # the two fields deciding which guests it serves were skipped - and the
+    # reduced count was recorded as expected. Both now use the shared names; the
+    # floor rises with them, or the rename could be undone without this
+    # noticing.
+    "np9p_server.py": 6,
 }
 
 
