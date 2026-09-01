@@ -47,6 +47,13 @@ NP_AUTH_MAGIC = int.from_bytes(b"AUTHNP02", "big")  # ninep-abi NP_AUTH_MAGIC
 NP_AUTH_MAGIC_SIGNED = int.from_bytes(b"AUTHNP03", "big")  # the per-machine-keypair format
 NP_PUBKEY_LEN = 32
 NP_SIG_LEN = 64
+# Signature DOMAIN TAGS - must match ninep-abi's SIG_DOMAIN_* byte for byte.
+# They keep a signature made in one role from verifying in the other: without
+# them a captured reply signature is structurally a valid request signature from
+# the same key.
+SIG_DOMAIN_REQUEST = b"ouroboros-cluster-request-v1\0"
+SIG_DOMAIN_REPLY = b"ouroboros-cluster-reply-v1\0"
+
 NP_NONCE_LEN = 16
 NP_NAME_LEN = 32  # requesting user's name, NUL-padded - ninep-abi NP_NAME_LEN
 DEFAULT_KEY = b"ouroboros-dev-cluster-key-v1"  # Makefile CLUSTER_KEY default
@@ -124,7 +131,7 @@ def signed_frame(np_msg, seed, user=None):
     nonce = os.urandom(NP_NONCE_LEN)
     name = user.ljust(NP_NAME_LEN, b"\0")
     public = ed.public_key(seed)
-    sig = ed.sign(seed, nonce + name + np_msg)
+    sig = ed.sign(seed, SIG_DOMAIN_REQUEST + nonce + name + np_msg)
     body = struct.pack("<Q", NP_AUTH_MAGIC_SIGNED) + nonce + name + public + sig + np_msg
     return struct.pack("<I", len(body)) + body, nonce
 
@@ -168,7 +175,7 @@ def recv_reply(sock, key, nonce, expect_signed=False, peer_key=None):
         if len(body) < NP_SIG_LEN + 8:
             return FS_ERR_AUTH, b""
         sig, np = body[:NP_SIG_LEN], body[NP_SIG_LEN:]
-        if peer_key is None or not load_ed_reference().verify(peer_key, nonce + np, sig):
+        if peer_key is None or not load_ed_reference().verify(peer_key, SIG_DOMAIN_REPLY + nonce + np, sig):
             return FS_ERR_AUTH, b""
         (status,) = struct.unpack("<Q", np[:8])
         return status, np[8:]

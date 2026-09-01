@@ -167,7 +167,7 @@ if the curve arithmetic does not come together, nothing has been built on it.
 | 6c ✅ | **On-device** key generation (`/bin/clusterkey`) | refuses without real entropy — verified by booting a guest with the entropy device *removed*; the existing identity survives the refusal | also refuses to replace an identity without `-f`, and reports unreadable `authorized` lines, which a lookup cannot |
 | 7 ✅ | Exporter **accepts** signed frames alongside old ones | **the Python peer signs and the guest verifies** — the wire proven by a foreign implementation before a guest client exists; MAC'd frames unregressed; 25 signed ops with **no supervisor restart**, which is the only signal a userland panic gives | unauthorized key, tampered message, tampered signature, a *different authorized* key swapped in, and a truncated frame — each refused |
 | 8 ✅ | Client **sends** signed frames | two-node matrix both directions, **and the captured link carries only `AUTHNP03`** — a run that succeeds proves the cluster works, not that it did so the way you believe | a machine with no `/etc/cluster/id` falls back to the MAC'd format and still serves, verified by removing the file from an image |
-| 9 ✅ | Reply signing (mutual auth over the new primitive) | Python verifies guest replies **and signs its own**, so both halves of the exchange are checked by an independent implementation; a client verifying against a *different authorized peer's* key is refused | the shared key now authenticates nothing — step 10 deletes it |
+| 9 ✅ | Reply signing, **domain-separated** | Python verifies guest replies **and signs its own**, so both halves of the exchange are checked by an independent implementation; a client verifying against a *different authorized peer's* key is refused | the shared key now authenticates nothing — step 10 deletes it |
 | 10 | **Flag day**: drop the shared key everywhere | old-format peer refused; keyless node fail-closed; **revocation works** — delete a line, the peer stops being served | |
 | 11 | Docs, postmortem, release | | |
 
@@ -286,6 +286,16 @@ transport bug. It was a stopwatch. The server warms its signer before accepting
 connections now. Worth recording because the diagnosis took several wrong turns:
 the symptom pointed at the wire, the packet capture was nearly empty, and only
 timing the reference located it.
+
+**Signatures are domain-separated**, added after review pointed out that a
+request and a reply were the same shape — one key, `nonce ‖ rest`, no context —
+so a signature made in one role was structurally valid in the other. An attacker
+who observed a signed reply could reframe it as a *request* from that machine.
+It was stopped only incidentally, by the reframed `name` field having to match a
+local account. The signed input now carries a distinct constant per role; nothing
+on the wire changes. Verified three ways: a correctly tagged request is served,
+an untagged one (the shape a reply signature has) is refused, and a
+reply-domain signature offered as a request is refused.
 
 ## Risks, named in advance
 
