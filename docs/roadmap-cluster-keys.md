@@ -169,7 +169,7 @@ if the curve arithmetic does not come together, nothing has been built on it.
 | 8 ✅ | Client **sends** signed frames | two-node matrix both directions, **and the captured link carries only `AUTHNP03`** — a run that succeeds proves the cluster works, not that it did so the way you believe | a machine with no `/etc/cluster/id` falls back to the MAC'd format and still serves, verified by removing the file from an image |
 | 9 ✅ | Reply signing, **domain-separated** | Python verifies guest replies **and signs its own**, so both halves of the exchange are checked by an independent implementation; a client verifying against a *different authorized peer's* key is refused | the shared key now authenticates nothing — step 10 deletes it |
 | 10a ✅ | **Decouple the gate** from the shared key: each format checks its own precondition, both directions reported separately | a node with a keypair and **no shared key at all** serves a full cluster (mount, cat, cpu, per-user permissions); a keyed node still accepts both formats; all four key/identity combinations behave as reported | the shared key is proven **not load-bearing**, before anything is deleted |
-| 10b | **Flag day**: delete the shared key everywhere (staging, MAC paths, `hmac.rs`, both Python peers) | old-format peer refused; **revocation works** — delete a line, the peer stops being served | |
+| 10b ✅ | **Flag day**: the shared key deleted everywhere (netd's MAC paths, `hmac.rs`, the ninep-abi constants, the Makefile staging, both Python peers) | a retired-format frame is **refused** (`--legacy-mac`, kept so the refusal is demonstrable rather than assumed); an unauthorized key is refused; **revocation works** — comment out a peer's line and the same signed request from the same key stops being served; the two-node cluster and the host-peer rigs run on signatures alone | the shared secret no longer exists |
 | 11 | Docs, postmortem, release | | |
 
 **Step 10 was split after asking what could go wrong.** `Auth::enabled()` was
@@ -184,6 +184,12 @@ nothing, so its acceptance test — a cluster running with **no shared key
 anywhere** — is what proves the key is not load-bearing. 10b is then subtraction
 whose correctness 10a already established, rather than a deletion and a
 behaviour change failing together with no way to tell which broke.
+
+**10b was subtraction, as intended.** With 10a's four-configuration matrix
+already green, the flag day removed code rather than changing behaviour — and
+the one thing it had to add was a way to *send* a retired frame
+(`np9p_client.py --legacy-mac`), because a negative control that cannot produce
+the old format cannot show the new code refuses it.
 
 10a also surfaced a hole that the obvious version of the refactor would have
 shipped: **HMAC with a zero-length key is a valid HMAC.** Removing the

@@ -75,8 +75,56 @@ CHECKED = [
 # truthiness test. Raise a baseline when a peer learns a new constant.
 PEER_BASELINE = {
     "np9p_client.py": 6,
-    "np9p_server.py": 4,
+    # Was 4, which BAKED THE GAP IN AS CORRECT: the server spelled the
+    # public-key length with a private name and the nonce as a bare literal, so
+    # the two fields deciding which guests it serves were skipped - and the
+    # reduced count was recorded as expected. Both now use the shared names; the
+    # floor rises with them, or the rename could be undone without this
+    # noticing.
+    "np9p_server.py": 6,
 }
+
+
+def check_dev_peer_labels(problems):
+    """`np9p_client.py`'s short-name map must match `mkclusterkeys.py`'s dev peers.
+
+    Same shape of hazard as the constants above, in a place a reader would not
+    look: `mkclusterkeys.py` derives each dev node's key from a seed LABEL
+    ("ouroboros-dev-node-b"), while `--peer=` takes the short NAME ("node-b"),
+    so the client carries a translation. If the two drift, `--peer=node-b`
+    derives a key belonging to no machine, and the reply-verification control
+    built on it PASSES FOR THE WRONG REASON - it reports "not verified" against
+    a key nobody holds, which an exporter accepting any authorized signature
+    would also fail. That is a check that cannot fail, and it is what this one
+    exists to stop coming back.
+
+    Parsed textually rather than imported: `mkclusterkeys.py` executes the
+    Ed25519 reference at module level (an RFC 8032 self-check, about a second),
+    which is the cost the client's own lazy loading was written to avoid.
+    """
+    mk = open(os.path.join(HERE, "mkclusterkeys.py")).read()
+    cl = open(os.path.join(HERE, "np9p_client.py")).read()
+
+    block = re.search(r"DEV_PEERS = \[(.*?)\]", mk, re.S)
+    if not block:
+        problems.append("mkclusterkeys.py: DEV_PEERS not found (renamed?)")
+        return
+    want = {n: l for n, _ip, l in re.findall(
+        r'\(\s*"([^"]+)"\s*,\s*"([^"]+)"\s*,\s*"([^"]+)"\s*\)', block.group(1))}
+
+    block = re.search(r"DEV_PEER_LABELS = \{(.*?)\}", cl, re.S)
+    if not block:
+        problems.append("np9p_client.py: DEV_PEER_LABELS not found (renamed?)")
+        return
+    got = dict(re.findall(r'"([^"]+)"\s*:\s*"([^"]+)"', block.group(1)))
+
+    if not want:
+        problems.append("mkclusterkeys.py: DEV_PEERS parsed empty - a check over nothing")
+        return
+    if want != got:
+        problems.append(
+            f"dev peer labels disagree: mkclusterkeys.py has {want}, "
+            f"np9p_client.py has {got}")
 
 
 def main():
@@ -126,12 +174,15 @@ def main():
     if compared < len(CHECKED):
         problems.append(f"only {compared} constant(s) compared, expected at least {len(CHECKED)}")
 
+    check_dev_peer_labels(problems)
+
     if problems:
         print("check-wire-constants: DISAGREEMENT")
         for p in problems:
             print(f"  - {p}")
         return 1
-    print(f"check-wire-constants: {compared} constant(s) agree across Rust and both Python peers")
+    print(f"check-wire-constants: {compared} constant(s) agree across Rust and both Python peers, "
+          "and the dev peer labels agree")
     return 0
 
 

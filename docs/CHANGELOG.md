@@ -7,6 +7,71 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/`; 
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## Per-machine keypairs: the shared cluster key is retired (2026-08-31)
+
+Every machine now holds its own **Ed25519 keypair** and authorizes peers **by
+public key** — the `known_hosts`/`authorized_keys` model. The shared
+`\CLUSTER.KEY` (v0.10.0–v0.15.0) is deleted, along with `netd`'s MAC paths,
+`hmac.rs`, five `ninep-abi` constants, the Makefile staging, and both Python
+peers' MAC code.
+
+**Why.** With one symmetric secret, verification capability *equals* signing
+capability: a peer that can check A's requests can forge them. Sound at two
+nodes; false at three, with no revocation short of re-keying everyone.
+Asymmetric keys separate those, so revoking a member is deleting a line.
+
+**The crypto**, hand-rolled in a new pure `ed25519` crate (no crate available
+under this project's PIE relocation contract): SHA-512, field arithmetic mod
+2²⁵⁵−19 in five radix-2⁵¹ limbs, extended-coordinate curve points with a
+unified addition formula and a branchless scalar multiply, scalar arithmetic mod
+L, sign and verify. Deterministic signing was the reason for choosing Ed25519 —
+hardware entropy is absent on Parallels and the Pi, and a repeated ECDSA nonce
+leaks the key. **The gate**: it reproduces RFC 8032's *published signatures*
+byte-for-byte, which only a deterministic scheme allows you to ask. Measured on
+the target (`/bin/edtest`): peak stack **3,392 of 32,768 bytes**, ~504 µs to
+sign with a cached key under QEMU-TCG — which settled two deferred decisions in
+favour of the simpler code (the bit-by-bit scalar reduction stays; no fixed-base
+table).
+
+**The wire.** The auth header is
+`[magic "AUTHNP03"][nonce:16][name:32][pubkey:32][sig:64]`, signed over
+`domain-tag ‖ nonce ‖ name ‖ message`. Replies are signed too, against the
+request's nonce. The two directions ask **different questions**, which is why an
+`authorized` line carries an address as well as a key: an exporter is *offered*
+a key and need only decide whether it is allowed (look up by key), while a
+client is offered nothing and must know in advance whose signature will do (look
+up by address) — accepting any authorized signature there would authenticate
+"some cluster member" rather than "the machine I asked".
+
+**Domain separation.** Request and reply signatures carry distinct NUL-terminated
+tags. Without them a captured reply signature is structurally a valid request
+signature from the same key.
+
+**Small-order public keys are refused** in `verify`, computed as
+`[8]A == identity` rather than compared against a table. Against such a key the
+cofactorless equation is satisfiable with no secret at all, so an `authorized`
+line carrying one is a universal forgery rather than a weak credential.
+
+**Fail-closed, both directions, and it says which half is missing.** No
+`/etc/cluster/id` ⇒ the export is closed *and* no remote request can be made;
+no parseable peer in `/etc/cluster/authorized` ⇒ the export serves nobody.
+
+**Tools.** `clusterkey` shows this machine's public key, generates a keypair
+(**refusing without real entropy** — a guessable machine key is worse than none
+because it looks like security), lists authorized peers, and prints the line
+another machine should hold. `peers` flags a line that is well-formed but
+unusable, by line number.
+
+**Verified**: a two-node cluster with no shared key anywhere doing remote mount,
+`cat`, `cpu` and per-user permission enforcement (6 signed frames each way, 0
+MAC'd, 0 fault lines); a retired-format frame refused; an unauthorized key
+refused; a reply signed by the wrong machine refused *by the client*; and
+revocation — comment a peer's line out and the same key stops being served.
+
+See [`cluster-keys-postmortem.md`](cluster-keys-postmortem.md) and
+[`roadmap-cluster-keys.md`](roadmap-cluster-keys.md). **Still per-machine, not
+per-user**: an authorized machine can claim any of its own users' names.
+
 ## Per-user cluster identity: a remote request now carries *who* (2026-08-31)
 
 The 9P export authenticated a **machine** — a shared cluster key — and then

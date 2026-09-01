@@ -7,6 +7,75 @@ for the forward plan see [`roadmap.md`](roadmap.md).
 
 ---
 
+## 2026-08-31 (evening) — the shared cluster key is gone
+
+*(The third and largest thread of one long day. Fourteen merged PRs, plus the
+flag day open as #60.)*
+
+Hans's answer to "what next" was per-machine keypairs, with an instruction that
+shaped the whole arc: lay out steps that are each verifiable, because the last
+time we did too much before reviewing, the review found too many issues to fix
+cleanly. No time pressure — the only pressure is quality.
+
+So the plan doc came first, with no code: eleven steps, each with a stated check
+and a negative control, where steps 1–4 touch nothing that exists and step 4 is
+a go/no-go gate. Then a hand-rolled Ed25519 built in that order — SHA-512, field
+arithmetic mod 2²⁵⁵−19, curve points, scalar arithmetic, sign and verify — with
+every layer checked against a Python reference that is itself checked against
+RFC 8032. The gate was "does this reproduce the RFC's *published signatures*
+byte-for-byte", which is a stronger question than "does it verify what it
+signs", and is only askable because Ed25519 is deterministic. It passed.
+
+Then the on-disk format (`/etc/cluster/{id,id.pub,authorized}`), a generator
+that **refuses without real entropy** rather than producing a guessable machine
+key, an exporter that verifies signatures, a client that makes them, and signed
+replies — each proven against a Python peer holding the other half, because a
+format both ends of which are mine proves only that I am consistent.
+
+The day's real subject turned out not to be cryptography. It was **checks that
+could not fail**. The relocation check used since step 1 had been reporting `0`
+because `llvm-readelf` prints nothing at all for these binaries — five steps of
+worthless evidence, in the one arc where everything else was mutation-tested.
+Two test tables spliced into the wrong place and iterated empty lists. A bound
+test named for `u64` overflow did 256 subtractions where ~4,096 are needed.
+Seven mutations stacked silently because I never restored the file between runs.
+
+And the one that mattered: the audit added a guard refusing small-order public
+keys — a real universal-forgery credential — as a hand-written table of eight
+hex values. Three were wrong. It accepted three genuinely small-order keys and
+blocked one ordinary valid point. Its test exercised the two that happened to be
+right. The fix is not a better table: `[8]P == identity` is the definition,
+costs three doublings, and cannot be transcribed wrongly. Then the *replacement*
+test turned out to be vacuous too — it passed with the guard removed — and the
+version that survives mutation builds two different forgery families, because
+the obvious one is accidentally caught by a guard on the wrong point.
+
+Step 10 was one line in the plan: "flag day, drop the shared key." Asking what
+could go wrong split it in two, and the split is what found a hole. `enabled()`
+was `key_len > 0` and gated the export, inbound auth *and* outbound signing —
+so deleting the key file without moving it takes the cluster dark, which I
+confirmed on two guests before writing anything. 10a moved the gate and deleted
+nothing; its acceptance test is a two-node cluster running with no shared key
+anywhere, which is only possible while the deletion has not happened. It also
+caught what the obvious refactor would have shipped: **HMAC with a zero-length
+key is a valid HMAC**, so removing the gate would not make an unconfigured
+export refuse MAC'd frames — it would make it accept the ones computed under the
+empty key. Proven by removing that one guard and reading a guest's disk from the
+host holding no secret at all.
+
+10b was then subtraction: −412 lines, `hmac.rs` deleted entirely. What it had to
+*add* was a way to send a retired frame, so that the guest refusing one is
+demonstrable rather than assumed.
+
+The counter-practice worth keeping: after a two-node run, read the **pcap**, not
+the transcript. It had been captured for exactly that question since the rig was
+built and nothing had ever read it — which is how the shell came to print
+"remote-mounted (cluster-key auth)" on a run whose wire carried five signed
+frames and zero MAC'd ones. It now reports the format each node actually used,
+beside the fault count.
+
+Full write-up: [`cluster-keys-postmortem.md`](cluster-keys-postmortem.md).
+
 ## 2026-08-31 — a remote request now says who is asking
 
 *(Later the same day: v0.15.0 cut, and a design question answered on paper.)*

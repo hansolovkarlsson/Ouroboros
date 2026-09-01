@@ -134,11 +134,6 @@ BUILD_DIR    := build
 ESP_DIR      := $(BUILD_DIR)/esp
 ESP_IMG      := $(ESP_DIR).img
 ESP_HDD      := $(ESP_DIR).hdd
-# The shared DEV cluster secret staged into the ESP as \CLUSTER.KEY (netd reads
-# it at boot to authenticate the 9P export - the export-hardening phase). NOT a
-# real secret; overridable on the command line for a mismatched-key test, e.g.
-# `make run-image-2vm-b CLUSTER_KEY=wrong-key` to prove the export refuses.
-CLUSTER_KEY  ?= ouroboros-dev-cluster-key-v1
 # WHICH MACHINE an image is built as. Per-machine keypairs mean an image carries
 # an identity, so the two-node rig cannot boot one image twice any more: node A's
 # disk and node B's disk hold different private keys and the same `authorized`
@@ -520,7 +515,44 @@ serve-bin:
 # itself: the default shell binary and the config file (loader.rs's
 # CONFIG_PATH) naming which program to load - edit INIT.CFG and rebuild
 # just that program to swap it out, no kernel rebuild required.
+# STAGED FROM SCRATCH, NOT ACCRETED, and that is the whole point of the `rm -rf`.
+#
+# This recipe only ever ADDS files, so deleting a staging line does not delete
+# what it already wrote - only `make clean` did. The shared cluster key was
+# staged here until the flag day, so any tree built before it still held
+# \CLUSTER.KEY and `make image` kept baking the dev secret into esp.img,
+# esp.hdd and both two-node images, while the flag day's headline check is
+# "an image with no CLUSTER.KEY anywhere on it".
+#
+# The first fix was a two-entry blocklist (CLUSTER.KEY and a stale `User/` from
+# the /User -> /Users rename). It was ALREADY INCOMPLETE when it was written:
+# build/esp/bin/PONG was staged by no line in this file - a survivor of an older
+# path - and because $(EXT2_PART)/$(EXFAT_PART) copy $(ESP_DIR)/bin/* wholesale,
+# it had propagated into the payload images too. Naming the survivors you happen
+# to know is not a fix for "the directory remembers everything"; regenerating it
+# is. Every path below is written by this recipe, and the run targets that mount
+# $(ESP_DIR) with QEMU's `fat:rw:` can add files of their own, which is a second
+# way in that a blocklist would never have covered.
+#
+# THE DELETE IS GUARDED, because `ESP_DIR` is not a literal. It derives from
+# `BUILD_DIR`, both are ordinary simply-expanded variables, and a command-line
+# assignment overrides them - the idiom this Makefile documents for
+# `CLUSTER_NODE`. An earlier version of this comment claimed the opposite ("a
+# literal, never user-supplied") while `make esp ESP_DIR=$HOME` would have
+# expanded the line below to `rm -rf $HOME`. A claim in a comment is not a
+# check, so it is a check now.
+#
+# SCOPE, stated so it is not mistaken for more: the guard and the `rm -rf` are
+# quoted, which is what makes the destructive line safe. The `mkdir`/`cp` lines
+# below are not, so a BUILD_DIR containing whitespace fails the build noisily
+# (and can leave a stray directory) rather than deleting anything. That is the
+# right trade at 70-odd paths; quoting them all is churn without a hazard.
 esp: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin accountd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin id-bin passwd-bin useradd-bin groupadd-bin usermod-bin clusterkey-bin chello-bin cdemo-bin cfile-bin cpico-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin edtest-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin tail-bin nl-bin rev-bin uniq-bin sort-bin
+	@test ! -e "$(ESP_DIR)" || test -f "$(ESP_DIR)/EFI/ORBS/INIT.CFG" || { \
+		echo "esp: $(ESP_DIR) is not an Ouroboros ESP tree - refusing to delete it"; \
+		echo "esp: (remove it by hand if that is really where you want the ESP staged)"; \
+		exit 1; }
+	rm -rf "$(ESP_DIR)"
 	mkdir -p $(ESP_DIR)/EFI/BOOT $(ESP_DIR)/EFI/ORBS $(ESP_DIR)/bin $(ESP_DIR)/man $(ESP_DIR)/etc
 	cp $(KERNEL) $(ESP_DIR)/EFI/BOOT/BOOTAA64.EFI
 	cp $(SHELL_BIN) $(ESP_DIR)/EFI/ORBS/SH.BIN
@@ -534,14 +566,6 @@ esp: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin acco
 	cp $(ACCTD_BIN) $(ESP_DIR)/EFI/ORBS/ACCOUNTD.BIN
 	cp $(ARGS_BIN) $(ESP_DIR)/EFI/ORBS/ARGS.BIN
 	printf '\\EFI\\ORBS\\SH.BIN' > $(ESP_DIR)/EFI/ORBS/INIT.CFG
-	# The cluster secret netd reads at boot to authenticate the 9P export
-	# (the export-hardening phase). A fixed DEV key, shared by every machine
-	# built from this tree, so two-VM runs (2vm-a/b, both derived from esp.img)
-	# authenticate each other with no per-machine config. NOT a real secret -
-	# it lives in the repo; a deployment would use its own. Fail-closed: with no
-	# CLUSTER.KEY, netd refuses all remote clients. The host peers
-	# (scripts/np9p_*.py) read this same value. Kept in sync with CLUSTER_KEY.
-	printf '%s' '$(CLUSTER_KEY)' > $(ESP_DIR)/CLUSTER.KEY
 	# /bin: programs the shell finds via PATH by bare name (Stage 2 of the
 	# standalone-binaries arc). Named uppercase, no extension (8.3-legal);
 	# fsd's case-insensitive lookup matches a lowercase-typed command. For
@@ -933,18 +957,6 @@ $(EXT2_PART): esp
 	python3 scripts/mkpasswd.py --shadow > $(BUILD_DIR)/ext2-src/etc/shadow
 	chmod 600 $(BUILD_DIR)/ext2-src/etc/shadow
 	python3 scripts/mkgroup.py > $(BUILD_DIR)/ext2-src/etc/group
-	# The shared cluster secret. Without it netd's export is fail-closed, so the
-	# ext2 two-node rig (the only one that can show PERMISSIONS crossing the
-	# cluster - FAT32 records no mode at all) could not come up.
-	#
-	# chmod 600 for the same reason /etc/shadow above gets it, and it matters
-	# MORE here: this is the one image where fsd actually enforces modes, and
-	# the key is what the whole cluster mechanism rests on - anyone who can read
-	# it can present any user name from anywhere. netd runs as root, so 0600
-	# costs nothing. Shipping the permission demo and the secret that makes it
-	# meaningful on one disk with opposite protections would be a self-own.
-	printf '%s' '$(CLUSTER_KEY)' > $(BUILD_DIR)/ext2-src/CLUSTER.KEY
-	chmod 600 $(BUILD_DIR)/ext2-src/CLUSTER.KEY
 	# /etc/cluster: the per-machine identity. ext2 is the one image where fsd
 	# ENFORCES modes, so it is also the only one where `id` being 0600 means
 	# anything - and mke2fs -d carries the host's mode onto the guest.
@@ -1264,7 +1276,13 @@ test-parallels:
 # Native target, not the workspace default (aarch64-unknown-uefi), which cannot
 # run a test binary.
 HOST_TARGET := $(shell rustc -vV | sed -n 's/^host: //p')
-PURE_CRATES := accounts regex ed25519 clusterkeys
+PURE_CRATES := accounts regex ed25519 clusterkeys ninep-abi
+# `ninep-abi` joined the list at the flag day. It had always qualified - pure
+# consts plus `resolve_ns`, no I/O and no syscalls - and was simply never listed,
+# so its thirteen assertions about the WIRE FORMAT, including the one pinning
+# `NP_FRAME_MAX`, were compiled by nothing at all. That is precisely the failure
+# this variable's comment above describes, sitting on the crate that defines the
+# format both Python peers transcribe from.
 
 # The PIE relocation contract, checked mechanically over every userland binary:
 # ABS64 is unloadable by this project's loader. See scripts/check-relocs.sh for

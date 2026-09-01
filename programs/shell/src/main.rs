@@ -3378,16 +3378,19 @@ fn cmd_mount_proc(line: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize, out: &mut Ou
 /// disk over TCP - the pivot to distributed. The binding is per-task and
 /// inherited by spawned commands, exactly like every other namespace change.
 ///
-/// **Trusted-LAN, no authentication** (the roadmap's stated Phase 1 posture):
-/// any peer that connects to an export is served; who-may-mount-what is a later
-/// hardening phase. `host` is a dotted-quad IPv4 (name resolution is a later
-/// nicety); `port` defaults to 564 ([`ninep_abi::NP_NET_PORT`]) if omitted.
+/// **Authenticated in both directions.** `netd` signs the request with this
+/// machine's private key and verifies the exporter's signed reply against the
+/// key it holds for the address dialled, so BOTH machines need an
+/// `/etc/cluster/` identity and each must list the other in `authorized`. A
+/// missing local line for the dialled host fails here, before a packet leaves.
+/// `host` is a dotted-quad IPv4 (name resolution is a later nicety); `port`
+/// defaults to 564 ([`ninep_abi::NP_NET_PORT`]) if omitted.
 fn cmd_mount_remote(line: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize, out: &mut Output) {
     let mut words = line.split_whitespace();
     words.next(); // "mount"
     words.next(); // "-r"
     let (Some(hostport), Some(path_arg)) = (words.next(), words.next()) else {
-        out.put_line("mount: usage: mount -r <host:port> <path>  (needs the shared cluster key)");
+        out.put_line("mount: usage: mount -r <host:port> <path>  (both machines need /etc/cluster keys)");
         return;
     };
     // Split host[:port] on the ':' byte; default port NP_NET_PORT (564). Byte
@@ -3499,12 +3502,14 @@ fn parse_ipv4(s: &str) -> Option<[u8; 4]> {
     }
 }
 
-/// `cpu <host:port> <command...>` - remote execution (cluster Phase 4a, the Plan
-/// 9 `cpu` model): run `<command>` on the remote machine and print its output
-/// here. In 4a the command runs on the remote's CPU using the *remote's*
-/// resources (its `/bin`, its disk); a later step imports this machine's
-/// namespace so it reads *our* files. Trusted-LAN, no auth. Output is bounded to
-/// one message for now (small commands). E.g. `cpu 10.0.2.10:564 ls /`.
+/// `cpu <host:port> <command...>` - remote execution (the Plan 9 `cpu` model):
+/// run `<command>` on the remote machine and print its output here. It runs on
+/// the remote's CPU using the *remote's* resources (its `/bin`, its disk), with
+/// this machine's namespace bound at `/host` so it can read *our* files too.
+/// Authenticated: the request is signed with this machine's key and the remote
+/// resolves the calling user through its own `/etc/passwd`. Output past the
+/// one-message cap is pulled in chunks (`NETOP_RUN_MORE`), bounded by `netd`'s
+/// run buffer. E.g. `cpu 10.0.2.10:564 ls /`.
 fn cmd_cpu(line: &str, out: &mut Output) {
     let mut words = line.split_whitespace();
     words.next(); // "cpu"

@@ -20,6 +20,77 @@ a **DONE** marker or ~~strikethrough~~ is finished.
 
 ---
 
+## Per-machine cluster keypairs ✅ DONE (2026-08-31)
+
+The design doc and its step log stay in
+[`roadmap-cluster-keys.md`](roadmap-cluster-keys.md), which is where the
+per-step verification criteria and the two 10a/10b halves are recorded. This is
+the plan-shaped summary of how it was sequenced and what the sequencing bought.
+
+**Shape: eleven steps, each with a stated check AND a negative control, written
+down before any code.** The instruction that produced it was explicit — no time
+pressure, only quality, and no repeat of the day one branch grew too big to
+review ([`review-and-split-postmortem.md`](review-and-split-postmortem.md)).
+
+**Steps 1–5 build `ed25519` as a pure crate with no callers**, so the hardest
+part of the arc cost a test failure rather than a boot loop when wrong:
+
+1. SHA-512 · 2. field arithmetic mod 2²⁵⁵−19 · 3. curve points + scalar
+multiplication · **4. sign/verify — the GO/NO-GO GATE** (reproduce RFC 8032's
+*published signatures* byte-for-byte, which only a deterministic scheme lets you
+ask) · 5. on-target proof via `/bin/edtest`, which produced the two numbers the
+design had been deferring to it: **peak stack 3,392 of 32,768 bytes** (closing
+the arc's named headline risk) and ~504 µs to sign under QEMU-TCG.
+
+Step 5 is also where two deferred decisions were settled **on measurement, in
+favour of the simpler code**: the bit-by-bit scalar reduction stayed rather than
+ref10's hand-derived constant chain, and no fixed-base table was added.
+
+**Steps 6–9 wire it up, one direction at a time**, each proven against a Python
+peer holding the other half — because a format both ends of which are mine
+proves only that I am consistent:
+
+6. the on-disk format (`clusterkeys`), the staged dev identities, and
+   `clusterkey` (which **refuses to generate without real entropy**) ·
+7. the exporter VERIFIES signatures · 8. the guest SIGNS its own requests ·
+9. replies are signed too, domain-separated.
+
+Note the ordering: **verify before sign.** An exporter that can check a
+signature nobody yet makes is harmless; the reverse would put unverifiable
+frames on the wire.
+
+**Step 10 was one line in the plan and split into two on contact**, which is
+the sequencing lesson worth keeping:
+
+- **10a — decouple the gate, delete nothing.** `Auth::enabled()` was
+  `key_len > 0` and gated the export, inbound auth *and* outbound signing, so
+  deleting the key file without moving it takes the cluster dark (confirmed on
+  two guests first). Its acceptance test — a two-node cluster running with **no
+  shared key anywhere** — is only possible *while the deletion has not
+  happened*, and it is what proves the key is not load-bearing before anything
+  is removed. 10a also caught the hole the obvious refactor would have shipped:
+  **HMAC with a zero-length key is a valid HMAC**, so removing the gate makes an
+  unconfigured export *accept* empty-key frames rather than refuse them.
+- **10b — the flag day.** −412 lines; `hmac.rs` deleted. The only thing it had
+  to *add* was a way to SEND a retired frame, so the refusal is demonstrable
+  rather than assumed.
+
+**11. Docs, postmortem, release.**
+
+**What it bought:** revocation. One shared secret made every member
+interchangeable and removing one meant re-keying all of them; now you delete a
+line from `/etc/cluster/authorized`.
+
+**What it deliberately did not buy**, stated so the next tier is honest: keys
+are per-*machine*, not per-*user* (an authorized machine can still claim any of
+its own users' names — roadmap item 1); `AUTHORIZED_MAX` caps a cluster at about
+a dozen peers, where a shared secret scaled without limit; and replay protection
+and encryption remain behind the "leaving a trusted network" trigger.
+
+Retrospective: [`cluster-keys-postmortem.md`](cluster-keys-postmortem.md).
+
+---
+
 ## Microkernel arc — "recently completed" running notes (from What's next)
 
 **Recently completed (2026-08-19/20): general supervision + heartbeat,

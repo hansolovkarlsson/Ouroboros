@@ -1,11 +1,18 @@
 //! Hand-rolled SHA-256, the password-hash primitive for the account database.
 //!
-//! Byte-for-byte the SHA-256 from `netd/src/hmac.rs` (NIST-validated there);
-//! this is now the shared copy the shell's `login` and the `/bin` account tools
-//! use (the earlier per-copy in `shell/src/sha256.rs` was folded in here). netd
-//! keeps its own copy because it needs the HMAC wrapper and the shipped
-//! cluster-auth code is deliberately left untouched. `no_std`, no heap,
-//! byte-only so it's PIE-relocation-safe.
+//! FIPS 180-4. The single copy in the tree: the shell's `login` and every `/bin`
+//! account tool bottom out here, so this is what every password on the system is
+//! checked with. `no_std`, no heap, byte-only so it's PIE-relocation-safe.
+//!
+//! **Validated against NIST known-answer vectors HERE, in the tests below**, and
+//! that placement is the point rather than a detail. This module used to open by
+//! citing `netd/src/hmac.rs` as "NIST-validated there" - and when the flag day
+//! deleted that file the provenance dangled, which is what prompted a look at
+//! it. The cited file had claimed validation "see the `sha256_selftest` /
+//! `hmac_selftest` functions", and NEITHER FUNCTION HAD EVER EXISTED IN IT: the
+//! claim was unverifiable long before it was unreachable, so the hash behind
+//! every password had no known-answer test anywhere in the tree while reading as
+//! though it did. A borrowed assurance is worth exactly what you can re-run.
 
 /// SHA-256 round constants (FIPS 180-4).
 const K: [u32; 64] = [
@@ -130,4 +137,151 @@ pub fn digest_eq(a: &[u8], b: &[u8]) -> bool {
         diff |= a[i] ^ b[i];
     }
     diff == 0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Hex-decode a digest literal, so a vector can be written the way the
+    /// standard prints it rather than as 32 comma-separated bytes.
+    fn hex(h: &str) -> [u8; DIGEST] {
+        let b = h.as_bytes();
+        assert_eq!(b.len(), DIGEST * 2, "a digest is 64 hex chars");
+        let mut out = [0u8; DIGEST];
+        for (i, o) in out.iter_mut().enumerate() {
+            let d = |c: u8| match c {
+                b'0'..=b'9' => c - b'0',
+                b'a'..=b'f' => c - b'a' + 10,
+                _ => panic!("non-hex digit in vector"),
+            };
+            *o = d(b[i * 2]) << 4 | d(b[i * 2 + 1]);
+        }
+        out
+    }
+
+    /// The published FIPS 180-4 / NIST CSRC known-answer vectors.
+    ///
+    /// THE FOREIGN OBSERVER: these digests come from the standard, not from this
+    /// implementation, which is the whole reason they are worth having. A test
+    /// asserting only that `hash_password` round-trips - which is all this crate
+    /// had - passes just as happily against a hash that is wrong in the same way
+    /// twice.
+    #[test]
+    fn nist_known_answer_vectors() {
+        // The empty string. Catches padding-only bugs, which no non-empty
+        // vector reaches: the length block and the 0x80 terminator are the
+        // entire computation here.
+        assert_eq!(
+            sha256_two(b"", b""),
+            hex("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+        );
+        // "abc" - the standard's own first example.
+        assert_eq!(
+            sha256_two(b"abc", b""),
+            hex("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+        );
+        // 448 bits. Mislabelled here for a day as "the padding case that JUST
+        // fits one block" - it is not: 56 + 1 terminator + 8 length = 65, so it
+        // needs TWO blocks and writes 63 pad zeros. See the boundary test below
+        // for the length that actually fits, and for what the mislabel hid.
+        assert_eq!(
+            sha256_two(b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq", b""),
+            hex("248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1")
+        );
+        // 896 bits: spans two blocks, so the chaining variables must carry.
+        assert_eq!(
+            sha256_two(
+                b"abcdefghbcdefghicdefghijdefghijkefghijklfghijklmghijklmn",
+                b"hijklmnoijklmnopjklmnopqklmnopqrlmnopqrsmnopqrstnopqrstu"
+            ),
+            hex("cf5b16a778af8380036ce59e7b0492370b249b11e8f07a51afac45037afee9d1")
+        );
+    }
+
+    /// The padding boundary: the lengths where the pad loop runs ZERO times.
+    ///
+    /// 55 bytes is the only length in a block where message + terminator +
+    /// 8-byte length is exactly 64, so `finalize`'s `while self.fill != BLOCK - 8`
+    /// never iterates. EVERY other vector in this file writes at least one pad
+    /// byte, which is why none of them could see a `finalize` that pads
+    /// unconditionally: rewriting that loop as a do-while left all of them
+    /// passing while corrupting every 55-mod-64-byte message. Proven by
+    /// mutation, and not hypothetical - `sha256_two(salt, password)` with
+    /// `SALT_MAX` 16 and a 39-character password is exactly 55 bytes, and a
+    /// wrong digest there locks an account out, because the stored hash came
+    /// from a correct SHA-256 elsewhere.
+    ///
+    /// Digests from Python's `hashlib`, not from this implementation.
+    #[test]
+    fn the_zero_pad_boundary_is_covered() {
+        // One block, zero pad bytes.
+        assert_eq!(
+            sha256_two(&[b'a'; 55], b""),
+            hex("9f4390f8d30c2dd92ec9f095b65e2b9ae9b0a925a5258e241c9f1e910f734318")
+        );
+        // Two blocks, zero pad bytes in the second - the same boundary one
+        // block along, so a bug that only shows after a chaining step is
+        // covered too.
+        assert_eq!(
+            sha256_two(&[b'a'; 119], b""),
+            hex("31eba51c313a5c08226adf18d4a359cfdfd8d2e816b13f4af952f7ea6584dcfb")
+        );
+        // Exactly one full block of message: the terminator itself forces a
+        // second block, the other side of the same edge.
+        assert_eq!(
+            sha256_two(&[b'a'; 64], b""),
+            hex("ffe054fe7ae0cb6dc65c3af9b61d5209f439851db43d0ba5997337df154668eb")
+        );
+    }
+
+    /// The two-part entry point must hash the CONCATENATION, not the parts.
+    ///
+    /// `login` calls it as `sha256_two(salt, password)`; if the split leaked
+    /// into the digest, a password check would still round-trip (both sides
+    /// split identically) while disagreeing with every other SHA-256 in the
+    /// world - and the vectors above, which pass everything in one part, could
+    /// not see it.
+    #[test]
+    fn the_split_point_does_not_change_the_digest() {
+        let whole = b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq";
+        let expect = hex("248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1");
+        for cut in 0..=whole.len() {
+            assert_eq!(
+                sha256_two(&whole[..cut], &whole[cut..]),
+                expect,
+                "split at {cut} changed the digest"
+            );
+        }
+    }
+
+    /// `digest_eq` is constant-time, so it cannot early-out - but it must still
+    /// be a correct comparison, and it must refuse anything that is not a full
+    /// digest rather than comparing a prefix.
+    #[test]
+    fn digest_eq_matches_only_a_full_equal_digest() {
+        let a = sha256_two(b"abc", b"");
+        assert!(digest_eq(&a, &a));
+        // Every single-bit difference, at every byte - a mask bug that dropped
+        // one byte from the fold would pass a whole-digest comparison.
+        for i in 0..DIGEST {
+            let mut b = a;
+            b[i] ^= 0x01;
+            assert!(!digest_eq(&a, &b), "byte {i} was not compared");
+        }
+        // A truncated stored hash must not match by prefix.
+        assert!(!digest_eq(&a, &a[..DIGEST - 1]));
+        assert!(!digest_eq(&a[..DIGEST - 1], &a));
+        assert!(!digest_eq(&[], &[]));
+        // NOR AN OVER-LONG ONE. Both length cases above are SHORTER than a
+        // digest, so they leave `a.len() != DIGEST` and `a.len() < DIGEST`
+        // indistinguishable - proven by mutation: weakening the guard to `<`
+        // kept every assertion here green while the function began accepting a
+        // 33-byte stored hash by comparing only its first 32 bytes. A trailing
+        // byte of garbage in /etc/shadow would have authenticated.
+        let mut long = [0u8; DIGEST + 1];
+        long[..DIGEST].copy_from_slice(&a);
+        assert!(!digest_eq(&a, &long));
+        assert!(!digest_eq(&long, &a));
+    }
 }

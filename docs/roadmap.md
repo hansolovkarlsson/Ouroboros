@@ -26,23 +26,27 @@ supervised, MMU-isolated userland servers, with a capability model, crash
 recovery, and grant/safecopy bulk IPC (all in
 [`roadmap-completed.md`](roadmap-completed.md) / [`CHANGELOG.md`](CHANGELOG.md)).
 So is the users/permissions arc, whose last item — per-user *cluster* identity —
-shipped 2026-08-31. What is left of it is the tier below: the cluster key is
-still per-*machine*, which is item 1. In rough order of value (2 and 3 are what
+shipped 2026-08-31, and the per-machine-keypair arc that followed it
+([`roadmap-cluster-keys.md`](roadmap-cluster-keys.md)), which retired the shared
+cluster key entirely. What is left is the tier below: keys are per-*machine*,
+not per-*user*, which is item 1. In rough order of value (2 and 3 are what
 the microkernel arc itself still leaves open):
 
 1. **Per-user keys for the cluster.** Per-user cluster *identity* shipped
    2026-08-31 (see [`CHANGELOG.md`](CHANGELOG.md) and
    [`unspellable-postmortem.md`](unspellable-postmortem.md)): a remote request
-   carries the requesting user's **name** inside the MAC, the far side resolves
+   carries the requesting user's **name** inside the signature, the far side resolves
    it through its own `/etc/passwd` and refuses a stranger, and the identity
    reaches `fsd` as a **required parameter** carried in the request rather than
    an opt-in wrapper and a latch. `cpu` is covered too — `netd` assumes the
    mapped user's identity for the spawn, so a remote command inherits it.
 
-   **What is left is the tier below it: the key is still per-machine.** A peer
-   holding the cluster key can claim *any* name, so the model defends against
-   the users of a trusted node — the real exposure — but not against a
-   compromised node. Per-user keys would close that, and the design forks are
+   **What is left is the tier below it: keys are per-machine, not per-user.**
+   The shared secret is gone — each machine has its own Ed25519 keypair and
+   authorizes peers by public key, so a member can be revoked by deleting a line
+   — but an authorized *machine* can still claim any of its own users' names. So
+   the model defends against the users of a trusted node — the real exposure —
+   but not against a compromised node. Per-user keys would close that, and the design forks are
    real: whether each user gets a key or the machine key signs a per-user
    credential; where those live (`/etc/cluster/keys/<name>`? a factotum-style
    agent, as Plan 9 does it?); how a node learns a peer user's key without a
@@ -93,7 +97,7 @@ the microkernel arc itself still leaves open):
      client-nonce MAC over challenge-response. Per-op ticket handshakes would be
      brutal, so it wants a ticket cache in `netd` — the task with no heap, a
      32 KB stack that has hit the guard page five times, and no mutable statics
-     (the cluster key already threads as `&Auth` for that reason).
+     (the auth config already threads as `&Auth` for that reason).
    - **A single point of failure that is also the highest-value target.** Master
      down = no new sessions; master compromised = the whole cluster. Plan 9 lives
      with this; it is a real cost, not a footnote.
@@ -109,18 +113,26 @@ the microkernel arc itself still leaves open):
    authentication mechanism, and it should be decided deliberately rather than
    arrived at.
 
-   **The cheaper step that should come first: per-machine keypairs** — now
-   designed in [`roadmap-cluster-keys.md`](roadmap-cluster-keys.md), which also
-   records why the *symmetric* version of this was rejected (with a symmetric
-   key, the ability to verify is the ability to forge). Each node holds its own
-   Ed25519 keypair and lists the peer *public* keys it accepts (SSH's
-   `authorized_keys` model). No new server, no clock, no ticket cache, no single
-   point of failure.
-   It kills "one shared secret = interchangeable members" and gives per-peer
-   revocation, which is the largest single weakness of what shipped in v0.15.0.
-   It deliberately leaves "B can claim any of *its own* users" open — which is
-   exactly the residual a master exists to close, so building this first makes
-   the master's value precise instead of assumed.
+   **The cheaper step that came first: per-machine keypairs — ✅ BUILT
+   2026-08-31.** Each node holds its own Ed25519 keypair and lists the peer
+   *public* keys it accepts (SSH's `authorized_keys` model); the shared secret
+   is deleted. No new server, no clock, no ticket cache, no single point of
+   failure. See [`roadmap-cluster-keys.md`](roadmap-cluster-keys.md) for the
+   step log (and for why the *symmetric* version was rejected: with a symmetric
+   key, the ability to verify is the ability to forge),
+   [`roadmap-completed.md`](roadmap-completed.md) for the plan-shaped summary,
+   and [`cluster-keys-postmortem.md`](cluster-keys-postmortem.md) for what it
+   cost to learn.
+
+   It killed "one shared secret = interchangeable members" and gave per-peer
+   revocation — the largest single weakness of what shipped in v0.15.0. It
+   deliberately left **"B can claim any of its own users"** open, which is
+   exactly the residual a master exists to close: that is now a *measured*
+   remainder rather than an assumed one, which was the point of building this
+   first. Two costs it introduced, worth weighing against a master: a peer list
+   caps a cluster at about a dozen nodes (`AUTHORIZED_MAX`), where one secret
+   scaled without limit, and key generation **refuses without real entropy**, so
+   platforms with no RNG (Parallels, the Pi) need keys staged at build time.
 
    All of it stays behind the **"leaving a trusted network" trigger**. Today's
    deployment is two QEMU VMs and, soon, two Raspberry Pi 4s on a home network,
@@ -509,7 +521,7 @@ Unixes still have that this doesn't. **None are designed or sequenced yet;**
 each is recorded so the reasoning and the starting points aren't lost.
 Several build directly on things that already exist (cond's small ANSI
 parser, ext2's on-disk permission bits, the per-task capability model, the
-cluster-auth HMAC, `ulib`, and the POSIX-libc plan above), which is the point
+cluster-auth crypto, `ulib`, and the POSIX-libc plan above), which is the point
 of writing them down now rather than from scratch later.
 
 ### 1. Terminal escape codes / VT100 (scoped-ish, the nearest of these)
@@ -651,8 +663,11 @@ crate, plus creator-owned new inodes.
   walks every ancestor's search bit, not just the object and its parent.
 - **Per-user cluster identity** — **the only item of this arc still open, and
   promoted to "What's next" above on 2026-08-30** once `accountd` gave the hole
-  a privileged writer on the far end. The 9P export authenticates the *machine*
-  (shared key), not a *user*.
+  a privileged writer on the far end. **Shipped 2026-08-31**: the export now
+  carries the requesting user's name inside the signature and resolves it
+  through the far side's own `/etc/passwd`. What remains is the tier below —
+  the export authenticates the *machine* (its keypair), so an authorized
+  machine can still claim any of its own users' names; see item 1 above.
 - ~~**Symbolic-mode `chmod`** (`u+x`)~~ — **shipped 2026-08-29** (`u+x`, `go-w`,
   `a=rx`, `u+rw,go+r`, copy-source `g=u`, conditional `X`, `s`/`t`; octal still
   works and stays absolute). A real `/etc/skel` for `useradd` **also shipped
@@ -741,7 +756,7 @@ exists to build on / hard parts / consumer question" treatment.
 **a. Users, login, passwords, permissions — and per-user home directories (extends item 4).**
 Item 4 already scopes the identity/permission arc: a login prompt, an
 `/etc/passwd`-shaped file with hashed passwords (reusing the cluster-auth
-SHA-256/HMAC), and ext2 mode/uid/gid actually *enforced* at the `FSOP_*`
+SHA-256, now the `accounts` crate's), and ext2 mode/uid/gid actually *enforced* at the `FSOP_*`
 dispatch — ext2-only, because FAT/exFAT can't store owners. The addition here is
 **per-user home directories**: a `/home/<user>` the login sets as the shell's
 initial cwd — a small convention layered on the permission work, not a separate

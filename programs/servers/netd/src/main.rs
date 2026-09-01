@@ -27,7 +27,6 @@
 use core::arch::asm;
 use core::panic::PanicInfo;
 
-mod hmac;
 
 /// Our IPv4, derived from the NIC's MAC (cluster Phase 1d) so two guests on a
 /// shared L2 link get distinct addresses with no config channel: the last octet
@@ -181,29 +180,24 @@ fn main() -> ! {
 /// Bytes of `/etc/cluster/authorized` netd keeps.
 ///
 /// About fourteen peers at 72 bytes a line. It lives in `Auth`, on `serve`'s
-/// frame, because that is where the cluster key already lives and this server
-/// has no heap - and 1 KB against a 32 KB stack that has hit its guard page five
+/// frame, because that is where the rest of the auth config already lives and
+/// this server has no heap - and 1 KB against a 32 KB stack that has hit its guard page five
 /// times is a deliberate, measured choice rather than a comfortable one. A file
 /// longer than this is REPORTED at boot rather than silently half-read: the
 /// peers past the cut would simply not be authorized, which is safe and
 /// invisible, and invisible is the half worth fixing.
 const AUTHORIZED_MAX: usize = 1024;
 
-/// The cluster authentication config, loaded once from disk at boot (the
-/// export-hardening phase; see `docs/roadmap-cluster.md`'s security section).
-/// A *shared cluster secret*: every machine in the cluster is configured with
-/// the same key, so any of them can mount/run on any other, and one without
-/// the key cannot join. Read-only after startup; no mutable statics exist in
+/// The cluster authentication config, loaded once from disk at boot (see
+/// `docs/roadmap-cluster-keys.md`). A *per-machine keypair*: this machine holds
+/// its own private key and a list of the peer PUBLIC keys it accepts, so a
+/// member is revoked by deleting a line rather than by re-keying everyone. A
+/// machine with neither can neither serve nor dial. Read-only after startup; no mutable statics exist in
 /// userland (`.bss` asserted empty), so this rides `serve`'s stack frame and is
 /// threaded (`&Auth`) through the event loop to the two leaves that need it -
 /// the inbound gate (`handle_9p`) and the outbound signer (`handle_rmount`/
 /// `handle_run`).
 struct Auth {
-    /// The cluster secret. Empty (`key_len == 0`) means unconfigured, which is
-    /// **fail-closed**: the export refuses every remote client. Harmless for a
-    /// single-machine run (nobody is mounting it).
-    key: [u8; hmac::BLOCK],
-    key_len: usize,
     /// The no-exec lever: a machine may share its disk (mounts allowed) while
     /// refusing remote code execution (`NP_RUN`). Set by a `\NOEXEC` flag file.
     noexec: bool,
@@ -212,166 +206,175 @@ struct Auth {
     /// `SigningKey` rather than the raw seed: expanding derives the public key
     /// with a scalar multiplication, and doing that per frame would double the
     /// cost of every signature for a value that never changes. `None` means this
-    /// machine has no identity, and outbound requests fall back to the MAC'd
-    /// format - which is what keeps a keyless single-machine setup working right
-    /// up until step 10 retires that format.
+    /// machine has no identity, and since the flag day there is no second format
+    /// to fall back to: it can neither sign an outbound request nor sign a reply,
+    /// so it neither dials nor serves.
     signing: Option<ed25519::SigningKey>,
     /// `/etc/cluster/authorized`: the peers this machine accepts, by public key.
-    /// Empty means no peer can be verified by signature, which is fail-closed
-    /// for the signed format and leaves the MAC'd one unaffected.
+    /// Empty means no peer can be verified at all, which closes the export -
+    /// fail-closed, and with the MAC'd format gone there is nothing it leaves
+    /// unaffected.
     authorized: [u8; AUTHORIZED_MAX],
     authorized_len: usize,
 }
 
 impl Auth {
-    /// Whether this machine holds the shared cluster secret.
-    ///
-    /// This used to be spelled `enabled()` and meant "authentication is
-    /// configured", which was true when the shared key was the ONLY way to
-    /// authenticate anything. It stopped being true at step 7, and the name
-    /// kept the old meaning: a machine with a perfectly good keypair and a full
-    /// `authorized` file reported its export CLOSED, because the question being
-    /// asked was "is there a shared key" while the question that mattered was
-    /// "can this machine authenticate anything".
-    ///
-    /// Renamed rather than redefined, so every old call site had to be looked at
-    /// rather than silently inheriting a new meaning.
-    fn has_key(&self) -> bool {
-        self.key_len > 0
-    }
-
-    /// Whether this machine can serve a **signed** request.
+    /// Whether this machine can serve an export request.
     ///
     /// Two conditions, and the second is the one that is easy to forget: it
     /// needs peers to verify against, AND an identity of its own, because a
-    /// signed request gets a signed REPLY - a machine that cannot sign refuses
-    /// rather than answering with a MAC the caller cannot check (see
-    /// `seal_reply`). Stated once here because it is read in two places, and a
-    /// boot message that disagreed with the gate is exactly what this arc keeps
-    /// finding: the first version of this said "accepts signed requests" on a
-    /// node that refused every one of them.
+    /// request gets a SIGNED reply - a machine that cannot sign refuses rather
+    /// than answering unauthenticated (see `seal_reply`).
+    ///
+    /// Until the flag day this sat beside `accepts_mac`, and both were reached
+    /// through a `can_verify` that meant "either". There is only one format
+    /// now, so the three collapsed into this.
     fn accepts_signed(&self) -> bool {
         // PARSEABLE PEERS, not merely bytes. `clusterkeys` documents commenting
         // a line out as a supported revocation, so a file with its last peer
-        // commented out is non-empty and authorizes nobody - and the byte test
-        // made this print "accepts signed requests" on a node that refuses
-        // every one of them, which is the exact gate-vs-message disagreement
-        // this predicate was introduced to prevent.
+        // commented out is non-empty and authorizes nobody.
         self.signing.is_some() && count_peers(self.authorized()) > 0
     }
 
-    /// Whether this machine can serve a **MAC'd** request — it holds the shared
-    /// key. (The reply is MAC'd under the same key, so there is no second
-    /// condition here.)
-    fn accepts_mac(&self) -> bool {
-        self.has_key()
-    }
-
-    /// Whether the export is open at all: it can serve at least one format.
-    /// Neither is the fail-closed case.
-    fn can_verify(&self) -> bool {
-        self.accepts_signed() || self.accepts_mac()
-    }
-
-    /// Whether this machine can authenticate an **outbound** request — sign it
-    /// with its own identity, or MAC it under the shared key.
-    ///
-    /// Separate from [`Auth::can_verify`] because the two really are different
-    /// preconditions: a machine that lists peers but has no identity of its own
-    /// can serve requests it cannot make, and one with an identity but an empty
-    /// `authorized` file is the reverse. One boolean could only be wrong about
-    /// one of them.
+    /// Whether this machine can authenticate an **outbound** request, i.e. sign
+    /// it. Separate from [`Auth::accepts_signed`] because a machine that lists
+    /// no peers can still make requests of machines that list IT.
     fn can_send(&self) -> bool {
-        self.signing.is_some() || self.has_key()
+        self.signing.is_some()
     }
+
     /// The peers this machine accepts, as `clusterkeys` expects them.
     fn authorized(&self) -> &[u8] {
         &self.authorized[..self.authorized_len]
     }
 
-    fn key(&self) -> &[u8] {
-        &self.key[..self.key_len]
-    }
 }
 
-/// The disk path (FAT 8.3-legal) of the cluster secret and the no-exec flag.
-const KEY_PATH: &[u8] = b"/CLUSTER.KEY";
+/// The disk path (FAT 8.3-legal) of the no-exec flag.
 const NOEXEC_PATH: &[u8] = b"/NOEXEC";
-/// The peers this machine accepts, by public key (step 7 of
-/// docs/roadmap-cluster-keys.md). Absent means it verifies no signatures.
+/// The peers this machine accepts, by public key (see
+/// docs/roadmap-cluster-keys.md). Absent means it verifies no signatures, which
+/// closes the export.
 const AUTHORIZED_PATH: &[u8] = b"/etc/cluster/authorized";
-/// This machine's own private key (step 8). Its presence is what makes netd sign
-/// its outbound requests rather than MAC them.
+/// This machine's own private key. Its presence is what lets netd sign its
+/// outbound requests at all; without it, it can neither serve nor dial.
 const ID_PATH: &[u8] = b"/etc/cluster/id";
 
-/// Load the cluster auth config from disk via `fsd` at boot. The key file's
-/// trailing whitespace/newline is trimmed (so an editor-saved one-line secret
-/// works). Retries while `fsd` reports `NO_FS` (its disk isn't mounted yet - a
+/// Whether an `fsd` reply is a TRANSIENT failure that a boot-time read should
+/// retry, rather than a real answer.
+///
+/// The list is of codes that mean **the server could not answer**, which is a
+/// different question from "was this an error":
+///
+/// - `NO_FS` — the disk is not mounted yet. `netd` and `fsd` start together, so
+///   the first reads race the mount.
+/// - `TASK_ERR_NO_SUCH_TASK` — `fsd` is being restarted underneath us
+///   (`tasks::fail_calls_to` fails every in-flight `MSG_CALL` to a slot being
+///   torn down); the supervisor reinstalls it in the same handler.
+/// - `FS_ERROR` — how `read_file_chunk` reports a refused `GRANT`. It grants
+///   BEFORE it calls, and the kernel refuses a grant to a non-existent task, so
+///   this — not `TASK_ERR_NO_SUCH_TASK` — is what the restart window actually
+///   produces. Two earlier versions of this function missed it by enumerating
+///   the codes they expected rather than the ones the path emits.
+/// - `MSG_ERR_FULL` — `fsd`'s mailbox was momentarily full.
+///
+/// WHY NOT "EVERYTHING EXCEPT A DEFINITIVE ANSWER", which this briefly was:
+/// because a PERMANENT error is then retried forever. `mkdir /NOEXEC` — a
+/// plausible way to reach for the flag — makes `read_at` return
+/// `FS_ERR_NOT_A_FILE`, and this read is netd's first, so the whole shared
+/// budget is spent sleeping in `NET_WAIT` with the mailbox undrained, for a
+/// condition waiting cannot change. That starves the two reads that configure
+/// the cluster AND leaves the supervisor's 160ms health ping unacked, which is
+/// the restart loop `testing-parallels.md` Risk #1 is about. Fail-safe applies
+/// to the DECISION (see `noexec` below), not to how long to wait for one.
+fn transient_fs_failure(r: u64) -> bool {
+    matches!(
+        r,
+        syscall_abi::NO_FS
+            | syscall_abi::TASK_ERR_NO_SUCH_TASK
+            | syscall_abi::FS_ERROR
+            | syscall_abi::MSG_ERR_FULL
+    )
+}
+
+/// Load the cluster auth config from disk via `fsd` at boot.
+///
+/// Retries while `fsd` reports `NO_FS` (its disk isn't mounted yet - a
 /// boot-order race, since netd and fsd start together), but stops immediately
 /// on `FS_ERR_NOT_FOUND` (the file is definitively absent = run unconfigured).
 fn load_auth() -> Auth {
     let mut auth = Auth {
-        key: [0u8; hmac::BLOCK],
-        key_len: 0,
         noexec: false,
         signing: None,
         authorized: [0u8; AUTHORIZED_MAX],
         authorized_len: 0,
     };
-    let mut buf = [0u8; hmac::BLOCK];
     // ONE retry budget across all three reads, not one each.
     //
-    // Each read waits for the same event - the disk mounting - so three separate
-    // 2s budgets do not make the race three times more winnable, they make a
+    // Each waits for the same event - the disk mounting - so three separate 2s
+    // budgets do not make the race three times as winnable, they make a
     // DISKLESS boot spend three times as long not draining netd's mailbox.
     // Parallels with no USB stick, and a Pi with no card, are both supported
-    // configurations where nothing ever mounts; at ~6s of silence the supervisor
-    // health ping (160ms) times out often enough to burn all three restarts and
-    // disable netd for the boot. Up to ~2s total, at 40ms a try.
+    // configurations where nothing ever mounts; at several seconds of silence
+    // the supervisor health ping (160ms) times out often enough to burn all
+    // three restarts and disable netd for the boot. Up to ~2s total, at 40ms
+    // a try.
     //
-    // THE BUDGET GATES THE RETRY, NEVER THE FIRST ATTEMPT. Written first as
-    // `while budget > 0`, which meant that if this read exhausted it, the two
-    // below never ran ONCE - so a disk that mounted late gave a node with no
-    // identity and no peers for the whole boot, which is exactly the
-    // configuration step 10a exists to make work. The comment on the id read
-    // claimed to prevent that while the code caused it.
+    // THE BUDGET GATES THE RETRY, NEVER THE FIRST ATTEMPT: written first as
+    // `while budget > 0`, which meant that exhausting it on the first read left
+    // the others never attempted ONCE, so a disk that mounted late gave a node
+    // with no identity and no peers for the whole boot.
     let mut budget = 50u32;
+    // The no-exec flag is presence-only: any successful read (even 0 bytes)
+    // means the file exists; FS_ERR_* means it doesn't.
+    //
+    // RETRIED ON A TRANSIENT FAILURE LIKE THE TWO READS BELOW, AND THIS ONE
+    // MATTERS MOST,
+    // BECAUSE IT IS THE ONLY ONE THAT FAILS *OPEN*. An unread id or peer list
+    // closes the export; an unread `\NOEXEC` leaves `noexec` false, which is
+    // indistinguishable from "the operator did not ask for it" - and
+    // `handle_cpu_run`'s `if auth.noexec` is the only gate on remote execution
+    // past authentication, so a node configured to share its disk while
+    // refusing `cpu` would spawn remote commands for the whole boot, silently
+    // (the boot line prints only inside the true branch).
+    //
+    // Until step 10b this read was third, behind the retried `CLUSTER.KEY`
+    // read, whose loop absorbed the mount race on its behalf; deleting that
+    // read promoted this one to netd's FIRST `fsd` call and left it bare. The
+    // race is real wherever the disk is slower than QEMU's virtio-blk - USB-MSD
+    // on Parallels and the Pi, which is to say the platforms least likely to be
+    // the ones you test on.
+    let mut one = [0u8; 1];
+    let m;
     loop {
-        let n = read_file_chunk(As::FirstParty, KEY_PATH, 0, 0, &mut buf);
-        if n == syscall_abi::NO_FS && budget > 0 {
+        let r = read_file_chunk(As::FirstParty, NOEXEC_PATH, 0, 0, &mut one);
+        if transient_fs_failure(r) && budget > 0 {
             budget -= 1;
             syscall(syscall_abi::NET_WAIT, 40);
             continue;
         }
-        if n < syscall_abi::FS_ERR_MIN {
-            let mut len = (n as usize).min(buf.len());
-            while len > 0
-                && matches!(buf[len - 1], b'\n' | b'\r' | b' ' | b'\t')
-            {
-                len -= 1;
-            }
-            auth.key[..len].copy_from_slice(&buf[..len]);
-            auth.key_len = len;
-        }
-        break; // success, or FS_ERR_NOT_FOUND (unconfigured)
+        m = r;
+        break;
     }
-    // The no-exec flag is presence-only: any successful read (even 0 bytes)
-    // means the file exists; FS_ERR_* means it doesn't.
-    let mut one = [0u8; 1];
-    let m = read_file_chunk(As::FirstParty, NOEXEC_PATH, 0, 0, &mut one);
-    auth.noexec = m < syscall_abi::FS_ERR_MIN;
+    // FAIL CLOSED ON "I DON'T KNOW". `m < FS_ERR_MIN` asked "did the read
+    // succeed", which folds "the disk never mounted" in with "the operator did
+    // not ask for no-exec" - so a node that ran out of retry budget on a slow
+    // disk came up with remote execution ENABLED, which is the one outcome this
+    // probe must never produce by accident. Only a definitive `FS_ERR_NOT_FOUND`
+    // clears the lever now; every other outcome, success or unanswered, sets it.
+    auth.noexec = m != syscall_abi::FS_ERR_NOT_FOUND;
 
     // This machine's own key. Absent is not an error either - it means netd
-    // signs nothing and falls back to the shared-key MAC.
+    // signs nothing, which since the flag day means it can neither serve nor dial.
     let mut idbuf = [0u8; 128];
     // Retried on NO_FS like the two reads around it, sharing their budget - but
-    // ALWAYS ATTEMPTED, even with the budget spent. A machine that silently MACs
-    // works today and stops working at step 10b, so "never read at all" is the
-    // one outcome this must not have.
+    // ALWAYS ATTEMPTED, even with the budget spent. This file is now the whole
+    // of this machine's cluster identity - unread means it neither serves nor
+    // dials - so "never read at all" is the one outcome this must not have.
     let mut idn;
     loop {
         idn = read_file_chunk(As::FirstParty, ID_PATH, 0, 0, &mut idbuf);
-        if idn == syscall_abi::NO_FS && budget > 0 {
+        if transient_fs_failure(idn) && budget > 0 {
             budget -= 1;
             syscall(syscall_abi::NET_WAIT, 40);
             continue;
@@ -394,8 +397,8 @@ fn load_auth() -> Auth {
                 auth.signing = Some(key);
             }
             // A key file that exists and is not a key is a mistake worth
-            // naming: the machine silently falls back to MAC'ing, which works
-            // today and stops working at step 10b.
+            // naming: the machine ends up with no identity at all, and so
+            // neither serves nor dials, which looks identical to having no file.
             None => log(b"netd: WARNING /etc/cluster/id is not a key; not signing\r\n"),
         }
     }
@@ -403,14 +406,14 @@ fn load_auth() -> Auth {
     // The authorized-peer list. Absent is not an error: a machine with no peers
     // simply verifies no signatures, which is what a single-machine run wants.
     //
-    // Retried on NO_FS like the cluster key above, because this read can happen
-    // before the disk is mounted - and unlike the key, a silently-empty peer
+    // Retried on NO_FS like the two reads above, because this read can happen
+    // before the disk is mounted - and unlike the identity, a silently-empty peer
     // list produces "authentication failed" for every signed frame, which is
     // indistinguishable from a wrong key.
     let mut n;
     loop {
         n = read_file_chunk(As::FirstParty, AUTHORIZED_PATH, 0, 0, &mut auth.authorized);
-        if n == syscall_abi::NO_FS && budget > 0 {
+        if transient_fs_failure(n) && budget > 0 {
             budget -= 1;
             syscall(syscall_abi::NET_WAIT, 40);
             continue;
@@ -446,34 +449,25 @@ fn load_auth() -> Auth {
         log_dec(u64::MAX - n);
         log(b" below the error ceiling); no peer can be verified by signature\r\n");
     }
-    // REPORTED PER DIRECTION, because they now have different preconditions and
-    // a machine can be able to do one and not the other. The single old line
-    // ("export requires the cluster key") was the visible half of the conflated
-    // gate: it printed on a node whose wire carried only signatures, and it
-    // printed CLOSED on a node that held every key it needed except that one.
-    if auth.can_verify() {
-        log(b"netd: export open, accepts ");
-        if auth.accepts_signed() {
-            log(b"signed");
-            if auth.accepts_mac() {
-                log(b" and ");
-            }
-        }
-        if auth.accepts_mac() {
-            log(b"MAC'd");
-        }
-        log(b" requests\r\n");
+    // REPORTED PER DIRECTION: they have different preconditions, and a machine
+    // can be able to do one and not the other. Naming WHICH half is missing
+    // matters more now that there is no fallback format to fall back to - the
+    // two causes send you to different files.
+    if auth.accepts_signed() {
+        log(b"netd: export open, accepts signed requests\r\n");
         if auth.noexec {
             log(b"netd: no-exec set (remote-run refused; disk-share allowed)\r\n");
         }
+    } else if auth.signing.is_none() {
+        log(b"netd: export CLOSED - no /etc/cluster/id to sign replies with (fail-closed)\r\n");
     } else {
-        log(b"netd: export CLOSED - no authorized peers and no cluster key (fail-closed)\r\n");
+        log(b"netd: export CLOSED - no authorized peers in /etc/cluster/authorized (fail-closed)\r\n");
     }
     if !auth.can_send() {
         // Says nothing about the export: this machine can still SERVE. It just
         // cannot ask anyone else for anything, which is a different outage and
         // would otherwise be discovered one failed `mount -r` at a time.
-        log(b"netd: no identity and no cluster key - cannot make remote requests\r\n");
+        log(b"netd: no /etc/cluster/id - cannot make remote requests\r\n");
     }
     auth
 }
@@ -1377,7 +1371,7 @@ fn handle_run(packed_mac: u64, sender: u64, buf: &[u8], len: usize, out: &mut [u
     // nonce is unused here.)
     let (total, _nonce) = frame_signed(auth, &who, &np[..hdr + clen], &mut req);
     if total == 0 {
-        return fail(out, b"cpu: cannot authenticate (no cluster key, or the request does not fit)\r\n");
+        return fail(out, b"cpu: cannot authenticate (no /etc/cluster/id to sign with, or the request does not fit)\r\n");
     }
 
     let mac = unpack_mac(packed_mac);
@@ -1477,16 +1471,17 @@ fn handle_rmount(packed_mac: u64, buf: &[u8], len: usize, out: &mut [u8], auth: 
         return fail(out, syscall_abi::NO_FS);
     }
     // Strip the reply's 4-byte length prefix; the sealed body is
-    // `[mac:32][status:u64][data]` (reply-auth). Verify the MAC against the nonce
-    // WE signed the request with before trusting a single byte of the reply - an
-    // injected/forged reply (or one from a peer without the key) fails here.
+    // `[sig:64][status:u64][data]` (reply-auth). Verify the signature against
+    // the nonce WE sent the request with before trusting a single byte - an
+    // injected or forged reply fails here.
     let body_len = u32::from_le_bytes([resp[0], resp[1], resp[2], resp[3]]) as usize;
     let body_end = (ninep_abi::NP_NET_LEN_PREFIX + body_len).min(got);
     let body = &resp[ninep_abi::NP_NET_LEN_PREFIX..body_end];
 
-    // We signed the request, so the reply is signed - the formats travel in
-    // pairs (see `seal_reply`), and neither side has to be told which.
-    let reply_np = if auth.signing.is_some() {
+    // The reply is SIGNED. There is no longer a second format to be told apart
+    // from, but the length and the signature are still checked before a byte of
+    // the reply is trusted.
+    let reply_np = {
         let sl = ninep_abi::NP_SIG_LEN;
         if body.len() < sl + 8 {
             return fail(out, syscall_abi::FS_ERR_AUTH);
@@ -1514,18 +1509,6 @@ fn handle_rmount(packed_mac: u64, buf: &[u8], len: usize, out: &mut [u8], auth: 
         pfx[tag.len()..tag.len() + nonce.len()].copy_from_slice(&nonce);
         if !ed25519::verify_prefixed(&peer_key, &pfx[..tag.len() + nonce.len()], reply_np, &sig) {
             return fail(out, syscall_abi::FS_ERR_AUTH);
-        }
-        reply_np
-    } else {
-        let ml = ninep_abi::NP_MAC_LEN;
-        if body.len() < ml + 8 {
-            return fail(out, syscall_abi::FS_ERR_AUTH); // too short to be a sealed reply
-        }
-        let reply_mac = &body[..ml];
-        let reply_np = &body[ml..]; // [status:u64][data]
-        let computed = hmac::hmac_sha256(auth.key(), &nonce, reply_np);
-        if !hmac::mac_eq(reply_mac, &computed) {
-            return fail(out, syscall_abi::FS_ERR_AUTH); // reply not authenticated
         }
         reply_np
     };
@@ -2333,6 +2316,22 @@ fn sack_retransmit(mac: &[u8; 6], c: &mut TcpConn, seg: &TcpIn) {
 /// the prefix buffer with the 12-byte frame header, and about one TCP segment.
 const EXPORT_CHUNK: usize = 1400;
 
+/// The reply prefix must have room for the largest reply AND its signature.
+///
+/// A COMPILE-TIME ASSERTION, not a test, because it is a relationship between
+/// three constants in two crates and the thing that breaks it is editing one of
+/// them. `seal_reply_signed`'s no-room arm is correct but degrades the export to
+/// refusing every large read with `FS_ERR_AUTH` - a failure that looks like a key
+/// problem between two correctly-keyed machines - so it must stay unreachable,
+/// and "unreachable by 572 bytes of slack nobody re-derives" is not a guarantee.
+///
+/// The largest `build_9p_reply` is `frame_reply`'s header (`NP_NET_LEN_PREFIX` +
+/// an 8-byte status) plus a full `EXPORT_CHUNK` of file data.
+const _: () = assert!(
+    ninep_abi::NP_NET_LEN_PREFIX + 8 + EXPORT_CHUNK + ninep_abi::NP_SIG_LEN <= PREFIX_MAX,
+    "PREFIX_MAX cannot hold a full EXPORT_CHUNK reply plus its signature"
+);
+
 /// The inline-reply cap fsd enforces on `readdir`/`read_file` (`FS_DATA_MAX`);
 /// a larger `want` is rejected, so the export clamps to it for those verbs.
 const DATA_INLINE: usize = syscall_abi::FS_DATA_MAX as usize;
@@ -2347,16 +2346,15 @@ const DATA_INLINE: usize = syscall_abi::FS_DATA_MAX as usize;
 /// export serves the local boot mount (tree 0). Single-writer, trusted-LAN (see
 /// docs/roadmap-cluster-phase2.md).
 fn handle_9p(c: &mut TcpConn, request: &[u8], dials: &mut [Option<DialConn>; MAX_DIAL], mac: &[u8; 6], auth: &Auth) {
-    // Authenticate first (the export-hardening phase): verify the client-nonce
-    // MAC over the request and recover the bare NP message. A failure (wrong or
-    // missing cluster key, or an unconfigured export) is refused before any verb
-    // runs - fail-closed. `authenticate` returns the NP message slice on success.
+    // Authenticate first: verify the client's Ed25519 signature over the request
+    // and recover the bare NP message. A failure (an unauthorized key, a bad
+    // signature, or an unconfigured export) is refused before any verb runs -
+    // fail-closed. `authenticate` returns the NP message slice on success.
     let signed_request = request.len() >= ninep_abi::NP_NET_LEN_PREFIX + 8
         && read_u64(request, ninep_abi::NP_NET_LEN_PREFIX) == ninep_abi::NP_AUTH_MAGIC_SIGNED;
     // A machine with no identity cannot sign a reply, and a signed request must
-    // not be answered with a MAC its caller has no way to check. Refusing is the
-    // honest outcome, and it is reachable only in the half-migrated state that
-    // step 10 ends.
+    // not be answered unauthenticated. Refusing is the honest outcome: an export
+    // that cannot prove who it is has nothing to serve with.
     if signed_request && !auth.accepts_signed() {
         // Refused WITHOUT LOGGING, like every other pre-authentication refusal.
         //
@@ -2391,13 +2389,13 @@ fn handle_9p(c: &mut TcpConn, request: &[u8], dials: &mut [Option<DialConn>; MAX
     let proxy = match map_user(&name) {
         Ok(p) => p,
         Err(cause) => {
-            // NOT deny_9p: that reports a key failure, and the key verified
-            // fine - sending an operator after \CLUSTER.KEY when the real cause
-            // is a missing account costs them the afternoon. Naming the cause is
-            // safe HERE and only here, because this peer has already proved it
-            // holds the cluster key; the pre-auth path stays deliberately
-            // ambiguous so an unauthenticated stranger cannot enumerate
-            // accounts.
+            // NOT deny_9p: that reports a key failure, and the signature
+            // verified fine - sending an operator after /etc/cluster/authorized
+            // when the real cause is a missing account costs them the
+            // afternoon. Naming the cause is safe HERE and only here, because
+            // this peer has already proved it holds an authorized private key;
+            // the pre-auth path stays deliberately ambiguous so an
+            // unauthenticated stranger cannot enumerate accounts.
             deny_unknown_user(c, request, cause);
             return;
         }
@@ -2410,9 +2408,9 @@ fn handle_9p(c: &mut TcpConn, request: &[u8], dials: &mut [Option<DialConn>; MAX
         return;
     }
     let n = build_9p_reply(msg, &mut c.prefix, dials, mac, As::Remote(proxy));
-    // Reply-auth (mutual authentication): MAC the reply against the request nonce
-    // so the client can prove it came from a holder of the cluster key.
-    let n = seal_reply(c, auth, &nonce, n, signed_request);
+    // Reply-auth (mutual authentication): sign the reply against the request
+    // nonce, so the client can prove it came from the machine it dialled.
+    let n = seal_reply(c, auth, &nonce, n);
     c.prefix_len = n;
     c.prefix_off = 0;
     c.file = false;
@@ -2436,16 +2434,16 @@ fn count_peers(authorized: &[u8]) -> usize {
     n
 }
 
-/// Verify a framed export request's client-nonce MAC and return the bare NP
-/// message on success (the export-hardening phase; see `hmac.rs` and
-/// `ninep_abi`'s auth-frame constants). The framed request is
-/// `[len:4][magic:8][nonce:16][mac:32][NP message]`; the MAC is
-/// `HMAC(cluster_key, nonce || NP-message)`. Returns `None` (refuse) when the
-/// export is unconfigured (fail-closed), the frame is too short, the magic is
-/// absent (an unauthenticated/legacy frame), or the MAC doesn't match (wrong
-/// key / forgery). Constant-time MAC compare (`hmac::mac_eq`). On success also
-/// returns a copy of the request nonce, which the reply is MAC'd against
-/// (reply-auth, mutual authentication - see `seal_reply`).
+/// Verify a framed export request and return the bare NP message on success
+/// (see `ninep_abi`'s auth-frame constants).
+///
+/// The framed request is `[len:4][magic:8][nonce:16][name:32][pubkey:32]
+/// [sig:64][NP message]`, signed over `domain-tag ‖ nonce ‖ name ‖ message`.
+/// Returns `None` (refuse) when the frame is too short, the magic is not this
+/// format, the offered public key is not one this machine authorizes, or the
+/// signature does not verify. On success also returns a copy of the request
+/// nonce, which the reply is signed against (reply-auth, mutual authentication
+/// - see `seal_reply`), and the requesting user's name.
 fn authenticate<'a>(
     auth: &Auth,
     request: &'a [u8],
@@ -2454,54 +2452,21 @@ fn authenticate<'a>(
     if request.len() < p + 8 {
         return None;
     }
-    // The magic is a FORMAT discriminator. It moved to 02 when the user's name
-    // joined the header, and 03 is the SIGNED format (per-machine keypairs) -
-    // accepted alongside 02 during the transition, which is what lets this
-    // exporter learn to verify signatures before any client learns to make them.
-    // Anything else is refused rather than misparsed.
-    if read_u64(request, p) == ninep_abi::NP_AUTH_MAGIC_SIGNED {
-        // Precondition enforced by the lookup inside: an empty `authorized`
-        // file matches no offered key, so every signed request is refused.
-        return authenticate_signed(auth, request);
-    }
-    // THE MAC ARM CARRIES ITS OWN KEY CHECK, and it is not a leftover of the
-    // gate that used to sit at the top of this function.
+    // ONE FORMAT. The magic is still checked as a discriminator rather than
+    // assumed, because a frame that is not this format must be REFUSED and not
+    // misparsed - the header sizes differ, so reading a MAC'd frame as a signed
+    // one would take the signature's first bytes for a public key.
     //
-    // HMAC WITH A ZERO-LENGTH KEY IS A PERFECTLY VALID HMAC. Without this line
-    // an unconfigured machine would not refuse MAC'd requests - it would accept
-    // the ones computed under the empty key, which every attacker also has. So
-    // "no cluster key" has to mean "refuse", explicitly, and cannot be left to
-    // fall out of the verification: the verification SUCCEEDS.
-    if !auth.accepts_mac() {
+    // The MAC'd format (AUTHNP02) was accepted here until the flag day, guarded
+    // by an explicit "do we hold the shared key" check. That check existed
+    // because HMAC WITH A ZERO-LENGTH KEY IS A VALID HMAC: without it an
+    // unconfigured export would have accepted requests computed under the empty
+    // key, which every attacker also has. Deleting the format deletes the trap
+    // with it - there is no longer a verification that succeeds by default.
+    if read_u64(request, p) != ninep_abi::NP_AUTH_MAGIC_SIGNED {
         return None;
     }
-    let need = p + ninep_abi::NP_AUTH_HDR;
-    if request.len() < need {
-        return None;
-    }
-    if read_u64(request, p) != ninep_abi::NP_AUTH_MAGIC {
-        return None;
-    }
-    let noff = p + ninep_abi::NP_AUTH_NONCE_OFF;
-    let woff = p + ninep_abi::NP_AUTH_NAME_OFF;
-    let moff = p + ninep_abi::NP_AUTH_MAC_OFF;
-    let mac = &request[moff..moff + ninep_abi::NP_MAC_LEN];
-    let np = &request[need..];
-    // The MAC covers nonce || name || message, so verifying it is what makes the
-    // claimed user trustworthy: without the key an attacker can neither forge a
-    // name nor edit one in flight.
-    let mut prefix = [0u8; ninep_abi::NP_MAC_PREFIX_LEN];
-    prefix.copy_from_slice(&request[noff..noff + ninep_abi::NP_MAC_PREFIX_LEN]);
-    let computed = hmac::hmac_sha256(auth.key(), &prefix, np);
-    if hmac::mac_eq(mac, &computed) {
-        let mut nonce_copy = [0u8; ninep_abi::NP_NONCE_LEN];
-        nonce_copy.copy_from_slice(&request[noff..noff + ninep_abi::NP_NONCE_LEN]);
-        let mut who = [0u8; ninep_abi::NP_NAME_LEN];
-        who.copy_from_slice(&request[woff..woff + ninep_abi::NP_NAME_LEN]);
-        Some((np, nonce_copy, who))
-    } else {
-        None
-    }
+    authenticate_signed(auth, request)
 }
 
 /// Where the NP message starts in a framed request, by format.
@@ -2512,12 +2477,18 @@ fn authenticate<'a>(
 /// therefore never true for a signed `cpu` request, and the caller got a binary
 /// framed reply where the code exists to give it a readable line. One function
 /// now, so the denial paths cannot drift from `authenticate` again.
-fn np_offset(request: &[u8]) -> usize {
+fn np_offset(request: &[u8]) -> Option<usize> {
     let p = ninep_abi::NP_NET_LEN_PREFIX;
     if request.len() >= p + 8 && read_u64(request, p) == ninep_abi::NP_AUTH_MAGIC_SIGNED {
-        p + ninep_abi::NP_AUTH_HDR_SIGNED
+        Some(p + ninep_abi::NP_AUTH_HDR_SIGNED)
     } else {
-        p + ninep_abi::NP_AUTH_HDR
+        // NOT a guess. With the MAC'd format gone there is one header layout,
+        // and a frame that is not it has no verb at any offset we know - so this
+        // says so rather than returning the old MAC header size and reading
+        // whatever bytes live there as a verb. The callers use it only to decide
+        // whether a denial should read as text (a `cpu` run) or as a framed
+        // reply, and "unknown" correctly means the framed one.
+        None
     }
 }
 
@@ -2532,12 +2503,10 @@ fn np_offset(request: &[u8]) -> usize {
 ///    key allowed here" is separate from "does this signature check out". A
 ///    valid signature by a key nobody authorized is exactly as unwelcome as an
 ///    invalid one.
-/// 3. The signature verifies over `nonce ‖ name ‖ message` - the same bytes the
-///    MAC'd format authenticates.
+/// 3. The signature verifies over `SIG_DOMAIN_REQUEST ‖ nonce ‖ name ‖ message`.
 ///
-/// Returns the bare NP message, the nonce (which the reply is still MAC'd
-/// against - reply-auth moves to signatures in step 9), and the claimed user
-/// name, exactly as the MAC'd path does, so everything downstream is unchanged.
+/// Returns the bare NP message, the nonce (which the reply is signed against, so
+/// the two are bound to one transaction), and the claimed user name.
 fn authenticate_signed<'a>(
     auth: &Auth,
     request: &'a [u8],
@@ -2603,42 +2572,50 @@ fn authenticate_signed<'a>(
     Some((np, nonce, who))
 }
 
-/// Seal a framed export reply with a MAC (reply-auth / mutual authentication -
-/// tier 2). `c.prefix[..n]` holds the finished framed reply `[len:4][status:8]
-/// [result…]`; rewrite it to `[len':4][mac:32][status:8][result…]` where
-/// `mac = HMAC(key, request_nonce || [status][result])`. Binding to the request
-/// nonce proves the server holds the key AND ties the reply to this specific
-/// request (so a captured reply can't be replayed against another). Returns the
-/// new framed length. (The `cpu`-run output *stream* is not framed and stays
-/// reply-unauthenticated - the harder streaming-MAC case, deferred.)
-fn seal_reply(c: &mut TcpConn, auth: &Auth, nonce: &[u8], n: usize, signed: bool) -> usize {
-    // THE REPLY FORMAT FOLLOWS THE REQUEST FORMAT, and no discriminator byte is
-    // needed for it: the exporter knows which kind of request it verified, and
-    // the client knows which kind it sent. Inventing a tag would add a field
-    // both sides must agree about for no information either lacks.
-    //
-    // A signed request therefore gets a signed reply - which is why a machine
-    // that cannot sign refuses a signed request outright (see `handle_9p`)
-    // rather than answering it with a MAC the caller cannot check.
-    if signed {
-        if let Some(key) = auth.signing.as_ref() {
-            return seal_reply_signed(c, key, nonce, n);
-        }
+/// Seal a framed export reply — reply-auth, i.e. mutual authentication.
+///
+/// `c.prefix[..n]` holds the finished framed reply `[len:4][status:8][result…]`;
+/// rewrite it to `[len':4][sig:64][status:8][result…]`, signed over
+/// `request_nonce ‖ body`. Binding to the request's nonce proves the exporter
+/// holds the private key AND ties this reply to THAT request, so a captured
+/// reply cannot be replayed against another. Returns the new framed length.
+///
+/// (The `cpu`-run output *stream* is not framed and stays reply-unauthenticated
+/// — the harder streaming case, still deferred.)
+///
+/// Took a `signed: bool` until the flag day, because the reply format followed
+/// whichever format the request used. With one format there is nothing to
+/// follow.
+fn seal_reply(c: &mut TcpConn, auth: &Auth, nonce: &[u8], n: usize) -> usize {
+    match auth.signing.as_ref() {
+        Some(key) => seal_reply_signed(c, key, nonce, n),
+        // Unreachable in practice: `accepts_signed` requires a signing key, so
+        // a request that authenticated implies one exists. Left as a refusal
+        // rather than an `expect` because an unsealed reply must never go out -
+        // returning `n` here would send the BODY unauthenticated.
+        None => refuse_reply(c),
     }
-    let ml = ninep_abi::NP_MAC_LEN; // 32
-    let body_start = ninep_abi::NP_NET_LEN_PREFIX; // 4
-    if n < body_start || n + ml > c.prefix.len() {
-        return n; // malformed or no room - leave unsealed (shouldn't happen)
-    }
-    let body_len = n - body_start;
-    // MAC over nonce || reply-body (compute before shifting the body).
-    let macv = hmac::hmac_sha256(auth.key(), nonce, &c.prefix[body_start..n]);
-    // Make room for the MAC: shift the body right by `ml`, then write the MAC.
-    c.prefix.copy_within(body_start..n, body_start + ml);
-    c.prefix[body_start..body_start + ml].copy_from_slice(&macv);
-    let new_body = ml + body_len;
-    c.prefix[0..4].copy_from_slice(&(new_body as u32).to_le_bytes());
-    body_start + new_body // = n + ml
+}
+
+/// Stage a bare `FS_ERR_AUTH` in place of a reply this machine cannot sign.
+///
+/// A STATUS-ONLY FRAME, DELIBERATELY, and it is not the same thing as sending
+/// nothing. Both arms of [`seal_reply`] used to return `0`, which leaves
+/// `prefix_len` at zero, and `pump_send` then closes the connection with a bare
+/// FIN carrying no payload. The client's `handle_rmount` rejects that on LENGTH
+/// (`got < NP_NET_LEN_PREFIX + 8`) and reports `NO_FS`, so the shell prints "no
+/// filesystem" - the message an unreachable peer gives - about a machine that is
+/// up, listening, and simply unable to sign. `np9p_client.py` raises an
+/// unhandled `RuntimeError` on the same reply.
+///
+/// Twelve bytes (`[len][status]`) instead: too short to carry a signature, which
+/// is exactly what the client's next check tests, so it maps to `FS_ERR_AUTH`
+/// and the operator is sent to the keys rather than to the network. This is the
+/// same unsealed shape `deny_9p` and `deny_no_identity` already stage - a
+/// refusal carries no data to authenticate, and an attacker who could forge it
+/// could equally drop the connection.
+fn refuse_reply(c: &mut TcpConn) -> usize {
+    frame_reply(&mut c.prefix, syscall_abi::FS_ERR_AUTH, &[])
 }
 
 /// Refuse a signed request because THIS machine has no identity to answer with.
@@ -2648,8 +2625,8 @@ fn seal_reply(c: &mut TcpConn, auth: &Auth, nonce: &[u8], n: usize, signed: bool
 /// is that a `cpu` caller reads its reply as text, and "wrong or missing cluster
 /// key" would point at the wrong machine entirely.
 fn deny_no_identity(c: &mut TcpConn, request: &[u8]) {
-    let voff = np_offset(request);
-    let is_run = request.len() >= voff + 8 && read_u64(request, voff) == ninep_abi::NP_RUN;
+    let is_run = matches!(np_offset(request),
+        Some(voff) if request.len() >= voff + 8 && read_u64(request, voff) == ninep_abi::NP_RUN);
     c.file = false;
     c.prefix_off = 0;
     c.cpu_child = CPU_NONE;
@@ -2664,8 +2641,8 @@ fn deny_no_identity(c: &mut TcpConn, request: &[u8]) {
     }
 }
 
-/// Sign a framed export reply with this machine's private key - the mirror of
-/// [`seal_reply`]'s MAC, and the last thing the shared cluster key was doing.
+/// Sign a framed export reply with this machine's private key - the reply half
+/// of the mutual authentication [`seal_reply`] dispatches to.
 ///
 /// `[len][sig:64][status][result]`, signed over `request_nonce ‖ body`. Binding
 /// to the request's nonce is what ties this reply to *that* request, so a
@@ -2680,7 +2657,23 @@ fn seal_reply_signed(
     let sl = ninep_abi::NP_SIG_LEN; // 64
     let body_start = ninep_abi::NP_NET_LEN_PREFIX;
     if n < body_start || n + sl > c.prefix.len() {
-        return n; // no room - leave unsealed, as the MAC path does
+        // NO ROOM: refuse, exactly as [`seal_reply`]'s keyless arm does.
+        //
+        // Returning `n` here - which it did until this was caught - stages the
+        // body with no signature over it, and `handle_9p` then transmits it: an
+        // authenticated request answered by an unauthenticated reply, which is
+        // the one thing reply-signing exists to prevent. The caller sees
+        // `FS_ERR_AUTH`, so the symptom is "authentication failed on large
+        // reads" between two machines that are correctly keyed.
+        //
+        // Unreachable today, but only by a margin nothing asserts: `PREFIX_MAX`
+        // is 2048 and the largest `build_9p_reply` is 12 + `EXPORT_CHUNK`
+        // (1400) = 1412, leaving 572 bytes spare after the signature. Raising
+        // `EXPORT_CHUNK` past 1972, shrinking `PREFIX_MAX`, or adding a verb
+        // with a bigger reply would each reach it - so the margin is pinned by
+        // a compile-time assertion beside `EXPORT_CHUNK` rather than left to
+        // arithmetic nobody re-does.
+        return refuse_reply(c);
     }
     let body_len = n - body_start;
     // Signed over nonce ‖ body via the two-part entry point, so the
@@ -2704,8 +2697,8 @@ fn seal_reply_signed(
 /// staged, which the shell surfaces as "authentication failed". The verb peek
 /// is only used to pick the reply *format* (untrusted, but harmless either way).
 fn deny_9p(c: &mut TcpConn, request: &[u8]) {
-    let voff = np_offset(request);
-    let is_run = request.len() >= voff + 8 && read_u64(request, voff) == ninep_abi::NP_RUN;
+    let is_run = matches!(np_offset(request),
+        Some(voff) if request.len() >= voff + 8 && read_u64(request, voff) == ninep_abi::NP_RUN);
     c.file = false;
     c.prefix_off = 0;
     c.cpu_child = CPU_NONE;
@@ -2724,8 +2717,8 @@ fn deny_9p(c: &mut TcpConn, request: &[u8]) {
 /// on the wire (one refusal code, so a client needs no new case), an accurate
 /// line for the `cpu` caller, who reads the reply as raw output.
 fn deny_unknown_user(c: &mut TcpConn, request: &[u8], cause: LineScan) {
-    let voff = np_offset(request);
-    let is_run = request.len() >= voff + 8 && read_u64(request, voff) == ninep_abi::NP_RUN;
+    let is_run = matches!(np_offset(request),
+        Some(voff) if request.len() >= voff + 8 && read_u64(request, voff) == ninep_abi::NP_RUN);
     c.file = false;
     c.prefix_off = 0;
     c.cpu_child = CPU_NONE;
@@ -2734,7 +2727,7 @@ fn deny_unknown_user(c: &mut TcpConn, request: &[u8], cause: LineScan) {
         let m: &[u8] = if unreadable {
             b"cpu: this host cannot read its account database right now\r\n"
         } else {
-            b"cpu: no account of that name on this host (the cluster key was accepted)\r\n"
+            b"cpu: no account of that name on this host (the signature was accepted)\r\n"
         };
         let n = m.len().min(c.prefix.len());
         c.prefix[..n].copy_from_slice(&m[..n]);
@@ -2748,15 +2741,16 @@ fn deny_unknown_user(c: &mut TcpConn, request: &[u8], cause: LineScan) {
     }
 }
 
-/// Frame **and sign** an NP message for an outbound export request (the
-/// export-hardening phase - the client-side counterpart of [`authenticate`]).
-/// Writes either format - `[len][magic][nonce][name][pubkey][sig][np]` when this
-/// machine has a signing identity, `[len][magic][nonce][name][mac][np]` when it
-/// does not - and returns the total framed length (or `0` if there is no cluster
-/// key, or `out` is too small)
-/// **and the nonce it used** - the client verifies the reply's MAC against that
-/// same nonce (reply-auth). The nonce is a fresh, non-repeating value: the
-/// `MONOTONIC_US` clock plus our packed IP. `mac = HMAC(cluster_key, nonce || np)`.
+/// Frame **and sign** an NP message for an outbound export request - the
+/// client-side counterpart of [`authenticate`].
+///
+/// Writes the one format, `[len][magic][nonce][name][pubkey][sig][np]`, and
+/// returns the total framed length (or `0` if this machine has no signing
+/// identity, or `out` is too small) **and the nonce it used** - the client
+/// verifies the reply's SIGNATURE against that same nonce (reply-auth). The
+/// nonce is a fresh, non-repeating value: the `MONOTONIC_US` clock plus our
+/// packed IP. It took an `auth` rather than a key because it once had two
+/// formats to choose between; it keeps it for [`Auth::can_send`].
 fn frame_signed(
     auth: &Auth,
     who: &[u8; ninep_abi::NP_NAME_LEN],
@@ -2777,58 +2771,24 @@ fn frame_signed(
     if !auth.can_send() {
         return (0, zero_nonce);
     }
-    // SIGN WHEN THIS MACHINE HAS AN IDENTITY, MAC otherwise.
-    //
-    // The fallback is what lets a machine with no `/etc/cluster/id` keep working
-    // while the cluster is half-migrated, and it is deliberately the *older*
-    // format rather than a refusal: step 10 retires the MAC and this branch
-    // becomes a deletion rather than a redesign.
-    if let Some(key) = auth.signing.as_ref() {
-        return frame_signed_ed25519(key, who, np, out);
+    // ONE FORMAT: sign, or refuse. Until the flag day this fell back to a
+    // shared-key MAC when the machine had no identity of its own, which is what
+    // kept a keyless node working through the migration. There is nothing to
+    // fall back to now, and a request this machine cannot authenticate must not
+    // be sent at all - see the gate above.
+    match auth.signing.as_ref() {
+        Some(key) => frame_signed_ed25519(key, who, np, out),
+        None => (0, zero_nonce),
     }
-    let p = ninep_abi::NP_NET_LEN_PREFIX;
-    let body = ninep_abi::NP_AUTH_HDR + np.len();
-    let total = p + body;
-    if total > out.len() || np.len() > ninep_abi::NP_NET_MAX {
-        return (0, zero_nonce);
-    }
-    // Fresh nonce: [monotonic_us:8][our_ip_packed:8]. Held in a local so the
-    // HMAC input doesn't alias the `out` buffer we're writing the MAC into.
-    let us = syscall(syscall_abi::MONOTONIC_US, 0);
-    let ip = our_ip();
-    let ipp = (ip[0] as u64) | ((ip[1] as u64) << 8) | ((ip[2] as u64) << 16) | ((ip[3] as u64) << 24);
-    let mut nonce = [0u8; ninep_abi::NP_NONCE_LEN];
-    nonce[0..8].copy_from_slice(&us.to_le_bytes());
-    nonce[8..16].copy_from_slice(&ipp.to_le_bytes());
-    // Length prefix + magic + nonce, then the NP message after the header.
-    out[0..4].copy_from_slice(&(body as u32).to_le_bytes());
-    out[p..p + 8].copy_from_slice(&ninep_abi::NP_AUTH_MAGIC.to_le_bytes());
-    let noff = p + ninep_abi::NP_AUTH_NONCE_OFF;
-    out[noff..noff + ninep_abi::NP_NONCE_LEN].copy_from_slice(&nonce);
-    let woff = p + ninep_abi::NP_AUTH_NAME_OFF;
-    out[woff..woff + ninep_abi::NP_NAME_LEN].copy_from_slice(who);
-    let npoff = p + ninep_abi::NP_AUTH_HDR;
-    out[npoff..npoff + np.len()].copy_from_slice(np);
-    // MAC over nonce || name || np. The name is INSIDE the MAC, which is the
-    // point: protecting the claimed user costs nothing extra (the MAC was
-    // already here) and it cannot be edited in flight without the key. Built as
-    // one prefix so the MAC stays a two-part call.
-    let mut prefix = [0u8; ninep_abi::NP_MAC_PREFIX_LEN];
-    prefix[..ninep_abi::NP_NONCE_LEN].copy_from_slice(&nonce);
-    prefix[ninep_abi::NP_NONCE_LEN..].copy_from_slice(who);
-    let mac = hmac::hmac_sha256(auth.key(), &prefix, np);
-    let moff = p + ninep_abi::NP_AUTH_MAC_OFF;
-    out[moff..moff + ninep_abi::NP_MAC_LEN].copy_from_slice(&mac);
-    (total, nonce)
 }
 
 /// Frame and **sign** an outbound export request with this machine's private
 /// key - the mirror of [`authenticate_signed`].
 ///
 /// Writes `[len][magic][nonce][name][pubkey][sig][np]` and returns the framed
-/// length and the nonce. The nonce still matters: until step 9 the *reply* is
-/// MAC'd against it, so both halves of the exchange remain checkable while only
-/// one of them has moved to signatures.
+/// length and the nonce. The nonce is what binds the two halves of the exchange:
+/// the exporter signs its reply over that same value, so a captured reply cannot
+/// be replayed against a different request.
 fn frame_signed_ed25519(
     key: &ed25519::SigningKey,
     who: &[u8; ninep_abi::NP_NAME_LEN],
@@ -4152,7 +4112,7 @@ fn for_each_line(path: &[u8], mut f: impl FnMut(&[u8]) -> bool) -> LineScan {
             // mounted yet) and a `TASK_ERR_*` from an fsd restart are transient,
             // and folding them into a refusal reports "authentication failed"
             // for a condition that would succeed a moment later - sending the
-            // operator after the cluster key again. `load_auth` already retries
+            // operator after the cluster identity again. `load_auth` already retries
             // NO_FS for exactly this reason; this reports it so callers can.
             return LineScan::Unreadable;
         }
@@ -4291,8 +4251,8 @@ fn map_user(who: &[u8; ninep_abi::NP_NAME_LEN]) -> Result<Proxy, LineScan> {
 /// compile until it says who it is for. See docs/unspellable-postmortem.md.
 #[derive(Clone, Copy)]
 enum As {
-    /// `netd`'s own business: the cluster key, the `/etc/passwd` lookups behind
-    /// name resolution, the HTTP server's file reads. Authorized against
+    /// `netd`'s own business: its cluster identity and authorized-peer files, the
+    /// `/etc/passwd` lookups behind name resolution, the HTTP server's file reads. Authorized against
     /// `netd`'s own kernel-bound credential, exactly as before this existed.
     FirstParty,
     /// A remote caller, already resolved through THIS machine's `/etc/passwd`.
@@ -4304,7 +4264,7 @@ enum As {
     /// This is the other listener, and it needs saying: HTTP has no user model,
     /// so before this it read files with netd's own root credential and `fsd`'s
     /// root bypass served them - an unauthenticated `GET /etc/shadow` on port 80
-    /// returned the hashes, no cluster key and no username involved. That is the
+    /// returned the hashes, no signature and no username involved. That is the
     /// same exposure the cluster identity work closes, reachable through the
     /// door next to it. Anonymous means `other`-triad access and nothing more.
     Anonymous,

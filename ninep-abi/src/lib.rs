@@ -239,6 +239,33 @@ pub const NP_NET_LEN_PREFIX: usize = 4;
 /// segments. A large file streams a chunk per round trip, as `cat` does locally.
 pub const NP_NET_MAX: usize = 48 + 2048;
 
+/// The NP message header: `verb`, `tree`, and the four params.
+const NP_MSG_HDR: usize = 6 * 8;
+
+/// WHAT [`NP_NET_MAX`] IS FOR, as opposed to what it equals: one NP message
+/// header plus a full bulk-transfer chunk.
+///
+/// A COMPILE-TIME ASSERTION rather than a test, on clippy's advice
+/// (`assertions_on_constants`) and because it is strictly stronger - it fails
+/// the BUILD, so it holds for `make esp` and every image target, not only for
+/// someone who ran `make test`. The paired test in this module pins these
+/// numbers by VALUE; this pins them by MEANING, so a deliberate resize has to
+/// satisfy the requirement instead of just updating a literal.
+///
+/// `syscall-abi` is deliberately not a dependency of this crate (see the note
+/// at the `NsTarget` definition), so `SAFECOPY_MAX` is spelled out here.
+const _: () = {
+    const SAFECOPY_MAX: usize = 2048; // syscall-abi's bulk-transfer cap
+    assert!(
+        NP_NET_MAX >= NP_MSG_HDR + SAFECOPY_MAX,
+        "NP_NET_MAX must hold an NP header plus a full bulk chunk"
+    );
+    assert!(
+        NP_NET_MAX >= NP_MSG_HDR + NP_REMOTE_CHUNK,
+        "NP_NET_MAX must hold an NP header plus a remote read chunk"
+    );
+};
+
 /// The namespace `tree` sentinel marking a **remote** binding (cluster Phase 1c).
 /// A local binding's `tree` selects a mount *within* `fsd` (0 = the boot mount);
 /// `0xFF` instead means the binding's `target` begins with a 6-byte endpoint
@@ -289,63 +316,83 @@ pub const NS_PROC_TREE: u8 = 4;
 pub const NP_REMOTE_CHUNK: usize = 512;
 
 // ---------------------------------------------------------------------------
-// Cluster authentication (the export-hardening phase; see the security section
-// of `docs/roadmap-cluster.md`). Every *inbound* framed export request carries
-// an auth header in front of the NP message; the exporter verifies it before
-// serving any verb (fs op *or* `NP_RUN`). The scheme is a **client-nonce MAC**:
+// Cluster authentication. THIS BLOCK IS THE NORMATIVE WIRE SPEC: both Python
+// peers (`scripts/np9p_client.py`, `scripts/np9p_server.py`) are transcribed
+// from it, and so is any third implementation. Keep it exact - a drift here
+// surfaces at the far end as a bare `FS_ERR_AUTH`, which reads as a key problem
+// rather than a format problem.
 //
-//   framed request:  [u32 len][magic:8][nonce:16][mac:32][NP message...]
+// Every *inbound* framed export request carries an auth header in front of the
+// NP message; the exporter verifies it before serving any verb (fs op *or*
+// `NP_RUN`). The scheme is a **per-machine Ed25519 signature** over a
+// client-chosen nonce (see `docs/roadmap-cluster-keys.md`):
 //
-// where `mac = HMAC-SHA256(cluster_key, nonce || NP-message)`. The shared
-// cluster secret never crosses the wire, and a peer without it cannot forge a
-// request. `len` still counts every byte after the 4-byte prefix (now the auth
-// header + the NP message).
+//   framed request:  [u32 len][magic:8][nonce:16][name:32][pubkey:32][sig:64][NP message...]
 //
-// The *reply* is authenticated too (tier 2, mutual authentication):
+// - `magic` is [`NP_AUTH_MAGIC_SIGNED`] ("AUTHNP03").
+// - `name` is the requesting USER, NUL-padded (see [`NP_NAME_LEN`]); the
+//   exporter resolves it through its OWN `/etc/passwd` and refuses a stranger.
+// - `pubkey` is the CALLING MACHINE's public key, which the exporter looks up
+//   in `/etc/cluster/authorized` BEFORE verifying anything - "is this key
+//   allowed here" and "does this signature check out" are different questions,
+//   and a valid signature by an unauthorized key is exactly as unwelcome as an
+//   invalid one.
+// - `sig` covers [`SIG_DOMAIN_REQUEST`] ‖ `nonce` ‖ `name` ‖ NP-message. The
+//   header is [`NP_AUTH_HDR_SIGNED`] (152) bytes.
 //
-//   framed reply:  [u32 len][mac:32][status:u64][result...]
+// The private key never crosses the wire, and unlike the shared-secret scheme
+// this replaced, the ability to VERIFY is no longer the ability to FORGE - which
+// is what makes per-peer revocation (delete a line) meaningful. `len` counts
+// every byte after the 4-byte prefix (the auth header + the NP message).
 //
-// where `mac = HMAC-SHA256(cluster_key, request_nonce || [status][result])` -
-// the reply is MAC'd against the SAME nonce the client signed its request with,
-// which both proves the reply came from a holder of the key AND binds it to this
-// specific request (a captured reply can't be replayed against another). No
-// reply nonce field is needed - the request nonce is the shared per-transaction
-// value both sides already hold. The client rejects a reply whose MAC doesn't
-// verify (an injected/forged reply, or one from a peer without the key). This is
-// integrity/authenticity, NOT confidentiality: bytes still cross in cleartext.
+// The *reply* is signed too (mutual authentication):
+//
+//   framed reply:  [u32 len][sig:64][status:u64][result...]
+//
+// where `sig` covers [`SIG_DOMAIN_REPLY`] ‖ `request_nonce` ‖ `[status][result]`,
+// made with the EXPORTER's private key. Binding to the request's nonce ties the
+// reply to *that* request, so a captured reply cannot be replayed against a
+// different one; no reply nonce field is needed, since the request nonce is the
+// per-transaction value both sides already hold. The two domain tags are what
+// stop a signature made for one direction from being presented as the other.
+//
+// THE TWO DIRECTIONS LOOK THE PEER UP DIFFERENTLY, and this asymmetry is why an
+// `authorized` line carries an ADDRESS as well as a key: an exporter is OFFERED
+// a key and need only decide whether it is allowed, while a client is offered
+// nothing and must know IN ADVANCE whose signature will do, so it looks up by
+// the address it dialled (`clusterkeys::find_by_ip`). Accepting any authorized
+// signature there would authenticate "some cluster member" rather than "the
+// machine I asked".
+//
+// A machine that cannot sign REFUSES a signed request rather than answering
+// unauthenticated. This is integrity/authenticity, NOT confidentiality: bytes
+// still cross in cleartext.
 //
 // Still out of scope (deferred to the leaving-a-trusted-network hardening,
 // docs/roadmap-cluster.md): replay-of-observed-ops (a passive sniffer can replay
-// a captured request verbatim; forgery of a *new* one it cannot), per-peer
-// identity, transport encryption, and reply-auth for the `cpu`-run output
-// *stream* (not a framed reply). See `programs/servers/netd/src/hmac.rs`.
+// a captured request verbatim; forgery of a *new* one it cannot), transport
+// encryption, and reply-auth for the `cpu`-run output *stream* (not a framed
+// reply). Keys are per-MACHINE, not per-user, so an authorized machine can still
+// claim any of its own users' names.
+//
+// The retired shared-key MAC format ("AUTHNP02") is refused outright; it
+// survives only as a negative control `np9p_client.py --legacy-mac` can send.
 // ---------------------------------------------------------------------------
 
-/// Magic at the head of an authenticated framed request, distinguishing it from
-/// an unauthenticated (legacy) frame. When the exporter has a key configured it
-/// requires this; a frame without it is refused (fail-closed).
-///
-/// **Bumped to `02` when the requesting user's name joined the header** (the
-/// per-user cluster identity arc). A deliberate flag day: an `01` peer's frame
-/// is *refused* rather than misparsed, because the old layout's first 32
-/// message bytes would otherwise be read as a username. Both nodes of a cluster
-/// are built from one tree, so the cost is nil, and the alternative - a
-/// silently misread identity - is not a trade worth making.
-pub const NP_AUTH_MAGIC: u64 = 0x4155_5448_4E50_3032; // "AUTHNP02" (big-endian ASCII)
 
 /// Bytes of nonce in the auth header (a fresh, non-repeating value per request:
 /// the client's `MONOTONIC_US` clock, plus its packed IP for cross-machine
 /// separation). Only freshness is required - not secrecy or unpredictability.
 pub const NP_NONCE_LEN: usize = 16;
 
-/// Bytes of MAC in the auth header (one HMAC-SHA256 digest).
-pub const NP_MAC_LEN: usize = 32;
-
 /// Bytes of **requesting user name** in the auth header, NUL-padded.
 ///
-/// The shared key authenticates a *machine*; this says which of that machine's
-/// users is asking, so the far side can apply its own permission model instead
-/// of serving every remote request as root.
+/// The signature authenticates a *machine* (its keypair); this says which of
+/// that machine's users is asking, so the far side can apply its own permission
+/// model instead of serving every remote request as root. It is covered by the
+/// signature, so the claimed user cannot be tampered with in flight - though an
+/// authorized machine can still claim any of its own users' names, which is what
+/// a per-USER key tier would close.
 ///
 /// **A name, not a uid.** Two nodes have independent `/etc/passwd` files, so
 /// uid 1000 need not be the same person on both - numeric identity (NFS's
@@ -358,21 +405,15 @@ pub const NP_MAC_LEN: usize = 32;
 /// typed at a prompt can cross the cluster.
 pub const NP_NAME_LEN: usize = 32;
 
-/// The auth header size prepended to a framed request body: `magic`(8) +
-/// `nonce`([`NP_NONCE_LEN`]) + `name`([`NP_NAME_LEN`]) + `mac`([`NP_MAC_LEN`]).
-pub const NP_AUTH_HDR: usize = 8 + NP_NONCE_LEN + NP_NAME_LEN + NP_MAC_LEN;
-
 /// Offset of the nonce within the auth header (right after the 8-byte magic).
 pub const NP_AUTH_NONCE_OFF: usize = 8;
 /// Offset of the requesting user's name within the auth header.
 pub const NP_AUTH_NAME_OFF: usize = 8 + NP_NONCE_LEN;
-/// Offset of the MAC within the auth header (after magic + nonce + name).
-pub const NP_AUTH_MAC_OFF: usize = 8 + NP_NONCE_LEN + NP_NAME_LEN;
-
 /// Magic marking a **signed** framed request — the per-machine-keypair format
-/// (`docs/roadmap-cluster-keys.md`). Accepted alongside [`NP_AUTH_MAGIC`]
-/// during the transition, which is what lets the exporter learn to verify
-/// signatures before any client learns to make them.
+/// (`docs/roadmap-cluster-keys.md`). The ONLY accepted format since the flag
+/// day; it was accepted alongside the shared-key MAC'd magic `AUTHNP02` during
+/// the transition, which is what let the exporter learn to verify signatures
+/// before any client learned to make them.
 ///
 /// The layout keeps `nonce` and `name` where the MAC'd format has them and
 /// replaces the 32-byte MAC with a 32-byte **public key** plus a 64-byte
@@ -393,25 +434,16 @@ pub const NP_PUBKEY_LEN: usize = 32;
 pub const NP_SIG_LEN: usize = 64;
 
 /// Offset of the offered public key within a signed auth header — where the
-/// MAC'd format keeps its MAC.
+/// retired MAC'd format kept its MAC.
 pub const NP_AUTH_PUBKEY_OFF: usize = 8 + NP_NONCE_LEN + NP_NAME_LEN;
 /// Offset of the signature within a signed auth header.
 pub const NP_AUTH_SIG_OFF: usize = NP_AUTH_PUBKEY_OFF + NP_PUBKEY_LEN;
 /// Size of a signed auth header: `magic`(8) + `nonce` + `name` + `pubkey` +
-/// `sig`. Larger than the MAC'd header, so [`NP_FRAME_MAX`] is sized from this
-/// one.
+/// `sig` = 152. The only header format on the wire; it was the larger of the
+/// two while the retired MAC'd one still existed, which is why
+/// [`NP_FRAME_MAX`] is sized from it.
 pub const NP_AUTH_HDR_SIGNED: usize =
     8 + NP_NONCE_LEN + NP_NAME_LEN + NP_PUBKEY_LEN + NP_SIG_LEN;
-
-/// The bytes the request MAC covers *before* the NP message: `nonce` || `name`.
-/// One constant because both sides must agree, and because it keeps the MAC a
-/// two-part call rather than growing a three-part variant.
-///
-/// **The name is inside the MAC, which is the whole point.** It costs nothing -
-/// the MAC was already there - and it means the claimed user cannot be edited
-/// in flight by anything that does not hold the cluster key. A tamper attempt
-/// fails verification exactly as a tampered path or offset already does.
-pub const NP_MAC_PREFIX_LEN: usize = NP_NONCE_LEN + NP_NAME_LEN;
 
 /// Domain tag prefixed to the bytes a **request** signature covers.
 ///
@@ -435,13 +467,44 @@ pub const SIG_DOMAIN_REQUEST: &[u8] = b"ouroboros-cluster-request-v1\0";
 pub const SIG_DOMAIN_REPLY: &[u8] = b"ouroboros-cluster-reply-v1\0";
 
 /// The longest domain tag, so a caller can size a buffer for either.
-pub const SIG_DOMAIN_MAX: usize = 29;
+///
+/// COMPUTED, NOT TRANSCRIBED. This was the literal `29`, tied to the tags it
+/// describes by nothing but a `#[cfg(test)]` assertion — and `netd` sizes four
+/// signing buffers as `SIG_DOMAIN_MAX + …` and writes their last byte, so one
+/// byte of tag growth is a slice-index panic in `authenticate_signed`, reached
+/// from `handle_9p` BEFORE any key lookup. Anyone able to send 152 bytes to
+/// port 564 could then kill `netd` and burn the supervisor's per-boot restart
+/// cap. A `cargo test` is the wrong guard for that: it does not run for
+/// `make esp` or any image target.
+///
+/// Evaluating the definition removes both problems at once — it cannot be
+/// transcribed wrongly, and it cannot be stale. Same move as the small-order-key
+/// table this arc replaced with `[8]P == identity`.
+pub const SIG_DOMAIN_MAX: usize = if SIG_DOMAIN_REQUEST.len() > SIG_DOMAIN_REPLY.len() {
+    SIG_DOMAIN_REQUEST.len()
+} else {
+    SIG_DOMAIN_REPLY.len()
+};
 
-/// The bytes an Ed25519 **signature** covers before the NP message. The same
-/// `nonce ‖ name` the MAC covers, deliberately: the two formats authenticate
-/// identical bytes and differ only in who can produce the authenticator, so a
-/// reader comparing them has one fewer difference to hold in mind.
-pub const NP_SIG_PREFIX_LEN: usize = NP_MAC_PREFIX_LEN;
+/// Both tags fit the buffer sized from them — trivially true now that
+/// [`SIG_DOMAIN_MAX`] is computed, and asserted at BUILD time anyway so that
+/// re-transcribing it later fails the build rather than a test nobody ran.
+const _: () = {
+    assert!(SIG_DOMAIN_REQUEST.len() <= SIG_DOMAIN_MAX);
+    assert!(SIG_DOMAIN_REPLY.len() <= SIG_DOMAIN_MAX);
+};
+
+/// The bytes an Ed25519 **signature** covers before the NP message:
+/// `nonce ‖ name`.
+///
+/// **The name is inside the signature, which is the whole point.** It costs
+/// nothing — the signature was already there — and it means the claimed user
+/// cannot be edited in flight by anything without the machine's private key. A
+/// tamper attempt fails verification exactly as a tampered path or offset does.
+///
+/// Was defined as an alias of `NP_MAC_PREFIX_LEN` while both formats existed,
+/// because they deliberately authenticated identical bytes.
+pub const NP_SIG_PREFIX_LEN: usize = NP_NONCE_LEN + NP_NAME_LEN;
 
 // --- the in-request identity word (`a3`) ----------------------------------
 //
@@ -474,8 +537,9 @@ pub const NP_SIG_PREFIX_LEN: usize = NP_MAC_PREFIX_LEN;
 /// netd's own" fallback, because that fallback is root).
 pub const NP_ID_NONE: u64 = 0;
 
-/// **`netd`'s own business**, stated explicitly: the cluster key, the
-/// `/etc/passwd` lookups behind name resolution, the HTTP server's file reads.
+/// **`netd`'s own business**, stated explicitly: its cluster identity and
+/// authorized-peer files, the `/etc/passwd` lookups behind name resolution, the
+/// HTTP server's file reads.
 /// Authorized against `netd`'s own kernel-bound credential, exactly as before
 /// this field existed. Spelling it is what makes a forgotten export path a
 /// compile error rather than a silent root escalation.
@@ -535,17 +599,9 @@ pub fn proxy_parts(word: u64) -> Option<(u32, u32)> {
 /// Largest fully-framed request buffer: the 4-byte length prefix + the auth
 /// header + the biggest NP message. Buffers that build or receive a framed
 /// export request are sized to this.
-pub const NP_FRAME_MAX: usize =
-    NP_NET_LEN_PREFIX + max_usize(NP_AUTH_HDR, NP_AUTH_HDR_SIGNED) + NP_NET_MAX;
-
-/// `max` for `usize` in a `const` context.
-const fn max_usize(a: usize, b: usize) -> usize {
-    if a > b {
-        a
-    } else {
-        b
-    }
-}
+///
+/// Was a `max` of the two header sizes while both formats existed.
+pub const NP_FRAME_MAX: usize = NP_NET_LEN_PREFIX + NP_AUTH_HDR_SIGNED + NP_NET_MAX;
 
 // ---------------------------------------------------------------------------
 // The shared namespace resolver. A namespace is a sequence of bindings
@@ -765,39 +821,56 @@ mod tests {
         assert_eq!(NP_AUTH_SIG_OFF, NP_AUTH_PUBKEY_OFF + NP_PUBKEY_LEN);
         assert_eq!(NP_AUTH_HDR_SIGNED, NP_AUTH_SIG_OFF + NP_SIG_LEN);
         assert_eq!(NP_AUTH_HDR_SIGNED, 152);
-        // nonce and name sit where the MAC'd format keeps them, so the shared
-        // prefix really is shared.
         assert_eq!(NP_AUTH_NONCE_OFF, 8);
         assert_eq!(NP_AUTH_NAME_OFF, 8 + NP_NONCE_LEN);
-        assert_eq!(NP_SIG_PREFIX_LEN, NP_MAC_PREFIX_LEN);
     }
 
     #[test]
-    fn a_frame_buffer_fits_the_larger_of_the_two_headers() {
-        // The signed header is bigger; a buffer sized from the MAC'd one would
-        // truncate every signed frame at the maximum message size.
-        assert!(NP_AUTH_HDR_SIGNED > NP_AUTH_HDR);
+    fn a_frame_buffer_fits_the_whole_header() {
+        // PINNED AS LITERALS, INDEPENDENTLY OF THE DEFINITIONS ABOVE. This test
+        // used to assert `NP_FRAME_MAX == NP_NET_LEN_PREFIX + NP_AUTH_HDR_SIGNED
+        // + NP_NET_MAX`, which is `NP_FRAME_MAX`'s own definition token-for-token
+        // - it tracked any edit instead of catching one. Mutation-proven at the
+        // time: `NP_NET_MAX = 7` left all thirteen tests in this crate green,
+        // and the Makefile cited THIS test by name as the reason the crate was
+        // added to `make test`. A second, independent spelling of each number is
+        // what makes the sum mean something.
+        assert_eq!(NP_NET_LEN_PREFIX, 4);
+        assert_eq!(NP_AUTH_HDR_SIGNED, 152);
+        assert_eq!(NP_NET_MAX, 2096);
+        assert_eq!(NP_FRAME_MAX, 2252);
+        // And the composition still holds, so a buffer sized from `NP_FRAME_MAX`
+        // cannot truncate a maximal frame.
         assert_eq!(NP_FRAME_MAX, NP_NET_LEN_PREFIX + NP_AUTH_HDR_SIGNED + NP_NET_MAX);
     }
 
     #[test]
-    fn the_two_magics_differ() {
-        // A signed frame must never be read as a MAC'd one: the MAC'd reader
-        // would take the first 32 bytes of the public key as a MAC and refuse,
-        // which is safe, but the reverse (a MAC'd frame read as signed) would
-        // read message bytes as a signature.
-        assert_ne!(NP_AUTH_MAGIC, NP_AUTH_MAGIC_SIGNED);
+    fn the_retired_mac_magic_is_not_the_signed_one() {
+        // The MAC'd format is gone, but its magic must never be reachable by
+        // accident: `authenticate` refuses anything that is not the signed
+        // magic, and this pins that the retired value is genuinely a different
+        // 8 bytes rather than something a stale peer's frame could satisfy.
+        // COMPUTED FROM THE ASCII, NOT TRANSCRIBED. Both values used to be
+        // hand-written hex, so this compared two literals and a digit
+        // transposition in either still passed - while the three other
+        // spellings of the magic (both Python peers, drive-2vm.py) all derive
+        // it from the bytes. A transposition would keep the two Rust ends
+        // agreeing, so a two-VM cluster still mounts and `make test` stays
+        // green, while every foreign observer is refused with AUTH FAILED and
+        // reads as a key problem. Same class as the small-order-key table this
+        // arc replaced with `[8]P == identity`.
+        assert_eq!(NP_AUTH_MAGIC_SIGNED, u64::from_be_bytes(*b"AUTHNP03"));
+        assert_ne!(u64::from_be_bytes(*b"AUTHNP02"), NP_AUTH_MAGIC_SIGNED);
     }
 
     #[test]
-    fn the_mac_covers_exactly_the_nonce_and_the_name() {
-        // Both peers build the MAC input from NP_MAC_PREFIX_LEN and read the
+    fn the_signature_covers_exactly_the_nonce_and_the_name() {
+        // Both peers build the signed input from NP_SIG_PREFIX_LEN and read the
         // fields by offset. If those disagreed, either the name would fall
-        // outside the MAC (forgeable) or every verification would fail.
+        // outside the signature (forgeable) or every verification would fail.
         assert_eq!(NP_AUTH_NAME_OFF, NP_AUTH_NONCE_OFF + NP_NONCE_LEN);
-        assert_eq!(NP_AUTH_MAC_OFF, NP_AUTH_NAME_OFF + NP_NAME_LEN);
-        assert_eq!(NP_MAC_PREFIX_LEN, NP_AUTH_MAC_OFF - NP_AUTH_NONCE_OFF);
-        assert_eq!(NP_AUTH_HDR, 8 + NP_NONCE_LEN + NP_NAME_LEN + NP_MAC_LEN);
+        assert_eq!(NP_AUTH_PUBKEY_OFF, NP_AUTH_NAME_OFF + NP_NAME_LEN);
+        assert_eq!(NP_SIG_PREFIX_LEN, NP_AUTH_PUBKEY_OFF - NP_AUTH_NONCE_OFF);
     }
 
     #[test]

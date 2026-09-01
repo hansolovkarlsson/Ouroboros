@@ -12,8 +12,9 @@ alive. Both transcripts and both abort counts are printed at the end.
 
 Use the EXT2 images for anything about permissions: FAT32 records no mode, so
 `fsd` has nothing to enforce and every remote request looks permitted there
-regardless of who sent it. `make image-ext2` stages CLUSTER.KEY for exactly this
-reason — without it the export is fail-closed and the rig cannot come up.
+regardless of who sent it. `make image-ext2` stages `/etc/cluster/id` (at 0600)
+and `authorized` for exactly this reason — without an identity and a peer list
+the export is fail-closed and the rig cannot come up.
 
 The console-typing rules (pace the input, match only NEW output) are inherited
 from drive-qemu.py's `Guest`, deliberately rather than copied: they are the
