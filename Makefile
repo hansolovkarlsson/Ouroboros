@@ -132,6 +132,8 @@ SERVE_BIN    := target/$(USER_TARGET)/release/serve.bin
 # (mkdir -p $(ESP_DIR)/...), which every image target depends on.
 BUILD_DIR    := build
 ESP_DIR      := $(BUILD_DIR)/esp
+# Where `esp` builds the tree before it becomes $(ESP_DIR) (see that target).
+ESP_STAGE    := $(ESP_DIR).new
 ESP_IMG      := $(ESP_DIR).img
 ESP_HDD      := $(ESP_DIR).hdd
 # WHICH MACHINE an image is built as. Per-machine keypairs mean an image carries
@@ -534,98 +536,115 @@ serve-bin:
 # $(ESP_DIR) with QEMU's `fat:rw:` can add files of their own, which is a second
 # way in that a blocklist would never have covered.
 #
-# ESP_DIR is a literal (build/esp), never empty or user-supplied.
 esp: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin accountd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin id-bin passwd-bin useradd-bin groupadd-bin usermod-bin clusterkey-bin chello-bin cdemo-bin cfile-bin cpico-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin edtest-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin tail-bin nl-bin rev-bin uniq-bin sort-bin
-	rm -rf $(ESP_DIR)
-	mkdir -p $(ESP_DIR)/EFI/BOOT $(ESP_DIR)/EFI/ORBS $(ESP_DIR)/bin $(ESP_DIR)/man $(ESP_DIR)/etc
-	cp $(KERNEL) $(ESP_DIR)/EFI/BOOT/BOOTAA64.EFI
-	cp $(SHELL_BIN) $(ESP_DIR)/EFI/ORBS/SH.BIN
-	cp $(HELLO_BIN) $(ESP_DIR)/EFI/ORBS/HELLO.BIN
-	cp $(PONG_BIN) $(ESP_DIR)/EFI/ORBS/PONG.BIN
-	cp $(FSD_BIN) $(ESP_DIR)/EFI/ORBS/FSD.BIN
-	cp $(UPPER_BIN) $(ESP_DIR)/EFI/ORBS/UPPER.BIN
-	cp $(UPPER_BIN) $(ESP_DIR)/bin/UPPER
-	cp $(COND_BIN) $(ESP_DIR)/EFI/ORBS/COND.BIN
-	cp $(NETD_BIN) $(ESP_DIR)/EFI/ORBS/NETD.BIN
-	cp $(ACCTD_BIN) $(ESP_DIR)/EFI/ORBS/ACCOUNTD.BIN
-	cp $(ARGS_BIN) $(ESP_DIR)/EFI/ORBS/ARGS.BIN
-	printf '\\EFI\\ORBS\\SH.BIN' > $(ESP_DIR)/EFI/ORBS/INIT.CFG
+	@# REFUSE TO DELETE ANYTHING THAT IS NOT ONE OF OUR OWN TREES.
+	@# `ESP_DIR` is NOT a literal: it derives from `BUILD_DIR`, and both are
+	@# ordinary simply-expanded variables that a command-line assignment
+	@# overrides - the idiom this Makefile documents for `CLUSTER_NODE`. So
+	@# `make esp ESP_DIR=$$HOME` would expand the swap below to `rm -rf $$HOME`.
+	@# An earlier version of this comment asserted the opposite ("a literal,
+	@# never user-supplied"); it was wrong, which is why the check is code now.
+	@for d in "$(ESP_STAGE)" "$(ESP_DIR)"; do \
+		test ! -e "$$d" || test -f "$$d/EFI/ORBS/INIT.CFG" || { \
+			echo "esp: $$d exists and is not an Ouroboros ESP tree - refusing to delete it"; \
+			exit 1; }; \
+	done
+	rm -rf $(ESP_STAGE)
+	mkdir -p $(ESP_STAGE)/EFI/BOOT $(ESP_STAGE)/EFI/ORBS $(ESP_STAGE)/bin $(ESP_STAGE)/man $(ESP_STAGE)/etc
+	cp $(KERNEL) $(ESP_STAGE)/EFI/BOOT/BOOTAA64.EFI
+	cp $(SHELL_BIN) $(ESP_STAGE)/EFI/ORBS/SH.BIN
+	cp $(HELLO_BIN) $(ESP_STAGE)/EFI/ORBS/HELLO.BIN
+	cp $(PONG_BIN) $(ESP_STAGE)/EFI/ORBS/PONG.BIN
+	cp $(FSD_BIN) $(ESP_STAGE)/EFI/ORBS/FSD.BIN
+	cp $(UPPER_BIN) $(ESP_STAGE)/EFI/ORBS/UPPER.BIN
+	cp $(UPPER_BIN) $(ESP_STAGE)/bin/UPPER
+	cp $(COND_BIN) $(ESP_STAGE)/EFI/ORBS/COND.BIN
+	cp $(NETD_BIN) $(ESP_STAGE)/EFI/ORBS/NETD.BIN
+	cp $(ACCTD_BIN) $(ESP_STAGE)/EFI/ORBS/ACCOUNTD.BIN
+	cp $(ARGS_BIN) $(ESP_STAGE)/EFI/ORBS/ARGS.BIN
+	printf '\\EFI\\ORBS\\SH.BIN' > $(ESP_STAGE)/EFI/ORBS/INIT.CFG
 	# /bin: programs the shell finds via PATH by bare name (Stage 2 of the
 	# standalone-binaries arc). Named uppercase, no extension (8.3-legal);
 	# fsd's case-insensitive lookup matches a lowercase-typed command. For
 	# now the argv proof program plus the first externalized commands
 	# (echo/uptime/clear - Stage 4), each a real program sharing `ulib`.
-	cp $(ARGS_BIN) $(ESP_DIR)/bin/ARGS
-	cp $(ECHO_BIN) $(ESP_DIR)/bin/ECHO
-	cp $(UPTIME_BIN) $(ESP_DIR)/bin/UPTIME
-	cp $(CLEAR_BIN) $(ESP_DIR)/bin/CLEAR
-	cp $(LS_BIN) $(ESP_DIR)/bin/LS
-	cp $(CAT_BIN) $(ESP_DIR)/bin/CAT
-	cp $(MKDIR_BIN) $(ESP_DIR)/bin/MKDIR
-	cp $(RMDIR_BIN) $(ESP_DIR)/bin/RMDIR
-	cp $(TOUCH_BIN) $(ESP_DIR)/bin/TOUCH
-	cp $(RM_BIN) $(ESP_DIR)/bin/RM
-	cp $(CP_BIN) $(ESP_DIR)/bin/CP
-	cp $(MV_BIN) $(ESP_DIR)/bin/MV
-	cp $(WRITEAT_BIN) $(ESP_DIR)/bin/WRITEAT
-	cp $(CHMOD_BIN) $(ESP_DIR)/bin/CHMOD
-	cp $(CHOWN_BIN) $(ESP_DIR)/bin/CHOWN
-	cp $(TREE_BIN) $(ESP_DIR)/bin/TREE
-	cp $(PWD_BIN) $(ESP_DIR)/bin/PWD
-	cp $(PRINTENV_BIN) $(ESP_DIR)/bin/PRINTENV
-	cp $(ID_BIN) $(ESP_DIR)/bin/ID
-	cp $(PASSWD_BIN) $(ESP_DIR)/bin/PASSWD
-	cp $(USERADD_BIN) $(ESP_DIR)/bin/USERADD
-	cp $(GROUPADD_BIN) $(ESP_DIR)/bin/GROUPADD
-	cp $(USERMOD_BIN) $(ESP_DIR)/bin/USERMOD
-	cp $(CLUSTERKEY_BIN) $(ESP_DIR)/bin/CLUSTERKEY
-	cp $(CHELLO_BIN) $(ESP_DIR)/bin/CHELLO
-	cp $(CDEMO_BIN) $(ESP_DIR)/bin/CDEMO
-	cp $(CFILE_BIN) $(ESP_DIR)/bin/CFILE
-	cp $(CPICO_BIN) $(ESP_DIR)/bin/CPICO
-	cp $(WRITE_BIN) $(ESP_DIR)/bin/WRITE
-	cp $(READKEY_BIN) $(ESP_DIR)/bin/READKEY
-	cp $(MORE_BIN) $(ESP_DIR)/bin/MORE
-	cp $(MORE_BIN) $(ESP_DIR)/bin/LESS
-	cp $(SEND_BIN) $(ESP_DIR)/bin/SEND
-	cp $(RECV_BIN) $(ESP_DIR)/bin/RECV
-	cp $(SELFTEST_BIN) $(ESP_DIR)/bin/SELFTEST
-	cp $(EDTEST_BIN) $(ESP_DIR)/bin/EDTEST
-	cp $(MAN_BIN) $(ESP_DIR)/bin/MAN
-	cp $(PING_BIN) $(ESP_DIR)/bin/PING
-	cp $(RESOLVE_BIN) $(ESP_DIR)/bin/RESOLVE
-	cp $(FETCH_BIN) $(ESP_DIR)/bin/FETCH
-	cp $(DIAL_BIN) $(ESP_DIR)/bin/DIAL
-	cp $(SERVE_BIN) $(ESP_DIR)/bin/SERVE
-	cp $(WC_BIN) $(ESP_DIR)/bin/WC
-	cp $(GREP_BIN) $(ESP_DIR)/bin/GREP
-	cp $(HEAD_BIN) $(ESP_DIR)/bin/HEAD
-	cp $(TAIL_BIN) $(ESP_DIR)/bin/TAIL
-	cp $(NL_BIN) $(ESP_DIR)/bin/NL
-	cp $(REV_BIN) $(ESP_DIR)/bin/REV
-	cp $(UNIQ_BIN) $(ESP_DIR)/bin/UNIQ
-	cp $(SORT_BIN) $(ESP_DIR)/bin/SORT
+	cp $(ARGS_BIN) $(ESP_STAGE)/bin/ARGS
+	cp $(ECHO_BIN) $(ESP_STAGE)/bin/ECHO
+	cp $(UPTIME_BIN) $(ESP_STAGE)/bin/UPTIME
+	cp $(CLEAR_BIN) $(ESP_STAGE)/bin/CLEAR
+	cp $(LS_BIN) $(ESP_STAGE)/bin/LS
+	cp $(CAT_BIN) $(ESP_STAGE)/bin/CAT
+	cp $(MKDIR_BIN) $(ESP_STAGE)/bin/MKDIR
+	cp $(RMDIR_BIN) $(ESP_STAGE)/bin/RMDIR
+	cp $(TOUCH_BIN) $(ESP_STAGE)/bin/TOUCH
+	cp $(RM_BIN) $(ESP_STAGE)/bin/RM
+	cp $(CP_BIN) $(ESP_STAGE)/bin/CP
+	cp $(MV_BIN) $(ESP_STAGE)/bin/MV
+	cp $(WRITEAT_BIN) $(ESP_STAGE)/bin/WRITEAT
+	cp $(CHMOD_BIN) $(ESP_STAGE)/bin/CHMOD
+	cp $(CHOWN_BIN) $(ESP_STAGE)/bin/CHOWN
+	cp $(TREE_BIN) $(ESP_STAGE)/bin/TREE
+	cp $(PWD_BIN) $(ESP_STAGE)/bin/PWD
+	cp $(PRINTENV_BIN) $(ESP_STAGE)/bin/PRINTENV
+	cp $(ID_BIN) $(ESP_STAGE)/bin/ID
+	cp $(PASSWD_BIN) $(ESP_STAGE)/bin/PASSWD
+	cp $(USERADD_BIN) $(ESP_STAGE)/bin/USERADD
+	cp $(GROUPADD_BIN) $(ESP_STAGE)/bin/GROUPADD
+	cp $(USERMOD_BIN) $(ESP_STAGE)/bin/USERMOD
+	cp $(CLUSTERKEY_BIN) $(ESP_STAGE)/bin/CLUSTERKEY
+	cp $(CHELLO_BIN) $(ESP_STAGE)/bin/CHELLO
+	cp $(CDEMO_BIN) $(ESP_STAGE)/bin/CDEMO
+	cp $(CFILE_BIN) $(ESP_STAGE)/bin/CFILE
+	cp $(CPICO_BIN) $(ESP_STAGE)/bin/CPICO
+	cp $(WRITE_BIN) $(ESP_STAGE)/bin/WRITE
+	cp $(READKEY_BIN) $(ESP_STAGE)/bin/READKEY
+	cp $(MORE_BIN) $(ESP_STAGE)/bin/MORE
+	cp $(MORE_BIN) $(ESP_STAGE)/bin/LESS
+	cp $(SEND_BIN) $(ESP_STAGE)/bin/SEND
+	cp $(RECV_BIN) $(ESP_STAGE)/bin/RECV
+	cp $(SELFTEST_BIN) $(ESP_STAGE)/bin/SELFTEST
+	cp $(EDTEST_BIN) $(ESP_STAGE)/bin/EDTEST
+	cp $(MAN_BIN) $(ESP_STAGE)/bin/MAN
+	cp $(PING_BIN) $(ESP_STAGE)/bin/PING
+	cp $(RESOLVE_BIN) $(ESP_STAGE)/bin/RESOLVE
+	cp $(FETCH_BIN) $(ESP_STAGE)/bin/FETCH
+	cp $(DIAL_BIN) $(ESP_STAGE)/bin/DIAL
+	cp $(SERVE_BIN) $(ESP_STAGE)/bin/SERVE
+	cp $(WC_BIN) $(ESP_STAGE)/bin/WC
+	cp $(GREP_BIN) $(ESP_STAGE)/bin/GREP
+	cp $(HEAD_BIN) $(ESP_STAGE)/bin/HEAD
+	cp $(TAIL_BIN) $(ESP_STAGE)/bin/TAIL
+	cp $(NL_BIN) $(ESP_STAGE)/bin/NL
+	cp $(REV_BIN) $(ESP_STAGE)/bin/REV
+	cp $(UNIQ_BIN) $(ESP_STAGE)/bin/UNIQ
+	cp $(SORT_BIN) $(ESP_STAGE)/bin/SORT
 	# Manual pages: plain-text files read by /bin/MAN as /man/<command>.
-	cp manpages/* $(ESP_DIR)/man/
+	cp manpages/* $(ESP_STAGE)/man/
 	# /etc/cluster: this machine's Ed25519 identity and the peers it accepts
 	# (docs/roadmap-cluster-keys.md). netd READS `authorized` at boot as of
 	# step 7 and verifies signed frames against it; `id` becomes load-bearing at
 	# step 8, when this machine starts signing its own outbound requests.
-	mkdir -p $(ESP_DIR)/etc/cluster
-	python3 scripts/mkclusterkeys.py $(ESP_DIR)/etc/cluster $(CLUSTER_NODE)
+	mkdir -p $(ESP_STAGE)/etc/cluster
+	python3 scripts/mkclusterkeys.py $(ESP_STAGE)/etc/cluster $(CLUSTER_NODE)
 	# /etc/passwd + /etc/group: the account database the shell's login gate and
 	# the /bin account tools (id/su/passwd/useradd/groupadd/usermod) use
 	# (name:uid:gid:home:salt:hash / name:gid:members, hashes precomputed - see
 	# scripts/mkpasswd.py + scripts/mkgroup.py; DEV creds root/root + user/user).
 	# Absent -> login falls back to root.
-	python3 scripts/mkpasswd.py > $(ESP_DIR)/etc/passwd
-	python3 scripts/mkpasswd.py --shadow > $(ESP_DIR)/etc/shadow
-	chmod 600 $(ESP_DIR)/etc/shadow
-	python3 scripts/mkgroup.py > $(ESP_DIR)/etc/group
+	python3 scripts/mkpasswd.py > $(ESP_STAGE)/etc/passwd
+	python3 scripts/mkpasswd.py --shadow > $(ESP_STAGE)/etc/shadow
+	chmod 600 $(ESP_STAGE)/etc/shadow
+	python3 scripts/mkgroup.py > $(ESP_STAGE)/etc/group
 	# Per-user home directories under /Users (the login home for `user`; `~`
 	# expands to it). FAT can't record an owner, so it's world-usable here; on
 	# ext2 the image build chowns it (see the ext2-src staging).
-	mkdir -p $(ESP_DIR)/Users/user
+	mkdir -p $(ESP_STAGE)/Users/user
+	@# SWAP, don't overwrite in place. Six `run*` targets mount $(ESP_DIR) as a
+	@# QEMU `fat:rw:` volume, so a second concurrent make used to unlink files
+	@# out from under a live guest. Staging beside it and renaming means the
+	@# live tree is only ever replaced whole, by one rename.
+	rm -rf $(ESP_DIR)
+	mv $(ESP_STAGE) $(ESP_DIR)
 
 # Boots the ESP directory directly in QEMU (no disk image needed) against
 # the aarch64 OVMF firmware installed by `brew install qemu`.

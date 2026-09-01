@@ -467,7 +467,32 @@ pub const SIG_DOMAIN_REQUEST: &[u8] = b"ouroboros-cluster-request-v1\0";
 pub const SIG_DOMAIN_REPLY: &[u8] = b"ouroboros-cluster-reply-v1\0";
 
 /// The longest domain tag, so a caller can size a buffer for either.
-pub const SIG_DOMAIN_MAX: usize = 29;
+///
+/// COMPUTED, NOT TRANSCRIBED. This was the literal `29`, tied to the tags it
+/// describes by nothing but a `#[cfg(test)]` assertion — and `netd` sizes four
+/// signing buffers as `SIG_DOMAIN_MAX + …` and writes their last byte, so one
+/// byte of tag growth is a slice-index panic in `authenticate_signed`, reached
+/// from `handle_9p` BEFORE any key lookup. Anyone able to send 152 bytes to
+/// port 564 could then kill `netd` and burn the supervisor's per-boot restart
+/// cap. A `cargo test` is the wrong guard for that: it does not run for
+/// `make esp` or any image target.
+///
+/// Evaluating the definition removes both problems at once — it cannot be
+/// transcribed wrongly, and it cannot be stale. Same move as the small-order-key
+/// table this arc replaced with `[8]P == identity`.
+pub const SIG_DOMAIN_MAX: usize = if SIG_DOMAIN_REQUEST.len() > SIG_DOMAIN_REPLY.len() {
+    SIG_DOMAIN_REQUEST.len()
+} else {
+    SIG_DOMAIN_REPLY.len()
+};
+
+/// Both tags fit the buffer sized from them — trivially true now that
+/// [`SIG_DOMAIN_MAX`] is computed, and asserted at BUILD time anyway so that
+/// re-transcribing it later fails the build rather than a test nobody ran.
+const _: () = {
+    assert!(SIG_DOMAIN_REQUEST.len() <= SIG_DOMAIN_MAX);
+    assert!(SIG_DOMAIN_REPLY.len() <= SIG_DOMAIN_MAX);
+};
 
 /// The bytes an Ed25519 **signature** covers before the NP message:
 /// `nonce ‖ name`.

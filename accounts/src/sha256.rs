@@ -181,8 +181,10 @@ mod tests {
             sha256_two(b"abc", b""),
             hex("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
         );
-        // 448 bits: the padding case that JUST fits one block, the off-by-one
-        // either side of which needs a second block.
+        // 448 bits. Mislabelled here for a day as "the padding case that JUST
+        // fits one block" - it is not: 56 + 1 terminator + 8 length = 65, so it
+        // needs TWO blocks and writes 63 pad zeros. See the boundary test below
+        // for the length that actually fits, and for what the mislabel hid.
         assert_eq!(
             sha256_two(b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq", b""),
             hex("248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1")
@@ -194,6 +196,42 @@ mod tests {
                 b"hijklmnoijklmnopjklmnopqklmnopqrlmnopqrsmnopqrstnopqrstu"
             ),
             hex("cf5b16a778af8380036ce59e7b0492370b249b11e8f07a51afac45037afee9d1")
+        );
+    }
+
+    /// The padding boundary: the lengths where the pad loop runs ZERO times.
+    ///
+    /// 55 bytes is the only length in a block where message + terminator +
+    /// 8-byte length is exactly 64, so `finalize`'s `while self.fill != BLOCK - 8`
+    /// never iterates. EVERY other vector in this file writes at least one pad
+    /// byte, which is why none of them could see a `finalize` that pads
+    /// unconditionally: rewriting that loop as a do-while left all of them
+    /// passing while corrupting every 55-mod-64-byte message. Proven by
+    /// mutation, and not hypothetical - `sha256_two(salt, password)` with
+    /// `SALT_MAX` 16 and a 39-character password is exactly 55 bytes, and a
+    /// wrong digest there locks an account out, because the stored hash came
+    /// from a correct SHA-256 elsewhere.
+    ///
+    /// Digests from Python's `hashlib`, not from this implementation.
+    #[test]
+    fn the_zero_pad_boundary_is_covered() {
+        // One block, zero pad bytes.
+        assert_eq!(
+            sha256_two(&[b'a'; 55], b""),
+            hex("9f4390f8d30c2dd92ec9f095b65e2b9ae9b0a925a5258e241c9f1e910f734318")
+        );
+        // Two blocks, zero pad bytes in the second - the same boundary one
+        // block along, so a bug that only shows after a chaining step is
+        // covered too.
+        assert_eq!(
+            sha256_two(&[b'a'; 119], b""),
+            hex("31eba51c313a5c08226adf18d4a359cfdfd8d2e816b13f4af952f7ea6584dcfb")
+        );
+        // Exactly one full block of message: the terminator itself forces a
+        // second block, the other side of the same edge.
+        assert_eq!(
+            sha256_two(&[b'a'; 64], b""),
+            hex("ffe054fe7ae0cb6dc65c3af9b61d5209f439851db43d0ba5997337df154668eb")
         );
     }
 
@@ -235,5 +273,15 @@ mod tests {
         assert!(!digest_eq(&a, &a[..DIGEST - 1]));
         assert!(!digest_eq(&a[..DIGEST - 1], &a));
         assert!(!digest_eq(&[], &[]));
+        // NOR AN OVER-LONG ONE. Both length cases above are SHORTER than a
+        // digest, so they leave `a.len() != DIGEST` and `a.len() < DIGEST`
+        // indistinguishable - proven by mutation: weakening the guard to `<`
+        // kept every assertion here green while the function began accepting a
+        // 33-byte stored hash by comparing only its first 32 bytes. A trailing
+        // byte of garbage in /etc/shadow would have authenticated.
+        let mut long = [0u8; DIGEST + 1];
+        long[..DIGEST].copy_from_slice(&a);
+        assert!(!digest_eq(&a, &long));
+        assert!(!digest_eq(&long, &a));
     }
 }

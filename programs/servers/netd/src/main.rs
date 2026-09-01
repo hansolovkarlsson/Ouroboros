@@ -263,23 +263,28 @@ const ID_PATH: &[u8] = b"/etc/cluster/id";
 /// Whether an `fsd` reply is a TRANSIENT failure that a boot-time read should
 /// retry, rather than a real answer.
 ///
-/// Two causes, both of which clear on their own:
+/// INVERTED ON PURPOSE: this asks what a DEFINITIVE answer looks like, and
+/// treats everything else as "ask again". The enumerate-the-transients version
+/// was written twice and was wrong both times, because the interesting failures
+/// are the ones nobody thought to list:
 ///
-/// - `NO_FS` — the disk is not mounted yet. `netd` and `fsd` start together, so
-///   the first reads race the mount.
-/// - `TASK_ERR_NO_SUCH_TASK` — `fsd` is being restarted underneath us. The
-///   kernel fails every in-flight `MSG_CALL` to a slot it is tearing down
-///   (`tasks::fail_calls_to`), and the supervisor reinstalls `fsd` in the same
-///   handler, so the very next attempt can succeed.
+/// - First it was `r == NO_FS` only, which missed `TASK_ERR_NO_SUCH_TASK` from
+///   an `fsd` restart (`tasks::fail_calls_to` fails every in-flight `MSG_CALL`
+///   to a slot being torn down).
+/// - Then it was those two, which STILL missed the restart window it was
+///   written for: [`read_file_chunk`] issues its `GRANT` *before* the
+///   `MSG_CALL`, the kernel refuses a grant to a non-existent task, and netd
+///   turns that into `FS_ERROR` — so the real restart path never produced
+///   either listed value.
 ///
-/// EXISTS BECAUSE THE `NO_FS`-ONLY VERSION LEFT HALF THE HOLE OPEN. Every
-/// `TASK_ERR_*` is numerically above `FS_ERR_MIN`, so a hand-written
-/// `r == NO_FS` retry treats "fsd restarted mid-call" as a definitive answer —
-/// which for the `\NOEXEC` probe means `noexec = false`, the one outcome that
-/// fails OPEN. `for_each_line` already documented both as transient and cited
-/// this function's callers as the precedent; the precedent did not cover it.
+/// A definitive answer is success (below `FS_ERR_MIN`), or `FS_ERR_NOT_FOUND`
+/// ("the disk is there and the file is not"). Anything else — an unmounted
+/// disk, a restarting server, a refused grant, a full mailbox, a code added
+/// next year — means we did not get an answer, and the caller decides what to
+/// do about that. A new failure mode now defaults to being retried instead of
+/// being silently believed.
 fn transient_fs_failure(r: u64) -> bool {
-    r == syscall_abi::NO_FS || r == syscall_abi::TASK_ERR_NO_SUCH_TASK
+    r >= syscall_abi::FS_ERR_MIN && r != syscall_abi::FS_ERR_NOT_FOUND
 }
 
 /// Load the cluster auth config from disk via `fsd` at boot.
@@ -341,7 +346,13 @@ fn load_auth() -> Auth {
         m = r;
         break;
     }
-    auth.noexec = m < syscall_abi::FS_ERR_MIN;
+    // FAIL CLOSED ON "I DON'T KNOW". `m < FS_ERR_MIN` asked "did the read
+    // succeed", which folds "the disk never mounted" in with "the operator did
+    // not ask for no-exec" - so a node that ran out of retry budget on a slow
+    // disk came up with remote execution ENABLED, which is the one outcome this
+    // probe must never produce by accident. Only a definitive `FS_ERR_NOT_FOUND`
+    // clears the lever now; every other outcome, success or unanswered, sets it.
+    auth.noexec = m != syscall_abi::FS_ERR_NOT_FOUND;
 
     // This machine's own key. Absent is not an error either - it means netd
     // signs nothing, which since the flag day means it can neither serve nor dial.

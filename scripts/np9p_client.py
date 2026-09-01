@@ -439,22 +439,53 @@ def main():
             del args[i]
             break
     SIGN_KEY = dev_seed(SIGN_LABEL)
-    # `--peer=<node|label>`: whose signature to expect on the reply. Recorded,
-    # not derived - see `peer_key()`. A short dev node name is translated to the
-    # seed label that node's key is really derived from; anything else is passed
-    # through, so a deliberately-nobody label still works as a control.
+    # `--peer=<node>`: whose signature to expect on the reply. Recorded, not
+    # derived - see `peer_key()`. The short dev node name is translated to the
+    # seed label that node's key is really derived from.
+    #
+    # AN UNKNOWN NAME IS AN ERROR, not a fallback. It used to pass the raw
+    # string through, so `--peer=nodeb` derived a key NO MACHINE HOLDS and the
+    # run printed "REPLY NOT VERIFIED" - which it would also print against an
+    # exporter that wrongly accepted any authorized signature. The control then
+    # passes for the wrong reason, which is the exact defect
+    # `check_dev_peer_labels` was added to prevent, reachable through a typo.
+    # `--peer-label=` below is the escape hatch for a deliberately-nobody key,
+    # where saying so explicitly is the point.
     global PEER_LABEL
     for i, a in enumerate(list(args)):
         if a.startswith("--peer="):
             want = a[len("--peer="):]
-            PEER_LABEL = DEV_PEER_LABELS.get(want, want)
+            if want not in DEV_PEER_LABELS:
+                sys.exit(f"--peer={want}: unknown node (known: "
+                         f"{', '.join(sorted(DEV_PEER_LABELS))}); "
+                         f"use --peer-label=<seed> for a key no machine holds")
+            PEER_LABEL = DEV_PEER_LABELS[want]
+            del args[i]
+            break
+    for i, a in enumerate(list(args)):
+        if a.startswith("--peer-label="):
+            PEER_LABEL = a[len("--peer-label="):]
             del args[i]
             break
     if "--user" in args:
         global USER
         i = args.index("--user")
+        if i + 1 >= len(args):
+            sys.exit("--user needs a name")
         USER = args[i + 1].encode()
         del args[i:i + 2]
+    # EVERY FLAG MUST HAVE BEEN CONSUMED BY NOW.
+    #
+    # An unrecognised `--flag` used to fall through as an ignored positional, so
+    # the request went out with DEFAULT settings while the operator believed
+    # they had changed something - a negative control that quietly becomes a
+    # successful authenticated run. `--key wrong` was documented as a control
+    # for exactly that until the flag day removed the flag, and it did not start
+    # failing, it started SUCCEEDING. A typo (`--sing=nobody`) does the same,
+    # and so does a repeated flag, since each loop above deletes one and breaks.
+    leftover = [a for a in args if a.startswith("--")]
+    if leftover:
+        sys.exit(f"unknown or repeated option(s): {' '.join(leftover)}")
     if len(args) < 4:
         print(__doc__)
         sys.exit(2)
