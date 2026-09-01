@@ -177,15 +177,7 @@ fn main() -> ! {
     serve(packed_mac);
 }
 
-/// The cluster authentication config, loaded once from disk at boot (the
-/// export-hardening phase; see `docs/roadmap-cluster.md`'s security section).
-/// A *shared cluster secret*: every machine in the cluster is configured with
-/// the same key, so any of them can mount/run on any other, and one without
-/// the key cannot join. Read-only after startup; no mutable statics exist in
-/// userland (`.bss` asserted empty), so this rides `serve`'s stack frame and is
-/// threaded (`&Auth`) through the event loop to the two leaves that need it -
-/// the inbound gate (`handle_9p`) and the outbound signer (`handle_rmount`/
-/// `handle_run`).
+
 /// Bytes of `/etc/cluster/authorized` netd keeps.
 ///
 /// About fourteen peers at 72 bytes a line. It lives in `Auth`, on `serve`'s
@@ -197,6 +189,15 @@ fn main() -> ! {
 /// invisible, and invisible is the half worth fixing.
 const AUTHORIZED_MAX: usize = 1024;
 
+/// The cluster authentication config, loaded once from disk at boot (the
+/// export-hardening phase; see `docs/roadmap-cluster.md`'s security section).
+/// A *shared cluster secret*: every machine in the cluster is configured with
+/// the same key, so any of them can mount/run on any other, and one without
+/// the key cannot join. Read-only after startup; no mutable statics exist in
+/// userland (`.bss` asserted empty), so this rides `serve`'s stack frame and is
+/// threaded (`&Auth`) through the event loop to the two leaves that need it -
+/// the inbound gate (`handle_9p`) and the outbound signer (`handle_rmount`/
+/// `handle_run`).
 struct Auth {
     /// The cluster secret. Empty (`key_len == 0`) means unconfigured, which is
     /// **fail-closed**: the export refuses every remote client. Harmless for a
@@ -278,21 +279,43 @@ fn load_auth() -> Auth {
 
     // The authorized-peer list. Absent is not an error: a machine with no peers
     // simply verifies no signatures, which is what a single-machine run wants.
-    let n = read_file_chunk(As::FirstParty, AUTHORIZED_PATH, 0, 0, &mut auth.authorized);
+    //
+    // Retried on NO_FS like the cluster key above, because this read can happen
+    // before the disk is mounted - and unlike the key, a silently-empty peer
+    // list produces "authentication failed" for every signed frame, which is
+    // indistinguishable from a wrong key.
+    let mut n = syscall_abi::NO_FS;
+    for _ in 0..50 {
+        n = read_file_chunk(As::FirstParty, AUTHORIZED_PATH, 0, 0, &mut auth.authorized);
+        if n != syscall_abi::NO_FS {
+            break;
+        }
+        syscall(syscall_abi::NET_WAIT, 40);
+    }
     if n < syscall_abi::FS_ERR_MIN {
         auth.authorized_len = (n as usize).min(AUTHORIZED_MAX);
-        if auth.authorized_len == AUTHORIZED_MAX {
-            // Said out loud, because the alternative is a peer that is silently
-            // not authorized and an operator reading a file that lists it.
-            log(b"netd: WARNING /etc/cluster/authorized is larger than netd can read;\r\n");
-            log(b"      peers past the first 1024 bytes will NOT be authorized\r\n");
+        // EXACT truncation detection: a file that is exactly AUTHORIZED_MAX
+        // bytes is fully read, and warning about it would be a false alarm. One
+        // byte past the end answers the question the fill level cannot.
+        let mut probe = [0u8; 1];
+        let more = read_file_chunk(As::FirstParty, AUTHORIZED_PATH, AUTHORIZED_MAX as u64, 0, &mut probe);
+        if more < syscall_abi::FS_ERR_MIN && more > 0 {
+            log(b"netd: WARNING /etc/cluster/authorized is larger than netd can read (");
+            log_dec(AUTHORIZED_MAX as u64);
+            log(b" bytes);\r\n      peers past that point will NOT be authorized\r\n");
         }
-        let peers = count_peers(auth.authorized());
-        if peers > 0 {
-            log(b"netd: cluster identity: ");
-            log_dec(peers as u64);
-            log(b" authorized peer(s)\r\n");
-        }
+        // ALWAYS reported, including zero. A machine that authorizes nobody
+        // refuses every signed frame with the same error a wrong key gives, so
+        // "0 peers" at boot is the difference between a five-minute diagnosis
+        // and an afternoon.
+        log(b"netd: cluster identity: ");
+        log_dec(count_peers(auth.authorized()) as u64);
+        log(b" authorized peer(s)\r\n");
+    } else if n != syscall_abi::FS_ERR_NOT_FOUND {
+        // Not "absent" - actually broken. Say which.
+        log(b"netd: WARNING could not read /etc/cluster/authorized (error ");
+        log_dec(u64::MAX - n);
+        log(b" below the error ceiling); no peer can be verified by signature\r\n");
     }
     if auth.enabled() {
         log(b"netd: cluster auth enabled (export requires the cluster key)\r\n");
@@ -2240,6 +2263,23 @@ fn authenticate<'a>(
     }
 }
 
+/// Where the NP message starts in a framed request, by format.
+///
+/// The two denial paths peek at the verb to choose a reply shape, and both used
+/// the MAC'd header size unconditionally - so for a signed frame they read the
+/// first eight bytes of the Ed25519 SIGNATURE as the verb. `is_run` was
+/// therefore never true for a signed `cpu` request, and the caller got a binary
+/// framed reply where the code exists to give it a readable line. One function
+/// now, so the denial paths cannot drift from `authenticate` again.
+fn np_offset(request: &[u8]) -> usize {
+    let p = ninep_abi::NP_NET_LEN_PREFIX;
+    if request.len() >= p + 8 && read_u64(request, p) == ninep_abi::NP_AUTH_MAGIC_SIGNED {
+        p + ninep_abi::NP_AUTH_HDR_SIGNED
+    } else {
+        p + ninep_abi::NP_AUTH_HDR
+    }
+}
+
 /// Verify a **signed** framed request: the per-machine-keypair format.
 ///
 /// Three things must hold, in this order, and the order is the design:
@@ -2287,7 +2327,10 @@ fn authenticate_signed<'a>(
     let mut sig = [0u8; ninep_abi::NP_SIG_LEN];
     sig.copy_from_slice(&request[soff..soff + ninep_abi::NP_SIG_LEN]);
 
-    if !verify_prefixed(&offered, &prefix, np, &sig) {
+    // The crate verifies over `prefix ‖ message` without joining them, so netd
+    // does not carry a second buffer the size of the largest message on the
+    // frame of its most stack-constrained server.
+    if !ed25519::verify_prefixed(&offered, &prefix, np, &sig) {
         return None;
     }
 
@@ -2296,28 +2339,6 @@ fn authenticate_signed<'a>(
     let mut who = [0u8; ninep_abi::NP_NAME_LEN];
     who.copy_from_slice(&request[woff..woff + ninep_abi::NP_NAME_LEN]);
     Some((np, nonce, who))
-}
-
-/// Verify a signature over `prefix ‖ message` without joining them in memory.
-///
-/// `ed25519::verify` takes one slice, and the two halves are not adjacent in the
-/// frame. Copying the message would mean a second `NP_NET_MAX` buffer on a stack
-/// that has hit its guard page five times, so the concatenation is built once
-/// into a fixed buffer sized to the largest message the wire allows.
-fn verify_prefixed(
-    key: &[u8; ninep_abi::NP_PUBKEY_LEN],
-    prefix: &[u8; ninep_abi::NP_SIG_PREFIX_LEN],
-    message: &[u8],
-    sig: &[u8; ninep_abi::NP_SIG_LEN],
-) -> bool {
-    let mut joined = [0u8; ninep_abi::NP_SIG_PREFIX_LEN + ninep_abi::NP_NET_MAX];
-    let n = message.len().min(ninep_abi::NP_NET_MAX);
-    if n != message.len() {
-        return false; // longer than the wire allows: not something to sign around
-    }
-    joined[..prefix.len()].copy_from_slice(prefix);
-    joined[prefix.len()..prefix.len() + n].copy_from_slice(&message[..n]);
-    ed25519::verify(key, &joined[..prefix.len() + n], sig)
 }
 
 /// Seal a framed export reply with a MAC (reply-auth / mutual authentication -
@@ -2352,7 +2373,7 @@ fn seal_reply(c: &mut TcpConn, auth: &Auth, nonce: &[u8], n: usize) -> usize {
 /// staged, which the shell surfaces as "authentication failed". The verb peek
 /// is only used to pick the reply *format* (untrusted, but harmless either way).
 fn deny_9p(c: &mut TcpConn, request: &[u8]) {
-    let voff = ninep_abi::NP_NET_LEN_PREFIX + ninep_abi::NP_AUTH_HDR; // NP verb offset
+    let voff = np_offset(request);
     let is_run = request.len() >= voff + 8 && read_u64(request, voff) == ninep_abi::NP_RUN;
     c.file = false;
     c.prefix_off = 0;
@@ -2372,7 +2393,7 @@ fn deny_9p(c: &mut TcpConn, request: &[u8]) {
 /// on the wire (one refusal code, so a client needs no new case), an accurate
 /// line for the `cpu` caller, who reads the reply as raw output.
 fn deny_unknown_user(c: &mut TcpConn, request: &[u8], cause: LineScan) {
-    let voff = ninep_abi::NP_NET_LEN_PREFIX + ninep_abi::NP_AUTH_HDR;
+    let voff = np_offset(request);
     let is_run = request.len() >= voff + 8 && read_u64(request, voff) == ninep_abi::NP_RUN;
     c.file = false;
     c.prefix_off = 0;
@@ -4738,8 +4759,6 @@ fn reply(sender: u64, data: &[u8]) {
     syscall4(syscall_abi::MSG_SEND, sender, data.as_ptr() as u64, data.len() as u64, 0);
 }
 
-/// Route a log line through the console server as a batched `DSPOP_WRITE`,
-/// falling back to `PUTC` if there's no server this boot.
 /// Log a decimal number.
 fn log_dec(v: u64) {
     let mut buf = [0u8; 20];
@@ -4761,6 +4780,8 @@ fn log_dec(v: u64) {
     log(&out[..n]);
 }
 
+/// Route a log line through the console server as a batched `DSPOP_WRITE`,
+/// falling back to `PUTC` if there's no server this boot.
 fn log(bytes: &[u8]) {
     let payload_off = ninep_abi::NP_REQ_PAYLOAD as usize;
     let mut off = 0;

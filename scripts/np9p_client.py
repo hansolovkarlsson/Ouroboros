@@ -65,15 +65,27 @@ def dev_seed(label):
     return hashlib.sha256(label.encode()).digest()
 
 
+_ED_REFERENCE = None
+
+
 def load_ed_reference():
-    """The Ed25519 reference, which asserts itself against RFC 8032 when loaded."""
-    import importlib.util
-    import os.path
-    here = os.path.dirname(os.path.abspath(__file__))
-    spec = importlib.util.spec_from_file_location("edref", os.path.join(here, "gen-sign-vectors.py"))
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
+    """The Ed25519 reference, which asserts itself against RFC 8032 when loaded.
+
+    Memoized: loading it re-runs those self-assertions, which are two full
+    pure-Python signatures. Once is the point (it proves the reference before
+    anything trusts it); once PER FRAME made `dial` and `serve`, which issue
+    several ops each, needlessly slow.
+    """
+    global _ED_REFERENCE
+    if _ED_REFERENCE is None:
+        import importlib.util
+        import os.path
+        here = os.path.dirname(os.path.abspath(__file__))
+        spec = importlib.util.spec_from_file_location("edref", os.path.join(here, "gen-sign-vectors.py"))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _ED_REFERENCE = mod
+    return _ED_REFERENCE
 
 
 # WHICH USER this client claims to be. The key authenticates the machine; the
@@ -310,15 +322,23 @@ def main():
     # instead of the shared-key MAC. Defaults to the dev "host" identity, which
     # is what `mkclusterkeys.py` puts in every image's authorized file; pass a
     # label to sign with a key the guest does NOT authorize.
-    if "--sign" in args:
-        global SIGN_KEY
-        i = args.index("--sign")
-        label = "ouroboros-dev-host-peer"
-        if i + 1 < len(args) and not args[i + 1].startswith("-") and "." not in args[i + 1]:
-            label = args[i + 1]
-            del args[i + 1]
-        SIGN_KEY = dev_seed(label)
-        del args[i]
+    # `--sign` alone uses the dev "host" identity; `--sign=<label>` uses another
+    # seed label, which is how a key the guest does NOT authorize is tested.
+    #
+    # NOT `--sign <label>` with a heuristic: guessing whether the next token is a
+    # label or a positional silently swallowed arguments. `read --sign FILE 0 100`
+    # signed with the label "FILE" and read the path "0" - a test that would have
+    # "proved" a refusal for entirely the wrong reason.
+    global SIGN_KEY
+    for i, a in enumerate(list(args)):
+        if a == "--sign":
+            SIGN_KEY = dev_seed("ouroboros-dev-host-peer")
+            del args[i]
+            break
+        if a.startswith("--sign="):
+            SIGN_KEY = dev_seed(a[len("--sign="):])
+            del args[i]
+            break
     if "--user" in args:
         global USER
         i = args.index("--user")
