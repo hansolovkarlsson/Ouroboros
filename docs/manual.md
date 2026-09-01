@@ -350,7 +350,7 @@ Mount another machine's exported filesystem into your namespace, then read
 (and write) it like any local path:
 
 ```
-$ mount -r 10.0.2.10:564 /mnt/a     # bind A's export at /mnt/a (needs the shared cluster key)
+$ mount -r 10.0.2.10:564 /mnt/a     # bind A's export at /mnt/a (both machines need keys)
 $ ls /mnt/a                         # A's disk root
 $ cat /mnt/a/EFI/ORBS/INIT.CFG      # read a file on A
 $ mkdir /mnt/a/reports              # create on A's disk
@@ -440,7 +440,7 @@ $ dial /mnt/a/net 93.184.216.34 80 GET / HTTP/1.0   # dial out of A's nic
 
 The only thing that changes is the base path: `/net` is your network,
 `/mnt/a/net` is A's — so the last line reaches the web *through A's connection*,
-authenticated by the same cluster key as any export access. Unlike `cpu A fetch`
+authenticated by the same machine keypair as any export access. Unlike `cpu A fetch`
 (which runs a program on A), `dial` gives you a raw connection you drive
 yourself, with no matching program needed on A. Scoped to a TCP client
 (stop-and-wait, small transactions); UDP is later work.

@@ -13,12 +13,11 @@ with the SAME `authorized` file or the two nodes cannot authenticate each other.
 Random keys per build would produce a cluster that fails to talk to itself, with
 a symptom (authentication refused) that looks nothing like the cause (the images
 disagree about who the peers are). So the dev keypairs are derived from fixed
-seed strings, exactly as `scripts/mkpasswd.py` uses fixed dev passwords and the
-Makefile a fixed CLUSTER_KEY.
+seed strings, exactly as `scripts/mkpasswd.py` uses fixed dev passwords.
 
 WHICH MEANS THE DEV PRIVATE KEYS ARE IN THIS REPOSITORY, and anyone can sign as
-these nodes. That is the same trade the existing dev CLUSTER_KEY already makes
-and it is fine for QEMU rigs; it is NOT fine for anything real. A deployment
+these nodes. That is the same trade the dev passwords already make, and it is
+fine for QEMU rigs; it is NOT fine for anything real. A deployment
 generates on the device (`/bin/clusterkey`, which requires real entropy and
 refuses without it) and distributes the PUBLIC halves by hand. `--random` here
 writes one real identity for THIS node and an `authorized` naming only itself,

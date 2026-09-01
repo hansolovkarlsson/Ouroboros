@@ -521,7 +521,7 @@ Unixes still have that this doesn't. **None are designed or sequenced yet;**
 each is recorded so the reasoning and the starting points aren't lost.
 Several build directly on things that already exist (cond's small ANSI
 parser, ext2's on-disk permission bits, the per-task capability model, the
-cluster-auth HMAC, `ulib`, and the POSIX-libc plan above), which is the point
+cluster-auth crypto, `ulib`, and the POSIX-libc plan above), which is the point
 of writing them down now rather than from scratch later.
 
 ### 1. Terminal escape codes / VT100 (scoped-ish, the nearest of these)
@@ -663,8 +663,11 @@ crate, plus creator-owned new inodes.
   walks every ancestor's search bit, not just the object and its parent.
 - **Per-user cluster identity** — **the only item of this arc still open, and
   promoted to "What's next" above on 2026-08-30** once `accountd` gave the hole
-  a privileged writer on the far end. The 9P export authenticates the *machine*
-  (shared key), not a *user*.
+  a privileged writer on the far end. **Shipped 2026-08-31**: the export now
+  carries the requesting user's name inside the signature and resolves it
+  through the far side's own `/etc/passwd`. What remains is the tier below —
+  the export authenticates the *machine* (its keypair), so an authorized
+  machine can still claim any of its own users' names; see item 1 above.
 - ~~**Symbolic-mode `chmod`** (`u+x`)~~ — **shipped 2026-08-29** (`u+x`, `go-w`,
   `a=rx`, `u+rw,go+r`, copy-source `g=u`, conditional `X`, `s`/`t`; octal still
   works and stays absolute). A real `/etc/skel` for `useradd` **also shipped
@@ -753,7 +756,7 @@ exists to build on / hard parts / consumer question" treatment.
 **a. Users, login, passwords, permissions — and per-user home directories (extends item 4).**
 Item 4 already scopes the identity/permission arc: a login prompt, an
 `/etc/passwd`-shaped file with hashed passwords (reusing the cluster-auth
-SHA-256/HMAC), and ext2 mode/uid/gid actually *enforced* at the `FSOP_*`
+SHA-256, now the `accounts` crate's), and ext2 mode/uid/gid actually *enforced* at the `FSOP_*`
 dispatch — ext2-only, because FAT/exFAT can't store owners. The addition here is
 **per-user home directories**: a `/home/<user>` the login sets as the shell's
 initial cwd — a small convention layered on the permission work, not a separate

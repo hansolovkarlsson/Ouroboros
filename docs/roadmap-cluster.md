@@ -306,11 +306,15 @@ netd holding the run's output in a `PendingRun` buffer), lifting the cap to ~2 K
     buys the thing one shared secret could never give — **revocation**: delete a
     line instead of re-keying every member. See
     [`roadmap-cluster-keys.md`](roadmap-cluster-keys.md).
-  - **Tier 2 — reply-direction (mutual) auth ✅ DONE (v0.13.0, 2026-08-26).** The
-    export MACs its *reply* too (`mac = HMAC(key, request_nonce ‖ [status]
-    [result])`, prepended to the framed reply), so an active injector can't feed a
-    client forged data; the client rejects any reply whose MAC doesn't verify.
-    Bound to the request nonce (no new wire field). No round trip, no state.
+  - **Tier 2 — reply-direction (mutual) auth ✅ DONE (v0.13.0, 2026-08-26; now
+    signatures).** The export authenticates its *reply* too, so an active
+    injector can't feed a client forged data; the client rejects any reply that
+    doesn't verify. Shipped as a MAC (`mac = HMAC(key, request_nonce ‖ [status]
+    [result])`); since the per-machine-keypair arc it is a 64-byte **Ed25519
+    signature** over `SIG_DOMAIN_REPLY ‖ request_nonce ‖ [status][result]`, made
+    with the exporter's private key and checked against the key the client holds
+    for **the address it dialled**. Bound to the request nonce (no new wire
+    field). No round trip, no state.
     **Integrity, not confidentiality** — bytes still cross in cleartext. Scoped to
     the framed fs / `/net/tcp` replies; the `cpu`-run *output stream* (not a framed
     reply) is left with the untrusted-network work below. Banked as defense-in
@@ -319,8 +323,9 @@ netd holding the run's output in a `PendingRun` buffer), lifting the cap to ~2 K
   - **Tier 3 — per-user identity ✅ DONE (2026-08-31).** The tiers above
     authenticate a *machine*; this says which of that machine's **users** is
     asking. The auth header carries the caller's **name** (32 bytes, NUL-padded),
-    inside the MAC (`mac = HMAC(key, nonce ‖ name ‖ message)`) so it cannot be
-    altered without the key; the exporter resolves it through **its own**
+    covered by the request's authenticator (then `mac = HMAC(key, nonce ‖ name ‖
+    message)`, now a signature over `SIG_DOMAIN_REQUEST ‖ nonce ‖ name ‖
+    message`) so it cannot be altered in flight; the exporter resolves it through **its own**
     `/etc/passwd` and refuses a name it does not know. A *name*, not a uid: two
     nodes number their users independently, and NFS's `AUTH_SYS` shows what
     sending the number does. The identity reaches `fsd` as a **required
@@ -342,11 +347,12 @@ netd holding the run's output in a `PendingRun` buffer), lifting the cap to ~2 K
     - **Replay protection** — a captured request can be replayed verbatim today
       (forgery of a *new* one cannot). Fix: a server nonce (costs a per-op round
       trip) or a bounded seen-nonce cache (needs bounded state under no-heap).
-    - **Per-peer and per-user keys** — one shared secret = interchangeable
-      members; no per-machine access control or key rotation, and (since tier 3)
-      a peer that holds the key can claim any *user* name. Fix: per-machine — and
-      ultimately per-user — identities, properly wanting **asymmetric crypto**
-      (Ed25519-class) — the heavy lift. **A designated auth server (Plan 9's
+    - **Per-user keys** — the per-machine half **shipped 2026-08-31** (Ed25519
+      per machine, peers authorized by public key, revocation by deleting a
+      line), so "interchangeable members" and "no key rotation" are closed. What
+      remains is per-*user*: an authorized machine can still claim any of its own
+      users' names, so the model defends against the users of a trusted node but
+      not a compromised one. **A designated auth server (Plan 9's
       `authsrv` + tickets) is evaluated in full under item 1 of
       [`roadmap.md`](roadmap.md)**: it is the right long-term shape, it is what
       Plan 9 does, and the note records both the detail that decides whether it

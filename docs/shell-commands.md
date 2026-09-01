@@ -16,7 +16,7 @@ implement a completely different command set. For the **cluster commands**
 [`manual.md`](manual.md)'s cluster section is the task-oriented walkthrough with
 two-machine examples. The 9P export those commands ride is **authenticated with
 per-machine Ed25519 keypairs** (`/etc/cluster/`, both directions signed);
-machines that don't share the key are refused.
+a machine whose public key the other does not list is refused.
 
 ## General behavior
 

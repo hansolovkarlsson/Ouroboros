@@ -289,36 +289,67 @@ pub const NS_PROC_TREE: u8 = 4;
 pub const NP_REMOTE_CHUNK: usize = 512;
 
 // ---------------------------------------------------------------------------
-// Cluster authentication (the export-hardening phase; see the security section
-// of `docs/roadmap-cluster.md`). Every *inbound* framed export request carries
-// an auth header in front of the NP message; the exporter verifies it before
-// serving any verb (fs op *or* `NP_RUN`). The scheme is a **client-nonce MAC**:
+// Cluster authentication. THIS BLOCK IS THE NORMATIVE WIRE SPEC: both Python
+// peers (`scripts/np9p_client.py`, `scripts/np9p_server.py`) are transcribed
+// from it, and so is any third implementation. Keep it exact - a drift here
+// surfaces at the far end as a bare `FS_ERR_AUTH`, which reads as a key problem
+// rather than a format problem.
 //
-//   framed request:  [u32 len][magic:8][nonce:16][mac:32][NP message...]
+// Every *inbound* framed export request carries an auth header in front of the
+// NP message; the exporter verifies it before serving any verb (fs op *or*
+// `NP_RUN`). The scheme is a **per-machine Ed25519 signature** over a
+// client-chosen nonce (see `docs/roadmap-cluster-keys.md`):
 //
-// where `mac = HMAC-SHA256(cluster_key, nonce || NP-message)`. The shared
-// cluster secret never crosses the wire, and a peer without it cannot forge a
-// request. `len` still counts every byte after the 4-byte prefix (now the auth
-// header + the NP message).
+//   framed request:  [u32 len][magic:8][nonce:16][name:32][pubkey:32][sig:64][NP message...]
 //
-// The *reply* is authenticated too (tier 2, mutual authentication):
+// - `magic` is [`NP_AUTH_MAGIC_SIGNED`] ("AUTHNP03").
+// - `name` is the requesting USER, NUL-padded (see [`NP_NAME_LEN`]); the
+//   exporter resolves it through its OWN `/etc/passwd` and refuses a stranger.
+// - `pubkey` is the CALLING MACHINE's public key, which the exporter looks up
+//   in `/etc/cluster/authorized` BEFORE verifying anything - "is this key
+//   allowed here" and "does this signature check out" are different questions,
+//   and a valid signature by an unauthorized key is exactly as unwelcome as an
+//   invalid one.
+// - `sig` covers [`SIG_DOMAIN_REQUEST`] ‖ `nonce` ‖ `name` ‖ NP-message. The
+//   header is [`NP_AUTH_HDR_SIGNED`] (152) bytes.
 //
-//   framed reply:  [u32 len][mac:32][status:u64][result...]
+// The private key never crosses the wire, and unlike the shared-secret scheme
+// this replaced, the ability to VERIFY is no longer the ability to FORGE - which
+// is what makes per-peer revocation (delete a line) meaningful. `len` counts
+// every byte after the 4-byte prefix (the auth header + the NP message).
 //
-// where `mac = HMAC-SHA256(cluster_key, request_nonce || [status][result])` -
-// the reply is MAC'd against the SAME nonce the client signed its request with,
-// which both proves the reply came from a holder of the key AND binds it to this
-// specific request (a captured reply can't be replayed against another). No
-// reply nonce field is needed - the request nonce is the shared per-transaction
-// value both sides already hold. The client rejects a reply whose MAC doesn't
-// verify (an injected/forged reply, or one from a peer without the key). This is
-// integrity/authenticity, NOT confidentiality: bytes still cross in cleartext.
+// The *reply* is signed too (mutual authentication):
+//
+//   framed reply:  [u32 len][sig:64][status:u64][result...]
+//
+// where `sig` covers [`SIG_DOMAIN_REPLY`] ‖ `request_nonce` ‖ `[status][result]`,
+// made with the EXPORTER's private key. Binding to the request's nonce ties the
+// reply to *that* request, so a captured reply cannot be replayed against a
+// different one; no reply nonce field is needed, since the request nonce is the
+// per-transaction value both sides already hold. The two domain tags are what
+// stop a signature made for one direction from being presented as the other.
+//
+// THE TWO DIRECTIONS LOOK THE PEER UP DIFFERENTLY, and this asymmetry is why an
+// `authorized` line carries an ADDRESS as well as a key: an exporter is OFFERED
+// a key and need only decide whether it is allowed, while a client is offered
+// nothing and must know IN ADVANCE whose signature will do, so it looks up by
+// the address it dialled (`clusterkeys::find_by_ip`). Accepting any authorized
+// signature there would authenticate "some cluster member" rather than "the
+// machine I asked".
+//
+// A machine that cannot sign REFUSES a signed request rather than answering
+// unauthenticated. This is integrity/authenticity, NOT confidentiality: bytes
+// still cross in cleartext.
 //
 // Still out of scope (deferred to the leaving-a-trusted-network hardening,
 // docs/roadmap-cluster.md): replay-of-observed-ops (a passive sniffer can replay
-// a captured request verbatim; forgery of a *new* one it cannot), per-peer
-// identity, transport encryption, and reply-auth for the `cpu`-run output
-// *stream* (not a framed reply). See `programs/servers/netd/src/hmac.rs`.
+// a captured request verbatim; forgery of a *new* one it cannot), transport
+// encryption, and reply-auth for the `cpu`-run output *stream* (not a framed
+// reply). Keys are per-MACHINE, not per-user, so an authorized machine can still
+// claim any of its own users' names.
+//
+// The retired shared-key MAC format ("AUTHNP02") is refused outright; it
+// survives only as a negative control `np9p_client.py --legacy-mac` can send.
 // ---------------------------------------------------------------------------
 
 
@@ -329,9 +360,12 @@ pub const NP_NONCE_LEN: usize = 16;
 
 /// Bytes of **requesting user name** in the auth header, NUL-padded.
 ///
-/// The shared key authenticates a *machine*; this says which of that machine's
-/// users is asking, so the far side can apply its own permission model instead
-/// of serving every remote request as root.
+/// The signature authenticates a *machine* (its keypair); this says which of
+/// that machine's users is asking, so the far side can apply its own permission
+/// model instead of serving every remote request as root. It is covered by the
+/// signature, so the claimed user cannot be tampered with in flight - though an
+/// authorized machine can still claim any of its own users' names, which is what
+/// a per-USER key tier would close.
 ///
 /// **A name, not a uid.** Two nodes have independent `/etc/passwd` files, so
 /// uid 1000 need not be the same person on both - numeric identity (NFS's
@@ -373,13 +407,14 @@ pub const NP_PUBKEY_LEN: usize = 32;
 pub const NP_SIG_LEN: usize = 64;
 
 /// Offset of the offered public key within a signed auth header — where the
-/// MAC'd format keeps its MAC.
+/// retired MAC'd format kept its MAC.
 pub const NP_AUTH_PUBKEY_OFF: usize = 8 + NP_NONCE_LEN + NP_NAME_LEN;
 /// Offset of the signature within a signed auth header.
 pub const NP_AUTH_SIG_OFF: usize = NP_AUTH_PUBKEY_OFF + NP_PUBKEY_LEN;
 /// Size of a signed auth header: `magic`(8) + `nonce` + `name` + `pubkey` +
-/// `sig`. Larger than the MAC'd header, so [`NP_FRAME_MAX`] is sized from this
-/// one.
+/// `sig` = 152. The only header format on the wire; it was the larger of the
+/// two while the retired MAC'd one still existed, which is why
+/// [`NP_FRAME_MAX`] is sized from it.
 pub const NP_AUTH_HDR_SIGNED: usize =
     8 + NP_NONCE_LEN + NP_NAME_LEN + NP_PUBKEY_LEN + NP_SIG_LEN;
 
@@ -450,8 +485,9 @@ pub const NP_SIG_PREFIX_LEN: usize = NP_NONCE_LEN + NP_NAME_LEN;
 /// netd's own" fallback, because that fallback is root).
 pub const NP_ID_NONE: u64 = 0;
 
-/// **`netd`'s own business**, stated explicitly: the cluster key, the
-/// `/etc/passwd` lookups behind name resolution, the HTTP server's file reads.
+/// **`netd`'s own business**, stated explicitly: its cluster identity and
+/// authorized-peer files, the `/etc/passwd` lookups behind name resolution, the
+/// HTTP server's file reads.
 /// Authorized against `netd`'s own kernel-bound credential, exactly as before
 /// this field existed. Spelling it is what makes a forgotten export path a
 /// compile error rather than a silent root escalation.

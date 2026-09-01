@@ -138,6 +138,23 @@ USER = b"root"
 PEER_LABEL = "ouroboros-dev-node-a"
 _PEER_KEY = None
 
+# The dev nodes, by the SHORT NAME an `authorized` line carries, mapped to the
+# seed label `mkclusterkeys.py` actually derives that node's key from.
+#
+# This map exists because the short name is the one a person reaches for, and
+# passing it raw produced a control THAT COULD NOT FAIL FOR ITS STATED REASON:
+# `--peer=node-b` derived sha256(b"node-b"), a key belonging to no machine in the
+# cluster, so the run printed REPLY NOT VERIFIED whether or not the client checks
+# the key for the address it dialled - it would print the same thing against an
+# exporter that accepted ANY authorized signature, which is exactly the bug the
+# control is meant to catch. Only a real other node's key distinguishes "a key I
+# authorize" from "the key for the host I asked".
+DEV_PEER_LABELS = {
+    "node-a": "ouroboros-dev-node-a",
+    "node-b": "ouroboros-dev-node-b",
+    "host": "ouroboros-dev-host-peer",
+}
+
 
 def peer_key():
     """The expected exporter public key, derived once, on first use."""
@@ -415,12 +432,15 @@ def main():
             del args[i]
             break
     SIGN_KEY = dev_seed(SIGN_LABEL)
-    # `--peer=<label>`: whose signature to expect on the reply. Recorded, not
-    # derived - see `peer_key()`.
+    # `--peer=<node|label>`: whose signature to expect on the reply. Recorded,
+    # not derived - see `peer_key()`. A short dev node name is translated to the
+    # seed label that node's key is really derived from; anything else is passed
+    # through, so a deliberately-nobody label still works as a control.
     global PEER_LABEL
     for i, a in enumerate(list(args)):
         if a.startswith("--peer="):
-            PEER_LABEL = a[len("--peer="):]
+            want = a[len("--peer="):]
+            PEER_LABEL = DEV_PEER_LABELS.get(want, want)
             del args[i]
             break
     if "--user" in args:

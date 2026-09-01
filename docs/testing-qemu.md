@@ -138,7 +138,9 @@ above work unchanged. Three ways to prove the gate:
 python3 scripts/np9p_client.py localhost 5640 readdir / --sign=nobody     # -> AUTH FAILED
 # the RETIRED shared-key MAC format, which nothing accepts any more
 python3 scripts/np9p_client.py localhost 5640 readdir / --legacy-mac      # -> AUTH FAILED
-# a reply signed by the wrong machine (we check the key for the address we dialled)
+# a reply signed by the wrong machine (we check the key for the address we dialled).
+# node-b IS in the guest's `authorized`, which is what makes this control mean
+# something: it is refused for being the wrong PEER, not for being an unknown key.
 python3 scripts/np9p_client.py localhost 5640 readdir / --peer=node-b     # -> REPLY NOT VERIFIED
 ```
 
@@ -147,10 +149,11 @@ longer staged onto any image; `--legacy-mac` exists only so its refusal is
 demonstrable rather than assumed.
 
 This host↔guest round trip is the real cross-implementation check: the python
-`hmac` and the guest's hand-rolled `netd`/`hmac.rs` must agree byte-for-byte, or
-the correct key is rejected too (that's how a magic-byte transposition in the
-python peers was caught — see `docs/cluster-auth-postmortem.md`). A machine with
-a `\NOEXEC` flag file authenticates mounts but refuses `cpu` remote-exec.
+peer's Ed25519 and the guest's hand-rolled `ed25519` crate must agree
+byte-for-byte over the same signed bytes, or a correctly-keyed peer is rejected
+too (that is how a magic-byte transposition in the python peers was caught under
+the older MAC format — see `docs/cluster-auth-postmortem.md`). A machine with a
+`\NOEXEC` flag file authenticates mounts but refuses `cpu` remote-exec.
 
 The guest reaches the host at **10.0.2.2** over SLIRP with no hostfwd (SLIRP routes
 guest→host automatically), which is why `run-image-9p-client` needs only a NIC.

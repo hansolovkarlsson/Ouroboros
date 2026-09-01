@@ -331,7 +331,8 @@ moves the PL011 onto GPIO14/15), not in the kernel.
 ### Risk 4 — the `netd` boot race transfers directly
 
 [`testing-parallels.md`](testing-parallels.md)'s Risk #1: `load_auth` blocks
-`serve()` while it reads `CLUSTER.KEY` through `fsd`, and USB-MSD is markedly
+`serve()` while it reads `/etc/cluster/id` and `authorized` through `fsd`, and
+the `\NOEXEC` probe ahead of them, and USB-MSD is markedly
 slower than QEMU's virtio-blk, which can push the health-ping supervisor into a
 restart loop that QEMU never shows. The Pi's runtime storage is USB-MSD too
 (§6), so this risk arrives unchanged — and the Pi's USB stack has one more layer
