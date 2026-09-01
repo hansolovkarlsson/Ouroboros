@@ -134,11 +134,6 @@ BUILD_DIR    := build
 ESP_DIR      := $(BUILD_DIR)/esp
 ESP_IMG      := $(ESP_DIR).img
 ESP_HDD      := $(ESP_DIR).hdd
-# The shared DEV cluster secret staged into the ESP as \CLUSTER.KEY (netd reads
-# it at boot to authenticate the 9P export - the export-hardening phase). NOT a
-# real secret; overridable on the command line for a mismatched-key test, e.g.
-# `make run-image-2vm-b CLUSTER_KEY=wrong-key` to prove the export refuses.
-CLUSTER_KEY  ?= ouroboros-dev-cluster-key-v1
 # WHICH MACHINE an image is built as. Per-machine keypairs mean an image carries
 # an identity, so the two-node rig cannot boot one image twice any more: node A's
 # disk and node B's disk hold different private keys and the same `authorized`
@@ -534,14 +529,6 @@ esp: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin acco
 	cp $(ACCTD_BIN) $(ESP_DIR)/EFI/ORBS/ACCOUNTD.BIN
 	cp $(ARGS_BIN) $(ESP_DIR)/EFI/ORBS/ARGS.BIN
 	printf '\\EFI\\ORBS\\SH.BIN' > $(ESP_DIR)/EFI/ORBS/INIT.CFG
-	# The cluster secret netd reads at boot to authenticate the 9P export
-	# (the export-hardening phase). A fixed DEV key, shared by every machine
-	# built from this tree, so two-VM runs (2vm-a/b, both derived from esp.img)
-	# authenticate each other with no per-machine config. NOT a real secret -
-	# it lives in the repo; a deployment would use its own. Fail-closed: with no
-	# CLUSTER.KEY, netd refuses all remote clients. The host peers
-	# (scripts/np9p_*.py) read this same value. Kept in sync with CLUSTER_KEY.
-	printf '%s' '$(CLUSTER_KEY)' > $(ESP_DIR)/CLUSTER.KEY
 	# /bin: programs the shell finds via PATH by bare name (Stage 2 of the
 	# standalone-binaries arc). Named uppercase, no extension (8.3-legal);
 	# fsd's case-insensitive lookup matches a lowercase-typed command. For
@@ -933,18 +920,6 @@ $(EXT2_PART): esp
 	python3 scripts/mkpasswd.py --shadow > $(BUILD_DIR)/ext2-src/etc/shadow
 	chmod 600 $(BUILD_DIR)/ext2-src/etc/shadow
 	python3 scripts/mkgroup.py > $(BUILD_DIR)/ext2-src/etc/group
-	# The shared cluster secret. Without it netd's export is fail-closed, so the
-	# ext2 two-node rig (the only one that can show PERMISSIONS crossing the
-	# cluster - FAT32 records no mode at all) could not come up.
-	#
-	# chmod 600 for the same reason /etc/shadow above gets it, and it matters
-	# MORE here: this is the one image where fsd actually enforces modes, and
-	# the key is what the whole cluster mechanism rests on - anyone who can read
-	# it can present any user name from anywhere. netd runs as root, so 0600
-	# costs nothing. Shipping the permission demo and the secret that makes it
-	# meaningful on one disk with opposite protections would be a self-own.
-	printf '%s' '$(CLUSTER_KEY)' > $(BUILD_DIR)/ext2-src/CLUSTER.KEY
-	chmod 600 $(BUILD_DIR)/ext2-src/CLUSTER.KEY
 	# /etc/cluster: the per-machine identity. ext2 is the one image where fsd
 	# ENFORCES modes, so it is also the only one where `id` being 0600 means
 	# anything - and mke2fs -d carries the host's mode onto the guest.

@@ -107,9 +107,10 @@ keyboard↔storage contention, which has real-hardware-only failure modes).
 ### <a name="risk-1--netd-boot-race"></a>Risk #1 — the `netd` boot race (the reason A1 exists)
 
 `netd`'s `serve()` calls `load_auth()` **before** entering its event loop, and
-`load_auth` does a *blocking* `read_file_chunk` to `fsd` for `\CLUSTER.KEY`, with
-a retry loop on `NO_FS` (up to 50 tries × `NET_WAIT(40)` ≈ 2 s) for the case where
-the disk isn't mounted yet.
+`load_auth` does *blocking* `read_file_chunk` calls to `fsd` for
+`/etc/cluster/id` and `/etc/cluster/authorized`, with a retry loop on `NO_FS`
+(**one shared budget** of 50 tries × `NET_WAIT(40)` ≈ 2 s across both, not per
+read) for the case where the disk isn't mounted yet.
 
 On QEMU this is a non-event: virtio-blk auto-mounts before `netd` ever asks, so
 `load_auth` returns on the first call. **On Parallels the disk is USB-MSD** —
@@ -127,14 +128,20 @@ export use instead of at boot) or bound the retry far tighter and treat "not yet
 as "closed for now, re-check later." That's a small, isolated patch — a `0.11.1`
 candidate.
 
-### Staging note: `CLUSTER.KEY` lives on the USB stick here
+### Staging note: the cluster identity lives on the USB stick here
 
 On Parallels, `fsd`'s mounted disk (tree 0) is the **USB stick**, not the boot
-ESP — so `load_auth` reads `\CLUSTER.KEY` from the stick. Functionally it changes
-nothing (there's no NIC, so the export is inert regardless), but to exercise the
-*found-key* branch of `load_auth` rather than the retry-then-closed branch, put a
-`CLUSTER.KEY` file at the root of the pass-through stick. Its absence is a valid
-test too — you should see `export CLOSED … (fail-closed)`, not a crash.
+ESP — so `load_auth` reads `/etc/cluster/id` and `/etc/cluster/authorized` from
+the stick. Functionally it changes nothing (there's no NIC, so the export is
+inert regardless), but to exercise the *found* branch of `load_auth` rather than
+the retry-then-closed branch, put an `/etc/cluster/` directory at the root of the
+pass-through stick. Its absence is a valid test too — you should see
+`export CLOSED - no /etc/cluster/id to sign replies with (fail-closed)`, not a
+crash.
+
+Note that `clusterkey new` **cannot** generate an identity on Parallels: there is
+no virtio-rng, and generation refuses without real entropy rather than producing
+a guessable machine key. Copy one in from a machine that has entropy.
 
 ## Part B — the cluster (blocked; the real path forward)
 
@@ -149,7 +156,7 @@ Genuine **two-node real-hardware** cluster testing is gated, in order, on:
    arc regardless of cluster testing.
 2. Then: two Parallels VMs (or a Parallels VM ↔ another machine) on a shared
    network, running the two-node matrix — `mount -r`, remote read/write, `cpu`,
-   `dial`, matching-vs-mismatched `CLUSTER.KEY`, and the SIGKILL-a-node
+   `dial`, authorized-vs-unauthorized peer keys, and the SIGKILL-a-node
    clean-disconnect check.
 
 Every item in that matrix is **already validated on two QEMU VMs**

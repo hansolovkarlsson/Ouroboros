@@ -299,6 +299,13 @@ netd holding the run's output in a `PendingRun` buffer), lifting the cap to ~2 K
     shares the disk while refusing remote-exec. The symmetric key makes the
     bidirectional `cpu` `/host` callback authenticate for free. See
     [`cluster-auth-postmortem.md`](cluster-auth-postmortem.md).
+  - **Superseded ✅ (the per-machine-keypair arc, 2026-09-01).** The shared
+    secret is **gone**: every machine now holds its own Ed25519 keypair and
+    authorizes peers by public key (`/etc/cluster/authorized`, the
+    `known_hosts` model), both directions signed and domain-separated. Which
+    buys the thing one shared secret could never give — **revocation**: delete a
+    line instead of re-keying every member. See
+    [`roadmap-cluster-keys.md`](roadmap-cluster-keys.md).
   - **Tier 2 — reply-direction (mutual) auth ✅ DONE (v0.13.0, 2026-08-26).** The
     export MACs its *reply* too (`mac = HMAC(key, request_nonce ‖ [status]
     [result])`, prepended to the framed reply), so an active injector can't feed a

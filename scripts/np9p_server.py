@@ -22,7 +22,6 @@ Then in the guest (SLIRP maps the host to 10.0.2.2):
     cat /mnt/a/SUB/NOTE.TXT
 """
 import hashlib
-import hmac
 import os
 import socket
 import struct
@@ -41,10 +40,10 @@ FS_ERR_AUTH = (1 << 64) - 1 - 30  # u64::MAX - 30
 # error to the client. Use FS_ERROR for "no such path".
 HDR = 48  # NP_REQ_PAYLOAD
 
-# Cluster auth (the export-hardening phase): the guest signs every request, so
-# this server must verify the client-nonce MAC before serving it. Must match the
-# guest's \CLUSTER.KEY (Makefile CLUSTER_KEY); override with `--key <k>`.
-NP_AUTH_MAGIC = int.from_bytes(b"AUTHNP02", "big")  # ninep-abi NP_AUTH_MAGIC
+# Cluster auth: the guest SIGNS every request with its per-machine Ed25519 key,
+# so this server verifies a signature and an authorized public key before
+# serving anything. The shared \CLUSTER.KEY it used to verify a MAC against
+# authenticates nothing since the flag day.
 NP_AUTH_MAGIC_SIGNED = int.from_bytes(b"AUTHNP03", "big")  # per-machine keypairs
 NP_NAME_LEN = 32  # requesting user's name, NUL-padded
 NP_KEY_LEN = 32
@@ -56,10 +55,7 @@ NP_SIG_LEN = 64
 SIG_DOMAIN_REQUEST = b"ouroboros-cluster-request-v1\0"
 SIG_DOMAIN_REPLY = b"ouroboros-cluster-reply-v1\0"
 
-NP_AUTH_HDR = 8 + 16 + NP_NAME_LEN + 32  # magic + nonce + name + mac
 NP_AUTH_HDR_SIGNED = 8 + 16 + NP_NAME_LEN + NP_KEY_LEN + NP_SIG_LEN
-DEFAULT_KEY = b"ouroboros-dev-cluster-key-v1"
-KEY = DEFAULT_KEY  # replaced from argv in main()
 
 # Public keys this server accepts, by hex. The dev cluster's three identities,
 # derived the same way scripts/mkclusterkeys.py derives them - so a guest built
@@ -148,24 +144,18 @@ def warm_up():
 
 def verify(body):
     """Strip + verify the auth header; return (NP message, nonce), or None. The
-    nonce is what the reply is MAC'd against (reply-auth)."""
+    nonce is what the reply is signed against (reply-auth).
+
+    ONE FORMAT. The retired shared-key MAC'd format (`AUTHNP02`) was accepted
+    here until the flag day; a frame carrying it is now refused like any other
+    unknown magic, which is what makes this peer able to show that the GUEST
+    refuses one too rather than merely assuming so."""
     if len(body) < 8:
         return None
     (magic,) = struct.unpack("<Q", body[:8])
-    if magic == NP_AUTH_MAGIC_SIGNED:
-        return verify_signed(body)
-    if len(body) < NP_AUTH_HDR:
+    if magic != NP_AUTH_MAGIC_SIGNED:
         return None
-    if magic != NP_AUTH_MAGIC:
-        return None
-    nonce = body[8:24]
-    name = body[24 : 24 + NP_NAME_LEN]  # the requesting user, inside the MAC
-    mac = body[24 + NP_NAME_LEN : NP_AUTH_HDR]
-    np = body[NP_AUTH_HDR:]
-    expected = hmac.new(KEY, nonce + name + np, hashlib.sha256).digest()
-    if not hmac.compare_digest(mac, expected):
-        return None
-    return np, nonce
+    return verify_signed(body)
 
 # The served tree. Directories map a path to a list of (name, is_dir); files map
 # a path to bytes. HELLO.TXT is deliberately > NP_REMOTE_CHUNK (512) so a guest
@@ -218,26 +208,21 @@ def frame_reply(status, data=b""):
 
 
 def serve_request(body):
-    # Authenticate first (the export-hardening phase): reject a wrong/missing
-    # cluster key before serving any verb - the guest surfaces FS_ERR_AUTH. A
-    # denial is unsealed (the client's reply-verify fails -> auth error anyway).
-    signed_request = len(body) >= 8 and struct.unpack("<Q", body[:8])[0] == NP_AUTH_MAGIC_SIGNED
+    # Authenticate first: reject an unauthorized key, a bad signature or a
+    # retired-format frame before serving any verb - the guest surfaces
+    # FS_ERR_AUTH. A denial is unsealed (the client's reply-verify fails ->
+    # auth error anyway).
     verified = verify(body)
     if verified is None:
         return frame_reply(FS_ERR_AUTH)
     body, nonce = verified
 
-    # Every real reply is SEALED (reply-auth): [u32 len][mac:32][status][data],
-    # mac = HMAC(key, request_nonce || [status][data]).
+    # Every real reply is SEALED (reply-auth): [u32 len][sig:64][status][data],
+    # signed over `domain-tag || request_nonce || [status][data]` with this
+    # peer's own key, which every image's authorized file lists at 10.0.2.2.
     def sealed(status, data=b""):
         inner = struct.pack("<Q", status) + data
-        # The reply format follows the request format, as netd does it: a signed
-        # request gets a reply signed with this peer's own key, which every
-        # image's authorized file already lists at 10.0.2.2.
-        if signed_request:
-            seal = ed().sign(host_seed(), SIG_DOMAIN_REPLY + nonce + inner)
-        else:
-            seal = hmac.new(KEY, nonce + inner, hashlib.sha256).digest()
+        seal = ed().sign(host_seed(), SIG_DOMAIN_REPLY + nonce + inner)
         framed = seal + inner
         return struct.pack("<I", len(framed)) + framed
 
@@ -276,12 +261,7 @@ def serve_request(body):
 
 
 def main():
-    global KEY
     args = sys.argv[1:]
-    if "--key" in args:
-        i = args.index("--key")
-        KEY = args[i + 1].encode()
-        del args[i:i + 2]
     port = int(args[0]) if args else 5641
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)

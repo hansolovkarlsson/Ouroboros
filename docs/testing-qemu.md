@@ -127,17 +127,24 @@ python3 scripts/np9p_server.py 5641                 # on the host; serves a smal
 #   mount -r 10.0.2.2:5641 /mnt/a ; ls /mnt/a ; cat /mnt/a/HELLO.TXT
 ```
 
-**Authentication (since v0.10.0 — the export-hardening phase).** The export
-requires a **shared cluster key**: every request is signed with
-`HMAC-SHA256(key, nonce ‖ request)`, and a peer without the key is refused
-(fail-closed). Both python peers sign/verify with the dev key by default
-(`ouroboros-dev-cluster-key-v1`, staged into the ESP as `\CLUSTER.KEY` from the
-Makefile's `CLUSTER_KEY`), so the commands above work unchanged. To prove the
-gate, pass a wrong key and watch it be rejected:
+**Authentication.** Every request is **signed** with a per-machine Ed25519 key,
+and the exporter serves only a public key listed in its
+`/etc/cluster/authorized`. Both python peers hold the dev "host" identity, which
+`scripts/mkclusterkeys.py` puts in every image's `authorized`, so the commands
+above work unchanged. Three ways to prove the gate:
 
 ```sh
-python3 scripts/np9p_client.py localhost 5640 readdir / --key wrong  # -> AUTH FAILED
+# a key the guest does not authorize
+python3 scripts/np9p_client.py localhost 5640 readdir / --sign=nobody     # -> AUTH FAILED
+# the RETIRED shared-key MAC format, which nothing accepts any more
+python3 scripts/np9p_client.py localhost 5640 readdir / --legacy-mac      # -> AUTH FAILED
+# a reply signed by the wrong machine (we check the key for the address we dialled)
+python3 scripts/np9p_client.py localhost 5640 readdir / --peer=node-b     # -> REPLY NOT VERIFIED
 ```
+
+The shared `\CLUSTER.KEY` (v0.10.0–v0.15.0) authenticates nothing now and is no
+longer staged onto any image; `--legacy-mac` exists only so its refusal is
+demonstrable rather than assumed.
 
 This host↔guest round trip is the real cross-implementation check: the python
 `hmac` and the guest's hand-rolled `netd`/`hmac.rs` must agree byte-for-byte, or
@@ -214,11 +221,11 @@ keys rather than desynchronising the pair.
 
 It has its **own link port**, so it can run alongside the FAT32 pair rather than
 colliding with it (a collision shows up as an unrelated guest-side timeout,
-which is a miserable thing to debug). `make image-ext2` stages `CLUSTER.KEY`
-onto that disk — without it `netd`'s export is fail-closed and the rig cannot
-come up — at **mode 0600**, because ext2 is the one image where `fsd` enforces
-modes and the key is what the whole cluster mechanism rests on: anyone who can
-read it can present any user name from anywhere.
+which is a miserable thing to debug). `make image-ext2` stages
+`/etc/cluster/id` onto that disk — without it `netd`'s export is fail-closed and
+the rig cannot come up — at **mode 0600**, because ext2 is the one image where
+`fsd` enforces modes and a machine's private key is what its whole identity
+rests on: anyone who can read it can impersonate the machine.
 
 **Driving both nodes unattended.** `scripts/drive-2vm.py` starts A, runs its
 steps, then starts B and runs its steps while A stays alive — printing both

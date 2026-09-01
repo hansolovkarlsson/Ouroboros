@@ -259,21 +259,30 @@ model: *"remote" is just the same file protocol over TCP instead of local
 IPC*, so the commands you already know (`ls`, `cat`, `mkdir`, `cpu`) work
 across machines with no new syntax — only *where a path points* changes.
 
-**Trust, stated plainly:** the export is authenticated with a **shared cluster
-secret** (since v0.10.0 — the export-hardening phase). Every machine reads the
-same key from `\CLUSTER.KEY` on its boot disk; a request is signed with an HMAC
-so the secret never crosses the wire, and a peer without the key gets nothing
-(fail-closed). So `mount -r` and `cpu` work between machines that share the key,
-and are refused between machines that don't. Since v0.13.0 the exchange is
-**mutually authenticated** — replies are MAC'd too, so a client rejects a forged
-reply — but this is **integrity, not secrecy**: bytes still cross the wire in
-cleartext. Two knobs: no `\CLUSTER.KEY` = the export is closed entirely; a
-`\NOEXEC` flag file = the machine shares its disk but refuses remote `cpu`
-execution.
+**Trust, stated plainly:** every machine has its **own Ed25519 keypair**, and
+authorizes its peers **by public key** — the `known_hosts`/`authorized_keys`
+model, not a shared password. The private half lives in `/etc/cluster/id`
+(mode 0600); the peers this machine will talk to are listed one per line in
+`/etc/cluster/authorized`, each line naming a peer, its address and its public
+key. Every request is signed, and so is every reply, so the exchange is
+**mutually authenticated**: a client checks the reply against the key it
+expects *for the address it dialled*, not against any key it happens to
+authorize.
+
+This replaced a **shared** secret (`\CLUSTER.KEY`, v0.10.0–v0.15.0). The
+difference that matters is **revocation**: with one secret every member was
+interchangeable and removing one meant re-keying all of them, whereas now you
+delete a line. It is still **integrity, not secrecy** — bytes cross the wire in
+cleartext.
+
+Fail-closed in both directions: a machine with no `/etc/cluster/id` cannot sign,
+so its export is **closed** and it can make no remote requests; a machine with
+no authorized peers serves nobody. A `\NOEXEC` flag file is the one other knob —
+the machine shares its disk but refuses remote `cpu` execution.
 
 **Who is asking, not just which machine** (since 2026-08-31). Each request also
-carries the **name** of the user making it, inside the MAC so it cannot be
-altered without the key. The far side resolves that name through **its own**
+carries the **name** of the user making it, inside the signature so it cannot
+be altered by anyone without the machine's private key. The far side resolves that name through **its own**
 `/etc/passwd` and applies its own permissions to it, refusing a name it does not
 know — so an unprivileged user reading a remote mount gets exactly what that
 account may read there, and `cpu` runs the command as that user rather than as
@@ -305,14 +314,20 @@ private one: it requires no key and no account.
 
 | File | Effect |
 | --- | --- |
-| `\CLUSTER.KEY` | The shared cluster secret. All machines in a cluster need the **same** contents. Absent ⇒ the export is closed to every remote peer (fail-closed). |
+| `/etc/cluster/id` | This machine's **private** key (0600, 64 hex chars). Absent ⇒ it can neither serve nor make remote requests. Generate with `clusterkey new`. |
+| `/etc/cluster/id.pub` | The public half, for pasting into a peer's `authorized`. `clusterkey` with no arguments prints it. |
+| `/etc/cluster/authorized` | The peers this machine accepts, one per line: `<name> <ipv4> <pubkey-hex>`. Absent or empty ⇒ the export serves nobody. Comment a line out (or delete it) to **revoke** that peer. |
 | `\NOEXEC` | Presence-only flag: authenticated peers may still `mount -r` the disk, but every `cpu` (remote-exec) is refused. |
 
-In the QEMU images a dev `\CLUSTER.KEY` is staged automatically (the Makefile's
-`CLUSTER_KEY`, default `ouroboros-dev-cluster-key-v1`), so the two-VM targets
-authenticate out of the box. To set your own on a running machine, just write the
-file — `write /CLUSTER.KEY my-secret` (then reboot so `netd` re-reads it), and
-`touch /NOEXEC` to enable the no-exec lever.
+In the QEMU images a dev identity is staged automatically
+(`scripts/mkclusterkeys.py`, selected by the Makefile's `CLUSTER_NODE`), so the
+two-VM targets authenticate out of the box. On a real machine: run
+`clusterkey new` on each, `clusterkey line <name> <ip>` on one to print the line
+the other should hold, and paste it into that machine's
+`/etc/cluster/authorized`. `clusterkey peers` lists what a machine currently
+accepts and flags a line that cannot work. Key generation **refuses without real
+entropy** rather than producing a guessable identity — see
+[`testing-qemu.md`](testing-qemu.md) for which platforms have it.
 
 ### Setting up two machines
 

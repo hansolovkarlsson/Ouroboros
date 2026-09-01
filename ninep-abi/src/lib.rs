@@ -321,25 +321,11 @@ pub const NP_REMOTE_CHUNK: usize = 512;
 // *stream* (not a framed reply). See `programs/servers/netd/src/hmac.rs`.
 // ---------------------------------------------------------------------------
 
-/// Magic at the head of an authenticated framed request, distinguishing it from
-/// an unauthenticated (legacy) frame. When the exporter has a key configured it
-/// requires this; a frame without it is refused (fail-closed).
-///
-/// **Bumped to `02` when the requesting user's name joined the header** (the
-/// per-user cluster identity arc). A deliberate flag day: an `01` peer's frame
-/// is *refused* rather than misparsed, because the old layout's first 32
-/// message bytes would otherwise be read as a username. Both nodes of a cluster
-/// are built from one tree, so the cost is nil, and the alternative - a
-/// silently misread identity - is not a trade worth making.
-pub const NP_AUTH_MAGIC: u64 = 0x4155_5448_4E50_3032; // "AUTHNP02" (big-endian ASCII)
 
 /// Bytes of nonce in the auth header (a fresh, non-repeating value per request:
 /// the client's `MONOTONIC_US` clock, plus its packed IP for cross-machine
 /// separation). Only freshness is required - not secrecy or unpredictability.
 pub const NP_NONCE_LEN: usize = 16;
-
-/// Bytes of MAC in the auth header (one HMAC-SHA256 digest).
-pub const NP_MAC_LEN: usize = 32;
 
 /// Bytes of **requesting user name** in the auth header, NUL-padded.
 ///
@@ -358,21 +344,15 @@ pub const NP_MAC_LEN: usize = 32;
 /// typed at a prompt can cross the cluster.
 pub const NP_NAME_LEN: usize = 32;
 
-/// The auth header size prepended to a framed request body: `magic`(8) +
-/// `nonce`([`NP_NONCE_LEN`]) + `name`([`NP_NAME_LEN`]) + `mac`([`NP_MAC_LEN`]).
-pub const NP_AUTH_HDR: usize = 8 + NP_NONCE_LEN + NP_NAME_LEN + NP_MAC_LEN;
-
 /// Offset of the nonce within the auth header (right after the 8-byte magic).
 pub const NP_AUTH_NONCE_OFF: usize = 8;
 /// Offset of the requesting user's name within the auth header.
 pub const NP_AUTH_NAME_OFF: usize = 8 + NP_NONCE_LEN;
-/// Offset of the MAC within the auth header (after magic + nonce + name).
-pub const NP_AUTH_MAC_OFF: usize = 8 + NP_NONCE_LEN + NP_NAME_LEN;
-
 /// Magic marking a **signed** framed request — the per-machine-keypair format
-/// (`docs/roadmap-cluster-keys.md`). Accepted alongside [`NP_AUTH_MAGIC`]
-/// during the transition, which is what lets the exporter learn to verify
-/// signatures before any client learns to make them.
+/// (`docs/roadmap-cluster-keys.md`). The ONLY accepted format since the flag
+/// day; it was accepted alongside the shared-key MAC'd magic `AUTHNP02` during
+/// the transition, which is what let the exporter learn to verify signatures
+/// before any client learned to make them.
 ///
 /// The layout keeps `nonce` and `name` where the MAC'd format has them and
 /// replaces the 32-byte MAC with a 32-byte **public key** plus a 64-byte
@@ -403,16 +383,6 @@ pub const NP_AUTH_SIG_OFF: usize = NP_AUTH_PUBKEY_OFF + NP_PUBKEY_LEN;
 pub const NP_AUTH_HDR_SIGNED: usize =
     8 + NP_NONCE_LEN + NP_NAME_LEN + NP_PUBKEY_LEN + NP_SIG_LEN;
 
-/// The bytes the request MAC covers *before* the NP message: `nonce` || `name`.
-/// One constant because both sides must agree, and because it keeps the MAC a
-/// two-part call rather than growing a three-part variant.
-///
-/// **The name is inside the MAC, which is the whole point.** It costs nothing -
-/// the MAC was already there - and it means the claimed user cannot be edited
-/// in flight by anything that does not hold the cluster key. A tamper attempt
-/// fails verification exactly as a tampered path or offset already does.
-pub const NP_MAC_PREFIX_LEN: usize = NP_NONCE_LEN + NP_NAME_LEN;
-
 /// Domain tag prefixed to the bytes a **request** signature covers.
 ///
 /// Without it a request signature and a reply signature are the same shape -
@@ -437,11 +407,17 @@ pub const SIG_DOMAIN_REPLY: &[u8] = b"ouroboros-cluster-reply-v1\0";
 /// The longest domain tag, so a caller can size a buffer for either.
 pub const SIG_DOMAIN_MAX: usize = 29;
 
-/// The bytes an Ed25519 **signature** covers before the NP message. The same
-/// `nonce ‖ name` the MAC covers, deliberately: the two formats authenticate
-/// identical bytes and differ only in who can produce the authenticator, so a
-/// reader comparing them has one fewer difference to hold in mind.
-pub const NP_SIG_PREFIX_LEN: usize = NP_MAC_PREFIX_LEN;
+/// The bytes an Ed25519 **signature** covers before the NP message:
+/// `nonce ‖ name`.
+///
+/// **The name is inside the signature, which is the whole point.** It costs
+/// nothing — the signature was already there — and it means the claimed user
+/// cannot be edited in flight by anything without the machine's private key. A
+/// tamper attempt fails verification exactly as a tampered path or offset does.
+///
+/// Was defined as an alias of `NP_MAC_PREFIX_LEN` while both formats existed,
+/// because they deliberately authenticated identical bytes.
+pub const NP_SIG_PREFIX_LEN: usize = NP_NONCE_LEN + NP_NAME_LEN;
 
 // --- the in-request identity word (`a3`) ----------------------------------
 //
@@ -535,17 +511,9 @@ pub fn proxy_parts(word: u64) -> Option<(u32, u32)> {
 /// Largest fully-framed request buffer: the 4-byte length prefix + the auth
 /// header + the biggest NP message. Buffers that build or receive a framed
 /// export request are sized to this.
-pub const NP_FRAME_MAX: usize =
-    NP_NET_LEN_PREFIX + max_usize(NP_AUTH_HDR, NP_AUTH_HDR_SIGNED) + NP_NET_MAX;
-
-/// `max` for `usize` in a `const` context.
-const fn max_usize(a: usize, b: usize) -> usize {
-    if a > b {
-        a
-    } else {
-        b
-    }
-}
+///
+/// Was a `max` of the two header sizes while both formats existed.
+pub const NP_FRAME_MAX: usize = NP_NET_LEN_PREFIX + NP_AUTH_HDR_SIGNED + NP_NET_MAX;
 
 // ---------------------------------------------------------------------------
 // The shared namespace resolver. A namespace is a sequence of bindings
@@ -765,39 +733,33 @@ mod tests {
         assert_eq!(NP_AUTH_SIG_OFF, NP_AUTH_PUBKEY_OFF + NP_PUBKEY_LEN);
         assert_eq!(NP_AUTH_HDR_SIGNED, NP_AUTH_SIG_OFF + NP_SIG_LEN);
         assert_eq!(NP_AUTH_HDR_SIGNED, 152);
-        // nonce and name sit where the MAC'd format keeps them, so the shared
-        // prefix really is shared.
         assert_eq!(NP_AUTH_NONCE_OFF, 8);
         assert_eq!(NP_AUTH_NAME_OFF, 8 + NP_NONCE_LEN);
-        assert_eq!(NP_SIG_PREFIX_LEN, NP_MAC_PREFIX_LEN);
     }
 
     #[test]
-    fn a_frame_buffer_fits_the_larger_of_the_two_headers() {
-        // The signed header is bigger; a buffer sized from the MAC'd one would
-        // truncate every signed frame at the maximum message size.
-        assert!(NP_AUTH_HDR_SIGNED > NP_AUTH_HDR);
+    fn a_frame_buffer_fits_the_whole_header() {
         assert_eq!(NP_FRAME_MAX, NP_NET_LEN_PREFIX + NP_AUTH_HDR_SIGNED + NP_NET_MAX);
     }
 
     #[test]
-    fn the_two_magics_differ() {
-        // A signed frame must never be read as a MAC'd one: the MAC'd reader
-        // would take the first 32 bytes of the public key as a MAC and refuse,
-        // which is safe, but the reverse (a MAC'd frame read as signed) would
-        // read message bytes as a signature.
-        assert_ne!(NP_AUTH_MAGIC, NP_AUTH_MAGIC_SIGNED);
+    fn the_retired_mac_magic_is_not_the_signed_one() {
+        // The MAC'd format is gone, but its magic must never be reachable by
+        // accident: `authenticate` refuses anything that is not the signed
+        // magic, and this pins that the retired value is genuinely a different
+        // 8 bytes rather than something a stale peer's frame could satisfy.
+        const RETIRED_MAC_MAGIC: u64 = 0x4155_5448_4E50_3032; // "AUTHNP02"
+        assert_ne!(RETIRED_MAC_MAGIC, NP_AUTH_MAGIC_SIGNED);
     }
 
     #[test]
-    fn the_mac_covers_exactly_the_nonce_and_the_name() {
-        // Both peers build the MAC input from NP_MAC_PREFIX_LEN and read the
+    fn the_signature_covers_exactly_the_nonce_and_the_name() {
+        // Both peers build the signed input from NP_SIG_PREFIX_LEN and read the
         // fields by offset. If those disagreed, either the name would fall
-        // outside the MAC (forgeable) or every verification would fail.
+        // outside the signature (forgeable) or every verification would fail.
         assert_eq!(NP_AUTH_NAME_OFF, NP_AUTH_NONCE_OFF + NP_NONCE_LEN);
-        assert_eq!(NP_AUTH_MAC_OFF, NP_AUTH_NAME_OFF + NP_NAME_LEN);
-        assert_eq!(NP_MAC_PREFIX_LEN, NP_AUTH_MAC_OFF - NP_AUTH_NONCE_OFF);
-        assert_eq!(NP_AUTH_HDR, 8 + NP_NONCE_LEN + NP_NAME_LEN + NP_MAC_LEN);
+        assert_eq!(NP_AUTH_PUBKEY_OFF, NP_AUTH_NAME_OFF + NP_NAME_LEN);
+        assert_eq!(NP_SIG_PREFIX_LEN, NP_AUTH_PUBKEY_OFF - NP_AUTH_NONCE_OFF);
     }
 
     #[test]

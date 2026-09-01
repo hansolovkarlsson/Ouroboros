@@ -38,7 +38,7 @@ about the practical trade for a would-be user.**
   `qsort`, `malloc`), though no real *application* is ported yet and there's no
   dynamic linking; programs are position-independent `aarch64-none`
   binaries.
-- **Accounts and permissions exist, but the cluster key is per-machine** — there
+- **Accounts and permissions exist, but cluster keys are per-machine** — there
   is a real user model (`/etc/passwd`, `/etc/shadow`, groups, `login`, enforced
   file modes on ext2), and a remote request carries the requesting user's name so
   the far side applies its own permissions to it. What is missing is per-user

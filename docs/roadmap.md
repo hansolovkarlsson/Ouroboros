@@ -26,23 +26,27 @@ supervised, MMU-isolated userland servers, with a capability model, crash
 recovery, and grant/safecopy bulk IPC (all in
 [`roadmap-completed.md`](roadmap-completed.md) / [`CHANGELOG.md`](CHANGELOG.md)).
 So is the users/permissions arc, whose last item — per-user *cluster* identity —
-shipped 2026-08-31. What is left of it is the tier below: the cluster key is
-still per-*machine*, which is item 1. In rough order of value (2 and 3 are what
+shipped 2026-08-31, and the per-machine-keypair arc that followed it
+([`roadmap-cluster-keys.md`](roadmap-cluster-keys.md)), which retired the shared
+cluster key entirely. What is left is the tier below: keys are per-*machine*,
+not per-*user*, which is item 1. In rough order of value (2 and 3 are what
 the microkernel arc itself still leaves open):
 
 1. **Per-user keys for the cluster.** Per-user cluster *identity* shipped
    2026-08-31 (see [`CHANGELOG.md`](CHANGELOG.md) and
    [`unspellable-postmortem.md`](unspellable-postmortem.md)): a remote request
-   carries the requesting user's **name** inside the MAC, the far side resolves
+   carries the requesting user's **name** inside the signature, the far side resolves
    it through its own `/etc/passwd` and refuses a stranger, and the identity
    reaches `fsd` as a **required parameter** carried in the request rather than
    an opt-in wrapper and a latch. `cpu` is covered too — `netd` assumes the
    mapped user's identity for the spawn, so a remote command inherits it.
 
-   **What is left is the tier below it: the key is still per-machine.** A peer
-   holding the cluster key can claim *any* name, so the model defends against
-   the users of a trusted node — the real exposure — but not against a
-   compromised node. Per-user keys would close that, and the design forks are
+   **What is left is the tier below it: keys are per-machine, not per-user.**
+   The shared secret is gone — each machine has its own Ed25519 keypair and
+   authorizes peers by public key, so a member can be revoked by deleting a line
+   — but an authorized *machine* can still claim any of its own users' names. So
+   the model defends against the users of a trusted node — the real exposure —
+   but not against a compromised node. Per-user keys would close that, and the design forks are
    real: whether each user gets a key or the machine key signs a per-user
    credential; where those live (`/etc/cluster/keys/<name>`? a factotum-style
    agent, as Plan 9 does it?); how a node learns a peer user's key without a
@@ -93,7 +97,7 @@ the microkernel arc itself still leaves open):
      client-nonce MAC over challenge-response. Per-op ticket handshakes would be
      brutal, so it wants a ticket cache in `netd` — the task with no heap, a
      32 KB stack that has hit the guard page five times, and no mutable statics
-     (the cluster key already threads as `&Auth` for that reason).
+     (the auth config already threads as `&Auth` for that reason).
    - **A single point of failure that is also the highest-value target.** Master
      down = no new sessions; master compromised = the whole cluster. Plan 9 lives
      with this; it is a real cost, not a footnote.
