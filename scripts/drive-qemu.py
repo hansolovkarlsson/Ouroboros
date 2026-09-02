@@ -4,7 +4,9 @@
     python3 scripts/drive-qemu.py [--slirp] <disk-image> 'WAIT@@TYPE' [...]
 
 Each argument is a step: wait for WAIT (a regex) to appear in *new* guest
-output, then type TYPE followed by Enter. An empty TYPE just waits. Example:
+output, then type TYPE followed by Enter. An empty TYPE just waits; a TYPE of
+`<ENTER>` types an empty line (a bare Enter), which is how a prompt that must
+REFUSE an empty answer gets tested. Example:
 
     python3 scripts/drive-qemu.py build/espext2.img \\
         'login@@root' 'assword@@root' '# @@id' '# @@cat /etc/shadow'
@@ -42,6 +44,7 @@ import sys
 import threading
 import time
 
+ENTER = "<ENTER>"   # a step whose TYPE is this types an EMPTY line (bare Enter)
 TYPE_DELAY = 0.02   # per character; below this the PL011 drops input
 SETTLE = 0.6        # after a prompt matches, before typing
 TIMEOUT = 90        # per step
@@ -113,12 +116,21 @@ class Guest:
             time.sleep(TYPE_DELAY)
 
     def run(self, steps):
-        """Each step is (wait_pattern, text_to_type). Returns True if all matched."""
+        """Each step is (wait_pattern, text_to_type). Returns True if all matched.
+
+        An empty TYPE waits without typing. To type an EMPTY LINE - a bare
+        Enter - use the literal `<ENTER>`, which is what makes "the tool must
+        refuse an empty answer" testable at all; without it every
+        empty-input rule (passwd's and useradd's empty-password refusal) was
+        unreachable from this harness, so the check guarding it could not fail.
+        """
         for pattern, text in steps:
             if pattern and not self.wait_for(pattern):
                 self.report(f"!!! TIMEOUT waiting for {pattern!r}")
                 return False
-            if text:
+            if text == ENTER:
+                self.type_line("")
+            elif text:
                 self.type_line(text)
         return True
 

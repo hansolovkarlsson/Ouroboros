@@ -9,6 +9,11 @@ DESCRIPTION
     password. ROOT ONLY. Creates the home directory /Users/<name> and, on ext2,
     chowns it to the new user.
 
+    The password may not be empty, the same rule passwd enforces. useradd is
+    the only writer of an INITIAL secret, so without the check an account made
+    by pressing Enter twice would be loginable by pressing Enter. The refusal
+    happens before anything is written, so no account is created.
+
     -u <uid>          use this uid (default: the next free id at/above 1000)
     -g <group|gid>    primary group by name or number (default: a user-private
                       group named after the user, created in /etc/group with

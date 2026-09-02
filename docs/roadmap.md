@@ -871,7 +871,16 @@ and left in place, rather than deleted. Two reasons. A reader wants to know a
 hazard was *considered*, not just that it is absent today; and the section
 would otherwise silently shrink into looking like nothing was ever found.
 
-- **The 9P export bypasses permissions entirely.** `netd` relays a remote
+- ~~**The 9P export bypasses permissions entirely.**~~ **Closed 2026-08-31** by
+  per-user cluster identity (v0.15.0), which this finding specified. `fsd`'s
+  `effective_caller` now REFUSES a `NET_TASK` request that states no identity
+  rather than falling back to netd's root, and `netd`'s `AsUser::enter` makes a
+  `cpu` child inherit the mapped user, so both doors below are shut. The
+  residual — an authorized *machine* may still claim any of its own users'
+  names — is frontier item 1 above, not this entry. The finding as originally
+  recorded, left in present tense rather than rewritten:
+
+  `netd` relays a remote
   request to `fsd` under its *own* root identity, so `check_access`'s
   `if uid == 0 { return true }` short-circuits before any mode is consulted —
   and `mount -r` is not root-gated (the shell's only `shell_uid() != 0` check is
@@ -885,7 +894,7 @@ would otherwise silently shrink into looking like nothing was ever found.
   the far end, not just a readable file. This is the concrete argument for
   **per-user cluster identity**, which was promoted out of the north-star
   section to the top of "What's next" on 2026-08-30 precisely because of it.
-  **This finding is the specification for that arc**, and closes with it.
+  **This finding was the specification for that arc**, and closed with it.
 - **`fsd`'s per-request cost multiplied** when ancestor-`x` traversal landed:
   `path_allows` now costs 2 + (ancestors + 1) + 1 path resolutions where it cost
   1, `NP_OPEN` with `O_RDWR` does three ancestor walks, and `caller_id` issues
@@ -899,13 +908,30 @@ would otherwise silently shrink into looking like nothing was ever found.
   as the v0.4.1 FAT32 O(n²) read that ran past the supervisor's runnable-wedge
   and got `fsd` restarted mid-read; the cost is milliseconds per sector on real
   USB-MSD, not QEMU virtio-blk. **Unmeasured on hardware.**
-- **`NP_STAT`/`NP_CHMOD`/`NP_CHOWN` skip the "does this filesystem model modes?"
-  short-circuit**, calling `ancestors_searchable` directly instead of going
-  through `path_allows`. On FAT32/exFAT — which record no mode, so every other
-  verb short-circuits to allow — a non-root `cat ../f` succeeds while
-  `ls -l ../f` is refused. Every `ls -l` entry also pays a guaranteed-useless
-  ancestor walk. Note `check_access` is **default-allow** (`_ => true`), so a
-  future `NP_` verb added without an arm here ships unauthenticated.
+- ~~**`NP_STAT`/`NP_CHMOD`/`NP_CHOWN` skip the "does this filesystem model
+  modes?" short-circuit**~~ — **fixed 2026-09-02.** They called
+  `ancestors_searchable` directly instead of going through `path_allows`, so on
+  FAT32/exFAT — which record no mode, so every other verb short-circuits to
+  allow — a non-root stat of a path containing `..` was refused while a read of
+  the same path succeeded, and every `ls -l` entry paid a guaranteed-useless
+  ancestor walk. The question is now asked once at the top of `check_access`,
+  where it covers every verb.
+
+  **One correction to the finding as originally written**, since it named a
+  symptom that cannot occur: it said `cat ../f` succeeds while `ls -l ../f` is
+  refused *from the shell*. It does not — `ulib::normalize_path` collapses `..`
+  client-side, so no `/bin` program can send `fsd` such a path. The divergence
+  was reachable only from a client that sends raw paths, which means the 9P
+  export. Verified there in both directions against an unpatched guest
+  (`np9p_client.py stat /BIN/../ETC/PASSWD --user user` → `FS_ERR_PERM`, `read`
+  of the same path → served) — and *that* took fixing the observer first, whose
+  `stat` op was sending `NP_READ_FILE`. The cost half was reachable all along:
+  `ls -l` sends one `NP_STAT` per entry.
+
+- **`check_access` is default-allow** (`_ => true`), so a future `NP_` verb
+  added without an arm here ships unauthenticated. Untouched by the fix above,
+  and the reason it is worth its own line is that the fix removed the entry it
+  used to be a footnote on.
 - ~~**A server authorized on the *current* occupant of the sender's slot.**~~
   **Fixed 2026-08-30.** `GET_ID(sender)` answered "who occupies slot N now",
   not "who sent this": a non-root task could `MSG_SEND` (non-blocking), `EXIT`,
@@ -965,10 +991,13 @@ would otherwise silently shrink into looking like nothing was ever found.
   the mirror, since the definition is what gets edited next. *Recorded as a
   strike-through rather than deleted, per the ledger note above — it was
   removed outright when fixed, which was the wrong call and is corrected here.*
-- **`useradd` accepts an empty password** while `passwd` now rejects one, so an
-  account created by pressing Enter twice is loginable by pressing Enter. It is
-  the only writer of an *initial* secret, so it is the one that most needs the
-  check. Pre-existing.
+- ~~**`useradd` accepts an empty password**~~ — **fixed 2026-09-02.** `passwd`
+  rejected one and `useradd` did not, so an account created by pressing Enter
+  twice was loginable by pressing Enter — confirmed on `main` before the fix
+  (`useradd bob`, Enter, Enter → `useradd: created bob`, then `login: bob` with
+  an empty password → `uid=1001(bob)`). It is the only writer of an *initial*
+  secret, so it was the one that most needed the check. Both manpages now state
+  the rule; neither did.
 
 ## Open gaps (small, from the old parking lot)
 
