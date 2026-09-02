@@ -38,6 +38,53 @@ history is the CHANGELOG. The number `0.4.0` (rather than `0.1.0`) reflects
 that accumulated maturity and sets the cadence going forward: the next arc
 is `0.5.0`.
 
+| Version | Date | Arc |
+| --- | --- | --- |
+| `0.4.0` | 2026-08-24 | everything to date: boot/shell/FAT32, USB, network, filesystems |
+| `0.4.1` | 2026-08-24 | patch — the `fsd` large-read restart |
+| `0.5.0` | 2026-08-25 | cluster Phase 0: one verb set, per-task namespaces, multi-mount |
+| `0.6.0` | 2026-08-25 | Phase 1 — 9P-over-TCP: export, remote-mount, two nodes |
+| `0.7.0` | 2026-08-25 | Phase 2 — two-node read **and write** disk sharing |
+| `0.8.0` | 2026-08-25 | Phase 3 — resources as files: `/proc`, `/dev/cons`, `/net` |
+| `0.9.0` | 2026-08-26 | Phase 4 — remote execution, the full Plan 9 `cpu` model |
+| `0.10.0` | 2026-08-26 | export hardening: shared-cluster-key HMAC auth |
+| `0.11.0` | 2026-08-26 | `/net/tcp` dial-out — use another machine's NIC |
+| `0.12.0` | 2026-08-26 | dial-in — accept inbound on another machine's NIC |
+| `0.13.0` | 2026-08-26 | reply authentication (mutual auth) |
+| `0.14.0` | 2026-08-27 | `cpu` chunked output delivery + four more `/bin` filters |
+| `0.15.0` | 2026-08-31 | per-**user** cluster identity (wire flag day: `AUTHNP01`→`02`) |
+| `0.16.0` | 2026-09-01 | per-**machine** Ed25519 keypairs (wire flag day: `AUTHNP02`→`03`) |
+
+## Three things that have bitten, and how to avoid them
+
+Learned the hard way, in the order they hurt.
+
+**1. Bump `VERSION`, `kernel/Cargo.toml` and `Cargo.lock` in ONE commit, before
+building.** `make image` / `release.sh build` regenerates `Cargo.lock` when the
+kernel version changes, so a release commit that omits it goes *dirty mid-build*
+and `publish` then refuses ("working tree is dirty"). Run `cargo metadata` after
+editing `Cargo.toml` to regenerate the lock, and commit all three together. This
+cost a v0.14.0 amend-and-diverge that took a `reset --soft` to untangle.
+
+**2. Ship the `.dmg`, never a zipped `.hdd`.** `prl_disk_tool create --dmg`
+writes an `.hdd` *bundle* whose `DiskDescriptor.xml` references the disk data by
+**absolute path** to the `.dmg` — the bundle's own data file is 0 bytes. A zipped
+`.hdd` is therefore useless on any machine but the one that built it. The `.dmg`
+is self-contained; the notes carry the one-line `prl_disk_tool create` recipe for
+wrapping it locally.
+
+**3. Smoke-test the built image before publishing.** The artifacts are what
+people download, and `release.sh build` is the last point at which a bad one is
+free to fix. Boot `build/esp.img` and check the console reaches a login prompt
+with no faults — `python3 scripts/drive-qemu.py --slirp build/esp.img
+'login:@@root' 'assword@@root' '# @@uptime'` does it unattended and prints the
+abort count.
+
+**When two arcs share one branch** and each needs its own minor tag: ff-merge the
+whole branch, then tag *each* version at *its* commit, checking out the earlier
+one detached to build its artifacts (its notes file does not exist at that
+commit, so `-F` a copy made beforehand). Done for v0.10.0 + v0.11.0.
+
 ## What a release contains
 
 Every release is three things:

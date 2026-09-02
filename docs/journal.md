@@ -7,6 +7,71 @@ for the forward plan see [`roadmap.md`](roadmap.md).
 
 ---
 
+## 2026-09-01 — reviewing the review's repairs, and shipping v0.16.0
+
+*(The day after. No new features: one open PR reviewed four times, eight small
+follow-ups, a release, and a postmortem about the reviewing itself.)*
+
+The flag day sat open as #60 overnight. Reviewing it found fifteen things, one
+of which mattered a great deal: deleting the retried `CLUSTER.KEY` read had
+promoted the `\NOEXEC` probe to `netd`'s first `fsd` call and left it bare, so a
+machine configured to share its disk while refusing `cpu` would enable remote
+execution for the whole boot — silently, because the line that says otherwise
+prints only inside the true branch. Plus an unsealed reply path, a stale
+`CLUSTER.KEY` surviving in every built image because `make esp` only ever added
+files, and `ninep-abi` never actually running in `make test`.
+
+Fixed those. Reviewed again — and the second round was mostly about **the
+fixes**. So was the third. So was the fourth.
+
+That is the day's subject, and it has its own postmortem
+([`repairing-the-repairs-postmortem.md`](repairing-the-repairs-postmortem.md)).
+The `\NOEXEC` classification took **four** corrections, each a reasonable
+response to the evidence and each incomplete: `NO_FS` only; then
+`TASK_ERR_NO_SUCH_TASK`; then the discovery that the restart window produces
+neither, because `read_file_chunk` grants *before* it calls and a refused grant
+is `FS_ERROR`; then a bound, because the inverted predicate that fixed *that*
+retried permanent errors forever. A `rm -rf $(ESP_DIR)` I added carried a comment
+of mine asserting it could never expand to `rm -rf $HOME`, which it could — a
+claim in a comment is not a check, and it is a `test` in the recipe now.
+
+The thread through all of it: **every defect came from building more than the bug
+needed** — a staging tree where a guarded delete would do, an inverted predicate
+where a list would do, a catch-all flag scanner where three cases would do. The
+last commit of the sequence was a *reduction*, and nothing has needed fixing
+since.
+
+I also wrote three checks that could not fail while fixing checks that could not
+fail, including one the Makefile comment cited by name as the reason for the
+change. Mutation caught all three; reading caught none. The honest reading is
+that I write the check from the shape of the fix rather than the shape of the
+bug, and a condition derived from the repair cannot detect the defect that
+motivated it.
+
+Then #60 merged and **v0.16.0** went out — the second deliberate wire flag day
+(`AUTHNP02` → `03`, the retired format refused outright), so both ends of a
+cluster upgrade together. The remaining findings became eight small PRs, one
+subject each, rather than another round on a branch that had already grown too
+big to review: the pre-auth fingerprinting leak, transient-vs-permanent `fsd`
+failures, three transcribed constants, the dev-label tables, the
+duplicate-address lookup asymmetry, sealing the post-authentication refusal, the
+wire-spec docs, and a trigger. None needed a second round.
+
+Two smaller things worth keeping. A `LineScan` split *looked* done and produced
+the old message on a real boot, because `map_user` flattened the value one level
+above the code that distinguished it — the same "fixed one layer away from where
+the failure enters" as the `\NOEXEC` bug, and running found both where reading
+found neither. And a remote `cat` failed during verification; rather than blame
+my change or wave it off, I baselined it — 2 in 6 on the branch, 1 in 4 on
+`main`, against a roadmap recording that flake at "2 of 6 on main" — and said so
+including the sample size.
+
+The one open item, `NET_WAIT` not being a sleep, is parked on purpose:
+instrumented, the retry loop runs **zero** times on QEMU, so that rig can
+observe neither the bug nor a fix. It is queued against the first Raspberry Pi
+bench session, written into `testing-pi4.md` as Risk 4b and as a numbered step
+of "when the boards arrive".
+
 ## 2026-08-31 (evening) — the shared cluster key is gone
 
 *(The third and largest thread of one long day. Fourteen merged PRs, plus the
