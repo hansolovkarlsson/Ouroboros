@@ -184,8 +184,9 @@ def build_frame(verb, tree, params, payload):
 def signed_frame(np_msg, seed, user=None):
     """[u32 len][magic:8][nonce:16][name:32][pubkey:32][sig:64][np]
 
-    The signature covers nonce || name || np - the same bytes the MAC covers, so
-    the only thing that changed is who can produce the authenticator. The public
+    The signature covers SIG_DOMAIN_REQUEST || nonce || name || np - the same
+    bytes the retired MAC covered, after a domain tag that keeps a reply
+    signature from being replayed as a request one. The public
     key travels in the frame the way SSH offers one; the exporter decides whether
     that key is authorized BEFORE it verifies anything.
     """

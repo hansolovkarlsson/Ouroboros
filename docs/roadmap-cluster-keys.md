@@ -90,17 +90,20 @@ It becomes:
 - `pubkey` is the **sending machine's** public key — its identity, offered the
   way SSH offers a key. The exporter looks it up in its authorized list *first*
   and refuses an unknown key before verifying anything.
-- `sig` is Ed25519 over `nonce ‖ name ‖ np`. The public key is not inside the
-  signed bytes: the verification equation already binds a signature to the key
-  that verifies it, and the key's *authority* is decided by the lookup, not by
-  the signature.
+- `sig` is Ed25519 over `SIG_DOMAIN_REQUEST ‖ nonce ‖ name ‖ np`. The public
+  key is not inside the signed bytes: the verification equation already binds a
+  signature to the key that verifies it, and the key's *authority* is decided by
+  the lookup, not by the signature. **The domain tag is not optional** — without
+  it a captured reply signature is structurally a valid request signature from
+  the same key, so both directions carry one and they differ.
 - `name` keeps its v0.15.0 meaning — the requesting **user**, resolved on the far
   side through its own `/etc/passwd`.
 - The magic advances again, which makes this the second deliberate flag day. A
   v0.15.0 peer is refused rather than misparsed.
 
-The reply gains a signature in place of its MAC, over `request_nonce ‖ [status]
-[result]`, signed by the **exporter's** key.
+The reply gains a signature in place of its MAC, over
+`SIG_DOMAIN_REPLY ‖ request_nonce ‖ [status][result]`, signed by the
+**exporter's** key.
 
 ## Decision 3 — who verifies what, in each direction
 

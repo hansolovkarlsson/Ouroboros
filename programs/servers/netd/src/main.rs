@@ -2562,7 +2562,8 @@ fn authenticate_signed<'a>(
     clusterkeys::find_by_key(auth.authorized(), &offered)?;
 
     let np = &request[need..];
-    // The signed bytes: nonce ‖ name ‖ message. Built into one buffer because
+    // The signed bytes, after the domain tag: nonce ‖ name ‖ message. Built
+    // into one buffer because
     // the signature is over a concatenation the frame does not store adjacently
     // - the prefix and the message are separated by the key and signature.
     // Domain-separated: the signed input is TAG ‖ nonce ‖ name, so a signature
@@ -2862,8 +2863,9 @@ fn frame_signed_ed25519(
     let npoff = p + ninep_abi::NP_AUTH_HDR_SIGNED;
     out[npoff..npoff + np.len()].copy_from_slice(np);
 
-    // Signed over nonce ‖ name ‖ np, the same bytes the MAC covers - and via the
-    // two-part entry point, so the concatenation is never built in memory.
+    // Signed over SIG_DOMAIN_REQUEST ‖ nonce ‖ name ‖ np - the same bytes the
+    // retired MAC covered, after the tag - and via the two-part entry point, so
+    // the concatenation is never built in memory.
     let mut prefix = [0u8; ninep_abi::SIG_DOMAIN_MAX + ninep_abi::NP_SIG_PREFIX_LEN];
     let tag = ninep_abi::SIG_DOMAIN_REQUEST;
     prefix[..tag.len()].copy_from_slice(tag);
