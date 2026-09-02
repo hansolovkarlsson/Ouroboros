@@ -200,7 +200,7 @@ ps kill fg wait send recv selftest env set unset cpu`.
 | `find` `du` `df` | ✗ | Client-side directory walking (new but small); `df` wants the volume info fsd already returns. |
 | `date` `sleep` | ✗ | Blocked on wall-clock (§12) and a per-task timer respectively. |
 | `chmod` `chown` `ln` | ◐ | `chmod`/`chown` **shipped** (ext2-only; `chmod` takes octal *or* symbolic modes, `chown` names *or* numeric ids); `ln`/`ln -s` are still open (the ext2 link foundation exists — `i_links_count` is maintained and symlinks are reported — so it's a small follow-up, see roadmap §b). |
-| Command flags (`ls -l`, `grep -i/-r`, `rm -r`, `cp -r`, real regex) | ◐ | `ls` takes `-l`/`-a` (on the `stat` op) and `grep` takes `-i`/`-v`/`-n`/`-F` with **real extended-regex** matching (the pure, host-tested `regex` crate; `-F` for literal); the rest are still positional-only. A shared `ulib` option parser would generalize flag handling (roadmap item 2). |
+| Command flags (`ls -l`, `grep -i/-r`, `rm -r`, `cp -r`, real regex) | ◐ | `ls` takes `-l`/`-a` (on the `stat` op) and `grep` takes `-i`/`-v`/`-n`/`-F` with **real extended-regex** matching including the twelve POSIX `[[:alpha:]]` character classes (the pure, host-tested `regex` crate; `-F` for literal), and `cp`/`mv` take `-f` (plus `--` to end options) since replacing an existing file requires it; the rest are still positional-only. A shared `ulib` option parser would generalize flag handling (roadmap item 2). |
 | An editor + a pager (`less`/`more`) | ✗ | The two consumers that justify the VT100 arc (§4) and general `select` — gated on items 1 & 3. |
 | `sed` `awk` `find … -exec` | ✗ | Larger; realistic once a libc/scripting layer exists. |
 

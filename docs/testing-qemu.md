@@ -39,9 +39,19 @@ that: each argument is a `WAIT@@TYPE` step — wait for a regex to appear in *ne
 guest output, then type a line — and it prints the transcript followed by the
 abort count from QEMU's own `-d int` trace.
 
+An empty `TYPE` waits without typing. A `TYPE` of **`<ENTER>`** types an *empty
+line* — a bare Enter — which is how a prompt that must **refuse** an empty
+answer gets tested. Without it every such rule was unreachable from this rig,
+including `useradd`'s and `passwd`'s empty-password refusals.
+
 ```sh
 python3 scripts/drive-qemu.py build/espext2.img \
     'login@@root' 'assword@@root' '# @@id' '# @@cat /etc/shadow'
+
+# A prompt that must refuse an empty answer:
+python3 scripts/drive-qemu.py build/espext2.img \
+    'login@@root' 'assword@@root' '# @@useradd bob' \
+    'New password@@<ENTER>' 'Retype@@<ENTER>'      # -> "password may not be empty"
 ```
 
 This is what makes login, permission enforcement and `cpu` testable in a loop.
@@ -119,7 +129,18 @@ python peers (no dependencies beyond python 3) act as the "foreign observer":
 make run-image-9p                                   # adds a hostfwd tcp::5640-:564
 python3 scripts/np9p_client.py localhost 5640 readdir /
 python3 scripts/np9p_client.py localhost 5640 read /EFI/ORBS/INIT.CFG
+python3 scripts/np9p_client.py localhost 5640 stat /EFI/ORBS/INIT.CFG
+python3 scripts/np9p_client.py localhost 5640 mv /A.TXT /B.TXT       # NP_MV, raw paths
+```
 
+`stat` really does send `NP_STAT` (it sent `NP_READ_FILE` until 2026-09-02 and
+printed the byte count as a "size", so it could not exercise the one verb that
+reaches `fsd`'s ancestor walk without going through `path_allows`). `mv` exists
+because the guest's own `/bin/mv` guards `mv f f` before `fsd` ever sees it, so
+the server-side guard — the one protecting the path where paths arrive raw — had
+no client that could reach it.
+
+```sh
 # The GUEST reads a file served by the HOST:
 make run-image-9p-client                            # a NIC, no hostfwd needed
 python3 scripts/np9p_server.py 5641                 # on the host; serves a small tree
