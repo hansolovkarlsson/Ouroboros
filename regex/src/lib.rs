@@ -25,8 +25,16 @@
 //! Alternation binds loosest, then concatenation, then the postfix repeats -
 //! so `^a|b$` is "starts with `a`" or "ends with `b`", not `^(a|b)$`.
 //!
+//! POSIX class names work inside a bracket expression: `[[:alpha:]]`,
+//! `[[:digit:]_]`, `[^[:space:]]`. All twelve are supported (`alnum`, `alpha`,
+//! `blank`, `cntrl`, `digit`, `graph`, `lower`, `print`, `punct`, `space`,
+//! `upper`, `xdigit`), and an unknown name is an ERROR rather than a fall back
+//! to the literal characters. Note the POSIX form needs BOTH brackets - a bare
+//! `[:alpha:]` is one bracket expression containing `:`, `a`, `l`, `p` and `h`,
+//! which is what POSIX leaves undefined and what this engine does.
+//!
 //! Not supported, deliberately: back-references, `{n,m}` counted repetition,
-//! POSIX class names (`[:alpha:]`), and submatch capture. Each is a real
+//! and submatch capture. Each is a real
 //! addition rather than a tweak, and nothing wants them yet.
 //!
 //! ## Shape: parse to an AST, emit a program, run it on an explicit stack
@@ -122,6 +130,12 @@ pub enum Error {
     /// A character-class range whose endpoints are the wrong way round
     /// (`[z-a]`) - almost always a typo, and never worth guessing at.
     BadRange,
+    /// `[[:nosuch:]]` - a POSIX class name that does not exist. Refused rather
+    /// than read as the literal characters, which is what a parser that does
+    /// not know the syntax would do: `[[:alfa:]]` would then quietly match `a`,
+    /// `l`, `f`, `:` and `[`, and report success on text containing none of the
+    /// letters intended.
+    UnknownClassName,
     /// A `*` or `+` applied to something that can match the empty string
     /// (`(a*)*`, `(a|)*`). POSIX allows it; this engine refuses it, because a
     /// loop body that consumes nothing is the one way a backtracking matcher
@@ -144,6 +158,7 @@ impl Error {
             Error::TrailingBackslash => b"trailing backslash",
             Error::NothingToRepeat => b"nothing to repeat",
             Error::BadRange => b"character-class range is reversed",
+            Error::UnknownClassName => b"unknown [:name:] character class",
             Error::EmptyRepeat => b"repeat of a possibly-empty expression",
         }
     }
@@ -381,9 +396,10 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// `[abc]`, `[a-z]`, `[^...]`. A `]` immediately after the (optional) `^`
-    /// is a literal `]`, and a `-` first or last is a literal `-` - the POSIX
-    /// rules, which exist precisely so those two characters remain typable.
+    /// `[abc]`, `[a-z]`, `[^...]`, `[[:alpha:]]`. A `]` immediately after the
+    /// (optional) `^` is a literal `]`, and a `-` first or last is a literal
+    /// `-` - the POSIX rules, which exist precisely so those two characters
+    /// remain typable.
     fn parse_class(&mut self) -> Result<u16, Error> {
         self.pos += 1; // consume '['
         if self.n_classes >= MAX_CLASSES {
@@ -404,6 +420,34 @@ impl<'a> Parser<'a> {
             if c == b']' && !first {
                 self.pos += 1;
                 break;
+            }
+            // `[:name:]` - a POSIX class name. Only meaningful INSIDE a bracket
+            // expression, which is why it is handled here and not in `atom`.
+            if c == b'[' && self.pat.get(self.pos + 1).copied() == Some(b':') {
+                self.pos += 2; // consume "[:"
+                let name_start = self.pos;
+                loop {
+                    match (self.pat.get(self.pos), self.pat.get(self.pos + 1)) {
+                        (Some(b':'), Some(b']')) => break,
+                        (None, _) => return Err(Error::UnterminatedClass),
+                        _ => self.pos += 1,
+                    }
+                }
+                let name = &self.pat[name_start..self.pos];
+                self.pos += 2; // consume ":]"
+                // `posix_class` decides on the NAME, so the first byte settles
+                // whether the name is known; the loop then just collects. One
+                // function answers both questions, so there is no second list
+                // of names to drift out of step with this one.
+                for b in 0..=u8::MAX {
+                    match posix_class(name, b) {
+                        None => return Err(Error::UnknownClassName),
+                        Some(true) => bits[(b >> 3) as usize] |= 1 << (b & 7),
+                        Some(false) => {}
+                    }
+                }
+                first = false;
+                continue;
             }
             first = false;
             self.pos += 1;
@@ -470,6 +514,41 @@ impl<'a> Parser<'a> {
         self.n_classes += 1;
         self.push(Node::Class((self.n_classes - 1) as u8))
     }
+}
+
+/// Whether byte `b` belongs to the POSIX character class `name`, or `None` if
+/// `name` is not one of the twelve.
+///
+/// COMPUTED from `core`'s own `is_ascii_*` predicates rather than transcribed
+/// as twelve 32-byte bit tables. A table of 384 hex bytes is a transcription
+/// task, and a wrong bit in one would be invisible: the class would simply
+/// match slightly the wrong set, in a direction no test looks at unless it was
+/// written for that byte.
+///
+/// TWO PLACES WHERE POSIX AND `core` DISAGREE, both handled explicitly:
+///
+/// - `is_ascii_whitespace` EXCLUDES vertical tab (0x0B); POSIX `[:space:]`
+///   includes it. Six characters, not five.
+/// - POSIX `[:print:]` is `[:graph:]` plus the space; `core` has no `print`.
+///
+/// `[:punct:]` is `is_ascii_punctuation`, which is the POSIX set (printable,
+/// neither space nor alphanumeric) - checked against the count, not assumed.
+fn posix_class(name: &[u8], b: u8) -> Option<bool> {
+    Some(match name {
+        b"alnum" => b.is_ascii_alphanumeric(),
+        b"alpha" => b.is_ascii_alphabetic(),
+        b"blank" => b == b' ' || b == b'\t',
+        b"cntrl" => b.is_ascii_control(),
+        b"digit" => b.is_ascii_digit(),
+        b"graph" => b.is_ascii_graphic(),
+        b"lower" => b.is_ascii_lowercase(),
+        b"print" => b.is_ascii_graphic() || b == b' ',
+        b"punct" => b.is_ascii_punctuation(),
+        b"space" => b.is_ascii_whitespace() || b == 0x0B,
+        b"upper" => b.is_ascii_uppercase(),
+        b"xdigit" => b.is_ascii_hexdigit(),
+        _ => return None,
+    })
 }
 
 /// Emitter state: the growing program.
@@ -1046,5 +1125,110 @@ mod tests {
         let re = Regex::compile(b"^(cat|dog)+[0-9]*\\.txt$").unwrap();
         assert!(re.prog_len() <= MAX_PROG);
         assert_eq!(re.class_count(), 1);
+    }
+
+    // ---- POSIX character classes -------------------------------------------
+
+    /// How many of the 256 bytes `[[:name:]]` accepts.
+    ///
+    /// The COUNT is the assertion that a wrong class set cannot survive.
+    /// Spot-checking `m("[[:alpha:]]", "a")` passes for any class containing
+    /// `a` - alnum, lower, print, graph and xdigit all do - so it distinguishes
+    /// almost nothing. A cardinality pins the whole set with one number.
+    fn class_size(name: &str) -> usize {
+        // A fixed buffer: this crate is `no_std`, so its tests have no `Vec`.
+        let mut pat = [0u8; 24];
+        let n = name.as_bytes();
+        pat[..3].copy_from_slice(b"[[:");
+        pat[3..3 + n.len()].copy_from_slice(n);
+        pat[3 + n.len()..6 + n.len()].copy_from_slice(b":]]");
+        let re = Regex::compile(&pat[..6 + n.len()]).unwrap();
+        (0..=u8::MAX)
+            .filter(|&b| re.is_match(&[b], false) == Match::Yes)
+            .count()
+    }
+
+    #[test]
+    fn posix_classes_have_the_right_cardinalities() {
+        assert_eq!(class_size("upper"), 26);
+        assert_eq!(class_size("lower"), 26);
+        assert_eq!(class_size("alpha"), 52);
+        assert_eq!(class_size("digit"), 10);
+        assert_eq!(class_size("alnum"), 62);
+        assert_eq!(class_size("xdigit"), 22); // 0-9 A-F a-f
+        assert_eq!(class_size("blank"), 2); // space, tab
+        assert_eq!(class_size("cntrl"), 33); // 0x00..=0x1F and 0x7F
+        assert_eq!(class_size("graph"), 94); // 0x21..=0x7E
+        assert_eq!(class_size("print"), 95); // graph + space
+        assert_eq!(class_size("punct"), 32); // graph - alnum
+        assert_eq!(class_size("space"), 6); // space \t \n \v \f \r
+    }
+
+    /// The one place `core` and POSIX disagree, and it is off by exactly this
+    /// byte: `is_ascii_whitespace` omits the vertical tab. Written as its own
+    /// test because the cardinality above would also pass if `space` held six
+    /// entirely different bytes.
+    #[test]
+    fn posix_space_includes_the_vertical_tab() {
+        assert!(m("[[:space:]]", "\x0b"));
+        for c in [" ", "\t", "\n", "\x0c", "\r"] {
+            assert!(m("[[:space:]]", c), "space should contain {c:?}");
+        }
+        assert!(!m("[[:space:]]", "a"));
+    }
+
+    /// Every class must be DISJOINT from the bytes it excludes, not merely
+    /// contain the ones it includes.
+    #[test]
+    fn posix_classes_exclude_what_they_should() {
+        assert!(!m("[[:alpha:]]", "1"));
+        assert!(!m("[[:digit:]]", "a"));
+        assert!(!m("[[:upper:]]", "a"));
+        assert!(!m("[[:lower:]]", "A"));
+        assert!(!m("[[:punct:]]", "a"));
+        assert!(!m("[[:punct:]]", " "));
+        assert!(!m("[[:cntrl:]]", "a"));
+        assert!(!m("[[:graph:]]", " "));
+        assert!(m("[[:print:]]", " "));
+        assert!(!m("[[:xdigit:]]", "g"));
+    }
+
+    #[test]
+    fn posix_classes_compose_with_the_rest_of_a_bracket_expression() {
+        assert!(m("^[[:digit:]]+$", "2026"));
+        assert!(m("^[[:alpha:][:digit:]_]+$", "a_9Z"));
+        assert!(!m("^[[:alpha:][:digit:]_]+$", "a-9"));
+        assert!(m("^[[:digit:]abc]+$", "1a2b"));
+        // Negation applies to the assembled set, not to each piece.
+        assert!(m("^[^[:digit:]]+$", "abc"));
+        assert!(!m("^[^[:digit:]]+$", "ab1"));
+        // And they still work under the case-insensitive flag.
+        assert!(mi("^[[:lower:]]+$", "ABC"));
+    }
+
+    #[test]
+    fn an_unknown_class_name_is_an_error_not_a_literal() {
+        // The whole point: `[[:alfa:]]` must NOT quietly become the letters
+        // a, l, f plus punctuation.
+        assert_eq!(Regex::compile(b"[[:alfa:]]").err(), Some(Error::UnknownClassName));
+        assert_eq!(Regex::compile(b"[[::]]").err(), Some(Error::UnknownClassName));
+        assert_eq!(Regex::compile(b"[[:ALPHA:]]").err(), Some(Error::UnknownClassName));
+    }
+
+    #[test]
+    fn an_unterminated_class_name_is_an_error() {
+        assert_eq!(Regex::compile(b"[[:alpha]").err(), Some(Error::UnterminatedClass));
+        assert_eq!(Regex::compile(b"[[:alpha").err(), Some(Error::UnterminatedClass));
+    }
+
+    /// POSIX leaves the single-bracket form undefined; this engine reads it as
+    /// an ordinary bracket expression. Pinned by a test so the behaviour is a
+    /// decision rather than an accident, and so that changing it later is a
+    /// visible change.
+    #[test]
+    fn a_bare_colon_form_is_an_ordinary_bracket_expression() {
+        assert!(m("[:alpha:]", "a"));
+        assert!(m("[:alpha:]", ":"));
+        assert!(!m("[:alpha:]", "z"));
     }
 }
