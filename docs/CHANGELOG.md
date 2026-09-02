@@ -71,7 +71,9 @@ POSIX `rename`: a protocol verb has nobody to consult.
 
 ### The observers
 
-Four things that reported success while proving nothing, all found this day:
+Five things that reported success while proving nothing, all found this day —
+written up as [`blind-instruments-postmortem.md`](blind-instruments-postmortem.md),
+the twenty-eighth:
 
 - **`np9p_client.py`'s `stat` sent `NP_READ_FILE`** and printed the byte count
   as a "size" — a plausible answer from a different verb. `NP_STAT` is the only
