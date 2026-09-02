@@ -338,6 +338,37 @@ restart loop that QEMU never shows. The Pi's runtime storage is USB-MSD too
 (§6), so this risk arrives unchanged — and the Pi's USB stack has one more layer
 of real hardware under it than Parallels' did.
 
+### <a name="risk-4b--net-wait-is-not-a-sleep"></a>Risk 4b — `NET_WAIT` is not a sleep, so the retry budget may not exist
+
+**DEFERRED TO THIS SESSION ON PURPOSE, with the reason written down.** It is a
+known defect with a known fix and no way to test the fix on QEMU — this is the
+rig that can, so it is a task the first bench session should expect to pick up.
+
+`load_auth`'s retry loops call `NET_WAIT(40)` expecting a 40 ms sleep. They do
+not necessarily get one: `tasks.rs` wakes a `WaitReason::NetInput` waiter when
+`net_has_frame() || has_queued_message(waiter) || timed_out`, and it **consumes
+nothing**. `load_auth`'s own `read_file_chunk` is a *sender-filtered* `MSG_CALL`
+on `FSD_TASK`, so it never drains anything else. Once the supervisor's health
+ping is queued — `PING_INTERVAL` is 64 ticks ≈ 1.28 s, and `netd` is Blocked for
+almost all of `load_auth` — that message sits in the mailbox, every later
+`NET_WAIT(40)` returns in microseconds, and the documented "~2 s at 40 ms a try"
+collapses into a busy-spin that burns the whole budget in a moment.
+
+**Why QEMU cannot test it:** measured, not assumed — instrumented, the `\NOEXEC`
+probe retries **0 times** there, because virtio-blk has `fsd` ready before `netd`
+asks. The loop never executes, so neither the bug nor a fix for it is
+observable. USB-MSD on this board is the first rig where the loop runs at all.
+
+**What to watch for**, the same signature as Risk 4 above: `netd` restarting at
+boot, or coming up with `export CLOSED` on a card holding a perfectly good
+`/etc/cluster/id`. If the disk mounts later than ~1.3 s the budget is already
+spent, and the id/authorized reads get one attempt each.
+
+**The fix, if it fires:** `load_auth` must drain its mailbox while it waits —
+answering the health ping rather than ignoring it — instead of treating
+`NET_WAIT` as a timer. That touches supervision, which is why it was not written
+blind against a rig that cannot run it.
+
 ### Risk 5 — no second console when the first one fails
 
 Unlike a VM, there is no host-side window to fall back on. Serial and HDMI are
@@ -398,6 +429,12 @@ The first session is not "run the test matrix." It is:
    checklist; record which prediction each line confirmed or broke.
 3. Only then run the single-machine matrix from
    [`testing-parallels.md`](testing-parallels.md) §"What you *can* validate."
+4. **Pick up the deferred `NET_WAIT` task** (§7 [Risk 4b](#risk-4b--net-wait-is-not-a-sleep)).
+   It is queued for this session specifically: the defect is understood, the fix
+   is sketched, and QEMU cannot exercise either — instrument `load_auth`'s retry
+   count on this board and see whether the loop runs at all before deciding
+   whether the fix is needed. This is the one piece of open work that has been
+   waiting on **hardware** rather than on a decision.
 
 Then update this document in place: turn every **(predicted)** into
 **(confirmed)** or into a numbered entry in a new postmortem. If §7 Risk 1 fires,
