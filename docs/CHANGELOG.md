@@ -51,7 +51,7 @@ name is an error, never a fall back to the literal letters. The tests assert
 **cardinalities**, because `m("[[:alpha:]]", "a")` passes for five of the twelve
 classes and distinguishes almost nothing.
 
-**`mv` replaces an existing file** (#74, open at end of day): all three arms,
+**`mv` replaces an existing file** (#74): all three arms,
 when both sides are ordinary files. On ext2 the whole change is **one write** of
 the destination's directory entry, re-pointed at the source's inode, so the name
 never resolves to nothing. FAT32 and exFAT cost *atomicity, not the name* — two
