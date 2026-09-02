@@ -976,6 +976,24 @@ Known small gaps, not yet sequenced (the *completed* parking-lot entries — USB
 keyboard, GOP console, preemption, task destruction, driver isolation, etc. — are
 in [`roadmap-completed.md`](roadmap-completed.md)):
 
+- **`NET_WAIT` is not a sleep — TRIGGERED ON PI HARDWARE, deliberately not fixed
+  yet.** `load_auth`'s retry loops treat `NET_WAIT(40)` as a 40 ms timer, but
+  `tasks.rs` wakes a `NetInput` waiter on `has_queued_message` *without consuming
+  it*, and `load_auth`'s reads are sender-filtered `MSG_CALL`s that drain nothing
+  else. Once the supervisor's health ping is queued (~1.28 s in) every subsequent
+  wait returns instantly, so the documented "~2 s at 40 ms a try" becomes a
+  busy-spin that spends the budget at once — and the `\NOEXEC` probe, the read
+  that fails *open*, is first in line.
+
+  **The trigger is hardware, not a decision.** Instrumented on QEMU the loop
+  retries **0 times**, because virtio-blk has `fsd` ready before `netd` asks: the
+  path never runs, so neither the bug nor a fix is observable there. The fix —
+  draining the mailbox while waiting instead of ignoring it — touches
+  supervision, and writing it blind against a rig that cannot exercise it is how
+  the fixes in this arc's own review kept needing fixes. Queued as step 4 of
+  [`testing-pi4.md`](testing-pi4.md) §8 and written up as its Risk 4b, so the
+  first bench session picks it up rather than rediscovering it.
+
 - **An intermittent failure of `cp` across a remote mount, observed once.**
   2026-08-30, on the two-node ext2 rig: `cp /mnt/a/README.TXT /mnt/a/COPY.TXT`
   returned `cp: failed` in one run and succeeded in the two that followed,
