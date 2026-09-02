@@ -1055,9 +1055,27 @@ pub const FSOP_WRITE_AT: u64 = 13;
 /// On success the reply payload (from [`FS_REPLY_PAYLOAD`]) is:
 /// `partition_lba: u64` (the volume's first sector), then
 /// `capacity_sectors: u64` (the whole disk's 512-byte-sector count), then
+/// `flags: u64` (see [`MOUNT_FLAG_ENFORCES_MODES`]), then
 /// the format name as ASCII bytes running to the end of the reply
 /// (`"FAT32"`/`"exFAT"`/`"ext2"`). The client formats these itself.
+///
+/// `flags` was added 2026-09-02 so a client can ask whether the mounted
+/// filesystem enforces permissions instead of inferring it from the name.
+/// The name is a label for a human; a client that branches on it is making
+/// a security decision by string comparison, and gets it wrong for the next
+/// filesystem that models modes.
 pub const FSOP_MOUNT_INFO: u64 = 14;
+
+/// [`FSOP_MOUNT_INFO`] `flags` bit 0: the mounted filesystem records owner
+/// and mode, so `fsd` can enforce permissions on it. Derived by the server
+/// from the root's `stat`, not from the format name.
+///
+/// A server that cannot tell (the root would not `stat`) leaves this CLEAR.
+/// That is deliberate and is the opposite of what `fsd`'s own internal
+/// permission check does with the same uncertainty: an unknown makes the
+/// check run (deny more), and makes this flag absent (warn more). Both
+/// resolve "I don't know" toward saying so.
+pub const MOUNT_FLAG_ENFORCES_MODES: u64 = 1 << 0;
 /// no params -> status `0` (was mounted, now dropped) or [`NO_FS`]
 /// (nothing was mounted). Drops the server's mounted filesystem so the
 /// disk can be reformatted or a different volume mounted (disk-tools arc,

@@ -955,33 +955,48 @@ would otherwise silently shrink into looking like nothing was ever found.
   host-side Python peer. Note the `-d int` health bar reads `0` either way: a
   userland panic parks a task rather than raising a CPU exception, so the signal
   is the supervisor's restart line.
-- **`warn_if_unprotected` fails open** — but does *not* misfire today, which is
-  a distinction worth keeping straight. **Tested 2026-08-29 on all three
-  images**: the warning correctly appears on FAT32 and exFAT and correctly stays
-  silent on ext2, so the mitigation works as designed and this is not a live
-  hole.
+- ~~**`warn_if_unprotected` fails open**~~ — **fixed 2026-09-02**, and the
+  structure that was the real finding is gone rather than patched.
 
-  The structure is still wrong, and it is the *reason* it works that should
-  worry us. `mounted_fs_unprotected` returns `false` — "this filesystem enforces
+  `mounted_fs_unprotected` returned `false` — "this filesystem enforces
   permissions" — for **any** non-zero `FSOP_MOUNT_INFO` status, including the
-  `NO_FS` that means "`fsd` has not finished mounting yet". It is the first
-  statement of `login()`, and it has **no retry**, while `read_account_file` in
-  the same file carries a bounded 200-try `NO_FS` retry *precisely because login
-  can beat the mount*. One of those two functions is defended against a race the
-  other ignores.
+  `NO_FS` that means "`fsd` has not finished mounting yet". It was the first
+  statement of `login()` and had **no retry**, while `read_account_file` three
+  lines away carries a bounded 200-try `NO_FS` retry *precisely because login
+  can beat the mount* — two functions in one file disagreeing about whether a
+  race exists. It passed on QEMU because virtio-blk mounts first; the device
+  that loses is USB-MSD on real hardware, where the whole symptom is a warning
+  that silently does **not** print.
 
-  It passes on QEMU because virtio-blk mounts before login asks. The device that
-  would lose that race is USB-MSD on real Parallels, which is measurably slower
-  and where [`testing-parallels.md`](testing-parallels.md) already flags a
-  `netd` boot-race risk for the same reason — and where the failure is silent,
-  since the whole symptom is a warning that *doesn't* print. Same shape as the
-  xHCI keyboard↔storage contention: invisible on the emulator, real on hardware.
+  Three changes, and the first is the one that matters:
 
-  Two further defects in the same three lines, both unexercised today: it
-  inspects only tree 0 (a multi-mount with `/etc` on a different tree
-  misreports) and string-matches `"ext2"` (a future mode-modelling filesystem
-  would raise a false alarm). `fsd` already derives this structurally from
-  `stat().mode.is_some()`, which is what this should ask instead.
+  - **`login` now reads the account file FIRST and warns SECOND.** That makes
+    the race unreachable instead of merely unlikely: `read_account_file`
+    returns only once `fsd` has answered, so the warning asks a server that is
+    up. No second retry budget to keep in step with the first. The printed
+    order is unchanged.
+  - **`FSOP_MOUNT_INFO` carries a flags word** with
+    `MOUNT_FLAG_ENFORCES_MODES`, derived by `fsd` from the root's `stat` — the
+    same question `check_access` asks, via one tri-state helper whose two
+    callers resolve "cannot tell" in opposite directions (deny more / warn
+    more) and say so. The shell no longer string-matches `"ext2"`: a security
+    decision by string comparison would raise a false alarm for the next
+    filesystem that models modes.
+  - **An unknown status now warns**, where it used to reassure. `NO_FS`
+    deliberately does not: nothing is mounted, so there is no filesystem to
+    make a claim about, and `login` says "no /etc/passwd" for itself.
+
+  All four branches were exercised by mutation, since three of them cannot be
+  reached on a healthy QEMU boot: clearing the flag on ext2 raised the warning
+  *while `mount` still printed the name `ext2`* (which is what proves the shell
+  reads the flag and not the name), and forcing `FS_ERROR` and `NO_FS` produced
+  the warn and no-warn branches respectively.
+
+  **Still open, deliberately scoped out**: it inspects tree 0 only, so a
+  multi-mount with `/etc` on a different tree misreports. That needs the
+  warning to know which tree `/etc/passwd` resolved through, which is a
+  namespace question rather than this one.
+
 - ~~**`libc/include/sys.h`'s `FS_ERR_MIN` had drifted from the Rust
   constant.**~~ **Fixed 2026-08-30** (#37). The C header hand-mirrored the
   reserved-error floor at `MAX-33` while `accountd`'s codes moved it to

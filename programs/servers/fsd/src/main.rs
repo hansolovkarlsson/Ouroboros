@@ -378,17 +378,26 @@ fn handle(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [Fid; M
     } else if op == syscall_abi::FSOP_MOUNT_INFO {
         // Report tree 0 (the primary mount), as ever. Handles the not-mounted
         // case itself (NO_FS).
-        let Some(mounted) = mounts[0].as_ref() else {
+        let Some(mounted) = mounts[0].as_mut() else {
             return status_reply(reply, syscall_abi::NO_FS);
         };
         let part_lba = mounted.partition_lba() as u64;
+        // Whether this filesystem can enforce permissions is derived HERE, from
+        // the root's stat - the server is the only party that can answer it.
+        // The shell used to answer it by string-matching the format name, which
+        // is a security decision made by string comparison.
+        let mut flags = 0u64;
+        if models_modes_or_unknown(mounted) == Some(true) {
+            flags |= syscall_abi::MOUNT_FLAG_ENFORCES_MODES;
+        }
         let capacity = disk::Disk.capacity_sectors().unwrap_or(0);
         let name = mounted.name().as_bytes();
         reply[0..8].copy_from_slice(&0u64.to_le_bytes());
         reply[8..16].copy_from_slice(&part_lba.to_le_bytes());
         reply[16..24].copy_from_slice(&capacity.to_le_bytes());
-        reply[24..24 + name.len()].copy_from_slice(name);
-        24 + name.len()
+        reply[24..32].copy_from_slice(&flags.to_le_bytes());
+        reply[32..32 + name.len()].copy_from_slice(name);
+        32 + name.len()
     } else if op == syscall_abi::FSOP_UNMOUNT {
         // ROOT ONLY - taking the disk away is at least as privileged as writing
         // to it. Confirmed reachable: `unmount` as an ordinary user succeeded.
@@ -1193,19 +1202,29 @@ fn path_allows(fs: &mut vfs::Filesystem, path: &str, who: &Caller, need: u16) ->
     }
 }
 
-/// Whether the mounted filesystem models owner/mode at all. ext2 does; FAT32,
-/// exFAT and the synthetic `/proc` do not, and on those every permission
-/// question has the same answer, so asking it once here is both the correct
-/// answer and the cheap one.
+/// Whether the mounted filesystem models owner/mode at all - `None` when the
+/// root would not `stat`, so the question could not be answered.
 ///
-/// A filesystem whose root cannot be stat'd is treated as modelling modes: the
-/// per-verb checks below each fail open on their own `Err`, so an unreadable
-/// root must not additionally skip the ancestor walk.
+/// The tri-state is not fussiness: the two callers resolve the unknown in
+/// OPPOSITE directions, and a single `bool` here would have to pick one and
+/// silently impose it on the other. `check_access` treats unknown as "modelled"
+/// so the per-verb checks still run; `FSOP_MOUNT_INFO` treats it as "not
+/// modelled" so the shell still warns. Both are "say so when unsure", which is
+/// the same rule pointing two ways because one is a denial and the other is a
+/// warning.
+fn models_modes_or_unknown(fs: &mut vfs::Filesystem) -> Option<bool> {
+    fs.stat("/").ok().map(|st| st.mode.is_some())
+}
+
+/// Whether to apply the per-verb permission checks. ext2 models owner/mode;
+/// FAT32, exFAT and the synthetic `/proc` do not, and on those every permission
+/// question has the same answer, so asking once is both the correct answer and
+/// the cheap one.
+///
+/// Unknown counts as modelled: the per-verb checks each fail open on their own
+/// `Err`, so an unreadable root must not ALSO skip the ancestor walk.
 fn models_modes(fs: &mut vfs::Filesystem) -> bool {
-    match fs.stat("/") {
-        Ok(st) => st.mode.is_some(),
-        Err(_) => true,
-    }
+    models_modes_or_unknown(fs).unwrap_or(true)
 }
 
 /// Enforce the caller's permission for `verb`. Returns `true` if allowed. Reads
