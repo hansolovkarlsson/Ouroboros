@@ -1301,9 +1301,6 @@ impl Fs {
 
     // ---- write infrastructure (Stage C: directories) ------------------------
 
-    /// Unlink `name` from directory `dir`: extend the previous entry's `rec_len`
-    /// to swallow the removed one (or, if it's first in its block, zero its inode
-    /// field) - the standard ext2 removal. `NotFound` if absent.
     /// Re-point the existing entry `name` in `dir` at inode `ino`, in place.
     ///
     /// ONE BLOCK WRITE, and it is the commit point of a replacing
@@ -1346,6 +1343,9 @@ impl Fs {
         Err(Error::NotFound)
     }
 
+    /// Unlink `name` from directory `dir`: extend the previous entry's `rec_len`
+    /// to swallow the removed one (or, if it's first in its block, zero its inode
+    /// field) - the standard ext2 removal. `NotFound` if absent.
     fn remove_dirent(&mut self, dir: &Inode, name: &str) -> Result<(), Error> {
         let bs = self.block_size as usize;
         let nblocks = dir.size as usize / bs;
@@ -1595,7 +1595,15 @@ impl Fs {
         // had just re-pointed and destroy the file the caller asked to keep.
         // (The same self-destruct shape as `cp x x` in the isolation arc.)
         if let Some((d_ino, d_mode)) = self.lookup_in(&dp, d_name)? {
-            if sp_ino == dp_ino && s_name == d_name {
+            // Same entry, or two names for the same inode. POSIX `rename`
+            // requires both to succeed and do nothing, and here the second is
+            // also a DATA-LOSS path: `set_dirent_inode` would re-point `dst` at
+            // an inode `drop_link(d_ino)` then frees, taking the blocks out
+            // from under the name that now claims them - whenever the link
+            // count says 1, which a foreign or damaged image can present while
+            // two names exist. This OS cannot yet create a hard link, but these
+            // ext2 images are built by the host's `mke2fs -d`.
+            if (sp_ino == dp_ino && s_name == d_name) || d_ino == s_ino {
                 return Ok(());
             }
             let dst_is_dir = d_mode & S_IFMT == S_IFDIR;

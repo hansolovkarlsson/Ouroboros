@@ -15,24 +15,6 @@
 
 use ulib::PATH_MAX;
 
-/// Returns `(force, index_of_first_operand)`. Only `-f` is accepted, and only
-/// before the operands; any other `-...` word is rejected outright rather than
-/// taken as a filename.
-fn leading_force_flag() -> (bool, u64) {
-    let mut buf = [0u8; 16];
-    match ulib::arg(1, &mut buf) {
-        Some(n) if n >= 1 && buf[0] == b'-' => {
-            if &buf[..n] == b"-f" {
-                (true, 2)
-            } else {
-                ulib::con_write(b"cp: unknown option (only -f is accepted)\r\n");
-                ulib::exit(1);
-            }
-        }
-        _ => (false, 1),
-    }
-}
-
 fn arg_or_die(index: u64, buf: &mut [u8], msg: &[u8]) -> usize {
     match ulib::arg(index, buf) {
         Some(len) if len > 0 => len,
@@ -49,7 +31,10 @@ pub extern "C" fn _start() -> ! {
     ulib::usage_if_requested(
         b"usage: cp [-f] <src> <dst>  (copy a file; -f overwrites an existing destination)\r\n",
     );
-    let (force, first) = leading_force_flag();
+    let Some((force, first)) = ulib::parse_force_opts() else {
+        ulib::con_write(b"cp: unknown option (only -f is accepted; use -- before a name starting with -)\r\n");
+        ulib::exit(1);
+    };
     let mut src_arg_buf = [0u8; PATH_MAX];
     let src_arg_len = arg_or_die(first, &mut src_arg_buf, b"cp: missing source file argument\r\n");
     let src_arg = core::str::from_utf8(&src_arg_buf[..src_arg_len]).unwrap_or("");
@@ -88,11 +73,22 @@ pub extern "C" fn _start() -> ! {
     // Before the truncating write below, not after: cp destroys the
     // destination's contents as its FIRST act, so a refusal that came later
     // would arrive after the damage.
-    if !force && ulib::fs_exists(dst_path) {
-        ulib::con_write(b"cp: ");
-        ulib::con_write(dst_path.as_bytes());
-        ulib::con_write(b" exists (use -f to overwrite)\r\n");
-        ulib::exit(1);
+    if !force {
+        match ulib::fs_presence(dst_path) {
+            ulib::Presence::Present => {
+                ulib::con_write(b"cp: ");
+                ulib::con_write(dst_path.as_bytes());
+                ulib::con_write(b" exists (use -f to overwrite)\r\n");
+                ulib::exit(1);
+            }
+            ulib::Presence::Unknown => {
+                ulib::con_write(b"cp: cannot tell whether ");
+                ulib::con_write(dst_path.as_bytes());
+                ulib::con_write(b" exists (use -f to overwrite anyway)\r\n");
+                ulib::exit(1);
+            }
+            ulib::Presence::Absent => {}
+        }
     }
 
     // Confirm the source exists (and is a file, not a directory) *before*

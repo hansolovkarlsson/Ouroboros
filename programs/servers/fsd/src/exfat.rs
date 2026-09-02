@@ -1418,11 +1418,18 @@ impl Fs {
         self.delete_set(parent.first_cluster, parent.contiguous, slot, len)
     }
 
-    /// Rename or move a file/directory. `dst` must not already exist. Re-points
-    /// a new entry set at `src`'s existing clusters (no data copy), preserving
-    /// its `NoFatChain` layout, then deletes `src`'s set - write-new-before-
-    /// delete-old ordering. exFAT has no `..` entry, so a moved directory needs
-    /// no fixup (unlike FAT32's `mv`).
+    /// Rename or move a file/directory. Re-points a new entry set at `src`'s
+    /// existing clusters (no data copy), preserving its `NoFatChain` layout,
+    /// then deletes `src`'s set - write-new-before-delete-old ordering. exFAT
+    /// has no `..` entry, so a moved directory needs no fixup (unlike FAT32's
+    /// `mv`).
+    ///
+    /// An existing `dst` is REPLACED when both it and `src` are ordinary files
+    /// - POSIX `rename` - and the same write-new-first ordering applies, so a
+    /// failure part-way leaves a transient duplicate name rather than a
+    /// destroyed destination. Not atomic: an exFAT entry set carries the file's
+    /// own location, so there is no inode number to re-point. A DIRECTORY on
+    /// either side of an existing name is still refused.
     pub fn mv(&mut self, src: &str, dst: &str) -> Result<(), Error> {
         let (src_parent_path, src_name) = split_parent(src).ok_or(Error::InvalidName)?;
         let (dst_parent_path, dst_name) = split_parent(dst).ok_or(Error::InvalidName)?;
@@ -1450,18 +1457,29 @@ impl Fs {
             dst_parent.size,
             dst_name,
         )? {
-            // `mv f f` must be a no-op, or the delete below destroys the file
-            // the create was going to point at.
-            if src_parent.first_cluster == dst_parent.first_cluster && src_slot == dst_slot {
+            // Name matching is up-case folded, so `src` and `dst` can be the
+            // SAME set two ways. `mv f f` is a genuine no-op; `mv FOO.TXT
+            // foo.txt` is a real request to change the stored spelling, and
+            // reporting Ok without doing it would claim a success that did not
+            // happen. The create-first order below performs it: write the set
+            // under the new name, delete the old one, and skip both the
+            // source-side delete (same slot) and the data free (same file).
+            let same_set =
+                src_parent.first_cluster == dst_parent.first_cluster && src_slot == dst_slot;
+            if same_set && src_name.as_bytes() == dst_name.as_bytes() {
                 return Ok(());
             }
             if src_entry.is_dir || dst_entry.is_dir {
                 return Err(Error::AlreadyExists);
             }
-            // Entry set first, data last: a crash between them leaks clusters
-            // (which `fsck_exfat` reclaims) rather than dropping live data out
-            // from under a name that still resolves.
-            self.delete_set(dst_parent.first_cluster, dst_parent.contiguous, dst_slot, dst_len)?;
+            // CREATE BEFORE DELETING, like the non-replacing path below.
+            // Deleting the destination first survives a crash no worse, and is
+            // wrong against an ordinary error: a failing `create_entry` (a
+            // directory that cannot be extended, an allocation failure) would
+            // return Err having already destroyed `dst` while `src` is still
+            // there. Slot indices are stable across a create - `create_entry`
+            // fills a free run and moves nothing - so the recorded `dst_slot`
+            // still addresses the old set afterwards.
             self.create_entry(
                 dst_parent.first_cluster,
                 dst_parent.contiguous,
@@ -1471,9 +1489,12 @@ impl Fs {
                 src_entry.size,
                 src_entry.contiguous,
             )?;
-            self.delete_set(src_parent.first_cluster, src_parent.contiguous, src_slot, src_len)?;
-            if dst_entry.first_cluster >= 2 {
-                self.free_data(dst_entry.first_cluster, dst_entry.contiguous, dst_entry.size)?;
+            self.delete_set(dst_parent.first_cluster, dst_parent.contiguous, dst_slot, dst_len)?;
+            if !same_set {
+                self.delete_set(src_parent.first_cluster, src_parent.contiguous, src_slot, src_len)?;
+                if dst_entry.first_cluster >= 2 {
+                    self.free_data(dst_entry.first_cluster, dst_entry.contiguous, dst_entry.size)?;
+                }
             }
             return Ok(());
         }

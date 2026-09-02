@@ -29,8 +29,22 @@ DESCRIPTION
 
     Both must be ordinary files: replacing a directory, or moving a directory
     onto an existing name, is refused with "already exists" whatever flags are
-    given. Only -f is accepted, and only before the operands; any other -word
-    is an error rather than a filename.
+    If the destination cannot be checked at all - the filesystem server is
+    restarting, or a directory on the way is not searchable by you - mv
+    refuses too, saying so:
+
+        mv: cannot tell whether /D/T.TXT exists (use -f to replace anyway)
+
+    It fails CLOSED because the server will replace whatever is there; reading
+    "could not tell" as "nothing there" would switch the guard off exactly when
+    something is already wrong.
+
+    Only -f is accepted, and only before the operands. Any other -word is an
+    error rather than a filename: for a command that destroys data, treating a
+    mistyped flag as the source is the wrong way to be forgiving. Use -- to end
+    the options when a name begins with a dash:
+
+        mv -- -odd.txt ok.txt
 
     On ext2 the replacement is very nearly atomic. The whole change is one
     write of the destination's directory entry, re-pointing it at the source's

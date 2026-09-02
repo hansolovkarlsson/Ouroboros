@@ -22,9 +22,22 @@ DESCRIPTION
     machine - so a prompt would work in the interactive case and hang or fail
     everywhere else. A refusal behaves identically everywhere.
 
+    If the destination cannot be checked at all - the filesystem server is
+    restarting, or a directory on the way is not searchable by you - cp
+    refuses too, saying so:
+
+        cp: cannot tell whether /D/T.TXT exists (use -f to overwrite anyway)
+
+    It fails CLOSED because the server will overwrite whatever is there; reading
+    "could not tell" as "nothing there" would switch the guard off exactly when
+    something is already wrong.
+
     Only -f is accepted, and only before the operands. Any other -word is an
     error rather than a filename: for a command that destroys data, treating a
-    mistyped flag as the source is the wrong way to be forgiving.
+    mistyped flag as the source is the wrong way to be forgiving. Use -- to end
+    the options when a name begins with a dash:
+
+        cp -- -odd.txt ok.txt
 
 SEE ALSO
     mv, cat, write

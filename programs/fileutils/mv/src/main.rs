@@ -18,23 +18,6 @@
 
 use ulib::PATH_MAX;
 
-/// Returns `(force, index_of_first_operand)`. Only `-f` is accepted, and only
-/// before the operands; any other `-...` word is rejected outright.
-fn leading_force_flag() -> (bool, u64) {
-    let mut buf = [0u8; 16];
-    match ulib::arg(1, &mut buf) {
-        Some(n) if n >= 1 && buf[0] == b'-' => {
-            if &buf[..n] == b"-f" {
-                (true, 2)
-            } else {
-                ulib::con_write(b"mv: unknown option (only -f is accepted)\r\n");
-                ulib::exit(1);
-            }
-        }
-        _ => (false, 1),
-    }
-}
-
 fn arg_or_die(index: u64, buf: &mut [u8], msg: &[u8]) -> usize {
     match ulib::arg(index, buf) {
         Some(len) if len > 0 => len,
@@ -54,7 +37,10 @@ pub extern "C" fn _start() -> ! {
     // `-f` may lead; everything after it is an operand. An UNKNOWN `-x` is an
     // error rather than a path: for a destructive command, silently treating a
     // mistyped flag as the source is the wrong way to be permissive.
-    let (force, first) = leading_force_flag();
+    let Some((force, first)) = ulib::parse_force_opts() else {
+        ulib::con_write(b"mv: unknown option (only -f is accepted; use -- before a name starting with -)\r\n");
+        ulib::exit(1);
+    };
     let mut src_arg_buf = [0u8; PATH_MAX];
     let src_arg_len = arg_or_die(first, &mut src_arg_buf, b"mv: missing source argument\r\n");
     let src_arg = core::str::from_utf8(&src_arg_buf[..src_arg_len]).unwrap_or("");
@@ -134,11 +120,24 @@ pub extern "C" fn _start() -> ! {
     // Checked AFTER the into-a-directory rewrite above, so `mv a dir/` asks
     // about `dir/a` - the name that would actually be replaced - and not about
     // `dir`, which of course exists.
-    if !force && ulib::fs_exists(final_dst) {
-        ulib::con_write(b"mv: ");
-        ulib::con_write(final_dst.as_bytes());
-        ulib::con_write(b" exists (use -f to replace)\r\n");
-        ulib::exit(1);
+    if !force {
+        match ulib::fs_presence(final_dst) {
+            ulib::Presence::Present => {
+                ulib::con_write(b"mv: ");
+                ulib::con_write(final_dst.as_bytes());
+                ulib::con_write(b" exists (use -f to replace)\r\n");
+                ulib::exit(1);
+            }
+            // Fail CLOSED. `fsd` will replace whatever is there, so a stat we
+            // could not interpret must not be read as "nothing there".
+            ulib::Presence::Unknown => {
+                ulib::con_write(b"mv: cannot tell whether ");
+                ulib::con_write(final_dst.as_bytes());
+                ulib::con_write(b" exists (use -f to replace anyway)\r\n");
+                ulib::exit(1);
+            }
+            ulib::Presence::Absent => {}
+        }
     }
 
     let code = ulib::fs_mv(src_path, final_dst);

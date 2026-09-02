@@ -1107,6 +1107,17 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   active bitmap, and `fsck_msdos` clean but for a pre-existing FSInfo drift —
   see the next item.
 
+- **`cargo doc` is noisy for the userland crates, and that hid a real defect.**
+  The kernel is held at **zero** unresolved intra-doc links (the cluster-keys
+  arc did that deliberately, precisely so the next one would be visible);
+  `fsd`, `ulib`, `mv` and `cp` together emit **39**. Because nobody reads that
+  output, a doc comment ABSORBED by a function inserted above it — `set_dirent_inode`
+  opening its rustdoc with `remove_dirent`'s description — shipped in the `mv`
+  work and was caught by a code review rather than by the tool that exists to
+  catch exactly this, and had caught it once before. Bringing the userland
+  crates to zero is a small, purely mechanical job whose value is entirely in
+  the baseline it creates.
+
 - **`fsd` never maintains the FAT32 `FSInfo` free-cluster count.** It is
   written once at `format` time and never updated by an allocation or a free,
   so `fsck_msdos` reports "Free space in FSInfo block (N) not correct (N-1)"
