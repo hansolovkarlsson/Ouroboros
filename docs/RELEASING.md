@@ -54,6 +54,7 @@ is `0.5.0`.
 | `0.14.0` | 2026-08-27 | `cpu` chunked output delivery + four more `/bin` filters |
 | `0.15.0` | 2026-08-31 | per-**user** cluster identity (wire flag day: `AUTHNP01`→`02`) |
 | `0.16.0` | 2026-09-01 | per-**machine** Ed25519 keypairs (wire flag day: `AUTHNP02`→`03`) |
+| `0.17.0` | 2026-09-02 | small gaps: `mv` replaces a file (`-f` required, on `cp` too), POSIX classes in `grep` |
 
 ## Four things that have bitten, and how to avoid them
 

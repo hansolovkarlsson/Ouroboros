@@ -949,20 +949,34 @@ phase:
   and the same pattern in `exfat`/`ext2`. See the
   [userland & pipelines postmortem](userland-and-pipelines-postmortem.md) and
   `CHANGELOG.md`'s "Large-read fsd restart fixed" entry.
-- **GPT is parsed but not validated on read.** `fsd`'s `partition::discover`
+- **GPT is parsed but not validated on read** — **FIXED (2026-08-27,** the
+  small-gaps arc: header + entry-array CRC32 with backup-GPT fallback, tested by
+  a host harness because the firmware auto-repairs a corrupt primary).** As
+  recorded at the time: `fsd`'s `partition::discover`
   trusts the "EFI PART" signature; it doesn't check the GPT header/entry-array
   CRC32s or fall back to the backup GPT on a corrupt primary. Fine for the
   clean images we make, a robustness gap for a real damaged disk. (The
   *builder*, `scripts/mkgpt.py`, does write correct CRCs — UEFI requires them.)
-- **Pipelines can't combine with `>`/`>>`.** `a | b > file` is refused (the last
+- **Pipelines can't combine with `>`/`>>`** — **FIXED (2026-08-27,** the
+  small-gaps arc: the last stage's stdout points at the shell, reusing the same
+  redirect capture a single `cmd > file` uses).** As recorded at the time:
+  `a | b > file` is refused (the last
   stage writes straight to the console; there's no capture of its output). A
   real feature would route the last stage's stdout into a file capture.
-- **`grep` is substring-only and case-sensitive** (no regex, no `-i`); **`head`
+- **All three of these are FIXED**: `grep` gained `-i`/`-v`/`-n` and POSIX
+  **extended regular expressions** (2026-08-29, the `regex` crate) and the
+  twelve POSIX **character classes** (2026-09-02, v0.17.0); `head` got a
+  cooperative `YIELD` rather than relying on a timeout, and `sort` shipped, both
+  2026-08-27. As recorded at the time:
+  **`grep` is substring-only and case-sensitive** (no regex, no `-i`); **`head`
   relies on the producer's send-timeout** when it exits early rather than
   actively signalling upstream; **`sort` isn't written** (it needs to buffer all
   input before emitting, unlike the streaming/line-buffered filters). All small,
   optional filter follow-ups.
-- **A pipeline stage other than the first can't be a builtin** (a later stage
+- **A pipeline stage other than the first can't be a builtin** — **FIXED
+  (2026-08-27,** a builtin may now sit at any position; it can only be a
+  *source*, so a non-first one drains its upstream first).** As recorded at the
+  time: (a later stage
   must be a program that reads stdin). Reasonable, but means e.g. `cat x | ps` is
   not meaningful; documented, not likely worth changing.
 
