@@ -1456,12 +1456,14 @@ impl Fs {
         if mode & S_IFMT == S_IFDIR {
             return Err(Error::NotAFile);
         }
+        let target = self.read_inode(tino)?;
         self.remove_dirent(&parent, name)?;
-        self.drop_link(tino)
+        self.drop_link(tino, &target)
     }
 
-    /// Drop one link to `ino`: free its blocks and the inode itself when that
-    /// was the last one, otherwise just decrement the count.
+    /// Drop one link to `ino`, whose inode the caller has ALREADY read: free its
+    /// blocks and the inode itself when that was the last one, otherwise just
+    /// decrement the count.
     ///
     /// Factored out of [`rm`](Self::rm) when [`mv`](Self::mv) grew a second
     /// caller (replacing an existing destination unlinks it). The `i_dtime`
@@ -1469,8 +1471,13 @@ impl Fs {
     /// small `i_dtime` is misread by `e2fsck` as an orphan-list next-pointer,
     /// which is the bug the filesystems arc hit and would be easy to omit in a
     /// second hand-written copy of this sequence.
-    fn drop_link(&mut self, ino: u32) -> Result<(), Error> {
-        let target = self.read_inode(ino)?;
+    ///
+    /// It takes the `Inode` rather than reading it because the first version
+    /// read it HERE, which moved the read after `rm`'s `remove_dirent` and
+    /// turned a clean "I/O error, nothing changed" into an unlinked file whose
+    /// blocks leak. Every caller now reads before it unlinks or commits.
+    fn drop_link(&mut self, ino: u32, target: &Inode) -> Result<(), Error> {
+        let target = *target;
         if target.links <= 1 {
             self.free_all_blocks(&target)?;
             self.free_inode(ino, false)?;
@@ -1610,6 +1617,10 @@ impl Fs {
             if is_dir || dst_is_dir {
                 return Err(Error::AlreadyExists);
             }
+            // Read the replaced inode BEFORE committing: if the disk cannot
+            // be read we want to fail having changed nothing, not after the
+            // destination name already points at the new file.
+            let d_inode = self.read_inode(d_ino)?;
             // THE COMMIT: one block write, after which `dst` names the new
             // content. Everything below is cleanup.
             self.set_dirent_inode(&dp, d_name, s_ino, ftype)?;
@@ -1618,7 +1629,7 @@ impl Fs {
             } else {
                 self.remove_dirent(&sp, s_name)?;
             }
-            return self.drop_link(d_ino);
+            return self.drop_link(d_ino, &d_inode);
         }
 
         if sp_ino == dp_ino {

@@ -29,6 +29,8 @@ DESCRIPTION
 
     Both must be ordinary files: replacing a directory, or moving a directory
     onto an existing name, is refused with "already exists" whatever flags are
+    given.
+
     If the destination cannot be checked at all - the filesystem server is
     restarting, or a directory on the way is not searchable by you - mv
     refuses too, saying so:
@@ -46,14 +48,17 @@ DESCRIPTION
 
         mv -- -odd.txt ok.txt
 
-    On ext2 the replacement is very nearly atomic. The whole change is one
+    On ext2 the replacement is very nearly ATOMIC. The whole change is one
     write of the destination's directory entry, re-pointing it at the source's
-    inode, so the name never resolves to nothing - a reader either sees the old
-    file or the new one. FAT32 and exFAT cannot do this: a directory entry
+    inode, so a reader sees either the old file or the new one and nothing in
+    between.
+
+    FAT32 and exFAT cannot manage that in a single write: a directory entry
     there holds the file's location itself rather than an inode number, so the
-    old entry must be removed and a new one written, and between those two
-    writes the name does not exist. That is a property of those formats, not of
-    this implementation.
+    change takes two writes. The new entry is written before the old one is
+    freed, though, so the name is never ABSENT either - a reader in between
+    finds two entries and gets one of the two files. What those formats cost
+    is atomicity, not the name.
 
     mv x x is refused ("source and destination are the same").
 

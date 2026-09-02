@@ -60,12 +60,20 @@ pub fn syscall4(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64) -> u64 
 
 /// True if any argument is `-?` - the uniform usage-help flag. A program checks
 /// this (usually via [`usage_if_requested`]) and prints its one-line usage.
+///
+/// Scanning STOPS at a literal `--`, so a file actually named `-?` is reachable
+/// as `mv -- -? new.txt`. Without that, `--` protected every dash-leading name
+/// except this one, and the manpage saying otherwise would have been wrong in
+/// exactly the case someone would try first.
 pub fn help_requested() -> bool {
     let n = argc();
     let mut i = 1u64;
     let mut buf = [0u8; 4];
     while i < n {
         if let Some(l) = arg(i, &mut buf) {
+            if &buf[..l] == b"--" {
+                return false;
+            }
             if &buf[..l] == b"-?" {
                 return true;
             }

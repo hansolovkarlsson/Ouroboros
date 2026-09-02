@@ -1483,12 +1483,13 @@ impl Fs {
         let src_entry = src_entry.ok_or(Error::NotFound)?;
 
         // An existing destination is REPLACED when both it and `src` are
-        // ordinary files. Unlike ext2 this cannot be atomic: a FAT directory
+        // ordinary files. Unlike ext2 this cannot be ATOMIC: a FAT directory
         // entry holds the file's first cluster and size itself, so there is no
-        // inode number to re-point - the old entry must go and a new one take
-        // its place, and between those two writes the name resolves to
-        // nothing. Said plainly rather than papered over; it is a property of
-        // the on-disk format, not of this code.
+        // inode number to re-point, and the change takes two writes rather than
+        // one. It is NOT a window in which the name is absent: the new entry is
+        // written before either old one is freed, so a reader in between finds
+        // two entries and gets one of the two files, never nothing. That
+        // distinction is the whole point of the insert-first ordering below.
         let mut dst_found: Option<(u64, usize)> = None;
         let mut dst_entry: Option<DirEntry> = None;
         self.walk_dir_with_location(dst_parent.cluster, |entry, lba, offset| {
@@ -1535,9 +1536,16 @@ impl Fs {
             self.free_entry_with_lfn(dst_parent.cluster, dst_lba, dst_offset)?;
             if !same_entry {
                 self.free_entry_with_lfn(src_parent.cluster, src_lba, src_offset)?;
-                // Only when the destination was a DIFFERENT file. On a
-                // case-only rename the chain is the one we just re-linked.
-                if dst_entry.cluster != 0 {
+                // Free the old chain only when it is genuinely a DIFFERENT
+                // file. Two guards, not one: a case-only rename re-links the
+                // same entry, and a cross-linked image can give two separate
+                // entries the same first cluster - which this OS cannot create,
+                // but `vvfat` and a damaged disk can, exactly as a host-built
+                // ext2 image can carry a forged hard link. Freeing there would
+                // destroy the chain the SURVIVING name points at, and report
+                // success. Same defect the ext2 arm's `d_ino == s_ino` guard
+                // closes; it wanted closing in all three arms, not one.
+                if dst_entry.cluster != 0 && dst_entry.cluster != src_entry.cluster {
                     self.free_chain(dst_entry.cluster)?;
                 }
             }

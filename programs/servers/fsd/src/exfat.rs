@@ -1448,9 +1448,12 @@ impl Fs {
             .ok_or(Error::NotFound)?;
 
         // An existing destination is REPLACED when both it and `src` are
-        // ordinary files. Like FAT32 and unlike ext2 this cannot be atomic: an
-        // exFAT entry set carries the file's own location, so the set must be
-        // deleted and rebuilt, and the name resolves to nothing in between.
+        // ordinary files. Like FAT32 and unlike ext2 this cannot be ATOMIC: an
+        // exFAT entry set carries the file's own location, so the change takes
+        // two writes rather than one. It is NOT a window in which the name is
+        // absent: the new set is written before the old one is deleted, so a
+        // reader in between finds two and gets one of the two files, never
+        // nothing.
         if let Some((dst_entry, dst_slot, dst_len)) = self.find_in_parent(
             dst_parent.first_cluster,
             dst_parent.contiguous,
@@ -1492,7 +1495,12 @@ impl Fs {
             self.delete_set(dst_parent.first_cluster, dst_parent.contiguous, dst_slot, dst_len)?;
             if !same_set {
                 self.delete_set(src_parent.first_cluster, src_parent.contiguous, src_slot, src_len)?;
-                if dst_entry.first_cluster >= 2 {
+                // Two guards: a case-only rename re-links the same set, and a
+                // cross-linked image can give two sets the same first cluster.
+                // Freeing then destroys the data the surviving name points at.
+                if dst_entry.first_cluster >= 2
+                    && dst_entry.first_cluster != src_entry.first_cluster
+                {
                     self.free_data(dst_entry.first_cluster, dst_entry.contiguous, dst_entry.size)?;
                 }
             }

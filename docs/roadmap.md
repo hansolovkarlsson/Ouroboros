@@ -1068,12 +1068,15 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   either file.
 
   **FAT32 and exFAT cannot**, and the note was right about why: their directory
-  entries hold the file's own location rather than an inode number, so the old
-  entry must go before the new one is written and the name is briefly absent.
-  Said plainly in the manpage rather than papered over. The ordering that *is*
-  available was taken — entry first, data chain last — so a crash leaks
-  clusters (which `fsck_msdos`/`fsck_exfat` reclaim) rather than dropping live
-  data out from under a name that still resolves.
+  entries hold the file's own location rather than an inode number, so the
+  change takes two writes rather than one. What they cost is *atomicity*, not
+  the name — the new entry is written before either old one is freed, so a
+  reader in between finds two entries and gets one of the two files, never
+  nothing. That ordering was got wrong first and caught by review: freeing the
+  destination first survives a crash no worse but destroys `dst` on an ordinary
+  *error*, such as a directory that cannot be extended. Data chains are freed
+  last, so a crash leaks clusters (which `fsck_msdos`/`fsck_exfat` reclaim)
+  rather than dropping live data out from under a name that still resolves.
 
   **Deliberately still refused**: a directory as the destination, and a
   directory moved onto an existing name. POSIX also replaces an empty directory

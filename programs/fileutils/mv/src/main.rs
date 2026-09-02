@@ -120,6 +120,16 @@ pub extern "C" fn _start() -> ! {
     // Checked AFTER the into-a-directory rewrite above, so `mv a dir/` asks
     // about `dir/a` - the name that would actually be replaced - and not about
     // `dir`, which of course exists.
+    // Report a missing SOURCE before complaining about the destination:
+    // without this, `mv nosuchfile existing.txt` says the destination exists
+    // and the user only discovers the real problem after adding -f. Only a
+    // definite Absent is reported here - an Unknown falls through and lets the
+    // rename itself produce the authoritative error.
+    if ulib::fs_presence(src_path) == ulib::Presence::Absent {
+        ulib::fs_error("mv", syscall_abi::FS_ERR_NOT_FOUND);
+        ulib::exit(1);
+    }
+
     if !force {
         match ulib::fs_presence(final_dst) {
             ulib::Presence::Present => {

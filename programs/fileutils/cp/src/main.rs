@@ -70,9 +70,22 @@ pub extern "C" fn _start() -> ! {
     let src_path = core::str::from_utf8(&src_path_buf[..src_path_len]).unwrap_or("");
     let dst_path = core::str::from_utf8(&dst_path_buf[..dst_path_len]).unwrap_or("");
 
-    // Before the truncating write below, not after: cp destroys the
-    // destination's contents as its FIRST act, so a refusal that came later
-    // would arrive after the damage.
+    // Confirm the source exists (and is a file, not a directory) *before*
+    // touching dst - a one-byte read is the cheapest existence/kind check.
+    let mut probe = [0u8; 1];
+    let code = ulib::fs_read_file(src_path, &mut probe);
+    if ulib::is_fs_error(code) {
+        ulib::fs_error("cp", code);
+        ulib::exit(1);
+    }
+
+    // Both orderings matter here. BEFORE the truncating write below, because
+    // cp destroys the destination as its first act and a refusal that came
+    // after would arrive after the damage. But AFTER the source probe above,
+    // because checking the destination first made `cp nosuchfile existing.txt`
+    // report that the DESTINATION exists - so the user learned the source was
+    // missing only after adding -f. The probe is a read; nothing is touched
+    // either way.
     if !force {
         match ulib::fs_presence(dst_path) {
             ulib::Presence::Present => {
@@ -91,14 +104,6 @@ pub extern "C" fn _start() -> ! {
         }
     }
 
-    // Confirm the source exists (and is a file, not a directory) *before*
-    // touching dst - a one-byte read is the cheapest existence/kind check.
-    let mut probe = [0u8; 1];
-    let code = ulib::fs_read_file(src_path, &mut probe);
-    if ulib::is_fs_error(code) {
-        ulib::fs_error("cp", code);
-        ulib::exit(1);
-    }
 
     // Truncate/create dst empty, then stream src into it one chunk at a time.
     // Non-atomic: an interrupted copy leaves dst truncated (a partial copy is a
