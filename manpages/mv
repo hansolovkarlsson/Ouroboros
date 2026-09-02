@@ -8,5 +8,24 @@ DESCRIPTION
     Renames <src> to <dst>, moving it between directories if needed. Paths
     resolve against the current directory.
 
+    If <dst> is an existing DIRECTORY, <src> moves into it and keeps its
+    basename (mv notes.txt backup/), as real mv does.
+
+    If <dst> is an existing FILE, it is REPLACED - also as real mv does. The
+    replaced file's contents are gone. Both must be ordinary files: replacing
+    a directory, or moving a directory onto an existing name, is still refused
+    with "already exists".
+
+    On ext2 the replacement is very nearly atomic. The whole change is one
+    write of the destination's directory entry, re-pointing it at the source's
+    inode, so the name never resolves to nothing - a reader either sees the old
+    file or the new one. FAT32 and exFAT cannot do this: a directory entry
+    there holds the file's location itself rather than an inode number, so the
+    old entry must be removed and a new one written, and between those two
+    writes the name does not exist. That is a property of those formats, not of
+    this implementation.
+
+    mv x x is refused ("source and destination are the same").
+
 SEE ALSO
     cp, rm

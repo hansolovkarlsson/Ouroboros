@@ -1440,11 +1440,42 @@ impl Fs {
             .find_in_parent(src_parent.first_cluster, src_parent.contiguous, src_parent.size, src_name)?
             .ok_or(Error::NotFound)?;
 
-        if self
-            .find_in_parent(dst_parent.first_cluster, dst_parent.contiguous, dst_parent.size, dst_name)?
-            .is_some()
-        {
-            return Err(Error::AlreadyExists);
+        // An existing destination is REPLACED when both it and `src` are
+        // ordinary files. Like FAT32 and unlike ext2 this cannot be atomic: an
+        // exFAT entry set carries the file's own location, so the set must be
+        // deleted and rebuilt, and the name resolves to nothing in between.
+        if let Some((dst_entry, dst_slot, dst_len)) = self.find_in_parent(
+            dst_parent.first_cluster,
+            dst_parent.contiguous,
+            dst_parent.size,
+            dst_name,
+        )? {
+            // `mv f f` must be a no-op, or the delete below destroys the file
+            // the create was going to point at.
+            if src_parent.first_cluster == dst_parent.first_cluster && src_slot == dst_slot {
+                return Ok(());
+            }
+            if src_entry.is_dir || dst_entry.is_dir {
+                return Err(Error::AlreadyExists);
+            }
+            // Entry set first, data last: a crash between them leaks clusters
+            // (which `fsck_exfat` reclaims) rather than dropping live data out
+            // from under a name that still resolves.
+            self.delete_set(dst_parent.first_cluster, dst_parent.contiguous, dst_slot, dst_len)?;
+            self.create_entry(
+                dst_parent.first_cluster,
+                dst_parent.contiguous,
+                dst_name,
+                src_entry.is_dir,
+                src_entry.first_cluster,
+                src_entry.size,
+                src_entry.contiguous,
+            )?;
+            self.delete_set(src_parent.first_cluster, src_parent.contiguous, src_slot, src_len)?;
+            if dst_entry.first_cluster >= 2 {
+                self.free_data(dst_entry.first_cluster, dst_entry.contiguous, dst_entry.size)?;
+            }
+            return Ok(());
         }
 
         // Link dst to the same clusters first, then unlink src.

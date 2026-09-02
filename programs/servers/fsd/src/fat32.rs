@@ -1475,17 +1475,52 @@ impl Fs {
         let (src_lba, src_offset) = src_location.ok_or(Error::NotFound)?;
         let src_entry = src_entry.ok_or(Error::NotFound)?;
 
-        let mut dst_exists = false;
-        self.walk_dir(dst_parent.cluster, |entry| {
+        // An existing destination is REPLACED when both it and `src` are
+        // ordinary files. Unlike ext2 this cannot be atomic: a FAT directory
+        // entry holds the file's first cluster and size itself, so there is no
+        // inode number to re-point - the old entry must go and a new one take
+        // its place, and between those two writes the name resolves to
+        // nothing. Said plainly rather than papered over; it is a property of
+        // the on-disk format, not of this code.
+        let mut dst_found: Option<(u64, usize)> = None;
+        let mut dst_entry: Option<DirEntry> = None;
+        self.walk_dir_with_location(dst_parent.cluster, |entry, lba, offset| {
             if entry.name().eq_ignore_ascii_case(dst_name) {
-                dst_exists = true;
+                dst_found = Some((lba, offset));
+                dst_entry = Some(*entry);
                 true
             } else {
                 false
             }
         })?;
-        if dst_exists {
-            return Err(Error::AlreadyExists);
+        if let (Some((dst_lba, dst_offset)), Some(dst_entry)) = (dst_found, dst_entry) {
+            // `mv f f` must be a no-op. Without this the code below frees the
+            // entry it is about to re-create from, and the file is gone - the
+            // `cp x x` self-destruct, one filesystem down.
+            if (dst_lba, dst_offset) == (src_lba, src_offset) {
+                return Ok(());
+            }
+            if src_entry.is_dir || dst_entry.is_dir {
+                return Err(Error::AlreadyExists);
+            }
+            // Free the destination's ENTRY first and its data chain LAST: a
+            // crash between them leaks clusters, which `fsck_msdos` reclaims,
+            // where the other order would drop live data out from under a name
+            // that still resolves.
+            self.free_entry_with_lfn(dst_parent.cluster, dst_lba, dst_offset)?;
+            let attr = if src_entry.is_dir { ATTR_DIRECTORY } else { 0 };
+            self.insert_named_entry(
+                dst_parent.cluster,
+                dst_name,
+                attr,
+                src_entry.cluster,
+                src_entry.size,
+            )?;
+            self.free_entry_with_lfn(src_parent.cluster, src_lba, src_offset)?;
+            if dst_entry.cluster != 0 {
+                self.free_chain(dst_entry.cluster)?;
+            }
+            return Ok(());
         }
 
         let attr = if src_entry.is_dir { ATTR_DIRECTORY } else { 0 };

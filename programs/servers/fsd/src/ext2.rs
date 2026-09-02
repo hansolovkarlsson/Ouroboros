@@ -1304,6 +1304,48 @@ impl Fs {
     /// Unlink `name` from directory `dir`: extend the previous entry's `rec_len`
     /// to swallow the removed one (or, if it's first in its block, zero its inode
     /// field) - the standard ext2 removal. `NotFound` if absent.
+    /// Re-point the existing entry `name` in `dir` at inode `ino`, in place.
+    ///
+    /// ONE BLOCK WRITE, and it is the commit point of a replacing
+    /// [`mv`](Self::mv): before it the name resolves to the old content, after
+    /// it to the new, and at no instant does it resolve to nothing. That is the
+    /// property a `rm` followed by a rename cannot offer, and it is available
+    /// here only because an ext2 directory entry names an inode rather than
+    /// holding the file's location itself.
+    fn set_dirent_inode(&mut self, dir: &Inode, name: &str, ino: u32, ftype: u8) -> Result<(), Error> {
+        let bs = self.block_size as usize;
+        let nblocks = dir.size as usize / bs;
+        let mut buf = [0u8; MAX_BLOCK_SIZE];
+        for li in 0..nblocks {
+            let phys = self.block_for(dir, li as u32)?;
+            if phys == 0 {
+                continue;
+            }
+            self.read_block(phys, &mut buf[..bs])?;
+            let mut off = 0usize;
+            while off + 8 <= bs {
+                let e = &buf[off..];
+                let e_ino = u32::from_le_bytes([e[0], e[1], e[2], e[3]]);
+                let rec_len = u16::from_le_bytes([e[4], e[5]]) as usize;
+                let nl = e[6] as usize;
+                if rec_len < 8 || off + rec_len > bs {
+                    break;
+                }
+                if e_ino != 0
+                    && nl == name.len()
+                    && off + 8 + nl <= bs
+                    && &buf[off + 8..off + 8 + nl] == name.as_bytes()
+                {
+                    buf[off..off + 4].copy_from_slice(&ino.to_le_bytes());
+                    buf[off + 7] = ftype;
+                    return self.write_block(phys, &buf[..bs]);
+                }
+                off += rec_len;
+            }
+        }
+        Err(Error::NotFound)
+    }
+
     fn remove_dirent(&mut self, dir: &Inode, name: &str) -> Result<(), Error> {
         let bs = self.block_size as usize;
         let nblocks = dir.size as usize / bs;
@@ -1414,16 +1456,29 @@ impl Fs {
         if mode & S_IFMT == S_IFDIR {
             return Err(Error::NotAFile);
         }
-        let target = self.read_inode(tino)?;
         self.remove_dirent(&parent, name)?;
+        self.drop_link(tino)
+    }
+
+    /// Drop one link to `ino`: free its blocks and the inode itself when that
+    /// was the last one, otherwise just decrement the count.
+    ///
+    /// Factored out of [`rm`](Self::rm) when [`mv`](Self::mv) grew a second
+    /// caller (replacing an existing destination unlinks it). The `i_dtime`
+    /// that `mark_inode_deleted` writes is not decoration: a freed inode with a
+    /// small `i_dtime` is misread by `e2fsck` as an orphan-list next-pointer,
+    /// which is the bug the filesystems arc hit and would be easy to omit in a
+    /// second hand-written copy of this sequence.
+    fn drop_link(&mut self, ino: u32) -> Result<(), Error> {
+        let target = self.read_inode(ino)?;
         if target.links <= 1 {
             self.free_all_blocks(&target)?;
-            self.free_inode(tino, false)?;
-            self.mark_inode_deleted(tino, target.mode)?;
+            self.free_inode(ino, false)?;
+            self.mark_inode_deleted(ino, target.mode)?;
         } else {
             let mut t = target;
             t.links -= 1;
-            self.write_inode(tino, &t)?;
+            self.write_inode(ino, &t)?;
         }
         Ok(())
     }
@@ -1502,10 +1557,24 @@ impl Fs {
         Ok(())
     }
 
-    /// Rename or move a file/directory. `dst` must not already exist. Re-points
-    /// a new directory entry at `src`'s inode (no data copy) then unlinks the old
-    /// entry (write-new-before-delete). For a directory moved to a *different*
+    /// Rename or move a file/directory. Re-points a new directory entry at
+    /// `src`'s inode (no data copy) then unlinks the old entry
+    /// (write-new-before-delete). For a directory moved to a *different*
     /// parent, fixes its `..` and moves the parent-link-count contribution.
+    ///
+    /// An existing `dst` is REPLACED when both it and `src` are non-directories
+    /// - the POSIX rename, and on ext2 it is very nearly atomic: the whole
+    /// change is one write of `dst`'s directory entry, re-pointing it at
+    /// `src`'s inode. The name never resolves to nothing. What follows that
+    /// write is cleanup (unlink `src`'s name, drop the replaced inode), and a
+    /// crash inside it leaks - a link count too high, blocks not returned,
+    /// both `e2fsck` repairs - rather than losing either file.
+    ///
+    /// Anything involving a DIRECTORY as the destination is still refused with
+    /// `AlreadyExists`, deliberately: POSIX also replaces an empty directory
+    /// with a directory, which needs an emptiness check and the parent link
+    /// counts moved, and nothing has asked for it. Refusing is safe and
+    /// honest; the surface can grow when something wants it.
     pub fn mv(&mut self, src: &str, dst: &str) -> Result<(), Error> {
         let (sp_path, s_name) = split_parent(src).ok_or(Error::InvalidName)?;
         let (dp_path, d_name) = split_parent(dst).ok_or(Error::InvalidName)?;
@@ -1518,11 +1587,31 @@ impl Fs {
             return Err(Error::NotADirectory);
         }
         let (s_ino, s_mode) = self.lookup_in(&sp, s_name)?.ok_or(Error::NotFound)?;
-        if self.lookup_in(&dp, d_name)?.is_some() {
-            return Err(Error::AlreadyExists);
-        }
         let is_dir = s_mode & S_IFMT == S_IFDIR;
         let ftype = if is_dir { FT_DIR } else { FT_REG };
+
+        // A destination that already exists. `mv f f` MUST be a no-op and not
+        // reach the replace path: the same-name case would unlink the entry it
+        // had just re-pointed and destroy the file the caller asked to keep.
+        // (The same self-destruct shape as `cp x x` in the isolation arc.)
+        if let Some((d_ino, d_mode)) = self.lookup_in(&dp, d_name)? {
+            if sp_ino == dp_ino && s_name == d_name {
+                return Ok(());
+            }
+            let dst_is_dir = d_mode & S_IFMT == S_IFDIR;
+            if is_dir || dst_is_dir {
+                return Err(Error::AlreadyExists);
+            }
+            // THE COMMIT: one block write, after which `dst` names the new
+            // content. Everything below is cleanup.
+            self.set_dirent_inode(&dp, d_name, s_ino, ftype)?;
+            if sp_ino == dp_ino {
+                self.remove_dirent(&dp, s_name)?;
+            } else {
+                self.remove_dirent(&sp, s_name)?;
+            }
+            return self.drop_link(d_ino);
+        }
 
         if sp_ino == dp_ino {
             // Rename within one directory - operate on a single parent struct.

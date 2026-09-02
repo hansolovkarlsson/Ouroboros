@@ -103,7 +103,8 @@ cat /COPY.TXT | grep line | wc
 Things worth confirming as you go:
 
 - `rmdir` on a non-empty directory is refused (`directory not empty`).
-- `mv` onto a name that already exists is refused (`already exists`).
+- `mv` onto an existing *file* replaces it; onto an existing *directory* it
+  moves into it; a directory onto an existing name is refused (`already exists`).
 - A moved directory keeps its contents (`ls /SUB2` still shows `NESTED.TXT`).
 - Everything you created/renamed is still there after quitting and re-running
   `make run-image-exfat` (persistence).

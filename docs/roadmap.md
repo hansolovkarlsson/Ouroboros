@@ -1054,21 +1054,59 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   longest chain of round trips any command makes — a dropped segment plus the
   RTO is the obvious candidate, and `net-ext2-*.pcap` from a failing run would
   settle it. Reproducing it is the first step, and may take a loop.
-- **`mv` cannot replace an existing destination.** All three filesystem arms
-  return `AlreadyExists` if the target name is taken, so `mv a b` fails where
-  every Unix would overwrite `b`. Found 2026-08-30 while fixing the account
-  server's destructive-rewrite finding, whose obvious fix — write a temp file,
-  rename over the target — has nowhere to land because of this. (That finding
-  got a better fix anyway: write only the bytes that differ. But the *general*
-  "update a file without a window in which it is empty" pattern still has no
-  primitive.) The user-visible half is a one-line surprise; the interesting half
-  is that a real replace should be **atomic**, and `ext2` can very nearly manage
-  it — replacing a name means overwriting one directory entry's inode number in
-  place, a single block write, after which the name resolves to the new content
-  and the old inode is merely orphaned (leaked blocks, `e2fsck`-fixable) rather
-  than the name being briefly absent. FAT32/exFAT have no inode indirection, so
-  there it is unavoidably delete-then-rename with a window, and that difference
-  should be stated rather than papered over.
+- ~~**`mv` cannot replace an existing destination.**~~ — **fixed 2026-09-02.**
+  All three arms now replace an existing destination when both it and the
+  source are ordinary files, which is what POSIX `rename` does and what every
+  Unix `mv` does.
+
+  **ext2 gets the near-atomic version the note predicted**: the whole change is
+  one write of the destination's directory entry, re-pointing it at the
+  source's inode. The name never resolves to nothing — a reader sees either the
+  old file or the new one — and everything after that write is cleanup (unlink
+  the source name, drop the replaced inode). A crash inside the cleanup leaks a
+  link count or some blocks, both of which `e2fsck` repairs, rather than losing
+  either file.
+
+  **FAT32 and exFAT cannot**, and the note was right about why: their directory
+  entries hold the file's own location rather than an inode number, so the old
+  entry must go before the new one is written and the name is briefly absent.
+  Said plainly in the manpage rather than papered over. The ordering that *is*
+  available was taken — entry first, data chain last — so a crash leaks
+  clusters (which `fsck_msdos`/`fsck_exfat` reclaim) rather than dropping live
+  data out from under a name that still resolves.
+
+  **Deliberately still refused**: a directory as the destination, and a
+  directory moved onto an existing name. POSIX also replaces an empty directory
+  with a directory; that needs an emptiness check and the parent link counts
+  moved, and nothing has asked for it.
+
+  **The self-move guard now exists in `fsd` as well as `/bin/mv`.** `mv f f`
+  must be a no-op, because the replace path would otherwise free the entry it
+  is about to rebuild from — the `cp x x` self-destruct one layer down. The
+  `/bin/mv` guard cannot cover the 9P export, which sends raw paths; removing
+  the `fsd` guard and driving a self-`mv` from the host client destroyed a
+  directory entry (the volume went from 150 files to 149) and returned an
+  error. `np9p_client.py` gained an `mv` op to make that demonstrable, for the
+  same reason its `stat` was fixed the day before.
+
+  Verified on all three rigs against the foreign checkers: `e2fsck` clean
+  (and it reports `Unattached inode` when the cleanup is mutated away, so the
+  clean result means something), `fsck_exfat` "appears to be OK" including the
+  active bitmap, and `fsck_msdos` clean but for a pre-existing FSInfo drift —
+  see the next item.
+
+- **`fsd` never maintains the FAT32 `FSInfo` free-cluster count.** It is
+  written once at `format` time and never updated by an allocation or a free,
+  so `fsck_msdos` reports "Free space in FSInfo block (N) not correct (N-1)"
+  after any write. Found 2026-09-02 while checking the `mv` work, and
+  **confirmed pre-existing**: a single `echo one > /F` on `main`, with no `mv`
+  involved at all, produces the identical warning. Harmless today — the count
+  is a hint and every real driver recomputes when it does not trust it — but it
+  is a false positive that will keep showing up in exactly the check most
+  likely to catch a genuine allocator bug, which is the argument for fixing it.
+  The fix is small and local: adjust the stored count in `alloc_cluster` and
+  `free_chain`, and write the sector back.
+
 - ~~**`grep` has no regex**~~ — **shipped 2026-08-29.** Patterns are POSIX
   **extended** regular expressions (`.` `*` `+` `?` `[...]` `^` `$` `|` `(...)`),
   via a new pure, host-tested **`regex` crate** at the repo root; `-F` keeps the
