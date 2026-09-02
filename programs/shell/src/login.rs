@@ -61,9 +61,26 @@ pub struct Session {
 /// returns its length; on return this task's identity is the logged-in user
 /// (or root, if there is no `/etc/passwd`). Loops until authentication succeeds.
 pub fn login(cwd: &mut [u8; CWD_SIZE]) -> Session {
-    warn_if_unprotected();
+    // ORDER IS LOAD-BEARING: read the account file FIRST, warn SECOND.
+    //
+    // `warn_if_unprotected` used to run first and ask `fsd` whether the mounted
+    // filesystem enforces permissions - a question `fsd` cannot answer until it
+    // has mounted. It has no retry of its own, and read_account_file below has
+    // a bounded one for precisely that race, so the two functions three lines
+    // apart disagreed about whether the race exists.
+    //
+    // On QEMU virtio-blk mounts before login asks and the warning is correct.
+    // The device that loses the race is USB-MSD on real hardware, where the
+    // whole symptom is a security warning that silently does NOT print.
+    //
+    // Doing the read first makes the race unreachable rather than merely
+    // unlikely: read_account_file returns only once `fsd` has answered
+    // something, so the warning below asks a server that is up. The printed
+    // order is unchanged - the warning still precedes both the "no /etc/passwd"
+    // line and the first prompt.
     let mut pbuf = [0u8; PASSWD_MAX];
     let plen = crate::read_account_file(PASSWD_PATH, &mut pbuf);
+    warn_if_unprotected();
     if plen == 0 {
         crate::print_line("login: no /etc/passwd - starting a root session");
         return root_at(cwd);

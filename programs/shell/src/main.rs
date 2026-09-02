@@ -3663,13 +3663,36 @@ fn cmd_mount_at(line: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize, out: &mut Outp
 /// unprotected here (FAT32/exFAT record no mode, so `fsd` lets every access
 /// through and `/etc/shadow` is world-writable however it was chmod'd at build
 /// time). `false` when nothing is mounted: the root-session fallback covers it.
+/// Whether the mounted filesystem CANNOT enforce permissions - the question
+/// behind login's warning.
+///
+/// Two things this deliberately does not do any more. It no longer compares the
+/// format NAME against `"ext2"`: whether modes are enforced is `fsd`'s to
+/// answer, and a name comparison would raise a false alarm for the next
+/// filesystem that models them. And it no longer treats every non-zero status
+/// as "enforced": that folded `NO_FS` - which at boot means "`fsd` has not
+/// finished mounting yet" - into the reassuring answer.
+///
+/// There is no retry here, and that is the fix rather than an omission: `login`
+/// now calls this only AFTER `read_account_file`, whose own bounded `NO_FS`
+/// retry exists for exactly this race. By the time we ask, `fsd` has answered
+/// something. Waiting twice for one race would be two budgets to keep in step.
 pub(crate) fn mounted_fs_unprotected() -> bool {
-    let mut info = [0u8; 32];
-    if fs_call(syscall_abi::FSOP_MOUNT_INFO, [0; 4], &[], &[], &mut info) != 0 {
-        return false;
+    let mut info = [0u8; 48];
+    match fs_call(syscall_abi::FSOP_MOUNT_INFO, [0; 4], &[], &[], &mut info) {
+        0 => {}
+        // Nothing is mounted, so there is no filesystem to make a claim about -
+        // and no /etc/shadow either. `login` says "no /etc/passwd" for itself,
+        // which is the louder and more accurate message.
+        syscall_abi::NO_FS => return false,
+        // Anything else: we asked and cannot tell. A guarantee we cannot
+        // confirm should announce its absence, which is what this warning is.
+        _ => return true,
     }
-    let name_end = info[16..].iter().position(|&b| b == 0).unwrap_or(16) + 16;
-    &info[16..name_end] != b"ext2"
+    let flags = u64::from_le_bytes([
+        info[16], info[17], info[18], info[19], info[20], info[21], info[22], info[23],
+    ]);
+    flags & syscall_abi::MOUNT_FLAG_ENFORCES_MODES == 0
 }
 
 /// (FSOP_MOUNT_INFO) and print the format, its partition's first sector,
@@ -3677,7 +3700,7 @@ pub(crate) fn mounted_fs_unprotected() -> bool {
 fn mount_info(out: &mut Output) {
     // Reply payload: partition_lba (u64), capacity_sectors (u64), then the
     // format name as ASCII to the end. Zero-init so the name's end is a 0.
-    let mut info = [0u8; 32];
+    let mut info = [0u8; 48];
     match fs_call(syscall_abi::FSOP_MOUNT_INFO, [0; 4], &[], &[], &mut info) {
         NO_FS => print_line("nothing mounted (run `mount -a` to mount the disk)"),
         0 => {
@@ -3687,8 +3710,9 @@ fn mount_info(out: &mut Output) {
             let capacity = u64::from_le_bytes([
                 info[8], info[9], info[10], info[11], info[12], info[13], info[14], info[15],
             ]);
-            let name_end = info[16..].iter().position(|&b| b == 0).unwrap_or(16) + 16;
-            let name = core::str::from_utf8(&info[16..name_end]).unwrap_or("?");
+            // The name now starts at 24: 16..24 is the flags word.
+            let name_end = info[24..].iter().position(|&b| b == 0).unwrap_or(info.len() - 24) + 24;
+            let name = core::str::from_utf8(&info[24..name_end]).unwrap_or("?");
             out.put_str(name);
             out.put_str(" mounted at partition LBA ");
             out.put_u64_decimal(part_lba);
