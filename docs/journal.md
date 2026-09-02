@@ -113,6 +113,10 @@ than trusting it. That is the whole of today in one sentence: every one of these
 five was a message that was accurate about what had happened and silent about
 what had not.
 
+Written up as [`blind-instruments-postmortem.md`](blind-instruments-postmortem.md),
+the twenty-eighth — the third in a row about verification rather than code, after
+*a step is only verifiable if the check can fail* and *a repair is a change*.
+
 ---
 
 ## 2026-09-01 — reviewing the review's repairs, and shipping v0.16.0
