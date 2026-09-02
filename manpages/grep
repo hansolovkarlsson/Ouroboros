@@ -25,13 +25,32 @@ PATTERNS
     a|b         a or b
     (e)         grouping
     \c          the literal c (\. \* \[ \\ ...); \n and \t are newline and tab
+    [[:name:]]  a POSIX character class, inside a bracket expression
 
     Alternation binds loosest: ^a|b$ means "starts with a" OR "ends with b",
     not ^(a|b)$. The line terminator is stripped before matching, so $ anchors
     to the end of the visible text.
 
-    Not supported: back-references, {n,m} counted repetition, POSIX class names
-    like [:alpha:], and submatch capture.
+    The twelve POSIX class names are alnum, alpha, blank, cntrl, digit, graph,
+    lower, print, punct, space, upper and xdigit. They go INSIDE a bracket
+    expression and compose with the rest of it:
+
+        grep [[:digit:]]            a line containing a digit
+        grep ^[[:alpha:]]*:0        letters, then ":0"
+        grep [[:alpha:][:digit:]_]  a letter, a digit or an underscore
+        grep [^[:space:]]           a line with a non-blank character
+
+    Both brackets are needed. A bare [:alpha:] is an ordinary bracket
+    expression holding the characters : a l p h, which is what POSIX leaves
+    undefined; it will not be an error, so check the brackets if a class seems
+    to match the wrong thing. An unknown NAME is an error ("unknown [:name:]
+    character class") rather than a fall back to the literal letters.
+
+    [:space:] includes the vertical tab, which is the POSIX set of six
+    whitespace characters, not the five most languages use.
+
+    Not supported: back-references, {n,m} counted repetition, and submatch
+    capture.
 
     A repeat whose body can match nothing - (a*)* or (a|)* - is REFUSED with
     "repeat of a possibly-empty expression". POSIX allows it; this engine does
@@ -51,6 +70,8 @@ TYPING A PATTERN AT THIS SHELL
       - A pipe is only a pipeline separator when it stands alone between
         spaces, so grep a|b works as alternation. Write grep "a | b" - with
         spaces - and the shell splits it into pipeline stages instead.
+      - A class in brackets is safe from the next point: the shell expands
+        only * and ?, so [[:digit:]] reaches grep unchanged.
       - The shell expands * and ? against the filesystem before grep sees
         them, and there are no quotes to prevent it. A pattern matching no
         filename is passed through unchanged (the usual case), but in a

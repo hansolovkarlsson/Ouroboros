@@ -1076,7 +1076,10 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   stack, not recursion; empty-body repeats refused so every accepted pattern
   terminates; a step budget whose exhaustion reports `Limit`, never a silent
   "no"). Still open, each a real addition rather than a tweak: back-references,
-  `{n,m}` counted repetition, `[:alpha:]` class names, and submatch capture —
+  `{n,m}` counted repetition and submatch capture (`[[:alpha:]]` class names
+  shipped 2026-09-02: all twelve, computed from `core`'s `is_ascii_*`
+  predicates rather than transcribed as bit tables, with an unknown name an
+  error rather than a fall back to the literal letters) —
   plus the shared `ulib` option parser of North-star item 2, still unbuilt. The
   `regex` crate is deliberately reusable: an editor's search and a `find` are
   the next consumers.
