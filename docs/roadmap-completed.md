@@ -89,6 +89,34 @@ and encryption remain behind the "leaving a trusted network" trigger.
 
 Retrospective: [`cluster-keys-postmortem.md`](cluster-keys-postmortem.md).
 
+**Released as v0.16.0 on 2026-09-01, after four review rounds and eight
+follow-up PRs.** Worth recording as part of the arc's shape rather than as an
+afterthought, because the reviewing cost about as much as the building and
+taught more.
+
+The first round found the flag day's own defects — the `\NOEXEC` lever failing
+*open* (deleting the retried `CLUSTER.KEY` read had promoted the flag probe to
+`netd`'s first `fsd` call and left it bare), an unsealed reply path, a stale
+`\CLUSTER.KEY` surviving in every built image, and `ninep-abi` never running in
+`make test`. **The next three rounds mostly found the previous round's
+repairs**, which is the subject of
+[`repairing-the-repairs-postmortem.md`](repairing-the-repairs-postmortem.md) and
+the thing to read before starting the next arc.
+
+Two process changes came out of it, and both are cheap:
+
+- **A review's findings go in a NEW PR against the same base**, not as commits
+  on the branch under review. Every fixing round made the reviewed diff larger,
+  which made the next round's target larger — the loop
+  [`review-and-split-postmortem.md`](review-and-split-postmortem.md) already
+  described and this arc re-ran anyway.
+- **Scope a later round to the repairs.** Round four targeted only the fix
+  commits — a few hundred lines against a diff swept three times — and found the
+  worst item of the sequence, a `rm -rf` that could have expanded to
+  `rm -rf $HOME`.
+
+The eight follow-ups were then one subject each, and none needed a second round.
+
 ---
 
 ## Microkernel arc — "recently completed" running notes (from What's next)

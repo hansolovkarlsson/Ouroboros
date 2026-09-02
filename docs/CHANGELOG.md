@@ -7,6 +7,65 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/`; 
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## v0.16.0 released, and eight follow-ups from reviewing it (2026-09-01)
+
+The per-machine-keypair arc below shipped as **v0.16.0** — the second deliberate
+**wire flag day** (`AUTHNP02` → `AUTHNP03`, the retired format refused outright
+rather than misparsed), so a pre-0.16 machine cannot mount from or `cpu` to a
+0.16 machine in either direction. Upgrade both ends together.
+
+**Four review rounds against the flag-day PR, then eight small follow-ups.** The
+first round found the arc's defects; the next three mostly found the previous
+round's *repairs*, which is the subject of
+[`repairing-the-repairs-postmortem.md`](repairing-the-repairs-postmortem.md).
+
+Fixed in the PR itself:
+
+- **The `\NOEXEC` lever failed open.** Deleting the retried `CLUSTER.KEY` read
+  promoted the flag probe to `netd`'s first `fsd` call with no retry, so a
+  machine configured to share its disk while refusing `cpu` enabled remote
+  execution for the whole boot — silently, since that boot line prints only when
+  the lever is set. Took four corrections to classify correctly; the surviving
+  rule names what a *definitive* answer is and retries everything else.
+- **An unsealed reply** on `seal_reply_signed`'s no-room path, and a `rm -rf` in
+  `make esp` whose comment asserted — wrongly — that `ESP_DIR` could not be
+  overridden from the command line.
+- **A stale `\CLUSTER.KEY` survived in built images**, because `esp` only ever
+  added files; `ninep-abi` was never in `make test`; and `accounts`' SHA-256 had
+  no known-answer test anywhere in the tree, its cited validation naming
+  functions that had never existed.
+
+Then, one subject per PR:
+
+- **#61 — pre-authentication fingerprinting.** `deny_no_identity` told an
+  unauthenticated caller whether *this* machine held a keypair, so eight bytes to
+  port 564 distinguished a configured node from an unconfigured one. One refusal
+  now, naming no machine's state. `np9p_client.py` gained a `run` op, since it
+  could not exercise the `cpu` path at all — the one surface where a refusal is
+  prose.
+- **#62 — transient vs permanent `fsd` failures.** `LineScan::Unreadable` was
+  documented "Transient" and returned for every failure, so a node with no
+  `/etc/passwd` (a supported state) told callers "try again" forever.
+- **#63 — transcribed constants.** A bulk-chunk bound compared against a local
+  *copy* of `syscall_abi::SAFECOPY_MAX`; `NP_MSG_HDR` was a second spelling of
+  `NP_REQ_PAYLOAD`; `clusterkey peers` read 2048 bytes where `netd` authorizes
+  1024, so it listed peers the export refuses.
+- **#64 — the cross-language check covered one peer of two.** Renaming a dev
+  identity passed the check and broke `np9p_server.py` silently.
+- **#65 — duplicate addresses.** `find_by_key` scans every line while
+  `find_by_ip` took the first, so one file authorized a re-keyed peer inbound and
+  rejected its replies outbound. Ambiguity is refused and reported now.
+- **#66 — the post-authentication refusal is signed**, so its status word is
+  readable; every client length-checks an unsealed reply before the status, which
+  made a transient failure arrive as "authentication failed".
+- **#67 — the wire spec says what the wire carries.** Every description of the
+  signed bytes omitted the domain tag; `syscall-abi`'s `FS_ERR_AUTH` still
+  defined the error as a MAC rejection; a Parallels checkpoint grepped for a
+  string the code never prints.
+- **#68 — `NET_WAIT` queued against Pi hardware.** It is not a sleep (a queued
+  message wakes it without being consumed), and QEMU cannot test the fix — the
+  retry loop runs zero times there. Recorded as `testing-pi4.md` Risk 4b.
+
 ## Per-machine keypairs: the shared cluster key is retired (2026-08-31)
 
 Every machine now holds its own **Ed25519 keypair** and authorizes peers **by
