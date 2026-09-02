@@ -40,6 +40,8 @@ NP_BASE = 0x100
 NP_READDIR = NP_BASE + 0
 NP_READ_FILE = NP_BASE + 1
 NP_READ = NP_BASE + 2
+NP_STAT = NP_BASE + 12
+STAT_INFO_LEN = 27   # ninep-abi STAT_INFO_LEN; the NP_STAT result record
 NP_WRITE_FILE = NP_BASE + 11
 NP_WRITE_AT = NP_BASE + 4
 NP_READ_AT = NP_BASE + 10
@@ -617,7 +619,13 @@ def main():
         want = int(args[5]) if len(args) > 5 else 4096
         np_msg = build_frame(NP_READ, 0, [len(pb), offset, want], pb)
     elif op == "stat":
-        np_msg = build_frame(NP_READ_FILE, 0, [len(pb), 1], pb)
+        # NP_STAT, not NP_READ_FILE. This op sent NP_READ_FILE with want=1 and
+        # printed its byte count as a "size", which is a plausible-looking
+        # answer produced by a completely different verb: NP_STAT is the only
+        # verb reached through `ancestors_searchable` rather than
+        # `path_allows`, so the one arm this tool could not exercise was the
+        # one that most needed a foreign observer.
+        np_msg = build_frame(NP_STAT, 0, [len(pb)], pb)
     else:
         print(f"unknown op {op!r}", file=sys.stderr)
         sys.exit(2)
@@ -651,7 +659,26 @@ def main():
         print("entries:")
         sys.stdout.write(data.decode("latin1"))
     elif op == "stat":
-        print(f"size: {status} bytes; first byte(s): {data!r}")
+        # status is STAT_INFO_LEN on success; the record is in `data`.
+        if len(data) < STAT_INFO_LEN:
+            print(f"status: {status}; short stat record ({len(data)} bytes)")
+            sys.exit(1)
+        size = int.from_bytes(data[0:8], "little")
+        flags = int.from_bytes(data[8:12], "little")
+        kind = "dir" if flags & 1 else "file"
+        line = f"{kind}  size={size}"
+        if data[19]:
+            year = int.from_bytes(data[12:14], "little")
+            line += (f"  {year:04d}-{data[14]:02d}-{data[15]:02d} "
+                     f"{data[16]:02d}:{data[17]:02d}:{data[18]:02d}")
+        if data[26]:
+            mode = int.from_bytes(data[20:22], "little")
+            uid = int.from_bytes(data[22:24], "little")
+            gid = int.from_bytes(data[24:26], "little")
+            line += f"  mode={mode:04o} uid={uid} gid={gid}"
+        else:
+            line += "  (filesystem records no mode)"
+        print(line)
     else:
         sys.stdout.buffer.write(data)
         sys.stdout.flush()
