@@ -98,7 +98,7 @@ keyboard↔storage contention, which has real-hardware-only failure modes).
 
 | # | Check | How | Pass signal |
 | --- | --- | --- | --- |
-| **A1** | Clean boot; `netd` does **not** wedge | Boot the `.hdd`; read the console during startup | `netd: no NIC this boot`, then either `cluster auth enabled` **or** `export CLOSED … (fail-closed)` — and **no** `server slot 4 restarted/wedged/failed` loop |
+| **A1** | Clean boot; `netd` does **not** wedge | Boot the `.hdd`; read the console during startup | `netd: no NIC this boot`, then either `netd: export open, accepts signed requests` **or** `netd: export CLOSED … (fail-closed)` — and **no** `server slot 4 restarted/wedged/failed` loop |
 | **A2** | No-NIC graceful degradation | `ping 10.0.2.2` ; `mount -n /net` then `cat /net/ip` ; `dial /net 1.1.1.1 80` | Each fails with a *clean* "no network" message — **no** `EL0 FAULT`, no hang |
 | **A3** | Shell + core commands | `make test-parallels CMDS="help;echo hi;uptime;ls;env;pwd"` | Screenshots show correct output |
 | **A4** | USB disk + filesystem | With a FAT32 stick passed through: `ls`, `cat FILE`, `mkdir D`, `write F text`, `writeat F 0 x`, then reboot and re-`cat` | Files read/write/persist across reboot; no mid-transfer stall |
@@ -107,10 +107,16 @@ keyboard↔storage contention, which has real-hardware-only failure modes).
 ### <a name="risk-1--netd-boot-race"></a>Risk #1 — the `netd` boot race (the reason A1 exists)
 
 `netd`'s `serve()` calls `load_auth()` **before** entering its event loop, and
-`load_auth` does *blocking* `read_file_chunk` calls to `fsd` for
-`/etc/cluster/id` and `/etc/cluster/authorized`, with a retry loop on `NO_FS`
-(**one shared budget** of 50 tries × `NET_WAIT(40)` ≈ 2 s across both, not per
-read) for the case where the disk isn't mounted yet.
+`load_auth` does *blocking* `read_file_chunk` calls to `fsd` for **three**
+files — the `\NOEXEC` flag, `/etc/cluster/id` and `/etc/cluster/authorized` —
+each retried on a transient failure (**one shared budget** of 50 tries ×
+`NET_WAIT(40)` ≈ 2 s across all three, not per read) for the case where the disk
+isn't mounted yet.
+
+The `\NOEXEC` probe goes **first**, and it is the one that matters most here:
+it is the only one that fails *open* if it never gets an answer, so it now
+defaults to setting the lever rather than clearing it. See its comment in
+`load_auth`, and `testing-pi4.md`'s Risk 4, which mirrors this section.
 
 On QEMU this is a non-event: virtio-blk auto-mounts before `netd` ever asks, so
 `load_auth` returns on the first call. **On Parallels the disk is USB-MSD** —

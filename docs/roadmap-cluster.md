@@ -325,7 +325,8 @@ netd holding the run's output in a `PendingRun` buffer), lifting the cap to ~2 K
     asking. The auth header carries the caller's **name** (32 bytes, NUL-padded),
     covered by the request's authenticator (then `mac = HMAC(key, nonce ‖ name ‖
     message)`, now a signature over `SIG_DOMAIN_REQUEST ‖ nonce ‖ name ‖
-    message`) so it cannot be altered in flight; the exporter resolves it through **its own**
+    message`) so it cannot be altered in flight; the exporter resolves it
+    through **its own**
     `/etc/passwd` and refuses a name it does not know. A *name*, not a uid: two
     nodes number their users independently, and NFS's `AUTH_SYS` shows what
     sending the number does. The identity reaches `fsd` as a **required

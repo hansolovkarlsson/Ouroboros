@@ -433,7 +433,8 @@ pub const NP_AUTH_NAME_OFF: usize = 8 + NP_NONCE_LEN;
 /// [len:4][magic:8][nonce:16][name:32][pubkey:32][sig:64][NP message]
 /// ```
 ///
-/// The signature covers `nonce ‖ name ‖ message` — the same bytes the MAC
+/// The signature covers `SIG_DOMAIN_REQUEST ‖ nonce ‖ name ‖ message` — the
+/// same bytes, after the domain tag, that the retired MAC
 /// covered. What changed is not *what* is authenticated but *who can produce
 /// it*: a secret every machine holds, or a private key only one machine holds.
 pub const NP_AUTH_MAGIC_SIGNED: u64 = 0x4155_5448_4E50_3033; // "AUTHNP03"
