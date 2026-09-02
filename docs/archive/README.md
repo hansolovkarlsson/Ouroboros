@@ -27,9 +27,11 @@ what someone knew on a particular afternoon, this is the only place that says.
   first milestones: boot bring-up, the shell, filesystems, USB, the network
   stack.
 - [`memory-notes-2026-09.md`](memory-notes-2026-09.md) — the assistant's memory
-  directory as it stood on 2026-09-02, immediately before it was consolidated
-  from 26 notes to 20. Most of it was duplicating this repository, which is why
-  it was trimmed; six notes were retired outright and survive only here.
+  directory as it stood on 2026-09-02, immediately before it was consolidated,
+  in two passes the same day: 26 notes to 20 (the notes that duplicated this
+  repository), then 20 to 15 (the notes that duplicated each other). Twelve
+  notes were retired or merged, and the verbatim text of each survives only
+  here.
 
 The `[[double-bracket]]` links in these files point at assistant memory notes,
 not at files in this repository; they will not resolve here. Left as written

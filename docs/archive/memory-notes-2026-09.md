@@ -1,7 +1,7 @@
 # Archive — assistant memory notes, as they stood 2026-09-02
 
 A verbatim snapshot of the assistant's memory directory for this project taken
-just before it was consolidated from 26 files (62 KB) down to 20 (~22 KB).
+just before it was consolidated from 26 files (62 KB) down to 20 (36 KB).
 
 **This is not the reference**, for the same reason as the build logs beside it:
 almost everything below is a restatement of something the repo already records
@@ -1205,4 +1205,255 @@ bad index deleted fourteen tests and left the suite green at 8.
 
 Related: [[reference-a-check-that-cannot-fail]] (the parent lesson),
 [[reference-compute-dont-transcribe]], [[reference-a-repair-is-a-change]].
+```
+
+---
+
+# Second pass — 2026-09-02, evening
+
+A further consolidation the same day, from 20 files (36 KB) down to 15
+(29 KB). The first pass above removed notes that *restated the repo*; this one
+removes the remaining **duplication between notes** — three pairs that had
+grown into each other, plus two project notes whose content had all landed in
+`CLAUDE.md` and the postmortems.
+
+| Retired / merged note | Now covered by |
+| --- | --- |
+| `project-completed-arcs` | folded into `project-ouroboros-status`; the arcs themselves are `../CHANGELOG.md`, `../roadmap-completed.md` and the postmortems, and every "live constraint" it listed is stated in `CLAUDE.md` |
+| `project-gui-stack-direction` | one line in `project-ouroboros-status`; the reasoning is `../research-gui-stack.md`, already summarised in `CLAUDE.md` |
+| `reference-restatements-drift` | merged into `reference-copies-drift` |
+| `reference-compute-dont-transcribe` | merged into `reference-copies-drift` — prose copies and data copies are the same disease |
+| `reference-firmware-hides-robustness` | a bullet in `reference-a-check-that-cannot-fail`; the account is `../small-gaps-postmortem.md` |
+| `reference-stacked-pr-squash-trap` | a bullet in `reference-a-repair-is-a-change`; the account is `../review-and-split-postmortem.md` |
+
+Verbatim text of each, as it stood immediately before this pass:
+
+
+## `project-completed-arcs.md`
+
+```markdown
+---
+name: project-completed-arcs
+description: "The finished Ouroboros arcs in one line each, with only the LIVE constraints they left — the full record is in the repo"
+metadata:
+  type: project
+---
+
+For any arc's actual story read `docs/CHANGELOG.md`, `docs/roadmap-completed.md`,
+and its postmortem under `docs/` — all indexed from `CLAUDE.md`. What survives
+here is only the part that **changes what to do next** and is not already stated
+as an instruction in the repo.
+
+## Arcs done (don't re-propose them)
+
+Standalone binaries + PATH/argv/cwd; multi-stage pipelines; the interactive shell
+and a bigger `/bin`; filesystems (FAT32/exFAT/ext2, read-write); disk management;
+the network stack; cluster Phases 0–4; the small-gaps parking lot;
+users/permissions + account management; the libc arc (C runs, picolibc);
+per-machine Ed25519 cluster keypairs (v0.16.0 — the shared key is deleted;
+revocation is now "delete a line" from `/etc/cluster/authorized`).
+
+## Live constraints these left
+
+- **Job control stays a builtin.** Don't propose externalizing `ps`/`kill`/
+  `wait`/`fg`: an externalized version runs in a *spawnable slot*, so it lists
+  itself and its task numbers are racy. Nor `mount`/`erase`/`partition`/`format`
+  (they must run when nothing is mounted — they cannot live on the disk they
+  manage), nor `shutdown`/`halt`.
+- **A server authorizes on `SENDER_ID`/`SENDER_GROUPS`, never `GET_ID(sender)`.**
+  The kernel binds the credential at *send*; reading the slot at dequeue reads
+  whoever recycled into it. Applies to every new server.
+- **The C portability waist is the syscall stubs** in `libc/src` — `write`/`read`/
+  `open`/`close`/`lseek`/`fstat`/`sbrk`/`_exit`. picolibc needed zero new porting
+  code because its stdio bottoms out there. Aim anything else ported at the same
+  waist rather than widening the kernel. What is left of that arc is "port one
+  more real program" (SQLite, a small C compiler).
+- **Home base is `/Users`**, Hans's stated preference — not `/home`.
+- **Relocation safety applies to all userland code** —
+  [[reference-str-slice-pie-trap]].
+
+## Resolved, kept only so they are not re-investigated
+
+- **The fsd large-read restart** (v0.4.1) — `read_at` re-walked the FAT chain per
+  call, so a long `cat` ran past the supervisor's wedge timer. Fixed with a
+  forward-only chain *position* cache.
+- **The xHCI keyboard ↔ USB-storage contention** — both modes fixed; see
+  `docs/xhci-keyboard-postmortem.md`.
+
+Related: [[project-ouroboros-status]], [[project-cluster-vision]],
+[[project-release-process]].
+```
+
+## `project-gui-stack-direction.md`
+
+```markdown
+---
+name: project-gui-stack-direction
+description: "Parked want — a GUI stack on Ouroboros; the design note exists, and its one decisive finding"
+metadata:
+  type: project
+---
+
+A GUI stack is a **parked someday-want** (flagged 2026-08-28), not a next task —
+nothing needs it yet, so it sits behind everything with a nearer consumer. The
+design reasoning is written up in `docs/research-gui-stack.md` (roadmap item f).
+
+**The one finding worth carrying in memory:** the decisive blocker is the
+**bulk-pixel path**, not toolkit size. `MSG_MAX_LEN` is 768 B inline with no
+shared memory, so an 8 MB frame is ~11,000 messages — SDL's "ship a pixel buffer
+and present it" model is the wrong shape for this ABI. The fit is Plan 9's
+`/dev/draw`: compact drawing *verbs* against *server-side* images, via a `drawd`
+server in the `cond`/`fsd`/`netd` mould, which `cond` already half-is. SDL/GTK
+then become pure-userland client libs and no kernel change is needed after
+`drawd`. Don't widen the `FB_*` gate — it is `CON_TASK`-only by design.
+
+The two unlocking steps are a USB boot-protocol **mouse** driver (small reuse of
+the xHCI HID path) and **`drawd`**. Same "write to the ABI's grain, don't emulate
+someone else's" conclusion as the POSIX-divergence arc.
+```
+
+## `reference-restatements-drift.md`
+
+```markdown
+---
+name: reference-restatements-drift
+description: "The code holds one copy of each fact; the prose holds several, and nothing keeps them in step — comments, manpages, doc links and mirrored constants drift invisibly"
+metadata:
+  type: reference
+---
+
+2026-08-30, five instances in one day, found five different ways: comments still
+enumerating "tasks 0–4" beside a guard covering 0–5; `libc/include/sys.h` pinning
+the reserved-error floor at `MAX-33` after the Rust constant moved to `MAX-38` (a
+C caller would read an error as a *success* value); a doc link to a constant that
+never existed; a manpage naming a syscall designed and never shipped; and
+`CLAUDE.md` describing the wrong slot count and two contradictory crate counts.
+
+**None were visible to the compiler or to any test** — a comment, a manpage, a doc
+link, an unused C constant and a prose count are exactly what neither checks.
+That is the category, not bad luck.
+
+Practices that actually caught them:
+
+- `cargo doc --no-deps` must report **zero** unresolved intra-doc links. Nine had
+  accumulated precisely because nothing read that output; a clean baseline is what
+  makes the next one visible.
+- When a constant is **hand-mirrored across languages**, put the note at the
+  *definition* pointing at the mirror — the definition is what gets edited.
+  (`scripts/check-wire-constants.py` now does this mechanically for the wire.)
+- Prefer stating an **invariant** over enumerating a list ("every slot below
+  `FIRST_SPAWNABLE`", not "tasks 0–4"). The enumeration is the part that goes
+  stale, and it already had once.
+- Grep for a removed identifier across `manpages/` and `docs/` when renaming
+  anything user-visible.
+
+Related: [[reference-a-check-that-cannot-fail]] (the code version of the same
+disease).
+```
+
+## `reference-compute-dont-transcribe.md`
+
+```markdown
+---
+name: reference-compute-dont-transcribe
+description: "Where a definition is cheap to evaluate, evaluate it — a hand-written table of eight small-order Ed25519 keys had three wrong entries and was a hole in both directions"
+metadata:
+  type: reference
+---
+
+**Enumerating a mathematical property is a transcription task; computing it is
+not.**
+
+The case: a guard refusing small-order Ed25519 public keys (against such a key
+the cofactorless verification equation is satisfiable with **no secret**, so an
+authorized line carrying one is a universal forgery). It was written as a table
+of the eight encodings, 32 hex bytes each. **Three entries were wrong** — it
+ACCEPTED three genuinely small-order keys and REFUSED one ordinary valid point.
+Nobody reads 32 bytes of hex and notices `26e8…` became `13e8…`, and the test
+exercised only the two entries that happened to be right.
+
+The fix is not a better table: `[8]P == identity` **is** the definition, costs
+three doublings, and cannot be transcribed wrongly.
+
+**Three corollaries:**
+
+- **Put the check at the boundary** (`ed25519::verify`), not in the parser that
+  happened to think of it — a parser guard protects only callers who go through
+  the parser.
+- **Make test DATA self-checking.** The replacement asserts each candidate *is*
+  small order via the curve arithmetic before asserting it is refused, so a
+  mistyped constant fails loudly instead of quietly shrinking the test.
+- A wrong constant in a security check fails in **both** directions — it lets the
+  dangerous thing through *and* blocks a legitimate one.
+
+**How to apply:** when a guard is a list of magic values, ask what property the
+list stands in for and whether computing it is affordable. Usually it is.
+
+Related: [[reference-a-check-that-cannot-fail]].
+```
+
+## `reference-firmware-hides-robustness.md`
+
+```markdown
+---
+name: reference-firmware-hides-robustness
+description: "Testing lesson: a robust surrounding layer (UEFI/OVMF) can HIDE the robustness path you are testing — host-harness the real module instead of booting"
+metadata:
+  type: reference
+---
+
+**When testing a *robustness/recovery* path, the robustness of the layer around
+it can mask the very behaviour you want to observe — so a QEMU or real boot is
+NOT the strongest test.** Found adding GPT CRC validation + backup fallback to
+`fsd`'s `partition.rs`:
+
+- Corrupt the **primary** GPT and boot → `fsd` mounted, and the on-disk primary
+  was **valid again afterwards**: EDK2/OVMF auto-repairs it from the backup during
+  boot, so `fsd` never saw the corruption.
+- Corrupt **both** copies → the firmware refuses to boot at all; the kernel never
+  runs.
+
+Either way `fsd`'s own fallback is invisible behind the firmware.
+
+**The honest test was a host harness** that `#[path]`-includes the *real*
+`partition.rs` and drives it through a mock `Disk` over raw image bytes (clean /
+corrupt-primary / corrupt-array / corrupt-both / plain-MBR), plus a cross-check
+that the hand-rolled CRC-32 matched `zlib.crc32`.
+
+**How to apply:** for a recovery path, host-harness the real module directly and
+reserve the boot for the clean case. Related reflex: a bug that returns a *shared*
+error code (e.g. conflating "range invalid" with "no entry") is invisible until
+something prints the branch actually taken.
+```
+
+## `reference-stacked-pr-squash-trap.md`
+
+```markdown
+---
+name: reference-stacked-pr-squash-trap
+description: "Squash-merging a PR whose branch is the BASE of another CLOSES the stacked PR and GitHub won't reopen it — merge without --delete-branch, rebase, retarget, then delete"
+metadata:
+  type: reference
+---
+
+Merging a stack (B based on A): squash-merging A with `--delete-branch`
+**closes** PR B rather than retargeting it, and GitHub then **refuses to reopen**
+it once B's head has been force-pushed. B's work survives, but needs a new PR
+number. Cost this once — PR #29 had to be reopened as #31.
+
+The order that works:
+
+1. `gh pr merge A --squash` — **without** `--delete-branch`
+2. `git rebase --onto main <A-old-tip> B` — git drops already-upstream commits by
+   patch-id, so a squashed A's commits vanish cleanly
+3. `gh pr edit B --base main`
+4. *then* `git push origin --delete A`
+
+**Record every branch tip first** (`git rev-parse` each) — recovery from a bad
+rebase is a SHA you wrote down.
+
+Also: **`MERGEABLE` is a claim about text, not meaning.** A changed signature in
+one PR plus a new call site in another produces no textual conflict and a tree
+that does not compile. For any shared-signature change, merge locally and build
+before trusting the flag.
 ```
