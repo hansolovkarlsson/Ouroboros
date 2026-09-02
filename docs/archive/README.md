@@ -26,8 +26,12 @@ what someone knew on a particular afternoon, this is the only place that says.
 - [`early-milestones-log-2026-08.md`](early-milestones-log-2026-08.md) — the
   first milestones: boot bring-up, the shell, filesystems, USB, the network
   stack.
+- [`memory-notes-2026-09.md`](memory-notes-2026-09.md) — the assistant's memory
+  directory as it stood on 2026-09-02, immediately before it was consolidated
+  from 26 notes to 20. Most of it was duplicating this repository, which is why
+  it was trimmed; six notes were retired outright and survive only here.
 
-The `[[double-bracket]]` links in both files point at assistant memory notes,
+The `[[double-bracket]]` links in these files point at assistant memory notes,
 not at files in this repository; they will not resolve here. Left as written
 rather than rewritten, because editing a contemporaneous record defeats the only
 reason to keep one.
