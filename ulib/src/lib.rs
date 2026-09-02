@@ -60,12 +60,20 @@ pub fn syscall4(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64) -> u64 
 
 /// True if any argument is `-?` - the uniform usage-help flag. A program checks
 /// this (usually via [`usage_if_requested`]) and prints its one-line usage.
+///
+/// Scanning STOPS at a literal `--`, so a file actually named `-?` is reachable
+/// as `mv -- -? new.txt`. Without that, `--` protected every dash-leading name
+/// except this one, and the manpage saying otherwise would have been wrong in
+/// exactly the case someone would try first.
 pub fn help_requested() -> bool {
     let n = argc();
     let mut i = 1u64;
     let mut buf = [0u8; 4];
     while i < n {
         if let Some(l) = arg(i, &mut buf) {
+            if &buf[..l] == b"--" {
+                return false;
+            }
             if &buf[..l] == b"-?" {
                 return true;
             }
@@ -1148,6 +1156,72 @@ pub fn fs_stat(path: &str, info: &mut [u8]) -> u64 {
         &[],
         info,
     )
+}
+
+/// What [`fs_presence`] could determine about a path.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Presence {
+    /// The server said there is no such file.
+    Absent,
+    /// The server returned a stat record.
+    Present,
+    /// The server answered something else - `NO_FS` while `fsd` is restarting,
+    /// a permission refusal, a backend that cannot stat. We do not know.
+    Unknown,
+}
+
+/// Whether `path` names something, as far as the server will say.
+///
+/// The check behind `mv`/`cp`'s refusal to replace a destination without `-f`.
+/// It lives here rather than in each command so the two cannot drift into
+/// disagreeing about what "already there" means - they are the same question,
+/// asked about the same destructive act.
+///
+/// THE THIRD STATE IS THE POINT. An earlier version returned a bare `bool` and
+/// folded every error into "no", reasoning that the operation would then go
+/// ahead and fail on its own merits at the server. That reasoning was true of
+/// the server as it used to be and is FALSE of the one this guard was written
+/// for: `fsd` no longer refuses an existing destination, it REPLACES it. So an
+/// `NP_STAT` that failed for any reason other than absence would have silently
+/// switched the guard off and destroyed the file it exists to protect. The
+/// callers now fail closed on `Unknown` and say which it was.
+pub fn fs_presence(path: &str) -> Presence {
+    let mut info = [0u8; ninep_abi::STAT_INFO_LEN];
+    let r = fs_stat(path, &mut info);
+    if !is_fs_error(r) {
+        Presence::Present
+    } else if r == syscall_abi::FS_ERR_NOT_FOUND {
+        Presence::Absent
+    } else {
+        Presence::Unknown
+    }
+}
+
+/// Leading `-f` / `--` for `mv` and `cp`: returns `(force, first_operand_index)`,
+/// or `None` for an unrecognised option (the caller prints its own message).
+///
+/// `--` ends the options, so a file whose name begins with `-` stays reachable
+/// (`mv -- -odd.txt new.txt`) - it was not, briefly, which is why this exists.
+/// An unknown `-word` is refused rather than taken as a filename: for a command
+/// that destroys data, reading a mistyped flag as the source is the wrong way
+/// to be forgiving.
+pub fn parse_force_opts() -> Option<(bool, u64)> {
+    let mut force = false;
+    let mut i = 1u64;
+    loop {
+        // Three bytes distinguishes `-f` and `--` (two) from anything longer,
+        // which `arg` would silently truncate into looking like one of them.
+        let mut buf = [0u8; 3];
+        match arg(i, &mut buf) {
+            Some(2) if &buf[..2] == b"--" => return Some((force, i + 1)),
+            Some(2) if &buf[..2] == b"-f" => {
+                force = true;
+                i += 1;
+            }
+            Some(n) if n >= 1 && buf[0] == b'-' => return None,
+            _ => return Some((force, i)),
+        }
+    }
 }
 
 /// The size field of a stat record (see [`fs_stat`]).

@@ -7,6 +7,98 @@ for the forward plan see [`roadmap.md`](roadmap.md).
 
 ---
 
+## 2026-09-02 — emptying the small-gaps parking lot, and four blind instruments
+
+*(A day of small items. Five roadmap ledger entries struck, one feature
+finished, two review rounds — and a theme nobody set out to find.)*
+
+Started by trimming the assistant's memory directory, which had grown to 26
+notes and 62 KB, most of it restating what this repository already records. It
+came down to 20 notes and ~35 KB, with the pre-trim state snapshotted into
+`docs/archive/` beside the two build logs moved out on the 1st. Six notes were
+retired outright because a postmortem or a reference doc already covers them.
+
+Then the roadmap's small items, chosen by reading the code rather than trusting
+the roadmap's own sizing — which turned out to matter, because the first one's
+description was wrong.
+
+**The `fsd` mode-check.** `NP_STAT`, `NP_CHMOD` and `NP_CHOWN` skipped the
+"does this filesystem model modes?" short-circuit that every other verb gets.
+The roadmap said the symptom was `cat ../f` succeeding while `ls -l ../f` is
+refused. Booted `main` to get a baseline and `ls -l /BIN/../ETC/PASSWD` worked
+fine: `ulib::normalize_path` collapses `..` client-side, so no `/bin` program
+can send `fsd` a path containing one. The divergence is real but reachable only
+from the 9P export, which sends raw paths.
+
+**So the export was the observer — and the observer was blind.** Three probes
+through `np9p_client.py` came back green against a `main` guest that definitely
+had the bug. They were green because the tool's `stat` op sends `NP_READ_FILE`,
+not `NP_STAT`, and prints the returned byte count as a "size" — a plausible
+answer produced by a completely different verb. `NP_STAT` is the *only* verb
+that reaches `ancestors_searchable` without going through `path_allows`, so the
+one arm most in need of a foreign observer was precisely the one this tool could
+not address. Fixed it; the divergence reproduced immediately.
+
+The same shape appeared twice more before the day ended. `drive-qemu.py` could
+not type an empty line at all — `if text:` skipped the step — which made every
+"refuse an empty answer" rule untestable from the harness, including the
+`useradd` empty-password refusal added an hour later. And `cargo doc`, which
+caught an absorbed doc comment during the cluster-keys arc, did not catch one
+this time: the userland crates emit 39 unresolved links where the kernel is held
+at 0, and nobody reads a noisy output.
+
+**The fail-open mount warning** was the nicest fix of the day, because it turned
+out not to need the thing I had planned. I had said "add the bounded `NO_FS`
+retry"; the actual defect was that two functions three lines apart disagreed
+about whether a race exists, and adding a second retry budget would have made
+that worse while looking like a fix. Reordering `login` to read the account file
+first and warn second makes the race *unreachable* instead of merely unlikely,
+with one budget rather than two to keep in step. Three of the four branches
+can't occur on a healthy QEMU boot, so they were reached by breaking the server
+on purpose — the useful one being that clearing the flag on ext2 raises the
+warning *while `mount` still prints the name `ext2`*, which is what proves the
+shell reads the flag and not the name.
+
+**POSIX character classes** were the one item with no boot at all. The
+definitions are computed from `core`'s `is_ascii_*` predicates rather than
+transcribed as twelve bit tables — 384 hex bytes is a transcription task, and
+the same reasoning as the small-order key table in the keys arc. That surfaced
+two real disagreements between `core` and POSIX. The tests assert cardinalities,
+since spot-checking `[[:alpha:]]` against `"a"` passes for five of the twelve
+classes.
+
+**`mv` replacing an existing file** took the rest of the day and two review
+rounds. The feature itself was small once scoped to file-replaces-file; ext2 got
+the near-atomic version the roadmap predicted, one write of the destination's
+directory entry. Then Hans asked whether replacing should require asking first —
+a good question, because adding replace had *removed* a safety that was already
+there. The answer was `-f` on both `mv` and `cp` (which has always clobbered
+silently), and a refusal rather than a prompt: interactivity here is keyboard
+ownership, and neither command has a keyboard in a pipeline, under `cpu`, or
+when the request arrives from a 9P peer.
+
+Round 1 found ten things, two of which could destroy a file. Both FAT arms freed
+the *destination* before writing the new entry — fine against a crash, wrong
+against an ordinary error. And ext2's replace path freed an inode two names
+shared. Neither this OS nor its tools can produce a hard link or a cross-linked
+cluster, so both were forged: `debugfs` for ext2, a hand-patched first-cluster
+field for FAT. With the ext2 guard removed, `cat` returned empty and `mv` still
+exited 0.
+
+Round 2, scoped to the repairs as this project has learned to do, found eight —
+and four were prose that the round-1 reorder had invalidated, sitting in the
+commit whose message was partly about fixing stale doc comments. The other
+notable one: round 1 had argued for the same-inode guard from "this OS cannot
+create that, but these images are host-built," and then applied it to one arm of
+three. The same argument covers `vvfat`.
+
+And the fourth blind instrument, from testing that: `cat` still printed the right
+content with the cross-link guard removed, because freeing a chain marks the FAT
+and never touches the data. Only `fsck_msdos` saw it. I would have called that
+guard verified on a passing `cat`.
+
+---
+
 ## 2026-09-01 — reviewing the review's repairs, and shipping v0.16.0
 
 *(The day after. No new features: one open PR reviewed four times, eight small

@@ -9,6 +9,7 @@ Usage:
     python3 scripts/np9p_client.py <host> <port> readdir <path>
     python3 scripts/np9p_client.py <host> <port> read    <path> [offset] [want]
     python3 scripts/np9p_client.py <host> <port> stat    <path>
+    python3 scripts/np9p_client.py <host> <port> mv      <src> <dst>
     python3 scripts/np9p_client.py <host> <port> run     <command>
 
 Every request is SIGNED with a per-machine Ed25519 key: the auth header is
@@ -40,6 +41,7 @@ NP_BASE = 0x100
 NP_READDIR = NP_BASE + 0
 NP_READ_FILE = NP_BASE + 1
 NP_READ = NP_BASE + 2
+NP_MV = NP_BASE + 9
 NP_STAT = NP_BASE + 12
 STAT_INFO_LEN = 27   # ninep-abi STAT_INFO_LEN; the NP_STAT result record
 NP_WRITE_FILE = NP_BASE + 11
@@ -618,6 +620,16 @@ def main():
         offset = int(args[4]) if len(args) > 4 else 0
         want = int(args[5]) if len(args) > 5 else 4096
         np_msg = build_frame(NP_READ, 0, [len(pb), offset, want], pb)
+    elif op == "mv":
+        # Two paths in one payload, lengths in a0/a1. Present because the
+        # guest's own /bin/mv guards `mv f f` before fsd ever sees it, so the
+        # server-side guard - the one that protects THIS path, where paths
+        # arrive raw - had no client that could reach it.
+        if len(args) < 5:
+            sys.exit("mv needs <src> <dst>")
+        src = args[3].encode()
+        dst = args[4].encode()
+        np_msg = build_frame(NP_MV, 0, [len(src), len(dst)], src + dst)
     elif op == "stat":
         # NP_STAT, not NP_READ_FILE. This op sent NP_READ_FILE with want=1 and
         # printed its byte count as a "size", which is a plausible-looking

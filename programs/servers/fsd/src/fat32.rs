@@ -1422,11 +1422,16 @@ impl Fs {
         self.patch_entry_cluster_size(dir_lba, dir_off, head_cluster, new_size)
     }
 
-    /// Renames or moves the file or directory at `src` to `dst`. `dst`
-    /// must not already exist - `mv` refuses rather than overwriting it
-    /// or (if `dst` happens to be an existing directory) moving `src`
-    /// inside it keeping its old name, narrower than a real `mv`'s full
-    /// semantics.
+    /// Renames or moves the file or directory at `src` to `dst`.
+    ///
+    /// An existing `dst` is REPLACED when both it and `src` are ordinary files
+    /// - POSIX `rename`. Unlike ext2 this cannot be atomic: a FAT directory
+    /// entry holds the file's first cluster and size itself, so there is no
+    /// inode number to re-point and the old entry must be replaced. The name
+    /// therefore resolves to two entries for an instant rather than to none,
+    /// which is the recoverable direction. A DIRECTORY on either side of an
+    /// existing name is still refused. `dst` being an existing directory does
+    /// NOT move `src` inside it - `/bin/mv` does that, above this layer.
     ///
     /// Implemented uniformly for a same-directory rename and a
     /// cross-directory move alike, rather than special-casing the
@@ -1437,7 +1442,9 @@ impl Fs {
     /// new thing before touching the old one" ordering as
     /// [`write_file`](Self::write_file)'s overwrite path, so a failure
     /// partway through (e.g. a disk-full error inserting into `dst`'s
-    /// parent) never leaves `src` half-deleted.
+    /// parent) never leaves `src` half-deleted. The replacing path added in
+    /// 2026-09 keeps that same order for the same reason - the new entry is
+    /// written before either old one is freed.
     ///
     /// **The one step this can't skip: when a *directory* moves to a
     /// *different* parent, its own `..` entry has to be patched to point
@@ -1475,17 +1482,74 @@ impl Fs {
         let (src_lba, src_offset) = src_location.ok_or(Error::NotFound)?;
         let src_entry = src_entry.ok_or(Error::NotFound)?;
 
-        let mut dst_exists = false;
-        self.walk_dir(dst_parent.cluster, |entry| {
+        // An existing destination is REPLACED when both it and `src` are
+        // ordinary files. Unlike ext2 this cannot be ATOMIC: a FAT directory
+        // entry holds the file's first cluster and size itself, so there is no
+        // inode number to re-point, and the change takes two writes rather than
+        // one. It is NOT a window in which the name is absent: the new entry is
+        // written before either old one is freed, so a reader in between finds
+        // two entries and gets one of the two files, never nothing. That
+        // distinction is the whole point of the insert-first ordering below.
+        let mut dst_found: Option<(u64, usize)> = None;
+        let mut dst_entry: Option<DirEntry> = None;
+        self.walk_dir_with_location(dst_parent.cluster, |entry, lba, offset| {
             if entry.name().eq_ignore_ascii_case(dst_name) {
-                dst_exists = true;
+                dst_found = Some((lba, offset));
+                dst_entry = Some(*entry);
                 true
             } else {
                 false
             }
         })?;
-        if dst_exists {
-            return Err(Error::AlreadyExists);
+        if let (Some((dst_lba, dst_offset)), Some(dst_entry)) = (dst_found, dst_entry) {
+            // Both walks match case-insensitively, so `src` and `dst` can be
+            // the SAME entry two ways. `mv f f` is a genuine no-op. But
+            // `mv FOO.TXT foo.txt` is a real request - change the stored case -
+            // and returning Ok without doing it would report success for
+            // nothing, which is worse than the `AlreadyExists` it used to give.
+            // The insert-first order below performs it: write the entry under
+            // the new spelling, free the old one, and skip both the source-side
+            // free (same slot) and the chain free (same file).
+            let same_entry = (dst_lba, dst_offset) == (src_lba, src_offset);
+            if same_entry && src_name.as_bytes() == dst_name.as_bytes() {
+                return Ok(());
+            }
+            if src_entry.is_dir || dst_entry.is_dir {
+                return Err(Error::AlreadyExists);
+            }
+            // WRITE THE NEW ENTRY FIRST, exactly as the non-replacing path
+            // below does. Freeing the destination first looked fine against a
+            // crash, and is wrong against an ORDINARY ERROR: if the insert then
+            // fails - a full directory that cannot be extended, no contiguous
+            // run for the LFN entries, a write error - `mv` returns Err having
+            // already destroyed `dst`, with `src` still in place. The caller
+            // sees "failed" and the destination is gone for nothing. This order
+            // can only leave a transient duplicate name, which is recoverable.
+            let attr = if src_entry.is_dir { ATTR_DIRECTORY } else { 0 };
+            self.insert_named_entry(
+                dst_parent.cluster,
+                dst_name,
+                attr,
+                src_entry.cluster,
+                src_entry.size,
+            )?;
+            self.free_entry_with_lfn(dst_parent.cluster, dst_lba, dst_offset)?;
+            if !same_entry {
+                self.free_entry_with_lfn(src_parent.cluster, src_lba, src_offset)?;
+                // Free the old chain only when it is genuinely a DIFFERENT
+                // file. Two guards, not one: a case-only rename re-links the
+                // same entry, and a cross-linked image can give two separate
+                // entries the same first cluster - which this OS cannot create,
+                // but `vvfat` and a damaged disk can, exactly as a host-built
+                // ext2 image can carry a forged hard link. Freeing there would
+                // destroy the chain the SURVIVING name points at, and report
+                // success. Same defect the ext2 arm's `d_ino == s_ino` guard
+                // closes; it wanted closing in all three arms, not one.
+                if dst_entry.cluster != 0 && dst_entry.cluster != src_entry.cluster {
+                    self.free_chain(dst_entry.cluster)?;
+                }
+            }
+            return Ok(());
         }
 
         let attr = if src_entry.is_dir { ATTR_DIRECTORY } else { 0 };

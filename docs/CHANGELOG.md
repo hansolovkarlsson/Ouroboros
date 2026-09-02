@@ -7,6 +7,101 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/`; 
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## The small-gaps parking lot, and the observers that could not see it (2026-09-02)
+
+No arc, no release. Five roadmap ledger entries struck with dates, one feature
+finished, and a recurring finding that turned out to be the day's real subject:
+**several of the tools this project verifies with could not have failed.**
+
+**`fsd` asks "does this filesystem model modes?" once, for every verb** (#71).
+`path_allows` short-circuited on a filesystem that records no owner/mode;
+`NP_STAT`, `NP_CHMOD` and `NP_CHOWN` never got that short-circuit because they
+call `ancestors_searchable` directly. The question moved to the top of
+`check_access`, which is a net removal. The roadmap's description of the symptom
+was **wrong and is corrected**: it said `cat ../f` succeeds while `ls -l ../f`
+is refused *from the shell*, and it cannot — `ulib::normalize_path` collapses
+`..` client-side, so no `/bin` program can send `fsd` such a path. The
+divergence was reachable only from the 9P export, which sends raw paths. The
+cost half was reachable all along: `ls -l` sends one `NP_STAT` per entry, each
+paying an ancestor walk that could only return true.
+
+**`useradd` refuses an empty password** (#71), the rule `passwd` already had.
+On `main`, `useradd bob` + Enter + Enter created the account and `login: bob` +
+Enter reached a shell as uid 1001.
+
+**The mount-permissions warning stopped failing open** (#72).
+`mounted_fs_unprotected` read *any* non-zero `FSOP_MOUNT_INFO` status as
+"permissions enforced", including the `NO_FS` that means `fsd` has not finished
+mounting — with no retry, three lines from a function carrying a bounded one for
+exactly that race. Fixed structurally rather than with a second budget:
+`login` now reads the account file **first** and warns second, so the race is
+unreachable rather than unlikely. `FSOP_MOUNT_INFO` also gained a flags word
+(`MOUNT_FLAG_ENFORCES_MODES`) derived from the root's `stat`, so the shell no
+longer decides a security question by string-matching `"ext2"`. Both callers of
+that question now go through one tri-state helper and resolve "cannot tell" in
+opposite directions — deny more, warn more — rather than one silently imposing
+its default on the other.
+
+**POSIX character classes in `regex`** (#73): `[[:alpha:]]` and the other
+eleven, inside a bracket expression. **Computed** from `core`'s `is_ascii_*`
+predicates rather than transcribed as twelve 32-byte bit tables, which surfaced
+two places `core` and POSIX disagree — `is_ascii_whitespace` excludes the
+vertical tab that `[:space:]` includes, and `core` has no `print`. An unknown
+name is an error, never a fall back to the literal letters. The tests assert
+**cardinalities**, because `m("[[:alpha:]]", "a")` passes for five of the twelve
+classes and distinguishes almost nothing.
+
+**`mv` replaces an existing file** (#74): all three arms,
+when both sides are ordinary files. On ext2 the whole change is **one write** of
+the destination's directory entry, re-pointed at the source's inode, so the name
+never resolves to nothing. FAT32 and exFAT cost *atomicity, not the name* — two
+writes, new entry first, so a reader in between finds two entries and gets one
+of the two files. `/bin/mv` and `/bin/cp` then **refuse an existing destination
+unless `-f`** — a departure from POSIX, deliberate on a system with no undo,
+trash or snapshots, and a refusal rather than a prompt because neither command
+has a keyboard as a pipeline stage, under `cpu`, or from a 9P peer. `fsd` keeps
+POSIX `rename`: a protocol verb has nobody to consult.
+
+### The observers
+
+Four things that reported success while proving nothing, all found this day:
+
+- **`np9p_client.py`'s `stat` sent `NP_READ_FILE`** and printed the byte count
+  as a "size" — a plausible answer from a different verb. `NP_STAT` is the only
+  verb reaching `ancestors_searchable` without `path_allows`, so the one arm
+  most needing a foreign observer was the one the tool could not address. Three
+  probes ran green against a knowingly-buggy guest before this was noticed.
+- **`drive-qemu.py` could not type an empty line**, so every "refuse an empty
+  answer" rule was untestable from the harness — including `useradd`'s, added
+  the same day. A TYPE of `<ENTER>` now sends a bare Enter.
+- **`cargo doc` is noisy for the userland crates** — 39 unresolved links against
+  the kernel's **0** — so a doc comment absorbed by a function inserted above it
+  shipped and was caught by review instead. Recorded as its own roadmap item:
+  the value of a zero baseline is entirely in what it makes visible.
+- **`cat` was the wrong instrument** for a cross-linked-cluster test. Freeing a
+  chain marks the FAT and does not touch the data, so the file still read
+  correctly with the guard removed; only `fsck_msdos` saw `/B.TXT starts with
+  free cluster`.
+
+### Two review rounds on #74
+
+Round 1 found ten, two of which could destroy a file: both FAT arms freed the
+*destination* before writing the new entry (fine against a crash, wrong against
+an ordinary error — a failing insert loses `dst` while `src` is untouched), and
+ext2's replace path freed an inode that two names shared. Both proven by forging
+the condition, since neither this OS nor its tools produce it: a `debugfs` hard
+link for ext2, a hand-patched first-cluster field for FAT.
+
+Round 2, scoped to the repairs, found eight — **four of them prose the reorder
+itself had invalidated**, in the commit whose message was partly about fixing
+stale doc comments — plus the same-inode guard having been applied to one arm of
+three after an argument that covered all three.
+
+Also: a pre-existing gap recorded rather than folded in — `fsd` writes the FAT32
+`FSInfo` free-cluster count at format time and never maintains it, so
+`fsck_msdos` warns after any write. Confirmed pre-existing by a single `echo` on
+`main` with no `mv` involved.
+
 ## v0.16.0 released, and eight follow-ups from reviewing it (2026-09-01)
 
 The per-machine-keypair arc below shipped as **v0.16.0** — the second deliberate

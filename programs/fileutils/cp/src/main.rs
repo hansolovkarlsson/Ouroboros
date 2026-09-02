@@ -4,6 +4,11 @@
 //! via the grant/safecopy bulk path (`fs_read_bulk` -> `fs_write_at`), so a
 //! file of any size copies without holding the whole thing. Ported from the
 //! shell's `cmd_cp` - same self-copy guard and read-before-truncate ordering.
+//!
+//! An existing destination is REFUSED unless `-f` is given, matching `mv`.
+//! Deliberately a refusal and NOT a prompt: asking needs the keyboard, and `cp`
+//! has none as a pipeline stage or under `cpu` on another machine. A guard that
+//! works only in the interactive case is the wrong guard.
 
 #![no_std]
 #![no_main]
@@ -23,13 +28,20 @@ fn arg_or_die(index: u64, buf: &mut [u8], msg: &[u8]) -> usize {
 #[no_mangle]
 #[link_section = ".text.start"]
 pub extern "C" fn _start() -> ! {
-    ulib::usage_if_requested(b"usage: cp <src> <dst>  (copy a file)\r\n");
+    ulib::usage_if_requested(
+        b"usage: cp [-f] <src> <dst>  (copy a file; -f overwrites an existing destination)\r\n",
+    );
+    let Some((force, first)) = ulib::parse_force_opts() else {
+        ulib::con_write(b"cp: unknown option (only -f is accepted; use -- before a name starting with -)\r\n");
+        ulib::exit(1);
+    };
     let mut src_arg_buf = [0u8; PATH_MAX];
-    let src_arg_len = arg_or_die(1, &mut src_arg_buf, b"cp: missing source file argument\r\n");
+    let src_arg_len = arg_or_die(first, &mut src_arg_buf, b"cp: missing source file argument\r\n");
     let src_arg = core::str::from_utf8(&src_arg_buf[..src_arg_len]).unwrap_or("");
 
     let mut dst_arg_buf = [0u8; PATH_MAX];
-    let dst_arg_len = arg_or_die(2, &mut dst_arg_buf, b"cp: missing destination file argument\r\n");
+    let dst_arg_len =
+        arg_or_die(first + 1, &mut dst_arg_buf, b"cp: missing destination file argument\r\n");
     let dst_arg = core::str::from_utf8(&dst_arg_buf[..dst_arg_len]).unwrap_or("");
 
     let mut cwd_buf = [0u8; PATH_MAX];
@@ -66,6 +78,32 @@ pub extern "C" fn _start() -> ! {
         ulib::fs_error("cp", code);
         ulib::exit(1);
     }
+
+    // Both orderings matter here. BEFORE the truncating write below, because
+    // cp destroys the destination as its first act and a refusal that came
+    // after would arrive after the damage. But AFTER the source probe above,
+    // because checking the destination first made `cp nosuchfile existing.txt`
+    // report that the DESTINATION exists - so the user learned the source was
+    // missing only after adding -f. The probe is a read; nothing is touched
+    // either way.
+    if !force {
+        match ulib::fs_presence(dst_path) {
+            ulib::Presence::Present => {
+                ulib::con_write(b"cp: ");
+                ulib::con_write(dst_path.as_bytes());
+                ulib::con_write(b" exists (use -f to overwrite)\r\n");
+                ulib::exit(1);
+            }
+            ulib::Presence::Unknown => {
+                ulib::con_write(b"cp: cannot tell whether ");
+                ulib::con_write(dst_path.as_bytes());
+                ulib::con_write(b" exists (use -f to overwrite anyway)\r\n");
+                ulib::exit(1);
+            }
+            ulib::Presence::Absent => {}
+        }
+    }
+
 
     // Truncate/create dst empty, then stream src into it one chunk at a time.
     // Non-atomic: an interrupted copy leaves dst truncated (a partial copy is a
