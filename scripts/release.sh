@@ -88,6 +88,25 @@ cmd_publish() {
 	local branch; branch="$(git rev-parse --abbrev-ref HEAD)"
 	[ "${branch}" = "main" ] || log "WARNING: publishing from '${branch}', not main"
 
+	# PUSH THE BRANCH BEFORE TAGGING IT. Without this the tag and the GitHub
+	# Release were pushed while the commit they name stayed local, so the
+	# published release pointed at something not on origin/main and the repo
+	# still advertised the previous VERSION. It went unnoticed through several
+	# releases because the next merged PR carried the release commit up
+	# afterwards - the state repaired itself, just not before anyone looked.
+	# RELEASING.md has listed "push main" as the first publish step all along;
+	# the script simply never did it.
+	#
+	# Only for a real branch: the two-arcs-one-branch recipe in RELEASING.md
+	# tags from a DETACHED HEAD on purpose, and there is no branch to push
+	# there.
+	if [ "${branch}" != "HEAD" ]; then
+		log "push ${branch}"
+		git push origin "${branch}"
+	else
+		log "detached HEAD - not pushing a branch (tagging an earlier commit)"
+	fi
+
 	log "annotated tag ${TAG}"
 	git tag -a "${TAG}" -F "${NOTES}"
 

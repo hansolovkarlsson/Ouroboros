@@ -55,7 +55,7 @@ is `0.5.0`.
 | `0.15.0` | 2026-08-31 | per-**user** cluster identity (wire flag day: `AUTHNP01`→`02`) |
 | `0.16.0` | 2026-09-01 | per-**machine** Ed25519 keypairs (wire flag day: `AUTHNP02`→`03`) |
 
-## Three things that have bitten, and how to avoid them
+## Four things that have bitten, and how to avoid them
 
 Learned the hard way, in the order they hurt.
 
@@ -73,7 +73,17 @@ writes an `.hdd` *bundle* whose `DiskDescriptor.xml` references the disk data by
 is self-contained; the notes carry the one-line `prl_disk_tool create` recipe for
 wrapping it locally.
 
-**3. Smoke-test the built image before publishing.** The artifacts are what
+**3. `publish` must push the branch before it tags.** It did not, for the first
+fourteen releases: the tag and the GitHub Release were pushed while the commit
+they name stayed local, so the release pointed at something not on `origin/main`
+and the repository still advertised the *previous* `VERSION`. It escaped notice
+because the next merged PR carried the release commit up afterwards — the state
+repaired itself, just never before someone looked. Found at v0.17.0 by checking
+`git rev-parse HEAD origin/main` after publishing instead of trusting the "published"
+line. `release.sh` now pushes the branch first (and skips that on a detached
+HEAD, which the two-arcs recipe below uses deliberately).
+
+**4. Smoke-test the built image before publishing.** The artifacts are what
 people download, and `release.sh build` is the last point at which a bad one is
 free to fix. Boot `build/esp.img` and check the console reaches a login prompt
 with no faults — `python3 scripts/drive-qemu.py --slirp build/esp.img
