@@ -7,11 +7,18 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/`; 
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
-## The small-gaps parking lot, and the observers that could not see it (2026-09-02)
+## v0.17.0 — the small-gaps parking lot, and the observers that could not see it (2026-09-02)
 
-No arc, no release. Five roadmap ledger entries struck with dates, one feature
-finished, and a recurring finding that turned out to be the day's real subject:
-**several of the tools this project verifies with could not have failed.**
+Released as **v0.17.0**. Not an arc: seven roadmap ledger entries struck with
+dates, one feature finished, two new gaps recorded, and a recurring finding that
+turned out to be the day's real subject — **five of the tools this project
+verifies with could not have failed.**
+
+**A behaviour change worth reading before upgrading**: `mv` and `cp` now refuse
+an existing destination unless `-f` is given. `cp` used to clobber silently, so
+a script relying on that needs the flag. There is **no wire flag day** — a
+v0.16.0 node and a v0.17.0 node talk normally, unlike the previous two
+releases.
 
 **`fsd` asks "does this filesystem model modes?" once, for every verb** (#71).
 `path_allows` short-circuited on a filesystem that records no owner/mode;
@@ -82,6 +89,15 @@ Four things that reported success while proving nothing, all found this day:
   chain marks the FAT and does not touch the data, so the file still read
   correctly with the guard removed; only `fsck_msdos` saw `/B.TXT starts with
   free cluster`.
+- **`release.sh publish` printed "published" without pushing the branch** — the
+  fifth, found while cutting this very release. The tag and the GitHub Release
+  went to the remote while the commit they name stayed local, so v0.17.0 briefly
+  pointed at something not on `origin/main` and the repository still advertised
+  `VERSION 0.16.0`. Wrong for **fourteen releases**, and invisible because the
+  next merged PR carried the release commit up afterwards: the state repaired
+  itself, just never before anyone looked. `RELEASING.md` had listed "push
+  `main`" as the first publish step the whole time, and the prose being right is
+  what made the gap hard to see. Now trap 4, and the script pushes first.
 
 ### Two review rounds on #74
 

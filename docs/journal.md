@@ -97,6 +97,22 @@ content with the cross-link guard removed, because freeing a chain marks the FAT
 and never touches the data. Only `fsck_msdos` saw it. I would have called that
 guard verified on a passing `cat`.
 
+Cut **v0.17.0** at the end of the day — and the release produced the fifth.
+`scripts/release.sh publish` printed its "published" line having created the
+tag, pushed the tag, and cut the GitHub Release, but never pushed `main`. So the
+release pointed at a commit that existed on the remote only via the tag, and the
+repository still said `VERSION 0.16.0`. It has been wrong since the tooling was
+written, and it never showed because the next merged PR carried the release
+commit up afterwards: the state repaired itself, just never while anyone was
+looking. `RELEASING.md` has listed "push main" as the first publish step all
+along, which is exactly what made it invisible — the prose was right, so nobody
+read the script against it.
+
+Caught by running `git rev-parse HEAD origin/main` after the success line rather
+than trusting it. That is the whole of today in one sentence: every one of these
+five was a message that was accurate about what had happened and silent about
+what had not.
+
 ---
 
 ## 2026-09-01 — reviewing the review's repairs, and shipping v0.16.0
