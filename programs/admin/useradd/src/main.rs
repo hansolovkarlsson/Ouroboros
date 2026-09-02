@@ -167,6 +167,14 @@ pub extern "C" fn _start() -> ! {
         if pw[..pwl] != pw2[..pwl2] {
             die(b"useradd: passwords do not match\r\n");
         }
+        // The same rule `passwd` enforces. It matters MORE here: this is the
+        // only writer of an *initial* secret, so without it an account created
+        // by pressing Enter twice is loginable by pressing Enter. Refusing
+        // before prep step 1 means nothing has been committed and there is
+        // nothing to roll back.
+        if pwl == 0 {
+            die(b"useradd: password may not be empty; no account was created\r\n");
+        }
 
         // Hardware entropy if this machine has an RNG; the clock fallback
         // otherwise, said out loud rather than stored quietly (salt_from).

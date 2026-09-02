@@ -1177,14 +1177,10 @@ fn ancestors_searchable(fs: &mut vfs::Filesystem, path: &str, who: &Caller) -> b
 /// can't model permissions passes - the op then runs and fails on its own merits
 /// (not-found, etc.) rather than masquerading as a permission error.
 fn path_allows(fs: &mut vfs::Filesystem, path: &str, who: &Caller, need: u16) -> bool {
-    // ONE stat answers "does this filesystem model permissions at all?" - on
-    // FAT32/exFAT//proc it does not, and the ancestor walk below would run only
-    // to return an inevitable `true`. Ask once, up front.
-    if let Ok(st) = fs.stat("/") {
-        if st.mode.is_none() {
-            return true;
-        }
-    }
+    // The "does this filesystem model permissions at all?" short-circuit used to
+    // live here. It is now the first thing `check_access` asks, because three
+    // verbs (NP_STAT/NP_CHMOD/NP_CHOWN) reach `ancestors_searchable` without
+    // coming through this function and so never got it - see `models_modes`.
     if !ancestors_searchable(fs, path, who) {
         return false;
     }
@@ -1193,6 +1189,21 @@ fn path_allows(fs: &mut vfs::Filesystem, path: &str, who: &Caller, need: u16) ->
             Some(m) => mode_allows(m.mode, m.uid as u32, m.gid as u32, who, need),
             None => true, // filesystem doesn't model owner/mode -> unrestricted
         },
+        Err(_) => true,
+    }
+}
+
+/// Whether the mounted filesystem models owner/mode at all. ext2 does; FAT32,
+/// exFAT and the synthetic `/proc` do not, and on those every permission
+/// question has the same answer, so asking it once here is both the correct
+/// answer and the cheap one.
+///
+/// A filesystem whose root cannot be stat'd is treated as modelling modes: the
+/// per-verb checks below each fail open on their own `Err`, so an unreadable
+/// root must not additionally skip the ancestor walk.
+fn models_modes(fs: &mut vfs::Filesystem) -> bool {
+    match fs.stat("/") {
+        Ok(st) => st.mode.is_some(),
         Err(_) => true,
     }
 }
@@ -1206,6 +1217,15 @@ fn check_access(fs: &mut vfs::Filesystem, who: Option<Caller>, verb: u64, p: &[u
     let uid = who.uid;
     if uid == 0 {
         return true; // root: skip the per-op work entirely
+    }
+    // ONE stat answers "does this filesystem model permissions at all?", for
+    // EVERY verb. It used to sit inside `path_allows`, which meant the three
+    // verbs that call `ancestors_searchable` directly - NP_STAT, NP_CHMOD and
+    // NP_CHOWN - never got it: on FAT32 a non-root `cat ../f` was allowed (it
+    // goes through `path_allows`) while `ls -l ../f` was refused, and every
+    // `ls -l` entry paid an ancestor walk that could only return `true`.
+    if !models_modes(fs) {
+        return true;
     }
     match verb {
         // Stat: the object's own mode is NOT checked - `ls -l` needs metadata for
@@ -1292,7 +1312,6 @@ fn check_access(fs: &mut vfs::Filesystem, who: Option<Caller>, verb: u64, p: &[u
                 _ => true,
             }
         }
-        // chmod: owner-only (root already returned above).
         // chmod: owner-only (root already returned above). These two stat the
         // object directly rather than going through path_allows, so they need
         // the ancestor walk spelled out.
