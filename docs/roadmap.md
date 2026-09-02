@@ -1080,6 +1080,18 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   with a directory; that needs an emptiness check and the parent link counts
   moved, and nothing has asked for it.
 
+  **The commands ask for the intent; the server does not.** `fsd`'s `NP_MV`
+  replaces, which is POSIX `rename` and right for a protocol verb with nobody
+  to consult, while `/bin/mv` refuses an existing destination unless `-f` is
+  given — and `/bin/cp`, which has always clobbered silently, gained the same
+  flag so the two most destructive commands agree. A **refusal, not a prompt**:
+  prompting needs the keyboard, and neither command has one as a pipeline
+  stage, under `cpu` on another machine, or when the request arrives from a 9P
+  peer, so a prompt would guard the interactive case and nothing else. (There
+  is no `isatty` equivalent to branch on, which is why "prompt when we can" was
+  not built.) `> file` redirection still truncates silently — a third case, not
+  addressed here.
+
   **The self-move guard now exists in `fsd` as well as `/bin/mv`.** `mv f f`
   must be a no-op, because the replace path would otherwise free the entry it
   is about to rebuild from — the `cp x x` self-destruct one layer down. The

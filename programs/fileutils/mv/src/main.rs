@@ -4,11 +4,36 @@
 //! content moves), plus the `mv file dir` convenience: if the destination is an
 //! existing directory, the source moves *into* it keeping its basename. Ported
 //! from the shell's `cmd_mv` - same self-move guard.
+//!
+//! An existing destination is REFUSED unless `-f` is given. `fsd` will happily
+//! replace it - that is POSIX `rename`, and it is the right behaviour for a
+//! protocol verb with no user to consult - so the caution lives here, in the
+//! command a person types. Deliberately a refusal and NOT a prompt: asking
+//! needs the keyboard, and `mv` has none when it runs as a pipeline stage, or
+//! under `cpu` on another machine, or when the request arrives from a 9P peer.
+//! A guard that works only in the interactive case is the wrong guard.
 
 #![no_std]
 #![no_main]
 
 use ulib::PATH_MAX;
+
+/// Returns `(force, index_of_first_operand)`. Only `-f` is accepted, and only
+/// before the operands; any other `-...` word is rejected outright.
+fn leading_force_flag() -> (bool, u64) {
+    let mut buf = [0u8; 16];
+    match ulib::arg(1, &mut buf) {
+        Some(n) if n >= 1 && buf[0] == b'-' => {
+            if &buf[..n] == b"-f" {
+                (true, 2)
+            } else {
+                ulib::con_write(b"mv: unknown option (only -f is accepted)\r\n");
+                ulib::exit(1);
+            }
+        }
+        _ => (false, 1),
+    }
+}
 
 fn arg_or_die(index: u64, buf: &mut [u8], msg: &[u8]) -> usize {
     match ulib::arg(index, buf) {
@@ -23,13 +48,19 @@ fn arg_or_die(index: u64, buf: &mut [u8], msg: &[u8]) -> usize {
 #[no_mangle]
 #[link_section = ".text.start"]
 pub extern "C" fn _start() -> ! {
-    ulib::usage_if_requested(b"usage: mv <src> <dst>  (rename/move a file)\r\n");
+    ulib::usage_if_requested(
+        b"usage: mv [-f] <src> <dst>  (rename/move a file; -f replaces an existing destination)\r\n",
+    );
+    // `-f` may lead; everything after it is an operand. An UNKNOWN `-x` is an
+    // error rather than a path: for a destructive command, silently treating a
+    // mistyped flag as the source is the wrong way to be permissive.
+    let (force, first) = leading_force_flag();
     let mut src_arg_buf = [0u8; PATH_MAX];
-    let src_arg_len = arg_or_die(1, &mut src_arg_buf, b"mv: missing source argument\r\n");
+    let src_arg_len = arg_or_die(first, &mut src_arg_buf, b"mv: missing source argument\r\n");
     let src_arg = core::str::from_utf8(&src_arg_buf[..src_arg_len]).unwrap_or("");
 
     let mut dst_arg_buf = [0u8; PATH_MAX];
-    let dst_arg_len = arg_or_die(2, &mut dst_arg_buf, b"mv: missing destination argument\r\n");
+    let dst_arg_len = arg_or_die(first + 1, &mut dst_arg_buf, b"mv: missing destination argument\r\n");
     let dst_arg = core::str::from_utf8(&dst_arg_buf[..dst_arg_len]).unwrap_or("");
 
     let mut cwd_buf = [0u8; PATH_MAX];
@@ -99,6 +130,16 @@ pub extern "C" fn _start() -> ! {
         final_dst_len += base.len();
     }
     let final_dst = core::str::from_utf8(&final_dst_buf[..final_dst_len]).unwrap_or("");
+
+    // Checked AFTER the into-a-directory rewrite above, so `mv a dir/` asks
+    // about `dir/a` - the name that would actually be replaced - and not about
+    // `dir`, which of course exists.
+    if !force && ulib::fs_exists(final_dst) {
+        ulib::con_write(b"mv: ");
+        ulib::con_write(final_dst.as_bytes());
+        ulib::con_write(b" exists (use -f to replace)\r\n");
+        ulib::exit(1);
+    }
 
     let code = ulib::fs_mv(src_path, final_dst);
     if ulib::is_fs_error(code) {

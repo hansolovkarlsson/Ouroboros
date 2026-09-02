@@ -1150,6 +1150,22 @@ pub fn fs_stat(path: &str, info: &mut [u8]) -> u64 {
     )
 }
 
+/// Whether `path` names something that exists.
+///
+/// The check behind `mv`/`cp`'s refusal to replace a destination without `-f`.
+/// It lives here rather than in each command so the two cannot drift into
+/// disagreeing about what "already there" means - they are the same question,
+/// asked about the same destructive act.
+///
+/// An unreadable or unmounted filesystem answers "no", which is the safe
+/// direction for this caller: the operation then goes ahead and fails on its
+/// own merits at the server, rather than being refused with a message about a
+/// file that may not be there.
+pub fn fs_exists(path: &str) -> bool {
+    let mut info = [0u8; ninep_abi::STAT_INFO_LEN];
+    !is_fs_error(fs_stat(path, &mut info))
+}
+
 /// The size field of a stat record (see [`fs_stat`]).
 pub fn stat_size(info: &[u8]) -> u64 {
     u64::from_le_bytes([

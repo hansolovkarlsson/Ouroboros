@@ -2,7 +2,7 @@ NAME
     mv - rename or move a file
 
 SYNOPSIS
-    mv <src> <dst>
+    mv [-f] <src> <dst>
 
 DESCRIPTION
     Renames <src> to <dst>, moving it between directories if needed. Paths
@@ -11,10 +11,26 @@ DESCRIPTION
     If <dst> is an existing DIRECTORY, <src> moves into it and keeps its
     basename (mv notes.txt backup/), as real mv does.
 
-    If <dst> is an existing FILE, it is REPLACED - also as real mv does. The
-    replaced file's contents are gone. Both must be ordinary files: replacing
-    a directory, or moving a directory onto an existing name, is still refused
-    with "already exists".
+    If <dst> is an existing FILE, mv REFUSES unless -f is given:
+
+        mv: /B.TXT exists (use -f to replace)
+
+    With -f the file is replaced and its contents are gone. This differs from
+    POSIX mv, which replaces silently; the choice is deliberate on a system
+    with no undo, no trash and no snapshots. cp behaves the same way.
+
+    It is a refusal and not a prompt, on purpose. Asking needs the keyboard,
+    and mv has none when it runs as a pipeline stage, under cpu on another
+    machine, or when the rename arrives from a 9P peer - so a prompt would
+    work in the interactive case and hang or fail everywhere else.
+
+    The check is made against the name that would actually be replaced, so
+    `mv a dir` reports dir/a rather than dir.
+
+    Both must be ordinary files: replacing a directory, or moving a directory
+    onto an existing name, is refused with "already exists" whatever flags are
+    given. Only -f is accepted, and only before the operands; any other -word
+    is an error rather than a filename.
 
     On ext2 the replacement is very nearly atomic. The whole change is one
     write of the destination's directory entry, re-pointing it at the source's
