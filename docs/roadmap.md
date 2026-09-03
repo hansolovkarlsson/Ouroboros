@@ -1200,10 +1200,28 @@ would otherwise silently shrink into looking like nothing was ever found.
   `stat` op was sending `NP_READ_FILE`. The cost half was reachable all along:
   `ls -l` sends one `NP_STAT` per entry.
 
-- **`check_access` is default-allow** (`_ => true`), so a future `NP_` verb
-  added without an arm here ships unauthenticated. Untouched by the fix above,
-  and the reason it is worth its own line is that the fix removed the entry it
-  used to be a footnote on.
+- ~~**`check_access` is default-allow** (`_ => true`), so a future `NP_` verb
+  added without an arm here ships unauthenticated.~~ — **fixed 2026-09-03.**
+  The default arm now REFUSES. Every verb that can reach `check_access` has an
+  arm (`handle_ninep` only receives `[NP_BASE, NP_LIMIT)`, and the four fid ops
+  return before it), so the arm was **unreachable** — which is precisely why it
+  had to change: nothing exercised it, nothing would have warned, and the
+  change that adds a verb touches `ninep-abi`, not `fsd`.
+
+  Refusing is the safe direction for the same reason the root bypass exists: an
+  enforcement mistake can then only over-restrict a non-root caller, never hand
+  out access. But a verb *silently refused* is still a bug, so a
+  `const _: () = assert!(NP_LIMIT == NP_BASE + 20, ...)` makes the compiler say
+  so — adding a verb to `ninep-abi` now fails the `fsd` build with a message
+  naming `check_access`, rather than being discovered as a mysterious
+  permission denial. Verified by mutation: bumping `NP_LIMIT` produces
+  `error[E0080]: evaluation panicked: a NP_* verb was added or removed…`.
+
+  Enforcement behaviour is unchanged, checked on the ext2 rig (the only
+  filesystem that models modes): a non-root user is refused `ls`, `cat` and
+  `chmod` on a 0700 directory it does not own, allowed to write and read back
+  inside a 0777 one, and the C fid path (`NP_OPEN`/`PREAD`/`PWRITE`/`FSTAT`/
+  `CLUNK`, which bypasses this check by design) still round-trips a file.
 - ~~**A server authorized on the *current* occupant of the sender's slot.**~~
   **Fixed 2026-08-30.** `GET_ID(sender)` answered "who occupies slot N now",
   not "who sent this": a non-root task could `MSG_SEND` (non-blocking), `EXIT`,
