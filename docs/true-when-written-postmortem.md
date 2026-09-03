@@ -225,6 +225,68 @@ drift was caught by luck, days late, three separate times.
 
 ---
 
+## A related shape, earned two days later: the guard that stopped at one sibling
+
+*Added 2026-09-03, after three more instances turned up in the same window.*
+
+Case 4 above records that I wrote a lesson — *repairing one half of a pair is
+not repairing the pair* — and that a review showed the history did not support
+it for the case I had attached it to. That correction stands: the peer was
+adequate when written, and a client grew a dependency.
+
+But the lesson itself turned out to be real. I had simply claimed it before
+earning it, on the wrong evidence. Three genuine instances appeared within two
+days:
+
+- **`ls` alone never called `ulib::fs_error`.** Every other command under
+  `programs/fileutils/` rendered its errors through the shared helper, which
+  distinguishes every `FS_ERR_*` the servers can return; `ls` hardcoded
+  `"no such file or directory"` for all of them. A helper existed and one
+  caller did not use it. (Deliberately no counts here: both the number of
+  commands and the number of codes changed within a day of this being written,
+  and a rotting number in *this* document would be a poor joke.)
+- **`ls` alone never exited non-zero.** One `exit` call in the whole file,
+  `exit(0)`, where every sibling exits 1 on failure. Same command, second
+  instance, found separately.
+- **`net_call` retried `MSG_ERR_DENIED`; `np_remote` and `np_netlocal` did
+  not.** The retry carried a comment naming the hazard — "the brief
+  delegation-not-yet-applied window" — and that comment was *true*, and scoped
+  to the one function it sat in, while the window itself is a property of
+  **every** call to `netd` from a spawned program. Two of the three callers
+  raced. That was the residual half of the flake this project had been
+  recording as a TCP problem for weeks.
+
+The shell's duplicate error table, in the section above, is a fourth of the
+same family — a copy that drifted rather than a caller that abstained, but the
+same failure to travel.
+
+**What connects it to the rest of this document** is scope. `net_call`'s
+comment is a correct statement about a hazard, written in one of the three
+places the hazard applies. Nothing is false; nothing expires. The *claim* is
+local and the *condition* is global, and they diverge in silence exactly the
+way a true-when-written comment does — because the thing that would reveal the
+mismatch is, again, an edit in a different file: the sibling that was written
+later, or the caller that was never revisited.
+
+**The practical form.** A fix lands where the bug was *observed*, not
+everywhere the bug is *possible*, and nothing marks the difference. So when a
+guard, a retry or a shared renderer is added, the question is not "does this
+fix the failure" but **"how many places could have this failure, and how would
+I enumerate them?"** — which is answerable mechanically, and was in
+every case here. `grep -c 'ulib::fs_error' programs/fileutils/*/src/main.rs`
+returned a zero for exactly one command (it returns none now). Listing every
+`MSG_CALL` to `NET_TASK` and asking which of them retried `DENIED` returned two
+of three. Neither took a minute, and neither is prompted by the diff in front
+of you — which is the whole difficulty: the question has to be asked
+deliberately, because nothing in the change you are making raises it.
+
+The fix for the third instance is the one to imitate: the retry now lives in a
+single `net_msg_call` that all three callers share. A fourth caller cannot
+reintroduce it, because there is no longer a version of the code that omits
+it — [`unspellable-postmortem.md`](unspellable-postmortem.md)'s *make the wrong
+thing unspellable, not un-grepped*, applied to a hazard rather than to a
+privilege.
+
 ## What actually worked
 
 Three things, none of them "be more careful".
