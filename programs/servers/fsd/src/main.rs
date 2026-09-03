@@ -1355,9 +1355,33 @@ fn check_access(fs: &mut vfs::Filesystem, who: Option<Caller>, verb: u64, p: &[u
             },
             None => true,
         },
-        _ => true,
+        // DEFAULT-DENY. Every verb that can reach here has an arm above, so
+        // this is unreachable today - which is exactly why it must not be
+        // `true`. It was, and a verb added to `ninep-abi` without an arm here
+        // would have shipped UNAUTHORIZED: no compiler warning, no failing
+        // test, and nothing in the diff adding the verb to point at this file.
+        //
+        // Refusing is the safe direction for the same reason the root bypass
+        // above exists: an enforcement mistake can then only over-restrict a
+        // non-root caller, never hand out access. See
+        // docs/users-and-permissions-postmortem.md.
+        _ => false,
     }
 }
+
+// A verb added to `ninep-abi` must be given an arm in `check_access` above.
+// The default arm now REFUSES, so forgetting is no longer a security hole -
+// but a verb silently refused is still a bug, and nothing else would say so:
+// the change that adds a verb touches `ninep-abi`, not this file, which is the
+// shape that let the hole exist in the first place.
+//
+// So the compiler asks. If this stops compiling, add the arm (or add the verb
+// to the fid-op early-return in `handle_ninep`, which bypasses this check by
+// design), then bump the count.
+const _: () = assert!(
+    ninep_abi::NP_LIMIT == ninep_abi::NP_BASE + 20,
+    "a NP_* verb was added or removed: give it an arm in check_access, then update this count"
+);
 
 /// The old kernel `fs_error_code`, unchanged: maps a `fat32::Error` to
 /// its ABI code. The mount-shape variants map to `FS_ERR_IO` rather
