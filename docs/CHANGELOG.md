@@ -7,6 +7,57 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/`; 
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## v0.18.1 — the remote-read flake, closed (2026-09-03)
+
+Released as **v0.18.1**, a patch on v0.18.0. No new capability; the substance is
+one long-standing intermittent traced and closed. No wire flag day.
+
+**The flake was two faults filed as one, and neither was TCP.** Roadmap frontier
+item 3 had stood for weeks as "roughly one remote op in six fails", with three
+ranked TCP suspects. A packet capture disproved all three: every connection in a
+failing run was healthy, and 42 ops produced 58 of the ~112 connections they
+should have, because the guest **stopped issuing requests** rather than losing
+them.
+
+**Fault A — the supervisor restarted `netd` mid-read.** `supervisor.rs`'s
+passive detector treats a server continuously `Runnable` for `WEDGE_TICKS`
+(128 ticks = 2.56 s) as wedged. Its stated premise — "servers return to
+`Blocked(recv)` in far less than one tick" — was true when a request meant a
+local disk read, and expired when remote mounts landed: `netd` busy-polls a
+non-blocking `recv` for the whole of a TCP round trip. Five sequential round
+trips against a peer that signs in Python is 3.0 s, so `cat` of a 1960-byte file
+failed **7 of 7** while `ls -l` at 2.41 s failed 0 of 7. `netd` then exhausted
+`MAX_RESTARTS`, after which every remote op failed — so "one in six" was never a
+rate. Fixed by letting a supervised server report progress unprompted, over the
+existing `KERNEL_SENDER` ack path (`note_ack` now also clears the passive
+counter); a genuinely wedged server never reaches the line that sends it, so the
+original protection is unchanged.
+
+**Fault B — a capability-delegation race.** The shell `SPAWN`s a program and only
+then `DELEGATE`s it `TO_NET`, so a child reaching `netd` in that window gets
+`MSG_ERR_DENIED`. `ulib::net_call` had absorbed this for years; `np_remote` and
+`np_netlocal` had not, and `MSG_ERR_DENIED` sits above `FS_ERR_MIN`, so it fell
+into the generic arm and surfaced as `FS_ERROR` — `cat: failed`, with no hint
+that a capability was simply not granted yet. On a failing boot the capture held
+**zero ARP and zero TCP**. The retry now lives in one `net_msg_call` all three
+callers share. Proved by forcing the race (a temporary spawn→delegate delay):
+3 of 3 failed without the fix with the peer receiving nothing, 3 of 3 passed
+with it.
+
+**`ls` exits non-zero on failure.** It had exactly one `exit` call — `exit(0)` —
+so a missing file, a permission denial and an unreachable peer all reported
+success, and no script could detect an `ls` failure. It now accumulates a
+failure flag and exits 1, while still listing the operands that worked.
+
+**Also**: `scripts/trace-remote-flake.py`, the harness that found both faults
+(three observers — guest transcript, peer request log, pcap — and a refusal to
+report results unless the peer actually received something); and the
+twenty-ninth postmortem,
+[`true-when-written-postmortem.md`](true-when-written-postmortem.md), on the
+class three of these bugs share — a statement correct when written and falsified
+later by a change in a different file, where no compiler, test or review can see
+it.
+
 ## v0.18.0 — things that were saying the wrong thing (2026-09-03)
 
 Released as **v0.18.0**. Not an arc: six PRs, no new capability, and the

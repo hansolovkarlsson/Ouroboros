@@ -56,6 +56,7 @@ is `0.5.0`.
 | `0.16.0` | 2026-09-01 | per-**machine** Ed25519 keypairs (wire flag day: `AUTHNP02`→`03`) |
 | `0.17.0` | 2026-09-02 | small gaps: `mv` replaces a file (`-f` required, on `cp` too), POSIX classes in `grep` |
 | `0.18.0` | 2026-09-03 | correctness: cross-mount `mv` refused (was a silent local rename), `ls` reports the real error, host peer serves `NP_STAT` |
+| `0.18.1` | 2026-09-03 | patch — the remote-read flake closed (supervisor no longer restarts `netd` mid-read; delegation race), `ls` exits non-zero on failure |
 
 ## Four things that have bitten, and how to avoid them
 
