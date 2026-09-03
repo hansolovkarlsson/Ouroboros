@@ -335,7 +335,24 @@ the microkernel arc itself still leaves open):
    [`testing-qemu.md`](testing-qemu.md) both show `ls /mnt/a` in that recipe,
    and it now does what they say.
 
-3. **The remote-read flake, on both transports.** Roughly one remote op in six
+3. **The remote-read flake — DOMINANT CAUSE FIXED 2026-09-03, a smaller
+   residual still open.** The packet trace below found it was never TCP: the
+   supervisor was restarting `netd` mid-read. That is fixed (a supervised
+   server may now report progress unprompted, so it is not killed for being
+   busy), and the workload that failed **11 of 42** now fails **2 of 42** with
+   zero restarts.
+
+   **What remains open is a genuinely different fault**, and the two were
+   filed as one item for weeks: the residual reports `cat: failed` — a generic
+   error — not the `NO_FS` of an absent server, it survives with the
+   supervisor quiet, and it is the older *"intermittent first-ls on two-VM"*
+   the Phase 2 notes recorded. About **3 in 46** across two runs after the fix
+   (small sample, stated as one) against ~1 in 4 before. The trace harness
+   (`scripts/trace-remote-flake.py`) applies to it unchanged, and the
+   two-node rig is where it was first seen. The original entry, and the trace
+   that split it, follow.
+
+   Originally: roughly one remote op in six
    fails, reported to the caller as a generic failure (`cat: failed`). Originally
    measured on the two-VM socket link; observed again 2026-08-31 on the
    **SLIRP** path of `run-image-9p-client`, one run in two, so it is not specific
@@ -405,8 +422,8 @@ the microkernel arc itself still leaves open):
    filed as one item. The harness that found this (attach `filter-dump`, run a
    mixed cycle, classify every connection) applies there unchanged.
 
-   **A second, smaller finding, and it is what made the first one hard to
-   see:** `ls` calls `ulib::exit(0)` on **every** path — it has exactly one
+   **A second, smaller finding — FIXED 2026-09-03 — and it is what made the
+   first one hard to see:** `ls` called `ulib::exit(0)` on **every** path — it has exactly one
    `exit` in the file — so it reports a missing file, a permission denial or an
    unreachable cluster peer with **exit status 0**. `cat` exits 1 correctly. A
    test harness written for this investigation scored a whole run of failures as

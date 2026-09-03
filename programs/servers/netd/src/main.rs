@@ -759,6 +759,7 @@ fn arp_resolve(mac: &[u8; 6], target: &[u8; 4]) -> Option<[u8; 6]> {
         return None;
     }
 
+    let mut beat = now();
     let deadline = now() + 25; // ~500ms
     let mut frame = [0u8; 1600];
     loop {
@@ -776,6 +777,7 @@ fn arp_resolve(mac: &[u8; 6], target: &[u8; 4]) -> Option<[u8; 6]> {
                 return Some(sha);
             }
         }
+        beat = beat_if_new_tick(now(), beat);
         if now() > deadline {
             return None;
         }
@@ -829,6 +831,7 @@ fn icmp_echo(mac: &[u8; 6], target_mac: &[u8; 6], target: &[u8; 4]) -> bool {
         return false;
     }
 
+    let mut beat = now();
     let deadline = now() + 50; // ~1s
     let mut frame = [0u8; 1600];
     loop {
@@ -837,6 +840,7 @@ fn icmp_echo(mac: &[u8; 6], target_mac: &[u8; 6], target: &[u8; 4]) -> bool {
                 return true;
             }
         }
+        beat = beat_if_new_tick(now(), beat);
         if now() > deadline {
             return false;
         }
@@ -899,6 +903,7 @@ fn resolve_ip(mac: &[u8; 6], host: &[u8]) -> Result<[u8; 4], u64> {
     if send(&frame[..flen]).is_err() {
         return Err(syscall_abi::NET_RESOLVE_TIMEOUT);
     }
+    let mut beat = now();
     let deadline = now() + 40; // ~800ms (kept tight so a fetch's resolve+TCP
                                // total stays under the supervisor wedge threshold)
     let mut rx = [0u8; 1600];
@@ -908,6 +913,7 @@ fn resolve_ip(mac: &[u8; 6], host: &[u8]) -> Result<[u8; 4], u64> {
                 return parse_dns_a(payload).ok_or(syscall_abi::NET_RESOLVE_NXDOMAIN);
             }
         }
+        beat = beat_if_new_tick(now(), beat);
         if now() > deadline {
             return Err(syscall_abi::NET_RESOLVE_TIMEOUT);
         }
@@ -1016,6 +1022,7 @@ fn tcp_get(mac: &[u8; 6], dst_mac: &[u8; 6], target: &[u8; 4], dst_port: u16, re
     let Some(n) = build_tcp(mac, dst_mac, target, src_port, dst_port, isn, 0, TCP_SYN, true, &[], &mut frame) else {
         return (syscall_abi::NET_FETCH_TIMEOUT, 0);
     };
+    let mut beat = now();
     let their_isn = 'handshake: {
         let mut tries = 0u32;
         loop {
@@ -1035,6 +1042,7 @@ fn tcp_get(mac: &[u8; 6], dst_mac: &[u8; 6], target: &[u8; 4], dst_port: u16, re
                         }
                     }
                 }
+                beat = beat_if_new_tick(now(), beat);
                 if now() > deadline {
                     break; // this try timed out - resend the SYN (if tries left)
                 }
@@ -1091,6 +1099,7 @@ fn tcp_get(mac: &[u8; 6], dst_mac: &[u8; 6], target: &[u8; 4], dst_port: u16, re
                 }
             }
         }
+        beat = beat_if_new_tick(now(), beat);
         if got >= resp.len() || now() > deadline {
             break;
         }
@@ -1127,6 +1136,7 @@ fn tcp_run(packed_mac: u64, mac: &[u8; 6], dst_mac: &[u8; 6], target: &[u8; 4], 
     let Some(n) = build_tcp(mac, dst_mac, target, src_port, dst_port, isn, 0, TCP_SYN, true, &[], &mut frame) else {
         return (syscall_abi::NET_FETCH_TIMEOUT, 0);
     };
+    let mut beat = now();
     let their_isn = 'handshake: {
         let mut tries = 0u32;
         loop {
@@ -1150,6 +1160,7 @@ fn tcp_run(packed_mac: u64, mac: &[u8; 6], dst_mac: &[u8; 6], target: &[u8; 4], 
                         on_frame(mac, &rx[..len], conns, dials, auth);
                     }
                 }
+                beat = beat_if_new_tick(now(), beat);
                 if now() > deadline {
                     break;
                 }
@@ -1218,6 +1229,7 @@ fn tcp_run(packed_mac: u64, mac: &[u8; 6], dst_mac: &[u8; 6], target: &[u8; 4], 
         pump_conns(mac, conns);
         // If an export callback was served this pass, `deadline` moved.
         let _ = before_deadline;
+        beat = beat_if_new_tick(now(), beat);
         if fin || got >= resp.len() || now() > deadline {
             break;
         }
@@ -5119,6 +5131,37 @@ fn read_u64(buf: &[u8], off: usize) -> u64 {
 
 fn now() -> u64 {
     syscall(syscall_abi::GET_TICKS, 0)
+}
+
+/// Tell the supervisor we are alive, without being asked.
+///
+/// Every wait below BUSY-POLLS a non-blocking `recv`, so this task stays
+/// `Runnable` for the whole of a network round trip. `supervisor.rs`'s passive
+/// detector restarts a server observed continuously `Runnable` for
+/// `WEDGE_TICKS` (2.56s), and its active ping only pokes a *Blocked* server -
+/// so a busy one is never asked whether it is alive, and was simply killed for
+/// taking too long. A remote `cat` of a 1960-byte file is five sequential round
+/// trips; against a peer that signs in Python (~0.6s each) that is 3.0s, and it
+/// failed 100% of the time with the supervisor restarting `netd` underneath it.
+/// Traced 2026-09-03 - see docs/roadmap.md frontier item 3, where the packet
+/// capture showed every TCP connection healthy and the fault here instead.
+///
+/// The kernel intercepts a `MSG_SEND` to `KERNEL_SENDER` as an ack before any
+/// argument validation (syscall.rs), so this needs no buffer and cannot fail;
+/// `note_ack` is a no-op for a task the supervisor does not manage.
+fn heartbeat() {
+    syscall4(syscall_abi::MSG_SEND, syscall_abi::KERNEL_SENDER, 0, 0, 0);
+}
+
+/// A wait loop's per-tick heartbeat: beats at most once per tick (20ms) rather
+/// than once per spin, which would be a syscall per iteration of a tight loop.
+/// Returns the new tick stamp to carry into the next iteration.
+fn beat_if_new_tick(t: u64, last: u64) -> u64 {
+    if t != last {
+        heartbeat();
+        return t;
+    }
+    last
 }
 
 /// Microseconds since boot - a high-resolution monotonic clock (unlike
