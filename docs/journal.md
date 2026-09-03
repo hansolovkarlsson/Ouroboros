@@ -7,6 +7,55 @@ for the forward plan see [`roadmap.md`](roadmap.md).
 
 ---
 
+## 2026-09-03 (cont.) — widening the parser instead of describing the gap
+
+*(The last of the three `NP_STAT`-review follow-ups, and the shortest. Its one
+lesson is about where I had put the blame.)*
+
+`STAT_FLAG_DIR` — the bit saying a remote entry is a directory — was pinned by
+nothing. `check-wire-constants.py`'s Rust integer pattern wanted `usize` (it is
+`u32`) and both languages' patterns wanted a literal (it is `1 << 0`), so it
+was invisible to **both** sides and adding it to `CHECKED` failed with "not
+found in ninep-abi".
+
+I had written that up, the day before, as *"genuinely unpinnable as this script
+stands"*. That sentence is the finding. **The script's reach is a property of
+the script**, and I had recorded it as a property of the constant — a limit of
+my own tool, described as a fact about the thing it was failing to see. Two
+regex lines per language.
+
+25 → 27 constants: the dir bit, plus `FS_ERROR`, which the server and Rust both
+spelled and the list had simply never mentioned. That second one was found by
+**asking the question mechanically** — which names does a peer spell that Rust
+also declares, and that `CHECKED` omits — rather than by remembering. The
+answer was one name, and nothing would have prompted me to look for it.
+
+### The damage, forged rather than asserted
+
+The roadmap entry claimed a drifted bit would make "every remote directory
+render as a file". Rather than ship that as a prediction, I set the peer to
+write the bit at `1 << 1` and ran the guest:
+
+```
+# ls -l /mnt/a
+-rw-r--r--    -    -         0        -         /mnt/a
+```
+
+The mount **root** is classified as a file, so `ls` prints one zero-byte entry
+and never enumerates it — `HELLO.TXT` and `SUB/` do not appear at all. Exit
+code 0, no error at any layer. Worse than predicted, and the kind of thing
+worth knowing precisely before writing a comment about it.
+
+Both mutation directions are caught, including the one the review named (move
+it in `ninep-abi`, peer keeps writing bit 0). The `FS_ERROR` mutation was
+instructive too: setting it to `(1 << 64) - 2` made it match **no** pattern, so
+instead of a value disagreement it tripped the *dead-entry* guard and the
+per-peer baseline — the two checks that exist for a constant that has stopped
+being looked at, rather than one that is wrong. I expected the third guard and
+got the other two, which is the better outcome.
+
+---
+
 ## 2026-09-03 (cont.) — a status code nobody compared, and the `mv` it was hiding
 
 *(The third follow-up from the `NP_STAT` review. The intended fix was three

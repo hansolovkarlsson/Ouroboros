@@ -311,11 +311,20 @@ the microkernel arc itself still leaves open):
      the copy-then-delete that Unix `mv` does across filesystems is left open;
      refusing is the honest floor, and `cp` already works across a mount.
 
-   - **`STAT_FLAG_DIR` is pinned by nothing.** `check-wire-constants.py`'s Rust
-     regex matches `usize` only (it is `u32`) and both integer regexes want
-     `\d+` (it is `1 << 0`), so the dir bit is invisible to both sides. Move
-     it in `ninep-abi` and the peer keeps writing bit 0, with `make test`
-     reporting agreement having never seen the name.
+   - ~~**`STAT_FLAG_DIR` is pinned by nothing.**~~ — **fixed 2026-09-03** by
+     widening the patterns rather than continuing to describe the gap: the
+     parser's reach had been treated as a property of the constants. Rust
+     `u32` and both languages' `1 << n` shift form are now parsed, so the dir
+     bit is compared (25 → 27 constants, `FS_ERROR` picked up alongside it by
+     asking which names a peer and Rust *both* spell that the list did not
+     mention).
+
+     The damage it now guards was **forged and observed**, not asserted: with
+     the peer writing the bit at `1 << 1`, `ls -l /mnt/a` classifies the mount
+     **root** as a file and prints one zero-byte entry — `HELLO.TXT` and
+     `SUB/` never appear, exit code 0, no error anywhere. Worse than the
+     "directories list as files" this was predicted to cause: the listing
+     silently becomes a one-line file listing.
    - **The fid verbs reach no export at all.** `NP_OPEN`/`NP_PREAD`/
      `NP_PWRITE`/`NP_FSTAT`/`NP_CLUNK` appear in neither Python peer *and* in
      no arm of `netd`'s export, which falls through to `FS_ERROR` — so a C
