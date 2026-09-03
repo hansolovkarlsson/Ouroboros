@@ -256,20 +256,36 @@ the microkernel arc itself still leaves open):
 
    Follow-ups this opened, each its own change:
 
-   - **`ls` renders every `fsd` error as "no such file or directory".**
-     `ls_err` hardcodes that string and `ls` is the only command under
-     `programs/fileutils/` that never calls `ulib::fs_error` (which already
-     renders fifteen codes distinctly). This is a **guest** bug and it stays
-     armed with no Python peer anywhere: over a real ext2 mount an
-     `FS_ERR_PERM` reports "no such file or directory", which is actively
-     misleading in a security context, and so do `FS_ERR_AUTH` (a cluster
-     signature refusal) and a transient `NO_FS` during an `fsd` restart.
+   - ~~**`ls` renders every `fsd` error as "no such file or directory".**~~ —
+     **fixed 2026-09-03.** `ls` was the only command under
+     `programs/fileutils/` that never called `ulib::fs_error`, so over an ext2
+     mount a file you may not read reported as a file that does not exist —
+     and `FS_ERR_AUTH` and a transient `NO_FS` said the same. `fs_error_msg`
+     now exposes the message table so `ls` keeps its `ls: <operand>: <msg>`
+     prefix without a second copy of it. Verified with a negative control (only
+     that change reverted: the denied directory and the missing one print the
+     same string). Fixing it turned up a **second copy** of the table in the
+     shell's `print_fs_error`, already drifted both ways — missing `NO_FS` and
+     `FS_ERR_READ_ONLY`, and an `FS_ERR_INVALID_NAME` message still naming an
+     8.3 restriction that FAT32 long-filename *write* support removed on
+     2026-08-27 (checked: `touch /AVERYLONGFILENAME.TXT` succeeds). Both fixed;
+     **unifying the two tables is still open** — the shell keeps its own fs
+     layer and cannot share `ulib`'s.
    - **The peer answers an absent path with `FS_ERROR`, where `fsd` answers
      `FS_ERR_NOT_FOUND`.** `ulib::fs_presence` branches on exactly that code,
      so an absent remote path reads as `Unknown` rather than `Absent` — which
      is the three-state answer `mv`/`cp`'s overwrite guard exists to consume,
      so `cp` into this mount reports "cannot tell whether … exists" for a path
      the peer knows for certain is absent.
+
+     **Now directly visible**, since `ls` stopped hardcoding its message
+     (2026-09-03): `ls /mnt/a/NOPE` against the Python peer prints
+     `ls: /mnt/a/NOPE: failed` — the `_` arm — where the same command against
+     a real `fsd` mount prints "no such file or directory". Not a regression;
+     the hardcoded string had been *masking* the peer's imprecise answer by
+     being accidentally right for this one case. A command that reports what
+     the server said makes a server that says the wrong thing visible, which
+     is the argument for fixing the peer rather than the message.
    - **`STAT_FLAG_DIR` is pinned by nothing.** `check-wire-constants.py`'s Rust
      regex matches `usize` only (it is `u32`) and both integer regexes want
      `\d+` (it is `1 << 0`), so the dir bit is invisible to both sides. Move

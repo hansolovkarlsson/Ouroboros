@@ -1723,10 +1723,23 @@ fn print_fs_error(cmd: &str, code: u64) {
     print_str(cmd);
     print_str(": ");
     print_line(match code {
+        // This table is a second copy of `ulib::fs_error_msg`'s - the shell
+        // keeps its own fs layer and cannot share it. The two had already
+        // drifted when this was written: these two arms were missing here, so
+        // both fell to the `_` default and printed "failed", and the
+        // INVALID_NAME text below had gone stale in only one of the copies.
+        syscall_abi::NO_FS => "no filesystem mounted this boot",
+        syscall_abi::FS_ERR_READ_ONLY => "read-only filesystem",
         syscall_abi::FS_ERR_NOT_FOUND => "no such file or directory",
         syscall_abi::FS_ERR_NOT_A_FILE => "is a directory",
         syscall_abi::FS_ERR_NOT_A_DIRECTORY => "not a directory",
-        syscall_abi::FS_ERR_INVALID_NAME => "invalid name (must fit this kernel's 8.3 short-name subset)",
+        // NOT "must fit this kernel's 8.3 short-name subset" any more: FAT32
+        // long-filename WRITE support (2026-08-27) creates a name that does not
+        // fit 8.3 by generating a short alias beside the LFN entries. Verified
+        // by `touch /AVERYLONGFILENAME.TXT` on the FAT32 image, which succeeds
+        // and lists under its full name. The message outlived the restriction
+        // it described by a week.
+        syscall_abi::FS_ERR_INVALID_NAME => "invalid name for this filesystem",
         syscall_abi::FS_ERR_ALREADY_EXISTS => "already exists",
         syscall_abi::FS_ERR_NOT_EMPTY => "directory not empty",
         syscall_abi::FS_ERR_IS_ROOT => "can't remove the root directory",

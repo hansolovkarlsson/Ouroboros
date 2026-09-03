@@ -7,6 +7,71 @@ for the forward plan see [`roadmap.md`](roadmap.md).
 
 ---
 
+## 2026-09-03 (cont.) — `ls` stops claiming every failure is a missing file
+
+*(A guest bug, three lines, armed on every filesystem that enforces
+permissions.)*
+
+`ls_err` hardcoded `"no such file or directory"` and printed it for **every**
+`fsd` status. `ls` was the only command under `programs/fileutils/` that never
+called `ulib::fs_error`, which already renders fifteen codes distinctly — cat 1,
+cp 4, mv 3, chmod 3, `ls` **0**.
+
+So on any ext2 mount, a file you are not allowed to read reported as a file that
+does not exist. Demonstrated both ways on the ext2 rig, the only image where
+`fsd` enforces modes:
+
+```
+  before:  $ ls /PRIV      ls: /PRIV: no such file or directory
+           $ ls /NOPE      ls: /NOPE: no such file or directory
+  after:   $ ls /PRIV      ls: /PRIV: permission denied
+           $ ls /NOPE      ls: /NOPE: no such file or directory
+```
+
+The "before" arm is the point: a directory that **is there** and one that **is
+not** were indistinguishable. Misleading in ordinary use and actively so in a
+security context — and the same string covered `FS_ERR_AUTH` (a cluster peer
+refusing a signature) and a transient `NO_FS` while `fsd` restarts.
+
+`ulib::fs_error_msg(code)` splits the message table out of `fs_error` so `ls`
+keeps its richer `ls: <operand>: <msg>` prefix — with several operands the
+message alone does not say which one failed — without carrying a second copy of
+the table. Both failing call sites now pass the code they already had and were
+discarding. The third, `resolve` returning `None`, is a *client-side* path
+problem no `FS_ERR_*` value describes, so it gets its own message rather than a
+code the server never sent.
+
+### A second table, found by looking for the first
+
+Checking whether anything else hardcoded the string turned up the shell's
+`print_fs_error` — not the same defect (it does dispatch on the code) but a
+**second copy** of `ulib`'s table, which the shell keeps because it has its own
+fs layer and cannot share one. The two had already drifted, both ways:
+
+- The shell was missing `NO_FS` and `FS_ERR_READ_ONLY`, so both fell to its `_`
+  default and printed "failed".
+- Its `FS_ERR_INVALID_NAME` read *"invalid name (must fit this kernel's 8.3
+  short-name subset)"* — **false since 2026-08-27**, when FAT32 long-filename
+  *write* support landed and began generating a short alias beside the LFN
+  entries for exactly the names that message says are refused. Verified rather
+  than assumed: `touch /AVERYLONGFILENAME.TXT` on the FAT32 image succeeds and
+  lists under its full name. The message outlived the restriction it described
+  by a week.
+
+Both fixed. Unifying the two tables is a larger change and is not attempted
+here; the copies at least now mention each other.
+
+### One self-inflicted scare
+
+A verification run printed `ls: /PRIV: no such file or directory` *after* the
+fix, which read as a regression. It was the test: `make image-ext2` regenerates
+the ext2 partition from `mke2fs -d`, so the `/PRIV` an earlier boot created was
+gone and `ls` was correctly reporting a missing directory. **On a rig whose disk
+is rebuilt under it, the setup steps must be in the same run as the assertion.**
+Worth recording because the failure looks exactly like the bug returning.
+
+---
+
 ## 2026-09-03 (cont.) — the `ls`-of-a-remote-mount bug, and a review that inverted my account of it
 
 *(Roadmap frontier item 2, open since 2026-08-31. Fixed in the host test peer.

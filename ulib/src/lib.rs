@@ -1546,7 +1546,20 @@ pub fn is_fs_error(code: u64) -> bool {
 pub fn fs_error(cmd: &str, code: u64) {
     con_write(cmd.as_bytes());
     con_write(b": ");
-    let msg: &[u8] = match code {
+    con_write(fs_error_msg(code));
+    con_write(b"\r\n");
+}
+
+/// The message [`fs_error`] would print for `code`, without printing it.
+///
+/// Split out so a command that wants a RICHER prefix than `<cmd>: ` does not
+/// have to carry its own copy of the table - `ls` prints
+/// `ls: <operand>: <msg>`, because with several operands the message alone
+/// does not say which one failed. It hardcoded "no such file or directory"
+/// for every code until 2026-09-03, so an ext2 `FS_ERR_PERM` reported a
+/// missing file; that is the drift this exists to prevent repeating.
+pub fn fs_error_msg(code: u64) -> &'static [u8] {
+    match code {
         syscall_abi::NO_FS => b"no filesystem mounted this boot",
         syscall_abi::FS_ERR_NOT_FOUND => b"no such file or directory",
         syscall_abi::FS_ERR_NOT_A_FILE => b"is a directory",
@@ -1562,9 +1575,7 @@ pub fn fs_error(cmd: &str, code: u64) {
         syscall_abi::FS_ERR_IO => b"device I/O error",
         syscall_abi::FS_ERR_AUTH => b"cluster authentication failed (peer not authorized, or bad key/signature)",
         _ => b"failed",
-    };
-    con_write(msg);
-    con_write(b"\r\n");
+    }
 }
 
 // ---------------------------------------------------------------------------

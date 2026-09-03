@@ -106,13 +106,14 @@ pub extern "C" fn _start() -> ! {
             let argstr = core::str::from_utf8(arg).unwrap_or("");
             let mut pb = [0u8; ulib::PATH_MAX];
             let Some(pl) = ulib::resolve(cwd, argstr, &mut pb) else {
-                ls_err(argstr);
+                ls_err_msg(argstr, b"invalid or too-long path");
                 continue;
             };
             let resolved = core::str::from_utf8(&pb[..pl]).unwrap_or("");
             let mut info = [0u8; ninep_abi::STAT_INFO_LEN];
-            if ulib::is_fs_error(ulib::fs_stat(resolved, &mut info)) {
-                ls_err(argstr);
+            let st = ulib::fs_stat(resolved, &mut info);
+            if ulib::is_fs_error(st) {
+                ls_err(argstr, st);
                 continue;
             }
             if ulib::stat_is_dir(&info) {
@@ -152,7 +153,7 @@ pub extern "C" fn _start() -> ! {
         let mut listing = [0u8; 512];
         let n = ulib::fs_list_dir(dirpath, &mut listing);
         if ulib::is_fs_error(n) {
-            ls_err(argstr);
+            ls_err(argstr, n);
             continue;
         }
         show_listing(target, dirpath, &listing[..n as usize], all, all, long);
@@ -162,11 +163,33 @@ pub extern "C" fn _start() -> ! {
     ulib::exit(0);
 }
 
-/// Print `ls: <arg>: no such file or directory` for a bad operand.
-fn ls_err(arg: &str) {
+/// Print `ls: <arg>: <what actually went wrong>` for a failed operand.
+///
+/// The message comes from [`ulib::fs_error_msg`], the same table every other
+/// command under `programs/fileutils/` renders through. This used to hardcode
+/// "no such file or directory" for EVERY code, which made `ls` the one
+/// fileutil that could not report what happened: an ext2 `FS_ERR_PERM` said
+/// the file was missing (actively misleading, since the file is there and the
+/// caller is not allowed it), an `FS_ERR_AUTH` from a cluster peer said the
+/// same, and so did a transient `NO_FS` while `fsd` was restarting. It also
+/// cost a debugging session on 2026-09-03, where a remote mount's unserved
+/// `NP_STAT` surfaced as a message about a path whose path was fine - see
+/// `docs/journal.md`.
+fn ls_err(arg: &str, code: u64) {
+    ls_err_msg(arg, ulib::fs_error_msg(code));
+}
+
+/// `ls_err` for a failure that is NOT an `fsd` status - the message is given
+/// directly. Kept separate rather than inventing a code, because `resolve`
+/// failing is a client-side path problem (too long to hold, or unresolvable
+/// against the cwd) and no `FS_ERR_*` value describes it; folding it into one
+/// would mean picking a code the server never sent.
+fn ls_err_msg(arg: &str, msg: &[u8]) {
     ulib::con_write(b"ls: ");
     ulib::con_write(arg.as_bytes());
-    ulib::con_write(b": no such file or directory\r\n");
+    ulib::con_write(b": ");
+    ulib::con_write(msg);
+    ulib::con_write(b"\r\n");
 }
 
 /// Collect a `name\n`/`name/\n` listing into entries, sort by name, and display
