@@ -20,6 +20,19 @@ Then in the guest (SLIRP maps the host to 10.0.2.2):
     cat /mnt/a/HELLO.TXT
     ls /mnt/a/SUB
     cat /mnt/a/SUB/NOTE.TXT
+
+VERBS SERVED, stated because the gap is otherwise invisible: NP_READDIR,
+NP_STAT, NP_READ / NP_READ_AT, NP_READ_FILE. Every other verb - including all
+of the mutating ones - gets FS_ERROR, since the export is read-only.
+
+An unimplemented verb does NOT surface as "unsupported" at the guest. It
+surfaces as whatever the *command* makes of FS_ERROR, which is usually "no such
+file or directory" - a message about a path, for a request whose path was fine.
+That cost a real debugging session: `ls` stats its target before listing it, so
+a missing NP_STAT made every `ls` of a remote mount fail while `cat` under the
+same mount worked, and the symptom was recorded in the roadmap for days as a
+guest-side path-resolution bug. If a guest command fails here for a reason that
+makes no sense, check this list before suspecting the guest.
 """
 import hashlib
 import os
@@ -32,6 +45,20 @@ NP_READDIR = NP_BASE + 0
 NP_READ_FILE = NP_BASE + 1
 NP_READ = NP_BASE + 2
 NP_READ_AT = NP_BASE + 10
+NP_STAT = NP_BASE + 12
+
+# `NP_STAT`'s reply: status = STAT_INFO_LEN, payload = a fixed 27-byte StatInfo.
+# The offsets are `ninep-abi`'s STAT_* constants; keep them in step with it.
+# `ls` STATS ITS TARGET BEFORE LISTING IT, so a peer without this verb makes
+# every `ls` of a remote mount fail as "no such file or directory" while `cat`
+# of a file under the same mount works - which is exactly how the bug this
+# implements away was recorded, as a path-resolution fault in the guest.
+STAT_INFO_LEN = 27
+STAT_SIZE_OFF = 0
+STAT_FLAGS_OFF = 8
+STAT_TIMEVALID_OFF = 19
+STAT_MODEVALID_OFF = 26
+STAT_FLAG_DIR = 1 << 0
 
 FS_ERROR = (1 << 64) - 1
 NO_FS = (1 << 64) - 2
@@ -217,6 +244,29 @@ def listing(path):
     return out
 
 
+def stat_info(path):
+    """A 27-byte StatInfo for a path in the served tree, or None if absent.
+
+    `time` and `mode` are left INVALID (their valid-flag bytes stay 0), which
+    is what `fsd` itself reports for a filesystem that cannot model them
+    (FAT32, exFAT, `/proc`) - so `ls -l` shows a size and a type here and
+    omits the columns this peer has no answer for, rather than inventing one.
+    """
+    if path in DIRS:
+        size, is_dir = 0, True
+    elif path in FILES:
+        size, is_dir = len(FILES[path]), False
+    else:
+        return None
+    info = bytearray(STAT_INFO_LEN)
+    info[STAT_SIZE_OFF:STAT_SIZE_OFF + 8] = struct.pack("<Q", size)
+    flags = STAT_FLAG_DIR if is_dir else 0
+    info[STAT_FLAGS_OFF:STAT_FLAGS_OFF + 4] = struct.pack("<I", flags)
+    info[STAT_TIMEVALID_OFF] = 0
+    info[STAT_MODEVALID_OFF] = 0
+    return bytes(info)
+
+
 def read_frame(sock):
     """Read one [u32 len][body] frame; return body bytes (or None on EOF)."""
     hdr = b""
@@ -273,6 +323,12 @@ def serve_request(body):
         want = a1
         out = out[:want]
         return sealed(len(out), out)
+
+    if verb == NP_STAT:
+        info = stat_info(path)
+        if info is None:
+            return sealed(FS_ERROR)
+        return sealed(STAT_INFO_LEN, info)
 
     if verb in (NP_READ, NP_READ_AT):
         data = FILES.get(path)

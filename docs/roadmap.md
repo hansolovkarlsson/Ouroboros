@@ -200,16 +200,44 @@ the microkernel arc itself still leaves open):
    away the guarantee. Split and ownership are independent choices, and only
    the second one is the problem.
 
-2. **`ls` of a remote-mount ROOT fails against the host Python peer.** On the
-   `run-image-9p-client` rig, `mount -r 10.0.2.2:5641 /mnt/a` then `ls /mnt/a`
-   reports "no such file or directory", while `cat /mnt/a/HELLO.TXT` works and
-   `readdir /` from the host client works. So it is the guest's resolution of the
-   mount *root* — probably an empty path where the server expects `/` — not the
-   transport or the server. **Pre-existing**, confirmed by running the same steps
-   against `main` before per-machine keys existed; found while restoring that
-   rig as the foreign observer for the client half. `CLAUDE.md` and
-   `docs/testing-qemu.md` both show `ls /mnt/a` in that recipe, so the docs
-   promise something that has not worked for some time.
+2. ~~**`ls` of a remote mount fails against the host Python peer.**~~ —
+   **fixed 2026-09-03**, and **the diagnosis recorded here was wrong in both of
+   its parts**, which is worth more than the fix.
+
+   It was recorded as "the guest's resolution of the mount *root* — probably an
+   empty path where the server expects `/`". The guest sends **`/`**, correctly;
+   `ninep-abi`'s `resolve_ns` has an explicit guard for that case (target `"/"`
+   with an empty remainder). And it was never about the root: `ls /mnt/a/SUB`
+   failed identically, which the original note did not test.
+
+   The actual cause: **`ls` stats its target before listing it, and
+   `scripts/np9p_server.py` implemented no `NP_STAT` verb at all.** The peer
+   returned `FS_ERROR` for an unknown verb, and `ls` renders that as "no such
+   file or directory" — a message that describes a path problem, for a request
+   whose path was fine. `cat` worked throughout because it needs only
+   `NP_READ_AT`. Fixed by implementing the verb in the peer (43 lines): a
+   27-byte `StatInfo` with size and the dir flag, and time/mode left
+   *invalid*, which is what `fsd` itself reports for a filesystem that cannot
+   model them.
+
+   **This is `blind-instruments-postmortem.md`'s finding, one file over.** That
+   postmortem's lead item is `np9p_client.py`'s `stat`, which sent
+   `NP_READ_FILE` and printed the byte count as a "size". The client was
+   repaired on 2026-09-02 — and **nobody asked whether the server half of the
+   same mirrored pair had a `stat` at all.** It did not. A fix applied to one
+   half of a pair of foreign observers, on the day the lesson was about foreign
+   observers being unchecked.
+
+   Two things the fix did *not* turn out to be, both checked rather than
+   assumed: `tree /mnt/a` and `cp /mnt/a/SUB/NOTE.TXT /COPY.TXT` were
+   **already working** against the unfixed peer — neither calls `fs_stat`
+   (`tree` reads the trailing `/` out of the readdir format), so `ls` was the
+   only casualty. I had expected to widen the finding to both and the negative
+   control said otherwise.
+
+   The docs needed no correction in the end: `CLAUDE.md` and
+   `docs/testing-qemu.md` both show `ls /mnt/a` in that recipe, and it now does
+   what they say.
 
 3. **The remote-read flake, on both transports.** Roughly one remote op in six
    fails, reported to the caller as a generic failure (`cat: failed`). Originally

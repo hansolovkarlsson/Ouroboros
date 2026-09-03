@@ -59,12 +59,22 @@ CHECKED = [
     "NP_NAME_LEN",
     "NP_PUBKEY_LEN",
     "NP_SIG_LEN",
+    # Not an auth field, but the same hazard: a fixed-width record whose length
+    # is hardcoded in all three implementations. A wrong value here does not
+    # fail a signature, it silently misparses every `ls -l` over a remote mount.
+    "STAT_INFO_LEN",
 ]
 
 # NOT checked: NP_MAC_LEN. Neither peer names it - both write the literal 32 at
 # each use - so there is nothing to compare. Listing it anyway would trip this
 # script's own "dead entry" guard, which is the correct outcome for a name that
 # does not exist on one side, and the wrong way to record a nit about the peers.
+#
+# NOT checked either: STAT_INFO_LEN's field OFFSETS (STAT_SIZE_OFF and the
+# rest). Only np9p_server.py spells them - it is the only peer that BUILDS a
+# StatInfo, the client just forwards the bytes - so there is no second
+# declaration to compare, same as NP_MAC_LEN above. The record's LENGTH is
+# checked, which is the value whose drift breaks parsing outright.
 
 
 # How many of CHECKED each peer is known to spell TODAY. A bare "more than
@@ -74,14 +84,14 @@ CHECKED = [
 # what it is named for. Confirmed, which is why these are numbers and not a
 # truthiness test. Raise a baseline when a peer learns a new constant.
 PEER_BASELINE = {
-    "np9p_client.py": 6,
+    "np9p_client.py": 7,
     # Was 4, which BAKED THE GAP IN AS CORRECT: the server spelled the
     # public-key length with a private name and the nonce as a bare literal, so
     # the two fields deciding which guests it serves were skipped - and the
     # reduced count was recorded as expected. Both now use the shared names; the
     # floor rises with them, or the rename could be undone without this
     # noticing.
-    "np9p_server.py": 6,
+    "np9p_server.py": 7,
 }
 
 

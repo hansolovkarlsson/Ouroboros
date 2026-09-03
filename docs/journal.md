@@ -7,7 +7,87 @@ for the forward plan see [`roadmap.md`](roadmap.md).
 
 ---
 
-## 2026-09-03 — shrinking `CLAUDE.md`, and what the move exposed
+## 2026-09-03 (afternoon) — the `ls`-of-a-remote-mount bug, which was in the observer
+
+*(Roadmap frontier item 2, open since 2026-08-31. Fixed in 43 lines of Python.
+The fix is not the interesting part: the diagnosis in the roadmap was wrong in
+both of its parts, and the defect was in a foreign observer repaired the day
+before for the same missing verb.)*
+
+The symptom, exactly as recorded: on the `run-image-9p-client` rig,
+`mount -r 10.0.2.2:5641 /mnt/a` succeeds, `cat /mnt/a/HELLO.TXT` works, and
+`ls /mnt/a` says **"no such file or directory"**. The roadmap's note read: *"So
+it is the guest's resolution of the mount root — probably an empty path where
+the server expects `/`."*
+
+I nearly went and read `resolve_ns` looking for that empty path. It has an
+explicit guard for exactly that case — `target "/" with empty after` — so either
+the guard was broken or the hypothesis was. **Run it, don't read it.** I stood
+the host peer up behind a logging wrapper that printed the decoded verb and path
+of every request, and drove the guest through the documented recipe.
+
+Two things came back at once:
+
+```
+  REQ 0x10c (UNKNOWN) path=b'/'      pathlen=1  served=NO
+  REQ 0x10c (UNKNOWN) path=b'/SUB'   pathlen=4  served=NO
+  REQ READ            path=b'/SUB/NOTE.TXT'     served=yes
+```
+
+The guest sends **`/`**, correctly. And **`/SUB` fails identically** — so it was
+never about the mount root, which the original note had simply not tested.
+`0x10c` is `NP_BASE + 12` = **`NP_STAT`**, and `scripts/np9p_server.py`
+implemented no such verb. `ls` stats its target before listing it; the peer
+returned `FS_ERROR` for the unknown verb; and `ls` renders `FS_ERROR` as "no
+such file or directory". **A message about a path, for a request whose path was
+fine** — which is why it was filed as a path bug and stayed filed that way.
+
+### The part that matters
+
+This is [`blind-instruments-postmortem.md`](blind-instruments-postmortem.md)'s
+lead finding, one file over. That postmortem — written *the day before* — opens
+with `np9p_client.py`'s `stat`, which sent `NP_READ_FILE` and printed the byte
+count as a "size", so three probes ran green against a guest known to have a
+bug. The client was repaired on 2026-09-02.
+
+**Nobody asked whether the server half of the same mirrored pair had a `stat` at
+all.** It did not. The two scripts are each other's mirror by design and are
+described that way in both docstrings; the repair went to one of them, on the
+day whose lesson was that the observer is a check too. *Repairing one half of a
+pair is not repairing the pair.*
+
+The peer's docstring, meanwhile, had listed `ls /mnt/a` in its usage example the
+whole time. A correct description of an incorrect implementation, which
+`blind-instruments` also names as the harder kind to catch — it was right about
+what the tool was *for*, and nothing was checking that against what it could
+answer. It now states the four verbs it serves, and says plainly that an
+unimplemented verb surfaces at the guest as whatever the *command* makes of
+`FS_ERROR`, so the next gap is visible as a gap.
+
+### The negative control that corrected me
+
+Having found a missing stat, I assumed `tree` and `cp` across a remote mount
+were broken too, and drafted the roadmap entry saying so. Then I reverted the
+peer to `main` and ran them: **both already worked.** Neither calls `fs_stat` —
+`tree` gets the directory flag from the trailing `/` in the readdir format, and
+`cp` only reads. `ls` was the sole casualty.
+
+So the widening was wrong, and the only reason it did not ship in the roadmap is
+that reverting one file and booting twice is cheap. Both arms of the comparison
+are the same image and the same steps.
+
+Verified after the fix: `ls /mnt/a` lists `HELLO.TXT  SUB/`; `ls /mnt/a/SUB`
+lists `NOTE.TXT`; `ls -l` reports 1960 bytes for `HELLO.TXT` (40 x 49, so the
+size field decodes correctly) with `-` in the columns the peer has no answer
+for; **`ls /mnt/a/NOPE` still fails**, which is what proves the new arm can say
+no; `cat` unaffected; zero aborts in QEMU's own trace. The synthesized
+`-rw-r--r--` in `ls -l` is not from this change — a local FAT32 `ls -l /` prints
+the same, because `mode_valid == 0` is the normal answer for FAT32, exFAT and
+`/proc` too.
+
+---
+
+## 2026-09-03 (morning) — shrinking `CLAUDE.md`, and what the move exposed
 
 *(No code. `CLAUDE.md` had reached 197,771 bytes — read in full at the start of
 every session, whether or not any of it was relevant. It is now 50,003, and
