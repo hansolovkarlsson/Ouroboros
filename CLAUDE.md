@@ -33,7 +33,7 @@ are the ones worth having in mind before you open it:
 - **`docs/roadmap-completed.md`** — the finished arcs that used to live in
   `roadmap.md`, moved out so the roadmap stays forward-looking (the
   *plan-shaped* companion to `CHANGELOG.md`'s condensed milestone log).
-- **The postmortems under `docs/`** (twenty-eight of them) — the design, bug
+- **The postmortems under `docs/`** (twenty-nine of them) — the design, bug
   and process retrospectives: *the traps already hit and the lessons
   learned*. Read the relevant one before reworking a subsystem.
   `docs/README.md` indexes all of them with a full annotation each, and every
@@ -51,6 +51,10 @@ are the ones worth having in mind before you open it:
     un-grepped*: a required parameter beats an opt-in wrapper.
   - `review-and-split-postmortem.md` — *a green signal is a claim, not
     evidence*, and *a diff too big to review is too big to fix*.
+  - `true-when-written-postmortem.md` — *the comment was true when it was
+    written; that is the problem*. A claim that guards behaviour is a check
+    nobody has written yet, and the edit that falsifies it is always in
+    another file — so compiler, tests and review all miss it.
 - **`docs/journal.md`** — a chronological dev-log (narrative "what and why
   each day"), a lighter companion to the milestone-oriented `CHANGELOG.md`.
 - **`docs/README.md`** — the annotated index of every document under `docs/`;
