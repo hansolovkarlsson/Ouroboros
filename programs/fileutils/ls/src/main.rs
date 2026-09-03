@@ -97,6 +97,7 @@ pub extern "C" fn _start() -> ! {
     let mut diroffs = [(0u16, 0u16); MAX_PATHS];
     let mut ndirs = 0usize;
 
+    let mut failed = false;
     if nargs == 0 {
         diroffs[0] = (0, 0); // len 0 = the cwd
         ndirs = 1;
@@ -107,6 +108,7 @@ pub extern "C" fn _start() -> ! {
             let mut pb = [0u8; ulib::PATH_MAX];
             let Some(pl) = ulib::resolve(cwd, argstr, &mut pb) else {
                 ls_err_msg(argstr, b"invalid or too-long path");
+                failed = true;
                 continue;
             };
             let resolved = core::str::from_utf8(&pb[..pl]).unwrap_or("");
@@ -114,6 +116,7 @@ pub extern "C" fn _start() -> ! {
             let st = ulib::fs_stat(resolved, &mut info);
             if ulib::is_fs_error(st) {
                 ls_err(argstr, st);
+                failed = true;
                 continue;
             }
             if ulib::stat_is_dir(&info) {
@@ -154,13 +157,24 @@ pub extern "C" fn _start() -> ! {
         let n = ulib::fs_list_dir(dirpath, &mut listing);
         if ulib::is_fs_error(n) {
             ls_err(argstr, n);
+            failed = true;
             continue;
         }
         show_listing(target, dirpath, &listing[..n as usize], all, all, long);
     }
 
     ulib::end_of_stream(target);
-    ulib::exit(0);
+    // EXIT 1 IF ANY OPERAND FAILED. `ls` used to have exactly one `exit` call -
+    // `exit(0)` - so it reported a missing file, a permission denial and an
+    // unreachable cluster peer all with status 0, and no script could detect an
+    // `ls` failure; every other command under `programs/fileutils/` exits 1 on
+    // error. Found 2026-09-03 when a test harness scored a whole run of
+    // failures as passes because of it (docs/roadmap.md frontier item 3).
+    //
+    // Accumulated rather than returned early, because the loops deliberately
+    // CONTINUE past a bad operand - `ls good bad` must still list `good`, which
+    // is what every Unix `ls` does, and then exit non-zero.
+    ulib::exit(if failed { 1 } else { 0 });
 }
 
 /// Print `ls: <arg>: <what actually went wrong>` for a failed operand.

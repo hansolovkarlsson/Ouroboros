@@ -7,6 +7,90 @@ for the forward plan see [`roadmap.md`](roadmap.md).
 
 ---
 
+## 2026-09-03 (cont.) — the supervisor was killing netd mid-read
+
+*(The fix for what the packet trace found, plus the `ls` exit code that made it
+hard to see. Two changes, one kernel and one server.)*
+
+The trace showed every TCP connection healthy and `netd` being **restarted by
+its own supervisor** during a multi-chunk remote read. The mechanism, once
+found, is a clean case of an expired premise — the third today.
+
+`supervisor.rs` has two liveness regimes: a *Blocked* server gets an active
+ping and must ack it; a *Runnable* server is judged by the passive
+`WEDGE_TICKS` counter, 128 ticks = **2.56 s** of continuous runnability. That
+split is sound, and its doc states the assumption it rests on:
+
+> *"safely above any real request (servers return to `Blocked(recv)` in far
+> less than one tick)"*
+
+True when a request meant a local disk read. **`netd` busy-polls a non-blocking
+`recv` for the whole of a TCP round trip**, so it is `Runnable` throughout — and
+against a peer that signs in Python, five sequential round trips is 3.0 s. Over
+the line, every time.
+
+And the active ping could not save it: `poll_ping` returns early for a
+non-blocked server, on the reasoning that "a Runnable *wedge* is the passive
+heartbeat's job". So a busy server is **never asked** whether it is alive, and
+is killed for taking too long.
+
+### The fix, and why it is this one
+
+The tempting fix is to raise `WEDGE_TICKS`. That is not a fix — any threshold
+is exceeded by a slow enough peer, and the number would have to encode
+assumptions about a machine at the other end of a network.
+
+Instead: **a supervised server may say it is alive, unprompted.** The mechanism
+already existed — the kernel intercepts a `MSG_SEND` to `KERNEL_SENDER` as an
+ack before any argument validation, so it needs no buffer and cannot fail.
+`note_ack` now also clears the passive counter, which promotes the ack from
+"the ping was answered" to "this server is making progress", and `netd` beats
+once per tick inside each of its seven wait loops.
+
+What it deliberately keeps: a genuinely wedged server never reaches the line
+that sends the beat, so the passive arm still catches exactly the case it was
+written for. What it stops doing is punishing a server for being busy.
+
+### Two things the edit itself got wrong first
+
+**A substring replace double-patched two loops.** The pattern for the deeply
+indented sites was a superstring of the pattern for the shallow ones, so the
+deep loops got the beat line twice, at the wrong indentation. Caught by reading
+the result rather than trusting the replacement count — which was 7 where the
+grep had said 5, and that discrepancy was the tell.
+
+**The first pass missed the loops that mattered.** Five sites matched
+`if now() > deadline {`; the two **reply** waits read
+`if got >= resp.len() || now() > deadline {`, a different shape. Those are the
+loops that span the peer's think time — the handshake completes in
+milliseconds. Fixing only the five would have left the bug and produced a
+convincing-looking patch. Now asserted mechanically: every line containing
+`now() > deadline` must have a beat on the line above, 7 of 7.
+
+### Result
+
+The workload that failed **11 of 42** now fails **2 of 42**, with the peer
+serving 105 requests where it had served 59 — and *zero* wedge or restart lines
+in the kernel log, down from three restarts and an exhausted budget. The
+residual is a different fault: it reports `cat: failed`, not the `NO_FS` of an
+absent server, and it is the older "intermittent first-op" the roadmap recorded
+on the two-node rig. About 3 in 46 across both runs, small sample, stated as
+one.
+
+### And the `ls` exit code
+
+`ls` had exactly one `exit` call — `exit(0)` — so a missing file, a permission
+denial and an unreachable cluster peer all reported success. Every other command
+under `programs/fileutils/` exits 1. It now accumulates a failure flag and exits
+1 if any operand failed, while still listing the operands that worked, which is
+what every Unix `ls` does.
+
+A local, not a `static mut`: all three failure sites are in one function, so the
+mutable-statics question does not arise. `ls /mnt/a/NOPE` now exits 1, verified
+in the same run as the wedge fix.
+
+---
+
 ## 2026-09-03 (cont.) — the twenty-ninth postmortem: true when written
 
 *(No code. Reading back the day's four fixes and finding they were one fix.)*

@@ -325,6 +325,26 @@ pub fn heartbeat(slot: usize, blocked: bool) -> bool {
 pub fn note_ack(slot: usize) {
     let reg = unsafe { &mut *REGISTRY.0.get() };
     if let Some(e) = reg.iter_mut().find(|e| e.slot == Some(slot)) {
+        // ALSO clears the PASSIVE counter, which makes this more than "the
+        // ping was answered": it is "this server is alive", from the only
+        // party that knows. A server may send it UNPROMPTED, and `netd` does
+        // - see the wedge story below.
+        //
+        // Why that is needed: `poll_ping` only pings a *Blocked* server, so a
+        // server that is legitimately busy for a long time is never asked, and
+        // the passive `WEDGE_TICKS` arm judges it alone. That arm's premise -
+        // "servers return to Blocked(recv) in far less than one tick" - was
+        // true when a request meant a local disk read, and stopped being true
+        // when remote mounts landed: `netd` busy-polls a non-blocking `recv`
+        // for the whole of a TCP round trip, so a multi-chunk remote read
+        // against a slow peer kept it `Runnable` past 2.56s and the supervisor
+        // restarted it MID-READ. Traced 2026-09-03; see docs/roadmap.md
+        // frontier item 3.
+        //
+        // A genuinely wedged server never reaches the line that sends this, so
+        // the passive arm still catches the case it was written for. What it
+        // stops doing is punishing a server for being busy.
+        e.runnable_ticks = 0;
         e.ping_outstanding = false;
         e.ping_wait = 0;
         e.idle_ticks = 0;
