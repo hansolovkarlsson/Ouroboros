@@ -7,6 +7,80 @@ for the forward plan see [`roadmap.md`](roadmap.md).
 
 ---
 
+## 2026-09-03 — shrinking `CLAUDE.md`, and what the move exposed
+
+*(No code. `CLAUDE.md` had reached 197,771 bytes — read in full at the start of
+every session, whether or not any of it was relevant. It is now 50,003, and
+nothing was deleted from the repository.)*
+
+The file's bulk was concentrated: `## Structure` alone was 147KB of it, 75%.
+But length was not really the problem. **The same prose was in three places.**
+Take the cluster-auth arc: a 1.6KB abstract in `Structure`'s `docs/` block, a
+second description of the same thing inside a 13.9KB bullet 700 lines earlier,
+and the real one at the top of `cluster-auth-postmortem.md` — which, like every
+postmortem here, already opens with a title, an italic abstract and its spine in
+a blockquote. Two copies of an abstract the file itself writes better.
+
+Two moves, both verbatim:
+
+- The annotated `docs/` index (55KB) became [`README.md`](README.md). Moving it
+  next to the documents it indexes should keep it current, since it can now be
+  edited in the same commit as the doc it describes. It immediately gained the
+  nine files it had drifted away from: `RELEASING.md`,
+  `microkernel-comparison.md`, `roadmap-cluster-phase{0..4}.md`,
+  `release-notes/`, and the generated site.
+- The annotated source tree (91KB) became [`source-map.md`](source-map.md).
+  `CLAUDE.md` keeps a skeleton: one line per file, enough to find the right one
+  and to know what else a change will touch.
+
+The 13.9KB postmortem bullet was deleted outright rather than moved, replaced by
+a pointer plus the five whose lessons generalize past their own subsystem.
+
+Both moves were reconciled the way
+[`review-and-split-postmortem.md`](review-and-split-postmortem.md) says to:
+diff the original against the *union* of the pieces before closing the source.
+Every one of the original's 808 unique lines is accounted for — in the new
+`CLAUDE.md`, in one of the two new files, or in the one bullet deliberately
+removed. Five lines came back unmatched on the final pass and all five were
+edits made on purpose. The moved blocks were also `cmp`-checked byte-for-byte
+against what came out the other side, because "the lines are all present" and
+"the block is intact" are different claims.
+
+### The instrument was wrong again
+
+Two of my own verification counts disagreed: 27 postmortems indexed, or 28. The
+index was right. The count regex was `^  [a-z-]+-postmortem\.md `, and
+`cluster-phase0-postmortem.md` has a digit in it. A trivial slip, but the shape
+is the one [`blind-instruments-postmortem.md`](blind-instruments-postmortem.md)
+is about — the check reported a plausible number about a question it had not
+asked, and it was only caught because a second check disagreed with it.
+
+### What the move exposed: the `//!` headers have drifted
+
+The argument for `source-map.md` was partly that the long-form annotation
+belongs in each file's own `//!` module doc, which is read only when that file
+is open. That argument assumed the `//!` headers were current. They are not, and
+on exactly the files that have changed most:
+
+| file | `//!` says | reality |
+|---|---|---|
+| `programs/servers/netd/src/main.rs` | ends at "Stage 2b: real ARP + IPv4 + ICMP … guest-initiated ping only" | the TCP server, the HTTP static-file server, all of Stages 4a–4o, the 9P export gateway, cluster auth and signed frames, `cpu` remote execution, and the `/net/tcp` dial-out/dial-in files — none mentioned |
+| `programs/servers/fsd/src/main.rs` | no mention of permission enforcement or fids | both shipped (users arc step 3; libc arc step 5) |
+| `kernel/src/tasks.rs` | no mention of `SENDER_CREDS` | the credential-bound-at-send fix, the whole point of [`asking-the-right-question-postmortem.md`](asking-the-right-question-postmortem.md) |
+| `ed25519/src/lib.rs` | no mention of small-order key rejection | added after the review that found the hand-written table with three wrong entries |
+
+Seven checks for a latest-documented capability, seven absent. None of this is
+visible to the compiler or to any test — the category, not bad luck, and the
+same category the last two retrospectives are about.
+
+It also meant I had written a sentence into both new files claiming the `//!`
+was "the closest thing to authority", which I disproved twenty minutes later
+while looking for exactly this. Both now say the code is the authority and every
+annotation is a claim to check. **Refreshing those headers is the follow-up this
+day leaves open**, and it is a source change, not a docs one.
+
+---
+
 ## 2026-09-02 — emptying the small-gaps parking lot, and four blind instruments
 
 *(A day of small items. Five roadmap ledger entries struck, one feature
