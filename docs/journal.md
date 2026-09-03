@@ -7,12 +7,11 @@ for the forward plan see [`roadmap.md`](roadmap.md).
 
 ---
 
-## 2026-09-03 (afternoon) — the `ls`-of-a-remote-mount bug, which was in the observer
+## 2026-09-03 (cont.) — the `ls`-of-a-remote-mount bug, and a review that inverted my account of it
 
-*(Roadmap frontier item 2, open since 2026-08-31. Fixed in 43 lines of Python.
-The fix is not the interesting part: the diagnosis in the roadmap was wrong in
-both of its parts, and the defect was in a foreign observer repaired the day
-before for the same missing verb.)*
+*(Roadmap frontier item 2, open since 2026-08-31. Fixed in the host test peer.
+Then reviewed at `max`, which produced fifteen findings — and the three that
+mattered were all corrections to what I had just written about the fix.)*
 
 The symptom, exactly as recorded: on the `run-image-9p-client` rig,
 `mount -r 10.0.2.2:5641 /mnt/a` succeeds, `cat /mnt/a/HELLO.TXT` works, and
@@ -20,13 +19,10 @@ The symptom, exactly as recorded: on the `run-image-9p-client` rig,
 it is the guest's resolution of the mount root — probably an empty path where
 the server expects `/`."*
 
-I nearly went and read `resolve_ns` looking for that empty path. It has an
-explicit guard for exactly that case — `target "/" with empty after` — so either
-the guard was broken or the hypothesis was. **Run it, don't read it.** I stood
-the host peer up behind a logging wrapper that printed the decoded verb and path
-of every request, and drove the guest through the documented recipe.
-
-Two things came back at once:
+`resolve_ns` has an explicit guard for exactly that case, so either the guard
+was broken or the hypothesis was. **Run it, don't read it.** I stood the host
+peer up behind a logging wrapper printing the decoded verb and path of every
+request:
 
 ```
   REQ 0x10c (UNKNOWN) path=b'/'      pathlen=1  served=NO
@@ -34,60 +30,116 @@ Two things came back at once:
   REQ READ            path=b'/SUB/NOTE.TXT'     served=yes
 ```
 
-The guest sends **`/`**, correctly. And **`/SUB` fails identically** — so it was
-never about the mount root, which the original note had simply not tested.
-`0x10c` is `NP_BASE + 12` = **`NP_STAT`**, and `scripts/np9p_server.py`
-implemented no such verb. `ls` stats its target before listing it; the peer
-returned `FS_ERROR` for the unknown verb; and `ls` renders `FS_ERROR` as "no
-such file or directory". **A message about a path, for a request whose path was
-fine** — which is why it was filed as a path bug and stayed filed that way.
+The guest sends **`/`**, correctly. `/SUB` fails identically, so it was never
+about the mount root — the original note had simply not tested that. `0x10c` is
+`NP_BASE + 12` = **`NP_STAT`**, and the peer implemented no such verb. `ls`
+stats a named operand before listing it; the peer returned `FS_ERROR`; `ls`
+renders `FS_ERROR` as "no such file or directory". **A message about a path,
+for a request whose path was fine** — which is why it stayed filed as a path
+bug. Fixed by implementing the verb.
 
-### The part that matters
+That much held up. What follows is what the review found, and it is the more
+useful half of the day.
 
-This is [`blind-instruments-postmortem.md`](blind-instruments-postmortem.md)'s
-lead finding, one file over. That postmortem — written *the day before* — opens
-with `np9p_client.py`'s `stat`, which sent `NP_READ_FILE` and printed the byte
-count as a "size", so three probes ran green against a guest known to have a
-bug. The client was repaired on 2026-09-02.
+### The lesson I drew was the wrong lesson
 
-**Nobody asked whether the server half of the same mirrored pair had a `stat` at
-all.** It did not. The two scripts are each other's mirror by design and are
-described that way in both docstrings; the repair went to one of them, on the
-day whose lesson was that the observer is a check too. *Repairing one half of a
-pair is not repairing the pair.*
+I wrote this up as *repairing one half of a pair is not repairing the pair*:
+[`blind-instruments-postmortem.md`](blind-instruments-postmortem.md), written
+the day before, opens with `np9p_client.py`'s fake `stat`; the client was
+repaired 2026-09-02; nobody checked the server. Neat, and it fit the week.
 
-The peer's docstring, meanwhile, had listed `ls /mnt/a` in its usage example the
-whole time. A correct description of an incorrect implementation, which
-`blind-instruments` also names as the harder kind to catch — it was right about
-what the tool was *for*, and nothing was checking that against what it could
-answer. It now states the four verbs it serves, and says plainly that an
-unimplemented verb surfaces at the guest as whatever the *command* makes of
-`FS_ERROR`, so the next gap is visible as a gap.
+**`git log -S` says it is not what happened.** The peer was created 2026-08-25
+(`a9e7342`) and `ls` did not call `fs_stat` **at all** until 2026-08-27
+(`3cf79d1` added `ls -l`, `54a9b01` file operands). So the peer was *adequate
+for its documented recipe when it was written*, and
+`roadmap-cluster-phase1.md` and `CHANGELOG.md` were accurate when written too —
+my note implied both had been wrong for days. Acting on it would have put an
+error into the milestone record while correcting a different one.
 
-### The negative control that corrected me
+The real mechanism: **a guest client grew a verb dependency, and nothing re-ran
+the recipe that depended on it.** Seven days, 08-27 to 09-03. That points
+somewhere else entirely — not at the peers being unchecked mirrors, but at a
+documented recipe with no test behind it. `chmod`'s symbolic form already calls
+`fs_stat`; `mv` and `cp` call `fs_presence`, which is `fs_stat`. The next one to
+grow a requirement breaks this rig identically, and the lesson I had written
+would not have caught it.
 
-Having found a missing stat, I assumed `tree` and `cp` across a remote mount
-were broken too, and drafted the roadmap entry saying so. Then I reverted the
-peer to `main` and ran them: **both already worked.** Neither calls `fs_stat` —
-`tree` gets the directory flag from the trailing `/` in the readdir format, and
-`cp` only reads. `ls` was the sole casualty.
+**A neat lesson that fits the week is the one to check hardest.** I had three
+postmortems in a row about unchecked observers and reached for a fourth
+instance of the same shape. The shape was available; the history did not
+support it.
 
-So the widening was wrong, and the only reason it did not ship in the roadmap is
-that reverting one file and booting twice is cheap. Both arms of the comparison
-are the same image and the same steps.
+### The control I called proof could not fail
 
-Verified after the fix: `ls /mnt/a` lists `HELLO.TXT  SUB/`; `ls /mnt/a/SUB`
-lists `NOTE.TXT`; `ls -l` reports 1960 bytes for `HELLO.TXT` (40 x 49, so the
-size field decodes correctly) with `-` in the columns the peer has no answer
-for; **`ls /mnt/a/NOPE` still fails**, which is what proves the new arm can say
-no; `cat` unaffected; zero aborts in QEMU's own trace. The synthesized
-`-rw-r--r--` in `ls -l` is not from this change — a local FAT32 `ls -l /` prints
-the same, because `mode_valid == 0` is the normal answer for FAT32, exFAT and
-`/proc` too.
+I recorded `ls /mnt/a/NOPE` still failing as "what proves the new arm can say
+no". It proves nothing. An unserved verb and an absent path both reach
+`sealed(FS_ERROR)`, so the reply is byte-identical — the check passes against
+the *unfixed* peer. A check that cannot fail, inside the verification record of
+a PR whose subject is checks that cannot fail.
+
+The control that does discriminate was in the same list and unlabelled:
+`ls /mnt/a/SUB`, which fails before and lists `NOTE.TXT` after. **I wrote the
+check from the shape of the fix, not from the shape of the failure** — which is
+[`repairing-the-repairs`](repairing-the-repairs-postmortem.md)'s finding, and I
+had read it that morning.
+
+### And a cheaper instrument existed
+
+`ls` with no operand does not stat — it lists the cwd. So `cd /mnt/a; ls`
+worked the whole time, and two commands would have isolated the fault to the
+operand path before any wrapper was written. The wrapper was still what named
+`0x10c`, so it earned its keep; but I built the precise instrument before the
+cheap bisect, in that order.
+
+### Three more of mine, all restatements that drifted
+
+- **`cat` sends `NP_READ`, not `NP_READ_AT`** as I wrote — and the transcript
+  pasted two lines above the claim reads `REQ READ`. Contradicted by my own
+  evidence, in the same entry.
+- **FAT32 *does* decode an mtime** (`fat32.rs:788`). My docstring said `fsd`
+  reports no time for "FAT32, exFAT, `/proc`"; the `time: None` arms are exFAT,
+  ext2 and `/proc`, while the *mode* triple is FAT32/exFAT/`/proc`. I collapsed
+  two different lists into one.
+- **`cp` does call `fs_stat`.** I ran `grep -c fs_stat` over `cp`, got 0, and
+  published the reason. It calls `ulib::fs_presence`, which is `fs_stat` one
+  level down. The conclusion (`cp` worked) was right; the reason was wrong — it
+  worked because that command's *destination* was local, so the stat never
+  crossed the mount. Reverse the operands and it fails. **My instrument was a
+  grep that could not see through an indirection, in the entry about
+  instruments.**
+
+Also mine, in the wire-constant check: I excluded the four `STAT_*` offsets
+with a note claiming "only `np9p_server.py` spells them, so there is no second
+declaration to compare, same as `NP_MAC_LEN`". Both halves wrong. The script
+compares each peer to **`ninep-abi`**, not the peers to each other, so one peer
+is enough — the offsets were checkable all along (adding them: 14 → 18
+constants, and a mutated `STAT_FLAGS_OFF` is caught). And `NP_MAC_LEN` is
+excluded for a different reason: Rust does not declare it at all. I had also
+left the rationale three lines below stating two counts that were both wrong,
+one of them already false before I touched it.
+
+### What the review did not find
+
+The fix itself. The peer genuinely lacked the verb, `0x10c` is `NP_BASE + 12`,
+`40 × 49 = 1960`, and `ls` works. Every finding of substance was about the
+*account* of the fix rather than the fix — which is its own data point about
+where the defects are when the code change is twelve lines and the prose around
+it is a hundred and thirty.
+
+### The one genuinely valuable find, and it is a guest bug
+
+`ls_err` hardcodes "no such file or directory" for **every** error code, and
+`ls` is the only command under `programs/fileutils/` that never calls
+`ulib::fs_error` — which already renders fifteen codes distinctly (cat 1, cp 4,
+mv 3, chmod 3; `ls` 0). The misleading message that cost this session is three
+lines in the guest, and it stays armed where no Python peer exists: over a real
+ext2 mount an `FS_ERR_PERM` prints "no such file or directory", which is
+actively misleading in a security context, and so do `FS_ERR_AUTH` and a
+transient `NO_FS` during an `fsd` restart. Its own change, next.
 
 ---
 
-## 2026-09-03 (morning) — shrinking `CLAUDE.md`, and what the move exposed
+## 2026-09-03 — shrinking `CLAUDE.md`, and what the move exposed
 
 *(No code. `CLAUDE.md` had reached 197,771 bytes — read in full at the start of
 every session, whether or not any of it was relevant. It is now 50,003, and
