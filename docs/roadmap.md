@@ -347,9 +347,21 @@ the microkernel arc itself still leaves open):
    error — not the `NO_FS` of an absent server, it survives with the
    supervisor quiet, and it is the older *"intermittent first-ls on two-VM"*
    the Phase 2 notes recorded. About **3 in 46** across two runs after the fix
-   (small sample, stated as one) against ~1 in 4 before. The trace harness
-   (`scripts/trace-remote-flake.py`) applies to it unchanged, and the
-   two-node rig is where it was first seen. The original entry, and the trace
+   (small sample, stated as one) against ~1 in 4 before.
+
+   **It is POSITIONAL, not a flat rate — measured 2026-09-03 after the fix
+   landed, and this is the useful part for whoever chases it.** Six identical
+   `cat /mnt/a/HELLO.TXT` in one boot immediately after `mount -r`: the
+   **first fails, the next five succeed**, with zero wedge lines. A separate
+   run of two cats as the first two ops failed **both**. So a rate quoted from
+   a mixed workload ("2 of 42") is real but misleading as a search target — it
+   invites hunting a random ~5% fault, when the signal is concentrated in the
+   **first remote op(s) after a mount**. Which is exactly what the Phase 2
+   notes named it: *intermittent FIRST-ls*. Start there, with one boot and one
+   op, rather than a long mixed run.
+
+   The trace harness (`scripts/trace-remote-flake.py`) applies to it
+   unchanged, and the two-node rig is where it was first seen. The original entry, and the trace
    that split it, follow.
 
    Originally: roughly one remote op in six
