@@ -335,8 +335,48 @@ the microkernel arc itself still leaves open):
    [`testing-qemu.md`](testing-qemu.md) both show `ls /mnt/a` in that recipe,
    and it now does what they say.
 
-3. **The remote-read flake — DOMINANT CAUSE FIXED 2026-09-03, a smaller
-   residual still open.** The packet trace below found it was never TCP: the
+3. ~~**The remote-read flake, on both transports.**~~ — **BOTH CAUSES FOUND
+   AND FIXED 2026-09-03.** It was two faults filed as one for weeks, and
+   neither was TCP.
+
+   **Cause A: the supervisor was restarting `netd` mid-read** (the dominant
+   one). Fixed by letting a supervised server report progress unprompted — see
+   the trace below.
+
+   **Cause B: a capability-delegation race, and the request never left the
+   guest.** The shell `SPAWN`s a program and only *then* `DELEGATE`s it
+   `TO_NET` — it cannot delegate to a slot that does not exist yet — so a
+   child reaching `netd` inside that window gets `MSG_ERR_DENIED`.
+   `ulib::net_call` had absorbed that for years, with a comment naming it "the
+   brief delegation-not-yet-applied window". **`np_netlocal` and `np_remote`
+   did not**, and `MSG_ERR_DENIED` sits above `FS_ERR_MIN`, so it fell into
+   the generic arm and surfaced as `FS_ERROR` — which `cat` prints as
+   "cat: failed", giving no hint that the cause was a capability not yet
+   granted. One sibling had the guard and another did not; the retry now lives
+   in a single `net_msg_call` all three share, so a fourth caller cannot
+   reintroduce it.
+
+   **Proved by forcing the race rather than by counting boots.** Six boots
+   after Cause A was fixed gave one failure — the historic 1-in-6 — and its
+   capture contained **zero ARP and zero TCP**, which is what pointed inside
+   the guest. But six samples at 1-in-6 have a 33% chance of showing nothing,
+   so the fix was demonstrated deterministically instead: a temporary 4-tick
+   delay inserted between `SPAWN` and `DELEGATE` (test scaffold, not
+   committed) makes every spawn race.
+
+   | build | result | peer requests |
+   | --- | --- | --- |
+   | wide window, **no** fix | **3 of 3 failed** | **0** |
+   | wide window, with fix | 3 of 3 ok | 15 |
+   | clean, with fix | 4 of 4 ok (+6 of 6 earlier) | — |
+
+   Zero requests reaching a peer that was verified alive is the same signature
+   as the original failing capture, which is what ties the forced case to the
+   real one.
+
+   The original entry, and the trace that split the two faults, follow.
+
+   ~~Previously: dominant cause fixed, residual open.~~ The packet trace below found it was never TCP: the
    supervisor was restarting `netd` mid-read. That is fixed (a supervised
    server may now report progress unprompted, so it is not killed for being
    busy), and the workload that failed **11 of 42** now fails **2 of 42** with
