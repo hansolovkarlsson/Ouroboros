@@ -353,7 +353,75 @@ the microkernel arc itself still leaves open):
    [`testing-qemu.md`](testing-qemu.md) for telling it apart from a real refusal.
    The fix wants a packet trace first, not a guess.
 
-   **Another data point, 2026-09-03** (SLIRP rig, `run-image-9p-client` shape,
+   **TRACED 2026-09-03, and it is not TCP.** The packet capture this entry
+   asked for was finally taken (SLIRP rig, `run-image-9p-client` shape, against
+   `np9p_server.py`, 42 mixed ops with `-object filter-dump` attached). **Every
+   one of the 58 TCP connections in the capture is healthy** — SYN, SYN-ACK,
+   request, reply, FIN — with a single SYN retransmit across the whole run and
+   no RST, no unanswered SYN, no missing reply. So all three suspects above are
+   **disproven for this rig**: the failures are not a TCP problem, and 42 ops
+   produced only 58 of the ~112 connections they should have, because the guest
+   **stopped issuing requests** rather than losing them.
+
+   The cause is in the guest's own console output, which nothing had been
+   reading:
+
+   ```
+   Ouroboros kernel: server slot 4 wedged - no progress (runnable) - restarting
+   Ouroboros kernel: server slot 4 restarted (attempt 1/3)
+   ```
+
+   Slot 4 is `netd`. **The supervisor's wedge detector restarts the network
+   server mid-read**, and the in-flight command dies with it —
+   `supervisor.rs`'s `WEDGE_TICKS = 128` at a 20 ms tick is **2.56 s**
+   continuously `Runnable`, and `netd` is `Runnable` (not `Blocked`) for the
+   whole of a multi-chunk remote read. Measured round trip against this peer is
+   **0.602 s** (its Ed25519 signing is Python), so:
+
+   | op | round trips | time | vs 2.56 s | observed |
+   | --- | --- | --- | --- | --- |
+   | `cat HELLO.TXT` (1960 B) | 5 | **3.01 s** | **over** | failed **7 of 7** |
+   | `ls -l /mnt/a` | 4 | 2.41 s | under by 0.15 s | 0 of 7 |
+   | `cat NOTE.TXT` (29 B) | 2 | 1.20 s | under | 3 of 7 |
+   | `ls /mnt/a` | 2 | 1.20 s | under | 1 of 7 |
+
+   The only op over the threshold is the only one that failed every time.
+   `netd` then exhausts `MAX_RESTARTS = 3`, after which **every** remote op
+   fails — which is what the scattered late failures of the short ops are, not
+   a per-op probability at all. That also explains why the rate looked like
+   "roughly one in six": it is not a rate, it is one deterministic failure plus
+   the collateral of a dead server.
+
+   This is the class `network-stack-postmortem.md` already recorded once — the
+   supervisor restarting `netd` mid-transfer when a burst ran too long — back in
+   a new path.
+
+   **What this does NOT explain, stated because the entry conflated two
+   observations.** This is the *SLIRP + Python-peer* rig, where a round trip
+   costs 0.6 s because the peer signs in Python. On the **two-node** rig both
+   ends sign in Rust (~2 ms), so a five-chunk read is ~10 ms and cannot approach
+   2.56 s. The "intermittent first-ls on two-VM" recorded earlier is therefore
+   **probably a different fault**, still open, and the two should not have been
+   filed as one item. The harness that found this (attach `filter-dump`, run a
+   mixed cycle, classify every connection) applies there unchanged.
+
+   **A second, smaller finding, and it is what made the first one hard to
+   see:** `ls` calls `ulib::exit(0)` on **every** path — it has exactly one
+   `exit` in the file — so it reports a missing file, a permission denial or an
+   unreachable cluster peer with **exit status 0**. `cat` exits 1 correctly. A
+   test harness written for this investigation scored a whole run of failures as
+   passes because of it, and no script can detect an `ls` failure today.
+
+   **One process note.** The first "reproduction" was an artifact: the host peer
+   had been killed by a tool timeout, so every SYN got an RST, `cat` exited 1,
+   `ls` printed an error and exited 0, and the harness reported a beautifully
+   regular "only `cat` fails" pattern that was entirely the dead instrument. It
+   was caught by the capture showing 42 connections all RST. The harness now
+   refuses to report results unless the peer's request count went **up** during
+   the run — [[reference-a-check-that-cannot-fail]], applied to the rig rather
+   than the code.
+
+   **Earlier data point, 2026-09-03** (SLIRP rig, `run-image-9p-client` shape,
    against the Python peer): `cat /mnt/a/SUB/NOTE.TXT` failed **once in five**
    observations — `cat: failed`, exit 1 — then succeeded 4/4 on immediate
    re-runs with no code change in between, each showing the expected two
