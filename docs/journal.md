@@ -7,6 +7,49 @@ for the forward plan see [`roadmap.md`](roadmap.md).
 
 ---
 
+## 2026-09-03 (cont.) — the twenty-ninth postmortem: true when written
+
+*(No code. Reading back the day's four fixes and finding they were one fix.)*
+
+Five PRs, and four of them corrected a **statement** rather than logic. In every
+case the code was doing exactly what it had been written to do; what had rotted
+was the description. Written up as
+[`true-when-written-postmortem.md`](true-when-written-postmortem.md), the
+twenty-ninth.
+
+It is the sequel to `repairing-the-repairs`' *a claim in a comment is not a
+check*, moved one step:
+
+> **THE COMMENT WAS TRUE WHEN IT WAS WRITTEN. THAT IS THE PROBLEM.**
+
+A claim that is wrong on arrival can be caught by a careful reader. A claim that
+is *right* on arrival passes every review it will ever get, and is then
+falsified by an unrelated change in a different file.
+
+The number that made the shape unarguable: `fs_mv`'s *"a cross-tree move can't
+arise yet (a later phase concern)"* was written at **12:06** on 2026-08-25 and
+falsified at **16:37 the same day** by Phase 1c's remote mounts. Its
+consequence — a cross-mount `mv` that renamed the file locally and exited 0 —
+survived nine days, hidden behind a second defect that stopped `mv`'s guard
+before it could reach the first.
+
+The mechanism the four share: **the falsifying edit is always in another file.**
+Which is exactly why the three defences all miss it — the compiler sees only a
+string, no test asserts that a comment is true, and a reviewer reads a diff that
+does not contain the claim it invalidates.
+
+Two things I had not seen before writing it down. **Duplication acted as the
+only detector** — the stale 8.3 filename message surfaced because the shell's
+duplicate error table was laid beside `ulib`'s and they disagreed; wire
+*constants* have a comparer that grew 12 → 27 names that day and caught every
+mutation, while wire *prose* has none. And **two of the four claims were mine
+and never true at all**, the second written immediately after being corrected
+for the first — which is a different species from the other two, preventable at
+writing time, and worth not conflating with them, since "read more carefully"
+does nothing for a comment that was accurate when read.
+
+---
+
 ## 2026-09-03 (cont.) — widening the parser instead of describing the gap
 
 *(The last of the three `NP_STAT`-review follow-ups, and the shortest. Its one
