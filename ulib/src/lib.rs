@@ -856,6 +856,42 @@ fn is_local_net(r: &Resolved) -> bool {
     r.server == syscall_abi::NET_TASK && r.endpoint == [0u8; ninep_abi::NS_ENDPOINT_LEN]
 }
 
+/// `MSG_CALL` to `netd`, absorbing the delegation race.
+///
+/// **Every** call to `NET_TASK` from a spawned command must go through this.
+/// The shell `SPAWN`s a program and only *then* `DELEGATE`s it the `TO_NET`
+/// capability - it cannot delegate to a slot that does not exist yet - so a
+/// child that reaches `netd` in that window gets `MSG_ERR_DENIED`. It is
+/// transient by construction: the delegation is already on its way.
+///
+/// This existed in `net_call` (`ping`/`resolve`/`fetch`) and was MISSING from
+/// the two `np_*` paths, so a remote-mount read raced instead. `MSG_ERR_DENIED`
+/// is above `FS_ERR_MIN`, so it fell into the generic error arm and surfaced as
+/// `FS_ERROR` - which `cat` prints as "cat: failed", with no hint that the
+/// cause was a capability not yet granted. That was roadmap frontier item 3's
+/// residual: measured 1 boot in 6, and the packet capture showed **zero** ARP
+/// and **zero** TCP on a failing run, because the request never left the guest.
+///
+/// One function rather than three copies of the retry: the bug was one sibling
+/// having it and another not, and a fourth caller would have made the same
+/// mistake available again.
+fn net_msg_call(req: &[u8], reply: &mut [u8]) -> u64 {
+    let deadline = get_ticks() + 150;
+    loop {
+        let packed = syscall4(
+            syscall_abi::MSG_CALL,
+            syscall_abi::NET_TASK,
+            req.as_ptr() as u64,
+            req.len() as u64,
+            reply.as_mut_ptr() as u64,
+        );
+        if packed == syscall_abi::MSG_ERR_DENIED && get_ticks() <= deadline {
+            continue;
+        }
+        return packed;
+    }
+}
+
 /// One direct NP verb round trip to `netd` for the local `/net` filesystem: like
 /// [`np_call`] but addressed to `NET_TASK` (which serves `/net` read verbs and
 /// the `/net/tcp` dial-out connection files). The inline payload is
@@ -879,13 +915,7 @@ fn np_netlocal(verb: u64, params: [u64; 4], payload1: &[u8], payload2: &[u8], re
     req[HDR..HDR + payload1.len()].copy_from_slice(payload1);
     req[HDR + payload1.len()..end].copy_from_slice(payload2);
     let mut reply = [0u8; syscall_abi::MSG_MAX_LEN as usize];
-    let packed = syscall4(
-        syscall_abi::MSG_CALL,
-        syscall_abi::NET_TASK,
-        req.as_ptr() as u64,
-        end as u64,
-        reply.as_mut_ptr() as u64,
-    );
+    let packed = net_msg_call(&req[..end], &mut reply);
     if packed == syscall_abi::TASK_ERR_NO_SUCH_TASK {
         return syscall_abi::NO_FS;
     }
@@ -937,13 +967,7 @@ fn np_remote(endpoint: &[u8; ninep_abi::NS_ENDPOINT_LEN], verb: u64, params: [u6
     req[p1_end..p2_end].copy_from_slice(payload2);
 
     let mut reply = [0u8; syscall_abi::MSG_MAX_LEN as usize];
-    let packed = syscall4(
-        syscall_abi::MSG_CALL,
-        syscall_abi::NET_TASK,
-        req.as_ptr() as u64,
-        p2_end as u64,
-        reply.as_mut_ptr() as u64,
-    );
+    let packed = net_msg_call(&req[..p2_end], &mut reply);
     if packed == syscall_abi::TASK_ERR_NO_SUCH_TASK {
         return syscall_abi::NO_FS;
     }
@@ -1612,20 +1636,7 @@ pub fn fs_error_msg(code: u64) -> &'static [u8] {
 /// lands, so a transient `MSG_ERR_DENIED` is retried briefly (the same bounded
 /// wait `pipe_out` uses), rather than surfaced as a failure.
 pub fn net_call(req: &[u8], reply: &mut [u8]) -> u64 {
-    let deadline = get_ticks() + 150;
-    loop {
-        let packed = syscall4(
-            syscall_abi::MSG_CALL,
-            syscall_abi::NET_TASK,
-            req.as_ptr() as u64,
-            req.len() as u64,
-            reply.as_mut_ptr() as u64,
-        );
-        if packed == syscall_abi::MSG_ERR_DENIED && get_ticks() <= deadline {
-            continue;
-        }
-        return packed;
-    }
+    net_msg_call(req, reply)
 }
 
 /// The one panic handler the command binary needs - provided here so each
