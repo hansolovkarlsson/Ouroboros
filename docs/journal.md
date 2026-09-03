@@ -7,6 +7,89 @@ for the forward plan see [`roadmap.md`](roadmap.md).
 
 ---
 
+## 2026-09-03 (cont.) — a status code nobody compared, and the `mv` it was hiding
+
+*(The third follow-up from the `NP_STAT` review. The intended fix was three
+lines. What it uncovered was a cross-mount `mv` that renamed the file locally
+and reported success.)*
+
+### The intended fix
+
+`scripts/np9p_server.py` answered a bare `FS_ERROR` for every failure, where
+`fsd` answers `FS_ERR_NOT_FOUND` for a path that is definitively absent. That
+is not merely a vaguer message: `ulib::fs_presence` **branches on that exact
+value** to answer `Absent` rather than `Unknown`, and `Unknown` is what
+`mv`/`cp`'s destructive-overwrite guard treats as "could not tell". So the peer
+knew a path was absent and the guest could not find out.
+
+| | before | after |
+|---|---|---|
+| `ls /mnt/a/NOPE` | `failed` | `no such file or directory` |
+| `cp /F.TXT /mnt/a/NEW.TXT` | `cannot tell whether … exists` | `read-only filesystem` |
+
+A verb the peer *knows* but refuses on policy now answers `FS_ERR_READ_ONLY`
+instead of sharing one value with "verb I do not recognise" — three different
+conditions that had all rendered as one.
+
+`check-wire-constants.py` grew to read **syscall-abi as well as ninep-abi** and
+to parse the `u64::MAX - N` idiom that both Python peers hand-transcribe as
+`(1 << 64) - 1 - N`. That arithmetic was being done twice by hand, in two
+languages, for values whose drift is silent — 12 → 25 constants checked, both
+mutations caught. It also now reports *which crate* a disagreement is against,
+because saying "ninep-abi has …" for a syscall-abi constant sends the reader to
+a file that does not contain it.
+
+### What it uncovered
+
+With the guard no longer stuck on `Unknown`, `mv /F.TXT /mnt/a/NEW.TXT` got
+past it — and **exited 0 with no output**. The peer's log showed no `NP_MV` had
+ever arrived.
+
+`ulib::fs_mv` resolved both paths through the namespace and then dispatched on
+the **source's** target, handing that server the destination's *string*. The
+server read it as its own path. So the file was renamed to a **local**
+`/NEW.TXT`, the remote mount was untouched, and the exit code said success.
+Confirmed against `main`: `mv -f` reached the same path there, so this was
+pre-existing and `-f` was all it took.
+
+Above that dispatch sat:
+
+> `// Both paths resolve through the namespace; in Phase 0 every binding is`
+> `// tree 0, so a cross-tree move can't arise yet (a later phase concern).`
+
+True when written. False since remote mounts, `/proc` and multi-mount arrived.
+**The later phase came and nobody came back** — and because the assumption
+lived in a comment rather than a check, nothing failed when it expired. That is
+the same shape as the `8.3 short-name` message fixed hours earlier: a true
+statement that quietly stopped being one, with no mechanism watching.
+
+Refused now with a reserved `FS_ERR_CROSS_DEVICE` — POSIX's `EXDEV` — comparing
+**all three** fields of the resolution, because a local `/net` and a remote
+mount both resolve to `NET_TASK` with tree 0 and differ only in the endpoint.
+`-f` does not bypass it: the guard is in `fs_mv`, not in `mv`'s presence check,
+and `-f` was precisely the arm that reached the silent rename. A same-tree `mv`
+is unchanged, verified in the same run.
+
+### Two notes on method
+
+**My PR made a pre-existing bug more reachable, so it was mine to fix.** The
+silent rename needed `-f` before and would have needed nothing after. Shipping
+the status-code fix alone and filing the `mv` bug would have been the tidier
+PR and the wrong call.
+
+**The error-message tables I aligned earlier today got their first test.**
+Adding `FS_ERR_CROSS_DEVICE` meant updating both `ulib::fs_error_msg` and the
+shell's `print_fs_error` — the two copies whose drift was fixed that morning.
+The discipline held because the drift was fresh in mind, which is not a
+mechanism. Unifying them is still open.
+
+Also: an earlier run of this sequence showed `cat: failed` on a chunked remote
+read. Re-run, it succeeded, as did the final verification — the recorded
+intermittent, not this change. Logged under frontier item 3 with its sample
+size rather than explained away.
+
+---
+
 ## 2026-09-03 (cont.) — `ls` stops claiming every failure is a missing file
 
 *(A guest bug, three lines, armed on every filesystem that enforces

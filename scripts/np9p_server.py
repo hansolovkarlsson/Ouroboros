@@ -54,6 +54,8 @@ NP_READ_FILE = NP_BASE + 1
 NP_READ = NP_BASE + 2
 NP_READ_AT = NP_BASE + 10
 NP_STAT = NP_BASE + 12
+NP_CLUNK = NP_BASE + 19
+NP_LIMIT = NP_CLUNK + 1  # ninep-abi: one past the last defined verb
 
 # `NP_STAT`'s reply: status = STAT_INFO_LEN, payload = a fixed 27-byte StatInfo.
 # The offsets are `ninep-abi`'s STAT_* constants; keep them in step with it.
@@ -68,11 +70,23 @@ STAT_TIMEVALID_OFF = 19
 STAT_MODEVALID_OFF = 26
 STAT_FLAG_DIR = 1 << 0
 
+# WHICH ERROR CODE, and why it is not all one value. `FS_ERROR` is the generic
+# "something went wrong"; the guest renders it as "failed". `FS_ERR_NOT_FOUND`
+# means DEFINITIVELY ABSENT, and `ulib::fs_presence` branches on exactly that
+# value to answer Absent rather than Unknown - which is what `mv`/`cp`'s
+# destructive-overwrite guard consumes. Answering FS_ERROR for an absent path
+# therefore does not merely print a vaguer message: it switches that guard into
+# its "could not tell" arm for a path this peer knows for certain is not there.
+#
+# This file used to answer FS_ERROR everywhere, with a note saying any value
+# above FS_ERR_MIN reads as an error to the client. True, and it stopped being
+# sufficient once a verb existed whose ABSENT answer is consumed as data rather
+# than displayed - NP_STAT is that verb.
 FS_ERROR = (1 << 64) - 1
-NO_FS = (1 << 64) - 2
+NO_FS = (1 << 64) - 1 - 1  # u64::MAX - 1: no filesystem mounted (transient)
+FS_ERR_NOT_FOUND = (1 << 64) - 1 - 2  # u64::MAX - 2: definitively absent
+FS_ERR_READ_ONLY = (1 << 64) - 1 - 29  # u64::MAX - 29
 FS_ERR_AUTH = (1 << 64) - 1 - 30  # u64::MAX - 30
-# A stand-in for fsd's FS_ERR_NOT_FOUND band; any value >= FS_ERR_MIN reads as an
-# error to the client. Use FS_ERROR for "no such path".
 HDR = 48  # NP_REQ_PAYLOAD
 
 # Cluster auth: the guest SIGNS every request with its per-machine Ed25519 key,
@@ -348,7 +362,7 @@ def serve_request(body):
     if verb == NP_READDIR:
         out = listing(path)
         if out is None:
-            return sealed(FS_ERROR)
+            return sealed(FS_ERR_NOT_FOUND)
         want = a1
         out = out[:want]
         return sealed(len(out), out)
@@ -356,13 +370,13 @@ def serve_request(body):
     if verb == NP_STAT:
         info = stat_info(path)
         if info is None:
-            return sealed(FS_ERROR)
+            return sealed(FS_ERR_NOT_FOUND)
         return sealed(STAT_INFO_LEN, info)
 
     if verb in (NP_READ, NP_READ_AT):
         data = FILES.get(path)
         if data is None:
-            return sealed(FS_ERROR)
+            return sealed(FS_ERR_NOT_FOUND)
         offset, want = a1, a2
         chunk = data[offset : offset + want]
         return sealed(len(chunk), chunk)
@@ -370,7 +384,7 @@ def serve_request(body):
     if verb == NP_READ_FILE:
         data = FILES.get(path)
         if data is None:
-            return sealed(FS_ERROR)
+            return sealed(FS_ERR_NOT_FOUND)
         want = a1
         return sealed(len(data), data[:want])
 
@@ -383,8 +397,15 @@ def serve_request(body):
     #
     # A prose list of served verbs sits in this file's docstring with nothing
     # comparing it to this dispatch chain, so treat THIS as the authority.
+    if NP_BASE <= verb < NP_LIMIT:
+        # A verb this peer knows of and refuses on policy, not one it failed to
+        # recognise. netd copies the status through verbatim, so the guest
+        # renders "read-only filesystem" - which is the actual reason, and
+        # distinguishable from both "absent" and "no idea".
+        print(f"  [read-only: refusing verb 0x{verb:x} path={path!r}]", flush=True)
+        return sealed(FS_ERR_READ_ONLY)
     print(f"  [unserved verb 0x{verb:x} path={path!r}] -> FS_ERROR "
-          f"(the guest will most likely report 'no such file or directory')",
+          f"(the guest will report whatever its command makes of a generic error)",
           flush=True)
     return sealed(FS_ERROR)
 
