@@ -43,6 +43,16 @@ def rust_consts(path):
         out[name] = (1 << 64) - 1 - int(off)
     for name in re.findall(r"pub const (\w+): u64 = u64::MAX;", src):
         out[name] = (1 << 64) - 1
+    # FLAG BITS are `u32` written as a shift (`1 << 0`), which neither pattern
+    # above sees: the integer one wants `usize` and a literal. STAT_FLAG_DIR
+    # was invisible to BOTH languages for that reason, so the bit deciding
+    # whether a remote entry lists as a directory was pinned by nothing while
+    # the script reported agreement - a check that silently did not cover the
+    # constant it was added alongside.
+    for name, sh in re.findall(r"pub const (\w+): u32 = 1 << (\d+);", src):
+        out[name] = 1 << int(sh)
+    for name, val in re.findall(r"pub const (\w+): u32 = (\d+);", src):
+        out[name] = int(val)
     return out
 
 
@@ -64,6 +74,12 @@ def py_consts(path):
     # quietly stops looking at the thing it is named for.
     for name, val in re.findall(r"^(\w+) = (\d+)\s*(?:#.*)?$", src, re.M):
         out[name] = int(val)
+    # The peers' spelling of a flag bit. This also matches np9p_client.py's
+    # `REPLY_UNVERIFIED = 1 << 64`, a deliberate out-of-range sentinel that is
+    # not a wire constant - harmless, since only names listed in CHECKED are
+    # ever compared, and it is not one.
+    for name, sh in re.findall(r"^(\w+) = 1 << (\d+)\s*(?:#.*)?$", src, re.M):
+        out[name] = 1 << int(sh)
     return out
 
 
@@ -96,6 +112,15 @@ CHECKED = [
     # Server-only: it is what the read-only export now refuses mutations with,
     # and netd copies a status through verbatim, so the value reaches a guest.
     "FS_ERR_READ_ONLY",
+    # The dir bit of a StatInfo's flags word. Move it in ninep-abi while a peer
+    # keeps writing bit 0 and every remote directory lists as a FILE, with no
+    # error anywhere - the well-formed wrong answer this script exists to stop.
+    "STAT_FLAG_DIR",
+    # The generic failure sentinel. Server-only (the client reads statuses, it
+    # does not send them), and free coverage once the `u64::MAX` pattern
+    # existed - found by asking which names a peer and Rust BOTH spell that
+    # this list does not mention, rather than by remembering to add it.
+    "FS_ERROR",
 ]
 
 # NOT checked: NP_MAC_LEN. Neither peer names it - both write the literal 32 at
@@ -124,11 +149,12 @@ CHECKED = [
 # with no error anywhere - and a well-formed wrong answer is strictly worse
 # than a parse failure.
 #
-# NOT checked, and genuinely unpinnable as this script stands: STAT_FLAG_DIR -
-# the dir bit the peer writes. `rust_consts` matches `usize` only (it is
-# `u32`), and both int regexes want `\d+` (it is `1 << 0`), so it is invisible
-# to BOTH sides and adding it fails with "not found in ninep-abi". Widening the
-# regexes is its own change; until then the dir bit is pinned by nothing.
+# STAT_FLAG_DIR was listed here as "genuinely unpinnable" until 2026-09-03: it
+# is `u32` where the integer pattern wanted `usize`, and `1 << 0` where both
+# wanted a literal, so it was invisible to BOTH languages and adding it to
+# CHECKED failed with "not found in ninep-abi". The fix was to widen the
+# patterns, not to keep describing the gap - the parser's reach was being
+# treated as a property of the constants rather than of the parser.
 
 
 # How many of CHECKED each peer is known to spell TODAY. A bare "more than
@@ -145,7 +171,7 @@ PEER_BASELINE = {
     # reduced count was recorded as expected. Both now use the shared names; the
     # floor rises with them, or the rename could be undone without this
     # noticing.
-    "np9p_server.py": 15,  # the above + 4 STAT_* offsets + FS_ERR_READ_ONLY
+    "np9p_server.py": 17,  # + 4 STAT_* offsets, FS_ERR_READ_ONLY, STAT_FLAG_DIR, FS_ERROR
 }
 
 
