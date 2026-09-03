@@ -7,6 +7,68 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/`; 
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## v0.18.0 — things that were saying the wrong thing (2026-09-03)
+
+Released as **v0.18.0**. Not an arc: six PRs, no new capability, and the
+load-bearing fixes correct what the system had been *saying* rather than what it
+had been *doing*. No wire flag day — the auth frame is untouched, so v0.17.0 and
+v0.18.0 nodes interoperate.
+
+**A cross-mount `mv` silently renamed the file locally and reported success.**
+`ulib::fs_mv` resolved both paths through the namespace and then dispatched to
+the **source's** server, handing it the destination's *string*, which that
+server read as a path of its own. `mv /F.TXT /mnt/a/NEW.TXT` produced a local
+`/NEW.TXT`, the remote mount never saw a request, exit code 0. Any `mv` across
+two different mounts did this — a remote mount, a second partition, `/proc`. Now
+refused with a reserved `FS_ERR_CROSS_DEVICE` (POSIX's `EXDEV`), comparing all
+three fields of the resolution, since a local `/net` and a remote mount both
+resolve to `NET_TASK`/tree 0 and differ only in the endpoint. `-f` does not
+override it: the guard sits below `mv`'s overwrite check, and `-f` was the arm
+that reached the silent rename. Same-mount `mv` unchanged; `cp` across a mount
+has always been correct.
+
+**`ls` reported every failure as "no such file or directory".** It was the only
+command under `programs/fileutils/` never calling `ulib::fs_error`, which
+renders fifteen conditions distinctly. On ext2 — the filesystem that enforces
+permissions — a file the caller was not allowed to read reported as a file that
+did not exist, and the same string covered `FS_ERR_AUTH` (a cluster peer
+refusing a signature) and a transient `NO_FS` during an `fsd` restart.
+`fs_error_msg` now exposes the message table so `ls` keeps its
+`ls: <operand>: <msg>` prefix without a second copy of it. The shell's own copy
+of that table — separate because the shell has its own fs layer — had drifted
+too: missing `NO_FS` and `FS_ERR_READ_ONLY`, and an `FS_ERR_INVALID_NAME`
+message still naming an 8.3 restriction that FAT32 long-filename write removed
+on 2026-08-27.
+
+**`ls` of a host-served 9P mount had been failing since 2026-08-27.**
+`scripts/np9p_server.py` implemented no `NP_STAT`, and `ls` began stating a
+named operand when it gained `-l` and file operands; the peer returned a generic
+error and `ls` rendered it as a path problem. Recorded in the roadmap for three
+days as a guest-side path-resolution bug, which it was not. The peer now serves
+`NP_STAT`, answers a definitively-absent path with `FS_ERR_NOT_FOUND` (which
+`ulib::fs_presence` branches on to tell *absent* from *could not tell*, so
+`cp`/`mv`'s overwrite guard works against it), refuses a known-but-unsupported
+verb with `FS_ERR_READ_ONLY`, and prints the number of any verb it does not
+serve. Host-side tooling only; nothing in the shipped image changed.
+
+**The cross-language wire check grew from 12 to 27 constants.** It now reads
+`syscall-abi` as well as `ninep-abi`, parses the `u64::MAX - N` status-code idiom
+both Python peers hand-transcribe as `(1 << 64) - 1 - N`, and covers the
+`StatInfo` field offsets and the directory flag bit — which had been invisible
+to the parser on *both* sides, so the bit deciding whether a remote entry lists
+as a directory was pinned by nothing. Forged: with that bit drifted, `ls -l` of
+a remote mount classifies the mount **root** as a file and prints one zero-byte
+line, never enumerating the directory, exit code 0.
+
+**Documentation.** `CLAUDE.md` shrank 198KB → 50KB, its two long indexes moved
+verbatim to `docs/README.md` (every document, annotated) and
+`docs/source-map.md` (every source file, annotated) — nothing deleted, and both
+now live beside what they describe. The twenty-ninth postmortem,
+[`true-when-written-postmortem.md`](true-when-written-postmortem.md), covers the
+class three of the above share: a statement that was correct when written and
+was falsified later by a change in a different file, where no compiler, test or
+review can see it. One had a shelf life of four and a half hours.
+
 ## v0.17.0 — the small-gaps parking lot, and the observers that could not see it (2026-09-02)
 
 Released as **v0.17.0**. Not an arc: seven roadmap ledger entries struck with
