@@ -1385,6 +1385,25 @@ pub const FS_ERR_PERM: u64 = u64::MAX - 32;
 /// in the same commit.
 pub const FS_ERR_MIN: u64 = u64::MAX - 38;
 
+/// **Cross-device move**: `mv`'s source and destination resolved to different
+/// namespace targets (two different mounts, or a local path and a remote one),
+/// which `NP_MV` cannot express - a rename is one request to one server, and
+/// that server can only see one of the two trees.
+///
+/// Reserved 2026-09-03, after a cross-mount `mv` was found to SILENTLY rename
+/// the file in the SOURCE's tree and report success: `ulib::fs_mv` resolved
+/// both paths but dispatched on the source's target, handing the server the
+/// destination's *string*, which it then interpreted as its own. So
+/// `mv /F.TXT /mnt/a/NEW.TXT` produced a local `/NEW.TXT` and exit 0. The
+/// comment above that code said a cross-tree move "can't arise yet (a later
+/// phase concern)" - true when every binding was tree 0, and false since
+/// remote mounts, `/proc` and multi-mount arrived.
+///
+/// This is POSIX's `EXDEV`. A future `mv` may do the copy-then-delete that
+/// Unix `mv` does across filesystems; refusing is the honest floor, and `cp`
+/// already works across a mount.
+pub const FS_ERR_CROSS_DEVICE: u64 = u64::MAX - 33;
+
 /// Generic failure sentinel for [`SPAWN`] - same bit pattern as
 /// [`FS_ERROR`] (a bad ELF, no free task slot, and a disk read failure
 /// all collapse to this one value, matching the `fs_*` syscalls' own

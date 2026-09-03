@@ -1501,12 +1501,29 @@ pub fn fs_write_at(path: &str, offset: u64, data: &[u8]) -> u64 {
 /// two paths (the server relinks the entry, no content moves). Returns `0`,
 /// [`NO_FS`], or an `FS_ERR_*` code.
 pub fn fs_mv(src: &str, dst: &str) -> u64 {
-    // Both paths resolve through the namespace; in Phase 0 every binding is
-    // tree 0, so a cross-tree move can't arise yet (a later phase concern).
     let mut fsrc = [0u8; FSP_MAX];
     let mut fdst = [0u8; FSP_MAX];
     let rs = mount_resolve(src, &mut fsrc);
     let rd = mount_resolve(dst, &mut fdst);
+    // BOTH ends must land on the same server, because the dispatch below picks
+    // ONE target (the source's) and hands it the destination's *string*. A
+    // cross-target move therefore did not fail - the destination path was
+    // reinterpreted in the source's tree, so `mv /F.TXT /mnt/a/NEW.TXT`
+    // renamed the file to a LOCAL `/NEW.TXT` and returned success. Verified
+    // against the two-node/Python-peer rig: no `NP_MV` ever reached the peer.
+    //
+    // The comment this replaces said a cross-tree move "can't arise yet (a
+    // later phase concern)". That was true while every binding was tree 0, and
+    // stopped being true when remote mounts, `/proc` and multi-mount landed -
+    // nobody came back to it. Compare the targets rather than assuming.
+    // All THREE fields, not just the server: a local `/net` and a remote mount
+    // both resolve to `NET_TASK` with tree 0 and are told apart only by the
+    // endpoint being zero or real (the discriminator the cluster arc chose and
+    // documented), so comparing servers alone would call two different targets
+    // the same one.
+    if rs.server != rd.server || rs.tree != rd.tree || rs.endpoint != rd.endpoint {
+        return syscall_abi::FS_ERR_CROSS_DEVICE;
+    }
     np_dispatch(
         &rs,
         ninep_abi::NP_MV,
@@ -1574,6 +1591,7 @@ pub fn fs_error_msg(code: u64) -> &'static [u8] {
         syscall_abi::FS_ERR_PERM => b"permission denied",
         syscall_abi::FS_ERR_IO => b"device I/O error",
         syscall_abi::FS_ERR_AUTH => b"cluster authentication failed (peer not authorized, or bad key/signature)",
+        syscall_abi::FS_ERR_CROSS_DEVICE => b"cannot move across mounts (copy it, then remove the original)",
         _ => b"failed",
     }
 }

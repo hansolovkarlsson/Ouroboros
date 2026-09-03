@@ -32,6 +32,17 @@ def rust_consts(path):
         out[name] = body.encode().decode("unicode_escape").encode("latin1")
     for name, val in re.findall(r"pub const (\w+): usize = (\d+);", src):
         out[name] = int(val)
+    # The STATUS CODES are `u64` written as an offset from the top of the range
+    # (`u64::MAX - 30`), not as a literal, and both Python peers hand-transcribe
+    # them as `(1 << 64) - 1 - 30`. That arithmetic is done twice by hand in two
+    # languages for values whose drift is silent - `ulib::fs_presence` branches
+    # on FS_ERR_NOT_FOUND, so a wrong one switches a destructive-overwrite guard
+    # rather than printing a wrong message. Parsed narrowly, matching only that
+    # idiom: anything else stays invisible rather than being guessed at.
+    for name, off in re.findall(r"pub const (\w+): u64 = u64::MAX - (\d+);", src):
+        out[name] = (1 << 64) - 1 - int(off)
+    for name in re.findall(r"pub const (\w+): u64 = u64::MAX;", src):
+        out[name] = (1 << 64) - 1
     return out
 
 
@@ -39,6 +50,13 @@ def py_consts(path):
     """The same, from a Python peer — evaluated literally, never exec'd."""
     src = open(path).read()
     out = {}
+    # `(1 << 64) - 1 - 30`, the peers' spelling of `u64::MAX - 30`. Matched
+    # before the bare-integer pattern below, which would not see it at all.
+    for name, off in re.findall(
+            r"^(\w+) = \(1 << 64\) - 1 - (\d+)\s*(?:#.*)?$", src, re.M):
+        out[name] = (1 << 64) - 1 - int(off)
+    for name in re.findall(r"^(\w+) = \(1 << 64\) - 1\s*(?:#.*)?$", src, re.M):
+        out[name] = (1 << 64) - 1
     for name, lit in re.findall(r'^(\w+) = (b"(?:[^"\\]|\\.)*")\s*$', src, re.M):
         out[name] = eval(lit)  # a bytes literal matched by the regex above
     # A trailing `# comment` is ordinary in these files, so it must not make a
@@ -68,6 +86,16 @@ CHECKED = [
     "STAT_FLAGS_OFF",
     "STAT_TIMEVALID_OFF",
     "STAT_MODEVALID_OFF",
+    # Status codes (syscall-abi). FS_ERR_NOT_FOUND is the load-bearing one:
+    # `ulib::fs_presence` branches on it to answer Absent rather than Unknown,
+    # so a peer spelling it wrong does not print a vaguer message - it switches
+    # `mv`/`cp`'s destructive-overwrite guard into its "could not tell" arm.
+    "NO_FS",
+    "FS_ERR_NOT_FOUND",
+    "FS_ERR_AUTH",
+    # Server-only: it is what the read-only export now refuses mutations with,
+    # and netd copies a status through verbatim, so the value reaches a guest.
+    "FS_ERR_READ_ONLY",
 ]
 
 # NOT checked: NP_MAC_LEN. Neither peer names it - both write the literal 32 at
@@ -110,14 +138,14 @@ CHECKED = [
 # what it is named for. Confirmed, which is why these are numbers and not a
 # truthiness test. Raise a baseline when a peer learns a new constant.
 PEER_BASELINE = {
-    "np9p_client.py": 7,   # STAT_INFO_LEN; the offsets are server-only
+    "np9p_client.py": 10,  # 6 auth + STAT_INFO_LEN + 3 status codes
     # Was 4, which BAKED THE GAP IN AS CORRECT: the server spelled the
     # public-key length with a private name and the nonce as a bare literal, so
     # the two fields deciding which guests it serves were skipped - and the
     # reduced count was recorded as expected. Both now use the shared names; the
     # floor rises with them, or the rename could be undone without this
     # noticing.
-    "np9p_server.py": 11,
+    "np9p_server.py": 15,  # the above + 4 STAT_* offsets + FS_ERR_READ_ONLY
 }
 
 
@@ -185,18 +213,37 @@ def check_dev_peer_labels(problems):
 
 
 def main():
-    rust = rust_consts(os.path.join(ROOT, "ninep-abi", "src", "lib.rs"))
+    problems_early = []
+    # BOTH crates: the verb/frame constants are ninep-abi's, the status codes
+    # syscall-abi's, and the peers spell names from each. Checked for collisions
+    # when this was added (none) - a name defined in both would silently take
+    # whichever loaded last.
+    rust, origin = {}, {}
+    for crate in ("ninep-abi", "syscall-abi"):
+        found = rust_consts(os.path.join(ROOT, crate, "src", "lib.rs"))
+        dupes = set(rust) & set(found)
+        if dupes:
+            problems_early.append(
+                f"{sorted(dupes)} declared in more than one crate - this script "
+                "merges them, so one silently wins; rename or scope them")
+        rust.update(found)
+        # WHICH crate each name came from, so a disagreement names the file to
+        # open. Reporting "ninep-abi has ..." for a syscall-abi constant sends
+        # the reader to a file that does not contain it.
+        origin.update({k: crate for k in found})
     peers = {
         name: py_consts(os.path.join(HERE, name))
         for name in ("np9p_client.py", "np9p_server.py")
     }
 
-    problems = []
+    problems = list(problems_early)
     compared = 0
     per_peer = {name: 0 for name in peers}
     for const in CHECKED:
         if const not in rust:
-            problems.append(f"{const}: not found in ninep-abi (renamed? then update this list)")
+            problems.append(
+                f"{const}: not found in ninep-abi or syscall-abi "
+                "(renamed? then update this list)")
             continue
         seen_anywhere = False
         for peer, consts in peers.items():
@@ -207,7 +254,8 @@ def main():
             per_peer[peer] += 1
             if consts[const] != rust[const]:
                 problems.append(
-                    f"{const}: ninep-abi has {rust[const]!r}, {peer} has {consts[const]!r}"
+                    f"{const}: {origin[const]} has {rust[const]!r}, "
+                    f"{peer} has {consts[const]!r}"
                 )
         if not seen_anywhere:
             problems.append(f"{const}: no Python peer spells it (dead entry in this list)")
