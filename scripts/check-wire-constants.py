@@ -59,12 +59,48 @@ CHECKED = [
     "NP_NAME_LEN",
     "NP_PUBKEY_LEN",
     "NP_SIG_LEN",
+    # Not auth fields, but the same hazard: a fixed-width record whose length
+    # AND field offsets are hardcoded across implementations. A wrong value
+    # here does not fail a signature - it silently misparses every `ls -l` over
+    # a remote mount, which is a well-formed wrong answer rather than an error.
+    "STAT_INFO_LEN",
+    "STAT_SIZE_OFF",
+    "STAT_FLAGS_OFF",
+    "STAT_TIMEVALID_OFF",
+    "STAT_MODEVALID_OFF",
 ]
 
 # NOT checked: NP_MAC_LEN. Neither peer names it - both write the literal 32 at
 # each use - so there is nothing to compare. Listing it anyway would trip this
 # script's own "dead entry" guard, which is the correct outcome for a name that
 # does not exist on one side, and the wrong way to record a nit about the peers.
+#
+# The STAT_* OFFSETS above were first left out, with a note claiming they were
+# NP_MAC_LEN's situation - "only np9p_server.py spells them, so there is no
+# second declaration to compare". BOTH HALVES OF THAT WERE WRONG, and the
+# reasoning is worth keeping because it is an easy mistake to repeat:
+#
+#   - This script does not compare the peers to EACH OTHER. It compares each
+#     peer to `ninep-abi` (see `seen_anywhere` in main), so ONE peer spelling a
+#     name is enough for that name to be checked. A server-only constant is
+#     fully checkable.
+#   - NP_MAC_LEN differs in kind, not degree: `ninep-abi` does not declare it
+#     at all, so listing it would trip the "not found in ninep-abi" guard.
+#     Being spelled by one peer is the normal case; being spelled by no Rust
+#     is the excluding one.
+#
+# The stated risk model was wrong too: it said the LENGTH is "the value whose
+# drift breaks parsing outright", implying the offsets were the safer omission.
+# The opposite holds. A wrong length IS caught (np9p_client.py checks it),
+# while a drifted STAT_FLAGS_OFF makes every remote directory render as a file
+# with no error anywhere - and a well-formed wrong answer is strictly worse
+# than a parse failure.
+#
+# NOT checked, and genuinely unpinnable as this script stands: STAT_FLAG_DIR -
+# the dir bit the peer writes. `rust_consts` matches `usize` only (it is
+# `u32`), and both int regexes want `\d+` (it is `1 << 0`), so it is invisible
+# to BOTH sides and adding it fails with "not found in ninep-abi". Widening the
+# regexes is its own change; until then the dir bit is pinned by nothing.
 
 
 # How many of CHECKED each peer is known to spell TODAY. A bare "more than
@@ -74,14 +110,14 @@ CHECKED = [
 # what it is named for. Confirmed, which is why these are numbers and not a
 # truthiness test. Raise a baseline when a peer learns a new constant.
 PEER_BASELINE = {
-    "np9p_client.py": 6,
+    "np9p_client.py": 7,   # STAT_INFO_LEN; the offsets are server-only
     # Was 4, which BAKED THE GAP IN AS CORRECT: the server spelled the
     # public-key length with a private name and the nonce as a bare literal, so
     # the two fields deciding which guests it serves were skipped - and the
     # reduced count was recorded as expected. Both now use the shared names; the
     # floor rises with them, or the rename could be undone without this
     # noticing.
-    "np9p_server.py": 6,
+    "np9p_server.py": 11,
 }
 
 
@@ -181,10 +217,18 @@ def main():
     # make them match zero constants - so refuse to report success on silence.
     #
     # PER PEER, not just in total. A single total lets one peer drop out
-    # entirely and still clear the bar on the other's matches: today the client
-    # spells 6 of these names and the server 4, so a server that stopped parsing
-    # would leave 6 >= 6 and this would report success while checking half of
-    # what it is named for.
+    # entirely and still clear the bar on the other's matches: if the server
+    # stopped parsing, the client's own matches would carry the total past a
+    # combined floor and this would report success while checking half of what
+    # it is named for.
+    #
+    # DELIBERATELY NO LONGER QUOTING THE COUNTS HERE. This comment used to say
+    # "the client spells 6 of these names and the server 4"; the 4 was already
+    # false when written (the baseline eight lines above had been raised to 6,
+    # and its own note records why), and both numbers went stale again the next
+    # time a constant was added. The numbers that must be right live in
+    # PEER_BASELINE, where the script reads them - a prose copy beside them is
+    # a restatement nothing checks.
     for peer, n in per_peer.items():
         want = PEER_BASELINE.get(peer, 1)
         if n < want:

@@ -200,16 +200,90 @@ the microkernel arc itself still leaves open):
    away the guarantee. Split and ownership are independent choices, and only
    the second one is the problem.
 
-2. **`ls` of a remote-mount ROOT fails against the host Python peer.** On the
-   `run-image-9p-client` rig, `mount -r 10.0.2.2:5641 /mnt/a` then `ls /mnt/a`
-   reports "no such file or directory", while `cat /mnt/a/HELLO.TXT` works and
-   `readdir /` from the host client works. So it is the guest's resolution of the
-   mount *root* — probably an empty path where the server expects `/` — not the
-   transport or the server. **Pre-existing**, confirmed by running the same steps
-   against `main` before per-machine keys existed; found while restoring that
-   rig as the foreign observer for the client half. `CLAUDE.md` and
-   `docs/testing-qemu.md` both show `ls /mnt/a` in that recipe, so the docs
-   promise something that has not worked for some time.
+2. ~~**`ls` of a remote mount fails against the host Python peer.**~~ —
+   **fixed 2026-09-03.** The cause was `scripts/np9p_server.py` implementing no
+   `NP_STAT` verb: `ls` stats a named operand before listing it, the peer
+   returned `FS_ERROR` for the unknown verb, and `ls` renders every error as
+   "no such file or directory". A message about a path, for a request whose
+   path was fine — which is why it sat filed as a path bug.
+
+   **Three things this entry previously got wrong, kept because each one cost
+   something.**
+
+   - **The diagnosis was wrong.** It read "the guest's resolution of the mount
+     *root* — probably an empty path where the server expects `/`". The guest
+     sends `/`, correctly; `ninep-abi`'s `resolve_ns` has an explicit guard for
+     that case. And it was never about the root — `ls /mnt/a/SUB` failed
+     identically, which the note had not tested.
+   - **The mechanism was the mirror image of the one first recorded.** The
+     first write-up called this a neglected half of a mirrored pair: the
+     client's `stat` was repaired 2026-09-02 and nobody checked the server.
+     **`git log -S` says otherwise.** The peer was created 2026-08-25
+     (`a9e7342`) and `ls` did not call `fs_stat` at all until **2026-08-27**
+     (`3cf79d1` added `-l`, `54a9b01` file operands). So the peer was adequate
+     for its documented recipe when it was written, and
+     [`roadmap-cluster-phase1.md`](roadmap-cluster-phase1.md) and
+     [`CHANGELOG.md`](CHANGELOG.md) were correct then too. The real mechanism:
+     **a guest client grew a verb dependency, and nothing re-ran the recipe
+     that depended on it.** Which matters, because the lesson points somewhere
+     different — the next `/bin` command to grow one breaks this rig the same
+     way, and `chmod`'s symbolic form already calls `fs_stat`.
+   - **A cheaper discriminator existed than the one used.** `ls` with **no
+     operand** does not stat (it lists the cwd), so `cd /mnt/a; ls` worked
+     throughout. Two commands would have isolated the fault to the operand
+     path; an ad-hoc logging wrapper round the peer was built instead. The
+     wrapper did name the verb, which is what the fix needed — but not before
+     a cheap bisect could have narrowed where to point it.
+
+   **The `ls /mnt/a/NOPE` control the first write-up leaned on does not
+   discriminate.** It was recorded as "what proves the new arm can say no", and
+   it proves nothing: an unserved verb and an absent path both reach
+   `sealed(FS_ERROR)`, so the reply is byte-identical and the check passes
+   against the *unfixed* peer. The control that does discriminate is
+   `ls /mnt/a/SUB` — it fails before the fix and lists `NOTE.TXT` after.
+   Making the absent case honestly distinguishable is the `FS_ERR_NOT_FOUND`
+   follow-up below, and it would make the `NOPE` control real as a side effect.
+
+   Scope, checked rather than assumed: `tree /mnt/a` worked against the
+   unfixed peer (it takes the directory flag from the readdir trailing `/` and
+   stats nothing), and so did
+   `cp /mnt/a/SUB/NOTE.TXT /COPY.TXT` — but **not** for the reason first
+   recorded. `cp` *does* stat, via `ulib::fs_presence`; a `grep` for `fs_stat`
+   in `cp` returns zero because the call is one level of indirection away. It
+   worked because that command's **destination was local**, so the stat never
+   crossed the mount. Reverse the operands — `cp /F.TXT /mnt/a/NEW.TXT` — and
+   it stats the remote path directly, as `mv` does for a remote source.
+
+   Follow-ups this opened, each its own change:
+
+   - **`ls` renders every `fsd` error as "no such file or directory".**
+     `ls_err` hardcodes that string and `ls` is the only command under
+     `programs/fileutils/` that never calls `ulib::fs_error` (which already
+     renders fifteen codes distinctly). This is a **guest** bug and it stays
+     armed with no Python peer anywhere: over a real ext2 mount an
+     `FS_ERR_PERM` reports "no such file or directory", which is actively
+     misleading in a security context, and so do `FS_ERR_AUTH` (a cluster
+     signature refusal) and a transient `NO_FS` during an `fsd` restart.
+   - **The peer answers an absent path with `FS_ERROR`, where `fsd` answers
+     `FS_ERR_NOT_FOUND`.** `ulib::fs_presence` branches on exactly that code,
+     so an absent remote path reads as `Unknown` rather than `Absent` — which
+     is the three-state answer `mv`/`cp`'s overwrite guard exists to consume,
+     so `cp` into this mount reports "cannot tell whether … exists" for a path
+     the peer knows for certain is absent.
+   - **`STAT_FLAG_DIR` is pinned by nothing.** `check-wire-constants.py`'s Rust
+     regex matches `usize` only (it is `u32`) and both integer regexes want
+     `\d+` (it is `1 << 0`), so the dir bit is invisible to both sides. Move
+     it in `ninep-abi` and the peer keeps writing bit 0, with `make test`
+     reporting agreement having never seen the name.
+   - **The fid verbs reach no export at all.** `NP_OPEN`/`NP_PREAD`/
+     `NP_PWRITE`/`NP_FSTAT`/`NP_CLUNK` appear in neither Python peer *and* in
+     no arm of `netd`'s export, which falls through to `FS_ERROR` — so a C
+     program's `open`/`fstat` over a remote mount fails on a real guest-to-guest
+     mount too. `ls -l` works remotely now; `fstat` of the same file does not.
+
+   The docs needed no correction: `CLAUDE.md` and
+   [`testing-qemu.md`](testing-qemu.md) both show `ls /mnt/a` in that recipe,
+   and it now does what they say.
 
 3. **The remote-read flake, on both transports.** Roughly one remote op in six
    fails, reported to the caller as a generic failure (`cat: failed`). Originally
@@ -228,6 +302,17 @@ the microkernel arc itself still leaves open):
    permission tests run on — see the message table in
    [`testing-qemu.md`](testing-qemu.md) for telling it apart from a real refusal.
    The fix wants a packet trace first, not a guess.
+
+   **Another data point, 2026-09-03** (SLIRP rig, `run-image-9p-client` shape,
+   against the Python peer): `cat /mnt/a/SUB/NOTE.TXT` failed **once in five**
+   observations — `cat: failed`, exit 1 — then succeeded 4/4 on immediate
+   re-runs with no code change in between, each showing the expected two
+   chunked `NP_READ`s arriving at the peer. Small sample, stated as one:
+   consistent with the rate already recorded, and useful mainly as a *negative*
+   result — it appeared during a run verifying an unrelated `NP_STAT` fix, and
+   the re-runs are what established it was not that change. Worth knowing when
+   the trace is finally taken: the failing op was a **chunked** read (offset
+   29, the second segment), not the first request of a connection.
 
 4. **General / transitive capability delegation.** The delegation shipped
    2026-08-21 is deliberately coarse: one delegated target per task,

@@ -20,6 +20,27 @@ Then in the guest (SLIRP maps the host to 10.0.2.2):
     cat /mnt/a/HELLO.TXT
     ls /mnt/a/SUB
     cat /mnt/a/SUB/NOTE.TXT
+
+VERBS SERVED - five names in four arms: NP_READDIR, NP_STAT, NP_READ and
+NP_READ_AT (one arm, same handling), NP_READ_FILE. Everything else gets
+FS_ERROR. That includes the mutating verbs, because the export is read-only,
+but ALSO the read-capable fid verbs NP_OPEN / NP_PREAD / NP_PWRITE / NP_FSTAT /
+NP_CLUNK, which no peer here implements and netd's export does not handle
+either - so a C program's open/fstat over a remote mount fails the same way,
+and read-only is not the reason.
+
+This list is hand-maintained prose and nothing compares it to the dispatch
+chain; `serve_request`'s fallthrough is the authority, and it PRINTS the verb
+number it refused.
+
+An unimplemented verb does NOT surface as "unsupported" at the guest. It
+surfaces as whatever the *command* makes of FS_ERROR, which is usually "no such
+file or directory" - a message about a path, for a request whose path was fine.
+That cost a real debugging session: `ls` stats a named operand before listing
+it, so a missing NP_STAT made `ls /mnt/a` fail while `cat` under the same mount
+worked, and the symptom was recorded in the roadmap for days as a guest-side
+path-resolution bug. If a guest command fails here for a reason that makes no
+sense, read the fallthrough's output before suspecting the guest.
 """
 import hashlib
 import os
@@ -32,6 +53,20 @@ NP_READDIR = NP_BASE + 0
 NP_READ_FILE = NP_BASE + 1
 NP_READ = NP_BASE + 2
 NP_READ_AT = NP_BASE + 10
+NP_STAT = NP_BASE + 12
+
+# `NP_STAT`'s reply: status = STAT_INFO_LEN, payload = a fixed 27-byte StatInfo.
+# The offsets are `ninep-abi`'s STAT_* constants; keep them in step with it.
+# `ls` STATS ITS TARGET BEFORE LISTING IT, so a peer without this verb makes
+# every `ls` of a remote mount fail as "no such file or directory" while `cat`
+# of a file under the same mount works - which is exactly how the bug this
+# implements away was recorded, as a path-resolution fault in the guest.
+STAT_INFO_LEN = 27
+STAT_SIZE_OFF = 0
+STAT_FLAGS_OFF = 8
+STAT_TIMEVALID_OFF = 19
+STAT_MODEVALID_OFF = 26
+STAT_FLAG_DIR = 1 << 0
 
 FS_ERROR = (1 << 64) - 1
 NO_FS = (1 << 64) - 2
@@ -217,6 +252,50 @@ def listing(path):
     return out
 
 
+def stat_info(path):
+    """A 27-byte StatInfo for a path in the served tree, or None if absent.
+
+    Only size and the dir flag are set. The time and mode valid-flags are left
+    at the zero every other byte starts as, which is how `fsd` reports a
+    filesystem that cannot model a field: `time: None` on exFAT, ext2 and
+    `/proc` (FAT32 DOES decode an mtime), and `mode: None` on FAT32, exFAT and
+    `/proc`. The two lists are different, which is why this says both rather
+    than one triple for both halves.
+
+    What the guest does with an absent field is NOT this peer's choice, and
+    is worth knowing before reading `ls -l` output as evidence: `ls`
+    SYNTHESIZES a mode string when it has none (`perm_string`, `None if is_dir
+    => 0o755` else `0o644`), so a remote listing prints a plausible
+    `-rw-r--r--` in the column ext2's real bits occupy. The dashes in the
+    uid/gid/time columns are real absences; the mode column is not.
+
+    The valid-flags are deliberately NOT written as an explicit `= 0`. That
+    assignment cannot fail visibly - the bytearray is already zero, so 25 of
+    the 27 possible offsets produce a byte-identical record - while an
+    out-of-range offset raises IndexError, which `main`'s
+    `except (ConnectionError, OSError)` does not catch, killing the accept
+    loop. `fsd`'s own reference does `fill(0)` then only ever writes `= 1`.
+    """
+    if path in DIRS:
+        size, is_dir = 0, True
+    elif path in FILES:
+        size, is_dir = len(FILES[path]), False
+    else:
+        return None
+    info = bytearray(STAT_INFO_LEN)
+    info[STAT_SIZE_OFF:STAT_SIZE_OFF + 8] = struct.pack("<Q", size)
+    flags = STAT_FLAG_DIR if is_dir else 0
+    info[STAT_FLAGS_OFF:STAT_FLAGS_OFF + 4] = struct.pack("<I", flags)
+    # Slice-assignment RESIZES a bytearray on a width mismatch rather than
+    # raising, so a struct-format slip would ship a record whose length
+    # disagrees with the status the caller is told - and nothing guest-side
+    # compares the two (`ulib::fs_stat` returns the status without checking the
+    # bytes delivered). Every sibling arm sends a MEASURED length; this is the
+    # only one sending a constant, so it states the equivalence instead.
+    assert len(info) == STAT_INFO_LEN, f"StatInfo width {len(info)} != {STAT_INFO_LEN}"
+    return bytes(info)
+
+
 def read_frame(sock):
     """Read one [u32 len][body] frame; return body bytes (or None on EOF)."""
     hdr = b""
@@ -274,6 +353,12 @@ def serve_request(body):
         out = out[:want]
         return sealed(len(out), out)
 
+    if verb == NP_STAT:
+        info = stat_info(path)
+        if info is None:
+            return sealed(FS_ERROR)
+        return sealed(STAT_INFO_LEN, info)
+
     if verb in (NP_READ, NP_READ_AT):
         data = FILES.get(path)
         if data is None:
@@ -289,7 +374,18 @@ def serve_request(body):
         want = a1
         return sealed(len(data), data[:want])
 
-    # Any mutate/unknown verb: the export is read-only.
+    # Anything else. SAY SO ON STDOUT: this line is why the bug that added the
+    # NP_STAT arm above cost a debugging session. An unserved verb was
+    # indistinguishable from an absent path at the guest (both FS_ERROR, which
+    # `ls` renders as "no such file or directory"), so the only way to learn
+    # that the verb number was 0x10c was to wrap this script in an ad-hoc
+    # logger. Printing it costs one line and makes the next gap name itself.
+    #
+    # A prose list of served verbs sits in this file's docstring with nothing
+    # comparing it to this dispatch chain, so treat THIS as the authority.
+    print(f"  [unserved verb 0x{verb:x} path={path!r}] -> FS_ERROR "
+          f"(the guest will most likely report 'no such file or directory')",
+          flush=True)
     return sealed(FS_ERROR)
 
 
