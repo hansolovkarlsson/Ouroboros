@@ -146,7 +146,7 @@ structure.
   (picolibc is ported, C programs run — see `docs/libc-arc-postmortem.md`), so
   what's left is porting a real *application* and the `fork`/`select`/signals
   mismatches, not inventing the mechanism. Deliberately a userland personality,
-  never a POSIX kernel — see `docs/roadmap.md`.
+  never a POSIX kernel — see `docs/ROADMAP.md`.
 
 See also: `docs/architecture.md` (how the pieces fit),
 `docs/roadmap-cluster.md` (where the distributed direction is headed), and

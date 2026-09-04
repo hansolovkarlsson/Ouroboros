@@ -670,7 +670,7 @@ run: esp
 
 # Same as `run`, plus a virtio-net device on virtio-mmio with QEMU's
 # user-mode (SLIRP) networking - the dev loop for the network stack
-# (kernel/src/virtio_net.rs, docs/roadmap.md's Stage 1). SLIRP answers ARP
+# (kernel/src/virtio_net.rs, docs/ROADMAP.md's Stage 1). SLIRP answers ARP
 # for its gateway (10.0.2.2), which is what init_net's boot-time probe
 # exercises. `-object filter-dump` writes every frame to $(NET_PCAP) for
 # independent host-side inspection (tcpdump/tshark), the same "verify against

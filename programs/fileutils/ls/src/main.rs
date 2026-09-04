@@ -169,7 +169,7 @@ pub extern "C" fn _start() -> ! {
     // unreachable cluster peer all with status 0, and no script could detect an
     // `ls` failure; every other command under `programs/fileutils/` exits 1 on
     // error. Found 2026-09-03 when a test harness scored a whole run of
-    // failures as passes because of it (docs/roadmap.md frontier item 3).
+    // failures as passes because of it (docs/ROADMAP.md frontier item 3).
     //
     // Accumulated rather than returned early, because the loops deliberately
     // CONTINUE past a bad operand - `ls good bad` must still list `good`, which

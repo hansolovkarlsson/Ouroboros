@@ -11,7 +11,7 @@ This note is forward-looking design reasoning, a companion to
 [`research-directions.md`](research-directions.md) and
 [`research-redox-and-pi.md`](research-redox-and-pi.md). It expands roadmap
 item **f** ("Graphics card / GPU support") in
-[`roadmap.md`](roadmap.md) from *"note virtio-gpu as the entry point"* into
+[`ROADMAP.md`](ROADMAP.md) from *"note virtio-gpu as the entry point"* into
 *"here is the whole stack, and here is which layer is actually blocking."*
 
 **Ouroboros's own state below is drawn from the tree, not from memory** —

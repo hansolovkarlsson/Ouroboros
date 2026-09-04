@@ -1,7 +1,7 @@
 # The small-gaps arc — clearing the roadmap parking lot
 
 *A design/bug retrospective (a nineteenth piece, 2026-08-27). The day the
-"Open gaps" and "Remaining follow-ups" lists in `roadmap.md` got emptied of
+"Open gaps" and "Remaining follow-ups" lists in `ROADMAP.md` got emptied of
 their small items — seven of them, in a row: FAT32 long-filename **write**,
 GPT **CRC validation** + backup fallback, `a | b > file` (pipelines compose
 with redirection), `grep` **flags** (`-i`/`-v`/`-n`) + a cooperative **`YIELD`**

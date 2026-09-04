@@ -152,7 +152,7 @@ influences without imitating them outright.
 ## Concrete patterns worth revisiting once the prerequisites exist
 
 Not commitments, just noted parallels between where MINIX's design landed
-and where this project's own [`roadmap.md`](roadmap.md) is already headed:
+and where this project's own [`ROADMAP.md`](ROADMAP.md) is already headed:
 
 - **A "boot image" of more than one program**, the way MINIX packs
   kernel+PM+VFS+RS together, is a natural generalization of `loader.rs`

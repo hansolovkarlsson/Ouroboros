@@ -5,7 +5,7 @@ The design for the next tier of cluster security after
 keypair**, and a machine authorizes its peers by listing their *public* keys.
 The shared `\CLUSTER.KEY` goes away.
 
-This is item 1 of [`roadmap.md`](roadmap.md) — the half of it that should be
+This is item 1 of [`ROADMAP.md`](ROADMAP.md) — the half of it that should be
 built first, ahead of both per-*user* keys and the designated auth server
 evaluated in the same item.
 
@@ -344,7 +344,7 @@ reply-domain signature offered as a request is refused.
 - **Per-*user* keys.** A machine can still vouch for any of *its own* users, so
   this defends against a machine you have not authorized, not against a
   compromised one lying about its users. That is the tier the designated auth
-  server addresses — evaluated in [`roadmap.md`](roadmap.md) item 1.
+  server addresses — evaluated in [`ROADMAP.md`](ROADMAP.md) item 1.
 - **Replay protection, transport encryption, `cpu`-stream reply auth.** Unchanged
   and still gated behind the "leaving a trusted network" trigger in
   [`roadmap-cluster.md`](roadmap-cluster.md).

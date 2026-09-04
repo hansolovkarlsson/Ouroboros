@@ -8,7 +8,7 @@ for the full QEMU run/test guide (single machine *and* the two-node
 cluster), [`architecture.md`](architecture.md) for how the kernel works,
 [`processes.md`](processes.md) for the userland program model,
 [`shell-commands.md`](shell-commands.md) for the builtin command
-reference, [`roadmap.md`](roadmap.md) / [`roadmap-cluster.md`](roadmap-cluster.md)
+reference, [`ROADMAP.md`](ROADMAP.md) / [`roadmap-cluster.md`](roadmap-cluster.md)
 for what's next, and `CLAUDE.md` at the repository root for the debugging
 history behind every design decision. To build an OS like this yourself,
 [`tutorial.md`](tutorial.md) is the staged from-scratch guide.

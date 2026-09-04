@@ -28,7 +28,7 @@ xHCI** path — but **networking has no working path at all**:
 
 - `netd`'s NIC driver is **virtio-mmio**, which is skipped on Parallels; and
 - Parallels' own NIC is **virtio-PCI**, a transport this project deliberately
-  does not have yet (see [`roadmap.md`](roadmap.md)'s "Platform reality").
+  does not have yet (see [`ROADMAP.md`](ROADMAP.md)'s "Platform reality").
 
 So on Parallels `NET_MAC` returns `NET_ERROR`, `netd` reports *"no NIC this
 boot,"* and **every network/cluster feature is unreachable**: `ping`, `resolve`,
@@ -154,7 +154,7 @@ a guessable machine key. Copy one in from a machine that has entropy.
 Genuine **two-node real-hardware** cluster testing is gated, in order, on:
 
 1. **A virtio-PCI transport for the NIC** — the named sub-project in
-   [`roadmap.md`](roadmap.md) ("Platform reality: the storage story again").
+   [`ROADMAP.md`](ROADMAP.md) ("Platform reality: the storage story again").
    Same shape as storage: virtio-mmio on QEMU, a separate PCI path for Parallels.
    Until it lands, `netd` has no NIC on Parallels, so **no cluster feature can
    run there at all.** This is independently the thing blocking *all* Parallels
@@ -185,7 +185,7 @@ step 1 exists.
 
 - [`testing-qemu.md`](testing-qemu.md) — the QEMU dev loop and the two-node
   cluster testing that covers everything Parallels currently can't.
-- [`roadmap.md`](roadmap.md) — the virtio-PCI transport sub-project (Part B step 1).
+- [`ROADMAP.md`](ROADMAP.md) — the virtio-PCI transport sub-project (Part B step 1).
 - [`xhci-keyboard-postmortem.md`](xhci-keyboard-postmortem.md),
   [`usb-storage-postmortem.md`](usb-storage-postmortem.md),
   [`filesystems-arc-postmortem.md`](filesystems-arc-postmortem.md) — the

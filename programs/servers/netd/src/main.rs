@@ -2416,7 +2416,7 @@ fn handle_9p(c: &mut TcpConn, request: &[u8], dials: &mut [Option<DialConn>; MAX
     // key can claim ANY name. This defends against the *users* of a trusted
     // node, which is the real exposure - a node's own users are not all trusted
     // even when the node is. Defending against a compromised node needs
-    // per-user keys, a further tier (docs/roadmap.md).
+    // per-user keys, a further tier (docs/ROADMAP.md).
     let proxy = match map_user(&name) {
         Ok(p) => p,
         Err(cause) => {
@@ -5143,7 +5143,7 @@ fn now() -> u64 {
 /// taking too long. A remote `cat` of a 1960-byte file is five sequential round
 /// trips; against a peer that signs in Python (~0.6s each) that is 3.0s, and it
 /// failed 100% of the time with the supervisor restarting `netd` underneath it.
-/// Traced 2026-09-03 - see docs/roadmap.md frontier item 3, where the packet
+/// Traced 2026-09-03 - see docs/ROADMAP.md frontier item 3, where the packet
 /// capture showed every TCP connection healthy and the fault here instead.
 ///
 /// The kernel intercepts a `MSG_SEND` to `KERNEL_SENDER` as an ack before any

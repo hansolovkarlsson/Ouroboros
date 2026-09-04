@@ -235,7 +235,7 @@ same day as the isolation work, which is not a coincidence.
   catches both crashes and wedges. But a crash in any *kernel-resident*
   driver (xHCI, virtio-blk/the block transport) still takes the system
   down — it's EL1 code, and the no-IOMMU DMA constraint is what keeps the
-  block transport in the kernel for now (see `roadmap.md`).
+  block transport in the kernel for now (see `ROADMAP.md`).
 - **Wedge detection is heuristic, not a proof.** Both detectors are sound
   on this single-user, fast-request system — a healthy server returns to
   `Blocked` in far less than a tick, and acks a ping within a tick or two —

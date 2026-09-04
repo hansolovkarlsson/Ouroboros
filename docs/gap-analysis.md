@@ -9,7 +9,7 @@ would take* and which roadmap arc it lives under.
 
 This exists to **sequence the work**, not to aspire. It is the organizing
 exercise behind the "North-star directions" section of
-[`roadmap.md`](roadmap.md): it surfaces which gaps are one small program and
+[`ROADMAP.md`](ROADMAP.md): it surfaces which gaps are one small program and
 which are multi-milestone arcs, so the order of the next arcs falls out of the
 map rather than being guessed. Keep it *factual* — a description of where the
 line is today, the way the roadmap's parking lot tracks specific known gaps,
@@ -24,7 +24,7 @@ just organized as a coherent map. When a row changes, update it here.
 
 Cross-references: syscalls are named as in [`syscall-abi/src/lib.rs`]; the
 server protocols are `FSOP_*` (fsd) / `NETOP_*` (netd) / the `ninep-abi` verb
-set; roadmap arcs are cited by their `roadmap.md` section.
+set; roadmap arcs are cited by their `ROADMAP.md` section.
 
 ---
 
@@ -92,7 +92,7 @@ set; roadmap arcs are cited by their `roadmap.md` section.
 
 | Capability | Status | Notes / what it would take |
 |---|---|---|
-| A libc (C) | ◐→✓ | **Exists as a userland POSIX personality — picolibc is ported** (`/bin/CPICO`: float `printf`, `snprintf`, `qsort`, `malloc`, `strtol`), *not* a kernel ABI. Built `-fPIC` (self-relocates under the loader, zero `ABS64`), linked against ~8 syscall stubs (`write`/`read`/`open`/`close`/`lseek`/`fstat`/`sbrk`/`_exit`) that map onto existing server messages. A hand-rolled minimal libc (`libc/src`) preceded it. **Done:** the mechanism (unmodified C stdlib code runs). **Left:** porting a real *application* — see the libc-arc postmortem + `roadmap.md`. |
+| A libc (C) | ◐→✓ | **Exists as a userland POSIX personality — picolibc is ported** (`/bin/CPICO`: float `printf`, `snprintf`, `qsort`, `malloc`, `strtol`), *not* a kernel ABI. Built `-fPIC` (self-relocates under the loader, zero `ABS64`), linked against ~8 syscall stubs (`write`/`read`/`open`/`close`/`lseek`/`fstat`/`sbrk`/`_exit`) that map onto existing server messages. A hand-rolled minimal libc (`libc/src`) preceded it. **Done:** the mechanism (unmodified C stdlib code runs). **Left:** porting a real *application* — see the libc-arc postmortem + `ROADMAP.md`. |
 | `malloc`/`free` (real heap) | ◐ | **C:** picolibc's `malloc`/`free`/`realloc` over the `sbrk` stub (`HEAP_INFO`) — a real allocator. **Rust:** a raw fixed **heap area** used as `&mut [u8]`; **no `alloc`-backed `Vec`/`Box`/`String`** — prebuilt `liballoc` isn't PIE-linkable on stable (`R_AARCH64_ABS64`; `-Z build-std` is nightly). |
 | Dynamic linking / shared libraries | ✗ | Every program is a **static position-independent** `aarch64-none` binary (`R_AARCH64_RELATIVE` only). No `.so`, no `dlopen`. picolibc is linked statically. |
 | Threads (shared address space) | ✗ | One task = one thread of control in its own region. No `pthread`, no in-process threads. picolibc built `-Dthread-local-storage=false`, global `errno`. |
@@ -285,6 +285,6 @@ experience as complete as its *distributed* one already is.
 ---
 
 *See also:* [`comparison.md`](comparison.md) (the philosophy-level trade),
-[`roadmap.md`](roadmap.md) (the arcs each gap maps to),
+[`ROADMAP.md`](ROADMAP.md) (the arcs each gap maps to),
 [`architecture.md`](architecture.md) (how today's pieces fit), and the
 postmortems under `docs/` for why the boundary sits where it does.

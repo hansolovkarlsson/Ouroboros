@@ -14,7 +14,7 @@ and [console-server](console-server-postmortem.md) postmortems (the arcs that
 did the actual forcing) and to the [cluster](cluster-phase0-postmortem.md)
 [postmortems](cluster-distributed-postmortem.md) (where the result got its
 name). The forward half — how portability comes back — lives in
-[`roadmap.md`](roadmap.md); the honest user-facing trade is in
+[`ROADMAP.md`](ROADMAP.md); the honest user-facing trade is in
 [`comparison.md`](comparison.md); the crystallized statement of what the ABI
 *is* is the "Philosophy — not POSIX, not Linux" subsection of
 [`architecture.md`](architecture.md).
@@ -180,7 +180,7 @@ Linux-shaped, but…" — that hesitation is the signal. It means the map and th
 territory have diverged, and the divergence is usually not a mistake to fix
 but a truth to write down. The output of this postmortem isn't a code change;
 it's the reconciliation itself: the philosophy subsection in
-`architecture.md`, the portability plan in `roadmap.md`, the honest trade in
+`architecture.md`, the portability plan in `ROADMAP.md`, the honest trade in
 `comparison.md`, and this account of how the drift happened — so the next
 person who asks doesn't have to reverse-engineer the answer from the gaps at
 syscall numbers 7–14.
