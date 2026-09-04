@@ -37,10 +37,10 @@ are the ones worth having in mind before you open it:
   support, USB keyboard + storage, the userland servers, the network
   stack, …) is recorded there in condensed form. Check it for *what was
   built, and why it works the way it does*.
-- **`docs/roadmap.md`** — the forward-looking plan of known future work
+- **`docs/ROADMAP.md`** — the forward-looking plan of known future work
   (open frontier, remaining follow-ups, north-star directions, open gaps).
 - **`docs/roadmap-completed.md`** — the finished arcs that used to live in
-  `roadmap.md`, moved out so the roadmap stays forward-looking (the
+  `ROADMAP.md`, moved out so the roadmap stays forward-looking (the
   *plan-shaped* companion to `CHANGELOG.md`'s condensed milestone log).
 - **The postmortems under `docs/`** (twenty-nine of them) — the design, bug
   and process retrospectives: *the traps already hit and the lessons
@@ -540,7 +540,7 @@ testing method, unrelated to the above: `send-key-event` drives Parallels' own s
 keyboard device, not the specific physical USB keyboard from that
 postmortem - a legitimate stand-in for scripted regression checks, but
 not a substitute for real-physical-hardware confirmation of anything
-USB-passthrough-specific. See `docs/roadmap.md`'s "Testing infrastructure"
+USB-passthrough-specific. See `docs/ROADMAP.md`'s "Testing infrastructure"
 section for more.
 
 ## Toolchain
@@ -576,7 +576,7 @@ docs/                every document is annotated in full in `docs/README.md` - r
   processes.md       reference: userland loading, the ELF/PIE binary format, the relocation-class traps - READ THIS BEFORE WRITING ANY USERLAND PROGRAM
   shell-commands.md  reference: the default shell's builtin commands
   CHANGELOG.md       the milestone record, phase 0 to the present, newest first - what was built, and why it works the way it does
-  roadmap.md         the forward-looking plan (finished arcs live in roadmap-completed.md; the cluster direction in roadmap-cluster.md)
+  ROADMAP.md         the forward-looking plan (finished arcs live in roadmap-completed.md; the cluster direction in roadmap-cluster.md)
   journal.md         chronological dev-log, a lighter companion to CHANGELOG.md
   testing-qemu.md    every `make run-*` target, the FAT32/exFAT/ext2/GPT test images, the 9P host peers, the two-node cluster rig
   testing-parallels.md, testing-pi4.md   the real-hardware guides. Both share one caveat: NO NETWORKING, so the whole cluster is QEMU-only

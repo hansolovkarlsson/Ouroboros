@@ -1,7 +1,7 @@
 # Ouroboros changelog
 
 Historical record of completed milestones, newest first. For
-forward-looking plans, see [`roadmap.md`](roadmap.md); for the
+forward-looking plans, see [`ROADMAP.md`](ROADMAP.md); for the
 debugging history and lessons behind each decision (what was tried,
 what broke, how it was diagnosed), see the debugging postmortems under `docs/`; for *how* something
 here actually works today, see [`architecture.md`](architecture.md) and
@@ -517,7 +517,7 @@ being able to read the file it lives in.
 requests under its own root identity — so `check_access` short-circuits on the
 root bypass before any mode is read. Not a regression, but `accountd` put a
 privileged writer on the far end of it. Promoted from a north-star note to the
-top of `roadmap.md`'s frontier.
+top of `ROADMAP.md`'s frontier.
 
 **One ABI fix worth recording here rather than only in the PR:**
 `libc/include/sys.h` hand-mirrors the reserved-error floor `FS_ERR_MIN`, and
@@ -2977,7 +2977,7 @@ file the guest wrote onto its own fresh filesystem (`HELLO.TXT` →
 stale after writes — is a **pre-existing FAT32 write-engine trait** (the engine
 never maintained FSInfo; the spec allows it to be stale, and `fsck` only warns),
 not a format bug; a write-engine follow-up. Next: milestone 3's exFAT and ext2
-mkfs steps — see `roadmap.md`.
+mkfs steps — see `ROADMAP.md`.
 
 ## Disk management tools, milestone 2: `erase` + `partition` (MBR)
 
@@ -3012,7 +3012,7 @@ refuse-while-mounted and usage guards. The resulting MBR was read cleanly by
 macOS's own `fdisk` (partition 1: type 0x07, start LBA 2048, 129024 sectors =
 131072 − 2048), and a hexdump confirmed the wipe (the old FAT32 boot sector at
 LBA 1 zeroed). Zero `-d int` aborts across the run. Next: milestone 3, `format`
-(mkfs) per filesystem — see `roadmap.md`.
+(mkfs) per filesystem — see `ROADMAP.md`.
 
 ## Disk management tools, milestone 1: `mount`-info and `unmount`
 
@@ -3036,7 +3036,7 @@ Foundational for the rest of the arc — you unmount before formatting, and
 mount-info is how you confirm a format worked. Verified on QEMU across FAT32
 (partition LBA 1) and exFAT (partition LBA 2048): the full mount-info → unmount →
 "nothing mounted" → `mount -a` → remount cycle, `ls` after remount, and the
-`mount xyz` usage guard, with zero `-d int` aborts. See `roadmap.md`'s "Disk
+`mount xyz` usage guard, with zero `-d int` aborts. See `ROADMAP.md`'s "Disk
 management tools" arc for milestones 2 (partition/erase) and 3 (format).
 
 ## More filesystems, step 5: ext2 read-write (the arc's finale)
@@ -3084,7 +3084,7 @@ binary back **byte-identical**. FAT32/exFAT unregressed.
 
 **The "more filesystems" arc is complete** (steps 0-5): GPT/MBR discovery, the
 VFS refactor, and FAT32 + exFAT + ext2, each read-write (FAT32/exFAT) or with
-ext2 now read-write too. Deferred, as noted in `roadmap.md`: ext4 (a separate
+ext2 now read-write too. Deferred, as noted in `ROADMAP.md`: ext4 (a separate
 large arc), and FAT long-filename *write*.
 
 ## More filesystems, step 4: ext2 read-only
@@ -3137,7 +3137,7 @@ running off ext2, a `cat /README.TXT | grep line | wc` pipeline (`3 11 57`),
 "no such file or directory" - the behaviour that would differ on FAT/exFAT), and
 `touch` refused "read-only filesystem". FAT32/exFAT unregressed.
 
-Next in the arc (see `roadmap.md`): ext2 read-write - inode + block-bitmap
+Next in the arc (see `ROADMAP.md`): ext2 read-write - inode + block-bitmap
 allocation and directory-record insertion, the highest corruption risk of the
 set.
 
@@ -3209,7 +3209,7 @@ hierarchy clean) after all the allocate/free/rename churn - proof the
 `SetChecksum`, `NameHash`, bitmap, and FAT stay spec-correct. FAT32 via
 `run-image` unregressed.
 
-Next in the arc (see `roadmap.md`): ext2 read-only - the genuinely different
+Next in the arc (see `ROADMAP.md`): ext2 read-only - the genuinely different
 (inode-based) model that makes the `Filesystem` abstraction prove itself.
 
 ## More filesystems, step 2: exFAT read-only
@@ -3272,7 +3272,7 @@ refused with "read-only filesystem"; `cat /nope.txt` → "no such file or
 directory". FAT32 via `run-image` unregressed (mounts as "FAT32", `touch`/`rm`
 still work).
 
-Next in the arc (see `roadmap.md`): exFAT read-write (bitmap allocation,
+Next in the arc (see `ROADMAP.md`): exFAT read-write (bitmap allocation,
 directory-entry-set writes), then ext2 read-only — the real VFS test, a
 genuinely different (inode-based) model.
 
@@ -3336,7 +3336,7 @@ byte-identical through the new dispatch: `ls`, `mkdir`/`cd`/`write`/`cat`,
 `cp`, `mv`, `rm`, `rmdir` (correctly refusing a non-empty dir), and a
 pipeline reading a file (`cat h.txt | grep works | wc` → `0 3 18`).
 
-Next in the arc (see `roadmap.md`): GPT + multi-partition (so a second
+Next in the arc (see `ROADMAP.md`): GPT + multi-partition (so a second
 filesystem on a real disk is reachable), then exFAT read-only, then ext2
 read-only (the real test of the abstraction).
 
@@ -3409,7 +3409,7 @@ chain); `cat /pt.txt | upper` → the file's contents uppercased (argv producer)
 `cat /pt.txt | upper | upper` likewise over three stages; `echo x | nosuchprog`
 and `echo x | pwd` → the not-a-program error; `pwd | upper` → "/" (builtin
 head). Only more `/bin` filters (`grep`/`wc`/`head`/`sort`) remain to make
-pipelines broadly useful — see `roadmap.md`.
+pipelines broadly useful — see `ROADMAP.md`.
 
 ## Multi-stage pipelines, step 1: a chainable filter shape (`upper` over `ulib`)
 
@@ -3432,7 +3432,7 @@ existing two-stage pipes: `echo hello world | /EFI/ORBS/UPPER.BIN` → "HELLO
 WORLD" (builtin-captured left), and `cat /pt.txt | /EFI/ORBS/UPPER.BIN` →
 "PIPED THROUGH A FILTER" (program left, live relay).
 
-The rest of the arc is staged in `roadmap.md`: N-stage parsing, argv on
+The rest of the arc is staged in `ROADMAP.md`: N-stage parsing, argv on
 pipeline stages (so `cat FILE | …` works), PATH resolution in pipes, the
 N-stage spawn/delegate/wait plumbing (a linear chain needs only the existing
 one-target-per-task delegation), then real `/bin` filters as the payoff.
@@ -3509,7 +3509,7 @@ a real address; `resolve nonexistent.invalid` → "could not resolve" (exit 1);
 "… bytes total" truncation note; `resolve example.com > /res.txt` then `cat`
 showed the captured line.
 
-The three deliberately-builtin groups remain (see `roadmap.md`): `ps`/`kill`/
+The three deliberately-builtin groups remain (see `ROADMAP.md`): `ps`/`kill`/
 `wait`/`fg` (job control), and `mount`/`selftest`/`help` (shell-coupled). With
 the network commands out, the externalization arc is effectively complete.
 
@@ -3550,7 +3550,7 @@ source to any of the three → the specific error and exit code 1.
 `mkdir`/`rmdir`/`touch`/`rm` + `cp`/`mv`/`writeat`), with only `write`, `cd`,
 and `pwd` left in the shell. The arc continues with the non-fs commands
 (`ps`/`kill`/`wait`/`ping`/`resolve`/`fetch`/`mount`/`selftest`/`help`). See
-`roadmap.md`.
+`ROADMAP.md`.
 
 ## Standalone binaries, Stage 4 (write-command increment): `mkdir`/`rmdir`/`touch`/`rm` externalized
 
@@ -3578,7 +3578,7 @@ an existing one → "already exists", `rm` on a directory → "is a directory",
 
 Still builtin (they need the shell's own state or move bulk data): `write`,
 `writeat`, `cp`, `mv`. The arc continues with those, then the non-fs commands.
-See `roadmap.md`.
+See `ROADMAP.md`.
 
 ## Standalone binaries, Stage 4 (filesystem increment): a cwd-delivery ABI, and `ls`/`cat` externalized
 
@@ -3618,7 +3618,7 @@ remaining builtins unregressed.
 The arc continues: the rest of the filesystem commands
 (`mkdir`/`rmdir`/`touch`/`rm`/`cp`/`mv`/`writeat`) can now follow the same
 cwd+argv pattern, then the non-fs ones (`ps`/`kill`/`wait`/`ping`/…). See
-`roadmap.md`.
+`ROADMAP.md`.
 
 ## Standalone binaries, Stage 4 (first increment): `ulib` + echo/uptime/clear externalized
 
@@ -3647,7 +3647,7 @@ The tradeoff, documented: an externalized command is unavailable on a boot
 without `/bin` (e.g. `make run`'s unmountable FAT16, or real hardware with no
 stick) — a bare `echo` there is "unknown command" rather than the builtin it
 used to be. A minimal built-in fallback set is a deferred option (see
-`roadmap.md`).
+`ROADMAP.md`).
 
 Verified on QEMU (run-image): `echo hello world` → `hello world` (via
 `/bin/ECHO`, task 5, reaped); `uptime` → a real tick count; three invocations
@@ -3657,7 +3657,7 @@ captured text; `help`/`selftest`/`ls /bin` and the remaining builtins
 unregressed; zero `-d int` aborts.
 
 The arc continues: a cwd-delivery mechanism, then the filesystem commands
-(`ls`/`cat`/…). See `roadmap.md`.
+(`ls`/`cat`/…). See `ROADMAP.md`.
 
 ## Standalone binaries, Stage 3: a shell environment
 
@@ -3687,7 +3687,7 @@ Verified on QEMU (run-image): `env` shows `PATH=/bin`; `set GREETING=hello` +
 aborts.
 
 Next (last of the arc): externalize the actual commands into `/bin`
-(Stage 4). See `roadmap.md`.
+(Stage 4). See `ROADMAP.md`.
 
 ## Standalone binaries, Stage 2: /bin + PATH lookup
 
@@ -3724,7 +3724,7 @@ then `cat` showed the captured argv; zero `-d int` aborts.
 
 Next in the arc: a shell environment (Stage 3, makes PATH a real env var),
 then externalizing the actual commands into `/bin` (Stage 4). See
-`roadmap.md`.
+`ROADMAP.md`.
 
 ## Standalone binaries, Stage 1: an argv ABI
 
@@ -3766,7 +3766,7 @@ is a zombie holding its slot until waited; that's the existing 2-slot/reaping
 limit the arc's Stage 0 addresses, not an argv issue.)
 
 Still to come in the arc: `/bin` + PATH lookup (Stage 2), a shell environment
-(Stage 3), and externalizing the commands (Stage 4). See `roadmap.md`.
+(Stage 3), and externalizing the commands (Stage 4). See `ROADMAP.md`.
 
 ## Network stack, Stage 4o: TCP SACK (sender-side selective retransmit)
 
@@ -4329,12 +4329,12 @@ with `tcpdump` of the pcap: `ping 10.0.2.2`/`10.0.2.3` → `reply from ...`,
 and ICMP echo request/reply (`id 0x4f42`, checksums validated) for the
 reachable hosts. The renumber left everything working (`selftest`, disk
 surface, `exec` → slot 5, pipe → slot 6, `ps` shows netd in slot 4), no
-supervisor restart. See `docs/roadmap.md`. UDP is Stage 3, TCP Stage 4.
+supervisor restart. See `docs/ROADMAP.md`. UDP is Stage 3, TCP Stage 4.
 
 ## Network stack, Stage 1: a virtio-net driver, and the first frames this kernel has sent
 
 The first networking this project has ever had. Stage 1 of the network-stack
-arc (`docs/roadmap.md`): the **kernel-side virtio-net driver only** - the
+arc (`docs/ROADMAP.md`): the **kernel-side virtio-net driver only** - the
 DMA-owning half that, per the no-IOMMU DMA constraint, must stay in the
 trusted EL1 kernel (a device can DMA anywhere without an IOMMU, so the
 ring/buffer owner can't be an untrusted EL0 task - the same rule that keeps
@@ -4368,7 +4368,7 @@ the reply in - TX and RX confirmed by a source outside the kernel's own
 output. Regression: plain `make run` boots normally, `init_net` silent, zero
 `-d int` aborts. Still just the driver: no protocol stack, no `NET_*`
 syscalls yet (those land with `netd`, Stage 2), polled not interrupt-driven,
-QEMU-only. See `docs/roadmap.md`.
+QEMU-only. See `docs/ROADMAP.md`.
 
 ## FAT32 interior / random-access writes (`write_at` past EOF) - and a `writeat` builtin
 
@@ -5281,7 +5281,7 @@ section.
 **The goal:** replace the flat, position-*dependent* userland-program
 loader with a real ELF64 loader that parses `PT_LOAD` segments and
 processes `R_AARCH64_RELATIVE` self-relocations against wherever a
-program actually loads - the documented fix (`roadmap.md`) for this
+program actually loads - the documented fix (`ROADMAP.md`) for this
 project's single most-repeated bug class: `core::fmt`'s argument-
 dispatch table and slice/literal comparisons both crashing for the
 identical reason (an absolute data pointer baked in for a link-time
@@ -5425,7 +5425,7 @@ own CLI, `prlctl`, can script an entire real-hardware test round trip
 (boot, type via `send-key-event`, screenshot via `capture`) with no
 human watching the VM live - now `make test-parallels`
 (`scripts/test-parallels.sh`). Every real-hardware round trip in this
-milestone went through it. See `roadmap.md`'s "Testing infrastructure"
+milestone went through it. See `ROADMAP.md`'s "Testing infrastructure"
 section.
 
 ## USB HID keyboard driver: confirmed - real, physical keyboard input on real Parallels hardware, first time ever
@@ -5499,7 +5499,7 @@ simple layout regardless), no stall recovery on the interrupt endpoint
 specifically (EP0's setup-time control transfers do recover from a
 Stall), only the first matching interrupt IN endpoint is ever
 configured. Preemptive multitasking is still unavailable on Parallels
-(a separate, already-tracked gap - see `roadmap.md`).
+(a separate, already-tracked gap - see `ROADMAP.md`).
 
 ## GOP framebuffer console: confirmed - a real, working shell prompt on real Parallels hardware, first time ever
 
@@ -6012,7 +6012,7 @@ lot both flagged.
   an end-to-end test, since nothing in this kernel can yet create a
   file spanning more than one cluster). No `cp`, no output redirection
   yet — those need shell-side plumbing this syscall alone doesn't
-  provide (see `roadmap.md`'s parking lot).
+  provide (see `ROADMAP.md`'s parking lot).
 
 ## Phase 5 — file lifecycle: `touch`/`rm`
 
@@ -6150,7 +6150,7 @@ phase is really three dependent stages:
   step toward this project's stated microkernel goal, using the driver as
   the forcing function for dynamic task creation and real IPC. Decided
   against, for now — that would pull the process-model/IPC work (see
-  `roadmap.md`'s parking lot) into phase 3's critical path, and phase 3's
+  `ROADMAP.md`'s parking lot) into phase 3's critical path, and phase 3's
   actual goal is disk commands working at all. Revisit once there's more
   than one reason to want driver isolation; virtio itself doesn't
   require it.
@@ -6209,7 +6209,7 @@ phase is really three dependent stages:
   accumulate them literally.
 
 **Deliberately out of scope at the time** (later picked up as phases
-4/5, or still open — see `roadmap.md`): any write support (`mkdir`,
+4/5, or still open — see `ROADMAP.md`): any write support (`mkdir`,
 `rm`, `touch`, `cp`, `mv`, output redirection — writing to a real
 filesystem is a meaningfully bigger risk than reading, and doesn't block
 anything read-only commands need); `stat`/`file`/`find`/`tree`; wiring

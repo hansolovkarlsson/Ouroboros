@@ -1,5 +1,5 @@
 /* The first C program to run on Ouroboros — the foundational proof for the
- * userland-libc arc (docs/roadmap.md, "POSIX / C-program portability").
+ * userland-libc arc (docs/ROADMAP.md, "POSIX / C-program portability").
  *
  * Deliberately self-contained (its own _start + syscall stubs, no libc yet):
  * the point is to prove the *toolchain path* end to end — C cross-compiled to

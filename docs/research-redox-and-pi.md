@@ -66,7 +66,7 @@ standard library + POSIX layer *written in Rust*, and it's the mechanism that
 lets Redox run genuine C/C++ programs **and** Rust `std` programs. Two lessons
 specifically transferable to us:
 - It's the **existence proof for the plan we already wrote** — the
-  posix-divergence postmortem and `roadmap.md`'s portability section both say
+  posix-divergence postmortem and `ROADMAP.md`'s portability section both say
   "C portability comes back as a userland libc, not a POSIX kernel." Redox
   proves that's not hand-waving: a non-POSIX Rust microkernel really does run C
   via a compat libc.

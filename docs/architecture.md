@@ -10,7 +10,7 @@ For the process-loading/userland-program model specifically (the newest
 subsystem, and the one most likely to change next), see
 [`processes.md`](processes.md). For completed milestones, see
 [`CHANGELOG.md`](CHANGELOG.md); for what's planned next and why, see
-[`roadmap.md`](roadmap.md). For how this boot flow compares to a mature
+[`ROADMAP.md`](ROADMAP.md). For how this boot flow compares to a mature
 microkernel's (MINIX), see
 [`research-minix-boot.md`](research-minix-boot.md).
 
@@ -313,7 +313,7 @@ framebuffer — the kernel's old `fbconsole` never did.
 from disk and starts it running **alongside** whatever's already
 running — this is `tasks::spawn`, not POSIX exec-replaces-current-process
 semantics. The shell command is named `exec` to match
-`docs/roadmap.md`'s original wording for this item, but nothing about
+`docs/ROADMAP.md`'s original wording for this item, but nothing about
 the calling task is replaced or stopped; it keeps running, and the new
 program becomes a new, independent task in whichever spawnable slot
 (4-5) is `Unused`.

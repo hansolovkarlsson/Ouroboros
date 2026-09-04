@@ -1,5 +1,5 @@
 //! virtio-net: raw Ethernet frame send/receive over `virtio_mmio`'s
-//! transport, Stage 1 of the network stack (`docs/roadmap.md`). This is the
+//! transport, Stage 1 of the network stack (`docs/ROADMAP.md`). This is the
 //! kernel-side NIC driver only - the DMA-capable half that, per the
 //! no-IOMMU DMA constraint, must stay in the trusted EL1 kernel (a device
 //! can DMA anywhere without an IOMMU, so the ring/buffer owner can't be an
@@ -40,7 +40,7 @@
 //! over PCI, which needs a virtio-pci transport this project doesn't have -
 //! so this driver, like `virtio_blk`, only runs behind the
 //! `virtio_mmio_probe_safe` gate (QEMU), never on real Parallels yet. See
-//! `docs/roadmap.md`'s network-stack section.
+//! `docs/ROADMAP.md`'s network-stack section.
 
 use core::cell::UnsafeCell;
 use core::ptr::read_volatile;

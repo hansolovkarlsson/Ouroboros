@@ -1,7 +1,7 @@
 # Ouroboros roadmap — completed
 
 The finished arcs and milestones that used to live in
-[`roadmap.md`](roadmap.md), moved here so the roadmap stays forward-looking.
+[`ROADMAP.md`](ROADMAP.md), moved here so the roadmap stays forward-looking.
 This is the *plan-shaped* record — how each arc was sequenced and what was
 learned; for the condensed milestone log see [`CHANGELOG.md`](CHANGELOG.md),
 and for the debugging retrospectives see the postmortems under `docs/`.
@@ -13,7 +13,7 @@ parking-lot entries that are done.
 **A note on the text:** these sections are moved *verbatim* from the roadmap, so
 a few still carry their original "deferred / still-open" tails (LFN-write, ext4,
 `/dev`, exporting the environment, `sort`, GPT CRC validation, …) for context —
-those open items now live in [`roadmap.md`](roadmap.md) under "Remaining
+those open items now live in [`ROADMAP.md`](ROADMAP.md) under "Remaining
 follow-ups" and "Open gaps"; the headers' old scoping labels ("scoped",
 "IN PROGRESS") are the historical wording, not current status. Everything with
 a **DONE** marker or ~~strikethrough~~ is finished.
@@ -821,7 +821,7 @@ not-a-program error; `pwd | upper` → "/" (builtin head). Combining `|` with
 ## A userland libc personality: C-program portability, ending at picolibc (2026-08-28)
 
 The arc that made Ouroboros run C — the mechanism half of the "POSIX / C-program
-portability" plan (that plan still lives in `roadmap.md` for its *remaining*,
+portability" plan (that plan still lives in `ROADMAP.md` for its *remaining*,
 still-forward parts: `posix_spawn`/`fork`-in-userspace, `select`/`poll`/signals/
 `mmap`, and porting a real application). The full design retrospective is
 `docs/libc-arc-postmortem.md` (the twenty-first); the milestone facts are in
@@ -873,7 +873,7 @@ contract (`ABS64` unloadable, `RELATIVE` fine); `-fPIC` satisfies it for C
 exactly as `relocation-model=pic` does for Rust, and the whole picolibc port's
 viability reduced to "does `-fPIC` picolibc emit zero `ABS64`" (it does).
 
-**What is NOT done** (stays forward in `roadmap.md`): porting a real application
+**What is NOT done** (stays forward in `ROADMAP.md`): porting a real application
 (SQLite, a small C compiler) — "port one more program"; and the architectural
 mismatches (`fork`/`posix_spawn`, `select`/`poll`, signals, `mmap`). One open
 follow-up noted: picolibc's `posix-console` stdout is unbuffered (chatty console
@@ -983,7 +983,7 @@ phase:
 - ~~xHCI keyboard failing outright on a real, manually-launched
   Parallels VM~~ — **done, found and fixed the same day, by the user
   directly** (not by any of this project's own scripted testing, which
-  never reproduced it — see `docs/roadmap.md`'s "Testing infrastructure"
+  never reproduced it — see `docs/ROADMAP.md`'s "Testing infrastructure"
   section for why: `make test-parallels` drives Parallels' own synthetic
   keyboard headlessly, with no live-rendered VM window competing for
   host CPU/GPU time). Root cause: every busy-wait in `xhci.rs` was
@@ -1457,7 +1457,7 @@ phase:
 
 ## Users, permissions & account management arc — DONE (2026-08-28 → 2026-08-30)
 
-Moved here from `roadmap.md` item 4 once complete. The step from "one implicit
+Moved here from `ROADMAP.md` item 4 once complete. The step from "one implicit
 user, whoever's at the keyboard" to a real identity + permission model with
 on-device account management. Sequenced in four steps over the day, each a small
 surface joined to machinery that already existed:
@@ -1501,7 +1501,7 @@ the 22nd).
 ### Steps 5–6: the deferred tier, closed (2026-08-29 → 2026-08-30)
 
 Every refinement this arc deferred was closed within two days, **except one**.
-The write-up above listed them as staying in `roadmap.md`; they did not stay
+The write-up above listed them as staying in `ROADMAP.md`; they did not stay
 long, so here is where each went:
 
 5. **The security follow-ups (2026-08-29)** — `/etc/shadow` (#28), supplementary
@@ -1539,7 +1539,7 @@ long, so here is where each went:
 
 **What is left, and it is the whole of what is left:** per-user **cluster**
 identity, promoted from a north-star note to the frontier in
-[`roadmap.md`](roadmap.md) on 2026-08-30 — the 9P export authenticates a
+[`ROADMAP.md`](ROADMAP.md) on 2026-08-30 — the 9P export authenticates a
 machine, not a user, and `netd` relays remote requests as root, which
 `accountd` turned from a theoretical gap into one with a privileged writer on
 the far end.

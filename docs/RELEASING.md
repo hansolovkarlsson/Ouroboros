@@ -2,7 +2,7 @@
 
 How releases are cut, and the versioning scheme they follow. This is the
 process; the forward-looking work itself lives in
-[`roadmap.md`](roadmap.md) / [`roadmap-cluster.md`](roadmap-cluster.md),
+[`ROADMAP.md`](ROADMAP.md) / [`roadmap-cluster.md`](roadmap-cluster.md),
 and the per-milestone record in [`CHANGELOG.md`](CHANGELOG.md).
 
 ## Versioning scheme

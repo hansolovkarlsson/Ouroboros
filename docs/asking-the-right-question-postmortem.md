@@ -113,7 +113,7 @@ frees the old blocks *before* the new ones land — so an `fsd` restart
 The review's suggested fix was the standard one: write a temp file, then
 rename over the target. **That is not available here.** `mv` refuses an
 existing destination on all three filesystem arms, so replace-on-rename would
-be a filesystem arc of its own. (Recorded in `roadmap.md` as a real gap, with
+be a filesystem arc of its own. (Recorded in `ROADMAP.md` as a real gap, with
 the note that `ext2` can very nearly make it atomic — replacing a name means
 overwriting one directory entry's inode number in place, a single block write —
 while FAT32/exFAT have no such indirection and are unavoidably

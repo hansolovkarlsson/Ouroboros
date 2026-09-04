@@ -505,7 +505,7 @@ fn main() -> Status {
     // regardless of whether the scan itself would be safe.
     if virtio_mmio_probe_safe {
         init_storage();
-        // Network stack, Stage 1 (docs/roadmap.md): the virtio-net driver +
+        // Network stack, Stage 1 (docs/ROADMAP.md): the virtio-net driver +
         // a raw-frame ARP round-trip proof. Same gate as storage - the
         // virtio-mmio scan crashes real Parallels hardware, and Parallels
         // exposes virtio-net over PCI anyway (needs a transport this project

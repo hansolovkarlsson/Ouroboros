@@ -338,7 +338,7 @@ pub fn note_ack(slot: usize) {
         // when remote mounts landed: `netd` busy-polls a non-blocking `recv`
         // for the whole of a TCP round trip, so a multi-chunk remote read
         // against a slow peer kept it `Runnable` past 2.56s and the supervisor
-        // restarted it MID-READ. Traced 2026-09-03; see docs/roadmap.md
+        // restarted it MID-READ. Traced 2026-09-03; see docs/ROADMAP.md
         // frontier item 3.
         //
         // A genuinely wedged server never reaches the line that sends this, so

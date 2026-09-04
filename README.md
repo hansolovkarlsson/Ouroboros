@@ -113,3 +113,7 @@ stick.
 ```
 kernel/     the kernel, built as a UEFI application (aarch64-unknown-uefi)
 ```
+
+## License
+
+MIT — see [`LICENSE`](LICENSE).

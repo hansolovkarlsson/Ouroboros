@@ -278,7 +278,7 @@ protection, PER-USER keys - keys are per-MACHINE now, so an authorized machine
 can claim any of its OWN users' names - transport encryption, cpu-stream
 reply-auth), built only if Ouroboros leaves a trusted network. Also newly recorded: a measured ~1-in-6
 remote-op flake on the two-VM socket link, present on main before this arc (see
-docs/roadmap.md item 2 and testing-qemu.md's message table - `cat: failed` is
+docs/ROADMAP.md item 2 and testing-qemu.md's message table - `cat: failed` is
 the flake, `cat: permission denied` is a real refusal).
 
 **Testing rig:** two QEMU VMs on a shared L2 socket link (`make run-image-2vm-a`
@@ -410,7 +410,7 @@ metadata:
 copy goes stale within days.** Current truth lives in `CLAUDE.md` (durable
 boot/MMU/exception/syscall/task guidance), `docs/CHANGELOG.md` (milestone
 record, newest first), `docs/journal.md` (day-by-day narrative),
-`docs/roadmap.md` (what's next) and the twenty-plus postmortems under `docs/`.
+`docs/ROADMAP.md` (what's next) and the twenty-plus postmortems under `docs/`.
 Read those before describing what the OS can do today.
 
 The constraints below are here because they are *platform facts* that outlived
@@ -487,7 +487,7 @@ target is now 2× Raspberry Pi 4.**
   retry loop runs **0 times** (virtio-blk has `fsd` ready before `netd` asks), so
   that rig can observe neither the bug nor a fix. USB-MSD on a Pi is the first
   rig where the loop executes. Written up as `docs/testing-pi4.md` Risk 4b and
-  as step 4 of its "When the boards arrive", plus `roadmap.md`'s open gaps.
+  as step 4 of its "When the boards arrive", plus `ROADMAP.md`'s open gaps.
   **How to apply:** when Pi bring-up starts, that step is the one open item
   waiting on hardware - instrument the retry count first, and only then decide
   whether the fix (drain the mailbox while waiting, which touches supervision)
@@ -867,7 +867,7 @@ hardware confirmation.
 This is now wired up as `make test-parallels`
 (`scripts/test-parallels.sh` in the Ouroboros repo) — rebuilds
 `esp.hdd`, boots the VM, types a `;`-separated list of shell commands,
-and screenshots after each one. See `docs/roadmap.md`'s "Testing
+and screenshots after each one. See `docs/ROADMAP.md`'s "Testing
 infrastructure" section and `CLAUDE.md`'s "## Commands" section for the
 full writeup.
 

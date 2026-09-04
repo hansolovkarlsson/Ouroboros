@@ -1,7 +1,7 @@
 # Running and testing Ouroboros on real Raspberry Pi 4 hardware
 
 > **Status: test plan, not a test log (2026-08-28).** The boards were ordered
-> 2026-08-26 ([`roadmap.md`](roadmap.md)) and nothing here has been booted yet.
+> 2026-08-26 ([`ROADMAP.md`](ROADMAP.md)) and nothing here has been booted yet.
 > Claims are marked **(confirmed)** when they come from this repository's own
 > source or from a vendor document, and **(predicted)** when they are reasoning
 > from those two. The point of writing it before the boards arrive is that the

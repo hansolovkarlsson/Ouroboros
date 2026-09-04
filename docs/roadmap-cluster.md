@@ -355,7 +355,7 @@ netd holding the run's output in a `PendingRun` buffer), lifting the cap to ~2 K
       users' names, so the model defends against the users of a trusted node but
       not a compromised one. **A designated auth server (Plan 9's
       `authsrv` + tickets) is evaluated in full under item 1 of
-      [`roadmap.md`](roadmap.md)**: it is the right long-term shape, it is what
+      [`ROADMAP.md`](ROADMAP.md)**: it is the right long-term shape, it is what
       Plan 9 does, and the note records both the detail that decides whether it
       closes the hole at all (the ticket must be verifiable by the *exporter*
       without trusting the peer) and why per-machine keypairs should come first.

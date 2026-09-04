@@ -107,7 +107,7 @@ not production-ready.
 | Language | Rust, `no_std`, nightly | Rust, `no_std`/`alloc` pre-`exit_boot_services`, stable toolchain (no nightly, no `-Z build-std` needed — see `CLAUDE.md`'s "Toolchain" section) |
 | Kernel/policy boundary | Explicit, trait-based: core is "mechanism, not policy," every scheduler/allocator/filesystem behavior is a swappable module outside the TCB | None yet — MMU, exceptions, console drivers, and the scheduler are all undifferentiated EL1 kernel code |
 | Fault isolation | Modules can crash and be restarted, with attempted state migration, without a full reboot | None — a bug in any kernel-resident driver or the scheduler takes down the whole system, same gap noted against MINIX |
-| Runtime extensibility | Hot-reload is a designed-in primitive (pause/snapshot/swap/restore/rollback) | None — the one loaded userland program is fixed at boot; no `exec()`, no dynamic task creation (see `docs/roadmap.md`'s parking lot) |
+| Runtime extensibility | Hot-reload is a designed-in primitive (pause/snapshot/swap/restore/rollback) | None — the one loaded userland program is fixed at boot; no `exec()`, no dynamic task creation (see `docs/ROADMAP.md`'s parking lot) |
 | Process model | Modules within one kernel address space, not separate user-space processes the way MINIX's servers are | Two fixed EL0 tasks (one loaded program, one idle), no dynamic creation |
 | Maturity | Pre-alpha, unproven, no external contribution history visible | Pre-alpha, incrementally verified via QEMU (and periodically Parallels) at every milestone — see `CLAUDE.md` |
 
@@ -145,7 +145,7 @@ picture that MINIX's boot sequence didn't emphasize as much is a
 concrete vocabulary for the layer *within* a kernel that MINIX pushes
 entirely into user-space servers instead: if Ouroboros's own drivers
 (console, virtio-blk, eventually virtio-console) ever get pulled behind
-trait boundaries the way `docs/roadmap.md`'s "actual microkernel-style
+trait boundaries the way `docs/ROADMAP.md`'s "actual microkernel-style
 driver isolation" parking-lot item already gestures at, Helix's
 mechanism/policy split (`core/` vs. `subsystems/` vs. `modules_impl/`)
 is a concrete shape for what "isolated but still fast" could look like
@@ -155,7 +155,7 @@ before that decision gets made by drift.
 ## Concrete patterns worth revisiting once the prerequisites exist
 
 Not commitments, just noted parallels with where this project's own
-[`roadmap.md`](roadmap.md) parking lot is already headed:
+[`ROADMAP.md`](ROADMAP.md) parking lot is already headed:
 
 - **A `Cpu`/`Mmu`/`InterruptController` trait boundary**, the way
   Helix's `hal/` layer does it, is roughly what Ouroboros's own
@@ -167,7 +167,7 @@ Not commitments, just noted parallels with where this project's own
 - **Self-healing/hot-reload as a *design goal to hold in mind*, not a
   near-term target** — it presupposes dynamic task creation and some
   notion of "swap a running thing for another" that Ouroboros doesn't
-  have (see `docs/roadmap.md`'s parking lot: dynamic task creation and
+  have (see `docs/ROADMAP.md`'s parking lot: dynamic task creation and
   `exec()` come before anything like this could exist). Recording it now
   because the *shape* of the mechanism (pause → snapshot → swap →
   restore → rollback) is a reasonable target shape once those

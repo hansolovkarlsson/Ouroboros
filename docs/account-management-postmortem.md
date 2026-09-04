@@ -184,7 +184,7 @@ Self-service `passwd` (the `accountd`/setuid tier the crate is built for), a
 **virtio-entropy RNG** for strong salts, **supplementary group membership**
 (needs a kernel group list), `/etc/shadow`, the ancestor-directory `x`-traversal
 check, and per-user *cluster* identity. Each is a deliberate deferral with its
-reason attached, in [`roadmap.md`](roadmap.md).
+reason attached, in [`ROADMAP.md`](ROADMAP.md).
 
 ## The shape of the lesson
 

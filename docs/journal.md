@@ -3,7 +3,7 @@
 A chronological dev-log — what was worked on each day and why, in narrative
 form. For the condensed milestone record see [`CHANGELOG.md`](CHANGELOG.md); for
 the deeper design-and-bugs retrospectives see the postmortems under `docs/`;
-for the forward plan see [`roadmap.md`](roadmap.md).
+for the forward plan see [`ROADMAP.md`](ROADMAP.md).
 
 ---
 
@@ -1553,7 +1553,7 @@ addresses, PL011-not-mini-UART, the serial rig) if UEFI proves unworkable.
 ## 2026-08-27 (cont.) — keeping the roadmap forward-looking
 
 A cleanup Hans asked for: the roadmap had grown to 1700 lines, half of it
-finished work. Split it — `roadmap.md` back down to ~530 forward-looking lines
+finished work. Split it — `ROADMAP.md` back down to ~530 forward-looking lines
 (open frontier, remaining follow-ups, north-stars, open gaps), and the finished
 arcs (microkernel bring-up, network stack, filesystems, disk management,
 standalone binaries, pipelines, and the done parking-lot entries) moved verbatim
@@ -2001,7 +2001,7 @@ fid, and we *deferred* fids in Phase 0 — so adding them someday pays off twice
 
 Wrote it all down: a "Philosophy — not POSIX, not Linux" subsection in
 `architecture.md`, a parked "POSIX portability via a userland libc personality"
-entry in `roadmap.md`, and a fresh `comparison.md` — a user-facing "what you gain,
+entry in `ROADMAP.md`, and a fresh `comparison.md` — a user-facing "what you gain,
 what you give up" pro/con vs MINIX/Linux/Unix/Plan 9/Helix (the older
 `research-directions.md` had gone stale as a user-facing view).
 

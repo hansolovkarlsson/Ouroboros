@@ -162,4 +162,4 @@ The arc closes the oldest gap in the gap-analysis. What's left are refinements
 with their own follow-up notes: `/etc/shadow` (the hashes currently sit in a
 world-readable `passwd`), `passwd`/`useradd`, per-user `/home`, groups, the
 ancestor-`x` traversal, and per-user cluster identity. See
-[[project-users-permissions-arc]] and `docs/roadmap.md`.
+[[project-users-permissions-arc]] and `docs/ROADMAP.md`.

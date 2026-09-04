@@ -1845,7 +1845,7 @@ unsafe fn activate_keyboard(
 /// evidence, printed for *every* enumerated device so a boot screenshot
 /// answers "what is this device" directly (the exact question the
 /// USB-storage scoping needs answered for a passed-through stick - see
-/// `docs/roadmap.md`). Mass storage (class 0x08) gets an explicit
+/// `docs/ROADMAP.md`). Mass storage (class 0x08) gets an explicit
 /// callout since it's the class the next milestone is waiting to see.
 /// Same bounded-walk shape as [`find_keyboard_interrupt_endpoint`], and
 /// the same tolerance for a short-arrived buffer.
