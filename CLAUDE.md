@@ -2,6 +2,15 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Start here
+
+`scratch/daily-standup.md` — written at the end of the previous working day to
+be read at the start of the next: where the tree was left, what went in, and
+what is outstanding. `scratch/` is gitignored and is not part of this
+repository, so the file is absent on a fresh clone and on any day that was not
+closed out. When it is absent, `git log` and the documents named below are the
+way in.
+
 ## What this is
 
 Ouroboros is an ARM64 (aarch64) operating system written in Rust (plus some

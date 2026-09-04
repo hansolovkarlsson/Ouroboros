@@ -15,9 +15,3 @@
 /third_party/pico-install/
 /third_party/picolibc-cross.resolved.txt
 __pycache__/
-# The /day-closeout skill's standup brief: a personal "where was I" note,
-# rewritten from scratch every time it runs. The durable record of a day lives
-# in docs/journal.md, docs/CHANGELOG.md, docs/roadmap.md and the postmortems,
-# all of which go through a PR - so committing a file designed to be overwritten
-# daily would add churn to a history where nothing else churns.
-/docs/daily-standup.md
