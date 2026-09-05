@@ -52,13 +52,14 @@ static void show(const char *p) {
     }
 }
 
-int main(int argc, char **argv) {
-    if (argc > 1) {
-        for (int i = 1; i < argc; i++) {
-            show(argv[i]);
-        }
-        return 0;
-    }
+/* `main(void)`, NOT `main(int, char **)`. crt0.c declares `extern int
+ * main(void)` and calls it with no arguments - C programs on this system get no
+ * argv at all yet (the Rust side has GET_ARGV; the C runtime does not wire it).
+ * The first version of this file took argc/argv anyway, which is a signature
+ * mismatch reading a garbage argc; it happened to take the no-arguments branch,
+ * which is exactly how that class of bug survives a test. Fixed paths until the
+ * C runtime grows argv. */
+int main(void) {
     show("/EFI/ORBS/INIT.CFG");
     show("/mnt/a/HELLO.TXT");
     show("/dev/cons");
