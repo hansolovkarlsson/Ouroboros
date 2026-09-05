@@ -287,6 +287,75 @@ it — [`unspellable-postmortem.md`](unspellable-postmortem.md)'s *make the wron
 thing unspellable, not un-grepped*, applied to a hazard rather than to a
 privilege.
 
+## The shape at its largest, earned a day later: a public copy, twelve days stale
+
+*Added 2026-09-04, from a housekeeping pass that went looking for something
+else entirely.*
+
+Every case above is a claim inside the repository, falsified by an edit to
+another file in the same repository. The largest instance of the shape is not
+in the repository at all — it is **served to the public**.
+
+`docs/` is a GitHub Pages site, and `docs/site/` is 23 hand-written HTML pages
+abridging documents under `docs/`. Nothing generated them, so nothing noticed
+when a source moved on and its page did not. The site **froze on 2026-08-23**.
+Twelve days later it was still presenting v0.17.0 as current, with two releases,
+twelve merged PRs, a closed frontier item and this postmortem absent from it —
+and the pages themselves read as confident and finished, because they were true
+when written.
+
+That is the same mechanism as the four cases above, with two aggravations. The
+distance between the claim and the edit that falsifies it is now a **file
+format** as well as a file: no compiler, test, grep or review crosses from
+`manual.md` to `manual.html`. And the audience is external, so the cost is not a
+developer misled for an afternoon but a stranger given a wrong answer for as
+long as nobody looks.
+
+**The detector had to be built carefully, and the obvious version would have
+been born green.** The natural check is "is the source's last commit newer than
+the page's?" — and dates fail here twice over:
+
+- **A repo-wide mechanical edit levels them.** The same day, a
+  `roadmap.md` → `ROADMAP.md` rename rewrote all 23 pages and all their sources
+  *in one commit*. Anchored on the current history, a date-based check would
+  have reported every page fresh on the day it was written — a green signal
+  produced by the rename, not by the site being current.
+- **Dates are too coarse to see a same-day edit.** Comparing last-commit dates
+  found 7 stale pages. Comparing the source **blob hash** each page was written
+  against found **9**. The two dates missed had a matching date and 19–20
+  changed lines each, one of them an entire *"this section's premise is now out
+  of date"* block that had never reached the public page — a correction that had
+  itself gone stale in copy.
+
+So the check records the exact blob each page was abridged from. The cost is the
+opposite error: a mechanical edit applied to *both* sides still changes the
+blob, and reports a page that is genuinely in sync. That happened at exactly one
+page (two lines, both the rename). It was diffed rather than assumed, confirmed
+in sync, and re-stamped alone. Over-reporting in that direction is the safe one,
+and saying which direction a check errs in is part of specifying it.
+
+Two things this adds to the rules above rather than restating them:
+
+- **A copy in another format is the same claim, with every detector removed.**
+  The `duplication as an accidental detector` section notes that two copies
+  disagreeing is what exposed the 8.3 message. That only works when something
+  *lays them side by side*. Across a format boundary nothing ever does, so the
+  duplication stops being an accidental detector and becomes a pure liability.
+- **A detector for staleness can itself be stale-by-construction.** The
+  date-based version would have passed on the day it was written, for a reason
+  that had nothing to do with the property it claimed to check — the exact
+  failure [`blind-instruments-postmortem.md`](blind-instruments-postmortem.md)
+  is about, reached by a different road. It was caught only by asking what a
+  known-stale page *should* produce and finding the answer was "green".
+
+The check is `scripts/check-site-freshness.py` (`make check-site`), verified by
+mutation: a changed source flags its page, an unregistered page under
+`docs/site/` fails the manifest, and a manifest entry whose file is gone fails
+too. The nine stale pages are not fixed by it and were not fixed that day — see
+[`ROADMAP.md`](ROADMAP.md). It is deliberately outside `make test` until they
+are, because a suite that is permanently red teaches people to ignore it, which
+would end with the detector as stale as the thing it detects.
+
 ## What actually worked
 
 Three things, none of them "be more careful".

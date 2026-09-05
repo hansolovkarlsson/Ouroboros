@@ -490,6 +490,7 @@ make parallels-hdd          # wrap build/esp.img into build/esp.hdd, a Parallels
 make test-parallels          # scripted real-hardware round trip via prlctl - see below
 make test                   # host unit tests + clippy --all-targets for the pure crates (accounts, regex, ed25519, clusterkeys, ninep-abi) + the cross-language wire-constant check
 make check-relocs           # the PIE contract: no R_AARCH64_ABS64 in any userland binary
+make check-site             # the published GitHub Pages site vs the documents it abridges (nine pages behind as of 2026-09-04; deliberately NOT part of `test` yet - see docs/ROADMAP.md)
 make clean
 ```
 
