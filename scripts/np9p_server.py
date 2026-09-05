@@ -22,25 +22,28 @@ Then in the guest (SLIRP maps the host to 10.0.2.2):
     cat /mnt/a/SUB/NOTE.TXT
 
 VERBS SERVED - five names in four arms: NP_READDIR, NP_STAT, NP_READ and
-NP_READ_AT (one arm, same handling), NP_READ_FILE. Everything else gets
-FS_ERROR. That includes the mutating verbs, because the export is read-only,
-but ALSO the read-capable fid verbs NP_OPEN / NP_PREAD / NP_PWRITE / NP_FSTAT /
-NP_CLUNK, which no peer here implements and netd's export does not handle
-either - so a C program's open/fstat over a remote mount fails the same way,
-and read-only is not the reason.
+NP_READ_AT (one arm, same handling), NP_READ_FILE. A known verb refused on
+policy gets FS_ERR_READ_ONLY (the mutating verbs - the export is read-only);
+anything else gets FS_ERR_NO_SUCH_VERB. That second group is currently the
+read-capable fid verbs NP_OPEN / NP_PREAD / NP_PWRITE / NP_FSTAT / NP_CLUNK,
+which no peer here implements and netd's export does not handle either - so a C
+program's open/fstat over a remote mount fails the same way, and read-only is
+not the reason.
 
 This list is hand-maintained prose and nothing compares it to the dispatch
 chain; `serve_request`'s fallthrough is the authority, and it PRINTS the verb
 number it refused.
 
-An unimplemented verb does NOT surface as "unsupported" at the guest. It
-surfaces as whatever the *command* makes of FS_ERROR, which is usually "no such
-file or directory" - a message about a path, for a request whose path was fine.
-That cost a real debugging session: `ls` stats a named operand before listing
-it, so a missing NP_STAT made `ls /mnt/a` fail while `cat` under the same mount
-worked, and the symptom was recorded in the roadmap for days as a guest-side
-path-resolution bug. If a guest command fails here for a reason that makes no
-sense, read the fallthrough's output before suspecting the guest.
+An unimplemented verb DOES now surface as itself at the guest ("that server
+does not implement this request"), since 2026-09-05. It used to surface as
+whatever the *command* made of FS_ERROR, which is usually "no such file or
+directory" - a message about a path, for a request whose path was fine. That
+cost a real debugging session: `ls` stats a named operand before listing it, so
+a missing NP_STAT made `ls /mnt/a` fail while `cat` under the same mount worked,
+and the symptom was recorded in the roadmap for days as a guest-side
+path-resolution bug. The status code says THAT a verb is missing and cannot say
+WHICH, so the fallthrough still prints the number - read it before suspecting
+the guest.
 """
 import hashlib
 import os
@@ -87,6 +90,7 @@ NO_FS = (1 << 64) - 1 - 1  # u64::MAX - 1: no filesystem mounted (transient)
 FS_ERR_NOT_FOUND = (1 << 64) - 1 - 2  # u64::MAX - 2: definitively absent
 FS_ERR_READ_ONLY = (1 << 64) - 1 - 29  # u64::MAX - 29
 FS_ERR_AUTH = (1 << 64) - 1 - 30  # u64::MAX - 30
+FS_ERR_NO_SUCH_VERB = (1 << 64) - 1 - 39  # u64::MAX - 39: this server has no arm for that verb
 HDR = 48  # NP_REQ_PAYLOAD
 
 # Cluster auth: the guest SIGNS every request with its per-machine Ed25519 key,
@@ -404,10 +408,14 @@ def serve_request(body):
         # distinguishable from both "absent" and "no idea".
         print(f"  [read-only: refusing verb 0x{verb:x} path={path!r}]", flush=True)
         return sealed(FS_ERR_READ_ONLY)
-    print(f"  [unserved verb 0x{verb:x} path={path!r}] -> FS_ERROR "
-          f"(the guest will report whatever its command makes of a generic error)",
+    print(f"  [unserved verb 0x{verb:x} path={path!r}] -> FS_ERR_NO_SUCH_VERB",
           flush=True)
-    return sealed(FS_ERROR)
+    # NOT FS_ERROR, which this answered until 2026-09-05. The guest rendered
+    # that as "no such file or directory" - a message about a path, for a
+    # request whose path was fine - which is precisely the confusion the print
+    # above exists to work around. Now the guest says so itself, and the print
+    # is what names WHICH verb, since one status code cannot.
+    return sealed(FS_ERR_NO_SUCH_VERB)
 
 
 def main():

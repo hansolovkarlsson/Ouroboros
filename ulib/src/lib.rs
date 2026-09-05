@@ -1612,6 +1612,7 @@ pub fn fs_error_msg(code: u64) -> &'static [u8] {
         syscall_abi::FS_ERR_DISK_FULL => b"disk full",
         syscall_abi::FS_ERR_READ_ONLY => b"read-only filesystem",
         syscall_abi::FS_ERR_NOT_SUPPORTED => b"not supported by this filesystem (mode/owner need ext2)",
+        syscall_abi::FS_ERR_NO_SUCH_VERB => b"that server does not implement this request (its log names the verb)",
         syscall_abi::FS_ERR_PERM => b"permission denied",
         syscall_abi::FS_ERR_IO => b"device I/O error",
         syscall_abi::FS_ERR_AUTH => b"cluster authentication failed (peer not authorized, or bad key/signature)",

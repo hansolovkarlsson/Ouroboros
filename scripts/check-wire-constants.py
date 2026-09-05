@@ -121,6 +121,13 @@ CHECKED = [
     # existed - found by asking which names a peer and Rust BOTH spell that
     # this list does not mention, rather than by remembering to add it.
     "FS_ERROR",
+    # "the server has no arm for that verb", reserved 2026-09-05. It replaced
+    # FS_ERROR in the read-only server's fallthrough, so its VALUE now decides
+    # whether a guest says "does not implement this request" or "no such file
+    # or directory" - the whole point of reserving it. Reserving it also moved
+    # FS_ERR_MIN (the band was full from MAX-1 to MAX-38), which is exactly the
+    # kind of shift a hand-mirrored copy misses.
+    "FS_ERR_NO_SUCH_VERB",
 ]
 
 # NOT checked: NP_MAC_LEN. Neither peer names it - both write the literal 32 at
@@ -171,7 +178,7 @@ PEER_BASELINE = {
     # reduced count was recorded as expected. Both now use the shared names; the
     # floor rises with them, or the rename could be undone without this
     # noticing.
-    "np9p_server.py": 17,  # + 4 STAT_* offsets, FS_ERR_READ_ONLY, STAT_FLAG_DIR, FS_ERROR
+    "np9p_server.py": 18,  # + 4 STAT_* offsets, FS_ERR_READ_ONLY, STAT_FLAG_DIR, FS_ERROR, FS_ERR_NO_SUCH_VERB
 }
 
 

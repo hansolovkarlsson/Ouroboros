@@ -3960,7 +3960,22 @@ fn build_9p_reply(msg: &[u8], out: &mut [u8; PREFIX_MAX], dials: &mut [Option<Di
             let status = fsd_write_at(who, fspath, tree, p1, data);
             frame_reply(out, status, &[])
         }
-        _ => frame_reply(out, syscall_abi::FS_ERROR, &[]),
+        // A verb this export has no arm for - today the five fid verbs
+        // (NP_OPEN/NP_PREAD/NP_PWRITE/NP_FSTAT/NP_CLUNK), which fsd implements
+        // and no export does.
+        //
+        // NOT `FS_ERROR`, which is what this answered until 2026-09-05. Clients
+        // render `FS_ERROR` as "no such file or directory" - a message about a
+        // path, for a request whose path was fine - and that has already cost
+        // one debugging session (a missing NP_STAT was recorded in the roadmap
+        // for days as a guest-side path-resolution bug). The code says THAT a
+        // verb is missing; only this log says WHICH, so it is not optional.
+        v => {
+            log(b"netd: export: no arm for verb ");
+            log_dec(v);
+            log(b"\r\n");
+            frame_reply(out, syscall_abi::FS_ERR_NO_SUCH_VERB, &[])
+        }
     }
 }
 
