@@ -180,6 +180,20 @@ LIBC_OBJS    := $(patsubst libc/src/%.c,$(BUILD_DIR)/libc/%.o,$(LIBC_SRCS))
 LIBC_CFLAGS  := $(CFLAGS_OS) -Ilibc/include -fno-builtin
 CDEMO_BIN    := $(BUILD_DIR)/cdemo.bin
 CFILE_BIN    := $(BUILD_DIR)/cfile.bin
+NSDEMO_BIN   := $(BUILD_DIR)/nsdemo.bin
+# The Rust namespace-resolution shim a C program links to reach
+# `ninep_abi::resolve_ns` (docs/roadmap-fid-verbs.md step 3). A STATICLIB, since
+# the consumer is a clang+LLD link, not a Rust one.
+NSRESOLVE_A  := target/aarch64-unknown-none/release/libnsresolve.a
+# --gc-sections IS REQUIRED, not a size optimization. Without it this link fails
+# outright: `rust-lld: error: relocation R_AARCH64_ABS64 cannot be used against
+# local symbol`, from the PREBUILT `core` bundled into the staticlib - the same
+# wall that makes alloc's collections unlinkable here, one crate down. The
+# offending .rodata is UNREFERENCED, so collecting it removes the relocation
+# rather than hiding it (verified: 0 ABS64, 7 RELATIVE afterwards, and the entry
+# point stays at 0x0 because the linker script KEEPs .text.start).
+# NOT with LLD's -O2, which reintroduces the failure - do not add it.
+LDFLAGS_RUSTSHIM := $(LDFLAGS_OS) --gc-sections
 # The picolibc port (the real C library): a prebuilt static libc.a + headers
 # under third_party/picolibc-prebuilt (built once from picolibc 1.8.9 by
 # scripts/build-picolibc.sh; committed so `make` needs no meson/ninja). A C
@@ -198,7 +212,7 @@ ifeq ($(PROFILE),release)
 CARGO_FLAGS += --release
 endif
 
-.PHONY: all build check-site shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin accountd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin id-bin passwd-bin useradd-bin groupadd-bin usermod-bin clusterkey-bin chello-bin cdemo-bin cfile-bin cpico-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin edtest-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin sort-bin esp run run-virtio-console run-usb-kbd run-usb-multi run-gicv3 image run-image run-image-9p run-image-9p-client run-image-2vm-a run-image-2vm-b run-image-2vm-ext2-a run-image-2vm-ext2-b image-gpt run-image-gpt image-exfat run-image-exfat image-ext2 run-image-ext2 images-2vm images-2vm-ext2 parallels-hdd release test check-relocs test-parallels clean
+.PHONY: all build check-site shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin accountd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin id-bin passwd-bin useradd-bin groupadd-bin usermod-bin clusterkey-bin chello-bin cdemo-bin cfile-bin nsdemo-bin cpico-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin edtest-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin sort-bin esp run run-virtio-console run-usb-kbd run-usb-multi run-gicv3 image run-image run-image-9p run-image-9p-client run-image-2vm-a run-image-2vm-b run-image-2vm-ext2-a run-image-2vm-ext2-b image-gpt run-image-gpt image-exfat run-image-exfat image-ext2 run-image-ext2 images-2vm images-2vm-ext2 parallels-hdd release test check-relocs test-parallels clean
 
 # Overridable by `make test-parallels VM_NAME=... CMDS=... BOOT_WAIT=...`.
 VM_NAME     ?= Ouroboros
@@ -403,6 +417,17 @@ cfile-bin: $(LIBC_OBJS)
 	"$(LD_LLD)" $(LDFLAGS_OS) -o $(BUILD_DIR)/cfile.elf $(BUILD_DIR)/cfile.o $(LIBC_OBJS)
 	"$(OBJCOPY)" --strip-all $(BUILD_DIR)/cfile.elf $(CFILE_BIN)
 
+$(NSRESOLVE_A): nsresolve/src/lib.rs nsresolve/Cargo.toml ninep-abi/src/lib.rs syscall-abi/src/lib.rs
+	cargo build -p nsresolve --target aarch64-unknown-none --release
+
+# A C program that resolves paths through its OWN namespace - which C could not
+# do at all before, and is why a C open() of a remote mount never left the
+# machine. The runnable half of step 3's build gate.
+nsdemo-bin: $(LIBC_OBJS) $(NSRESOLVE_A)
+	$(CC) $(CFLAGS_OS) -Ilibc/include -c libc/nsdemo.c -o $(BUILD_DIR)/nsdemo.o
+	"$(LD_LLD)" $(LDFLAGS_RUSTSHIM) -o $(BUILD_DIR)/nsdemo.elf $(BUILD_DIR)/nsdemo.o $(LIBC_OBJS) $(NSRESOLVE_A)
+	"$(OBJCOPY)" --strip-all $(BUILD_DIR)/nsdemo.elf $(NSDEMO_BIN)
+
 # The porting layer for picolibc: our syscall stubs (crt0/os/file) compiled
 # against picolibc's headers so struct/ABI shapes match, plus the 128-bit-shift
 # builtins. Kept apart from LIBC_OBJS (the hand-rolled libc) - a picolibc program
@@ -554,7 +579,7 @@ serve-bin:
 # below are not, so a BUILD_DIR containing whitespace fails the build noisily
 # (and can leave a stray directory) rather than deleting anything. That is the
 # right trade at 70-odd paths; quoting them all is churn without a hazard.
-esp: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin accountd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin id-bin passwd-bin useradd-bin groupadd-bin usermod-bin clusterkey-bin chello-bin cdemo-bin cfile-bin cpico-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin edtest-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin tail-bin nl-bin rev-bin uniq-bin sort-bin
+esp: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin accountd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin id-bin passwd-bin useradd-bin groupadd-bin usermod-bin clusterkey-bin chello-bin cdemo-bin cfile-bin nsdemo-bin cpico-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin edtest-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin tail-bin nl-bin rev-bin uniq-bin sort-bin
 	@test ! -e "$(ESP_DIR)" || test -f "$(ESP_DIR)/EFI/ORBS/INIT.CFG" || { \
 		echo "esp: $(ESP_DIR) is not an Ouroboros ESP tree - refusing to delete it"; \
 		echo "esp: (remove it by hand if that is really where you want the ESP staged)"; \
@@ -605,6 +630,7 @@ esp: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin acco
 	cp $(CHELLO_BIN) $(ESP_DIR)/bin/CHELLO
 	cp $(CDEMO_BIN) $(ESP_DIR)/bin/CDEMO
 	cp $(CFILE_BIN) $(ESP_DIR)/bin/CFILE
+	cp $(NSDEMO_BIN) $(ESP_DIR)/bin/NSDEMO
 	cp $(CPICO_BIN) $(ESP_DIR)/bin/CPICO
 	cp $(WRITE_BIN) $(ESP_DIR)/bin/WRITE
 	cp $(READKEY_BIN) $(ESP_DIR)/bin/READKEY

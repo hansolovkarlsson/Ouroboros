@@ -1,0 +1,13 @@
+[package]
+name = "nsresolve"
+version = "0.1.0"
+edition = "2021"
+
+# A STATICLIB, not an rlib: the consumer is a C program linked by clang + LLD,
+# so it needs a `.a` with a C ABI, not a Rust artifact.
+[lib]
+crate-type = ["staticlib"]
+
+[dependencies]
+syscall-abi = { path = "../syscall-abi" }
+ninep-abi = { path = "../ninep-abi" }

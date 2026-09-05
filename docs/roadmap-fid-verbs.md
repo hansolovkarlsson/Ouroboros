@@ -233,7 +233,51 @@ write flags; `NP_FSTAT` reporting a size one byte short.
 > it observes hides exactly the divergence it exists to find. Worth its own
 > small change, not a silent divergence here.
 
-**Step 3 — the C client resolves its namespace.** Decision 1, confirmed first.
+**Step 3a — the build gate. ✅ DONE 2026-09-05.** Decision 1 said a Rust
+`staticlib` shim, and named its cost: C programs link no Rust at all. So the
+crate was written as a **gate before any logic** — a trivial `x + 1`, linked and
+relocation-checked — on the precedent that a one-build gate proved `alloc` could
+not be PIE-linked before a week went into it
+([`capability-and-hardening-postmortem.md`](capability-and-hardening-postmortem.md)).
+
+**The trivial gate passed and was worthless.** Making it *representative* — the
+shim actually calling `ninep_abi::resolve_ns` — **failed the link**:
+`rust-lld: error: relocation R_AARCH64_ABS64 cannot be used against local
+symbol`, out of the **prebuilt `core`** bundled into the staticlib. The same
+wall that makes `alloc`'s collections unlinkable here, one crate down. Bisected
+to `resolve_ns` specifically: a version with the call removed links, the version
+with it does not.
+
+Resolved by `--gc-sections`: the offending `.rodata` is **unreferenced**, so
+collecting it removes the relocation rather than hiding it. Verified 0 ABS64 /
+7 RELATIVE afterwards, with the entry point still at `0x0` (the linker script
+`KEEP`s `.text.start`). LLD's `-O2` reintroduces the failure, so it is not used.
+The flag is now load-bearing, and its comment says so.
+
+**Then it was booted, because a link is not a run.** `/bin/NSDEMO`, on a guest,
+with real bindings in place:
+
+```
+/EFI/ORBS/INIT.CFG -> fsd tree 0, path /EFI/ORBS/INIT.CFG
+/mnt/a/HELLO.TXT   -> REMOTE 10.0.2.2:5641, path /HELLO.TXT
+/dev/cons          -> console
+/net/ip            -> netd /net, path /ip
+```
+
+0 fault lines in QEMU's own trace. The first run of this demo resolved
+*everything* to `fsd tree 0` — correct, because nothing was bound, and therefore
+proof of nothing; the bindings had to be made before the output meant anything.
+The remote line is the one that matters: it is exactly the knowledge a C program
+could not previously have, and it is why `open("/mnt/a/F")` went to `fsd`.
+
+**A blind spot found on the way:** `check-relocs` scanned only
+`target/aarch64-unknown-none/release`, so it checked 56 Rust binaries and
+**zero C ones** while reporting the contract for "every userland binary" — and
+the C link is precisely where the new ABS64 risk lives. Widened to `build/*.elf`
+(56 → 61). Both controls run: relinking without `--gc-sections` fails at link
+time, and a forged ABS64 in a C binary is caught.
+
+**Step 3b — rewire `file.c` (NEXT).** Decision 1, confirmed first.
 `file.c` resolves the path, then addresses `FSD_TASK` or `NET_TASK` accordingly,
 granting to whichever it addressed. · **Check:** `make run-image-9p-client`, a
 C program `open()`s and reads a file under `/mnt/a` served by the Step-2 server,

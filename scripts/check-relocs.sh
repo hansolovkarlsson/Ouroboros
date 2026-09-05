@@ -28,10 +28,24 @@ if [ ! -d "$DIR" ]; then
   exit 2
 fi
 
+# THE C PROGRAMS TOO. They link elsewhere - clang + LLD into build/*.elf, not
+# cargo into target/ - so for as long as this scanned only $DIR it checked 56
+# Rust binaries and ZERO C ones, while reporting a clean contract for "every
+# userland binary".
+#
+# That blind spot sat exactly where the risk is highest. The C link is the one
+# that pulls PREBUILT `core` out of a Rust staticlib (nsresolve), whose .rodata
+# carries ABS64 - it needs --gc-sections to link at all, and a change that
+# dropped that flag would have produced either a link error or, worse, a binary
+# this check called clean without looking at it.
+CDIR="build"
+
 total_relative=0
 bad=0
 checked=0
-for f in "$DIR"/*(.); do
+cfiles=()
+[ -d "$CDIR" ] && cfiles=("$CDIR"/*.elf(N.))
+for f in "$DIR"/*(.) $cfiles; do
   # Only ELF executables, not rlibs or build artefacts.
   head -c 4 "$f" 2>/dev/null | grep -q $'\x7fELF' || continue
   case "$f" in *.bin|*.d) continue;; esac
