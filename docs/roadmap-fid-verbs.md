@@ -192,17 +192,46 @@ booted and probed, not a recollection.
 > needs no guest program. Making `open()` surface the code belongs with Step 3,
 > where C's routing changes anyway.
 
-**Step 2 — teach the foreign observer.** `np9p_server.py` gains `NP_OPEN`,
-`NP_PREAD`, `NP_FSTAT`, `NP_CLUNK` (read-only: `NP_PWRITE` stays refused, the
-host export is read-only, and that refusal is now *legible* after Step 1). No
-guest code changes. · **Check:** a host-side self-test drives the server's own
-dispatch through open→fstat→pread→clunk and compares the bytes against the file
-on disk. · **Negative control:** delete one arm, the test fails; the docstring's
-hand-maintained verb list is prose that nothing compares to the dispatch chain,
-so the test is what makes the list a claim rather than a comment. · **Why
-before the client:** it is the instrument, and an instrument built after the
-thing it measures gets tuned until the measurement passes
-([`blind-instruments-postmortem.md`](blind-instruments-postmortem.md)).
+**Step 2 — teach the foreign observer. ✅ DONE 2026-09-05.**
+`np9p_server.py` serves `NP_OPEN`, `NP_PREAD`, `NP_FSTAT` and `NP_CLUNK`;
+`NP_PWRITE`, and an `NP_OPEN` asking for write/create/truncate, are refused
+`FS_ERR_READ_ONLY` — a policy refusal, now distinguishable from the
+"no arm" answer Step 1 reserved. No guest code changed, so the peer is
+deliberately **ahead of** the guest: the client in Step 3 can be built against
+something that already answers.
+
+· **Check:** `--self-test`, in `make test` — 25 verb/parameter cases against the
+table beside the dispatch, then a real round trip (open → fstat → pread in *two*
+chunks → clunk → the clunked fid must not still read), byte-compared against the
+file. · **Negative controls, all four run and all four caught:** `NP_PREAD`
+ignoring its offset; `NP_CLUNK` not freeing the fid; `NP_OPEN` ignoring the
+write flags; `NP_FSTAT` reporting a size one byte short.
+
+> **The trap this step found, and it is aimed straight at Step 4:**
+> **`NP_OPEN` does not use the parameter layout every other path verb uses.**
+> Its `a0` is the `OPEN_*` **flags** and `a1` is the path length — the reverse
+> of every other path-carrying verb. `netd`'s `build_9p_reply` decodes `p0` as
+> the path length *generically*, before the verb match, so an `NP_OPEN` arriving
+> there today would resolve a 1–3 byte path from the flag word and land
+> somewhere plausible rather than failing.
+>
+> This is not a deduction from reading the ABI — the first version of the
+> self-test sent a generic frame, so a 10-character path arrived as flags
+> `10 = OPEN_WRITE|OPEN_TRUNC` and was refused read-only. The harness written to
+> check the trap reproduced it.
+>
+> And the other four fid verbs carry **no path at all** (`a0` is the fid), so
+> re-resolving a path per operation is not merely wasteful — there is nothing to
+> resolve. **The fid must remember what it was opened on**, which is an argument
+> for Decision 2 independent of the ownership one: only `netd` holds the
+> resolution, so only `netd` can own the handle.
+
+> **A follow-up this step declined to fix, on purpose:** `fsd` answers a bare
+> `FS_ERROR` for a bad or not-yours fid — the same over-generic sentinel Step 1
+> just stopped using for verbs, one layer down. The Python peer **mirrors** it
+> rather than improving on it: an observer that answers better than the server
+> it observes hides exactly the divergence it exists to find. Worth its own
+> small change, not a silent divergence here.
 
 **Step 3 — the C client resolves its namespace.** Decision 1, confirmed first.
 `file.c` resolves the path, then addresses `FSD_TASK` or `NET_TASK` accordingly,
