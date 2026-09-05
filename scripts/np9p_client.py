@@ -51,7 +51,16 @@ NP_WRITE_FILE = NP_BASE + 11
 NP_WRITE_AT = NP_BASE + 4
 NP_READ_AT = NP_BASE + 10
 NP_OPEN = NP_BASE + 15  # the first of the five fid verbs no export implements
-FS_ERR_MIN = (1 << 64) - 64  # errors are a small band just below u64::MAX
+# NOT syscall-abi's FS_ERR_MIN, and no longer named as if it were. This is a
+# deliberately LOOSE host-side floor - 'anything in the top 64 is an error' -
+# which is safe here and is what lets REPLY_UNVERIFIED (1 << 64) compare as an
+# error. It carried the ABI name until 2026-09-05 and was invisible to
+# check-wire-constants only because its spelling `(1 << 64) - 64` happens not
+# to match the parser's `- 1 - N` idiom. That is luck, not design: the real
+# FS_ERR_MIN is now a CHECKED constant, so a name collision here would compare
+# a loose sentinel against the ABI and fail for a reason nobody would enjoy
+# diagnosing. Renamed so it cannot.
+ERR_BAND_FLOOR = (1 << 64) - 64
 FS_ERR_AUTH = (1 << 64) - 1 - 30  # u64::MAX - 30
 # The two statuses a SEALED post-authentication refusal can carry. They became
 # worth naming when the exporter started signing that refusal: before, every
@@ -67,7 +76,7 @@ FS_ERR_NOT_FOUND = (1 << 64) - 1 - 2  # u64::MAX - 2: definitively absent
 # with whatever the reader already believed. A negative control that cannot tell
 # "the export refused me" from "I refused the export" proves neither.
 # Deliberately ONE PAST the u64 range: it can never collide with a status the
-# wire can carry, and it still compares `>= FS_ERR_MIN`, so every existing
+# wire can carry, and it still compares `>= ERR_BAND_FLOOR`, so every existing
 # "is this an error?" branch in this script keeps treating it as one instead of
 # falling through to the success path or raising a TypeError.
 REPLY_UNVERIFIED = 1 << 64
@@ -379,12 +388,12 @@ def do_dial(host, port, dst_ip, dst_port, request):
         print("status: REPLY NOT VERIFIED"); sys.exit(1)
     if st == FS_ERR_AUTH:
         print("status: AUTH FAILED"); sys.exit(1)
-    if st >= FS_ERR_MIN or not data.strip().isdigit():
+    if st >= ERR_BAND_FLOOR or not data.strip().isdigit():
         print(f"clone failed (status 0x{st:016x})"); sys.exit(1)
     n = int(data.strip())
     print(f"[clone] connection {n}")
     st, _ = np_writefile(host, port, f"{base}/{n}/ctl", f"connect {dst_ip}!{dst_port}".encode())
-    if st >= FS_ERR_MIN:
+    if st >= ERR_BAND_FLOOR:
         print(f"connect failed (status 0x{st:016x})"); sys.exit(1)
     # Poll status until Established.
     for _ in range(50):
@@ -404,7 +413,7 @@ def do_dial(host, port, dst_ip, dst_port, request):
     empties = 0
     for _ in range(400):
         st, data = np_readfile(host, port, f"{base}/{n}/data", want=512)
-        if st >= FS_ERR_MIN:
+        if st >= ERR_BAND_FLOOR:
             break
         if data:
             got += data; empties = 0
@@ -431,12 +440,12 @@ def do_serve(host, port, announce_port, extern_port, response):
     import time
     base = "/net/tcp"
     st, data = np_readfile(host, port, base + "/clone")
-    if st >= FS_ERR_MIN or not data.strip().isdigit():
+    if st >= ERR_BAND_FLOOR or not data.strip().isdigit():
         print(f"clone failed (0x{st:016x})"); sys.exit(1)
     n = int(data.strip())
     print(f"[clone] listener {n}")
     st, _ = np_writefile(host, port, f"{base}/{n}/ctl", f"announce {announce_port}".encode())
-    if st >= FS_ERR_MIN:
+    if st >= ERR_BAND_FLOOR:
         print(f"announce failed (0x{st:016x})"); sys.exit(1)
     print(f"[announce] listening on guest:{announce_port}")
 
@@ -450,7 +459,7 @@ def do_serve(host, port, announce_port, extern_port, response):
     m = None
     for _ in range(50):
         st, data = np_readfile(host, port, f"{base}/{n}/listen", want=16)
-        if st < FS_ERR_MIN and data.strip().isdigit():
+        if st < ERR_BAND_FLOOR and data.strip().isdigit():
             m = int(data.strip()); break
         time.sleep(0.1)
     if m is None:
@@ -461,7 +470,7 @@ def do_serve(host, port, announce_port, extern_port, response):
     got_req = b""
     for _ in range(50):
         st, data = np_readfile(host, port, f"{base}/{m}/data", want=512)
-        if st < FS_ERR_MIN and data:
+        if st < ERR_BAND_FLOOR and data:
             got_req += data; break
         time.sleep(0.05)
     print(f"[request] guest relayed: {got_req!r}")
@@ -728,7 +737,7 @@ def main():
               "it has no readable /etc/passwd to resolve our name, which will "
               "not clear by itself")
         sys.exit(1)
-    if status >= FS_ERR_MIN:
+    if status >= ERR_BAND_FLOOR:
         print(f"status: ERROR 0x{status:016x}")
         sys.exit(1)
     print(f"status: {status}")
