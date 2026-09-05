@@ -717,10 +717,30 @@ fn handle_ninep(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [
                 if let Err(e) = fs.write_file(path, &[]) {
                     return status_reply(reply, error_code(&e));
                 }
-            } else if flags & ninep_abi::OPEN_CREATE != 0 && fs.stat(path).is_err() {
-                if let Err(e) = fs.touch(path) {
-                    return status_reply(reply, error_code(&e));
+            } else if flags & ninep_abi::OPEN_CREATE != 0 {
+                if fs.stat(path).is_err() {
+                    if let Err(e) = fs.touch(path) {
+                        return status_reply(reply, error_code(&e));
+                    }
                 }
+            } else if let Err(e) = fs.stat(path) {
+                // THE FILE MUST EXIST when the caller is not creating it.
+                //
+                // This check was missing: a read-only NP_OPEN of an absent path
+                // allocated a fid and returned it, and the caller only learned
+                // the truth at its first NP_PREAD/NP_FSTAT. So a C program got a
+                // valid fd for a file that is not there, and reported the
+                // failure against the WRONG operation ("fstat failed: no such
+                // file or directory" for a path that never opened).
+                //
+                // Three things it also broke, worth naming so this is not
+                // re-simplified away: POSIX says open(O_RDONLY) on a missing
+                // file fails; ninep-abi's NP_OPEN doc says permission is checked
+                // "here, once, per the flags", which cannot be true of a file
+                // that does not exist; and it made fsd DISAGREE with
+                // scripts/np9p_server.py, which answers FS_ERR_NOT_FOUND - the
+                // divergence a foreign observer exists to find, found by one.
+                return status_reply(reply, error_code(&e));
             }
             let opener_uid = who.map_or(u32::MAX, |c| c.uid);
             match alloc_fid(fids, sender, opener_uid, tree, path, flags) {

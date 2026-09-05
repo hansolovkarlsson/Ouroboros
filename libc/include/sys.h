@@ -28,7 +28,16 @@
 /* Task ids + grant modes. */
 #define FSD_TASK 2
 #define CON_TASK 3
+#define NET_TASK 4
 #define GRANT_READ 1
+
+/* Remote-mount relay (syscall-abi's NETOP_*): a NP message addressed to netd,
+ * which carries it to the endpoint's 9P export over TCP and returns the NP
+ * reply body verbatim. Offsets into the request: the 6-byte [ip:4][port:2 LE]
+ * endpoint, then the NP message. */
+#define NETOP_RMOUNT 4
+#define NETOP_RMOUNT_ENDPOINT 8
+#define NETOP_RMOUNT_MSG 16
 
 #define HEAP_INFO_BASE 0
 #define HEAP_INFO_SIZE 1
@@ -66,6 +75,12 @@
  * and a C caller compiled against a stale floor reads those new codes as
  * successful return values. syscall-abi's own definition carries a note back
  * to this line for that reason. */
+/* Error codes a C program can distinguish. Only the ones it can act on -
+ * everything else is just ">= FS_ERR_MIN". */
+#define FS_ERR_NOT_FOUND (~0UL - 2UL)
+#define FS_ERR_PERM (~0UL - 32UL)
+#define FS_ERR_NO_SUCH_VERB (~0UL - 39UL)
+
 #define FS_ERR_MIN (~0UL - 39UL)
 
 static inline long __os_syscall1(long num, long a0) {
