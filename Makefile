@@ -1303,10 +1303,14 @@ check-relocs:
 # and the stale answer is the PUBLIC one. See the script's module docstring for
 # why it compares blob hashes rather than commit dates.
 #
-# NOT part of `test` yet, deliberately: nine pages are already behind their
-# sources (the site froze on 2026-08-23), so wiring it in today would make
-# `make test` permanently red and train everyone to ignore it. Move it into
-# `test` once that backlog is cleared - that is the whole change.
+# PART OF `test` since 2026-09-05, which is the whole point of building it: a
+# check outside the default suite decays. It was held out at first because nine
+# pages were already behind (the site froze on 2026-08-23) and a permanently-red
+# suite trains everyone to ignore it. That backlog was cleared by re-abridging
+# five pages and DELETING the other four - changelog, roadmap, shell-commands
+# and processes are reference material that wants to be current rather than
+# abridged, so docs.html links the markdown on GitHub and there is no copy left
+# to drift. Fewer pages fixed than were broken, on purpose.
 check-site:
 	@python3 scripts/check-site-freshness.py
 
@@ -1329,6 +1333,12 @@ test:
 	@# as a key problem rather than a constant problem.
 	@echo "== cross-language wire constants"
 	@python3 scripts/check-wire-constants.py || exit 1
+	@# The published site abridges documents in this repo, and nothing lays the
+	@# two side by side - not the compiler, not a test, not review, because the
+	@# drift crosses a FILE FORMAT. The failure is silent and outward-facing: a
+	@# public page keeps serving a confident, stale answer. See check-site above.
+	@echo "== published site vs its sources"
+	@python3 scripts/check-site-freshness.py || exit 1
 	@echo "== all pure-crate host tests passed, and clippy clean including tests"
 
 clean:

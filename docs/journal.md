@@ -7,6 +7,65 @@ for the forward plan see [`ROADMAP.md`](ROADMAP.md).
 
 ---
 
+## 2026-09-05 — clearing the site by deleting four of it
+
+*(Documentation and one Makefile line. The check built yesterday went green,
+and then into `make test`.)*
+
+Yesterday's detector reported nine public pages behind their sources. Today
+cleared them, by **fixing fewer pages than were broken**.
+
+**Four pages were deleted rather than re-abridged.** `changelog`, `roadmap`,
+`shell-commands` and `processes` are reference material: they are worth more
+*current* than abridged, and they move on days when nothing else does.
+`roadmap.html` was 11,050 words against a 14,286-word source — barely an
+abridgement, so it drifted every time the roadmap was touched. `docs.html` now
+links the markdown on GitHub for all four, which removes four drift surfaces
+permanently instead of promising to re-abridge them forever. The site is
+public, so this was a decision to take rather than a maintenance call: the
+alternative — re-abridge all nine and accept the recurring cost — was
+legitimate and was declined.
+
+**The remaining five were re-abridged by hand**, and that is where the day's
+real finding turned up: **three of the markdown sources were themselves behind
+the code.** `architecture.md` described six task slots and stopped its
+capability table at `netd`; `tasks.rs` says eleven, with `accountd` at slot 5
+and 6–10 spawnable, and its `EXIT`/`KILL` guard derives from one constant
+rather than the list of slots the document named. `manual.md` said the
+workspace had four crates (it has 61) and that the filesystem server was
+FAT32-only (it reads FAT32, exFAT and ext2). Each was corrected at the source
+before its page was written from it, because a page cannot be honestly
+abridged from a document that is wrong, and the only other option was
+publishing the error onto a live site.
+
+That is [`asking-the-right-question-postmortem.md`](asking-the-right-question-postmortem.md)'s
+shape arriving from a new direction. `tasks.rs` is the authority on the slot
+map; every restatement of it drifts, and this time the drift had propagated two
+copies deep — code → `architecture.md` → `architecture-overview.html` — with
+the public copy the furthest behind and the only one a stranger reads.
+
+The two research pages needed less than the diff suggested. Both already
+carried the *substance* of an "this section's premise is now out of date"
+correction; what they carried stale was a **count** — "the FS is a userland
+server", written when there was one, against four today. A number is the part
+of a page that ages first and reads most confidently.
+
+**One page needed no edit at all.** `research-directions.html` was reported
+because its source's only change was `notes.txt` → "the original brief", a
+rewording the page never quoted. That is the over-reporting direction the check
+was specified to err in: diffed, confirmed in sync, re-stamped alone. Saying
+which way a check errs is part of specifying it, and this is the second time
+that clause has been the one that mattered.
+
+**Then the one-line change the whole thing was for:** `check-site` now runs
+inside `make test`. It was outside only while nine failures would have made the
+suite permanently red. Verified by mutation first, not by watching it pass — a
+line appended to `manual.md` turned it red at exactly one page, which is the
+only evidence that a green run means anything. `make test` is 137 tests plus
+the wire constants plus the site, still under three seconds.
+
+---
+
 ## 2026-09-04 — housekeeping, and measuring before restructuring
 
 *(No kernel or server code. Three PRs, all documentation and tooling — and one

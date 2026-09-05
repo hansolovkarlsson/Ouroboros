@@ -5,11 +5,12 @@ abridges.
 `docs/` is served live by GitHub Pages (https://hansolovkarlsson.github.io/Ouroboros/,
 branch `main`, path `/docs`), and `docs/site/*.html` is HAND-WRITTEN. It is not
 generated from the markdown and could not easily be: the pages are curated
-ABRIDGEMENTS, not renderings. `changelog.html` is half the words of
-`CHANGELOG.md`; `architecture-overview.html` is a sixth of `architecture.md`
-and a different document with a different job; the site carries 10 of the 29
-postmortems; `glossary.html` has no markdown source at all; and the slugs are
-not derivable from the filenames (`capability-and-hardening-postmortem.md` ->
+ABRIDGEMENTS, not renderings. `architecture-overview.html` is a sixth of
+`architecture.md` and a different document with a different job;
+`changelog.html` was half the words of `CHANGELOG.md` before it was deleted
+(see the MANIFEST note below); the site carries 10 of the 29 postmortems;
+`glossary.html` has no markdown source at all; and the slugs are not derivable
+from the filenames (`capability-and-hardening-postmortem.md` ->
 `postmortem-capability-hardening.html`).
 
 So there is no build step to notice when a source moves on and its page does
@@ -64,21 +65,26 @@ ROOT = os.path.dirname(HERE)
 # not. That is deliberate: a new page added without a line here would otherwise
 # be unchecked and look fine, which is the state this whole file exists to
 # prevent.
+#
+# FOUR PAGES ARE ABSENT ON PURPOSE. changelog, roadmap, shell-commands and
+# processes were deleted as pages on 2026-09-05 and docs.html now links to the
+# markdown on GitHub instead. They were reference material - worth CURRENT
+# rather than abridged - and roadmap.html was 11,050 words against a 14,286-word
+# source, which is barely an abridgement and so drifted every time the roadmap
+# was touched. Deleting a drift surface beats promising to re-abridge it
+# forever. Do not "restore" them here without restoring the pages: the presence
+# check above would fail immediately, which is the intended way round.
 MANIFEST = {
     "index.html": None,
     "site/docs.html": None,
     "site/glossary.html": None,
-    "site/architecture-overview.html": ("architecture.md", "2c4e5489e8eb"),
-    "site/changelog.html": ("CHANGELOG.md", "1815fce8696f"),
-    "site/manual.html": ("manual.md", "6fc9d56a1a36"),
+    "site/architecture-overview.html": ("architecture.md", "15c87b76f698"),
+    "site/manual.html": ("manual.md", "4d941973839a"),
     "site/microkernel-comparison.html": ("microkernel-comparison.md", "5a75d8e5a23a"),
-    "site/processes.html": ("processes.md", "051691e1dc7e"),
-    "site/roadmap.html": ("ROADMAP.md", "bc22169ed162"),
-    "site/shell-commands.html": ("shell-commands.md", "3042b085c1ad"),
     "site/tutorial.html": ("tutorial.md", "cd4430be90e9"),
-    "site/research-directions.html": ("research-directions.md", "d2a2b7dd95f9"),
-    "site/research-helix-os.html": ("research-helix-os.md", "db4785cac593"),
-    "site/research-minix-boot.html": ("research-minix-boot.md", "9b47882b593c"),
+    "site/research-directions.html": ("research-directions.md", "6a43dfc7acbd"),
+    "site/research-helix-os.html": ("research-helix-os.md", "01c5568c3840"),
+    "site/research-minix-boot.html": ("research-minix-boot.md", "da738d5c2676"),
     "site/postmortem-boot-bringup.html": ("boot-bringup-postmortem.md", "d43cf0144698"),
     "site/postmortem-capability-hardening.html": ("capability-and-hardening-postmortem.md", "1f65f27ce9d8"),
     "site/postmortem-console-server.html": ("console-server-postmortem.md", "1a65a5208cdf"),

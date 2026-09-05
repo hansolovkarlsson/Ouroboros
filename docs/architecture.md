@@ -89,7 +89,7 @@ tables it walks. Two coarse block kinds cover almost everything:
 | RAM | Whatever the UEFI memory map reports as general RAM | Normal WB, executable, EL1-only |
 
 **Isolation is per-task and MMU-enforced, not a trust model.** Each of
-the six scheduler slots has its *own* translation-table view (its own
+the eleven scheduler slots has its *own* translation-table view (its own
 L0/L1/L2/L3 in `mmu.rs`): identical kernel and device mappings in every
 view, but EL0 access granted only to that task's own region. From any
 view, every other task's memory is ordinary EL1-only RAM, so an EL0
@@ -173,7 +173,7 @@ running touches them), a real limitation for whatever runs next.
 
 ## Process model
 
-`tasks.rs` implements round-robin scheduling among up to `NUM_TASKS` (6)
+`tasks.rs` implements round-robin scheduling among up to `NUM_TASKS` (11)
 EL0 task slots — no priorities, no queue. Every task is either `Unused`,
 `Runnable`, `Blocked(reason)`, or `Zombie(status)`; the scheduler only
 ever picks among the runnable ones. Two things move execution from one
@@ -530,7 +530,7 @@ roughly this size as the system grows by adding *servers*, not syscalls.
 | *7–14* | *(gaps)* | | | The eight `fs_*` syscalls (`list_dir`/`read_file`/`mkdir`/`rmdir`/`touch`/`rm`/`write_file`/`mv`) lived here until the filesystem moved out of the kernel entirely. Their exact contracts survive unchanged as the filesystem server's `FSOP_*` request protocol (below); the numbers stay unfilled, same stable-ABI reasoning as the gap at 5 |
 | 15 | `read_char` | ignored | a byte | Blocking — if none is waiting, suspends the calling task and switches to another runnable one instead of returning `NO_CHAR`; resumes with the byte once available. See `tasks.rs`'s `block_current_and_switch` and the "Blocking primitives" section below |
 | 16 | `spawn` | total staged length, **stdout target** | **the new task's slot index**, `SPAWN_ERROR`, or a `SPAWN_ERR_*` code | Parses, relocates, and starts the program image previously fed into the kernel's 128KB staging buffer via `spawn_stage` (30), as a **new, independent task** alongside the caller. The **stdout target** (arg1) is the task the program's output should go to — `CON_TASK` for a plain `exec`, or the shell itself for a pipe/redirect producer (see `stdout_target`, 38) — `tasks::spawn`, not exec-replaces-current-process. **Contract changed with the userland-filesystem milestone**: it used to take a path, but the kernel has no filesystem to read one with anymore — the caller reads the program via the filesystem server (`FSOP_READ_AT`, 512 bytes at a time) and stages it first; see the shell's `cmd_exec` for the reference flow. Failures: `SPAWN_ERR_BAD_ELF`/`SPAWN_ERR_TOO_LARGE`/`SPAWN_ERR_NO_FREE_SLOT`; a failure after the region allocation gives the memory back (`tasks::free_runtime_region` — always the LIFO case). See "Dynamic task creation" above |
-| 17 | `exit` | exit code | **does not return** (or `EXIT_DENIED`) | Destroys the calling task: its slot becomes spawnable again, its EL0 mapping is removed (a fresh `mmu::rebuild_with_el0_regions`), and its RAM is returned to the runtime bump allocator when LIFO order allows (`tasks::free_runtime_region` — most-recent allocation only; anything else leaks, deliberately). Tasks 0 (the boot shell — the sole keyboard owner), 1 (idle), and 2 (the filesystem server) are refused with `EXIT_DENIED`, the only case where this syscall returns. The exit code is kept as `Zombie(status)` until a `wait` collects it |
+| 17 | `exit` | exit code | **does not return** (or `EXIT_DENIED`) | Destroys the calling task: its slot becomes spawnable again, its EL0 mapping is removed (a fresh `mmu::rebuild_with_el0_regions`), and its RAM is returned to the runtime bump allocator when LIFO order allows (`tasks::free_runtime_region` — most-recent allocation only; anything else leaks, deliberately). Every slot below `FIRST_SPAWNABLE` (6) is refused with `EXIT_DENIED`, the only case where this syscall returns — the boot shell (0, the sole keyboard owner), idle (1), and the four servers whose death would strand a resource: fsd (2), cond (3), netd (4) and accountd (5). The guard derives from the constant rather than listing slots, so adding a server protects it automatically. The exit code is kept as `Zombie(status)` until a `wait` collects it |
 | 18 | `task_state` | task index | a `TASK_STATE_*` code, or `TASK_STATE_INVALID` past the last slot | Read-only observability for the spawn/exit lifecycle (the shell's `ps`): `UNUSED`/`RUNNABLE`/`BLOCKED` per slot. Probing indices upward until `INVALID` is how a caller discovers the slot count without it leaking into the ABI |
 | 19 | `kill` | task index | `0`, `TASK_ERR_PROTECTED`, or `TASK_ERR_NO_SUCH_TASK` | Destroys another task — `exit`'s teardown minus the context switch (a non-current task isn't executing; its saved context is simply discarded). Tasks 0–2 (boot shell, idle, filesystem server) are protected. If the killed task held the keyboard, ownership reverts to task 0 |
 | 20 | `fg` | task index | `0`, `TASK_ERR_PROTECTED`, or `TASK_ERR_NO_SUCH_TASK` | Hands keyboard ownership to the given task (the wake-check's input-owner state, previously hardcoded to task 0). **The shell `fg`s every foreground command it runs** (in `run_found_command`, before it `wait`s), so an interactive `/bin` program — a pager, an editor, a REPL — can `read_char` while it runs; only the keyboard owner receives keystrokes. On the program's death ownership reverts to task 0 automatically (`revert_input_owner_if`). **Ctrl+C** (`0x03`) while a non-shell task owns the keyboard now **terminates** that foreground program: the poll choke point marks it (`PENDING_KILL`), `on_tick` kills it (the `KILL` teardown), and the shell's `wait` wakes with `TASK_KILLED_STATUS`. It's a terminate, not a deliverable signal (the program can't catch it — a later refinement). Idle can't be foregrounded; index 0 is an explicit "give it back" |
@@ -634,7 +634,7 @@ then stats each entry (`ulib::fs_stat` and the `stat_*` accessors, incl.
 Memory isolation is MMU-enforced, but the IPC *topology* is enforced too:
 a task can only initiate a `msg_send`/`msg_call` to the endpoints its
 capabilities allow. Because task-slot roles are static (0 shell, 1 idle,
-2 fsd, 3 cond, 4 netd, 5–6 spawnable), capabilities are a **pure function of
+2 fsd, 3 cond, 4 netd, 5 accountd, 6–10 spawnable), capabilities are a **pure function of
 slot** — no stored table, no runtime state — living entirely in
 `tasks::caps_for_slot(slot)`. A slot's capability word packs a **send-mask**
 (which slots it may initiate IPC to) plus resource bits (`CAP_BLOCK` gates
@@ -648,12 +648,13 @@ The policy:
 
 | slot | role | may initiate IPC to | resource caps |
 |---|---|---|---|
-| 0 | shell | fsd, cond, netd, spawned children (5, 6) | — |
+| 0 | shell | fsd, cond, netd, spawned children (6–10) | — |
 | 1 | idle | — | — |
 | 2 | fsd | cond (its logs) | `CAP_BLOCK` |
 | 3 | cond | — (only replies) | `CAP_CON` |
-| 4 | netd | fsd (serving files over HTTP), cond (its logs) | `CAP_NET` |
-| 5, 6 | spawnable | shell, fsd, cond | — |
+| 4 | netd | fsd (serving files over HTTP), cond (its logs), and itself — the self-send bit exists only so netd may *delegate* the reply capability to a remote-exec child whose output pipes back to it | `CAP_NET` |
+| 5 | accountd | fsd (`/etc/passwd`, `/etc/shadow`), cond (its logs) | — (its privilege is policy, not a device) |
+| 6–10 | spawnable | shell, fsd, cond, accountd | — |
 
 Enforced at the `msg_send`/`msg_call` boundary by `tasks::may_send(src,
 dest)`, which returns `MSG_ERR_DENIED` unless the send is permitted. Two

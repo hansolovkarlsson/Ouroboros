@@ -183,8 +183,8 @@
           <tr><th scope="row">Kernel image format</th><td>One multi-part <code class="inline">/boot/image</code> (kernel + servers)</td><td>Single kernel at a fixed address</td><td class="oc">Single UEFI PE/COFF application</td></tr>
           <tr><th scope="row">First code to run</th><td>Boot Monitor (MINIX-authored)</td><td>U-Boot (not MINIX-authored)</td><td class="oc">The kernel's own entry point, immediately</td></tr>
           <tr><th scope="row">Load address</th><td>Chosen by the Boot Monitor</td><td>Hardcoded (<code class="inline">0x80200000</code>)</td><td class="oc">Wherever UEFI places it (queried, not assumed)</td></tr>
-          <tr><th scope="row">Where drivers / FS live</th><td>User-space servers, restartable by RS</td><td>Same</td><td class="oc">FS is a userland server; other drivers still kernel-resident</td></tr>
-          <tr><th scope="row">Fault isolation of OS components</th><td>Strong — a crashed driver is a crashed process</td><td>Same</td><td class="oc">The FS server is isolated + supervised; in-kernel drivers are not</td></tr>
+          <tr><th scope="row">Where drivers / FS live</th><td>User-space servers, restartable by RS</td><td>Same</td><td class="oc">Filesystem, console, network and account servers in user space; device drivers still kernel-resident</td></tr>
+          <tr><th scope="row">Fault isolation of OS components</th><td>Strong — a crashed driver is a crashed process</td><td>Same</td><td class="oc">All four servers are isolated + supervised; in-kernel drivers are not</td></tr>
         </tbody>
       </table>
     </div>
@@ -195,13 +195,18 @@
       When these notes were first written, Ouroboros was considerably more
       monolithic than either MINIX platform — MMU, exceptions, drivers, and
       scheduling all undifferentiated EL1 code, with nothing in user space
-      but a demo. That has since changed for one major component: the FAT32
-      filesystem now runs as an isolated, supervised, restartable userland
-      server — the exact shape MINIX's RS-parented boot image demonstrates,
-      if for one service rather than a fleet. MINIX's boot sequence remains
-      the concrete existence proof of the fuller version: a typed set of
-      cooperating servers started in dependency order, each independently
-      replaceable.
+      but a demo. That has since changed for four components: the
+      filesystem, the console, the network stack and account management each
+      run as an isolated, supervised, restartable userland server, reached
+      over <code class="inline">sendrec</code>-shaped IPC with
+      <code class="inline">grant</code>/<code class="inline">safecopy</code>
+      capability copies — MINIX's <code class="inline">sys_safecopy</code>
+      and its reincarnation server, in miniature. The gap versus MINIX is now
+      <strong>breadth</strong>, not the absence of the model: four servers
+      rather than a full fleet, no VFS or process manager, no process trees.
+      MINIX's boot sequence remains the concrete existence proof of the
+      fuller version — a typed set of cooperating servers started in
+      dependency order, each independently replaceable.
     </p>
 
     <h2>Patterns worth revisiting</h2>
