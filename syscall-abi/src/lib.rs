@@ -1405,6 +1405,17 @@ pub const FS_ERR_NO_SUCH_VERB: u64 = u64::MAX - 39;
 /// new error code is reserved, and a C program compiled against a stale floor
 /// reads the newly reserved codes as ordinary success values - so change both,
 /// in the same commit.
+///
+/// **And both node images, for a code that crosses the wire.**
+/// [`FS_ERR_NO_SUCH_VERB`] is the first reserved code a *peer* can receive over
+/// 9P/TCP, which makes the floor a CROSS-NODE agreement and not only a
+/// cross-language one: a node still built with `FS_ERR_MIN = MAX-38` reads
+/// `MAX-39` as a **success** value - a byte count of about 1.8e19 - so "verb
+/// not implemented" arrives as a garbage-length read reply rather than an
+/// error. Nothing detects that; it is a well-formed wrong answer. What keeps it
+/// off the floor today is that `make images-2vm` builds both node images from
+/// one tree in one target, which exists for a different reason (per-machine
+/// keys) and is load-bearing here too.
 pub const FS_ERR_MIN: u64 = u64::MAX - 39;
 
 /// **Cross-device move**: `mv`'s source and destination resolved to different

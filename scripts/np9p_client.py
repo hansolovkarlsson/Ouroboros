@@ -11,7 +11,7 @@ Usage:
     python3 scripts/np9p_client.py <host> <port> stat    <path>
     python3 scripts/np9p_client.py <host> <port> mv      <src> <dst>
     python3 scripts/np9p_client.py <host> <port> run     <command>
-    python3 scripts/np9p_client.py <host> <port> noverb  [path] [verb]
+    python3 scripts/np9p_client.py <host> <port> noverb  <path> [verb]
 
 Every request is SIGNED with a per-machine Ed25519 key: the auth header is
 `[magic:8][nonce:16][name:32][pubkey:32][sig:64]` in front of the NP message,
@@ -183,13 +183,24 @@ def peer_key():
 
 # Status codes worth NAMING in output. A probe that prints a bare
 # 0xffffffffffffffd8 makes the reader do the arithmetic that the bug was about.
+#
+# BUILT FROM THE MODULE CONSTANTS, not from repeated literals. `check-wire-
+# constants.py` parses `^NAME = ...` lines and pins those against Rust; a literal
+# inside a dict body is invisible to it, so a code that moved would be caught in
+# the constant and NOT in the table - and this probe would then print a
+# confidently wrong name for the very status it exists to make honest.
+FS_ERROR = (1 << 64) - 1
+FS_ERR_READ_ONLY = (1 << 64) - 1 - 29  # u64::MAX - 29
+FS_ERR_PERM = (1 << 64) - 1 - 32  # u64::MAX - 32
+FS_ERR_NO_SUCH_VERB = (1 << 64) - 1 - 39  # u64::MAX - 39: no arm for that verb
 STATUS_NAMES = {
-    (1 << 64) - 1: "FS_ERROR",
-    (1 << 64) - 1 - 2: "FS_ERR_NOT_FOUND",
-    (1 << 64) - 1 - 29: "FS_ERR_READ_ONLY",
-    (1 << 64) - 1 - 30: "FS_ERR_AUTH",
-    (1 << 64) - 1 - 32: "FS_ERR_PERM",
-    (1 << 64) - 1 - 39: "FS_ERR_NO_SUCH_VERB",
+    FS_ERROR: "FS_ERROR",
+    NO_FS: "NO_FS",
+    FS_ERR_NOT_FOUND: "FS_ERR_NOT_FOUND",
+    FS_ERR_READ_ONLY: "FS_ERR_READ_ONLY",
+    FS_ERR_AUTH: "FS_ERR_AUTH",
+    FS_ERR_PERM: "FS_ERR_PERM",
+    FS_ERR_NO_SUCH_VERB: "FS_ERR_NO_SUCH_VERB",
 }
 
 
@@ -635,7 +646,11 @@ def main():
         # (0x10c = NP_STAT) and this must NOT answer FS_ERR_NO_SUCH_VERB. A
         # probe that reports "not implemented" for everything, including what is
         # implemented, proves nothing about either.
-        path = (args[3] if len(args) > 3 else "/").encode()
+        # `path` is REQUIRED, not defaulted: main() already exits on
+        # `len(args) < 4`, so an `else "/"` default here could never be reached
+        # and the usage line promised a bare `noverb` that only ever printed the
+        # docstring.
+        path = args[3].encode()
         verb = int(args[4], 0) if len(args) > 4 else NP_OPEN
         np = build_frame(verb, 0, [len(path), 0, 0, 0], path)
         try:

@@ -142,7 +142,29 @@ Measured on a booted guest (`make run-image-9p`) with
 | | `NP_OPEN` (0x10f, no arm) | `NP_STAT` (0x10c, served) |
 |---|---|---|
 | before | `FS_ERROR`, no log | 27 bytes of stat |
-| after | `FS_ERR_NO_SUCH_VERB`, `netd: export: no arm for verb 271` | 27 bytes of stat |
+| after | `FS_ERR_NO_SUCH_VERB` + `netd: export: no arm for verb 0x10f` | 27 bytes of stat |
+
+`netd` had **four** such fallthroughs, not one: the `/dev/cons` and `/net` export
+arms and the defensive transitive-mount arm answered `FS_ERROR` too, so
+`NP_OPEN /net/ip` still said "no such file or directory". All four now answer
+alike and name the target that refused (`netd: /net: no arm for verb 0x10f`).
+
+The **host** peer needed a different fix, and it is the one worth remembering:
+its refusal was `if NP_BASE <= verb < NP_LIMIT: FS_ERR_READ_ONLY`, and `NP_LIMIT`
+is one past `NP_CLUNK` — so all five fid verbs were *inside* it and got
+"read-only filesystem", a policy that peer does not have about them. The range
+only ever meant "a verb I have heard of", which is a different question, and it
+silently absorbed every verb `ninep-abi` added. Replaced with an explicit
+mutating-verb set.
+
+That bug survived the first pass because the check only ever ran against the
+*guest's* export, while the docstring listing the served verbs — whose own text
+says nothing compares it to the dispatch chain — was edited to claim the
+opposite of what the code did. So the arms are now covered by
+`np9p_server.py --self-test`, in `make test`: one request per verb, checked
+against the table beside it. Its negative controls are the bug itself
+(restore the range test → four verbs mismatch) and a deleted arm
+(→ `NP_STAT` mismatches).
 
 The right-hand column is the control that matters: a probe reporting "not
 implemented" for everything, including what *is* implemented, would prove

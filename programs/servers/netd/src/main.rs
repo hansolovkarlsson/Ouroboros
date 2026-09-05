@@ -3713,7 +3713,13 @@ fn net_op(verb: u64, fspath: &[u8], offset: u64, want: usize, data_in: &[u8], ou
             out[..n].copy_from_slice(&content[off..off + n]);
             (n as u64, n)
         }
-        _ => (syscall_abi::FS_ERROR, 0), // /net is read-only
+        // /net serves only the read verbs above. Anything else - a write, or
+        // one of the fid verbs - has no arm here, and saying so beats the
+        // generic error a client renders as "no such file or directory".
+        other => {
+            log_no_arm(b"/net", other);
+            (syscall_abi::FS_ERR_NO_SUCH_VERB, 0)
+        }
     }
 }
 
@@ -3828,7 +3834,13 @@ fn build_9p_reply(msg: &[u8], out: &mut [u8; PREFIX_MAX], dials: &mut [Option<Di
                     log(wire_slice(payload, p0, p2));
                     0
                 }
-                _ => syscall_abi::FS_ERROR, // console is write-only
+                // Read verbs land here too, and "the console has no arm for
+                // reading" is exactly what this code says - so it is the right
+                // answer for both, not a stretch to cover the write-only case.
+                other => {
+                    log_no_arm(b"/dev/cons", other);
+                    syscall_abi::FS_ERR_NO_SUCH_VERB
+                }
             };
             return frame_reply(out, status, &[]);
         }
@@ -3860,7 +3872,9 @@ fn build_9p_reply(msg: &[u8], out: &mut [u8; PREFIX_MAX], dials: &mut [Option<Di
         }
         // A remote binding in the export namespace would be transitive mounting -
         // not bound today, so this can't occur; refuse defensively.
-        ninep_abi::NsTarget::Remote(_) => return frame_reply(out, syscall_abi::FS_ERROR, &[]),
+        ninep_abi::NsTarget::Remote(_) => {
+            return frame_reply(out, syscall_abi::FS_ERR_NO_SUCH_VERB, &[]);
+        }
         // A local fsd tree (the boot disk, /proc, or a mounted partition).
         ninep_abi::NsTarget::Fsd(t) => t as u64,
     };
@@ -3971,9 +3985,7 @@ fn build_9p_reply(msg: &[u8], out: &mut [u8; PREFIX_MAX], dials: &mut [Option<Di
         // for days as a guest-side path-resolution bug). The code says THAT a
         // verb is missing; only this log says WHICH, so it is not optional.
         v => {
-            log(b"netd: export: no arm for verb ");
-            log_dec(v);
-            log(b"\r\n");
+            log_no_arm(b"export", v);
             frame_reply(out, syscall_abi::FS_ERR_NO_SUCH_VERB, &[])
         }
     }
@@ -5248,6 +5260,55 @@ fn reply(sender: u64, data: &[u8]) {
 }
 
 /// Log a decimal number.
+/// Report a verb this server has no arm for, as ONE console round trip.
+///
+/// In hex, because every other artifact in this arc names verbs in hex -
+/// `ninep-abi` defines them as `NP_BASE + n` off `0x100`, and both Python peers
+/// print `0x10f`. A decimal `271` makes the reader convert before they can
+/// cross-reference, in the one output whose entire purpose is legibility.
+///
+/// One `log()` call, not three: `log` is a synchronous `MSG_CALL` to the console
+/// server, and this is reachable from a remote peer, so each extra call is
+/// another IPC round trip an authorized peer can drive. It is NOT rate-limited,
+/// and that is a deliberate, bounded choice rather than an oversight: netd holds
+/// no static mutable state (the PIE linker script asserts `.data`/`.bss` empty),
+/// so a per-boot cap has to be threaded from the main loop through five
+/// signatures - too wide a change for a diagnostic line. The exposure is also
+/// smaller than it looks: reaching this needs a *signature-verified, authorized*
+/// peer, and the platform where a console flood actually hurts (Parallels, whose
+/// framebuffer is the only console) HAS NO NETWORKING, so no remote peer can
+/// reach netd there at all. The cap belongs with step 4 of
+/// `docs/roadmap-fid-verbs.md`, which threads netd-owned per-connection state
+/// for the fid table anyway.
+fn log_no_arm(what: &[u8], verb: u64) {
+    let mut line = [0u8; 64];
+    let mut n = 0usize;
+    for &b in b"netd: " {
+        line[n] = b;
+        n += 1;
+    }
+    for &b in what.iter().take(16) {
+        line[n] = b;
+        n += 1;
+    }
+    for &b in b": no arm for verb 0x" {
+        line[n] = b;
+        n += 1;
+    }
+    let mut started = false;
+    for shift in (0..16).rev() {
+        let nib = ((verb >> (shift * 4)) & 0xf) as u8;
+        if nib != 0 || started || shift == 0 {
+            started = true;
+            line[n] = if nib < 10 { b'0' + nib } else { b'a' + nib - 10 };
+            n += 1;
+        }
+    }
+    line[n] = b'\r';
+    line[n + 1] = b'\n';
+    log(&line[..n + 2]);
+}
+
 fn log_dec(v: u64) {
     let mut buf = [0u8; 20];
     let mut n = 0usize;

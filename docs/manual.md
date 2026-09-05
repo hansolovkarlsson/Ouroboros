@@ -504,8 +504,9 @@ bytes per buffer** (`MAX_USER_LEN`) — longer buffers are rejected, not
 truncated.
 
 **Error convention:** all failure codes live in a reserved top band of
-`u64` — **any return value `>= FS_ERR_MIN` (`u64::MAX - 31`) is an
-error**; everything below is a real result (byte counts, sizes, exit
+`u64` — **any return value `>= FS_ERR_MIN` (`u64::MAX - 39`, and it moves
+down each time a code is reserved - check `syscall-abi`, never this
+sentence) is an error**; everything below is a real result (byte counts, sizes, exit
 statuses). `NO_FS` (`MAX-1`) means no filesystem is mounted this boot.
 
 | # | Name | Arguments | Purpose |

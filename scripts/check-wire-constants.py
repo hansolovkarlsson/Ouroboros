@@ -171,7 +171,12 @@ CHECKED = [
 # what it is named for. Confirmed, which is why these are numbers and not a
 # truthiness test. Raise a baseline when a peer learns a new constant.
 PEER_BASELINE = {
-    "np9p_client.py": 10,  # 6 auth + STAT_INFO_LEN + 3 status codes
+    "np9p_client.py": 13,  # 6 auth + STAT_INFO_LEN + 6 status codes
+    # Rose from 10 when the `noverb` probe's status-name table was rebuilt
+    # from module constants instead of repeated literals: FS_ERROR,
+    # FS_ERR_READ_ONLY, FS_ERR_PERM and FS_ERR_NO_SUCH_VERB became names this
+    # script can see and pin. Raising the floor is what keeps them visible -
+    # inlining them back into the dict would otherwise pass silently.
     # Was 4, which BAKED THE GAP IN AS CORRECT: the server spelled the
     # public-key length with a private name and the nonce as a bare literal, so
     # the two fields deciding which guests it serves were skipped - and the
