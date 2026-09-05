@@ -168,8 +168,8 @@
         <tbody>
           <tr><th scope="row">Target architecture</th><td>x86_64 (AArch64/RISC-V stubbed)</td><td class="oc">AArch64 (Parallels on Apple Silicon primary)</td></tr>
           <tr><th scope="row">Boot</th><td>Limine / Multiboot2 / UEFI, three frontends</td><td class="oc">UEFI only — the one path that works on the real target</td></tr>
-          <tr><th scope="row">Kernel / policy boundary</th><td>Explicit, trait-based, swappable modules outside the TCB</td><td class="oc">Partial — the FS is a userland server; scheduler/MMU/drivers still kernel-resident</td></tr>
-          <tr><th scope="row">Fault isolation</th><td>Module restart with attempted state migration, no reboot (within one address space)</td><td class="oc">MMU-enforced per-task isolation; the FS server is contained + supervised</td></tr>
+          <tr><th scope="row">Kernel / policy boundary</th><td>Explicit, trait-based, swappable modules outside the TCB</td><td class="oc">Partial — the filesystem, console, network and account servers are userland tasks; scheduler/MMU/device drivers still kernel-resident</td></tr>
+          <tr><th scope="row">Fault isolation</th><td>Module restart with attempted state migration, no reboot (within one address space)</td><td class="oc">MMU-enforced per-task isolation; all four servers are contained + supervised (restart-from-image, a passive heartbeat, an active health ping)</td></tr>
           <tr><th scope="row">Runtime extensibility</th><td>Hot-reload is a designed-in primitive</td><td class="oc">Dynamic spawn / exec / exit / wait, but reload = restart, not live swap</td></tr>
           <tr><th scope="row">Maturity</th><td>Pre-alpha, unproven</td><td class="oc">Pre-alpha, incrementally verified on QEMU and real Parallels hardware</td></tr>
         </tbody>
@@ -196,11 +196,15 @@
       </li>
       <li>
         <strong>Self-healing / hot-reload as a design goal to hold in
-        mind,</strong> not a near-term target — Ouroboros now has the
-        prerequisites (dynamic task creation, a supervised restartable
-        server) that this presupposed, so the <em>shape</em> of the
-        mechanism (pause → snapshot → swap → restore → rollback) is a
-        reasonable target once a general supervision layer exists.
+        mind.</strong> The note originally listed this as blocked on
+        prerequisites Ouroboros did not have. It now has them — dynamic task
+        creation, and a general supervision layer that restarts any of the
+        four servers from a kept boot image. That is Helix's self-heal story
+        (watchdog + health monitor + recovery) in miniature, which leaves
+        <em>hot-reload with state migration</em> — live replacement rather
+        than stateless restart — as the genuinely distinct idea still
+        outstanding, its shape (pause → snapshot → swap → restore →
+        rollback) already a reasonable target.
       </li>
     </ul>
 

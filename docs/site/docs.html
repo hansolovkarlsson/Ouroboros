@@ -29,10 +29,11 @@
 
   <h1 class="title">The documentation library</h1>
   <p class="dek">
-    Every document in this project, as a web page — the build-it-yourself
-    guide, the architecture and reference material, the debugging
-    postmortems, and the research notes. Each page has a Markdown source
-    of record in the repository under <code class="inline">docs/</code>.
+    Every document in this project — the build-it-yourself guide, the
+    architecture and reference material, the debugging postmortems, and the
+    research notes. Each page here abridges a Markdown source of record in the
+    repository under <code class="inline">docs/</code>; the fast-moving
+    reference documents are linked straight to that source instead.
   </p>
 
   <article>
@@ -50,10 +51,10 @@
         <h3>Build an ARM64 OS from scratch</h3>
         <p>Nine ordered stages from a UEFI hello world to preemptive multitasking and position-independent userland loaded from disk — the working path only, no bug narratives. Stable Rust and QEMU are all you need.</p>
       </a>
-      <a class="pm-card" href="shell-commands.html">
-        <span class="pm-eyebrow">Guide · reference</span>
+      <a class="pm-card" href="https://github.com/hansolovkarlsson/Ouroboros/blob/main/docs/shell-commands.md">
+        <span class="pm-eyebrow">Reference · Markdown ↗</span>
         <h3>Shell commands</h3>
-        <p>The default shell's builtin commands — syntax, behaviour, and known limitations, command by command, from <code class="inline">ls</code>/<code class="inline">cat</code> through <code class="inline">exec</code>/<code class="inline">fg</code>/<code class="inline">kill</code> and pipelines.</p>
+        <p>The default shell's builtin commands — syntax, behaviour, and known limitations, command by command. Read on GitHub, where it is always current: the shell gains commands faster than a hand-written abridgement can track them.</p>
       </a>
       <a class="pm-card" href="glossary.html">
         <span class="pm-eyebrow">Guide · reference</span>
@@ -68,24 +69,38 @@
       <a class="pm-card" href="architecture-overview.html">
         <span class="pm-eyebrow">Reference · the layers</span>
         <h3>Architecture overview</h3>
-        <p>Six diagrams: the privilege stack, what the kernel keeps versus what it pushes out, the five task slots, the MMU-enforced isolation model, a single <code class="inline">cat</code> traced across the boundary, and the boot sequence from firmware to EL0.</p>
+        <p>Six diagrams: the privilege stack, what the kernel keeps versus what it pushes out, the eleven task slots, the MMU-enforced isolation model, a single <code class="inline">cat</code> traced across the boundary, and the boot sequence from firmware to EL0.</p>
       </a>
-      <a class="pm-card" href="processes.html">
-        <span class="pm-eyebrow">Reference · userland</span>
+      <a class="pm-card" href="https://github.com/hansolovkarlsson/Ouroboros/blob/main/docs/processes.md">
+        <span class="pm-eyebrow">Reference · Markdown ↗</span>
         <h3>The process model</h3>
-        <p>How userland programs are loaded, laid out in memory, and structured — the ELF/PIE binary format, the config mechanism, and a guide to writing a replacement program (and the relocation-class traps to avoid).</p>
+        <p>How userland programs are loaded, laid out in memory, and structured — the ELF/PIE binary format, the config mechanism, and a guide to writing a replacement program (and the relocation-class traps to avoid). Read on GitHub.</p>
       </a>
-      <a class="pm-card" href="roadmap.html">
-        <span class="pm-eyebrow">Reference · what's next</span>
+      <a class="pm-card" href="https://github.com/hansolovkarlsson/Ouroboros/blob/main/docs/ROADMAP.md">
+        <span class="pm-eyebrow">Reference · Markdown ↗</span>
         <h3>Roadmap</h3>
-        <p>The forward-looking parking lot of known future work — a relocating loader's next steps, blocking primitives, driver isolation, and the testing infrastructure — not yet sequenced.</p>
+        <p>The forward-looking plan — the open frontier, the small tails finished arcs left behind, and the north-star directions. It moves every working day, so it is served from the repository rather than copied here.</p>
       </a>
-      <a class="pm-card" href="changelog.html">
-        <span class="pm-eyebrow">Reference · history</span>
+      <a class="pm-card" href="https://github.com/hansolovkarlsson/Ouroboros/blob/main/docs/CHANGELOG.md">
+        <span class="pm-eyebrow">Reference · Markdown ↗</span>
         <h3>Changelog</h3>
         <p>The full milestone-by-milestone record, phase 0 to the present, newest first — every completed step with the same level of detail as the postmortems.</p>
       </a>
     </div>
+
+    <blockquote class="aside">
+      <span class="aside-label">Why four of these leave the site</span>
+      <p>
+        The shell reference, the process model, the roadmap and the changelog
+        are <strong>reference</strong> material — worth more <em>current</em>
+        than abridged, and they move on days when nothing else does. They used
+        to be hand-written pages here, and hand-written pages fall behind: the
+        whole site froze for twelve days once, still presenting a superseded
+        release as current, with nothing anywhere reporting it. Serving the
+        Markdown itself removes the copy rather than promising to keep it in
+        step.
+      </p>
+    </blockquote>
 
     <h2>Postmortems</h2>
     <p>
