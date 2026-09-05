@@ -8,6 +8,9 @@ members = [
     "programs/servers/fsd", "programs/servers/cond", "programs/servers/netd",
     "programs/servers/accountd",
     "programs/demos/hello", "programs/demos/pong",
+    # The C-side namespace-resolution shim (a staticlib for C programs, not an
+    # rlib for Rust ones) - see nsresolve/src/lib.rs and docs/roadmap-fid-verbs.md.
+    "nsresolve",
     "programs/fileutils/ls", "programs/fileutils/cat", "programs/fileutils/mkdir",
     "programs/fileutils/rmdir", "programs/fileutils/touch", "programs/fileutils/rm",
     "programs/fileutils/cp", "programs/fileutils/mv", "programs/fileutils/writeat",

@@ -271,6 +271,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "nsresolve"
+version = "0.1.0"
+dependencies = [
+ "ninep-abi",
+ "syscall-abi",
+]
+
+[[package]]
 name = "ouroboros-kernel"
 version = "0.18.1"
 dependencies = [
