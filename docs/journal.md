@@ -7,6 +7,102 @@ for the forward plan see [`ROADMAP.md`](ROADMAP.md).
 
 ---
 
+## 2026-09-04 — housekeeping, and measuring before restructuring
+
+*(No kernel or server code. Three PRs, all documentation and tooling — and one
+scoping pass whose main product was refusing two plausible ideas.)*
+
+The day started as tidying and turned into an argument with an instinct.
+
+**The standup was in the wrong place.** `/day-closeout` had been writing
+`docs/daily-standup.md`, kept out of history by a `.gitignore` rule. That works,
+but it puts a personal note that is overwritten daily inside the directory
+holding the durable record — the one place a reader is told to trust — with a
+rule as the only thing separating them, and a rule is invisible when you are
+looking at a file listing. Moved to `scratch/`, which is already ignored and is
+not part of the repository. The exact-path ignore rule was then dead, so it went
+too: a guard over a location nobody writes to would only ever fire on a mistake
+it also hides.
+
+**`docs/roadmap.md` became `docs/ROADMAP.md`**, matching `CHANGELOG.md` and
+`README.md`; it had been the one lowercase name in the set. Renamed through a
+temporary name deliberately — macOS is case-insensitive, so a direct
+`git mv docs/roadmap.md docs/ROADMAP.md` is a no-op that leaves the file
+lowercase in the index while every local check reports success, and the rename
+surfaces only in a case-sensitive checkout, where the links break. Two moves via
+`ROADMAP.tmp.md` forces git to record it, and it is stored as `R100`. All 120
+references across 46 files followed, reaching well past markdown: comments in
+four kernel sources, `libc/hello.c`, the Makefile, and the committed
+`docs/site/*.html`. Also an MIT `LICENSE` — the repo has been public without one,
+which means all rights reserved — and a `make all` target.
+
+**A wrong turn worth recording**, because it is the kind that looks like it
+worked. The three changes were meant to be three reviewable commits. The first,
+`git add LICENSE` then `git commit`, silently swallowed the roadmap rename as
+well: the rename had been staged in the index earlier, and `git commit` commits
+the *index*, not the paths you just added. Caught before pushing by checking
+`--name-status` rather than trusting the commit message. Rebuilding it needed
+care in a second direction — the fix must never *unstage* the rename, because an
+index holding `docs/roadmap.md` while the worktree holds `docs/ROADMAP.md` is
+precisely the case-insensitive phantom state the temp-name move exists to avoid.
+Three commits, each one concern, verified by reading `--name-status` back.
+
+**Then the real question: the project feels big, so what should be split out or
+parked?** Two specific proposals — break some programs into a separate
+repository, and bench FAT32 to focus on ext2. Both measured as wrong targets,
+and the measuring was the day's real work.
+
+*It is not big, and not slow.* Tracked source is **9.8 MB**; the 2.1 GB working
+tree is 1.95 GB of `target/` and `build/`. An incremental kernel build is
+**1.5 s**, the full ESP stage of all ~50 userland binaries **12 s**, `make test`
+**2.6 s**. `default-members = ["kernel"]`, so a bare `cargo build` never touches
+the 50 userland crates or the 5 pure ones — splitting them would save
+approximately zero, because the time is not there to save. Only `ed25519` and
+`regex` are genuinely standalone libraries anyway; splitting buys coordination
+overhead (path deps become git deps, a change across the boundary becomes two
+PRs) against no measured gain.
+
+*FAT32 cannot be benched.* Three findings, each verified rather than recalled.
+UEFI can only boot FAT, and `mkext2.py` says so in its own docstring —
+`image-ext2` *depends on* `image`, because the ext2 rig still needs a FAT32 ESP
+as partition 2. But that ESP is read by firmware, not by `fsd`: `loader.rs` uses
+`uefi::fs::FileSystem` during the boot-services window, so `fsd`'s 2,239-line
+`fat32.rs` is only for runtime mounting — which made the question a fair one.
+What settles it is that **on real hardware there is only one partition and it is
+FAT32**: Parallels' `esp.hdd` and the Pi 4 boot card both. Parking `fsd`'s FAT32
+arm would leave `fsd` able to mount nothing on either real-hardware target,
+while 2× Pi 4 is the declared next step. The invertible version does work —
+`exfat.rs` (1,713 lines, one rig, no real hardware) is the only arm with no
+structural role — but parking it saves attention, not time, and that was worth
+saying rather than dressing up.
+
+**The weight is in the documents, and one of them is public.** 31,430 lines of
+markdown, 29 postmortems, a 6,242-line changelog, and 23 hand-maintained HTML
+pages under `docs/site/` with no generator. That last one is not a size
+complaint but a live failure: `docs/` is served by GitHub Pages, and the site
+**froze on 2026-08-23** while its sources kept moving. Two releases and a closed
+frontier item are absent from the public site, with nothing anywhere reporting
+it. See [`ROADMAP.md`](ROADMAP.md) and
+[`true-when-written-postmortem.md`](true-when-written-postmortem.md).
+
+**The first framing of the fix was wrong too, and the numbers refused it.** A
+generator was the obvious answer and would have destroyed the site: the pages
+are curated *abridgements*, not renderings. `changelog.html` is half its
+source's words; `architecture-overview.html` a sixth, and a different document
+with a different job. The site carries 10 of 29 postmortems, `glossary.html` has
+no markdown source at all, and the slugs are not derivable. Rendering every
+`.md` would double the changelog page and delete the glossary. What was needed
+was not generation but detection — so `scripts/check-site-freshness.py` makes
+the drift loud and fixes nothing, and the nine pages stay a human job.
+
+It is deliberately **not** in `make test` yet. Nine pages are already behind, so
+wiring it in today would make `test` permanently red and train everyone to
+ignore it — the failure mode that would waste the check entirely. It sits beside
+`check-relocs` as `make check-site` until the backlog clears, and the Makefile
+comment says that moving it in is the one-line change that finishes the job.
+
+---
+
 ## 2026-09-03 (cont.) — the supervisor was killing netd mid-read
 
 *(The fix for what the packet trace found, plus the `ls` exit code that made it

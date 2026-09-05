@@ -594,6 +594,45 @@ The small open tails those arcs deliberately left:
   failure modes it would prevent. It is a simplification with a security
   argument, not a fix.
 
+## The published website, and the nine pages behind it (2026-09-04)
+
+`docs/` is served live by GitHub Pages
+(https://hansolovkarlsson.github.io/Ouroboros/, branch `main`, path `/docs`),
+and `docs/site/*.html` is **hand-written** — 23 pages plus `index.html`. Nothing
+generated them and nothing checked them, so the site froze on **2026-08-23**
+while its sources kept moving: v0.18.0, v0.18.1, twelve merged PRs, a closed
+frontier item and the 29th postmortem are all absent from the public site.
+
+`scripts/check-site-freshness.py` (`make check-site`, added 2026-09-04) now
+reports it — nine pages behind their source — but reporting is all it does. Two
+things are still open, and the second depends on the first:
+
+1. **Clear the nine.** The recommendation from the scoping pass is to fix
+   **fewer pages than are broken**. Four of them — `changelog`, `roadmap`,
+   `shell-commands`, `processes` — are reference material that wants to be
+   *current* rather than abridged, and `roadmap.html` is 11,050 words against a
+   14,286-word source, which is barely an abridgement and so drifts every time
+   the roadmap is touched. Deleting those four as pages and linking to the
+   markdown on GitHub removes four drift surfaces permanently instead of
+   committing to re-abridging them forever. That leaves five genuinely
+   editorial pages (`manual`, `architecture-overview`, and the three
+   `research-*`) to re-abridge by hand. **Pending a decision**: the site is
+   public, so dropping four pages is not a maintenance call to make silently.
+2. **Then move `check-site` into `make test`** — a one-line change, and the
+   whole point. It sits outside the suite today only because nine failures
+   would make `test` permanently red and train everyone to ignore it. A check
+   outside the default suite decays; this one should not be left there long.
+
+**Not a generator.** That was the first framing and the measurements refused
+it: these pages are curated *abridgements*, not renderings (`changelog.html` is
+half its source's words, `architecture-overview.html` a sixth and a different
+document with a different job), the site is a curated subset (10 of the 29
+postmortems), `glossary.html` has no markdown source at all, and the slugs are
+not derivable (`capability-and-hardening-postmortem.md` →
+`postmortem-capability-hardening.html`). Rendering every `.md` would double the
+changelog page, replace the overview with a 10,000-word reference, and delete
+the glossary.
+
 ## Testing infrastructure: scripted real-hardware round trips
 
 > **Direction update (2026-08-26): Parallels real-hardware testing is PARKED.**
