@@ -331,6 +331,21 @@ the microkernel arc itself still leaves open):
      program's `open`/`fstat` over a remote mount fails on a real guest-to-guest
      mount too. `ls -l` works remotely now; `fstat` of the same file does not.
 
+     **SCOPED 2026-09-05 — [`roadmap-fid-verbs.md`](roadmap-fid-verbs.md),
+     six ordered steps, each with a check and a negative control.** The
+     scoping changed the item: **this heading names the wrong subsystem.**
+     `libc/src/file.c` sends every fid verb to `FSD_TASK` and grants to
+     `FSD_TASK`, with no namespace resolution anywhere — so a C
+     `open("/mnt/a/F")` asks `fsd` about a path only `netd` knows, and never
+     leaves the machine. Teaching the export the five verbs is real work and
+     is steps 4–6, but it would not have moved the reported symptom by one
+     byte. Two decisions are called out there as needing confirmation before
+     code: where namespace resolution lives for C's fd path (the recommendation
+     costs the C arc its first Rust link), and who owns a remote fid — `fsd`'s
+     ownership check is a task **slot**, so proxying remote opens straight
+     through would make every peer's fids indistinguishable inside one
+     8-entry table.
+
    The docs needed no correction: `CLAUDE.md` and
    [`testing-qemu.md`](testing-qemu.md) both show `ls /mnt/a` in that recipe,
    and it now does what they say.
