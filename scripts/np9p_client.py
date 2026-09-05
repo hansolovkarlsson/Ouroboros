@@ -11,6 +11,7 @@ Usage:
     python3 scripts/np9p_client.py <host> <port> stat    <path>
     python3 scripts/np9p_client.py <host> <port> mv      <src> <dst>
     python3 scripts/np9p_client.py <host> <port> run     <command>
+    python3 scripts/np9p_client.py <host> <port> noverb  <path> [verb]
 
 Every request is SIGNED with a per-machine Ed25519 key: the auth header is
 `[magic:8][nonce:16][name:32][pubkey:32][sig:64]` in front of the NP message,
@@ -28,6 +29,8 @@ e.g. after `make run-image-9p`:
     python3 scripts/np9p_client.py localhost 5640 readdir / --sign=nobody      # -> refused (unauthorized key)
     python3 scripts/np9p_client.py localhost 5640 readdir / --legacy-mac       # -> refused (retired format)
     python3 scripts/np9p_client.py localhost 5640 read /etc/shadow --user user # -> refused (permissions)
+    python3 scripts/np9p_client.py localhost 5640 noverb /                     # -> FS_ERR_NO_SUCH_VERB (NP_OPEN)
+    python3 scripts/np9p_client.py localhost 5640 noverb / 0x10c               # -> served: NP_STAT (the control)
 """
 import hashlib
 import hmac
@@ -47,6 +50,7 @@ STAT_INFO_LEN = 27   # ninep-abi STAT_INFO_LEN; the NP_STAT result record
 NP_WRITE_FILE = NP_BASE + 11
 NP_WRITE_AT = NP_BASE + 4
 NP_READ_AT = NP_BASE + 10
+NP_OPEN = NP_BASE + 15  # the first of the five fid verbs no export implements
 FS_ERR_MIN = (1 << 64) - 64  # errors are a small band just below u64::MAX
 FS_ERR_AUTH = (1 << 64) - 1 - 30  # u64::MAX - 30
 # The two statuses a SEALED post-authentication refusal can carry. They became
@@ -175,6 +179,34 @@ def peer_key():
     if _PEER_KEY is None:
         _PEER_KEY = load_ed_reference().public_key(dev_seed(PEER_LABEL))
     return _PEER_KEY
+
+
+# Status codes worth NAMING in output. A probe that prints a bare
+# 0xffffffffffffffd8 makes the reader do the arithmetic that the bug was about.
+#
+# BUILT FROM THE MODULE CONSTANTS, not from repeated literals. `check-wire-
+# constants.py` parses `^NAME = ...` lines and pins those against Rust; a literal
+# inside a dict body is invisible to it, so a code that moved would be caught in
+# the constant and NOT in the table - and this probe would then print a
+# confidently wrong name for the very status it exists to make honest.
+FS_ERROR = (1 << 64) - 1
+FS_ERR_READ_ONLY = (1 << 64) - 1 - 29  # u64::MAX - 29
+FS_ERR_PERM = (1 << 64) - 1 - 32  # u64::MAX - 32
+FS_ERR_NO_SUCH_VERB = (1 << 64) - 1 - 39  # u64::MAX - 39: no arm for that verb
+STATUS_NAMES = {
+    FS_ERROR: "FS_ERROR",
+    NO_FS: "NO_FS",
+    FS_ERR_NOT_FOUND: "FS_ERR_NOT_FOUND",
+    FS_ERR_READ_ONLY: "FS_ERR_READ_ONLY",
+    FS_ERR_AUTH: "FS_ERR_AUTH",
+    FS_ERR_PERM: "FS_ERR_PERM",
+    FS_ERR_NO_SUCH_VERB: "FS_ERR_NO_SUCH_VERB",
+}
+
+
+def status_name(status):
+    """`FS_ERR_NO_SUCH_VERB` for a known code, else the raw value."""
+    return STATUS_NAMES.get(status, f"0x{status:x}")
 
 
 def build_frame(verb, tree, params, payload):
@@ -592,6 +624,39 @@ def main():
         try:
             status, data = one_op(host, port, np)
             print(f"guest answered status=0x{status:x} ({len(data)} bytes) - it survived")
+        except Exception as exc:
+            print(f"no usable answer: {exc!r}")
+        return
+
+    if op == "noverb":
+        # noverb <host> <port> noverb [path] [verb]
+        #
+        # Send a correctly-signed request for a verb the export has NO ARM for -
+        # NP_OPEN by default, the first of the five fid verbs (the open frontier
+        # item; see docs/roadmap-fid-verbs.md). The point is the STATUS the
+        # guest answers with, not the data.
+        #
+        # Until 2026-09-05 that status was the generic FS_ERROR, which every
+        # client renders as "no such file or directory" - a message about a
+        # path, for a request whose path was fine. It is now
+        # FS_ERR_NO_SUCH_VERB, and netd LOGS the verb number on the guest
+        # console (a status code cannot carry it).
+        #
+        # THE CONTROL IS THE SECOND ARGUMENT: pass a verb the export DOES serve
+        # (0x10c = NP_STAT) and this must NOT answer FS_ERR_NO_SUCH_VERB. A
+        # probe that reports "not implemented" for everything, including what is
+        # implemented, proves nothing about either.
+        # `path` is REQUIRED, not defaulted: main() already exits on
+        # `len(args) < 4`, so an `else "/"` default here could never be reached
+        # and the usage line promised a bare `noverb` that only ever printed the
+        # docstring.
+        path = args[3].encode()
+        verb = int(args[4], 0) if len(args) > 4 else NP_OPEN
+        np = build_frame(verb, 0, [len(path), 0, 0, 0], path)
+        try:
+            status, data = one_op(host, port, np)
+            print(f"verb 0x{verb:x} path={path!r} -> {status_name(status)} "
+                  f"({len(data)} bytes of data)")
         except Exception as exc:
             print(f"no usable answer: {exc!r}")
         return

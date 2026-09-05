@@ -1366,6 +1366,26 @@ pub const FS_ERR_NOT_SUPPORTED: u64 = u64::MAX - 31;
 /// (uid 0) bypasses the check, so this is only ever a *non-root* refusal.
 pub const FS_ERR_PERM: u64 = u64::MAX - 32;
 
+/// **The server has no arm for this verb** - not "the filesystem cannot model
+/// it" ([`FS_ERR_NOT_SUPPORTED`]), and emphatically not "no such file". The
+/// request was well-formed and the path was fine; the server it reached simply
+/// does not implement that request.
+///
+/// Reserved 2026-09-05, because the absence of it was actively misleading. Both
+/// 9P peers - `netd`'s export gateway and `scripts/np9p_server.py` - answered a
+/// verb they did not implement with the generic [`FS_ERROR`], which
+/// [`crate::FS_ERROR`]'s clients render as *"no such file or directory"*: a
+/// message about a path, for a request whose path was correct. That cost a real
+/// debugging session once already (a missing `NP_STAT` made `ls /mnt/a` fail
+/// while `cat` under the same mount worked, and the symptom sat in the roadmap
+/// for days as a guest-side path-resolution bug), and the five fid verbs
+/// (`NP_OPEN`/`NP_PREAD`/`NP_PWRITE`/`NP_FSTAT`/`NP_CLUNK`) are currently
+/// implemented by no export at all, so it was about to cost another.
+///
+/// **A server returning this should also log the verb number**, because the
+/// code says *that* a verb is missing and cannot say *which*.
+pub const FS_ERR_NO_SUCH_VERB: u64 = u64::MAX - 39;
+
 /// Floor of the reserved error band (with headroom for future codes):
 /// **any error-capable syscall's return value `>= FS_ERR_MIN` is an
 /// error**, everything below is a real result. The predicate callers
@@ -1377,13 +1397,26 @@ pub const FS_ERR_PERM: u64 = u64::MAX - 32;
 /// so the `ACCT_ERR_*` codes fit below the filesystem ones instead of colliding
 /// with them - safe each time, since
 /// both sides of the ABI import this from the same crate and no real success
-/// value approaches it either way.)
+/// value approaches it either way. `MAX-39` for [`FS_ERR_NO_SUCH_VERB`] is the
+/// latest move - the band was FULL from `MAX-1` to `MAX-38`, with no free slot
+/// anywhere in it, so a new code necessarily moves the floor.)
 ///
 /// **`libc/include/sys.h` hand-mirrors this value.** It moves down every time a
 /// new error code is reserved, and a C program compiled against a stale floor
 /// reads the newly reserved codes as ordinary success values - so change both,
 /// in the same commit.
-pub const FS_ERR_MIN: u64 = u64::MAX - 38;
+///
+/// **And both node images, for a code that crosses the wire.**
+/// [`FS_ERR_NO_SUCH_VERB`] is the first reserved code a *peer* can receive over
+/// 9P/TCP, which makes the floor a CROSS-NODE agreement and not only a
+/// cross-language one: a node still built with `FS_ERR_MIN = MAX-38` reads
+/// `MAX-39` as a **success** value - a byte count of about 1.8e19 - so "verb
+/// not implemented" arrives as a garbage-length read reply rather than an
+/// error. Nothing detects that; it is a well-formed wrong answer. What keeps it
+/// off the floor today is that `make images-2vm` builds both node images from
+/// one tree in one target, which exists for a different reason (per-machine
+/// keys) and is load-bearing here too.
+pub const FS_ERR_MIN: u64 = u64::MAX - 39;
 
 /// **Cross-device move**: `mv`'s source and destination resolved to different
 /// namespace targets (two different mounts, or a local path and a remote one),

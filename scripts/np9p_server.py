@@ -12,7 +12,8 @@ gateway's `Connection: close` shape, which the guest's `tcp_get`-based client
 reads to EOF).
 
 Usage (host):
-    python3 scripts/np9p_server.py [port]        # default 5641
+    python3 scripts/np9p_server.py [port]
+    python3 scripts/np9p_server.py --self-test [-v]   # verb dispatch vs the table        # default 5641
 
 Then in the guest (SLIRP maps the host to 10.0.2.2):
     mount -r 10.0.2.2:5641 /mnt/a
@@ -22,27 +23,32 @@ Then in the guest (SLIRP maps the host to 10.0.2.2):
     cat /mnt/a/SUB/NOTE.TXT
 
 VERBS SERVED - five names in four arms: NP_READDIR, NP_STAT, NP_READ and
-NP_READ_AT (one arm, same handling), NP_READ_FILE. Everything else gets
-FS_ERROR. That includes the mutating verbs, because the export is read-only,
-but ALSO the read-capable fid verbs NP_OPEN / NP_PREAD / NP_PWRITE / NP_FSTAT /
-NP_CLUNK, which no peer here implements and netd's export does not handle
-either - so a C program's open/fstat over a remote mount fails the same way,
-and read-only is not the reason.
+NP_READ_AT (one arm, same handling), NP_READ_FILE. A known verb refused on
+policy gets FS_ERR_READ_ONLY (the mutating verbs - the export is read-only);
+anything else gets FS_ERR_NO_SUCH_VERB. That second group is currently the
+read-capable fid verbs NP_OPEN / NP_PREAD / NP_PWRITE / NP_FSTAT / NP_CLUNK,
+which no peer here implements and netd's export does not handle either - so a C
+program's open/fstat over a remote mount fails the same way, and read-only is
+not the reason.
 
 This list is hand-maintained prose and nothing compares it to the dispatch
 chain; `serve_request`'s fallthrough is the authority, and it PRINTS the verb
 number it refused.
 
-An unimplemented verb does NOT surface as "unsupported" at the guest. It
-surfaces as whatever the *command* makes of FS_ERROR, which is usually "no such
-file or directory" - a message about a path, for a request whose path was fine.
-That cost a real debugging session: `ls` stats a named operand before listing
-it, so a missing NP_STAT made `ls /mnt/a` fail while `cat` under the same mount
-worked, and the symptom was recorded in the roadmap for days as a guest-side
-path-resolution bug. If a guest command fails here for a reason that makes no
-sense, read the fallthrough's output before suspecting the guest.
+An unimplemented verb DOES now surface as itself at the guest ("that server
+does not implement this request"), since 2026-09-05. It used to surface as
+whatever the *command* made of FS_ERROR, which is usually "no such file or
+directory" - a message about a path, for a request whose path was fine. That
+cost a real debugging session: `ls` stats a named operand before listing it, so
+a missing NP_STAT made `ls /mnt/a` fail while `cat` under the same mount worked,
+and the symptom was recorded in the roadmap for days as a guest-side
+path-resolution bug. The status code says THAT a verb is missing and cannot say
+WHICH, so the fallthrough still prints the number - read it before suspecting
+the guest.
 """
+import contextlib
 import hashlib
+import io
 import os
 import socket
 import struct
@@ -87,6 +93,30 @@ NO_FS = (1 << 64) - 1 - 1  # u64::MAX - 1: no filesystem mounted (transient)
 FS_ERR_NOT_FOUND = (1 << 64) - 1 - 2  # u64::MAX - 2: definitively absent
 FS_ERR_READ_ONLY = (1 << 64) - 1 - 29  # u64::MAX - 29
 FS_ERR_AUTH = (1 << 64) - 1 - 30  # u64::MAX - 30
+FS_ERR_NO_SUCH_VERB = (1 << 64) - 1 - 39  # u64::MAX - 39: this server has no arm for that verb
+
+# The verbs this peer refuses ON POLICY (the export is read-only), as an
+# EXPLICIT SET rather than "anything in [NP_BASE, NP_LIMIT)".
+#
+# The range test was wrong and said so confidently: NP_LIMIT is one past
+# NP_CLUNK, so the five FID verbs (NP_OPEN 0x10f .. NP_CLUNK 0x113) are INSIDE
+# it, and every one of them was answered "read-only filesystem" - a policy this
+# peer does not have about them, for verbs it simply does not implement. The
+# range only ever meant "a verb I have heard of", which is not the same
+# question, and it silently absorbed each new verb ninep-abi defined.
+MUTATING_VERBS = {
+    NP_BASE + 3,   # NP_WRITE
+    NP_BASE + 4,   # NP_WRITE_AT
+    NP_BASE + 5,   # NP_TOUCH
+    NP_BASE + 6,   # NP_MKDIR
+    NP_BASE + 7,   # NP_RMDIR
+    NP_BASE + 8,   # NP_RM
+    NP_BASE + 9,   # NP_MV
+    NP_BASE + 11,  # NP_WRITE_FILE
+    NP_BASE + 13,  # NP_CHMOD
+    NP_BASE + 14,  # NP_CHOWN
+    NP_BASE + 17,  # NP_PWRITE - a fid write, refused for the same reason
+}
 HDR = 48  # NP_REQ_PAYLOAD
 
 # Cluster auth: the guest SIGNS every request with its per-machine Ed25519 key,
@@ -397,21 +427,114 @@ def serve_request(body):
     #
     # A prose list of served verbs sits in this file's docstring with nothing
     # comparing it to this dispatch chain, so treat THIS as the authority.
-    if NP_BASE <= verb < NP_LIMIT:
+    if verb in MUTATING_VERBS:
         # A verb this peer knows of and refuses on policy, not one it failed to
         # recognise. netd copies the status through verbatim, so the guest
         # renders "read-only filesystem" - which is the actual reason, and
         # distinguishable from both "absent" and "no idea".
         print(f"  [read-only: refusing verb 0x{verb:x} path={path!r}]", flush=True)
         return sealed(FS_ERR_READ_ONLY)
-    print(f"  [unserved verb 0x{verb:x} path={path!r}] -> FS_ERROR "
-          f"(the guest will report whatever its command makes of a generic error)",
+    print(f"  [unserved verb 0x{verb:x} path={path!r}] -> FS_ERR_NO_SUCH_VERB",
           flush=True)
-    return sealed(FS_ERROR)
+    # NOT FS_ERROR, which this answered until 2026-09-05. The guest rendered
+    # that as "no such file or directory" - a message about a path, for a
+    # request whose path was fine - which is precisely the confusion the print
+    # above exists to work around. Now the guest says so itself, and the print
+    # is what names WHICH verb, since one status code cannot.
+    return sealed(FS_ERR_NO_SUCH_VERB)
+
+
+# Every verb ninep-abi defines, and the group this peer's DISPATCH must put it
+# in. Kept beside the dispatch on purpose: the docstring's prose list of served
+# verbs had nothing comparing it to the chain, so when the read-only branch
+# silently swallowed the five fid verbs the prose went on claiming otherwise -
+# confidently, and for as long as nobody read both. `--self-test` is what turns
+# that prose into a claim that can fail.
+#
+# "served" means a real answer, not an error in the reserved band.
+SELF_TEST_VERBS = [
+    ("NP_READDIR", NP_BASE + 0, "served", b"/"),  # a DIRECTORY: readdir of a file is a real NOT_FOUND, not a dispatch answer
+    ("NP_READ_FILE", NP_BASE + 1, "served"),
+    ("NP_READ", NP_BASE + 2, "served"),
+    ("NP_WRITE", NP_BASE + 3, "read-only"),
+    ("NP_WRITE_AT", NP_BASE + 4, "read-only"),
+    ("NP_TOUCH", NP_BASE + 5, "read-only"),
+    ("NP_MKDIR", NP_BASE + 6, "read-only"),
+    ("NP_RMDIR", NP_BASE + 7, "read-only"),
+    ("NP_RM", NP_BASE + 8, "read-only"),
+    ("NP_MV", NP_BASE + 9, "read-only"),
+    ("NP_READ_AT", NP_BASE + 10, "served"),
+    ("NP_WRITE_FILE", NP_BASE + 11, "read-only"),
+    ("NP_STAT", NP_BASE + 12, "served"),
+    ("NP_CHMOD", NP_BASE + 13, "read-only"),
+    ("NP_CHOWN", NP_BASE + 14, "read-only"),
+    ("NP_OPEN", NP_BASE + 15, "no-such-verb"),
+    ("NP_PREAD", NP_BASE + 16, "no-such-verb"),
+    ("NP_PWRITE", NP_BASE + 17, "read-only"),
+    ("NP_FSTAT", NP_BASE + 18, "no-such-verb"),
+    ("NP_CLUNK", NP_BASE + 19, "no-such-verb"),
+    ("NP_RUN", NP_BASE + 0x20, "no-such-verb"),
+]
+
+
+def classify(status):
+    if status == FS_ERR_READ_ONLY:
+        return "read-only"
+    if status == FS_ERR_NO_SUCH_VERB:
+        return "no-such-verb"
+    if status >= (1 << 64) - 64:
+        return f"error 0x{status:x}"
+    return "served"
+
+
+def self_test(quiet=True):
+    """Drive `serve_request` once per verb and check the group it lands in.
+
+    Auth is stubbed out - this tests the DISPATCH, and a signature check in the
+    way would only mean the test needs keys to answer a question about verb
+    numbers. `verify` is restored afterwards so an in-process caller is not left
+    with a server that authenticates nothing.
+    """
+    global verify
+    real_verify = verify
+    verify = lambda body: (body, b"\0" * NP_NONCE_LEN)  # noqa: E731
+    bad = []
+    try:
+        for entry in SELF_TEST_VERBS:
+            name, verb, want = entry[0], entry[1], entry[2]
+            path = entry[3] if len(entry) > 3 else b"/HELLO.TXT"
+            msg = (struct.pack("<Q", verb) + b"\0" * 8
+                   + struct.pack("<QQQ", len(path), 512, 0)
+                   + b"\0" * (HDR - 40) + path)
+            # The dispatch PRINTS its own operational lines (which verb it
+            # refused, and why). Useful on a live server, noise in `make test`,
+            # so swallow them unless -v asked for the detail.
+            if quiet:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    out = serve_request(msg)
+            else:
+                out = serve_request(msg)
+            status = struct.unpack("<Q", out[4 + NP_SIG_LEN:4 + NP_SIG_LEN + 8])[0]
+            got = classify(status)
+            if got != want:
+                bad.append(f"  - {name} (0x{verb:x}): dispatch says {got}, "
+                           f"this table says {want}")
+            elif not quiet:
+                print(f"  {name:14} 0x{verb:x} -> {got}")
+    finally:
+        verify = real_verify
+    if bad:
+        print("np9p_server --self-test: DISPATCH DISAGREES WITH THE TABLE")
+        print("\n".join(bad))
+        return 1
+    print(f"np9p_server: {len(SELF_TEST_VERBS)} verb(s) dispatch as documented")
+    return 0
 
 
 def main():
     args = sys.argv[1:]
+    if "--self-test" in args:
+        sys.exit(self_test(quiet="-v" not in args))
     port = int(args[0]) if args else 5641
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)

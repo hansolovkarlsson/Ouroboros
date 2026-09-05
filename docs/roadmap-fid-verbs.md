@@ -74,6 +74,12 @@ observer has to come first, because it is the instrument.
 
 ## Two decisions that change the plan's shape
 
+> **Both CONFIRMED 2026-09-05**, as recommended: the Rust shim for resolution,
+> and `netd` owning the fids. The wording below is the case as it was put; it is
+> kept rather than rewritten into a settled statement, because the cost named in
+> Decision 1 is one the C arc has not paid yet and should stay visible until it
+> has.
+
 ### Decision 1 — where namespace resolution lives for C's fd path
 
 `ninep_abi::resolve_ns` is deliberately task-id-neutral and is **the single
@@ -122,17 +128,69 @@ Each step names its check **and** a negative control — the discipline from
 verifiable if the check can fail.* Most of that arc's real findings were checks
 that could not.
 
-**Step 1 — make the failure legible.** Replace both `_ => FS_ERROR`
-catch-alls (`netd`'s `build_9p_reply`, `np9p_server.py`'s `serve_request`) with
-a distinct code, and give it a message. **Not `FS_ERR_NOT_SUPPORTED`** — its
-existing message reads *"not supported by this filesystem (mode/owner need
-ext2)"*, which would send a reader after the filesystem for a verb the *server*
-never implemented. A new code; `MAX-34`…`MAX-38` are free below `FS_ERR_MIN`.
-· **Check:** a C `open()` on a remote mount reports "verb not implemented by
-that server", naming the verb number, not "no such file or directory".
-· **Negative control:** the pre-fix message, recorded before the change — the
-control is that the two differ. · **Why first:** every step below is debugged
-through this message, and today it points at the wrong subsystem.
+**Step 1 — make the failure legible. ✅ DONE 2026-09-05.** Both
+`_ => FS_ERROR` catch-alls (`netd`'s `build_9p_reply`, `np9p_server.py`'s
+`serve_request`) now answer `FS_ERR_NO_SUCH_VERB`, and each server **logs the
+verb number** — a status code says *that* a verb is missing and cannot say
+*which*. Deliberately **not** `FS_ERR_NOT_SUPPORTED`, whose message reads *"not
+supported by this filesystem (mode/owner need ext2)"* and would send a reader
+after the filesystem for a verb the *server* never implemented.
+
+Measured on a booted guest (`make run-image-9p`) with
+`np9p_client.py … noverb`:
+
+| | `NP_OPEN` (0x10f, no arm) | `NP_STAT` (0x10c, served) |
+|---|---|---|
+| before | `FS_ERROR`, no log | 27 bytes of stat |
+| after | `FS_ERR_NO_SUCH_VERB` + `netd: export: no arm for verb 0x10f` | 27 bytes of stat |
+
+`netd` had **four** such fallthroughs, not one: the `/dev/cons` and `/net` export
+arms and the defensive transitive-mount arm answered `FS_ERROR` too, so
+`NP_OPEN /net/ip` still said "no such file or directory". All four now answer
+alike and name the target that refused (`netd: /net: no arm for verb 0x10f`).
+
+The **host** peer needed a different fix, and it is the one worth remembering:
+its refusal was `if NP_BASE <= verb < NP_LIMIT: FS_ERR_READ_ONLY`, and `NP_LIMIT`
+is one past `NP_CLUNK` — so all five fid verbs were *inside* it and got
+"read-only filesystem", a policy that peer does not have about them. The range
+only ever meant "a verb I have heard of", which is a different question, and it
+silently absorbed every verb `ninep-abi` added. Replaced with an explicit
+mutating-verb set.
+
+That bug survived the first pass because the check only ever ran against the
+*guest's* export, while the docstring listing the served verbs — whose own text
+says nothing compares it to the dispatch chain — was edited to claim the
+opposite of what the code did. So the arms are now covered by
+`np9p_server.py --self-test`, in `make test`: one request per verb, checked
+against the table beside it. Its negative controls are the bug itself
+(restore the range test → four verbs mismatch) and a deleted arm
+(→ `NP_STAT` mismatches).
+
+The right-hand column is the control that matters: a probe reporting "not
+implemented" for everything, including what *is* implemented, would prove
+nothing about either. The left column's "before" row is a real pre-fix build,
+booted and probed, not a recollection.
+
+> **Two corrections to this step, found while doing it** — recorded rather than
+> smoothed over, since a plan quietly edited to match what happened stops being
+> a plan.
+>
+> **The free slots did not exist.** This step said `MAX-34`…`MAX-38` were free
+> below `FS_ERR_MIN`. They are the `ACCT_ERR_*` codes: the band is **full** from
+> `MAX-1` to `MAX-38`, and `FS_ERR_MIN` *is* `MAX-38`. Reserving a code
+> therefore *moves the floor* — to `MAX-39` — and `libc/include/sys.h`
+> **hand-mirrors** that floor, its own comment saying to change both in the same
+> commit. A C program compiled against a stale floor reads a newly reserved code
+> as an ordinary success value.
+>
+> **The check could not be run as written.** It named a C `open()` on a remote
+> mount. But `libc`'s `open()` returns `-1` for every failure with the status
+> discarded, this libc has no `errno`, and `cfile.c` opens a hardcoded local
+> path — so nothing C could say would distinguish the codes, and until Step 3 a
+> C program cannot reach a remote mount at all. The verb-level check moved to
+> the **foreign observer**, which exercises exactly the catch-all under test and
+> needs no guest program. Making `open()` surface the code belongs with Step 3,
+> where C's routing changes anyway.
 
 **Step 2 — teach the foreign observer.** `np9p_server.py` gains `NP_OPEN`,
 `NP_PREAD`, `NP_FSTAT`, `NP_CLUNK` (read-only: `NP_PWRITE` stays refused, the

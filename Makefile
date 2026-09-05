@@ -1333,6 +1333,12 @@ test:
 	@# as a key problem rather than a constant problem.
 	@echo "== cross-language wire constants"
 	@python3 scripts/check-wire-constants.py || exit 1
+	@# The host 9P peer's docstring lists which verbs it serves, and nothing
+	@# compared that prose to its dispatch chain - so when a range test silently
+	@# swallowed the five fid verbs, the prose went on claiming otherwise. This
+	@# drives one request per verb and checks the group each lands in.
+	@echo "== 9P peer verb dispatch"
+	@python3 scripts/np9p_server.py --self-test || exit 1
 	@# The published site abridges documents in this repo, and nothing lays the
 	@# two side by side - not the compiler, not a test, not review, because the
 	@# drift crosses a FILE FORMAT. The failure is silent and outward-facing: a
