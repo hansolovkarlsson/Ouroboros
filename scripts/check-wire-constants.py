@@ -83,6 +83,40 @@ def py_consts(path):
     return out
 
 
+def c_consts(path):
+    """The same, from the C header — `#define NAME value`, evaluated literally.
+
+    `libc/include/sys.h` HAND-MIRRORS the whole wire ABI for C programs and was
+    checked by nothing until 2026-09-05, which is worse than the Python peers'
+    situation rather than better: its own comment on FS_ERR_MIN says the value
+    "can drift" and that a C caller compiled against a stale floor reads newly
+    reserved error codes as SUCCESSFUL RETURNS. That note was correct, had been
+    stale through three moves of the floor, and there was no check to notice.
+    """
+    src = open(path).read()
+    out = {}
+    # Resolve in two passes so `(NP_BASE + 15)` can see NP_BASE.
+    for _ in range(2):
+        for name, body in re.findall(r"^#define (\w+)\s+(.+?)\s*$", src, re.M):
+            body = body.strip()
+            # `(~0UL - 39UL)` — the C spelling of `u64::MAX - 39`.
+            m = re.fullmatch(r"\(~0UL - (\d+)UL\)", body)
+            if m:
+                out[name] = (1 << 64) - 1 - int(m.group(1))
+                continue
+            # Integers, with optional u/U suffix and optional 0x, and simple
+            # `(NAME + n)` sums. Anything else stays INVISIBLE rather than
+            # guessed at - the same narrowness the Rust parser uses.
+            m = re.fullmatch(r"\(?(\w+)\s*\+\s*(\d+)\)?", body)
+            if m and m.group(1) in out:
+                out[name] = out[m.group(1)] + int(m.group(2))
+                continue
+            m = re.fullmatch(r"(0[xX][0-9a-fA-F]+|\d+)[uU]?[lL]*", body)
+            if m:
+                out[name] = int(m.group(1), 0)
+    return out
+
+
 # Only constants BOTH sides spell. A name one side does not have is not a
 # disagreement — but a name neither has is a check that silently tests nothing,
 # so every entry must be found at least once or this script fails.
@@ -128,6 +162,11 @@ CHECKED = [
     # FS_ERR_MIN (the band was full from MAX-1 to MAX-38), which is exactly the
     # kind of shift a hand-mirrored copy misses.
     "FS_ERR_NO_SUCH_VERB",
+    # The FLOOR of the error band, spelled in Rust and hand-mirrored in C. It
+    # moves DOWN every time a code is reserved, and a C program compiled against
+    # a stale floor reads the new codes as ordinary success values - a wrong
+    # answer, not an error. Three moves went unchecked before this line existed.
+    "FS_ERR_MIN",
 ]
 
 # NOT checked: NP_MAC_LEN. Neither peer names it - both write the literal 32 at
@@ -183,7 +222,10 @@ PEER_BASELINE = {
     # reduced count was recorded as expected. Both now use the shared names; the
     # floor rises with them, or the rename could be undone without this
     # noticing.
-    "np9p_server.py": 18,  # + 4 STAT_* offsets, FS_ERR_READ_ONLY, STAT_FLAG_DIR, FS_ERROR, FS_ERR_NO_SUCH_VERB
+    "np9p_server.py": 18,
+    # The C header. It spells far more of the ABI than either Python peer; this
+    # floor covers the names CHECKED lists today.
+    "libc/include/sys.h": 3,  # + 4 STAT_* offsets, FS_ERR_READ_ONLY, STAT_FLAG_DIR, FS_ERROR, FS_ERR_NO_SUCH_VERB
 }
 
 
@@ -273,6 +315,12 @@ def main():
         name: py_consts(os.path.join(HERE, name))
         for name in ("np9p_client.py", "np9p_server.py")
     }
+    # The C header is a third independent spelling of the same ABI, and the one
+    # with the least excuse for being unchecked: it is compiled into every C
+    # program, and a wrong value there is not a failed signature but a wrong
+    # answer.
+    peers["libc/include/sys.h"] = c_consts(
+        os.path.join(ROOT, "libc", "include", "sys.h"))
 
     problems = list(problems_early)
     compared = 0
@@ -332,7 +380,11 @@ def main():
         for p in problems:
             print(f"  - {p}")
         return 1
-    print(f"check-wire-constants: {compared} constant(s) agree across Rust and both Python peers, "
+    # The peer names come from `peers`, not from a sentence. This line said "both
+    # Python peers" while a third peer (the C header) was being compared - the
+    # same restatement-goes-stale shape this file warns about twice already.
+    print(f"check-wire-constants: {compared} constant(s) agree across Rust and "
+          f"{len(peers)} peer(s) ({', '.join(sorted(peers))}), "
           "and the dev peer labels agree")
     return 0
 
