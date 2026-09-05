@@ -13,7 +13,7 @@ reads to EOF).
 
 Usage (host):
     python3 scripts/np9p_server.py [port]
-    python3 scripts/np9p_server.py --self-test [-v]   # verb dispatch vs the table        # default 5641
+    python3 scripts/np9p_server.py --self-test [-v]   # verb dispatch + a fid round trip        # default 5641
 
 Then in the guest (SLIRP maps the host to 10.0.2.2):
     mount -r 10.0.2.2:5641 /mnt/a
@@ -22,14 +22,22 @@ Then in the guest (SLIRP maps the host to 10.0.2.2):
     ls /mnt/a/SUB
     cat /mnt/a/SUB/NOTE.TXT
 
-VERBS SERVED - five names in four arms: NP_READDIR, NP_STAT, NP_READ and
-NP_READ_AT (one arm, same handling), NP_READ_FILE. A known verb refused on
-policy gets FS_ERR_READ_ONLY (the mutating verbs - the export is read-only);
-anything else gets FS_ERR_NO_SUCH_VERB. That second group is currently the
-read-capable fid verbs NP_OPEN / NP_PREAD / NP_PWRITE / NP_FSTAT / NP_CLUNK,
-which no peer here implements and netd's export does not handle either - so a C
-program's open/fstat over a remote mount fails the same way, and read-only is
-not the reason.
+VERBS SERVED - the path verbs NP_READDIR, NP_STAT, NP_READ and NP_READ_AT (one
+arm, same handling), NP_READ_FILE; and since 2026-09-05 the READ-CAPABLE FID
+verbs NP_OPEN / NP_PREAD / NP_FSTAT / NP_CLUNK, so a C program's open/read/fstat
+works over a remote mount pointed at this peer. A known verb refused on policy
+gets FS_ERR_READ_ONLY (the mutating verbs, plus NP_PWRITE and an NP_OPEN asking
+for write/create/truncate - this export is read-only); anything else gets
+FS_ERR_NO_SUCH_VERB.
+
+**netd's export still implements NONE of the fid verbs** - that is steps 4-6 of
+docs/roadmap-fid-verbs.md - so this peer is currently AHEAD of the guest, which
+is the right way round for a foreign observer: the client can be built and
+checked against something that already answers.
+
+DO NOT TRUST THIS PARAGRAPH. `--self-test` compares the dispatch chain against
+SELF_TEST_VERBS on every `make test`; that table is the checked claim, this is
+prose.
 
 This list is hand-maintained prose and nothing compares it to the dispatch
 chain; `serve_request`'s fallthrough is the authority, and it PRINTS the verb
@@ -91,6 +99,7 @@ STAT_FLAG_DIR = 1 << 0
 FS_ERROR = (1 << 64) - 1
 NO_FS = (1 << 64) - 1 - 1  # u64::MAX - 1: no filesystem mounted (transient)
 FS_ERR_NOT_FOUND = (1 << 64) - 1 - 2  # u64::MAX - 2: definitively absent
+FS_ERR_NOT_A_FILE = (1 << 64) - 1 - 3  # u64::MAX - 3: it is a directory
 FS_ERR_READ_ONLY = (1 << 64) - 1 - 29  # u64::MAX - 29
 FS_ERR_AUTH = (1 << 64) - 1 - 30  # u64::MAX - 30
 FS_ERR_NO_SUCH_VERB = (1 << 64) - 1 - 39  # u64::MAX - 39: this server has no arm for that verb
@@ -104,6 +113,28 @@ FS_ERR_NO_SUCH_VERB = (1 << 64) - 1 - 39  # u64::MAX - 39: this server has no ar
 # peer does not have about them, for verbs it simply does not implement. The
 # range only ever meant "a verb I have heard of", which is not the same
 # question, and it silently absorbed each new verb ninep-abi defined.
+# Fids: server-side open-file handles (ninep-abi's NP_OPEN..NP_CLUNK).
+#
+# THE PARAMETER LAYOUT IS NOT THE ONE EVERY OTHER PATH VERB USES, and that is
+# the trap to carry into netd's export: for NP_OPEN, `a0` is the OPEN_* FLAGS
+# and `a1` is the path length - the reverse of every other path-carrying verb,
+# where `a0` is the path length. A generic "p0 is the path length" decode reads
+# the flag word (1, 3, ...) as a length and resolves a 1-3 byte path, which
+# lands somewhere plausible instead of failing.
+#
+# The other four carry NO PATH AT ALL - `a0` is the fid - so re-resolving a path
+# per operation is not merely wasteful, there is nothing to resolve. The fid
+# must remember what it was opened on.
+FID_BASE = 3  # 0/1/2 stay clear of a C program's stdin/stdout/stderr
+MAX_FIDS = 8  # fsd's own ceiling, mirrored so exhaustion behaves the same here
+OPEN_READ = 1
+OPEN_WRITE = 2
+OPEN_CREATE = 4
+OPEN_TRUNC = 8
+# fid -> path. Flags are not kept: this export is read-only, so the only flag
+# combination that ever gets a fid is a pure read.
+FIDS = {}
+
 MUTATING_VERBS = {
     NP_BASE + 3,   # NP_WRITE
     NP_BASE + 4,   # NP_WRITE_AT
@@ -418,6 +449,61 @@ def serve_request(body):
         want = a1
         return sealed(len(data), data[:want])
 
+    # --- fids ------------------------------------------------------------
+    # NP_OPEN: a0 = OPEN_* flags, a1 = path length (see the note by FID_BASE).
+    if verb == NP_BASE + 15:
+        flags, plen = a0, a1
+        fpath = body[HDR:HDR + plen]
+        if flags & (OPEN_WRITE | OPEN_CREATE | OPEN_TRUNC):
+            # Refused on POLICY, like the mutating verbs - not "no such verb".
+            print(f"  [read-only: refusing NP_OPEN flags=0x{flags:x} "
+                  f"path={fpath!r}]", flush=True)
+            return sealed(FS_ERR_READ_ONLY)
+        if fpath in DIRS:
+            return sealed(FS_ERR_NOT_A_FILE)
+        if fpath not in FILES:
+            return sealed(FS_ERR_NOT_FOUND)
+        free = next((n for n in range(FID_BASE, FID_BASE + MAX_FIDS)
+                     if n not in FIDS), None)
+        if free is None:
+            # fsd reaps dead owners' fids first and only then fails; this peer
+            # has no task table to ask, so it simply fails. A client that leaks
+            # fids sees the ceiling here EARLIER than against fsd, which is the
+            # safe direction for an observer.
+            return sealed(FS_ERROR)
+        FIDS[free] = fpath
+        return sealed(free)
+
+    # The fid ops. a0 = fid, and there is no path.
+    if verb in (NP_BASE + 16, NP_BASE + 18, NP_BASE + 19):
+        fid = a0
+        if fid not in FIDS:
+            # MATCHES fsd, which answers a bare FS_ERROR for a bad or
+            # not-yours fid. Deliberately not "improved" to a clearer code: an
+            # observer that answers better than the server it observes hides
+            # exactly the divergence it exists to find. That fsd's own answer
+            # is the same over-generic sentinel this file just stopped using
+            # for verbs is a real follow-up, recorded in
+            # docs/roadmap-fid-verbs.md, not a difference to introduce here.
+            print(f"  [bad fid {fid} for verb 0x{verb:x}]", flush=True)
+            return sealed(FS_ERROR)
+        fpath = FIDS[fid]
+        if verb == NP_BASE + 19:  # NP_CLUNK
+            del FIDS[fid]
+            return sealed(0)
+        if verb == NP_BASE + 18:  # NP_FSTAT
+            info = stat_info(fpath)
+            if info is None:
+                return sealed(FS_ERR_NOT_FOUND)
+            return sealed(STAT_INFO_LEN, info)
+        # NP_PREAD: a1 = offset, a2 = count. Status = bytes read, 0 at EOF.
+        data = FILES[fpath]
+        off, count = a1, a2
+        if off >= len(data):
+            return sealed(0)
+        chunk = data[off:off + count]
+        return sealed(len(chunk), chunk)
+
     # Anything else. SAY SO ON STDOUT: this line is why the bug that added the
     # NP_STAT arm above cost a debugging session. An unserved verb was
     # indistinguishable from an absent path at the guest (both FS_ERROR, which
@@ -451,29 +537,43 @@ def serve_request(body):
 # confidently, and for as long as nobody read both. `--self-test` is what turns
 # that prose into a claim that can fail.
 #
+# EACH ENTRY CARRIES ITS OWN PARAMS, because a generic frame is wrong for
+# NP_OPEN: its `a0` is the OPEN_* flags, not the path length. The first version
+# of this test sent `a0 = len(path)`, so a 10-character path arrived as flags
+# 10 = OPEN_WRITE|OPEN_TRUNC and was refused read-only - the exact trap
+# documented by FID_BASE, reproduced by the harness meant to check it. `FID` is
+# substituted with a fid this test opens first.
+FID = "<fid>"
 # "served" means a real answer, not an error in the reserved band.
 SELF_TEST_VERBS = [
-    ("NP_READDIR", NP_BASE + 0, "served", b"/"),  # a DIRECTORY: readdir of a file is a real NOT_FOUND, not a dispatch answer
-    ("NP_READ_FILE", NP_BASE + 1, "served"),
-    ("NP_READ", NP_BASE + 2, "served"),
-    ("NP_WRITE", NP_BASE + 3, "read-only"),
-    ("NP_WRITE_AT", NP_BASE + 4, "read-only"),
-    ("NP_TOUCH", NP_BASE + 5, "read-only"),
-    ("NP_MKDIR", NP_BASE + 6, "read-only"),
-    ("NP_RMDIR", NP_BASE + 7, "read-only"),
-    ("NP_RM", NP_BASE + 8, "read-only"),
-    ("NP_MV", NP_BASE + 9, "read-only"),
-    ("NP_READ_AT", NP_BASE + 10, "served"),
-    ("NP_WRITE_FILE", NP_BASE + 11, "read-only"),
-    ("NP_STAT", NP_BASE + 12, "served"),
-    ("NP_CHMOD", NP_BASE + 13, "read-only"),
-    ("NP_CHOWN", NP_BASE + 14, "read-only"),
-    ("NP_OPEN", NP_BASE + 15, "no-such-verb"),
-    ("NP_PREAD", NP_BASE + 16, "no-such-verb"),
-    ("NP_PWRITE", NP_BASE + 17, "read-only"),
-    ("NP_FSTAT", NP_BASE + 18, "no-such-verb"),
-    ("NP_CLUNK", NP_BASE + 19, "no-such-verb"),
-    ("NP_RUN", NP_BASE + 0x20, "no-such-verb"),
+    #  name,           verb,          expected group,  (a0, a1, a2),        path
+    ("NP_READDIR",    NP_BASE + 0,  "served",       ("PLEN", 4096, 0), b"/"),
+    ("NP_READ_FILE",  NP_BASE + 1,  "served",       ("PLEN", 512, 0),  b"/HELLO.TXT"),
+    ("NP_READ",       NP_BASE + 2,  "served",       ("PLEN", 0, 512),  b"/HELLO.TXT"),
+    ("NP_WRITE",      NP_BASE + 3,  "read-only",    ("PLEN", 0, 0),    b"/HELLO.TXT"),
+    ("NP_WRITE_AT",   NP_BASE + 4,  "read-only",    ("PLEN", 0, 0),    b"/HELLO.TXT"),
+    ("NP_TOUCH",      NP_BASE + 5,  "read-only",    ("PLEN", 0, 0),    b"/NEW.TXT"),
+    ("NP_MKDIR",      NP_BASE + 6,  "read-only",    ("PLEN", 0, 0),    b"/NEWDIR"),
+    ("NP_RMDIR",      NP_BASE + 7,  "read-only",    ("PLEN", 0, 0),    b"/SUB"),
+    ("NP_RM",         NP_BASE + 8,  "read-only",    ("PLEN", 0, 0),    b"/HELLO.TXT"),
+    ("NP_MV",         NP_BASE + 9,  "read-only",    ("PLEN", 0, 0),    b"/HELLO.TXT"),
+    ("NP_READ_AT",    NP_BASE + 10, "served",       ("PLEN", 0, 512),  b"/HELLO.TXT"),
+    ("NP_WRITE_FILE", NP_BASE + 11, "read-only",    ("PLEN", 0, 0),    b"/HELLO.TXT"),
+    ("NP_STAT",       NP_BASE + 12, "served",       ("PLEN", 0, 0),    b"/HELLO.TXT"),
+    ("NP_CHMOD",      NP_BASE + 13, "read-only",    ("PLEN", 0o644, 0), b"/HELLO.TXT"),
+    ("NP_CHOWN",      NP_BASE + 14, "read-only",    ("PLEN", 0, 0),    b"/HELLO.TXT"),
+    # a0 = FLAGS here, not the path length.
+    ("NP_OPEN(r)",    NP_BASE + 15, "served",       (OPEN_READ, "PLEN", 0), b"/HELLO.TXT"),
+    ("NP_OPEN(w)",    NP_BASE + 15, "read-only",    (OPEN_WRITE, "PLEN", 0), b"/HELLO.TXT"),
+    ("NP_OPEN(dir)",  NP_BASE + 15, "not-a-file",   (OPEN_READ, "PLEN", 0), b"/SUB"),
+    ("NP_OPEN(gone)", NP_BASE + 15, "not-found",    (OPEN_READ, "PLEN", 0), b"/NOPE.TXT"),
+    # a0 = a FID, and no path at all.
+    ("NP_PREAD",      NP_BASE + 16, "served",       (FID, 0, 512),     b""),
+    ("NP_PREAD(bad)", NP_BASE + 16, "generic-error", (999, 0, 512),    b""),
+    ("NP_PWRITE",     NP_BASE + 17, "read-only",    (FID, 0, 4),       b""),
+    ("NP_FSTAT",      NP_BASE + 18, "served",       (FID, 0, 0),       b""),
+    ("NP_CLUNK",      NP_BASE + 19, "served",       (FID, 0, 0),       b""),
+    ("NP_RUN",        NP_BASE + 0x20, "no-such-verb", ("PLEN", 0, 0),  b"/HELLO.TXT"),
 ]
 
 
@@ -482,52 +582,113 @@ def classify(status):
         return "read-only"
     if status == FS_ERR_NO_SUCH_VERB:
         return "no-such-verb"
+    if status == FS_ERR_NOT_FOUND:
+        return "not-found"
+    if status == FS_ERR_NOT_A_FILE:
+        return "not-a-file"
+    if status == FS_ERROR:
+        return "generic-error"
     if status >= (1 << 64) - 64:
         return f"error 0x{status:x}"
     return "served"
 
 
-def self_test(quiet=True):
-    """Drive `serve_request` once per verb and check the group it lands in.
+def _frame(verb, params, path, fid):
+    """One NP request body: [verb][tree][a0][a1][a2][a3][path]."""
+    vals = [len(path) if p == "PLEN" else (fid if p is FID else p) for p in params]
+    return (struct.pack("<Q", verb) + b"\0" * 8
+            + struct.pack("<QQQ", *vals) + b"\0" * (HDR - 40) + path)
 
-    Auth is stubbed out - this tests the DISPATCH, and a signature check in the
-    way would only mean the test needs keys to answer a question about verb
-    numbers. `verify` is restored afterwards so an in-process caller is not left
-    with a server that authenticates nothing.
+
+def _call(body, quiet):
+    """Drive one request through the dispatch; return (status, data)."""
+    if quiet:
+        with contextlib.redirect_stdout(io.StringIO()):
+            out = serve_request(body)
+    else:
+        out = serve_request(body)
+    inner = out[4 + NP_SIG_LEN:]
+    return struct.unpack("<Q", inner[:8])[0], inner[8:]
+
+
+def self_test(quiet=True):
+    """Check the dispatch against the table above, then a real fid round trip.
+
+    Auth is stubbed out - this tests DISPATCH, and a signature check in the way
+    would only mean the test needs keys to answer a question about verb numbers.
+    `verify` is restored afterwards so an in-process caller is not left with a
+    server that authenticates nothing.
     """
     global verify
     real_verify = verify
     verify = lambda body: (body, b"\0" * NP_NONCE_LEN)  # noqa: E731
     bad = []
     try:
-        for entry in SELF_TEST_VERBS:
-            name, verb, want = entry[0], entry[1], entry[2]
-            path = entry[3] if len(entry) > 3 else b"/HELLO.TXT"
-            msg = (struct.pack("<Q", verb) + b"\0" * 8
-                   + struct.pack("<QQQ", len(path), 512, 0)
-                   + b"\0" * (HDR - 40) + path)
-            # The dispatch PRINTS its own operational lines (which verb it
-            # refused, and why). Useful on a live server, noise in `make test`,
-            # so swallow them unless -v asked for the detail.
-            if quiet:
-                with contextlib.redirect_stdout(io.StringIO()):
-                    out = serve_request(msg)
-            else:
-                out = serve_request(msg)
-            status = struct.unpack("<Q", out[4 + NP_SIG_LEN:4 + NP_SIG_LEN + 8])[0]
+        FIDS.clear()
+        # A fid for the entries that need one. If this fails everything after
+        # it is meaningless, so say so rather than reporting 4 confusing
+        # mismatches.
+        st, _ = _call(_frame(NP_BASE + 15, (OPEN_READ, "PLEN", 0), b"/HELLO.TXT", 0), quiet)
+        if st >= (1 << 64) - 64:
+            print(f"np9p_server --self-test: could not open a fid (status 0x{st:x})")
+            return 1
+        fid = st
+
+        for name, verb, want, params, path in SELF_TEST_VERBS:
+            status, _ = _call(_frame(verb, params, path, fid), quiet)
             got = classify(status)
             if got != want:
                 bad.append(f"  - {name} (0x{verb:x}): dispatch says {got}, "
                            f"this table says {want}")
             elif not quiet:
                 print(f"  {name:14} 0x{verb:x} -> {got}")
+
+        # The round trip Step 2 is actually for: open -> fstat -> pread (in two
+        # chunks, so an offset that is ignored shows up) -> clunk -> the fid is
+        # gone. Byte-compared against the file, not just "no error".
+        FIDS.clear()
+        want_bytes = FILES[b"/HELLO.TXT"]
+        st, _ = _call(_frame(NP_BASE + 15, (OPEN_READ, "PLEN", 0), b"/HELLO.TXT", 0), quiet)
+        fid = st
+        st, info = _call(_frame(NP_BASE + 18, (FID, 0, 0), b"", fid), quiet)
+        size = struct.unpack("<Q", info[STAT_SIZE_OFF:STAT_SIZE_OFF + 8])[0]
+        if st != STAT_INFO_LEN or size != len(want_bytes):
+            bad.append(f"  - fid round trip: NP_FSTAT gave status {st}, size "
+                       f"{size}; expected {STAT_INFO_LEN}, {len(want_bytes)}")
+        half = len(want_bytes) // 2
+        got = b""
+        for off, count in ((0, half), (half, len(want_bytes))):
+            st, chunk = _call(_frame(NP_BASE + 16, (FID, off, count), b"", fid), quiet)
+            if st != len(chunk):
+                bad.append(f"  - fid round trip: NP_PREAD status {st} != "
+                           f"{len(chunk)} bytes delivered")
+            got += chunk
+        if got != want_bytes:
+            # Report the FIRST DIVERGENCE, not both buffers. The file is ~2KB
+            # and printing it twice buried the one byte that mattered under
+            # 4000 characters of identical text - a failure nobody reads is not
+            # much better than one that never fires.
+            at = next((i for i in range(min(len(got), len(want_bytes)))
+                       if got[i] != want_bytes[i]), min(len(got), len(want_bytes)))
+            bad.append(f"  - fid round trip: read back {len(got)} bytes, file "
+                       f"holds {len(want_bytes)}; first difference at byte {at}: "
+                       f"got {got[at:at + 24]!r} want {want_bytes[at:at + 24]!r}")
+        st, _ = _call(_frame(NP_BASE + 19, (FID, 0, 0), b"", fid), quiet)
+        if st != 0:
+            bad.append(f"  - fid round trip: NP_CLUNK status {st}, expected 0")
+        st, _ = _call(_frame(NP_BASE + 16, (FID, 0, 16), b"", fid), quiet)
+        if classify(st) != "generic-error":
+            bad.append(f"  - fid round trip: NP_PREAD on a CLUNKED fid gave "
+                       f"{classify(st)}; a freed handle must not still read")
     finally:
         verify = real_verify
+        FIDS.clear()
     if bad:
         print("np9p_server --self-test: DISPATCH DISAGREES WITH THE TABLE")
         print("\n".join(bad))
         return 1
-    print(f"np9p_server: {len(SELF_TEST_VERBS)} verb(s) dispatch as documented")
+    print(f"np9p_server: {len(SELF_TEST_VERBS)} verb(s) dispatch as documented, "
+          f"and a fid round trip reads the file back byte-for-byte")
     return 0
 
 
