@@ -90,5 +90,5 @@ the directory it described.
   roadmap-cluster-phase2.md  ditto Phase 2 (two-node read+write disk sharing)
   roadmap-cluster-phase3.md  ditto Phase 3 (resources-as-files: /proc, /dev/cons, /net)
   roadmap-cluster-phase4.md  ditto Phase 4 (remote execution, the Plan 9 `cpu` model - a program runs on B with A's namespace imported, so no shared memory is needed)
-  index.html, site/, assets/ the generated documentation website (rendered from these sources) plus its stylesheet and images - build output, not a source to edit by hand
+  index.html, site/, assets/ the published documentation website (GitHub Pages, branch `main`, path /docs) plus its stylesheet and images. NOT generated and NOT build output - every page is HAND-WRITTEN, a curated ABRIDGEMENT of a markdown source under docs/, which is why nothing noticed the site freezing for twelve days. `make test` now runs scripts/check-site-freshness.py, which fails when a source moves and its page does not; edit the page and re-stamp it (`--update site/<page>.html`). Four reference documents - CHANGELOG, ROADMAP, shell-commands, processes - deliberately have NO page: docs.html links the markdown, because they are worth current rather than abridged
 ```

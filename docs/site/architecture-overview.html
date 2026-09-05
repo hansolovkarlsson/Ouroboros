@@ -193,8 +193,8 @@
 
   <div class="stat-row">
     <div class="stat"><span class="stat-num">2</span><span class="stat-label">Exception levels</span></div>
-    <div class="stat"><span class="stat-num">6</span><span class="stat-label">Task slots</span></div>
-    <div class="stat"><span class="stat-num">1</span><span class="stat-label">FS, in userland</span></div>
+    <div class="stat"><span class="stat-num">11</span><span class="stat-label">Task slots</span></div>
+    <div class="stat"><span class="stat-num">4</span><span class="stat-label">Servers in userland</span></div>
     <div class="stat"><span class="stat-num">0</span><span class="stat-label">Shared memory</span></div>
   </div>
 
@@ -303,7 +303,7 @@
         <div class="rcard">
           <span class="tag">Devices</span>
           <h3>Raw hardware</h3>
-          <p>A from-scratch <strong>xHCI</strong> USB stack (keyboard and mass storage) and a <strong>virtio</strong> transport + block driver — the parts that genuinely touch MMIO and DMA.</p>
+          <p>A from-scratch <strong>xHCI</strong> USB stack (keyboard and mass storage) and a <strong>virtio</strong> transport with block, network, console and entropy drivers — the parts that genuinely touch MMIO and DMA.</p>
         </div>
         <div class="rcard">
           <span class="tag">Storage</span>
@@ -313,25 +313,35 @@
         <div class="rcard out">
           <span class="tag">Not here</span>
           <h3>The filesystem → userland</h3>
-          <p>FAT32 parsing, directories, paths, cluster chains — none of it lives in the kernel. It moved out to a task (<code class="inline">fsd</code>), reached only over IPC.</p>
+          <p>FAT32, exFAT and ext2 parsing, partition tables, directories, paths, permissions — none of it lives in the kernel. It moved out to a task (<code class="inline">fsd</code>), reached only over IPC.</p>
         </div>
         <div class="rcard out">
           <span class="tag">Not here</span>
           <h3>The console → userland</h3>
           <p>Font, cursor, line wrap, scrolling, ANSI parsing — the console rendering moved out to a task (<code class="inline">cond</code>) too, driving the kernel's dumb pixel primitives over gated syscalls.</p>
         </div>
+        <div class="rcard out">
+          <span class="tag">Not here</span>
+          <h3>The network → userland</h3>
+          <p>ARP, IPv4, ICMP, UDP, DNS and TCP are a userland task (<code class="inline">netd</code>) — the whole protocol stack, plus an HTTP server and the cluster's 9P gateway. The kernel keeps only the DMA-owning NIC driver, gated to that one task.</p>
+        </div>
+        <div class="rcard out">
+          <span class="tag">Not here</span>
+          <h3>Accounts → userland</h3>
+          <p>Password changes go to a task (<code class="inline">accountd</code>) rather than a setuid binary — which could not work here, since the loader is an ordinary program and "this is setuid" would be a claim by a task the capability model distrusts.</p>
+        </div>
       </div>
-      <figcaption><span class="fig">FIG 2</span> &nbsp;Kernel responsibilities. The dashed card is what was deliberately <em>removed</em> from the kernel.</figcaption>
+      <figcaption><span class="fig">FIG 2</span> &nbsp;Kernel responsibilities. The dashed cards are what was deliberately <em>removed</em> from the kernel.</figcaption>
     </figure>
 
     <h2>The tasks</h2>
 
     <p>
-      Five scheduler slots. The first three have fixed roles; the last
-      two are filled at runtime when the shell's
-      <code class="inline">exec</code> starts another program. Each is an
+      Eleven scheduler slots. The first six have fixed roles — the shell,
+      idle, and the four servers; the remaining five are filled at runtime,
+      when the shell runs a command or builds a pipeline. Each is an
       ordinary EL0 program — the shell is not special kernel code, it is
-      just the program loaded into slot 0.
+      just the program loaded into slot 0, and neither is any server.
     </p>
 
     <figure>
@@ -356,7 +366,7 @@
             <tr>
               <td class="slot">2</td>
               <td class="tname">FS server</td>
-              <td><span class="d">Owns the entire FAT32 engine. The only task allowed the block-device syscalls. Boot-loaded and supervised — the kernel restarts it from a kept image if it crashes or wedges.</span></td>
+              <td><span class="d">Owns FAT32, exFAT, ext2, a synthetic <code class="inline">/proc</code>, partition discovery and permission enforcement. The only task allowed the block-device syscalls. Boot-loaded and supervised — the kernel restarts it from a kept image if it crashes or wedges.</span></td>
               <td><span class="tbadge pro">protected</span></td>
             </tr>
             <tr>
@@ -367,20 +377,26 @@
             </tr>
             <tr>
               <td class="slot">4</td>
-              <td class="tname">Spawnable</td>
-              <td><span class="d">Filled by <code class="inline">exec &lt;path&gt;</code> — a program running concurrently with the shell. Own memory, own view, reaped when it exits.</span></td>
-              <td><span class="tbadge spawn">runtime</span></td>
+              <td class="tname">Network server</td>
+              <td><span class="d">The entire protocol stack in userland — ARP, IPv4, ICMP, UDP, DNS, TCP — plus an HTTP server, the cluster's 9P export gateway, and remote execution. The only task allowed the NIC syscalls; the DMA-owning driver stays in the kernel because there is no IOMMU.</span></td>
+              <td><span class="tbadge pro">protected</span></td>
             </tr>
             <tr>
               <td class="slot">5</td>
+              <td class="tname">Account server</td>
+              <td><span class="d">Changes passwords for callers who may not write <code class="inline">/etc/shadow</code> themselves. It holds no device capability at all — its privilege is policy, and it authorizes on the sender credential the kernel bound when the message was sent, never on who occupies a slot now.</span></td>
+              <td><span class="tbadge pro">protected</span></td>
+            </tr>
+            <tr>
+              <td class="slot">6–10</td>
               <td class="tname">Spawnable</td>
-              <td><span class="d">A second concurrent program. Job control (<code class="inline">fg</code>, <code class="inline">kill</code>, <code class="inline">wait</code>) and IPC let these cooperate — a shell can foreground a nested shell, a client can call a server.</span></td>
+              <td><span class="d">Five slots filled by running a command — a <code class="inline">/bin</code> program, a background job, or the stages of a pipeline running concurrently. Own memory, own view, reaped when they exit. Job control (<code class="inline">fg</code>, <code class="inline">kill</code>, <code class="inline">wait</code>) and IPC let them cooperate.</span></td>
               <td><span class="tbadge spawn">runtime</span></td>
             </tr>
           </tbody>
         </table>
       </div>
-      <figcaption><span class="fig">FIG 3</span> &nbsp;The task table. Slots 0–3 are protected from <code class="inline">exit</code>/<code class="inline">kill</code>; 4–5 cycle as programs come and go.</figcaption>
+      <figcaption><span class="fig">FIG 3</span> &nbsp;The task table. Slots 0–5 are protected from <code class="inline">exit</code>/<code class="inline">kill</code>; 6–10 cycle as programs come and go. The guard derives from one constant, so a new server is protected the moment it is added.</figcaption>
     </figure>
 
     <h2>How the tasks are kept apart</h2>
@@ -397,12 +413,12 @@
         <div class="icell">
           <div class="num">01 · separation</div>
           <h3>Per-task page tables</h3>
-          <p>Every task runs under its own translation view. From inside any task, another's memory is simply not mapped for EL0 — touching it faults, and the fault kills only the toucher. Proven by injection: the same read succeeds under a shared map and faults under views.</p>
+          <p>Every task runs under its own translation view. From inside any task, another's memory is simply not mapped for EL0 — touching it faults, and the fault kills only the toucher. Proven by injection: the same read succeeds under a shared map and faults under views. The same mechanism guards a task from itself: a page mapped EL1-only sits between its heap and its stack, so a stack overflow faults cleanly instead of quietly corrupting what is below it — it has caught real overflows three times.</p>
         </div>
         <div class="icell">
           <div class="num">02 · communication</div>
           <h3>Messages by copy</h3>
-          <p>Tasks never share memory. A message is copied — out of the sender, into the kernel, into the destination's mailbox. Small, bounded, safe by construction: no pointer from one task is ever dereferenced by another. And a task may only message the endpoints its per-slot capability mask allows — a spawned program can reach the two servers and the shell, not arbitrary tasks — so isolation is topological, not just memory-level.</p>
+          <p>Tasks never share memory. A message is copied — out of the sender, into the kernel, into the destination's mailbox. Small, bounded, safe by construction: no pointer from one task is ever dereferenced by another. And a task may only message the endpoints its per-slot capability mask allows — a spawned program can reach the servers it legitimately needs and the shell, not the NIC and not arbitrary tasks — so isolation is topological, not just memory-level.</p>
         </div>
         <div class="icell">
           <div class="num">03 · bulk data</div>
@@ -419,6 +435,7 @@
           <div class="memrow mine">its own region — rw</div>
           <div class="memrow locked">fsd region</div>
           <div class="memrow locked">cond region</div>
+          <div class="memrow locked">netd region</div>
           <div class="memrow locked">kernel region</div>
         </div>
         <div class="memmid">
@@ -520,12 +537,12 @@
         <div class="ribbon">
           <div class="rstep"><div class="rn">01</div><div class="rt">UEFI init</div><div class="rd">Logging, allocator, protocols — all still firmware-backed.</div></div>
           <div class="rstep"><div class="rn">02</div><div class="rt">Find console</div><div class="rd">Devicetree → ACPI → PCI → framebuffer.</div></div>
-          <div class="rstep"><div class="rn">03</div><div class="rt">Load programs</div><div class="rd">Shell + filesystem server off the ESP.</div></div>
+          <div class="rstep"><div class="rn">03</div><div class="rt">Load programs</div><div class="rd">The shell and the four servers, off the ESP.</div></div>
           <div class="rstep mark"><div class="rn">04</div><div class="rt">Exit boot services</div><div class="rd">Firmware left behind, permanently.</div></div>
           <div class="rstep"><div class="rn">05</div><div class="rt">Install vectors</div><div class="rd"><code class="inline">VBAR_EL1</code>, before anything can fault.</div></div>
           <div class="rstep"><div class="rn">06</div><div class="rt">Own the MMU</div><div class="rd">Swap in the kernel's own page tables.</div></div>
           <div class="rstep"><div class="rn">07</div><div class="rt">GIC + timer</div><div class="rd">Arm the 20 ms preemption tick.</div></div>
-          <div class="rstep"><div class="rn">08</div><div class="rt">Build tasks</div><div class="rd">Initial context for shell, idle, server.</div></div>
+          <div class="rstep"><div class="rn">08</div><div class="rt">Build tasks</div><div class="rd">Initial context for shell, idle, servers.</div></div>
           <div class="rstep mark"><div class="rn">09</div><div class="rt">Drop to EL0</div><div class="rd"><code class="inline">tasks::start</code> — and never returns.</div></div>
         </div>
       </div>
@@ -538,7 +555,7 @@
       This page is the overview. The reference documents in the
       repository go all the way down: <a href="https://github.com/hansolovkarlsson/Ouroboros/blob/main/docs/architecture.md">architecture.md</a>
       for the full mechanics, <a href="https://github.com/hansolovkarlsson/Ouroboros/blob/main/docs/processes.md">processes.md</a>
-      for the userland-program model, and the four
+      for the userland-program model, and the
       <a href="postmortem-boot-bringup.html">postmortems</a> for the
       debugging that <em>found</em> this design on real hardware.
     </p>

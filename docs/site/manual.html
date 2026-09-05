@@ -36,9 +36,22 @@
   <div class="kicker">User manual · Ouroboros</div>
 
   <h1 class="title small">Ouroboros manual</h1>
-  <p class="dek">The one-stop reference for using Ouroboros: building it, running it on QEMU and on real Parallels hardware, testing it, using the shell, and the complete syscall ABI. Each section links to the deeper reference where one exists — <a href="architecture-overview.html"><code class="inline">architecture.md</code></a> for how the kernel works, <a href="processes.html"><code class="inline">processes.md</code></a> for the userland program model, <a href="shell-commands.html"><code class="inline">shell-commands.md</code></a> for the full builtin command reference, <a href="roadmap.html"><code class="inline">ROADMAP.md</code></a> for what's next, and <code class="inline">CLAUDE.md</code> at the repository root for the debugging history behind every design decision. If you want to build an OS like this yourself, <a href="tutorial.html"><code class="inline">tutorial.md</code></a> is the staged from-scratch guide — the working path only, with code samples from this kernel.</p>
+  <p class="dek">The one-stop reference for using Ouroboros: building it, running it, using the shell and the <code class="inline">/bin</code> commands, <strong>sharing resources across a cluster of machines</strong>, and the syscall ABI. Each section links to the deeper reference where one exists — <a href="https://github.com/hansolovkarlsson/Ouroboros/blob/main/docs/testing-qemu.md"><code class="inline">testing-qemu.md</code></a> for the full QEMU run/test guide (single machine <em>and</em> the two-node cluster), <a href="architecture-overview.html"><code class="inline">architecture.md</code></a> for how the kernel works, <a href="https://github.com/hansolovkarlsson/Ouroboros/blob/main/docs/processes.md"><code class="inline">processes.md</code></a> for the userland program model, <a href="https://github.com/hansolovkarlsson/Ouroboros/blob/main/docs/shell-commands.md"><code class="inline">shell-commands.md</code></a> for the builtin command reference, and <a href="https://github.com/hansolovkarlsson/Ouroboros/blob/main/docs/ROADMAP.md"><code class="inline">ROADMAP.md</code></a> for what is next. To build an OS like this yourself, <a href="tutorial.html"><code class="inline">tutorial.md</code></a> is the staged from-scratch guide.</p>
 
   <article>
+
+    <blockquote class="aside">
+      <span class="aside-label">What Ouroboros is, in one line</span>
+      <p>
+        An ARM64 microkernel OS whose filesystem, console, network and
+        accounts are <strong>userland servers</strong> reached over a uniform
+        file protocol — which is exactly what lets several machines share
+        their disks, processes, consoles, and even <em>run programs on each
+        other</em> over the network. That last part is the
+        <a href="#cluster">cluster</a> section, and it is what the project is
+        ultimately about.
+      </p>
+    </blockquote>
 
 <h2>Prerequisites</h2>
 
@@ -54,94 +67,228 @@
 <div class="panel"><div class="panel-tab"><span>sh</span></div><pre><code>make build                  # kernel only (debug profile)
 make build PROFILE=release  # kernel, release profile
 make shell-bin              # the default shell (userland)
-make hello-bin              # the demo second program (userland)
-make esp                    # stage the full ESP directory layout</code></pre></div>
+make esp                    # stage the full ESP directory layout
+make test                   # host unit tests for the pure crates + clippy</code></pre></div>
 
-<p>The workspace has four crates: <code class="inline">kernel</code> (a UEFI application, <code class="inline">aarch64-unknown-uefi</code>), <code class="inline">shell</code> and <code class="inline">hello</code> (userland programs, <code class="inline">aarch64-unknown-none</code>), and <code class="inline">syscall-abi</code> (the shared constants both sides import, so syscall numbers can never silently drift). Userland programs <strong>always build <code class="inline">--release</code></strong> regardless of <code class="inline">PROFILE</code> — a hard toolchain constraint of the position-independent build, not a preference (a debug build fails to link; see <code class="inline">processes.md</code>'s "Binary format").</p>
+<p>The workspace has 61 crates: <code class="inline">kernel</code> (a UEFI application, <code class="inline">aarch64-unknown-uefi</code>); every userland program under <code class="inline">programs/</code> — the shell, the four servers, and the <code class="inline">/bin</code> commands (<code class="inline">aarch64-unknown-none</code>); and the shared libraries both sides import, of which <code class="inline">syscall-abi</code> matters most, since it is why syscall numbers can never silently drift. Userland programs <strong>always build <code class="inline">--release</code></strong> regardless of <code class="inline">PROFILE</code> — a hard toolchain constraint of the position-independent build, not a preference (a debug build fails to link; see <code class="inline">processes.md</code>'s "Binary format").</p>
 
 <p>The staged ESP layout:</p>
 
 <div class="panel"><pre><code>\EFI\BOOT\BOOTAA64.EFI   the kernel (UEFI auto-boots this path)
 \EFI\ORBS\SH.BIN         the default shell
-\EFI\ORBS\HELLO.BIN      the demo second program
-\EFI\ORBS\INIT.CFG       one line: the path of the program to boot into</code></pre></div>
+\EFI\ORBS\FSD.BIN        the filesystem server (task slot 2)
+\EFI\ORBS\COND.BIN       the console server (slot 3)
+\EFI\ORBS\NETD.BIN       the network server (slot 4)
+\EFI\ORBS\ACCOUNTD.BIN   the account server (slot 5)
+\EFI\ORBS\INIT.CFG       one line: the path of the program to boot into
+\bin\                    the standalone commands
+\man\                    their manual pages
+\etc\                    passwd, group, and the cluster identity</code></pre></div>
 
-<p>Swap the boot program by editing <code class="inline">INIT.CFG</code> — no kernel rebuild needed. (<code class="inline">ORBS</code>, not the full project name: FAT's 8.3 short-name limit, which the runtime FAT32 reader doesn't parse long-filename entries around.)</p>
+<p>Swap the boot program by editing <code class="inline">INIT.CFG</code> — no kernel rebuild needed. (<code class="inline">ORBS</code>, not the full project name: FAT's 8.3 short-name limit.)</p>
 
 <h2>Running on QEMU</h2>
 
-<div class="panel"><div class="panel-tab"><span>sh</span></div><pre><code>make run             # fast dev loop - vvfat-backed disk (FAT16!)
-make run-image       # boots esp.img - real FAT32, disk commands work
-make run-usb-kbd     # + xHCI controller &amp; USB keyboard (monitor sendkey)
-make run-usb-multi   # + USB tablet and storage stick (3-device xHCI rig)
-make run-virtio-console  # + a virtio console device (see its Makefile note)
-make run-net         # + a virtio-net device & QEMU user-net + a net.pcap dump
-make run-image-net   # real FAT32 *and* the NIC in one boot - the fullest run
-make run-image-server # + SLIRP hostfwd tcp::5555->:80, so the host can curl netd's HTTP server
-make run-gicv3       # forces GICv3 instead of QEMU's default GICv2</code></pre></div>
+<div class="panel"><div class="panel-tab"><span>sh</span></div><pre><code>make run             # fastest loop - vvfat FAT16 disk (no real filesystem)
+make run-image       # boots build/esp.img - real FAT32; disk commands work
+make run-image-net   # real FAT32 + a NIC - the fullest single-machine run</code></pre></div>
 
-<p>To test the network <strong>client</strong> ops, boot <code class="inline">make run-image-net</code> and type <code class="inline">ping 10.0.2.2</code>, <code class="inline">resolve example.com</code>, or <code class="inline">fetch example.com</code> at the shell. To test the network <strong>server</strong>, boot <code class="inline">make run-image-server</code> and, on the host, run <code class="inline">curl http://localhost:5555/</code> — the guest's from-scratch TCP stack serves a landing page. It's a real static-file server, too: any other path is streamed from the filesystem server, e.g. <code class="inline">curl http://localhost:5555/EFI/ORBS/INIT.CFG</code> returns that file's bytes (read through <code class="inline">fsd</code> — the guest serving its own filesystem over HTTP), and a missing path returns <code class="inline">404</code>. A directory path (e.g. <code class="inline">http://localhost:5555/EFI/ORBS</code>, or <code class="inline">/</code>) returns a browsable HTML index with links, so you can point a browser at the guest and click through its filesystem; files get a proper <code class="inline">Content-Type</code>, so text and HTML render. (Both are QEMU-only — Parallels' virtio-net is PCI, which this project's virtio path doesn't drive.)</p>
+<p>The one everyday gotcha: <strong><code class="inline">make run</code>'s disk is FAT16</strong> (a QEMU vvfat artifact), and FAT16 is the one format the filesystem server does <em>not</em> implement — it reads FAT32, exFAT and ext2 — so every disk command prints "no filesystem mounted" there. Use <strong><code class="inline">make run-image</code></strong> whenever you want <code class="inline">ls</code>/<code class="inline">cat</code>/<code class="inline">write</code>/<code class="inline">exec</code> to actually work. Exit QEMU with <strong><code class="inline">Ctrl+a x</code></strong>.</p>
 
-<p>The one everyday gotcha: <strong><code class="inline">make run</code>'s disk is FAT16</strong> (an artifact of QEMU's vvfat driver), which the FAT32-only filesystem server can't mount — every disk command prints a shared "no filesystem mounted" message there. Use <code class="inline">make run-image</code> whenever you want <code class="inline">ls</code>/<code class="inline">cat</code>/ <code class="inline">exec</code>/etc. to actually work.</p>
-
-<p>Exit QEMU with <code class="inline">Ctrl+a x</code>. On the USB targets, keystrokes can be injected through the monitor socket: <code class="inline">printf 'sendkey u\n' | nc -U qemu-monitor.sock</code>.</p>
+<p>That's enough to get a working shell. The <strong>full run/test guide</strong> — every <code class="inline">make run-*</code> target, the exFAT/ext2/GPT test disks, the network runs, the 9P host peers, and the <strong>two-node cluster</strong> setup — is <a href="https://github.com/hansolovkarlsson/Ouroboros/blob/main/docs/testing-qemu.md">testing-qemu.md</a>. You will want it for the <a href="#cluster">cluster</a> section below.</p>
 
 <h2>Running on Parallels (real hardware)</h2>
 
-<div class="panel"><div class="panel-tab"><span>sh</span></div><pre><code>make image           # esp.img - raw MBR+FAT32 disk image
-make parallels-hdd   # wraps it into esp.hdd via prl_disk_tool</code></pre></div>
+<div class="panel"><div class="panel-tab"><span>sh</span></div><pre><code>make image           # build/esp.img - raw MBR+FAT32 disk image
+make parallels-hdd   # wraps it into build/esp.hdd via prl_disk_tool</code></pre></div>
 
-<p>Attach <code class="inline">esp.hdd</code> as the VM's <strong>Hard Disk</strong> device. Two confirmed traps (see <code class="inline">CLAUDE.md</code>'s "Parallels disk attachment"): Parallels rejects raw <code class="inline">.img</code> files on the Hard Disk device, and attaching the image to the CD/DVD device <em>looks</em> like it works but doesn't (the optical driver wants ISO9660). Also: <code class="inline">esp.hdd</code> stores a <em>pointer</em> to <code class="inline">esp.dmg</code>'s absolute path, so the two files must stay together.</p>
+<p>Attach <code class="inline">build/esp.hdd</code> as the VM's <strong>Hard Disk</strong> device. Two confirmed traps: Parallels rejects raw <code class="inline">.img</code> files on the Hard Disk device, and attaching the image to the CD/DVD device <em>looks</em> like it works but doesn't (the optical driver wants ISO9660). Also: <code class="inline">esp.hdd</code> stores a <em>pointer</em> to <code class="inline">esp.dmg</code>'s absolute path, so the two files must stay together.</p>
 
-<p>What works on real Parallels hardware today: the GOP framebuffer console, a real USB keyboard (including Shift and Ctrl chords), preemptive multitasking, the whole shell — <strong>and real disk access via a passed-through USB stick</strong> (Parallels exposes no storage controller this kernel can drive, but USB mass storage over the xHCI driver works: pass a USB 3.x stick through to the VM, boot, wait a few seconds for it to attach, and type <code class="inline">mount</code> — a FAT32-formatted stick then serves the full disk-command surface, <code class="inline">exec</code> included; USB 2.0 sticks land on the EHCI controller instead and can't be used).</p>
+<p>What works on real Parallels hardware today: the GOP framebuffer console, a real USB keyboard (including Shift and Ctrl chords), preemptive multitasking, the whole shell — <strong>and real disk access via a passed-through USB stick</strong> (Parallels exposes no storage controller this kernel can drive, but USB mass storage over the xHCI driver works: pass a USB 3.x stick through, boot, wait a few seconds for it to attach, and type <code class="inline">mount</code>; USB 2.0 sticks land on the EHCI controller instead and can't be used). <strong>There is no networking on Parallels</strong> — its virtio-net is PCI, which this project's virtio path doesn't drive — so the cluster section is QEMU-only.</p>
 
 <h3>Scripted real-hardware testing</h3>
 
 <div class="panel"><div class="panel-tab"><span>sh</span></div><pre><code>make test-parallels CMDS="help;ls;uptime" [BOOT_WAIT=12] [VM_NAME=Ouroboros]</code></pre></div>
 
-<p>Rebuilds <code class="inline">esp.hdd</code>, boots the registered VM headlessly, types each <code class="inline">;</code>-separated command via <code class="inline">prlctl send-key-event</code>, and saves a screenshot after each into a <code class="inline">parallels-test-&lt;timestamp&gt;/</code> directory (gitignored — delete it when done). Supports <code class="inline">&gt;</code> (a held-Shift chord) and a <code class="inline">CTRL-C</code> pseudo-command (a held-Ctrl chord, no Enter). Requires the VM registered in Parallels with its Hard Disk pointed at this repo's <code class="inline">esp.hdd</code>.</p>
+<p>Rebuilds <code class="inline">esp.hdd</code>, boots the registered VM headlessly, types each <code class="inline">;</code>-separated command via <code class="inline">prlctl send-key-event</code>, and saves a screenshot after each into a <code class="inline">parallels-test-&lt;timestamp&gt;/</code> directory (gitignored — delete it when done). Supports <code class="inline">&gt;</code> (a held-Shift chord) and a <code class="inline">CTRL-C</code> pseudo-command. Requires the VM registered in Parallels with its Hard Disk pointed at this repo's <code class="inline">esp.hdd</code>.</p>
 
 <h2>Using the shell</h2>
 
-<p>Full reference: <a href="shell-commands.html"><code class="inline">shell-commands.md</code></a>. The short tour:</p>
+<p>Full builtin reference: <a href="https://github.com/hansolovkarlsson/Ouroboros/blob/main/docs/shell-commands.md"><code class="inline">shell-commands.md</code></a>. The short tour (boot <code class="inline">make run-image</code> so the disk is mountable):</p>
 
-<div class="panel"><pre><code>$ help                          # list every builtin
-$ mount                         # (Parallels) mount a passed-through USB stick
-$ ls /EFI/ORBS                  # disk commands (FAT32 boot only)
+<div class="panel"><pre><code>$ help                          # list the builtins
+$ ls /                          # BIN/  EFI/
+$ ls /bin                       # the standalone commands (see below)
 $ write notes.txt hello world   # create/replace a file's contents
 $ cat notes.txt
 $ echo backup &gt;&gt; log.txt        # output redirection: &gt; replace, &gt;&gt; append
-$ mv notes.txt /EFI/ORBS        # into an existing directory keeps the name
-$ exec /EFI/ORBS/HELLO.BIN      # spawn a second program (runs alongside)
-$ wait 2                        # block until it exits, collect its status
-$ exec /EFI/ORBS/SH.BIN         # spawn a second shell...
-$ fg 2                          # ...and hand it the keyboard (nested session)
-$ exit                          # (in the nested shell) hand it back
-$ ps                            # one line per task slot
-$ kill 2                        # destroy a task
-$ exec /EFI/ORBS/PONG.BIN       # spawn the message server...
-$ send 2 hello                  # ...send it an IPC message
-$ recv                          # ...and receive its echo back</code></pre></div>
+$ cat log.txt | grep back | wc  # multi-stage pipelines
+$ mkdir docs ; mv notes.txt docs
+$ cd docs ; pwd
+$ ps                            # one line per task slot: state + name
+$ set PATH=/bin ; env           # a real environment; $VAR expansion</code></pre></div>
 
-<p>Job-control notes: only one task owns the keyboard at a time (<code class="inline">fg</code> moves it; ownership returns to the boot shell automatically when the owner dies, or on <strong>Ctrl+C</strong>, which reclaims the keyboard without killing anything). An exited task holds its slot as a zombie until <code class="inline">wait</code>ed (<code class="inline">ps</code> shows it); <code class="inline">kill</code> reaps immediately. Ctrl+C also interrupts a stuck <code class="inline">wait</code>.</p>
+<h3>Commands come from two places</h3>
+
+<p><strong>Builtins</strong> run inside the shell itself, and the set is deliberately minimal — a command stays builtin only if it mutates shell state, needs job control, or must run with no disk mounted: <code class="inline">help cd bind mount unmount erase partition format exec exit/logout shutdown halt ps kill fg wait env set unset su cpu</code>. Everything else lives in <code class="inline">/bin</code>.</p>
+
+<p>The shell <strong>gates each session on a login</strong> (username + password against <code class="inline">/etc/passwd</code>; the dev images ship <code class="inline">root</code>/<code class="inline">root</code> and <code class="inline">user</code>/<code class="inline">user</code>), and the prompt shows <code class="inline">#</code> for root, <code class="inline">$</code> for a normal user. <code class="inline">logout</code> ends the session and returns to the login prompt; <code class="inline">su &lt;user&gt;</code> lets <strong>root</strong> drop to a named user — a logged-in user cannot escalate. A user lands in their home under <code class="inline">/Users</code>, and <code class="inline">~</code> expands to it.</p>
+
+<p><strong>Account management</strong> lives in <code class="inline">/bin</code> and is root-only — <code class="inline">useradd</code>, <code class="inline">groupadd</code>, <code class="inline">usermod</code> — with one deliberate exception: <code class="inline">passwd</code>. <strong>Any user may change their own password</strong> (supplying the current one); only root may set someone else's. That works because the check lives in a <em>server</em> (<code class="inline">accountd</code>) which asks the kernel who sent the request, rather than in a setuid bit on a file — a setuid binary <em>cannot</em> work here, since the shell reads the binary, so "this is setuid" would be a claim made by a task the capability model distrusts.</p>
+
+<p><strong>On ext2, file permissions are enforced</strong> — owner→group→other, matching a primary or any supplementary group, root bypasses, and every ancestor directory's search bit is checked. So a normal user can write in <code class="inline">~</code> but not in <code class="inline">/</code>, and cannot read <code class="inline">/etc/shadow</code> at all. On FAT32 and exFAT there are no modes to enforce, and <code class="inline">login</code> says so at the prompt.</p>
+
+<p><strong><code class="inline">/bin</code> programs</strong> are real standalone binaries loaded from disk, found on <code class="inline">$PATH</code>, spawned with arguments, and reaped:</p>
+
+<div class="panel"><pre><code>files      ls tree cat cp mv mkdir rmdir touch rm write writeat chmod chown more
+basics     echo pwd uptime clear args send recv selftest man printenv id
+filters    grep wc head tail nl rev uniq sort upper
+network    ping resolve fetch dial serve
+admin      passwd useradd groupadd usermod clusterkey</code></pre></div>
+
+<p>You type them the same way you would a builtin (<code class="inline">ls</code>, <code class="inline">cat x</code>); the shell finds <code class="inline">/bin/LS</code> on PATH. A <code class="inline">/bin</code> command resolves relative paths against the shell's working directory, delivered to it at spawn. <code class="inline">cp</code> and <code class="inline">mv</code> <strong>refuse an existing destination</strong> without <code class="inline">-f</code> — deliberate, on a system with no undo.</p>
+
+<p><strong>Usage help:</strong> append <code class="inline">-?</code> to any command that takes arguments, builtin or <code class="inline">/bin</code>, for a one-line reminder. For a full manual page, <code class="inline">man &lt;command&gt;</code>; pipe a long one to the pager, <code class="inline">man grep | more</code>. Pages are plain-text files under <code class="inline">/man</code> on disk.</p>
+
+<p><strong>Wildcards &amp; completion:</strong> <code class="inline">*</code> and <code class="inline">?</code> expand against the filesystem, and a pattern matching nothing is left literal. Press <strong>Tab</strong> to complete the last word as a filename — one match fills it in, several extend to the common prefix and then list.</p>
+
+<p><strong>Redirection &amp; pipelines</strong> work across both kinds of command: <code class="inline">echo hi &gt; f.txt</code>, <code class="inline">&gt;&gt; f.txt</code>, and <code class="inline">a | b | c</code> with each stage a separate program. A single builtin may sit at any pipeline position, and <code class="inline">a | b &gt; file</code> redirects the pipeline's output.</p>
+
+<h3>Spawning, job control, and IPC demos</h3>
+
+<div class="panel"><pre><code>$ exec /bin/LS /             # exec spawns a program explicitly (like typing it)
+$ exec /EFI/ORBS/SH.BIN      # spawn a second shell...
+$ fg 6                       # ...and hand it the keyboard (a nested session)
+$ exit                       # (in the nested shell) hand it back
+$ kill 6                     # destroy a task
+$ exec /EFI/ORBS/PONG.BIN    # the IPC echo-server demo...
+$ send 6 hello ; recv        # ...send it a message and read its echo</code></pre></div>
+
+<p>Job-control notes: one task owns the keyboard at a time (<code class="inline">fg</code> moves it; it returns to the boot shell when the owner dies, or on <strong>Ctrl+C</strong>). An exited task holds its slot as a zombie until <code class="inline">wait</code>ed (<code class="inline">ps</code> shows it); <code class="inline">kill</code> reaps immediately. Ctrl+C also interrupts a stuck <code class="inline">wait</code>.</p>
+
+<h3>Disks and mounts</h3>
+
+<div class="panel"><pre><code>$ mount                      # show what's mounted (format, partition, capacity)
+$ mount -a                   # mount the kernel's block device (or rescan USB)
+$ mount 1 /mnt/f             # mount the disk's 2nd partition at /mnt/f
+$ mount -p /proc             # the process table as files
+$ mount -n /net              # this machine's network identity (ip, mac)
+$ mount -c /dev/cons         # the console as a writable file
+$ bind /work /EFI/ORBS       # /work now resolves to /EFI/ORBS, for this shell
+$ unmount                    # drop the mounted filesystem</code></pre></div>
+
+<p>Every mount and <code class="inline">bind</code> changes <strong>only this shell's</strong> namespace, and the commands it spawns inherit it — a per-task view, never a global one. Preparing a blank disk from inside the guest: <code class="inline">erase disk</code>, then <code class="inline">partition fat32</code> (or <code class="inline">exfat</code>/<code class="inline">ext2</code>), then <code class="inline">format fat32</code>, then <code class="inline">mount -a</code>.</p>
+
+<h2 id="cluster">Cluster: sharing resources across machines</h2>
+
+<p>This is what Ouroboros is ultimately about: <strong>several machines sharing their resources as one system</strong> — one machine reads another's disk, inspects its processes, writes its screen, or <em>runs a program on it</em> — over a from-scratch 9P-style protocol carried on the network. It is the Plan 9 model: <em>"remote" is just the same file protocol over TCP instead of local IPC</em>, so the commands you already know work across machines with no new syntax. Only <em>where a path points</em> changes.</p>
+
+<blockquote class="aside">
+  <span class="aside-label">Trust, stated plainly</span>
+  <p>
+    Every machine has its <strong>own Ed25519 keypair</strong> and authorizes
+    its peers <strong>by public key</strong> — the <code class="inline">known_hosts</code>
+    model, not a shared password. The private half lives in
+    <code class="inline">/etc/cluster/id</code> (mode 0600); peers are listed one
+    per line in <code class="inline">/etc/cluster/authorized</code>. Every request
+    is signed, and so is every reply, so the exchange is <strong>mutually
+    authenticated</strong>: a client checks the reply against the key it expects
+    <em>for the address it dialled</em>.
+  </p>
+  <p>
+    It is <strong>integrity, not secrecy</strong> — bytes cross the wire in
+    cleartext, so a passive sniffer reads your files and can replay a request.
+    Encryption, replay protection and per-user keys are gated behind a "leaving
+    a trusted network" trigger. <strong>Do not expose an Ouroboros export to a
+    hostile network yet.</strong>
+  </p>
+</blockquote>
+
+<p>This replaced a <strong>shared</strong> secret. The difference that matters is <strong>revocation</strong>: with one secret every member was interchangeable and removing one meant re-keying all of them; now you delete a line. It fails closed in both directions — a machine with no <code class="inline">/etc/cluster/id</code> cannot sign, so its export is closed and it can make no remote requests; a machine with no authorized peers serves nobody. A <code class="inline">\NOEXEC</code> flag file is the one other knob: share the disk, refuse remote execution.</p>
+
+<p><strong>Who is asking, not just which machine.</strong> Each request also carries the <strong>name</strong> of the user making it, inside the signature so it cannot be altered without the machine's private key. The far side resolves that name through <strong>its own</strong> <code class="inline">/etc/passwd</code> and applies its own permissions, refusing a name it does not know. Two consequences: both machines need an <code class="inline">/etc/passwd</code> and an account is matched by <em>name</em> (uid numbers need not match, which is why the name travels rather than the number); and <strong>supplementary groups do not cross</strong> — a remote caller is judged on uid and primary group only. This is still auth at the <em>machine</em> level: a machine the cluster authorizes can claim any of its own users' names, so it protects you from the users of a machine you trust, not from a machine you don't.</p>
+
+<p><strong>The built-in HTTP server is anonymous and unprivileged.</strong> <code class="inline">netd</code> also serves the disk over plain HTTP on port 80, which has no user model at all — so it reads files as <strong><code class="inline">nobody</code></strong>, never as root: world-readable files are served, anything else gets <strong>403</strong>. On FAT32 and exFAT, which record no mode, everything remains readable. It requires no key and no account; do not treat it as private.</p>
+
+<div class="cmp-wrap"><table class="cmp-table"><thead><tr><th scope="col">File</th><th scope="col">Effect</th></tr></thead><tbody>
+<tr><td><code class="inline">/etc/cluster/id</code></td><td>This machine's <strong>private</strong> key (0600, 64 hex chars). Absent ⇒ it can neither serve nor make remote requests. Generate with <code class="inline">clusterkey new</code>.</td></tr>
+<tr><td><code class="inline">/etc/cluster/id.pub</code></td><td>The public half, for pasting into a peer's <code class="inline">authorized</code>.</td></tr>
+<tr><td><code class="inline">/etc/cluster/authorized</code></td><td>The peers this machine accepts, one per line: <code class="inline">&lt;name&gt; &lt;ipv4&gt; &lt;pubkey-hex&gt;</code>. Absent or empty ⇒ the export serves nobody. Delete a line to <strong>revoke</strong> that peer.</td></tr>
+<tr><td><code class="inline">\NOEXEC</code></td><td>Presence-only flag: authenticated peers may still <code class="inline">mount -r</code> the disk, but every remote <code class="inline">cpu</code> is refused.</td></tr>
+</tbody></table></div>
+
+<p>The QEMU images stage a dev identity automatically, so the two-VM targets authenticate out of the box. On a real machine: run <code class="inline">clusterkey new</code> on each, <code class="inline">clusterkey line &lt;name&gt; &lt;ip&gt;</code> on one to print the line the other should hold, and paste it in. <code class="inline">clusterkey peers</code> lists what a machine currently accepts and flags a line that cannot work. Key generation <strong>refuses without real entropy</strong> rather than producing a guessable identity.</p>
+
+<h3>Setting up two machines</h3>
+
+<p>The dev setup is two QEMU guests on a shared virtual link — <code class="inline">make run-image-2vm-a</code> in one terminal, <code class="inline">make run-image-2vm-b</code> in another; see <a href="https://github.com/hansolovkarlsson/Ouroboros/blob/main/docs/testing-qemu.md">testing-qemu.md</a> for the exact commands. Machine <strong>A is 10.0.2.10</strong> and <strong>B is 10.0.2.11</strong>; each <code class="inline">netd</code> runs a 9P <strong>export</strong> on TCP port <strong>564</strong> automatically, so every machine is ready to share the moment it boots. Everything below is typed at <strong>machine B</strong>, reaching <strong>machine A</strong>.</p>
+
+<h3>Sharing a disk — <code class="inline">mount -r</code></h3>
+
+<div class="panel"><pre><code>$ mount -r 10.0.2.10:564 /mnt/a     # bind A's export at /mnt/a
+$ ls /mnt/a                         # A's disk root
+$ cat /mnt/a/EFI/ORBS/INIT.CFG      # read a file on A
+$ mkdir /mnt/a/reports              # create on A's disk
+$ write /mnt/a/reports/note.txt hi  # write to A's disk
+$ cp /BIN/LS /mnt/a/ls.copy         # stream a local file onto A (chunked)</code></pre></div>
+
+<p>The mount is <strong>per-shell</strong> and inherited by spawned commands. Read and write both work (single-writer by convention — there is no distributed lock yet). If A disconnects, the next operation on <code class="inline">/mnt/a</code> fails cleanly rather than hanging.</p>
+
+<h3>Another machine's processes, screen, and address</h3>
+
+<p><code class="inline">/proc</code>, <code class="inline">/dev/cons</code> and <code class="inline">/net</code> are synthetic filesystems — the task table as files, the console as a <em>writable</em> file, and the machine's IPv4/MAC as read-only files. Because <code class="inline">netd</code>'s export serves them too, reading another machine's is just a longer path:</p>
+
+<div class="panel"><pre><code>$ mount -p /proc                    # your own process table
+$ cat /proc/2/state                 # runnable | blocked | zombie | unused
+$ ls /mnt/a/proc                    # MACHINE A's task slots
+$ cat /mnt/a/proc/2/state           # A's filesystem-server state
+
+$ mount -c /dev/cons                # your console as a file
+$ echo hello &gt; /dev/cons            # ...prints on this screen
+$ write /mnt/a/dev/cons "ping from B"   # prints on MACHINE A's screen
+
+$ mount -n /net ; cat /net/ip       # your own address (10.0.2.11)
+$ cat /mnt/a/net/ip                 # MACHINE A's address -&gt; 10.0.2.10</code></pre></div>
+
+<h3>Running a program on another machine — <code class="inline">cpu</code></h3>
+
+<p><code class="inline">cpu &lt;host:port&gt; &lt;command&gt;</code> runs the command on the remote machine's CPU and streams its output back — and, crucially, the command reads <strong>your</strong> files, through your namespace imported at <code class="inline">/host</code>. That is the Plan 9 <code class="inline">cpu</code> model: ship the computation to another machine while its data stays yours.</p>
+
+<div class="panel"><pre><code>$ cpu 10.0.2.10:564 ls /            # run `ls` ON machine A; see A's disk root
+$ cpu 10.0.2.10:564 uptime          # run `uptime` on A; A's uptime
+$ cpu 10.0.2.10:564 ls /host        # /host is THIS machine - YOUR root
+$ write local.txt hi
+$ cpu 10.0.2.10:564 cat /host/local.txt   # cat runs on A, reads YOUR local.txt</code></pre></div>
+
+<p>So within one remote command, <code class="inline">/</code> is the machine it runs on and <code class="inline">/host</code> is the machine you launched it from. The command's program is loaded from the remote's disk, so both machines should have the same <code class="inline">/bin</code>. Output up to about 2 KB comes back whole; larger output is still bounded, with truly unbounded streaming a documented later refinement.</p>
+
+<h3>Using another machine's network — <code class="inline">/net/tcp</code></h3>
+
+<p>A machine can open a TCP connection <strong>out of another machine's NIC</strong>, and equally <strong>accept</strong> connections on it. Both are Plan 9's <code class="inline">/net/tcp</code> connection files — read <code class="inline">clone</code> for a connection number, write <code class="inline">connect</code> or <code class="inline">announce</code> to its <code class="inline">ctl</code>, then read and write its <code class="inline">data</code>. The <code class="inline">dial</code> and <code class="inline">serve</code> commands drive the whole sequence:</p>
+
+<div class="panel"><pre><code>$ mount -n /net                              # bind THIS machine's /net
+$ dial /net 93.184.216.34 80 GET / HTTP/1.0  # dial out of OUR nic
+$ mount -r 10.0.2.10:564 /mnt/a              # mount machine A's export
+$ dial /mnt/a/net 93.184.216.34 80 GET / HTTP/1.0   # dial out of A's nic
+
+$ serve /net 9000 hi there         # answer clients that connect to US
+$ serve /mnt/a/net 9000 hi there   # answer clients that connect to A</code></pre></div>
+
+<p>The only thing that changes is the base path: <code class="inline">/net</code> is your network, <code class="inline">/mnt/a/net</code> is A's. So <code class="inline">dial /mnt/a/net</code> reaches the web <em>through A's connection</em>, and <code class="inline">serve /mnt/a/net</code> makes a program <em>here</em> answer clients who connect to <strong>A's address</strong> — A lends its ingress, this machine owns the service. Both are scoped to small transactions: a TCP client, and a listener with a couple of concurrent connections.</p>
 
 <h2>Syscall ABI</h2>
 
-<p>Full per-syscall detail: <a href="architecture-overview.html"><code class="inline">architecture.md</code></a>'s syscall table; the authoritative constants live in <code class="inline">syscall-abi/src/lib.rs</code>, imported by both the kernel and every userland program.</p>
+<p>Full, current per-syscall detail: <a href="architecture-overview.html"><code class="inline">architecture.md</code></a>'s syscall table; the authoritative constants live in <code class="inline">syscall-abi/src/lib.rs</code> and <code class="inline">ninep-abi/src/lib.rs</code>, imported by both the kernel and every userland program. The table below covers the <strong>core</strong> syscalls only — the filesystem protocol has since moved to the uniform <code class="inline">ninep-abi</code> verb set (<code class="inline">NP_READDIR</code>/<code class="inline">NP_READ</code>/<code class="inline">NP_WRITE</code>/…) and the network and cluster operations to the <code class="inline">NETOP_*</code> protocol, both documented in those crates.</p>
 
 <p><strong>Calling convention</strong> (Linux-shaped, not Linux-compatible): syscall number in <code class="inline">x8</code>, up to four arguments in <code class="inline">x0</code>–<code class="inline">x3</code>, return value in <code class="inline">x0</code>, via <code class="inline">svc #0</code>. Pointer/length arguments are bounded at <strong>512 bytes per buffer</strong> (<code class="inline">MAX_USER_LEN</code>) — longer buffers are rejected, not truncated.</p>
 
 <p><strong>Error convention:</strong> all failure codes live in a reserved top band of <code class="inline">u64</code> — <strong>any return value <code class="inline">&gt;= FS_ERR_MIN</code> (<code class="inline">u64::MAX - 31</code>) is an error</strong>; everything below is a real result (byte counts, sizes, exit statuses). <code class="inline">NO_FS</code> (<code class="inline">MAX-1</code>) means no filesystem is mounted this boot.</p>
 
-<div class="cmp-wrap"><table class="cmp-table"><thead><tr><th scope="col">#</th><th scope="col">Name</th><th scope="col">Arguments</th><th scope="col">Purpose</th></tr></thead><tbody><tr><td>0</td><td><code class="inline">print</code></td><td>value</td><td>Demo: log a value through the kernel console</td></tr><tr><td>1</td><td><code class="inline">double</code></td><td>value</td><td>Demo: returns <code class="inline">value * 2</code></td></tr><tr><td>2</td><td><code class="inline">report</code></td><td>task id</td><td>Demo: per-task counter</td></tr><tr><td>3</td><td><code class="inline">try_read_char</code></td><td>—</td><td>Non-blocking read; <code class="inline">NO_CHAR</code> if nothing waiting</td></tr><tr><td>4</td><td><code class="inline">putc</code></td><td>byte</td><td>Raw console byte write</td></tr><tr><td>5</td><td>—</td><td></td><td><em>Deliberate gap (removed <code class="inline">shell_input</code>; ABI stability over density)</em></td></tr><tr><td>6</td><td><code class="inline">get_ticks</code></td><td>—</td><td>Preemption tick count since boot</td></tr><tr><td>7–14</td><td>—</td><td></td><td><em>Deliberate gaps: the old <code class="inline">fs_*</code> syscalls — the filesystem lives in userland now (the fsd server); their contracts survive as the <code class="inline">FSOP_*</code> request protocol below</em></td></tr><tr><td>15</td><td><code class="inline">read_char</code></td><td>—</td><td>Blocking read: the task is suspended until a byte arrives</td></tr><tr><td>16</td><td><code class="inline">spawn</code></td><td>staged total len</td><td>Start a program image previously fed in via <code class="inline">spawn_stage</code> as a new task alongside the caller; returns the new task's slot index</td></tr><tr><td>17</td><td><code class="inline">exit</code></td><td>code</td><td>Destroy the calling task; status kept (masked to 0–255) until <code class="inline">wait</code>ed. Tasks 0–2 refused (<code class="inline">EXIT_DENIED</code>)</td></tr><tr><td>18</td><td><code class="inline">task_state</code></td><td>index</td><td><code class="inline">UNUSED</code>/<code class="inline">RUNNABLE</code>/<code class="inline">BLOCKED</code>/<code class="inline">ZOMBIE</code>, or <code class="inline">TASK_STATE_INVALID</code> past the last slot</td></tr><tr><td>19</td><td><code class="inline">kill</code></td><td>index</td><td>Destroy another task (reaps immediately). Tasks 0–2 protected</td></tr><tr><td>20</td><td><code class="inline">fg</code></td><td>index</td><td>Hand keyboard ownership to a task (auto-reverts to task 0 on the owner's death, or on Ctrl+C)</td></tr><tr><td>21</td><td><code class="inline">wait</code></td><td>index</td><td>Block until the task dies; returns its status (0–255), <code class="inline">TASK_KILLED_STATUS</code> (0x100), or <code class="inline">WAIT_INTERRUPTED</code> (Ctrl+C). Collecting the status reaps the slot</td></tr><tr><td>22</td><td><code class="inline">mount</code></td><td>replace flag</td><td>Rescan the USB ports and install a storage device as the kernel's block device (<code class="inline">0</code>, <code class="inline">MOUNT_ALREADY</code>, or <code class="inline">MOUNT_NO_DEVICE</code>) — the device half; the FS half is the server's <code class="inline">FSOP_MOUNT</code></td></tr><tr><td>23</td><td><code class="inline">msg_send</code></td><td>dest, buf ptr/len</td><td>IPC: deliver a message (≤64 bytes) — straight into a matching blocked receiver's buffer (direct delivery), or into the task's bounded mailbox. Zero length is legal: the pipeline end-of-stream marker</td></tr><tr><td>24</td><td><code class="inline">msg_recv</code></td><td>buf ptr/len</td><td>Block until a message arrives; returns <code class="inline">(sender &lt;&lt; 32) | len</code>, or <code class="inline">RECV_INTERRUPTED</code> on Ctrl+C</td></tr><tr><td>25</td><td><code class="inline">msg_try_recv</code></td><td>buf ptr/len</td><td>Non-blocking receive; <code class="inline">NO_MSG</code> when empty</td></tr><tr><td>26</td><td><code class="inline">block_info</code></td><td>—</td><td>Block-device capacity in sectors — <strong>task 2 (the fsd server) only</strong>, like all three <code class="inline">block_*</code> syscalls</td></tr><tr><td>27</td><td><code class="inline">block_read</code></td><td>LBA, buf ptr</td><td>Read one 512-byte sector (fsd only)</td></tr><tr><td>28</td><td><code class="inline">block_write</code></td><td>LBA, buf ptr</td><td>Write one 512-byte sector (fsd only)</td></tr><tr><td>29</td><td><code class="inline">msg_call</code></td><td>dest, req ptr/len, reply ptr</td><td>Synchronous request/response: send + block for a reply <em>from <code class="inline">dest</code> specifically</em>; sub-tick round trips via direct delivery. Reply buffer is a fixed 64 bytes</td></tr><tr><td>30</td><td><code class="inline">spawn_stage</code></td><td>offset, chunk ptr/len</td><td>Feed one chunk of a program image into the kernel's 128KB staging buffer for <code class="inline">spawn</code></td></tr></tbody></table></div>
-
-<p><strong>File operations</strong> are <code class="inline">FSOP_*</code> requests to the filesystem server (task 2), sent via <code class="inline">msg_call</code>: a 56-byte message (op + six LE u64 args — pointers into your own buffers), one u64 reply with the old syscalls' exact return semantics. Ops: <code class="inline">LIST_DIR</code>, <code class="inline">READ_FILE</code>, <code class="inline">READ_AT</code> (windowed read at an offset), <code class="inline">WRITE_FILE</code>, <code class="inline">MKDIR</code>, <code class="inline">RMDIR</code>, <code class="inline">TOUCH</code>, <code class="inline">RM</code>, <code class="inline">MV</code>, <code class="inline">MOUNT</code>. The shell's <code class="inline">fs_call</code> wrapper (<code class="inline">shell/src/main.rs</code>) is the reference client.</p>
-
-<p>Filesystem failures return a specific <code class="inline">FS_ERR_*</code> code (<code class="inline">NOT_FOUND</code>, <code class="inline">NOT_A_FILE</code>, <code class="inline">NOT_A_DIRECTORY</code>, <code class="inline">INVALID_NAME</code>, <code class="inline">ALREADY_EXISTS</code>, <code class="inline">NOT_EMPTY</code>, <code class="inline">IS_ROOT</code>, <code class="inline">DISK_FULL</code>, <code class="inline">IO</code>); <code class="inline">spawn</code> adds <code class="inline">SPAWN_ERR_BAD_ELF</code>/<code class="inline">SPAWN_ERR_TOO_LARGE</code>/<code class="inline">SPAWN_ERR_NO_FREE_SLOT</code>; the task syscalls add <code class="inline">TASK_ERR_NO_SUCH_TASK</code>/<code class="inline">TASK_ERR_PROTECTED</code>; the block syscalls add <code class="inline">BLOCK_ERR_NO_DEVICE</code>/<code class="inline">BLOCK_ERR_IO</code>/ <code class="inline">BLOCK_ERR_DENIED</code>.</p>
+<div class="cmp-wrap"><table class="cmp-table"><thead><tr><th scope="col">#</th><th scope="col">Name</th><th scope="col">Arguments</th><th scope="col">Purpose</th></tr></thead><tbody><tr><td>0</td><td><code class="inline">print</code></td><td>value</td><td>Demo: log a value through the kernel console</td></tr><tr><td>1</td><td><code class="inline">double</code></td><td>value</td><td>Demo: returns <code class="inline">value * 2</code></td></tr><tr><td>2</td><td><code class="inline">report</code></td><td>task id</td><td>Demo: per-task counter</td></tr><tr><td>3</td><td><code class="inline">try_read_char</code></td><td>—</td><td>Non-blocking read; <code class="inline">NO_CHAR</code> if nothing waiting</td></tr><tr><td>4</td><td><code class="inline">putc</code></td><td>byte</td><td>Raw console byte write</td></tr><tr><td>5</td><td>—</td><td></td><td><em>Deliberate gap (removed <code class="inline">shell_input</code>; ABI stability over density)</em></td></tr><tr><td>6</td><td><code class="inline">get_ticks</code></td><td>—</td><td>Preemption tick count since boot</td></tr><tr><td>7–14</td><td>—</td><td></td><td><em>Deliberate gaps: the old <code class="inline">fs_*</code> syscalls — the filesystem lives in userland now; their contracts survive as the server's request protocol</em></td></tr><tr><td>15</td><td><code class="inline">read_char</code></td><td>—</td><td>Blocking read: the task is suspended until a byte arrives</td></tr><tr><td>16</td><td><code class="inline">spawn</code></td><td>staged len, stdout target</td><td>Start a program image previously fed in via <code class="inline">spawn_stage</code> as a new task alongside the caller; returns the new task's slot index. The stdout target is what makes pipes and redirection work</td></tr><tr><td>17</td><td><code class="inline">exit</code></td><td>code</td><td>Destroy the calling task; status kept (masked to 0–255) until <code class="inline">wait</code>ed. Slots 0–5 — the shell, idle, and the four servers — refused (<code class="inline">EXIT_DENIED</code>)</td></tr><tr><td>18</td><td><code class="inline">task_state</code></td><td>index</td><td><code class="inline">UNUSED</code>/<code class="inline">RUNNABLE</code>/<code class="inline">BLOCKED</code>/<code class="inline">ZOMBIE</code>, or <code class="inline">TASK_STATE_INVALID</code> past the last slot</td></tr><tr><td>19</td><td><code class="inline">kill</code></td><td>index</td><td>Destroy another task (reaps immediately). Slots 0–5 protected</td></tr><tr><td>20</td><td><code class="inline">fg</code></td><td>index</td><td>Hand keyboard ownership to a task (auto-reverts to task 0 on the owner's death, or on Ctrl+C, which terminates the foreground program)</td></tr><tr><td>21</td><td><code class="inline">wait</code></td><td>index</td><td>Block until the task dies; returns its status (0–255), <code class="inline">TASK_KILLED_STATUS</code> (0x100), or <code class="inline">WAIT_INTERRUPTED</code> (Ctrl+C). Collecting the status reaps the slot</td></tr><tr><td>22</td><td><code class="inline">mount</code></td><td>replace flag</td><td>Rescan the USB ports and install a storage device as the kernel's block device — the device half; the filesystem half is a request to the server</td></tr><tr><td>23</td><td><code class="inline">msg_send</code></td><td>dest, buf ptr/len</td><td>IPC: deliver a message (≤64 bytes) — straight into a matching blocked receiver's buffer, or into the task's bounded mailbox. Zero length is legal: the pipeline end-of-stream marker</td></tr><tr><td>24</td><td><code class="inline">msg_recv</code></td><td>buf ptr/len</td><td>Block until a message arrives; returns <code class="inline">(sender &lt;&lt; 32) | len</code>, or <code class="inline">RECV_INTERRUPTED</code> on Ctrl+C</td></tr><tr><td>25</td><td><code class="inline">msg_try_recv</code></td><td>buf ptr/len</td><td>Non-blocking receive; <code class="inline">NO_MSG</code> when empty</td></tr><tr><td>26–28</td><td><code class="inline">block_info</code> / <code class="inline">block_read</code> / <code class="inline">block_write</code></td><td>LBA, buf ptr</td><td>Capacity, and one 512-byte sector each way — <strong>gated to the filesystem server alone</strong>. This is the kernel's entire remaining storage role</td></tr><tr><td>29</td><td><code class="inline">msg_call</code></td><td>dest, req ptr/len, reply ptr</td><td>Synchronous request/response: send + block for a reply <em>from <code class="inline">dest</code> specifically</em>. Reply buffer is a fixed 64 bytes</td></tr><tr><td>30</td><td><code class="inline">spawn_stage</code></td><td>offset, chunk ptr/len</td><td>Feed one chunk of a program image into the kernel's 128KB staging buffer for <code class="inline">spawn</code></td></tr><tr><td>41</td><td><code class="inline">delegate</code></td><td>grantee, target</td><td>Grant one task the runtime right to send to another. A caller may only delegate a capability it <em>statically holds</em>, which confines this to the shell authorizing a pipeline's producer to stream straight to its consumer</td></tr><tr><td>42–45</td><td><code class="inline">net_*</code></td><td>frames, buffers, timeouts</td><td>Raw Ethernet send/receive, the MAC, and the blocking wait that lets the network server watch the wire, its mailbox and a timer at once — <strong>gated to the network server</strong>, the same pattern as <code class="inline">block_*</code></td></tr><tr><td>65–66</td><td><code class="inline">sender_id</code> / <code class="inline">sender_groups</code></td><td>—</td><td>The credential a server authorizes against, bound by the kernel <em>when the message was sent</em>. Asking who occupies a slot <em>now</em> cannot serve this: a caller can send, exit, and have its slot reaped and re-spawned before the server reads its mailbox</td></tr></tbody></table></div>
 
 <h2>Writing your own program</h2>
 
-<p>The full guide is <a href="processes.html"><code class="inline">processes.md</code></a>; <code class="inline">hello/</code> is the working ~70-line template. The essentials: <code class="inline">#![no_std]</code>/<code class="inline">#![no_main]</code>, <code class="inline">_start</code> placed first in <code class="inline">.text</code> via <code class="inline">.text.start</code>, syscalls via inline <code class="inline">svc #0</code>, <strong>release builds only</strong>, and <strong>no static mutable state</strong> (the linker script asserts <code class="inline">.data</code>/<code class="inline">.bss</code> empty — keep state in <code class="inline">main</code>'s stack frame). Stage the stripped ELF on the ESP and either point <code class="inline">INIT.CFG</code> at it (boot into it) or <code class="inline">exec</code> it from the shell.</p>
+<p>The full guide is <a href="https://github.com/hansolovkarlsson/Ouroboros/blob/main/docs/processes.md"><code class="inline">processes.md</code></a>; <code class="inline">programs/demos/hello</code> is the working template. The essentials: <code class="inline">#![no_std]</code>/<code class="inline">#![no_main]</code>, <code class="inline">_start</code> placed first in <code class="inline">.text</code> via <code class="inline">.text.start</code>, syscalls via inline <code class="inline">svc #0</code>, <strong>release builds only</strong>, and <strong>no static mutable state</strong> (the linker script asserts <code class="inline">.data</code>/<code class="inline">.bss</code> empty — keep state in <code class="inline">main</code>'s stack frame). Stage the stripped ELF on the ESP and either point <code class="inline">INIT.CFG</code> at it or run it from the shell.</p>
 
   </article>
 

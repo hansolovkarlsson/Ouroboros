@@ -44,10 +44,12 @@ make hello-bin              # the demo second program (userland)
 make esp                    # stage the full ESP directory layout
 ```
 
-The workspace has four crates: `kernel` (a UEFI application,
-`aarch64-unknown-uefi`), `shell` and `hello` (userland programs,
-`aarch64-unknown-none`), and `syscall-abi` (the shared constants both
-sides import, so syscall numbers can never silently drift). Userland
+The workspace has 61 crates: `kernel` (a UEFI application,
+`aarch64-unknown-uefi`); every userland program under `programs/` — the
+shell, the four servers, and the `/bin` commands (`aarch64-unknown-none`);
+and the shared libraries both sides import, of which `syscall-abi` is the
+one that matters most, since it is why syscall numbers can never silently
+drift. Userland
 programs **always build `--release`** regardless of `PROFILE` — a hard
 toolchain constraint of the position-independent build, not a
 preference (a debug build fails to link; see `processes.md`'s "Binary
@@ -58,8 +60,15 @@ The staged ESP layout:
 ```
 \EFI\BOOT\BOOTAA64.EFI   the kernel (UEFI auto-boots this path)
 \EFI\ORBS\SH.BIN         the default shell
+\EFI\ORBS\FSD.BIN        the filesystem server (task slot 2)
+\EFI\ORBS\COND.BIN       the console server (slot 3)
+\EFI\ORBS\NETD.BIN       the network server (slot 4)
+\EFI\ORBS\ACCOUNTD.BIN   the account server (slot 5)
 \EFI\ORBS\HELLO.BIN      the demo second program
 \EFI\ORBS\INIT.CFG       one line: the path of the program to boot into
+\bin\                    the standalone commands
+\man\                    their manual pages
+\etc\                    passwd, group, and the cluster identity
 ```
 
 Swap the boot program by editing `INIT.CFG` — no kernel rebuild needed.
@@ -77,8 +86,9 @@ make run-image-net   # real FAT32 + a NIC - the fullest single-machine run
 ```
 
 The one everyday gotcha: **`make run`'s disk is FAT16** (a QEMU vvfat
-artifact), which the FAT32-only filesystem server can't mount — every disk
-command prints "no filesystem mounted" there. Use **`make run-image`**
+artifact), and FAT16 is the one format the filesystem server does *not*
+implement (it reads FAT32, exFAT and ext2) — so every disk command prints
+"no filesystem mounted" there. Use **`make run-image`**
 whenever you want `ls`/`cat`/`write`/`exec` to actually work. Exit QEMU
 with **`Ctrl+a x`**.
 
@@ -510,9 +520,9 @@ statuses). `NO_FS` (`MAX-1`) means no filesystem is mounted this boot.
 | 7–14 | — | | *Deliberate gaps: the old `fs_*` syscalls — the filesystem lives in userland now (the fsd server); their contracts survive as the `FSOP_*` request protocol below* |
 | 15 | `read_char` | — | Blocking read: the task is suspended until a byte arrives |
 | 16 | `spawn` | staged total len | Start a program image previously fed in via `spawn_stage` as a new task alongside the caller; returns the new task's slot index |
-| 17 | `exit` | code | Destroy the calling task; status kept (masked to 0–255) until `wait`ed. Tasks 0–2 refused (`EXIT_DENIED`) |
+| 17 | `exit` | code | Destroy the calling task; status kept (masked to 0–255) until `wait`ed. Slots 0–5 — the shell, idle, and the four servers — refused (`EXIT_DENIED`) |
 | 18 | `task_state` | index | `UNUSED`/`RUNNABLE`/`BLOCKED`/`ZOMBIE`, or `TASK_STATE_INVALID` past the last slot |
-| 19 | `kill` | index | Destroy another task (reaps immediately). Tasks 0–2 protected |
+| 19 | `kill` | index | Destroy another task (reaps immediately). Slots 0–5 protected |
 | 20 | `fg` | index | Hand keyboard ownership to a task (auto-reverts to task 0 on the owner's death, or on Ctrl+C) |
 | 21 | `wait` | index | Block until the task dies; returns its status (0–255), `TASK_KILLED_STATUS` (0x100), or `WAIT_INTERRUPTED` (Ctrl+C). Collecting the status reaps the slot |
 | 22 | `mount` | replace flag | Rescan the USB ports and install a storage device as the kernel's block device (`0`, `MOUNT_ALREADY`, or `MOUNT_NO_DEVICE`) — the device half; the FS half is the server's `FSOP_MOUNT` |

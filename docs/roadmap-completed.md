@@ -20,6 +20,62 @@ a **DONE** marker or ~~strikethrough~~ is finished.
 
 ---
 
+## The published website, and the nine pages behind it ✅ DONE (2026-09-05)
+
+`docs/` is served live by GitHub Pages
+(https://hansolovkarlsson.github.io/Ouroboros/, branch `main`, path `/docs`),
+and `docs/site/*.html` is **hand-written** — 23 pages plus `index.html`. Nothing
+generated them and nothing checked them, so the site froze on **2026-08-23**
+while its sources kept moving: v0.18.0, v0.18.1, twelve merged PRs, a closed
+frontier item and the 29th postmortem were all absent from the public site.
+
+**Not a generator.** That was the first framing and the measurements refused
+it: these pages are curated *abridgements*, not renderings (`changelog.html`
+was half its source's words, `architecture-overview.html` a sixth and a
+different document with a different job), the site is a curated subset (10 of
+the 29 postmortems), `glossary.html` has no markdown source at all, and the
+slugs are not derivable (`capability-and-hardening-postmortem.md` →
+`postmortem-capability-hardening.html`). Rendering every `.md` would have
+doubled the changelog page, replaced the overview with a 10,000-word
+reference, and deleted the glossary.
+
+So the fix was in three parts, over two days:
+
+1. **A detector, 2026-09-04** — `scripts/check-site-freshness.py`
+   (`make check-site`), which records the exact source **blob** each page was
+   abridged from. See [`true-when-written-postmortem.md`](true-when-written-postmortem.md)
+   for why the obvious date-based version would have been *born green*.
+2. **Clear the nine, 2026-09-05 — by fixing fewer pages than were broken.**
+   Four of them — `changelog`, `roadmap`, `shell-commands`, `processes` — were
+   reference material that wants to be *current* rather than abridged, and
+   `roadmap.html` was 11,050 words against a 14,286-word source, which is
+   barely an abridgement and so drifted every time the roadmap was touched.
+   **Deleted as pages**; `docs.html` links the markdown on GitHub instead, so
+   there is no copy left to fall behind. The remaining five (`manual`,
+   `architecture-overview`, and the three `research-*`) were re-abridged by
+   hand.
+3. **`check-site` moved into `make test`** — the whole point of building it. A
+   check outside the default suite decays; it sat outside only while nine
+   failures would have made `test` permanently red.
+
+**Re-abridging found drift in the markdown, not just in the HTML.** Three
+sources were themselves behind the code: `architecture.md` said six task slots
+and stopped its capability table at netd (the real map is eleven slots, with
+`accountd` at 5 and 6–10 spawnable); `manual.md` said the workspace had four
+crates (61) and that the filesystem server was FAT32-only (it reads FAT32,
+exFAT and ext2). Those were corrected at the source before the pages were
+written from them — a page cannot be honestly abridged from a document that is
+wrong, and the alternative was publishing the error. That is the
+[`asking-the-right-question-postmortem.md`](asking-the-right-question-postmortem.md)
+shape again: `tasks.rs` is the authority on the slot map, and every restatement
+of it elsewhere drifts.
+
+**The residual cost, stated:** the four deleted pages are a permanent removal
+of drift surface, not a deferral — but they are also four fewer curated
+entry points, and a reader who wanted an abridged changelog now gets a
+6,000-line one. That was judged the right trade for reference material that
+is only useful when current.
+
 ## Per-machine cluster keypairs ✅ DONE (2026-08-31)
 
 The design doc and its step log stay in
