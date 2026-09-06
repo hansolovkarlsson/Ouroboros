@@ -1194,10 +1194,6 @@ pub(crate) fn set_delegate(grantee: usize, target: usize) {
     DELEGATED_SEND[grantee].fetch_or(1 << target, Ordering::Relaxed);
 }
 
-/// Clear every delegation involving `task` - both the one `task` was granted
-/// (delegated-out) and any pointing *at* `task`, so a reused slot can never
-/// inherit a delegation aimed at a now-dead target. Called from every
-/// teardown path alongside [`clear_grant`]/[`reset_stdout_target`].
 /// Drop everything `task` has been *granted*, without touching grants aimed
 /// at it. Called where a slot becomes live ([`spawn`], [`install_task`]) so a
 /// fresh occupant starts with an empty set no matter what the previous one
@@ -1214,8 +1210,29 @@ fn clear_delegations_of(task: usize) {
     DELEGATED_SEND[task].store(NO_DELEGATION, Ordering::Relaxed);
 }
 
+/// Clear every delegation involving `task` that can no longer mean what it
+/// meant: everything `task` was *granted*, and - for a spawnable slot - every
+/// grant *aimed at* it, so a reused slot can never inherit a delegation meant
+/// for its previous occupant. Called from every teardown path alongside
+/// [`clear_grant`]/[`reset_stdout_target`].
+///
+/// A grant aimed at a slot below [`FIRST_SPAWNABLE`] is KEPT. The reuse
+/// argument does not hold there: `SPAWN` cannot fill such a slot, and the only
+/// thing that ever comes back in it is the same supervised server, reinstalled
+/// by `supervisor::restart` - exactly what the grant named. Stripping it made
+/// every program alive across a `netd` restart netless for the rest of its
+/// life, because the grant is only ever made once, at spawn, by the shell; the
+/// symptom was the generic "request failed" after a 150-tick spin, the same
+/// face as the missing-grant bug of #107. Measured 2026-09-06 with a ping loop
+/// across a forced restart: six failures out of six after the restart line
+/// before this, replies resuming after it. A grant aimed at a protected slot
+/// that stays dead (restart cap exhausted) is harmless - every send to it
+/// answers `TASK_ERR_NO_SUCH_TASK`.
 fn clear_delegate(task: usize) {
     clear_delegations_of(task);
+    if task < FIRST_SPAWNABLE {
+        return;
+    }
     // Clear only THIS task's bit in everyone else's set - not the whole set.
     // When this was one slot, "the delegation pointing at `task`" and "that
     // task's only delegation" were the same thing; with a mask they are not,

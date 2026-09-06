@@ -7,6 +7,48 @@ for the forward plan see [`ROADMAP.md`](ROADMAP.md).
 
 ---
 
+## 2026-09-06 (cont. 3) — a grant that was only ever made once
+
+*(The second ledger finding: nothing re-grants `TO_NET` after a supervised
+`netd` restart.)*
+
+**The shape, before touching anything.** A spawned program holds no static
+right to reach `netd`; the shell delegates it once, in `spawn_path`, and that
+is the only `DELEGATE` aimed at `netd` in the tree. When `netd` faults or
+wedges, the teardown calls `clear_delegate` on its slot, which strips that bit
+from every live task's set — the right thing for a spawnable slot, whose next
+occupant may be anything, and then the supervisor reinstalls `netd` into the
+same slot. So every program alive across the restart is netless for life, and
+its next request fails the way #107's missing grant did: a 150-tick spin, then
+`request failed`. Three fixes were on offer — re-grant from the supervisor
+(the kernel would have to know the shell's policy), re-grant from the shell
+(which cannot learn a restart happened), or stop stripping grants aimed at a
+protected slot, since `SPAWN` can never fill one and the only thing that ever
+comes back there is the same server. Hans chose the third.
+
+**Building the check first, because nothing in the tree can force a restart.**
+Two temporary mutations: a resolve of the name `wedgeme` parks `netd` in a
+spin, so the passive heartbeat restarts it about 2.6 s later; and `ping` makes
+eight requests 1.5 s apart instead of one, so it is alive across the restart.
+`exec` the ping, trigger the wedge on its first reply. Against the unmodified
+kernel: *"server slot 4 restarted"*, then six failures out of six. That is
+the check that can fail. The fix is four lines — `clear_delegate` returns
+before the strip loop when the dead slot is below `FIRST_SPAWNABLE` — and the
+same run then shows one in-flight failure and replies resuming. Mutations
+reverted, the network controls (`ping`, `ping | wc`, a now-harmless `resolve
+wedgeme`) unchanged, suite green. The recipe, mutations included, is in
+`testing-qemu.md`, since a future reader of the ledger line "measured" should
+be able to measure it again.
+
+**One rig lesson, small and reusable.** The first attempt never typed the
+trigger: `exec` prints the prompt *before* the child's first line, so a step
+waiting for `# ` after it sees nothing new and times out. Key the next step on
+the child's output instead. And a doc-comment wart fixed in passing: yesterday's
+insertion of `clear_delegations_of` had landed between `clear_delegate`'s doc
+and `clear_delegate`, so the doc described the wrong function.
+
+---
+
 ## 2026-09-06 (cont. 2) — the wrong slot, and a bug you have to build a window to reach
 
 *(The first of the five pre-existing ledger findings from the delegation

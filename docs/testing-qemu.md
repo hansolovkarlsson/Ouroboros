@@ -174,6 +174,44 @@ far past the supervisor's 2.56 s wedge threshold, and it must **succeed** —
 that is what distinguishes a capability denial (fails instantly, no packets)
 from a server restart (`server slot 4 wedged` on the console).
 
+**A client alive across a `netd` restart.** A spawned program reaches `netd`
+only through the `TO_NET` grant the shell makes once, at spawn; until
+2026-09-06 the server's crash teardown stripped that grant from every live
+task and nothing made it again, so any program alive across a supervised
+restart was netless for the rest of its life. The kernel now keeps grants
+aimed at a protected slot across its teardown. Nothing in the tree can force
+a restart on demand, so the check uses **two temporary mutations, applied for
+the run and reverted after** (`git checkout` the two files):
+
+- in `programs/servers/netd/src/main.rs`, at the top of the `NETOP_RESOLVE`
+  arm: `if buf[8..end].starts_with(b"wedgeme") { loop { core::hint::spin_loop() } }`
+  — a resolve of that name parks the server, and the supervisor's passive
+  heartbeat restarts it after `WEDGE_TICKS` (about 2.6 s);
+- in `programs/netutils/ping/src/main.rs`, replace the single request with
+  eight, each followed by a 75-tick wait (`get_ticks` + `yield_now`), printing
+  `reply from` or `ping: request failed` each time via `con_write`.
+
+```sh
+python3 scripts/drive-qemu.py --slirp build/esp.img \
+  'login:@@root' 'assword@@root' \
+  '# @@exec /bin/ping 10.0.2.2' \
+  'reply from@@resolve wedgeme' \
+  'wedged@@' \
+  'reply from|request failed@@' 'reply from|request failed@@' \
+  'reply from|request failed@@' 'reply from|request failed@@' \
+  'exited@@ps' '# @@'
+```
+
+The trigger is keyed on ping's first reply, not the prompt: `exec` returns the
+prompt before ping prints, and a step waiting for `# ` there matches nothing
+new and times out. Expected: *"server slot 4 wedged … restarting"*, one
+`ping: request failed` (the request in flight when the server died), then
+**`reply from 10.0.2.2` resuming** for the remaining requests. Against the
+pre-fix kernel the same run gives `ping: request failed` for every request
+after *"restarted (attempt 1/3)"* — six of six — each after the client's
+150-tick spin. `resolve` itself reports *"no network server this boot"*, which
+is the mid-call death answer, not a boot condition; recorded, not fixed.
+
 **Authentication.** Every request is **signed** with a per-machine Ed25519 key,
 and the exporter serves only a public key listed in its
 `/etc/cluster/authorized`. Both python peers hold the dev "host" identity, which

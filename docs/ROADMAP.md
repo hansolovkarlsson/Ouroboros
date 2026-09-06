@@ -1364,12 +1364,23 @@ would otherwise silently shrink into looking like nothing was ever found.
     success-shaped output under the error line, where an all-program pipeline
     aborts whole. A `bool` return gating the second call is the whole fix.
     Raised by the `high` review, traced not run.
-  - **Nothing re-grants `TO_NET` after a supervised `netd` restart.**
-    `clear_delegate` strips bit 4 from every live task (correctly — the slot
-    could be reused by something else), but the grant is only ever made at
-    spawn. A program spawned before the restart is netless for the rest of its
-    life, and `net_msg_call` busy-spins its 150-tick deadline with no yield
-    before reporting the same generic failure this arc was about.
+  - ~~**Nothing re-grants `TO_NET` after a supervised `netd` restart.**~~
+    **Fixed 2026-09-06, the other way round: nothing strips it any more.**
+    `clear_delegate` stripped bit 4 from every live task on `netd`'s
+    teardown — right for a spawnable slot, which may be reused by a stranger,
+    and wrong for a protected one, which `SPAWN` can never fill and which only
+    ever holds the same supervised server again. The grant is only ever made
+    at spawn, so a program alive across the restart was netless for the rest
+    of its life, and `net_msg_call` busy-spun its 150-tick deadline before
+    reporting the same generic failure #107 was about. Grants aimed at a slot
+    below `FIRST_SPAWNABLE` are now kept across its teardown. **Measured
+    before and after** with a temporary ping loop (eight requests, 1.5 s
+    apart) `exec`'d and then `netd` parked by a temporary trigger so the
+    supervisor restarted it: before, one in-flight failure and then six
+    failures out of six after *"server slot 4 restarted"*; after, the one
+    in-flight failure and replies resuming. The two rig mutations are not in
+    the tree; the recipe is in `testing-qemu.md`. Still true and untouched:
+    the client's 150-tick spin on a denial has no yield.
   - **`netd` demuxes remote-exec by raw slot number** (`PendingRun.owner`,
     `TcpConn.cpu_child`). Slots are recycled the moment a task is reaped, and
     `handle_client`'s comment states an invariant — that only one task can hold
