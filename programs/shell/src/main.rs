@@ -1120,15 +1120,10 @@ fn run_head_pipeline(
     for i in (0..prog_stages.len()).rev() {
         match spawn_stage(prog_stages[i], cwd, *cwd_len, env, next_target) {
             Ok(slot) => {
-                // Same grant every non-pipeline spawn gets (`run_found_command`).
-                // Its ABSENCE here is what made a piped read of a remote mount
-                // impossible: `cat /mnt/a/F | wc` left `cat` without `TO_NET`,
-                // so its `netd` call was denied and it printed "cat: failed"
-                // having sent no packets at all. This coexists with the
-                // producer->consumer delegation below only because
-                // `tasks.rs::DELEGATED_SEND` is a SET - as one slot, whichever
-                // grant landed second silently revoked the first.
-                delegate_net(slot);
+                // `spawn_path` has already delegated `TO_NET`; this stage's
+                // producer->consumer grant is added below. Both survive only
+                // because `tasks.rs::DELEGATED_SEND` is a SET - as one slot,
+                // whichever grant landed second silently revoked the first.
                 slots[i] = slot;
                 next_target = slot;
             }
@@ -1533,7 +1528,7 @@ fn dispatch_line(line: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize, env:
         // "Standalone binaries, Stage 4".
         // ping, resolve, and fetch are externalized to /bin now (Stage 4) -
         // spawned programs that reach netd via the TO_NET capability the shell
-        // delegates at spawn (see run_path_command / delegate_net).
+        // delegates at spawn (see spawn_path / delegate_net).
         // pwd, ls, cat, mkdir, rmdir, touch, rm, cp, mv, writeat, and write are
         // externalized to /bin - spawned programs that inherit the shell's cwd
         // via GET_CWD. `cd`/`bind` stay because they mutate the shell's *own*
@@ -1889,11 +1884,7 @@ fn cmd_exec(line: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize, env: &Env, out: &m
         // Plain `exec prog [args]`: fire-and-forget, output straight to the
         // console.
         match spawn_path(path, argv, cwd, cwd_len, env, syscall_abi::CON_TASK) {
-            // Fire-and-forget, but still delegate `TO_NET` - `exec` runs the
-            // same /bin programs `run_found_command` does, and without this an
-            // `exec`ed one could not reach `netd` (so a remote-mount read
-            // failed with "failed" and no packets, the pipeline bug's sibling).
-            Ok(slot) => delegate_net(slot),
+            Ok(_slot) => {}
             Err(0) => print_line("exec: path too long"),
             Err(NO_FS) => print_no_fs(),
             Err(code) => print_fs_error("exec", code),
@@ -1904,10 +1895,7 @@ fn cmd_exec(line: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize, env: &Env, out: &m
     // and capture it into the redirect sink, then wait for the program - the
     // caller (`run_line`) writes the capture to the file (`finish_redirect`).
     match spawn_path(path, argv, cwd, cwd_len, env, self_task()) {
-        Ok(slot) => {
-            delegate_net(slot);
-            capture_program_output(slot, out);
-        }
+        Ok(slot) => capture_program_output(slot, out),
         Err(0) => print_line("exec: path too long"),
         Err(NO_FS) => print_no_fs(),
         Err(code) => print_fs_error("exec", code),
@@ -2205,16 +2193,33 @@ fn su_by_name(name: &str) {
 /// fire-and-forget). Returns `false` if no PATH directory has the command
 /// (the caller then prints "unknown command"). A `>`/`>>` redirect routes
 /// Delegate this shell's `TO_NET` send-capability to a freshly spawned command
-/// (`slot`), so a network command (`ping`, and later `resolve`/`fetch`) can
-/// reach the network server - a spawnable slot doesn't hold `TO_NET` statically
-/// (`tasks.rs::caps_for_slot` gives it `TO_SHELL | TO_FSD | TO_CON`). The shell
-/// holds it, so it alone can grant it, the same `DELEGATE` mechanism the
-/// program-to-program pipe uses. Best-effort: granting it to every foreground
-/// command is harmless (a command that never calls netd never uses it, and the
-/// delegation is cleared when the task dies); a command with no network to
-/// reach just reports its own "no network server" path if the grant somehow
-/// failed. The cost of not knowing, from the shell, which `/bin` program needs
-/// the network.
+/// (`slot`), so a network command (`ping`, `resolve`, `fetch`, or any program
+/// reading a remote mount) can reach the network server - a spawnable slot
+/// doesn't hold `TO_NET` statically (`tasks.rs::caps_for_slot` gives it
+/// `TO_SHELL | TO_FSD | TO_CON | TO_ACCT`). The shell holds it, so it alone can
+/// grant it, the same `DELEGATE` mechanism the program-to-program pipe uses.
+///
+/// **Called from [`spawn_path`] only** - every spawn in this shell goes through
+/// it. It was five separate call sites until 2026-09-06, and two of them did
+/// not call it, which is exactly the bug: see `spawn_path`'s own note.
+///
+/// Granting it to every command is a deliberate trade, and the cost is real:
+/// a `wc` in a pipeline holds a send right to `netd` for its whole life,
+/// which `caps_for_slot`'s refusal of `TO_NET` to spawnable slots is meant to
+/// deny. The shell cannot know which `/bin` program needs the network, and
+/// `netd` authorizes each request itself - the same reasoning `caps_for_slot`
+/// already records for handing `TO_ACCT` to every slot rather than delegating
+/// it per command.
+///
+/// **The result is deliberately discarded**, and that is the weakest part of
+/// this: a denial here is silent, and the only signal is a network command
+/// later failing for an unrelated-looking reason. The cases are netd absent
+/// this boot, netd mid-restart, the child already gone, and a `caps_for_slot`
+/// edit that drops `TO_NET` from slot 0 - the last of which would return the
+/// whole tree to the pre-fix behaviour with no diagnostic anywhere. Left as-is
+/// because a spawn that succeeded should not fail on a best-effort grant, but
+/// it is a check that cannot fail (docs/cluster-keys-postmortem.md) and is
+/// listed as such in `ROADMAP.md`.
 fn delegate_net(slot: u64) {
     let _ = syscall4(syscall_abi::DELEGATE, slot, syscall_abi::NET_TASK, 0, 0);
 }
@@ -2324,7 +2329,6 @@ fn run_found_command(
     if out.is_console() {
         match spawn_path(candidate, argv, cwd, cwd_len, env, syscall_abi::CON_TASK) {
             Ok(slot) => {
-                delegate_net(slot);
                 // Hand the foreground program the keyboard so it can read input
                 // (an editor, a REPL, a pager) - only the keyboard owner gets
                 // keystrokes, and the shell owns it by default. On the program's
@@ -2346,10 +2350,7 @@ fn run_found_command(
         }
     } else {
         match spawn_path(candidate, argv, cwd, cwd_len, env, self_task()) {
-            Ok(slot) => {
-                delegate_net(slot);
-                capture_program_output(slot, out);
-            }
+            Ok(slot) => capture_program_output(slot, out),
             Err(0) => print_line("command path too long"),
             Err(NO_FS) => print_no_fs(),
             Err(code) => print_fs_error(command, code),
@@ -2486,7 +2487,18 @@ fn spawn_path(path: &str, argv: &[&str], cwd: &[u8; CWD_SIZE], cwd_len: usize, e
     }
     match syscall4(syscall_abi::SPAWN, offset, stdout_target, argv_len, cwd_stage_len) {
         code if code >= FS_ERR_MIN => Err(code),
-        slot => Ok(slot),
+        slot => {
+            // EVERY spawn gets `TO_NET`, here rather than at each call site.
+            // It used to be the caller's job and two of the five callers did
+            // not do it (`run_head_pipeline` and both `cmd_exec` arms), which
+            // is the whole of the 2026-09-06 bug: a network program in a
+            // pipeline was denied and reported a generic failure having sent
+            // no packets. No caller legitimately withholds the grant, so a
+            // per-caller copy carried no information and only offered a sixth
+            // spawn site the same way to be wrong.
+            delegate_net(slot);
+            Ok(slot)
+        }
     }
 }
 

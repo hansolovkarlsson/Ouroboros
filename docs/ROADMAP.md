@@ -380,19 +380,26 @@ the microkernel arc itself still leaves open):
      | command | before | after |
      | --- | --- | --- |
      | `cat /mnt/a/BIG.TXT` (28 RTs, ~17 s) | **works** | works |
-     | `cat /mnt/a/HELLO.TXT \| wc` (5 RTs, ~3 s) | `cat: failed` | `40 400 1960` |
-     | `cat /mnt/a/BIG.TXT \| wc` | `cat: failed` | `200 2600 13600` |
+     | `cat /mnt/a/HELLO.TXT \| wc` (5 RTs, ~3 s) | `cat: failed` + `0 0 0` | `40 400 1960` |
+     | `cat /mnt/a/BIG.TXT \| wc` | `cat: failed` + `0 0 0` | `200 2600 13600` |
      | `ping 10.0.2.2` | works | works |
-     | `ping 10.0.2.2 \| wc` | `ping: request failed` | `1 3 21` |
+     | `ping 10.0.2.2 \| wc` | `ping: request failed` + `0 0 0` | `1 3 21` |
+
+     Both halves of each `before` cell were always printed together: `cat`'s
+     error path calls `end_of_stream` before exiting, so the consumer sees a
+     clean empty stream and reports `0 0 0`. The 09-05 entry recorded only the
+     `0 0 0`; recording only the `cat: failed` would drop the same signature
+     from the other end.
 
      The longer read succeeded and the shorter piped one failed, which no
      threshold can explain. **The host peer logged not one request** for a
      failing run — the same "zero packets left the guest" signature as cause B
-     below, and the same symptom text, because it is the same denial: the
-     shell's `run_head_pipeline` never delegated `TO_NET` to a pipeline stage
-     (only `run_found_command` did), so *every network-using program was
-     broken inside a pipeline* — not just remote mounts. `cmd_exec` had the
-     identical gap.
+     below, and the same symptom text, because it is the same denial: of the
+     shell's five spawn sites, only `run_found_command`'s two delegated
+     `TO_NET`. `run_head_pipeline` and **both** `cmd_exec` arms did not — so
+     *every network-using program was broken inside a pipeline*, and under
+     `exec`, not just remote mounts. The grant now lives in `spawn_path`, the
+     one function all five go through, so a sixth site cannot omit it.
 
      **And it could not be fixed in the shell alone**, which is why it lasted:
      `tasks.rs::DELEGATED_SEND` held **one** delegated target per task, so a
@@ -596,8 +603,12 @@ the microkernel arc itself still leaves open):
    29, the second segment), not the first request of a connection.
 
 4. **General / transitive capability delegation.** The delegation shipped
-   2026-08-21 is deliberately coarse: one delegated target per task,
-   non-transitive, in practice shell-only. Making it general (any task hands
+   2026-08-21 is deliberately coarse: **non-transitive, irrevocable short of
+   task death, and in practice shell-only.** (It was also *one target per
+   task* until 2026-09-06, when that turned out to be a bug rather than a
+   scope cut — see the 09-06 entry under item 2. It is a per-task set now,
+   which is what `a | b | c` with a network stage needed; the rest of this
+   item is untouched by that.) Making it general (any task hands
    any held capability onward, revocably — MINIX's full grant model) would
    unlock true relay-free `a | b | c` and a spawned program running its
    *own* server. The catch: **neither consumer exists yet**, so building
@@ -1236,6 +1247,45 @@ Kept as a **ledger**: an item that gets fixed is struck through with the date
 and left in place, rather than deleted. Two reasons. A reader wants to know a
 hazard was *considered*, not just that it is absent today; and the section
 would otherwise silently shrink into looking like nothing was ever found.
+
+- **Six findings from the 2026-09-06 delegation review, all PRE-EXISTING**
+  (raised against the `TO_NET`-in-pipelines fix; the five findings that were
+  *about* that diff were fixed in it). Each is its own change, deliberately not
+  bundled — a repair is a change, and changes have the defect rate of the code
+  they fix.
+  - **The shell's pipeline error paths `KILL` without `WAIT`.** `KILL` is
+    refused on a zombie (`task_exists` matches only `Runnable | Blocked`) and
+    only `WAIT` reaps, so a stage that exited on its own — a bad `grep`
+    pattern, an unknown flag — leaks one of just five spawnable slots. Five
+    such pipelines exhaust the pool and every later spawn fails until the user
+    runs `wait <n>` by hand. Six sites, all in `run_head_pipeline` and
+    `drain_program_output`.
+  - **The "consumer already exited, stay quiet" heuristic inspects the wrong
+    slot.** The kernel denies `DELEGATE` on a dead *grantee* before it looks at
+    the target, but the shell explains the denial from the *target*'s state —
+    so a producer that exited early gets `pipe: could not authorize the stream`
+    printed on top of its own message, which is exactly the noise the check
+    exists to suppress.
+  - **Nothing re-grants `TO_NET` after a supervised `netd` restart.**
+    `clear_delegate` strips bit 4 from every live task (correctly — the slot
+    could be reused by something else), but the grant is only ever made at
+    spawn. A program spawned before the restart is netless for the rest of its
+    life, and `net_msg_call` busy-spins its 150-tick deadline with no yield
+    before reporting the same generic failure this arc was about.
+  - **`netd` demuxes remote-exec by raw slot number** (`PendingRun.owner`,
+    `TcpConn.cpu_child`). Slots are recycled the moment a task is reaped, and
+    `handle_client`'s comment states an invariant — that only one task can hold
+    `TO_NET` — which the shell's blanket grant has now made false.
+  - **A nested shell cannot delegate `TO_NET` at all.** `may_delegate` reads
+    the *static* mask and spawnable slots have none, so every `delegate_net`
+    from a spawned `SH.BIN` is denied, discarded by its `let _ =`, and its
+    whole subtree is silently netless — bit-for-bit the symptom this arc spent
+    two days tracing.
+  - **`delegate_net` discards its result**, so the one grant this arc is about
+    is the only `DELEGATE` in the shell with no failure signal. A future
+    `caps_for_slot` edit dropping `TO_NET` from slot 0 would return the tree to
+    the pre-fix behaviour with no diagnostic anywhere. A check that cannot
+    fail.
 
 - ~~**The 9P export bypasses permissions entirely.**~~ **Closed 2026-08-31** by
   per-user cluster identity (v0.15.0), which this finding specified. `fsd`'s

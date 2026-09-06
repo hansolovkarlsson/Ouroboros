@@ -55,6 +55,49 @@ Nothing is widened: every bit still needs a delegator that statically holds it.
 What is gone is the accidental revocation — and `clear_delegate` now clears one
 bit rather than a whole set, or a stage exiting would strip its siblings' grant.
 
+### What the review then found, which was more than the fix
+
+`/code-review max` returned fifteen findings against a thirty-line diff. Five
+were acted on here; the rest are pre-existing and are now recorded rather than
+quietly carried.
+
+**The one that mattered was a security regression I introduced.** `DELEGATE`
+validated the *target* slot but never the **grantee**, so any `/bin` program
+could grant a *server* a send right — `DELEGATE(grantee=cond, target=shell)`
+passed every check, and `cond`'s mask is deliberately empty because it only
+ever replies. That was self-limiting purely by accident: with one slot, each
+injection overwrote the last. Making it a set removed the accident and nothing
+replaced it, and servers never exit so `clear_delegate` never ran. The grantee
+must now be a spawnable slot; both real delegators only ever grant to a slot
+they just spawned, so it costs nothing legitimate. **A widening in one place
+turned an accidental bound into a real hole somewhere else** — and the diff
+that opened it did not touch the file it opened it in.
+
+The rest, briefly: `delegate_net` moved into `spawn_path`, the one function all
+five spawn sites already go through, so the sixth cannot omit it (the fix
+otherwise repeated the same line five times and trusted the next author);
+`DELEGATED_SEND` is zeroed where a slot becomes live, so freshness stops
+depending on every teardown path remembering; the `NUM_TASKS <= 16` ceiling
+that `caps_for_slot`'s `u32` has always needed is now a `const` assert instead
+of a comment, which matters more once two arms shift the same bit index in two
+widths.
+
+And it caught four wrong claims in the prose I had just written to correct
+wrong claims: the ROADMAP contradicted itself two hundred lines down (item 4
+still described the retired single-slot model), I wrote "the non-pipeline spawn
+path only" when `cmd_exec` is a non-pipeline path that *also* lacked the grant,
+I cited the wrong frontier item, and my before/after table recorded `cat:
+failed` while dropping the `0 0 0` — the exact half of the signature the 09-05
+entry had kept and I had faulted it for reading alone. The slot map inside
+`tasks.rs`, which `CLAUDE.md` names as **the authority** on slot numbers, was
+itself wrong in two places: `5..10 spawnable` when `FIRST_SPAWNABLE` is 6 and
+slot 5 is `accountd`.
+
+**Nine documents still asserted the single-slot model**, including
+`architecture.md`, the reference `CLAUDE.md` names for the privilege model.
+`make check-site` went red the moment `architecture.md` changed — which is the
+09-04 site-freshness work doing exactly its job, one day after it landed.
+
 ### What this was really about
 
 Every hard part of the day was in the record, not the code. The fix is thirty
@@ -84,7 +127,27 @@ harder while the smaller piped one was the actual bug.
 **And one gap the fix did not have to find: testing one spawn path is not
 testing the others.** The delegation race fixed on 09-03 was proved with a
 forced-race scaffold and a three-row table — all of it running unpiped
-commands, on the one spawn path that had the grant.
+commands, on the one spawn path that had the grant. Every recipe in
+`testing-qemu.md` did the same, which is why months of green said nothing about
+this. There is a piped-and-`exec` recipe there now, with `BIG.TXT` as the
+control that separates a capability denial (instant, no packets) from a
+supervisor restart (`server slot 4 wedged`) — the two failures this arc spent
+two days confusing for each other.
+
+**Pre-existing, found by the review, recorded not fixed** (each is its own
+change, and a repair is a change — `repairing-the-repairs-postmortem.md`):
+the shell's pipeline error paths `KILL` without `WAIT`, and `KILL` is a no-op
+on a zombie, so an already-exited stage leaks one of only five spawnable slots;
+the "consumer already exited, stay quiet" heuristic reads the *target*'s state
+when the kernel denies on a dead *grantee* first, so it prints the noise it
+exists to suppress; nothing re-grants `TO_NET` after a supervised `netd`
+restart, so a program spawned before the restart is netless for the rest of its
+life; `netd` demuxes remote-exec by raw slot number, which was safe while one
+task at a time held `TO_NET` and is not now; a nested shell cannot delegate
+`TO_NET` at all (`may_delegate` reads the *static* mask, and spawnable slots
+have none), so its whole subtree is silently netless; and `delegate_net`
+discards its result, making the one grant this arc is about the only `DELEGATE`
+in the shell with no failure signal.
 
 ---
 

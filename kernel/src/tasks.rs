@@ -77,7 +77,7 @@ use crate::loader::LoadedProgram;
 /// (`syscall_abi::NET_TASK`). Each server stays `Unused` if its `*.BIN`
 /// doesn't exist, and `spawn` never fills a reserved slot: a spawned program
 /// landing in one would inherit its role. Slots [`FIRST_SPAWNABLE`]..NUM_TASKS
-/// (5..10) start `Unused` and are only ever filled by `spawn` (dynamic task
+/// (6..10) start `Unused` and are only ever filled by `spawn` (dynamic task
 /// creation) - the pool a foreground command, a background task, and a
 /// pipeline draw from. A small, fixed bound rather than anything growable -
 /// "generous but bounded," the same philosophy `mmu.rs`'s
@@ -86,6 +86,20 @@ use crate::loader::LoadedProgram;
 /// fails with `SpawnError::NoFreeSlot` past this): the per-task arrays and the
 /// `mmu.rs` table pool (`MAX_EL0_REGIONS`, which must stay equal) auto-scale.
 pub const NUM_TASKS: usize = 11;
+
+/// The send-mask ceiling, checked rather than described. [`caps_for_slot`]
+/// packs the per-slot send-mask into the low `NUM_TASKS` bits of a `u32` whose
+/// bits 16+ are the `CAP_*` resource capabilities, so a slot count past 16
+/// would alias `CAP_BLOCK` as "may send to slot 16" - **granting** a
+/// capability rather than failing. `NUM_TASKS`' own doc calls raising it "a
+/// one-constant change", which is exactly the edit that would do this
+/// silently. Two arms now test the same bit index in two widths (the static
+/// `u32` and [`DELEGATED_SEND`]'s `u64`), so the agreement is worth pinning
+/// where the compiler enforces it.
+const _: () = assert!(
+    NUM_TASKS <= 16,
+    "NUM_TASKS past 16 collides with the CAP_* bits at 16+ in caps_for_slot's u32"
+);
 
 /// The first slot `spawn` may use - everything below it is fixed infrastructure
 /// (boot shell, idle, filesystem server, console server, network server, account
@@ -102,7 +116,7 @@ pub const FIRST_SPAWNABLE: usize = 6;
 
 // Per-slot capabilities (the capability model for who-may-do-what).
 // Because task-slot roles are static (see `NUM_TASKS`'s doc comment - 0
-// shell, 1 idle, 2 fsd, 3 cond, 4 netd, 5..10 spawnable), a task's
+// shell, 1 idle, 2 fsd, 3 cond, 4 netd, 5 accountd, 6..10 spawnable), a task's
 // capabilities are a pure function of its slot: no stored table, no mutable
 // state, and a restarted server or a spawned child automatically gets the
 // right caps. The whole policy lives in `caps_for_slot`. Packed in one `u32`:
@@ -1148,8 +1162,9 @@ fn reset_id(task: usize) {
 /// spawnable slot holds statically). With one slot the shell could grant only
 /// one of them, so a piped read of a remote file could not be made to work at
 /// all from the shell's side - `netd` was never reached, and `cat` printed
-/// "cat: failed" having sent zero packets. Traced 2026-09-06; see
-/// docs/ROADMAP.md frontier item 3.
+/// "cat: failed" having sent zero packets. Traced 2026-09-06; see the 09-06
+/// entry under docs/ROADMAP.md frontier item **2** (item 3 is the *earlier*
+/// remote-read arc this was long mistaken for).
 ///
 /// A mask is not a widening of the model: every bit still has to be granted by
 /// a delegator that *statically* holds that same capability, one `DELEGATE`
@@ -1183,8 +1198,24 @@ pub(crate) fn set_delegate(grantee: usize, target: usize) {
 /// (delegated-out) and any pointing *at* `task`, so a reused slot can never
 /// inherit a delegation aimed at a now-dead target. Called from every
 /// teardown path alongside [`clear_grant`]/[`reset_stdout_target`].
-fn clear_delegate(task: usize) {
+/// Drop everything `task` has been *granted*, without touching grants aimed
+/// at it. Called where a slot becomes live ([`spawn`], [`install_task`]) so a
+/// fresh occupant starts with an empty set no matter what the previous one
+/// accumulated.
+///
+/// Every teardown path already calls [`clear_delegate`], so today this is
+/// belt-and-braces - but it is the belt that does not depend on a future fifth
+/// teardown path remembering. A missed clear used to leak one capability (the
+/// single index); with a set it leaks the whole accumulated mask, so the cost
+/// of the omission went up while the odds of it did not go down.
+/// docs/unspellable-postmortem.md: make the wrong thing unspellable rather
+/// than un-grepped.
+fn clear_delegations_of(task: usize) {
     DELEGATED_SEND[task].store(NO_DELEGATION, Ordering::Relaxed);
+}
+
+fn clear_delegate(task: usize) {
+    clear_delegations_of(task);
     // Clear only THIS task's bit in everyone else's set - not the whole set.
     // When this was one slot, "the delegation pointing at `task`" and "that
     // task's only delegation" were the same thing; with a mask they are not,
@@ -1750,6 +1781,7 @@ pub(crate) fn fail_calls_to(dead: usize) {
 pub(crate) fn install_task(slot: usize, context: Context, region: (u64, u64)) {
     unsafe { *TASKS[slot].0.get() = context };
     unsafe { *REGIONS[slot].0.get() = region };
+    clear_delegations_of(slot);
     unsafe { *STATES[slot].0.get() = TaskState::Runnable };
     flush_new_code(region.0, region.1);
 }
@@ -1792,6 +1824,7 @@ pub(crate) fn spawn(context: Context, region: (u64, u64)) -> Result<usize, Spawn
         if unsafe { *STATES[i].0.get() } == TaskState::Unused {
             unsafe { *TASKS[i].0.get() = context };
             unsafe { *REGIONS[i].0.get() = region };
+            clear_delegations_of(i);
             unsafe { *STATES[i].0.get() = TaskState::Runnable };
             // Freshly-written code needs the same clean/invalidate
             // sequence `init` gives the boot-loaded programs - a

@@ -656,6 +656,18 @@ The policy:
 | 5 | accountd | fsd (`/etc/passwd`, `/etc/shadow`), cond (its logs) | — (its privilege is policy, not a device) |
 | 6–10 | spawnable | shell, fsd, cond, accountd | — |
 
+**`netd` is missing from that last row, and in practice it is not.** The shell
+delegates `TO_NET` to *every* command it spawns (`spawn_path`), because it
+cannot know from a program's name whether it needs the network — a plain
+`cat` does, the moment its path lies under a remote mount. So the static
+refusal of `TO_NET` to spawnable slots stays literally true in the kernel and
+is close to vacuous at runtime: a `wc` in a pipeline holds a send right to
+`netd` for its whole life. That is a deliberate trade on the same ground
+`caps_for_slot` already records for `TO_ACCT` — holding the capability to
+*ask* is not permission to succeed, and `netd` authorizes each request itself
+— but it is a widening, and it is the reason the delegation set accumulates
+rather than replacing.
+
 Enforced at the `msg_send`/`msg_call` boundary by `tasks::may_send(src,
 dest)`, which returns `MSG_ERR_DENIED` unless the send is permitted. Two
 ways it's permitted: the **reply exemption** — if `dest` is currently
@@ -676,10 +688,20 @@ capability for bulk *data*.
 The static send-mask is a baseline; `delegate(grantee, target)` (41) hands
 one task the runtime right to initiate sends to another — a dynamic addition
 to `grantee`'s send-mask, consulted by `may_send` after the static check. It
-is stored in one per-task slot (`tasks::DELEGATED_SEND`, the single-slot
-`grant`/`stdout_target` precedent) and cleared on task death — both a dying
-task's delegated-out capability and any delegation aimed *at* it, so a reused
-slot can never inherit a stale one.
+is stored as a per-task **set** (`tasks::DELEGATED_SEND`, a bitmask over slot
+indices in the same `1 << slot` shape the static mask uses) and cleared on task
+death — both a dying task's delegated-out capabilities and any delegation aimed
+*at* it, so a reused slot can never inherit a stale one; the set is also zeroed
+wherever a slot becomes live, so that safety does not rest on every teardown
+path remembering.
+
+It was **one** slot until 2026-09-06, which was a bug rather than a scope cut:
+a pipeline stage needs its downstream consumer *and* `TO_NET` to read a remote
+mount, and with one slot the second grant silently revoked the first. A set is
+not a widening — every bit still requires a delegator that statically holds
+that same capability, one `delegate` call at a time — but note that nothing
+revokes a bit short of task death, and `delegate`'s grantee must be a spawnable
+slot precisely so a program cannot accumulate send rights *into* a server.
 
 The rule that makes it safe: **a task may only delegate a send-capability it
 *statically* holds** (`tasks::may_delegate` consults `caps_for_slot`, not the
