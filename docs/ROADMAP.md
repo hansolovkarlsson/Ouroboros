@@ -1274,12 +1274,75 @@ would otherwise silently shrink into looking like nothing was ever found.
     announces itself and names the tool that resolves it. Closing it properly
     means deciding what Ctrl+C should *mean* for a pipeline (detach? kill the
     whole group?), which is a design question, not a repair.
-  - **The "consumer already exited, stay quiet" heuristic inspects the wrong
-    slot.** The kernel denies `DELEGATE` on a dead *grantee* before it looks at
-    the target, but the shell explains the denial from the *target*'s state —
-    so a producer that exited early gets `pipe: could not authorize the stream`
-    printed on top of its own message, which is exactly the noise the check
-    exists to suppress.
+  - ~~**The "consumer already exited, stay quiet" heuristic inspects the wrong
+    slot.**~~ **Fixed 2026-09-06.** The kernel denies `DELEGATE` on a dead
+    *grantee* before it looks at the target, but the shell explained the denial
+    from the *target*'s state — so a producer that exited early got `pipe:
+    could not authorize the stream` printed on top of its own message, which
+    is exactly the noise the check exists to suppress. **Fixed in the kernel,
+    not the shell:** `DELEGATE` now answers `TASK_ERR_NO_SUCH_TASK` for a dead
+    slot at either end and `MSG_ERR_DENIED` only for a refusal, as `KILL`,
+    `FG`, `WAIT`, `MSG_SEND` and `MSG_CALL` already did, and the shell reads
+    the reason from the answer. The first version read `TASK_STATE` for both
+    ends *after* the denial; the `high` review showed that a later state read
+    cannot tell a refusal from an exit that happened in between, so it would
+    have silenced a real denial — and a nested shell, whose static mask holds
+    no spawnable slot, is refused on every link.
+
+    **Narrower than recorded, and measured rather than argued.** The ordinary
+    producer failure — `ls /nope | wc`, `cat /nope | wc` — was already quiet
+    before the fix: the first stage is spawned *last* and delegated before it
+    has run a single instruction, and a producer that *has* run stays alive in
+    `ulib::end_of_stream`, which retries a denial for 150 ticks. So the bad
+    path needs a producer that exits **without** end-of-stream (`-?` does)
+    *and* a tick landing between two adjacent shell syscalls. It was forced by
+    parking the shell until stage 0 was a zombie: under that window every
+    pipeline printed the line (`ls / | wc` included) before the fix, and none
+    after; with the window removed the controls are byte-identical to before.
+  - **A producer that exits without `end_of_stream` wedges the pipeline.**
+    `ls -? | wc` leaves `wc` blocked in `pipe_recv` forever and the shell
+    waiting on it: no prompt came back within the rig's 90 s step timeout.
+    Found 2026-09-06 while using `-?` as the exit-without-EOF producer the
+    previous item's reproduction needed — and `usage_if_requested` is only the
+    instance that was run. **26 of the 53 programs under `programs/` never
+    call `end_of_stream` at all** (counted by grep: every `admin/*` tool,
+    `cp mv rm mkdir rmdir touch chmod chown write writeat more`, `send recv
+    readkey args selftest`, both demos, the four servers), and the ones that
+    do skip it on their early error exits (`cat` with no operand). What the
+    rig did *not* measure is Ctrl+C: `drive-qemu.py` cannot send it, and the
+    review traced that for a console-sink pipeline the consumer owns the
+    keyboard, so Ctrl+C kills it and the shell's `WAIT` returns — the slot
+    hold above is the redirect/drain sinks' problem, not this one. Untested
+    either way. **`netd`'s `cpu` path has the same wedge with a leak on top:**
+    `cpu_child_msg` reaps the child only on the empty message and `pump_send`
+    holds the connection until then, so a remote command that exits without
+    one never streams, never FINs, and its slot is never reaped by anyone.
+    Own change, two shapes: every exit path ends the stream (the instances,
+    half the tree), or the kernel ends it for any task whose stdout target is
+    not the console (the class). The class shape is not free, and the review
+    listed why: there are three death paths (`EXIT`, `KILL`, the EL0-fault
+    teardown) and `fail_calls_to` covers `MSG_CALL` waiters, not the plain
+    `MSG_RECV` that `pipe_recv` is; a well-behaved producer already sends its
+    own empty message, and a second one lands in a mailbox nothing drains —
+    the shell's next capture would read it as an immediate EOF; and a full
+    mailbox at teardown cannot be retried by a task being torn down. Decide
+    the shape before writing either.
+  - **The shell's pipeline teardown uses slot numbers as identity.** A stage
+    that faults at EL0 goes straight to `Unused` (`kill_current_and_switch`
+    stores it, no zombie), and any spawner — `netd`'s `cpu` handler, a nested
+    shell — may take that slot before the shell's `kill_and_reap` loop reaches
+    it, which then kills or reaps a stranger; `KILL` and `WAIT` have no owner
+    check. The same class as the `netd` raw-slot item below, seen from the
+    other side, and pre-existing: the 2026-09-06 fix did not widen it, but it
+    is the moment "unused means already exited" was written down as a rule.
+    Raised by the `high` review, traced not run.
+  - **`cmd_pipeline` runs a builtin-headed second segment after the first
+    segment failed.** `run_head_pipeline` returns `()`, so when the drained
+    upstream segment aborts — a stage that will not spawn, a link that cannot
+    be authorized — the builtin and everything after it still run and print
+    success-shaped output under the error line, where an all-program pipeline
+    aborts whole. A `bool` return gating the second call is the whole fix.
+    Raised by the `high` review, traced not run.
   - **Nothing re-grants `TO_NET` after a supervised `netd` restart.**
     `clear_delegate` strips bit 4 from every live task (correctly — the slot
     could be reused by something else), but the grant is only ever made at
@@ -1294,7 +1357,12 @@ would otherwise silently shrink into looking like nothing was ever found.
     the *static* mask and spawnable slots have none, so every `delegate_net`
     from a spawned `SH.BIN` is denied, discarded by its `let _ =`, and its
     whole subtree is silently netless — bit-for-bit the symptom this arc spent
-    two days tracing.
+    two days tracing. **Wider than `TO_NET`, measured 2026-09-06:** the same
+    refusal hits every producer→consumer link, so a nested shell cannot run
+    *any* pipeline — `exec /EFI/ORBS/SH.BIN`, `fg 6`, log in, `ls / | wc`
+    answers `pipe: could not authorize the stream` and kills both stages. It
+    is at least honest now: since `DELEGATE` answers `TASK_ERR_NO_SUCH_TASK`
+    for a dead slot, that line is only ever printed for a real refusal.
   - **`delegate_net` discards its result**, so the one grant this arc is about
     is the only `DELEGATE` in the shell with no failure signal. A future
     `caps_for_slot` edit dropping `TO_NET` from slot 0 would return the tree to

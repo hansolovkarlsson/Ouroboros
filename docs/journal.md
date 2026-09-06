@@ -7,6 +7,94 @@ for the forward plan see [`ROADMAP.md`](ROADMAP.md).
 
 ---
 
+## 2026-09-06 (cont. 2) — the wrong slot, and a bug you have to build a window to reach
+
+*(The first of the five pre-existing ledger findings from the delegation
+review: the pipeline's "stay quiet" heuristic reads the consumer's state when
+the kernel may have denied on the producer's.)*
+
+**First move: run it, before reading it.** The ledger said a producer that
+exited early gets `pipe: could not authorize the stream` printed on top of its
+own message, and the standup called it the most user-visible of the five. On
+the unmodified tree, `ls /nope | wc` and `cat /nope | wc` printed the
+producer's line, `0 0 0`, and `pipe: ls exited with code 1` — quiet, and
+correct. The heuristic *does* read the wrong slot; the case the reading
+described simply never arrives that way.
+
+**Why not, from the code.** The first stage is spawned last, so the shell
+delegates it before it has run an instruction. A producer that *has* run and
+failed does not exit either: `ulib::end_of_stream` treats a denial as
+transient and retries it for 150 ticks, so it sits alive until the grant lands.
+What is left is a producer that exits with **no** end-of-stream (`-?` does
+exactly that: print usage, `exit(0)`), running to its exit in the gap between
+two adjacent shell syscalls — a tick landing in a window of a few instructions.
+Real, and rare enough that no recipe would ever see it.
+
+**So the window was built.** A temporary loop parked the shell after the spawn
+loop until stage 0 was a zombie. Under it, *every* pipeline printed the line —
+`ls -? | wc`, `ls /nope | wc`, even `ls / | wc` once its producer gave up on
+the stream after 150 ticks. That is the check that can fail
+(`cluster-keys-postmortem.md`): a fix verified only on the unmodified tree
+would have been verified against runs that never reached the branch. The fix
+reads both ends of the link; same window, same three commands, no line. Window
+removed, controls byte-identical to the morning's run, 137 tests, 62 binaries
+with no `ABS64`. Nineteen lines in, four out, most of them the comment saying
+how narrow the path is and how it was reached.
+
+**The finding beside it.** Using `-?` as the exit-without-EOF producer showed
+that `ls -? | wc` on the *unmodified* shell never returns a prompt: `wc` waits
+in `pipe_recv` for an end-of-stream nobody sends, and the shell waits on `wc`.
+Ctrl+C then holds the slots, which is the deliberate hold from yesterday. On
+the ledger, not fixed — the instance is one call in `usage_if_requested`, but
+the class is "a task exited with a non-console stdout target and no one ended
+the stream", which the kernel could close for every program at once. That is a
+design choice, so it is written down for Hans rather than made.
+
+**Then the review moved the fix a layer down.** `/code-review high` on the
+diff: the kernel folds "that slot is dead" and "you may not" into one
+`MSG_ERR_DENIED`, so any `TASK_STATE` read after the fact is a guess — a policy
+refusal on a stage that died between the two syscalls reads as "already
+exited", and a nested shell (whose static mask holds no spawnable slot) is
+refused on every link, so under the window the shell-side fix would have
+silenced the one message that was true. Every sibling syscall — `KILL`, `FG`,
+`WAIT`, `MSG_SEND`, `MSG_CALL` — already answers `TASK_ERR_NO_SUCH_TASK` for a
+dead slot. So `DELEGATE` does too now, the shell reads the reason from the
+answer, and the closure, the second and third syscalls, the TOCTOU and the
+"NOT merely not-runnable" caveat are all gone. The reason is atomic with the
+denial only if the kernel gives it — the same shape as the `ls` error table
+that rendered every `fsd` code as "no such file": the caller had flattened a
+reason the layer below knew. Same window, same commands: quiet. The nested
+shell under the window is quiet too, and that is also right: there the exit
+*precedes* the syscall, so the kernel answers "no such task"; the case the
+review named — refused first, then the stage dies before the shell's state
+read — is the one no read after the fact can get right, and the one the
+atomic answer removes. And without the window, the nested shell answers
+`pipe: could not authorize the stream` to `ls / | wc` — it cannot run a
+pipeline at all, which the ledger had recorded only as "cannot delegate
+`TO_NET`". Widened there, measured.
+
+**And it found what I had written beside the finding.** "Ctrl+C then holds
+the slots" was inferred from yesterday's hold, not run — the rig cannot send
+Ctrl+C, and for a console-sink pipeline the consumer owns the keyboard, so
+Ctrl+C kills it and the shell recovers. Struck. And `-?` was "the instance"
+only because it was the one I ran: twenty-six of fifty-three programs never
+call `end_of_stream`, and the ones that do skip it on their early error exits.
+The class fix I had written down in one line has three open questions the
+review listed, all now on the ledger. Six wrong-or-narrow claims in the prose
+around a fix whose code was right twice — yesterday's ratio, again.
+
+**What this one says.** A finding made by reading code is a hypothesis about a
+run, and the consequence attached to it is the part most likely to be wrong —
+the code was read correctly, and the sentence after it ("a producer that
+exited early gets…") described a run that does not happen. Yesterday's lesson
+from the other direction: a stored measurement is a hypothesis for the next
+run; a stored *reading* was never a measurement at all. The work today was not
+the five-line fix but building the window that let the check fail, and the
+window found a second bug the reading could not have — and the review then
+found that half of what I wrote about that second bug was itself a reading.
+
+---
+
 ## 2026-09-06 (cont.) — a second review, and the reason beside a right decision was wrong
 
 *(The slot-leak fix went through `/code-review high` before merging. It found no

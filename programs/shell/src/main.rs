@@ -1148,21 +1148,19 @@ fn run_head_pipeline(
 
     // Authorize each adjacent producer->consumer link.
     for i in 0..prog_stages.len() - 1 {
-        if syscall4(syscall_abi::DELEGATE, slots[i], slots[i + 1], 0, 0) != 0 {
-            // A consumer that has ALREADY exited is the ordinary case, not a
+        let r = syscall4(syscall_abi::DELEGATE, slots[i], slots[i + 1], 0, 0);
+        if r != 0 {
+            // A stage that has ALREADY exited is the ordinary case, not a
             // capability failure: a stage that rejects its own arguments (a bad
             // `grep` pattern, an unknown flag) prints its reason and exits
             // before the shell gets here. It has already told the user what
             // went wrong, so adding "could not authorize the stream" on top
             // only obscures it. Anything else is a real failure and still says
-            // so.
-            // "Already exited" means zombie or unused - NOT merely not-runnable:
-            // a healthy consumer parked in pipe_recv is BLOCKED, so testing
-            // `!= RUNNABLE` would swallow a genuine delegation failure and kill
-            // the pipeline with no message at all.
-            let state = syscall(syscall_abi::TASK_STATE, slots[i + 1]);
-            let died = state == syscall_abi::TASK_STATE_ZOMBIE
-                || state == syscall_abi::TASK_STATE_UNUSED;
+            // so. Either end of the link may be the one that died, and the
+            // kernel says which case this is - it answers NO_SUCH_TASK for a
+            // dead slot and DENIED for a refusal - so the reason is read from
+            // the answer, not re-derived from a later TASK_STATE.
+            let died = r == syscall_abi::TASK_ERR_NO_SUCH_TASK;
             for s in &slots[..prog_stages.len()] {
                 kill_and_reap(*s);
             }
