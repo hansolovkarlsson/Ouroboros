@@ -134,11 +134,27 @@ control that separates a capability denial (instant, no packets) from a
 supervisor restart (`server slot 4 wedged`) — the two failures this arc spent
 two days confusing for each other.
 
-**Pre-existing, found by the review, recorded not fixed** (each is its own
-change, and a repair is a change — `repairing-the-repairs-postmortem.md`):
-the shell's pipeline error paths `KILL` without `WAIT`, and `KILL` is a no-op
-on a zombie, so an already-exited stage leaks one of only five spawnable slots;
-the "consumer already exited, stay quiet" heuristic reads the *target*'s state
+**One of those was then fixed the same day** — the slot leak, because it was
+the one a user hits by ordinary accident. `KILL` frees a *live* task's slot
+outright, but a stage that already exited is a `Zombie`, `task_exists` counts
+only `Runnable`/`Blocked`, so the kernel refuses the kill and only `WAIT` ever
+reaps. Every "abandon this pipeline" path leaked one of five slots. Five
+`cat /etc/passwd | grep` with no pattern — a typo, not a stress test — and the
+shell could no longer run **any** `/bin` program: `echo still-alive` answered
+`echo: no free task slot`. Eight paths now go through one `kill_and_reap`.
+
+Two things this one taught. **The completion paths never leaked**, because they
+already waited on every stage; only the error paths did — so the bug lived
+exactly where nothing routine goes, which is why it survived every green run.
+And **the fix falsified a comment two hundred lines away**: a block that read
+"the capture killed the last stage (but didn't reap it)" and carried an
+explicit `WAIT` to compensate. True when written; false the moment the capture
+path started reaping. That comment was found by looking, not by the compiler —
+the same class `true-when-written-postmortem.md` collects, hit while fixing a
+bug found by a review, on a branch about correcting claims.
+
+**Still pre-existing, recorded not fixed** (each is its own change, and a repair
+is a change — `repairing-the-repairs-postmortem.md`): the "consumer already exited, stay quiet" heuristic reads the *target*'s state
 when the kernel denies on a dead *grantee* first, so it prints the noise it
 exists to suppress; nothing re-grants `TO_NET` after a supervised `netd`
 restart, so a program spawned before the restart is netless for the rest of its

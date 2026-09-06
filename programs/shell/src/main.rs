@@ -1129,7 +1129,7 @@ fn run_head_pipeline(
             }
             Err(code) => {
                 for s in &slots[i + 1..prog_stages.len()] {
-                    syscall(syscall_abi::KILL, *s);
+                    kill_and_reap(*s);
                 }
                 let cmd = prog_stages[i].split_whitespace().next().unwrap_or("");
                 match code {
@@ -1164,7 +1164,7 @@ fn run_head_pipeline(
             let died = state == syscall_abi::TASK_STATE_ZOMBIE
                 || state == syscall_abi::TASK_STATE_UNUSED;
             for s in &slots[..prog_stages.len()] {
-                syscall(syscall_abi::KILL, *s);
+                kill_and_reap(*s);
             }
             if !died {
                 print_line("pipe: could not authorize the stream");
@@ -1184,7 +1184,7 @@ fn run_head_pipeline(
             Output::Capture { buf, len, overflowed } => (buf, len, overflowed),
             Output::Console => {
                 for s in &slots[..prog_stages.len()] {
-                    syscall(syscall_abi::KILL, *s);
+                    kill_and_reap(*s);
                 }
                 return;
             }
@@ -1192,7 +1192,7 @@ fn run_head_pipeline(
         if overflowed {
             print_line("pipe: left command's output exceeds the capture buffer - nothing was piped");
             for s in &slots[..prog_stages.len()] {
-                syscall(syscall_abi::KILL, *s);
+                kill_and_reap(*s);
             }
             return;
         }
@@ -1201,7 +1201,7 @@ fn run_head_pipeline(
             let chunk_len = (len - sent).min(syscall_abi::MSG_MAX_LEN as usize);
             if !pipe_send(slots[0], unsafe { buf.as_ptr().add(sent) }, chunk_len as u64) {
                 for s in &slots[..prog_stages.len()] {
-                    syscall(syscall_abi::KILL, *s);
+                    kill_and_reap(*s);
                 }
                 return;
             }
@@ -1242,10 +1242,20 @@ fn run_head_pipeline(
             let mut out = Output::Capture { buf: capture, len: 0, overflowed: false };
             capture_program_output(slots[last], &mut out);
             if matches!(out, Output::Capture { overflowed: true, .. }) {
-                // The capture killed the last stage (but didn't reap it); the
-                // producers are likely blocked feeding the now-dead consumer.
-                // Reap the last stage and kill the producers so nothing hangs.
-                let _ = syscall(syscall_abi::WAIT, slots[last]);
+                // The last stage is already reaped on both routes out of
+                // `capture_program_output` (its abandon path `kill_and_reap`s,
+                // its normal path `WAIT`s), so there is nothing to collect here
+                // - this used to carry an explicit `WAIT` for it, and the
+                // comment saying the capture "didn't reap it" stopped being
+                // true when the abandon path started reaping.
+                //
+                // The producers are likely still blocked feeding a consumer
+                // that is now gone, so kill them. Deliberately a bare `KILL`
+                // and NOT `kill_and_reap`: the `wait_pipe_stage` loop
+                // immediately below reaps each one *and reports how it ended*,
+                // which is the message the user should see. Reaping here first
+                // would leave that loop nothing to collect and turn every
+                // report into "did not exit cleanly".
                 for s in &slots[..last] {
                     syscall(syscall_abi::KILL, *s);
                 }
@@ -1273,13 +1283,44 @@ fn drain_program_output(slot: u64) {
     loop {
         let packed = syscall4(syscall_abi::MSG_RECV, buf.as_mut_ptr() as u64, buf.len() as u64, 0, 0);
         if packed == RECV_INTERRUPTED || packed >= FS_ERR_MIN {
-            syscall(syscall_abi::KILL, slot);
+            kill_and_reap(slot);
             return;
         }
         if (packed & 0xffff_ffff) == 0 {
             break; // end of stream
         }
     }
+    let _ = syscall(syscall_abi::WAIT, slot);
+}
+
+/// Kill a spawned task **and collect its slot** - what every "abandon this
+/// child and give up" path here needs, and what a bare `KILL` does not do.
+///
+/// The gap is exactly one state. `KILL` frees a *live* task's slot outright
+/// (`tasks::kill_task` sets it `Unused`), but a task that already exited on its
+/// own is a **`Zombie`**, and `task_exists` counts only `Runnable`/`Blocked` -
+/// so the kernel refuses the `KILL` with `TASK_ERR_NO_SUCH_TASK`, the result is
+/// discarded, and only `WAIT` ever reaps. Every abandon path below therefore
+/// leaked one of just **five** spawnable slots each time it ran, and the
+/// commonest trigger is completely ordinary: a stage that rejects its own
+/// arguments (`cat f | grep` with no pattern) prints its usage and exits before
+/// the shell has finished wiring the pipeline, so the shell tears the pipeline
+/// down and the already-dead stage is the one it cannot kill.
+///
+/// Measured, not reasoned: five `cat /etc/passwd | grep` (no pattern) leave all
+/// five slots `exited (code 1) - `wait` to collect` in `ps`, after which **the
+/// shell can no longer run any `/bin` program at all** - not just pipelines.
+/// `echo still-alive` answers `echo: no free task slot`, and only `wait <n>`
+/// five times over gets the machine back.
+///
+/// `WAIT` cannot block here: if the `KILL` succeeded the slot is already
+/// `Unused` and `WAIT` returns immediately, and a slot below `FIRST_SPAWNABLE`
+/// (an unfilled `slots[]` entry, which is 0) is refused up front by both calls.
+///
+/// The *completion* paths do not need this - they already `wait_pipe_stage`
+/// every stage, which is why the leak only ever showed on the error paths.
+fn kill_and_reap(slot: u64) {
+    syscall(syscall_abi::KILL, slot);
     let _ = syscall(syscall_abi::WAIT, slot);
 }
 
@@ -1327,7 +1368,7 @@ fn pipe_send(slot: u64, ptr: *const u8, len: u64) -> bool {
             syscall_abi::MSG_ERR_FULL => {
                 if syscall(syscall_abi::GET_TICKS, 0) > deadline {
                     print_line("pipe: program stopped reading its input - killing it");
-                    syscall(syscall_abi::KILL, slot);
+                    kill_and_reap(slot);
                     return false;
                 }
             }
@@ -2373,7 +2414,7 @@ fn capture_program_output(slot: u64, out: &mut Output) {
             } else {
                 "exec: capture failed, nothing written"
             });
-            syscall(syscall_abi::KILL, slot);
+            kill_and_reap(slot);
             if let Output::Capture { overflowed, .. } = out {
                 *overflowed = true;
             }
