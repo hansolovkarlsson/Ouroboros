@@ -355,9 +355,16 @@ the microkernel arc itself still leaves open):
      permanently, and for making every multi-op read a TOCTOU on the path: a
      fid names the *file*, a path names a *name*.
 
-     **Step 4, the session gate, is next** — and nothing is built on it until
-     it passes, the shape that already earned its keep when step 3a's gate
-     failed and saved the arc from being built on an assumption.
+     **Step 4's gate has since RUN, and it failed usefully**: a persistent
+     connection is viable but not unconditionally, because both clients used
+     the export's FIN as the end-of-reply marker — so switching the export
+     would have been a flag day. The prototype was reverted rather than parked
+     behind a flag. **Prerequisite 1 (length-aware clients) is DONE** for the
+     framed path (`#105`); the remaining blocker is prerequisite 2, the wire
+     signal by which a client opts into a session — and it must also answer
+     what happens to `cpu`, whose `NP_RUN` reply carries no length prefix at
+     all, so EOF is genuinely its terminator there. Detail, with the checks
+     and controls, in [`roadmap-fid-verbs.md`](roadmap-fid-verbs.md).
 
    - **Re-confirmed 2026-09-05, and it is the WEDGE-TIMER failure already
      analysed below, not a new one.** `cat /mnt/a/HELLO.TXT | wc` gives

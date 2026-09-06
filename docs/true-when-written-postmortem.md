@@ -356,6 +356,74 @@ too. The nine stale pages are not fixed by it and were not fixed that day — se
 are, because a suite that is permanently red teaches people to ignore it, which
 would end with the detector as stale as the thing it detects.
 
+## The variant that needs no time at all: false on arrival (2026-09-05)
+
+*Added from the fid-verbs arc — seven PRs and three review rounds on one
+twenty-line hunk.*
+
+Everything above is a statement that **was** true and stopped being true. That
+framing has a comfortable implication: the author was right, time did the
+damage, and the remedy is detection. A day of writing claims under review
+produced the harsher variant. **Most of the day's false statements were false
+the moment they were typed**, by the person typing them, about code they had
+just written and were looking at.
+
+Four, all caught by review rather than by any check:
+
+- **A docstring asserting the opposite of the dispatch beneath it.** The host
+  peer's module note was rewritten to say the five fid verbs now answer "no
+  such verb". They answered `FS_ERR_READ_ONLY`, because the refusal above them
+  tested a *range* (`NP_BASE..NP_LIMIT`) that contains them. The file's own
+  text already warned that nothing compared the prose to the chain.
+- **Arithmetic invented to support a story.** A fixture comment asserted
+  `1960 = 4 × 512`, "exactly `MAX_CONNS`". It is 2048, and the read is five
+  round trips, not four. The tidy account built on it — a teardown bug passing
+  because the fixture stopped one chunk short — described a coincidence that
+  does not exist.
+- **A diagnosis contradicting a measurement in the same file.** A new bug
+  record blamed slot exhaustion. Twelve hundred lines further down, the same
+  document already carried a measured table attributing that exact failure to
+  the supervisor's wedge timer, with a round-trip cost and a 7-of-7 failure
+  rate.
+- **"Harmless … unchanged"**, written about a change that moved which party
+  tears a TCP connection down.
+
+**Why this is a different problem from the four above, and why detection does
+not help.** A statement that rots can be caught by comparing it to the thing it
+describes: that is what a blob-hash check, a self-test against a verb table, or
+a duplicate that disagrees will do. A statement that is *born* wrong is
+consistent with nothing, because it was never checked against anything — it was
+written in the same motion as the code, from the same understanding, and it
+inherits that understanding's errors exactly. The author is the worst available
+reviewer of it, and was, four times in one day.
+
+**The progression across three reviews is the finding.** Round one found a real
+defect. Round two found a real defect *and* the invented arithmetic. Round three
+found **no code defects at all** — only claims: a prerequisite marked DONE that
+covered one of two read paths, with the second (`cpu`'s `NP_RUN` stream) unable
+to follow because it carries no length prefix; a comment describing behaviour
+the same pull request had just removed; and an "it is not hypothetical"
+justification for a branch that no rig in the tree can reach.
+
+That ordering is not luck. The code converged because it was executed —
+compiled, booted, byte-compared against a file. The claims did not converge,
+because nothing executes a claim. **By the third round the defects had migrated
+entirely out of the code and into what had been said about it**, and they were
+still arriving at the same rate.
+
+Two things follow, and neither is a detector:
+
+1. **A claim written beside new code has the defect rate of new code, and none
+   of its verification.** It should be reviewed as code, not read as
+   documentation — which is an argument for review specifically, over any
+   check that could have been automated.
+2. **The claims that survive are the ones that name their own limits.** The
+   comments from this day that no review touched are the ones that said what
+   they could *not* do: "this arm is unexercised by any rig in the tree",
+   "verified by construction rather than by test", "the HTTP path cannot be
+   tested because `fetch` hardcodes port 80". A hedge is not weakness in a
+   comment; it is the part that stays true.
+
 ## What actually worked
 
 Three things, none of them "be more careful".
