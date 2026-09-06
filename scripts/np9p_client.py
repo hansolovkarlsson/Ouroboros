@@ -279,15 +279,36 @@ def recv_reply(sock, nonce, peer_key=None):
     # The server frames [u32 len][sig:64][status u64][data] then FINs
     # (reply-auth). Verify the signature against the nonce WE sent before
     # trusting a byte; a failure (tamper, or an unauthorized peer) -> refusal.
-    buf = b""
-    while True:
-        chunk = sock.recv(4096)
-        if not chunk:
-            break
-        buf += chunk
+    # READ EXACTLY WHAT THE FRAME SAYS, rather than to EOF.
+    #
+    # The reply is `[u32 len][sig:64][status u64][data]`, so its length is on
+    # the wire and the server's FIN was never NEEDED to know where it ends -
+    # only convenient. Waiting for one is what makes this client unable to talk
+    # to an export that keeps the connection open between requests, which is
+    # what a fid SESSION is (decision 3, docs/roadmap-fid-verbs.md): it would
+    # block here forever on a reply it had already received in full.
+    #
+    # Landed on its own, and BEFORE any session exists, because it is a no-op
+    # against today's FIN-closing export - the bytes and the parse are
+    # identical, only the stopping condition changes - and it is required under
+    # every option for the wire signal that is still undecided.
+    def read_exactly(n):
+        out = b""
+        while len(out) < n:
+            chunk = sock.recv(n - len(out))
+            if not chunk:
+                break  # EOF - let the caller report a short reply
+            out += chunk
+        return out
+
+    buf = read_exactly(4)
     if len(buf) < 4:
         raise RuntimeError(f"short reply ({len(buf)} bytes)")
     (flen,) = struct.unpack("<I", buf[:4])
+    buf += read_exactly(flen)
+    if len(buf) < 4 + flen:
+        raise RuntimeError(
+            f"truncated reply: header says {flen} bytes, got {len(buf) - 4}")
     body = buf[4:4 + flen]
     # The reply is signed, and it must verify against the key expected for the
     # HOST WE DIALLED, not against any key we happen to authorize. Accepting the

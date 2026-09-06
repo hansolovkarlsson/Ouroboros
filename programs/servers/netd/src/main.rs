@@ -978,7 +978,7 @@ fn handle_fetch(packed_mac: u64, host: &[u8], out: &mut [u8]) -> usize {
     };
 
     let mut resp = [0u8; 2048];
-    let (status, got) = tcp_get(&mac, &dst_mac, &ip, 80, &req[..rlen], &mut resp);
+    let (status, got) = tcp_get(&mac, &dst_mac, &ip, 80, &req[..rlen], &mut resp, false);
     finish(out, status, &resp[..got])
 }
 
@@ -1003,7 +1003,7 @@ fn build_http_get(host: &[u8], out: &mut [u8]) -> Option<usize> {
 /// the response (in-order reassembly), clean FIN teardown. One connection,
 /// bounded by short timeouts (kept under the supervisor wedge threshold).
 /// Returns `(NET_FETCH_* status, bytes copied into resp)`.
-fn tcp_get(mac: &[u8; 6], dst_mac: &[u8; 6], target: &[u8; 4], dst_port: u16, request: &[u8], resp: &mut [u8]) -> (u64, usize) {
+fn tcp_get(mac: &[u8; 6], dst_mac: &[u8; 6], target: &[u8; 4], dst_port: u16, request: &[u8], resp: &mut [u8], framed: bool) -> (u64, usize) {
     let mut frame = [0u8; 1600];
     let mut rx = [0u8; 1600];
     // A fresh source port (and a derived ISN) per connection, so back-to-back
@@ -1065,7 +1065,26 @@ fn tcp_get(mac: &[u8; 6], dst_mac: &[u8; 6], target: &[u8; 4], dst_port: u16, re
         snd_nxt = snd_nxt.wrapping_add(request.len() as u32);
     }
 
-    // Receive the response until the peer's FIN or a deadline (~1s).
+    // Receive the response until it is COMPLETE, then the peer's FIN, then a
+    // deadline (~1s), in that order of preference.
+    //
+    // `framed` says the reply carries its own length (`[u32 len][body]`) - the
+    // 9P export's shape. Then EOF is not needed to know the reply ended, and
+    // waiting for one is merely a habit: this returns as soon as the framed
+    // body is complete.
+    //
+    // NOT unconditional, because the other caller is the HTTP fetch on port 80,
+    // whose response has no length prefix this code parses - `Connection: close`
+    // IS its terminator. Making both length-aware would have ended every fetch
+    // at four bytes of "HTTP".
+    //
+    // Why this matters beyond a small latency win: it is the prerequisite for
+    // the export becoming a SESSION (decision 3, docs/roadmap-fid-verbs.md).
+    // A session never FINs between requests, so a client that waits for one
+    // stalls into the deadline on every single request. Landing it FIRST, and
+    // separately, is deliberate - it is verifiable against today's
+    // FIN-closing export, and it is needed under every option for the wire
+    // signal that is still undecided.
     let mut got = 0usize;
     let mut fin = false;
     let mut deadline = now() + 50;
@@ -1082,6 +1101,13 @@ fn tcp_get(mac: &[u8; 6], dst_mac: &[u8; 6], target: &[u8; 4], dst_port: u16, re
                     rcv_nxt = rcv_nxt.wrapping_add(s.data_len as u32);
                     if let Some(n) = build_tcp(mac, dst_mac, target, src_port, dst_port, snd_nxt, rcv_nxt, TCP_ACK, false, &[], &mut frame) {
                         let _ = send(&frame[..n]);
+                    }
+                    // Complete framed reply in hand? Stop; do not wait for a FIN.
+                    if framed && got >= ninep_abi::NP_NET_LEN_PREFIX {
+                        let flen = u32::from_le_bytes([resp[0], resp[1], resp[2], resp[3]]) as usize;
+                        if got >= ninep_abi::NP_NET_LEN_PREFIX + flen {
+                            break;
+                        }
                     }
                     deadline = now() + 50; // extend while making progress
                 }
@@ -1484,7 +1510,7 @@ fn handle_rmount(packed_mac: u64, buf: &[u8], len: usize, out: &mut [u8], auth: 
     };
 
     let mut resp = [0u8; ninep_abi::NP_NET_LEN_PREFIX + ninep_abi::NP_NET_MAX];
-    let (status, got) = tcp_get(&mac, &dst_mac, &ip, port, &req[..total], &mut resp);
+    let (status, got) = tcp_get(&mac, &dst_mac, &ip, port, &req[..total], &mut resp, true);
     if status != syscall_abi::NET_FETCH_OK || got < ninep_abi::NP_NET_LEN_PREFIX + 8 {
         return fail(out, syscall_abi::NO_FS);
     }
