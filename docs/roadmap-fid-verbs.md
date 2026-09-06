@@ -277,14 +277,75 @@ the C link is precisely where the new ABS64 risk lives. Widened to `build/*.elf`
 (56 → 61). Both controls run: relinking without `--gc-sections` fails at link
 time, and a forged ABS64 in a C binary is caught.
 
-**Step 3b — rewire `file.c` (NEXT).** Decision 1, confirmed first.
-`file.c` resolves the path, then addresses `FSD_TASK` or `NET_TASK` accordingly,
-granting to whichever it addressed. · **Check:** `make run-image-9p-client`, a
-C program `open()`s and reads a file under `/mnt/a` served by the Step-2 server,
-and prints bytes that match. · **Negative controls, two:** the same program on a
-**local** path still works (no regression on tree 0 — the path every existing C
-program takes); and with `/mnt/a` unmounted it fails with a path error rather
-than hanging or reaching `fsd`. · This step closes the reported symptom.
+**Step 3b — rewire `file.c`. ✅ DONE 2026-09-05.** Decision 1, confirmed first.
+`file.c` resolves through `ouro_ns_resolve`, then addresses `FSD_TASK` or
+`NET_TASK`, **granting to whichever it addressed** — granting to `fsd` and
+sending to `netd` hands the wrong task the buffer.
+
+Measured on a booted guest against the Step-2 host peer, 0 fault lines:
+
+```
+$ cremote                                  # before the mount
+/EFI/ORBS/INIT.CFG: fd=3 size=16 first=\EFI\ORBS\SH.BIN
+/mnt/a/HELLO.TXT: open failed: no such file or directory     -> exit 1
+$ mount -r 10.0.2.2:5641 /mnt/a
+$ cremote
+/EFI/ORBS/INIT.CFG: fd=3 size=16 first=\EFI\ORBS\SH.BIN
+/mnt/a/HELLO.TXT: fd=3 size=1960 first=line 000: hello from the host 9P server over TCP
+```
+
+**The reported symptom is closed.** Both negative controls are inside the test
+program rather than beside it: the local path is read **first** (every existing
+C program takes that route, so a change fixing the remote case by breaking the
+local one would otherwise look like a pass), and the unmounted run is the same
+binary failing cleanly. `cfile` — the existing `O_CREAT|O_TRUNC` user — was run
+in the same session and is unaffected.
+
+> **The fd is no longer the fid**, and that identity could not have survived.
+> "A POSIX fd IS a 9P fid" was exact while `fsd` was the only server able to
+> issue one. With two, a remote fid 3 and a local fid 3 are different handles
+> wearing the same number, and both indexed the same `g_files` slot. The fd is
+> now a slot this library chooses, with the server's fid stored beside the
+> target it belongs to — Decision 2's problem arriving from the client side.
+
+> **A real `fsd` bug this step surfaced, and fixed:** `NP_OPEN` never checked
+> that the file exists unless `OPEN_CREATE`/`OPEN_TRUNC` was set. A read-only
+> open of an absent path allocated a fid and returned it, so the caller learned
+> the truth at its first `NP_PREAD`/`NP_FSTAT` — which is how the pre-mount run
+> above first reported *"fstat failed"* for a file that never opened. It broke
+> three things at once: POSIX (`open(O_RDONLY)` on a missing file must fail),
+> `ninep-abi`'s own claim that permission is checked "here, once, per the
+> flags" (untrue of a file that does not exist), and agreement with
+> `np9p_server.py`, which answers `FS_ERR_NOT_FOUND`. **A foreign observer
+> found a server bug by disagreeing with it**, which is the entire argument for
+> building the observer first.
+
+> **Review found a silent zero-byte remote write, and it was the code this step
+> shipped untested.** `write()` on a remote fd granted the buffer to `netd` and
+> sent `NP_PWRITE` with no payload — but **no grant crosses a machine**: the
+> relay forwards the NP message verbatim and never looks at one. The far side
+> would have received a bare 48-byte header while `write()` advanced the offset
+> and returned `count`. The comment claimed `netd` bridged the grant, which
+> confused the *export* side (`fsd_write_at`, inbound, which does bridge) with
+> the outbound relay, which does not — `true-when-written` again, written the
+> same day. Now **refused**: the inline wire shape for `NP_PWRITE` is not
+> defined until step 6, so there is nothing to agree with and nothing to test
+> against, and a refusal is checkable today where a second untested
+> implementation would not be.
+>
+> **The step's other fix was half a fix.** Making `open(O_RDONLY)` fail on a
+> missing file left the sibling branch alone, so `open(O_WRONLY|O_TRUNC)`
+> without `O_CREAT` still *created* the file — the same POSIX violation, one
+> branch over. Both are now asserted by `cremote`, which checks that each
+> refusal actually happens: a fix that makes something fail correctly needs a
+> check that the failure occurs, or it is indistinguishable from the bug still
+> being there.
+
+> **Two costs paid here, stated:** every C program now links the Rust shim, so
+> `--gc-sections` is required for the whole C arc rather than one target; and
+> `open()` still returns `-1` for everything, with `ouro_last_fs_status()`
+> beside it as the way to ask why. That is deliberately not `errno` — one
+> value, no thread story, and no claim to be more.
 
 **Step 4 — the export learns the fid handle verbs.** `NP_OPEN`, `NP_FSTAT`,
 `NP_CLUNK` in `build_9p_reply`, with Decision 2's per-connection table.

@@ -6,52 +6,136 @@
  *
  * Also here: stdout-target routing, so write(1|2) goes to the console or, when
  * the program is a pipe producer, to the consumer - so a C program works in a
- * pipeline. Paths resolve against the shell-delivered cwd; tree 0 (the default
- * disk mount) only, for now. */
+ * pipeline.
+ *
+ * PATHS RESOLVE THROUGH THIS TASK'S NAMESPACE, not just against the cwd. Until
+ * 2026-09-05 every request went to fsd unconditionally, so open("/mnt/a/F")
+ * asked fsd about a path only netd knows - a remote mount is a NAMESPACE
+ * binding, not an fsd mount - and the request never left the machine. That was
+ * the actual cause of "the fid verbs reach no export"; see
+ * docs/roadmap-fid-verbs.md.
+ *
+ * AND THE FD IS NO LONGER THE FID. The old design ("a POSIX fd IS a 9P fid")
+ * was exact while fsd was the only server that could issue one. It cannot
+ * survive a second: a remote fid 3 from the far export and a local fid 3 from
+ * fsd are different handles wearing the same number, and both indexed the same
+ * g_files slot. The fd is now a C-chosen slot and the server's fid is stored
+ * beside the target it belongs to - the same reason netd must own remote fids
+ * rather than pass fsd's through (decision 2 in that document), arriving from
+ * the client side. */
 #include "sys.h"
+#include "nsresolve.h"
 #include <fcntl.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
-#define MAX_FILES 8 /* fsd's fid table size; fds run FID_BASE .. FID_BASE+7 */
+/* How many files this LIBRARY can hold open. No longer tied to fsd's MAX_FIDS:
+ * that number justified the old fd==fid identity, which is retired (see the
+ * header note), and a slot here is consumed by a local OR a remote fid, so the
+ * two counts are about different things. Do not "resync" them. */
+#define MAX_FILES 8
+/* Room for a path AFTER namespace substitution, which can be LONGER than what
+ * the caller passed: a binding replaces its prefix with a target root that may
+ * be longer (`bind /m /very/long/root`). ulib uses 256 (FSP_MAX) for the same
+ * buffer; 96 silently truncated, and a truncated path with O_TRUNC truncates
+ * the WRONG FILE with no error anywhere. */
 #define PATH_MAX_C 96
+#define FSPATH_MAX_C 256
 
-/* Per-open client state: the cursor + flags. Indexed by (fd - FID_BASE); the fd
- * itself is the fsd fid. */
+/* Per-open client state. Indexed by (fd - FID_BASE), a slot THIS library
+ * chooses - see the note above on why the fd is no longer the fid. */
 struct file_state {
     int used;
     long offset;
     int flags;
+    unsigned long fid;      /* the fid the SERVER issued, which may collide
+                             * across servers - hence a separate slot number */
+    unsigned target;        /* NS_TARGET_* of the mount this fid lives on */
+    unsigned char endpoint[NS_ENDPOINT_LEN]; /* NS_TARGET_REMOTE only */
 };
 static struct file_state g_files[MAX_FILES];
 
+/* The status of the last failed request. open()/read()/write() return -1 with
+ * no errno (this libc has none), so without this a C program cannot tell "no
+ * such file" from "that server does not implement this request" - the exact
+ * confusion FS_ERR_NO_SUCH_VERB was reserved to end, stopping one layer short
+ * of C. Not errno: one value, no thread story, no claim to be more.
+ *
+ * CLEARED ON SUCCESS, or a later failure that sets nothing reports whatever the
+ * previous call left behind - a stale answer being worse than none here. */
+static unsigned long g_last_status;
+
+/* A failure that never reached a server: a path too long to resolve, or no free
+ * fd slot. NOT FS_ERR_MIN, which this used and which IS FS_ERR_NO_SUCH_VERB -
+ * they are the same u64::MAX - 39, so a client-side failure reported itself as
+ * "that server does not implement this request", the precise confusion that
+ * code was reserved to end. Distinct, and deliberately not a wire value. */
+#define FS_ERR_CLIENT (~0UL - 1UL - 39UL)
+
+unsigned long ouro_last_fs_status(void) {
+    return g_last_status;
+}
+
 /* ---- fsd request helper -------------------------------------------------- */
 
-/* Send a ninep request to fsd (tree 0) with an optional path payload; copy up
- * to `reply_cap` bytes of the reply DATA (after the 8-byte status) into
- * `reply_data`. Returns fsd's status. */
-static long fsd_request(unsigned long verb, unsigned long p0, unsigned long p1, unsigned long p2,
-                        const char *path, size_t pathlen, unsigned char *reply_data,
-                        size_t reply_cap) {
-    unsigned char req[NP_REQ_PAYLOAD + FS_DATA_MAX];
-    for (unsigned i = 0; i < NP_REQ_PAYLOAD; i++) {
-        req[i] = 0;
-    }
-    __wr_u64(req + 0, verb);
-    __wr_u64(req + 16, p0);
-    __wr_u64(req + 24, p1);
-    __wr_u64(req + 32, p2);
+/* Send a ninep request to the server a resolved path lives on, and copy up to
+ * `reply_cap` bytes of the reply DATA (after the 8-byte status) into
+ * `reply_data`. Returns the server's status.
+ *
+ * `target`/`endpoint` say where: NS_TARGET_FSD goes straight to fsd as before;
+ * NS_TARGET_REMOTE is wrapped in a NETOP_RMOUNT to netd, which carries the NP
+ * message to that endpoint's export over TCP and returns the reply body
+ * verbatim - so netd's relay needs no knowledge of the fid verbs (it is
+ * verb-agnostic; the far side is what must implement them).
+ *
+ * The wrapping is byte-for-byte ulib::np_remote's, because it is the same wire:
+ * two implementations of one frame is exactly the drift check-wire-constants
+ * exists for, and it only pins the constants, not the layout. */
+static long np_request(unsigned target, const unsigned char *endpoint,
+                       unsigned long verb, unsigned long p0, unsigned long p1, unsigned long p2,
+                       const char *path, size_t pathlen, unsigned char *reply_data,
+                       size_t reply_cap) {
+    unsigned char req[MSG_MAX_LEN];
+    unsigned base = 0;
+    long dest = FSD_TASK;
+    memset(req, 0, NETOP_RMOUNT_MSG + NP_REQ_PAYLOAD);
     if (pathlen > FS_DATA_MAX) {
         pathlen = FS_DATA_MAX;
     }
+    /* Only the header needs clearing - the payload region is written by the
+     * memcpy below or not sent at all. Zeroing all 768 bytes per call cost
+     * ~150K pointless byte stores on a 100 KB read (200 chunks x 768). */
+    if ((target & 0xff) == NS_TARGET_REMOTE) {
+        dest = NET_TASK;
+        base = NETOP_RMOUNT_MSG;
+        __wr_u64(req + 0, NETOP_RMOUNT);
+        memcpy(req + NETOP_RMOUNT_ENDPOINT, endpoint, NS_ENDPOINT_LEN);
+    }
+    __wr_u64(req + base + 0, verb);
+    /* The fsd TREE INDEX, from `target`'s high bits - a resolved path may live
+     * on a mounted partition, not just the boot disk, and C could not address
+     * one before.
+     *
+     * ulib::np_remote hardcodes 0 here with a stated reason (a remote export
+     * serves its own boot mount). This agrees with it in practice because
+     * `nsresolve` sets no high bits for NsTarget::Remote, so the remote case
+     * writes 0 either way - but it agrees by derivation rather than by
+     * assertion, which is the safer of the two. */
+    __wr_u64(req + base + 8, (unsigned long)((target >> 8) & 0xff));
+    __wr_u64(req + base + 16, p0);
+    __wr_u64(req + base + 24, p1);
+    __wr_u64(req + base + 32, p2);
     if (pathlen && path) {
-        memcpy(req + NP_REQ_PAYLOAD, path, pathlen);
+        memcpy(req + base + NP_REQ_PAYLOAD, path, pathlen);
     }
     unsigned char reply[MSG_MAX_LEN];
-    long r = __os_syscall4(SYS_MSG_CALL, FSD_TASK, (long)req, (long)(NP_REQ_PAYLOAD + pathlen),
-                           (long)reply);
+    long r = __os_syscall4(SYS_MSG_CALL, dest, (long)req,
+                           (long)(base + NP_REQ_PAYLOAD + pathlen), (long)reply);
     if ((unsigned long)r >= FS_ERR_MIN) {
+        /* A transport failure, not a server answer - MSG_ERR_DENIED is the
+         * likely one (netd's send capability is delegated after spawn). */
+        g_last_status = (unsigned long)r;
         return (long)FS_ERR_MIN;
     }
     unsigned long rlen = (unsigned long)r & 0xffffffffUL;
@@ -62,7 +146,11 @@ static long fsd_request(unsigned long verb, unsigned long p0, unsigned long p1, 
         }
         memcpy(reply_data, reply + 8, d);
     }
-    return (long)__rd_u64(reply);
+    long status = (long)__rd_u64(reply);
+    if ((unsigned long)status >= FS_ERR_MIN) {
+        g_last_status = (unsigned long)status;
+    }
+    return status;
 }
 
 /* ---- path resolution (for open) ------------------------------------------ */
@@ -117,19 +205,55 @@ int open(const char *path, int flags, ...) {
         oflags |= OPEN_TRUNC;
     }
 
-    size_t plen = strlen(abspath);
-    long fid = fsd_request(NP_OPEN, oflags, plen, 0, abspath, plen, 0, 0);
-    if ((unsigned long)fid >= FS_ERR_MIN || fid < FID_BASE) {
+    /* Where does this path live? Until this call existed, the answer was
+     * always "fsd", which is why a remote mount was unreachable from C. */
+    char fspath[FSPATH_MAX_C];
+    unsigned long fslen = 0;
+    unsigned target = 0;
+    unsigned char endpoint[NS_ENDPOINT_LEN];
+    memset(endpoint, 0, sizeof endpoint);
+    if (ouro_ns_resolve(abspath, strlen(abspath), fspath, sizeof fspath, &fslen,
+                        &target, endpoint) != 0) {
+        g_last_status = FS_ERR_CLIENT;
         return -1;
     }
-    int idx = (int)(fid - FID_BASE);
-    if (idx < 0 || idx >= MAX_FILES) {
+    /* The console and /net are not openable files: both are served by other
+     * servers with no fid model at all, and answering "no such file" for them
+     * would be the same lie this arc has been removing. */
+    if ((target & 0xff) == NS_TARGET_CONSOLE || (target & 0xff) == NS_TARGET_NETLOCAL) {
+        g_last_status = FS_ERR_NO_SUCH_VERB;
+        return -1;
+    }
+
+    /* A free slot of OUR choosing - see the header note: the fd cannot be the
+     * fid once two servers can issue them. */
+    int idx = -1;
+    for (int i = 0; i < MAX_FILES; i++) {
+        if (!g_files[i].used) {
+            idx = i;
+            break;
+        }
+    }
+    if (idx < 0) {
+        g_last_status = FS_ERR_CLIENT;
+        return -1;
+    }
+
+    /* NP_OPEN's a0 is the FLAGS and a1 the path length - the reverse of every
+     * other path-carrying verb. Getting this backwards resolves a 1-3 byte path
+     * out of the flag word and lands somewhere plausible instead of failing. */
+    long fid = np_request(target, endpoint, NP_OPEN, oflags, fslen, 0,
+                          fspath, (size_t)fslen, 0, 0);
+    if ((unsigned long)fid >= FS_ERR_MIN || fid < FID_BASE) {
         return -1;
     }
     g_files[idx].used = 1;
     g_files[idx].flags = flags;
     g_files[idx].offset = 0;
-    return (int)fid;
+    g_files[idx].fid = (unsigned long)fid;
+    g_files[idx].target = target;
+    memcpy(g_files[idx].endpoint, endpoint, NS_ENDPOINT_LEN);
+    return FID_BASE + idx;
 }
 
 static struct file_state *file_for(int fd) {
@@ -161,7 +285,7 @@ int close(int fd) {
     if (!f) {
         return -1;
     }
-    fsd_request(NP_CLUNK, (unsigned long)fd, 0, 0, 0, 0, 0, 0);
+    np_request(f->target, f->endpoint, NP_CLUNK, f->fid, 0, 0, 0, 0, 0, 0);
     f->used = 0;
     return 0;
 }
@@ -172,7 +296,7 @@ int fstat(int fd, struct stat *st) {
         return -1;
     }
     unsigned char info[STAT_INFO_LEN];
-    long s = fsd_request(NP_FSTAT, (unsigned long)fd, 0, 0, 0, 0, info, sizeof(info));
+    long s = np_request(f->target, f->endpoint, NP_FSTAT, f->fid, 0, 0, 0, 0, info, sizeof(info));
     if ((unsigned long)s >= FS_ERR_MIN) {
         return -1;
     }
@@ -355,6 +479,27 @@ ssize_t write(int fd, const void *buf, size_t count) {
     if (!f) {
         return -1;
     }
+    /* A REMOTE WRITE IS REFUSED, not attempted.
+     *
+     * The first version of this granted the buffer to netd and sent NP_PWRITE
+     * with no payload - and NO GRANT CROSSES A MACHINE. netd's rmount relay
+     * forwards the NP message verbatim and never looks at a grant, so the far
+     * side would have received a bare 48-byte header, while this function
+     * advanced the offset and returned `count`: a silent zero-byte write
+     * reported as success. (The comment there claimed netd bridged the grant.
+     * It confused the EXPORT side - fsd_write_at, which does bridge, inbound -
+     * with the outbound relay, which does not.)
+     *
+     * The data must ride INLINE in the request, the way ulib::fs_write_at does
+     * it. That wire shape is not defined for NP_PWRITE yet: no export
+     * implements the verb (step 6 of docs/roadmap-fid-verbs.md), so there is
+     * nothing to agree with and nothing to test against. Refusing is the
+     * honest answer until there is - and it is checkable today, which a second
+     * untested implementation would not be. */
+    if ((f->target & 0xff) == NS_TARGET_REMOTE) {
+        g_last_status = FS_ERR_NO_SUCH_VERB;
+        return -1;
+    }
     size_t off = 0;
     while (off < count) {
         size_t chunk = count - off;
@@ -362,7 +507,8 @@ ssize_t write(int fd, const void *buf, size_t count) {
             chunk = FS_DATA_MAX;
         }
         __os_syscall4(SYS_GRANT, FSD_TASK, (long)(p + off), (long)chunk, GRANT_READ);
-        long st = fsd_request(NP_PWRITE, (unsigned long)fd, (unsigned long)f->offset, chunk, 0, 0, 0, 0);
+        long st = np_request(f->target, f->endpoint, NP_PWRITE, f->fid,
+                             (unsigned long)f->offset, chunk, 0, 0, 0, 0);
         if ((unsigned long)st >= FS_ERR_MIN) {
             return (off > 0) ? (ssize_t)off : -1;
         }
@@ -394,8 +540,8 @@ ssize_t read(int fd, void *buf, size_t count) {
         if (want > FS_DATA_MAX) {
             want = FS_DATA_MAX;
         }
-        long n = fsd_request(NP_PREAD, (unsigned long)fd, (unsigned long)f->offset, want, 0, 0, p + got,
-                             want);
+        long n = np_request(f->target, f->endpoint, NP_PREAD, f->fid,
+                            (unsigned long)f->offset, want, 0, 0, p + got, want);
         if ((unsigned long)n >= FS_ERR_MIN) {
             return (got > 0) ? (ssize_t)got : -1;
         }

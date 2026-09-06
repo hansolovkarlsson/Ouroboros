@@ -181,6 +181,7 @@ LIBC_CFLAGS  := $(CFLAGS_OS) -Ilibc/include -fno-builtin
 CDEMO_BIN    := $(BUILD_DIR)/cdemo.bin
 CFILE_BIN    := $(BUILD_DIR)/cfile.bin
 NSDEMO_BIN   := $(BUILD_DIR)/nsdemo.bin
+CREMOTE_BIN  := $(BUILD_DIR)/cremote.bin
 # The Rust namespace-resolution shim a C program links to reach
 # `ninep_abi::resolve_ns` (docs/roadmap-fid-verbs.md step 3). A STATICLIB, since
 # the consumer is a clang+LLD link, not a Rust one.
@@ -194,6 +195,11 @@ NSRESOLVE_A  := target/aarch64-unknown-none/release/libnsresolve.a
 # point stays at 0x0 because the linker script KEEPs .text.start).
 # NOT with LLD's -O2, which reintroduces the failure - do not add it.
 LDFLAGS_RUSTSHIM := $(LDFLAGS_OS) --gc-sections
+# EVERY C program links the shim now, not just the demo: libc/src/file.c
+# resolves each path through the task namespace, so `ouro_ns_resolve` is a hard
+# dependency of open()/read()/write(). That is the cost of the C arc reaching a
+# remote mount at all, and it is paid by all of them - which also means
+# --gc-sections is now required for the whole C arc, not one target.
 # The picolibc port (the real C library): a prebuilt static libc.a + headers
 # under third_party/picolibc-prebuilt (built once from picolibc 1.8.9 by
 # scripts/build-picolibc.sh; committed so `make` needs no meson/ninja). A C
@@ -212,7 +218,7 @@ ifeq ($(PROFILE),release)
 CARGO_FLAGS += --release
 endif
 
-.PHONY: all build check-site shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin accountd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin id-bin passwd-bin useradd-bin groupadd-bin usermod-bin clusterkey-bin chello-bin cdemo-bin cfile-bin nsdemo-bin cpico-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin edtest-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin sort-bin esp run run-virtio-console run-usb-kbd run-usb-multi run-gicv3 image run-image run-image-9p run-image-9p-client run-image-2vm-a run-image-2vm-b run-image-2vm-ext2-a run-image-2vm-ext2-b image-gpt run-image-gpt image-exfat run-image-exfat image-ext2 run-image-ext2 images-2vm images-2vm-ext2 parallels-hdd release test check-relocs test-parallels clean
+.PHONY: all build check-site shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin accountd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin id-bin passwd-bin useradd-bin groupadd-bin usermod-bin clusterkey-bin chello-bin cdemo-bin cfile-bin nsdemo-bin cremote-bin cpico-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin edtest-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin sort-bin esp run run-virtio-console run-usb-kbd run-usb-multi run-gicv3 image run-image run-image-9p run-image-9p-client run-image-2vm-a run-image-2vm-b run-image-2vm-ext2-a run-image-2vm-ext2-b image-gpt run-image-gpt image-exfat run-image-exfat image-ext2 run-image-ext2 images-2vm images-2vm-ext2 parallels-hdd release test check-relocs test-parallels clean
 
 # Overridable by `make test-parallels VM_NAME=... CMDS=... BOOT_WAIT=...`.
 VM_NAME     ?= Ouroboros
@@ -406,15 +412,15 @@ $(BUILD_DIR)/libc/%.o: libc/src/%.c
 # A C program using the minimal libc: compile against the headers, link with the
 # libc objects (crt0 provides _start). The demo may use compiler builtins (a
 # struct copy -> memcpy) since those resolve to the libc's own memcpy.
-cdemo-bin: $(LIBC_OBJS)
+cdemo-bin: $(LIBC_OBJS) $(NSRESOLVE_A)
 	$(CC) $(CFLAGS_OS) -Ilibc/include -c libc/demo.c -o $(BUILD_DIR)/cdemo.o
-	"$(LD_LLD)" $(LDFLAGS_OS) -o $(BUILD_DIR)/cdemo.elf $(BUILD_DIR)/cdemo.o $(LIBC_OBJS)
+	"$(LD_LLD)" $(LDFLAGS_RUSTSHIM) -o $(BUILD_DIR)/cdemo.elf $(BUILD_DIR)/cdemo.o $(LIBC_OBJS) $(NSRESOLVE_A)
 	"$(OBJCOPY)" --strip-all $(BUILD_DIR)/cdemo.elf $(CDEMO_BIN)
 
 # A C program using the libc's file I/O (open/read/write/close/fstat over fsd).
-cfile-bin: $(LIBC_OBJS)
+cfile-bin: $(LIBC_OBJS) $(NSRESOLVE_A)
 	$(CC) $(CFLAGS_OS) -Ilibc/include -c libc/cfile.c -o $(BUILD_DIR)/cfile.o
-	"$(LD_LLD)" $(LDFLAGS_OS) -o $(BUILD_DIR)/cfile.elf $(BUILD_DIR)/cfile.o $(LIBC_OBJS)
+	"$(LD_LLD)" $(LDFLAGS_RUSTSHIM) -o $(BUILD_DIR)/cfile.elf $(BUILD_DIR)/cfile.o $(LIBC_OBJS) $(NSRESOLVE_A)
 	"$(OBJCOPY)" --strip-all $(BUILD_DIR)/cfile.elf $(CFILE_BIN)
 
 $(NSRESOLVE_A): nsresolve/src/lib.rs nsresolve/Cargo.toml ninep-abi/src/lib.rs syscall-abi/src/lib.rs
@@ -427,6 +433,15 @@ nsdemo-bin: $(LIBC_OBJS) $(NSRESOLVE_A)
 	$(CC) $(CFLAGS_OS) -Ilibc/include -c libc/nsdemo.c -o $(BUILD_DIR)/nsdemo.o
 	"$(LD_LLD)" $(LDFLAGS_RUSTSHIM) -o $(BUILD_DIR)/nsdemo.elf $(BUILD_DIR)/nsdemo.o $(LIBC_OBJS) $(NSRESOLVE_A)
 	"$(OBJCOPY)" --strip-all $(BUILD_DIR)/nsdemo.elf $(NSDEMO_BIN)
+
+# A C program that opens and reads a file on a REMOTE mount - the step-3b
+# check. It reads a LOCAL path first, on purpose: every existing C program takes
+# that route, so a change that fixed the remote case by breaking the local one
+# would otherwise look like a pass.
+cremote-bin: $(LIBC_OBJS) $(NSRESOLVE_A)
+	$(CC) $(CFLAGS_OS) -Ilibc/include -c libc/cremote.c -o $(BUILD_DIR)/cremote.o
+	"$(LD_LLD)" $(LDFLAGS_RUSTSHIM) -o $(BUILD_DIR)/cremote.elf $(BUILD_DIR)/cremote.o $(LIBC_OBJS) $(NSRESOLVE_A)
+	"$(OBJCOPY)" --strip-all $(BUILD_DIR)/cremote.elf $(CREMOTE_BIN)
 
 # The porting layer for picolibc: our syscall stubs (crt0/os/file) compiled
 # against picolibc's headers so struct/ABI shapes match, plus the 128-bit-shift
@@ -447,9 +462,9 @@ $(BUILD_DIR)/pico/builtins.o: libc/pico/builtins.c
 
 # A C program linked against the REAL picolibc (float printf, snprintf, qsort,
 # strtol - what the hand-rolled libc couldn't do). Runs as /bin/CPICO.
-cpico-bin: $(PICO_PORT)
+cpico-bin: $(NSRESOLVE_A) $(PICO_PORT)
 	$(CC) $(CFLAGS_OS) $(PICO_INC) -c libc/picodemo.c -o $(BUILD_DIR)/pico/picodemo.o
-	"$(LD_LLD)" $(LDFLAGS_OS) -o $(BUILD_DIR)/cpico.elf $(PICO_PORT) $(BUILD_DIR)/pico/picodemo.o $(PICO_LIBC)
+	"$(LD_LLD)" $(LDFLAGS_RUSTSHIM) -o $(BUILD_DIR)/cpico.elf $(PICO_PORT) $(BUILD_DIR)/pico/picodemo.o $(PICO_LIBC) $(NSRESOLVE_A)
 	"$(OBJCOPY)" --strip-all $(BUILD_DIR)/cpico.elf $(CPICO_BIN)
 
 write-bin:
@@ -579,7 +594,7 @@ serve-bin:
 # below are not, so a BUILD_DIR containing whitespace fails the build noisily
 # (and can leave a stray directory) rather than deleting anything. That is the
 # right trade at 70-odd paths; quoting them all is churn without a hazard.
-esp: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin accountd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin id-bin passwd-bin useradd-bin groupadd-bin usermod-bin clusterkey-bin chello-bin cdemo-bin cfile-bin nsdemo-bin cpico-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin edtest-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin tail-bin nl-bin rev-bin uniq-bin sort-bin
+esp: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin accountd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin id-bin passwd-bin useradd-bin groupadd-bin usermod-bin clusterkey-bin chello-bin cdemo-bin cfile-bin nsdemo-bin cremote-bin cpico-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin edtest-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin tail-bin nl-bin rev-bin uniq-bin sort-bin
 	@test ! -e "$(ESP_DIR)" || test -f "$(ESP_DIR)/EFI/ORBS/INIT.CFG" || { \
 		echo "esp: $(ESP_DIR) is not an Ouroboros ESP tree - refusing to delete it"; \
 		echo "esp: (remove it by hand if that is really where you want the ESP staged)"; \
@@ -631,6 +646,7 @@ esp: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin acco
 	cp $(CDEMO_BIN) $(ESP_DIR)/bin/CDEMO
 	cp $(CFILE_BIN) $(ESP_DIR)/bin/CFILE
 	cp $(NSDEMO_BIN) $(ESP_DIR)/bin/NSDEMO
+	cp $(CREMOTE_BIN) $(ESP_DIR)/bin/CREMOTE
 	cp $(CPICO_BIN) $(ESP_DIR)/bin/CPICO
 	cp $(WRITE_BIN) $(ESP_DIR)/bin/WRITE
 	cp $(READKEY_BIN) $(ESP_DIR)/bin/READKEY
