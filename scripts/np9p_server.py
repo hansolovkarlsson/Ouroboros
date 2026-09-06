@@ -735,8 +735,19 @@ def main():
                 continue
             reply = serve_request(body)
             conn.sendall(reply)
-            # One request/reply per connection, then FIN - the guest client reads
-            # to EOF (Connection: close shape).
+            # One request/reply per connection, then FIN.
+            #
+            # The FIN is TIDY TEARDOWN, NOT A FRAMING SIGNAL - and it stopped
+            # being one on 2026-09-05. This used to say "the guest client reads
+            # to EOF", which was true when written and is now false: the guest
+            # stops at `4 + len` from the frame's own header and closes first.
+            # Left as a warning rather than deleted, because the next reader
+            # would otherwise reasonably conclude that `shutdown(SHUT_WR)` is
+            # load-bearing for correctness here. It is not.
+            #
+            # NP_RUN is the exception, and it is a real one: its reply is a raw
+            # stream with NO length prefix, so for that verb EOF genuinely is
+            # the terminator (see np9p_client.py's run_op).
             try:
                 conn.shutdown(socket.SHUT_WR)
             except OSError:

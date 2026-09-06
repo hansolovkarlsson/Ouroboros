@@ -435,12 +435,30 @@ a fid-eviction rule invented here.
 >
 > 1. **Make every client length-aware** — read exactly `4 + len` and stop.
 >    Verifiable on its own against the current FIN-closing export, so it can
->    land before anything else moves. **✅ DONE 2026-09-05.** Not
->    *"unchanged"*, which is how this was first written and is too strong:
->    the client now closes the connection itself once the framed reply is
->    complete, instead of waiting for the export's FIN. Same bytes, different
->    party tearing down — and getting that wrong strands the exporter's slot
->    for seconds out of a pool of four.
+>    land before anything else moves. **✅ DONE 2026-09-05 for the FRAMED
+>    path** — `np9p_client.py`'s `recv_reply` and `netd`'s `tcp_get`. Not
+>    *"unchanged"*, which is how this was first written and is too strong: the
+>    client now closes the connection itself once the framed reply is complete,
+>    instead of waiting for the export's FIN. Same bytes, different party
+>    tearing down — and getting that wrong strands the exporter's slot for
+>    seconds out of a pool of four.
+>
+>    **"Every client" was an overclaim, and the remainder is a WIRE gap rather
+>    than a missed edit.** Both peers keep a second read path that still ends on
+>    the peer's FIN — `np9p_client.py`'s `run_op` and `netd`'s `tcp_run`, the
+>    remote-execution (`cpu`) stream. Those cannot be made length-aware:
+>    **`NP_RUN`'s reply carries no length prefix at all.** It is a raw output
+>    stream, and EOF is genuinely its terminator.
+>
+>    So a session that stops sending FIN between requests would hang `cpu` —
+>    `run_op` until its 10s socket timeout, `tcp_run` into its own deadline on
+>    every remote run — which is precisely the flag day this prerequisite
+>    exists to avoid, surviving in the one verb nobody looked at.
+>
+>    **Step 2's wire signal must therefore cover the run stream too**, or
+>    `NP_RUN` must be excluded from sessions explicitly. Either is a decision;
+>    the one thing that is not available is assuming prerequisite 1 finished
+>    the job.
 > 2. **Make the session OPT-IN**, so an old client and a new export can
 >    coexist. Without a signal, a length-aware new client and a FIN-waiting old
 >    one cannot both be right about the same server. This needs a wire

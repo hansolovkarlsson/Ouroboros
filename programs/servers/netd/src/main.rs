@@ -1124,12 +1124,23 @@ fn tcp_get(mac: &[u8; 6], dst_mac: &[u8; 6], target: &[u8; 4], dst_port: u16, re
                             // exact failure this early close exists to prevent.
                             //
                             // The in-tree exporter never coalesces (MAX_BURST
-                            // = 1, so its FIN is always its own segment), but a
-                            // host TCP stack routinely does:
-                            // scripts/np9p_server.py does `sendall` then
-                            // `shutdown(SHUT_WR)` with nothing in between. So
-                            // the case is not hypothetical, it is the
-                            // `make run-image-9p-client` path.
+                            // = 1, so its FIN is always its own segment). A host
+                            // TCP stack MAY - np9p_server.py does `sendall` then
+                            // `shutdown(SHUT_WR)` with nothing between - but on
+                            // an idle connection `sendall` hands the data to the
+                            // kernel, which transmits it immediately, so the FIN
+                            // almost always lands in its own segment there too.
+                            //
+                            // SO THIS ARM IS UNEXERCISED BY ANY RIG IN THE TREE,
+                            // and that is stated rather than left for someone to
+                            // discover: if the `+ 1` here were wrong, neither
+                            // `make test` nor `run-image-9p-client` would
+                            // notice. Covering it needs a peer that can be MADE
+                            // to coalesce, which a Python peer cannot do
+                            // reliably (it is the host kernel's choice, not the
+                            // script's). Kept because the cost of being wrong -
+                            // a stranded slot out of a pool of four - is worse
+                            // than the cost of a branch that rarely runs.
                             if s.flags & TCP_FIN != 0 {
                                 rcv_nxt = rcv_nxt.wrapping_add(1);
                             }
