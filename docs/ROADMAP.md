@@ -1253,13 +1253,27 @@ would otherwise silently shrink into looking like nothing was ever found.
   *about* that diff were fixed in it). Each is its own change, deliberately not
   bundled — a repair is a change, and changes have the defect rate of the code
   they fix.
-  - **The shell's pipeline error paths `KILL` without `WAIT`.** `KILL` is
-    refused on a zombie (`task_exists` matches only `Runnable | Blocked`) and
-    only `WAIT` reaps, so a stage that exited on its own — a bad `grep`
-    pattern, an unknown flag — leaks one of just five spawnable slots. Five
-    such pipelines exhaust the pool and every later spawn fails until the user
-    runs `wait <n>` by hand. Six sites, all in `run_head_pipeline` and
-    `drain_program_output`.
+  - ~~**The shell's pipeline error paths `KILL` without `WAIT`.**~~ **Fixed
+    2026-09-06.** `KILL` is refused on a zombie (`task_exists` matches only
+    `Runnable | Blocked`) and only `WAIT` reaps, so a stage that exited on its
+    own — a bad `grep` pattern, an unknown flag — leaked one of just five
+    spawnable slots. **Measured before the fix:** five `cat /etc/passwd | grep`
+    (no pattern) left all five slots held, after which the shell could not run
+    *any* `/bin` program — `echo still-alive` answered `echo: no free task
+    slot` — and only five `wait <n>` calls recovered it. Eight abandon paths
+    now go through one `kill_and_reap`; the *completion* paths never leaked,
+    because they already `wait_pipe_stage` every stage. Seven iterations now
+    leave the pool untouched.
+
+    **One leak of the same shape survives, deliberately: Ctrl+C during a
+    pipeline's wait loop.** `wait_pipe_stage` treats `WAIT_INTERRUPTED` as
+    something to report — *"it may still be running - see ps"* — and moves to
+    the next stage without reaping, so the slots stay held. It is left as-is
+    because the task genuinely may still be running and reaping a live task
+    behind the user's back is worse, and because unlike the fixed bug it
+    announces itself and names the tool that resolves it. Closing it properly
+    means deciding what Ctrl+C should *mean* for a pipeline (detach? kill the
+    whole group?), which is a design question, not a repair.
   - **The "consumer already exited, stay quiet" heuristic inspects the wrong
     slot.** The kernel denies `DELEGATE` on a dead *grantee* before it looks at
     the target, but the shell explains the denial from the *target*'s state —
