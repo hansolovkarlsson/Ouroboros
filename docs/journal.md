@@ -7,6 +7,62 @@ for the forward plan see [`ROADMAP.md`](ROADMAP.md).
 
 ---
 
+## 2026-09-06 (cont.) — a second review, and the reason beside a right decision was wrong
+
+*(The slot-leak fix went through `/code-review high` before merging. It found no
+defect in the code and four in what the code said about itself.)*
+
+The review traced the kernel side independently and confirmed the two claims
+`kill_and_reap` rests on: `KILL` refuses anything not `Runnable`/`Blocked`
+while `kill_task` frees a live slot outright, and `WAIT` never blocks on an
+`Unused`, out-of-range or protected slot. So the helper cannot deadlock at any
+of its eight sites, and the `WAIT` removed from the redirect-overflow block was
+safely covered on both routes out of `capture_program_output`. The fix was
+right. Every finding was about the prose beside it.
+
+**The justification I had written for a deliberate choice was backwards.** The
+redirect-overflow block kills its producers with a bare `KILL` rather than
+`kill_and_reap`, and my comment said this was so the `wait_pipe_stage` loop
+below could report how each ended — that reaping first "would turn every report
+into *did not exit cleanly*". But a *successful* bare `KILL` frees the slot to
+`Unused`, so that loop gets `TASK_ERR_NO_SUCH_TASK` — which sits above
+`FS_ERR_MIN` — and prints *did not exit cleanly* regardless. The bare `KILL` is
+still the right call, for the case I had not named: a producer that already
+exited on its own is a zombie, the kill fails, and the loop's `WAIT` reaps its
+**real** exit code. And that is the common case, because `ulib::pipe_out`
+fast-fails the moment its consumer is gone, so producers here mostly die by
+themselves. Right decision, wrong reason written down — and a wrong reason
+attached to a right decision is worse than no reason, because the next reader
+who checks it finds it false and reasonably concludes the decision is too.
+
+**The claim I had flagged as argued-not-tested was, in fact, too strong.**
+"`WAIT` cannot block here" is unconditional; the two syscalls are separate trips
+through EL0 with the shell preemptible between them, and `netd` spawns its own
+remote-exec child into the lowest free slot — so a `cpu` request arriving in
+that gap takes the slot a successful `KILL` just freed, and the `WAIT` blocks on
+a stranger. Narrow enough to accept, and now written as "does not block on the
+task it was called for", with the window named. The same window was a
+*guaranteed* occurrence on one path, because `pipe_send` killed and reaped
+`slots[0]` and then its caller did it again; `pipe_send` now leaves teardown to
+its one caller.
+
+**And "the completion paths never leaked" holds only absent Ctrl+C.**
+`wait_pipe_stage` treats `WAIT_INTERRUPTED` as something to report — *it may
+still be running, see `ps`* — and moves on without reaping. Left deliberately:
+the task may be alive, and reaping a live task behind the user's back is worse
+than a held slot that names the tool to release it. Recorded on the roadmap's
+ledger as a design question — what should Ctrl+C *mean* for a pipeline — rather
+than as a repair waiting to happen.
+
+Two reviews in one day, then, and the shape of what they found moved the same
+way it did across the three rounds on 09-05: the first found a real security
+regression in my own diff; the second found none in the code and four in the
+claims. Not exercised by either, and said so in the commit: `pipe_send`'s
+timeout branch, which needs a `/bin` program that stays alive and never reads
+its input, and none exists.
+
+---
+
 ## 2026-09-06 — the remote-read bug was never the wedge timer, and the citation was the problem
 
 *(One fix, two files, and a correction to a record that had the wrong cause
