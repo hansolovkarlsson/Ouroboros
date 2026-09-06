@@ -111,7 +111,9 @@ const _: () = assert!(
 ///
 /// **`pub` on purpose, and load-bearing.** Every "is this slot protected?" guard
 /// in `syscall.rs` derives from this constant rather than spelling out a
-/// literal - see the guards in `EXIT`/`KILL`/`WAIT`/`FG`.
+/// literal - see the guards in `EXIT`/`KILL`/`WAIT`/`FG`, and `DELEGATE`'s
+/// refusal of a protected grantee. `spawn` scans from it, which is what makes
+/// it the line below which a slot is never reused by a stranger.
 pub const FIRST_SPAWNABLE: usize = 6;
 
 // Per-slot capabilities (the capability model for who-may-do-what).
@@ -1194,36 +1196,45 @@ pub(crate) fn set_delegate(grantee: usize, target: usize) {
     DELEGATED_SEND[grantee].fetch_or(1 << target, Ordering::Relaxed);
 }
 
-/// Clear every delegation involving `task` - both the one `task` was granted
-/// (delegated-out) and any pointing *at* `task`, so a reused slot can never
-/// inherit a delegation aimed at a now-dead target. Called from every
-/// teardown path alongside [`clear_grant`]/[`reset_stdout_target`].
-/// Drop everything `task` has been *granted*, without touching grants aimed
-/// at it. Called where a slot becomes live ([`spawn`], [`install_task`]) so a
-/// fresh occupant starts with an empty set no matter what the previous one
-/// accumulated.
+/// Drop everything `task` has been *granted*. Called from every teardown
+/// path alongside [`clear_grant`]/[`reset_stdout_target`], and again where a
+/// slot becomes live ([`spawn`], [`install_task`]) so a fresh occupant starts
+/// with an empty set no matter what the previous one accumulated: the belt
+/// that does not depend on a future teardown path remembering. A missed clear
+/// used to leak one capability (the single index); with a set it leaks the
+/// whole accumulated mask. docs/unspellable-postmortem.md: make the wrong
+/// thing unspellable rather than un-grepped.
 ///
-/// Every teardown path already calls [`clear_delegate`], so today this is
-/// belt-and-braces - but it is the belt that does not depend on a future fifth
-/// teardown path remembering. A missed clear used to leak one capability (the
-/// single index); with a set it leaks the whole accumulated mask, so the cost
-/// of the omission went up while the odds of it did not go down.
-/// docs/unspellable-postmortem.md: make the wrong thing unspellable rather
-/// than un-grepped.
+/// Grants *aimed at* `task` are deliberately NOT touched here. Teardown used
+/// to strip them, so a reused slot could not inherit a grant meant for its
+/// previous occupant. That was right for a spawnable slot and wrong for a
+/// protected one: `SPAWN` can never fill a slot below [`FIRST_SPAWNABLE`], and
+/// the only thing that ever comes back there is the same supervised server,
+/// reinstalled by `supervisor::restart`, which is exactly what the grant
+/// named. Stripping made every program alive across a `netd` restart netless
+/// for the rest of its life, because the shell's `TO_NET` grant is made once,
+/// at spawn. So the strip moved to where reuse actually happens:
+/// [`clear_delegations_at`], in [`spawn`]. A grant aimed at a dead slot is
+/// inert in between: `MSG_SEND`/`MSG_CALL` test `task_exists` before
+/// `may_send`, and `DELEGATE` refuses a dead target. Measured 2026-09-06 with
+/// a ping loop across a forced restart: six failures out of six after the
+/// restart line before, the one in-flight failure and replies resuming after.
 fn clear_delegations_of(task: usize) {
     DELEGATED_SEND[task].store(NO_DELEGATION, Ordering::Relaxed);
 }
 
-fn clear_delegate(task: usize) {
-    clear_delegations_of(task);
-    // Clear only THIS task's bit in everyone else's set - not the whole set.
-    // When this was one slot, "the delegation pointing at `task`" and "that
-    // task's only delegation" were the same thing; with a mask they are not,
-    // and storing NO_DELEGATION here would revoke a live sibling grant (a
-    // pipeline's surviving stages losing `TO_NET` the moment any one stage
-    // exits) instead of just the one aimed at the dead slot.
-    for slot in DELEGATED_SEND.iter() {
-        slot.fetch_and(!(1 << task), Ordering::Relaxed);
+/// Strip every grant *aimed at* `slot`. A delegation stops meaning what it
+/// meant when the slot is taken by a stranger, and [`spawn`] is the only path
+/// that does that; [`install_task`] does not call this on purpose, since its
+/// callers (the boot loader, `supervisor::restart`) put back the occupant the
+/// grant was made for. Only this bit is cleared, not the whole set: when this
+/// was one slot, "the delegation pointing at `slot`" and "that task's only
+/// delegation" were the same thing, and with a mask storing `NO_DELEGATION`
+/// here would revoke a live sibling grant (a pipeline's surviving stages
+/// losing `TO_NET` the moment any one stage exits).
+fn clear_delegations_at(slot: usize) {
+    for set in DELEGATED_SEND.iter() {
+        set.fetch_and(!(1 << slot), Ordering::Relaxed);
     }
 }
 
@@ -1670,7 +1681,7 @@ pub(crate) unsafe fn exit_current_and_switch(frame: *mut Context, status: u64) -
     clear_mailbox(current);
     clear_sender_cred(current);
     clear_grant(current);
-    clear_delegate(current);
+    clear_delegations_of(current);
     clear_argv(current);
     clear_cwd(current);
     clear_env(current);
@@ -1700,7 +1711,7 @@ pub(crate) fn kill_task(i: usize) {
     clear_mailbox(i);
     clear_sender_cred(i);
     clear_grant(i);
-    clear_delegate(i);
+    clear_delegations_of(i);
     clear_argv(i);
     clear_cwd(i);
     clear_env(i);
@@ -1732,7 +1743,7 @@ pub(crate) unsafe fn kill_current_and_switch(frame: *mut Context) {
     clear_mailbox(current);
     clear_sender_cred(current);
     clear_grant(current);
-    clear_delegate(current);
+    clear_delegations_of(current);
     clear_argv(current);
     clear_cwd(current);
     clear_env(current);
@@ -1825,6 +1836,7 @@ pub(crate) fn spawn(context: Context, region: (u64, u64)) -> Result<usize, Spawn
             unsafe { *TASKS[i].0.get() = context };
             unsafe { *REGIONS[i].0.get() = region };
             clear_delegations_of(i);
+            clear_delegations_at(i);
             unsafe { *STATES[i].0.get() = TaskState::Runnable };
             // Freshly-written code needs the same clean/invalidate
             // sequence `init` gives the boot-loaded programs - a
