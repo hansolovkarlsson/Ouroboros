@@ -7,6 +7,88 @@ for the forward plan see [`ROADMAP.md`](ROADMAP.md).
 
 ---
 
+## 2026-09-05 (cont.) — the fid verbs, two gates, and three reviews of twenty lines
+
+*(Seven PRs after the site work. The frontier item's reported symptom is
+closed, and the two most valuable hours were spent on things that did not get
+built.)*
+
+**The item named the wrong subsystem, and the scoping is what found it.** "The
+fid verbs reach no export" says the export. But `libc/src/file.c` sent every
+request to `FSD_TASK` and resolved no namespace at all, so a C
+`open("/mnt/a/F")` asked `fsd` about a path only `netd` knows and never left
+the machine. Teaching the export those five verbs is real work — it is now
+steps 5–7 — and it would not have moved the reported symptom by one byte. The
+plan was written first, with a check and a negative control per step, and that
+alone paid for itself before any code.
+
+**Step 1 was making the failure legible**, and it went first because every
+later step is debugged through that message. Both peers answered an
+unimplemented verb with the generic `FS_ERROR`, which clients render as "no
+such file or directory" — a message about a path for a request whose path was
+fine. Reserving `FS_ERR_NO_SUCH_VERB` turned out to move `FS_ERR_MIN`, because
+the error band was **full** from `MAX-1` to `MAX-38`; `libc/include/sys.h`
+hand-mirrors that floor, and a C program compiled against a stale one reads new
+error codes as *successful returns*.
+
+**Step 2 built the foreign observer before the client it measures**, and it
+earned that ordering twice over. Writing the fid arms into
+`scripts/np9p_server.py` exposed that **`NP_OPEN` does not use the parameter
+layout every other path verb uses** — its `a0` is the flags and `a1` the path
+length, the reverse of all its siblings — and it exposed it in the least
+deniable way: the first self-test sent a generic frame, so a ten-character path
+arrived as flags `OPEN_WRITE|OPEN_TRUNC`. The harness written to check the trap
+reproduced it. Later the same observer found an `fsd` bug **by disagreeing with
+it**: `NP_OPEN` never checked the file existed unless the caller was creating
+it, so a read-only open of an absent path handed back a valid fid and the truth
+arrived at the first read.
+
+**Two gates ran, and both failed. That is the day's real result.** Step 3a
+asked whether a Rust `staticlib` can link into these C programs at all. The
+trivial version — `x + 1` — linked and proved nothing; the *representative*
+version, calling the real resolver, failed outright on `R_AARCH64_ABS64` out of
+prebuilt `core`. `--gc-sections` fixed it properly (the offending `.rodata` is
+unreferenced, so collecting it removes the relocation rather than hiding it).
+Step 4 asked whether the export connection can be held open for a fid's
+lifetime. It built cleanly, and then the blocking fact turned up on the *client*
+side: **both clients use the server's FIN as the end-of-reply marker**, so an
+export that stops sending one hangs the Python peer and stalls every
+guest-to-guest request into a timeout. That prototype was reverted rather than
+parked behind a flag, because known-breaking code waiting to be switched on is
+how a flag day happens by accident.
+
+**The cheapest option was recommended first, and it was wrong.** For remote file
+handles, translating fid ops to the path verbs the export already serves needs
+no server state and would have closed remote write nearly for free. It was
+rejected once the question was asked properly — stable, safe, room to grow —
+because path-translation *structurally cannot* express a handle that survives
+`unlink`, file locking, `O_APPEND` atomicity or directory streams, and because
+a path re-resolved per operation is a TOCTOU: between a read at offset 0 and one
+at 512 the far side can replace that path and the client splices two files
+together with no error anywhere. A fid names the file; a path names a name.
+
+**Then three reviews of the same twenty lines, and the progression is the
+lesson.** Round one found a real bug: the early break left the export's FIN in
+flight, stranding a slot out of a pool of four. Round two found a second real
+bug — the break skipped a *coalesced* FIN — and, worse, arithmetic invented out
+of nothing: a comment asserting `1960 = 4 × 512` (it is not) supporting a story
+about a fixture stopping one chunk short (it does not). Round three found no
+code defects at all, only claims: "make **every** client length-aware" marked
+DONE when only the framed path had changed, with `cpu`'s `NP_RUN` stream
+carrying no length prefix at all and therefore genuinely unable to follow.
+
+Two things are worth carrying out of that. The first is that **rounds two and
+three found things the day's own testing had passed** — including a "verified
+both directions" run that proved less than it looked, because the host fixture
+sat *exactly* on the threshold that decides the outcome. The second is sharper:
+by round three the defects were no longer in the code, they were in what had
+been *said about* the code. The reviews stopped finding bugs and kept finding
+claims. A day's honest output includes a correction to a bug record that
+contradicted a measured analysis already sitting in the same file, twelve
+hundred lines further down.
+
+---
+
 ## 2026-09-05 — clearing the site by deleting four of it
 
 *(Documentation and one Makefile line. The check built yesterday went green,
