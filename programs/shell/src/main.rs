@@ -1120,6 +1120,15 @@ fn run_head_pipeline(
     for i in (0..prog_stages.len()).rev() {
         match spawn_stage(prog_stages[i], cwd, *cwd_len, env, next_target) {
             Ok(slot) => {
+                // Same grant every non-pipeline spawn gets (`run_found_command`).
+                // Its ABSENCE here is what made a piped read of a remote mount
+                // impossible: `cat /mnt/a/F | wc` left `cat` without `TO_NET`,
+                // so its `netd` call was denied and it printed "cat: failed"
+                // having sent no packets at all. This coexists with the
+                // producer->consumer delegation below only because
+                // `tasks.rs::DELEGATED_SEND` is a SET - as one slot, whichever
+                // grant landed second silently revoked the first.
+                delegate_net(slot);
                 slots[i] = slot;
                 next_target = slot;
             }
@@ -1880,7 +1889,11 @@ fn cmd_exec(line: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize, env: &Env, out: &m
         // Plain `exec prog [args]`: fire-and-forget, output straight to the
         // console.
         match spawn_path(path, argv, cwd, cwd_len, env, syscall_abi::CON_TASK) {
-            Ok(_slot) => {}
+            // Fire-and-forget, but still delegate `TO_NET` - `exec` runs the
+            // same /bin programs `run_found_command` does, and without this an
+            // `exec`ed one could not reach `netd` (so a remote-mount read
+            // failed with "failed" and no packets, the pipeline bug's sibling).
+            Ok(slot) => delegate_net(slot),
             Err(0) => print_line("exec: path too long"),
             Err(NO_FS) => print_no_fs(),
             Err(code) => print_fs_error("exec", code),
@@ -1891,7 +1904,10 @@ fn cmd_exec(line: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize, env: &Env, out: &m
     // and capture it into the redirect sink, then wait for the program - the
     // caller (`run_line`) writes the capture to the file (`finish_redirect`).
     match spawn_path(path, argv, cwd, cwd_len, env, self_task()) {
-        Ok(slot) => capture_program_output(slot, out),
+        Ok(slot) => {
+            delegate_net(slot);
+            capture_program_output(slot, out);
+        }
         Err(0) => print_line("exec: path too long"),
         Err(NO_FS) => print_no_fs(),
         Err(code) => print_fs_error("exec", code),

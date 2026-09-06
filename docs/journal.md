@@ -7,6 +7,87 @@ for the forward plan see [`ROADMAP.md`](ROADMAP.md).
 
 ---
 
+## 2026-09-06 — the remote-read bug was never the wedge timer, and the citation was the problem
+
+*(One fix, two files, and a correction to a record that had the wrong cause
+written down with a measured table beside it.)*
+
+The day's task was "the `WEDGE_TICKS` remote-read bug": remote `cat` of
+anything over ~2 KB was recorded as broken because `netd` stays continuously
+`Runnable` across a multi-chunk read, and any read past 2.56 s gets the server
+restarted mid-transfer. The record was confident and it was wrong.
+
+**The first run disproved it.** Reproducing it against the host peer showed
+`cat: failed` exactly as documented — and **no `server slot 4 wedged` line
+anywhere in the boot**, which is the signature that failure announces itself
+with. Zero aborts in QEMU's own trace. The 09-03 heartbeat fix was doing its
+job; nothing had been restarted.
+
+**Then the discriminator turned out to be the pipe, not the size.** With the
+host peer instrumented to log every accept and every request:
+
+| command | round trips | before | after |
+| --- | --- | --- | --- |
+| `cat /mnt/a/BIG.TXT` (13,600 B) | 28, ~17 s | **works** | works |
+| `cat /mnt/a/HELLO.TXT \| wc` (1,960 B) | 5, ~3 s | `cat: failed` | `40 400 1960` |
+| `ping 10.0.2.2` | — | works | works |
+| `ping 10.0.2.2 \| wc` | — | `ping: request failed` | `1 3 21` |
+
+A 17-second read succeeding while a 3-second piped one fails is not something
+a threshold can produce. And the host logged **not one request** on a failing
+run — the request never left the guest.
+
+**The cause, and why it needed a kernel change to fix.** The shell delegates
+`TO_NET` to a spawned command in `run_found_command`; `run_head_pipeline` never
+did, and neither did `cmd_exec`. So `cat` in a pipeline was denied by the
+capability check, `MSG_ERR_DENIED` surfaced through the generic arm as
+`FS_ERROR`, and `cat` printed "cat: failed". That is the *same* chain
+`ulib::net_msg_call` was built to absorb in September — but its retry is for a
+denial that is transient by construction, and here the grant simply never came.
+**Every network-using program was broken inside a pipeline**, not just remote
+mounts.
+
+It could not be fixed in the shell alone. `tasks.rs`'s `DELEGATED_SEND` held
+**one** delegated target per task, so a pipeline stage could hold the pipe
+delegation *or* `TO_NET` and the second grant silently revoked the first. It is
+a bitmask now, in the same `1 << slot` shape `caps_for_slot` already uses.
+Nothing is widened: every bit still needs a delegator that statically holds it.
+What is gone is the accidental revocation — and `clear_delegate` now clears one
+bit rather than a whole set, or a stage exiting would strip its siblings' grant.
+
+### What this was really about
+
+Every hard part of the day was in the record, not the code. The fix is thirty
+lines and the diagnosis took four runs.
+
+**Matching a symptom to a stored cause is a guess wearing a citation.** The
+09-05 entry did what this project recommends — checked a "new" bug against a
+documented, measured analysis rather than guessing fresh, and explicitly noted
+that it had nearly overwritten the analysis with a guess. It still landed on
+the wrong cause, because it matched on the *symptom* (a remote read fails) and
+never re-checked the analysis's **signature**. `WEDGE_TICKS` prints
+`server slot 4 wedged`; that line was absent from every failing run, and
+nobody looked. A stored analysis is evidence for the run it was measured on,
+and a hypothesis for every run after.
+
+**The counter-example was in hand and read as confirmation.** The 09-05 entry
+records `cat /mnt/a/BIG.TXT` — the *unpiped* form — as failing. It does not,
+and did not. The one observation that would have collapsed the timing theory
+in a minute was written down as supporting it.
+
+**A fixture chosen to be far past a threshold is only a better probe if the
+threshold is the cause.** `BIG.TXT` was added on 09-05 specifically because
+`HELLO.TXT` sat right *on* the 2.56 s line — sound reasoning that made the
+fixture strictly worse here, since the bigger file exercises the working path
+harder while the smaller piped one was the actual bug.
+
+**And one gap the fix did not have to find: testing one spawn path is not
+testing the others.** The delegation race fixed on 09-03 was proved with a
+forced-race scaffold and a three-row table — all of it running unpiped
+commands, on the one spawn path that had the grant.
+
+---
+
 ## 2026-09-05 (cont.) — the fid verbs, two gates, and three reviews of twenty lines
 
 *(Seven PRs after the site work. The frontier item's reported symptom is

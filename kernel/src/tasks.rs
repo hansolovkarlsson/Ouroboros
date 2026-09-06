@@ -217,7 +217,7 @@ pub(crate) fn may_send(src: usize, dest: usize) -> bool {
     // A runtime-delegated send capability (the `DELEGATE` syscall) - `src`
     // was handed the right to reach `dest` at runtime by a task that
     // statically held it. See [`DELEGATED_SEND`].
-    dest < NUM_TASKS && DELEGATED_SEND[src].load(Ordering::Relaxed) == dest as u64
+    dest < NUM_TASKS && DELEGATED_SEND[src].load(Ordering::Relaxed) & (1 << dest) != 0
 }
 
 /// 2MB - matches `loader.rs`'s own `SLOT_ALIGN` (a plain numeric
@@ -1130,15 +1130,32 @@ fn reset_id(task: usize) {
 /// to stream directly to its consumer (relay-free `programA | programB`),
 /// taking the shell out of the byte hot path.
 ///
-/// One delegated send-target per task (a slot index, or `NO_DELEGATION`),
-/// matching the single-slot `GRANTS`/`STDOUT_TARGET` precedent: a task
-/// orchestrates one delegated stream at a time, so one slot suffices
-/// (`a | b | c`, whose middle stage would both send and receive, stays out
-/// of scope). No transitive re-delegation - [`may_delegate`] consults only
-/// the *static* mask, so a delegated capability can never be laundered
-/// onward, which is also why only the shell (the one slot holding
-/// `TO_SPAWN_*`) can ever authorize producer->consumer streaming.
-const NO_DELEGATION: u64 = NUM_TASKS as u64;
+/// A **set** of delegated send-targets per task, as a bitmask over slot
+/// indices in exactly the shape [`caps_for_slot`] already uses (`1 << slot`),
+/// so [`may_send`]'s static and delegated arms test the same way. Empty
+/// ([`NO_DELEGATION`]) = nothing delegated. No transitive re-delegation -
+/// [`may_delegate`] consults only the *static* mask, so a delegated capability
+/// can never be laundered onward, which is also why only the shell (the one
+/// slot holding `TO_SPAWN_*`) can ever authorize producer->consumer streaming.
+///
+/// **This was ONE slot until 2026-09-06, and that was a bug with a
+/// user-visible symptom**, not just a scope cut. It matched the single-slot
+/// `GRANTS`/`STDOUT_TARGET` precedent on the reasoning that a task
+/// "orchestrates one delegated stream at a time" - true of the pipe alone, and
+/// false as soon as a pipeline stage needed a *second, unrelated* capability.
+/// A remote mount is exactly that case: `cat /mnt/a/F | wc` needs `cat` to hold
+/// both the pipe delegation (to `wc`) and `TO_NET` (to reach `netd`, which no
+/// spawnable slot holds statically). With one slot the shell could grant only
+/// one of them, so a piped read of a remote file could not be made to work at
+/// all from the shell's side - `netd` was never reached, and `cat` printed
+/// "cat: failed" having sent zero packets. Traced 2026-09-06; see
+/// docs/ROADMAP.md frontier item 3.
+///
+/// A mask is not a widening of the model: every bit still has to be granted by
+/// a delegator that *statically* holds that same capability, one `DELEGATE`
+/// call at a time. What it removes is the accidental rule that a second grant
+/// silently *revoked* the first.
+const NO_DELEGATION: u64 = 0;
 static DELEGATED_SEND: [AtomicU64; NUM_TASKS] =
     [const { AtomicU64::new(NO_DELEGATION) }; NUM_TASKS];
 
@@ -1154,8 +1171,12 @@ pub(crate) fn may_delegate(delegator: usize, target: usize) -> bool {
 /// `DELEGATE`'s core: grant `grantee` the runtime capability to send to
 /// `target`. The syscall arm has already checked [`may_delegate`] and that
 /// `grantee`/`target` are valid live slots - this only records it.
+///
+/// ADDS to the set rather than replacing it, which is the whole point of
+/// [`DELEGATED_SEND`] being a mask: a pipeline stage is granted its downstream
+/// consumer *and* `TO_NET`, and neither grant may quietly undo the other.
 pub(crate) fn set_delegate(grantee: usize, target: usize) {
-    DELEGATED_SEND[grantee].store(target as u64, Ordering::Relaxed);
+    DELEGATED_SEND[grantee].fetch_or(1 << target, Ordering::Relaxed);
 }
 
 /// Clear every delegation involving `task` - both the one `task` was granted
@@ -1164,10 +1185,14 @@ pub(crate) fn set_delegate(grantee: usize, target: usize) {
 /// teardown path alongside [`clear_grant`]/[`reset_stdout_target`].
 fn clear_delegate(task: usize) {
     DELEGATED_SEND[task].store(NO_DELEGATION, Ordering::Relaxed);
+    // Clear only THIS task's bit in everyone else's set - not the whole set.
+    // When this was one slot, "the delegation pointing at `task`" and "that
+    // task's only delegation" were the same thing; with a mask they are not,
+    // and storing NO_DELEGATION here would revoke a live sibling grant (a
+    // pipeline's surviving stages losing `TO_NET` the moment any one stage
+    // exits) instead of just the one aimed at the dead slot.
     for slot in DELEGATED_SEND.iter() {
-        if slot.load(Ordering::Relaxed) == task as u64 {
-            slot.store(NO_DELEGATION, Ordering::Relaxed);
-        }
+        slot.fetch_and(!(1 << task), Ordering::Relaxed);
     }
 }
 

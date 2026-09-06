@@ -366,24 +366,53 @@ the microkernel arc itself still leaves open):
      all, so EOF is genuinely its terminator there. Detail, with the checks
      and controls, in [`roadmap-fid-verbs.md`](roadmap-fid-verbs.md).
 
-   - **Re-confirmed 2026-09-05, and it is the WEDGE-TIMER failure already
-     analysed below, not a new one.** `cat /mnt/a/HELLO.TXT | wc` gives
-     `0 0 0` and `cat /mnt/a/BIG.TXT` (13,600 B, a new larger fixture) reports
-     `cat: failed` — both identical on `main`, so neither belongs to the fid
-     arc. The instinct was to blame `MAX_CONNS = 4`; **that was wrong**, and
-     the measured table further down this file already had the answer: `netd`
-     is continuously `Runnable` for a whole multi-chunk remote read, and any
-     read taking longer than `WEDGE_TICKS` (2.56 s) gets `netd` restarted
-     mid-transfer. `HELLO.TXT` is 5 round trips ≈ 3.0 s (over), and `BIG.TXT`
-     is ~28 round trips ≈ 17 s (far over). The pipe variant fails for the same
-     reason — a pipeline adds time, it does not add a new fault.
+   - ~~**Re-confirmed 2026-09-05, and it is the WEDGE-TIMER failure already
+     analysed below, not a new one.**~~ — **THAT ATTRIBUTION WAS WRONG, and
+     the real bug is FOUND AND FIXED 2026-09-06.** It was never the wedge
+     timer. The 09-03 heartbeat fix works exactly as documented: a remote
+     `cat` of `BIG.TXT` is **28 round trips over ~17 s** — nearly seven times
+     `WEDGE_TICKS` — and it now completes with **zero** `slot 4 wedged`
+     messages and zero faults. Timing was never the discriminator.
 
-     Two things worth keeping from re-finding it: the peer's fixture was
-     sitting right **on** the threshold, so it failed for a reason any change
-     in signing speed could move either side of — `BIG.TXT` is far past it and
-     stays there. And a documented, measured analysis was nearly overwritten
-     with a fresh guess, which is what a "new" bug record should always be
-     checked against first.
+     **The discriminator was the PIPE.** Measured on `main`, same boot, same
+     peer:
+
+     | command | before | after |
+     | --- | --- | --- |
+     | `cat /mnt/a/BIG.TXT` (28 RTs, ~17 s) | **works** | works |
+     | `cat /mnt/a/HELLO.TXT \| wc` (5 RTs, ~3 s) | `cat: failed` | `40 400 1960` |
+     | `cat /mnt/a/BIG.TXT \| wc` | `cat: failed` | `200 2600 13600` |
+     | `ping 10.0.2.2` | works | works |
+     | `ping 10.0.2.2 \| wc` | `ping: request failed` | `1 3 21` |
+
+     The longer read succeeded and the shorter piped one failed, which no
+     threshold can explain. **The host peer logged not one request** for a
+     failing run — the same "zero packets left the guest" signature as cause B
+     below, and the same symptom text, because it is the same denial: the
+     shell's `run_head_pipeline` never delegated `TO_NET` to a pipeline stage
+     (only `run_found_command` did), so *every network-using program was
+     broken inside a pipeline* — not just remote mounts. `cmd_exec` had the
+     identical gap.
+
+     **And it could not be fixed in the shell alone**, which is why it lasted:
+     `tasks.rs::DELEGATED_SEND` held **one** delegated target per task, so a
+     stage could hold the pipe delegation *or* `TO_NET`, and the second grant
+     silently revoked the first. It is now a **set** (a bitmask in the same
+     `1 << slot` shape `caps_for_slot` already uses). Not a widening — every
+     bit still needs a delegator that statically holds it; what is gone is the
+     accidental revocation.
+
+     **The lesson, and it is about the record rather than the code.** The
+     09-05 entry did the thing this file elsewhere recommends — it checked a
+     "new" bug against a documented, measured analysis instead of guessing —
+     and it landed on the wrong cause anyway, because it matched on the
+     *symptom* (a remote read fails) and never re-checked the old analysis's
+     **signature**: `WEDGE_TICKS` announces itself with `server slot 4 wedged`
+     on the console, and that line was absent from every failing run. Reusing
+     a measured analysis is only safe if its signature is re-observed; matching
+     a symptom to a stored cause is a guess wearing a citation. The 09-05 entry
+     even recorded `cat /mnt/a/BIG.TXT` as failing, when the unpiped form
+     works — the counter-example was in hand and read as confirmation.
 
    The docs needed no correction: `CLAUDE.md` and
    [`testing-qemu.md`](testing-qemu.md) both show `ls /mnt/a` in that recipe,
@@ -427,6 +456,17 @@ the microkernel arc itself still leaves open):
    Zero requests reaching a peer that was verified alive is the same signature
    as the original failing capture, which is what ties the forced case to the
    real one.
+
+   **Cause B had a THIRD sibling, found 2026-09-06 — see the corrected
+   09-06 bullet above.** The retry `net_msg_call` added absorbs a denial that
+   is *transient by construction*, and its doc says so. It cannot help where
+   the grant never arrives at all, and there the very same `MSG_ERR_DENIED` →
+   `FS_ERROR` → "cat: failed" chain plays out permanently: the shell delegated
+   `TO_NET` on its non-pipeline spawn path only. Every measurement in the
+   table above ran an unpiped command, so the surviving half of the bug was
+   invisible to the check that proved the fix. A denial-absorbing retry is not
+   the same thing as a grant, and testing one spawn path does not test the
+   others.
 
    The original entry, and the trace that split the two faults, follow.
 
