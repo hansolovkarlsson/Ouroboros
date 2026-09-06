@@ -627,6 +627,16 @@ fn cpu_child_msg(c: &mut TcpConn, child: u8, data: &[u8]) {
 /// passes `None`, and the main serve loop passes `Some`.
 #[allow(clippy::too_many_arguments)]
 fn handle_client(packed_mac: u64, sender: u64, buf: &[u8], len: usize, conns: &mut [Option<TcpConn>; MAX_CONNS], dials: &mut [Option<DialConn>; MAX_DIAL], auth: &Auth, pending: Option<&mut PendingRun>) {
+    // Too short to carry an op: `buf` is never cleared between messages, so
+    // decoding a short one would dispatch the PREVIOUS request's bytes as this
+    // sender's. Reachable since 2026-09-06: a remote-exec child orphaned by a
+    // netd restart keeps its send right (grants aimed at a supervised slot
+    // survive its restart), so its zero-length end-of-stream marker lands here
+    // with no `cpu_child` record to route it. Dropped, no reply; the supervisor
+    // ping is eight bytes and unaffected.
+    if len < 8 {
+        return;
+    }
     match read_u64(buf, 0) {
         syscall_abi::NETOP_PING => {
             let status = handle_ping(packed_mac, read_u64(buf, 8));

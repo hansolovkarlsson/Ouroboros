@@ -7,20 +7,21 @@ for the forward plan see [`ROADMAP.md`](ROADMAP.md).
 
 ---
 
-## 2026-09-06 (cont. 3) — a grant that was only ever made once
+## 2026-09-06 (cont. 3): a grant that was only ever made once
 
 *(The second ledger finding: nothing re-grants `TO_NET` after a supervised
 `netd` restart.)*
 
 **The shape, before touching anything.** A spawned program holds no static
-right to reach `netd`; the shell delegates it once, in `spawn_path`, and that
-is the only `DELEGATE` aimed at `netd` in the tree. When `netd` faults or
+right to reach `netd`; the shell delegates it once, in `spawn_path`. (One
+other grant is aimed at `netd`: its own, to the remote-exec child it spawns,
+and that one turned out to matter, below.) When `netd` faults or
 wedges, the teardown calls `clear_delegate` on its slot, which strips that bit
-from every live task's set — the right thing for a spawnable slot, whose next
+from every live task's set, the right thing for a spawnable slot, whose next
 occupant may be anything, and then the supervisor reinstalls `netd` into the
 same slot. So every program alive across the restart is netless for life, and
 its next request fails the way #107's missing grant did: a 150-tick spin, then
-`request failed`. Three fixes were on offer — re-grant from the supervisor
+`request failed`. Three fixes were on offer: re-grant from the supervisor
 (the kernel would have to know the shell's policy), re-grant from the shell
 (which cannot learn a restart happened), or stop stripping grants aimed at a
 protected slot, since `SPAWN` can never fill one and the only thing that ever
@@ -32,13 +33,34 @@ spin, so the passive heartbeat restarts it about 2.6 s later; and `ping` makes
 eight requests 1.5 s apart instead of one, so it is alive across the restart.
 `exec` the ping, trigger the wedge on its first reply. Against the unmodified
 kernel: *"server slot 4 restarted"*, then six failures out of six. That is
-the check that can fail. The fix is four lines — `clear_delegate` returns
-before the strip loop when the dead slot is below `FIRST_SPAWNABLE` — and the
-same run then shows one in-flight failure and replies resuming. Mutations
+the check that can fail. The fix was four lines, a range test in the teardown
+helper, and the same run then showed one in-flight failure and replies
+resuming. Mutations
 reverted, the network controls (`ping`, `ping | wc`, a now-harmless `resolve
 wedgeme`) unchanged, suite green. The recipe, mutations included, is in
 `testing-qemu.md`, since a future reader of the ledger line "measured" should
 be able to measure it again.
+
+**The `medium` review moved the fix again, and named the grant I had not.**
+Two things. The range test was the wrong altitude: "may a stranger reuse this
+slot" is already structural, since `spawn` is the only path that installs a
+stranger and `install_task` the only path for a protected slot, so the strip
+now lives in `spawn` beside the belt the other direction already had, and the
+teardown helper does one thing. A grant aimed at a dead slot lingers until the
+slot is reused, and is inert meanwhile, because every send tests liveness
+before the capability. And "the only `DELEGATE` aimed at `netd` in the tree",
+which I had written in this entry and in the kernel's doc comment, was false:
+`netd` delegates to its own remote-exec child. That grant now survives the
+restart too, and its delegator does not, so an orphaned child's end-of-stream
+marker reaches a fresh `netd` with no record of it, where a zero-length message
+would have been decoded from the previous request's bytes. A length guard
+closes it. A second finding of the same family is on the ledger: a client
+alive across the restart keeps a bare connection index the new `netd` may hand
+to someone else, reachable now because the client is no longer denied at the
+door. Own change, with its shape written down. The same run again after all of
+it: replies resume. The review also found this session's prose full of a
+punctuation the house rule forbids, in files written today by me, which is
+fixed here and noted where I will see it next time.
 
 **One rig lesson, small and reusable.** The first attempt never typed the
 trigger: `exec` prints the prompt *before* the child's first line, so a step
@@ -49,7 +71,7 @@ and `clear_delegate`, so the doc described the wrong function.
 
 ---
 
-## 2026-09-06 (cont. 2) — the wrong slot, and a bug you have to build a window to reach
+## 2026-09-06 (cont. 2): the wrong slot, and a bug you have to build a window to reach
 
 *(The first of the five pre-existing ledger findings from the delegation
 review: the pipeline's "stay quiet" heuristic reads the consumer's state when
@@ -59,7 +81,7 @@ the kernel may have denied on the producer's.)*
 exited early gets `pipe: could not authorize the stream` printed on top of its
 own message, and the standup called it the most user-visible of the five. On
 the unmodified tree, `ls /nope | wc` and `cat /nope | wc` printed the
-producer's line, `0 0 0`, and `pipe: ls exited with code 1` — quiet, and
+producer's line, `0 0 0`, and `pipe: ls exited with code 1`. Quiet, and
 correct. The heuristic *does* read the wrong slot; the case the reading
 described simply never arrives that way.
 
@@ -69,11 +91,11 @@ failed does not exit either: `ulib::end_of_stream` treats a denial as
 transient and retries it for 150 ticks, so it sits alive until the grant lands.
 What is left is a producer that exits with **no** end-of-stream (`-?` does
 exactly that: print usage, `exit(0)`), running to its exit in the gap between
-two adjacent shell syscalls — a tick landing in a window of a few instructions.
+two adjacent shell syscalls, a tick landing in a window of a few instructions.
 Real, and rare enough that no recipe would ever see it.
 
 **So the window was built.** A temporary loop parked the shell after the spawn
-loop until stage 0 was a zombie. Under it, *every* pipeline printed the line —
+loop until stage 0 was a zombie. Under it, *every* pipeline printed the line:
 `ls -? | wc`, `ls /nope | wc`, even `ls / | wc` once its producer gave up on
 the stream after 150 ticks. That is the check that can fail
 (`cluster-keys-postmortem.md`): a fix verified only on the unmodified tree
@@ -87,59 +109,59 @@ how narrow the path is and how it was reached.
 that `ls -? | wc` on the *unmodified* shell never returns a prompt: `wc` waits
 in `pipe_recv` for an end-of-stream nobody sends, and the shell waits on `wc`.
 Ctrl+C then holds the slots, which is the deliberate hold from yesterday. On
-the ledger, not fixed — the instance is one call in `usage_if_requested`, but
+the ledger, not fixed: the instance is one call in `usage_if_requested`, but
 the class is "a task exited with a non-console stdout target and no one ended
 the stream", which the kernel could close for every program at once. That is a
 design choice, so it is written down for Hans rather than made.
 
 **Then the review moved the fix a layer down.** `/code-review high` on the
 diff: the kernel folds "that slot is dead" and "you may not" into one
-`MSG_ERR_DENIED`, so any `TASK_STATE` read after the fact is a guess — a policy
+`MSG_ERR_DENIED`, so any `TASK_STATE` read after the fact is a guess: a policy
 refusal on a stage that died between the two syscalls reads as "already
 exited", and a nested shell (whose static mask holds no spawnable slot) is
 refused on every link, so under the window the shell-side fix would have
-silenced the one message that was true. Every sibling syscall — `KILL`, `FG`,
-`WAIT`, `MSG_SEND`, `MSG_CALL` — already answers `TASK_ERR_NO_SUCH_TASK` for a
+silenced the one message that was true. Every sibling syscall, `KILL`, `FG`,
+`WAIT`, `MSG_SEND`, `MSG_CALL`, already answers `TASK_ERR_NO_SUCH_TASK` for a
 dead slot. So `DELEGATE` does too now, the shell reads the reason from the
 answer, and the closure, the second and third syscalls, the TOCTOU and the
 "NOT merely not-runnable" caveat are all gone. The reason is atomic with the
-denial only if the kernel gives it — the same shape as the `ls` error table
+denial only if the kernel gives it: the same shape as the `ls` error table
 that rendered every `fsd` code as "no such file": the caller had flattened a
 reason the layer below knew. Same window, same commands: quiet. The nested
 shell under the window is quiet too, and that is also right: there the exit
-*precedes* the syscall, so the kernel answers "no such task"; the case the
-review named — refused first, then the stage dies before the shell's state
-read — is the one no read after the fact can get right, and the one the
-atomic answer removes. And without the window, the nested shell answers
-`pipe: could not authorize the stream` to `ls / | wc` — it cannot run a
+*precedes* the syscall, so the kernel answers "no such task". The case the
+review named is the other order, refused first and then the stage dies before
+the shell's state read. No read after the fact can get that one right, and the
+atomic answer removes it. And without the window, the nested shell answers
+`pipe: could not authorize the stream` to `ls / | wc`: it cannot run a
 pipeline at all, which the ledger had recorded only as "cannot delegate
 `TO_NET`". Widened there, measured.
 
 **And it found what I had written beside the finding.** "Ctrl+C then holds
-the slots" was inferred from yesterday's hold, not run — the rig cannot send
+the slots" was inferred from yesterday's hold, not run: the rig cannot send
 Ctrl+C, and for a console-sink pipeline the consumer owns the keyboard, so
 Ctrl+C kills it and the shell recovers. Struck. And `-?` was "the instance"
 only because it was the one I ran: twenty-six of fifty-three programs never
 call `end_of_stream`, and the ones that do skip it on their early error exits.
 The class fix I had written down in one line has three open questions the
 review listed, all now on the ledger. Six wrong-or-narrow claims in the prose
-around a fix whose code was right twice — yesterday's ratio, again.
+around a fix whose code was right twice: yesterday's ratio, again.
 
-**A second pass, `medium`, on the kernel version — because the code on the
+**A second pass, `medium`, on the kernel version, because the code on the
 branch was no longer the code the first review had read.** Six findings, one
 of them a gap the fix had opened: the "already told the user" premise is false
 for a program that exits with *no* output, so under the window `touch f | wc`
 went from a wrong line to a bare prompt, and a non-zero exit from a silent
-producer would have vanished with it — `kill_and_reap` discards the `WAIT`
+producer would have vanished with it: `kill_and_reap` discards the `WAIT`
 status. The teardown on that path now `KILL`s each stage and, where the kill
 is refused because the stage already exited, reaps it through
 `wait_pipe_stage`: silent for exit 0, and `pipe: ls exited with code 1` where
 the first version printed nothing. Forced window again: `touch /T1 | wc` gives
 a bare prompt, `ls /nope | wc` its message and its exit code. Beside it: the
 `architecture.md` syscall table and `delegate_net`'s doc both still described
-`DELEGATE` as answering only `MSG_ERR_DENIED` — the falsifying edit was in the
-kernel, the claim in two other files, the `true-when-written` shape exactly —
-and the arm answered out-of-range by *argument position*, `DENIED` for the
+`DELEGATE` as answering only `MSG_ERR_DENIED`: the falsifying edit was in the
+kernel, the claim in two other files, the `true-when-written` shape exactly.
+And the arm answered out-of-range by *argument position*, `DENIED` for the
 grantee and `NO_SUCH_TASK` for the target. One rule now, stated in the ABI doc
 with its precedence. Left alone from that pass: `kill_and_reap`'s unconditional
 `WAIT` after a successful `KILL` is a wasted trap and reopens the slot-reuse
@@ -148,7 +170,7 @@ yesterday with a review of its own, and this branch is about the link.
 
 **Measured later the same day: the narrowing was half wrong.** Running the
 review's suggested `touch f | wc` on the unmodified shell reached the dead-link
-path on the first attempt — `touch` exited before the link was authorized — and
+path on the first attempt, `touch` exited before the link was authorized, and
 wedged the shell on the second, when it exited after. A producer that neither
 prints nor ends its stream does not hand the shell its turn back: `SPAWN` is
 the shell's longest syscall, a tick is pending at its `eret`, and the child
@@ -157,19 +179,19 @@ gets the slice. The morning's "a window of a few instructions" was true for
 everything else. So the original line was reachable all along by any silent
 producer, the ledger now says so, and the next change is written down beside
 it: when the producer is the dead end, the shell can end the stream on its
-behalf — it holds the send right and nothing was delivered — so `touch f | wc`
+behalf: it holds the send right and nothing was delivered, so `touch f | wc`
 prints `0 0 0`. The site's architecture page was re-read against the changed
 `architecture.md` and does not abridge the syscall table's return codes, so it
 was re-stamped, not rewritten.
 
 **What this one says.** A finding made by reading code is a hypothesis about a
-run, and the consequence attached to it is the part most likely to be wrong —
+run, and the consequence attached to it is the part most likely to be wrong:
 the code was read correctly, and the sentence after it ("a producer that
 exited early gets…") described a run that does not happen. Yesterday's lesson
 from the other direction: a stored measurement is a hypothesis for the next
 run; a stored *reading* was never a measurement at all. The work today was not
 the five-line fix but building the window that let the check fail, and the
-window found a second bug the reading could not have — and the review then
+window found a second bug the reading could not have, and the review then
 found that half of what I wrote about that second bug was itself a reading.
 
 ---

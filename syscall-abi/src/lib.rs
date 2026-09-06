@@ -461,11 +461,12 @@ pub const HEAP_INFO_SIZE: u64 = 1;
 /// producer to stream directly to its consumer (relay-free
 /// `programA | programB`): only the shell holds the send-caps for the
 /// spawnable slots. The delegation is cleared automatically when the grantee
-/// dies, or when a *spawnable* target dies (its slot may be reused, and the
-/// grant must not follow it to a stranger); a grant aimed at a protected slot
-/// - a supervised server - survives that server's restart, since nothing but
-/// the same server ever comes back there and the grant is only ever made at
-/// spawn. No explicit revoke is needed for either flow. Enforced at the `MSG_SEND`/`MSG_CALL` boundary (the kernel's
+/// dies, and when the target's slot is *reused* by a new spawn (the grant must
+/// not follow the slot to a stranger). A grant aimed at a protected slot, a
+/// supervised server, therefore survives that server's restart: nothing but
+/// the same server ever comes back there, and the grants that reach it are
+/// only ever made once (the shell's `TO_NET` at spawn, `netd`'s to its own
+/// remote-exec child). No explicit revoke is needed for either flow. Enforced at the `MSG_SEND`/`MSG_CALL` boundary (the kernel's
 /// `may_send`).
 ///
 /// **Grants ACCUMULATE.** A task's delegations are a set, so a second call

@@ -184,8 +184,8 @@ a restart on demand, so the check uses **two temporary mutations, applied for
 the run and reverted after** (`git checkout` the two files):
 
 - in `programs/servers/netd/src/main.rs`, at the top of the `NETOP_RESOLVE`
-  arm: `if buf[8..end].starts_with(b"wedgeme") { loop { core::hint::spin_loop() } }`
-  — a resolve of that name parks the server, and the supervisor's passive
+  arm: `if buf[8..end].starts_with(b"wedgeme") { loop { core::hint::spin_loop() } }`:
+  a resolve of that name parks the server, and the supervisor's passive
   heartbeat restarts it after `WEDGE_TICKS` (about 2.6 s);
 - in `programs/netutils/ping/src/main.rs`, replace the single request with
   eight, each followed by a 75-tick wait (`get_ticks` + `yield_now`), printing
@@ -208,7 +208,7 @@ new and times out. Expected: *"server slot 4 wedged … restarting"*, one
 `ping: request failed` (the request in flight when the server died), then
 **`reply from 10.0.2.2` resuming** for the remaining requests. Against the
 pre-fix kernel the same run gives `ping: request failed` for every request
-after *"restarted (attempt 1/3)"* — six of six — each after the client's
+after *"restarted (attempt 1/3)"*, six of six, each after the client's
 150-tick spin. `resolve` itself reports *"no network server this boot"*, which
 is the mid-call death answer, not a boot condition; recorded, not fixed.
 

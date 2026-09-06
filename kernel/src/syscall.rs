@@ -1445,7 +1445,7 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
             // TO_CON|TO_ACCT, so `DELEGATE(grantee=CON_TASK, target=0)` passed
             // every check and handed `cond` - whose mask is deliberately empty
             // because it "only ever replies" - an unsolicited send right.
-            // Servers never exit, so `clear_delegate` never ran and it stuck
+            // Servers never exit, so no teardown ever cleared it and it stuck
             // for the boot. It was self-limiting only by accident, back when a
             // second grant overwrote the first; once DELEGATED_SEND became a
             // set that accident stopped limiting anything, and there is no
