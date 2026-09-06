@@ -424,6 +424,83 @@ Two things follow, and neither is a detector:
    tested because `fetch` hardcodes port 80". A hedge is not weakness in a
    comment; it is the part that stays true.
 
+## The strongest claim is a measurement, and it rots the same way (2026-09-06)
+
+*Added from the day that closed roadmap frontier item 2's remaining bug — which
+turned out not to be the bug the roadmap said it was.*
+
+Everything above is prose: a comment, a docstring, an error string, a recipe.
+The natural defence, stated at the end of this file, is to convert a claim that
+guards behaviour into a check, and the reason that works is that a measurement
+is better than an assertion. 2026-09-06 supplies the case where the claim
+**was** a measurement — a table of round-trip counts, timings and a 7-of-7
+failure rate — and it rotted exactly like a comment, for exactly the reason in
+"The mechanism": the edit that falsified it was in another file.
+
+### The citation
+
+On 2026-09-03 the remote-read flake was traced to the supervisor's wedge timer
+and a measured table was written into `ROADMAP.md`: `cat HELLO.TXT` is five
+round trips at 0.6 s, 3.01 s, over the 2.56 s threshold, failed 7 of 7. That
+was true. **The same day**, a heartbeat was added so a busy `netd` reports
+progress unprompted, and the table's cause stopped being reachable — but the
+table stayed, correctly, as the record of what had been measured.
+
+On 2026-09-05 a remote `cat` failed again, and the new bug record did the thing
+this project recommends: it checked the "new" bug against the documented,
+measured analysis rather than guessing, found the table, and attributed the
+failure to it. It even noted, proudly, that a fresh guess had *nearly*
+overwritten the analysis. It was wrong. The heartbeat fix worked; nothing had
+been restarted; the 17-second unpiped read of a 13,600-byte file succeeded on
+every run. The failing command was the *piped* one, because two of the shell's
+five spawn paths had never delegated `TO_NET` — a capability denial, instant,
+zero packets, entirely unrelated to timing.
+
+What went wrong is precise, and it is not "the table was stale". The 09-05
+entry matched the new failure to the old cause on the **symptom** — a remote
+read fails — and never re-observed the old cause's **signature**. The wedge
+timer announces itself: `server slot 4 wedged - no progress (runnable)` on the
+console. That line was absent from every failing run, and nobody looked,
+because a citation feels like rigour. The entry also recorded the unpiped
+`BIG.TXT` as failing when it did not — the one observation that would have
+collapsed the timing theory in a minute, written down as supporting it.
+
+So the rule this earns is narrower and more useful than "measurements go
+stale":
+
+> **A stored analysis is evidence for the run it was measured on, and a
+> hypothesis for every run after.** Re-using it is not wrong — it is the right
+> first move — but it is re-used by re-observing its *signature*, not by
+> matching its *symptom*. A symptom matched to a stored cause is a guess
+> wearing a citation.
+
+Two smaller shapes from the same day, both already catalogued above and both
+hit again while fixing this:
+
+- **A safety property nobody had claimed.** `DELEGATE` had never validated
+  which slot may *receive* a grant, so any program could hand a server a send
+  right. That was harmless only because a second grant overwrote the first —
+  an accident nobody had written down as a guard. Making the delegation set
+  accumulate (the fix for the pipeline bug, in `tasks.rs`) removed the accident;
+  the hole opened in `syscall.rs`, a file the diff did not touch, and no check
+  could have noticed because there had never been a claim to falsify. This is
+  the inverse of everything above: not a claim that rotted, but a property that
+  was never stated, so it was guarded by coincidence until the coincidence was
+  edited. Review found it. Nothing else could have.
+- **False on arrival, with a twist.** A comment justifying a deliberate bare
+  `KILL` gave a reason that was backwards — the decision was right, the reason
+  written beside it was not. A wrong reason attached to a right decision is
+  more dangerous than a missing one: the next reader who checks it finds it
+  false and reasonably undoes the decision.
+
+And the mechanism, one more time, because it held in every case: the 09-03
+table was falsified by the 09-03 heartbeat commit (a different file); the
+`DELEGATE` bound was removed by a change to `tasks.rs` (a different file); the
+"(but didn't reap it)" comment in the redirect block was falsified by making
+`capture_program_output` reap (a different function, two hundred lines away).
+The compiler saw strings, no test asserts a table, and each reviewer read a
+diff that did not contain the claim it invalidated.
+
 ## What actually worked
 
 Three things, none of them "be more careful".
