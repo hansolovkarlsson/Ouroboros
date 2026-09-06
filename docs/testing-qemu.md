@@ -212,6 +212,33 @@ after *"restarted (attempt 1/3)"*, six of six, each after the client's
 150-tick spin. `resolve` itself reports *"no network server this boot"*, which
 is the mid-call death answer, not a boot condition; recorded, not fixed.
 
+**A recycled slot must not inherit a server's memory of its predecessor.**
+`netd` used to remember its remote-exec child by bare slot number; since
+2026-09-06 it records the kernel-issued task identity (`TASK_IDENTITY` at
+spawn, `SENDER_TASK` on every message). The check needs a host-side peer and
+the guest shell at once, which is what `drive-qemu.py`'s `--hostfwd` is for
+(it implies `--slirp`; macOS has no `timeout`, hence the perl alarm):
+
+```sh
+(sleep 40; perl -e 'alarm 100; exec @ARGV' \
+   python3 scripts/np9p_client.py localhost 5640 run 'touch /X1' > /tmp/run.log 2>&1) &
+python3 scripts/drive-qemu.py --hostfwd=tcp::5640-:564 build/esp.img \
+  'login:@@root' 'assword@@root' \
+  'exited \(code 0\)@@ps' \
+  '# @@wait 6' \
+  '# @@ping 10.0.2.2' \
+  '# @@ps' '# @@'
+```
+
+`touch` never ends its stream, so the child exits into a zombie while the
+connection still names its slot; the third step keys on the kernel's exit
+line, `ps` shows slot 6 as *exited*, `wait 6` reaps it, and the `ping` lands
+in slot 6. Expected: `reply from 10.0.2.2`. Against the pre-fix `netd` the
+ping's request is captured as the child's output and the prompt never
+returns (the harness times out on the last steps). The same `--hostfwd` rig
+with `run 'ls /'` is the control: the host prints the guest's root listing,
+and `ping 10.0.2.2 | wc` in the guest answers `1 3 21` beside it.
+
 **Authentication.** Every request is **signed** with a per-machine Ed25519 key,
 and the exporter serves only a public key listed in its
 `/etc/cluster/authorized`. Both python peers hold the dev "host" identity, which

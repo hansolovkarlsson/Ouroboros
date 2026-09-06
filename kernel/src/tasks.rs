@@ -513,6 +513,11 @@ struct Message {
 #[derive(Clone, Copy)]
 struct Cred {
     id: u64,
+    /// The sender's packed task identity (slot and generation) at the same
+    /// instant - the answer to `SENDER_TASK`. Captured here rather than read
+    /// back later for the reason `id` is: by the time a server looks, the slot
+    /// may hold someone else.
+    task: u64,
     groups: [u32; syscall_abi::MAX_SUPP_GROUPS],
     n_groups: u8,
     /// False for the initial value: "this task has not received a message", as
@@ -522,7 +527,7 @@ struct Cred {
 
 impl Cred {
     const fn none() -> Self {
-        Cred { id: 0, groups: [0; syscall_abi::MAX_SUPP_GROUPS], n_groups: 0, present: false }
+        Cred { id: 0, task: 0, groups: [0; syscall_abi::MAX_SUPP_GROUPS], n_groups: 0, present: false }
     }
 }
 
@@ -539,7 +544,38 @@ fn cred_of(task: usize) -> Cred {
     }
     let mut groups = [0u32; syscall_abi::MAX_SUPP_GROUPS];
     let n = groups_of(task, &mut groups).min(syscall_abi::MAX_SUPP_GROUPS);
-    Cred { id: id_of(task), groups, n_groups: n as u8, present: true }
+    Cred { id: id_of(task), task: task_id_of(task).unwrap_or(0), groups, n_groups: n as u8, present: true }
+}
+
+/// Every task's generation: issued by [`issue_generation`] when its slot
+/// becomes live, from a boot-wide counter that never repeats. A slot number
+/// names a position; a generation names an occupant. Servers that remember a
+/// client (netd's remote-exec child and run owner, fsd's fids, the `/net/tcp`
+/// connection table) must remember the occupant, because the position is
+/// recycled the moment a task is reaped - the same reason [`SENDER_CREDS`]
+/// captures a credential at send time instead of reading the slot later.
+static GENERATIONS: [AtomicU64; NUM_TASKS] = [const { AtomicU64::new(0) }; NUM_TASKS];
+/// The next generation to issue. Starts at 1 so that 0 never names a task.
+static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
+
+/// Give `slot` a fresh generation. Called at the two places a slot becomes
+/// live ([`spawn`], [`install_task`]) - a supervised server's restart is a new
+/// occupant too, since none of the state its clients held in it survived.
+fn issue_generation(slot: usize) {
+    let g = NEXT_GENERATION.fetch_add(1, Ordering::Relaxed);
+    GENERATIONS[slot].store(g, Ordering::Relaxed);
+}
+
+/// `slot`'s packed task identity (`generation << TASK_ID_SLOT_BITS | slot`),
+/// or `None` if the slot is unused or out of range. A zombie still answers: it
+/// is still that occupant until reaped, which is what lets a server record a
+/// child that exited before the server got around to looking.
+pub(crate) fn task_id_of(slot: usize) -> Option<u64> {
+    if slot >= NUM_TASKS || matches!(unsafe { *STATES[slot].0.get() }, TaskState::Unused) {
+        return None;
+    }
+    let g = GENERATIONS[slot].load(Ordering::Relaxed);
+    Some((g << syscall_abi::TASK_ID_SLOT_BITS) | slot as u64)
 }
 
 const MSG_MAX: usize = syscall_abi::MSG_MAX_LEN as usize;
@@ -1059,6 +1095,13 @@ fn record_sender_cred(dest: usize, cred: Cred) {
 pub(crate) fn sender_id_of(task: usize) -> Option<u64> {
     let cred = unsafe { *SENDER_CREDS[task].0.get() };
     cred.present.then_some(cred.id)
+}
+
+/// `task`'s captured sender task identity, or `None` if it has received nothing
+/// (or the sender was the kernel, which has no identity to give).
+pub(crate) fn sender_task_of(task: usize) -> Option<u64> {
+    let cred = unsafe { *SENDER_CREDS[task].0.get() };
+    (cred.present && cred.task != 0).then_some(cred.task)
 }
 
 /// Copy `task`'s captured sender groups into `out`, returning the true count -
@@ -1793,6 +1836,7 @@ pub(crate) fn install_task(slot: usize, context: Context, region: (u64, u64)) {
     unsafe { *TASKS[slot].0.get() = context };
     unsafe { *REGIONS[slot].0.get() = region };
     clear_delegations_of(slot);
+    issue_generation(slot);
     unsafe { *STATES[slot].0.get() = TaskState::Runnable };
     flush_new_code(region.0, region.1);
 }
@@ -1837,6 +1881,7 @@ pub(crate) fn spawn(context: Context, region: (u64, u64)) -> Result<usize, Spawn
             unsafe { *REGIONS[i].0.get() = region };
             clear_delegations_of(i);
             clear_delegations_at(i);
+            issue_generation(i);
             unsafe { *STATES[i].0.get() = TaskState::Runnable };
             // Freshly-written code needs the same clean/invalidate
             // sequence `init` gives the boot-loaded programs - a
@@ -2014,6 +2059,19 @@ pub unsafe fn init(
             bits = in(reg) (1u64 << 18) | (1u64 << 16),
             options(nostack),
         );
+    }
+    // Every slot live at boot gets its generation here: init is the one place
+    // a slot becomes live outside `spawn`/`install_task`, and a boot task with
+    // no generation has packed identity 0, which `SENDER_TASK` reports as "no
+    // identity" - so the shell's own `cpu` request would have carried the
+    // same all-ones answer as the kernel's health ping. Slots 0 and 1 are
+    // Runnable statically; the servers above set themselves Runnable only
+    // when their image was present, which is why this is a loop over state
+    // rather than a list.
+    for slot in 0..NUM_TASKS {
+        if !matches!(unsafe { *STATES[slot].0.get() }, TaskState::Unused) {
+            issue_generation(slot);
+        }
     }
 }
 

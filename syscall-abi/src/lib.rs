@@ -764,6 +764,43 @@ pub const RANDOM: u64 = 63;
 /// against - a request only ever arrives on an unfiltered receive.
 pub const SENDER_ID: u64 = 65;
 
+/// `()` -> the packed task identity of the sender of the message this task
+/// last received on an unfiltered receive, captured by the kernel at send time
+/// exactly as [`SENDER_ID`] is; [`GET_ID_ERR`] if nothing has been received.
+///
+/// **A slot number is not an identity.** A slot is recycled the moment its
+/// task is reaped, and the next occupant is indistinguishable from the last by
+/// number alone, so a server that remembers "slot 6 is my remote-exec child"
+/// or "slot 6 owns this run" can be answered by a stranger a few ticks later.
+/// The kernel issues every task a **generation** when its slot becomes live (a
+/// counter that never repeats within a boot), and this returns
+/// `(generation << TASK_ID_SLOT_BITS) | slot` - see [`task_id_slot`]. Compare
+/// the whole word; the slot half alone is the bug this exists to close. The
+/// value is stable for the whole handling of a request (a filtered receive,
+/// i.e. a reply to a call this task made, never replaces it).
+///
+/// Exposed to servers only for now: `ps`/`wait` still speak in slots.
+pub const SENDER_TASK: u64 = 67;
+
+/// `(task index)` -> the packed task identity (`(generation <<
+/// TASK_ID_SLOT_BITS) | slot`) of the occupant of that slot, or [`GET_ID_ERR`]
+/// if the slot is unused or out of range. A zombie still answers: it is still
+/// that occupant until reaped. The companion of [`SENDER_TASK`] for the other
+/// direction - a server that just `SPAWN`ed a task records this, and later
+/// matches messages from it by [`SENDER_TASK`], never by the bare slot the
+/// spawn returned. Read-only, like [`TASK_STATE`].
+pub const TASK_IDENTITY: u64 = 68;
+
+/// Width of the slot field in a packed task identity: the slot is the low
+/// [`TASK_ID_SLOT_BITS`] bits, the generation everything above.
+pub const TASK_ID_SLOT_BITS: u32 = 8;
+
+/// The slot half of a packed task identity (what `KILL`/`WAIT`/`MSG_SEND`
+/// still take).
+pub const fn task_id_slot(id: u64) -> u64 {
+    id & ((1 << TASK_ID_SLOT_BITS) - 1)
+}
+
 /// The supplementary group list captured alongside [`SENDER_ID`], with the same
 /// `(out pointer, capacity)` arguments and return value as [`GET_GROUPS`]:
 /// the sender's true count (which may exceed the capacity), or [`GET_ID_ERR`]

@@ -7,6 +7,70 @@ for the forward plan see [`ROADMAP.md`](ROADMAP.md).
 
 ---
 
+## 2026-09-06 (cont. 4): a slot is a position, and the kernel now names the occupant
+
+*(The third ledger finding: `netd` remembers its remote-exec child and its run
+owner by bare slot number, and slots are recycled the moment a task is reaped.)*
+
+**Three shapes, scored before choosing.** Reap promptly (narrows the window,
+does not close it). Demux the child by its stdout target (structural for that
+one record, silent about the run owner, the connection table and `fsd`'s fids,
+and it hard-codes today's topology). Or have the kernel issue every task a
+generation and capture the sender's slot-plus-generation with its credential
+at send time, the way `SENDER_ID` already captures who a request came from.
+The third wins on all three criteria: captured by the kernel rather than
+inferred by a server, closes the whole class, and is what a process id is
+when one is needed. Hans took it, and asked that the three criteria be the
+standing policy for every suggestion. They are, in memory, now.
+
+**The check before the code.** Nothing in the tree lets one process take
+another's slot on cue, so the rig learned `--hostfwd` and a two-party recipe:
+the host asks the guest to `cpu`-run `touch`, which exits without ending its
+stream, so the child sits as a zombie while `netd`'s connection still names
+its slot; the guest reaps it with `wait 6` and runs `ping`, which lands in the
+same slot. Before: the ping's request is routed to the connection as the
+child's output, never answered, and the prompt never returns. That is the
+failure the ledger described, run rather than read.
+
+**The kernel side is small.** A boot-wide counter, a generation per slot
+issued where a slot becomes live (`spawn`, and `install_task`, since a
+restarted server is a new occupant too), the packed identity added to the
+credential the kernel already captures at send time, and two syscalls:
+`SENDER_TASK` for the receiver, `TASK_IDENTITY(slot)` for a server that just
+spawned something. A zombie still answers `TASK_IDENTITY`: it is still that
+occupant until reaped, which is exactly the case the child lands in. Servers
+only for now; `ps` and `wait` keep speaking in slots. `netd` converts its two
+records and matches every message by the whole word. The run owner is captured
+*before* `tcp_run`, because that pumps the event loop and its unfiltered
+receives replace the captured sender, the same trap `SENDER_ID`'s doc already
+warns about. After: `reply from 10.0.2.2`, and `ps` shows a clean pool.
+
+**The `medium` review found the collision my rig could not.** Two messages
+have no identity to capture: the supervisor's health ping, sent by the kernel
+on nobody's behalf, and anything from a boot task, because `init` marks the
+boot slots live without going through `spawn` or `install_task` and none of
+them had a generation. For both, `SENDER_TASK` answers all-ones. So did
+`netd`'s "no child" sentinel. Held a bare TCP connection open for a minute
+and watched: *"server slot 4 wedged - unresponsive (ping timeout) -
+restarting"*, because every ping was captured as that idle connection's
+child output and never acked. A regression this branch introduced, reachable
+by any idle client, and invisible to a rig that never left a connection open
+across a ping interval. Three changes: the boot slots get their generations at
+the end of `init` (a loop over live state, not a list); the sentinel is zero,
+which no packed identity can ever be, since generations start at one; and the
+demux skips a message with no identity outright, while a run request from a
+caller with none fails closed. Same rig, same minute: no restart. The shell's
+own `cpu` request now carries an identity too, which the host peer's refusal
+of the verb shows in its own way: the request reached the network at all.
+
+**Two small stumbles worth a line.** `ulib` already had a `task_id` (the
+uid/gid of a task), so the query is `TASK_IDENTITY`; and macOS has no
+`timeout`, so the recipe uses a perl alarm. The remaining carriers of the
+same disease are named on the ledger: `fsd`'s fids, whose own doc says the
+owner is a slot, and the `/net/tcp` connection table. Each is its own change.
+
+---
+
 ## 2026-09-06 (cont. 3): a grant that was only ever made once
 
 *(The second ledger finding: nothing re-grants `TO_NET` after a supervised

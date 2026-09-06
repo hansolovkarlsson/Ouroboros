@@ -232,6 +232,21 @@ pub fn sender_id() -> u64 {
     syscall(syscall_abi::SENDER_ID, 0)
 }
 
+/// The packed task identity (slot and generation) of the sender of the last
+/// request this task received, or [`syscall_abi::GET_ID_ERR`]. A server that
+/// remembers a client must remember THIS, not the slot: see
+/// [`syscall_abi::SENDER_TASK`].
+pub fn sender_task() -> u64 {
+    syscall(syscall_abi::SENDER_TASK, 0)
+}
+
+/// The packed task identity of the occupant of `slot` (zombies included), or
+/// [`syscall_abi::GET_ID_ERR`] for an unused slot - what a server records right
+/// after a `SPAWN`, to match the child's messages by [`sender_task`] later.
+pub fn task_identity(slot: u64) -> u64 {
+    syscall(syscall_abi::TASK_IDENTITY, slot)
+}
+
 /// The supplementary group list captured alongside [`sender_id`]. Returns how
 /// many gids the sender actually had (which may exceed `out`), or `None` if no
 /// message has been received.
