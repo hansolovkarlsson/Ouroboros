@@ -194,11 +194,20 @@ def main() -> int:
     # server on the host at 10.0.2.2 - which is how the guest-signs /
     # host-verifies half of the cluster is tested. Without it this harness has no
     # networking at all, which is why that half was never run unattended.
+    # `--hostfwd=tcp::5640-:564` (repeatable) forwards a host port into the
+    # guest, so a host-side peer can reach the guest's export or HTTP server
+    # while the harness drives the shell - the two-party checks (a remote `cpu`
+    # run from the host, then a command typed in the guest) need both at once.
+    # Implies `--slirp`.
     extra = ()
-    if "--slirp" in argv:
-        argv.remove("--slirp")
+    hostfwd = [a[len("--hostfwd="):] for a in argv if a.startswith("--hostfwd=")]
+    argv = [a for a in argv if not a.startswith("--hostfwd=")]
+    if "--slirp" in argv or hostfwd:
+        if "--slirp" in argv:
+            argv.remove("--slirp")
+        netdev = "user,id=net0" + "".join(f",hostfwd={h}" for h in hostfwd)
         extra = (
-            "-netdev", "user,id=net0",
+            "-netdev", netdev,
             "-device", "virtio-net-device,netdev=net0",
         )
 

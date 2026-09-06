@@ -1407,10 +1407,30 @@ would otherwise silently shrink into looking like nothing was ever found.
     grant across the restart is what makes it reachable. Own change: record
     the opening sender in `DialConn` and check it in `dial_file_op`. Raised
     by the `medium` review, traced not run.
-  - **`netd` demuxes remote-exec by raw slot number** (`PendingRun.owner`,
-    `TcpConn.cpu_child`). Slots are recycled the moment a task is reaped, and
-    `handle_client`'s comment states an invariant — that only one task can hold
-    `TO_NET` — which the shell's blanket grant has now made false.
+  - ~~**`netd` demuxes remote-exec by raw slot number** (`PendingRun.owner`,
+    `TcpConn.cpu_child`).~~ **Fixed 2026-09-06 with a kernel-issued task
+    identity.** Slots are recycled the moment a task is reaped, and until
+    #107 the code could lean on only one spawned task at a time holding
+    `TO_NET`; the shell's blanket grant made that false. The kernel now issues
+    every task a **generation** when its slot becomes live (a boot-wide
+    counter; a supervised restart is a new occupant too), captures the
+    sender's packed identity `(generation << 8) | slot` with its credential at
+    send time, and exposes it as `SENDER_TASK`, with `TASK_IDENTITY(slot)`
+    for the other direction. `netd` records both its remote-exec child and
+    its run owner by that identity and matches every message against it.
+    **Measured before and after** (recipe in `testing-qemu.md`): a remote
+    `cpu` run of `touch`, which exits without ending its stream, left the
+    child a zombie with the connection still naming its slot; `wait 6` in
+    the guest reaped it, and the next `ping` landed in slot 6. Before: the
+    ping's request was captured as the child's output and the prompt never
+    returned. After: `reply from 10.0.2.2`. Chosen over "reap promptly" and
+    "demux by stdout target" on all three criteria (stable: captured by the
+    kernel, not inferred; safe: closes the class; not blocking: a generation
+    is what a process id is). **Same disease, next to convert, each its own
+    change:** `fsd`'s fids (`Fid.owner` is a slot, and its own doc says so),
+    and the `/net/tcp` connection table (the item above). `ps`, `wait`,
+    `kill` and `fg` still speak in slots on purpose; widen when something
+    needs it.
   - **A nested shell cannot delegate `TO_NET` at all.** `may_delegate` reads
     the *static* mask and spawnable slots have none, so every `delegate_net`
     from a spawned `SH.BIN` is denied, discarded by its `let _ =`, and its

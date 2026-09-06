@@ -880,6 +880,18 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
             // wrong question for a server that is authorizing a request.
             tasks::sender_id_of(tasks::current_task()).unwrap_or(syscall_abi::GET_ID_ERR)
         }
+        syscall_abi::SENDER_TASK => {
+            // No arguments: the packed slot+generation of whoever sent the
+            // message this task last received, captured with SENDER_ID's
+            // credential at send time. The bare slot MSG_RECV reports is a
+            // position; this is the occupant.
+            tasks::sender_task_of(tasks::current_task()).unwrap_or(syscall_abi::GET_ID_ERR)
+        }
+        syscall_abi::TASK_IDENTITY => {
+            // arg0 = task index: that slot's current occupant's packed identity
+            // (zombies included), or GET_ID_ERR. Read-only, like TASK_STATE.
+            tasks::task_id_of(arg0 as usize).unwrap_or(syscall_abi::GET_ID_ERR)
+        }
         syscall_abi::SENDER_GROUPS => {
             // arg0 = out pointer, arg1 = capacity in gids - GET_GROUPS' shape,
             // against the captured credential rather than the live slot.

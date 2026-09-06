@@ -577,9 +577,14 @@ fn drain_client_messages(packed_mac: u64, buf: &mut [u8], conns: &mut [Option<Tc
         }
         let sender = packed >> 32;
         let len = ((packed & 0xffff_ffff) as usize).min(buf.len());
+        // The OCCUPANT, not the position: a cpu child's slot is recycled the
+        // moment it is reaped, and the next task in it (someone's `ping`)
+        // would otherwise have its request captured as the child's output and
+        // never answered. Measured 2026-09-06; see the ledger.
+        let sender_id = syscall(syscall_abi::SENDER_TASK, 0);
         if let Some(ci) = conns
             .iter()
-            .position(|c| matches!(c, Some(c) if c.cpu_child == sender as u8))
+            .position(|c| matches!(c, Some(c) if c.cpu_child == sender_id))
         {
             // A cpu child talks to us for TWO things (cluster Phase 4a/4b): its
             // stdout (a raw MSG_SEND we capture) and - once its namespace imports
@@ -609,6 +614,8 @@ fn drain_client_messages(packed_mac: u64, buf: &mut [u8], conns: &mut [Option<Tc
 /// child's output straight through is a later refinement).
 fn cpu_child_msg(c: &mut TcpConn, child: u8, data: &[u8]) {
     if data.is_empty() {
+        // `child` is the slot (WAIT speaks in slots); the caller matched the
+        // sender by full identity before routing here.
         let _ = syscall(syscall_abi::WAIT, child as u64); // reap; ignore the status
         c.cpu_child = CPU_NONE;
     } else {
@@ -690,7 +697,8 @@ fn handle_client(packed_mac: u64, sender: u64, buf: &[u8], len: usize, conns: &m
             // The shell pulls the next chunk of its last cpu run's output; an
             // empty reply = end of stream. Owner-checked inside next_chunk.
             let mut r = [0u8; syscall_abi::MSG_MAX_LEN as usize];
-            let rlen = pending.map(|p| p.next_chunk(sender, &mut r)).unwrap_or(0);
+            let who = syscall(syscall_abi::SENDER_TASK, 0);
+            let rlen = pending.map(|p| p.next_chunk(who, &mut r)).unwrap_or(0);
             reply(sender, &r[..rlen]);
         }
         // An NP read verb from a *local* client: the /net synthetic filesystem
@@ -1384,7 +1392,9 @@ fn pump_conns(mac: &[u8; 6], conns: &mut [Option<TcpConn>; MAX_CONNS]) {
 /// frame (no mutable statics). Bounded by `RUN_OUT_MAX` (the remote's own send
 /// buffer caps it too); truly unbounded streaming as the child produces is a
 /// later refinement (see `docs/roadmap-cluster.md`). The `owner` check means only
-/// the task that issued the run may pull its output.
+/// the task that issued the run may pull its output - by packed task identity
+/// (`SENDER_TASK`), so a task that later lands in the issuer's reaped slot
+/// cannot pull it.
 const RUN_OUT_MAX: usize = 2048;
 struct PendingRun {
     active: bool,
@@ -1416,7 +1426,11 @@ impl PendingRun {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn handle_run(packed_mac: u64, sender: u64, buf: &[u8], len: usize, out: &mut [u8], conns: &mut [Option<TcpConn>; MAX_CONNS], dials: &mut [Option<DialConn>; MAX_DIAL], auth: &Auth, pending: &mut PendingRun) -> usize {
+fn handle_run(packed_mac: u64, _sender: u64, buf: &[u8], len: usize, out: &mut [u8], conns: &mut [Option<TcpConn>; MAX_CONNS], dials: &mut [Option<DialConn>; MAX_DIAL], auth: &Auth, pending: &mut PendingRun) -> usize {
+    // Captured BEFORE tcp_run: it pumps our event loop, whose unfiltered
+    // receives replace the captured sender, so reading this afterwards could
+    // name whoever's message was drained last.
+    let owner = syscall(syscall_abi::SENDER_TASK, 0);
     let fail = |out: &mut [u8], msg: &[u8]| -> usize {
         let n = msg.len().min(out.len());
         out[..n].copy_from_slice(&msg[..n]);
@@ -1492,11 +1506,11 @@ fn handle_run(packed_mac: u64, sender: u64, buf: &[u8], len: usize, out: &mut [u
     if status != syscall_abi::NET_FETCH_OK {
         return fail(out, b"cpu: remote run failed\r\n");
     }
-    pending.owner = sender;
+    pending.owner = owner;
     pending.len = got.min(RUN_OUT_MAX);
     pending.cursor = 0;
     pending.active = true;
-    pending.next_chunk(sender, out)
+    pending.next_chunk(owner, out)
 }
 
 fn handle_rmount(packed_mac: u64, buf: &[u8], len: usize, out: &mut [u8], auth: &Auth) -> usize {
@@ -1735,15 +1749,20 @@ struct TcpConn {
     ssthresh: u32,
     /// Remote-execution (cluster Phase 4a): the scheduler slot of the spawned
     /// `cpu` child whose stdout this connection is capturing, or `CPU_NONE`
-    /// (0xFF) when this isn't a run connection. While set, `pump_send` holds off
+    /// when this isn't a run connection. While set, `pump_send` holds off
     /// (the response isn't ready); the child's output messages accumulate into
     /// `prefix`, and its end-of-stream reaps it, clears this, and lets the
-    /// accumulated output stream out then FIN.
-    cpu_child: u8,
+    /// accumulated output stream out then FIN. A PACKED TASK IDENTITY (slot and
+    /// generation, `TASK_IDENTITY` at spawn), matched against `SENDER_TASK` on every
+    /// message - never the bare slot, which is recycled the moment the child
+    /// is reaped.
+    cpu_child: u64,
 }
 
 /// `TcpConn::cpu_child` sentinel: this connection is not a remote-run capture.
-const CPU_NONE: u8 = 0xFF;
+/// No task identity is ever all-ones (`GET_ID_ERR` is the "no such task"
+/// answer of `TASK_IDENTITY`, and a failed lookup at spawn must not become a match).
+const CPU_NONE: u64 = u64::MAX;
 
 // ---------------------------------------------------------------------------
 // Dial-out: /net/tcp connection files (the Plan 9 `/net/tcp` model, scoped).
@@ -3046,14 +3065,17 @@ fn handle_cpu_run(c: &mut TcpConn, msg: &[u8], auth: &Auth, who: Proxy) {
         c.prefix_len = n;
         return;
     };
-    match cpu_spawn(cmdline) {
-        Some(slot) => {
+    match cpu_spawn(cmdline).map(|slot| (slot, syscall(syscall_abi::TASK_IDENTITY, slot as u64))) {
+        Some((_, id)) if id != syscall_abi::GET_ID_ERR => {
             // Capture: hold the response until the child's output completes.
-            c.cpu_child = slot;
+            c.cpu_child = id;
         }
-        None => {
-            // Nothing to capture - stream an error line and FIN (cpu_child stays
-            // NONE, so pump_send sends c.prefix immediately).
+        _ => {
+            // Nothing to capture - no /bin program, or the child's slot was
+            // already Unused by the time TASK_IDENTITY looked (it faulted on its
+            // first instruction, or a foreign WAIT reaped it between the two
+            // syscalls). Stream an error line and FIN (cpu_child stays NONE, so
+            // pump_send sends c.prefix immediately).
             let msg: &[u8] = b"cpu: cannot run command (no such /bin program?)\r\n";
             let n = msg.len().min(c.prefix.len());
             c.prefix[..n].copy_from_slice(&msg[..n]);
