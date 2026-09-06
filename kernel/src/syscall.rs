@@ -1452,15 +1452,32 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
             // UNDELEGATE to undo it. Both real delegators (the shell wiring a
             // pipeline, netd wiring its `cpu` child) only ever grant to a slot
             // they just spawned, so this costs nothing legitimate.
+            //
+            // A slot that is not live answers TASK_ERR_NO_SUCH_TASK, as KILL,
+            // FG, WAIT, MSG_SEND and MSG_CALL already do - NOT the policy
+            // refusal. The distinction is the shell's: a pipeline stage that
+            // already exited (its own error, already printed) is the ordinary
+            // reason a link cannot be authorized, and a real denial is not.
+            // It used to fold both into MSG_ERR_DENIED, and the shell then
+            // re-derived the reason from TASK_STATE after the fact - two more
+            // syscalls, and a guess: a policy refusal on a stage that died in
+            // between read as "already exited". The reason is atomic with the
+            // answer only if the kernel gives it.
+            //
+            // Checked in this order, and the ABI doc states it: a grantee
+            // below the spawnable range is the security refusal above and is
+            // answered first; then either slot not live (out of range counts
+            // as not live, for both arguments alike - `task_exists` bounds-
+            // checks); then the caller's own policy.
             let grantee = arg0 as usize;
             let target = arg1 as usize;
-            if grantee < tasks::FIRST_SPAWNABLE
-                || grantee >= tasks::NUM_TASKS
-                || !tasks::task_exists(grantee)
-                || target >= tasks::NUM_TASKS
-                || !tasks::task_exists(target)
-                || !tasks::may_delegate(tasks::current_task(), target)
-            {
+            if grantee < tasks::FIRST_SPAWNABLE {
+                return syscall_abi::MSG_ERR_DENIED;
+            }
+            if !tasks::task_exists(grantee) || !tasks::task_exists(target) {
+                return syscall_abi::TASK_ERR_NO_SUCH_TASK;
+            }
+            if !tasks::may_delegate(tasks::current_task(), target) {
                 return syscall_abi::MSG_ERR_DENIED;
             }
             tasks::set_delegate(grantee, target);
