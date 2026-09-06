@@ -414,6 +414,41 @@ one. A peer that crashes without a FIN leaves a half-open connection, so an
 idle timeout is still required; it is just TCP-shaped and standard rather than
 a fid-eviction rule invented here.
 
+> **GATE RESULT 2026-09-05: viable, but NOT as an unconditional change — and
+> the prototype was reverted rather than kept.** The gate was built (the export
+> holds the connection after a reply, resetting only once everything is acked so
+> retransmission out of `c.prefix` still works, plus a 30s idle reap for a peer
+> that dies without a FIN) and it built clean. Then the blocking fact turned up
+> on the *client* side:
+>
+> **Both existing clients use the server's FIN as the end-of-reply marker.**
+> `np9p_client.py`'s `recv_reply` reads to EOF; `netd`'s own `tcp_get` says so
+> in as many words — *"Receive the response until the peer's FIN or a deadline
+> (~1s)"*. An export that stops sending FIN therefore hangs the Python peer
+> outright and stalls every guest-to-guest request into a one-second timeout.
+> That is a **flag day on a live protocol**, which fails the stability test
+> before any of the fid work begins.
+>
+> The frame already carries its own length (`[u32 len][body]`), so EOF was
+> never *necessary* — only convenient. Two things are therefore prerequisites,
+> in this order, and neither is optional:
+>
+> 1. **Make every client length-aware** — read exactly `4 + len` and stop.
+>    Harmless on its own: it works against the current FIN-closing export
+>    unchanged, so it can land and be verified before anything else moves.
+> 2. **Make the session OPT-IN**, so an old client and a new export can
+>    coexist. Without a signal, a length-aware new client and a FIN-waiting old
+>    one cannot both be right about the same server. This needs a wire
+>    signal, and inventing one unilaterally is exactly what "do it right the
+>    first time" rules out — **the mechanism is a decision, not an
+>    implementation detail** (a new auth magic beside `AUTHNP03`, a flag in the
+>    request header, or a separate listen port each have different costs across
+>    the three implementations that spell this frame).
+>
+> **The gate did its job.** It cost one afternoon's prototype and it stopped a
+> change that would have broken every existing peer, which is precisely the
+> failure mode step 3a's gate caught for the toolchain.
+
 **Step 4 — the session gate. NEXT, and nothing is built on it until it
 passes.** Prove a persistent export connection is viable *before* any fid
 exists on top of it — the same shape as step 3a, which earned its keep by
