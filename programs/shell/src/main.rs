@@ -1251,11 +1251,20 @@ fn run_head_pipeline(
                 //
                 // The producers are likely still blocked feeding a consumer
                 // that is now gone, so kill them. Deliberately a bare `KILL`
-                // and NOT `kill_and_reap`: the `wait_pipe_stage` loop
-                // immediately below reaps each one *and reports how it ended*,
-                // which is the message the user should see. Reaping here first
-                // would leave that loop nothing to collect and turn every
-                // report into "did not exit cleanly".
+                // and NOT `kill_and_reap`, but NOT for the reason first written
+                // here - that reason was backwards. A *successful* `KILL` frees
+                // the slot to `Unused` outright, so the `wait_pipe_stage` loop
+                // below gets `TASK_ERR_NO_SUCH_TASK` (which is above
+                // `FS_ERR_MIN`) and prints "did not exit cleanly" either way.
+                //
+                // What the bare `KILL` actually buys is the *other* case, and
+                // it is the common one: a producer that already exited on its
+                // own is a `Zombie`, the `KILL` fails, and the loop's `WAIT`
+                // reaps its REAL exit code and reports that instead. And it is
+                // common because `ulib::pipe_out` fast-fails as soon as its
+                // consumer is gone, so producers usually exit by themselves
+                // here rather than needing to be killed. Reaping them here
+                // would throw that status away.
                 for s in &slots[..last] {
                     syscall(syscall_abi::KILL, *s);
                 }
@@ -1313,12 +1322,34 @@ fn drain_program_output(slot: u64) {
 /// `echo still-alive` answers `echo: no free task slot`, and only `wait <n>`
 /// five times over gets the machine back.
 ///
-/// `WAIT` cannot block here: if the `KILL` succeeded the slot is already
-/// `Unused` and `WAIT` returns immediately, and a slot below `FIRST_SPAWNABLE`
-/// (an unfilled `slots[]` entry, which is 0) is refused up front by both calls.
+/// `WAIT` does not block on the task this was called for: if the `KILL`
+/// succeeded the slot is already `Unused` and `WAIT` returns immediately, if it
+/// failed the task is a `Zombie` and `WAIT` reaps it, and a slot below
+/// `FIRST_SPAWNABLE` (an unfilled `slots[]` entry, which is 0) is refused up
+/// front by both calls.
+///
+/// **Not the same as "cannot block", and the difference is a real if narrow
+/// window.** The two syscalls are separate trips through EL0 and the shell is
+/// preemptible between them. A successful `KILL` frees the slot, `tasks::spawn`
+/// hands out the lowest free slot, and `netd` issues its own `SPAWN` for a
+/// remote-exec child — so an inbound `cpu` request landing in that gap can take
+/// the slot, and the `WAIT` then blocks on an unrelated task until it exits
+/// (escapable with Ctrl+C, which returns `WAIT_INTERRUPTED`). Accepted rather
+/// than closed: it needs a concurrent remote request inside a two-syscall
+/// window, and the alternative is a combined kill-and-reap syscall for a
+/// hazard that has never been observed. Recorded so the next reader does not
+/// have to re-derive that the claim is "does not", not "cannot".
 ///
 /// The *completion* paths do not need this - they already `wait_pipe_stage`
 /// every stage, which is why the leak only ever showed on the error paths.
+/// With one exception, which is a real remaining gap rather than a quibble:
+/// `wait_pipe_stage` treats `WAIT_INTERRUPTED` as something to *report* ("it
+/// may still be running - see ps") and moves on to the next stage without
+/// reaping, so a Ctrl+C during a pipeline's wait loop holds slots exactly as
+/// the bug this function fixes did. The difference is that it announces itself
+/// and names the tool, which is why it is left alone here: the task may still
+/// be alive, and reaping a live task is not a thing to do behind the user's
+/// back. See ROADMAP.md's review ledger.
 fn kill_and_reap(slot: u64) {
     syscall(syscall_abi::KILL, slot);
     let _ = syscall(syscall_abi::WAIT, slot);
@@ -1368,7 +1399,12 @@ fn pipe_send(slot: u64, ptr: *const u8, len: u64) -> bool {
             syscall_abi::MSG_ERR_FULL => {
                 if syscall(syscall_abi::GET_TICKS, 0) > deadline {
                     print_line("pipe: program stopped reading its input - killing it");
-                    kill_and_reap(slot);
+                    // Teardown is the CALLER's - it kills and reaps every
+                    // stage, this one included, the moment we return false.
+                    // Doing it here as well killed and reaped `slots[0]` twice
+                    // and left it ambiguous who owned the slot, which also made
+                    // `kill_and_reap`'s slot-reuse window a guaranteed
+                    // occurrence on this path rather than a rare race.
                     return false;
                 }
             }

@@ -1264,6 +1264,16 @@ would otherwise silently shrink into looking like nothing was ever found.
     now go through one `kill_and_reap`; the *completion* paths never leaked,
     because they already `wait_pipe_stage` every stage. Seven iterations now
     leave the pool untouched.
+
+    **One leak of the same shape survives, deliberately: Ctrl+C during a
+    pipeline's wait loop.** `wait_pipe_stage` treats `WAIT_INTERRUPTED` as
+    something to report — *"it may still be running - see ps"* — and moves to
+    the next stage without reaping, so the slots stay held. It is left as-is
+    because the task genuinely may still be running and reaping a live task
+    behind the user's back is worse, and because unlike the fixed bug it
+    announces itself and names the tool that resolves it. Closing it properly
+    means deciding what Ctrl+C should *mean* for a pipeline (detach? kill the
+    whole group?), which is a design question, not a repair.
   - **The "consumer already exited, stay quiet" heuristic inspects the wrong
     slot.** The kernel denies `DELEGATE` on a dead *grantee* before it looks at
     the target, but the shell explains the denial from the *target*'s state —
