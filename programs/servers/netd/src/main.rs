@@ -632,9 +632,13 @@ fn handle_client(packed_mac: u64, sender: u64, buf: &[u8], len: usize, conns: &m
     // sender's. Reachable since 2026-09-06: a remote-exec child orphaned by a
     // netd restart keeps its send right (grants aimed at a supervised slot
     // survive its restart), so its zero-length end-of-stream marker lands here
-    // with no `cpu_child` record to route it. Dropped, no reply; the supervisor
-    // ping is eight bytes and unaffected.
+    // with no `cpu_child` record to route it. Answered exactly as an unknown
+    // op is, not dropped: a caller that got here through a blocking MSG_CALL
+    // must never be left waiting for a reply that does not come. For the
+    // orphan's fire-and-forget send the reply is refused or ignored, which is
+    // fine. The supervisor ping is eight bytes and never takes this path.
     if len < 8 {
+        reply(sender, &0u64.to_le_bytes());
         return;
     }
     match read_u64(buf, 0) {

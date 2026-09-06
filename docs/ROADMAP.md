@@ -1389,7 +1389,9 @@ would otherwise silently shrink into looking like nothing was ever found.
     which has no record of it, and its zero-length end-of-stream marker
     would have been decoded from the never-cleared request buffer as the
     previous client's request. Closed with a length guard at the top of
-    `handle_client` (the supervisor ping is eight bytes, unaffected); the
+    `handle_client` that answers as the unknown-op arm does rather than
+    dropping, so a blocking caller is never left waiting (the `low` review's
+    one finding; the supervisor ping is eight bytes, unaffected); the
     child's data messages dispatch as unknown ops and are answered and
     ignored. Demuxing the child by its stdout target instead of a remembered
     slot is the fuller shape, and belongs with the raw-slot item below.
