@@ -43,6 +43,11 @@ def rust_consts(path):
         out[name] = (1 << 64) - 1 - int(off)
     for name in re.findall(r"pub const (\w+): u64 = u64::MAX;", src):
         out[name] = (1 << 64) - 1
+    # Plain `u64 = N` - how the NETOP_* op numbers are written. Absent until
+    # 2026-09-05, so NETOP_RMOUNT was invisible on the Rust side and could not
+    # be compared however carefully the C header spelled it.
+    for name, val in re.findall(r"pub const (\w+): u64 = (\d+);", src):
+        out[name] = int(val)
     # FLAG BITS are `u32` written as a shift (`1 << 0`), which neither pattern
     # above sees: the integer one wants `usize` and a literal. STAT_FLAG_DIR
     # was invisible to BOTH languages for that reason, so the bit deciding
@@ -167,6 +172,24 @@ CHECKED = [
     # a stale floor reads the new codes as ordinary success values - a wrong
     # answer, not an error. Three moves went unchecked before this line existed.
     "FS_ERR_MIN",
+    # The remote-mount relay frame, hand-mirrored into libc/include/sys.h by
+    # step 3b. A drift in NETOP_RMOUNT_MSG misframes EVERY remote request from
+    # C - the NP message lands at the wrong offset, so the far side reads a
+    # verb out of the endpoint bytes.
+    "NET_TASK",
+    "NETOP_RMOUNT",
+    "NETOP_RMOUNT_ENDPOINT",
+    "NETOP_RMOUNT_MSG",
+    # Error codes a C program branches on to decide what to print.
+    "FS_ERR_NOT_FOUND",
+    "FS_ERR_PERM",
+    "MSG_ERR_DENIED",
+    # The endpoint width, spelled a third time in libc/include/nsresolve.h.
+    "NS_ENDPOINT_LEN",
+    "NS_TARGET_FSD",
+    "NS_TARGET_CONSOLE",
+    "NS_TARGET_NETLOCAL",
+    "NS_TARGET_REMOTE",
 ]
 
 # NOT checked: NP_MAC_LEN. Neither peer names it - both write the literal 32 at
@@ -225,7 +248,11 @@ PEER_BASELINE = {
     "np9p_server.py": 18,
     # The C header. It spells far more of the ABI than either Python peer; this
     # floor covers the names CHECKED lists today.
-    "libc/include/sys.h": 3,  # + 4 STAT_* offsets, FS_ERR_READ_ONLY, STAT_FLAG_DIR, FS_ERROR, FS_ERR_NO_SUCH_VERB
+    # Raised from 3 when step 3b's constants were pinned. The script's own
+    # instruction is to raise a baseline when a peer learns a new constant; it
+    # had already learned FS_ERR_NOT_FOUND without the floor moving.
+    "libc/include/sys.h": 11,
+    "libc/include/nsresolve.h": 5,  # + 4 STAT_* offsets, FS_ERR_READ_ONLY, STAT_FLAG_DIR, FS_ERROR, FS_ERR_NO_SUCH_VERB
 }
 
 
@@ -299,7 +326,10 @@ def main():
     # when this was added (none) - a name defined in both would silently take
     # whichever loaded last.
     rust, origin = {}, {}
-    for crate in ("ninep-abi", "syscall-abi"):
+    # nsresolve joins them because libc/include/nsresolve.h hand-copies its
+    # NS_TARGET_* values, and a reordered copy routes a REMOTE path to fsd -
+    # a wrong answer, not an error.
+    for crate in ("ninep-abi", "syscall-abi", "nsresolve"):
         found = rust_consts(os.path.join(ROOT, crate, "src", "lib.rs"))
         dupes = set(rust) & set(found)
         if dupes:
@@ -321,6 +351,11 @@ def main():
     # answer.
     peers["libc/include/sys.h"] = c_consts(
         os.path.join(ROOT, "libc", "include", "sys.h"))
+    # The shim header is a FOURTH spelling: NS_TARGET_* and NS_ENDPOINT_LEN are
+    # copies of nsresolve/src/lib.rs and ninep_abi. A reordered NS_TARGET_*
+    # routes a remote path to fsd, which is a wrong answer rather than an error.
+    peers["libc/include/nsresolve.h"] = c_consts(
+        os.path.join(ROOT, "libc", "include", "nsresolve.h"))
 
     problems = list(problems_early)
     compared = 0

@@ -320,6 +320,27 @@ in the same session and is unaffected.
 > found a server bug by disagreeing with it**, which is the entire argument for
 > building the observer first.
 
+> **Review found a silent zero-byte remote write, and it was the code this step
+> shipped untested.** `write()` on a remote fd granted the buffer to `netd` and
+> sent `NP_PWRITE` with no payload — but **no grant crosses a machine**: the
+> relay forwards the NP message verbatim and never looks at one. The far side
+> would have received a bare 48-byte header while `write()` advanced the offset
+> and returned `count`. The comment claimed `netd` bridged the grant, which
+> confused the *export* side (`fsd_write_at`, inbound, which does bridge) with
+> the outbound relay, which does not — `true-when-written` again, written the
+> same day. Now **refused**: the inline wire shape for `NP_PWRITE` is not
+> defined until step 6, so there is nothing to agree with and nothing to test
+> against, and a refusal is checkable today where a second untested
+> implementation would not be.
+>
+> **The step's other fix was half a fix.** Making `open(O_RDONLY)` fail on a
+> missing file left the sibling branch alone, so `open(O_WRONLY|O_TRUNC)`
+> without `O_CREAT` still *created* the file — the same POSIX violation, one
+> branch over. Both are now asserted by `cremote`, which checks that each
+> refusal actually happens: a fix that makes something fail correctly needs a
+> check that the failure occurs, or it is indistinguishable from the bug still
+> being there.
+
 > **Two costs paid here, stated:** every C program now links the Rust shim, so
 > `--gc-sections` is required for the whole C arc rather than one target; and
 > `open()` still returns `-1` for everything, with `ouro_last_fs_status()`

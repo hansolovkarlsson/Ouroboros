@@ -57,9 +57,39 @@ static int try_read(const char *path) {
     return 0;
 }
 
+/* Each of these asserts a REFUSAL. A fix that makes something fail correctly
+ * needs a check that the failure happens, or it is indistinguishable from the
+ * bug it replaced still being there. */
+static int must_refuse(const char *what, int ok) {
+    if (ok) {
+        printf("%s: SUCCEEDED, and must not have\r\n", what);
+        return 1;
+    }
+    printf("%s: refused (%s)\r\n", what, why());
+    return 0;
+}
+
 int main(void) {
     int bad = 0;
     bad |= try_read("/EFI/ORBS/INIT.CFG");  /* local - the no-regression check */
     bad |= try_read("/mnt/a/HELLO.TXT");    /* remote - the new capability */
+
+    /* O_TRUNC WITHOUT O_CREAT on a missing file must fail (POSIX ENOENT). fsd
+     * used to create it, and the sibling O_RDONLY fix left this branch alone. */
+    int fd = open("/NOSUCH.TXT", O_WRONLY | O_TRUNC);
+    bad |= must_refuse("open(/NOSUCH.TXT, O_WRONLY|O_TRUNC)", fd >= 0);
+    if (fd >= 0) {
+        close(fd);
+    }
+
+    /* A remote WRITE must be refused, not silently dropped. It used to grant a
+     * buffer that never crosses a machine and send a payload-free request,
+     * which would have reported success while transmitting nothing. */
+    fd = open("/mnt/a/HELLO.TXT", O_RDONLY);
+    if (fd >= 0) {
+        ssize_t n = write(fd, "x", 1);
+        bad |= must_refuse("write() to a remote fd", n >= 0);
+        close(fd);
+    }
     return bad;
 }

@@ -714,6 +714,15 @@ fn handle_ninep(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [
             };
             let flags = p[0];
             if flags & ninep_abi::OPEN_TRUNC != 0 {
+                // O_TRUNC WITHOUT O_CREAT MUST NOT CREATE. `write_file` creates
+                // the file when it is absent, so this branch made
+                // `open(path, O_WRONLY|O_TRUNC)` conjure a file POSIX says must
+                // fail with ENOENT - the exact violation the `else` arm below
+                // was added to fix, left standing in the sibling branch. Half a
+                // fix reads as a whole one until someone tries the other case.
+                if flags & ninep_abi::OPEN_CREATE == 0 && fs.stat(path).is_err() {
+                    return status_reply(reply, syscall_abi::FS_ERR_NOT_FOUND);
+                }
                 if let Err(e) = fs.write_file(path, &[]) {
                     return status_reply(reply, error_code(&e));
                 }

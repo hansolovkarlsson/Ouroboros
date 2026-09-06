@@ -89,7 +89,17 @@ pub unsafe extern "C" fn ouro_ns_resolve(
     let path_slice = core::slice::from_raw_parts(path, path_len);
     let out_slice = core::slice::from_raw_parts_mut(out, out_cap);
     let r = ninep_abi::resolve_ns(&ns[..nlen], path_slice, out_slice);
-    if r.len > out_cap {
+    // TRUNCATION IS THE FAILURE THAT MATTERS, and `r.len > out_cap` could never
+    // detect it: `resolve_ns` clamps every write with `.min(out.len())` and
+    // returns the CLAMPED length, so that test was dead code and the documented
+    // "-1 if a buffer was too small" was unreachable. A silently shortened path
+    // is not a smaller answer, it is a DIFFERENT PATH - and with `O_TRUNC` it
+    // truncates the wrong file, with no error anywhere.
+    //
+    // A full buffer cannot be told from an overflowed one, so a result that
+    // exactly fills it is refused too. Over-refusing by one byte is the safe
+    // direction; saying which way a check errs is part of specifying it.
+    if r.len >= out_cap {
         return -1;
     }
     *out_len = r.len;
