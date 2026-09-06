@@ -347,74 +347,118 @@ in the same session and is unaffected.
 > beside it as the way to ask why. That is deliberately not `errno` — one
 > value, no thread story, and no claim to be more.
 
-> **BLOCKER FOUND 2026-09-05, before writing any of step 4: there is no
+> **BLOCKER FOUND 2026-09-05, before writing any of step 4: there was no
 > connection to key a fid table on.** `tcp_get` opens a **fresh TCP connection
-> per remote request**, with a new source port each time ("One connection",
-> and `next_src_port` exists so back-to-back round trips never reuse a 4-tuple
-> a peer still holds in `TIME_WAIT`). The export therefore sees one request per
-> connection, and a per-connection fid table would lose every fid the instant
-> it was created.
+> per remote request**, with a new source port each time ("One connection", and
+> `next_src_port` exists so back-to-back round trips never reuse a 4-tuple a
+> peer still holds in `TIME_WAIT`). The export therefore saw one request per
+> connection, and a per-connection fid table would have lost every fid the
+> instant it was created.
 >
-> Decision 2's *substance* is untouched — `netd` owns remote fids, and a remote
-> client never names an `fsd` fid directly. What is gone is the **key**, and
-> with it the free answer to a question a connection was implicitly answering:
-> **when is a remote fid reclaimed?** There is no close to hang it on, and none
-> of `fsd`'s dead-owner-task signal either, because the owner is on another
-> machine. A client that never `NP_CLUNK`s leaks a slot forever.
->
-> Four ways forward, and the choice changes how much of steps 4–6 exists at all:
->
-> 1. **Key on the authenticated identity** (peer public key + user name, both
->    already in every signed request) and reclaim least-recently-used when the
->    table fills. No new wire, no transport change. A client's fid can be
->    reclaimed under it and then fail — bounded, but silent.
-> 2. **The same, plus an idle timeout** (`monotonic_us` is already there).
->    More predictable, still silent when it fires.
-> 3. **Make the export connection persistent** for a fid's lifetime. Truest to
->    real 9P, where a session *is* a connection, and it deletes the lifetime
->    question outright — connection close clunks everything. It is also a real
->    change to a transport that is deliberately one-shot today.
-> 4. **Do not carry fids over the wire at all.** `libc` remembers the resolved
->    *path* for a remote fd and translates: `NP_PREAD` → `NP_READ_AT`,
->    `NP_PWRITE` → `NP_WRITE_AT`, `NP_FSTAT` → `NP_STAT`, `NP_CLUNK` → nothing.
->    **The export already implements every one of those arms.** No server-side
->    state exists, so nothing can leak, be reclaimed, or be confused between
->    peers. The cost is the fid's own benefit — authorize-once becomes
->    authorize-per-op, which across a network is arguably the more correct
->    behaviour anyway, since the far side's permissions can change between ops.
->
-> **Recommendation: 4.** It removes steps 4 and 5 almost entirely, makes step 6
-> (remote write) fall out of an arm that already exists and is already tested,
-> and adds no state to a server that has no way to reclaim it. Options 1 and 2
-> build a table whose hardest problem is one the design need not have; option 3
-> is the principled answer and the largest change.
+> Decision 2's *substance* survived — `netd` owns remote fids, and a remote
+> client never names an `fsd` fid directly. What was gone was the **key**, and
+> with it the free answer to a question the connection had been answering
+> implicitly: **when is a remote fid reclaimed?**
 
-**Step 4 — the export learns the fid handle verbs.** `NP_OPEN`, `NP_FSTAT`,
-`NP_CLUNK` in `build_9p_reply`, with Decision 2's per-connection table.
-`NP_PREAD`/`NP_PWRITE` deliberately **not** yet — the handle lifecycle is worth
-proving before the data path rides on it. · **Check:** `np9p_client.py` gains an
-open→fstat→clunk sequence against the *guest's* export
-(`make run-image-9p`). · **Negative controls, two:** a fid number the client
-never opened is refused rather than served; and a fid opened on connection A is
-refused on connection B. The second is the whole point of Decision 2, so it is
-the one that must be shown failing before the table exists.
+## Decision 3 — the export connection becomes a session (2026-09-05)
 
-**Step 5 — `NP_PREAD`.** The wire→`SAFECOPY` bridge, mirroring
+**Confirmed: make the connection persistent for a fid's lifetime.** Four
+options were weighed against three criteria, in this order — **stable, safe,
+and leaving room for future features** — and on those the smallest change was
+the worst one.
+
+**That ordering is now the project's standing rule, and it was adopted because
+of this decision.** The first recommendation here was the cheapest option, and
+it was wrong; the criteria were restated (2026-09-05) as a correction, against
+a background of too much time spent re-fixing earlier fixes. A cheap repair
+has the same defect rate as the code it repairs — see
+[`repairing-the-repairs-postmortem.md`](repairing-the-repairs-postmortem.md) —
+so cheapest-now is not cheapest-in-total, and it is not the default answer.
+
+**Why not "translate fid ops to path ops" (the smallest change).** `libc` could
+have remembered the resolved path for a remote fd and sent `NP_READ_AT` /
+`NP_WRITE_AT` / `NP_STAT`, all of which the export already implements. It needs
+no server state at all, and it would have closed remote write almost for free.
+It was rejected because path-translation is not merely "authorize per op
+instead of once" — it **structurally cannot express** things a handle can, and
+never will:
+
+- **A path re-resolved per operation is a TOCTOU.** Between a read at offset 0
+  and one at offset 512, the far side can rename or replace that path, and the
+  client splices two different files together with no error anywhere — the
+  well-formed wrong answer this project keeps writing postmortems about. A fid
+  names the *file*; a path names a *name*.
+- **Unlink-then-read is impossible.** POSIX lets an open fd keep reading a
+  deleted file. Path-based, that cannot be done at all.
+- **File locking, `O_APPEND` atomicity, and directory streams** all need
+  per-handle server state, so none of them could ever exist remotely.
+
+**Why not a table keyed on the authenticated identity.** It keeps fid semantics
+but replaces a structural lifetime with a *policy* one — LRU or a timeout — so
+a live handle can vanish under its holder. That risk is permanent, and it is
+the hardest part of a design that need not have it.
+
+**What a session buys beyond fids.** Close-clunks-everything is a lifetime with
+no timers, no eviction and no knobs. It is also the only one of the four with a
+natural home for **session-scoped authentication**: every remote request is
+individually signed today, and a session could authenticate once instead —
+a reduction in per-request crypto that the other options have nowhere to put.
+**Deliberately out of scope for this arc**: changing the auth model in the same
+change that changes the transport is two risky things at once. Per-request
+signing stays; the door is simply no longer closed.
+
+**The cost, stated honestly.** `MAX_CONNS` is **4**, so sessions are a real
+budget and need a per-peer allocation or one peer starves the others. And a
+session does **not** remove every lifetime question — it removes the *policy*
+one. A peer that crashes without a FIN leaves a half-open connection, so an
+idle timeout is still required; it is just TCP-shaped and standard rather than
+a fid-eviction rule invented here.
+
+**Step 4 — the session gate. NEXT, and nothing is built on it until it
+passes.** Prove a persistent export connection is viable *before* any fid
+exists on top of it — the same shape as step 3a, which earned its keep by
+failing. A client holds one export connection open across several requests; the
+export serves them all on it and closes cleanly. **No fid verbs, no server
+handle state.** · **Checks, three, because three separate things could sink
+this:** (1) `netd` is not restarted by the supervisor while a session is idle —
+it already pumps its event loop during long waits, which is how `cpu` works, so
+this is expected to pass and must be *shown*, not assumed; (2) `MAX_CONNS`
+sessions can be open at once and the *next* one is refused cleanly rather than
+wedging or evicting a live one; (3) an abandoned session (peer killed, no FIN)
+is reclaimed by the idle timeout. · **Negative controls:** kill a peer
+mid-session and confirm the slot returns; open `MAX_CONNS + 1` and confirm the
+refusal is an error the client reports, not a hang.
+
+**Step 5 — the export learns `NP_OPEN` / `NP_FSTAT` / `NP_CLUNK`**, with the
+fid table keyed on the session from step 4. `NP_PREAD`/`NP_PWRITE`
+deliberately not yet: the handle lifecycle is worth proving before the data
+path rides on it. · **Check:** `np9p_client.py` gains an open→fstat→clunk
+sequence over one session against the guest's export (`make run-image-9p`).
+· **Negative controls, three:** a fid the client never opened is refused; a fid
+opened on session A is refused on session B (the whole point of Decision 2, so
+it must be shown failing before the table exists); and closing a session
+clunks its fids, verified by reopening and finding the old numbers dead.
+
+**Step 6 — `NP_PREAD`.** The wire→`SAFECOPY` bridge, mirroring
 `read_file_chunk`'s existing `GRANT_WRITE` pattern. · **Check:** read a file
-**larger than one `NP_REMOTE_CHUNK`** through a fid and byte-compare against the
-same file read path-based over the same mount — two independent paths to the
-same bytes. · **Negative control:** truncate the expected buffer by one byte;
-the comparison must fail. (A same-length compare that passes on a short read is
-the failure mode.)
+**larger than one `NP_REMOTE_CHUNK`** through a fid and byte-compare against
+the same file read path-based over the same mount — two independent paths to
+the same bytes. · **Negative control:** truncate the expected buffer by one
+byte; the comparison must fail. (A same-length compare that passes on a short
+read is the failure mode.)
 
-**Step 6 — `NP_PWRITE`.** The mirror bridge; `fsd_write_at` is the proven
-precedent for wire-inline → local `GRANT_READ`, already shipped in Phase 2.
-· **Check:** the two-VM rig, B writes through a fid onto A's disk, reads it back
-and compares. · **Negative control — and this one dictates the rig:** a user
-without `w` on the target must be refused. **Use `make run-image-2vm-ext2-*`,
-not the FAT32 pair.** FAT32 records no mode, so `fsd` has nothing to enforce and
-a permission test there passes before a fix and after it, proving nothing either
-time — the caveat `scripts/drive-2vm.py` already carries.
+**Step 7 — `NP_PWRITE`, and the C write path it unblocks.** The mirror bridge;
+`fsd_write_at` is the proven precedent for wire-inline → local `GRANT_READ`.
+This is also where `libc`'s remote `write()` stops being a refusal: step 3b
+refuses it precisely because this wire shape did not exist yet. · **Check:**
+the two-VM rig, B writes through a fid onto A's disk, reads it back and
+compares; and `cremote`'s `write() to a remote fd` assertion flips from
+"must refuse" to "must succeed". · **Negative control — and this one dictates
+the rig:** a user without `w` on the target must be refused. **Use
+`make run-image-2vm-ext2-*`, not the FAT32 pair.** FAT32 records no mode, so
+`fsd` has nothing to enforce and a permission test there passes before a fix
+and after it, proving nothing either time — the caveat
+`scripts/drive-2vm.py` already carries.
 
 ## Deliberately not in scope
 
@@ -422,6 +466,13 @@ time — the caveat `scripts/drive-2vm.py` already carries.
 - **Raising `MAX_FIDS`** — Decision 2 moves the per-client budget to `netd`,
   which makes 8 an `fsd`-local number again. Raise it when something actually
   exhausts it, with the exhaustion as the evidence.
+- **Session-scoped authentication** — Decision 3 makes it possible for the
+  first time, and it stays out of this arc anyway: changing the auth model in
+  the same change that changes the transport is two risky things at once.
+- **`fsd`'s bare `FS_ERROR` for a bad or not-yours fid** — the same
+  over-generic sentinel step 1 stopped using for verbs, one layer down. Worth
+  its own small change; `scripts/np9p_server.py` mirrors it deliberately rather
+  than diverging.
 - **`FID_PATH_MAX` (96)** — the export strips the mount prefix before relaying,
   so a remote path arrives *shorter*, not longer. Worth re-checking at Step 4
   rather than pre-emptively widening.
