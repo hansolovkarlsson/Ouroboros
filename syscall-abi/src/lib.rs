@@ -456,6 +456,18 @@ pub const HEAP_INFO_SIZE: u64 = 1;
 /// grantee or the target dies, so no explicit revoke is needed for that
 /// flow. Enforced at the `MSG_SEND`/`MSG_CALL` boundary (the kernel's
 /// `may_send`).
+///
+/// **Grants ACCUMULATE.** A task's delegations are a set, so a second call
+/// adds a target rather than replacing the first - which is what lets a
+/// pipeline stage hold both its consumer and `TO_NET` (it was one slot until
+/// 2026-09-06, and the silent replacement was a bug). There is deliberately
+/// **no revoke** short of task death, so a grant is for the grantee's
+/// lifetime: delegate what a task may hold until it exits, not less.
+///
+/// `grantee` must be a **spawnable** slot (the kernel's `FIRST_SPAWNABLE` and
+/// up). Servers never exit, so a grant into one would never be cleared, and
+/// accumulating send rights into a server is exactly what the static masks
+/// exist to deny.
 pub const DELEGATE: u64 = 41;
 
 /// `(frame ptr, frame len)` -> `0` on success, or an error sentinel.

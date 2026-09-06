@@ -229,9 +229,11 @@ ps | upper                               ->  the process list, uppercased
   captures it and writes it to the file), and hands each producer a runtime
   capability to reach its
   consumer (`DELEGATE`); that sibling-to-sibling send is otherwise forbidden
-  by the IPC send-mask, and the shell alone can grant it. A linear chain needs
-  only one delegated target per task, so no special "general delegation" is
-  involved. The shell then waits for every stage to exit.
+  by the IPC send-mask, and the shell alone can grant it. Each stage holds its
+  consumer *and* the `TO_NET` every spawned command gets, so the delegation set
+  is a per-task bitmask rather than a single target — it was one slot until
+  2026-09-06, and a piped read of a remote mount could not work until it was
+  not. The shell then waits for every stage to exit.
 
 A pipeline stage is a standard filter program (see `upper/src/main.rs` for
 the shape to copy: stdin is `msg_recv`, output goes to its **stdout target**

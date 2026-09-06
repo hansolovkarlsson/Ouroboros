@@ -148,6 +148,32 @@ python3 scripts/np9p_server.py 5641                 # on the host; serves a smal
 #   mount -r 10.0.2.2:5641 /mnt/a ; ls /mnt/a ; cat /mnt/a/HELLO.TXT
 ```
 
+**Run at least one of these PIPED, and one under `exec`.** Unattended:
+
+```sh
+python3 scripts/drive-qemu.py --slirp build/esp.img \
+  'login:@@root' 'assword@@root' \
+  '# @@mount -r 10.0.2.2:5641 /mnt/a' \
+  '# @@cat /mnt/a/HELLO.TXT | wc' \
+  '# @@cat /mnt/a/BIG.TXT | wc' \
+  '# @@ping 10.0.2.2 | wc' \
+  '# @@exec /bin/cat /mnt/a/SUB/NOTE.TXT' \
+  '# @@'
+```
+
+Expected `40 400 1960`, `200 2600 13600`, `1 3 21`, and the note's one line.
+
+Not decoration: a spawned command reaches `netd` only through a capability the
+shell delegates, and until 2026-09-06 **two of the shell's five spawn paths did
+not delegate it** — so every network program was broken in a pipeline and under
+`exec`, for months, while every recipe on this page ran unpiped commands and
+passed. The bug was invisible to the tests that were supposed to cover it
+because they all exercised the one spawn path that worked. `BIG.TXT` is also
+the control that the failure is not a timeout: it is ~28 round trips over ~17 s,
+far past the supervisor's 2.56 s wedge threshold, and it must **succeed** —
+that is what distinguishes a capability denial (fails instantly, no packets)
+from a server restart (`server slot 4 wedged` on the console).
+
 **Authentication.** Every request is **signed** with a per-machine Ed25519 key,
 and the exporter serves only a public key listed in its
 `/etc/cluster/authorized`. Both python peers hold the dev "host" identity, which

@@ -1438,9 +1438,24 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
             // delegate a send-cap it *statically holds* (may_delegate),
             // which confines inter-child streaming to the shell - see the
             // DELEGATE doc in syscall-abi and tasks::may_delegate.
+            //
+            // The GRANTEE must be a spawnable slot. Only `target` used to be
+            // constrained, which let any /bin program widen a *server's*
+            // send-mask: a spawnable slot statically holds TO_SHELL|TO_FSD|
+            // TO_CON|TO_ACCT, so `DELEGATE(grantee=CON_TASK, target=0)` passed
+            // every check and handed `cond` - whose mask is deliberately empty
+            // because it "only ever replies" - an unsolicited send right.
+            // Servers never exit, so `clear_delegate` never ran and it stuck
+            // for the boot. It was self-limiting only by accident, back when a
+            // second grant overwrote the first; once DELEGATED_SEND became a
+            // set that accident stopped limiting anything, and there is no
+            // UNDELEGATE to undo it. Both real delegators (the shell wiring a
+            // pipeline, netd wiring its `cpu` child) only ever grant to a slot
+            // they just spawned, so this costs nothing legitimate.
             let grantee = arg0 as usize;
             let target = arg1 as usize;
-            if grantee >= tasks::NUM_TASKS
+            if grantee < tasks::FIRST_SPAWNABLE
+                || grantee >= tasks::NUM_TASKS
                 || !tasks::task_exists(grantee)
                 || target >= tasks::NUM_TASKS
                 || !tasks::task_exists(target)

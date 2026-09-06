@@ -418,7 +418,7 @@
         <div class="icell">
           <div class="num">02 · communication</div>
           <h3>Messages by copy</h3>
-          <p>Tasks never share memory. A message is copied — out of the sender, into the kernel, into the destination's mailbox. Small, bounded, safe by construction: no pointer from one task is ever dereferenced by another. And a task may only message the endpoints its per-slot capability mask allows — a spawned program can reach the servers it legitimately needs and the shell, not the NIC and not arbitrary tasks — so isolation is topological, not just memory-level.</p>
+          <p>Tasks never share memory. A message is copied — out of the sender, into the kernel, into the destination's mailbox. Small, bounded, safe by construction: no pointer from one task is ever dereferenced by another. And a task may only message the endpoints its per-slot capability mask allows — a spawned program can reach the servers it legitimately needs and the shell, not the device drivers' hardware and not arbitrary tasks — so isolation is topological, not just memory-level. The mask is a baseline: a task holding a capability may hand it onward at runtime, which is how the shell wires one program's output straight into the next, and how any command gets to speak to the network server at all.</p>
         </div>
         <div class="icell">
           <div class="num">03 · bulk data</div>

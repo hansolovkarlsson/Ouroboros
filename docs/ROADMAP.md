@@ -366,24 +366,60 @@ the microkernel arc itself still leaves open):
      all, so EOF is genuinely its terminator there. Detail, with the checks
      and controls, in [`roadmap-fid-verbs.md`](roadmap-fid-verbs.md).
 
-   - **Re-confirmed 2026-09-05, and it is the WEDGE-TIMER failure already
-     analysed below, not a new one.** `cat /mnt/a/HELLO.TXT | wc` gives
-     `0 0 0` and `cat /mnt/a/BIG.TXT` (13,600 B, a new larger fixture) reports
-     `cat: failed` — both identical on `main`, so neither belongs to the fid
-     arc. The instinct was to blame `MAX_CONNS = 4`; **that was wrong**, and
-     the measured table further down this file already had the answer: `netd`
-     is continuously `Runnable` for a whole multi-chunk remote read, and any
-     read taking longer than `WEDGE_TICKS` (2.56 s) gets `netd` restarted
-     mid-transfer. `HELLO.TXT` is 5 round trips ≈ 3.0 s (over), and `BIG.TXT`
-     is ~28 round trips ≈ 17 s (far over). The pipe variant fails for the same
-     reason — a pipeline adds time, it does not add a new fault.
+   - ~~**Re-confirmed 2026-09-05, and it is the WEDGE-TIMER failure already
+     analysed below, not a new one.**~~ — **THAT ATTRIBUTION WAS WRONG, and
+     the real bug is FOUND AND FIXED 2026-09-06.** It was never the wedge
+     timer. The 09-03 heartbeat fix works exactly as documented: a remote
+     `cat` of `BIG.TXT` is **28 round trips over ~17 s** — nearly seven times
+     `WEDGE_TICKS` — and it now completes with **zero** `slot 4 wedged`
+     messages and zero faults. Timing was never the discriminator.
 
-     Two things worth keeping from re-finding it: the peer's fixture was
-     sitting right **on** the threshold, so it failed for a reason any change
-     in signing speed could move either side of — `BIG.TXT` is far past it and
-     stays there. And a documented, measured analysis was nearly overwritten
-     with a fresh guess, which is what a "new" bug record should always be
-     checked against first.
+     **The discriminator was the PIPE.** Measured on `main`, same boot, same
+     peer:
+
+     | command | before | after |
+     | --- | --- | --- |
+     | `cat /mnt/a/BIG.TXT` (28 RTs, ~17 s) | **works** | works |
+     | `cat /mnt/a/HELLO.TXT \| wc` (5 RTs, ~3 s) | `cat: failed` + `0 0 0` | `40 400 1960` |
+     | `cat /mnt/a/BIG.TXT \| wc` | `cat: failed` + `0 0 0` | `200 2600 13600` |
+     | `ping 10.0.2.2` | works | works |
+     | `ping 10.0.2.2 \| wc` | `ping: request failed` + `0 0 0` | `1 3 21` |
+
+     Both halves of each `before` cell were always printed together: `cat`'s
+     error path calls `end_of_stream` before exiting, so the consumer sees a
+     clean empty stream and reports `0 0 0`. The 09-05 entry recorded only the
+     `0 0 0`; recording only the `cat: failed` would drop the same signature
+     from the other end.
+
+     The longer read succeeded and the shorter piped one failed, which no
+     threshold can explain. **The host peer logged not one request** for a
+     failing run — the same "zero packets left the guest" signature as cause B
+     below, and the same symptom text, because it is the same denial: of the
+     shell's five spawn sites, only `run_found_command`'s two delegated
+     `TO_NET`. `run_head_pipeline` and **both** `cmd_exec` arms did not — so
+     *every network-using program was broken inside a pipeline*, and under
+     `exec`, not just remote mounts. The grant now lives in `spawn_path`, the
+     one function all five go through, so a sixth site cannot omit it.
+
+     **And it could not be fixed in the shell alone**, which is why it lasted:
+     `tasks.rs::DELEGATED_SEND` held **one** delegated target per task, so a
+     stage could hold the pipe delegation *or* `TO_NET`, and the second grant
+     silently revoked the first. It is now a **set** (a bitmask in the same
+     `1 << slot` shape `caps_for_slot` already uses). Not a widening — every
+     bit still needs a delegator that statically holds it; what is gone is the
+     accidental revocation.
+
+     **The lesson, and it is about the record rather than the code.** The
+     09-05 entry did the thing this file elsewhere recommends — it checked a
+     "new" bug against a documented, measured analysis instead of guessing —
+     and it landed on the wrong cause anyway, because it matched on the
+     *symptom* (a remote read fails) and never re-checked the old analysis's
+     **signature**: `WEDGE_TICKS` announces itself with `server slot 4 wedged`
+     on the console, and that line was absent from every failing run. Reusing
+     a measured analysis is only safe if its signature is re-observed; matching
+     a symptom to a stored cause is a guess wearing a citation. The 09-05 entry
+     even recorded `cat /mnt/a/BIG.TXT` as failing, when the unpiped form
+     works — the counter-example was in hand and read as confirmation.
 
    The docs needed no correction: `CLAUDE.md` and
    [`testing-qemu.md`](testing-qemu.md) both show `ls /mnt/a` in that recipe,
@@ -427,6 +463,17 @@ the microkernel arc itself still leaves open):
    Zero requests reaching a peer that was verified alive is the same signature
    as the original failing capture, which is what ties the forced case to the
    real one.
+
+   **Cause B had a THIRD sibling, found 2026-09-06 — see the corrected
+   09-06 bullet above.** The retry `net_msg_call` added absorbs a denial that
+   is *transient by construction*, and its doc says so. It cannot help where
+   the grant never arrives at all, and there the very same `MSG_ERR_DENIED` →
+   `FS_ERROR` → "cat: failed" chain plays out permanently: the shell delegated
+   `TO_NET` on its non-pipeline spawn path only. Every measurement in the
+   table above ran an unpiped command, so the surviving half of the bug was
+   invisible to the check that proved the fix. A denial-absorbing retry is not
+   the same thing as a grant, and testing one spawn path does not test the
+   others.
 
    The original entry, and the trace that split the two faults, follow.
 
@@ -556,8 +603,12 @@ the microkernel arc itself still leaves open):
    29, the second segment), not the first request of a connection.
 
 4. **General / transitive capability delegation.** The delegation shipped
-   2026-08-21 is deliberately coarse: one delegated target per task,
-   non-transitive, in practice shell-only. Making it general (any task hands
+   2026-08-21 is deliberately coarse: **non-transitive, irrevocable short of
+   task death, and in practice shell-only.** (It was also *one target per
+   task* until 2026-09-06, when that turned out to be a bug rather than a
+   scope cut — see the 09-06 entry under item 2. It is a per-task set now,
+   which is what `a | b | c` with a network stage needed; the rest of this
+   item is untouched by that.) Making it general (any task hands
    any held capability onward, revocably — MINIX's full grant model) would
    unlock true relay-free `a | b | c` and a spawned program running its
    *own* server. The catch: **neither consumer exists yet**, so building
@@ -1196,6 +1247,45 @@ Kept as a **ledger**: an item that gets fixed is struck through with the date
 and left in place, rather than deleted. Two reasons. A reader wants to know a
 hazard was *considered*, not just that it is absent today; and the section
 would otherwise silently shrink into looking like nothing was ever found.
+
+- **Six findings from the 2026-09-06 delegation review, all PRE-EXISTING**
+  (raised against the `TO_NET`-in-pipelines fix; the five findings that were
+  *about* that diff were fixed in it). Each is its own change, deliberately not
+  bundled — a repair is a change, and changes have the defect rate of the code
+  they fix.
+  - **The shell's pipeline error paths `KILL` without `WAIT`.** `KILL` is
+    refused on a zombie (`task_exists` matches only `Runnable | Blocked`) and
+    only `WAIT` reaps, so a stage that exited on its own — a bad `grep`
+    pattern, an unknown flag — leaks one of just five spawnable slots. Five
+    such pipelines exhaust the pool and every later spawn fails until the user
+    runs `wait <n>` by hand. Six sites, all in `run_head_pipeline` and
+    `drain_program_output`.
+  - **The "consumer already exited, stay quiet" heuristic inspects the wrong
+    slot.** The kernel denies `DELEGATE` on a dead *grantee* before it looks at
+    the target, but the shell explains the denial from the *target*'s state —
+    so a producer that exited early gets `pipe: could not authorize the stream`
+    printed on top of its own message, which is exactly the noise the check
+    exists to suppress.
+  - **Nothing re-grants `TO_NET` after a supervised `netd` restart.**
+    `clear_delegate` strips bit 4 from every live task (correctly — the slot
+    could be reused by something else), but the grant is only ever made at
+    spawn. A program spawned before the restart is netless for the rest of its
+    life, and `net_msg_call` busy-spins its 150-tick deadline with no yield
+    before reporting the same generic failure this arc was about.
+  - **`netd` demuxes remote-exec by raw slot number** (`PendingRun.owner`,
+    `TcpConn.cpu_child`). Slots are recycled the moment a task is reaped, and
+    `handle_client`'s comment states an invariant — that only one task can hold
+    `TO_NET` — which the shell's blanket grant has now made false.
+  - **A nested shell cannot delegate `TO_NET` at all.** `may_delegate` reads
+    the *static* mask and spawnable slots have none, so every `delegate_net`
+    from a spawned `SH.BIN` is denied, discarded by its `let _ =`, and its
+    whole subtree is silently netless — bit-for-bit the symptom this arc spent
+    two days tracing.
+  - **`delegate_net` discards its result**, so the one grant this arc is about
+    is the only `DELEGATE` in the shell with no failure signal. A future
+    `caps_for_slot` edit dropping `TO_NET` from slot 0 would return the tree to
+    the pre-fix behaviour with no diagnostic anywhere. A check that cannot
+    fail.
 
 - ~~**The 9P export bypasses permissions entirely.**~~ **Closed 2026-08-31** by
   per-user cluster identity (v0.15.0), which this finding specified. `fsd`'s
