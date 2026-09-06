@@ -347,6 +347,48 @@ in the same session and is unaffected.
 > beside it as the way to ask why. That is deliberately not `errno` — one
 > value, no thread story, and no claim to be more.
 
+> **BLOCKER FOUND 2026-09-05, before writing any of step 4: there is no
+> connection to key a fid table on.** `tcp_get` opens a **fresh TCP connection
+> per remote request**, with a new source port each time ("One connection",
+> and `next_src_port` exists so back-to-back round trips never reuse a 4-tuple
+> a peer still holds in `TIME_WAIT`). The export therefore sees one request per
+> connection, and a per-connection fid table would lose every fid the instant
+> it was created.
+>
+> Decision 2's *substance* is untouched — `netd` owns remote fids, and a remote
+> client never names an `fsd` fid directly. What is gone is the **key**, and
+> with it the free answer to a question a connection was implicitly answering:
+> **when is a remote fid reclaimed?** There is no close to hang it on, and none
+> of `fsd`'s dead-owner-task signal either, because the owner is on another
+> machine. A client that never `NP_CLUNK`s leaks a slot forever.
+>
+> Four ways forward, and the choice changes how much of steps 4–6 exists at all:
+>
+> 1. **Key on the authenticated identity** (peer public key + user name, both
+>    already in every signed request) and reclaim least-recently-used when the
+>    table fills. No new wire, no transport change. A client's fid can be
+>    reclaimed under it and then fail — bounded, but silent.
+> 2. **The same, plus an idle timeout** (`monotonic_us` is already there).
+>    More predictable, still silent when it fires.
+> 3. **Make the export connection persistent** for a fid's lifetime. Truest to
+>    real 9P, where a session *is* a connection, and it deletes the lifetime
+>    question outright — connection close clunks everything. It is also a real
+>    change to a transport that is deliberately one-shot today.
+> 4. **Do not carry fids over the wire at all.** `libc` remembers the resolved
+>    *path* for a remote fd and translates: `NP_PREAD` → `NP_READ_AT`,
+>    `NP_PWRITE` → `NP_WRITE_AT`, `NP_FSTAT` → `NP_STAT`, `NP_CLUNK` → nothing.
+>    **The export already implements every one of those arms.** No server-side
+>    state exists, so nothing can leak, be reclaimed, or be confused between
+>    peers. The cost is the fid's own benefit — authorize-once becomes
+>    authorize-per-op, which across a network is arguably the more correct
+>    behaviour anyway, since the far side's permissions can change between ops.
+>
+> **Recommendation: 4.** It removes steps 4 and 5 almost entirely, makes step 6
+> (remote write) fall out of an arm that already exists and is already tested,
+> and adds no state to a server that has no way to reclaim it. Options 1 and 2
+> build a table whose hardest problem is one the design need not have; option 3
+> is the principled answer and the largest change.
+
 **Step 4 — the export learns the fid handle verbs.** `NP_OPEN`, `NP_FSTAT`,
 `NP_CLUNK` in `build_9p_reply`, with Decision 2's per-connection table.
 `NP_PREAD`/`NP_PWRITE` deliberately **not** yet — the handle lifecycle is worth
