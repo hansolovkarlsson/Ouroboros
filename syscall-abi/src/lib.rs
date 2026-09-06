@@ -445,12 +445,14 @@ pub const HEAP_INFO_BASE: u64 = 0;
 pub const HEAP_INFO_SIZE: u64 = 1;
 
 /// `(grantee, target)` -> `0` on success, [`TASK_ERR_NO_SUCH_TASK`] if either
-/// slot is not a live task (unused, or exited and not yet reaped), or
-/// [`MSG_ERR_DENIED`] for a refusal the caller cannot fix by trying again: a
-/// grantee outside the spawnable range, or a target the caller does not
-/// statically hold. The two are kept apart because a pipeline's producer or
-/// consumer exiting before its link is authorized is the ordinary case, and the
-/// shell must tell it from a genuine denial without a second syscall.
+/// slot is not a live task (out of range, unused, or exited and not yet
+/// reaped), or [`MSG_ERR_DENIED`] for a refusal the caller cannot fix by trying
+/// again: a grantee below the spawnable range, or a target the caller does not
+/// statically hold. Checked in that order - a protected grantee is refused
+/// before either slot's liveness is looked at. The two answers are kept apart
+/// because a pipeline's producer or consumer exiting before its link is
+/// authorized is the ordinary case, and the shell must tell it from a genuine
+/// denial without a second syscall.
 /// Runtime capability delegation: grant `grantee` (a task slot) the right to
 /// initiate IPC sends to `target` (a task slot) - a dynamic addition to
 /// `grantee`'s static send-mask. The caller may only delegate a send

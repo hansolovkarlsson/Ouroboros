@@ -1161,11 +1161,21 @@ fn run_head_pipeline(
             // dead slot and DENIED for a refusal - so the reason is read from
             // the answer, not re-derived from a later TASK_STATE.
             let died = r == syscall_abi::TASK_ERR_NO_SUCH_TASK;
-            for s in &slots[..prog_stages.len()] {
-                kill_and_reap(*s);
+            // Tear down, and let a stage that ended on its own say how. `KILL`
+            // frees a live stage outright and refuses one that already exited;
+            // that one is reaped by `wait_pipe_stage`, silent for exit 0 and
+            // reporting anything else. The "already told the user" premise
+            // above is false for a program that exits with no output (`touch
+            // f | wc`): its exit code is the only thing there is to show, and
+            // `kill_and_reap` would throw it away.
+            for j in 0..prog_stages.len() {
+                if syscall(syscall_abi::KILL, slots[j]) != 0 {
+                    let cmd = prog_stages[j].split_whitespace().next().unwrap_or("stage");
+                    wait_pipe_stage(cmd, slots[j]);
+                }
             }
             if !died {
-                print_line("pipe: could not authorize the stream");
+                print_fs_error("pipe: could not authorize the stream", r);
             }
             return;
         }
@@ -2287,11 +2297,14 @@ fn su_by_name(name: &str) {
 /// it per command.
 ///
 /// **The result is deliberately discarded**, and that is the weakest part of
-/// this: a denial here is silent, and the only signal is a network command
+/// this: a failure here is silent, and the only signal is a network command
 /// later failing for an unrelated-looking reason. The cases are netd absent
-/// this boot, netd mid-restart, the child already gone, and a `caps_for_slot`
-/// edit that drops `TO_NET` from slot 0 - the last of which would return the
-/// whole tree to the pre-fix behaviour with no diagnostic anywhere. Left as-is
+/// this boot or dead after a failed restart, and the child already gone -
+/// both `TASK_ERR_NO_SUCH_TASK` since 2026-09-06 - and a `caps_for_slot`
+/// edit that drops `TO_NET` from slot 0, the one `MSG_ERR_DENIED` among them,
+/// which would return the whole tree to the pre-fix behaviour with no
+/// diagnostic anywhere. Anyone acting on this: test for `!= 0`, not for the
+/// denial code, or the common cases stay silent behind a check. Left as-is
 /// because a spawn that succeeded should not fail on a best-effort grant, but
 /// it is a check that cannot fail (docs/cluster-keys-postmortem.md) and is
 /// listed as such in `ROADMAP.md`.

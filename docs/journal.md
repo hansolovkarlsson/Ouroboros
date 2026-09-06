@@ -83,6 +83,43 @@ The class fix I had written down in one line has three open questions the
 review listed, all now on the ledger. Six wrong-or-narrow claims in the prose
 around a fix whose code was right twice — yesterday's ratio, again.
 
+**A second pass, `medium`, on the kernel version — because the code on the
+branch was no longer the code the first review had read.** Six findings, one
+of them a gap the fix had opened: the "already told the user" premise is false
+for a program that exits with *no* output, so under the window `touch f | wc`
+went from a wrong line to a bare prompt, and a non-zero exit from a silent
+producer would have vanished with it — `kill_and_reap` discards the `WAIT`
+status. The teardown on that path now `KILL`s each stage and, where the kill
+is refused because the stage already exited, reaps it through
+`wait_pipe_stage`: silent for exit 0, and `pipe: ls exited with code 1` where
+the first version printed nothing. Forced window again: `touch /T1 | wc` gives
+a bare prompt, `ls /nope | wc` its message and its exit code. Beside it: the
+`architecture.md` syscall table and `delegate_net`'s doc both still described
+`DELEGATE` as answering only `MSG_ERR_DENIED` — the falsifying edit was in the
+kernel, the claim in two other files, the `true-when-written` shape exactly —
+and the arm answered out-of-range by *argument position*, `DENIED` for the
+grantee and `NO_SUCH_TASK` for the target. One rule now, stated in the ABI doc
+with its precedence. Left alone from that pass: `kill_and_reap`'s unconditional
+`WAIT` after a successful `KILL` is a wasted trap and reopens the slot-reuse
+window its own doc records; behaviour-preserving to fix, but the helper landed
+yesterday with a review of its own, and this branch is about the link.
+
+**Measured later the same day: the narrowing was half wrong.** Running the
+review's suggested `touch f | wc` on the unmodified shell reached the dead-link
+path on the first attempt — `touch` exited before the link was authorized — and
+wedged the shell on the second, when it exited after. A producer that neither
+prints nor ends its stream does not hand the shell its turn back: `SPAWN` is
+the shell's longest syscall, a tick is pending at its `eret`, and the child
+gets the slice. The morning's "a window of a few instructions" was true for
+`ls` and `cat`, which block on `cond` before they exit, and a reading for
+everything else. So the original line was reachable all along by any silent
+producer, the ledger now says so, and the next change is written down beside
+it: when the producer is the dead end, the shell can end the stream on its
+behalf — it holds the send right and nothing was delivered — so `touch f | wc`
+prints `0 0 0`. The site's architecture page was re-read against the changed
+`architecture.md` and does not abridge the syscall table's return codes, so it
+was re-stamped, not rewritten.
+
 **What this one says.** A finding made by reading code is a hypothesis about a
 run, and the consequence attached to it is the part most likely to be wrong —
 the code was read correctly, and the sentence after it ("a producer that

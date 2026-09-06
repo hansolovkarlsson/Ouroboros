@@ -1261,7 +1261,10 @@ would otherwise silently shrink into looking like nothing was ever found.
     (no pattern) left all five slots held, after which the shell could not run
     *any* `/bin` program — `echo still-alive` answered `echo: no free task
     slot` — and only five `wait <n>` calls recovered it. Eight abandon paths
-    now go through one `kill_and_reap`; the *completion* paths never leaked,
+    went through one `kill_and_reap` (seven since later on 2026-09-06: the
+    link-authorization path now `KILL`s and, for a stage that had already
+    exited, reaps it through `wait_pipe_stage` so its exit code is reported
+    rather than discarded); the *completion* paths never leaked,
     because they already `wait_pipe_stage` every stage. Seven iterations now
     leave the pool untouched.
 
@@ -1289,19 +1292,37 @@ would otherwise silently shrink into looking like nothing was ever found.
     have silenced a real denial — and a nested shell, whose static mask holds
     no spawnable slot, is refused on every link.
 
-    **Narrower than recorded, and measured rather than argued.** The ordinary
-    producer failure — `ls /nope | wc`, `cat /nope | wc` — was already quiet
-    before the fix: the first stage is spawned *last* and delegated before it
-    has run a single instruction, and a producer that *has* run stays alive in
-    `ulib::end_of_stream`, which retries a denial for 150 ticks. So the bad
-    path needs a producer that exits **without** end-of-stream (`-?` does)
-    *and* a tick landing between two adjacent shell syscalls. It was forced by
-    parking the shell until stage 0 was a zombie: under that window every
-    pipeline printed the line (`ls / | wc` included) before the fix, and none
-    after; with the window removed the controls are byte-identical to before.
+    **Narrower than recorded for a producer that PRINTS, routine for one
+    that does not — measured, both.** `ls /nope | wc` and `cat /nope | wc`
+    were already quiet before the fix: a producer that prints blocks on
+    `cond` and hands the shell its turn back before the link is authorized,
+    and one that reaches `ulib::end_of_stream` stays alive in its 150-tick
+    retry of the denial. But a producer that neither prints nor ends its
+    stream runs to exit *first*: `SPAWN` is the shell's longest syscall, a
+    tick is pending at its `eret`, and the child gets the slice.
+    `touch /T3 | wc` on the unmodified shell reached the dead-link path on
+    the first attempt — where the original code would have printed the line —
+    and the next attempt, `touch /T4 | wc`, went the other way and wedged the
+    shell (next item). So the path was reachable all along by any silent
+    producer, and the first write-up's "a tick landing in a window of a few
+    instructions" was a reading. Forced for verification by parking the
+    shell until stage 0 was a zombie: under that window every pipeline
+    printed the line before the fix and none after; with the window removed
+    the controls are byte-identical. The dead stage's exit code is reported
+    (`pipe: ls exited with code 1`), silent for exit 0.
+
+    **The next change, not this one:** when the *producer* is the dead end
+    and the consumer is alive, the shell could end the stream on its behalf.
+    It holds the send right, and a producer that died before its link was
+    authorized delivered nothing, so one empty message is the whole correct
+    stream — `touch f | wc` would print `0 0 0`, and the racy and non-racy
+    paths would converge. Not done here: it is a behaviour, not a repair.
   - **A producer that exits without `end_of_stream` wedges the pipeline.**
     `ls -? | wc` leaves `wc` blocked in `pipe_recv` forever and the shell
     waiting on it: no prompt came back within the rig's 90 s step timeout.
+    `touch /T4 | wc` the same — `touch` exits 0 after the link is authorized
+    and sends nothing, so a silent producer either wedges the shell or (when
+    it exits before the link) is torn down with its consumer; it never works.
     Found 2026-09-06 while using `-?` as the exit-without-EOF producer the
     previous item's reproduction needed — and `usage_if_requested` is only the
     instance that was run. **26 of the 53 programs under `programs/` never
