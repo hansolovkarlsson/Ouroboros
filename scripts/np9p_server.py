@@ -306,12 +306,32 @@ def verify(body):
 _HELLO = b"".join(
     (b"line %03d: hello from the host 9P server over TCP\n" % i) for i in range(40)
 )
+# ...and BIG.TXT is deliberately MUCH longer, ~28 round trips against ~5.
+#
+# HELLO.TXT is 1960 bytes, which `cat` reads as five remote round trips (four
+# 512-byte reads at 0/512/1024/1536, then a terminating zero-length one). At the
+# ~0.6 s per round trip this Python peer costs, that is ~3 s - and
+# docs/ROADMAP.md already records it failing 7 of 7 for exactly that reason:
+# netd stays continuously Runnable across a multi-chunk remote read, and 3 s is
+# past supervisor.rs's WEDGE_TICKS (2.56 s), so the supervisor restarts it
+# mid-read.
+#
+# So HELLO.TXT sits right ON that threshold, which makes it a poor probe: it
+# fails for a timing reason that any change to per-round-trip cost can move
+# either side of. BIG.TXT (13,600 bytes, 27 chunks, ~28 round trips, ~17 s) is
+# far past it and stays there, so a test using it fails for a reason that does
+# not depend on how fast the signing happens to be today.
+_BIG = b"".join(
+    (b"line %03d: a file long enough to need more connections than netd has\n" % i)
+    for i in range(200)
+)
 DIRS = {
-    b"/": [(b"HELLO.TXT", False), (b"SUB", True)],
+    b"/": [(b"HELLO.TXT", False), (b"BIG.TXT", False), (b"SUB", True)],
     b"/SUB": [(b"NOTE.TXT", False)],
 }
 FILES = {
     b"/HELLO.TXT": _HELLO,
+    b"/BIG.TXT": _BIG,
     b"/SUB/NOTE.TXT": b"a nested file, read remotely\n",
 }
 
@@ -715,8 +735,19 @@ def main():
                 continue
             reply = serve_request(body)
             conn.sendall(reply)
-            # One request/reply per connection, then FIN - the guest client reads
-            # to EOF (Connection: close shape).
+            # One request/reply per connection, then FIN.
+            #
+            # The FIN is TIDY TEARDOWN, NOT A FRAMING SIGNAL - and it stopped
+            # being one on 2026-09-05. This used to say "the guest client reads
+            # to EOF", which was true when written and is now false: the guest
+            # stops at `4 + len` from the frame's own header and closes first.
+            # Left as a warning rather than deleted, because the next reader
+            # would otherwise reasonably conclude that `shutdown(SHUT_WR)` is
+            # load-bearing for correctness here. It is not.
+            #
+            # NP_RUN is the exception, and it is a real one: its reply is a raw
+            # stream with NO length prefix, so for that verb EOF genuinely is
+            # the terminator (see np9p_client.py's run_op).
             try:
                 conn.shutdown(socket.SHUT_WR)
             except OSError:

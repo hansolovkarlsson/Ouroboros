@@ -359,6 +359,25 @@ the microkernel arc itself still leaves open):
      it passes, the shape that already earned its keep when step 3a's gate
      failed and saved the arc from being built on an assumption.
 
+   - **Re-confirmed 2026-09-05, and it is the WEDGE-TIMER failure already
+     analysed below, not a new one.** `cat /mnt/a/HELLO.TXT | wc` gives
+     `0 0 0` and `cat /mnt/a/BIG.TXT` (13,600 B, a new larger fixture) reports
+     `cat: failed` — both identical on `main`, so neither belongs to the fid
+     arc. The instinct was to blame `MAX_CONNS = 4`; **that was wrong**, and
+     the measured table further down this file already had the answer: `netd`
+     is continuously `Runnable` for a whole multi-chunk remote read, and any
+     read taking longer than `WEDGE_TICKS` (2.56 s) gets `netd` restarted
+     mid-transfer. `HELLO.TXT` is 5 round trips ≈ 3.0 s (over), and `BIG.TXT`
+     is ~28 round trips ≈ 17 s (far over). The pipe variant fails for the same
+     reason — a pipeline adds time, it does not add a new fault.
+
+     Two things worth keeping from re-finding it: the peer's fixture was
+     sitting right **on** the threshold, so it failed for a reason any change
+     in signing speed could move either side of — `BIG.TXT` is far past it and
+     stays there. And a documented, measured analysis was nearly overwritten
+     with a fresh guess, which is what a "new" bug record should always be
+     checked against first.
+
    The docs needed no correction: `CLAUDE.md` and
    [`testing-qemu.md`](testing-qemu.md) both show `ls /mnt/a` in that recipe,
    and it now does what they say.

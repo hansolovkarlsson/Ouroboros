@@ -90,6 +90,15 @@ NP_AUTH_MAGIC_SIGNED = int.from_bytes(b"AUTHNP03", "big")  # the per-machine-key
 NP_RUN = 0x100 + 0x20  # ninep-abi's NP_BASE + 0x20 - remote execution (`cpu`)
 NP_PUBKEY_LEN = 32
 NP_SIG_LEN = 64
+# A sanity ceiling on a DECLARED reply length, so recv_reply cannot be made to
+# allocate on a number the peer chose. Deliberately NOT a mirror of ninep-abi's
+# NP_FRAME_MAX (~2.2 KB): a defensive bound only has to be finite and
+# comfortably above real traffic, and mirroring the exact constant would add
+# three more hand-copied ABI values - NP_NET_MAX, NP_AUTH_HDR_SIGNED and
+# NP_FRAME_MAX are all defined as SUMS in Rust, which check-wire-constants
+# cannot parse, so the copies would be pinned by nothing. A round 64 KiB
+# couples to nothing and still refuses the 4 GiB case this exists for.
+MAX_DECLARED_REPLY = 64 * 1024
 # Signature DOMAIN TAGS - must match ninep-abi's SIG_DOMAIN_* byte for byte.
 # They keep a signature made in one role from verifying in the other: without
 # them a captured reply signature is structurally a valid request signature from
@@ -279,15 +288,52 @@ def recv_reply(sock, nonce, peer_key=None):
     # The server frames [u32 len][sig:64][status u64][data] then FINs
     # (reply-auth). Verify the signature against the nonce WE sent before
     # trusting a byte; a failure (tamper, or an unauthorized peer) -> refusal.
-    buf = b""
-    while True:
-        chunk = sock.recv(4096)
-        if not chunk:
-            break
-        buf += chunk
+    # READ EXACTLY WHAT THE FRAME SAYS, rather than to EOF.
+    #
+    # The reply is `[u32 len][sig:64][status u64][data]`, so its length is on
+    # the wire and the server's FIN was never NEEDED to know where it ends -
+    # only convenient. Waiting for one is what makes this client unable to talk
+    # to an export that keeps the connection open between requests, which is
+    # what a fid SESSION is (decision 3, docs/roadmap-fid-verbs.md): it would
+    # block here forever on a reply it had already received in full.
+    #
+    # Landed on its own, and BEFORE any session exists, because it is a no-op
+    # against today's FIN-closing export - the bytes and the parse are
+    # identical, only the stopping condition changes - and it is required under
+    # every option for the wire signal that is still undecided.
+    # BOUNDED, because `flen` comes off the wire BEFORE any signature is
+    # checked. Reading to EOF was inherently bounded by the peer closing;
+    # reading a DECLARED length is not, and `sock.recv(n)` allocates n bytes -
+    # so `len = 0xFFFFFFFF` would attempt a 4 GiB allocation on the first call.
+    # This script is the foreign observer for a security boundary, and one that
+    # the observed party can hang or exhaust is a poor witness.
+    #
+    # ONE bound, and the per-read `min(...)` below is loop shape rather than a
+    # second one: the declared-length check runs first and uses the same 64 KiB
+    # figure, so the per-call cap can never limit anything it has not already
+    # limited. Calling that defence-in-depth would be describing a guard that
+    # cannot fire.
+    def read_exactly(n):
+        out = b""
+        while len(out) < n:
+            chunk = sock.recv(min(n - len(out), 65536))
+            if not chunk:
+                break  # EOF - let the caller report a short reply
+            out += chunk
+        return out
+
+    buf = read_exactly(4)
     if len(buf) < 4:
         raise RuntimeError(f"short reply ({len(buf)} bytes)")
     (flen,) = struct.unpack("<I", buf[:4])
+    if flen > MAX_DECLARED_REPLY:
+        raise RuntimeError(
+            f"reply header declares {flen} bytes, far beyond anything this "
+            f"protocol produces (cap {MAX_DECLARED_REPLY}) - refusing to read it")
+    buf += read_exactly(flen)
+    if len(buf) < 4 + flen:
+        raise RuntimeError(
+            f"truncated reply: header says {flen} bytes, got {len(buf) - 4}")
     body = buf[4:4 + flen]
     # The reply is signed, and it must verify against the key expected for the
     # HOST WE DIALLED, not against any key we happen to authorize. Accepting the
