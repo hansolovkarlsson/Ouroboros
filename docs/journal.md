@@ -45,6 +45,24 @@ records and matches every message by the whole word. The run owner is captured
 receives replace the captured sender, the same trap `SENDER_ID`'s doc already
 warns about. After: `reply from 10.0.2.2`, and `ps` shows a clean pool.
 
+**The `medium` review found the collision my rig could not.** Two messages
+have no identity to capture: the supervisor's health ping, sent by the kernel
+on nobody's behalf, and anything from a boot task, because `init` marks the
+boot slots live without going through `spawn` or `install_task` and none of
+them had a generation. For both, `SENDER_TASK` answers all-ones. So did
+`netd`'s "no child" sentinel. Held a bare TCP connection open for a minute
+and watched: *"server slot 4 wedged - unresponsive (ping timeout) -
+restarting"*, because every ping was captured as that idle connection's
+child output and never acked. A regression this branch introduced, reachable
+by any idle client, and invisible to a rig that never left a connection open
+across a ping interval. Three changes: the boot slots get their generations at
+the end of `init` (a loop over live state, not a list); the sentinel is zero,
+which no packed identity can ever be, since generations start at one; and the
+demux skips a message with no identity outright, while a run request from a
+caller with none fails closed. Same rig, same minute: no restart. The shell's
+own `cpu` request now carries an identity too, which the host peer's refusal
+of the verb shows in its own way: the request reached the network at all.
+
 **Two small stumbles worth a line.** `ulib` already had a `task_id` (the
 uid/gid of a task), so the query is `TASK_IDENTITY`; and macOS has no
 `timeout`, so the recipe uses a perl alarm. The remaining carriers of the

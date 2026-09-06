@@ -232,9 +232,6 @@ pub fn sender_id() -> u64 {
     syscall(syscall_abi::SENDER_ID, 0)
 }
 
-/// The supplementary group list captured alongside [`sender_id`]. Returns how
-/// many gids the sender actually had (which may exceed `out`), or `None` if no
-/// message has been received.
 /// The packed task identity (slot and generation) of the sender of the last
 /// request this task received, or [`syscall_abi::GET_ID_ERR`]. A server that
 /// remembers a client must remember THIS, not the slot: see
@@ -250,6 +247,9 @@ pub fn task_identity(slot: u64) -> u64 {
     syscall(syscall_abi::TASK_IDENTITY, slot)
 }
 
+/// The supplementary group list captured alongside [`sender_id`]. Returns how
+/// many gids the sender actually had (which may exceed `out`), or `None` if no
+/// message has been received.
 pub fn sender_groups(out: &mut [u32]) -> Option<usize> {
     let n = syscall4(
         syscall_abi::SENDER_GROUPS,

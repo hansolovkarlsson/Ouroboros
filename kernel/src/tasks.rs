@@ -2060,6 +2060,19 @@ pub unsafe fn init(
             options(nostack),
         );
     }
+    // Every slot live at boot gets its generation here: init is the one place
+    // a slot becomes live outside `spawn`/`install_task`, and a boot task with
+    // no generation has packed identity 0, which `SENDER_TASK` reports as "no
+    // identity" - so the shell's own `cpu` request would have carried the
+    // same all-ones answer as the kernel's health ping. Slots 0 and 1 are
+    // Runnable statically; the servers above set themselves Runnable only
+    // when their image was present, which is why this is a loop over state
+    // rather than a list.
+    for slot in 0..NUM_TASKS {
+        if !matches!(unsafe { *STATES[slot].0.get() }, TaskState::Unused) {
+            issue_generation(slot);
+        }
+    }
 }
 
 /// Standard ARM self-modifying-code sequence (clean D-cache, invalidate

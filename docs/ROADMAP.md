@@ -1430,7 +1430,14 @@ would otherwise silently shrink into looking like nothing was ever found.
     change:** `fsd`'s fids (`Fid.owner` is a slot, and its own doc says so),
     and the `/net/tcp` connection table (the item above). `ps`, `wait`,
     `kill` and `fg` still speak in slots on purpose; widen when something
-    needs it.
+    needs it. **The review's catch, fixed in the same branch:** a message with
+    no identity (the kernel's health ping, a boot task before the boot slots
+    got their generations) answered all-ones from `SENDER_TASK`, which was
+    also `netd`'s "no child" sentinel, so an idle open connection captured
+    every ping and the supervisor restarted `netd` (measured by holding a
+    bare TCP connection open for a minute). The sentinel is zero now, which
+    no identity can be; a message with no identity is never demuxed as a
+    child; a run from a caller with none fails closed.
   - **A nested shell cannot delegate `TO_NET` at all.** `may_delegate` reads
     the *static* mask and spawnable slots have none, so every `delegate_net`
     from a spawned `SH.BIN` is denied, discarded by its `let _ =`, and its

@@ -581,11 +581,19 @@ fn drain_client_messages(packed_mac: u64, buf: &mut [u8], conns: &mut [Option<Tc
         // moment it is reaped, and the next task in it (someone's `ping`)
         // would otherwise have its request captured as the child's output and
         // never answered. Measured 2026-09-06; see the ledger.
+        // A message with NO identity (the supervisor's health ping, sent as
+        // KERNEL_SENDER) answers GET_ID_ERR here and must never be demuxed as a
+        // child: it was, once, because GET_ID_ERR is all-ones and so was the
+        // old CPU_NONE, and a silent open connection then captured every ping
+        // and the supervisor restarted netd for not acking. Measured
+        // 2026-09-06 by holding a bare TCP connection open for a minute.
         let sender_id = syscall(syscall_abi::SENDER_TASK, 0);
-        if let Some(ci) = conns
-            .iter()
-            .position(|c| matches!(c, Some(c) if c.cpu_child == sender_id))
-        {
+        let child_conn = if sender_id == syscall_abi::GET_ID_ERR {
+            None
+        } else {
+            conns.iter().position(|c| matches!(c, Some(c) if c.cpu_child == sender_id))
+        };
+        if let Some(ci) = child_conn {
             // A cpu child talks to us for TWO things (cluster Phase 4a/4b): its
             // stdout (a raw MSG_SEND we capture) and - once its namespace imports
             // the caller's (4b) - its remote-fs access (a NETOP_RMOUNT MSG_CALL we
@@ -1436,6 +1444,13 @@ fn handle_run(packed_mac: u64, _sender: u64, buf: &[u8], len: usize, out: &mut [
         out[..n].copy_from_slice(&msg[..n]);
         n
     };
+    // A caller with no identity cannot own a run: GET_ID_ERR would be the
+    // owner AND what any later identity-less message answers, so the two would
+    // match. Every real task has an identity since the boot slots got their
+    // generations; this is the fail-closed answer if that ever stops being so.
+    if owner == syscall_abi::GET_ID_ERR {
+        return fail(out, b"cpu: caller has no task identity\r\n");
+    }
     if packed_mac == syscall_abi::NET_ERROR || len < syscall_abi::NETOP_RMOUNT_MSG {
         return fail(out, b"cpu: no network\r\n");
     }
@@ -1747,22 +1762,25 @@ struct TcpConn {
     /// window)`.
     cwnd: u32,
     ssthresh: u32,
-    /// Remote-execution (cluster Phase 4a): the scheduler slot of the spawned
-    /// `cpu` child whose stdout this connection is capturing, or `CPU_NONE`
-    /// when this isn't a run connection. While set, `pump_send` holds off
-    /// (the response isn't ready); the child's output messages accumulate into
-    /// `prefix`, and its end-of-stream reaps it, clears this, and lets the
-    /// accumulated output stream out then FIN. A PACKED TASK IDENTITY (slot and
-    /// generation, `TASK_IDENTITY` at spawn), matched against `SENDER_TASK` on every
-    /// message - never the bare slot, which is recycled the moment the child
-    /// is reaped.
+    /// The PACKED TASK IDENTITY (slot and generation, `TASK_IDENTITY` at spawn)
+    /// of the spawned cpu child whose output this connection is capturing, or
+    /// [`CPU_NONE`] when this isn't a run connection. While set, `pump_send`
+    /// holds off (the response isn't ready); the child's output messages
+    /// accumulate into `prefix`, and its end-of-stream reaps it, clears this,
+    /// and lets the accumulated output stream out then FIN. Matched against
+    /// `SENDER_TASK` on every message, never the bare slot, which is recycled
+    /// the moment the child is reaped.
     cpu_child: u64,
 }
 
 /// `TcpConn::cpu_child` sentinel: this connection is not a remote-run capture.
-/// No task identity is ever all-ones (`GET_ID_ERR` is the "no such task"
-/// answer of `TASK_IDENTITY`, and a failed lookup at spawn must not become a match).
-const CPU_NONE: u64 = u64::MAX;
+/// ZERO, because no task identity is ever zero (generations start at 1, so
+/// every packed identity is at least `1 << TASK_ID_SLOT_BITS`), and because
+/// all-ones is exactly what BOTH lookups answer when there is no identity to
+/// give: `TASK_IDENTITY` of an unused slot, and `SENDER_TASK` of a message the
+/// kernel sent on nobody's behalf. The first version used all-ones here, and
+/// the supervisor's health ping matched every idle connection.
+const CPU_NONE: u64 = 0;
 
 // ---------------------------------------------------------------------------
 // Dial-out: /net/tcp connection files (the Plan 9 `/net/tcp` model, scoped).
