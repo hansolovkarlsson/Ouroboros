@@ -1446,10 +1446,10 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
         }
         syscall_abi::DELEGATE => {
             // arg0 = grantee slot, arg1 = target slot: grant `grantee` the
-            // runtime capability to send to `target`. The caller may only
-            // delegate a send-cap it *statically holds* (may_delegate),
-            // which confines inter-child streaming to the shell - see the
-            // DELEGATE doc in syscall-abi and tasks::may_delegate.
+            // runtime capability to send to `target`. The caller may delegate
+            // a send-cap it *statically holds* to anyone, or a right it holds
+            // at all to its OWN CHILDREN (and authorize links between them) -
+            // see the DELEGATE doc in syscall-abi and tasks::may_delegate.
             //
             // The GRANTEE must be a spawnable slot. Only `target` used to be
             // constrained, which let any /bin program widen a *server's*
@@ -1489,7 +1489,7 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
             if !tasks::task_exists(grantee) || !tasks::task_exists(target) {
                 return syscall_abi::TASK_ERR_NO_SUCH_TASK;
             }
-            if !tasks::may_delegate(tasks::current_task(), target) {
+            if !tasks::may_delegate(tasks::current_task(), grantee, target) {
                 return syscall_abi::MSG_ERR_DENIED;
             }
             tasks::set_delegate(grantee, target);

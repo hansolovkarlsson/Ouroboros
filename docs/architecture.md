@@ -554,7 +554,7 @@ roughly this size as the system grows by adding *servers*, not syscalls.
 | 38 | `stdout_target` | — | the caller's stdout target task index | Where this program's output should go (set by whoever `spawn`ed it; `CON_TASK` by default). A producer routes output there: `CON_TASK` → the console server (`DSPOP_WRITE`); otherwise a raw byte stream (chunked data messages + an empty end-of-stream message) to that task, which relays or captures it. This is what makes a task's own output capturable — program-to-program pipes and `exec … > file` |
 | 39 | `self` | — | the caller's own task slot index | A task's identity (otherwise unknowable — every other task-aware syscall takes an index). The shell needs it to route a pipe producer's stdout back to itself, and a foreground-spawned shell isn't task 0 |
 | 40 | `heap_info` | field (`0`=base, `1`=size) | the requested heap-area geometry, or `0` | Each program's region carries a fixed 256KB **raw heap area** (between its code and its stack guard page) it reads/writes via a `&mut [u8]` — space far larger than the 32KB stack, for data a fixed stack buffer can't hold (the shell backs its redirect/pipe capture with it, so `cat big > file` works). *Not* a `GlobalAlloc` heap — `alloc`'s collections can't link under this PIE loader (prebuilt lib`alloc` has `R_AARCH64_ABS64` relocations a `-pie` link rejects; the fix is nightly `-Z build-std`) |
-| 41 | `delegate` | grantee task, target task | `0`, `TASK_ERR_NO_SUCH_TASK` (either slot not a live task, the ordinary way a pipeline link fails, when a stage exited before it was authorized), or `MSG_ERR_DENIED` (a grantee below the spawnable range, or a target the caller does not statically hold; checked in that order) | **Runtime capability delegation**: grant `grantee` the right to initiate sends to `target`, a dynamic addition to `grantee`'s send-mask. The caller may only delegate a send-cap it *statically holds itself* (no transitive re-delegation), which confines it to the shell authorizing a pipe's producer to stream directly to its consumer. Cleared when the grantee dies, and when the target's slot is reused by a new spawn; a grant aimed at a supervised server therefore survives its restart (the slot can only ever hold that server again). See "Runtime capability delegation" below |
+| 41 | `delegate` | grantee task, target task | `0`, `TASK_ERR_NO_SUCH_TASK` (either slot not a live task, the ordinary way a pipeline link fails, when a stage exited before it was authorized), or `MSG_ERR_DENIED` (a grantee below the spawnable range, or a target the caller does not statically hold; checked in that order) | **Runtime capability delegation**: grant `grantee` the right to initiate sends to `target`, a dynamic addition to `grantee`'s send-mask. The caller may delegate a send-cap it *statically holds* to anyone (the boot shell wiring a pipe), or a right it holds at all to its **own children**, and authorize links between them, so a nested shell can wire its pipelines and pass on the network right it was given while no task can hand a right to a stranger. Cleared when the grantee dies, and when the target's slot is reused by a new spawn; a grant aimed at a supervised server therefore survives its restart (the slot can only ever hold that server again). See "Runtime capability delegation" below |
 | 42 | `net_send` | frame ptr, frame len | `0` or `NET_ERROR` | Transmit one raw Ethernet frame through the kernel's virtio-net driver. **Gated to `NET_TASK`** (the network server) — the DMA-owning NIC driver stays in the kernel (no IOMMU), reached only by the one task that owns the protocol stack, the `block_*` → fsd pattern |
 | 43 | `net_recv` | buf ptr, buf len | the frame's length (copied into `buf`, truncated to `buf len`), `NET_NO_FRAME` if none is waiting, or `NET_ERROR` | Non-blocking poll of the virtio-net receive ring. Gated to `NET_TASK` like `net_send` |
 | 44 | `net_mac` | — | the NIC's 6-byte MAC packed little-endian into a `u64`, or `NET_ERROR` | The network server needs it to build the Ethernet source of every frame. Gated to `NET_TASK` |
@@ -704,14 +704,18 @@ that same capability, one `delegate` call at a time — but note that nothing
 revokes a bit short of task death, and `delegate`'s grantee must be a spawnable
 slot precisely so a program cannot accumulate send rights *into* a server.
 
-The rule that makes it safe: **a task may only delegate a send-capability it
-*statically* holds** (`tasks::may_delegate` consults `caps_for_slot`, not the
-delegated slot — so nothing can be laundered onward). This self-secures the
-feature to its one use today: only the shell (slot 0) statically holds the
-spawnable slots' send-caps, so **only the shell can authorize one spawned
-program to reach another** — which is exactly what a relay-free
-program-to-program pipe needs (see "Dynamic task creation" above). A spawned
-program cannot delegate that reach, because it does not hold it. Enforced at
+The rule that makes it safe: **rights flow down a task's own subtree and
+nowhere else.** A task may delegate a send-capability it *statically* holds to
+anyone, which is how the boot shell (slot 0, the one holder of every spawnable
+slot's send-cap) wires a relay-free program-to-program pipe (see "Dynamic task
+creation" above). And a task may pass a right it holds at all, statically or by
+delegation, to a task it **spawned**, and authorize links between its own
+children; the kernel records every task's parent at `spawn`, by task identity
+so a reused slot inherits nothing. That second way is what lets a nested shell
+(`exec /EFI/ORBS/SH.BIN`) run pipelines and hand its commands the network
+right it was itself handed. A pipeline stage has no children, so it can pass
+its consumer link or its network right to nobody, and no task can ever name a
+stranger as grantee: nothing can be laundered onward. Enforced at
 the same `msg_send`/`msg_call` boundary as the static mask; a denied
 delegation, and a send with no covering capability, both return
 `MSG_ERR_DENIED`. A delegation naming a slot that is not a live task answers

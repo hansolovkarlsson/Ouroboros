@@ -455,12 +455,16 @@ pub const HEAP_INFO_SIZE: u64 = 1;
 /// denial without a second syscall.
 /// Runtime capability delegation: grant `grantee` (a task slot) the right to
 /// initiate IPC sends to `target` (a task slot) - a dynamic addition to
-/// `grantee`'s static send-mask. The caller may only delegate a send
-/// capability it *statically holds itself* (no transitive re-delegation),
-/// which in practice confines this to the shell authorizing a pipeline's
-/// producer to stream directly to its consumer (relay-free
-/// `programA | programB`): only the shell holds the send-caps for the
-/// spawnable slots. The delegation is cleared automatically when the grantee
+/// `grantee`'s static send-mask. Two ways the caller may: a send capability it
+/// *statically holds itself* may be delegated to anyone (how the boot shell
+/// wires a pipeline's producer to its consumer, relay-free
+/// `programA | programB`, and hands each command its network right); and a
+/// right it holds at all, statically or by delegation, may be passed to its
+/// **own children** (tasks its `SPAWN` created), and links authorized between
+/// them. Rights flow down a task's own subtree and nowhere else - a task with
+/// no children can delegate nothing it was given - which is what lets a nested
+/// shell run pipelines and reach the network while nothing can hand a right to
+/// a stranger. The delegation is cleared automatically when the grantee
 /// dies, and when the target's slot is *reused* by a new spawn (the grant must
 /// not follow the slot to a stranger). A grant aimed at a protected slot, a
 /// supervised server, therefore survives that server's restart: nothing but

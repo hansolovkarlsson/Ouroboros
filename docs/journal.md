@@ -7,6 +7,52 @@ for the forward plan see [`ROADMAP.md`](ROADMAP.md).
 
 ---
 
+## 2026-09-06 (cont. 5): rights flow down a subtree, and a nested shell can finally pipe
+
+*(The fourth ledger finding: a nested shell cannot delegate at all, so it can
+run no pipeline and nothing under it can reach the network.)*
+
+**Why, and the three shapes.** `may_delegate` consulted only the static table,
+on purpose: nothing a task was handed could be laundered onward. A spawned
+`SH.BIN` sits in a spawnable slot, which holds none of the spawnable slots and
+not netd, so every `DELEGATE` it issued was refused, the network one silently.
+Consulting runtime grants would open exactly the laundering the rule forbids.
+A "delegable" flag would need the boot shell to know a subshell from any other
+program, which means trusting a binary's name, the claim the model refuses
+elsewhere. Parent tracking wins on all three criteria: the kernel records who
+spawned whom, by task identity so a reused slot inherits nothing, and a task
+may pass a right it holds to its own children and authorize links between
+them. Rights move down a subtree and nowhere else. A pipeline stage has no
+children and can give away nothing. Hans took it.
+
+**The rule, in one function.** Two ways to pass: the delegator statically
+holds the target, as before, which is how slot 0 does everything it did; or
+the grantee is the delegator's child and the target is either another child
+or something the delegator may itself reach, statically or by delegation.
+One field per slot set at `spawn` and cleared with the rest of the teardown,
+one extra clause, and the nested shell needed no change: the calls it already
+made stopped being refused.
+
+**The check, and what it nearly hid.** The first run against the fix showed
+the first two pipelines refused and the later ones working, which no version
+of the rule predicts. The edit script had stopped on its first assertion and
+written nothing, so that was the *old* kernel; and the old kernel was showing
+something else: after any command in the nested shell, even a builtin, `ps`
+shows task 0 runnable and task 6 blocked. The keyboard had gone back to the
+boot shell, and the "working" pipelines ran there. Same prompt in both, so
+nothing on screen says which shell answered. That is a separate pre-existing
+bug, on the ledger now, and the recipe types `fg 6` before every nested
+command and ends with a `ps` that proves who ran it. With the edits actually
+in: `1 5 40`, `reply from 10.0.2.2`, `1 3 21`, task 6 runnable.
+
+**What was not tested, said plainly.** The negative half of the rule, that a
+task cannot delegate to or for a stranger, has no program that would try it,
+so it rests on reading the function. The two clauses are short and the
+positive half was run, but a check that can fail for the refusal side would
+need a deliberately misbehaving program, which is a rig item for the ledger.
+
+---
+
 ## 2026-09-06 (cont. 4): a slot is a position, and the kernel now names the occupant
 
 *(The third ledger finding: `netd` remembers its remote-exec child and its run
