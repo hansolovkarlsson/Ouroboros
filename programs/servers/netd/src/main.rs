@@ -1115,10 +1115,32 @@ fn tcp_get(mac: &[u8; 6], dst_mac: &[u8; 6], target: &[u8; 4], dst_port: u16, re
                     if framed && got >= ninep_abi::NP_NET_LEN_PREFIX {
                         let flen = u32::from_le_bytes([resp[0], resp[1], resp[2], resp[3]]) as usize;
                         if got >= ninep_abi::NP_NET_LEN_PREFIX + flen {
+                            // CONSUME A COALESCED FIN FIRST. This breaks past
+                            // the FIN arm below, so a peer that piggybacks its
+                            // FIN on the last data segment would otherwise get
+                            // a FIN|ACK acking only the data - leaving its FIN
+                            // unacked and its slot retransmitting into an
+                            // ephemeral port we no longer track, which is the
+                            // exact failure this early close exists to prevent.
+                            //
+                            // The in-tree exporter never coalesces (MAX_BURST
+                            // = 1, so its FIN is always its own segment), but a
+                            // host TCP stack routinely does:
+                            // scripts/np9p_server.py does `sendall` then
+                            // `shutdown(SHUT_WR)` with nothing in between. So
+                            // the case is not hypothetical, it is the
+                            // `make run-image-9p-client` path.
+                            if s.flags & TCP_FIN != 0 {
+                                rcv_nxt = rcv_nxt.wrapping_add(1);
+                            }
                             if let Some(n) = build_tcp(mac, dst_mac, target, src_port, dst_port, snd_nxt, rcv_nxt, TCP_FIN | TCP_ACK, false, &[], &mut frame) {
                                 let _ = send(&frame[..n]);
                             }
-                            fin = true;
+                            // `fin` deliberately NOT set: it means "the peer
+                            // FIN'd" everywhere else here, and the only thing
+                            // it feeds is `got > 0 || fin`, which `got > 0`
+                            // already satisfies on this path. A flag that stops
+                            // meaning its name is how the next reader is misled.
                             break;
                         }
                     }

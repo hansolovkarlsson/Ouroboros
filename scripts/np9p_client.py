@@ -308,8 +308,11 @@ def recv_reply(sock, nonce, peer_key=None):
     # This script is the foreign observer for a security boundary, and one that
     # the observed party can hang or exhaust is a poor witness.
     #
-    # Two bounds, because either alone is thin: refuse a length the protocol
-    # cannot produce, and cap each individual read regardless.
+    # ONE bound, and the per-read `min(...)` below is loop shape rather than a
+    # second one: the declared-length check runs first and uses the same 64 KiB
+    # figure, so the per-call cap can never limit anything it has not already
+    # limited. Calling that defence-in-depth would be describing a guard that
+    # cannot fire.
     def read_exactly(n):
         out = b""
         while len(out) < n:

@@ -359,27 +359,24 @@ the microkernel arc itself still leaves open):
      it passes, the shape that already earned its keep when step 3a's gate
      failed and saved the arc from being built on an assumption.
 
-   - **Two remote reads that fail today, found 2026-09-05 and NOT caused by
-     the fid arc** — both confirmed identical on `main`, so they are
-     pre-existing and are recorded here rather than fixed inside another
-     change:
+   - **Re-confirmed 2026-09-05, and it is the WEDGE-TIMER failure already
+     analysed below, not a new one.** `cat /mnt/a/HELLO.TXT | wc` gives
+     `0 0 0` and `cat /mnt/a/BIG.TXT` (13,600 B, a new larger fixture) reports
+     `cat: failed` — both identical on `main`, so neither belongs to the fid
+     arc. The instinct was to blame `MAX_CONNS = 4`; **that was wrong**, and
+     the measured table further down this file already had the answer: `netd`
+     is continuously `Runnable` for a whole multi-chunk remote read, and any
+     read taking longer than `WEDGE_TICKS` (2.56 s) gets `netd` restarted
+     mid-transfer. `HELLO.TXT` is 5 round trips ≈ 3.0 s (over), and `BIG.TXT`
+     is ~28 round trips ≈ 17 s (far over). The pipe variant fails for the same
+     reason — a pipeline adds time, it does not add a new fault.
 
-     1. **A remote read larger than ~4 chunks fails.** `cat /mnt/a/BIG.TXT`
-        (13,800 bytes) reports `cat: failed`. `NP_REMOTE_CHUNK` is 512 and
-        `netd`'s `MAX_CONNS` is 4, and the remote-mount client opens one
-        connection per verb — so the numbers line up suggestively, but the
-        cause is not yet established.
-     2. **A remote read piped into another command fails.**
-        `cat /mnt/a/HELLO.TXT | wc` gives `0 0 0` while the same `cat`
-        unpiped prints all 40 lines, and a C program reads the same file
-        whole. So it is the pipe path, not the read.
-
-     **Why they were invisible:** `np9p_server.py`'s fixture was 1960 bytes —
-     *exactly* 4 chunks, exactly `MAX_CONNS` — while its comment claimed to
-     "exercise the multi-round-trip chunked-read loop". It exercised the loop
-     right up to the limit and never past it. A `/BIG.TXT` fixture (200 lines)
-     now makes both reproducible; adding it is what turned two silent failures
-     into two named ones.
+     Two things worth keeping from re-finding it: the peer's fixture was
+     sitting right **on** the threshold, so it failed for a reason any change
+     in signing speed could move either side of — `BIG.TXT` is far past it and
+     stays there. And a documented, measured analysis was nearly overwritten
+     with a fresh guess, which is what a "new" bug record should always be
+     checked against first.
 
    The docs needed no correction: `CLAUDE.md` and
    [`testing-qemu.md`](testing-qemu.md) both show `ls /mnt/a` in that recipe,

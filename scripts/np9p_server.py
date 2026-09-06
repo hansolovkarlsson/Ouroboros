@@ -306,14 +306,21 @@ def verify(body):
 _HELLO = b"".join(
     (b"line %03d: hello from the host 9P server over TCP\n" % i) for i in range(40)
 )
-# ...and BIG.TXT is deliberately more than MAX_CONNS chunks.
+# ...and BIG.TXT is deliberately MUCH longer, ~28 round trips against ~5.
 #
-# HELLO.TXT is 1960 bytes = 4 chunks of 512, which is EXACTLY netd's MAX_CONNS
-# (4). The remote-mount client opens one connection per verb, so a read of it
-# uses the slot pool right up to its limit and never past it - a fixture that
-# claimed to exercise the chunked-read loop while being one chunk short of
-# exercising slot REUSE. A connection-teardown bug that stranded every slot
-# passed against it and failed on the very next file size.
+# HELLO.TXT is 1960 bytes, which `cat` reads as five remote round trips (four
+# 512-byte reads at 0/512/1024/1536, then a terminating zero-length one). At the
+# ~0.6 s per round trip this Python peer costs, that is ~3 s - and
+# docs/ROADMAP.md already records it failing 7 of 7 for exactly that reason:
+# netd stays continuously Runnable across a multi-chunk remote read, and 3 s is
+# past supervisor.rs's WEDGE_TICKS (2.56 s), so the supervisor restarts it
+# mid-read.
+#
+# So HELLO.TXT sits right ON that threshold, which makes it a poor probe: it
+# fails for a timing reason that any change to per-round-trip cost can move
+# either side of. BIG.TXT (13,600 bytes, 27 chunks, ~28 round trips, ~17 s) is
+# far past it and stays there, so a test using it fails for a reason that does
+# not depend on how fast the signing happens to be today.
 _BIG = b"".join(
     (b"line %03d: a file long enough to need more connections than netd has\n" % i)
     for i in range(200)
