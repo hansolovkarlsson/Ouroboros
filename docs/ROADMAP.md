@@ -331,20 +331,33 @@ the microkernel arc itself still leaves open):
      program's `open`/`fstat` over a remote mount fails on a real guest-to-guest
      mount too. `ls -l` works remotely now; `fstat` of the same file does not.
 
-     **SCOPED 2026-09-05 — [`roadmap-fid-verbs.md`](roadmap-fid-verbs.md),
-     six ordered steps, each with a check and a negative control.** The
-     scoping changed the item: **this heading names the wrong subsystem.**
-     `libc/src/file.c` sends every fid verb to `FSD_TASK` and grants to
-     `FSD_TASK`, with no namespace resolution anywhere — so a C
-     `open("/mnt/a/F")` asks `fsd` about a path only `netd` knows, and never
-     leaves the machine. Teaching the export the five verbs is real work and
-     is steps 4–6, but it would not have moved the reported symptom by one
-     byte. Two decisions are called out there as needing confirmation before
-     code: where namespace resolution lives for C's fd path (the recommendation
-     costs the C arc its first Rust link), and who owns a remote fid — `fsd`'s
-     ownership check is a task **slot**, so proxying remote opens straight
-     through would make every peer's fids indistinguishable inside one
-     8-entry table.
+     **IN PROGRESS — [`roadmap-fid-verbs.md`](roadmap-fid-verbs.md) is the
+     plan: seven ordered steps, each with a check and a negative control.
+     STEPS 1–3 ARE DONE AND THE REPORTED SYMPTOM IS CLOSED** — a C program
+     opens and reads a file on a remote mount.
+
+     **This heading names the wrong subsystem**, which is what the scoping
+     found. `libc/src/file.c` sent every fid verb to `FSD_TASK` with no
+     namespace resolution anywhere, so a C `open("/mnt/a/F")` asked `fsd`
+     about a path only `netd` knows and never left the machine. Teaching the
+     export the five verbs is real work — it is now steps 5–7 — but it would
+     not have moved the reported symptom by one byte.
+
+     Three decisions are recorded there, all confirmed: namespace resolution
+     for C's fd path lives in a **Rust staticlib shim** (the C arc's first Rust
+     link, which needed `--gc-sections` to link at all, since prebuilt `core`
+     carries `ABS64`); **`netd` owns remote fids**; and the export connection
+     becomes a **session**, held for a fid's lifetime — because step 4 found
+     there is **no connection to key a fid table on**, every remote request
+     opening its own TCP connection with a fresh source port. The smallest
+     option (translate fid ops to the path verbs the export already serves) was
+     rejected for foreclosing unlink-then-read, locking and `O_APPEND`
+     permanently, and for making every multi-op read a TOCTOU on the path: a
+     fid names the *file*, a path names a *name*.
+
+     **Step 4, the session gate, is next** — and nothing is built on it until
+     it passes, the shape that already earned its keep when step 3a's gate
+     failed and saved the arc from being built on an assumption.
 
    The docs needed no correction: `CLAUDE.md` and
    [`testing-qemu.md`](testing-qemu.md) both show `ls /mnt/a` in that recipe,
