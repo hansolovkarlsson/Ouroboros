@@ -434,9 +434,13 @@ a fid-eviction rule invented here.
 > in this order, and neither is optional:
 >
 > 1. **Make every client length-aware** — read exactly `4 + len` and stop.
->    Harmless on its own: it works against the current FIN-closing export
->    unchanged, so it can land and be verified before anything else moves.
->    **✅ DONE 2026-09-05**, on its own and before any session exists.
+>    Verifiable on its own against the current FIN-closing export, so it can
+>    land before anything else moves. **✅ DONE 2026-09-05.** Not
+>    *"unchanged"*, which is how this was first written and is too strong:
+>    the client now closes the connection itself once the framed reply is
+>    complete, instead of waiting for the export's FIN. Same bytes, different
+>    party tearing down — and getting that wrong strands the exporter's slot
+>    for seconds out of a pool of four.
 > 2. **Make the session OPT-IN**, so an old client and a new export can
 >    coexist. Without a signal, a length-aware new client and a FIN-waiting old
 >    one cannot both be right about the same server. This needs a wire

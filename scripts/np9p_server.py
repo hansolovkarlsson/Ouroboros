@@ -306,12 +306,25 @@ def verify(body):
 _HELLO = b"".join(
     (b"line %03d: hello from the host 9P server over TCP\n" % i) for i in range(40)
 )
+# ...and BIG.TXT is deliberately more than MAX_CONNS chunks.
+#
+# HELLO.TXT is 1960 bytes = 4 chunks of 512, which is EXACTLY netd's MAX_CONNS
+# (4). The remote-mount client opens one connection per verb, so a read of it
+# uses the slot pool right up to its limit and never past it - a fixture that
+# claimed to exercise the chunked-read loop while being one chunk short of
+# exercising slot REUSE. A connection-teardown bug that stranded every slot
+# passed against it and failed on the very next file size.
+_BIG = b"".join(
+    (b"line %03d: a file long enough to need more connections than netd has\n" % i)
+    for i in range(200)
+)
 DIRS = {
-    b"/": [(b"HELLO.TXT", False), (b"SUB", True)],
+    b"/": [(b"HELLO.TXT", False), (b"BIG.TXT", False), (b"SUB", True)],
     b"/SUB": [(b"NOTE.TXT", False)],
 }
 FILES = {
     b"/HELLO.TXT": _HELLO,
+    b"/BIG.TXT": _BIG,
     b"/SUB/NOTE.TXT": b"a nested file, read remotely\n",
 }
 

@@ -359,6 +359,28 @@ the microkernel arc itself still leaves open):
      it passes, the shape that already earned its keep when step 3a's gate
      failed and saved the arc from being built on an assumption.
 
+   - **Two remote reads that fail today, found 2026-09-05 and NOT caused by
+     the fid arc** — both confirmed identical on `main`, so they are
+     pre-existing and are recorded here rather than fixed inside another
+     change:
+
+     1. **A remote read larger than ~4 chunks fails.** `cat /mnt/a/BIG.TXT`
+        (13,800 bytes) reports `cat: failed`. `NP_REMOTE_CHUNK` is 512 and
+        `netd`'s `MAX_CONNS` is 4, and the remote-mount client opens one
+        connection per verb — so the numbers line up suggestively, but the
+        cause is not yet established.
+     2. **A remote read piped into another command fails.**
+        `cat /mnt/a/HELLO.TXT | wc` gives `0 0 0` while the same `cat`
+        unpiped prints all 40 lines, and a C program reads the same file
+        whole. So it is the pipe path, not the read.
+
+     **Why they were invisible:** `np9p_server.py`'s fixture was 1960 bytes —
+     *exactly* 4 chunks, exactly `MAX_CONNS` — while its comment claimed to
+     "exercise the multi-round-trip chunked-read loop". It exercised the loop
+     right up to the limit and never past it. A `/BIG.TXT` fixture (200 lines)
+     now makes both reproducible; adding it is what turned two silent failures
+     into two named ones.
+
    The docs needed no correction: `CLAUDE.md` and
    [`testing-qemu.md`](testing-qemu.md) both show `ls /mnt/a` in that recipe,
    and it now does what they say.

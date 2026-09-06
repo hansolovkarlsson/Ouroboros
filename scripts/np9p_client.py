@@ -90,6 +90,15 @@ NP_AUTH_MAGIC_SIGNED = int.from_bytes(b"AUTHNP03", "big")  # the per-machine-key
 NP_RUN = 0x100 + 0x20  # ninep-abi's NP_BASE + 0x20 - remote execution (`cpu`)
 NP_PUBKEY_LEN = 32
 NP_SIG_LEN = 64
+# A sanity ceiling on a DECLARED reply length, so recv_reply cannot be made to
+# allocate on a number the peer chose. Deliberately NOT a mirror of ninep-abi's
+# NP_FRAME_MAX (~2.2 KB): a defensive bound only has to be finite and
+# comfortably above real traffic, and mirroring the exact constant would add
+# three more hand-copied ABI values - NP_NET_MAX, NP_AUTH_HDR_SIGNED and
+# NP_FRAME_MAX are all defined as SUMS in Rust, which check-wire-constants
+# cannot parse, so the copies would be pinned by nothing. A round 64 KiB
+# couples to nothing and still refuses the 4 GiB case this exists for.
+MAX_DECLARED_REPLY = 64 * 1024
 # Signature DOMAIN TAGS - must match ninep-abi's SIG_DOMAIN_* byte for byte.
 # They keep a signature made in one role from verifying in the other: without
 # them a captured reply signature is structurally a valid request signature from
@@ -292,10 +301,19 @@ def recv_reply(sock, nonce, peer_key=None):
     # against today's FIN-closing export - the bytes and the parse are
     # identical, only the stopping condition changes - and it is required under
     # every option for the wire signal that is still undecided.
+    # BOUNDED, because `flen` comes off the wire BEFORE any signature is
+    # checked. Reading to EOF was inherently bounded by the peer closing;
+    # reading a DECLARED length is not, and `sock.recv(n)` allocates n bytes -
+    # so `len = 0xFFFFFFFF` would attempt a 4 GiB allocation on the first call.
+    # This script is the foreign observer for a security boundary, and one that
+    # the observed party can hang or exhaust is a poor witness.
+    #
+    # Two bounds, because either alone is thin: refuse a length the protocol
+    # cannot produce, and cap each individual read regardless.
     def read_exactly(n):
         out = b""
         while len(out) < n:
-            chunk = sock.recv(n - len(out))
+            chunk = sock.recv(min(n - len(out), 65536))
             if not chunk:
                 break  # EOF - let the caller report a short reply
             out += chunk
@@ -305,6 +323,10 @@ def recv_reply(sock, nonce, peer_key=None):
     if len(buf) < 4:
         raise RuntimeError(f"short reply ({len(buf)} bytes)")
     (flen,) = struct.unpack("<I", buf[:4])
+    if flen > MAX_DECLARED_REPLY:
+        raise RuntimeError(
+            f"reply header declares {flen} bytes, far beyond anything this "
+            f"protocol produces (cap {MAX_DECLARED_REPLY}) - refusing to read it")
     buf += read_exactly(flen)
     if len(buf) < 4 + flen:
         raise RuntimeError(

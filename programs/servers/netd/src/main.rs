@@ -1102,10 +1102,23 @@ fn tcp_get(mac: &[u8; 6], dst_mac: &[u8; 6], target: &[u8; 4], dst_port: u16, re
                     if let Some(n) = build_tcp(mac, dst_mac, target, src_port, dst_port, snd_nxt, rcv_nxt, TCP_ACK, false, &[], &mut frame) {
                         let _ = send(&frame[..n]);
                     }
-                    // Complete framed reply in hand? Stop; do not wait for a FIN.
+                    // Complete framed reply in hand? CLOSE, then stop.
+                    //
+                    // Not a bare `break`. `pump_send` has MAX_BURST = 1, so the
+                    // export's FIN is always a SEPARATE segment after the last
+                    // data segment - which means breaking here leaves that FIN
+                    // in flight, unacked, and this side never sends one either.
+                    // The exporting node's slot then sits in `Closing` until
+                    // `service_rto` gives up (five doublings, ~6-9s), and its
+                    // pool is only MAX_CONNS deep. Ending a connection is this
+                    // side's job the moment it stops listening to it.
                     if framed && got >= ninep_abi::NP_NET_LEN_PREFIX {
                         let flen = u32::from_le_bytes([resp[0], resp[1], resp[2], resp[3]]) as usize;
                         if got >= ninep_abi::NP_NET_LEN_PREFIX + flen {
+                            if let Some(n) = build_tcp(mac, dst_mac, target, src_port, dst_port, snd_nxt, rcv_nxt, TCP_FIN | TCP_ACK, false, &[], &mut frame) {
+                                let _ = send(&frame[..n]);
+                            }
+                            fin = true;
                             break;
                         }
                     }
