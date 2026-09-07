@@ -10,7 +10,7 @@ elsewhere, and those places are the ones to read:
 | For | Read |
 | --- | --- |
 | What was built, and when | [`../CHANGELOG.md`](../CHANGELOG.md) |
-| The narrative of each day | [`../journal.md`](../journal.md) |
+| The narrative of each day | [`../work-journal/`](../work-journal/README.md) |
 | How an arc was sequenced | [`../roadmap-completed.md`](../roadmap-completed.md) |
 | What went wrong and why | the postmortems in [`../`](../) |
 | The load-bearing boot/MMU/syscall guidance | [`../../CLAUDE.md`](../../CLAUDE.md) |

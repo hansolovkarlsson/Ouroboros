@@ -64,7 +64,7 @@ are the ones worth having in mind before you open it:
     written; that is the problem*. A claim that guards behaviour is a check
     nobody has written yet, and the edit that falsifies it is always in
     another file — so compiler, tests and review all miss it.
-- **`docs/journal.md`** — a chronological dev-log (narrative "what and why
+- **`docs/work-journal/`** — a chronological dev-log, one file per day (narrative "what and why
   each day"), a lighter companion to the milestone-oriented `CHANGELOG.md`.
 - **`docs/README.md`** — the annotated index of every document under `docs/`;
   **`docs/source-map.md`** — the annotated index of every source file. Both
@@ -578,7 +578,7 @@ docs/                every document is annotated in full in `docs/README.md` - r
   shell-commands.md  reference: the default shell's builtin commands
   CHANGELOG.md       the milestone record, phase 0 to the present, newest first - what was built, and why it works the way it does
   ROADMAP.md         the forward-looking plan (finished arcs live in roadmap-completed.md; the cluster direction in roadmap-cluster.md)
-  journal.md         chronological dev-log, a lighter companion to CHANGELOG.md
+  work-journal/      chronological dev-log, one file per day plus an index README - a lighter companion to CHANGELOG.md
   testing-qemu.md    every `make run-*` target, the FAT32/exFAT/ext2/GPT test images, the 9P host peers, the two-node cluster rig
   testing-parallels.md, testing-pi4.md   the real-hardware guides. Both share one caveat: NO NETWORKING, so the whole cluster is QEMU-only
   gap-analysis.md    per-subsystem have/partial/don't inventory vs mainstream Unixes, capped by a ranked list of the biggest gaps

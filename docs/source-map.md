@@ -159,6 +159,6 @@ this project has a postmortem about precisely what happens to those
 restatements that drifted, none of them visible to the compiler or any test).
 If an annotation names a file, function, constant or flag, and you are about to
 rely on it, check the source. Known drift as of the move is recorded in
-[`journal.md`](journal.md) under *"shrinking `CLAUDE.md`, and what the move
+[`work-journal/2026-09-03.md`](work-journal/2026-09-03.md) under *"shrinking `CLAUDE.md`, and what the move
 exposed"* (2026-09-03) — named rather than dated because that day has more than
 one entry and a bare date now resolves to the wrong one.
