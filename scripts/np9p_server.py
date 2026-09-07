@@ -102,6 +102,7 @@ FS_ERR_NOT_FOUND = (1 << 64) - 1 - 2  # u64::MAX - 2: definitively absent
 FS_ERR_NOT_A_FILE = (1 << 64) - 1 - 3  # u64::MAX - 3: it is a directory
 FS_ERR_READ_ONLY = (1 << 64) - 1 - 29  # u64::MAX - 29
 FS_ERR_AUTH = (1 << 64) - 1 - 30  # u64::MAX - 30
+NP_SESSION = NP_BASE + 0x21  # open a session on this connection (Decision 3)
 FS_ERR_NO_SUCH_VERB = (1 << 64) - 1 - 39  # u64::MAX - 39: this server has no arm for that verb
 
 # The verbs this peer refuses ON POLICY (the export is read-only), as an
@@ -409,6 +410,30 @@ def read_frame(sock):
     return body
 
 
+# How long a session may sit idle here before this peer closes it: a bound on
+# a guest that died holding one, the same job netd's CONN_IDLE_TICKS does.
+SESSION_IDLE_S = 60
+
+
+def request_verb(body):
+    """The NP verb inside a signed request frame, or None if it is not one."""
+    if len(body) < NP_AUTH_HDR_SIGNED + 8:
+        return None
+    (magic,) = struct.unpack("<Q", body[:8])
+    if magic != NP_AUTH_MAGIC_SIGNED:
+        return None
+    return struct.unpack("<Q", body[NP_AUTH_HDR_SIGNED:NP_AUTH_HDR_SIGNED + 8])[0]
+
+
+def reply_status(reply):
+    """The status word of a sealed `[len][sig][status][data]` reply (or of the
+    unsealed 12-byte denial, whose status is FS_ERR_AUTH either way)."""
+    body = reply[4:]
+    if len(body) >= NP_SIG_LEN + 8:
+        return struct.unpack("<Q", body[NP_SIG_LEN:NP_SIG_LEN + 8])[0]
+    return struct.unpack("<Q", body[:8])[0] if len(body) >= 8 else FS_ERROR
+
+
 def frame_reply(status, data=b""):
     body = struct.pack("<Q", status) + data
     return struct.pack("<I", len(body)) + body
@@ -438,6 +463,13 @@ def serve_request(body):
     verb, tree = struct.unpack("<QQ", body[:16])
     a0, a1, a2, a3 = struct.unpack("<QQQQ", body[16:48])
     payload = body[HDR:]
+    # A session: answer 0 and the connection loop in main() keeps reading
+    # frames on this socket instead of shutting it down after the reply. No
+    # budget here - a host peer has no MAX_CONNS - so the guest's FS_ERR_BUSY
+    # arm has no counterpart in this server, and says so.
+    if verb == NP_SESSION:
+        print("  [session opened on this connection]", flush=True)
+        return sealed(0)
     path = payload[: min(a0, len(payload))]
 
     if verb == NP_READDIR:
@@ -594,6 +626,7 @@ SELF_TEST_VERBS = [
     ("NP_FSTAT",      NP_BASE + 18, "served",       (FID, 0, 0),       b""),
     ("NP_CLUNK",      NP_BASE + 19, "served",       (FID, 0, 0),       b""),
     ("NP_RUN",        NP_BASE + 0x20, "no-such-verb", ("PLEN", 0, 0),  b"/HELLO.TXT"),
+    ("NP_SESSION",    NP_BASE + 0x21, "served",       (0, 0, 0),         b""),
 ]
 
 
@@ -730,11 +763,25 @@ def main():
     while True:
         conn, addr = srv.accept()
         try:
-            body = read_frame(conn)
-            if body is None:
-                continue
-            reply = serve_request(body)
-            conn.sendall(reply)
+            # A session (NP_SESSION answered 0) keeps this loop reading frames
+            # on the same socket; anything else is one request, one reply, FIN.
+            # Single-threaded, so a held session blocks the next accept until
+            # it closes or idles out - fine for the gate this exists for, and
+            # named in the roadmap for the step that makes the guest hold one.
+            conn.settimeout(SESSION_IDLE_S)
+            session = False
+            while True:
+                body = read_frame(conn)
+                if body is None:
+                    break
+                reply = serve_request(body)
+                conn.sendall(reply)
+                if request_verb(body) == NP_SESSION and reply_status(reply) == 0:
+                    session = True
+                if not session:
+                    break
+            if session:
+                continue  # the peer closed it; nothing to shut down
             # One request/reply per connection, then FIN.
             #
             # The FIN is TIDY TEARDOWN, NOT A FRAMING SIGNAL - and it stopped

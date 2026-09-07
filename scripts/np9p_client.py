@@ -12,6 +12,8 @@ Usage:
     python3 scripts/np9p_client.py <host> <port> mv      <src> <dst>
     python3 scripts/np9p_client.py <host> <port> run     <command>
     python3 scripts/np9p_client.py <host> <port> noverb  <path> [verb]
+    python3 scripts/np9p_client.py <host> <port> session <path>          # readdir+stat+read on ONE connection
+    python3 scripts/np9p_client.py <host> <port> session-gate [hold_s]  # the step-4 checks, PASS/FAIL each
 
 Every request is SIGNED with a per-machine Ed25519 key: the auth header is
 `[magic:8][nonce:16][name:32][pubkey:32][sig:64]` in front of the NP message,
@@ -51,6 +53,7 @@ NP_WRITE_FILE = NP_BASE + 11
 NP_WRITE_AT = NP_BASE + 4
 NP_READ_AT = NP_BASE + 10
 NP_OPEN = NP_BASE + 15  # the first of the five fid verbs no export implements
+NP_SESSION = NP_BASE + 0x21  # open a session on this connection (Decision 3, 2026-09-07)
 # NOT syscall-abi's FS_ERR_MIN, and no longer named as if it were. This is a
 # deliberately LOOSE host-side floor - 'anything in the top 64 is an error' -
 # which is safe here and is what lets REPLY_UNVERIFIED (1 << 64) compare as an
@@ -211,6 +214,7 @@ FS_ERROR = (1 << 64) - 1
 FS_ERR_READ_ONLY = (1 << 64) - 1 - 29  # u64::MAX - 29
 FS_ERR_PERM = (1 << 64) - 1 - 32  # u64::MAX - 32
 FS_ERR_NO_SUCH_VERB = (1 << 64) - 1 - 39  # u64::MAX - 39: no arm for that verb
+FS_ERR_BUSY = (1 << 64) - 1 - 40  # u64::MAX - 40: the export's session budget is spent
 STATUS_NAMES = {
     FS_ERROR: "FS_ERROR",
     NO_FS: "NO_FS",
@@ -219,6 +223,7 @@ STATUS_NAMES = {
     FS_ERR_AUTH: "FS_ERR_AUTH",
     FS_ERR_PERM: "FS_ERR_PERM",
     FS_ERR_NO_SUCH_VERB: "FS_ERR_NO_SUCH_VERB",
+    FS_ERR_BUSY: "FS_ERR_BUSY",
 }
 
 
@@ -410,6 +415,213 @@ def run_op(host, port, command, timeout=10):
         except socket.timeout:
             pass
     return out
+
+
+class Session:
+    """One export connection held across requests: the step-4 shape.
+
+    `open()` sends NP_SESSION; status 0 means every later `op()` on this object
+    is served on the SAME TCP connection, which is what a fid's lifetime will
+    hang off. Against an export that predates the verb, `open()` answers
+    FS_ERR_NO_SUCH_VERB and the connection closes after it, as it always did -
+    so the caller learns "no sessions here" from the one answer that cannot be
+    mistaken for a key problem.
+    """
+
+    def __init__(self, host, port, timeout=10):
+        self.sock = socket.create_connection((host, port), timeout=timeout)
+
+    def op(self, np_msg):
+        frame, nonce = signed_frame(np_msg, SIGN_KEY)
+        self.sock.sendall(frame)
+        return recv_reply(self.sock, nonce, peer_key=peer_key())
+
+    def open(self):
+        return self.op(build_frame(NP_SESSION, 0, [], b""))
+
+    def close(self):
+        self.sock.close()
+
+    def abort(self):
+        """Close with a RST rather than a FIN: the shape of a peer that dies
+        mid-session (SO_LINGER with a zero timeout)."""
+        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+        self.sock.close()
+
+
+# What the guest export budgets: SESSION_MAX in netd is MAX_CONNS - 1 = 3, so
+# the fourth session on a fresh export must be refused with FS_ERR_BUSY. Spelled
+# here as the EXPECTATION the gate checks, not as a mirror of the constant.
+EXPECTED_SESSIONS = 3
+# netd reaps a silent connection after CONN_IDLE_TICKS = 30 s; the gate waits
+# this much longer than that before asking whether the reap happened.
+REAP_WAIT_S = 36
+
+
+def do_session(host, port, path):
+    """readdir, stat and read `path` over ONE connection, and say so."""
+    s = Session(host, port)
+    st, _ = s.open()
+    if st != 0:
+        print(f"session refused: {status_name(st)}")
+        s.close()
+        sys.exit(1)
+    pb = path.encode()
+    st, data = s.op(build_frame(NP_READDIR, 0, [len(pb), 4096], pb))
+    print(f"[same connection] readdir -> {status_name(st) if st >= ERR_BAND_FLOOR else f'{len(data)} bytes'}")
+    st, data = s.op(build_frame(NP_STAT, 0, [len(pb)], pb))
+    print(f"[same connection] stat    -> {status_name(st) if st >= ERR_BAND_FLOOR else f'record of {len(data)} bytes'}")
+    st, data = s.op(build_frame(NP_READ, 0, [len(pb), 0, 64], pb))
+    print(f"[same connection] read    -> {status_name(st) if st >= ERR_BAND_FLOOR else data[:64]!r}")
+    s.close()
+
+
+def do_session_gate(host, port, hold_s=10):
+    """The step-4 session gate (docs/roadmap/roadmap-fid-verbs.md), run end to
+    end against a live export, one PASS/FAIL line per check:
+
+      1. a session idle for `hold_s` seconds still answers on the same
+         connection (the guest transcript is the other half of this check: it
+         must show no `server slot 4 ... restart` line);
+      2. the budget: three sessions accepted, the fourth refused with
+         FS_ERR_BUSY; a one-shot request still served beside them; none of the
+         three evicted; with the table full a fifth connection is refused
+         (reset or EOF), not hung; a session its peer aborts returns its slot
+         at once;
+      3. sessions abandoned without a FIN are reaped by the idle timeout, and
+         their slots come back.
+
+    Every check can fail against an export without the feature: 1 and 2 fail
+    on FS_ERR_NO_SUCH_VERB at the first open, and 3 on the slots never coming
+    back. Exit status is the number of failed checks.
+    """
+    import time
+    failed = 0
+
+    def check(name, ok, detail):
+        nonlocal failed
+        print(f"[{'PASS' if ok else 'FAIL'}] {name}: {detail}", flush=True)
+        if not ok:
+            failed += 1
+
+    root = build_frame(NP_READDIR, 0, [1, 4096], b"/")
+
+    def served(status):
+        return status < ERR_BAND_FLOOR
+
+    # 1. idle hold
+    s = Session(host, port, timeout=hold_s + 20)
+    st, _ = s.open()
+    if st != 0:
+        check("open a session", False, status_name(st))
+        s.close()
+        return failed
+    st1, d1 = s.op(root)
+    time.sleep(hold_s)
+    st2, d2 = s.op(root)
+    check(f"a session idle {hold_s}s still answers on the same connection",
+          served(st1) and served(st2) and d1 == d2,
+          f"readdir before/after: {status_name(st1)}/{status_name(st2)}, {len(d1)}/{len(d2)} bytes")
+    s.close()
+    time.sleep(0.5)
+
+    # 2. budget
+    held = []
+    refusal = None
+    for i in range(EXPECTED_SESSIONS + 1):
+        s = Session(host, port)
+        st, _ = s.open()
+        if st == 0:
+            held.append(s)
+        else:
+            refusal = (i + 1, st)
+            s.close()
+            break
+    check(f"{EXPECTED_SESSIONS} sessions accepted, the next refused with FS_ERR_BUSY",
+          len(held) == EXPECTED_SESSIONS and refusal is not None and refusal[1] == FS_ERR_BUSY,
+          f"accepted {len(held)}, refusal " + (f"#{refusal[0]} {status_name(refusal[1])}" if refusal else "none"))
+    try:
+        st, _ = one_op(host, port, root)
+        detail = "served" if served(st) else status_name(st)
+    except (RuntimeError, OSError) as exc:
+        st, detail = FS_ERROR, f"no reply ({exc.__class__.__name__})"
+    check("a one-shot request is served beside the held sessions", served(st), detail)
+
+    def answers(s):
+        try:
+            return served(s.op(root)[0])
+        except (RuntimeError, OSError):
+            return False
+    alive = sum(1 for s in held if answers(s))
+    check("no held session was evicted", alive == len(held), f"{alive}/{len(held)} still answer")
+    # The table is full once a bare 4th connection is open (SYN only, no
+    # request). A 5th must be refused: SLIRP accepts the host's connect on the
+    # guest's behalf, so the refusal shows on the first read as a reset or EOF,
+    # never as a served reply and never as a hang.
+    bare = socket.create_connection((host, port), timeout=10)
+    time.sleep(0.5)
+    fifth = socket.create_connection((host, port), timeout=10)
+    frame, _nonce = signed_frame(root, SIGN_KEY)
+    outcome = None
+    try:
+        fifth.settimeout(8)
+        fifth.sendall(frame)
+        got = fifth.recv(4)
+        outcome = "EOF" if not got else f"served {len(got)}+ bytes"
+    except socket.timeout:
+        outcome = "hang (8s timeout)"
+    except OSError as exc:
+        outcome = f"reset ({exc.__class__.__name__})"
+    check("with the table full, a 5th connection is refused rather than hung",
+          outcome == "EOF" or outcome.startswith("reset"), outcome)
+    fifth.close()
+    bare.close()
+    time.sleep(0.5)
+    # A peer that dies mid-session sends a RST (or its OS does); the slot must
+    # be back immediately, not after the idle timeout.
+    held.pop(0).abort()
+    time.sleep(0.5)
+    s = Session(host, port)
+    st, _ = s.open()
+    check("a session aborted by its peer (RST) returns its slot at once", st == 0, status_name(st) if st else "accepted")
+    if st == 0:
+        held.append(s)
+    else:
+        s.close()
+
+    # 3. the idle reap: hold every session open and silent past the timeout
+    print(f"  holding {len(held)} session(s) silent for {REAP_WAIT_S}s ...", flush=True)
+    time.sleep(REAP_WAIT_S)
+    dead = 0
+    hung = 0
+    for s in held:
+        try:
+            s.sock.settimeout(8)
+            st, _ = s.op(root)
+            if served(st):
+                pass  # still alive: not reaped
+        except socket.timeout:
+            hung += 1
+        except (RuntimeError, OSError):
+            dead += 1  # short reply (EOF) or a reset: reaped
+    check(f"sessions silent for {REAP_WAIT_S}s were reaped (reset/EOF on the next request)",
+          dead == len(held), f"{dead}/{len(held)} reaped, {hung} hung, {len(held) - dead - hung} still served")
+    for s in held:
+        s.close()
+    fresh = []
+    for _ in range(EXPECTED_SESSIONS):
+        s = Session(host, port)
+        st, _ = s.open()
+        if st == 0:
+            fresh.append(s)
+        else:
+            s.close()
+            break
+    check(f"the reaped slots are back: {EXPECTED_SESSIONS} fresh sessions accepted", len(fresh) == EXPECTED_SESSIONS, f"{len(fresh)} accepted")
+    for s in fresh:
+        s.close()
+    print(f"session-gate: {failed} check(s) failed", flush=True)
+    return failed
 
 
 def np_readfile(host, port, path, want=512):
@@ -646,7 +858,7 @@ def main():
     leftover = [a for a in checked if a.startswith("--")]
     if leftover:
         sys.exit(f"unknown or repeated option(s): {' '.join(leftover)}")
-    if len(args) < 4:
+    if len(args) < 4 and not (len(args) == 3 and args[2] == "session-gate"):
         print(__doc__)
         sys.exit(2)
     host, port, op = args[0], int(args[1]), args[2]
@@ -714,6 +926,14 @@ def main():
                   f"({len(data)} bytes of data)")
         except Exception as exc:
             print(f"no usable answer: {exc!r}")
+        return
+
+    if op == "session-gate":
+        hold = int(args[3]) if len(args) > 3 else 10
+        sys.exit(min(do_session_gate(host, port, hold), 125))
+
+    if op == "session":
+        do_session(host, port, args[3])
         return
 
     if op == "dial":

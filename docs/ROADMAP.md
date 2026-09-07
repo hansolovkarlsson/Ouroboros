@@ -1484,7 +1484,26 @@ would otherwise silently shrink into looking like nothing was ever found.
     Accepted on the proxy argument (above), but a `CAP_SPAWN` bit in
     `caps_for_slot` would make "which tasks may create tasks" a stated policy
     rather than an accident of the dispatch table. Raised by the `medium`
-    review of the one-step delegation change, 2026-09-06.
+    review of the one-step delegation change, 2026-09-06. **Decided
+    2026-09-07, not yet built: a STATIC bit**, held by slot 0, `netd` and every
+    spawnable slot, denied to `fsd`, `cond`, `accountd` and the idle task. The
+    delegable form collapses on contact (the boot shell cannot tell a subshell
+    from any program without trusting a binary's name, the argument already
+    rejected once), so the bit buys exactly one stated sentence, *servers
+    cannot create tasks*, which today is an absence rather than a check.
+    Verify by temporary mutation (no server can be made to spawn on cue);
+    pairs with the misbehaving-program rig item below.
+  - **The session gate's stated limits (2026-09-07, step 4 of
+    `roadmap/roadmap-fid-verbs.md`).** Sessions are capped in total
+    (`SESSION_MAX = MAX_CONNS - 1`), not per peer, so with three or more nodes
+    one peer can hold every session slot; a per-peer share is the fix, and a
+    two-node cluster cannot exercise it. `scripts/np9p_server.py` serves a
+    session single-threaded (a held session blocks the next accept until it
+    closes or idles out at 60 s), fine for the gate and not for the step that
+    makes the guest hold one. A session client that pipelines a request before
+    the previous reply is acked has it retransmitted, not lost (the export's
+    request state resets only once the reply is acked, since the reply buffer
+    feeds retransmits). And the export still takes a request from one segment.
   - **The refusal side of delegation has no check that can fail.** Every
     `DELEGATE` in the tree is a parent granting to its own child, so nothing
     ever exercises "a task cannot delegate to or for a stranger"; the
