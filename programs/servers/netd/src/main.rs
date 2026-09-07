@@ -4477,7 +4477,7 @@ fn map_user(who: &[u8; ninep_abi::NP_NAME_LEN]) -> Result<Proxy, LineScan> {
 /// `writeat` ran as root, and the grep never saw it because it searched for the
 /// helper names that were known rather than for the property. A required
 /// parameter cannot be forgotten: a new export verb that calls `fsd` does not
-/// compile until it says who it is for. See docs/unspellable-postmortem.md.
+/// compile until it says who it is for. See docs/postmortems/unspellable-postmortem.md.
 #[derive(Clone, Copy)]
 enum As {
     /// `netd`'s own business: its cluster identity and authorized-peer files, the

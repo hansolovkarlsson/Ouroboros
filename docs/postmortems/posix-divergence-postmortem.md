@@ -14,10 +14,10 @@ and [console-server](console-server-postmortem.md) postmortems (the arcs that
 did the actual forcing) and to the [cluster](cluster-phase0-postmortem.md)
 [postmortems](cluster-distributed-postmortem.md) (where the result got its
 name). The forward half — how portability comes back — lives in
-[`ROADMAP.md`](ROADMAP.md); the honest user-facing trade is in
-[`comparison.md`](comparison.md); the crystallized statement of what the ABI
+[`ROADMAP.md`](../ROADMAP.md); the honest user-facing trade is in
+[`comparison.md`](../comparison.md); the crystallized statement of what the ABI
 *is* is the "Philosophy — not POSIX, not Linux" subsection of
-[`architecture.md`](architecture.md).
+[`architecture.md`](../architecture.md).
 
 ## The starting point: a goal phrased as a feeling
 

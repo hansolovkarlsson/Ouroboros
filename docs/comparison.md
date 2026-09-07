@@ -143,7 +143,7 @@ structure.
   head.
 - **The biggest thing you give up across the board is POSIX / C portability**
   — and that gap is *now half-closed*: the userland libc personality is built
-  (picolibc is ported, C programs run — see `docs/libc-arc-postmortem.md`), so
+  (picolibc is ported, C programs run — see `docs/postmortems/libc-arc-postmortem.md`), so
   what's left is porting a real *application* and the `fork`/`select`/signals
   mismatches, not inventing the mechanism. Deliberately a userland personality,
   never a POSIX kernel — see `docs/ROADMAP.md`.

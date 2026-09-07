@@ -59,7 +59,7 @@ Beyond the firmware, four things make the Pi 4 fit *this* kernel unusually well:
 - **The xHCI path is the one storage path already confirmed on real hardware.**
   The Pi 4's VL805 sits behind the Broadcom PCIe root complex, so
   `pci::discover_xhci` → `xhci.rs` → `usb_msd.rs` should carry over — the same
-  chain the [xHCI keyboard postmortem](xhci-keyboard-postmortem.md) is about.
+  chain the [xHCI keyboard postmortem](postmortems/xhci-keyboard-postmortem.md) is about.
 - **It boots from a removable SD card**, so a bad build is a card swap, not a
   recovery procedure. Keep a second card flashed and known-good.
 - **It has a serial header**, which the laptop option does not.

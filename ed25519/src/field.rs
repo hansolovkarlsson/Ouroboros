@@ -97,7 +97,7 @@ impl Fe {
     /// Lazy reduction would be correct here *if* every caller knew how many adds
     /// it may do before reducing. That is a rule someone has to remember, which
     /// is the shape of invariant this project keeps getting wrong (see
-    /// `docs/unspellable-postmortem.md`). Carrying costs five shifts and five
+    /// `docs/postmortems/unspellable-postmortem.md`). Carrying costs five shifts and five
     /// adds against 254 squarings in a single inversion — far below measurable —
     /// and buys the invariant that **every `Fe` always has limbs below 2⁵¹**, so
     /// no caller can create an unreduced one by accident.

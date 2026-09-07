@@ -7,7 +7,7 @@ mode/owner `stat` surface, `chmod`/`chown`, kernel identity, `login`, and `fsd`
 enforcement. The roadmap's #1-ranked gap, closed.*
 
 For the milestone facts see `CHANGELOG.md`; for the day's narrative see
-the [work journal](work-journal/README.md). This is the retrospective — the threads that ran through the arc,
+the [work journal](../work-journal/README.md). This is the retrospective — the threads that ran through the arc,
 and the two places the design changed under contact with reality.
 
 ## The spine: the feature was a *join*, not a build

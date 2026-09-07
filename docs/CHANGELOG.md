@@ -3,7 +3,7 @@
 Historical record of completed milestones, newest first. For
 forward-looking plans, see [`ROADMAP.md`](ROADMAP.md); for the
 debugging history and lessons behind each decision (what was tried,
-what broke, how it was diagnosed), see the debugging postmortems under `docs/`; for *how* something
+what broke, how it was diagnosed), see the debugging postmortems under `docs/postmortems/`; for *how* something
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
@@ -53,7 +53,7 @@ failure flag and exits 1, while still listing the operands that worked.
 (three observers — guest transcript, peer request log, pcap — and a refusal to
 report results unless the peer actually received something); and the
 twenty-ninth postmortem,
-[`true-when-written-postmortem.md`](true-when-written-postmortem.md), on the
+[`true-when-written-postmortem.md`](postmortems/true-when-written-postmortem.md), on the
 class three of these bugs share — a statement correct when written and falsified
 later by a change in a different file, where no compiler, test or review can see
 it.
@@ -115,7 +115,7 @@ line, never enumerating the directory, exit code 0.
 verbatim to `docs/README.md` (every document, annotated) and
 `docs/source-map.md` (every source file, annotated) — nothing deleted, and both
 now live beside what they describe. The twenty-ninth postmortem,
-[`true-when-written-postmortem.md`](true-when-written-postmortem.md), covers the
+[`true-when-written-postmortem.md`](postmortems/true-when-written-postmortem.md), covers the
 class three of the above share: a statement that was correct when written and
 was falsified later by a change in a different file, where no compiler, test or
 review can see it. One had a shelf life of four and a half hours.
@@ -185,7 +185,7 @@ POSIX `rename`: a protocol verb has nobody to consult.
 ### The observers
 
 Five things that reported success while proving nothing, all found this day —
-written up as [`blind-instruments-postmortem.md`](blind-instruments-postmortem.md),
+written up as [`blind-instruments-postmortem.md`](postmortems/blind-instruments-postmortem.md),
 the twenty-eighth:
 
 - **`np9p_client.py`'s `stat` sent `NP_READ_FILE`** and printed the byte count
@@ -243,7 +243,7 @@ rather than misparsed), so a pre-0.16 machine cannot mount from or `cpu` to a
 **Four review rounds against the flag-day PR, then eight small follow-ups.** The
 first round found the arc's defects; the next three mostly found the previous
 round's *repairs*, which is the subject of
-[`repairing-the-repairs-postmortem.md`](repairing-the-repairs-postmortem.md).
+[`repairing-the-repairs-postmortem.md`](postmortems/repairing-the-repairs-postmortem.md).
 
 Fixed in the PR itself:
 
@@ -353,7 +353,7 @@ MAC'd, 0 fault lines); a retired-format frame refused; an unauthorized key
 refused; a reply signed by the wrong machine refused *by the client*; and
 revocation — comment a peer's line out and the same key stops being served.
 
-See [`cluster-keys-postmortem.md`](cluster-keys-postmortem.md) and
+See [`cluster-keys-postmortem.md`](postmortems/cluster-keys-postmortem.md) and
 [`roadmap-cluster-keys.md`](roadmap-cluster-keys.md). **Still per-machine, not
 per-user**: an authorized machine can claim any of its own users' names.
 
@@ -392,7 +392,7 @@ latch, and both properties were the bug: a forgotten call site (`fsd_write_at`)
 silently ran remote `cp`/`>>`/`writeat` as root, and any other task's request
 interleaving between the two messages dropped the latch. Now an unproxied export
 path does not compile, and nothing can come between a request and the identity
-that is a field of it. See [`unspellable-postmortem.md`](unspellable-postmortem.md).
+that is a field of it. See [`unspellable-postmortem.md`](postmortems/unspellable-postmortem.md).
 
 **`cpu` too, and by a different mechanism.** A spawned program is not `netd`'s
 request — it makes its own, with its own task identity, and a child inherits the
@@ -528,7 +528,7 @@ precisely why nothing caught it; the Rust definition now carries a note back to
 the mirror.
 
 Retrospective:
-[`asking-the-right-question-postmortem.md`](asking-the-right-question-postmortem.md)
+[`asking-the-right-question-postmortem.md`](postmortems/asking-the-right-question-postmortem.md)
 (the 24th).
 
 ## `accountd`: a fourth server, and self-service passwords (2026-08-30)
@@ -667,7 +667,7 @@ replaced — and carried the supervisor change, which the branch split had
 dropped along with nine doc files.
 
 The day's process lessons, which outlived its code, are in
-[`review-and-split-postmortem.md`](review-and-split-postmortem.md): six primary
+[`review-and-split-postmortem.md`](postmortems/review-and-split-postmortem.md): six primary
 signals that reported success while something was wrong, and the one habit that
 caught them (construct the failure before trusting the fix).
 
@@ -961,7 +961,7 @@ rewrite.
   `/bin/id` read `/etc/passwd` with the 512-byte inline read while
   `login`/`su`/`useradd` read the full ~2 KB, so it couldn't resolve names past
   ~5 accounts — switched to the bulk read. See
-  `docs/account-management-postmortem.md`.
+  `docs/postmortems/account-management-postmortem.md`.
 
 ## picolibc: the real C library (libc arc, step 6)
 
@@ -1594,7 +1594,7 @@ correctly and `*.md` stayed literal; `cat ba<Tab>` completed to `BANANA.TXT` and
 This shell-and-binaries branch as a whole — the keyboard-ownership arc, the
 externalization scoping, and the two old traps that resurfaced (this PIE wall
 and the pager's piped-read `MSG_MAX` bug) — is retrospected in
-[`interactive-shell-postmortem.md`](interactive-shell-postmortem.md).
+[`interactive-shell-postmortem.md`](postmortems/interactive-shell-postmortem.md).
 
 ## `man` - manual pages
 
@@ -1701,7 +1701,7 @@ those are now just `/bin` programs.
 The design behind this — *interactivity is keyboard ownership, not a shell
 property* — and the protected-server guard bug an ultrareview later caught in
 `FG` are written up in
-[`interactive-shell-postmortem.md`](interactive-shell-postmortem.md).
+[`interactive-shell-postmortem.md`](postmortems/interactive-shell-postmortem.md).
 
 ## `pwd` and `write` move out to `/bin`
 
@@ -1969,7 +1969,7 @@ refinement to build if the need arises.
 1500 bytes back; the guest printed all 33 lines (the full 1500) — past the old
 768-byte cut — via the chunked pull. Zero EL0 faults, and the ~2 KB `PendingRun`
 on netd's stack did *not* trip the guard page (the recurring trap). See
-[`cpu-streaming-postmortem.md`](cpu-streaming-postmortem.md).
+[`cpu-streaming-postmortem.md`](postmortems/cpu-streaming-postmortem.md).
 
 ## Reply authentication — mutual auth on the export (auth tier 2, part 1)
 
@@ -2008,7 +2008,7 @@ explicit **"leaving a trusted network" trigger** on the roadmap.
 foreign observer verified it (a correct-key `readdir`/`dial`/`serve` all pass, so
 the guest's Rust `seal_reply` and the Python HMAC agree byte-for-byte); a tampered
 reply — any flipped byte of data or MAC — is rejected. Zero EL0 faults. See the
-tier-2 addendum in [`cluster-auth-postmortem.md`](cluster-auth-postmortem.md).
+tier-2 addendum in [`cluster-auth-postmortem.md`](postmortems/cluster-auth-postmortem.md).
 
 ## Dial-in: /net/tcp accept — serve on another machine's network
 
@@ -2054,7 +2054,7 @@ through the export were byte-exact end to end (external client received the serv
 reply). Zero EL0 faults. The guard-page **stack overflow returned** (`MAX_DIAL=4`
 overflowed `serve`'s 32 KB stack — the network arc's recurring trap, now the
 fifth time) and was fixed by capping the fan-out. See
-[`dial-in-postmortem.md`](dial-in-postmortem.md).
+[`dial-in-postmortem.md`](postmortems/dial-in-postmortem.md).
 
 ## Dial-out: /net/tcp connection files — use another machine's network
 
@@ -2102,7 +2102,7 @@ saw the connection arrive from the guest's NIC and received its forwarded
 request; the reply streamed back through the guest. Zero EL0 faults. A stack
 overflow (the big per-conn buffers on `serve`'s guard-paged stack — the network
 arc's recurring trap) was found and fixed by shrinking `MAX_DIAL`/buffers. See
-[`dial-out-postmortem.md`](dial-out-postmortem.md).
+[`dial-out-postmortem.md`](postmortems/dial-out-postmortem.md).
 
 ## Cluster authentication: the export-hardening phase (v0.10.0)
 
@@ -2149,7 +2149,7 @@ ceiling bit again (the key threads as `&Auth` through the whole event loop); a
 sentinel collision (`FS_ERR_AUTH` first placed on a used `MAX-n` slot) was caught
 by `rustc`'s `unreachable_patterns`; and a magic-byte transposition shared by both
 Python peers was caught only by the independent Rust guest — see
-[`cluster-auth-postmortem.md`](cluster-auth-postmortem.md).
+[`cluster-auth-postmortem.md`](postmortems/cluster-auth-postmortem.md).
 
 ## Cluster Phase 4b: namespace import — the full Plan 9 `cpu` model
 
@@ -5486,7 +5486,7 @@ Full technical write-up - including the debugging techniques that found
 each bug (poisoned DMA buffers, widening a request to break a suspicious
 size coincidence, using a known-good standard request as a control,
 decoding raw exception registers by hand) - in
-[`xhci-keyboard-postmortem.md`](xhci-keyboard-postmortem.md), written to
+[`xhci-keyboard-postmortem.md`](postmortems/xhci-keyboard-postmortem.md), written to
 be useful to other bare-metal-OS developers hitting the same class of
 problem, not just as this project's own history.
 

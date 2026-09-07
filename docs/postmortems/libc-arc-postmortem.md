@@ -9,7 +9,7 @@ or loader code — C portability turned out to be a userland personality riding
 the machinery that was already there.*
 
 For the milestone facts see `CHANGELOG.md` (steps 1–6); for the day-narrative
-see the [work journal](work-journal/README.md). This is the retrospective — the threads that ran through the
+see the [work journal](../work-journal/README.md). This is the retrospective — the threads that ran through the
 arc and what each cost.
 
 ## The spine: portability is a personality, not a kernel property

@@ -531,7 +531,7 @@ pub const NP_SIG_PREFIX_LEN: usize = NP_NONCE_LEN + NP_NAME_LEN;
 // separate message that `fsd` held until the next request arrived. Any other
 // task's request interleaving between the two dropped it, and the fallback was
 // `netd`'s root. A field of the request it authorizes cannot be separated from
-// it by anything. See docs/unspellable-postmortem.md.
+// it by anything. See docs/postmortems/unspellable-postmortem.md.
 //
 // **Who may set it.** `fsd` honours this field on a request from `NET_TASK` and
 // from nowhere else, so no other task can claim an identity by writing to

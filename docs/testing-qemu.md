@@ -331,7 +331,7 @@ This host↔guest round trip is the real cross-implementation check: the python
 peer's Ed25519 and the guest's hand-rolled `ed25519` crate must agree
 byte-for-byte over the same signed bytes, or a correctly-keyed peer is rejected
 too (that is how a magic-byte transposition in the python peers was caught under
-the older MAC format — see `docs/cluster-auth-postmortem.md`). A machine with a
+the older MAC format — see `docs/postmortems/cluster-auth-postmortem.md`). A machine with a
 `\NOEXEC` flag file authenticates mounts but refuses `cpu` remote-exec.
 
 The guest reaches the host at **10.0.2.2** over SLIRP with no hostfwd (SLIRP routes
@@ -353,7 +353,7 @@ python3 scripts/np9p_client.py localhost 5640 serve 9000 5900 HELLO-SERVED-VIA-G
 Both are foreign-observer round trips: `dial` proves the guest opened a real
 outbound connection (a host server sees it arrive from the guest's NIC); `serve`
 proves the guest accepted a real inbound one (the external host socket gets the
-served reply). See `docs/dial-out-postmortem.md` / `docs/dial-in-postmortem.md`.
+served reply). See `docs/postmortems/dial-out-postmortem.md` / `docs/postmortems/dial-in-postmortem.md`.
 
 ---
 

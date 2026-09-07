@@ -124,7 +124,7 @@ to the layer that actually knows which client is asking.
 ## The ordered plan
 
 Each step names its check **and** a negative control — the discipline from
-[`cluster-keys-postmortem.md`](cluster-keys-postmortem.md): *a step is only
+[`cluster-keys-postmortem.md`](postmortems/cluster-keys-postmortem.md): *a step is only
 verifiable if the check can fail.* Most of that arc's real findings were checks
 that could not.
 
@@ -238,7 +238,7 @@ write flags; `NP_FSTAT` reporting a size one byte short.
 crate was written as a **gate before any logic** — a trivial `x + 1`, linked and
 relocation-checked — on the precedent that a one-build gate proved `alloc` could
 not be PIE-linked before a week went into it
-([`capability-and-hardening-postmortem.md`](capability-and-hardening-postmortem.md)).
+([`capability-and-hardening-postmortem.md`](postmortems/capability-and-hardening-postmortem.md)).
 
 **The trivial gate passed and was worthless.** Making it *representative* — the
 shim actually calling `ninep_abi::resolve_ns` — **failed the link**:
@@ -372,7 +372,7 @@ of this decision.** The first recommendation here was the cheapest option, and
 it was wrong; the criteria were restated (2026-09-05) as a correction, against
 a background of too much time spent re-fixing earlier fixes. A cheap repair
 has the same defect rate as the code it repairs — see
-[`repairing-the-repairs-postmortem.md`](repairing-the-repairs-postmortem.md) —
+[`repairing-the-repairs-postmortem.md`](postmortems/repairing-the-repairs-postmortem.md) —
 so cheapest-now is not cheapest-in-total, and it is not the default answer.
 
 **Why not "translate fid ops to path ops" (the smallest change).** `libc` could
