@@ -603,8 +603,10 @@ the microkernel arc itself still leaves open):
    29, the second segment), not the first request of a connection.
 
 4. **General / transitive capability delegation.** The delegation shipped
-   2026-08-21 is deliberately coarse: **non-transitive, irrevocable short of
-   task death, and in practice shell-only.** (It was also *one target per
+   2026-08-21 was deliberately coarse: **non-transitive, irrevocable short of
+   task death, and in practice shell-only**; since 2026-09-06 it is one-step
+   (a task may pass what it holds to its own direct children) and still
+   irrevocable. (It was also *one target per
    task* until 2026-09-06, when that turned out to be a bug rather than a
    scope cut — see the 09-06 entry under item 2. It is a per-task set now,
    which is what `a | b | c` with a network stage needed; the rest of this
@@ -616,7 +618,7 @@ the microkernel arc itself still leaves open):
    consumer" trap the capability-and-hardening postmortem flagged for
    delegation itself. Build the consumer first, or wait until one is
    actually wanted. **Update 2026-09-06:** the consumer arrived, and the
-   subtree-scoped half shipped with it: the kernel records each task's
+   one-step half shipped with it: the kernel records each task's
    parent, and a task may pass a right it holds to its own children and
    authorize links between them (see the review ledger's nested-shell item).
    Still open here: revocation, and passing a right to anything that is not
@@ -1444,7 +1446,7 @@ would otherwise silently shrink into looking like nothing was ever found.
     no identity can be; a message with no identity is never demuxed as a
     child; a run from a caller with none fails closed.
   - ~~**A nested shell cannot delegate `TO_NET` at all.**~~ **Fixed
-    2026-09-06 with parent tracking and subtree-scoped delegation.**
+    2026-09-06 with parent tracking and one-step delegation.**
     `may_delegate` read the *static* mask and spawnable slots have none, so
     every `delegate_net` from a spawned `SH.BIN` was denied, discarded by its
     `let _ =`, and its whole subtree silently netless; wider than `TO_NET`,
@@ -1453,8 +1455,8 @@ would otherwise silently shrink into looking like nothing was ever found.
     authorize the stream`). The kernel now records every task's parent at
     `spawn`, by task identity, and `may_delegate` has a second way to pass: a
     task may hand a right it holds, statically or by delegation, to its own
-    children, and authorize links between them. Rights flow down a subtree
-    and nowhere else; no task can name a stranger. (`SPAWN` is ungated, so
+    direct children (a grandchild does not qualify). Rights flow one step
+    down and nowhere else; no task can name a stranger. (`SPAWN` is ungated, so
     any task may spawn a child and pass it what it holds. Stated as accepted:
     the parent could relay every byte itself, so the child gains nothing the
     parent could not do on its behalf. Gating `SPAWN` is its own decision,
@@ -1477,12 +1479,12 @@ would otherwise silently shrink into looking like nothing was ever found.
     north-star item 4 ("transitive delegation"), built now because the nested
     shell is the consumer that item said to wait for; the general, revocable
     form is still open there.
-  - **`SPAWN` is ungated.** Any task may spawn, which with subtree
+  - **`SPAWN` is ungated.** Any task may spawn, which with one-step
     delegation means any task may pass what it holds to its own children.
     Accepted on the proxy argument (above), but a `CAP_SPAWN` bit in
     `caps_for_slot` would make "which tasks may create tasks" a stated policy
     rather than an accident of the dispatch table. Raised by the `medium`
-    review of the subtree change, 2026-09-06.
+    review of the one-step delegation change, 2026-09-06.
   - **A foregrounded nested shell loses the keyboard after every command.**
     `exec /EFI/ORBS/SH.BIN`, `fg 6`, log in, `echo hi` (a builtin, no child,
     no `FG`): `ps` before shows task 0 blocked and task 6 runnable, `ps` after
@@ -1494,7 +1496,11 @@ would otherwise silently shrink into looking like nothing was ever found.
     both shells hides which one answered. Not traced to a cause; the revert
     on child exit goes to slot 0 by design, but this case has no child.
   - **`delegate_net` discards its result**, so the one grant this arc is about
-    is the only `DELEGATE` in the shell with no failure signal. A future
+    is the only `DELEGATE` in the shell with no failure signal. **Worse since
+    subtree delegation (2026-09-06):** a nested shell that never received
+    `TO_NET` itself (netd absent or dead when it was spawned) is refused on
+    every grant it makes, so one dropped result silences a whole subtree for
+    the boot, with no line anywhere. A future
     `caps_for_slot` edit dropping `TO_NET` from slot 0 would return the tree to
     the pre-fix behaviour with no diagnostic anywhere. A check that cannot
     fail.

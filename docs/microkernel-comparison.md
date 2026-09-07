@@ -90,14 +90,13 @@ privilege) underneath them. Measured against that one test:
   reach (a spawned program can reach only the two servers and the shell,
   not arbitrary tasks or the device gates). The static per-slot mask is now
   a *baseline* that can be extended at runtime: `DELEGATE` (syscall 41) lets
-  a task hand another a send-capability it statically holds — MINIX's grant
+  a task hand a send-capability it holds to a task it spawned, MINIX's grant
   mechanism, in miniature for the send topology. It's used today for
   relay-free program-to-program pipes (the shell delegates a producer the
   right to stream directly to its consumer). Since 2026-09-06 it is a set of
   delegated targets per task, and delegation is confined to a task's own
-  subtree: a task may pass a right it holds to a task it spawned, and wire
-  links between its own children, so a nested shell delegates exactly as the
-  boot shell does. Passing a right to anything that is not your own child,
+  direct children: a task may pass a right it holds to a task it spawned, so
+  a nested shell delegates exactly as the boot shell does. Passing a right to anything that is not your own child,
   and revocation, remain the gap.
 - **No process manager / no PID namespace / no `fork`.** Task creation is
   `spawn` (add a task alongside the caller), not the POSIX
@@ -109,7 +108,7 @@ privilege) underneath them. Measured against that one test:
 using the right IPC primitives and an enforced IPC capability topology that
 is now a static baseline plus runtime delegation. Short of MINIX mainly on
 *breadth* (three servers, not a full fleet) and on *general* capability
-delegation (today's is subtree-scoped and irrevocable, where MINIX's grants
+delegation (today's is one-step, to a task's own direct children, and irrevocable, where MINIX's grants
 are general and transitive).
 
 ---
@@ -283,7 +282,7 @@ real-world hardening behind the design.
 | Non-crashing hang recovery | Timeouts / RS health | Health checks for hangs (first-class) | **Yes** — a passive heartbeat catches a *runnable* wedge; an active ping catches a *blocked* wedge |
 | Live code replacement | No (restart, not hot-swap) | **Yes** — pause/snapshot/swap/restore/rollback | No (reload same image) |
 | Supervision scope | Uniform (RS parents every boot-image process) | Uniform (self-heal framework) | **Uniform** — a registry supervises every boot-image server (`fsd`, `cond`, `netd`) |
-| Trust topology | Capability-gated endpoints between servers | Trait boundaries | **Capability send-mask** — a per-slot mask enforced at the IPC boundary restricts who each task may reach, now a static baseline plus runtime `DELEGATE` (coarse: one target, non-transitive, in practice shell-only) |
+| Trust topology | Capability-gated endpoints between servers | Trait boundaries | **Capability send-mask**, a per-slot mask enforced at the IPC boundary restricts who each task may reach, now a static baseline plus runtime `DELEGATE` (a task may pass a right it holds to its own direct children; irrevocable) |
 | Kernel/policy split | Kernel is mechanism; PM/VFS/RS are policy | Explicit: `core/` (mechanism) vs. `subsystems/` + `modules_impl/` (policy) | **Partial** — the FS and console are out; scheduler, MMU, and the remaining drivers are still kernel-resident |
 
 ---
@@ -307,7 +306,7 @@ The first three moves on this list have since shipped, in order:
   isolation topological, not just memory-level.
 - ~~**Runtime capability delegation (basic).**~~ **Done** — `DELEGATE`
   (syscall 41) extends the static send-mask at runtime, confined to a task's
-  own subtree (since 2026-09-06; it was "only what you statically hold"
+  own direct children (since 2026-09-06; it was "only what you statically hold"
   before); its first consumer is relay-free program-to-program pipes (the
   shell out of the byte path).
 - ~~**The stdout-over-IPC payoff** (program-to-program pipes,
@@ -320,8 +319,8 @@ The first three moves on this list have since shipped, in order:
 
 What's left, in rough order of payoff:
 
-1. **General capability delegation.** Today's `DELEGATE` is coarse — one
-   delegated target per task, non-transitive, in practice shell-only.
+1. **General capability delegation.** Today's `DELEGATE` is one-step and
+   irrevocable: a task may pass what it holds to its own direct children.
    MINIX's grant mechanism is general and transitive (any task hands any
    held capability onward, revocably) — needed for direct task-to-task
    streaming without a relay, or a spawned program that runs its own server.

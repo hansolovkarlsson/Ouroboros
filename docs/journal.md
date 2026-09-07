@@ -25,13 +25,12 @@ may pass a right it holds to its own children and authorize links between
 them. Rights move down a subtree and nowhere else. A pipeline stage has no
 children and can give away nothing. Hans took it.
 
-**The rule, in one function.** Two ways to pass: the delegator statically
+**The rule, as first written.** Two ways to pass: the delegator statically
 holds the target, as before, which is how slot 0 does everything it did; or
 the grantee is the delegator's child and the target is either another child
-or something the delegator may itself reach, statically or by delegation.
-One field per slot set at `spawn` and cleared with the rest of the teardown,
-one extra clause, and the nested shell needed no change: the calls it already
-made stopped being refused.
+or something the delegator may itself reach. One field per slot, one extra
+clause, and the nested shell needed no change: the calls it already made
+stopped being refused. (Two reviews later the rule is one clause, below.)
 
 **The check, and what it nearly hid.** The first run against the fix showed
 the first two pipelines refused and the later ones working, which no version
@@ -64,6 +63,22 @@ true rather than true by coincidence. Beside those: `may_send` now calls the
 same "holds a send right" test `may_delegate` does, the five teardown sites
 clear a slot's rights through one helper, a dead guard went, and four
 documents that still described the old rule were brought up to the code.
+
+**A third pass, and the rule is one clause.** The grantee is my own direct
+child and the target is something I may reach. "Another of my children" needed
+no arm, because `spawn` now grants a spawner and its child each other, so a
+child is always something I may reach; the arm was dead the moment that grant
+landed. Two more things fell out of that grant: netd's self-send bit and its
+explicit grant to its remote-exec child were both no-ops, so both are gone,
+and the remote run still works, which is the evidence the general rule
+subsumes the special case. The parent is now cleared when a slot is reused,
+not at exit, because the reaper this primitive is meant for arrives after the
+exit and must still be able to ask whose child a zombie is. And the word
+"subtree" was wrong everywhere it appeared: the check is one step, a
+grandchild does not qualify, and every description now says "own direct
+children" and points at the one function. Three documents and one site page
+still stated the deleted rule in passages I had not touched; a review found
+them, and the freshness check could not, because I had re-stamped the hash.
 
 **What was not tested, said plainly.** The negative half of the rule, that a
 task cannot delegate to or for a stranger, has no program that would try it,

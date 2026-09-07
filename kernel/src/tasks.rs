@@ -175,11 +175,13 @@ fn caps_for_slot(slot: usize) -> u32 {
         // Network server: logs to the console server, and calls the
         // filesystem server (its HTTP server reads files from fsd to serve
         // them - netd is fsd's first non-shell client); owns the NIC.
-        // (Replies to its own clients ride the reply exemption.) Holds TO_NET
-        // (a self-send bit) *only* so it may DELEGATE the reply capability to a
-        // child it spawns - the remote-exec (Plan 9 `cpu`, cluster Phase 4a)
-        // child whose stdout it captures, which pipes its output back to netd.
-        syscall_abi::NET_TASK => TO_FSD | TO_CON | TO_NET | CAP_NET,
+        // (Replies to its own clients ride the reply exemption.) It used to
+        // hold a TO_NET self-send bit *only* so it could DELEGATE the reply
+        // capability to the remote-exec child it spawns; since 2026-09-06 a
+        // child is granted its spawner at spawn, so the bit and netd's
+        // explicit grant were both no-ops and are gone - the evidence that the
+        // parent-child rule subsumes the special case.
+        syscall_abi::NET_TASK => TO_FSD | TO_CON | CAP_NET,
         // Account server: reads and writes /etc/passwd + /etc/shadow through the
         // filesystem server, and logs to the console. It holds NO device
         // capability at all - its privilege is not a resource but a POLICY one
@@ -1184,19 +1186,19 @@ fn reset_id(task: usize) {
 
 /// Runtime capability delegation (the `DELEGATE` syscall). The static
 /// send-mask in [`caps_for_slot`] is fixed per slot; delegation lets a task
-/// that *statically holds* a send-capability hand it to another task at
-/// runtime - the mechanism a shell uses to authorize a pipeline's producer
-/// to stream directly to its consumer (relay-free `programA | programB`),
-/// taking the shell out of the byte hot path.
+/// hand a send-capability it holds to a task it spawned, at runtime - the
+/// mechanism a shell uses to authorize a pipeline's producer to stream
+/// directly to its consumer (relay-free `programA | programB`), taking the
+/// shell out of the byte hot path.
 ///
 /// A **set** of delegated send-targets per task, as a bitmask over slot
 /// indices in exactly the shape [`caps_for_slot`] already uses (`1 << slot`),
 /// so [`may_send`]'s static and delegated arms test the same way. Empty
 /// ([`NO_DELEGATION`]) = nothing delegated. A delegated capability cannot be
 /// laundered to a stranger: [`may_delegate`] lets a task pass a right it holds
-/// only DOWN ITS OWN SUBTREE (to a task it spawned, per [`PARENTS`]), and
-/// authorize links only between its own children. Slot 0, which statically
-/// holds every spawnable slot, still authorizes anything, as before.
+/// only to its OWN DIRECT CHILDREN (tasks its `SPAWN` created, per
+/// [`PARENTS`]). Slot 0 wires its pipelines the same way, since every task
+/// it wires is one it spawned.
 ///
 /// **This was ONE slot until 2026-09-06, and that was a bug with a
 /// user-visible symptom**, not just a scope cut. It matched the single-slot
@@ -1227,13 +1229,15 @@ static DELEGATED_SEND: [AtomicU64; NUM_TASKS] =
 /// parent - the same reason `SENDER_TASK` exists.
 ///
 /// The one consumer today is [`may_delegate`]: authority over a task's own
-/// subtree is what lets a nested shell wire its children's pipelines and hand
-/// them the network right it was handed, without any task ever being able to
-/// give a right to a stranger. It is also the primitive the owner-less `WAIT`
-/// and `KILL` and the pipeline teardown are waiting on (docs/ROADMAP.md) -
-/// with one caveat for that future consumer: this is cleared at EXIT, while
-/// [`task_id_of`] still answers for a zombie, so "whose child is this zombie"
-/// must be read before or at the exit, not from here afterwards.
+/// direct children is what lets a nested shell wire its children's pipelines
+/// and hand them the network right it was handed, without any task ever being
+/// able to give a right to a stranger. It is also the primitive the owner-less
+/// `WAIT` and `KILL` and the pipeline teardown are waiting on
+/// (docs/ROADMAP.md), which is why it is cleared when the slot is REUSED
+/// ([`spawn`] overwrites it, [`install_task`] clears it), not at exit: a
+/// reaper by definition arrives after the exit, and must still be able to
+/// ask whose child a zombie is. [`task_id_of`] answers for zombies for the
+/// same reason.
 static PARENTS: [AtomicU64; NUM_TASKS] = [const { AtomicU64::new(0) }; NUM_TASKS];
 
 /// Record `spawner` as `child`'s parent, by identity, at the moment of spawn.
@@ -1241,8 +1245,8 @@ fn set_parent(child: usize, spawner: usize) {
     PARENTS[child].store(task_id_of(spawner).unwrap_or(0), Ordering::Relaxed);
 }
 
-/// Forget a slot's parent - wired into every teardown path and into
-/// [`install_task`], so a fresh occupant never inherits one.
+/// Forget a slot's parent. Called where a slot is REUSED ([`install_task`];
+/// [`spawn`] overwrites instead), never at exit - see [`PARENTS`].
 fn clear_parent(slot: usize) {
     PARENTS[slot].store(0, Ordering::Relaxed);
 }
@@ -1265,17 +1269,21 @@ fn holds_send_right(src: usize, dest: usize) -> bool {
 }
 
 /// Whether `delegator` may grant `grantee` the right to send to `target`:
-/// `grantee` must be `delegator`'s own child (see [`PARENTS`]), and `target`
-/// either another of its children or a task `delegator` holds a send right to
-/// itself, statically or by delegation. That is the whole rule. Rights flow
-/// DOWN a task's own subtree and nowhere else; no task can ever name a
-/// stranger as grantee.
+/// `grantee` must be `delegator`'s OWN DIRECT CHILD (a task its `SPAWN`
+/// created, see [`PARENTS`]; not a grandchild), and `target` a task
+/// `delegator` holds a send right to itself, statically or by delegation.
+/// That is the whole rule, and every other description of it points here.
+/// A task's own children are always among what it may reach, because
+/// [`spawn`] grants a spawner and its child each other, so "another of my
+/// children" needs no arm of its own. Rights flow one step down and nowhere
+/// else; no task can ever name a stranger as grantee.
 ///
 /// There is deliberately no separate "statically held" rule for slot 0: every
 /// task the boot shell wires is one it spawned, so its grants pass here like
 /// anyone's, and the rule is true rather than true by coincidence. The syscall
-/// arm's refusal of a protected grantee is now derivable (a protected slot is
-/// never anyone's child) and kept as the belt.
+/// arm still refuses a protected grantee first, and that refusal is
+/// load-bearing for the ERROR ORDER the ABI promises (a dead protected
+/// grantee answers DENIED, not NO_SUCH_TASK), not for policy.
 ///
 /// **What this permits, stated so nobody has to discover it:** `SPAWN` is
 /// ungated, so any task, a pipeline stage included, may spawn a child and
@@ -1288,23 +1296,12 @@ fn holds_send_right(src: usize, dest: usize) -> bool {
 /// This is what lets a spawned `SH.BIN` run a pipeline or reach the network
 /// at all - until 2026-09-06 every `DELEGATE` it issued was refused, because
 /// the rule then was "statically hold the target", which only slot 0 can. It
-/// is the subtree-scoped form of ROADMAP.md's "transitive delegation" item,
-/// built now because the nested shell is the consumer that item was waiting
-/// for. A right already in hand outlives the parent that gave it, like every
-/// other grant; only the authority to grant anything NEW dies with the parent.
+/// is the one-step form of ROADMAP.md's "transitive delegation" item, built
+/// now because the nested shell is the consumer that item was waiting for. A
+/// right already in hand outlives the parent that gave it, like every other
+/// grant; only the authority to grant anything NEW dies with the parent.
 pub(crate) fn may_delegate(delegator: usize, grantee: usize, target: usize) -> bool {
-    is_child_of(grantee, delegator)
-        && (is_child_of(target, delegator) || holds_send_right(delegator, target))
-}
-
-/// Everything a slot's occupant was granted or was recorded as: its delegated
-/// send set and its parent. ONE call at every place an occupant ends or is
-/// replaced, so the next per-task table is added here and nowhere else - the
-/// single-slot delegation leak this file describes came from a table that
-/// each teardown path had to remember on its own.
-fn clear_rights(slot: usize) {
-    clear_delegations_of(slot);
-    clear_parent(slot);
+    is_child_of(grantee, delegator) && holds_send_right(delegator, target)
 }
 
 /// `DELEGATE`'s core: grant `grantee` the runtime capability to send to
@@ -1803,7 +1800,7 @@ pub(crate) unsafe fn exit_current_and_switch(frame: *mut Context, status: u64) -
     clear_mailbox(current);
     clear_sender_cred(current);
     clear_grant(current);
-    clear_rights(current);
+    clear_delegations_of(current);
     clear_argv(current);
     clear_cwd(current);
     clear_env(current);
@@ -1833,7 +1830,7 @@ pub(crate) fn kill_task(i: usize) {
     clear_mailbox(i);
     clear_sender_cred(i);
     clear_grant(i);
-    clear_rights(i);
+    clear_delegations_of(i);
     clear_argv(i);
     clear_cwd(i);
     clear_env(i);
@@ -1865,7 +1862,7 @@ pub(crate) unsafe fn kill_current_and_switch(frame: *mut Context) {
     clear_mailbox(current);
     clear_sender_cred(current);
     clear_grant(current);
-    clear_rights(current);
+    clear_delegations_of(current);
     clear_argv(current);
     clear_cwd(current);
     clear_env(current);
@@ -1914,7 +1911,8 @@ pub(crate) fn fail_calls_to(dead: usize) {
 pub(crate) fn install_task(slot: usize, context: Context, region: (u64, u64)) {
     unsafe { *TASKS[slot].0.get() = context };
     unsafe { *REGIONS[slot].0.get() = region };
-    clear_rights(slot);
+    clear_delegations_of(slot);
+    clear_parent(slot);
     issue_generation(slot);
     unsafe { *STATES[slot].0.get() = TaskState::Runnable };
     flush_new_code(region.0, region.1);
@@ -1958,11 +1956,11 @@ pub(crate) fn spawn(context: Context, region: (u64, u64)) -> Result<usize, Spawn
         if unsafe { *STATES[i].0.get() } == TaskState::Unused {
             unsafe { *TASKS[i].0.get() = context };
             unsafe { *REGIONS[i].0.get() = region };
-            clear_rights(i);
+            clear_delegations_of(i);
             clear_delegations_at(i);
             issue_generation(i);
             let spawner = current_task();
-            set_parent(i, spawner);
+            set_parent(i, spawner); // overwrites the previous occupant's parent
             // A parent and its child may always exchange messages: the child
             // pipes its output to the parent for capture and redirection, the
             // parent relays a builtin's output into the child. Slot 0 has both

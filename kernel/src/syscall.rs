@@ -1478,8 +1478,11 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
             //
             // Checked in this order, and the ABI doc states it: a grantee
             // below the spawnable range is the security refusal above and is
-            // answered first (derivable now - a protected slot is never anyone's
-            // child - and kept as the belt); then either slot not live (out of
+            // answered first. As POLICY it is derivable now (a protected slot is
+            // never anyone's child); as ERROR ORDER it is load-bearing: a dead
+            // protected grantee must answer DENIED, not NO_SUCH_TASK, which the
+            // shell treats as the benign "a stage already exited". Then either
+            // slot not live (out of
             // range counts as not live, for both arguments alike - `task_exists`
             // bounds-checks); then the subtree rule.
             let grantee = arg0 as usize;

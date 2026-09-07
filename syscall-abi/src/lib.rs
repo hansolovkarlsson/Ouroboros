@@ -457,10 +457,11 @@ pub const HEAP_INFO_SIZE: u64 = 1;
 /// Runtime capability delegation: grant `grantee` (a task slot) the right to
 /// initiate IPC sends to `target` (a task slot) - a dynamic addition to
 /// `grantee`'s static send-mask. One rule: `grantee` must be the caller's
-/// **own child** (a task its `SPAWN` created; the kernel records every task's
-/// parent by task identity), and `target` either another of its children or a
-/// task the caller itself holds a send right to, statically or by delegation.
-/// Rights flow down a task's own subtree and nowhere else: the boot shell
+/// **own direct child** (a task its `SPAWN` created, not a grandchild; the
+/// kernel records every task's parent by task identity), and `target` a task
+/// the caller itself holds a send right to, statically or by delegation (its
+/// own children always are, since a spawner and its child are granted each
+/// other at spawn). Rights flow one step down and nowhere else: the boot shell
 /// wires a pipeline's producer to its consumer (relay-free
 /// `programA | programB`) and hands each command its network right, and a
 /// nested shell does the same for its own commands with the right it was
