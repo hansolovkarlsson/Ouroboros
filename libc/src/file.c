@@ -151,40 +151,55 @@ static long np_request(unsigned target, const unsigned char *endpoint,
 
 /* ---- path resolution (for open) ------------------------------------------ */
 
-static void resolve_path(const char *path, char *out) {
+/* The absolute form of `path` into `out`, or -1 when it does not fit.
+ *
+ * It used to TRUNCATE at PATH_MAX_C - 1 and carry on, so a long path opened
+ * whatever its first 95 bytes named. Measured 2026-09-07 with a file whose
+ * path is exactly 95 bytes and a 98-byte path built on it: O_RDONLY read that
+ * file, O_WRONLY|O_TRUNC emptied it, exit 0, no message. A cwd the kernel
+ * reports as too long fails the same way rather than being replaced by "/";
+ * only a cwd the kernel does not know at all falls back to the root. */
+static int resolve_path(const char *path, char *out) {
     if (path[0] == '/') {
         size_t n = strlen(path);
         if (n >= PATH_MAX_C) {
-            n = PATH_MAX_C - 1;
+            return -1;
         }
         memcpy(out, path, n);
         out[n] = 0;
-        return;
+        return 0;
     }
     char cwd[PATH_MAX_C];
     long clen = __os_syscall4(SYS_GET_CWD, (long)cwd, sizeof(cwd), 0, 0);
-    if (clen <= 0 || clen >= PATH_MAX_C) {
+    if (clen <= 0) {
         clen = 1;
         cwd[0] = '/';
     }
-    size_t o = 0;
-    for (long i = 0; i < clen && o < PATH_MAX_C - 1; i++) {
-        out[o++] = cwd[i];
+    if (clen >= PATH_MAX_C) {
+        return -1;
     }
-    if ((o == 0 || out[o - 1] != '/') && o < PATH_MAX_C - 1) {
+    size_t o = (size_t)clen;
+    memcpy(out, cwd, o);
+    if (out[o - 1] != '/') {
         out[o++] = '/';
     }
-    for (size_t i = 0; path[i] && o < PATH_MAX_C - 1; i++) {
-        out[o++] = path[i];
+    size_t n = strlen(path);
+    if (o + n >= PATH_MAX_C) {
+        return -1;
     }
-    out[o] = 0;
+    memcpy(out + o, path, n);
+    out[o + n] = 0;
+    return 0;
 }
 
 /* ---- open / close / lseek / fstat ---------------------------------------- */
 
 int open(const char *path, int flags, ...) {
     char abspath[PATH_MAX_C];
-    resolve_path(path, abspath);
+    if (resolve_path(path, abspath) != 0) {
+        g_last_status = FS_ERR_CLIENT;
+        return -1;
+    }
 
     unsigned long oflags = 0;
     int acc = flags & 3; /* O_ACCMODE: O_RDONLY=0, O_WRONLY=1, O_RDWR=2 */
