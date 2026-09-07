@@ -1818,3 +1818,30 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   its own fs layer. Likewise `ulib::read_line` still duplicates
   `login::read_field` (the same split); consolidate if the shell ever gains a
   `ulib` dependency.
+- **The shell has no quoting** (carried in the standup since 2026-09-03, recorded
+  here 2026-09-07). The word splitter is whitespace-only, so an argument
+  containing a space cannot be spelled: `echo "a  b"` prints the quotes and
+  splits on the run of spaces.
+- **`resolve` blames the boot for a mid-call death.** Its only failure text is
+  "no network server this boot" (`programs/netutils/resolve/src/main.rs`),
+  printed also when `netd` died during the call and the supervisor will have it
+  back within a tick.
+- **`fsd` answers a request naming a fid it does not hold with bare
+  `FS_ERROR`** ("bad or not-yours", `programs/servers/fsd/src/main.rs`), which
+  every client renders as "no such file or directory" for a request that named
+  no path. The same shape `FS_ERR_NO_SUCH_VERB` was reserved to fix for verbs.
+- **C programs receive no `argv`.** `libc/src/crt0.c` calls `main(void)`; a C
+  program cannot read its own command line while a Rust one can, so no ported
+  tool that takes a filename argument works yet.
+- **Two error tables name the same codes.** The shell's `print_fs_error` and
+  `ulib::fs_error_msg` are hand-kept copies, and they have already disagreed
+  once (the stale 8.3 filename message, journal 2026-09-05). The split exists
+  because the shell has no `ulib` dependency, the same reason its file readers
+  are separate.
+- **`netd`'s module doc ends at "Stage 2b"** (real ARP, IPv4, ICMP, guest-side
+  ping). TCP, the HTTP server, the 9P export gateway, cluster auth, `cpu` remote
+  execution and the `/net/tcp` files are undescribed at the top of the file, so
+  the first thing a reader sees is a claim four arcs behind the code.
+- **`make clean` is the only pruning of `target/`**, which is 1.0 GB on
+  2026-09-07 on a tree that builds 62 binaries; there is no partial clean, so
+  recovering the space means rebuilding everything.
