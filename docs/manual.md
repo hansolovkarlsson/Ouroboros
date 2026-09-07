@@ -44,7 +44,7 @@ make hello-bin              # the demo second program (userland)
 make esp                    # stage the full ESP directory layout
 ```
 
-The workspace has 61 crates: `kernel` (a UEFI application,
+The workspace has 62 crates: `kernel` (a UEFI application,
 `aarch64-unknown-uefi`); every userland program under `programs/` — the
 shell, the four servers, and the `/bin` commands (`aarch64-unknown-none`);
 and the shared libraries both sides import, of which `syscall-abi` is the
