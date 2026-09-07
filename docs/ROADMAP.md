@@ -1845,3 +1845,32 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
 - **`make clean` is the only pruning of `target/`**, which is 1.0 GB on
   2026-09-07 on a tree that builds 62 binaries; there is no partial clean, so
   recovering the space means rebuilding everything.
+- **A C `open()` silently truncates a path longer than 95 bytes, and opens
+  whatever the first 95 bytes name.** `resolve_path` in `libc/src/file.c` copies
+  the caller's path into a 96-byte buffer (`PATH_MAX_C`) and cuts it there
+  without an error, before namespace resolution. **Measured 2026-09-07** on the
+  FAT32 image with a file whose absolute path is exactly 95 bytes and a C
+  program opening that path with three characters appended: `open(O_RDONLY)`
+  returned fd 3 and `read` gave the 95-byte file's 26 bytes; `open(O_WRONLY |
+  O_TRUNC)` returned fd 3 and `ls -l` then showed the 95-byte file at size 0.
+  Exit code 0 throughout, no message anywhere. The comment on the *other*
+  buffer in the same file (`FSPATH_MAX_C`, raised to 256 on 2026-09-05) warns of
+  exactly this, "a truncated path with O_TRUNC truncates the WRONG FILE with no
+  error anywhere", and the buffer before it still does it. Read, not measured:
+  a relative path is capped the same way after `cwd` is prepended, so it is
+  reached sooner. The 09-07 audit's "a path over 255 bytes" as a client-side
+  failure was a reading of that comment; a long path never reaches
+  `FS_ERR_CLIENT`, it reaches `fsd` shortened. Fix shape, its own change:
+  `resolve_path` reports overflow instead of truncating, `open()` records
+  `FS_ERR_CLIENT` and returns -1, and `cremote`'s `must_leave` asserts it, the
+  check that would have failed against today's code. Found while fixing #119,
+  in the same function.
+- **The shell drops input past 128 bytes without saying so.** `BUFFER_SIZE` in
+  `programs/shell/src/main.rs`; `on_byte`'s own comment reads "Buffer full:
+  silently drop further bytes". Met by accident on 2026-09-07 while measuring
+  the item above: a 129-byte `write <95-byte path> hello-from-the-95-byte-file`
+  wrote `hello-from-the-95-byte-fil`. The dropped byte is not echoed, so a
+  human sees the line stop, but a driven or pasted line loses its tail and the
+  command runs on the rest, which for `write` and `cp` means the wrong content
+  or the wrong destination. A 95-byte path plus a second one already exceeds
+  the line. Same disease as the item above, one layer up.
