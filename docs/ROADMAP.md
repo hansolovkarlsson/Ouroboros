@@ -1454,8 +1454,11 @@ would otherwise silently shrink into looking like nothing was ever found.
     `spawn`, by task identity, and `may_delegate` has a second way to pass: a
     task may hand a right it holds, statically or by delegation, to its own
     children, and authorize links between them. Rights flow down a subtree
-    and nowhere else; a pipeline stage has no children and can delegate
-    nothing; no task can name a stranger. Scored against the alternatives
+    and nowhere else; no task can name a stranger. (`SPAWN` is ungated, so
+    any task may spawn a child and pass it what it holds. Stated as accepted:
+    the parent could relay every byte itself, so the child gains nothing the
+    parent could not do on its behalf. Gating `SPAWN` is its own decision,
+    below.) Scored against the alternatives
     (consult runtime grants in `may_delegate`: laundering; a "delegable" flag:
     the shell cannot tell a subshell from any program without trusting a
     binary's name) it is the one that wins on all three criteria, and parent
@@ -1463,10 +1466,23 @@ would otherwise silently shrink into looking like nothing was ever found.
     teardown are waiting on. **Measured after:** the same nested shell
     answers `1 5 40` to `ls / | wc`, `reply from 10.0.2.2` to `ping`, and
     `1 3 21` to `ping | wc`. The nested shell needed no change: the calls it
-    already made stopped being refused. This is the subtree-scoped form of
+    already made stopped being refused. The `medium` review then found the
+    half the measurement missed: a nested shell could still not relay a
+    builtin's output into a child or capture a child's output, so
+    `echo hi | wc` and `ls > f` failed under it, because the parent-child
+    channel was the boot shell's *static* privilege. A parent and its child
+    are now granted each other at spawn. The review also removed the
+    "statically held" rule as dead: every task the boot shell wires is one it
+    spawned. This is the subtree-scoped form of
     north-star item 4 ("transitive delegation"), built now because the nested
     shell is the consumer that item said to wait for; the general, revocable
     form is still open there.
+  - **`SPAWN` is ungated.** Any task may spawn, which with subtree
+    delegation means any task may pass what it holds to its own children.
+    Accepted on the proxy argument (above), but a `CAP_SPAWN` bit in
+    `caps_for_slot` would make "which tasks may create tasks" a stated policy
+    rather than an accident of the dispatch table. Raised by the `medium`
+    review of the subtree change, 2026-09-06.
   - **A foregrounded nested shell loses the keyboard after every command.**
     `exec /EFI/ORBS/SH.BIN`, `fg 6`, log in, `echo hi` (a builtin, no child,
     no `FG`): `ps` before shows task 0 blocked and task 6 runnable, `ps` after

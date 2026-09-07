@@ -93,11 +93,12 @@ privilege) underneath them. Measured against that one test:
   a task hand another a send-capability it statically holds — MINIX's grant
   mechanism, in miniature for the send topology. It's used today for
   relay-free program-to-program pipes (the shell delegates a producer the
-  right to stream directly to its consumer). It stays coarse: one delegated
-  target per task, and delegation is confined by the "may only delegate what
-  you statically hold" rule (no transitive re-delegation), so in practice
-  only the shell delegates. A general capability-passing mechanism (any task
-  handing any held capability onward, transitively) is the remaining gap.
+  right to stream directly to its consumer). Since 2026-09-06 it is a set of
+  delegated targets per task, and delegation is confined to a task's own
+  subtree: a task may pass a right it holds to a task it spawned, and wire
+  links between its own children, so a nested shell delegates exactly as the
+  boot shell does. Passing a right to anything that is not your own child,
+  and revocation, remain the gap.
 - **No process manager / no PID namespace / no `fork`.** Task creation is
   `spawn` (add a task alongside the caller), not the POSIX
   fork-exec-wait lineage MINIX's PM administers. There *is* a
@@ -108,8 +109,8 @@ privilege) underneath them. Measured against that one test:
 using the right IPC primitives and an enforced IPC capability topology that
 is now a static baseline plus runtime delegation. Short of MINIX mainly on
 *breadth* (three servers, not a full fleet) and on *general* capability
-delegation (today's is coarse — one delegated target per task, non-transitive,
-in practice shell-only — where MINIX's grants are general and transitive).
+delegation (today's is subtree-scoped and irrevocable, where MINIX's grants
+are general and transitive).
 
 ---
 
@@ -305,9 +306,10 @@ The first three moves on this list have since shipped, in order:
   IPC send-mask enforced at the `MSG_SEND`/`MSG_CALL` boundary makes the
   isolation topological, not just memory-level.
 - ~~**Runtime capability delegation (basic).**~~ **Done** — `DELEGATE`
-  (syscall 41) extends the static send-mask at runtime, confined by a "may
-  only delegate what you statically hold" rule; its first consumer is
-  relay-free program-to-program pipes (the shell out of the byte path).
+  (syscall 41) extends the static send-mask at runtime, confined to a task's
+  own subtree (since 2026-09-06; it was "only what you statically hold"
+  before); its first consumer is relay-free program-to-program pipes (the
+  shell out of the byte path).
 - ~~**The stdout-over-IPC payoff** (program-to-program pipes,
   `exec … > file`).~~ **Done** — a per-task stdout target routes a program's
   output to the console, the shell (for capture/relay), or, with delegation,

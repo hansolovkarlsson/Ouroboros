@@ -329,9 +329,9 @@ is what makes program-to-program pipes and `exec … > file` work:
   `delegate(producer, consumer)` (41) — so the producer streams **directly**
   to the consumer over IPC, with the shell out of the byte path (it only
   waits for both to exit). That sibling-to-sibling send is normally
-  forbidden by the static send-mask; the shell alone can authorize it,
-  because it alone statically holds the spawnable slots' send-caps (see "IPC
-  capabilities" and "Runtime capability delegation" below).
+  forbidden by the static send-mask; the spawner authorizes it, since a
+  task may wire links between its own children (see "IPC capabilities" and
+  "Runtime capability delegation" below).
 - For `exec prog > file` the shell sets the producer's stdout to *itself*
   (learning its own index via `self`, 39), captures the producer's output,
   and writes it to the file — no delegation needed, since `producer → shell`
@@ -554,7 +554,7 @@ roughly this size as the system grows by adding *servers*, not syscalls.
 | 38 | `stdout_target` | — | the caller's stdout target task index | Where this program's output should go (set by whoever `spawn`ed it; `CON_TASK` by default). A producer routes output there: `CON_TASK` → the console server (`DSPOP_WRITE`); otherwise a raw byte stream (chunked data messages + an empty end-of-stream message) to that task, which relays or captures it. This is what makes a task's own output capturable — program-to-program pipes and `exec … > file` |
 | 39 | `self` | — | the caller's own task slot index | A task's identity (otherwise unknowable — every other task-aware syscall takes an index). The shell needs it to route a pipe producer's stdout back to itself, and a foreground-spawned shell isn't task 0 |
 | 40 | `heap_info` | field (`0`=base, `1`=size) | the requested heap-area geometry, or `0` | Each program's region carries a fixed 256KB **raw heap area** (between its code and its stack guard page) it reads/writes via a `&mut [u8]` — space far larger than the 32KB stack, for data a fixed stack buffer can't hold (the shell backs its redirect/pipe capture with it, so `cat big > file` works). *Not* a `GlobalAlloc` heap — `alloc`'s collections can't link under this PIE loader (prebuilt lib`alloc` has `R_AARCH64_ABS64` relocations a `-pie` link rejects; the fix is nightly `-Z build-std`) |
-| 41 | `delegate` | grantee task, target task | `0`, `TASK_ERR_NO_SUCH_TASK` (either slot not a live task, the ordinary way a pipeline link fails, when a stage exited before it was authorized), or `MSG_ERR_DENIED` (a grantee below the spawnable range, or a target the caller does not statically hold; checked in that order) | **Runtime capability delegation**: grant `grantee` the right to initiate sends to `target`, a dynamic addition to `grantee`'s send-mask. The caller may delegate a send-cap it *statically holds* to anyone (the boot shell wiring a pipe), or a right it holds at all to its **own children**, and authorize links between them, so a nested shell can wire its pipelines and pass on the network right it was given while no task can hand a right to a stranger. Cleared when the grantee dies, and when the target's slot is reused by a new spawn; a grant aimed at a supervised server therefore survives its restart (the slot can only ever hold that server again). See "Runtime capability delegation" below |
+| 41 | `delegate` | grantee task, target task | `0`, `TASK_ERR_NO_SUCH_TASK` (either slot not a live task, the ordinary way a pipeline link fails, when a stage exited before it was authorized), or `MSG_ERR_DENIED` (a grantee below the spawnable range or not the caller's own child, or a target the caller neither spawned nor holds a send right to; checked in that order) | **Runtime capability delegation**: grant `grantee` the right to initiate sends to `target`, a dynamic addition to `grantee`'s send-mask. One rule: the grantee must be the caller's **own child**, and the target another child or a task the caller may itself reach. Rights flow down a task's own subtree and nowhere else, so a nested shell wires its pipelines and passes on the network right it was given exactly as the boot shell does, and no task can reach one it could not reach before. A parent and its child are granted each other at spawn. Cleared when the grantee dies, and when the target's slot is reused by a new spawn; a grant aimed at a supervised server therefore survives its restart (the slot can only ever hold that server again). See "Runtime capability delegation" below |
 | 42 | `net_send` | frame ptr, frame len | `0` or `NET_ERROR` | Transmit one raw Ethernet frame through the kernel's virtio-net driver. **Gated to `NET_TASK`** (the network server) — the DMA-owning NIC driver stays in the kernel (no IOMMU), reached only by the one task that owns the protocol stack, the `block_*` → fsd pattern |
 | 43 | `net_recv` | buf ptr, buf len | the frame's length (copied into `buf`, truncated to `buf len`), `NET_NO_FRAME` if none is waiting, or `NET_ERROR` | Non-blocking poll of the virtio-net receive ring. Gated to `NET_TASK` like `net_send` |
 | 44 | `net_mac` | — | the NIC's 6-byte MAC packed little-endian into a `u64`, or `NET_ERROR` | The network server needs it to build the Ethernet source of every frame. Gated to `NET_TASK` |
@@ -699,23 +699,25 @@ path remembering.
 It was **one** slot until 2026-09-06, which was a bug rather than a scope cut:
 a pipeline stage needs its downstream consumer *and* `TO_NET` to read a remote
 mount, and with one slot the second grant silently revoked the first. A set is
-not a widening — every bit still requires a delegator that statically holds
-that same capability, one `delegate` call at a time — but note that nothing
-revokes a bit short of task death, and `delegate`'s grantee must be a spawnable
-slot precisely so a program cannot accumulate send rights *into* a server.
+not a widening: every bit still requires a delegator that holds that same
+right and spawned the grantee, one `delegate` call at a time. Note that
+nothing revokes a bit short of task death or slot reuse, and `delegate`'s
+grantee must be a spawnable slot precisely so a program cannot accumulate send
+rights *into* a server.
 
 The rule that makes it safe: **rights flow down a task's own subtree and
-nowhere else.** A task may delegate a send-capability it *statically* holds to
-anyone, which is how the boot shell (slot 0, the one holder of every spawnable
-slot's send-cap) wires a relay-free program-to-program pipe (see "Dynamic task
-creation" above). And a task may pass a right it holds at all, statically or by
-delegation, to a task it **spawned**, and authorize links between its own
-children; the kernel records every task's parent at `spawn`, by task identity
-so a reused slot inherits nothing. That second way is what lets a nested shell
-(`exec /EFI/ORBS/SH.BIN`) run pipelines and hand its commands the network
-right it was itself handed. A pipeline stage has no children, so it can pass
-its consumer link or its network right to nobody, and no task can ever name a
-stranger as grantee: nothing can be laundered onward. Enforced at
+nowhere else.** The grantee must be a task the caller **spawned** (the kernel
+records every task's parent at `spawn`, by task identity, so a reused slot
+inherits nothing), and the target either another of its children or a task
+the caller may itself reach, statically or by delegation. That one rule covers
+the boot shell wiring a relay-free program-to-program pipe (see "Dynamic task
+creation" above) and a nested shell (`exec /EFI/ORBS/SH.BIN`) doing the same
+for its own commands with the network right it was itself handed. `spawn` is
+ungated, so any task, a pipeline stage included, may spawn a child and pass it
+what it holds; that is not laundering, since the parent could have relayed
+every byte itself, and no task can ever reach one it could not reach before.
+A parent and its child are granted each other at spawn, so capture,
+redirection and builtin-headed pipelines work under any spawner. Enforced at
 the same `msg_send`/`msg_call` boundary as the static mask; a denied
 delegation, and a send with no covering capability, both return
 `MSG_ERR_DENIED`. A delegation naming a slot that is not a live task answers

@@ -45,6 +45,26 @@ bug, on the ledger now, and the recipe types `fg 6` before every nested
 command and ends with a `ps` that proves who ran it. With the edits actually
 in: `1 5 40`, `reply from 10.0.2.2`, `1 3 21`, task 6 runnable.
 
+**The `medium` review, and what it corrected.** Three things. First, a claim:
+I had written that a pipeline stage "has no children and can give away
+nothing", and `SPAWN` is ungated, so a stage can spawn and pass on its
+consumer link or its network right. That is the rule working as written, and
+it is not laundering: the parent could have relayed every byte itself. But it
+was a consequence I had not stated, so it is stated now, in the code, the
+ABI, the reference and the ledger, with gating `SPAWN` recorded as its own
+decision. Second, a gap the measurement missed: a nested shell could still not
+relay a builtin's output into a child or capture a child's output, so
+`echo hi | wc` and `ls > f` failed under it, because the parent-child channel
+was the boot shell's static privilege and nothing granted it to any other
+spawner. A parent and its child are now granted each other at spawn. Third,
+the "statically held" rule was dead weight: every task the boot shell wires
+is one it spawned, so the subtree rule passes its grants too, and deleting
+the old rule makes the sentence "rights flow down a subtree and nowhere else"
+true rather than true by coincidence. Beside those: `may_send` now calls the
+same "holds a send right" test `may_delegate` does, the five teardown sites
+clear a slot's rights through one helper, a dead guard went, and four
+documents that still described the old rule were brought up to the code.
+
 **What was not tested, said plainly.** The negative half of the rule, that a
 task cannot delegate to or for a stranger, has no program that would try it,
 so it rests on reading the function. The two clauses are short and the

@@ -1446,10 +1446,10 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
         }
         syscall_abi::DELEGATE => {
             // arg0 = grantee slot, arg1 = target slot: grant `grantee` the
-            // runtime capability to send to `target`. The caller may delegate
-            // a send-cap it *statically holds* to anyone, or a right it holds
-            // at all to its OWN CHILDREN (and authorize links between them) -
-            // see the DELEGATE doc in syscall-abi and tasks::may_delegate.
+            // runtime capability to send to `target`. The grantee must be the
+            // caller's OWN CHILD, and the target another child or a task the
+            // caller holds a send right to - see the DELEGATE doc in
+            // syscall-abi and tasks::may_delegate.
             //
             // The GRANTEE must be a spawnable slot. Only `target` used to be
             // constrained, which let any /bin program widen a *server's*
@@ -1478,9 +1478,10 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
             //
             // Checked in this order, and the ABI doc states it: a grantee
             // below the spawnable range is the security refusal above and is
-            // answered first; then either slot not live (out of range counts
-            // as not live, for both arguments alike - `task_exists` bounds-
-            // checks); then the caller's own policy.
+            // answered first (derivable now - a protected slot is never anyone's
+            // child - and kept as the belt); then either slot not live (out of
+            // range counts as not live, for both arguments alike - `task_exists`
+            // bounds-checks); then the subtree rule.
             let grantee = arg0 as usize;
             let target = arg1 as usize;
             if grantee < tasks::FIRST_SPAWNABLE {
