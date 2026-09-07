@@ -279,3 +279,34 @@ number arriving on schedule, and it is what makes "the code that was reviewed
 is not the code on the branch" a reason to run the next round rather than a
 reason to skip it.
 
+
+## Two more, from a day of moving files (2026-09-07)
+
+Both from the reorganization of `docs/` (#114 to #117), and both are the
+spine again: an instrument that answered a question adjacent to the one asked,
+and a result read before confirming what the change had actually done.
+
+**A count of the wrong population.** Before moving the postmortems, the audit
+estimated how many site pages would need re-stamping by counting, in each
+abridged postmortem, the links that would change. The grep counted outward
+links across all 29 postmortems and the estimate said eight; the move showed
+two. Nineteen of the 29 are not abridged by the site at all, so most of what
+was counted could not affect any page. The number was exact, computed, and
+about a different question. The check that actually settled it was the site
+checker itself after the rewrite, which reports pages behind their source by
+blob hash and cannot count a file the site does not carry. An estimate is an
+instrument too, and the population it counts is the first thing to state.
+
+**A stash that carried more than its pathspec.** The roadmap's seven new
+open-gap lines were set aside with `git stash push -- docs/ROADMAP.md` so the
+journal PR could go first. `journal.md`'s deletion was staged on the same
+branch at that moment, and the stash took the staged deletion along. Popped
+onto a fresh branch and committed with `-a`, the "roadmap only" commit held
+`docs/ROADMAP.md` plus 3489 deleted lines of `docs/journal.md`, and the PR
+would have removed the journal with nothing in its place. It was caught by
+reading `git show --stat` on the commit before reporting the PR open, which is
+the one-line version of "confirm the change applied before reading the
+result" from the 09-06 section above: here, confirm the change is *only* the
+change. Amended, pushed with lease, and the PR's file list checked against the
+remote rather than the local branch, since the first `gh pr view` after the
+force push still showed the stale two files.
