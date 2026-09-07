@@ -1,7 +1,7 @@
 # Running and testing Ouroboros on real Raspberry Pi 4 hardware
 
 > **Status: test plan, not a test log (2026-08-28).** The boards were ordered
-> 2026-08-26 ([`ROADMAP.md`](ROADMAP.md)) and nothing here has been booted yet.
+> 2026-08-26 ([`ROADMAP.md`](../ROADMAP.md)) and nothing here has been booted yet.
 > Claims are marked **(confirmed)** when they come from this repository's own
 > source or from a vendor document, and **(predicted)** when they are reasoning
 > from those two. The point of writing it before the boards arrive is that the
@@ -15,8 +15,8 @@ The practical guide to booting Ouroboros on a **real Raspberry Pi 4** under UEFI
 firmware. Companion to [`testing-qemu.md`](testing-qemu.md) (the fast dev loop,
 single machine and two-node cluster) and [`testing-parallels.md`](testing-parallels.md)
 (the parked VM target, whose single-machine matrix and `netd` boot-race analysis
-both transfer here). [`manual.md`](manual.md) covers *using* the OS once booted;
-[`research-redox-and-pi.md`](research-redox-and-pi.md) Part 2 is the BCM2711
+both transfer here). [`manual.md`](../manual.md) covers *using* the OS once booted;
+[`research-redox-and-pi.md`](../research/research-redox-and-pi.md) Part 2 is the BCM2711
 register-level fallback reference.
 
 ---
@@ -59,7 +59,7 @@ Beyond the firmware, four things make the Pi 4 fit *this* kernel unusually well:
 - **The xHCI path is the one storage path already confirmed on real hardware.**
   The Pi 4's VL805 sits behind the Broadcom PCIe root complex, so
   `pci::discover_xhci` → `xhci.rs` → `usb_msd.rs` should carry over — the same
-  chain the [xHCI keyboard postmortem](postmortems/xhci-keyboard-postmortem.md) is about.
+  chain the [xHCI keyboard postmortem](../postmortems/xhci-keyboard-postmortem.md) is about.
 - **It boots from a removable SD card**, so a bad build is a card swap, not a
   recovery procedure. Keep a second card flashed and known-good.
 - **It has a serial header**, which the laptop option does not.
@@ -414,7 +414,7 @@ Caveats: peripheral coverage on the `raspi*` machines is **partial and varies by
 QEMU version** (networking and USB especially — the same "no NIC on this target"
 story as §2), so verify against the version in use. See the QEMU Arm docs
 (<https://www.qemu.org/docs/master/system/arm/raspi.html>) and
-[`resources.md`](resources.md) for the OSDev-wiki bare-metal-Pi references.
+[`resources.md`](../resources.md) for the OSDev-wiki bare-metal-Pi references.
 
 ## 8. When the boards arrive
 
@@ -457,11 +457,11 @@ fix are all above, which is the whole reason for writing them down first.
   MCFG, which is what §6 step 2's prediction rests on.
 - [rust-embedded/rust-raspberrypi-OS-tutorials](https://github.com/rust-embedded/rust-raspberrypi-OS-tutorials) —
   the raw BCM2711 register facts, if the UEFI path ever has to be abandoned. See
-  [`research-redox-and-pi.md`](research-redox-and-pi.md) Part 2.
+  [`research-redox-and-pi.md`](../research/research-redox-and-pi.md) Part 2.
 - [OSDev Wiki](https://wiki.osdev.org/) — bare-metal reference: the
   *Raspberry_Pi_Bare_Bones* / *ARM_RaspberryPi* / *PL011* / *GIC* pages are the
   register-level companion to the tutorials above. Curated with the other
-  external references in [`resources.md`](resources.md).
+  external references in [`resources.md`](../resources.md).
 - [QEMU Arm — Raspberry Pi boards](https://www.qemu.org/docs/master/system/arm/raspi.html) —
   the `raspi3b`/`raspi4b` machine types (see "Develop on QEMU first" above).
 - This repository: `kernel/src/main.rs`, `virtio_mmio.rs`, `pci.rs`, `madt.rs`,

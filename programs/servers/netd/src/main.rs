@@ -189,7 +189,7 @@ fn main() -> ! {
 const AUTHORIZED_MAX: usize = clusterkeys::AUTHORIZED_MAX;
 
 /// The cluster authentication config, loaded once from disk at boot (see
-/// `docs/roadmap-cluster-keys.md`). A *per-machine keypair*: this machine holds
+/// `docs/roadmap/roadmap-cluster-keys.md`). A *per-machine keypair*: this machine holds
 /// its own private key and a list of the peer PUBLIC keys it accepts, so a
 /// member is revoked by deleting a line rather than by re-keying everyone. A
 /// machine with neither can neither serve nor dial. Read-only after startup; no mutable statics exist in
@@ -253,7 +253,7 @@ impl Auth {
 /// The disk path (FAT 8.3-legal) of the no-exec flag.
 const NOEXEC_PATH: &[u8] = b"/NOEXEC";
 /// The peers this machine accepts, by public key (see
-/// docs/roadmap-cluster-keys.md). Absent means it verifies no signatures, which
+/// docs/roadmap/roadmap-cluster-keys.md). Absent means it verifies no signatures, which
 /// closes the export.
 const AUTHORIZED_PATH: &[u8] = b"/etc/cluster/authorized";
 /// This machine's own private key. Its presence is what lets netd sign its
@@ -1109,7 +1109,7 @@ fn tcp_get(mac: &[u8; 6], dst_mac: &[u8; 6], target: &[u8; 4], dst_port: u16, re
     // at four bytes of "HTTP".
     //
     // Why this matters beyond a small latency win: it is the prerequisite for
-    // the export becoming a SESSION (decision 3, docs/roadmap-fid-verbs.md).
+    // the export becoming a SESSION (decision 3, docs/roadmap/roadmap-fid-verbs.md).
     // A session never FINs between requests, so a client that waits for one
     // stalls into the deadline on every single request. Landing it FIRST, and
     // separately, is deliberate - it is verifiable against today's
@@ -1399,7 +1399,7 @@ fn pump_conns(mac: &[u8; 6], conns: &mut [Option<TcpConn>; MAX_CONNS]) {
 /// holds it here between pull calls - a single pending run at a time, on `serve`'s
 /// frame (no mutable statics). Bounded by `RUN_OUT_MAX` (the remote's own send
 /// buffer caps it too); truly unbounded streaming as the child produces is a
-/// later refinement (see `docs/roadmap-cluster.md`). The `owner` check means only
+/// later refinement (see `docs/roadmap/roadmap-cluster.md`). The `owner` check means only
 /// the task that issued the run may pull its output - by packed task identity
 /// (`SENDER_TASK`), so a task that later lands in the issuer's reaped slot
 /// cannot pull it.
@@ -2498,7 +2498,7 @@ const DATA_INLINE: usize = syscall_abi::FS_DATA_MAX as usize;
 /// plus the mutate verbs (touch/mkdir/rmdir/rm/mv/write/write_file/write_at),
 /// each relayed to the local `fsd`. The request's `tree` field is ignored - the
 /// export serves the local boot mount (tree 0). Single-writer, trusted-LAN (see
-/// docs/roadmap-cluster-phase2.md).
+/// docs/roadmap/roadmap-cluster-phase2.md).
 fn handle_9p(c: &mut TcpConn, request: &[u8], dials: &mut [Option<DialConn>; MAX_DIAL], mac: &[u8; 6], auth: &Auth) {
     // Authenticate first: verify the client's Ed25519 signature over the request
     // and recover the bare NP message. A failure (an unauthorized key, a bad
@@ -2690,7 +2690,7 @@ fn authenticate_signed<'a>(
     //    user through this machine's own /etc/passwd.
     //  - The peer's `ip` is not checked against this connection's source
     //    address either. Inbound authorizes BY KEY, outbound BY ADDRESS (see
-    //    docs/roadmap-cluster-keys.md, decision 3): an exporter is offered a key
+    //    docs/roadmap/roadmap-cluster-keys.md, decision 3): an exporter is offered a key
     //    and need only decide whether it is allowed, so pinning the address as
     //    well would refuse an authorized machine that dialled from a second
     //    interface without making any forgery harder - the key is the claim.
@@ -5406,7 +5406,7 @@ fn reply(sender: u64, data: &[u8]) {
 /// peer, and the platform where a console flood actually hurts (Parallels, whose
 /// framebuffer is the only console) HAS NO NETWORKING, so no remote peer can
 /// reach netd there at all. The cap belongs with step 4 of
-/// `docs/roadmap-fid-verbs.md`, which threads netd-owned per-connection state
+/// `docs/roadmap/roadmap-fid-verbs.md`, which threads netd-owned per-connection state
 /// for the fid table anyway.
 fn log_no_arm(what: &[u8], verb: u64) {
     let mut line = [0u8; 64];

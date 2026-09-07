@@ -1,6 +1,6 @@
 //! `/bin/clusterkey` — this machine's cluster identity.
 //!
-//! Step 6c of `docs/roadmap-cluster-keys.md`. Four things an operator needs:
+//! Step 6c of `docs/roadmap/roadmap-cluster-keys.md`. Four things an operator needs:
 //!
 //! ```text
 //! clusterkey              show this machine's public key

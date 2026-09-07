@@ -79,7 +79,7 @@ is only useful when current.
 ## Per-machine cluster keypairs ✅ DONE (2026-08-31)
 
 The design doc and its step log stay in
-[`roadmap-cluster-keys.md`](roadmap-cluster-keys.md), which is where the
+[`roadmap-cluster-keys.md`](roadmap/roadmap-cluster-keys.md), which is where the
 per-step verification criteria and the two 10a/10b halves are recorded. This is
 the plan-shaped summary of how it was sequenced and what the sequencing bought.
 
@@ -261,7 +261,7 @@ protocol logic in a userland server" split maps onto the `fsd`/`cond`
 precedent exactly, and it would be the first genuinely *stateful* server —
 which is what would finally motivate Helix-style hot-reload-with-state-
 migration and, eventually, the distributed half of the Plan 9 `/net`
-direction (see [`research-directions.md`](research-directions.md)).
+direction (see [`research-directions.md`](research/research-directions.md)).
 
 **The architecture, dictated by the no-IOMMU DMA constraint.** Same rule
 that keeps the block transport in the kernel: a NIC does DMA (RX/TX
@@ -535,7 +535,7 @@ not a near-term follow-on to ext2. FAT12/16 read support would be a cheap
 add to the exFAT/FAT32 family if ever wanted, but has little real use here.
 
 **Relationship to the Plan 9 direction** (see
-[`research-directions.md`](research-directions.md)): the `Filesystem`-enum-
+[`research-directions.md`](research/research-directions.md)): the `Filesystem`-enum-
 in-`fsd` is the pragmatic near-term shape. The Plan 9 end state is instead
 *one server per filesystem* mounted into per-task namespaces — the enum is a
 stepping stone to that, not a dead end, and the `FSOP_*` protocol growth
@@ -1377,8 +1377,8 @@ phase:
   this area short of real signals/parent-child process trees. See `CLAUDE.md`'s "Task destruction" section.
 - **Actual microkernel-style driver isolation** — moving components
   out of the EL1 kernel and into supervised EL0 processes, per
-  `docs/research-minix-boot.md`'s comparison (process-boundary
-  isolation, MINIX's answer) and `docs/research-helix-os.md`'s.
+  `docs/research/research-minix-boot.md`'s comparison (process-boundary
+  isolation, MINIX's answer) and `docs/research/research-helix-os.md`'s.
   **Part 1 — real IPC — is done (2026-08-17):** fixed-size (≤64-byte)
   copied messages, bounded per-task mailboxes, blocking `msg_recv` on
   the proven `WaitReason` machinery (Ctrl+C-interruptible), mailboxes

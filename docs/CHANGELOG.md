@@ -354,7 +354,7 @@ refused; a reply signed by the wrong machine refused *by the client*; and
 revocation — comment a peer's line out and the same key stops being served.
 
 See [`cluster-keys-postmortem.md`](postmortems/cluster-keys-postmortem.md) and
-[`roadmap-cluster-keys.md`](roadmap-cluster-keys.md). **Still per-machine, not
+[`roadmap-cluster-keys.md`](roadmap/roadmap-cluster-keys.md). **Still per-machine, not
 per-user**: an authorized machine can claim any of its own users' names.
 
 ## Per-user cluster identity: a remote request now carries *who* (2026-08-31)
@@ -1962,7 +1962,7 @@ in the run until it gets the first chunk, so there's never a nested one).
 buffer), which covers realistic command output — but it's still **bounded**,
 because netd collects the whole run before the shell pulls it. Truly unbounded
 streaming (the remote sending as the child produces, the caller forwarding
-incrementally) is a real arc, documented in `docs/roadmap-cluster.md` as a later
+incrementally) is a real arc, documented in `docs/roadmap/roadmap-cluster.md` as a later
 refinement to build if the need arises.
 
 **Verified** end to end: a guest ran `cpu` against a host "export" that streamed
@@ -2186,7 +2186,7 @@ must never block" rule that shaped 4a's capture, now on the caller.
 and `cat /host/BONLY.TXT` (its contents) — the command on A reading B's disk
 through the import. Zero `-d int` aborts on both nodes; the non-cpu paths (remote
 mount/read) unregressed. Phase 4 (4a + 4b) is complete — the honest distributed
-processing, done. See [`roadmap-cluster-phase4.md`](roadmap-cluster-phase4.md).
+processing, done. See [`roadmap-cluster-phase4.md`](roadmap/roadmap-cluster-phase4.md).
 
 ## Cluster Phase 4a: remote execution — run a program on another machine
 
@@ -2197,7 +2197,7 @@ proof it's genuinely remote: on machine B, `cpu 10.0.2.10:564 ls /` shows
 `RANHERE/`, a directory that exists only on **machine A's** disk — so the `ls` ran
 on A. This is the transport half of the Plan 9 `cpu` model (step 4a; importing
 the caller's namespace is 4b — see
-[`roadmap-cluster-phase4.md`](roadmap-cluster-phase4.md)).
+[`roadmap-cluster-phase4.md`](roadmap/roadmap-cluster-phase4.md)).
 
 **netd is the spawner, non-blocking.** A `RUN` frame (a new `ninep_abi::NP_RUN`
 verb) arrives on the export connection; netd reads the named `/bin` program off
@@ -2306,7 +2306,7 @@ slice (Plan 9's full `/net/tcp` connection files — using another machine's NIC
 special-cases in the export, which is the real signal that the deferred
 namespace-aware export (resolve incoming paths through a composed per-export
 namespace, retiring the prefix hacks) has earned its place next. See
-[`roadmap-cluster-phase3.md`](roadmap-cluster-phase3.md).
+[`roadmap-cluster-phase3.md`](roadmap/roadmap-cluster-phase3.md).
 
 ## Cluster Phase 3 (step 2): `/dev/cons` — write another machine's screen
 
@@ -2340,7 +2340,7 @@ console, and `cat /dev/cons` returns an error (write-only). Between two VMs: fro
 B, `mount -r 10.0.2.10:564 /mnt/a` then `write /mnt/a/dev/cons
 >>>HELLO-ON-A-FROM-B<<<` — and **machine A's console prints
 `>>>HELLO-ON-A-FROM-B<<<`**, B writing A's screen over 9P/TCP. Zero `-d int`
-aborts on both nodes. See [`roadmap-cluster-phase3.md`](roadmap-cluster-phase3.md).
+aborts on both nodes. See [`roadmap-cluster-phase3.md`](roadmap/roadmap-cluster-phase3.md).
 
 ## Cluster Phase 3 (step 1): `/proc` — a machine's process table as (remote) files
 
@@ -2386,7 +2386,7 @@ A's ten slots and `cat /mnt/a/proc/2/state`/`…/4/state` return A's fsd/netd st
 alongside. Zero `-d int` aborts on both nodes. Only per-slot *state* is exposed
 (there is no cross-task argv/name accessor yet). Folds into the Phase 3 arc; more
 resources-as-files (`/dev/cons`, `/net`) later. See
-[`roadmap-cluster-phase3.md`](roadmap-cluster-phase3.md).
+[`roadmap-cluster-phase3.md`](roadmap/roadmap-cluster-phase3.md).
 
 ## Cluster Phase 2: two-node read+write — machine B writes machine A's disk
 
@@ -2435,7 +2435,7 @@ disk. Byte-exactness confirmed by a foreign observer: mounting A's disk image on
 macOS, `LSCOPY` is `cmp`-identical to `/BIN/LS`. Clean-disconnect verified by
 `SIGKILL`ing A mid-session — B's next op returns a clean error and B stays
 responsive locally. Zero Data/Prefetch aborts on both VMs. **Phase 2 done → cut
-v0.7.0.** See [`roadmap-cluster-phase2.md`](roadmap-cluster-phase2.md).
+v0.7.0.** See [`roadmap-cluster-phase2.md`](roadmap/roadmap-cluster-phase2.md).
 
 ## Cluster Phase 1, step 1d: two-node integration — machine B reads machine A's disk (Phase 1 done)
 
@@ -2470,7 +2470,7 @@ anywhere), and **zero Data/Prefetch aborts on both VMs** under `-d int`.
 **This is the milestone that answers the years-long question with a yes.** Phase 1
 is complete (1a export + 1c remote-mount client + 1d two-node); write-side
 sharing is Phase 2. Ready to cut **v0.6.0**. See
-[`roadmap-cluster.md`](roadmap-cluster.md) / [`roadmap-cluster-phase1.md`](roadmap-cluster-phase1.md).
+[`roadmap-cluster.md`](roadmap/roadmap-cluster.md) / [`roadmap-cluster-phase1.md`](roadmap/roadmap-cluster-phase1.md).
 
 ## Cluster Phase 1, step 1c: the remote-mount client — a machine reads another's disk
 
@@ -2535,7 +2535,7 @@ host at `10.0.2.2` over SLIRP, no hostfwd needed): a guest `mount -r
 serves the host client (regression pass), and zero Data/Prefetch aborts across
 the run (only the expected HVC/IRQ/SVC). One VM, host as server — no second VM
 yet. Next: 1d (two-VM integration) → **v0.6.0**. See
-[`roadmap-cluster-phase1.md`](roadmap-cluster-phase1.md).
+[`roadmap-cluster-phase1.md`](roadmap/roadmap-cluster-phase1.md).
 
 ## Cluster Phase 1, step 1a: the 9P export gateway — a machine serves its fs over TCP
 
@@ -2569,7 +2569,7 @@ serves (`curl :5555` → the HTML index), netd is not restarted, and zero `-d in
 aborts across repeated requests. One VM, host as client — no second VM needed
 yet. Next: 1b (netd's outbound remote-client) + 1c (the remote-mount client:
 `mount -r host:port /path`), then 1d (two-VM). See
-[`roadmap-cluster-phase1.md`](roadmap-cluster-phase1.md).
+[`roadmap-cluster-phase1.md`](roadmap/roadmap-cluster-phase1.md).
 
 ## Cluster Phase 0, step 0e: cond on the verb set — the last bespoke protocol retired
 
@@ -2736,7 +2736,7 @@ file-op arms are deleted and only the admin ops remain.
 ## Cluster Phase 0, step 0a+0b: the `ninep-abi` uniform verb set, in use end-to-end
 
 The first *build* step of the distributed-cluster arc (design:
-[`roadmap-cluster-phase0.md`](roadmap-cluster-phase0.md)). The whole direction
+[`roadmap-cluster-phase0.md`](roadmap/roadmap-cluster-phase0.md)). The whole direction
 rests on "remote is just this same protocol over TCP instead of local IPC," so
 step one is to stop having three bespoke server protocols and define **one
 uniform, server-agnostic verb set** — and make it the real, in-use path, not a
@@ -6144,7 +6144,7 @@ phase is really three dependent stages:
   MBR boot signature, not just "no error returned." See
   `kernel/src/virtio_mmio.rs`/`kernel/src/virtio_blk.rs`.
 - **Kernel-resident, not a user-space driver process — a deliberate,
-  explicit choice, not an oversight.** `docs/research-minix-boot.md`
+  explicit choice, not an oversight.** `docs/research/research-minix-boot.md`
   raised a real fork here: writing virtio-blk (and eventually
   virtio-console) as an isolated EL0 driver process would be a concrete
   step toward this project's stated microkernel goal, using the driver as

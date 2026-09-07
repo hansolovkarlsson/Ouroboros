@@ -1,5 +1,5 @@
 //! `ed25519` — the signature primitive behind **per-machine cluster keypairs**
-//! (see `docs/roadmap-cluster-keys.md` for the arc this belongs to).
+//! (see `docs/roadmap/roadmap-cluster-keys.md` for the arc this belongs to).
 //!
 //! Being built in steps, each verifiable on its own, because the alternative —
 //! landing a curve implementation in one reviewable-in-theory diff — is how the

@@ -2,7 +2,7 @@
 
 A reference note on a second outside design influence, alongside
 [`research-minix-boot.md`](research-minix-boot.md) — not reference
-documentation for our own system (see [`architecture.md`](architecture.md)
+documentation for our own system (see [`architecture.md`](../architecture.md)
 for that). Sourced from the project's own GitHub repository and official
 documentation site (linked throughout, not recalled from memory), not to
 be treated as exhaustive Helix internals documentation.
@@ -155,7 +155,7 @@ before that decision gets made by drift.
 ## Concrete patterns worth revisiting once the prerequisites exist
 
 Not commitments, just noted parallels with where this project's own
-[`ROADMAP.md`](ROADMAP.md) parking lot is already headed:
+[`ROADMAP.md`](../ROADMAP.md) parking lot is already headed:
 
 - **A `Cpu`/`Mmu`/`InterruptController` trait boundary**, the way
   Helix's `hal/` layer does it, is roughly what Ouroboros's own

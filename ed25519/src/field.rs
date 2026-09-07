@@ -1,5 +1,5 @@
 //! Arithmetic in the field **GF(2²⁵⁵ − 19)**, the field Ed25519's curve is
-//! defined over. Step 2 of `docs/roadmap-cluster-keys.md`.
+//! defined over. Step 2 of `docs/roadmap/roadmap-cluster-keys.md`.
 //!
 //! ## The representation, and why this one
 //!

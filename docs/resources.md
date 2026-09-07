@@ -1,7 +1,7 @@
 # External resources — reference links for when we get stuck
 
 A curated, annotated list of *external* references (as opposed to the
-`research-*.md` notes, which are our own synthesis). Kept so a link that
+`research/` notes, which are our own synthesis). Kept so a link that
 proved useful once is findable again — especially the hardware bring-up
 material we'll want when Pi 3/Pi 4 work starts.
 
@@ -18,7 +18,7 @@ Pages worth going to first (paths are `wiki.osdev.org/<Page_Name>`):
 - **Raspberry_Pi_Bare_Bones**, **ARM_RaspberryPi**, **Raspberry_Pi_4** — the
   canonical bare-metal Pi tutorials: memory map, the mailbox interface, the
   GPIO/UART init dance, `kernel8.img` boot. The complement to
-  `rust-raspberrypi-OS-tutorials` (see [`research-redox-and-pi.md`](research-redox-and-pi.md)
+  `rust-raspberrypi-OS-tutorials` (see [`research-redox-and-pi.md`](research/research-redox-and-pi.md)
   Part 2) — the wiki explains the *why*, the tutorials give working Rust.
 - **PL011** — the UART we already drive (`kernel/src/uart.rs`); the Pi's PL011
   register layout is the same, only the base address differs (BCM2711 peripheral
@@ -42,7 +42,7 @@ and **`raspi4b`**, plus `raspi2b`, `raspi3ap`, etc.).
 
 What this gives us and its limits — the full write-up (which path it exercises,
 the raw-vs-UEFI nuance, and a starting command) lives in
-[`testing-pi4.md`](testing-pi4.md) under "Develop on QEMU first." In short:
+[`testing-pi4.md`](testing/testing-pi4.md) under "Develop on QEMU first." In short:
 QEMU's `raspi4b` boots the **raw BCM2711** path (a `kernel8.img`, our *fallback*
 route), which is exactly the right rig for developing Pi peripheral drivers
 (the real PL011 base, GIC-400, the mailbox) without hardware; the *preferred*
@@ -55,9 +55,9 @@ varies by QEMU version — verify against the version in use.
 
 ## See also (in-repo)
 
-- [`testing-pi4.md`](testing-pi4.md) — the Pi 4 test plan (UEFI-first, the
+- [`testing-pi4.md`](testing/testing-pi4.md) — the Pi 4 test plan (UEFI-first, the
   serial rig, boot checkpoints, ranked risks).
-- [`research-redox-and-pi.md`](research-redox-and-pi.md) Part 2 — the Pi 4
+- [`research-redox-and-pi.md`](research/research-redox-and-pi.md) Part 2 — the Pi 4
   bring-up cookbook mapped onto our stack (peripheral base, GIC-400, the boot
   routes).
-- [`testing-qemu.md`](testing-qemu.md) — the current QEMU dev/test loop.
+- [`testing-qemu.md`](testing/testing-qemu.md) — the current QEMU dev/test loop.

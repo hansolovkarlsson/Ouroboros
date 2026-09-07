@@ -153,5 +153,5 @@ other's disk over a protocol written from scratch.
 - [`roadmap-cluster.md`](roadmap-cluster.md) Phase 2; the Phase 1 design
   ([`roadmap-cluster-phase1.md`](roadmap-cluster-phase1.md)) whose transport,
   `NETOP_RMOUNT`, remote binding, and inline-chunk model this builds on.
-- [`network-stack-postmortem.md`](postmortems/network-stack-postmortem.md) — the
+- [`network-stack-postmortem.md`](../postmortems/network-stack-postmortem.md) — the
   trace-based, foreign-observer testing discipline to reuse.

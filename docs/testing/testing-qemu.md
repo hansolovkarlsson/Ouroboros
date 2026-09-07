@@ -2,7 +2,7 @@
 
 The practical guide to booting Ouroboros under QEMU — the fast dev loop the whole
 project relies on — from a single machine up to a **two-node cluster** on a shared
-virtual network. Companion to [`manual.md`](manual.md) (which covers *using* the
+virtual network. Companion to [`manual.md`](../manual.md) (which covers *using* the
 OS once it's booted) and [`testing-exfat.md`](testing-exfat.md) (the exFAT disk
 rig). Every command here is a `make` target defined in the repository `Makefile`.
 
@@ -93,7 +93,7 @@ round-trip (including verifying against macOS's own `fsck_exfat`).
 **Disk-management from inside the guest** (works on any of these, or a blank disk):
 `erase disk`, `partition [fat32|exfat|ext2]`, then `format [fat32|exfat|ext2]`
 lay down a fresh filesystem; `mount -a` mounts it. These are shell *builtins*
-(they must run when nothing is mounted — see [`manual.md`](manual.md)).
+(they must run when nothing is mounted — see [`manual.md`](../manual.md)).
 
 ---
 
@@ -491,7 +491,7 @@ octet): the two-VM targets set MAC `…:0a` → **10.0.2.10** (machine A) and `�
 single-VM SLIRP runs are unchanged.) Read a machine's own address any time with
 `mount -n /net ; cat /net/ip`.
 
-**What to do once both are up** — see [`manual.md`](manual.md)'s cluster section
+**What to do once both are up** — see [`manual.md`](../manual.md)'s cluster section
 for the full command set. The essentials, typed in **machine B's** shell:
 
 ```
@@ -519,7 +519,7 @@ make run-gicv3       # force GICv3 instead of QEMU's default GICv2
 
 On the USB targets you can inject keystrokes through the monitor socket:
 `printf 'sendkey u\n' | nc -U qemu-monitor.sock`. (USB on *real* hardware is a
-Parallels story — see [`manual.md`](manual.md).)
+Parallels story — see [`manual.md`](../manual.md).)
 
 ---
 
@@ -546,7 +546,7 @@ Call]` (firmware PSCI at boot) are all expected and benign; an *abort* is a real
 fault. A clean run is zero aborts.
 
 **Real-hardware testing** (Parallels) is a separate path — `make test-parallels`;
-see [`manual.md`](manual.md)'s Parallels section.
+see [`manual.md`](../manual.md)'s Parallels section.
 
 ---
 

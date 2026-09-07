@@ -3,12 +3,12 @@
 The one-stop reference for using Ouroboros: building it, running it,
 using the shell and the `/bin` commands, **sharing resources across a
 cluster of machines**, and the syscall ABI. Each section links to the
-deeper reference where one exists — [`testing-qemu.md`](testing-qemu.md)
+deeper reference where one exists — [`testing-qemu.md`](testing/testing-qemu.md)
 for the full QEMU run/test guide (single machine *and* the two-node
 cluster), [`architecture.md`](architecture.md) for how the kernel works,
 [`processes.md`](processes.md) for the userland program model,
 [`shell-commands.md`](shell-commands.md) for the builtin command
-reference, [`ROADMAP.md`](ROADMAP.md) / [`roadmap-cluster.md`](roadmap-cluster.md)
+reference, [`ROADMAP.md`](ROADMAP.md) / [`roadmap-cluster.md`](roadmap/roadmap-cluster.md)
 for what's next, and `CLAUDE.md` at the repository root for the debugging
 history behind every design decision. To build an OS like this yourself,
 [`tutorial.md`](tutorial.md) is the staged from-scratch guide.
@@ -95,7 +95,7 @@ with **`Ctrl+a x`**.
 That's enough to get a working shell. The **full run/test guide** — every
 `make run-*` target, the exFAT/ext2/GPT test disks, the network runs, the
 9P host peers, and the **two-node cluster** setup — is
-[`testing-qemu.md`](testing-qemu.md). You'll want it for the
+[`testing-qemu.md`](testing/testing-qemu.md). You'll want it for the
 [cluster](#cluster-sharing-resources-across-machines) section below.
 
 ## Running on Parallels (real hardware)
@@ -337,13 +337,13 @@ the other should hold, and paste it into that machine's
 `/etc/cluster/authorized`. `clusterkey peers` lists what a machine currently
 accepts and flags a line that cannot work. Key generation **refuses without real
 entropy** rather than producing a guessable identity — see
-[`testing-qemu.md`](testing-qemu.md) for which platforms have it.
+[`testing-qemu.md`](testing/testing-qemu.md) for which platforms have it.
 
 ### Setting up two machines
 
 Any two Ouroboros machines on the same network can do this. The dev setup
 is two QEMU guests on a shared virtual link — **see
-[`testing-qemu.md`](testing-qemu.md) §5** for the exact commands
+[`testing-qemu.md`](testing/testing-qemu.md) §5** for the exact commands
 (`make run-image-2vm-a` in one terminal, `make run-image-2vm-b` in
 another). In that setup machine **A is 10.0.2.10** and **B is 10.0.2.11**;
 each `netd` runs a 9P **export** on TCP port **564** automatically, so every
@@ -481,7 +481,7 @@ straightforward extension of `serve`.
 Every machine's `netd` is both a client and a 9P **export gateway**; paths
 resolve through a per-task **namespace** whose bindings can point at a local
 `fsd` mount, the console, `/net`, or a **remote** endpoint. The full design
-and its build history: [`roadmap-cluster.md`](roadmap-cluster.md) and the
+and its build history: [`roadmap-cluster.md`](roadmap/roadmap-cluster.md) and the
 per-phase design docs (`roadmap-cluster-phase{1,2,3,4}.md`), with the bug
 retrospectives in `cluster-distributed-postmortem.md` and
 `cluster-phase0-postmortem.md`.

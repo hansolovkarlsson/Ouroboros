@@ -70,7 +70,7 @@ pub enum Filesystem {
     /// `/proc` - a synthetic, read-only process-table filesystem (no disk;
     /// generated from `TASK_STATE`). The first non-disk arm, proving the enum is
     /// a genuine VFS and not just a format multiplexer. See [`proc`] and cluster
-    /// Phase 3 (`docs/roadmap-cluster-phase3.md`).
+    /// Phase 3 (`docs/roadmap/roadmap-cluster-phase3.md`).
     Proc(proc::Fs),
 }
 

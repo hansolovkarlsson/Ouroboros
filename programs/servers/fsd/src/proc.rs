@@ -1,5 +1,5 @@
 //! `/proc` - a synthetic, read-only process-table filesystem (cluster Phase 3;
-//! see `docs/roadmap-cluster-phase3.md`). It holds no disk: every listing and
+//! see `docs/roadmap/roadmap-cluster-phase3.md`). It holds no disk: every listing and
 //! file is generated on demand from the kernel's scheduler via the ungated
 //! `TASK_STATE` syscall, so the machine's live task table *is* a file tree.
 //!

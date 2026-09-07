@@ -1,7 +1,7 @@
 # Phase 1 design — 9P-over-TCP: the pivot to distributed
 
 The detailed design for **Phase 1** of [`roadmap-cluster.md`](roadmap-cluster.md):
-carry the uniform verb set ([`ninep-abi`](../ninep-abi/src/lib.rs)) over a TCP
+carry the uniform verb set ([`ninep-abi`](../../ninep-abi/src/lib.rs)) over a TCP
 connection, so one machine **exports** its filesystem server and another
 **remote-mounts** it. This is where Phase 0's local groundwork pays off — the
 whole thesis was *"remote is just this same protocol over TCP instead of local
@@ -209,7 +209,7 @@ read/write disk sharing — the milestone that answers "is it doable?" with a ye
 - [`roadmap-cluster.md`](roadmap-cluster.md) Phase 1; the Phase 0 design
   ([`roadmap-cluster-phase0.md`](roadmap-cluster-phase0.md)) whose verb set,
   `tree` selector, and namespace this rides on.
-- [`network-stack-postmortem.md`](postmortems/network-stack-postmortem.md) — netd's TCP and
+- [`network-stack-postmortem.md`](../postmortems/network-stack-postmortem.md) — netd's TCP and
   the trace-based, foreign-observer testing discipline to reuse.
 - [9P (protocol)](https://en.wikipedia.org/wiki/9P_(protocol)) — the model; we
   carry our own verb set, not 9P2000 on the wire (a minimal, honest subset).

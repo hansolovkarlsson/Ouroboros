@@ -182,4 +182,4 @@ problem.
 - [Plan 9 wiki: Overview](https://9p.io/wiki/plan9/Overview/index.html) — the two foundational ideas (namespaces + 9P), "everything is a file."
 - [9P (protocol) — Wikipedia](https://en.wikipedia.org/wiki/9P_(protocol)) — the 9P message set and its role as the universal connector.
 - [In praise of Plan 9 — Drew DeVault](https://drewdevault.com/blog/In-praise-of-Plan-9/) — a practitioner's summary of what the design buys.
-- This project's own [`research-minix-boot.md`](research-minix-boot.md), [`research-helix-os.md`](research-helix-os.md), and [`microkernel-comparison.md`](microkernel-comparison.md) for the MINIX/Helix material and Ouroboros's current self-assessment.
+- This project's own [`research-minix-boot.md`](research-minix-boot.md), [`research-helix-os.md`](research-helix-os.md), and [`microkernel-comparison.md`](../microkernel-comparison.md) for the MINIX/Helix material and Ouroboros's current self-assessment.

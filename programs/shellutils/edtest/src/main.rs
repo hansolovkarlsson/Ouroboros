@@ -1,6 +1,6 @@
 //! `/bin/edtest` — the on-target check for the `ed25519` crate.
 //!
-//! Step 5 of `docs/roadmap-cluster-keys.md`, and the step that decides whether
+//! Step 5 of `docs/roadmap/roadmap-cluster-keys.md`, and the step that decides whether
 //! the design survives contact with the machine. The host tests prove the
 //! arithmetic; this proves three things they cannot:
 //!

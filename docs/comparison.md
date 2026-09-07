@@ -7,7 +7,7 @@ is **pre-alpha**, a from-scratch research OS, and most of what a mature
 system gives you it does not.
 
 For the *design-influence* lens (what Ouroboros deliberately borrowed from
-each and why), see `docs/research-directions.md`, `research-minix-boot.md`,
+each and why), see `docs/research/research-directions.md`, `research-minix-boot.md`,
 and `research-helix-os.md` — those are about ideas absorbed. **This doc is
 about the practical trade for a would-be user.**
 
@@ -149,5 +149,5 @@ structure.
   never a POSIX kernel — see `docs/ROADMAP.md`.
 
 See also: `docs/architecture.md` (how the pieces fit),
-`docs/roadmap-cluster.md` (where the distributed direction is headed), and
+`docs/roadmap/roadmap-cluster.md` (where the distributed direction is headed), and
 the research notes above for the design-influence view.

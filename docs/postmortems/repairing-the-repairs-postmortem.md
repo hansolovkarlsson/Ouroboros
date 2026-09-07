@@ -252,6 +252,6 @@ One item is open and deliberately so: `NET_WAIT` is not a sleep, and **QEMU
 cannot test the fix** — instrumented, the retry loop runs zero times there,
 because virtio-blk has `fsd` ready before `netd` asks. It is queued against the
 first Raspberry Pi bench session, written up as
-[`testing-pi4.md`](../testing-pi4.md)'s Risk 4b and as a numbered step of "when the
+[`testing-pi4.md`](../testing/testing-pi4.md)'s Risk 4b and as a numbered step of "when the
 boards arrive". Writing it blind against a rig that cannot exercise it is, after
 this day, a recognisable mistake rather than a hypothetical one.

@@ -1,6 +1,6 @@
 //! Arithmetic modulo **L**, the order of Ed25519's prime-order subgroup, where
 //! `L = 2²⁵² + 27742317777372353535851937790883648493`. Part of step 4 of
-//! `docs/roadmap-cluster-keys.md`.
+//! `docs/roadmap/roadmap-cluster-keys.md`.
 //!
 //! Two operations matter: reducing a 512-bit hash to a scalar, and computing
 //! `s = r + k·a mod L`, which is the whole of the signing equation.

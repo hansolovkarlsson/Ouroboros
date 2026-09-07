@@ -100,7 +100,7 @@ kernel boots as a UEFI application, the requirement is not "an ARM board" but
 the ESP tree with `make esp` and copy it onto a FAT32 card over the firmware
 release; do *not* `dd` `esp.img`, which has no room for the firmware.
 
-**[Full test plan → `docs/testing-pi4.md`](docs/testing-pi4.md)** — board
+**[Full test plan → `docs/testing/testing-pi4.md`](docs/testing/testing-pi4.md)** — board
 selection, the bench rig and serial wiring, the firmware settings that matter,
 an ordered boot-checkpoint list, and the ranked risks. Two caveats up front: the
 Pi's GENET NIC is not virtio, so networking and the cluster are as unreachable

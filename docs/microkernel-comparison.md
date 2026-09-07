@@ -3,8 +3,8 @@
 A self-assessment against the three ideas this project draws on, measured
 as they actually stand in the code today — not aspiration. It sits
 alongside the two outward-looking research notes,
-[`research-minix-boot.md`](research-minix-boot.md) and
-[`research-helix-os.md`](research-helix-os.md), and reads best after
+[`research-minix-boot.md`](research/research-minix-boot.md) and
+[`research-helix-os.md`](research/research-helix-os.md), and reads best after
 [`architecture.md`](architecture.md), which is the authoritative
 reference for the mechanisms named below.
 
@@ -343,12 +343,12 @@ project).
 - [`architecture.md`](architecture.md) — the authoritative reference for
   every mechanism named above (privilege model, per-task views, syscall
   ABI, FSOP protocol, grant/safecopy, console discovery).
-- [`research-minix-boot.md`](research-minix-boot.md) and
-  [`research-helix-os.md`](research-helix-os.md) — the outward-looking
+- [`research-minix-boot.md`](research/research-minix-boot.md) and
+  [`research-helix-os.md`](research/research-helix-os.md) — the outward-looking
   notes on the two influences. Their "current shape" / "what this says
   about Ouroboros" sections predate the isolation work and are superseded
   by this note; their descriptions of MINIX and Helix themselves stand.
-- [`research-directions.md`](research-directions.md) — the forward-looking
+- [`research-directions.md`](research/research-directions.md) — the forward-looking
   companion to this note: a synthesis across all four influences
   (adding the Plan 9 material) identifying Plan 9's namespaces + uniform
   file protocol as the standout next architecture — the one mechanism that
