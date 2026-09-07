@@ -100,6 +100,20 @@ const SERVER_ISN: u32 = 0x0002_0000;
 /// arriving with no free slot is REFUSED with a RST (since sessions, 2026-09-07:
 /// a drop meant a hang for as long as a session held the table).
 const MAX_CONNS: usize = 4;
+/// The receive window this server advertises (written into every outbound
+/// segment by `build_tcp_generic`), and the width of "in window" for RFC 5961's
+/// sequence checks in the RST arm of `handle_tcp`. ONE constant for both, since
+/// they were two: the check used `0xFFFF` while the wire carried 64240, so a
+/// RST 1295 bytes past the real window still earned a challenge (review #124).
+const RCV_WINDOW: u32 = 64_240;
+// It goes on the wire as a `u16`, so a future value above that would truncate
+// there while the RST check kept using the wide one - re-creating the exact
+// "the check used one number, the wire carried another" split this constant was
+// made to remove (review of #124). A build error instead.
+const _: () = assert!(
+    RCV_WINDOW <= u16::MAX as u32,
+    "RCV_WINDOW must fit the 16-bit TCP window field it is written into"
+);
 /// How many of those may be SESSIONS (`NP_SESSION`, docs/roadmap/roadmap-fid-verbs.md
 /// Decision 3) at once. One below `MAX_CONNS` on purpose: a session holds its
 /// slot until the peer closes it or the idle reap takes it, so if every slot
@@ -115,7 +129,7 @@ const SESSION_MAX: usize = MAX_CONNS - 1;
 /// one-shot 9P connection whose peer never sent a request or never finished
 /// closing - the same leak, which nothing bounded before). A `cpu` run
 /// connection is exempt while its child runs, since neither side speaks then.
-const CONN_IDLE_TICKS: u64 = 1500;
+const CONN_IDLE_TICKS: u64 = 30 * TICKS_PER_SEC;
 /// Max SACK blocks parsed from one segment's TCP options (RFC 2018 allows up
 /// to 4 in the 40-byte option area, 3 alongside timestamps).
 const MAX_SACK: usize = 4;
@@ -173,6 +187,11 @@ const RTO_POLL_MS: u64 = 200;
 /// A tick in microseconds (`MONOTONIC_US`'s unit), for converting an
 /// estimated RTO in µs to `now()` ticks.
 const TICK_US: u64 = 20_000;
+/// Ticks in a second, COMPUTED from the tick period rather than hand-derived at
+/// each use: `CONN_IDLE_TICKS`, the zero-window probe and the challenge rate
+/// limit are all stated in seconds through this, so changing the tick moves
+/// them together instead of leaving three `// 1 s` comments true-when-written.
+const TICKS_PER_SEC: u64 = 1_000_000 / TICK_US;
 /// The RTO's clock-granularity floor `G` (RFC 6298's `max(G, 4*RTTVAR)`):
 /// the 20ms tick the RTO deadline is measured in, so the variance term never
 /// implies finer resolution than the timer actually has.
@@ -558,11 +577,21 @@ fn serve(packed_mac: u64) -> ! {
                 if conns[i].is_none() {
                     continue;
                 }
-                if service_rto(&mac, conns[i].as_mut().unwrap(), now()) {
+                // ONE clock read per CONNECTION, not per pass: the pump loop
+                // below streams a whole window with an fsd read per segment, so
+                // a pass over two busy connections can outlast RTO_MIN_TICKS.
+                // A pass-wide `t` then armed the second connection's RTO at a
+                // deadline already past, firing a spurious retransmit that
+                // collapsed cwnd and resent data nothing had lost (review of
+                // #124, which is also where the three-reads-per-connection this
+                // replaces came from).
+                let t = now();
+                if service_rto(&mac, conns[i].as_mut().unwrap(), t) {
                     conns[i] = None;
                     continue;
                 }
-                if reap_idle(&mac, conns[i].as_ref().unwrap(), now()) {
+                probe_zero_window(&mac, conns[i].as_mut().unwrap(), t);
+                if reap_idle(&mac, conns[i].as_ref().unwrap(), t) {
                     conns[i] = None;
                     continue;
                 }
@@ -1091,6 +1120,14 @@ fn tcp_get(mac: &[u8; 6], dst_mac: &[u8; 6], target: &[u8; 4], dst_port: u16, re
                         if s.flags & (TCP_SYN | TCP_ACK) == (TCP_SYN | TCP_ACK) && s.ack == isn + 1 {
                             break 'handshake s.seq;
                         }
+                        // A bare ACK in SYN-SENT is an exporter's challenge (it
+                        // still holds a connection on this port from an earlier
+                        // incarnation): answer with a RST at its ack (RFC 793
+                        // 3.10), which frees that slot, so the next SYN of this
+                        // same call is served instead of timing out (#124).
+                        if is_bare_ack(s.flags, s.data_len) {
+                            syn_sent_reset(mac, dst_mac, target, src_port, dst_port, s.ack);
+                        }
                     }
                 }
                 beat = beat_if_new_tick(now(), beat);
@@ -1277,6 +1314,14 @@ fn tcp_run(packed_mac: u64, mac: &[u8; 6], dst_mac: &[u8; 6], target: &[u8; 4], 
                         if s.flags & (TCP_SYN | TCP_ACK) == (TCP_SYN | TCP_ACK) && s.ack == isn + 1 {
                             break 'handshake s.seq;
                         }
+                        // A bare ACK in SYN-SENT is an exporter's challenge (it
+                        // still holds a connection on this port from an earlier
+                        // incarnation): answer with a RST at its ack (RFC 793
+                        // 3.10), which frees that slot, so the next SYN of this
+                        // same call is served instead of timing out (#124).
+                        if is_bare_ack(s.flags, s.data_len) {
+                            syn_sent_reset(mac, dst_mac, target, src_port, dst_port, s.ack);
+                        }
                     } else {
                         // A non-run frame arriving mid-handshake (an early export
                         // request, ARP): serve it so we don't drop it.
@@ -1374,11 +1419,13 @@ fn pump_conns(mac: &[u8; 6], conns: &mut [Option<TcpConn>; MAX_CONNS]) {
         if conns[i].is_none() {
             continue;
         }
-        if service_rto(mac, conns[i].as_mut().unwrap(), now()) {
+        let t = now(); // per connection, not per pass - see `serve`'s copy
+        if service_rto(mac, conns[i].as_mut().unwrap(), t) {
             conns[i] = None;
             continue;
         }
-        if reap_idle(mac, conns[i].as_ref().unwrap(), now()) {
+        probe_zero_window(mac, conns[i].as_mut().unwrap(), t);
+        if reap_idle(mac, conns[i].as_ref().unwrap(), t) {
             conns[i] = None;
             continue;
         }
@@ -1818,6 +1865,11 @@ struct TcpConn {
     /// retransmit on a session resent bytes from the wrong offset, or gave the
     /// reply up as already sent - invisible on QEMU, where SLIRP loses nothing.
     data_base: u32,
+    /// Tick of the last zero-window probe (`probe_zero_window`); 0 = none yet.
+    last_probe: u64,
+    /// Tick of the last challenge ACK sent on this connection (RFC 5961's
+    /// rate limit, see `challenge`); 0 = none yet.
+    last_challenge: u64,
 }
 
 /// `TcpConn::cpu_child` sentinel: this connection is not a remote-run capture.
@@ -2161,7 +2213,21 @@ fn handle_tcp(mac: &[u8; 6], frame: &[u8], seg: &TcpIn, conns: &mut [Option<TcpC
     // freed the slot, which a session made a cheaper kill than it had been.
     if seg.flags & TCP_RST != 0 {
         if let Some(i) = find_conn(conns, seg) {
-            conns[i] = None;
+            let c = conns[i].as_ref().unwrap();
+            // RFC 5961 3.2's three arms, and the third is why this is not a
+            // bare equality test: exactly `rcv_nxt` resets; IN WINDOW ahead of
+            // it earns a challenge (a peer that pipelined a request we have not
+            // consumed aborts at a sequence past `rcv_nxt`, and its answer to
+            // the challenge is a RST that does match); anything else is DROPPED
+            // rather than challenged, or every stray segment buys a reply.
+            let reset = seg.seq == c.rcv_nxt;
+            let in_window = seq_gt(seg.seq, c.rcv_nxt)
+                && !seq_gt(seg.seq, c.rcv_nxt.wrapping_add(RCV_WINDOW));
+            if reset {
+                conns[i] = None;
+            } else if in_window {
+                send_challenge(mac, conns, i);
+            }
         }
         return;
     }
@@ -2177,7 +2243,21 @@ fn handle_tcp(mac: &[u8; 6], frame: &[u8], seg: &TcpIn, conns: &mut [Option<TcpC
         // was one request long, and not once a session holds a peer's port
         // for as long as it likes (review of #123). A duplicate SYN during the
         // handshake still restarts it, as before.
-        let Some(i) = find_conn(conns, seg).or_else(|| free_slot(conns)) else {
+        // The challenge goes to the STORED peer (see `challenge`), not to the
+        // sender of the SYN: a SYN is not proof of anything, and answering its
+        // MAC would tell a forger our sequence numbers. The branch has no rig
+        // that reaches it:
+        // the host client cannot pin a source port through SLIRP (ledgered).
+        let existing = find_conn(conns, seg);
+        if let Some(i) = existing {
+            let past_handshake = matches!(conns[i].as_ref(),
+                Some(c) if !matches!(c.state, ConnState::SynRcvd));
+            if past_handshake {
+                send_challenge(mac, conns, i);
+                return;
+            }
+        }
+        let Some(i) = existing.or_else(|| free_slot(conns)) else {
             // All slots busy: REFUSE (RST), do not drop. A dropped SYN was fine
             // while every connection was one request long - the peer
             // retransmitted into a slot that freed within a second. A session
@@ -2226,6 +2306,8 @@ fn handle_tcp(mac: &[u8; 6], frame: &[u8], seg: &TcpIn, conns: &mut [Option<TcpC
             session: false,
             last_rx: now(),
             data_base: SERVER_ISN.wrapping_add(1),
+            last_probe: 0,
+            last_challenge: 0,
         };
         send_seg(mac, &c, TCP_SYN | TCP_ACK, true, &[]);
         c.snd_nxt = c.snd_nxt.wrapping_add(1); // our SYN consumes one too
@@ -2245,16 +2327,74 @@ fn handle_tcp(mac: &[u8; 6], frame: &[u8], seg: &TcpIn, conns: &mut [Option<TcpC
     }
 }
 
+/// [`challenge`] for a connection held by index, so the caller may keep the
+/// table borrowed.
+fn send_challenge(mac: &[u8; 6], conns: &mut [Option<TcpConn>; MAX_CONNS], i: usize) {
+    if let Some(c) = conns[i].as_mut() {
+        challenge(mac, c);
+    }
+}
+
 /// Refuse a SYN outright: `[RST|ACK]` with `ack = seq + 1`, the answer a closed
 /// port gives, so the peer's connect fails now instead of retransmitting into
 /// a table that may not free for as long as a session lasts. No `TcpConn` is
 /// built for it (the struct is 2 KB of stack on a task that has hit its guard
 /// page before).
 fn send_rst_to(mac: &[u8; 6], seg: &TcpIn) {
+    send_to_seg(mac, seg, 0, seg.seq.wrapping_add(1), TCP_RST | TCP_ACK);
+}
+
+/// RFC 5961's challenge ACK: our current `snd_nxt`/`rcv_nxt`, telling a peer
+/// that sent something unacceptable (a SYN into a live connection, an
+/// out-of-window RST, an ACK for bytes never sent) where we actually are, so a
+/// peer that really did restart answers with a RST that passes the checks and
+/// a stale or forged segment achieves nothing.
+///
+/// RATE-LIMITED to one per `CHALLENGE_TICKS` per connection (RFC 5961 section
+/// 7): without it a flood costs one transmitted segment per received one,
+/// inside the single-threaded frame-drain loop the supervisor watches for a
+/// server that stays runnable too long (review of #124).
+///
+/// ADDRESSED TO THE STORED PEER, never to whoever sent the segment. An earlier
+/// version answered the sender's MAC, which made this a one-packet sequence
+/// oracle: a forged segment drew a reply carrying `snd_nxt`/`rcv_nxt` straight
+/// back to the forger, handing an off-path attacker the numbers the sequence
+/// checks exist to require (review of #124). A peer that really did move to new
+/// hardware is answered at its old MAC and falls back on its own retransmits,
+/// which costs it a reconnect - the cheaper mistake. This block said the
+/// opposite of the line below it for one round; that is the shape
+/// `true-when-written-postmortem.md` collects.
+fn challenge(mac: &[u8; 6], c: &mut TcpConn) {
+    // SHORT (0.1 s), because every challenge path shares it and two of them
+    // lose information when suppressed: a suppressed SYN challenge drops the
+    // SYN silently, and TCP never retransmits a RST, so a suppressed in-window
+    // RST challenge loses a legitimate abort outright. A tenth of a second
+    // still bounds a flood to ten segments a second per connection, and the
+    // earlier half-second cost more than it bought (review of #124).
+    const CHALLENGE_TICKS: u64 = TICKS_PER_SEC / 10;
+    let t = now();
+    // No "none yet" sentinel: the field starts at 0 and the subtraction stands
+    // on its own. A `!= 0` guard meant a challenge sent at tick 0 disabled the
+    // limiter for that connection, which is worse than what it costs instead -
+    // that for the first CHALLENGE_TICKS after netd starts (or is restarted by
+    // the supervisor mid-traffic) a challenge is suppressed, since `t` itself
+    // is still below the limit. A tenth of a second, once, per netd lifetime.
+    if t.wrapping_sub(c.last_challenge) < CHALLENGE_TICKS {
+        return;
+    }
+    c.last_challenge = t;
+    send_seg(mac, c, TCP_ACK, false, &[]);
+}
+
+/// One segment addressed at a peer BY ITS OWN SEGMENT (source MAC, IP and
+/// port), rather than by a `TcpConn`'s stored fields - what a REFUSAL needs,
+/// since it answers a peer that has no connection here at all. Challenges do
+/// not use it: they answer the stored peer (see `challenge`).
+fn send_to_seg(mac: &[u8; 6], seg: &TcpIn, seq: u32, ack: u32, flags: u8) {
     let mut out = [0u8; 1600];
     if let Some(n) = build_tcp_srv(
-        mac, &seg.src_mac, &seg.src_ip, seg.src_port, seg.dst_port, 0, seg.seq.wrapping_add(1),
-        TCP_RST | TCP_ACK, false, &[], &mut out,
+        mac, &seg.src_mac, &seg.src_ip, seg.src_port, seg.dst_port, seq, ack,
+        flags, false, &[], &mut out,
     ) {
         let _ = send(&out[..n]);
     }
@@ -2295,6 +2435,53 @@ fn reply_pending(c: &TcpConn) -> bool {
     c.prefix_off < c.prefix_len || (c.file && !c.eof)
 }
 
+/// Whether this connection is PERSISTING: it owes the peer more of a reply,
+/// and the peer's window is shut. The condition `probe_zero_window` probes on,
+/// and its ONLY caller - `service_rto` used to consult it too, for an exemption
+/// that was removed in the same branch (see the RTO's own comment), and this
+/// block went on describing the two as coupled (review of #124). Deliberately
+/// NOT gated on
+/// `snd_nxt == snd_una`, since a zero window with data still in flight is the
+/// persist case itself (the peer's window closed and the outstanding segment
+/// was lost, so no ACK advances `snd_una`).
+///
+/// NARROW ON PURPOSE. A first version let `service_rto` skip the abort for any
+/// connection with a zero window, which made a connection with unacked data and
+/// no reply outstanding immortal: `reap_idle` declines while data is in flight,
+/// and nothing else frees a slot. Only a connection something is actively
+/// probing is exempt from the abort.
+fn persisting(c: &TcpConn) -> bool {
+    c.window == 0
+        && c.cpu_child == CPU_NONE
+        && c.responded
+        && (reply_pending(c) || (!c.session && !c.fin_sent))
+}
+
+/// Zero-window probing (RFC 1122 4.2.2.17, the persist timer): while a reply
+/// is stalled because the peer advertises window 0 and nothing is in flight,
+/// send an empty segment at `snd_una - 1` once a second. Old data, so the peer
+/// must answer with an ACK (RFC 793: an out-of-window segment is acked), which
+/// refreshes `last_rx` and, when the window reopens, carries the new size. A
+/// dead peer answers nothing and `reap_idle` takes it 30 s after its last
+/// segment. Unmeasured on the in-tree rigs: the export's files are too small
+/// to fill SLIRP's buffer, so no rig closes the window (ledgered).
+fn probe_zero_window(mac: &[u8; 6], c: &mut TcpConn, now: u64) {
+    const PROBE_TICKS: u64 = TICKS_PER_SEC;
+    // The owed FIN counts here, though not in `reply_pending` (a session never
+    // sends one, and counting it there would stop every session resetting): a
+    // peer that closes its window exactly at end-of-body leaves `eof` set with
+    // the FIN unsent, and without this the probe declined and the 30 s reap
+    // took a connection that was one segment from done (review of #124).
+    if !persisting(c) {
+        return;
+    }
+    if now.wrapping_sub(c.last_probe) < PROBE_TICKS {
+        return;
+    }
+    send_seg_at(mac, c, c.snd_una.wrapping_sub(1), TCP_ACK, &[]);
+    c.last_probe = now;
+}
+
 /// The idle reap: `true` when `c` has had nothing in flight and no segment from
 /// its peer for `CONN_IDLE_TICKS`, in which case a RST has been sent and the
 /// caller frees the slot. Unacked data is the retransmit timer's business, not
@@ -2325,7 +2512,56 @@ fn reap_idle(mac: &[u8; 6], c: &TcpConn, now: u64) -> bool {
 /// actual sending (`pump_send`) is *not* done here - it runs once per
 /// event-loop wake so the health-ping stays promptly acked (see `serve`).
 fn handle_conn_segment(mac: &[u8; 6], frame: &[u8], seg: &TcpIn, c: &mut TcpConn, dials: &mut [Option<DialConn>; MAX_DIAL], auth: &Auth, sessions: usize) -> bool {
-    c.last_rx = now();
+    // In-window by sequence: at or ahead of what we expect, and not beyond the
+    // window we advertised. Only such a segment winds the reaper's clock at the
+    // end of this function - "refreshed for a segment this function accepts"
+    // was true only of the ACK guard below, and every other segment netd
+    // ignores (a stale sequence, junk past the window) still wound it, which is
+    // a slot a peer can hold with rubbish (review of #124).
+    // RFC 793's acceptance test: the segment ENDS at or past what we expect
+    // next, and starts within the window we advertised. The lower bound is on
+    // the END, not the start, or a retransmitted request whose original we
+    // already consumed - a live peer talking - counted for nothing and the
+    // reaper took the connection at 30 s (review of #124).
+    let seg_end = seg.seq.wrapping_add(seg.data_len);
+    let in_window = !seq_gt(c.rcv_nxt, seg_end)
+        && !seq_gt(seg.seq, c.rcv_nxt.wrapping_add(RCV_WINDOW));
+    // `last_rx` is refreshed at the END, for a segment this function accepts:
+    // refreshing it here let a peer hold its slot against `reap_idle` forever
+    // with segments that are all challenged and dropped (review of #124).
+    // An ACK for bytes never sent is not ours to apply (RFC 793 3.9, RFC 5961):
+    // answer with a bare ACK and drop the segment. Applying it moved snd_una
+    // and, through the fast-forward below, snd_nxt, while the reply base did
+    // not follow - on a session parked between requests that put every later
+    // reply off by the difference (review of #124). Stale ACKs from a previous
+    // incarnation are the realistic source: SERVER_ISN is a constant, so every
+    // incarnation of a 4-tuple shares one sequence space.
+    // BOUNDED BY snd_max, NOT snd_nxt: `snd_nxt` is a CURSOR that `rewind_to`
+    // moves BACKWARDS on every go-back-N retransmit, so bounding against it
+    // discarded exactly the recovery ACK the fast-forward branch below exists
+    // for (a peer that buffered the out-of-order tail acks past the rewound
+    // cursor in one jump), froze `snd_una`, and let the RTO give up and RST a
+    // transfer that was recovering normally. It also made that branch dead
+    // code, which is how the review of #124 found it. `snd_max` is the highest
+    // sequence ever newly sent and is never rewound.
+    // A FIN is exempt: this guard is the FIRST statement, so returning here
+    // discarded a peer's CLOSE when its ack was unacceptable, and the slot was
+    // then held to the 30 s reap for a peer that had already gone (review of
+    // #124). The unacceptable ack is still not applied - the FIN arm at the
+    // bottom does not read it.
+    // NO FLAG EXEMPTION (RFC 5961 s5): an unacceptable ack is challenged and
+    // dropped whatever else the segment carries. A FIN was exempted for one
+    // round, to stop a real peer's close being discarded - but a conforming
+    // peer never closes with an ack beyond anything we sent, so the exemption
+    // bought nothing real and let the very segment this guard names (a stale
+    // FIN|ACK from a previous incarnation of the 4-tuple, since SERVER_ISN is a
+    // constant) tear down a live session on the sequence test alone. A close
+    // that IS dropped here costs a slot until the 30 s reap; a close that is
+    // honoured on a forged ack costs the session (review of #124).
+    if seg.flags & TCP_ACK != 0 && seq_gt(seg.ack, c.snd_max) {
+        challenge(mac, c);
+        return false;
+    }
     // Track the peer's ACK (frees send window), count duplicate ACKs, and
     // update the advertised window.
     if seg.flags & TCP_ACK != 0 {
@@ -2360,9 +2596,19 @@ fn handle_conn_segment(mac: &[u8; 6], frame: &[u8], seg: &TcpIn, c: &mut TcpConn
             if seq_gt(c.snd_una, c.snd_nxt) {
                 rewind_to(c, c.snd_una);
             }
-        } else if seg.ack == c.snd_una && c.snd_nxt != c.snd_una && seg.data_len == 0 {
+        } else if seg.ack == c.snd_una && c.snd_nxt != c.snd_una && seg.data_len == 0
+            && c.window != 0 {
             // A duplicate ACK with data still outstanding: the peer received an
-            // out-of-order segment (a gap before it). Three of
+            // out-of-order segment (a gap before it). A SHUT WINDOW is excluded,
+            // or the ACK a zero-window PROBE is designed to elicit counts as a
+            // dup-ACK and the persist timer manufactures the loss signal it
+            // exists to avoid (review of #124). RFC 5681's fourth condition,
+            // "the advertised window is unchanged", is DELIBERATELY NOT applied
+            // on top of that: the case it guards is the probe's own answer,
+            // already excluded here, while requiring equality forfeits fast
+            // retransmit against a receiver whose window shrinks as it buffers
+            // the out-of-order tail - the common case during loss - leaving
+            // recovery to the RTO with cwnd collapsed to one segment. Three of
             // these => fast retransmit - rewind the send cursor to snd_una and resend from
             // there (go-back-N); the next pump does the actual sending.
             c.dup_acks = c.dup_acks.saturating_add(1);
@@ -2384,7 +2630,13 @@ fn handle_conn_segment(mac: &[u8; 6], frame: &[u8], seg: &TcpIn, c: &mut TcpConn
             }
         }
     }
-    c.window = seg.window as u32;
+    // ONLY FROM AN ACCEPTED SEGMENT. Left unconditional, one segment with a
+    // guessed 4-tuple, any sequence and `window = 0` was ignored for every
+    // other purpose yet still shut the send window, stalling the connection
+    // into the persist state until the peer's next real ACK (review of #124).
+    if in_window {
+        c.window = seg.window as u32;
+    }
 
     // A bare ACK completes the handshake.
     if matches!(c.state, ConnState::SynRcvd) && seg.flags & TCP_ACK != 0 {
@@ -2427,8 +2679,15 @@ fn handle_conn_segment(mac: &[u8; 6], frame: &[u8], seg: &TcpIn, c: &mut TcpConn
     // promptly and a burst can never block netd long enough to look wedged.
     // This ACK just updated snd_una/window above; the next pump uses it.
 
+    if in_window {
+        c.last_rx = now();
+    }
+
     // The peer's FIN: ack it (past any data it carried plus the FIN) and close.
-    if seg.flags & TCP_FIN != 0 {
+    // IN WINDOW only - the same test every other segment gets, and this arm had
+    // none, so a stale or blind FIN on a guessed 4-tuple tore down a live
+    // session (review of #124).
+    if seg.flags & TCP_FIN != 0 && in_window {
         c.rcv_nxt = seg.seq.wrapping_add(seg.data_len).wrapping_add(1);
         send_seg(mac, c, TCP_ACK, false, &[]);
         return true;
@@ -2436,10 +2695,17 @@ fn handle_conn_segment(mac: &[u8; 6], frame: &[u8], seg: &TcpIn, c: &mut TcpConn
     false
 }
 
-/// Index of the connection matching `seg`'s peer (IP + source port), if any.
+/// Index of the connection matching `seg`'s peer AND the local port it arrived
+/// on. The local port is part of the key since the review of #124: without it a
+/// peer opening a NEW connection to port 80 from an ephemeral port it had used
+/// for a 9P session was matched against that session, challenged, and answered
+/// the challenge with a RST that tore the session down - one round trip after
+/// the challenge was added to prevent exactly that destruction.
 fn find_conn(conns: &[Option<TcpConn>; MAX_CONNS], seg: &TcpIn) -> Option<usize> {
     conns.iter().position(|c| {
-        matches!(c, Some(c) if c.peer_ip == seg.src_ip && c.peer_port == seg.src_port)
+        matches!(c, Some(c) if c.peer_ip == seg.src_ip
+            && c.peer_port == seg.src_port
+            && c.local_port == seg.dst_port)
     })
 }
 
@@ -2519,11 +2785,54 @@ fn service_rto(mac: &[u8; 6], c: &mut TcpConn, now: u64) -> bool {
         // ssthresh and collapse cwnd to one segment, restarting slow start.
         c.ssthresh = (c.cwnd / 2).max(MIN_CWND);
         c.cwnd = MSS;
-        rewind_to(c, c.snd_una); // presume loss, resend from snd_una
+        if matches!(c.state, ConnState::SynRcvd) {
+            // Before the handshake the only unacked byte is our own SYN, and
+            // `rewind_to` would move `snd_nxt` BELOW it: `in_flight` then reads
+            // 0, the early return above disarms the timer for good, and the
+            // SYN-ACK is never resent (review of #124). Resend it here instead
+            // and leave the cursor alone.
+            //
+            // AT `snd_una`, WHICH IS WHERE THE ORIGINAL WENT. `send_seg` uses
+            // `snd_nxt`, already one past it because our SYN consumed a
+            // sequence number, so this resent the SYN-ACK a byte further on: the
+            // peer took that as the sequence, acked one past it, and the ACK
+            // guard above - correctly - refused an ack beyond anything we sent,
+            // so the handshake could never complete and the RTO gave up. A lost
+            // SYN-ACK became unrecoverable, on the one link that loses segments
+            // and none that this project can currently run (review of #124).
+            send_seg_at_mss(mac, c, c.snd_una, TCP_SYN | TCP_ACK, true, &[]);
+        } else {
+            rewind_to(c, c.snd_una); // presume loss, resend from snd_una
+        }
         c.rto_retries += 1;
         c.rto_deadline = now + (c.rto_ticks << c.rto_retries.min(4)); // exp. backoff, capped
     }
     false
+}
+
+/// A client-direction RST at `seq` with no ack: the RFC 793 3.10 answer to an
+/// unacceptable ACK in SYN-SENT, used by every client path here (`tcp_get`,
+/// `tcp_run`, a dial) when an exporter challenges a SYN on a port it still
+/// holds. Freeing that slot is what makes the SYN retry succeed. Sent for ANY
+/// bare ACK in SYN-SENT, including one whose ack happens to equal our isn + 1
+/// (an exporter slot past its handshake that received nothing from a previous
+/// incarnation), where RFC 793 would drop instead: that RST frees a slot that
+/// is stale by construction, and the cost of the deviation is one segment.
+fn syn_sent_reset(mac: &[u8; 6], dst_mac: &[u8; 6], target: &[u8; 4], src_port: u16, dst_port: u16, seq: u32) {
+    let mut out = [0u8; 1600];
+    if let Some(n) = build_tcp(mac, dst_mac, target, src_port, dst_port, seq, 0, TCP_RST, false, &[], &mut out) {
+        let _ = send(&out[..n]);
+    }
+}
+
+/// A BARE ACK: acknowledgement only, no SYN, no FIN, no RST and no payload.
+/// Named once because the three client handshakes test it (an exporter's
+/// challenge for a port it still holds), and spelled
+/// `flags & ACK != 0 && flags & SYN == 0` it also matched FIN|ACK and a data
+/// segment from a previous incarnation of a recycled 4-tuple, each of which
+/// would then draw a RST it should not (review of #124).
+fn is_bare_ack(flags: u8, data_len: usize) -> bool {
+    flags & TCP_ACK != 0 && flags & (TCP_SYN | TCP_FIN | TCP_RST) == 0 && data_len == 0
 }
 
 /// Build and send one server-direction segment for connection `c`.
@@ -2550,9 +2859,14 @@ fn send_seg(mac: &[u8; 6], c: &TcpConn, flags: u8, with_mss: bool, payload: &[u8
 /// used by selective retransmit to resend a specific gap without disturbing
 /// the forward send cursor.
 fn send_seg_at(mac: &[u8; 6], c: &TcpConn, seq: u32, flags: u8, payload: &[u8]) {
+    send_seg_at_mss(mac, c, seq, flags, false, payload)
+}
+
+/// [`send_seg_at`], with the MSS option a SYN must carry.
+fn send_seg_at_mss(mac: &[u8; 6], c: &TcpConn, seq: u32, flags: u8, with_mss: bool, payload: &[u8]) {
     let mut out = [0u8; 1600];
     if let Some(n) = build_tcp_srv(
-        mac, &c.peer_mac, &c.peer_ip, c.peer_port, c.local_port, seq, c.rcv_nxt, flags, false, payload, &mut out,
+        mac, &c.peer_mac, &c.peer_ip, c.peer_port, c.local_port, seq, c.rcv_nxt, flags, with_mss, payload, &mut out,
     ) {
         let _ = send(&out[..n]);
     }
@@ -3834,6 +4148,7 @@ fn dial_on_segment(mac: &[u8; 6], frame: &[u8], dials: &mut [Option<DialConn>; M
             continue;
         };
         let c = dials[i].as_mut().unwrap();
+        let prev_activity = c.last_activity;
         c.last_activity = t;
         if s.flags & TCP_RST != 0 {
             c.state = DialState::Closed;
@@ -3850,7 +4165,22 @@ fn dial_on_segment(mac: &[u8; 6], frame: &[u8], dials: &mut [Option<DialConn>; M
         }
         match c.state {
             DialState::Connecting => {
-                if s.flags & (TCP_SYN | TCP_ACK) == (TCP_SYN | TCP_ACK) && s.ack == c.isn.wrapping_add(1) {
+                if is_bare_ack(s.flags, s.data_len) {
+                    // The exporter's challenge for a held port: RST at its ack
+                    // frees that slot; the SYN retry then connects (#124).
+                    //
+                    // This segment changes nothing here, so it must not wind the
+                    // idle clock either, or a peer trickling one bare ACK holds
+                    // a dial slot off the 12 s reap forever while drawing a RST
+                    // each time. Undone HERE rather than skipped before the
+                    // match, where it also covered `Accepting` (whose
+                    // handshake-completing ACK is bare by construction) and
+                    // `Established` (where a pure ACK frees send buffer), and so
+                    // reaped a listener that had just been established (both
+                    // reviews of #124).
+                    c.last_activity = prev_activity;
+                    syn_sent_reset(mac, &c.peer_mac, &c.peer_ip, c.src_port, c.peer_port, s.ack);
+                } else if s.flags & (TCP_SYN | TCP_ACK) == (TCP_SYN | TCP_ACK) && s.ack == c.isn.wrapping_add(1) {
                     c.snd_nxt = c.isn.wrapping_add(1);
                     c.snd_una = c.snd_nxt;
                     c.rcv_nxt = s.seq.wrapping_add(1);
@@ -5019,6 +5349,14 @@ fn pump_send(mac: &[u8; 6], c: &mut TcpConn) {
         if !c.fin_sent {
             send_seg(mac, c, TCP_FIN | TCP_ACK, false, &[]);
             c.snd_nxt = c.snd_nxt.wrapping_add(1); // FIN consumes a sequence number
+            // ...and raises the send high-water mark, or the peer's ACK OF THE
+            // FIN is one past `snd_max` and the guard above would challenge and
+            // drop it. `rtt_on_send` is not called for a FIN (nothing to time).
+            // Through `raise_snd_max`, not an assignment: a FIN sent after a
+            // rewind (a mid-stream read error sets `eof` during recovery) is at
+            // a lower `snd_nxt` than bytes already sent, and assigning would
+            // drop the bound below them (review of #124).
+            raise_snd_max(c);
             c.fin_sent = true;
             c.state = ConnState::Closing;
         }
@@ -5221,7 +5559,7 @@ fn build_tcp_generic(
     out[t + 8..t + 12].copy_from_slice(&ack.to_be_bytes());
     out[t + 12] = ((tcp_hdr / 4) as u8) << 4; // data offset in 32-bit words
     out[t + 13] = flags;
-    out[t + 14..t + 16].copy_from_slice(&64240u16.to_be_bytes()); // window
+    out[t + 14..t + 16].copy_from_slice(&(RCV_WINDOW as u16).to_be_bytes()); // window
     out[t + 16..t + 18].copy_from_slice(&[0, 0]); // checksum placeholder
     out[t + 18..t + 20].copy_from_slice(&[0, 0]); // urgent pointer
     if with_mss {
@@ -5553,6 +5891,16 @@ fn rtt_update(c: &mut TcpConn, r_us: u64) {
     c.rto_ticks = (rto_us / TICK_US).clamp(RTO_MIN_TICKS, RTO_MAX_TICKS);
 }
 
+/// Raise the send high-water mark to `snd_nxt` if that is further on. A
+/// MAXIMUM, never an assignment: `snd_nxt` is a cursor that `rewind_to` moves
+/// backwards, so assigning could LOWER the bound below bytes already sent and
+/// make their ACKs unacceptable (review of #124).
+fn raise_snd_max(c: &mut TcpConn) {
+    if seq_gt(c.snd_nxt, c.snd_max) {
+        c.snd_max = c.snd_nxt;
+    }
+}
+
 /// Called after a data segment starting at `seg_start` is sent. If it's new
 /// data (at or past the send high-water mark, not a retransmit) and no RTT
 /// sample is already outstanding, start timing it: the sample completes when
@@ -5560,10 +5908,20 @@ fn rtt_update(c: &mut TcpConn, r_us: u64) {
 /// timed, and an outstanding sample is invalidated if the segment is later
 /// retransmitted (see `rewind_to`).
 fn rtt_on_send(c: &mut TcpConn, seg_start: u32) {
-    if seq_gt(c.snd_max, seg_start) {
-        return; // seg_start < snd_max: a retransmit, not new data - don't time
+    // Karn's question, asked BEFORE the mark moves: did this segment start
+    // below the high-water mark, i.e. is it a retransmit?
+    let retransmit = seq_gt(c.snd_max, seg_start);
+    // The mark itself is raised UNCONDITIONALLY, because a retransmit can end
+    // ABOVE it: after a rewind, `pump_send` re-segments against a halved cwnd,
+    // so a recovery segment can start below the mark and finish past it. Skipping
+    // the raise then left the mark behind `snd_nxt`, and since #124 made it the
+    // acceptance bound for incoming ACKs, the peer's ack of those bytes was
+    // challenged and dropped and the RTO reset a recovering transfer - the very
+    // failure the bound was introduced to fix (review of #124).
+    raise_snd_max(c);
+    if retransmit {
+        return; // never time a retransmit
     }
-    c.snd_max = c.snd_nxt;
     if !c.rtt_active {
         c.rtt_active = true;
         c.rtt_seq = c.snd_nxt;

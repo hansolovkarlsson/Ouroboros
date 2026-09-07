@@ -1529,6 +1529,36 @@ would otherwise silently shrink into looking like nothing was ever found.
     version of this item said "RST only when every busy slot is a session",
     which cannot happen: `SESSION_MAX` is `MAX_CONNS - 1`, so a full table
     always holds one non-session (review of #124).
+  - **Loss recovery now HAS a rig, and it found a real regression
+    (2026-09-07).** SLIRP never drops a segment, so every retransmit path here
+    was argued rather than run. A temporary two-line mutation in `pump_send`
+    (swallow one new file-body segment, once) plus an HTTP fetch of a 140 KB
+    binary through `--hostfwd=tcp::5555-:80` forces a real fast retransmit.
+    It caught the second review's top finding: bounding an incoming ACK against
+    `snd_nxt`, which `rewind_to` moves BACKWARDS, discarded the peer's recovery
+    ACK and the RTO then RST the transfer. **Measured, and re-measured under
+    `scripts/run-guest.sh` once the harness turned out to kill the guest
+    mid-run:** with the bound at `snd_max` `curl` gets all 140,088 bytes,
+    hash-identical, guest alive at the end; with it back at `snd_nxt` the
+    transfer truncates at 11,303 bytes, guest alive, no restart line. The first
+    reading of this (11,201 bytes) was taken through `drive-qemu.py` and could
+    not be told apart from the guest being killed; it happened to be right. Worth keeping as the shape
+    for any future retransmit change, and worth making permanent (a build-time
+    or config lever rather than an edit) if a third one arrives.
+
+    **And its limit, measured the same day.** The fifth review found a second
+    defect in the same bound that this rig CANNOT reach: `snd_max` was raised
+    only for a segment starting at or past it, so a recovery segment that
+    starts below the mark and ends past it (re-segmentation against a halved
+    `cwnd`) left the mark behind `snd_nxt`, and the peer's ack of those bytes
+    was then challenged and dropped. Tried and failed to reproduce: a
+    four-drop version of the rig (chunks 2, 9, 17, 26 of a 140 KB fetch)
+    completes hash-identical BOTH with the fix and with it mutated out, because
+    after a rewind `in_flight` is zero and every segment goes out at
+    `SERVE_CHUNK` until the last partial one, so the boundaries stay aligned.
+    Reaching it needs a loss whose recovery re-segments across the mark, which
+    this injector cannot choose. Fixed by reading, and the fix is a maximum
+    rather than an assignment, which cannot be wrong in the other direction.
   - **The session gate's own harness was blind until 2026-09-07, and its late
     checks proved nothing.** `drive-qemu.py` kills QEMU seconds after its last
     typed step; the gate runs for a minute or more, so its reap and
@@ -1547,6 +1577,36 @@ would otherwise silently shrink into looking like nothing was ever found.
     one still passes). It verifies slots are usable again, not that the reap
     returned them; the reap check beside it is what can fail for that. Worth
     tightening if the two ever need to be independent.
+  - **Session-gate branches no rig reaches (review of #124, fixed by
+    reading, verified by nothing).** The zero-window probe (`probe_zero_window`)
+    that keeps a paused-but-alive peer off the 30 s reap: the export's files
+    are too small to fill SLIRP's buffer, so no rig closes the window. The
+    challenge ACK for a SYN into a held slot, and the clients' RST answer to
+    it in SYN-SENT: the host client cannot pin a source port through SLIRP,
+    so nothing reconnects into a held slot; the two-VM socket link could, with
+    a peer that fixes its port. And the RST validated at `rcv_nxt` rather than
+    on any RST: the host's abort (`SO_LINGER` 0) still frees the slot at once,
+    which shows the accepting arm, not the challenging one. A paused peer that
+    answers no probe for 30 s is reaped, shorter than a desktop stack's persist
+    timer, stated as this project's bound.
+  - **The refusal side of delegation has no check that can fail.** Every
+    `DELEGATE` in the tree is a parent granting to its own child, so nothing
+    ever exercises "a task cannot delegate to or for a stranger"; the
+    one-clause rule rests on reading. Rig item: a deliberately misbehaving
+    `/bin` program that issues `DELEGATE(grantee=<not its child>, ...)` and
+    `DELEGATE(<its child>, <a task it cannot reach>)` and prints the two
+    answers, expected `MSG_ERR_DENIED` both times. Promised in the journal on
+    2026-09-06 and not built.
+  - **A foregrounded nested shell loses the keyboard after every command.**
+    `exec /EFI/ORBS/SH.BIN`, `fg 6`, log in, `echo hi` (a builtin, no child,
+    no `FG`): `ps` before shows task 0 blocked and task 6 runnable, `ps` after
+    shows task 0 runnable and task 6 blocked, and the next line typed runs in
+    the boot shell. Measured 2026-09-06 while testing subtree delegation,
+    where it first looked like the nested shell's later pipelines had started
+    working: they had, in the other shell. Every nested-shell recipe needs a
+    `fg 6` before each command until this is fixed, and the same prompt in
+    both shells hides which one answered. Not traced to a cause; the revert
+    on child exit goes to slot 0 by design, but this case has no child.
   - **`delegate_net` discards its result**, so the one grant this arc is about
     is the only `DELEGATE` in the shell with no failure signal. **Worse since
     subtree delegation (2026-09-06):** a nested shell that never received

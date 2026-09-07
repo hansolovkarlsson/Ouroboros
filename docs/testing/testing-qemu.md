@@ -160,6 +160,31 @@ client needs, waits for `export open` rather than sleeping, and **asserts the
 guest is still alive at the end**, exiting 99 if not. See
 [`blind-instruments-postmortem.md`](../postmortems/blind-instruments-postmortem.md).
 
+**Forcing a retransmit** (2026-09-07), since SLIRP never drops a segment and
+every loss-recovery path here would otherwise be argued rather than run. In
+`pump_send`'s file-body arm, swallow exactly one new segment once (a `bool` on
+`TcpConn` and `if !c.dropped_one && c.read_off == (SERVE_CHUNK as u64) * 2`,
+still advancing `snd_nxt`/`read_off`), then fetch a file big enough to have
+several segments in flight:
+
+```sh
+scripts/run-guest.sh --hostfwd=tcp::5555-:80 -- \
+  curl -s --max-time 120 http://localhost:5555/EFI/ORBS/FSD.BIN -o /tmp/got.bin
+shasum -a 256 /tmp/got.bin build/esp/EFI/ORBS/FSD.BIN   # must match
+```
+
+**Through `run-guest.sh`, not `drive-qemu.py`** - for the reason two paragraphs
+up, and this recipe was first written the wrong way: a 140 KB transfer that
+starts 40 s in does not finish before the driver kills the guest, so a truncated
+file reads as a loss-recovery bug and a completed one is luck. The first
+measurement of the ACK-bound regression was taken that way and was re-run under
+`run-guest.sh` before it was believed.
+
+The peer dup-ACKs, netd fast-retransmits, and the hashes match. This is what
+found the ACK-bound regression in the review of #124: with the bound on
+`snd_nxt` instead of `snd_max`, `curl` exits 18 with 11,201 of 140,088 bytes.
+Remove the mutation afterwards; nothing in the tree reaches this path without it.
+
 Every line can fail: against an export without the verb the gate stops at the
 first open with `FS_ERR_NO_SUCH_VERB`; with `SESSION_MAX` raised to `MAX_CONNS`
 and `CONN_IDLE_TICKS` made huge it fails on the budget, on the one-shot beside a
