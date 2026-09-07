@@ -310,3 +310,54 @@ result" from the 09-06 section above: here, confirm the change is *only* the
 change. Amended, pushed with lease, and the PR's file list checked against the
 remote rather than the local branch, since the first `gh pr view` after the
 force push still showed the stale two files.
+
+## The rig that measured a dead guest (2026-09-07, later the same day)
+
+The worst instance in this file so far, because the instrument reported
+**PASS** for the property under test while the subject was not running.
+
+`np9p_client.py session-gate` checks the export's session handling against a
+booted guest: eleven checks, ending with an idle session being reaped after
+30 s of silence and its slot coming back. The guest was booted by
+`drive-qemu.py`, which drives the *shell*: it types its steps, lingers four
+seconds and kills QEMU. The gate needs a minute or more. So the guest was
+being killed part-way through, and every socket error after that read to the
+client as **the export refusing it** - which is exactly what a reaped session
+looks like from the host. The reap check reported `3/3 reaped`. Nothing had
+been reaped; the process was gone.
+
+**What it looked like from outside.** The gate flaked: 11/11, then 10/11 with
+`0/3 reaped`, then 11/11 again. The obvious reading is a timing-sensitive
+guest, and the fix that suggests itself is a longer wait - which would have
+made the false pass more reliable rather than less. Two hypotheses were tried
+against it and both were wrong: that the guest tick under TCG is not
+wall-clock (true, and not the cause), and that a change in this branch had
+made a connection immortal (false, and the tightening it produced was kept
+because it is correct on its own terms).
+
+**What settled it** was refusing to keep guessing and instrumenting the guest:
+a temporary log of the connection table whenever a SYN was refused, then of
+every slot creation and free with the peer's port. The table was full of
+*recently created* connections with ages of 22 to 73 ticks - nothing like the
+1500-tick idle limit - which is impossible if the table were merely
+un-reaped, and pointed straight at the client's own connections. From there
+the driver's `finally: g.stop()` was three lines of reading away.
+
+**The lesson is the file's, sharpened.** Every earlier section here is about
+an instrument answering a different question than the one asked. This one is
+about an instrument answering a question about *nothing at all*: the subject
+had stopped existing, and the harness had no way to say so, because nothing
+in it ever asked whether the guest was still there. A test rig needs a
+liveness assertion about its subject for the same reason
+`trace-remote-flake.py` refuses to report unless the peer's request count
+rose - and that precedent was in the tree, in a sibling script, and was not
+carried across.
+
+**What shipped:** `scripts/run-guest.sh`, which boots a guest for exactly as
+long as a host-side client needs, waits for the export to announce itself
+rather than sleeping a fixed time, and **asserts the guest is still alive
+before believing the run**, exiting 99 when it is not. Under it the same gate
+is 11/11 three times with the guest alive at the end, zero restarts and zero
+aborts. The earlier "8 of 8" and "11 of 11" runs recorded for step 4 of the
+fid-verbs plan were re-measured; the early checks in those runs were real (the
+guest was alive for them), and the late ones were not evidence either way.

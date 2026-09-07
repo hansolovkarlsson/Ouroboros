@@ -1503,25 +1503,50 @@ would otherwise silently shrink into looking like nothing was ever found.
     makes the guest hold one. A session client that pipelines a request before
     the previous reply is acked has it retransmitted, not lost (the export's
     request state resets only once the reply is acked, since the reply buffer
-    feeds retransmits). And the export still takes a request from one segment.
-  - **The refusal side of delegation has no check that can fail.** Every
-    `DELEGATE` in the tree is a parent granting to its own child, so nothing
-    ever exercises "a task cannot delegate to or for a stranger"; the
-    one-clause rule rests on reading. Rig item: a deliberately misbehaving
-    `/bin` program that issues `DELEGATE(grantee=<not its child>, ...)` and
-    `DELEGATE(<its child>, <a task it cannot reach>)` and prints the two
-    answers, expected `MSG_ERR_DENIED` both times. Promised in the journal on
-    2026-09-06 and not built.
-  - **A foregrounded nested shell loses the keyboard after every command.**
-    `exec /EFI/ORBS/SH.BIN`, `fg 6`, log in, `echo hi` (a builtin, no child,
-    no `FG`): `ps` before shows task 0 blocked and task 6 runnable, `ps` after
-    shows task 0 runnable and task 6 blocked, and the next line typed runs in
-    the boot shell. Measured 2026-09-06 while testing subtree delegation,
-    where it first looked like the nested shell's later pipelines had started
-    working: they had, in the other shell. Every nested-shell recipe needs a
-    `fg 6` before each command until this is fixed, and the same prompt in
-    both shells hides which one answered. Not traced to a cause; the revert
-    on child exit goes to slot 0 by design, but this case has no child.
+    feeds retransmits). And the export still takes a request from one segment,
+    **which on a session changes the failure's shape** (review of #123): a
+    request split across two segments used to be one refused request on a
+    connection that then closed; on a session the first segment earns an auth
+    refusal, the second is dropped and retransmitted, and after the reset it
+    arrives as a fresh "request" and earns a second one, so the client reads
+    two replies for one request and every reply after is off by one. Not
+    reachable from a shipped caller (the guest caps inline data at 512 bytes),
+    but step 7's `NP_PWRITE` frames are up to `NP_FRAME_MAX` = 2252 bytes
+    against an MSS of 1460, so **a per-connection request buffer filled to
+    `4 + len` is a prerequisite of step 7**, not a nicety.
+  - **A SYN against a transiently full table is now refused, and the guest's
+    own clients take a RST as final** (review of #123). `tcp_get`/`tcp_run`
+    answer `NET_FETCH_REFUSED` at once on a RST with no SYN retry, so a remote
+    read that lands while the export node holds four connections (three idle
+    sessions and two one-shots, or five HTTP transfers) fails immediately where
+    a dropped SYN used to be absorbed by a one-second retransmit into a freed
+    slot. Rare with two nodes, real under load. Two shapes, a decision: drop
+    the SYN when the table's non-session slot will free by itself (a plain
+    one-shot: bounded by the RTO give-up and the 30 s reap) and RST only when
+    it is held by something unbounded (a `cpu` run, which the reap exempts
+    while its child runs); or the client retries a SYN once or twice after a
+    RST (a genuinely closed port then takes longer to report). The first
+    version of this item said "RST only when every busy slot is a session",
+    which cannot happen: `SESSION_MAX` is `MAX_CONNS - 1`, so a full table
+    always holds one non-session (review of #124).
+  - **The session gate's own harness was blind until 2026-09-07, and its late
+    checks proved nothing.** `drive-qemu.py` kills QEMU seconds after its last
+    typed step; the gate runs for a minute or more, so its reap and
+    slots-come-back checks were measured against a guest that had already been
+    killed, and a refusal by a dead process is indistinguishable from the
+    export refusing. It surfaced as flake (11/11, then 0/3 reaped) and was
+    settled by logging netd's connection table rather than by another guess.
+    `scripts/run-guest.sh` now boots the guest for the client's whole run and
+    asserts it is alive at the end. Re-measured under it: 11/11 three times,
+    0 restarts, 0 aborts. Full write-up in
+    [`blind-instruments-postmortem.md`](postmortems/blind-instruments-postmortem.md).
+  - **What the session gate still does not prove (2026-09-07).** Its last
+    check, "the reaped slots are back", closes the held sessions before opening
+    fresh ones, so it passes even against a netd that never reaps (measured:
+    with `CONN_IDLE_TICKS` multiplied by 1000 the reap check fails 0/3 and this
+    one still passes). It verifies slots are usable again, not that the reap
+    returned them; the reap check beside it is what can fail for that. Worth
+    tightening if the two ever need to be independent.
   - **`delegate_net` discards its result**, so the one grant this arc is about
     is the only `DELEGATE` in the shell with no failure signal. **Worse since
     subtree delegation (2026-09-06):** a nested shell that never received

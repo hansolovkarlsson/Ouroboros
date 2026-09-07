@@ -97,7 +97,8 @@ const SERVER_ISN: u32 = 0x0002_0000;
 /// How many concurrent server connections `netd` can hold at once (a browser
 /// opens several for one page). Bounded because each `TcpConn` carries a
 /// ~2KB response-prefix buffer and they all live on `serve()`'s stack; a SYN
-/// arriving with no free slot is dropped (the peer retransmits).
+/// arriving with no free slot is REFUSED with a RST (since sessions, 2026-09-07:
+/// a drop meant a hang for as long as a session held the table).
 const MAX_CONNS: usize = 4;
 /// How many of those may be SESSIONS (`NP_SESSION`, docs/roadmap/roadmap-fid-verbs.md
 /// Decision 3) at once. One below `MAX_CONNS` on purpose: a session holds its
@@ -1694,10 +1695,13 @@ enum ConnState {
     Closing,
 }
 
-/// One server-side TCP connection. `netd` serves one at a time - a second
-/// peer's SYN while a connection is active just replaces it (single-threaded,
-/// no concurrency), the same "one at a time, fixed values suffice" stance the
-/// client side takes.
+/// One server-side TCP connection: one of `MAX_CONNS` the event loop
+/// multiplexes, keyed by the peer's ip:port (`find_conn`). A SYN from a peer
+/// whose slot is past its handshake is challenged, not honoured (see
+/// `handle_tcp`); a duplicate SYN during the handshake restarts it. This doc
+/// said "netd serves one at a time - a second peer's SYN just replaces it"
+/// until the review of #124: true when written, false since `MAX_CONNS`, and
+/// #124 is what made the replacing half false too.
 struct TcpConn {
     peer_ip: [u8; 4],
     peer_mac: [u8; 6],
@@ -1805,6 +1809,15 @@ struct TcpConn {
     /// The tick (`now()`) of the last segment from the peer; `reap_idle` reads
     /// it.
     last_rx: u64,
+    /// The sequence number of `prefix[0]` for the reply being streamed: what
+    /// `rewind_to` and `retransmit_one` map a sequence number back to a buffer
+    /// offset against. Recorded at the staging site (the `responded = true`
+    /// line in `handle_conn_segment`) for every reply, because on a session
+    /// the second reply is staged at `prefix[0]` again while the sequence
+    /// space keeps counting. Both mappers used the constant until the review of #123: a
+    /// retransmit on a session resent bytes from the wrong offset, or gave the
+    /// reply up as already sent - invisible on QEMU, where SLIRP loses nothing.
+    data_base: u32,
 }
 
 /// `TcpConn::cpu_child` sentinel: this connection is not a remote-run capture.
@@ -2134,12 +2147,18 @@ fn parse_tcp_in(frame: &[u8]) -> Option<TcpIn> {
 
 /// Route one inbound TCP segment to its connection, multiplexing up to
 /// `MAX_CONNS` at once (keyed by the peer's IP+port). A SYN opens (or, for the
-/// same peer, restarts) a connection in a free slot - or is dropped if all
-/// slots are busy (the peer retransmits); every other segment is dispatched to
+/// same peer during its handshake, restarts) a connection in a free slot - or
+/// is refused with a RST if all slots are busy, or challenged with a bare ACK if
+/// it names a connection past its handshake; every other segment is dispatched to
 /// its matching connection via [`handle_conn_segment`], and a returned "close"
 /// (the peer's FIN, or an RST) frees the slot.
 fn handle_tcp(mac: &[u8; 6], frame: &[u8], seg: &TcpIn, conns: &mut [Option<TcpConn>; MAX_CONNS], dials: &mut [Option<DialConn>; MAX_DIAL], auth: &Auth) {
-    // RST tears down a matching connection.
+    // RST tears down a matching connection - when its sequence number is
+    // exactly what we expect next (RFC 5961 3.2). Any other RST gets a bare ACK
+    // (the challenge): a peer that really reset answers with a RST at our ack,
+    // which passes; a stale RST from a previous incarnation, or a blind one
+    // from anyone who can guess the 4-tuple, does not. Until #124 any RST
+    // freed the slot, which a session made a cheaper kill than it had been.
     if seg.flags & TCP_RST != 0 {
         if let Some(i) = find_conn(conns, seg) {
             conns[i] = None;
@@ -2150,6 +2169,14 @@ fn handle_tcp(mac: &[u8; 6], frame: &[u8], seg: &TcpIn, conns: &mut [Option<TcpC
     // SYN (without ACK): open the connection in this peer's existing slot (a
     // retransmitted/duplicate SYN) or a free one, and answer with SYN-ACK.
     if seg.flags & TCP_SYN != 0 && seg.flags & TCP_ACK == 0 {
+        // A SYN from the ip:port of a connection PAST its handshake is answered
+        // with a bare ACK (RFC 5961's challenge), not by rebuilding the slot: a
+        // peer that really did restart answers the challenge with a RST, which
+        // frees the slot, and its next SYN is served. Rebuilding silently
+        // destroyed whatever the slot held - harmless when every connection
+        // was one request long, and not once a session holds a peer's port
+        // for as long as it likes (review of #123). A duplicate SYN during the
+        // handshake still restarts it, as before.
         let Some(i) = find_conn(conns, seg).or_else(|| free_slot(conns)) else {
             // All slots busy: REFUSE (RST), do not drop. A dropped SYN was fine
             // while every connection was one request long - the peer
@@ -2198,6 +2225,7 @@ fn handle_tcp(mac: &[u8; 6], frame: &[u8], seg: &TcpIn, conns: &mut [Option<TcpC
             cpu_child: CPU_NONE,
             session: false,
             last_rx: now(),
+            data_base: SERVER_ISN.wrapping_add(1),
         };
         send_seg(mac, &c, TCP_SYN | TCP_ACK, true, &[]);
         c.snd_nxt = c.snd_nxt.wrapping_add(1); // our SYN consumes one too
@@ -2243,15 +2271,28 @@ fn session_reset_if_done(c: &mut TcpConn) {
         && c.responded
         && !c.fin_sent
         && c.cpu_child == CPU_NONE
-        && !c.file
-        && c.prefix_off >= c.prefix_len
+        && !reply_pending(c)
         && c.snd_nxt == c.snd_una
     {
         c.responded = false;
         c.prefix_len = 0;
         c.prefix_off = 0;
         c.eof = false;
+        // `file` too, though no session path sets it today: the predicate this
+        // reset used to carry (`!c.file`) made a half-staged body structurally
+        // impossible, and `reply_pending` accepts `file && eof`, so clearing it
+        // here is what keeps `pump_send` - which never consults `responded` -
+        // from streaming a phantom body into the session (review of #124).
+        c.file = false;
     }
+}
+
+/// Whether bytes of the staged reply are still to be SENT (as opposed to
+/// acked): prefix bytes not yet pumped, or a file body not at EOF. The one
+/// spelling of that question for the session reset and the zero-window probe,
+/// which had two (review of #124).
+fn reply_pending(c: &TcpConn) -> bool {
+    c.prefix_off < c.prefix_len || (c.file && !c.eof)
 }
 
 /// The idle reap: `true` when `c` has had nothing in flight and no segment from
@@ -2262,6 +2303,14 @@ fn reap_idle(mac: &[u8; 6], c: &TcpConn, now: u64) -> bool {
     if c.cpu_child != CPU_NONE || c.snd_nxt != c.snd_una {
         return false;
     }
+    // A reply stalled on the peer's closed window is NOT exempt: an exemption
+    // (the first fix, review of #123) left a peer that vanished mid-reply with
+    // window 0 holding its slot forever, and with a full table refused by RST
+    // that was an unauthenticated wedge of both ports (review of #124). What
+    // keeps a live-but-paused peer off this reap is `probe_zero_window`: its
+    // answer to the probe refreshes `last_rx`. A peer that answers nothing for
+    // 30 s, paused or not, is reaped - this project's stated bound, shorter
+    // than a desktop stack's persist timer, and said so.
     if now.wrapping_sub(c.last_rx) <= CONN_IDLE_TICKS {
         return false;
     }
@@ -2313,8 +2362,8 @@ fn handle_conn_segment(mac: &[u8; 6], frame: &[u8], seg: &TcpIn, c: &mut TcpConn
             }
         } else if seg.ack == c.snd_una && c.snd_nxt != c.snd_una && seg.data_len == 0 {
             // A duplicate ACK with data still outstanding: the peer received an
-            // out-of-order segment (a gap before it). Three of these => fast
-            // retransmit - rewind the send cursor to snd_una and resend from
+            // out-of-order segment (a gap before it). Three of
+            // these => fast retransmit - rewind the send cursor to snd_una and resend from
             // there (go-back-N); the next pump does the actual sending.
             c.dup_acks = c.dup_acks.saturating_add(1);
             if c.dup_acks >= 3 && c.last_rexmit_una != c.snd_una {
@@ -2353,6 +2402,13 @@ fn handle_conn_segment(mac: &[u8; 6], frame: &[u8], seg: &TcpIn, c: &mut TcpConn
     if !c.responded && seg.data_len > 0 && seg.seq == c.rcv_nxt {
         c.rcv_nxt = c.rcv_nxt.wrapping_add(seg.data_len);
         c.responded = true;
+        // The reply about to be staged goes out at snd_nxt: that is prefix[0]'s
+        // sequence number for every retransmit mapping until the next request.
+        // Recorded HERE, the one gate every staging site is reached through
+        // (handle_9p, both deny_*, handle_cpu_run, start_response), rather than
+        // at a session reset - so a later restage through this gate can never
+        // inherit a stale base (review of #124).
+        c.data_base = c.snd_nxt;
         let end = (seg.data_off + seg.data_len as usize).min(frame.len());
         let request = &frame[seg.data_off..end];
         // Dispatch by the local listen port: 80 is the HTTP server, 564 the 9P
@@ -2401,12 +2457,12 @@ fn seq_gt(a: u32, b: u32) -> bool {
 /// Rewind the send cursor to sequence `seq` (for a fast retransmit), so the
 /// next `pump_send` resends everything from there (go-back-N). The response is
 /// a fixed byte stream - `[prefix][file body from offset 0][FIN]` starting at
-/// `SERVER_ISN + 1` (our SYN consumed one seq) - so a sequence number maps
+/// `c.data_base` (`SERVER_ISN + 1` for a connection's first reply; on a
+/// session, wherever the next reply was staged) - so a sequence number maps
 /// straight back to a byte offset: prefix bytes, then file bytes re-read from
 /// fsd, then the FIN. Resetting `eof`/`fin_sent` lets pump re-derive the tail.
 fn rewind_to(c: &mut TcpConn, seq: u32) {
-    let data_base = SERVER_ISN.wrapping_add(1);
-    let off = seq.wrapping_sub(data_base) as usize;
+    let off = seq.wrapping_sub(c.data_base) as usize;
     c.snd_nxt = seq;
     c.prefix_off = off.min(c.prefix_len);
     c.read_off = off.saturating_sub(c.prefix_len) as u64;
@@ -2447,6 +2503,15 @@ fn service_rto(mac: &[u8; 6], c: &mut TcpConn, now: u64) -> bool {
     }
     if now >= c.rto_deadline {
         if c.rto_retries >= RTO_MAX_RETRIES {
+            // A peer whose window is SHUT does not reach this arm and needs no
+            // exemption in it: with nothing sendable, the first expiry's
+            // `rewind_to` drives `in_flight` to 0 and the early return at the
+            // top of this function resets `rto_retries`. An exemption was
+            // written here anyway and was worse than useless - `reap_idle`
+            // declines a connection with data in flight, so it made a peer that
+            // stalled and then vanished immortal (both reviews of #124). What
+            // keeps a live paused peer alive is `probe_zero_window`, whose
+            // answers wind `last_rx`; one that answers nothing is reaped at 30 s.
             send_seg(mac, c, TCP_RST, false, &[]); // peer is dead - abort
             return true;
         }
@@ -2498,8 +2563,7 @@ fn send_seg_at(mac: &[u8; 6], c: &TcpConn, seq: u32, flags: u8, payload: &[u8]) 
 /// offset - the same seq->offset mapping `rewind_to` uses, but as a one-off
 /// resend that leaves `snd_nxt`/`prefix_off`/`read_off` untouched.
 fn retransmit_one(mac: &[u8; 6], c: &mut TcpConn, seq: u32, n: usize) {
-    let data_base = SERVER_ISN.wrapping_add(1);
-    let off = seq.wrapping_sub(data_base) as usize;
+    let off = seq.wrapping_sub(c.data_base) as usize;
     let n = n.min(SERVE_CHUNK);
     let mut buf = [0u8; SERVE_CHUNK];
     if off < c.prefix_len {
@@ -2693,6 +2757,22 @@ fn handle_9p(c: &mut TcpConn, request: &[u8], dials: &mut [Option<DialConn>; MAX
     c.prefix_len = n;
     c.prefix_off = 0;
     c.file = false;
+}
+
+/// Whether a refusal of `request` goes out as RAW TEXT (the `cpu` client reads
+/// its reply as an output stream) rather than a framed status: it names
+/// `NP_RUN`, and this is not a session. On a session NP_RUN is never served raw
+/// (handle_9p routes it to the framed "no arm" answer), so its refusal must be
+/// framed too - a raw line with no FIN behind it leaves the session out of
+/// phase for every request after (review of #123). One function for both
+/// refusal paths, which drifted from each other once already (review of #124).
+///
+/// Placed HERE rather than above `deny_9p`, where it first landed: inserting it
+/// there left `deny_9p`'s own long doc block sitting on this function, which
+/// sends no message at all, and `deny_9p` undocumented (review of #124).
+fn raw_run(c: &TcpConn, request: &[u8]) -> bool {
+    !c.session && matches!(np_offset(request),
+        Some(voff) if request.len() >= voff + 8 && read_u64(request, voff) == ninep_abi::NP_RUN)
 }
 
 /// Log a 32-byte key as hex.
@@ -2974,8 +3054,7 @@ fn seal_reply_signed(
 /// ends share, which is where the answer is either way, and the node that is
 /// actually misconfigured has already said so on its own console at boot.
 fn deny_9p(c: &mut TcpConn, request: &[u8]) {
-    let is_run = matches!(np_offset(request),
-        Some(voff) if request.len() >= voff + 8 && read_u64(request, voff) == ninep_abi::NP_RUN);
+    let is_run = raw_run(c, request);
     c.file = false;
     c.prefix_off = 0;
     c.cpu_child = CPU_NONE;
@@ -2995,8 +3074,7 @@ fn deny_9p(c: &mut TcpConn, request: &[u8]) {
 /// on the wire (one refusal code, so a client needs no new case), an accurate
 /// line for the `cpu` caller, who reads the reply as raw output.
 fn deny_unknown_user(c: &mut TcpConn, request: &[u8], cause: LineScan, auth: &Auth, nonce: &[u8]) {
-    let is_run = matches!(np_offset(request),
-        Some(voff) if request.len() >= voff + 8 && read_u64(request, voff) == ninep_abi::NP_RUN);
+    let is_run = raw_run(c, request);
     c.file = false;
     c.prefix_off = 0;
     c.cpu_child = CPU_NONE;

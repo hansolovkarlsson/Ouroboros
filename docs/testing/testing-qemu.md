@@ -144,13 +144,21 @@ transcript is the other half of the first check: no `wedged`/`restarted`
 line. The `cpu` run at the end is what the last guest step keys on:
 
 ```sh
-(sleep 40; perl -e 'alarm 200; exec @ARGV' \
-   python3 scripts/np9p_client.py localhost 5640 session-gate 5 > /tmp/gate.log 2>&1; \
-   python3 scripts/np9p_client.py localhost 5640 run 'echo gate-done' >> /tmp/gate.log) &
-python3 scripts/drive-qemu.py --hostfwd=tcp::5640-:564 build/esp.img \
-  'login:@@root' 'assword@@root' 'exited \(code 0\)@@ps' '# @@'
-cat /tmp/gate.log        # expected: 8 PASS, "0 check(s) failed"
+scripts/run-guest.sh -- python3 scripts/np9p_client.py localhost 5640 session-gate 5
+# expected: 11 PASS, "0 check(s) failed", then
+#   run-guest: guest alive at the end - the run means what it says
+#   run-guest: 0 restart line(s), 0 abort line(s)
 ```
+
+**Use `run-guest.sh`, not `drive-qemu.py`, for any host-side client that runs
+longer than a shell step.** `drive-qemu.py` types its steps, lingers four
+seconds and kills QEMU; a client still running then sees connection refusals
+that read exactly like the export refusing it. The session gate was measured
+that way on 2026-09-07 and its reap check reported `3/3 reaped` against a guest
+that had already been killed. `run-guest.sh` boots the guest for as long as the
+client needs, waits for `export open` rather than sleeping, and **asserts the
+guest is still alive at the end**, exiting 99 if not. See
+[`blind-instruments-postmortem.md`](../postmortems/blind-instruments-postmortem.md).
 
 Every line can fail: against an export without the verb the gate stops at the
 first open with `FS_ERR_NO_SUCH_VERB`; with `SESSION_MAX` raised to `MAX_CONNS`
