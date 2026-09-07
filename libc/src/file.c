@@ -62,16 +62,14 @@ static struct file_state g_files[MAX_FILES];
  * confusion FS_ERR_NO_SUCH_VERB was reserved to end, stopping one layer short
  * of C. Not errno: one value, no thread story, no claim to be more.
  *
- * CLEARED ON SUCCESS, or a later failure that sets nothing reports whatever the
- * previous call left behind - a stale answer being worse than none here. */
+ * Cleared to 0 by every request a server answers without error (np_request's
+ * success arm), or a later failure that sets nothing reports whatever the
+ * previous call left behind - a stale answer being worse than none here. The
+ * comment said "cleared on success" for two days before anything did it.
+ *
+ * Client-side failures (no fd slot, an unresolvable path) record FS_ERR_CLIENT,
+ * defined in sys.h next to the wire codes it must stay distinct from. */
 static unsigned long g_last_status;
-
-/* A failure that never reached a server: a path too long to resolve, or no free
- * fd slot. NOT FS_ERR_MIN, which this used and which IS FS_ERR_NO_SUCH_VERB -
- * they are the same u64::MAX - 39, so a client-side failure reported itself as
- * "that server does not implement this request", the precise confusion that
- * code was reserved to end. Distinct, and deliberately not a wire value. */
-#define FS_ERR_CLIENT (~0UL - 1UL - 39UL)
 
 unsigned long ouro_last_fs_status(void) {
     return g_last_status;
@@ -147,9 +145,7 @@ static long np_request(unsigned target, const unsigned char *endpoint,
         memcpy(reply_data, reply + 8, d);
     }
     long status = (long)__rd_u64(reply);
-    if ((unsigned long)status >= FS_ERR_MIN) {
-        g_last_status = (unsigned long)status;
-    }
+    g_last_status = (unsigned long)status >= FS_ERR_MIN ? (unsigned long)status : 0;
     return status;
 }
 

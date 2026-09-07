@@ -23,6 +23,7 @@ static const char *why(void) {
     if (s == FS_ERR_PERM) return "permission denied";
     if (s == FS_ERR_NO_SUCH_VERB) return "that server does not implement this request";
     if (s == MSG_ERR_DENIED) return "not allowed to reach that server (capability)";
+    if (s == FS_ERR_CLIENT) return "never sent (no free fd, or the path could not be resolved)";
     if (s >= FS_ERR_MIN) return "failed";
     return "no error recorded";
 }
@@ -69,6 +70,20 @@ static int must_refuse(const char *what, int ok) {
     return 0;
 }
 
+/* The status a refusal leaves behind must be the one a reader can act on, or
+ * the refusal is only half a check: FS_ERR_CLIENT sat one step below FS_ERR_MIN
+ * for two days, so every client-side refusal read as "no error recorded". The
+ * codes are u64::MAX - n, so their low 32 bits are enough to tell apart. */
+static int must_leave(const char *what, unsigned long expected) {
+    unsigned long s = ouro_last_fs_status();
+    if (s == expected && (expected == 0 || strcmp(why(), "no error recorded") != 0)) {
+        return 0;
+    }
+    printf("%s: left status ..%x (%s), expected ..%x\r\n", what, (unsigned)s, why(),
+           (unsigned)expected);
+    return 1;
+}
+
 int main(void) {
     int bad = 0;
     bad |= try_read("/EFI/ORBS/INIT.CFG");  /* local - the no-regression check */
@@ -90,6 +105,44 @@ int main(void) {
         ssize_t n = write(fd, "x", 1);
         bad |= must_refuse("write() to a remote fd", n >= 0);
         close(fd);
+    }
+
+    /* A ninth open has no fd slot (the library holds eight) and never reaches a
+     * server. The refusal must be readable as that, and the next success must
+     * clear it - both claims file.c made before anything checked them. */
+    int held[8];
+    int n_held = 0;
+    while (n_held < 8) {
+        held[n_held] = open("/EFI/ORBS/INIT.CFG", O_RDONLY);
+        if (held[n_held] < 0) {
+            break;
+        }
+        n_held++;
+    }
+    if (n_held < 8) {
+        printf("open #%d of /EFI/ORBS/INIT.CFG failed: %s\r\n", n_held + 1, why());
+        bad = 1;
+    } else {
+        fd = open("/EFI/ORBS/INIT.CFG", O_RDONLY);
+        bad |= must_refuse("a ninth open", fd >= 0);
+        bad |= must_leave("a ninth open", FS_ERR_CLIENT);
+        if (fd >= 0) {
+            close(fd);
+        }
+    }
+    while (n_held > 0) {
+        close(held[--n_held]);
+    }
+    fd = open("/EFI/ORBS/INIT.CFG", O_RDONLY);
+    if (fd < 0) {
+        printf("reopen after the refusal failed: %s\r\n", why());
+        bad = 1;
+    } else {
+        close(fd);
+    }
+    bad |= must_leave("a success after a refusal", 0);
+    if (!bad) {
+        printf("cremote: all checks passed\r\n");
     }
     return bad;
 }

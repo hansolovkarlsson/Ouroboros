@@ -83,6 +83,17 @@
 
 #define FS_ERR_MIN (~0UL - 39UL)
 
+/* A failure that never reached a server: no free fd slot, or a path this
+ * library could not resolve. Deliberately NOT a wire value, so it sits BELOW
+ * the band - nothing a server answers can be mistaken for it - and for the
+ * same reason a reader must test for it BY NAME: ">= FS_ERR_MIN" is false for
+ * it, which is how cremote's why() came to call every client-side refusal "no
+ * error recorded". The floor moves down as codes are reserved; the assert
+ * makes a move onto this value a build failure rather than an alias. */
+#define FS_ERR_CLIENT (~0UL - 40UL)
+_Static_assert(FS_ERR_CLIENT < FS_ERR_MIN,
+               "FS_ERR_CLIENT must stay below the wire error band; the floor moved onto it");
+
 static inline long __os_syscall1(long num, long a0) {
     register long x8 asm("x8") = num;
     register long x0 asm("x0") = a0;
