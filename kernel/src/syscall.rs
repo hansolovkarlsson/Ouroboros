@@ -1446,10 +1446,10 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
         }
         syscall_abi::DELEGATE => {
             // arg0 = grantee slot, arg1 = target slot: grant `grantee` the
-            // runtime capability to send to `target`. The caller may only
-            // delegate a send-cap it *statically holds* (may_delegate),
-            // which confines inter-child streaming to the shell - see the
-            // DELEGATE doc in syscall-abi and tasks::may_delegate.
+            // runtime capability to send to `target`. The grantee must be the
+            // caller's OWN CHILD, and the target another child or a task the
+            // caller holds a send right to - see the DELEGATE doc in
+            // syscall-abi and tasks::may_delegate.
             //
             // The GRANTEE must be a spawnable slot. Only `target` used to be
             // constrained, which let any /bin program widen a *server's*
@@ -1478,9 +1478,13 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
             //
             // Checked in this order, and the ABI doc states it: a grantee
             // below the spawnable range is the security refusal above and is
-            // answered first; then either slot not live (out of range counts
-            // as not live, for both arguments alike - `task_exists` bounds-
-            // checks); then the caller's own policy.
+            // answered first. As POLICY it is derivable now (a protected slot is
+            // never anyone's child); as ERROR ORDER it is load-bearing: a dead
+            // protected grantee must answer DENIED, not NO_SUCH_TASK, which the
+            // shell treats as the benign "a stage already exited". Then either
+            // slot not live (out of
+            // range counts as not live, for both arguments alike - `task_exists`
+            // bounds-checks); then the subtree rule.
             let grantee = arg0 as usize;
             let target = arg1 as usize;
             if grantee < tasks::FIRST_SPAWNABLE {
@@ -1489,7 +1493,7 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
             if !tasks::task_exists(grantee) || !tasks::task_exists(target) {
                 return syscall_abi::TASK_ERR_NO_SUCH_TASK;
             }
-            if !tasks::may_delegate(tasks::current_task(), target) {
+            if !tasks::may_delegate(tasks::current_task(), grantee, target) {
                 return syscall_abi::MSG_ERR_DENIED;
             }
             tasks::set_delegate(grantee, target);

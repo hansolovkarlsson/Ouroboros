@@ -3249,8 +3249,10 @@ fn cpu_spawn(cmdline: &[u8]) -> Option<u8> {
     if slot >= syscall_abi::FS_ERR_MIN {
         return None;
     }
-    // Delegate the reply capability so the child may pipe its output back to us.
-    let _ = syscall4(syscall_abi::DELEGATE, slot, syscall_abi::NET_TASK, 0, 0);
+    // No DELEGATE here: since 2026-09-06 the kernel grants a child its spawner
+    // at spawn, so the child may pipe its output back to us by construction.
+    // The explicit grant (and the TO_NET self-bit that existed only to permit
+    // it) were no-ops after that and are gone.
     Some(slot as u8)
 }
 

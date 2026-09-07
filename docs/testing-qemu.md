@@ -239,6 +239,35 @@ returns (the harness times out on the last steps). The same `--hostfwd` rig
 with `run 'ls /'` is the control: the host prints the guest's root listing,
 and `ping 10.0.2.2 | wc` in the guest answers `1 3 21` beside it.
 
+**A nested shell can wire its own pipelines and reach the network.** Until
+2026-09-06 a spawned `SH.BIN` could authorize nothing (every `DELEGATE` it
+issued was refused, since spawnable slots hold no spawnable slot statically);
+the kernel now records each task's parent and lets a task pass a right it
+holds to its own children. One rig caveat is load-bearing: **the keyboard goes
+back to the boot shell after every command in the nested shell** (a separate
+bug, on the ledger), and both shells print the same `# ` prompt, so each
+nested command is preceded by `fg 6` typed to the boot shell and keyed on the
+previous command's output, not on the prompt. `ps` from inside shows task 6
+runnable and task 0 blocked, which is how to know which shell answered.
+
+```sh
+python3 scripts/drive-qemu.py --slirp build/esp.img \
+  'login:@@root' 'assword@@root' \
+  '# @@exec /EFI/ORBS/SH.BIN' \
+  'login:@@fg 6' 'fg 6@@root' 'assword@@root' \
+  '# @@ls / | wc' \
+  '1 5 40|authorize@@fg 6' 'fg 6@@ping 10.0.2.2' \
+  'reply from|failed@@fg 6' 'fg 6@@ping 10.0.2.2 | wc' \
+  '1 3 21|authorize|failed@@fg 6' 'fg 6@@ps' \
+  'task 10@@fg 6' 'fg 6@@exit' 'logout@@'
+```
+
+Expected: `1 5 40`, `reply from 10.0.2.2`, `1 3 21`, and a `ps` with task 6
+runnable. Against the pre-fix kernel the first answers `pipe: could not
+authorize the stream: permission denied (...)` and the ping `ping: request
+failed`; the later commands may then *look* fixed, because they ran in the
+boot shell after the keyboard reverted, which is what the `ps` step is for.
+
 **Authentication.** Every request is **signed** with a per-machine Ed25519 key,
 and the exporter serves only a public key listed in its
 `/etc/cluster/authorized`. Both python peers hold the dev "host" identity, which

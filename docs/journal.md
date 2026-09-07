@@ -7,6 +7,125 @@ for the forward plan see [`ROADMAP.md`](ROADMAP.md).
 
 ---
 
+## 2026-09-06 (cont. 6): the day as a whole, written at its close
+
+*(Five PRs: the 09-06 closeout #109, then #110, #111, #112 merged, and #113
+open with three review rounds on it. Four of the five pre-existing findings
+from the delegation review are closed; the fifth, `delegate_net` discarding
+its result, is worse than it was and still open.)*
+
+The morning's standup called the first finding "the most user-visible of the
+five" and it was the least: a wrong line in a race that printing producers
+never reach. Each finding after it turned out to need a kernel primitive
+rather than a patch, and the choice was made the same way each time, scored
+against the three criteria Hans then asked to have registered as policy:
+stable, safe, and not blocking what comes next. So the day's real deliverables
+are primitives. The kernel answers *which* end of a link is dead. A grant aimed
+at a supervised server survives its restart. Every task has an identity that a
+recycled slot cannot inherit, captured with the credential the kernel already
+binds at send time. Every task has a parent, by that identity, and may pass
+what it holds one step down. Netd's two records and its special-case bit are
+gone into the general mechanism. The nested shell, which could run no pipeline
+this morning, runs all five shapes tonight.
+
+What the day cost was reviews, and they were worth every round. Eight rounds
+across four PRs; each found something real, and seven of the eight found it in
+the previous round's repair. One would have shipped a `netd` that the
+supervisor restarted whenever a client sat idle. The pattern is now recorded
+where it belongs, in `blind-instruments-postmortem.md`, with the two rig
+blindnesses that nearly hid it: a transcript that could not say which shell
+answered, and an edit script that stopped before it wrote.
+
+Left for tomorrow, in order of weight: the wire signal for a persistent export
+session, which has blocked the fid arc for two days; whether `SPAWN` should be
+gated now that any task may hand its children what it holds; the two remaining
+carriers of slot-as-identity, `fsd`'s fids and the `/net/tcp` table; and a
+release, since two new syscalls and a changed delegation rule are ABI that
+`CHANGELOG.md` does not yet know about.
+
+---
+
+## 2026-09-06 (cont. 5): rights flow one step down, and a nested shell can finally pipe
+
+*(The fourth ledger finding: a nested shell cannot delegate at all, so it can
+run no pipeline and nothing under it can reach the network.)*
+
+**Why, and the three shapes.** `may_delegate` consulted only the static table,
+on purpose: nothing a task was handed could be laundered onward. A spawned
+`SH.BIN` sits in a spawnable slot, which holds none of the spawnable slots and
+not netd, so every `DELEGATE` it issued was refused, the network one silently.
+Consulting runtime grants would open exactly the laundering the rule forbids.
+A "delegable" flag would need the boot shell to know a subshell from any other
+program, which means trusting a binary's name, the claim the model refuses
+elsewhere. Parent tracking wins on all three criteria: the kernel records who
+spawned whom, by task identity so a reused slot inherits nothing, and a task
+may pass a right it holds to its own children and authorize links between
+them. Rights move down a subtree and nowhere else. A pipeline stage has no
+children and can give away nothing. Hans took it.
+
+**The rule, as first written.** Two ways to pass: the delegator statically
+holds the target, as before, which is how slot 0 does everything it did; or
+the grantee is the delegator's child and the target is either another child
+or something the delegator may itself reach. One field per slot, one extra
+clause, and the nested shell needed no change: the calls it already made
+stopped being refused. (Two reviews later the rule is one clause, below.)
+
+**The check, and what it nearly hid.** The first run against the fix showed
+the first two pipelines refused and the later ones working, which no version
+of the rule predicts. The edit script had stopped on its first assertion and
+written nothing, so that was the *old* kernel; and the old kernel was showing
+something else: after any command in the nested shell, even a builtin, `ps`
+shows task 0 runnable and task 6 blocked. The keyboard had gone back to the
+boot shell, and the "working" pipelines ran there. Same prompt in both, so
+nothing on screen says which shell answered. That is a separate pre-existing
+bug, on the ledger now, and the recipe types `fg 6` before every nested
+command and ends with a `ps` that proves who ran it. With the edits actually
+in: `1 5 40`, `reply from 10.0.2.2`, `1 3 21`, task 6 runnable.
+
+**The `medium` review, and what it corrected.** Three things. First, a claim:
+I had written that a pipeline stage "has no children and can give away
+nothing", and `SPAWN` is ungated, so a stage can spawn and pass on its
+consumer link or its network right. That is the rule working as written, and
+it is not laundering: the parent could have relayed every byte itself. But it
+was a consequence I had not stated, so it is stated now, in the code, the
+ABI, the reference and the ledger, with gating `SPAWN` recorded as its own
+decision. Second, a gap the measurement missed: a nested shell could still not
+relay a builtin's output into a child or capture a child's output, so
+`echo hi | wc` and `ls > f` failed under it, because the parent-child channel
+was the boot shell's static privilege and nothing granted it to any other
+spawner. A parent and its child are now granted each other at spawn. Third,
+the "statically held" rule was dead weight: every task the boot shell wires
+is one it spawned, so the subtree rule passes its grants too, and deleting
+the old rule makes the sentence "rights flow down a subtree and nowhere else"
+true rather than true by coincidence. Beside those: `may_send` now calls the
+same "holds a send right" test `may_delegate` does, the five teardown sites
+clear a slot's rights through one helper, a dead guard went, and four
+documents that still described the old rule were brought up to the code.
+
+**A third pass, and the rule is one clause.** The grantee is my own direct
+child and the target is something I may reach. "Another of my children" needed
+no arm, because `spawn` now grants a spawner and its child each other, so a
+child is always something I may reach; the arm was dead the moment that grant
+landed. Two more things fell out of that grant: netd's self-send bit and its
+explicit grant to its remote-exec child were both no-ops, so both are gone,
+and the remote run still works, which is the evidence the general rule
+subsumes the special case. The parent is now cleared when a slot is reused,
+not at exit, because the reaper this primitive is meant for arrives after the
+exit and must still be able to ask whose child a zombie is. And the word
+"subtree" was wrong everywhere it appeared: the check is one step, a
+grandchild does not qualify, and every description now says "own direct
+children" and points at the one function. Three documents and one site page
+still stated the deleted rule in passages I had not touched; a review found
+them, and the freshness check could not, because I had re-stamped the hash.
+
+**What was not tested, said plainly.** The negative half of the rule, that a
+task cannot delegate to or for a stranger, has no program that would try it,
+so it rests on reading the function. The two clauses are short and the
+positive half was run, but a check that can fail for the refusal side would
+need a deliberately misbehaving program, which is a rig item for the ledger.
+
+---
+
 ## 2026-09-06 (cont. 4): a slot is a position, and the kernel now names the occupant
 
 *(The third ledger finding: `netd` remembers its remote-exec child and its run

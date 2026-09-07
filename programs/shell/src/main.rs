@@ -2303,8 +2303,12 @@ fn su_by_name(name: &str) {
 /// both `TASK_ERR_NO_SUCH_TASK` since 2026-09-06 - and a `caps_for_slot`
 /// edit that drops `TO_NET` from slot 0, the one `MSG_ERR_DENIED` among them,
 /// which would return the whole tree to the pre-fix behaviour with no
-/// diagnostic anywhere. Anyone acting on this: test for `!= 0`, not for the
-/// denial code, or the common cases stay silent behind a check. Left as-is
+/// diagnostic anywhere. A fourth since subtree delegation (2026-09-06): a
+/// NESTED shell that never received `TO_NET` itself (netd absent or dead at
+/// the moment it was spawned) is denied on every grant it makes, so one
+/// dropped result here silences a whole subtree, not one command. Anyone
+/// acting on this: test for `!= 0`, not for the denial code, or the common
+/// cases stay silent behind a check. Left as-is
 /// because a spawn that succeeded should not fail on a best-effort grant, but
 /// it is a check that cannot fail (docs/cluster-keys-postmortem.md) and is
 /// listed as such in `ROADMAP.md`.

@@ -447,20 +447,30 @@ pub const HEAP_INFO_SIZE: u64 = 1;
 /// `(grantee, target)` -> `0` on success, [`TASK_ERR_NO_SUCH_TASK`] if either
 /// slot is not a live task (out of range, unused, or exited and not yet
 /// reaped), or [`MSG_ERR_DENIED`] for a refusal the caller cannot fix by trying
-/// again: a grantee below the spawnable range, or a target the caller does not
-/// statically hold. Checked in that order - a protected grantee is refused
+/// again: a grantee below the spawnable range or not the caller's own child, or
+/// a target the caller neither spawned nor holds a send right to. Checked in
+/// that order - a protected grantee is refused
 /// before either slot's liveness is looked at. The two answers are kept apart
 /// because a pipeline's producer or consumer exiting before its link is
 /// authorized is the ordinary case, and the shell must tell it from a genuine
 /// denial without a second syscall.
 /// Runtime capability delegation: grant `grantee` (a task slot) the right to
 /// initiate IPC sends to `target` (a task slot) - a dynamic addition to
-/// `grantee`'s static send-mask. The caller may only delegate a send
-/// capability it *statically holds itself* (no transitive re-delegation),
-/// which in practice confines this to the shell authorizing a pipeline's
-/// producer to stream directly to its consumer (relay-free
-/// `programA | programB`): only the shell holds the send-caps for the
-/// spawnable slots. The delegation is cleared automatically when the grantee
+/// `grantee`'s static send-mask. One rule: `grantee` must be the caller's
+/// **own direct child** (a task its `SPAWN` created, not a grandchild; the
+/// kernel records every task's parent by task identity), and `target` a task
+/// the caller itself holds a send right to, statically or by delegation (its
+/// own children always are, since a spawner and its child are granted each
+/// other at spawn). Rights flow one step down and nowhere else: the boot shell
+/// wires a pipeline's producer to its consumer (relay-free
+/// `programA | programB`) and hands each command its network right, and a
+/// nested shell does the same for its own commands with the right it was
+/// handed. `SPAWN` is ungated, so any task may spawn a child and pass it what
+/// it holds; that grants nothing the task could not have relayed itself, and
+/// no task can ever reach one it could not reach before. A parent and its
+/// child are granted each other at spawn, so capture, redirection and
+/// builtin-headed pipelines work under any spawner, not only slot 0.
+/// The delegation is cleared automatically when the grantee
 /// dies, and when the target's slot is *reused* by a new spawn (the grant must
 /// not follow the slot to a stranger). A grant aimed at a protected slot, a
 /// supervised server, therefore survives that server's restart: nothing but

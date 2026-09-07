@@ -603,8 +603,10 @@ the microkernel arc itself still leaves open):
    29, the second segment), not the first request of a connection.
 
 4. **General / transitive capability delegation.** The delegation shipped
-   2026-08-21 is deliberately coarse: **non-transitive, irrevocable short of
-   task death, and in practice shell-only.** (It was also *one target per
+   2026-08-21 was deliberately coarse: **non-transitive, irrevocable short of
+   task death, and in practice shell-only**; since 2026-09-06 it is one-step
+   (a task may pass what it holds to its own direct children) and still
+   irrevocable. (It was also *one target per
    task* until 2026-09-06, when that turned out to be a bug rather than a
    scope cut — see the 09-06 entry under item 2. It is a per-task set now,
    which is what `a | b | c` with a network stage needed; the rest of this
@@ -615,7 +617,12 @@ the microkernel arc itself still leaves open):
    this first would repeat the "premature, a mechanism without a hard
    consumer" trap the capability-and-hardening postmortem flagged for
    delegation itself. Build the consumer first, or wait until one is
-   actually wanted.
+   actually wanted. **Update 2026-09-06:** the consumer arrived, and the
+   one-step half shipped with it: the kernel records each task's
+   parent, and a task may pass a right it holds to its own children and
+   authorize links between them (see the review ledger's nested-shell item).
+   Still open here: revocation, and passing a right to anything that is not
+   your own child.
 
 5. **Per-task ASIDs, revisited** — a pure TLB-flush-per-switch optimization
    that passed on QEMU but faulted the idle task on real Parallels and was
@@ -1438,18 +1445,70 @@ would otherwise silently shrink into looking like nothing was ever found.
     bare TCP connection open for a minute). The sentinel is zero now, which
     no identity can be; a message with no identity is never demuxed as a
     child; a run from a caller with none fails closed.
-  - **A nested shell cannot delegate `TO_NET` at all.** `may_delegate` reads
-    the *static* mask and spawnable slots have none, so every `delegate_net`
-    from a spawned `SH.BIN` is denied, discarded by its `let _ =`, and its
-    whole subtree is silently netless — bit-for-bit the symptom this arc spent
-    two days tracing. **Wider than `TO_NET`, measured 2026-09-06:** the same
-    refusal hits every producer→consumer link, so a nested shell cannot run
-    *any* pipeline: `exec /EFI/ORBS/SH.BIN`, `fg 6`, log in, `ls / | wc`
-    answers `pipe: could not authorize the stream` and kills both stages. It
-    is at least honest now: since `DELEGATE` answers `TASK_ERR_NO_SUCH_TASK`
-    for a dead slot, that line is only ever printed for a real refusal.
+  - ~~**A nested shell cannot delegate `TO_NET` at all.**~~ **Fixed
+    2026-09-06 with parent tracking and one-step delegation.**
+    `may_delegate` read the *static* mask and spawnable slots have none, so
+    every `delegate_net` from a spawned `SH.BIN` was denied, discarded by its
+    `let _ =`, and its whole subtree silently netless; wider than `TO_NET`,
+    measured: the same refusal hit every producer→consumer link, so a nested
+    shell could run *no* pipeline (`ls / | wc` answered `pipe: could not
+    authorize the stream`). The kernel now records every task's parent at
+    `spawn`, by task identity, and `may_delegate` has a second way to pass: a
+    task may hand a right it holds, statically or by delegation, to its own
+    direct children (a grandchild does not qualify). Rights flow one step
+    down and nowhere else; no task can name a stranger. (`SPAWN` is ungated, so
+    any task may spawn a child and pass it what it holds. Stated as accepted:
+    the parent could relay every byte itself, so the child gains nothing the
+    parent could not do on its behalf. Gating `SPAWN` is its own decision,
+    below.) Scored against the alternatives
+    (consult runtime grants in `may_delegate`: laundering; a "delegable" flag:
+    the shell cannot tell a subshell from any program without trusting a
+    binary's name) it is the one that wins on all three criteria, and parent
+    tracking is the primitive the owner-less `WAIT`/`KILL` and the pipeline
+    teardown are waiting on. **Measured after:** the same nested shell
+    answers `1 5 40` to `ls / | wc`, `reply from 10.0.2.2` to `ping`, and
+    `1 3 21` to `ping | wc`. The nested shell needed no change: the calls it
+    already made stopped being refused. The `medium` review then found the
+    half the measurement missed: a nested shell could still not relay a
+    builtin's output into a child or capture a child's output, so
+    `echo hi | wc` and `ls > f` failed under it, because the parent-child
+    channel was the boot shell's *static* privilege. A parent and its child
+    are now granted each other at spawn. The review also removed the
+    "statically held" rule as dead: every task the boot shell wires is one it
+    spawned. This is the one-step form of
+    north-star item 4 ("transitive delegation"), built now because the nested
+    shell is the consumer that item said to wait for; the general, revocable
+    form is still open there.
+  - **`SPAWN` is ungated.** Any task may spawn, which with one-step
+    delegation means any task may pass what it holds to its own children.
+    Accepted on the proxy argument (above), but a `CAP_SPAWN` bit in
+    `caps_for_slot` would make "which tasks may create tasks" a stated policy
+    rather than an accident of the dispatch table. Raised by the `medium`
+    review of the one-step delegation change, 2026-09-06.
+  - **The refusal side of delegation has no check that can fail.** Every
+    `DELEGATE` in the tree is a parent granting to its own child, so nothing
+    ever exercises "a task cannot delegate to or for a stranger"; the
+    one-clause rule rests on reading. Rig item: a deliberately misbehaving
+    `/bin` program that issues `DELEGATE(grantee=<not its child>, ...)` and
+    `DELEGATE(<its child>, <a task it cannot reach>)` and prints the two
+    answers, expected `MSG_ERR_DENIED` both times. Promised in the journal on
+    2026-09-06 and not built.
+  - **A foregrounded nested shell loses the keyboard after every command.**
+    `exec /EFI/ORBS/SH.BIN`, `fg 6`, log in, `echo hi` (a builtin, no child,
+    no `FG`): `ps` before shows task 0 blocked and task 6 runnable, `ps` after
+    shows task 0 runnable and task 6 blocked, and the next line typed runs in
+    the boot shell. Measured 2026-09-06 while testing subtree delegation,
+    where it first looked like the nested shell's later pipelines had started
+    working: they had, in the other shell. Every nested-shell recipe needs a
+    `fg 6` before each command until this is fixed, and the same prompt in
+    both shells hides which one answered. Not traced to a cause; the revert
+    on child exit goes to slot 0 by design, but this case has no child.
   - **`delegate_net` discards its result**, so the one grant this arc is about
-    is the only `DELEGATE` in the shell with no failure signal. A future
+    is the only `DELEGATE` in the shell with no failure signal. **Worse since
+    subtree delegation (2026-09-06):** a nested shell that never received
+    `TO_NET` itself (netd absent or dead when it was spawned) is refused on
+    every grant it makes, so one dropped result silences a whole subtree for
+    the boot, with no line anywhere. A future
     `caps_for_slot` edit dropping `TO_NET` from slot 0 would return the tree to
     the pre-fix behaviour with no diagnostic anywhere. A check that cannot
     fail.
