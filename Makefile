@@ -1299,7 +1299,7 @@ release:
 # command in $(CMDS) through Parallels' own virtual keyboard
 # (`prlctl send-key-event`, confirmed to land on the same
 # xhci::poll_key interrupt-endpoint path a real physical USB keyboard
-# does - see docs/xhci-keyboard-postmortem.md), and saves a screenshot
+# does - see docs/postmortems/xhci-keyboard-postmortem.md), and saves a screenshot
 # after each step instead of needing a human watching live. See
 # scripts/test-parallels.sh for the full mechanics.
 #

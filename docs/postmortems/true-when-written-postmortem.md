@@ -352,7 +352,7 @@ The check is `scripts/check-site-freshness.py` (`make check-site`), verified by
 mutation: a changed source flags its page, an unregistered page under
 `docs/site/` fails the manifest, and a manifest entry whose file is gone fails
 too. The nine stale pages are not fixed by it and were not fixed that day — see
-[`ROADMAP.md`](ROADMAP.md). It is deliberately outside `make test` until they
+[`ROADMAP.md`](../ROADMAP.md). It is deliberately outside `make test` until they
 are, because a suite that is permanently red teaches people to ignore it, which
 would end with the detector as stale as the thing it detects.
 

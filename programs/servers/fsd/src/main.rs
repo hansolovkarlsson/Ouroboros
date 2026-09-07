@@ -1393,7 +1393,7 @@ fn check_access(fs: &mut vfs::Filesystem, who: Option<Caller>, verb: u64, p: &[u
         // Refusing is the safe direction for the same reason the root bypass
         // above exists: an enforcement mistake can then only over-restrict a
         // non-root caller, never hand out access. See
-        // docs/users-and-permissions-postmortem.md.
+        // docs/postmortems/users-and-permissions-postmortem.md.
         _ => false,
     }
 }

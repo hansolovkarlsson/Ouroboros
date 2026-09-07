@@ -4,7 +4,7 @@
 # physical keyboard.
 #
 # What this replaces: every real-hardware round trip documented in
-# docs/xhci-keyboard-postmortem.md and docs/boot-bringup-postmortem.md was
+# docs/postmortems/xhci-keyboard-postmortem.md and docs/postmortems/boot-bringup-postmortem.md was
 # manual - rebuild, re-image, boot the VM, look at the screen, type on a
 # real keyboard, report back. `prlctl send-key-event` sends key events to
 # a running VM by scancode, and `prlctl capture` grabs a screenshot to a

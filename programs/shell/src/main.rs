@@ -2310,7 +2310,7 @@ fn su_by_name(name: &str) {
 /// acting on this: test for `!= 0`, not for the denial code, or the common
 /// cases stay silent behind a check. Left as-is
 /// because a spawn that succeeded should not fail on a best-effort grant, but
-/// it is a check that cannot fail (docs/cluster-keys-postmortem.md) and is
+/// it is a check that cannot fail (docs/postmortems/cluster-keys-postmortem.md) and is
 /// listed as such in `ROADMAP.md`.
 fn delegate_net(slot: u64) {
     let _ = syscall4(syscall_abi::DELEGATE, slot, syscall_abi::NET_TASK, 0, 0);

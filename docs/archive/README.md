@@ -12,7 +12,7 @@ elsewhere, and those places are the ones to read:
 | What was built, and when | [`../CHANGELOG.md`](../CHANGELOG.md) |
 | The narrative of each day | [`../work-journal/`](../work-journal/README.md) |
 | How an arc was sequenced | [`../roadmap-completed.md`](../roadmap-completed.md) |
-| What went wrong and why | the postmortems in [`../`](../) |
+| What went wrong and why | the postmortems in [`../postmortems/`](../postmortems/) |
 | The load-bearing boot/MMU/syscall guidance | [`../../CLAUDE.md`](../../CLAUDE.md) |
 
 They are kept for one purpose: **archaeology.** A contemporaneous note

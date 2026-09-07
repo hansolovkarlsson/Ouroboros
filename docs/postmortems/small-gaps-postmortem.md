@@ -9,7 +9,7 @@ for prompt filter early-exit, a **builtin at any pipeline position**, **`sort`**
 (the filter that can't stream), and **environment export** to child programs.*
 
 For the milestone-by-milestone facts see `CHANGELOG.md`; for the day-by-day
-narrative see the [work journal](work-journal/README.md). This is the retrospective — the threads that ran
+narrative see the [work journal](../work-journal/README.md). This is the retrospective — the threads that ran
 through a batch of items each marked "small," and what "small" turned out to
 mean.
 

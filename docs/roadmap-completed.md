@@ -4,7 +4,7 @@ The finished arcs and milestones that used to live in
 [`ROADMAP.md`](ROADMAP.md), moved here so the roadmap stays forward-looking.
 This is the *plan-shaped* record — how each arc was sequenced and what was
 learned; for the condensed milestone log see [`CHANGELOG.md`](CHANGELOG.md),
-and for the debugging retrospectives see the postmortems under `docs/`.
+and for the debugging retrospectives see the postmortems under `docs/postmortems/`.
 
 The order roughly follows the roadmap's old layout (microkernel arc, network
 stack, filesystems, disk management, standalone binaries, pipelines), then the
@@ -43,7 +43,7 @@ So the fix was in three parts, over two days:
 
 1. **A detector, 2026-09-04** — `scripts/check-site-freshness.py`
    (`make check-site`), which records the exact source **blob** each page was
-   abridged from. See [`true-when-written-postmortem.md`](true-when-written-postmortem.md)
+   abridged from. See [`true-when-written-postmortem.md`](postmortems/true-when-written-postmortem.md)
    for why the obvious date-based version would have been *born green*.
 2. **Clear the nine, 2026-09-05 — by fixing fewer pages than were broken.**
    Four of them — `changelog`, `roadmap`, `shell-commands`, `processes` — were
@@ -66,7 +66,7 @@ crates (61) and that the filesystem server was FAT32-only (it reads FAT32,
 exFAT and ext2). Those were corrected at the source before the pages were
 written from them — a page cannot be honestly abridged from a document that is
 wrong, and the alternative was publishing the error. That is the
-[`asking-the-right-question-postmortem.md`](asking-the-right-question-postmortem.md)
+[`asking-the-right-question-postmortem.md`](postmortems/asking-the-right-question-postmortem.md)
 shape again: `tasks.rs` is the authority on the slot map, and every restatement
 of it elsewhere drifts.
 
@@ -86,7 +86,7 @@ the plan-shaped summary of how it was sequenced and what the sequencing bought.
 **Shape: eleven steps, each with a stated check AND a negative control, written
 down before any code.** The instruction that produced it was explicit — no time
 pressure, only quality, and no repeat of the day one branch grew too big to
-review ([`review-and-split-postmortem.md`](review-and-split-postmortem.md)).
+review ([`review-and-split-postmortem.md`](postmortems/review-and-split-postmortem.md)).
 
 **Steps 1–5 build `ed25519` as a pure crate with no callers**, so the hardest
 part of the arc cost a test failure rather than a boot loop when wrong:
@@ -143,7 +143,7 @@ its own users' names — roadmap item 1); `AUTHORIZED_MAX` caps a cluster at abo
 a dozen peers, where a shared secret scaled without limit; and replay protection
 and encryption remain behind the "leaving a trusted network" trigger.
 
-Retrospective: [`cluster-keys-postmortem.md`](cluster-keys-postmortem.md).
+Retrospective: [`cluster-keys-postmortem.md`](postmortems/cluster-keys-postmortem.md).
 
 **Released as v0.16.0 on 2026-09-01, after four review rounds and eight
 follow-up PRs.** Worth recording as part of the arc's shape rather than as an
@@ -156,7 +156,7 @@ The first round found the flag day's own defects — the `\NOEXEC` lever failing
 `\CLUSTER.KEY` surviving in every built image, and `ninep-abi` never running in
 `make test`. **The next three rounds mostly found the previous round's
 repairs**, which is the subject of
-[`repairing-the-repairs-postmortem.md`](repairing-the-repairs-postmortem.md) and
+[`repairing-the-repairs-postmortem.md`](postmortems/repairing-the-repairs-postmortem.md) and
 the thing to read before starting the next arc.
 
 Two process changes came out of it, and both are cheap:
@@ -164,7 +164,7 @@ Two process changes came out of it, and both are cheap:
 - **A review's findings go in a NEW PR against the same base**, not as commits
   on the branch under review. Every fixing round made the reviewed diff larger,
   which made the next round's target larger — the loop
-  [`review-and-split-postmortem.md`](review-and-split-postmortem.md) already
+  [`review-and-split-postmortem.md`](postmortems/review-and-split-postmortem.md) already
   described and this arc re-ran anyway.
 - **Scope a later round to the repairs.** Round four targeted only the fix
   commits — a few hundred lines against a diff swept three times — and found the
@@ -880,7 +880,7 @@ The arc that made Ouroboros run C — the mechanism half of the "POSIX / C-progr
 portability" plan (that plan still lives in `ROADMAP.md` for its *remaining*,
 still-forward parts: `posix_spawn`/`fork`-in-userspace, `select`/`poll`/signals/
 `mmap`, and porting a real application). The full design retrospective is
-`docs/libc-arc-postmortem.md` (the twenty-first); the milestone facts are in
+`docs/postmortems/libc-arc-postmortem.md` (the twenty-first); the milestone facts are in
 `CHANGELOG.md` (libc arc steps 1–6).
 
 **The thesis, proven:** C portability is a *userland personality*, not a kernel
@@ -1003,7 +1003,7 @@ phase:
   reduction already shrinks its exposure). Remaining, tracked below: the
   read-side re-walk in a large `cp` (interleaved writes invalidate the cursor)
   and the same pattern in `exfat`/`ext2`. See the
-  [userland & pipelines postmortem](userland-and-pipelines-postmortem.md) and
+  [userland & pipelines postmortem](postmortems/userland-and-pipelines-postmortem.md) and
   `CHANGELOG.md`'s "Large-read fsd restart fixed" entry.
 - **GPT is parsed but not validated on read** — **FIXED (2026-08-27,** the
   small-gaps arc: header + entry-array CRC32 with backup-GPT fallback, tested by
@@ -1140,7 +1140,7 @@ phase:
   port and checking each device's actual HID interface protocol
   (`bInterfaceProtocol=1`, Keyboard) before configuring it. Full
   technical write-up, including the debugging techniques that found each
-  bug, in [`xhci-keyboard-postmortem.md`](xhci-keyboard-postmortem.md) -
+  bug, in [`xhci-keyboard-postmortem.md`](postmortems/xhci-keyboard-postmortem.md) -
   written to be useful to other bare-metal-OS developers hitting the
   same class of problem, not just this project's own history.
   **Still coarse, worth knowing before building on this:** one port, one
@@ -1549,9 +1549,9 @@ call in step 4 was **option 1 on a shared helper** (root-only tools now, the
 repoint, not a rewrite — option 1 is a strict subset of the server). Groups are
 **primary-gid** because the kernel identity is one packed word; salts are
 **clock-derived** and documented as weak. Retrospectives:
-[`users-and-permissions-postmortem.md`](users-and-permissions-postmortem.md)
+[`users-and-permissions-postmortem.md`](postmortems/users-and-permissions-postmortem.md)
 (steps 1–3, the 20th) and
-[`account-management-postmortem.md`](account-management-postmortem.md) (step 4,
+[`account-management-postmortem.md`](postmortems/account-management-postmortem.md) (step 4,
 the 22nd).
 
 ### Steps 5–6: the deferred tier, closed (2026-08-29 → 2026-08-30)
@@ -1570,7 +1570,7 @@ long, so here is where each went:
    `read_account_file`'s deliberate overflow-returns-`0`, correct for
    `/etc/passwd` ("no accounts, root session") and a **total lockout** for
    `/etc/shadow` ("no secret", root included). See
-   [`review-and-split-postmortem.md`](review-and-split-postmortem.md) (the
+   [`review-and-split-postmortem.md`](postmortems/review-and-split-postmortem.md) (the
    23rd).
 
 6. **Self-service passwords, and a hole underneath them (2026-08-30)** —
@@ -1590,7 +1590,7 @@ long, so here is where each went:
    on every permission check and every fid op, so it was fixed and merged
    separately (#36): the kernel binds the credential at *send*
    (`SENDER_ID`/`SENDER_GROUPS`). See
-   [`asking-the-right-question-postmortem.md`](asking-the-right-question-postmortem.md)
+   [`asking-the-right-question-postmortem.md`](postmortems/asking-the-right-question-postmortem.md)
    (the 24th).
 
 **What is left, and it is the whole of what is left:** per-user **cluster**

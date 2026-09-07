@@ -209,7 +209,7 @@ read/write disk sharing — the milestone that answers "is it doable?" with a ye
 - [`roadmap-cluster.md`](roadmap-cluster.md) Phase 1; the Phase 0 design
   ([`roadmap-cluster-phase0.md`](roadmap-cluster-phase0.md)) whose verb set,
   `tree` selector, and namespace this rides on.
-- [`network-stack-postmortem.md`](network-stack-postmortem.md) — netd's TCP and
+- [`network-stack-postmortem.md`](postmortems/network-stack-postmortem.md) — netd's TCP and
   the trace-based, foreign-observer testing discipline to reuse.
 - [9P (protocol)](https://en.wikipedia.org/wiki/9P_(protocol)) — the model; we
   carry our own verb set, not 9P2000 on the wire (a minimal, honest subset).

@@ -264,7 +264,7 @@ at a roadmap arc:
    highest-leverage gap: **porting a real application** (SQLite, a small C
    compiler) — "port one more program" — plus the architectural mismatches
    (`posix_spawn`/`fork`, `select`/`poll`, signals, `mmap`). → roadmap "POSIX /
-   C-program portability", `roadmap-completed.md`, `docs/libc-arc-postmortem.md`.
+   C-program portability", `roadmap-completed.md`, `docs/postmortems/libc-arc-postmortem.md`.
 3. **A richer terminal + its first full-screen consumer.** VT100 color/cursor
    addressing, built alongside an editor or pager so the escape set is
    driven by a real need. → roadmap items 1 & 3.
@@ -287,4 +287,4 @@ experience as complete as its *distributed* one already is.
 *See also:* [`comparison.md`](comparison.md) (the philosophy-level trade),
 [`ROADMAP.md`](ROADMAP.md) (the arcs each gap maps to),
 [`architecture.md`](architecture.md) (how today's pieces fit), and the
-postmortems under `docs/` for why the boundary sits where it does.
+postmortems under `docs/postmortems/` for why the boundary sits where it does.

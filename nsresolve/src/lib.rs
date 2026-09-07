@@ -18,7 +18,7 @@
 //! relocation-checked, before any logic was written against the assumption that
 //! it would work. The precedent is deliberate — a one-build gate proved `alloc`
 //! could not be PIE-linked on stable before a week was spent on it
-//! (`docs/capability-and-hardening-postmortem.md`).
+//! (`docs/postmortems/capability-and-hardening-postmortem.md`).
 //!
 //! The gate then had to be made **representative**, which mattered more than
 //! passing it: `x + 1` proves nothing about `resolve_ns`, and the ABS64 risk

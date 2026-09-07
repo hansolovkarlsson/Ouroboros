@@ -8,7 +8,7 @@ record — how each arc was sequenced and what was learned) and
 document stays about what's *still open*. For *how* something already built
 actually works, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md); for the debugging history and lessons
-behind each decision, see the postmortems under `docs/` and `CLAUDE.md`.
+behind each decision, see the postmortems under `docs/postmortems/` and `CLAUDE.md`.
 This document is the one to update first when direction changes.
 
 > **The long-term direction** — a Plan 9-style **resource-sharing cluster**
@@ -34,7 +34,7 @@ the microkernel arc itself still leaves open):
 
 1. **Per-user keys for the cluster.** Per-user cluster *identity* shipped
    2026-08-31 (see [`CHANGELOG.md`](CHANGELOG.md) and
-   [`unspellable-postmortem.md`](unspellable-postmortem.md)): a remote request
+   [`unspellable-postmortem.md`](postmortems/unspellable-postmortem.md)): a remote request
    carries the requesting user's **name** inside the signature, the far side resolves
    it through its own `/etc/passwd` and refuses a stranger, and the identity
    reaches `fsd` as a **required parameter** carried in the request rather than
@@ -121,7 +121,7 @@ the microkernel arc itself still leaves open):
    step log (and for why the *symmetric* version was rejected: with a symmetric
    key, the ability to verify is the ability to forge),
    [`roadmap-completed.md`](roadmap-completed.md) for the plan-shaped summary,
-   and [`cluster-keys-postmortem.md`](cluster-keys-postmortem.md) for what it
+   and [`cluster-keys-postmortem.md`](postmortems/cluster-keys-postmortem.md) for what it
    cost to learn.
 
    It killed "one shared secret = interchangeable members" and gave per-peer
@@ -843,7 +843,7 @@ normal.
   `posix-console` stdio bottoms out at exactly those). No kernel/loader change.
   The full six-step arc (first C program → `.data`/`.bss` → minimal libc → file
   I/O + pipes → fids → picolibc) is recorded in `roadmap-completed.md` and
-  `docs/libc-arc-postmortem.md`. **The mechanism is done; the remaining bullets
+  `docs/postmortems/libc-arc-postmortem.md`. **The mechanism is done; the remaining bullets
   below are the still-forward parts.**
 
 - **The architectural mismatches** (not just missing functions — think
@@ -888,7 +888,7 @@ normal.
 **Status (2026-08-28): the mechanism is built, the arc's remainder is
 forward-looking.** The six-step libc arc is complete through a running picolibc
 (see `roadmap-completed.md` for the sequenced record and
-`docs/libc-arc-postmortem.md` for the retrospective). What remains is genuinely
+`docs/postmortems/libc-arc-postmortem.md` for the retrospective). What remains is genuinely
 different in kind — "port one more program": a real application (SQLite, a small
 C compiler), plus the still-open architectural mismatches above (`posix_spawn`
 native / `fork` in userspace à la Redox's `redox-rt`, `select`/`poll`/signals/
@@ -998,9 +998,9 @@ size cap.) Cheap wins first; the editor last, gated on item 1.
 management — is finished; the sequenced plan-shaped record moved to
 [`roadmap-completed.md`](roadmap-completed.md) and the milestone log is in
 [`CHANGELOG.md`](CHANGELOG.md). Retrospectives:
-[`users-and-permissions-postmortem.md`](users-and-permissions-postmortem.md)
+[`users-and-permissions-postmortem.md`](postmortems/users-and-permissions-postmortem.md)
 (steps 1–3) and
-[`account-management-postmortem.md`](account-management-postmortem.md) (step 4).
+[`account-management-postmortem.md`](postmortems/account-management-postmortem.md) (step 4).
 What shipped: a kernel-owned uid/gid per task; a `login:` gate over
 `/etc/passwd`; `fsd` permission enforcement (ext2); and the account tools
 (`passwd`/`useradd`/`groupadd`/`usermod`, `su`/`id` by name, `/etc/group`
@@ -1605,7 +1605,7 @@ would otherwise silently shrink into looking like nothing was ever found.
   (`SENDER_ID`/`SENDER_GROUPS`) — see `docs/architecture.md`'s syscall table.
   Raised against the unmerged account server, but it was `fsd`, in shipped
   code, that had it on every permission check and every fid op. Written up in
-  [`asking-the-right-question-postmortem.md`](asking-the-right-question-postmortem.md).
+  [`asking-the-right-question-postmortem.md`](postmortems/asking-the-right-question-postmortem.md).
 - ~~**One malformed export frame could kill the network for the boot.**~~
   **Fixed 2026-08-30** (#44). `NP_WRITE_AT` sliced `&payload[p0..p0 + dlen]`
   with the range *start* unclamped, and two sibling arms had a wrapping add that

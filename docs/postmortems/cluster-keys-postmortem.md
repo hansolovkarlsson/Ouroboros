@@ -51,7 +51,7 @@ The user's instruction opened the arc and shaped everything after it:
 That referenced [`review-and-split-postmortem.md`](review-and-split-postmortem.md)
 — the day one branch grew too big to review, and fixing review findings produced
 roughly one self-inflicted escalation per round. So the plan doc
-([`roadmap-cluster-keys.md`](roadmap-cluster-keys.md)) was written **before any
+([`roadmap-cluster-keys.md`](../roadmap-cluster-keys.md)) was written **before any
 code**, as eleven steps with a stated verification and a negative control each,
 where steps 1–4 touch no existing file and step 4 is a go/no-go gate.
 

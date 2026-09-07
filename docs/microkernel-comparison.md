@@ -64,7 +64,7 @@ privilege) underneath them. Measured against that one test:
   simpler one re-introduces exactly the trust the isolation milestone had
   just removed. (See [`architecture.md`](architecture.md) and the
   grant/safecopy section of
-  [`isolation-and-dataflow-postmortem.md`](isolation-and-dataflow-postmortem.md).)
+  [`isolation-and-dataflow-postmortem.md`](postmortems/isolation-and-dataflow-postmortem.md).)
 
 ### Where it falls short of MINIX
 
@@ -353,7 +353,7 @@ project).
   (adding the Plan 9 material) identifying Plan 9's namespaces + uniform
   file protocol as the standout next architecture — the one mechanism that
   would unify the servers, the capability model, and delegation.
-- [`isolation-and-dataflow-postmortem.md`](isolation-and-dataflow-postmortem.md)
+- [`isolation-and-dataflow-postmortem.md`](postmortems/isolation-and-dataflow-postmortem.md)
   — the day-by-day account of the EL0 fault isolation, `fsd`
   supervision, per-task page tables, and grant/safecopy milestones that
   this note assesses.

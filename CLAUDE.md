@@ -42,7 +42,7 @@ are the ones worth having in mind before you open it:
 - **`docs/roadmap-completed.md`** — the finished arcs that used to live in
   `ROADMAP.md`, moved out so the roadmap stays forward-looking (the
   *plan-shaped* companion to `CHANGELOG.md`'s condensed milestone log).
-- **The postmortems under `docs/`** (twenty-nine of them) — the design, bug
+- **The postmortems under `docs/postmortems/`** (twenty-nine of them) — the design, bug
   and process retrospectives: *the traps already hit and the lessons
   learned*. Read the relevant one before reworking a subsystem.
   `docs/README.md` indexes all of them with a full annotation each, and every
@@ -583,7 +583,7 @@ docs/                every document is annotated in full in `docs/README.md` - r
   testing-parallels.md, testing-pi4.md   the real-hardware guides. Both share one caveat: NO NETWORKING, so the whole cluster is QEMU-only
   gap-analysis.md    per-subsystem have/partial/don't inventory vs mainstream Unixes, capped by a ranked list of the biggest gaps
   archive/           contemporaneous build logs, kept for archaeology only - not the reference
-  *-postmortem.md    the twenty-eight design/bug/process retrospectives (see the section above, and docs/README.md)
+  postmortems/       the twenty-nine design/bug/process retrospectives, one file each (see the section above, and docs/README.md)
   research-*.md      synthesis notes on MINIX/Plan 9/Helix/Redox, the GUI stack, and where the design should go next
 
 kernel/              every file annotated in full in `docs/source-map.md`; each also carries its own `//!`
@@ -611,7 +611,7 @@ kernel/              every file annotated in full in `docs/source-map.md`; each 
   src/syscall.rs     the svc dispatch table - the authority on which syscalls exist (numbers/sentinels in syscall-abi)
   src/tasks.rs       task slots, round-robin scheduler, mailboxes, grants, capability send-mask, per-task identity.
                      THE AUTHORITY on slot numbers and counts - restating that map elsewhere has drifted before,
-                     see docs/asking-the-right-question-postmortem.md
+                     see docs/postmortems/asking-the-right-question-postmortem.md
   src/virtio_mmio.rs virtio-mmio transport: 32-slot discovery, modern register layout
   src/block.rs       BlockDevice enum (Virtio | UsbMsd) - what fsd's disk layer sits on
   src/usb_msd.rs     USB mass storage: Bulk-Only Transport + SCSI over xhci's bulk endpoints, with BOT error recovery

@@ -1321,7 +1321,7 @@ pub(crate) fn set_delegate(grantee: usize, target: usize) {
 /// with an empty set no matter what the previous one accumulated: the belt
 /// that does not depend on a future teardown path remembering. A missed clear
 /// used to leak one capability (the single index); with a set it leaks the
-/// whole accumulated mask. docs/unspellable-postmortem.md: make the wrong
+/// whole accumulated mask. docs/postmortems/unspellable-postmortem.md: make the wrong
 /// thing unspellable rather than un-grepped.
 ///
 /// Grants *aimed at* `task` are deliberately NOT touched here. Teardown used

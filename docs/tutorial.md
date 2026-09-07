@@ -4,7 +4,7 @@ This is a tutorial distilled from building [Ouroboros](../README.md) — a
 from-scratch aarch64 microkernel in Rust that boots via UEFI, runs a
 preemptively-scheduled userland shell loaded from disk, and works on
 both QEMU and real Parallels-on-Apple-Silicon hardware. Unlike the
-[postmortems](boot-bringup-postmortem.md), which document the debugging
+[postmortems](postmortems/boot-bringup-postmortem.md), which document the debugging
 that *found* this path, this document presents only the path itself:
 each stage as the working design, with real code from the finished
 kernel, and a short "why this way" note wherever the working choice is
@@ -1054,10 +1054,10 @@ genuinely discovered device addresses everywhere — and the same
 discover-don't-assume discipline above is precisely what makes it
 survivable. That story, including everything that goes differently on
 real hardware, is told in the four postmortems:
-[boot bring-up](boot-bringup-postmortem.md),
-[shell & filesystem](shell-and-filesystem-postmortem.md),
-[xHCI keyboard](xhci-keyboard-postmortem.md), and
-[USB storage](usb-storage-postmortem.md).
+[boot bring-up](postmortems/boot-bringup-postmortem.md),
+[shell & filesystem](postmortems/shell-and-filesystem-postmortem.md),
+[xHCI keyboard](postmortems/xhci-keyboard-postmortem.md), and
+[USB storage](postmortems/usb-storage-postmortem.md).
 
 For the complete, working implementation of every stage in this
 tutorial — including all the parts condensed here — the

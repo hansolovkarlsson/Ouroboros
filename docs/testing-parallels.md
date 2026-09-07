@@ -186,7 +186,7 @@ step 1 exists.
 - [`testing-qemu.md`](testing-qemu.md) — the QEMU dev loop and the two-node
   cluster testing that covers everything Parallels currently can't.
 - [`ROADMAP.md`](ROADMAP.md) — the virtio-PCI transport sub-project (Part B step 1).
-- [`xhci-keyboard-postmortem.md`](xhci-keyboard-postmortem.md),
-  [`usb-storage-postmortem.md`](usb-storage-postmortem.md),
-  [`filesystems-arc-postmortem.md`](filesystems-arc-postmortem.md) — the
+- [`xhci-keyboard-postmortem.md`](postmortems/xhci-keyboard-postmortem.md),
+  [`usb-storage-postmortem.md`](postmortems/usb-storage-postmortem.md),
+  [`filesystems-arc-postmortem.md`](postmortems/filesystems-arc-postmortem.md) — the
   real-hardware bug classes A4/A5 guard against.

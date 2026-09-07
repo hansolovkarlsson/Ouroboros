@@ -47,7 +47,7 @@ the Ouroboros design is on a path a much larger project validated by shipping.
 | Driver crash | Component panic ≠ kernel panic; supervised restart | `supervisor.rs`: restart fsd/cond on crash **or** wedge |
 | Uniform resource protocol | **Schemes** (`scheme:path`), one open/read/write/close ABI | **9P verb set** + per-task namespaces + `bind` |
 | Per-process view | Each process has its own namespace + fd table | Each task has its own namespace (NS_SET/bind) |
-| Kernel POSIX-ness | Kernel ABI "intentionally unstable and minimal"; **POSIX lives in userspace (relibc)** | Exactly the conclusion of [`posix-divergence-postmortem.md`](posix-divergence-postmortem.md): POSIX is a userland-libc personality, not a kernel property |
+| Kernel POSIX-ness | Kernel ABI "intentionally unstable and minimal"; **POSIX lives in userspace (relibc)** | Exactly the conclusion of [`posix-divergence-postmortem.md`](postmortems/posix-divergence-postmortem.md): POSIX is a userland-libc personality, not a kernel property |
 | Capability idea | Namespace visibility = what a process may name; `fd`s carry permissions | Per-slot IPC send-mask + runtime `delegate` |
 | Driver ↔ kernel | Syscalls + `irq:`/`event:`/`memory:` schemes | Gated syscalls (BLOCK_*, NET_*, CON_*/FB_*) to one privileged task each |
 
