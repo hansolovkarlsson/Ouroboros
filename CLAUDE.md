@@ -505,10 +505,16 @@ why it isn't just on `PATH`.
 The kernel and the userland programs have no unit test suite — they are
 pre-alpha code that mostly proves it boots, and most of it can only run on
 the target. The **pure crates are the exception and now have one**:
-`make test` runs `check-site` (above) plus the host unit tests for every
-crate with no I/O, no syscalls and no target dependency (`accounts`, `regex`, `ed25519`,
-`clusterkeys`, `ninep-abi` — 129 tests as of 2026-09-01, and the number is
-checked by running it, not by incrementing). It exists because such a crate can otherwise have
+`make test` runs the host unit tests for every crate with no I/O, no
+syscalls and no target dependency (`accounts`, `regex`, `ed25519`,
+`clusterkeys`, `ninep-abi`: 137 tests as of 2026-09-07, and the number is
+checked by running it, not by incrementing), clippy over those crates' test
+targets too, the cross-language wire-constant check
+(`scripts/check-wire-constants.py`: Rust against the two C headers and the
+two Python peers), the 9P host peer's verb-dispatch self-test
+(`scripts/np9p_server.py --self-test`, one request per verb, added in #99
+after a range test silently swallowed five verbs its docstring claimed), and
+`check-site` (above). It exists because such a crate can otherwise have
 **no build coverage at all**: it is a workspace member but not a
 default-member, so until something depends on it, `cargo build`, `make
 build` and `make esp` all stay green while it is broken. Run it before
@@ -669,6 +675,9 @@ regex/               a small POSIX-ERE engine behind grep. An explicit backtrack
 libc/                the C-portability arc: crt0 + syscall stubs + a narrow waist (write/read/open/sbrk/_exit)
                      that BOTH a hand-rolled libc and a real PICOLIBC link against unchanged
                      (third_party/picolibc-prebuilt; regenerate with scripts/build-picolibc.sh)
+nsresolve/           a Rust staticlib wrapping ninep_abi::resolve_ns, so a C program reaches the SAME namespace
+                     resolver ulib and netd use. EVERY C program links it (file.c depends on it); the link needs
+                     --gc-sections, see docs/source-map.md
 scripts/             test-parallels.sh (real-hardware smoke test), drive-qemu.py + drive-2vm.py (drive the guest
                      shell / a two-node cluster unattended - the fussy paced typing is load-bearing, see
                      docs/testing/testing-qemu.md), mk{gpt,exfat,ext2,clusterkeys,passwd,group}.py (build the test disk
@@ -676,8 +685,8 @@ scripts/             test-parallels.sh (real-hardware smoke test), drive-qemu.py
                      FOREIGN OBSERVER for both directions of the export)
 ```
 
-Sixty-one-crate workspace. `kernel` and the shared libs (`ulib`,
-`syscall-abi`, `ninep-abi`, `accounts`, `regex`, `ed25519`, `clusterkeys`) sit at the repo root; **every userland
+Sixty-two-crate workspace. `kernel` and the shared libs (`ulib`,
+`syscall-abi`, `ninep-abi`, `accounts`, `regex`, `ed25519`, `clusterkeys`, `nsresolve`) sit at the repo root; **every userland
 program lives under `programs/`, grouped by role** (`programs/shell`,
 `programs/servers/{fsd,cond,netd,accountd}`, `programs/demos/{hello,pong}`,
 `programs/fileutils/*`, `programs/textutils/*`, `programs/netutils/*`,
