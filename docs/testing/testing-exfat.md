@@ -4,7 +4,7 @@ How to build the exFAT test disk, drive the whole read-write surface from the
 shell, and confirm the result against a real exFAT driver. This is the
 QEMU-based test rig used to bring up `fsd/src/exfat.rs` (the more-filesystems
 arc, steps 2–3). For *what* exFAT support does and how it works, see
-[`CHANGELOG.md`](CHANGELOG.md)'s "More filesystems, steps 2/3" and the module
+[`CHANGELOG.md`](../CHANGELOG.md)'s "More filesystems, steps 2/3" and the module
 doc in `fsd/src/exfat.rs`.
 
 ## Why there's a special disk for this
@@ -142,7 +142,7 @@ each entry carries — are all spec-correct.
 
 Not a one-command path, and not covered here. Storage on Parallels/Apple Silicon
 is USB-mass-storage only (no emulated disk controller on the PCI bus — see
-[`ROADMAP.md`](ROADMAP.md)'s parking lot), so testing exFAT there needs a
+[`ROADMAP.md`](../ROADMAP.md)'s parking lot), so testing exFAT there needs a
 physical exFAT-formatted USB stick passed through to the VM. QEMU
 (`run-image-exfat`) is the honest test surface for this feature, the same as the
 rest of the disk work.

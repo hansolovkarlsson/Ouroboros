@@ -13,7 +13,7 @@
  * asked fsd about a path only netd knows - a remote mount is a NAMESPACE
  * binding, not an fsd mount - and the request never left the machine. That was
  * the actual cause of "the fid verbs reach no export"; see
- * docs/roadmap-fid-verbs.md.
+ * docs/roadmap/roadmap-fid-verbs.md.
  *
  * AND THE FD IS NO LONGER THE FID. The old design ("a POSIX fd IS a 9P fid")
  * was exact while fsd was the only server that could issue one. It cannot
@@ -492,7 +492,7 @@ ssize_t write(int fd, const void *buf, size_t count) {
      *
      * The data must ride INLINE in the request, the way ulib::fs_write_at does
      * it. That wire shape is not defined for NP_PWRITE yet: no export
-     * implements the verb (step 6 of docs/roadmap-fid-verbs.md), so there is
+     * implements the verb (step 6 of docs/roadmap/roadmap-fid-verbs.md), so there is
      * nothing to agree with and nothing to test against. Refusing is the
      * honest answer until there is - and it is checkable today, which a second
      * untested implementation would not be. */

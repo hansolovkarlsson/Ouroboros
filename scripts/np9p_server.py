@@ -4,7 +4,7 @@ client (cluster Phase 1c). It's the mirror of `np9p_client.py`: that one lets th
 host read a guest's exported filesystem; this one lets a *guest* remote-mount and
 read a filesystem served by the host - the "foreign observer" that verifies the
 client routing (netd's NETOP_RMOUNT -> TCP -> this server), per
-docs/roadmap-cluster-phase1.md's step 1c.
+docs/roadmap/roadmap-cluster-phase1.md's step 1c.
 
 It serves a small fixed in-memory tree over the length-delimited `ninep-abi`
 frame, one request/reply per connection then FIN (matching the guest export
@@ -31,7 +31,7 @@ for write/create/truncate - this export is read-only); anything else gets
 FS_ERR_NO_SUCH_VERB.
 
 **netd's export still implements NONE of the fid verbs** - that is steps 4-6 of
-docs/roadmap-fid-verbs.md - so this peer is currently AHEAD of the guest, which
+docs/roadmap/roadmap-fid-verbs.md - so this peer is currently AHEAD of the guest, which
 is the right way round for a foreign observer: the client can be built and
 checked against something that already answers.
 
@@ -504,7 +504,7 @@ def serve_request(body):
             # exactly the divergence it exists to find. That fsd's own answer
             # is the same over-generic sentinel this file just stopped using
             # for verbs is a real follow-up, recorded in
-            # docs/roadmap-fid-verbs.md, not a difference to introduce here.
+            # docs/roadmap/roadmap-fid-verbs.md, not a difference to introduce here.
             print(f"  [bad fid {fid} for verb 0x{verb:x}]", flush=True)
             return sealed(FS_ERROR)
         fpath = FIDS[fid]

@@ -1,6 +1,6 @@
 //! `clusterkeys` — the on-disk format for per-machine cluster identity.
 //!
-//! Step 6a of `docs/roadmap-cluster-keys.md`. Pure: parsing and formatting only,
+//! Step 6a of `docs/roadmap/roadmap-cluster-keys.md`. Pure: parsing and formatting only,
 //! no I/O and no syscalls, so it is host-testable like `accounts` and `regex`.
 //! Callers do their own file reading and hand byte buffers in.
 //!

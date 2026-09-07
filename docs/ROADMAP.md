@@ -14,7 +14,7 @@ This document is the one to update first when direction changes.
 > **The long-term direction** — a Plan 9-style **resource-sharing cluster**
 > (distributed Ouroboros: machines sharing storage/devices/services over
 > per-machine namespaces and a uniform file protocol) now has its own phased
-> plan in [`roadmap-cluster.md`](roadmap-cluster.md). The Plan 9 "local
+> plan in [`roadmap-cluster.md`](roadmap/roadmap-cluster.md). The Plan 9 "local
 > namespace + uniform protocol" work below is **Phase 0** of that arc — the
 > foundation the whole distributed vision builds on, not a standalone item.
 
@@ -27,7 +27,7 @@ recovery, and grant/safecopy bulk IPC (all in
 [`roadmap-completed.md`](roadmap-completed.md) / [`CHANGELOG.md`](CHANGELOG.md)).
 So is the users/permissions arc, whose last item — per-user *cluster* identity —
 shipped 2026-08-31, and the per-machine-keypair arc that followed it
-([`roadmap-cluster-keys.md`](roadmap-cluster-keys.md)), which retired the shared
+([`roadmap-cluster-keys.md`](roadmap/roadmap-cluster-keys.md)), which retired the shared
 cluster key entirely. What is left is the tier below: keys are per-*machine*,
 not per-*user*, which is item 1. In rough order of value (2 and 3 are what
 the microkernel arc itself still leaves open):
@@ -117,7 +117,7 @@ the microkernel arc itself still leaves open):
    2026-08-31.** Each node holds its own Ed25519 keypair and lists the peer
    *public* keys it accepts (SSH's `authorized_keys` model); the shared secret
    is deleted. No new server, no clock, no ticket cache, no single point of
-   failure. See [`roadmap-cluster-keys.md`](roadmap-cluster-keys.md) for the
+   failure. See [`roadmap-cluster-keys.md`](roadmap/roadmap-cluster-keys.md) for the
    step log (and for why the *symmetric* version was rejected: with a symmetric
    key, the ability to verify is the ability to forge),
    [`roadmap-completed.md`](roadmap-completed.md) for the plan-shaped summary,
@@ -222,7 +222,7 @@ the microkernel arc itself still leaves open):
      (`a9e7342`) and `ls` did not call `fs_stat` at all until **2026-08-27**
      (`3cf79d1` added `-l`, `54a9b01` file operands). So the peer was adequate
      for its documented recipe when it was written, and
-     [`roadmap-cluster-phase1.md`](roadmap-cluster-phase1.md) and
+     [`roadmap-cluster-phase1.md`](roadmap/roadmap-cluster-phase1.md) and
      [`CHANGELOG.md`](CHANGELOG.md) were correct then too. The real mechanism:
      **a guest client grew a verb dependency, and nothing re-ran the recipe
      that depended on it.** Which matters, because the lesson points somewhere
@@ -331,7 +331,7 @@ the microkernel arc itself still leaves open):
      program's `open`/`fstat` over a remote mount fails on a real guest-to-guest
      mount too. `ls -l` works remotely now; `fstat` of the same file does not.
 
-     **IN PROGRESS — [`roadmap-fid-verbs.md`](roadmap-fid-verbs.md) is the
+     **IN PROGRESS — [`roadmap-fid-verbs.md`](roadmap/roadmap-fid-verbs.md) is the
      plan: seven ordered steps, each with a check and a negative control.
      STEPS 1–3 ARE DONE AND THE REPORTED SYMPTOM IS CLOSED** — a C program
      opens and reads a file on a remote mount.
@@ -364,7 +364,7 @@ the microkernel arc itself still leaves open):
      signal by which a client opts into a session — and it must also answer
      what happens to `cpu`, whose `NP_RUN` reply carries no length prefix at
      all, so EOF is genuinely its terminator there. Detail, with the checks
-     and controls, in [`roadmap-fid-verbs.md`](roadmap-fid-verbs.md).
+     and controls, in [`roadmap-fid-verbs.md`](roadmap/roadmap-fid-verbs.md).
 
    - ~~**Re-confirmed 2026-09-05, and it is the WEDGE-TIMER failure already
      analysed below, not a new one.**~~ — **THAT ATTRIBUTION WAS WRONG, and
@@ -422,7 +422,7 @@ the microkernel arc itself still leaves open):
      works — the counter-example was in hand and read as confirmation.
 
    The docs needed no correction: `CLAUDE.md` and
-   [`testing-qemu.md`](testing-qemu.md) both show `ls /mnt/a` in that recipe,
+   [`testing-qemu.md`](testing/testing-qemu.md) both show `ls /mnt/a` in that recipe,
    and it now does what they say.
 
 3. ~~**The remote-read flake, on both transports.**~~ — **BOTH CAUSES FOUND
@@ -520,7 +520,7 @@ the microkernel arc itself still leaves open):
    and no retransmit at all on the *request* segment after the handshake. It
    matters more than a flake usually would, because it is the rig the cluster's
    permission tests run on — see the message table in
-   [`testing-qemu.md`](testing-qemu.md) for telling it apart from a real refusal.
+   [`testing-qemu.md`](testing/testing-qemu.md) for telling it apart from a real refusal.
    The fix wants a packet trace first, not a guess.
 
    **TRACED 2026-09-03, and it is not TCP.** The packet capture this entry
@@ -710,21 +710,21 @@ The small open tails those arcs deliberately left:
 
 > **Direction update (2026-08-26): Parallels real-hardware testing is PARKED.**
 > QEMU (single machine *and* the two-node cluster on a shared socket link — see
-> [`testing-qemu.md`](testing-qemu.md)) is the working dev/test loop and is
+> [`testing-qemu.md`](testing/testing-qemu.md)) is the working dev/test loop and is
 > **good enough for now**. Parallels was never going to prove the cluster anyway
 > — it has no working NIC transport (virtio-PCI, unsupported), so networking and
 > the whole Plan 9 cluster are unreachable there (see
-> [`testing-parallels.md`](testing-parallels.md) for the full analysis, kept as a
+> [`testing-parallels.md`](testing/testing-parallels.md) for the full analysis, kept as a
 > "perhaps later" reference, not an active plan). **The intended physical target
 > is now 2× Raspberry Pi 4** (real ARM hardware, ordered 2026-08-26): the Plan 9
 > resource-sharing mechanics are a better fit for genuine physical machines than a
 > VM, so a real two-node cluster on the Pis is the eventual real-hardware proof.
-> A concrete Pi test plan is now written -- [`testing-pi4.md`](testing-pi4.md), 2026-08-28, ahead of the boards, with every claim labelled (predicted) or (confirmed) so the first bench session turns it into a log. Note its headline finding: **the Pi's GENET NIC is not virtio either**, so 2x Pi 4 does not by itself deliver the two-node cluster proof -- that needs USB-Ethernet over the existing xHCI stack, or a GENET driver, first. The
+> A concrete Pi test plan is now written -- [`testing-pi4.md`](testing/testing-pi4.md), 2026-08-28, ahead of the boards, with every claim labelled (predicted) or (confirmed) so the first bench session turns it into a log. Note its headline finding: **the Pi's GENET NIC is not virtio either**, so 2x Pi 4 does not by itself deliver the two-node cluster proof -- that needs USB-Ethernet over the existing xHCI stack, or a GENET driver, first. The
 > `prlctl`/`make test-parallels` tooling below stays available but is no longer a
 > priority.
 >
 > **Pi-4 bring-up reference (pre-read, for when the boards arrive):**
-> `docs/research-redox-and-pi.md` (Part 2) maps the
+> `docs/research/research-redox-and-pi.md` (Part 2) maps the
 > `rust-raspberrypi-OS-tutorials` repo onto our situation. The key call: **try
 > the [pftf/RPi4](https://github.com/pftf/RPi4) EDK2 UEFI+ACPI firmware first** —
 > a Pi 4 under it exposes UEFI + ACPI + a GOP framebuffer, so our existing boot
@@ -883,7 +883,7 @@ normal.
   exists; and Redox pushed **`fork`/`execve` into userspace** (`redox-rt`),
   synthesizing `fork` as `clone` without `CLONE_VM` — the answer to "but C
   calls `fork()`" without putting `fork` back in the kernel. See
-  `docs/research-redox-and-pi.md`.
+  `docs/research/research-redox-and-pi.md`.
 
 **Status (2026-08-28): the mechanism is built, the arc's remainder is
 forward-looking.** The six-step libc arc is complete through a running picolibc
@@ -1068,7 +1068,7 @@ a "null namespace"). Ouroboros has both halves — per-task namespaces (`bind`/
 namespace means "unchanged," not "no access"). Making the namespace the
 enforcement boundary is the reconciliation the self-service/privilege work wants;
 Redox is the working model (and RedoxFS's encrypted partition is the reference
-for at-rest security). See `docs/research-redox-and-pi.md`.
+for at-rest security). See `docs/research/research-redox-and-pi.md`.
 
 ### 5. An on-device compiler: C and/or Rust (north-star, very large)
 
@@ -1210,12 +1210,12 @@ virtio-gpu as the entry point when the time comes. **The whole GUI stack above
 this** — how far up toward SDL/GTK it could go, which layer actually blocks, and
 why a Plan 9 `/dev/draw`-shaped `drawd` server (not an `SDL_Surface` pixel-ship
 model) is the fit for a 768-byte inline ABI with no shared memory — is worked out
-in [`research-gui-stack.md`](research-gui-stack.md). Its finding: the mouse
+in [`research-gui-stack.md`](research/research-gui-stack.md). Its finding: the mouse
 driver and a `drawd` draw server are the two steps that unlock everything else,
 and the pixel-transfer model is the day-one decision to get right.
 
 **g. Cluster data redundancy — documents failsafed across nodes (new, a later cluster phase).**
-The cluster (see [`roadmap-cluster.md`](roadmap-cluster.md)) shares disk and
+The cluster (see [`roadmap-cluster.md`](roadmap/roadmap-cluster.md)) shares disk and
 resources today, but a document lives on exactly **one** node — lose that node,
 lose the file. The direction: **automatic replication** so data is mirrored
 across cluster nodes and survives a node failure (a write on one node propagated
@@ -1232,7 +1232,7 @@ small Rust filesystem (a daemon, exactly `fsd`'s model) with copy-on-write plus
 **data *and* metadata checksums**, written from scratch rather than porting ZFS
 (Redox tried the ZFS port and abandoned it as microkernel-hostile). Checksums +
 CoW are the integrity substrate a replication scheme needs; RedoxFS is the "write
-it small, don't port a giant" precedent. See `docs/research-redox-and-pi.md`.
+it small, don't port a giant" precedent. See `docs/research/research-redox-and-pi.md`.
 
 **h. SQLite — an on-device database (new, the canonical first libc port).**
 SQLite is a single-file, dependency-light **C library** — the textbook "port one
@@ -1695,7 +1695,7 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   draining the mailbox while waiting instead of ignoring it — touches
   supervision, and writing it blind against a rig that cannot exercise it is how
   the fixes in this arc's own review kept needing fixes. Queued as step 4 of
-  [`testing-pi4.md`](testing-pi4.md) §8 and written up as its Risk 4b, so the
+  [`testing-pi4.md`](testing/testing-pi4.md) §8 and written up as its Risk 4b, so the
   first bench session picks it up rather than rediscovering it.
 
 - **An intermittent failure of `cp` across a remote mount, observed once.**

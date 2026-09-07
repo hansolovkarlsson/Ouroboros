@@ -183,7 +183,7 @@ CFILE_BIN    := $(BUILD_DIR)/cfile.bin
 NSDEMO_BIN   := $(BUILD_DIR)/nsdemo.bin
 CREMOTE_BIN  := $(BUILD_DIR)/cremote.bin
 # The Rust namespace-resolution shim a C program links to reach
-# `ninep_abi::resolve_ns` (docs/roadmap-fid-verbs.md step 3). A STATICLIB, since
+# `ninep_abi::resolve_ns` (docs/roadmap/roadmap-fid-verbs.md step 3). A STATICLIB, since
 # the consumer is a clang+LLD link, not a Rust one.
 NSRESOLVE_A  := target/aarch64-unknown-none/release/libnsresolve.a
 # --gc-sections IS REQUIRED, not a size optimization. Without it this link fails
@@ -389,7 +389,7 @@ usermod-bin:
 	cargo build -p usermod --target $(USER_TARGET) --release
 	"$(OBJCOPY)" --strip-all $(USERMOD_ELF) $(USERMOD_BIN)
 
-# On-device cluster identity (docs/roadmap-cluster-keys.md step 6c).
+# On-device cluster identity (docs/roadmap/roadmap-cluster-keys.md step 6c).
 clusterkey-bin:
 	cargo build -p clusterkey --target $(USER_TARGET) --release
 	"$(OBJCOPY)" --strip-all $(CLUSTERKEY_ELF) $(CLUSTERKEY_BIN)
@@ -491,7 +491,7 @@ selftest-bin:
 	cargo build -p selftest --target $(USER_TARGET) --release
 	"$(OBJCOPY)" --strip-all $(SELFTEST_ELF) $(SELFTEST_BIN)
 
-# The ed25519 on-target check (docs/roadmap-cluster-keys.md step 5): the same RFC
+# The ed25519 on-target check (docs/roadmap/roadmap-cluster-keys.md step 5): the same RFC
 # 8032 vectors the host tests run, plus peak-stack and per-operation timing,
 # which only the target can answer.
 edtest-bin:
@@ -673,7 +673,7 @@ esp: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin acco
 	# Manual pages: plain-text files read by /bin/MAN as /man/<command>.
 	cp manpages/* $(ESP_DIR)/man/
 	# /etc/cluster: this machine's Ed25519 identity and the peers it accepts
-	# (docs/roadmap-cluster-keys.md). netd READS `authorized` at boot as of
+	# (docs/roadmap/roadmap-cluster-keys.md). netd READS `authorized` at boot as of
 	# step 7 and verifies signed frames against it; `id` becomes load-bearing at
 	# step 8, when this machine starts signing its own outbound requests.
 	mkdir -p $(ESP_DIR)/etc/cluster
@@ -1090,7 +1090,7 @@ run-image-server: image
 		-nographic
 
 # run-image-server plus a second hostfwd for netd's 9P-export listener (port
-# 564): the cluster Phase 1 export gateway (docs/roadmap-cluster-phase1.md). A
+# 564): the cluster Phase 1 export gateway (docs/roadmap/roadmap-cluster-phase1.md). A
 # host 9P client (scripts/np9p_client.py) reaches the guest's exported fsd via
 #   python3 scripts/np9p_client.py localhost 5640 readdir /
 # reading the guest's disk over TCP. curl http://localhost:5555/ still works.

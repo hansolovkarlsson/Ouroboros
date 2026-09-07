@@ -1,5 +1,5 @@
 //! Ed25519 signing and verification — step 4 of
-//! `docs/roadmap-cluster-keys.md`, and the arc's **go/no-go gate**.
+//! `docs/roadmap/roadmap-cluster-keys.md`, and the arc's **go/no-go gate**.
 //!
 //! Everything below is RFC 8032 §5.1 with no variations. The scheme is
 //! deterministic: a signature is a function of the key and the message alone,

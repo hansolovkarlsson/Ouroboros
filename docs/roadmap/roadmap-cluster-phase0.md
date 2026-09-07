@@ -286,13 +286,13 @@ of the careful work; 0c is a small, CWD-shaped kernel addition; 0d is the payoff
 and is mostly `fsd`-internal; 0e is a light `cond` adaptation. Each step is a
 plausible single session, and each is independently shippable — so this can land
 incrementally, and a natural release boundary (a completed **arc** →
-[`RELEASING.md`](RELEASING.md)'s minor bump) is Phase 0 complete = **v0.5.0**.
+[`RELEASING.md`](../RELEASING.md)'s minor bump) is Phase 0 complete = **v0.5.0**.
 
 ## Sources
 
 - [`roadmap-cluster.md`](roadmap-cluster.md) — the phased cluster plan this
   details Phase 0 of.
-- [`research-directions.md`](research-directions.md) — the Plan 9 namespace +
+- [`research-directions.md`](../research/research-directions.md) — the Plan 9 namespace +
   uniform-protocol analysis this rests on.
 - [The Use of Name Spaces in Plan 9](https://9p.io/sys/doc/names.html) and
   [9P (protocol)](https://en.wikipedia.org/wiki/9P_(protocol)) — the model and

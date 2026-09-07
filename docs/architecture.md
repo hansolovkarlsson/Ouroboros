@@ -12,7 +12,7 @@ subsystem, and the one most likely to change next), see
 [`CHANGELOG.md`](CHANGELOG.md); for what's planned next and why, see
 [`ROADMAP.md`](ROADMAP.md). For how this boot flow compares to a mature
 microkernel's (MINIX), see
-[`research-minix-boot.md`](research-minix-boot.md).
+[`research-minix-boot.md`](research/research-minix-boot.md).
 
 ## Design goals
 

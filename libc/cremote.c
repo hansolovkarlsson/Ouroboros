@@ -1,5 +1,5 @@
 /* Open and read a file on a REMOTE mount, from C - step 3b of
- * docs/roadmap-fid-verbs.md, and the thing that could not be done before.
+ * docs/roadmap/roadmap-fid-verbs.md, and the thing that could not be done before.
  *
  * Fixed paths, because C programs get no argv yet (crt0.c calls main() with no
  * arguments). Run it after `mount -r <host>:<port> /mnt/a`.

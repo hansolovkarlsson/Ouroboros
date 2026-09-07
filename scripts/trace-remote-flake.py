@@ -29,7 +29,7 @@ This refuses to report anything unless the peer's request count rose.
 
 Reuses drive-qemu.py's `Guest` rather than copying it: the paced typing and the
 match-only-NEW-output high-water mark are load-bearing, and a second copy would
-drift. See docs/testing-qemu.md.
+drift. See docs/testing/testing-qemu.md.
 """
 import importlib.util, os, sys, time
 

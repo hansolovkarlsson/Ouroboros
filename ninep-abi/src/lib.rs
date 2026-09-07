@@ -1,5 +1,5 @@
 //! `ninep-abi` — the uniform, server-agnostic file-protocol verb set for the
-//! distributed-cluster arc (Phase 0; see `docs/roadmap-cluster-phase0.md`).
+//! distributed-cluster arc (Phase 0; see `docs/roadmap/roadmap-cluster-phase0.md`).
 //!
 //! The whole cluster direction rests on one insight: *"remote" is just "the
 //! same protocol, over TCP instead of local IPC."* Today each server speaks its
@@ -223,7 +223,7 @@ pub const NP_RUN: u64 = NP_BASE + 0x20;
 // message itself: the 48-byte header + payload for a request, or the 8-byte
 // status + result for a reply). A reader reads 4 bytes, then `len` more. The
 // header is exactly the local NP wire; only the transport of bulk data changes
-// (inline, not via a grant). See `docs/roadmap-cluster-phase1.md`.
+// (inline, not via a grant). See `docs/roadmap/roadmap-cluster-phase1.md`.
 // ---------------------------------------------------------------------------
 
 /// The TCP port a machine's 9P export listener runs on (9P's registered port),
@@ -335,7 +335,7 @@ pub const NP_REMOTE_CHUNK: usize = 512;
 // Every *inbound* framed export request carries an auth header in front of the
 // NP message; the exporter verifies it before serving any verb (fs op *or*
 // `NP_RUN`). The scheme is a **per-machine Ed25519 signature** over a
-// client-chosen nonce (see `docs/roadmap-cluster-keys.md`):
+// client-chosen nonce (see `docs/roadmap/roadmap-cluster-keys.md`):
 //
 //   framed request:  [u32 len][magic:8][nonce:16][name:32][pubkey:32][sig:64][NP message...]
 //
@@ -379,7 +379,7 @@ pub const NP_REMOTE_CHUNK: usize = 512;
 // still cross in cleartext.
 //
 // Still out of scope (deferred to the leaving-a-trusted-network hardening,
-// docs/roadmap-cluster.md): replay-of-observed-ops (a passive sniffer can replay
+// docs/roadmap/roadmap-cluster.md): replay-of-observed-ops (a passive sniffer can replay
 // a captured request verbatim; forgery of a *new* one it cannot), transport
 // encryption, and reply-auth for the `cpu`-run output *stream* (not a framed
 // reply). Keys are per-MACHINE, not per-user, so an authorized machine can still
@@ -420,7 +420,7 @@ pub const NP_AUTH_NONCE_OFF: usize = 8;
 /// Offset of the requesting user's name within the auth header.
 pub const NP_AUTH_NAME_OFF: usize = 8 + NP_NONCE_LEN;
 /// Magic marking a **signed** framed request — the per-machine-keypair format
-/// (`docs/roadmap-cluster-keys.md`). The ONLY accepted format since the flag
+/// (`docs/roadmap/roadmap-cluster-keys.md`). The ONLY accepted format since the flag
 /// day; it was accepted alongside the shared-key MAC'd magic `AUTHNP02` during
 /// the transition, which is what let the exporter learn to verify signatures
 /// before any client learned to make them.

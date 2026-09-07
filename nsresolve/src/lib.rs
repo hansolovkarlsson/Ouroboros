@@ -1,7 +1,7 @@
 //! Namespace resolution for the C fd path — the one piece of `ulib`'s routing
 //! that a C program cannot reach.
 //!
-//! **Why this crate exists.** Step 3 of `docs/roadmap-fid-verbs.md`: a C
+//! **Why this crate exists.** Step 3 of `docs/roadmap/roadmap-fid-verbs.md`: a C
 //! `open("/mnt/a/F")` today goes straight to `fsd`, which knows nothing about
 //! `/mnt/a` — that is a *namespace* binding, and only `ninep_abi::resolve_ns`
 //! knows how to read one. `resolve_ns` is deliberately the **single source** for

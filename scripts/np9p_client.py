@@ -3,7 +3,7 @@ r"""A minimal host-side client for Ouroboros's 9P-over-TCP export (cluster
 Phase 1). Speaks the length-delimited `ninep-abi` frame to a netd export
 listener (default guest port 564, reached via a SLIRP hostfwd) so you can read a
 guest's filesystem over TCP from the host - the "foreign observer" that verifies
-the export gateway (docs/roadmap-cluster-phase1.md).
+the export gateway (docs/roadmap/roadmap-cluster-phase1.md).
 
 Usage:
     python3 scripts/np9p_client.py <host> <port> readdir <path>
@@ -294,7 +294,7 @@ def recv_reply(sock, nonce, peer_key=None):
     # the wire and the server's FIN was never NEEDED to know where it ends -
     # only convenient. Waiting for one is what makes this client unable to talk
     # to an export that keeps the connection open between requests, which is
-    # what a fid SESSION is (decision 3, docs/roadmap-fid-verbs.md): it would
+    # what a fid SESSION is (decision 3, docs/roadmap/roadmap-fid-verbs.md): it would
     # block here forever on a reply it had already received in full.
     #
     # Landed on its own, and BEFORE any session exists, because it is a no-op
@@ -688,7 +688,7 @@ def main():
         #
         # Send a correctly-signed request for a verb the export has NO ARM for -
         # NP_OPEN by default, the first of the five fid verbs (the open frontier
-        # item; see docs/roadmap-fid-verbs.md). The point is the STATUS the
+        # item; see docs/roadmap/roadmap-fid-verbs.md). The point is the STATUS the
         # guest answers with, not the data.
         #
         # Until 2026-09-05 that status was the generic FS_ERROR, which every

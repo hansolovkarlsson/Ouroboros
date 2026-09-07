@@ -9,8 +9,8 @@ microkernel / bare-metal-OS developers.*
 A companion to the [network-stack](network-stack-postmortem.md) and
 [console-server](console-server-postmortem.md) postmortems (which built the
 servers this arc unifies) and the forward-looking
-[`roadmap-cluster.md`](../roadmap-cluster.md) and
-[`roadmap-cluster-phase0.md`](../roadmap-cluster-phase0.md) (the vision and the
+[`roadmap-cluster.md`](../roadmap/roadmap-cluster.md) and
+[`roadmap-cluster-phase0.md`](../roadmap/roadmap-cluster-phase0.md) (the vision and the
 detailed design). This is the arc where the insight *"remote is just this
 protocol over TCP instead of local IPC"* stopped being a slogan and became the
 actual shape of the code.

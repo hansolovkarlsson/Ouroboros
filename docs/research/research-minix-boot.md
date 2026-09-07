@@ -1,7 +1,7 @@
 # Research: MINIX's boot process, compared to Ouroboros's
 
 A comparative research note, not reference documentation for our own
-system (see [`architecture.md`](architecture.md) for that) — MINIX is one
+system (see [`architecture.md`](../architecture.md) for that) — MINIX is one
 of this project's stated influences (the original brief: "draw ideas from Linux,
 Minix, and Plan 9"), so this looks at how a real, decades-mature
 microkernel actually boots and starts its first processes, and where
@@ -71,7 +71,7 @@ speculation:
 
 ## Ouroboros's boot sequence, for direct comparison
 
-See [`architecture.md`](architecture.md#boot-flow) for the authoritative
+See [`architecture.md`](../architecture.md#boot-flow) for the authoritative
 version; summarized here in the same shape as MINIX's sequence above for
 side-by-side reading:
 
@@ -152,7 +152,7 @@ influences without imitating them outright.
 ## Concrete patterns worth revisiting once the prerequisites exist
 
 Not commitments, just noted parallels between where MINIX's design landed
-and where this project's own [`ROADMAP.md`](ROADMAP.md) is already headed:
+and where this project's own [`ROADMAP.md`](../ROADMAP.md) is already headed:
 
 - **A "boot image" of more than one program**, the way MINIX packs
   kernel+PM+VFS+RS together, is a natural generalization of `loader.rs`

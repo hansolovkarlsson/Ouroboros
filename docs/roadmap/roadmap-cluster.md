@@ -9,7 +9,7 @@ and it is the thing Ouroboros is ultimately aiming at.
 
 This document is the honest, phased plan from where the code is today to a
 working two-node cluster and beyond. It's a companion to
-[`research-directions.md`](research-directions.md) (which argued Plan 9's
+[`research-directions.md`](../research/research-directions.md) (which argued Plan 9's
 namespace model is the standout next architecture) — this one takes that
 conclusion and follows it all the way to the distributed goal. It commits us to
 a *direction and a sequence*, not to writing all of it now.
@@ -53,7 +53,7 @@ The two hardest pieces of a distributed OS are already built and
   request, blocks, gets a reply) is *already* the shape of a file-protocol
   transaction.
 - **A working TCP/IP stack** (`netd`, the network-stack arc — see
-  [`network-stack-postmortem.md`](postmortems/network-stack-postmortem.md)): ARP, IPv4,
+  [`network-stack-postmortem.md`](../postmortems/network-stack-postmortem.md)): ARP, IPv4,
   ICMP, UDP, DNS, and TCP with congestion control, loss recovery, and a
   concurrent HTTP server. This is the transport a distributed protocol rides on.
 
@@ -101,7 +101,7 @@ protocol you wrote from scratch.
 > namespace as per-task kernel-stored opaque bytes; capabilities unchanged), the
 > `ninep-abi` verb/wire format, `fsd` multi-mount, and the staged 0a–0e plan.
 
-*This is the Plan 9 "local half" from [`research-directions.md`](research-directions.md),
+*This is the Plan 9 "local half" from [`research-directions.md`](../research/research-directions.md),
 now understood as the foundation of the whole distributed vision rather than a
 standalone elegance play. It has a concrete local consumer — **multiple
 simultaneous mounts** — so it's a feature, not a refactor-for-vanity.*
@@ -210,7 +210,7 @@ files, so a machine dials TCP **out of another's NIC** (`dial /mnt/a/net <ip>
 extended); `net_op` only mutates state while the event loop (`pump_dials` /
 `dial_on_segment`) does the TCP; `/net` became read-write. Stop-and-wait, TCP
 client only. The "use another machine's network" half of the north star. See
-[`dial-out-postmortem.md`](postmortems/dial-out-postmortem.md).
+[`dial-out-postmortem.md`](../postmortems/dial-out-postmortem.md).
 
 **Follow-up ✅ DONE (2026-08-26): `/net/tcp` dial-in** — the mirror of dial-out:
 `announce <port>` + `listen` make a machine **accept inbound** connections on
@@ -219,7 +219,7 @@ address). Passive open on A, relay to B, B owns the service. An accepted
 connection is just another `DialConn` (handle in the path, still no fids), so it
 was almost all reuse; small fan-out (a listener + two accepts). Completes the
 `/net/tcp` model symmetrically. See
-[`dial-in-postmortem.md`](postmortems/dial-in-postmortem.md).
+[`dial-in-postmortem.md`](../postmortems/dial-in-postmortem.md).
 
 Deferred to later phases: a persistent multi-accept server loop; UDP; union
 directories when a consumer appears; and transitive/remote re-export (the export
@@ -298,7 +298,7 @@ netd holding the run's output in a `PendingRun` buffer), lifting the cap to ~2 K
     (no `\CLUSTER.KEY` = export refuses all remote clients); a `\NOEXEC` flag
     shares the disk while refusing remote-exec. The symmetric key makes the
     bidirectional `cpu` `/host` callback authenticate for free. See
-    [`cluster-auth-postmortem.md`](postmortems/cluster-auth-postmortem.md).
+    [`cluster-auth-postmortem.md`](../postmortems/cluster-auth-postmortem.md).
   - **Superseded ✅ (the per-machine-keypair arc, 2026-09-01).** The shared
     secret is **gone**: every machine now holds its own Ed25519 keypair and
     authorizes peers by public key (`/etc/cluster/authorized`, the
@@ -319,7 +319,7 @@ netd holding the run's output in a `PendingRun` buffer), lifting the cap to ~2 K
     the framed fs / `/net/tcp` replies; the `cpu`-run *output stream* (not a framed
     reply) is left with the untrusted-network work below. Banked as defense-in
     -depth under trusted-LAN because the symmetric key made it nearly free. See the
-    tier-2 addendum in [`cluster-auth-postmortem.md`](postmortems/cluster-auth-postmortem.md).
+    tier-2 addendum in [`cluster-auth-postmortem.md`](../postmortems/cluster-auth-postmortem.md).
   - **Tier 3 — per-user identity ✅ DONE (2026-08-31).** The tiers above
     authenticate a *machine*; this says which of that machine's **users** is
     asking. The auth header carries the caller's **name** (32 bytes, NUL-padded),
@@ -331,7 +331,7 @@ netd holding the run's output in a `PendingRun` buffer), lifting the cap to ~2 K
     nodes number their users independently, and NFS's `AUTH_SYS` shows what
     sending the number does. The identity reaches `fsd` as a **required
     parameter** carried in the request (`a3`), never an opt-in wrapper or a latch
-    — see [`unspellable-postmortem.md`](postmortems/unspellable-postmortem.md) for the
+    — see [`unspellable-postmortem.md`](../postmortems/unspellable-postmortem.md) for the
     attempt that did it the other way and what that cost. `cpu` is covered by a
     second mechanism: `netd` assumes the mapped user for the length of the spawn
     so the child inherits it. **Still machine-keyed**, which is the point of the
@@ -355,7 +355,7 @@ netd holding the run's output in a `PendingRun` buffer), lifting the cap to ~2 K
       users' names, so the model defends against the users of a trusted node but
       not a compromised one. **A designated auth server (Plan 9's
       `authsrv` + tickets) is evaluated in full under item 1 of
-      [`ROADMAP.md`](ROADMAP.md)**: it is the right long-term shape, it is what
+      [`ROADMAP.md`](../ROADMAP.md)**: it is the right long-term shape, it is what
       Plan 9 does, and the note records both the detail that decides whether it
       closes the hole at all (the ticket must be verifiable by the *exporter*
       without trusting the peer) and why per-machine keypairs should come first.
@@ -438,7 +438,7 @@ mirage, it's a straight line of engineering from what already boots today.
   message set to base the uniform protocol on (a minimal subset first).
 - Plan 9's `cpu` command and CPU-server model — the reference for Phase 4
   (execution with an imported namespace).
-- This project's own [`research-directions.md`](research-directions.md) (the
+- This project's own [`research-directions.md`](../research/research-directions.md) (the
   Plan 9 local-half analysis) and
-  [`network-stack-postmortem.md`](postmortems/network-stack-postmortem.md) (the transport
+  [`network-stack-postmortem.md`](../postmortems/network-stack-postmortem.md) (the transport
   this rides on, and the two-VM/trace-based testing discipline to reuse).

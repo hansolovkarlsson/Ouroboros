@@ -33,7 +33,7 @@ are load-bearing rather than defensive:
 A settle delay after each match (SETTLE) covers the same hazard for the tail of
 a prompt that is still draining.
 
-See docs/testing-qemu.md, and the memory note on QEMU stdin driving the guest
+See docs/testing/testing-qemu.md, and the memory note on QEMU stdin driving the guest
 shell. The technique is what makes `cpu`, login, and permission behaviour
 testable without a human at the keyboard.
 """
@@ -153,7 +153,7 @@ class Guest:
         - **`SError` counts.** It is the asynchronous fault class a DMA or MMU
           bug produces - including a server overrunning its guard page - so
           dropping it turns exactly the runs worth catching into clean ones.
-          docs/testing-qemu.md defines the bar as
+          docs/testing/testing-qemu.md defines the bar as
           `Data Abort|Prefetch Abort|SError`, and this must not disagree with it.
         - **Lines, not substring occurrences.** Two faults reported on one line
           are two faults, and one line mentioning `Abort` twice is not.

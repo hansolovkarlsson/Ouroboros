@@ -998,7 +998,7 @@ pub const NETOP_RUN: u64 = 5;
 /// once the output is exhausted (end of stream). This is the shell-side chunked
 /// delivery that lifts `cpu` output past one message; truly unbounded streaming
 /// (the remote sending as it produces) is a later refinement - see
-/// `docs/roadmap-cluster.md`.
+/// `docs/roadmap/roadmap-cluster.md`.
 pub const NETOP_RUN_MORE: u64 = 6;
 
 /// [`CON_INFO`] field: the backend kind ([`CON_KIND_*`]).
@@ -1330,7 +1330,7 @@ pub const FS_ERR_IO: u64 = u64::MAX - 10;
 /// no-exec lever). Surfaces as a remote-mount / `cpu` failure so the shell can
 /// say "authentication failed" distinctly from [`NO_FS`] (an unreachable peer).
 /// In the `FS_ERR_*` band, so `>= FS_ERR_MIN` treats it as an error like every
-/// other. See `docs/roadmap-cluster-keys.md`.
+/// other. See `docs/roadmap/roadmap-cluster-keys.md`.
 ///
 /// Shipped in v0.10.0 for a shared-key client-nonce MAC, which v0.16.0's flag
 /// day deleted; the code and its meaning to a caller are unchanged.

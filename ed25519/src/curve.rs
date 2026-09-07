@@ -1,5 +1,5 @@
 //! Points on Ed25519's twisted Edwards curve, and scalar multiplication.
-//! Step 3 of `docs/roadmap-cluster-keys.md`.
+//! Step 3 of `docs/roadmap/roadmap-cluster-keys.md`.
 //!
 //! The curve is `−x² + y² = 1 + d·x²·y²` over GF(2²⁵⁵−19), with
 //! `d = −121665/121666`. Signing and verification are entirely: multiply a

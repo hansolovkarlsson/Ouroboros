@@ -578,13 +578,15 @@ docs/                every document is annotated in full in `docs/README.md` - r
   shell-commands.md  reference: the default shell's builtin commands
   CHANGELOG.md       the milestone record, phase 0 to the present, newest first - what was built, and why it works the way it does
   ROADMAP.md         the forward-looking plan (finished arcs live in roadmap-completed.md; the cluster direction in roadmap-cluster.md)
+  roadmap/           the sub-plans: the seven cluster documents (roadmap-cluster*.md) and roadmap-fid-verbs.md
   work-journal/      chronological dev-log, one file per day plus an index README - a lighter companion to CHANGELOG.md
-  testing-qemu.md    every `make run-*` target, the FAT32/exFAT/ext2/GPT test images, the 9P host peers, the two-node cluster rig
-  testing-parallels.md, testing-pi4.md   the real-hardware guides. Both share one caveat: NO NETWORKING, so the whole cluster is QEMU-only
+  testing/           testing-qemu.md (every `make run-*` target, the test images, the 9P host peers, the two-node
+                     cluster rig), testing-parallels.md and testing-pi4.md (the real-hardware guides, sharing one
+                     caveat: NO NETWORKING, so the whole cluster is QEMU-only), testing-exfat.md
   gap-analysis.md    per-subsystem have/partial/don't inventory vs mainstream Unixes, capped by a ranked list of the biggest gaps
   archive/           contemporaneous build logs, kept for archaeology only - not the reference
   postmortems/       the twenty-nine design/bug/process retrospectives, one file each (see the section above, and docs/README.md)
-  research-*.md      synthesis notes on MINIX/Plan 9/Helix/Redox, the GUI stack, and where the design should go next
+  research/          synthesis notes on MINIX/Plan 9/Helix/Redox, the GUI stack, and where the design should go next
 
 kernel/              every file annotated in full in `docs/source-map.md`; each also carries its own `//!`
   src/main.rs        #[entry]: UEFI init, console/MADT/PSCI discovery, loader, ExitBootServices, then exceptions/mmu/xhci/storage/net/gic/timer/tasks
@@ -669,7 +671,7 @@ libc/                the C-portability arc: crt0 + syscall stubs + a narrow wais
                      (third_party/picolibc-prebuilt; regenerate with scripts/build-picolibc.sh)
 scripts/             test-parallels.sh (real-hardware smoke test), drive-qemu.py + drive-2vm.py (drive the guest
                      shell / a two-node cluster unattended - the fussy paced typing is load-bearing, see
-                     docs/testing-qemu.md), mk{gpt,exfat,ext2,clusterkeys,passwd,group}.py (build the test disk
+                     docs/testing/testing-qemu.md), mk{gpt,exfat,ext2,clusterkeys,passwd,group}.py (build the test disk
                      images and the staged /etc files), np9p_{client,server}.py (the host-side 9P peers - the
                      FOREIGN OBSERVER for both directions of the export)
 ```
