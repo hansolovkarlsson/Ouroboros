@@ -132,9 +132,9 @@ def c_consts(path):
             # Integers, with optional u/U suffix and optional 0x, and simple
             # `(NAME + n)` sums. Anything else stays INVISIBLE rather than
             # guessed at - the same narrowness the Rust parser uses.
-            m = re.fullmatch(r"\(?(\w+)\s*\+\s*(\d+)\)?", body)
+            m = re.fullmatch(r"\(?(\w+)\s*\+\s*(0[xX][0-9a-fA-F]+|\d+)\)?", body)
             if m and m.group(1) in out:
-                out[name] = out[m.group(1)] + int(m.group(2))
+                out[name] = out[m.group(1)] + int(m.group(2), 0)
                 continue
             m = re.fullmatch(r"(0[xX][0-9a-fA-F]+|\d+)[uU]?[lL]*", body)
             if m:
@@ -203,8 +203,9 @@ CHECKED = [
     "NETOP_RMOUNT",
     "NETOP_RMOUNT_ENDPOINT",
     "NETOP_RMOUNT_MSG",
-    # Error codes a C program branches on to decide what to print.
-    "FS_ERR_NOT_FOUND",
+    # Error codes a C program branches on to decide what to print
+    # (FS_ERR_NOT_FOUND too, listed once above: a second listing counted it
+    # twice per peer and inflated every baseline by one, found by review).
     "FS_ERR_PERM",
     "MSG_ERR_DENIED",
     # The endpoint width, spelled a third time in libc/include/nsresolve.h.
@@ -280,7 +281,7 @@ CHECKED = [
 # what it is named for. Confirmed, which is why these are numbers and not a
 # truthiness test. Raise a baseline when a peer learns a new constant.
 PEER_BASELINE = {
-    "np9p_client.py": 28,  # the counted value on 2026-09-07, once the verbs were pinned
+    "np9p_client.py": 27,  # the counted value on 2026-09-07, once the verbs were pinned
     # Rose from 10 when the `noverb` probe's status-name table was rebuilt
     # from module constants instead of repeated literals: FS_ERROR,
     # FS_ERR_READ_ONLY, FS_ERR_PERM and FS_ERR_NO_SUCH_VERB became names this
@@ -292,13 +293,13 @@ PEER_BASELINE = {
     # reduced count was recorded as expected. Both now use the shared names; the
     # floor rises with them, or the rename could be undone without this
     # noticing.
-    "np9p_server.py": 27,  # counted 2026-09-07, verbs included
+    "np9p_server.py": 26,  # counted 2026-09-07, verbs included
     # The C header. It spells far more of the ABI than either Python peer; this
     # floor covers the names CHECKED lists today.
     # Raised from 3 when step 3b's constants were pinned. The script's own
     # instruction is to raise a baseline when a peer learns a new constant; it
     # had already learned FS_ERR_NOT_FOUND without the floor moving.
-    "libc/include/sys.h": 23,  # counted 2026-09-07; was 11 while it already matched 16
+    "libc/include/sys.h": 22,  # counted 2026-09-07; was 11 while it already matched 16
     "libc/include/nsresolve.h": 5,  # + 4 STAT_* offsets, FS_ERR_READ_ONLY, STAT_FLAG_DIR, FS_ERROR, FS_ERR_NO_SUCH_VERB
 }
 
