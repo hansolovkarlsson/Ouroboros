@@ -233,3 +233,49 @@ classes in `grep`, computed rather than transcribed. Two permission fixes.
 ones recorded.
 
 And five instruments that can now fail.
+
+## Two more, earned four days later (2026-09-06)
+
+Both are the spine again, and both were found the same way as the five: not by
+reading, but by a result that did not fit any version of the code.
+
+**An instrument that could not tell two shells apart.** The nested-shell check
+types `exec /EFI/ORBS/SH.BIN`, `fg 6`, logs in, and runs a pipeline. The first
+run against the parent-tracking fix showed the first two pipelines refused and
+the next two working, which no version of the rule predicts. The edit script
+had stopped on its first assertion and written nothing, so that was the *old*
+kernel; and the old kernel was showing something else. After any command in the
+nested shell, even a builtin, the keyboard goes back to the boot shell, and both
+shells print the same `# `. The "working" pipelines ran in the other shell. The
+transcript was confident, well-formed, and about a question it had not asked:
+*which task answered*. The recipe now types `fg 6` before every nested command,
+keys each step on the previous command's output rather than the prompt, and
+ends with a `ps` whose `task 6: runnable` is the only line that says who ran
+the test. The keyboard revert itself is a pre-existing bug, on the ledger.
+
+**A fix that fails to apply looks exactly like a partial fix.** Twice in one
+afternoon an edit script asserted an anchor, missed it, exited, and wrote
+nothing, and the "after" run was the "before" tree. The adjacent case above
+("a mutation that did not apply") is this one's dual: there, an unapplied
+mutation looked like a test that could not fail; here, an unapplied fix looked
+like a fix that half worked, and the half that "worked" was the other bug. A
+third time the script applied and the build reported success with a warning
+the log did not surface: a fold over teardown sites had matched the new
+helper's own body and turned it into a call to itself, and the guest never
+reached the login prompt. The counter-practice is the same as before with one
+line added: **confirm the change applied before reading the result** (print
+per step, write per file, `grep` the symbol you expect), and treat a build
+that succeeds with a new warning as a build that has not been read.
+
+**Eight review rounds, and the delta every one found.** Four PRs today went
+through eight rounds of `/code-review`. Every round found at least one real
+defect, and in seven of the eight it was in code that had changed since the
+previous round: the fix for the previous round's finding. The one regression
+that would have shipped (a sentinel equal to "no identity", so the kernel's
+health ping matched every idle connection and the supervisor restarted `netd`)
+was in a round-two repair. That is
+[`repairing-the-repairs-postmortem.md`](repairing-the-repairs-postmortem.md)'s
+number arriving on schedule, and it is what makes "the code that was reviewed
+is not the code on the branch" a reason to run the next round rather than a
+reason to skip it.
+

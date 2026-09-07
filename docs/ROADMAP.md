@@ -1485,6 +1485,14 @@ would otherwise silently shrink into looking like nothing was ever found.
     `caps_for_slot` would make "which tasks may create tasks" a stated policy
     rather than an accident of the dispatch table. Raised by the `medium`
     review of the one-step delegation change, 2026-09-06.
+  - **The refusal side of delegation has no check that can fail.** Every
+    `DELEGATE` in the tree is a parent granting to its own child, so nothing
+    ever exercises "a task cannot delegate to or for a stranger"; the
+    one-clause rule rests on reading. Rig item: a deliberately misbehaving
+    `/bin` program that issues `DELEGATE(grantee=<not its child>, ...)` and
+    `DELEGATE(<its child>, <a task it cannot reach>)` and prints the two
+    answers, expected `MSG_ERR_DENIED` both times. Promised in the journal on
+    2026-09-06 and not built.
   - **A foregrounded nested shell loses the keyboard after every command.**
     `exec /EFI/ORBS/SH.BIN`, `fg 6`, log in, `echo hi` (a builtin, no child,
     no `FG`): `ps` before shows task 0 blocked and task 6 runnable, `ps` after

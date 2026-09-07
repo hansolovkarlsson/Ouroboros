@@ -7,6 +7,44 @@ for the forward plan see [`ROADMAP.md`](ROADMAP.md).
 
 ---
 
+## 2026-09-06 (cont. 6): the day as a whole, written at its close
+
+*(Five PRs: the 09-06 closeout #109, then #110, #111, #112 merged, and #113
+open with three review rounds on it. Four of the five pre-existing findings
+from the delegation review are closed; the fifth, `delegate_net` discarding
+its result, is worse than it was and still open.)*
+
+The morning's standup called the first finding "the most user-visible of the
+five" and it was the least: a wrong line in a race that printing producers
+never reach. Each finding after it turned out to need a kernel primitive
+rather than a patch, and the choice was made the same way each time, scored
+against the three criteria Hans then asked to have registered as policy:
+stable, safe, and not blocking what comes next. So the day's real deliverables
+are primitives. The kernel answers *which* end of a link is dead. A grant aimed
+at a supervised server survives its restart. Every task has an identity that a
+recycled slot cannot inherit, captured with the credential the kernel already
+binds at send time. Every task has a parent, by that identity, and may pass
+what it holds one step down. Netd's two records and its special-case bit are
+gone into the general mechanism. The nested shell, which could run no pipeline
+this morning, runs all five shapes tonight.
+
+What the day cost was reviews, and they were worth every round. Eight rounds
+across four PRs; each found something real, and seven of the eight found it in
+the previous round's repair. One would have shipped a `netd` that the
+supervisor restarted whenever a client sat idle. The pattern is now recorded
+where it belongs, in `blind-instruments-postmortem.md`, with the two rig
+blindnesses that nearly hid it: a transcript that could not say which shell
+answered, and an edit script that stopped before it wrote.
+
+Left for tomorrow, in order of weight: the wire signal for a persistent export
+session, which has blocked the fid arc for two days; whether `SPAWN` should be
+gated now that any task may hand its children what it holds; the two remaining
+carriers of slot-as-identity, `fsd`'s fids and the `/net/tcp` table; and a
+release, since two new syscalls and a changed delegation rule are ABI that
+`CHANGELOG.md` does not yet know about.
+
+---
+
 ## 2026-09-06 (cont. 5): rights flow one step down, and a nested shell can finally pipe
 
 *(The fourth ledger finding: a nested shell cannot delegate at all, so it can
