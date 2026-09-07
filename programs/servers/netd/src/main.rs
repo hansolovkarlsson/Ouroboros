@@ -99,6 +99,22 @@ const SERVER_ISN: u32 = 0x0002_0000;
 /// ~2KB response-prefix buffer and they all live on `serve()`'s stack; a SYN
 /// arriving with no free slot is dropped (the peer retransmits).
 const MAX_CONNS: usize = 4;
+/// How many of those may be SESSIONS (`NP_SESSION`, docs/roadmap/roadmap-fid-verbs.md
+/// Decision 3) at once. One below `MAX_CONNS` on purpose: a session holds its
+/// slot until the peer closes it or the idle reap takes it, so if every slot
+/// could be a session, one-shot traffic (a plain request, a `cpu` run, the HTTP
+/// server) would be shut out for as long as the peers cared to idle. The
+/// (MAX_CONNS + 1)th request is refused with `FS_ERR_BUSY`, never by evicting a
+/// live session. A per-PEER share is not enforced: with two nodes there is one
+/// peer each way, and starving is a three-node problem (ledgered).
+const SESSION_MAX: usize = MAX_CONNS - 1;
+/// A server connection with nothing in flight and no segment from its peer for
+/// this long is reaped with a RST: 30 s at 20 ms per tick. This is what bounds
+/// a session whose peer died without a FIN (and, since 2026-09-07, an HTTP or
+/// one-shot 9P connection whose peer never sent a request or never finished
+/// closing - the same leak, which nothing bounded before). A `cpu` run
+/// connection is exempt while its child runs, since neither side speaks then.
+const CONN_IDLE_TICKS: u64 = 1500;
 /// Max SACK blocks parsed from one segment's TCP options (RFC 2018 allows up
 /// to 4 in the 40-byte option area, 3 alongside timestamps).
 const MAX_SACK: usize = 4;
@@ -542,6 +558,10 @@ fn serve(packed_mac: u64) -> ! {
                     continue;
                 }
                 if service_rto(&mac, conns[i].as_mut().unwrap(), now()) {
+                    conns[i] = None;
+                    continue;
+                }
+                if reap_idle(&mac, conns[i].as_ref().unwrap(), now()) {
                     conns[i] = None;
                     continue;
                 }
@@ -1357,6 +1377,10 @@ fn pump_conns(mac: &[u8; 6], conns: &mut [Option<TcpConn>; MAX_CONNS]) {
             conns[i] = None;
             continue;
         }
+        if reap_idle(mac, conns[i].as_ref().unwrap(), now()) {
+            conns[i] = None;
+            continue;
+        }
         loop {
             let c = conns[i].as_mut().unwrap();
             if !c.responded {
@@ -1771,6 +1795,16 @@ struct TcpConn {
     /// `SENDER_TASK` on every message, never the bare slot, which is recycled
     /// the moment the child is reaped.
     cpu_child: u64,
+    /// This connection is a SESSION: `NP_SESSION` was accepted on it. After each
+    /// reply is fully acked the request state resets (see
+    /// `session_reset_if_done`) instead of a FIN going out, so the next request
+    /// is served on the same connection - the lifetime a fid needs. Never
+    /// cleared: a session ends when the peer closes it, or the idle reap takes
+    /// it, and either frees the slot.
+    session: bool,
+    /// The tick (`now()`) of the last segment from the peer; `reap_idle` reads
+    /// it.
+    last_rx: u64,
 }
 
 /// `TcpConn::cpu_child` sentinel: this connection is not a remote-run capture.
@@ -2117,7 +2151,15 @@ fn handle_tcp(mac: &[u8; 6], frame: &[u8], seg: &TcpIn, conns: &mut [Option<TcpC
     // retransmitted/duplicate SYN) or a free one, and answer with SYN-ACK.
     if seg.flags & TCP_SYN != 0 && seg.flags & TCP_ACK == 0 {
         let Some(i) = find_conn(conns, seg).or_else(|| free_slot(conns)) else {
-            return; // all slots busy - drop; the peer will retransmit
+            // All slots busy: REFUSE (RST), do not drop. A dropped SYN was fine
+            // while every connection was one request long - the peer
+            // retransmitted into a slot that freed within a second. A session
+            // holds its slot for as long as its peer likes, so a drop would now
+            // hang the caller until its own connect timeout, and the plan's
+            // check is that the refusal is an error the client REPORTS. (Not
+            // logged: reachable by anyone who can send a SYN.)
+            send_rst_to(mac, seg);
+            return;
         };
         let mut c = TcpConn {
             peer_ip: seg.src_ip,
@@ -2154,6 +2196,8 @@ fn handle_tcp(mac: &[u8; 6], frame: &[u8], seg: &TcpIn, conns: &mut [Option<TcpC
             cwnd: INIT_CWND,
             ssthresh: INIT_SSTHRESH,
             cpu_child: CPU_NONE,
+            session: false,
+            last_rx: now(),
         };
         send_seg(mac, &c, TCP_SYN | TCP_ACK, true, &[]);
         c.snd_nxt = c.snd_nxt.wrapping_add(1); // our SYN consumes one too
@@ -2162,12 +2206,67 @@ fn handle_tcp(mac: &[u8; 6], frame: &[u8], seg: &TcpIn, conns: &mut [Option<TcpC
         return;
     }
 
-    // Everything else is dispatched to its matching connection (if any).
+    // Everything else is dispatched to its matching connection (if any). The
+    // session count is taken here, before the slot is borrowed, so `NP_SESSION`
+    // can be budgeted against the whole table.
+    let sessions = conns.iter().filter(|c| matches!(c, Some(c) if c.session)).count();
     if let Some(i) = find_conn(conns, seg) {
-        if handle_conn_segment(mac, frame, seg, conns[i].as_mut().unwrap(), dials, auth) {
+        if handle_conn_segment(mac, frame, seg, conns[i].as_mut().unwrap(), dials, auth, sessions) {
             conns[i] = None;
         }
     }
+}
+
+/// Refuse a SYN outright: `[RST|ACK]` with `ack = seq + 1`, the answer a closed
+/// port gives, so the peer's connect fails now instead of retransmitting into
+/// a table that may not free for as long as a session lasts. No `TcpConn` is
+/// built for it (the struct is 2 KB of stack on a task that has hit its guard
+/// page before).
+fn send_rst_to(mac: &[u8; 6], seg: &TcpIn) {
+    let mut out = [0u8; 1600];
+    if let Some(n) = build_tcp_srv(
+        mac, &seg.src_mac, &seg.src_ip, seg.src_port, seg.dst_port, 0, seg.seq.wrapping_add(1),
+        TCP_RST | TCP_ACK, false, &[], &mut out,
+    ) {
+        let _ = send(&out[..n]);
+    }
+}
+
+/// A session whose reply is fully sent AND fully acked goes back to waiting for
+/// a request: the same connection, a fresh `prefix`. Acked, not merely sent,
+/// because `prefix` is also what a retransmit is read from - clearing it with
+/// bytes still in flight would resend garbage. Called from the segment handler
+/// (so a request arriving with the ACK that completes the previous reply is
+/// taken, not dropped and retransmitted a second later) and from the pump.
+fn session_reset_if_done(c: &mut TcpConn) {
+    if c.session
+        && c.responded
+        && !c.fin_sent
+        && c.cpu_child == CPU_NONE
+        && !c.file
+        && c.prefix_off >= c.prefix_len
+        && c.snd_nxt == c.snd_una
+    {
+        c.responded = false;
+        c.prefix_len = 0;
+        c.prefix_off = 0;
+        c.eof = false;
+    }
+}
+
+/// The idle reap: `true` when `c` has had nothing in flight and no segment from
+/// its peer for `CONN_IDLE_TICKS`, in which case a RST has been sent and the
+/// caller frees the slot. Unacked data is the retransmit timer's business, not
+/// this one's, and a running `cpu` child is exempt (see `CONN_IDLE_TICKS`).
+fn reap_idle(mac: &[u8; 6], c: &TcpConn, now: u64) -> bool {
+    if c.cpu_child != CPU_NONE || c.snd_nxt != c.snd_una {
+        return false;
+    }
+    if now.wrapping_sub(c.last_rx) <= CONN_IDLE_TICKS {
+        return false;
+    }
+    send_seg(mac, c, TCP_RST | TCP_ACK, false, &[]);
+    true
 }
 
 /// The per-connection TCP state machine for one non-SYN segment: process its
@@ -2176,7 +2275,8 @@ fn handle_tcp(mac: &[u8; 6], frame: &[u8], seg: &TcpIn, conns: &mut [Option<TcpC
 /// Returns `true` when the connection should be closed (the peer FIN'd). The
 /// actual sending (`pump_send`) is *not* done here - it runs once per
 /// event-loop wake so the health-ping stays promptly acked (see `serve`).
-fn handle_conn_segment(mac: &[u8; 6], frame: &[u8], seg: &TcpIn, c: &mut TcpConn, dials: &mut [Option<DialConn>; MAX_DIAL], auth: &Auth) -> bool {
+fn handle_conn_segment(mac: &[u8; 6], frame: &[u8], seg: &TcpIn, c: &mut TcpConn, dials: &mut [Option<DialConn>; MAX_DIAL], auth: &Auth, sessions: usize) -> bool {
+    c.last_rx = now();
     // Track the peer's ACK (frees send window), count duplicate ACKs, and
     // update the advertised window.
     if seg.flags & TCP_ACK != 0 {
@@ -2242,8 +2342,14 @@ fn handle_conn_segment(mac: &[u8; 6], frame: &[u8], seg: &TcpIn, c: &mut TcpConn
         c.state = ConnState::Established;
     }
 
+    // A session whose previous reply this ACK just completed is ready for the
+    // next request - which may be in this very segment.
+    session_reset_if_done(c);
+
     // The request (may arrive with the handshake ACK, or just after) -> set up
-    // the response. Only once; the streaming itself is driven by pump_send.
+    // the response. Only once per request; the streaming itself is driven by
+    // pump_send. Still ONE SEGMENT per request, session or not: a request split
+    // across segments is not reassembled (unchanged by sessions, stated here).
     if !c.responded && seg.data_len > 0 && seg.seq == c.rcv_nxt {
         c.rcv_nxt = c.rcv_nxt.wrapping_add(seg.data_len);
         c.responded = true;
@@ -2253,7 +2359,7 @@ fn handle_conn_segment(mac: &[u8; 6], frame: &[u8], seg: &TcpIn, c: &mut TcpConn
         // export gateway (cluster Phase 1). Both stage a response in `c.prefix`
         // for pump_send to stream.
         if c.local_port == ninep_abi::NP_NET_PORT {
-            handle_9p(c, request, dials, mac, auth);
+            handle_9p(c, request, dials, mac, auth, sessions);
         } else {
             start_response(c, request);
         }
@@ -2499,7 +2605,7 @@ const DATA_INLINE: usize = syscall_abi::FS_DATA_MAX as usize;
 /// each relayed to the local `fsd`. The request's `tree` field is ignored - the
 /// export serves the local boot mount (tree 0). Single-writer, trusted-LAN (see
 /// docs/roadmap/roadmap-cluster-phase2.md).
-fn handle_9p(c: &mut TcpConn, request: &[u8], dials: &mut [Option<DialConn>; MAX_DIAL], mac: &[u8; 6], auth: &Auth) {
+fn handle_9p(c: &mut TcpConn, request: &[u8], dials: &mut [Option<DialConn>; MAX_DIAL], mac: &[u8; 6], auth: &Auth, sessions: usize) {
     // Authenticate first: verify the client's Ed25519 signature over the request
     // and recover the bare NP message. A failure (an unauthorized key, a bad
     // signature, or an unconfigured export) is refused before any verb runs -
@@ -2557,11 +2663,30 @@ fn handle_9p(c: &mut TcpConn, request: &[u8], dials: &mut [Option<DialConn>; MAX
     // Route: a remote-run request (cluster Phase 4a) vs a normal fs verb. `msg`
     // is the NP message (verb at offset 0), framing + auth already stripped.
     let verb = if msg.len() >= 8 { read_u64(msg, 0) } else { 0 };
-    if verb == ninep_abi::NP_RUN {
+    // A run needs a connection of its own: its reply is a raw stream whose only
+    // terminator is the FIN, which a session by definition does not send. On a
+    // session it falls through to the fs dispatch, which has no arm for it and
+    // answers FS_ERR_NO_SUCH_VERB (logging the verb) - "not on this
+    // connection", which is exactly true.
+    if verb == ninep_abi::NP_RUN && !c.session {
         handle_cpu_run(c, msg, auth, proxy);
         return;
     }
-    let n = build_9p_reply(msg, &mut c.prefix, dials, mac, As::Remote(proxy));
+    // Open a session (Decision 3): budgeted against the whole table, and never
+    // by evicting a live one. Idempotent on a connection that already is one.
+    let n = if verb == ninep_abi::NP_SESSION {
+        let status = if c.session {
+            0
+        } else if sessions >= SESSION_MAX {
+            syscall_abi::FS_ERR_BUSY
+        } else {
+            c.session = true;
+            0
+        };
+        frame_reply(&mut c.prefix, status, &[])
+    } else {
+        build_9p_reply(msg, &mut c.prefix, dials, mac, As::Remote(proxy))
+    };
     // Reply-auth (mutual authentication): sign the reply against the request
     // nonce, so the client can prove it came from the machine it dialled.
     let n = seal_reply(c, auth, &nonce, n);
@@ -4806,7 +4931,13 @@ fn pump_send(mac: &[u8; 6], c: &mut TcpConn) {
             continue;
         }
 
-        // 3. Body fully sent -> FIN (once). avail >= 1 here, so it fits.
+        // 3. Body fully sent. A SESSION goes back to waiting for the next
+        // request once the reply is acked (never a FIN from this side); anything
+        // else -> FIN (once). avail >= 1 here, so it fits.
+        if c.session {
+            session_reset_if_done(c);
+            return;
+        }
         if !c.fin_sent {
             send_seg(mac, c, TCP_FIN | TCP_ACK, false, &[]);
             c.snd_nxt = c.snd_nxt.wrapping_add(1); // FIN consumes a sequence number

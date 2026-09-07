@@ -210,6 +210,26 @@ pub const STAT_FLAG_DIR: u32 = 1 << 0;
 /// dispatch never sees it — the cpu path handles it explicitly.
 pub const NP_RUN: u64 = NP_BASE + 0x20;
 
+/// **Open a session on this connection** (docs/roadmap/roadmap-fid-verbs.md,
+/// Decision 3, decided 2026-09-07). Sent FIRST on a fresh export connection.
+/// Status `0` means the export will keep the connection open after every
+/// reply until the client closes it or it sits idle past the export's limit;
+/// every request the client then sends on it is served on the same connection,
+/// which is the lifetime a fid needs. An export that predates this verb
+/// answers [`syscall_abi::FS_ERR_NO_SUCH_VERB`] (or the bare error before
+/// v0.19.0) and closes after the reply as it always did, so a client learns
+/// "no sessions here" from the one answer that cannot be mistaken for
+/// anything else - that is why the signal is a verb and not a new auth magic
+/// (which an old export refuses as a KEY failure) or a flag bit (which every
+/// relay would have to mask). An export whose session budget is spent answers
+/// [`syscall_abi::FS_ERR_BUSY`]; the client stays per-request.
+///
+/// [`NP_RUN`] is refused on a session connection: its reply is a raw stream
+/// whose only terminator is the FIN, so a run must have a connection of its
+/// own. No params; no payload. Outside `[NP_BASE, NP_LIMIT)` like `NP_RUN`, so
+/// `fsd`'s dispatch never sees it.
+pub const NP_SESSION: u64 = NP_BASE + 0x21;
+
 // ---------------------------------------------------------------------------
 // The verbs over TCP (cluster Phase 1: 9P-over-TCP). Locally a request is a
 // kernel-copied `MSG_CALL` and bulk data moves by grant/safecopy; over a TCP

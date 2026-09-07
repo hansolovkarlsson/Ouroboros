@@ -167,6 +167,9 @@ CHECKED = [
     # FS_ERR_MIN (the band was full from MAX-1 to MAX-38), which is exactly the
     # kind of shift a hand-mirrored copy misses.
     "FS_ERR_NO_SUCH_VERB",
+    # "the export's session budget is spent", reserved 2026-09-07 for the
+    # session gate; it moved the floor to MAX-40 the same way.
+    "FS_ERR_BUSY",
     # The FLOOR of the error band, spelled in Rust and hand-mirrored in C. It
     # moves DOWN every time a code is reserved, and a C program compiled against
     # a stale floor reads the new codes as ordinary success values - a wrong

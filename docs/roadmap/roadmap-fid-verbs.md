@@ -472,8 +472,51 @@ a fid-eviction rule invented here.
 > change that would have broken every existing peer, which is precisely the
 > failure mode step 3a's gate caught for the toolchain.
 
-**Step 4 — the session gate. NEXT, and nothing is built on it until it
-passes.** Prove a persistent export connection is viable *before* any fid
+> **DECIDED 2026-09-07: the signal is a verb, `NP_SESSION` (`NP_BASE + 0x21`),
+> sent first on a fresh connection.** Scored against the three: a new auth
+> magic fails *stable* (an old export refuses it as a KEY failure, so a new
+> client cannot tell "old server" from "bad key"); a flag bit has no spare
+> word and every relay would have to mask it; a second port leaks the mode
+> into `mount -r host:port` and doubles every rig line. A verb is the
+> mechanism `FS_ERR_NO_SUCH_VERB` (step 1) was built for: an old export answers
+> it with the one status that cannot be mistaken for anything else, nothing is
+> masked, `check-wire-constants` already pins verbs, and the peer self-test
+> already drives one request per verb. It is also the natural home for
+> session-scoped authentication later, with the magic untouched until the auth
+> model itself changes. **`NP_RUN` is excluded from sessions by rule**: its
+> reply is a raw stream whose only terminator is the FIN, so on a session it
+> falls to the fs dispatch and is refused as "no arm", and `cpu` keeps its own
+> connection by construction (`tcp_run` opens one). A session refused for
+> budget answers a new code, `FS_ERR_BUSY` (`MAX-40`), which moved the floor
+> once more; a v0.19.0 node never receives it (it sends no `NP_SESSION`).
+
+**Step 4 — the session gate. ✅ DONE 2026-09-07, all checks and controls
+measured on a booted guest, and each shown to fail.** `netd`'s export keeps a
+session connection after every reply (the request state resets once the reply
+is fully *acked*, since the reply buffer is also the retransmit source), reaps
+any server connection silent with nothing in flight for 30 s by RST (a session
+whose peer died without a FIN, and the pre-existing HTTP/one-shot leak of a
+peer that never finished closing), caps sessions at `MAX_CONNS - 1` so one-shot
+traffic always has a slot (`FS_ERR_BUSY` for the next, never an eviction), and
+answers a SYN against a full table with RST instead of a silent drop (a drop
+now means a hang for as long as a session lasts). `np9p_client.py session-gate`
+runs the whole sequence: **8 of 8 PASS** (idle 5 s then same connection
+answers; 3 accepted, 4th `FS_ERR_BUSY`; a one-shot served beside them; none
+evicted; 5th connection with the table full: EOF, not a hang; a peer's RST
+returns its slot at once; 3 silent sessions reaped after 36 s; 3 fresh ones
+accepted), guest transcript with no `wedged`/`restarted` line and `netd`
+blocked-waiting at the end, 0 fault lines. **Against `main`'s export** the
+gate fails at the first open with `FS_ERR_NO_SUCH_VERB` (exit 1); **with the
+cap and the reap mutated out** it fails on the budget (4 accepted), on the
+one-shot beside a full table (reset), and on the reap (0 of 4), exit 3.
+Recipe in `docs/testing/testing-qemu.md`. **Not in this step, by design:**
+`netd` *as a client* does not open sessions yet (the mount-time probe is step
+5's, where a fid first needs one); a request still has to arrive in one
+segment (unchanged); a client that pipelines a request before the previous
+reply is acked has it retransmitted, not lost; and the host peer serves a
+session single-threaded, so it must grow a thread per connection before the
+guest holds one against it. As written, the step was: prove a persistent
+export connection is viable *before* any fid
 exists on top of it — the same shape as step 3a, which earned its keep by
 failing. A client holds one export connection open across several requests; the
 export serves them all on it and closes cleanly. **No fid verbs, no server
@@ -487,8 +530,9 @@ is reclaimed by the idle timeout. · **Negative controls:** kill a peer
 mid-session and confirm the slot returns; open `MAX_CONNS + 1` and confirm the
 refusal is an error the client reports, not a hang.
 
-**Step 5 — the export learns `NP_OPEN` / `NP_FSTAT` / `NP_CLUNK`**, with the
-fid table keyed on the session from step 4. `NP_PREAD`/`NP_PWRITE`
+**Step 5 — the export learns `NP_OPEN` / `NP_FSTAT` / `NP_CLUNK`. NEXT.** With
+the fid table keyed on the session from step 4, and `netd` as a client probing
+`NP_SESSION` once at `mount -r` and remembering the answer per mount. `NP_PREAD`/`NP_PWRITE`
 deliberately not yet: the handle lifecycle is worth proving before the data
 path rides on it. · **Check:** `np9p_client.py` gains an open→fstat→clunk
 sequence over one session against the guest's export (`make run-image-9p`).

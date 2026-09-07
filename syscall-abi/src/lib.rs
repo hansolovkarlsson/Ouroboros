@@ -1457,6 +1457,19 @@ pub const FS_ERR_PERM: u64 = u64::MAX - 32;
 /// code says *that* a verb is missing and cannot say *which*.
 pub const FS_ERR_NO_SUCH_VERB: u64 = u64::MAX - 39;
 
+/// **The server is out of room for this**: a budgeted resource on the far side
+/// (today: the 9P export's session slots, `ninep_abi::NP_SESSION`) is fully
+/// used, and the request was otherwise fine. Not a refusal the caller cannot
+/// fix (that is [`MSG_ERR_DENIED`] / [`FS_ERR_PERM`]) and not "no arm for that
+/// verb" ([`FS_ERR_NO_SUCH_VERB`]): retry later, or do without.
+///
+/// Reserved 2026-09-07 for the session gate. Reserving it moved
+/// [`FS_ERR_MIN`] again (the band is contiguous), which is a cross-node
+/// agreement: a v0.19.0 node reads `MAX-40` as a success value. It never
+/// receives one, because only a session request is ever answered with this and
+/// a v0.19.0 node sends none, but the next release note says so anyway.
+pub const FS_ERR_BUSY: u64 = u64::MAX - 40;
+
 /// Floor of the reserved error band (with headroom for future codes):
 /// **any error-capable syscall's return value `>= FS_ERR_MIN` is an
 /// error**, everything below is a real result. The predicate callers
@@ -1468,9 +1481,10 @@ pub const FS_ERR_NO_SUCH_VERB: u64 = u64::MAX - 39;
 /// so the `ACCT_ERR_*` codes fit below the filesystem ones instead of colliding
 /// with them - safe each time, since
 /// both sides of the ABI import this from the same crate and no real success
-/// value approaches it either way. `MAX-39` for [`FS_ERR_NO_SUCH_VERB`] is the
-/// latest move - the band was FULL from `MAX-1` to `MAX-38`, with no free slot
-/// anywhere in it, so a new code necessarily moves the floor.)
+/// value approaches it either way. `MAX-39` for [`FS_ERR_NO_SUCH_VERB`] - the
+/// band was FULL from `MAX-1` to `MAX-38`, with no free slot anywhere in it, so
+/// a new code necessarily moves the floor - and `MAX-40` for [`FS_ERR_BUSY`]
+/// on 2026-09-07, the latest move.)
 ///
 /// **`libc/include/sys.h` hand-mirrors this value.** It moves down every time a
 /// new error code is reserved, and a C program compiled against a stale floor
@@ -1487,7 +1501,7 @@ pub const FS_ERR_NO_SUCH_VERB: u64 = u64::MAX - 39;
 /// off the floor today is that `make images-2vm` builds both node images from
 /// one tree in one target, which exists for a different reason (per-machine
 /// keys) and is load-bearing here too.
-pub const FS_ERR_MIN: u64 = u64::MAX - 39;
+pub const FS_ERR_MIN: u64 = u64::MAX - 40;
 
 /// **Cross-device move**: `mv`'s source and destination resolved to different
 /// namespace targets (two different mounts, or a local path and a remote one),

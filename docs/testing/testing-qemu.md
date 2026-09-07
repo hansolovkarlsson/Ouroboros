@@ -131,7 +131,31 @@ python3 scripts/np9p_client.py localhost 5640 readdir /
 python3 scripts/np9p_client.py localhost 5640 read /EFI/ORBS/INIT.CFG
 python3 scripts/np9p_client.py localhost 5640 stat /EFI/ORBS/INIT.CFG
 python3 scripts/np9p_client.py localhost 5640 mv /A.TXT /B.TXT       # NP_MV, raw paths
+python3 scripts/np9p_client.py localhost 5640 session /EFI/ORBS      # readdir+stat+read on ONE connection (NP_SESSION)
 ```
+
+**The session gate** (step 4 of `docs/roadmap/roadmap-fid-verbs.md`, 2026-09-07):
+`session-gate` runs the plan's checks and negative controls against the live
+export and prints one PASS/FAIL line each (idle hold, the budget of three, a
+one-shot served beside them, no eviction, a fifth connection refused not hung,
+a peer's RST returning its slot, silent sessions reaped after 30 s, the slots
+back). It takes about a minute, most of it the reap wait, and the guest
+transcript is the other half of the first check: no `wedged`/`restarted`
+line. The `cpu` run at the end is what the last guest step keys on:
+
+```sh
+(sleep 40; perl -e 'alarm 200; exec @ARGV' \
+   python3 scripts/np9p_client.py localhost 5640 session-gate 5 > /tmp/gate.log 2>&1; \
+   python3 scripts/np9p_client.py localhost 5640 run 'echo gate-done' >> /tmp/gate.log) &
+python3 scripts/drive-qemu.py --hostfwd=tcp::5640-:564 build/esp.img \
+  'login:@@root' 'assword@@root' 'exited \(code 0\)@@ps' '# @@'
+cat /tmp/gate.log        # expected: 8 PASS, "0 check(s) failed"
+```
+
+Every line can fail: against an export without the verb the gate stops at the
+first open with `FS_ERR_NO_SUCH_VERB`; with `SESSION_MAX` raised to `MAX_CONNS`
+and `CONN_IDLE_TICKS` made huge it fails on the budget, on the one-shot beside a
+full table, and on the reap (measured, 2026-09-07).
 
 `stat` really does send `NP_STAT` (it sent `NP_READ_FILE` until 2026-09-02 and
 printed the byte count as a "size", so it could not exercise the one verb that
