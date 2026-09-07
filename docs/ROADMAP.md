@@ -1845,8 +1845,14 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
 - **`make clean` is the only pruning of `target/`**, which is 1.0 GB on
   2026-09-07 on a tree that builds 62 binaries; there is no partial clean, so
   recovering the space means rebuilding everything.
-- **A C `open()` silently truncates a path longer than 95 bytes, and opens
-  whatever the first 95 bytes name.** `resolve_path` in `libc/src/file.c` copies
+- ~~**A C `open()` silently truncates a path longer than 95 bytes, and opens
+  whatever the first 95 bytes name.**~~ **Fixed 2026-09-07, the same day:**
+  `resolve_path` reports overflow, `open()` records `FS_ERR_CLIENT` and returns
+  -1, and `cremote` asserts the refusal with that status; the check fails
+  against the truncating version (it answered "no such file") and passes with
+  the fix, from `/` and from a subdirectory. A cwd the kernel reports as too
+  long now fails the same way instead of being replaced by `/`. As found:
+  `resolve_path` in `libc/src/file.c` copied
   the caller's path into a 96-byte buffer (`PATH_MAX_C`) and cuts it there
   without an error, before namespace resolution. **Measured 2026-09-07** on the
   FAT32 image with a file whose absolute path is exactly 95 bytes and a C

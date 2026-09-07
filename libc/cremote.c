@@ -107,6 +107,45 @@ int main(void) {
         close(fd);
     }
 
+    /* A path that does not fit the library's buffer must be refused BEFORE it
+     * is sent, not cut to 95 bytes and sent: a truncated path names a different
+     * file, and with O_TRUNC it empties it. The cut version answered this open
+     * with either a fid or "no such file", never with FS_ERR_CLIENT. */
+    static const char longpath[] =
+        "/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    fd = open(longpath, O_RDONLY);
+    bad |= must_refuse("open() of a path longer than the buffer", fd >= 0);
+    bad |= must_leave("open() of a path longer than the buffer", FS_ERR_CLIENT);
+    if (fd >= 0) {
+        close(fd);
+    }
+
+    /* The RELATIVE branch: the cwd is prepended first, so the same limit is
+     * reached sooner, and nothing else in the tree opens a relative path from
+     * C. The positive half needs a known cwd, so it runs only from /; the
+     * overflow half holds from any cwd, since cwd + "/" + 110 bytes never fits.
+     * A cwd that fits the buffer is what SYS_GET_CWD answers here, so the
+     * skipped case is a genuinely different cwd, not a failure hidden. */
+    char cwd[96];
+    long clen = __os_syscall4(SYS_GET_CWD, (long)cwd, sizeof cwd, 0, 0);
+    if (clen == 1 && cwd[0] == '/') {
+        fd = open("EFI/ORBS/INIT.CFG", O_RDONLY);
+        if (fd < 0) {
+            printf("open(EFI/ORBS/INIT.CFG) relative to / failed: %s\r\n", why());
+            bad = 1;
+        } else {
+            close(fd);
+        }
+    } else {
+        printf("relative open skipped (cwd is not /)\r\n");
+    }
+    fd = open(longpath + 1, O_RDONLY);
+    bad |= must_refuse("open() of a relative path that overflows with the cwd", fd >= 0);
+    bad |= must_leave("open() of a relative path that overflows with the cwd", FS_ERR_CLIENT);
+    if (fd >= 0) {
+        close(fd);
+    }
+
     /* A ninth open has no fd slot (the library holds eight) and never reaches a
      * server. The refusal must be readable as that, and the next success must
      * clear it - both claims file.c made before anything checked them. */
