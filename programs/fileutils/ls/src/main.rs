@@ -188,7 +188,7 @@ pub extern "C" fn _start() -> ! {
 /// same, and so did a transient `NO_FS` while `fsd` was restarting. It also
 /// cost a debugging session on 2026-09-03, where a remote mount's unserved
 /// `NP_STAT` surfaced as a message about a path whose path was fine - see
-/// `docs/journal.md`.
+/// `docs/work-journal/2026-09-03.md`.
 fn ls_err(arg: &str, code: u64) {
     ls_err_msg(arg, ulib::fs_error_msg(code));
 }
