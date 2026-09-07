@@ -230,6 +230,13 @@ CHECKED = [
     "NP_CLUNK",
     "NP_RUN",
     "NP_SESSION",
+    # Spelled by the C header only (libc's fid path): found by a review of the
+    # first version of this list, which had pinned the names the Python peers
+    # spell and stopped there while sys.h carried four more in the same form.
+    "NP_TOUCH",
+    "NP_PREAD",
+    "NP_PWRITE",
+    "NP_FSTAT",
 ]
 
 # NOT checked: NP_MAC_LEN. Neither peer names it - both write the literal 32 at
@@ -291,7 +298,7 @@ PEER_BASELINE = {
     # Raised from 3 when step 3b's constants were pinned. The script's own
     # instruction is to raise a baseline when a peer learns a new constant; it
     # had already learned FS_ERR_NOT_FOUND without the floor moving.
-    "libc/include/sys.h": 19,  # counted 2026-09-07; was 11 while it already matched 16
+    "libc/include/sys.h": 23,  # counted 2026-09-07; was 11 while it already matched 16
     "libc/include/nsresolve.h": 5,  # + 4 STAT_* offsets, FS_ERR_READ_ONLY, STAT_FLAG_DIR, FS_ERROR, FS_ERR_NO_SUCH_VERB
 }
 
