@@ -80,7 +80,7 @@ MANIFEST = {
     "site/glossary.html": None,
     "site/architecture-overview.html": ("architecture.md", "509d12aeb521"),
     "site/manual.html": ("manual.md", "ea3f93e07175"),
-    "site/microkernel-comparison.html": ("microkernel-comparison.md", "febedb885499"),
+    "site/microkernel-comparison.html": ("microkernel-comparison.md", "39e87a0db80d"),
     "site/tutorial.html": ("tutorial.md", "cd4430be90e9"),
     "site/research-directions.html": ("research-directions.md", "6a43dfc7acbd"),
     "site/research-helix-os.html": ("research-helix-os.md", "01c5568c3840"),

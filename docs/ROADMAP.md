@@ -1475,7 +1475,7 @@ would otherwise silently shrink into looking like nothing was ever found.
     channel was the boot shell's *static* privilege. A parent and its child
     are now granted each other at spawn. The review also removed the
     "statically held" rule as dead: every task the boot shell wires is one it
-    spawned. This is the subtree-scoped form of
+    spawned. This is the one-step form of
     north-star item 4 ("transitive delegation"), built now because the nested
     shell is the consumer that item said to wait for; the general, revocable
     form is still open there.

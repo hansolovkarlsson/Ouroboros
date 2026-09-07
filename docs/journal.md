@@ -7,7 +7,7 @@ for the forward plan see [`ROADMAP.md`](ROADMAP.md).
 
 ---
 
-## 2026-09-06 (cont. 5): rights flow down a subtree, and a nested shell can finally pipe
+## 2026-09-06 (cont. 5): rights flow one step down, and a nested shell can finally pipe
 
 *(The fourth ledger finding: a nested shell cannot delegate at all, so it can
 run no pipeline and nothing under it can reach the network.)*
