@@ -7,6 +7,105 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/pos
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## v0.19.0: rights flow one step down, tasks have identities, C reaches a remote mount (2026-09-07)
+
+Released as **v0.19.0**. Thirty PRs since v0.18.1, half of them kernel and shell
+work on capability delegation, the rest the C arc reaching remote mounts, an
+honest "not implemented" on the 9P wire, an MIT licence and the `docs/`
+reorganization. No wire flag day (`AUTHNP03` unchanged), but the error floor
+moved (`FS_ERR_MIN` `MAX-38` to `MAX-39`, for `FS_ERR_NO_SUCH_VERB`), and that
+is a cross-node agreement: a v0.18.1 client reading that one code from a
+v0.19.0 export sees a success with an absurd length. Upgrade both nodes together.
+
+**Network programs failed inside pipelines and under `exec`** (#107). `cat
+/mnt/a/X | wc` and `ping | wc` printed `cat: failed` / `ping: request failed`
+while the unpiped forms worked, and the record had blamed the supervisor's
+`WEDGE_TICKS`; the host peer's request log showed the request never left the
+guest. The shell delegated `TO_NET` in `run_found_command` only, not
+`run_head_pipeline` or `cmd_exec`, and `tasks.rs` held **one** delegated target
+per task, so a pipeline stage's consumer link silently revoked its network
+right. `delegate_net` now lives in `spawn_path`, the one function all spawn
+sites pass through, and `DELEGATED_SEND` is a bitmask. The `max` review found a
+security regression the widening opened in a file the diff never touched:
+`DELEGATE` never validated the *grantee*, so any program could grant a server a
+send right; the grantee must be a spawnable slot now.
+
+**Four kernel primitives followed**, one per gap that review uncovered, each
+chosen against the standing three criteria (stable, safe, not blocking what
+comes next):
+
+- **A failed pipeline leaked a task slot** (#108): a stage already exited was a
+  `Zombie` the kernel refused to `KILL`, so every abandon path leaked one of
+  five slots and five mistyped `grep`s left the shell unable to run any `/bin`
+  program. Eight paths go through one `kill_and_reap`.
+- **`DELEGATE` says which end died** (#110): `TASK_ERR_NO_SUCH_TASK` for a dead
+  slot, `MSG_ERR_DENIED` only for a refusal a retry cannot fix, one rule with a
+  stated precedence. The shell reads the reason from the answer instead of a
+  `TASK_STATE` read after the fact, so `pipe: could not authorize the stream`
+  no longer prints over a producer's own message, and a silent producer's
+  non-zero exit is reported. Verified under a built window (the shell parked
+  until stage 0 was a zombie) because the racy path is unreachable otherwise.
+- **A grant aimed at a supervised server survives its restart** (#111): the
+  teardown stripped every task's bit for the restarted slot, so a program alive
+  across a `netd` restart was netless for life. The strip now lives in `spawn`,
+  the only path that installs a stranger. Checked by a temporary
+  `resolve wedgeme` under an eight-request `ping`: 6/6 failures before, replies
+  resuming after; recipe in `testing/testing-qemu.md`.
+- **Every task has an identity** (#112): syscalls `SENDER_TASK` (67) and
+  `TASK_IDENTITY` (68) return `(generation << 8) | slot`, the generation
+  issued where a slot becomes live and captured with the credential at send
+  time. `netd` matched its remote-exec child and each run's owner by bare slot,
+  so a `ping` landing in a reaped child's slot was routed into a stranger's
+  connection and never answered. The review found the first version's
+  regression: identity-less messages (the supervisor's health ping, boot tasks)
+  matched the "no child" sentinel, and an idle client got `netd` restarted every
+  ping interval. Boot slots get generations at the end of `init`, the sentinel
+  is zero, and the demux skips a message with no identity.
+- **A nested shell can pipe** (#113): `may_delegate` read only the static mask,
+  so a spawned `SH.BIN` could authorize no link and delegate no network right.
+  The kernel records every task's parent by identity; the rule is one clause,
+  *the grantee is my own direct child and the target is something I may
+  reach*, and a spawner and its child are granted each other at spawn (which
+  made netd's self-send bit and its explicit grant to its child dead code,
+  both removed). `SPAWN` stays ungated; the consequence (a stage may spawn and
+  pass on what it holds) is stated in the ABI doc and gating it is a ledgered
+  decision. The refusal side has no check that can fail yet, and says so.
+
+**The C library reaches a remote mount** (#100, #102, #119). `file.c` sent
+every request to `FSD_TASK` and resolved nothing, so a C `open("/mnt/a/F")`
+never left the machine. `nsresolve` is a Rust `staticlib` wrapping
+`ninep_abi::resolve_ns` so C uses the same resolver as `ulib` and `netd`; the
+link needs `--gc-sections` (prebuilt `core` carries `R_AARCH64_ABS64` in
+unreferenced `.rodata`). `open`/`read`/`fstat`/`close` work on a remote file
+through `netd`'s relay; a remote `write()` is refused until the export learns
+`NP_PWRITE`. `ouro_last_fs_status()` is the way to ask why `open()` failed;
+its client-side code sat one below `FS_ERR_MIN` (so `cremote`'s `why()` said
+"no error recorded") and it was never cleared on success as its comment
+claimed, both closed in #119 with checks in `cremote` that fail against the old
+code. `fsd`'s `NP_OPEN` returned a valid fid for a read-only open of an absent
+file and created one for `O_TRUNC` without `O_CREAT`; both refuse.
+
+**A refused 9P verb says so** (#98, #99, #105, #89). Both peers answered an
+unimplemented verb with `FS_ERROR`, rendered as "no such file or directory".
+`FS_ERR_NO_SUCH_VERB` is reserved (the band was full, so the floor moved and
+`sys.h`'s mirror with it; `check-wire-constants` reads the C header now, #101),
+each server logs the verb number, and `np9p_server.py` serves the read-capable
+fid verbs with a self-test in `make test`. Both 9P clients read the framed
+length instead of waiting for the peer's FIN (`tcp_get` has an HTTP caller
+whose terminator *is* the FIN, so it is a parameter). `fsd`'s `check_access`
+catch-all was `_ => true`; it refuses now, with a `const` assert on the verb
+count so a new verb is a compile error rather than a silent hole.
+
+**Housekeeping** (#91 to #97, #114 to #118, #120): an MIT `LICENSE`;
+`docs/roadmap.md` to `ROADMAP.md` (renamed through a temporary name, since
+macOS would have recorded nothing); `make all`; `scripts/check-site-freshness.py`
+compares each published page against the blob hash of the source it abridges
+and runs in `make test`, after four abridged pages were deleted in favour of
+links and three markdown sources were found behind the code; the postmortems,
+plans, testing guides and research notes moved into folders and the journal
+became one file per day; and the 09-07 audit's false claims (crate count,
+`make test`'s contents, three files missing from the source map) corrected.
+
 ## v0.18.1 — the remote-read flake, closed (2026-09-03)
 
 Released as **v0.18.1**, a patch on v0.18.0. No new capability; the substance is
