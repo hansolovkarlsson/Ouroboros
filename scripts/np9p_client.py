@@ -90,7 +90,7 @@ REPLY_UNVERIFIED = 1 << 64
 # the guest must refuse. It is not a format this client speaks any more.
 RETIRED_MAC_MAGIC = int.from_bytes(b"AUTHNP02", "big")
 NP_AUTH_MAGIC_SIGNED = int.from_bytes(b"AUTHNP03", "big")  # the per-machine-keypair format
-NP_RUN = 0x100 + 0x20  # ninep-abi's NP_BASE + 0x20 - remote execution (`cpu`)
+NP_RUN = NP_BASE + 0x20  # remote execution (`cpu`)
 NP_PUBKEY_LEN = 32
 NP_SIG_LEN = 64
 # A sanity ceiling on a DECLARED reply length, so recv_reply cannot be made to
@@ -363,13 +363,22 @@ def recv_reply(sock, nonce, peer_key=None):
     return status, np[8:]
 
 
+def request_frame(np_msg, user=None, seed=None):
+    """The frame EVERY request goes out as: signed, or - when `--legacy-mac`
+    asked for the negative control - the retired MAC format the export must
+    refuse. One builder, because `Session.op` grew its own send path with only
+    the signed arm, so `session ... --legacy-mac` sent a properly signed frame
+    and printed a success for a refusal it never asked for (review of #123)."""
+    if LEGACY_MAC_KEY is not None:
+        return legacy_mac_frame(np_msg, LEGACY_MAC_KEY, user=user)
+    # `seed`: sign as a DIFFERENT machine, for the one check that must reach
+    # the export's unauthorized-key refusal on a session.
+    return signed_frame(np_msg, SIGN_KEY if seed is None else seed, user=user)
+
+
 def one_op(host, port, np_msg, timeout=10):
     """Run one authenticated NP op over a fresh export connection; return (status, data)."""
-    if LEGACY_MAC_KEY is not None:
-        # The negative control: a retired-format frame, which must be refused.
-        frame, nonce = legacy_mac_frame(np_msg, LEGACY_MAC_KEY)
-    else:
-        frame, nonce = signed_frame(np_msg, SIGN_KEY)
+    frame, nonce = request_frame(np_msg)
     with socket.create_connection((host, port), timeout=timeout) as s:
         s.sendall(frame)
         status, data = recv_reply(s, nonce, peer_key=peer_key())
@@ -432,7 +441,7 @@ class Session:
         self.sock = socket.create_connection((host, port), timeout=timeout)
 
     def op(self, np_msg, user=None, seed=None):
-        frame, nonce = signed_frame(np_msg, SIGN_KEY if seed is None else seed, user=user)
+        frame, nonce = request_frame(np_msg, user=user, seed=seed)
         self.sock.sendall(frame)
         return recv_reply(self.sock, nonce, peer_key=peer_key())
 
@@ -650,7 +659,7 @@ def do_session_gate(host, port, hold_s=10):
             raise RuntimeError("no precondition")
         time.sleep(0.5)
         fifth = socket.create_connection((host, port), timeout=10)
-        frame, _nonce = signed_frame(root, SIGN_KEY)
+        frame, _nonce = request_frame(root)
         fifth.settimeout(8)
         fifth.sendall(frame)
         got = fifth.recv(4)

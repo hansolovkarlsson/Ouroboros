@@ -48,6 +48,19 @@ def rust_consts(path):
     # be compared however carefully the C header spelled it.
     for name, val in re.findall(r"pub const (\w+): u64 = (\d+);", src):
         out[name] = int(val)
+    # A hex literal (`NP_BASE: u64 = 0x100`), and the VERBS, written relative
+    # to it (`NP_BASE + 12`, or bare `NP_BASE` for the first). Until the review
+    # of #123 neither pattern existed, so no verb number was compared anywhere
+    # while the Decision 3 note claimed they were: a peer's typo in
+    # `NP_BASE + 0x21` would have read at runtime as FS_ERR_NO_SUCH_VERB, the
+    # exact "old export, no sessions here" answer the design relies on.
+    for name, val in re.findall(r"pub const (\w+): u64 = 0x([0-9a-fA-F_]+);", src):
+        out[name] = int(val.replace("_", ""), 16)
+    if "NP_BASE" in out:
+        for name in re.findall(r"pub const (\w+): u64 = NP_BASE;", src):
+            out[name] = out["NP_BASE"]
+        for name, off in re.findall(r"pub const (\w+): u64 = NP_BASE \+ (0x[0-9a-fA-F]+|\d+);", src):
+            out[name] = out["NP_BASE"] + int(off, 0)
     # FLAG BITS are `u32` written as a shift (`1 << 0`), which neither pattern
     # above sees: the integer one wants `usize` and a literal. STAT_FLAG_DIR
     # was invisible to BOTH languages for that reason, so the bit deciding
@@ -79,6 +92,13 @@ def py_consts(path):
     # quietly stops looking at the thing it is named for.
     for name, val in re.findall(r"^(\w+) = (\d+)\s*(?:#.*)?$", src, re.M):
         out[name] = int(val)
+    # The peers' spelling of NP_BASE (`0x100`) and of the verbs (`NP_BASE + 12`),
+    # for the same reason as on the Rust side above.
+    for name, val in re.findall(r"^(\w+) = 0x([0-9a-fA-F]+)\s*(?:#.*)?$", src, re.M):
+        out[name] = int(val, 16)
+    if "NP_BASE" in out:
+        for name, off in re.findall(r"^(\w+) = NP_BASE \+ (0x[0-9a-fA-F]+|\d+)\s*(?:#.*)?$", src, re.M):
+            out[name] = out["NP_BASE"] + int(off, 0)
     # The peers' spelling of a flag bit. This also matches np9p_client.py's
     # `REPLY_UNVERIFIED = 1 << 64`, a deliberate out-of-range sentinel that is
     # not a wire constant - harmless, since only names listed in CHECKED are
@@ -112,9 +132,9 @@ def c_consts(path):
             # Integers, with optional u/U suffix and optional 0x, and simple
             # `(NAME + n)` sums. Anything else stays INVISIBLE rather than
             # guessed at - the same narrowness the Rust parser uses.
-            m = re.fullmatch(r"\(?(\w+)\s*\+\s*(\d+)\)?", body)
+            m = re.fullmatch(r"\(?(\w+)\s*\+\s*(0[xX][0-9a-fA-F]+|\d+)\)?", body)
             if m and m.group(1) in out:
-                out[name] = out[m.group(1)] + int(m.group(2))
+                out[name] = out[m.group(1)] + int(m.group(2), 0)
                 continue
             m = re.fullmatch(r"(0[xX][0-9a-fA-F]+|\d+)[uU]?[lL]*", body)
             if m:
@@ -183,8 +203,9 @@ CHECKED = [
     "NETOP_RMOUNT",
     "NETOP_RMOUNT_ENDPOINT",
     "NETOP_RMOUNT_MSG",
-    # Error codes a C program branches on to decide what to print.
-    "FS_ERR_NOT_FOUND",
+    # Error codes a C program branches on to decide what to print
+    # (FS_ERR_NOT_FOUND too, listed once above: a second listing counted it
+    # twice per peer and inflated every baseline by one, found by review).
     "FS_ERR_PERM",
     "MSG_ERR_DENIED",
     # The endpoint width, spelled a third time in libc/include/nsresolve.h.
@@ -193,6 +214,30 @@ CHECKED = [
     "NS_TARGET_CONSOLE",
     "NS_TARGET_NETLOCAL",
     "NS_TARGET_REMOTE",
+    # THE VERBS, pinned since the review of #123 (none were before). Every one
+    # a peer spells by name; the server's dispatch table writes most of its own
+    # inline as `NP_BASE + n`, which this does not see, and the server's
+    # --self-test is what checks that table against its dispatch.
+    "NP_BASE",
+    "NP_READDIR",
+    "NP_READ_FILE",
+    "NP_READ",
+    "NP_WRITE_AT",
+    "NP_MV",
+    "NP_READ_AT",
+    "NP_WRITE_FILE",
+    "NP_STAT",
+    "NP_OPEN",
+    "NP_CLUNK",
+    "NP_RUN",
+    "NP_SESSION",
+    # Spelled by the C header only (libc's fid path): found by a review of the
+    # first version of this list, which had pinned the names the Python peers
+    # spell and stopped there while sys.h carried four more in the same form.
+    "NP_TOUCH",
+    "NP_PREAD",
+    "NP_PWRITE",
+    "NP_FSTAT",
 ]
 
 # NOT checked: NP_MAC_LEN. Neither peer names it - both write the literal 32 at
@@ -236,7 +281,7 @@ CHECKED = [
 # what it is named for. Confirmed, which is why these are numbers and not a
 # truthiness test. Raise a baseline when a peer learns a new constant.
 PEER_BASELINE = {
-    "np9p_client.py": 13,  # 6 auth + STAT_INFO_LEN + 6 status codes
+    "np9p_client.py": 27,  # the counted value on 2026-09-07, once the verbs were pinned
     # Rose from 10 when the `noverb` probe's status-name table was rebuilt
     # from module constants instead of repeated literals: FS_ERROR,
     # FS_ERR_READ_ONLY, FS_ERR_PERM and FS_ERR_NO_SUCH_VERB became names this
@@ -248,13 +293,13 @@ PEER_BASELINE = {
     # reduced count was recorded as expected. Both now use the shared names; the
     # floor rises with them, or the rename could be undone without this
     # noticing.
-    "np9p_server.py": 18,
+    "np9p_server.py": 26,  # counted 2026-09-07, verbs included
     # The C header. It spells far more of the ABI than either Python peer; this
     # floor covers the names CHECKED lists today.
     # Raised from 3 when step 3b's constants were pinned. The script's own
     # instruction is to raise a baseline when a peer learns a new constant; it
     # had already learned FS_ERR_NOT_FOUND without the floor moving.
-    "libc/include/sys.h": 11,
+    "libc/include/sys.h": 22,  # counted 2026-09-07; was 11 while it already matched 16
     "libc/include/nsresolve.h": 5,  # + 4 STAT_* offsets, FS_ERR_READ_ONLY, STAT_FLAG_DIR, FS_ERROR, FS_ERR_NO_SUCH_VERB
 }
 

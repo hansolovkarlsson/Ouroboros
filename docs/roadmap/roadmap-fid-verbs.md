@@ -480,7 +480,8 @@ a fid-eviction rule invented here.
 > into `mount -r host:port` and doubles every rig line. A verb is the
 > mechanism `FS_ERR_NO_SUCH_VERB` (step 1) was built for: an old export answers
 > it with the one status that cannot be mistaken for anything else, nothing is
-> masked, `check-wire-constants` already pins verbs, and the peer self-test
+> masked, `check-wire-constants` pins the verbs (since the review of #123: it
+> pinned none before, and this sentence was first written as if it did), and the peer self-test
 > already drives one request per verb. It is also the natural home for
 > session-scoped authentication later, with the magic untouched until the auth
 > model itself changes. **`NP_RUN` is excluded from sessions by rule**: its
