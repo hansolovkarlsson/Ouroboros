@@ -160,6 +160,28 @@ client needs, waits for `export open` rather than sleeping, and **asserts the
 guest is still alive at the end**, exiting 99 if not. See
 [`blind-instruments-postmortem.md`](../postmortems/blind-instruments-postmortem.md).
 
+**Forcing a retransmit.** SLIRP never drops a segment, so every loss-recovery
+path in `netd` is otherwise argued rather than run. In `pump_send`'s file-body
+arm, swallow exactly one new segment once (a `bool` on `TcpConn` and
+`if !c.dropped_one && c.read_off == (SERVE_CHUNK as u64) * 2`, still advancing
+`snd_nxt`/`read_off`), then fetch a file big enough to have several segments in
+flight:
+
+```sh
+scripts/run-guest.sh --hostfwd=tcp::5555-:80 -- \
+  curl -s --max-time 120 http://localhost:5555/EFI/ORBS/FSD.BIN -o /tmp/got.bin
+shasum -a 256 /tmp/got.bin build/esp/EFI/ORBS/FSD.BIN   # must match
+```
+
+The peer dup-ACKs, netd fast-retransmits, and the hashes match. This is the
+only rig in the tree that reaches a retransmit path, and the one measured
+finding of the 2026-09-07 TCP arc came from it: with the incoming-ACK bound
+placed on `snd_nxt` (a cursor `rewind_to` moves backwards) rather than the send
+high-water mark, the same fetch truncated at 11,303 of 140,088 bytes. That fix
+is NOT in the tree - the branch carrying it was abandoned, see `ROADMAP.md` -
+so the rig is recorded here for whoever builds the next attempt. Remove the
+mutation afterwards; nothing reaches this path without it.
+
 Every line can fail: against an export without the verb the gate stops at the
 first open with `FS_ERR_NO_SUCH_VERB`; with `SESSION_MAX` raised to `MAX_CONNS`
 and `CONN_IDLE_TICKS` made huge it fails on the budget, on the one-shot beside a
