@@ -255,3 +255,83 @@ first Raspberry Pi bench session, written up as
 [`testing-pi4.md`](../testing/testing-pi4.md)'s Risk 4b and as a numbered step of "when the
 boards arrive". Writing it blind against a rig that cannot exercise it is, after
 this day, a recognisable mistake rather than a hypothetical one.
+
+---
+
+## The sequel's sequel: fourteen rounds, and the round that said stop (2026-09-07)
+
+*Added six days later, from the `netd` session-gate arc. Same spine, three times
+the scale, and one thing this file did not previously have: a stopping rule.*
+
+| round | findings | mostly about |
+| --- | --- | --- |
+| 1 | 4 | the session gate itself |
+| 2 | 9 | round 1's fixes |
+| 3 | 2 (cut short by a rate limit) | round 2's fixes |
+| 4 | 9 | round 3's fixes, including a regression it introduced |
+| 5 | 5 | round 4's fixes |
+| 6 | 7 | round 5's fixes, including a leak round 5 added |
+| 7 | 15 (`max`) | rounds 1 to 6, eight of them in the checks |
+| 8 | 5 | round 7's fixes |
+| 9 | 5 | round 8's fix, withdrawn |
+| split | | the branch cut in two |
+| 10 | 15 (`max`, TCP half alone) | six regressions the arc introduced |
+| 11 | 9 | the split's own collateral |
+| 12 | 6 | the harness, no code finding |
+| 13 | 4 | the harness and prose, no code finding |
+
+**Three of the regressions were severe**, and each was correct about the bug it
+named while wrong about something beside it. An incoming-ACK bound was placed on
+`snd_nxt`, a cursor `rewind_to` moves *backwards*, so it discarded the recovery
+ACK of a transfer that was healing and let the RTO reset it. A persist exemption
+meant to protect a paused peer made a *vanished* one immortal, because the
+reaper declines any connection with data in flight. A handshake retransmit went
+out at `snd_nxt` rather than the sequence the original used, so a lost SYN-ACK
+stopped being recoverable at all. Every one of those was a repair.
+
+**What is new here is not the ratio, it is what the ratio was allowed to
+decide.** The 2026-09-01 arc took four rounds and shipped. This one took nine
+and was still finding severe regressions, so the question stopped being "what
+does the next round find" and became "what does this rate *mean*". It means the
+work had no check that could fail: `netd`'s TCP paths cannot be reached by
+anything in the tree. SLIRP loses no segments and forges none, the hardware
+targets have no networking at all, and the two-VM link rotates its source ports,
+so it cannot even collide a 4-tuple deliberately. Every one of those fixes was
+reasoning, and reasoning has no error bar.
+
+**The split was the first move that changed the picture**, and it is the
+transferable one. The branch was 950 lines of two different things. Cut apart,
+the session half was 99 lines that a gate exercises end to end, and the TCP half
+was 404 lines that nothing exercises. Reviewed alone against a clean baseline,
+the TCP half gave up fifteen findings including **six regressions of its own**,
+two of which broke shipped behaviour: an `in_window` gate that rejected `cpu`'s
+own connection close, and an ACK guard that let a FIN with the ACK bit clear be
+honoured anywhere in a 64 KB window, a one-packet blind teardown strictly worse
+than the stale-FIN case the guard was written for. A diff that size hides its
+own regressions inside its own volume; the same reviewers found them
+immediately once it stood alone.
+
+**So it was abandoned**, and that is the entry this file was missing. The five
+real gaps in the receive path are on the ledger with their analysis, the branch
+stays on origin as the reference the ledger points at, and the precondition for
+the next attempt is written down as **a rig, not more care**: a host-side peer
+that can forge a segment onto a guest's link, or the two-Pi network already on
+the hardware roadmap. Meanwhile the session half merged after two consecutive
+rounds that found nothing wrong with its code.
+
+**The stopping rule, stated so it can be reused:**
+
+> When consecutive review rounds keep finding defects **in the previous round's
+> repairs**, that is not a reason to run another round. It is evidence that the
+> work has no check that can fail, and the next move is a rig or a retreat, not
+> a fix. Splitting the change is how you find out which half is which: the half
+> a test can reach converges, and the half it cannot does not.
+
+**One measurement survived the retreat, and it is the exception that proves
+the rule.** Loss recovery *can* be reached, by swallowing one segment in
+`pump_send` and fetching a 140 KB file over HTTP. That rig caught the ACK-bound
+regression above and pinned it to a number: 140,088 bytes hash-identical with
+the fix, truncated at 11,303 without it. One rig, one measured finding, out of
+an arc of roughly seventy. The recipe is in
+[`testing-qemu.md`](../testing/testing-qemu.md) and it says plainly that the fix
+it measured is not in the tree.

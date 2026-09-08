@@ -40,4 +40,4 @@ what is now this directory.
 | [2026-09-04](2026-09-04.md) | 1 | housekeeping, and measuring before restructuring |
 | [2026-09-05](2026-09-05.md) | 2 | clearing the site by deleting four of it · the fid verbs, two gates, and three reviews of twenty lines |
 | [2026-09-06](2026-09-06.md) | 7 | the remote-read bug was never the wedge timer, and the citation was the problem · a second review, and the reason beside a right decision was wrong · the wrong slot, and a bug you have to build a window to reach · a grant that was only ever made once · a slot is a position, and the kernel now names the occupant · rights flow one step down, and a nested shell can finally pipe · the day as a whole, written at its close |
-| [2026-09-07](2026-09-07.md) | 1 | an audit of the segment, and four moves that emptied the top of `docs/` |
+| [2026-09-07](2026-09-07.md) | 2 | an audit of the segment, and four moves that emptied the top of `docs/` · v0.19.0, the session gate, and fourteen rounds that ended in a revert |
