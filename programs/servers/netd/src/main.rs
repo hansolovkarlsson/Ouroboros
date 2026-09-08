@@ -105,8 +105,8 @@ const MAX_CONNS: usize = 4;
 /// slot until the peer closes it or the idle reap takes it, so if every slot
 /// could be a session, one-shot traffic (a plain request, a `cpu` run, the HTTP
 /// server) would be shut out for as long as the peers cared to idle. The
-/// (MAX_CONNS + 1)th request is refused with `FS_ERR_BUSY`, never by evicting a
-/// live session. A per-PEER share is not enforced: with two nodes there is one
+/// (SESSION_MAX + 1)th session request - the FOURTH, as the gate asserts - is
+/// refused with `FS_ERR_BUSY`, never by evicting a live session. A per-PEER share is not enforced: with two nodes there is one
 /// peer each way, and starving is a three-node problem (ledgered).
 const SESSION_MAX: usize = MAX_CONNS - 1;
 /// A server connection with nothing in flight and no segment from its peer for

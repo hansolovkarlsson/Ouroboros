@@ -676,13 +676,33 @@ def do_session_gate(host, port, hold_s=10):
               "no session was held to abort")
         return failed
     held.pop(0).abort()
-    time.sleep(0.5)
-    s = Session(host, port)
-    st, _ = s.open()
-    check("a session aborted by its peer (RST) returns its slot at once", st == 0, status_name(st) if st else "accepted")
-    if st == 0:
+    # Guarded and retried, like every other socket pair in this function: the
+    # abort frees a slot on netd's next event-loop wake, and a SYN into that
+    # window is answered with a RST that reaches the host as a connect-time
+    # ConnectionRefusedError. Unguarded, it left the run as a traceback with no
+    # verdict line and exit 1 - which reads exactly like "one check failed"
+    # (review of #124). It was the only call site the hardening pass missed.
+    st = None
+    detail = "no reply"
+    s = None
+    for _ in range(6):
+        time.sleep(0.5)
+        s = None
+        try:
+            s = Session(host, port)
+            st, _ = s.open()
+            detail = status_name(st) if st else "accepted"
+            break
+        except (RuntimeError, OSError) as exc:
+            if s is not None:
+                s.close()
+            s = None
+            st = None
+            detail = f"{exc.__class__.__name__}"
+    check("a session aborted by its peer (RST) returns its slot at once", st == 0, detail)
+    if st == 0 and s is not None:
         held.append(s)
-    else:
+    elif s is not None:
         s.close()
 
     # 3. the idle reap, escalating (see REAP_WAITS_S for why it is not one

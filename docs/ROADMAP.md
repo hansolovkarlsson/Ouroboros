@@ -1517,8 +1517,8 @@ would otherwise silently shrink into looking like nothing was ever found.
   - **A SYN against a transiently full table is now refused, and the guest's
     own clients take a RST as final** (review of #123). `tcp_get`/`tcp_run`
     answer `NET_FETCH_REFUSED` at once on a RST with no SYN retry, so a remote
-    read that lands while the export node holds four connections (three idle
-    sessions and two one-shots, or five HTTP transfers) fails immediately where
+    read that lands while the export node holds all four connections (three
+    idle sessions and one one-shot, or four HTTP transfers) fails immediately where
     a dropped SYN used to be absorbed by a one-second retransmit into a freed
     slot. Rare with two nodes, real under load. Two shapes, a decision: drop
     the SYN when the table's non-session slot will free by itself (a plain

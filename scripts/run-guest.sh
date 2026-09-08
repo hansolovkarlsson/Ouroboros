@@ -141,7 +141,11 @@ kill $QPID 2>/dev/null; wait $QPID 2>/dev/null
 # restarted proves nothing about the client either way, so passing the client's
 # own status through would have the caller attribute a failure to the export -
 # the misattribution this script exists to prevent (review of #124).
-if ! report_guest; then
+# ...but NOT over 99: a guest that died mid-run has almost certainly left a
+# restart or abort line too, so an unconditional 98 here reported "came up and
+# did not stay healthy" for the one case this script exists to tell apart
+# (review of #124).
+if ! report_guest && [ $RC -ne 99 ]; then
 	RC=98
 fi
 exit $RC
