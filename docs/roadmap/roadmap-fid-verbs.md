@@ -500,12 +500,21 @@ peer that never finished closing), caps sessions at `MAX_CONNS - 1` so one-shot
 traffic always has a slot (`FS_ERR_BUSY` for the next, never an eviction), and
 answers a SYN against a full table with RST instead of a silent drop (a drop
 now means a hang for as long as a session lasts). `np9p_client.py session-gate`
-runs the whole sequence: **8 of 8 PASS** (idle 5 s then same connection
-answers; 3 accepted, 4th `FS_ERR_BUSY`; a one-shot served beside them; none
-evicted; 5th connection with the table full: EOF, not a hang; a peer's RST
-returns its slot at once; 3 silent sessions reaped after 36 s; 3 fresh ones
-accepted), guest transcript with no `wedged`/`restarted` line and `netd`
-blocked-waiting at the end, 0 fault lines. **Against `main`'s export** the
+runs the whole sequence: **11 of 11 PASS** under `scripts/run-guest.sh` (idle
+5 s then same connection answers; `NP_RUN` refused framed and in phase three
+ways, a valid caller, an unknown user, an unauthorized key; 3 accepted, 4th
+`FS_ERR_BUSY`; a one-shot served beside them; none evicted; 5th connection with
+the table full: EOF, not a hang; a peer's RST returns its slot at once; a
+silent session reaped; the slots back), guest alive at the end, no
+`wedged`/`restarted` line, 0 aborts, three runs.
+
+**The first record here said 8 of 8 and was measured through
+`drive-qemu.py`, which kills the guest seconds after its last shell step.** The
+early checks in those runs were real; the late ones, the reap and the slots
+coming back, were measured against a killed process, and a dead guest's silence
+is indistinguishable from the export refusing. `run-guest.sh` exists because of
+it and asserts the guest is alive before believing a run; the whole trap is in
+[`blind-instruments-postmortem.md`](../postmortems/blind-instruments-postmortem.md). **Against `main`'s export** the
 gate fails at the first open with `FS_ERR_NO_SUCH_VERB` (exit 1); **with the
 cap and the reap mutated out** it fails on the budget (4 accepted), on the
 one-shot beside a full table (reset), and on the reap (0 of 4), exit 3.

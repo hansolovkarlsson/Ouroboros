@@ -431,8 +431,8 @@ class Session:
     def __init__(self, host, port, timeout=10):
         self.sock = socket.create_connection((host, port), timeout=timeout)
 
-    def op(self, np_msg):
-        frame, nonce = signed_frame(np_msg, SIGN_KEY)
+    def op(self, np_msg, user=None, seed=None):
+        frame, nonce = signed_frame(np_msg, SIGN_KEY if seed is None else seed, user=user)
         self.sock.sendall(frame)
         return recv_reply(self.sock, nonce, peer_key=peer_key())
 
@@ -453,9 +453,19 @@ class Session:
 # the fourth session on a fresh export must be refused with FS_ERR_BUSY. Spelled
 # here as the EXPECTATION the gate checks, not as a mirror of the constant.
 EXPECTED_SESSIONS = 3
-# netd reaps a silent connection after CONN_IDLE_TICKS = 30 s; the gate waits
-# this much longer than that before asking whether the reap happened.
-REAP_WAIT_S = 36
+# netd reaps a silent connection after CONN_IDLE_TICKS, which is 30 s of GUEST
+# TICKS - and a guest tick is not a wall-clock 20 ms. Under TCG the timer fires
+# at whatever rate the host affords (CLAUDE.md records ~37 ms once), so the same
+# 1500 ticks can be 30 s or well over a minute of the host's time, varying with
+# host load. A single fixed wait therefore measured the host's clock against the
+# guest's and flaked: three runs of the same build gave 3/3, 2/3 and 0/3 reaped.
+# So the check ESCALATES instead: wait, probe once, and if the session is still
+# served wait longer, up to the last of these. It still fails if the reap never
+# happens, which is the property under test; what it no longer does is fail
+# because QEMU was slow. A probe RESETS the idle timer (an accepted segment
+# refreshes `last_rx`), which is why each attempt opens its own session rather
+# than re-probing one.
+REAP_WAITS_S = (40, 75, 120)
 
 
 def do_session(host, port, path):
@@ -482,7 +492,9 @@ def do_session_gate(host, port, hold_s=10):
 
       1. a session idle for `hold_s` seconds still answers on the same
          connection (the guest transcript is the other half of this check: it
-         must show no `server slot 4 ... restart` line);
+         must show no `server slot 4 ... restart` line), and NP_RUN on it is
+         refused FRAMED with the session still in phase, three ways: a valid
+         caller ("no arm"), an unknown user name, an unauthorized key;
       2. the budget: three sessions accepted, the fourth refused with
          FS_ERR_BUSY; a one-shot request still served beside them; none of the
          three evicted; with the table full a fifth connection is refused
@@ -516,30 +528,92 @@ def do_session_gate(host, port, hold_s=10):
         check("open a session", False, status_name(st))
         s.close()
         return failed
-    st1, d1 = s.op(root)
-    time.sleep(hold_s)
-    st2, d2 = s.op(root)
-    check(f"a session idle {hold_s}s still answers on the same connection",
-          served(st1) and served(st2) and d1 == d2,
-          f"readdir before/after: {status_name(st1)}/{status_name(st2)}, {len(d1)}/{len(d2)} bytes")
+    # In a try: the failure this check EXISTS to detect - the session dying
+    # during the hold - arrives as an exception, so bare calls made the one
+    # event under test abort the whole run with a traceback and lose the ten
+    # checks after it. The three below were written with the guard; this one,
+    # first and oldest, was not (review of #124).
+    try:
+        st1, d1 = s.op(root)
+        time.sleep(hold_s)
+        st2, d2 = s.op(root)
+        ok = served(st1) and served(st2) and d1 == d2
+        detail = f"readdir before/after: {status_name(st1)}/{status_name(st2)}, {len(d1)}/{len(d2)} bytes"
+    except (RuntimeError, OSError) as exc:
+        st1, d1 = FS_ERROR, b""
+        ok, detail = False, f"the session died during the hold ({exc.__class__.__name__})"
+    check(f"a session idle {hold_s}s still answers on the same connection", ok, detail)
+    # NP_RUN on a session is refused FRAMED, whether the refusal is "no arm on
+    # this connection" (a valid caller) or an auth refusal (an unknown user):
+    # the export's raw-text refusal has no FIN behind it on a session, so it
+    # would leave every later reply out of phase (review of #123). The readdir
+    # after each is what shows the session is still in phase.
+    run = build_frame(NP_RUN, 0, [len(b"echo x"), 0, 0, 0], b"echo x")
+    try:
+        st_run, _ = s.op(run)
+        st_after, d_after = s.op(root)
+        detail = f"run -> {status_name(st_run)}, then readdir -> {status_name(st_after) if not served(st_after) else f'{len(d_after)} bytes'}"
+        ok = st_run == FS_ERR_NO_SUCH_VERB and served(st_after) and d_after == d1
+    except (RuntimeError, OSError) as exc:
+        ok, detail = False, f"session lost ({exc.__class__.__name__})"
+    check("NP_RUN on a session is refused framed and the session stays in phase", ok, detail)
+    try:
+        st_run, _ = s.op(run, user=b"nobody-here")
+        st_after, d_after = s.op(root)
+        detail = f"run as an unknown user -> {status_name(st_run)}, then readdir -> {status_name(st_after) if not served(st_after) else f'{len(d_after)} bytes'}"
+        # The property is FRAMED-AND-IN-PHASE, so the refusal status is
+        # accepted as a set: deny_unknown_user answers NO_FS or FS_ERR_NOT_FOUND
+        # when the export cannot read its own /etc/passwd, and pinning
+        # FS_ERR_AUTH made this fail for a reason it is not about (review #124).
+        ok = st_run in (FS_ERR_AUTH, FS_ERR_NOT_FOUND, NO_FS) and served(st_after) and d_after == d1
+    except (RuntimeError, OSError) as exc:
+        ok, detail = False, f"session lost ({exc.__class__.__name__})"
+    check("an auth-refused NP_RUN on a session is refused framed and the session stays in phase", ok, detail)
+    # The check above reaches deny_unknown_user (a valid key, an unknown name).
+    # deny_9p is the OTHER refusal path, reached by an unauthorized KEY, and it
+    # had its own copy of the raw-vs-framed rule - so it needs its own check
+    # that can fail (review of #124).
+    try:
+        st_run, _ = s.op(run, seed=dev_seed("nobody"))
+        st_after, d_after = s.op(root)
+        detail = f"run with an unauthorized key -> {status_name(st_run)}, then readdir -> {status_name(st_after) if not served(st_after) else f'{len(d_after)} bytes'}"
+        ok = st_run == FS_ERR_AUTH and served(st_after) and d_after == d1
+    except (RuntimeError, OSError) as exc:
+        ok, detail = False, f"session lost ({exc.__class__.__name__})"
+    check("an NP_RUN with an unauthorized key on a session is refused framed and the session stays in phase", ok, detail)
     s.close()
     time.sleep(0.5)
 
     # 2. budget
     held = []
     refusal = None
+    # In a try like every other check in this file: a socket timeout, a netd
+    # restart, or a RST from a table still tearing down after section 1 used to
+    # raise straight out of do_session_gate, losing the six checks after it -
+    # which is the hardening this whole file was given and this loop had missed
+    # (review of #124).
     for i in range(EXPECTED_SESSIONS + 1):
-        s = Session(host, port)
-        st, _ = s.open()
+        s = None
+        try:
+            s = Session(host, port)
+            st, _ = s.open()
+        except (RuntimeError, OSError) as exc:
+            if s is not None:
+                s.close()
+            refusal = (i + 1, None, exc.__class__.__name__)
+            break
         if st == 0:
             held.append(s)
         else:
-            refusal = (i + 1, st)
+            refusal = (i + 1, st, None)
             s.close()
             break
     check(f"{EXPECTED_SESSIONS} sessions accepted, the next refused with FS_ERR_BUSY",
           len(held) == EXPECTED_SESSIONS and refusal is not None and refusal[1] == FS_ERR_BUSY,
-          f"accepted {len(held)}, refusal " + (f"#{refusal[0]} {status_name(refusal[1])}" if refusal else "none"))
+          f"accepted {len(held)}, refusal " + (
+              "none" if refusal is None
+              else f"#{refusal[0]} {refusal[2]}" if refusal[1] is None
+              else f"#{refusal[0]} {status_name(refusal[1])}"))
     try:
         st, _ = one_op(host, port, root)
         detail = "served" if served(st) else status_name(st)
@@ -558,66 +632,188 @@ def do_session_gate(host, port, hold_s=10):
     # request). A 5th must be refused: SLIRP accepts the host's connect on the
     # guest's behalf, so the refusal shows on the first read as a reset or EOF,
     # never as a served reply and never as a hang.
-    bare = socket.create_connection((host, port), timeout=10)
-    time.sleep(0.5)
-    fifth = socket.create_connection((host, port), timeout=10)
-    frame, _nonce = signed_frame(root, SIGN_KEY)
+    # `bare` is the PRECONDITION - the fourth connection, which must SUCCEED to
+    # fill the table - and `fifth` is the one under test. They are caught
+    # separately: with both in one try, a refusal of `bare` (an earlier one-shot
+    # still tearing down, so the table was already full) set the outcome and the
+    # check reported the property proven from the refusal of the connection that
+    # was supposed to establish it (review of #124).
+    bare = None
+    fifth = None
     outcome = None
     try:
+        bare = socket.create_connection((host, port), timeout=10)
+    except OSError as exc:
+        outcome = f"precondition failed: the 4th connection was refused ({exc.__class__.__name__})"
+    try:
+        if bare is None:
+            raise RuntimeError("no precondition")
+        time.sleep(0.5)
+        fifth = socket.create_connection((host, port), timeout=10)
+        frame, _nonce = signed_frame(root, SIGN_KEY)
         fifth.settimeout(8)
         fifth.sendall(frame)
         got = fifth.recv(4)
         outcome = "EOF" if not got else f"served {len(got)}+ bytes"
     except socket.timeout:
         outcome = "hang (8s timeout)"
+    except RuntimeError:
+        pass  # the precondition already failed; its message is the outcome
     except OSError as exc:
         outcome = f"reset ({exc.__class__.__name__})"
     check("with the table full, a 5th connection is refused rather than hung",
-          outcome == "EOF" or outcome.startswith("reset"), outcome)
-    fifth.close()
-    bare.close()
+          bare is not None and (outcome == "EOF" or outcome.startswith("reset")), outcome)
+    for sk in (fifth, bare):
+        if sk is not None:
+            sk.close()
     time.sleep(0.5)
     # A peer that dies mid-session sends a RST (or its OS does); the slot must
     # be back immediately, not after the idle timeout.
+    if not held:
+        # `abort()` on an empty list raised IndexError and took the run with it,
+        # after check 5 had already reported the failure (review of #124).
+        check("a session aborted by its peer (RST) returns its slot at once", False,
+              "no session was held to abort")
+        return failed
     held.pop(0).abort()
-    time.sleep(0.5)
-    s = Session(host, port)
-    st, _ = s.open()
-    check("a session aborted by its peer (RST) returns its slot at once", st == 0, status_name(st) if st else "accepted")
-    if st == 0:
+    # Guarded and retried, like every other socket pair in this function: the
+    # abort frees a slot on netd's next event-loop wake, and a SYN into that
+    # window is answered with a RST that reaches the host as a connect-time
+    # ConnectionRefusedError. Unguarded, it left the run as a traceback with no
+    # verdict line and exit 1 - which reads exactly like "one check failed"
+    # (review of #124). It was the only call site the hardening pass missed.
+    st = None
+    detail = "no reply"
+    s = None
+    for _ in range(6):
+        time.sleep(0.5)
+        s = None
+        try:
+            s = Session(host, port)
+            st, _ = s.open()
+            detail = status_name(st) if st else "accepted"
+            break
+        except (RuntimeError, OSError) as exc:
+            if s is not None:
+                s.close()
+            s = None
+            st = None
+            detail = f"{exc.__class__.__name__}"
+    check("a session aborted by its peer (RST) returns its slot at once", st == 0, detail)
+    if st == 0 and s is not None:
         held.append(s)
-    else:
+    elif s is not None:
         s.close()
 
-    # 3. the idle reap: hold every session open and silent past the timeout
-    print(f"  holding {len(held)} session(s) silent for {REAP_WAIT_S}s ...", flush=True)
-    time.sleep(REAP_WAIT_S)
-    dead = 0
-    hung = 0
-    for s in held:
-        try:
-            s.sock.settimeout(8)
-            st, _ = s.op(root)
-            if served(st):
-                pass  # still alive: not reaped
-        except socket.timeout:
-            hung += 1
-        except (RuntimeError, OSError):
-            dead += 1  # short reply (EOF) or a reset: reaped
-    check(f"sessions silent for {REAP_WAIT_S}s were reaped (reset/EOF on the next request)",
-          dead == len(held), f"{dead}/{len(held)} reaped, {hung} hung, {len(held) - dead - hung} still served")
-    for s in held:
-        s.close()
-    fresh = []
-    for _ in range(EXPECTED_SESSIONS):
-        s = Session(host, port)
-        st, _ = s.open()
-        if st == 0:
-            fresh.append(s)
-        else:
+    # 3. the idle reap, escalating (see REAP_WAITS_S for why it is not one
+    # wait). The budget check's sessions are KEPT for it: a reap matters because
+    # it returns a slot, so holding the table FULL is what lets the check after
+    # this one ("the slots are back") fail for the reason it names.
+    reaped_after = None
+    detail = "no session held"
+    for wait in REAP_WAITS_S:
+        # RETRIED WITH A SETTLE, like the "slots are back" loop below. Rounds 2
+        # and 3 start immediately after the previous round closed its sessions,
+        # so their FINs are still in flight and netd frees a slot only on its
+        # next wake: a refill into that window got FS_ERR_BUSY or a RST, broke
+        # with fewer sessions than it needs, and burned a whole escalation round
+        # (sleeping 75 s or 120 s for a verdict it could no longer reach)
+        # against a perfectly healthy export (review of #124).
+        for _ in range(8):
+            while len(held) < EXPECTED_SESSIONS:
+                s = None
+                try:
+                    s = Session(host, port, timeout=20)
+                    st, _ = s.open()
+                except (RuntimeError, OSError):
+                    # CLOSED before breaking: the socket exists by then, so netd
+                    # has a slot for it, and abandoning it here held that slot
+                    # through the whole measurement window this loop is about to
+                    # open (review of #124).
+                    if s is not None:
+                        s.close()
+                    break
+                if st != 0:
+                    s.close()
+                    break
+                held.append(s)
+            if len(held) == EXPECTED_SESSIONS:
+                break
+            time.sleep(2)
+        if not held:
+            detail = "could not hold a session to test"
+            continue
+        print(f"  holding {len(held)} session(s) silent for {wait}s ...", flush=True)
+        time.sleep(wait)
+        reaped = 0
+        for s in held:
+            try:
+                s.sock.settimeout(15)
+                # ANY REPLY, including a framed error, means the session is
+                # ALIVE. Scoring this by `served()` counted every error status
+                # as "reaped", so a session that answered FS_ERR_BUSY passed the
+                # check while demonstrably answering (review of #124).
+                s.op(root)
+            except socket.timeout:
+                pass  # neither answering nor refused: not evidence either way
+            except (RuntimeError, OSError):
+                reaped += 1  # EOF or reset: the export dropped it
+        held_now = len(held)
+        detail = f"{reaped}/{held_now} reaped after {wait}s (held {held_now} of {EXPECTED_SESSIONS})"
+        for s in held:
             s.close()
+        held = []
+        # Against what was actually HELD, not the target: the refill above
+        # breaks on a transient, and scoring 2 reaped out of 2 against a target
+        # of 3 reported failure while printing the property satisfied on its own
+        # evidence, then slept through the whole escalation (review of #124).
+        # At least TWO, and all of them. Scoring `reaped == held_now` alone let
+        # a run that could only hold one session pass on that single reap -
+        # weakest exactly on the slow, loaded runs the escalation exists for
+        # (review of #124).
+        if held_now >= 2 and reaped == held_now:
+            reaped_after = wait
             break
-    check(f"the reaped slots are back: {EXPECTED_SESSIONS} fresh sessions accepted", len(fresh) == EXPECTED_SESSIONS, f"{len(fresh)} accepted")
+    check("sessions silent past the export's idle limit are reaped", reaped_after is not None, detail)
+    time.sleep(1)
+    # The slots come back - RETRIED, because teardown is asynchronous: the RST
+    # for a reaped session and the FINs for the ones just closed are still in
+    # flight, and a connection opened into that moment can be answered with a
+    # bare close. That surfaced as an uncaught "short reply (0 bytes)" that
+    # killed the whole run after every check had passed.
+    fresh = []
+    why_stopped = ""
+    for attempt in range(6):
+        while len(fresh) < EXPECTED_SESSIONS:
+            # The CONNECT is inside the try as well: a SYN against a table that
+            # has not finished tearing down is answered with a RST (by design
+            # since #123), which SLIRP reports to the host as a refused
+            # connection - from socket.create_connection, before any frame is
+            # sent. Catching only the open() left that as an uncaught
+            # ConnectionRefusedError.
+            s = None
+            try:
+                s = Session(host, port)
+                st, _ = s.open()
+            except (RuntimeError, OSError) as exc:
+                if s is not None:
+                    s.close()  # see the reap loop: an abandoned socket holds a slot
+                why_stopped = f"{exc.__class__.__name__} on open #{len(fresh) + 1}"
+                break
+            if st != 0:
+                s.close()
+                why_stopped = f"{status_name(st)} on open #{len(fresh) + 1}"
+                break
+            fresh.append(s)
+        if len(fresh) == EXPECTED_SESSIONS:
+            break
+        for s in fresh:
+            s.close()
+        fresh = []
+        time.sleep(2)
+    check(f"the reaped slots are back: {EXPECTED_SESSIONS} fresh sessions accepted",
+          len(fresh) == EXPECTED_SESSIONS,
+          f"{len(fresh)} accepted" + (f" ({why_stopped})" if why_stopped and len(fresh) < EXPECTED_SESSIONS else ""))
     for s in fresh:
         s.close()
     print(f"session-gate: {failed} check(s) failed", flush=True)

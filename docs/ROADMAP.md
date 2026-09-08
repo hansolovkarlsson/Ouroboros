@@ -1503,7 +1503,113 @@ would otherwise silently shrink into looking like nothing was ever found.
     makes the guest hold one. A session client that pipelines a request before
     the previous reply is acked has it retransmitted, not lost (the export's
     request state resets only once the reply is acked, since the reply buffer
-    feeds retransmits). And the export still takes a request from one segment.
+    feeds retransmits). And the export still takes a request from one segment,
+    **which on a session changes the failure's shape** (review of #123): a
+    request split across two segments used to be one refused request on a
+    connection that then closed; on a session the first segment earns an auth
+    refusal, the second is dropped and retransmitted, and after the reset it
+    arrives as a fresh "request" and earns a second one, so the client reads
+    two replies for one request and every reply after is off by one. Not
+    reachable from a shipped caller (the guest caps inline data at 512 bytes),
+    but step 7's `NP_PWRITE` frames are up to `NP_FRAME_MAX` = 2252 bytes
+    against an MSS of 1460, so **a per-connection request buffer filled to
+    `4 + len` is a prerequisite of step 7**, not a nicety.
+  - **A SYN against a transiently full table is now refused, and the guest's
+    own clients take a RST as final** (review of #123). `tcp_get`/`tcp_run`
+    answer `NET_FETCH_REFUSED` at once on a RST with no SYN retry, so a remote
+    read that lands while the export node holds all four connections (three
+    idle sessions and one one-shot, or four HTTP transfers) fails immediately where
+    a dropped SYN used to be absorbed by a one-second retransmit into a freed
+    slot. Rare with two nodes, real under load. Two shapes, a decision: drop
+    the SYN when the table's non-session slot will free by itself (a plain
+    one-shot: bounded by the RTO give-up and the 30 s reap) and RST only when
+    it is held by something unbounded (a `cpu` run, which the reap exempts
+    while its child runs); or the client retries a SYN once or twice after a
+    RST (a genuinely closed port then takes longer to report). The first
+    version of this item said "RST only when every busy slot is a session",
+    which cannot happen: `SESSION_MAX` is `MAX_CONNS - 1`, so a full table
+    always holds one non-session (review of #124).
+  - **`netd`'s TCP receive path does not validate what it accepts, and an
+    attempt to fix that was ABANDONED on 2026-09-07 after it proved worse than
+    the gaps.** The gaps are real and are listed here so the analysis outlives
+    the branch (`netd/tcp-hardening`, cc1a190, kept on origin, PR #126
+    closed unmerged):
+
+    - **Nothing bounds an incoming ACK.** `handle_conn_segment` applies any
+      `ack` past `snd_una`, so a stale ACK from a previous incarnation of a
+      4-tuple (`SERVER_ISN` is the constant 0x0002_0000, so every incarnation
+      shares one sequence space) advances `snd_una` arbitrarily, grows `cwnd`,
+      and through the go-back-N fast-forward moves the file cursor - a hole in
+      the served body rather than an error.
+    - **No segment is sequence-checked.** A RST frees a slot on the 4-tuple
+      alone; a FIN closes on the 4-tuple alone; `find_conn` ignores the local
+      port, so one peer's two connections to 80 and 564 are one slot to netd.
+      RFC 5961's three protections (challenge on an unacceptable ACK, on an
+      out-of-window RST, on a SYN into an established connection) are all
+      absent.
+    - **A duplicate SYN rebuilds a live slot**, discarding whatever it held.
+    - **No zero-window persist timer** (RFC 1122 4.2.2.17). Nothing probes a
+      receiver that shuts its window, so nothing elicits the update that would
+      reopen it: with the window shut the first RTO expiry's `rewind_to` drives
+      `in_flight` to 0, the next call takes the early return and resets
+      `rto_retries`, so the abort arm is unreachable and `reap_idle` RSTs the
+      transfer at 30 s instead - a live but paused reader, dropped mid-file.
+      (An earlier draft of this bullet said the RTO retransmits into the shut
+      window and aborts after `RTO_MAX_RETRIES`; `service_rto`'s own comment is
+      the correct half, and this is the record the next attempt builds on.)
+    - **The dial table repeats all of it**, and its ISN is a pure function of
+      its source port.
+
+    **Why the fix was abandoned rather than repaired.** Ten review rounds over
+    one day found roughly fifty defects in it; six were REGRESSIONS the fix
+    itself introduced, and two broke shipped behaviour: an `in_window` gate on
+    the FIN arm rejected `cpu`'s own close (`tcp_run` binds `snd_nxt` once and
+    never advances it, unlike `tcp_get`), leaking an exporter slot per remote
+    run; and the ACK guard, gated on the ACK bit, let a FIN with that bit clear
+    be honoured anywhere in a 64 KB window - a one-packet blind teardown, worse
+    than the stale-FIN case it was written for. A third removed an existing
+    bound: with the persist timer, a conformant peer advertising window 0 holds
+    a slot forever, where the pre-change code reaped it in 30 s. The pattern
+    across rounds was a repair rate matching the defect rate
+    ([`repairing-the-repairs-postmortem.md`](postmortems/repairing-the-repairs-postmortem.md)),
+    which is what happens when every change rests on reading.
+
+    **The precondition for trying again is a rig, not more care.** Nothing in
+    the tree can reach these paths: SLIRP loses no segments and forges none,
+    Parallels and the Pi have no networking at all, and the two-VM socket link
+    rotates its source ports so it cannot even collide a 4-tuple on purpose.
+    What would reach them: the two-Pi network already on the hardware roadmap,
+    or a host-side injector that can forge a segment onto a guest's link (a raw
+    socket peer on the QEMU socket netdev, which the two-VM rig already
+    proves is possible). The one path that DOES have a rig today - loss
+    recovery, via a temporary one-segment drop in `pump_send` plus an HTTP
+    fetch, see `testing/testing-qemu.md` - is exactly where the one measured
+    finding of the whole arc came from. Build the rig first; it is the part
+    that decides whether the next attempt converges.
+    **The stack cost is a separate warning**: the abandoned branch's own
+    `syn_sent_reset` added a 1600-byte frame that LLVM inlined into `tcp_get`,
+    taking the `fetch` path to 32,272 bytes of netd's 32,768-byte stack. Any
+    future work here must measure the frame, not just the logic; `netd` has
+    overflowed its stack twice already (see `loader.rs`).
+
+  - **The session gate's own harness was blind until 2026-09-07, and its late
+    checks proved nothing.** `drive-qemu.py` kills QEMU seconds after its last
+    typed step; the gate runs for a minute or more, so its reap and
+    slots-come-back checks were measured against a guest that had already been
+    killed, and a refusal by a dead process is indistinguishable from the
+    export refusing. It surfaced as flake (11/11, then 0/3 reaped) and was
+    settled by logging netd's connection table rather than by another guess.
+    `scripts/run-guest.sh` now boots the guest for the client's whole run and
+    asserts it is alive at the end. Re-measured under it: 11/11 three times,
+    0 restarts, 0 aborts. Full write-up in
+    [`blind-instruments-postmortem.md`](postmortems/blind-instruments-postmortem.md).
+  - **What the session gate still does not prove (2026-09-07).** Its last
+    check, "the reaped slots are back", closes the held sessions before opening
+    fresh ones, so it passes even against a netd that never reaps (measured:
+    with `CONN_IDLE_TICKS` multiplied by 1000 the reap check fails 0/3 and this
+    one still passes). It verifies slots are usable again, not that the reap
+    returned them; the reap check beside it is what can fail for that. Worth
+    tightening if the two ever need to be independent.
   - **The refusal side of delegation has no check that can fail.** Every
     `DELEGATE` in the tree is a parent granting to its own child, so nothing
     ever exercises "a task cannot delegate to or for a stranger"; the
