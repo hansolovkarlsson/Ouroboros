@@ -2303,16 +2303,15 @@ fn reap_idle(mac: &[u8; 6], c: &TcpConn, now: u64) -> bool {
     if c.cpu_child != CPU_NONE || c.snd_nxt != c.snd_una {
         return false;
     }
-    // A reply stalled on the peer's closed window is NOT exempt: an exemption
-    // (the first fix, review of #123) left a peer that vanished mid-reply with
-    // window 0 holding its slot forever, and with a full table refused by RST
-    // that was an unauthenticated wedge of both ports (review of #124). What
-    // NOTHING PROBES A SHUT WINDOW. A receiver that stops reading is reaped
-    // here after 30 s of silence even though it is alive and merely paused:
-    // netd has no persist timer (RFC 1122 4.2.2.17), so there is no probe to
-    // elicit the window update that would keep it. A branch that added one was
-    // abandoned for introducing worse (docs/ROADMAP.md, PR #126); the gap is on
-    // the ledger.
+    // NOTHING PROBES A SHUT WINDOW, so a reply stalled on one is reaped here
+    // after 30 s of silence even though its peer is alive and merely paused:
+    // netd has no persist timer (RFC 1122 4.2.2.17), and there is no probe to
+    // elicit the window update that would keep the connection. Exempting such a
+    // connection instead is NOT the fix - it was tried, and left a peer that
+    // vanished mid-reply holding its slot forever, which with a full table
+    // refused by RST is an unauthenticated wedge of both ports. A branch that
+    // added the probe was abandoned for introducing worse (docs/ROADMAP.md,
+    // PR #126); the gap is on the ledger.
     if now.wrapping_sub(c.last_rx) <= CONN_IDLE_TICKS {
         return false;
     }

@@ -49,10 +49,28 @@ BOOT_WAIT="${BOOT_WAIT:-60}"
 # guest faulted, proves nothing about the client's result - so they DECIDE the
 # exit code rather than being printed beside it.
 report_guest() {
-	RESTARTS=$(grep -cE 'wedged|restarted|not restarting|giving up' "$SERIAL" 2>/dev/null)
-	ABORTS=$(grep -cE 'Abort|SError' "$TRACE" 2>/dev/null)
-	echo "run-guest: ${RESTARTS:-0} restart line(s), ${ABORTS:-0} abort line(s)"
-	if [ "${RESTARTS:-0}" != "0" ] || [ "${ABORTS:-0}" != "0" ]; then
+	# A LOG IT COULD NOT READ IS NOT A CLEAN LOG. `grep -c` on a missing file
+	# prints nothing and `${X:-0}` turned that into "0 restart line(s)" - "I did
+	# not check" reading identically to "I checked and it was clean", which is
+	# the trap `drive-qemu.py`'s own `aborts()` documents having lost once in a
+	# refactor. It bites hardest on the boot-failure path, where the guest is
+	# known to have failed and the trace may not exist at all.
+	if [ -r "$SERIAL" ]; then
+		RESTARTS=$(grep -cE 'wedged|restarted|not restarting|giving up' "$SERIAL")
+	else
+		RESTARTS="?"
+	fi
+	if [ -r "$TRACE" ]; then
+		ABORTS=$(grep -cE 'Abort|SError' "$TRACE")
+	else
+		ABORTS="?"
+	fi
+	echo "run-guest: ${RESTARTS} restart line(s), ${ABORTS} abort line(s)"
+	if [ "$RESTARTS" = "?" ] || [ "$ABORTS" = "?" ]; then
+		echo "run-guest: a guest log was missing or unreadable - health UNKNOWN, not clean" >&2
+		return 1
+	fi
+	if [ "$RESTARTS" != "0" ] || [ "$ABORTS" != "0" ]; then
 		echo "run-guest: the guest did not stay healthy - the result above is not evidence" >&2
 		return 1
 	fi
@@ -119,7 +137,11 @@ kill $QPID 2>/dev/null; wait $QPID 2>/dev/null
 # Three verdicts, three codes a caller can tell apart: 97 the guest never came
 # up, 98 it came up and did not stay healthy, 99 it died mid-run. Anything else
 # is the client's own exit status, passed through untouched.
-if ! report_guest && [ $RC -eq 0 ]; then
+# UNCONDITIONALLY, not only when the client passed. A run whose guest was
+# restarted proves nothing about the client either way, so passing the client's
+# own status through would have the caller attribute a failure to the export -
+# the misattribution this script exists to prevent (review of #124).
+if ! report_guest; then
 	RC=98
 fi
 exit $RC

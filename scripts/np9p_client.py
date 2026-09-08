@@ -587,18 +587,33 @@ def do_session_gate(host, port, hold_s=10):
     # 2. budget
     held = []
     refusal = None
+    # In a try like every other check in this file: a socket timeout, a netd
+    # restart, or a RST from a table still tearing down after section 1 used to
+    # raise straight out of do_session_gate, losing the six checks after it -
+    # which is the hardening this whole file was given and this loop had missed
+    # (review of #124).
     for i in range(EXPECTED_SESSIONS + 1):
-        s = Session(host, port)
-        st, _ = s.open()
+        s = None
+        try:
+            s = Session(host, port)
+            st, _ = s.open()
+        except (RuntimeError, OSError) as exc:
+            if s is not None:
+                s.close()
+            refusal = (i + 1, None, exc.__class__.__name__)
+            break
         if st == 0:
             held.append(s)
         else:
-            refusal = (i + 1, st)
+            refusal = (i + 1, st, None)
             s.close()
             break
     check(f"{EXPECTED_SESSIONS} sessions accepted, the next refused with FS_ERR_BUSY",
           len(held) == EXPECTED_SESSIONS and refusal is not None and refusal[1] == FS_ERR_BUSY,
-          f"accepted {len(held)}, refusal " + (f"#{refusal[0]} {status_name(refusal[1])}" if refusal else "none"))
+          f"accepted {len(held)}, refusal " + (
+              "none" if refusal is None
+              else f"#{refusal[0]} {refusal[2]}" if refusal[1] is None
+              else f"#{refusal[0]} {status_name(refusal[1])}"))
     try:
         st, _ = one_op(host, port, root)
         detail = "served" if served(st) else status_name(st)
@@ -654,6 +669,12 @@ def do_session_gate(host, port, hold_s=10):
     time.sleep(0.5)
     # A peer that dies mid-session sends a RST (or its OS does); the slot must
     # be back immediately, not after the idle timeout.
+    if not held:
+        # `abort()` on an empty list raised IndexError and took the run with it,
+        # after check 5 had already reported the failure (review of #124).
+        check("a session aborted by its peer (RST) returns its slot at once", False,
+              "no session was held to abort")
+        return failed
     held.pop(0).abort()
     time.sleep(0.5)
     s = Session(host, port)
@@ -671,23 +692,34 @@ def do_session_gate(host, port, hold_s=10):
     reaped_after = None
     detail = "no session held"
     for wait in REAP_WAITS_S:
-        while len(held) < EXPECTED_SESSIONS:
-            s = None
-            try:
-                s = Session(host, port, timeout=20)
-                st, _ = s.open()
-            except (RuntimeError, OSError):
-                # CLOSED before breaking: the socket exists by then, so netd has
-                # a slot for it, and abandoning it here held that slot through
-                # the whole measurement window this loop is about to open
-                # (review of #124).
-                if s is not None:
+        # RETRIED WITH A SETTLE, like the "slots are back" loop below. Rounds 2
+        # and 3 start immediately after the previous round closed its sessions,
+        # so their FINs are still in flight and netd frees a slot only on its
+        # next wake: a refill into that window got FS_ERR_BUSY or a RST, broke
+        # with fewer sessions than it needs, and burned a whole escalation round
+        # (sleeping 75 s or 120 s for a verdict it could no longer reach)
+        # against a perfectly healthy export (review of #124).
+        for _ in range(8):
+            while len(held) < EXPECTED_SESSIONS:
+                s = None
+                try:
+                    s = Session(host, port, timeout=20)
+                    st, _ = s.open()
+                except (RuntimeError, OSError):
+                    # CLOSED before breaking: the socket exists by then, so netd
+                    # has a slot for it, and abandoning it here held that slot
+                    # through the whole measurement window this loop is about to
+                    # open (review of #124).
+                    if s is not None:
+                        s.close()
+                    break
+                if st != 0:
                     s.close()
+                    break
+                held.append(s)
+            if len(held) == EXPECTED_SESSIONS:
                 break
-            if st != 0:
-                s.close()
-                break
-            held.append(s)
+            time.sleep(2)
         if not held:
             detail = "could not hold a session to test"
             continue

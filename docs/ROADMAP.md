@@ -1548,9 +1548,15 @@ would otherwise silently shrink into looking like nothing was ever found.
       out-of-window RST, on a SYN into an established connection) are all
       absent.
     - **A duplicate SYN rebuilds a live slot**, discarding whatever it held.
-    - **No zero-window persist timer.** A receiver that shuts its window is
-      served by an RTO retransmitting into it, and after `RTO_MAX_RETRIES` the
-      transfer is RST rather than persisted (RFC 1122 4.2.2.17).
+    - **No zero-window persist timer** (RFC 1122 4.2.2.17). Nothing probes a
+      receiver that shuts its window, so nothing elicits the update that would
+      reopen it: with the window shut the first RTO expiry's `rewind_to` drives
+      `in_flight` to 0, the next call takes the early return and resets
+      `rto_retries`, so the abort arm is unreachable and `reap_idle` RSTs the
+      transfer at 30 s instead - a live but paused reader, dropped mid-file.
+      (An earlier draft of this bullet said the RTO retransmits into the shut
+      window and aborts after `RTO_MAX_RETRIES`; `service_rto`'s own comment is
+      the correct half, and this is the record the next attempt builds on.)
     - **The dial table repeats all of it**, and its ISN is a pure function of
       its source port.
 
