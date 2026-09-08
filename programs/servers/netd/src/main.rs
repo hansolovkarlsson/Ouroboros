@@ -1696,12 +1696,12 @@ enum ConnState {
 }
 
 /// One server-side TCP connection: one of `MAX_CONNS` the event loop
-/// multiplexes, keyed by the peer's ip:port (`find_conn`). A SYN from a peer
-/// whose slot is past its handshake is challenged, not honoured (see
-/// `handle_tcp`); a duplicate SYN during the handshake restarts it. This doc
-/// said "netd serves one at a time - a second peer's SYN just replaces it"
-/// until the review of #124: true when written, false since `MAX_CONNS`, and
-/// #124 is what made the replacing half false too.
+/// multiplexes, keyed by the peer's ip:port (`find_conn`), which is NOT keyed
+/// on the local port, so one peer's connections to 80 and 564 are one slot. A
+/// SYN matching a slot rebuilds it whatever its state. This doc said "netd
+/// serves one at a time - a second peer's SYN just replaces it" until the
+/// review of #124: the first half was false from `MAX_CONNS` onward, the
+/// second is still true and is on the ledger as a gap.
 struct TcpConn {
     peer_ip: [u8; 4],
     peer_mac: [u8; 6],
@@ -2146,19 +2146,21 @@ fn parse_tcp_in(frame: &[u8]) -> Option<TcpIn> {
 }
 
 /// Route one inbound TCP segment to its connection, multiplexing up to
-/// `MAX_CONNS` at once (keyed by the peer's IP+port). A SYN opens (or, for the
-/// same peer during its handshake, restarts) a connection in a free slot - or
-/// is refused with a RST if all slots are busy, or challenged with a bare ACK if
-/// it names a connection past its handshake; every other segment is dispatched to
-/// its matching connection via [`handle_conn_segment`], and a returned "close"
-/// (the peer's FIN, or an RST) frees the slot.
+/// `MAX_CONNS` at once (keyed by the peer's IP+port). A SYN opens - or, for any
+/// slot already matching that ip:port, REBUILDS - a connection, or is refused
+/// with a RST if all slots are busy; every other segment is dispatched to its
+/// matching connection via [`handle_conn_segment`], and a returned "close" (the
+/// peer's FIN, or an RST) frees the slot. None of those paths validates a
+/// sequence number; see `docs/ROADMAP.md` on the receive path.
 fn handle_tcp(mac: &[u8; 6], frame: &[u8], seg: &TcpIn, conns: &mut [Option<TcpConn>; MAX_CONNS], dials: &mut [Option<DialConn>; MAX_DIAL], auth: &Auth) {
-    // RST tears down a matching connection - when its sequence number is
-    // exactly what we expect next (RFC 5961 3.2). Any other RST gets a bare ACK
-    // (the challenge): a peer that really reset answers with a RST at our ack,
-    // which passes; a stale RST from a previous incarnation, or a blind one
-    // from anyone who can guess the 4-tuple, does not. Until #124 any RST
-    // freed the slot, which a session made a cheaper kill than it had been.
+    // RST tears down a matching connection on the 4-TUPLE ALONE: no sequence
+    // check, no RFC 5961 challenge, and `find_conn` does not even key on the
+    // local port. So a stale RST from a previous incarnation (SERVER_ISN is a
+    // constant, so incarnations share a sequence space) or a blind one from
+    // anyone who can guess the 4-tuple kills a live session. A branch that
+    // fixed this was abandoned for introducing worse (docs/ROADMAP.md, PR
+    // #126); the gap is on the ledger, and this comment says what the code
+    // does rather than what that branch did.
     if seg.flags & TCP_RST != 0 {
         if let Some(i) = find_conn(conns, seg) {
             conns[i] = None;
@@ -2169,14 +2171,12 @@ fn handle_tcp(mac: &[u8; 6], frame: &[u8], seg: &TcpIn, conns: &mut [Option<TcpC
     // SYN (without ACK): open the connection in this peer's existing slot (a
     // retransmitted/duplicate SYN) or a free one, and answer with SYN-ACK.
     if seg.flags & TCP_SYN != 0 && seg.flags & TCP_ACK == 0 {
-        // A SYN from the ip:port of a connection PAST its handshake is answered
-        // with a bare ACK (RFC 5961's challenge), not by rebuilding the slot: a
-        // peer that really did restart answers the challenge with a RST, which
-        // frees the slot, and its next SYN is served. Rebuilding silently
-        // destroyed whatever the slot held - harmless when every connection
-        // was one request long, and not once a session holds a peer's port
-        // for as long as it likes (review of #123). A duplicate SYN during the
-        // handshake still restarts it, as before.
+        // A SYN matching an existing slot REBUILDS it, whatever state it was
+        // in - so a stale or spoofed SYN, or SLIRP reusing a source port,
+        // silently destroys a live session and the real peer meets an
+        // unexpected SYN-ACK. Sessions made that worse (a slot is now held for
+        // as long as a peer likes) without making it new. On the ledger with
+        // the rest of the receive path's missing validation.
         let Some(i) = find_conn(conns, seg).or_else(|| free_slot(conns)) else {
             // All slots busy: REFUSE (RST), do not drop. A dropped SYN was fine
             // while every connection was one request long - the peer
@@ -2288,9 +2288,9 @@ fn session_reset_if_done(c: &mut TcpConn) {
 }
 
 /// Whether bytes of the staged reply are still to be SENT (as opposed to
-/// acked): prefix bytes not yet pumped, or a file body not at EOF. The one
-/// spelling of that question for the session reset and the zero-window probe,
-/// which had two (review of #124).
+/// acked): prefix bytes not yet pumped, or a file body not at EOF. Named
+/// because the session reset asks it and a reader should not have to re-derive
+/// the predicate from `prefix_off`/`eof` at the call site.
 fn reply_pending(c: &TcpConn) -> bool {
     c.prefix_off < c.prefix_len || (c.file && !c.eof)
 }
@@ -2307,10 +2307,12 @@ fn reap_idle(mac: &[u8; 6], c: &TcpConn, now: u64) -> bool {
     // (the first fix, review of #123) left a peer that vanished mid-reply with
     // window 0 holding its slot forever, and with a full table refused by RST
     // that was an unauthenticated wedge of both ports (review of #124). What
-    // keeps a live-but-paused peer off this reap is `probe_zero_window`: its
-    // answer to the probe refreshes `last_rx`. A peer that answers nothing for
-    // 30 s, paused or not, is reaped - this project's stated bound, shorter
-    // than a desktop stack's persist timer, and said so.
+    // NOTHING PROBES A SHUT WINDOW. A receiver that stops reading is reaped
+    // here after 30 s of silence even though it is alive and merely paused:
+    // netd has no persist timer (RFC 1122 4.2.2.17), so there is no probe to
+    // elicit the window update that would keep it. A branch that added one was
+    // abandoned for introducing worse (docs/ROADMAP.md, PR #126); the gap is on
+    // the ledger.
     if now.wrapping_sub(c.last_rx) <= CONN_IDLE_TICKS {
         return false;
     }
@@ -2503,15 +2505,12 @@ fn service_rto(mac: &[u8; 6], c: &mut TcpConn, now: u64) -> bool {
     }
     if now >= c.rto_deadline {
         if c.rto_retries >= RTO_MAX_RETRIES {
-            // A peer whose window is SHUT does not reach this arm and needs no
-            // exemption in it: with nothing sendable, the first expiry's
-            // `rewind_to` drives `in_flight` to 0 and the early return at the
-            // top of this function resets `rto_retries`. An exemption was
-            // written here anyway and was worse than useless - `reap_idle`
-            // declines a connection with data in flight, so it made a peer that
-            // stalled and then vanished immortal (both reviews of #124). What
-            // keeps a live paused peer alive is `probe_zero_window`, whose
-            // answers wind `last_rx`; one that answers nothing is reaped at 30 s.
+            // A peer whose window is SHUT does not reach this arm: with
+            // nothing sendable, the first expiry's `rewind_to` drives
+            // `in_flight` to 0 and the early return at the top of this function
+            // resets `rto_retries`. It is `reap_idle` that takes such a
+            // connection, at 30 s, whether the peer is dead or merely paused -
+            // see its comment, and the ledger.
             send_seg(mac, c, TCP_RST, false, &[]); // peer is dead - abort
             return true;
         }

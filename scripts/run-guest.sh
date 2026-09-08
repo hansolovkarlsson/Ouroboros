@@ -36,8 +36,12 @@ if [ "${NO_BUILD:-0}" != "1" ] && [ "$IMAGE" = "build/esp.img" ]; then
 	make image >/dev/null || { echo "run-guest: make image failed" >&2; exit 96; }
 fi
 LOGDIR="${LOGDIR:-${TMPDIR:-/tmp}}"
-SERIAL="$LOGDIR/guest-serial.log"
-TRACE="$LOGDIR/guest-int.log"
+# PER PROCESS: two runs share $LOGDIR (the docs show a gate run and a curl run),
+# and fixed names let the second truncate the first's serial log while the first
+# is still grepping it for readiness and for restart lines - so one run's boot
+# output could satisfy the other's wait and `report_guest` score the wrong guest.
+SERIAL="$LOGDIR/guest-serial.$$.log"
+TRACE="$LOGDIR/guest-int.$$.log"
 BOOT_WAIT="${BOOT_WAIT:-60}"
 
 # What the guest says about its own health, and this script's verdict on it.
@@ -94,8 +98,16 @@ if ! grep -q 'export open' "$SERIAL" 2>/dev/null; then
 	exit 97
 fi
 
-"$@"
+# BOUNDED. The recipe this replaces wrapped the client in `perl -e 'alarm 200'`;
+# a bare "$@" lets a client that hangs - the gate blocked on a session netd
+# never answers, which is one of the failure modes under test - hang the whole
+# run with QEMU alive. The reap escalation can legitimately sleep ~235 s, so the
+# bound is generous enough to tell slow from wedged. macOS has no `timeout`.
+perl -e 'alarm shift; exec @ARGV' "${RUN_TIMEOUT:-600}" "$@"
 RC=$?
+if [ $RC -eq 142 ] || [ $RC -eq 14 ]; then
+	echo "run-guest: the client hit the ${RUN_TIMEOUT:-600}s bound - wedged, not slow" >&2
+fi
 
 if kill -0 $QPID 2>/dev/null; then
 	echo "run-guest: guest alive at the end - the run means what it says"

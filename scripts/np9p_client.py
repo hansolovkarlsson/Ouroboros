@@ -617,15 +617,22 @@ def do_session_gate(host, port, hold_s=10):
     # request). A 5th must be refused: SLIRP accepts the host's connect on the
     # guest's behalf, so the refusal shows on the first read as a reset or EOF,
     # never as a served reply and never as a hang.
-    # Both connects in the try: they are aimed at a table that is FULL, which
-    # this file documents further down as reaching the host as a connect-time
-    # ConnectionRefusedError. Refused IS the outcome under test here, so it has
-    # to be a verdict rather than a traceback (review of #124).
+    # `bare` is the PRECONDITION - the fourth connection, which must SUCCEED to
+    # fill the table - and `fifth` is the one under test. They are caught
+    # separately: with both in one try, a refusal of `bare` (an earlier one-shot
+    # still tearing down, so the table was already full) set the outcome and the
+    # check reported the property proven from the refusal of the connection that
+    # was supposed to establish it (review of #124).
     bare = None
     fifth = None
     outcome = None
     try:
         bare = socket.create_connection((host, port), timeout=10)
+    except OSError as exc:
+        outcome = f"precondition failed: the 4th connection was refused ({exc.__class__.__name__})"
+    try:
+        if bare is None:
+            raise RuntimeError("no precondition")
         time.sleep(0.5)
         fifth = socket.create_connection((host, port), timeout=10)
         frame, _nonce = signed_frame(root, SIGN_KEY)
@@ -635,10 +642,12 @@ def do_session_gate(host, port, hold_s=10):
         outcome = "EOF" if not got else f"served {len(got)}+ bytes"
     except socket.timeout:
         outcome = "hang (8s timeout)"
+    except RuntimeError:
+        pass  # the precondition already failed; its message is the outcome
     except OSError as exc:
         outcome = f"reset ({exc.__class__.__name__})"
     check("with the table full, a 5th connection is refused rather than hung",
-          outcome == "EOF" or outcome.startswith("reset"), outcome)
+          bare is not None and (outcome == "EOF" or outcome.startswith("reset")), outcome)
     for sk in (fifth, bare):
         if sk is not None:
             sk.close()
@@ -663,11 +672,18 @@ def do_session_gate(host, port, hold_s=10):
     detail = "no session held"
     for wait in REAP_WAITS_S:
         while len(held) < EXPECTED_SESSIONS:
+            s = None
             try:
                 s = Session(host, port, timeout=20)
                 st, _ = s.open()
             except (RuntimeError, OSError):
-                break  # a transient here is not a verdict: try the longer wait
+                # CLOSED before breaking: the socket exists by then, so netd has
+                # a slot for it, and abandoning it here held that slot through
+                # the whole measurement window this loop is about to open
+                # (review of #124).
+                if s is not None:
+                    s.close()
+                break
             if st != 0:
                 s.close()
                 break
@@ -691,7 +707,7 @@ def do_session_gate(host, port, hold_s=10):
             except (RuntimeError, OSError):
                 reaped += 1  # EOF or reset: the export dropped it
         held_now = len(held)
-        detail = f"{reaped}/{held_now} reaped after {wait}s"
+        detail = f"{reaped}/{held_now} reaped after {wait}s (held {held_now} of {EXPECTED_SESSIONS})"
         for s in held:
             s.close()
         held = []
@@ -699,7 +715,11 @@ def do_session_gate(host, port, hold_s=10):
         # breaks on a transient, and scoring 2 reaped out of 2 against a target
         # of 3 reported failure while printing the property satisfied on its own
         # evidence, then slept through the whole escalation (review of #124).
-        if reaped == held_now:
+        # At least TWO, and all of them. Scoring `reaped == held_now` alone let
+        # a run that could only hold one session pass on that single reap -
+        # weakest exactly on the slow, loaded runs the escalation exists for
+        # (review of #124).
+        if held_now >= 2 and reaped == held_now:
             reaped_after = wait
             break
     check("sessions silent past the export's idle limit are reaped", reaped_after is not None, detail)
@@ -719,10 +739,13 @@ def do_session_gate(host, port, hold_s=10):
             # connection - from socket.create_connection, before any frame is
             # sent. Catching only the open() left that as an uncaught
             # ConnectionRefusedError.
+            s = None
             try:
                 s = Session(host, port)
                 st, _ = s.open()
             except (RuntimeError, OSError) as exc:
+                if s is not None:
+                    s.close()  # see the reap loop: an abandoned socket holds a slot
                 why_stopped = f"{exc.__class__.__name__} on open #{len(fresh) + 1}"
                 break
             if st != 0:

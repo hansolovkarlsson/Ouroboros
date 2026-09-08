@@ -1604,6 +1604,24 @@ would otherwise silently shrink into looking like nothing was ever found.
     one still passes). It verifies slots are usable again, not that the reap
     returned them; the reap check beside it is what can fail for that. Worth
     tightening if the two ever need to be independent.
+  - **The refusal side of delegation has no check that can fail.** Every
+    `DELEGATE` in the tree is a parent granting to its own child, so nothing
+    ever exercises "a task cannot delegate to or for a stranger"; the
+    one-clause rule rests on reading. Rig item: a deliberately misbehaving
+    `/bin` program that issues `DELEGATE(grantee=<not its child>, ...)` and
+    `DELEGATE(<its child>, <a task it cannot reach>)` and prints the two
+    answers, expected `MSG_ERR_DENIED` both times. Promised in the journal on
+    2026-09-06 and not built.
+  - **A foregrounded nested shell loses the keyboard after every command.**
+    `exec /EFI/ORBS/SH.BIN`, `fg 6`, log in, `echo hi` (a builtin, no child,
+    no `FG`): `ps` before shows task 0 blocked and task 6 runnable, `ps` after
+    shows task 0 runnable and task 6 blocked, and the next line typed runs in
+    the boot shell. Measured 2026-09-06 while testing subtree delegation,
+    where it first looked like the nested shell's later pipelines had started
+    working: they had, in the other shell. Every nested-shell recipe needs a
+    `fg 6` before each command until this is fixed, and the same prompt in
+    both shells hides which one answered. Not traced to a cause; the revert
+    on child exit goes to slot 0 by design, but this case has no child.
   - **`delegate_net` discards its result**, so the one grant this arc is about
     is the only `DELEGATE` in the shell with no failure signal. **Worse since
     subtree delegation (2026-09-06):** a nested shell that never received
