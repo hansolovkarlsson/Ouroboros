@@ -305,15 +305,18 @@ struct Fid {
     /// is the remote user it proxied, not `netd`'s own.
     ///
     /// Part of the ownership test, with `owner`, for every fid verb including
-    /// `NP_CLUNK`. It is what separates two remote users behind the one
-    /// `NET_TASK` identity: `netd` multiplexes every session through one
-    /// mailbox, so every remote fid has the same `owner`, and without this a
-    /// remote user could stat, read or clunk another's fid by naming it. A
-    /// mismatch is refused and the fid is KEPT. It used to be dropped, on the
-    /// reading that a uid change meant a recycled slot, which was the only way
-    /// a slot-keyed `owner` could notice one; the generation in `owner` now
-    /// notices that directly, and on a session the drop let a co-tenant
-    /// destroy a handle by naming it.
+    /// `NP_CLUNK`, but ONLY when the owner is `NET_TASK`. It is what separates
+    /// two remote users behind that one identity: `netd` multiplexes every
+    /// session through one mailbox, so every remote fid has the same `owner`,
+    /// and without this a remote user could stat, read or clunk another's fid
+    /// by naming it. A mismatch is refused and the fid is KEPT. It used to be
+    /// dropped, on the reading that a uid change meant a recycled slot, which
+    /// was the only way a slot-keyed `owner` could notice one; the generation
+    /// in `owner` now notices that directly, and on a session the drop let a
+    /// co-tenant destroy a handle by naming it. For any other owner the
+    /// identity is already unique, and POSIX keeps a descriptor usable across
+    /// a privilege drop (`SET_ID`), so comparing the uid there would strand
+    /// the fid for the task's lifetime (review of #130).
     owner_uid: u32,
     tree: usize,
     path_len: usize,
@@ -348,10 +351,6 @@ fn handle(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [Fid; M
     // request's `a3` word. `None` means "no identity to authorize against", and
     // every consumer fails closed on it. See `effective_caller`.
     let who = effective_caller(op, sender, req);
-    // WHICH TASK sent it, as the kernel's packed identity (slot and
-    // generation), captured at send time like `who`. A fid is owned by this;
-    // the bare `sender` slot stays what grants and the reply are addressed to.
-    let owner = syscall4(syscall_abi::SENDER_TASK, 0, 0, 0, 0);
 
     // File operations travel over the uniform verb set (ninep-abi, the Phase 0
     // cluster protocol), carrying a `tree` selector that picks which mount -
@@ -360,7 +359,13 @@ fn handle(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [Fid; M
     // FSOP_MOUNT_AT - fsd-specific, not uniform file verbs) plus the SYSOP_PING
     // fall-through.
     if (ninep_abi::NP_BASE..ninep_abi::NP_LIMIT).contains(&op) {
-        return handle_ninep(mounts, fids, sender, owner, who, op, req, reply);
+        // WHICH TASK sent it, as the kernel's packed identity (slot and
+        // generation), captured at send time like `who`. The file verbs take
+        // only this and derive the slot from it where a grant needs one, so a
+        // slot can never be passed where an identity belongs. Read here rather
+        // than beside `who`: the FSOP_* control ops below never need it.
+        let owner = syscall4(syscall_abi::SENDER_TASK, 0, 0, 0, 0);
+        return handle_ninep(mounts, fids, owner, who, op, req, reply);
     }
     let p = [read_u64(req, 8), read_u64(req, 16), read_u64(req, 24), read_u64(req, 32)];
 
@@ -473,13 +478,11 @@ fn handle(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [Fid; M
 /// namespace resolves it to a real mount in a later step.
 ///
 /// [`NP_REQ_PAYLOAD`]: ninep_abi::NP_REQ_PAYLOAD
-// One over clippy's argument limit, and the one over is `owner`: the sender's
-// identity and the sender's slot are different questions (see `Fid::owner`),
-// and folding them into one struct would make passing the slot where the
-// identity belongs spellable again.
-#[allow(clippy::too_many_arguments)]
-fn handle_ninep(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [Fid; MAX_FIDS], sender: u64, owner: u64, who: Option<Caller>, verb: u64, req: &[u8], reply: &mut [u8]) -> usize {
+fn handle_ninep(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [Fid; MAX_FIDS], owner: u64, who: Option<Caller>, verb: u64, req: &[u8], reply: &mut [u8]) -> usize {
     const NP_HDR: usize = ninep_abi::NP_REQ_PAYLOAD as usize;
+    // The slot half of the sender's identity: what a SAFECOPY grant is looked
+    // up by. Derived, never passed, so the two cannot be swapped at a call.
+    let sender = syscall_abi::task_id_slot(owner);
     if req.len() < NP_HDR {
         return status_reply(reply, syscall_abi::FS_ERROR);
     }
@@ -494,7 +497,7 @@ fn handle_ninep(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [
         verb,
         ninep_abi::NP_PREAD | ninep_abi::NP_PWRITE | ninep_abi::NP_FSTAT | ninep_abi::NP_CLUNK
     ) {
-        return handle_fid_op(mounts, fids, sender, owner, who, verb, &p, reply);
+        return handle_fid_op(mounts, fids, owner, who, verb, &p, reply);
     }
     // The `tree` selector picks which mount (cluster Phase 0 multi-mount); an
     // out-of-range tree is a client bug. An unmounted tree replies NO_FS.
@@ -743,6 +746,24 @@ fn handle_ninep(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [
             let Some(path) = path_from(payload, 0, p[1]) else {
                 return status_reply(reply, syscall_abi::FS_ERROR);
             };
+            // The user the fid is opened as. `check_access` above already
+            // refused a request with no caller, so this cannot fail; it fails
+            // closed rather than storing a sentinel uid.
+            let Some(opener) = who else {
+                return status_reply(reply, syscall_abi::FS_ERROR);
+            };
+            // A FID SLOT BEFORE THE SIDE EFFECTS. Truncate and create below
+            // change the disk, and an open refused after them for a full
+            // table (or a path too long to remember) has emptied or created a
+            // file the caller then holds no handle to; the host peer refuses
+            // first, and `cleak` can fill the table to show it (review of
+            // #130). Nothing the refusals need is computed by the branch.
+            let Some(slot) = free_fid_slot(fids) else {
+                return status_reply(reply, syscall_abi::FS_ERROR); // table full
+            };
+            if path.len() > FID_PATH_MAX {
+                return status_reply(reply, syscall_abi::FS_ERROR);
+            }
             let flags = p[0];
             if flags & ninep_abi::OPEN_TRUNC != 0 {
                 // O_TRUNC WITHOUT O_CREAT MUST NOT CREATE. `write_file` creates
@@ -782,52 +803,31 @@ fn handle_ninep(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [
                 // divergence a foreign observer exists to find, found by one.
                 return status_reply(reply, error_code(&e));
             }
-            // No identity, no fid. A message the kernel sent on nobody's
-            // behalf answers all-ones here, which is also what an unused slot
-            // answers the reaper, so a fid recorded under it would be freed at
-            // the next full table with its file still open.
-            if owner == syscall_abi::GET_ID_ERR {
-                return status_reply(reply, syscall_abi::FS_ERROR);
-            }
-            let opener_uid = who.map_or(u32::MAX, |c| c.uid);
-            match alloc_fid(fids, owner, opener_uid, tree, path, flags) {
-                Some(fid) => status_reply(reply, fid),
-                None => status_reply(reply, syscall_abi::FS_ERROR), // table full
-            }
+            let fid = &mut fids[slot];
+            *fid = Fid::empty();
+            fid.used = true;
+            fid.owner = owner;
+            fid.owner_uid = opener.uid;
+            fid.flags = flags;
+            fid.tree = tree;
+            fid.path_len = path.len();
+            fid.path[..path.len()].copy_from_slice(path.as_bytes());
+            status_reply(reply, slot as u64 + FID_BASE)
         }
         _ => status_reply(reply, syscall_abi::FS_ERROR),
     }
 }
 
-/// Reserve a fid for `owner` (a packed task identity) referring to `path` on
-/// `tree`. Returns the fid number (>= FID_BASE) or `None` if the table is full
-/// even after reaping fids whose owner is gone.
-fn alloc_fid(
-    fids: &mut [Fid; MAX_FIDS],
-    owner: u64,
-    owner_uid: u32,
-    tree: usize,
-    path: &str,
-    flags: u64,
-) -> Option<u64> {
-    let pb = path.as_bytes();
-    if pb.len() > FID_PATH_MAX {
-        return None;
-    }
+/// A free index in the fid table, or `None` if it is full even after reaping
+/// fids whose owner is gone. Only finds the slot; `NP_OPEN` fills it, after its
+/// side effects, so that a refusal here happens before them.
+fn free_fid_slot(fids: &mut [Fid; MAX_FIDS]) -> Option<usize> {
     let mut slot = fids.iter().position(|f| !f.used);
     if slot.is_none() {
         reap_dead_fids(fids);
         slot = fids.iter().position(|f| !f.used);
     }
-    let i = slot?;
-    fids[i].used = true;
-    fids[i].owner = owner;
-    fids[i].owner_uid = owner_uid;
-    fids[i].flags = flags;
-    fids[i].tree = tree;
-    fids[i].path_len = pb.len();
-    fids[i].path[..pb.len()].copy_from_slice(pb);
-    Some(i as u64 + FID_BASE)
+    slot
 }
 
 /// Free any fid whose owner is gone (a client that crashed, exited without
@@ -842,17 +842,22 @@ fn alloc_fid(
 /// command in the same slot, so eight C programs that each leaked one fid left
 /// the ninth, running in that very slot, unable to open anything, and a
 /// restarted `netd` in its protected slot kept the old `netd`'s fids for the
-/// boot. An unused slot answers `GET_ID_ERR`, which no owner is. A zombie
-/// still answers its own identity and is freed too: it can send nothing more.
+/// boot. An unused slot answers `GET_ID_ERR`, which no owner is.
+///
+/// ONE read per fid, on purpose. A zombie still answers its own identity and
+/// is kept until its parent reaps it, which is at most one more full table
+/// away; asking `TASK_STATE` as well would free it now, but two reads have a
+/// window between them (the owner exits and is reaped, or its slot respawned,
+/// between the two), in which a stale-but-matching identity and a non-zombie
+/// state keep a fid that was reapable. A single read has no such window
+/// (review of #130).
 fn reap_dead_fids(fids: &mut [Fid; MAX_FIDS]) {
     for f in fids.iter_mut() {
         if !f.used {
             continue;
         }
         let slot = syscall_abi::task_id_slot(f.owner);
-        let occupant = syscall4(syscall_abi::TASK_IDENTITY, slot, 0, 0, 0);
-        let state = syscall4(syscall_abi::TASK_STATE, slot, 0, 0, 0);
-        if occupant != f.owner || state == syscall_abi::TASK_STATE_ZOMBIE {
+        if syscall4(syscall_abi::TASK_IDENTITY, slot, 0, 0, 0) != f.owner {
             f.used = false;
         }
     }
@@ -860,13 +865,11 @@ fn reap_dead_fids(fids: &mut [Fid; MAX_FIDS]) {
 
 /// Handle a fid op (`a0` = fid): resolve the fid to its owner-checked path +
 /// mount, then read/write/stat/clunk. No per-op permission check - authorized at
-/// open. `owner` is the sender's packed identity (what a fid is owned by);
-/// `sender` its bare slot (what a grant is looked up by).
-#[allow(clippy::too_many_arguments)] // see handle_ninep
+/// open. `owner` is the sender's packed identity, what a fid is owned by; the
+/// slot a grant is looked up by is derived from it.
 fn handle_fid_op(
     mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS],
     fids: &mut [Fid; MAX_FIDS],
-    sender: u64,
     owner: u64,
     who: Option<Caller>,
     verb: u64,
@@ -881,12 +884,16 @@ fn handle_fid_op(
     if idx >= MAX_FIDS || !fids[idx].used || fids[idx].owner != owner {
         return status_reply(reply, syscall_abi::FS_ERROR); // bad or not-yours
     }
-    // ...and asked for by the same USER, for every verb, NP_CLUNK included: see
-    // Fid::owner_uid. A mismatch refuses and KEEPS the fid - the owner is still
-    // using it, and the asker was never entitled to it.
-    match who {
-        Some(c) if c.uid == fids[idx].owner_uid => {}
-        _ => return status_reply(reply, syscall_abi::FS_ERR_PERM),
+    let sender = syscall_abi::task_id_slot(owner);
+    // ...and, from `netd`, asked for by the same USER, for every verb with
+    // NP_CLUNK included: see Fid::owner_uid. A mismatch refuses and KEEPS the
+    // fid - the owner is still using it, and the asker was never entitled to
+    // it. Only `netd`: it is the one sender whose identity fronts many users.
+    if sender == syscall_abi::NET_TASK {
+        match who {
+            Some(c) if c.uid == fids[idx].owner_uid => {}
+            _ => return status_reply(reply, syscall_abi::FS_ERR_PERM),
+        }
     }
     if verb == ninep_abi::NP_CLUNK {
         fids[idx].used = false;

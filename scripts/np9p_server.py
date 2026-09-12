@@ -265,7 +265,7 @@ def verify_signed(body):
         return None
     if not ed().verify(pub, SIG_DOMAIN_REQUEST + nonce + name + np, sig):
         return None
-    return np, nonce
+    return np, nonce, name
 
 
 # The host peer's own identity - the "host" dev key, which every image's
@@ -293,8 +293,9 @@ def warm_up():
 
 
 def verify(body):
-    """Strip + verify the auth header; return (NP message, nonce), or None. The
-    nonce is what the reply is signed against (reply-auth).
+    """Strip + verify the auth header; return (NP message, nonce, name), or
+    None. The nonce is what the reply is signed against (reply-auth); the name
+    is the user the request is made as, which a fid is bound to at open.
 
     ONE FORMAT. The retired shared-key MAC'd format (`AUTHNP02`) was accepted
     here until the flag day; a frame carrying it is now refused like any other
@@ -453,7 +454,7 @@ def serve_request(body):
     verified = verify(body)
     if verified is None:
         return frame_reply(FS_ERR_AUTH)
-    body, nonce = verified
+    body, nonce, name = verified
 
     # Every real reply is SEALED (reply-auth): [u32 len][sig:64][status][data],
     # signed over `domain-tag || request_nonce || [status][data]` with this
@@ -529,7 +530,12 @@ def serve_request(body):
             # fids sees the ceiling here EARLIER than against fsd, which is the
             # safe direction for an observer.
             return sealed(FS_ERROR)
-        FIDS[free] = fpath
+        # Bound to the USER as well as the number, as fsd binds a fid to the
+        # (task, user) that opened it: a fid verb from another user answers
+        # FS_ERR_PERM and the fid is kept (ninep-abi, NP_CLUNK). Before the
+        # review of #130 this peer freed any known fid for any caller, so no
+        # observer could see fsd's own clunk test fail.
+        FIDS[free] = (fpath, name)
         return sealed(free)
 
     # The fid ops. a0 = fid, and there is no path.
@@ -545,7 +551,10 @@ def serve_request(body):
             # docs/roadmap/roadmap-fid-verbs.md, not a difference to introduce here.
             print(f"  [bad fid {fid} for verb 0x{verb:x}]", flush=True)
             return sealed(FS_ERROR)
-        fpath = FIDS[fid]
+        fpath, opener = FIDS[fid]
+        if opener != name:
+            print(f"  [fid {fid}: opened as {opener!r}, asked for as {name!r}]", flush=True)
+            return sealed(FS_ERR_PERM)
         if verb == NP_BASE + 19:  # NP_CLUNK
             del FIDS[fid]
             return sealed(0)
@@ -680,7 +689,7 @@ def self_test(quiet=True):
     """
     global verify
     real_verify = verify
-    verify = lambda body: (body, b"\0" * NP_NONCE_LEN)  # noqa: E731
+    verify = lambda body: (body, b"\0" * NP_NONCE_LEN, b"self-test")  # noqa: E731
     bad = []
     try:
         FIDS.clear()

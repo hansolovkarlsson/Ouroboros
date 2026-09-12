@@ -15,11 +15,9 @@
 #include <unistd.h>
 #include "sys.h"
 
-/* The two halves of _exit this program keeps, so its line reaches the console
- * (and a pipe consumer sees end-of-stream), minus the third, __libc_close_all. */
-extern void __libc_flush_stdout(void);
-extern void __libc_end_stdout(void);
-
+/* _exit's three steps minus the third: flush stdio, end stdout (so the line
+ * reaches the console and a pipe consumer sees end-of-stream), and NOT
+ * __libc_close_all. Both are declared by unistd.h. */
 int main(void) {
     int fd = open("/CLEAK.TXT", O_WRONLY | O_CREAT);
     if (fd < 0) {

@@ -123,7 +123,10 @@ pub const NP_CHOWN: u64 = NP_BASE + 14;
 /// C fd). `a0` = the [`OPEN_*`] flag bits, `a1` = path length; payload = the
 /// path. Status = the fid on success, or an `FS_ERR_*` code (permission is
 /// checked here, once, per the flags). The fid remembers the file for this
-/// client until [`NP_CLUNK`].
+/// client until [`NP_CLUNK`], and BELONGS to the client that opened it: the
+/// sending task, and behind a relay that fronts many users (`netd`'s export,
+/// this peer set's host server) the user it was opened as. Every fid verb
+/// tests that; see [`NP_CLUNK`] for the answers.
 pub const NP_OPEN: u64 = NP_BASE + 15;
 
 /// **Read** from a fid at an explicit offset: `a0` = fid, `a1` = offset,
@@ -140,6 +143,14 @@ pub const NP_PWRITE: u64 = NP_BASE + 17;
 pub const NP_FSTAT: u64 = NP_BASE + 18;
 
 /// **Close** a fid, freeing the server-side handle: `a0` = fid. Status = 0.
+///
+/// Ownership is tested here exactly as on the other fid verbs, not skipped
+/// because the request only frees: a fid another task opened answers
+/// `FS_ERROR` (indistinguishable from a fid that does not exist), and one
+/// the same relay opened for a DIFFERENT user answers `FS_ERR_PERM`. In both
+/// cases the fid is kept and the owner keeps using it. A server that freed on
+/// any clunk would let a co-tenant destroy a handle by naming it (the fsd
+/// behaviour fixed 2026-09-12).
 pub const NP_CLUNK: u64 = NP_BASE + 19;
 
 /// [`NP_OPEN`] flag: open for reading (needs `r` on the file).

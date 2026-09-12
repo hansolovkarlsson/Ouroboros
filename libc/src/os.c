@@ -22,8 +22,8 @@ void _exit(int code) {
         __libc_flush_stdout(); /* stdio's buffer, which sits above... */
     }
     __libc_end_stdout(); /* ...the write-boundary buffer, then the EOS marker */
-    /* Release the server-side fids: nothing else does, and a leaked one is
-     * unreapable once the task's slot is recycled. */
+    /* Release the server-side fids - see __libc_close_all's comment in file.c
+     * for what a leaked one costs. */
     __libc_close_all();
     __os_syscall1(SYS_EXIT, code);
     for (;;) {
