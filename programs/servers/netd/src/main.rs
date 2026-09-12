@@ -1840,7 +1840,7 @@ const CPU_NONE: u64 = 0;
 /// `serve`'s guard-paged stack `MAX_CONNS` times over. Four covers a C
 /// program's working set of open files; the fifth open on a session is refused
 /// `FS_ERR_BUSY`, the answer the session budget gives, never by evicting one.
-/// fsd's own table (`MAX_FIDS`, 8) is shared by every local C program and every
+/// fsd's own table (`ninep_abi::MAX_FIDS`) is shared by every local C program and every
 /// session, so three full sessions can starve a local open: that arrives as
 /// fsd's `FS_ERROR`, relayed as-is, and it is on the ledger.
 const SESSION_FIDS: usize = 4;
@@ -1864,10 +1864,28 @@ struct SessionFid {
     /// a slot with a new uid is a recycled slot), which on a session would let
     /// a co-tenant destroy a handle by naming it.
     opener: Proxy,
+    /// fsd's packed task identity (`TASK_IDENTITY(FSD_TASK)`) when this fid was
+    /// opened. fsd's fids are just `[Fid; MAX_FIDS]` on its stack, wiped to
+    /// empty when the supervisor restarts it, and it re-issues numbers from 3 -
+    /// so a fid this session cached before that restart now names a DIFFERENT
+    /// file, one a later session opened. Forwarding the stale number would stat
+    /// or clunk that other session's live fid (fsd's owner is always
+    /// `NET_TASK`, so its own ownership check cannot tell them apart). Every op
+    /// and `Drop`'s clunk compare this against fsd's current generation first
+    /// and treat a mismatch as a dead handle: fsd forgot it either way.
+    fsd_gen: u64,
 }
 
 impl SessionFid {
-    const NONE: SessionFid = SessionFid { fsd_fid: 0, opener: Proxy { uid: 0, gid: 0 } };
+    const NONE: SessionFid = SessionFid { fsd_fid: 0, opener: Proxy { uid: 0, gid: 0 }, fsd_gen: 0 };
+}
+
+/// fsd's current packed task identity (slot + generation). A restart by the
+/// supervisor is a new occupant of the protected slot and so a new generation,
+/// which is what a cached [`SessionFid::fsd_gen`] is compared against. A fid
+/// opened against one generation is dead the moment this differs.
+fn fsd_generation() -> u64 {
+    syscall(syscall_abi::TASK_IDENTITY, syscall_abi::FSD_TASK)
 }
 
 /// A connection's fids die with it. `Drop`, and not a clunk at each site that
@@ -1890,11 +1908,16 @@ impl SessionFid {
 /// this doc is not read as the connection's whole teardown.
 impl Drop for TcpConn {
     fn drop(&mut self) {
+        let gen = fsd_generation();
         for f in self.fids.iter_mut() {
-            if f.fsd_fid != 0 {
+            // Only a fid still on the generation it was opened against is
+            // clunked; one fsd has forgotten (it restarted) is not, because the
+            // number now belongs to another session's file, and clunking it
+            // would close that (review of #128).
+            if f.fsd_fid != 0 && f.fsd_gen == gen {
                 let _ = fsd_call(As::Remote(f.opener), ninep_abi::NP_CLUNK, 0, f.fsd_fid, 0, &[], &mut []);
-                *f = SessionFid::NONE;
             }
+            *f = SessionFid::NONE;
         }
     }
 }
@@ -4471,11 +4494,25 @@ fn fid_verb_reply(msg: &[u8], out: &mut [u8; PREFIX_MAX], fids: &mut [SessionFid
         let Some(slot) = fids.iter().position(|f| f.fsd_fid == 0) else {
             return frame_reply(out, syscall_abi::FS_ERR_BUSY, &[]);
         };
+        // Read fsd's generation BEFORE the open, not after, and the ordering is
+        // deliberate against the race it looks like a bug for (review of #129):
+        // there is no atomic "open and report the generation", so whichever side
+        // the read lands, an fsd restart in the window is recorded wrong - and
+        // the two directions are not equally bad. Reading before means a restart
+        // between here and the open landing records the OLD gen against a fid on
+        // the new one, so a later op sees a mismatch and refuses a LIVE fid: the
+        // client re-opens, harmless. Reading after would record the NEW gen
+        // against a fid opened on the old, now-wiped fsd, so a later op sees a
+        // match and forwards a stale number fsd may have REISSUED - the exact
+        // aliasing this guard exists to stop. The guard must fail toward
+        // false-dead, never false-live. No restart (the real case): the gen is
+        // stable across both calls, so the recorded value is the open's.
+        let gen = fsd_generation();
         let status = fsd_call(who, ninep_abi::NP_OPEN, tree, p0, fspath.len() as u64, fspath, &mut []);
         if status >= syscall_abi::FS_ERR_MIN {
             return frame_reply(out, status, &[]);
         }
-        fids[slot] = SessionFid { fsd_fid: status, opener: proxy };
+        fids[slot] = SessionFid { fsd_fid: status, opener: proxy, fsd_gen: gen };
         return frame_reply(out, FID_BASE + slot as u64, &[]);
     }
     // NP_FSTAT / NP_CLUNK: a0 is the fid and there is no path.
@@ -4486,6 +4523,14 @@ fn fid_verb_reply(msg: &[u8], out: &mut [u8; PREFIX_MAX], fids: &mut [SessionFid
         // three stay comparable (roadmap-fid-verbs.md, step 2's follow-up).
         _ => return frame_reply(out, syscall_abi::FS_ERROR, &[]),
     };
+    // fsd restarted since this fid was opened? The number is stale, and
+    // forwarding it would land on whatever fsd re-issued that number to. Free
+    // the slot and refuse, before the uid check (which is about netd's own
+    // opener record and would otherwise mask this) and before any forward.
+    if fids[slot].fsd_gen != fsd_generation() {
+        fids[slot] = SessionFid::NONE;
+        return frame_reply(out, syscall_abi::FS_ERROR, &[]);
+    }
     if fids[slot].opener.uid != proxy.uid {
         return frame_reply(out, syscall_abi::FS_ERR_PERM, &[]);
     }

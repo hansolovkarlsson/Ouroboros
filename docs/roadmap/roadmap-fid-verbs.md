@@ -570,8 +570,10 @@ holds it (and A's own `fstat` still served, so the refusal is about the
 session and not the fid); closing A holding a fid leaves the number dead on a
 fresh session. That third one a per-connection table passes *whether or not*
 `fsd` was told, so the gate adds the half that can fail: **12 opens across
-three closed sessions against `fsd`'s 8-slot table**, which succeed only if
-each close clunked. · **Three more, pinning the step's boundaries:** the fifth
+three closed sessions against `fsd`'s table** (`ninep_abi::MAX_FIDS`, 8 that
+day; the wire checker asserts the gate's product exceeds it on every
+`make test`, since a raised table would otherwise leave this check passing
+with the clunk deleted), which succeed only if each close clunked. · **Three more, pinning the step's boundaries:** the fifth
 open on a session is `FS_ERR_BUSY`; a fid verb on a one-shot connection is
 `FS_ERR_NO_SUCH_VERB`; another user on the session is `FS_ERR_PERM` and the
 owner keeps the fid; and `NP_PREAD` on a session answers `FS_ERR_NO_SUCH_VERB`
@@ -611,6 +613,24 @@ the same file read path-based over the same mount — two independent paths to
 the same bytes. · **Negative control:** truncate the expected buffer by one
 byte; the comparison must fail. (A same-length compare that passes on a short
 read is the failure mode.)
+
+> **Fold `fid_verb_reply` into `build_9p_reply` as part of this step, not
+> before it (decided 2026-09-12, review of #128 item 9).** Step 5 left the
+> fid verbs in their own `fid_verb_reply`, which re-spells `build_9p_reply`'s
+> preamble a second way: the runt check, the header decode, and the `EXPORT_NS`
+> `resolve_ns` plus the non-`Fsd` `NsTarget` refusal. Removing
+> that duplication means threading `fids`/`session` into `build_9p_reply` and
+> giving it a per-verb path-word selector (`a0` for the path verbs, `a1` for
+> `NP_OPEN`, no path for the fid ops), so `NP_OPEN`/`NP_FSTAT`/`NP_CLUNK`
+> become arms of the existing match, and `NP_PREAD` is then one more arm
+> beside `NP_READ_AT`, reusing `read_file_chunk` and its chunk cap rather than
+> a second copy. That is the payoff, and it is **this step's** consumer: the
+> fold touches the dispatch preamble every path verb runs through, which the
+> step-5 fid gate does not exercise (it covers `NP_OPEN`/`FSTAT`/`CLUNK`,
+> `readdir` and `stat`, not `read`/`write`/`mv`/`chmod`/`write_at`), so it
+> should land with the read-path gate this step adds and not as a bare
+> refactor ahead of it (the merge-with-consumer lesson,
+> [`cluster-phase0-postmortem.md`](../postmortems/cluster-phase0-postmortem.md)).
 
 **Step 7 — `NP_PWRITE`, and the C write path it unblocks.** The mirror bridge;
 `fsd_write_at` is the proven precedent for wire-inline → local `GRANT_READ`.

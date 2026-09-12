@@ -151,6 +151,20 @@ pub const OPEN_CREATE: u64 = 4;
 /// [`NP_OPEN`] flag: truncate the file to empty on open.
 pub const OPEN_TRUNC: u64 = 8;
 
+/// How many fids `fsd` holds open at once, across every client: every local C
+/// program and, since step 5 of `docs/roadmap/roadmap-fid-verbs.md`
+/// (2026-09-12), every export session, since a remote fid is an `fsd` fid
+/// owned by `netd`. Declared here rather than kept private to `fsd` because
+/// the number is a BUDGET that peers observe: the host peer mirrors it
+/// (`scripts/np9p_server.py`, so exhaustion behaves the same there), and the
+/// step-5 gate's one fallible check opens more than this many fids across
+/// closed sessions to prove that closing a session clunks them, a property
+/// `scripts/check-wire-constants.py` asserts against this value on every
+/// `make test`. Raise it when something actually exhausts it, with the
+/// exhaustion as the evidence; the gate's rounds then have to grow with it, and
+/// the checker says so.
+pub const MAX_FIDS: usize = 8;
+
 /// One past the last defined verb — a server dispatches the `[NP_BASE, NP_LIMIT)`
 /// range to its verb handler and lets everything else (including `SYSOP_PING`)
 /// fall through to its existing path.

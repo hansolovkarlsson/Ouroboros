@@ -133,7 +133,7 @@ FS_ERR_NO_SUCH_VERB = (1 << 64) - 1 - 39  # u64::MAX - 39: this server has no ar
 # per operation is not merely wasteful, there is nothing to resolve. The fid
 # must remember what it was opened on.
 FID_BASE = 3  # 0/1/2 stay clear of a C program's stdin/stdout/stderr
-MAX_FIDS = 8  # fsd's own ceiling, mirrored so exhaustion behaves the same here
+MAX_FIDS = 8  # ninep-abi MAX_FIDS, fsd's ceiling, so exhaustion behaves the same here
 OPEN_READ = 1
 OPEN_WRITE = 2
 OPEN_CREATE = 4

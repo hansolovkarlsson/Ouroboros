@@ -837,13 +837,19 @@ def do_session_gate(host, port, hold_s=10):
 # What the guest export budgets PER SESSION: SESSION_FIDS in netd is 4. Spelled
 # here as the expectation the gate checks, like EXPECTED_SESSIONS above.
 EXPECTED_SESSION_FIDS = 4
-# fsd's own table is MAX_FIDS = 8, shared by every local C program and every
-# remote session. The gate opens EXPECTED_SESSION_FIDS on each of
-# FID_BUDGET_ROUNDS sessions, closing each session before the next, so the total
-# (12) exceeds fsd's 8: every open succeeds only if closing a session really
+# fsd's own table is ninep-abi's MAX_FIDS, shared by every local C program and
+# every remote session. The gate opens EXPECTED_SESSION_FIDS on each of
+# FID_BUDGET_ROUNDS sessions, closing each session before the next, so the
+# total EXCEEDS MAX_FIDS: every open succeeds only if closing a session really
 # clunks its fids on fsd. That is the check that fails when the clunk is
 # missing, and it is the only one here that can - a per-connection table
 # refuses an old number on a new session whether or not fsd was told.
+#
+# The numbers are NOT quoted here, on purpose: this comment used to say "the
+# total (12) exceeds fsd's 8", and raising MAX_FIDS to 16 would have left a
+# check that passes with the clunk deleted while every copy kept saying 8.
+# check-wire-constants.py asserts ROUNDS * EXPECTED_SESSION_FIDS > MAX_FIDS
+# against ninep-abi on every `make test`, which is where a raise is caught.
 FID_BUDGET_ROUNDS = 3
 
 
@@ -858,9 +864,9 @@ def do_fid_gate(host, port, path):
       2. the three negative controls the plan names: a fid never opened is
          refused; a fid opened on session A is refused on session B while A
          still holds it; closing a session clunks its fids - an old number is
-         dead on a fresh session, AND fsd's 8-slot table survives 12 opens
-         across three closed sessions (the half a per-connection table alone
-         cannot pass);
+         dead on a fresh session, AND fsd's MAX_FIDS-slot table survives more
+         opens than that across closed sessions (the half a per-connection
+         table alone cannot pass);
       3. the boundaries of what step 5 is: the per-session budget (a fifth
          open refused FS_ERR_BUSY); a fid verb on a ONE-SHOT connection refused
          FS_ERR_NO_SUCH_VERB ("not on this connection", the mirror of NP_RUN on
@@ -990,7 +996,7 @@ def do_fid_gate(host, port, path):
     if c is not None:
         c.close()
         time.sleep(0.5)
-    # fsd's budget: 12 opens across three closed sessions succeed only if each
+    # fsd's budget: more opens than MAX_FIDS across closed sessions succeed only if each
     # close clunked. Every open is scored, and the fifth on a session must be
     # the per-session refusal, not fsd's.
     opened = 0
