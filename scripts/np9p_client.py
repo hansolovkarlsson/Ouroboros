@@ -1037,6 +1037,7 @@ def do_fid_gate(host, port, path):
         ok, detail = False, f"no reply ({exc.__class__.__name__})"
     check("a fid verb on a one-shot connection is refused FS_ERR_NO_SUCH_VERB", ok, detail)
     d = session()
+    st_open = FS_ERROR
     try:
         if d is None:
             raise RuntimeError("no session")
@@ -1050,6 +1051,20 @@ def do_fid_gate(host, port, path):
     except (RuntimeError, OSError) as exc:
         ok, detail = False, f"{exc}"
     check("another user on the same session is refused the fid, and the owner still has it", ok, detail)
+    # The same wall for NP_CLUNK, which fsd used to skip: before the review of
+    # #130 no rig ever sent a clunk from a differing user, so the ownership test
+    # on the freeing verb had no observer at all.
+    try:
+        if d is None or not served(st_open):
+            raise RuntimeError("no fid to probe")
+        st_c, _ = d.op(clunk(st_open), user=b"user")
+        st_r2, _ = d.op(fstat(st_open))
+        st_own, _ = d.op(clunk(st_open))
+        ok = st_c == FS_ERR_PERM and st_r2 == STAT_INFO_LEN and st_own == 0
+        detail = f"clunk as user -> {status_name(st_c)}, owner's fstat -> {status_name(st_r2) if not served(st_r2) else 'served'}, owner's clunk -> {status_name(st_own) if not served(st_own) else '0'}"
+    except (RuntimeError, OSError) as exc:
+        ok, detail = False, f"{exc}"
+    check("another user's clunk is refused and the owner still holds the fid, then closes it", ok, detail)
     try:
         if d is None:
             raise RuntimeError("no session")

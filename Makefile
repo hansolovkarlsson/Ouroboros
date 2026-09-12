@@ -180,6 +180,7 @@ LIBC_OBJS    := $(patsubst libc/src/%.c,$(BUILD_DIR)/libc/%.o,$(LIBC_SRCS))
 LIBC_CFLAGS  := $(CFLAGS_OS) -Ilibc/include -fno-builtin
 CDEMO_BIN    := $(BUILD_DIR)/cdemo.bin
 CFILE_BIN    := $(BUILD_DIR)/cfile.bin
+CLEAK_BIN    := $(BUILD_DIR)/cleak.bin
 NSDEMO_BIN   := $(BUILD_DIR)/nsdemo.bin
 CREMOTE_BIN  := $(BUILD_DIR)/cremote.bin
 # The Rust namespace-resolution shim a C program links to reach
@@ -218,7 +219,7 @@ ifeq ($(PROFILE),release)
 CARGO_FLAGS += --release
 endif
 
-.PHONY: all build check-site shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin accountd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin id-bin passwd-bin useradd-bin groupadd-bin usermod-bin clusterkey-bin chello-bin cdemo-bin cfile-bin nsdemo-bin cremote-bin cpico-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin edtest-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin sort-bin esp run run-virtio-console run-usb-kbd run-usb-multi run-gicv3 image run-image run-image-9p run-image-9p-client run-image-2vm-a run-image-2vm-b run-image-2vm-ext2-a run-image-2vm-ext2-b image-gpt run-image-gpt image-exfat run-image-exfat image-ext2 run-image-ext2 images-2vm images-2vm-ext2 parallels-hdd release test check-relocs test-parallels clean
+.PHONY: all build check-site shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin accountd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin id-bin passwd-bin useradd-bin groupadd-bin usermod-bin clusterkey-bin chello-bin cdemo-bin cfile-bin cleak-bin nsdemo-bin cremote-bin cpico-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin edtest-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin sort-bin esp run run-virtio-console run-usb-kbd run-usb-multi run-gicv3 image run-image run-image-9p run-image-9p-client run-image-2vm-a run-image-2vm-b run-image-2vm-ext2-a run-image-2vm-ext2-b image-gpt run-image-gpt image-exfat run-image-exfat image-ext2 run-image-ext2 images-2vm images-2vm-ext2 parallels-hdd release test check-relocs test-parallels clean
 
 # Overridable by `make test-parallels VM_NAME=... CMDS=... BOOT_WAIT=...`.
 VM_NAME     ?= Ouroboros
@@ -423,6 +424,14 @@ cfile-bin: $(LIBC_OBJS) $(NSRESOLVE_A)
 	"$(LD_LLD)" $(LDFLAGS_RUSTSHIM) -o $(BUILD_DIR)/cfile.elf $(BUILD_DIR)/cfile.o $(LIBC_OBJS) $(NSRESOLVE_A)
 	"$(OBJCOPY)" --strip-all $(BUILD_DIR)/cfile.elf $(CFILE_BIN)
 
+# A C program that LEAKS a fid on purpose (exits through the raw EXIT syscall,
+# past _exit's close-all): the check for fsd's identity-keyed fid reaper. See
+# libc/cleak.c and docs/testing/testing-qemu.md.
+cleak-bin: $(LIBC_OBJS) $(NSRESOLVE_A)
+	$(CC) $(CFLAGS_OS) -Ilibc/include -c libc/cleak.c -o $(BUILD_DIR)/cleak.o
+	"$(LD_LLD)" $(LDFLAGS_RUSTSHIM) -o $(BUILD_DIR)/cleak.elf $(BUILD_DIR)/cleak.o $(LIBC_OBJS) $(NSRESOLVE_A)
+	"$(OBJCOPY)" --strip-all $(BUILD_DIR)/cleak.elf $(CLEAK_BIN)
+
 $(NSRESOLVE_A): nsresolve/src/lib.rs nsresolve/Cargo.toml ninep-abi/src/lib.rs syscall-abi/src/lib.rs
 	cargo build -p nsresolve --target aarch64-unknown-none --release
 
@@ -594,7 +603,7 @@ serve-bin:
 # below are not, so a BUILD_DIR containing whitespace fails the build noisily
 # (and can leave a stray directory) rather than deleting anything. That is the
 # right trade at 70-odd paths; quoting them all is churn without a hazard.
-esp: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin accountd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin id-bin passwd-bin useradd-bin groupadd-bin usermod-bin clusterkey-bin chello-bin cdemo-bin cfile-bin nsdemo-bin cremote-bin cpico-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin edtest-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin tail-bin nl-bin rev-bin uniq-bin sort-bin
+esp: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin accountd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin id-bin passwd-bin useradd-bin groupadd-bin usermod-bin clusterkey-bin chello-bin cdemo-bin cfile-bin cleak-bin nsdemo-bin cremote-bin cpico-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin edtest-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin tail-bin nl-bin rev-bin uniq-bin sort-bin
 	@test ! -e "$(ESP_DIR)" || test -f "$(ESP_DIR)/EFI/ORBS/INIT.CFG" || { \
 		echo "esp: $(ESP_DIR) is not an Ouroboros ESP tree - refusing to delete it"; \
 		echo "esp: (remove it by hand if that is really where you want the ESP staged)"; \
@@ -645,6 +654,7 @@ esp: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin acco
 	cp $(CHELLO_BIN) $(ESP_DIR)/bin/CHELLO
 	cp $(CDEMO_BIN) $(ESP_DIR)/bin/CDEMO
 	cp $(CFILE_BIN) $(ESP_DIR)/bin/CFILE
+	cp $(CLEAK_BIN) $(ESP_DIR)/bin/CLEAK
 	cp $(NSDEMO_BIN) $(ESP_DIR)/bin/NSDEMO
 	cp $(CREMOTE_BIN) $(ESP_DIR)/bin/CREMOTE
 	cp $(CPICO_BIN) $(ESP_DIR)/bin/CPICO

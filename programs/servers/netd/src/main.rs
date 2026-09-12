@@ -1859,10 +1859,13 @@ struct SessionFid {
     fsd_fid: u64,
     /// The remote user the fid was opened as: the identity every op on it is
     /// forwarded under, and the one another user on the same session is
-    /// refused against. Checked HERE and not left to fsd, because fsd DROPS a
-    /// fid whose caller's uid no longer matches (its owner is a task slot, and
-    /// a slot with a new uid is a recycled slot), which on a session would let
-    /// a co-tenant destroy a handle by naming it.
+    /// refused against. Checked HERE as well as by fsd. fsd's own check is the
+    /// wall (`Fid::owner_uid` there: every remote fid has the one `NET_TASK`
+    /// owner, so the uid is all that separates two remote users), and until
+    /// 2026-09-12 it also DROPPED the fid on a mismatch, so a co-tenant could
+    /// destroy a handle by naming it; this check is what kept that probe from
+    /// reaching fsd, and it stays because the layer that knows which client is
+    /// asking should refuse before forwarding anything.
     opener: Proxy,
     /// fsd's packed task identity (`TASK_IDENTITY(FSD_TASK)`) when this fid was
     /// opened. fsd's fids are just `[Fid; MAX_FIDS]` on its stack, wiped to
@@ -4507,6 +4510,14 @@ fn fid_verb_reply(msg: &[u8], out: &mut [u8; PREFIX_MAX], fids: &mut [SessionFid
         // aliasing this guard exists to stop. The guard must fail toward
         // false-dead, never false-live. No restart (the real case): the gen is
         // stable across both calls, so the recorded value is the open's.
+        //
+        // The false-dead direction has a cost worth naming: a restart in the
+        // window leaves the fid open on the NEW fsd under netd's own, still
+        // live identity, and nothing clunks it (every later op and Drop treat
+        // the mismatch as "fsd forgot it"), so fsd's reaper cannot free it
+        // until netd itself restarts. One fid per such window, and the window
+        // is one round trip during an fsd restart; clunking on mismatch would
+        // reintroduce the aliasing, so the leak is accepted (review of #130).
         let gen = fsd_generation();
         let status = fsd_call(who, ninep_abi::NP_OPEN, tree, p0, fspath.len() as u64, fspath, &mut []);
         if status >= syscall_abi::FS_ERR_MIN {
@@ -4536,10 +4547,19 @@ fn fid_verb_reply(msg: &[u8], out: &mut [u8; PREFIX_MAX], fids: &mut [SessionFid
     }
     let fsd_fid = fids[slot].fsd_fid;
     if verb == ninep_abi::NP_CLUNK {
-        // Freed whatever fsd answers: a fid fsd no longer knows (it restarted)
-        // is gone either way, and a slot kept for it would never free.
+        // Freed whatever fsd answers, with one exception. A fid fsd no longer
+        // knows (it restarted) is gone either way, and a slot kept for it
+        // would never free. But fsd REFUSES a clunk from a user other than
+        // the opener and keeps the fid (its `Fid::owner_uid`), so on that
+        // answer the slot is kept too: clearing it would orphan a live fid on
+        // fsd under netd's own identity, which nothing could ever reap, and
+        // kill the owner's handle on this side. Unreachable past the uid
+        // check above; the check is what the export's mutation control
+        // removes, and this is what makes that run honest (review of #130).
         let status = fsd_call(who, verb, 0, fsd_fid, 0, &[], &mut []);
-        fids[slot] = SessionFid::NONE;
+        if status != syscall_abi::FS_ERR_PERM {
+            fids[slot] = SessionFid::NONE;
+        }
         return frame_reply(out, status, &[]);
     }
     // NP_FSTAT: status = STAT_INFO_LEN, data = the record, as NP_STAT answers.
