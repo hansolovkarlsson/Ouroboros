@@ -334,7 +334,16 @@ the microkernel arc itself still leaves open):
      **IN PROGRESS — [`roadmap-fid-verbs.md`](roadmap/roadmap-fid-verbs.md) is the
      plan: seven ordered steps, each with a check and a negative control.
      STEPS 1–3 ARE DONE AND THE REPORTED SYMPTOM IS CLOSED** — a C program
-     opens and reads a file on a remote mount.
+     opens and reads a file on a remote mount. **Step 4 (the session) landed
+     2026-09-07 and step 5 (the export serves `NP_OPEN`/`NP_FSTAT`/`NP_CLUNK`
+     on a session, fids keyed on the connection and clunked when it goes)
+     on 2026-09-12**, each measured by a gate under `run-guest.sh` and shown
+     failing by mutation. Left: `NP_PREAD` (6), `NP_PWRITE` (7), and the
+     CLIENT half of 5, which the plan under-specified: `netd` must hold a
+     client-side session across a C program's `open()`..`close()`, which
+     `tcp_get`'s one-connection-per-call model cannot, and `mount -r` is a
+     shell `NS_SET` that `netd` never hears about. A design decision, recorded
+     in the plan, not a follow-up.
 
      **This heading names the wrong subsystem**, which is what the scoping
      found. `libc/src/file.c` sent every fid verb to `FSD_TASK` with no
@@ -1548,6 +1557,20 @@ would otherwise silently shrink into looking like nothing was ever found.
       out-of-window RST, on a SYN into an established connection) are all
       absent.
     - **A duplicate SYN rebuilds a live slot**, discarding whatever it held.
+      **Since 2026-09-12 "whatever it held" includes open files**: a session's
+      fids are clunked on `fsd` when its `TcpConn` drops, so a blind SYN or
+      RST on a guessed 4-tuple closes the real peer's files, whose next
+      `NP_FSTAT` answers a bare `FS_ERROR` indistinguishable from a bad fid.
+    - **A peer that RSTs or FINs mid-`cpu` run orphans the child.** The slot
+      is freed without looking at `cpu_child` (the idle reap and the RTO
+      give-up exempt a live child, so only those two paths are reachable);
+      the child's end-of-stream then finds no connection to route to and
+      lands in `handle_client`'s length guard, and nothing `WAIT`s it, so it
+      holds a task slot until someone types `wait N`. Pre-existing, found by
+      the review of step 5 (2026-09-12) because `TcpConn`'s new `Drop` reads
+      as the connection's teardown and is not: a `WAIT` there would block the
+      event loop, so the release is a `KILL` or a deferred reap, its own
+      change.
     - **No zero-window persist timer** (RFC 1122 4.2.2.17). Nothing probes a
       receiver that shuts its window, so nothing elicits the update that would
       reopen it: with the window shut the first RTO expiry's `rewind_to` drives

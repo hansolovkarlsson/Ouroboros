@@ -150,6 +150,23 @@ scripts/run-guest.sh -- python3 scripts/np9p_client.py localhost 5640 session-ga
 #   run-guest: 0 restart line(s), 0 abort line(s)
 ```
 
+**The fid gate** (step 5, 2026-09-12): `fid-gate` runs the plan's check and
+controls for the three fid verbs the export serves on a session, one PASS/FAIL
+line each: open→fstat→clunk with the `fstat` record byte-equal to `NP_STAT`'s;
+the clunked fid refused; a never-opened fid refused; a fid from session A
+refused on B and still served on A; an old number dead on a fresh session;
+12 opens over three closed sessions against `fsd`'s 8-slot table (the check
+that fails when closing a session does not clunk); the fifth open on a session
+`FS_ERR_BUSY`; a fid verb on a one-shot connection `FS_ERR_NO_SUCH_VERB`;
+another user refused `FS_ERR_PERM` while the owner keeps the fid; `NP_PREAD`
+still `FS_ERR_NO_SUCH_VERB` (step 6 flips that line). About twenty seconds
+after boot. Against `main` before step 5 it fails 8 of 10 at the first open.
+
+```sh
+scripts/run-guest.sh -- python3 scripts/np9p_client.py localhost 5640 fid-gate
+# expected: 10 PASS, "0 check(s) failed", then the two run-guest lines above
+```
+
 **Use `run-guest.sh`, not `drive-qemu.py`, for any host-side client that runs
 longer than a shell step.** `drive-qemu.py` types its steps, lingers four
 seconds and kills QEMU; a client still running then sees connection refusals

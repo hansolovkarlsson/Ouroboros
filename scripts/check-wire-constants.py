@@ -238,6 +238,15 @@ CHECKED = [
     "NP_PREAD",
     "NP_PWRITE",
     "NP_FSTAT",
+    # NP_OPEN's a0. The server has spelled all four since step 2 and the C
+    # header since step 3b, unpinned until step 5 (2026-09-12) gave the client
+    # a reason to spell OPEN_READ too. A drift here is the quiet kind: a peer
+    # opening for read with the wrong bit gets a fid fsd authorized for
+    # something else, and every later op is judged against that.
+    "OPEN_READ",
+    "OPEN_WRITE",
+    "OPEN_CREATE",
+    "OPEN_TRUNC",
 ]
 
 # NOT checked: NP_MAC_LEN. Neither peer names it - both write the literal 32 at
@@ -281,7 +290,7 @@ CHECKED = [
 # what it is named for. Confirmed, which is why these are numbers and not a
 # truthiness test. Raise a baseline when a peer learns a new constant.
 PEER_BASELINE = {
-    "np9p_client.py": 27,  # the counted value on 2026-09-07, once the verbs were pinned
+    "np9p_client.py": 31,  # counted 2026-09-12: 27 on 09-07 once the verbs were pinned, then step 5 taught it NP_PREAD/NP_FSTAT/NP_CLUNK and OPEN_READ
     # Rose from 10 when the `noverb` probe's status-name table was rebuilt
     # from module constants instead of repeated literals: FS_ERROR,
     # FS_ERR_READ_ONLY, FS_ERR_PERM and FS_ERR_NO_SUCH_VERB became names this
@@ -293,13 +302,13 @@ PEER_BASELINE = {
     # reduced count was recorded as expected. Both now use the shared names; the
     # floor rises with them, or the rename could be undone without this
     # noticing.
-    "np9p_server.py": 26,  # counted 2026-09-07, verbs included
+    "np9p_server.py": 30,  # counted 2026-09-12: 26 on 09-07 with the verbs, then the four OPEN_* flags pinned by step 5
     # The C header. It spells far more of the ABI than either Python peer; this
     # floor covers the names CHECKED lists today.
     # Raised from 3 when step 3b's constants were pinned. The script's own
     # instruction is to raise a baseline when a peer learns a new constant; it
     # had already learned FS_ERR_NOT_FOUND without the floor moving.
-    "libc/include/sys.h": 22,  # counted 2026-09-07; was 11 while it already matched 16
+    "libc/include/sys.h": 26,  # counted 2026-09-12: 22 on 09-07 (was 11 while it already matched 16), then the four OPEN_* flags
     "libc/include/nsresolve.h": 5,  # + 4 STAT_* offsets, FS_ERR_READ_ONLY, STAT_FLAG_DIR, FS_ERROR, FS_ERR_NO_SUCH_VERB
 }
 

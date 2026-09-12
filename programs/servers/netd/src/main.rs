@@ -1804,8 +1804,14 @@ struct TcpConn {
     /// `session_reset_if_done`) instead of a FIN going out, so the next request
     /// is served on the same connection - the lifetime a fid needs. Never
     /// cleared: a session ends when the peer closes it, or the idle reap takes
-    /// it, and either frees the slot.
+    /// it, and either frees the slot, and with it every fid in `fids`.
     session: bool,
+    /// The fids this connection holds (step 5): client-facing fid
+    /// `FID_BASE + i` is `fids[i]`. Keyed on the connection, which is what a
+    /// session is FOR: a number from one session means nothing on another, and
+    /// the whole table is clunked when the connection goes (`Drop`). Only a
+    /// session ever fills it; `fid_verb_reply` refuses a one-shot.
+    fids: [SessionFid; SESSION_FIDS],
     /// The tick (`now()`) of the last segment from the peer; `reap_idle` reads
     /// it.
     last_rx: u64,
@@ -1828,6 +1834,70 @@ struct TcpConn {
 /// kernel sent on nobody's behalf. The first version used all-ones here, and
 /// the supervisor's health ping matched every idle connection.
 const CPU_NONE: u64 = 0;
+
+/// How many fids one SESSION may hold at once (docs/roadmap/roadmap-fid-verbs.md,
+/// step 5). Small and fixed: the table rides in `TcpConn`, which lives on
+/// `serve`'s guard-paged stack `MAX_CONNS` times over. Four covers a C
+/// program's working set of open files; the fifth open on a session is refused
+/// `FS_ERR_BUSY`, the answer the session budget gives, never by evicting one.
+/// fsd's own table (`MAX_FIDS`, 8) is shared by every local C program and every
+/// session, so three full sessions can starve a local open: that arrives as
+/// fsd's `FS_ERROR`, relayed as-is, and it is on the ledger.
+const SESSION_FIDS: usize = 4;
+/// The smallest fid a session hands out. ninep-abi's `NP_OPEN` promises "a
+/// small integer >= 3" (0-2 are a C program's stdio), and fsd numbers its own
+/// from 3 for the same reason. Two private constants rather than one shared,
+/// on purpose: a client-facing fid is netd's number and never fsd's (Decision
+/// 2), and the two spaces starting at the same value is a coincidence a shared
+/// name would read as an identity.
+const FID_BASE: u64 = 3;
+
+/// One fid a session holds: the fsd fid behind it, and WHO opened it.
+#[derive(Clone, Copy)]
+struct SessionFid {
+    /// fsd's fid, or 0 for a free slot (fsd's are >= 3, so 0 is never one).
+    fsd_fid: u64,
+    /// The remote user the fid was opened as: the identity every op on it is
+    /// forwarded under, and the one another user on the same session is
+    /// refused against. Checked HERE and not left to fsd, because fsd DROPS a
+    /// fid whose caller's uid no longer matches (its owner is a task slot, and
+    /// a slot with a new uid is a recycled slot), which on a session would let
+    /// a co-tenant destroy a handle by naming it.
+    opener: Proxy,
+}
+
+impl SessionFid {
+    const NONE: SessionFid = SessionFid { fsd_fid: 0, opener: Proxy { uid: 0, gid: 0 } };
+}
+
+/// A connection's fids die with it. `Drop`, and not a clunk at each site that
+/// frees a slot: there are six of those (the peer's FIN, its RST, the idle
+/// reap, the RTO give-up, a SYN rebuilding the slot, and the serve loop's own
+/// copies of two of them), and the next one added would be the one that
+/// forgot. This way the wrong thing is unspellable, not merely un-grepped
+/// (docs/postmortems/unspellable-postmortem.md). Each clunk is one `MSG_CALL`
+/// to fsd as the user who opened the fid, from the same event loop that made
+/// the open; a connection that never opened anything costs nothing here. A fid
+/// fsd no longer knows (fsd restarted) answers an error that is ignored: the
+/// handle is gone either way.
+///
+/// The fids are the ONLY per-connection resource released here, and that is
+/// the limit of the claim above. A running `cpu_child` is not: a `WAIT` on a
+/// live child would block the event loop, and a `KILL` or a deferred reap is
+/// its own change. So a peer that RSTs or FINs mid-run leaves the child to
+/// finish into a connection that no longer exists, and nothing reaps it
+/// (`docs/ROADMAP.md`, the receive-path ledger). Pre-existing; named here so
+/// this doc is not read as the connection's whole teardown.
+impl Drop for TcpConn {
+    fn drop(&mut self) {
+        for f in self.fids.iter_mut() {
+            if f.fsd_fid != 0 {
+                let _ = fsd_call(As::Remote(f.opener), ninep_abi::NP_CLUNK, 0, f.fsd_fid, 0, &[], &mut []);
+                *f = SessionFid::NONE;
+            }
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Dial-out: /net/tcp connection files (the Plan 9 `/net/tcp` model, scoped).
@@ -2224,6 +2294,7 @@ fn handle_tcp(mac: &[u8; 6], frame: &[u8], seg: &TcpIn, conns: &mut [Option<TcpC
             ssthresh: INIT_SSTHRESH,
             cpu_child: CPU_NONE,
             session: false,
+            fids: [SessionFid::NONE; SESSION_FIDS],
             last_rx: now(),
             data_base: SERVER_ISN.wrapping_add(1),
         };
@@ -2746,6 +2817,12 @@ fn handle_9p(c: &mut TcpConn, request: &[u8], dials: &mut [Option<DialConn>; MAX
             0
         };
         frame_reply(&mut c.prefix, status, &[])
+    } else if is_fid_verb(verb) {
+        // The fid verbs need the connection's own table, which build_9p_reply
+        // never sees; and NP_OPEN's parameter layout is not the generic one
+        // (a0 = flags, a1 = path length), so it must not go through the
+        // generic decode at all - see fid_verb_reply.
+        fid_verb_reply(msg, &mut c.prefix, &mut c.fids, c.session, proxy)
     } else {
         build_9p_reply(msg, &mut c.prefix, dials, mac, As::Remote(proxy))
     };
@@ -4209,16 +4286,6 @@ fn build_9p_reply(msg: &[u8], out: &mut [u8; PREFIX_MAX], dials: &mut [Option<Di
     };
     let mut buf = [0u8; EXPORT_CHUNK];
 
-    // Data slice for a status that is a byte count (0..FS_ERR_MIN); empty on an
-    // error status.
-    fn ok_data(status: u64, buf: &[u8]) -> &[u8] {
-        if status < syscall_abi::FS_ERR_MIN {
-            &buf[..(status as usize).min(buf.len())]
-        } else {
-            &[]
-        }
-    }
-
     match verb {
         v if v == ninep_abi::NP_READDIR => {
             // The inline verbs (readdir / read_file) are capped at fsd's inline
@@ -4303,9 +4370,12 @@ fn build_9p_reply(msg: &[u8], out: &mut [u8; PREFIX_MAX], dials: &mut [Option<Di
             let status = fsd_write_at(who, fspath, tree, p1, data);
             frame_reply(out, status, &[])
         }
-        // A verb this export has no arm for - today the five fid verbs
-        // (NP_OPEN/NP_PREAD/NP_PWRITE/NP_FSTAT/NP_CLUNK), which fsd implements
-        // and no export does.
+        // A verb this export has no arm for. Not the fid verbs any more: those
+        // are routed to fid_verb_reply before this function is reached
+        // (handle_9p). The two still unserved - NP_PREAD and NP_PWRITE, steps
+        // 6 and 7 - are refused there with the same code and the same
+        // `export: no arm` line on any connection; a served fid verb on a
+        // one-shot connection is refused there too, logged `one-shot: no arm`.
         //
         // NOT `FS_ERROR`, which is what this answered until 2026-09-05. Clients
         // render `FS_ERROR` as "no such file or directory" - a message about a
@@ -4318,6 +4388,119 @@ fn build_9p_reply(msg: &[u8], out: &mut [u8; PREFIX_MAX], dials: &mut [Option<Di
             frame_reply(out, syscall_abi::FS_ERR_NO_SUCH_VERB, &[])
         }
     }
+}
+
+/// Data slice for a status that is a byte count (0..FS_ERR_MIN); empty on an
+/// error status.
+fn ok_data(status: u64, buf: &[u8]) -> &[u8] {
+    if status < syscall_abi::FS_ERR_MIN {
+        &buf[..(status as usize).min(buf.len())]
+    } else {
+        &[]
+    }
+}
+
+/// The verbs that make or name a fid: served by `fid_verb_reply`, on a session
+/// only.
+fn is_fid_verb(verb: u64) -> bool {
+    matches!(
+        verb,
+        ninep_abi::NP_OPEN | ninep_abi::NP_PREAD | ninep_abi::NP_PWRITE | ninep_abi::NP_FSTAT | ninep_abi::NP_CLUNK
+    )
+}
+
+/// Serve a fid verb on a session (step 5 of docs/roadmap/roadmap-fid-verbs.md):
+/// `NP_OPEN` opens on fsd and answers with a number of THIS connection's
+/// (`FID_BASE` + slot); `NP_FSTAT` and `NP_CLUNK` forward through that slot.
+/// A remote client never names an fsd fid (Decision 2): the table is keyed on
+/// the connection, so a number from one session means nothing on another, and
+/// closing the session clunks everything in it (`TcpConn`'s `Drop`).
+///
+/// On a ONE-SHOT connection every fid verb is refused `FS_ERR_NO_SUCH_VERB`:
+/// the fid would die with the reply, and "not on this connection" is the rule
+/// that refuses `NP_RUN` on a session, seen from the other side. A
+/// per-request client (netd itself, today) therefore sees exactly what it saw
+/// before this arm existed. `NP_PREAD` and `NP_PWRITE` are steps 6 and 7 and
+/// take the same refusal for now, logged like any other missing arm.
+///
+/// `proxy` is the remote user, already mapped onto this machine's accounts: it
+/// is what every forwarded op carries (`As::Remote`), and what a fid is bound
+/// to at open. An op on a fid from a different user on the same session is
+/// refused `FS_ERR_PERM` here, without asking fsd, so the fid survives it.
+fn fid_verb_reply(msg: &[u8], out: &mut [u8; PREFIX_MAX], fids: &mut [SessionFid; SESSION_FIDS], session: bool, proxy: Proxy) -> usize {
+    let hdr = ninep_abi::NP_REQ_PAYLOAD as usize; // 48
+    if msg.len() < hdr {
+        return frame_reply(out, syscall_abi::FS_ERROR, &[]);
+    }
+    let verb = read_u64(msg, 0);
+    let p0 = read_u64(msg, 16);
+    let p1 = read_u64(msg, 24);
+    let payload = &msg[hdr..];
+    // A verb with no arm ANYWHERE is logged as such before the connection
+    // kind is looked at: the export's log line is the one thing that names
+    // WHICH verb was missing, and a reader greps for `export: no arm`.
+    if verb == ninep_abi::NP_PREAD || verb == ninep_abi::NP_PWRITE {
+        log_no_arm(b"export", verb);
+        return frame_reply(out, syscall_abi::FS_ERR_NO_SUCH_VERB, &[]);
+    }
+    if !session {
+        log_no_arm(b"one-shot", verb);
+        return frame_reply(out, syscall_abi::FS_ERR_NO_SUCH_VERB, &[]);
+    }
+    let who = As::Remote(proxy);
+    if verb == ninep_abi::NP_OPEN {
+        // a0 = the OPEN_* flags, a1 = the path length: the reverse of every
+        // other path verb, which is why this is not build_9p_reply's generic
+        // decode (step 2's trap, found by the host peer's self-test).
+        let path = &payload[..(p1 as usize).min(payload.len())];
+        let mut pbuf = [0u8; 256];
+        let resolved = ninep_abi::resolve_ns(EXPORT_NS, path, &mut pbuf);
+        let tree = match resolved.target {
+            ninep_abi::NsTarget::Fsd(t) => t as u64,
+            // The console and /net have no fid model, here or locally (libc
+            // refuses them the same way), and a remote binding would be
+            // transitive mounting, which the export does not do.
+            _ => {
+                log_no_arm(b"export", verb);
+                return frame_reply(out, syscall_abi::FS_ERR_NO_SUCH_VERB, &[]);
+            }
+        };
+        let fspath = &pbuf[..resolved.len];
+        // A free slot BEFORE asking fsd, so a refusal here never leaves a fid
+        // open on fsd that nothing would clunk.
+        let Some(slot) = fids.iter().position(|f| f.fsd_fid == 0) else {
+            return frame_reply(out, syscall_abi::FS_ERR_BUSY, &[]);
+        };
+        let status = fsd_call(who, ninep_abi::NP_OPEN, tree, p0, fspath.len() as u64, fspath, &mut []);
+        if status >= syscall_abi::FS_ERR_MIN {
+            return frame_reply(out, status, &[]);
+        }
+        fids[slot] = SessionFid { fsd_fid: status, opener: proxy };
+        return frame_reply(out, FID_BASE + slot as u64, &[]);
+    }
+    // NP_FSTAT / NP_CLUNK: a0 is the fid and there is no path.
+    let slot = match p0.checked_sub(FID_BASE) {
+        Some(i) if (i as usize) < SESSION_FIDS && fids[i as usize].fsd_fid != 0 => i as usize,
+        // Bad, or not this session's: the bare FS_ERROR that fsd and the host
+        // peer both answer for the same case - mirrored, not improved, so the
+        // three stay comparable (roadmap-fid-verbs.md, step 2's follow-up).
+        _ => return frame_reply(out, syscall_abi::FS_ERROR, &[]),
+    };
+    if fids[slot].opener.uid != proxy.uid {
+        return frame_reply(out, syscall_abi::FS_ERR_PERM, &[]);
+    }
+    let fsd_fid = fids[slot].fsd_fid;
+    if verb == ninep_abi::NP_CLUNK {
+        // Freed whatever fsd answers: a fid fsd no longer knows (it restarted)
+        // is gone either way, and a slot kept for it would never free.
+        let status = fsd_call(who, verb, 0, fsd_fid, 0, &[], &mut []);
+        fids[slot] = SessionFid::NONE;
+        return frame_reply(out, status, &[]);
+    }
+    // NP_FSTAT: status = STAT_INFO_LEN, data = the record, as NP_STAT answers.
+    let mut rec = [0u8; ninep_abi::STAT_INFO_LEN];
+    let status = fsd_call(who, verb, 0, fsd_fid, 0, &[], &mut rec);
+    frame_reply(out, status, ok_data(status, &rec))
 }
 
 /// Relay an offset-write to fsd, bridging the wire's inline data to fsd's
@@ -5612,9 +5795,10 @@ fn reply(sender: u64, data: &[u8]) {
 /// smaller than it looks: reaching this needs a *signature-verified, authorized*
 /// peer, and the platform where a console flood actually hurts (Parallels, whose
 /// framebuffer is the only console) HAS NO NETWORKING, so no remote peer can
-/// reach netd there at all. The cap belongs with step 4 of
-/// `docs/roadmap/roadmap-fid-verbs.md`, which threads netd-owned per-connection state
-/// for the fid table anyway.
+/// reach netd there at all. Step 5 of `docs/roadmap/roadmap-fid-verbs.md` gave
+/// `TcpConn` netd-owned per-connection state (the fid table), so a
+/// per-connection cap now has somewhere to live; it is still not built, and
+/// the exposure above is unchanged.
 fn log_no_arm(what: &[u8], verb: u64) {
     let mut line = [0u8; 64];
     let mut n = 0usize;
