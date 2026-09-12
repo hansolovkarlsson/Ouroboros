@@ -21,7 +21,7 @@ static const char *why(void) {
     unsigned long s = ouro_last_fs_status();
     if (s == FS_ERR_NOT_FOUND) return "no such file or directory";
     if (s == FS_ERR_PERM) return "permission denied";
-    if (s == FS_ERR_NO_SUCH_VERB) return "that server does not implement this request";
+    if (s == FS_ERR_NO_SUCH_VERB) return "that server does not implement this request, or not on this kind of connection";
     if (s == MSG_ERR_DENIED) return "not allowed to reach that server (capability)";
     if (s == FS_ERR_CLIENT) return "never sent (no free fd, or the path could not be resolved)";
     if (s >= FS_ERR_MIN) return "failed";

@@ -14,6 +14,7 @@ Usage:
     python3 scripts/np9p_client.py <host> <port> noverb  <path> [verb]
     python3 scripts/np9p_client.py <host> <port> session <path>          # readdir+stat+read on ONE connection
     python3 scripts/np9p_client.py <host> <port> session-gate [hold_s]  # the step-4 checks, PASS/FAIL each
+    python3 scripts/np9p_client.py <host> <port> fid-gate [path]       # the step-5 checks: open/fstat/clunk on a session
 
 Every request is SIGNED with a per-machine Ed25519 key: the auth header is
 `[magic:8][nonce:16][name:32][pubkey:32][sig:64]` in front of the NP message,
@@ -31,7 +32,7 @@ e.g. after `make run-image-9p`:
     python3 scripts/np9p_client.py localhost 5640 readdir / --sign=nobody      # -> refused (unauthorized key)
     python3 scripts/np9p_client.py localhost 5640 readdir / --legacy-mac       # -> refused (retired format)
     python3 scripts/np9p_client.py localhost 5640 read /etc/shadow --user user # -> refused (permissions)
-    python3 scripts/np9p_client.py localhost 5640 noverb /                     # -> FS_ERR_NO_SUCH_VERB (NP_OPEN)
+    python3 scripts/np9p_client.py localhost 5640 noverb /                     # -> FS_ERR_NO_SUCH_VERB (NP_PREAD)
     python3 scripts/np9p_client.py localhost 5640 noverb / 0x10c               # -> served: NP_STAT (the control)
 """
 import hashlib
@@ -52,7 +53,11 @@ STAT_INFO_LEN = 27   # ninep-abi STAT_INFO_LEN; the NP_STAT result record
 NP_WRITE_FILE = NP_BASE + 11
 NP_WRITE_AT = NP_BASE + 4
 NP_READ_AT = NP_BASE + 10
-NP_OPEN = NP_BASE + 15  # the first of the five fid verbs no export implements
+NP_OPEN = NP_BASE + 15  # a0 = OPEN_* flags, a1 = path length - the REVERSE of every other path verb
+NP_PREAD = NP_BASE + 16  # a0 = fid: no path at all. Not served by the guest export yet (step 6)
+NP_FSTAT = NP_BASE + 18  # a0 = fid
+NP_CLUNK = NP_BASE + 19  # a0 = fid
+OPEN_READ = 1  # ninep-abi OPEN_READ
 NP_SESSION = NP_BASE + 0x21  # open a session on this connection (Decision 3, 2026-09-07)
 # NOT syscall-abi's FS_ERR_MIN, and no longer named as if it were. This is a
 # deliberately LOOSE host-side floor - 'anything in the top 64 is an error' -
@@ -829,6 +834,232 @@ def do_session_gate(host, port, hold_s=10):
     return failed
 
 
+# What the guest export budgets PER SESSION: SESSION_FIDS in netd is 4. Spelled
+# here as the expectation the gate checks, like EXPECTED_SESSIONS above.
+EXPECTED_SESSION_FIDS = 4
+# fsd's own table is MAX_FIDS = 8, shared by every local C program and every
+# remote session. The gate opens EXPECTED_SESSION_FIDS on each of
+# FID_BUDGET_ROUNDS sessions, closing each session before the next, so the total
+# (12) exceeds fsd's 8: every open succeeds only if closing a session really
+# clunks its fids on fsd. That is the check that fails when the clunk is
+# missing, and it is the only one here that can - a per-connection table
+# refuses an old number on a new session whether or not fsd was told.
+FID_BUDGET_ROUNDS = 3
+
+
+def do_fid_gate(host, port, path):
+    """The step-5 fid gate (docs/roadmap/roadmap-fid-verbs.md): NP_OPEN, NP_FSTAT
+    and NP_CLUNK over one session against a live export, one PASS/FAIL line
+    per check, exit status the number that failed:
+
+      1. open -> fstat -> clunk on one session, the fstat record byte-equal to
+         NP_STAT's record for the same path (two paths to the same bytes), and
+         the clunked fid refused afterwards;
+      2. the three negative controls the plan names: a fid never opened is
+         refused; a fid opened on session A is refused on session B while A
+         still holds it; closing a session clunks its fids - an old number is
+         dead on a fresh session, AND fsd's 8-slot table survives 12 opens
+         across three closed sessions (the half a per-connection table alone
+         cannot pass);
+      3. the boundaries of what step 5 is: the per-session budget (a fifth
+         open refused FS_ERR_BUSY); a fid verb on a ONE-SHOT connection refused
+         FS_ERR_NO_SUCH_VERB ("not on this connection", the mirror of NP_RUN on
+         a session); a fid opened as root refused FS_ERR_PERM to another user
+         on the same session, and still served to root after (fsd was not
+         asked, so it did not drop it); and NP_PREAD refused FS_ERR_NO_SUCH_VERB
+         with the session still in phase - step 6 changes that line, on
+         purpose.
+
+    Against an export that predates step 5 every check fails at its first open
+    with FS_ERR_NO_SUCH_VERB.
+    """
+    import time
+    failed = 0
+
+    def check(name, ok, detail):
+        nonlocal failed
+        print(f"[{'PASS' if ok else 'FAIL'}] {name}: {detail}", flush=True)
+        if not ok:
+            failed += 1
+
+    def served(status):
+        return status < ERR_BAND_FLOOR
+
+    pb = path.encode()
+    root = build_frame(NP_READDIR, 0, [1, 4096], b"/")
+    open_r = build_frame(NP_OPEN, 0, [OPEN_READ, len(pb)], pb)
+
+    def fstat(fid):
+        return build_frame(NP_FSTAT, 0, [fid], b"")
+
+    def clunk(fid):
+        return build_frame(NP_CLUNK, 0, [fid], b"")
+
+    def session():
+        """A session, or None with the refusal printed."""
+        s = None
+        try:
+            s = Session(host, port)
+            st, _ = s.open()
+        except (RuntimeError, OSError) as exc:
+            if s is not None:
+                s.close()
+            print(f"  could not open a session: {exc.__class__.__name__}", flush=True)
+            return None
+        if st != 0:
+            s.close()
+            print(f"  session refused: {status_name(st)}", flush=True)
+            return None
+        return s
+
+    # 1. the round trip, and the record compared against the path verb's.
+    a = session()
+    if a is None:
+        check("open -> fstat -> clunk on one session", False, "no session")
+        return failed
+    try:
+        st_open, _ = a.op(open_r)
+        if served(st_open):
+            fid = st_open
+            st_f, rec_f = a.op(fstat(fid))
+            st_s, rec_s = a.op(build_frame(NP_STAT, 0, [len(pb)], pb))
+            st_c, _ = a.op(clunk(fid))
+            ok = (st_f == STAT_INFO_LEN and st_s == STAT_INFO_LEN and rec_f == rec_s
+                  and st_c == 0)
+            detail = (f"open -> fid {fid}, fstat -> {status_name(st_f) if not served(st_f) else f'{len(rec_f)} bytes'}, "
+                      f"stat -> {status_name(st_s) if not served(st_s) else f'{len(rec_s)} bytes'}, "
+                      f"records {'equal' if rec_f == rec_s else 'DIFFER'}, clunk -> {status_name(st_c)}")
+        else:
+            fid = None
+            ok, detail = False, f"open -> {status_name(st_open)}"
+    except (RuntimeError, OSError) as exc:
+        fid = None
+        ok, detail = False, f"session lost ({exc.__class__.__name__})"
+    check("open -> fstat -> clunk on one session, fstat's record equal to stat's", ok, detail)
+    try:
+        if fid is None:
+            raise RuntimeError("no fid")
+        st, _ = a.op(fstat(fid))
+        ok, detail = st == FS_ERROR, f"fstat after clunk -> {status_name(st)}"
+    except (RuntimeError, OSError) as exc:
+        ok, detail = False, f"no fid to test ({exc})"
+    check("the clunked fid is refused", ok, detail)
+
+    # 2. the negative controls. Session `a` is still open and holds nothing.
+    # NOT fid 3: `a` opened and clunked 3 a moment ago, so fstat(3) here would
+    # be the clunked-fid check again under another name (review of the first
+    # version). 3 + EXPECTED_SESSION_FIDS is one past the table, a number this
+    # session could never have filled, and it pins the bounds arm as well.
+    never = 3 + EXPECTED_SESSION_FIDS
+    try:
+        st, _ = a.op(fstat(never))
+        ok, detail = st == FS_ERROR, f"fstat of never-opened fid {never} -> {status_name(st)}"
+    except (RuntimeError, OSError) as exc:
+        ok, detail = False, f"session lost ({exc.__class__.__name__})"
+    check("a fid the session never opened is refused", ok, detail)
+    b = session()
+    fid_a = None
+    try:
+        st_open, _ = a.op(open_r)
+        if not served(st_open):
+            raise RuntimeError(f"open on A -> {status_name(st_open)}")
+        fid_a = st_open
+        if b is None:
+            raise RuntimeError("no second session")
+        st_b, _ = b.op(fstat(fid_a))
+        st_a, rec_a = a.op(fstat(fid_a))
+        ok = st_b == FS_ERROR and st_a == STAT_INFO_LEN
+        detail = f"fid {fid_a} opened on A: fstat on B -> {status_name(st_b)}, on A -> {status_name(st_a) if not served(st_a) else 'served'}"
+    except (RuntimeError, OSError) as exc:
+        ok, detail = False, f"{exc}"
+    check("a fid opened on session A is refused on session B, and still served on A", ok, detail)
+    if b is not None:
+        b.close()
+    # Close A with its fid still open; a fresh session must find the number dead.
+    a.close()
+    time.sleep(0.5)
+    c = session()
+    try:
+        if c is None or fid_a is None:
+            raise RuntimeError("no session or no fid")
+        st, _ = c.op(fstat(fid_a))
+        ok, detail = st == FS_ERROR, f"session A closed holding fid {fid_a}; fstat on a fresh session -> {status_name(st)}"
+    except (RuntimeError, OSError) as exc:
+        ok, detail = False, f"{exc}"
+    check("closing a session leaves its fid numbers dead on the next", ok, detail)
+    if c is not None:
+        c.close()
+        time.sleep(0.5)
+    # fsd's budget: 12 opens across three closed sessions succeed only if each
+    # close clunked. Every open is scored, and the fifth on a session must be
+    # the per-session refusal, not fsd's.
+    opened = 0
+    fifth = None
+    stopped = ""
+    for rnd in range(FID_BUDGET_ROUNDS):
+        s = session()
+        if s is None:
+            stopped = f"no session for round {rnd + 1}"
+            break
+        try:
+            for i in range(EXPECTED_SESSION_FIDS):
+                st, _ = s.op(open_r)
+                if not served(st):
+                    stopped = f"open #{opened + 1} (round {rnd + 1}) -> {status_name(st)}"
+                    break
+                opened += 1
+            else:
+                if rnd == 0:
+                    fifth, _ = s.op(open_r)
+        except (RuntimeError, OSError) as exc:
+            stopped = f"session lost in round {rnd + 1} ({exc.__class__.__name__})"
+        s.close()
+        if stopped:
+            break
+        time.sleep(0.5)
+    want = FID_BUDGET_ROUNDS * EXPECTED_SESSION_FIDS
+    check(f"closing a session clunks its fids on fsd: {want} opens over {FID_BUDGET_ROUNDS} closed sessions all succeed",
+          opened == want, f"{opened}/{want} opens succeeded" + (f" ({stopped})" if stopped else ""))
+    check(f"a session's {EXPECTED_SESSION_FIDS + 1}th open is refused FS_ERR_BUSY",
+          fifth == FS_ERR_BUSY, "no fifth open made" if fifth is None else status_name(fifth))
+
+    # 3. the boundaries.
+    try:
+        st, _ = one_op(host, port, open_r)
+        ok, detail = st == FS_ERR_NO_SUCH_VERB, f"NP_OPEN on a one-shot connection -> {status_name(st)}"
+    except (RuntimeError, OSError) as exc:
+        ok, detail = False, f"no reply ({exc.__class__.__name__})"
+    check("a fid verb on a one-shot connection is refused FS_ERR_NO_SUCH_VERB", ok, detail)
+    d = session()
+    try:
+        if d is None:
+            raise RuntimeError("no session")
+        st_open, _ = d.op(open_r)
+        if not served(st_open):
+            raise RuntimeError(f"open -> {status_name(st_open)}")
+        st_u, _ = d.op(fstat(st_open), user=b"user")
+        st_r, _ = d.op(fstat(st_open))
+        ok = st_u == FS_ERR_PERM and st_r == STAT_INFO_LEN
+        detail = f"fid {st_open} opened as root: fstat as user -> {status_name(st_u)}, then as root -> {status_name(st_r) if not served(st_r) else 'served'}"
+    except (RuntimeError, OSError) as exc:
+        ok, detail = False, f"{exc}"
+    check("another user on the same session is refused the fid, and the owner still has it", ok, detail)
+    try:
+        if d is None:
+            raise RuntimeError("no session")
+        st_p, _ = d.op(build_frame(NP_PREAD, 0, [3, 0, 16], b""))
+        st_after, _ = d.op(root)
+        ok = st_p == FS_ERR_NO_SUCH_VERB and served(st_after)
+        detail = f"pread -> {status_name(st_p)}, then readdir -> {'served' if served(st_after) else status_name(st_after)}"
+    except (RuntimeError, OSError) as exc:
+        ok, detail = False, f"{exc}"
+    check("NP_PREAD is refused FS_ERR_NO_SUCH_VERB (step 6) and the session stays in phase", ok, detail)
+    if d is not None:
+        d.close()
+    print(f"fid-gate: {failed} check(s) failed", flush=True)
+    return failed
+
+
 def np_readfile(host, port, path, want=512):
     pb = path.encode()
     return one_op(host, port, build_frame(NP_READ_FILE, 0, [len(pb), want], pb))
@@ -1063,7 +1294,7 @@ def main():
     leftover = [a for a in checked if a.startswith("--")]
     if leftover:
         sys.exit(f"unknown or repeated option(s): {' '.join(leftover)}")
-    if len(args) < 4 and not (len(args) == 3 and args[2] == "session-gate"):
+    if len(args) < 4 and not (len(args) == 3 and args[2] in ("session-gate", "fid-gate")):
         print(__doc__)
         sys.exit(2)
     host, port, op = args[0], int(args[1]), args[2]
@@ -1104,9 +1335,13 @@ def main():
         # noverb <host> <port> noverb [path] [verb]
         #
         # Send a correctly-signed request for a verb the export has NO ARM for -
-        # NP_OPEN by default, the first of the five fid verbs (the open frontier
-        # item; see docs/roadmap/roadmap-fid-verbs.md). The point is the STATUS the
-        # guest answers with, not the data.
+        # NP_PREAD by default, the first fid verb step 5 of
+        # docs/roadmap/roadmap-fid-verbs.md left unserved (it was NP_OPEN until
+        # the export learned it). The point is the STATUS the guest answers
+        # with, not the data. The frame is the generic path-verb shape, which
+        # for a fid verb puts the path length where the fid goes; that is fine
+        # here, since the verb is refused before any fid is looked at (and on a
+        # one-shot connection every fid verb is refused, session or not).
         #
         # Until 2026-09-05 that status was the generic FS_ERROR, which every
         # client renders as "no such file or directory" - a message about a
@@ -1123,7 +1358,7 @@ def main():
         # and the usage line promised a bare `noverb` that only ever printed the
         # docstring.
         path = args[3].encode()
-        verb = int(args[4], 0) if len(args) > 4 else NP_OPEN
+        verb = int(args[4], 0) if len(args) > 4 else NP_PREAD
         np = build_frame(verb, 0, [len(path), 0, 0, 0], path)
         try:
             status, data = one_op(host, port, np)
@@ -1132,6 +1367,10 @@ def main():
         except Exception as exc:
             print(f"no usable answer: {exc!r}")
         return
+
+    if op == "fid-gate":
+        fid_path = args[3] if len(args) > 3 else "/EFI/ORBS/INIT.CFG"
+        sys.exit(min(do_fid_gate(host, port, fid_path), 125))
 
     if op == "session-gate":
         hold = int(args[3]) if len(args) > 3 else 10

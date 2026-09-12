@@ -1450,8 +1450,14 @@ pub const FS_ERR_PERM: u64 = u64::MAX - 32;
 /// debugging session once already (a missing `NP_STAT` made `ls /mnt/a` fail
 /// while `cat` under the same mount worked, and the symptom sat in the roadmap
 /// for days as a guest-side path-resolution bug), and the five fid verbs
-/// (`NP_OPEN`/`NP_PREAD`/`NP_PWRITE`/`NP_FSTAT`/`NP_CLUNK`) are currently
-/// implemented by no export at all, so it was about to cost another.
+/// (`NP_OPEN`/`NP_PREAD`/`NP_PWRITE`/`NP_FSTAT`/`NP_CLUNK`) were then
+/// implemented by no export at all, so it was about to cost another. Since
+/// 2026-09-12 `netd`'s export serves `NP_OPEN`/`NP_FSTAT`/`NP_CLUNK` on a
+/// session, and the code carries a second meaning there: **the verb exists,
+/// but not on this kind of connection**. A fid verb on a one-shot connection
+/// and `NP_RUN` on a session both answer it. A client cannot tell the two
+/// meanings apart from the code, which is why the server's log line, not the
+/// status, is what says which; the client messages say both.
 ///
 /// **A server returning this should also log the verb number**, because the
 /// code says *that* a verb is missing and cannot say *which*.

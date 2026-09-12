@@ -30,10 +30,16 @@ gets FS_ERR_READ_ONLY (the mutating verbs, plus NP_PWRITE and an NP_OPEN asking
 for write/create/truncate - this export is read-only); anything else gets
 FS_ERR_NO_SUCH_VERB.
 
-**netd's export still implements NONE of the fid verbs** - that is steps 4-6 of
-docs/roadmap/roadmap-fid-verbs.md - so this peer is currently AHEAD of the guest, which
-is the right way round for a foreign observer: the client can be built and
-checked against something that already answers.
+**netd's export serves NP_OPEN / NP_FSTAT / NP_CLUNK since step 5 (2026-09-12),
+on a session only, and NOT YET NP_PREAD / NP_PWRITE** (steps 6 and 7 of
+docs/roadmap/roadmap-fid-verbs.md). This peer serves the read half on any
+connection, so it is still AHEAD of the guest on the data path, which is the
+right way round for a foreign observer: the client can be built and checked
+against something that already answers. One difference is deliberate and worth
+knowing when a result here and there disagree: this peer keys fids on nothing
+(one global table, any connection may use any fid), where netd keys them on
+the SESSION, so a fid opened on one connection is refused on another there
+and served here. `np9p_client.py fid-gate` measures netd's rule.
 
 DO NOT TRUST THIS PARAGRAPH. `--self-test` compares the dispatch chain against
 SELF_TEST_VERBS on every `make test`; that table is the checked claim, this is

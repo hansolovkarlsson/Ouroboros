@@ -540,16 +540,69 @@ is reclaimed by the idle timeout. · **Negative controls:** kill a peer
 mid-session and confirm the slot returns; open `MAX_CONNS + 1` and confirm the
 refusal is an error the client reports, not a hang.
 
-**Step 5 — the export learns `NP_OPEN` / `NP_FSTAT` / `NP_CLUNK`. NEXT.** With
-the fid table keyed on the session from step 4, and `netd` as a client probing
-`NP_SESSION` once at `mount -r` and remembering the answer per mount. `NP_PREAD`/`NP_PWRITE`
+**Step 5: the export learns `NP_OPEN` / `NP_FSTAT` / `NP_CLUNK`. ✅ DONE
+2026-09-12 for the EXPORT half; the client half is deferred, see below.** The
+fid table is keyed on the session from step 4: `TcpConn` carries four
+`SessionFid` slots (the `fsd` fid behind each, and the remote user who opened
+it), the client-facing number is `3 + slot` and means nothing on any other
+connection, and the whole table is clunked on `fsd` when the connection goes,
+by a `Drop` on `TcpConn` rather than a call at each of the six sites that free
+a slot. A one-shot connection is refused every fid verb with
+`FS_ERR_NO_SUCH_VERB` ("not on this connection", the mirror of `NP_RUN` on a
+session), so a per-request client, which `netd` itself still is, sees exactly
+what it saw before. `NP_OPEN` decodes its own parameters (`a0` = flags,
+`a1` = path length, step 2's trap) and resolves the path through the export
+namespace like every other verb; the console and `/net` refuse it, having no
+fid model here or locally. A fid opened by one user is refused `FS_ERR_PERM`
+to another on the same session *without* asking `fsd`, because `fsd` drops a
+fid whose caller's uid changed (a recycled slot, locally) and on a session that
+would let a co-tenant destroy a handle by naming it. `NP_PREAD`/`NP_PWRITE`
 deliberately not yet: the handle lifecycle is worth proving before the data
-path rides on it. · **Check:** `np9p_client.py` gains an open→fstat→clunk
-sequence over one session against the guest's export (`make run-image-9p`).
-· **Negative controls, three:** a fid the client never opened is refused; a fid
-opened on session A is refused on session B (the whole point of Decision 2, so
-it must be shown failing before the table exists); and closing a session
-clunks its fids, verified by reopening and finding the old numbers dead.
+path rides on it.
+
+· **Check, measured under `run-guest.sh`, guest alive, 0 restarts, 0 aborts:**
+`np9p_client.py fid-gate` runs open→fstat→clunk over one session with the
+`fstat` record byte-compared against `NP_STAT`'s for the same path (two paths
+to the same bytes), then the clunked fid refused. **10 of 10 PASS.** · **The
+three negative controls the plan named, all run:** a fid the session never
+opened is refused; a fid opened on session A is refused on B while A still
+holds it (and A's own `fstat` still served, so the refusal is about the
+session and not the fid); closing A holding a fid leaves the number dead on a
+fresh session. That third one a per-connection table passes *whether or not*
+`fsd` was told, so the gate adds the half that can fail: **12 opens across
+three closed sessions against `fsd`'s 8-slot table**, which succeed only if
+each close clunked. · **Three more, pinning the step's boundaries:** the fifth
+open on a session is `FS_ERR_BUSY`; a fid verb on a one-shot connection is
+`FS_ERR_NO_SUCH_VERB`; another user on the session is `FS_ERR_PERM` and the
+owner keeps the fid; and `NP_PREAD` on a session answers `FS_ERR_NO_SUCH_VERB`
+with the session still in phase, a line step 6 must flip. · **Shown failing
+three ways:** against `main`'s export before the change, 8 of 10 fail at the
+first open with `FS_ERR_NO_SUCH_VERB` (the two boundary pins pass there by
+construction); with the `Drop` clunk mutated out, the 12-opens check fails at
+the eighth open (7 of 12, one slot already lost to the fid session A was closed
+holding earlier in the run); with the uid check mutated out, the co-tenant check fails, and
+`fsd` then drops the fid so the owner's next `fstat` fails too, which is the
+claim in the paragraph above measured rather than argued. Recipe in
+`docs/testing/testing-qemu.md`.
+
+> **The client half is NOT in this step, and the plan's sentence about it was
+> under-specified.** "`netd` as a client probing `NP_SESSION` once at
+> `mount -r` and remembering the answer per mount" has no check in the plan
+> and, read closely, no consumer: `mount -r` is a shell `NS_SET`, `netd` is
+> never told a mount happened, and a C program's remote `open()` reaches
+> `netd` as one `NETOP_RMOUNT` per verb, each carried by `tcp_get` on a fresh
+> connection that closes after the reply. For a fid to survive from that
+> `open()` to the `fstat()` after it, `netd` must HOLD a client-side session
+> to the far export across requests, which `tcp_get`'s synchronous
+> one-connection-per-call model cannot do; the event-loop-driven `DialConn`
+> is the shape that can. That is a design decision (where the client session
+> lives, when it opens, what happens to it when the peer reaps it after 30 s
+> idle, and how it is verified: the two-VM rig, since the host peer serves
+> fids on any connection and would pass a client that never held one), not a
+> follow-up, and it is recorded here for the next session rather than built on
+> a guess. Until it is built, a guest-to-guest C `open()` on a remote mount
+> gets `FS_ERR_NO_SUCH_VERB` from a step-5 export exactly as it did from a
+> step-4 one.
 
 **Step 6 — `NP_PREAD`.** The wire→`SAFECOPY` bridge, mirroring
 `read_file_chunk`'s existing `GRANT_WRITE` pattern. · **Check:** read a file
@@ -575,9 +628,14 @@ and after it, proving nothing either time — the caveat
 ## Deliberately not in scope
 
 - **`ulib` fid helpers** — no Rust consumer, see above.
-- **Raising `MAX_FIDS`** — Decision 2 moves the per-client budget to `netd`,
-  which makes 8 an `fsd`-local number again. Raise it when something actually
-  exhausts it, with the exhaustion as the evidence.
+- **Raising `MAX_FIDS`.** This entry used to say Decision 2 "makes 8 an
+  `fsd`-local number again". It does not: every remote fid is also an `fsd`
+  fid, owned by `netd`, so `fsd`'s 8 is shared by every local C program and
+  every session, and three full sessions (`SESSION_FIDS` = 4 each) exceed it
+  (the `SESSION_FIDS` comment in `netd` says so, 2026-09-12). Raise it when
+  something actually exhausts it, with the exhaustion as the evidence; the
+  step-5 gate depends on 12 > 8 and quotes both numbers, which is a copy that
+  can drift and is the review's item 7.
 - **Session-scoped authentication** — Decision 3 makes it possible for the
   first time, and it stays out of this arc anyway: changing the auth model in
   the same change that changes the transport is two risky things at once.
