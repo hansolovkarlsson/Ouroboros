@@ -1569,6 +1569,15 @@ fn handle_run(packed_mac: u64, _sender: u64, buf: &[u8], len: usize, out: &mut [
 /// far side's session budget gives, never by evicting a live one.
 const MAX_CLIENT_SESSIONS: usize = 3;
 
+/// The buffers a session round trip needs are sized for a FID verb, not the
+/// one-shot path's 2 KB reads/writes: a fid request is an NP header plus a path
+/// or one `NP_REMOTE_CHUNK` of inline data, a reply a status plus one chunk,
+/// each under ~800 bytes even sealed and framed. Sizing `req`/`resp` for that
+/// (rather than `NP_FRAME_MAX`) keeps `session_rmount`'s frame well under the
+/// one-shot path's, which matters because both hang off `serve`'s 32 KB stack
+/// and a session opens by nesting one round trip inside another.
+const SESSION_BUF: usize = 1024;
+
 /// Ticks (`now()`) of inactivity before a held client session is reaped as a
 /// BACKSTOP. Deliberately ABOVE `CONN_IDLE_TICKS` (the far side's 30 s reap):
 /// the normal path frees a session on its last clunk, and this only cleans up
@@ -1607,31 +1616,47 @@ struct ClientSession {
     last_activity: u64,
 }
 
+/// The two ~1.6 KB packet buffers a TCP round trip needs (one to build, one to
+/// receive), allocated ONCE by `session_rmount` and threaded down. netd's
+/// `serve` stack is 32 KB and already carries `conns` and `dials`; giving each
+/// of `client_connect`/`client_exchange` its own pair nested them four deep and
+/// overflowed the guard page (a write fault, the exact failure `MAX_DIAL` was
+/// capped for). One shared pair keeps the session path no deeper than the
+/// one-shot path it mirrors.
+struct TcpScratch {
+    frame: [u8; 1600],
+    rx: [u8; 1600],
+}
+
+impl TcpScratch {
+    fn new() -> Self {
+        TcpScratch { frame: [0u8; 1600], rx: [0u8; 1600] }
+    }
+}
+
 /// Open a TCP connection to a far export and complete the handshake, returning
 /// `(src_port, snd_nxt, rcv_nxt)` or `None`. The handshake half of `tcp_get`,
 /// factored so a held client session can keep the connection the one-shot path
 /// throws away. Same SYN retransmit (`SYN_TRIES`), since a freshly-connected
 /// QEMU socket link can drop the first frame.
-fn client_connect(mac: &[u8; 6], dst_mac: &[u8; 6], target: &[u8; 4], dst_port: u16) -> Option<(u16, u32, u32)> {
-    let mut frame = [0u8; 1600];
-    let mut rx = [0u8; 1600];
+fn client_connect(mac: &[u8; 6], dst_mac: &[u8; 6], target: &[u8; 4], dst_port: u16, sc: &mut TcpScratch) -> Option<(u16, u32, u32)> {
     let src_port = next_src_port();
     let isn = TCP_ISN ^ ((src_port as u32) << 8);
     const SYN_TRIES: u32 = 4;
     const SYN_WAIT_TICKS: u64 = 12;
-    let n = build_tcp(mac, dst_mac, target, src_port, dst_port, isn, 0, TCP_SYN, true, &[], &mut frame)?;
+    let n = build_tcp(mac, dst_mac, target, src_port, dst_port, isn, 0, TCP_SYN, true, &[], &mut sc.frame)?;
     let mut beat = now();
     let mut tries = 0u32;
     let their_isn = loop {
-        if send(&frame[..n]).is_err() {
+        if send(&sc.frame[..n]).is_err() {
             return None;
         }
         tries += 1;
         let deadline = now() + SYN_WAIT_TICKS;
         let mut synack = None;
         loop {
-            if let Some(len) = recv(&mut rx) {
-                if let Some(seg) = parse_tcp(&rx[..len], target, dst_port, src_port) {
+            if let Some(len) = recv(&mut sc.rx) {
+                if let Some(seg) = parse_tcp(&sc.rx[..len], target, dst_port, src_port) {
                     if seg.flags & TCP_RST != 0 {
                         return None;
                     }
@@ -1655,8 +1680,8 @@ fn client_connect(mac: &[u8; 6], dst_mac: &[u8; 6], target: &[u8; 4], dst_port: 
     };
     let snd_nxt = isn + 1;
     let rcv_nxt = their_isn.wrapping_add(1);
-    if let Some(n) = build_tcp(mac, dst_mac, target, src_port, dst_port, snd_nxt, rcv_nxt, TCP_ACK, false, &[], &mut frame) {
-        let _ = send(&frame[..n]);
+    if let Some(n) = build_tcp(mac, dst_mac, target, src_port, dst_port, snd_nxt, rcv_nxt, TCP_ACK, false, &[], &mut sc.frame) {
+        let _ = send(&sc.frame[..n]);
     }
     Some((src_port, snd_nxt, rcv_nxt))
 }
@@ -1671,38 +1696,36 @@ fn client_connect(mac: &[u8; 6], dst_mac: &[u8; 6], target: &[u8; 4], dst_port: 
 /// Like `tcp_get`, `parse_tcp` drops any frame not on this 4-tuple, so an export
 /// frame arriving mid-exchange is dropped and the peer retransmits it. That is a
 /// pre-existing property of a blocking remote round trip, not new here.
-fn client_exchange(mac: &[u8; 6], s: &mut ClientSession, request: &[u8], resp: &mut [u8]) -> usize {
-    let mut frame = [0u8; 1600];
-    let mut rx = [0u8; 1600];
-    let target = &s.ip;
-    let dst_mac = &s.dst_mac;
+fn client_exchange(mac: &[u8; 6], s: &mut ClientSession, request: &[u8], resp: &mut [u8], sc: &mut TcpScratch) -> usize {
+    let target = s.ip;
+    let dst_mac = s.dst_mac;
     let dst_port = s.port;
     let src_port = s.src_port;
     let snd_after = s.snd_nxt.wrapping_add(request.len() as u32);
     let mut rcv_nxt = s.rcv_nxt;
     // Send the request (PSH|ACK) at the session's current send sequence.
-    let Some(n) = build_tcp(mac, dst_mac, target, src_port, dst_port, s.snd_nxt, rcv_nxt, TCP_PSH | TCP_ACK, false, request, &mut frame) else {
+    let Some(n) = build_tcp(mac, &dst_mac, &target, src_port, dst_port, s.snd_nxt, rcv_nxt, TCP_PSH | TCP_ACK, false, request, &mut sc.frame) else {
         return 0;
     };
-    if send(&frame[..n]).is_err() {
+    if send(&sc.frame[..n]).is_err() {
         return 0;
     }
     let mut got = 0usize;
     let mut beat = now();
     let mut deadline = now() + 50;
     loop {
-        if let Some(len) = recv(&mut rx) {
-            if let Some(seg) = parse_tcp(&rx[..len], target, dst_port, src_port) {
+        if let Some(len) = recv(&mut sc.rx) {
+            if let Some(seg) = parse_tcp(&sc.rx[..len], &target, dst_port, src_port) {
                 if seg.flags & TCP_RST != 0 {
                     return 0; // reset (the far side reaped) - dead
                 }
                 if seg.data_len > 0 && seg.seq == rcv_nxt {
                     let take = seg.data_len.min(resp.len() - got);
-                    resp[got..got + take].copy_from_slice(&rx[seg.data_off..seg.data_off + take]);
+                    resp[got..got + take].copy_from_slice(&sc.rx[seg.data_off..seg.data_off + take]);
                     got += take;
                     rcv_nxt = rcv_nxt.wrapping_add(seg.data_len as u32);
-                    if let Some(n) = build_tcp(mac, dst_mac, target, src_port, dst_port, snd_after, rcv_nxt, TCP_ACK, false, &[], &mut frame) {
-                        let _ = send(&frame[..n]);
+                    if let Some(n) = build_tcp(mac, &dst_mac, &target, src_port, dst_port, snd_after, rcv_nxt, TCP_ACK, false, &[], &mut sc.frame) {
+                        let _ = send(&sc.frame[..n]);
                     }
                     deadline = now() + 50;
                 }
@@ -1744,9 +1767,9 @@ fn client_close(mac: &[u8; 6], s: &ClientSession) {
 /// and return the `(start, len)` of the NP reply body within `resp`, or `None`
 /// if the length or the reply signature fails against `expect_key` and the
 /// nonce WE sent. The one place a client trusts a byte off the wire; both
-/// `handle_rmount`'s one-shot path and a session round trip verify through it,
-/// so the check is spelled once (Decision 3's client-side asymmetry - the key
-/// is the one for the address we dialled, not merely one we authorize).
+/// `oneshot_rmount` and a session round trip verify through it, so the check is
+/// spelled once (Decision 3's client-side asymmetry - the key is the one for
+/// the address we dialled, not merely one we authorize).
 fn verify_sealed(resp: &[u8], got: usize, nonce: &[u8; ninep_abi::NP_NONCE_LEN], expect_key: &[u8; clusterkeys::KEY_LEN]) -> Option<(usize, usize)> {
     if got < ninep_abi::NP_NET_LEN_PREFIX + 8 {
         return None;
@@ -1772,21 +1795,21 @@ fn verify_sealed(resp: &[u8], got: usize, nonce: &[u8; ninep_abi::NP_NONCE_LEN],
 }
 
 /// One signed round trip on a held session: frame + sign `np` with a fresh
-/// nonce, exchange it on the connection, verify the sealed reply, and write the
-/// NP reply body to `out`. Returns its length, or an `FS_ERR_*` the caller
-/// surfaces and frees the session on: `FS_ERROR` if the connection is dead
-/// (fail-dead), `FS_ERR_AUTH` if the frame could not be signed or the reply did
-/// not verify. Per-request signing is unchanged from the one-shot path
-/// (Decision 3 kept it); only the connection is reused.
+/// nonce into `req`, exchange it on the connection, verify the sealed reply, and
+/// write the NP reply body to `out`. Returns its length, or an `FS_ERR_*` the
+/// caller surfaces and frees the session on: `FS_ERROR` if the connection is
+/// dead (fail-dead), `FS_ERR_AUTH` if the frame could not be signed or the reply
+/// did not verify. Per-request signing is unchanged from the one-shot path
+/// (Decision 3 kept it); only the connection is reused. `req`/`resp`/`sc` are
+/// the caller's buffers (`session_rmount`'s), threaded to keep the stack shallow.
 #[allow(clippy::too_many_arguments)]
-fn session_exchange(mac: &[u8; 6], s: &mut ClientSession, auth: &Auth, who: &[u8; ninep_abi::NP_NAME_LEN], expect_key: &[u8; clusterkeys::KEY_LEN], np: &[u8], resp: &mut [u8], out: &mut [u8]) -> Result<usize, u64> {
-    let mut req = [0u8; ninep_abi::NP_FRAME_MAX];
+fn session_exchange(mac: &[u8; 6], s: &mut ClientSession, auth: &Auth, who: &[u8; ninep_abi::NP_NAME_LEN], expect_key: &[u8; clusterkeys::KEY_LEN], np: &[u8], req: &mut [u8], resp: &mut [u8], out: &mut [u8], sc: &mut TcpScratch) -> Result<usize, u64> {
     let np = &np[..np.len().min(ninep_abi::NP_NET_MAX)];
-    let (total, nonce) = frame_signed(auth, who, np, &mut req);
+    let (total, nonce) = frame_signed(auth, who, np, req);
     if total == 0 {
         return Err(syscall_abi::FS_ERR_AUTH);
     }
-    let got = client_exchange(mac, s, &req[..total], resp);
+    let got = client_exchange(mac, s, &req[..total], resp, sc);
     if got == 0 {
         return Err(syscall_abi::FS_ERROR); // dead connection - fail-dead
     }
@@ -1801,24 +1824,23 @@ fn session_exchange(mac: &[u8; 6], s: &mut ClientSession, auth: &Auth, who: &[u8
 /// none: allocate a slot, handshake, and send `NP_SESSION` on it. A far export
 /// that refuses the session (an old node with no such verb, or its budget spent)
 /// surfaces its own status, and no slot is kept. `Err` is the `FS_ERR_*`/`NO_FS`
-/// to fail the verb with.
+/// to fail the verb with. `req`/`resp`/`sc` are the caller's buffers.
 #[allow(clippy::too_many_arguments)]
-fn find_or_open_session(mac: &[u8; 6], dst_mac: &[u8; 6], ip: [u8; 4], port: u16, uid: u32, sessions: &mut [Option<ClientSession>; MAX_CLIENT_SESSIONS], auth: &Auth, who: &[u8; ninep_abi::NP_NAME_LEN], expect_key: &[u8; clusterkeys::KEY_LEN]) -> Result<usize, u64> {
+fn find_or_open_session(mac: &[u8; 6], dst_mac: &[u8; 6], ip: [u8; 4], port: u16, uid: u32, sessions: &mut [Option<ClientSession>; MAX_CLIENT_SESSIONS], auth: &Auth, who: &[u8; ninep_abi::NP_NAME_LEN], expect_key: &[u8; clusterkeys::KEY_LEN], req: &mut [u8], resp: &mut [u8], sc: &mut TcpScratch) -> Result<usize, u64> {
     if let Some(i) = sessions.iter().position(|s| matches!(s, Some(s) if s.ip == ip && s.port == port && s.uid == uid)) {
         return Ok(i);
     }
     let Some(slot) = sessions.iter().position(|s| s.is_none()) else {
         return Err(syscall_abi::FS_ERR_BUSY); // our own session budget
     };
-    let Some((src_port, snd_nxt, rcv_nxt)) = client_connect(mac, dst_mac, &ip, port) else {
+    let Some((src_port, snd_nxt, rcv_nxt)) = client_connect(mac, dst_mac, &ip, port, sc) else {
         return Err(syscall_abi::NO_FS);
     };
     let mut sess = ClientSession { ip, port, uid, dst_mac: *dst_mac, src_port, snd_nxt, rcv_nxt, fids: 0, last_activity: now() };
     let mut np_session = [0u8; ninep_abi::NP_REQ_PAYLOAD as usize];
     np_session[0..8].copy_from_slice(&ninep_abi::NP_SESSION.to_le_bytes());
-    let mut resp = [0u8; ninep_abi::NP_NET_LEN_PREFIX + ninep_abi::NP_NET_MAX];
     let mut sess_out = [0u8; 16];
-    match session_exchange(mac, &mut sess, auth, who, expect_key, &np_session, &mut resp, &mut sess_out) {
+    match session_exchange(mac, &mut sess, auth, who, expect_key, &np_session, req, resp, &mut sess_out, sc) {
         Ok(n) if n >= 8 && read_u64(&sess_out, 0) == 0 => {
             sessions[slot] = Some(sess);
             Ok(slot)
@@ -1854,6 +1876,11 @@ fn find_or_open_session(mac: &[u8; 6], dst_mac: &[u8; 6], ip: [u8; 4], port: u16
 /// is fail-dead `FS_ERROR`, and the client re-opens on its next call. `NP_OPEN`
 /// adds a fid to the session's count and a successful `NP_CLUNK` removes one,
 /// closing the session when the last fid goes.
+///
+/// The one place the session path's big buffers live: `sc` (the two packet
+/// buffers), `req` and `resp` are allocated HERE, once, and threaded down, so
+/// the path is no deeper than the one-shot `oneshot_rmount` it mirrors and does
+/// not overflow `serve`'s 32 KB stack.
 #[allow(clippy::too_many_arguments)]
 fn session_rmount(mac: &[u8; 6], dst_mac: &[u8; 6], ip: [u8; 4], port: u16, uid: u32, verb: u64, sessions: &mut [Option<ClientSession>; MAX_CLIENT_SESSIONS], auth: &Auth, who: &[u8; ninep_abi::NP_NAME_LEN], expect_key: Option<[u8; clusterkeys::KEY_LEN]>, msg: &[u8], out: &mut [u8]) -> usize {
     let fail = |out: &mut [u8], st: u64| -> usize {
@@ -1863,12 +1890,14 @@ fn session_rmount(mac: &[u8; 6], dst_mac: &[u8; 6], ip: [u8; 4], port: u16, uid:
     let Some(peer_key) = expect_key else {
         return fail(out, syscall_abi::FS_ERR_AUTH);
     };
-    let slot = match find_or_open_session(mac, dst_mac, ip, port, uid, sessions, auth, who, &peer_key) {
+    let mut sc = TcpScratch::new();
+    let mut req = [0u8; SESSION_BUF];
+    let mut resp = [0u8; SESSION_BUF];
+    let slot = match find_or_open_session(mac, dst_mac, ip, port, uid, sessions, auth, who, &peer_key, &mut req, &mut resp, &mut sc) {
         Ok(i) => i,
         Err(st) => return fail(out, st),
     };
-    let mut resp = [0u8; ninep_abi::NP_NET_LEN_PREFIX + ninep_abi::NP_NET_MAX];
-    let n = match session_exchange(mac, sessions[slot].as_mut().unwrap(), auth, who, &peer_key, msg, &mut resp, out) {
+    let n = match session_exchange(mac, sessions[slot].as_mut().unwrap(), auth, who, &peer_key, msg, &mut req, &mut resp, out, &mut sc) {
         Ok(n) => n,
         Err(st) => {
             // Fail-dead: free the session. Close it only if the failure was not
@@ -1885,7 +1914,8 @@ fn session_rmount(mac: &[u8; 6], dst_mac: &[u8; 6], ip: [u8; 4], port: u16, uid:
     // last fid goes. The NP status is the reply body's first word.
     let np_status = if n >= 8 { read_u64(out, 0) } else { u64::MAX };
     if verb == ninep_abi::NP_OPEN && np_status < syscall_abi::FS_ERR_MIN {
-        sessions[slot].as_mut().unwrap().fids = sessions[slot].as_ref().unwrap().fids.saturating_add(1);
+        let s = sessions[slot].as_mut().unwrap();
+        s.fids = s.fids.saturating_add(1);
     } else if verb == ninep_abi::NP_CLUNK && np_status < syscall_abi::FS_ERR_MIN {
         let s = sessions[slot].as_mut().unwrap();
         s.fids = s.fids.saturating_sub(1);
@@ -1930,27 +1960,14 @@ fn handle_rmount(packed_mac: u64, buf: &[u8], len: usize, sessions: &mut [Option
     let port = u16::from_le_bytes([buf[ep + 4], buf[ep + 5]]);
     let msg = &buf[syscall_abi::NETOP_RMOUNT_MSG..len];
 
-    // Frame + sign the NP message (the export-hardening phase): a no-key client
-    // can't sign, so it fails with FS_ERR_AUTH rather than sending an unsigned
-    // request the remote would reject anyway.
-    //
-    // WHO is asking, resolved to a name BEFORE any TCP work. Two reasons for the
-    // ordering. The credential comes from `SENDER_ID`, which reports the sender
-    // of the last message this task received - and the TCP path below re-enters
-    // the event loop, which receives more. And the `/etc/passwd` lookup wants its
-    // buffers off the stack before the frame and response buffers go live, which
-    // is where netd's peak is.
+    // WHO is asking, resolved to a name BEFORE any TCP work (the TCP path
+    // re-enters the event loop, whose unfiltered receives would replace the
+    // captured `SENDER_ID` credential). A no-name caller cannot be spoken for,
+    // so it refuses to send rather than send an unnamed request.
     let mut who = [0u8; ninep_abi::NP_NAME_LEN];
     match caller_name(&mut who) {
         LineScan::Found => {}
-        // No name for the caller means this machine cannot say who is asking, so
-        // it refuses to send rather than send an unnamed request. The two causes
-        // report differently: NO_FS for the transient one (the shell surfaces it
-        // as "no filesystem", which is both true and worth retrying), AUTH for a
-        // uid this machine has no account for.
         LineScan::Unreadable => return fail(out, syscall_abi::NO_FS),
-        // NOT `NO_FS`: the shell renders that as "no filesystem", which reads as
-        // "not mounted yet, try again" - wrong for a file that is never coming.
         LineScan::NoDatabase => return fail(out, syscall_abi::FS_ERR_NOT_FOUND),
         LineScan::NotFound => return fail(out, syscall_abi::FS_ERR_AUTH),
     }
@@ -1959,15 +1976,10 @@ fn handle_rmount(packed_mac: u64, buf: &[u8], len: usize, sessions: &mut [Option
     // name and the uid name the same caller.
     let uid = syscall4(syscall_abi::SENDER_ID, 0, 0, 0, 0) as u32;
 
-    // WHOSE SIGNATURE WILL WE ACCEPT ON THE REPLY? Resolved BEFORE sending.
-    //
-    // This check used to run after `tcp_get`, which meant a stale or missing
-    // line for the dialled address let an NP_WRITE / NP_MKDIR / NP_RM land on
-    // the exporter and then reported FS_ERR_AUTH: the write happened, the shell
-    // said it did not. That is the same failure shape the send gate below was
-    // added for, on a different trigger - so it gets the same treatment. The
-    // lookup is a pure function of the authorized file and the address, so
-    // hoisting it costs nothing.
+    // WHOSE SIGNATURE WILL WE ACCEPT ON THE REPLY? Resolved BEFORE sending, so a
+    // stale or missing line for the dialled address refuses the request rather
+    // than letting a mutating verb land and then reporting FS_ERR_AUTH (the
+    // write happened, the shell said it did not - a hoist that costs nothing).
     let expect_key = if auth.signing.is_some() {
         match clusterkeys::find_by_ip(auth.authorized(), &ip) {
             Some(peer) => Some(peer.key),
@@ -1985,31 +1997,43 @@ fn handle_rmount(packed_mac: u64, buf: &[u8], len: usize, sessions: &mut [Option
     // Route by verb. A fid verb (open/pread/pwrite/fstat/clunk - every non-Path
     // `shape`, the ABI set in one place) needs the far export's per-connection
     // fid alive from open() to close(), so it rides a HELD session (Decision 4).
-    // Every other verb carries its own path and needs no handle, so it keeps the
-    // one-shot connection `tcp_get` opens and closes, unchanged.
+    // Every other verb carries its own path and needs no handle, so the one-shot
+    // path opens and closes a connection per call, unchanged. Each branch holds
+    // its own big buffers in its OWN frame, never both on the stack at once.
     let verb = if msg.len() >= 8 { read_u64(msg, 0) } else { 0 };
     if shape(verb) != Shape::Path {
-        return session_rmount(&mac, &dst_mac, ip, port, uid, verb, sessions, auth, &who, expect_key, msg, out);
+        session_rmount(&mac, &dst_mac, ip, port, uid, verb, sessions, auth, &who, expect_key, msg, out)
+    } else {
+        oneshot_rmount(&mac, &dst_mac, &ip, port, &who, expect_key, auth, msg, out)
     }
+}
 
-    // One-shot: frame + sign the NP message (a no-key client can't sign, so it
-    // fails FS_ERR_AUTH rather than sending an unsigned request the remote would
-    // reject anyway), one round trip that closes, then verify the sealed reply.
+/// One-shot remote relay for a stateless (path-carrying) verb: frame + sign the
+/// NP message, one TCP round trip that opens and closes, then verify the sealed
+/// reply. Split out of `handle_rmount` so its ~4 KB of frame/reply buffers and
+/// the session path's do not share a stack frame (they never run together).
+#[allow(clippy::too_many_arguments)]
+fn oneshot_rmount(mac: &[u8; 6], dst_mac: &[u8; 6], ip: &[u8; 4], port: u16, who: &[u8; ninep_abi::NP_NAME_LEN], expect_key: Option<[u8; clusterkeys::KEY_LEN]>, auth: &Auth, msg: &[u8], out: &mut [u8]) -> usize {
+    let fail = |out: &mut [u8], st: u64| -> usize {
+        out[0..8].copy_from_slice(&st.to_le_bytes());
+        8
+    };
+    // A no-key client can't sign, so it fails FS_ERR_AUTH rather than sending an
+    // unsigned request the remote would reject anyway.
     let mut req = [0u8; ninep_abi::NP_FRAME_MAX];
     let np = &msg[..msg.len().min(ninep_abi::NP_NET_MAX)];
-    let (total, nonce) = frame_signed(auth, &who, np, &mut req);
+    let (total, nonce) = frame_signed(auth, who, np, &mut req);
     if total == 0 {
         return fail(out, syscall_abi::FS_ERR_AUTH);
     }
     let mut resp = [0u8; ninep_abi::NP_NET_LEN_PREFIX + ninep_abi::NP_NET_MAX];
-    let (status, got) = tcp_get(&mac, &dst_mac, &ip, port, &req[..total], &mut resp, true);
+    let (status, got) = tcp_get(mac, dst_mac, ip, port, &req[..total], &mut resp, true);
     if status != syscall_abi::NET_FETCH_OK || got < ninep_abi::NP_NET_LEN_PREFIX + 8 {
         return fail(out, syscall_abi::NO_FS);
     }
-    // The sealed reply (`[sig:64][status:u64][data]`) is verified against the key
-    // we expect for the ADDRESS we dialled and the nonce we sent, before a byte
-    // is trusted - `verify_sealed`, shared with the session path (Decision 3's
-    // client-side asymmetry lives there).
+    // The sealed reply is verified against the key we expect for the ADDRESS we
+    // dialled and the nonce we sent, before a byte is trusted (`verify_sealed`,
+    // shared with the session path).
     let Some(peer_key) = expect_key else {
         return fail(out, syscall_abi::FS_ERR_AUTH);
     };
