@@ -617,13 +617,60 @@ claim in the paragraph above measured rather than argued. Recipe in
 > gets `FS_ERR_NO_SUCH_VERB` from a step-5 export exactly as it did from a
 > step-4 one.
 
-**Step 6 — `NP_PREAD`.** The wire→`SAFECOPY` bridge, mirroring
-`read_file_chunk`'s existing `GRANT_WRITE` pattern. · **Check:** read a file
+**Step 6 — `NP_PREAD`. ✅ DONE 2026-09-12, with the item-9 fold.** The
+wire→`SAFECOPY` bridge, mirroring `read_file_chunk`'s existing `GRANT_WRITE`
+pattern. · **Check:** read a file
 **larger than one `NP_REMOTE_CHUNK`** through a fid and byte-compare against
 the same file read path-based over the same mount — two independent paths to
 the same bytes. · **Negative control:** truncate the expected buffer by one
 byte; the comparison must fail. (A same-length compare that passes on a short
 read is the failure mode.)
+
+> **A correction to this step, found while doing it.** There is no
+> `SAFECOPY` bridge to build: `fsd`'s `NP_PREAD` answers **inline** (the bytes
+> ride in its reply, as `NP_READDIR`'s do), not through a grant like the
+> path-based `NP_READ` that `read_file_chunk` bridges. So the relay is one
+> `fsd_call3` with the readdir arm's `DATA_INLINE` cap and `ok_data`, and
+> `read_file_chunk` is reused by nothing here; the sentence above was written
+> from the verb's name, not from `fsd`'s arm. The plan's other claim held: the
+> chunk cap is shared, not copied.
+
+> **Measured under `run-guest.sh`, guest alive, 0 restarts, 0 aborts.** The
+> fid gate grew four checks and is **14 of 14**: a `pread` of a never-opened
+> fid refused; another user's `pread` refused `FS_ERR_PERM` with the owner's
+> next read served; `/man/grep` (4661 bytes, nine chunks and a tail) read to
+> EOF through a fid and byte-equal to the same file over `NP_READ_AT` on
+> one-shot connections, the check failing on a file that fits one chunk; EOF
+> answering 0 with the session in phase. The one-shot refusal check sends
+> `NP_PREAD` beside `NP_OPEN`. · **Shown failing four ways**, the tree
+> committed before each mutation: against `main`'s step-5 export the four new
+> checks fail with `FS_ERR_NO_SUCH_VERB` and the ten step-5 checks pass (10 of
+> 14); with the expected buffer one byte short, the compare alone fails (4661
+> through the fid, 4660 path-based); with the export forwarding `offset + 1`,
+> the compare alone fails the other way (4660 through the fid, 4661
+> path-based); and with the fold's path-word selector reading `a1` for every
+> path verb, the new **path gate** (below) fails 10 of 12. Recipes in
+> `docs/testing/testing-qemu.md`.
+
+> **The fold landed with it, as decided.** `fid_verb_reply` is gone;
+> `build_9p_reply` takes the connection's fid table and whether it is a
+> session, `path_len_word` picks which request word carries the path length
+> per verb (`a0`, `a1` for `NP_OPEN`, none for the ops on a fid, which skip the
+> namespace rather than resolve a payload they do not have), `session_slot` is
+> the shared front half of the three ops on a fid (slot lookup, the `fsd`
+> generation guard, the per-user wall), and `NP_OPEN`/`NP_PREAD`/`NP_FSTAT`/
+> `NP_CLUNK` are arms of the one match. The fold's own gate is
+> `np9p_client.py path-gate`: every path verb end to end on a scratch file
+> (`write_file`, `read_at`, `write_at`, `stat`, `mv`, `chmod`, `touch`,
+> `mkdir`/`rmdir`/`readdir`, `rm`), the console and `/net` arms, and `NP_OPEN`
+> of `/net/ip` and `/dev/cons` refused on a session; **12 of 12** on the
+> folded tree. Its control is the selector mutation above, and the two checks
+> that survive it are worth knowing: `NP_READ_AT` with `a1` = 100 and
+> `NP_CHMOD` with `a1` = 0o600 still pass, because `plen.min(payload.len())`
+> clamps a too-long length to the whole payload, which for a path-only
+> request *is* the path. The clamp is right (a runt frame must not panic
+> `netd`), and it means a wrong word can be invisible when the wrong number is
+> larger than the right one, so the gate's other ten are the ones that see it.
 
 > **Fold `fid_verb_reply` into `build_9p_reply` as part of this step, not
 > before it (decided 2026-09-12, review of #128 item 9).** Step 5 left the

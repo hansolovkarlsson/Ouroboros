@@ -162,14 +162,60 @@ that fails when closing a session does not clunk; the fifth open on a session
 another user refused `FS_ERR_PERM` while the owner keeps the fid; another
 user's `NP_CLUNK` refused `FS_ERR_PERM` while the owner still holds the fid and
 then closes it (added by the review of #130: the freeing verb's ownership test
-had no observer at all); `NP_PREAD` still `FS_ERR_NO_SUCH_VERB` (step 6 flips
-that line). About twenty seconds after boot. Against `main` before step 5 it
-fails 8 of 10 at the first open (the clunk check did not exist yet).
+had no observer at all); and, since step 6 (2026-09-12), the data path: a
+`pread` of a never-opened fid refused; another user's `pread` refused
+`FS_ERR_PERM` with the owner's next read served; `/man/grep` (longer than one
+`NP_REMOTE_CHUNK`) read to EOF through a fid in chunks and byte-compared
+against the same file read path-based over `NP_READ_AT`, two independent
+paths to the same bytes, the check FAILING on a file that fits one chunk (a
+same-length compare that passes on a short read is the failure mode, and a
+one-chunk file cannot show it); then EOF answering 0 and the session still in
+phase. The one-shot refusal check sends `NP_PREAD` beside `NP_OPEN`. About
+twenty seconds after boot. Against `main` before step 5 it fails at the first
+open; against step 5's export the four step-6 checks fail with
+`FS_ERR_NO_SUCH_VERB` and the rest pass (10 of 14, measured).
 
 ```sh
 scripts/run-guest.sh -- python3 scripts/np9p_client.py localhost 5640 fid-gate
-# expected: 11 PASS, "0 check(s) failed", then the two run-guest lines above
+# expected: 14 PASS, "0 check(s) failed", then the two run-guest lines above
 ```
+
+**Its two step-6 controls, both measured 2026-09-12**, each failing the byte
+compare and nothing else. On the client, make the expected buffer one byte
+short: in `do_fid_gate`, `via_path = via_path[:-1]` just before the `ok =`
+line of the compare (4661 through the fid, 4660 path-based, DIFFER). On the
+export, shift the read: in `build_9p_reply`'s `NP_PREAD` arm, forward `p1 + 1`
+as the offset (4660 through the fid, 4661 path-based). A short-read mutation
+(`DATA_INLINE - 1` as the cap) is NOT a control: a short read is legal and the
+client continues from it, so the file still arrives whole and the gate
+rightly passes. Revert each with `git checkout`, having committed first.
+
+**The path gate** (step 6, 2026-09-12): the fold that put the fid verbs into
+`build_9p_reply` rewrote the preamble every path verb runs through (the header
+decode, which request word carries the path length, the namespace resolution,
+the console / `/net` / remote refusals), and the fid gate exercises none of
+`write`/`read_at`/`write_at`/`mv`/`chmod`/`touch`/`rm`/`mkdir`. `path-gate`
+runs each end to end on a scratch file (`/PGATE.TXT`, `/PGATE2.TXT`,
+`/PGATE3.TXT`, `/PGATED`, removed at the end), plus the console arm (an
+`NP_WRITE` to `/dev/cons`, which prints on the guest console, and a read
+refused as no arm), the `/net` arm (`/net/ip` reads as an address), and on a
+session `NP_OPEN` of `/net/ip` and `/dev/cons` refused `FS_ERR_NO_SUCH_VERB`
+with a path verb still served after. `NP_CHMOD` answers `FS_ERR_NOT_SUPPORTED`
+on FAT32 and 0 on ext2; either means the arm reached `fsd`, and the check says
+which it saw.
+
+```sh
+scripts/run-guest.sh -- python3 scripts/np9p_client.py localhost 5640 path-gate
+# expected: 12 PASS, "0 check(s) failed", then the two run-guest lines above
+```
+
+Its control is the selector: in `path_len_word`, make the `_` arm answer
+`Some(p1 as usize)` so every path verb reads its length from the wrong word.
+Measured: 10 of 12 fail. The two that survive, `read_at` with `a1` = 100 and
+`chmod` with `a1` = 0o600, survive because a too-long length is clamped to the
+whole payload, which for a path-only request is the path; so a wrong word is
+invisible whenever the wrong number is larger than the right one, and the
+other ten are the checks that see it.
 
 **The fid reaper check** (2026-09-12, the `fsd`-side follow-up to step 5):
 `fsd` reaps a leaked fid, when its table is full, by comparing the owning
@@ -200,8 +246,9 @@ new generation in the same protected slot); that case is not exercised by a
 rig, and rides on the identity comparison this run does exercise.
 
 **The second control for the same change** is the fid gate's two co-tenant
-checks with `netd`'s own per-user test removed (`fid_verb_reply`, the
-`opener.uid != proxy.uid` refusal). Before the change that mutation made `fsd`
+checks with `netd`'s own per-user test removed (`session_slot`, the
+`opener.uid != proxy.uid` refusal; it was in `fid_verb_reply` until step 6
+folded that function away). Before the change that mutation made `fsd`
 drop the owner's fid, and the fstat check failed; now `fsd` refuses the
 co-tenant `FS_ERR_PERM` and keeps the fid, and the gate stays 11 of 11 on
 `fsd`'s wall alone. The clunk check is the one that observes the freeing verb:

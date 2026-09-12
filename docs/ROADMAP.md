@@ -337,8 +337,10 @@ the microkernel arc itself still leaves open):
      opens and reads a file on a remote mount. **Step 4 (the session) landed
      2026-09-07 and step 5 (the export serves `NP_OPEN`/`NP_FSTAT`/`NP_CLUNK`
      on a session, fids keyed on the connection and clunked when it goes)
-     on 2026-09-12**, each measured by a gate under `run-guest.sh` and shown
-     failing by mutation. Left: `NP_PREAD` (6), `NP_PWRITE` (7), and the
+     on 2026-09-12, and step 6 (`NP_PREAD` on a session, carrying the fold
+     of the fid verbs into the export's one dispatch) the same day**, each
+     measured by a gate under `run-guest.sh` and shown failing by mutation.
+     Left: `NP_PWRITE` (7), and the
      CLIENT half of 5, which the plan under-specified: `netd` must hold a
      client-side session across a C program's `open()`..`close()`, which
      `tcp_get`'s one-connection-per-call model cannot, and `mount -r` is a
