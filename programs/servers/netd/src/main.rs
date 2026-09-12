@@ -1859,10 +1859,13 @@ struct SessionFid {
     fsd_fid: u64,
     /// The remote user the fid was opened as: the identity every op on it is
     /// forwarded under, and the one another user on the same session is
-    /// refused against. Checked HERE and not left to fsd, because fsd DROPS a
-    /// fid whose caller's uid no longer matches (its owner is a task slot, and
-    /// a slot with a new uid is a recycled slot), which on a session would let
-    /// a co-tenant destroy a handle by naming it.
+    /// refused against. Checked HERE as well as by fsd. fsd's own check is the
+    /// wall (`Fid::owner_uid` there: every remote fid has the one `NET_TASK`
+    /// owner, so the uid is all that separates two remote users), and until
+    /// 2026-09-12 it also DROPPED the fid on a mismatch, so a co-tenant could
+    /// destroy a handle by naming it; this check is what kept that probe from
+    /// reaching fsd, and it stays because the layer that knows which client is
+    /// asking should refuse before forwarding anything.
     opener: Proxy,
     /// fsd's packed task identity (`TASK_IDENTITY(FSD_TASK)`) when this fid was
     /// opened. fsd's fids are just `[Fid; MAX_FIDS]` on its stack, wiped to

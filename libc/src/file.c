@@ -277,12 +277,15 @@ static struct file_state *file_for(int fd) {
 
 /* Close every open fd at exit.
  *
- * A fid is server-side state in fsd, and nothing else releases it: fsd reaps a
- * fid only when its owner SLOT reads dead, but slots are recycled and the shell
- * reuses the same one for every foreground command - so a C program that relies
- * on exit to close its files (standard practice, and what picolibc's exit does)
- * leaks a fid permanently. Eight of those exhaust fsd's table and every
- * subsequent open fails, for every program, until fsd restarts. */
+ * A fid is server-side state in fsd, and nothing else releases it promptly. fsd
+ * reaps a leaked fid only when its table is full, by noticing that the owning
+ * task's slot now holds a different occupant (a generation, since 2026-09-12;
+ * before that it asked whether the SLOT was dead, and the shell reuses the same
+ * one for every foreground command, so eight C programs that each leaked a fid
+ * left the ninth unable to open anything until fsd restarted). Closing at exit
+ * is still right: a fid held until the table fills is a slot some other
+ * program cannot have in the meantime. libc/cleak.c is the program that
+ * deliberately skips this, the check for fsd's reaper. */
 void __libc_close_all(void) {
     for (int i = 0; i < MAX_FILES; i++) {
         if (g_files[i].used) {
