@@ -198,7 +198,7 @@ fn main() -> ! {
 ///
 /// About fourteen peers at 72 bytes a line. It lives in `Auth`, on `serve`'s
 /// frame, because that is where the rest of the auth config already lives and
-/// this server has no heap - and 1 KB against a 32 KB stack that has hit its guard page five
+/// this server has no heap - and 1 KB against a 40 KB stack that has hit its guard page five
 /// times is a deliberate, measured choice rather than a comfortable one. A file
 /// longer than this is REPORTED at boot rather than silently half-read: the
 /// peers past the cut would simply not be authorized, which is safe and
@@ -1574,7 +1574,7 @@ const MAX_CLIENT_SESSIONS: usize = 3;
 /// or one `NP_REMOTE_CHUNK` of inline data, a reply a status plus one chunk,
 /// each under ~800 bytes even sealed and framed. Sizing `req`/`resp` for that
 /// (rather than `NP_FRAME_MAX`) keeps `session_rmount`'s frame well under the
-/// one-shot path's, which matters because both hang off `serve`'s 32 KB stack
+/// one-shot path's, which matters because both hang off `serve`'s 40 KB stack
 /// and a session opens by nesting one round trip inside another.
 const SESSION_BUF: usize = 1024;
 
@@ -1618,7 +1618,7 @@ struct ClientSession {
 
 /// The two ~1.6 KB packet buffers a TCP round trip needs (one to build, one to
 /// receive), allocated ONCE by `session_rmount` and threaded down. netd's
-/// `serve` stack is 32 KB and already carries `conns` and `dials`; giving each
+/// `serve` stack is 40 KB and already carries `conns` and `dials`; giving each
 /// of `client_connect`/`client_exchange` its own pair nested them four deep and
 /// overflowed the guard page (a write fault, the exact failure `MAX_DIAL` was
 /// capped for). One shared pair keeps the session path no deeper than the
@@ -1879,8 +1879,12 @@ fn find_or_open_session(mac: &[u8; 6], dst_mac: &[u8; 6], ip: [u8; 4], port: u16
 ///
 /// The one place the session path's big buffers live: `sc` (the two packet
 /// buffers), `req` and `resp` are allocated HERE, once, and threaded down, so
-/// the path is no deeper than the one-shot `oneshot_rmount` it mirrors and does
-/// not overflow `serve`'s 32 KB stack.
+/// they are not duplicated at each deeper level. The session path still nests
+/// one call deeper than the one-shot `oneshot_rmount` (a `find_or_open` between
+/// `session_rmount` and `client_connect`), which is why the EL0 stack is 40 KB,
+/// not 32 KB (`kernel/src/loader.rs`/`mmu.rs` `STACK_PAGES`): the one-shot path
+/// just fit 32 KB and this ran ~1-3 KB past it. Verified on the two-VM rig by
+/// `cbig`, and its overflow was caught by the guard first.
 #[allow(clippy::too_many_arguments)]
 fn session_rmount(mac: &[u8; 6], dst_mac: &[u8; 6], ip: [u8; 4], port: u16, uid: u32, verb: u64, sessions: &mut [Option<ClientSession>; MAX_CLIENT_SESSIONS], auth: &Auth, who: &[u8; ninep_abi::NP_NAME_LEN], expect_key: Option<[u8; clusterkeys::KEY_LEN]>, msg: &[u8], out: &mut [u8]) -> usize {
     let fail = |out: &mut [u8], st: u64| -> usize {
@@ -2320,7 +2324,7 @@ impl Drop for TcpConn {
 /// so these three sizes trade directly against netd's stack headroom.
 // A listener + a couple of concurrent accepted connections ("small fan-out").
 // Each DialConn carries its send+recv buffers and the whole array lives on
-// serve()'s guard-paged (32 KB) stack, so this is capped tight - 4 overflowed.
+// serve()'s guard-paged (40 KB) stack, so this is capped tight - 4 overflowed.
 const MAX_DIAL: usize = 3;
 /// Per-connection send buffer: bytes the client has queued (via a /data write)
 /// that are not yet sent-and-acked. One small request's worth (stop-and-wait).
@@ -5201,7 +5205,7 @@ fn set_prefix(c: &mut TcpConn, bytes: &[u8]) {
 /// database larger than the buffer would silently read as empty - which for
 /// `/etc/shadow` once meant every account, root included, locked out. The same
 /// trap is one buffer away here. Streaming also keeps netd's stack small: this
-/// is the task whose 32 KB has hit the guard page five times, so a 512-byte
+/// is the task whose 40 KB has hit the guard page five times, so a 512-byte
 /// chunk plus a 128-byte line beats a 2 KB whole-file buffer - in a frame that
 /// finishes before the request and response buffers go live.
 ///
