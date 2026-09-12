@@ -4494,6 +4494,19 @@ fn fid_verb_reply(msg: &[u8], out: &mut [u8; PREFIX_MAX], fids: &mut [SessionFid
         let Some(slot) = fids.iter().position(|f| f.fsd_fid == 0) else {
             return frame_reply(out, syscall_abi::FS_ERR_BUSY, &[]);
         };
+        // Read fsd's generation BEFORE the open, not after, and the ordering is
+        // deliberate against the race it looks like a bug for (review of #129):
+        // there is no atomic "open and report the generation", so whichever side
+        // the read lands, an fsd restart in the window is recorded wrong - and
+        // the two directions are not equally bad. Reading before means a restart
+        // between here and the open landing records the OLD gen against a fid on
+        // the new one, so a later op sees a mismatch and refuses a LIVE fid: the
+        // client re-opens, harmless. Reading after would record the NEW gen
+        // against a fid opened on the old, now-wiped fsd, so a later op sees a
+        // match and forwards a stale number fsd may have REISSUED - the exact
+        // aliasing this guard exists to stop. The guard must fail toward
+        // false-dead, never false-live. No restart (the real case): the gen is
+        // stable across both calls, so the recorded value is the open's.
         let gen = fsd_generation();
         let status = fsd_call(who, ninep_abi::NP_OPEN, tree, p0, fspath.len() as u64, fspath, &mut []);
         if status >= syscall_abi::FS_ERR_MIN {
