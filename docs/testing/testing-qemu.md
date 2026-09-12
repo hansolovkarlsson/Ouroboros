@@ -199,8 +199,13 @@ runs each end to end on a scratch file (`/PGATE.TXT`, `/PGATE2.TXT`,
 `/PGATE3.TXT`, `/PGATED`, removed at the end), plus the console arm (an
 `NP_WRITE` to `/dev/cons`, which prints on the guest console, and a read
 refused as no arm), the `/net` arm (`/net/ip` reads as an address), and on a
-session `NP_OPEN` of `/net/ip` and `/dev/cons` refused `FS_ERR_NO_SUCH_VERB`
-with a path verb still served after. `NP_CHMOD` answers `FS_ERR_NOT_SUPPORTED`
+session `NP_OPEN` of `/net/ip`, `/net/tcp/clone`, `/net/tcp` and `/dev/cons`
+refused `FS_ERR_NO_SUCH_VERB` with a path verb still served after. The two
+`/net/tcp` paths are there because the first fold answered them with a bare
+`FS_ERROR` and `FS_ERR_NOT_A_FILE` (the `/net` arm hands that subtree to the
+dial code before looking at the verb) while `/net/ip` was refused correctly,
+so the check passed and saw nothing; measured on that build before the fix
+(review of the step-6 PR). `NP_CHMOD` answers `FS_ERR_NOT_SUPPORTED`
 on FAT32 and 0 on ext2; either means the arm reached `fsd`, and the check says
 which it saw.
 

@@ -672,6 +672,27 @@ read is the failure mode.)
 > `netd`), and it means a wrong word can be invisible when the wrong number is
 > larger than the right one, so the gate's other ten are the ones that see it.
 
+> **The high review of the step-6 PR (2026-09-12): ten findings, seven acted
+> on, three recorded.** The one real regression: the fold let an `NP_OPEN` of
+> `/net/tcp/*` reach the dial code, which answered a bare `FS_ERROR` or
+> not-a-file with no log line, where the deleted function had refused every
+> non-`fsd` open as a verb with no arm; the path gate probed `/net/ip` only,
+> so it could not see it. Measured on the pre-fix export before fixing
+> (`/net/tcp/clone` → `FS_ERROR`, `/net/tcp` → `FS_ERR_NOT_A_FILE`), then
+> refused at the resolve point for every non-`fsd` target and the gate's open
+> check widened to those two paths. Structure, acted on because step 7 is the
+> next edit and would have walked into both: one `Shape` classifier replaces
+> the two predicates that spelled the fid-verb set separately, and the ops on
+> a fid are dispatched before any path is resolved so no tree or path is in
+> scope for their arms (the first fold gave them a placeholder pair a copied
+> `NP_WRITE_AT` arm could have used). On the gates: the read-to-EOF loop is
+> one function applied to both fetchers, so the path-based oracle is held to
+> the subject's standard (its status was not being checked against the bytes
+> delivered); `path-gate` sweeps its scratch names first; the open/stat/read_at
+> frames are built once each. Two stale claims fixed (`source-map.md` still
+> said `fsd` drops a fid on a uid mismatch; the co-tenant control's expected
+> count). **Recorded, not done:** the two items added to the list below.
+
 > **Fold `fid_verb_reply` into `build_9p_reply` as part of this step, not
 > before it (decided 2026-09-12, review of #128 item 9).** Step 5 left the
 > fid verbs in their own `fid_verb_reply`, which re-spells `build_9p_reply`'s
@@ -721,6 +742,20 @@ and after it, proving nothing either time — the caveat
   over-generic sentinel step 1 stopped using for verbs, one layer down. Worth
   its own small change; `scripts/np9p_server.py` mirrors it deliberately rather
   than diverging.
+- **`NP_PREAD` with a count of 0** (review of the step-6 PR): `fsd`'s
+  `want_len` rejects it with `FS_ERROR`, the export relays that, and the host
+  peer answers 0 for the same frame, while `ninep-abi` says status = bytes
+  read. No shipped client sends it (libc's `read()` loop never asks for 0),
+  and the divergence is `fsd`'s, not the export's. Settle it with the item
+  above, in `fsd`: a zero-count read answering 0 is the POSIX shape.
+- **`dial_file_op` touches `last_activity` before it looks at the verb**
+  (review of the step-6 PR): a refused op on `/net/tcp/N/data` still refreshes
+  the slot's idle timer, so a client retrying a refusal in a loop keeps a dial
+  slot from the reaper. Pre-existing in unchanged code; the review found it
+  because the first fold had opened a new way in (`NP_OPEN`, since closed).
+  The fix is to move the touch inside the two verb branches, and it wants a
+  rig that can watch a slot age out, which the session gate's reap check is
+  the shape of.
 - **`FID_PATH_MAX` (96)** — the export strips the mount prefix before relaying,
   so a remote path arrives *shorter*, not longer. Worth re-checking at Step 4
   rather than pre-emptively widening.
