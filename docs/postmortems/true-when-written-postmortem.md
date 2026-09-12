@@ -501,6 +501,25 @@ table was falsified by the 09-03 heartbeat commit (a different file); the
 The compiler saw strings, no test asserts a table, and each reviewer read a
 diff that did not contain the claim it invalidated.
 
+## The copy beside the copy (2026-09-12)
+
+The smallest instance yet, and the one that shows the shape survives being
+known. The `fsd` fid change of 2026-09-12 (#130) made a leaked fid reapable by
+task identity, which falsified a comment in `libc/src/file.c` saying a leaked
+fid was permanent. That comment was found and rewritten *in the same commit*,
+with the lesson above in mind. Six lines away, `libc/src/os.c` carried a
+one-sentence paraphrase of it ("a leaked one is unreapable once the task's slot
+is recycled"), and the commit left that one standing. The review caught it: two
+comments on the same fact, now contradicting each other, a reader of `_exit`
+following whichever one they opened first.
+
+The fix was not a third paraphrase. `os.c` now points at `__libc_close_all`'s
+comment, which carries the explanation once. That is the cheap half of *compute
+the property*: where a claim cannot be a check, keep it in one place and make
+every other mention a pointer, so the edit that falsifies it has one line to
+find. The `netd` comment that said `fsd` drops a fid on a uid mismatch was the
+same day's other copy, in another server, and went the same way.
+
 ## What actually worked
 
 Three things, none of them "be more careful".
