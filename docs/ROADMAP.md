@@ -1443,8 +1443,13 @@ would otherwise silently shrink into looking like nothing was ever found.
     "demux by stdout target" on all three criteria (stable: captured by the
     kernel, not inferred; safe: closes the class; not blocking: a generation
     is what a process id is). **Same disease, next to convert, each its own
-    change:** `fsd`'s fids (`Fid.owner` is a slot, and its own doc says so),
-    and the `/net/tcp` connection table (the item above). `ps`, `wait`,
+    change:** ~~`fsd`'s fids (`Fid.owner` is a slot, and its own doc says so)~~
+    **converted 2026-09-12**: `Fid.owner` is the `SENDER_TASK` identity, the
+    reaper frees by it (a recycled shell slot's leaks and a restarted `netd`'s
+    fids alike), and a uid mismatch is refused without dropping the fid;
+    `libc/cleak.c` is the check, and the fid gate's co-tenant check passes
+    with `netd`'s own per-user check removed. Still to convert:
+    the `/net/tcp` connection table (the item above). `ps`, `wait`,
     `kill` and `fg` still speak in slots on purpose; widen when something
     needs it. **The review's catch, fixed in the same branch:** a message with
     no identity (the kernel's health ping, a boot task before the boot slots

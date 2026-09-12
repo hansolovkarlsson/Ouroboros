@@ -556,7 +556,15 @@ namespace like every other verb; the console and `/net` refuse it, having no
 fid model here or locally. A fid opened by one user is refused `FS_ERR_PERM`
 to another on the same session *without* asking `fsd`, because `fsd` drops a
 fid whose caller's uid changed (a recycled slot, locally) and on a session that
-would let a co-tenant destroy a handle by naming it. `NP_PREAD`/`NP_PWRITE`
+would let a co-tenant destroy a handle by naming it. **The drop is gone the
+same day** (review items 10 and 11, their own PR): `fsd`'s `Fid.owner` is now
+the sender's packed task identity rather than its slot, the ownership test for
+all four fid verbs including `NP_CLUNK` is `(owner, owner_uid)`, a uid mismatch
+is refused and the fid kept, and the reaper frees by identity, so a restarted
+`netd`'s fids are reclaimed at the next full table instead of surviving the
+boot. `netd`'s own check stays as the layer that knows which client is asking;
+with it removed for one run the gate's co-tenant check still passes on `fsd`'s
+wall alone (measured). `NP_PREAD`/`NP_PWRITE`
 deliberately not yet: the handle lifecycle is worth proving before the data
 path rides on it.
 
