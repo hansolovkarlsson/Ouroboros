@@ -159,13 +159,16 @@ refused on B and still served on A; an old number dead on a fresh session;
 which the gate's product must exceed; the wire checker asserts it), the check
 that fails when closing a session does not clunk; the fifth open on a session
 `FS_ERR_BUSY`; a fid verb on a one-shot connection `FS_ERR_NO_SUCH_VERB`;
-another user refused `FS_ERR_PERM` while the owner keeps the fid; `NP_PREAD`
-still `FS_ERR_NO_SUCH_VERB` (step 6 flips that line). About twenty seconds
-after boot. Against `main` before step 5 it fails 8 of 10 at the first open.
+another user refused `FS_ERR_PERM` while the owner keeps the fid; another
+user's `NP_CLUNK` refused `FS_ERR_PERM` while the owner still holds the fid and
+then closes it (added by the review of #130: the freeing verb's ownership test
+had no observer at all); `NP_PREAD` still `FS_ERR_NO_SUCH_VERB` (step 6 flips
+that line). About twenty seconds after boot. Against `main` before step 5 it
+fails 8 of 10 at the first open (the clunk check did not exist yet).
 
 ```sh
 scripts/run-guest.sh -- python3 scripts/np9p_client.py localhost 5640 fid-gate
-# expected: 10 PASS, "0 check(s) failed", then the two run-guest lines above
+# expected: 11 PASS, "0 check(s) failed", then the two run-guest lines above
 ```
 
 **The fid reaper check** (2026-09-12, the `fsd`-side follow-up to step 5):
@@ -196,12 +199,18 @@ mechanism is what reclaims a restarted `netd`'s fids (a supervisor restart is a
 new generation in the same protected slot); that case is not exercised by a
 rig, and rides on the identity comparison this run does exercise.
 
-**The second control for the same change** is the fid gate's co-tenant check
-with `netd`'s own per-user test removed (`fid_verb_reply`, the
+**The second control for the same change** is the fid gate's two co-tenant
+checks with `netd`'s own per-user test removed (`fid_verb_reply`, the
 `opener.uid != proxy.uid` refusal). Before the change that mutation made `fsd`
-drop the owner's fid, and the check failed; now `fsd` refuses the co-tenant
-`FS_ERR_PERM` and keeps the fid, and the gate stays 10 of 10. Revert the
-mutation with `git checkout` afterwards.
+drop the owner's fid, and the fstat check failed; now `fsd` refuses the
+co-tenant `FS_ERR_PERM` and keeps the fid, and the gate stays 11 of 11 on
+`fsd`'s wall alone. The clunk check is the one that observes the freeing verb:
+with the same `netd` mutation AND `fsd`'s `handle_fid_op` made to skip the uid
+test for `NP_CLUNK`, it fails (the clunk as `user` answers 0 and the owner's
+next fstat `FS_ERROR`) while the fstat check still passes, so it can fail, and
+only for the reason it exists. Revert both mutations with `git checkout`
+afterwards, and COMMIT FIRST: a checkout restores the committed file, and on
+2026-09-12 it took uncommitted fixes with it.
 
 **Use `run-guest.sh`, not `drive-qemu.py`, for any host-side client that runs
 longer than a shell step.** `drive-qemu.py` types its steps, lingers four

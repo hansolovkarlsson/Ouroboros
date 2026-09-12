@@ -563,8 +563,11 @@ all four fid verbs including `NP_CLUNK` is `(owner, owner_uid)`, a uid mismatch
 is refused and the fid kept, and the reaper frees by identity, so a restarted
 `netd`'s fids are reclaimed at the next full table instead of surviving the
 boot. `netd`'s own check stays as the layer that knows which client is asking;
-with it removed for one run the gate's co-tenant check still passes on `fsd`'s
-wall alone (measured). `NP_PREAD`/`NP_PWRITE`
+with it removed for one run the gate's co-tenant checks still pass on `fsd`'s
+wall alone (measured). The review of that PR found the clunk half of the wall
+had no observer, so the spec now states it (`NP_CLUNK`'s doc), the host peer
+binds a fid to its user, and the gate's eleventh check is another user's clunk
+refused with the owner still holding the fid. `NP_PREAD`/`NP_PWRITE`
 deliberately not yet: the handle lifecycle is worth proving before the data
 path rides on it.
 
