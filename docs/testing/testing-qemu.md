@@ -155,8 +155,9 @@ controls for the three fid verbs the export serves on a session, one PASS/FAIL
 line each: open→fstat→clunk with the `fstat` record byte-equal to `NP_STAT`'s;
 the clunked fid refused; a never-opened fid refused; a fid from session A
 refused on B and still served on A; an old number dead on a fresh session;
-12 opens over three closed sessions against `fsd`'s 8-slot table (the check
-that fails when closing a session does not clunk); the fifth open on a session
+12 opens over three closed sessions against `fsd`'s table (`ninep_abi::MAX_FIDS`,
+which the gate's product must exceed; the wire checker asserts it), the check
+that fails when closing a session does not clunk; the fifth open on a session
 `FS_ERR_BUSY`; a fid verb on a one-shot connection `FS_ERR_NO_SUCH_VERB`;
 another user refused `FS_ERR_PERM` while the owner keeps the fid; `NP_PREAD`
 still `FS_ERR_NO_SUCH_VERB` (step 6 flips that line). About twenty seconds

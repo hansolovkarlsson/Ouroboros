@@ -247,6 +247,11 @@ CHECKED = [
     "OPEN_WRITE",
     "OPEN_CREATE",
     "OPEN_TRUNC",
+    # fsd's fid budget, ninep-abi's since 2026-09-12 (review of #128). The
+    # server mirrors it so exhaustion behaves the same there, and the client's
+    # fid gate must open MORE than it across closed sessions for its one
+    # fallible check to be able to fail - see check_fid_gate_budget.
+    "MAX_FIDS",
 ]
 
 # NOT checked: NP_MAC_LEN. Neither peer names it - both write the literal 32 at
@@ -302,7 +307,7 @@ PEER_BASELINE = {
     # reduced count was recorded as expected. Both now use the shared names; the
     # floor rises with them, or the rename could be undone without this
     # noticing.
-    "np9p_server.py": 30,  # counted 2026-09-12: 26 on 09-07 with the verbs, then the four OPEN_* flags pinned by step 5
+    "np9p_server.py": 31,  # counted 2026-09-12: 26 on 09-07 with the verbs, then the four OPEN_* flags and MAX_FIDS pinned by step 5
     # The C header. It spells far more of the ABI than either Python peer; this
     # floor covers the names CHECKED lists today.
     # Raised from 3 when step 3b's constants were pinned. The script's own
@@ -374,6 +379,34 @@ def check_dev_peer_labels(problems):
             problems.append(
                 f"{peer}: dev seed label(s) spelled outside DEV_PEER_LABELS: "
                 f"{', '.join(stray)}")
+
+
+def check_fid_gate_budget(problems, rust):
+    """The fid gate's clunk-on-close check can fail only if the gate opens MORE
+    fids across closed sessions than fsd's table holds: ROUNDS * PER_SESSION
+    > MAX_FIDS. The three numbers are spelled in two files by two languages,
+    and the first version of the gate quoted "12 > 8" in prose in five places
+    and computed it nowhere - so raising MAX_FIDS to 16 would have left a
+    check that passes with the clunk deleted while every copy kept saying 8
+    (review of #128). Asserted here, where MAX_FIDS is already parsed."""
+    src = open(os.path.join(HERE, "np9p_client.py")).read()
+    vals = {}
+    for name in ("EXPECTED_SESSION_FIDS", "FID_BUDGET_ROUNDS"):
+        m = re.search(rf"^{name} = (\d+)$", src, re.M)
+        if not m:
+            problems.append(f"np9p_client.py: {name} not found (renamed?)")
+            return
+        vals[name] = int(m.group(1))
+    if "MAX_FIDS" not in rust:
+        problems.append("MAX_FIDS: not found in ninep-abi (renamed?)")
+        return
+    product = vals["FID_BUDGET_ROUNDS"] * vals["EXPECTED_SESSION_FIDS"]
+    if product <= rust["MAX_FIDS"]:
+        problems.append(
+            f"the fid gate opens {vals['FID_BUDGET_ROUNDS']} x "
+            f"{vals['EXPECTED_SESSION_FIDS']} = {product} fids across closed "
+            f"sessions, not more than MAX_FIDS = {rust['MAX_FIDS']}: its "
+            "clunk-on-close check could no longer fail - raise FID_BUDGET_ROUNDS")
 
 
 def main():
@@ -466,6 +499,7 @@ def main():
         problems.append(f"only {compared} constant(s) compared, expected at least {len(CHECKED)}")
 
     check_dev_peer_labels(problems)
+    check_fid_gate_budget(problems, rust)
 
     if problems:
         print("check-wire-constants: DISAGREEMENT")
@@ -477,7 +511,7 @@ def main():
     # same restatement-goes-stale shape this file warns about twice already.
     print(f"check-wire-constants: {compared} constant(s) agree across Rust and "
           f"{len(peers)} peer(s) ({', '.join(sorted(peers))}), "
-          "and the dev peer labels agree")
+          "and the dev peer labels agree, and the fid gate's budget exceeds MAX_FIDS")
     return 0
 
 

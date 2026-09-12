@@ -262,8 +262,10 @@ const MAX_MOUNTS: usize = ninep_abi::NS_PROC_TREE as usize + 1;
 /// How many files can be open at once, across all clients. Small and fixed - the
 /// table lives on `main`'s stack frame (fsd keeps no static state), and fsd's
 /// stack is guard-page-bounded, so this stays modest. If it fills, `NP_OPEN`
-/// first reaps fids whose owner task has died (`TASK_STATE`), then fails.
-const MAX_FIDS: usize = 8;
+/// first reaps fids whose owner task has died (`TASK_STATE`), then fails. The
+/// value is `ninep-abi`'s since 2026-09-12: it is a budget the export's
+/// sessions share and the host peers observe, so it is pinned there.
+const MAX_FIDS: usize = ninep_abi::MAX_FIDS;
 /// Longest path a fid remembers (bounded, no heap). Enough for the paths a C
 /// program opens on the boot disk; a longer path fails `NP_OPEN`.
 const FID_PATH_MAX: usize = 96;

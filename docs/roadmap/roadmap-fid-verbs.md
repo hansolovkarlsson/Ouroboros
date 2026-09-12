@@ -570,8 +570,10 @@ holds it (and A's own `fstat` still served, so the refusal is about the
 session and not the fid); closing A holding a fid leaves the number dead on a
 fresh session. That third one a per-connection table passes *whether or not*
 `fsd` was told, so the gate adds the half that can fail: **12 opens across
-three closed sessions against `fsd`'s 8-slot table**, which succeed only if
-each close clunked. · **Three more, pinning the step's boundaries:** the fifth
+three closed sessions against `fsd`'s table** (`ninep_abi::MAX_FIDS`, 8 that
+day; the wire checker asserts the gate's product exceeds it on every
+`make test`, since a raised table would otherwise leave this check passing
+with the clunk deleted), which succeed only if each close clunked. · **Three more, pinning the step's boundaries:** the fifth
 open on a session is `FS_ERR_BUSY`; a fid verb on a one-shot connection is
 `FS_ERR_NO_SUCH_VERB`; another user on the session is `FS_ERR_PERM` and the
 owner keeps the fid; and `NP_PREAD` on a session answers `FS_ERR_NO_SUCH_VERB`

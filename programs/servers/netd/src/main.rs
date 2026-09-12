@@ -1840,7 +1840,7 @@ const CPU_NONE: u64 = 0;
 /// `serve`'s guard-paged stack `MAX_CONNS` times over. Four covers a C
 /// program's working set of open files; the fifth open on a session is refused
 /// `FS_ERR_BUSY`, the answer the session budget gives, never by evicting one.
-/// fsd's own table (`MAX_FIDS`, 8) is shared by every local C program and every
+/// fsd's own table (`ninep_abi::MAX_FIDS`) is shared by every local C program and every
 /// session, so three full sessions can starve a local open: that arrives as
 /// fsd's `FS_ERROR`, relayed as-is, and it is on the ledger.
 const SESSION_FIDS: usize = 4;
