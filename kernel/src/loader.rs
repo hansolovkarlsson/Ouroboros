@@ -128,7 +128,7 @@ const CONFIG_PATH: &str = "\\EFI\\ORBS\\INIT.CFG";
 // response-prefix buffer dominating), and a client op (ping/resolve/fetch)
 // nests its own ~5KB TCP/DNS buffers on top of that - which overflowed 24KB
 // (caught, again, by the guard). All regions grow 8KB; RAM is ample.
-const STACK_PAGES: u64 = 8;
+const STACK_PAGES: u64 = 10;
 /// One inaccessible guard page between the code and the stack. The stack
 /// grows down from the top of the region; an overflow past the 8KB stack
 /// lands in this page, which `mmu.rs` maps EL1-only, taking a clean EL0

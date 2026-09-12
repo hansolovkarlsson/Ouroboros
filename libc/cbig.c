@@ -72,12 +72,12 @@ int main(void) {
     int longer = ln > 512;
     int same = (ln == rn) && (memcmp(local, remote, (size_t)ln) == 0);
     if (same && longer) {
-        printf("cbig: %ld bytes over the remote mount match the local copy "
-               "(%ld > one chunk)\r\n", rn, ln);
+        printf("cbig: %d bytes over the remote mount match the local copy "
+               "(%d > one chunk)\r\n", (int)rn, (int)ln);
         return 0;
     }
-    printf("cbig: MISMATCH - local %ld bytes, remote %ld bytes, %s, %s\r\n",
-           ln, rn, same ? "equal" : "DIFFER",
+    printf("cbig: MISMATCH - local %d bytes, remote %d bytes, %s, %s\r\n",
+           (int)ln, (int)rn, same ? "equal" : "DIFFER",
            longer ? "longer than a chunk" : "NOT longer than a chunk");
     return 1;
 }
