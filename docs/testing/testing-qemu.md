@@ -250,13 +250,14 @@ mechanism is what reclaims a restarted `netd`'s fids (a supervisor restart is a
 new generation in the same protected slot); that case is not exercised by a
 rig, and rides on the identity comparison this run does exercise.
 
-**The second control for the same change** is the fid gate's two co-tenant
-checks with `netd`'s own per-user test removed (`session_slot`, the
-`opener.uid != proxy.uid` refusal; it was in `fid_verb_reply` until step 6
-folded that function away). Before the change that mutation made `fsd`
-drop the owner's fid, and the fstat check failed; now `fsd` refuses the
-co-tenant `FS_ERR_PERM` and keeps the fid, and the gate stays 11 of 11 on
-`fsd`'s wall alone. The clunk check is the one that observes the freeing verb:
+**The second control for the same change** is the fid gate's three co-tenant
+checks (fstat, clunk, and since step 6 pread) with `netd`'s own per-user test
+removed (`session_slot`, the `opener.uid != proxy.uid` refusal; it was in
+`fid_verb_reply` until step 6 folded that function away). Before the change
+that mutation made `fsd` drop the owner's fid, and the fstat check failed; now
+`fsd` refuses the co-tenant `FS_ERR_PERM` and keeps the fid, and the gate stays
+14 of 14 on `fsd`'s wall alone (re-measured after step 6; it was 11 of 11 at
+step 5). The clunk check is the one that observes the freeing verb:
 with the same `netd` mutation AND `fsd`'s `handle_fid_op` made to skip the uid
 test for `NP_CLUNK`, it fails (the clunk as `user` answers 0 and the owner's
 next fstat `FS_ERROR`) while the fstat check still passes, so it can fail, and
