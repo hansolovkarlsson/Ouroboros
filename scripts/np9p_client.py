@@ -1253,7 +1253,7 @@ def do_path_gate(host, port):
 
     f1, f2, f3, d1 = "/PGATE.TXT", "/PGATE2.TXT", "/PGATE3.TXT", "/PGATED"
     # 300 bytes: past any small-buffer path, well inside one inline write.
-    content = b"".join(f"path-gate line {i:03d}\n".encode() for i in range(15))
+    content = b"".join(f"path-gate line {i:04d}\n".encode() for i in range(15))
     assert len(content) == 300, len(content)
 
     def run(name, fn):
