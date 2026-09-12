@@ -14,7 +14,8 @@ Usage:
     python3 scripts/np9p_client.py <host> <port> noverb  <path> [verb]
     python3 scripts/np9p_client.py <host> <port> session <path>          # readdir+stat+read on ONE connection
     python3 scripts/np9p_client.py <host> <port> session-gate [hold_s]  # the step-4 checks, PASS/FAIL each
-    python3 scripts/np9p_client.py <host> <port> fid-gate [path]       # the step-5 checks: open/fstat/clunk on a session
+    python3 scripts/np9p_client.py <host> <port> fid-gate [path] [data_path]  # the step-5/6 checks: open/fstat/clunk, and pread to EOF, on a session
+    python3 scripts/np9p_client.py <host> <port> path-gate              # the path verbs end to end on a scratch file, plus the console and /net arms
 
 Every request is SIGNED with a per-machine Ed25519 key: the auth header is
 `[magic:8][nonce:16][name:32][pubkey:32][sig:64]` in front of the NP message,
@@ -32,7 +33,7 @@ e.g. after `make run-image-9p`:
     python3 scripts/np9p_client.py localhost 5640 readdir / --sign=nobody      # -> refused (unauthorized key)
     python3 scripts/np9p_client.py localhost 5640 readdir / --legacy-mac       # -> refused (retired format)
     python3 scripts/np9p_client.py localhost 5640 read /etc/shadow --user user # -> refused (permissions)
-    python3 scripts/np9p_client.py localhost 5640 noverb /                     # -> FS_ERR_NO_SUCH_VERB (NP_PREAD)
+    python3 scripts/np9p_client.py localhost 5640 noverb /                     # -> FS_ERR_NO_SUCH_VERB (NP_PWRITE)
     python3 scripts/np9p_client.py localhost 5640 noverb / 0x10c               # -> served: NP_STAT (the control)
 """
 import hashlib
@@ -53,11 +54,26 @@ STAT_INFO_LEN = 27   # ninep-abi STAT_INFO_LEN; the NP_STAT result record
 NP_WRITE_FILE = NP_BASE + 11
 NP_WRITE_AT = NP_BASE + 4
 NP_READ_AT = NP_BASE + 10
+# The rest of the path verbs, spelled for `path-gate` (step 6 of
+# docs/roadmap/roadmap-fid-verbs.md folded the fid verbs into the export's one
+# dispatch, so every path verb now runs through a preamble that fold touched).
+NP_WRITE = NP_BASE + 3
+NP_TOUCH = NP_BASE + 5
+NP_MKDIR = NP_BASE + 6
+NP_RMDIR = NP_BASE + 7
+NP_RM = NP_BASE + 8
+NP_CHMOD = NP_BASE + 13
 NP_OPEN = NP_BASE + 15  # a0 = OPEN_* flags, a1 = path length - the REVERSE of every other path verb
-NP_PREAD = NP_BASE + 16  # a0 = fid: no path at all. Not served by the guest export yet (step 6)
+NP_PREAD = NP_BASE + 16  # a0 = fid, a1 = offset, a2 = count: no path at all. Served on a session since step 6 (2026-09-12)
+NP_PWRITE = NP_BASE + 17  # a0 = fid: no path at all. Not served by the guest export yet (step 7)
 NP_FSTAT = NP_BASE + 18  # a0 = fid
 NP_CLUNK = NP_BASE + 19  # a0 = fid
 OPEN_READ = 1  # ninep-abi OPEN_READ
+# The most data one remote read carries: what a client asks per NP_PREAD and
+# what the export caps a reply at. The fid gate's data check reads a file
+# LONGER than this through a fid, so the rising offset is exercised and not
+# just the first chunk.
+NP_REMOTE_CHUNK = 512
 NP_SESSION = NP_BASE + 0x21  # open a session on this connection (Decision 3, 2026-09-07)
 # NOT syscall-abi's FS_ERR_MIN, and no longer named as if it were. This is a
 # deliberately LOOSE host-side floor - 'anything in the top 64 is an error' -
@@ -217,6 +233,7 @@ def peer_key():
 # confidently wrong name for the very status it exists to make honest.
 FS_ERROR = (1 << 64) - 1
 FS_ERR_READ_ONLY = (1 << 64) - 1 - 29  # u64::MAX - 29
+FS_ERR_NOT_SUPPORTED = (1 << 64) - 1 - 31  # u64::MAX - 31: this filesystem cannot model it (chmod on FAT32)
 FS_ERR_PERM = (1 << 64) - 1 - 32  # u64::MAX - 32
 FS_ERR_NO_SUCH_VERB = (1 << 64) - 1 - 39  # u64::MAX - 39: no arm for that verb
 FS_ERR_BUSY = (1 << 64) - 1 - 40  # u64::MAX - 40: the export's session budget is spent
@@ -226,6 +243,7 @@ STATUS_NAMES = {
     FS_ERR_NOT_FOUND: "FS_ERR_NOT_FOUND",
     FS_ERR_READ_ONLY: "FS_ERR_READ_ONLY",
     FS_ERR_AUTH: "FS_ERR_AUTH",
+    FS_ERR_NOT_SUPPORTED: "FS_ERR_NOT_SUPPORTED",
     FS_ERR_PERM: "FS_ERR_PERM",
     FS_ERR_NO_SUCH_VERB: "FS_ERR_NO_SUCH_VERB",
     FS_ERR_BUSY: "FS_ERR_BUSY",
@@ -243,6 +261,30 @@ def build_frame(verb, tree, params, payload):
     for i in range(4):
         hdr += struct.pack("<Q", params[i] if i < len(params) else 0)
     return hdr + payload
+
+
+def served(status):
+    """Whether a status is an answer rather than a refusal: below the error
+    band (which REPLY_UNVERIFIED sits above, so it reads as a refusal too)."""
+    return status < ERR_BAND_FLOOR
+
+
+# The request shapes the gates spell more than once, built in ONE place each.
+# NP_OPEN's word order is the reverse of every other path verb's (a0 = flags,
+# a1 = path length), and the host peer's self-test caught that swapped once
+# already; a gate that opened with the words swapped would report the export
+# broken for the wrong reason. `pb` is the path as bytes.
+def open_frame(pb, flags=OPEN_READ):
+    return build_frame(NP_OPEN, 0, [flags, len(pb)], pb)
+
+
+def stat_frame(pb):
+    return build_frame(NP_STAT, 0, [len(pb)], pb)
+
+
+def read_at_frame(pb, offset, want):
+    # read/read_at take the result window in a2, the offset in a1.
+    return build_frame(NP_READ_AT, 0, [len(pb), offset, want], pb)
 
 
 def signed_frame(np_msg, seed, user=None):
@@ -493,7 +535,7 @@ def do_session(host, port, path):
     pb = path.encode()
     st, data = s.op(build_frame(NP_READDIR, 0, [len(pb), 4096], pb))
     print(f"[same connection] readdir -> {status_name(st) if st >= ERR_BAND_FLOOR else f'{len(data)} bytes'}")
-    st, data = s.op(build_frame(NP_STAT, 0, [len(pb)], pb))
+    st, data = s.op(stat_frame(pb))
     print(f"[same connection] stat    -> {status_name(st) if st >= ERR_BAND_FLOOR else f'record of {len(data)} bytes'}")
     st, data = s.op(build_frame(NP_READ, 0, [len(pb), 0, 64], pb))
     print(f"[same connection] read    -> {status_name(st) if st >= ERR_BAND_FLOOR else data[:64]!r}")
@@ -531,9 +573,6 @@ def do_session_gate(host, port, hold_s=10):
             failed += 1
 
     root = build_frame(NP_READDIR, 0, [1, 4096], b"/")
-
-    def served(status):
-        return status < ERR_BAND_FLOOR
 
     # 1. idle hold
     s = Session(host, port, timeout=hold_s + 20)
@@ -853,9 +892,9 @@ EXPECTED_SESSION_FIDS = 4
 FID_BUDGET_ROUNDS = 3
 
 
-def do_fid_gate(host, port, path):
-    """The step-5 fid gate (docs/roadmap/roadmap-fid-verbs.md): NP_OPEN, NP_FSTAT
-    and NP_CLUNK over one session against a live export, one PASS/FAIL line
+def do_fid_gate(host, port, path, data_path):
+    """The fid gate (docs/roadmap/roadmap-fid-verbs.md steps 5 and 6): NP_OPEN,
+    NP_FSTAT, NP_CLUNK and NP_PREAD over one session against a live export, one PASS/FAIL line
     per check, exit status the number that failed:
 
       1. open -> fstat -> clunk on one session, the fstat record byte-equal to
@@ -872,12 +911,21 @@ def do_fid_gate(host, port, path):
          FS_ERR_NO_SUCH_VERB ("not on this connection", the mirror of NP_RUN on
          a session); a fid opened as root refused FS_ERR_PERM to another user
          on the same session, and still served to root after (fsd was not
-         asked, so it did not drop it); and NP_PREAD refused FS_ERR_NO_SUCH_VERB
-         with the session still in phase - step 6 changes that line, on
-         purpose.
+         asked, so it did not drop it);
+      4. step 6, the data path: NP_PREAD on a fid the session never opened
+         refused; NP_PREAD as another user refused FS_ERR_PERM with the
+         owner's next read still served; `data_path` read TO EOF through a fid
+         in NP_REMOTE_CHUNK pieces and byte-compared against the same file
+         read path-based (NP_READ_AT over one-shot connections: two
+         independent paths to the same bytes), and the file must be LONGER
+         than one chunk or the check FAILS - a same-length compare that
+         passes on a short read is the failure mode, and a file that fits one
+         chunk cannot show it; then EOF answered 0 and the session still in
+         phase.
 
     Against an export that predates step 5 every check fails at its first open
-    with FS_ERR_NO_SUCH_VERB.
+    with FS_ERR_NO_SUCH_VERB; against step 5's, the four step-6 checks fail
+    with NP_PREAD refused the same way.
     """
     import time
     failed = 0
@@ -888,18 +936,18 @@ def do_fid_gate(host, port, path):
         if not ok:
             failed += 1
 
-    def served(status):
-        return status < ERR_BAND_FLOOR
-
     pb = path.encode()
     root = build_frame(NP_READDIR, 0, [1, 4096], b"/")
-    open_r = build_frame(NP_OPEN, 0, [OPEN_READ, len(pb)], pb)
+    open_r = open_frame(pb)
 
     def fstat(fid):
         return build_frame(NP_FSTAT, 0, [fid], b"")
 
     def clunk(fid):
         return build_frame(NP_CLUNK, 0, [fid], b"")
+
+    def pread(fid, offset, count):
+        return build_frame(NP_PREAD, 0, [fid, offset, count], b"")
 
     def session():
         """A session, or None with the refusal printed."""
@@ -928,7 +976,7 @@ def do_fid_gate(host, port, path):
         if served(st_open):
             fid = st_open
             st_f, rec_f = a.op(fstat(fid))
-            st_s, rec_s = a.op(build_frame(NP_STAT, 0, [len(pb)], pb))
+            st_s, rec_s = a.op(stat_frame(pb))
             st_c, _ = a.op(clunk(fid))
             ok = (st_f == STAT_INFO_LEN and st_s == STAT_INFO_LEN and rec_f == rec_s
                   and st_c == 0)
@@ -1032,7 +1080,9 @@ def do_fid_gate(host, port, path):
     # 3. the boundaries.
     try:
         st, _ = one_op(host, port, open_r)
-        ok, detail = st == FS_ERR_NO_SUCH_VERB, f"NP_OPEN on a one-shot connection -> {status_name(st)}"
+        st_p, _ = one_op(host, port, pread(3, 0, 16))
+        ok = st == FS_ERR_NO_SUCH_VERB and st_p == FS_ERR_NO_SUCH_VERB
+        detail = f"on a one-shot connection: NP_OPEN -> {status_name(st)}, NP_PREAD -> {status_name(st_p)}"
     except (RuntimeError, OSError) as exc:
         ok, detail = False, f"no reply ({exc.__class__.__name__})"
     check("a fid verb on a one-shot connection is refused FS_ERR_NO_SUCH_VERB", ok, detail)
@@ -1065,21 +1115,284 @@ def do_fid_gate(host, port, path):
     except (RuntimeError, OSError) as exc:
         ok, detail = False, f"{exc}"
     check("another user's clunk is refused and the owner still holds the fid, then closes it", ok, detail)
+
+    # 4. step 6: the data path. Session `d` is open and holds nothing (its fid
+    # was clunked above), so `never` is a number it could not have filled.
     try:
         if d is None:
             raise RuntimeError("no session")
-        st_p, _ = d.op(build_frame(NP_PREAD, 0, [3, 0, 16], b""))
-        st_after, _ = d.op(root)
-        ok = st_p == FS_ERR_NO_SUCH_VERB and served(st_after)
-        detail = f"pread -> {status_name(st_p)}, then readdir -> {'served' if served(st_after) else status_name(st_after)}"
+        st, _ = d.op(pread(never, 0, NP_REMOTE_CHUNK))
+        ok, detail = st == FS_ERROR, f"pread of never-opened fid {never} -> {status_name(st)}"
+    except (RuntimeError, OSError) as exc:
+        ok, detail = False, f"session lost ({exc.__class__.__name__})"
+    check("a pread of a fid the session never opened is refused", ok, detail)
+    db = data_path.encode()
+    open_data = open_frame(db)
+    data_fid = None
+    try:
+        if d is None:
+            raise RuntimeError("no session")
+        st_open, _ = d.op(open_data)
+        if not served(st_open):
+            raise RuntimeError(f"open {data_path} -> {status_name(st_open)}")
+        data_fid = st_open
+        st_u, _ = d.op(pread(data_fid, 0, NP_REMOTE_CHUNK), user=b"user")
+        st_r, chunk_r = d.op(pread(data_fid, 0, NP_REMOTE_CHUNK))
+        ok = st_u == FS_ERR_PERM and served(st_r) and st_r == len(chunk_r) and st_r > 0
+        detail = (f"fid {data_fid} opened as root: pread as user -> {status_name(st_u)}, "
+                  f"then as root -> {status_name(st_r) if not served(st_r) else f'{st_r} bytes'}")
     except (RuntimeError, OSError) as exc:
         ok, detail = False, f"{exc}"
-    check("NP_PREAD is refused FS_ERR_NO_SUCH_VERB (step 6) and the session stays in phase", ok, detail)
+    check("another user's pread is refused FS_ERR_PERM, and the owner's next pread is served", ok, detail)
+    # The file to EOF, twice, through ONE loop applied to two fetchers: rising
+    # offsets, one chunk per request, until the export answers 0, with the
+    # status checked against the bytes delivered on BOTH sides (the first
+    # version checked it on the fid side only, so the oracle was held to a
+    # looser standard than the subject, found by review). A short read is
+    # continued from, not taken as EOF: it is legal, and a control that
+    # shortens every chunk by one must still deliver the whole file. Bounded,
+    # so a file that never ends the loop fails the check instead of hanging
+    # it.
+    MAX_CHUNKS = 64
+
+    def read_to_eof(fetch, what):
+        """(bytes, reason, saw_eof): `fetch(offset)` -> (status, chunk)."""
+        got = b""
+        try:
+            for _ in range(MAX_CHUNKS):
+                st, chunk = fetch(len(got))
+                if not served(st):
+                    return got, f"{what} at {len(got)} -> {status_name(st)}", False
+                if st != len(chunk):
+                    return got, f"{what} at {len(got)}: status {st} != {len(chunk)} bytes delivered", False
+                if st == 0:
+                    return got, "", True
+                got += chunk
+        except (RuntimeError, OSError) as exc:
+            return got, f"{what}: no reply ({exc.__class__.__name__})", False
+        return got, f"{what}: no EOF within {MAX_CHUNKS} chunks - pick a smaller data_path", False
+
+    if d is not None and data_fid is not None:
+        via_fid, stopped, saw_eof = read_to_eof(lambda off: d.op(pread(data_fid, off, NP_REMOTE_CHUNK)), "pread")
+    else:
+        via_fid, stopped, saw_eof = b"", "no data fid", False
+    # The same file path-based, over fresh one-shot connections: the export's
+    # NP_READ_AT arm, fsd's grant-bridged read, nothing shared with the fid path
+    # past fsd's filesystem code.
+    via_path, stopped_path, _ = read_to_eof(lambda off: one_op(host, port, read_at_frame(db, off, NP_REMOTE_CHUNK)), "read_at")
+    stopped = stopped or stopped_path
+    ok = (not stopped and via_fid == via_path and len(via_fid) > NP_REMOTE_CHUNK)
+    detail = (f"{data_path}: {len(via_fid)} bytes through the fid, {len(via_path)} path-based, "
+              f"{'equal' if via_fid == via_path else 'DIFFER'}, "
+              f"{'longer' if len(via_fid) > NP_REMOTE_CHUNK else 'NOT longer'} than one chunk ({NP_REMOTE_CHUNK})"
+              + (f" ({stopped})" if stopped else ""))
+    check("a file longer than one chunk read to EOF through a fid equals the same file read path-based", ok, detail)
+    try:
+        if d is None or data_fid is None:
+            raise RuntimeError("no data fid")
+        st_c, _ = d.op(clunk(data_fid))
+        st_after, _ = d.op(root)
+        ok = saw_eof and st_c == 0 and served(st_after)
+        detail = (f"EOF -> {'0' if saw_eof else 'never seen'}, clunk -> {status_name(st_c)}, "
+                  f"then readdir -> {'served' if served(st_after) else status_name(st_after)}")
+    except (RuntimeError, OSError) as exc:
+        ok, detail = False, f"{exc}"
+    check("EOF answers 0, the data fid clunks, and the session stays in phase", ok, detail)
     if d is not None:
         d.close()
     print(f"fid-gate: {failed} check(s) failed", flush=True)
     return failed
 
+
+
+def do_path_gate(host, port):
+    """The path-verb gate (step 6 of docs/roadmap/roadmap-fid-verbs.md): every
+    path verb the export serves, end to end on a scratch file, one PASS/FAIL
+    line each. It exists because step 6 folded the fid verbs into the export's
+    ONE dispatch, and the fold rewrote the preamble every path verb runs
+    through (the header decode, which request word carries the path length,
+    the namespace resolution and the console / /net / remote refusals). The
+    fid gate covers NP_OPEN/FSTAT/CLUNK/PREAD, readdir and stat; nothing
+    covered NP_WRITE_FILE, NP_READ_AT, NP_WRITE_AT, NP_MV, NP_CHMOD, NP_TOUCH,
+    NP_RM, NP_MKDIR, NP_RMDIR, or the console and /net arms, so a fold that
+    broke any of them would have measured green.
+
+    Each request is its own one-shot connection (the way these verbs have
+    always been served), except the last check, which needs a session: an
+    NP_OPEN of /net/ip and of /dev/cons must be refused FS_ERR_NO_SUCH_VERB
+    (neither target has a fid model), and a path verb must still be served on
+    the same session after.
+
+    Writes /PGATE.TXT, /PGATE2.TXT, /PGATE3.TXT and /PGATED on the export's
+    disk and removes them at the end. NP_CHMOD answers FS_ERR_NOT_SUPPORTED on
+    FAT32 (no mode to set) and 0 on ext2; both mean the arm reached fsd, and
+    either is accepted - FS_ERROR or FS_ERR_NO_SUCH_VERB is not.
+
+    Shown failing by mutating the export's path-word selection (every path
+    verb then reads its path length from the wrong word).
+    """
+    failed = 0
+
+    def check(name, ok, detail):
+        nonlocal failed
+        print(f"[{'PASS' if ok else 'FAIL'}] {name}: {detail}", flush=True)
+        if not ok:
+            failed += 1
+
+    def op(np_msg):
+        return one_op(host, port, np_msg)
+
+    def path_op(verb, path, a1=0, a2=0, data=b""):
+        pb = path.encode()
+        return op(build_frame(verb, 0, [len(pb), a1, a2], pb + data))
+
+    def read_at(path, offset, want):
+        return op(read_at_frame(path.encode(), offset, want))
+
+    def stat(path):
+        return op(stat_frame(path.encode()))
+
+    def stat_size(path):
+        st, rec = stat(path)
+        if st != STAT_INFO_LEN or len(rec) < STAT_INFO_LEN:
+            return None
+        return int.from_bytes(rec[0:8], "little")
+
+    f1, f2, f3, d1 = "/PGATE.TXT", "/PGATE2.TXT", "/PGATE3.TXT", "/PGATED"
+    # 300 bytes: past any small-buffer path, well inside one inline write.
+    content = b"".join(f"path-gate line {i:04d}\n".encode() for i in range(15))
+    assert len(content) == 300, len(content)
+    # A run that died mid-way (a dropped connection, a guest killed under it)
+    # leaves its scratch names on the disk, and the next run then fails on a
+    # leftover rather than on the fold. Sweep first, statuses ignored: on a
+    # clean disk every one of these is a not-found. Not try/finally, which
+    # cannot run after the connection that would do the removing is gone.
+    for scratch in (f1, f2, f3):
+        try:
+            path_op(NP_RM, scratch)
+        except (RuntimeError, OSError):
+            pass
+    try:
+        path_op(NP_RMDIR, d1)
+    except (RuntimeError, OSError):
+        pass
+
+    def run(name, fn):
+        try:
+            ok, detail = fn()
+        except (RuntimeError, OSError) as exc:
+            ok, detail = False, f"no reply ({exc.__class__.__name__}: {exc})"
+        check(name, ok, detail)
+
+    def t_write_file():
+        st, _ = path_op(NP_WRITE_FILE, f1, len(content), data=content)
+        st_r, got = read_at(f1, 0, NP_REMOTE_CHUNK)
+        ok = st == 0 and st_r == len(content) and got == content
+        return ok, f"write_file -> {status_name(st)}, read_at 0 -> {status_name(st_r) if not served(st_r) else f'{st_r} bytes'}, {'equal' if got == content else 'DIFFER'}"
+    run("NP_WRITE_FILE creates the file and NP_READ_AT reads it back", t_write_file)
+
+    def t_read_at_offset():
+        st, got = read_at(f1, 100, 50)
+        ok = st == 50 and got == content[100:150]
+        return ok, f"read_at 100/50 -> {status_name(st) if not served(st) else f'{st} bytes'}, {'the right window' if got == content[100:150] else 'WRONG window'}"
+    run("NP_READ_AT honours its offset and count", t_read_at_offset)
+
+    def t_write_at():
+        st, _ = path_op(NP_WRITE_AT, f1, 4, 3, data=b"XYZ")
+        want = content[:4] + b"XYZ" + content[7:]
+        st_r, got = read_at(f1, 0, NP_REMOTE_CHUNK)
+        ok = st == 0 and got == want
+        return ok, f"write_at 4 -> {status_name(st)}, read back {'patched in place' if got == want else 'WRONG'}"
+    run("NP_WRITE_AT patches in place", t_write_at)
+
+    def t_stat():
+        size = stat_size(f1)
+        return size == len(content), f"stat size -> {size}"
+    run("NP_STAT reports the size", t_stat)
+
+    def t_mv():
+        src, dst = f1.encode(), f2.encode()
+        st, _ = op(build_frame(NP_MV, 0, [len(src), len(dst)], src + dst))
+        st_old, _ = stat(f1)
+        st_r, got = read_at(f2, 0, NP_REMOTE_CHUNK)
+        want = content[:4] + b"XYZ" + content[7:]
+        ok = st == 0 and not served(st_old) and st_old != FS_ERR_NO_SUCH_VERB and got == want
+        return ok, f"mv -> {status_name(st)}, old name stat -> {status_name(st_old)}, new name reads {'the content' if got == want else 'WRONG'}"
+    run("NP_MV renames: the old name is gone and the new one has the bytes", t_mv)
+
+    def t_chmod():
+        st, _ = path_op(NP_CHMOD, f2, 0o600)
+        ok = st in (0, FS_ERR_NOT_SUPPORTED)
+        return ok, f"chmod 0600 -> {status_name(st)}{' (a filesystem with no modes; the arm reached fsd)' if st == FS_ERR_NOT_SUPPORTED else ''}"
+    run("NP_CHMOD reaches fsd (0, or FS_ERR_NOT_SUPPORTED where modes do not exist)", t_chmod)
+
+    def t_touch():
+        st, _ = path_op(NP_TOUCH, f3)
+        size = stat_size(f3)
+        return st == 0 and size == 0, f"touch -> {status_name(st)}, stat size -> {size}"
+    run("NP_TOUCH creates an empty file", t_touch)
+
+    def t_mkdir_rmdir():
+        st, _ = path_op(NP_MKDIR, d1)
+        st_l, listing = path_op(NP_READDIR, "/", 4096)
+        listed = served(st_l) and (d1[1:] + "/").encode() in listing.split(b"\n")
+        st_rm, _ = path_op(NP_RMDIR, d1)
+        st_l2, listing2 = path_op(NP_READDIR, "/", 4096)
+        gone = served(st_l2) and (d1[1:] + "/").encode() not in listing2.split(b"\n")
+        ok = st == 0 and listed and st_rm == 0 and gone
+        return ok, f"mkdir -> {status_name(st)}, listed {listed}, rmdir -> {status_name(st_rm)}, gone {gone}"
+    run("NP_MKDIR then NP_RMDIR, seen by NP_READDIR between", t_mkdir_rmdir)
+
+    def t_rm():
+        st2, _ = path_op(NP_RM, f2)
+        st3, _ = path_op(NP_RM, f3)
+        s2, _ = stat(f2)
+        s3, _ = stat(f3)
+        ok = st2 == 0 and st3 == 0 and not served(s2) and not served(s3)
+        return ok, f"rm -> {status_name(st2)}, {status_name(st3)}; stat after -> {status_name(s2)}, {status_name(s3)}"
+    run("NP_RM removes both files", t_rm)
+
+    def t_console():
+        line = b"path-gate: hello from the host\n"
+        st, _ = path_op(NP_WRITE, "/dev/cons", len(line), data=line)
+        st_r, _ = read_at("/dev/cons", 0, 16)
+        ok = st == 0 and st_r == FS_ERR_NO_SUCH_VERB
+        return ok, f"write -> {status_name(st)} (look for the line on the guest console), read -> {status_name(st_r)}"
+    run("the console arm: NP_WRITE to /dev/cons served, a read refused as no arm", t_console)
+
+    def t_net():
+        st, got = path_op(NP_READ, "/net/ip", 0, 64)
+        text = got.decode("latin1").strip()
+        ok = served(st) and text.count(".") == 3 and all(p.isdigit() for p in text.split("."))
+        return ok, f"read /net/ip -> {status_name(st) if not served(st) else text!r}"
+    run("the /net arm: NP_READ of /net/ip answers this machine's address", t_net)
+
+    def t_open_non_fsd():
+        s = Session(host, port)
+        try:
+            st, _ = s.open()
+            if st != 0:
+                return False, f"session refused: {status_name(st)}"
+            # /net/tcp/clone and /net/tcp too, not just /net/ip: the /net
+            # arm hands the whole /tcp subtree to the dial code BEFORE it
+            # looks at the verb, so an open that reaches it is answered by
+            # the clone/ctl/data logic with a bare status and no log line -
+            # which is what the first fold did, and this check could not see
+            # (review of the step-6 PR). The refusal has to happen at the
+            # resolve point, for every non-fsd target, and this is what
+            # measures that it does.
+            targets = (b"/net/ip", b"/net/tcp/clone", b"/net/tcp", b"/dev/cons")
+            got = [s.op(open_frame(t))[0] for t in targets]
+            st_after, _ = s.op(stat_frame(b"/EFI/ORBS/INIT.CFG"))
+            ok = all(g == FS_ERR_NO_SUCH_VERB for g in got) and st_after == STAT_INFO_LEN
+            opens = ", ".join(f"open {t.decode()} -> {status_name(g)}" for t, g in zip(targets, got))
+            return ok, f"{opens}, then stat on the session -> {status_name(st_after) if not served(st_after) else 'served'}"
+        finally:
+            s.close()
+    run("NP_OPEN of every non-fsd target refused FS_ERR_NO_SUCH_VERB on a session, and a path verb still served after", t_open_non_fsd)
+
+    print(f"path-gate: {failed} check(s) failed", flush=True)
+    return failed
 
 def np_readfile(host, port, path, want=512):
     pb = path.encode()
@@ -1315,7 +1628,7 @@ def main():
     leftover = [a for a in checked if a.startswith("--")]
     if leftover:
         sys.exit(f"unknown or repeated option(s): {' '.join(leftover)}")
-    if len(args) < 4 and not (len(args) == 3 and args[2] in ("session-gate", "fid-gate")):
+    if len(args) < 4 and not (len(args) == 3 and args[2] in ("session-gate", "fid-gate", "path-gate")):
         print(__doc__)
         sys.exit(2)
     host, port, op = args[0], int(args[1]), args[2]
@@ -1356,9 +1669,9 @@ def main():
         # noverb <host> <port> noverb [path] [verb]
         #
         # Send a correctly-signed request for a verb the export has NO ARM for -
-        # NP_PREAD by default, the first fid verb step 5 of
-        # docs/roadmap/roadmap-fid-verbs.md left unserved (it was NP_OPEN until
-        # the export learned it). The point is the STATUS the guest answers
+        # NP_PWRITE by default, the one fid verb still unserved after step 6 of
+        # docs/roadmap/roadmap-fid-verbs.md (it was NP_OPEN until step 5, then
+        # NP_PREAD until step 6). The point is the STATUS the guest answers
         # with, not the data. The frame is the generic path-verb shape, which
         # for a fid verb puts the path length where the fid goes; that is fine
         # here, since the verb is refused before any fid is looked at (and on a
@@ -1379,7 +1692,7 @@ def main():
         # and the usage line promised a bare `noverb` that only ever printed the
         # docstring.
         path = args[3].encode()
-        verb = int(args[4], 0) if len(args) > 4 else NP_PREAD
+        verb = int(args[4], 0) if len(args) > 4 else NP_PWRITE
         np = build_frame(verb, 0, [len(path), 0, 0, 0], path)
         try:
             status, data = one_op(host, port, np)
@@ -1391,7 +1704,13 @@ def main():
 
     if op == "fid-gate":
         fid_path = args[3] if len(args) > 3 else "/EFI/ORBS/INIT.CFG"
-        sys.exit(min(do_fid_gate(host, port, fid_path), 125))
+        # The data check needs a file LONGER than NP_REMOTE_CHUNK; the gate
+        # fails, rather than passes, on one that is not (see do_fid_gate).
+        data_path = args[4] if len(args) > 4 else "/man/grep"
+        sys.exit(min(do_fid_gate(host, port, fid_path, data_path), 125))
+
+    if op == "path-gate":
+        sys.exit(min(do_path_gate(host, port), 125))
 
     if op == "session-gate":
         hold = int(args[3]) if len(args) > 3 else 10
@@ -1442,7 +1761,7 @@ def main():
         # verb reached through `ancestors_searchable` rather than
         # `path_allows`, so the one arm this tool could not exercise was the
         # one that most needed a foreign observer.
-        np_msg = build_frame(NP_STAT, 0, [len(pb)], pb)
+        np_msg = stat_frame(pb)
     else:
         print(f"unknown op {op!r}", file=sys.stderr)
         sys.exit(2)

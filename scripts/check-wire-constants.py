@@ -252,6 +252,21 @@ CHECKED = [
     # fid gate must open MORE than it across closed sessions for its one
     # fallible check to be able to fail - see check_fid_gate_budget.
     "MAX_FIDS",
+    # Spelled by the client since step 6 (2026-09-12) for `path-gate`, the
+    # end-to-end run of every path verb the export serves: the fold of the fid
+    # verbs into the export's one dispatch rewrote the preamble those verbs
+    # share, and nothing had exercised most of them from the foreign observer.
+    # A drifted verb number here would make the gate probe the wrong arm and
+    # report the fold broken (or fine) for the wrong reason.
+    "NP_WRITE",
+    "NP_MKDIR",
+    "NP_RMDIR",
+    "NP_RM",
+    "NP_CHMOD",
+    "FS_ERR_NOT_SUPPORTED",
+    # The per-request data cap the fid gate's read-to-EOF check must exceed:
+    # a file that fits one chunk cannot show a wrong rising offset.
+    "NP_REMOTE_CHUNK",
 ]
 
 # NOT checked: NP_MAC_LEN. Neither peer names it - both write the literal 32 at
@@ -295,7 +310,7 @@ CHECKED = [
 # what it is named for. Confirmed, which is why these are numbers and not a
 # truthiness test. Raise a baseline when a peer learns a new constant.
 PEER_BASELINE = {
-    "np9p_client.py": 31,  # counted 2026-09-12: 27 on 09-07 once the verbs were pinned, then step 5 taught it NP_PREAD/NP_FSTAT/NP_CLUNK and OPEN_READ
+    "np9p_client.py": 40,  # counted 2026-09-12: 31 after step 5 (NP_PREAD/NP_FSTAT/NP_CLUNK, OPEN_READ), then step 6 taught it the path verbs for path-gate, NP_PWRITE, FS_ERR_NOT_SUPPORTED and NP_REMOTE_CHUNK
     # Rose from 10 when the `noverb` probe's status-name table was rebuilt
     # from module constants instead of repeated literals: FS_ERROR,
     # FS_ERR_READ_ONLY, FS_ERR_PERM and FS_ERR_NO_SUCH_VERB became names this
