@@ -726,7 +726,7 @@ the rig:** a user without `w` on the target must be refused. **Use
 and after it, proving nothing either time — the caveat
 `scripts/drive-2vm.py` already carries.
 
-## Decision 4 — where the client session lives (2026-09-12)
+## Decision 4: where the client session lives (2026-09-12)
 
 > **✅ CONFIRMED AND BUILT 2026-09-12, as recommended.** `netd` holds a
 > `ClientSession` per `(endpoint, uid)`, opened lazily on the first fid verb,
@@ -890,6 +890,22 @@ authentication** (sign once per session rather than per verb, which the held
 connection makes possible but which is an auth-model change); and **raising
 `SESSION_FIDS` or the client-session table size** (do it when something
 exhausts it, with the exhaustion as evidence).
+
+**A stack-depth limitation on the ledger, found by the PR review.** The 40 KB
+stack is sized for the top-level session path (`serve` → `drain` →
+`handle_client` → `session_rmount`). A fid `NETOP_RMOUNT` can also arrive at
+the **re-entrant** drain inside `tcp_run` (a local task doing remote fid I/O
+while this node runs a `cpu` command), where `session_rmount`'s ~5 KB and its
+call level nest on top of `handle_run` + `tcp_run`'s own frame, well past
+40 KB. It faults CLEAN on the guard (netd restarts, dropping held
+connections), not silently, and the trigger is narrow: a local remote-fid op
+concurrent with an outbound `cpu` run on the same node. Not fixed here because
+the fix (refuse a new session from the re-entrant context, or make
+`NETOP_RMOUNT` async) is larger than the corner and there is no rig that
+creates the condition; the same latent depth already applied to the one-shot
+path this arc did not change, one level shallower. Revisit with async
+`NETOP_RMOUNT`, or a rig that can drive a concurrent remote op during a `cpu`
+run.
 
 ## Deliberately not in scope
 

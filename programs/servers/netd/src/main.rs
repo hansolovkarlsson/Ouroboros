@@ -1828,6 +1828,12 @@ fn session_exchange(mac: &[u8; 6], s: &mut ClientSession, auth: &Auth, who: &[u8
 #[allow(clippy::too_many_arguments)]
 fn find_or_open_session(mac: &[u8; 6], dst_mac: &[u8; 6], ip: [u8; 4], port: u16, uid: u32, sessions: &mut [Option<ClientSession>; MAX_CLIENT_SESSIONS], auth: &Auth, who: &[u8; ninep_abi::NP_NAME_LEN], expect_key: &[u8; clusterkeys::KEY_LEN], req: &mut [u8], resp: &mut [u8], sc: &mut TcpScratch) -> Result<usize, u64> {
     if let Some(i) = sessions.iter().position(|s| matches!(s, Some(s) if s.ip == ip && s.port == port && s.uid == uid)) {
+        // Pick up a re-resolved next hop. `handle_rmount` runs ARP fresh on
+        // every verb, so if the peer's (or gateway's) MAC changed since this
+        // session opened, adopt the new one rather than sending every round
+        // trip to the stale MAC until the idle reap (review of the
+        // client-session PR); the one-shot path recovers this way already.
+        sessions[i].as_mut().unwrap().dst_mac = *dst_mac;
         return Ok(i);
     }
     let Some(slot) = sessions.iter().position(|s| s.is_none()) else {
@@ -1914,19 +1920,28 @@ fn session_rmount(mac: &[u8; 6], dst_mac: &[u8; 6], ip: [u8; 4], port: u16, uid:
             return fail(out, st);
         }
     };
-    // Refcount the fid this verb made or freed, and close the session when its
-    // last fid goes. The NP status is the reply body's first word.
+    // Refcount the fid this verb made or freed. The NP status is the reply
+    // body's first word.
     let np_status = if n >= 8 { read_u64(out, 0) } else { u64::MAX };
-    if verb == ninep_abi::NP_OPEN && np_status < syscall_abi::FS_ERR_MIN {
+    {
         let s = sessions[slot].as_mut().unwrap();
-        s.fids = s.fids.saturating_add(1);
-    } else if verb == ninep_abi::NP_CLUNK && np_status < syscall_abi::FS_ERR_MIN {
-        let s = sessions[slot].as_mut().unwrap();
-        s.fids = s.fids.saturating_sub(1);
-        if s.fids == 0 {
-            let sess = sessions[slot].take().unwrap();
-            client_close(mac, &sess);
+        if verb == ninep_abi::NP_OPEN && np_status < syscall_abi::FS_ERR_MIN {
+            s.fids = s.fids.saturating_add(1);
+        } else if verb == ninep_abi::NP_CLUNK && np_status < syscall_abi::FS_ERR_MIN {
+            s.fids = s.fids.saturating_sub(1);
         }
+    }
+    // A session holding no fids serves nothing: close it now rather than
+    // leaving it for the idle backstop. This is the last-clunk free AND the
+    // freshly-opened-but-the-open-failed free - a session find_or_open just
+    // created for an `NP_OPEN` that returned an error (a missing file, a
+    // permission refusal) never reached one fid, and it would otherwise hold a
+    // slot and a far-side connection for `CLIENT_SESSION_IDLE_TICKS`; three
+    // such failed opens to distinct endpoints would spend the whole
+    // `MAX_CLIENT_SESSIONS` budget (review of the client-session PR).
+    if sessions[slot].as_ref().unwrap().fids == 0 {
+        let sess = sessions[slot].take().unwrap();
+        client_close(mac, &sess);
     }
     n
 }
