@@ -268,7 +268,7 @@ fn valid_msg_range(ptr: u64, len: u64) -> bool {
 /// matches this project's established "fixed static buffer, no heap"
 /// pattern for every other runtime buffer (`fat32.rs`'s callers,
 /// `shell/src/main.rs`'s own read buffers).
-const SPAWN_STAGING_SIZE: usize = 128 * 1024;
+const SPAWN_STAGING_SIZE: usize = syscall_abi::SPAWN_STAGING_SIZE;
 
 struct SpawnStagingCell(core::cell::UnsafeCell<[u8; SPAWN_STAGING_SIZE]>);
 // SAFETY: single-core; only ever touched from the SPAWN_STAGE/SPAWN

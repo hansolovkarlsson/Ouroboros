@@ -1811,6 +1811,20 @@ fn print_no_fs() {
 fn print_fs_error(cmd: &str, code: u64) {
     print_str(cmd);
     print_str(": ");
+    if code == syscall_abi::SPAWN_ERR_TOO_LARGE {
+        // One code for two bounds (the reserved error band is full, and
+        // moving its floor is a cross-node flag day, see FS_ERR_MIN), so
+        // the message says how to tell them apart - the file size is
+        // visible with `ls -l`, the image size is not - and prints the
+        // bounds from the ABI constants the kernel itself enforces, not
+        // a restated "128KB"/"2MB" that nothing would keep true.
+        print_str("program too large: the file is over the kernel's ");
+        print_u64(syscall_abi::SPAWN_STAGING_SIZE as u64 / 1024);
+        print_str("KB staging buffer (see ls -l), or its loaded image with static data, heap and stack is over the ");
+        print_u64(syscall_abi::REGION_SLOT_SIZE / (1024 * 1024));
+        print_line("MB region slot");
+        return;
+    }
     print_line(match code {
         // This table is a second copy of `ulib::fs_error_msg`'s - the shell
         // keeps its own fs layer and cannot share it. The two had already
@@ -1844,11 +1858,7 @@ fn print_fs_error(cmd: &str, code: u64) {
         syscall_abi::MSG_ERR_TOO_BIG => "message too big (64-byte limit)",
         syscall_abi::MSG_ERR_DENIED => "permission denied (the IPC capability policy doesn't permit reaching that task)",
         syscall_abi::SPAWN_ERR_BAD_ELF => "not a loadable program (bad ELF)",
-        // One code for two bounds (the reserved error band is full, and
-        // moving its floor is a cross-node flag day, see FS_ERR_MIN), so
-        // the message says how to tell them apart: the file size is
-        // visible with `ls -l`, the image size is not.
-        syscall_abi::SPAWN_ERR_TOO_LARGE => "program too large: the file is over the kernel's 128KB staging buffer (see ls -l), or the loaded image with its static data, heap and stack is over the 2MB region",
+        // SPAWN_ERR_TOO_LARGE is handled above (it prints numbers).
         syscall_abi::SPAWN_ERR_NO_FREE_SLOT => "no free task slot",
         syscall_abi::TASK_ERR_NO_SUCH_TASK => "no such task (see ps)",
         // Names the whole protected set: a message listing a stale subset is how
@@ -2542,7 +2552,7 @@ fn spawn_path(path: &str, argv: &[&str], cwd: &[u8; CWD_SIZE], cwd_len: usize, e
             break;
         }
         if syscall4(syscall_abi::SPAWN_STAGE, offset, chunk.as_ptr() as u64, n, 0) != 0 {
-            // Only reachable by staging past the kernel's 128KB buffer
+            // Only reachable by staging past the kernel's staging buffer
             // - the same too-large refusal SPAWN itself would give.
             return Err(syscall_abi::SPAWN_ERR_TOO_LARGE);
         }

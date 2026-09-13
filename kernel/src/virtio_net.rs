@@ -27,9 +27,12 @@
 //!   we skip past it.
 //!
 //! The `Desc`/`Avail`/`Used` ring types are redefined locally rather than
-//! shared with `virtio_blk.rs` - a small, deliberate duplication (the same
-//! call the project already makes for values like `RUNTIME_SLOT_ALIGN`)
-//! that keeps this new module from touching the proven block driver at all.
+//! shared with `virtio_blk.rs` - a small, deliberate duplication that
+//! keeps this new module from touching the proven block driver at all.
+//! (This used to cite `RUNTIME_SLOT_ALIGN` as precedent; that constant
+//! was a copy of the loader's slot size and is gone, since a copied
+//! VALUE drifts silently where a copied TYPE at least fails to compile
+//! when the two are mixed - see the true-when-written postmortem.)
 //!
 //! Cache coherence: same as `virtio_blk.rs` - QEMU's `dma-coherent;`
 //! devicetree property means no explicit cache maintenance, only ordering

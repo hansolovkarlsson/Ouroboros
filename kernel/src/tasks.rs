@@ -238,15 +238,14 @@ pub(crate) fn may_send(src: usize, dest: usize) -> bool {
     holds_send_right(src, dest)
 }
 
-/// Every region [`allocate_runtime_region`] hands out is a multiple of
-/// the loader's 2MB slot, so a region `elf_region_size` has bounded to one
-/// slot's worth of bytes also lies inside ONE slot - the invariant
-/// `mmu.rs`'s per-task view rests on. The loader's own constant, not a
-/// copy: this used to be a second `0x20_0000` "simplest to just
-/// duplicate", and the bound in the loader is only sufficient while this
-/// alignment matches it, which a copy cannot promise
-/// (docs/postmortems/true-when-written-postmortem.md).
-const RUNTIME_SLOT_ALIGN: u64 = crate::loader::SLOT_ALIGN;
+// Every region `allocate_runtime_region` hands out is a multiple of the
+// loader's 2MB slot (`loader::SLOT_ALIGN`, used by name below), so a
+// region `elf_region_size` has bounded to one slot's worth of bytes also
+// lies inside ONE slot - the invariant `mmu.rs`'s per-task view rests on.
+// There used to be a second `0x20_0000` here, `RUNTIME_SLOT_ALIGN`,
+// "simplest to just duplicate"; the loader's bound is only sufficient
+// while this alignment matches it, which a copy cannot promise
+// (docs/postmortems/true-when-written-postmortem.md).
 
 /// Bump allocator for dynamically `spawn`ed programs' EL0 regions -
 /// deliberately the simplest correct thing, not a real allocator: grows
@@ -268,7 +267,7 @@ static NEXT_RUNTIME_REGION_TOP: AtomicU64 = AtomicU64::new(0);
 /// any `allocate_runtime_region` call.
 pub(crate) fn init_runtime_allocator() {
     let (_, max_addr) = crate::mmu::ram_span();
-    NEXT_RUNTIME_REGION_TOP.store(max_addr & !(RUNTIME_SLOT_ALIGN - 1), Ordering::Relaxed);
+    NEXT_RUNTIME_REGION_TOP.store(max_addr & !(crate::loader::SLOT_ALIGN - 1), Ordering::Relaxed);
 }
 
 /// Hands out `size` bytes (rounded up to a 2MB multiple) of fresh RAM,
@@ -280,7 +279,7 @@ pub(crate) fn init_runtime_allocator() {
 /// comment for why that's an accepted, deliberate limit for now rather
 /// than a real allocator.
 pub(crate) fn allocate_runtime_region(size: u64) -> u64 {
-    let aligned_size = size.next_multiple_of(RUNTIME_SLOT_ALIGN);
+    let aligned_size = size.next_multiple_of(crate::loader::SLOT_ALIGN);
     NEXT_RUNTIME_REGION_TOP.fetch_sub(aligned_size, Ordering::Relaxed) - aligned_size
 }
 
@@ -295,7 +294,7 @@ pub(crate) fn allocate_runtime_region(size: u64) -> u64 {
 /// long-lived middle task exiting after a later allocation just means
 /// that one region stays unavailable for the rest of the boot.
 pub(crate) fn free_runtime_region(base: u64, size: u64) {
-    let aligned_size = size.next_multiple_of(RUNTIME_SLOT_ALIGN);
+    let aligned_size = size.next_multiple_of(crate::loader::SLOT_ALIGN);
     let _ = NEXT_RUNTIME_REGION_TOP.compare_exchange(
         base,
         base + aligned_size,

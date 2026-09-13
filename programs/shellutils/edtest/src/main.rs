@@ -145,7 +145,13 @@ pub extern "C" fn _start() -> ! {
     // exactly what this step must not accept on faith - so run the same probe
     // around a function with a KNOWN extra 4 KB frame and check the reading
     // moves by about that much. If it does not, the number below means nothing.
-    let plain = measure_stack(&SK1);
+    // `plain` carries the stack size the probe measured against, so the
+    // report below divides by the same extent the probe used (one fetch,
+    // not a second one that could in principle differ).
+    let (plain, stack_size) = match measure_stack(&SK1) {
+        Some((used, size)) => (Some(used), size),
+        None => (None, 0),
+    };
     let padded = measure_stack_padded(&SK1);
     match (plain, padded) {
         (Some(a), Some(b)) if b > a + 3072 && b < a + 8192 => {
@@ -165,7 +171,6 @@ pub extern "C" fn _start() -> ! {
     }
 
     let calibrated = matches!((plain, padded), (Some(a), Some(b)) if b > a + 3072 && b < a + 8192);
-    let (_, stack_size) = ulib::stack_extent();
     match plain {
         Some(used) if calibrated => {
             out(target, b"\r\n  peak stack for sign+verify: ");
@@ -228,8 +233,8 @@ fn put_dec(target: u64, v: u64) {
 /// instead, a copy of the loader's page count that went stale when the stack
 /// grew and silently disabled this measurement; the sanity check below is
 /// what refused, and the calibration in `_start` is what made that visible.)
-fn measure_stack(secret: &[u8; 32]) -> Option<usize> {
-    measure_stack_inner(secret, false).map(|(used, _)| used)
+fn measure_stack(secret: &[u8; 32]) -> Option<(usize, usize)> {
+    measure_stack_inner(secret, false)
 }
 
 /// `(peak bytes used, stack size)`, or `None` if the probe could not run.

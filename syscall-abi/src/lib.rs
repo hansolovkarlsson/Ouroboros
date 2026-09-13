@@ -1355,6 +1355,17 @@ pub const FS_ERR_AUTH: u64 = u64::MAX - 30;
 // [`FS_ERR_NOT_FOUND`]); these three cover the causes the filesystem
 // codes can't express.
 
+/// The two bounds behind [`SPAWN_ERR_TOO_LARGE`], as the kernel enforces
+/// them, so the shell's message can print the real numbers instead of a
+/// restated copy. [`SPAWN_STAGING_SIZE`] is the kernel's staging buffer:
+/// a program FILE longer than this cannot be staged. [`REGION_SLOT_SIZE`]
+/// is the 2MB slot the kernel's per-task page tables split: a program's
+/// loaded IMAGE (memory size, so `.bss` counts) plus the loader's fixed
+/// heap, guard and stack must fit inside it. The kernel reads both from
+/// here (`syscall.rs`'s staging buffer, `loader.rs`'s `SLOT_ALIGN`).
+pub const SPAWN_STAGING_SIZE: usize = 131072;
+pub const REGION_SLOT_SIZE: u64 = 2097152;
+
 /// The file was read, but isn't a loadable program (bad ELF header,
 /// unsupported relocation, malformed program headers, ...).
 pub const SPAWN_ERR_BAD_ELF: u64 = u64::MAX - 11;

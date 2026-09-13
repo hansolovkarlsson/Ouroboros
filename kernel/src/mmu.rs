@@ -403,9 +403,10 @@ fn overlaps(region: (u64, u64), start: u64, end: u64) -> bool {
 /// 2MB-aligned (`loader.rs` over-allocates and trims task 0's, and
 /// `tasks::allocate_runtime_region` rounds to `SLOT_ALIGN`); `tasks.rs`'s
 /// `IdleRegion` is a single 4KB page and cannot straddle. `build_view`
-/// still checks, and maps a second sub-slot EL1-only with a warning
-/// rather than aliasing - see there, and `MAX_EL0_REGIONS`'s doc comment
-/// for the other violation it fails safe on.
+/// still checks containment itself, and gives a region that fails no EL0
+/// mapping at all, with a forced warning, rather than aliasing - see
+/// there, and `MAX_EL0_REGIONS`'s doc comment for the other violation it
+/// fails safe on.
 ///
 /// `extra_devices` are additional discovered device regions (`(base,
 /// size)`) that need to stay mapped and accessible after this switch, on
@@ -615,6 +616,30 @@ unsafe fn build_view(
 ) {
     let l1 = unsafe { &mut *L1_TABLES[view].0.get() };
 
+    // One L2 and one L3 per view is enough because a region fits one 2MB
+    // slot (the loader's bound plus 2MB-aligned bases, see
+    // `install_identity_map`'s safety comment), so it touches exactly one
+    // 1GB block and one 2MB slot. Checked rather than trusted, and checked
+    // as CONTAINMENT (first and last byte in the same slot) rather than as
+    // "a second sub-slot in this block": a region straddling a 1GB
+    // boundary would refill the same per-view L2 for the second block, a
+    // case a per-block flag cannot see. A region that fails gets NO EL0
+    // mapping at all - the task faults cleanly on its first instruction
+    // and its slot is reaped, rather than half of it aliasing the other
+    // half (the program then executes zeros at its own base, which is how
+    // this was found). Forced past the console's quiet mode, since on the
+    // framebuffer platforms it is the only trace the fault will leave.
+    let (base, size) = el0_region;
+    let contained = size == 0 || base / MIB2 == (base + size - 1) / MIB2;
+    let el0_region = if contained {
+        el0_region
+    } else {
+        crate::console::println_force!(
+            "Ouroboros kernel: WARNING: EL0 region {base:#x}+{size:#x} does not fit one 2MB slot, mapping none of it EL0"
+        );
+        (0, 0)
+    };
+
     // Device: fixed low 1GB. See module doc comment for why this one stays
     // a hardcoded convention rather than discovered.
     l1[0] = device_block(0);
@@ -632,31 +657,13 @@ unsafe fn build_view(
 
             if overlaps(el0_region, block_start, block_end) {
                 // This view's own region lives in this block - split it
-                // so only the region's own pages get EL0 access. One L2
-                // and one L3 per view is enough because a region fits
-                // one 2MB slot (the loader's bound plus 2MB-aligned
-                // bases, see `install_identity_map`'s safety comment),
-                // so it touches exactly one 1GB block and one 2MB slot.
-                // Checked rather than trusted: a second overlapping
-                // sub-slot would refill the one L3 table and alias the
-                // first sub-slot onto the second's memory (the program
-                // then executes zeros at its own base). Such a slot is
-                // mapped EL1-only instead, loudly, so the task faults
-                // cleanly on its first touch of it.
+                // so only the region's own pages get EL0 access (one
+                // sub-slot: the containment check above).
                 let l2 = unsafe { &mut *EL0_L2_TABLES[view].0.get() };
-                let mut l3_filled = false;
                 for (i, entry) in l2.iter_mut().enumerate() {
                     let sub_base = block_start + (i as u64) * MIB2;
                     let sub_end = sub_base + MIB2;
-                    if overlaps(el0_region, sub_base, sub_end) && l3_filled {
-                        crate::console::println!(
-                            "Ouroboros kernel: WARNING: EL0 region {:#x}+{:#x} spans a second 2MB slot at {sub_base:#x}, leaving it EL1-only",
-                            el0_region.0,
-                            el0_region.1
-                        );
-                        *entry = kernel_block_2m(sub_base);
-                    } else if overlaps(el0_region, sub_base, sub_end) {
-                        l3_filled = true;
+                    if overlaps(el0_region, sub_base, sub_end) {
                         let l3 = unsafe { &mut *EL0_L3_TABLES[view].0.get() };
                         // The loader owns the region layout; ask it.
                         let guard = guard_page_addr(el0_region);
