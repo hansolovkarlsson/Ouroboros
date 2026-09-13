@@ -81,6 +81,19 @@
 //! is abundant enough (512MB in the QEMU config) for this to not matter.
 //! Unaffected by the switch to real ELF loading - this trick only ever
 //! cared about the *total* region size, however that size gets derived.
+//!
+//! Alignment is only HALF the invariant. A 2MB-aligned region that is
+//! itself larger than 2MB straddles the next slot regardless, and that is
+//! exactly what a large `.bss` produces (memory size, not file size, so
+//! the staging bound never sees it): on 2026-09-13 a 1.9MB `.bss` gave a
+//! two-slot region and `mmu.rs` aliased the first slot onto the second,
+//! so the program executed zeros at its own base. The other half is
+//! therefore [`elf_region_size`]'s bound: code pages plus the fixed tail
+//! must not exceed `SLOT_PAGES`, else `LoaderError::RegionTooLarge`. Both
+//! halves are needed by every loading path, the runtime one
+//! (`tasks::allocate_runtime_region` rounds to `SLOT_ALIGN`) as much as
+//! this boot-time one; `mmu.rs`'s `build_view` checks containment itself
+//! and refuses a region that fails, so a path that forgets fails loudly.
 
 use alloc::string::String;
 use core::mem::size_of;
@@ -183,6 +196,14 @@ const TAIL_PAGES: u64 = HEAP_PAGES + GUARD_PAGES + STACK_PAGES;
 const _: () = assert!(
     TAIL_PAGES < SLOT_PAGES,
     "the fixed [heap][guard][stack] tail leaves no room for code in a 2MB region slot"
+);
+
+/// The image ceiling the shell prints when `spawn` refuses a program is
+/// an ABI literal (`syscall_abi::SPAWN_IMAGE_MAX`); this is what keeps it
+/// the number `elf_region_size` actually enforces.
+const _: () = assert!(
+    syscall_abi::SPAWN_IMAGE_MAX == (SLOT_PAGES - TAIL_PAGES) * PAGE_SIZE as u64,
+    "syscall_abi::SPAWN_IMAGE_MAX must equal the slot minus the loader's tail; update it with the tail"
 );
 
 /// The tail of one region, resolved to addresses: `[heap][guard][stack]`
@@ -378,18 +399,18 @@ pub enum LoaderError {
     /// fetched through the alias as zeros. Refused here instead. Carries
     /// the region size in pages so the boot log can say by how much.
     RegionTooLarge(u64),
-    /// A `PT_LOAD` segment's `p_vaddr + p_memsz` lies outside the region
-    /// the caller sized for it. `elf_region_size` sizes the region from
-    /// exactly these fields, so this cannot happen for a program that
-    /// passed through it; `copy_segments` checks anyway, because its
-    /// alternative is a write past the region on the strength of a claim
-    /// made in another function.
+    /// A `PT_LOAD` segment's `p_vaddr + p_memsz` overflows, or lies
+    /// outside the region the caller sized for it. `elf_region_size`
+    /// refuses the overflow first (so a wrapped end is never mistaken for
+    /// a small one); `copy_segments` checks the bound again against the
+    /// region it is handed, because its alternative is a write past the
+    /// region on the strength of a claim made in another function.
     SegmentOutsideRegion,
-    /// A `PT_LOAD` segment's `p_filesz` exceeds its `p_memsz`. The region
-    /// is sized from `p_memsz`, the copy moves `p_filesz` bytes and then
-    /// zeroes `p_memsz - p_filesz`: an inverted pair would copy past the
-    /// segment's own extent into the tail and underflow the zero length.
-    /// Refused at parse, before any size is derived from either.
+    /// A `PT_LOAD` segment's `p_filesz` exceeds its `p_memsz`. The copy
+    /// moves `p_filesz` bytes and then zeroes `p_memsz - p_filesz`: an
+    /// inverted pair would copy past the segment's own extent and
+    /// underflow the zero length. Refused by `copy_segments`, at the
+    /// write, by the `checked_sub` that computes that length.
     SegmentFileSizeOverMemSize,
     /// A relocation type other than `R_AARCH64_RELATIVE` showed up - this
     /// project has no imported symbols to resolve, so nothing else should
@@ -666,13 +687,6 @@ fn parse_program_headers(file: &[u8], header: &ElfHeader) -> Result<ProgramHeade
     for (i, slot) in headers.iter_mut().enumerate().take(count) {
         let offset = header.e_phoff as usize + i * header.e_phentsize as usize;
         *slot = read_at::<ProgramHeader>(file, offset)?;
-        // Every later use of a PT_LOAD assumes p_filesz <= p_memsz (ELF
-        // requires it; `copy_segments` subtracts them). Refuse the
-        // inversion here so no size is ever derived from a header that
-        // lies about its own extent.
-        if slot.p_type == PT_LOAD && slot.p_filesz > slot.p_memsz {
-            return Err(LoaderError::SegmentFileSizeOverMemSize);
-        }
     }
     Ok(ProgramHeaders { headers, count })
 }
@@ -817,7 +831,7 @@ pub(crate) fn elf_region_size(program: &[u8]) -> Result<(ElfHeader, ProgramHeade
     let mut max_end = 0u64;
     for ph in phdrs.as_slice() {
         if ph.p_type == PT_LOAD {
-            let end = ph.p_vaddr.checked_add(ph.p_memsz).ok_or(LoaderError::Truncated)?;
+            let end = ph.p_vaddr.checked_add(ph.p_memsz).ok_or(LoaderError::SegmentOutsideRegion)?;
             max_end = max_end.max(end);
         }
     }

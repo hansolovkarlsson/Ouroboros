@@ -299,7 +299,7 @@ pub const ACCT_TASK: u64 = 5;
 
 /// `(offset, chunk ptr, chunk len)` -> `0` on success or
 /// [`SPAWN_ERROR`]. Copies one chunk of a program image into the
-/// kernel's fixed 128KB spawn staging buffer at `offset` - the feed
+/// kernel's fixed spawn staging buffer ([`SPAWN_STAGING_SIZE`]) at `offset` - the feed
 /// half of the two-step spawn (see [`SPAWN`]'s contract-change note).
 /// Chunks are bounded by the same 512-byte per-syscall buffer cap as
 /// everything else; offsets past the staging buffer are refused.
@@ -1365,6 +1365,16 @@ pub const FS_ERR_AUTH: u64 = u64::MAX - 30;
 /// here (`syscall.rs`'s staging buffer, `loader.rs`'s `SLOT_ALIGN`).
 pub const SPAWN_STAGING_SIZE: usize = 131072;
 pub const REGION_SLOT_SIZE: u64 = 2097152;
+/// The most a program's loaded IMAGE (code, data and `.bss` together:
+/// memory size, not file size) may occupy: [`REGION_SLOT_SIZE`] minus the
+/// loader's fixed heap, guard page and stack. The number a user can act
+/// on when `spawn` refuses an image, since the tail is the kernel's and
+/// reaches userland through no other syscall. Defined here as a literal
+/// and PINNED by a compile-time assert in `kernel/src/loader.rs` against
+/// the tail it is derived from, so a heap or stack growth that does not
+/// update this fails at `make build` rather than leaving the shell
+/// printing a ceiling the loader no longer enforces.
+pub const SPAWN_IMAGE_MAX: u64 = 1789952;
 
 /// The file was read, but isn't a loadable program (bad ELF header,
 /// unsupported relocation, malformed program headers, ...).

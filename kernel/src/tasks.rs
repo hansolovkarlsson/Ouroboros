@@ -238,15 +238,6 @@ pub(crate) fn may_send(src: usize, dest: usize) -> bool {
     holds_send_right(src, dest)
 }
 
-// Every region `allocate_runtime_region` hands out is a multiple of the
-// loader's 2MB slot (`loader::SLOT_ALIGN`, used by name below), so a
-// region `elf_region_size` has bounded to one slot's worth of bytes also
-// lies inside ONE slot - the invariant `mmu.rs`'s per-task view rests on.
-// There used to be a second `0x20_0000` here, `RUNTIME_SLOT_ALIGN`,
-// "simplest to just duplicate"; the loader's bound is only sufficient
-// while this alignment matches it, which a copy cannot promise
-// (docs/postmortems/true-when-written-postmortem.md).
-
 /// Bump allocator for dynamically `spawn`ed programs' EL0 regions -
 /// deliberately the simplest correct thing, not a real allocator: grows
 /// *downward* from the top of discovered RAM (`init_runtime_allocator`),
@@ -270,7 +261,10 @@ pub(crate) fn init_runtime_allocator() {
     NEXT_RUNTIME_REGION_TOP.store(max_addr & !(crate::loader::SLOT_ALIGN - 1), Ordering::Relaxed);
 }
 
-/// Hands out `size` bytes (rounded up to a 2MB multiple) of fresh RAM,
+/// Hands out `size` bytes (rounded up to a multiple of the loader's
+/// `SLOT_ALIGN`, so a region `elf_region_size` has bounded to one slot's
+/// worth of bytes also lies inside ONE slot, the invariant `mmu.rs`'s
+/// per-task view rests on) of fresh RAM,
 /// already identity-mapped EL1-accessible (all of discovered RAM is,
 /// unconditionally - see `mmu.rs`) but not yet EL0-accessible; the caller
 /// still has to fold the returned `(base, size)` into a fresh call to

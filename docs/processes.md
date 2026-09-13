@@ -114,7 +114,10 @@ so `.bss` counts, not just the file's bytes) plus the loader's fixed tail
 (`TAIL_PAGES` in `loader.rs`: heap, guard page, stack) must fit inside that
 one 2MB slot, and since 2026-09-13 the loader refuses one that does not.
 From `spawn` that is `SPAWN_ERR_TOO_LARGE`, the same code as the
-staging-buffer bound (the shell's message says how to tell the two apart);
+staging-buffer bound and the empty-file case; the shell tells the three
+apart itself (it knows what it staged) and prints the ceiling from
+`SPAWN_IMAGE_MAX`, the ABI's copy of the slot minus the tail, which the
+loader pins at build time;
 for a server loaded at boot the boot log prints the loader's refusal, which
 names the page counts, and the kernel carries on without that server; for
 the shell itself the kernel panics at boot, since there is nothing to run.

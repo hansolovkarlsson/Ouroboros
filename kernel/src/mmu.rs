@@ -624,11 +624,14 @@ unsafe fn build_view(
     // "a second sub-slot in this block": a region straddling a 1GB
     // boundary would refill the same per-view L2 for the second block, a
     // case a per-block flag cannot see. A region that fails gets NO EL0
-    // mapping at all - the task faults cleanly on its first instruction
-    // and its slot is reaped, rather than half of it aliasing the other
-    // half (the program then executes zeros at its own base, which is how
-    // this was found). Forced past the console's quiet mode, since on the
-    // framebuffer platforms it is the only trace the fault will leave.
+    // mapping at all, so the task faults cleanly on its first instruction
+    // (a spawned task is then killed and reaped; a supervised server is
+    // restarted up to its per-boot cap, repeating this warning; the boot
+    // shell or idle task halts the kernel, see `exceptions.rs`) rather
+    // than half of it aliasing the other half (the program then executes
+    // zeros at its own base, which is how this was found). Forced past
+    // the console's quiet mode, since on the framebuffer platforms it is
+    // the only trace the fault will leave.
     let (base, size) = el0_region;
     let contained = size == 0 || base / MIB2 == (base + size - 1) / MIB2;
     let el0_region = if contained {
