@@ -4614,8 +4614,8 @@ fn wire_slice(payload: &[u8], off: usize, len: u64) -> &[u8] {
 /// Both facts the dispatch needs (does this verb need a session; does it have a
 /// path to resolve) derive from this, so they cannot disagree (review of the
 /// step-6 PR: the first fold spelled the fid-verb set four ways in this file).
-/// Step 7 serves `NP_PWRITE` by moving it from `Unserved` to `Fid` and adding
-/// its arm; nothing else here changes.
+/// All five fid verbs are served since step 7 (`NP_PWRITE`, 2026-09-12); a
+/// future ninep-abi fid verb would be added here as `Fid` with its own arm.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Shape {
     /// A path verb: `a0` = the path length, payload = the path (then data).
@@ -4629,18 +4629,12 @@ enum Shape {
     /// at open, and resolving a payload the request does not have would land
     /// in the console or `/net` arm by accident.
     Fid,
-    /// A fid verb ninep-abi defines and this export does not serve yet
-    /// (`NP_PWRITE`, step 7): refused as a verb with no arm on ANY
-    /// connection, and logged as such, so the log names the verb that is
-    /// missing rather than the connection kind.
-    Unserved,
 }
 
 fn shape(verb: u64) -> Shape {
     match verb {
         ninep_abi::NP_OPEN => Shape::Open,
-        ninep_abi::NP_PREAD | ninep_abi::NP_FSTAT | ninep_abi::NP_CLUNK => Shape::Fid,
-        ninep_abi::NP_PWRITE => Shape::Unserved,
+        ninep_abi::NP_PREAD | ninep_abi::NP_PWRITE | ninep_abi::NP_FSTAT | ninep_abi::NP_CLUNK => Shape::Fid,
         _ => Shape::Path,
     }
 }
@@ -4727,15 +4721,7 @@ fn build_9p_reply(
     }
     let mut buf = [0u8; EXPORT_CHUNK];
     match shape {
-        // NOT `FS_ERROR`, which is what a verb with no arm answered until
-        // 2026-09-05: clients render that as "no such file or directory", a
-        // message about a path for a request whose verb was the problem. The
-        // code says THAT a verb is missing; only the log says WHICH.
-        Shape::Unserved => {
-            log_no_arm(b"export", verb);
-            return frame_reply(out, syscall_abi::FS_ERR_NO_SUCH_VERB, &[]);
-        }
-        // --- the ops on a fid (roadmap-fid-verbs.md steps 5 and 6) ---
+        // --- the ops on a fid (roadmap-fid-verbs.md steps 5, 6 and 7) ---
         // Dispatched HERE, before any path is resolved, so no tree or path is
         // in scope for these arms: an arm that reached for one would not
         // compile (the first fold gave them a placeholder pair, which a
@@ -4764,6 +4750,20 @@ fn build_9p_reply(
                     let status = fsd_call3(who, v, 0, fsd_fid, p1, want as u64, &[], &mut buf[..want]);
                     frame_reply(out, status, ok_data(status, &buf))
                 }
+                // Write through a fid: a1 = offset, a2 = count, payload = the
+                // data (count bytes, no path). fsd's NP_PWRITE reads its data
+                // from the SENDER's granted buffer (as fsd_write_at does for
+                // the path-based NP_WRITE_AT), so this bridges the wire-inline
+                // bytes to a local GRANT_READ - the mirror of NP_PREAD's inline
+                // read, the other way. Status = bytes written. The fid's open
+                // flags are the authorization: fsd refuses NP_PWRITE on a fid
+                // not opened for writing (FS_ERR_PERM), which is where a
+                // read-only remote fd's write is refused (step 7).
+                v if v == ninep_abi::NP_PWRITE => {
+                    let data = wire_slice(payload, 0, p2);
+                    let status = fsd_pwrite(who, fsd_fid, p1, data);
+                    frame_reply(out, status, &[])
+                }
                 // Stat through a fid. Status = STAT_INFO_LEN, data = the
                 // record, as NP_STAT answers for the same path.
                 v if v == ninep_abi::NP_FSTAT => {
@@ -4788,9 +4788,10 @@ fn build_9p_reply(
                     }
                     frame_reply(out, status, &[])
                 }
-                // `shape` answers Fid for exactly the three above. The same
-                // refusal as Unserved rather than a panic, which would kill
-                // netd and every connection it holds.
+                // `shape` answers Fid for exactly the four above. A verb
+                // reaching this arm would be a shape/match drift; refuse and
+                // log it rather than panic, which would kill netd and every
+                // connection it holds.
                 v => {
                     log_no_arm(b"export", v);
                     frame_reply(out, syscall_abi::FS_ERR_NO_SUCH_VERB, &[])
@@ -5015,10 +5016,8 @@ fn build_9p_reply(
             frame_reply(out, FID_BASE + slot as u64, &[])
         }
         // A path verb this export has no arm for: whatever ninep-abi defines
-        // next. (A fid verb it does not serve is `Shape::Unserved` and refused
-        // above with the same code and log line; a served fid verb on a
-        // one-shot connection is refused above too, logged `one-shot: no arm`
-        // so the two refusals read apart.)
+        // next. (A served fid verb on a one-shot connection is refused above,
+        // logged `one-shot: no arm` so the two refusals read apart.)
         //
         // NOT `FS_ERROR`, which is what this answered until 2026-09-05. Clients
         // render `FS_ERROR` as "no such file or directory" - a message about a
@@ -5085,6 +5084,54 @@ fn fsd_write_at(who: As, path: &[u8], tree: u64, offset: u64, data: &[u8]) -> u6
         syscall_abi::FSD_TASK,
         req.as_ptr() as u64,
         end as u64,
+        reply.as_mut_ptr() as u64,
+    );
+    if packed >= syscall_abi::FS_ERR_MIN {
+        return packed;
+    }
+    if (packed & 0xffff_ffff) < 8 {
+        return syscall_abi::FS_ERROR;
+    }
+    read_u64(&reply, 0)
+}
+
+/// Relay a write through a fid to fsd (step 7): the mirror of `fsd_write_at`
+/// for a fid rather than a path. Copy `data` into a local buffer, `GRANT_READ`
+/// it to fsd, then issue `NP_PWRITE(a0 = fid, a1 = offset, a2 = datalen)` with
+/// no path payload - fsd's fid table already knows the file, and its
+/// `handle_fid_op` `SAFECOPY`s the data from this granted buffer. `data.len()`
+/// is bounded by `NP_REMOTE_CHUNK` (the client's inline cap). Returns fsd's
+/// status (bytes written, or an `FS_ERR_*`/`TASK_ERR_*` code) - `FS_ERR_PERM`
+/// when the fid was not opened for writing, which is where a read-only remote
+/// fd's write is refused.
+fn fsd_pwrite(who: As, fsd_fid: u64, offset: u64, data: &[u8]) -> u64 {
+    let mut dbuf = [0u8; ninep_abi::NP_REMOTE_CHUNK];
+    let dlen = data.len().min(dbuf.len());
+    dbuf[..dlen].copy_from_slice(&data[..dlen]);
+    let granted = syscall4(
+        syscall_abi::GRANT,
+        syscall_abi::FSD_TASK,
+        dbuf.as_ptr() as u64,
+        dlen as u64,
+        syscall_abi::GRANT_READ,
+    );
+    if granted != 0 {
+        return syscall_abi::FS_ERROR;
+    }
+    const HDR: usize = ninep_abi::NP_REQ_PAYLOAD as usize;
+    let mut req = [0u8; syscall_abi::MSG_MAX_LEN as usize];
+    req[0..8].copy_from_slice(&ninep_abi::NP_PWRITE.to_le_bytes());
+    // tree (a8) is ignored for a fid op - the fid carries its own tree.
+    req[16..24].copy_from_slice(&fsd_fid.to_le_bytes()); // a0: fid
+    req[24..32].copy_from_slice(&offset.to_le_bytes()); // a1: offset
+    req[32..40].copy_from_slice(&(dlen as u64).to_le_bytes()); // a2: data len
+    req[40..48].copy_from_slice(&who.word().to_le_bytes()); // a3: WHO this is for
+    let mut reply = [0u8; syscall_abi::MSG_MAX_LEN as usize];
+    let packed = syscall4(
+        syscall_abi::MSG_CALL,
+        syscall_abi::FSD_TASK,
+        req.as_ptr() as u64,
+        HDR as u64,
         reply.as_mut_ptr() as u64,
     );
     if packed >= syscall_abi::FS_ERR_MIN {

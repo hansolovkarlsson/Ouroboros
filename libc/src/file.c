@@ -493,36 +493,30 @@ ssize_t write(int fd, const void *buf, size_t count) {
     if (!f) {
         return -1;
     }
-    /* A REMOTE WRITE IS REFUSED, not attempted.
-     *
-     * The first version of this granted the buffer to netd and sent NP_PWRITE
-     * with no payload - and NO GRANT CROSSES A MACHINE. netd's rmount relay
-     * forwards the NP message verbatim and never looks at a grant, so the far
-     * side would have received a bare 48-byte header, while this function
-     * advanced the offset and returned `count`: a silent zero-byte write
-     * reported as success. (The comment there claimed netd bridged the grant.
-     * It confused the EXPORT side - fsd_write_at, which does bridge, inbound -
-     * with the outbound relay, which does not.)
-     *
-     * The data must ride INLINE in the request, the way ulib::fs_write_at does
-     * it. That wire shape is not defined for NP_PWRITE yet: no export
-     * implements the verb (step 6 of docs/roadmap/roadmap-fid-verbs.md), so there is
-     * nothing to agree with and nothing to test against. Refusing is the
-     * honest answer until there is - and it is checkable today, which a second
-     * untested implementation would not be. */
-    if ((f->target & 0xff) == NS_TARGET_REMOTE) {
-        g_last_status = FS_ERR_NO_SUCH_VERB;
-        return -1;
-    }
+    /* A REMOTE write and a LOCAL write differ only in how the data reaches
+     * fsd: a LOCAL fid grants the buffer to fsd (which SAFECOPYs from it, so
+     * the payload is empty), a REMOTE fid sends the data INLINE in the request
+     * because NO GRANT CROSSES A MACHINE - netd's export bridges the inline
+     * bytes to the far fsd via its own GRANT_READ (step 7 of
+     * docs/roadmap/roadmap-fid-verbs.md; the export's fsd_pwrite). The remote
+     * refusal that stood here until NP_PWRITE was served is gone. */
+    int remote = ((f->target & 0xff) == NS_TARGET_REMOTE);
     size_t off = 0;
     while (off < count) {
         size_t chunk = count - off;
         if (chunk > FS_DATA_MAX) {
             chunk = FS_DATA_MAX;
         }
-        __os_syscall4(SYS_GRANT, FSD_TASK, (long)(p + off), (long)chunk, GRANT_READ);
-        long st = np_request(f->target, f->endpoint, NP_PWRITE, f->fid,
-                             (unsigned long)f->offset, chunk, 0, 0, 0, 0);
+        long st;
+        if (remote) {
+            st = np_request(f->target, f->endpoint, NP_PWRITE, f->fid,
+                            (unsigned long)f->offset, chunk,
+                            (const char *)(p + off), chunk, 0, 0);
+        } else {
+            __os_syscall4(SYS_GRANT, FSD_TASK, (long)(p + off), (long)chunk, GRANT_READ);
+            st = np_request(f->target, f->endpoint, NP_PWRITE, f->fid,
+                            (unsigned long)f->offset, chunk, 0, 0, 0, 0);
+        }
         if ((unsigned long)st >= FS_ERR_MIN) {
             return (off > 0) ? (ssize_t)off : -1;
         }
