@@ -81,6 +81,19 @@
 //! is abundant enough (512MB in the QEMU config) for this to not matter.
 //! Unaffected by the switch to real ELF loading - this trick only ever
 //! cared about the *total* region size, however that size gets derived.
+//!
+//! Alignment is only HALF the invariant. A 2MB-aligned region that is
+//! itself larger than 2MB straddles the next slot regardless, and that is
+//! exactly what a large `.bss` produces (memory size, not file size, so
+//! the staging bound never sees it): on 2026-09-13 a 1.9MB `.bss` gave a
+//! two-slot region and `mmu.rs` aliased the first slot onto the second,
+//! so the program executed zeros at its own base. The other half is
+//! therefore [`elf_region_size`]'s bound: code pages plus the fixed tail
+//! must not exceed `SLOT_PAGES`, else `LoaderError::RegionTooLarge`. Both
+//! halves are needed by every loading path, the runtime one
+//! (`tasks::allocate_runtime_region` rounds to `SLOT_ALIGN`) as much as
+//! this boot-time one; `mmu.rs`'s `build_view` checks containment itself
+//! and refuses a region that fails, so a path that forgets fails loudly.
 
 use alloc::string::String;
 use core::mem::size_of;
@@ -159,7 +172,17 @@ pub(crate) const GUARD_PAGES: u64 = 1;
 /// capture with it, so `cat big > file` captures the whole file instead of
 /// refusing. 256KB, still far inside one 2MB slot.
 const HEAP_PAGES: u64 = 64;
-const SLOT_ALIGN: u64 = 0x20_0000; // 2MB - see module doc comment.
+/// 2MB: the L2 slot `mmu.rs` splits into pages for a task's EL0 view, so
+/// the bound every region must fit (see the module doc comment). One
+/// definition, read by `tasks.rs`'s runtime region allocator (whose
+/// rounding is what makes "size fits a slot" mean "fits ONE slot") and
+/// pinned to `mmu.rs`'s own slot size by a compile-time assert there.
+pub(crate) const SLOT_ALIGN: u64 = 0x20_0000;
+/// The slot in pages: the one bound `elf_region_size` checks against, the
+/// figure its refusal prints, and what the tail is pinned below. Also the
+/// capacity of the L3 table `mmu.rs` fills for a view, which pins it to
+/// its own `ENTRIES_PER_TABLE`.
+pub(crate) const SLOT_PAGES: u64 = SLOT_ALIGN / PAGE_SIZE as u64;
 
 /// The fixed tail every loaded program's region ends in, in pages:
 /// `[heap][guard][stack]`, stack at the top (`sp_el0 = base + size`). The
@@ -169,40 +192,67 @@ const SLOT_ALIGN: u64 = 0x20_0000; // 2MB - see module doc comment.
 /// outside this module restates it.
 const TAIL_PAGES: u64 = HEAP_PAGES + GUARD_PAGES + STACK_PAGES;
 
-/// The heap area `(base, size)` inside a loaded program's region, computed
-/// from the region's `(base, size)` and the fixed `[code][heap][guard]
-/// [stack]` layout: the heap sits `TAIL_PAGES` down from the region end,
-/// and is `HEAP_PAGES` long. Returns `(0, 0)` for a region too small to
-/// have the tail (the idle task's single page). Used by the `heap_info`
-/// syscall.
-pub(crate) fn heap_area(base: u64, size: u64) -> (u64, u64) {
-    let page = PAGE_SIZE as u64;
-    if size < TAIL_PAGES * page {
-        return (0, 0);
-    }
-    (base + size - TAIL_PAGES * page, HEAP_PAGES * page)
+/// The tail alone must leave room for at least one page of code inside a
+/// slot, or `elf_region_size`'s slot check below refuses every program.
+/// Pinned where a heap or stack growth would trip it at `make build`.
+const _: () = assert!(
+    TAIL_PAGES < SLOT_PAGES,
+    "the fixed [heap][guard][stack] tail leaves no room for code in a 2MB region slot"
+);
+
+/// The most a program's loaded image may occupy, in bytes: the slot minus
+/// the tail. Reported to userland as `HEAP_INFO_IMAGE_MAX`, so the number
+/// the shell prints when `spawn` refuses an image is the one
+/// `elf_region_size` enforces, with no literal anywhere to keep in step.
+pub(crate) fn image_max() -> u64 {
+    (SLOT_PAGES - TAIL_PAGES) * PAGE_SIZE as u64
 }
 
-/// The stack `(base, size)` inside a loaded program's region: the top
-/// `STACK_PAGES` pages, so the stack pointer starts at `base + size` and
-/// grows down towards the guard page. `(0, 0)` for a region too small to
-/// have the tail, like `heap_area`. Reported by `heap_info`'s
+/// The tail of one region, resolved to addresses: `[heap][guard][stack]`
+/// up to the region's end. The ONE place the tail's geometry is turned
+/// into addresses; `heap_area`, `stack_area` and `guard_page_addr` are
+/// projections of it, so a layout change (a wider guard, a red zone) is
+/// made here once rather than kept in step across three helpers.
+struct Tail {
+    heap: (u64, u64),
+    guard: u64,
+    stack: (u64, u64),
+}
+
+/// `None` for a region too small to hold the tail at all (the idle task's
+/// single page); every loaded program's region holds it by construction
+/// (`elf_region_size` adds it).
+fn tail(base: u64, size: u64) -> Option<Tail> {
+    let page = PAGE_SIZE as u64;
+    if size < TAIL_PAGES * page {
+        return None;
+    }
+    let end = base + size;
+    let stack_base = end - STACK_PAGES * page;
+    let guard = stack_base - GUARD_PAGES * page;
+    let heap_base = guard - HEAP_PAGES * page;
+    Some(Tail { heap: (heap_base, HEAP_PAGES * page), guard, stack: (stack_base, STACK_PAGES * page) })
+}
+
+/// The heap area `(base, size)` inside a loaded program's region, or
+/// `(0, 0)` for a region with no tail. Used by the `heap_info` syscall.
+pub(crate) fn heap_area(base: u64, size: u64) -> (u64, u64) {
+    tail(base, size).map_or((0, 0), |t| t.heap)
+}
+
+/// The stack `(base, size)` inside a loaded program's region: the stack
+/// pointer starts at `base + size` and grows down towards the guard page.
+/// `(0, 0)` for a region with no tail. Reported by `heap_info`'s
 /// `HEAP_INFO_STACK_*` fields so a program that measures its own stack
 /// (`/bin/edtest`) asks the loader for the extent instead of restating
 /// `STACK_PAGES` - a restated copy went stale once and silently disabled
 /// that measurement.
 pub(crate) fn stack_area(base: u64, size: u64) -> (u64, u64) {
-    let page = PAGE_SIZE as u64;
-    if size < TAIL_PAGES * page {
-        return (0, 0);
-    }
-    (base + size - STACK_PAGES * page, STACK_PAGES * page)
+    tail(base, size).map_or((0, 0), |t| t.stack)
 }
 
 /// The stack guard page's address for an EL0 region, or `None` for a
-/// region too small to have the tail (the idle task's single page). The
-/// page immediately below the stack, `STACK_PAGES + GUARD_PAGES` pages
-/// down from the region end. `mmu.rs`'s `build_view` maps that one page
+/// region with no tail. `mmu.rs`'s `build_view` maps that one page
 /// EL1-only so a stack overflow into it faults cleanly. Lives here rather
 /// than in `mmu.rs` so the layout has one owner: `mmu.rs` used to derive
 /// this address itself from its own copy of `STACK_PAGES`, kept equal by a
@@ -210,12 +260,7 @@ pub(crate) fn stack_area(base: u64, size: u64) -> (u64, u64) {
 /// alone the guard landed mid-stack
 /// (docs/postmortems/true-when-written-postmortem.md).
 pub(crate) fn guard_page_addr(region: (u64, u64)) -> Option<u64> {
-    let (base, size) = region;
-    let page = PAGE_SIZE as u64;
-    if size < TAIL_PAGES * page {
-        return None;
-    }
-    Some(base + size - (STACK_PAGES + GUARD_PAGES) * page)
+    tail(region.0, region.1).map(|t| t.guard)
 }
 
 /// Generous headroom, not a real limit this project has ever come close
@@ -346,6 +391,29 @@ pub enum LoaderError {
     /// doc comment for why this is a fixed bound, not a `Vec`.
     TooManyProgramHeaders,
     NoLoadSegments,
+    /// The program's loaded image plus the fixed `[heap][guard][stack]`
+    /// tail would not fit one 2MB region slot (`SLOT_ALIGN`). `mmu.rs`'s
+    /// `build_view` splits exactly one 2MB L2 slot per task into 4KB pages
+    /// and fills one L3 table per view; a region past that would have its
+    /// two sub-slots share the one table, and the first slot's addresses
+    /// would resolve to the second's memory - witnessed 2026-09-13 as an
+    /// EL0 unknown-instruction fault at the region base, the program's code
+    /// fetched through the alias as zeros. Refused here instead. Carries
+    /// the region size in pages so the boot log can say by how much.
+    RegionTooLarge(u64),
+    /// A `PT_LOAD` segment's `p_vaddr + p_memsz` overflows, or lies
+    /// outside the region the caller sized for it. `elf_region_size`
+    /// refuses the overflow first (so a wrapped end is never mistaken for
+    /// a small one); `copy_segments` checks the bound again against the
+    /// region it is handed, because its alternative is a write past the
+    /// region on the strength of a claim made in another function.
+    SegmentOutsideRegion,
+    /// A `PT_LOAD` segment's `p_filesz` exceeds its `p_memsz`. The copy
+    /// moves `p_filesz` bytes and then zeroes `p_memsz - p_filesz`: an
+    /// inverted pair would copy past the segment's own extent and
+    /// underflow the zero length. Refused by `copy_segments`, at the
+    /// write, by the `checked_sub` that computes that length.
+    SegmentFileSizeOverMemSize,
     /// A relocation type other than `R_AARCH64_RELATIVE` showed up - this
     /// project has no imported symbols to resolve, so nothing else should
     /// ever legitimately appear here. Deliberately a hard error, not a
@@ -376,6 +444,12 @@ impl core::fmt::Display for LoaderError {
             LoaderError::WrongMachine(m) => write!(f, "unexpected ELF machine {m} (expected EM_AARCH64)"),
             LoaderError::TooManyProgramHeaders => write!(f, "program has more than {MAX_PROGRAM_HEADERS} program headers"),
             LoaderError::NoLoadSegments => write!(f, "program has no PT_LOAD segments"),
+            LoaderError::SegmentFileSizeOverMemSize => write!(f, "a PT_LOAD segment's file size exceeds its memory size"),
+            LoaderError::SegmentOutsideRegion => write!(f, "a PT_LOAD segment lies outside the region sized for the program"),
+            LoaderError::RegionTooLarge(pages) => write!(
+                f,
+                "program's image plus heap and stack needs {pages} pages, over the {SLOT_PAGES} the 2MB region slot holds"
+            ),
             LoaderError::UnsupportedRelocation(t) => write!(f, "unsupported relocation type {t} (only R_AARCH64_RELATIVE is supported - no dynamic linking)"),
         }
     }
@@ -658,17 +732,28 @@ fn find_section_by_name(file: &[u8], header: &ElfHeader, name: &[u8]) -> Result<
 }
 
 /// Copies every `PT_LOAD` segment's file bytes to `region_base +
-/// p_vaddr`, then zeroes `p_memsz - p_filesz` bytes past that - a real
-/// `.bss` region (if a program ever has one - `programs/linker.ld` still
-/// `ASSERT`s it doesn't, see that file's own doc comment) falls out of
-/// this for free, it isn't a separate feature.
+/// p_vaddr`, then zeroes `p_memsz - p_filesz` bytes past that: the
+/// program's `.bss`. Every C program has one (`programs/linker.ld`'s old
+/// no-`.bss` `ASSERT` went with the `.data`/`.bss` milestone), and a
+/// large one is exactly what `elf_region_size`'s slot bound is for.
 ///
 /// # Safety
 /// `region_base` must point to a freshly allocated, writable region of at
-/// least `region_size` bytes, and every `PT_LOAD` segment's `p_vaddr +
-/// p_memsz` must fit within it (true by construction - the caller derives
-/// `region_size` from exactly this).
-unsafe fn copy_segments(file: &[u8], phdrs: &[ProgramHeader], region_base: u64) -> Result<(), LoaderError> {
+/// least `region_size` bytes. Everything else this function relies on it
+/// checks itself, from the headers in hand: that each `PT_LOAD` ends
+/// inside `region_size` (also established upstream, where
+/// `elf_region_size` sizes the region from these fields, but a claim
+/// about another function's check is the kind of claim that stops being
+/// true in an edit to that other function) and that its file size does
+/// not exceed its memory size (checked HERE ONLY, by the `checked_sub`
+/// that computes the `.bss` length; nothing upstream looks at
+/// `p_filesz`).
+unsafe fn copy_segments(
+    file: &[u8],
+    phdrs: &[ProgramHeader],
+    region_base: u64,
+    region_size: u64,
+) -> Result<(), LoaderError> {
     for ph in phdrs {
         if ph.p_type != PT_LOAD {
             continue;
@@ -678,10 +763,14 @@ unsafe fn copy_segments(file: &[u8], phdrs: &[ProgramHeader], region_base: u64) 
         if src_end > file.len() {
             return Err(LoaderError::Truncated);
         }
+        let seg_end = ph.p_vaddr.checked_add(ph.p_memsz).ok_or(LoaderError::SegmentOutsideRegion)?;
+        if seg_end > region_size {
+            return Err(LoaderError::SegmentOutsideRegion);
+        }
+        let bss_len = ph.p_memsz.checked_sub(ph.p_filesz).ok_or(LoaderError::SegmentFileSizeOverMemSize)?;
         let dst = (region_base + ph.p_vaddr) as *mut u8;
         unsafe {
             core::ptr::copy_nonoverlapping(file[src_start..src_end].as_ptr(), dst, ph.p_filesz as usize);
-            let bss_len = ph.p_memsz - ph.p_filesz;
             if bss_len > 0 {
                 core::ptr::write_bytes(dst.add(ph.p_filesz as usize), 0, bss_len as usize);
             }
@@ -745,7 +834,7 @@ pub(crate) fn elf_region_size(program: &[u8]) -> Result<(ElfHeader, ProgramHeade
     let mut max_end = 0u64;
     for ph in phdrs.as_slice() {
         if ph.p_type == PT_LOAD {
-            let end = ph.p_vaddr.checked_add(ph.p_memsz).ok_or(LoaderError::Truncated)?;
+            let end = ph.p_vaddr.checked_add(ph.p_memsz).ok_or(LoaderError::SegmentOutsideRegion)?;
             max_end = max_end.max(end);
         }
     }
@@ -761,7 +850,23 @@ pub(crate) fn elf_region_size(program: &[u8]) -> Result<(ElfHeader, ProgramHeade
     // mapped EL1-only by mmu.rs so a stack overflow faults cleanly; the heap
     // (a raw buffer the program reaches via `heap_info`) is below the
     // guard, above the code.
+    //
+    // The whole region must fit one 2MB slot: that is the invariant
+    // `mmu.rs`'s per-task view rests on (one L2 slot split into one L3
+    // table), and nothing else checks it. A program's memory size is not
+    // its file size, so a large `.bss` passes the staging-buffer check and
+    // arrives here at a couple of megabytes. Bounded in PAGES, before any
+    // multiply: `max_end` is a `p_vaddr + p_memsz` the file chose, up to
+    // u64::MAX, and `code_pages * page_size` for one near the top wraps to
+    // a small number that would pass a check on the product (a debug
+    // build panics in the multiply instead; either way the check must
+    // come first).
+    // (`code_pages` is at most 2^52 after the `div_ceil`, so the sum
+    // cannot overflow; only the multiply could.)
     let region_pages = code_pages + TAIL_PAGES;
+    if region_pages > SLOT_PAGES {
+        return Err(LoaderError::RegionTooLarge(region_pages));
+    }
     let region_size = region_pages * page_size;
 
     Ok((header, phdrs, region_size))
@@ -786,7 +891,7 @@ pub(crate) unsafe fn populate_region(
     region_size: u64,
 ) -> Result<LoadedProgram, LoaderError> {
     // SAFETY: forwarded from this function's own contract.
-    unsafe { copy_segments(program, phdrs, region_base)? };
+    unsafe { copy_segments(program, phdrs, region_base, region_size)? };
 
     if let Some(rela_shdr) = find_section_by_name(program, header, b".rela.dyn")? {
         // SAFETY: segments were just copied into this same region above.

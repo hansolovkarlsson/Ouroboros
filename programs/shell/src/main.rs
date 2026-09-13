@@ -1801,6 +1801,13 @@ fn print_no_fs() {
     print_line("no filesystem mounted this boot (see the kernel boot log - `make run`'s disk is FAT16, not FAT32; use `make run-image` for disk commands)");
 }
 
+/// The shell's own spawn refusal: an empty program file. The kernel folds
+/// that into `SPAWN_ERR_TOO_LARGE` (the staging bound), but `spawn_path`
+/// knows it staged zero bytes before the kernel is asked, so it says so.
+/// A small value, below every kernel code (all `>= FS_ERR_MIN`) and above
+/// `0`, the existing "failed" sentinel, so it collides with nothing.
+const SHELL_ERR_EMPTY_PROGRAM: u64 = 1;
+
 /// Prints `"<cmd>: <one specific reason>"` for a kernel `FS_ERR_*` code -
 /// the payoff of splitting the old single collapsed `FS_ERROR` sentinel:
 /// no more guess-list error messages. Integer `match` plus `print_str`
@@ -1811,6 +1818,22 @@ fn print_no_fs() {
 fn print_fs_error(cmd: &str, code: u64) {
     print_str(cmd);
     print_str(": ");
+    // The two spawn size refusals print their bounds as the kernel holds
+    // them (the staging size from the ABI constant the kernel sizes its
+    // buffer from; the image ceiling from the running kernel itself), not
+    // a restated "128KB"/"2MB" that nothing would keep true.
+    if code == syscall_abi::SPAWN_ERR_TOO_LARGE {
+        print_str("program file is over the kernel's ");
+        print_u64(syscall_abi::SPAWN_STAGING_SIZE as u64 / 1024);
+        print_line("KB staging buffer (see ls -l)");
+        return;
+    }
+    if code == syscall_abi::SPAWN_ERR_IMAGE_TOO_LARGE {
+        print_str("program image (code, data and .bss together) is over the ");
+        print_u64(syscall(syscall_abi::HEAP_INFO, syscall_abi::HEAP_INFO_IMAGE_MAX) / 1024);
+        print_line("KB a program may occupy (the region slot minus the loader's heap, guard page and stack)");
+        return;
+    }
     print_line(match code {
         // This table is a second copy of `ulib::fs_error_msg`'s - the shell
         // keeps its own fs layer and cannot share it. The two had already
@@ -1844,7 +1867,9 @@ fn print_fs_error(cmd: &str, code: u64) {
         syscall_abi::MSG_ERR_TOO_BIG => "message too big (64-byte limit)",
         syscall_abi::MSG_ERR_DENIED => "permission denied (the IPC capability policy doesn't permit reaching that task)",
         syscall_abi::SPAWN_ERR_BAD_ELF => "not a loadable program (bad ELF)",
-        syscall_abi::SPAWN_ERR_TOO_LARGE => "program too large for the kernel's staging buffer (or empty)",
+        // SPAWN_ERR_TOO_LARGE and SPAWN_ERR_IMAGE_TOO_LARGE are handled
+        // above (they print numbers).
+        SHELL_ERR_EMPTY_PROGRAM => "program file is empty",
         syscall_abi::SPAWN_ERR_NO_FREE_SLOT => "no free task slot",
         syscall_abi::TASK_ERR_NO_SUCH_TASK => "no such task (see ps)",
         // Names the whole protected set: a message listing a stale subset is how
@@ -2538,14 +2563,19 @@ fn spawn_path(path: &str, argv: &[&str], cwd: &[u8; CWD_SIZE], cwd_len: usize, e
             break;
         }
         if syscall4(syscall_abi::SPAWN_STAGE, offset, chunk.as_ptr() as u64, n, 0) != 0 {
-            // Only reachable by staging past the kernel's 128KB buffer
-            // - the same too-large refusal SPAWN itself would give.
+            // Only reachable by staging past the kernel's staging buffer
+            // - the same refusal SPAWN itself gives for that.
             return Err(syscall_abi::SPAWN_ERR_TOO_LARGE);
         }
         offset += n;
         if n < chunk.len() as u64 {
             break;
         }
+    }
+    if offset == 0 {
+        // The kernel would refuse this as SPAWN_ERR_TOO_LARGE too; say
+        // what it actually is.
+        return Err(SHELL_ERR_EMPTY_PROGRAM);
     }
     // arg1 is the spawned program's stdout target: CON_TASK for a plain
     // `exec` (output straight to the console), or the shell's own task

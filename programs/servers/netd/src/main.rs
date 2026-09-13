@@ -1888,7 +1888,7 @@ fn find_or_open_session(mac: &[u8; 6], dst_mac: &[u8; 6], ip: [u8; 4], port: u16
 /// they are not duplicated at each deeper level. The session path still nests
 /// one call deeper than the one-shot `oneshot_rmount` (a `find_or_open` between
 /// `session_rmount` and `client_connect`), which is why the EL0 stack is 40 KB,
-/// not 32 KB (`kernel/src/loader.rs`/`mmu.rs` `STACK_PAGES`): the one-shot path
+/// not 32 KB (`kernel/src/loader.rs`'s `STACK_PAGES`): the one-shot path
 /// just fit 32 KB and this ran ~1-3 KB past it. Verified on the two-VM rig by
 /// `cbig`, and its overflow was caught by the guard first.
 #[allow(clippy::too_many_arguments)]

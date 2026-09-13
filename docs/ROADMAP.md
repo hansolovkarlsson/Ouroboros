@@ -1830,7 +1830,14 @@ would otherwise silently shrink into looking like nothing was ever found.
   fix (#134), all PRE-EXISTING.** The fix itself, the `GUARD_PAGES` pin and
   the dead `edtest` probe were done in the PR; these are the wider copies of
   the same layout the review found around it.
-  - **Nothing checks that a loaded region fits one 2 MB slot.**
+  - ~~**Nothing checks that a loaded region fits one 2 MB slot.**~~ **Fixed
+    2026-09-13** (the PR after #134): `elf_region_size` refuses a region over
+    `SLOT_ALIGN` with `LoaderError::RegionTooLarge`, mapped to
+    `SPAWN_ERR_TOO_LARGE`, and a `const` assert pins the tail below the slot.
+    Witnessed first: a C program with a 1.9 MB `.bss` faulted at its own
+    region base with an unknown-instruction exception (its code fetched
+    through the aliased table as zeros); with the check it is refused by
+    name. The original finding, kept:
     `elf_region_size` sums code pages and the fixed tail with no bound, while
     `build_view` fills one L3 table per view on the strength of a "fits one
     slot by construction" comment. A `.bss` past ~1.7 MB passes the staging

@@ -145,15 +145,17 @@ pub extern "C" fn _start() -> ! {
     // exactly what this step must not accept on faith - so run the same probe
     // around a function with a KNOWN extra 4 KB frame and check the reading
     // moves by about that much. If it does not, the number below means nothing.
+    // `plain` is `(peak bytes, stack size)`: the report below divides by
+    // the same extent the probe measured against.
     let plain = measure_stack(&SK1);
     let padded = measure_stack_padded(&SK1);
     match (plain, padded) {
-        (Some(a), Some(b)) if b > a + 3072 && b < a + 8192 => {
+        (Some((a, _)), Some(b)) if b > a + 3072 && b < a + 8192 => {
             out(target, b"\r\n  [ok]   stack probe responds to a known 4KB frame (+");
             put_dec(target, (b - a) as u64);
             out(target, b" bytes)\r\n");
         }
-        (Some(a), Some(b)) => {
+        (Some((a, _)), Some(b)) => {
             out(target, b"\r\n  [FAIL] stack probe did not respond as expected: ");
             put_dec(target, a as u64);
             out(target, b" then ");
@@ -164,10 +166,9 @@ pub extern "C" fn _start() -> ! {
         _ => out(target, b"\r\n  [warn] stack measurement unavailable\r\n"),
     }
 
-    let calibrated = matches!((plain, padded), (Some(a), Some(b)) if b > a + 3072 && b < a + 8192);
-    let (_, stack_size) = ulib::stack_extent();
+    let calibrated = matches!((plain, padded), (Some((a, _)), Some(b)) if b > a + 3072 && b < a + 8192);
     match plain {
-        Some(used) if calibrated => {
+        Some((used, stack_size)) if calibrated => {
             out(target, b"\r\n  peak stack for sign+verify: ");
             put_dec(target, used as u64);
             out(target, b" bytes of ");
@@ -228,8 +229,8 @@ fn put_dec(target: u64, v: u64) {
 /// instead, a copy of the loader's page count that went stale when the stack
 /// grew and silently disabled this measurement; the sanity check below is
 /// what refused, and the calibration in `_start` is what made that visible.)
-fn measure_stack(secret: &[u8; 32]) -> Option<usize> {
-    measure_stack_inner(secret, false).map(|(used, _)| used)
+fn measure_stack(secret: &[u8; 32]) -> Option<(usize, usize)> {
+    measure_stack_inner(secret, false)
 }
 
 /// `(peak bytes used, stack size)`, or `None` if the probe could not run.

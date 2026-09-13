@@ -268,7 +268,7 @@ fn valid_msg_range(ptr: u64, len: u64) -> bool {
 /// matches this project's established "fixed static buffer, no heap"
 /// pattern for every other runtime buffer (`fat32.rs`'s callers,
 /// `shell/src/main.rs`'s own read buffers).
-const SPAWN_STAGING_SIZE: usize = 128 * 1024;
+const SPAWN_STAGING_SIZE: usize = syscall_abi::SPAWN_STAGING_SIZE;
 
 struct SpawnStagingCell(core::cell::UnsafeCell<[u8; SPAWN_STAGING_SIZE]>);
 // SAFETY: single-core; only ever touched from the SPAWN_STAGE/SPAWN
@@ -393,6 +393,11 @@ fn spawn_staged(total_len: u64, stdout_target: u64, argv_len: u64, cwd_len: u64)
 
     let (header, phdrs, region_size) = match loader::elf_region_size(program) {
         Ok(result) => result,
+        // A well-formed program whose image plus heap and stack would not
+        // fit one 2MB region slot: its own code, so a spawner can tell
+        // "shrink the static data" from the staging bound's "shrink the
+        // file" above. The ceiling itself is HEAP_INFO_IMAGE_MAX.
+        Err(loader::LoaderError::RegionTooLarge(_)) => return syscall_abi::SPAWN_ERR_IMAGE_TOO_LARGE,
         Err(_) => return syscall_abi::SPAWN_ERR_BAD_ELF,
     };
     let region_base = tasks::allocate_runtime_region(region_size);
@@ -942,6 +947,7 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
                 syscall_abi::HEAP_INFO_SIZE => heap_size,
                 syscall_abi::HEAP_INFO_STACK_BASE => stack_base,
                 syscall_abi::HEAP_INFO_STACK_SIZE => stack_size,
+                syscall_abi::HEAP_INFO_IMAGE_MAX => loader::image_max(),
                 _ => 0,
             }
         }

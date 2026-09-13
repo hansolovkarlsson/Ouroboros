@@ -68,7 +68,7 @@ use core::ffi::c_void;
 use core::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 use crate::exceptions::Context;
-use crate::loader::LoadedProgram;
+use crate::loader::{LoadedProgram, SLOT_ALIGN};
 
 /// Slots 0/1 are always the loaded program and the idle task (`init`);
 /// slots 2/3/4 are reserved for the boot-loaded servers - the filesystem
@@ -238,15 +238,6 @@ pub(crate) fn may_send(src: usize, dest: usize) -> bool {
     holds_send_right(src, dest)
 }
 
-/// 2MB - matches `loader.rs`'s own `SLOT_ALIGN` (a plain numeric
-/// constant, not shared across modules - simplest to just duplicate the
-/// value rather than build a shared-constants module for one number).
-/// Every region [`allocate_runtime_region`] hands out is a multiple of
-/// this, satisfying `mmu.rs`'s "each EL0 region fits inside one 2MB slot"
-/// invariant the same way `loader.rs`'s own over-allocate-and-trim trick
-/// already does for task 0's boot-time-loaded program.
-const RUNTIME_SLOT_ALIGN: u64 = 0x20_0000;
-
 /// Bump allocator for dynamically `spawn`ed programs' EL0 regions -
 /// deliberately the simplest correct thing, not a real allocator: grows
 /// *downward* from the top of discovered RAM (`init_runtime_allocator`),
@@ -267,10 +258,13 @@ static NEXT_RUNTIME_REGION_TOP: AtomicU64 = AtomicU64::new(0);
 /// any `allocate_runtime_region` call.
 pub(crate) fn init_runtime_allocator() {
     let (_, max_addr) = crate::mmu::ram_span();
-    NEXT_RUNTIME_REGION_TOP.store(max_addr & !(RUNTIME_SLOT_ALIGN - 1), Ordering::Relaxed);
+    NEXT_RUNTIME_REGION_TOP.store(max_addr & !(SLOT_ALIGN - 1), Ordering::Relaxed);
 }
 
-/// Hands out `size` bytes (rounded up to a 2MB multiple) of fresh RAM,
+/// Hands out `size` bytes (rounded up to a multiple of the loader's
+/// `SLOT_ALIGN`, so a region `elf_region_size` has bounded to one slot's
+/// worth of bytes also lies inside ONE slot, the invariant `mmu.rs`'s
+/// per-task view rests on) of fresh RAM,
 /// already identity-mapped EL1-accessible (all of discovered RAM is,
 /// unconditionally - see `mmu.rs`) but not yet EL0-accessible; the caller
 /// still has to fold the returned `(base, size)` into a fresh call to
@@ -279,7 +273,7 @@ pub(crate) fn init_runtime_allocator() {
 /// comment for why that's an accepted, deliberate limit for now rather
 /// than a real allocator.
 pub(crate) fn allocate_runtime_region(size: u64) -> u64 {
-    let aligned_size = size.next_multiple_of(RUNTIME_SLOT_ALIGN);
+    let aligned_size = size.next_multiple_of(SLOT_ALIGN);
     NEXT_RUNTIME_REGION_TOP.fetch_sub(aligned_size, Ordering::Relaxed) - aligned_size
 }
 
@@ -294,7 +288,7 @@ pub(crate) fn allocate_runtime_region(size: u64) -> u64 {
 /// long-lived middle task exiting after a later allocation just means
 /// that one region stays unavailable for the rest of the boot.
 pub(crate) fn free_runtime_region(base: u64, size: u64) {
-    let aligned_size = size.next_multiple_of(RUNTIME_SLOT_ALIGN);
+    let aligned_size = size.next_multiple_of(SLOT_ALIGN);
     let _ = NEXT_RUNTIME_REGION_TOP.compare_exchange(
         base,
         base + aligned_size,

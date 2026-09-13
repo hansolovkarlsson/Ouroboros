@@ -145,7 +145,40 @@ use core::cell::UnsafeCell;
 
 use uefi::mem::memory_map::{MemoryMap, MemoryMapOwned, MemoryType};
 
-use crate::loader::{guard_page_addr, GUARD_PAGES};
+use core::sync::atomic::{AtomicU64, Ordering};
+
+use crate::loader::{guard_page_addr, GUARD_PAGES, SLOT_ALIGN, SLOT_PAGES};
+
+/// The slot `build_view` splits (`MIB2`) and the slot the loader bounds
+/// every region to (`SLOT_ALIGN`) are one quantity in two modules; pinned
+/// so the loader's bound cannot silently stop meaning "fits one slot".
+/// Likewise the loader's bound in pages and the L3 table `build_view`
+/// fills: the bound is provably the table's capacity only if they agree.
+const _: () = assert!(SLOT_ALIGN == MIB2, "the loader's region slot must be the L2 slot build_view splits");
+const _: () = assert!(SLOT_PAGES == ENTRIES_PER_TABLE as u64, "the loader's slot in pages must be one L3 table");
+
+/// A region `build_view` refused (see there) while no console existed to
+/// say so: the boot-time views are built before any console on the
+/// platforms that have only a framebuffer, so the warning is kept here
+/// and `report_deferred_warnings` prints it once a console is up. Base
+/// and size of the last such region; `0` size means none.
+static DEFERRED_REFUSAL: (AtomicU64, AtomicU64) = (AtomicU64::new(0), AtomicU64::new(0));
+
+/// Prints a `build_view` refusal that happened before a console existed.
+/// Called from `main.rs` once every console mechanism has had its turn.
+pub(crate) fn report_deferred_warnings() {
+    let size = DEFERRED_REFUSAL.1.swap(0, Ordering::Relaxed);
+    if size != 0 {
+        let base = DEFERRED_REFUSAL.0.load(Ordering::Relaxed);
+        refusal_warning(base, size);
+    }
+}
+
+fn refusal_warning(base: u64, size: u64) {
+    crate::console::println_force!(
+        "Ouroboros kernel: WARNING: EL0 region {base:#x}+{size:#x} does not fit one 2MB slot, mapping none of it EL0"
+    );
+}
 
 /// `build_view` maps exactly ONE page EL1-only at the address
 /// `guard_page_addr` returns. If the loader ever reserved a wider guard,
@@ -391,12 +424,16 @@ fn overlaps(region: (u64, u64), start: u64, end: u64) -> bool {
 /// since firmware reports it as LOADER_CODE/LOADER_DATA in the same map.
 /// `el0_regions` are the (start, size) pairs that get EL0 access -
 /// everything else in RAM stays EL1-only. Each must independently fit
-/// within one 2MB-aligned slot (true by construction: `loader.rs`
-/// over-allocates and trims to guarantee this for task 0's loaded
-/// program, and `tasks.rs`'s `IdleRegion` is a single 4KB page, which can
-/// never straddle a 2MB boundary regardless of where it lands) - see
-/// `MAX_EL0_REGIONS`'s doc comment for what happens if that's ever
-/// violated.
+/// within one 2MB-aligned slot. That rests on two checks, not on
+/// construction: `loader::elf_region_size` refuses a region larger than
+/// `SLOT_ALIGN` (before it, a 1.9MB `.bss` produced a two-slot region
+/// and `build_view` aliased it, 2026-09-13), and every region base is
+/// 2MB-aligned (`loader.rs` over-allocates and trims task 0's, and
+/// `tasks::allocate_runtime_region` rounds to `SLOT_ALIGN`); `tasks.rs`'s
+/// `IdleRegion` is a single 4KB page and cannot straddle. `build_view`
+/// still checks containment itself, and gives a region that fails no EL0
+/// mapping at all, with a forced (or, before any console exists,
+/// deferred) warning, rather than aliasing - see there.
 ///
 /// `extra_devices` are additional discovered device regions (`(base,
 /// size)`) that need to stay mapped and accessible after this switch, on
@@ -606,6 +643,39 @@ unsafe fn build_view(
 ) {
     let l1 = unsafe { &mut *L1_TABLES[view].0.get() };
 
+    // One L2 and one L3 per view is enough because a region fits one 2MB
+    // slot (the loader's bound plus 2MB-aligned bases, see
+    // `install_identity_map`'s safety comment), so it touches exactly one
+    // 1GB block and one 2MB slot. Checked rather than trusted, and checked
+    // as CONTAINMENT (first and last byte in the same slot) rather than as
+    // "a second sub-slot in this block": a region straddling a 1GB
+    // boundary would refill the same per-view L2 for the second block, a
+    // case a per-block flag cannot see. A region that fails gets NO EL0
+    // mapping at all, so the task faults cleanly on its first instruction
+    // (a spawned task is then killed and reaped; a supervised server is
+    // restarted up to its per-boot cap, repeating this warning; the boot
+    // shell or idle task halts the kernel, see `exceptions.rs`) rather
+    // than half of it aliasing the other half (the program then executes
+    // zeros at its own base, which is how this was found). Forced past
+    // the console's quiet mode, since on the framebuffer platforms it is
+    // the only trace the fault will leave; and DEFERRED when there is no
+    // console yet at all, which is the case for every boot-time view on
+    // those same platforms (the framebuffer console comes up after
+    // `install_identity_map`), so `main.rs` prints it later.
+    let (base, size) = el0_region;
+    let contained = size == 0 || base / MIB2 == (base + size - 1) / MIB2;
+    let el0_region = if contained {
+        el0_region
+    } else {
+        if crate::console::is_installed() {
+            refusal_warning(base, size);
+        } else {
+            DEFERRED_REFUSAL.0.store(base, Ordering::Relaxed);
+            DEFERRED_REFUSAL.1.store(size, Ordering::Relaxed);
+        }
+        (0, 0)
+    };
+
     // Device: fixed low 1GB. See module doc comment for why this one stays
     // a hardcoded convention rather than discovered.
     l1[0] = device_block(0);
@@ -623,11 +693,8 @@ unsafe fn build_view(
 
             if overlaps(el0_region, block_start, block_end) {
                 // This view's own region lives in this block - split it
-                // so only the region's own pages get EL0 access. One L2
-                // and one L3 per view is always enough: a region fits
-                // one 2MB slot by construction (see
-                // `install_identity_map`'s safety comment), so it
-                // touches exactly one 1GB block and one 2MB slot.
+                // so only the region's own pages get EL0 access (one
+                // sub-slot: the containment check above).
                 let l2 = unsafe { &mut *EL0_L2_TABLES[view].0.get() };
                 for (i, entry) in l2.iter_mut().enumerate() {
                     let sub_base = block_start + (i as u64) * MIB2;

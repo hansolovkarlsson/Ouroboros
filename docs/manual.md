@@ -504,7 +504,7 @@ bytes per buffer** (`MAX_USER_LEN`) — longer buffers are rejected, not
 truncated.
 
 **Error convention:** all failure codes live in a reserved top band of
-`u64` — **any return value `>= FS_ERR_MIN` (`u64::MAX - 40`, and it moves
+`u64` — **any return value `>= FS_ERR_MIN` (`u64::MAX - 42`, and it moves
 down each time a code is reserved - check `syscall-abi`, never this
 sentence) is an error**; everything below is a real result (byte counts, sizes, exit
 statuses). `NO_FS` (`MAX-1`) means no filesystem is mounted this boot.
@@ -534,7 +534,7 @@ statuses). `NO_FS` (`MAX-1`) means no filesystem is mounted this boot.
 | 27 | `block_read` | LBA, buf ptr | Read one 512-byte sector (fsd only) |
 | 28 | `block_write` | LBA, buf ptr | Write one 512-byte sector (fsd only) |
 | 29 | `msg_call` | dest, req ptr/len, reply ptr | Synchronous request/response: send + block for a reply *from `dest` specifically*; sub-tick round trips via direct delivery. Reply buffer is a fixed 64 bytes |
-| 30 | `spawn_stage` | offset, chunk ptr/len | Feed one chunk of a program image into the kernel's 128KB staging buffer for `spawn` |
+| 30 | `spawn_stage` | offset, chunk ptr/len | Feed one chunk of a program image into the kernel's staging buffer (`SPAWN_STAGING_SIZE`) for `spawn` |
 
 **File operations** are `FSOP_*` requests to the filesystem server
 (task 2), sent via `msg_call`: a 56-byte message (op + six LE u64
@@ -547,8 +547,8 @@ syscalls' exact return semantics. Ops: `LIST_DIR`, `READ_FILE`,
 Filesystem failures return a specific `FS_ERR_*` code (`NOT_FOUND`,
 `NOT_A_FILE`, `NOT_A_DIRECTORY`, `INVALID_NAME`, `ALREADY_EXISTS`,
 `NOT_EMPTY`, `IS_ROOT`, `DISK_FULL`, `IO`); `spawn` adds
-`SPAWN_ERR_BAD_ELF`/`SPAWN_ERR_TOO_LARGE`/`SPAWN_ERR_NO_FREE_SLOT`;
-the task syscalls add `TASK_ERR_NO_SUCH_TASK`/`TASK_ERR_PROTECTED`;
+`SPAWN_ERR_BAD_ELF`/`SPAWN_ERR_TOO_LARGE`/`SPAWN_ERR_IMAGE_TOO_LARGE`/
+`SPAWN_ERR_NO_FREE_SLOT`; the task syscalls add `TASK_ERR_NO_SUCH_TASK`/`TASK_ERR_PROTECTED`;
 the block syscalls add `BLOCK_ERR_NO_DEVICE`/`BLOCK_ERR_IO`/
 `BLOCK_ERR_DENIED`.
 

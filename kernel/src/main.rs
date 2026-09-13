@@ -621,6 +621,10 @@ fn main() -> Status {
     }
 
     // SAFETY: every loaded EL0 region was just mapped EL0-accessible above.
+    // Every console mechanism has had its turn by now: say so if a
+    // boot-time EL0 region was refused by `build_view` back when there was
+    // nothing to say it through (the framebuffer platforms).
+    mmu::report_deferred_warnings();
     unsafe { tasks::init(&program, fsd.as_ref(), cond.as_ref(), netd.as_ref(), accountd.as_ref()) };
 
     console::println!("Ouroboros kernel: shell ready - type and press Enter");

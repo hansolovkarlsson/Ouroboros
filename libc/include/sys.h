@@ -43,6 +43,7 @@
 #define HEAP_INFO_SIZE 1
 #define HEAP_INFO_STACK_BASE 2
 #define HEAP_INFO_STACK_SIZE 3
+#define HEAP_INFO_IMAGE_MAX 4
 
 /* ninep verbs (ninep-abi; NP_BASE = 0x100). */
 #define NP_BASE 0x100
@@ -72,7 +73,7 @@
 #define STAT_MODE_OFF 20u
 
 /* Floor of the reserved error band: any syscall/fs return >= this is an error
- * (mirrors syscall-abi's FS_ERR_MIN = u64::MAX - 40). Hand-mirrored, so it can
+ * (mirrors syscall-abi's FS_ERR_MIN = u64::MAX - 42). Hand-mirrored, so it can
  * drift: the Rust constant moves DOWN whenever a new error code is reserved,
  * and a C caller compiled against a stale floor reads those new codes as
  * successful return values. syscall-abi's own definition carries a note back
@@ -83,7 +84,7 @@
 #define FS_ERR_PERM (~0UL - 32UL)
 #define FS_ERR_NO_SUCH_VERB (~0UL - 39UL)
 
-#define FS_ERR_MIN (~0UL - 40UL)
+#define FS_ERR_MIN (~0UL - 42UL)
 
 /* A failure that never reached a server: no free fd slot, or a path this
  * library could not resolve. Deliberately NOT a wire value, so it sits BELOW
@@ -92,7 +93,7 @@
  * it, which is how cremote's why() came to call every client-side refusal "no
  * error recorded". The floor moves down as codes are reserved; the assert
  * makes a move onto this value a build failure rather than an alias. */
-#define FS_ERR_CLIENT (~0UL - 41UL)
+#define FS_ERR_CLIENT (~0UL - 43UL)
 _Static_assert(FS_ERR_CLIENT < FS_ERR_MIN,
                "FS_ERR_CLIENT must stay below the wire error band; the floor moved onto it");
 
