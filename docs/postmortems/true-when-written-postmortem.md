@@ -578,6 +578,31 @@ now asks the loader for the extent through `HEAP_INFO`'s new stack fields.
 Measured both ways on the same kernel: the old probe prints "unavailable"
 twice, the new one calibrates and reports 3456 of 40960.)*
 
+## The copy is always one hop further out than the fix (2026-09-13)
+
+The shared-constant fix landed the next morning and was reviewed five times
+across two pull requests before it was done, and the sequence is the lesson.
+Sharing `STACK_PAGES` left `mmu.rs` re-deriving the layout from the shared
+numbers. Moving the derivation into the loader left `/bin/edtest` with its own
+`STACK_BYTES`, stale since the growth, its measurement silently dead. Fixing
+that left the slot size in three untied copies. Tying those left `build_view`
+trusting the invariant with a fail-safe that was partial and, on the
+framebuffer platforms, silent. Each fix was right. Each review found the same
+shape one file further from the last one. Nothing in the tree could have
+found any of them, because each was a claim beside a check rather than a
+check.
+
+The other lesson of the day is about my own claims in review. The reviews
+asked four times for a distinct spawn error code, and I refused three times
+because "moving `FS_ERR_MIN` is a cross-node flag day". That sentence is true
+and is written in the ABI, scoped to *a code that crosses the wire*; no spawn
+code does, and `FS_ERR_BUSY` had moved the floor on that very reasoning six
+days earlier. A true statement reused past the case it was written for is
+this postmortem's spine applied to an argument instead of a comment, and it
+was harder to see because I had made it, restated it, and recorded it in two
+commit messages and a pull request body by the time it was checked. The
+review that overturned it did so by reading the doc I was citing.
+
 ## What actually worked
 
 Three things, none of them "be more careful".

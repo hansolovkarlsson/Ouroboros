@@ -1852,6 +1852,17 @@ would otherwise silently shrink into looking like nothing was ever found.
     shell's `main.rs` (16 KB), `tree`'s `main.rs` (~32 KB). The number is
     40 KB. State the relationship ("the loader's `STACK_PAGES`") where a
     value is not load-bearing, and the value in one place where it is.
+    *Three of the twelve went in #135 (2026-09-13): `processes.md`'s
+    memory-model paragraph, `architecture.md`'s layout line, and the ABI's
+    `HEAP_INFO` doc. The rest stand.*
+  - **`activate_task` clamps an out-of-range view index silently**
+    (`L0_TABLES[view.min(MAX_EL0_REGIONS - 1)]`, `mmu.rs`), so a task past
+    the last view would run under another task's translation tables, the
+    opposite of a fail-safe, and nothing documents it. Noticed in passing by
+    the fourth review of #135 (2026-09-13) while a dangling pointer to a
+    "fail-safe" that no longer existed was being removed. Unreachable while
+    `NUM_TASKS == MAX_EL0_REGIONS`; wants a `const` assert tying the two, or
+    a refusal in place of the clamp.
   - **The stack top is hand-derived as `base + size` at seven sites across
     three files** (`tasks.rs` five times, `supervisor.rs`, `syscall.rs`),
     inside an identical `Context` literal. Anything ever placed above the
