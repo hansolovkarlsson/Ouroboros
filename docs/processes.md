@@ -78,8 +78,9 @@ don't add key/value parsing preemptively.
 ## Memory model
 
 A loaded program gets one EL0-accessible region: its code (and rodata) at
-the base, then one inaccessible **guard page**, then a fixed stack
-allowance (currently 8 pages, 32KB), with the stack pointer starting at the
+the base, then a fixed **heap area**, then one inaccessible **guard
+page**, then a fixed stack allowance (the loader's `STACK_PAGES`; ask
+`heap_info` for the extent rather than restating it), with the stack pointer starting at the
 top and growing down - so a stack overflow lands in the guard page and
 takes a clean fault instead of corrupting the code below (see "Stack guard
 page" in `CLAUDE.md`; the guard has repeatedly caught real overflows, each
@@ -113,11 +114,11 @@ RAM in the QEMU config, that's not a meaningful cost.
 so `.bss` counts, not just the file's bytes) plus the loader's fixed tail
 (`TAIL_PAGES` in `loader.rs`: heap, guard page, stack) must fit inside that
 one 2MB slot, and since 2026-09-13 the loader refuses one that does not.
-From `spawn` that is `SPAWN_ERR_TOO_LARGE`, the same code as the
-staging-buffer bound and the empty-file case; the shell tells the three
-apart itself (it knows what it staged) and prints the ceiling from
-`SPAWN_IMAGE_MAX`, the ABI's copy of the slot minus the tail, which the
-loader pins at build time;
+From `spawn` that is `SPAWN_ERR_IMAGE_TOO_LARGE`, its own code (the
+staging-buffer bound and an empty file are `SPAWN_ERR_TOO_LARGE`; the
+shell names the empty case itself, since it knows it staged nothing), and
+the shell prints the ceiling the running kernel reports through
+`heap_info`'s `HEAP_INFO_IMAGE_MAX` field;
 for a server loaded at boot the boot log prints the loader's refusal, which
 names the page counts, and the kernel carries on without that server; for
 the shell itself the kernel panics at boot, since there is nothing to run.

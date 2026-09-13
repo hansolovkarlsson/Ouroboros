@@ -145,12 +145,40 @@ use core::cell::UnsafeCell;
 
 use uefi::mem::memory_map::{MemoryMap, MemoryMapOwned, MemoryType};
 
-use crate::loader::{guard_page_addr, GUARD_PAGES, SLOT_ALIGN};
+use core::sync::atomic::{AtomicU64, Ordering};
+
+use crate::loader::{guard_page_addr, GUARD_PAGES, SLOT_ALIGN, SLOT_PAGES};
 
 /// The slot `build_view` splits (`MIB2`) and the slot the loader bounds
 /// every region to (`SLOT_ALIGN`) are one quantity in two modules; pinned
 /// so the loader's bound cannot silently stop meaning "fits one slot".
+/// Likewise the loader's bound in pages and the L3 table `build_view`
+/// fills: the bound is provably the table's capacity only if they agree.
 const _: () = assert!(SLOT_ALIGN == MIB2, "the loader's region slot must be the L2 slot build_view splits");
+const _: () = assert!(SLOT_PAGES == ENTRIES_PER_TABLE as u64, "the loader's slot in pages must be one L3 table");
+
+/// A region `build_view` refused (see there) while no console existed to
+/// say so: the boot-time views are built before any console on the
+/// platforms that have only a framebuffer, so the warning is kept here
+/// and `report_deferred_warnings` prints it once a console is up. Base
+/// and size of the last such region; `0` size means none.
+static DEFERRED_REFUSAL: (AtomicU64, AtomicU64) = (AtomicU64::new(0), AtomicU64::new(0));
+
+/// Prints a `build_view` refusal that happened before a console existed.
+/// Called from `main.rs` once every console mechanism has had its turn.
+pub(crate) fn report_deferred_warnings() {
+    let size = DEFERRED_REFUSAL.1.swap(0, Ordering::Relaxed);
+    if size != 0 {
+        let base = DEFERRED_REFUSAL.0.load(Ordering::Relaxed);
+        refusal_warning(base, size);
+    }
+}
+
+fn refusal_warning(base: u64, size: u64) {
+    crate::console::println_force!(
+        "Ouroboros kernel: WARNING: EL0 region {base:#x}+{size:#x} does not fit one 2MB slot, mapping none of it EL0"
+    );
+}
 
 /// `build_view` maps exactly ONE page EL1-only at the address
 /// `guard_page_addr` returns. If the loader ever reserved a wider guard,
@@ -404,9 +432,8 @@ fn overlaps(region: (u64, u64), start: u64, end: u64) -> bool {
 /// `tasks::allocate_runtime_region` rounds to `SLOT_ALIGN`); `tasks.rs`'s
 /// `IdleRegion` is a single 4KB page and cannot straddle. `build_view`
 /// still checks containment itself, and gives a region that fails no EL0
-/// mapping at all, with a forced warning, rather than aliasing - see
-/// there, and `MAX_EL0_REGIONS`'s doc comment for the other violation it
-/// fails safe on.
+/// mapping at all, with a forced (or, before any console exists,
+/// deferred) warning, rather than aliasing - see there.
 ///
 /// `extra_devices` are additional discovered device regions (`(base,
 /// size)`) that need to stay mapped and accessible after this switch, on
@@ -631,15 +658,21 @@ unsafe fn build_view(
     // than half of it aliasing the other half (the program then executes
     // zeros at its own base, which is how this was found). Forced past
     // the console's quiet mode, since on the framebuffer platforms it is
-    // the only trace the fault will leave.
+    // the only trace the fault will leave; and DEFERRED when there is no
+    // console yet at all, which is the case for every boot-time view on
+    // those same platforms (the framebuffer console comes up after
+    // `install_identity_map`), so `main.rs` prints it later.
     let (base, size) = el0_region;
     let contained = size == 0 || base / MIB2 == (base + size - 1) / MIB2;
     let el0_region = if contained {
         el0_region
     } else {
-        crate::console::println_force!(
-            "Ouroboros kernel: WARNING: EL0 region {base:#x}+{size:#x} does not fit one 2MB slot, mapping none of it EL0"
-        );
+        if crate::console::is_installed() {
+            refusal_warning(base, size);
+        } else {
+            DEFERRED_REFUSAL.0.store(base, Ordering::Relaxed);
+            DEFERRED_REFUSAL.1.store(size, Ordering::Relaxed);
+        }
         (0, 0)
     };
 

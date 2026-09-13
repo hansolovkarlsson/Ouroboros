@@ -440,7 +440,10 @@ pub const SELF: u64 = 39;
 /// [`HEAP_INFO_STACK_BASE`] and [`HEAP_INFO_STACK_SIZE`] - the loader's
 /// own answer for where a program's stack lies, so a program that reasons
 /// about its stack (`/bin/edtest` measures its peak use) never restates
-/// the loader's page count.
+/// the loader's page count - and [`HEAP_INFO_IMAGE_MAX`], the most a
+/// loaded image may occupy, for the same reason: the shell prints it
+/// when `spawn` refuses one, and the running kernel is the only thing
+/// that knows it.
 pub const HEAP_INFO: u64 = 40;
 
 /// [`HEAP_INFO`] field: the heap area's base address (`0` if none).
@@ -452,6 +455,15 @@ pub const HEAP_INFO_SIZE: u64 = 1;
 pub const HEAP_INFO_STACK_BASE: u64 = 2;
 /// [`HEAP_INFO`] field: the stack's size in bytes.
 pub const HEAP_INFO_STACK_SIZE: u64 = 3;
+/// [`HEAP_INFO`] field: the most a program's loaded IMAGE (code, data and
+/// `.bss` together, memory size) may occupy, in bytes - the 2MB region
+/// slot minus the loader's fixed heap, guard page and stack. Not a
+/// property of the calling task (every task gets the same answer) but of
+/// the running kernel, which is why it is a syscall field and not an ABI
+/// literal: a literal would have to be pinned to the loader's tail by an
+/// assert and would still be stale in a shell built against an older
+/// ABI. The number behind [`SPAWN_ERR_IMAGE_TOO_LARGE`].
+pub const HEAP_INFO_IMAGE_MAX: u64 = 4;
 
 /// `(grantee, target)` -> `0` on success, [`TASK_ERR_NO_SUCH_TASK`] if either
 /// slot is not a live task (out of range, unused, or exited and not yet
@@ -1355,34 +1367,21 @@ pub const FS_ERR_AUTH: u64 = u64::MAX - 30;
 // [`FS_ERR_NOT_FOUND`]); these three cover the causes the filesystem
 // codes can't express.
 
-/// The two bounds behind [`SPAWN_ERR_TOO_LARGE`], as the kernel enforces
-/// them, so the shell's message can print the real numbers instead of a
-/// restated copy. [`SPAWN_STAGING_SIZE`] is the kernel's staging buffer:
-/// a program FILE longer than this cannot be staged. [`REGION_SLOT_SIZE`]
-/// is the 2MB slot the kernel's per-task page tables split: a program's
-/// loaded IMAGE (memory size, so `.bss` counts) plus the loader's fixed
-/// heap, guard and stack must fit inside it. The kernel reads both from
-/// here (`syscall.rs`'s staging buffer, `loader.rs`'s `SLOT_ALIGN`).
+/// The kernel's spawn staging buffer, in bytes: a program FILE longer
+/// than this cannot be staged, and [`SPAWN_STAGE`] refuses the chunk that
+/// would cross it. Part of the caller's contract, hence here; the kernel
+/// sizes its buffer from this constant. (The other spawn bound, the most
+/// a loaded IMAGE may occupy, is the running kernel's to report, not a
+/// literal: [`HEAP_INFO_IMAGE_MAX`].)
 pub const SPAWN_STAGING_SIZE: usize = 131072;
-pub const REGION_SLOT_SIZE: u64 = 2097152;
-/// The most a program's loaded IMAGE (code, data and `.bss` together:
-/// memory size, not file size) may occupy: [`REGION_SLOT_SIZE`] minus the
-/// loader's fixed heap, guard page and stack. The number a user can act
-/// on when `spawn` refuses an image, since the tail is the kernel's and
-/// reaches userland through no other syscall. Defined here as a literal
-/// and PINNED by a compile-time assert in `kernel/src/loader.rs` against
-/// the tail it is derived from, so a heap or stack growth that does not
-/// update this fails at `make build` rather than leaving the shell
-/// printing a ceiling the loader no longer enforces.
-pub const SPAWN_IMAGE_MAX: u64 = 1789952;
 
 /// The file was read, but isn't a loadable program (bad ELF header,
 /// unsupported relocation, malformed program headers, ...).
 pub const SPAWN_ERR_BAD_ELF: u64 = u64::MAX - 11;
-/// The program is larger than the kernel's fixed staging buffer (or
-/// empty), or its loaded image (memory size, so `.bss` counts) plus the
-/// loader's fixed heap, guard and stack would not fit one 2MB region
-/// slot - refused outright rather than loaded truncated or aliased.
+/// The program FILE is larger than the kernel's staging buffer
+/// ([`SPAWN_STAGING_SIZE`]), or empty - refused outright rather than
+/// loaded truncated. (An image too large to MAP is the separate
+/// [`SPAWN_ERR_IMAGE_TOO_LARGE`], since 2026-09-13.)
 pub const SPAWN_ERR_TOO_LARGE: u64 = u64::MAX - 12;
 /// Every task slot already holds a live task.
 pub const SPAWN_ERR_NO_FREE_SLOT: u64 = u64::MAX - 13;
@@ -1539,7 +1538,24 @@ pub const FS_ERR_BUSY: u64 = u64::MAX - 40;
 /// off the floor today is that `make images-2vm` builds both node images from
 /// one tree in one target, which exists for a different reason (per-machine
 /// keys) and is load-bearing here too.
-pub const FS_ERR_MIN: u64 = u64::MAX - 40;
+///
+/// `MAX-41` is [`SPAWN_ERR_IMAGE_TOO_LARGE`] (2026-09-13), a code that
+/// never crosses the wire (`cpu` turns any spawn failure into a text
+/// line), so that move was the one-line kind: this constant, `sys.h`'s
+/// mirror, and `sys.h`'s `FS_ERR_CLIENT` stepping down out of its way.
+pub const FS_ERR_MIN: u64 = u64::MAX - 42;
+
+/// The program parsed, but its loaded image (code, data and `.bss`
+/// together: memory size, not file size) plus the loader's fixed heap,
+/// guard page and stack would not fit the one 2MB region slot a task's
+/// page tables split - refused rather than mapped aliased (before the
+/// bound existed, such a program executed zeros at its own base). The
+/// ceiling a caller can act on is [`HEAP_INFO_IMAGE_MAX`]. Distinct from
+/// [`SPAWN_ERR_TOO_LARGE`] (the FILE over the staging buffer) so that
+/// every spawner, not only a shell that watched its own staging, can
+/// tell "shrink the file" from "shrink the static data". Reserved
+/// 2026-09-13, moving the floor to `MAX-42`.
+pub const SPAWN_ERR_IMAGE_TOO_LARGE: u64 = u64::MAX - 41;
 
 /// **Cross-device move**: `mv`'s source and destination resolved to different
 /// namespace targets (two different mounts, or a local path and a remote one),

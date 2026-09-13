@@ -247,6 +247,7 @@ CHECKED = [
     "HEAP_INFO_SIZE",
     "HEAP_INFO_STACK_BASE",
     "HEAP_INFO_STACK_SIZE",
+    "HEAP_INFO_IMAGE_MAX",
     # NP_OPEN's a0. The server has spelled all four since step 2 and the C
     # header since step 3b, unpinned until step 5 (2026-09-12) gave the client
     # a reason to spell OPEN_READ too. A drift here is the quiet kind: a peer
@@ -337,7 +338,7 @@ PEER_BASELINE = {
     # Raised from 3 when step 3b's constants were pinned. The script's own
     # instruction is to raise a baseline when a peer learns a new constant; it
     # had already learned FS_ERR_NOT_FOUND without the floor moving.
-    "libc/include/sys.h": 30,  # counted 2026-09-13: 26 on 09-12, then the four HEAP_INFO_* field selectors
+    "libc/include/sys.h": 31,  # counted 2026-09-13: 26 on 09-12, then the five HEAP_INFO_* field selectors
     "libc/include/nsresolve.h": 5,  # + 4 STAT_* offsets, FS_ERR_READ_ONLY, STAT_FLAG_DIR, FS_ERROR, FS_ERR_NO_SUCH_VERB
 }
 

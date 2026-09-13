@@ -177,10 +177,12 @@ const HEAP_PAGES: u64 = 64;
 /// definition, read by `tasks.rs`'s runtime region allocator (whose
 /// rounding is what makes "size fits a slot" mean "fits ONE slot") and
 /// pinned to `mmu.rs`'s own slot size by a compile-time assert there.
-pub(crate) const SLOT_ALIGN: u64 = syscall_abi::REGION_SLOT_SIZE;
+pub(crate) const SLOT_ALIGN: u64 = 0x20_0000;
 /// The slot in pages: the one bound `elf_region_size` checks against, the
-/// figure its refusal prints, and what the tail is pinned below.
-const SLOT_PAGES: u64 = SLOT_ALIGN / PAGE_SIZE as u64;
+/// figure its refusal prints, and what the tail is pinned below. Also the
+/// capacity of the L3 table `mmu.rs` fills for a view, which pins it to
+/// its own `ENTRIES_PER_TABLE`.
+pub(crate) const SLOT_PAGES: u64 = SLOT_ALIGN / PAGE_SIZE as u64;
 
 /// The fixed tail every loaded program's region ends in, in pages:
 /// `[heap][guard][stack]`, stack at the top (`sp_el0 = base + size`). The
@@ -198,13 +200,13 @@ const _: () = assert!(
     "the fixed [heap][guard][stack] tail leaves no room for code in a 2MB region slot"
 );
 
-/// The image ceiling the shell prints when `spawn` refuses a program is
-/// an ABI literal (`syscall_abi::SPAWN_IMAGE_MAX`); this is what keeps it
-/// the number `elf_region_size` actually enforces.
-const _: () = assert!(
-    syscall_abi::SPAWN_IMAGE_MAX == (SLOT_PAGES - TAIL_PAGES) * PAGE_SIZE as u64,
-    "syscall_abi::SPAWN_IMAGE_MAX must equal the slot minus the loader's tail; update it with the tail"
-);
+/// The most a program's loaded image may occupy, in bytes: the slot minus
+/// the tail. Reported to userland as `HEAP_INFO_IMAGE_MAX`, so the number
+/// the shell prints when `spawn` refuses an image is the one
+/// `elf_region_size` enforces, with no literal anywhere to keep in step.
+pub(crate) fn image_max() -> u64 {
+    (SLOT_PAGES - TAIL_PAGES) * PAGE_SIZE as u64
+}
 
 /// The tail of one region, resolved to addresses: `[heap][guard][stack]`
 /// up to the region's end. The ONE place the tail's geometry is turned
@@ -739,12 +741,13 @@ fn find_section_by_name(file: &[u8], header: &ElfHeader, name: &[u8]) -> Result<
 /// `region_base` must point to a freshly allocated, writable region of at
 /// least `region_size` bytes. Everything else this function relies on it
 /// checks itself, from the headers in hand: that each `PT_LOAD` ends
-/// inside `region_size` and that its file size does not exceed its
-/// memory size. Both are also established upstream (`elf_region_size`
-/// sizes the region from these fields; `parse_program_headers` refuses
-/// the inversion), but a claim about another function's check is the
-/// kind of claim that stops being true in an edit to that other function,
-/// so the copy is bounded here where the write happens.
+/// inside `region_size` (also established upstream, where
+/// `elf_region_size` sizes the region from these fields, but a claim
+/// about another function's check is the kind of claim that stops being
+/// true in an edit to that other function) and that its file size does
+/// not exceed its memory size (checked HERE ONLY, by the `checked_sub`
+/// that computes the `.bss` length; nothing upstream looks at
+/// `p_filesz`).
 unsafe fn copy_segments(
     file: &[u8],
     phdrs: &[ProgramHeader],
@@ -860,10 +863,11 @@ pub(crate) fn elf_region_size(program: &[u8]) -> Result<(ElfHeader, ProgramHeade
     // come first).
     // (`code_pages` is at most 2^52 after the `div_ceil`, so the sum
     // cannot overflow; only the multiply could.)
-    if code_pages > SLOT_PAGES - TAIL_PAGES {
-        return Err(LoaderError::RegionTooLarge(code_pages + TAIL_PAGES));
+    let region_pages = code_pages + TAIL_PAGES;
+    if region_pages > SLOT_PAGES {
+        return Err(LoaderError::RegionTooLarge(region_pages));
     }
-    let region_size = (code_pages + TAIL_PAGES) * page_size;
+    let region_size = region_pages * page_size;
 
     Ok((header, phdrs, region_size))
 }
