@@ -112,8 +112,8 @@ const CONFIG_PATH: &str = "\\EFI\\ORBS\\INIT.CFG";
 // buffers + staging + the call chain), a real, silent, pre-existing
 // overflow into the top of the code region that had gone unnoticed because
 // nothing was mapped to fault on it. Grown to 16KB to give that path
-// comfortable headroom; if `mmu.rs`'s `guard_page_addr` `STACK_PAGES` isn't
-// kept equal to this, the guard lands in the wrong place.
+// comfortable headroom. (`mmu.rs`'s `guard_page_addr` reads this same
+// constant, so the guard moves with it - see the 40KB note below for why.)
 //
 // Grown again to 24KB (6 pages) once the network server (`netd`) appeared:
 // its client ops (ping/resolve/fetch) and TCP server nest several 1600/2048
@@ -135,19 +135,22 @@ const CONFIG_PATH: &str = "\\EFI\\ORBS\\INIT.CFG";
 // -> handle_client -> handle_rmount -> session_rmount -> find_or_open ->
 // client_connect, each its own frame), so its ~1600-byte packet buffers ran
 // ~1-3KB past the 32KB edge where the one-shot path just fit. Caught by the
-// guard, same as every prior growth; +8KB again, RAM still ample. NOTE the
-// duplicate below: `mmu.rs`'s guard_page_addr has its own STACK_PAGES that
-// must move in lockstep, or the guard lands mid-stack and a clean overflow
-// becomes silent corruption (which cost real debugging time here first).
-const STACK_PAGES: u64 = 10;
+// guard, same as every prior growth; +8KB again, RAM still ample. That
+// growth is also why this is `pub(crate)`: `mmu.rs`'s `guard_page_addr`
+// used to carry its OWN copy of this number, kept equal only by a `must
+// match loader.rs` comment, and growing this one without the other put the
+// guard mid-stack, so a clean overflow became silent corruption that cost
+// real debugging time (docs/postmortems/true-when-written-postmortem.md).
+// There is one copy now; `mmu.rs` reads it, together with `GUARD_PAGES`.
+pub(crate) const STACK_PAGES: u64 = 10;
 /// One inaccessible guard page between the code and the stack. The stack
 /// grows down from the top of the region; an overflow past the 40KB stack
 /// lands in this page, which `mmu.rs` maps EL1-only, taking a clean EL0
 /// fault instead of silently corrupting the code below. See `mmu.rs`'s
 /// `build_view` (which derives the guard's address from the region's
-/// `(base, size)` and this same layout convention) and the stack-guard
-/// milestone writeup.
-const GUARD_PAGES: u64 = 1;
+/// `(base, size)` and these two constants) and the stack-guard milestone
+/// writeup.
+pub(crate) const GUARD_PAGES: u64 = 1;
 /// A fixed heap allowance per program, between the code and the guard page
 /// (`[code][heap][guard][stack]`). Programs can't use `alloc`'s
 /// collections - prebuilt `liballoc` has `R_AARCH64_ABS64` relocations a

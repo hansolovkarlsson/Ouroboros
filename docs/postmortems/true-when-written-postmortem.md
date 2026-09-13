@@ -565,6 +565,13 @@ single shared `STACK_PAGES` the two read, and until that exists the pair is a
 grep away from the next person who grows one and not the other. The lesson costs
 nothing to state and cost a real chunk of a debugging session to learn.
 
+*(Update, 2026-09-13: that fix landed the next morning. `loader.rs`'s
+`STACK_PAGES` and `GUARD_PAGES` are `pub(crate)` and `mmu.rs`'s
+`guard_page_addr` reads them; its own copy and the `must match` comment are
+gone. The sibling duplicate the old comment cited as precedent,
+`tasks.rs`'s `RUNTIME_SLOT_ALIGN` restating `loader.rs`'s `SLOT_ALIGN`, is
+the same pattern and is still two copies.)*
+
 ## What actually worked
 
 Three things, none of them "be more careful".

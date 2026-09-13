@@ -145,6 +145,8 @@ use core::cell::UnsafeCell;
 
 use uefi::mem::memory_map::{MemoryMap, MemoryMapOwned, MemoryType};
 
+use crate::loader::{GUARD_PAGES, STACK_PAGES};
+
 const GIB: u64 = 1 << 30;
 const MIB2: u64 = 2 * 1024 * 1024;
 const ENTRIES_PER_TABLE: usize = 512;
@@ -353,19 +355,20 @@ fn el0_page_4k(base: u64) -> u64 {
 
 /// The stack guard page's address for an EL0 region, or `None` for a
 /// region too small to have one. Derived from the layout `loader.rs`
-/// builds - `[code][1 guard page][STACK_PAGES stack pages]`, stack at the
-/// top - so the guard is the page immediately below the stack,
-/// `STACK_PAGES + 1` pages down from the region end. `build_view` maps
-/// that one page EL1-only so a stack overflow into it faults cleanly. The
-/// idle task's single-page region (and any region too small to hold
-/// `[code][guard][stack]`) has no guard. `STACK_PAGES` is duplicated from
-/// `loader.rs` by convention - the same pattern `RUNTIME_SLOT_ALIGN` uses
-/// for `loader`'s `SLOT_ALIGN`; a mismatch would misplace the guard, so
-/// keep them in sync.
+/// builds - `[code][GUARD_PAGES guard page][STACK_PAGES stack pages]`,
+/// stack at the top - so the guard is the page immediately below the
+/// stack, `STACK_PAGES + GUARD_PAGES` pages down from the region end.
+/// `build_view` maps that one page EL1-only so a stack overflow into it
+/// faults cleanly. The idle task's single-page region (and any region too
+/// small to hold `[code][guard][stack]`) has no guard. Both constants are
+/// `loader.rs`'s own: this function used to hold its own `STACK_PAGES`,
+/// kept equal by a `must match loader.rs` comment, and the one time the
+/// loader's copy grew alone the guard landed mid-stack (see
+/// `loader.rs`'s history block on the constant, and
+/// docs/postmortems/true-when-written-postmortem.md).
 fn guard_page_addr(region: (u64, u64)) -> Option<u64> {
-    const STACK_PAGES: u64 = 10; // must match loader.rs (40KB stack)
     let (base, size) = region;
-    let guard_from_end = (STACK_PAGES + 1) * 4096;
+    let guard_from_end = (STACK_PAGES + GUARD_PAGES) * 4096;
     if size <= guard_from_end {
         return None;
     }
