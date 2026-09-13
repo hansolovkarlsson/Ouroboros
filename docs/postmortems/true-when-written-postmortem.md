@@ -565,12 +565,18 @@ single shared `STACK_PAGES` the two read, and until that exists the pair is a
 grep away from the next person who grows one and not the other. The lesson costs
 nothing to state and cost a real chunk of a debugging session to learn.
 
-*(Update, 2026-09-13: that fix landed the next morning. `loader.rs`'s
-`STACK_PAGES` and `GUARD_PAGES` are `pub(crate)` and `mmu.rs`'s
-`guard_page_addr` reads them; its own copy and the `must match` comment are
-gone. The sibling duplicate the old comment cited as precedent,
-`tasks.rs`'s `RUNTIME_SLOT_ALIGN` restating `loader.rs`'s `SLOT_ALIGN`, is
-the same pattern and is still two copies.)*
+*(Update, 2026-09-13: that fix landed the next morning, and a review of it
+found the trap one file further out. `loader.rs` now owns the region layout
+outright: `guard_page_addr` moved there beside `heap_area`, `STACK_PAGES` is
+private again, and `mmu.rs` asks rather than re-deriving; a compile-time
+assert pins the one page `build_view` maps to `GUARD_PAGES`. The further copy
+was `/bin/edtest`'s stack probe, which carried its own `STACK_BYTES = 32 *
+1024` under a "must match the loader's `STACK_PAGES`" comment: the 40 KB growth
+left it stale, its sanity check refused every run, and the peak-stack
+measurement had been printing "unavailable" since, with nothing failing. It
+now asks the loader for the extent through `HEAP_INFO`'s new stack fields.
+Measured both ways on the same kernel: the old probe prints "unavailable"
+twice, the new one calibrates and reports 3456 of 40960.)*
 
 ## What actually worked
 

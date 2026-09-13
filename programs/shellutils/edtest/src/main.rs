@@ -165,12 +165,15 @@ pub extern "C" fn _start() -> ! {
     }
 
     let calibrated = matches!((plain, padded), (Some(a), Some(b)) if b > a + 3072 && b < a + 8192);
+    let (_, stack_size) = ulib::stack_extent();
     match plain {
         Some(used) if calibrated => {
             out(target, b"\r\n  peak stack for sign+verify: ");
             put_dec(target, used as u64);
-            out(target, b" bytes of 32768 (");
-            put_dec(target, (used as u64 * 100) / 32768);
+            out(target, b" bytes of ");
+            put_dec(target, stack_size as u64);
+            out(target, b" (");
+            put_dec(target, (used as u64 * 100) / stack_size as u64);
             out(target, b"%)\r\n");
         }
         // Deliberately NOT printed in the usual format when the probe did not
@@ -218,27 +221,25 @@ fn put_dec(target: u64, v: u64) {
 ///
 /// Paints the unused stack below the current frame with a known byte, runs the
 /// operations, then finds the lowest painted byte that changed. The stack extent
-/// is not guessed: `HEAP_INFO` reports this task's heap, and the loader's layout
-/// is `[code][heap][guard][stack]`, so the stack starts one guard page above the
-/// heap's end and runs `STACK_BYTES` upward. Painting is therefore bounded by
-/// construction and cannot wander into the guard page — which would be a fault,
-/// not a measurement.
+/// is not guessed: `HEAP_INFO` reports this task's stack `(base, size)` as the
+/// loader laid it out, guard page excluded. Painting is therefore bounded by
+/// construction and cannot wander into the guard page, which would be a fault,
+/// not a measurement. (It used to add a local `STACK_BYTES` to the heap's end
+/// instead, a copy of the loader's page count that went stale when the stack
+/// grew and silently disabled this measurement; the sanity check below is
+/// what refused, and the calibration in `_start` is what made that visible.)
 fn measure_stack(secret: &[u8; 32]) -> Option<usize> {
-    measure_stack_inner(secret, false)
+    measure_stack_inner(secret, false).map(|(used, _)| used)
 }
 
+/// `(peak bytes used, stack size)`, or `None` if the probe could not run.
 #[inline(never)]
-fn measure_stack_inner(secret: &[u8; 32], pad: bool) -> Option<usize> {
-    /// Must match the loader's `STACK_PAGES` (8) × 4 KB.
-    const STACK_BYTES: usize = 32 * 1024;
-    const PAGE: usize = 4096;
-
-    let heap = ulib::heap();
-    if heap.is_empty() {
+fn measure_stack_inner(secret: &[u8; 32], pad: bool) -> Option<(usize, usize)> {
+    let (stack_lo, stack_size) = ulib::stack_extent();
+    if stack_lo == 0 || stack_size == 0 {
         return None;
     }
-    let stack_lo = heap.as_ptr() as usize + heap.len() + PAGE; // past the guard page
-    let stack_hi = stack_lo + STACK_BYTES;
+    let stack_hi = stack_lo + stack_size;
 
     let probe = 0u64;
     let sp = &probe as *const u64 as usize;
@@ -280,14 +281,14 @@ fn measure_stack_inner(secret: &[u8; 32], pad: bool) -> Option<usize> {
         }
         p += 1;
     }
-    Some(stack_hi - lowest)
+    Some((stack_hi - lowest, stack_size))
 }
 
 /// The same measurement, with a deliberate extra 4 KB frame in the call path.
 /// Used only to prove the probe reacts - see the calibration in `_start`.
 #[inline(never)]
 fn measure_stack_padded(secret: &[u8; 32]) -> Option<usize> {
-    measure_stack_inner(secret, true)
+    measure_stack_inner(secret, true).map(|(used, _)| used)
 }
 
 /// The operations being measured.

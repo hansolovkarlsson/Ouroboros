@@ -936,9 +936,12 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
         syscall_abi::HEAP_INFO => {
             let (base, size) = tasks::task_region(tasks::current_task());
             let (heap_base, heap_size) = loader::heap_area(base, size);
+            let (stack_base, stack_size) = loader::stack_area(base, size);
             match arg0 {
                 syscall_abi::HEAP_INFO_BASE => heap_base,
                 syscall_abi::HEAP_INFO_SIZE => heap_size,
+                syscall_abi::HEAP_INFO_STACK_BASE => stack_base,
+                syscall_abi::HEAP_INFO_STACK_SIZE => stack_size,
                 _ => 0,
             }
         }

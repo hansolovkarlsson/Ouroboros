@@ -106,14 +106,14 @@ use uefi::CString16;
 /// renamed to the tidier `ORBS` abbreviation.)
 const CONFIG_PATH: &str = "\\EFI\\ORBS\\INIT.CFG";
 
-// 16KB. Was 8KB (2 pages) - but the stack guard page (below) immediately
-// caught the shell's own `exec` path overflowing 8KB by ~32 bytes
+// 40KB (10 pages) today; the paragraphs below are the history of how it
+// got there. Started at 8KB (2 pages) - but the stack guard page (below)
+// immediately caught the shell's own `exec` path overflowing 8KB by ~32 bytes
 // (`cmd_exec` -> `spawn_path` -> `fs_call`'s 768+768-byte request/reply
 // buffers + staging + the call chain), a real, silent, pre-existing
 // overflow into the top of the code region that had gone unnoticed because
 // nothing was mapped to fault on it. Grown to 16KB to give that path
-// comfortable headroom. (`mmu.rs`'s `guard_page_addr` reads this same
-// constant, so the guard moves with it - see the 40KB note below for why.)
+// comfortable headroom.
 //
 // Grown again to 24KB (6 pages) once the network server (`netd`) appeared:
 // its client ops (ping/resolve/fetch) and TCP server nest several 1600/2048
@@ -135,21 +135,18 @@ const CONFIG_PATH: &str = "\\EFI\\ORBS\\INIT.CFG";
 // -> handle_client -> handle_rmount -> session_rmount -> find_or_open ->
 // client_connect, each its own frame), so its ~1600-byte packet buffers ran
 // ~1-3KB past the 32KB edge where the one-shot path just fit. Caught by the
-// guard, same as every prior growth; +8KB again, RAM still ample. That
-// growth is also why this is `pub(crate)`: `mmu.rs`'s `guard_page_addr`
-// used to carry its OWN copy of this number, kept equal only by a `must
-// match loader.rs` comment, and growing this one without the other put the
-// guard mid-stack, so a clean overflow became silent corruption that cost
-// real debugging time (docs/postmortems/true-when-written-postmortem.md).
-// There is one copy now; `mmu.rs` reads it, together with `GUARD_PAGES`.
-pub(crate) const STACK_PAGES: u64 = 10;
-/// One inaccessible guard page between the code and the stack. The stack
-/// grows down from the top of the region; an overflow past the 40KB stack
-/// lands in this page, which `mmu.rs` maps EL1-only, taking a clean EL0
-/// fault instead of silently corrupting the code below. See `mmu.rs`'s
-/// `build_view` (which derives the guard's address from the region's
-/// `(base, size)` and these two constants) and the stack-guard milestone
-/// writeup.
+// guard, same as every prior growth; +8KB again, RAM still ample. This
+// growth once left a second copy of this number behind in `mmu.rs`, which
+// misplaced the guard (docs/postmortems/true-when-written-postmortem.md);
+// there is one copy now, and `guard_page_addr` below is what `mmu.rs` asks.
+const STACK_PAGES: u64 = 10;
+/// One inaccessible guard page between the heap and the stack. The stack
+/// grows down from the top of the region; an overflow past the
+/// `STACK_PAGES` stack lands in this page, which `mmu.rs` maps EL1-only,
+/// taking a clean EL0 fault instead of silently corrupting the heap and
+/// code below. `pub(crate)` only so `mmu.rs`'s `build_view`, which maps
+/// exactly one page, can pin that assumption with a compile-time assert.
+/// See `guard_page_addr` below and the stack-guard milestone writeup.
 pub(crate) const GUARD_PAGES: u64 = 1;
 /// A fixed heap allowance per program, between the code and the guard page
 /// (`[code][heap][guard][stack]`). Programs can't use `alloc`'s
@@ -158,25 +155,67 @@ pub(crate) const GUARD_PAGES: u64 = 1;
 /// off-limits on this stable-only project - so this is a raw buffer a
 /// program reads/writes via a `&mut [u8]` (reported by the `heap_info`
 /// syscall), not a `GlobalAlloc`-backed heap. It lets a program hold data
-/// far larger than its 16KB stack: the shell backs its redirect/pipe
+/// far larger than its stack (`STACK_PAGES`): the shell backs its redirect/pipe
 /// capture with it, so `cat big > file` captures the whole file instead of
 /// refusing. 256KB, still far inside one 2MB slot.
 const HEAP_PAGES: u64 = 64;
 const SLOT_ALIGN: u64 = 0x20_0000; // 2MB - see module doc comment.
 
+/// The fixed tail every loaded program's region ends in, in pages:
+/// `[heap][guard][stack]`, stack at the top (`sp_el0 = base + size`). The
+/// code sits below it. Every function that derives an address from this
+/// layout (`heap_area`, `stack_area`, `guard_page_addr`, `elf_region_size`)
+/// reads these same three constants, so the layout is stated once; nothing
+/// outside this module restates it.
+const TAIL_PAGES: u64 = HEAP_PAGES + GUARD_PAGES + STACK_PAGES;
+
 /// The heap area `(base, size)` inside a loaded program's region, computed
 /// from the region's `(base, size)` and the fixed `[code][heap][guard]
-/// [stack]` layout: the heap sits `HEAP_PAGES + GUARD_PAGES + STACK_PAGES`
-/// pages down from the region end, and is `HEAP_PAGES` long. Returns
-/// `(0, 0)` for a region too small to have a heap (the idle task's single
-/// page). Used by the `heap_info` syscall.
+/// [stack]` layout: the heap sits `TAIL_PAGES` down from the region end,
+/// and is `HEAP_PAGES` long. Returns `(0, 0)` for a region too small to
+/// have the tail (the idle task's single page). Used by the `heap_info`
+/// syscall.
 pub(crate) fn heap_area(base: u64, size: u64) -> (u64, u64) {
     let page = PAGE_SIZE as u64;
-    let tail = (HEAP_PAGES + GUARD_PAGES + STACK_PAGES) * page;
-    if size < tail {
+    if size < TAIL_PAGES * page {
         return (0, 0);
     }
-    (base + size - tail, HEAP_PAGES * page)
+    (base + size - TAIL_PAGES * page, HEAP_PAGES * page)
+}
+
+/// The stack `(base, size)` inside a loaded program's region: the top
+/// `STACK_PAGES` pages, so the stack pointer starts at `base + size` and
+/// grows down towards the guard page. `(0, 0)` for a region too small to
+/// have the tail, like `heap_area`. Reported by `heap_info`'s
+/// `HEAP_INFO_STACK_*` fields so a program that measures its own stack
+/// (`/bin/edtest`) asks the loader for the extent instead of restating
+/// `STACK_PAGES` - a restated copy went stale once and silently disabled
+/// that measurement.
+pub(crate) fn stack_area(base: u64, size: u64) -> (u64, u64) {
+    let page = PAGE_SIZE as u64;
+    if size < TAIL_PAGES * page {
+        return (0, 0);
+    }
+    (base + size - STACK_PAGES * page, STACK_PAGES * page)
+}
+
+/// The stack guard page's address for an EL0 region, or `None` for a
+/// region too small to have the tail (the idle task's single page). The
+/// page immediately below the stack, `STACK_PAGES + GUARD_PAGES` pages
+/// down from the region end. `mmu.rs`'s `build_view` maps that one page
+/// EL1-only so a stack overflow into it faults cleanly. Lives here rather
+/// than in `mmu.rs` so the layout has one owner: `mmu.rs` used to derive
+/// this address itself from its own copy of `STACK_PAGES`, kept equal by a
+/// `must match loader.rs` comment, and the one time the loader's copy grew
+/// alone the guard landed mid-stack
+/// (docs/postmortems/true-when-written-postmortem.md).
+pub(crate) fn guard_page_addr(region: (u64, u64)) -> Option<u64> {
+    let (base, size) = region;
+    let page = PAGE_SIZE as u64;
+    if size < TAIL_PAGES * page {
+        return None;
+    }
+    Some(base + size - (STACK_PAGES + GUARD_PAGES) * page)
 }
 
 /// Generous headroom, not a real limit this project has ever come close
@@ -716,12 +755,13 @@ pub(crate) fn elf_region_size(program: &[u8]) -> Result<(ElfHeader, ProgramHeade
 
     let page_size = PAGE_SIZE as u64;
     let code_pages = max_end.div_ceil(page_size);
-    // Layout: [code_pages][HEAP_PAGES heap][1 guard page][STACK_PAGES
-    // stack pages]. The stack sits at the top (sp_el0 = base + size); the
-    // guard page, immediately below it, is mapped EL1-only by mmu.rs so a
-    // stack overflow faults cleanly; the heap (a raw buffer the program
-    // reaches via `heap_info`) is below the guard, above the code.
-    let region_pages = code_pages + HEAP_PAGES + GUARD_PAGES + STACK_PAGES;
+    // Layout: [code_pages][HEAP_PAGES heap][GUARD_PAGES guard][STACK_PAGES
+    // stack] - the `TAIL_PAGES` tail above the code. The stack sits at the
+    // top (sp_el0 = base + size); the guard page, immediately below it, is
+    // mapped EL1-only by mmu.rs so a stack overflow faults cleanly; the heap
+    // (a raw buffer the program reaches via `heap_info`) is below the
+    // guard, above the code.
+    let region_pages = code_pages + TAIL_PAGES;
     let region_size = region_pages * page_size;
 
     Ok((header, phdrs, region_size))
