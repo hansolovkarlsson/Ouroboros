@@ -1359,7 +1359,9 @@ pub const FS_ERR_AUTH: u64 = u64::MAX - 30;
 /// unsupported relocation, malformed program headers, ...).
 pub const SPAWN_ERR_BAD_ELF: u64 = u64::MAX - 11;
 /// The program is larger than the kernel's fixed staging buffer (or
-/// empty) - refused outright rather than loaded truncated.
+/// empty), or its loaded image (memory size, so `.bss` counts) plus the
+/// loader's fixed heap, guard and stack would not fit one 2MB region
+/// slot - refused outright rather than loaded truncated or aliased.
 pub const SPAWN_ERR_TOO_LARGE: u64 = u64::MAX - 12;
 /// Every task slot already holds a live task.
 pub const SPAWN_ERR_NO_FREE_SLOT: u64 = u64::MAX - 13;

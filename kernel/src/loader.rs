@@ -169,6 +169,14 @@ const SLOT_ALIGN: u64 = 0x20_0000; // 2MB - see module doc comment.
 /// outside this module restates it.
 const TAIL_PAGES: u64 = HEAP_PAGES + GUARD_PAGES + STACK_PAGES;
 
+/// The tail alone must leave room for at least one page of code inside a
+/// slot, or `elf_region_size`'s slot check below refuses every program.
+/// Pinned where a heap or stack growth would trip it at `make build`.
+const _: () = assert!(
+    TAIL_PAGES * 4096 < SLOT_ALIGN,
+    "the fixed [heap][guard][stack] tail leaves no room for code in a 2MB region slot"
+);
+
 /// The heap area `(base, size)` inside a loaded program's region, computed
 /// from the region's `(base, size)` and the fixed `[code][heap][guard]
 /// [stack]` layout: the heap sits `TAIL_PAGES` down from the region end,
@@ -346,6 +354,16 @@ pub enum LoaderError {
     /// doc comment for why this is a fixed bound, not a `Vec`.
     TooManyProgramHeaders,
     NoLoadSegments,
+    /// The program's loaded image plus the fixed `[heap][guard][stack]`
+    /// tail would not fit one 2MB region slot (`SLOT_ALIGN`). `mmu.rs`'s
+    /// `build_view` splits exactly one 2MB L2 slot per task into 4KB pages
+    /// and fills one L3 table per view; a region past that would have its
+    /// two sub-slots share the one table, and the first slot's addresses
+    /// would resolve to the second's memory - witnessed 2026-09-13 as an
+    /// EL0 unknown-instruction fault at the region base, the program's code
+    /// fetched through the alias as zeros. Refused here instead. Carries
+    /// the region size in pages so the boot log can say by how much.
+    RegionTooLarge(u64),
     /// A relocation type other than `R_AARCH64_RELATIVE` showed up - this
     /// project has no imported symbols to resolve, so nothing else should
     /// ever legitimately appear here. Deliberately a hard error, not a
@@ -376,6 +394,11 @@ impl core::fmt::Display for LoaderError {
             LoaderError::WrongMachine(m) => write!(f, "unexpected ELF machine {m} (expected EM_AARCH64)"),
             LoaderError::TooManyProgramHeaders => write!(f, "program has more than {MAX_PROGRAM_HEADERS} program headers"),
             LoaderError::NoLoadSegments => write!(f, "program has no PT_LOAD segments"),
+            LoaderError::RegionTooLarge(pages) => write!(
+                f,
+                "program's image plus heap and stack needs {pages} pages, over the {} the 2MB region slot holds",
+                SLOT_ALIGN / PAGE_SIZE as u64
+            ),
             LoaderError::UnsupportedRelocation(t) => write!(f, "unsupported relocation type {t} (only R_AARCH64_RELATIVE is supported - no dynamic linking)"),
         }
     }
@@ -763,6 +786,14 @@ pub(crate) fn elf_region_size(program: &[u8]) -> Result<(ElfHeader, ProgramHeade
     // guard, above the code.
     let region_pages = code_pages + TAIL_PAGES;
     let region_size = region_pages * page_size;
+    // The whole region must fit one 2MB slot: that is the invariant
+    // `mmu.rs`'s per-task view rests on (one L2 slot split into one L3
+    // table), and nothing else checks it. A program's memory size is not
+    // its file size, so a large `.bss` passes the staging-buffer check and
+    // arrives here at a couple of megabytes.
+    if region_size > SLOT_ALIGN {
+        return Err(LoaderError::RegionTooLarge(region_pages));
+    }
 
     Ok((header, phdrs, region_size))
 }

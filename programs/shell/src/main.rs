@@ -1844,7 +1844,7 @@ fn print_fs_error(cmd: &str, code: u64) {
         syscall_abi::MSG_ERR_TOO_BIG => "message too big (64-byte limit)",
         syscall_abi::MSG_ERR_DENIED => "permission denied (the IPC capability policy doesn't permit reaching that task)",
         syscall_abi::SPAWN_ERR_BAD_ELF => "not a loadable program (bad ELF)",
-        syscall_abi::SPAWN_ERR_TOO_LARGE => "program too large for the kernel's staging buffer (or empty)",
+        syscall_abi::SPAWN_ERR_TOO_LARGE => "program too large (over the kernel's staging buffer, or its image plus heap and stack over the 2MB region slot; or empty)",
         syscall_abi::SPAWN_ERR_NO_FREE_SLOT => "no free task slot",
         syscall_abi::TASK_ERR_NO_SUCH_TASK => "no such task (see ps)",
         // Names the whole protected set: a message listing a stale subset is how
