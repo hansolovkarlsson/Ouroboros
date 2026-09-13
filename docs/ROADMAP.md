@@ -1826,6 +1826,31 @@ would otherwise silently shrink into looking like nothing was ever found.
   an empty password → `uid=1001(bob)`). It is the only writer of an *initial*
   secret, so it was the one that most needed the check. Both manpages now state
   the rule; neither did.
+- **Three findings from the 2026-09-13 review of the shared `STACK_PAGES`
+  fix (#134), all PRE-EXISTING.** The fix itself, the `GUARD_PAGES` pin and
+  the dead `edtest` probe were done in the PR; these are the wider copies of
+  the same layout the review found around it.
+  - **Nothing checks that a loaded region fits one 2 MB slot.**
+    `elf_region_size` sums code pages and the fixed tail with no bound, while
+    `build_view` fills one L3 table per view on the strength of a "fits one
+    slot by construction" comment. A `.bss` past ~1.7 MB passes the staging
+    size check (it is memory size, not file bytes) and the two 2 MB sub-slots
+    then share one L3, so the first slot's pages resolve to the second's.
+    Wants a `const` assert on the tail against `SLOT_ALIGN` and a runtime
+    size check mapped to the existing too-large spawn error.
+  - **Twelve prose copies of the stack size, disagreeing with each other and
+    with the constant**: `processes.md` (8 pages/32 KB and 4 pages/16 KB in
+    the same file), `architecture.md` (32 KB, three places), `gap-analysis.md`
+    (16 KB), `ROADMAP.md` (32 KB), `syscall-abi`'s `HEAP_INFO` doc and the
+    shell's `main.rs` (16 KB), `tree`'s `main.rs` (~32 KB). The number is
+    40 KB. State the relationship ("the loader's `STACK_PAGES`") where a
+    value is not load-bearing, and the value in one place where it is.
+  - **The stack top is hand-derived as `base + size` at seven sites across
+    three files** (`tasks.rs` five times, `supervisor.rs`, `syscall.rs`),
+    inside an identical `Context` literal. Anything ever placed above the
+    stack must be found at all seven and the compiler flags none. A
+    `stack_top()` on the loaded-program type and a `Context::for_program`
+    constructor would make it one.
 
 ## Open gaps (small, from the old parking lot)
 

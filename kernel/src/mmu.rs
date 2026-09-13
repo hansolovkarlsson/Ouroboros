@@ -145,6 +145,19 @@ use core::cell::UnsafeCell;
 
 use uefi::mem::memory_map::{MemoryMap, MemoryMapOwned, MemoryType};
 
+use crate::loader::{guard_page_addr, GUARD_PAGES};
+
+/// `build_view` maps exactly ONE page EL1-only at the address
+/// `guard_page_addr` returns. If the loader ever reserved a wider guard,
+/// the pages above the one it names would stay EL0-writable and an
+/// overflow of up to a page would go silent - the same class of drift
+/// sharing the constants was meant to end, so pin it where the compiler
+/// enforces it.
+const _: () = assert!(
+    GUARD_PAGES == 1,
+    "build_view maps a single guard page; widen its mapping before growing GUARD_PAGES"
+);
+
 const GIB: u64 = 1 << 30;
 const MIB2: u64 = 2 * 1024 * 1024;
 const ENTRIES_PER_TABLE: usize = 512;
@@ -349,27 +362,6 @@ fn el0_page_4k(base: u64) -> u64 {
         | AP_EL1_EL0_RW
         | SH_INNER
         | AF
-}
-
-/// The stack guard page's address for an EL0 region, or `None` for a
-/// region too small to have one. Derived from the layout `loader.rs`
-/// builds - `[code][1 guard page][STACK_PAGES stack pages]`, stack at the
-/// top - so the guard is the page immediately below the stack,
-/// `STACK_PAGES + 1` pages down from the region end. `build_view` maps
-/// that one page EL1-only so a stack overflow into it faults cleanly. The
-/// idle task's single-page region (and any region too small to hold
-/// `[code][guard][stack]`) has no guard. `STACK_PAGES` is duplicated from
-/// `loader.rs` by convention - the same pattern `RUNTIME_SLOT_ALIGN` uses
-/// for `loader`'s `SLOT_ALIGN`; a mismatch would misplace the guard, so
-/// keep them in sync.
-fn guard_page_addr(region: (u64, u64)) -> Option<u64> {
-    const STACK_PAGES: u64 = 10; // must match loader.rs (40KB stack)
-    let (base, size) = region;
-    let guard_from_end = (STACK_PAGES + 1) * 4096;
-    if size <= guard_from_end {
-        return None;
-    }
-    Some(base + size - guard_from_end)
 }
 
 fn is_general_ram(ty: MemoryType) -> bool {
@@ -642,6 +634,7 @@ unsafe fn build_view(
                     let sub_end = sub_base + MIB2;
                     if overlaps(el0_region, sub_base, sub_end) {
                         let l3 = unsafe { &mut *EL0_L3_TABLES[view].0.get() };
+                        // The loader owns the region layout; ask it.
                         let guard = guard_page_addr(el0_region);
                         for (j, page) in l3.iter_mut().enumerate() {
                             let page_base = sub_base + (j as u64) * 4096;

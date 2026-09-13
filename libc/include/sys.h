@@ -41,6 +41,8 @@
 
 #define HEAP_INFO_BASE 0
 #define HEAP_INFO_SIZE 1
+#define HEAP_INFO_STACK_BASE 2
+#define HEAP_INFO_STACK_SIZE 3
 
 /* ninep verbs (ninep-abi; NP_BASE = 0x100). */
 #define NP_BASE 0x100

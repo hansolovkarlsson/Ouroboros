@@ -770,7 +770,7 @@ far `fsd`; local writes keep the grant path.
 > level deeper than the path-based client ops, so its packet buffers ran
 > ~1-3 KB past `netd`'s 32 KB EL0 stack (the one-shot path, one level
 > shallower, just fit). The stack grew to 40 KB, the same fix every prior netd
-> client op that outgrew the stack got. `STACK_PAGES` is DUPLICATED in
+> client op that outgrew the stack got. `STACK_PAGES` was DUPLICATED (until 2026-09-13; one shared constant since) in
 > `kernel/src/loader.rs` (allocates the region) and `kernel/src/mmu.rs` (places
 > the guard `STACK_PAGES + 1` from the end); changing only one misplaced the
 > guard mid-stack and turned a clean overflow into erratic corruption that cost

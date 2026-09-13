@@ -315,6 +315,19 @@ pub fn heap() -> &'static mut [u8] {
     unsafe { core::slice::from_raw_parts_mut(base as *mut u8, size as usize) }
 }
 
+/// This program's stack extent `(lowest address, size in bytes)`, as the
+/// loader laid it out (`HEAP_INFO`'s stack fields): the stack pointer starts
+/// at `base + size` and grows down, and the page below `base` is the guard.
+/// Not a slice: most of it is live frames. For a program that reasons about
+/// its own stack (a peak-use probe), so the size is asked for, never a
+/// restated copy of the loader's page count. `(0, 0)` if the region has no
+/// stack area.
+pub fn stack_extent() -> (usize, usize) {
+    let base = syscall(syscall_abi::HEAP_INFO, syscall_abi::HEAP_INFO_STACK_BASE);
+    let size = syscall(syscall_abi::HEAP_INFO, syscall_abi::HEAP_INFO_STACK_SIZE);
+    (base as usize, size as usize)
+}
+
 /// Block until a keyboard byte is available, and return it (`READ_CHAR`). A
 /// program only receives keystrokes while it *owns* the keyboard - the shell
 /// hands a foreground command that ownership at spawn, so an interactive `/bin`

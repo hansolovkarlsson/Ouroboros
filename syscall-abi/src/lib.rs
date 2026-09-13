@@ -427,7 +427,7 @@ pub const SELF: u64 = 39;
 /// `(field)` -> the requested heap-area geometry, or `0`. Each program's
 /// EL0 region carries a fixed **heap area** (a raw buffer between its code
 /// and its stack guard page) that it can read/write via a `&mut [u8]` -
-/// space far larger than the 16KB stack, for holding data a fixed stack
+/// space far larger than the stack, for holding data a fixed stack
 /// buffer can't (the shell backs its redirect/pipe capture with it, so
 /// `cat big > file` captures the whole file). It is *not* a
 /// `GlobalAlloc`-backed heap: `alloc`'s collections can't link under this
@@ -436,13 +436,22 @@ pub const SELF: u64 = 39;
 /// so it's a raw buffer, not `Vec`/`Box`/`String`. Fields:
 /// [`HEAP_INFO_BASE`] (the area's base address, `0` if the region is too
 /// small to have one - e.g. the idle task) and [`HEAP_INFO_SIZE`] (its
-/// length in bytes).
+/// length in bytes), plus the same pair for the region's **stack**,
+/// [`HEAP_INFO_STACK_BASE`] and [`HEAP_INFO_STACK_SIZE`] - the loader's
+/// own answer for where a program's stack lies, so a program that reasons
+/// about its stack (`/bin/edtest` measures its peak use) never restates
+/// the loader's page count.
 pub const HEAP_INFO: u64 = 40;
 
 /// [`HEAP_INFO`] field: the heap area's base address (`0` if none).
 pub const HEAP_INFO_BASE: u64 = 0;
 /// [`HEAP_INFO`] field: the heap area's size in bytes.
 pub const HEAP_INFO_SIZE: u64 = 1;
+/// [`HEAP_INFO`] field: the stack's lowest address (`0` if none). The
+/// stack grows down from `base + size`; the page below `base` is the guard.
+pub const HEAP_INFO_STACK_BASE: u64 = 2;
+/// [`HEAP_INFO`] field: the stack's size in bytes.
+pub const HEAP_INFO_STACK_SIZE: u64 = 3;
 
 /// `(grantee, target)` -> `0` on success, [`TASK_ERR_NO_SUCH_TASK`] if either
 /// slot is not a live task (out of range, unused, or exited and not yet
