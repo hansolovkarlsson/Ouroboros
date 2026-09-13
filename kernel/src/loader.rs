@@ -159,7 +159,12 @@ pub(crate) const GUARD_PAGES: u64 = 1;
 /// capture with it, so `cat big > file` captures the whole file instead of
 /// refusing. 256KB, still far inside one 2MB slot.
 const HEAP_PAGES: u64 = 64;
-const SLOT_ALIGN: u64 = 0x20_0000; // 2MB - see module doc comment.
+/// 2MB: the L2 slot `mmu.rs` splits into pages for a task's EL0 view, so
+/// the bound every region must fit (see the module doc comment). One
+/// definition, read by `tasks.rs`'s runtime region allocator (whose
+/// rounding is what makes "size fits a slot" mean "fits ONE slot") and
+/// pinned to `mmu.rs`'s own slot size by a compile-time assert there.
+pub(crate) const SLOT_ALIGN: u64 = 0x20_0000;
 
 /// The fixed tail every loaded program's region ends in, in pages:
 /// `[heap][guard][stack]`, stack at the top (`sp_el0 = base + size`). The
@@ -173,7 +178,7 @@ const TAIL_PAGES: u64 = HEAP_PAGES + GUARD_PAGES + STACK_PAGES;
 /// slot, or `elf_region_size`'s slot check below refuses every program.
 /// Pinned where a heap or stack growth would trip it at `make build`.
 const _: () = assert!(
-    TAIL_PAGES * 4096 < SLOT_ALIGN,
+    TAIL_PAGES * (PAGE_SIZE as u64) < SLOT_ALIGN,
     "the fixed [heap][guard][stack] tail leaves no room for code in a 2MB region slot"
 );
 
@@ -364,6 +369,12 @@ pub enum LoaderError {
     /// fetched through the alias as zeros. Refused here instead. Carries
     /// the region size in pages so the boot log can say by how much.
     RegionTooLarge(u64),
+    /// A `PT_LOAD` segment's `p_filesz` exceeds its `p_memsz`. The region
+    /// is sized from `p_memsz`, the copy moves `p_filesz` bytes and then
+    /// zeroes `p_memsz - p_filesz`: an inverted pair would copy past the
+    /// segment's own extent into the tail and underflow the zero length.
+    /// Refused at parse, before any size is derived from either.
+    SegmentFileSizeOverMemSize,
     /// A relocation type other than `R_AARCH64_RELATIVE` showed up - this
     /// project has no imported symbols to resolve, so nothing else should
     /// ever legitimately appear here. Deliberately a hard error, not a
@@ -394,6 +405,7 @@ impl core::fmt::Display for LoaderError {
             LoaderError::WrongMachine(m) => write!(f, "unexpected ELF machine {m} (expected EM_AARCH64)"),
             LoaderError::TooManyProgramHeaders => write!(f, "program has more than {MAX_PROGRAM_HEADERS} program headers"),
             LoaderError::NoLoadSegments => write!(f, "program has no PT_LOAD segments"),
+            LoaderError::SegmentFileSizeOverMemSize => write!(f, "a PT_LOAD segment's file size exceeds its memory size"),
             LoaderError::RegionTooLarge(pages) => write!(
                 f,
                 "program's image plus heap and stack needs {pages} pages, over the {} the 2MB region slot holds",
@@ -638,6 +650,13 @@ fn parse_program_headers(file: &[u8], header: &ElfHeader) -> Result<ProgramHeade
     for (i, slot) in headers.iter_mut().enumerate().take(count) {
         let offset = header.e_phoff as usize + i * header.e_phentsize as usize;
         *slot = read_at::<ProgramHeader>(file, offset)?;
+        // Every later use of a PT_LOAD assumes p_filesz <= p_memsz (ELF
+        // requires it; `copy_segments` subtracts them). Refuse the
+        // inversion here so no size is ever derived from a header that
+        // lies about its own extent.
+        if slot.p_type == PT_LOAD && slot.p_filesz > slot.p_memsz {
+            return Err(LoaderError::SegmentFileSizeOverMemSize);
+        }
     }
     Ok(ProgramHeaders { headers, count })
 }
@@ -681,16 +700,18 @@ fn find_section_by_name(file: &[u8], header: &ElfHeader, name: &[u8]) -> Result<
 }
 
 /// Copies every `PT_LOAD` segment's file bytes to `region_base +
-/// p_vaddr`, then zeroes `p_memsz - p_filesz` bytes past that - a real
-/// `.bss` region (if a program ever has one - `programs/linker.ld` still
-/// `ASSERT`s it doesn't, see that file's own doc comment) falls out of
-/// this for free, it isn't a separate feature.
+/// p_vaddr`, then zeroes `p_memsz - p_filesz` bytes past that: the
+/// program's `.bss`. Every C program has one (`programs/linker.ld`'s old
+/// no-`.bss` `ASSERT` went with the `.data`/`.bss` milestone), and a
+/// large one is exactly what `elf_region_size`'s slot bound is for.
 ///
 /// # Safety
 /// `region_base` must point to a freshly allocated, writable region of at
 /// least `region_size` bytes, and every `PT_LOAD` segment's `p_vaddr +
 /// p_memsz` must fit within it (true by construction - the caller derives
-/// `region_size` from exactly this).
+/// `region_size` from exactly this, and `parse_program_headers` has
+/// refused any segment with `p_filesz > p_memsz`, which is what keeps the
+/// copy inside the segment and the subtraction from underflowing).
 unsafe fn copy_segments(file: &[u8], phdrs: &[ProgramHeader], region_base: u64) -> Result<(), LoaderError> {
     for ph in phdrs {
         if ph.p_type != PT_LOAD {
@@ -784,16 +805,22 @@ pub(crate) fn elf_region_size(program: &[u8]) -> Result<(ElfHeader, ProgramHeade
     // mapped EL1-only by mmu.rs so a stack overflow faults cleanly; the heap
     // (a raw buffer the program reaches via `heap_info`) is below the
     // guard, above the code.
-    let region_pages = code_pages + TAIL_PAGES;
-    let region_size = region_pages * page_size;
+    //
     // The whole region must fit one 2MB slot: that is the invariant
     // `mmu.rs`'s per-task view rests on (one L2 slot split into one L3
     // table), and nothing else checks it. A program's memory size is not
     // its file size, so a large `.bss` passes the staging-buffer check and
-    // arrives here at a couple of megabytes.
-    if region_size > SLOT_ALIGN {
-        return Err(LoaderError::RegionTooLarge(region_pages));
+    // arrives here at a couple of megabytes. Bounded in PAGES, before any
+    // multiply: `max_end` is a `p_vaddr + p_memsz` the file chose, up to
+    // u64::MAX, and `code_pages * page_size` for one near the top wraps to
+    // a small number that would pass a check on the product (a debug
+    // build panics in the multiply instead; either way the check must
+    // come first).
+    let max_code_pages = SLOT_ALIGN / page_size - TAIL_PAGES;
+    if code_pages > max_code_pages {
+        return Err(LoaderError::RegionTooLarge(code_pages.saturating_add(TAIL_PAGES)));
     }
+    let region_size = (code_pages + TAIL_PAGES) * page_size;
 
     Ok((header, phdrs, region_size))
 }

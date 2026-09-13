@@ -1844,7 +1844,11 @@ fn print_fs_error(cmd: &str, code: u64) {
         syscall_abi::MSG_ERR_TOO_BIG => "message too big (64-byte limit)",
         syscall_abi::MSG_ERR_DENIED => "permission denied (the IPC capability policy doesn't permit reaching that task)",
         syscall_abi::SPAWN_ERR_BAD_ELF => "not a loadable program (bad ELF)",
-        syscall_abi::SPAWN_ERR_TOO_LARGE => "program too large (over the kernel's staging buffer, or its image plus heap and stack over the 2MB region slot; or empty)",
+        // One code for two bounds (the reserved error band is full, and
+        // moving its floor is a cross-node flag day, see FS_ERR_MIN), so
+        // the message says how to tell them apart: the file size is
+        // visible with `ls -l`, the image size is not.
+        syscall_abi::SPAWN_ERR_TOO_LARGE => "program too large: the file is over the kernel's 128KB staging buffer (see ls -l), or the loaded image with its static data, heap and stack is over the 2MB region",
         syscall_abi::SPAWN_ERR_NO_FREE_SLOT => "no free task slot",
         syscall_abi::TASK_ERR_NO_SUCH_TASK => "no such task (see ps)",
         // Names the whole protected set: a message listing a stale subset is how

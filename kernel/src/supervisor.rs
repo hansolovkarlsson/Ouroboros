@@ -257,8 +257,8 @@ pub fn restart(slot: usize) {
     let image_len = e.image_len;
     let (header, phdrs, region_size) = match loader::elf_region_size(&e.image[..image_len]) {
         Ok(result) => result,
-        Err(_) => {
-            console::println!("Ouroboros kernel: kept image for slot {slot} failed to parse - not restarting");
+        Err(e) => {
+            console::println!("Ouroboros kernel: kept image for slot {slot} refused by the loader ({e}) - not restarting");
             return;
         }
     };

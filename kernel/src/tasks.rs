@@ -238,14 +238,15 @@ pub(crate) fn may_send(src: usize, dest: usize) -> bool {
     holds_send_right(src, dest)
 }
 
-/// 2MB - matches `loader.rs`'s own `SLOT_ALIGN` (a plain numeric
-/// constant, not shared across modules - simplest to just duplicate the
-/// value rather than build a shared-constants module for one number).
 /// Every region [`allocate_runtime_region`] hands out is a multiple of
-/// this, satisfying `mmu.rs`'s "each EL0 region fits inside one 2MB slot"
-/// invariant the same way `loader.rs`'s own over-allocate-and-trim trick
-/// already does for task 0's boot-time-loaded program.
-const RUNTIME_SLOT_ALIGN: u64 = 0x20_0000;
+/// the loader's 2MB slot, so a region `elf_region_size` has bounded to one
+/// slot's worth of bytes also lies inside ONE slot - the invariant
+/// `mmu.rs`'s per-task view rests on. The loader's own constant, not a
+/// copy: this used to be a second `0x20_0000` "simplest to just
+/// duplicate", and the bound in the loader is only sufficient while this
+/// alignment matches it, which a copy cannot promise
+/// (docs/postmortems/true-when-written-postmortem.md).
+const RUNTIME_SLOT_ALIGN: u64 = crate::loader::SLOT_ALIGN;
 
 /// Bump allocator for dynamically `spawn`ed programs' EL0 regions -
 /// deliberately the simplest correct thing, not a real allocator: grows

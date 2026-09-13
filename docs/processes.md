@@ -110,16 +110,20 @@ transiently-allocated-then-freed memory per program at boot; with 512MB of
 RAM in the QEMU config, that's not a meaningful cost.
 
 **The slot is also a ceiling.** A program's loaded image (its memory size,
-so `.bss` counts, not just the file's bytes) plus the loader's fixed heap,
-guard page and stack must fit inside that one 2MB slot, and since
-2026-09-13 the loader refuses one that does not (`SPAWN_ERR_TOO_LARGE` from
-`spawn`, the same code as the staging-buffer bound; a boot program is
-reported in the boot log). Before the check, a 1.9MB `.bss` passed the
-128KB staging bound and the two 2MB sub-slots then shared one page table,
-so the program's own code was fetched through the second slot as zeros and
-it died at its first instruction. The tail is 300KB today, so a program can
-carry about 1.7MB of static data; past that, the region would have to span
-slots, which `mmu.rs` does not do.
+so `.bss` counts, not just the file's bytes) plus the loader's fixed tail
+(`TAIL_PAGES` in `loader.rs`: heap, guard page, stack) must fit inside that
+one 2MB slot, and since 2026-09-13 the loader refuses one that does not.
+From `spawn` that is `SPAWN_ERR_TOO_LARGE`, the same code as the
+staging-buffer bound (the shell's message says how to tell the two apart);
+for a server loaded at boot the boot log prints the loader's refusal, which
+names the page counts, and the kernel carries on without that server; for
+the shell itself the kernel panics at boot, since there is nothing to run.
+Before the check, a large `.bss` passed the staging bound (which is on file
+bytes) and the two 2MB sub-slots then shared one page table, so the
+program's own code was fetched through the second slot as zeros and it died
+at its first instruction. What is left for static data is the slot minus
+the tail; the refusal message carries the real numbers, and a compile-time
+assert in `loader.rs` keeps the tail from ever consuming the whole slot.
 
 Two independent regions exist at once: the loaded program (task 0) and a
 small fixed 4KB idle-task stub (task 1, still compiled into the kernel —
