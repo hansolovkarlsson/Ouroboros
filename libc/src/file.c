@@ -520,10 +520,18 @@ ssize_t write(int fd, const void *buf, size_t count) {
         if ((unsigned long)st >= FS_ERR_MIN) {
             return (off > 0) ? (ssize_t)off : -1;
         }
-        f->offset += (long)chunk;
-        off += chunk;
+        /* Advance by what was ACTUALLY written (fsd's NP_PWRITE status is the
+         * byte count), not by the whole chunk. A short or zero write (the far
+         * fsd wrote fewer bytes than asked) then reports the true total rather
+         * than a full success over a data gap, and st == 0 cannot spin the
+         * loop. POSIX write() may return less than count; the caller retries. */
+        f->offset += st;
+        off += (size_t)st;
+        if ((size_t)st < chunk) {
+            break;
+        }
     }
-    return (ssize_t)count;
+    return (ssize_t)off;
 }
 
 ssize_t read(int fd, void *buf, size_t count) {

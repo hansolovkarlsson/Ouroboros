@@ -5105,8 +5105,16 @@ fn fsd_write_at(who: As, path: &[u8], tree: u64, offset: u64, data: &[u8]) -> u6
 /// when the fid was not opened for writing, which is where a read-only remote
 /// fd's write is refused.
 fn fsd_pwrite(who: As, fsd_fid: u64, offset: u64, data: &[u8]) -> u64 {
+    // Reject an over-cap write rather than silently truncating it: the client
+    // caps a chunk at NP_REMOTE_CHUNK, so a larger `data` is a wire fault or a
+    // cap drift (FS_DATA_MAX and NP_REMOTE_CHUNK are independent constants), and
+    // a short write reported as success is the well-formed-wrong-answer this
+    // project keeps a postmortem about (review of the step-7 PR).
+    if data.len() > ninep_abi::NP_REMOTE_CHUNK {
+        return syscall_abi::FS_ERROR;
+    }
     let mut dbuf = [0u8; ninep_abi::NP_REMOTE_CHUNK];
-    let dlen = data.len().min(dbuf.len());
+    let dlen = data.len();
     dbuf[..dlen].copy_from_slice(&data[..dlen]);
     let granted = syscall4(
         syscall_abi::GRANT,

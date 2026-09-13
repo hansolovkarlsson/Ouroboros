@@ -713,7 +713,7 @@ read is the failure mode.)
 > refactor ahead of it (the merge-with-consumer lesson,
 > [`cluster-phase0-postmortem.md`](../postmortems/cluster-phase0-postmortem.md)).
 
-**Step 7 — `NP_PWRITE`, and the C write path it unblocks. ✅ DONE
+**Step 7: `NP_PWRITE`, and the C write path it unblocks. ✅ DONE
 2026-09-12. THE ARC IS COMPLETE.** The export's `NP_PWRITE` arm bridges the
 wire-inline data to `fsd` via `fsd_pwrite` (the mirror of `NP_PREAD`'s inline
 read, and of `fsd_write_at`'s path-based `GRANT_READ`); `NP_PWRITE` moved from

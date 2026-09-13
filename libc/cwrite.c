@@ -69,6 +69,7 @@ int main(void) {
         return 1;
     }
     printf("cwrite: %d bytes written through a remote fid and read back "
-           "identical (%d > one chunk)\r\n", (int)sizeof pat, (int)sizeof pat);
+           "identical (more than one %d-byte chunk)\r\n",
+           (int)sizeof pat, (int)FS_DATA_MAX);
     return 0;
 }
