@@ -331,22 +331,19 @@ the microkernel arc itself still leaves open):
      program's `open`/`fstat` over a remote mount fails on a real guest-to-guest
      mount too. `ls -l` works remotely now; `fstat` of the same file does not.
 
-     **IN PROGRESS — [`roadmap-fid-verbs.md`](roadmap/roadmap-fid-verbs.md) is the
-     plan: seven ordered steps, each with a check and a negative control.
-     STEPS 1–3 ARE DONE AND THE REPORTED SYMPTOM IS CLOSED** — a C program
-     opens and reads a file on a remote mount. **Step 4 (the session) landed
-     2026-09-07 and step 5 (the export serves `NP_OPEN`/`NP_FSTAT`/`NP_CLUNK`
-     on a session, fids keyed on the connection and clunked when it goes)
-     on 2026-09-12, step 6 (`NP_PREAD` on a session, carrying the fold
-     of the fid verbs into the export's one dispatch) the same day, and the
-     CLIENT half of 5 (Decision 4: `netd` holds a `ClientSession` per
-     (endpoint, uid), opened on the first fid verb, fail-dead on the far reap)
-     also 2026-09-12**, each measured by a gate under `run-guest.sh` and shown
-     failing by mutation; the client half by `libc/cbig.c` reading a
-     nine-chunk file over a remote mount on the two-VM ext2 rig, byte-matching
-     the local copy, with a close-per-verb mutation as its control. **A C
-     program's `open()`/`read()`/`close()` on a remote mount now works
-     guest-to-guest. Left: `NP_PWRITE` (step 7).**
+     **✅ DONE 2026-09-12. [`roadmap-fid-verbs.md`](roadmap/roadmap-fid-verbs.md)
+     is the plan: seven ordered steps, each with a check and a negative
+     control, ALL COMPLETE.** A C program's `open`/`read`/`write`/`close` over
+     a remote mount works guest-to-guest, and permissions are enforced across
+     it. Steps 1-3 made a C read work; step 4 (the session) landed 2026-09-07;
+     steps 5 (the export serves the fid verbs on a session), 6 (`NP_PREAD` plus
+     the dispatch fold), the client half of 5 (Decision 4: `netd` holds a
+     `ClientSession` per (endpoint, uid)), and 7 (`NP_PWRITE`, and `libc`'s
+     remote `write()`) all landed 2026-09-12. Each measured by a gate under
+     `run-guest.sh` or a C witness on the two-VM ext2 rig (`cbig` reads a
+     nine-chunk file and byte-matches; `cwrite` writes two chunks and reads
+     them back identical, refused `FS_ERR_PERM` for a user without `w`), each
+     shown failing by mutation.
 
      **This heading names the wrong subsystem**, which is what the scoping
      found. `libc/src/file.c` sent every fid verb to `FSD_TASK` with no

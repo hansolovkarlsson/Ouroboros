@@ -662,6 +662,35 @@ on a one-shot connection), the pre-session behaviour. **cbig is subject to the
 same ~1/6 socket-link flake as any remote op here** (`cbig: remote … read
 failed`, no fault): re-run rather than reading one failure as a regression.
 
+**The remote-write witness** (step 7 of `roadmap-fid-verbs.md`, `NP_PWRITE`,
+2026-09-12). `/bin/CWRITE` (`libc/cwrite.c`) writes an 800-byte pattern (two
+`NP_REMOTE_CHUNK`s, so `write()` loops over one held session) through a remote
+fid onto A's disk, reopens it, and reads it back, comparing against the
+pattern. Run node B as **root**, which may write A's root-owned directory:
+
+```sh
+python3 scripts/drive-2vm.py build/espext2-a.img build/espext2-b.img \
+  --a 'login:@@root' 'assword:@@root' '# @@ls /man' \
+  --b 'login:@@root' 'assword:@@root' \
+     '# @@mount -r 10.0.2.10:564 /mnt/a' \
+     '# @@cwrite' \
+     '# @@'
+# expected: "cwrite: 800 bytes written through a remote fid and read back
+# identical (800 > one chunk)", 0 fault lines.
+```
+
+**The permission control, and it dictates the rig.** Run node B as **user**
+instead (`login:@@user` / `\$ @@` prompt): the `O_CREAT` open in A's
+root-owned directory is refused, `cwrite: open (write) refused: permission
+denied`, measured 2/2 where root's succeeds. This is the `w`-permission control
+the plan names, and it is real ONLY on the ext2 pair. FAT32 records no mode, so
+`fsd` has nothing to enforce and the write would go through for anyone. **Shown
+failing:** feed the export's write bridge no data (in `build_9p_reply`'s
+`NP_PWRITE` arm, pass `&[]` to `fsd_pwrite`); `cwrite` then fails every attempt
+rather than reporting success. Against the pre-step-7 tree a remote `write()`
+returned `-1`. cwrite is subject to the same ~1/6 socket flake as any remote op
+(a first-op `capability` denial, no fault); re-run.
+
 **A remote op fails spuriously now and then — know which message is which.**
 Measured 2026-08-31 on this rig: roughly one remote read in six fails on the
 shared socket link, on `main` as much as on any branch (3 scripted runs each:
