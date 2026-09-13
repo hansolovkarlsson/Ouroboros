@@ -520,6 +520,51 @@ every other mention a pointer, so the edit that falsifies it has one line to
 find. The `netd` comment that said `fsd` drops a fid on a uid mismatch was the
 same day's other copy, in another server, and went the same way.
 
+## The strongest kind: a duplicated constant, and the check is a comment (2026-09-12)
+
+The client-side export session (Decision 4) made `netd` nest one call level
+deeper, so its stack outgrew the 32 KB it ran on and the EL0 stack had to grow
+to 40 KB. `STACK_PAGES` sets that size, and it is written **twice**:
+`kernel/src/loader.rs` allocates the region, `kernel/src/mmu.rs` places the
+guard page `STACK_PAGES + 1` from the end. I changed `loader.rs` to 10 and left
+`mmu.rs` at 8.
+
+Nothing failed to compile. Nothing failed loudly at all. The loader now handed
+each task a 40 KB stack while `mmu.rs` mapped the guard page where the 32 KB
+stack used to end, which is 8 KB *below* the new top. The guard was now sitting
+in the middle of live stack, and the top 8 KB had no guard beneath it. A clean
+stack overflow (grow past the bottom, hit an EL1-only page, take a clean EL0
+fault) had become an overflow that walked through mapped memory and faulted
+somewhere arbitrary, or not where the numbers said it should.
+
+This is the spine at its worst. The `mmu.rs` constant carries the comment
+`// must match loader.rs (32KB stack)`, a claim that was true the day it was
+typed, guarding behaviour, in a *different file* from the edit that falsified
+it. It passed every review it will ever get. And it did not merely go stale
+quietly the way a doc count does: a misplaced guard page turns the one
+mechanism that makes overflow *safe* into a source of silent corruption, so the
+falsification cost more than the feature. It also poisoned the diagnosis. Every
+"grow the stack and see if the fault moves" experiment I ran was measuring a
+layout where the guard was in the wrong place, so the fault behaved as if the
+stack size did not matter, which reads as unbounded recursion and sent me
+hunting a cycle that was not there. The trap did not just hide; it lied about
+its own shape.
+
+What finally broke it was decoding the fault address against the region layout
+and finding the overflow point scaled with the *allocated* size while the guard
+did not move with it, a contradiction a correctly-placed guard cannot produce.
+The comment `must match loader.rs` was the tell, read at last as an instruction
+I had not followed rather than a note.
+
+The comment is the weakest possible check, and the residual is stated where it
+will be read: both `STACK_PAGES` now say 40 KB, `loader.rs`'s history block
+explains the growth and warns about the duplicate, and the `mmu.rs` comment
+still says `must match loader.rs`. That is *keep it in one place and point*
+applied to a constant that genuinely lives in two modules. The honest fix is a
+single shared `STACK_PAGES` the two read, and until that exists the pair is a
+grep away from the next person who grows one and not the other. The lesson costs
+nothing to state and cost a real chunk of a debugging session to learn.
+
 ## What actually worked
 
 Three things, none of them "be more careful".
