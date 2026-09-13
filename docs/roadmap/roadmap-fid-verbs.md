@@ -541,7 +541,8 @@ mid-session and confirm the slot returns; open `MAX_CONNS + 1` and confirm the
 refusal is an error the client reports, not a hang.
 
 **Step 5: the export learns `NP_OPEN` / `NP_FSTAT` / `NP_CLUNK`. ✅ DONE
-2026-09-12 for the EXPORT half; the client half is deferred, see below.** The
+2026-09-12 for the EXPORT half; the CLIENT half landed the same day, Decision 4
+below.** The
 fid table is keyed on the session from step 4: `TcpConn` carries four
 `SessionFid` slots (the `fsd` fid behind each, and the remote user who opened
 it), the client-facing number is `3 + slot` and means nothing on any other
@@ -615,7 +616,8 @@ claim in the paragraph above measured rather than argued. Recipe in
 > follow-up, and it is recorded here for the next session rather than built on
 > a guess. Until it is built, a guest-to-guest C `open()` on a remote mount
 > gets `FS_ERR_NO_SUCH_VERB` from a step-5 export exactly as it did from a
-> step-4 one.
+> step-4 one. **The decision is now written as Decision 4 below (2026-09-12),
+> for confirmation before code.**
 
 **Step 6 — `NP_PREAD`. ✅ DONE 2026-09-12, with the item-9 fold.** The
 wire→`SAFECOPY` bridge, mirroring `read_file_chunk`'s existing `GRANT_WRITE`
@@ -723,6 +725,187 @@ the rig:** a user without `w` on the target must be refused. **Use
 `fsd` has nothing to enforce and a permission test there passes before a fix
 and after it, proving nothing either time — the caveat
 `scripts/drive-2vm.py` already carries.
+
+## Decision 4: where the client session lives (2026-09-12)
+
+> **✅ CONFIRMED AND BUILT 2026-09-12, as recommended.** `netd` holds a
+> `ClientSession` per `(endpoint, uid)`, opened lazily on the first fid verb,
+> driven synchronously, fail-dead on the far reap, freed on the last clunk. A
+> guest-to-guest C `open()`/`read()`/`close()` on a remote mount now works.
+> · **Witness, on the two-VM ext2 rig** (`scripts/drive-2vm.py`,
+> `make images-2vm-ext2`): `libc/cbig.c` (`/bin/CBIG`) reads `/man/grep`
+> (4661 bytes, nine `NP_REMOTE_CHUNK`s) off node A over a remote mount through
+> a held session and byte-compares it against node B's own identical copy;
+> **it matches**, so the fid survived `open`→`read`(×9 preads)→`close` on one
+> connection. cbig self-checks (no host oracle) because `/man/grep` is staged
+> identically on both nodes. · **The control that can fail**: close the session
+> after every verb (`session_rmount`, the one-shot shape) and cbig FAILS 2/2
+> (the second verb reaches a clunked fid), where held it passes; measured.
+> · **Against `main`** a C `open()` gets `FS_ERR_NO_SUCH_VERB` (a fid verb on a
+> one-shot connection), the pre-session behaviour. · **One rig caveat, not a
+> bug**: `drive-2vm.py` already records ~1/6 remote ops failing on the shared
+> QEMU socket link, on `main` as much as here (measured 2/3 cbig successes in
+> one batch, no faults); it is the link, not the session.
+>
+> **One real gotcha, worth not repeating.** The session path nests one call
+> level deeper than the path-based client ops, so its packet buffers ran
+> ~1-3 KB past `netd`'s 32 KB EL0 stack (the one-shot path, one level
+> shallower, just fit). The stack grew to 40 KB, the same fix every prior netd
+> client op that outgrew the stack got. `STACK_PAGES` is DUPLICATED in
+> `kernel/src/loader.rs` (allocates the region) and `kernel/src/mmu.rs` (places
+> the guard `STACK_PAGES + 1` from the end); changing only one misplaced the
+> guard mid-stack and turned a clean overflow into erratic corruption that cost
+> real debugging time before the mismatch was spotted. Both must move together;
+> the `mmu.rs` comment says so.
+
+**The client half of step 5, written out before any code, because the plan
+under-specified it as one sentence and a read of the code shows it hides a
+design choice, not a follow-up.** This is a decision to CONFIRM, in the shape
+Decision 3 was: weighed on the standing order, stable first, then safe, then
+leaving room for future features.
+
+### What is actually there, and why a session is needed at all
+
+A C program's remote file op does not reach the far export directly. `libc`'s
+`np_request` wraps each fid verb as one `NETOP_RMOUNT` `MSG_CALL` to `netd`
+(`NET_TASK`), carrying the endpoint (`ip:port`) and the verbatim NP message;
+`netd`'s `handle_rmount` frames it onto TCP with `tcp_get`, does ONE
+request/reply round trip, and **closes the connection** (`tcp_get` sends the
+FIN once the framed reply is complete). So `open()`, `fstat()`, `read()` and
+`close()` are four separate `NETOP_RMOUNT` calls, each on a fresh TCP
+connection that dies after its reply.
+
+That is exactly what a remote fid cannot survive. The far export's fid is a
+number on ITS connection (`FID_BASE + slot`, per connection, Decision 2), and
+closing the connection clunks it (`TcpConn`'s `Drop`). So the fid `open()`
+returns is dead before the `read()` after it is sent: the second
+`NETOP_RMOUNT` opens a new connection where that number means nothing (or names
+a different session's file). **A remote fid needs one TCP connection held from
+`open()` to `close()`**, which is what step 4 built the session verb for, seen
+from the client side.
+
+### The trigger: `netd` never hears about `mount -r`
+
+`mount -r host:port /mnt/a` is a shell builtin (`cmd_mount_remote`) that adds a
+`NS_REMOTE_TREE` binding to the SHELL's namespace (`ns_add`). `netd` is never
+told. The first thing `netd` learns of a remote mount is a `NETOP_RMOUNT`
+carrying a fid verb for that endpoint. **So the session opens lazily, on the
+first fid verb to an endpoint `netd` holds no session for**, not at mount time.
+`netd` already peeks an embedded verb elsewhere (the `NP_RUN`-vs-session split
+in `handle_9p`), so telling a fid verb (`NP_OPEN`/`PREAD`/`PWRITE`/`FSTAT`/
+`CLUNK`) from a path verb costs one `is_*` check. Path verbs
+(`readdir`/`read`/`stat`/`write_file`/…) keep using one-shot `tcp_get`
+unchanged: they carry their own path and need no handle, so a `cat` over a
+remote mount is untouched.
+
+### The choice: how the held connection is driven
+
+> **Recommended: a small held-session table in `netd`, keyed on `(endpoint,
+> uid)`, driven SYNCHRONOUSLY the way `NETOP_RMOUNT` already is.** The delta
+> from today is the smallest that is correct: on a fid verb, find or open a
+> session to `(endpoint, uid)`; a fresh one opens the TCP connection and sends
+> `NP_SESSION` first (refused → close and fail the open, which is right, an old
+> export served no fid verbs anyway); then the verb rides that connection and
+> the connection is NOT closed. The connection's 4-tuple and sequence state,
+> which `tcp_get` keeps on its stack for one call, become a `ClientSession`
+> struct that outlives the call. The next fid verb for the same `(endpoint,
+> uid)` resumes it.
+
+**Keyed on `(endpoint, uid)`, not per libc fd or per C program**, because the
+far export binds each fid to the requesting user and refuses a co-tenant
+(step 5's wall). Two of one user's remote fids to one endpoint therefore share
+one connection and its `SESSION_FIDS` = 4 budget; a third program's fifth open
+is `FS_ERR_BUSY`, the same answer the budget gives locally, and ledgered. Two
+DIFFERENT users to one endpoint get two sessions, because their fids are owned
+by different far-side users.
+
+**Why synchronous and not the event-loop `DialConn` shape the deferral note
+first named.** `NETOP_RMOUNT` is a synchronous `MSG_CALL`: the C program is
+blocked in it, and `netd` must produce that one reply before returning, so an
+async connection buys no concurrency for the caller that is waiting. `netd`
+already blocks its event loop for one round trip per remote verb today (via
+`tcp_get`), bounded under the supervisor wedge threshold; holding the
+connection between calls does not lengthen any single block. The one thing an
+event-loop `DialConn` would add is letting `netd` serve OTHER clients (its
+export, `cpu`, HTTP) while one C program's round trip is in flight. That is a
+real limitation, but it is a PRE-EXISTING property of `NETOP_RMOUNT`, not one
+the session introduces, and fixing it means making `NETOP_RMOUNT` itself async
+(park the `MSG_CALL`, reply later, the `handle_run` pattern). Changing the
+transport to a held session AND the concurrency model in one step is two risky
+things at once, the same separation Decision 3 drew between transport and auth.
+So: hold synchronously now, and leave async `NETOP_RMOUNT` as its own future
+item, foreclosed by nothing here.
+
+**Lifetime, the part with no free answer.** A held connection is a scarce slot
+(the same NIC-facing budget as `MAX_DIAL`), so it must be returned. Two bounds,
+both wanted:
+
+- **On the far side's reap.** The export RSTs a session idle for
+  `CONN_IDLE_TICKS` (30 s). `netd` is not listening on the held connection
+  between calls, so it learns of the RST on the NEXT fid verb, when its send
+  fails. The rule is **fail-dead**: report the fid gone (`FS_ERROR`), never
+  silently reopen a session and forward the old number onto a fid the far side
+  reissued. This is the same false-dead-is-safe discipline the `fsd`-generation
+  guard already follows, one layer out, and it matches a POSIX stale handle. A
+  C program's `read()` then returns -1, which is honest.
+- **On this side.** Free the `ClientSession` when the count of fids `netd` has
+  relayed-open on it reaches zero (every `NP_OPEN` reply increments, every
+  `NP_CLUNK`, and a fid the far side dropped, decrements), which returns the
+  slot promptly and mirrors the export's own close-clunks-everything; with a
+  `DIAL_IDLE_TICKS`-style idle timer as the backstop for a C program that
+  crashed without clunking. **A refcount, not an LRU or a bare timer**, because
+  a live handle must never vanish under its holder, which was the exact reason
+  Decision 3 rejected the identity-keyed table.
+
+### How it is verified, and why only the two-VM rig can
+
+`libc/cremote.c` already exists and does the whole lifecycle:
+`open("/mnt/a/…", O_RDONLY)`, `fstat`, `read`, `close`, after `mount -r`. It
+was written for step 3b and today passes only against the HOST peer
+(`make run-image-9p-client`), because the host peer serves fids on ANY
+connection: it would pass a client that opened a fresh connection per verb and
+never held a session, so it cannot witness the client half at all. **The
+witness is the two-VM rig** (`make run-image-2vm-ext2-*`, `scripts/drive-2vm.py`):
+node B does `mount -r 10.0.2.10:564 /mnt/a`, then runs `cremote`, reading a
+file LARGER than one `NP_REMOTE_CHUNK` off A's disk so the rising-offset
+`read()` loop crosses several `NETOP_RMOUNT` calls on one held session, bytes
+compared against the same file read path-based. · **The negative control that
+can fail**: revert `netd` to closing the connection after each fid verb (the
+one-shot shape); `cremote`'s `read()` then reaches A with a fid the far export
+has clunked and fails, where a per-connection-blind check would pass. · **The
+permission control needs the EXT2 pair**, since FAT32 records no mode and every
+remote request looks permitted: a file B's user may not read is refused, and
+the refusal is the far side's, on a fid opened as B.
+
+**This also unblocks step 7's own check**: the two-VM write test (B writes
+through a fid onto A's disk) needs exactly this held client session, so the
+client half lands before `NP_PWRITE`, and `NP_PWRITE` is then one `Shape` edit
+and one arm on top of a proven session.
+
+### The boundary, stated
+
+Out of this decision on purpose, each for the reason Decision 3 gives:
+**async `NETOP_RMOUNT`** (concurrency, a separate arc); **session-scoped
+authentication** (sign once per session rather than per verb, which the held
+connection makes possible but which is an auth-model change); and **raising
+`SESSION_FIDS` or the client-session table size** (do it when something
+exhausts it, with the exhaustion as evidence).
+
+**A stack-depth limitation on the ledger, found by the PR review.** The 40 KB
+stack is sized for the top-level session path (`serve` → `drain` →
+`handle_client` → `session_rmount`). A fid `NETOP_RMOUNT` can also arrive at
+the **re-entrant** drain inside `tcp_run` (a local task doing remote fid I/O
+while this node runs a `cpu` command), where `session_rmount`'s ~5 KB and its
+call level nest on top of `handle_run` + `tcp_run`'s own frame, well past
+40 KB. It faults CLEAN on the guard (netd restarts, dropping held
+connections), not silently, and the trigger is narrow: a local remote-fid op
+concurrent with an outbound `cpu` run on the same node. Not fixed here because
+the fix (refuse a new session from the re-entrant context, or make
+`NETOP_RMOUNT` async) is larger than the corner and there is no rig that
+creates the condition; the same latent depth already applied to the one-shot
+path this arc did not change, one level shallower. Revisit with async
+`NETOP_RMOUNT`, or a rig that can drive a concurrent remote op during a `cpu`
+run.
 
 ## Deliberately not in scope
 

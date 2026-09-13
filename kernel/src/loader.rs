@@ -128,9 +128,20 @@ const CONFIG_PATH: &str = "\\EFI\\ORBS\\INIT.CFG";
 // response-prefix buffer dominating), and a client op (ping/resolve/fetch)
 // nests its own ~5KB TCP/DNS buffers on top of that - which overflowed 24KB
 // (caught, again, by the guard). All regions grow 8KB; RAM is ample.
-const STACK_PAGES: u64 = 8;
+//
+// Grown again to 40KB (10 pages) for the client-side export SESSION (Decision
+// 4 of docs/roadmap/roadmap-fid-verbs.md): a remote fid verb from a C program
+// nests one call level DEEPER than the path-based client ops (serve -> drain
+// -> handle_client -> handle_rmount -> session_rmount -> find_or_open ->
+// client_connect, each its own frame), so its ~1600-byte packet buffers ran
+// ~1-3KB past the 32KB edge where the one-shot path just fit. Caught by the
+// guard, same as every prior growth; +8KB again, RAM still ample. NOTE the
+// duplicate below: `mmu.rs`'s guard_page_addr has its own STACK_PAGES that
+// must move in lockstep, or the guard lands mid-stack and a clean overflow
+// becomes silent corruption (which cost real debugging time here first).
+const STACK_PAGES: u64 = 10;
 /// One inaccessible guard page between the code and the stack. The stack
-/// grows down from the top of the region; an overflow past the 8KB stack
+/// grows down from the top of the region; an overflow past the 40KB stack
 /// lands in this page, which `mmu.rs` maps EL1-only, taking a clean EL0
 /// fault instead of silently corrupting the code below. See `mmu.rs`'s
 /// `build_view` (which derives the guard's address from the region's
