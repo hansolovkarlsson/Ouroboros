@@ -541,7 +541,8 @@ mid-session and confirm the slot returns; open `MAX_CONNS + 1` and confirm the
 refusal is an error the client reports, not a hang.
 
 **Step 5: the export learns `NP_OPEN` / `NP_FSTAT` / `NP_CLUNK`. ✅ DONE
-2026-09-12 for the EXPORT half; the client half is deferred, see below.** The
+2026-09-12 for the EXPORT half; the CLIENT half landed the same day, Decision 4
+below.** The
 fid table is keyed on the session from step 4: `TcpConn` carries four
 `SessionFid` slots (the `fsd` fid behind each, and the remote user who opened
 it), the client-facing number is `3 + slot` and means nothing on any other
@@ -726,6 +727,36 @@ and after it, proving nothing either time — the caveat
 `scripts/drive-2vm.py` already carries.
 
 ## Decision 4 — where the client session lives (2026-09-12)
+
+> **✅ CONFIRMED AND BUILT 2026-09-12, as recommended.** `netd` holds a
+> `ClientSession` per `(endpoint, uid)`, opened lazily on the first fid verb,
+> driven synchronously, fail-dead on the far reap, freed on the last clunk. A
+> guest-to-guest C `open()`/`read()`/`close()` on a remote mount now works.
+> · **Witness, on the two-VM ext2 rig** (`scripts/drive-2vm.py`,
+> `make images-2vm-ext2`): `libc/cbig.c` (`/bin/CBIG`) reads `/man/grep`
+> (4661 bytes, nine `NP_REMOTE_CHUNK`s) off node A over a remote mount through
+> a held session and byte-compares it against node B's own identical copy;
+> **it matches**, so the fid survived `open`→`read`(×9 preads)→`close` on one
+> connection. cbig self-checks (no host oracle) because `/man/grep` is staged
+> identically on both nodes. · **The control that can fail**: close the session
+> after every verb (`session_rmount`, the one-shot shape) and cbig FAILS 2/2
+> (the second verb reaches a clunked fid), where held it passes; measured.
+> · **Against `main`** a C `open()` gets `FS_ERR_NO_SUCH_VERB` (a fid verb on a
+> one-shot connection), the pre-session behaviour. · **One rig caveat, not a
+> bug**: `drive-2vm.py` already records ~1/6 remote ops failing on the shared
+> QEMU socket link, on `main` as much as here (measured 2/3 cbig successes in
+> one batch, no faults); it is the link, not the session.
+>
+> **One real gotcha, worth not repeating.** The session path nests one call
+> level deeper than the path-based client ops, so its packet buffers ran
+> ~1-3 KB past `netd`'s 32 KB EL0 stack (the one-shot path, one level
+> shallower, just fit). The stack grew to 40 KB, the same fix every prior netd
+> client op that outgrew the stack got. `STACK_PAGES` is DUPLICATED in
+> `kernel/src/loader.rs` (allocates the region) and `kernel/src/mmu.rs` (places
+> the guard `STACK_PAGES + 1` from the end); changing only one misplaced the
+> guard mid-stack and turned a clean overflow into erratic corruption that cost
+> real debugging time before the mismatch was spotted. Both must move together;
+> the `mmu.rs` comment says so.
 
 **The client half of step 5, written out before any code, because the plan
 under-specified it as one sentence and a read of the code shows it hides a

@@ -337,15 +337,16 @@ the microkernel arc itself still leaves open):
      opens and reads a file on a remote mount. **Step 4 (the session) landed
      2026-09-07 and step 5 (the export serves `NP_OPEN`/`NP_FSTAT`/`NP_CLUNK`
      on a session, fids keyed on the connection and clunked when it goes)
-     on 2026-09-12, and step 6 (`NP_PREAD` on a session, carrying the fold
-     of the fid verbs into the export's one dispatch) the same day**, each
-     measured by a gate under `run-guest.sh` and shown failing by mutation.
-     Left: `NP_PWRITE` (7), and the
-     CLIENT half of 5, which the plan under-specified: `netd` must hold a
-     client-side session across a C program's `open()`..`close()`, which
-     `tcp_get`'s one-connection-per-call model cannot, and `mount -r` is a
-     shell `NS_SET` that `netd` never hears about. A design decision, recorded
-     in the plan, not a follow-up.
+     on 2026-09-12, step 6 (`NP_PREAD` on a session, carrying the fold
+     of the fid verbs into the export's one dispatch) the same day, and the
+     CLIENT half of 5 (Decision 4: `netd` holds a `ClientSession` per
+     (endpoint, uid), opened on the first fid verb, fail-dead on the far reap)
+     also 2026-09-12**, each measured by a gate under `run-guest.sh` and shown
+     failing by mutation; the client half by `libc/cbig.c` reading a
+     nine-chunk file over a remote mount on the two-VM ext2 rig, byte-matching
+     the local copy, with a close-per-verb mutation as its control. **A C
+     program's `open()`/`read()`/`close()` on a remote mount now works
+     guest-to-guest. Left: `NP_PWRITE` (step 7).**
 
      **This heading names the wrong subsystem**, which is what the scoping
      found. `libc/src/file.c` sent every fid verb to `FSD_TASK` with no

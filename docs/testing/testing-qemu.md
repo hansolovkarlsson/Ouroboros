@@ -632,6 +632,36 @@ report `uid=0(root)`. A permission test that has never been seen to fail is a
 test whose passing means nothing — and on the FAT32 rig it *cannot* fail, which
 is the whole reason this section says to use ext2.
 
+**The client-session witness** (Decision 4 of `roadmap-fid-verbs.md`, the
+client half of step 5, 2026-09-12). A shell `cat` over a remote mount is
+path-based (one `NETOP_RMOUNT` per chunk); only a **C program** exercises the
+held client session, because only `libc`'s fd path uses fids. `/bin/CBIG`
+(`libc/cbig.c`) reads `/man/grep` (4661 bytes, nine `NP_REMOTE_CHUNK`s) off A
+over the mount and byte-compares it against B's own identical copy of the same
+file, so it self-checks with no host oracle. The read succeeds only if `netd`
+holds ONE connection to A's export across the C `open`→`read`(nine preads)
+→`close` (the far fid dies with the connection otherwise).
+
+```sh
+python3 scripts/drive-2vm.py build/espext2-a.img build/espext2-b.img \
+  --a 'login:@@root' 'assword:@@root' '# @@ls /man' \
+  --b 'login:@@user' 'assword:@@user' \
+     '\$ @@mount -r 10.0.2.10:564 /mnt/a' \
+     '\$ @@cbig' \
+     '\$ @@'
+# expected: "cbig: 4661 bytes over the remote mount match the local copy
+# (4661 > one chunk)", 0 fault lines both nodes.
+```
+
+Its control is the session's whole point: in `session_rmount`, close the
+session after every verb (`if let Some(sess) = sessions[slot].take() {
+client_close(mac, &sess); }` before the refcount block) so it is not held; cbig
+then FAILS (the second verb reaches a clunked fid), measured 2/2. Against
+`main` a C `open()` on a remote mount answers `FS_ERR_NO_SUCH_VERB` (a fid verb
+on a one-shot connection), the pre-session behaviour. **cbig is subject to the
+same ~1/6 socket-link flake as any remote op here** (`cbig: remote … read
+failed`, no fault): re-run rather than reading one failure as a regression.
+
 **A remote op fails spuriously now and then — know which message is which.**
 Measured 2026-08-31 on this rig: roughly one remote read in six fails on the
 shared socket link, on `main` as much as on any branch (3 scripted runs each:
