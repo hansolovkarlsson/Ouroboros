@@ -713,18 +713,37 @@ read is the failure mode.)
 > refactor ahead of it (the merge-with-consumer lesson,
 > [`cluster-phase0-postmortem.md`](../postmortems/cluster-phase0-postmortem.md)).
 
-**Step 7 — `NP_PWRITE`, and the C write path it unblocks.** The mirror bridge;
-`fsd_write_at` is the proven precedent for wire-inline → local `GRANT_READ`.
-This is also where `libc`'s remote `write()` stops being a refusal: step 3b
-refuses it precisely because this wire shape did not exist yet. · **Check:**
-the two-VM rig, B writes through a fid onto A's disk, reads it back and
-compares; and `cremote`'s `write() to a remote fd` assertion flips from
-"must refuse" to "must succeed". · **Negative control — and this one dictates
-the rig:** a user without `w` on the target must be refused. **Use
-`make run-image-2vm-ext2-*`, not the FAT32 pair.** FAT32 records no mode, so
-`fsd` has nothing to enforce and a permission test there passes before a fix
-and after it, proving nothing either time — the caveat
-`scripts/drive-2vm.py` already carries.
+**Step 7 — `NP_PWRITE`, and the C write path it unblocks. ✅ DONE
+2026-09-12. THE ARC IS COMPLETE.** The export's `NP_PWRITE` arm bridges the
+wire-inline data to `fsd` via `fsd_pwrite` (the mirror of `NP_PREAD`'s inline
+read, and of `fsd_write_at`'s path-based `GRANT_READ`); `NP_PWRITE` moved from
+`Shape::Unserved` to `Shape::Fid`, and that variant is gone now that all five
+fid verbs are served. `libc`'s remote `write()` stops being a refusal: a remote
+fid sends `NP_PWRITE` with its data INLINE in the request (no grant crosses a
+machine), chunked by `NP_REMOTE_CHUNK`, and `netd`'s export re-grants it to the
+far `fsd`; local writes keep the grant path.
+
+> **Check:** `libc/cwrite.c` (`/bin/CWRITE`) writes an 800-byte pattern (two
+> chunks, so the write loops over one held session) through a remote fid onto
+> A's disk, reopens it, reads it back, and compares. **Measured on
+> `make run-image-2vm-ext2-*`:** as ROOT it writes and reads back identical
+> (multiple runs); if the write did not cross, the compare fails. · **Negative
+> control, and it dictates the rig:** as a normal USER the create in A's
+> root-owned directory is refused `FS_ERR_PERM` (2/2), where root's succeeds -
+> the `w`-permission control that only ext2 makes real (FAT32 records no mode).
+> · **Shown failing:** with the export's write bridge fed no data (a
+> mutation), `cwrite` fails every attempt rather than reporting success.
+> Against the pre-step-7 tree a remote `write()` returned `-1`
+> (`FS_ERR_NO_SUCH_VERB`).
+
+> **The plan's `cremote` claim was wrong, and it is worth saying why.** The
+> plan said `cremote`'s `write() to a remote fd` assertion would flip from
+> "must refuse" to "must succeed". It does NOT: `cremote` opens the file
+> `O_RDONLY`, so a write to that fd is still refused - now by `fsd`'s
+> open-flags check (`FS_ERR_PERM`) rather than by `libc`'s blanket refusal, a
+> better test of the same assertion. The positive write path needed its own
+> witness opened for writing, which is why `cwrite` exists rather than a
+> `cremote` edit. `cremote` is unchanged and still passes.
 
 ## Decision 4: where the client session lives (2026-09-12)
 
