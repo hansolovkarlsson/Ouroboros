@@ -214,17 +214,8 @@ unsafe impl Sync for Table {}
 /// split and one L3 split - its own region's.
 ///
 /// One definition, not a second literal: this *is* `tasks::NUM_TASKS`,
-/// so raising the slot count there scales every table pool here. (The
-/// array-typed parameters of `install_identity_map` and
-/// `rebuild_with_el0_regions` would have refused a mismatch anyway;
-/// deriving it just removes the question.) `activate_task` and
-/// `switch_full` index `L0_TABLES` with the task slot directly. It used
-/// to be clamped onto the last view, which would have run an
-/// out-of-range task under another task's tables; now it is a plain
-/// index, and keeping it in range is the callers' job in `tasks.rs`. A
-/// slot newtype constructible only there would make that a type instead
-/// of a discipline. The map of where slots come from is not restated
-/// here: it lives in `tasks.rs`, and a copy of it would drift.
+/// so raising the slot count there scales every table pool here. A slot
+/// with no view is refused, not clamped: see [`refuse_missing_view`].
 const MAX_EL0_REGIONS: usize = crate::tasks::NUM_TASKS;
 
 // Per-task translation-table views (the per-task page-tables
@@ -513,14 +504,11 @@ pub unsafe fn install_identity_map(
 /// safety requirements otherwise apply identically) - the same
 /// requirement `main.rs`'s single call site already satisfies for every
 /// caller of this function, since none can run before boot completes.
-/// Called with interrupts masked throughout - single-core, so no other
-/// code can observe the table set mid-rebuild. That holds for every
-/// caller because each is an exception entry or runs inside one: eight
-/// sites across three files (`syscall.rs`: `spawn_staged`, and the
-/// `EXIT` and `KILL` arms of `dispatch`; `tasks.rs`: four sites, all
-/// inside `on_tick`; `exceptions.rs`: the EL0 fault handler). A caller
-/// from ordinary EL1 code with interrupts enabled would break this and
-/// has never existed.
+/// Must be called with interrupts masked throughout - single-core, so
+/// no other code can observe the table set mid-rebuild. Every caller
+/// today is an exception entry (SVC, IRQ or EL0 fault) or runs inside
+/// one, which is what satisfies this; a caller from ordinary EL1 code
+/// with interrupts enabled would not, and must mask them first.
 pub(crate) unsafe fn rebuild_with_el0_regions(el0_regions: [(u64, u64); MAX_EL0_REGIONS]) {
     let memory_map = unsafe { (*STORED_MEMORY_MAP.0.get()).as_ref() }
         .expect("install_identity_map must run before rebuild_with_el0_regions");
@@ -772,19 +760,33 @@ unsafe fn build_view(
     }
 }
 
+/// The refusal that replaced the clamp: a task slot with no view of its
+/// own is reported and the machine halted, instead of the slot being
+/// clamped onto the last view (which ran the task under another task's
+/// tables) or left to the array bounds check (a panic, which under the
+/// `uefi` crate's handler is silent after `ExitBootServices`, see the
+/// `ROADMAP.md` ledger). Unreachable today: `MAX_EL0_REGIONS` is
+/// `NUM_TASKS`, and every caller derives `view` from a task slot.
+/// Exercised once by mutation (a temporary `activate_task(NUM_TASKS)`
+/// after the identity-map install printed this line and halted).
+fn refuse_missing_view(view: usize) {
+    if view >= MAX_EL0_REGIONS {
+        crate::console::println_force!(
+            "mmu: task slot {view} has no translation-table view (there are {MAX_EL0_REGIONS}); refusing to switch"
+        );
+        crate::power::halt();
+    }
+}
+
 /// The per-context-switch table switch: points TTBR0_EL1 at `view`'s
 /// table set and invalidates the TLB. Called by `tasks.rs` wherever
 /// the current task changes - the moment the following `eret` lands in
 /// EL0, the new task can only see its own region.
 ///
 /// `view` is a task slot, and there are exactly as many views as slots
-/// (`MAX_EL0_REGIONS` is `NUM_TASKS`), so the index is plain rather
-/// than clamped. If a caller ever passed a slot past the last view, the
-/// bounds check would panic, and a panic here is not a report: the
-/// kernel takes the `uefi` crate's panic handler (the `panic_handler`
-/// feature in `kernel/Cargo.toml`), which after `ExitBootServices`
-/// prints nothing, spins, and shuts the machine down. This is the one
-/// copy of that sentence; `switch_full` points here.
+/// (`MAX_EL0_REGIONS` is `NUM_TASKS`). A slot past the last view is
+/// refused by [`refuse_missing_view`] before the index, not clamped onto
+/// a neighbour's tables.
 ///
 /// The full `tlbi vmalle1` on every switch is the stage-2
 /// correctness-first design: with a single ASID, entries cached under
@@ -793,6 +795,7 @@ unsafe fn build_view(
 /// entries) makes this a plain TTBR0 write; if that ever misbehaves on
 /// real hardware, this version is the known-correct fallback.
 pub(crate) fn activate_task(view: usize) {
+    refuse_missing_view(view);
     let ttbr0 = L0_TABLES[view].0.get() as u64;
     unsafe {
         asm!(
@@ -810,8 +813,8 @@ pub(crate) fn activate_task(view: usize) {
 /// The full MAIR/TCR/TTBR0 configuration sequence, switching to
 /// `view`'s table set - the boot-time install and every runtime
 /// rebuild end here. [`activate_task`] is the lighter switch-only
-/// sibling used on every context switch; what its doc says about the
-/// `view` index applies to this one identically.
+/// sibling used on every context switch. Both refuse a slot with no
+/// view via [`refuse_missing_view`].
 unsafe fn switch_full(view: usize) {
     let mair_el1: u64 =
         (MAIR_ATTR_DEVICE_NGNRNE << (8 * MAIR_IDX_DEVICE_NGNRNE)) | (MAIR_ATTR_NORMAL_WB << (8 * MAIR_IDX_NORMAL_WB));
@@ -846,6 +849,7 @@ unsafe fn switch_full(view: usize) {
         | (0b10 << 30)               // TG1: 4KB granule (TTBR1 encoding)
         | (ips << 32); // IPS: from hardware
 
+    refuse_missing_view(view);
     let ttbr0_el1 = L0_TABLES[view].0.get() as u64;
 
     // Masked and left masked: between the MAIR/TCR write and the TTBR0

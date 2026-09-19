@@ -1869,21 +1869,27 @@ would otherwise silently shrink into looking like nothing was ever found.
     first round added a `const` assert instead and claimed a mutation showed
     it could fail; the review found the same mutation fails the build with
     the assert deleted, so it proved nothing about the assert. The
-    definitional constant needs no such proof.
-  - **The kernel has no panic handler of its own.** `kernel/Cargo.toml`
-    takes the `uefi` crate's `panic_handler` feature, whose handler after
-    `ExitBootServices` prints nothing (its `println!` degrades to
-    `log::debug!`), spins, then calls runtime `ResetSystem` with
-    `SHUTDOWN`. So any post-exit panic, including an index bounds check in
-    the IRQ or SVC path, is a silent multi-second hang followed by a
-    power-off, with no line on the PL011 or the framebuffer console. (The
-    handler has a `hlt`-loop fallback for when the system table pointer is
-    gone, but `uefi` 0.39 never clears that pointer after
-    `exit_boot_services`, so the shutdown path is the one that runs.) On
-    Parallels, where the framebuffer is the only console, that is
-    indistinguishable from a hardware crash. Found by the review of #136
-    (2026-09-18) while checking what "panics here" would actually do. It is
-    not hypothetical: `mmu.rs` already has two post-exit `expect` sites
+    definitional constant needs no such proof. The fifth review then held
+    that with the clamp gone a bad slot would panic, and a panic is silent
+    (the entry below), so the refusal the original finding offered as the
+    alternative landed too: `refuse_missing_view` reports the slot and
+    the view count through the console and halts, exercised by mutation
+    (a temporary `activate_task(NUM_TASKS)` after the install printed the
+    line and halted, no aborts in QEMU's trace).
+  - **The kernel has no panic handler of its own, and a post-exit panic
+    is silent.** `kernel/Cargo.toml` takes the `uefi` crate's
+    `panic_handler` feature. **Measured on QEMU (2026-09-19)**, with a
+    temporary `panic!()` placed right after the identity-map install and
+    QEMU's own exception trace on: the last console line was the install
+    message, nothing further printed, the trace showed no abort of any
+    kind, and QEMU exited about a minute into the boot on a PSCI call,
+    which is the firmware's shutdown. That matches the crate source
+    (`println!` degrades to `log::debug!` once boot services are gone, a
+    long spin, then `ResetSystem` with `SHUTDOWN`), but the run is the
+    evidence. On Parallels, where the framebuffer is the only console,
+    that is indistinguishable from a hardware crash. Found by the review of
+    #136 (2026-09-18) while checking what "panics here" would actually do.
+    It is not hypothetical: `mmu.rs` has two post-exit `expect` sites
     guarding "install_identity_map ran first" (`rebuild_with_el0_regions`
     and `ram_span`), plus an `unwrap` inside `install_identity_map` itself
     that re-reads the map it just stored. Wants a kernel
