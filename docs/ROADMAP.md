@@ -1927,7 +1927,7 @@ would otherwise silently shrink into looking like nothing was ever found.
     turned race-freedom into a claim); `next_runnable` takes and returns
     the type. **Scope**: the type covers the view switch and the
     scheduler's own slot. `task_exists`, `may_send`, `send_message` and the
-    per-task arrays still take a `usize`, so `MSG_CALL` range-checks twice
+    per-task arrays still take a `usize`, so `MSG_CALL` and `KILL` range-check twice
     (harmlessly); converting those is a separate change. `activate_task`,
     `switch_full`, `build_view` and `block_current_and_switch_to`'s
     `prefer` take it; every table index in `mmu.rs` is typed, and

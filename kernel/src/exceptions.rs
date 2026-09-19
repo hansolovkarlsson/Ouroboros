@@ -474,14 +474,10 @@ extern "C" fn rust_el0_fault_handler(frame: *mut Context) {
         halt();
     }
     console::println_force!("Ouroboros kernel: task {slot} killed after fault");
-    // Same teardown order as the KILL arm (syscall.rs): reclaim RAM
-    // (LIFO-or-leak), hand the keyboard back if the faulter held it,
-    // fail anyone blocked mid-call to it, then discard its context and
-    // switch the frame to the next runnable task.
-    let (base, size) = tasks::task_region(slot);
-    tasks::free_runtime_region(base, size);
-    tasks::revert_input_owner_if(slot);
-    tasks::fail_calls_to(slot);
+    // The shared first half of a teardown (RAM, keyboard, pending
+    // calls), then discard the context and switch the frame to the next
+    // runnable task.
+    tasks::release_resources(current);
     // SAFETY: `frame` is the live trap frame of this very fault (the
     // "4:" trampoline's contract).
     unsafe { tasks::kill_current_and_switch(frame) };

@@ -3347,8 +3347,10 @@ fn parse_u64(s: &str) -> Option<u64> {
 }
 
 /// `kill <n>` - destroys another task (the `KILL` syscall). The kernel
-/// refuses tasks 0/1 and empty slots; see [`print_fs_error`]'s task
-/// arms for the messages.
+/// refuses the protected slots (0 to 5: the boot shell, idle and the
+/// servers), empty slots, and the caller's own slot; this shell names the
+/// self case in its own words below, and [`print_fs_error`]'s task arms
+/// carry the kernel's messages for the rest.
 fn cmd_kill(arg: &str) {
     let Some(n) = parse_u64(arg) else {
         print_line("kill: usage: kill <task number> (see ps)");
@@ -3358,7 +3360,7 @@ fn cmd_kill(arg: &str) {
         // The kernel refuses this too (TASK_ERR_PROTECTED), but that
         // code's message names the permanent slots, which is the wrong
         // explanation for the slot the user just named.
-        print_line("kill: a task cannot kill itself - use exit");
+        print_line("kill: a task cannot kill itself (a child shell is killed from its parent; exit only logs out)");
         return;
     }
     match syscall(syscall_abi::KILL, n) {

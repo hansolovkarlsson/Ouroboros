@@ -1892,6 +1892,26 @@ pub(crate) unsafe fn exit_current_and_switch(frame: *mut Context, status: u64) -
 /// simply discarded. The caller handles the region-free, owner-revert,
 /// and mmu rebuild around this, same as the `EXIT` arm does - see
 /// `syscall.rs`.
+/// The first half of ending a task, before its context is discarded:
+/// reclaim its RAM (LIFO-or-leak, see [`free_runtime_region`]), hand the
+/// keyboard back if it held it, and fail anyone blocked mid-call to it.
+/// Every path that ends a task (the `EXIT` and `KILL` arms, the EL0 fault
+/// handler, Ctrl+C, a supervisor restart) calls this, then either
+/// [`kill_task`] (a task that is not running) or one of the
+/// `*_current_and_switch` paths, then the identity-map rebuild. It used to
+/// be the same four lines at those five sites, each with a comment
+/// pointing at another copy; [`tear_down`] is the second half. Takes the
+/// type so the callers stop unwrapping a `TaskIndex` one line after
+/// making one; the helpers inside still take a `usize` (the ledger's
+/// stated scope for the newtype).
+pub(crate) fn release_resources(i: TaskIndex) {
+    let i = i.index();
+    let (base, size) = task_region(i);
+    free_runtime_region(base, size);
+    revert_input_owner_if(i);
+    fail_calls_to(i);
+}
+
 pub(crate) fn kill_task(i: TaskIndex) {
     if i == current_index() {
         crate::console::println_force!(
@@ -2412,11 +2432,8 @@ pub unsafe fn on_tick(frame: *mut Context) {
     // owner is always in range; this guard is the belt-and-braces backstop.
     if let Some(victim_slot) = TaskIndex::new(victim).filter(|v| v.index() >= FIRST_SPAWNABLE) {
         crate::console::println!("Ouroboros kernel: Ctrl+C - foreground task {victim} terminated");
-        let (base, size) = task_region(victim);
-        free_runtime_region(base, size);
-        revert_input_owner_if(victim);
-        fail_calls_to(victim);
-        if victim == current.index() {
+        release_resources(victim_slot);
+        if victim_slot == current {
             unsafe { kill_current_and_switch(frame) };
             unsafe { crate::mmu::rebuild_with_el0_regions(el0_regions()) };
             return;
@@ -2465,11 +2482,8 @@ pub unsafe fn on_tick(frame: *mut Context) {
         if runnable_wedge || blocked_wedge {
             let why = if blocked_wedge { "unresponsive (ping timeout)" } else { "no progress (runnable)" };
             crate::console::println!("Ouroboros kernel: server slot {slot} wedged - {why} - restarting");
-            let (base, size) = task_region(slot);
-            free_runtime_region(base, size);
-            revert_input_owner_if(slot);
-            fail_calls_to(slot);
-            if slot == current.index() {
+            release_resources(server);
+            if server == current {
                 // The wedged server is the interrupted task: discard its
                 // frame and switch away, exactly like the fault handler.
                 unsafe { kill_current_and_switch(frame) };

@@ -1001,14 +1001,10 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
             // masked-IRQ rebuild spawn_program already proved safe.
             // The return value must be passed through unmodified - see
             // exit_current_and_switch's doc comment.
-            let (base, size) = tasks::task_region(current);
-            tasks::free_runtime_region(base, size);
-            // A foregrounded task's death hands the keyboard back to
-            // the boot shell - see tasks::revert_input_owner_if.
-            tasks::revert_input_owner_if(current);
-            // Anyone blocked mid-MSG_CALL to this task gets a failed
-            // call instead of waiting forever - see fail_calls_to.
-            tasks::fail_calls_to(current);
+            // RAM, keyboard (a foregrounded task's death hands it back
+            // to the boot shell), and anyone blocked mid-MSG_CALL to
+            // this task - see release_resources.
+            tasks::release_resources(tasks::current_index());
             // SAFETY: `frame` is the live trap frame of this very
             // syscall (dispatch's contract with the SVC trampoline).
             let resumed_x0 = unsafe { tasks::exit_current_and_switch(frame, arg0) };
@@ -1102,13 +1098,10 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
             }
             let i = target.index();
             console::println!("Ouroboros kernel: task {i} killed");
-            // Same teardown order as EXIT's arm, minus the context
-            // switch (the killed task isn't the one running - refused
-            // above - see tasks::kill_task's doc comment).
-            let (base, size) = tasks::task_region(i);
-            tasks::free_runtime_region(base, size);
-            tasks::revert_input_owner_if(i);
-            tasks::fail_calls_to(i);
+            // Same teardown as EXIT's arm, minus the context switch (the
+            // killed task isn't the one running - refused above - see
+            // tasks::kill_task's doc comment).
+            tasks::release_resources(target);
             tasks::kill_task(target);
             // SAFETY: same masked-IRQ single-core contract as
             // spawn_program's and EXIT's rebuilds.
@@ -1249,7 +1242,9 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
                 // up-front refusal as WAIT's self-wait.
                 return syscall_abi::TASK_ERR_PROTECTED;
             }
-            // The one place a caller-supplied slot becomes a TaskIndex:
+            // One of the places a caller-supplied slot becomes a
+            // TaskIndex (KILL's target and the Ctrl+C victim are the
+            // others):
             // refused here, so the handoff below cannot be handed an
             // unchecked number.
             let Some(dest_index) = tasks::TaskIndex::new(dest).filter(|d| tasks::task_exists(d.index())) else {
