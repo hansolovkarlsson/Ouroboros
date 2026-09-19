@@ -833,8 +833,8 @@ pub unsafe fn on_tick(frame: *mut Context) {
     let current = current_index();
     let next = next_runnable(current);
     if next == current { return; }
-<span class="hl">    *TASKS[current.index()].0.get() = *frame;</span>    <span class="dim">// interrupted task's state out</span>
-<span class="hl">    *frame = *TASKS[next.index()].0.get();</span>       <span class="dim">// next task's state in</span>
+    <span class="hl">*TASKS[current.index()].0.get() = *frame;</span>    <span class="dim">// interrupted task's state out</span>
+    <span class="hl">*frame = *TASKS[next.index()].0.get();</span>       <span class="dim">// next task's state in</span>
     set_current(next);
     mmu::activate_task(next);                     // its own translation-table view
 }</code></pre>

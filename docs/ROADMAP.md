@@ -1935,7 +1935,8 @@ would otherwise silently shrink into looking like nothing was ever found.
     Named `TaskIndex` because `TaskSlot` was already the saved-context
     cell. Shown to fail at compile time: `activate_task(11)`,
     `set_current(3usize)` and `next_runnable(3usize)` (type mismatch),
-    `TaskIndex(11)` in `mmu.rs` and in `tasks.rs` (private field), each
+    `TaskIndex(11)` in `mmu.rs` and in `tasks.rs` outside the
+    `task_index` module (private field), each
     restored and the files confirmed identical afterwards. Boot-tested on
     QEMU after each commit with the guest driven through login, `echo`,
     `uptime`, `ls` and `cat` (spawn, the `MSG_CALL` handoff, the exit

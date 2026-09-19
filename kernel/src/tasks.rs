@@ -102,7 +102,8 @@ mod task_index {
     /// [`TaskIndex::FIRST`] and [`TaskIndex::IDLE`], [`TaskIndex::all`],
     /// and [`TaskIndex::succ`], a step from one that already exists. No
     /// total `usize -> TaskIndex` constructor: a modulo would be a clamp
-    /// wearing a type. `tasks.rs` itself cannot write `TaskIndex(x)`.
+    /// wearing a type. Outside this module, `tasks.rs` itself cannot
+    /// write `TaskIndex(x)`.
     /// Named `TaskIndex` because `TaskSlot` is already the saved-context
     /// cell in `TASKS`.
     #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -1867,7 +1868,7 @@ pub(crate) unsafe fn exit_current_and_switch(frame: *mut Context, status: u64) -
     // WAIT collects it - which is also what makes the slot spawnable
     // again. The memory is still freed at death (the caller's job),
     // not at reap.
-    tear_down(current.index(), TaskState::Zombie(status & 0xff));
+    tear_down(current, TaskState::Zombie(status & 0xff));
     let next = next_runnable(current);
     *frame = unsafe { *TASKS[next.index()].0.get() };
     set_current(next);
@@ -1875,17 +1876,23 @@ pub(crate) unsafe fn exit_current_and_switch(frame: *mut Context, status: u64) -
     frame.gpr[0]
 }
 
-/// `KILL`'s teardown: destroys task `i` - which must not be the
-/// currently-running task (the syscall layer's validation guarantees
-/// this today: only tasks ≥ 2 can be killed, and the caller is always
-/// whichever task is running). Same bookkeeping as
-/// [`exit_current_and_switch`] minus the context switch - a
-/// non-current task isn't executing (single core, IRQs masked
-/// throughout SVC dispatch; it's parked at an `eret` boundary), so its
-/// saved context is simply discarded. The caller handles the
-/// region-free, owner-revert, and mmu rebuild around this, same as the
-/// `EXIT` arm does - see `syscall.rs`.
-pub(crate) fn kill_task(i: usize) {
+/// `KILL`'s teardown: destroys task `i`, which must not be the
+/// currently-running task. That used to be described here as guaranteed
+/// by "only tasks >= 2 can be killed, and the caller is always whichever
+/// task is running", which stopped being true the day spawned programs
+/// could issue syscalls: a spawned task could `KILL` its own slot, and
+/// did (witnessed 2026-09-19, a child shell running `kill` on itself:
+/// the `eret` landed in a freed region and the task died again in the
+/// fault handler). The `KILL` arm now refuses a self-target outright,
+/// and `on_tick`'s two callers pass a slot they have just compared
+/// against the current one. Same bookkeeping as
+/// [`exit_current_and_switch`] minus the context switch - a non-current
+/// task isn't executing (single core, IRQs masked throughout SVC
+/// dispatch; it's parked at an `eret` boundary), so its saved context is
+/// simply discarded. The caller handles the region-free, owner-revert,
+/// and mmu rebuild around this, same as the `EXIT` arm does - see
+/// `syscall.rs`.
+pub(crate) fn kill_task(i: TaskIndex) {
     tear_down(i, TaskState::Unused);
 }
 
@@ -1896,7 +1903,8 @@ pub(crate) fn kill_task(i: usize) {
 /// ([`kill_task`], [`kill_current_and_switch`], [`exit_current_and_switch`])
 /// all come through here, so a new per-task table needs one `clear_*`
 /// call, not three.
-fn tear_down(i: usize, final_state: TaskState) {
+fn tear_down(i: TaskIndex, final_state: TaskState) {
+    let i = i.index();
     unsafe { *STATES[i].0.get() = final_state };
     unsafe { *REGIONS[i].0.get() = (0, 0) };
     clear_mailbox(i);
@@ -1929,7 +1937,7 @@ fn tear_down(i: usize, final_state: TaskState) {
 pub(crate) unsafe fn kill_current_and_switch(frame: *mut Context) {
     let frame = unsafe { &mut *frame };
     let current = current_index();
-    tear_down(current.index(), TaskState::Unused);
+    tear_down(current, TaskState::Unused);
     let next = next_runnable(current);
     *frame = unsafe { *TASKS[next.index()].0.get() };
     set_current(next);
@@ -2341,7 +2349,8 @@ pub unsafe fn on_tick(frame: *mut Context) {
     let frame = unsafe { &mut *frame };
     let current = current_index();
 
-    for i in 0..NUM_TASKS {
+    for task in TaskIndex::all() {
+        let i = task.index();
         let TaskState::Blocked(reason) = (unsafe { *STATES[i].0.get() }) else { continue };
         if reason == WaitReason::Keyboard && i != INPUT_OWNER.load(Ordering::Relaxed) {
             continue;
@@ -2376,7 +2385,7 @@ pub unsafe fn on_tick(frame: *mut Context) {
     // protected set KILL/EXIT/FG enforce (never the shell, idle, or a
     // supervised server). FG refuses to foreground 0-4, so a real keyboard
     // owner is always in range; this guard is the belt-and-braces backstop.
-    if (FIRST_SPAWNABLE..NUM_TASKS).contains(&victim) {
+    if let Some(victim_slot) = TaskIndex::new(victim).filter(|v| v.index() >= FIRST_SPAWNABLE) {
         crate::console::println!("Ouroboros kernel: Ctrl+C - foreground task {victim} terminated");
         let (base, size) = task_region(victim);
         free_runtime_region(base, size);
@@ -2387,7 +2396,7 @@ pub unsafe fn on_tick(frame: *mut Context) {
             unsafe { crate::mmu::rebuild_with_el0_regions(el0_regions()) };
             return;
         }
-        kill_task(victim);
+        kill_task(victim_slot);
         unsafe { crate::mmu::rebuild_with_el0_regions(el0_regions()) };
     }
 
@@ -2399,7 +2408,8 @@ pub unsafe fn on_tick(frame: *mut Context) {
     // `slot` is a real index passed to is_supervised/heartbeat/restart/
     // task_region, not just an array subscript.
     #[allow(clippy::needless_range_loop)]
-    for slot in 0..NUM_TASKS {
+    for server in TaskIndex::all() {
+        let slot = server.index();
         if !crate::supervisor::is_supervised(slot) {
             continue;
         }
@@ -2449,7 +2459,7 @@ pub unsafe fn on_tick(frame: *mut Context) {
             }
             // Not the current task: tear it down in place, leave `current`
             // running, and fall through to the ordinary round-robin.
-            kill_task(slot);
+            kill_task(server);
             crate::supervisor::restart(slot);
             unsafe { crate::mmu::rebuild_with_el0_regions(el0_regions()) };
         }

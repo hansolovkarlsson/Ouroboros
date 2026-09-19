@@ -1085,18 +1085,29 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
                 // as the bound and not as a list.
                 return syscall_abi::TASK_ERR_PROTECTED;
             }
-            if !tasks::task_exists(i) {
-                return syscall_abi::TASK_ERR_NO_SUCH_TASK;
+            if i == tasks::current_task() {
+                // A task may not KILL itself: the teardown below would
+                // free the region the `eret` returns into, and the task
+                // would die a second time in the EL0 fault handler
+                // (witnessed 2026-09-19: a child shell running `kill`
+                // on its own slot). EXIT is how a task ends itself. Same
+                // self-target refusal as WAIT and MSG_CALL.
+                return syscall_abi::TASK_ERR_PROTECTED;
             }
+            // The checked constructor is the range check; kill_task
+            // takes the type, so an unchecked slot cannot reach it.
+            let Some(target) = tasks::TaskIndex::new(i).filter(|t| tasks::task_exists(t.index())) else {
+                return syscall_abi::TASK_ERR_NO_SUCH_TASK;
+            };
             console::println!("Ouroboros kernel: task {i} killed");
             // Same teardown order as EXIT's arm, minus the context
-            // switch (the killed task isn't the one running - see
-            // tasks::kill_task's doc comment).
+            // switch (the killed task isn't the one running - refused
+            // above - see tasks::kill_task's doc comment).
             let (base, size) = tasks::task_region(i);
             tasks::free_runtime_region(base, size);
             tasks::revert_input_owner_if(i);
             tasks::fail_calls_to(i);
-            tasks::kill_task(i);
+            tasks::kill_task(target);
             // SAFETY: same masked-IRQ single-core contract as
             // spawn_program's and EXIT's rebuilds.
             unsafe { mmu::rebuild_with_el0_regions(tasks::el0_regions()) };
