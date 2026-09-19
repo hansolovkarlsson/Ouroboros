@@ -218,22 +218,13 @@ unsafe impl Sync for Table {}
 /// array-typed parameters of `install_identity_map` and
 /// `rebuild_with_el0_regions` would have refused a mismatch anyway;
 /// deriving it just removes the question.) `activate_task` and
-/// `switch_full` index `L0_TABLES` with the task slot directly: an
-/// out-of-range slot used to be clamped onto the last view, which would
-/// have run that task under another task's tables, the opposite of a
-/// fail-safe. Now it is a plain bounds-checked index that no caller can
-/// exceed (what a panic here would mean is on `activate_task`'s doc).
-/// Every slot comes from `% NUM_TASKS`, a `0..NUM_TASKS` loop, `CURRENT`,
-/// or the literal `0` in `tasks::start`, with one path worth naming: the
-/// `MSG_CALL` arm hands `tasks::block_current_and_switch_to` a
-/// syscall-supplied `dest` as its `prefer` hint. That value is checked
-/// twice in `syscall.rs` (`dest >= NUM_TASKS` and `task_exists`, which
-/// re-checks the bound) and then indexes `STATES[p]` inside
-/// `block_current_and_switch_to` before it ever reaches this table, so
-/// even with both checks gone an out-of-range `dest` would panic at
-/// `STATES`, not switch tables. The guarantee is still a discipline
-/// across two files rather than a type; a slot newtype constructible only
-/// in `tasks.rs` would move it into the compiler.
+/// `switch_full` index `L0_TABLES` with the task slot directly. It used
+/// to be clamped onto the last view, which would have run an
+/// out-of-range task under another task's tables; now it is a plain
+/// index, and keeping it in range is the callers' job in `tasks.rs`. A
+/// slot newtype constructible only there would make that a type instead
+/// of a discipline. The map of where slots come from is not restated
+/// here: it lives in `tasks.rs`, and a copy of it would drift.
 const MAX_EL0_REGIONS: usize = crate::tasks::NUM_TASKS;
 
 // Per-task translation-table views (the per-task page-tables
@@ -525,10 +516,11 @@ pub unsafe fn install_identity_map(
 /// Called with interrupts masked throughout - single-core, so no other
 /// code can observe the table set mid-rebuild. That holds for every
 /// caller because each is an exception entry or runs inside one: eight
-/// sites across three files (`syscall.rs`'s `spawn_staged` and its
-/// `EXIT` and `KILL` arms, `tasks.rs`'s tick and supervisor-restart
-/// paths, and `exceptions.rs`'s EL0 fault handler). A caller from ordinary EL1
-/// code with interrupts enabled would break this and has never existed.
+/// sites across three files (`syscall.rs`: `spawn_staged`, and the
+/// `EXIT` and `KILL` arms of `dispatch`; `tasks.rs`: four sites, all
+/// inside `on_tick`; `exceptions.rs`: the EL0 fault handler). A caller
+/// from ordinary EL1 code with interrupts enabled would break this and
+/// has never existed.
 pub(crate) unsafe fn rebuild_with_el0_regions(el0_regions: [(u64, u64); MAX_EL0_REGIONS]) {
     let memory_map = unsafe { (*STORED_MEMORY_MAP.0.get()).as_ref() }
         .expect("install_identity_map must run before rebuild_with_el0_regions");
@@ -787,16 +779,12 @@ unsafe fn build_view(
 ///
 /// `view` is a task slot, and there are exactly as many views as slots
 /// (`MAX_EL0_REGIONS` is `NUM_TASKS`), so the index is plain rather
-/// than clamped: no caller can pass a slot past the last view. If one
-/// ever did, the bounds check would panic, and a panic here is not a
-/// report: the kernel has no `#[panic_handler]` of its own, it takes the
-/// `uefi` crate's via the `panic_handler` feature in `kernel/Cargo.toml`,
-/// and after `ExitBootServices` that handler prints nothing, spins, and
-/// resets the machine (or, if runtime reset is unavailable, executes
-/// `hlt`, which traps to `exceptions.rs` and prints a fault at the
-/// handler's own address). The guarantee is the callers, not this line.
-/// This paragraph is the one copy of that argument; `MAX_EL0_REGIONS`
-/// and `switch_full` point here rather than restate it.
+/// than clamped. If a caller ever passed a slot past the last view, the
+/// bounds check would panic, and a panic here is not a report: the
+/// kernel takes the `uefi` crate's panic handler (the `panic_handler`
+/// feature in `kernel/Cargo.toml`), which after `ExitBootServices`
+/// prints nothing, spins, and shuts the machine down. This is the one
+/// copy of that sentence; `switch_full` points here.
 ///
 /// The full `tlbi vmalle1` on every switch is the stage-2
 /// correctness-first design: with a single ASID, entries cached under

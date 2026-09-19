@@ -1873,37 +1873,36 @@ would otherwise silently shrink into looking like nothing was ever found.
   - **The kernel has no panic handler of its own.** `kernel/Cargo.toml`
     takes the `uefi` crate's `panic_handler` feature, whose handler after
     `ExitBootServices` prints nothing (its `println!` degrades to
-    `log::debug!`), spins, then resets the machine. So any post-exit panic,
-    including an index bounds check in the IRQ or SVC path, is a silent
-    multi-second hang followed by a power-off, with no line on the PL011
-    or the framebuffer console. (When runtime reset is unavailable the
-    handler falls into a `hlt` loop instead, which traps to `exceptions.rs`
-    and prints a fault at the handler's own address: a line, but not the
-    panic message.) On Parallels, where the framebuffer is the only
-    console, the reset path is indistinguishable from a hardware crash. Found by
-    the review of #136 (2026-09-18) while checking what "panics here" would
-    actually do. It is not hypothetical: `mmu.rs` already has three
-    post-exit panic sites (`ram_span`'s and `rebuild_with_el0_regions`'s
-    `expect`, and the `unwrap` in the stashed-memory-map read), each
-    guarding "install_identity_map ran first". Wants a kernel
+    `log::debug!`), spins, then calls runtime `ResetSystem` with
+    `SHUTDOWN`. So any post-exit panic, including an index bounds check in
+    the IRQ or SVC path, is a silent multi-second hang followed by a
+    power-off, with no line on the PL011 or the framebuffer console. (The
+    handler has a `hlt`-loop fallback for when the system table pointer is
+    gone, but `uefi` 0.39 never clears that pointer after
+    `exit_boot_services`, so the shutdown path is the one that runs.) On
+    Parallels, where the framebuffer is the only console, that is
+    indistinguishable from a hardware crash. Found by the review of #136
+    (2026-09-18) while checking what "panics here" would actually do. It is
+    not hypothetical: `mmu.rs` already has two post-exit `expect` sites
+    guarding "install_identity_map ran first" (`rebuild_with_el0_regions`
+    and `ram_span`), plus an `unwrap` inside `install_identity_map` itself
+    that re-reads the map it just stored. Wants a kernel
     `#[panic_handler]` that reports the message and location through
     `console::println!` and halts, the way `exceptions.rs` already reports
     a fault. **First drop the `panic_handler` feature from the `uefi`
     dependency in `kernel/Cargo.toml`**, or the build fails on a duplicate
     `panic_impl` lang item.
   - **The task slot passed to `activate_task`/`switch_full` is a bare
-    `usize`, in range only by the discipline of eight callers.** Seven
-    derive it from `% NUM_TASKS`, a bounded loop or `CURRENT`; the eighth
-    is `MSG_CALL`, whose `dest` is a syscall argument checked twice in
-    `syscall.rs` (`>= NUM_TASKS` and `task_exists`) and then used to index
-    `STATES` in `tasks.rs` before the view is ever switched, so a bad
-    `dest` would panic there, never reach the tables. The guarantee holds,
-    but as a discipline across two files that nothing ties to the index.
-    A `TaskSlot(usize)` newtype constructible
-    only in `tasks.rs` (from the modulo, the loop, and the checked syscall
-    paths) would make an unchecked slot unspellable rather than grepped
-    for. Found by the second review of #136 (2026-09-18). Pairs with the
-    `TaskIdentity` newtype already on the small list.
+    `usize`, in range only by the discipline of its callers.** Every
+    caller today derives it in `tasks.rs` from the slot count or from a
+    value `syscall.rs` has already range-checked, so the index holds; but
+    nothing ties those checks to the index, and #136's reviews found that
+    every prose inventory of the callers written to document the
+    discipline was wrong within a round. A `TaskSlot(usize)` newtype
+    constructible only in `tasks.rs` would make an unchecked slot
+    unspellable rather than grepped for, and would replace the inventory
+    with a type. Found by the second review of #136 (2026-09-18). Pairs
+    with the `TaskIdentity` newtype already on the small list.
   - **The stack top is hand-derived as `base + size` at seven sites across
     three files** (`tasks.rs` five times, `supervisor.rs`, `syscall.rs`),
     inside an identical `Context` literal. Anything ever placed above the

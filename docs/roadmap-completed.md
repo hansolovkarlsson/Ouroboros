@@ -728,7 +728,7 @@ the shell's own cwd/lifecycle) and the redirection/pipe **syntax**
    (`FIRST_SPAWNABLE=5`, so slots 5–9 — **five** spawnable), the headroom a
    foreground command + a background task + a pipeline need. The per-task arrays
    in `tasks.rs` and the EL0 table pool in `mmu.rs` (`MAX_EL0_REGIONS`, which
-   must stay equal) were converted to `[const { … }; N]` so they now auto-scale
+   must stay equal; since #136 it is defined as `NUM_TASKS`) were converted to `[const { … }; N]` so they now auto-scale
    from the one constant; the boot EL0-regions array in `main.rs` is built
    programmatically for the same reason. One real gotcha caught: the caps `u32`
    packs the send-mask in the low `NUM_TASKS` bits and the resource caps at bits
