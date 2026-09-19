@@ -757,10 +757,10 @@ holds a different task's registers — it restores whatever is there and
 // kernel/src/tasks.rs (condensed) — the entire scheduler
 static TASKS: [TaskSlot; NUM_TASKS] = /* saved Context per task */;
 // TaskIndex: a slot below NUM_TASKS by construction (private field; made
-// only by a checked `new`, the constants, or `succ`). CURRENT holds one,
-// and set_current is its only store - so "in range" is a type, not a
-// convention kept at every store site.
-static CURRENT: SyncCell<TaskIndex> = /* TaskIndex::FIRST */;
+// only by a checked `new`, the constants, or `succ`). CURRENT is an
+// AtomicUsize inside TaskIndex's own module: set_current(TaskIndex) is
+// its only store, so current_index() rebuilds the type without a check,
+// and "in range" is a type rather than a convention at every store site.
 
 fn next_runnable(from: TaskIndex) -> TaskIndex {
     let mut candidate = from;

@@ -466,7 +466,7 @@ extern "C" fn rust_el0_fault_handler(frame: *mut Context) {
     console::println_force!(
         "Ouroboros kernel: EL0 FAULT task={current} esr_el1={esr:#x} far_el1={far:#x} elr_el1={elr:#x}"
     );
-    if current <= 1 {
+    if tasks::is_boot_or_idle(current) {
         console::println_force!(
             "Ouroboros kernel: task {current} is the boot shell/idle - nothing to resume, halting"
         );

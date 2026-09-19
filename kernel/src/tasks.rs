@@ -89,6 +89,8 @@ use crate::loader::{LoadedProgram, SLOT_ALIGN};
 pub const NUM_TASKS: usize = 11;
 
 mod task_index {
+    use core::sync::atomic::{AtomicUsize, Ordering};
+
     use super::NUM_TASKS;
 
     /// A task slot index that is below [`NUM_TASKS`] by construction. This
@@ -139,8 +141,27 @@ mod task_index {
             self.0
         }
     }
+
+    /// The running task's slot. Atomic storage (so a read from any context
+    /// is a load, not a data race) behind a typed API: [`set_current`] is
+    /// the only store and takes a `TaskIndex`, so the value read back by
+    /// [`current_index`] can only ever have been a `TaskIndex`'s index,
+    /// and rebuilding one from it needs no check and no modulo. Lives in
+    /// this module so that nothing outside it can store a bare `usize`.
+    static CURRENT: AtomicUsize = AtomicUsize::new(0);
+
+    /// The running task's slot, as a [`TaskIndex`].
+    pub(crate) fn current_index() -> TaskIndex {
+        TaskIndex(CURRENT.load(Ordering::Relaxed))
+    }
+
+    /// The one store to `CURRENT`.
+    pub(super) fn set_current(slot: TaskIndex) {
+        CURRENT.store(slot.0, Ordering::Relaxed);
+    }
 }
-pub(crate) use task_index::TaskIndex;
+pub(crate) use task_index::{current_index, TaskIndex};
+use task_index::set_current;
 
 /// The send-mask ceiling, checked rather than described. [`caps_for_slot`]
 /// packs the per-slot send-mask into the low `NUM_TASKS` bits of a `u32` whose
@@ -404,15 +425,6 @@ unsafe impl Sync for TaskSlot {}
 static TASKS: [TaskSlot; NUM_TASKS] =
     [const { TaskSlot(UnsafeCell::new(Context::zeroed())) }; NUM_TASKS];
 
-struct CurrentCell(UnsafeCell<TaskIndex>);
-// SAFETY: single-core, and every switch path runs with interrupts masked
-// (an SVC, IRQ or fault entry) - the same argument as `TASKS`/`STATES`.
-unsafe impl Sync for CurrentCell {}
-/// The running task's slot, held AS a [`TaskIndex`] rather than as a
-/// `usize` that is one by convention: [`set_current`] is the only store,
-/// so [`current_index`] needs no constructor and no modulo.
-static CURRENT: CurrentCell = CurrentCell(UnsafeCell::new(TaskIndex::FIRST));
-
 /// Each task's own `(base, size)` EL0 region, recorded once at creation
 /// time (`init` for slots 0/1, `spawn` for any later slot) and never
 /// changed after - there's no task destruction yet, so a region, once
@@ -438,15 +450,10 @@ pub(crate) fn current_task() -> usize {
     current_index().index()
 }
 
-/// [`current_task`] as a [`TaskIndex`], for the `mmu.rs` view switch.
-pub(crate) fn current_index() -> TaskIndex {
-    unsafe { *CURRENT.0.get() }
-}
-
-/// The one store to `CURRENT`. Taking a [`TaskIndex`] is what makes
-/// "the current slot is in range" a type rather than a claim.
-fn set_current(slot: TaskIndex) {
-    unsafe { *CURRENT.0.get() = slot };
+/// Whether `slot` is the boot program or the idle task, the two slots
+/// that have nothing to fall back to if they fault (`exceptions.rs`).
+pub(crate) fn is_boot_or_idle(slot: usize) -> bool {
+    slot == TaskIndex::FIRST.index() || slot == TaskIndex::IDLE.index()
 }
 
 /// The `(base, size)` region recorded for task `i` at creation time
@@ -1704,10 +1711,6 @@ fn next_runnable(from: TaskIndex) -> TaskIndex {
     from
 }
 
-/// The idle task's slot (task 1 - see this module's doc comment). Named here so
-/// [`next_runnable_skip_idle`] doesn't hardcode a bare `1`.
-const IDLE_TASK: TaskIndex = TaskIndex::IDLE;
-
 /// Like [`next_runnable`], but skips the idle task unless it's the only thing
 /// runnable. A *voluntary* yield ([`yield_current_and_switch`]) wants to hand
 /// the CPU to real work; parking on idle would just wait for the next tick,
@@ -1716,7 +1719,7 @@ fn next_runnable_skip_idle(from: TaskIndex) -> TaskIndex {
     let mut candidate = from;
     for _ in 0..NUM_TASKS {
         candidate = candidate.succ();
-        if candidate != IDLE_TASK
+        if candidate != TaskIndex::IDLE
             && unsafe { *STATES[candidate.index()].0.get() } == TaskState::Runnable
         {
             return candidate;
@@ -1745,15 +1748,15 @@ fn next_runnable_skip_idle(from: TaskIndex) -> TaskIndex {
 /// dispatched (true when called from `syscall::dispatch`, its only caller).
 pub(crate) unsafe fn yield_current_and_switch(frame: *mut Context) -> u64 {
     let frame = unsafe { &mut *frame };
-    let current = current_task();
-    let next = next_runnable_skip_idle(current_index());
-    if next.index() == current {
+    let current = current_index();
+    let next = next_runnable_skip_idle(current);
+    if next == current {
         return frame.gpr[0]; // nothing else to run - just carry on
     }
     // YIELD's own return value, seen by `current` when it is resumed later.
     frame.gpr[0] = 0;
-    unsafe { *TASKS[current].0.get() = *frame };
-    // STATES[current] stays Runnable - a yield doesn't block.
+    unsafe { *TASKS[current.index()].0.get() = *frame };
+    // STATES[current.index()] stays Runnable - a yield doesn't block.
     *frame = unsafe { *TASKS[next.index()].0.get() };
     set_current(next);
     crate::mmu::activate_task(next);
@@ -1816,16 +1819,16 @@ pub(crate) unsafe fn block_current_and_switch_to(
     prefer: Option<TaskIndex>,
 ) -> u64 {
     let frame = unsafe { &mut *frame };
-    let current = current_task();
-    unsafe { *TASKS[current].0.get() = *frame };
-    unsafe { *STATES[current].0.get() = TaskState::Blocked(reason) };
+    let current = current_index();
+    unsafe { *TASKS[current.index()].0.get() = *frame };
+    unsafe { *STATES[current.index()].0.get() = TaskState::Blocked(reason) };
     let next = match prefer {
         Some(p)
-            if p.index() != current && unsafe { *STATES[p.index()].0.get() } == TaskState::Runnable =>
+            if p != current && unsafe { *STATES[p.index()].0.get() } == TaskState::Runnable =>
         {
             p
         }
-        _ => next_runnable(current_index()),
+        _ => next_runnable(current),
     };
     *frame = unsafe { *TASKS[next.index()].0.get() };
     set_current(next);
@@ -1858,25 +1861,25 @@ pub(crate) unsafe fn block_current_and_switch_to(
 /// live trap frame of the syscall currently being dispatched.
 pub(crate) unsafe fn exit_current_and_switch(frame: *mut Context, status: u64) -> u64 {
     let frame = unsafe { &mut *frame };
-    let current = current_task();
+    let current = current_index();
     // Zombie, not Unused: the status (masked to a byte, POSIX-style, so
     // it can never collide with the ABI's error band) is kept until a
     // WAIT collects it - which is also what makes the slot spawnable
     // again. The memory is still freed at death (the caller's job),
     // not at reap.
-    unsafe { *STATES[current].0.get() = TaskState::Zombie(status & 0xff) };
-    unsafe { *REGIONS[current].0.get() = (0, 0) };
-    clear_mailbox(current);
-    clear_sender_cred(current);
-    clear_grant(current);
-    clear_delegations_of(current);
-    clear_argv(current);
-    clear_cwd(current);
-    clear_env(current);
-    clear_namespace(current);
-    reset_stdout_target(current);
-    reset_id(current);
-    let next = next_runnable(current_index());
+    unsafe { *STATES[current.index()].0.get() = TaskState::Zombie(status & 0xff) };
+    unsafe { *REGIONS[current.index()].0.get() = (0, 0) };
+    clear_mailbox(current.index());
+    clear_sender_cred(current.index());
+    clear_grant(current.index());
+    clear_delegations_of(current.index());
+    clear_argv(current.index());
+    clear_cwd(current.index());
+    clear_env(current.index());
+    clear_namespace(current.index());
+    reset_stdout_target(current.index());
+    reset_id(current.index());
+    let next = next_runnable(current);
     *frame = unsafe { *TASKS[next.index()].0.get() };
     set_current(next);
     crate::mmu::activate_task(next);
@@ -1925,20 +1928,20 @@ pub(crate) fn kill_task(i: usize) {
 /// live trap frame of the exception currently being handled.
 pub(crate) unsafe fn kill_current_and_switch(frame: *mut Context) {
     let frame = unsafe { &mut *frame };
-    let current = current_task();
-    unsafe { *STATES[current].0.get() = TaskState::Unused };
-    unsafe { *REGIONS[current].0.get() = (0, 0) };
-    clear_mailbox(current);
-    clear_sender_cred(current);
-    clear_grant(current);
-    clear_delegations_of(current);
-    clear_argv(current);
-    clear_cwd(current);
-    clear_env(current);
-    clear_namespace(current);
-    reset_stdout_target(current);
-    reset_id(current);
-    let next = next_runnable(current_index());
+    let current = current_index();
+    unsafe { *STATES[current.index()].0.get() = TaskState::Unused };
+    unsafe { *REGIONS[current.index()].0.get() = (0, 0) };
+    clear_mailbox(current.index());
+    clear_sender_cred(current.index());
+    clear_grant(current.index());
+    clear_delegations_of(current.index());
+    clear_argv(current.index());
+    clear_cwd(current.index());
+    clear_env(current.index());
+    clear_namespace(current.index());
+    reset_stdout_target(current.index());
+    reset_id(current.index());
+    let next = next_runnable(current);
     *frame = unsafe { *TASKS[next.index()].0.get() };
     set_current(next);
     crate::mmu::activate_task(next);
@@ -2347,9 +2350,10 @@ pub unsafe fn start() -> ! {
 /// its only caller).
 pub unsafe fn on_tick(frame: *mut Context) {
     let frame = unsafe { &mut *frame };
-    let current = current_task();
+    let current = current_index();
 
-    for i in 0..NUM_TASKS {
+    for task in TaskIndex::all() {
+        let i = task.index();
         let TaskState::Blocked(reason) = (unsafe { *STATES[i].0.get() }) else { continue };
         if reason == WaitReason::Keyboard && i != INPUT_OWNER.load(Ordering::Relaxed) {
             continue;
@@ -2369,7 +2373,7 @@ pub unsafe fn on_tick(frame: *mut Context) {
     // Blocked, not running, at the tick), and the price of catching Ctrl+C in a
     // runaway loop with no read to piggyback on.
     let owner = INPUT_OWNER.load(Ordering::Relaxed);
-    if owner != 0 && owner == current {
+    if owner != 0 && owner == current.index() {
         let _ = crate::syscall::poll_keyboard_byte();
     }
 
@@ -2390,7 +2394,7 @@ pub unsafe fn on_tick(frame: *mut Context) {
         free_runtime_region(base, size);
         revert_input_owner_if(victim);
         fail_calls_to(victim);
-        if victim == current {
+        if victim == current.index() {
             unsafe { kill_current_and_switch(frame) };
             unsafe { crate::mmu::rebuild_with_el0_regions(el0_regions()) };
             return;
@@ -2445,7 +2449,7 @@ pub unsafe fn on_tick(frame: *mut Context) {
             free_runtime_region(base, size);
             revert_input_owner_if(slot);
             fail_calls_to(slot);
-            if slot == current {
+            if slot == current.index() {
                 // The wedged server is the interrupted task: discard its
                 // frame and switch away, exactly like the fault handler.
                 unsafe { kill_current_and_switch(frame) };
@@ -2463,13 +2467,13 @@ pub unsafe fn on_tick(frame: *mut Context) {
         }
     }
 
-    let next = next_runnable(current_index());
-    if next.index() == current {
+    let next = next_runnable(current);
+    if next == current {
         // Nothing else runnable - stay put rather than pointlessly saving
         // and reloading the same context.
         return;
     }
-    unsafe { *TASKS[current].0.get() = *frame };
+    unsafe { *TASKS[current.index()].0.get() = *frame };
     *frame = unsafe { *TASKS[next.index()].0.get() };
     set_current(next);
     // The eret this returns into lands in `next`'s EL0 code - it must
@@ -2502,7 +2506,7 @@ pub unsafe fn on_tick(frame: *mut Context) {
 /// contract), same as [`on_tick`].
 pub unsafe fn on_net_irq(frame: *mut Context) {
     let frame = unsafe { &mut *frame };
-    let current = current_task();
+    let current = current_index();
     for slot in TaskIndex::all() {
         let i = slot.index();
         if let TaskState::Blocked(WaitReason::NetInput { .. }) = unsafe { *STATES[i].0.get() } {
@@ -2510,8 +2514,8 @@ pub unsafe fn on_net_irq(frame: *mut Context) {
             // sources itself), matching `NetInput`'s `poll` Some(0).
             unsafe { (*TASKS[i].0.get()).gpr[0] = 0 };
             unsafe { *STATES[i].0.get() = TaskState::Runnable };
-            if i != current {
-                unsafe { *TASKS[current].0.get() = *frame };
+            if slot != current {
+                unsafe { *TASKS[current.index()].0.get() = *frame };
                 *frame = unsafe { *TASKS[i].0.get() };
                 set_current(slot);
                 crate::mmu::activate_task(slot);
