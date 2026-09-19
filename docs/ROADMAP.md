@@ -1916,18 +1916,29 @@ would otherwise silently shrink into looking like nothing was ever found.
     its field private to a nested module so that even `tasks.rs` cannot
     spell `TaskIndex(x)`: the constructors are `new` (checked, `None` past
     the end, used once, where `MSG_CALL`'s caller-supplied `dest` becomes
-    a slot), `wrapping` (the round-robin's modulo), `all` and `FIRST`.
-    `activate_task`, `switch_full` and `block_current_and_switch_to`'s
-    `prefer` take it; `l0_table`'s runtime refusal is gone because the
-    case is unspellable. Named `TaskIndex` because `TaskSlot` was already
-    the saved-context cell. Shown to fail three ways at compile time:
-    `activate_task(11)` (type mismatch), `TaskIndex(11)` in `mmu.rs` and
-    `TaskIndex(11)` in `tasks.rs` (private field), each restored and the
-    files confirmed identical afterwards. Boot-tested on QEMU with the
-    guest driven through login, `echo`, `uptime`, `ls` and `cat`
-    (spawn, the `MSG_CALL` handoff, the exit paths), zero fault lines.
-    Found by the second review of #136 (2026-09-18). Pairs with the
-    `TaskIdentity` newtype still on the small list.
+    a slot), the constants `FIRST` and `IDLE`, `all`, and `succ` (the
+    round-robin step, from a slot that already exists). There is no total
+    `usize -> TaskIndex` constructor: the first round had a `wrapping`
+    modulo, and its review found it used as a clamp twice (the
+    `current_index()` read, and `next_runnable`'s fallback), so it is
+    gone. `CURRENT` holds a `TaskIndex`, `set_current` is its only store,
+    and `next_runnable` takes and returns the type. `activate_task`,
+    `switch_full`, `build_view` and `block_current_and_switch_to`'s
+    `prefer` take it; every table index in `mmu.rs` is typed, and
+    `l0_table`'s runtime refusal is gone because the case is unspellable.
+    Named `TaskIndex` because `TaskSlot` was already the saved-context
+    cell. Shown to fail at compile time: `activate_task(11)`,
+    `set_current(3usize)` and `next_runnable(3usize)` (type mismatch),
+    `TaskIndex(11)` in `mmu.rs` and in `tasks.rs` (private field), each
+    restored and the files confirmed identical afterwards. Boot-tested on
+    QEMU after each commit with the guest driven through login, `echo`,
+    `uptime`, `ls` and `cat` (spawn, the `MSG_CALL` handoff, the exit
+    paths), zero fault lines. Found by the second review of #136
+    (2026-09-18). Pairs with the `TaskIdentity` newtype still on the small
+    list; #137's review also noted `CurrentCell` is the fourth hand-rolled
+    `UnsafeCell` + `unsafe impl Sync` wrapper in `tasks.rs` (fifth with
+    `mmu.rs`'s `Table`), each restating the single-core argument. A generic
+    `SyncCell<T>` holding that argument once is a do-when-touched item.
   - **The stack top is hand-derived as `base + size` at seven sites across
     three files** (`tasks.rs` five times, `supervisor.rs`, `syscall.rs`),
     inside an identical `Context` literal. Anything ever placed above the

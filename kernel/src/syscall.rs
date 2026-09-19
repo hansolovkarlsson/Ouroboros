@@ -1242,6 +1242,8 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
             let Some(dest_index) = tasks::TaskIndex::new(dest).filter(|d| tasks::task_exists(d.index())) else {
                 return syscall_abi::TASK_ERR_NO_SUCH_TASK;
             };
+            // Shadowed on purpose: nothing below can name the unchecked value.
+            let dest = dest_index.index();
             // Capability check: may this task call `dest`? (The request half
             // of a call is an unsolicited send, so it's mask-governed; the
             // reply rides the reply exemption in may_send.)

@@ -96,17 +96,26 @@ mod task_index {
     /// lookup with an unchecked `usize` is unspellable rather than
     /// grepped for (docs/postmortems/unspellable-postmortem.md). The field
     /// is private to this module: the only ways to make one are
-    /// [`TaskIndex::new`] (checked, `None` past the end),
-    /// [`TaskIndex::wrapping`] (total, the modulo is the proof),
-    /// [`TaskIndex::all`] and [`TaskIndex::FIRST`]. `tasks.rs` itself
-    /// cannot write `TaskIndex(x)`. Named `TaskIndex` because `TaskSlot`
-    /// is already the saved-context cell in `TASKS`.
+    /// [`TaskIndex::new`] (checked, `None` past the end), the constants
+    /// [`TaskIndex::FIRST`] and [`TaskIndex::IDLE`], [`TaskIndex::all`],
+    /// and [`TaskIndex::succ`], a step from one that already exists. No
+    /// total `usize -> TaskIndex` constructor: a modulo would be a clamp
+    /// wearing a type. `tasks.rs` itself cannot write `TaskIndex(x)`.
+    /// Named `TaskIndex` because `TaskSlot` is already the saved-context
+    /// cell in `TASKS`.
     #[derive(Clone, Copy, PartialEq, Eq, Debug)]
     pub(crate) struct TaskIndex(usize);
+
+    const _: () = assert!(NUM_TASKS > 1, "TaskIndex::IDLE is slot 1, which must exist");
 
     impl TaskIndex {
         /// Slot 0, the boot program.
         pub(crate) const FIRST: TaskIndex = TaskIndex(0);
+
+        /// Slot 1, the idle task (see the module doc). A literal checked
+        /// against the slot count here, where the field is spellable,
+        /// rather than reduced modulo it.
+        pub(crate) const IDLE: TaskIndex = TaskIndex(1);
 
         /// The checked constructor: `None` at or past `NUM_TASKS`. This is
         /// where a caller-supplied slot (a syscall argument) is refused.
@@ -114,9 +123,10 @@ mod task_index {
             (i < NUM_TASKS).then_some(TaskIndex(i))
         }
 
-        /// The total constructor for a round-robin step: `i % NUM_TASKS`.
-        pub(crate) const fn wrapping(i: usize) -> TaskIndex {
-            TaskIndex(i % NUM_TASKS)
+        /// The next slot round-robin, wrapping to 0 after the last. The
+        /// only arithmetic on a slot, and it starts from a slot.
+        pub(crate) fn succ(self) -> TaskIndex {
+            TaskIndex((self.0 + 1) % NUM_TASKS)
         }
 
         /// Every slot, in order.
@@ -1683,27 +1693,29 @@ static STATES: [StateSlot; NUM_TASKS] = [
 /// use `wfe` either, so it has to stay a real, always-runnable busy-spin),
 /// but a safe "stay put" is the right behavior if that ever stops being
 /// true, not a panic.
-fn next_runnable(from: usize) -> TaskIndex {
-    for offset in 1..=NUM_TASKS {
-        let candidate = TaskIndex::wrapping(from + offset);
+fn next_runnable(from: TaskIndex) -> TaskIndex {
+    let mut candidate = from;
+    for _ in 0..NUM_TASKS {
+        candidate = candidate.succ();
         if unsafe { *STATES[candidate.index()].0.get() } == TaskState::Runnable {
             return candidate;
         }
     }
-    TaskIndex::wrapping(from)
+    from
 }
 
 /// The idle task's slot (task 1 - see this module's doc comment). Named here so
 /// [`next_runnable_skip_idle`] doesn't hardcode a bare `1`.
-const IDLE_TASK: TaskIndex = TaskIndex::wrapping(1);
+const IDLE_TASK: TaskIndex = TaskIndex::IDLE;
 
 /// Like [`next_runnable`], but skips the idle task unless it's the only thing
 /// runnable. A *voluntary* yield ([`yield_current_and_switch`]) wants to hand
 /// the CPU to real work; parking on idle would just wait for the next tick,
 /// which is exactly the stall the yield exists to avoid.
-fn next_runnable_skip_idle(from: usize) -> TaskIndex {
-    for offset in 1..=NUM_TASKS {
-        let candidate = TaskIndex::wrapping(from + offset);
+fn next_runnable_skip_idle(from: TaskIndex) -> TaskIndex {
+    let mut candidate = from;
+    for _ in 0..NUM_TASKS {
+        candidate = candidate.succ();
         if candidate != IDLE_TASK
             && unsafe { *STATES[candidate.index()].0.get() } == TaskState::Runnable
         {
@@ -1734,7 +1746,7 @@ fn next_runnable_skip_idle(from: usize) -> TaskIndex {
 pub(crate) unsafe fn yield_current_and_switch(frame: *mut Context) -> u64 {
     let frame = unsafe { &mut *frame };
     let current = current_task();
-    let next = next_runnable_skip_idle(current);
+    let next = next_runnable_skip_idle(current_index());
     if next.index() == current {
         return frame.gpr[0]; // nothing else to run - just carry on
     }
@@ -1813,7 +1825,7 @@ pub(crate) unsafe fn block_current_and_switch_to(
         {
             p
         }
-        _ => next_runnable(current),
+        _ => next_runnable(current_index()),
     };
     *frame = unsafe { *TASKS[next.index()].0.get() };
     set_current(next);
@@ -1864,7 +1876,7 @@ pub(crate) unsafe fn exit_current_and_switch(frame: *mut Context, status: u64) -
     clear_namespace(current);
     reset_stdout_target(current);
     reset_id(current);
-    let next = next_runnable(current);
+    let next = next_runnable(current_index());
     *frame = unsafe { *TASKS[next.index()].0.get() };
     set_current(next);
     crate::mmu::activate_task(next);
@@ -1926,7 +1938,7 @@ pub(crate) unsafe fn kill_current_and_switch(frame: *mut Context) {
     clear_namespace(current);
     reset_stdout_target(current);
     reset_id(current);
-    let next = next_runnable(current);
+    let next = next_runnable(current_index());
     *frame = unsafe { *TASKS[next.index()].0.get() };
     set_current(next);
     crate::mmu::activate_task(next);
@@ -2451,7 +2463,7 @@ pub unsafe fn on_tick(frame: *mut Context) {
         }
     }
 
-    let next = next_runnable(current);
+    let next = next_runnable(current_index());
     if next.index() == current {
         // Nothing else runnable - stay put rather than pointlessly saving
         // and reloading the same context.

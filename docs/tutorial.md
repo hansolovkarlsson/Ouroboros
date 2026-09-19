@@ -756,11 +756,16 @@ holds a different task's registers — it restores whatever is there and
 ```rust
 // kernel/src/tasks.rs (condensed) — the entire scheduler
 static TASKS: [TaskSlot; NUM_TASKS] = /* saved Context per task */;
-static CURRENT: AtomicUsize = AtomicUsize::new(0);
+// TaskIndex: a slot below NUM_TASKS by construction (private field; made
+// only by a checked `new`, the constants, or `succ`). CURRENT holds one,
+// and set_current is its only store - so "in range" is a type, not a
+// convention kept at every store site.
+static CURRENT: SyncCell<TaskIndex> = /* TaskIndex::FIRST */;
 
-fn next_runnable(from: usize) -> usize {
-    for offset in 1..=NUM_TASKS {
-        let candidate = (from + offset) % NUM_TASKS;
+fn next_runnable(from: TaskIndex) -> TaskIndex {
+    let mut candidate = from;
+    for _ in 0..NUM_TASKS {
+        candidate = candidate.succ();            // (i + 1) % NUM_TASKS
         if state(candidate) == TaskState::Runnable { return candidate; }
     }
     from
@@ -769,12 +774,13 @@ fn next_runnable(from: usize) -> usize {
 /// Called from rust_irq_handler on every tick.
 pub unsafe fn on_tick(frame: *mut Context) {
     let frame = &mut *frame;
-    let current = CURRENT.load(Ordering::Relaxed);
+    let current = current_index();
     let next = next_runnable(current);
     if next == current { return; }
-    *TASKS[current].0.get() = *frame;    // interrupted task's state out
-    *frame = *TASKS[next].0.get();       // next task's state in
-    CURRENT.store(next, Ordering::Relaxed);
+    *TASKS[current.index()].0.get() = *frame;    // interrupted task's state out
+    *frame = *TASKS[next.index()].0.get();       // next task's state in
+    set_current(next);
+    mmu::activate_task(next);                     // its own translation-table view
 }
 ```
 
