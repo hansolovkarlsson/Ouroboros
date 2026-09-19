@@ -607,7 +607,7 @@ unsafe fn build_tables(memory_map: &MemoryMapOwned, el0_regions: [(u64, u64); MA
 
     // Build each task's view: identical kernel/device mappings, EL0
     // access granted only to that view's own region.
-    for (view, &region) in el0_regions.iter().enumerate() {
+    for (view, &region) in TaskIndex::all().zip(el0_regions.iter()) {
         unsafe {
             build_view(
                 view,
@@ -643,7 +643,7 @@ unsafe fn build_tables(memory_map: &MemoryMapOwned, el0_regions: [(u64, u64); MA
 /// for an unused slot) gets its containing 1GB block split down to 4KB
 /// pages so only the region's own pages carry EL0 access.
 unsafe fn build_view(
-    view: usize,
+    view: TaskIndex,
     el0_region: (u64, u64),
     min_addr: u64,
     max_addr: u64,
@@ -651,7 +651,7 @@ unsafe fn build_view(
     extra_l1_count: usize,
     l1_span_devices: &[(usize, u64)],
 ) {
-    let l1 = unsafe { &mut *L1_TABLES[view].0.get() };
+    let l1 = unsafe { &mut *L1_TABLES[view.index()].0.get() };
 
     // One L2 and one L3 per view is enough because a region fits one 2MB
     // slot (the loader's bound plus 2MB-aligned bases, see
@@ -705,12 +705,12 @@ unsafe fn build_view(
                 // This view's own region lives in this block - split it
                 // so only the region's own pages get EL0 access (one
                 // sub-slot: the containment check above).
-                let l2 = unsafe { &mut *EL0_L2_TABLES[view].0.get() };
+                let l2 = unsafe { &mut *EL0_L2_TABLES[view.index()].0.get() };
                 for (i, entry) in l2.iter_mut().enumerate() {
                     let sub_base = block_start + (i as u64) * MIB2;
                     let sub_end = sub_base + MIB2;
                     if overlaps(el0_region, sub_base, sub_end) {
-                        let l3 = unsafe { &mut *EL0_L3_TABLES[view].0.get() };
+                        let l3 = unsafe { &mut *EL0_L3_TABLES[view.index()].0.get() };
                         // The loader owns the region layout; ask it.
                         let guard = guard_page_addr(el0_region);
                         for (j, page) in l3.iter_mut().enumerate() {
@@ -728,12 +728,12 @@ unsafe fn build_view(
                                 kernel_page_4k(page_base)
                             };
                         }
-                        *entry = table_desc(EL0_L3_TABLES[view].0.get() as u64);
+                        *entry = table_desc(EL0_L3_TABLES[view.index()].0.get() as u64);
                     } else {
                         *entry = kernel_block_2m(sub_base);
                     }
                 }
-                l1[idx] = table_desc(EL0_L2_TABLES[view].0.get() as u64);
+                l1[idx] = table_desc(EL0_L2_TABLES[view.index()].0.get() as u64);
             } else {
                 l1[idx] = normal_block(block_start);
             }
@@ -749,8 +749,8 @@ unsafe fn build_view(
         }
     }
 
-    let l0 = unsafe { &mut *L0_TABLES[view].0.get() };
-    l0[0] = table_desc(L1_TABLES[view].0.get() as u64);
+    let l0 = unsafe { &mut *L0_TABLES[view.index()].0.get() };
+    l0[0] = table_desc(L1_TABLES[view.index()].0.get() as u64);
     // Shared extra-device L1 tables (64-bit PCI BARs past 512GB, etc.) -
     // identical entries in every view, so every view's L0 points at the
     // same tables.

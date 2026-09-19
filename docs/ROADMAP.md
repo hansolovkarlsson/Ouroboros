@@ -1907,7 +1907,7 @@ would otherwise silently shrink into looking like nothing was ever found.
     `panic_impl` lang item.
   - ~~**The task slot passed to `activate_task`/`switch_full` is a bare
     `usize`, in range only by the discipline of its callers.**~~ **Fixed
-    2026-09-19** (the PR after #136). Every caller derived it in `tasks.rs`
+    2026-09-19** (#137). Every caller derived it in `tasks.rs`
     from the slot count or from a value `syscall.rs` had already
     range-checked, so the index held; but nothing tied those checks to the
     index, and #136's reviews found every prose inventory of the callers
