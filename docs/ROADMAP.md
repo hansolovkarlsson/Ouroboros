@@ -1880,9 +1880,9 @@ would otherwise silently shrink into looking like nothing was ever found.
     indexes `tasks::TASKS[next]` before it switches, so a bad slot panics
     there first and the refusal never prints; and at the boot-time
     `switch_full` call there is no console yet on framebuffer-only
-    machines. The refusal guards the lookup only. The check that can fail
-    where the slot is made is the `TaskSlot` newtype, the next entry but
-    one, and it is the follow-up this fix owes.
+    machines. The refusal guarded the lookup only. The check that can fail
+    where the slot is made is the `TaskIndex` newtype, the next entry but
+    one, landed as the follow-up.
   - **The kernel has no panic handler of its own, and a post-exit panic
     is silent.** `kernel/Cargo.toml` takes the `uefi` crate's
     `panic_handler` feature. **Measured on QEMU (2026-09-19)**, with a
@@ -1905,17 +1905,29 @@ would otherwise silently shrink into looking like nothing was ever found.
     a fault. **First drop the `panic_handler` feature from the `uefi`
     dependency in `kernel/Cargo.toml`**, or the build fails on a duplicate
     `panic_impl` lang item.
-  - **The task slot passed to `activate_task`/`switch_full` is a bare
-    `usize`, in range only by the discipline of its callers.** Every
-    caller today derives it in `tasks.rs` from the slot count or from a
-    value `syscall.rs` has already range-checked, so the index holds; but
-    nothing ties those checks to the index, and #136's reviews found that
-    every prose inventory of the callers written to document the
-    discipline was wrong within a round. A `TaskSlot(usize)` newtype
-    constructible only in `tasks.rs` would make an unchecked slot
-    unspellable rather than grepped for, and would replace the inventory
-    with a type. Found by the second review of #136 (2026-09-18). Pairs
-    with the `TaskIdentity` newtype already on the small list.
+  - ~~**The task slot passed to `activate_task`/`switch_full` is a bare
+    `usize`, in range only by the discipline of its callers.**~~ **Fixed
+    2026-09-19** (the PR after #136). Every caller derived it in `tasks.rs`
+    from the slot count or from a value `syscall.rs` had already
+    range-checked, so the index held; but nothing tied those checks to the
+    index, and #136's reviews found every prose inventory of the callers
+    written to document the discipline wrong within a round. Now
+    `tasks::TaskIndex`, a `usize` below `NUM_TASKS` by construction, with
+    its field private to a nested module so that even `tasks.rs` cannot
+    spell `TaskIndex(x)`: the constructors are `new` (checked, `None` past
+    the end, used once, where `MSG_CALL`'s caller-supplied `dest` becomes
+    a slot), `wrapping` (the round-robin's modulo), `all` and `FIRST`.
+    `activate_task`, `switch_full` and `block_current_and_switch_to`'s
+    `prefer` take it; `l0_table`'s runtime refusal is gone because the
+    case is unspellable. Named `TaskIndex` because `TaskSlot` was already
+    the saved-context cell. Shown to fail three ways at compile time:
+    `activate_task(11)` (type mismatch), `TaskIndex(11)` in `mmu.rs` and
+    `TaskIndex(11)` in `tasks.rs` (private field), each restored and the
+    files confirmed identical afterwards. Boot-tested on QEMU with the
+    guest driven through login, `echo`, `uptime`, `ls` and `cat`
+    (spawn, the `MSG_CALL` handoff, the exit paths), zero fault lines.
+    Found by the second review of #136 (2026-09-18). Pairs with the
+    `TaskIdentity` newtype still on the small list.
   - **The stack top is hand-derived as `base + size` at seven sites across
     three files** (`tasks.rs` five times, `supervisor.rs`, `syscall.rs`),
     inside an identical `Context` literal. Anything ever placed above the

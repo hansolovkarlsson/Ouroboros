@@ -96,7 +96,9 @@ view, every other task's memory is ordinary EL1-only RAM, so an EL0
 touch of it faults — and, per the fault-isolation design above, kills
 only the toucher. `mmu::activate_task` switches `TTBR0_EL1` to the
 incoming task's view (and flushes the TLB) at every context switch;
-`tasks.rs` calls it wherever `CURRENT` changes. A view fine-grains only
+`tasks.rs` calls it wherever `CURRENT` changes, and it takes a
+`tasks::TaskIndex` (a slot below `NUM_TASKS` by construction) rather
+than a bare `usize`, so a slot with no view cannot be spelled. A view fine-grains only
 its own region (one 2MB→4KB split). A loaded program's region fits one
 2MB slot because the loader refuses one that would not (`elf_region_size`'s
 bound, added 2026-09-13 after a 1.9MB `.bss` produced a two-slot region and

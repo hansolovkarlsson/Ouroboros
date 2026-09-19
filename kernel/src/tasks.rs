@@ -88,6 +88,50 @@ use crate::loader::{LoadedProgram, SLOT_ALIGN};
 /// constant, not as a second literal) auto-scale.
 pub const NUM_TASKS: usize = 11;
 
+mod task_index {
+    use super::NUM_TASKS;
+
+    /// A task slot index that is below [`NUM_TASKS`] by construction. This
+    /// is the type `mmu.rs` takes for a translation-table view, so a view
+    /// lookup with an unchecked `usize` is unspellable rather than
+    /// grepped for (docs/postmortems/unspellable-postmortem.md). The field
+    /// is private to this module: the only ways to make one are
+    /// [`TaskIndex::new`] (checked, `None` past the end),
+    /// [`TaskIndex::wrapping`] (total, the modulo is the proof),
+    /// [`TaskIndex::all`] and [`TaskIndex::FIRST`]. `tasks.rs` itself
+    /// cannot write `TaskIndex(x)`. Named `TaskIndex` because `TaskSlot`
+    /// is already the saved-context cell in `TASKS`.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    pub(crate) struct TaskIndex(usize);
+
+    impl TaskIndex {
+        /// Slot 0, the boot program.
+        pub(crate) const FIRST: TaskIndex = TaskIndex(0);
+
+        /// The checked constructor: `None` at or past `NUM_TASKS`. This is
+        /// where a caller-supplied slot (a syscall argument) is refused.
+        pub(crate) fn new(i: usize) -> Option<TaskIndex> {
+            (i < NUM_TASKS).then_some(TaskIndex(i))
+        }
+
+        /// The total constructor for a round-robin step: `i % NUM_TASKS`.
+        pub(crate) fn wrapping(i: usize) -> TaskIndex {
+            TaskIndex(i % NUM_TASKS)
+        }
+
+        /// Every slot, in order.
+        pub(crate) fn all() -> impl Iterator<Item = TaskIndex> {
+            (0..NUM_TASKS).map(TaskIndex)
+        }
+
+        /// The plain index, for the per-task arrays.
+        pub(crate) fn index(self) -> usize {
+            self.0
+        }
+    }
+}
+pub(crate) use task_index::TaskIndex;
+
 /// The send-mask ceiling, checked rather than described. [`caps_for_slot`]
 /// packs the per-slot send-mask into the low `NUM_TASKS` bits of a `u32` whose
 /// bits 16+ are the `CAP_*` resource capabilities, so a slot count past 16
@@ -375,6 +419,12 @@ static REGIONS: [RegionSlot; NUM_TASKS] =
 /// this to refuse exits from tasks 0/1 and to know whose region to free.
 pub(crate) fn current_task() -> usize {
     CURRENT.load(Ordering::Relaxed)
+}
+
+/// [`current_task`] as a [`TaskIndex`], for the `mmu.rs` view switch.
+/// Total because every store to `CURRENT` is a `TaskIndex`'s index.
+pub(crate) fn current_index() -> TaskIndex {
+    TaskIndex::wrapping(CURRENT.load(Ordering::Relaxed))
 }
 
 /// The `(base, size)` region recorded for task `i` at creation time
@@ -1621,14 +1671,14 @@ static STATES: [StateSlot; NUM_TASKS] = [
 /// use `wfe` either, so it has to stay a real, always-runnable busy-spin),
 /// but a safe "stay put" is the right behavior if that ever stops being
 /// true, not a panic.
-fn next_runnable(from: usize) -> usize {
+fn next_runnable(from: usize) -> TaskIndex {
     for offset in 1..=NUM_TASKS {
-        let candidate = (from + offset) % NUM_TASKS;
-        if unsafe { *STATES[candidate].0.get() } == TaskState::Runnable {
+        let candidate = TaskIndex::wrapping(from + offset);
+        if unsafe { *STATES[candidate.index()].0.get() } == TaskState::Runnable {
             return candidate;
         }
     }
-    from
+    TaskIndex::wrapping(from)
 }
 
 /// The idle task's slot (task 1 - see this module's doc comment). Named here so
@@ -1639,11 +1689,11 @@ const IDLE_TASK: usize = 1;
 /// runnable. A *voluntary* yield ([`yield_current_and_switch`]) wants to hand
 /// the CPU to real work; parking on idle would just wait for the next tick,
 /// which is exactly the stall the yield exists to avoid.
-fn next_runnable_skip_idle(from: usize) -> usize {
+fn next_runnable_skip_idle(from: usize) -> TaskIndex {
     for offset in 1..=NUM_TASKS {
-        let candidate = (from + offset) % NUM_TASKS;
-        if candidate != IDLE_TASK
-            && unsafe { *STATES[candidate].0.get() } == TaskState::Runnable
+        let candidate = TaskIndex::wrapping(from + offset);
+        if candidate.index() != IDLE_TASK
+            && unsafe { *STATES[candidate.index()].0.get() } == TaskState::Runnable
         {
             return candidate;
         }
@@ -1673,15 +1723,15 @@ pub(crate) unsafe fn yield_current_and_switch(frame: *mut Context) -> u64 {
     let frame = unsafe { &mut *frame };
     let current = CURRENT.load(Ordering::Relaxed);
     let next = next_runnable_skip_idle(current);
-    if next == current {
+    if next.index() == current {
         return frame.gpr[0]; // nothing else to run - just carry on
     }
     // YIELD's own return value, seen by `current` when it is resumed later.
     frame.gpr[0] = 0;
     unsafe { *TASKS[current].0.get() = *frame };
     // STATES[current] stays Runnable - a yield doesn't block.
-    *frame = unsafe { *TASKS[next].0.get() };
-    CURRENT.store(next, Ordering::Relaxed);
+    *frame = unsafe { *TASKS[next.index()].0.get() };
+    CURRENT.store(next.index(), Ordering::Relaxed);
     crate::mmu::activate_task(next);
     frame.gpr[0]
 }
@@ -1739,7 +1789,7 @@ pub(crate) unsafe fn block_current_and_switch(frame: *mut Context, reason: WaitR
 pub(crate) unsafe fn block_current_and_switch_to(
     frame: *mut Context,
     reason: WaitReason,
-    prefer: Option<usize>,
+    prefer: Option<TaskIndex>,
 ) -> u64 {
     let frame = unsafe { &mut *frame };
     let current = CURRENT.load(Ordering::Relaxed);
@@ -1747,14 +1797,14 @@ pub(crate) unsafe fn block_current_and_switch_to(
     unsafe { *STATES[current].0.get() = TaskState::Blocked(reason) };
     let next = match prefer {
         Some(p)
-            if p != current && unsafe { *STATES[p].0.get() } == TaskState::Runnable =>
+            if p.index() != current && unsafe { *STATES[p.index()].0.get() } == TaskState::Runnable =>
         {
             p
         }
         _ => next_runnable(current),
     };
-    *frame = unsafe { *TASKS[next].0.get() };
-    CURRENT.store(next, Ordering::Relaxed);
+    *frame = unsafe { *TASKS[next.index()].0.get() };
+    CURRENT.store(next.index(), Ordering::Relaxed);
     crate::mmu::activate_task(next);
     frame.gpr[0]
 }
@@ -1803,8 +1853,8 @@ pub(crate) unsafe fn exit_current_and_switch(frame: *mut Context, status: u64) -
     reset_stdout_target(current);
     reset_id(current);
     let next = next_runnable(current);
-    *frame = unsafe { *TASKS[next].0.get() };
-    CURRENT.store(next, Ordering::Relaxed);
+    *frame = unsafe { *TASKS[next.index()].0.get() };
+    CURRENT.store(next.index(), Ordering::Relaxed);
     crate::mmu::activate_task(next);
     frame.gpr[0]
 }
@@ -1865,8 +1915,8 @@ pub(crate) unsafe fn kill_current_and_switch(frame: *mut Context) {
     reset_stdout_target(current);
     reset_id(current);
     let next = next_runnable(current);
-    *frame = unsafe { *TASKS[next].0.get() };
-    CURRENT.store(next, Ordering::Relaxed);
+    *frame = unsafe { *TASKS[next.index()].0.get() };
+    CURRENT.store(next.index(), Ordering::Relaxed);
     crate::mmu::activate_task(next);
 }
 
@@ -2210,7 +2260,7 @@ pub unsafe fn start() -> ! {
     // (build_tables switches to the current task's view, and CURRENT
     // starts at 0) - activated again here for explicitness, so this
     // function's contract doesn't silently depend on that ordering.
-    crate::mmu::activate_task(0);
+    crate::mmu::activate_task(TaskIndex::FIRST);
     let ctx = unsafe { *TASKS[0].0.get() };
     unsafe {
         asm!(
@@ -2390,14 +2440,14 @@ pub unsafe fn on_tick(frame: *mut Context) {
     }
 
     let next = next_runnable(current);
-    if next == current {
+    if next.index() == current {
         // Nothing else runnable - stay put rather than pointlessly saving
         // and reloading the same context.
         return;
     }
     unsafe { *TASKS[current].0.get() = *frame };
-    *frame = unsafe { *TASKS[next].0.get() };
-    CURRENT.store(next, Ordering::Relaxed);
+    *frame = unsafe { *TASKS[next.index()].0.get() };
+    CURRENT.store(next.index(), Ordering::Relaxed);
     // The eret this returns into lands in `next`'s EL0 code - it must
     // run under `next`'s own table view (per-task page tables).
     crate::mmu::activate_task(next);
@@ -2429,7 +2479,8 @@ pub unsafe fn on_tick(frame: *mut Context) {
 pub unsafe fn on_net_irq(frame: *mut Context) {
     let frame = unsafe { &mut *frame };
     let current = CURRENT.load(Ordering::Relaxed);
-    for i in 0..NUM_TASKS {
+    for slot in TaskIndex::all() {
+        let i = slot.index();
         if let TaskState::Blocked(WaitReason::NetInput { .. }) = unsafe { *STATES[i].0.get() } {
             // NET_WAIT's return value is ignored (the server drains its
             // sources itself), matching `NetInput`'s `poll` Some(0).
@@ -2439,7 +2490,7 @@ pub unsafe fn on_net_irq(frame: *mut Context) {
                 unsafe { *TASKS[current].0.get() = *frame };
                 *frame = unsafe { *TASKS[i].0.get() };
                 CURRENT.store(i, Ordering::Relaxed);
-                crate::mmu::activate_task(i);
+                crate::mmu::activate_task(slot);
             }
             // Only one task ever blocks on NetInput (the network server).
             return;

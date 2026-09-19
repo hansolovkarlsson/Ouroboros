@@ -146,6 +146,8 @@
 use core::arch::asm;
 use core::cell::UnsafeCell;
 
+use crate::tasks::TaskIndex;
+
 use uefi::mem::memory_map::{MemoryMap, MemoryMapOwned, MemoryType};
 
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -215,7 +217,7 @@ unsafe impl Sync for Table {}
 ///
 /// One definition, not a second literal: this *is* `tasks::NUM_TASKS`,
 /// so raising the slot count there scales every table pool here. A slot
-/// with no view is refused, not clamped: see [`l0_table`].
+/// with no view is unspellable, not clamped: see [`l0_table`].
 const MAX_EL0_REGIONS: usize = crate::tasks::NUM_TASKS;
 
 // Per-task translation-table views (the per-task page-tables
@@ -631,7 +633,7 @@ unsafe fn build_tables(memory_map: &MemoryMapOwned, el0_regions: [(u64, u64); MA
         );
     }
 
-    unsafe { switch_full(crate::tasks::current_task()) };
+    unsafe { switch_full(crate::tasks::current_index()) };
 }
 
 /// Builds one task's translation-table view: the shared kernel shape
@@ -760,23 +762,14 @@ unsafe fn build_view(
     }
 }
 
-/// The L0 table for `view`, or a reported halt if there is none. This
-/// replaced a clamp onto the last view, which would have run an
-/// out-of-range task under another task's tables. It guards this lookup
-/// only: every runtime caller has already indexed `tasks::TASKS[view]`
-/// by the time it gets here, so a bad slot would have panicked there
-/// first (silently, see `ROADMAP.md`'s panic-handler entry), and at the
-/// boot-time `switch_full` call there is no console yet on
-/// framebuffer-only machines. A slot newtype made only in `tasks.rs` is
-/// the check at the right depth; this is the one this file can make.
-fn l0_table(view: usize) -> &'static Table {
-    if view >= MAX_EL0_REGIONS {
-        crate::console::println_force!(
-            "mmu: task slot {view} has no translation-table view (there are {MAX_EL0_REGIONS}); refusing to switch"
-        );
-        crate::power::halt();
-    }
-    &L0_TABLES[view]
+/// The L0 table for `view`. A [`TaskIndex`] is below `NUM_TASKS` by
+/// construction and `MAX_EL0_REGIONS` *is* `NUM_TASKS`, so this index is
+/// total: a slot with no view cannot be spelled. (This replaced, in
+/// turn, a clamp onto the last view, which would have run an
+/// out-of-range task under another task's tables, and then a runtime
+/// refusal, which no real caller could reach.)
+fn l0_table(view: TaskIndex) -> &'static Table {
+    &L0_TABLES[view.index()]
 }
 
 /// The per-context-switch table switch: points TTBR0_EL1 at `view`'s
@@ -786,6 +779,8 @@ fn l0_table(view: usize) -> &'static Table {
 ///
 /// `view` is a task slot, and there are exactly as many views as slots
 /// (`MAX_EL0_REGIONS` is `NUM_TASKS`); [`l0_table`] is the lookup.
+/// Taking a [`TaskIndex`] rather than a `usize` is what makes a slot
+/// with no view unspellable at every call site.
 ///
 /// The full `tlbi vmalle1` on every switch is the stage-2
 /// correctness-first design: with a single ASID, entries cached under
@@ -793,7 +788,7 @@ fn l0_table(view: usize) -> &'static Table {
 /// The planned stage-3 refinement (per-task ASIDs + nG-tagged EL0
 /// entries) makes this a plain TTBR0 write; if that ever misbehaves on
 /// real hardware, this version is the known-correct fallback.
-pub(crate) fn activate_task(view: usize) {
+pub(crate) fn activate_task(view: TaskIndex) {
     let ttbr0 = l0_table(view).0.get() as u64;
     unsafe {
         asm!(
@@ -813,7 +808,7 @@ pub(crate) fn activate_task(view: usize) {
 /// rebuild end here. [`activate_task`] is the lighter switch-only
 /// sibling used on every context switch; both look the view up through
 /// [`l0_table`].
-unsafe fn switch_full(view: usize) {
+unsafe fn switch_full(view: TaskIndex) {
     let mair_el1: u64 =
         (MAIR_ATTR_DEVICE_NGNRNE << (8 * MAIR_IDX_DEVICE_NGNRNE)) | (MAIR_ATTR_NORMAL_WB << (8 * MAIR_IDX_NORMAL_WB));
 
