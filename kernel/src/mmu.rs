@@ -219,8 +219,15 @@ unsafe impl Sync for Table {}
 /// out-of-range slot used to be clamped onto the last view, which would
 /// have run that task under another task's tables, the opposite of a
 /// fail-safe. Now it is a plain bounds-checked index that no caller can
-/// exceed, since every slot comes from `% NUM_TASKS`, a `0..NUM_TASKS`
-/// loop, or `CURRENT`.
+/// exceed. Every slot comes from `% NUM_TASKS`, a `0..NUM_TASKS` loop,
+/// or `CURRENT`, with one exception worth naming: the `MSG_CALL` path
+/// hands `tasks::block_current_and_switch_to` a syscall-supplied `dest`
+/// as its `prefer` hint, and the only thing keeping that in range is the
+/// `dest >= tasks::NUM_TASKS` refusal in `syscall.rs`'s `MSG_CALL` arm.
+/// Loosen that check, or add a second `prefer` caller without one, and
+/// this index is reachable from EL0. A slot newtype constructible only
+/// in `tasks.rs` would move that guarantee into the compiler
+/// (`ROADMAP.md`'s review-findings ledger has the entry).
 const MAX_EL0_REGIONS: usize = crate::tasks::NUM_TASKS;
 
 // Per-task translation-table views (the per-task page-tables
@@ -509,9 +516,13 @@ pub unsafe fn install_identity_map(
 /// safety requirements otherwise apply identically) - the same
 /// requirement `main.rs`'s single call site already satisfies for every
 /// caller of this function, since none can run before boot completes.
-/// Called from an SVC handler with interrupts masked throughout (true
-/// for `syscall.rs`'s `spawn`, its only caller) - single-core, so no
-/// other code can observe the table set mid-rebuild.
+/// Called with interrupts masked throughout - single-core, so no other
+/// code can observe the table set mid-rebuild. That holds for every
+/// caller because each is an exception entry or runs inside one: eight
+/// sites across three files (`syscall.rs`'s spawn/exec/exit arms,
+/// `tasks.rs`'s tick and supervisor-restart paths, and
+/// `exceptions.rs`'s EL0 fault handler). A caller from ordinary EL1
+/// code with interrupts enabled would break this and has never existed.
 pub(crate) unsafe fn rebuild_with_el0_regions(el0_regions: [(u64, u64); MAX_EL0_REGIONS]) {
     let memory_map = unsafe { (*STORED_MEMORY_MAP.0.get()).as_ref() }
         .expect("install_identity_map must run before rebuild_with_el0_regions");
@@ -771,9 +782,11 @@ unsafe fn build_view(
 /// `view` is a task slot, and there are exactly as many views as slots
 /// (`MAX_EL0_REGIONS` is `NUM_TASKS`), so the index is plain rather
 /// than clamped: no caller can pass a slot past the last view. If one
-/// ever did, the bounds check would panic, and the kernel has no panic
-/// handler of its own (see `ROADMAP.md`), so that would be a silent
-/// hang, not a report; the guarantee is the callers, not this line.
+/// ever did, the bounds check would panic, and a panic here is not a
+/// report: the kernel has no `#[panic_handler]` of its own, it takes the
+/// `uefi` crate's via the `panic_handler` feature in `kernel/Cargo.toml`,
+/// and after `ExitBootServices` that handler prints nothing, spins, and
+/// resets the machine. The guarantee is the callers, not this line.
 ///
 /// The full `tlbi vmalle1` on every switch is the stage-2
 /// correctness-first design: with a single ASID, entries cached under
@@ -799,7 +812,9 @@ pub(crate) fn activate_task(view: usize) {
 /// The full MAIR/TCR/TTBR0 configuration sequence, switching to
 /// `view`'s table set - the boot-time install and every runtime
 /// rebuild end here. [`activate_task`] is the lighter switch-only
-/// sibling used on every context switch.
+/// sibling used on every context switch, and what its doc says about
+/// the `view` index (plain, not clamped, guaranteed by the callers, and
+/// a panic here would be silent) applies to this one identically.
 unsafe fn switch_full(view: usize) {
     let mair_el1: u64 =
         (MAIR_ATTR_DEVICE_NGNRNE << (8 * MAIR_IDX_DEVICE_NGNRNE)) | (MAIR_ATTR_NORMAL_WB << (8 * MAIR_IDX_NORMAL_WB));

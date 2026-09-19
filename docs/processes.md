@@ -129,12 +129,13 @@ at its first instruction. What is left for static data is the slot minus
 the tail; the refusal message carries the real numbers, and a compile-time
 assert in `loader.rs` keeps the tail from ever consuming the whole slot.
 
-Two independent regions exist at once: the loaded program (task 0) and a
-small fixed 4KB idle-task stub (task 1, still compiled into the kernel —
-see `docs/architecture.md`'s process model section). `mmu.rs` handles up
-to two such regions, sized for exactly this case; see its module doc
-comment (`MAX_EL0_REGIONS`) for what happens if that's ever exceeded (a
-loud warning and a fail-safe EL1-only mapping, not silent corruption).
+One region exists per scheduler slot: the loaded programs, the servers,
+and the small fixed 4KB idle-task stub (task 1, still compiled into the
+kernel, see `docs/architecture.md`'s process model section). `mmu.rs`
+holds one translation-table view per slot; its region count
+(`MAX_EL0_REGIONS`) is defined as `tasks::NUM_TASKS`, so there is no
+"exceeded" case to handle: a task slot always has a view, and the spawn
+path refuses a slot before any table is built for it.
 
 ## Binary format
 

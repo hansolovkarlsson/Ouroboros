@@ -1879,9 +1879,25 @@ would otherwise silently shrink into looking like nothing was ever found.
     or the framebuffer console. On Parallels, where the framebuffer is the
     only console, that is indistinguishable from a hardware crash. Found by
     the review of #136 (2026-09-18) while checking what "panics here" would
-    actually do. Wants a kernel `#[panic_handler]` that reports the message
-    and location through `console::println!` and halts, the way
-    `exceptions.rs` already reports a fault.
+    actually do. It is not hypothetical: `mmu.rs` already has three
+    post-exit panic sites (`ram_span`'s and `rebuild_with_el0_regions`'s
+    `expect`, and the `unwrap` in the stashed-memory-map read), each
+    guarding "install_identity_map ran first". Wants a kernel
+    `#[panic_handler]` that reports the message and location through
+    `console::println!` and halts, the way `exceptions.rs` already reports
+    a fault. **First drop the `panic_handler` feature from the `uefi`
+    dependency in `kernel/Cargo.toml`**, or the build fails on a duplicate
+    `panic_impl` lang item.
+  - **The task slot passed to `activate_task`/`switch_full` is a bare
+    `usize`, in range only by the discipline of eight callers.** Seven
+    derive it from `% NUM_TASKS`, a bounded loop or `CURRENT`; the eighth
+    is `MSG_CALL`, whose `dest` is a syscall argument refused at
+    `>= NUM_TASKS` in `syscall.rs`, a check in a different file that
+    nothing ties to the index. A `TaskSlot(usize)` newtype constructible
+    only in `tasks.rs` (from the modulo, the loop, and the checked syscall
+    paths) would make an unchecked slot unspellable rather than grepped
+    for. Found by the second review of #136 (2026-09-18). Pairs with the
+    `TaskIdentity` newtype already on the small list.
   - **The stack top is hand-derived as `base + size` at seven sites across
     three files** (`tasks.rs` five times, `supervisor.rs`, `syscall.rs`),
     inside an identical `Context` literal. Anything ever placed above the
