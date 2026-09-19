@@ -123,22 +123,25 @@
 //! traps to EL1 by default — `SCTLR_EL1.nTWE`/`nTWI`, unrelated to the
 //! mapping work here.)
 //!
-//! ## Since generalized to two independent regions, not one shared 8KB slot
+//! ## Since generalized to one independent region per task slot
 //!
 //! The paragraphs above describe the original shape: one 8KB compile-time
 //! static, holding both EL0 tasks, isolated via one L2/L3 split. Once task
 //! 0 became a program loaded from disk at a runtime-determined address
 //! (`loader.rs`) instead of a compile-time constant, that stopped fitting
-//! the "one region" model — task 0's region and task 1's small idle region
-//! (`tasks.rs::IdleRegion`) are now unrelated allocations that could
+//! the "one region" model: task 0's region and task 1's small idle region
+//! (`tasks.rs::IdleRegion`) became unrelated allocations that could
 //! easily land in different 1GB blocks or 2MB slots. [`install_identity_map`]
-//! takes an array of regions instead of one tuple, and `EL0_L2_TABLES`/
-//! `EL0_L3_TABLES` are both sized for up to [`MAX_EL0_REGIONS`] independent
-//! splits rather than one. The underlying technique (walk down to L3 only
-//! for the slot(s) that need it, everything else stays a coarse block) is
-//! unchanged — see `MAX_EL0_REGIONS`'s own doc comment for the alignment
-//! invariant that keeps this from needing to handle a *single* region
-//! spanning multiple slots, which would be a bigger change.
+//! took an array of regions instead of one tuple, first sized for those
+//! two, and now sized for every scheduler slot: `EL0_L2_TABLES`/
+//! `EL0_L3_TABLES` hold [`MAX_EL0_REGIONS`] (that is, `tasks::NUM_TASKS`)
+//! independent splits, one per task. The underlying technique (walk down
+//! to L3 only for the slot(s) that need it, everything else stays a coarse
+//! block) is unchanged. The alignment invariant that keeps this from ever
+//! needing to handle a *single* region spanning multiple slots, which
+//! would be a bigger change, is the loader's: see the safety comments on
+//! `install_identity_map` and the `SLOT_ALIGN` assert near the top of this
+//! file.
 
 use core::arch::asm;
 use core::cell::UnsafeCell;
@@ -219,15 +222,18 @@ unsafe impl Sync for Table {}
 /// out-of-range slot used to be clamped onto the last view, which would
 /// have run that task under another task's tables, the opposite of a
 /// fail-safe. Now it is a plain bounds-checked index that no caller can
-/// exceed. Every slot comes from `% NUM_TASKS`, a `0..NUM_TASKS` loop,
-/// or `CURRENT`, with one exception worth naming: the `MSG_CALL` path
-/// hands `tasks::block_current_and_switch_to` a syscall-supplied `dest`
-/// as its `prefer` hint, and the only thing keeping that in range is the
-/// `dest >= tasks::NUM_TASKS` refusal in `syscall.rs`'s `MSG_CALL` arm.
-/// Loosen that check, or add a second `prefer` caller without one, and
-/// this index is reachable from EL0. A slot newtype constructible only
-/// in `tasks.rs` would move that guarantee into the compiler
-/// (`ROADMAP.md`'s review-findings ledger has the entry).
+/// exceed (what a panic here would mean is on `activate_task`'s doc).
+/// Every slot comes from `% NUM_TASKS`, a `0..NUM_TASKS` loop, `CURRENT`,
+/// or the literal `0` in `tasks::start`, with one path worth naming: the
+/// `MSG_CALL` arm hands `tasks::block_current_and_switch_to` a
+/// syscall-supplied `dest` as its `prefer` hint. That value is checked
+/// twice in `syscall.rs` (`dest >= NUM_TASKS` and `task_exists`, which
+/// re-checks the bound) and then indexes `STATES[p]` inside
+/// `block_current_and_switch_to` before it ever reaches this table, so
+/// even with both checks gone an out-of-range `dest` would panic at
+/// `STATES`, not switch tables. The guarantee is still a discipline
+/// across two files rather than a type; a slot newtype constructible only
+/// in `tasks.rs` would move it into the compiler.
 const MAX_EL0_REGIONS: usize = crate::tasks::NUM_TASKS;
 
 // Per-task translation-table views (the per-task page-tables
@@ -519,9 +525,9 @@ pub unsafe fn install_identity_map(
 /// Called with interrupts masked throughout - single-core, so no other
 /// code can observe the table set mid-rebuild. That holds for every
 /// caller because each is an exception entry or runs inside one: eight
-/// sites across three files (`syscall.rs`'s spawn/exec/exit arms,
-/// `tasks.rs`'s tick and supervisor-restart paths, and
-/// `exceptions.rs`'s EL0 fault handler). A caller from ordinary EL1
+/// sites across three files (`syscall.rs`'s `spawn_staged` and its
+/// `EXIT` and `KILL` arms, `tasks.rs`'s tick and supervisor-restart
+/// paths, and `exceptions.rs`'s EL0 fault handler). A caller from ordinary EL1
 /// code with interrupts enabled would break this and has never existed.
 pub(crate) unsafe fn rebuild_with_el0_regions(el0_regions: [(u64, u64); MAX_EL0_REGIONS]) {
     let memory_map = unsafe { (*STORED_MEMORY_MAP.0.get()).as_ref() }
@@ -786,7 +792,11 @@ unsafe fn build_view(
 /// report: the kernel has no `#[panic_handler]` of its own, it takes the
 /// `uefi` crate's via the `panic_handler` feature in `kernel/Cargo.toml`,
 /// and after `ExitBootServices` that handler prints nothing, spins, and
-/// resets the machine. The guarantee is the callers, not this line.
+/// resets the machine (or, if runtime reset is unavailable, executes
+/// `hlt`, which traps to `exceptions.rs` and prints a fault at the
+/// handler's own address). The guarantee is the callers, not this line.
+/// This paragraph is the one copy of that argument; `MAX_EL0_REGIONS`
+/// and `switch_full` point here rather than restate it.
 ///
 /// The full `tlbi vmalle1` on every switch is the stage-2
 /// correctness-first design: with a single ASID, entries cached under
@@ -812,9 +822,8 @@ pub(crate) fn activate_task(view: usize) {
 /// The full MAIR/TCR/TTBR0 configuration sequence, switching to
 /// `view`'s table set - the boot-time install and every runtime
 /// rebuild end here. [`activate_task`] is the lighter switch-only
-/// sibling used on every context switch, and what its doc says about
-/// the `view` index (plain, not clamped, guaranteed by the callers, and
-/// a panic here would be silent) applies to this one identically.
+/// sibling used on every context switch; what its doc says about the
+/// `view` index applies to this one identically.
 unsafe fn switch_full(view: usize) {
     let mair_el1: u64 =
         (MAIR_ATTR_DEVICE_NGNRNE << (8 * MAIR_IDX_DEVICE_NGNRNE)) | (MAIR_ATTR_NORMAL_WB << (8 * MAIR_IDX_NORMAL_WB));

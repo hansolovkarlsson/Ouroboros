@@ -1876,8 +1876,11 @@ would otherwise silently shrink into looking like nothing was ever found.
     `log::debug!`), spins, then resets the machine. So any post-exit panic,
     including an index bounds check in the IRQ or SVC path, is a silent
     multi-second hang followed by a power-off, with no line on the PL011
-    or the framebuffer console. On Parallels, where the framebuffer is the
-    only console, that is indistinguishable from a hardware crash. Found by
+    or the framebuffer console. (When runtime reset is unavailable the
+    handler falls into a `hlt` loop instead, which traps to `exceptions.rs`
+    and prints a fault at the handler's own address: a line, but not the
+    panic message.) On Parallels, where the framebuffer is the only
+    console, the reset path is indistinguishable from a hardware crash. Found by
     the review of #136 (2026-09-18) while checking what "panics here" would
     actually do. It is not hypothetical: `mmu.rs` already has three
     post-exit panic sites (`ram_span`'s and `rebuild_with_el0_regions`'s
@@ -1891,9 +1894,12 @@ would otherwise silently shrink into looking like nothing was ever found.
   - **The task slot passed to `activate_task`/`switch_full` is a bare
     `usize`, in range only by the discipline of eight callers.** Seven
     derive it from `% NUM_TASKS`, a bounded loop or `CURRENT`; the eighth
-    is `MSG_CALL`, whose `dest` is a syscall argument refused at
-    `>= NUM_TASKS` in `syscall.rs`, a check in a different file that
-    nothing ties to the index. A `TaskSlot(usize)` newtype constructible
+    is `MSG_CALL`, whose `dest` is a syscall argument checked twice in
+    `syscall.rs` (`>= NUM_TASKS` and `task_exists`) and then used to index
+    `STATES` in `tasks.rs` before the view is ever switched, so a bad
+    `dest` would panic there, never reach the tables. The guarantee holds,
+    but as a discipline across two files that nothing ties to the index.
+    A `TaskSlot(usize)` newtype constructible
     only in `tasks.rs` (from the modulo, the loop, and the checked syscall
     paths) would make an unchecked slot unspellable rather than grepped
     for. Found by the second review of #136 (2026-09-18). Pairs with the
