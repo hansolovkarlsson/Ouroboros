@@ -1855,14 +1855,33 @@ would otherwise silently shrink into looking like nothing was ever found.
     *Three of the twelve went in #135 (2026-09-13): `processes.md`'s
     memory-model paragraph, `architecture.md`'s layout line, and the ABI's
     `HEAP_INFO` doc. The rest stand.*
-  - **`activate_task` clamps an out-of-range view index silently**
-    (`L0_TABLES[view.min(MAX_EL0_REGIONS - 1)]`, `mmu.rs`), so a task past
-    the last view would run under another task's translation tables, the
-    opposite of a fail-safe, and nothing documents it. Noticed in passing by
-    the fourth review of #135 (2026-09-13) while a dangling pointer to a
-    "fail-safe" that no longer existed was being removed. Unreachable while
-    `NUM_TASKS == MAX_EL0_REGIONS`; wants a `const` assert tying the two, or
-    a refusal in place of the clamp.
+  - ~~**`activate_task` clamps an out-of-range view index silently**~~
+    **Fixed 2026-09-18** (#136). It was `L0_TABLES[view.min(MAX_EL0_REGIONS
+    - 1)]` in `mmu.rs` (twice: `activate_task` and `switch_full`), so a task
+    past the last view would have run under another task's translation
+    tables, the opposite of a fail-safe, and nothing documented it. Noticed
+    in passing by the fourth review of #135 (2026-09-13). Unreachable while
+    `NUM_TASKS == MAX_EL0_REGIONS`, which the array-typed parameters of
+    `install_identity_map` and `rebuild_with_el0_regions` already enforced
+    (a "must stay equal" comment on each side undersold that). Now
+    `MAX_EL0_REGIONS` is *defined as* `tasks::NUM_TASKS`, one definition
+    rather than two literals, and both lookups are plain indexes. The PR's
+    first round added a `const` assert instead and claimed a mutation showed
+    it could fail; the review found the same mutation fails the build with
+    the assert deleted, so it proved nothing about the assert. The
+    definitional constant needs no such proof.
+  - **The kernel has no panic handler of its own.** `kernel/Cargo.toml`
+    takes the `uefi` crate's `panic_handler` feature, whose handler after
+    `ExitBootServices` prints nothing (its `println!` degrades to
+    `log::debug!`), spins, then resets the machine. So any post-exit panic,
+    including an index bounds check in the IRQ or SVC path, is a silent
+    multi-second hang followed by a power-off, with no line on the PL011
+    or the framebuffer console. On Parallels, where the framebuffer is the
+    only console, that is indistinguishable from a hardware crash. Found by
+    the review of #136 (2026-09-18) while checking what "panics here" would
+    actually do. Wants a kernel `#[panic_handler]` that reports the message
+    and location through `console::println!` and halts, the way
+    `exceptions.rs` already reports a fault.
   - **The stack top is hand-derived as `base + size` at seven sites across
     three files** (`tasks.rs` five times, `supervisor.rs`, `syscall.rs`),
     inside an identical `Context` literal. Anything ever placed above the

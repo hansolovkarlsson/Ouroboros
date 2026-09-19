@@ -84,7 +84,8 @@ use crate::loader::{LoadedProgram, SLOT_ALIGN};
 /// `MAX_EXTRA_L1_TABLES` already states for a similar "how many of these might
 /// we need" question. Raising it is a one-constant change now (`spawn` just
 /// fails with `SpawnError::NoFreeSlot` past this): the per-task arrays and the
-/// `mmu.rs` table pool (`MAX_EL0_REGIONS`, which must stay equal) auto-scale.
+/// `mmu.rs` table pool (`MAX_EL0_REGIONS`, which is defined as this
+/// constant, not as a second literal) auto-scale.
 pub const NUM_TASKS: usize = 11;
 
 /// The send-mask ceiling, checked rather than described. [`caps_for_slot`]

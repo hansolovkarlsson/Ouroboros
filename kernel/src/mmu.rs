@@ -203,14 +203,25 @@ struct Table(UnsafeCell<[u64; ENTRIES_PER_TABLE]>);
 // TTBR0_EL1.
 unsafe impl Sync for Table {}
 
-/// One EL0 region slot per task (`tasks::NUM_TASKS`, kept in sync by
-/// the array literals both sides carry) - and, since the per-task
-/// page-tables milestone, also the number of translation-table
-/// *views*: view i grants EL0 access to region i alone. Each region is
-/// independently guaranteed to fit within one 2MB-aligned slot (see
-/// the safety comments on `install_identity_map`), so a view needs
-/// exactly one L2 split and one L3 split - its own region's.
-const MAX_EL0_REGIONS: usize = 11;
+/// One EL0 region slot per task, and, since the per-task page-tables
+/// milestone, also the number of translation-table *views*: view i
+/// grants EL0 access to region i alone. Each region is independently
+/// guaranteed to fit within one 2MB-aligned slot (see the safety
+/// comments on `install_identity_map`), so a view needs exactly one L2
+/// split and one L3 split - its own region's.
+///
+/// One definition, not a second literal: this *is* `tasks::NUM_TASKS`,
+/// so raising the slot count there scales every table pool here. (The
+/// array-typed parameters of `install_identity_map` and
+/// `rebuild_with_el0_regions` would have refused a mismatch anyway;
+/// deriving it just removes the question.) `activate_task` and
+/// `switch_full` index `L0_TABLES` with the task slot directly: an
+/// out-of-range slot used to be clamped onto the last view, which would
+/// have run that task under another task's tables, the opposite of a
+/// fail-safe. Now it is a plain bounds-checked index that no caller can
+/// exceed, since every slot comes from `% NUM_TASKS`, a `0..NUM_TASKS`
+/// loop, or `CURRENT`.
+const MAX_EL0_REGIONS: usize = crate::tasks::NUM_TASKS;
 
 // Per-task translation-table views (the per-task page-tables
 // milestone): view i is the table set task i runs under - identical
@@ -757,6 +768,13 @@ unsafe fn build_view(
 /// the current task changes - the moment the following `eret` lands in
 /// EL0, the new task can only see its own region.
 ///
+/// `view` is a task slot, and there are exactly as many views as slots
+/// (`MAX_EL0_REGIONS` is `NUM_TASKS`), so the index is plain rather
+/// than clamped: no caller can pass a slot past the last view. If one
+/// ever did, the bounds check would panic, and the kernel has no panic
+/// handler of its own (see `ROADMAP.md`), so that would be a silent
+/// hang, not a report; the guarantee is the callers, not this line.
+///
 /// The full `tlbi vmalle1` on every switch is the stage-2
 /// correctness-first design: with a single ASID, entries cached under
 /// the previous view would otherwise satisfy the next task's walks.
@@ -764,7 +782,7 @@ unsafe fn build_view(
 /// entries) makes this a plain TTBR0 write; if that ever misbehaves on
 /// real hardware, this version is the known-correct fallback.
 pub(crate) fn activate_task(view: usize) {
-    let ttbr0 = L0_TABLES[view.min(MAX_EL0_REGIONS - 1)].0.get() as u64;
+    let ttbr0 = L0_TABLES[view].0.get() as u64;
     unsafe {
         asm!(
             "msr ttbr0_el1, {0}",
@@ -816,7 +834,7 @@ unsafe fn switch_full(view: usize) {
         | (0b10 << 30)               // TG1: 4KB granule (TTBR1 encoding)
         | (ips << 32); // IPS: from hardware
 
-    let ttbr0_el1 = L0_TABLES[view.min(MAX_EL0_REGIONS - 1)].0.get() as u64;
+    let ttbr0_el1 = L0_TABLES[view].0.get() as u64;
 
     // Masked and left masked: between the MAIR/TCR write and the TTBR0
     // switch below, code is still running under firmware's *old* tables
