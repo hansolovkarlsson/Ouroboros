@@ -283,7 +283,7 @@
         <div class="rcard">
           <span class="tag">Memory</span>
           <h3>Per-task page tables</h3>
-          <p>Each task has its own L0–L3 view. Kernel and device mappings are shared; EL0 access is granted to that task's region only. Switching tasks switches <code class="inline">TTBR0</code>.</p>
+          <p>Each task has its own L0–L3 view. Kernel and device mappings are shared; EL0 access is granted to that task's region only. Switching tasks switches <code class="inline">TTBR0</code>, and the slot it switches to is a <code class="inline">TaskIndex</code>: a value below <code class="inline">NUM_TASKS</code> by construction, so a slot with no view cannot be spelled.</p>
         </div>
         <div class="rcard">
           <span class="tag">Messaging</span>

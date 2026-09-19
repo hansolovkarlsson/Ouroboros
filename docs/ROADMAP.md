@@ -1941,9 +1941,10 @@ would otherwise silently shrink into looking like nothing was ever found.
     `uptime`, `ls` and `cat` (spawn, the `MSG_CALL` handoff, the exit
     paths), zero fault lines. Found by the second review of #136
     (2026-09-18). Pairs with the `TaskIdentity` newtype still on the small
-    list; #137's review also noted `CurrentCell` is the fourth hand-rolled
-    `UnsafeCell` + `unsafe impl Sync` wrapper in `tasks.rs` (fifth with
-    `mmu.rs`'s `Table`), each restating the single-core argument. A generic
+    list; #137's review also counted the hand-rolled `UnsafeCell` +
+    `unsafe impl Sync` wrappers, each restating the single-core argument:
+    eleven in `tasks.rs` (`StateSlot`, `RegionSlot`, ...) and three in
+    `mmu.rs` (`Table`, ...), by `grep -c 'unsafe impl Sync'`. A generic
     `SyncCell<T>` holding that argument once is a do-when-touched item.
   - **The stack top is hand-derived as `base + size` at seven sites across
     three files** (`tasks.rs` five times, `supervisor.rs`, `syscall.rs`),

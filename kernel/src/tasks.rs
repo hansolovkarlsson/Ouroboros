@@ -137,7 +137,7 @@ mod task_index {
         }
 
         /// The plain index, for the per-task arrays.
-        pub(crate) fn index(self) -> usize {
+        pub(crate) const fn index(self) -> usize {
             self.0
         }
     }
@@ -148,7 +148,7 @@ mod task_index {
     /// [`current_index`] can only ever have been a `TaskIndex`'s index,
     /// and rebuilding one from it needs no check and no modulo. Lives in
     /// this module so that nothing outside it can store a bare `usize`.
-    static CURRENT: AtomicUsize = AtomicUsize::new(0);
+    static CURRENT: AtomicUsize = AtomicUsize::new(TaskIndex::FIRST.0);
 
     /// The running task's slot, as a [`TaskIndex`].
     pub(crate) fn current_index() -> TaskIndex {
@@ -452,8 +452,8 @@ pub(crate) fn current_task() -> usize {
 
 /// Whether `slot` is the boot program or the idle task, the two slots
 /// that have nothing to fall back to if they fault (`exceptions.rs`).
-pub(crate) fn is_boot_or_idle(slot: usize) -> bool {
-    slot == TaskIndex::FIRST.index() || slot == TaskIndex::IDLE.index()
+pub(crate) fn is_boot_or_idle(slot: TaskIndex) -> bool {
+    slot == TaskIndex::FIRST || slot == TaskIndex::IDLE
 }
 
 /// The `(base, size)` region recorded for task `i` at creation time
@@ -1867,18 +1867,7 @@ pub(crate) unsafe fn exit_current_and_switch(frame: *mut Context, status: u64) -
     // WAIT collects it - which is also what makes the slot spawnable
     // again. The memory is still freed at death (the caller's job),
     // not at reap.
-    unsafe { *STATES[current.index()].0.get() = TaskState::Zombie(status & 0xff) };
-    unsafe { *REGIONS[current.index()].0.get() = (0, 0) };
-    clear_mailbox(current.index());
-    clear_sender_cred(current.index());
-    clear_grant(current.index());
-    clear_delegations_of(current.index());
-    clear_argv(current.index());
-    clear_cwd(current.index());
-    clear_env(current.index());
-    clear_namespace(current.index());
-    reset_stdout_target(current.index());
-    reset_id(current.index());
+    tear_down(current.index(), TaskState::Zombie(status & 0xff));
     let next = next_runnable(current);
     *frame = unsafe { *TASKS[next.index()].0.get() };
     set_current(next);
@@ -1897,7 +1886,18 @@ pub(crate) unsafe fn exit_current_and_switch(frame: *mut Context, status: u64) -
 /// region-free, owner-revert, and mmu rebuild around this, same as the
 /// `EXIT` arm does - see `syscall.rs`.
 pub(crate) fn kill_task(i: usize) {
-    unsafe { *STATES[i].0.get() = TaskState::Unused };
+    tear_down(i, TaskState::Unused);
+}
+
+/// Everything a task leaves behind, cleared in one place: the slot's
+/// state becomes `final_state` (`Unused` for a kill, `Zombie` for an exit
+/// whose status a `WAIT` still has to collect), its region is forgotten,
+/// and every per-task table is reset. The three paths that end a task
+/// ([`kill_task`], [`kill_current_and_switch`], [`exit_current_and_switch`])
+/// all come through here, so a new per-task table needs one `clear_*`
+/// call, not three.
+fn tear_down(i: usize, final_state: TaskState) {
+    unsafe { *STATES[i].0.get() = final_state };
     unsafe { *REGIONS[i].0.get() = (0, 0) };
     clear_mailbox(i);
     clear_sender_cred(i);
@@ -1929,18 +1929,7 @@ pub(crate) fn kill_task(i: usize) {
 pub(crate) unsafe fn kill_current_and_switch(frame: *mut Context) {
     let frame = unsafe { &mut *frame };
     let current = current_index();
-    unsafe { *STATES[current.index()].0.get() = TaskState::Unused };
-    unsafe { *REGIONS[current.index()].0.get() = (0, 0) };
-    clear_mailbox(current.index());
-    clear_sender_cred(current.index());
-    clear_grant(current.index());
-    clear_delegations_of(current.index());
-    clear_argv(current.index());
-    clear_cwd(current.index());
-    clear_env(current.index());
-    clear_namespace(current.index());
-    reset_stdout_target(current.index());
-    reset_id(current.index());
+    tear_down(current.index(), TaskState::Unused);
     let next = next_runnable(current);
     *frame = unsafe { *TASKS[next.index()].0.get() };
     set_current(next);
@@ -2093,7 +2082,7 @@ pub unsafe fn init(
     // file/VA offset 0, but tasks.rs shouldn't assume that itself - see
     // LoadedProgram::entry's own doc comment). Stack at the top of the
     // loaded region, growing down, same shape every EL0 task has used.
-    *unsafe { &mut *TASKS[0].0.get() } = Context {
+    *unsafe { &mut *TASKS[TaskIndex::FIRST.index()].0.get() } = Context {
         gpr: [0; 31],
         sp_el0: program.base + program.size,
         elr_el1: program.entry,
@@ -2288,7 +2277,7 @@ pub unsafe fn start() -> ! {
     // starts at 0) - activated again here for explicitness, so this
     // function's contract doesn't silently depend on that ordering.
     crate::mmu::activate_task(TaskIndex::FIRST);
-    let ctx = unsafe { *TASKS[0].0.get() };
+    let ctx = unsafe { *TASKS[TaskIndex::FIRST.index()].0.get() };
     unsafe {
         asm!(
             "msr sp_el0, {sp_el0}",
@@ -2352,8 +2341,7 @@ pub unsafe fn on_tick(frame: *mut Context) {
     let frame = unsafe { &mut *frame };
     let current = current_index();
 
-    for task in TaskIndex::all() {
-        let i = task.index();
+    for i in 0..NUM_TASKS {
         let TaskState::Blocked(reason) = (unsafe { *STATES[i].0.get() }) else { continue };
         if reason == WaitReason::Keyboard && i != INPUT_OWNER.load(Ordering::Relaxed) {
             continue;

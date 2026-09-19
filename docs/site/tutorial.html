@@ -811,11 +811,17 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64,
     <div class="panel">
       <div class="panel-tab"><span>kernel/src/tasks.rs</span><span>the entire scheduler</span></div>
       <pre><code>static TASKS: [TaskSlot; NUM_TASKS] = <span class="dim">/* saved Context per task */</span>;
-static CURRENT: AtomicUsize = AtomicUsize::new(0);
+<span class="dim">// TaskIndex: a slot below NUM_TASKS by construction (private field; its</span>
+<span class="dim">// constructors live in tasks.rs's task_index module, and the code is the</span>
+<span class="dim">// list). CURRENT is an AtomicUsize inside that same module, and</span>
+<span class="dim">// set_current(TaskIndex) is its only store, so current_index() rebuilds</span>
+<span class="dim">// the type without a check: "in range" is a type, not a convention kept</span>
+<span class="dim">// at every store site.</span>
 
-fn next_runnable(from: usize) -&gt; usize {
-    for offset in 1..=NUM_TASKS {
-        let candidate = (from + offset) % NUM_TASKS;
+fn next_runnable(from: TaskIndex) -&gt; TaskIndex {
+    let mut candidate = from;
+    for _ in 0..NUM_TASKS {
+        candidate = candidate.succ();            // (i + 1) % NUM_TASKS
         if state(candidate) == TaskState::Runnable { return candidate; }
     }
     from
@@ -824,12 +830,13 @@ fn next_runnable(from: usize) -&gt; usize {
 <span class="dim">/// Called from rust_irq_handler on every tick.</span>
 pub unsafe fn on_tick(frame: *mut Context) {
     let frame = &amp;mut *frame;
-    let current = CURRENT.load(Ordering::Relaxed);
+    let current = current_index();
     let next = next_runnable(current);
     if next == current { return; }
-    <span class="hl">*TASKS[current].0.get() = *frame;</span>    <span class="dim">// interrupted task's state out</span>
-    <span class="hl">*frame = *TASKS[next].0.get();</span>       <span class="dim">// next task's state in</span>
-    CURRENT.store(next, Ordering::Relaxed);
+<span class="hl">    *TASKS[current.index()].0.get() = *frame;</span>    <span class="dim">// interrupted task's state out</span>
+<span class="hl">    *frame = *TASKS[next.index()].0.get();</span>       <span class="dim">// next task's state in</span>
+    set_current(next);
+    mmu::activate_task(next);                     // its own translation-table view
 }</code></pre>
     </div>
 
