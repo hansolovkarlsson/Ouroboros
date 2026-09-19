@@ -1856,7 +1856,7 @@ would otherwise silently shrink into looking like nothing was ever found.
     memory-model paragraph, `architecture.md`'s layout line, and the ABI's
     `HEAP_INFO` doc. The rest stand.*
   - ~~**`activate_task` clamps an out-of-range view index silently**~~
-    **Fixed 2026-09-18** (#136). It was `L0_TABLES[view.min(MAX_EL0_REGIONS
+    **Fixed 2026-09-19** (#136). It was `L0_TABLES[view.min(MAX_EL0_REGIONS
     - 1)]` in `mmu.rs` (twice: `activate_task` and `switch_full`), so a task
     past the last view would have run under another task's translation
     tables, the opposite of a fail-safe, and nothing documented it. Noticed
@@ -1872,10 +1872,17 @@ would otherwise silently shrink into looking like nothing was ever found.
     definitional constant needs no such proof. The fifth review then held
     that with the clamp gone a bad slot would panic, and a panic is silent
     (the entry below), so the refusal the original finding offered as the
-    alternative landed too: `refuse_missing_view` reports the slot and
-    the view count through the console and halts, exercised by mutation
-    (a temporary `activate_task(NUM_TASKS)` after the install printed the
-    line and halted, no aborts in QEMU's trace).
+    alternative landed too: `l0_table` reports the slot and the view count
+    through the console and halts instead of indexing. A mutation (a
+    temporary `activate_task(NUM_TASKS)` after the install) printed the
+    line and halted with no aborts in QEMU's trace. **The sixth review
+    then showed that mutation was not in situ**: every runtime caller
+    indexes `tasks::TASKS[next]` before it switches, so a bad slot panics
+    there first and the refusal never prints; and at the boot-time
+    `switch_full` call there is no console yet on framebuffer-only
+    machines. The refusal guards the lookup only. The check that can fail
+    where the slot is made is the `TaskSlot` newtype, the next entry but
+    one, and it is the follow-up this fix owes.
   - **The kernel has no panic handler of its own, and a post-exit panic
     is silent.** `kernel/Cargo.toml` takes the `uefi` crate's
     `panic_handler` feature. **Measured on QEMU (2026-09-19)**, with a

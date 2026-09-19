@@ -215,7 +215,7 @@ unsafe impl Sync for Table {}
 ///
 /// One definition, not a second literal: this *is* `tasks::NUM_TASKS`,
 /// so raising the slot count there scales every table pool here. A slot
-/// with no view is refused, not clamped: see [`refuse_missing_view`].
+/// with no view is refused, not clamped: see [`l0_table`].
 const MAX_EL0_REGIONS: usize = crate::tasks::NUM_TASKS;
 
 // Per-task translation-table views (the per-task page-tables
@@ -760,22 +760,23 @@ unsafe fn build_view(
     }
 }
 
-/// The refusal that replaced the clamp: a task slot with no view of its
-/// own is reported and the machine halted, instead of the slot being
-/// clamped onto the last view (which ran the task under another task's
-/// tables) or left to the array bounds check (a panic, which under the
-/// `uefi` crate's handler is silent after `ExitBootServices`, see the
-/// `ROADMAP.md` ledger). Unreachable today: `MAX_EL0_REGIONS` is
-/// `NUM_TASKS`, and every caller derives `view` from a task slot.
-/// Exercised once by mutation (a temporary `activate_task(NUM_TASKS)`
-/// after the identity-map install printed this line and halted).
-fn refuse_missing_view(view: usize) {
+/// The L0 table for `view`, or a reported halt if there is none. This
+/// replaced a clamp onto the last view, which would have run an
+/// out-of-range task under another task's tables. It guards this lookup
+/// only: every runtime caller has already indexed `tasks::TASKS[view]`
+/// by the time it gets here, so a bad slot would have panicked there
+/// first (silently, see `ROADMAP.md`'s panic-handler entry), and at the
+/// boot-time `switch_full` call there is no console yet on
+/// framebuffer-only machines. A slot newtype made only in `tasks.rs` is
+/// the check at the right depth; this is the one this file can make.
+fn l0_table(view: usize) -> &'static Table {
     if view >= MAX_EL0_REGIONS {
         crate::console::println_force!(
             "mmu: task slot {view} has no translation-table view (there are {MAX_EL0_REGIONS}); refusing to switch"
         );
         crate::power::halt();
     }
+    &L0_TABLES[view]
 }
 
 /// The per-context-switch table switch: points TTBR0_EL1 at `view`'s
@@ -784,9 +785,7 @@ fn refuse_missing_view(view: usize) {
 /// EL0, the new task can only see its own region.
 ///
 /// `view` is a task slot, and there are exactly as many views as slots
-/// (`MAX_EL0_REGIONS` is `NUM_TASKS`). A slot past the last view is
-/// refused by [`refuse_missing_view`] before the index, not clamped onto
-/// a neighbour's tables.
+/// (`MAX_EL0_REGIONS` is `NUM_TASKS`); [`l0_table`] is the lookup.
 ///
 /// The full `tlbi vmalle1` on every switch is the stage-2
 /// correctness-first design: with a single ASID, entries cached under
@@ -795,8 +794,7 @@ fn refuse_missing_view(view: usize) {
 /// entries) makes this a plain TTBR0 write; if that ever misbehaves on
 /// real hardware, this version is the known-correct fallback.
 pub(crate) fn activate_task(view: usize) {
-    refuse_missing_view(view);
-    let ttbr0 = L0_TABLES[view].0.get() as u64;
+    let ttbr0 = l0_table(view).0.get() as u64;
     unsafe {
         asm!(
             "msr ttbr0_el1, {0}",
@@ -813,8 +811,8 @@ pub(crate) fn activate_task(view: usize) {
 /// The full MAIR/TCR/TTBR0 configuration sequence, switching to
 /// `view`'s table set - the boot-time install and every runtime
 /// rebuild end here. [`activate_task`] is the lighter switch-only
-/// sibling used on every context switch. Both refuse a slot with no
-/// view via [`refuse_missing_view`].
+/// sibling used on every context switch; both look the view up through
+/// [`l0_table`].
 unsafe fn switch_full(view: usize) {
     let mair_el1: u64 =
         (MAIR_ATTR_DEVICE_NGNRNE << (8 * MAIR_IDX_DEVICE_NGNRNE)) | (MAIR_ATTR_NORMAL_WB << (8 * MAIR_IDX_NORMAL_WB));
@@ -849,8 +847,7 @@ unsafe fn switch_full(view: usize) {
         | (0b10 << 30)               // TG1: 4KB granule (TTBR1 encoding)
         | (ips << 32); // IPS: from hardware
 
-    refuse_missing_view(view);
-    let ttbr0_el1 = L0_TABLES[view].0.get() as u64;
+    let ttbr0_el1 = l0_table(view).0.get() as u64;
 
     // Masked and left masked: between the MAIR/TCR write and the TTBR0
     // switch below, code is still running under firmware's *old* tables
