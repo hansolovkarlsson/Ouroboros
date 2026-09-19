@@ -1699,8 +1699,10 @@ static STATES: [StateSlot; NUM_TASKS] = [
 /// runnable. That fallback is unreachable today (task 1, the idle task,
 /// never blocks - see this module's doc comment for why it can't safely
 /// use `wfe` either, so it has to stay a real, always-runnable busy-spin),
-/// but a safe "stay put" is the right behavior if that ever stops being
-/// true, not a panic.
+/// but a "stay put" is the right behavior if that ever stops being true,
+/// not a panic - for a caller whose `from` is still a live task. The two
+/// callers that have just torn `from` down go through
+/// [`switch_away_from_dead`], which treats the fallback as a halt.
 fn next_runnable(from: TaskIndex) -> TaskIndex {
     let mut candidate = from;
     for _ in 0..NUM_TASKS {
@@ -1869,10 +1871,7 @@ pub(crate) unsafe fn exit_current_and_switch(frame: *mut Context, status: u64) -
     // again. The memory is still freed at death (the caller's job),
     // not at reap.
     tear_down(current, TaskState::Zombie(status & 0xff));
-    let next = next_runnable(current);
-    *frame = unsafe { *TASKS[next.index()].0.get() };
-    set_current(next);
-    crate::mmu::activate_task(next);
+    switch_away_from_dead(frame, current);
     frame.gpr[0]
 }
 
@@ -1883,9 +1882,10 @@ pub(crate) unsafe fn exit_current_and_switch(frame: *mut Context, status: u64) -
 /// could issue syscalls: a spawned task could `KILL` its own slot, and
 /// did (witnessed 2026-09-19, a child shell running `kill` on itself:
 /// the `eret` landed in a freed region and the task died again in the
-/// fault handler). The `KILL` arm now refuses a self-target outright,
-/// and `on_tick`'s two callers pass a slot they have just compared
-/// against the current one. Same bookkeeping as
+/// fault handler). The `KILL` arm refuses a self-target outright, and
+/// this function checks it again itself: the running task is the one
+/// value it can name without the caller, so the class is caught here
+/// whatever a future caller forgets. Same bookkeeping as
 /// [`exit_current_and_switch`] minus the context switch - a non-current
 /// task isn't executing (single core, IRQs masked throughout SVC
 /// dispatch; it's parked at an `eret` boundary), so its saved context is
@@ -1893,6 +1893,13 @@ pub(crate) unsafe fn exit_current_and_switch(frame: *mut Context, status: u64) -
 /// and mmu rebuild around this, same as the `EXIT` arm does - see
 /// `syscall.rs`.
 pub(crate) fn kill_task(i: TaskIndex) {
+    if i == current_index() {
+        crate::console::println_force!(
+            "Ouroboros kernel: kill_task on the running task {} - a kernel bug; halting rather than freeing the region the eret returns into",
+            i.index()
+        );
+        crate::power::halt();
+    }
     tear_down(i, TaskState::Unused);
 }
 
@@ -1938,7 +1945,25 @@ pub(crate) unsafe fn kill_current_and_switch(frame: *mut Context) {
     let frame = unsafe { &mut *frame };
     let current = current_index();
     tear_down(current, TaskState::Unused);
-    let next = next_runnable(current);
+    switch_away_from_dead(frame, current);
+}
+
+/// The context switch that follows a teardown of `dead`, the task that
+/// was running: load the next runnable task into `frame` and activate
+/// its view. `next_runnable`'s "stay put" fallback is not safe here -
+/// `dead`'s region is freed and its state is `Zombie`/`Unused`, so
+/// resuming it would `eret` into freed memory under a stale view, the
+/// same fault a self-`KILL` used to produce. Unreachable while the idle
+/// task is always runnable; a reported halt if that ever changes.
+fn switch_away_from_dead(frame: &mut Context, dead: TaskIndex) {
+    let next = next_runnable(dead);
+    if next == dead {
+        crate::console::println_force!(
+            "Ouroboros kernel: task {} ended with nothing else runnable (the idle task should never block) - halting",
+            dead.index()
+        );
+        crate::power::halt();
+    }
     *frame = unsafe { *TASKS[next.index()].0.get() };
     set_current(next);
     crate::mmu::activate_task(next);
@@ -2405,9 +2430,6 @@ pub unsafe fn on_tick(frame: *mut Context) {
     // path can't see it. A healthy server (idle in recv, or briefly busy)
     // is observed Blocked; a wedged one stays Runnable. On a wedge,
     // restart it on the exact teardown path the fault handler uses.
-    // `slot` is a real index passed to is_supervised/heartbeat/restart/
-    // task_region, not just an array subscript.
-    #[allow(clippy::needless_range_loop)]
     for server in TaskIndex::all() {
         let slot = server.index();
         if !crate::supervisor::is_supervised(slot) {

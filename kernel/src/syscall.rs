@@ -1085,20 +1085,22 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
                 // as the bound and not as a list.
                 return syscall_abi::TASK_ERR_PROTECTED;
             }
-            if i == tasks::current_task() {
+            // The checked constructor is the range check; everything
+            // below names the slot through it, never the raw argument.
+            let Some(target) = tasks::TaskIndex::new(i).filter(|t| tasks::task_exists(t.index())) else {
+                return syscall_abi::TASK_ERR_NO_SUCH_TASK;
+            };
+            if target == tasks::current_index() {
                 // A task may not KILL itself: the teardown below would
                 // free the region the `eret` returns into, and the task
                 // would die a second time in the EL0 fault handler
                 // (witnessed 2026-09-19: a child shell running `kill`
                 // on its own slot). EXIT is how a task ends itself. Same
-                // self-target refusal as WAIT and MSG_CALL.
+                // self-target refusal as WAIT and MSG_CALL; kill_task
+                // checks it once more, as the mechanism.
                 return syscall_abi::TASK_ERR_PROTECTED;
             }
-            // The checked constructor is the range check; kill_task
-            // takes the type, so an unchecked slot cannot reach it.
-            let Some(target) = tasks::TaskIndex::new(i).filter(|t| tasks::task_exists(t.index())) else {
-                return syscall_abi::TASK_ERR_NO_SUCH_TASK;
-            };
+            let i = target.index();
             console::println!("Ouroboros kernel: task {i} killed");
             // Same teardown order as EXIT's arm, minus the context
             // switch (the killed task isn't the one running - refused

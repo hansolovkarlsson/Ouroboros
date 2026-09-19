@@ -3354,6 +3354,13 @@ fn cmd_kill(arg: &str) {
         print_line("kill: usage: kill <task number> (see ps)");
         return;
     };
+    if n == self_task() {
+        // The kernel refuses this too (TASK_ERR_PROTECTED), but that
+        // code's message names the permanent slots, which is the wrong
+        // explanation for the slot the user just named.
+        print_line("kill: a task cannot kill itself - use exit");
+        return;
+    }
     match syscall(syscall_abi::KILL, n) {
         code if code >= FS_ERR_MIN => print_fs_error("kill", code),
         _ => {}

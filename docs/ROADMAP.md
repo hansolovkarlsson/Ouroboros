@@ -1915,8 +1915,8 @@ would otherwise silently shrink into looking like nothing was ever found.
     `tasks::TaskIndex`, a `usize` below `NUM_TASKS` by construction, with
     its field private to a nested module so that even `tasks.rs` cannot
     spell `TaskIndex(x)`: the constructors are `new` (checked, `None` past
-    the end, used once, where `MSG_CALL`'s caller-supplied `dest` becomes
-    a slot), the constants `FIRST` and `IDLE`, `all`, and `succ` (the
+    the end; used where a caller-supplied slot becomes one: `MSG_CALL`'s
+    `dest`, `KILL`'s target, and the Ctrl+C victim in `on_tick`), the constants `FIRST` and `IDLE`, `all`, and `succ` (the
     round-robin step, from a slot that already exists). There is no total
     `usize -> TaskIndex` constructor: the first round had a `wrapping`
     modulo, and its review found it used as a clamp twice (the
@@ -1947,6 +1947,33 @@ would otherwise silently shrink into looking like nothing was ever found.
     eleven in `tasks.rs` (`StateSlot`, `RegionSlot`, ...) and three in
     `mmu.rs` (`Table`, ...), by `grep -c 'unsafe impl Sync'`. A generic
     `SyncCell<T>` holding that argument once is a do-when-touched item.
+  - ~~**A task could `KILL` itself.**~~ **Fixed 2026-09-19** (#137). The
+    `KILL` arm refused the protected slots and empty slots, and nothing
+    else; `kill_task`'s doc said the syscall layer guaranteed the victim
+    was never the running task because "only tasks >= 2 can be killed, and
+    the caller is always whichever task is running", true when slot 0 was
+    the only task issuing syscalls and false since spawned programs run.
+    Witnessed first: a child shell in slot 6 ran `kill 6`; the kernel
+    printed "task 6 killed", the `eret` landed in the freed region (EL0
+    instruction permission fault), and the fault handler tore the slot
+    down again. Now refused with `TASK_ERR_PROTECTED` like WAIT and
+    MSG_CALL, `kill_task` checks it again as the mechanism (a reported
+    halt), and the two paths that tear the running task down go through
+    `switch_away_from_dead`, which halts rather than resume a torn-down
+    context if nothing else is runnable. Found by the fifth review of
+    #137; the shell names the self case in its own words, and the ABI
+    doc, `shell-commands.md` and `manual.md` state the protected set.
+  - **A child shell loses the keyboard after its first command.** Spawn a
+    shell from a shell (`/EFI/ORBS/SH.BIN`, slot 6), run any command in it
+    (`echo hi`, slot 7): when slot 7 exits, keyboard ownership reverts to
+    task 0, the boot shell, which is blocked in `WAIT` on slot 6, so the
+    child shell's next prompt never receives input and the session is
+    stuck until Ctrl+C. The revert-on-death rule in `revert_input_owner_if`
+    is "to task 0", not "to the spawner". Seen 2026-09-19 while driving the
+    self-`KILL` witness for #137 (not caused by it: the same rig without a
+    grandchild works). Wants the revert to go to the dead task's spawner
+    when that spawner is itself a foreground task, or a stated rule that
+    nested shells are unsupported.
   - **The stack top is hand-derived as `base + size` at seven sites across
     three files** (`tasks.rs` five times, `supervisor.rs`, `syscall.rs`),
     inside an identical `Context` literal. Anything ever placed above the

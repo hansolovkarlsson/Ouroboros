@@ -138,12 +138,14 @@ pub const TASK_STATE_ZOMBIE: u64 = 3;
 /// [`TASK_STATE`]'s "no such slot" answer.
 pub const TASK_STATE_INVALID: u64 = u64::MAX;
 
-/// `(task index)` -> `0` on success, [`TASK_ERR_PROTECTED`] (tasks 0/1
-/// are permanent), or [`TASK_ERR_NO_SUCH_TASK`]. Destroys *another*
-/// task - same teardown as a voluntary [`EXIT`] (slot freed, mapping
-/// removed, RAM reclaimed in the LIFO case), minus the context switch:
-/// the killed task isn't the one running. If the killed task held the
-/// keyboard (see [`FG`]), ownership reverts to task 0.
+/// `(task index)` -> `0` on success, [`TASK_ERR_PROTECTED`] (the
+/// permanent slots below the first spawnable one - the boot shell, idle
+/// and the servers - or your own slot: a task ends itself with [`EXIT`],
+/// never `KILL`), or [`TASK_ERR_NO_SUCH_TASK`]. Destroys *another* task -
+/// same teardown as a voluntary [`EXIT`] (slot freed, mapping removed,
+/// RAM reclaimed in the LIFO case), minus the context switch: the killed
+/// task isn't the one running. If the killed task held the keyboard (see
+/// [`FG`]), ownership reverts to task 0.
 pub const KILL: u64 = 19;
 
 /// `(task index)` -> `0` on success, [`TASK_ERR_PROTECTED`] (idle can't
