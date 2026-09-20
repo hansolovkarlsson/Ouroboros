@@ -1880,9 +1880,9 @@ would otherwise silently shrink into looking like nothing was ever found.
     indexes `tasks::TASKS[next]` before it switches, so a bad slot panics
     there first and the refusal never prints; and at the boot-time
     `switch_full` call there is no console yet on framebuffer-only
-    machines. The refusal guards the lookup only. The check that can fail
-    where the slot is made is the `TaskSlot` newtype, the next entry but
-    one, and it is the follow-up this fix owes.
+    machines. The refusal guarded the lookup only. The check that can fail
+    where the slot is made is the `TaskIndex` newtype, the next entry but
+    one, landed as the follow-up.
   - **The kernel has no panic handler of its own, and a post-exit panic
     is silent.** `kernel/Cargo.toml` takes the `uefi` crate's
     `panic_handler` feature. **Measured on QEMU (2026-09-19)**, with a
@@ -1905,17 +1905,112 @@ would otherwise silently shrink into looking like nothing was ever found.
     a fault. **First drop the `panic_handler` feature from the `uefi`
     dependency in `kernel/Cargo.toml`**, or the build fails on a duplicate
     `panic_impl` lang item.
-  - **The task slot passed to `activate_task`/`switch_full` is a bare
-    `usize`, in range only by the discipline of its callers.** Every
-    caller today derives it in `tasks.rs` from the slot count or from a
-    value `syscall.rs` has already range-checked, so the index holds; but
-    nothing ties those checks to the index, and #136's reviews found that
-    every prose inventory of the callers written to document the
-    discipline was wrong within a round. A `TaskSlot(usize)` newtype
-    constructible only in `tasks.rs` would make an unchecked slot
-    unspellable rather than grepped for, and would replace the inventory
-    with a type. Found by the second review of #136 (2026-09-18). Pairs
-    with the `TaskIdentity` newtype already on the small list.
+  - ~~**The task slot passed to `activate_task`/`switch_full` is a bare
+    `usize`, in range only by the discipline of its callers.**~~ **Fixed
+    2026-09-19** (#137). Every caller derived it in `tasks.rs`
+    from the slot count or from a value `syscall.rs` had already
+    range-checked, so the index held; but nothing tied those checks to the
+    index, and #136's reviews found every prose inventory of the callers
+    written to document the discipline wrong within a round. Now
+    `tasks::TaskIndex`, a `usize` below `NUM_TASKS` by construction, with
+    its field private to a nested module so that even `tasks.rs` cannot
+    spell `TaskIndex(x)`: the constructors are `new` (checked, `None` past
+    the end; used wherever a caller-supplied slot becomes one, which is
+    a grep and not a list here), the constants `FIRST` and `IDLE`, `all`, `current_index` (which
+    rebuilds the one `set_current` stored), and `succ` (the
+    round-robin step, from a slot that already exists). There is no total
+    `usize -> TaskIndex` constructor: the first round had a `wrapping`
+    modulo, and its review found it used as a clamp twice (the
+    `current_index()` read, and `next_runnable`'s fallback), so it is
+    gone. `CURRENT` is atomic storage inside the type's own module with
+    `set_current(TaskIndex)` as its only store (a third review caught the
+    second commit swapping the atomic for an `UnsafeCell`, which had
+    turned race-freedom into a claim); `next_runnable` takes and returns
+    the type. **Scope**: the type covers the view switch and the
+    scheduler's own slot. `task_exists`, `may_send`, `send_message` and the
+    per-task arrays still take a `usize`, so an arm that hands a typed slot
+    to one of them unwraps it, harmlessly; `is_live` remains an alias of
+    `task_exists` for the two identity arms, which are also the last
+    guard-then-index pairs (three names for one predicate; the next step
+    of this scope, with a `switch_to` helper for the five-site switch tail
+    and one predicate-driven scan for the two runnable loops). Converting
+    those is a separate change. `activate_task`,
+    `switch_full`, `build_view` and `block_current_and_switch_to`'s
+    `prefer` take it; every table index in `mmu.rs` is typed, and
+    `l0_table`'s runtime refusal is gone because the case is unspellable.
+    Named `TaskIndex` because `TaskSlot` was already the saved-context
+    cell. Shown to fail at compile time: `activate_task(11)`,
+    `set_current(3usize)` and `next_runnable(3usize)` (type mismatch),
+    `TaskIndex(11)` in `mmu.rs` and in `tasks.rs` outside the
+    `task_index` module (private field), each
+    restored and the files confirmed identical afterwards. Boot-tested on
+    QEMU after each commit with the guest driven through login, `echo`,
+    `uptime`, `ls` and `cat` (spawn, the `MSG_CALL` handoff, the exit
+    paths), zero fault lines. Found by the second review of #136
+    (2026-09-18). Pairs with the `TaskIdentity` newtype still on the small
+    list; #137's review also counted the hand-rolled `UnsafeCell` +
+    `unsafe impl Sync` wrappers, each restating the single-core argument:
+    eleven in `tasks.rs` (`StateSlot`, `RegionSlot`, ...) and three in
+    `mmu.rs` (`Table`, ...), by `grep -c 'unsafe impl Sync'`. A generic
+    `SyncCell<T>` holding that argument once is a do-when-touched item.
+  - ~~**A task could `KILL` itself.**~~ **Fixed 2026-09-19** (#137). The
+    `KILL` arm refused the protected slots and empty slots, and nothing
+    else; `kill_task`'s doc said the syscall layer guaranteed the victim
+    was never the running task because "only tasks >= 2 can be killed, and
+    the caller is always whichever task is running", true when slot 0 was
+    the only task issuing syscalls and false since spawned programs run.
+    Witnessed first: a child shell in slot 6 ran `kill 6`; the kernel
+    printed "task 6 killed", the `eret` landed in the freed region (EL0
+    instruction permission fault), and the fault handler tore the slot
+    down again. Now refused like WAIT and MSG_CALL, and all three return a
+    code of its own, `TASK_ERR_SELF` (`MAX-42`, the floor's old value; floor to `MAX-43`), because
+    `TASK_ERR_PROTECTED`'s one explanation names the permanent slots, the
+    wrong one for the slot the caller just named (the shell's error
+    printer distinguishes it today; `libc`'s `sys.h` mirrors no task code
+    and its programs print "failed" for the whole band, so naming
+    `TASK_ERR_SELF`/`_PROTECTED`/`_NO_SUCH_TASK` there is do-when-touched);
+    `kill_task` checks it again as the mechanism (a reported
+    halt), and the two paths that tear the running task down go through
+    `switch_away_from_dead`, which halts rather than resume a torn-down
+    context if nothing else is runnable. Found by the fifth review of
+    #137; the shell names the self case in its own words, and the ABI
+    doc, `shell-commands.md` and `manual.md` state the protected set.
+  - ~~**Ctrl+C could tear down a task that had already exited.**~~ **Fixed
+    2026-09-19** (#137). `interrupt_key_check` marks the keyboard owner in
+    `PENDING_KILL` and the next tick tears it down; the tick's guard
+    checked only that the slot was spawnable, not that it was live. A
+    foreground program that exited between the mark and the tick was a
+    Zombie whose status the parent's `WAIT` may already have collected;
+    the second teardown turned that into `TASK_KILLED_STATUS` and cleared
+    tables the slot no longer owned. The guard now goes through `live_index`
+    too. Found by the ninth review of #137, while the guard was being
+    rewritten to go through `TaskIndex::new`; not driven on the guest,
+    since `drive-qemu.py` types characters and a Ctrl+C that lands in the
+    window between an exit and the next tick is not something the rig can
+    place. Read, not run.
+  - **The Ctrl+C mark is a bare slot, so a slot re-spawned inside the
+    window is the one killed.** `interrupt_key_check` stores the keyboard
+    owner's slot in `PENDING_KILL`; if that task exits, its parent reaps it
+    and spawns again into the same slot before the next tick, the tick's
+    guard (range, bound, and since #137 liveness) passes and the new
+    occupant is terminated as "the foreground task". Narrow: it needs a
+    parent that is runnable rather than blocked in `WAIT` and a spawn
+    inside one tick. Marking `(slot, generation)`, the pair `SENDER_TASK`
+    already captures, and comparing the generation at the tick closes it.
+    Found by the eleventh review of #137 (2026-09-19); the liveness fix's
+    comment had claimed more than it did.
+  - **A child shell loses the keyboard after its first command.** Spawn a
+    shell from a shell (`/EFI/ORBS/SH.BIN`, slot 6), run any command in it
+    (`echo hi`, slot 7): when slot 7 exits, keyboard ownership reverts to
+    task 0, the boot shell (blocked in `WAIT` on slot 6 when the child was
+    run as a foreground command, or back at its prompt after `exec` then
+    `fg`), so the child shell's next prompt never receives input and it
+    stays alive until killed from the boot shell. The revert-on-death rule in `revert_input_owner_if`
+    is "to task 0", not "to the spawner". Seen 2026-09-19 while driving the
+    self-`KILL` witness for #137 (not caused by it: the same rig without a
+    grandchild works). Wants the revert to go to the dead task's spawner
+    when that spawner is itself a foreground task, or a stated rule that
+    nested shells are unsupported.
   - **The stack top is hand-derived as `base + size` at seven sites across
     three files** (`tasks.rs` five times, `supervisor.rs`, `syscall.rs`),
     inside an identical `Context` literal. Anything ever placed above the

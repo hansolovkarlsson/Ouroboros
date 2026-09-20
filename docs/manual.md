@@ -504,7 +504,7 @@ bytes per buffer** (`MAX_USER_LEN`) — longer buffers are rejected, not
 truncated.
 
 **Error convention:** all failure codes live in a reserved top band of
-`u64` — **any return value `>= FS_ERR_MIN` (`u64::MAX - 42`, and it moves
+`u64`: **any return value `>= FS_ERR_MIN` (`u64::MAX - 43`, and it moves
 down each time a code is reserved - check `syscall-abi`, never this
 sentence) is an error**; everything below is a real result (byte counts, sizes, exit
 statuses). `NO_FS` (`MAX-1`) means no filesystem is mounted this boot.
@@ -518,22 +518,22 @@ statuses). `NO_FS` (`MAX-1`) means no filesystem is mounted this boot.
 | 4 | `putc` | byte | Raw console byte write |
 | 5 | — | | *Deliberate gap (removed `shell_input`; ABI stability over density)* |
 | 6 | `get_ticks` | — | Preemption tick count since boot |
-| 7–14 | — | | *Deliberate gaps: the old `fs_*` syscalls — the filesystem lives in userland now (the fsd server); their contracts survive as the `FSOP_*` request protocol below* |
+| 7–14 | — | | *Deliberate gaps: the old `fs_*` syscalls: the filesystem lives in userland now (the fsd server); their contracts survive as the `FSOP_*` request protocol below* |
 | 15 | `read_char` | — | Blocking read: the task is suspended until a byte arrives |
 | 16 | `spawn` | staged total len | Start a program image previously fed in via `spawn_stage` as a new task alongside the caller; returns the new task's slot index |
-| 17 | `exit` | code | Destroy the calling task; status kept (masked to 0–255) until `wait`ed. Slots 0–5 — the shell, idle, and the four servers — refused (`EXIT_DENIED`) |
+| 17 | `exit` | code | Destroy the calling task; status kept (masked to 0–255) until `wait`ed. Slots 0–5 (the shell, idle, and the four servers) refused (`EXIT_DENIED`) |
 | 18 | `task_state` | index | `UNUSED`/`RUNNABLE`/`BLOCKED`/`ZOMBIE`, or `TASK_STATE_INVALID` past the last slot |
-| 19 | `kill` | index | Destroy another task (reaps immediately). Slots 0–5 protected |
-| 20 | `fg` | index | Hand keyboard ownership to a task (auto-reverts to task 0 on the owner's death, or on Ctrl+C) |
-| 21 | `wait` | index | Block until the task dies; returns its status (0–255), `TASK_KILLED_STATUS` (0x100), or `WAIT_INTERRUPTED` (Ctrl+C). Collecting the status reaps the slot |
-| 22 | `mount` | replace flag | Rescan the USB ports and install a storage device as the kernel's block device (`0`, `MOUNT_ALREADY`, or `MOUNT_NO_DEVICE`) — the device half; the FS half is the server's `FSOP_MOUNT` |
-| 23 | `msg_send` | dest, buf ptr/len | IPC: deliver a message (≤64 bytes) — straight into a matching blocked receiver's buffer (direct delivery), or into the task's bounded mailbox. Zero length is legal: the pipeline end-of-stream marker |
+| 19 | `kill` | index | Destroy another task (reaps immediately). The permanent slots (below the first spawnable one) refused with `TASK_ERR_PROTECTED`, the caller's own slot with `TASK_ERR_SELF` |
+| 20 | `fg` | index | Hand keyboard ownership to a task (auto-reverts to task 0 on the owner's death, or on Ctrl+C, which terminates the foreground task) |
+| 21 | `wait` | index | Block until the task dies; returns its status (0–255), `TASK_KILLED_STATUS` (0x100), or `WAIT_INTERRUPTED` (Ctrl+C, for the boot shell only: it is the one keyboard owner Ctrl+C never terminates); refused with `TASK_ERR_PROTECTED` (a permanent slot) or `TASK_ERR_SELF`. Collecting the status reaps the slot |
+| 22 | `mount` | replace flag | Rescan the USB ports and install a storage device as the kernel's block device (`0`, `MOUNT_ALREADY`, or `MOUNT_NO_DEVICE`): the device half; the FS half is the server's `FSOP_MOUNT` |
+| 23 | `msg_send` | dest, buf ptr/len | IPC: deliver a message (up to `MSG_MAX_LEN`, 768 bytes), straight into a matching blocked receiver's buffer (direct delivery), or into the task's bounded mailbox. Zero length is legal: the pipeline end-of-stream marker |
 | 24 | `msg_recv` | buf ptr/len | Block until a message arrives; returns `(sender << 32) \| len`, or `RECV_INTERRUPTED` on Ctrl+C |
 | 25 | `msg_try_recv` | buf ptr/len | Non-blocking receive; `NO_MSG` when empty |
-| 26 | `block_info` | — | Block-device capacity in sectors — **task 2 (the fsd server) only**, like all three `block_*` syscalls |
+| 26 | `block_info` | — | Block-device capacity in sectors, **task 2 (the fsd server) only**, like all three `block_*` syscalls |
 | 27 | `block_read` | LBA, buf ptr | Read one 512-byte sector (fsd only) |
 | 28 | `block_write` | LBA, buf ptr | Write one 512-byte sector (fsd only) |
-| 29 | `msg_call` | dest, req ptr/len, reply ptr | Synchronous request/response: send + block for a reply *from `dest` specifically*; sub-tick round trips via direct delivery. Reply buffer is a fixed 64 bytes |
+| 29 | `msg_call` | dest, req ptr/len, reply ptr | Synchronous request/response: send + block for a reply *from `dest` specifically*; sub-tick round trips via direct delivery. Reply buffer is a fixed `MSG_MAX_LEN` (768) bytes |
 | 30 | `spawn_stage` | offset, chunk ptr/len | Feed one chunk of a program image into the kernel's staging buffer (`SPAWN_STAGING_SIZE`) for `spawn` |
 
 **File operations** are `FSOP_*` requests to the filesystem server
@@ -548,7 +548,7 @@ Filesystem failures return a specific `FS_ERR_*` code (`NOT_FOUND`,
 `NOT_A_FILE`, `NOT_A_DIRECTORY`, `INVALID_NAME`, `ALREADY_EXISTS`,
 `NOT_EMPTY`, `IS_ROOT`, `DISK_FULL`, `IO`); `spawn` adds
 `SPAWN_ERR_BAD_ELF`/`SPAWN_ERR_TOO_LARGE`/`SPAWN_ERR_IMAGE_TOO_LARGE`/
-`SPAWN_ERR_NO_FREE_SLOT`; the task syscalls add `TASK_ERR_NO_SUCH_TASK`/`TASK_ERR_PROTECTED`;
+`SPAWN_ERR_NO_FREE_SLOT`; the task syscalls add `TASK_ERR_NO_SUCH_TASK`/`TASK_ERR_PROTECTED`/`TASK_ERR_SELF`;
 the block syscalls add `BLOCK_ERR_NO_DEVICE`/`BLOCK_ERR_IO`/
 `BLOCK_ERR_DENIED`.
 

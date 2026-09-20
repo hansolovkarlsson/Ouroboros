@@ -756,25 +756,39 @@ holds a different task's registers — it restores whatever is there and
 ```rust
 // kernel/src/tasks.rs (condensed) — the entire scheduler
 static TASKS: [TaskSlot; NUM_TASKS] = /* saved Context per task */;
-static CURRENT: AtomicUsize = AtomicUsize::new(0);
+// TaskIndex: a slot below NUM_TASKS by construction (private field; its
+// constructors live in tasks.rs's task_index module, and the code is the
+// list). CURRENT is an AtomicUsize inside that same module, and
+// set_current(TaskIndex) is its only store, so current_index() rebuilds
+// the type without a check: "in range" is a type, not a convention kept
+// at every store site.
 
-fn next_runnable(from: usize) -> usize {
-    for offset in 1..=NUM_TASKS {
-        let candidate = (from + offset) % NUM_TASKS;
-        if state(candidate) == TaskState::Runnable { return candidate; }
+fn next_runnable(from: TaskIndex) -> Option<TaskIndex> {
+    let mut candidate = from;
+    for _ in 0..NUM_TASKS {                      // the last candidate is `from` itself
+        candidate = candidate.succ();            // (i + 1) % NUM_TASKS
+        if state(candidate) == TaskState::Runnable { return Some(candidate); }
     }
-    from
+    None                                         // nothing runnable at all
+}
+
+/// Every switch path comes through here: None means the idle task blocked,
+/// which it never does, so the answer is a reported halt, not a resume of a
+/// task whose state says it must not run.
+fn next_or_halt(from: TaskIndex) -> TaskIndex {
+    next_runnable(from).unwrap_or_else(|| halt_with_report(from))
 }
 
 /// Called from rust_irq_handler on every tick.
 pub unsafe fn on_tick(frame: *mut Context) {
     let frame = &mut *frame;
-    let current = CURRENT.load(Ordering::Relaxed);
-    let next = next_runnable(current);
+    let current = current_index();
+    let next = next_or_halt(current);
     if next == current { return; }
-    *TASKS[current].0.get() = *frame;    // interrupted task's state out
-    *frame = *TASKS[next].0.get();       // next task's state in
-    CURRENT.store(next, Ordering::Relaxed);
+    *TASKS[current.index()].0.get() = *frame;    // interrupted task's state out
+    *frame = *TASKS[next.index()].0.get();       // next task's state in
+    set_current(next);
+    mmu::activate_task(next);                     // its own translation-table view
 }
 ```
 
@@ -1010,9 +1024,9 @@ the sign the foundations are right. In the order that worked:
   owner dies. Add a Ctrl+C intercept at the single point all keyboard
   input flows through, and a stuck foreground task can never brick the
   session.
-- **IPC.** Fixed-size messages (64 bytes) copied through the kernel
+- **IPC.** Bounded messages (up to 768 bytes) copied through the kernel
   into bounded per-task mailboxes; blocking receive is one more wait
-  reason. No shared memory — copying is the isolation-friendly
+  reason. No shared memory: copying is the isolation-friendly
   semantics, and at this size it's free. This is the doorway to the
   microkernel move: servers in userland.
 

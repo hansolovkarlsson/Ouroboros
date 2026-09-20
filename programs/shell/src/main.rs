@@ -1875,6 +1875,7 @@ fn print_fs_error(cmd: &str, code: u64) {
         // Names the whole protected set: a message listing a stale subset is how
         // a reader concludes a newly added server is fair game.
         syscall_abi::TASK_ERR_PROTECTED => "that task is protected (the boot shell, idle, and the fsd/cond/netd/accountd servers are permanent)",
+        syscall_abi::TASK_ERR_SELF => "that is this task itself (a task cannot kill, wait on or call itself)",
         _ => "failed",
     });
 }
@@ -3347,8 +3348,10 @@ fn parse_u64(s: &str) -> Option<u64> {
 }
 
 /// `kill <n>` - destroys another task (the `KILL` syscall). The kernel
-/// refuses tasks 0/1 and empty slots; see [`print_fs_error`]'s task
-/// arms for the messages.
+/// refuses the protected slots (every one below the first spawnable:
+/// the boot shell, idle and the servers), empty slots, and the caller's
+/// own slot, each with its own
+/// code; [`print_fs_error`]'s task arms carry the messages.
 fn cmd_kill(arg: &str) {
     let Some(n) = parse_u64(arg) else {
         print_line("kill: usage: kill <task number> (see ps)");
@@ -3364,10 +3367,9 @@ fn cmd_kill(arg: &str) {
 /// shell's own next read then waits until that task exits or is killed
 /// (ownership reverts to task 0 automatically on the owner's death).
 /// Ctrl+C is the escape hatch: the kernel intercepts it whenever a
-/// task other than the boot shell owns the keyboard, reverting
-/// ownership to task 0 (the foregrounded task keeps running in the
-/// background - nothing is delivered to it; `kill` it if it should
-/// die too).
+/// task other than the boot shell owns the keyboard, terminates that
+/// task on the next tick (exactly as `kill` would; its slot becomes
+/// spawnable again) and reverts ownership to task 0.
 fn cmd_fg(arg: &str) {
     let Some(n) = parse_u64(arg) else {
         print_line("fg: usage: fg <task number> (see ps)");

@@ -138,12 +138,15 @@ pub const TASK_STATE_ZOMBIE: u64 = 3;
 /// [`TASK_STATE`]'s "no such slot" answer.
 pub const TASK_STATE_INVALID: u64 = u64::MAX;
 
-/// `(task index)` -> `0` on success, [`TASK_ERR_PROTECTED`] (tasks 0/1
-/// are permanent), or [`TASK_ERR_NO_SUCH_TASK`]. Destroys *another*
-/// task - same teardown as a voluntary [`EXIT`] (slot freed, mapping
-/// removed, RAM reclaimed in the LIFO case), minus the context switch:
-/// the killed task isn't the one running. If the killed task held the
-/// keyboard (see [`FG`]), ownership reverts to task 0.
+/// `(task index)` -> `0` on success, [`TASK_ERR_PROTECTED`] (the
+/// permanent slots below the first spawnable one - the boot shell, idle
+/// and the servers), [`TASK_ERR_SELF`] (your own slot: a task ends
+/// itself with [`EXIT`], never `KILL`), or [`TASK_ERR_NO_SUCH_TASK`].
+/// Destroys *another* task -
+/// same teardown as a voluntary [`EXIT`] (slot freed, mapping removed,
+/// RAM reclaimed in the LIFO case), minus the context switch: the killed
+/// task isn't the one running. If the killed task held the keyboard (see
+/// [`FG`]), ownership reverts to task 0.
 pub const KILL: u64 = 19;
 
 /// `(task index)` -> `0` on success, [`TASK_ERR_PROTECTED`] (idle can't
@@ -164,8 +167,9 @@ pub const FG: u64 = 20;
 /// with this ABI's error band), [`TASK_KILLED_STATUS`] if the waited
 /// task was killed out from under the waiter, [`WAIT_INTERRUPTED`] if
 /// the user typed Ctrl+C during the wait (the target keeps running),
-/// [`TASK_ERR_PROTECTED`] (waiting on task 0/1 or on yourself is a
-/// guaranteed deadlock), or [`TASK_ERR_NO_SUCH_TASK`]. Blocks until the
+/// [`TASK_ERR_PROTECTED`] (waiting on a permanent slot is a guaranteed
+/// deadlock: it never dies), [`TASK_ERR_SELF`] (so is waiting on
+/// yourself), or [`TASK_ERR_NO_SUCH_TASK`]. Blocks until the
 /// target dies if it's still alive; returns immediately with the status
 /// if it's already a zombie. **Collecting the status is what reaps**:
 /// the zombie's slot only becomes spawnable again once waited (or the
@@ -218,8 +222,8 @@ pub const MSG_TRY_RECV: u64 = 25;
 /// `(dest task, req ptr, req len, reply ptr)` -> the packed
 /// `(sender << 32) | copied_len` of the reply (sender is always
 /// `dest`), [`RECV_INTERRUPTED`] on Ctrl+C, [`TASK_ERR_NO_SUCH_TASK`],
-/// [`TASK_ERR_PROTECTED`] (calling yourself is a guaranteed deadlock),
-/// or a `MSG_ERR_*` code if the send half fails. The synchronous
+/// [`TASK_ERR_SELF`] (calling yourself is a guaranteed deadlock), or a
+/// `MSG_ERR_*` code if the send half fails. The synchronous
 /// request/response primitive (MINIX's `sendrec` shape): sends the
 /// request to `dest`, then blocks until a reply *from `dest`
 /// specifically* arrives - a message from any other task stays queued
@@ -1390,10 +1394,11 @@ pub const SPAWN_ERR_NO_FREE_SLOT: u64 = u64::MAX - 13;
 
 /// The index is out of range or the slot holds no task.
 pub const TASK_ERR_NO_SUCH_TASK: u64 = u64::MAX - 14;
-/// Task 0 (the boot shell), task 1 (idle), task 2 (the filesystem
-/// server, [`FSD_TASK`]), and task 3 (the console server, [`CON_TASK`])
-/// are permanent - they can't be killed or waited on, and idle can't be
-/// foregrounded.
+/// The target is one of the permanent slots below the first spawnable
+/// one: the boot shell, idle, and the servers (`FSD_TASK`, `CON_TASK`,
+/// `NET_TASK`, `ACCOUNT_TASK`). They can't be killed or waited on, and
+/// every one but the boot shell can't be foregrounded. Stated as the
+/// bound, not a list: the list is what went stale here twice.
 pub const TASK_ERR_PROTECTED: u64 = u64::MAX - 15;
 
 /// A [`WAIT`] cut short by Ctrl+C - the waited task keeps running,
@@ -1543,7 +1548,11 @@ pub const FS_ERR_BUSY: u64 = u64::MAX - 40;
 /// never crosses the wire (`cpu` turns any spawn failure into a text
 /// line), so that move was the one-line kind: this constant, `sys.h`'s
 /// mirror, and `sys.h`'s `FS_ERR_CLIENT` stepping down out of its way.
-pub const FS_ERR_MIN: u64 = u64::MAX - 42;
+/// `MAX-42` is [`TASK_ERR_SELF`] (2026-09-19), the same kind: a task
+/// syscall's answer to its own caller, never a 9P reply. The pattern
+/// each time: the new code takes the floor's old value, and the floor
+/// steps down by one, so the band has no holes.
+pub const FS_ERR_MIN: u64 = u64::MAX - 43;
 
 /// The program parsed, but its loaded image (code, data and `.bss`
 /// together: memory size, not file size) plus the loader's fixed heap,
@@ -1556,6 +1565,22 @@ pub const FS_ERR_MIN: u64 = u64::MAX - 42;
 /// tell "shrink the file" from "shrink the static data". Reserved
 /// 2026-09-13, moving the floor to `MAX-42`.
 pub const SPAWN_ERR_IMAGE_TOO_LARGE: u64 = u64::MAX - 41;
+
+/// The target is the calling task itself. `KILL`ing yourself would free
+/// the region the `eret` returns into (witnessed 2026-09-19 as a fault
+/// and a second teardown, before the refusal existed); `WAIT`ing on or
+/// `MSG_CALL`ing yourself would block for an answer only you could give.
+/// Its own code, rather than [`TASK_ERR_PROTECTED`], because that code's
+/// one explanation ("the permanent slots") is the wrong one for the slot
+/// the caller just named. The shell's error printer is the consumer that
+/// tells them apart today; `libc`'s `sys.h` mirrors no task code and its
+/// programs print "failed" for anything in the band, so a C program does
+/// not benefit until that header names it (a do-when-touched item in
+/// `ROADMAP.md`). A task ends itself with [`EXIT`]; a shell's `exit`
+/// only logs out, so a child shell is ended from outside (Ctrl+C while it
+/// holds the keyboard, or `KILL` from its parent). Reserved 2026-09-19,
+/// moving the floor to `MAX-43`.
+pub const TASK_ERR_SELF: u64 = u64::MAX - 42;
 
 /// **Cross-device move**: `mv`'s source and destination resolved to different
 /// namespace targets (two different mounts, or a local path and a remote one),

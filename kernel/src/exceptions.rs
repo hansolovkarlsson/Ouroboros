@@ -444,8 +444,8 @@ extern "C" fn rust_exception_handler(esr: u64, far: u64, elr: u64, vector: u64) 
 /// Tasks 0 (the boot shell - the keyboard owner; nothing meaningful
 /// survives its death) and 1 (idle - it faulting means a kernel bug,
 /// its code is 8 bytes of `nop; b`) still halt, honestly. If the dead
-/// task is the filesystem server, the kernel restarts it from the
-/// image kept at boot - see `syscall::restart_fsd`.
+/// task is a supervised server (fsd, cond, netd, accountd), the kernel
+/// restarts it from the image kept at boot - see `supervisor::restart`.
 extern "C" fn rust_el0_fault_handler(frame: *mut Context) {
     let (esr, far, elr): (u64, u64, u64);
     // SAFETY: pure system-register reads; still valid - nothing has
@@ -462,33 +462,27 @@ extern "C" fn rust_el0_fault_handler(frame: *mut Context) {
             options(nomem, nostack),
         );
     }
-    let current = tasks::current_task();
+    let current = tasks::current_index();
+    let slot = current.index();
     console::println_force!(
-        "Ouroboros kernel: EL0 FAULT task={current} esr_el1={esr:#x} far_el1={far:#x} elr_el1={elr:#x}"
+        "Ouroboros kernel: EL0 FAULT task={slot} esr_el1={esr:#x} far_el1={far:#x} elr_el1={elr:#x}"
     );
-    if current <= 1 {
+    if tasks::is_boot_or_idle(current) {
         console::println_force!(
-            "Ouroboros kernel: task {current} is the boot shell/idle - nothing to resume, halting"
+            "Ouroboros kernel: task {slot} is the boot shell/idle - nothing to resume, halting"
         );
         halt();
     }
-    console::println_force!("Ouroboros kernel: task {current} killed after fault");
-    // Same teardown order as the KILL arm (syscall.rs): reclaim RAM
-    // (LIFO-or-leak), hand the keyboard back if the faulter held it,
-    // fail anyone blocked mid-call to it, then discard its context and
-    // switch the frame to the next runnable task.
-    let (base, size) = tasks::task_region(current);
-    tasks::free_runtime_region(base, size);
-    tasks::revert_input_owner_if(current);
-    tasks::fail_calls_to(current);
+    console::println_force!("Ouroboros kernel: task {slot} killed after fault");
+    // Both halves of the teardown (RAM, keyboard, pending calls; then
+    // state and tables), and the switch to the next runnable task.
     // SAFETY: `frame` is the live trap frame of this very fault (the
     // "4:" trampoline's contract).
     unsafe { tasks::kill_current_and_switch(frame) };
-    // Any supervised server (the filesystem or console server) is
-    // restarted from its kept image - the generalized version of the
-    // fsd-only restart, now covering cond too. See supervisor.rs.
-    if crate::supervisor::is_supervised(current) {
-        crate::supervisor::restart(current);
+    // Any supervised server is restarted from its kept image; which
+    // slots count is supervisor.rs's to say, not this comment's.
+    if crate::supervisor::is_supervised(slot) {
+        crate::supervisor::restart(slot);
     }
     // One rebuild covers both the dropped region and (if the server
     // was restarted) its fresh one.
