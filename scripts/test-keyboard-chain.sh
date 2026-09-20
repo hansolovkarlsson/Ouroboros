@@ -18,47 +18,71 @@ cd "$(dirname "$0")/.."
 IMG=build/esp.img
 [ -f "$IMG" ] || { echo "test-keyboard-chain: $IMG missing - run make image"; exit 2; }
 CTRLC=$(printf '\003')
-DRIVE="python3 scripts/drive-qemu.py $IMG login:@@root assword@@root"
 fail=0
+
+# One boot. The firmware hangs before its own "BdsDxe: starting" line about
+# one boot in six on this host (measured 2026-09-20, pauses between boots made
+# no difference); nothing of ours has run by then, so such a boot is retried,
+# up to three times, and says so. A boot that reaches that line is never
+# retried: from there on a hang is the kernel's.
+boot() {
+    tries=0
+    while :; do
+        tries=$((tries + 1))
+        out=$(python3 scripts/drive-qemu.py "$IMG" 'login:@@root' 'assword@@root' "$@" 2>&1)
+        case $out in *"BdsDxe: starting"*) break ;; esac
+        [ $tries -lt 3 ] || break
+        echo "     (firmware never reached its boot entry, retrying)" >&2
+    done
+}
 
 # The transcript is CRLF; strip the CR before grepping. Every expectation is
 # checked on the lines AFTER the marker command, so a prompt or an answer
 # from earlier in the run cannot satisfy it.
-after() { tr -d '\r' | sed -n "/^# $1\$/,\$p"; }
+after() { sed -n "/^# $1\$/,\$p"; }
+# Every transcript is kept (build/chain-N.txt), and a failure prints where
+# the driver gave up and the transcript's tail, so a firmware hang or a
+# changed prompt is distinguishable from the kernel misrouting the keyboard.
+n=0
 grade() { # name, transcript, marker, expected-regex...
     name=$1; out=$2; marker=$3; shift 3
+    n=$((n + 1)); log=build/chain-$n.txt
+    printf '%s\n' "$out" | tr -d '\r' > "$log"
     for want in "$@"; do
-        if ! printf '%s\n' "$out" | after "$marker" | grep -qE -- "$want"; then
-            echo "FAIL $name: after '$marker' expected /$want/"; fail=1; return
+        if ! after "$marker" < "$log" | grep -qE -- "$want"; then
+            echo "FAIL $name: after '$marker' expected /$want/ ($log)"
+            grep -n 'TIMEOUT' "$log" | head -3
+            tail -n 12 "$log" | sed 's/^/    | /'
+            fail=1; return
         fi
     done
-    echo "ok   $name"
+    echo "ok   $name ($log)"
 }
 
 # 1. The nested shell keeps the keyboard across the commands it runs.
-out=$($DRIVE '# @@exec /EFI/ORBS/SH.BIN' 'login:@@fg 6' '@@root' 'assword@@root' \
-  '# @@cd /EFI' '# @@echo hi' '# @@pwd' '# @@ps' '# @@' 2>&1)
+boot '# @@exec /EFI/ORBS/SH.BIN' 'login:@@fg 6' '@@root' 'assword@@root' \
+  '# @@cd /EFI' '# @@echo hi' '# @@pwd' '# @@ps' '# @@'
 grade "nested shell keeps the keyboard" "$out" "pwd" '^/EFI$' '^task 6: runnable' '^task 0: blocked'
 
 # 2. Three deep, the middle link killed from below: the keyboard skips it.
-out=$($DRIVE '# @@/EFI/ORBS/SH.BIN' 'login:@@root' 'assword@@root' '# @@cd /EFI' \
+boot '# @@/EFI/ORBS/SH.BIN' 'login:@@root' 'assword@@root' '# @@cd /EFI' \
   '# @@/EFI/ORBS/SH.BIN' 'login:@@root' 'assword@@root' \
   '# @@exec /EFI/ORBS/SH.BIN' 'login:@@fg 8' '@@root' 'assword@@root' \
-  '# @@kill 7' "# @@$CTRLC" '# @@pwd' '# @@ps' '# @@' 2>&1)
+  '# @@kill 7' "# @@$CTRLC" '# @@pwd' '# @@ps' '# @@'
 grade "dead link spliced out" "$out" "kill 7" '^/EFI$' '^task 6: runnable' '^task 0: blocked'
 
 # 3. fg back to a task in the chain pops it: the boot shell gets it back last.
-out=$($DRIVE '# @@exec /EFI/ORBS/SH.BIN' 'login:@@fg 6' '@@root' 'assword@@root' \
+boot '# @@exec /EFI/ORBS/SH.BIN' 'login:@@fg 6' '@@root' 'assword@@root' \
   '# @@cd /EFI' '# @@exec /EFI/ORBS/SH.BIN' 'login:@@fg 7' '@@root' 'assword@@root' \
-  '# @@fg 6' '# @@kill 7' "# @@$CTRLC" '# @@pwd' '# @@' 2>&1)
+  '# @@fg 6' '# @@kill 7' "# @@$CTRLC" '# @@pwd' '# @@'
 grade "fg into the chain pops" "$out" "kill 7" '^/$'
 
 # 4. Four deep, fg back one level then a kill and a Ctrl+C: the live shell
 #    two levels up must answer, not the boot shell blocked in its wait.
-out=$($DRIVE '# @@/EFI/ORBS/SH.BIN' 'login:@@root' 'assword@@root' '# @@cd /EFI' \
+boot '# @@/EFI/ORBS/SH.BIN' 'login:@@root' 'assword@@root' '# @@cd /EFI' \
   '# @@/EFI/ORBS/SH.BIN' 'login:@@root' 'assword@@root' \
   '# @@exec /EFI/ORBS/SH.BIN' 'login:@@fg 8' '@@root' 'assword@@root' \
-  '# @@fg 7' '# @@kill 8' "# @@$CTRLC" '# @@pwd' '# @@ps' '# @@' 2>&1)
+  '# @@fg 7' '# @@kill 8' "# @@$CTRLC" '# @@pwd' '# @@ps' '# @@'
 grade "pop then kill, the live shell answers" "$out" "kill 8" '^/EFI$' '^task 6: runnable' '^task 0: blocked'
 
 exit $fail
