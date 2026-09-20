@@ -973,7 +973,7 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
         }
         syscall_abi::EXIT => {
             let current = tasks::current_index();
-            if current.index() < tasks::FIRST_SPAWNABLE {
+            if !current.is_spawnable() {
                 // No slot below FIRST_SPAWNABLE may exit. Stated as the
                 // bound rather than as a list, because the list is what
                 // goes stale: every one of these comments enumerated
@@ -1076,7 +1076,7 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
                 // as the bound and not as a list.
                 return syscall_abi::TASK_ERR_PROTECTED;
             }
-            if !tasks::task_exists(target.index()) {
+            if !tasks::is_occupied(target) {
                 return syscall_abi::TASK_ERR_NO_SUCH_TASK;
             }
             if target == tasks::current_index() {
@@ -1431,7 +1431,7 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
                 // Index 0 is allowed - an explicit "give it back".
                 return syscall_abi::TASK_ERR_PROTECTED;
             }
-            if !tasks::task_exists(target.index()) {
+            if !tasks::is_occupied(target) {
                 return syscall_abi::TASK_ERR_NO_SUCH_TASK;
             }
             tasks::set_input_owner(target.index());
@@ -1439,20 +1439,16 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
         }
         syscall_abi::GRANT => {
             // arg0 = grantee, arg1 = buf ptr, arg2 = buf len, arg3 = dir.
-            let grantee = arg0 as usize;
             let dir = arg3;
             let valid_dir =
                 dir != 0 && dir & !(syscall_abi::GRANT_READ | syscall_abi::GRANT_WRITE) == 0;
-            if !valid_dir
-                || grantee >= tasks::NUM_TASKS
-                || !tasks::task_exists(grantee)
-                || arg2 == 0
-                || arg2 > syscall_abi::SAFECOPY_MAX
-                || !in_caller_region(arg1, arg2)
-            {
+            let grantee = tasks::live_index(arg0 as usize);
+            let Some(grantee) = grantee.filter(|_| {
+                valid_dir && arg2 != 0 && arg2 <= syscall_abi::SAFECOPY_MAX && in_caller_region(arg1, arg2)
+            }) else {
                 return syscall_abi::GRANT_ERR;
-            }
-            tasks::set_grant(tasks::current_task(), grantee, arg1, arg2, dir);
+            };
+            tasks::set_grant(tasks::current_task(), grantee.index(), arg1, arg2, dir);
             0
         }
         syscall_abi::SAFECOPY => {
@@ -1513,18 +1509,20 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
             // slot not live (out of
             // range counts as not live, for both arguments alike - `task_exists`
             // bounds-checks); then the subtree rule.
-            let grantee = arg0 as usize;
-            let target = arg1 as usize;
-            if grantee < tasks::FIRST_SPAWNABLE {
+            // A protected grantee is DENIED before any liveness question,
+            // so the answer does not depend on whether the slot is
+            // occupied (range: a slot past the end is not protected, and
+            // falls to NO_SUCH_TASK below like any empty one).
+            if tasks::TaskIndex::new(arg0 as usize).is_some_and(|g| !g.is_spawnable()) {
                 return syscall_abi::MSG_ERR_DENIED;
             }
-            if !tasks::task_exists(grantee) || !tasks::task_exists(target) {
+            let (Some(grantee), Some(target)) = (tasks::live_index(arg0 as usize), tasks::live_index(arg1 as usize)) else {
                 return syscall_abi::TASK_ERR_NO_SUCH_TASK;
-            }
-            if !tasks::may_delegate(tasks::current_task(), grantee, target) {
+            };
+            if !tasks::may_delegate(tasks::current_task(), grantee.index(), target.index()) {
                 return syscall_abi::MSG_ERR_DENIED;
             }
-            tasks::set_delegate(grantee, target);
+            tasks::set_delegate(grantee.index(), target.index());
             0
         }
         _ => {

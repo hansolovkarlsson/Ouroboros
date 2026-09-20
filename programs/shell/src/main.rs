@@ -3367,10 +3367,9 @@ fn cmd_kill(arg: &str) {
 /// shell's own next read then waits until that task exits or is killed
 /// (ownership reverts to task 0 automatically on the owner's death).
 /// Ctrl+C is the escape hatch: the kernel intercepts it whenever a
-/// task other than the boot shell owns the keyboard, reverting
-/// ownership to task 0 (the foregrounded task keeps running in the
-/// background - nothing is delivered to it; `kill` it if it should
-/// die too).
+/// task other than the boot shell owns the keyboard, terminates that
+/// task on the next tick (exactly as `kill` would; its slot becomes
+/// spawnable again) and reverts ownership to task 0.
 fn cmd_fg(arg: &str) {
     let Some(n) = parse_u64(arg) else {
         print_line("fg: usage: fg <task number> (see ps)");

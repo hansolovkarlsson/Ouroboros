@@ -111,6 +111,10 @@ mod task_index {
     pub(crate) struct TaskIndex(usize);
 
     const _: () = assert!(NUM_TASKS > 1, "TaskIndex::IDLE is slot 1, which must exist");
+    const _: () = assert!(
+        FIRST_SPAWNABLE <= NUM_TASKS,
+        "is_spawnable's bound must lie within the slot count, or no slot is spawnable and every task syscall answers protected"
+    );
 
     impl TaskIndex {
         /// Slot 0, the boot program.
@@ -2048,20 +2052,26 @@ pub(crate) fn install_task(slot: usize, context: Context, region: (u64, u64)) {
 /// and a `WAIT`'s target may be a Zombie, which is not live by
 /// [`task_exists`]'s definition but is exactly what a `WAIT` collects.
 pub(crate) fn live_index(i: usize) -> Option<TaskIndex> {
-    TaskIndex::new(i).filter(|t| task_exists(t.index()))
+    TaskIndex::new(i).filter(|t| is_occupied(*t))
+}
+
+/// Whether `t` currently holds a *live* task (`Runnable` or `Blocked`):
+/// the typed form of [`task_exists`], asking the state table directly
+/// so the range the type already proves is not re-tested.
+pub(crate) fn is_occupied(t: TaskIndex) -> bool {
+    matches!(
+        unsafe { *STATES[t.index()].0.get() },
+        TaskState::Runnable | TaskState::Blocked(_)
+    )
 }
 
 /// Whether slot `i` currently holds a *live* task (`Runnable` or
-/// `Blocked`) - the existence check behind [`live_index`], and `WAIT`'s
-/// own after it has tried to reap. Zombies are deliberately not "live":
+/// `Blocked`), for callers that still hold a plain index; the typed
+/// arms ask [`is_occupied`]. Zombies are deliberately not "live":
 /// `fg`/`kill` on one would target a task that no longer runs (`wait` is
 /// how a zombie is dealt with - `ps` says so).
 pub(crate) fn task_exists(i: usize) -> bool {
-    i < NUM_TASKS
-        && matches!(
-            unsafe { *STATES[i].0.get() },
-            TaskState::Runnable | TaskState::Blocked(_)
-        )
+    TaskIndex::new(i).is_some_and(is_occupied)
 }
 
 pub(crate) enum SpawnError {
