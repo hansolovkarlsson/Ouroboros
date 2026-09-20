@@ -407,3 +407,48 @@ The common line, same as the one this retrospective opened with: each of these
 returned a well-formed answer to a question it had not been asked, and each was
 caught by reading a second instrument that could disagree with the first.
 
+## The check that reported four failures (2026-09-20)
+
+The day's new instrument was `scripts/test-keyboard-chain.sh`: four driven
+boots through the nested-shell keyboard recipes, each graded on the lines its
+negative control lacked. Three things it did wrong before it did anything
+right, all found the same day.
+
+**Four failures, two of them false.** Its first run against the push-only
+mutant reported every recipe failing. Two of the four should have passed on
+that mutant, and by hand they did. The script kept no transcript, so it could
+say only "expected /EFI after pwd" and not why. Once it kept them, the answer
+was that three of the four boots had hung in the firmware before its own boot
+entry, before any kernel code ran, and only the fourth had run and failed as
+the mutant should. A check that cannot show its transcript cannot be
+distinguished from the failure it is looking for. It keeps them now, prints
+where the driver gave up and the tail, and retries a boot whose transcript
+never shows `BdsDxe: starting`, saying so; a boot past that line is never
+retried, because from there a hang is the kernel's.
+
+**A hang I read as evidence three times.** Before the script existed the same
+firmware hang had cost an hour: three boots in a row ended at the firmware's
+clear-screen with no kernel output, each right after a rebuild, and I stashed
+and rebuilt the committed kernel to find out whether my change had broken
+boot. It had not; the committed kernel hung the same way once. Measured
+directly afterwards: one hang in six bare boots, pauses between boots making
+no difference, the same image booting on every retry. The guide now carries
+the measurement, and the rule that a boot without the firmware's boot-entry
+line is not evidence about the kernel.
+
+**A target that would grade a stale image.** `make test-keyboard-chain` did
+not depend on `image`, and the script tested only that the image file
+existed; an edit to `revert_input_owner_if` followed by the target alone
+would have booted the previous kernel four times and printed four `ok`
+lines. Found by review before it happened. The target depends on `image`
+now, and the script refuses an image older than the kernel of its profile
+or the staged copy in the ESP tree.
+
+And one more, smaller, from the same day: the `SyncCell` ledger entry quoted
+a grep and a number, and the grep did not produce the number. The count is
+stated once now, with the anchored command that reproduces it.
+
+The line is the one this retrospective always ends on. An instrument that
+cannot fail for the reason it was built for, or cannot show why it failed, is
+not measuring; and the first thing to mutate is the instrument.
+

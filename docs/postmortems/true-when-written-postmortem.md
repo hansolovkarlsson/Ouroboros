@@ -641,6 +641,54 @@ rule for that check is to update the page to the source and then stamp, in
 that order; the day found the one way to satisfy it while making it lie, which
 is to update the page past the source.
 
+## The claim I wrote, and the round that read it (2026-09-20)
+
+Yesterday's section was about each round finding what the previous round
+wrote. Today the same thing happened to a claim I wrote as a *conclusion*
+rather than as a description, and it is worth its own entry because it is
+the strongest kind: a sentence that says what cannot happen.
+
+**"Nothing strands."** The third review of #140 found that `fg` back to a
+task already in the keyboard chain recorded a cycle, and that a kill inside
+the cycle made a task its own previous owner. I normalised a self-naming
+entry to "none", filed stack semantics as a design change, and wrote in the
+ledger that with the normalisation and the splice "every revert still lands
+on a live task or task 0, so nothing strands". The review of #142, two pull
+requests later, produced the four-deep sequence in which the keyboard lands
+on task 0 while task 0 is blocked in `WAIT` on a shell that sits at a live
+prompt nothing can reach. The sentence was true of every case I had traced
+and false of the first one I had not. The fix it was arguing against went in
+the same day as #143, and the ledger entry now records the sentence and the
+case that refuted it.
+
+**"EL1 never runs with IRQs unmasked."** The soundness argument every
+`SyncCell` rests on, written in #142, stated as a property of the kernel. It
+was a property of the kernel except for the few instructions in `main.rs`
+between `msr daifclr, #2` and the first `eret`. The argument was true of
+every context I had listed and the exception was in the one file I had not
+read while writing it. Same shape as the `fs_mv` precondition in the original
+entry: a claim that guards behaviour, whose falsifying edit lives elsewhere.
+The exception was removed and vector slot 5 now checks the claim, which is
+the conversion this retrospective keeps recommending.
+
+**"Named below."** The module doc said the twenty-three remaining wrappers
+were named below; the text named five. False on the day it was written,
+caught by the third review, and replaced by the grep that lists them.
+
+**A rig caveat that outlived its bug.** The subtree-delegation recipe in the
+testing guide said the keyboard goes back to the boot shell after every
+nested command and typed `fg 6` before each; the same file, fifty lines
+above, described the fix. Run without the `fg` lines it passed, and it is
+written as run now.
+
+The common shape, sharper than yesterday's: a claim written as a conclusion
+("nothing strands", "never unmasked", "named below") is a claim about every
+case, and I had checked the cases I could think of. The next reader thought
+of one more. The remedy was the same each time: state the mechanism, measure
+the number, or turn the claim into a check. Two of the four became checks
+(`make test-keyboard-chain`, the slot 5 halt); one became a measurement; one
+became a recipe run as written.
+
 ## What actually worked
 
 Three things, none of them "be more careful".

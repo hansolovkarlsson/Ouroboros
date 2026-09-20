@@ -1935,7 +1935,8 @@ would otherwise silently shrink into looking like nothing was ever found.
     guard-then-index pairs (three names for one predicate; the next step
     of this scope, with a `switch_to` helper for the five-site switch tail
     and one predicate-driven scan for the two runnable loops). Converting
-    those is a separate change: **done 2026-09-20 in #141**, no behaviour
+    those is a separate change: **done 2026-09-20 in #141, merged as #144**
+    (its base was deleted under it and GitHub closed it), no behaviour
     change (`switch_to`, `scan_from` over `is_runnable`, `is_live` and
     `task_exists` gone with the identity arms on `live_index`, and
     `live_occupant(id)` for the two identity-to-live-slot lookups).
