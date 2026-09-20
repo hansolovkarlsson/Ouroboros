@@ -534,11 +534,16 @@ static INPUT_OWNER: AtomicUsize = AtomicUsize::new(0);
 
 /// A foreground task the Ctrl+C escape hatch (`interrupt_key_check`) has marked
 /// for death, killed by [`on_tick`] at a safe point (the only place this kernel
-/// tears a task down and switches away). `usize::MAX` = nothing pending. The
-/// kill is deferred to `on_tick` rather than done inline in the keyboard poll
-/// because the poll runs in contexts (a wake-check pass, a syscall) where
-/// switching away from a task isn't safe - `on_tick` already owns that.
-static PENDING_KILL: AtomicUsize = AtomicUsize::new(usize::MAX);
+/// tears a task down and switches away). Holds the task's packed identity
+/// (`generation << TASK_ID_SLOT_BITS | slot`, see [`task_id_of`]), not its
+/// slot: the slot can be reaped and re-spawned between the mark and the tick,
+/// and a bare slot number would then name the new occupant, who was never
+/// interrupted. `0` = nothing pending (generations start at 1, so 0 never
+/// names a task). The kill is deferred to `on_tick` rather than done inline
+/// in the keyboard poll because the poll runs in contexts (a wake-check pass,
+/// a syscall) where switching away from a task isn't safe - `on_tick` already
+/// owns that.
+static PENDING_KILL: AtomicU64 = AtomicU64::new(0);
 
 /// `FG`'s effect: hand the keyboard to task `owner`. Validation (index
 /// in range, slot occupied, not idle) is the syscall layer's job -
@@ -576,7 +581,17 @@ pub(crate) fn interrupt_key_check(byte: u8) -> bool {
     if byte != ETX || owner == 0 {
         return false;
     }
-    PENDING_KILL.store(owner, Ordering::Relaxed);
+    // The occupant, not the slot: see PENDING_KILL. An owner that is not a
+    // task (an Unused slot) cannot happen, since ownership reverts on
+    // death; if a future death path forgets that, say so rather than
+    // silently eat every Ctrl+C, and let the byte through.
+    let Some(id) = task_id_of(owner) else {
+        crate::console::println_force!(
+            "Ouroboros kernel: keyboard owner slot {owner} holds no task - a kernel bug (its two writers are set_input_owner and revert_input_owner_if)"
+        );
+        return false;
+    };
+    PENDING_KILL.store(id, Ordering::Relaxed);
     true
 }
 
@@ -1343,9 +1358,21 @@ fn clear_parent(slot: usize) {
 /// any slot with no live occupant on either side, and false once the parent's
 /// slot has been reused, since the recorded identity no longer matches.
 pub(crate) fn is_child_of(child: usize, parent: usize) -> bool {
-    // No live identity is ever 0 (generations start at 1), so the 0 that
-    // PARENTS holds for "no parent" matches nothing by construction.
-    child < NUM_TASKS && task_id_of(parent).is_some_and(|p| PARENTS[child].load(Ordering::Relaxed) == p)
+    // The 0 that PARENTS holds for "no parent" matches nothing: see
+    // occupant_is for why.
+    child < NUM_TASKS && occupant_is(parent, PARENTS[child].load(Ordering::Relaxed))
+}
+
+/// Whether `id` (a packed identity, see [`task_id_of`]) still names the
+/// occupant of `slot`: the one spelling of that question, for every
+/// place that remembered an occupant and now needs to know whether it is
+/// still there (the parent link, the Ctrl+C mark). `0` names no task:
+/// generations start at 1, so [`task_id_of`] never answers `Some(0)` and a
+/// "none" sentinel compares false here by construction. This is the one
+/// place that argument is made; callers that store `0` for "none" rely on
+/// it and say so by pointing here.
+pub(crate) fn occupant_is(slot: usize, id: u64) -> bool {
+    task_id_of(slot) == Some(id)
 }
 
 /// Whether `src` holds a send right to `dest`, statically or by delegation -
@@ -1610,10 +1637,14 @@ impl WaitReason {
                 // nothing would otherwise be running while the sole
                 // typist is blocked here). Scoped to exactly the
                 // dangerous case - the waiter that owns the keyboard:
-                // drain one byte if available; Ctrl+C interrupts the
-                // wait (the target keeps running); any other typed
-                // byte is deliberately discarded, same spirit as
-                // typing at a busy foreground job in `sh`.
+                // drain one byte if available. Ctrl+C reaches this
+                // branch only when the waiter is task 0 (the one owner
+                // interrupt_key_check never marks); any other owner is
+                // marked for death by the poll itself and never sees
+                // the byte. For task 0 it interrupts the wait (the
+                // target keeps running); any other typed byte is
+                // deliberately discarded, same spirit as typing at a
+                // busy foreground job in `sh`.
                 if waiter == INPUT_OWNER.load(Ordering::Relaxed) {
                     if let Some(byte) = crate::syscall::poll_keyboard_byte() {
                         if byte == 0x03 {
@@ -1633,7 +1664,8 @@ impl WaitReason {
                 }
             }
             WaitReason::Message { buf, len, from } => {
-                // Same Ctrl+C escape hatch as TaskExit's - a `recv`
+                // Same Ctrl+C escape hatch as TaskExit's, with the same
+                // reach (task 0 only; any other owner is marked instead) - a `recv`
                 // (or a call to a wedged server) with no reply coming
                 // must not brick the session.
                 if waiter == INPUT_OWNER.load(Ordering::Relaxed) {
@@ -2426,8 +2458,9 @@ pub unsafe fn start() -> ! {
 /// stays queued in the console/xHCI driver's own hardware buffer -
 /// `poll_keyboard_byte` never touches it - until the owner task's own
 /// wait is what asks. A task other than the owner that blocks on
-/// `Keyboard` just stays blocked (this kernel has no `fg`/`bg` or
-/// controlling-task handoff to ever change that) - honest, not silently
+/// `Keyboard` just stays blocked until ownership reaches it (an `FG`
+/// naming it, or the revert to task 0 on the owner's death; see
+/// `INPUT_OWNER`) - honest, not silently
 /// wrong, and it's what makes `exec`ing a second program that reads
 /// input behave like a real background task rather than a second
 /// terminal racing the first for every keystroke.
@@ -2471,22 +2504,25 @@ pub unsafe fn on_tick(frame: *mut Context) {
     // like the supervised-server restart below but without a restart. Its death
     // reverts the keyboard to the shell, whose `WAIT` wakes with
     // `TASK_KILLED_STATUS`.
-    let victim = PENDING_KILL.swap(usize::MAX, Ordering::Relaxed);
+    let pending = PENDING_KILL.swap(0, Ordering::Relaxed);
     // Only a spawnable slot (>= FIRST_SPAWNABLE) may be terminated - the same
     // protected set KILL/EXIT/FG enforce (never the shell, idle, or a
     // supervised server). FG refuses to foreground any slot from 1 up to
     // FIRST_SPAWNABLE, so a real keyboard owner other than the boot shell
     // is always in range; this guard is the belt-and-braces backstop.
-    // Range, the protected bound, AND liveness: a foreground program that
-    // exited between the mark and this tick is a Zombie whose status the
-    // parent may already have collected, and tearing it down again would
-    // turn that status into "killed" and clear tables it no longer owns.
-    // Narrowed, not closed: the mark is a bare slot, so a slot reaped and
-    // re-spawned inside the same window passes this check and the new
-    // occupant is killed. Closing it means marking (slot, generation), the
-    // pair SENDER_TASK already captures - ROADMAP.md's ledger has it.
-    if let Some(victim_slot) = live_index(victim).filter(|v| v.is_spawnable()) {
-        crate::console::println!("Ouroboros kernel: Ctrl+C - foreground task {victim} terminated");
+    // Range, the protected bound, liveness, AND the same occupant: a
+    // foreground program that exited between the mark and this tick is a
+    // Zombie whose status the parent may already have collected (not live,
+    // so skipped), and a slot reaped and re-spawned in that window holds a
+    // different generation than the mark (not the same occupant, so
+    // skipped). Tearing either down would kill a task that was never
+    // interrupted.
+    // 0 ("nothing pending") names slot 0 and no generation, so it fails
+    // is_spawnable and occupant_is alike; no separate guard is needed.
+    let victim = live_index(syscall_abi::task_id_slot(pending) as usize)
+        .filter(|v| v.is_spawnable() && occupant_is(v.index(), pending));
+    if let Some(victim_slot) = victim {
+        crate::console::println!("Ouroboros kernel: Ctrl+C - foreground task {} terminated", victim_slot.index());
         if victim_slot == current {
             unsafe { kill_current_and_switch(frame) };
             unsafe { crate::mmu::rebuild_with_el0_regions(el0_regions()) };
