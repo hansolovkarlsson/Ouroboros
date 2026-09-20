@@ -1988,25 +1988,25 @@ would otherwise silently shrink into looking like nothing was ever found.
     since `drive-qemu.py` types characters and a Ctrl+C that lands in the
     window between an exit and the next tick is not something the rig can
     place. Read, not run.
-  - ~~**The Ctrl+C mark is a bare slot, so a slot re-spawned inside the
-    window is the one killed.**~~ **Fixed 2026-09-19.** `PENDING_KILL` holds
-    the owner's packed identity (generation and slot, the same value
+  - - ~~**The Ctrl+C mark is a bare slot, so a slot re-spawned inside the
+    window is the one killed.**~~ **Fixed 2026-09-19** (#138). `PENDING_KILL`
+    holds the owner's packed identity (generation and slot, the same value
     `SENDER_TASK` captures) and the tick kills only if the slot's current
     occupant is that identity. Shown to fail in situ by mutation: with the
     mark storing a stale generation, Ctrl+C at a foreground `readkey` did
-    nothing and the program ran on to a normal exit; restored, the same
-    Ctrl+C terminated it. The re-spawn window itself is not driven (the rig
-    cannot place a keystroke between an exit and the next tick); the
-    identity check is what the mutation exercises. The original finding: `interrupt_key_check` stores the keyboard
-    owner's slot in `PENDING_KILL`; if that task exits, its parent reaps it
-    and spawns again into the same slot before the next tick, the tick's
-    guard (range, bound, and since #137 liveness) passes and the new
-    occupant is terminated as "the foreground task". Narrow: it needs a
-    parent that is runnable rather than blocked in `WAIT` and a spawn
-    inside one tick. Marking `(slot, generation)`, the pair `SENDER_TASK`
-    already captures, and comparing the generation at the tick closes it.
-    Found by the eleventh review of #137 (2026-09-19); the liveness fix's
-    comment had claimed more than it did.
+    nothing and the program ran on to a normal exit; restored, the same Ctrl+C
+    terminated it. The re-spawn window itself is not driven (the rig cannot
+    place a keystroke between an exit and the next tick); the identity check
+    is what the mutation exercises. The original finding:
+    `interrupt_key_check` stores the keyboard owner's slot in `PENDING_KILL`;
+    if that task exits, its parent reaps it and spawns again into the same
+    slot before the next tick, the tick's guard (range, bound, and since #137
+    liveness) passes and the new occupant is terminated as "the foreground
+    task". Narrow: it needs a parent that is runnable rather than blocked in
+    `WAIT` and a spawn inside one tick. Marking `(slot, generation)`, the pair
+    `SENDER_TASK` already captures, and comparing the generation at the tick
+    closes it. Found by the eleventh review of #137 (2026-09-19); the liveness
+    fix's comment had claimed more than it did.
   - **A child shell loses the keyboard after its first command.** Spawn a
     shell from a shell (`/EFI/ORBS/SH.BIN`, slot 6), run any command in it
     (`echo hi`, slot 7): when slot 7 exits, keyboard ownership reverts to

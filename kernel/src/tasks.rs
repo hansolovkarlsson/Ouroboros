@@ -2436,8 +2436,9 @@ pub unsafe fn start() -> ! {
 /// stays queued in the console/xHCI driver's own hardware buffer -
 /// `poll_keyboard_byte` never touches it - until the owner task's own
 /// wait is what asks. A task other than the owner that blocks on
-/// `Keyboard` just stays blocked (this kernel has no `fg`/`bg` or
-/// controlling-task handoff to ever change that) - honest, not silently
+/// `Keyboard` just stays blocked until ownership reaches it (an `FG`
+/// naming it, or the revert to task 0 on the owner's death; see
+/// `INPUT_OWNER`) - honest, not silently
 /// wrong, and it's what makes `exec`ing a second program that reads
 /// input behave like a real background task rather than a second
 /// terminal racing the first for every keystroke.
@@ -2494,8 +2495,9 @@ pub unsafe fn on_tick(frame: *mut Context) {
     // different generation than the mark (not the same occupant, so
     // skipped). Tearing either down would kill a task that was never
     // interrupted.
-    let victim = pending
-        .ne(&0)
+    // 0 is "nothing pending" and can match no occupant (task_id_of never
+    // answers 0), so the guard below is for the reader, not the machine.
+    let victim = (pending != 0)
         .then(|| syscall_abi::task_id_slot(pending) as usize)
         .and_then(live_index)
         .filter(|v| v.is_spawnable() && task_id_of(v.index()) == Some(pending));
