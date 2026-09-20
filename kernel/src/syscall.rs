@@ -1125,7 +1125,7 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
             if let Some(status) = tasks::try_reap(i) {
                 return status;
             }
-            if !tasks::task_exists(i) {
+            if !tasks::is_occupied(target) {
                 return syscall_abi::TASK_ERR_NO_SUCH_TASK;
             }
             // Still alive: block until it dies (or Ctrl+C - see

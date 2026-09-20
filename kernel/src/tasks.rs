@@ -1763,8 +1763,11 @@ fn next_runnable_skip_idle(from: TaskIndex) -> TaskIndex {
             return candidate;
         }
     }
-    // Nothing else runnable: the plain scan returns `from` itself (a
-    // yielding task is Runnable), so this is "stay put".
+    // The loop above returns `from` itself as its last candidate, so a
+    // real yielder (Runnable, not idle) never reaches this line: it stays
+    // put up there. This is reached only if `from` IS the idle task or is
+    // not Runnable, and then the plain scan (with its halt on nothing) is
+    // the right answer.
     next_or_halt(from)
 }
 

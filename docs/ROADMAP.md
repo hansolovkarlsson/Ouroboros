@@ -1916,7 +1916,8 @@ would otherwise silently shrink into looking like nothing was ever found.
     its field private to a nested module so that even `tasks.rs` cannot
     spell `TaskIndex(x)`: the constructors are `new` (checked, `None` past
     the end; used wherever a caller-supplied slot becomes one, which is
-    a grep and not a list here), the constants `FIRST` and `IDLE`, `all`, and `succ` (the
+    a grep and not a list here), the constants `FIRST` and `IDLE`, `all`, `current_index` (which
+    rebuilds the one `set_current` stored), and `succ` (the
     round-robin step, from a slot that already exists). There is no total
     `usize -> TaskIndex` constructor: the first round had a `wrapping`
     modulo, and its review found it used as a clamp twice (the
@@ -1976,7 +1977,7 @@ would otherwise silently shrink into looking like nothing was ever found.
     foreground program that exited between the mark and the tick was a
     Zombie whose status the parent's `WAIT` may already have collected;
     the second teardown turned that into `TASK_KILLED_STATUS` and cleared
-    tables the slot no longer owned. The guard now requires `task_exists`
+    tables the slot no longer owned. The guard now goes through `live_index`
     too. Found by the ninth review of #137, while the guard was being
     rewritten to go through `TaskIndex::new`; not driven on the guest,
     since `drive-qemu.py` types characters and a Ctrl+C that lands in the
@@ -1996,9 +1997,10 @@ would otherwise silently shrink into looking like nothing was ever found.
   - **A child shell loses the keyboard after its first command.** Spawn a
     shell from a shell (`/EFI/ORBS/SH.BIN`, slot 6), run any command in it
     (`echo hi`, slot 7): when slot 7 exits, keyboard ownership reverts to
-    task 0, the boot shell, which is blocked in `WAIT` on slot 6, so the
-    child shell's next prompt never receives input and the session is
-    stuck until Ctrl+C. The revert-on-death rule in `revert_input_owner_if`
+    task 0, the boot shell (blocked in `WAIT` on slot 6 when the child was
+    run as a foreground command, or back at its prompt after `exec` then
+    `fg`), so the child shell's next prompt never receives input and it
+    stays alive until killed from the boot shell. The revert-on-death rule in `revert_input_owner_if`
     is "to task 0", not "to the spawner". Seen 2026-09-19 while driving the
     self-`KILL` witness for #137 (not caused by it: the same rig without a
     grandchild works). Wants the revert to go to the dead task's spawner
