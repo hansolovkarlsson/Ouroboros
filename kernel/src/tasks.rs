@@ -573,7 +573,10 @@ static PENDING_KILL: AtomicU64 = AtomicU64::new(0);
 /// range, slot occupied, not idle) is the syscall layer's job.
 pub(crate) fn set_input_owner(owner: usize) {
     let previous = INPUT_OWNER.swap(owner, Ordering::Relaxed);
-    if previous != owner {
+    // Task 0 never dies, so its entry is never read: `fg 0` (the explicit
+    // "give it back") records nothing, and the table holds only entries
+    // the revert can reach.
+    if previous != owner && owner != 0 {
         PREVIOUS_OWNERS[owner].store(task_id_of(previous).unwrap_or(0), Ordering::Relaxed);
     }
 }
@@ -590,24 +593,19 @@ pub(crate) fn input_owner() -> usize {
 /// that task is still the same occupant and live; otherwise to task 0.
 /// Called from [`end_task`], so every task-death path returns the
 /// terminal to a task that reads it instead of leaving input routed at an
-/// empty slot. Runs before [`end_task`] clears `dying`'s tables, which is
-/// what lets it read the dying task's own entry.
+/// empty slot. This is also what clears `dying`'s entry: the one reader
+/// takes it, so no separate clear can be ordered ahead of the read.
 pub(crate) fn revert_input_owner_if(dying: usize) {
+    let previous = PREVIOUS_OWNERS[dying].swap(0, Ordering::Relaxed);
     if input_owner() != dying {
         return;
     }
-    let previous = PREVIOUS_OWNERS[dying].load(Ordering::Relaxed);
-    let slot = syscall_abi::task_id_slot(previous) as usize;
     // `0` (never handed over) names slot 0 and no generation, so it fails
     // occupant_is and falls back to task 0 like any stale entry.
-    let target = if occupant_is(slot, previous) && task_exists(slot) { slot } else { 0 };
+    let target = live_index(syscall_abi::task_id_slot(previous) as usize)
+        .filter(|t| occupant_is(t.index(), previous))
+        .map_or(0, TaskIndex::index);
     INPUT_OWNER.store(target, Ordering::Relaxed);
-}
-
-/// Forget who handed a task the keyboard. Called from [`end_task`] after
-/// the revert that reads it.
-fn clear_previous_owner(task: usize) {
-    PREVIOUS_OWNERS[task].store(0, Ordering::Relaxed);
 }
 
 /// The Ctrl+C escape hatch. When `byte` is Ctrl+C (`0x03`, ETX) and a task
@@ -2014,7 +2012,6 @@ fn end_task(i: TaskIndex, final_state: TaskState) {
     let (base, size) = task_region(i);
     free_runtime_region(base, size);
     revert_input_owner_if(i);
-    clear_previous_owner(i);
     fail_calls_to(i);
 
     unsafe { *STATES[i].0.get() = final_state };

@@ -236,10 +236,11 @@ $ send 5 hello ; recv        # ...send it a message and read its echo
 Job-control notes: one task owns the keyboard at a time (`fg` moves it;
 when the owner dies it returns to the task that held it when `fg` handed it
 over, so a nested shell gets it back from its own commands, and to the boot
-shell if that task is gone; **Ctrl+C** terminates the owner, which is what
-gets it back). An exited task holds its
+shell if that task is gone; **Ctrl+C** terminates any owner but the boot
+shell, which is one such death, and the boot shell ignores it). An exited task holds its
 slot as a zombie until `wait`ed (`ps` shows it); `kill` reaps immediately.
-Ctrl+C also interrupts a stuck `wait`.
+Ctrl+C also interrupts a stuck `wait` in the boot shell; in a nested shell
+it kills the shell, since that shell is the owner Ctrl+C terminates.
 
 ### Disks and mounts
 
