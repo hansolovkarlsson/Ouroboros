@@ -479,9 +479,8 @@ extern "C" fn rust_el0_fault_handler(frame: *mut Context) {
     // SAFETY: `frame` is the live trap frame of this very fault (the
     // "4:" trampoline's contract).
     unsafe { tasks::kill_current_and_switch(frame) };
-    // Any supervised server (the filesystem or console server) is
-    // restarted from its kept image - the generalized version of the
-    // fsd-only restart, now covering cond too. See supervisor.rs.
+    // Any supervised server is restarted from its kept image; which
+    // slots count is supervisor.rs's to say, not this comment's.
     if crate::supervisor::is_supervised(slot) {
         crate::supervisor::restart(slot);
     }

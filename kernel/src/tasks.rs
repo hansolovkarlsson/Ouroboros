@@ -361,8 +361,7 @@ pub(crate) fn allocate_runtime_region(size: u64) -> u64 {
 /// cursor, not a real allocator with a free list, and the common
 /// exec-then-exit pattern is exactly the LIFO case. `size` must be the
 /// same value the allocation was asked for (re-rounded to the same 2MB
-/// multiple here). Called from [`release_resources`], the first half of
-/// every teardown, where a leak is a bounded, documented cost - a
+/// multiple here). Called from [`end_task`], the one teardown, where a leak is a bounded, documented cost - a
 /// long-lived middle task exiting after a later allocation just means
 /// that one region stays unavailable for the rest of the boot.
 pub(crate) fn free_runtime_region(base: u64, size: u64) {
@@ -429,7 +428,7 @@ static TASKS: [TaskSlot; NUM_TASKS] =
 
 /// Each task's own `(base, size)` EL0 region, recorded at creation time
 /// (`init` for the boot slots, `spawn` for any later one) and zeroed by
-/// [`tear_down`] when the task ends, so a record is only as stable as the
+/// [`end_task`] when the task ends, so a record is only as stable as the
 /// slot's occupant: the next `spawn` into that slot writes a different
 /// region. Needed so `spawn` and the enders can rebuild the *full*
 /// `el0_regions` array `mmu::rebuild_with_el0_regions` expects (every
@@ -513,7 +512,7 @@ pub(crate) fn el0_regions() -> [(u64, u64); NUM_TASKS] {
 /// `const 0` until job control existed): the `FG` syscall reassigns it
 /// ([`set_input_owner`]), and **any death of the current owner reverts
 /// it to task 0** ([`revert_input_owner_if`], run by
-/// [`release_resources`] on every teardown) - task 0 can never die (`EXIT`
+/// [`end_task`] on every teardown) - task 0 can never die (`EXIT`
 /// and `KILL` both refuse
 /// it), so the revert target is always valid, the same permanence
 /// argument the original hardcoding relied on, now load-bearing for
@@ -536,7 +535,7 @@ pub(crate) fn set_input_owner(owner: usize) {
 }
 
 /// If `dying` currently owns the keyboard, hand it back to task 0 -
-/// called from [`release_resources`], so every task-death path returns
+/// called from [`end_task`], so every task-death path returns
 /// the terminal to the
 /// boot shell instead of leaving input routed at an empty slot.
 pub(crate) fn revert_input_owner_if(dying: usize) {
@@ -1859,9 +1858,9 @@ pub(crate) unsafe fn block_current_and_switch_to(
 /// 1, idle, always is).
 ///
 /// The caller refuses the protected slots (below `FIRST_SPAWNABLE`)
-/// *before* calling this and does the mmu rebuild after; both halves of
-/// the teardown itself (RAM, keyboard and pending calls, then state and
-/// tables) run in here - see `syscall.rs`'s `EXIT` arm.
+/// *before* calling this and does the mmu rebuild after; the teardown
+/// itself ([`end_task`]: RAM, keyboard and pending calls, then state and
+/// tables) runs in here - see `syscall.rs`'s `EXIT` arm.
 ///
 /// # Safety
 /// Same contract as [`block_current_and_switch`]: `frame` must be the
@@ -1872,33 +1871,47 @@ pub(crate) unsafe fn exit_current_and_switch(frame: *mut Context, status: u64) -
     // Zombie, not Unused: the status (masked to a byte, POSIX-style, so
     // it can never collide with the ABI's error band) is kept until a
     // WAIT collects it - which is also what makes the slot spawnable
-    // again. The memory is still freed at death (release_resources, just
-    // below),
+    // again. The memory is still freed at death (end_task, just below),
     // not at reap.
-    release_resources(current);
-    tear_down(current, TaskState::Zombie(status & 0xff));
+    end_task(current, TaskState::Zombie(status & 0xff));
     switch_away_from_dead(frame, current);
     frame.gpr[0]
 }
 
-/// The first half of ending a task, before its context is discarded:
-/// reclaim its RAM (LIFO-or-leak, see [`free_runtime_region`]), hand the
-/// keyboard back if it held it, and fail anyone blocked mid-call to it.
-/// Called only by the three enders ([`kill_task`],
-/// [`kill_current_and_switch`], [`exit_current_and_switch`]), each of
-/// which runs it and then [`tear_down`], in that order, because
-/// `tear_down` zeroes the region record this reads: a caller could once
-/// call an ender without it (the four lines lived at five call sites),
-/// which would have leaked the region silently, since freeing a zero
-/// range is a no-op. Private, so that order is the only one spellable.
-/// The helpers inside still take a `usize` (the ledger's stated scope
-/// for the newtype).
-fn release_resources(i: TaskIndex) {
+/// Everything that ends a task, in the one order that works, called by
+/// the three enders ([`kill_task`], [`kill_current_and_switch`],
+/// [`exit_current_and_switch`]) and by nothing else. First the resources
+/// the task held: reclaim its RAM (LIFO-or-leak, see
+/// [`free_runtime_region`]), hand the keyboard back if it held it, and
+/// fail anyone blocked mid-call to it. Then the slot: its state becomes
+/// `final_state` (`Unused` for a kill, `Zombie` for an exit whose status
+/// a `WAIT` still has to collect), its region record is forgotten, and
+/// every per-task table is reset. The order matters because the second
+/// part zeroes the region record the first part reads, and freeing a
+/// zero range is a no-op: when these were two functions, the leak was
+/// one skipped call away and silent. One function, so the order is the
+/// only thing spellable; a new per-task table needs one `clear_*` call
+/// here, not three. The helpers inside still take a `usize` (the
+/// ledger's stated scope for the newtype).
+fn end_task(i: TaskIndex, final_state: TaskState) {
     let i = i.index();
     let (base, size) = task_region(i);
     free_runtime_region(base, size);
     revert_input_owner_if(i);
     fail_calls_to(i);
+
+    unsafe { *STATES[i].0.get() = final_state };
+    unsafe { *REGIONS[i].0.get() = (0, 0) };
+    clear_mailbox(i);
+    clear_sender_cred(i);
+    clear_grant(i);
+    clear_delegations_of(i);
+    clear_argv(i);
+    clear_cwd(i);
+    clear_env(i);
+    clear_namespace(i);
+    reset_stdout_target(i);
+    reset_id(i);
 }
 
 /// `KILL`'s teardown: destroys task `i`, which must not be the
@@ -1915,7 +1928,7 @@ fn release_resources(i: TaskIndex) {
 /// [`exit_current_and_switch`] minus the context switch - a non-current
 /// task isn't executing (single core, IRQs masked throughout SVC
 /// dispatch; it's parked at an `eret` boundary), so its saved context is
-/// simply discarded. Both halves of the teardown run here; the caller
+/// simply discarded. The whole teardown ([`end_task`]) runs here; the caller
 /// does the mmu rebuild after, same as the `EXIT` arm does - see
 /// `syscall.rs`.
 pub(crate) fn kill_task(i: TaskIndex) {
@@ -1926,30 +1939,7 @@ pub(crate) fn kill_task(i: TaskIndex) {
         );
         crate::power::halt();
     }
-    release_resources(i);
-    tear_down(i, TaskState::Unused);
-}
-
-/// The second half of ending a task, after [`release_resources`]: the
-/// slot's state becomes `final_state` (`Unused` for a kill, `Zombie` for
-/// an exit whose status a `WAIT` still has to collect), its region record
-/// is forgotten, and every per-task table is reset. The three enders all
-/// come through here, so a new per-task table needs one `clear_*` call,
-/// not three.
-fn tear_down(i: TaskIndex, final_state: TaskState) {
-    let i = i.index();
-    unsafe { *STATES[i].0.get() = final_state };
-    unsafe { *REGIONS[i].0.get() = (0, 0) };
-    clear_mailbox(i);
-    clear_sender_cred(i);
-    clear_grant(i);
-    clear_delegations_of(i);
-    clear_argv(i);
-    clear_cwd(i);
-    clear_env(i);
-    clear_namespace(i);
-    reset_stdout_target(i);
-    reset_id(i);
+    end_task(i, TaskState::Unused);
 }
 
 /// The EL0-fault teardown's context switch: destroys the *currently
@@ -1970,8 +1960,7 @@ fn tear_down(i: TaskIndex, final_state: TaskState) {
 pub(crate) unsafe fn kill_current_and_switch(frame: *mut Context) {
     let frame = unsafe { &mut *frame };
     let current = current_index();
-    release_resources(current);
-    tear_down(current, TaskState::Unused);
+    end_task(current, TaskState::Unused);
     switch_away_from_dead(frame, current);
 }
 
