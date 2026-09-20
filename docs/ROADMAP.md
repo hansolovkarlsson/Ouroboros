@@ -1957,7 +1957,7 @@ would otherwise silently shrink into looking like nothing was ever found.
     printed "task 6 killed", the `eret` landed in the freed region (EL0
     instruction permission fault), and the fault handler tore the slot
     down again. Now refused like WAIT and MSG_CALL, and all three return a
-    code of its own, `TASK_ERR_SELF` (`MAX-43`, floor to `MAX-44`), because
+    code of its own, `TASK_ERR_SELF` (`MAX-42`, the floor's old value; floor to `MAX-43`), because
     `TASK_ERR_PROTECTED`'s one explanation names the permanent slots, the
     wrong one for a C program or a remote `cpu` run that sees no shell;
     `kill_task` checks it again as the mechanism (a reported
@@ -1966,6 +1966,19 @@ would otherwise silently shrink into looking like nothing was ever found.
     context if nothing else is runnable. Found by the fifth review of
     #137; the shell names the self case in its own words, and the ABI
     doc, `shell-commands.md` and `manual.md` state the protected set.
+  - ~~**Ctrl+C could tear down a task that had already exited.**~~ **Fixed
+    2026-09-19** (#137). `interrupt_key_check` marks the keyboard owner in
+    `PENDING_KILL` and the next tick tears it down; the tick's guard
+    checked only that the slot was spawnable, not that it was live. A
+    foreground program that exited between the mark and the tick was a
+    Zombie whose status the parent's `WAIT` may already have collected;
+    the second teardown turned that into `TASK_KILLED_STATUS` and cleared
+    tables the slot no longer owned. The guard now requires `task_exists`
+    too. Found by the ninth review of #137, while the guard was being
+    rewritten to go through `TaskIndex::new`; not driven on the guest,
+    since `drive-qemu.py` types characters and a Ctrl+C that lands in the
+    window between an exit and the next tick is not something the rig can
+    place. Read, not run.
   - **A child shell loses the keyboard after its first command.** Spawn a
     shell from a shell (`/EFI/ORBS/SH.BIN`, slot 6), run any command in it
     (`echo hi`, slot 7): when slot 7 exits, keyboard ownership reverts to

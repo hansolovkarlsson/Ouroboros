@@ -426,13 +426,13 @@ unsafe impl Sync for TaskSlot {}
 static TASKS: [TaskSlot; NUM_TASKS] =
     [const { TaskSlot(UnsafeCell::new(Context::zeroed())) }; NUM_TASKS];
 
-/// Each task's own `(base, size)` EL0 region, recorded once at creation
-/// time (`init` for slots 0/1, `spawn` for any later slot) and never
-/// changed after - there's no task destruction yet, so a region, once
-/// assigned, is permanent for the rest of this boot. Needed so `spawn`
-/// can rebuild the *full* `el0_regions` array `mmu::rebuild_with_el0_regions`
-/// expects (every still-live task's region, not just the newly-added
-/// one) without walking anything else to reconstruct it.
+/// Each task's own `(base, size)` EL0 region, recorded at creation time
+/// (`init` for the boot slots, `spawn` for any later one) and zeroed by
+/// [`tear_down`] when the task ends, so a record is only as stable as the
+/// slot's occupant: the next `spawn` into that slot writes a different
+/// region. Needed so `spawn` and the enders can rebuild the *full*
+/// `el0_regions` array `mmu::rebuild_with_el0_regions` expects (every
+/// still-live task's region) without walking anything else.
 struct RegionSlot(UnsafeCell<(u64, u64)>);
 
 // SAFETY: same argument as `TaskSlot` above.
@@ -1851,14 +1851,15 @@ pub(crate) unsafe fn block_current_and_switch_to(
 /// unmodified, so the SVC trampoline's blind `x0` write is a no-op for
 /// the *resumed* task (see `block_current_and_switch`'s doc comment).
 ///
-/// `next_runnable` can't hand back the now-`Unused` current task: its
-/// "stay put" fallback only fires if *nothing* is runnable, and task 1
-/// (idle) is always runnable - the same standing guarantee that
-/// fallback's own doc comment records.
+/// The now-`Zombie` current task cannot be resumed by mistake:
+/// [`switch_away_from_dead`] halts rather than take `next_runnable`'s
+/// "stay put" fallback, which only fires if *nothing* is runnable (task
+/// 1, idle, always is).
 ///
-/// The caller is responsible for refusing tasks 0/1 *before* calling
-/// this, and for the region free + mmu rebuild around it - see
-/// `syscall.rs`'s `EXIT` arm for the full teardown order.
+/// The caller refuses the protected slots (below `FIRST_SPAWNABLE`)
+/// *before* calling this and does the mmu rebuild after; both halves of
+/// the teardown itself (RAM, keyboard and pending calls, then state and
+/// tables) run in here - see `syscall.rs`'s `EXIT` arm.
 ///
 /// # Safety
 /// Same contract as [`block_current_and_switch`]: `frame` must be the
@@ -1869,7 +1870,8 @@ pub(crate) unsafe fn exit_current_and_switch(frame: *mut Context, status: u64) -
     // Zombie, not Unused: the status (masked to a byte, POSIX-style, so
     // it can never collide with the ABI's error band) is kept until a
     // WAIT collects it - which is also what makes the slot spawnable
-    // again. The memory is still freed at death (the caller's job),
+    // again. The memory is still freed at death (release_resources, just
+    // above),
     // not at reap.
     release_resources(current);
     tear_down(current, TaskState::Zombie(status & 0xff));
@@ -2431,8 +2433,9 @@ pub unsafe fn on_tick(frame: *mut Context) {
     let victim = PENDING_KILL.swap(usize::MAX, Ordering::Relaxed);
     // Only a spawnable slot (>= FIRST_SPAWNABLE) may be terminated - the same
     // protected set KILL/EXIT/FG enforce (never the shell, idle, or a
-    // supervised server). FG refuses to foreground 0-4, so a real keyboard
-    // owner is always in range; this guard is the belt-and-braces backstop.
+    // supervised server). FG refuses to foreground any slot from 1 up to
+    // FIRST_SPAWNABLE, so a real keyboard owner other than the boot shell
+    // is always in range; this guard is the belt-and-braces backstop.
     // Range, the protected bound, AND liveness: a foreground program that
     // exited between the mark and this tick is a Zombie whose status the
     // parent may already have collected, and tearing it down again would

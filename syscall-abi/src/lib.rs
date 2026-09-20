@@ -1548,9 +1548,11 @@ pub const FS_ERR_BUSY: u64 = u64::MAX - 40;
 /// never crosses the wire (`cpu` turns any spawn failure into a text
 /// line), so that move was the one-line kind: this constant, `sys.h`'s
 /// mirror, and `sys.h`'s `FS_ERR_CLIENT` stepping down out of its way.
-/// `MAX-43` is [`TASK_ERR_SELF`] (2026-09-19), the same kind: a task
-/// syscall's answer to its own caller, never a 9P reply.
-pub const FS_ERR_MIN: u64 = u64::MAX - 44;
+/// `MAX-42` is [`TASK_ERR_SELF`] (2026-09-19), the same kind: a task
+/// syscall's answer to its own caller, never a 9P reply. The pattern
+/// each time: the new code takes the floor's old value, and the floor
+/// steps down by one, so the band has no holes.
+pub const FS_ERR_MIN: u64 = u64::MAX - 43;
 
 /// The program parsed, but its loaded image (code, data and `.bss`
 /// together: memory size, not file size) plus the loader's fixed heap,
@@ -1572,9 +1574,9 @@ pub const SPAWN_ERR_IMAGE_TOO_LARGE: u64 = u64::MAX - 41;
 /// one explanation ("the permanent slots") is the wrong one for the slot
 /// the caller just named, and a C program or a remote `cpu` run sees no
 /// shell to paper over it. A task ends itself with [`EXIT`]; a child
-/// shell is killed from its parent (its `exit` only logs out). Reserved
-/// 2026-09-19, moving the floor to `MAX-44`.
-pub const TASK_ERR_SELF: u64 = u64::MAX - 43;
+/// shell is ended with Ctrl+C or killed from its parent (its `exit` only
+/// logs out). Reserved 2026-09-19, moving the floor to `MAX-43`.
+pub const TASK_ERR_SELF: u64 = u64::MAX - 42;
 
 /// **Cross-device move**: `mv`'s source and destination resolved to different
 /// namespace targets (two different mounts, or a local path and a remote one),

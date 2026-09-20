@@ -504,7 +504,7 @@ bytes per buffer** (`MAX_USER_LEN`) — longer buffers are rejected, not
 truncated.
 
 **Error convention:** all failure codes live in a reserved top band of
-`u64`: **any return value `>= FS_ERR_MIN` (`u64::MAX - 44`, and it moves
+`u64`: **any return value `>= FS_ERR_MIN` (`u64::MAX - 43`, and it moves
 down each time a code is reserved - check `syscall-abi`, never this
 sentence) is an error**; everything below is a real result (byte counts, sizes, exit
 statuses). `NO_FS` (`MAX-1`) means no filesystem is mounted this boot.
@@ -523,7 +523,7 @@ statuses). `NO_FS` (`MAX-1`) means no filesystem is mounted this boot.
 | 16 | `spawn` | staged total len | Start a program image previously fed in via `spawn_stage` as a new task alongside the caller; returns the new task's slot index |
 | 17 | `exit` | code | Destroy the calling task; status kept (masked to 0–255) until `wait`ed. Slots 0–5 — the shell, idle, and the four servers — refused (`EXIT_DENIED`) |
 | 18 | `task_state` | index | `UNUSED`/`RUNNABLE`/`BLOCKED`/`ZOMBIE`, or `TASK_STATE_INVALID` past the last slot |
-| 19 | `kill` | index | Destroy another task (reaps immediately). Slots 0–5 refused with `TASK_ERR_PROTECTED`, the caller's own slot with `TASK_ERR_SELF` |
+| 19 | `kill` | index | Destroy another task (reaps immediately). The permanent slots (below the first spawnable one) refused with `TASK_ERR_PROTECTED`, the caller's own slot with `TASK_ERR_SELF` |
 | 20 | `fg` | index | Hand keyboard ownership to a task (auto-reverts to task 0 on the owner's death, or on Ctrl+C) |
 | 21 | `wait` | index | Block until the task dies; returns its status (0–255), `TASK_KILLED_STATUS` (0x100), or `WAIT_INTERRUPTED` (Ctrl+C). Collecting the status reaps the slot |
 | 22 | `mount` | replace flag | Rescan the USB ports and install a storage device as the kernel's block device (`0`, `MOUNT_ALREADY`, or `MOUNT_NO_DEVICE`) — the device half; the FS half is the server's `FSOP_MOUNT` |

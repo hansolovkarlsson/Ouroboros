@@ -3348,8 +3348,9 @@ fn parse_u64(s: &str) -> Option<u64> {
 }
 
 /// `kill <n>` - destroys another task (the `KILL` syscall). The kernel
-/// refuses the protected slots (0 to 5: the boot shell, idle and the
-/// servers), empty slots, and the caller's own slot, each with its own
+/// refuses the protected slots (every one below the first spawnable:
+/// the boot shell, idle and the servers), empty slots, and the caller's
+/// own slot, each with its own
 /// code; [`print_fs_error`]'s task arms carry the messages.
 fn cmd_kill(arg: &str) {
     let Some(n) = parse_u64(arg) else {
