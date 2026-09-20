@@ -71,6 +71,37 @@ both load-bearing:
 A timeout prints which pattern it was waiting for, which is usually enough to
 see whether the guest died or the prompt simply differs from the regex.
 
+**The nested shell keeps the keyboard.** The keyboard reverts, on its owner's
+death, to the task that held it when `fg` handed it over (`PREVIOUS_OWNERS`
+in `tasks.rs`), which is what lets a shell spawned from a shell run more than
+one command. Misdiagnosed once (2026-09-06, "a builtin, no child") and fixed
+on 2026-09-20; this is the check that can fail for it, on `build/esp.img`:
+
+```sh
+python3 scripts/drive-qemu.py build/esp.img 'login:@@root' 'assword@@root' \
+  '# @@exec /EFI/ORBS/SH.BIN' 'login:@@fg 6' '@@root' 'assword@@root' \
+  '# @@cd /EFI' '# @@echo hi' '# @@pwd' '# @@ps' '# @@'
+# expected: pwd prints /EFI (the nested shell's cwd) and ps shows
+# "task 6: runnable" with task 0 blocked. The negative control, measured on
+# the kernel before the fix: pwd prints / and ps shows task 0 runnable,
+# task 6 blocked, because the boot shell answered.
+```
+
+The chain, three shells deep, with the middle one killed from below (a link
+dying while NOT the owner): after Ctrl+C at the innermost prompt the keyboard
+must reach the outer nested shell, not the boot shell.
+
+```sh
+python3 scripts/drive-qemu.py build/esp.img 'login:@@root' 'assword@@root' \
+  '# @@/EFI/ORBS/SH.BIN' 'login:@@root' 'assword@@root' '# @@cd /EFI' \
+  '# @@/EFI/ORBS/SH.BIN' 'login:@@root' 'assword@@root' \
+  '# @@exec /EFI/ORBS/SH.BIN' 'login:@@fg 8' '@@root' 'assword@@root' \
+  '# @@kill 7' '# @@'$'\x03' '# @@pwd' '# @@'
+# expected: pwd prints /EFI (task 6 answered). Without the splice in
+# revert_input_owner_if the keyboard falls to the boot shell, which is
+# blocked in wait on task 6, and pwd prints nothing.
+```
+
 ## 2. Disk-format test images
 
 Ouroboros's filesystem server (`fsd`) mounts FAT32, exFAT, and ext2, and discovers

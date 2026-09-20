@@ -594,9 +594,19 @@ pub(crate) fn input_owner() -> usize {
 /// Called from [`end_task`], so every task-death path returns the
 /// terminal to a task that reads it instead of leaving input routed at an
 /// empty slot. This is also what clears `dying`'s entry: the one reader
-/// takes it, so no separate clear can be ordered ahead of the read.
+/// takes it, so no separate clear can be ordered ahead of the read. A
+/// task can also die as a LINK in the chain without owning the keyboard
+/// (a nested shell killed from a shell below it), so every entry that
+/// names `dying` is re-pointed at `dying`'s own previous owner first:
+/// the later revert then skips the dead link instead of falling to task
+/// 0 past a live shell that is about to read.
 pub(crate) fn revert_input_owner_if(dying: usize) {
     let previous = PREVIOUS_OWNERS[dying].swap(0, Ordering::Relaxed);
+    if let Some(id) = task_id_of(dying) {
+        for entry in PREVIOUS_OWNERS.iter() {
+            let _ = entry.compare_exchange(id, previous, Ordering::Relaxed, Ordering::Relaxed);
+        }
+    }
     if input_owner() != dying {
         return;
     }
@@ -609,11 +619,12 @@ pub(crate) fn revert_input_owner_if(dying: usize) {
 }
 
 /// The Ctrl+C escape hatch. When `byte` is Ctrl+C (`0x03`, ETX) and a task
-/// other than the boot shell owns the keyboard (a foreground `/bin` program is
-/// running, having been handed the keyboard by `run_found_command`), that
-/// program is marked for death ([`PENDING_KILL`], killed by [`on_tick`]) and the
-/// byte is swallowed (returns `true`). When it dies the keyboard reverts to the
-/// shell that ran it, whose `WAIT` on it then wakes with `TASK_KILLED_STATUS`. When task 0
+/// other than the boot shell owns the keyboard (a foreground `/bin` program
+/// handed the keyboard by `run_found_command`, or a nested shell handed it by
+/// `fg`), that task is marked for death ([`PENDING_KILL`], killed by
+/// [`on_tick`]) and the byte is swallowed (returns `true`). When it dies the
+/// keyboard reverts to the task that held it at the `fg`, whose `WAIT` on it
+/// (if it is a shell that ran it) then wakes with `TASK_KILLED_STATUS`. When task 0
 /// (the boot shell) already owns the keyboard, Ctrl+C is not special: it passes
 /// through as an ordinary byte the line editor ignores (returns `false`), so the
 /// normal single-shell case is unchanged.

@@ -2039,7 +2039,31 @@ would otherwise silently shrink into looking like nothing was ever found.
     (`pwd` gave `/`). Zero aborts in QEMU's trace for both runs. The
     older entry of 2026-09-06 below ("a foregrounded nested shell loses
     the keyboard after every command") was the same defect seen from the
-    `exec` then `fg` flow.
+    `exec` then `fg` flow. The second review of #140 found the chain could
+    still fall to task 0 past a live shell: a link that dies while NOT the
+    owner (a nested shell killed from a shell below it) took its entry
+    with it. Every entry naming a dying task is now re-pointed at that
+    task's own previous owner; witnessed three shells deep (`kill 7` from
+    task 8, Ctrl+C at 8's prompt, `pwd` answered by task 6). Both recipes
+    are in `docs/testing/testing-qemu.md`.
+  - **Ctrl+C at a nested shell's own prompt kills the shell** (login, cwd
+    and env gone), because `interrupt_key_check` terminates any keyboard
+    owner but task 0, a rule from when the only other owner was a
+    foreground program. Newly routine now that a nested shell keeps the
+    keyboard. The kernel could tell the two apart: a previous owner blocked
+    in `WAIT` on the owner means a foreground command (terminate), a
+    previous owner at its prompt means a session handed over with `fg`
+    (pass the byte through, as for task 0). A behaviour decision, so filed;
+    the manual, its page and `wait`'s doc say what happens today. Found by
+    the second review of #140.
+  - **`FG` is caller-unchecked.** A task that does not hold the keyboard can
+    foreground any spawnable task, and the recorded chain then names the
+    holder, not the caller, so the revert can route the keyboard to a task
+    that never asked for it. Not new (it was always unchecked), but the
+    shell's "reverts to this shell" now rests on caller == holder, which is
+    true because only the owner can read a command line and nothing else
+    calls `FG`. Refusing `FG` from a non-owner would make the chain
+    trustworthy by construction. Found by the second review of #140.
   - **The stack top is hand-derived as `base + size` at seven sites across
     three files** (`tasks.rs` five times, `supervisor.rs`, `syscall.rs`),
     inside an identical `Context` literal. Anything ever placed above the
