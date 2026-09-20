@@ -972,8 +972,8 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
             0
         }
         syscall_abi::EXIT => {
-            let current = tasks::current_task();
-            if current < tasks::FIRST_SPAWNABLE {
+            let current = tasks::current_index();
+            if current.index() < tasks::FIRST_SPAWNABLE {
                 // No slot below FIRST_SPAWNABLE may exit. Stated as the
                 // bound rather than as a list, because the list is what
                 // goes stale: every one of these comments enumerated
@@ -993,7 +993,7 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
                 // The only case where EXIT returns to its caller.
                 return syscall_abi::EXIT_DENIED;
             }
-            console::println!("Ouroboros kernel: task {current} exited (code {arg0})");
+            console::println!("Ouroboros kernel: task {} exited (code {arg0})", current.index());
             // Teardown order: reclaim the RAM (LIFO-or-leak, see
             // free_runtime_region), discard the task and clear its
             // region record, then rebuild the identity map so the
@@ -1004,7 +1004,7 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
             // RAM, keyboard (a foregrounded task's death hands it back
             // to the boot shell), and anyone blocked mid-MSG_CALL to
             // this task - see release_resources.
-            tasks::release_resources(tasks::current_index());
+            tasks::release_resources(current);
             // SAFETY: `frame` is the live trap frame of this very
             // syscall (dispatch's contract with the SVC trampoline).
             let resumed_x0 = unsafe { tasks::exit_current_and_switch(frame, arg0) };
@@ -1092,9 +1092,10 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
                 // would die a second time in the EL0 fault handler
                 // (witnessed 2026-09-19: a child shell running `kill`
                 // on its own slot). EXIT is how a task ends itself. Same
-                // self-target refusal as WAIT and MSG_CALL; kill_task
-                // checks it once more, as the mechanism.
-                return syscall_abi::TASK_ERR_PROTECTED;
+                // self-target refusal as WAIT and MSG_CALL, with its own
+                // code so every client can say why; kill_task checks it
+                // once more, as the mechanism.
+                return syscall_abi::TASK_ERR_SELF;
             }
             let i = target.index();
             console::println!("Ouroboros kernel: task {i} killed");
@@ -1110,12 +1111,17 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
         }
         syscall_abi::WAIT => {
             let i = arg0 as usize;
-            if i < tasks::FIRST_SPAWNABLE || i == tasks::current_task() {
+            if i < tasks::FIRST_SPAWNABLE {
                 // Waiting on any slot below FIRST_SPAWNABLE (they never
                 // die - the boot shell, idle, and the supervised servers
-                // are all exit/kill-protected) or on yourself is a
-                // guaranteed deadlock - refused up front.
+                // are all exit/kill-protected) is a guaranteed deadlock -
+                // refused up front.
                 return syscall_abi::TASK_ERR_PROTECTED;
+            }
+            if i == tasks::current_task() {
+                // So is waiting on yourself; its own code, like KILL's
+                // and MSG_CALL's self-target refusals.
+                return syscall_abi::TASK_ERR_SELF;
             }
             if i >= tasks::NUM_TASKS {
                 return syscall_abi::TASK_ERR_NO_SUCH_TASK;
@@ -1239,14 +1245,13 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
             if dest == tasks::current_task() {
                 // Calling yourself would block waiting for a reply
                 // only you could send - a guaranteed deadlock, same
-                // up-front refusal as WAIT's self-wait.
-                return syscall_abi::TASK_ERR_PROTECTED;
+                // up-front refusal as WAIT's self-wait, same code.
+                return syscall_abi::TASK_ERR_SELF;
             }
-            // One of the places a caller-supplied slot becomes a
+            // One of the three places a caller-supplied slot becomes a
             // TaskIndex (KILL's target and the Ctrl+C victim are the
-            // others):
-            // refused here, so the handoff below cannot be handed an
-            // unchecked number.
+            // others): an out-of-range or empty slot is refused here, so
+            // the handoff below is never handed an unchecked number.
             let Some(dest_index) = tasks::TaskIndex::new(dest).filter(|d| tasks::task_exists(d.index())) else {
                 return syscall_abi::TASK_ERR_NO_SUCH_TASK;
             };

@@ -504,7 +504,7 @@ bytes per buffer** (`MAX_USER_LEN`) — longer buffers are rejected, not
 truncated.
 
 **Error convention:** all failure codes live in a reserved top band of
-`u64` — **any return value `>= FS_ERR_MIN` (`u64::MAX - 42`, and it moves
+`u64` — **any return value `>= FS_ERR_MIN` (`u64::MAX - 44`, and it moves
 down each time a code is reserved - check `syscall-abi`, never this
 sentence) is an error**; everything below is a real result (byte counts, sizes, exit
 statuses). `NO_FS` (`MAX-1`) means no filesystem is mounted this boot.
@@ -548,7 +548,7 @@ Filesystem failures return a specific `FS_ERR_*` code (`NOT_FOUND`,
 `NOT_A_FILE`, `NOT_A_DIRECTORY`, `INVALID_NAME`, `ALREADY_EXISTS`,
 `NOT_EMPTY`, `IS_ROOT`, `DISK_FULL`, `IO`); `spawn` adds
 `SPAWN_ERR_BAD_ELF`/`SPAWN_ERR_TOO_LARGE`/`SPAWN_ERR_IMAGE_TOO_LARGE`/
-`SPAWN_ERR_NO_FREE_SLOT`; the task syscalls add `TASK_ERR_NO_SUCH_TASK`/`TASK_ERR_PROTECTED`;
+`SPAWN_ERR_NO_FREE_SLOT`; the task syscalls add `TASK_ERR_NO_SUCH_TASK`/`TASK_ERR_PROTECTED`/`TASK_ERR_SELF`;
 the block syscalls add `BLOCK_ERR_NO_DEVICE`/`BLOCK_ERR_IO`/
 `BLOCK_ERR_DENIED`.
 

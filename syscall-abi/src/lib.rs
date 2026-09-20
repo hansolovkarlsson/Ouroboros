@@ -1392,10 +1392,11 @@ pub const SPAWN_ERR_NO_FREE_SLOT: u64 = u64::MAX - 13;
 
 /// The index is out of range or the slot holds no task.
 pub const TASK_ERR_NO_SUCH_TASK: u64 = u64::MAX - 14;
-/// Task 0 (the boot shell), task 1 (idle), task 2 (the filesystem
-/// server, [`FSD_TASK`]), and task 3 (the console server, [`CON_TASK`])
-/// are permanent - they can't be killed or waited on, and idle can't be
-/// foregrounded.
+/// The target is one of the permanent slots below the first spawnable
+/// one: the boot shell, idle, and the servers (`FSD_TASK`, `CON_TASK`,
+/// `NET_TASK`, `ACCOUNT_TASK`). They can't be killed or waited on, and
+/// every one but the boot shell can't be foregrounded. Stated as the
+/// bound, not a list: the list is what went stale here twice.
 pub const TASK_ERR_PROTECTED: u64 = u64::MAX - 15;
 
 /// A [`WAIT`] cut short by Ctrl+C - the waited task keeps running,
@@ -1545,7 +1546,9 @@ pub const FS_ERR_BUSY: u64 = u64::MAX - 40;
 /// never crosses the wire (`cpu` turns any spawn failure into a text
 /// line), so that move was the one-line kind: this constant, `sys.h`'s
 /// mirror, and `sys.h`'s `FS_ERR_CLIENT` stepping down out of its way.
-pub const FS_ERR_MIN: u64 = u64::MAX - 42;
+/// `MAX-43` is [`TASK_ERR_SELF`] (2026-09-19), the same kind: a task
+/// syscall's answer to its own caller, never a 9P reply.
+pub const FS_ERR_MIN: u64 = u64::MAX - 44;
 
 /// The program parsed, but its loaded image (code, data and `.bss`
 /// together: memory size, not file size) plus the loader's fixed heap,
@@ -1558,6 +1561,18 @@ pub const FS_ERR_MIN: u64 = u64::MAX - 42;
 /// tell "shrink the file" from "shrink the static data". Reserved
 /// 2026-09-13, moving the floor to `MAX-42`.
 pub const SPAWN_ERR_IMAGE_TOO_LARGE: u64 = u64::MAX - 41;
+
+/// The target is the calling task itself. `KILL`ing yourself would free
+/// the region the `eret` returns into (witnessed 2026-09-19 as a fault
+/// and a second teardown, before the refusal existed); `WAIT`ing on or
+/// `MSG_CALL`ing yourself would block for an answer only you could give.
+/// Its own code, rather than [`TASK_ERR_PROTECTED`], because that code's
+/// one explanation ("the permanent slots") is the wrong one for the slot
+/// the caller just named, and a C program or a remote `cpu` run sees no
+/// shell to paper over it. A task ends itself with [`EXIT`]; a child
+/// shell is killed from its parent (its `exit` only logs out). Reserved
+/// 2026-09-19, moving the floor to `MAX-44`.
+pub const TASK_ERR_SELF: u64 = u64::MAX - 43;
 
 /// **Cross-device move**: `mv`'s source and destination resolved to different
 /// namespace targets (two different mounts, or a local path and a remote one),

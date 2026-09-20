@@ -1875,23 +1875,6 @@ pub(crate) unsafe fn exit_current_and_switch(frame: *mut Context, status: u64) -
     frame.gpr[0]
 }
 
-/// `KILL`'s teardown: destroys task `i`, which must not be the
-/// currently-running task. That used to be described here as guaranteed
-/// by "only tasks >= 2 can be killed, and the caller is always whichever
-/// task is running", which stopped being true the day spawned programs
-/// could issue syscalls: a spawned task could `KILL` its own slot, and
-/// did (witnessed 2026-09-19, a child shell running `kill` on itself:
-/// the `eret` landed in a freed region and the task died again in the
-/// fault handler). The `KILL` arm refuses a self-target outright, and
-/// this function checks it again itself: the running task is the one
-/// value it can name without the caller, so the class is caught here
-/// whatever a future caller forgets. Same bookkeeping as
-/// [`exit_current_and_switch`] minus the context switch - a non-current
-/// task isn't executing (single core, IRQs masked throughout SVC
-/// dispatch; it's parked at an `eret` boundary), so its saved context is
-/// simply discarded. The caller handles the region-free, owner-revert,
-/// and mmu rebuild around this, same as the `EXIT` arm does - see
-/// `syscall.rs`.
 /// The first half of ending a task, before its context is discarded:
 /// reclaim its RAM (LIFO-or-leak, see [`free_runtime_region`]), hand the
 /// keyboard back if it held it, and fail anyone blocked mid-call to it.
@@ -1912,6 +1895,22 @@ pub(crate) fn release_resources(i: TaskIndex) {
     fail_calls_to(i);
 }
 
+/// `KILL`'s teardown: destroys task `i`, which must not be the
+/// currently-running task. That used to be described here as guaranteed
+/// by "only tasks >= 2 can be killed, and the caller is always whichever
+/// task is running", which stopped being true the day spawned programs
+/// could issue syscalls: a spawned task could `KILL` its own slot, and
+/// did (witnessed 2026-09-19, a child shell running `kill` on itself:
+/// the `eret` landed in a freed region and the task died again in the
+/// fault handler). The `KILL` arm refuses a self-target outright, and
+/// this function checks it again itself: the running task is the one
+/// value it can name without the caller, so the class is caught here
+/// whatever a future caller forgets. Same bookkeeping as
+/// [`exit_current_and_switch`] minus the context switch - a non-current
+/// task isn't executing (single core, IRQs masked throughout SVC
+/// dispatch; it's parked at an `eret` boundary), so its saved context is
+/// simply discarded. The caller runs [`release_resources`] first and
+/// the mmu rebuild after, same as the `EXIT` arm does - see `syscall.rs`.
 pub(crate) fn kill_task(i: TaskIndex) {
     if i == current_index() {
         crate::console::println_force!(
@@ -2271,9 +2270,9 @@ pub unsafe fn init(
     // Runnable statically; the servers above set themselves Runnable only
     // when their image was present, which is why this is a loop over state
     // rather than a list.
-    for slot in 0..NUM_TASKS {
-        if !matches!(unsafe { *STATES[slot].0.get() }, TaskState::Unused) {
-            issue_generation(slot);
+    for slot in TaskIndex::all() {
+        if !matches!(unsafe { *STATES[slot.index()].0.get() }, TaskState::Unused) {
+            issue_generation(slot.index());
         }
     }
 }

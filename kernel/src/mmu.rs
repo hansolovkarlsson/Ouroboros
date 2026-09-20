@@ -607,7 +607,10 @@ unsafe fn build_tables(memory_map: &MemoryMapOwned, el0_regions: [(u64, u64); MA
 
     // Build each task's view: identical kernel/device mappings, EL0
     // access granted only to that view's own region.
-    for (view, &region) in TaskIndex::all().zip(el0_regions.iter()) {
+    // Indexed by the view, not zipped: both bounds are NUM_TASKS, so this
+    // is total, where a zip would stop at the shorter side without a word.
+    for view in TaskIndex::all() {
+        let region = el0_regions[view.index()];
         unsafe {
             build_view(
                 view,

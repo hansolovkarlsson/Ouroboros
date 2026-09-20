@@ -1875,6 +1875,7 @@ fn print_fs_error(cmd: &str, code: u64) {
         // Names the whole protected set: a message listing a stale subset is how
         // a reader concludes a newly added server is fair game.
         syscall_abi::TASK_ERR_PROTECTED => "that task is protected (the boot shell, idle, and the fsd/cond/netd/accountd servers are permanent)",
+        syscall_abi::TASK_ERR_SELF => "that is this task itself (a task cannot kill, wait on or call itself; a child shell is killed from its parent, and exit only logs out)",
         _ => "failed",
     });
 }
@@ -3348,21 +3349,13 @@ fn parse_u64(s: &str) -> Option<u64> {
 
 /// `kill <n>` - destroys another task (the `KILL` syscall). The kernel
 /// refuses the protected slots (0 to 5: the boot shell, idle and the
-/// servers), empty slots, and the caller's own slot; this shell names the
-/// self case in its own words below, and [`print_fs_error`]'s task arms
-/// carry the kernel's messages for the rest.
+/// servers), empty slots, and the caller's own slot, each with its own
+/// code; [`print_fs_error`]'s task arms carry the messages.
 fn cmd_kill(arg: &str) {
     let Some(n) = parse_u64(arg) else {
         print_line("kill: usage: kill <task number> (see ps)");
         return;
     };
-    if n == self_task() {
-        // The kernel refuses this too (TASK_ERR_PROTECTED), but that
-        // code's message names the permanent slots, which is the wrong
-        // explanation for the slot the user just named.
-        print_line("kill: a task cannot kill itself (a child shell is killed from its parent; exit only logs out)");
-        return;
-    }
     match syscall(syscall_abi::KILL, n) {
         code if code >= FS_ERR_MIN => print_fs_error("kill", code),
         _ => {}

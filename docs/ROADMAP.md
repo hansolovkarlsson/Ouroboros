@@ -1956,8 +1956,11 @@ would otherwise silently shrink into looking like nothing was ever found.
     Witnessed first: a child shell in slot 6 ran `kill 6`; the kernel
     printed "task 6 killed", the `eret` landed in the freed region (EL0
     instruction permission fault), and the fault handler tore the slot
-    down again. Now refused with `TASK_ERR_PROTECTED` like WAIT and
-    MSG_CALL, `kill_task` checks it again as the mechanism (a reported
+    down again. Now refused like WAIT and MSG_CALL, and all three return a
+    code of its own, `TASK_ERR_SELF` (`MAX-43`, floor to `MAX-44`), because
+    `TASK_ERR_PROTECTED`'s one explanation names the permanent slots, the
+    wrong one for a C program or a remote `cpu` run that sees no shell;
+    `kill_task` checks it again as the mechanism (a reported
     halt), and the two paths that tear the running task down go through
     `switch_away_from_dead`, which halts rather than resume a torn-down
     context if nothing else is runnable. Found by the fifth review of
