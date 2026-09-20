@@ -100,7 +100,8 @@ mod task_index {
     /// is private to this module: the only ways to make one are
     /// [`TaskIndex::new`] (checked, `None` past the end), the constants
     /// [`TaskIndex::FIRST`] and [`TaskIndex::IDLE`], [`TaskIndex::all`],
-    /// and [`TaskIndex::succ`], a step from one that already exists. No
+    /// [`TaskIndex::succ`] (a step from one that already exists), and
+    /// [`current_index`], which rebuilds the one [`set_current`] stored. No
     /// total `usize -> TaskIndex` constructor: a modulo would be a clamp
     /// wearing a type. Outside this module, `tasks.rs` itself cannot
     /// write `TaskIndex(x)`.
@@ -360,8 +361,8 @@ pub(crate) fn allocate_runtime_region(size: u64) -> u64 {
 /// cursor, not a real allocator with a free list, and the common
 /// exec-then-exit pattern is exactly the LIFO case. `size` must be the
 /// same value the allocation was asked for (re-rounded to the same 2MB
-/// multiple here). Called from the `EXIT` syscall's teardown
-/// (`syscall.rs`), where a leak is a bounded, documented cost - a
+/// multiple here). Called from [`release_resources`], the first half of
+/// every teardown, where a leak is a bounded, documented cost - a
 /// long-lived middle task exiting after a later allocation just means
 /// that one region stays unavailable for the rest of the boot.
 pub(crate) fn free_runtime_region(base: u64, size: u64) {
@@ -511,8 +512,9 @@ pub(crate) fn el0_regions() -> [(u64, u64); NUM_TASKS] {
 /// task blocked the same way. Runtime state now (it was a hardcoded
 /// `const 0` until job control existed): the `FG` syscall reassigns it
 /// ([`set_input_owner`]), and **any death of the current owner reverts
-/// it to task 0** ([`revert_input_owner_if`], wired into both the
-/// `EXIT` and `KILL` teardowns) - task 0 can never die (both refuse
+/// it to task 0** ([`revert_input_owner_if`], run by
+/// [`release_resources`] on every teardown) - task 0 can never die (`EXIT`
+/// and `KILL` both refuse
 /// it), so the revert target is always valid, the same permanence
 /// argument the original hardcoding relied on, now load-bearing for
 /// the revert too.
@@ -534,8 +536,8 @@ pub(crate) fn set_input_owner(owner: usize) {
 }
 
 /// If `dying` currently owns the keyboard, hand it back to task 0 -
-/// called from both task-death paths (`EXIT`'s teardown and `KILL`'s),
-/// so a foregrounded task's death always returns the terminal to the
+/// called from [`release_resources`], so every task-death path returns
+/// the terminal to the
 /// boot shell instead of leaving input routed at an empty slot.
 pub(crate) fn revert_input_owner_if(dying: usize) {
     let _ = INPUT_OWNER.compare_exchange(dying, 0, Ordering::Relaxed, Ordering::Relaxed);
@@ -2019,9 +2021,9 @@ pub(crate) fn fail_calls_to(dead: usize) {
     }
 }
 
-/// Installs a task directly into a specific slot - the filesystem
-/// server's *restart* path (`syscall.rs::restart_fsd`), which must
-/// land in slot 2 exactly ([`spawn`] deliberately scans from
+/// Installs a task directly into a specific slot - a supervised
+/// server's *restart* path (`supervisor::restart`), which must land in
+/// that server's own slot exactly ([`spawn`] deliberately scans from
 /// [`FIRST_SPAWNABLE`] and can never fill the reserved slot). The
 /// caller guarantees the slot is `Unused` (the fault teardown just
 /// made it so) and handles the mmu rebuild that actually makes the
@@ -2037,11 +2039,6 @@ pub(crate) fn install_task(slot: usize, context: Context, region: (u64, u64)) {
     flush_new_code(region.0, region.1);
 }
 
-/// Whether slot `i` currently holds a *live* task (`Runnable` or
-/// `Blocked`) - the `KILL`/`FG`/`WAIT` syscalls' existence check.
-/// Zombies are deliberately not "live": `fg`/`kill` on one would
-/// target a task that no longer runs (`wait` is how a zombie is
-/// dealt with - `ps` says so).
 /// A caller-supplied slot number as a [`TaskIndex`] that names a LIVE
 /// task, or `None`: the one spelling of "range-checked and occupied",
 /// used by every syscall arm that acts on another task (`KILL`, `FG`,
@@ -2053,6 +2050,11 @@ pub(crate) fn live_index(i: usize) -> Option<TaskIndex> {
     TaskIndex::new(i).filter(|t| task_exists(t.index()))
 }
 
+/// Whether slot `i` currently holds a *live* task (`Runnable` or
+/// `Blocked`) - the existence check behind [`live_index`], and `WAIT`'s
+/// own after it has tried to reap. Zombies are deliberately not "live":
+/// `fg`/`kill` on one would target a task that no longer runs (`wait` is
+/// how a zombie is dealt with - `ps` says so).
 pub(crate) fn task_exists(i: usize) -> bool {
     i < NUM_TASKS
         && matches!(

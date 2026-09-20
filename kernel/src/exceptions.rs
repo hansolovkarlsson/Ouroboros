@@ -444,8 +444,8 @@ extern "C" fn rust_exception_handler(esr: u64, far: u64, elr: u64, vector: u64) 
 /// Tasks 0 (the boot shell - the keyboard owner; nothing meaningful
 /// survives its death) and 1 (idle - it faulting means a kernel bug,
 /// its code is 8 bytes of `nop; b`) still halt, honestly. If the dead
-/// task is the filesystem server, the kernel restarts it from the
-/// image kept at boot - see `syscall::restart_fsd`.
+/// task is a supervised server (fsd, cond, netd, accountd), the kernel
+/// restarts it from the image kept at boot - see `supervisor::restart`.
 extern "C" fn rust_el0_fault_handler(frame: *mut Context) {
     let (esr, far, elr): (u64, u64, u64);
     // SAFETY: pure system-register reads; still valid - nothing has

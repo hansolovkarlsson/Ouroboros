@@ -1572,8 +1572,11 @@ pub const SPAWN_ERR_IMAGE_TOO_LARGE: u64 = u64::MAX - 41;
 /// `MSG_CALL`ing yourself would block for an answer only you could give.
 /// Its own code, rather than [`TASK_ERR_PROTECTED`], because that code's
 /// one explanation ("the permanent slots") is the wrong one for the slot
-/// the caller just named, and a C program or a remote `cpu` run sees no
-/// shell to paper over it. A task ends itself with [`EXIT`]; a child
+/// the caller just named. The shell's error printer is the consumer that
+/// tells them apart today; `libc`'s `sys.h` mirrors no task code and its
+/// programs print "failed" for anything in the band, so a C program does
+/// not benefit until that header names it (a do-when-touched item in
+/// `ROADMAP.md`). A task ends itself with [`EXIT`]; a child
 /// shell is ended with Ctrl+C or killed from its parent (its `exit` only
 /// logs out). Reserved 2026-09-19, moving the floor to `MAX-43`.
 pub const TASK_ERR_SELF: u64 = u64::MAX - 42;

@@ -1959,7 +1959,10 @@ would otherwise silently shrink into looking like nothing was ever found.
     down again. Now refused like WAIT and MSG_CALL, and all three return a
     code of its own, `TASK_ERR_SELF` (`MAX-42`, the floor's old value; floor to `MAX-43`), because
     `TASK_ERR_PROTECTED`'s one explanation names the permanent slots, the
-    wrong one for a C program or a remote `cpu` run that sees no shell;
+    wrong one for the slot the caller just named (the shell's error
+    printer distinguishes it today; `libc`'s `sys.h` mirrors no task code
+    and its programs print "failed" for the whole band, so naming
+    `TASK_ERR_SELF`/`_PROTECTED`/`_NO_SUCH_TASK` there is do-when-touched);
     `kill_task` checks it again as the mechanism (a reported
     halt), and the two paths that tear the running task down go through
     `switch_away_from_dead`, which halts rather than resume a torn-down
