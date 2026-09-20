@@ -1928,8 +1928,13 @@ would otherwise silently shrink into looking like nothing was ever found.
     turned race-freedom into a claim); `next_runnable` takes and returns
     the type. **Scope**: the type covers the view switch and the
     scheduler's own slot. `task_exists`, `may_send`, `send_message` and the
-    per-task arrays still take a `usize`, so an arm that hands a typed slot to one of them unwraps it, and `is_live` remains an alias of `task_exists` for the identity arms (three names for one predicate; the next step of this scope)
-    (harmlessly); converting those is a separate change. `activate_task`,
+    per-task arrays still take a `usize`, so an arm that hands a typed slot
+    to one of them unwraps it, harmlessly; `is_live` remains an alias of
+    `task_exists` for the two identity arms, which are also the last
+    guard-then-index pairs (three names for one predicate; the next step
+    of this scope, with a `switch_to` helper for the five-site switch tail
+    and one predicate-driven scan for the two runnable loops). Converting
+    those is a separate change. `activate_task`,
     `switch_full`, `build_view` and `block_current_and_switch_to`'s
     `prefer` take it; every table index in `mmu.rs` is typed, and
     `l0_table`'s runtime refusal is gone because the case is unspellable.

@@ -1732,8 +1732,8 @@ fn next_runnable(from: TaskIndex) -> Option<TaskIndex> {
 /// nothing at all is runnable, which cannot happen while the idle task
 /// never blocks. If it ever does, every switch path halts here with a
 /// report rather than resuming a task whose state says it must not run
-/// (Blocked, or torn down). One place, so the three callers cannot
-/// disagree about what the fallback means.
+/// (Blocked, or torn down). One place, so its callers cannot disagree
+/// about what the fallback means.
 fn next_or_halt(from: TaskIndex) -> TaskIndex {
     match next_runnable(from) {
         Some(next) => next,
