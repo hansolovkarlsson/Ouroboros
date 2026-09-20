@@ -855,10 +855,10 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
             // Ungated like GET_ID - membership isn't secret, and fsd needs the
             // sender's list on every permission check. A dead slot reports no
             // identity (see GET_ID), so it reports no groups either.
-            let t = arg0 as usize;
-            if !tasks::is_live(t) {
+            let Some(t) = tasks::live_index(arg0 as usize) else {
                 return syscall_abi::GET_ID_ERR;
-            }
+            };
+            let t = t.index();
             let cap = (arg2 as usize).min(syscall_abi::MAX_SUPP_GROUPS);
             let bytes = (cap * core::mem::size_of::<u32>()) as u64;
             if cap > 0 && !valid_user_range(arg1, bytes) {
@@ -879,16 +879,14 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
             // arg0 = task index -> its packed (gid << 32) | uid. Identity isn't
             // secret (uid/gid aren't credentials), so any task may read any
             // slot's - `ps` shows owners, `fsd` checks the sender's later.
-            let t = arg0 as usize;
             // A DEAD slot must not report an identity. `reset_id` stores 0
             // (root) into a slot on task death, so a server that authorizes on
             // GET_ID of the message sender would read a caller who sent a
             // request and then exited as ROOT - send it, exit, be authorized.
             // Report unavailable and let the caller fail closed.
-            if !tasks::is_live(t) {
-                syscall_abi::GET_ID_ERR
-            } else {
-                tasks::id_of(t)
+            match tasks::live_index(arg0 as usize) {
+                Some(t) => tasks::id_of(t.index()),
+                None => syscall_abi::GET_ID_ERR,
             }
         }
         syscall_abi::SENDER_ID => {
