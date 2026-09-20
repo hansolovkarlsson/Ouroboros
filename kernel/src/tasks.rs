@@ -582,11 +582,16 @@ pub(crate) fn interrupt_key_check(byte: u8) -> bool {
         return false;
     }
     // The occupant, not the slot: see PENDING_KILL. An owner that is not a
-    // task (an Unused slot) cannot happen - ownership reverts on death -
-    // but if it did, there is nothing to mark.
-    if let Some(id) = task_id_of(owner) {
-        PENDING_KILL.store(id, Ordering::Relaxed);
-    }
+    // task (an Unused slot) cannot happen, since ownership reverts on
+    // death; if a future death path forgets that, say so rather than
+    // silently eat every Ctrl+C, and let the byte through.
+    let Some(id) = task_id_of(owner) else {
+        crate::console::println_force!(
+            "Ouroboros kernel: keyboard owner slot {owner} holds no task - a kernel bug (a death path skipped revert_input_owner_if)"
+        );
+        return false;
+    };
+    PENDING_KILL.store(id, Ordering::Relaxed);
     true
 }
 
@@ -1355,7 +1360,16 @@ fn clear_parent(slot: usize) {
 pub(crate) fn is_child_of(child: usize, parent: usize) -> bool {
     // No live identity is ever 0 (generations start at 1), so the 0 that
     // PARENTS holds for "no parent" matches nothing by construction.
-    child < NUM_TASKS && task_id_of(parent).is_some_and(|p| PARENTS[child].load(Ordering::Relaxed) == p)
+    child < NUM_TASKS && occupant_is(parent, PARENTS[child].load(Ordering::Relaxed))
+}
+
+/// Whether `id` (a packed identity, see [`task_id_of`]) still names the
+/// occupant of `slot`: the one spelling of that question, for every
+/// place that remembered an occupant and now needs to know whether it is
+/// still there (the parent link, the Ctrl+C mark). `0` names no task, so
+/// a "none" sentinel compares false by construction.
+pub(crate) fn occupant_is(slot: usize, id: u64) -> bool {
+    task_id_of(slot) == Some(id) && id != 0
 }
 
 /// Whether `src` holds a send right to `dest`, statically or by delegation -
@@ -2495,12 +2509,10 @@ pub unsafe fn on_tick(frame: *mut Context) {
     // different generation than the mark (not the same occupant, so
     // skipped). Tearing either down would kill a task that was never
     // interrupted.
-    // 0 is "nothing pending" and can match no occupant (task_id_of never
-    // answers 0), so the guard below is for the reader, not the machine.
-    let victim = (pending != 0)
-        .then(|| syscall_abi::task_id_slot(pending) as usize)
-        .and_then(live_index)
-        .filter(|v| v.is_spawnable() && task_id_of(v.index()) == Some(pending));
+    // 0 ("nothing pending") names slot 0 and no generation, so it fails
+    // is_spawnable and occupant_is alike; no separate guard is needed.
+    let victim = live_index(syscall_abi::task_id_slot(pending) as usize)
+        .filter(|v| v.is_spawnable() && occupant_is(v.index(), pending));
     if let Some(victim_slot) = victim {
         crate::console::println!("Ouroboros kernel: Ctrl+C - foreground task {} terminated", victim_slot.index());
         if victim_slot == current {
