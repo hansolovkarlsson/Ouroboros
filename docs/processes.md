@@ -557,8 +557,9 @@ Worth knowing before building further on this:
   real limits: a task can end itself (`exit`, syscall 17 - slot freed,
   region unmapped, RAM reclaimed in the common LIFO case), another
   task can be ended (`kill`, 19), the keyboard can be handed to a
-  spawned task and back (`fg`, 20 - ownership reverts to task 0 when
-  the owner dies; Ctrl+C reclaims it), and a task's exit status can be
+  spawned task and back (`fg`, 20 - ownership reverts to the task that
+  handed it over when the owner dies, or to task 0 if that task is gone;
+  Ctrl+C kills the owner, which is how it is reclaimed), and a task's exit status can be
   awaited and collected (`wait`, 21 - exited tasks hold their slot as
   zombies until waited; `kill` reaps immediately),
   no way to reload an *already-running* task's program in place, and

@@ -570,7 +570,8 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
         // Only the keyboard owner's reads consume keystrokes: the poll
         // answers None for anyone else without touching the input (see
         // poll_keyboard_byte), so a non-owner gets NO_CHAR here, or blocks
-        // below until ownership reaches it (an FG, or the revert to task 0).
+        // below until ownership reaches it (an FG, or the revert on the
+        // owner's death).
         syscall_abi::TRY_READ_CHAR => match poll_keyboard_byte(tasks::current_task()) {
             Some(byte) => byte as u64,
             None => NO_CHAR,
