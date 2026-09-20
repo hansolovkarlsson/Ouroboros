@@ -1875,7 +1875,7 @@ fn print_fs_error(cmd: &str, code: u64) {
         // Names the whole protected set: a message listing a stale subset is how
         // a reader concludes a newly added server is fair game.
         syscall_abi::TASK_ERR_PROTECTED => "that task is protected (the boot shell, idle, and the fsd/cond/netd/accountd servers are permanent)",
-        syscall_abi::TASK_ERR_SELF => "that is this task itself (a task cannot kill, wait on or call itself; a foreground child shell is ended with Ctrl+C)",
+        syscall_abi::TASK_ERR_SELF => "that is this task itself (a task cannot kill, wait on or call itself)",
         _ => "failed",
     });
 }

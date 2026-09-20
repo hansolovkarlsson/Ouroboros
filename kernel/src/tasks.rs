@@ -145,8 +145,7 @@ mod task_index {
         /// Whether this slot is one `spawn` may fill, as opposed to a
         /// permanent one (the boot shell, idle and the servers, every
         /// slot below [`FIRST_SPAWNABLE`]). The one home of that bound
-        /// for the syscall arms: `KILL`, `WAIT` and `FG` refuse a
-        /// non-spawnable target and the Ctrl+C guard ignores one.
+        /// for every arm and guard that asks it; which ones is a grep.
         pub(crate) const fn is_spawnable(self) -> bool {
             self.0 >= FIRST_SPAWNABLE
         }
@@ -1104,15 +1103,13 @@ static IDS: [AtomicU64; NUM_TASKS] = [const { AtomicU64::new(0) }; NUM_TASKS];
 static SAVED_IDS: [AtomicU64; NUM_TASKS] = [const { AtomicU64::new(0) }; NUM_TASKS];
 
 /// Whether `task` is a live task - one that could actually have sent a message
-/// worth authorizing. A `Zombie` has run and died; an `Unused` slot has had its
+/// worth authorizing: [`task_exists`], under the name the identity arms
+/// use, so there is one liveness predicate. A `Zombie` has run and died; an `Unused` slot has had its
 /// identity reset to root by [`reset_id`], which is precisely why `GET_ID` must
 /// not answer for either: a server that authorizes on the sender's identity
 /// would read a caller that exited as ROOT.
 pub(crate) fn is_live(task: usize) -> bool {
-    !matches!(
-        unsafe { *STATES[task].0.get() },
-        TaskState::Unused | TaskState::Zombie(_)
-    )
+    task_exists(task)
 }
 
 /// Per-task **supplementary groups**: the gids a task belongs to *in addition*
@@ -1715,19 +1712,38 @@ static STATES: [StateSlot; NUM_TASKS] = [
 /// runnable. That fallback is unreachable today (task 1, the idle task,
 /// never blocks - see this module's doc comment for why it can't safely
 /// use `wfe` either, so it has to stay a real, always-runnable busy-spin),
-/// but a "stay put" is the right behavior if that ever stops being true,
-/// not a panic - for a caller whose `from` is still a live task. The two
-/// callers that have just torn `from` down go through
-/// [`switch_away_from_dead`], which treats the fallback as a halt.
-fn next_runnable(from: TaskIndex) -> TaskIndex {
+/// so `None` is unreachable today; every caller goes through
+/// [`next_or_halt`], which reports and halts on it rather than resume a
+/// task whose state says it must not run.
+fn next_runnable(from: TaskIndex) -> Option<TaskIndex> {
     let mut candidate = from;
     for _ in 0..NUM_TASKS {
         candidate = candidate.succ();
         if unsafe { *STATES[candidate.index()].0.get() } == TaskState::Runnable {
-            return candidate;
+            return Some(candidate);
         }
     }
-    from
+    None
+}
+
+/// [`next_runnable`], for a caller that has no safe "stay put": the
+/// scan includes `from` itself as its last candidate, so `None` means
+/// nothing at all is runnable, which cannot happen while the idle task
+/// never blocks. If it ever does, every switch path halts here with a
+/// report rather than resuming a task whose state says it must not run
+/// (Blocked, or torn down). One place, so the three callers cannot
+/// disagree about what the fallback means.
+fn next_or_halt(from: TaskIndex) -> TaskIndex {
+    match next_runnable(from) {
+        Some(next) => next,
+        None => {
+            crate::console::println_force!(
+                "Ouroboros kernel: nothing runnable after task {} (the idle task should never block) - halting",
+                from.index()
+            );
+            crate::power::halt();
+        }
+    }
 }
 
 /// Like [`next_runnable`], but skips the idle task unless it's the only thing
@@ -1745,7 +1761,7 @@ fn next_runnable_skip_idle(from: TaskIndex) -> TaskIndex {
         }
     }
     // Nothing else runnable - fall back (idle, or stay put).
-    next_runnable(from)
+    next_or_halt(from)
 }
 
 /// Voluntarily give up the CPU (the `YIELD` syscall): save the current task -
@@ -1847,7 +1863,7 @@ pub(crate) unsafe fn block_current_and_switch_to(
         {
             p
         }
-        _ => next_runnable(current),
+        _ => next_or_halt(current),
     };
     *frame = unsafe { *TASKS[next.index()].0.get() };
     set_current(next);
@@ -1980,20 +1996,15 @@ pub(crate) unsafe fn kill_current_and_switch(frame: *mut Context) {
 
 /// The context switch that follows a teardown of `dead`, the task that
 /// was running: load the next runnable task into `frame` and activate
-/// its view. `next_runnable`'s "stay put" fallback is not safe here -
-/// `dead`'s region is freed and its state is `Zombie`/`Unused`, so
-/// resuming it would `eret` into freed memory under a stale view, the
-/// same fault a self-`KILL` used to produce. Unreachable while the idle
-/// task is always runnable; a reported halt if that ever changes.
+/// its view. There is no "stay put" here: `dead`'s region is freed and
+/// its state is `Zombie`/`Unused`, so resuming it would `eret` into
+/// freed memory under a stale view, the same fault a self-`KILL` used to
+/// produce; [`next_or_halt`] reports and halts instead if nothing else
+/// is runnable.
 fn switch_away_from_dead(frame: &mut Context, dead: TaskIndex) {
-    let next = next_runnable(dead);
-    if next == dead {
-        crate::console::println_force!(
-            "Ouroboros kernel: task {} ended with nothing else runnable (the idle task should never block) - halting",
-            dead.index()
-        );
-        crate::power::halt();
-    }
+    // `dead` is torn down, so it is never Runnable and the scan cannot
+    // return it; None means nothing runnable, and next_or_halt reports.
+    let next = next_or_halt(dead);
     *frame = unsafe { *TASKS[next.index()].0.get() };
     set_current(next);
     crate::mmu::activate_task(next);
@@ -2043,14 +2054,13 @@ pub(crate) fn install_task(slot: usize, context: Context, region: (u64, u64)) {
 }
 
 /// A caller-supplied slot number as a [`TaskIndex`] that names a LIVE
-/// task, or `None`: the one spelling of "range-checked and occupied",
-/// for an arm that acts on another task (`FG`, `MSG_SEND`, `MSG_CALL`)
-/// and for the Ctrl+C victim guard. `KILL` and `WAIT` take the two
-/// questions apart on purpose, range ([`TaskIndex::new`]) and then the
-/// protected bound ([`TaskIndex::is_spawnable`]) before liveness, so a
-/// protected slot answers "protected" whether or not it is occupied;
-/// and a `WAIT`'s target may be a Zombie, which is not live by
-/// [`task_exists`]'s definition but is exactly what a `WAIT` collects.
+/// task, or `None`: the one spelling of "range-checked and occupied".
+/// Which arms use it is a grep, not a list here. An arm that must
+/// answer "protected" whether or not the slot is occupied takes the two
+/// questions apart instead, range ([`TaskIndex::new`]) and the bound
+/// ([`TaskIndex::is_spawnable`]) before liveness; and a `WAIT`'s target
+/// may be a Zombie, which is not live but is exactly what a `WAIT`
+/// collects, so it uses the range check alone.
 pub(crate) fn live_index(i: usize) -> Option<TaskIndex> {
     TaskIndex::new(i).filter(|t| is_occupied(*t))
 }
@@ -2537,7 +2547,7 @@ pub unsafe fn on_tick(frame: *mut Context) {
         }
     }
 
-    let next = next_runnable(current);
+    let next = next_or_halt(current);
     if next == current {
         // Nothing else runnable - stay put rather than pointlessly saving
         // and reloading the same context.

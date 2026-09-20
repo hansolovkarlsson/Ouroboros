@@ -1017,7 +1017,7 @@ the sign the foundations are right. In the order that worked:
   owner dies. Add a Ctrl+C intercept at the single point all keyboard
   input flows through, and a stuck foreground task can never brick the
   session.
-- **IPC.** Fixed-size messages (64 bytes) copied through the kernel
+- **IPC.** Bounded messages (up to 768 bytes) copied through the kernel
   into bounded per-task mailboxes; blocking receive is one more wait
   reason. No shared memory — copying is the isolation-friendly
   semantics, and at this size it's free. This is the doorway to the

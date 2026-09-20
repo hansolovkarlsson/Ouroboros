@@ -843,7 +843,7 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
             // sender's list on every permission check. A dead slot reports no
             // identity (see GET_ID), so it reports no groups either.
             let t = arg0 as usize;
-            if t >= tasks::NUM_TASKS || !tasks::is_live(t) {
+            if !tasks::is_live(t) {
                 return syscall_abi::GET_ID_ERR;
             }
             let cap = (arg2 as usize).min(syscall_abi::MAX_SUPP_GROUPS);
@@ -872,7 +872,7 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
             // GET_ID of the message sender would read a caller who sent a
             // request and then exited as ROOT - send it, exit, be authorized.
             // Report unavailable and let the caller fail closed.
-            if t >= tasks::NUM_TASKS || !tasks::is_live(t) {
+            if !tasks::is_live(t) {
                 syscall_abi::GET_ID_ERR
             } else {
                 tasks::id_of(t)
@@ -1442,10 +1442,10 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
             let dir = arg3;
             let valid_dir =
                 dir != 0 && dir & !(syscall_abi::GRANT_READ | syscall_abi::GRANT_WRITE) == 0;
-            let grantee = tasks::live_index(arg0 as usize);
-            let Some(grantee) = grantee.filter(|_| {
-                valid_dir && arg2 != 0 && arg2 <= syscall_abi::SAFECOPY_MAX && in_caller_region(arg1, arg2)
-            }) else {
+            if !valid_dir || arg2 == 0 || arg2 > syscall_abi::SAFECOPY_MAX || !in_caller_region(arg1, arg2) {
+                return syscall_abi::GRANT_ERR;
+            }
+            let Some(grantee) = tasks::live_index(arg0 as usize) else {
                 return syscall_abi::GRANT_ERR;
             };
             tasks::set_grant(tasks::current_task(), grantee.index(), arg1, arg2, dir);

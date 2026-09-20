@@ -1915,8 +1915,8 @@ would otherwise silently shrink into looking like nothing was ever found.
     `tasks::TaskIndex`, a `usize` below `NUM_TASKS` by construction, with
     its field private to a nested module so that even `tasks.rs` cannot
     spell `TaskIndex(x)`: the constructors are `new` (checked, `None` past
-    the end; used where a caller-supplied slot becomes one: the `MSG_CALL`,
-    `KILL`, `WAIT` and `FG` targets, and the Ctrl+C victim in `on_tick`), the constants `FIRST` and `IDLE`, `all`, and `succ` (the
+    the end; used wherever a caller-supplied slot becomes one, which is
+    a grep and not a list here), the constants `FIRST` and `IDLE`, `all`, and `succ` (the
     round-robin step, from a slot that already exists). There is no total
     `usize -> TaskIndex` constructor: the first round had a `wrapping`
     modulo, and its review found it used as a clamp twice (the

@@ -1576,9 +1576,10 @@ pub const SPAWN_ERR_IMAGE_TOO_LARGE: u64 = u64::MAX - 41;
 /// tells them apart today; `libc`'s `sys.h` mirrors no task code and its
 /// programs print "failed" for anything in the band, so a C program does
 /// not benefit until that header names it (a do-when-touched item in
-/// `ROADMAP.md`). A task ends itself with [`EXIT`]; a child
-/// shell is ended with Ctrl+C or killed from its parent (its `exit` only
-/// logs out). Reserved 2026-09-19, moving the floor to `MAX-43`.
+/// `ROADMAP.md`). A task ends itself with [`EXIT`]; a shell's `exit`
+/// only logs out, so a child shell is ended from outside (Ctrl+C while it
+/// holds the keyboard, or `KILL` from its parent). Reserved 2026-09-19,
+/// moving the floor to `MAX-43`.
 pub const TASK_ERR_SELF: u64 = u64::MAX - 42;
 
 /// **Cross-device move**: `mv`'s source and destination resolved to different
