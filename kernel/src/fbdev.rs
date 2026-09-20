@@ -37,9 +37,12 @@ struct FbDev {
 }
 
 struct FbCell(UnsafeCell<Option<FbDev>>);
-// SAFETY: single-core; set once at boot before any task runs, then only
-// read/written from within the FB_* syscall arms (IRQs masked, never
-// reentrant) - the same reasoning as every other per-boot global here.
+// SAFETY: the `synccell` module's argument (one core, interrupts masked
+// for the whole of every EL1 context), which `SyncCell` would state for
+// us except that `FbDev` holds the framebuffer's raw `*mut u8` and is not
+// `Send`, so the bound refuses it and this wrapper argues its own case:
+// set once at boot before any task runs, then only read/written from
+// within the FB_* syscall arms (IRQs masked, never reentrant).
 unsafe impl Sync for FbCell {}
 static FB: FbCell = FbCell(UnsafeCell::new(None));
 

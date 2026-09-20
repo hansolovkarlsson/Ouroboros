@@ -43,9 +43,8 @@
 //!
 //! [`KERNEL_SENDER`]: syscall_abi::KERNEL_SENDER
 
-use core::cell::UnsafeCell;
-
 use crate::console;
+use crate::synccell::SyncCell;
 use crate::exceptions::Context;
 use crate::loader;
 use crate::tasks;
@@ -159,13 +158,7 @@ impl Entry {
     }
 }
 
-struct Registry(UnsafeCell<[Entry; MAX_SUPERVISED]>);
-// SAFETY: single-core; entries are filled once at boot (`register`, during
-// boot services) and afterward only touched from the EL0-fault handler and
-// `on_tick`, both of which run with all exceptions masked - never
-// reentrant, the same contract the old `FSD_IMAGE` static relied on.
-unsafe impl Sync for Registry {}
-static REGISTRY: Registry = Registry(UnsafeCell::new([const { Entry::empty() }; MAX_SUPERVISED]));
+static REGISTRY: SyncCell<[Entry; MAX_SUPERVISED]> = SyncCell::new([const { Entry::empty() }; MAX_SUPERVISED]);
 
 /// Stash `slot`'s ELF image and mark it supervised. Called once per server
 /// by `loader.rs` during boot services (`load_fsd`/`load_cond`). Returns
@@ -175,7 +168,7 @@ pub fn register(slot: usize, image: &[u8]) -> Registered {
     if image.is_empty() || image.len() > IMG_CAP {
         return Registered::ImageTooLarge;
     }
-    let reg = unsafe { &mut *REGISTRY.0.get() };
+    let reg = unsafe { &mut *REGISTRY.get() };
     let idx = reg
         .iter()
         .position(|e| e.slot == Some(slot))
@@ -224,7 +217,7 @@ impl Registered {
 /// Whether `slot` is a supervised server - the generic replacement for the
 /// fault handler's old `if current == FSD_TASK` check.
 pub fn is_supervised(slot: usize) -> bool {
-    let reg = unsafe { &*REGISTRY.0.get() };
+    let reg = unsafe { &*REGISTRY.get() };
     reg.iter().any(|e| e.slot == Some(slot))
 }
 
@@ -236,7 +229,7 @@ pub fn is_supervised(slot: usize) -> bool {
 /// cap guards crash/wedge loops. Safe to call whether the dead task was
 /// the current one or not - it only touches this slot.
 pub fn restart(slot: usize) {
-    let reg = unsafe { &mut *REGISTRY.0.get() };
+    let reg = unsafe { &mut *REGISTRY.get() };
     let Some(e) = reg.iter_mut().find(|e| e.slot == Some(slot)) else {
         return;
     };
@@ -299,7 +292,7 @@ pub fn restart(slot: usize) {
 /// been continuously `Runnable` for [`WEDGE_TICKS`] - the wedge signal, on
 /// which the caller restarts it. A no-op for an unregistered slot.
 pub fn heartbeat(slot: usize, blocked: bool) -> bool {
-    let reg = unsafe { &mut *REGISTRY.0.get() };
+    let reg = unsafe { &mut *REGISTRY.get() };
     let Some(e) = reg.iter_mut().find(|e| e.slot == Some(slot)) else {
         return false;
     };
@@ -323,7 +316,7 @@ pub fn heartbeat(slot: usize, blocked: bool) -> bool {
 ///
 /// [`KERNEL_SENDER`]: syscall_abi::KERNEL_SENDER
 pub fn note_ack(slot: usize) {
-    let reg = unsafe { &mut *REGISTRY.0.get() };
+    let reg = unsafe { &mut *REGISTRY.get() };
     if let Some(e) = reg.iter_mut().find(|e| e.slot == Some(slot)) {
         // ALSO clears the PASSIVE counter, which makes this more than "the
         // ping was answered": it is "this server is alive", from the only
@@ -369,7 +362,7 @@ pub fn note_ack(slot: usize) {
 ///   ([`PingAction::Inject`]) and mark it outstanding. One ping outstanding
 ///   at a time, so the server's 4-deep mailbox can never fill with pings.
 pub fn poll_ping(slot: usize, blocked: bool) -> PingAction {
-    let reg = unsafe { &mut *REGISTRY.0.get() };
+    let reg = unsafe { &mut *REGISTRY.get() };
     let Some(e) = reg.iter_mut().find(|e| e.slot == Some(slot)) else {
         return PingAction::None;
     };

@@ -144,6 +144,7 @@
 //! file.
 
 use core::arch::asm;
+use crate::synccell::SyncCell;
 use core::cell::UnsafeCell;
 
 use crate::tasks::TaskIndex;
@@ -201,12 +202,13 @@ const MIB2: u64 = 2 * 1024 * 1024;
 const ENTRIES_PER_TABLE: usize = 512;
 
 #[repr(align(4096))]
-struct Table(UnsafeCell<[u64; ENTRIES_PER_TABLE]>);
+struct Table(SyncCell<[u64; ENTRIES_PER_TABLE]>);
 
-// SAFETY: single-core, no preemption - nothing else touches these
-// concurrently. Each is populated once, before it's ever reachable via
-// TTBR0_EL1.
-unsafe impl Sync for Table {}
+impl Table {
+    const fn get(&self) -> *mut [u64; ENTRIES_PER_TABLE] {
+        self.0.get()
+    }
+}
 
 /// One EL0 region slot per task, and, since the per-task page-tables
 /// milestone, also the number of translation-table *views*: view i
@@ -235,9 +237,9 @@ const MAX_EL0_REGIONS: usize = crate::tasks::NUM_TASKS;
 // then touches one constant, not four table arrays. `Table` isn't `Copy`
 // (`UnsafeCell` isn't), which is why the repeat needs the inline-const form.
 static L0_TABLES: [Table; MAX_EL0_REGIONS] =
-    [const { Table(UnsafeCell::new([0; ENTRIES_PER_TABLE])) }; MAX_EL0_REGIONS];
+    [const { Table(SyncCell::new([0; ENTRIES_PER_TABLE])) }; MAX_EL0_REGIONS];
 static L1_TABLES: [Table; MAX_EL0_REGIONS] =
-    [const { Table(UnsafeCell::new([0; ENTRIES_PER_TABLE])) }; MAX_EL0_REGIONS];
+    [const { Table(SyncCell::new([0; ENTRIES_PER_TABLE])) }; MAX_EL0_REGIONS];
 
 /// The most `extra_devices` entries `install_identity_map` has ever been
 /// called with - matches `main.rs`'s own fixed-size staging array
@@ -253,17 +255,18 @@ const MAX_EXTRA_DEVICES: usize = 4;
 /// parameter) rather than copying - the caller only ever needs to supply
 /// it once.
 struct StoredMapCell(UnsafeCell<Option<MemoryMapOwned>>);
-struct StoredExtraDevicesCell(UnsafeCell<([(u64, u64); MAX_EXTRA_DEVICES], usize)>);
 
-// SAFETY: single-core; written once by `install_identity_map`'s first
-// call, before any code that could race it exists, and only ever read
-// (not mutated) afterward.
+// SAFETY: the `synccell` module's argument (one core, interrupts masked
+// for the whole of every EL1 context), which `SyncCell` would state for
+// us except that `MemoryMapOwned` holds a `NonNull` and is not `Send`, so
+// the bound refuses it and this wrapper argues its own case: written once
+// by `install_identity_map`'s first call, before any code that could race
+// it exists, and only ever read (not mutated) afterward.
 unsafe impl Sync for StoredMapCell {}
-unsafe impl Sync for StoredExtraDevicesCell {}
 
 static STORED_MEMORY_MAP: StoredMapCell = StoredMapCell(UnsafeCell::new(None));
-static STORED_EXTRA_DEVICES: StoredExtraDevicesCell =
-    StoredExtraDevicesCell(UnsafeCell::new(([(0, 0); MAX_EXTRA_DEVICES], 0)));
+static STORED_EXTRA_DEVICES: SyncCell<([(u64, u64); MAX_EXTRA_DEVICES], usize)> =
+    SyncCell::new(([(0, 0); MAX_EXTRA_DEVICES], 0));
 
 // One L0 entry (`L1_TABLE` above, always L0 index 0) covers the first
 // 512GB of VA space (512 entries * 1GB each) - enough for every RAM
@@ -295,10 +298,10 @@ static STORED_EXTRA_DEVICES: StoredExtraDevicesCell =
 // slot is one 4KB table.
 const MAX_EXTRA_L1_TABLES: usize = 4;
 static EXTRA_L1_TABLES: [Table; MAX_EXTRA_L1_TABLES] = [
-    Table(UnsafeCell::new([0; ENTRIES_PER_TABLE])),
-    Table(UnsafeCell::new([0; ENTRIES_PER_TABLE])),
-    Table(UnsafeCell::new([0; ENTRIES_PER_TABLE])),
-    Table(UnsafeCell::new([0; ENTRIES_PER_TABLE])),
+    Table(SyncCell::new([0; ENTRIES_PER_TABLE])),
+    Table(SyncCell::new([0; ENTRIES_PER_TABLE])),
+    Table(SyncCell::new([0; ENTRIES_PER_TABLE])),
+    Table(SyncCell::new([0; ENTRIES_PER_TABLE])),
 ];
 
 // One L2 + one L3 per *view* (not per region-in-a-shared-map, the
@@ -309,10 +312,10 @@ static EXTRA_L1_TABLES: [Table; MAX_EXTRA_L1_TABLES] = [
 // shared map's up-to-five-splits bookkeeping.
 
 static EL0_L2_TABLES: [Table; MAX_EL0_REGIONS] =
-    [const { Table(UnsafeCell::new([0; ENTRIES_PER_TABLE])) }; MAX_EL0_REGIONS];
+    [const { Table(SyncCell::new([0; ENTRIES_PER_TABLE])) }; MAX_EL0_REGIONS];
 
 static EL0_L3_TABLES: [Table; MAX_EL0_REGIONS] =
-    [const { Table(UnsafeCell::new([0; ENTRIES_PER_TABLE])) }; MAX_EL0_REGIONS];
+    [const { Table(SyncCell::new([0; ENTRIES_PER_TABLE])) }; MAX_EL0_REGIONS];
 
 // Stage-1 descriptor bit positions (VMSAv8-64, 4KB granule), cross-checked
 // against Linux's arch/arm64/include/asm/pgtable-hwdef.h rather than
@@ -477,7 +480,7 @@ pub unsafe fn install_identity_map(
     let mut stored = [(0u64, 0u64); MAX_EXTRA_DEVICES];
     let count = extra_devices.len().min(MAX_EXTRA_DEVICES);
     stored[..count].copy_from_slice(&extra_devices[..count]);
-    unsafe { *STORED_EXTRA_DEVICES.0.get() = (stored, count) };
+    unsafe { *STORED_EXTRA_DEVICES.get() = (stored, count) };
     unsafe { *STORED_MEMORY_MAP.0.get() = Some(memory_map) };
     // Re-borrow from the stash rather than the original parameter (now
     // moved) - the rest of this function is unchanged either way.
@@ -514,7 +517,7 @@ pub unsafe fn install_identity_map(
 pub(crate) unsafe fn rebuild_with_el0_regions(el0_regions: [(u64, u64); MAX_EL0_REGIONS]) {
     let memory_map = unsafe { (*STORED_MEMORY_MAP.0.get()).as_ref() }
         .expect("install_identity_map must run before rebuild_with_el0_regions");
-    let (extra_devices, count) = unsafe { *STORED_EXTRA_DEVICES.0.get() };
+    let (extra_devices, count) = unsafe { *STORED_EXTRA_DEVICES.get() };
     unsafe { build_tables(memory_map, el0_regions, &extra_devices[..count], false) };
 }
 
@@ -594,7 +597,7 @@ unsafe fn build_tables(memory_map: &MemoryMapOwned, el0_regions: [(u64, u64); MA
                 slot
             }
         };
-        let shared_l1 = unsafe { &mut *EXTRA_L1_TABLES[slot].0.get() };
+        let shared_l1 = unsafe { &mut *EXTRA_L1_TABLES[slot].get() };
         if shared_l1[l1_idx] == 0 {
             shared_l1[l1_idx] = device_block(base);
             if log {
@@ -654,7 +657,7 @@ unsafe fn build_view(
     extra_l1_count: usize,
     l1_span_devices: &[(usize, u64)],
 ) {
-    let l1 = unsafe { &mut *L1_TABLES[view.index()].0.get() };
+    let l1 = unsafe { &mut *L1_TABLES[view.index()].get() };
 
     // One L2 and one L3 per view is enough because a region fits one 2MB
     // slot (the loader's bound plus 2MB-aligned bases, see
@@ -708,12 +711,12 @@ unsafe fn build_view(
                 // This view's own region lives in this block - split it
                 // so only the region's own pages get EL0 access (one
                 // sub-slot: the containment check above).
-                let l2 = unsafe { &mut *EL0_L2_TABLES[view.index()].0.get() };
+                let l2 = unsafe { &mut *EL0_L2_TABLES[view.index()].get() };
                 for (i, entry) in l2.iter_mut().enumerate() {
                     let sub_base = block_start + (i as u64) * MIB2;
                     let sub_end = sub_base + MIB2;
                     if overlaps(el0_region, sub_base, sub_end) {
-                        let l3 = unsafe { &mut *EL0_L3_TABLES[view.index()].0.get() };
+                        let l3 = unsafe { &mut *EL0_L3_TABLES[view.index()].get() };
                         // The loader owns the region layout; ask it.
                         let guard = guard_page_addr(el0_region);
                         for (j, page) in l3.iter_mut().enumerate() {
@@ -731,12 +734,12 @@ unsafe fn build_view(
                                 kernel_page_4k(page_base)
                             };
                         }
-                        *entry = table_desc(EL0_L3_TABLES[view.index()].0.get() as u64);
+                        *entry = table_desc(EL0_L3_TABLES[view.index()].get() as u64);
                     } else {
                         *entry = kernel_block_2m(sub_base);
                     }
                 }
-                l1[idx] = table_desc(EL0_L2_TABLES[view.index()].0.get() as u64);
+                l1[idx] = table_desc(EL0_L2_TABLES[view.index()].get() as u64);
             } else {
                 l1[idx] = normal_block(block_start);
             }
@@ -752,15 +755,15 @@ unsafe fn build_view(
         }
     }
 
-    let l0 = unsafe { &mut *L0_TABLES[view.index()].0.get() };
-    l0[0] = table_desc(L1_TABLES[view.index()].0.get() as u64);
+    let l0 = unsafe { &mut *L0_TABLES[view.index()].get() };
+    l0[0] = table_desc(L1_TABLES[view.index()].get() as u64);
     // Shared extra-device L1 tables (64-bit PCI BARs past 512GB, etc.) -
     // identical entries in every view, so every view's L0 points at the
     // same tables.
     for slot in 0..extra_l1_count {
         let l0_idx = extra_l1_owners[slot];
         if l0_idx != usize::MAX && l0_idx < ENTRIES_PER_TABLE {
-            l0[l0_idx] = table_desc(EXTRA_L1_TABLES[slot].0.get() as u64);
+            l0[l0_idx] = table_desc(EXTRA_L1_TABLES[slot].get() as u64);
         }
     }
 }
@@ -792,7 +795,7 @@ fn l0_table(view: TaskIndex) -> &'static Table {
 /// entries) makes this a plain TTBR0 write; if that ever misbehaves on
 /// real hardware, this version is the known-correct fallback.
 pub(crate) fn activate_task(view: TaskIndex) {
-    let ttbr0 = l0_table(view).0.get() as u64;
+    let ttbr0 = l0_table(view).get() as u64;
     unsafe {
         asm!(
             "msr ttbr0_el1, {0}",
@@ -845,7 +848,7 @@ unsafe fn switch_full(view: TaskIndex) {
         | (0b10 << 30)               // TG1: 4KB granule (TTBR1 encoding)
         | (ips << 32); // IPS: from hardware
 
-    let ttbr0_el1 = l0_table(view).0.get() as u64;
+    let ttbr0_el1 = l0_table(view).get() as u64;
 
     // Masked and left masked: between the MAIR/TCR write and the TTBR0
     // switch below, code is still running under firmware's *old* tables

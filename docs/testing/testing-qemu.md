@@ -71,6 +71,13 @@ both load-bearing:
 A timeout prints which pattern it was waiting for, which is usually enough to
 see whether the guest died or the prompt simply differs from the regex.
 
+**A boot started in the same command as `make image` can hang in the
+firmware** before its `BdsDxe: loading Boot0001` line, with no kernel output
+at all. Measured 2026-09-20: three such hangs, each immediately after
+`make image` in one shell command, and every retry of the same image booted.
+Not attributed; if the first pattern waited for is `login:` and the transcript
+ends at the firmware's clear-screen, rerun before suspecting the kernel.
+
 **The nested shell keeps the keyboard.** The keyboard reverts, on its owner's
 death, to the task that held it when `fg` handed it over (`PREVIOUS_OWNERS`
 in `tasks.rs`), which is what lets a shell spawned from a shell run more than

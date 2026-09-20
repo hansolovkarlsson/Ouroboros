@@ -19,8 +19,8 @@ use crate::{gicv2, gicv3};
 struct GicCell(Cell<Option<GicInfo>>);
 
 // SAFETY: single-core, no preemption, no interrupts unmasked until after
-// `init` has run - same reasoning `console.rs`'s `ConsoleCell` already
-// documents for the identical pattern.
+// `init` has run - the `synccell` module's argument; this stays a `Cell`
+// rather than a `SyncCell` because its two users want `get`/`set` by value.
 unsafe impl Sync for GicCell {}
 
 static INFO: GicCell = GicCell(Cell::new(None));

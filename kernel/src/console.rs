@@ -2,8 +2,8 @@
 //! exception handler — a fault needs somewhere to report through too, if a
 //! console happens to have been installed before it fired.
 
-use core::cell::UnsafeCell;
 use core::fmt;
+use crate::synccell::SyncCell;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::fbconsole::FbConsole;
@@ -110,13 +110,7 @@ impl Console {
     }
 }
 
-struct ConsoleCell(UnsafeCell<Option<Console>>);
-
-// SAFETY: single-core, no preemption, no interrupts unmasked yet - nothing
-// can run concurrently with whatever's touching this.
-unsafe impl Sync for ConsoleCell {}
-
-static CONSOLE: ConsoleCell = ConsoleCell(UnsafeCell::new(None));
+static CONSOLE: SyncCell<Option<Console>> = SyncCell::new(None);
 
 /// When set, ordinary [`print`]/[`println`] output is suppressed - the
 /// "kernel console goes quiet once `cond` owns the screen" handoff.
@@ -135,7 +129,7 @@ static CONSOLE_QUIET: AtomicBool = AtomicBool::new(false);
 /// `exit_boot_services`, and only once.
 pub fn install(console: Console) {
     unsafe {
-        *CONSOLE.0.get() = Some(console);
+        *CONSOLE.get() = Some(console);
     }
 }
 
@@ -144,7 +138,7 @@ pub fn install(console: Console) {
 /// server share a screen and the kernel needs to go quiet. Used by `main`
 /// to decide whether to arm [`set_quiet`].
 pub fn is_framebuffer() -> bool {
-    matches!(unsafe { (*CONSOLE.0.get()).as_ref() }, Some(Console::Framebuffer(_)))
+    matches!(unsafe { (*CONSOLE.get()).as_ref() }, Some(Console::Framebuffer(_)))
 }
 
 /// Silence ([`true`]) or restore ([`false`]) ordinary kernel console
@@ -166,7 +160,7 @@ pub fn print(args: fmt::Arguments) {
 /// Like [`print`], but ignores [`set_quiet`] - for fault reports, which
 /// must reach a console even after the kernel has otherwise gone quiet.
 pub fn print_force(args: fmt::Arguments) {
-    if let Some(console) = unsafe { (*CONSOLE.0.get()).as_mut() } {
+    if let Some(console) = unsafe { (*CONSOLE.get()).as_mut() } {
         let _ = fmt::Write::write_fmt(console, args);
     }
 }
@@ -192,7 +186,7 @@ pub(crate) use println_force;
 /// Writes one raw byte to the global console if one has been installed;
 /// silently does nothing otherwise, same as [`print`].
 pub fn putc(byte: u8) {
-    if let Some(console) = unsafe { (*CONSOLE.0.get()).as_mut() } {
+    if let Some(console) = unsafe { (*CONSOLE.get()).as_mut() } {
         console.write_byte(byte);
     }
 }
@@ -200,12 +194,12 @@ pub fn putc(byte: u8) {
 /// Non-blocking read of one byte from the global console. `None` if there
 /// is no console installed yet, or there is one but nothing is waiting.
 pub fn read_byte() -> Option<u8> {
-    unsafe { (*CONSOLE.0.get()).as_mut() }.and_then(Console::read_byte)
+    unsafe { (*CONSOLE.get()).as_mut() }.and_then(Console::read_byte)
 }
 
 /// Whether a console has been installed yet - used by `main.rs` to decide
 /// whether a later fallback mechanism (virtio-console, then the
 /// framebuffer console) still needs to try.
 pub fn is_installed() -> bool {
-    unsafe { (*CONSOLE.0.get()).is_some() }
+    unsafe { (*CONSOLE.get()).is_some() }
 }

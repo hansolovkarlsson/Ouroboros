@@ -22,6 +22,7 @@ mod pci;
 mod power;
 mod supervisor;
 mod syscall;
+mod synccell;
 mod tasks;
 mod timer;
 mod uart;

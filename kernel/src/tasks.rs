@@ -63,7 +63,7 @@
 //! neither touches it, but a real limitation for whatever runs here next.
 
 use core::arch::{asm, global_asm};
-use core::cell::UnsafeCell;
+use crate::synccell::SyncCell;
 use core::ffi::c_void;
 use core::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
@@ -105,7 +105,7 @@ mod task_index {
     /// total `usize -> TaskIndex` constructor: a modulo would be a clamp
     /// wearing a type. Outside this module, `tasks.rs` itself cannot
     /// write `TaskIndex(x)`.
-    /// Named `TaskIndex` because `TaskSlot` is already the saved-context
+    /// Named `TaskIndex` because `TaskSlot` was already the saved-context
     /// cell in `TASKS`.
     #[derive(Clone, Copy, PartialEq, Eq, Debug)]
     pub(crate) struct TaskIndex(usize);
@@ -317,7 +317,7 @@ pub(crate) fn may_send(src: usize, dest: usize) -> bool {
     if dest >= NUM_TASKS {
         return false;
     }
-    if let TaskState::Blocked(WaitReason::Message { from: Some(f), .. }) = unsafe { *STATES[dest].0.get() } {
+    if let TaskState::Blocked(WaitReason::Message { from: Some(f), .. }) = unsafe { *STATES[dest].get() } {
         if f == src {
             return true;
         }
@@ -394,14 +394,15 @@ const IDLE_REGION_SIZE: usize = 0x1000;
 /// alignments; a single page was always fine, which is why the idle task
 /// alone never needed to move off this compile-time-static approach.
 #[repr(align(0x1000))]
-struct IdleRegion(UnsafeCell<[u8; IDLE_REGION_SIZE]>);
+struct IdleRegion(SyncCell<[u8; IDLE_REGION_SIZE]>);
 
-// SAFETY: single-core; written once by `init` before either task ever
-// runs, and only EL0 (isolated to this one region by `mmu.rs`) touches it
-// after that.
-unsafe impl Sync for IdleRegion {}
+impl IdleRegion {
+    const fn get(&self) -> *mut [u8; IDLE_REGION_SIZE] {
+        self.0.get()
+    }
+}
 
-static IDLE_REGION: IdleRegion = IdleRegion(UnsafeCell::new([0; IDLE_REGION_SIZE]));
+static IDLE_REGION: IdleRegion = IdleRegion(SyncCell::new([0; IDLE_REGION_SIZE]));
 
 global_asm!(
     r#"
@@ -423,20 +424,12 @@ unsafe extern "C" {
     static el0_idle_template_end: c_void;
 }
 
-struct TaskSlot(UnsafeCell<Context>);
-
-// SAFETY: single-core; only ever touched from EL1 with IRQs masked
-// (`init`, before either task runs) or from within the IRQ trampoline
-// itself (`on_tick`, which by construction can't run re-entrantly - taking
-// an exception masks further IRQs until the next `eret`).
-unsafe impl Sync for TaskSlot {}
-
 // `[const { … }; NUM_TASKS]` (not an explicit literal) so these per-slot
 // arrays auto-scale when NUM_TASKS changes (Stage 0) - the initializer is the
 // same for every slot, and the wrapper types aren't `Copy`, so the repeat
 // needs the inline-const form.
-static TASKS: [TaskSlot; NUM_TASKS] =
-    [const { TaskSlot(UnsafeCell::new(Context::zeroed())) }; NUM_TASKS];
+static TASKS: [SyncCell<Context>; NUM_TASKS] =
+    [const { SyncCell::new(Context::zeroed()) }; NUM_TASKS];
 
 /// Each task's own `(base, size)` EL0 region, recorded at creation time
 /// (`init` for the boot slots, `spawn` for any later one) and zeroed by
@@ -445,13 +438,8 @@ static TASKS: [TaskSlot; NUM_TASKS] =
 /// region. Needed so `spawn` and the enders can rebuild the *full*
 /// `el0_regions` array `mmu::rebuild_with_el0_regions` expects (every
 /// still-live task's region) without walking anything else.
-struct RegionSlot(UnsafeCell<(u64, u64)>);
-
-// SAFETY: same argument as `TaskSlot` above.
-unsafe impl Sync for RegionSlot {}
-
-static REGIONS: [RegionSlot; NUM_TASKS] =
-    [const { RegionSlot(UnsafeCell::new((0, 0))) }; NUM_TASKS];
+static REGIONS: [SyncCell<(u64, u64)>; NUM_TASKS] =
+    [const { SyncCell::new((0, 0)) }; NUM_TASKS];
 
 /// The `el0_regions` array every `mmu::rebuild_with_el0_regions` call
 /// needs: every task slot's own region, `(0, 0)` for any `Unused` one
@@ -474,13 +462,13 @@ pub(crate) fn is_boot_or_idle(slot: TaskIndex) -> bool {
 /// The `(base, size)` region recorded for task `i` at creation time
 /// (`(0, 0)` for the unused/never-created case).
 pub(crate) fn task_region(i: usize) -> (u64, u64) {
-    unsafe { *REGIONS[i].0.get() }
+    unsafe { *REGIONS[i].get() }
 }
 
 /// Task `i`'s state as its ABI code (`syscall-abi`'s `TASK_STATE_*`) -
 /// the `TASK_STATE` syscall's whole implementation, bounds check aside.
 pub(crate) fn task_state_code(i: usize) -> u64 {
-    match unsafe { *STATES[i].0.get() } {
+    match unsafe { *STATES[i].get() } {
         TaskState::Unused => syscall_abi::TASK_STATE_UNUSED,
         TaskState::Runnable => syscall_abi::TASK_STATE_RUNNABLE,
         TaskState::Blocked(_) => syscall_abi::TASK_STATE_BLOCKED,
@@ -494,9 +482,9 @@ pub(crate) fn task_state_code(i: usize) -> u64 {
 /// `WaitReason::TaskExit(target)`. Validation (range, protected,
 /// self-wait) is the syscall layer's job.
 pub(crate) fn try_reap(target: usize) -> Option<u64> {
-    match unsafe { *STATES[target].0.get() } {
+    match unsafe { *STATES[target].get() } {
         TaskState::Zombie(status) => {
-            unsafe { *STATES[target].0.get() = TaskState::Unused };
+            unsafe { *STATES[target].get() = TaskState::Unused };
             Some(status)
         }
         _ => None,
@@ -508,14 +496,14 @@ pub(crate) fn try_reap(target: usize) -> Option<u64> {
 /// peek behind the `TASK_EXIT_CODE` syscall, so `ps` can show the code while
 /// the slot is still held. Unlike [`try_reap`], leaves the state untouched.
 pub(crate) fn zombie_status(target: usize) -> Option<u64> {
-    match unsafe { *STATES[target].0.get() } {
+    match unsafe { *STATES[target].get() } {
         TaskState::Zombie(status) => Some(status),
         _ => None,
     }
 }
 
 pub(crate) fn el0_regions() -> [(u64, u64); NUM_TASKS] {
-    core::array::from_fn(|i| unsafe { *REGIONS[i].0.get() })
+    core::array::from_fn(|i| unsafe { *REGIONS[i].get() })
 }
 
 /// The one task on whose behalf `poll_keyboard_byte` will read hardware
@@ -745,7 +733,7 @@ fn issue_generation(slot: usize) {
 /// is still that occupant until reaped, which is what lets a server record a
 /// child that exited before the server got around to looking.
 pub(crate) fn task_id_of(slot: usize) -> Option<u64> {
-    if slot >= NUM_TASKS || matches!(unsafe { *STATES[slot].0.get() }, TaskState::Unused) {
+    if slot >= NUM_TASKS || matches!(unsafe { *STATES[slot].get() }, TaskState::Unused) {
         return None;
     }
     let g = GENERATIONS[slot].load(Ordering::Relaxed);
@@ -773,13 +761,8 @@ impl Mailbox {
     }
 }
 
-struct MailboxSlot(UnsafeCell<Mailbox>);
-// SAFETY: single-core, only touched from SVC dispatch and the tick
-// handler's wake-check - the same never-reentrant reasoning as every
-// other per-task cell in this module.
-unsafe impl Sync for MailboxSlot {}
-static MAILBOXES: [MailboxSlot; NUM_TASKS] =
-    [const { MailboxSlot(UnsafeCell::new(Mailbox::new())) }; NUM_TASKS];
+static MAILBOXES: [SyncCell<Mailbox>; NUM_TASKS] =
+    [const { SyncCell::new(Mailbox::new()) }; NUM_TASKS];
 
 /// `MSG_SEND`'s core: deliver `data` to `dest`. The caller validates
 /// `dest` exists; this only enforces the size and depth bounds.
@@ -802,7 +785,7 @@ pub(crate) fn send_message(sender: usize, dest: usize, data: &[u8]) -> u64 {
         return syscall_abi::MSG_ERR_TOO_BIG;
     }
     if let TaskState::Blocked(WaitReason::Message { buf, len, from }) =
-        unsafe { *STATES[dest].0.get() }
+        unsafe { *STATES[dest].get() }
     {
         if from.is_none() || from == Some(sender) {
             let copy_len = data.len().min(len as usize);
@@ -813,18 +796,18 @@ pub(crate) fn send_message(sender: usize, dest: usize, data: &[u8]) -> u64 {
                 // model as the wake-check's copy-out.
                 unsafe { core::ptr::write_volatile(dst.add(i), b) };
             }
-            unsafe { (*TASKS[dest].0.get()).gpr[0] = ((sender as u64) << 32) | copy_len as u64 };
+            unsafe { (*TASKS[dest].get()).gpr[0] = ((sender as u64) << 32) | copy_len as u64 };
             // No Message exists on this path, so the credential goes straight
             // into the receiver's cell - captured here, at send time, which is
             // the same instant it would have been captured into the queue.
             if from.is_none() {
                 record_sender_cred(dest, cred_of(sender));
             }
-            unsafe { *STATES[dest].0.get() = TaskState::Runnable };
+            unsafe { *STATES[dest].get() = TaskState::Runnable };
             return 0;
         }
     }
-    let mailbox = unsafe { &mut *MAILBOXES[dest].0.get() };
+    let mailbox = unsafe { &mut *MAILBOXES[dest].get() };
     if mailbox.count >= MSG_QUEUE_DEPTH {
         return syscall_abi::MSG_ERR_FULL;
     }
@@ -842,8 +825,8 @@ pub(crate) fn send_message(sender: usize, dest: usize, data: &[u8]) -> u64 {
     // a queued message. Mark it runnable now so a client call reaches it this
     // switch (sub-tick), not only on the next tick's wake-check. It drains
     // the mailbox itself on resume (NET_WAIT returns; the value is ignored).
-    if let TaskState::Blocked(WaitReason::NetInput { .. }) = unsafe { *STATES[dest].0.get() } {
-        unsafe { *STATES[dest].0.get() = TaskState::Runnable };
+    if let TaskState::Blocked(WaitReason::NetInput { .. }) = unsafe { *STATES[dest].get() } {
+        unsafe { *STATES[dest].get() = TaskState::Runnable };
     }
     0
 }
@@ -870,7 +853,7 @@ pub(crate) fn try_recv_message_from(
     buf_len: u64,
     from: Option<usize>,
 ) -> Option<u64> {
-    let mailbox = unsafe { &mut *MAILBOXES[task].0.get() };
+    let mailbox = unsafe { &mut *MAILBOXES[task].get() };
     let mut found = None;
     for i in 0..mailbox.count {
         let slot = (mailbox.head + i) % MSG_QUEUE_DEPTH;
@@ -909,7 +892,7 @@ pub(crate) fn try_recv_message_from(
 /// paths (`exit`/`kill`), so a later occupant of the same slot can
 /// never receive a predecessor's messages.
 pub(crate) fn clear_mailbox(task: usize) {
-    let mailbox = unsafe { &mut *MAILBOXES[task].0.get() };
+    let mailbox = unsafe { &mut *MAILBOXES[task].get() };
     mailbox.head = 0;
     mailbox.count = 0;
 }
@@ -934,18 +917,13 @@ impl Argv {
     }
 }
 
-struct ArgvSlot(UnsafeCell<Argv>);
-// SAFETY: single-core, non-reentrant - the same per-task-cell reasoning as
-// MAILBOXES; set_argv (from SPAWN) and the getters (from the child's own
-// syscalls) never run concurrently.
-unsafe impl Sync for ArgvSlot {}
-static ARGVS: [ArgvSlot; NUM_TASKS] =
-    [const { ArgvSlot(UnsafeCell::new(Argv::new())) }; NUM_TASKS];
+static ARGVS: [SyncCell<Argv>; NUM_TASKS] =
+    [const { SyncCell::new(Argv::new()) }; NUM_TASKS];
 
 /// Store a freshly spawned task's argv blob (from the `SPAWN` handler, which
 /// copies it out of the staging buffer). Truncated to `ARGV_CAP`.
 pub(crate) fn set_argv(task: usize, blob: &[u8]) {
-    let argv = unsafe { &mut *ARGVS[task].0.get() };
+    let argv = unsafe { &mut *ARGVS[task].get() };
     let n = blob.len().min(ARGV_CAP);
     argv.data[..n].copy_from_slice(&blob[..n]);
     argv.len = n;
@@ -970,7 +948,7 @@ pub(crate) fn server_name(slot: usize) -> Option<&'static [u8]> {
 /// the `TASK_NAME` syscall - the loader calls this for the servers and init,
 /// which are loaded (not `SPAWN`ed) and would otherwise have an empty argv.
 pub(crate) fn set_name(task: usize, name: &[u8]) {
-    let argv = unsafe { &mut *ARGVS[task].0.get() };
+    let argv = unsafe { &mut *ARGVS[task].get() };
     let n = name.len().min(ARGV_CAP - 8); // 4-byte argc + 4-byte len header
     argv.data[0..4].copy_from_slice(&1u32.to_le_bytes());
     argv.data[4..8].copy_from_slice(&(n as u32).to_le_bytes());
@@ -981,16 +959,16 @@ pub(crate) fn set_name(task: usize, name: &[u8]) {
 /// The argv blob for `task` (empty if it was spawned with none) - read by
 /// the `GET_ARGC`/`GET_ARG` syscall arms for the calling task.
 pub(crate) fn argv_blob(task: usize) -> &'static [u8] {
-    // SAFETY: single-core, non-reentrant (see ArgvSlot); the data lives in a
+    // SAFETY: single-core, non-reentrant (see `synccell`); the data lives in a
     // static for the whole boot, and the caller copies from it immediately.
-    let argv = unsafe { &*ARGVS[task].0.get() };
+    let argv = unsafe { &*ARGVS[task].get() };
     &argv.data[..argv.len]
 }
 
 /// Drop a dead task's argv so a later occupant of the slot can't read it -
 /// wired into every teardown path alongside `clear_mailbox`/`clear_grant`.
 pub(crate) fn clear_argv(task: usize) {
-    let argv = unsafe { &mut *ARGVS[task].0.get() };
+    let argv = unsafe { &mut *ARGVS[task].get() };
     argv.len = 0;
 }
 
@@ -1012,16 +990,13 @@ impl EnvBlob {
     }
 }
 
-struct EnvSlot(UnsafeCell<EnvBlob>);
-// SAFETY: single-core, non-reentrant - identical reasoning to ArgvSlot.
-unsafe impl Sync for EnvSlot {}
-static ENVS: [EnvSlot; NUM_TASKS] =
-    [const { EnvSlot(UnsafeCell::new(EnvBlob::new())) }; NUM_TASKS];
+static ENVS: [SyncCell<EnvBlob>; NUM_TASKS] =
+    [const { SyncCell::new(EnvBlob::new()) }; NUM_TASKS];
 
 /// Store a freshly spawned task's environment blob (from the `SPAWN` handler,
 /// which copies it out of the env staging buffer). Truncated to `ENV_CAP`.
 pub(crate) fn set_env(task: usize, blob: &[u8]) {
-    let env = unsafe { &mut *ENVS[task].0.get() };
+    let env = unsafe { &mut *ENVS[task].get() };
     let n = blob.len().min(ENV_CAP);
     env.data[..n].copy_from_slice(&blob[..n]);
     env.len = n;
@@ -1030,15 +1005,15 @@ pub(crate) fn set_env(task: usize, blob: &[u8]) {
 /// The env blob for `task` (empty if it inherited none) - read by the
 /// `GET_ENVC`/`GET_ENV` syscall arms (which reuse the argv blob decoders).
 pub(crate) fn env_blob(task: usize) -> &'static [u8] {
-    // SAFETY: single-core, non-reentrant (see EnvSlot); static for the whole
+    // SAFETY: single-core, non-reentrant (see `synccell`); static for the whole
     // boot, and the caller copies from it immediately.
-    let env = unsafe { &*ENVS[task].0.get() };
+    let env = unsafe { &*ENVS[task].get() };
     &env.data[..env.len]
 }
 
 /// Drop a dead task's env, alongside `clear_argv`/`clear_cwd`.
 pub(crate) fn clear_env(task: usize) {
-    let env = unsafe { &mut *ENVS[task].0.get() };
+    let env = unsafe { &mut *ENVS[task].get() };
     env.len = 0;
 }
 
@@ -1059,16 +1034,13 @@ impl Cwd {
     }
 }
 
-struct CwdSlot(UnsafeCell<Cwd>);
-// SAFETY: same single-core, non-reentrant per-task-cell reasoning as ARGVS.
-unsafe impl Sync for CwdSlot {}
-static CWDS: [CwdSlot; NUM_TASKS] =
-    [const { CwdSlot(UnsafeCell::new(Cwd::new())) }; NUM_TASKS];
+static CWDS: [SyncCell<Cwd>; NUM_TASKS] =
+    [const { SyncCell::new(Cwd::new()) }; NUM_TASKS];
 
 /// Store a freshly spawned task's working directory (from the `SPAWN`
 /// handler, out of the staging buffer). Truncated to `CWD_CAP`.
 pub(crate) fn set_cwd(task: usize, path: &[u8]) {
-    let cwd = unsafe { &mut *CWDS[task].0.get() };
+    let cwd = unsafe { &mut *CWDS[task].get() };
     let n = path.len().min(CWD_CAP);
     cwd.data[..n].copy_from_slice(&path[..n]);
     cwd.len = n;
@@ -1077,16 +1049,16 @@ pub(crate) fn set_cwd(task: usize, path: &[u8]) {
 /// The working directory for `task` (empty if none) - read by the `GET_CWD`
 /// syscall arm for the calling task.
 pub(crate) fn cwd_path(task: usize) -> &'static [u8] {
-    // SAFETY: single-core, non-reentrant (see CwdSlot); static-lifetime data,
+    // SAFETY: single-core, non-reentrant (see `synccell`); static-lifetime data,
     // copied from immediately by the caller.
-    let cwd = unsafe { &*CWDS[task].0.get() };
+    let cwd = unsafe { &*CWDS[task].get() };
     &cwd.data[..cwd.len]
 }
 
 /// Drop a dead task's cwd - wired into every teardown path alongside
 /// `clear_argv`.
 pub(crate) fn clear_cwd(task: usize) {
-    let cwd = unsafe { &mut *CWDS[task].0.get() };
+    let cwd = unsafe { &mut *CWDS[task].get() };
     cwd.len = 0;
 }
 
@@ -1109,16 +1081,13 @@ impl Namespace {
     }
 }
 
-struct NsSlot(UnsafeCell<Namespace>);
-// SAFETY: same single-core, non-reentrant per-task-cell reasoning as CWDS.
-unsafe impl Sync for NsSlot {}
-static NAMESPACES: [NsSlot; NUM_TASKS] =
-    [const { NsSlot(UnsafeCell::new(Namespace::new())) }; NUM_TASKS];
+static NAMESPACES: [SyncCell<Namespace>; NUM_TASKS] =
+    [const { SyncCell::new(Namespace::new()) }; NUM_TASKS];
 
 /// Store a freshly spawned task's namespace (from the `SPAWN` handler, out of
 /// the staging buffer). Truncated to `NS_CAP`.
 pub(crate) fn set_namespace(task: usize, blob: &[u8]) {
-    let ns = unsafe { &mut *NAMESPACES[task].0.get() };
+    let ns = unsafe { &mut *NAMESPACES[task].get() };
     let n = blob.len().min(NS_CAP);
     ns.data[..n].copy_from_slice(&blob[..n]);
     ns.len = n;
@@ -1127,16 +1096,16 @@ pub(crate) fn set_namespace(task: usize, blob: &[u8]) {
 /// The namespace blob for `task` (empty if none) - read by the `GET_NS` syscall
 /// arm for the calling task.
 pub(crate) fn namespace(task: usize) -> &'static [u8] {
-    // SAFETY: single-core, non-reentrant (see NsSlot); static-lifetime data,
+    // SAFETY: single-core, non-reentrant (see `synccell`); static-lifetime data,
     // copied from immediately by the caller.
-    let ns = unsafe { &*NAMESPACES[task].0.get() };
+    let ns = unsafe { &*NAMESPACES[task].get() };
     &ns.data[..ns.len]
 }
 
 /// Drop a dead task's namespace - wired into every teardown path alongside
 /// `clear_cwd`.
 pub(crate) fn clear_namespace(task: usize) {
-    let ns = unsafe { &mut *NAMESPACES[task].0.get() };
+    let ns = unsafe { &mut *NAMESPACES[task].get() };
     ns.len = 0;
 }
 
@@ -1240,36 +1209,31 @@ pub(crate) fn groups_of(task: usize, out: &mut [u32]) -> usize {
 /// neither delivery point can fire for a task that is awake and running, is
 /// what makes the value safe to read at any point while handling a request
 /// rather than only immediately after the receive.
-static SENDER_CREDS: [SenderCredSlot; NUM_TASKS] =
-    [const { SenderCredSlot(UnsafeCell::new(Cred::none())) }; NUM_TASKS];
-
-struct SenderCredSlot(UnsafeCell<Cred>);
-// SAFETY: single-core, written only from SVC dispatch (the two delivery
-// points) - the same never-reentrant reasoning as every other per-task cell.
-unsafe impl Sync for SenderCredSlot {}
+static SENDER_CREDS: [SyncCell<Cred>; NUM_TASKS] =
+    [const { SyncCell::new(Cred::none()) }; NUM_TASKS];
 
 /// Record `cred` as the credential behind `dest`'s newly delivered message.
 fn record_sender_cred(dest: usize, cred: Cred) {
-    unsafe { *SENDER_CREDS[dest].0.get() = cred };
+    unsafe { *SENDER_CREDS[dest].get() = cred };
 }
 
 /// `task`'s captured sender identity, or `None` if it has received nothing.
 pub(crate) fn sender_id_of(task: usize) -> Option<u64> {
-    let cred = unsafe { *SENDER_CREDS[task].0.get() };
+    let cred = unsafe { *SENDER_CREDS[task].get() };
     cred.present.then_some(cred.id)
 }
 
 /// `task`'s captured sender task identity, or `None` if it has received nothing
 /// (or the sender was the kernel, which has no identity to give).
 pub(crate) fn sender_task_of(task: usize) -> Option<u64> {
-    let cred = unsafe { *SENDER_CREDS[task].0.get() };
+    let cred = unsafe { *SENDER_CREDS[task].get() };
     (cred.present && cred.task != 0).then_some(cred.task)
 }
 
 /// Copy `task`'s captured sender groups into `out`, returning the true count -
 /// or `None` if it has received nothing.
 pub(crate) fn sender_groups_of(task: usize, out: &mut [u32]) -> Option<usize> {
-    let cred = unsafe { *SENDER_CREDS[task].0.get() };
+    let cred = unsafe { *SENDER_CREDS[task].get() };
     if !cred.present {
         return None;
     }
@@ -1285,7 +1249,7 @@ pub(crate) fn sender_groups_of(task: usize, out: &mut [u32]) -> Option<usize> {
 /// slot can never read its predecessor's - wired into every teardown path
 /// alongside `clear_mailbox`.
 pub(crate) fn clear_sender_cred(task: usize) {
-    unsafe { *SENDER_CREDS[task].0.get() = Cred::none() };
+    unsafe { *SENDER_CREDS[task].get() = Cred::none() };
 }
 
 /// `task`'s owning uid (the low half of its packed identity).
@@ -1547,12 +1511,8 @@ struct Grant {
     active: bool,
 }
 
-struct GrantSlot(UnsafeCell<Grant>);
-// SAFETY: same single-core, SVC/tick-only, never-reentrant reasoning as
-// MailboxSlot and every other per-task cell in this module.
-unsafe impl Sync for GrantSlot {}
-static GRANTS: [GrantSlot; NUM_TASKS] = [const {
-    GrantSlot(UnsafeCell::new(Grant { grantee: 0, ptr: 0, len: 0, dir: 0, active: false }))
+static GRANTS: [SyncCell<Grant>; NUM_TASKS] = [const {
+    SyncCell::new(Grant { grantee: 0, ptr: 0, len: 0, dir: 0, active: false })
 }; NUM_TASKS];
 
 /// `GRANT`'s core: record `granter`'s outstanding grant. The caller
@@ -1561,7 +1521,7 @@ static GRANTS: [GrantSlot; NUM_TASKS] = [const {
 /// and `[ptr, ptr+len)` lies inside `granter`'s own region - this only
 /// stores it.
 pub(crate) fn set_grant(granter: usize, grantee: usize, ptr: u64, len: u64, dir: u64) {
-    let g = unsafe { &mut *GRANTS[granter].0.get() };
+    let g = unsafe { &mut *GRANTS[granter].get() };
     *g = Grant { grantee, ptr, len, dir, active: true };
 }
 
@@ -1569,7 +1529,7 @@ pub(crate) fn set_grant(granter: usize, grantee: usize, ptr: u64, len: u64, dir:
 /// alongside [`clear_mailbox`], so a later occupant of the same slot
 /// can't inherit a predecessor's grant.
 pub(crate) fn clear_grant(task: usize) {
-    let g = unsafe { &mut *GRANTS[task].0.get() };
+    let g = unsafe { &mut *GRANTS[task].get() };
     g.active = false;
 }
 
@@ -1606,13 +1566,13 @@ pub(crate) fn safecopy(
     if dir != syscall_abi::GRANT_READ && dir != syscall_abi::GRANT_WRITE {
         return None;
     }
-    let grant = unsafe { *GRANTS[client].0.get() };
+    let grant = unsafe { *GRANTS[client].get() };
     if !grant.active || grant.grantee != server || grant.dir & dir == 0 {
         return None;
     }
     // The client must be actively blocked in a call to this server.
     let blocked_calling_me = matches!(
-        unsafe { *STATES[client].0.get() },
+        unsafe { *STATES[client].get() },
         TaskState::Blocked(WaitReason::Message { from: Some(f), .. }) if f == server
     );
     if !blocked_calling_me {
@@ -1708,11 +1668,11 @@ impl WaitReason {
                         return Some(syscall_abi::WAIT_INTERRUPTED);
                     }
                 }
-                match unsafe { *STATES[target].0.get() } {
+                match unsafe { *STATES[target].get() } {
                     TaskState::Zombie(status) => {
                         // Collecting the status is the reap - the slot
                         // becomes spawnable again here and only here.
-                        unsafe { *STATES[target].0.get() = TaskState::Unused };
+                        unsafe { *STATES[target].get() = TaskState::Unused };
                         Some(status)
                     }
                     TaskState::Unused => Some(syscall_abi::TASK_KILLED_STATUS),
@@ -1750,7 +1710,7 @@ impl WaitReason {
 /// Whether `task`'s mailbox holds at least one queued message - the
 /// message half of `WaitReason::NetInput`'s wake condition.
 fn has_queued_message(task: usize) -> bool {
-    unsafe { (*MAILBOXES[task].0.get()).count > 0 }
+    unsafe { (*MAILBOXES[task].get()).count > 0 }
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -1769,28 +1729,22 @@ enum TaskState {
     Zombie(u64),
 }
 
-struct StateSlot(UnsafeCell<TaskState>);
-
-// SAFETY: same argument as `TaskSlot` above - single-core, only touched
-// from EL1 with IRQs masked.
-unsafe impl Sync for StateSlot {}
-
 // Not uniform (slots 0/1 boot Runnable - the loaded program and idle - the
 // rest Unused until a server is installed or `spawn` fills them), so this one
 // stays an explicit literal rather than a `[const { … }; NUM_TASKS]` repeat:
 // two Runnable, then NUM_TASKS-2 Unused.
-static STATES: [StateSlot; NUM_TASKS] = [
-    StateSlot(UnsafeCell::new(TaskState::Runnable)),
-    StateSlot(UnsafeCell::new(TaskState::Runnable)),
-    StateSlot(UnsafeCell::new(TaskState::Unused)),
-    StateSlot(UnsafeCell::new(TaskState::Unused)),
-    StateSlot(UnsafeCell::new(TaskState::Unused)),
-    StateSlot(UnsafeCell::new(TaskState::Unused)),
-    StateSlot(UnsafeCell::new(TaskState::Unused)),
-    StateSlot(UnsafeCell::new(TaskState::Unused)),
-    StateSlot(UnsafeCell::new(TaskState::Unused)),
-    StateSlot(UnsafeCell::new(TaskState::Unused)),
-    StateSlot(UnsafeCell::new(TaskState::Unused)),
+static STATES: [SyncCell<TaskState>; NUM_TASKS] = [
+    SyncCell::new(TaskState::Runnable),
+    SyncCell::new(TaskState::Runnable),
+    SyncCell::new(TaskState::Unused),
+    SyncCell::new(TaskState::Unused),
+    SyncCell::new(TaskState::Unused),
+    SyncCell::new(TaskState::Unused),
+    SyncCell::new(TaskState::Unused),
+    SyncCell::new(TaskState::Unused),
+    SyncCell::new(TaskState::Unused),
+    SyncCell::new(TaskState::Unused),
+    SyncCell::new(TaskState::Unused),
 ];
 
 /// Scans forward from `from` (exclusive), wrapping, for the next
@@ -1809,7 +1763,7 @@ fn next_runnable(from: TaskIndex) -> Option<TaskIndex> {
 /// Whether `t` is `Runnable` right now: the one predicate both scans
 /// ask, so they cannot disagree about what "runnable" means.
 fn is_runnable(t: TaskIndex) -> bool {
-    matches!(unsafe { *STATES[t.index()].0.get() }, TaskState::Runnable)
+    matches!(unsafe { *STATES[t.index()].get() }, TaskState::Runnable)
 }
 
 /// The one scan behind [`next_runnable`] and [`next_runnable_skip_idle`]:
@@ -1886,7 +1840,7 @@ pub(crate) unsafe fn yield_current_and_switch(frame: *mut Context) -> u64 {
     }
     // YIELD's own return value, seen by `current` when it is resumed later.
     frame.gpr[0] = 0;
-    unsafe { *TASKS[current.index()].0.get() = *frame };
+    unsafe { *TASKS[current.index()].get() = *frame };
     // STATES[current.index()] stays Runnable - a yield doesn't block.
     switch_to(frame, next);
     frame.gpr[0]
@@ -1901,7 +1855,7 @@ pub(crate) unsafe fn yield_current_and_switch(frame: *mut Context) -> u64 {
 /// why the save is not in here. One place, so the three steps cannot be
 /// reordered or one of them forgotten at a new site.
 fn switch_to(frame: &mut Context, next: TaskIndex) {
-    *frame = unsafe { *TASKS[next.index()].0.get() };
+    *frame = unsafe { *TASKS[next.index()].get() };
     set_current(next);
     crate::mmu::activate_task(next);
 }
@@ -1963,11 +1917,11 @@ pub(crate) unsafe fn block_current_and_switch_to(
 ) -> u64 {
     let frame = unsafe { &mut *frame };
     let current = current_index();
-    unsafe { *TASKS[current.index()].0.get() = *frame };
-    unsafe { *STATES[current.index()].0.get() = TaskState::Blocked(reason) };
+    unsafe { *TASKS[current.index()].get() = *frame };
+    unsafe { *STATES[current.index()].get() = TaskState::Blocked(reason) };
     let next = match prefer {
         Some(p)
-            if p != current && unsafe { *STATES[p.index()].0.get() } == TaskState::Runnable =>
+            if p != current && unsafe { *STATES[p.index()].get() } == TaskState::Runnable =>
         {
             p
         }
@@ -2039,8 +1993,8 @@ fn end_task(i: TaskIndex, final_state: TaskState) {
     revert_input_owner_if(i);
     fail_calls_to(i);
 
-    unsafe { *STATES[i].0.get() = final_state };
-    unsafe { *REGIONS[i].0.get() = (0, 0) };
+    unsafe { *STATES[i].get() = final_state };
+    unsafe { *REGIONS[i].get() = (0, 0) };
     clear_mailbox(i);
     clear_sender_cred(i);
     clear_grant(i);
@@ -2131,11 +2085,11 @@ fn switch_away_from_dead(frame: &mut Context, dead: TaskIndex) {
 pub(crate) fn fail_calls_to(dead: usize) {
     for i in 0..NUM_TASKS {
         if let TaskState::Blocked(WaitReason::Message { from: Some(target), .. }) =
-            unsafe { *STATES[i].0.get() }
+            unsafe { *STATES[i].get() }
         {
             if target == dead {
-                unsafe { (*TASKS[i].0.get()).gpr[0] = syscall_abi::TASK_ERR_NO_SUCH_TASK };
-                unsafe { *STATES[i].0.get() = TaskState::Runnable };
+                unsafe { (*TASKS[i].get()).gpr[0] = syscall_abi::TASK_ERR_NO_SUCH_TASK };
+                unsafe { *STATES[i].get() = TaskState::Runnable };
             }
         }
     }
@@ -2150,12 +2104,12 @@ pub(crate) fn fail_calls_to(dead: usize) {
 /// region EL0-accessible. Does the same freshly-written-code cache
 /// maintenance as [`init`]/[`spawn`].
 pub(crate) fn install_task(slot: usize, context: Context, region: (u64, u64)) {
-    unsafe { *TASKS[slot].0.get() = context };
-    unsafe { *REGIONS[slot].0.get() = region };
+    unsafe { *TASKS[slot].get() = context };
+    unsafe { *REGIONS[slot].get() = region };
     clear_delegations_of(slot);
     clear_parent(slot);
     issue_generation(slot);
-    unsafe { *STATES[slot].0.get() = TaskState::Runnable };
+    unsafe { *STATES[slot].get() = TaskState::Runnable };
     flush_new_code(region.0, region.1);
 }
 
@@ -2182,7 +2136,7 @@ pub(crate) fn live_index(i: usize) -> Option<TaskIndex> {
 /// a caller that exited as ROOT.
 pub(crate) fn is_occupied(t: TaskIndex) -> bool {
     matches!(
-        unsafe { *STATES[t.index()].0.get() },
+        unsafe { *STATES[t.index()].get() },
         TaskState::Runnable | TaskState::Blocked(_)
     )
 }
@@ -2219,9 +2173,9 @@ pub(crate) enum SpawnError {
 /// [`FIRST_SPAWNABLE`] onward.
 pub(crate) fn spawn(context: Context, region: (u64, u64)) -> Result<usize, SpawnError> {
     for i in FIRST_SPAWNABLE..NUM_TASKS {
-        if unsafe { *STATES[i].0.get() } == TaskState::Unused {
-            unsafe { *TASKS[i].0.get() = context };
-            unsafe { *REGIONS[i].0.get() = region };
+        if unsafe { *STATES[i].get() } == TaskState::Unused {
+            unsafe { *TASKS[i].get() = context };
+            unsafe { *REGIONS[i].get() = region };
             clear_delegations_of(i);
             clear_delegations_at(i);
             issue_generation(i);
@@ -2237,7 +2191,7 @@ pub(crate) fn spawn(context: Context, region: (u64, u64)) -> Result<usize, Spawn
             // the parent's bit aimed at the child when the slot is reused.
             set_delegate(i, spawner);
             set_delegate(spawner, i);
-            unsafe { *STATES[i].0.get() = TaskState::Runnable };
+            unsafe { *STATES[i].get() = TaskState::Runnable };
             // Freshly-written code needs the same clean/invalidate
             // sequence `init` gives the boot-loaded programs - a
             // latent gap until the fault-isolation milestone added
@@ -2257,7 +2211,7 @@ pub(crate) fn spawn(context: Context, region: (u64, u64)) -> Result<usize, Spawn
 /// milestone: task 0's is sized to whatever program got loaded, not a
 /// fixed slot.
 pub fn idle_region() -> (u64, u64) {
-    (IDLE_REGION.0.get() as u64, IDLE_REGION_SIZE as u64)
+    (IDLE_REGION.get() as u64, IDLE_REGION_SIZE as u64)
 }
 
 /// Builds task 0's [`Context`] from an already-loaded program — `loader.rs`
@@ -2287,7 +2241,7 @@ pub unsafe fn init(
     // file/VA offset 0, but tasks.rs shouldn't assume that itself - see
     // LoadedProgram::entry's own doc comment). Stack at the top of the
     // loaded region, growing down, same shape every EL0 task has used.
-    *unsafe { &mut *TASKS[TaskIndex::FIRST.index()].0.get() } = Context {
+    *unsafe { &mut *TASKS[TaskIndex::FIRST.index()].get() } = Context {
         gpr: [0; 31],
         sp_el0: program.base + program.size,
         elr_el1: program.entry,
@@ -2296,7 +2250,7 @@ pub unsafe fn init(
         // able to preempt), NZCV cleared.
         spsr_el1: 0,
     };
-    unsafe { *REGIONS[0].0.get() = (program.base, program.size) };
+    unsafe { *REGIONS[0].get() = (program.base, program.size) };
     // Name the boot task so `ps` shows it (spawned tasks carry their own
     // argv[0]; these loaded ones would otherwise be nameless). Task 0 is the
     // init program named in INIT.CFG - the shell, in every configuration so
@@ -2306,34 +2260,34 @@ pub unsafe fn init(
 
     // Task 1: idle loop, copied into its own small static region exactly
     // like every EL0 task before this milestone.
-    let idle_start = IDLE_REGION.0.get() as *mut u8;
+    let idle_start = IDLE_REGION.get() as *mut u8;
     let start = &raw const el0_idle_template as *const u8;
     let end = &raw const el0_idle_template_end as *const u8;
     let len = unsafe { end.offset_from(start) } as usize;
     unsafe { core::ptr::copy_nonoverlapping(start, idle_start, len) };
 
     let idle_addr = idle_start as u64;
-    *unsafe { &mut *TASKS[1].0.get() } = Context {
+    *unsafe { &mut *TASKS[1].get() } = Context {
         gpr: [0; 31],
         sp_el0: idle_addr + IDLE_REGION_SIZE as u64,
         elr_el1: idle_addr,
         spsr_el1: 0,
     };
-    unsafe { *REGIONS[1].0.get() = (idle_addr, IDLE_REGION_SIZE as u64) };
+    unsafe { *REGIONS[1].get() = (idle_addr, IDLE_REGION_SIZE as u64) };
     set_name(1, b"idle");
     clean_dcache_range(idle_addr, IDLE_REGION_SIZE as u64);
 
     // Task 2: the filesystem server, exactly task 0's setup shape -
     // entry point, stack at the top of its region, everything unmasked.
     if let Some(fsd) = fsd {
-        *unsafe { &mut *TASKS[2].0.get() } = Context {
+        *unsafe { &mut *TASKS[2].get() } = Context {
             gpr: [0; 31],
             sp_el0: fsd.base + fsd.size,
             elr_el1: fsd.entry,
             spsr_el1: 0,
         };
-        unsafe { *REGIONS[2].0.get() = (fsd.base, fsd.size) };
-        unsafe { *STATES[2].0.get() = TaskState::Runnable };
+        unsafe { *REGIONS[2].get() = (fsd.base, fsd.size) };
+        unsafe { *STATES[2].get() = TaskState::Runnable };
         if let Some(n) = server_name(2) {
             set_name(2, n);
         }
@@ -2345,14 +2299,14 @@ pub unsafe fn init(
     // unmasked. Absent (no COND.BIN) leaves the slot `Unused`, and the
     // boot proceeds with the kernel's own console handling all output.
     if let Some(cond) = cond {
-        *unsafe { &mut *TASKS[3].0.get() } = Context {
+        *unsafe { &mut *TASKS[3].get() } = Context {
             gpr: [0; 31],
             sp_el0: cond.base + cond.size,
             elr_el1: cond.entry,
             spsr_el1: 0,
         };
-        unsafe { *REGIONS[3].0.get() = (cond.base, cond.size) };
-        unsafe { *STATES[3].0.get() = TaskState::Runnable };
+        unsafe { *REGIONS[3].get() = (cond.base, cond.size) };
+        unsafe { *STATES[3].get() = TaskState::Runnable };
         if let Some(n) = server_name(3) {
             set_name(3, n);
         }
@@ -2363,14 +2317,14 @@ pub unsafe fn init(
     // console servers. Absent (no NETD.BIN) leaves the slot `Unused`, and
     // the boot proceeds with no network - `ping` reports no server.
     if let Some(netd) = netd {
-        *unsafe { &mut *TASKS[4].0.get() } = Context {
+        *unsafe { &mut *TASKS[4].get() } = Context {
             gpr: [0; 31],
             sp_el0: netd.base + netd.size,
             elr_el1: netd.entry,
             spsr_el1: 0,
         };
-        unsafe { *REGIONS[4].0.get() = (netd.base, netd.size) };
-        unsafe { *STATES[4].0.get() = TaskState::Runnable };
+        unsafe { *REGIONS[4].get() = (netd.base, netd.size) };
+        unsafe { *STATES[4].get() = TaskState::Runnable };
         if let Some(n) = server_name(4) {
             set_name(4, n);
         }
@@ -2381,14 +2335,14 @@ pub unsafe fn init(
     // leaves the slot `Unused` and the system boots without self-service password
     // changes - exactly as it did before there was one.
     if let Some(accountd) = accountd {
-        *unsafe { &mut *TASKS[5].0.get() } = Context {
+        *unsafe { &mut *TASKS[5].get() } = Context {
             gpr: [0; 31],
             sp_el0: accountd.base + accountd.size,
             elr_el1: accountd.entry,
             spsr_el1: 0,
         };
-        unsafe { *REGIONS[5].0.get() = (accountd.base, accountd.size) };
-        unsafe { *STATES[5].0.get() = TaskState::Runnable };
+        unsafe { *REGIONS[5].get() = (accountd.base, accountd.size) };
+        unsafe { *STATES[5].get() = TaskState::Runnable };
         if let Some(n) = server_name(5) {
             set_name(5, n);
         }
@@ -2424,7 +2378,7 @@ pub unsafe fn init(
     // when their image was present, which is why this is a loop over state
     // rather than a list.
     for slot in TaskIndex::all() {
-        if !matches!(unsafe { *STATES[slot.index()].0.get() }, TaskState::Unused) {
+        if !matches!(unsafe { *STATES[slot.index()].get() }, TaskState::Unused) {
             issue_generation(slot.index());
         }
     }
@@ -2482,7 +2436,7 @@ pub unsafe fn start() -> ! {
     // starts at 0) - activated again here for explicitness, so this
     // function's contract doesn't silently depend on that ordering.
     crate::mmu::activate_task(TaskIndex::FIRST);
-    let ctx = unsafe { *TASKS[TaskIndex::FIRST.index()].0.get() };
+    let ctx = unsafe { *TASKS[TaskIndex::FIRST.index()].get() };
     unsafe {
         asm!(
             "msr sp_el0, {sp_el0}",
@@ -2552,10 +2506,10 @@ pub unsafe fn on_tick(frame: *mut Context) {
 
     for task in TaskIndex::all() {
         let i = task.index();
-        let TaskState::Blocked(reason) = (unsafe { *STATES[i].0.get() }) else { continue };
+        let TaskState::Blocked(reason) = (unsafe { *STATES[i].get() }) else { continue };
         if let Some(value) = reason.poll(i) {
-            unsafe { (*TASKS[i].0.get()).gpr[0] = value };
-            unsafe { *STATES[i].0.get() = TaskState::Runnable };
+            unsafe { (*TASKS[i].get()).gpr[0] = value };
+            unsafe { *STATES[i].get() = TaskState::Runnable };
         }
     }
 
@@ -2616,7 +2570,7 @@ pub unsafe fn on_tick(frame: *mut Context) {
         if !crate::supervisor::is_supervised(slot) {
             continue;
         }
-        let blocked = matches!(unsafe { *STATES[slot].0.get() }, TaskState::Blocked(_));
+        let blocked = matches!(unsafe { *STATES[slot].get() }, TaskState::Blocked(_));
 
         // Passive heartbeat: a server observed continuously `Runnable` is a
         // non-faulting loop wedge.
@@ -2670,7 +2624,7 @@ pub unsafe fn on_tick(frame: *mut Context) {
         // and reloading the same context.
         return;
     }
-    unsafe { *TASKS[current.index()].0.get() = *frame };
+    unsafe { *TASKS[current.index()].get() = *frame };
     switch_to(frame, next);
 }
 
@@ -2702,13 +2656,13 @@ pub unsafe fn on_net_irq(frame: *mut Context) {
     let current = current_index();
     for slot in TaskIndex::all() {
         let i = slot.index();
-        if let TaskState::Blocked(WaitReason::NetInput { .. }) = unsafe { *STATES[i].0.get() } {
+        if let TaskState::Blocked(WaitReason::NetInput { .. }) = unsafe { *STATES[i].get() } {
             // NET_WAIT's return value is ignored (the server drains its
             // sources itself), matching `NetInput`'s `poll` Some(0).
-            unsafe { (*TASKS[i].0.get()).gpr[0] = 0 };
-            unsafe { *STATES[i].0.get() = TaskState::Runnable };
+            unsafe { (*TASKS[i].get()).gpr[0] = 0 };
+            unsafe { *STATES[i].get() = TaskState::Runnable };
             if slot != current {
-                unsafe { *TASKS[current.index()].0.get() = *frame };
+                unsafe { *TASKS[current.index()].get() = *frame };
                 switch_to(frame, slot);
             }
             // Only one task ever blocks on NetInput (the network server).
