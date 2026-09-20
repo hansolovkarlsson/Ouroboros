@@ -542,6 +542,19 @@ static INPUT_OWNER: AtomicUsize = AtomicUsize::new(0);
 /// recorded (task 0 or a spawnable slot), so the revert can never route the
 /// keyboard to a protected task; a parent can be a server (netd's
 /// remote-exec children).
+///
+/// **The table is a stack, rooted at task 0, and `FG` keeps it one.** An
+/// `FG` to a task that is not in the chain below the owner pushes (the
+/// target's entry becomes the owner); an `FG` to a task that IS in the
+/// chain pops (every entry above the target is cleared, the target's own
+/// is left alone), so the table can never hold a cycle. It could before:
+/// an unconditional push let shell 7, handed the keyboard by shell 6,
+/// `fg 6` and overwrite 6's link to task 0 with a link back to 7, and
+/// after a kill inside that loop the revert once stranded the keyboard on
+/// an empty slot, and once left a live nested prompt unreachable behind
+/// the boot shell's `WAIT` (both witnessed 2026-09-20, the recipes in
+/// `scripts/test-keyboard-chain.sh`). The reader ([`revert_input_owner_if`])
+/// relies on the shape rather than repairing it.
 static PREVIOUS_OWNERS: [AtomicU64; NUM_TASKS] = [const { AtomicU64::new(0) }; NUM_TASKS];
 
 /// A foreground task the Ctrl+C escape hatch (`interrupt_key_check`) has marked
@@ -557,17 +570,39 @@ static PREVIOUS_OWNERS: [AtomicU64; NUM_TASKS] = [const { AtomicU64::new(0) }; N
 /// owns that.
 static PENDING_KILL: AtomicU64 = AtomicU64::new(0);
 
-/// `FG`'s effect: hand the keyboard to task `owner`, remembering who held
-/// it ([`PREVIOUS_OWNERS`]) so that `owner`'s death can hand it back.
-/// Foregrounding the owner again records nothing, so the task it would
-/// revert to stays the one it was handed from. Validation (index in
+/// `FG`'s effect: hand the keyboard to task `owner`, keeping
+/// [`PREVIOUS_OWNERS`] a stack: a push if `owner` is not in the chain below
+/// the task that held it, a pop of everything above `owner` if it is.
+/// Foregrounding the owner again records nothing. Validation (index in
 /// range, slot occupied, not idle) is the syscall layer's job.
 pub(crate) fn set_input_owner(owner: usize) {
     let previous = INPUT_OWNER.swap(owner, Ordering::Relaxed);
-    // Task 0 never dies, so its entry is never read: `fg 0` (the explicit
-    // "give it back") records nothing, and the table holds only entries
+    if previous == owner {
+        return;
+    }
+    // Walk down from `previous`, remembering each link. Reaching `owner`
+    // makes this a pop: the links walked are the entries above it.
+    let mut walked = [0usize; NUM_TASKS];
+    let mut n = 0;
+    let mut link = previous;
+    while n < NUM_TASKS {
+        walked[n] = link;
+        n += 1;
+        let Some(below) = live_occupant(PREVIOUS_OWNERS[link].load(Ordering::Relaxed)) else {
+            break; // the chain ends here: task 0, or a link that is gone
+        };
+        if below.index() == owner {
+            for &above in &walked[..n] {
+                PREVIOUS_OWNERS[above].store(0, Ordering::Relaxed);
+            }
+            return;
+        }
+        link = below.index();
+    }
+    // A push. Task 0 never dies, so its entry is never read: `fg 0` from
+    // outside the chain records nothing, and the table holds only entries
     // the revert can reach.
-    if previous != owner && owner != 0 {
+    if owner != 0 {
         PREVIOUS_OWNERS[owner].store(task_id_of(previous).unwrap_or(0), Ordering::Relaxed);
     }
 }
@@ -590,16 +625,13 @@ pub(crate) fn input_owner() -> usize {
 /// (a nested shell killed from a shell below it), so every entry that
 /// names `dying` is re-pointed at `dying`'s own previous owner first:
 /// the later revert then skips the dead link instead of falling to task
-/// 0 past a live shell that is about to read. An entry that names its
-/// own task is no entry: `fg` back to a task already in the chain makes
-/// a cycle (6 handed to 7, 7 `fg 6`), and a kill inside the cycle
-/// splices the survivor onto itself; taken literally that entry would
-/// hand the keyboard to the dying task and strand it on an empty slot
-/// (witnessed 2026-09-20: no prompt ever came back). Normalised here,
-/// once, before both uses.
+/// 0 past a live shell that is about to read. The splice cannot make an
+/// entry name its own task, because the table holds no cycle for it to
+/// close: [`set_input_owner`] pops instead of pushing when `fg` names a
+/// task already in the chain, which is the invariant this reader relies
+/// on.
 pub(crate) fn revert_input_owner_if(dying: usize) {
     let previous = PREVIOUS_OWNERS[dying].swap(0, Ordering::Relaxed);
-    let previous = if syscall_abi::task_id_slot(previous) as usize == dying { 0 } else { previous };
     if let Some(id) = task_id_of(dying) {
         for entry in PREVIOUS_OWNERS.iter() {
             let _ = entry.compare_exchange(id, previous, Ordering::Relaxed, Ordering::Relaxed);

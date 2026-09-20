@@ -82,7 +82,11 @@ ends at the firmware's clear-screen, rerun before suspecting the kernel.
 death, to the task that held it when `fg` handed it over (`PREVIOUS_OWNERS`
 in `tasks.rs`), which is what lets a shell spawned from a shell run more than
 one command. Misdiagnosed once (2026-09-06, "a builtin, no child") and fixed
-on 2026-09-20; this is the check that can fail for it, on `build/esp.img`:
+on 2026-09-20. **`make test-keyboard-chain`** (`scripts/test-keyboard-chain.sh`)
+runs the recipes below plus a fourth (four shells deep, `fg` back one level,
+a kill, a Ctrl+C: the live shell two levels up must answer) and grades each
+on the lines its negative control lacked; run `make image` first, in its own
+command. The first, by hand, on `build/esp.img`:
 
 ```sh
 python3 scripts/drive-qemu.py build/esp.img 'login:@@root' 'assword@@root' \
@@ -114,8 +118,9 @@ python3 scripts/drive-qemu.py build/esp.img 'login:@@root' 'assword@@root' \
 # keyboard fell to the boot shell, blocked in wait on task 6.
 ```
 
-A cycle: shell 7 (handed the keyboard by shell 6) hands it back with `fg 6`,
-6 kills 7, then Ctrl+C at 6's prompt. The keyboard must reach the boot shell.
+Handing back down the chain: shell 7 (handed the keyboard by shell 6) hands
+it back with `fg 6`, which pops 7 off the chain; 6 kills 7, then Ctrl+C at
+6's prompt. The keyboard must reach the boot shell.
 
 ```sh
 python3 scripts/drive-qemu.py build/esp.img 'login:@@root' 'assword@@root' \
@@ -123,9 +128,10 @@ python3 scripts/drive-qemu.py build/esp.img 'login:@@root' 'assword@@root' \
   '# @@cd /EFI' '# @@exec /EFI/ORBS/SH.BIN' 'login:@@fg 7' '@@root' \
   'assword@@root' '# @@fg 6' '# @@kill 7' '# @@'$'\x03' '# @@pwd' '# @@'
 # expected: pwd prints / (the boot shell answered). Negative control,
-# measured before revert_input_owner_if normalised a self-naming entry:
-# after "foreground task 6 terminated" no prompt ever comes back, the
-# keyboard stranded on the empty slot 6.
+# measured on the kernel that pushed unconditionally (fg 6 from 7 made a
+# cycle, and the kill spliced 6 onto itself): after "foreground task 6
+# terminated" no prompt ever comes back, the keyboard stranded on the
+# empty slot 6.
 ```
 
 ## 2. Disk-format test images
