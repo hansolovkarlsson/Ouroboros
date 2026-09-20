@@ -1077,9 +1077,9 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
                 // as the bound and not as a list.
                 return syscall_abi::TASK_ERR_PROTECTED;
             }
-            // The checked constructor is the range check; everything
+            // live_index is the range and liveness check; everything
             // below names the slot through it, never the raw argument.
-            let Some(target) = tasks::TaskIndex::new(i).filter(|t| tasks::task_exists(t.index())) else {
+            let Some(target) = tasks::live_index(i) else {
                 return syscall_abi::TASK_ERR_NO_SUCH_TASK;
             };
             if target == tasks::current_index() {
@@ -1113,15 +1113,17 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
                 // refused up front.
                 return syscall_abi::TASK_ERR_PROTECTED;
             }
-            if i == tasks::current_task() {
-                // So is waiting on yourself; its own code, like KILL's
-                // and MSG_CALL's self-target refusals.
-                return syscall_abi::TASK_ERR_SELF;
-            }
-            // The checked constructor is the range check.
+            // The range check alone, not live_index: a Zombie is not
+            // "live" but is exactly what a WAIT collects (try_reap below).
             let Some(target) = tasks::TaskIndex::new(i) else {
                 return syscall_abi::TASK_ERR_NO_SUCH_TASK;
             };
+            if target == tasks::current_index() {
+                // So is waiting on yourself; its own code, like KILL's
+                // and MSG_CALL's self-target refusals, compared the same
+                // way (typed, after construction).
+                return syscall_abi::TASK_ERR_SELF;
+            }
             let i = target.index();
             // Already a zombie: collect-and-reap immediately, no block.
             if let Some(status) = tasks::try_reap(i) {
@@ -1239,20 +1241,20 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
             if !valid_msg_range(arg1, arg2) || !valid_msg_range(arg3, syscall_abi::MSG_MAX_LEN) {
                 return FS_ERROR;
             }
-            if dest == tasks::current_task() {
-                // Calling yourself would block waiting for a reply
-                // only you could send - a guaranteed deadlock, same
-                // up-front refusal as WAIT's self-wait, same code.
-                return syscall_abi::TASK_ERR_SELF;
-            }
             // One of the places a caller-supplied slot becomes a
             // TaskIndex (KILL, WAIT and FG do the same with their
             // targets, and on_tick with the Ctrl+C victim): an
             // out-of-range or empty slot is refused here, so
             // the handoff below is never handed an unchecked number.
-            let Some(dest_index) = tasks::TaskIndex::new(dest).filter(|d| tasks::task_exists(d.index())) else {
+            let Some(dest_index) = tasks::live_index(dest) else {
                 return syscall_abi::TASK_ERR_NO_SUCH_TASK;
             };
+            if dest_index == tasks::current_index() {
+                // Calling yourself would block waiting for a reply
+                // only you could send - a guaranteed deadlock, same
+                // up-front refusal as WAIT's self-wait, same code.
+                return syscall_abi::TASK_ERR_SELF;
+            }
             // Shadowed on purpose: nothing below can name the unchecked value.
             let dest = dest_index.index();
             // Capability check: may this task call `dest`? (The request half
@@ -1428,8 +1430,7 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
                 // Index 0 is allowed - an explicit "give it back".
                 return syscall_abi::TASK_ERR_PROTECTED;
             }
-            // The checked constructor is the range check.
-            let Some(target) = tasks::TaskIndex::new(i).filter(|t| tasks::task_exists(t.index())) else {
+            let Some(target) = tasks::live_index(i) else {
                 return syscall_abi::TASK_ERR_NO_SUCH_TASK;
             };
             tasks::set_input_owner(target.index());

@@ -1871,7 +1871,7 @@ pub(crate) unsafe fn exit_current_and_switch(frame: *mut Context, status: u64) -
     // it can never collide with the ABI's error band) is kept until a
     // WAIT collects it - which is also what makes the slot spawnable
     // again. The memory is still freed at death (release_resources, just
-    // above),
+    // below),
     // not at reap.
     release_resources(current);
     tear_down(current, TaskState::Zombie(status & 0xff));
@@ -2042,6 +2042,17 @@ pub(crate) fn install_task(slot: usize, context: Context, region: (u64, u64)) {
 /// Zombies are deliberately not "live": `fg`/`kill` on one would
 /// target a task that no longer runs (`wait` is how a zombie is
 /// dealt with - `ps` says so).
+/// A caller-supplied slot number as a [`TaskIndex`] that names a LIVE
+/// task, or `None`: the one spelling of "range-checked and occupied",
+/// used by every syscall arm that acts on another task (`KILL`, `FG`,
+/// `MSG_CALL`) and by the Ctrl+C victim guard. `WAIT` is the deliberate
+/// exception and uses [`TaskIndex::new`] alone: a Zombie is not live by
+/// [`task_exists`]'s definition, but it is exactly what a `WAIT` is there
+/// to collect.
+pub(crate) fn live_index(i: usize) -> Option<TaskIndex> {
+    TaskIndex::new(i).filter(|t| task_exists(t.index()))
+}
+
 pub(crate) fn task_exists(i: usize) -> bool {
     i < NUM_TASKS
         && matches!(
@@ -2440,9 +2451,11 @@ pub unsafe fn on_tick(frame: *mut Context) {
     // exited between the mark and this tick is a Zombie whose status the
     // parent may already have collected, and tearing it down again would
     // turn that status into "killed" and clear tables it no longer owns.
-    if let Some(victim_slot) =
-        TaskIndex::new(victim).filter(|v| v.index() >= FIRST_SPAWNABLE && task_exists(v.index()))
-    {
+    // Narrowed, not closed: the mark is a bare slot, so a slot reaped and
+    // re-spawned inside the same window passes this check and the new
+    // occupant is killed. Closing it means marking (slot, generation), the
+    // pair SENDER_TASK already captures - ROADMAP.md's ledger has it.
+    if let Some(victim_slot) = live_index(victim).filter(|v| v.index() >= FIRST_SPAWNABLE) {
         crate::console::println!("Ouroboros kernel: Ctrl+C - foreground task {victim} terminated");
         if victim_slot == current {
             unsafe { kill_current_and_switch(frame) };
