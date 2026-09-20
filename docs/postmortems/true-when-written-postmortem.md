@@ -603,6 +603,44 @@ was harder to see because I had made it, restated it, and recorded it in two
 commit messages and a pull request body by the time it was checked. The
 review that overturned it did so by reading the doc I was citing.
 
+## Each round found what the previous round wrote (2026-09-19)
+
+The newtype that followed the shared constant took twenty reviews on one pull
+request, and from the tenth round on the findings were almost entirely claims
+written in the round before. The ledger named a `CurrentCell` as the example
+Sync wrapper after the same PR's third commit had deleted it. A shell message
+said "use exit" to a child shell whose `exit` only logs out, which I had
+watched happen in a witness run without reading it. The architecture doc's
+`wait` row was corrected to say only the boot shell's wait is interrupted by
+Ctrl+C, and the same commit wrote the old claim into the manual's `wait` row.
+The `fg` row said Ctrl+C ends a nested shell after its keyboard has reverted,
+when in that state Ctrl+C marks nothing. Every caller inventory in a doc
+comment ("used by `KILL`, `FG` and `MSG_CALL`") was wrong within a round,
+because the next commit added a caller.
+
+Two things about this are worth keeping. The first is that these claims were
+not true when written and then falsified elsewhere; they were false on
+arrival, by the same hand, each one an inference from the fix I had just made
+rather than a reading of the code. The variant from 2026-09-05 above, false
+on arrival, was one author's mistake on one day; here it was systematic,
+because every review round produced a fix and every fix produced new
+sentences, and the sentences were where the next round's findings lived. The
+second is what stopped it. Not better corrections. Fewer claims: caller lists
+replaced by "which arms use it is a grep, not a list", advice removed from
+error messages, docs that state the mechanism and stop, and a rule in the PR
+body that a further round is warranted only for a finding that changes
+behaviour, a check that cannot fail, or a claim the kernel contradicts. Under
+that rule the rounds ended.
+
+A smaller variant is worth its own line: a published page edited past its
+source. The manual's `fg` row on the site said Ctrl+C terminates the
+foreground program while the manual's own row still said "or on Ctrl+C", and
+the freshness check could not see it, because it hashes the source. The
+manifest hash was regenerated with the page ahead of the text it abridges. The
+rule for that check is to update the page to the source and then stamp, in
+that order; the day found the one way to satisfy it while making it lie, which
+is to update the page past the source.
+
 ## What actually worked
 
 Three things, none of them "be more careful".

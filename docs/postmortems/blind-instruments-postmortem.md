@@ -361,3 +361,49 @@ is 11/11 three times with the guest alive at the end, zero restarts and zero
 aborts. The earlier "8 of 8" and "11 of 11" runs recorded for step 4 of the
 fid-verbs plan were re-measured; the early checks in those runs were real (the
 guest was alive for them), and the late ones were not evidence either way.
+
+## Five more, from one pull request (2026-09-19)
+
+The newtype day added five to the catalogue, and three of them were mine in
+the sense that I built the instrument and read its answer.
+
+**A mutation that fails for another reason.** A `const` assert tying two
+literals was "shown to fail" by setting one literal to twelve. The review
+deleted the assert and ran the same mutation: the build failed on four type
+mismatches, because the equality was already enforced by array-typed
+parameters. The mutation had never asked the assert anything. The honest
+control is the mutation with the check removed, and the difference between
+the two runs is the evidence.
+
+**A mutation that is not in situ.** A runtime refusal in the view switch was
+exercised by calling the switch directly from `main.rs` with a bad slot, and
+the refusal printed. Every real caller indexes the task table before it
+switches, so a real bad slot panics there and the refusal never runs. The
+guard had been proved to work in a position no caller reaches. A mutation has
+to enter where a caller would.
+
+**A drive against a stale image.** A `cargo build` failed in the middle of a
+chained command, `make image` then staged the previous kernel without
+complaint, and the driven boot that followed passed. Only the build line in
+the output said otherwise. The image timestamp is checked against the edit
+before a transcript is read as evidence, and chained commands stop at the
+first failure.
+
+**A boot with stdin closed.** A one-off QEMU runner passed a closed stdin;
+the firmware read the end-of-file as a keypress, dropped to its boot menu,
+and the capture showed only firmware lines and two minutes of firmware timer
+interrupts. The kernel had never run. `drive-qemu.py` holds a pipe open even
+when it types nothing, and the reason is now written down.
+
+**A push that pushed nothing.** After one commit a review run had checked out
+the remote ref in the working tree. Two later commits landed on a detached
+HEAD, and each `git push origin <branch>` pushed the unchanged branch ref and
+printed success; the pull request was two commits behind while every push
+"worked". The reviewer's own remark that the remote was behind was the only
+signal. Now the branch name is checked before every commit and the PR's head
+is read back after every push.
+
+The common line, same as the one this retrospective opened with: each of these
+returned a well-formed answer to a question it had not been asked, and each was
+caught by reading a second instrument that could disagree with the first.
+
