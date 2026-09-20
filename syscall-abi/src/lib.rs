@@ -164,6 +164,9 @@ pub const KILL: u64 = 19;
 /// each command it runs). Foregrounding a task that is already in that
 /// chain of previous owners hands the keyboard BACK down the chain to it,
 /// forgetting the tasks above; foregrounding any other task stacks on.
+/// Handing it to a task that is blocked in [`WAIT`] on the caller (a shell
+/// that ran the caller as a foreground command) leaves nobody reading it:
+/// that wait discards every byte but Ctrl+C. Not refused today.
 /// **Ctrl+C (`0x03`) is the escape hatch**: typed while a task other
 /// than the boot shell owns the keyboard, the kernel intercepts it,
 /// swallows the byte and terminates that owner (the [`KILL`] teardown,

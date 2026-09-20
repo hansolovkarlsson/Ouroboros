@@ -71,15 +71,17 @@ both load-bearing:
 A timeout prints which pattern it was waiting for, which is usually enough to
 see whether the guest died or the prompt simply differs from the regex.
 
-**The firmware hangs before its own `BdsDxe: loading Boot0001` line about one
-boot in six on this host**, with no kernel output at all: the transcript ends
+**The firmware hangs before its own `BdsDxe: loading Boot0001` and `BdsDxe:
+starting Boot0001` lines about one boot in six on this host**, with no kernel output at all: the transcript ends
 at the firmware's clear-screen and the first pattern waited for (`login:`)
 times out. Measured 2026-09-20 (QEMU 11.1.1, edk2-stable202408): 1 hang in 6
 bare boots, pauses between boots making no difference, and the same image
 booting on every retry. Not attributed. Nothing of ours has run by then, so a
 boot without that line is not evidence about the kernel: rerun it.
-`scripts/test-keyboard-chain.sh` retries such a boot up to three times and
-says so; a boot that reaches the line is never retried.
+`scripts/test-keyboard-chain.sh` retries a boot whose transcript lacks the
+`BdsDxe: starting` line, up to three times, and says so; a boot that reaches
+it is never retried. This paragraph is the one statement of the hang; the
+script and the Makefile point here.
 
 **The nested shell keeps the keyboard.** The keyboard reverts, on its owner's
 death, to the task that held it when `fg` handed it over (`PREVIOUS_OWNERS`

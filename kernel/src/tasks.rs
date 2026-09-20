@@ -1407,6 +1407,15 @@ fn clear_parent(slot: usize) {
     PARENTS[slot].store(0, Ordering::Relaxed);
 }
 
+/// Forget who handed a slot's last occupant the keyboard. Every death
+/// already takes the entry ([`revert_input_owner_if`]); this is the same
+/// line at the two places a slot is REUSED, so a new occupant's entry is
+/// empty by construction and not by the argument that every death passed
+/// through `end_task`.
+fn clear_previous_owner(slot: usize) {
+    PREVIOUS_OWNERS[slot].store(0, Ordering::Relaxed);
+}
+
 /// Whether `child` was spawned by the CURRENT occupant of `parent`. False for
 /// any slot with no live occupant on either side, and false once the parent's
 /// slot has been reused, since the recorded identity no longer matches.
@@ -2140,6 +2149,7 @@ pub(crate) fn install_task(slot: usize, context: Context, region: (u64, u64)) {
     unsafe { *REGIONS[slot].get() = region };
     clear_delegations_of(slot);
     clear_parent(slot);
+    clear_previous_owner(slot);
     issue_generation(slot);
     unsafe { *STATES[slot].get() = TaskState::Runnable };
     flush_new_code(region.0, region.1);
@@ -2213,6 +2223,7 @@ pub(crate) fn spawn(context: Context, region: (u64, u64)) -> Result<usize, Spawn
             issue_generation(i);
             let spawner = current_task();
             set_parent(i, spawner); // overwrites the previous occupant's parent
+            clear_previous_owner(i);
             // A parent and its child may always exchange messages: the child
             // pipes its output to the parent for capture and redirection, the
             // parent relays a builtin's output into the child. Slot 0 has both

@@ -643,14 +643,18 @@ fn main() -> Status {
         console::set_quiet(true);
     }
 
-    // Unmasked last, right before dropping to EL0: nothing before this
-    // point expects to be interrupted, and everything after (task 0, or
-    // halt()'s wfe loop if it ever somehow got back here) is fine being
-    // woken by the tick - which, from here on, is also what drives every
-    // further task switch (`tasks::on_tick`).
-    unsafe {
-        core::arch::asm!("msr daifclr, #2", options(nostack, preserves_flags));
-    }
+    // IRQs stay masked at EL1 all the way into task 0: `tasks::start`'s
+    // `eret` restores task 0's saved SPSR (0, EL0t with DAIF clear), and
+    // THAT is what unmasks the tick, for EL0 only. There used to be an
+    // explicit `msr daifclr, #2` here, which opened a window of a few
+    // instructions in which a tick could land at EL1 inside `start`: the
+    // trampoline would have saved that EL1 frame as task 0's context, and a
+    // tick between `start`'s `msr elr_el1` and its `eret` would have sent
+    // the `eret` to a kernel address in EL0 mode. Never seen (the window is
+    // sub-microsecond), found by review of the single-core argument in
+    // `synccell.rs`, which holds only if EL1 never runs unmasked.
+    // From here on the tick is also what drives every further task switch
+    // (`tasks::on_tick`).
 
     // SAFETY: called after tasks::init().
     unsafe { tasks::start() }

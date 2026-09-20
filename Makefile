@@ -1345,7 +1345,7 @@ test-parallels:
 # nested-shell recipes in docs/testing/testing-qemu.md section 1b, graded on
 # the lines they name (scripts/test-keyboard-chain.sh). Minutes, not seconds,
 # so it is not in `make test`; run it when tasks.rs's keyboard ownership
-# changes. Run `make image` first, in its own command (see the guide for why).
+# changes. Run `make image` first; the script only boots.
 test-keyboard-chain:
 	./scripts/test-keyboard-chain.sh
 

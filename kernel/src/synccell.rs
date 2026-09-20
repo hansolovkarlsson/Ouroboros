@@ -10,17 +10,20 @@
 //! that put this on the ledger. The argument is made once here instead,
 //! and a wrapper that needs nothing but that argument is a `SyncCell<T>`,
 //! not a new type. **The measured count, stated here and nowhere else:**
-//! `grep -c 'unsafe impl.*Sync for' kernel/src/*.rs` summed to 46
-//! before this module and 23 after it, so 23 wrappers became
-//! a `SyncCell`. The 23 that remain are the two raw-pointer cells and the
-//! aligned and DMA wrappers named below.
+//! `grep -c '^unsafe impl.*Sync for' kernel/src/*.rs` (anchored, so a doc
+//! comment quoting the phrase does not count) summed to 46 before this
+//! module and 24 after it: this module's own impl and the 23 hand-rolled
+//! wrappers that remain, named below, so 23 became a `SyncCell`.
 //!
 //! **The argument.** This kernel runs on one core and never unmasks
 //! interrupts while it is itself running: EL1 code executes either at boot
-//! (before any task exists), inside SVC dispatch, inside the tick's IRQ
-//! trampoline, or inside the EL0 fault handler, and taking an exception
-//! masks further IRQs until the next `eret`, so none of those contexts can
-//! be entered while another is in progress. There is therefore never a
+//! (before any task exists, IRQs masked until the first `eret` into task 0
+//! restores that task's SPSR; `main.rs` once unmasked a few instructions
+//! early, the one exception, removed when this argument was written down),
+//! inside SVC dispatch, inside the tick's IRQ trampoline, or inside the EL0
+//! fault handler, and taking an exception masks further IRQs until the
+//! next `eret`, so none of those contexts can be entered while another is
+//! in progress. There is therefore never a
 //! second thread of execution that could observe a cell mid-write, which
 //! is exactly the guarantee `Sync` asks for. `T: Send` is the bound a
 //! shared cell of `T` needs in general (a `Mutex<T>` is `Sync` on the same
@@ -38,7 +41,8 @@
 //! USB storage drivers keep their own wrappers: their SAFETY arguments are
 //! about the device writing memory, a different claim from this one. The
 //! xHCI controller handle itself (`xhci::XHCI`) holds no pointer and is a
-//! `SyncCell`.
+//! `SyncCell`. `gic.rs`'s `GicCell` stays a `Cell` for its by-value
+//! `get`/`set`, and is the last of the 23.
 
 use core::cell::UnsafeCell;
 

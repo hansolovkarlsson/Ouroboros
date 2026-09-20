@@ -11,8 +11,8 @@
 # Four boots, about a minute each. Not part of `make test` (host-only, seconds)
 # for that reason; run it when tasks.rs's keyboard ownership changes.
 #
-# Boot after `make image` in the SAME command has hung in the firmware
-# (docs/testing/testing-qemu.md, section 1b); this script only boots.
+# This script only boots; run `make image` first. The firmware hang it
+# retries on is described once, in docs/testing/testing-qemu.md section 1b.
 set -u
 cd "$(dirname "$0")/.."
 IMG=build/esp.img
@@ -20,11 +20,11 @@ IMG=build/esp.img
 CTRLC=$(printf '\003')
 fail=0
 
-# One boot. The firmware hangs before its own "BdsDxe: starting" line about
-# one boot in six on this host (measured 2026-09-20, pauses between boots made
-# no difference); nothing of ours has run by then, so such a boot is retried,
-# up to three times, and says so. A boot that reaches that line is never
-# retried: from there on a hang is the kernel's.
+# One boot. A boot whose transcript never shows the firmware's own
+# "BdsDxe: starting" line is retried, up to three times, and says so (the
+# hang and its measured rate are in the guide, section 1b); nothing of ours
+# has run by then. A boot that reaches that line is never retried: from
+# there on a hang is the kernel's.
 boot() {
     tries=0
     while :; do

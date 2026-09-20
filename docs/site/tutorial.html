@@ -810,7 +810,7 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64,
 
     <div class="panel">
       <div class="panel-tab"><span>kernel/src/tasks.rs</span><span>the entire scheduler</span></div>
-      <pre><code>static TASKS: [TaskSlot; NUM_TASKS] = <span class="dim">/* saved Context per task */</span>;
+      <pre><code>static TASKS: [SyncCell&lt;Context&gt;; NUM_TASKS] = <span class="dim">/* saved Context per task */</span>;
 <span class="dim">// TaskIndex: a slot below NUM_TASKS by construction (private field; its</span>
 <span class="dim">// constructors live in tasks.rs's task_index module, and the code is the</span>
 <span class="dim">// list). CURRENT is an AtomicUsize inside that same module, and</span>

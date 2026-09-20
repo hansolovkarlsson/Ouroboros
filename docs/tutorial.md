@@ -755,7 +755,7 @@ holds a different task's registers — it restores whatever is there and
 
 ```rust
 // kernel/src/tasks.rs (condensed) — the entire scheduler
-static TASKS: [TaskSlot; NUM_TASKS] = /* saved Context per task */;
+static TASKS: [SyncCell<Context>; NUM_TASKS] = /* saved Context per task */;
 // TaskIndex: a slot below NUM_TASKS by construction (private field; its
 // constructors live in tasks.rs's task_index module, and the code is the
 // list). CURRENT is an AtomicUsize inside that same module, and
