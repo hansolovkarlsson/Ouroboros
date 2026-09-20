@@ -7,9 +7,13 @@
 //! with its own `unsafe impl Sync for X {}` and its own SAFETY comment,
 //! and every one of those comments said the same thing in different
 //! words. Fourteen of them in `tasks.rs` and `mmu.rs` alone by the count
-//! that put this on the ledger, twenty-five across the core files. The
-//! argument is made once here instead, and a wrapper that needs nothing
-//! but that argument is a `SyncCell<T>`, not a new type.
+//! that put this on the ledger. The argument is made once here instead,
+//! and a wrapper that needs nothing but that argument is a `SyncCell<T>`,
+//! not a new type. **The measured count, stated here and nowhere else:**
+//! `grep -c 'unsafe impl.*Sync for' kernel/src/*.rs` summed to 46
+//! before this module and 23 after it, so 23 wrappers became
+//! a `SyncCell`. The 23 that remain are the two raw-pointer cells and the
+//! aligned and DMA wrappers named below.
 //!
 //! **The argument.** This kernel runs on one core and never unmasks
 //! interrupts while it is itself running: EL1 code executes either at boot
@@ -30,9 +34,11 @@
 //! caller's, as it was with the hand-rolled wrappers. A cell that also
 //! needs an alignment (`mmu::Table`, `tasks::IdleRegion`) keeps its own
 //! `#[repr(align)]` newtype around a `SyncCell` and derives `Sync` from it
-//! instead of asserting it. The DMA rings in the virtio and xHCI drivers
-//! keep their own wrappers: their SAFETY arguments are about the device
-//! writing memory, a different claim from this one.
+//! instead of asserting it. The DMA rings and pages in the virtio, xHCI and
+//! USB storage drivers keep their own wrappers: their SAFETY arguments are
+//! about the device writing memory, a different claim from this one. The
+//! xHCI controller handle itself (`xhci::XHCI`) holds no pointer and is a
+//! `SyncCell`.
 
 use core::cell::UnsafeCell;
 

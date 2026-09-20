@@ -136,6 +136,7 @@
 //! first endpoint driven.
 
 use core::cell::UnsafeCell;
+use crate::synccell::SyncCell;
 use core::ptr::{read_volatile, write_volatile};
 
 use crate::console;
@@ -1162,9 +1163,7 @@ impl Xhci {
     }
 }
 
-struct XhciCell(UnsafeCell<Option<Xhci>>);
-unsafe impl Sync for XhciCell {}
-static XHCI: XhciCell = XhciCell(UnsafeCell::new(None));
+static XHCI: SyncCell<Option<Xhci>> = SyncCell::new(None);
 
 /// Brings up the xHCI controller at `bar_base` (from `pci::discover_xhci`)
 /// and, if a device is already connected on some root port, enumerates it
@@ -1417,7 +1416,7 @@ unsafe fn init_inner(bar_base: u64) -> Result<(), Error> {
     // activated device just because init's keyboard-shaped result is an
     // error.
     if kb_result.is_ok() || xhci.storage.is_some() {
-        unsafe { *XHCI.0.get() = Some(xhci) };
+        unsafe { *XHCI.get() = Some(xhci) };
     }
     kb_result
 }
@@ -1947,19 +1946,19 @@ unsafe fn poll_until(mut cond: impl FnMut() -> bool) -> bool {
 /// waiting - see that module for why no shell/ABI changes were needed to
 /// wire this in.
 pub fn poll_key() -> Option<u8> {
-    unsafe { (*XHCI.0.get()).as_mut() }.and_then(Xhci::poll_key)
+    unsafe { (*XHCI.get()).as_mut() }.and_then(Xhci::poll_key)
 }
 
 /// Whether an activated mass-storage device exists - `usb_msd.rs`'s
 /// gate, and `main.rs`/`syscall.rs`'s "is there anything to mount".
 pub(crate) fn storage_present() -> bool {
-    unsafe { (*XHCI.0.get()).as_ref() }.is_some_and(|x| x.storage.is_some())
+    unsafe { (*XHCI.get()).as_ref() }.is_some_and(|x| x.storage.is_some())
 }
 
 /// One synchronous bulk transfer on the storage device's IN (`dir_in`)
 /// or OUT ring - see [`Xhci::bulk_transfer`]. `usb_msd.rs`'s transport.
 pub(crate) fn storage_bulk(dir_in: bool, buf_addr: u64, len: u32) -> Result<(), Error> {
-    match unsafe { (*XHCI.0.get()).as_mut() } {
+    match unsafe { (*XHCI.get()).as_mut() } {
         Some(x) => x.bulk_transfer(dir_in, buf_addr, len),
         None => Err(Error::NoPortConnected),
     }
@@ -1969,7 +1968,7 @@ pub(crate) fn storage_bulk(dir_in: bool, buf_addr: u64, len: u32) -> Result<(), 
 /// after a stalled/failed transfer - [`Xhci::reset_storage_endpoint`].
 /// `usb_msd.rs`'s BOT reset-recovery step between command retries.
 pub(crate) fn storage_reset_endpoint(dir_in: bool) -> Result<(), Error> {
-    match unsafe { (*XHCI.0.get()).as_mut() } {
+    match unsafe { (*XHCI.get()).as_mut() } {
         Some(x) => x.reset_storage_endpoint(dir_in),
         None => Err(Error::NoPortConnected),
     }
@@ -1986,7 +1985,7 @@ pub(crate) fn storage_reset_endpoint(dir_in: bool) -> Result<(), Error> {
 /// runtime keyboard switchover is out of scope); other classes are
 /// left addressed as usual.
 pub(crate) fn rescan_ports() {
-    let Some(x) = (unsafe { (*XHCI.0.get()).as_mut() }) else {
+    let Some(x) = (unsafe { (*XHCI.get()).as_mut() }) else {
         return;
     };
     let dcbaa = unsafe { &mut *DCBAA.0.get() };

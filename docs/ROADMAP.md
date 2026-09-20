@@ -1959,17 +1959,19 @@ would otherwise silently shrink into looking like nothing was ever found.
     eleven in `tasks.rs` (`StateSlot`, `RegionSlot`, ...) and three in
     `mmu.rs` (`Table`, ...), by `grep -c 'unsafe impl Sync'`. A generic
     `SyncCell<T>` holding that argument once was a do-when-touched item:
-    **done 2026-09-20 in #142** (`kernel/src/synccell.rs`). Twenty-three
-    wrappers across `tasks`, `mmu`, `syscall`, `console` and `supervisor`
-    are `SyncCell<T>` now, no behaviour change; the bound is `T: Send`, so
+    **done 2026-09-20 in #142** (`kernel/src/synccell.rs`). The wrappers
+    across `tasks`, `mmu`, `syscall`, `console`, `supervisor` and `xhci`'s
+    controller handle are `SyncCell<T>` now, no behaviour change (the
+    measured count is in the module doc, and only there: a review found
+    this entry, the source map and the module giving three different
+    numbers for one property); the bound is `T: Send`, so
     the two cells that hold a raw pointer (`fbdev`'s `FbCell`, `mmu`'s
     `StoredMapCell` around the uefi crate's `MemoryMapOwned`) keep their
     own wrapper and say why, the two aligned ones (`Table`, `IdleRegion`)
     keep a `#[repr(align)]` newtype around a `SyncCell`, and the DMA rings
     in the virtio and xHCI drivers keep theirs, their SAFETY being about
     the device writing memory. `gic.rs`'s `GicCell` stays a `Cell` for its
-    by-value `get`/`set`. `grep -c 'unsafe impl Sync'` is 2 across those
-    five files, from 25.
+    by-value `get`/`set`.
   - ~~**A task could `KILL` itself.**~~ **Fixed 2026-09-19** (#137). The
     `KILL` arm refused the protected slots and empty slots, and nothing
     else; `kill_task`'s doc said the syscall layer guaranteed the victim
