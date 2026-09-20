@@ -97,9 +97,11 @@ python3 scripts/drive-qemu.py build/esp.img 'login:@@root' 'assword@@root' \
   '# @@/EFI/ORBS/SH.BIN' 'login:@@root' 'assword@@root' \
   '# @@exec /EFI/ORBS/SH.BIN' 'login:@@fg 8' '@@root' 'assword@@root' \
   '# @@kill 7' '# @@'$'\x03' '# @@pwd' '# @@'
-# expected: pwd prints /EFI (task 6 answered). Without the splice in
-# revert_input_owner_if the keyboard falls to the boot shell, which is
-# blocked in wait on task 6, and pwd prints nothing.
+# expected: pwd prints /EFI (task 6 answered) and ps shows task 6 runnable
+# with task 0 blocked. Negative control, measured with the splice loop in
+# revert_input_owner_if removed: after "foreground task 8 terminated" no
+# prompt ever comes back (the rig times out waiting for `# `), because the
+# keyboard fell to the boot shell, blocked in wait on task 6.
 ```
 
 ## 2. Disk-format test images
