@@ -1010,14 +1010,10 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
             unsafe { mmu::rebuild_with_el0_regions(tasks::el0_regions()) };
             resumed_x0
         }
-        syscall_abi::TASK_STATE => {
-            let i = arg0 as usize;
-            if i >= tasks::NUM_TASKS {
-                syscall_abi::TASK_STATE_INVALID
-            } else {
-                tasks::task_state_code(i)
-            }
-        }
+        syscall_abi::TASK_STATE => match tasks::TaskIndex::new(arg0 as usize) {
+            Some(t) => tasks::task_state_code(t.index()),
+            None => syscall_abi::TASK_STATE_INVALID,
+        },
         syscall_abi::TASK_NAME => {
             // arg0 = task index, arg1 = out pointer, arg2 = out capacity.
             // Copies up to capacity bytes of task `index`'s name (argv[0]),
@@ -1026,11 +1022,10 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
             if !valid_user_range(arg1, arg2) {
                 return 0;
             }
-            let i = arg0 as usize;
-            if i >= tasks::NUM_TASKS {
+            let Some(t) = tasks::TaskIndex::new(arg0 as usize) else {
                 return 0;
-            }
-            match argv_get(tasks::argv_blob(i), 0) {
+            };
+            match argv_get(tasks::argv_blob(t.index()), 0) {
                 Some(name) => {
                     let n = (name.len() as u64).min(arg2) as usize;
                     // SAFETY: out range validated above.
@@ -1045,11 +1040,10 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
             // arg0 = task index. The exit status of a zombie (peeked, NOT
             // reaped - unlike WAIT), or TASK_NO_EXIT_CODE for any other slot.
             // Lets `ps` show why a zombie is holding its slot.
-            let i = arg0 as usize;
-            if i >= tasks::NUM_TASKS {
+            let Some(t) = tasks::TaskIndex::new(arg0 as usize) else {
                 return syscall_abi::TASK_NO_EXIT_CODE;
-            }
-            tasks::zombie_status(i).unwrap_or(syscall_abi::TASK_NO_EXIT_CODE)
+            };
+            tasks::zombie_status(t.index()).unwrap_or(syscall_abi::TASK_NO_EXIT_CODE)
         }
         syscall_abi::POWER => {
             // arg0 = mode. Powers off or halts the machine - neither returns.
@@ -1068,8 +1062,13 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
             unsafe { tasks::yield_current_and_switch(frame) }
         }
         syscall_abi::KILL => {
-            let i = arg0 as usize;
-            if i < tasks::FIRST_SPAWNABLE {
+            // Range first (the checked constructor), then every other
+            // question on the typed value; nothing below names the raw
+            // argument.
+            let Some(target) = tasks::TaskIndex::new(arg0 as usize) else {
+                return syscall_abi::TASK_ERR_NO_SUCH_TASK;
+            };
+            if !target.is_spawnable() {
                 // Every slot below FIRST_SPAWNABLE is protected - the
                 // boot shell (the permanent keyboard owner), idle, and
                 // the supervised servers - same reasoning as EXIT's own
@@ -1077,11 +1076,9 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
                 // as the bound and not as a list.
                 return syscall_abi::TASK_ERR_PROTECTED;
             }
-            // live_index is the range and liveness check; everything
-            // below names the slot through it, never the raw argument.
-            let Some(target) = tasks::live_index(i) else {
+            if !tasks::task_exists(target.index()) {
                 return syscall_abi::TASK_ERR_NO_SUCH_TASK;
-            };
+            }
             if target == tasks::current_index() {
                 // A task may not KILL itself: the teardown below would
                 // free the region the `eret` returns into, and the task
@@ -1105,19 +1102,18 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
             0
         }
         syscall_abi::WAIT => {
-            let i = arg0 as usize;
-            if i < tasks::FIRST_SPAWNABLE {
+            // The range check alone, not live_index: a Zombie is not
+            // "live" but is exactly what a WAIT collects (try_reap below).
+            let Some(target) = tasks::TaskIndex::new(arg0 as usize) else {
+                return syscall_abi::TASK_ERR_NO_SUCH_TASK;
+            };
+            if !target.is_spawnable() {
                 // Waiting on any slot below FIRST_SPAWNABLE (they never
                 // die - the boot shell, idle, and the supervised servers
                 // are all exit/kill-protected) is a guaranteed deadlock -
                 // refused up front.
                 return syscall_abi::TASK_ERR_PROTECTED;
             }
-            // The range check alone, not live_index: a Zombie is not
-            // "live" but is exactly what a WAIT collects (try_reap below).
-            let Some(target) = tasks::TaskIndex::new(i) else {
-                return syscall_abi::TASK_ERR_NO_SUCH_TASK;
-            };
             if target == tasks::current_index() {
                 // So is waiting on yourself; its own code, like KILL's
                 // and MSG_CALL's self-target refusals, compared the same
@@ -1195,9 +1191,12 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
             if arg1 == 0 || arg2 > syscall_abi::MSG_MAX_LEN || !in_caller_region(arg1, arg2) {
                 return FS_ERROR;
             }
-            if dest >= tasks::NUM_TASKS || !tasks::task_exists(dest) {
+            let Some(dest_index) = tasks::live_index(dest) else {
                 return syscall_abi::TASK_ERR_NO_SUCH_TASK;
-            }
+            };
+            // Shadowed on purpose, as in MSG_CALL: nothing below can name
+            // the unchecked value.
+            let dest = dest_index.index();
             // Capability check: may this task send to `dest`? A reply to a
             // pending call is exempt (see may_send); an unsolicited send
             // needs the send-mask bit.
@@ -1418,8 +1417,10 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
             }
         }
         syscall_abi::FG => {
-            let i = arg0 as usize;
-            if (1..tasks::FIRST_SPAWNABLE).contains(&i) {
+            let Some(target) = tasks::TaskIndex::new(arg0 as usize) else {
+                return syscall_abi::TASK_ERR_NO_SUCH_TASK;
+            };
+            if target != tasks::TaskIndex::FIRST && !target.is_spawnable() {
                 // Foregrounding idle (1) or any supervised server (every
                 // slot from 2 up to FIRST_SPAWNABLE) is refused, same
                 // protected set as KILL/EXIT:
@@ -1430,9 +1431,9 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
                 // Index 0 is allowed - an explicit "give it back".
                 return syscall_abi::TASK_ERR_PROTECTED;
             }
-            let Some(target) = tasks::live_index(i) else {
+            if !tasks::task_exists(target.index()) {
                 return syscall_abi::TASK_ERR_NO_SUCH_TASK;
-            };
+            }
             tasks::set_input_owner(target.index());
             0
         }

@@ -91,7 +91,7 @@ pub const NUM_TASKS: usize = 11;
 mod task_index {
     use core::sync::atomic::{AtomicUsize, Ordering};
 
-    use super::NUM_TASKS;
+    use super::{FIRST_SPAWNABLE, NUM_TASKS};
 
     /// A task slot index that is below [`NUM_TASKS`] by construction. This
     /// is the type `mmu.rs` takes for a translation-table view, so a view
@@ -136,6 +136,15 @@ mod task_index {
         /// Every slot, in order.
         pub(crate) fn all() -> impl Iterator<Item = TaskIndex> {
             (0..NUM_TASKS).map(TaskIndex)
+        }
+
+        /// Whether this slot is one `spawn` may fill, as opposed to a
+        /// permanent one (the boot shell, idle and the servers, every
+        /// slot below [`FIRST_SPAWNABLE`]). The one home of that bound
+        /// for the syscall arms: `KILL`, `WAIT` and `FG` refuse a
+        /// non-spawnable target and the Ctrl+C guard ignores one.
+        pub(crate) const fn is_spawnable(self) -> bool {
+            self.0 >= FIRST_SPAWNABLE
         }
 
         /// The plain index, for the per-task arrays.
@@ -445,9 +454,10 @@ static REGIONS: [RegionSlot; NUM_TASKS] =
 /// needs: every task slot's own region, `(0, 0)` for any `Unused` one
 /// (already treated as "no region" by `mmu.rs`'s `overlaps_any`, same
 /// convention `main.rs`'s own boot-time call already relies on).
-/// Which task is currently executing, as a plain index for the per-task
-/// lookups in `syscall.rs` that still take one; [`current_index`] is the
-/// typed form, and every switch path and ender uses that.
+/// Which task is currently executing, as a plain index: the
+/// compatibility spelling for the per-task lookups in `syscall.rs` that
+/// still take one. New code takes [`current_index`], the typed form
+/// every switch path and ender uses, and converts at the call site.
 pub(crate) fn current_task() -> usize {
     current_index().index()
 }
@@ -2030,11 +2040,13 @@ pub(crate) fn install_task(slot: usize, context: Context, region: (u64, u64)) {
 
 /// A caller-supplied slot number as a [`TaskIndex`] that names a LIVE
 /// task, or `None`: the one spelling of "range-checked and occupied",
-/// used by every syscall arm that acts on another task (`KILL`, `FG`,
-/// `MSG_CALL`) and by the Ctrl+C victim guard. `WAIT` is the deliberate
-/// exception and uses [`TaskIndex::new`] alone: a Zombie is not live by
-/// [`task_exists`]'s definition, but it is exactly what a `WAIT` is there
-/// to collect.
+/// for an arm that acts on another task (`FG`, `MSG_SEND`, `MSG_CALL`)
+/// and for the Ctrl+C victim guard. `KILL` and `WAIT` take the two
+/// questions apart on purpose, range ([`TaskIndex::new`]) and then the
+/// protected bound ([`TaskIndex::is_spawnable`]) before liveness, so a
+/// protected slot answers "protected" whether or not it is occupied;
+/// and a `WAIT`'s target may be a Zombie, which is not live by
+/// [`task_exists`]'s definition but is exactly what a `WAIT` collects.
 pub(crate) fn live_index(i: usize) -> Option<TaskIndex> {
     TaskIndex::new(i).filter(|t| task_exists(t.index()))
 }
@@ -2446,7 +2458,7 @@ pub unsafe fn on_tick(frame: *mut Context) {
     // re-spawned inside the same window passes this check and the new
     // occupant is killed. Closing it means marking (slot, generation), the
     // pair SENDER_TASK already captures - ROADMAP.md's ledger has it.
-    if let Some(victim_slot) = live_index(victim).filter(|v| v.index() >= FIRST_SPAWNABLE) {
+    if let Some(victim_slot) = live_index(victim).filter(|v| v.is_spawnable()) {
         crate::console::println!("Ouroboros kernel: Ctrl+C - foreground task {victim} terminated");
         if victim_slot == current {
             unsafe { kill_current_and_switch(frame) };
