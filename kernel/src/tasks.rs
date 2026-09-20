@@ -552,6 +552,13 @@ pub(crate) fn set_input_owner(owner: usize) {
     INPUT_OWNER.store(owner, Ordering::Relaxed);
 }
 
+/// The task that owns the keyboard: the only one whose reads consume
+/// keystrokes (the `TRY_READ_CHAR`/`READ_CHAR` arms gate on this, and the
+/// tick's wake-check polls only for it).
+pub(crate) fn input_owner() -> usize {
+    INPUT_OWNER.load(Ordering::Relaxed)
+}
+
 /// If `dying` currently owns the keyboard, hand it back to task 0 -
 /// called from [`end_task`], so every task-death path returns
 /// the terminal to the

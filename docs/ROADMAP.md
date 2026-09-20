@@ -2003,17 +2003,18 @@ would otherwise silently shrink into looking like nothing was ever found.
     it. The re-spawn window itself is not driven (the rig cannot place a
     keystroke between an exit and the next tick); the identity check is
     what the mutation exercises. Found by the eleventh review of #137.
-  - **A background task can steal the keyboard owner's keystrokes.**
-    `TRY_READ_CHAR` and `READ_CHAR` call `poll_keyboard_byte` with no
-    `INPUT_OWNER` gate; only the tick's wake-check skips a non-owner
-    blocked on `Keyboard`. An `exec`'d program that loops on
-    `try_read_char` while a foreground program owns the keyboard consumes
-    the typed bytes (Ctrl+C still marks the owner, since the choke point
-    checks the owner, not the caller), contradicting `architecture.md`'s
-    row that only the owner receives keystrokes. Found by the second
-    review of #138 (2026-09-19); pre-existing, not in #138's scope. Wants
-    the owner gate at the syscall choke point: a non-owner's poll answers
-    `NO_CHAR` (or blocks) without consuming.
+  - ~~**A background task can steal the keyboard owner's keystrokes.**~~
+    **Fixed 2026-09-19.** `TRY_READ_CHAR` and `READ_CHAR` polled for
+    whoever called; only the tick's wake-check gated on `INPUT_OWNER`.
+    Witnessed first with `readkey`'s new `poll` mode (a spinner on
+    `try_read_char`, added as the observer): `exec /bin/readkey poll`, then
+    `echo hi` at the shell arrived as `ehoi`, the poller having echoed the
+    stolen `c`, ` ` and `h`. Both arms now gate on the owner: a non-owner's
+    `try_read_char` answers `NO_CHAR` without consuming and its `read_char`
+    blocks until ownership reaches it. After: the same `echo hi` prints
+    `hi` with the poller running. `architecture.md`'s claim that only the
+    owner receives keystrokes is true at the syscalls now, not only at
+    the wake-check. Found by the second review of #138.
   - **A child shell loses the keyboard after its first command.** Spawn a
     shell from a shell (`/EFI/ORBS/SH.BIN`, slot 6), run any command in it
     (`echo hi`, slot 7): when slot 7 exits, keyboard ownership reverts to

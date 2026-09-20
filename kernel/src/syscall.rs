@@ -559,19 +559,37 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
                 None => u64::MAX,
             }
         }
-        syscall_abi::TRY_READ_CHAR => match poll_keyboard_byte() {
-            Some(byte) => byte as u64,
-            None => NO_CHAR,
-        },
+        // Only the keyboard owner's reads consume keystrokes. The tick's
+        // wake-check already polled only for the owner, but these two arms
+        // polled for whoever called, so a background task spinning on
+        // TRY_READ_CHAR took the owner's bytes as they arrived (witnessed
+        // 2026-09-19: `exec /bin/readkey poll`, then `echo hi` at the shell
+        // arrived as `ehoi`). A non-owner now gets NO_CHAR without touching
+        // the input, or blocks until ownership reaches it (an FG, or the
+        // revert to task 0), which is the contract read_char's doc states.
+        syscall_abi::TRY_READ_CHAR => {
+            if tasks::current_task() != tasks::input_owner() {
+                return NO_CHAR;
+            }
+            match poll_keyboard_byte() {
+                Some(byte) => byte as u64,
+                None => NO_CHAR,
+            }
+        }
         // Blocks instead of returning NO_CHAR: if nothing's waiting yet,
         // suspends this task and switches to another runnable one - see
         // tasks::block_current_and_switch's own doc comment for why this
         // is safe on real hardware where a task-side `wfe` isn't. `frame`
         // is what makes that possible; every other arm above ignores it.
-        syscall_abi::READ_CHAR => match poll_keyboard_byte() {
-            Some(byte) => byte as u64,
-            None => unsafe { tasks::block_current_and_switch(frame, tasks::WaitReason::Keyboard) },
-        },
+        syscall_abi::READ_CHAR => {
+            if tasks::current_task() != tasks::input_owner() {
+                return unsafe { tasks::block_current_and_switch(frame, tasks::WaitReason::Keyboard) };
+            }
+            match poll_keyboard_byte() {
+                Some(byte) => byte as u64,
+                None => unsafe { tasks::block_current_and_switch(frame, tasks::WaitReason::Keyboard) },
+            }
+        }
         syscall_abi::PUTC => {
             console::putc(arg0 as u8);
             0

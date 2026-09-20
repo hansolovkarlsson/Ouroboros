@@ -6,6 +6,12 @@
 //! the shell owned the keyboard. Now the shell hands a foreground command the
 //! keyboard at spawn, so this reads input with `ulib::read_char` like any
 //! ordinary program. The same mechanism a future editor or REPL would use.
+//!
+//! `readkey poll` spins on `try_read_char` instead of blocking. It exists as
+//! the observer for the keyboard-owner gate: run it in the background
+//! (`exec /bin/readkey poll`) and type at the shell. If a non-owner could
+//! consume keystrokes, the spinner would echo them and the shell would see
+//! nothing; with the gate, the spinner answers only when it owns the keyboard.
 
 #![no_std]
 #![no_main]
@@ -13,9 +19,22 @@
 #[no_mangle]
 #[link_section = ".text.start"]
 pub extern "C" fn _start() -> ! {
-    ulib::con_write(b"readkey: press keys (q to quit, Ctrl+C to abort)\r\n");
+    let mut mode = [0u8; 8];
+    let poll = matches!(ulib::arg(1, &mut mode), Some(n) if &mode[..n] == b"poll");
+    if poll {
+        ulib::con_write(b"readkey: polling (q to quit)\r\n");
+    } else {
+        ulib::con_write(b"readkey: press keys (q to quit, Ctrl+C to abort)\r\n");
+    }
     loop {
-        let c = ulib::read_char();
+        let c = if poll {
+            match ulib::try_read_char() {
+                Some(c) => c,
+                None => continue,
+            }
+        } else {
+            ulib::read_char()
+        };
         if c == b'q' {
             break;
         }
