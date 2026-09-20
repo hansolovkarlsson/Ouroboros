@@ -34,6 +34,7 @@
 //! the kernel do the touching for it).
 
 use core::sync::atomic::{AtomicU64, Ordering};
+use crate::synccell::SyncCell;
 
 use syscall_abi::{FS_ERROR, NO_CHAR, SPAWN_ERROR};
 
@@ -60,21 +61,18 @@ static TASK_REPORTS: [AtomicU64; crate::tasks::NUM_TASKS] =
 /// moved to userland (the fsd server): hold the device, do raw
 /// sectors on request, for exactly one authorized task. `None` is the
 /// expected state whenever no disk was discovered this boot.
-struct BlockCell(core::cell::UnsafeCell<Option<crate::block::BlockDevice>>);
-// SAFETY: same single-core, non-reentrant-dispatch reasoning as FsCell.
-unsafe impl Sync for BlockCell {}
-static BLOCK: BlockCell = BlockCell(core::cell::UnsafeCell::new(None));
+static BLOCK: SyncCell<Option<crate::block::BlockDevice>> = SyncCell::new(None);
 
 /// Installs the block device the `BLOCK_*` syscalls serve. First
 /// installed wins, same as the filesystem itself.
 pub fn install_block_device(device: crate::block::BlockDevice) {
-    unsafe { *BLOCK.0.get() = Some(device) };
+    unsafe { *BLOCK.get() = Some(device) };
 }
 
 /// Whether a block device is installed - `MOUNT`'s "already" answer on
 /// the device level.
 pub fn block_device_installed() -> bool {
-    unsafe { (*BLOCK.0.get()).is_some() }
+    unsafe { (*BLOCK.get()).is_some() }
 }
 
 /// The virtio-net device the `NET_*` syscalls operate on - the kernel's
@@ -82,10 +80,7 @@ pub fn block_device_installed() -> bool {
 /// userland (the netd server): hold the NIC, send/receive raw frames on
 /// request, for exactly one authorized task (netd), the `BLOCK_*` -> fsd
 /// pattern. `None` whenever no NIC was discovered this boot.
-struct NetCell(core::cell::UnsafeCell<Option<crate::virtio_net::Device>>);
-// SAFETY: same single-core, non-reentrant-dispatch reasoning as BlockCell.
-unsafe impl Sync for NetCell {}
-static NET: NetCell = NetCell(core::cell::UnsafeCell::new(None));
+static NET: SyncCell<Option<crate::virtio_net::Device>> = SyncCell::new(None);
 
 /// The virtio-rng device the `RANDOM` syscall draws from. `None` whenever the
 /// machine has no entropy device - the ordinary case on every platform except a
@@ -97,20 +92,17 @@ static NET: NetCell = NetCell(core::cell::UnsafeCell::new(None));
 /// to corrupt, and every account tool needs it. The cost of a hostile caller is
 /// draining the host's entropy pool, which QEMU's device does not meaningfully
 /// suffer from.
-struct RngCell(core::cell::UnsafeCell<Option<crate::virtio_rng::Device>>);
-// SAFETY: same single-core, non-reentrant-dispatch reasoning as BlockCell.
-unsafe impl Sync for RngCell {}
-static RNG: RngCell = RngCell(core::cell::UnsafeCell::new(None));
+static RNG: SyncCell<Option<crate::virtio_rng::Device>> = SyncCell::new(None);
 
 /// Installs the entropy source the `RANDOM` syscall serves (from
 /// `main.rs::init_entropy`).
 pub fn install_rng_device(device: crate::virtio_rng::Device) {
-    unsafe { *RNG.0.get() = Some(device) };
+    unsafe { *RNG.get() = Some(device) };
 }
 
 /// Installs the NIC the `NET_*` syscalls serve (from `main.rs::init_net`).
 pub fn install_net_device(device: crate::virtio_net::Device) {
-    unsafe { *NET.0.get() = Some(device) };
+    unsafe { *NET.get() = Some(device) };
 }
 
 /// Whether the calling task may use the `NET_*` syscalls: whoever holds
@@ -125,7 +117,7 @@ fn net_access_allowed() -> bool {
 /// `false` if no NIC is installed. Not gated: it reads no frame data and is
 /// only ever reached from the kernel's own wake-check, not a syscall.
 pub(crate) fn net_has_frame() -> bool {
-    match unsafe { &*NET.0.get() } {
+    match unsafe { &*NET.get() } {
         // SAFETY: single-core, non-reentrant; has_frame only reads the used
         // ring index (see virtio_net::has_frame).
         Some(device) => unsafe { device.has_frame() },
@@ -137,7 +129,7 @@ pub(crate) fn net_has_frame() -> bool {
 /// `None` if no NIC was installed this boot - `main.rs` uses it to enable
 /// the interrupt at the GIC and register it with the IRQ handler.
 pub(crate) fn net_intid() -> Option<u32> {
-    unsafe { &*NET.0.get() }.as_ref().map(|device| device.intid())
+    unsafe { &*NET.get() }.as_ref().map(|device| device.intid())
 }
 
 /// Acknowledges the NIC's pending interrupt at the device (from the IRQ
@@ -146,7 +138,7 @@ pub(crate) fn net_intid() -> Option<u32> {
 /// device's own interrupt-status/ack registers and is reached only from the
 /// kernel's IRQ handler, never a syscall.
 pub(crate) fn net_ack_interrupt() {
-    if let Some(device) = unsafe { &*NET.0.get() } {
+    if let Some(device) = unsafe { &*NET.get() } {
         // SAFETY: single-core IRQ context; device installed (init ran).
         unsafe { device.ack_interrupt() };
     }
@@ -278,40 +270,25 @@ fn valid_msg_range(ptr: u64, len: u64) -> bool {
 /// `shell/src/main.rs`'s own read buffers).
 const SPAWN_STAGING_SIZE: usize = syscall_abi::SPAWN_STAGING_SIZE;
 
-struct SpawnStagingCell(core::cell::UnsafeCell<[u8; SPAWN_STAGING_SIZE]>);
-// SAFETY: single-core; only ever touched from the SPAWN_STAGE/SPAWN
-// dispatch arms, which by construction can't run re-entrantly (same
-// reasoning as `BLOCK`).
-unsafe impl Sync for SpawnStagingCell {}
-static SPAWN_STAGING: SpawnStagingCell = SpawnStagingCell(core::cell::UnsafeCell::new([0; SPAWN_STAGING_SIZE]));
+static SPAWN_STAGING: SyncCell<[u8; SPAWN_STAGING_SIZE]> = SyncCell::new([0; SPAWN_STAGING_SIZE]);
 
 /// Staging buffer for a spawn's argv blob (`ARGS_STAGE` writes it here; the
 /// next `SPAWN` copies `arg2` bytes of it into the new task's per-slot argv
 /// store). Small - `ARGV_MAX` (512), bounded by the shell's input line.
 const ARGS_STAGING_SIZE: usize = syscall_abi::ARGV_MAX as usize;
-struct ArgsStagingCell(core::cell::UnsafeCell<[u8; ARGS_STAGING_SIZE]>);
-// SAFETY: single-core; only touched from the ARGS_STAGE/SPAWN arms, which
-// can't run re-entrantly - same reasoning as SPAWN_STAGING.
-unsafe impl Sync for ArgsStagingCell {}
-static ARGS_STAGING: ArgsStagingCell = ArgsStagingCell(core::cell::UnsafeCell::new([0; ARGS_STAGING_SIZE]));
+static ARGS_STAGING: SyncCell<[u8; ARGS_STAGING_SIZE]> = SyncCell::new([0; ARGS_STAGING_SIZE]);
 
 /// Staging buffer for a spawn's working directory (`CWD_STAGE` writes it
 /// here; the next `SPAWN` copies `arg3` bytes into the child's per-slot cwd).
 const CWD_STAGING_SIZE: usize = syscall_abi::CWD_MAX as usize;
-struct CwdStagingCell(core::cell::UnsafeCell<[u8; CWD_STAGING_SIZE]>);
-// SAFETY: single-core, non-reentrant - same as ARGS_STAGING.
-unsafe impl Sync for CwdStagingCell {}
-static CWD_STAGING: CwdStagingCell = CwdStagingCell(core::cell::UnsafeCell::new([0; CWD_STAGING_SIZE]));
+static CWD_STAGING: SyncCell<[u8; CWD_STAGING_SIZE]> = SyncCell::new([0; CWD_STAGING_SIZE]);
 
 /// Staging buffer for a spawn's **environment** blob (`ENV_STAGE` writes it
 /// here). Unlike argv/cwd, `SPAWN`'s four args are already full, so the env
 /// isn't passed a length by `SPAWN` - instead `ENV_STAGE` latches the length
 /// in [`PENDING_ENV_LEN`], and the next `SPAWN` consumes and clears it.
 const ENV_STAGING_SIZE: usize = syscall_abi::ENV_MAX as usize;
-struct EnvStagingCell(core::cell::UnsafeCell<[u8; ENV_STAGING_SIZE]>);
-// SAFETY: single-core, non-reentrant - same as ARGS_STAGING.
-unsafe impl Sync for EnvStagingCell {}
-static ENV_STAGING: EnvStagingCell = EnvStagingCell(core::cell::UnsafeCell::new([0; ENV_STAGING_SIZE]));
+static ENV_STAGING: SyncCell<[u8; ENV_STAGING_SIZE]> = SyncCell::new([0; ENV_STAGING_SIZE]);
 /// Length of the env blob staged for the *next* `SPAWN` (`0` = none). Set by
 /// `ENV_STAGE`, consumed and reset to `0` by the next `SPAWN` - a single-slot
 /// latch, safe because the shell always stages immediately before spawning and
@@ -388,7 +365,7 @@ fn spawn_staged(total_len: u64, stdout_target: u64, argv_len: u64, cwd_len: u64)
     // an early failure) clears it - a failed spawn must not leak its staged env
     // onto the next one.
     let staged_env_len = pending_env_len();
-    let staging = unsafe { &mut *SPAWN_STAGING.0.get() };
+    let staging = unsafe { &mut *SPAWN_STAGING.get() };
     let size = total_len as usize;
     // A program bigger than the staging buffer can't have been staged
     // in the first place (SPAWN_STAGE bounds every chunk), and an
@@ -436,14 +413,14 @@ fn spawn_staged(total_len: u64, stdout_target: u64, argv_len: u64, cwd_len: u64)
             // by the staging buffer itself.
             let argv_len = (argv_len as usize).min(ARGS_STAGING_SIZE);
             if argv_len > 0 {
-                let staged = unsafe { &*ARGS_STAGING.0.get() };
+                let staged = unsafe { &*ARGS_STAGING.get() };
                 tasks::set_argv(slot, &staged[..argv_len]);
             }
             // Attach the working directory staged via CWD_STAGE (arg3 = its
             // length; 0 = none). The child reads it via GET_CWD.
             let cwd_len = (cwd_len as usize).min(CWD_STAGING_SIZE);
             if cwd_len > 0 {
-                let staged = unsafe { &*CWD_STAGING.0.get() };
+                let staged = unsafe { &*CWD_STAGING.get() };
                 tasks::set_cwd(slot, &staged[..cwd_len]);
             }
             // Attach the environment latched by ENV_STAGE (its length isn't a
@@ -452,7 +429,7 @@ fn spawn_staged(total_len: u64, stdout_target: u64, argv_len: u64, cwd_len: u64)
             // GET_ENVC/GET_ENV.
             let env_len = staged_env_len.min(ENV_STAGING_SIZE);
             if env_len > 0 {
-                let staged = unsafe { &*ENV_STAGING.0.get() };
+                let staged = unsafe { &*ENV_STAGING.get() };
                 tasks::set_env(slot, &staged[..env_len]);
             }
             // A child inherits its parent's (the spawning task's) namespace -
@@ -674,7 +651,7 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
             if len > CWD_STAGING_SIZE {
                 return SPAWN_ERROR;
             }
-            let staging = unsafe { &mut *CWD_STAGING.0.get() };
+            let staging = unsafe { &mut *CWD_STAGING.get() };
             // SAFETY: range sanity-checked above, same trust model as every
             // other userland pointer argument.
             let path = unsafe { core::slice::from_raw_parts(arg0 as *const u8, len) };
@@ -735,7 +712,7 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
             if len > ARGS_STAGING_SIZE {
                 return SPAWN_ERROR;
             }
-            let staging = unsafe { &mut *ARGS_STAGING.0.get() };
+            let staging = unsafe { &mut *ARGS_STAGING.get() };
             // SAFETY: range sanity-checked above, same trust model as every
             // other userland pointer argument.
             let blob = unsafe { core::slice::from_raw_parts(arg0 as *const u8, len) };
@@ -773,7 +750,7 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
             if len > ENV_STAGING_SIZE {
                 return SPAWN_ERROR;
             }
-            let staging = unsafe { &mut *ENV_STAGING.0.get() };
+            let staging = unsafe { &mut *ENV_STAGING.get() };
             // SAFETY: range sanity-checked above, same trust model as ARGS_STAGE.
             let blob = unsafe { core::slice::from_raw_parts(arg0 as *const u8, len) };
             staging[..len].copy_from_slice(blob);
@@ -938,7 +915,7 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
                 return syscall_abi::RANDOM_UNAVAILABLE;
             }
             // SAFETY: single-core, dispatch is not re-entrant.
-            let cell = unsafe { &mut *RNG.0.get() };
+            let cell = unsafe { &mut *RNG.get() };
             match cell {
                 None => syscall_abi::RANDOM_UNAVAILABLE,
                 Some(dev) => {
@@ -969,7 +946,7 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
             if !valid_user_range(arg1, arg2) {
                 return SPAWN_ERROR;
             }
-            let staging = unsafe { &mut *SPAWN_STAGING.0.get() };
+            let staging = unsafe { &mut *SPAWN_STAGING.get() };
             let offset = arg0 as usize;
             let len = arg2 as usize;
             let Some(end) = offset.checked_add(len) else { return SPAWN_ERROR };
@@ -1304,7 +1281,7 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
             if !block_access_allowed() {
                 return syscall_abi::BLOCK_ERR_DENIED;
             }
-            match unsafe { &*BLOCK.0.get() } {
+            match unsafe { &*BLOCK.get() } {
                 Some(device) => device.capacity_sectors(),
                 None => syscall_abi::BLOCK_ERR_NO_DEVICE,
             }
@@ -1316,7 +1293,7 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
             if !block_access_allowed() || !valid_user_range(arg1, syscall_abi::BLOCK_SECTOR_SIZE) {
                 return syscall_abi::BLOCK_ERR_DENIED;
             }
-            let Some(device) = (unsafe { &mut *BLOCK.0.get() }) else {
+            let Some(device) = (unsafe { &mut *BLOCK.get() }) else {
                 return syscall_abi::BLOCK_ERR_NO_DEVICE;
             };
             // SAFETY: pointer sanity-checked above (same trust model as
@@ -1332,7 +1309,7 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
             if !block_access_allowed() || !valid_user_range(arg1, syscall_abi::BLOCK_SECTOR_SIZE) {
                 return syscall_abi::BLOCK_ERR_DENIED;
             }
-            let Some(device) = (unsafe { &mut *BLOCK.0.get() }) else {
+            let Some(device) = (unsafe { &mut *BLOCK.get() }) else {
                 return syscall_abi::BLOCK_ERR_NO_DEVICE;
             };
             // SAFETY: same as BLOCK_READ.
@@ -1355,7 +1332,7 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
             {
                 return syscall_abi::NET_ERROR;
             }
-            let Some(device) = (unsafe { &mut *NET.0.get() }) else {
+            let Some(device) = (unsafe { &mut *NET.get() }) else {
                 return syscall_abi::NET_ERROR;
             };
             // SAFETY: bounds sanity-checked above, same trust model as BLOCK_*.
@@ -1370,7 +1347,7 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
             if !net_access_allowed() {
                 return syscall_abi::NET_ERROR;
             }
-            match unsafe { &*NET.0.get() } {
+            match unsafe { &*NET.get() } {
                 Some(device) => {
                     let m = device.mac();
                     // Pack the 6 MAC bytes little-endian into the low 48 bits.
@@ -1396,7 +1373,7 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
             {
                 return syscall_abi::NET_ERROR;
             }
-            let Some(device) = (unsafe { &mut *NET.0.get() }) else {
+            let Some(device) = (unsafe { &mut *NET.get() }) else {
                 return syscall_abi::NET_ERROR;
             };
             // SAFETY: same as NET_SEND.

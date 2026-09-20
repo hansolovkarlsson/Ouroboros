@@ -616,6 +616,7 @@ kernel/              every file annotated in full in `docs/source-map.md`; each 
   src/timer.rs       ARM generic timer (EL1 physical, PPI 14 / INTID 30), TICK_INTERVAL_MS
   src/loader.rs      INIT.CFG + the boot programs off the ESP; ELF64 parsing + R_AARCH64_RELATIVE processing
   src/supervisor.rs  server supervision: restart a crashed or wedged server from its boot image, per-boot cap
+  src/synccell.rs    SyncCell<T>, the one mutable-static wrapper: the single-core argument stated once, not per cell
   src/syscall.rs     the svc dispatch table - the authority on which syscalls exist (numbers/sentinels in syscall-abi)
   src/tasks.rs       task slots, round-robin scheduler, mailboxes, grants, capability send-mask, per-task identity.
                      THE AUTHORITY on slot numbers and counts - restating that map elsewhere has drifted before,
