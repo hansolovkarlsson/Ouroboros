@@ -96,12 +96,26 @@ python3 scripts/drive-qemu.py build/esp.img 'login:@@root' 'assword@@root' \
   '# @@/EFI/ORBS/SH.BIN' 'login:@@root' 'assword@@root' '# @@cd /EFI' \
   '# @@/EFI/ORBS/SH.BIN' 'login:@@root' 'assword@@root' \
   '# @@exec /EFI/ORBS/SH.BIN' 'login:@@fg 8' '@@root' 'assword@@root' \
-  '# @@kill 7' '# @@'$'\x03' '# @@pwd' '# @@'
+  '# @@kill 7' '# @@'$'\x03' '# @@pwd' '# @@ps' '# @@'
 # expected: pwd prints /EFI (task 6 answered) and ps shows task 6 runnable
 # with task 0 blocked. Negative control, measured with the splice loop in
 # revert_input_owner_if removed: after "foreground task 8 terminated" no
 # prompt ever comes back (the rig times out waiting for `# `), because the
 # keyboard fell to the boot shell, blocked in wait on task 6.
+```
+
+A cycle: shell 7 (handed the keyboard by shell 6) hands it back with `fg 6`,
+6 kills 7, then Ctrl+C at 6's prompt. The keyboard must reach the boot shell.
+
+```sh
+python3 scripts/drive-qemu.py build/esp.img 'login:@@root' 'assword@@root' \
+  '# @@exec /EFI/ORBS/SH.BIN' 'login:@@fg 6' '@@root' 'assword@@root' \
+  '# @@cd /EFI' '# @@exec /EFI/ORBS/SH.BIN' 'login:@@fg 7' '@@root' \
+  'assword@@root' '# @@fg 6' '# @@kill 7' '# @@'$'\x03' '# @@pwd' '# @@'
+# expected: pwd prints / (the boot shell answered). Negative control,
+# measured before revert_input_owner_if normalised a self-naming entry:
+# after "foreground task 6 terminated" no prompt ever comes back, the
+# keyboard stranded on the empty slot 6.
 ```
 
 ## 2. Disk-format test images

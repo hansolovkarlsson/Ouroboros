@@ -2044,8 +2044,23 @@ would otherwise silently shrink into looking like nothing was ever found.
     owner (a nested shell killed from a shell below it) took its entry
     with it. Every entry naming a dying task is now re-pointed at that
     task's own previous owner; witnessed three shells deep (`kill 7` from
-    task 8, Ctrl+C at 8's prompt, `pwd` answered by task 6). Both recipes
-    are in `docs/testing/testing-qemu.md`.
+    task 8, Ctrl+C at 8's prompt, `pwd` answered by task 6). The third
+    review found the splice could make a task its own previous owner
+    (`fg 6` from shell 7 makes a cycle, `kill 7` from 6 splices 6 onto
+    itself) and the next revert then stranded the keyboard on the empty
+    slot: witnessed, no prompt ever came back. An entry naming its own
+    task now counts as none. All three recipes are in
+    `docs/testing/testing-qemu.md`.
+  - **`FG` pushes onto the keyboard chain unconditionally**, so `fg` to a
+    task already in the chain records a cycle rather than returning along
+    it; the chain then reaches task 0 only through the stale-entry
+    fallback. Every revert still lands on a live task or task 0 (a
+    self-naming entry counts as none, and a dead link is spliced out), so
+    nothing strands, but the table can hold a shape the rule never meant.
+    Stack semantics would make it unspellable: `fg` to a task in the
+    owner's chain clears every entry above it and leaves its own alone.
+    Two bounded walks in `set_input_owner`; a design change, so filed.
+    Found by the third review of #140.
   - **Ctrl+C at a nested shell's own prompt kills the shell** (login, cwd
     and env gone), because `interrupt_key_check` terminates any keyboard
     owner but task 0, a rule from when the only other owner was a

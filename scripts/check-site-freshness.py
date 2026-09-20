@@ -81,7 +81,7 @@ MANIFEST = {
     "site/architecture-overview.html": ("architecture.md", "dcba14e9eafe"),
     "site/manual.html": ("manual.md", "43a955ca71aa"),
     "site/microkernel-comparison.html": ("microkernel-comparison.md", "7600abba8222"),
-    "site/tutorial.html": ("tutorial.md", "241346fe1a2b"),
+    "site/tutorial.html": ("tutorial.md", "730995337e32"),
     "site/research-directions.html": ("research/research-directions.md", "5f00b6b38b4d"),
     "site/research-helix-os.html": ("research/research-helix-os.md", "78af5c5b754d"),
     "site/research-minix-boot.html": ("research/research-minix-boot.md", "fc8d12707b08"),

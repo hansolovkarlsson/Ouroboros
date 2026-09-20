@@ -993,7 +993,7 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
                 // "0-4" until a fourth server arrived, and a fifth will
                 // do it again. Today that set is the boot shell (0 -
                 // nothing would own the keyboard, see
-                // tasks::INPUT_OWNER_TASK), idle (1 - never makes
+                // tasks::INPUT_OWNER's fallback), idle (1 - never makes
                 // syscalls, refused for completeness), the filesystem
                 // server (2 - its death would strand the disk for the
                 // rest of the boot, and its slot is

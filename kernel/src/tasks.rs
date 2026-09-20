@@ -599,9 +599,16 @@ pub(crate) fn input_owner() -> usize {
 /// (a nested shell killed from a shell below it), so every entry that
 /// names `dying` is re-pointed at `dying`'s own previous owner first:
 /// the later revert then skips the dead link instead of falling to task
-/// 0 past a live shell that is about to read.
+/// 0 past a live shell that is about to read. An entry that names its
+/// own task is no entry: `fg` back to a task already in the chain makes
+/// a cycle (6 handed to 7, 7 `fg 6`), and a kill inside the cycle
+/// splices the survivor onto itself; taken literally that entry would
+/// hand the keyboard to the dying task and strand it on an empty slot
+/// (witnessed 2026-09-20: no prompt ever came back). Normalised here,
+/// once, before both uses.
 pub(crate) fn revert_input_owner_if(dying: usize) {
     let previous = PREVIOUS_OWNERS[dying].swap(0, Ordering::Relaxed);
+    let previous = if syscall_abi::task_id_slot(previous) as usize == dying { 0 } else { previous };
     if let Some(id) = task_id_of(dying) {
         for entry in PREVIOUS_OWNERS.iter() {
             let _ = entry.compare_exchange(id, previous, Ordering::Relaxed, Ordering::Relaxed);
