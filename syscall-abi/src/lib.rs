@@ -1403,16 +1403,22 @@ pub const SPAWN_ERR_TOO_LARGE: u64 = u64::MAX - 12;
 /// Every task slot already holds a live task.
 pub const SPAWN_ERR_NO_FREE_SLOT: u64 = u64::MAX - 13;
 
-// Task-management failure codes, same reserved band. Answered by every
-// syscall that names another task: [`KILL`], [`FG`], [`WAIT`],
-// [`MSG_SEND`], [`MSG_CALL`] and [`DELEGATE`] (the set `kernel/src/
-// syscall.rs` returns them from; `libc/include/sys.h` mirrors the values
-// and points here for this list rather than restating it).
+// Task-management failure codes, same reserved band. Returned by
+// [`KILL`], [`FG`], [`WAIT`], [`MSG_SEND`], [`MSG_CALL`] and [`DELEGATE`],
+// and by no other syscall: [`GRANT`] answers [`GRANT_ERR`] for an empty
+// slot, and the `TASK_*` queries answer their own sentinels. (The set
+// `kernel/src/syscall.rs` returns them from; `libc/include/sys.h` mirrors
+// the values and points here for this list rather than restating it.)
 
 /// The index is out of range or the slot holds no task. The one of the
-/// three a client of a server can meet: a `MSG_SEND`/`MSG_CALL` to a
-/// server slot that is being restarted underneath the request, or that
-/// held no server this boot.
+/// three a client of a server can meet, two ways: a `MSG_SEND`/`MSG_CALL`
+/// to a slot that held no server this boot, or a `MSG_CALL` that was in
+/// flight when the server died. In the second case the caller is woken
+/// with this code by the teardown (`tasks::fail_calls_to`) and the
+/// supervisor reinstalls the server in that same teardown, before the
+/// caller runs again, so there is no "mid-restart" window to wait out.
+/// Whether the dead server had already acted on the request is not
+/// knowable from this code; a retry repeats any side effect it had.
 pub const TASK_ERR_NO_SUCH_TASK: u64 = u64::MAX - 14;
 /// The target is one of the permanent slots below the first spawnable
 /// one: the boot shell, idle, and the servers (`FSD_TASK`, `CON_TASK`,

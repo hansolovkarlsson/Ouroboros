@@ -15,27 +15,23 @@
 #include <unistd.h>
 #include "sys.h"
 
-static const char *why(void) {
-    return ouro_fs_strerror(ouro_last_fs_status());
-}
-
 static int try_read(const char *path) {
     int fd = open(path, O_RDONLY);
     if (fd < 0) {
-        printf("%s: open failed: %s\r\n", path, why());
+        printf("%s: open failed: %s\r\n", path, ouro_fs_strerror());
         return 1;
     }
     struct stat st;
     st.st_size = 0;
     if (fstat(fd, &st) != 0) {
-        printf("%s: fstat failed: %s\r\n", path, why());
+        printf("%s: fstat failed: %s\r\n", path, ouro_fs_strerror());
         close(fd);
         return 1;
     }
     char buf[128];
     ssize_t n = read(fd, buf, sizeof buf - 1);
     if (n < 0) {
-        printf("%s: read failed: %s\r\n", path, why());
+        printf("%s: read failed: %s\r\n", path, ouro_fs_strerror());
         close(fd);
         return 1;
     }
@@ -57,7 +53,7 @@ static int must_refuse(const char *what, int ok) {
         printf("%s: SUCCEEDED, and must not have\r\n", what);
         return 1;
     }
-    printf("%s: refused (%s)\r\n", what, why());
+    printf("%s: refused (%s)\r\n", what, ouro_fs_strerror());
     return 0;
 }
 
@@ -67,10 +63,10 @@ static int must_refuse(const char *what, int ok) {
  * codes are u64::MAX - n, so their low 32 bits are enough to tell apart. */
 static int must_leave(const char *what, unsigned long expected) {
     unsigned long s = ouro_last_fs_status();
-    if (s == expected && (expected == 0 || strcmp(why(), "no error recorded") != 0)) {
+    if (s == expected && (expected == 0 || strcmp(ouro_fs_strerror(), "no error recorded") != 0)) {
         return 0;
     }
-    printf("%s: left status ..%x (%s), expected ..%x\r\n", what, (unsigned)s, why(),
+    printf("%s: left status ..%x (%s), expected ..%x\r\n", what, (unsigned)s, ouro_fs_strerror(),
            (unsigned)expected);
     return 1;
 }
@@ -122,7 +118,7 @@ int main(void) {
     if (clen == 1 && cwd[0] == '/') {
         fd = open("EFI/ORBS/INIT.CFG", O_RDONLY);
         if (fd < 0) {
-            printf("open(EFI/ORBS/INIT.CFG) relative to / failed: %s\r\n", why());
+            printf("open(EFI/ORBS/INIT.CFG) relative to / failed: %s\r\n", ouro_fs_strerror());
             bad = 1;
         } else {
             close(fd);
@@ -150,7 +146,7 @@ int main(void) {
         n_held++;
     }
     if (n_held < 8) {
-        printf("open #%d of /EFI/ORBS/INIT.CFG failed: %s\r\n", n_held + 1, why());
+        printf("open #%d of /EFI/ORBS/INIT.CFG failed: %s\r\n", n_held + 1, ouro_fs_strerror());
         bad = 1;
     } else {
         fd = open("/EFI/ORBS/INIT.CFG", O_RDONLY);
@@ -165,7 +161,7 @@ int main(void) {
     }
     fd = open("/EFI/ORBS/INIT.CFG", O_RDONLY);
     if (fd < 0) {
-        printf("reopen after the refusal failed: %s\r\n", why());
+        printf("reopen after the refusal failed: %s\r\n", ouro_fs_strerror());
         bad = 1;
     } else {
         close(fd);

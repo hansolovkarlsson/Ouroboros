@@ -57,12 +57,12 @@ int main(void) {
 
     long ln = slurp("/man/grep", local, sizeof local);
     if (ln < 0) {
-        printf("cbig: local /man/grep read failed: %s\r\n", ouro_fs_strerror(ouro_last_fs_status()));
+        printf("cbig: local /man/grep read failed: %s\r\n", ouro_fs_strerror());
         return 1;
     }
     long rn = slurp("/mnt/a/man/grep", remote, sizeof remote);
     if (rn < 0) {
-        printf("cbig: remote /mnt/a/man/grep read failed: %s\r\n", ouro_fs_strerror(ouro_last_fs_status()));
+        printf("cbig: remote /mnt/a/man/grep read failed: %s\r\n", ouro_fs_strerror());
         return 1;
     }
     /* The check that can fail: same length, same bytes, and longer than one

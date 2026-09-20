@@ -79,12 +79,14 @@ unsigned long ouro_last_fs_status(void) {
  * rest of the band is "failed", and 0 is the explicit "nothing recorded" a
  * caller must not mistake for an error. Was a private why() copied into each
  * program, and the copies had already drifted on one wording. */
-const char *ouro_fs_strerror(unsigned long s) {
+const char *ouro_fs_strerror(void) {
+    unsigned long s = g_last_status;
+    if (s == NO_FS) return "no filesystem there, or the peer cannot be reached";
     if (s == FS_ERR_NOT_FOUND) return "no such file or directory";
     if (s == FS_ERR_PERM) return "permission denied";
     if (s == FS_ERR_NO_SUCH_VERB) return "that server does not implement this request, or not on this kind of connection";
     if (s == MSG_ERR_DENIED) return "not allowed to reach that server (capability)";
-    if (s == TASK_ERR_NO_SUCH_TASK) return "that server is not running (restarting, or absent this boot)";
+    if (s == TASK_ERR_NO_SUCH_TASK) return "that server is not running (it died with this request in flight, or was absent this boot)";
     if (s == FS_ERR_CLIENT) return "never sent (no free fd, or the path could not be resolved)";
     if (s >= FS_ERR_MIN) return "failed";
     return "no error recorded";
