@@ -2092,9 +2092,14 @@ would otherwise silently shrink into looking like nothing was ever found.
     keyboard. The kernel could tell the two apart: a previous owner blocked
     in `WAIT` on the owner means a foreground command (terminate), a
     previous owner at its prompt means a session handed over with `fg`
-    (pass the byte through, as for task 0). A behaviour decision, so filed;
-    the manual, its page and `wait`'s doc say what happens today. Found by
-    the second review of #140.
+    (pass the byte through, as for task 0). The same gate drops a nested
+    shell's type-ahead: the tick's Ctrl+C poll consumes and discards any
+    other byte that arrives while the owner is running rather than blocked
+    in a read, and exempts only task 0, so a line typed while a nested
+    shell is still printing its prompt can lose its first characters where
+    the boot shell's would not (third review of #143). A behaviour
+    decision, so filed; the manual, its page and `wait`'s doc say what
+    happens today. Found by the second review of #140.
   - **`FG` is caller-unchecked.** A task that does not hold the keyboard can
     foreground any spawnable task, and the recorded chain then names the
     holder, not the caller, so the revert can route the keyboard to a task

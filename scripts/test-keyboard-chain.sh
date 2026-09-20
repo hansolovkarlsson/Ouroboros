@@ -7,6 +7,7 @@
 # grep below is what distinguishes the two.
 #
 #   make test-keyboard-chain          # rebuilds the image first, then boots
+#   PROFILE=release ./scripts/test-keyboard-chain.sh   # by hand, naming the profile the image was staged from
 #
 # Four boots, about a minute each. Not part of `make test` (host-only, seconds)
 # for that reason; run it when tasks.rs's keyboard ownership changes.
@@ -19,8 +20,10 @@ IMG=build/esp.img
 [ -f "$IMG" ] || { echo "test-keyboard-chain: $IMG missing - run make image"; exit 2; }
 # A stale image would grade the previous kernel and print ok for a regression
 # its own controls would catch; `make test-keyboard-chain` depends on `image`,
-# and this refuses if the image predates any kernel binary anyway.
-for k in target/aarch64-unknown-uefi/*/BOOTAA64.efi; do
+# and this refuses anyway if the image predates the kernel binary of the
+# profile it was staged from (PROFILE, as the Makefile spells it; debug by
+# default) or the staged copy in the ESP tree.
+for k in "target/aarch64-unknown-uefi/${PROFILE:-debug}/BOOTAA64.efi" build/esp/EFI/BOOT/BOOTAA64.EFI; do
     [ -f "$k" ] && [ "$k" -nt "$IMG" ] && {
         echo "test-keyboard-chain: $IMG is older than $k - run make image"; exit 2; }
 done
@@ -46,7 +49,8 @@ boot() {
 # The transcript is CRLF; strip the CR before grepping. Every expectation is
 # checked on the lines AFTER the marker command, so a prompt or an answer
 # from earlier in the run cannot satisfy it.
-after() { sed -n "/^# $1\$/,\$p"; }
+# A string comparison, not a regex, so a marker may contain / . * or [.
+after() { awk -v m="# $1" 'p || $0 == m { p = 1; print }'; }
 # Every transcript is kept (build/chain-N.txt), and a failure prints where
 # the driver gave up and the transcript's tail, so a firmware hang or a
 # changed prompt is distinguishable from the kernel misrouting the keyboard.

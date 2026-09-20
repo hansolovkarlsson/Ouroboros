@@ -25,8 +25,8 @@
 //! Every vector except the tick (the only source of interrupts so far,
 //! see `gic.rs`/`timer.rs`) shares one path: capture ESR/FAR/ELR, report,
 //! halt. That path never returns, so it never needs to preserve anything.
-//! IRQ is the first exception this kernel needs to *resume from* — the
-//! interrupted task has to keep running afterward — so its vector slot
+//! IRQ is the first exception this kernel needs to *resume from*, since
+//! the interrupted task has to keep running afterward, so its vector slot
 //! does a full general-purpose register + ELR_EL1/SPSR_EL1 save, calls
 //! into Rust normally (`bl`, not a diverging `b`), restores everything,
 //! and `eret`s back. Historically that slot was index 5 (IRQ at EL1h),

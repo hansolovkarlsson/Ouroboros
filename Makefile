@@ -1348,7 +1348,7 @@ test-parallels:
 # changes. Depends on `image` so it can never grade a stale kernel (the
 # script also refuses an esp.img older than the kernel binary).
 test-keyboard-chain: image
-	./scripts/test-keyboard-chain.sh
+	PROFILE="$(PROFILE)" ./scripts/test-keyboard-chain.sh
 
 # Host unit tests for the PURE crates - the ones with no I/O, no syscalls and no
 # target dependency, so they run natively on the build machine. This exists

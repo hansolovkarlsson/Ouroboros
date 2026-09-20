@@ -2572,7 +2572,11 @@ pub unsafe fn on_tick(frame: *mut Context) {
     // Ctrl+C for the kill below. A non-Ctrl+C byte here is type-ahead the busy
     // child wasn't reading and is dropped - rare (a program that reads input is
     // Blocked, not running, at the tick), and the price of catching Ctrl+C in a
-    // runaway loop with no read to piggyback on.
+    // runaway loop with no read to piggyback on. A nested shell is the owner
+    // between its commands too now, so its type-ahead can be lost while it
+    // runs (parsing, printing a prompt) where the boot shell's, exempt below,
+    // is not: the same "is the owner a foreground program" question as the
+    // Ctrl+C-kills-a-nested-shell item in docs/ROADMAP.md, and decided there.
     // (The poll itself answers None unless `current` is the owner, so
     // this asks only "is the running task not the boot shell".)
     if current != TaskIndex::FIRST {

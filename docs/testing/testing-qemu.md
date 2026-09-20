@@ -90,8 +90,9 @@ one command. Misdiagnosed once (2026-09-06, "a builtin, no child") and fixed
 on 2026-09-20. **`make test-keyboard-chain`** (`scripts/test-keyboard-chain.sh`)
 runs the recipes below plus a fourth (four shells deep, `fg` back one level,
 a kill, a Ctrl+C: the live shell two levels up must answer) and grades each
-on the lines its negative control lacked; run `make image` first, in its own
-command. The first, by hand, on `build/esp.img`:
+on the lines its negative control lacked; the target rebuilds the image
+first (the Makefile is the authority on that). The first, by hand, on
+`build/esp.img`:
 
 ```sh
 python3 scripts/drive-qemu.py build/esp.img 'login:@@root' 'assword@@root' \
