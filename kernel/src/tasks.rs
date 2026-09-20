@@ -518,10 +518,13 @@ pub(crate) fn el0_regions() -> [(u64, u64); NUM_TASKS] {
     core::array::from_fn(|i| unsafe { *REGIONS[i].0.get() })
 }
 
-/// The one task whose `Blocked(WaitReason::Keyboard)` the wake-check
-/// will ever actually poll hardware for - see `on_tick`'s doc comment
-/// for why exactly one owner exists and what happens to every other
-/// task blocked the same way. Runtime state now (it was a hardcoded
+/// The one task on whose behalf `poll_keyboard_byte` will read hardware
+/// at all: the wake-check's poll for a blocked task, a task's own read
+/// syscall, and the tick's Ctrl+C poll for a running foreground task all
+/// pass the reader, and the poll refuses every other one - see
+/// `on_tick`'s doc comment for why exactly one owner exists and what
+/// happens to every other task blocked the same way. Runtime state now
+/// (it was a hardcoded
 /// `const 0` until job control existed): the `FG` syscall reassigns it
 /// ([`set_input_owner`]), and **any death of the current owner reverts
 /// it to task 0** ([`revert_input_owner_if`], run by
@@ -1653,11 +1656,9 @@ impl WaitReason {
                 // target keeps running); any other typed byte is
                 // deliberately discarded, same spirit as typing at a
                 // busy foreground job in `sh`.
-                {
-                    if let Some(byte) = crate::syscall::poll_keyboard_byte(waiter) {
-                        if byte == 0x03 {
-                            return Some(syscall_abi::WAIT_INTERRUPTED);
-                        }
+                if let Some(byte) = crate::syscall::poll_keyboard_byte(waiter) {
+                    if byte == 0x03 {
+                        return Some(syscall_abi::WAIT_INTERRUPTED);
                     }
                 }
                 match unsafe { *STATES[target].0.get() } {
@@ -1676,11 +1677,9 @@ impl WaitReason {
                 // reach (task 0 only; any other owner is marked instead) - a `recv`
                 // (or a call to a wedged server) with no reply coming
                 // must not brick the session.
-                {
-                    if let Some(byte) = crate::syscall::poll_keyboard_byte(waiter) {
-                        if byte == 0x03 {
-                            return Some(syscall_abi::RECV_INTERRUPTED);
-                        }
+                if let Some(byte) = crate::syscall::poll_keyboard_byte(waiter) {
+                    if byte == 0x03 {
+                        return Some(syscall_abi::RECV_INTERRUPTED);
                     }
                 }
                 try_recv_message_from(waiter, buf, len, from)
@@ -2461,11 +2460,14 @@ pub unsafe fn start() -> ! {
 /// tick, which flips from tick to tick as tasks trade being blocked and
 /// running - confirmed by testing (`exec`ing a second interactive shell
 /// and watching keystrokes arrive split, letter by letter, between the
-/// two). Skipping the poll entirely for every non-owner task fixes this
-/// without needing any buffering of its own: an unconsumed byte simply
-/// stays queued in the console/xHCI driver's own hardware buffer -
-/// `poll_keyboard_byte` never touches it - until the owner task's own
-/// wait is what asks. A task other than the owner that blocks on
+/// two). Refusing every non-owner at the poll itself fixes this without
+/// needing any buffering of its own (`poll_keyboard_byte` takes the
+/// reader it polls for and answers `None` for anyone but the owner,
+/// reading nothing): an unconsumed byte simply stays queued in the
+/// console/xHCI driver's own hardware buffer until the owner task's own
+/// wait, or its own read syscall, is what asks. This loop used to skip
+/// non-owners on its own; that gate moved into the poll so the two read
+/// syscalls could not miss it. A task other than the owner that blocks on
 /// `Keyboard` just stays blocked until ownership reaches it (an `FG`
 /// naming it, or the revert to task 0 on the owner's death; see
 /// `INPUT_OWNER`) - honest, not silently

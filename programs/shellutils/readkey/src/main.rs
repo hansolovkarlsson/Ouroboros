@@ -13,7 +13,8 @@
 //! consume keystrokes, the spinner would echo them and the shell would see
 //! nothing; with the gate, the spinner answers only when it owns the keyboard.
 //! It spins (a syscall per iteration, no yield exists yet), so it takes every
-//! timeslice it is given: an observer to run for the witness and kill after.
+//! timeslice it is given; it gives up on its own after a tick budget, and is
+//! an observer to run for the witness and kill after regardless.
 
 #![no_std]
 #![no_main]
@@ -23,14 +24,31 @@
 pub extern "C" fn _start() -> ! {
     ulib::usage_if_requested(b"usage: readkey [poll]  (poll: spin on try_read_char instead of blocking; an observer for the keyboard-owner gate, kill it when done)\r\n");
     let mut mode = [0u8; 8];
-    let poll = matches!(ulib::arg(1, &mut mode), Some(n) if &mode[..n] == b"poll");
+    let poll = match ulib::arg(1, &mut mode) {
+        None => false,
+        Some(n) if &mode[..n] == b"poll" => true,
+        Some(_) => {
+            ulib::con_write(b"readkey: unknown mode (the only one is `poll`)\r\n");
+            ulib::exit(1);
+        }
+    };
     if poll {
         ulib::con_write(b"readkey: polling (in the foreground: q to quit, Ctrl+C to abort; in the background it never owns the keyboard, so kill it from the shell)\r\n");
     } else {
         ulib::con_write(b"readkey: press keys (q to quit, Ctrl+C to abort)\r\n");
     }
+    // Poll mode spins (a syscall per iteration, no yield exists yet), so it
+    // is bounded: it gives up after POLL_TICKS ticks, which is long enough
+    // for the witness and short enough that a forgotten one does not cost
+    // the rest of the session.
+    const POLL_TICKS: u64 = 3000;
+    let started = ulib::get_ticks();
     loop {
         let c = if poll {
+            if ulib::get_ticks().wrapping_sub(started) > POLL_TICKS {
+                ulib::con_write(b"readkey: poll budget spent, exiting\r\n");
+                ulib::exit(0);
+            }
             match ulib::try_read_char() {
                 Some(c) => c,
                 None => continue,

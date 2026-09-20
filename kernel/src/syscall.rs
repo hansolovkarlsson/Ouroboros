@@ -211,9 +211,10 @@ fn con_access_allowed() -> bool {
 /// the running foreground task at the tick), and unless it is the
 /// current owner (`tasks::input_owner`) the answer is `None` with nothing
 /// read. The parameter is required so that a new caller cannot forget
-/// the rule (docs/postmortems/unspellable-postmortem.md); before it, six
-/// call sites each re-stated the rule and the two read syscalls did not,
-/// so a background poller took the owner's bytes (witnessed 2026-09-19).
+/// the rule (docs/postmortems/unspellable-postmortem.md); before it, of
+/// the six callers four re-stated the rule and the two read syscalls did
+/// not, so a background poller took the owner's bytes (witnessed
+/// 2026-09-19).
 /// Falls back to the USB keyboard (xhci.rs) when the byte-stream console
 /// has nothing waiting; `crate::xhci::poll_key()` is a no-op returning
 /// `None` if no keyboard was ever found this boot.
