@@ -542,6 +542,19 @@ static INPUT_OWNER: AtomicUsize = AtomicUsize::new(0);
 /// recorded (task 0 or a spawnable slot), so the revert can never route the
 /// keyboard to a protected task; a parent can be a server (netd's
 /// remote-exec children).
+///
+/// **The table is a stack, rooted at task 0, and `FG` keeps it one.** An
+/// `FG` to a task that is not in the chain below the owner pushes (the
+/// target's entry becomes the owner); an `FG` to a task that IS in the
+/// chain pops (every entry above the target is cleared, the target's own
+/// is left alone), so the table can never hold a cycle. It could before:
+/// an unconditional push let shell 7, handed the keyboard by shell 6,
+/// `fg 6` and overwrite 6's link to task 0 with a link back to 7, and
+/// after a kill inside that loop the revert once stranded the keyboard on
+/// an empty slot, and once left a live nested prompt unreachable behind
+/// the boot shell's `WAIT` (both witnessed 2026-09-20, the recipes in
+/// `scripts/test-keyboard-chain.sh`). The reader ([`revert_input_owner_if`])
+/// relies on the shape rather than repairing it.
 static PREVIOUS_OWNERS: [AtomicU64; NUM_TASKS] = [const { AtomicU64::new(0) }; NUM_TASKS];
 
 /// A foreground task the Ctrl+C escape hatch (`interrupt_key_check`) has marked
@@ -557,18 +570,49 @@ static PREVIOUS_OWNERS: [AtomicU64; NUM_TASKS] = [const { AtomicU64::new(0) }; N
 /// owns that.
 static PENDING_KILL: AtomicU64 = AtomicU64::new(0);
 
-/// `FG`'s effect: hand the keyboard to task `owner`, remembering who held
-/// it ([`PREVIOUS_OWNERS`]) so that `owner`'s death can hand it back.
-/// Foregrounding the owner again records nothing, so the task it would
-/// revert to stays the one it was handed from. Validation (index in
+/// `FG`'s effect: hand the keyboard to task `owner`, keeping
+/// [`PREVIOUS_OWNERS`] a stack: a push if `owner` is not in the chain below
+/// the task that held it, a pop of everything above `owner` if it is.
+/// Foregrounding the owner again records nothing. Validation (index in
 /// range, slot occupied, not idle) is the syscall layer's job.
 pub(crate) fn set_input_owner(owner: usize) {
     let previous = INPUT_OWNER.swap(owner, Ordering::Relaxed);
-    // Task 0 never dies, so its entry is never read: `fg 0` (the explicit
-    // "give it back") records nothing, and the table holds only entries
-    // the revert can reach.
-    if previous != owner && owner != 0 {
-        PREVIOUS_OWNERS[owner].store(task_id_of(previous).unwrap_or(0), Ordering::Relaxed);
+    if previous == owner {
+        return;
+    }
+    // Walk down from `previous`, remembering each link. Reaching `owner`
+    // makes this a pop: the links walked are the entries above it.
+    let mut walked = [0usize; NUM_TASKS];
+    let mut n = 0;
+    let mut link = previous;
+    while n < NUM_TASKS {
+        walked[n] = link;
+        n += 1;
+        let Some(below) = live_occupant(PREVIOUS_OWNERS[link].load(Ordering::Relaxed)) else {
+            break; // the chain ends here: task 0, or a link that is gone
+        };
+        if below.index() == owner {
+            for &above in &walked[..n] {
+                PREVIOUS_OWNERS[above].store(0, Ordering::Relaxed);
+            }
+            return;
+        }
+        link = below.index();
+    }
+    // A push. Task 0 never dies, so its entry is never read: `fg 0` from
+    // outside the chain records nothing, and the table holds only entries
+    // the revert can reach. A holder that is not a task cannot happen,
+    // since ownership reverts on death; if a future death path forgets
+    // that, say so, as `interrupt_key_check` does for the same state, and
+    // record no previous owner rather than a stranger.
+    if owner != 0 {
+        let holder = task_id_of(previous).unwrap_or_else(|| {
+            crate::console::println_force!(
+                "Ouroboros kernel: keyboard owner slot {previous} holds no task - a kernel bug (its two writers are set_input_owner and revert_input_owner_if)"
+            );
+            0
+        });
+        PREVIOUS_OWNERS[owner].store(holder, Ordering::Relaxed);
     }
 }
 
@@ -590,16 +634,13 @@ pub(crate) fn input_owner() -> usize {
 /// (a nested shell killed from a shell below it), so every entry that
 /// names `dying` is re-pointed at `dying`'s own previous owner first:
 /// the later revert then skips the dead link instead of falling to task
-/// 0 past a live shell that is about to read. An entry that names its
-/// own task is no entry: `fg` back to a task already in the chain makes
-/// a cycle (6 handed to 7, 7 `fg 6`), and a kill inside the cycle
-/// splices the survivor onto itself; taken literally that entry would
-/// hand the keyboard to the dying task and strand it on an empty slot
-/// (witnessed 2026-09-20: no prompt ever came back). Normalised here,
-/// once, before both uses.
+/// 0 past a live shell that is about to read. The splice cannot make an
+/// entry name its own task, because the table holds no cycle for it to
+/// close: [`set_input_owner`] pops instead of pushing when `fg` names a
+/// task already in the chain, which is the invariant this reader relies
+/// on.
 pub(crate) fn revert_input_owner_if(dying: usize) {
     let previous = PREVIOUS_OWNERS[dying].swap(0, Ordering::Relaxed);
-    let previous = if syscall_abi::task_id_slot(previous) as usize == dying { 0 } else { previous };
     if let Some(id) = task_id_of(dying) {
         for entry in PREVIOUS_OWNERS.iter() {
             let _ = entry.compare_exchange(id, previous, Ordering::Relaxed, Ordering::Relaxed);
@@ -1375,6 +1416,15 @@ fn clear_parent(slot: usize) {
     PARENTS[slot].store(0, Ordering::Relaxed);
 }
 
+/// Forget who handed a slot's last occupant the keyboard. Every death
+/// already takes the entry ([`revert_input_owner_if`]); this is the same
+/// line at the two places a slot is REUSED, so a new occupant's entry is
+/// empty by construction and not by the argument that every death passed
+/// through `end_task`.
+fn clear_previous_owner(slot: usize) {
+    PREVIOUS_OWNERS[slot].store(0, Ordering::Relaxed);
+}
+
 /// Whether `child` was spawned by the CURRENT occupant of `parent`. False for
 /// any slot with no live occupant on either side, and false once the parent's
 /// slot has been reused, since the recorded identity no longer matches.
@@ -2108,6 +2158,7 @@ pub(crate) fn install_task(slot: usize, context: Context, region: (u64, u64)) {
     unsafe { *REGIONS[slot].get() = region };
     clear_delegations_of(slot);
     clear_parent(slot);
+    clear_previous_owner(slot);
     issue_generation(slot);
     unsafe { *STATES[slot].get() = TaskState::Runnable };
     flush_new_code(region.0, region.1);
@@ -2181,6 +2232,7 @@ pub(crate) fn spawn(context: Context, region: (u64, u64)) -> Result<usize, Spawn
             issue_generation(i);
             let spawner = current_task();
             set_parent(i, spawner); // overwrites the previous occupant's parent
+            clear_previous_owner(i);
             // A parent and its child may always exchange messages: the child
             // pipes its output to the parent for capture and redirection, the
             // parent relays a builtin's output into the child. Slot 0 has both
@@ -2520,7 +2572,11 @@ pub unsafe fn on_tick(frame: *mut Context) {
     // Ctrl+C for the kill below. A non-Ctrl+C byte here is type-ahead the busy
     // child wasn't reading and is dropped - rare (a program that reads input is
     // Blocked, not running, at the tick), and the price of catching Ctrl+C in a
-    // runaway loop with no read to piggyback on.
+    // runaway loop with no read to piggyback on. A nested shell is the owner
+    // between its commands too now, so its type-ahead can be lost while it
+    // runs (parsing, printing a prompt) where the boot shell's, exempt below,
+    // is not: the same "is the owner a foreground program" question as the
+    // Ctrl+C-kills-a-nested-shell item in docs/ROADMAP.md, and decided there.
     // (The poll itself answers None unless `current` is the owner, so
     // this asks only "is the running task not the boot shell".)
     if current != TaskIndex::FIRST {

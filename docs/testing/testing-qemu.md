@@ -71,18 +71,28 @@ both load-bearing:
 A timeout prints which pattern it was waiting for, which is usually enough to
 see whether the guest died or the prompt simply differs from the regex.
 
-**A boot started in the same command as `make image` can hang in the
-firmware** before its `BdsDxe: loading Boot0001` line, with no kernel output
-at all. Measured 2026-09-20: three such hangs, each immediately after
-`make image` in one shell command, and every retry of the same image booted.
-Not attributed; if the first pattern waited for is `login:` and the transcript
-ends at the firmware's clear-screen, rerun before suspecting the kernel.
+**The firmware hangs before its own `BdsDxe: loading Boot0001` and `BdsDxe:
+starting Boot0001` lines about one boot in six on this host**, with no kernel output at all: the transcript ends
+at the firmware's clear-screen and the first pattern waited for (`login:`)
+times out. Measured 2026-09-20 (QEMU 11.1.1, edk2-stable202408): 1 hang in 6
+bare boots, pauses between boots making no difference, and the same image
+booting on every retry. Not attributed. Nothing of ours has run by then, so a
+boot without that line is not evidence about the kernel: rerun it.
+`scripts/test-keyboard-chain.sh` retries a boot whose transcript lacks the
+`BdsDxe: starting` line, up to three times, and says so; a boot that reaches
+it is never retried. This paragraph is the one statement of the hang; the
+script and the Makefile point here.
 
 **The nested shell keeps the keyboard.** The keyboard reverts, on its owner's
 death, to the task that held it when `fg` handed it over (`PREVIOUS_OWNERS`
 in `tasks.rs`), which is what lets a shell spawned from a shell run more than
 one command. Misdiagnosed once (2026-09-06, "a builtin, no child") and fixed
-on 2026-09-20; this is the check that can fail for it, on `build/esp.img`:
+on 2026-09-20. **`make test-keyboard-chain`** (`scripts/test-keyboard-chain.sh`)
+runs the recipes below plus a fourth (four shells deep, `fg` back one level,
+a kill, a Ctrl+C: the live shell two levels up must answer) and grades each
+on the lines its negative control lacked; the target rebuilds the image
+first (the Makefile is the authority on that). The first, by hand, on
+`build/esp.img`:
 
 ```sh
 python3 scripts/drive-qemu.py build/esp.img 'login:@@root' 'assword@@root' \
@@ -114,8 +124,9 @@ python3 scripts/drive-qemu.py build/esp.img 'login:@@root' 'assword@@root' \
 # keyboard fell to the boot shell, blocked in wait on task 6.
 ```
 
-A cycle: shell 7 (handed the keyboard by shell 6) hands it back with `fg 6`,
-6 kills 7, then Ctrl+C at 6's prompt. The keyboard must reach the boot shell.
+Handing back down the chain: shell 7 (handed the keyboard by shell 6) hands
+it back with `fg 6`, which pops 7 off the chain; 6 kills 7, then Ctrl+C at
+6's prompt. The keyboard must reach the boot shell.
 
 ```sh
 python3 scripts/drive-qemu.py build/esp.img 'login:@@root' 'assword@@root' \
@@ -123,9 +134,10 @@ python3 scripts/drive-qemu.py build/esp.img 'login:@@root' 'assword@@root' \
   '# @@cd /EFI' '# @@exec /EFI/ORBS/SH.BIN' 'login:@@fg 7' '@@root' \
   'assword@@root' '# @@fg 6' '# @@kill 7' '# @@'$'\x03' '# @@pwd' '# @@'
 # expected: pwd prints / (the boot shell answered). Negative control,
-# measured before revert_input_owner_if normalised a self-naming entry:
-# after "foreground task 6 terminated" no prompt ever comes back, the
-# keyboard stranded on the empty slot 6.
+# measured on the kernel that pushed unconditionally (fg 6 from 7 made a
+# cycle, and the kill spliced 6 onto itself): after "foreground task 6
+# terminated" no prompt ever comes back, the keyboard stranded on the
+# empty slot 6.
 ```
 
 ## 2. Disk-format test images

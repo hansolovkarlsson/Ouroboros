@@ -326,6 +326,15 @@ fn main() -> Status {
     // identity-map real discovered RAM instead of a hardcoded address.
     let memory_map = unsafe { boot::exit_boot_services(None) };
 
+    // IRQs masked from here until the first `eret` into task 0, by our own
+    // instruction and not by trusting what the firmware left: EDK2's
+    // ExitBootServices does disable interrupts, but the kernel's whole
+    // single-core argument (`synccell.rs`) is that EL1 never runs
+    // unmasked, and vector slot 5 (IRQ at EL1h) now halts to prove it.
+    unsafe {
+        core::arch::asm!("msr daifset, #2", options(nostack, preserves_flags));
+    }
+
     // First thing after exit, before anything else gets a chance to fault:
     // a bad access is still possible (e.g. the UART write below, if
     // `discovery` ever resolves an address that isn't actually valid on
@@ -643,14 +652,18 @@ fn main() -> Status {
         console::set_quiet(true);
     }
 
-    // Unmasked last, right before dropping to EL0: nothing before this
-    // point expects to be interrupted, and everything after (task 0, or
-    // halt()'s wfe loop if it ever somehow got back here) is fine being
-    // woken by the tick - which, from here on, is also what drives every
-    // further task switch (`tasks::on_tick`).
-    unsafe {
-        core::arch::asm!("msr daifclr, #2", options(nostack, preserves_flags));
-    }
+    // IRQs stay masked at EL1 all the way into task 0: `tasks::start`'s
+    // `eret` restores task 0's saved SPSR (0, EL0t with DAIF clear), and
+    // THAT is what unmasks the tick, for EL0 only. There used to be an
+    // explicit `msr daifclr, #2` here, which opened a window of a few
+    // instructions in which a tick could land at EL1 inside `start`: the
+    // trampoline would have saved that EL1 frame as task 0's context, and a
+    // tick between `start`'s `msr elr_el1` and its `eret` would have sent
+    // the `eret` to a kernel address in EL0 mode. Never seen (the window is
+    // sub-microsecond), found by review of the single-core argument in
+    // `synccell.rs`, which holds only if EL1 never runs unmasked.
+    // From here on the tick is also what drives every further task switch
+    // (`tasks::on_tick`).
 
     // SAFETY: called after tasks::init().
     unsafe { tasks::start() }

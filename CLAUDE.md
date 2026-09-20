@@ -337,7 +337,13 @@ registers are deliberately *not* saved — nothing running today uses them,
 and the only interrupted context that exists is `halt()`'s trivial spin
 loop. That stops being safe the moment real interruptible work with FP/SIMD
 state exists, which matters for whenever actual task switching is
-built, not this milestone.
+built, not this milestone. **Update (2026-09-20): slot 5 no longer takes
+the resumable path.** The kernel never runs at EL1 with IRQs unmasked
+(masked at `exit_boot_services`, and the first `eret` into task 0 is what
+unmasks, for EL0 only), so an IRQ at EL1h is a broken invariant and slot 5
+reports and halts like the other diverging vectors; slot 9 (the tick
+arriving from EL0) is the one resumable IRQ path. See `synccell.rs` for
+why the invariant is load-bearing.
 
 **Verified as sustained, not just "it prints once":** ran under QEMU for
 20+ seconds, confirmed 14 consecutive ticks at the correct ~1-second
@@ -367,6 +373,8 @@ with every other vector. Slot 9 (IRQ, lower EL AArch64) reuses the exact
 same resumable IRQ trampoline as slot 5 — a tick firing *while EL0 runs*
 lands in a different vector slot than one firing at EL1h, easy to miss and
 would have silently broken tick delivery the moment EL0 started running.
+(Since 2026-09-20 slot 9 is the only resumable IRQ path; slot 5 diverges,
+see the update above.)
 
 **The real blocker (first attempt): EL0 had no memory it was allowed to
 execute from.** Sharing `mmu.rs`'s single EL1-only RAM block between EL0
@@ -488,6 +496,7 @@ make run-image-exfat         # build build/espexfat.img (two-partition MBR: exFA
 make run-image-ext2          # build build/espext2.img (two-partition MBR: ext2 partition 1 + FAT32 ESP partition 2, via e2fsprogs' mke2fs + scripts/mkext2.py) and boot it - fsd mounts the ext2 partition (FAT32 + exFAT probes fail, ext2 succeeds), UEFI boots the FAT32 ESP; exercises fsd/src/ext2.rs (the ext2 read-write arm). Needs `brew install e2fsprogs`
 make parallels-hdd          # wrap build/esp.img into build/esp.hdd, a Parallels-native virtual hard disk
 make test-parallels          # scripted real-hardware round trip via prlctl - see below
+make test-keyboard-chain     # rebuilds the image, then four driven QEMU boots through the nested-shell keyboard-chain recipes (scripts/test-keyboard-chain.sh); minutes, so not in `make test` - run it whenever tasks.rs's keyboard ownership changes
 make test                   # host unit tests + clippy --all-targets for the pure crates (accounts, regex, ed25519, clusterkeys, ninep-abi) + the cross-language wire-constant check
 make check-relocs           # the PIE contract: no R_AARCH64_ABS64 in any userland binary
 make check-site             # the published GitHub Pages site vs the documents it abridges - ALSO RUN BY `make test` since 2026-09-05

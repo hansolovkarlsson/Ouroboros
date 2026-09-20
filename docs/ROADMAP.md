@@ -2067,18 +2067,24 @@ would otherwise silently shrink into looking like nothing was ever found.
     (`fg 6` from shell 7 makes a cycle, `kill 7` from 6 splices 6 onto
     itself) and the next revert then stranded the keyboard on the empty
     slot: witnessed, no prompt ever came back. An entry naming its own
-    task now counts as none. All three recipes are in
-    `docs/testing/testing-qemu.md`.
-  - **`FG` pushes onto the keyboard chain unconditionally**, so `fg` to a
-    task already in the chain records a cycle rather than returning along
-    it; the chain then reaches task 0 only through the stale-entry
-    fallback. Every revert still lands on a live task or task 0 (a
-    self-naming entry counts as none, and a dead link is spliced out), so
-    nothing strands, but the table can hold a shape the rule never meant.
-    Stack semantics would make it unspellable: `fg` to a task in the
-    owner's chain clears every entry above it and leaves its own alone.
-    Two bounded walks in `set_input_owner`; a design change, so filed.
-    Found by the third review of #140.
+    task counted as none from then until #143 made the cycle unspellable
+    (the next entry). The recipes are `make test-keyboard-chain`.
+  - ~~**`FG` pushes onto the keyboard chain unconditionally**~~ **Fixed
+    2026-09-20 (#143).** `fg` to a task already in the chain recorded a
+    cycle rather than returning along it, and this entry first claimed
+    "nothing strands": the review of #142 found the case that does. Four
+    deep, `fg 7` from shell 8 overwrote 7's link to 6; `kill 8` then made
+    7's entry name itself, the normalisation read that as none, and Ctrl+C
+    at 7 sent the keyboard to task 0, blocked in `WAIT` on 6, while 6 sat
+    at a live prompt nothing could reach (measured: the prompt printed,
+    `pwd` was never answered). `set_input_owner` keeps the table a stack
+    now: a walk down from the holder, and if it reaches the target every
+    link walked is cleared (a pop), else the target's entry becomes the
+    holder (a push). No cycle is spellable, the self-naming normalisation
+    is gone, and the four recipes are `make test-keyboard-chain`
+    (`scripts/test-keyboard-chain.sh`), each graded on the lines its
+    negative control lacked. Found by the third review of #140 and the
+    review of #142.
   - **Ctrl+C at a nested shell's own prompt kills the shell** (login, cwd
     and env gone), because `interrupt_key_check` terminates any keyboard
     owner but task 0, a rule from when the only other owner was a
@@ -2086,9 +2092,14 @@ would otherwise silently shrink into looking like nothing was ever found.
     keyboard. The kernel could tell the two apart: a previous owner blocked
     in `WAIT` on the owner means a foreground command (terminate), a
     previous owner at its prompt means a session handed over with `fg`
-    (pass the byte through, as for task 0). A behaviour decision, so filed;
-    the manual, its page and `wait`'s doc say what happens today. Found by
-    the second review of #140.
+    (pass the byte through, as for task 0). The same gate drops a nested
+    shell's type-ahead: the tick's Ctrl+C poll consumes and discards any
+    other byte that arrives while the owner is running rather than blocked
+    in a read, and exempts only task 0, so a line typed while a nested
+    shell is still printing its prompt can lose its first characters where
+    the boot shell's would not (third review of #143). A behaviour
+    decision, so filed; the manual, its page and `wait`'s doc say what
+    happens today. Found by the second review of #140.
   - **`FG` is caller-unchecked.** A task that does not hold the keyboard can
     foreground any spawnable task, and the recorded chain then names the
     holder, not the caller, so the revert can route the keyboard to a task
