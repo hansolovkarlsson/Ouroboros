@@ -1935,7 +1935,12 @@ would otherwise silently shrink into looking like nothing was ever found.
     guard-then-index pairs (three names for one predicate; the next step
     of this scope, with a `switch_to` helper for the five-site switch tail
     and one predicate-driven scan for the two runnable loops). Converting
-    those is a separate change. `activate_task`,
+    those is a separate change: **done 2026-09-20 in #141**, no behaviour
+    change (`switch_to`, `scan_from` over `is_runnable`, `is_live` and
+    `task_exists` gone with the identity arms on `live_index`, and
+    `live_occupant(id)` for the two identity-to-live-slot lookups).
+    `may_send`, `send_message` and the per-task arrays still take a
+    `usize`. `activate_task`,
     `switch_full`, `build_view` and `block_current_and_switch_to`'s
     `prefer` take it; every table index in `mmu.rs` is typed, and
     `l0_table`'s runtime refusal is gone because the case is unspellable.
