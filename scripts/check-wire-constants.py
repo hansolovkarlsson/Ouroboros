@@ -208,6 +208,14 @@ CHECKED = [
     # twice per peer and inflated every baseline by one, found by review).
     "FS_ERR_PERM",
     "MSG_ERR_DENIED",
+    # The task codes, mirrored into sys.h on 2026-09-20 so a C program can
+    # tell a server that is not there (NO_SUCH_TASK, the one MSG_CALL answers)
+    # from the rest of the band. Pinned the same day: TASK_ERR_SELF took the
+    # floor's old value the day before, which is exactly the kind of move a
+    # hand-mirrored copy gets wrong.
+    "TASK_ERR_NO_SUCH_TASK",
+    "TASK_ERR_PROTECTED",
+    "TASK_ERR_SELF",
     # The endpoint width, spelled a third time in libc/include/nsresolve.h.
     "NS_ENDPOINT_LEN",
     "NS_TARGET_FSD",
@@ -338,7 +346,7 @@ PEER_BASELINE = {
     # Raised from 3 when step 3b's constants were pinned. The script's own
     # instruction is to raise a baseline when a peer learns a new constant; it
     # had already learned FS_ERR_NOT_FOUND without the floor moving.
-    "libc/include/sys.h": 31,  # counted 2026-09-13: 26 on 09-12, then the five HEAP_INFO_* field selectors
+    "libc/include/sys.h": 34,  # counted 2026-09-20: 31 on 09-13 with the five HEAP_INFO_* field selectors, then the three TASK_ERR_* codes
     "libc/include/nsresolve.h": 5,  # + 4 STAT_* offsets, FS_ERR_READ_ONLY, STAT_FLAG_DIR, FS_ERROR, FS_ERR_NO_SUCH_VERB
 }
 

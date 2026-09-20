@@ -25,6 +25,18 @@
 #define MSG_ERR_FULL (~0UL - 20UL)
 #define MSG_ERR_DENIED (~0UL - 28UL)
 
+/* Task-management codes (mirrors syscall-abi's TASK_ERR_*). MSG_CALL and
+ * MSG_SEND answer TASK_ERR_NO_SUCH_TASK when the destination slot holds no
+ * live task: a server being restarted underneath the request, or absent this
+ * boot. That is the one of the three this library's own requests can meet,
+ * since it only ever addresses FSD_TASK and NET_TASK. The other two are
+ * answered by the task syscalls (kill/fg/wait, and a MSG_CALL to yourself),
+ * which no C program issues yet; named so the next one can tell them apart
+ * rather than reading all three as "failed". */
+#define TASK_ERR_NO_SUCH_TASK (~0UL - 14UL)
+#define TASK_ERR_PROTECTED (~0UL - 15UL)
+#define TASK_ERR_SELF (~0UL - 42UL)
+
 /* Task ids + grant modes. */
 #define FSD_TASK 2
 #define CON_TASK 3

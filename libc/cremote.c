@@ -23,6 +23,7 @@ static const char *why(void) {
     if (s == FS_ERR_PERM) return "permission denied";
     if (s == FS_ERR_NO_SUCH_VERB) return "that server does not implement this request, or not on this kind of connection";
     if (s == MSG_ERR_DENIED) return "not allowed to reach that server (capability)";
+    if (s == TASK_ERR_NO_SUCH_TASK) return "that server is not running (restarting, or absent this boot)";
     if (s == FS_ERR_CLIENT) return "never sent (no free fd, or the path could not be resolved)";
     if (s >= FS_ERR_MIN) return "failed";
     return "no error recorded";

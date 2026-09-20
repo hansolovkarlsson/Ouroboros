@@ -1986,9 +1986,10 @@ would otherwise silently shrink into looking like nothing was ever found.
     code of its own, `TASK_ERR_SELF` (`MAX-42`, the floor's old value; floor to `MAX-43`), because
     `TASK_ERR_PROTECTED`'s one explanation names the permanent slots, the
     wrong one for the slot the caller just named (the shell's error
-    printer distinguishes it today; `libc`'s `sys.h` mirrors no task code
-    and its programs print "failed" for the whole band, so naming
-    `TASK_ERR_SELF`/`_PROTECTED`/`_NO_SUCH_TASK` there is do-when-touched);
+    printer distinguishes it today; `libc`'s `sys.h` mirrored no task code
+    until 2026-09-20, when it gained all three, pinned by the wire check,
+    and `cremote`/`cwrite` name the one their requests can meet, a server
+    that is not running, instead of "failed");
     `kill_task` checks it again as the mechanism (a reported
     halt), and the two paths that tear the running task down go through
     `switch_away_from_dead`, which halts rather than resume a torn-down

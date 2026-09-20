@@ -1586,10 +1586,10 @@ pub const SPAWN_ERR_IMAGE_TOO_LARGE: u64 = u64::MAX - 41;
 /// Its own code, rather than [`TASK_ERR_PROTECTED`], because that code's
 /// one explanation ("the permanent slots") is the wrong one for the slot
 /// the caller just named. The shell's error printer is the consumer that
-/// tells them apart today; `libc`'s `sys.h` mirrors no task code and its
-/// programs print "failed" for anything in the band, so a C program does
-/// not benefit until that header names it (a do-when-touched item in
-/// `ROADMAP.md`). A task ends itself with [`EXIT`]; a shell's `exit`
+/// tells them apart today; `libc`'s `sys.h` has named all three since
+/// 2026-09-20 (pinned by `scripts/check-wire-constants.py`), though its
+/// programs only meet [`TASK_ERR_NO_SUCH_TASK`], the one a `MSG_CALL` to
+/// a server can answer. A task ends itself with [`EXIT`]; a shell's `exit`
 /// only logs out, so a child shell is ended from outside (Ctrl+C while it
 /// holds the keyboard, or `KILL` from its parent). Reserved 2026-09-19,
 /// moving the floor to `MAX-43`.
