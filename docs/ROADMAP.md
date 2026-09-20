@@ -1646,16 +1646,17 @@ would otherwise silently shrink into looking like nothing was ever found.
     `DELEGATE(<its child>, <a task it cannot reach>)` and prints the two
     answers, expected `MSG_ERR_DENIED` both times. Promised in the journal on
     2026-09-06 and not built.
-  - **A foregrounded nested shell loses the keyboard after every command.**
-    `exec /EFI/ORBS/SH.BIN`, `fg 6`, log in, `echo hi` (a builtin, no child,
-    no `FG`): `ps` before shows task 0 blocked and task 6 runnable, `ps` after
-    shows task 0 runnable and task 6 blocked, and the next line typed runs in
-    the boot shell. Measured 2026-09-06 while testing subtree delegation,
-    where it first looked like the nested shell's later pipelines had started
-    working: they had, in the other shell. Every nested-shell recipe needs a
-    `fg 6` before each command until this is fixed, and the same prompt in
-    both shells hides which one answered. Not traced to a cause; the revert
-    on child exit goes to slot 0 by design, but this case has no child.
+  - ~~**A foregrounded nested shell loses the keyboard after every command.**~~
+    **Fixed 2026-09-20**, as the entry "a child shell loses the keyboard
+    after its first command" further down: the same defect. `exec
+    /EFI/ORBS/SH.BIN`, `fg 6`, log in, `echo hi`: `ps` before showed task 0
+    blocked and task 6 runnable, `ps` after showed task 0 runnable and task
+    6 blocked, and the next line typed ran in the boot shell. Measured
+    2026-09-06 while testing subtree delegation, where it first looked like
+    the nested shell's later pipelines had started working: they had, in the
+    other shell. The cause was not traced then; "a builtin, no child" was
+    wrong, since `echo` is a `/bin` program and its exit is what reverted
+    the keyboard to slot 0.
   - **`delegate_net` discards its result**, so the one grant this arc is about
     is the only `DELEGATE` in the shell with no failure signal. **Worse since
     subtree delegation (2026-09-06):** a nested shell that never received
@@ -2015,18 +2016,69 @@ would otherwise silently shrink into looking like nothing was ever found.
     `hi` with the poller running. `architecture.md`'s claim that only the
     owner receives keystrokes is true at the syscalls now, not only at
     the wake-check. Found by the second review of #138.
-  - **A child shell loses the keyboard after its first command.** Spawn a
-    shell from a shell (`/EFI/ORBS/SH.BIN`, slot 6), run any command in it
-    (`echo hi`, slot 7): when slot 7 exits, keyboard ownership reverts to
-    task 0, the boot shell (blocked in `WAIT` on slot 6 when the child was
-    run as a foreground command, or back at its prompt after `exec` then
-    `fg`), so the child shell's next prompt never receives input and it
-    stays alive until killed from the boot shell. The revert-on-death rule in `revert_input_owner_if`
-    is "to task 0", not "to the spawner". Seen 2026-09-19 while driving the
-    self-`KILL` witness for #137 (not caused by it: the same rig without a
-    grandchild works). Wants the revert to go to the dead task's spawner
-    when that spawner is itself a foreground task, or a stated rule that
-    nested shells are unsupported.
+  - ~~**A child shell loses the keyboard after its first command.**~~
+    **Fixed 2026-09-20.** Spawn a shell from a shell (`/EFI/ORBS/SH.BIN`,
+    slot 6), run any command in it (`echo hi`, slot 7): when slot 7 exited,
+    keyboard ownership reverted to task 0, the boot shell, so the child
+    shell's next prompt never received input. The revert-on-death rule in
+    `revert_input_owner_if` was "to task 0". Seen 2026-09-19 while driving
+    the self-`KILL` witness for #137. Now `FG` records who held the keyboard
+    when it handed it over (`PREVIOUS_OWNERS`, a packed identity per task,
+    not a slot), and the owner's death returns it to that task if it is
+    still the same occupant and live, else to task 0. The previous owner
+    rather than the parent because every previous owner was a valid `FG`
+    target when recorded, so the revert can never land on a protected task;
+    a parent can be a server (netd's remote-exec children). Witnessed with
+    `drive-qemu.py` on `esp.img`: `exec /EFI/ORBS/SH.BIN`, `fg 6`, log in,
+    `cd /EFI`, `echo hi`, `pwd`. Before: `/` (the boot shell answered) and
+    `ps` showed task 0 runnable, task 6 blocked. After: `/EFI`, task 6
+    runnable, task 0 blocked. The chain too: with the nested shell run as a
+    foreground command, Ctrl+C at a grandchild `readkey` returned the
+    keyboard to the nested shell (`pwd` gave `/EFI`), and Ctrl+C at the
+    nested prompt killed it and returned the keyboard to the boot shell
+    (`pwd` gave `/`). Zero aborts in QEMU's trace for both runs. The
+    older entry of 2026-09-06 below ("a foregrounded nested shell loses
+    the keyboard after every command") was the same defect seen from the
+    `exec` then `fg` flow. The second review of #140 found the chain could
+    still fall to task 0 past a live shell: a link that dies while NOT the
+    owner (a nested shell killed from a shell below it) took its entry
+    with it. Every entry naming a dying task is now re-pointed at that
+    task's own previous owner; witnessed three shells deep (`kill 7` from
+    task 8, Ctrl+C at 8's prompt, `pwd` answered by task 6). The third
+    review found the splice could make a task its own previous owner
+    (`fg 6` from shell 7 makes a cycle, `kill 7` from 6 splices 6 onto
+    itself) and the next revert then stranded the keyboard on the empty
+    slot: witnessed, no prompt ever came back. An entry naming its own
+    task now counts as none. All three recipes are in
+    `docs/testing/testing-qemu.md`.
+  - **`FG` pushes onto the keyboard chain unconditionally**, so `fg` to a
+    task already in the chain records a cycle rather than returning along
+    it; the chain then reaches task 0 only through the stale-entry
+    fallback. Every revert still lands on a live task or task 0 (a
+    self-naming entry counts as none, and a dead link is spliced out), so
+    nothing strands, but the table can hold a shape the rule never meant.
+    Stack semantics would make it unspellable: `fg` to a task in the
+    owner's chain clears every entry above it and leaves its own alone.
+    Two bounded walks in `set_input_owner`; a design change, so filed.
+    Found by the third review of #140.
+  - **Ctrl+C at a nested shell's own prompt kills the shell** (login, cwd
+    and env gone), because `interrupt_key_check` terminates any keyboard
+    owner but task 0, a rule from when the only other owner was a
+    foreground program. Newly routine now that a nested shell keeps the
+    keyboard. The kernel could tell the two apart: a previous owner blocked
+    in `WAIT` on the owner means a foreground command (terminate), a
+    previous owner at its prompt means a session handed over with `fg`
+    (pass the byte through, as for task 0). A behaviour decision, so filed;
+    the manual, its page and `wait`'s doc say what happens today. Found by
+    the second review of #140.
+  - **`FG` is caller-unchecked.** A task that does not hold the keyboard can
+    foreground any spawnable task, and the recorded chain then names the
+    holder, not the caller, so the revert can route the keyboard to a task
+    that never asked for it. Not new (it was always unchecked), but the
+    shell's "reverts to this shell" now rests on caller == holder, which is
+    true because only the owner can read a command line and nothing else
+    calls `FG`. Refusing `FG` from a non-owner would make the chain
+    trustworthy by construction. Found by the second review of #140.
   - **The stack top is hand-derived as `base + size` at seven sites across
     three files** (`tasks.rs` five times, `supervisor.rs`, `syscall.rs`),
     inside an identical `Context` literal. Anything ever placed above the

@@ -234,10 +234,13 @@ $ send 5 hello ; recv        # ...send it a message and read its echo
 ```
 
 Job-control notes: one task owns the keyboard at a time (`fg` moves it;
-it returns to the boot shell when the owner dies, or on **Ctrl+C**, which
-reclaims the keyboard without killing anything). An exited task holds its
+when the owner dies it returns to the task that held it when `fg` handed it
+over, so a nested shell gets it back from its own commands, and to the boot
+shell if that task is gone; **Ctrl+C** terminates any owner but the boot
+shell, which is one such death, and the boot shell ignores it). An exited task holds its
 slot as a zombie until `wait`ed (`ps` shows it); `kill` reaps immediately.
-Ctrl+C also interrupts a stuck `wait`.
+Ctrl+C also interrupts a stuck `wait` in the boot shell; in a nested shell
+it kills the shell, since that shell is the owner Ctrl+C terminates.
 
 ### Disks and mounts
 
@@ -524,7 +527,7 @@ statuses). `NO_FS` (`MAX-1`) means no filesystem is mounted this boot.
 | 17 | `exit` | code | Destroy the calling task; status kept (masked to 0–255) until `wait`ed. Slots 0–5 (the shell, idle, and the four servers) refused (`EXIT_DENIED`) |
 | 18 | `task_state` | index | `UNUSED`/`RUNNABLE`/`BLOCKED`/`ZOMBIE`, or `TASK_STATE_INVALID` past the last slot |
 | 19 | `kill` | index | Destroy another task (reaps immediately). The permanent slots (below the first spawnable one) refused with `TASK_ERR_PROTECTED`, the caller's own slot with `TASK_ERR_SELF` |
-| 20 | `fg` | index | Hand keyboard ownership to a task (auto-reverts to task 0 on the owner's death, or on Ctrl+C, which terminates the foreground task) |
+| 20 | `fg` | index | Hand keyboard ownership to a task (on the owner's death it reverts to the task that held it when `fg` handed it over, if still alive, else to task 0; Ctrl+C terminates the foreground task, which is one such death) |
 | 21 | `wait` | index | Block until the task dies; returns its status (0–255), `TASK_KILLED_STATUS` (0x100), or `WAIT_INTERRUPTED` (Ctrl+C, for the boot shell only: it is the one keyboard owner Ctrl+C never terminates); refused with `TASK_ERR_PROTECTED` (a permanent slot) or `TASK_ERR_SELF`. Collecting the status reaps the slot |
 | 22 | `mount` | replace flag | Rescan the USB ports and install a storage device as the kernel's block device (`0`, `MOUNT_ALREADY`, or `MOUNT_NO_DEVICE`): the device half; the FS half is the server's `FSOP_MOUNT` |
 | 23 | `msg_send` | dest, buf ptr/len | IPC: deliver a message (up to `MSG_MAX_LEN`, 768 bytes), straight into a matching blocked receiver's buffer (direct delivery), or into the task's bounded mailbox. Zero length is legal: the pipeline end-of-stream marker |

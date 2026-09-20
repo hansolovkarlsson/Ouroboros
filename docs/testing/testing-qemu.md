@@ -71,6 +71,56 @@ both load-bearing:
 A timeout prints which pattern it was waiting for, which is usually enough to
 see whether the guest died or the prompt simply differs from the regex.
 
+**The nested shell keeps the keyboard.** The keyboard reverts, on its owner's
+death, to the task that held it when `fg` handed it over (`PREVIOUS_OWNERS`
+in `tasks.rs`), which is what lets a shell spawned from a shell run more than
+one command. Misdiagnosed once (2026-09-06, "a builtin, no child") and fixed
+on 2026-09-20; this is the check that can fail for it, on `build/esp.img`:
+
+```sh
+python3 scripts/drive-qemu.py build/esp.img 'login:@@root' 'assword@@root' \
+  '# @@exec /EFI/ORBS/SH.BIN' 'login:@@fg 6' '@@root' 'assword@@root' \
+  '# @@cd /EFI' '# @@echo hi' '# @@pwd' '# @@ps' '# @@'
+# expected: pwd prints /EFI (the nested shell's cwd) and ps shows
+# "task 6: runnable" with task 0 blocked. The negative control, measured on
+# the kernel before the fix: pwd prints / and ps shows task 0 runnable,
+# task 6 blocked, because the boot shell answered.
+```
+
+The chain, three shells deep, with the middle one killed from below (a link
+dying while NOT the owner): after Ctrl+C at the innermost prompt the keyboard
+must reach the outer nested shell, not the boot shell. `$'\x03'` is zsh and
+bash quoting for the raw Ctrl+C byte; under plain `sh` it is four literal
+characters, the driver types those, and the run times out at the same step
+as the negative control.
+
+```sh
+python3 scripts/drive-qemu.py build/esp.img 'login:@@root' 'assword@@root' \
+  '# @@/EFI/ORBS/SH.BIN' 'login:@@root' 'assword@@root' '# @@cd /EFI' \
+  '# @@/EFI/ORBS/SH.BIN' 'login:@@root' 'assword@@root' \
+  '# @@exec /EFI/ORBS/SH.BIN' 'login:@@fg 8' '@@root' 'assword@@root' \
+  '# @@kill 7' '# @@'$'\x03' '# @@pwd' '# @@ps' '# @@'
+# expected: pwd prints /EFI (task 6 answered) and ps shows task 6 runnable
+# with task 0 blocked. Negative control, measured with the splice loop in
+# revert_input_owner_if removed: after "foreground task 8 terminated" no
+# prompt ever comes back (the rig times out waiting for `# `), because the
+# keyboard fell to the boot shell, blocked in wait on task 6.
+```
+
+A cycle: shell 7 (handed the keyboard by shell 6) hands it back with `fg 6`,
+6 kills 7, then Ctrl+C at 6's prompt. The keyboard must reach the boot shell.
+
+```sh
+python3 scripts/drive-qemu.py build/esp.img 'login:@@root' 'assword@@root' \
+  '# @@exec /EFI/ORBS/SH.BIN' 'login:@@fg 6' '@@root' 'assword@@root' \
+  '# @@cd /EFI' '# @@exec /EFI/ORBS/SH.BIN' 'login:@@fg 7' '@@root' \
+  'assword@@root' '# @@fg 6' '# @@kill 7' '# @@'$'\x03' '# @@pwd' '# @@'
+# expected: pwd prints / (the boot shell answered). Negative control,
+# measured before revert_input_owner_if normalised a self-naming entry:
+# after "foreground task 6 terminated" no prompt ever comes back, the
+# keyboard stranded on the empty slot 6.
+```
+
 ## 2. Disk-format test images
 
 Ouroboros's filesystem server (`fsd`) mounts FAT32, exFAT, and ext2, and discovers

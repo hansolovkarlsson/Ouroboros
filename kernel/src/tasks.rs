@@ -527,13 +527,31 @@ pub(crate) fn el0_regions() -> [(u64, u64); NUM_TASKS] {
 /// (it was a hardcoded
 /// `const 0` until job control existed): the `FG` syscall reassigns it
 /// ([`set_input_owner`]), and **any death of the current owner reverts
-/// it to task 0** ([`revert_input_owner_if`], run by
-/// [`end_task`] on every teardown) - task 0 can never die (`EXIT`
-/// and `KILL` both refuse
-/// it), so the revert target is always valid, the same permanence
-/// argument the original hardcoding relied on, now load-bearing for
-/// the revert too.
+/// it to the task that held it when `FG` handed it over**
+/// ([`revert_input_owner_if`], run by [`end_task`] on every teardown),
+/// if that task is still the same occupant and alive, **else to task 0**.
+/// Task 0 can never die (`EXIT` and `KILL` both refuse it), so the
+/// fallback is always valid, the same permanence argument the original
+/// hardcoding relied on, now load-bearing for the revert too.
 static INPUT_OWNER: AtomicUsize = AtomicUsize::new(0);
+
+/// Who owned the keyboard when each task was last handed it by `FG`, as a
+/// packed identity ([`task_id_of`]; `0` = never handed over), so that its
+/// death returns the keyboard to the shell that ran it and not to the boot
+/// shell regardless. That distinction is the nested shell: with the revert
+/// hardwired to task 0, a shell spawned from the boot shell lost the
+/// keyboard the moment its first command exited, and its next prompt never
+/// read a byte (witnessed 2026-09-20: `exec /EFI/ORBS/SH.BIN`, `fg 6`, log
+/// in, `cd /EFI`, `echo hi`, then `pwd` printed `/`, the boot shell's cwd,
+/// and `ps` showed task 0 runnable and task 6 blocked). An IDENTITY and not
+/// a slot, for the same reason as [`PARENTS`]: the slot can be reaped and
+/// re-spawned while the child runs, and a bare slot number would then hand
+/// the keyboard to a stranger. The previous owner rather than the parent
+/// because every previous owner was a valid `FG` target when it was
+/// recorded (task 0 or a spawnable slot), so the revert can never route the
+/// keyboard to a protected task; a parent can be a server (netd's
+/// remote-exec children).
+static PREVIOUS_OWNERS: [AtomicU64; NUM_TASKS] = [const { AtomicU64::new(0) }; NUM_TASKS];
 
 /// A foreground task the Ctrl+C escape hatch (`interrupt_key_check`) has marked
 /// for death, killed by [`on_tick`] at a safe point (the only place this kernel
@@ -548,11 +566,19 @@ static INPUT_OWNER: AtomicUsize = AtomicUsize::new(0);
 /// owns that.
 static PENDING_KILL: AtomicU64 = AtomicU64::new(0);
 
-/// `FG`'s effect: hand the keyboard to task `owner`. Validation (index
-/// in range, slot occupied, not idle) is the syscall layer's job -
-/// this just stores.
+/// `FG`'s effect: hand the keyboard to task `owner`, remembering who held
+/// it ([`PREVIOUS_OWNERS`]) so that `owner`'s death can hand it back.
+/// Foregrounding the owner again records nothing, so the task it would
+/// revert to stays the one it was handed from. Validation (index in
+/// range, slot occupied, not idle) is the syscall layer's job.
 pub(crate) fn set_input_owner(owner: usize) {
-    INPUT_OWNER.store(owner, Ordering::Relaxed);
+    let previous = INPUT_OWNER.swap(owner, Ordering::Relaxed);
+    // Task 0 never dies, so its entry is never read: `fg 0` (the explicit
+    // "give it back") records nothing, and the table holds only entries
+    // the revert can reach.
+    if previous != owner && owner != 0 {
+        PREVIOUS_OWNERS[owner].store(task_id_of(previous).unwrap_or(0), Ordering::Relaxed);
+    }
 }
 
 /// The task that owns the keyboard: the only one whose reads consume
@@ -562,20 +588,50 @@ pub(crate) fn input_owner() -> usize {
     INPUT_OWNER.load(Ordering::Relaxed)
 }
 
-/// If `dying` currently owns the keyboard, hand it back to task 0 -
-/// called from [`end_task`], so every task-death path returns
-/// the terminal to the
-/// boot shell instead of leaving input routed at an empty slot.
+/// If `dying` currently owns the keyboard, hand it back to the task that
+/// held it when `dying` was foregrounded ([`PREVIOUS_OWNERS`]), provided
+/// that task is still the same occupant and live; otherwise to task 0.
+/// Called from [`end_task`], so every task-death path returns the
+/// terminal to a task that reads it instead of leaving input routed at an
+/// empty slot. This is also what clears `dying`'s entry: the one reader
+/// takes it, so no separate clear can be ordered ahead of the read. A
+/// task can also die as a LINK in the chain without owning the keyboard
+/// (a nested shell killed from a shell below it), so every entry that
+/// names `dying` is re-pointed at `dying`'s own previous owner first:
+/// the later revert then skips the dead link instead of falling to task
+/// 0 past a live shell that is about to read. An entry that names its
+/// own task is no entry: `fg` back to a task already in the chain makes
+/// a cycle (6 handed to 7, 7 `fg 6`), and a kill inside the cycle
+/// splices the survivor onto itself; taken literally that entry would
+/// hand the keyboard to the dying task and strand it on an empty slot
+/// (witnessed 2026-09-20: no prompt ever came back). Normalised here,
+/// once, before both uses.
 pub(crate) fn revert_input_owner_if(dying: usize) {
-    let _ = INPUT_OWNER.compare_exchange(dying, 0, Ordering::Relaxed, Ordering::Relaxed);
+    let previous = PREVIOUS_OWNERS[dying].swap(0, Ordering::Relaxed);
+    let previous = if syscall_abi::task_id_slot(previous) as usize == dying { 0 } else { previous };
+    if let Some(id) = task_id_of(dying) {
+        for entry in PREVIOUS_OWNERS.iter() {
+            let _ = entry.compare_exchange(id, previous, Ordering::Relaxed, Ordering::Relaxed);
+        }
+    }
+    if input_owner() != dying {
+        return;
+    }
+    // `0` (never handed over) names slot 0 and no generation, so it fails
+    // occupant_is and falls back to task 0 like any stale entry.
+    let target = live_index(syscall_abi::task_id_slot(previous) as usize)
+        .filter(|t| occupant_is(t.index(), previous))
+        .map_or(0, TaskIndex::index);
+    INPUT_OWNER.store(target, Ordering::Relaxed);
 }
 
 /// The Ctrl+C escape hatch. When `byte` is Ctrl+C (`0x03`, ETX) and a task
-/// other than the boot shell owns the keyboard (a foreground `/bin` program is
-/// running, having been handed the keyboard by `run_found_command`), that
-/// program is marked for death ([`PENDING_KILL`], killed by [`on_tick`]) and the
-/// byte is swallowed (returns `true`). When it dies the keyboard reverts to the
-/// shell, whose `WAIT` on it then wakes with `TASK_KILLED_STATUS`. When task 0
+/// other than the boot shell owns the keyboard (a foreground `/bin` program
+/// handed the keyboard by `run_found_command`, or a nested shell handed it by
+/// `fg`), that task is marked for death ([`PENDING_KILL`], killed by
+/// [`on_tick`]) and the byte is swallowed (returns `true`). When it dies the
+/// keyboard reverts to the task that held it at the `fg`, whose `WAIT` on it
+/// (if it is a shell that ran it) then wakes with `TASK_KILLED_STATUS`. When task 0
 /// (the boot shell) already owns the keyboard, Ctrl+C is not special: it passes
 /// through as an ordinary byte the line editor ignores (returns `false`), so the
 /// normal single-shell case is unchanged.
@@ -1958,17 +2014,20 @@ pub(crate) unsafe fn exit_current_and_switch(frame: *mut Context, status: u64) -
 /// the three enders ([`kill_task`], [`kill_current_and_switch`],
 /// [`exit_current_and_switch`]) and by nothing else. First the resources
 /// the task held: reclaim its RAM (LIFO-or-leak, see
-/// [`free_runtime_region`]), hand the keyboard back if it held it, and
-/// fail anyone blocked mid-call to it. Then the slot: its state becomes
-/// `final_state` (`Unused` for a kill, `Zombie` for an exit whose status
-/// a `WAIT` still has to collect), its region record is forgotten, and
-/// every per-task table is reset. The order matters because the second
-/// part zeroes the region record the first part reads, and freeing a
-/// zero range is a no-op: when these were two functions, the leak was
-/// one skipped call away and silent. One function, so the order is the
-/// only thing spellable; a new per-task table needs one `clear_*` call
-/// here, not three. The helpers inside still take a `usize` (the
-/// ledger's stated scope for the newtype).
+/// [`free_runtime_region`]), hand the keyboard back if it held it (which
+/// also takes the task's [`PREVIOUS_OWNERS`] entry, the one table whose
+/// clear is its reader, and re-points the entries naming the task, which
+/// asks [`task_id_of`] and so must run while the state is still live),
+/// and fail anyone blocked mid-call to it. Then the slot: its state
+/// becomes `final_state` (`Unused` for a kill, `Zombie` for an exit whose
+/// status a `WAIT` still has to collect), its region record is forgotten,
+/// and every other per-task table is reset. The order matters because the
+/// second part zeroes the region record and the state the first part
+/// reads, and freeing a zero range is a no-op: when these were two
+/// functions, the leak was one skipped call away and silent. One
+/// function, so the order is the only thing spellable; a new per-task
+/// table needs one `clear_*` call here, not three. The helpers inside
+/// still take a `usize` (the ledger's stated scope for the newtype).
 fn end_task(i: TaskIndex, final_state: TaskState) {
     let i = i.index();
     let (base, size) = task_region(i);
@@ -2469,7 +2528,7 @@ pub unsafe fn start() -> ! {
 /// non-owners on its own; that gate moved into the poll so the two read
 /// syscalls could not miss it. A task other than the owner that blocks on
 /// `Keyboard` just stays blocked until ownership reaches it (an `FG`
-/// naming it, or the revert to task 0 on the owner's death; see
+/// naming it, or the revert on the owner's death; see
 /// `INPUT_OWNER`) - honest, not silently
 /// wrong, and it's what makes `exec`ing a second program that reads
 /// input behave like a real background task rather than a second
@@ -2510,7 +2569,7 @@ pub unsafe fn on_tick(frame: *mut Context) {
     // site): tear the foreground child down - the `KILL` syscall's teardown,
     // split on whether the victim is the interrupted (current) task, exactly
     // like the supervised-server restart below but without a restart. Its death
-    // reverts the keyboard to the shell, whose `WAIT` wakes with
+    // reverts the keyboard to the shell that ran it, whose `WAIT` wakes with
     // `TASK_KILLED_STATUS`.
     let pending = PENDING_KILL.swap(0, Ordering::Relaxed);
     // Only a spawnable slot (>= FIRST_SPAWNABLE) may be terminated - the same

@@ -570,7 +570,8 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
         // Only the keyboard owner's reads consume keystrokes: the poll
         // answers None for anyone else without touching the input (see
         // poll_keyboard_byte), so a non-owner gets NO_CHAR here, or blocks
-        // below until ownership reaches it (an FG, or the revert to task 0).
+        // below until ownership reaches it (an FG, or the revert on the
+        // owner's death).
         syscall_abi::TRY_READ_CHAR => match poll_keyboard_byte(tasks::current_task()) {
             Some(byte) => byte as u64,
             None => NO_CHAR,
@@ -992,7 +993,7 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
                 // "0-4" until a fourth server arrived, and a fifth will
                 // do it again. Today that set is the boot shell (0 -
                 // nothing would own the keyboard, see
-                // tasks::INPUT_OWNER_TASK), idle (1 - never makes
+                // tasks::INPUT_OWNER's fallback), idle (1 - never makes
                 // syscalls, refused for completeness), the filesystem
                 // server (2 - its death would strand the disk for the
                 // rest of the boot, and its slot is

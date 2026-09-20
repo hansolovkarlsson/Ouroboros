@@ -2451,9 +2451,13 @@ fn run_found_command(
                 // Hand the foreground program the keyboard so it can read input
                 // (an editor, a REPL, a pager) - only the keyboard owner gets
                 // keystrokes, and the shell owns it by default. On the program's
-                // death (exit *or* Ctrl+C kill) ownership reverts to this shell
-                // automatically (kernel `revert_input_owner_if`). This is what
-                // lets an interactive command be an ordinary `/bin` program.
+                // death (exit *or* Ctrl+C kill) ownership reverts to whoever
+                // held it at the FG (kernel `revert_input_owner_if`). That is
+                // this shell on the assumption that it read the command line
+                // from the keyboard, which only the owner can; FG itself does
+                // not check that its caller is the owner (ledger). This is
+                // what lets an interactive command be an ordinary `/bin`
+                // program.
                 syscall(syscall_abi::FG, slot);
                 // Foreground: wait for it (also reaps the slot). A Ctrl+C now
                 // *terminates* the program (the kernel kills it and the wait
@@ -3365,11 +3369,13 @@ fn cmd_kill(arg: &str) {
 
 /// `fg <n>` - hands the keyboard to task `n` (the `FG` syscall). This
 /// shell's own next read then waits until that task exits or is killed
-/// (ownership reverts to task 0 automatically on the owner's death).
+/// (ownership reverts to whoever held it at the `FG`: this shell, on the
+/// assumption that it read the command from the keyboard).
 /// Ctrl+C is the escape hatch: the kernel intercepts it whenever a
 /// task other than the boot shell owns the keyboard, terminates that
 /// task on the next tick (exactly as `kill` would; its slot becomes
-/// spawnable again) and reverts ownership to task 0.
+/// spawnable again) and reverts ownership to the task that held it when
+/// the dead one was foregrounded, or to task 0 if that task is gone.
 fn cmd_fg(arg: &str) {
     let Some(n) = parse_u64(arg) else {
         print_line("fg: usage: fg <task number> (see ps)");
@@ -3383,8 +3389,10 @@ fn cmd_fg(arg: &str) {
 
 /// `wait <n>` - blocks until task `n` dies, then reports its collected
 /// exit status (which is also what reaps it: an un-waited exited task
-/// holds its slot as a zombie - see `ps`). Ctrl+C interrupts the wait
-/// (the task keeps running); any other typing during a wait is
+/// holds its slot as a zombie - see `ps`). In the boot shell Ctrl+C
+/// interrupts the wait (the task keeps running); in a nested shell it
+/// kills the shell instead, since the kernel terminates any keyboard
+/// owner but task 0 on Ctrl+C. Any other typing during a wait is
 /// discarded, same spirit as typing at a busy foreground job in `sh`.
 fn cmd_wait(arg: &str) {
     let Some(n) = parse_u64(arg) else {

@@ -107,7 +107,7 @@ pub const SPAWN: u64 = 16;
 /// switched to in its place. The one case where this *does* return to
 /// the caller: [`EXIT_DENIED`], for the three tasks that are refused -
 /// task 0 (the boot shell; nothing would own the keyboard, see
-/// `tasks.rs`'s `INPUT_OWNER_TASK`), task 1 (idle; it never makes
+/// `tasks.rs`'s `INPUT_OWNER`), task 1 (idle; it never makes
 /// syscalls anyway, refused for completeness), and task 2 (the
 /// filesystem server, [`FSD_TASK`] - its death would strand the disk
 /// for the rest of the boot). The exit code is masked to a
@@ -151,20 +151,23 @@ pub const TASK_STATE_INVALID: u64 = u64::MAX;
 /// same teardown as a voluntary [`EXIT`] (slot freed, mapping removed,
 /// RAM reclaimed in the LIFO case), minus the context switch: the killed
 /// task isn't the one running. If the killed task held the keyboard (see
-/// [`FG`]), ownership reverts to task 0.
+/// [`FG`]), ownership reverts as on any death of the owner.
 pub const KILL: u64 = 19;
 
 /// `(task index)` -> `0` on success, [`TASK_ERR_PROTECTED`] (idle can't
 /// be foregrounded), or [`TASK_ERR_NO_SUCH_TASK`]. Hands keyboard
 /// ownership to the given task - the caller's own next blocking read
-/// then waits, unwoken, until the foregrounded task exits or is killed
-/// (ownership reverts to task 0 automatically on the owner's death).
+/// then waits, unwoken, until the foregrounded task exits or is killed:
+/// on the owner's death ownership reverts to the task that held the
+/// keyboard when `FG` handed it over, if it is still that occupant and
+/// alive, else to task 0 (so a nested shell gets the keyboard back from
+/// each command it runs).
 /// **Ctrl+C (`0x03`) is the escape hatch**: typed while a task other
 /// than the boot shell owns the keyboard, the kernel intercepts it,
-/// reverts ownership to task 0, and swallows the byte - the
-/// foregrounded task keeps running in the background (nothing is
-/// delivered to or done to it; this is keyboard reclamation, not a
-/// signal). Index 0 is allowed as an explicit "give it back".
+/// swallows the byte and terminates that owner (the [`KILL`] teardown,
+/// at the next tick), whose death reverts ownership as above. It is a
+/// terminate, not a signal: nothing is delivered for the task to catch.
+/// Index 0 is allowed as an explicit "give it back".
 pub const FG: u64 = 20;
 
 /// `(task index)` -> the task's exit status (`0..=255` - [`EXIT`] masks

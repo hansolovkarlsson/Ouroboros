@@ -1020,8 +1020,9 @@ the sign the foundations are right. In the order that worked:
 - **`exit`, `wait`, `kill`, `fg`.** Task slots gain
   `Unused`/`Zombie(status)` states; exit statuses are collected by a
   blocking `wait` built on the same wake-check; keyboard ownership
-  becomes a runtime value that reverts to the boot shell whenever its
-  owner dies. Add a Ctrl+C intercept at the single point all keyboard
+  becomes a runtime value that reverts, whenever its owner dies, to the
+  task that held it when `fg` handed it over, and to the boot shell if
+  that task is gone. Add a Ctrl+C intercept at the single point all keyboard
   input flows through, and a stuck foreground task can never brick the
   session.
 - **IPC.** Bounded messages (up to 768 bytes) copied through the kernel
