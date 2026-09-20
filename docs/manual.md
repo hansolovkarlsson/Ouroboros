@@ -525,7 +525,7 @@ statuses). `NO_FS` (`MAX-1`) means no filesystem is mounted this boot.
 | 18 | `task_state` | index | `UNUSED`/`RUNNABLE`/`BLOCKED`/`ZOMBIE`, or `TASK_STATE_INVALID` past the last slot |
 | 19 | `kill` | index | Destroy another task (reaps immediately). The permanent slots (below the first spawnable one) refused with `TASK_ERR_PROTECTED`, the caller's own slot with `TASK_ERR_SELF` |
 | 20 | `fg` | index | Hand keyboard ownership to a task (auto-reverts to task 0 on the owner's death, or on Ctrl+C, which terminates the foreground task) |
-| 21 | `wait` | index | Block until the task dies; returns its status (0–255), `TASK_KILLED_STATUS` (0x100), or `WAIT_INTERRUPTED` (Ctrl+C while the waiter holds the keyboard); refused with `TASK_ERR_PROTECTED` (a permanent slot) or `TASK_ERR_SELF`. Collecting the status reaps the slot |
+| 21 | `wait` | index | Block until the task dies; returns its status (0–255), `TASK_KILLED_STATUS` (0x100), or `WAIT_INTERRUPTED` (Ctrl+C, for the boot shell only: it is the one keyboard owner Ctrl+C never terminates); refused with `TASK_ERR_PROTECTED` (a permanent slot) or `TASK_ERR_SELF`. Collecting the status reaps the slot |
 | 22 | `mount` | replace flag | Rescan the USB ports and install a storage device as the kernel's block device (`0`, `MOUNT_ALREADY`, or `MOUNT_NO_DEVICE`): the device half; the FS half is the server's `FSOP_MOUNT` |
 | 23 | `msg_send` | dest, buf ptr/len | IPC: deliver a message (up to `MSG_MAX_LEN`, 768 bytes), straight into a matching blocked receiver's buffer (direct delivery), or into the task's bounded mailbox. Zero length is legal: the pipeline end-of-stream marker |
 | 24 | `msg_recv` | buf ptr/len | Block until a message arrives; returns `(sender << 32) \| len`, or `RECV_INTERRUPTED` on Ctrl+C |

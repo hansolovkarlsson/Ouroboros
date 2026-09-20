@@ -1506,9 +1506,9 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
             // never anyone's child); as ERROR ORDER it is load-bearing: a dead
             // protected grantee must answer DENIED, not NO_SUCH_TASK, which the
             // shell treats as the benign "a stage already exited". Then either
-            // slot not live (out of
-            // range counts as not live, for both arguments alike - `task_exists`
-            // bounds-checks); then the subtree rule.
+            // slot not live (out of range counts as not live, for both
+            // arguments alike: `live_index` is range and liveness in one
+            // answer); then the subtree rule.
             // A protected grantee is DENIED before any liveness question,
             // so the answer does not depend on whether the slot is
             // occupied (range: a slot past the end is not protected, and
