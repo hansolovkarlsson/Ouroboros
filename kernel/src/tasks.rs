@@ -534,11 +534,16 @@ static INPUT_OWNER: AtomicUsize = AtomicUsize::new(0);
 
 /// A foreground task the Ctrl+C escape hatch (`interrupt_key_check`) has marked
 /// for death, killed by [`on_tick`] at a safe point (the only place this kernel
-/// tears a task down and switches away). `usize::MAX` = nothing pending. The
-/// kill is deferred to `on_tick` rather than done inline in the keyboard poll
-/// because the poll runs in contexts (a wake-check pass, a syscall) where
-/// switching away from a task isn't safe - `on_tick` already owns that.
-static PENDING_KILL: AtomicUsize = AtomicUsize::new(usize::MAX);
+/// tears a task down and switches away). Holds the task's packed identity
+/// (`generation << TASK_ID_SLOT_BITS | slot`, see [`task_id_of`]), not its
+/// slot: the slot can be reaped and re-spawned between the mark and the tick,
+/// and a bare slot number would then name the new occupant, who was never
+/// interrupted. `0` = nothing pending (generations start at 1, so 0 never
+/// names a task). The kill is deferred to `on_tick` rather than done inline
+/// in the keyboard poll because the poll runs in contexts (a wake-check pass,
+/// a syscall) where switching away from a task isn't safe - `on_tick` already
+/// owns that.
+static PENDING_KILL: AtomicU64 = AtomicU64::new(0);
 
 /// `FG`'s effect: hand the keyboard to task `owner`. Validation (index
 /// in range, slot occupied, not idle) is the syscall layer's job -
@@ -576,7 +581,12 @@ pub(crate) fn interrupt_key_check(byte: u8) -> bool {
     if byte != ETX || owner == 0 {
         return false;
     }
-    PENDING_KILL.store(owner, Ordering::Relaxed);
+    // The occupant, not the slot: see PENDING_KILL. An owner that is not a
+    // task (an Unused slot) cannot happen - ownership reverts on death -
+    // but if it did, there is nothing to mark.
+    if let Some(id) = task_id_of(owner) {
+        PENDING_KILL.store(id, Ordering::Relaxed);
+    }
     true
 }
 
@@ -2471,22 +2481,26 @@ pub unsafe fn on_tick(frame: *mut Context) {
     // like the supervised-server restart below but without a restart. Its death
     // reverts the keyboard to the shell, whose `WAIT` wakes with
     // `TASK_KILLED_STATUS`.
-    let victim = PENDING_KILL.swap(usize::MAX, Ordering::Relaxed);
+    let pending = PENDING_KILL.swap(0, Ordering::Relaxed);
     // Only a spawnable slot (>= FIRST_SPAWNABLE) may be terminated - the same
     // protected set KILL/EXIT/FG enforce (never the shell, idle, or a
     // supervised server). FG refuses to foreground any slot from 1 up to
     // FIRST_SPAWNABLE, so a real keyboard owner other than the boot shell
     // is always in range; this guard is the belt-and-braces backstop.
-    // Range, the protected bound, AND liveness: a foreground program that
-    // exited between the mark and this tick is a Zombie whose status the
-    // parent may already have collected, and tearing it down again would
-    // turn that status into "killed" and clear tables it no longer owns.
-    // Narrowed, not closed: the mark is a bare slot, so a slot reaped and
-    // re-spawned inside the same window passes this check and the new
-    // occupant is killed. Closing it means marking (slot, generation), the
-    // pair SENDER_TASK already captures - ROADMAP.md's ledger has it.
-    if let Some(victim_slot) = live_index(victim).filter(|v| v.is_spawnable()) {
-        crate::console::println!("Ouroboros kernel: Ctrl+C - foreground task {victim} terminated");
+    // Range, the protected bound, liveness, AND the same occupant: a
+    // foreground program that exited between the mark and this tick is a
+    // Zombie whose status the parent may already have collected (not live,
+    // so skipped), and a slot reaped and re-spawned in that window holds a
+    // different generation than the mark (not the same occupant, so
+    // skipped). Tearing either down would kill a task that was never
+    // interrupted.
+    let victim = pending
+        .ne(&0)
+        .then(|| syscall_abi::task_id_slot(pending) as usize)
+        .and_then(live_index)
+        .filter(|v| v.is_spawnable() && task_id_of(v.index()) == Some(pending));
+    if let Some(victim_slot) = victim {
+        crate::console::println!("Ouroboros kernel: Ctrl+C - foreground task {} terminated", victim_slot.index());
         if victim_slot == current {
             unsafe { kill_current_and_switch(frame) };
             unsafe { crate::mmu::rebuild_with_el0_regions(el0_regions()) };
