@@ -140,8 +140,9 @@ pub const TASK_STATE_INVALID: u64 = u64::MAX;
 
 /// `(task index)` -> `0` on success, [`TASK_ERR_PROTECTED`] (the
 /// permanent slots below the first spawnable one - the boot shell, idle
-/// and the servers - or your own slot: a task ends itself with [`EXIT`],
-/// never `KILL`), or [`TASK_ERR_NO_SUCH_TASK`]. Destroys *another* task -
+/// and the servers), [`TASK_ERR_SELF`] (your own slot: a task ends
+/// itself with [`EXIT`], never `KILL`), or [`TASK_ERR_NO_SUCH_TASK`].
+/// Destroys *another* task -
 /// same teardown as a voluntary [`EXIT`] (slot freed, mapping removed,
 /// RAM reclaimed in the LIFO case), minus the context switch: the killed
 /// task isn't the one running. If the killed task held the keyboard (see
@@ -166,8 +167,9 @@ pub const FG: u64 = 20;
 /// with this ABI's error band), [`TASK_KILLED_STATUS`] if the waited
 /// task was killed out from under the waiter, [`WAIT_INTERRUPTED`] if
 /// the user typed Ctrl+C during the wait (the target keeps running),
-/// [`TASK_ERR_PROTECTED`] (waiting on task 0/1 or on yourself is a
-/// guaranteed deadlock), or [`TASK_ERR_NO_SUCH_TASK`]. Blocks until the
+/// [`TASK_ERR_PROTECTED`] (waiting on a permanent slot is a guaranteed
+/// deadlock: it never dies), [`TASK_ERR_SELF`] (so is waiting on
+/// yourself), or [`TASK_ERR_NO_SUCH_TASK`]. Blocks until the
 /// target dies if it's still alive; returns immediately with the status
 /// if it's already a zombie. **Collecting the status is what reaps**:
 /// the zombie's slot only becomes spawnable again once waited (or the
@@ -220,8 +222,8 @@ pub const MSG_TRY_RECV: u64 = 25;
 /// `(dest task, req ptr, req len, reply ptr)` -> the packed
 /// `(sender << 32) | copied_len` of the reply (sender is always
 /// `dest`), [`RECV_INTERRUPTED`] on Ctrl+C, [`TASK_ERR_NO_SUCH_TASK`],
-/// [`TASK_ERR_PROTECTED`] (calling yourself is a guaranteed deadlock),
-/// or a `MSG_ERR_*` code if the send half fails. The synchronous
+/// [`TASK_ERR_SELF`] (calling yourself is a guaranteed deadlock), or a
+/// `MSG_ERR_*` code if the send half fails. The synchronous
 /// request/response primitive (MINIX's `sendrec` shape): sends the
 /// request to `dest`, then blocks until a reply *from `dest`
 /// specifically* arrives - a message from any other task stays queued

@@ -474,10 +474,8 @@ extern "C" fn rust_el0_fault_handler(frame: *mut Context) {
         halt();
     }
     console::println_force!("Ouroboros kernel: task {slot} killed after fault");
-    // The shared first half of a teardown (RAM, keyboard, pending
-    // calls), then discard the context and switch the frame to the next
-    // runnable task.
-    tasks::release_resources(current);
+    // Both halves of the teardown (RAM, keyboard, pending calls; then
+    // state and tables), and the switch to the next runnable task.
     // SAFETY: `frame` is the live trap frame of this very fault (the
     // "4:" trampoline's contract).
     unsafe { tasks::kill_current_and_switch(frame) };

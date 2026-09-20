@@ -445,8 +445,9 @@ static REGIONS: [RegionSlot; NUM_TASKS] =
 /// needs: every task slot's own region, `(0, 0)` for any `Unused` one
 /// (already treated as "no region" by `mmu.rs`'s `overlaps_any`, same
 /// convention `main.rs`'s own boot-time call already relies on).
-/// Which task is currently executing - `syscall.rs`'s `EXIT` arm uses
-/// this to refuse exits from tasks 0/1 and to know whose region to free.
+/// Which task is currently executing, as a plain index for the per-task
+/// lookups in `syscall.rs` that still take one; [`current_index`] is the
+/// typed form, and every switch path and ender uses that.
 pub(crate) fn current_task() -> usize {
     current_index().index()
 }
@@ -1870,6 +1871,7 @@ pub(crate) unsafe fn exit_current_and_switch(frame: *mut Context, status: u64) -
     // WAIT collects it - which is also what makes the slot spawnable
     // again. The memory is still freed at death (the caller's job),
     // not at reap.
+    release_resources(current);
     tear_down(current, TaskState::Zombie(status & 0xff));
     switch_away_from_dead(frame, current);
     frame.gpr[0]
@@ -1878,16 +1880,16 @@ pub(crate) unsafe fn exit_current_and_switch(frame: *mut Context, status: u64) -
 /// The first half of ending a task, before its context is discarded:
 /// reclaim its RAM (LIFO-or-leak, see [`free_runtime_region`]), hand the
 /// keyboard back if it held it, and fail anyone blocked mid-call to it.
-/// Every path that ends a task (the `EXIT` and `KILL` arms, the EL0 fault
-/// handler, Ctrl+C, a supervisor restart) calls this, then either
-/// [`kill_task`] (a task that is not running) or one of the
-/// `*_current_and_switch` paths, then the identity-map rebuild. It used to
-/// be the same four lines at those five sites, each with a comment
-/// pointing at another copy; [`tear_down`] is the second half. Takes the
-/// type so the callers stop unwrapping a `TaskIndex` one line after
-/// making one; the helpers inside still take a `usize` (the ledger's
-/// stated scope for the newtype).
-pub(crate) fn release_resources(i: TaskIndex) {
+/// Called only by the three enders ([`kill_task`],
+/// [`kill_current_and_switch`], [`exit_current_and_switch`]), each of
+/// which runs it and then [`tear_down`], in that order, because
+/// `tear_down` zeroes the region record this reads: a caller could once
+/// call an ender without it (the four lines lived at five call sites),
+/// which would have leaked the region silently, since freeing a zero
+/// range is a no-op. Private, so that order is the only one spellable.
+/// The helpers inside still take a `usize` (the ledger's stated scope
+/// for the newtype).
+fn release_resources(i: TaskIndex) {
     let i = i.index();
     let (base, size) = task_region(i);
     free_runtime_region(base, size);
@@ -1909,8 +1911,9 @@ pub(crate) fn release_resources(i: TaskIndex) {
 /// [`exit_current_and_switch`] minus the context switch - a non-current
 /// task isn't executing (single core, IRQs masked throughout SVC
 /// dispatch; it's parked at an `eret` boundary), so its saved context is
-/// simply discarded. The caller runs [`release_resources`] first and
-/// the mmu rebuild after, same as the `EXIT` arm does - see `syscall.rs`.
+/// simply discarded. Both halves of the teardown run here; the caller
+/// does the mmu rebuild after, same as the `EXIT` arm does - see
+/// `syscall.rs`.
 pub(crate) fn kill_task(i: TaskIndex) {
     if i == current_index() {
         crate::console::println_force!(
@@ -1919,16 +1922,16 @@ pub(crate) fn kill_task(i: TaskIndex) {
         );
         crate::power::halt();
     }
+    release_resources(i);
     tear_down(i, TaskState::Unused);
 }
 
-/// Everything a task leaves behind, cleared in one place: the slot's
-/// state becomes `final_state` (`Unused` for a kill, `Zombie` for an exit
-/// whose status a `WAIT` still has to collect), its region is forgotten,
-/// and every per-task table is reset. The three paths that end a task
-/// ([`kill_task`], [`kill_current_and_switch`], [`exit_current_and_switch`])
-/// all come through here, so a new per-task table needs one `clear_*`
-/// call, not three.
+/// The second half of ending a task, after [`release_resources`]: the
+/// slot's state becomes `final_state` (`Unused` for a kill, `Zombie` for
+/// an exit whose status a `WAIT` still has to collect), its region record
+/// is forgotten, and every per-task table is reset. The three enders all
+/// come through here, so a new per-task table needs one `clear_*` call,
+/// not three.
 fn tear_down(i: TaskIndex, final_state: TaskState) {
     let i = i.index();
     unsafe { *STATES[i].0.get() = final_state };
@@ -1963,6 +1966,7 @@ fn tear_down(i: TaskIndex, final_state: TaskState) {
 pub(crate) unsafe fn kill_current_and_switch(frame: *mut Context) {
     let frame = unsafe { &mut *frame };
     let current = current_index();
+    release_resources(current);
     tear_down(current, TaskState::Unused);
     switch_away_from_dead(frame, current);
 }
@@ -2429,9 +2433,14 @@ pub unsafe fn on_tick(frame: *mut Context) {
     // protected set KILL/EXIT/FG enforce (never the shell, idle, or a
     // supervised server). FG refuses to foreground 0-4, so a real keyboard
     // owner is always in range; this guard is the belt-and-braces backstop.
-    if let Some(victim_slot) = TaskIndex::new(victim).filter(|v| v.index() >= FIRST_SPAWNABLE) {
+    // Range, the protected bound, AND liveness: a foreground program that
+    // exited between the mark and this tick is a Zombie whose status the
+    // parent may already have collected, and tearing it down again would
+    // turn that status into "killed" and clear tables it no longer owns.
+    if let Some(victim_slot) =
+        TaskIndex::new(victim).filter(|v| v.index() >= FIRST_SPAWNABLE && task_exists(v.index()))
+    {
         crate::console::println!("Ouroboros kernel: Ctrl+C - foreground task {victim} terminated");
-        release_resources(victim_slot);
         if victim_slot == current {
             unsafe { kill_current_and_switch(frame) };
             unsafe { crate::mmu::rebuild_with_el0_regions(el0_regions()) };
@@ -2481,7 +2490,6 @@ pub unsafe fn on_tick(frame: *mut Context) {
         if runnable_wedge || blocked_wedge {
             let why = if blocked_wedge { "unresponsive (ping timeout)" } else { "no progress (runnable)" };
             crate::console::println!("Ouroboros kernel: server slot {slot} wedged - {why} - restarting");
-            release_resources(server);
             if server == current {
                 // The wedged server is the interrupted task: discard its
                 // frame and switch away, exactly like the fault handler.

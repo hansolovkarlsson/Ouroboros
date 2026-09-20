@@ -1001,10 +1001,6 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
             // masked-IRQ rebuild spawn_program already proved safe.
             // The return value must be passed through unmodified - see
             // exit_current_and_switch's doc comment.
-            // RAM, keyboard (a foregrounded task's death hands it back
-            // to the boot shell), and anyone blocked mid-MSG_CALL to
-            // this task - see release_resources.
-            tasks::release_resources(current);
             // SAFETY: `frame` is the live trap frame of this very
             // syscall (dispatch's contract with the SVC trampoline).
             let resumed_x0 = unsafe { tasks::exit_current_and_switch(frame, arg0) };
@@ -1102,7 +1098,6 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
             // Same teardown as EXIT's arm, minus the context switch (the
             // killed task isn't the one running - refused above - see
             // tasks::kill_task's doc comment).
-            tasks::release_resources(target);
             tasks::kill_task(target);
             // SAFETY: same masked-IRQ single-core contract as
             // spawn_program's and EXIT's rebuilds.
@@ -1123,9 +1118,11 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
                 // and MSG_CALL's self-target refusals.
                 return syscall_abi::TASK_ERR_SELF;
             }
-            if i >= tasks::NUM_TASKS {
+            // The checked constructor is the range check.
+            let Some(target) = tasks::TaskIndex::new(i) else {
                 return syscall_abi::TASK_ERR_NO_SUCH_TASK;
-            }
+            };
+            let i = target.index();
             // Already a zombie: collect-and-reap immediately, no block.
             if let Some(status) = tasks::try_reap(i) {
                 return status;
@@ -1248,9 +1245,10 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
                 // up-front refusal as WAIT's self-wait, same code.
                 return syscall_abi::TASK_ERR_SELF;
             }
-            // One of the three places a caller-supplied slot becomes a
-            // TaskIndex (KILL's target and the Ctrl+C victim are the
-            // others): an out-of-range or empty slot is refused here, so
+            // One of the places a caller-supplied slot becomes a
+            // TaskIndex (KILL, WAIT and FG do the same with their
+            // targets, and on_tick with the Ctrl+C victim): an
+            // out-of-range or empty slot is refused here, so
             // the handoff below is never handed an unchecked number.
             let Some(dest_index) = tasks::TaskIndex::new(dest).filter(|d| tasks::task_exists(d.index())) else {
                 return syscall_abi::TASK_ERR_NO_SUCH_TASK;
@@ -1430,10 +1428,11 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
                 // Index 0 is allowed - an explicit "give it back".
                 return syscall_abi::TASK_ERR_PROTECTED;
             }
-            if !tasks::task_exists(i) {
+            // The checked constructor is the range check.
+            let Some(target) = tasks::TaskIndex::new(i).filter(|t| tasks::task_exists(t.index())) else {
                 return syscall_abi::TASK_ERR_NO_SUCH_TASK;
-            }
-            tasks::set_input_owner(i);
+            };
+            tasks::set_input_owner(target.index());
             0
         }
         syscall_abi::GRANT => {
