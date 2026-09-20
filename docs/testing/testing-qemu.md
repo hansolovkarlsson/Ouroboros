@@ -462,12 +462,13 @@ and `ping 10.0.2.2 | wc` in the guest answers `1 3 21` beside it.
 2026-09-06 a spawned `SH.BIN` could authorize nothing (every `DELEGATE` it
 issued was refused, since spawnable slots hold no spawnable slot statically);
 the kernel now records each task's parent and lets a task pass a right it
-holds to its own children. One rig caveat is load-bearing: **the keyboard goes
-back to the boot shell after every command in the nested shell** (a separate
-bug, on the ledger), and both shells print the same `# ` prompt, so each
-nested command is preceded by `fg 6` typed to the boot shell and keyed on the
-previous command's output, not on the prompt. `ps` from inside shows task 6
-runnable and task 0 blocked, which is how to know which shell answered.
+holds to its own children. Both shells print the same `# ` prompt, so each
+step is keyed on the previous command's output, not on the prompt. Until
+2026-09-20 the keyboard went back to the boot shell after every nested command
+and every step here had to be preceded by `fg 6` (see section 1b); the recipe
+below is the one run after that fix, with no `fg` between commands. `ps` from
+inside shows task 6 runnable and task 0 blocked, which is how to know which
+shell answered.
 
 ```sh
 python3 scripts/drive-qemu.py --slirp build/esp.img \
@@ -475,10 +476,10 @@ python3 scripts/drive-qemu.py --slirp build/esp.img \
   '# @@exec /EFI/ORBS/SH.BIN' \
   'login:@@fg 6' 'fg 6@@root' 'assword@@root' \
   '# @@ls / | wc' \
-  '1 5 40|authorize@@fg 6' 'fg 6@@ping 10.0.2.2' \
-  'reply from|failed@@fg 6' 'fg 6@@ping 10.0.2.2 | wc' \
-  '1 3 21|authorize|failed@@fg 6' 'fg 6@@ps' \
-  'task 10@@fg 6' 'fg 6@@exit' 'logout@@'
+  '1 5 40|authorize@@ping 10.0.2.2' \
+  'reply from|failed@@ping 10.0.2.2 | wc' \
+  '1 3 21|authorize|failed@@ps' \
+  'task 10@@exit' 'logout@@'
 ```
 
 Expected: `1 5 40`, `reply from 10.0.2.2`, `1 3 21`, and a `ps` with task 6

@@ -529,7 +529,10 @@ pub(crate) fn el0_regions() -> [(u64, u64); NUM_TASKS] {
 /// ([`set_input_owner`]), and **any death of the current owner reverts
 /// it to the task that held it when `FG` handed it over**
 /// ([`revert_input_owner_if`], run by [`end_task`] on every teardown),
-/// if that task is still the same occupant and alive, **else to task 0**.
+/// if that task is still the same occupant and alive; **to the nearest
+/// live link above it** if that task itself died as a link in the chain
+/// without owning the keyboard (its entries are spliced out at its own
+/// death, see [`PREVIOUS_OWNERS`]); **else to task 0**.
 /// Task 0 can never die (`EXIT` and `KILL` both refuse it), so the
 /// fallback is always valid, the same permanence argument the original
 /// hardcoding relied on, now load-bearing for the revert too.
