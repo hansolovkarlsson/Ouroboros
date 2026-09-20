@@ -337,7 +337,13 @@ registers are deliberately *not* saved — nothing running today uses them,
 and the only interrupted context that exists is `halt()`'s trivial spin
 loop. That stops being safe the moment real interruptible work with FP/SIMD
 state exists, which matters for whenever actual task switching is
-built, not this milestone.
+built, not this milestone. **Update (2026-09-20): slot 5 no longer takes
+the resumable path.** The kernel never runs at EL1 with IRQs unmasked
+(masked at `exit_boot_services`, and the first `eret` into task 0 is what
+unmasks, for EL0 only), so an IRQ at EL1h is a broken invariant and slot 5
+reports and halts like the other diverging vectors; slot 9 (the tick
+arriving from EL0) is the one resumable IRQ path. See `synccell.rs` for
+why the invariant is load-bearing.
 
 **Verified as sustained, not just "it prints once":** ran under QEMU for
 20+ seconds, confirmed 14 consecutive ticks at the correct ~1-second
@@ -367,6 +373,8 @@ with every other vector. Slot 9 (IRQ, lower EL AArch64) reuses the exact
 same resumable IRQ trampoline as slot 5 — a tick firing *while EL0 runs*
 lands in a different vector slot than one firing at EL1h, easy to miss and
 would have silently broken tick delivery the moment EL0 started running.
+(Since 2026-09-20 slot 9 is the only resumable IRQ path; slot 5 diverges,
+see the update above.)
 
 **The real blocker (first attempt): EL0 had no memory it was allowed to
 execute from.** Sharing `mmu.rs`'s single EL1-only RAM block between EL0

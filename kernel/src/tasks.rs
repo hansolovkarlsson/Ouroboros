@@ -601,9 +601,18 @@ pub(crate) fn set_input_owner(owner: usize) {
     }
     // A push. Task 0 never dies, so its entry is never read: `fg 0` from
     // outside the chain records nothing, and the table holds only entries
-    // the revert can reach.
+    // the revert can reach. A holder that is not a task cannot happen,
+    // since ownership reverts on death; if a future death path forgets
+    // that, say so, as `interrupt_key_check` does for the same state, and
+    // record no previous owner rather than a stranger.
     if owner != 0 {
-        PREVIOUS_OWNERS[owner].store(task_id_of(previous).unwrap_or(0), Ordering::Relaxed);
+        let holder = task_id_of(previous).unwrap_or_else(|| {
+            crate::console::println_force!(
+                "Ouroboros kernel: keyboard owner slot {previous} holds no task - a kernel bug (its two writers are set_input_owner and revert_input_owner_if)"
+            );
+            0
+        });
+        PREVIOUS_OWNERS[owner].store(holder, Ordering::Relaxed);
     }
 }
 

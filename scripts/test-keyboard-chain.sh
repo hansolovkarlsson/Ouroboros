@@ -6,17 +6,24 @@
 # guards (the boot shell answering, or no prompt ever coming back), and the
 # grep below is what distinguishes the two.
 #
-#   make test-keyboard-chain          # builds nothing: run `make image` first
+#   make test-keyboard-chain          # rebuilds the image first, then boots
 #
 # Four boots, about a minute each. Not part of `make test` (host-only, seconds)
 # for that reason; run it when tasks.rs's keyboard ownership changes.
 #
-# This script only boots; run `make image` first. The firmware hang it
-# retries on is described once, in docs/testing/testing-qemu.md section 1b.
+# This script only boots. The firmware hang it retries on is described
+# once, in docs/testing/testing-qemu.md section 1b.
 set -u
 cd "$(dirname "$0")/.."
 IMG=build/esp.img
 [ -f "$IMG" ] || { echo "test-keyboard-chain: $IMG missing - run make image"; exit 2; }
+# A stale image would grade the previous kernel and print ok for a regression
+# its own controls would catch; `make test-keyboard-chain` depends on `image`,
+# and this refuses if the image predates any kernel binary anyway.
+for k in target/aarch64-unknown-uefi/*/BOOTAA64.efi; do
+    [ -f "$k" ] && [ "$k" -nt "$IMG" ] && {
+        echo "test-keyboard-chain: $IMG is older than $k - run make image"; exit 2; }
+done
 CTRLC=$(printf '\003')
 fail=0
 

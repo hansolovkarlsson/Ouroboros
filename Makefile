@@ -1345,8 +1345,9 @@ test-parallels:
 # nested-shell recipes in docs/testing/testing-qemu.md section 1b, graded on
 # the lines they name (scripts/test-keyboard-chain.sh). Minutes, not seconds,
 # so it is not in `make test`; run it when tasks.rs's keyboard ownership
-# changes. Run `make image` first; the script only boots.
-test-keyboard-chain:
+# changes. Depends on `image` so it can never grade a stale kernel (the
+# script also refuses an esp.img older than the kernel binary).
+test-keyboard-chain: image
 	./scripts/test-keyboard-chain.sh
 
 # Host unit tests for the PURE crates - the ones with no I/O, no syscalls and no

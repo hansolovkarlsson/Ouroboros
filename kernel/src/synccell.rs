@@ -13,7 +13,10 @@
 //! `grep -c '^unsafe impl.*Sync for' kernel/src/*.rs` (anchored, so a doc
 //! comment quoting the phrase does not count) summed to 46 before this
 //! module and 24 after it: this module's own impl and the 23 hand-rolled
-//! wrappers that remain, named below, so 23 became a `SyncCell`.
+//! wrappers that remain, so 23 became a `SyncCell`. The same grep without
+//! `-c` lists the 23; by class they are the two raw-pointer cells, the two
+//! aligned newtypes, `GicCell`, and the DMA rings, pages and buffers of the
+//! virtio, xHCI and USB storage drivers, each class explained below.
 //!
 //! **The argument.** This kernel runs on one core and never unmasks
 //! interrupts while it is itself running: EL1 code executes either at boot

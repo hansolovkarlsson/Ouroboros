@@ -854,8 +854,9 @@ unsafe fn switch_full(view: TaskIndex) {
     // switch below, code is still running under firmware's *old* tables
     // but *new* attribute-index semantics - a narrow, correctly-barriered
     // window, but not one worth letting an interrupt land in for free.
-    // (main.rs deliberately re-unmasks IRQ later, right before dropping to
-    // EL0 - this masking is only about surviving this specific transition.)
+    // (Nothing at EL1 ever unmasks again: the first `eret` into task 0
+    // restores that task's SPSR, and the tick is delivered to EL0 only -
+    // see `synccell.rs` for why that is load-bearing.)
     unsafe {
         asm!(
             "msr daifset, #0xf",      // mask D, A, I, F

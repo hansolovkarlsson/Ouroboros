@@ -22,14 +22,16 @@
 //!
 //! ## The IRQ vector is different from the other 15
 //!
-//! Every vector except IRQ-at-EL1h (index 5, the only source of interrupts
-//! so far — see `gic.rs`/`timer.rs`) shares one path: capture ESR/FAR/ELR,
-//! report, halt. That path never returns, so it never needs to preserve
-//! anything. IRQ is the first exception this kernel needs to *resume from*
-//! — the interrupted code (currently just `halt()`'s `wfe` loop) has to
-//! keep running afterward — so its vector slot does a full general-purpose
-//! register + ELR_EL1/SPSR_EL1 save, calls into Rust normally (`bl`, not a
-//! diverging `b`), restores everything, and `eret`s back.
+//! Every vector except the tick (the only source of interrupts so far,
+//! see `gic.rs`/`timer.rs`) shares one path: capture ESR/FAR/ELR, report,
+//! halt. That path never returns, so it never needs to preserve anything.
+//! IRQ is the first exception this kernel needs to *resume from* — the
+//! interrupted task has to keep running afterward — so its vector slot
+//! does a full general-purpose register + ELR_EL1/SPSR_EL1 save, calls
+//! into Rust normally (`bl`, not a diverging `b`), restores everything,
+//! and `eret`s back. Historically that slot was index 5 (IRQ at EL1h),
+//! when the interrupted code was `halt()`'s `wfe` loop at EL1; since
+//! 2026-09-20 it is slot 9 alone (IRQ from EL0), see the next section.
 //!
 //! Floating-point/SIMD (Q0-Q31) registers are deliberately *not* saved
 //! here. Nothing running today uses them, and the interrupted context is
@@ -37,17 +39,23 @@
 //! — this stops being safe the moment there's real interruptible work with
 //! FP/SIMD state.
 //!
-//! ## Two vector groups now use the resumable path, not one
+//! ## The tick is taken from EL0 only; an IRQ at EL1 is a fault
 //!
 //! A timer IRQ firing *while EL0 code is running* lands in a different
 //! vector slot than one firing at EL1 — the table is grouped by [current EL
 //! w/ SP_EL0][current EL w/ SP_ELx][lower EL AArch64][lower EL AArch32], so
-//! "IRQ at EL1h" (slot 5, our own kernel code, `halt()`'s `wfe` loop) and
-//! "IRQ from lower EL AArch64" (slot 9, EL0 tasks) are different entries
-//! entirely. Both share the exact same resumable trampoline (`2:` below) —
-//! GIC ack/EOI, the timer rearm, and now the task switch itself
-//! (`tasks::on_tick`) don't care which EL got interrupted, and `eret`
-//! resumes the right one automatically from the saved SPSR_EL1 regardless.
+//! "IRQ at EL1h" (slot 5, our own kernel code) and "IRQ from lower EL
+//! AArch64" (slot 9, EL0 tasks) are different entries entirely. Slot 9
+//! takes the resumable trampoline (`2:` below): GIC ack/EOI, the timer
+//! rearm, and the task switch itself (`tasks::on_tick`). Slot 5 used to
+//! share it, from the days when the interrupted code was `halt()`'s `wfe`
+//! loop; it now takes the diverging report-and-halt path, because the
+//! kernel never runs at EL1 with IRQs unmasked (`main.rs` masks them at
+//! `exit_boot_services` and nothing unmasks until the first `eret` into
+//! task 0 restores its SPSR), and every mutable static rests on exactly
+//! that (`synccell.rs`). An IRQ taken at EL1 is therefore a broken
+//! invariant, and reporting it (`EXCEPTION vector=5`) beats saving a
+//! kernel frame as a task context and finding out later.
 //! Slot 8 (Synchronous, lower EL AArch64) is where EL0's `svc` lands — but
 //! that same slot is also where an EL0 *fault* would land (bad memory
 //! access, etc.), so it isn't unconditionally treated as a syscall: it
@@ -142,8 +150,16 @@ b   1f
 mov x3, #4
 b   1f
 .balign 0x80
-// slot 5: IRQ, Current EL with SP_ELx - the resumable path, see below.
-b   2f
+// slot 5: IRQ, Current EL with SP_ELx - an interrupt taken while KERNEL
+// code runs. Diverging on purpose: EL1 never runs with IRQs unmasked
+// (masked at exit_boot_services, and the first eret into task 0 is what
+// unmasks, for EL0 only - see synccell.rs), so this slot is the check on
+// that invariant. It used to take the resumable path "2:" like slot 9;
+// then a future EL1 unmask would have had the tick save a KERNEL frame as
+// a task's context and eret into it later, silently. Now it reports and
+// halts, vector=5, the moment it happens.
+mov x3, #5
+b   1f
 .balign 0x80
 mov x3, #6
 b   1f
@@ -181,8 +197,9 @@ b.eq 3f
 // it existed, any userland wild pointer halted the whole system.
 b   4f
 .balign 0x80
-// slot 9: IRQ, lower EL AArch64 - a tick firing while EL0 runs. Same
-// resumable path as slot 5; see module doc comment.
+// slot 9: IRQ, lower EL AArch64 - the tick, firing while an EL0 task
+// runs: the ONE resumable IRQ path, and the only place a task switch
+// happens. See the module doc comment.
 b   2f
 .balign 0x80
 mov x3, #10

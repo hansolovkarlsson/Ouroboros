@@ -326,6 +326,15 @@ fn main() -> Status {
     // identity-map real discovered RAM instead of a hardcoded address.
     let memory_map = unsafe { boot::exit_boot_services(None) };
 
+    // IRQs masked from here until the first `eret` into task 0, by our own
+    // instruction and not by trusting what the firmware left: EDK2's
+    // ExitBootServices does disable interrupts, but the kernel's whole
+    // single-core argument (`synccell.rs`) is that EL1 never runs
+    // unmasked, and vector slot 5 (IRQ at EL1h) now halts to prove it.
+    unsafe {
+        core::arch::asm!("msr daifset, #2", options(nostack, preserves_flags));
+    }
+
     // First thing after exit, before anything else gets a chance to fault:
     // a bad access is still possible (e.g. the UART write below, if
     // `discovery` ever resolves an address that isn't actually valid on
