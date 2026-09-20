@@ -1855,14 +1855,67 @@ would otherwise silently shrink into looking like nothing was ever found.
     *Three of the twelve went in #135 (2026-09-13): `processes.md`'s
     memory-model paragraph, `architecture.md`'s layout line, and the ABI's
     `HEAP_INFO` doc. The rest stand.*
-  - **`activate_task` clamps an out-of-range view index silently**
-    (`L0_TABLES[view.min(MAX_EL0_REGIONS - 1)]`, `mmu.rs`), so a task past
-    the last view would run under another task's translation tables, the
-    opposite of a fail-safe, and nothing documents it. Noticed in passing by
-    the fourth review of #135 (2026-09-13) while a dangling pointer to a
-    "fail-safe" that no longer existed was being removed. Unreachable while
-    `NUM_TASKS == MAX_EL0_REGIONS`; wants a `const` assert tying the two, or
-    a refusal in place of the clamp.
+  - ~~**`activate_task` clamps an out-of-range view index silently**~~
+    **Fixed 2026-09-19** (#136). It was `L0_TABLES[view.min(MAX_EL0_REGIONS
+    - 1)]` in `mmu.rs` (twice: `activate_task` and `switch_full`), so a task
+    past the last view would have run under another task's translation
+    tables, the opposite of a fail-safe, and nothing documented it. Noticed
+    in passing by the fourth review of #135 (2026-09-13). Unreachable while
+    `NUM_TASKS == MAX_EL0_REGIONS`, which the array-typed parameters of
+    `install_identity_map` and `rebuild_with_el0_regions` already enforced
+    (a "must stay equal" comment on each side undersold that). Now
+    `MAX_EL0_REGIONS` is *defined as* `tasks::NUM_TASKS`, one definition
+    rather than two literals, and both lookups are plain indexes. The PR's
+    first round added a `const` assert instead and claimed a mutation showed
+    it could fail; the review found the same mutation fails the build with
+    the assert deleted, so it proved nothing about the assert. The
+    definitional constant needs no such proof. The fifth review then held
+    that with the clamp gone a bad slot would panic, and a panic is silent
+    (the entry below), so the refusal the original finding offered as the
+    alternative landed too: `l0_table` reports the slot and the view count
+    through the console and halts instead of indexing. A mutation (a
+    temporary `activate_task(NUM_TASKS)` after the install) printed the
+    line and halted with no aborts in QEMU's trace. **The sixth review
+    then showed that mutation was not in situ**: every runtime caller
+    indexes `tasks::TASKS[next]` before it switches, so a bad slot panics
+    there first and the refusal never prints; and at the boot-time
+    `switch_full` call there is no console yet on framebuffer-only
+    machines. The refusal guards the lookup only. The check that can fail
+    where the slot is made is the `TaskSlot` newtype, the next entry but
+    one, and it is the follow-up this fix owes.
+  - **The kernel has no panic handler of its own, and a post-exit panic
+    is silent.** `kernel/Cargo.toml` takes the `uefi` crate's
+    `panic_handler` feature. **Measured on QEMU (2026-09-19)**, with a
+    temporary `panic!()` placed right after the identity-map install and
+    QEMU's own exception trace on: the last console line was the install
+    message, nothing further printed, the trace showed no abort of any
+    kind, and QEMU exited about a minute into the boot on a PSCI call,
+    which is the firmware's shutdown. That matches the crate source
+    (`println!` degrades to `log::debug!` once boot services are gone, a
+    long spin, then `ResetSystem` with `SHUTDOWN`), but the run is the
+    evidence. On Parallels, where the framebuffer is the only console,
+    that is indistinguishable from a hardware crash. Found by the review of
+    #136 (2026-09-18) while checking what "panics here" would actually do.
+    It is not hypothetical: `mmu.rs` has two post-exit `expect` sites
+    guarding "install_identity_map ran first" (`rebuild_with_el0_regions`
+    and `ram_span`), plus an `unwrap` inside `install_identity_map` itself
+    that re-reads the map it just stored. Wants a kernel
+    `#[panic_handler]` that reports the message and location through
+    `console::println!` and halts, the way `exceptions.rs` already reports
+    a fault. **First drop the `panic_handler` feature from the `uefi`
+    dependency in `kernel/Cargo.toml`**, or the build fails on a duplicate
+    `panic_impl` lang item.
+  - **The task slot passed to `activate_task`/`switch_full` is a bare
+    `usize`, in range only by the discipline of its callers.** Every
+    caller today derives it in `tasks.rs` from the slot count or from a
+    value `syscall.rs` has already range-checked, so the index holds; but
+    nothing ties those checks to the index, and #136's reviews found that
+    every prose inventory of the callers written to document the
+    discipline was wrong within a round. A `TaskSlot(usize)` newtype
+    constructible only in `tasks.rs` would make an unchecked slot
+    unspellable rather than grepped for, and would replace the inventory
+    with a type. Found by the second review of #136 (2026-09-18). Pairs
+    with the `TaskIdentity` newtype already on the small list.
   - **The stack top is hand-derived as `base + size` at seven sites across
     three files** (`tasks.rs` five times, `supervisor.rs`, `syscall.rs`),
     inside an identical `Context` literal. Anything ever placed above the

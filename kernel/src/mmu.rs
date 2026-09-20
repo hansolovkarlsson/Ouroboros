@@ -123,22 +123,25 @@
 //! traps to EL1 by default — `SCTLR_EL1.nTWE`/`nTWI`, unrelated to the
 //! mapping work here.)
 //!
-//! ## Since generalized to two independent regions, not one shared 8KB slot
+//! ## Since generalized to one independent region per task slot
 //!
 //! The paragraphs above describe the original shape: one 8KB compile-time
 //! static, holding both EL0 tasks, isolated via one L2/L3 split. Once task
 //! 0 became a program loaded from disk at a runtime-determined address
 //! (`loader.rs`) instead of a compile-time constant, that stopped fitting
-//! the "one region" model — task 0's region and task 1's small idle region
-//! (`tasks.rs::IdleRegion`) are now unrelated allocations that could
+//! the "one region" model: task 0's region and task 1's small idle region
+//! (`tasks.rs::IdleRegion`) became unrelated allocations that could
 //! easily land in different 1GB blocks or 2MB slots. [`install_identity_map`]
-//! takes an array of regions instead of one tuple, and `EL0_L2_TABLES`/
-//! `EL0_L3_TABLES` are both sized for up to [`MAX_EL0_REGIONS`] independent
-//! splits rather than one. The underlying technique (walk down to L3 only
-//! for the slot(s) that need it, everything else stays a coarse block) is
-//! unchanged — see `MAX_EL0_REGIONS`'s own doc comment for the alignment
-//! invariant that keeps this from needing to handle a *single* region
-//! spanning multiple slots, which would be a bigger change.
+//! took an array of regions instead of one tuple, first sized for those
+//! two, and now sized for every scheduler slot: `EL0_L2_TABLES`/
+//! `EL0_L3_TABLES` hold [`MAX_EL0_REGIONS`] (that is, `tasks::NUM_TASKS`)
+//! independent splits, one per task. The underlying technique (walk down
+//! to L3 only for the slot(s) that need it, everything else stays a coarse
+//! block) is unchanged. The alignment invariant that keeps this from ever
+//! needing to handle a *single* region spanning multiple slots, which
+//! would be a bigger change, is the loader's: see the safety comments on
+//! `install_identity_map` and the `SLOT_ALIGN` assert near the top of this
+//! file.
 
 use core::arch::asm;
 use core::cell::UnsafeCell;
@@ -203,14 +206,17 @@ struct Table(UnsafeCell<[u64; ENTRIES_PER_TABLE]>);
 // TTBR0_EL1.
 unsafe impl Sync for Table {}
 
-/// One EL0 region slot per task (`tasks::NUM_TASKS`, kept in sync by
-/// the array literals both sides carry) - and, since the per-task
-/// page-tables milestone, also the number of translation-table
-/// *views*: view i grants EL0 access to region i alone. Each region is
-/// independently guaranteed to fit within one 2MB-aligned slot (see
-/// the safety comments on `install_identity_map`), so a view needs
-/// exactly one L2 split and one L3 split - its own region's.
-const MAX_EL0_REGIONS: usize = 11;
+/// One EL0 region slot per task, and, since the per-task page-tables
+/// milestone, also the number of translation-table *views*: view i
+/// grants EL0 access to region i alone. Each region is independently
+/// guaranteed to fit within one 2MB-aligned slot (see the safety
+/// comments on `install_identity_map`), so a view needs exactly one L2
+/// split and one L3 split - its own region's.
+///
+/// One definition, not a second literal: this *is* `tasks::NUM_TASKS`,
+/// so raising the slot count there scales every table pool here. A slot
+/// with no view is refused, not clamped: see [`l0_table`].
+const MAX_EL0_REGIONS: usize = crate::tasks::NUM_TASKS;
 
 // Per-task translation-table views (the per-task page-tables
 // milestone): view i is the table set task i runs under - identical
@@ -498,9 +504,11 @@ pub unsafe fn install_identity_map(
 /// safety requirements otherwise apply identically) - the same
 /// requirement `main.rs`'s single call site already satisfies for every
 /// caller of this function, since none can run before boot completes.
-/// Called from an SVC handler with interrupts masked throughout (true
-/// for `syscall.rs`'s `spawn`, its only caller) - single-core, so no
-/// other code can observe the table set mid-rebuild.
+/// Must be called with interrupts masked throughout - single-core, so
+/// no other code can observe the table set mid-rebuild. Every caller
+/// today is an exception entry (SVC, IRQ or EL0 fault) or runs inside
+/// one, which is what satisfies this; a caller from ordinary EL1 code
+/// with interrupts enabled would not, and must mask them first.
 pub(crate) unsafe fn rebuild_with_el0_regions(el0_regions: [(u64, u64); MAX_EL0_REGIONS]) {
     let memory_map = unsafe { (*STORED_MEMORY_MAP.0.get()).as_ref() }
         .expect("install_identity_map must run before rebuild_with_el0_regions");
@@ -752,10 +760,32 @@ unsafe fn build_view(
     }
 }
 
+/// The L0 table for `view`, or a reported halt if there is none. This
+/// replaced a clamp onto the last view, which would have run an
+/// out-of-range task under another task's tables. It guards this lookup
+/// only: every runtime caller has already indexed `tasks::TASKS[view]`
+/// by the time it gets here, so a bad slot would have panicked there
+/// first (silently, see `ROADMAP.md`'s panic-handler entry), and at the
+/// boot-time `switch_full` call there is no console yet on
+/// framebuffer-only machines. A slot newtype made only in `tasks.rs` is
+/// the check at the right depth; this is the one this file can make.
+fn l0_table(view: usize) -> &'static Table {
+    if view >= MAX_EL0_REGIONS {
+        crate::console::println_force!(
+            "mmu: task slot {view} has no translation-table view (there are {MAX_EL0_REGIONS}); refusing to switch"
+        );
+        crate::power::halt();
+    }
+    &L0_TABLES[view]
+}
+
 /// The per-context-switch table switch: points TTBR0_EL1 at `view`'s
 /// table set and invalidates the TLB. Called by `tasks.rs` wherever
 /// the current task changes - the moment the following `eret` lands in
 /// EL0, the new task can only see its own region.
+///
+/// `view` is a task slot, and there are exactly as many views as slots
+/// (`MAX_EL0_REGIONS` is `NUM_TASKS`); [`l0_table`] is the lookup.
 ///
 /// The full `tlbi vmalle1` on every switch is the stage-2
 /// correctness-first design: with a single ASID, entries cached under
@@ -764,7 +794,7 @@ unsafe fn build_view(
 /// entries) makes this a plain TTBR0 write; if that ever misbehaves on
 /// real hardware, this version is the known-correct fallback.
 pub(crate) fn activate_task(view: usize) {
-    let ttbr0 = L0_TABLES[view.min(MAX_EL0_REGIONS - 1)].0.get() as u64;
+    let ttbr0 = l0_table(view).0.get() as u64;
     unsafe {
         asm!(
             "msr ttbr0_el1, {0}",
@@ -781,7 +811,8 @@ pub(crate) fn activate_task(view: usize) {
 /// The full MAIR/TCR/TTBR0 configuration sequence, switching to
 /// `view`'s table set - the boot-time install and every runtime
 /// rebuild end here. [`activate_task`] is the lighter switch-only
-/// sibling used on every context switch.
+/// sibling used on every context switch; both look the view up through
+/// [`l0_table`].
 unsafe fn switch_full(view: usize) {
     let mair_el1: u64 =
         (MAIR_ATTR_DEVICE_NGNRNE << (8 * MAIR_IDX_DEVICE_NGNRNE)) | (MAIR_ATTR_NORMAL_WB << (8 * MAIR_IDX_NORMAL_WB));
@@ -816,7 +847,7 @@ unsafe fn switch_full(view: usize) {
         | (0b10 << 30)               // TG1: 4KB granule (TTBR1 encoding)
         | (ips << 32); // IPS: from hardware
 
-    let ttbr0_el1 = L0_TABLES[view.min(MAX_EL0_REGIONS - 1)].0.get() as u64;
+    let ttbr0_el1 = l0_table(view).0.get() as u64;
 
     // Masked and left masked: between the MAIR/TCR write and the TTBR0
     // switch below, code is still running under firmware's *old* tables

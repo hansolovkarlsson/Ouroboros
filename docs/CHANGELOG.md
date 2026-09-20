@@ -3555,6 +3555,8 @@ background task + a multi-stage pipeline.
   `NUM_TASKS` (one table view per task); the boot EL0-regions array in `main.rs`
   is now built programmatically instead of a fixed literal. `STATES` stays a
   literal (its boot values aren't uniform), extended by the three new slots.
+  *Update 2026-09-19 (#136): `MAX_EL0_REGIONS` is now defined as
+  `NUM_TASKS`, so the "must stay equal" above is the definition, not a rule.*
 - The shell's send-mask to its spawnable children became a computed
   `TO_SPAWNABLE` (bits `FIRST_SPAWNABLE..NUM_TASKS`) instead of the hardcoded
   `TO_SPAWN_5 | TO_SPAWN_6`, so it widens automatically.
