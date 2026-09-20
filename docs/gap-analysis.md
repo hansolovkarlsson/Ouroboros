@@ -38,7 +38,7 @@ set; roadmap arcs are cited by their `ROADMAP.md` section.
 | `exec()` (replace current image) | ✗ | The shell's `exec` builtin is a misnomer — it *spawns* alongside, nothing about the caller is replaced. True image-replacement isn't implemented. |
 | `wait()` / reaping / exit status | ✅ | `WAIT` (21) blocks on a task's death, returns a byte status; a `Zombie(status)` slot holds until waited (or `kill`ed, which reaps immediately). |
 | Kill another task | ✅ | `KILL` (19) — but by **slot index**, not by signal. |
-| Signals (`SIGINT`/`SIGTERM`/handlers/`sigaction`) | ✗ | Ctrl+C is **keyboard reclamation**, not a delivered signal (`FG`'s doc: nothing is delivered to the task). A real signal mechanism is unbuilt. |
+| Signals (`SIGINT`/`SIGTERM`/handlers/`sigaction`) | ✗ | Ctrl+C **terminates** the keyboard owner (any but the boot shell), not a delivered signal (`FG`'s doc: nothing is delivered for the task to catch). A real signal mechanism is unbuilt. |
 | Job control (`fg`/`bg`/`&`/jobs) | ◐ | `fg`/`ps`/`kill`/`wait` exist as builtins; **no background `&`**, no job table, foreground-only. Deliberately builtin (slot reuse makes an external `ps` race itself — see the userland-and-pipelines postmortem). |
 | Stable PIDs | ◐ | Task **slot indices** (0–9) identify tasks, but a freed slot is reused immediately, so a number isn't a stable identity across commands. |
 | Process groups / sessions / controlling terminal | ✗ | No grouping abstraction; there is one keyboard owner (`FG`/`INPUT_OWNER`, handed back along the chain of previous owners on death), not a session/pgrp model. |

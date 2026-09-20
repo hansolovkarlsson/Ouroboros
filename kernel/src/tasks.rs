@@ -529,7 +529,10 @@ pub(crate) fn el0_regions() -> [(u64, u64); NUM_TASKS] {
 /// ([`set_input_owner`]), and **any death of the current owner reverts
 /// it to the task that held it when `FG` handed it over**
 /// ([`revert_input_owner_if`], run by [`end_task`] on every teardown),
-/// if that task is still the same occupant and alive, **else to task 0**.
+/// if that task is still the same occupant and alive; **to the nearest
+/// live link above it** if that task itself died as a link in the chain
+/// without owning the keyboard (its entries are spliced out at its own
+/// death, see [`PREVIOUS_OWNERS`]); **else to task 0**.
 /// Task 0 can never die (`EXIT` and `KILL` both refuse it), so the
 /// fallback is always valid, the same permanence argument the original
 /// hardcoding relied on, now load-bearing for the revert too.
@@ -619,9 +622,7 @@ pub(crate) fn revert_input_owner_if(dying: usize) {
     }
     // `0` (never handed over) names slot 0 and no generation, so it fails
     // occupant_is and falls back to task 0 like any stale entry.
-    let target = live_index(syscall_abi::task_id_slot(previous) as usize)
-        .filter(|t| occupant_is(t.index(), previous))
-        .map_or(0, TaskIndex::index);
+    let target = live_occupant(previous).map_or(0, TaskIndex::index);
     INPUT_OWNER.store(target, Ordering::Relaxed);
 }
 
@@ -1183,16 +1184,6 @@ static IDS: [AtomicU64; NUM_TASKS] = [const { AtomicU64::new(0) }; NUM_TASKS];
 /// programs can never restore to root. Default `0`.
 static SAVED_IDS: [AtomicU64; NUM_TASKS] = [const { AtomicU64::new(0) }; NUM_TASKS];
 
-/// Whether `task` is a live task - one that could actually have sent a message
-/// worth authorizing: [`task_exists`], under the name the identity arms
-/// use, so there is one liveness predicate. A `Zombie` has run and died; an `Unused` slot has had its
-/// identity reset to root by [`reset_id`], which is precisely why `GET_ID` must
-/// not answer for either: a server that authorizes on the sender's identity
-/// would read a caller that exited as ROOT.
-pub(crate) fn is_live(task: usize) -> bool {
-    task_exists(task)
-}
-
 /// Per-task **supplementary groups**: the gids a task belongs to *in addition*
 /// to the primary gid packed into [`IDS`]. Written only by the root-gated group
 /// half of `SET_ID`, inherited at spawn ([`inherit_id`]), cleared on death.
@@ -1232,7 +1223,7 @@ pub(crate) fn groups_of(task: usize, out: &mut [u32]) -> usize {
 /// reaped and re-spawned before the server drains its mailbox - at which point
 /// `GET_ID` reports the *new* occupant. If that occupant is root, the request
 /// is authorized as root. The dead-slot half of this window was already closed
-/// (`is_live` makes `GET_ID` refuse a slot with no live task); the *recycled*
+/// (`live_index` makes `GET_ID` refuse a slot with no live task); the *recycled*
 /// slot is indistinguishable from the original, because a message carries a
 /// bare `u8` slot number and nothing else.
 ///
@@ -1515,7 +1506,7 @@ pub(crate) fn set_delegate(grantee: usize, target: usize) {
 /// for the rest of its life, because the shell's `TO_NET` grant is made once,
 /// at spawn. So the strip moved to where reuse actually happens:
 /// [`clear_delegations_at`], in [`spawn`]. A grant aimed at a dead slot is
-/// inert in between: `MSG_SEND`/`MSG_CALL` test `task_exists` before
+/// inert in between: `MSG_SEND`/`MSG_CALL` test `live_index` before
 /// `may_send`, and `DELEGATE` refuses a dead target. Measured 2026-09-06 with
 /// a ping loop across a forced restart: six failures out of six after the
 /// restart line before, the one in-flight failure and replies resuming after.
@@ -1812,10 +1803,23 @@ static STATES: [StateSlot; NUM_TASKS] = [
 /// [`next_or_halt`], which reports and halts on it rather than resume a
 /// task whose state says it must not run.
 fn next_runnable(from: TaskIndex) -> Option<TaskIndex> {
+    scan_from(from, is_runnable)
+}
+
+/// Whether `t` is `Runnable` right now: the one predicate both scans
+/// ask, so they cannot disagree about what "runnable" means.
+fn is_runnable(t: TaskIndex) -> bool {
+    matches!(unsafe { *STATES[t.index()].0.get() }, TaskState::Runnable)
+}
+
+/// The one scan behind [`next_runnable`] and [`next_runnable_skip_idle`]:
+/// forward from `from` (exclusive), wrapping, `from` itself the last
+/// candidate, for the first slot `wanted` accepts.
+fn scan_from(from: TaskIndex, wanted: impl Fn(TaskIndex) -> bool) -> Option<TaskIndex> {
     let mut candidate = from;
     for _ in 0..NUM_TASKS {
         candidate = candidate.succ();
-        if unsafe { *STATES[candidate.index()].0.get() } == TaskState::Runnable {
+        if wanted(candidate) {
             return Some(candidate);
         }
     }
@@ -1849,21 +1853,11 @@ fn next_or_halt(from: TaskIndex) -> TaskIndex {
 /// `Runnable` and the scan's last candidate, so when nothing else is
 /// runnable it stays put; idle is never chosen for a yield.
 fn next_runnable_skip_idle(from: TaskIndex) -> TaskIndex {
-    let mut candidate = from;
-    for _ in 0..NUM_TASKS {
-        candidate = candidate.succ();
-        if candidate != TaskIndex::IDLE
-            && unsafe { *STATES[candidate.index()].0.get() } == TaskState::Runnable
-        {
-            return candidate;
-        }
-    }
-    // The loop above returns `from` itself as its last candidate, so a
-    // real yielder (Runnable, not idle) never reaches this line: it stays
-    // put up there. This is reached only if `from` IS the idle task or is
-    // not Runnable, and then the plain scan (with its halt on nothing) is
-    // the right answer.
-    next_or_halt(from)
+    // The scan's last candidate is `from` itself, so a real yielder
+    // (Runnable, not idle) is always found and stays put. `None` is
+    // reached only if `from` IS the idle task or is not Runnable, and
+    // then the plain scan (with its halt on nothing) is the right answer.
+    scan_from(from, |c| c != TaskIndex::IDLE && is_runnable(c)).unwrap_or_else(|| next_or_halt(from))
 }
 
 /// Voluntarily give up the CPU (the `YIELD` syscall): save the current task -
@@ -1894,10 +1888,22 @@ pub(crate) unsafe fn yield_current_and_switch(frame: *mut Context) -> u64 {
     frame.gpr[0] = 0;
     unsafe { *TASKS[current.index()].0.get() = *frame };
     // STATES[current.index()] stays Runnable - a yield doesn't block.
+    switch_to(frame, next);
+    frame.gpr[0]
+}
+
+/// The context switch itself, the tail every switch path ends in: load
+/// `next`'s saved context into the live trap frame, make it the current
+/// task, and activate its table view, so the `eret` this frame returns
+/// into lands in `next`'s code under `next`'s own view. Whether the
+/// outgoing task's frame is saved first is the caller's decision (a
+/// yield, a block and the tick save it; a teardown discards it), which is
+/// why the save is not in here. One place, so the three steps cannot be
+/// reordered or one of them forgotten at a new site.
+fn switch_to(frame: &mut Context, next: TaskIndex) {
     *frame = unsafe { *TASKS[next.index()].0.get() };
     set_current(next);
     crate::mmu::activate_task(next);
-    frame.gpr[0]
 }
 
 /// Suspends the calling task (whichever one is live in `frame` right now)
@@ -1967,9 +1973,7 @@ pub(crate) unsafe fn block_current_and_switch_to(
         }
         _ => next_or_halt(current),
     };
-    *frame = unsafe { *TASKS[next.index()].0.get() };
-    set_current(next);
-    crate::mmu::activate_task(next);
+    switch_to(frame, next);
     frame.gpr[0]
 }
 
@@ -2109,10 +2113,7 @@ pub(crate) unsafe fn kill_current_and_switch(frame: *mut Context) {
 fn switch_away_from_dead(frame: &mut Context, dead: TaskIndex) {
     // `dead` is torn down, so it is never Runnable and the scan cannot
     // return it; None means nothing runnable, and next_or_halt reports.
-    let next = next_or_halt(dead);
-    *frame = unsafe { *TASKS[next.index()].0.get() };
-    set_current(next);
-    crate::mmu::activate_task(next);
+    switch_to(frame, next_or_halt(dead));
 }
 
 /// Fails every task blocked in a call to `dead` (a
@@ -2171,8 +2172,14 @@ pub(crate) fn live_index(i: usize) -> Option<TaskIndex> {
 }
 
 /// Whether `t` currently holds a *live* task (`Runnable` or `Blocked`):
-/// the typed form of [`task_exists`], asking the state table directly
-/// so the range the type already proves is not re-tested.
+/// the one liveness predicate, asking the state table directly so the
+/// range the type already proves is not re-tested. Zombies are
+/// deliberately not "live": `fg`/`kill` on one would target a task that
+/// no longer runs (`wait` is how a zombie is dealt with - `ps` says so),
+/// and a `Zombie` or `Unused` slot has had its identity reset to root by
+/// [`reset_id`], which is precisely why `GET_ID` must not answer for
+/// either: a server that authorizes on the sender's identity would read
+/// a caller that exited as ROOT.
 pub(crate) fn is_occupied(t: TaskIndex) -> bool {
     matches!(
         unsafe { *STATES[t.index()].0.get() },
@@ -2180,13 +2187,14 @@ pub(crate) fn is_occupied(t: TaskIndex) -> bool {
     )
 }
 
-/// Whether slot `i` currently holds a *live* task (`Runnable` or
-/// `Blocked`), for callers that still hold a plain index; the typed
-/// arms ask [`is_occupied`]. Zombies are deliberately not "live":
-/// `fg`/`kill` on one would target a task that no longer runs (`wait` is
-/// how a zombie is dealt with - `ps` says so).
-pub(crate) fn task_exists(i: usize) -> bool {
-    TaskIndex::new(i).is_some_and(is_occupied)
+/// The live task a packed identity ([`task_id_of`]) still names, or
+/// `None` if its slot is out of range, not live, or held by a different
+/// occupant now: the one spelling of "is the task I remembered still
+/// there", for every place that stored an identity and must act on the
+/// task only if it is (the Ctrl+C mark, the keyboard chain). `0` names
+/// slot 0 and no generation, so it fails [`occupant_is`] by construction.
+pub(crate) fn live_occupant(id: u64) -> Option<TaskIndex> {
+    live_index(syscall_abi::task_id_slot(id) as usize).filter(|t| occupant_is(t.index(), id))
 }
 
 pub(crate) enum SpawnError {
@@ -2586,8 +2594,7 @@ pub unsafe fn on_tick(frame: *mut Context) {
     // interrupted.
     // 0 ("nothing pending") names slot 0 and no generation, so it fails
     // is_spawnable and occupant_is alike; no separate guard is needed.
-    let victim = live_index(syscall_abi::task_id_slot(pending) as usize)
-        .filter(|v| v.is_spawnable() && occupant_is(v.index(), pending));
+    let victim = live_occupant(pending).filter(|v| v.is_spawnable());
     if let Some(victim_slot) = victim {
         crate::console::println!("Ouroboros kernel: Ctrl+C - foreground task {} terminated", victim_slot.index());
         if victim_slot == current {
@@ -2664,11 +2671,7 @@ pub unsafe fn on_tick(frame: *mut Context) {
         return;
     }
     unsafe { *TASKS[current.index()].0.get() = *frame };
-    *frame = unsafe { *TASKS[next.index()].0.get() };
-    set_current(next);
-    // The eret this returns into lands in `next`'s EL0 code - it must
-    // run under `next`'s own table view (per-task page tables).
-    crate::mmu::activate_task(next);
+    switch_to(frame, next);
 }
 
 /// Called from `rust_irq_handler` on a NIC receive interrupt: wakes the
@@ -2706,9 +2709,7 @@ pub unsafe fn on_net_irq(frame: *mut Context) {
             unsafe { *STATES[i].0.get() = TaskState::Runnable };
             if slot != current {
                 unsafe { *TASKS[current.index()].0.get() = *frame };
-                *frame = unsafe { *TASKS[i].0.get() };
-                set_current(slot);
-                crate::mmu::activate_task(slot);
+                switch_to(frame, slot);
             }
             // Only one task ever blocks on NetInput (the network server).
             return;

@@ -1315,7 +1315,8 @@ fn drain_program_output(slot: u64) {
 ///
 /// The gap is exactly one state. `KILL` frees a *live* task's slot outright
 /// (`tasks::kill_task` sets it `Unused`), but a task that already exited on its
-/// own is a **`Zombie`**, and `task_exists` counts only `Runnable`/`Blocked` -
+/// own is a **`Zombie`**, and the kernel's one liveness predicate
+/// (`is_occupied`, behind `live_index`) counts only `Runnable`/`Blocked` -
 /// so the kernel refuses the `KILL` with `TASK_ERR_NO_SUCH_TASK`, the result is
 /// discarded, and only `WAIT` ever reaps. Every abandon path below therefore
 /// leaked one of just **five** spawnable slots each time it ran, and the
