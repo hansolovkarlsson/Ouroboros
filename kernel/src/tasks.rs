@@ -587,7 +587,7 @@ pub(crate) fn interrupt_key_check(byte: u8) -> bool {
     // silently eat every Ctrl+C, and let the byte through.
     let Some(id) = task_id_of(owner) else {
         crate::console::println_force!(
-            "Ouroboros kernel: keyboard owner slot {owner} holds no task - a kernel bug (a death path skipped revert_input_owner_if)"
+            "Ouroboros kernel: keyboard owner slot {owner} holds no task - a kernel bug (its two writers are set_input_owner and revert_input_owner_if)"
         );
         return false;
     };
@@ -1358,18 +1358,21 @@ fn clear_parent(slot: usize) {
 /// any slot with no live occupant on either side, and false once the parent's
 /// slot has been reused, since the recorded identity no longer matches.
 pub(crate) fn is_child_of(child: usize, parent: usize) -> bool {
-    // No live identity is ever 0 (generations start at 1), so the 0 that
-    // PARENTS holds for "no parent" matches nothing by construction.
+    // The 0 that PARENTS holds for "no parent" matches nothing: see
+    // occupant_is for why.
     child < NUM_TASKS && occupant_is(parent, PARENTS[child].load(Ordering::Relaxed))
 }
 
 /// Whether `id` (a packed identity, see [`task_id_of`]) still names the
 /// occupant of `slot`: the one spelling of that question, for every
 /// place that remembered an occupant and now needs to know whether it is
-/// still there (the parent link, the Ctrl+C mark). `0` names no task, so
-/// a "none" sentinel compares false by construction.
+/// still there (the parent link, the Ctrl+C mark). `0` names no task:
+/// generations start at 1, so [`task_id_of`] never answers `Some(0)` and a
+/// "none" sentinel compares false here by construction. This is the one
+/// place that argument is made; callers that store `0` for "none" rely on
+/// it and say so by pointing here.
 pub(crate) fn occupant_is(slot: usize, id: u64) -> bool {
-    task_id_of(slot) == Some(id) && id != 0
+    task_id_of(slot) == Some(id)
 }
 
 /// Whether `src` holds a send right to `dest`, statically or by delegation -
@@ -1634,10 +1637,14 @@ impl WaitReason {
                 // nothing would otherwise be running while the sole
                 // typist is blocked here). Scoped to exactly the
                 // dangerous case - the waiter that owns the keyboard:
-                // drain one byte if available; Ctrl+C interrupts the
-                // wait (the target keeps running); any other typed
-                // byte is deliberately discarded, same spirit as
-                // typing at a busy foreground job in `sh`.
+                // drain one byte if available. Ctrl+C reaches this
+                // branch only when the waiter is task 0 (the one owner
+                // interrupt_key_check never marks); any other owner is
+                // marked for death by the poll itself and never sees
+                // the byte. For task 0 it interrupts the wait (the
+                // target keeps running); any other typed byte is
+                // deliberately discarded, same spirit as typing at a
+                // busy foreground job in `sh`.
                 if waiter == INPUT_OWNER.load(Ordering::Relaxed) {
                     if let Some(byte) = crate::syscall::poll_keyboard_byte() {
                         if byte == 0x03 {
@@ -1657,7 +1664,8 @@ impl WaitReason {
                 }
             }
             WaitReason::Message { buf, len, from } => {
-                // Same Ctrl+C escape hatch as TaskExit's - a `recv`
+                // Same Ctrl+C escape hatch as TaskExit's, with the same
+                // reach (task 0 only; any other owner is marked instead) - a `recv`
                 // (or a call to a wedged server) with no reply coming
                 // must not brick the session.
                 if waiter == INPUT_OWNER.load(Ordering::Relaxed) {
