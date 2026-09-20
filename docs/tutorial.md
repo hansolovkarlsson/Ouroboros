@@ -763,20 +763,27 @@ static TASKS: [TaskSlot; NUM_TASKS] = /* saved Context per task */;
 // the type without a check: "in range" is a type, not a convention kept
 // at every store site.
 
-fn next_runnable(from: TaskIndex) -> TaskIndex {
+fn next_runnable(from: TaskIndex) -> Option<TaskIndex> {
     let mut candidate = from;
-    for _ in 0..NUM_TASKS {
+    for _ in 0..NUM_TASKS {                      // the last candidate is `from` itself
         candidate = candidate.succ();            // (i + 1) % NUM_TASKS
-        if state(candidate) == TaskState::Runnable { return candidate; }
+        if state(candidate) == TaskState::Runnable { return Some(candidate); }
     }
-    from
+    None                                         // nothing runnable at all
+}
+
+/// Every switch path comes through here: None means the idle task blocked,
+/// which it never does, so the answer is a reported halt, not a resume of a
+/// task whose state says it must not run.
+fn next_or_halt(from: TaskIndex) -> TaskIndex {
+    next_runnable(from).unwrap_or_else(|| halt_with_report(from))
 }
 
 /// Called from rust_irq_handler on every tick.
 pub unsafe fn on_tick(frame: *mut Context) {
     let frame = &mut *frame;
     let current = current_index();
-    let next = next_runnable(current);
+    let next = next_or_halt(current);
     if next == current { return; }
     *TASKS[current.index()].0.get() = *frame;    // interrupted task's state out
     *frame = *TASKS[next.index()].0.get();       // next task's state in
@@ -1019,7 +1026,7 @@ the sign the foundations are right. In the order that worked:
   session.
 - **IPC.** Bounded messages (up to 768 bytes) copied through the kernel
   into bounded per-task mailboxes; blocking receive is one more wait
-  reason. No shared memory — copying is the isolation-friendly
+  reason. No shared memory: copying is the isolation-friendly
   semantics, and at this size it's free. This is the doorway to the
   microkernel move: servers in userland.
 

@@ -112,8 +112,8 @@ mod task_index {
 
     const _: () = assert!(NUM_TASKS > 1, "TaskIndex::IDLE is slot 1, which must exist");
     const _: () = assert!(
-        FIRST_SPAWNABLE <= NUM_TASKS,
-        "is_spawnable's bound must lie within the slot count, or no slot is spawnable and every task syscall answers protected"
+        FIRST_SPAWNABLE < NUM_TASKS,
+        "is_spawnable's bound must leave at least one slot above it, or no slot is spawnable and every task syscall answers protected"
     );
 
     impl TaskIndex {
@@ -1708,11 +1708,12 @@ static STATES: [StateSlot; NUM_TASKS] = [
 ];
 
 /// Scans forward from `from` (exclusive), wrapping, for the next
-/// `Runnable` task - falls back to `from` itself if nothing else is
-/// runnable. That fallback is unreachable today (task 1, the idle task,
-/// never blocks - see this module's doc comment for why it can't safely
-/// use `wfe` either, so it has to stay a real, always-runnable busy-spin),
-/// so `None` is unreachable today; every caller goes through
+/// `Runnable` task; the scan's last candidate is `from` itself, so a
+/// still-runnable `from` is returned when nothing else is. `None` means
+/// nothing at all is runnable, which is unreachable today (task 1, the
+/// idle task, never blocks - see this module's doc comment for why it
+/// can't safely use `wfe` either, so it has to stay a real,
+/// always-runnable busy-spin); every caller goes through
 /// [`next_or_halt`], which reports and halts on it rather than resume a
 /// task whose state says it must not run.
 fn next_runnable(from: TaskIndex) -> Option<TaskIndex> {
@@ -1746,10 +1747,12 @@ fn next_or_halt(from: TaskIndex) -> TaskIndex {
     }
 }
 
-/// Like [`next_runnable`], but skips the idle task unless it's the only thing
-/// runnable. A *voluntary* yield ([`yield_current_and_switch`]) wants to hand
-/// the CPU to real work; parking on idle would just wait for the next tick,
-/// which is exactly the stall the yield exists to avoid.
+/// Like [`next_runnable`], but skips the idle task. A *voluntary* yield
+/// ([`yield_current_and_switch`]) wants to hand the CPU to real work;
+/// parking on idle would just wait for the next tick, which is exactly
+/// the stall the yield exists to avoid. The yielding task is itself
+/// `Runnable` and the scan's last candidate, so when nothing else is
+/// runnable it stays put; idle is never chosen for a yield.
 fn next_runnable_skip_idle(from: TaskIndex) -> TaskIndex {
     let mut candidate = from;
     for _ in 0..NUM_TASKS {
@@ -1760,7 +1763,8 @@ fn next_runnable_skip_idle(from: TaskIndex) -> TaskIndex {
             return candidate;
         }
     }
-    // Nothing else runnable - fall back (idle, or stay put).
+    // Nothing else runnable: the plain scan returns `from` itself (a
+    // yielding task is Runnable), so this is "stay put".
     next_or_halt(from)
 }
 
