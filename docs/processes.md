@@ -279,9 +279,10 @@ dependency in your program's `Cargo.toml` (see the default shell's for an
 example) and use `syscall_abi::FS_MKDIR` etc. rather than hand-copying
 numbers. See `docs/architecture.md`'s syscall table for the full list.
 `try_read_char` (`TRY_READ_CHAR`, non-blocking, returns `NO_CHAR` when
-nothing is waiting), `read_char` (`READ_CHAR`, blocking - suspends the
-calling task and switches to another runnable one instead of returning
-immediately, resuming with the byte once one arrives; see
+nothing is waiting or the caller does not own the keyboard), `read_char`
+(`READ_CHAR`, blocking - suspends the calling task and switches to
+another runnable one instead of returning immediately, resuming with the
+byte once one arrives and the caller owns the keyboard; see
 `docs/architecture.md`'s "Process model" section for how blocking
 actually works) cover interactive input. **A `/bin` program *can* read the
 keyboard** now (a pager, an editor, a REPL): the shell hands a foreground

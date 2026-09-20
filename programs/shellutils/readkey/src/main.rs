@@ -12,6 +12,8 @@
 //! (`exec /bin/readkey poll`) and type at the shell. If a non-owner could
 //! consume keystrokes, the spinner would echo them and the shell would see
 //! nothing; with the gate, the spinner answers only when it owns the keyboard.
+//! It spins (a syscall per iteration, no yield exists yet), so it takes every
+//! timeslice it is given: an observer to run for the witness and kill after.
 
 #![no_std]
 #![no_main]
@@ -19,10 +21,11 @@
 #[no_mangle]
 #[link_section = ".text.start"]
 pub extern "C" fn _start() -> ! {
+    ulib::usage_if_requested(b"usage: readkey [poll]  (poll: spin on try_read_char instead of blocking; an observer for the keyboard-owner gate, kill it when done)\r\n");
     let mut mode = [0u8; 8];
     let poll = matches!(ulib::arg(1, &mut mode), Some(n) if &mode[..n] == b"poll");
     if poll {
-        ulib::con_write(b"readkey: polling (q to quit)\r\n");
+        ulib::con_write(b"readkey: polling (in the foreground: q to quit, Ctrl+C to abort; in the background it never owns the keyboard, so kill it from the shell)\r\n");
     } else {
         ulib::con_write(b"readkey: press keys (q to quit, Ctrl+C to abort)\r\n");
     }

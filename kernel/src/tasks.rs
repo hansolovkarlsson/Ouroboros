@@ -584,7 +584,7 @@ pub(crate) fn revert_input_owner_if(dying: usize) {
 /// raw-input mode). Ctrl+C means terminate.
 pub(crate) fn interrupt_key_check(byte: u8) -> bool {
     const ETX: u8 = 0x03; // Ctrl+C
-    let owner = INPUT_OWNER.load(Ordering::Relaxed);
+    let owner = input_owner();
     if byte != ETX || owner == 0 {
         return false;
     }
@@ -1636,15 +1636,16 @@ impl WaitReason {
     /// interrupt check (see below).
     fn poll(self, waiter: usize) -> Option<u64> {
         match self {
-            WaitReason::Keyboard => crate::syscall::poll_keyboard_byte().map(u64::from),
+            WaitReason::Keyboard => crate::syscall::poll_keyboard_byte(waiter).map(u64::from),
             WaitReason::TaskExit(target) => {
                 // A wait must stay interruptible or one `wait` on a
                 // never-exiting task bricks the whole session (the
                 // Ctrl+C hatch lives in the keyboard poll, which
                 // nothing would otherwise be running while the sole
                 // typist is blocked here). Scoped to exactly the
-                // dangerous case - the waiter that owns the keyboard:
-                // drain one byte if available. Ctrl+C reaches this
+                // dangerous case, the waiter that owns the keyboard, by the
+                // poll itself (it answers None for anyone else): drain one
+                // byte if available. Ctrl+C reaches this
                 // branch only when the waiter is task 0 (the one owner
                 // interrupt_key_check never marks); any other owner is
                 // marked for death by the poll itself and never sees
@@ -1652,8 +1653,8 @@ impl WaitReason {
                 // target keeps running); any other typed byte is
                 // deliberately discarded, same spirit as typing at a
                 // busy foreground job in `sh`.
-                if waiter == INPUT_OWNER.load(Ordering::Relaxed) {
-                    if let Some(byte) = crate::syscall::poll_keyboard_byte() {
+                {
+                    if let Some(byte) = crate::syscall::poll_keyboard_byte(waiter) {
                         if byte == 0x03 {
                             return Some(syscall_abi::WAIT_INTERRUPTED);
                         }
@@ -1675,8 +1676,8 @@ impl WaitReason {
                 // reach (task 0 only; any other owner is marked instead) - a `recv`
                 // (or a call to a wedged server) with no reply coming
                 // must not brick the session.
-                if waiter == INPUT_OWNER.load(Ordering::Relaxed) {
-                    if let Some(byte) = crate::syscall::poll_keyboard_byte() {
+                {
+                    if let Some(byte) = crate::syscall::poll_keyboard_byte(waiter) {
                         if byte == 0x03 {
                             return Some(syscall_abi::RECV_INTERRUPTED);
                         }
@@ -2483,9 +2484,6 @@ pub unsafe fn on_tick(frame: *mut Context) {
     for task in TaskIndex::all() {
         let i = task.index();
         let TaskState::Blocked(reason) = (unsafe { *STATES[i].0.get() }) else { continue };
-        if reason == WaitReason::Keyboard && i != INPUT_OWNER.load(Ordering::Relaxed) {
-            continue;
-        }
         if let Some(value) = reason.poll(i) {
             unsafe { (*TASKS[i].0.get()).gpr[0] = value };
             unsafe { *STATES[i].0.get() = TaskState::Runnable };
@@ -2500,9 +2498,10 @@ pub unsafe fn on_tick(frame: *mut Context) {
     // child wasn't reading and is dropped - rare (a program that reads input is
     // Blocked, not running, at the tick), and the price of catching Ctrl+C in a
     // runaway loop with no read to piggyback on.
-    let owner = INPUT_OWNER.load(Ordering::Relaxed);
-    if owner != 0 && owner == current.index() {
-        let _ = crate::syscall::poll_keyboard_byte();
+    // (The poll itself answers None unless `current` is the owner, so
+    // this asks only "is the running task not the boot shell".)
+    if current != TaskIndex::FIRST {
+        let _ = crate::syscall::poll_keyboard_byte(current.index());
     }
 
     // Honor a Ctrl+C kill (marked by `interrupt_key_check` from either poll
