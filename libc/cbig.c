@@ -24,8 +24,6 @@
 #include <unistd.h>
 #include "sys.h"
 
-unsigned long ouro_last_fs_status(void);
-
 /* Read the whole file at `path` into `buf` (up to `cap`), returning the byte
  * count or -1. One read() per call is enough: libc's read() loops internally,
  * issuing an NP_PREAD per FS_DATA_MAX chunk, so on a file over 512 bytes this
@@ -59,12 +57,12 @@ int main(void) {
 
     long ln = slurp("/man/grep", local, sizeof local);
     if (ln < 0) {
-        printf("cbig: local /man/grep read failed\r\n");
+        printf("cbig: local /man/grep read failed: %s\r\n", ouro_fs_strerror(ouro_last_fs_status()));
         return 1;
     }
     long rn = slurp("/mnt/a/man/grep", remote, sizeof remote);
     if (rn < 0) {
-        printf("cbig: remote /mnt/a/man/grep read failed\r\n");
+        printf("cbig: remote /mnt/a/man/grep read failed: %s\r\n", ouro_fs_strerror(ouro_last_fs_status()));
         return 1;
     }
     /* The check that can fail: same length, same bytes, and longer than one

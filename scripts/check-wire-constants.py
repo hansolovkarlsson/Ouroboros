@@ -502,7 +502,7 @@ def main():
                     f"{peer} has {consts[const]!r}"
                 )
         if not seen_anywhere:
-            problems.append(f"{const}: no Python peer spells it (dead entry in this list)")
+            problems.append(f"{const}: no peer spells it (dead entry in this list)")
 
     # A check that compared nothing passes for the wrong reason. The regexes
     # above are the fragile part - a formatting change to either language could

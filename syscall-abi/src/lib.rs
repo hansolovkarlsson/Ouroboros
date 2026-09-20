@@ -1403,9 +1403,16 @@ pub const SPAWN_ERR_TOO_LARGE: u64 = u64::MAX - 12;
 /// Every task slot already holds a live task.
 pub const SPAWN_ERR_NO_FREE_SLOT: u64 = u64::MAX - 13;
 
-// Task-management failure codes ([`KILL`]/[`FG`]), same reserved band.
+// Task-management failure codes, same reserved band. Answered by every
+// syscall that names another task: [`KILL`], [`FG`], [`WAIT`],
+// [`MSG_SEND`], [`MSG_CALL`] and [`DELEGATE`] (the set `kernel/src/
+// syscall.rs` returns them from; `libc/include/sys.h` mirrors the values
+// and points here for this list rather than restating it).
 
-/// The index is out of range or the slot holds no task.
+/// The index is out of range or the slot holds no task. The one of the
+/// three a client of a server can meet: a `MSG_SEND`/`MSG_CALL` to a
+/// server slot that is being restarted underneath the request, or that
+/// held no server this boot.
 pub const TASK_ERR_NO_SUCH_TASK: u64 = u64::MAX - 14;
 /// The target is one of the permanent slots below the first spawnable
 /// one: the boot shell, idle, and the servers (`FSD_TASK`, `CON_TASK`,
@@ -1588,8 +1595,9 @@ pub const SPAWN_ERR_IMAGE_TOO_LARGE: u64 = u64::MAX - 41;
 /// the caller just named. The shell's error printer is the consumer that
 /// tells them apart today; `libc`'s `sys.h` has named all three since
 /// 2026-09-20 (pinned by `scripts/check-wire-constants.py`), though its
-/// programs only meet [`TASK_ERR_NO_SUCH_TASK`], the one a `MSG_CALL` to
-/// a server can answer. A task ends itself with [`EXIT`]; a shell's `exit`
+/// programs only meet [`TASK_ERR_NO_SUCH_TASK`]: the only request path
+/// that records a status for them is a `MSG_CALL` to a server slot other
+/// than their own. A task ends itself with [`EXIT`]; a shell's `exit`
 /// only logs out, so a child shell is ended from outside (Ctrl+C while it
 /// holds the keyboard, or `KILL` from its parent). Reserved 2026-09-19,
 /// moving the floor to `MAX-43`.
