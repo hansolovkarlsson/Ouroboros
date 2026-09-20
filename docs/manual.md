@@ -514,12 +514,12 @@ statuses). `NO_FS` (`MAX-1`) means no filesystem is mounted this boot.
 | 0 | `print` | value | Demo: log a value through the kernel console |
 | 1 | `double` | value | Demo: returns `value * 2` |
 | 2 | `report` | task id | Demo: per-task counter |
-| 3 | `try_read_char` | — | Non-blocking read; `NO_CHAR` if nothing waiting |
+| 3 | `try_read_char` | — | Non-blocking read; `NO_CHAR` if nothing waiting or the caller does not own the keyboard |
 | 4 | `putc` | byte | Raw console byte write |
 | 5 | — | | *Deliberate gap (removed `shell_input`; ABI stability over density)* |
 | 6 | `get_ticks` | — | Preemption tick count since boot |
 | 7–14 | — | | *Deliberate gaps: the old `fs_*` syscalls: the filesystem lives in userland now (the fsd server); their contracts survive as the `FSOP_*` request protocol below* |
-| 15 | `read_char` | — | Blocking read: the task is suspended until a byte arrives |
+| 15 | `read_char` | — | Blocking read: the task is suspended until a byte arrives and it owns the keyboard |
 | 16 | `spawn` | staged total len | Start a program image previously fed in via `spawn_stage` as a new task alongside the caller; returns the new task's slot index |
 | 17 | `exit` | code | Destroy the calling task; status kept (masked to 0–255) until `wait`ed. Slots 0–5 (the shell, idle, and the four servers) refused (`EXIT_DENIED`) |
 | 18 | `task_state` | index | `UNUSED`/`RUNNABLE`/`BLOCKED`/`ZOMBIE`, or `TASK_STATE_INVALID` past the last slot |

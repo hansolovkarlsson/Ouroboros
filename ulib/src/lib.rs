@@ -338,6 +338,17 @@ pub fn read_char() -> u8 {
     syscall(syscall_abi::READ_CHAR, 0) as u8
 }
 
+/// [`read_char`]'s non-blocking twin (`TRY_READ_CHAR`): the next keyboard
+/// byte if one is waiting and this program owns the keyboard, else `None`.
+/// A program that does not own the keyboard gets `None` without consuming
+/// anything, so a background poller cannot take the owner's keystrokes.
+pub fn try_read_char() -> Option<u8> {
+    match syscall(syscall_abi::TRY_READ_CHAR, 0) {
+        syscall_abi::NO_CHAR => None,
+        byte => Some(byte as u8),
+    }
+}
+
 /// A microsecond-resolution monotonic timestamp since boot (`MONOTONIC_US`).
 /// The same clock netd's RTT estimator uses; the account tools fall back to it
 /// as (weak, clock-derived) salt entropy when there is no hardware RNG — see

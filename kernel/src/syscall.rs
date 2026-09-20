@@ -205,15 +205,23 @@ fn con_access_allowed() -> bool {
     tasks::cap_has(tasks::current_task(), tasks::CAP_CON)
 }
 
+/// The one place a keystroke is consumed, and the one place the keyboard
+/// owner rule is enforced: `reader` is the task on whose behalf the poll
+/// is made (the caller of a read syscall, the task a wait is polled for,
+/// the running foreground task at the tick), and unless it is the
+/// current owner (`tasks::input_owner`) the answer is `None` with nothing
+/// read. The parameter is required so that a new caller cannot forget
+/// the rule (docs/postmortems/unspellable-postmortem.md); before it, of
+/// the six callers four re-stated the rule and the two read syscalls did
+/// not, so a background poller took the owner's bytes (witnessed
+/// 2026-09-19).
 /// Falls back to the USB keyboard (xhci.rs) when the byte-stream console
-/// has nothing waiting - no shell/ABI changes needed to wire keyboard
-/// input in, since both sources feed the same syscalls (`TRY_READ_CHAR`,
-/// `READ_CHAR`). `crate::xhci::poll_key()` is a no-op returning `None`
-/// immediately if no keyboard was ever found/installed this boot. Also
-/// called from `tasks.rs`'s `on_tick` wake-check, evaluating
-/// `WaitReason::Keyboard` for a blocked task - the same check either way,
-/// just a different caller deciding what to do with the result.
-pub(crate) fn poll_keyboard_byte() -> Option<u8> {
+/// has nothing waiting; `crate::xhci::poll_key()` is a no-op returning
+/// `None` if no keyboard was ever found this boot.
+pub(crate) fn poll_keyboard_byte(reader: usize) -> Option<u8> {
+    if reader != tasks::input_owner() {
+        return None;
+    }
     let byte = console::read_byte().or_else(crate::xhci::poll_key)?;
     // The Ctrl+C escape hatch - see tasks::interrupt_key_check's doc comment.
     // Intercepted here, the single choke point every keyboard path funnels
@@ -559,7 +567,11 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
                 None => u64::MAX,
             }
         }
-        syscall_abi::TRY_READ_CHAR => match poll_keyboard_byte() {
+        // Only the keyboard owner's reads consume keystrokes: the poll
+        // answers None for anyone else without touching the input (see
+        // poll_keyboard_byte), so a non-owner gets NO_CHAR here, or blocks
+        // below until ownership reaches it (an FG, or the revert to task 0).
+        syscall_abi::TRY_READ_CHAR => match poll_keyboard_byte(tasks::current_task()) {
             Some(byte) => byte as u64,
             None => NO_CHAR,
         },
@@ -568,7 +580,7 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
         // tasks::block_current_and_switch's own doc comment for why this
         // is safe on real hardware where a task-side `wfe` isn't. `frame`
         // is what makes that possible; every other arm above ignores it.
-        syscall_abi::READ_CHAR => match poll_keyboard_byte() {
+        syscall_abi::READ_CHAR => match poll_keyboard_byte(tasks::current_task()) {
             Some(byte) => byte as u64,
             None => unsafe { tasks::block_current_and_switch(frame, tasks::WaitReason::Keyboard) },
         },

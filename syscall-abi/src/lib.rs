@@ -35,7 +35,9 @@ pub const DOUBLE: u64 = 1;
 /// of per-task syscall state. `arg0` is a task ID.
 pub const REPORT: u64 = 2;
 
-/// Non-blocking: returns a byte, or [`NO_CHAR`] if none is waiting.
+/// Non-blocking: returns a byte, or [`NO_CHAR`] if none is waiting, or
+/// if the caller does not own the keyboard (only the owner's reads consume
+/// keystrokes; a non-owner's poll takes nothing, see [`FG`]).
 pub const TRY_READ_CHAR: u64 = 3;
 
 /// Raw single-byte console write, no newline translation. `arg0` is the
@@ -65,7 +67,10 @@ pub const GET_TICKS: u64 = 6;
 /// returning [`NO_CHAR`] immediately like [`TRY_READ_CHAR`]. The caller
 /// simply doesn't run again until then - the kernel suspends it and
 /// schedules another task in its place (see `tasks.rs`'s
-/// `block_current_and_switch`), not a spin-wait on either side.
+/// `block_current_and_switch`), not a spin-wait on either side. Only the
+/// keyboard owner receives a byte: a caller that does not own the keyboard
+/// stays suspended until ownership reaches it (an [`FG`], or the revert to
+/// task 0 on the owner's death).
 pub const READ_CHAR: u64 = 15;
 
 /// `(total staged length, stdout target, argv blob length)` -> **the new
@@ -1292,9 +1297,9 @@ pub const MSG_MAX_LEN: u64 = 768;
 /// exiting: `0x100`, one past the largest real exit status.
 pub const TASK_KILLED_STATUS: u64 = 0x100;
 
-/// Sentinel `try_read_char` returns when no byte is waiting - out of
-/// range for any real byte (0-255), so callers can tell the two apart
-/// with a single comparison.
+/// Sentinel `try_read_char` returns when no byte is waiting, or when the
+/// caller does not own the keyboard - out of range for any real byte
+/// (0-255), so callers can tell the two apart with a single comparison.
 pub const NO_CHAR: u64 = u64::MAX;
 
 /// Generic/unknown failure for the `fs_*` syscalls - the fallback when
