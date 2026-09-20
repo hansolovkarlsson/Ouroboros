@@ -89,7 +89,10 @@ python3 scripts/drive-qemu.py build/esp.img 'login:@@root' 'assword@@root' \
 
 The chain, three shells deep, with the middle one killed from below (a link
 dying while NOT the owner): after Ctrl+C at the innermost prompt the keyboard
-must reach the outer nested shell, not the boot shell.
+must reach the outer nested shell, not the boot shell. `$'\x03'` is zsh and
+bash quoting for the raw Ctrl+C byte; under plain `sh` it is four literal
+characters, the driver types those, and the run times out at the same step
+as the negative control.
 
 ```sh
 python3 scripts/drive-qemu.py build/esp.img 'login:@@root' 'assword@@root' \

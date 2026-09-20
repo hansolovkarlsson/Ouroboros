@@ -411,9 +411,11 @@ since the underlying poll (`syscall::poll_keyboard_byte`) destructively
 consumes a byte the instant anything asks, a single keystroke went to
 whichever task happened to still be blocked at that exact tick, which
 flips from tick to tick as tasks trade being blocked and running.
-Fixed by introducing `tasks::INPUT_OWNER_TASK` (hardcoded to task 0, the
-boot-loaded shell — never destroyed, and there's no job-control
-mechanism yet that could legitimately reassign this): the wake-check now
+Fixed by introducing one keyboard owner, `tasks::INPUT_OWNER` (hardcoded
+to task 0 at the time, the boot-loaded shell, never destroyed; runtime
+state since `fg` arrived, reassigned by `fg` and handed back along the
+chain of previous owners on the owner's death, see the syscall table
+below): the wake-check now
 skips polling keyboard input entirely for every other task, so an
 unconsumed byte just stays queued in the console/xHCI driver's own
 hardware buffer until the owner task's own wait asks for it. A

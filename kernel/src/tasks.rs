@@ -2014,17 +2014,20 @@ pub(crate) unsafe fn exit_current_and_switch(frame: *mut Context, status: u64) -
 /// the three enders ([`kill_task`], [`kill_current_and_switch`],
 /// [`exit_current_and_switch`]) and by nothing else. First the resources
 /// the task held: reclaim its RAM (LIFO-or-leak, see
-/// [`free_runtime_region`]), hand the keyboard back if it held it, and
-/// fail anyone blocked mid-call to it. Then the slot: its state becomes
-/// `final_state` (`Unused` for a kill, `Zombie` for an exit whose status
-/// a `WAIT` still has to collect), its region record is forgotten, and
-/// every per-task table is reset. The order matters because the second
-/// part zeroes the region record the first part reads, and freeing a
-/// zero range is a no-op: when these were two functions, the leak was
-/// one skipped call away and silent. One function, so the order is the
-/// only thing spellable; a new per-task table needs one `clear_*` call
-/// here, not three. The helpers inside still take a `usize` (the
-/// ledger's stated scope for the newtype).
+/// [`free_runtime_region`]), hand the keyboard back if it held it (which
+/// also takes the task's [`PREVIOUS_OWNERS`] entry, the one table whose
+/// clear is its reader, and re-points the entries naming the task, which
+/// asks [`task_id_of`] and so must run while the state is still live),
+/// and fail anyone blocked mid-call to it. Then the slot: its state
+/// becomes `final_state` (`Unused` for a kill, `Zombie` for an exit whose
+/// status a `WAIT` still has to collect), its region record is forgotten,
+/// and every other per-task table is reset. The order matters because the
+/// second part zeroes the region record and the state the first part
+/// reads, and freeing a zero range is a no-op: when these were two
+/// functions, the leak was one skipped call away and silent. One
+/// function, so the order is the only thing spellable; a new per-task
+/// table needs one `clear_*` call here, not three. The helpers inside
+/// still take a `usize` (the ledger's stated scope for the newtype).
 fn end_task(i: TaskIndex, final_state: TaskState) {
     let i = i.index();
     let (base, size) = task_region(i);

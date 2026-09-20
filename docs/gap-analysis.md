@@ -41,7 +41,7 @@ set; roadmap arcs are cited by their `ROADMAP.md` section.
 | Signals (`SIGINT`/`SIGTERM`/handlers/`sigaction`) | ✗ | Ctrl+C is **keyboard reclamation**, not a delivered signal (`FG`'s doc: nothing is delivered to the task). A real signal mechanism is unbuilt. |
 | Job control (`fg`/`bg`/`&`/jobs) | ◐ | `fg`/`ps`/`kill`/`wait` exist as builtins; **no background `&`**, no job table, foreground-only. Deliberately builtin (slot reuse makes an external `ps` race itself — see the userland-and-pipelines postmortem). |
 | Stable PIDs | ◐ | Task **slot indices** (0–9) identify tasks, but a freed slot is reused immediately, so a number isn't a stable identity across commands. |
-| Process groups / sessions / controlling terminal | ✗ | No grouping abstraction; there is one implicit keyboard owner (`FG`/`INPUT_OWNER_TASK`), not a session/pgrp model. |
+| Process groups / sessions / controlling terminal | ✗ | No grouping abstraction; there is one keyboard owner (`FG`/`INPUT_OWNER`, handed back along the chain of previous owners on death), not a session/pgrp model. |
 | Parent/child process trees | ✗ | Tasks are flat peers in the scheduler; no recorded parent, no orphan reparenting, no process hierarchy. |
 
 ## 2. System-call surface

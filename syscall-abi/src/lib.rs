@@ -164,10 +164,10 @@ pub const KILL: u64 = 19;
 /// each command it runs).
 /// **Ctrl+C (`0x03`) is the escape hatch**: typed while a task other
 /// than the boot shell owns the keyboard, the kernel intercepts it,
-/// reverts ownership to task 0, and swallows the byte - the
-/// foregrounded task keeps running in the background (nothing is
-/// delivered to or done to it; this is keyboard reclamation, not a
-/// signal). Index 0 is allowed as an explicit "give it back".
+/// swallows the byte and terminates that owner (the [`KILL`] teardown,
+/// at the next tick), whose death reverts ownership as above. It is a
+/// terminate, not a signal: nothing is delivered for the task to catch.
+/// Index 0 is allowed as an explicit "give it back".
 pub const FG: u64 = 20;
 
 /// `(task index)` -> the task's exit status (`0..=255` - [`EXIT`] masks

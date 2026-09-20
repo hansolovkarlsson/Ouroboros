@@ -2452,10 +2452,12 @@ fn run_found_command(
                 // (an editor, a REPL, a pager) - only the keyboard owner gets
                 // keystrokes, and the shell owns it by default. On the program's
                 // death (exit *or* Ctrl+C kill) ownership reverts to whoever
-                // held it at the FG (kernel `revert_input_owner_if`): this
-                // shell, since it read the command line and only the owner
-                // reads. This is what lets an interactive command be an
-                // ordinary `/bin` program.
+                // held it at the FG (kernel `revert_input_owner_if`). That is
+                // this shell on the assumption that it read the command line
+                // from the keyboard, which only the owner can; FG itself does
+                // not check that its caller is the owner (ledger). This is
+                // what lets an interactive command be an ordinary `/bin`
+                // program.
                 syscall(syscall_abi::FG, slot);
                 // Foreground: wait for it (also reaps the slot). A Ctrl+C now
                 // *terminates* the program (the kernel kills it and the wait
@@ -3367,8 +3369,8 @@ fn cmd_kill(arg: &str) {
 
 /// `fg <n>` - hands the keyboard to task `n` (the `FG` syscall). This
 /// shell's own next read then waits until that task exits or is killed
-/// (ownership reverts to whoever held it at the `FG`, which is this shell,
-/// since it read the command).
+/// (ownership reverts to whoever held it at the `FG`: this shell, on the
+/// assumption that it read the command from the keyboard).
 /// Ctrl+C is the escape hatch: the kernel intercepts it whenever a
 /// task other than the boot shell owns the keyboard, terminates that
 /// task on the next tick (exactly as `kill` would; its slot becomes
