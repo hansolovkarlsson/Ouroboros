@@ -203,10 +203,17 @@ Kept as the steps land, newest first.
   `Parked` record was destroyed before `service_remotes` could send `NO_FS` -
   the caller hung in its `MSG_CALL` forever. `REMOTE_DEADLINE_TICKS` above the
   retransmit budget is exactly what let the reap win. Fixed by guarding the
-  reap with `parked.is_none()`, so a parked slot is `service_remotes`'s to free.
-  The async rig gained a fourth check (an unreachable peer answers `NO_FS` and
-  the prompt returns); the `--delay` peer only ever exercised the slow-but-alive
-  path. (2) A cpu child's Phase 4b `/host` request reaching the re-entrant drain
+  reap with `parked.is_none()`, so a parked slot is `service_remotes`'s to free
+  (correct by construction: it removes the sole place a parked slot is freed
+  without answering its caller). The async rig gained a fourth check, a
+  connection REFUSED by the authorized host on a dead port: it parks, the host
+  RSTs, and the caller gets `NO_FS` with the prompt back. That check does not
+  reproduce the reap race itself, which needs a peer answering ARP but DROPPING
+  the SYN so `Connecting` exhausts inside `pump_dials`; SLIRP RSTs a dead port,
+  and an in-subnet down IP fails ARP synchronously (a correct `NO_FS` by another
+  path). The SYN-drop control is a live L2 node refusing a dead port plus a
+  mutation to confirm the hang without the guard; described here, not automated,
+  the same honesty the `tcp_get` coalesced-FIN arm carries. (2) A cpu child's Phase 4b `/host` request reaching the re-entrant drain
   in a CHAINED cpu (a node both running a cpu and hosting a child) took the
   child arm, bypassed the by-sender refusal, and parked on a slot `tcp_run` does
   not drive - undriven, hanging the child. Now refused `FS_ERR_BUSY` when
