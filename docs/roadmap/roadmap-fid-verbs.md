@@ -942,7 +942,15 @@ the same by-sender branch and is left out (a pre-existing spawn/delegate race
 makes it a flaky driver). **The cpu child's own Phase 4b remote-fs stays on its
 path and is still deep from this drain** - deliberately not refused, since it is
 the run itself; that overflow is latent, closed only by async `NETOP_RMOUNT`
-(below). A refusal is honest, not service.
+(below). A refusal is honest, not service. **Update 2026-09-21:** the async
+remote mount has its own plan, `roadmap-async-rmount.md`, whose step 1 landed:
+the TOP-LEVEL remote-mount path is async now (a path verb parks and the loop
+serves others while its reply is in flight). This re-entrant drain is
+UNCHANGED - it still refuses an identified client by sender - because parking
+here would still sign the request (a deep Ed25519 frame build) and the run
+path is at the edge; the latent overflow is closed only by step 3, which
+removes the drain. The stack cost of a park proved to be the signature, which
+is exactly what step 3 defers.
 
 ## Deliberately not in scope
 

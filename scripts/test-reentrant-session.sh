@@ -74,8 +74,8 @@ show_fail() {
 # One recipe: run `# @@<marker>`, and require the client's refusal line AND no
 # netd fault/restart. A `condition_ok` grep that DID create the condition but
 # without the refusal (e.g. the run ended first) is retried, not passed.
-check() { # name, marker, refusal-regex, condition-not-created-regex
-    name=$1; marker=$2; want=$3; notyet=$4
+check() { # name, marker, want-regex, condition-not-created-regex [, also-want-regex, forbid-regex]
+    name=$1; marker=$2; want=$3; notyet=$4; also=${5:-}; forbid=${6:-}
     attempt=0
     while :; do
         attempt=$((attempt + 1))
@@ -84,9 +84,13 @@ check() { # name, marker, refusal-regex, condition-not-created-regex
         if printf '%s\n' "$tail" | grep -q 'EL0 FAULT\|server slot 4 restarted'; then
             show_fail "$name: netd faulted instead of refusing"; return
         fi
-        if printf '%s\n' "$tail" | grep -qE -- "$want"; then
+        if [ -n "$forbid" ] && printf '%s\n' "$tail" | grep -qE -- "$forbid"; then
+            show_fail "$name: the old answer came back ($forbid)"; return
+        fi
+        if printf '%s\n' "$tail" | grep -qE -- "$want" \
+            && { [ -z "$also" ] || printf '%s\n' "$tail" | grep -qE -- "$also"; }; then
             if no_faults; then echo "ok   $name ($log)"
-            else show_fail "$name: refused, but a node reported faults"; fi
+            else show_fail "$name: answered, but a node reported faults"; fi
             return
         fi
         # The client SUCCEEDED: the run returned before it asked, so the
@@ -107,7 +111,13 @@ check() { # name, marker, refusal-regex, condition-not-created-regex
     done
 }
 
-# The remote-mount path (NETOP_RMOUNT), the originally-reported case.
+# The remote-mount path (NETOP_RMOUNT), the originally-reported case. Still
+# REFUSED from the re-entrant drain (#147): the async remote mount
+# (docs/roadmap/roadmap-async-rmount.md) makes the TOP-LEVEL path verb async
+# (step 1), but the re-entrant drain keeps refusing an identified client by
+# sender, because parking there would still sign the request (deep), and the
+# run path is at the edge. Step 3 removes this drain, and only then is this
+# recipe served.
 check "one-shot rmount refused inside a run" \
     'cpu 10.0.2.10:564 ping 10.0.2.99 | cat /mnt/a/man/grep' \
     'cat: .*out of room for this right now' \

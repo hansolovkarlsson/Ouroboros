@@ -154,7 +154,16 @@ const CONFIG_PATH: &str = "\\EFI\\ORBS\\INIT.CFG";
 // growth once left a second copy of this number behind in `mmu.rs`, which
 // misplaced the guard (docs/postmortems/true-when-written-postmortem.md);
 // there is one copy now, and `guard_page_addr` below is what `mmu.rs` asks.
-const STACK_PAGES: u64 = 10;
+// 12 pages (48 KB). Was 10 (40 KB), itself grown from 8 (32 KB) for the
+// held client session (docs/roadmap/roadmap-fid-verbs.md). The async remote
+// mount (docs/roadmap/roadmap-async-rmount.md) puts a ~4 KB parked-request
+// table on netd's `serve` frame, which sits beneath the deep `cpu`-run chain
+// (`handle_run` -> `tcp_run` -> `build_tcp_generic`) that is already at this
+// guard page - the exact chain #147's re-entrant refusal exists for. Two more
+// pages give that table its room with margin; step 3 of the async plan removes
+// the re-entrant run path and can hand these back. Global (every task's stack),
+// which is fine: more headroom everywhere, and a 2 MB slot swallows 48 KB.
+const STACK_PAGES: u64 = 12;
 /// One inaccessible guard page between the heap and the stack. The stack
 /// grows down from the top of the region; an overflow past the
 /// `STACK_PAGES` stack lands in this page, which `mmu.rs` maps EL1-only,

@@ -1174,7 +1174,21 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
             if arg1 == 0 || arg2 > syscall_abi::MSG_MAX_LEN || !in_caller_region(arg1, arg2) {
                 return FS_ERROR;
             }
-            let Some(dest_index) = tasks::live_index(dest) else {
+            // A destination at or above `1 << TASK_ID_SLOT_BITS` is a packed
+            // task IDENTITY (the word `SENDER_TASK` answers), not a slot:
+            // every generation is at least 1, so no slot number reaches it.
+            // Resolved through `live_occupant`, which refuses once the task
+            // that identity named is gone and its slot holds someone else.
+            // That someone may be blocked calling this very sender, and a
+            // reply the server parked for the previous occupant (netd's async
+            // remote mount, docs/roadmap/roadmap-async-rmount.md) would
+            // otherwise complete the stranger's call with the wrong bytes.
+            let dest_index = if dest >= (1usize << syscall_abi::TASK_ID_SLOT_BITS) {
+                tasks::live_occupant(arg0)
+            } else {
+                tasks::live_index(dest)
+            };
+            let Some(dest_index) = dest_index else {
                 return syscall_abi::TASK_ERR_NO_SUCH_TASK;
             };
             // Shadowed on purpose, as in MSG_CALL: nothing below can name

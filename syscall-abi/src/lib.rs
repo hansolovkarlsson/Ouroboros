@@ -217,7 +217,16 @@ pub const MOUNT: u64 = 22;
 /// end-of-stream marker in the shell's pipeline convention - a
 /// pipeline child (`left | program`) receives its input as a stream of
 /// 1-to-[`MSG_MAX_LEN`]-byte data messages followed by one empty
-/// message meaning "no more input; finish and exit".
+/// message meaning "no more input; finish and exit". **`dest` may be a
+/// packed task identity** (the word [`SENDER_TASK`] answers) instead of
+/// a slot: any value at or above `1 << `[`TASK_ID_SLOT_BITS`] is one,
+/// since every generation is at least 1. It delivers only while that
+/// identity still names the slot's occupant, else
+/// [`TASK_ERR_NO_SUCH_TASK`]. A server that answers a call LATER than
+/// the handler that received it (a parked request) must reply this way:
+/// by then the caller may be dead and its slot recycled to a task that
+/// is itself blocked calling the server, and a reply by slot would
+/// complete the wrong call.
 pub const MSG_SEND: u64 = 23;
 
 /// `(buf ptr, len)` -> `(sender << 32) | copied_len`, or

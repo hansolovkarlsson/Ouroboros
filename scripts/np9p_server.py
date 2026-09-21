@@ -65,6 +65,7 @@ import hashlib
 import io
 import os
 import socket
+import time
 import struct
 import sys
 
@@ -777,6 +778,22 @@ def main():
     args = sys.argv[1:]
     if "--self-test" in args:
         sys.exit(self_test(quiet="-v" not in args))
+    # `--delay S` holds every reply for S seconds before sending it: a peer
+    # that is slow, not dead, so a guest with its request PARKED (netd's async
+    # remote mount, docs/roadmap/roadmap-async-rmount.md) can be killed and
+    # its slot taken by a second caller before the first reply lands. That is
+    # the identity check of the plan's step 0: the second caller must get its
+    # OWN reply, never the first's. Longer than the guest's deadline and the
+    # reply is simply too late, which is the other thing the rig measures.
+    if "--delay" in args:
+        di = args.index("--delay")
+        if di + 1 >= len(args):
+            print("np9p_server: --delay needs a value in seconds", file=sys.stderr)
+            sys.exit(2)
+        delay = float(args[di + 1])
+    else:
+        delay = 0.0
+    args = [a for i, a in enumerate(args) if a != "--delay" and (i == 0 or args[i - 1] != "--delay")]
     port = int(args[0]) if args else 5641
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -803,6 +820,8 @@ def main():
                 if body is None:
                     break
                 reply = serve_request(body)
+                if delay:
+                    time.sleep(delay)
                 conn.sendall(reply)
                 if request_verb(body) == NP_SESSION and reply_status(reply) == 0:
                     session = True
