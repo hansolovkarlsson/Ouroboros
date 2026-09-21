@@ -7,6 +7,79 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/pos
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## Unreleased: the fid verbs reach the export, the keyboard follows a chain, the remote mount goes async
+
+**Not yet released.** Draft notes for the next cut, proposed **v0.20.0**;
+cutting the version tag is deliberately held for a go-ahead. Twenty-one PRs
+since v0.19.0 (#129 to #149): the fid-verb-to-export arc and its held client
+sessions, the keyboard-ownership chain, a run of kernel-hardening primitives,
+and the first two steps of an asynchronous remote mount.
+
+**Cross-node and ABI changes, read before upgrading one node without the other:**
+
+- **The error floor moved, `FS_ERR_MIN` `MAX-39` to `MAX-43`.** New status
+  codes were reserved below the old floor: `FS_ERR_BUSY` (`MAX-40`, a server
+  out of room, retry later) and the C-facing task codes (#145). As in every
+  floor move, a node from before this reading one of the new codes from a newer
+  peer sees a success with an absurd length, so **upgrade both cluster nodes
+  together**.
+- **`libc/include/sys.h` now names the task error codes**, plus `NO_FS` and
+  `FS_ERR_BUSY`, with one shared `ouro_fs_strerror` (#145). A C `read()` of a
+  downed remote peer meets `NO_FS` rather than a bare `-1`.
+- **`MSG_SEND` accepts a packed task identity** in place of a slot (#149): any
+  destination at or above `1 << TASK_ID_SLOT_BITS` is the word `SENDER_TASK`
+  answers, resolved through the occupant check and refused once the slot is
+  recycled. A server that replies later than the handler that received a call
+  (a parked request) must reply this way.
+- **An IRQ taken at EL1 halts with `vector=5`** rather than resuming: the
+  kernel never runs at EL1 with interrupts unmasked, so that vector is a broken
+  invariant now, not a resumable path (see `synccell.rs`, 2026-09-20).
+- **The default per-task stack is 48 KB** (`STACK_PAGES` 10 to 12): the held
+  client session and then the async remote mount's parked-request table each
+  needed room on `netd`'s deep `serve` frame.
+
+**The fid verbs reach the export** (#129 to #133). A C program can now
+`open`/`pread`/`pwrite`/`fstat`/`clunk` a file on a *remote* mount, not just a
+local one. `netd` owns the remote fids and holds one TCP **session** per
+`(endpoint, user)` open across the separate verbs of a fid's life, because the
+far export's fid is a number on that connection and dies with it (#132). `fsd`
+binds each fid to its owning user and keeps it on a co-tenant's refused access
+rather than dropping it (#130). The export serves the fid verbs on a session
+and refuses them `FS_ERR_NO_SUCH_VERB` on a one-shot connection (#131, #133).
+The full arc, its decisions and its measured negative controls are in
+`docs/roadmap/roadmap-fid-verbs.md`; the `fid-gate` and `path-gate` rigs drive
+it end to end.
+
+**The keyboard follows a chain** (#136 to #144). A nested shell handed the
+keyboard with `fg` keeps it across the commands it runs, and ownership reverts
+to whoever held it when a foreground task was handed over, not always to the
+boot shell (#140). Ctrl+C is marked by task **generation**, so a slot recycled
+mid-keystroke is not terminated by a stale mark (#138); a task only reads the
+keyboard when it owns it (#139); `fg` onto a task already in the chain no longer
+builds a cycle (#143). Driven by `make test-keyboard-chain`.
+
+**Kernel-hardening primitives**, one per gap a review of the keyboard work
+uncovered: `SyncCell`, the single mutable-static wrapper with the single-core
+argument stated once (#142); a `TaskIndex` newtype that proves range-and-liveness
+once (#137); compile-time asserts pinning the MMU view count and the slot-fit
+bound (#135, #136); and the shared stack-pages constant (#134).
+
+**Smaller fixes.** The stack top is derived once and eighteen prose copies of
+the stack size became the relationship (#146). A re-entrant remote request
+(one arriving while `netd` is inside a `cpu` run) is refused `FS_ERR_BUSY` by
+sender rather than overflowing the guard page, with a two-node rig that had
+never existed (#147). A zero-count `NP_PREAD` answers `0`, the POSIX shape,
+instead of `FS_ERROR` (#148).
+
+**The remote mount goes asynchronous, steps 0 and 1** (#149). A path verb's
+`NETOP_RMOUNT` no longer blocks `netd`'s whole event loop: it is parked on a
+remote connection (the `/net/tcp` engine made generic over its buffer sizes),
+the loop drives it, and the reply is delivered later to the caller's task
+identity via the new `MSG_SEND` arm. The re-entrant drain still refuses (that
+is step 3's to remove); the held fid session is still synchronous (step 2). The
+plan, its four decisions and the three overflows the arc hit are in
+`docs/roadmap/roadmap-async-rmount.md`; `make test-async-rmount` drives it.
+
 ## v0.19.0: rights flow one step down, tasks have identities, C reaches a remote mount (2026-09-07)
 
 Released as **v0.19.0**. Thirty PRs since v0.18.1, half of them kernel and shell
