@@ -84,7 +84,10 @@ pub const NP_RM: u64 = NP_BASE + 8;
 pub const NP_MV: u64 = NP_BASE + 9;
 /// Read a windowed slice of a file *inline* (the reply carries the bytes): the
 /// chunked-read primitive an exec loader loops over. Params: `a0` = path length,
-/// `a1` = offset, `a2` = want. Status = bytes copied (0 at/past EOF).
+/// `a1` = offset, `a2` = want. Status = bytes copied (0 at/past EOF). A `want`
+/// of `0` is refused by `fsd` (`FS_ERROR`) while the host peer answers `0`,
+/// unlike [`NP_PREAD`] since 2026-09-21: an open ledger item in
+/// docs/roadmap/roadmap-fid-verbs.md, recorded rather than settled.
 pub const NP_READ_AT: u64 = NP_BASE + 10;
 /// Create/overwrite a file with data carried *inline* in the request (bounded
 /// by `FS_DATA_MAX`, 512) rather than by grant/safecopy - the small-write path.

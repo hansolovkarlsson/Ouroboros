@@ -244,9 +244,11 @@ same-length compare that passes on a short read is the failure mode, and a
 one-chunk file cannot show it); then EOF answering 0 and the session still in
 phase. The one-shot refusal check sends `NP_PREAD` beside `NP_OPEN`. About
 twenty seconds after boot. Against `main` before step 5 it fails at the first
-open; against step 5's export the four step-6 checks fail with
-`FS_ERR_NO_SUCH_VERB` and the rest pass (10 of 14, measured, before the
-zero-count check existed).
+open; against step 5's export every step-6 check fails with
+`FS_ERR_NO_SUCH_VERB` (each is an `NP_PREAD` on a session, which that export
+refuses) and the rest pass: 10 of 14, measured on 2026-09-12 when there were
+four such checks; the zero-count check makes it five, so 10 of 15 today, not
+re-measured.
 
 ```sh
 scripts/run-guest.sh -- python3 scripts/np9p_client.py localhost 5640 fid-gate

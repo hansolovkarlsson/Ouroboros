@@ -975,6 +975,16 @@ the run itself; that overflow is latent, closed only by async `NETOP_RMOUNT`
   tree), and the host peer's self-test gained a table row and a round-trip
   value check (shown failing by a mutation that refuses the count). The bare
   `FS_ERROR` item above stays open; this settled the count, not the sentinel.
+- **The path read verbs' floor on a count of 0** (review of #148): the same
+  divergence one verb over. `NP_READ_AT` with `want` 0 is refused `FS_ERROR`
+  by `fsd`'s `want_len` and answered 0 by the host peer, and `ninep-abi`'s doc
+  promises "0 at/past EOF" with no floor; `NP_READDIR` and `NP_READ_FILE` share
+  the helper. Left standing on purpose when #148 settled `NP_PREAD`: it is a
+  second behaviour change, no client sends it (ulib's readers size their
+  window from the buffer they hold), and `NP_READ_FILE`'s status is the file
+  size rather than the count, so a 0 there would be a size query and wants
+  deciding, not inheriting. Settle all three at once, with `path-gate` checks
+  the way the fid gate got one, or record in each doc that 0 is refused.
 - **`dial_file_op` touches `last_activity` before it looks at the verb**
   (review of the step-6 PR): a refused op on `/net/tcp/N/data` still refreshes
   the slot's idle timer, so a client retrying a refusal in a loop keeps a dial
