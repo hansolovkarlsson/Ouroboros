@@ -117,4 +117,22 @@ else
     fail=1
 fi
 stop_peers
+
+# 4. connection refused. A mount to the AUTHORIZED host on a DEAD port: the
+# request parks, the host RSTs the SYN, and the parked caller must be answered
+# NO_FS with the prompt coming back - not left blocked in its MSG_CALL. This
+# exercises the park -> dead-slot -> NO_FS reply-to-identity path end to end.
+# It does NOT reproduce the pump-vs-service reap race the review of #149 found
+# (that needs a peer answering ARP but DROPPING the SYN, so Connecting exhausts
+# inside pump_dials; SLIRP RSTs a dead port instead, and an in-subnet down IP
+# fails ARP synchronously). That race is fixed by the `parked.is_none()` guard
+# in pump_dials (a parked slot is service_remotes's to free), correct by
+# construction; a SYN-drop control needs a live node on an L2 link, noted in
+# docs/roadmap/roadmap-async-rmount.md. 10.0.2.2 is authorized (the dev host
+# peer), so the request reaches the park rather than failing auth first.
+boot '# @@mount -r 10.0.2.2:5599 /mnt/d' '# @@cat /mnt/d/X' '# @@uptime' '# @@'
+grade "a refused connection fails NO_FS, the caller is not hung" "$out" 'cat /mnt/d/X' \
+    'no filesystem mounted this boot' 'out of room'
+printf '%s\n' "$out" | tr -d '\r' | after 'uptime' | grep -q 'ticks since boot' || { echo "FAIL the shell never got its prompt back: the parked caller hung"; fail=1; }
+
 exit $fail

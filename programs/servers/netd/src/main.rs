@@ -655,7 +655,18 @@ fn drain_client_messages(packed_mac: u64, buf: &mut [u8], conns: &mut [Option<Tc
             // starts with that small value. A request goes to the normal client
             // dispatch (which replies); everything else is captured output.
             let is_request = len >= 8 && read_u64(buf, 0) == syscall_abi::NETOP_RMOUNT;
-            if is_request {
+            if is_request && reentrant {
+                // A CHAINED cpu (this node is running its own `cpu`, so we are
+                // inside `tcp_run`, AND hosting a child that now makes a Phase 4b
+                // `/host` request): the child's mount would park on a slot
+                // `tcp_run` does not drive (only the serve loop drives `remotes`),
+                // so it would sit undriven and hang the child. Refuse
+                // `FS_ERR_BUSY`, as a bystander is refused below. The NORMAL
+                // Phase 4b child arrives at the TOP-LEVEL drain (`reentrant`
+                // false: the hosting node is not itself in a run), parks, and the
+                // serve loop drives it (review of #149).
+                reply(sender, &syscall_abi::FS_ERR_BUSY.to_le_bytes());
+            } else if is_request {
                 handle_client(packed_mac, sender, buf, len, conns, dials, remotes, sessions, auth, pending.as_deref_mut());
             } else {
                 cpu_child_msg(conns[ci].as_mut().unwrap(), sender as u8, &buf[..len]);
@@ -685,9 +696,12 @@ fn drain_client_messages(packed_mac: u64, buf: &mut [u8], conns: &mut [Option<Tc
             // would send RUN_MORE is blocked on the run, the health ping is
             // unidentified), a retry is cheap, and the sender is the one fact
             // safe to read here without entering a handler to find out. The cpu
-            // CHILD (the `Some(ci)` arm above) is exempt: its Phase 4b remote-fs
-            // IS the run, not a bystander - still deep from here, still latent,
-            // see the ledger. The real fix is async NETOP_RMOUNT; a refusal is
+            // CHILD (the `Some(ci)` arm above) is refused the same way when this
+            // drain is re-entrant (a chained cpu): its Phase 4b remote-fs would
+            // park on a slot `tcp_run` does not drive. The NORMAL Phase 4b child,
+            // hosted on a node not itself running a cpu, arrives at the top-level
+            // drain and parks there, driven by the serve loop. The real fix for
+            // the re-entrant path is step 3 (remove this drain); a refusal is
             // honest, not service.
             reply(sender, &syscall_abi::FS_ERR_BUSY.to_le_bytes());
         } else {
@@ -768,7 +782,9 @@ fn handle_client(packed_mac: u64, sender: u64, buf: &[u8], len: usize, conns: &m
             // when its frame completes); a fid verb still answers here, from
             // the held session. A re-entrant path-verb mount (arriving while
             // we are inside a `cpu` run) never reaches this arm:
-            // `drain_client_messages` parks it without this frame.
+            // `drain_client_messages` refuses it with `FS_ERR_BUSY` (a bystander,
+            // or a chained-cpu child) before this frame. So a mount reaching
+            // here is top-level, and its park is driven by the serve loop.
             let mut r = [0u8; syscall_abi::MSG_MAX_LEN as usize];
             if let Some(rlen) = handle_rmount(packed_mac, buf, len, sessions, remotes, &mut r, auth) {
                 reply(sender, &r[..rlen]);
@@ -4519,8 +4535,21 @@ fn pump_dials<const S: usize, const R: usize>(mac: &[u8; 6], dials: &mut [Option
             // (so the client can still read the last bytes), or after a long idle -
             // but never idle-reap a Listening slot (a listener has no traffic of
             // its own yet must persist until an explicit close).
-            (c.state == DialState::Closed && c.rlen == 0)
-                || (c.state != DialState::Listening && t.saturating_sub(c.last_activity) > DIAL_IDLE_TICKS)
+            // A slot with a request still parked belongs to `service_remotes`,
+            // not the pump: it must answer the blocked caller (with the frame,
+            // or NO_FS on a dead/timed-out peer) BEFORE the slot is freed. The
+            // pump reaping a dead parked slot here - which it did until
+            // 2026-09-21, because REMOTE_DEADLINE_TICKS sits ABOVE the SYN/data
+            // retransmit budget, so `Connecting` reached its retry cap and was
+            // set Closed + reaped in ONE pump pass, destroying the `Parked`
+            // record before `service_remotes` saw `Closed` - left the caller
+            // blocked in its MSG_CALL forever (review of #149). `service_remotes`
+            // sees the Closed state and replies NO_FS, clears `parked`, and the
+            // next pump pass reaps the now-unparked slot. Dials never set
+            // `parked`, so this changes nothing for them.
+            c.parked.is_none()
+                && ((c.state == DialState::Closed && c.rlen == 0)
+                    || (c.state != DialState::Listening && t.saturating_sub(c.last_activity) > DIAL_IDLE_TICKS))
         };
         if reap {
             dials[i] = None;

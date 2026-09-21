@@ -197,3 +197,24 @@ Kept as the steps land, newest first.
   latent overflow closes at step 3 (remove the drain), not at step 1. Step 1's
   win is real and top-level: a mount no longer blocks the loop while its reply
   is in flight, which the concurrent check proves.
+- **The review of #149 found a real hang and a chained-cpu stall, both fixed.**
+  (1) A parked mount to an UNREACHABLE peer was reaped by `pump_dials` the
+  moment its SYN retries exhausted, in the same pass that set it Closed, so the
+  `Parked` record was destroyed before `service_remotes` could send `NO_FS` -
+  the caller hung in its `MSG_CALL` forever. `REMOTE_DEADLINE_TICKS` above the
+  retransmit budget is exactly what let the reap win. Fixed by guarding the
+  reap with `parked.is_none()`, so a parked slot is `service_remotes`'s to free.
+  The async rig gained a fourth check (an unreachable peer answers `NO_FS` and
+  the prompt returns); the `--delay` peer only ever exercised the slow-but-alive
+  path. (2) A cpu child's Phase 4b `/host` request reaching the re-entrant drain
+  in a CHAINED cpu (a node both running a cpu and hosting a child) took the
+  child arm, bypassed the by-sender refusal, and parked on a slot `tcp_run` does
+  not drive - undriven, hanging the child. Now refused `FS_ERR_BUSY` when
+  re-entrant, like a bystander; the normal Phase 4b child (top-level, on a node
+  not itself in a run) still parks and is driven. Two comments that claimed the
+  re-entrant drain parks a path verb were corrected: it refuses. (3) A noted
+  low-probability src-port collision between a dial and a remote sharing a
+  4-tuple is pre-existing (both draw from `next_src_port`) and, with `now_us()`
+  microsecond resolution between user-driven opens, not reachable in practice;
+  no static counter is available (netd's `.bss` is asserted empty), so it is
+  accepted rather than fixed here.
