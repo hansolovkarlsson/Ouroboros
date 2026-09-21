@@ -157,7 +157,15 @@ run with no `beat_if_new_tick` in the way.
 Kept as the steps land, newest first.
 
 - **Steps 0 and 1 landed 2026-09-21** (the kernel arm and the parked one-shot
-  path). What they found: **the stack cost is where the compiler puts it, not
+  path). Measured: `make test-async-rmount` 3 of 3 (served, identity,
+  concurrent), and both controls fail as they must: on a kernel that resolves
+  the identity to its SLOT the second `cat` prints the first file's bytes
+  (`line 000: hello from the host`), and on `main`'s image the silent peer's
+  `NO_FS` comes BEFORE the live read (the loop was blocked for the wait). The
+  identity check needed its window measured too: at a 1.5 s hold the reply
+  landed before the second caller existed and the check passed on the
+  slot-resolving kernel; the hold is 3.5 s and the deadline 5 s now. What
+  they found: **the stack cost is where the compiler puts it, not
   where the code reads.** The first build overflowed netd's guard page on the
   very first parked request, at the top level, in `handle_rmount`'s own
   prologue: with `oneshot_rmount` gone, `session_rmount` had exactly one
