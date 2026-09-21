@@ -675,6 +675,17 @@ pub(crate) fn revert_input_owner_if(dying: usize) {
     INPUT_OWNER.store(target, Ordering::Relaxed);
 }
 
+/// Whether any live task is blocked in [`WaitReason::TaskExit`] on slot
+/// `target` - i.e. someone ran `target` as a foreground command and is sitting
+/// in the `WAIT`. Used by [`interrupt_key_check`] to decide terminate-vs-detach
+/// alongside [`FOREGROUND_COMMAND`]; the scan is `NUM_TASKS` wide, which is
+/// small, and runs only on a Ctrl+C.
+fn task_waited_on(target: usize) -> bool {
+    STATES.iter().any(|st| {
+        matches!(unsafe { *st.get() }, TaskState::Blocked(WaitReason::TaskExit(t)) if t == target)
+    })
+}
+
 /// The Ctrl+C escape hatch. When `byte` is Ctrl+C (`0x03`, ETX) and a task
 /// other than the boot shell owns the keyboard, it does one of two things by
 /// whether the owner is a foreground command (its [`FOREGROUND_COMMAND`] flag,
@@ -716,17 +727,6 @@ pub(crate) fn revert_input_owner_if(dying: usize) {
 /// the byte is still consumed here either way (returns `true`), it is the
 /// effect that differs. Task 0 (the boot shell) is never an `owner` here (the
 /// guard below), so its Ctrl+C stays an ordinary ignored byte.
-/// Whether any live task is blocked in [`WaitReason::TaskExit`] on slot
-/// `target` - i.e. someone ran `target` as a foreground command and is sitting
-/// in the `WAIT`. Used by [`interrupt_key_check`] to decide terminate-vs-detach
-/// alongside [`FOREGROUND_COMMAND`]; the scan is `NUM_TASKS` wide, which is
-/// small, and runs only on a Ctrl+C.
-fn task_waited_on(target: usize) -> bool {
-    STATES.iter().any(|st| {
-        matches!(unsafe { *st.get() }, TaskState::Blocked(WaitReason::TaskExit(t)) if t == target)
-    })
-}
-
 pub(crate) fn interrupt_key_check(byte: u8) -> bool {
     const ETX: u8 = 0x03; // Ctrl+C
     let owner = input_owner();
