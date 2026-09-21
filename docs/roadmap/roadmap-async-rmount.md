@@ -119,19 +119,20 @@ different file from the same shell: the second `cat` prints its own file. On
 the tree with the arm sending to the slot instead, it prints the first file's
 bytes, which is the misdelivery the arm exists to refuse.
 
-**Step 1: the one-shot path.** `oneshot_rmount` and its use of `tcp_get` are
-replaced by a parked remote slot. The re-entrant drain routes a path-verb
-`NETOP_RMOUNT` (an identified bystander's, or the cpu child's Phase 4b read) to
-the shallow park path and still refuses every other identified request by
-sender. Checks: the host-peer client rig (`run-image-9p-client` driven: `mount`,
-`ls`, `cat` against `np9p_server.py`) reads the same bytes; the two-node
-`test-reentrant-session.sh` recipe `cpu <A> ping <nobody> | cat /mnt/a/man/grep`
-now *prints the file* where it was refused, which is the check that fails on
-the tree before this step, while the `resolve` recipe is still refused; the
-Phase 4b recipe `cpu <A> cat /host/x` still round-trips; and the fid gate and
-path gate are unchanged (the session path is untouched). Control: a parked
-request to a peer that never answers fails `NO_FS` within its deadline and the
-loop keeps serving (the export answers a host-side `ls` during the wait).
+**Step 1: the top-level one-shot path.** `oneshot_rmount` and its use of
+`tcp_get` are replaced by a parked remote slot, for a path verb arriving at the
+TOP-LEVEL drain. The re-entrant drain is left exactly as #147 left it: it
+refuses an identified client by sender. Parking there was tried and reverted,
+because the park still signs the request (a deep Ed25519 frame build,
+`frame_signed`), and the run path that reaches the re-entrant drain is already
+at its guard page. So the re-entrant drain, and the cpu child's own Phase 4b
+`/host` read that shares its depth, stay on the synchronous path until step 3
+removes the drain outright; the concurrency win of step 1 is at the top level,
+where a mount no longer blocks the loop. Checks: the driven single-VM rig
+`scripts/test-async-rmount.sh` (served, identity, concurrent, each with a
+measured control); the fid gate and path gate unchanged (the session path is
+untouched); the two-node `test-reentrant-session.sh` still refuses `cat` and
+`resolve` mid-run with no fault, exactly as before.
 
 **Step 2: the session path.** `ClientSession` becomes a remote slot held
 between verbs. Checks: the two-VM ext2 rig's `cbig`/`cwrite` witnesses, the fid
@@ -183,3 +184,16 @@ Kept as the steps land, newest first.
   builds the image) and passed on the OLD netd; the rig's own freshness check
   is what caught the real fault. A passing run of an image you did not just
   build is a claim about the previous build.
+- **The re-entrant park was over-reach, reverted the same day.** The first cut
+  of step 1 also parked a path verb arriving at the RE-ENTRANT drain (inside a
+  `cpu` run), to close the latent overflow #147 named. The single-VM rig passed
+  (its mounts are top-level), but the two-node rig faulted netd at `tcp_run`'s
+  own prologue on the run path: the park still calls `frame_signed` (a deep
+  Ed25519 build), and servicing the remote table from inside `tcp_run` added
+  ~2.8 KB, both on a frame already at the guard page. Reverted to #147's
+  by-sender refusal for the re-entrant drain. The finding is the plan's own
+  premise, now measured rather than argued: **the signature is the deep cost,
+  and it is exactly what makes the re-entrant drain unaffordable** - so the
+  latent overflow closes at step 3 (remove the drain), not at step 1. Step 1's
+  win is real and top-level: a mount no longer blocks the loop while its reply
+  is in flight, which the concurrent check proves.

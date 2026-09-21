@@ -856,18 +856,16 @@ returns before the client asks, and the request lands at the top level instead
 (measured: it just succeeds). `netd` now refuses an IDENTIFIED client's request
 from that drain, before `handle_client`'s frame is built, with `FS_ERR_BUSY` -
 "out of room for this right now"; only the supervisor's identity-less health
-ping is serviced from there. The refusal is BY SENDER, not by op, so a name
-lookup (`resolve`, a deep handler needing no prior mount) is refused - the
-first cut refused only `NETOP_RMOUNT` and `resolve` still faulted netd. **Since
-2026-09-21 a path verb's remote mount is the exception, served**: it is parked
-from that drain without `handle_client`'s frame (step 1 of
-`docs/roadmap/roadmap-async-rmount.md`), for a bystander and for the cpu
-child's own Phase 4b `/host` read alike, which closes the "latent" overflow the
-previous paragraph of this section used to name. `netd` prints `remote mount
-parked inside a run` when it does, and the `cat` recipe is graded on that line
-AND the file's text, because a served read looks the same whether it arrived
-mid-run or after; a served read WITHOUT the line is retried as "condition not
-created", as the refusal used to be.
+ping is serviced from there, and the cpu child's own remote-fs (Phase 4b) keeps
+its path. The refusal is BY SENDER, not by op, so a remote mount (`cat`) and a
+name lookup (`resolve`, a different, deeper handler needing no prior mount) are
+both refused - the first cut refused only `NETOP_RMOUNT` and `resolve` still
+faulted netd. The async remote mount (`docs/roadmap/roadmap-async-rmount.md`)
+makes the TOP-LEVEL remote-mount path async (step 1), which is what section 4's
+parked-mount checks exercise; the re-entrant drain here is unchanged, because
+parking a mount still signs it (a deep Ed25519 frame build) and the run path is
+at the edge. Step 3 of that plan removes this drain, and only then is a
+re-entrant remote mount served rather than refused.
 
 ```sh
 make test-reentrant-session   # builds both ext2 node images, then the two-node boots

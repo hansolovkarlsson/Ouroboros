@@ -645,36 +645,7 @@ fn drain_client_messages(packed_mac: u64, buf: &mut [u8], conns: &mut [Option<Tc
         // IS the re-entrant condition, so it names it rather than a second flag
         // that could disagree.
         let reentrant = pending.is_none();
-        // A path verb's remote mount is SHALLOW since it parks (Decision 1 of
-        // docs/roadmap/roadmap-async-rmount.md): `handle_rmount` frames the
-        // request into a remote slot and returns, and the reply is delivered
-        // from the event loop. So it is served from the re-entrant drain too,
-        // for the cpu child (its Phase 4b `/host` read, which used to take the
-        // deep synchronous path from here - the latent overflow the ledger
-        // named) and for an identified bystander alike, WITHOUT entering
-        // `handle_client`, whose frame is what this drain cannot afford. A fid
-        // verb still takes the held session's synchronous path (step 2 of the
-        // plan), so it stays on the arms below.
-        let shallow_rmount = reentrant
-            && sender_id != syscall_abi::GET_ID_ERR
-            && len >= syscall_abi::NETOP_RMOUNT_MSG + 8
-            && read_u64(buf, 0) == syscall_abi::NETOP_RMOUNT
-            && shape(read_u64(buf, syscall_abi::NETOP_RMOUNT_MSG)) == Shape::Path;
-        if shallow_rmount {
-            let mut r = [0u8; 16];
-            match handle_rmount(packed_mac, buf, len, sessions, remotes, &mut r, auth) {
-                Some(n) => reply(sender, &r[..n]),
-                // Parked from inside a run: said once on the console, because
-                // it is the one fact a rig cannot otherwise observe. A served
-                // request looks the same whether it arrived mid-run or after
-                // the run returned, and the re-entrant rig grades service, so
-                // without this line "the condition was created" would be a
-                // guess about timing. Rare by construction (a remote mount
-                // arriving during a `cpu` run), one line each, never at the
-                // top level.
-                None => log(b"netd: remote mount parked inside a run\r\n"),
-            }
-        } else if let Some(ci) = child_conn {
+        if let Some(ci) = child_conn {
             // A cpu child talks to us for TWO things (cluster Phase 4a/4b): its
             // stdout (a raw MSG_SEND we capture) and - once its namespace imports
             // the caller's (4b) - its remote-fs access (a NETOP_RMOUNT MSG_CALL we
@@ -1449,8 +1420,13 @@ fn tcp_run(packed_mac: u64, mac: &[u8; 6], dst_mac: &[u8; 6], target: &[u8; 4], 
         // out, and the parked remote mounts (a re-entrant one parked from this
         // very loop's drain is answered from here, or it never would be).
         pump_conns(mac, conns);
-        service_remotes(remotes);
-        pump_dials(mac, remotes);
+        // A parked remote mount is NOT serviced from here: it cannot be created
+        // from this re-entrant drain (which refuses an identified client by
+        // sender, as #147), and a top-level parked mount is serviced by the
+        // serve loop the moment this run returns. Servicing it here cost ~2.8 KB
+        // on an already-deep frame - the tcp_run-entry overflow the two-node rig
+        // measured 2026-09-21. `remotes` is threaded only so `on_frame` above
+        // routes a reply frame to its slot rather than mis-feeding the export.
         // If an export callback was served this pass, `deadline` moved.
         let _ = before_deadline;
         beat = beat_if_new_tick(now(), beat);

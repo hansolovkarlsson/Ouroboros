@@ -111,19 +111,17 @@ check() { # name, marker, want-regex, condition-not-created-regex [, also-want-r
     done
 }
 
-# The remote-mount path (NETOP_RMOUNT), the originally-reported case. SERVED
-# since the async remote mount (docs/roadmap/roadmap-async-rmount.md step 1):
-# a path verb is parked from the re-entrant drain without the deep frame, and
-# netd says so on the console, which is the witness that the request really
-# arrived mid-run (a served read looks the same either way). Graded on BOTH
-# lines: the file's text and the park line. On the tree before the park this
-# recipe answered "out of room", which the forbid pattern catches.
-check "one-shot rmount SERVED inside a run" \
+# The remote-mount path (NETOP_RMOUNT), the originally-reported case. Still
+# REFUSED from the re-entrant drain (#147): the async remote mount
+# (docs/roadmap/roadmap-async-rmount.md) makes the TOP-LEVEL path verb async
+# (step 1), but the re-entrant drain keeps refusing an identified client by
+# sender, because parking there would still sign the request (deep), and the
+# run path is at the edge. Step 3 removes this drain, and only then is this
+# recipe served.
+check "one-shot rmount refused inside a run" \
     'cpu 10.0.2.10:564 ping 10.0.2.99 | cat /mnt/a/man/grep' \
-    'netd: remote mount parked inside a run' \
-    'grep - keep lines' \
-    'grep - keep lines' \
-    'out of room for this right now'
+    'cat: .*out of room for this right now' \
+    'grep - keep lines'
 # A different, deeper handler that needs no mount (NETOP_RESOLVE): the case the
 # first, RMOUNT-only cut missed.
 check "resolve refused inside a run" \
