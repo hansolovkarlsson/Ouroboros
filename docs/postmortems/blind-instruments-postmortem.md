@@ -448,6 +448,34 @@ And one more, smaller, from the same day: the `SyncCell` ledger entry quoted
 a grep and a number, and the grep did not produce the number. The count is
 stated once now, with the anchored command that reproduces it.
 
+## A rig that would have failed for the wrong reason (2026-09-20, later)
+
+The afternoon's new instrument was `scripts/test-reentrant-session.sh`, a
+two-node rig that drives a remote request into `netd` while `netd` is inside a
+`cpu` run and grades whether the request is refused rather than faulting the
+guard page. Its `check()` helper took a fourth parameter, the regex that says
+"the client SUCCEEDED, so the run returned before it asked and the re-entrant
+condition was never created", a case that should be retried, since it proves
+nothing, rather than failed. The parameter was assigned and never read. A run that
+never created the condition would have burned its retries and then reported a
+hard failure, the instrument turning red for a reason that has nothing to do
+with the kernel. The condition happened to be created reliably (the unreachable
+ping's ARP wait holds the run open), so it never misled in practice, but that
+is luck, not a working check. The third review found the dead parameter; it is
+wired into both the retry note and the final message now, so a persistent
+"client kept succeeding" points at the ping timing and a persistent silence
+points at the shared socket link, and neither is graded as a fault.
+
+The same rig carries a witness it deliberately does not grade. The session-path
+client `cbig` reaches `netd` only intermittently: a pre-existing race delegates
+a spawned task's `netd` send right just after spawn, so its first request is
+sometimes refused by capability before any remote request, unrelated to what
+the rig tests. Grading `cbig` would have made the rig fail on that race, the
+blind-instrument inverse: a red that is not the defect. The rig grades `cat`
+and `resolve`, which reach `netd` deterministically, and reports the `cbig`
+race rather than failing on it. A check that can turn red for a cause outside
+its subject is as broken as one that cannot turn red at all.
+
 The line is the one this retrospective always ends on. An instrument that
 cannot fail for the reason it was built for, or cannot show why it failed, is
 not measuring; and the first thing to mutate is the instrument.

@@ -689,6 +689,44 @@ the number, or turn the claim into a check. Two of the four became checks
 (`make test-keyboard-chain`, the slot 5 halt); one became a measurement; one
 became a recipe run as written.
 
+## A claim as analysis, and a fix scoped to the symptom (2026-09-20, later)
+
+The same day's afternoon took three items off the standup, and the third, the
+`tcp_run` re-entrant nesting, produced two more instances of the shape, one in
+a document and one in code.
+
+**"The one-shot path is latent."** The fid-verbs ledger predicted that a remote
+mount reaching `netd` mid-`cpu`-run would fault the guard page, and said the
+one-shot path was one call level shallower and so only *latent*. Written as
+analysis, never run: a rig built this session held a run open with an
+unreachable ping and drove `cat` (the one-shot path) into it, and it faulted as
+readily as the session path. The word "latent" was a conclusion about a case
+nobody had measured, in exactly the family this retrospective collects, except
+that the falsifying evidence was a test that had not been built rather than an
+edit in another file.
+
+**A fix that made the reproducible fault stop, not the cause.** The deeper
+instance was in the fix, not a comment. The overflow is the depth of *any*
+handler reached from the re-entrant drain; the first fault I reproduced
+happened to carry `NETOP_RMOUNT`, so I refused `NETOP_RMOUNT` there, watched the
+`cat` and `cbig` recipes pass, and opened the pull request believing it done.
+The review's finding was that a bystander `resolve` needs no mount and runs a
+DNS lookup just as deep from the same drain; I drove it and it faulted. The
+right refusal is by *sender*, not by op, servicing only the supervisor's
+identity-less health ping and refusing every identified client. The lesson is
+narrower than "true when written" and worth stating on its own: making the
+fault you can reproduce stop is not the same as making its cause stop, and the
+op the first fault carried was a property of the case I reproduced, not of the
+bug. The review that named it was the same discipline as the claim-reading
+rounds above, applied to a fix rather than a sentence.
+
+There was also a comment of the older kind, caught in the same review: the
+`handle_client` remote-mount arm said a re-entrant mount "never reaches here",
+which was true for a bystander client and false for the `cpu` child's own
+Phase 4b remote-fs, which reaches it at the same deep frame. Corrected to name
+the child's path as still-deep and latent rather than asserting safety it does
+not have.
+
 ## What actually worked
 
 Three things, none of them "be more careful".

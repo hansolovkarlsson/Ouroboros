@@ -44,4 +44,4 @@ what is now this directory.
 | [2026-09-12](2026-09-12.md) | 5 | fid-verbs step 5, the export half, built and then hardened by two reviews · the `fsd`-side change, one mechanism for two leaks · step 6, `NP_PREAD`, and the fold that came with it · the client half of step 5, the held client session (Decision 4) · step 7, NP_PWRITE, and the fid-verbs arc complete |
 | [2026-09-13](2026-09-13.md) | 1 | one constant, and the four reviews that kept finding its copy one hop further out |
 | [2026-09-19](2026-09-19.md) | 1 | a newtype, twenty reviews, and the two bugs they turned up |
-| [2026-09-20](2026-09-20.md) | 1 | the keyboard chain, and the argument that had an exception |
+| [2026-09-20](2026-09-20.md) | 2 | the keyboard chain; then three standup picks, and a fix scoped to the symptom |
