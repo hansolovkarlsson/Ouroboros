@@ -1849,7 +1849,7 @@ would otherwise silently shrink into looking like nothing was ever found.
     Wants a `const` assert on the tail against `SLOT_ALIGN` and a runtime
     size check mapped to the existing too-large spawn error.
   - ~~**Twelve prose copies of the stack size, disagreeing with each other and
-    with the constant**~~ **Fixed 2026-09-20** (PR_STACK): the nine that
+    with the constant**~~ **Fixed 2026-09-20** (#146): the nine that
     stood after #135 now state the relationship (the loader's `STACK_PAGES`,
     reported by `heap_info`) and carry no value, except `tree`'s depth cap,
     which keeps the 32 KB it was derived from as the one stated number and
@@ -2119,7 +2119,7 @@ would otherwise silently shrink into looking like nothing was ever found.
     calls `FG`. Refusing `FG` from a non-owner would make the chain
     trustworthy by construction. Found by the second review of #140.
   - ~~**The stack top is hand-derived as `base + size` at seven sites across
-    three files**~~ **Fixed 2026-09-20** (PR_STACK). It was spelled inside
+    three files**~~ **Fixed 2026-09-20** (#146). It was spelled inside
     an identical `Context` literal in `tasks.rs` five times, `supervisor.rs`
     and `syscall.rs`, so anything ever placed above the stack had to be
     found at all seven with the compiler flagging none. Now
