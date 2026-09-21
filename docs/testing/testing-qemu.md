@@ -247,8 +247,8 @@ twenty seconds after boot. Against `main` before step 5 it fails at the first
 open; against step 5's export every step-6 check fails with
 `FS_ERR_NO_SUCH_VERB` (each is an `NP_PREAD` on a session, which that export
 refuses) and the rest pass: 10 of 14, measured on 2026-09-12 when there were
-four such checks; the zero-count check makes it five, so 10 of 15 today, not
-re-measured.
+four such checks. The zero-count check is a fifth, so expect one more failure
+there; that tree has not been re-measured with it.
 
 ```sh
 scripts/run-guest.sh -- python3 scripts/np9p_client.py localhost 5640 fid-gate

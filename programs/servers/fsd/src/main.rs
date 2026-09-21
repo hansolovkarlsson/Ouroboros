@@ -922,23 +922,12 @@ fn handle_fid_op(
     };
     match verb {
         ninep_abi::NP_PREAD => {
-            // Not `want_len`: a count of 0 is a legal read here that answers
-            // 0, the POSIX shape (`read(fd, buf, 0)` returns 0, and may still
-            // detect errors). It still goes through `read_at` with an empty
-            // buffer, so the fid gate above and the filesystem's own checks
-            // (not a file, gone) answer as a real read would: the path lookup
-            // runs as for any read, and only the data phase copies nothing
-            // (every `read_at` arm returns 0 for an empty buffer before its
-            // block walk). Until 2026-09-21 this arm used `want_len`, which
-            // rejects 0 with `FS_ERROR`, so the same frame the host peer
-            // answered 0 was refused here: the divergence
-            // docs/roadmap/roadmap-fid-verbs.md's ledger recorded. The path
-            // verbs keep `want_len`'s floor; whether their 0 should answer the
-            // same is an open ledger item there, not decided by this arm.
-            let want = p[2] as usize;
-            if want > DATA_MAX {
+            // `capped`, not `want_len`: a count of 0 is a legal read that
+            // answers 0, the POSIX shape. It still goes through `read_at` so
+            // the errors a real read would meet (not a file, gone) are met.
+            let Some(want) = capped(p[2]) else {
                 return status_reply(reply, syscall_abi::FS_ERROR);
-            }
+            };
             let (status_slot, result) = reply[..REPLY_PAYLOAD + want].split_at_mut(REPLY_PAYLOAD);
             match fs.read_at(path, p[1], result) {
                 Ok(copied) => {
@@ -1027,14 +1016,22 @@ fn path_from(payload: &[u8], start: usize, len: u64) -> Option<&str> {
     core::str::from_utf8(&payload[start..start + len]).ok()
 }
 
-/// A validated result-window size: non-zero, capped at the per-op
-/// payload max (which also always fits the reply buffer).
-fn want_len(want: u64) -> Option<usize> {
+/// A result-window size capped at the per-op payload max (which also always
+/// fits the reply buffer). The one bound every read verb shares; whether a
+/// verb also refuses 0 is that verb's choice, made by calling this or
+/// [`want_len`].
+fn capped(want: u64) -> Option<usize> {
     let want = want as usize;
-    if want == 0 || want > DATA_MAX {
+    if want > DATA_MAX {
         return None;
     }
     Some(want)
+}
+
+/// [`capped`] plus a floor: a validated result-window size that is non-zero.
+/// The path read verbs use it; `NP_PREAD` does not (a zero count answers 0).
+fn want_len(want: u64) -> Option<usize> {
+    capped(want).filter(|&w| w != 0)
 }
 
 // --- Permission enforcement (users/permissions arc, step 3) -----------------
