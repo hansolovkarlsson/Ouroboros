@@ -85,8 +85,9 @@ top and growing down - so a stack overflow lands in the guard page and
 takes a clean fault instead of corrupting the code below (see "Stack guard
 page" in `CLAUDE.md`; the guard has repeatedly caught real overflows, each
 growing the stack - the shell's `exec` path forced 8KB->16KB, and the
-network server forced 16KB->24KB->32KB as it gained TCP buffers and then
-concurrent connections).
+network server forced 16KB->24KB->32KB->40KB as it gained TCP buffers,
+then concurrent connections, then the remote-mount session path; the size
+today is the loader's `STACK_PAGES`, and `heap_info` reports it at runtime).
 Below the guard is a 256KB **raw heap area** the program reaches via the
 `heap_info` syscall (a `&mut [u8]`, not a `GlobalAlloc`-backed heap - see
 "Binary format" for why `alloc`'s `Vec`/`String` can't be used here) - the
@@ -579,7 +580,8 @@ Worth knowing before building further on this:
   a real `GlobalAlloc` heap is blocked: prebuilt lib`alloc` has
   `R_AARCH64_ABS64` relocations a `-pie` link rejects, and rebuilding it
   needs nightly `-Z build-std` (see "Binary format").
-- **Stack size is fixed** (4 pages, 16KB) regardless of what a program
+- **Stack size is fixed** (the loader's `STACK_PAGES`; `heap_info` reports
+  the extent) regardless of what a program
   actually needs, but there **is** a guard page now — a stack overflow
   lands in an inaccessible page below the stack and takes a clean EL0
   fault (the task is killed alone) instead of silently corrupting the code
@@ -625,7 +627,7 @@ Worth knowing before building further on this:
   size. What remains: the 512-byte inline cap still bounds directory
   *listings* (`ls`); a single non-streaming transfer is
   userland-memory-bound, but a program has a 256KB raw heap area now
-  (`heap_info`) on top of its 32KB stack, which the shell uses to capture
+  (`heap_info`) on top of its fixed stack, which the shell uses to capture
   large redirect/pipe output; and the stack now has a
   *guard page* (an overflow faults cleanly and kills just that task,
   rather than silently corrupting the program's own region - except a

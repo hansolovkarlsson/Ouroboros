@@ -471,6 +471,24 @@ pub struct LoadedProgram {
     pub entry: u64,
 }
 
+impl LoadedProgram {
+    /// The region as the `(base, size)` pair `tasks.rs` keys its tables by.
+    pub fn region(&self) -> (u64, u64) {
+        (self.base, self.size)
+    }
+
+    /// The initial stack pointer: the top of the region, the stack growing
+    /// down from there towards the guard page (`[code][heap][guard][stack]`,
+    /// see `TAIL_PAGES`). The ONE place this is derived: it used to be
+    /// spelled `base + size` inside an identical `Context` literal at seven
+    /// sites across three files, so anything ever placed above the stack
+    /// had to be found at all seven with the compiler flagging none.
+    /// `stack_area` agrees by construction (its base plus its size is this).
+    pub fn stack_top(&self) -> u64 {
+        self.base + self.size
+    }
+}
+
 /// Reads [`CONFIG_PATH`] for a program path, then reads and loads that
 /// program. Must run before `exit_boot_services` - both the filesystem
 /// read and the page allocation are boot services.

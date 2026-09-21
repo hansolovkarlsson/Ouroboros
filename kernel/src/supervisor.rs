@@ -269,13 +269,8 @@ pub fn restart(slot: usize) {
             return;
         }
     };
-    let context = Context {
-        gpr: [0; 31],
-        sp_el0: loaded.base + loaded.size,
-        elr_el1: loaded.entry,
-        spsr_el1: 0,
-    };
-    tasks::install_task(slot, context, (loaded.base, loaded.size));
+    let context = Context::for_program(&loaded);
+    tasks::install_task(slot, context, loaded.region());
     // The crash teardown cleared this slot's argv (the store `TASK_NAME`
     // reads), so re-apply the server's name - otherwise a restarted server
     // would go nameless in `ps`.

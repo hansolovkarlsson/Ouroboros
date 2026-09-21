@@ -96,7 +96,8 @@ the microkernel arc itself still leaves open):
      connection per request**, which is precisely why v0.10.0 chose a
      client-nonce MAC over challenge-response. Per-op ticket handshakes would be
      brutal, so it wants a ticket cache in `netd` — the task with no heap, a
-     32 KB stack that has hit the guard page five times, and no mutable statics
+     fixed stack (the loader's `STACK_PAGES`) that has hit the guard page five
+     times, and no mutable statics
      (the auth config already threads as `&Auth` for that reason).
    - **A single point of failure that is also the highest-value target.** Master
      down = no new sessions; master compromised = the whole cluster. Plan 9 lives
@@ -639,8 +640,9 @@ the microkernel arc itself still leaves open):
    needs a proven break-before-make sequence. Low value — a context switch
    already does far heavier work than the per-switch flush it would save.
 
-The stack **guard page** (16KB guarded stack, which immediately caught a
-real silent 8KB overflow in the shell's own `exec` path) and the 256KB raw
+The stack **guard page** (a guarded stack, which on the day it arrived caught
+a real silent overflow in the shell's own `exec` path; the size today is the
+loader's `STACK_PAGES`) and the 256KB raw
 **userland heap** (`heap_info` — a real `alloc`-backed heap stays blocked on
 stable: prebuilt lib`alloc` has `R_AARCH64_ABS64` relocations a `-pie` link
 rejects, and `-Z build-std` is nightly-only), formerly tracked here, both
@@ -1846,8 +1848,14 @@ would otherwise silently shrink into looking like nothing was ever found.
     then share one L3, so the first slot's pages resolve to the second's.
     Wants a `const` assert on the tail against `SLOT_ALIGN` and a runtime
     size check mapped to the existing too-large spawn error.
-  - **Twelve prose copies of the stack size, disagreeing with each other and
-    with the constant**: `processes.md` (8 pages/32 KB and 4 pages/16 KB in
+  - ~~**Twelve prose copies of the stack size, disagreeing with each other and
+    with the constant**~~ **Fixed 2026-09-20** (PR_STACK): the nine that
+    stood after #135 now state the relationship (the loader's `STACK_PAGES`,
+    reported by `heap_info`) and carry no value, except `tree`'s depth cap,
+    which keeps the 32 KB it was derived from as the one stated number and
+    says so. The two growth histories gained their missing last step
+    (32 KB to 40 KB, the remote-mount session path). The original finding:
+    `processes.md` (8 pages/32 KB and 4 pages/16 KB in
     the same file), `architecture.md` (32 KB, three places), `gap-analysis.md`
     (16 KB), `ROADMAP.md` (32 KB), `syscall-abi`'s `HEAP_INFO` doc and the
     shell's `main.rs` (16 KB), `tree`'s `main.rs` (~32 KB). The number is
@@ -2110,12 +2118,14 @@ would otherwise silently shrink into looking like nothing was ever found.
     true because only the owner can read a command line and nothing else
     calls `FG`. Refusing `FG` from a non-owner would make the chain
     trustworthy by construction. Found by the second review of #140.
-  - **The stack top is hand-derived as `base + size` at seven sites across
-    three files** (`tasks.rs` five times, `supervisor.rs`, `syscall.rs`),
-    inside an identical `Context` literal. Anything ever placed above the
-    stack must be found at all seven and the compiler flags none. A
-    `stack_top()` on the loaded-program type and a `Context::for_program`
-    constructor would make it one.
+  - ~~**The stack top is hand-derived as `base + size` at seven sites across
+    three files**~~ **Fixed 2026-09-20** (PR_STACK). It was spelled inside
+    an identical `Context` literal in `tasks.rs` five times, `supervisor.rs`
+    and `syscall.rs`, so anything ever placed above the stack had to be
+    found at all seven with the compiler flagging none. Now
+    `LoadedProgram::stack_top()` (with `region()` beside it) and
+    `Context::for_program` state it once, and the seven sites call them.
+    The idle task's context stays hand-built: it is not a loaded program.
 
 ## Open gaps (small, from the old parking lot)
 

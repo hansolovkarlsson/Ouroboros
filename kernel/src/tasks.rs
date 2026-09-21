@@ -2287,22 +2287,11 @@ pub unsafe fn init(
     netd: Option<&LoadedProgram>,
     accountd: Option<&LoadedProgram>,
 ) {
-    // Task 0: entry is the program's real ELF entry point, not just its
-    // load base - loader.rs computes `entry = base + e_entry` (they
-    // happen to be equal today, since programs/linker.ld keeps `_start` at
-    // file/VA offset 0, but tasks.rs shouldn't assume that itself - see
-    // LoadedProgram::entry's own doc comment). Stack at the top of the
-    // loaded region, growing down, same shape every EL0 task has used.
-    *unsafe { &mut *TASKS[TaskIndex::FIRST.index()].get() } = Context {
-        gpr: [0; 31],
-        sp_el0: program.base + program.size,
-        elr_el1: program.entry,
-        // M[3:0]=0000 selects EL0t (the only mode EL0 has), DAIF all
-        // clear (every exception class unmasked - the timer tick must be
-        // able to preempt), NZCV cleared.
-        spsr_el1: 0,
-    };
-    unsafe { *REGIONS[0].get() = (program.base, program.size) };
+    // Task 0: the shape every loaded program starts in (entry point, stack
+    // at the top of the region, everything unmasked) is `Context::for_program`,
+    // stated once there rather than per task here.
+    *unsafe { &mut *TASKS[TaskIndex::FIRST.index()].get() } = Context::for_program(program);
+    unsafe { *REGIONS[0].get() = program.region() };
     // Name the boot task so `ps` shows it (spawned tasks carry their own
     // argv[0]; these loaded ones would otherwise be nameless). Task 0 is the
     // init program named in INIT.CFG - the shell, in every configuration so
@@ -2332,13 +2321,8 @@ pub unsafe fn init(
     // Task 2: the filesystem server, exactly task 0's setup shape -
     // entry point, stack at the top of its region, everything unmasked.
     if let Some(fsd) = fsd {
-        *unsafe { &mut *TASKS[2].get() } = Context {
-            gpr: [0; 31],
-            sp_el0: fsd.base + fsd.size,
-            elr_el1: fsd.entry,
-            spsr_el1: 0,
-        };
-        unsafe { *REGIONS[2].get() = (fsd.base, fsd.size) };
+        *unsafe { &mut *TASKS[2].get() } = Context::for_program(fsd);
+        unsafe { *REGIONS[2].get() = fsd.region() };
         unsafe { *STATES[2].get() = TaskState::Runnable };
         if let Some(n) = server_name(2) {
             set_name(2, n);
@@ -2351,13 +2335,8 @@ pub unsafe fn init(
     // unmasked. Absent (no COND.BIN) leaves the slot `Unused`, and the
     // boot proceeds with the kernel's own console handling all output.
     if let Some(cond) = cond {
-        *unsafe { &mut *TASKS[3].get() } = Context {
-            gpr: [0; 31],
-            sp_el0: cond.base + cond.size,
-            elr_el1: cond.entry,
-            spsr_el1: 0,
-        };
-        unsafe { *REGIONS[3].get() = (cond.base, cond.size) };
+        *unsafe { &mut *TASKS[3].get() } = Context::for_program(cond);
+        unsafe { *REGIONS[3].get() = cond.region() };
         unsafe { *STATES[3].get() = TaskState::Runnable };
         if let Some(n) = server_name(3) {
             set_name(3, n);
@@ -2369,13 +2348,8 @@ pub unsafe fn init(
     // console servers. Absent (no NETD.BIN) leaves the slot `Unused`, and
     // the boot proceeds with no network - `ping` reports no server.
     if let Some(netd) = netd {
-        *unsafe { &mut *TASKS[4].get() } = Context {
-            gpr: [0; 31],
-            sp_el0: netd.base + netd.size,
-            elr_el1: netd.entry,
-            spsr_el1: 0,
-        };
-        unsafe { *REGIONS[4].get() = (netd.base, netd.size) };
+        *unsafe { &mut *TASKS[4].get() } = Context::for_program(netd);
+        unsafe { *REGIONS[4].get() = netd.region() };
         unsafe { *STATES[4].get() = TaskState::Runnable };
         if let Some(n) = server_name(4) {
             set_name(4, n);
@@ -2387,13 +2361,8 @@ pub unsafe fn init(
     // leaves the slot `Unused` and the system boots without self-service password
     // changes - exactly as it did before there was one.
     if let Some(accountd) = accountd {
-        *unsafe { &mut *TASKS[5].get() } = Context {
-            gpr: [0; 31],
-            sp_el0: accountd.base + accountd.size,
-            elr_el1: accountd.entry,
-            spsr_el1: 0,
-        };
-        unsafe { *REGIONS[5].get() = (accountd.base, accountd.size) };
+        *unsafe { &mut *TASKS[5].get() } = Context::for_program(accountd);
+        unsafe { *REGIONS[5].get() = accountd.region() };
         unsafe { *STATES[5].get() = TaskState::Runnable };
         if let Some(n) = server_name(5) {
             set_name(5, n);

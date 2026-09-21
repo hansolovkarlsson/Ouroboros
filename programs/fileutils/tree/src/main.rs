@@ -3,7 +3,8 @@
 //! directory), descending into each subdirectory and drawing the branch
 //! structure, then prints a `N directories, M files` summary.
 //!
-//! Constraints that shape it: spawned `/bin` programs get a ~32 KB stack, so
+//! Constraints that shape it: spawned `/bin` programs get a fixed stack (the
+//! loader's `STACK_PAGES`, reported by `heap_info`), so
 //! recursion is depth-capped ([`MAX_DEPTH`]) and each frame's buffers are
 //! kept small; there's no heap; and the framebuffer console renders ASCII
 //! 0x20-0x7E only, so the branches are the ASCII forms (`|-- `/`` `-- ``),
@@ -14,10 +15,14 @@
 #![no_std]
 #![no_main]
 
-/// Deepest level `tree` descends. The 32 KB spawn stack bounds this: each
+/// Deepest level `tree` descends. The spawn stack bounds this: each
 /// recursive frame holds a listing buffer plus the child's path and prefix
-/// (which the recursion borrows, so they stay live), ~900 bytes; 16 levels
-/// leaves comfortable headroom. A deeper tree is simply not descended.
+/// (which the recursion borrows, so they stay live), ~900 bytes. The cap
+/// was sized against a 32 KB stack, with comfortable headroom; that number
+/// is stated here, and only here, because the cap is derived from it. The
+/// stack is the loader's `STACK_PAGES`, which has only ever grown, so the
+/// headroom has too; if it ever shrinks below 32 KB, this is the cap to
+/// revisit. A deeper tree is simply not descended.
 const MAX_DEPTH: usize = 16;
 
 /// One directory's listing, as `fs_list_dir` fills it (`name\n`/`name/\n`).
