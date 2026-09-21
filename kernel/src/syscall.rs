@@ -1431,6 +1431,21 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
             if !tasks::is_occupied(target) {
                 return syscall_abi::TASK_ERR_NO_SUCH_TASK;
             }
+            // Only the keyboard's current owner may hand it off. In practice
+            // this is already so - only the owner can read the command line
+            // that types `fg`, and nothing else calls `FG` - but enforcing it
+            // makes the ownership chain (`PREVIOUS_OWNERS`) trustworthy by
+            // construction rather than by that argument: a non-owner `FG` would
+            // otherwise record the current holder, not the caller, as the
+            // target's previous owner, and the revert/detach could then route
+            // the keyboard to a task that never asked for it. Refused with
+            // `TASK_ERR_PROTECTED` (the nearest existing "this fg is not
+            // allowed" code; a dedicated code would move the packed error floor,
+            // a cross-node change out of proportion to a value no legitimate
+            // caller ever sees).
+            if tasks::current_task() != tasks::input_owner() {
+                return syscall_abi::TASK_ERR_PROTECTED;
+            }
             tasks::set_input_owner(target.index());
             0
         }

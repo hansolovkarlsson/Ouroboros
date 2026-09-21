@@ -670,7 +670,25 @@ pub(crate) fn revert_input_owner_if(dying: usize) {
 /// editor or a REPL, and Ctrl+C kills it and drops back to the shell. It is
 /// still not a *signal*; nothing is delivered to the program for it to catch (an
 /// editor can't offer "save first"). That's a later refinement (signals, or a
-/// raw-input mode). Ctrl+C means terminate.
+/// raw-input mode).
+///
+/// **A foreground COMMAND is terminated; a handed-over SESSION is detached.**
+/// The two look identical from here - both are a non-zero keyboard owner with a
+/// previous owner - but they mean different things, and Ctrl+C should too. The
+/// previous owner is the task that handed `owner` the keyboard (`FG`, recorded
+/// in [`PREVIOUS_OWNERS`]). If that task is blocked in [`WaitReason::TaskExit`]
+/// on `owner`, it ran `owner` as a foreground command (the shell's
+/// `run_found_command`: `FG` then `WAIT`) and is sitting in that `WAIT`; Ctrl+C
+/// terminates `owner` and the `WAIT` wakes with `TASK_KILLED_STATUS`, dropping
+/// back to it. If the previous owner is instead at its OWN prompt (not waiting
+/// on `owner` - it handed the keyboard over with a bare `fg` and returned to
+/// read its own line), `owner` is an interactive session, and terminating it on
+/// a stray Ctrl+C would throw away a live login, cwd and env. So Ctrl+C
+/// **detaches** it instead: the keyboard reverts to that previous owner, `owner`
+/// stays alive, and a later `fg` resumes it. Non-destructive and escapable -
+/// the byte is still consumed here either way (returns `true`), it is the
+/// effect that differs. Task 0 (the boot shell) is never an `owner` here (the
+/// guard below), so its Ctrl+C stays an ordinary ignored byte.
 pub(crate) fn interrupt_key_check(byte: u8) -> bool {
     const ETX: u8 = 0x03; // Ctrl+C
     let owner = input_owner();
@@ -687,7 +705,31 @@ pub(crate) fn interrupt_key_check(byte: u8) -> bool {
         );
         return false;
     };
-    PENDING_KILL.store(id, Ordering::Relaxed);
+    // The task that handed `owner` the keyboard, if it is still that same task
+    // and alive. `None` (no recorded or live previous owner) is treated as a
+    // handed-over session: detaching is non-destructive, so it is the safe
+    // default when we cannot confirm a waiting foreground parent.
+    let previous = live_occupant(PREVIOUS_OWNERS[owner].load(Ordering::Relaxed));
+    let foreground_command = matches!(
+        previous,
+        Some(p) if matches!(
+            unsafe { *STATES[p.index()].get() },
+            TaskState::Blocked(WaitReason::TaskExit(t)) if t == owner
+        )
+    );
+    if foreground_command {
+        // Terminate: the parent is blocked in `WAIT` on `owner` and will wake.
+        PENDING_KILL.store(id, Ordering::Relaxed);
+        return true;
+    }
+    // Detach: hand the keyboard back to the previous owner (or task 0 if none is
+    // live) without killing `owner`. This only flips the ownership atomic - no
+    // task teardown, no context switch - so it is safe from the poll context
+    // that `PENDING_KILL` is deferred out of. `owner`'s `PREVIOUS_OWNERS` entry
+    // is left intact, so a later `fg owner` resumes it (`set_input_owner`
+    // re-records the same link).
+    let target = previous.map_or(0, TaskIndex::index);
+    INPUT_OWNER.store(target, Ordering::Relaxed);
     true
 }
 

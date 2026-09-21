@@ -2099,29 +2099,34 @@ would otherwise silently shrink into looking like nothing was ever found.
     (`scripts/test-keyboard-chain.sh`), each graded on the lines its
     negative control lacked. Found by the third review of #140 and the
     review of #142.
-  - **Ctrl+C at a nested shell's own prompt kills the shell** (login, cwd
-    and env gone), because `interrupt_key_check` terminates any keyboard
-    owner but task 0, a rule from when the only other owner was a
-    foreground program. Newly routine now that a nested shell keeps the
-    keyboard. The kernel could tell the two apart: a previous owner blocked
-    in `WAIT` on the owner means a foreground command (terminate), a
-    previous owner at its prompt means a session handed over with `fg`
-    (pass the byte through, as for task 0). The same gate drops a nested
-    shell's type-ahead: the tick's Ctrl+C poll consumes and discards any
-    other byte that arrives while the owner is running rather than blocked
-    in a read, and exempts only task 0, so a line typed while a nested
-    shell is still printing its prompt can lose its first characters where
-    the boot shell's would not (third review of #143). A behaviour
-    decision, so filed; the manual, its page and `wait`'s doc say what
-    happens today. Found by the second review of #140.
+  - ~~**Ctrl+C at a nested shell's own prompt kills the shell**~~ **Resolved
+    2026-09-21: it DETACHES now, it does not kill.** `interrupt_key_check`
+    tells the two cases apart exactly as this item proposed: if the owner's
+    previous owner is blocked in `WAIT` (`WaitReason::TaskExit`) on it, it is
+    a foreground command and Ctrl+C terminates it; if that previous owner is
+    at its own prompt (not waiting), it is a session handed over with `fg` and
+    Ctrl+C reverts the keyboard to it WITHOUT killing the session, which `fg`
+    resumes. Not the literal "pass the byte through, as for task 0" first
+    filed here: that would have trapped the keyboard, since Ctrl+C was the only
+    way back from a `fg`-handed shell and its `exit` only logs out. Detach
+    preserves the session AND stays escapable. Driven by
+    `scripts/test-keyboard-chain.sh` recipes 5 (a handed-over shell survives
+    Ctrl+C, `ps` shows it blocked not unused) and 6 (a foreground shell is
+    still terminated), each with a measured always-kill mutation control. The
+    remaining type-ahead sub-point (a nested shell can lose the first
+    characters of a line typed while it is still printing its prompt) is
+    UNCHANGED and still filed. Found by the second review of #140.
   - **`FG` is caller-unchecked.** A task that does not hold the keyboard can
     foreground any spawnable task, and the recorded chain then names the
     holder, not the caller, so the revert can route the keyboard to a task
     that never asked for it. Not new (it was always unchecked), but the
     shell's "reverts to this shell" now rests on caller == holder, which is
     true because only the owner can read a command line and nothing else
-    calls `FG`. Refusing `FG` from a non-owner would make the chain
-    trustworthy by construction. Found by the second review of #140.
+    calls `FG`. ~~Refusing `FG` from a non-owner would make the chain
+    trustworthy by construction.~~ **Done 2026-09-21:** `FG` from a task that
+    does not currently own the keyboard is refused `TASK_ERR_PROTECTED`, so the
+    property holds by construction, not by that argument. Found by the second
+    review of #140.
   - ~~**The stack top is hand-derived as `base + size` at seven sites across
     three files**~~ **Fixed 2026-09-20** (#146). It was spelled inside
     an identical `Context` literal in `tasks.rs` five times, `supervisor.rs`
