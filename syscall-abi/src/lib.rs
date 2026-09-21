@@ -154,8 +154,13 @@ pub const TASK_STATE_INVALID: u64 = u64::MAX;
 /// [`FG`]), ownership reverts as on any death of the owner.
 pub const KILL: u64 = 19;
 
-/// `(task index)` -> `0` on success, [`TASK_ERR_PROTECTED`] (idle can't
-/// be foregrounded), or [`TASK_ERR_NO_SUCH_TASK`]. Hands keyboard
+/// `(task index, foreground)` -> `0` on success, [`TASK_ERR_PROTECTED`]
+/// (idle or a server can't be foregrounded, OR the caller does not
+/// currently own the keyboard - only the owner may hand it off, so the
+/// ownership chain always names the caller), or [`TASK_ERR_NO_SUCH_TASK`].
+/// `foreground` (arg1) is `1` when the caller will `WAIT` on the task as a
+/// foreground COMMAND and `0` for a bare `fg` handing over a SESSION; it
+/// selects what Ctrl+C does (see below). Hands keyboard
 /// ownership to the given task - the caller's own next blocking read
 /// then waits, unwoken, until the foregrounded task exits or is killed:
 /// on the owner's death ownership reverts to the task that held the
@@ -164,15 +169,16 @@ pub const KILL: u64 = 19;
 /// each command it runs). Foregrounding a task that is already in that
 /// chain of previous owners hands the keyboard BACK down the chain to it,
 /// forgetting the tasks above; foregrounding any other task stacks on.
-/// Handing it to a task that is blocked in [`WAIT`] on the caller (a shell
-/// that ran the caller as a foreground command) leaves nobody reading it:
-/// that wait discards every byte but Ctrl+C. Not refused today.
 /// **Ctrl+C (`0x03`) is the escape hatch**: typed while a task other
-/// than the boot shell owns the keyboard, the kernel intercepts it,
-/// swallows the byte and terminates that owner (the [`KILL`] teardown,
-/// at the next tick), whose death reverts ownership as above. It is a
-/// terminate, not a signal: nothing is delivered for the task to catch.
-/// Index 0 is allowed as an explicit "give it back".
+/// than the boot shell owns the keyboard, the kernel intercepts it and
+/// swallows the byte. If the owner was foregrounded as a COMMAND
+/// (`foreground` = 1) it is terminated (the [`KILL`] teardown, at the
+/// next tick), whose death reverts ownership as above. If it was handed
+/// over as a SESSION (`foreground` = 0) it is DETACHED instead: ownership
+/// reverts to whoever handed it over and the session survives, to be
+/// resumed with another `fg`. It is a terminate or a detach, not a
+/// signal: nothing is delivered for the task to catch. Index 0 is
+/// allowed as an explicit "give it back".
 pub const FG: u64 = 20;
 
 /// `(task index)` -> the task's exit status (`0..=255` - [`EXIT`] masks

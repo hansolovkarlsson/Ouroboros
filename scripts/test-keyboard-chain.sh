@@ -96,4 +96,24 @@ boot '# @@/EFI/ORBS/SH.BIN' 'login:@@root' 'assword@@root' '# @@cd /EFI' \
   '# @@fg 7' '# @@kill 8' "# @@$CTRLC" '# @@pwd' '# @@ps' '# @@'
 grade "pop then kill, the live shell answers" "$out" "kill 8" '^/EFI$' '^task 6: runnable' '^task 0: blocked'
 
+# 5. Ctrl+C at a handed-over session's OWN prompt DETACHES to the parent
+#    without killing it (2026-09-21): task 6 was handed the keyboard by `fg`
+#    (the boot shell did `exec`, not a foreground run, so it is at its prompt,
+#    not in a WAIT on 6), so Ctrl+C reverts the keyboard to the boot shell and
+#    LEAVES 6 alive. `ps` at the boot shell then shows 6 still there (blocked,
+#    not owning the keyboard) and task 0 runnable. Negative control on the
+#    pre-change kernel: Ctrl+C killed 6, so `ps` showed `task 6: unused`.
+boot '# @@exec /EFI/ORBS/SH.BIN' 'login:@@fg 6' '@@root' 'assword@@root' \
+  '# @@cd /EFI' "# @@$CTRLC" '# @@ps' '# @@'
+grade "ctrl-c detaches a handed-over shell, it survives" "$out" "ps" '^task 6: blocked' '^task 0: runnable'
+
+# 6. Ctrl+C at a FOREGROUND command still terminates it (the other side of the
+#    distinction): the boot shell ran `/EFI/ORBS/SH.BIN` as a foreground
+#    command (not `exec`), so it is blocked in a WAIT on task 6; Ctrl+C kills 6
+#    and the WAIT reaps it. `ps` shows `task 6: unused`. If the detach test
+#    above had wrongly caught this case, 6 would still be alive here.
+boot '# @@/EFI/ORBS/SH.BIN' 'login:@@root' 'assword@@root' '# @@cd /EFI' \
+  "# @@$CTRLC" '# @@ps' '# @@'
+grade "ctrl-c terminates a foreground shell" "$out" "ps" '^task 6: unused' '^task 0: runnable'
+
 exit $fail
