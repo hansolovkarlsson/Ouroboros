@@ -1,27 +1,30 @@
 #!/bin/sh
-# The re-entrant session check: a remote-mount request from a LOCAL client
-# arriving at netd while netd is inside a `cpu` run. Run on the two-node ext2
-# rig (docs/testing/testing-qemu.md section 5, "The re-entrant session
-# witness"), and graded on the lines it names.
+# The re-entrant client check: a request from a LOCAL client arriving at netd
+# while netd is inside a `cpu` run. Run on the two-node ext2 rig
+# (docs/testing/testing-qemu.md section 5, "The re-entrant client witness"),
+# graded on the lines it names.
 #
 # HOW THE CONDITION IS MADE. The shell spawns a pipeline's program stages
 # before it runs a builtin source, so `cpu <A> ping <unreachable> | <client>`
-# has <client>'s remote-mount request reach netd while netd is blocked in the
-# run. The unreachable ping's ARP wait is what holds the run open long enough;
-# a reachable command returns before the client asks and the request lands at
-# the top level instead, proving nothing (measured: the file just prints).
+# has <client>'s request reach netd while netd is blocked in the run. The
+# unreachable ping's ARP wait holds the run open; a reachable command returns
+# before the client asks and the request lands at the top level, proving
+# nothing (measured: the client just succeeds).
 #
-# WHAT IT REFUSES, AND WHERE. netd refuses a non-child client's NETOP_RMOUNT
-# from `tcp_run`'s re-entrant drain, before `handle_client`'s frame is
-# allocated - the relay does not fit on the stack from there. The refusal is
-# BEFORE the session/one-shot split, so both kinds of verb are refused at the
-# same point; the graded recipe drives the one-shot path (`cat`), which reaches
-# netd deterministically. The negative control, measured 2026-09-20 on the tree
-# before the refusal: an EL0 data abort in netd at the guard page
-# (esr_el1=0x9200004f), "server slot 4 restarted", and the client told its
-# server had died mid-request. The session path (`cbig`) faulted the same way,
-# one call level DEEPER; the ledger had called the one-shot case "latent" and
-# it was not.
+# WHAT IT REFUSES, AND WHY TWO CLIENTS. netd refuses an IDENTIFIED client's
+# request from `tcp_run`'s re-entrant drain, before `handle_client`'s frame is
+# built - every handler a client would reach (the remote-mount relay, an ICMP
+# ping, a DNS/TCP lookup) is too deep for that stack. Only the supervisor's
+# health ping (no identity) is serviced from there. So the refusal is by
+# SENDER, not by op: `cat` (a remote-mount NETOP_RMOUNT) and `resolve` (a
+# NETOP_RESOLVE, a different, deeper handler that needs no prior mount) must
+# BOTH be refused. The first cut refused only NETOP_RMOUNT and `resolve` still
+# faulted netd - hence both recipes here.
+#
+# The negative control, measured 2026-09-20 on the tree before the refusal: an
+# EL0 data abort in netd at the guard page (esr_el1=0x9200004f), "server slot 4
+# restarted", and the client told its server had died mid-request - for `cat`,
+# for `resolve`, and (deeper) for `cbig`.
 #
 #   make test-reentrant-session       # builds both node images first
 #   ./scripts/test-reentrant-session.sh   # by hand, against the images in build/
@@ -36,11 +39,10 @@ for img in "$A" "$B"; do
     [ -f "$img" ] || { echo "test-reentrant-session: $img missing - run make images-2vm-ext2"; exit 2; }
 done
 # A stale image grades the previous netd; refuse if either image predates the
-# server binary or a C program a recipe drives.
-for k in target/aarch64-unknown-none/release/netd.bin build/cbig.bin; do
-    [ -f "$k" ] && [ "$k" -nt "$B" ] && {
-        echo "test-reentrant-session: $B is older than $k - run make images-2vm-ext2"; exit 2; }
-done
+# server binary.
+[ -f target/aarch64-unknown-none/release/netd.bin ] && \
+    [ "target/aarch64-unknown-none/release/netd.bin" -nt "$B" ] && {
+        echo "test-reentrant-session: $B is older than netd.bin - run make images-2vm-ext2"; exit 2; }
 fail=0
 n=0
 
@@ -59,8 +61,6 @@ run() { # B step (the piped command), after the mount
         echo "     (firmware never reached its boot entry on a node, retrying)" >&2
     done
 }
-# The B transcript, CR stripped, from the marker command on. A string
-# comparison, not a regex, so a marker may contain / . * or |.
 after() { awk -v m="# $1" 'p || $0 == m { p = 1; print }'; }
 keep() { n=$((n + 1)); log=build/reentrant-$n.txt; printf '%s\n' "$1" | tr -d '\r' > "$log"; }
 no_faults() { grep -q -- '--- A: 0 fault lines' "$log" && grep -q -- '--- B: 0 fault lines' "$log"; }
@@ -71,58 +71,41 @@ show_fail() {
     fail=1
 }
 
-# GRADED: the one-shot path, refused from inside a run, netd stays up. `cat`
-# reaches netd deterministically (unlike cbig below), so this is the check that
-# must pass. A `cat` that PRINTS the file means the run ended before cat asked
-# (condition not created) and is retried, not passed.
-marker='cpu 10.0.2.10:564 ping 10.0.2.99 | cat /mnt/a/man/grep'
-attempt=0
-while :; do
-    attempt=$((attempt + 1))
-    run "# @@$marker"; keep "$out"
-    tail=$(sed -n '/^NODE B/,$p' "$log" | after "$marker")
-    if printf '%s\n' "$tail" | grep -q 'EL0 FAULT\|server slot 4 restarted'; then
-        show_fail "one-shot verb inside a run: netd faulted instead of refusing"; break
-    fi
-    if printf '%s\n' "$tail" | grep -q 'cat: .*out of room for this right now'; then
-        if no_faults; then echo "ok   one-shot verb inside a run is refused, netd stays up ($log)"
-        else show_fail "one-shot verb inside a run: refused, but a node reported faults"; fi
-        break
-    fi
-    if [ $attempt -ge 4 ]; then
-        show_fail "one-shot verb inside a run: the condition was not created in 4 tries (no refusal, no fault)"; break
-    fi
-    echo "     (condition not created or the link flaked - retrying, $log)" >&2
-done
+# One recipe: run `# @@<marker>`, and require the client's refusal line AND no
+# netd fault/restart. A `condition_ok` grep that DID create the condition but
+# without the refusal (e.g. the run ended first) is retried, not passed.
+check() { # name, marker, refusal-regex, condition-not-created-regex
+    name=$1; marker=$2; want=$3; notyet=$4
+    attempt=0
+    while :; do
+        attempt=$((attempt + 1))
+        run "# @@$marker"; keep "$out"
+        tail=$(sed -n '/^NODE B/,$p' "$log" | after "$marker")
+        if printf '%s\n' "$tail" | grep -q 'EL0 FAULT\|server slot 4 restarted'; then
+            show_fail "$name: netd faulted instead of refusing"; return
+        fi
+        if printf '%s\n' "$tail" | grep -qE -- "$want"; then
+            if no_faults; then echo "ok   $name ($log)"
+            else show_fail "$name: refused, but a node reported faults"; fi
+            return
+        fi
+        if [ $attempt -ge 4 ]; then
+            show_fail "$name: the condition was not created in 4 tries (no refusal, no fault)"; return
+        fi
+        echo "     ($name: condition not created or the link flaked - retrying, $log)" >&2
+    done
+}
 
-# BEST-EFFORT: the session (fid) path, same refusal one level deeper. cbig
-# reaches netd only intermittently - a pre-existing race delegates its netd
-# send right just after it is spawned, so its first request is sometimes
-# refused by capability ("not allowed to reach that server") before any remote
-# request, unrelated to this check. So: a FAULT here fails (a regression on the
-# deeper path), "out of room" is the win, and a persistent capability refusal
-# is reported as an observation, never a failure - a check that turned red on a
-# separate known race would be the blind instrument the postmortems warn of.
-marker='cpu 10.0.2.10:564 ping 10.0.2.99 | cbig'
-attempt=0
-while :; do
-    attempt=$((attempt + 1))
-    run "# @@$marker"; keep "$out"
-    tail=$(sed -n '/^NODE B/,$p' "$log" | after "$marker")
-    if printf '%s\n' "$tail" | grep -q 'EL0 FAULT\|server slot 4 restarted'; then
-        show_fail "session verb inside a run: netd faulted instead of refusing"; break
-    fi
-    if printf '%s\n' "$tail" | grep -q 'cbig: .*out of room for this right now'; then
-        if no_faults; then echo "ok   session verb inside a run is refused, netd stays up ($log)"
-        else show_fail "session verb inside a run: refused, but a node reported faults"; fi
-        break
-    fi
-    if [ $attempt -ge 5 ]; then
-        echo "note session verb inside a run: cbig never reached netd in 5 tries (the capability"
-        echo "     race, not this fix); the one-shot check above covers the shared refusal ($log)"
-        break
-    fi
-    echo "     (cbig capability-refused or the link flaked - retrying, $log)" >&2
-done
+# The remote-mount path (NETOP_RMOUNT), the originally-reported case.
+check "one-shot rmount refused inside a run" \
+    'cpu 10.0.2.10:564 ping 10.0.2.99 | cat /mnt/a/man/grep' \
+    'cat: .*out of room for this right now' \
+    'grep - keep lines'
+# A different, deeper handler that needs no mount (NETOP_RESOLVE): the case the
+# first, RMOUNT-only cut missed.
+check "resolve refused inside a run" \
+    'cpu 10.0.2.10:564 ping 10.0.2.99 | resolve example.com' \
+    'resolve: network server busy' \
+    'resolves to|NXDOMAIN|no such host'
 
 exit $fail

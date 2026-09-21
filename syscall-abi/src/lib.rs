@@ -1535,12 +1535,14 @@ pub const FS_ERR_NO_SUCH_VERB: u64 = u64::MAX - 39;
 /// fix (that is [`MSG_ERR_DENIED`] / [`FS_ERR_PERM`]) and not "no arm for that
 /// verb" ([`FS_ERR_NO_SUCH_VERB`]): retry later, or do without.
 ///
-/// Since 2026-09-20 also `netd`'s answer to a local client's remote-mount
-/// request (any `NETOP_RMOUNT`, fid or path verb) that reaches it while it
-/// is inside a `cpu` run: the relay does not fit on the stack from that
-/// re-entrant drain, so it is refused there before the request's frame is
-/// built, rather than faulting the guard page (measured both ways, see
-/// `drain_client_messages`).
+/// Since 2026-09-20 also `netd`'s answer to an identified local client's
+/// request of any kind that reaches it while it is inside a `cpu` run: every
+/// handler a client would reach (the remote-mount relay, an ICMP ping, a
+/// DNS/TCP lookup) is too deep for that re-entrant drain's stack, so it is
+/// refused there, before the request's frame is built, rather than faulting
+/// the guard page. Only the supervisor's identity-less health ping is
+/// serviced from there. Measured across `cat`, `resolve` and `cbig`, see
+/// `drain_client_messages`.
 ///
 /// Reserved 2026-09-07 for the session gate. Reserving it moved
 /// [`FS_ERR_MIN`] again (the band is contiguous), which is a cross-node

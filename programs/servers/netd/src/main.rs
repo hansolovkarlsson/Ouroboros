@@ -623,6 +623,11 @@ fn drain_client_messages(packed_mac: u64, buf: &mut [u8], conns: &mut [Option<Tc
         } else {
             conns.iter().position(|c| matches!(c, Some(c) if c.cpu_child == sender_id))
         };
+        // `pending` is `None` only from `tcp_run`'s re-entrant drain (both
+        // `serve`-loop callers pass `Some`); having no top-level run to service
+        // IS the re-entrant condition, so it names it rather than a second flag
+        // that could disagree.
+        let reentrant = pending.is_none();
         if let Some(ci) = child_conn {
             // A cpu child talks to us for TWO things (cluster Phase 4a/4b): its
             // stdout (a raw MSG_SEND we capture) and - once its namespace imports
@@ -638,28 +643,29 @@ fn drain_client_messages(packed_mac: u64, buf: &mut [u8], conns: &mut [Option<Tc
             } else {
                 cpu_child_msg(conns[ci].as_mut().unwrap(), sender as u8, &buf[..len]);
             }
-        } else if pending.is_none()
-            && len >= 8
-            && read_u64(buf, 0) == syscall_abi::NETOP_RMOUNT
-        {
-            // A NON-child client's remote mount arriving while we are inside a
-            // `cpu` run: this is `tcp_run`'s re-entrant drain (`pending` is
-            // `None` only here), whose frame plus `handle_run`'s already fill
-            // most of the stack. `handle_client` reserves its whole frame on
-            // entry - the reply buffer AND `handle_rmount`'s session/one-shot
-            // buffers below it - so the relay overflows the guard page before
-            // any check inside it can run; the refusal has to precede the call.
-            // Measured both ways on the two-node ext2 rig 2026-09-20
-            // (scripts/test-reentrant-session.sh): a `cat`/`cbig` over a mount,
-            // piped after a `cpu ... ping <unreachable>` that holds the run
-            // open, took an EL0 data abort in netd at the guard page
-            // (esr_el1=0x9200004f) and the supervisor restarted it. The one-shot
-            // path (`cat`) faulted as readily as the session path (`cbig`), one
-            // call level shallower, so the ledger's "latent" was wrong. Refused
-            // with FS_ERR_BUSY, "out of room, retry later" - the stack, here.
-            // The cpu CHILD's own remote-fs (Phase 4b, the `Some(ci)` arm above)
-            // keeps its path: it is the run, not a bystander to it. The real fix
-            // is async NETOP_RMOUNT, on the ledger; a refusal is honest.
+        } else if reentrant && sender_id != syscall_abi::GET_ID_ERR {
+            // An identified client's request reaching us mid-`cpu`-run (this is
+            // `tcp_run`'s re-entrant drain, on `handle_run`'s and `tcp_run`'s
+            // frames). Only the supervisor's health ping must be serviced from
+            // here to keep netd alive, and it carries NO identity (`KERNEL_SENDER`
+            // -> `GET_ID_ERR`) and is a shallow ack (the `_` arm of
+            // `handle_client`); it takes the `else` below. EVERY handler an
+            // identified client would reach is too deep for this re-entrant
+            // stack - the remote-mount relay (`handle_rmount`), an ICMP ping
+            // (`handle_ping` -> `arp_resolve`), a DNS/TCP lookup
+            // (`handle_resolve`/`handle_fetch`) - and overflows the guard page:
+            // measured 2026-09-20 on the two-node ext2 rig
+            // (scripts/test-reentrant-session.sh) with `cat` and `resolve` piped
+            // after a `cpu ... ping <unreachable>` that holds the run open, an
+            // EL0 data abort (esr_el1=0x9200004f) and a supervisor restart each
+            // time. Refuse with FS_ERR_BUSY ("out of room, retry later") BEFORE
+            // `handle_client`'s frame is built - Rust reserves the whole frame
+            // on entry, so a check inside it is too late (the first cut put one
+            // there and `cat` still faulted). The cpu CHILD (the `Some(ci)` arm
+            // above) is exempt: its Phase 4b remote-fs IS the run, not a
+            // bystander - still deep from here, still latent, see the ledger.
+            // The real fix is async NETOP_RMOUNT; a refusal is honest, not
+            // service.
             reply(sender, &syscall_abi::FS_ERR_BUSY.to_le_bytes());
         } else {
             handle_client(packed_mac, sender, buf, len, conns, dials, sessions, auth, pending.as_deref_mut());
@@ -734,10 +740,12 @@ fn handle_client(packed_mac: u64, sender: u64, buf: &[u8], len: usize, conns: &m
         syscall_abi::NETOP_RMOUNT => {
             // The remote-mount client (cluster Phase 1c): carry the embedded NP
             // request over TCP to the endpoint's 9P export gateway and reply with
-            // the NP reply body (`[status:u64][data]`) verbatim. A re-entrant
-            // remote mount (one arriving while we are inside a `cpu` run) never
-            // reaches here: `drain_client_messages` refuses it first, before
-            // this function's frame is even allocated (see there).
+            // the NP reply body (`[status:u64][data]`) verbatim. An IDENTIFIED
+            // client's re-entrant remote mount (one arriving while we are inside
+            // a `cpu` run) never reaches here: `drain_client_messages` refuses it
+            // before this frame is built (see there). A cpu CHILD's re-entrant
+            // remote mount (Phase 4b) DOES reach here, at the same deep frame -
+            // that overflow is unchanged and latent, on the ledger.
             let mut r = [0u8; syscall_abi::MSG_MAX_LEN as usize];
             let rlen = handle_rmount(packed_mac, buf, len, sessions, &mut r, auth);
             reply(sender, &r[..rlen]);

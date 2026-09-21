@@ -108,7 +108,7 @@
 #define FS_ERR_NO_SUCH_VERB (~0UL - 39UL)
 /* A resource of the server is fully used for now (a session slot, or netd's
  * stack while it runs a cpu command, during which it refuses another local
- * client's remote-mount requests rather than overflow): retry later. */
+ * client's requests rather than overflow): retry later. */
 #define FS_ERR_BUSY (~0UL - 40UL)
 
 #define FS_ERR_MIN (~0UL - 43UL)

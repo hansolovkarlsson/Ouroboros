@@ -925,19 +925,23 @@ abort in netd at the guard page (`esr_el1=0x9200004f`), the supervisor
 restarting it, cbig told its server died mid-request. The entry above called
 the one-shot path's depth "latent"; refusing only the session path and running
 `| cat` faulted the same way, one level shallower, so it was not latent. `netd`
-now refuses a non-child client's `NETOP_RMOUNT` in `drain_client_messages`
-itself, before `handle_client`'s frame is allocated (Rust reserves the whole
-frame on entry, so a check inside it is too late - the first cut put one there
-and `cat` still faulted), replying `FS_ERR_BUSY`, which `cat` and `cbig` print
-as "out of room for this right now". The refusal precedes the session/one-shot
-split, so both verb kinds are covered at one point; the cpu child's own
-remote-fs (Phase 4b) keeps its path. Driven by
-`scripts/test-reentrant-session.sh` (`make test-reentrant-session`): the
-graded recipe is the one-shot `cat`, which reaches netd deterministically;
-`cbig` is best-effort, since a pre-existing race (a spawned task's netd send
-right is delegated just after spawn) sometimes refuses its first request by
-capability before any remote request - reported, not failed. The real fix is
-still async `NETOP_RMOUNT` (below): a refusal is honest, not service.
+now refuses an IDENTIFIED client's request in `drain_client_messages` itself,
+before `handle_client`'s frame is allocated (Rust reserves the whole frame on
+entry, so a check inside it is too late - the first cut put one there and `cat`
+still faulted), replying `FS_ERR_BUSY`. The refusal is BY SENDER, not by op:
+the first cut refused only `NETOP_RMOUNT`, and the review of #147 showed a
+bystander `resolve` (a `NETOP_RESOLVE`, a different deeper handler, needing no
+mount) still faulted netd - because the overflow is the depth of any handler
+reached from this drain, not the op. Only the supervisor's identity-less health
+ping is serviced from here (a shallow ack); every identified client is refused.
+Driven by `scripts/test-reentrant-session.sh` (`make test-reentrant-session`),
+two graded recipes, `cat` (the relay) and `resolve` (a lookup), both reaching
+netd deterministically and refused without fault; the session path `cbig` is
+the same by-sender branch and is left out (a pre-existing spawn/delegate race
+makes it a flaky driver). **The cpu child's own Phase 4b remote-fs stays on its
+path and is still deep from this drain** - deliberately not refused, since it is
+the run itself; that overflow is latent, closed only by async `NETOP_RMOUNT`
+(below). A refusal is honest, not service.
 
 ## Deliberately not in scope
 
