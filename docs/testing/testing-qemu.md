@@ -807,6 +807,49 @@ cross-machine traffic. Zero exception-trace aborts is the health bar — see §7
 
 ---
 
+**The re-entrant session witness** (the stack-depth limitation on
+`roadmap-fid-verbs.md`'s ledger, closed 2026-09-20). A remote-mount request
+from a *local* client can reach `netd` while `netd` is inside a `cpu` run: the
+shell spawns a pipeline's program stages before it runs a builtin source, so
+`cpu <A> ping <unreachable> | <client>` has the client's `NETOP_RMOUNT` arrive
+at `tcp_run`'s re-entrant drain, where a relay would sit on `handle_run`'s and
+`tcp_run`'s frames as well as its own. The unreachable ping's ARP wait is what
+keeps the run open long enough; a reachable command returns before the client
+asks, and the request lands at the top level instead (measured: the file just
+prints, the pcap shows the two connections 20 ms apart, not overlapping).
+`netd` now refuses a non-child client's `NETOP_RMOUNT` from that drain, before
+`handle_client`'s frame is built, with `FS_ERR_BUSY` - "out of room for this
+right now"; the run and the cpu child's own remote-fs (Phase 4b) are
+unaffected. The refusal is BEFORE the session/one-shot split, so both verb
+kinds are refused at one point.
+
+```sh
+make test-reentrant-session   # builds both ext2 node images, then the two-node boots
+# or, by hand (the graded one-shot recipe):
+python3 scripts/drive-2vm.py build/espext2-a.img build/espext2-b.img \
+  --a 'login:@@root' 'assword:@@root' '# @@ls /man' \
+  --b 'login:@@root' 'assword:@@root' \
+     '# @@mount -r 10.0.2.10:564 /mnt/a' \
+     '# @@cpu 10.0.2.10:564 ping 10.0.2.99 | cat /mnt/a/man/grep' \
+     '# @@'
+# expected: "cat: that server is out of room for this right now (try again
+# later)", no "server slot 4 restarted", 0 fault lines both nodes.
+```
+
+**Its negative control, measured before the refusal existed**: on node B,
+`Ouroboros kernel: EL0 FAULT task=4 esr_el1=0x9200004f` (a data abort at the
+guard page), `task 4 killed after fault`, `server slot 4 restarted (attempt
+1/3)`, and the client reporting "that server is not running (it died with this
+request in flight)". The one-shot path (`cat`) faulted as readily as the
+session path (`cbig`), one call level shallower, so the ledger's "latent" was
+wrong. **The graded check drives `cat`**, which reaches netd deterministically.
+`cbig` (the session path, `libc`'s fid client) is run too but best-effort: a
+pre-existing race delegates a spawned task's netd send right just after spawn,
+so cbig's first request is sometimes refused by capability ("not allowed to
+reach that server") before any remote request - unrelated to this witness, so
+the script reports it and retries rather than failing. A fault on either path
+is a regression and does fail.
+
 ## 6. USB and GIC variants
 
 ```sh

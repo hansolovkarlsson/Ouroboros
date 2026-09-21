@@ -910,21 +910,34 @@ connection makes possible but which is an auth-model change); and **raising
 `SESSION_FIDS` or the client-session table size** (do it when something
 exhausts it, with the exhaustion as evidence).
 
-**A stack-depth limitation on the ledger, found by the PR review.** The 40 KB
-stack is sized for the top-level session path (`serve` → `drain` →
-`handle_client` → `session_rmount`). A fid `NETOP_RMOUNT` can also arrive at
-the **re-entrant** drain inside `tcp_run` (a local task doing remote fid I/O
-while this node runs a `cpu` command), where `session_rmount`'s ~5 KB and its
-call level nest on top of `handle_run` + `tcp_run`'s own frame, well past
-40 KB. It faults CLEAN on the guard (netd restarts, dropping held
-connections), not silently, and the trigger is narrow: a local remote-fid op
-concurrent with an outbound `cpu` run on the same node. Not fixed here because
-the fix (refuse a new session from the re-entrant context, or make
-`NETOP_RMOUNT` async) is larger than the corner and there is no rig that
-creates the condition; the same latent depth already applied to the one-shot
-path this arc did not change, one level shallower. Revisit with async
-`NETOP_RMOUNT`, or a rig that can drive a concurrent remote op during a `cpu`
-run.
+~~**A stack-depth limitation on the ledger, found by the PR review.**~~
+**Closed 2026-09-20 (PR_REENTRANT): measured, then refused.** The claim
+stood as analysis: the 40 KB stack is sized for the top-level session path
+(`serve` → `drain` → `handle_client` → `session_rmount`), and a fid
+`NETOP_RMOUNT` can also arrive at the **re-entrant** drain inside `tcp_run` (a
+local task doing remote fid I/O while this node runs a `cpu` command), where it
+nests on top of `handle_run` + `tcp_run`'s own frame. The rig that creates the
+condition is a pipeline: the shell spawns the program stages before it runs a
+builtin source, so `cpu <A> ping <nobody> | cbig` puts cbig's verbs inside the
+run (`scripts/test-reentrant-session.sh`, `make test-reentrant-session`;
+testing-qemu.md section 5). Measured on the tree before the fix: an EL0 data
+abort in netd at the guard page (`esr_el1=0x9200004f`), the supervisor
+restarting it, cbig told its server died mid-request. The entry above called
+the one-shot path's depth "latent"; refusing only the session path and running
+`| cat` faulted the same way, one level shallower, so it was not latent. `netd`
+now refuses a non-child client's `NETOP_RMOUNT` in `drain_client_messages`
+itself, before `handle_client`'s frame is allocated (Rust reserves the whole
+frame on entry, so a check inside it is too late - the first cut put one there
+and `cat` still faulted), replying `FS_ERR_BUSY`, which `cat` and `cbig` print
+as "out of room for this right now". The refusal precedes the session/one-shot
+split, so both verb kinds are covered at one point; the cpu child's own
+remote-fs (Phase 4b) keeps its path. Driven by
+`scripts/test-reentrant-session.sh` (`make test-reentrant-session`): the
+graded recipe is the one-shot `cat`, which reaches netd deterministically;
+`cbig` is best-effort, since a pre-existing race (a spawned task's netd send
+right is delegated just after spawn) sometimes refuses its first request by
+capability before any remote request - reported, not failed. The real fix is
+still async `NETOP_RMOUNT` (below): a refusal is honest, not service.
 
 ## Deliberately not in scope
 

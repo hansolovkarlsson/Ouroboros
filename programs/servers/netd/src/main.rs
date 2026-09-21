@@ -638,6 +638,29 @@ fn drain_client_messages(packed_mac: u64, buf: &mut [u8], conns: &mut [Option<Tc
             } else {
                 cpu_child_msg(conns[ci].as_mut().unwrap(), sender as u8, &buf[..len]);
             }
+        } else if pending.is_none()
+            && len >= 8
+            && read_u64(buf, 0) == syscall_abi::NETOP_RMOUNT
+        {
+            // A NON-child client's remote mount arriving while we are inside a
+            // `cpu` run: this is `tcp_run`'s re-entrant drain (`pending` is
+            // `None` only here), whose frame plus `handle_run`'s already fill
+            // most of the stack. `handle_client` reserves its whole frame on
+            // entry - the reply buffer AND `handle_rmount`'s session/one-shot
+            // buffers below it - so the relay overflows the guard page before
+            // any check inside it can run; the refusal has to precede the call.
+            // Measured both ways on the two-node ext2 rig 2026-09-20
+            // (scripts/test-reentrant-session.sh): a `cat`/`cbig` over a mount,
+            // piped after a `cpu ... ping <unreachable>` that holds the run
+            // open, took an EL0 data abort in netd at the guard page
+            // (esr_el1=0x9200004f) and the supervisor restarted it. The one-shot
+            // path (`cat`) faulted as readily as the session path (`cbig`), one
+            // call level shallower, so the ledger's "latent" was wrong. Refused
+            // with FS_ERR_BUSY, "out of room, retry later" - the stack, here.
+            // The cpu CHILD's own remote-fs (Phase 4b, the `Some(ci)` arm above)
+            // keeps its path: it is the run, not a bystander to it. The real fix
+            // is async NETOP_RMOUNT, on the ledger; a refusal is honest.
+            reply(sender, &syscall_abi::FS_ERR_BUSY.to_le_bytes());
         } else {
             handle_client(packed_mac, sender, buf, len, conns, dials, sessions, auth, pending.as_deref_mut());
         }
@@ -711,7 +734,10 @@ fn handle_client(packed_mac: u64, sender: u64, buf: &[u8], len: usize, conns: &m
         syscall_abi::NETOP_RMOUNT => {
             // The remote-mount client (cluster Phase 1c): carry the embedded NP
             // request over TCP to the endpoint's 9P export gateway and reply with
-            // the NP reply body (`[status:u64][data]`) verbatim.
+            // the NP reply body (`[status:u64][data]`) verbatim. A re-entrant
+            // remote mount (one arriving while we are inside a `cpu` run) never
+            // reaches here: `drain_client_messages` refuses it first, before
+            // this function's frame is even allocated (see there).
             let mut r = [0u8; syscall_abi::MSG_MAX_LEN as usize];
             let rlen = handle_rmount(packed_mac, buf, len, sessions, &mut r, auth);
             reply(sender, &r[..rlen]);
