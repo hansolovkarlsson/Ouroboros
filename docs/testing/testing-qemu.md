@@ -807,6 +807,52 @@ cross-machine traffic. Zero exception-trace aborts is the health bar — see §7
 
 ---
 
+**The re-entrant client witness** (the stack-depth limitation on
+`roadmap-fid-verbs.md`'s ledger, closed 2026-09-20). A request from a *local*
+client can reach `netd` while `netd` is inside a `cpu` run: the shell spawns a
+pipeline's program stages before it runs a builtin source, so
+`cpu <A> ping <unreachable> | <client>` has the client's request arrive at
+`tcp_run`'s re-entrant drain, on `handle_run`'s and `tcp_run`'s frames. The
+unreachable ping's ARP wait keeps the run open long enough; a reachable command
+returns before the client asks, and the request lands at the top level instead
+(measured: it just succeeds). `netd` now refuses an IDENTIFIED client's request
+from that drain, before `handle_client`'s frame is built, with `FS_ERR_BUSY` -
+"out of room for this right now"; only the supervisor's identity-less health
+ping is serviced from there, and the cpu child's own remote-fs (Phase 4b) keeps
+its path. The refusal is BY SENDER, not by op, so a remote mount (`cat`) and a
+name lookup (`resolve`, a different, deeper handler needing no prior mount) are
+both refused - the first cut refused only `NETOP_RMOUNT` and `resolve` still
+faulted netd.
+
+```sh
+make test-reentrant-session   # builds both ext2 node images, then the two-node boots
+# or, by hand (the two graded recipes):
+python3 scripts/drive-2vm.py build/espext2-a.img build/espext2-b.img \
+  --a 'login:@@root' 'assword:@@root' '# @@ls /man' \
+  --b 'login:@@root' 'assword:@@root' \
+     '# @@mount -r 10.0.2.10:564 /mnt/a' \
+     '# @@cpu 10.0.2.10:564 ping 10.0.2.99 | cat /mnt/a/man/grep' \
+     '# @@'
+# expected: "cat: that server is out of room for this right now (try again
+# later)". The `| resolve example.com` variant expects "resolve: network
+# server busy". Either way: no "server slot 4 restarted", 0 fault lines.
+```
+
+**Its negative control, measured before the refusal existed**: on node B,
+`Ouroboros kernel: EL0 FAULT task=4 esr_el1=0x9200004f` (a data abort at the
+guard page), `task 4 killed after fault`, `server slot 4 restarted (attempt
+1/3)`, and the client reporting "that server is not running (it died with this
+request in flight)" - for `cat`, for `resolve`, and (one level deeper) for
+`cbig`. **Both graded recipes (`cat`, `resolve`) reach netd deterministically.**
+The session path `cbig` shares the same refusal (by sender, before any op
+dispatch) and is not run here, because a pre-existing race delegates a spawned
+task's netd send right just after spawn and sometimes refuses cbig's first
+request by capability before any remote request - flaky as a driver, and it
+would test the same branch `cat` already does. **The cpu child's own Phase 4b
+remote-fs is still deep from this drain and is deliberately not refused** (it is
+the run, not a bystander); that overflow is latent, closed only by async
+`NETOP_RMOUNT`.
+
 ## 6. USB and GIC variants
 
 ```sh

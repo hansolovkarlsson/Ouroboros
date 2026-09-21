@@ -910,21 +910,38 @@ connection makes possible but which is an auth-model change); and **raising
 `SESSION_FIDS` or the client-session table size** (do it when something
 exhausts it, with the exhaustion as evidence).
 
-**A stack-depth limitation on the ledger, found by the PR review.** The 40 KB
-stack is sized for the top-level session path (`serve` → `drain` →
-`handle_client` → `session_rmount`). A fid `NETOP_RMOUNT` can also arrive at
-the **re-entrant** drain inside `tcp_run` (a local task doing remote fid I/O
-while this node runs a `cpu` command), where `session_rmount`'s ~5 KB and its
-call level nest on top of `handle_run` + `tcp_run`'s own frame, well past
-40 KB. It faults CLEAN on the guard (netd restarts, dropping held
-connections), not silently, and the trigger is narrow: a local remote-fid op
-concurrent with an outbound `cpu` run on the same node. Not fixed here because
-the fix (refuse a new session from the re-entrant context, or make
-`NETOP_RMOUNT` async) is larger than the corner and there is no rig that
-creates the condition; the same latent depth already applied to the one-shot
-path this arc did not change, one level shallower. Revisit with async
-`NETOP_RMOUNT`, or a rig that can drive a concurrent remote op during a `cpu`
-run.
+~~**A stack-depth limitation on the ledger, found by the PR review.**~~
+**Closed 2026-09-20 (#147): measured, then refused.** The claim
+stood as analysis: the 40 KB stack is sized for the top-level session path
+(`serve` → `drain` → `handle_client` → `session_rmount`), and a fid
+`NETOP_RMOUNT` can also arrive at the **re-entrant** drain inside `tcp_run` (a
+local task doing remote fid I/O while this node runs a `cpu` command), where it
+nests on top of `handle_run` + `tcp_run`'s own frame. The rig that creates the
+condition is a pipeline: the shell spawns the program stages before it runs a
+builtin source, so `cpu <A> ping <nobody> | cbig` puts cbig's verbs inside the
+run (`scripts/test-reentrant-session.sh`, `make test-reentrant-session`;
+testing-qemu.md section 5). Measured on the tree before the fix: an EL0 data
+abort in netd at the guard page (`esr_el1=0x9200004f`), the supervisor
+restarting it, cbig told its server died mid-request. The entry above called
+the one-shot path's depth "latent"; refusing only the session path and running
+`| cat` faulted the same way, one level shallower, so it was not latent. `netd`
+now refuses an IDENTIFIED client's request in `drain_client_messages` itself,
+before `handle_client`'s frame is allocated (Rust reserves the whole frame on
+entry, so a check inside it is too late - the first cut put one there and `cat`
+still faulted), replying `FS_ERR_BUSY`. The refusal is BY SENDER, not by op:
+the first cut refused only `NETOP_RMOUNT`, and the review of #147 showed a
+bystander `resolve` (a `NETOP_RESOLVE`, a different deeper handler, needing no
+mount) still faulted netd - because the overflow is the depth of any handler
+reached from this drain, not the op. Only the supervisor's identity-less health
+ping is serviced from here (a shallow ack); every identified client is refused.
+Driven by `scripts/test-reentrant-session.sh` (`make test-reentrant-session`),
+two graded recipes, `cat` (the relay) and `resolve` (a lookup), both reaching
+netd deterministically and refused without fault; the session path `cbig` is
+the same by-sender branch and is left out (a pre-existing spawn/delegate race
+makes it a flaky driver). **The cpu child's own Phase 4b remote-fs stays on its
+path and is still deep from this drain** - deliberately not refused, since it is
+the run itself; that overflow is latent, closed only by async `NETOP_RMOUNT`
+(below). A refusal is honest, not service.
 
 ## Deliberately not in scope
 
