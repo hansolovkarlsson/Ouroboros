@@ -139,6 +139,55 @@ between verbs. Checks: the two-VM ext2 rig's `cbig`/`cwrite` witnesses, the fid
 gate, and a re-entrant `cbig` recipe, which the by-sender refusal made a flaky
 driver and step 3 makes unnecessary.
 
+*Sized 2026-09-21, from the code at `78352df`, before any of it was written.*
+Eight things the paragraph above does not say, found by reading the paths step 2
+replaces (`client_connect`, `client_exchange`, `session_exchange`,
+`find_or_open_session`, `session_rmount`, `reap_client_sessions`, `TcpScratch`:
+about 330 lines, all of which go). (1) A fid verb's park is TWO-PHASE when no
+session exists: connect, send `NP_SESSION`, verify its reply is status 0, and
+only then frame and send the verb. The raw message (up to 752 bytes) has to be
+held on the parked record and signed later from the service pass, because the
+far export serves one framed request per session reset and two frames
+pipelined on the stream is not a case it handles. Signing from `service_remotes`
+is affordable: it runs at the top level, not the re-entrant drain. (2) A
+session slot outlives its reply: it stays `Established`, carries the fid
+refcount, closes on the last successful clunk, and needs its own idle
+threshold, because the engine reaps an idle slot at `DIAL_IDLE_TICKS` (12 s)
+while a held session must live `CLIENT_SESSION_IDLE_TICKS` (40 s), above the
+far side's 30 s. A per-slot exemption, as the listener has. (3) Two fid verbs
+from one uid to one endpoint can now OVERLAP, which the blocking path made
+impossible. Refuse the second `FS_ERR_BUSY` (the plan's answer to every budget),
+and record that libc's `read()` loop does not retry on it, so two C programs
+sharing one remote mount under one user is a stated limit, not a bug to chase.
+(4) The per-slot source-port window is pinned by a compile-time assert to
+`MAX_REMOTE == 2`; session slots need the split re-derived. (5) The stack moves
+rather than shrinks: each session slot is a `RemoteConn` (~2 KB) plus the
+held raw message from (1) (752 bytes), ~2.7 KB RESIDENT on `serve`'s frame,
+three of them ~8 KB, against the ~5.7 KB `session_rmount` frame that
+disappears. It should fit 48 KB, and step 1 showed the cost is where
+the compiler puts it, so it is measured on the two-node rig, not reasoned. (6)
+The fid refcount and last-clunk close move into the service pass, so the verb
+is recorded on the parked record. (7) The deadline arm needs a stated rule for
+a session slot: `service_remotes` fails a parked request at
+`REMOTE_DEADLINE_TICKS` (5 s) and closes the slot. On a session that is
+fail-dead, the verb answers `FS_ERROR`, the session closes and its fids go,
+and the client re-opens on its next call: exactly what `client_exchange` does
+today after one second of silence (its `deadline = now() + 50`), so the rule
+is inherited, not new, and five seconds is the more lenient of the two. It
+also settles the late reply: it lands on a closed slot, never ahead of a next
+verb's reply. (8) The blast radius is wider than the seven functions: the
+`sessions` table is threaded through the signatures of
+`drain_client_messages`, `handle_client`, `tcp_run` and `handle_run`, so
+whether sessions get their own slot table or join `remotes`, four signatures
+on the run path that step 1 left exactly as #147 left it are edited in step
+2 and again when step 3 deletes the drain. One check the paragraph above lacks: a fid
+verb parked on a slow peer must not stall a concurrent path-verb mount, the
+boundary the third review of #149 named and the reason step 2 exists; it rides
+the async rig with a delayed host peer and a C program. Estimate: a day, the
+shape of step 1 (#149: ~430 netd lines plus a 16-line kernel arm, three
+review rounds). Step 2 itself needs no kernel change and deletes more than it
+adds.
+
 **Step 3: the run.** `tcp_run` and the re-entrant drain go. Checks: every
 `test-reentrant-session.sh` recipe is *served*; `cpu` output past one message
 still pulls through `NETOP_RUN_MORE`; the supervisor's ping is acked during a
@@ -157,6 +206,9 @@ run with no `beat_if_new_tick` in the way.
 
 Kept as the steps land, newest first.
 
+- **Step 2 sized 2026-09-21**, before any of it was written: the eight
+  findings and the estimate are in the dated note under step 2 above, the one
+  place they live.
 - **Steps 0 and 1 landed 2026-09-21** (the kernel arm and the parked one-shot
   path). Measured: `make test-async-rmount` 3 of 3 (served, identity,
   concurrent), and both controls fail as they must: on a kernel that resolves

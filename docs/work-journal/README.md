@@ -45,4 +45,4 @@ what is now this directory.
 | [2026-09-13](2026-09-13.md) | 1 | one constant, and the four reviews that kept finding its copy one hop further out |
 | [2026-09-19](2026-09-19.md) | 1 | a newtype, twenty reviews, and the two bugs they turned up |
 | [2026-09-20](2026-09-20.md) | 2 | the keyboard chain; then three standup picks, and a fix scoped to the symptom |
-| [2026-09-21](2026-09-21.md) | 4 | a zero-count read settled in fsd · the async remote mount, steps 0-1, and an over-reach measured on the two-node rig · the release note that had gone missing · Ctrl+C detaches a handed-over shell, and a fix that needed two signals |
+| [2026-09-21](2026-09-21.md) | 5 | a zero-count read settled in fsd · the async remote mount, steps 0-1, and an over-reach measured on the two-node rig · the release note that had gone missing · Ctrl+C detaches a handed-over shell, and a fix that needed two signals · then step 2 sized from the code before it is written |
