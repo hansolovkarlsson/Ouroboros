@@ -233,7 +233,10 @@ user's `NP_CLUNK` refused `FS_ERR_PERM` while the owner still holds the fid and
 then closes it (added by the review of #130: the freeing verb's ownership test
 had no observer at all); and, since step 6 (2026-09-12), the data path: a
 `pread` of a never-opened fid refused; another user's `pread` refused
-`FS_ERR_PERM` with the owner's next read served; `/man/grep` (longer than one
+`FS_ERR_PERM` with the owner's next read served; since 2026-09-21 a
+zero-count `pread` at offset 0 of that file answering 0 with no bytes (the
+POSIX shape; `fsd` refused it `FS_ERROR` before, and this check failed on
+that tree); `/man/grep` (longer than one
 `NP_REMOTE_CHUNK`) read to EOF through a fid in chunks and byte-compared
 against the same file read path-based over `NP_READ_AT`, two independent
 paths to the same bytes, the check FAILING on a file that fits one chunk (a
@@ -242,11 +245,12 @@ one-chunk file cannot show it); then EOF answering 0 and the session still in
 phase. The one-shot refusal check sends `NP_PREAD` beside `NP_OPEN`. About
 twenty seconds after boot. Against `main` before step 5 it fails at the first
 open; against step 5's export the four step-6 checks fail with
-`FS_ERR_NO_SUCH_VERB` and the rest pass (10 of 14, measured).
+`FS_ERR_NO_SUCH_VERB` and the rest pass (10 of 14, measured, before the
+zero-count check existed).
 
 ```sh
 scripts/run-guest.sh -- python3 scripts/np9p_client.py localhost 5640 fid-gate
-# expected: 14 PASS, "0 check(s) failed", then the two run-guest lines above
+# expected: 15 PASS, "0 check(s) failed", then the two run-guest lines above
 ```
 
 **Its two step-6 controls, both measured 2026-09-12**, each failing the byte

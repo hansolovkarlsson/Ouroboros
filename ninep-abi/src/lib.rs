@@ -131,7 +131,9 @@ pub const NP_OPEN: u64 = NP_BASE + 15;
 
 /// **Read** from a fid at an explicit offset: `a0` = fid, `a1` = offset,
 /// `a2` = count. The reply carries the bytes inline; status = bytes read
-/// (`0` at EOF). No per-op permission check - the fid was authorized at open.
+/// (`0` at EOF, and `0` for a count of `0`: a legal read that delivers
+/// nothing, the POSIX shape, not an error). No per-op permission check - the
+/// fid was authorized at open.
 pub const NP_PREAD: u64 = NP_BASE + 16;
 
 /// **Write** to a fid at an explicit offset from the client's `GRANT_READ`

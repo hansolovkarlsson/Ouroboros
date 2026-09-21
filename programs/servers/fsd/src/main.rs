@@ -922,8 +922,24 @@ fn handle_fid_op(
     };
     match verb {
         ninep_abi::NP_PREAD => {
-            let Some(want) = want_len(p[2]) else {
-                return status_reply(reply, syscall_abi::FS_ERROR);
+            // A count of 0 is a legal read that answers 0, the POSIX shape
+            // (`read(fd, buf, 0)` returns 0, and may still detect errors). It
+            // still goes through `read_at` with an empty buffer, so the fid
+            // gate above and the filesystem's own checks (not a file, gone)
+            // answer as a real read would; every `read_at` arm returns 0 for an
+            // empty buffer without touching the disk. Until 2026-09-21 this arm
+            // used `want_len`, which rejects 0 with `FS_ERROR`, so the same
+            // frame the host peer answered 0 was refused here: the divergence
+            // docs/roadmap/roadmap-fid-verbs.md's ledger recorded. The path
+            // verbs keep `want_len`'s floor: their 0 was never asked for either
+            // way, and `NP_READ_FILE`'s status is the file size, not the count.
+            let want = if p[2] == 0 {
+                0
+            } else {
+                let Some(want) = want_len(p[2]) else {
+                    return status_reply(reply, syscall_abi::FS_ERROR);
+                };
+                want
             };
             let (status_slot, result) = reply[..REPLY_PAYLOAD + want].split_at_mut(REPLY_PAYLOAD);
             match fs.read_at(path, p[1], result) {

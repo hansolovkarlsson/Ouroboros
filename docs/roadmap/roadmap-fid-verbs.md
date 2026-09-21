@@ -961,12 +961,20 @@ the run itself; that overflow is latent, closed only by async `NETOP_RMOUNT`
   over-generic sentinel step 1 stopped using for verbs, one layer down. Worth
   its own small change; `scripts/np9p_server.py` mirrors it deliberately rather
   than diverging.
-- **`NP_PREAD` with a count of 0** (review of the step-6 PR): `fsd`'s
-  `want_len` rejects it with `FS_ERROR`, the export relays that, and the host
-  peer answers 0 for the same frame, while `ninep-abi` says status = bytes
-  read. No shipped client sends it (libc's `read()` loop never asks for 0),
-  and the divergence is `fsd`'s, not the export's. Settle it with the item
-  above, in `fsd`: a zero-count read answering 0 is the POSIX shape.
+- ~~**`NP_PREAD` with a count of 0**~~ (review of the step-6 PR): **settled
+  2026-09-21, in `fsd`.** It was: `fsd`'s `want_len` rejected it with
+  `FS_ERROR`, the export relayed that, and the host peer answered 0 for the
+  same frame, while `ninep-abi` says status = bytes read. No shipped client
+  sends it (libc's `read()` loop never asks for 0), and the divergence was
+  `fsd`'s, not the export's. Now `fsd`'s `NP_PREAD` arm takes 0 as a legal
+  count and answers 0 with no bytes, the POSIX shape, still through `read_at`
+  so the fid gate and the filesystem's own errors answer as a real read would;
+  the path verbs keep `want_len`'s floor. Pinned on both sides: the fid gate
+  grew a fifteenth check (a zero-count `pread` at offset 0 of a file with
+  bytes answers 0 and the fid still reads; it failed `FS_ERROR` on the old
+  tree), and the host peer's self-test gained a table row and a round-trip
+  value check (shown failing by a mutation that refuses the count). The bare
+  `FS_ERROR` item above stays open; this settled the count, not the sentinel.
 - **`dial_file_op` touches `last_activity` before it looks at the verb**
   (review of the step-6 PR): a refused op on `/net/tcp/N/data` still refreshes
   the slot's idle timer, so a client retrying a refusal in a loop keeps a dial
