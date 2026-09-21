@@ -637,6 +637,11 @@ SELF_TEST_VERBS = [
     # a0 = a FID, and no path at all.
     ("NP_PREAD",      NP_BASE + 16, "served",       (FID, 0, 512),     b""),
     ("NP_PREAD(bad)", NP_BASE + 16, "generic-error", (999, 0, 512),    b""),
+    # A count of 0 is served, not refused: the POSIX shape, and what fsd
+    # answers since 2026-09-21 (it refused FS_ERROR before, the divergence
+    # docs/roadmap/roadmap-fid-verbs.md's ledger recorded). The value, 0 with
+    # no bytes, is checked in the round trip below; this row pins the class.
+    ("NP_PREAD(zero)", NP_BASE + 16, "served",       (FID, 0, 0),       b""),
     ("NP_PWRITE",     NP_BASE + 17, "read-only",    (FID, 0, 4),       b""),
     ("NP_FSTAT",      NP_BASE + 18, "served",       (FID, 0, 0),       b""),
     ("NP_CLUNK",      NP_BASE + 19, "served",       (FID, 0, 0),       b""),
@@ -731,6 +736,14 @@ def self_test(quiet=True):
                 bad.append(f"  - fid round trip: NP_PREAD status {st} != "
                            f"{len(chunk)} bytes delivered")
             got += chunk
+        # A zero-count read answers 0 and delivers nothing, at an offset where
+        # the file HAS bytes, so EOF cannot be what answered. fsd answers the
+        # same since 2026-09-21; the guest-side observer is the fid gate's
+        # zero-count check in np9p_client.py.
+        st, chunk = _call(_frame(NP_BASE + 16, (FID, 0, 0), b"", fid), quiet)
+        if st != 0 or chunk:
+            bad.append(f"  - fid round trip: NP_PREAD with count 0 gave status "
+                       f"{st}, {len(chunk)} bytes; expected 0 and none")
         if got != want_bytes:
             # Report the FIRST DIVERGENCE, not both buffers. The file is ~2KB
             # and printing it twice buried the one byte that mattered under

@@ -233,7 +233,10 @@ user's `NP_CLUNK` refused `FS_ERR_PERM` while the owner still holds the fid and
 then closes it (added by the review of #130: the freeing verb's ownership test
 had no observer at all); and, since step 6 (2026-09-12), the data path: a
 `pread` of a never-opened fid refused; another user's `pread` refused
-`FS_ERR_PERM` with the owner's next read served; `/man/grep` (longer than one
+`FS_ERR_PERM` with the owner's next read served; since 2026-09-21 a
+zero-count `pread` at offset 0 of that file answering 0 with no bytes (the
+POSIX shape; `fsd` refused it `FS_ERROR` before, and this check failed on
+that tree); `/man/grep` (longer than one
 `NP_REMOTE_CHUNK`) read to EOF through a fid in chunks and byte-compared
 against the same file read path-based over `NP_READ_AT`, two independent
 paths to the same bytes, the check FAILING on a file that fits one chunk (a
@@ -241,12 +244,15 @@ same-length compare that passes on a short read is the failure mode, and a
 one-chunk file cannot show it); then EOF answering 0 and the session still in
 phase. The one-shot refusal check sends `NP_PREAD` beside `NP_OPEN`. About
 twenty seconds after boot. Against `main` before step 5 it fails at the first
-open; against step 5's export the four step-6 checks fail with
-`FS_ERR_NO_SUCH_VERB` and the rest pass (10 of 14, measured).
+open; against step 5's export every step-6 check fails with
+`FS_ERR_NO_SUCH_VERB` (each is an `NP_PREAD` on a session, which that export
+refuses) and the rest pass: 10 of 14, measured on 2026-09-12 when there were
+four such checks. The zero-count check is a fifth, so expect one more failure
+there; that tree has not been re-measured with it.
 
 ```sh
 scripts/run-guest.sh -- python3 scripts/np9p_client.py localhost 5640 fid-gate
-# expected: 14 PASS, "0 check(s) failed", then the two run-guest lines above
+# expected: 15 PASS, "0 check(s) failed", then the two run-guest lines above
 ```
 
 **Its two step-6 controls, both measured 2026-09-12**, each failing the byte
@@ -325,8 +331,8 @@ removed (`session_slot`, the `opener.uid != proxy.uid` refusal; it was in
 `fid_verb_reply` until step 6 folded that function away). Before the change
 that mutation made `fsd` drop the owner's fid, and the fstat check failed; now
 `fsd` refuses the co-tenant `FS_ERR_PERM` and keeps the fid, and the gate stays
-14 of 14 on `fsd`'s wall alone (re-measured after step 6; it was 11 of 11 at
-step 5). The clunk check is the one that observes the freeing verb:
+15 of 15 on `fsd`'s wall alone (re-measured 2026-09-21 with the zero-count
+check; 14 of 14 after step 6, 11 of 11 at step 5). The clunk check is the one that observes the freeing verb:
 with the same `netd` mutation AND `fsd`'s `handle_fid_op` made to skip the uid
 test for `NP_CLUNK`, it fails (the clunk as `user` answers 0 and the owner's
 next fstat `FS_ERROR`) while the fstat check still passes, so it can fail, and

@@ -53,10 +53,12 @@ pub const NP_REPLY_PAYLOAD: u64 = 8;
 pub const NP_BASE: u64 = 0x100;
 
 /// List a directory's entries into the reply (`name\n` / `name/\n`). Params:
-/// `a0` = path length, `a1` = result-window size. Status = bytes written.
+/// `a0` = path length, `a1` = result-window size, at least 1 (a window of 0
+/// is refused `FS_ERROR`, as for every path read verb). Status = bytes written.
 pub const NP_READDIR: u64 = NP_BASE;
 /// Read a file inline: the reply carries the bytes (capped by the message
-/// limit). Params: `a0` = path length, `a1` = want. Status = the file's *real*
+/// limit). Params: `a0` = path length, `a1` = want, at least 1 (a want of 0 is
+/// refused `FS_ERROR`, as for every path read verb). Status = the file's *real*
 /// size (a one-byte want is the cheapest existence/kind probe).
 pub const NP_READ_FILE: u64 = NP_BASE + 1;
 /// Read a file via the bulk `grant`/`safecopy` path (data delivered straight
@@ -84,7 +86,9 @@ pub const NP_RM: u64 = NP_BASE + 8;
 pub const NP_MV: u64 = NP_BASE + 9;
 /// Read a windowed slice of a file *inline* (the reply carries the bytes): the
 /// chunked-read primitive an exec loader loops over. Params: `a0` = path length,
-/// `a1` = offset, `a2` = want. Status = bytes copied (0 at/past EOF).
+/// `a1` = offset, `a2` = want, at least 1 (a want of 0 is refused `FS_ERROR`,
+/// as for every path read verb; only [`NP_PREAD`] answers 0 to a count of 0).
+/// Status = bytes copied (0 at/past EOF).
 pub const NP_READ_AT: u64 = NP_BASE + 10;
 /// Create/overwrite a file with data carried *inline* in the request (bounded
 /// by `FS_DATA_MAX`, 512) rather than by grant/safecopy - the small-write path.
@@ -131,7 +135,9 @@ pub const NP_OPEN: u64 = NP_BASE + 15;
 
 /// **Read** from a fid at an explicit offset: `a0` = fid, `a1` = offset,
 /// `a2` = count. The reply carries the bytes inline; status = bytes read
-/// (`0` at EOF). No per-op permission check - the fid was authorized at open.
+/// (`0` at EOF, and `0` for a count of `0`: a legal read that delivers
+/// nothing, the POSIX shape, not an error). No per-op permission check - the
+/// fid was authorized at open.
 pub const NP_PREAD: u64 = NP_BASE + 16;
 
 /// **Write** to a fid at an explicit offset from the client's `GRANT_READ`

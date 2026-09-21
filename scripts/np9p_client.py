@@ -914,7 +914,9 @@ def do_fid_gate(host, port, path, data_path):
          asked, so it did not drop it);
       4. step 6, the data path: NP_PREAD on a fid the session never opened
          refused; NP_PREAD as another user refused FS_ERR_PERM with the
-         owner's next read still served; `data_path` read TO EOF through a fid
+         owner's next read still served; a zero-count NP_PREAD answering 0
+         with no bytes (the POSIX shape, and the check that failed while fsd
+         refused it); `data_path` read TO EOF through a fid
          in NP_REMOTE_CHUNK pieces and byte-compared against the same file
          read path-based (NP_READ_AT over one-shot connections: two
          independent paths to the same bytes), and the file must be LONGER
@@ -1144,6 +1146,23 @@ def do_fid_gate(host, port, path, data_path):
     except (RuntimeError, OSError) as exc:
         ok, detail = False, f"{exc}"
     check("another user's pread is refused FS_ERR_PERM, and the owner's next pread is served", ok, detail)
+    # A count of 0 at offset 0 of a file that has bytes: the POSIX shape is a
+    # read that answers 0 and delivers nothing, with the fid intact (the EOF
+    # loop below is what proves it still reads). Not EOF under another name:
+    # the offset is 0 and the file is longer than a chunk, so the only way to
+    # answer 0 here is to treat the count as legal. Until 2026-09-21 fsd refused
+    # it FS_ERROR through `want_len` while the host peer answered 0, the
+    # divergence docs/roadmap/roadmap-fid-verbs.md's ledger recorded; this is
+    # the check that failed on that tree.
+    try:
+        if d is None or data_fid is None:
+            raise RuntimeError("no data fid")
+        st_z, chunk_z = d.op(pread(data_fid, 0, 0))
+        ok = st_z == 0 and len(chunk_z) == 0
+        detail = f"pread(fid {data_fid}, offset 0, count 0) -> {status_name(st_z) if not served(st_z) else f'{st_z}, {len(chunk_z)} bytes'}"
+    except (RuntimeError, OSError) as exc:
+        ok, detail = False, f"{exc}"
+    check("a zero-count pread answers 0 with no bytes, not an error", ok, detail)
     # The file to EOF, twice, through ONE loop applied to two fetchers: rising
     # offsets, one chunk per request, until the export answers 0, with the
     # status checked against the bytes delivered on BOTH sides (the first

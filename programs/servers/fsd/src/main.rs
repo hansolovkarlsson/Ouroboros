@@ -922,7 +922,10 @@ fn handle_fid_op(
     };
     match verb {
         ninep_abi::NP_PREAD => {
-            let Some(want) = want_len(p[2]) else {
+            // `capped`, not `want_len`: a count of 0 is a legal read that
+            // answers 0, the POSIX shape. It still goes through `read_at` so
+            // the errors a real read would meet (not a file, gone) are met.
+            let Some(want) = capped(p[2]) else {
                 return status_reply(reply, syscall_abi::FS_ERROR);
             };
             let (status_slot, result) = reply[..REPLY_PAYLOAD + want].split_at_mut(REPLY_PAYLOAD);
@@ -1013,14 +1016,22 @@ fn path_from(payload: &[u8], start: usize, len: u64) -> Option<&str> {
     core::str::from_utf8(&payload[start..start + len]).ok()
 }
 
-/// A validated result-window size: non-zero, capped at the per-op
-/// payload max (which also always fits the reply buffer).
-fn want_len(want: u64) -> Option<usize> {
+/// A result-window size capped at the per-op payload max (which also always
+/// fits the reply buffer). The one bound every read verb shares; whether a
+/// verb also refuses 0 is that verb's choice, made by calling this or
+/// [`want_len`].
+fn capped(want: u64) -> Option<usize> {
     let want = want as usize;
-    if want == 0 || want > DATA_MAX {
+    if want > DATA_MAX {
         return None;
     }
     Some(want)
+}
+
+/// [`capped`] plus a floor: a validated result-window size that is non-zero.
+/// The path read verbs use it; `NP_PREAD` does not (a zero count answers 0).
+fn want_len(want: u64) -> Option<usize> {
+    capped(want).filter(|&w| w != 0)
 }
 
 // --- Permission enforcement (users/permissions arc, step 3) -----------------
