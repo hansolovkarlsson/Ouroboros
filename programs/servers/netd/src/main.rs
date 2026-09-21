@@ -2557,8 +2557,12 @@ const REMOTE_RBUF: usize = 1024;
 /// the engine's own SYN and data retransmit budgets (`DIAL_SYN_TRIES` and
 /// `DIAL_DATA_TRIES` at `DIAL_RETX_WAIT` each), and BELOW `DIAL_IDLE_TICKS`,
 /// because the idle reap frees a slot without answering anyone and a parked
-/// caller is blocked in a `MSG_CALL` until it is answered.
-const REMOTE_DEADLINE_TICKS: u64 = 150;
+/// caller is blocked in a `MSG_CALL` until it is answered. Five seconds: a
+/// peer that is slow rather than dead is still answered, which the identity
+/// check of the async rig relies on (its peer holds a reply for 3.5 s so it
+/// lands while a second caller is parked), and a dead one costs a `cat` five
+/// seconds, not a minute.
+const REMOTE_DEADLINE_TICKS: u64 = 250;
 
 /// What a remote slot remembers about the request it carries, so the reply can
 /// be verified and delivered from the event loop long after the handler that

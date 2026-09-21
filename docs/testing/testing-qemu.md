@@ -422,7 +422,10 @@ make test-async-rmount        # rebuilds the image, then the three boots (script
 1. **served**: `cat /mnt/h/SUB/NOTE.TXT` prints the note and the prompt comes
    back. Control: a park that never delivers leaves the caller blocked in its
    `MSG_CALL` and no prompt ever returns.
-2. **identity**: the peer holds every reply (`np9p_server.py --delay 1.5`);
+2. **identity**: the peer holds every reply (`np9p_server.py --delay 3.5`,
+   inside the guest's 5 s deadline and past the driver's ~2.5 s between the
+   two `cat`s; at 1.5 s the reply landed before the second caller existed and
+   the check could not fail, measured);
    `exec /bin/cat /mnt/h/HELLO.TXT` parks as task 6, `kill 6`, then `cat
    /mnt/h/SUB/NOTE.TXT` takes slot 6 and parks too. The first reply lands
    while the second caller is parked and must reach nobody: the second `cat`

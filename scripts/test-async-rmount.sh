@@ -11,8 +11,13 @@
 #                 and no prompt ever returns.)
 #   2. identity   a parked reply whose caller was KILLED, and whose slot a second
 #                 caller now holds, reaches nobody: the second caller prints ITS
-#                 file. The peer is told to hold every reply (--delay), so the
-#                 first reply lands while the second caller is parked. On the
+#                 file. The peer holds every reply for 3.5 s (--delay): the
+#                 driver takes ~2.5 s to get from the first `cat` to the second
+#                 (two prompts settled, two lines typed), so the first reply
+#                 lands while the second caller is parked and before either
+#                 deadline (5 s, REMOTE_DEADLINE_TICKS). A 1.5 s delay landed
+#                 the reply before the second caller existed, and the check
+#                 could not fail (measured on the slot-sending kernel). On the
 #                 kernel sending the reply by SLOT (the mutation control), the
 #                 second `cat` prints the FIRST file's bytes.
 #   3. concurrent a request parked on a peer that never answers (--delay past
@@ -87,7 +92,7 @@ stop_peers
 
 # 2. identity. Task 6 is the first spawnable slot: the killed cat's, and then
 # the second cat's, which the transcript confirms.
-peer $PEER --delay 1.5; sleep 3
+peer $PEER --delay 3.5; sleep 3
 boot '# @@mount -r 10.0.2.2:5641 /mnt/h' '# @@exec /bin/cat /mnt/h/HELLO.TXT' '# @@kill 6' \
      '# @@cat /mnt/h/SUB/NOTE.TXT' '# @@'
 grade "a parked reply outlives its caller and reaches nobody else" "$out" 'cat /mnt/h/SUB/NOTE.TXT' \
