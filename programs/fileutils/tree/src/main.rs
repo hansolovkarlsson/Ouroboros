@@ -3,8 +3,10 @@
 //! directory), descending into each subdirectory and drawing the branch
 //! structure, then prints a `N directories, M files` summary.
 //!
-//! Constraints that shape it: spawned `/bin` programs get a ~32 KB stack, so
-//! recursion is depth-capped ([`MAX_DEPTH`]) and each frame's buffers are
+//! Constraints that shape it: spawned `/bin` programs get a fixed stack (the
+//! loader's `STACK_PAGES`, reported by `heap_info`), so
+//! recursion is depth-capped ([`depth_cap`], from the stack the loader
+//! reports, under a compile-time ceiling [`MAX_DEPTH`]) and each frame's buffers are
 //! kept small; there's no heap; and the framebuffer console renders ASCII
 //! 0x20-0x7E only, so the branches are the ASCII forms (`|-- `/`` `-- ``),
 //! not the Unicode box-drawing glyphs. Talks to the filesystem server via
@@ -14,11 +16,31 @@
 #![no_std]
 #![no_main]
 
-/// Deepest level `tree` descends. The 32 KB spawn stack bounds this: each
-/// recursive frame holds a listing buffer plus the child's path and prefix
-/// (which the recursion borrows, so they stay live), ~900 bytes; 16 levels
-/// leaves comfortable headroom. A deeper tree is simply not descended.
+/// Deepest level `tree` can descend: the bound of the prefix buffer
+/// ([`PREFIX_MAX`]), so a compile-time constant. The level it DOES descend
+/// to is [`depth_cap`], computed at start from the stack the loader gave
+/// this program, so a smaller stack shortens the walk instead of faulting
+/// on the guard page. A deeper tree is simply not descended.
 const MAX_DEPTH: usize = 16;
+
+/// What one level of recursion costs: `walk`'s frame holds a listing
+/// buffer plus the child's path and prefix (which the recursion borrows, so
+/// they stay live), ~900 bytes measured, rounded up.
+const FRAME_BYTES: usize = 1024;
+
+/// Stack kept back for everything that is not the recursion: `_start`'s
+/// own buffers, `ulib`'s request frames, the syscall path.
+const STACK_RESERVE: usize = 8 * 1024;
+
+/// The depth `walk` may reach on a stack of `stack_size` bytes: the levels
+/// that fit after the reserve, and never more than [`MAX_DEPTH`]. Asked of
+/// the loader (`ulib::stack_extent`) rather than restated from its page
+/// count, which is the copy that went stale in every other program's
+/// comment. A stack the loader reports as absent (`0`) descends nothing.
+fn depth_cap(stack_size: usize) -> usize {
+    let levels = stack_size.saturating_sub(STACK_RESERVE) / FRAME_BYTES;
+    if levels < MAX_DEPTH { levels } else { MAX_DEPTH }
+}
 
 /// One directory's listing, as `fs_list_dir` fills it (`name\n`/`name/\n`).
 const LIST_BUF: usize = 512;
@@ -79,8 +101,9 @@ pub extern "C" fn _start() -> ! {
     ulib::write_out(target, header.as_bytes());
     ulib::write_out(target, b"\r\n");
 
+    let cap = depth_cap(ulib::stack_extent().1);
     let mut counts = Counts { dirs: 0, files: 0 };
-    walk(root, "", target, 0, &mut counts);
+    walk(root, "", target, 0, cap, &mut counts);
 
     // Summary: a blank line, then the counts (real `tree`'s trailer).
     ulib::write_out(target, b"\r\n");
@@ -99,8 +122,9 @@ pub extern "C" fn _start() -> ! {
 
 /// List `path` and print its entries under `prefix`, recursing into
 /// subdirectories. `depth` is the current level (0 = directly under the
-/// root); `counts` accumulates the directory/file totals for the summary.
-fn walk(path: &str, prefix: &str, target: u64, depth: usize, counts: &mut Counts) {
+/// root), `cap` the level it may not reach ([`depth_cap`]); `counts`
+/// accumulates the directory/file totals for the summary.
+fn walk(path: &str, prefix: &str, target: u64, depth: usize, cap: usize, counts: &mut Counts) {
     let mut listing = [0u8; LIST_BUF];
     let n = ulib::fs_list_dir(path, &mut listing);
     if ulib::is_fs_error(n) {
@@ -156,7 +180,7 @@ fn walk(path: &str, prefix: &str, target: u64, depth: usize, counts: &mut Counts
 
         if e.is_dir {
             counts.dirs += 1;
-            if depth + 1 < MAX_DEPTH {
+            if depth + 1 < cap {
                 // Child prefix = this prefix + (a pipe if more siblings
                 // follow, else blank), and child path = path/name. Both live
                 // on this frame while the recursion borrows them.
@@ -166,7 +190,7 @@ fn walk(path: &str, prefix: &str, target: u64, depth: usize, counts: &mut Counts
                 let mut childbuf = [0u8; ulib::PATH_MAX];
                 if let Some(clen) = resolve_child(path, name, &mut childbuf) {
                     let child = core::str::from_utf8(&childbuf[..clen]).unwrap_or("");
-                    walk(child, child_prefix, target, depth + 1, counts);
+                    walk(child, child_prefix, target, depth + 1, cap, counts);
                 }
             }
         } else {

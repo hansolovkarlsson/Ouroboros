@@ -198,8 +198,9 @@ fn main() -> ! {
 ///
 /// About fourteen peers at 72 bytes a line. It lives in `Auth`, on `serve`'s
 /// frame, because that is where the rest of the auth config already lives and
-/// this server has no heap - and 1 KB against a 40 KB stack that has hit its guard page five
-/// times is a deliberate, measured choice rather than a comfortable one. A file
+/// this server has no heap - and 1 KB against a fixed stack (the loader's
+/// `STACK_PAGES`) that has hit its guard page five times is a deliberate,
+/// measured choice rather than a comfortable one. A file
 /// longer than this is REPORTED at boot rather than silently half-read: the
 /// peers past the cut would simply not be authorized, which is safe and
 /// invisible, and invisible is the half worth fixing.
@@ -1574,8 +1575,9 @@ const MAX_CLIENT_SESSIONS: usize = 3;
 /// or one `NP_REMOTE_CHUNK` of inline data, a reply a status plus one chunk,
 /// each under ~800 bytes even sealed and framed. Sizing `req`/`resp` for that
 /// (rather than `NP_FRAME_MAX`) keeps `session_rmount`'s frame well under the
-/// one-shot path's, which matters because both hang off `serve`'s 40 KB stack
-/// and a session opens by nesting one round trip inside another.
+/// one-shot path's, which matters because both hang off `serve`'s fixed
+/// stack (the loader's `STACK_PAGES`) and a session opens by nesting one
+/// round trip inside another.
 const SESSION_BUF: usize = 1024;
 
 /// Ticks (`now()`) of inactivity before a held client session is reaped as a
@@ -1618,7 +1620,8 @@ struct ClientSession {
 
 /// The two ~1.6 KB packet buffers a TCP round trip needs (one to build, one to
 /// receive), allocated ONCE by `session_rmount` and threaded down. netd's
-/// `serve` stack is 40 KB and already carries `conns` and `dials`; giving each
+/// `serve` stack is fixed (the loader's `STACK_PAGES`) and already carries
+/// `conns` and `dials`; giving each
 /// of `client_connect`/`client_exchange` its own pair nested them four deep and
 /// overflowed the guard page (a write fault, the exact failure `MAX_DIAL` was
 /// capped for). One shared pair keeps the session path no deeper than the
@@ -2339,7 +2342,8 @@ impl Drop for TcpConn {
 /// so these three sizes trade directly against netd's stack headroom.
 // A listener + a couple of concurrent accepted connections ("small fan-out").
 // Each DialConn carries its send+recv buffers and the whole array lives on
-// serve()'s guard-paged (40 KB) stack, so this is capped tight - 4 overflowed.
+// serve()'s guard-paged stack (the loader's `STACK_PAGES`), so this is capped
+// tight - 4 overflowed.
 const MAX_DIAL: usize = 3;
 /// Per-connection send buffer: bytes the client has queued (via a /data write)
 /// that are not yet sent-and-acked. One small request's worth (stop-and-wait).

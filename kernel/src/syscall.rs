@@ -397,13 +397,8 @@ fn spawn_staged(total_len: u64, stdout_target: u64, argv_len: u64, cwd_len: u64)
         }
     };
 
-    let context = Context {
-        gpr: [0; 31],
-        sp_el0: loaded.base + loaded.size,
-        elr_el1: loaded.entry,
-        spsr_el1: 0,
-    };
-    match tasks::spawn(context, (loaded.base, loaded.size)) {
+    let context = loaded.initial_context();
+    match tasks::spawn(context, loaded.region()) {
         Ok(slot) => {
             // Record where this program's output should go (the console by
             // default; the shell for a pipe/redirect). See STDOUT_TARGET.

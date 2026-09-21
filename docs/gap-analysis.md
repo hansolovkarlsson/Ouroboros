@@ -142,7 +142,7 @@ set; roadmap arcs are cited by their `ROADMAP.md` section.
 | Capability | Status | Notes |
 |---|---|---|
 | MMU paging + per-task page tables | ✅ | Per-slot L0–L3 translation views; EL0 sees only its own region. |
-| Stack guard page | ✅ | 16 KB guarded stack (caught real overflows). |
+| Stack guard page | ✅ | Guarded stack, sized by the loader's `STACK_PAGES` (the guard has caught real overflows). |
 | Runtime physical-page allocator | ◐ | A bump allocator (LIFO reclaim in the common case; leaks otherwise — no free list). |
 | Demand paging / swap / paging-to-disk | ✗ | All resident; no swap. |
 | `mmap` (anon + file-backed) | ✗ | Anon could map to region allocation; file-backed is harder. Unbuilt. |

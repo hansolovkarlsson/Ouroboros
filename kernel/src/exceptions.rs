@@ -125,6 +125,7 @@ impl Context {
     pub const fn zeroed() -> Self {
         Context { gpr: [0; 31], sp_el0: 0, elr_el1: 0, spsr_el1: 0 }
     }
+
 }
 
 global_asm!(

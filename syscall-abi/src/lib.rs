@@ -361,12 +361,16 @@ pub const SAFECOPY: u64 = 32;
 /// bytes. This is the per-operation bulk-transfer chunk size; callers
 /// wanting more loop, streaming one chunk at a time (the shell's `cat`
 /// does exactly this). A 4x lift over the old [`FS_DATA_MAX`], chosen
-/// to sit comfortably inside both a client's and the filesystem
-/// server's fixed 8KB stacks alongside their other buffers - tunable if
-/// that headroom ever changes (there's no userland heap or stack guard
-/// page yet). The genuine ceiling on a *single* transfer stays
-/// userland-memory-bound regardless; this primitive lifts the per-op
-/// cap and lets streaming callers move arbitrarily much in total.
+/// when a task's stack was 8KB so that a chunk sat comfortably inside
+/// both a client's and the filesystem server's stack alongside their
+/// other buffers. The stack has grown several times since (the loader's
+/// `STACK_PAGES`, reported by [`HEAP_INFO`]; a guard page below it
+/// faults an overflow cleanly) and every program has a raw heap area as
+/// well, so the headroom is larger than the value was sized for; a lift
+/// is a tuning question, not a safety one. The genuine ceiling on a
+/// *single* transfer stays userland-memory-bound regardless; this
+/// primitive lifts the per-op cap and lets streaming callers move
+/// arbitrarily much in total.
 pub const SAFECOPY_MAX: u64 = 2048;
 
 /// [`GRANT`]/[`SAFECOPY`] direction bit: the grantee may **read** from

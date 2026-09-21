@@ -120,7 +120,10 @@ another task's memory. (The guard has repeatedly exposed real overflows,
 each growing the stack: the shell's `exec` path over 8KB -> 16KB; the
 network server's `ping`/`fetch` path, nesting several 1600/2048-byte frame
 buffers, over 16KB -> 24KB; then netd again once it held 4 concurrent
-connections' `TcpConn`s *and* a client op's buffers, over 24KB -> 32KB.) The **heap** below the guard is a raw EL0-accessible buffer a
+connections' `TcpConn`s *and* a client op's buffers, over 24KB -> 32KB;
+then netd's remote-mount session path, one call deeper than the one-shot
+path, over 32KB -> 40KB. The size today is the loader's `STACK_PAGES`, and
+`heap_info` reports it at runtime.) The **heap** below the guard is a raw EL0-accessible buffer a
 program reaches via the `heap_info` syscall (a `&mut [u8]`, *not* a
 `GlobalAlloc`-backed heap - `alloc`'s collections can't link under this PIE
 loader) - the shell backs its redirect/pipe capture with it, so
@@ -767,8 +770,9 @@ explicitly designated, *only* during a call that client initiated, and
 can never reach a third task — enforced by the kernel, not trusted. The
 per-op transfer is capped at `SAFECOPY_MAX` (2048); larger transfers
 stream in a loop (`cat`), and the ultimate ceiling on a single buffer
-stays userland-memory-bound (a 256KB raw heap area via `heap_info`, on a
-32KB stack).
+stays userland-memory-bound (the raw heap area via `heap_info`, far larger
+than the stack; both extents are the loader's `HEAP_PAGES`/`STACK_PAGES`,
+and `heap_info` reports them).
 
 The `syscall-abi` crate covers the numbers, sentinels, and protocol
 constants. Argument validation is the kernel's: every syscall

@@ -757,7 +757,8 @@ fn on_byte(byte: u8, buf: &mut [u8; BUFFER_SIZE], len: &mut usize, cwd: &mut [u8
 /// to the target file ([`finish_redirect`]).
 /// This program's heap region as a mutable byte slice (see the `heap_info`
 /// syscall): a 256KB raw buffer the shell uses to hold a redirect/pipe
-/// capture far larger than its 16KB stack. Not an allocator - just this
+/// capture far larger than its stack (the loader's `STACK_PAGES`; `heap_info`
+/// reports both extents). Not an allocator - just this
 /// program's own EL0-accessible heap area.
 ///
 /// # Safety contract

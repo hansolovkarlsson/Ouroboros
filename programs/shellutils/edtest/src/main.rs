@@ -7,7 +7,9 @@
 //! 1. **The same vectors pass on the target.** Different pointer width, a
 //!    different code generator, and a loader that relocates the binary — none of
 //!    which the host exercises.
-//! 2. **Peak stack use**, measured rather than assumed. `netd` has 32 KB and has
+//! 2. **Peak stack use**, measured rather than assumed. `netd` has the same
+//!    fixed stack every task gets (the loader's `STACK_PAGES`; this program
+//!    prints the size it measures against, asked for at runtime) and has
 //!    hit its guard page five times in this project's history; a signature
 //!    verification is the largest computation it would ever have done.
 //! 3. **Time per operation**, so the decision to use bit-by-bit scalar reduction
