@@ -65,8 +65,8 @@ signature — see above); not X25519 alone (key agreement, not identity).
 
 The export is **one TCP connection per request**. There is no session to amortize
 a handshake over, and inventing one would need per-peer state in `netd` — the
-task with no heap, no mutable statics, and a 32 KB stack that has hit its guard
-page five times.
+task with no heap, no mutable statics, and a fixed stack (the loader's
+`STACK_PAGES`) that has hit its guard page five times.
 
 So every framed request carries a signature, exactly where today's MAC sits. The
 cost is one sign and one verify per operation, against a network round trip that

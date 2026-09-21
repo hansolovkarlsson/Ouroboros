@@ -45,7 +45,6 @@
 
 use crate::console;
 use crate::synccell::SyncCell;
-use crate::exceptions::Context;
 use crate::loader;
 use crate::tasks;
 
@@ -269,7 +268,7 @@ pub fn restart(slot: usize) {
             return;
         }
     };
-    let context = Context::for_program(&loaded);
+    let context = loaded.initial_context();
     tasks::install_task(slot, context, loaded.region());
     // The crash teardown cleared this slot's argv (the store `TASK_NAME`
     // reads), so re-apply the server's name - otherwise a restarted server

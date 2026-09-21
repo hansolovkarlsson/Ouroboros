@@ -1850,11 +1850,15 @@ would otherwise silently shrink into looking like nothing was ever found.
     size check mapped to the existing too-large spawn error.
   - ~~**Twelve prose copies of the stack size, disagreeing with each other and
     with the constant**~~ **Fixed 2026-09-20** (#146): the nine that
-    stood after #135 now state the relationship (the loader's `STACK_PAGES`,
-    reported by `heap_info`) and carry no value, except `tree`'s depth cap,
-    which keeps the 32 KB it was derived from as the one stated number and
-    says so. The two growth histories gained their missing last step
-    (32 KB to 40 KB, the remote-mount session path). The original finding:
+    stood after #135, and the nine more the review of #146 found (`useradd`
+    twice, `chown`, `edtest`, `netd` four times, the cluster-keys roadmap,
+    and `SAFECOPY_MAX`'s doc still describing 8 KB stacks with no guard
+    page), now state the relationship (the loader's `STACK_PAGES`, reported
+    by `heap_info`) and carry no value. `tree`'s depth cap, the one place
+    the value was load-bearing, is computed at start from the stack the
+    loader reports instead of from a number in a comment. The two growth
+    histories gained their missing last step (32 KB to 40 KB, the
+    remote-mount session path). The original finding:
     `processes.md` (8 pages/32 KB and 4 pages/16 KB in
     the same file), `architecture.md` (32 KB, three places), `gap-analysis.md`
     (16 KB), `ROADMAP.md` (32 KB), `syscall-abi`'s `HEAP_INFO` doc and the
@@ -2122,10 +2126,15 @@ would otherwise silently shrink into looking like nothing was ever found.
     three files**~~ **Fixed 2026-09-20** (#146). It was spelled inside
     an identical `Context` literal in `tasks.rs` five times, `supervisor.rs`
     and `syscall.rs`, so anything ever placed above the stack had to be
-    found at all seven with the compiler flagging none. Now
-    `LoadedProgram::stack_top()` (with `region()` beside it) and
-    `Context::for_program` state it once, and the seven sites call them.
-    The idle task's context stays hand-built: it is not a loaded program.
+    found at all seven with the compiler flagging none. Now one private
+    `region_end` in the loader is read by `tail` (the stack area) and by
+    `LoadedProgram::end()`/`stack_top()`, `initial_context()` beside them
+    builds the context every loaded program starts in, and the seven sites
+    plus `main.rs`'s five boot-log lines call those. The idle task's
+    context stays hand-built: it is not a loaded program. The first cut put
+    the constructor in `exceptions.rs` and claimed `stack_top` was the one
+    derivation while `tail` and the log lines still spelled their own; the
+    review of #146 caught both.
 
 ## Open gaps (small, from the old parking lot)
 

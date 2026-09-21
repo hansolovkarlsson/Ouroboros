@@ -240,7 +240,7 @@ fn main() -> Status {
     log::info!(
         "Ouroboros kernel: loaded shell program, region {:#x}-{:#x}, entry {:#x}",
         program.base,
-        program.base + program.size,
+        program.end(),
         program.entry
     );
 
@@ -254,7 +254,7 @@ fn main() -> Status {
             log::info!(
                 "Ouroboros kernel: loaded filesystem server, region {:#x}-{:#x}, entry {:#x}",
                 fsd.base,
-                fsd.base + fsd.size,
+                fsd.end(),
                 fsd.entry
             );
             Some(fsd)
@@ -275,7 +275,7 @@ fn main() -> Status {
             log::info!(
                 "Ouroboros kernel: loaded console server, region {:#x}-{:#x}, entry {:#x}",
                 cond.base,
-                cond.base + cond.size,
+                cond.end(),
                 cond.entry
             );
             Some(cond)
@@ -291,7 +291,7 @@ fn main() -> Status {
             log::info!(
                 "Ouroboros kernel: loaded network server, region {:#x}-{:#x}, entry {:#x}",
                 netd.base,
-                netd.base + netd.size,
+                netd.end(),
                 netd.entry
             );
             Some(netd)
@@ -307,7 +307,7 @@ fn main() -> Status {
             log::info!(
                 "Ouroboros kernel: loaded account server, region {:#x}-{:#x}, entry {:#x}",
                 accountd.base,
-                accountd.base + accountd.size,
+                accountd.end(),
                 accountd.entry
             );
             Some(accountd)

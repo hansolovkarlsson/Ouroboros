@@ -397,7 +397,7 @@ fn spawn_staged(total_len: u64, stdout_target: u64, argv_len: u64, cwd_len: u64)
         }
     };
 
-    let context = Context::for_program(&loaded);
+    let context = loaded.initial_context();
     match tasks::spawn(context, loaded.region()) {
         Ok(slot) => {
             // Record where this program's output should go (the console by

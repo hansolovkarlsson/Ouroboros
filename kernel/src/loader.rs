@@ -99,6 +99,8 @@ use alloc::string::String;
 use core::mem::size_of;
 use core::ptr::NonNull;
 
+use crate::exceptions::Context;
+
 use uefi::boot::{self, AllocateType, MemoryType, PAGE_SIZE};
 use uefi::fs::FileSystem;
 use uefi::CString16;
@@ -227,7 +229,7 @@ fn tail(base: u64, size: u64) -> Option<Tail> {
     if size < TAIL_PAGES * page {
         return None;
     }
-    let end = base + size;
+    let end = region_end(base, size);
     let stack_base = end - STACK_PAGES * page;
     let guard = stack_base - GUARD_PAGES * page;
     let heap_base = guard - HEAP_PAGES * page;
@@ -471,21 +473,50 @@ pub struct LoadedProgram {
     pub entry: u64,
 }
 
+/// The first address past a region. The one derivation of it: `tail`
+/// (so the stack area's top), [`LoadedProgram::end`] (so the boot log
+/// and every task's first stack pointer) all read this, and no caller
+/// spells `base + size` itself.
+fn region_end(base: u64, size: u64) -> u64 {
+    base + size
+}
+
 impl LoadedProgram {
     /// The region as the `(base, size)` pair `tasks.rs` keys its tables by.
     pub fn region(&self) -> (u64, u64) {
         (self.base, self.size)
     }
 
+    /// The first address past the region ([`region_end`]).
+    pub fn end(&self) -> u64 {
+        region_end(self.base, self.size)
+    }
+
     /// The initial stack pointer: the top of the region, the stack growing
     /// down from there towards the guard page (`[code][heap][guard][stack]`,
-    /// see `TAIL_PAGES`). The ONE place this is derived: it used to be
-    /// spelled `base + size` inside an identical `Context` literal at seven
-    /// sites across three files, so anything ever placed above the stack
-    /// had to be found at all seven with the compiler flagging none.
-    /// `stack_area` agrees by construction (its base plus its size is this).
+    /// see `TAIL_PAGES`). It used to be spelled `base + size` inside an
+    /// identical `Context` literal at seven sites across three files, so
+    /// anything ever placed above the stack had to be found at all seven
+    /// with the compiler flagging none. `stack_area` agrees by construction:
+    /// `tail` computes the stack's top from the same [`region_end`].
     pub fn stack_top(&self) -> u64 {
-        self.base + self.size
+        self.end()
+    }
+
+    /// The context a loaded program starts in: registers clear, the stack
+    /// pointer at [`Self::stack_top`], `ELR_EL1` at its real ELF entry
+    /// point (not its load base, which happens to be equal today only
+    /// because `programs/linker.ld` keeps `_start` at offset 0), and
+    /// `SPSR_EL1` zero: `M[3:0]=0000` selects EL0t (the only mode EL0
+    /// has), DAIF all clear (every exception class unmasked, so the timer
+    /// tick can preempt from the first instruction), NZCV cleared. Every
+    /// EL0 task the kernel loads (the boot programs, a supervised restart,
+    /// a `SPAWN`) starts from this; the idle task is the one context built
+    /// by hand, since it is not a loaded program. Lives here, with the
+    /// layout it derives from, so a change to how a program starts is
+    /// found in the file that owns the layout.
+    pub fn initial_context(&self) -> Context {
+        Context { gpr: [0; 31], sp_el0: self.stack_top(), elr_el1: self.entry, spsr_el1: 0 }
     }
 }
 

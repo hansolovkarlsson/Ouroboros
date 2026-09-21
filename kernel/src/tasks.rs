@@ -2290,7 +2290,7 @@ pub unsafe fn init(
     // Task 0: the shape every loaded program starts in (entry point, stack
     // at the top of the region, everything unmasked) is `Context::for_program`,
     // stated once there rather than per task here.
-    *unsafe { &mut *TASKS[TaskIndex::FIRST.index()].get() } = Context::for_program(program);
+    *unsafe { &mut *TASKS[TaskIndex::FIRST.index()].get() } = program.initial_context();
     unsafe { *REGIONS[0].get() = program.region() };
     // Name the boot task so `ps` shows it (spawned tasks carry their own
     // argv[0]; these loaded ones would otherwise be nameless). Task 0 is the
@@ -2321,7 +2321,7 @@ pub unsafe fn init(
     // Task 2: the filesystem server, exactly task 0's setup shape -
     // entry point, stack at the top of its region, everything unmasked.
     if let Some(fsd) = fsd {
-        *unsafe { &mut *TASKS[2].get() } = Context::for_program(fsd);
+        *unsafe { &mut *TASKS[2].get() } = fsd.initial_context();
         unsafe { *REGIONS[2].get() = fsd.region() };
         unsafe { *STATES[2].get() = TaskState::Runnable };
         if let Some(n) = server_name(2) {
@@ -2335,7 +2335,7 @@ pub unsafe fn init(
     // unmasked. Absent (no COND.BIN) leaves the slot `Unused`, and the
     // boot proceeds with the kernel's own console handling all output.
     if let Some(cond) = cond {
-        *unsafe { &mut *TASKS[3].get() } = Context::for_program(cond);
+        *unsafe { &mut *TASKS[3].get() } = cond.initial_context();
         unsafe { *REGIONS[3].get() = cond.region() };
         unsafe { *STATES[3].get() = TaskState::Runnable };
         if let Some(n) = server_name(3) {
@@ -2348,7 +2348,7 @@ pub unsafe fn init(
     // console servers. Absent (no NETD.BIN) leaves the slot `Unused`, and
     // the boot proceeds with no network - `ping` reports no server.
     if let Some(netd) = netd {
-        *unsafe { &mut *TASKS[4].get() } = Context::for_program(netd);
+        *unsafe { &mut *TASKS[4].get() } = netd.initial_context();
         unsafe { *REGIONS[4].get() = netd.region() };
         unsafe { *STATES[4].get() = TaskState::Runnable };
         if let Some(n) = server_name(4) {
@@ -2361,7 +2361,7 @@ pub unsafe fn init(
     // leaves the slot `Unused` and the system boots without self-service password
     // changes - exactly as it did before there was one.
     if let Some(accountd) = accountd {
-        *unsafe { &mut *TASKS[5].get() } = Context::for_program(accountd);
+        *unsafe { &mut *TASKS[5].get() } = accountd.initial_context();
         unsafe { *REGIONS[5].get() = accountd.region() };
         unsafe { *STATES[5].get() = TaskState::Runnable };
         if let Some(n) = server_name(5) {

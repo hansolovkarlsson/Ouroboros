@@ -117,7 +117,7 @@ pub extern "C" fn _start() -> ! {
     // --- Prepare (no writes yet) -------------------------------------------
     // The new /etc/passwd content is built here and held until the commit at the
     // bottom; `pbuf` is scoped so the passwd buffer isn't live across the group
-    // and home steps (this program runs on a 32KB guarded stack).
+    // and home steps (this program runs on a fixed guarded stack, the loader's `STACK_PAGES`).
     let mut out = [0u8; BUF];
     let olen;
     let uid;
@@ -275,7 +275,7 @@ pub extern "C" fn _start() -> ! {
 /// program's fixed frame doesn't have, and no consumer wants it yet.
 ///
 /// `#[inline(never)]`: the listing and copy buffers stay out of the caller's
-/// frame (a 32 KB guarded stack).
+/// frame (a fixed guarded stack, the loader's `STACK_PAGES`).
 #[inline(never)]
 fn populate_home(home: &str, uid: u32, gid: u32) {
     let mut listing = [0u8; 512];

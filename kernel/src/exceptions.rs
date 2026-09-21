@@ -97,7 +97,6 @@ use core::arch::global_asm;
 use core::ffi::c_void;
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
-use crate::loader::LoadedProgram;
 use crate::console;
 use crate::gic;
 use crate::halt;
@@ -127,20 +126,6 @@ impl Context {
         Context { gpr: [0; 31], sp_el0: 0, elr_el1: 0, spsr_el1: 0 }
     }
 
-    /// The context a loaded program starts in: registers clear, the stack
-    /// pointer at the top of its region ([`LoadedProgram::stack_top`]),
-    /// `ELR_EL1` at its real ELF entry point (not its load base, which
-    /// happens to be equal today only because `programs/linker.ld` keeps
-    /// `_start` at offset 0), and `SPSR_EL1` zero: `M[3:0]=0000` selects
-    /// EL0t (the only mode EL0 has), DAIF all clear (every exception
-    /// class unmasked, so the timer tick can preempt from the first
-    /// instruction), NZCV cleared. Every EL0 task the kernel loads (the
-    /// boot programs, a supervised restart, a `SPAWN`) starts from this;
-    /// the idle task is the one context built by hand, since it is not a
-    /// loaded program.
-    pub fn for_program(program: &LoadedProgram) -> Self {
-        Context { gpr: [0; 31], sp_el0: program.stack_top(), elr_el1: program.entry, spsr_el1: 0 }
-    }
 }
 
 global_asm!(

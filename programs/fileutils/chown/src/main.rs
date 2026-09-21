@@ -82,7 +82,7 @@ fn split_owner(spec: &[u8]) -> Option<OwnerFields<'_>> {
 /// Look up a user name in `/etc/passwd`, returning its uid.
 ///
 /// `#[inline(never)]`: the passwd file is a 2 KB stack buffer, kept out of the
-/// caller's frame (this program runs on a 32 KB guarded stack).
+/// caller's frame (this program runs on a fixed guarded stack, the loader's `STACK_PAGES`).
 #[inline(never)]
 fn user_by_name(name: &[u8]) -> Option<u32> {
     let mut buf = [0u8; ACCT_BUF];
