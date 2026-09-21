@@ -37,6 +37,10 @@ and the first two steps of an asynchronous remote mount.
 - **The default per-task stack is 48 KB** (`STACK_PAGES` 10 to 12): the held
   client session and then the async remote mount's parked-request table each
   needed room on `netd`'s deep `serve` frame.
+- **`fg` (syscall 20) gains a `foreground` argument** and refuses a non-owner
+  caller: only the task that currently owns the keyboard may hand it off, and
+  the argument selects whether Ctrl+C terminates the task (a command) or
+  detaches it (a `fg`-handed session).
 
 **The fid verbs reach the export** (#129 to #133). A C program can now
 `open`/`pread`/`pwrite`/`fstat`/`clunk` a file on a *remote* mount, not just a
@@ -79,6 +83,16 @@ identity via the new `MSG_SEND` arm. The re-entrant drain still refuses (that
 is step 3's to remove); the held fid session is still synchronous (step 2). The
 plan, its four decisions and the three overflows the arc hit are in
 `docs/roadmap/roadmap-async-rmount.md`; `make test-async-rmount` drives it.
+
+**Ctrl+C detaches a handed-over shell; `fg` refused from a non-owner** (#151).
+Ctrl+C now tells a foreground COMMAND from a handed-over SESSION: a `/bin`
+program the shell `WAIT`s on is terminated as before, but a nested shell handed
+the keyboard with `fg` is DETACHED instead - the keyboard reverts to its
+parent, the session survives with its login and cwd, and `fg` resumes it - so a
+stray Ctrl+C at a nested prompt no longer throws the session away. The kernel
+classifies on intent recorded at `FG` time OR a live task waiting on the owner.
+`FG` gains a `foreground` flag (arg1) and refuses a caller that does not own
+the keyboard. Driven by `make test-keyboard-chain` (two new recipes).
 
 ## v0.19.0: rights flow one step down, tasks have identities, C reaches a remote mount (2026-09-07)
 

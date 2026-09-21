@@ -727,6 +727,46 @@ Phase 4b remote-fs, which reaches it at the same deep frame. Corrected to name
 the child's path as still-deep and latent rather than asserting safety it does
 not have.
 
+## A behaviour change, the comments it left standing, and a doc bound to the wrong symbol (2026-09-21)
+
+Changing what Ctrl+C does to a foregrounded task (terminate a command,
+detach a `fg`-handed session) and refusing `FG` from a non-owner falsified
+three comments that the edit never touched, and a review caught all three.
+`run_found_command` still said "FG itself does not check that its caller is
+the owner" beside the very call the new refusal now guards. `interrupt_key_check`'s
+own head doc still said a `fg`-handed shell is "marked for death", the exact
+case the change now detaches. The `WaitReason::TaskExit` poll still said "any
+other owner is marked for death by the poll itself", now a terminate *or* a
+detach. Two of the three are in a different function from the edit that broke
+them; one is in a different file. This is the family's plainest form: a
+behaviour change makes true statements about the old behaviour false, in files
+the diff does not open, and nothing but a reader notices.
+
+The novel one this session was not a false claim but a correctly-worded one
+attached to the wrong thing. Fixing the review's earlier findings I inserted a
+new helper, `task_waited_on`, and its one-line doc *in the middle of*
+`interrupt_key_check`'s doc comment. In Rust a run of `///` lines binds to the
+next item, so the whole forty-line terminate-vs-detach explanation rebound to
+the trivial helper and the function it describes was left undocumented. The
+compiler is silent: it is valid Rust, every word still true, just describing
+the wrong symbol. In a project whose `CLAUDE.md` treats the doc comment as the
+authority, the authority now pointed at the wrong function. The check that
+found it was the same review discipline, reading the rendered structure rather
+than the diff. The fix was to move the helper above the block, which is the
+general remedy: a doc comment is positional, and an insertion into a comment
+block is an edit to what that block documents even when no word changes.
+
+A third strand ran under the day without a comment to point at. Twice the
+first form of a *fix* was wrong and an existing check, not a new one, said so:
+a source-port collision I dismissed as unreachable that the next review showed
+the async design had made reachable, and a Ctrl+C classification keyed on the
+parent's live `WAIT` state whose window a review exposed and whose flag-only
+replacement then failed an existing keyboard-chain recipe. The recurring shape
+is the one 09-20 named for a fix scoped to a symptom: the confident quick
+answer, `next_src_port` is fine / the flag is enough, was the reproducible
+signal that happened to be wrong, and the discipline that caught it was reading
+what I had claimed rather than trusting that it passed.
+
 ## What actually worked
 
 Three things, none of them "be more careful".
