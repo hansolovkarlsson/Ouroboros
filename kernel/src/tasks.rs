@@ -65,7 +65,7 @@
 use core::arch::{asm, global_asm};
 use crate::synccell::SyncCell;
 use core::ffi::c_void;
-use core::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 use crate::exceptions::Context;
 use crate::loader::{LoadedProgram, SLOT_ALIGN};
@@ -557,6 +557,19 @@ static INPUT_OWNER: AtomicUsize = AtomicUsize::new(0);
 /// relies on the shape rather than repairing it.
 static PREVIOUS_OWNERS: [AtomicU64; NUM_TASKS] = [const { AtomicU64::new(0) }; NUM_TASKS];
 
+/// How each task was foregrounded: `true` = a foreground COMMAND the caller
+/// will `WAIT` on (Ctrl+C terminates it), `false` = a session handed over with
+/// a bare `fg` (Ctrl+C detaches it, see [`interrupt_key_check`]). Recorded by
+/// [`set_input_owner`] INSIDE the `FG` that makes the task the owner, so it is
+/// correct the instant that task runs - unlike inferring it from the caller's
+/// `WAIT` state alone, which is briefly wrong in the window between
+/// `run_found_command`'s `FG` and its `WAIT` (review of #151). It is OR'd with a
+/// live scan for a task blocked in `WAIT` on the owner (`task_waited_on`), which
+/// covers a bare `fg` back to a still-waited task that clears this flag. Indexed
+/// by owner slot; only the current owner's entry is read, so stale entries for
+/// former owners are harmless.
+static FOREGROUND_COMMAND: [AtomicBool; NUM_TASKS] = [const { AtomicBool::new(false) }; NUM_TASKS];
+
 /// A foreground task the Ctrl+C escape hatch (`interrupt_key_check`) has marked
 /// for death, killed by [`on_tick`] at a safe point (the only place this kernel
 /// tears a task down and switches away). Holds the task's packed identity
@@ -575,7 +588,14 @@ static PENDING_KILL: AtomicU64 = AtomicU64::new(0);
 /// the task that held it, a pop of everything above `owner` if it is.
 /// Foregrounding the owner again records nothing. Validation (index in
 /// range, slot occupied, not idle) is the syscall layer's job.
-pub(crate) fn set_input_owner(owner: usize) {
+pub(crate) fn set_input_owner(owner: usize, foreground_command: bool) {
+    // Record HOW `owner` was foregrounded before anything else, so a Ctrl+C
+    // arriving the instant after `FG` returns already classifies it correctly
+    // (see FOREGROUND_COMMAND). Set even when re-foregrounding the same owner,
+    // in case the kind changed.
+    if owner < NUM_TASKS {
+        FOREGROUND_COMMAND[owner].store(foreground_command, Ordering::Relaxed);
+    }
     let previous = INPUT_OWNER.swap(owner, Ordering::Relaxed);
     if previous == owner {
         return;
@@ -656,21 +676,28 @@ pub(crate) fn revert_input_owner_if(dying: usize) {
 }
 
 /// The Ctrl+C escape hatch. When `byte` is Ctrl+C (`0x03`, ETX) and a task
-/// other than the boot shell owns the keyboard (a foreground `/bin` program
-/// handed the keyboard by `run_found_command`, or a nested shell handed it by
-/// `fg`), that task is marked for death ([`PENDING_KILL`], killed by
-/// [`on_tick`]) and the byte is swallowed (returns `true`). When it dies the
-/// keyboard reverts to the task that held it at the `fg`, whose `WAIT` on it
-/// (if it is a shell that ran it) then wakes with `TASK_KILLED_STATUS`. When task 0
-/// (the boot shell) already owns the keyboard, Ctrl+C is not special: it passes
-/// through as an ordinary byte the line editor ignores (returns `false`), so the
-/// normal single-shell case is unchanged.
+/// other than the boot shell owns the keyboard, it does one of two things by
+/// whether the owner is a foreground command (its [`FOREGROUND_COMMAND`] flag,
+/// OR a live task blocked in `WAIT` on it - see the body): a foreground
+/// COMMAND (a `/bin` program `run_found_command` will `WAIT` on) is marked for
+/// death ([`PENDING_KILL`], killed by [`on_tick`]); a SESSION handed over with
+/// a bare `fg` is DETACHED, the keyboard reverting to whoever handed it over
+/// without killing it, so a stray Ctrl+C at a nested shell's prompt does not
+/// throw away its login, cwd and env. Either way the byte is swallowed (returns
+/// `true`). On a terminate, when the task dies the keyboard reverts the same
+/// way. When task 0 (the boot shell) already owns the keyboard, Ctrl+C is not
+/// special: it passes through as an ordinary byte the line editor ignores
+/// (returns `false`), so the normal single-shell case is unchanged.
 ///
-/// This is the interrupt that makes interactive `/bin` programs viable: run an
-/// editor or a REPL, and Ctrl+C kills it and drops back to the shell. It is
-/// still not a *signal*; nothing is delivered to the program for it to catch (an
-/// editor can't offer "save first"). That's a later refinement (signals, or a
-/// raw-input mode).
+/// The opening summary applies here: a foreground COMMAND is marked for death,
+/// a `fg`-handed SESSION is detached. Which of the two `owner` is comes from
+/// [`FOREGROUND_COMMAND`], set at `FG` time (not inferred from the parent's
+/// live `WAIT` state, which has a window where it is wrong - review of #151).
+/// This is what makes interactive `/bin` programs viable: run an editor or a
+/// REPL, Ctrl+C kills it and drops back to the shell; a `fg`d shell instead
+/// detaches, and `fg` resumes it. It is still not a *signal*; nothing is
+/// delivered to the program for it to catch (an editor can't offer "save
+/// first"). That's a later refinement (signals, or a raw-input mode).
 ///
 /// **A foreground COMMAND is terminated; a handed-over SESSION is detached.**
 /// The two look identical from here - both are a non-zero keyboard owner with a
@@ -689,6 +716,17 @@ pub(crate) fn revert_input_owner_if(dying: usize) {
 /// the byte is still consumed here either way (returns `true`), it is the
 /// effect that differs. Task 0 (the boot shell) is never an `owner` here (the
 /// guard below), so its Ctrl+C stays an ordinary ignored byte.
+/// Whether any live task is blocked in [`WaitReason::TaskExit`] on slot
+/// `target` - i.e. someone ran `target` as a foreground command and is sitting
+/// in the `WAIT`. Used by [`interrupt_key_check`] to decide terminate-vs-detach
+/// alongside [`FOREGROUND_COMMAND`]; the scan is `NUM_TASKS` wide, which is
+/// small, and runs only on a Ctrl+C.
+fn task_waited_on(target: usize) -> bool {
+    STATES.iter().any(|st| {
+        matches!(unsafe { *st.get() }, TaskState::Blocked(WaitReason::TaskExit(t)) if t == target)
+    })
+}
+
 pub(crate) fn interrupt_key_check(byte: u8) -> bool {
     const ETX: u8 = 0x03; // Ctrl+C
     let owner = input_owner();
@@ -705,30 +743,32 @@ pub(crate) fn interrupt_key_check(byte: u8) -> bool {
         );
         return false;
     };
-    // The task that handed `owner` the keyboard, if it is still that same task
-    // and alive. `None` (no recorded or live previous owner) is treated as a
-    // handed-over session: detaching is non-destructive, so it is the safe
-    // default when we cannot confirm a waiting foreground parent.
-    let previous = live_occupant(PREVIOUS_OWNERS[owner].load(Ordering::Relaxed));
-    let foreground_command = matches!(
-        previous,
-        Some(p) if matches!(
-            unsafe { *STATES[p.index()].get() },
-            TaskState::Blocked(WaitReason::TaskExit(t)) if t == owner
-        )
-    );
-    if foreground_command {
-        // Terminate: the parent is blocked in `WAIT` on `owner` and will wake.
+    // Terminate a foreground COMMAND; detach a `fg`-handed SESSION. Two signals,
+    // OR'd, because each covers a case the other misses (both found by the
+    // review of #151):
+    //  - The flag recorded at `FG` time. `run_found_command` does `FG` then
+    //    `WAIT`, and inferring intent from the caller's live `WAIT` state alone
+    //    would misread a foreground command as a session in the window between
+    //    those two syscalls, detaching it into an orphan that can no longer read
+    //    the keyboard. The flag is set inside the `FG`, so it is right at once.
+    //  - Any task actually blocked in `WAIT` on `owner`. A bare `fg` back to a
+    //    task its parent is still waiting on (popping the chain) clears that
+    //    task's flag, but the parent is still in the `WAIT`; terminating is what
+    //    wakes it, and detaching would strand it holding the keyboard. The flag
+    //    cannot see this (it was just cleared) but the waiter is right there.
+    if FOREGROUND_COMMAND[owner].load(Ordering::Relaxed) || task_waited_on(owner) {
+        // Terminate: a task is, or is about to be, blocked in `WAIT` on `owner`,
+        // and its `WAIT` wakes with `TASK_KILLED_STATUS`.
         PENDING_KILL.store(id, Ordering::Relaxed);
         return true;
     }
-    // Detach: hand the keyboard back to the previous owner (or task 0 if none is
-    // live) without killing `owner`. This only flips the ownership atomic - no
-    // task teardown, no context switch - so it is safe from the poll context
-    // that `PENDING_KILL` is deferred out of. `owner`'s `PREVIOUS_OWNERS` entry
-    // is left intact, so a later `fg owner` resumes it (`set_input_owner`
-    // re-records the same link).
-    let target = previous.map_or(0, TaskIndex::index);
+    // Detach: hand the keyboard back to whoever handed it over (or task 0 if
+    // none is live) without killing `owner`. This only flips the ownership
+    // atomic - no task teardown, no context switch - so it is safe from the
+    // poll context that `PENDING_KILL` is deferred out of. `owner`'s
+    // `PREVIOUS_OWNERS` entry is left intact, so a later `fg owner` resumes it
+    // (`set_input_owner` re-records the same link).
+    let target = live_occupant(PREVIOUS_OWNERS[owner].load(Ordering::Relaxed)).map_or(0, TaskIndex::index);
     INPUT_OWNER.store(target, Ordering::Relaxed);
     true
 }
@@ -1749,9 +1789,10 @@ impl WaitReason {
                 // poll itself (it answers None for anyone else): drain one
                 // byte if available. Ctrl+C reaches this
                 // branch only when the waiter is task 0 (the one owner
-                // interrupt_key_check never marks); any other owner is
-                // marked for death by the poll itself and never sees
-                // the byte. For task 0 it interrupts the wait (the
+                // interrupt_key_check leaves alone - any other owner it
+                // terminates or detaches in the poll, returning true, so
+                // the byte never reaches here for them). For task 0 it
+                // interrupts the wait (the
                 // target keeps running); any other typed byte is
                 // deliberately discarded, same spirit as typing at a
                 // busy foreground job in `sh`.

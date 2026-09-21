@@ -1228,7 +1228,7 @@ fn run_head_pipeline(
         // keyboard (an interactive last stage, e.g. `ls -l | more`) and reap
         // every stage in order.
         PipeSink::Console => {
-            syscall(syscall_abi::FG, slots[last]);
+            syscall4(syscall_abi::FG, slots[last], 1, 0, 0); // foreground command
             for i in 0..prog_stages.len() {
                 let cmd = prog_stages[i].split_whitespace().next().unwrap_or("stage");
                 wait_pipe_stage(cmd, slots[i]);
@@ -2456,11 +2456,13 @@ fn run_found_command(
                 // death (exit *or* Ctrl+C kill) ownership reverts to whoever
                 // held it at the FG (kernel `revert_input_owner_if`). That is
                 // this shell on the assumption that it read the command line
-                // from the keyboard, which only the owner can; FG itself does
-                // not check that its caller is the owner (ledger). This is
-                // what lets an interactive command be an ordinary `/bin`
-                // program.
-                syscall(syscall_abi::FG, slot);
+                // from the keyboard, which only the owner can; FG refuses a
+                // caller that is not the current owner (so the chain always
+                // names the caller). This is what lets an interactive command
+                // be an ordinary `/bin` program. The `1` marks it a foreground
+                // command: Ctrl+C terminates it, where a bare `fg` (a handed-
+                // over session) would detach.
+                syscall4(syscall_abi::FG, slot, 1, 0, 0);
                 // Foreground: wait for it (also reaps the slot). A Ctrl+C now
                 // *terminates* the program (the kernel kills it and the wait
                 // returns TASK_KILLED_STATUS); print a newline so the next

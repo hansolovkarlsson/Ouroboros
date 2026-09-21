@@ -1446,7 +1446,7 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
             if tasks::current_task() != tasks::input_owner() {
                 return syscall_abi::TASK_ERR_PROTECTED;
             }
-            tasks::set_input_owner(target.index());
+            tasks::set_input_owner(target.index(), arg1 != 0);
             0
         }
         syscall_abi::GRANT => {
