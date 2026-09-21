@@ -911,7 +911,7 @@ connection makes possible but which is an auth-model change); and **raising
 exhausts it, with the exhaustion as evidence).
 
 ~~**A stack-depth limitation on the ledger, found by the PR review.**~~
-**Closed 2026-09-20 (PR_REENTRANT): measured, then refused.** The claim
+**Closed 2026-09-20 (#147): measured, then refused.** The claim
 stood as analysis: the 40 KB stack is sized for the top-level session path
 (`serve` → `drain` → `handle_client` → `session_rmount`), and a fid
 `NETOP_RMOUNT` can also arrive at the **re-entrant** drain inside `tcp_run` (a
