@@ -213,7 +213,24 @@ Kept as the steps land, newest first.
   and an in-subnet down IP fails ARP synchronously (a correct `NO_FS` by another
   path). The SYN-drop control is a live L2 node refusing a dead port plus a
   mutation to confirm the hang without the guard; described here, not automated,
-  the same honesty the `tcp_get` coalesced-FIN arm carries. (2) A cpu child's Phase 4b `/host` request reaching the re-entrant drain
+  the same honesty the `tcp_get` coalesced-FIN arm carries.
+- **The second review of #149 found four more, all fixed.** (1) `next_src_port`
+  was only unique across calls a round trip apart, an invariant the async park
+  breaks: two mounts parked back-to-back to the same peer could draw the same
+  ephemeral port and cross each other's replies (~1/12288 per pair, but real).
+  Fixed by giving each of the two remote slots a disjoint half of the ephemeral
+  window by slot index, so two live remote slots never share a 4-tuple; a
+  compile-time assert pins `MAX_REMOTE == 2`, which the split assumes.
+  (2) A top-level park could be starved by a re-entrant cpu run: its SYN was
+  never sent (tcp_run does not pump remotes) yet its deadline clock ran, so a
+  reachable peer was reported `NO_FS` when the run returned past 5 s. Fixed by
+  starting the deadline at first SYN SEND, not at park; a starved park does not
+  age. A park whose SYN was already sent and is then starved by a long run can
+  still age; that residual closes at step 3. (3) `--delay` with no value crashed
+  the host peer with IndexError; it errors cleanly now. (4) A spent remote slot
+  (reply delivered, parked cleared) was not in the NET_WAIT wakeup set, so it
+  could linger until an unrelated event; Closed remotes are in the poll set now.
+ (2) A cpu child's Phase 4b `/host` request reaching the re-entrant drain
   in a CHAINED cpu (a node both running a cpu and hosting a child) took the
   child arm, bypassed the by-sender refusal, and parked on a slot `tcp_run` does
   not drive - undriven, hanging the child. Now refused `FS_ERR_BUSY` when

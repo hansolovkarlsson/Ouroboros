@@ -547,7 +547,7 @@ fn serve(packed_mac: u64) -> ! {
             // A remote slot with a request parked needs the timer whatever its
             // state: its SYN and data retransmits, and its deadline, all fire
             // from the pump, and a silent peer sends no frame to wake us.
-            || remotes.iter().any(|c| matches!(c, Some(r) if r.parked.is_some() || r.state == DialState::Closing));
+            || remotes.iter().any(|c| matches!(c, Some(r) if r.parked.is_some() || r.state == DialState::Closing || r.state == DialState::Closed));
         let timeout = if unacked { RTO_POLL_MS } else { 0 };
         syscall(syscall_abi::NET_WAIT, timeout);
 
@@ -2159,7 +2159,23 @@ fn park_rmount(dst_mac: &[u8; 6], ip: [u8; 4], port: u16, caller: u64, who: &[u8
     // ~2 KB, this path is reached from the re-entrant drain, and the first
     // version (a local then a move) overflowed the guard page at the top
     // level, measured by the rig's first check on 2026-09-21.
-    remotes[slot] = Some(new_wire(next_src_port()));
+    // A per-slot source port, NOT bare next_src_port(): two mounts can park
+    // back-to-back (the identity test parks two to the same peer), and
+    // next_src_port() is only unique across calls a round trip apart - a
+    // property the async park breaks (review of #149). Offsetting by the slot
+    // index times the clock's own range (0x3000) gives each of the MAX_REMOTE
+    // slots a disjoint window, so two live remote slots never share a 4-tuple
+    // and their replies never cross. (A dial or a session could still collide
+    // with a remote - the pre-existing broad case next_src_port never fully
+    // closed - which self-heals via the reply's nonce check and TCP retransmit.)
+    // Each of the MAX_REMOTE (2) slots gets a disjoint half of the ephemeral
+    // window (0xc000..0xf000), so two live remote slots never share a src_port
+    // however close in time they parked, and stay clear of low/reserved ports.
+    const REMOTE_PORT_SPAN: u16 = 0x1800; // (0xf000 - 0xc000) / MAX_REMOTE
+    let src_port = TCP_SRC_PORT
+        + (slot as u16) * REMOTE_PORT_SPAN
+        + (now_us() % REMOTE_PORT_SPAN as u64) as u16;
+    remotes[slot] = Some(new_wire(src_port));
     let wire = remotes[slot].as_mut().unwrap();
     let np = &msg[..msg.len().min(ninep_abi::NP_NET_MAX)];
     let (total, nonce) = frame_signed(auth, who, np, &mut wire.sbuf);
@@ -2172,7 +2188,14 @@ fn park_rmount(dst_mac: &[u8; 6], ip: [u8; 4], port: u16, caller: u64, who: &[u8
     wire.peer_mac = *dst_mac;
     wire.peer_port = port;
     wire.state = DialState::Connecting; // the pump sends the SYN
-    wire.parked = Some(Parked { caller, nonce, expect_key, since: now() });
+    // since = 0: the deadline clock starts when the SYN is first SENT (in
+    // pump_dials), not when the request is parked. A park starved by a
+    // re-entrant cpu run - whose tcp_run neither pumps nor services remotes -
+    // has not sent its SYN, so it must not age toward NO_FS while it waits for
+    // the run to return (review of #149). Once the SYN goes out, it ages
+    // normally. (A park whose SYN is sent and is THEN starved by a long run can
+    // still age; that residual closes at step 3, which removes the run drain.)
+    wire.parked = Some(Parked { caller, nonce, expect_key, since: 0 });
     Ok(())
 }
 
@@ -2202,7 +2225,8 @@ fn service_remotes(remotes: &mut [Option<RemoteConn>; MAX_REMOTE]) {
         let too_big = matches!(flen, Some(f) if ninep_abi::NP_NET_LEN_PREFIX + f > REMOTE_RBUF);
         let complete = matches!(flen, Some(f) if c.rlen >= ninep_abi::NP_NET_LEN_PREFIX + f);
         let dead = c.state == DialState::Closed;
-        let late = t.wrapping_sub(c.parked.as_ref().unwrap().since) > REMOTE_DEADLINE_TICKS;
+        let since = c.parked.as_ref().unwrap().since;
+        let late = since != 0 && t.wrapping_sub(since) > REMOTE_DEADLINE_TICKS;
         if !(complete || too_big || dead || late) {
             continue;
         }
@@ -2536,6 +2560,10 @@ const DIAL_IDLE_TICKS: u64 = 600;
 /// dial-out for a slot. Two is the smallest number that lets a bystander's
 /// read proceed while a cpu child's is parked; raise it when a rig exhausts it.
 const MAX_REMOTE: usize = 2;
+// `park_rmount` splits the 0x3000-wide ephemeral window into one disjoint
+// REMOTE_PORT_SPAN per slot; that scheme assumes exactly two slots. Raising
+// MAX_REMOTE means re-deriving the per-slot port window, so pin it here.
+const _: () = assert!(MAX_REMOTE == 2, "park_rmount's per-slot src_port window assumes MAX_REMOTE == 2");
 /// A remote slot's buffers. Out: a client message is at most `MSG_MAX_LEN`
 /// (768) of which `NETOP_RMOUNT_MSG` (16) is the envelope, so a signed frame
 /// is at most `NP_FRAME_MAX`-shaped over 752 bytes of NP: 908. In: a sealed
@@ -4482,6 +4510,14 @@ fn pump_dials<const S: usize, const R: usize>(mac: &[u8; 6], dials: &mut [Option
                             let _ = send(&frame[..nn]);
                             c.retries += 1;
                             c.retx_deadline = t + DIAL_RETX_WAIT;
+                            // Start a parked request's deadline the moment its
+                            // SYN first goes out, not when it was parked (a
+                            // dial has no `parked`, so this is a no-op there).
+                            if let Some(pk) = c.parked.as_mut() {
+                                if pk.since == 0 {
+                                    pk.since = t;
+                                }
+                            }
                         }
                     }
                 }
