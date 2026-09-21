@@ -2162,15 +2162,13 @@ fn park_rmount(dst_mac: &[u8; 6], ip: [u8; 4], port: u16, caller: u64, who: &[u8
     // A per-slot source port, NOT bare next_src_port(): two mounts can park
     // back-to-back (the identity test parks two to the same peer), and
     // next_src_port() is only unique across calls a round trip apart - a
-    // property the async park breaks (review of #149). Offsetting by the slot
-    // index times the clock's own range (0x3000) gives each of the MAX_REMOTE
-    // slots a disjoint window, so two live remote slots never share a 4-tuple
-    // and their replies never cross. (A dial or a session could still collide
-    // with a remote - the pre-existing broad case next_src_port never fully
-    // closed - which self-heals via the reply's nonce check and TCP retransmit.)
-    // Each of the MAX_REMOTE (2) slots gets a disjoint half of the ephemeral
-    // window (0xc000..0xf000), so two live remote slots never share a src_port
-    // however close in time they parked, and stay clear of low/reserved ports.
+    // property the async park breaks (review of #149). Each of the MAX_REMOTE
+    // (2) slots gets a disjoint REMOTE_PORT_SPAN-wide half of the ephemeral
+    // window (0xc000..0xf000), so two live remote slots never share a 4-tuple
+    // and their replies never cross, and both stay clear of low/reserved ports.
+    // (A dial or a session could still collide with a remote - the pre-existing
+    // broad case next_src_port never fully closed - which self-heals via the
+    // reply's nonce check and TCP retransmit.)
     const REMOTE_PORT_SPAN: u16 = 0x1800; // (0xf000 - 0xc000) / MAX_REMOTE
     let src_port = TCP_SRC_PORT
         + (slot as u16) * REMOTE_PORT_SPAN
@@ -4515,7 +4513,12 @@ fn pump_dials<const S: usize, const R: usize>(mac: &[u8; 6], dials: &mut [Option
                             // dial has no `parked`, so this is a no-op there).
                             if let Some(pk) = c.parked.as_mut() {
                                 if pk.since == 0 {
-                                    pk.since = t;
+                                    // Clamp to >= 1: `since == 0` is the "SYN
+                                    // not sent yet" sentinel, and GET_TICKS can
+                                    // return 0, so a send at tick 0 must not
+                                    // leave the deadline disabled. One tick of
+                                    // skew against a 250-tick deadline is nil.
+                                    pk.since = t.max(1);
                                 }
                             }
                         }

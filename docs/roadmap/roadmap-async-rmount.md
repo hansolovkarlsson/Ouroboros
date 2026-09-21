@@ -213,7 +213,16 @@ Kept as the steps land, newest first.
   and an in-subnet down IP fails ARP synchronously (a correct `NO_FS` by another
   path). The SYN-drop control is a live L2 node refusing a dead port plus a
   mutation to confirm the hang without the guard; described here, not automated,
-  the same honesty the `tcp_get` coalesced-FIN arm carries.
+  the same honesty the `tcp_get` coalesced-FIN arm carries. (2) The chained-cpu
+  stall: a cpu child's Phase 4b `/host` request reaching the re-entrant drain
+  on a node both running a cpu AND hosting a child took the child arm, bypassed
+  the by-sender refusal, and parked on a slot `tcp_run` does not drive -
+  undriven, hanging the child. Now refused `FS_ERR_BUSY` when re-entrant, like a
+  bystander; the normal Phase 4b child (top-level, on a node not itself in a
+  run) still parks and is driven. Two comments that claimed the re-entrant drain
+  parks a path verb were corrected: it refuses. (3) A low-probability src-port
+  collision was noted and, that round, accepted; the second review below showed
+  it real and fixed it.
 - **The second review of #149 found four more, all fixed.** (1) `next_src_port`
   was only unique across calls a round trip apart, an invariant the async park
   breaks: two mounts parked back-to-back to the same peer could draw the same
@@ -230,15 +239,13 @@ Kept as the steps land, newest first.
   the host peer with IndexError; it errors cleanly now. (4) A spent remote slot
   (reply delivered, parked cleared) was not in the NET_WAIT wakeup set, so it
   could linger until an unrelated event; Closed remotes are in the poll set now.
- (2) A cpu child's Phase 4b `/host` request reaching the re-entrant drain
-  in a CHAINED cpu (a node both running a cpu and hosting a child) took the
-  child arm, bypassed the by-sender refusal, and parked on a slot `tcp_run` does
-  not drive - undriven, hanging the child. Now refused `FS_ERR_BUSY` when
-  re-entrant, like a bystander; the normal Phase 4b child (top-level, on a node
-  not itself in a run) still parks and is driven. Two comments that claimed the
-  re-entrant drain parks a path verb were corrected: it refuses. (3) A noted
-  low-probability src-port collision between a dial and a remote sharing a
-  4-tuple is pre-existing (both draw from `next_src_port`) and, with `now_us()`
-  microsecond resolution between user-driven opens, not reachable in practice;
-  no static counter is available (netd's `.bss` is asserted empty), so it is
-  accepted rather than fixed here.
+- **A third review of #149 found no bug**, and named the step-1/step-2
+  boundary precisely: a fid-verb `NETOP_RMOUNT` still runs `session_rmount`
+  synchronously on the serve frame, so while it does its round trip a
+  concurrently parked path-verb mount's SYN, retransmits and reply are not
+  serviced. A cross-client latency, not a correctness break, and exactly what
+  step 2 removes by moving the held session onto the same parked engine.
+  Recorded here so it is a known boundary, not a surprise. Two small things
+  also fixed: a stale in-function comment (a leftover `0x3000` where the code
+  uses `REMOTE_PORT_SPAN` 0x1800), and `Parked.since`'s zero sentinel made
+  sound against a `GET_TICKS` value of 0 (clamped to >= 1 at first SYN send).
