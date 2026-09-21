@@ -89,10 +89,21 @@ check() { # name, marker, refusal-regex, condition-not-created-regex
             else show_fail "$name: refused, but a node reported faults"; fi
             return
         fi
-        if [ $attempt -ge 4 ]; then
-            show_fail "$name: the condition was not created in 4 tries (no refusal, no fault)"; return
+        # The client SUCCEEDED: the run returned before it asked, so the
+        # re-entrant condition was never created. Expected sometimes (timing);
+        # retried, and named distinctly from a link flake so a persistent one
+        # points at the unreachable-ping timing, not at the kernel.
+        if printf '%s\n' "$tail" | grep -qE -- "$notyet"; then
+            reason="the client kept succeeding - the run returned before it asked (ping timing)"
+            note="condition not created (client succeeded)"
+        else
+            reason="no refusal, no fault, no success - the shared QEMU socket link flaked"
+            note="no usable output"
         fi
-        echo "     ($name: condition not created or the link flaked - retrying, $log)" >&2
+        if [ $attempt -ge 4 ]; then
+            show_fail "$name: $reason in 4 tries"; return
+        fi
+        echo "     ($name: $note - retrying, $log)" >&2
     done
 }
 

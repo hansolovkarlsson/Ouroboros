@@ -661,11 +661,17 @@ fn drain_client_messages(packed_mac: u64, buf: &mut [u8], conns: &mut [Option<Tc
             // time. Refuse with FS_ERR_BUSY ("out of room, retry later") BEFORE
             // `handle_client`'s frame is built - Rust reserves the whole frame
             // on entry, so a check inside it is too late (the first cut put one
-            // there and `cat` still faulted). The cpu CHILD (the `Some(ci)` arm
-            // above) is exempt: its Phase 4b remote-fs IS the run, not a
-            // bystander - still deep from here, still latent, see the ledger.
-            // The real fix is async NETOP_RMOUNT; a refusal is honest, not
-            // service.
+            // there and `cat` still faulted). Refusing BY SENDER means a
+            // hypothetical SHALLOW client op is refused here too, not only the
+            // deep handlers named above - deliberate, not an oversight: no
+            // shallow client op realistically arrives mid-run (the shell that
+            // would send RUN_MORE is blocked on the run, the health ping is
+            // unidentified), a retry is cheap, and the sender is the one fact
+            // safe to read here without entering a handler to find out. The cpu
+            // CHILD (the `Some(ci)` arm above) is exempt: its Phase 4b remote-fs
+            // IS the run, not a bystander - still deep from here, still latent,
+            // see the ledger. The real fix is async NETOP_RMOUNT; a refusal is
+            // honest, not service.
             reply(sender, &syscall_abi::FS_ERR_BUSY.to_le_bytes());
         } else {
             handle_client(packed_mac, sender, buf, len, conns, dials, sessions, auth, pending.as_deref_mut());

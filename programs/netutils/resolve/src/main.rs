@@ -83,7 +83,7 @@ pub extern "C" fn _start() -> ! {
             fail(b"resolve: no network interface this boot\r\n", target)
         }
         syscall_abi::FS_ERR_BUSY => {
-            fail(b"resolve: network server busy (in a cpu run - try again)\r\n", target)
+            fail(b"resolve: network server busy (try again)\r\n", target)
         }
         _ => fail(b"resolve: unexpected result\r\n", target),
     }
