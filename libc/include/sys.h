@@ -25,6 +25,24 @@
 #define MSG_ERR_FULL (~0UL - 20UL)
 #define MSG_ERR_DENIED (~0UL - 28UL)
 
+/* Task-management codes (mirrors syscall-abi's TASK_ERR_*; the list of
+ * syscalls that answer them is on the Rust constants, not repeated here).
+ * TASK_ERR_NO_SUCH_TASK is the one of the three ouro_last_fs_status() can
+ * report: the destination slot held no server this boot, or the server died
+ * with this request in flight (its supervisor reinstalls it before this
+ * program runs again, so there is nothing to wait for, and whether the dead
+ * server had acted on the request is unknowable). Only the fsd/netd request
+ * path records a status; the console write falls back to PUTC and the pipe
+ * write drops the rest of the buffer, and neither records what it saw. The
+ * other two are answered by kill/fg/wait and by a MSG_CALL to yourself, which
+ * no C program issues yet; named so the next one can tell them apart rather
+ * than reading all three as "failed". Knowingly the C-only reading: ulib
+ * folds this code into NO_FS for Rust programs, and the shell's "no such
+ * task" is for a task index a user named, a different situation. */
+#define TASK_ERR_NO_SUCH_TASK (~0UL - 14UL)
+#define TASK_ERR_PROTECTED (~0UL - 15UL)
+#define TASK_ERR_SELF (~0UL - 42UL)
+
 /* Task ids + grant modes. */
 #define FSD_TASK 2
 #define CON_TASK 3
@@ -80,6 +98,11 @@
  * to this line for that reason. */
 /* Error codes a C program can distinguish. Only the ones it can act on -
  * everything else is just ">= FS_ERR_MIN". */
+/* No filesystem answers there (nothing mounted, or a remote mount whose
+ * peer netd could not reach: no route, refused, timed out), relayed as the
+ * reply status, so a remote read on a downed peer names it instead of
+ * reading as "failed". Mirrors syscall-abi's NO_FS. */
+#define NO_FS (~0UL - 1UL)
 #define FS_ERR_NOT_FOUND (~0UL - 2UL)
 #define FS_ERR_PERM (~0UL - 32UL)
 #define FS_ERR_NO_SUCH_VERB (~0UL - 39UL)
@@ -96,6 +119,12 @@
 #define FS_ERR_CLIENT (~0UL - 44UL)
 _Static_assert(FS_ERR_CLIENT < FS_ERR_MIN,
                "FS_ERR_CLIENT must stay below the wire error band; the floor moved onto it");
+
+/* The status of the last failed request (libc/src/file.c), and that status
+ * as text, so every program prints the same words for the same code instead
+ * of keeping a copy of the table. */
+unsigned long ouro_last_fs_status(void);
+const char *ouro_fs_strerror(void);
 
 static inline long __os_syscall1(long num, long a0) {
     register long x8 asm("x8") = num;

@@ -22,19 +22,6 @@
 #include <unistd.h>
 #include "sys.h"
 
-unsigned long ouro_last_fs_status(void);
-
-static const char *why(void) {
-    unsigned long s = ouro_last_fs_status();
-    if (s == FS_ERR_NOT_FOUND) return "no such file or directory";
-    if (s == FS_ERR_PERM) return "permission denied";
-    if (s == FS_ERR_NO_SUCH_VERB) return "that server does not implement this request";
-    if (s == MSG_ERR_DENIED) return "not allowed to reach that server (capability)";
-    if (s == FS_ERR_CLIENT) return "never sent (no free fd, or the path could not be resolved)";
-    if (s >= FS_ERR_MIN) return "failed";
-    return "no error recorded";
-}
-
 int main(void) {
     const char *path = "/mnt/a/CWTEST.TXT";
     static char pat[800];
@@ -44,21 +31,21 @@ int main(void) {
 
     int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC);
     if (fd < 0) {
-        printf("cwrite: open (write) refused: %s\r\n", why());
+        printf("cwrite: open (write) refused: %s\r\n", ouro_fs_strerror());
         return 1;
     }
     ssize_t w = write(fd, pat, sizeof pat);
     close(fd);
     if (w != (ssize_t)sizeof pat) {
         printf("cwrite: write returned %d, wanted %d: %s\r\n",
-               (int)w, (int)sizeof pat, why());
+               (int)w, (int)sizeof pat, ouro_fs_strerror());
         return 1;
     }
 
     static char got[800];
     fd = open(path, O_RDONLY);
     if (fd < 0) {
-        printf("cwrite: reopen (read) failed: %s\r\n", why());
+        printf("cwrite: reopen (read) failed: %s\r\n", ouro_fs_strerror());
         return 1;
     }
     ssize_t r = read(fd, got, sizeof got);

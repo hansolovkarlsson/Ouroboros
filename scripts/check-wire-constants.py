@@ -208,6 +208,18 @@ CHECKED = [
     # twice per peer and inflated every baseline by one, found by review).
     "FS_ERR_PERM",
     "MSG_ERR_DENIED",
+    # The task codes, mirrored into sys.h on 2026-09-20 so a C program can
+    # tell a server that is not there (NO_SUCH_TASK, the one MSG_CALL answers)
+    # from the rest of the band. Pinned the same day: TASK_ERR_SELF took the
+    # floor's old value the day before, which is exactly the kind of move a
+    # hand-mirrored copy gets wrong.
+    "TASK_ERR_NO_SUCH_TASK",
+    "TASK_ERR_PROTECTED",
+    "TASK_ERR_SELF",
+    # The reply status netd relays for an unreachable remote peer, which a C
+    # program's own read() can therefore meet; found by the second review of
+    # #145, which had named the task code and left this one as "failed".
+    "NO_FS",
     # The endpoint width, spelled a third time in libc/include/nsresolve.h.
     "NS_ENDPOINT_LEN",
     "NS_TARGET_FSD",
@@ -320,7 +332,7 @@ CHECKED = [
 # what it is named for. Confirmed, which is why these are numbers and not a
 # truthiness test. Raise a baseline when a peer learns a new constant.
 PEER_BASELINE = {
-    "np9p_client.py": 40,  # counted 2026-09-12: 31 after step 5 (NP_PREAD/NP_FSTAT/NP_CLUNK, OPEN_READ), then step 6 taught it the path verbs for path-gate, NP_PWRITE, FS_ERR_NOT_SUPPORTED and NP_REMOTE_CHUNK
+    "np9p_client.py": 41,  # counted 2026-09-20: NO_FS pinned by the second review of #145; 40 on 09-12: 31 after step 5 (NP_PREAD/NP_FSTAT/NP_CLUNK, OPEN_READ), then step 6 taught it the path verbs for path-gate, NP_PWRITE, FS_ERR_NOT_SUPPORTED and NP_REMOTE_CHUNK
     # Rose from 10 when the `noverb` probe's status-name table was rebuilt
     # from module constants instead of repeated literals: FS_ERROR,
     # FS_ERR_READ_ONLY, FS_ERR_PERM and FS_ERR_NO_SUCH_VERB became names this
@@ -332,13 +344,13 @@ PEER_BASELINE = {
     # reduced count was recorded as expected. Both now use the shared names; the
     # floor rises with them, or the rename could be undone without this
     # noticing.
-    "np9p_server.py": 31,  # counted 2026-09-12: 26 on 09-07 with the verbs, then the four OPEN_* flags and MAX_FIDS pinned by step 5
+    "np9p_server.py": 32,  # counted 2026-09-20: NO_FS pinned by the second review of #145; 31 on 09-12: 26 on 09-07 with the verbs, then the four OPEN_* flags and MAX_FIDS pinned by step 5
     # The C header. It spells far more of the ABI than either Python peer; this
     # floor covers the names CHECKED lists today.
     # Raised from 3 when step 3b's constants were pinned. The script's own
     # instruction is to raise a baseline when a peer learns a new constant; it
     # had already learned FS_ERR_NOT_FOUND without the floor moving.
-    "libc/include/sys.h": 31,  # counted 2026-09-13: 26 on 09-12, then the five HEAP_INFO_* field selectors
+    "libc/include/sys.h": 35,  # counted 2026-09-20: 31 on 09-13 with the five HEAP_INFO_* field selectors, then the three TASK_ERR_* codes and NO_FS
     "libc/include/nsresolve.h": 5,  # + 4 STAT_* offsets, FS_ERR_READ_ONLY, STAT_FLAG_DIR, FS_ERROR, FS_ERR_NO_SUCH_VERB
 }
 
@@ -494,7 +506,7 @@ def main():
                     f"{peer} has {consts[const]!r}"
                 )
         if not seen_anywhere:
-            problems.append(f"{const}: no Python peer spells it (dead entry in this list)")
+            problems.append(f"{const}: no peer spells it (dead entry in this list)")
 
     # A check that compared nothing passes for the wrong reason. The regexes
     # above are the fragile part - a formatting change to either language could
