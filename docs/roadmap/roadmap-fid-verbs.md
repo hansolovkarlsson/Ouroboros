@@ -942,7 +942,12 @@ the same by-sender branch and is left out (a pre-existing spawn/delegate race
 makes it a flaky driver). **The cpu child's own Phase 4b remote-fs stays on its
 path and is still deep from this drain** - deliberately not refused, since it is
 the run itself; that overflow is latent, closed only by async `NETOP_RMOUNT`
-(below). A refusal is honest, not service.
+(below). A refusal is honest, not service. **Update 2026-09-21:** the async
+remote mount has its own plan, `roadmap-async-rmount.md`, and its step 1
+landed: a path verb's remote mount is now PARKED from that drain and served,
+for a bystander and for the cpu child alike, so the latent overflow is closed
+and the `cat` recipe of the rig grades service; the by-sender refusal remains
+for every other identified request until step 3 removes the re-entrant drain.
 
 ## Deliberately not in scope
 

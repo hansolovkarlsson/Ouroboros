@@ -74,8 +74,8 @@ show_fail() {
 # One recipe: run `# @@<marker>`, and require the client's refusal line AND no
 # netd fault/restart. A `condition_ok` grep that DID create the condition but
 # without the refusal (e.g. the run ended first) is retried, not passed.
-check() { # name, marker, refusal-regex, condition-not-created-regex
-    name=$1; marker=$2; want=$3; notyet=$4
+check() { # name, marker, want-regex, condition-not-created-regex [, also-want-regex, forbid-regex]
+    name=$1; marker=$2; want=$3; notyet=$4; also=${5:-}; forbid=${6:-}
     attempt=0
     while :; do
         attempt=$((attempt + 1))
@@ -84,9 +84,13 @@ check() { # name, marker, refusal-regex, condition-not-created-regex
         if printf '%s\n' "$tail" | grep -q 'EL0 FAULT\|server slot 4 restarted'; then
             show_fail "$name: netd faulted instead of refusing"; return
         fi
-        if printf '%s\n' "$tail" | grep -qE -- "$want"; then
+        if [ -n "$forbid" ] && printf '%s\n' "$tail" | grep -qE -- "$forbid"; then
+            show_fail "$name: the old answer came back ($forbid)"; return
+        fi
+        if printf '%s\n' "$tail" | grep -qE -- "$want" \
+            && { [ -z "$also" ] || printf '%s\n' "$tail" | grep -qE -- "$also"; }; then
             if no_faults; then echo "ok   $name ($log)"
-            else show_fail "$name: refused, but a node reported faults"; fi
+            else show_fail "$name: answered, but a node reported faults"; fi
             return
         fi
         # The client SUCCEEDED: the run returned before it asked, so the
@@ -107,11 +111,19 @@ check() { # name, marker, refusal-regex, condition-not-created-regex
     done
 }
 
-# The remote-mount path (NETOP_RMOUNT), the originally-reported case.
-check "one-shot rmount refused inside a run" \
+# The remote-mount path (NETOP_RMOUNT), the originally-reported case. SERVED
+# since the async remote mount (docs/roadmap/roadmap-async-rmount.md step 1):
+# a path verb is parked from the re-entrant drain without the deep frame, and
+# netd says so on the console, which is the witness that the request really
+# arrived mid-run (a served read looks the same either way). Graded on BOTH
+# lines: the file's text and the park line. On the tree before the park this
+# recipe answered "out of room", which the forbid pattern catches.
+check "one-shot rmount SERVED inside a run" \
     'cpu 10.0.2.10:564 ping 10.0.2.99 | cat /mnt/a/man/grep' \
-    'cat: .*out of room for this right now' \
-    'grep - keep lines'
+    'netd: remote mount parked inside a run' \
+    'grep - keep lines' \
+    'grep - keep lines' \
+    'out of room for this right now'
 # A different, deeper handler that needs no mount (NETOP_RESOLVE): the case the
 # first, RMOUNT-only cut missed.
 check "resolve refused inside a run" \

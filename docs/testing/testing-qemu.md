@@ -407,6 +407,35 @@ python3 scripts/drive-qemu.py --slirp build/esp.img \
 
 Expected `40 400 1960`, `200 2600 13600`, `1 3 21`, and the note's one line.
 
+**The async remote-mount checks** (`docs/roadmap/roadmap-async-rmount.md`
+steps 0 and 1, 2026-09-21): a path verb's `NETOP_RMOUNT` no longer blocks
+`netd`'s event loop. It is PARKED on a remote slot (the `/net/tcp` engine at
+NP-frame sizes), the loop drives the connection, and the reply is delivered
+later to the caller's task IDENTITY, which the kernel's `MSG_SEND` now accepts
+in place of a slot. Three driven boots against host-run peers, each a check
+that can fail and each with a measured control:
+
+```sh
+make test-async-rmount        # rebuilds the image, then the three boots (scripts/test-async-rmount.sh)
+```
+
+1. **served**: `cat /mnt/h/SUB/NOTE.TXT` prints the note and the prompt comes
+   back. Control: a park that never delivers leaves the caller blocked in its
+   `MSG_CALL` and no prompt ever returns.
+2. **identity**: the peer holds every reply (`np9p_server.py --delay 1.5`);
+   `exec /bin/cat /mnt/h/HELLO.TXT` parks as task 6, `kill 6`, then `cat
+   /mnt/h/SUB/NOTE.TXT` takes slot 6 and parks too. The first reply lands
+   while the second caller is parked and must reach nobody: the second `cat`
+   prints the note. Control: a kernel sending the parked reply by SLOT
+   (revert the identity arm in `syscall.rs`'s `MSG_SEND`) hands the second
+   `cat` the first file's bytes, `line 000: hello from the host`.
+3. **concurrent**: a second peer never answers (`--delay 30`, past the guest's
+   `REMOTE_DEADLINE_TICKS`); `exec /bin/cat /mnt/s/HELLO.TXT` parks on it, and
+   `cat /mnt/h/SUB/NOTE.TXT` against the live peer is served BEFORE the first
+   fails `NO_FS` ("no filesystem mounted this boot"). Control: on the
+   synchronous tree the loop is blocked for the whole wait, so the live read
+   cannot come first.
+
 Not decoration: a spawned command reaches `netd` only through a capability the
 shell delegates, and until 2026-09-06 **two of the shell's five spawn paths did
 not delegate it** — so every network program was broken in a pipeline and under
@@ -824,11 +853,18 @@ returns before the client asks, and the request lands at the top level instead
 (measured: it just succeeds). `netd` now refuses an IDENTIFIED client's request
 from that drain, before `handle_client`'s frame is built, with `FS_ERR_BUSY` -
 "out of room for this right now"; only the supervisor's identity-less health
-ping is serviced from there, and the cpu child's own remote-fs (Phase 4b) keeps
-its path. The refusal is BY SENDER, not by op, so a remote mount (`cat`) and a
-name lookup (`resolve`, a different, deeper handler needing no prior mount) are
-both refused - the first cut refused only `NETOP_RMOUNT` and `resolve` still
-faulted netd.
+ping is serviced from there. The refusal is BY SENDER, not by op, so a name
+lookup (`resolve`, a deep handler needing no prior mount) is refused - the
+first cut refused only `NETOP_RMOUNT` and `resolve` still faulted netd. **Since
+2026-09-21 a path verb's remote mount is the exception, served**: it is parked
+from that drain without `handle_client`'s frame (step 1 of
+`docs/roadmap/roadmap-async-rmount.md`), for a bystander and for the cpu
+child's own Phase 4b `/host` read alike, which closes the "latent" overflow the
+previous paragraph of this section used to name. `netd` prints `remote mount
+parked inside a run` when it does, and the `cat` recipe is graded on that line
+AND the file's text, because a served read looks the same whether it arrived
+mid-run or after; a served read WITHOUT the line is retried as "condition not
+created", as the refusal used to be.
 
 ```sh
 make test-reentrant-session   # builds both ext2 node images, then the two-node boots
@@ -839,9 +875,11 @@ python3 scripts/drive-2vm.py build/espext2-a.img build/espext2-b.img \
      '# @@mount -r 10.0.2.10:564 /mnt/a' \
      '# @@cpu 10.0.2.10:564 ping 10.0.2.99 | cat /mnt/a/man/grep' \
      '# @@'
-# expected: "cat: that server is out of room for this right now (try again
-# later)". The `| resolve example.com` variant expects "resolve: network
-# server busy". Either way: no "server slot 4 restarted", 0 fault lines.
+# expected: the file's text ("grep - keep lines ...") AND, before it,
+# "netd: remote mount parked inside a run". The `| resolve example.com` variant
+# expects "resolve: network server busy". Either way: no "server slot 4
+# restarted", 0 fault lines. Before 2026-09-21 the cat recipe expected "cat:
+# that server is out of room for this right now (try again later)" instead.
 ```
 
 **Its negative control, measured before the refusal existed**: on node B,
@@ -853,11 +891,11 @@ request in flight)" - for `cat`, for `resolve`, and (one level deeper) for
 The session path `cbig` shares the same refusal (by sender, before any op
 dispatch) and is not run here, because a pre-existing race delegates a spawned
 task's netd send right just after spawn and sometimes refuses cbig's first
-request by capability before any remote request - flaky as a driver, and it
-would test the same branch `cat` already does. **The cpu child's own Phase 4b
-remote-fs is still deep from this drain and is deliberately not refused** (it is
-the run, not a bystander); that overflow is latent, closed only by async
-`NETOP_RMOUNT`.
+request by capability before any remote request - flaky as a driver, and (a
+fid verb) it is the one remote-mount shape still on the synchronous session
+path, step 2 of the async plan. The cpu child's own Phase 4b remote-fs took
+the deep path from this drain until 2026-09-21 and was never refused (it is
+the run, not a bystander); it parks now, like any path verb.
 
 ## 6. USB and GIC variants
 
@@ -910,6 +948,7 @@ see [`manual.md`](../manual.md)'s Parallels section.
 | `run-image-exfat` | exFAT partition + FAT32 ESP (`fsd` mounts exFAT) |
 | `run-image-ext2` | ext2 partition + FAT32 ESP (needs `e2fsprogs`); **+ virtio-rng** |
 | `run-net` | virtio-net + SLIRP + `net.pcap` |
+| `test-async-rmount` | three driven boots against host 9P peers: the parked remote mount (section 4) |
 | `run-image-net` | real FAT32 **and** the NIC |
 | `run-image-server` | + `hostfwd tcp::5555->:80` (host `curl` reaches netd) |
 | `run-image-9p` | + `hostfwd tcp::5640->:564` (host reads guest's disk over 9P) |
