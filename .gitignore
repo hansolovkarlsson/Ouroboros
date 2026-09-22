@@ -2,7 +2,6 @@
 # All generated build artifacts (staging tree, disk images, pcaps, logs,
 # sockets, transient src dirs) now live under build/ - see the Makefile.
 /build/
-/parallels/
 /parallels-test-*/
 /scratch/
 /Parallels Error Reports/
