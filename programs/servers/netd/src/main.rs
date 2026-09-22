@@ -560,7 +560,7 @@ fn serve(packed_mac: u64) -> ! {
         // handled synchronously; the supervisor health-ping is acked here too
         // (any reply acks it). Also where a cpu child's output is captured
         // (cluster Phase 4a) - routed to its connection by drain_client_messages.
-        drain_client_messages(packed_mac, &mut buf, &mut conns, &mut dials, &mut remotes, &mut sessions, &auth, Some(&mut pending));
+        drain_client_messages(packed_mac, &mut buf, &mut conns, &mut dials, &mut remotes, &mut sessions, &auth, &mut pending);
 
         // 2. Incoming frames: ARP replies, parked remote mounts, dial-out
         // connections, and the TCP server.
@@ -576,8 +576,8 @@ fn serve(packed_mac: u64) -> ! {
             // that dies unanswered says NO_FS (an unreachable peer); a session
             // that dies under its fids says FS_ERROR (fail-dead, the word
             // `client_exchange` used for the same event before step 2).
-            service_remotes(&mut remotes, &auth, syscall_abi::NO_FS);
-            service_remotes(&mut sessions, &auth, syscall_abi::FS_ERROR);
+            service_remotes(&mut remotes, &auth, syscall_abi::NO_FS, Some(&mut pending));
+            service_remotes(&mut sessions, &auth, syscall_abi::FS_ERROR, None);
             pump_dials(&mac, &mut remotes, DIAL_IDLE_TICKS);
             // A held session idles for the far side's reap plus a margin (the
             // backstop for a client that crashed without clunking, Decision 4)
@@ -608,7 +608,7 @@ fn serve(packed_mac: u64) -> ! {
                     }
                     let before = c.snd_nxt;
                     pump_send(&mac, c); // `c` borrow ends here
-                    drain_client_messages(packed_mac, &mut buf, &mut conns, &mut dials, &mut remotes, &mut sessions, &auth, Some(&mut pending));
+                    drain_client_messages(packed_mac, &mut buf, &mut conns, &mut dials, &mut remotes, &mut sessions, &auth, &mut pending);
                     match conns[i].as_ref() {
                         Some(c) if c.snd_nxt != before => {} // progress - continue
                         _ => break,
@@ -625,7 +625,7 @@ fn serve(packed_mac: u64) -> ! {
 /// stdout we capture) is routed to *its* connection's output buffer instead of
 /// the normal client dispatch; everything else is a client request.
 #[allow(clippy::too_many_arguments)]
-fn drain_client_messages(packed_mac: u64, buf: &mut [u8], conns: &mut [Option<TcpConn>; MAX_CONNS], dials: &mut [Option<DialConn>; MAX_DIAL], remotes: &mut [Option<RemoteConn>; MAX_REMOTE], sessions: &mut [Option<SessionConn>; MAX_CLIENT_SESSIONS], auth: &Auth, mut pending: Option<&mut PendingRun>) {
+fn drain_client_messages(packed_mac: u64, buf: &mut [u8], conns: &mut [Option<TcpConn>; MAX_CONNS], dials: &mut [Option<DialConn>; MAX_DIAL], remotes: &mut [Option<RemoteConn>; MAX_REMOTE], sessions: &mut [Option<SessionConn>; MAX_CLIENT_SESSIONS], auth: &Auth, pending: &mut PendingRun) {
     loop {
         let packed =
             syscall4(syscall_abi::MSG_TRY_RECV, buf.as_mut_ptr() as u64, buf.len() as u64, 0, 0);
@@ -650,11 +650,6 @@ fn drain_client_messages(packed_mac: u64, buf: &mut [u8], conns: &mut [Option<Tc
         } else {
             conns.iter().position(|c| matches!(c, Some(c) if c.cpu_child == sender_id))
         };
-        // `pending` is `None` only from `tcp_run`'s re-entrant drain (both
-        // `serve`-loop callers pass `Some`); having no top-level run to service
-        // IS the re-entrant condition, so it names it rather than a second flag
-        // that could disagree.
-        let reentrant = pending.is_none();
         if let Some(ci) = child_conn {
             // A cpu child talks to us for TWO things (cluster Phase 4a/4b): its
             // stdout (a raw MSG_SEND we capture) and - once its namespace imports
@@ -664,58 +659,21 @@ fn drain_client_messages(packed_mac: u64, buf: &mut [u8], conns: &mut [Option<Tc
             // output (which would deadlock the child); raw text output never
             // starts with that small value. A request goes to the normal client
             // dispatch (which replies); everything else is captured output.
+            //
+            // Until step 3 of the async plan this arm also had to refuse a
+            // CHAINED cpu (a node both running a run and hosting a child),
+            // because the child's mount would have parked on a slot the
+            // blocking `tcp_run` did not drive. Nothing blocks now, so the
+            // serve loop drives every parked slot and there is no chained case
+            // left to name.
             let is_request = len >= 8 && read_u64(buf, 0) == syscall_abi::NETOP_RMOUNT;
-            if is_request && reentrant {
-                // A CHAINED cpu (this node is running its own `cpu`, so we are
-                // inside `tcp_run`, AND hosting a child that now makes a Phase 4b
-                // `/host` request): the child's mount would park on a slot
-                // `tcp_run` does not drive (only the serve loop drives `remotes`),
-                // so it would sit undriven and hang the child. Refuse
-                // `FS_ERR_BUSY`, as a bystander is refused below. The NORMAL
-                // Phase 4b child arrives at the TOP-LEVEL drain (`reentrant`
-                // false: the hosting node is not itself in a run), parks, and the
-                // serve loop drives it (review of #149).
-                reply(sender, &syscall_abi::FS_ERR_BUSY.to_le_bytes());
-            } else if is_request {
-                handle_client(packed_mac, sender, buf, len, conns, dials, remotes, sessions, auth, pending.as_deref_mut());
+            if is_request {
+                handle_client(packed_mac, sender, buf, len, dials, remotes, sessions, auth, pending);
             } else {
                 cpu_child_msg(conns[ci].as_mut().unwrap(), sender as u8, &buf[..len]);
             }
-        } else if reentrant && sender_id != syscall_abi::GET_ID_ERR {
-            // An identified client's request reaching us mid-`cpu`-run (this is
-            // `tcp_run`'s re-entrant drain, on `handle_run`'s and `tcp_run`'s
-            // frames). Only the supervisor's health ping must be serviced from
-            // here to keep netd alive, and it carries NO identity (`KERNEL_SENDER`
-            // -> `GET_ID_ERR`) and is a shallow ack (the `_` arm of
-            // `handle_client`); it takes the `else` below. EVERY handler an
-            // identified client would reach is too deep for this re-entrant
-            // stack - the remote-mount relay (`handle_rmount`), an ICMP ping
-            // (`handle_ping` -> `arp_resolve`), a DNS/TCP lookup
-            // (`handle_resolve`/`handle_fetch`) - and overflows the guard page:
-            // measured 2026-09-20 on the two-node ext2 rig
-            // (scripts/test-reentrant-session.sh) with `cat` and `resolve` piped
-            // after a `cpu ... ping <unreachable>` that holds the run open, an
-            // EL0 data abort (esr_el1=0x9200004f) and a supervisor restart each
-            // time. Refuse with FS_ERR_BUSY ("out of room, retry later") BEFORE
-            // `handle_client`'s frame is built - Rust reserves the whole frame
-            // on entry, so a check inside it is too late (the first cut put one
-            // there and `cat` still faulted). Refusing BY SENDER means a
-            // hypothetical SHALLOW client op is refused here too, not only the
-            // deep handlers named above - deliberate, not an oversight: no
-            // shallow client op realistically arrives mid-run (the shell that
-            // would send RUN_MORE is blocked on the run, the health ping is
-            // unidentified), a retry is cheap, and the sender is the one fact
-            // safe to read here without entering a handler to find out. The cpu
-            // CHILD (the `Some(ci)` arm above) is refused the same way when this
-            // drain is re-entrant (a chained cpu): its Phase 4b remote-fs would
-            // park on a slot `tcp_run` does not drive. The NORMAL Phase 4b child,
-            // hosted on a node not itself running a cpu, arrives at the top-level
-            // drain and parks there, driven by the serve loop. The real fix for
-            // the re-entrant path is step 3 (remove this drain); a refusal is
-            // honest, not service.
-            reply(sender, &syscall_abi::FS_ERR_BUSY.to_le_bytes());
         } else {
-            handle_client(packed_mac, sender, buf, len, conns, dials, remotes, sessions, auth, pending.as_deref_mut());
+            handle_client(packed_mac, sender, buf, len, dials, remotes, sessions, auth, pending);
         }
     }
 }
@@ -742,12 +700,8 @@ fn cpu_child_msg(c: &mut TcpConn, child: u8, data: &[u8]) {
 
 /// Dispatch one client request (a `MSG_CALL` from the shell) by op, replying
 /// with the op's status. The unknown-op arm also acks the supervisor ping.
-/// `pending` is `Option` because `tcp_run`'s re-entrant drain (during a run)
-/// must NOT process a `cpu` run op - the shell that started this run is blocked
-/// in it, so no `NETOP_RUN`/`NETOP_RUN_MORE` can legitimately arrive there; it
-/// passes `None`, and the main serve loop passes `Some`.
 #[allow(clippy::too_many_arguments)]
-fn handle_client(packed_mac: u64, sender: u64, buf: &[u8], len: usize, conns: &mut [Option<TcpConn>; MAX_CONNS], dials: &mut [Option<DialConn>; MAX_DIAL], remotes: &mut [Option<RemoteConn>; MAX_REMOTE], sessions: &mut [Option<SessionConn>; MAX_CLIENT_SESSIONS], auth: &Auth, pending: Option<&mut PendingRun>) {
+fn handle_client(packed_mac: u64, sender: u64, buf: &[u8], len: usize, dials: &mut [Option<DialConn>; MAX_DIAL], remotes: &mut [Option<RemoteConn>; MAX_REMOTE], sessions: &mut [Option<SessionConn>; MAX_CLIENT_SESSIONS], auth: &Auth, pending: &mut PendingRun) {
     // Too short to carry an op: `buf` is never cleared between messages, so
     // decoding a short one would dispatch the PREVIOUS request's bytes as this
     // sender's. Reachable since 2026-09-06: a remote-exec child orphaned by a
@@ -807,24 +761,22 @@ fn handle_client(packed_mac: u64, sender: u64, buf: &[u8], len: usize, conns: &m
         syscall_abi::NETOP_RUN => {
             // The remote-execution client (cluster Phase 4a): frame an NP_RUN to
             // the endpoint's export, which spawns the command there and streams
-            // its output back; reply that output to the shell's `cpu` builtin.
-            // handle_run pumps our event loop while it waits (cluster Phase 4b),
-            // so we keep serving the spawned command's imported-namespace
-            // callbacks (its /host reads come back to *our* export) - passing
-            // `conns` is what lets it do that.
+            // its output back. PARKED since step 3 of the async plan (`None`
+            // here: `service_remotes` answers the caller when the peer FINs),
+            // so the serve loop keeps serving the spawned command's
+            // imported-namespace callbacks - its `/host` reads come back to our
+            // own export - without any of the re-entrant pumping `tcp_run` did.
             let mut r = [0u8; syscall_abi::MSG_MAX_LEN as usize];
-            let rlen = match pending {
-                Some(p) => handle_run(packed_mac, sender, buf, len, &mut r, conns, dials, remotes, sessions, auth, p),
-                None => 0, // a nested run can't happen (the caller is blocked)
-            };
-            reply(sender, &r[..rlen]);
+            if let Some(rlen) = park_run(packed_mac, buf, len, &mut r, remotes, auth, pending) {
+                reply(sender, &r[..rlen]);
+            }
         }
         syscall_abi::NETOP_RUN_MORE => {
             // The shell pulls the next chunk of its last cpu run's output; an
             // empty reply = end of stream. Owner-checked inside next_chunk.
             let mut r = [0u8; syscall_abi::MSG_MAX_LEN as usize];
             let who = syscall(syscall_abi::SENDER_TASK, 0);
-            let rlen = pending.map(|p| p.next_chunk(who, &mut r)).unwrap_or(0);
+            let rlen = pending.next_chunk(who, &mut r);
             reply(sender, &r[..rlen]);
         }
         // An NP read verb from a *local* client: the /net synthetic filesystem
@@ -1332,200 +1284,8 @@ fn tcp_get(mac: &[u8; 6], dst_mac: &[u8; 6], target: &[u8; 4], dst_port: u16, re
     }
 }
 
-/// A client TCP connection for a remote *run* (cluster Phase 4b) that **pumps our
-/// own event loop while it waits**: the SYN handshake + `NP_RUN` send like
-/// `tcp_get`, but the receive loop, besides accumulating the run's output stream,
-/// also (a) acks the supervisor health-ping and serves other client requests,
-/// (b) feeds every non-run frame to `on_frame` - which is how the spawned
-/// command's imported-namespace (`/host`) reads, arriving at *our* export as
-/// frames, get served *during* the run - and (c) pumps the server connections so
-/// those export replies actually go out. A plain blocking `tcp_get` here would
-/// deadlock: it drops those frames while stuck waiting, the remote child blocks on
-/// its read, and no output ever comes. Returns `(NET_FETCH_* status, output len)`.
-#[allow(clippy::too_many_arguments)]
-fn tcp_run(packed_mac: u64, mac: &[u8; 6], dst_mac: &[u8; 6], target: &[u8; 4], dst_port: u16, request: &[u8], resp: &mut [u8], conns: &mut [Option<TcpConn>; MAX_CONNS], dials: &mut [Option<DialConn>; MAX_DIAL], remotes: &mut [Option<RemoteConn>; MAX_REMOTE], sessions: &mut [Option<SessionConn>; MAX_CLIENT_SESSIONS], auth: &Auth) -> (u64, usize) {
-    let mut frame = [0u8; 1600];
-    let mut rx = [0u8; 1600];
-    let mut cbuf = [0u8; syscall_abi::MSG_MAX_LEN as usize];
-    let src_port = next_src_port();
-    let isn = TCP_ISN ^ ((src_port as u32) << 8);
 
-    // SYN handshake (identical to tcp_get's, with retransmit).
-    const SYN_TRIES: u32 = 4;
-    const SYN_WAIT_TICKS: u64 = 12;
-    let Some(n) = build_tcp(mac, dst_mac, target, src_port, dst_port, isn, 0, TCP_SYN, true, &[], &mut frame) else {
-        return (syscall_abi::NET_FETCH_TIMEOUT, 0);
-    };
-    let mut beat = now();
-    let their_isn = 'handshake: {
-        let mut tries = 0u32;
-        loop {
-            if send(&frame[..n]).is_err() {
-                return (syscall_abi::NET_FETCH_TIMEOUT, 0);
-            }
-            tries += 1;
-            let deadline = now() + SYN_WAIT_TICKS;
-            loop {
-                if let Some(len) = recv(&mut rx) {
-                    if let Some(s) = parse_tcp(&rx[..len], target, dst_port, src_port) {
-                        if s.flags & TCP_RST != 0 {
-                            return (syscall_abi::NET_FETCH_REFUSED, 0);
-                        }
-                        if s.flags & (TCP_SYN | TCP_ACK) == (TCP_SYN | TCP_ACK) && s.ack == isn + 1 {
-                            break 'handshake s.seq;
-                        }
-                    } else {
-                        // A non-run frame arriving mid-handshake (an early export
-                        // request, ARP): serve it so we don't drop it.
-                        on_frame(mac, &rx[..len], conns, dials, remotes, sessions, auth);
-                    }
-                }
-                beat = beat_if_new_tick(now(), beat);
-                if now() > deadline {
-                    break;
-                }
-            }
-            if tries >= SYN_TRIES {
-                return (syscall_abi::NET_FETCH_TIMEOUT, 0);
-            }
-        }
-    };
 
-    let snd_nxt = isn + 1;
-    let mut rcv_nxt = their_isn.wrapping_add(1);
-    if let Some(n) = build_tcp(mac, dst_mac, target, src_port, dst_port, snd_nxt, rcv_nxt, TCP_ACK, false, &[], &mut frame) {
-        let _ = send(&frame[..n]);
-    }
-    if let Some(n) = build_tcp(mac, dst_mac, target, src_port, dst_port, snd_nxt, rcv_nxt, TCP_PSH | TCP_ACK, false, request, &mut frame) {
-        let _ = send(&frame[..n]);
-    }
-
-    // Receive loop, pumping the export the whole time. A long deadline (a run with
-    // namespace-import callbacks does several TCP round trips), extended on any
-    // progress - the run's output, *or* an export request we served.
-    let mut got = 0usize;
-    let mut fin = false;
-    let mut deadline = now() + 300;
-    loop {
-        // Ack the health-ping / service other client requests (re-entrant-safe:
-        // the shell is blocked in this very run, so no nested run can arrive).
-        let before_deadline = deadline;
-        drain_client_messages(packed_mac, &mut cbuf, conns, dials, remotes, sessions, auth, None);
-        while let Some(len) = recv(&mut rx) {
-            if let Some(s) = parse_tcp(&rx[..len], target, dst_port, src_port) {
-                if s.flags & TCP_RST != 0 {
-                    fin = true; // treat a reset as the end of the run
-                    break;
-                }
-                if s.data_len > 0 && s.seq == rcv_nxt {
-                    let take = s.data_len.min(resp.len() - got);
-                    resp[got..got + take].copy_from_slice(&rx[s.data_off..s.data_off + take]);
-                    got += take;
-                    rcv_nxt = rcv_nxt.wrapping_add(s.data_len as u32);
-                    if let Some(n) = build_tcp(mac, dst_mac, target, src_port, dst_port, snd_nxt, rcv_nxt, TCP_ACK, false, &[], &mut frame) {
-                        let _ = send(&frame[..n]);
-                    }
-                    deadline = now() + 300;
-                }
-                if s.flags & TCP_FIN != 0 {
-                    rcv_nxt = rcv_nxt.wrapping_add(1);
-                    if let Some(n) = build_tcp(mac, dst_mac, target, src_port, dst_port, snd_nxt, rcv_nxt, TCP_ACK, false, &[], &mut frame) {
-                        let _ = send(&frame[..n]);
-                    }
-                    if let Some(n) = build_tcp(mac, dst_mac, target, src_port, dst_port, snd_nxt, rcv_nxt, TCP_FIN | TCP_ACK, false, &[], &mut frame) {
-                        let _ = send(&frame[..n]);
-                    }
-                    fin = true;
-                    break;
-                }
-            } else {
-                // Not our run connection: an export request (the child's /host
-                // read), a parked remote mount's reply, or ARP - serve it, and
-                // count it as progress.
-                on_frame(mac, &rx[..len], conns, dials, remotes, sessions, auth);
-                deadline = now() + 300;
-            }
-        }
-        // Pump the server connections so served export replies actually go
-        // out, and the parked remote mounts (a re-entrant one parked from this
-        // very loop's drain is answered from here, or it never would be).
-        pump_conns(mac, conns);
-        // A parked remote mount is NOT serviced from here: it cannot be created
-        // from this re-entrant drain (which refuses an identified client by
-        // sender, as #147), and a top-level parked mount is serviced by the
-        // serve loop the moment this run returns. Servicing it here cost ~2.8 KB
-        // on an already-deep frame - the tcp_run-entry overflow the two-node rig
-        // measured 2026-09-21. `remotes` is threaded only so `on_frame` above
-        // routes a reply frame to its slot rather than mis-feeding the export.
-        // If an export callback was served this pass, `deadline` moved.
-        let _ = before_deadline;
-        beat = beat_if_new_tick(now(), beat);
-        if fin || got >= resp.len() || now() > deadline {
-            break;
-        }
-    }
-
-    if got > 0 || fin {
-        (syscall_abi::NET_FETCH_OK, got)
-    } else {
-        (syscall_abi::NET_FETCH_TIMEOUT, 0)
-    }
-}
-
-/// Service every server connection once (retransmit timer + a bounded pump),
-/// exactly the main serve loop's step 3 - factored so `tcp_run` can keep the
-/// export flowing while it drives a remote run (cluster Phase 4b).
-#[allow(clippy::needless_range_loop)] // index needed for the re-borrow after pump
-fn pump_conns(mac: &[u8; 6], conns: &mut [Option<TcpConn>; MAX_CONNS]) {
-    for i in 0..conns.len() {
-        if conns[i].is_none() {
-            continue;
-        }
-        if service_rto(mac, conns[i].as_mut().unwrap(), now()) {
-            conns[i] = None;
-            continue;
-        }
-        if reap_idle(mac, conns[i].as_ref().unwrap(), now()) {
-            conns[i] = None;
-            continue;
-        }
-        loop {
-            let c = conns[i].as_mut().unwrap();
-            if !c.responded {
-                break;
-            }
-            let before = c.snd_nxt;
-            pump_send(mac, c);
-            match conns[i].as_ref() {
-                Some(c) if c.snd_nxt != before => {}
-                _ => break,
-            }
-        }
-    }
-}
-
-/// Serve one `NETOP_RMOUNT` client request (cluster Phase 1c): carry the
-/// embedded `ninep-abi` NP request over a TCP round trip to a remote machine's
-/// 9P export gateway and hand the client the NP reply body verbatim.
-///
-/// `buf[..len]` is `[op:u64][ip:4][port:2 LE][pad:2][NP message...]`. We frame
-/// the NP message with the 4-byte length prefix the export listener expects,
-/// open a client connection to `ip:port` (via [`tcp_get`], which sends the
-/// request and reads the reply until the peer's FIN - the export does one
-/// request/reply then closes, like HTTP `Connection: close`), strip the reply's
-/// length prefix, and copy `[status:u64][data]` into `out`. On any transport
-/// failure (no NIC, no route, timeout, refused) the reply is a bare
-/// [`syscall_abi::NO_FS`] status - a remote mount that can't be reached fails
-/// *cleanly* (the roadmap's stated Phase 1 posture), never hangs or corrupts.
-/// Returns the number of bytes written to `out`.
-/// Serve one `NETOP_RUN` client request (cluster Phase 4a): frame an `NP_RUN` to
-/// the endpoint's export gateway (which spawns the command there and streams its
-/// stdout back), and return that output to the shell's `cpu` builtin. The reply
-/// is the **raw** output bytes (the run response is a stream, not a framed NP
-/// reply), bounded by the caller's `out` (one `MSG_MAX_LEN` for now - small
-/// commands). Request layout is `NETOP_RMOUNT`'s (endpoint + payload), the
-/// payload being the command line rather than an NP message.
-#[allow(clippy::too_many_arguments)]
 /// The collected output of the most recent `cpu` run, delivered to the shell one
 /// `MSG_MAX_LEN` chunk at a time (the shell pulls with `NETOP_RUN_MORE`). netd
 /// holds it here between pull calls - a single pending run at a time, on `serve`'s
@@ -1565,16 +1325,27 @@ impl PendingRun {
     }
 }
 
+/// DELIBERATELY NOT `#[inline(never)]`, unlike `park_rmount` and
+/// `park_session`, and the difference was measured rather than reasoned. Those
+/// two have a sibling branch with its own big buffers, so keeping each in its
+/// own frame stops `handle_rmount` carrying both at once. This one's only
+/// caller is `handle_client`, whose frame ALREADY holds the ping/resolve/fetch
+/// buffers, and those lifetimes are disjoint from this one's: inlined, the
+/// compiler overlaps them in the same slots. Adding the attribute here pushed
+/// the deepest chain from 1936 to 3072 bytes past netd's guard page at 48 KB.
+/// The step-1 lesson ("each branch holds its own buffers in its OWN frame")
+/// is about SIBLINGS, not about depth in general.
 #[allow(clippy::too_many_arguments)]
-fn handle_run(packed_mac: u64, _sender: u64, buf: &[u8], len: usize, out: &mut [u8], conns: &mut [Option<TcpConn>; MAX_CONNS], dials: &mut [Option<DialConn>; MAX_DIAL], remotes: &mut [Option<RemoteConn>; MAX_REMOTE], sessions: &mut [Option<SessionConn>; MAX_CLIENT_SESSIONS], auth: &Auth, pending: &mut PendingRun) -> usize {
-    // Captured BEFORE tcp_run: it pumps our event loop, whose unfiltered
-    // receives replace the captured sender, so reading this afterwards could
-    // name whoever's message was drained last.
+fn park_run(packed_mac: u64, buf: &[u8], len: usize, out: &mut [u8], remotes: &mut [Option<RemoteConn>; MAX_REMOTE], auth: &Auth, pending: &mut PendingRun) -> Option<usize> {
+    // Captured before any receive: an unfiltered receive replaces the captured
+    // sender, so reading this later could name whoever's message was drained
+    // last. Nothing here receives any more, but the ordering rule stands and
+    // is cheaper to keep than to re-derive.
     let owner = syscall(syscall_abi::SENDER_TASK, 0);
-    let fail = |out: &mut [u8], msg: &[u8]| -> usize {
+    let fail = |out: &mut [u8], msg: &[u8]| -> Option<usize> {
         let n = msg.len().min(out.len());
         out[..n].copy_from_slice(&msg[..n]);
-        n
+        Some(n)
     };
     // A caller with no identity cannot own a run: GET_ID_ERR would be the
     // owner AND what any later identity-less message answers, so the two would
@@ -1640,24 +1411,69 @@ fn handle_run(packed_mac: u64, _sender: u64, buf: &[u8], len: usize, out: &mut [
     let Some(dst_mac) = arp_resolve(&mac, &next_hop(&ip)) else {
         return fail(out, b"cpu: remote unreachable\r\n");
     };
-    // Pump our own event loop while awaiting the run's output (cluster Phase 4b):
-    // the spawned command's /host reads come back to *our* export as frames we
-    // must serve *during* the run - a plain blocking tcp_get would deadlock (it
-    // would drop those frames while stuck waiting). tcp_run drives the run's
-    // client connection AND serves the export + acks the health-ping each pass.
-    // Collect the run's output straight into the pending buffer (bounded by
-    // RUN_OUT_MAX; the remote's own send buffer caps it too). Then hand the shell
-    // the first chunk and let it pull the rest via NETOP_RUN_MORE.
-    pending.active = false;
-    let (status, got) = tcp_run(packed_mac, &mac, &dst_mac, &ip, port, &req[..total], &mut pending.buf, conns, dials, remotes, sessions, auth);
-    if status != syscall_abi::NET_FETCH_OK {
-        return fail(out, b"cpu: remote run failed\r\n");
+    // PARK it (step 3 of docs/roadmap/roadmap-async-rmount.md). This used to
+    // call `tcp_run`, which drove the run's connection while re-entrantly
+    // pumping the export and the mailbox, because a cpu child's Phase 4b
+    // `/host` reads come back to *our* export as frames that must be served
+    // DURING the run - a plain blocking read would have deadlocked. Parking
+    // makes that machinery unnecessary rather than cheaper: the serve loop is
+    // never blocked, so it serves the export, acks the health ping and drives
+    // every other client while the run is in flight, and the re-entrant drain
+    // (with its by-sender refusal, #147) is gone with it.
+    //
+    // The output is collected by `service_remotes`, which drains the slot's
+    // receive buffer into `pending` as it arrives and answers the caller on the
+    // peer's FIN. `pending` is cleared here so a previous run's output can
+    // never be handed to this caller if this one fails.
+    // ONE run at a time, refused before `pending` is touched. `PendingRun` is a
+    // single buffer with a single owner, and until step 3 two runs could not
+    // coexist: `tcp_run` blocked the loop for the whole first one, and #147's
+    // by-sender refusal turned away the second client's request. Step 3 removed
+    // both, and with `MAX_REMOTE` 2 both runs fit in the table - so without this
+    // the second park would take `pending.owner` from the first, and the first
+    // caller would be answered empty while the second received the first's
+    // bytes prepended to its own (review of #154). Refusing is honest and the
+    // shell retries; sharing the buffer is not.
+    if remotes.iter().any(|r| matches!(r, Some(r) if matches!(&r.parked, Some(pk) if pk.verb == ninep_abi::NP_RUN))) {
+        return fail(out, b"cpu: a run is already in flight (try again)\r\n");
     }
-    pending.owner = owner;
-    pending.len = got.min(RUN_OUT_MAX);
+    pending.active = false;
+    pending.len = 0;
     pending.cursor = 0;
-    pending.active = true;
-    pending.next_chunk(owner, out)
+    pending.owner = owner;
+    match park_remote(&dst_mac, ip, port, ninep_abi::NP_RUN, owner, &req[..total], remotes) {
+        Ok(()) => None,
+        Err(msg) => fail(out, msg),
+    }
+}
+
+/// Park an already-framed, already-signed request on a free remote slot. The
+/// bytes are copied in as they stand: unlike `park_rmount` this does no signing
+/// of its own, because a run's frame is built and signed by `park_run` before
+/// the endpoint is even resolved. `Err` is the text to answer the caller with.
+fn park_remote(dst_mac: &[u8; 6], ip: [u8; 4], port: u16, verb: u64, caller: u64, req: &[u8], remotes: &mut [Option<RemoteConn>; MAX_REMOTE]) -> Result<(), &'static [u8]> {
+    let Some(slot) = remotes.iter().position(|r| r.is_none()) else {
+        return Err(b"cpu: no free connection for the run (try again)\r\n");
+    };
+    if req.len() > REMOTE_SBUF {
+        return Err(b"cpu: the command line does not fit one request\r\n");
+    }
+    remotes[slot] = Some(new_wire(remote_src_port(slot)));
+    let wire = remotes[slot].as_mut().unwrap();
+    wire.sbuf[..req.len()].copy_from_slice(req);
+    wire.slen = req.len();
+    wire.peer_ip = ip;
+    wire.peer_mac = *dst_mac;
+    wire.peer_port = port;
+    wire.state = DialState::Connecting; // the pump sends the SYN
+    // The run's reply is a STREAM ended by the peer's FIN, not a framed NP
+    // reply, and it carries no signature (cpu output is reply-unauthenticated,
+    // stated in the auth design). `verb == NP_RUN` is what tells
+    // `service_remotes` both of those things; no extra field is needed.
+    // `since: 0` for the reason `park_rmount` gives: the clock starts at the
+    // first send, never at the park.
+    wire.parked = Some(Parked { caller, nonce: [0; ninep_abi::NP_NONCE_LEN], expect_key: [0; clusterkeys::KEY_LEN], since: 0, who: [0; ninep_abi::NP_NAME_LEN], verb, opening: false });
+    Ok(())
 }
 
 /// How many held client sessions (Decision 4) `netd` keeps at once: a session
@@ -1987,11 +1803,71 @@ fn park_rmount(dst_mac: &[u8; 6], ip: [u8; 4], port: u16, verb: u64, caller: u64
 /// here is affordable because this runs at the top level of `serve`, never
 /// from the re-entrant drain (the depth that made parking there over-reach,
 /// see the plan's ledger).
-fn service_remotes<const H: usize>(remotes: &mut [Option<Wire<REMOTE_SBUF, REMOTE_RBUF, H>>], auth: &Auth, dead: u64) {
+fn service_remotes<const H: usize>(remotes: &mut [Option<Wire<REMOTE_SBUF, REMOTE_RBUF, H>>], auth: &Auth, dead: u64, mut pending: Option<&mut PendingRun>) {
     let t = now();
+    // ONE reply buffer for the whole pass, shared by the run arm and the
+    // framed-reply arm below. Two arrays here cost ~768 bytes on `serve`'s own
+    // frame, because this is inlined into it and so sits beneath every chain
+    // netd has; measured when step 3's run arm first declared its own.
+    let mut r = [0u8; syscall_abi::MSG_MAX_LEN as usize];
     for slot in remotes.iter_mut() {
         let Some(c) = slot else { continue };
         if c.parked.is_none() {
+            continue;
+        }
+        // A cpu RUN (step 3). Its reply is a stream ended by the peer's FIN,
+        // not a framed NP reply, and it is reply-unauthenticated, so none of
+        // the framing, length or signature logic below applies to it. Its
+        // output is drained into `pending` as it arrives, which is what keeps
+        // the slot's receive buffer small: `RUN_OUT_MAX` of output does not
+        // have to fit `REMOTE_RBUF`.
+        if c.parked.as_ref().unwrap().verb == ninep_abi::NP_RUN {
+            let Some(p) = pending.as_deref_mut() else { continue };
+            if c.rlen > 0 {
+                let room = RUN_OUT_MAX.saturating_sub(p.len);
+                let take = c.rlen.min(room);
+                p.buf[p.len..p.len + take].copy_from_slice(&c.rbuf[..take]);
+                p.len += take;
+                // Consumed: the buffer is free for the next segment, and the
+                // peer's window re-opens. Output past RUN_OUT_MAX is dropped,
+                // the same bound `tcp_run` applied with `got.min(RUN_OUT_MAX)`.
+                c.rlen = 0;
+                // Progress: a run is bounded by SILENCE, not by total time.
+                c.parked.as_mut().unwrap().since = t.max(1);
+            }
+            let finished = c.peer_fin || c.state == DialState::Closed;
+            let since = c.parked.as_ref().unwrap().since;
+            let silent = since != 0 && t.wrapping_sub(since) > RUN_DEADLINE_TICKS;
+            if !(finished || silent) {
+                continue;
+            }
+            let parked = c.parked.take().unwrap();
+            // `tcp_run`'s rule exactly: output if anything arrived OR the peer
+            // closed CLEANLY, an error otherwise. The test is `peer_fin`, not
+            // `finished`: `finished` also covers a slot the pump set Closed
+            // after its SYN or data retransmits ran out, and treating that as a
+            // clean end answered a caller whose peer was never reached with an
+            // EMPTY reply - the shell then printed nothing and stopped, where
+            // the blocking path had said "remote run failed" (review of #154).
+            // A clean FIN with no output stays an empty reply, which is correct:
+            // that is a command that printed nothing.
+            let n = if p.len > 0 || c.peer_fin {
+                p.cursor = 0;
+                p.active = true;
+                p.next_chunk(parked.caller, &mut r)
+            } else {
+                // Never reached, or reached and silent past the deadline: the
+                // answer `tcp_run` gave for NET_FETCH_TIMEOUT.
+                let msg = b"cpu: remote run failed\r\n";
+                r[..msg.len()].copy_from_slice(msg);
+                msg.len()
+            };
+            reply(parked.caller, &r[..n]);
+            match c.state {
+                DialState::Established => c.state = DialState::Closing,
+                DialState::Closing | DialState::Closed => {}
+                _ => c.state = DialState::Closed,
+            }
             continue;
         }
         // Complete: the frame's own length says so. A frame the buffer cannot
@@ -2010,7 +1886,6 @@ fn service_remotes<const H: usize>(remotes: &mut [Option<Wire<REMOTE_SBUF, REMOT
             continue;
         }
         let parked = c.parked.take().unwrap();
-        let mut r = [0u8; syscall_abi::MSG_MAX_LEN as usize];
         // `verified` is the one outcome that leaves a session open: a reply
         // that failed its signature is fail-dead like a dead connection.
         let mut verified = false;
@@ -2389,9 +2264,19 @@ const DIAL_IDLE_TICKS: u64 = 600;
 /// The remote-mount client's own table of the same engine (Decision 2 of
 /// docs/roadmap/roadmap-async-rmount.md): one slot per parked `NETOP_RMOUNT`,
 /// separate from `dials` so a remote mount never competes with a `/net/tcp`
-/// dial-out for a slot. Two is the smallest number that lets a bystander's
-/// read proceed while a cpu child's is parked; raise it when a rig exhausts it.
-const MAX_REMOTE: usize = 2;
+/// dial-out for a slot. Two was the smallest number that let a bystander's read
+/// proceed while a cpu child's was parked. THREE since step 3 (2026-09-22),
+/// because a parked `cpu` run now HOLDS one of these for the whole run, up to
+/// `RUN_DEADLINE_TICKS`, where the run used to block the loop and take no slot
+/// at all. At two, a run plus one in-flight path verb filled the table, and the
+/// next verb - a `cat` over a remote mount issues them back to back, and a slot
+/// is not reaped until its FIN exchange finishes - would be refused
+/// `FS_ERR_BUSY`. That refusal is indistinguishable, in the client's output,
+/// from the by-sender refusal step 3 deleted, so the re-entrant rig could not
+/// tell a genuine regression from ordinary contention (review of #154). Three
+/// keeps two slots free during a run and costs one `RemoteConn` (~2.1 KB) of
+/// the stack headroom measured for `STACK_PAGES`.
+const MAX_REMOTE: usize = 3;
 /// The NP part of a remote request: a client message is at most `MSG_MAX_LEN`
 /// (768) of which `NETOP_RMOUNT_MSG` (16) is the envelope. It sizes the signed
 /// frame a remote slot sends AND the raw verb a session slot holds while its
@@ -2432,6 +2317,21 @@ const _: () = assert!(REMOTE_PORT_SPAN >= 0x400, "too many parking slots for the
 /// lands while a second caller is parked), and a dead one costs a `cat` five
 /// seconds, not a minute.
 const REMOTE_DEADLINE_TICKS: u64 = 250;
+
+/// Ticks of SILENCE a parked `cpu` run may take before it is given up on.
+/// A run is bounded by silence rather than by total time: a remote command may
+/// legitimately take a while, and every byte it sends resets this. Far above
+/// `REMOTE_DEADLINE_TICKS`, which bounds a single request/reply round trip.
+///
+/// `tcp_run` used 300 ticks (6 s) of silence, but reset it on ANY frame it
+/// served while waiting, including a Phase 4b child's `/host` callbacks to our
+/// own export. A parked run never sees those (the serve loop serves them, on
+/// other connections), so reproducing that coupling would mean threading
+/// export activity into this slot. Thirty seconds instead: strictly MORE
+/// permissive than the old rule for the case that changed (a child working
+/// silently on `/host` reads), and a dead peer still costs one of `MAX_REMOTE`
+/// slots for a bounded time rather than forever.
+const RUN_DEADLINE_TICKS: u64 = 1500;
 
 /// What a remote slot remembers about the request it carries, so the reply can
 /// be verified and delivered from the event loop long after the handler that

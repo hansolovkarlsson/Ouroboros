@@ -103,6 +103,25 @@ can hand the pages back. The plan's ledger has the detail; `make
 test-async-rmount` gained a session check and a latency-boundary check, each
 with a measured control.
 
+**The `cpu` run goes asynchronous too, step 3, and the arc's concurrency half
+is done.** `netd` no longer blocks its event loop for a remote **mount, fid
+verb or run** - the three paths this arc set out to move. ARP, DNS, ICMP and
+the HTTP fetch still block, deliberately and by the plan's Decision 4: they are
+bounded, they carry no fid, and none is on the path this arc removed.
+The run parks on the same engine as the mounts, its output is drained into the
+pending buffer as it arrives and delivered on the peer's FIN, and with nothing
+blocking there is no re-entrant drain left: `tcp_run`, `pump_conns`, the
+by-sender `FS_ERR_BUSY` refusal of #147 and the chained-cpu refusal are all
+deleted, 266 lines out for 144 in. **This fixes a real break, not just a
+fragility**: on the previous tree a cpu child's Phase 4b `/host` read faulted
+`netd` at its guard page and the supervisor restarted the server, every time,
+measured with a control on the two-node rig; it returns the right bytes now.
+The run's timeout is restated as 30 s of silence on the run connection, since a
+parked run cannot see the export callbacks the old timer also reset on.
+`STACK_PAGES` stays at 14: step 3 was planned to hand back step 2's two pages
+and, measured, cannot, because the stack is now dominated by resident tables
+rather than call depth. The re-entrant rig inverts, every recipe served.
+
 **Ctrl+C detaches a handed-over shell; `fg` refused from a non-owner** (#151).
 Ctrl+C now tells a foreground COMMAND from a handed-over SESSION: a `/bin`
 program the shell `WAIT`s on is terminated as before, but a nested shell handed

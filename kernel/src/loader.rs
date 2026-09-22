@@ -171,6 +171,21 @@ const CONFIG_PATH: &str = "\\EFI\\ORBS\\INIT.CFG";
 // the plan removes the re-entrant run path and can hand these back. Global
 // (every task's stack), which is fine: more headroom everywhere, and a 2 MB
 // slot swallows 56 KB.
+//
+// STEP 3 WAS EXPECTED TO HAND THESE TWO PAGES BACK AND DOES NOT. The plan said
+// removing the re-entrant run path would let the stack come down again, and
+// `tcp_run`'s ~4 KB frame did leave the tree. Measured on the two-node rig at
+// 48 KB anyway: netd still faults, now 1936 bytes into the guard page, in
+// `caller_name` beneath `park_run`. Deleting the deepest function did not make
+// the deepest CHAIN shallower, because what dominates is no longer a transient
+// frame at all - it is step 2's RESIDENT tables on `serve`'s frame, which
+// every chain stands on. Two further attempts to buy the page back were
+// measured and both refused: `#[inline(never)]` on `park_run` made it WORSE
+// (3072 bytes over, since inlining had been overlapping its buffers with
+// handle_client's fetch/resolve ones), and sharing one reply buffer in
+// `service_remotes` changed this chain not at all. 14 stays, with ~6.3 KB of
+// headroom; the pages come back when the resident tables shrink, not when a
+// function is deleted.
 const STACK_PAGES: u64 = 14;
 /// One inaccessible guard page between the heap and the stack. The stack
 /// grows down from the top of the region; an overflow past the
