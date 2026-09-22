@@ -244,6 +244,61 @@ adds.
 still pulls through `NETOP_RUN_MORE`; the supervisor's ping is acked during a
 run with no `beat_if_new_tick` in the way.
 
+**Step 3 landed 2026-09-22.** `handle_run` became `park_run`: it builds and
+signs the `NP_RUN` as before, then parks it and returns. `service_remotes`
+drains the slot's receive buffer into `PendingRun` as output arrives, so
+`RUN_OUT_MAX` of output never has to fit `REMOTE_RBUF`, and answers the caller
+on the peer's FIN. A run slot is identified by `verb == NP_RUN`, which also
+says its reply is a stream rather than a framed NP reply and carries no
+signature, so no new field was needed. Deleted: `tcp_run` (139 lines),
+`pump_conns` (32, it existed only so `tcp_run` could keep the export flowing),
+the re-entrant drain, the by-sender refusal of #147, the chained-cpu refusal,
+the `Option<&mut PendingRun>` that only existed to say "re-entrant", and
+`handle_client`'s `conns` parameter. 266 lines out, 144 in.
+
+**The latent overflow was not latent, and it is closed.** Measured with a
+control: on `main`, `cpu <A> ls /host` and `cpu <A> cat /host/HELLO.TXT` BOTH
+fault netd at the guard page (`esr_el1=0x9200004f`, `elr` in `handle_tcp`'s
+prologue, reached from `tcp_run`'s `on_frame`) and the supervisor restarts the
+server; on this branch both return the right bytes with zero fault lines on
+both nodes. Phase 4b remote-fs was **broken** on `main`, not merely fragile,
+and nothing had reported it because no rig ran a `/host` read.
+
+**Three findings the paragraph above did not say.**
+
+1. *The run's timeout changes shape.* `tcp_run` used 300 ticks of silence but
+   reset it on ANY frame it served, the child's `/host` callbacks included. A
+   parked run never sees those, so reproducing that coupling would mean
+   threading export activity into the slot. `RUN_DEADLINE_TICKS` is 30 s of
+   silence on the run connection instead: strictly more permissive than the old
+   rule for the case that changed, a child working silently on `/host` reads.
+
+2. *Step 3 does NOT hand back step 2's two pages, which this plan said it
+   would.* Measured at 48 KB: still faults, 1936 bytes into the guard page, in
+   `caller_name` beneath `park_run`. Deleting the deepest function did not make
+   the deepest CHAIN shallower, because what dominates is no longer a transient
+   frame at all: it is step 2's RESIDENT tables on `serve`'s frame, which every
+   chain stands on. Two attempts to buy a page back were measured and both
+   refused: `#[inline(never)]` on `park_run` made it WORSE (3072 bytes over,
+   because inlining had been overlapping its buffers with `handle_client`'s
+   fetch/resolve ones, whose lifetimes are disjoint), and sharing one reply
+   buffer in `service_remotes` moved this chain not at all. The pages come back
+   when the resident tables shrink, not when a function is deleted. **The
+   step-1 lesson is about SIBLING branches, not about depth in general**, and
+   this is the case that draws the line.
+
+3. *Inverting the re-entrant rig cost it a distinction, and the header says
+   so.* Before, "refused" and "succeeded" were different strings, so the
+   harness could see whether the condition had been created and retry when the
+   run had returned first. Now a client served DURING a run and one served
+   AFTER it returned produce the same output. The rig is a regression check
+   against the refusal and the overflow, not a proof of overlap; the async
+   rig's ordering checks are where overlap is proven. It also gained the
+   session recipe (`cbig`) the by-sender refusal had made too flaky to grade,
+   and its `resolve` recipe expects "no response" because the two-node link has
+   no SLIRP and so no DNS - netd running the resolver at all is the thing being
+   checked.
+
 ## Deliberately not in scope
 
 - **Session-scoped authentication.** Its own plan, after this. The held
@@ -257,6 +312,13 @@ run with no `beat_if_new_tick` in the way.
 
 Kept as the steps land, newest first.
 
+- **Step 3 landed 2026-09-22**, the same day as step 2, and with it the arc's
+  concurrency half is done: nothing in `netd` blocks its event loop for a
+  remote round trip any more. The detail is in the step 3 note above. The two
+  things worth carrying out of it: the overflow #147 called latent was
+  reproducible on demand and had broken Phase 4b outright, and a step that was
+  planned to RETURN stack instead proved the stack is now dominated by resident
+  tables rather than call depth.
 - **Step 2 landed 2026-09-22**, the day after it was sized, and the sizing
   held: a day, the shape of step 1, deleting more than it adds (462 lines out,
   339 in), no kernel change to the ABI but ONE to the loader (`STACK_PAGES` 12
