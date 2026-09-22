@@ -761,14 +761,14 @@ python3 scripts/drive-2vm.py build/espext2-a.img build/espext2-b.img \
 # (4661 > one chunk)", 0 fault lines both nodes.
 ```
 
-Its control is the session's whole point: in `session_rmount`, close the
-session after every verb (`if let Some(sess) = sessions[slot].take() {
-client_close(mac, &sess); }` before the refcount block) so it is not held; cbig
-then FAILS (the second verb reaches a clunked fid), measured 2/2. Against
-`main` a C `open()` on a remote mount answers `FS_ERR_NO_SUCH_VERB` (a fid verb
-on a one-shot connection), the pre-session behaviour. **cbig is subject to the
-same ~1/6 socket-link flake as any remote op here** (`cbig: remote … read
-failed`, no fault): re-run rather than reading one failure as a regression.
+Its control is the session's whole point: in `service_remotes`, close the
+session after every reply (force `c.fids = 0` just before the keep-open test)
+so it is not held; cbig then FAILS (the second verb reaches a clunked fid),
+measured. (Before async step 2 this control lived in `session_rmount`, closing
+the session after each verb; that whole synchronous path is gone.) **cbig is
+subject to the same ~1/6 socket-link flake as any remote op here** (`cbig:
+remote … read failed`, no fault): re-run rather than reading one failure as a
+regression.
 
 **The remote-write witness** (step 7 of `roadmap-fid-verbs.md`, `NP_PWRITE`,
 2026-09-12). `/bin/CWRITE` (`libc/cwrite.c`) writes an 800-byte pattern (two
@@ -892,11 +892,13 @@ request in flight)" - for `cat`, for `resolve`, and (one level deeper) for
 The session path `cbig` shares the same refusal (by sender, before any op
 dispatch) and is not run here, because a pre-existing race delegates a spawned
 task's netd send right just after spawn and sometimes refuses cbig's first
-request by capability before any remote request - flaky as a driver, and (a
-fid verb) it is the one remote-mount shape still on the synchronous session
-path, step 2 of the async plan. The cpu child's own Phase 4b remote-fs took
-the deep path from this drain until 2026-09-21 and was never refused (it is
-the run, not a bystander); it parks now, like any path verb.
+request by capability before any remote request - flaky as a driver. Since async
+step 2 (2026-09-22) a fid verb is parked like a path verb rather than run on a
+synchronous session, so the re-entrant drain refuses both the same way; the
+`cat`/`resolve` recipes remain the deterministic witnesses. The cpu child's own
+Phase 4b remote-fs took the deep path from this drain until 2026-09-21 and was
+never refused (it is the run, not a bystander); it parks now, like any path
+verb.
 
 ## 6. USB and GIC variants
 

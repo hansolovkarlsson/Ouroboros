@@ -139,6 +139,57 @@ between verbs. Checks: the two-VM ext2 rig's `cbig`/`cwrite` witnesses, the fid
 gate, and a re-entrant `cbig` recipe, which the by-sender refusal made a flaky
 driver and step 3 makes unnecessary.
 
+**Step 2 landed 2026-09-22.** The held session is a `SessionConn`, the same
+`Wire` engine as the path table with a third const buffer (`held`) that carries
+the first verb while its `NP_SESSION` opens. `handle_rmount`'s fid branch calls
+`park_session` and returns without waiting; `service_remotes`, run once per
+table, does the two-phase open (sign the held verb only after the far side
+answers the `NP_SESSION` with status 0), delivers replies to the caller's
+identity, keeps the fid refcount, and closes a session at zero fids or on a
+fail-dead reply. The whole blocking path is deleted: `ClientSession`,
+`TcpScratch`, `SESSION_BUF`, `client_connect`, `client_exchange`,
+`client_close`, `session_exchange`, `find_or_open_session`, `session_rmount`,
+`reap_client_sessions`. The source-port window is split across both tables by
+slot index (`remote_src_port`, `REMOTE_SLOTS`) rather than the retired
+`MAX_REMOTE == 2` assert, and `pump_dials` takes its table's idle threshold so a
+held session lives `CLIENT_SESSION_IDLE_TICKS` (40 s) where a dial or a parked
+path verb lives `DIAL_IDLE_TICKS` (12 s). Net: netd `main.rs` 462 lines deleted,
+339 added. Measured: `make test-async-rmount` 6 of 6 (the four step-0/1 checks
+plus the two step-2 checks below), the two-node ext2 `cbig`/`cwrite`/`cwrite`-as-user
+witnesses (0 faults both nodes), and `make test-reentrant-session` served (both
+recipes refused with 0 faults).
+
+Two new async-rig checks, each with a measured control. **Check 5 (session):**
+a C program's `open`/`fstat`/`read`/`close` (`/bin/cremote`) is served from a
+parked session slot held `Established` between the verbs; its control is the
+close-after-every-reply mutation (force `c.fids = 0` before the keep-open test
+in `service_remotes`), which makes cremote's `fstat` reach a clunked fid and
+fail, measured. **Check 6 (boundary):** a fid verb parked on a peer whose
+`NP_SESSION` reply never comes (the `--delay 30` host peer) does not stall a
+concurrent path-verb `cat` of a live peer, the cat's bytes landing BEFORE the
+open fails at the 5 s deadline. This is the step-1/step-2 boundary the third
+review of #149 named. Its control is `main`'s netd, where the session path
+still blocks the loop for its round trip and the cat is served AFTER the
+failure, measured.
+
+**The stack moved, exactly as finding 5 said, and was measured not reasoned.**
+A `SessionConn` is 2896 bytes (its send/recv buffers plus the 752-byte held
+verb); the old `ClientSession` held no buffers at all, a round trip borrowing
+the caller's. Three session slots resident on `serve`'s frame is ~8.5 KB more
+under the deep `cpu`-run chain (`handle_run` -> `tcp_run`) already at the guard
+page. The two-node rig faulted `tcp_run`'s own prologue at 48 KB, overflowing
+704 bytes into the guard page (`far_el1` inside it, a clean EL0 fault). Grew
+`STACK_PAGES` 12 -> 14, restoring step 1's ~7 KB of headroom. Step 3 removes the
+re-entrant run drain and can hand the pages back. This is not the plan's "should
+fit 48 KB" being wrong so much as the reason it was measured: the compiler put
+the resident table where it tipped a chain that was already at the edge.
+
+The overlap refusal is now a stated, exercised limit: two fid verbs from one uid
+to one endpoint can overlap (the blocking path made that unspellable), and
+`park_session` refuses the second `FS_ERR_BUSY`, which libc's `read()` loop does
+not retry, so two C programs sharing one remote mount under one user is a
+documented boundary, not a bug.
+
 *Sized 2026-09-21, from the code at `78352df`, before any of it was written.*
 Eight things the paragraph above does not say, found by reading the paths step 2
 replaces (`client_connect`, `client_exchange`, `session_exchange`,
@@ -206,6 +257,21 @@ run with no `beat_if_new_tick` in the way.
 
 Kept as the steps land, newest first.
 
+- **Step 2 landed 2026-09-22**, the day after it was sized, and the sizing
+  held: a day, the shape of step 1, deleting more than it adds (462 lines out,
+  339 in), no kernel change to the ABI but ONE to the loader (`STACK_PAGES` 12
+  -> 14, the resident-table growth finding 5 predicted and the two-node rig
+  measured: `tcp_run`'s prologue over the guard page at 48 KB). All eight
+  sized findings landed as written: the two-phase park with the held verb, the
+  40 s vs 12 s idle split per table, the overlap refusal (`FS_ERR_BUSY`, libc
+  does not retry), the re-derived per-slot port window, the moved-not-shrunk
+  stack, the refcount and last-clunk close in the service pass, the inherited
+  five-second deadline, and the four run-path signatures re-threaded. The
+  latency-boundary check finding also landed (async-rig check 6). Nothing in
+  the sizing turned out wrong on contact with the code; the one thing it did
+  not name was that the stack would need +2 pages rather than fitting 48 KB,
+  which is why it said measure, not reason. Full detail in the step 2 note
+  above.
 - **Step 2 sized 2026-09-21**, before any of it was written: the eight
   findings and the estimate are in the dated note under step 2 above, the one
   place they live.
