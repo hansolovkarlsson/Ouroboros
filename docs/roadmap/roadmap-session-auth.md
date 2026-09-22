@@ -53,8 +53,12 @@ carries about 2 KB of buffers and the signature paths are the deepest frames
 in the server whose stack has hit its guard page before.
 
 The driver is the client-session witness from `testing-qemu.md`: the ext2
-two-node rig, node B mounts node A, and `cbig` runs three times (each run is an
-`NP_SESSION`, an open, nine preads and a close over one held session).
+two-node rig, node B mounts node A, and `cbig` runs three times. Each run is
+an `NP_SESSION` and then 13 verbs over one held session: an open, eleven preads
+(`/man/grep` is 4,661 bytes, so ten 512-byte `NP_REMOTE_CHUNK`s carry data and
+one more reads end of file) and a close. Three runs make 39 timed verbs, and
+the three `NP_SESSION` requests make 42 signed requests in all. The mount
+itself sent no signed frame in this run: the counts leave no room for one.
 
 **Results, QEMU TCG, `cortex-a72`:**
 
@@ -81,7 +85,8 @@ still printed zeros that looked like "cheap", so it was checked against an
 observer it does not share code with: `drive-2vm.py` counts the `AUTHNP03`
 magics in each node's packet capture, and reported **42 signed frames on each
 node**. The counters counted 42 client signs and 42 client verifies on B, and
-42 export verifies and 42 export signs on A. The per-op means also reproduce the
+42 export verifies and 42 export signs on A. And 42 is what the workload
+predicts (3 + 39, above), so nothing was counted twice or missed. The per-op means also reproduce the
 2026-08-31 figure (521 + 939 = 1,460 µs against "~1.4 ms"), measured by a
 different tool on a different path. `cbig` passed all three runs, 0 fault
 lines on either node.
@@ -105,10 +110,11 @@ fresh ephemeral X25519 public key as its payload (32 bytes). It is already an
 signature with no new format. The export answers with its own ephemeral X25519
 public key as the result (32 bytes), and that reply is already signed with the
 exporter's key and bound to the request's nonce. Both sides then compute the
-shared secret. **No new signature scheme, no new round trip**: the verb this
-project added in September for exactly this purpose ("the natural home for
-session-scoped authentication later", `ninep-abi`'s `NP_SESSION` doc) carries
-it.
+shared secret. **No new signature scheme, no new round trip**: the verb chosen
+in September partly for this reason ("the natural home for session-scoped
+authentication later", `roadmap-fid-verbs.md`'s decision of 2026-09-07)
+carries it. `ninep-abi`'s own `NP_SESSION` doc says "No params; no payload"
+today, which step 3 changes.
 
 **Decision 2: compatibility is decided by the signed reply, so it cannot be
 stripped.** An export that predates this plan ignores `NP_SESSION`'s payload
@@ -127,8 +133,12 @@ request_nonce ‖ eph_client ‖ eph_export)`, then `k_c2s = K[0..32]` and
 `k_s2c = K[32..64]`: **one key per direction**, so a MAC made for one direction
 can never be presented as the other (the same property the two signature
 domain tags give today). The request nonce and both ephemerals are in the
-derivation so the keys are bound to this handshake and no other. The ephemeral
-private keys are dropped once `K` is derived.
+derivation so the keys are bound to this handshake and no other. An all-zero shared
+secret (a low-order public key from the peer, RFC 7748 section 6.1) is refused
+and the session is not keyed, since `K` would then depend on public values
+only. The ephemeral private keys are never stored: Decision 6 says how they are
+derived, and it lets the client re-derive its own in phase two instead of
+keeping it across the round trip.
 
 **Decision 4: the keyed frame.** After a keyed `NP_SESSION`, requests are
 
@@ -147,11 +157,25 @@ with `tag = HMAC-SHA-512(k_s2c, seq ‖ status ‖ result)`. **`seq` starts at 1
 and must be exactly one more than the last**, on both sides. TCP delivers in
 order, so any other value is an injection or a replay, and the session is
 closed on it (fail-dead, the same rule a failed reply signature follows today).
+Tags are compared in constant time (every byte, no early exit). A test vector
+cannot catch an early-exit compare, so this one is checked by reading the code,
+and the review is told so.
 The user name is no longer in the frame: it was signed into the `NP_SESSION`
-request and the export binds the session to it, so a keyed session cannot
-change user mid-stream at all (today another user on the session is refused
-`FS_ERR_PERM` per request). Once a session is keyed, the export refuses an
+request, and every verb on a keyed session runs as that user. **This is a
+change, not a preservation.** Today only a fid verb checks the user (the export
+refuses a fid whose opener's uid differs, `session_slot`); a path verb on a
+session runs under whatever name its own request carries. `netd` as a client
+already opens one session per `(endpoint, uid)`, so it never mixes users on
+one, but the export and both Python peers need the rule written down, and step
+5 tests it. Once a session is keyed, the export refuses an
 `AUTHNP03` frame on it: one connection, one format.
+
+**Keying happens once, on the first `NP_SESSION` of a fresh connection.** A
+later `NP_SESSION` that offers a key (on a keyed session, or on an unkeyed one
+that would be keyed mid-stream) is refused and the connection closed: there is
+no re-keying, because a session's life is already bounded by its fids and the
+idle reap. A later `NP_SESSION` with no payload on an unkeyed session keeps
+today's idempotent `0`, so a v0.20.0 client sees no change.
 
 **Decision 5: what stays exactly as it is.** One-shot connections (path verbs,
 the mount-time probe) and `NP_RUN` keep per-request `AUTHNP03` signatures.
@@ -159,6 +183,42 @@ the mount-time probe) and `NP_RUN` keep per-request `AUTHNP03` signatures.
 Ed25519 identity, the `authorized` file, the lookup-by-address rule for the
 client and the refuse-if-you-cannot-sign rule are all unchanged. This arc
 changes how a session proves each message, not who can open one.
+
+**Decision 6: where the ephemeral keys come from.** Parallels and the Pi have
+no hardware entropy (virtio-rng is absent there, which is why Ed25519 was chosen
+for its deterministic signing), and today's request nonce is the clock plus the
+IP. A guessable ephemeral lets an attacker compute the session keys. One that
+repeats for a replayed `NP_SESSION` gives the replay the same `K`, and every
+recorded `AUTHNP04` frame verifies again. So each ephemeral is **derived**, from
+a secret and from values that never repeat:
+
+- client: `SHA-512(SIG_DOMAIN_EPHEMERAL_C ‖ machine private key ‖ boot counter
+  ‖ request nonce)`, reduced to an X25519 scalar;
+- export: `SHA-512(SIG_DOMAIN_EPHEMERAL_E ‖ machine private key ‖ boot counter
+  ‖ request nonce ‖ MONOTONIC_US at the handshake)`, likewise.
+
+The private key makes each one secret. The **boot counter** is a number in
+`/etc/cluster/` that `netd` increments, writes and reads back at startup,
+*before* it keys any session, so a value is never used unless it is on disk and
+the next boot cannot repeat it. A supervisor restart of `netd` increments it
+again, which is harmless. Within a boot, the client's request nonce already
+never repeats, and the export's own clock reading makes its ephemeral differ
+for a replayed `NP_SESSION` whose request nonce is the same. Where virtio-rng
+exists, 32 bytes from `RANDOM` are mixed into both hashes as well. **If the
+counter cannot be written, the node keys no sessions**: its client offers no
+key and its export answers with an empty result, which is today's session,
+still per-request signed. That is fail-safe, not fail-open.
+
+Because the client's ephemeral depends only on the key, the counter and the
+nonce the slot already keeps in `Parked`, phase two re-derives it, and no
+private key is ever resident.
+
+**What this costs, stated honestly: forward secrecy is conditional.** Without
+hardware entropy, anyone who later obtains a machine's private key *and* its
+boot counter can recompute that machine's past ephemerals from a capture. Both
+live on the same disk, so on Parallels and the Pi the condition is "the disk
+was never stolen". Where virtio-rng is mixed in, forward secrecy holds without
+that condition.
 
 ### What it buys, and what it does not
 
@@ -172,10 +232,11 @@ changes how a session proves each message, not who can open one.
   `roadmap-cluster.md` gates behind leaving a trusted network. It arrives here
   as a side effect, not as a reason; **one-shot requests stay replayable**, so
   that item stays open.
-- **Forward secrecy** for any later encryption, because the keys come from
-  ephemerals. Nothing is encrypted by this plan, and adding encryption later is
-  another key off the same derivation, not a new handshake. That is the "not
-  blocking future features" test.
+- **Forward secrecy** for any later encryption, **conditionally**: fully where
+  hardware entropy is mixed in, and only against someone who never gets the
+  disk where it is not (Decision 6). Nothing is encrypted by this plan, and
+  adding encryption later is another key off the same derivation, not a new
+  handshake. That is the "not blocking future features" test.
 - **Not** confidentiality, **not** per-user keys, **not** protection against a
   compromised authorized machine. All unchanged.
 
@@ -204,9 +265,14 @@ tested against something that is not itself.
    vectors and the section 6.1 Diffie-Hellman vector as host unit tests. On the
    guest, time one scalar multiplication and measure its stack with
    `/bin/edtest`, calibrated the way step 5 of `roadmap-cluster-keys.md` was.
-   **Gate:** its stack must fit where `NP_SESSION` is handled on both sides
-   (the export's `handle_9p` path and the client's session opening), which is
-   `netd`'s tightest territory. If it does not, stop and re-plan before any
+   **Gate:** its stack must fit where the shared secret is computed on each
+   side, which is not where the session opens. On the client that is **phase
+   two in `service_remotes`**, the pump shared by the one-shot and session
+   tables, where the reply's signature verify, the scalar multiplication and
+   the key derivation run back to back. On the export it is the `NP_SESSION`
+   arm under `handle_9p`. The gate adds today's measured peak at those two call
+   sites to the new cost, rather than measuring `park_session`, which only
+   needs a base-point multiply. If it does not fit, stop and re-plan before any
    wire work. *Control:* a flipped bit in one vector fails its test.
 2. **HMAC-SHA-512 in `ed25519/`.** RFC 4231 vectors (SHA-512 rows) on the host;
    on the guest, time a MAC over a full `NP_NET_MAX` message. **Gate:** it must
@@ -215,9 +281,15 @@ tested against something that is not itself.
 3. **The wire, in `ninep-abi`.** `NP_AUTH_MAGIC_KEYED` (`AUTHNP04`),
    `SIG_DOMAIN_SESSION`, the header and tag lengths, the `NP_SESSION` payload
    and result shapes, the sequence rule, the key schedule, all in the normative
-   block. `scripts/check-wire-constants.py` pins each new constant across Rust,
-   the C headers and both Python peers. *Control:* change one constant in one
-   peer and the check fails.
+   block, and the `NP_SESSION` doc's "No params; no payload", which stops being
+   true. `scripts/check-wire-constants.py` cannot pin these yet: its Rust
+   parser reads `&[u8]` strings, decimal `usize` literals and `u64::MAX - n`
+   codes, not a `u64` hex magic or a length written as a sum, and the Python
+   peers spell a magic as `int.from_bytes(b"AUTHNP03", "big")`. So this step
+   extends the parser for those forms and pins **`AUTHNP03` as well**, which
+   is not pinned today. The C headers carry no auth constants and gain none.
+   *Control:* for each form the parser learns, change one constant in one peer
+   and the check fails.
 4. **Both Python peers.** Pure-Python X25519 (RFC 7748's reference ladder,
    asserted against its vectors on load, as the Ed25519 reference is) and the
    standard library's `hmac`. `np9p_server.py` keys a session when the client
@@ -231,15 +303,24 @@ tested against something that is not itself.
    *Controls, each run:* a tag with one bit flipped is refused and the session
    closes; a replayed `seq` is refused; a skipped `seq` is refused; an
    `AUTHNP03` frame on a keyed session is refused; a reply MAC'd with `k_c2s`
-   instead of `k_s2c` is refused by the client. An old-style `NP_SESSION` (no
-   payload) still gets today's session. Stack measured at the new peak.
+   instead of `k_s2c` is refused by the client; a low-order ephemeral (an
+   all-zero shared secret) is refused; a second `NP_SESSION` offering a key is
+   refused and the connection closes; a path verb on a keyed session runs as
+   the session's user, not a name of its own. An old-style `NP_SESSION` (no
+   payload) still gets today's session, and a node whose boot counter cannot
+   be written keys nothing. Stack measured at the new peak.
 6. **The client, in `netd`.** `park_session` sends the ephemeral, phase two
    derives the keys from the export's signed reply, and later verbs frame
    `AUTHNP04` into the slot. Checked on the two-node ext2 rig: `cbig` and
    `cwrite` pass over a keyed session, and a v0.20.0 export (the unkeyed
-   `NP_SESSION` answer) still works from a new client. **Then the step 0
-   measurement is re-run with the same instrumentation**, and the plan records
-   the new crypto share beside the old 44%.
+   `NP_SESSION` answer) still works from a new client. `drive-2vm.py`'s
+   auth-format table learns `AUTHNP04` in this step, before the measurement:
+   it knows only `AUTHNP03` and `AUTHNP02`, so on a keyed run it would count
+   the three `NP_SESSION`s and nothing else, and the cross-check that made step
+   0 trustworthy would go blind (the observer is the check nobody updates).
+   **Then the step 0 measurement is re-run with the same instrumentation**,
+   checked against that count, and the plan records the new crypto share
+   beside the old 44%.
 7. **Docs, rigs and the release.** The normative block, `docs/architecture.md`,
    `docs/manual.md`'s cluster section, `testing-qemu.md`'s session recipes,
    `roadmap-cluster.md`'s replay item (partly closed, and saying which part),
@@ -247,22 +328,28 @@ tested against something that is not itself.
 
 ## Risks, named in advance
 
-1. **`netd`'s stack.** The handshake adds a scalar multiplication to the two
-   places that already hold the deepest frames: `NP_SESSION` on the export and
-   the session opening on the client. Step 1 measures it before anything is
+1. **`netd`'s stack.** The handshake adds a scalar multiplication to two
+   places that already hold deep frames: the `NP_SESSION` arm on the export,
+   and phase two in `service_remotes` on the client, right after the reply's
+   signature verify. Step 1 measures it before anything is
    wired, and step 5 measures the real peak. The async arc's lesson applies:
    the stack is dominated by resident tables now, and `STACK_PAGES` is held at
    14 on purpose.
 2. **Per-session state.** A keyed session carries two 32-byte keys and two
-   counters on each side: `TcpConn` on the export, `SessionConn` on the client,
-   both resident. That is under 100 bytes per slot, but resident bytes are what
-   the stack is short of, so it is counted, not assumed.
+   sequence counters on each side: `TcpConn` on the export, `SessionConn` on
+   the client, both resident. No private key is kept (Decision 6), but the
+   client's `SessionConn` and `RemoteConn` are the same generic `Wire`, so a
+   field added for sessions lands in every `MAX_REMOTE` slot too unless it is
+   placed where only the session table carries it. That is under 100 bytes per
+   slot, but resident bytes are what the stack is short of, so where it lives
+   and what it costs are counted in steps 5 and 6, not assumed.
 3. **Three implementations.** Rust and two Python peers must agree on a key
    schedule and a MAC input byte for byte. A mismatch shows up as a bare
    `FS_ERR_AUTH`, which reads as a key problem. That is why the peers come
    before the guest code (step 4), and why the wire-constant check has to pin
    the domain tag.
 4. **Hand-rolled crypto.** X25519 and HMAC here are written from their RFCs,
-   as Ed25519 was. The vectors are the defence, plus the Python peers as a
+   as Ed25519 was, including the two checks such code most often leaves out:
+   the all-zero shared secret and the constant-time tag compare. The vectors are the defence, plus the Python peers as a
    second implementation from the same RFCs. A shared misreading of the RFC
    would pass both, which is why the vectors are the RFCs' own.
