@@ -767,6 +767,89 @@ answer, `next_src_port` is fine / the flag is enough, was the reproducible
 signal that happened to be wrong, and the discipline that caught it was reading
 what I had claimed rather than trusting that it passed.
 
+## The claim that decides how it is tested, and the authority that was already wrong (2026-09-22)
+
+*Added from the day the async remote mount finished, four PRs and four reviews
+producing twenty findings. Two of them are new species for this file, and the
+first is the worst one in it.*
+
+Everything above is a claim that misleads a **reader**. The defence the file
+ends on is to turn a claim that guards behaviour into a check, on the grounds
+that a check fails when the claim stops being true. 2026-09-22 supplies the
+case that attacks the defence itself.
+
+### The species: a false claim that removes the check
+
+The shell gained a warning for an environment too large to export in full. I
+went looking for how to exercise that branch, worked out that it could not be
+reached by typed input, and exercised it by temporarily lowering `ENV_MAX`
+instead, reverting afterwards. Then I wrote the conclusion into the journal and
+the pull request: *the branch is defensive rather than reachable, and saying
+which it is seems better than leaving a reader to assume it had been
+exercised.*
+
+The arithmetic was wrong. I had bounded the value by `ENV_VALUE_SIZE` and
+assumed a short name. The real bound is the 128-byte input **line**, which
+covers the name and the value together, so an entry is at most 128 bytes
+whatever the split, and sixteen of them are 2052 against a limit of 2048. It
+overflows by four bytes. A reviewer did the arithmetic in one line.
+
+Note what the false claim did. It did not merely sit in a file being wrong. It
+**decided the test strategy**: because the branch was unreachable, a mutation
+was the honest way to cover it; had it been reachable, driving it for real was
+obviously better and is what happened once the claim collapsed. So this is a
+claim that reached forward and removed the check that would have caught it.
+
+> **A CLAIM ABOUT REACHABILITY IS A CLAIM ABOUT WHAT THE TESTS CAN COVER, AND
+> IT IS SELF-SEALING.** A stale comment is found by the next person who reads
+> it. A false "this cannot happen" is not, because it is the reason nobody
+> built the thing that would have found it. It closes its own detector.
+
+The general form: any claim of the shape *this case cannot arise* should be
+read as a **proposal to not test something**, and priced accordingly. The
+project already knows the neighbouring rule, from
+[`cluster-keys-postmortem.md`](cluster-keys-postmortem.md): a step is only
+verifiable if the check can fail. This is the step before it. A check that was
+never written because a claim said it was unnecessary cannot fail either, and
+it leaves no absence for anyone to notice.
+
+### The second species: the copy was faithful and the original had rotted
+
+The same day, a documentation pass wrote out the kernel's syscall table in
+full, including a row for `set_id`. The row said a non-root task cannot change
+its uid at all. The kernel actually permits a non-root task to restore its
+**saved** identity, and the shell depends on exactly that at logout.
+
+The row was not careless. It was written *from* `syscall-abi`'s own doc
+comment, which is the authority this project names for the ABI, and that doc
+comment said the same wrong thing. Doing the recommended thing, writing from
+the source of truth rather than from memory, propagated the error into a second
+place and gave it a second witness.
+
+Everything above in this file is a copy drifting from an original that stayed
+right. This is the inverse: the copy was faithful, and the original was already
+wrong. Which means **"check it against the authority" is not sufficient** when
+the authority is prose rather than code. The fix corrected both, because
+correcting only the row would have regrown it the next time someone did the
+right thing.
+
+### And the ordinary kind, twice, in code written the same hour
+
+For completeness, because it shows the classic pattern does not need time to
+work: a comment in `service_remotes` stated that a peer which answered without
+acknowledging our request "is refused below, not trusted". It was not. Control
+fell through to an arm that passed the session handshake's own success code
+back as the caller's result, so a C program would have proceeded with a file
+handle that was never issued. The comment described the intended behaviour of
+code that had never been written that way, and it was written and reviewed the
+same day.
+
+The dispatch arm for `NETOP_RMOUNT` likewise still said a fid verb "answers
+here" in the same change that stopped it answering there. Both were caught by
+review, neither by a compiler or a test, which is the mechanism this file
+opened with: the falsifying edit is in the same file, and nothing anywhere
+fails.
+
 ## What actually worked
 
 Three things, none of them "be more careful".

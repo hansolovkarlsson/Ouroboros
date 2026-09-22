@@ -911,6 +911,27 @@ connection makes possible but which is an auth-model change); and **raising
 `SESSION_FIDS` or the client-session table size** (do it when something
 exhausts it, with the exhaustion as evidence).
 
+> **The first of those is done. ✅ Closed 2026-09-22, shipped in v0.20.0**
+> ([`roadmap-async-rmount.md`](roadmap-async-rmount.md), steps 0 to 3 across
+> #149, #152 and #154). The held session this decision produced is now a
+> parked slot on the same event-loop engine as the path verbs and the `cpu`
+> run, so nothing in `netd` blocks its loop for a remote mount, fid verb or
+> run. Two things that arc found are worth reading back into this one: the
+> session slots it made **resident** on `serve`'s frame, rather than
+> transient, are now what dominates netd's stack, so the two pages step 2
+> borrowed could not be returned by deleting `tcp_run`; and the re-entrant
+> stack-depth limitation closed below by refusal in #147 is closed by
+> *deletion* now, the drain itself being gone.
+>
+> **The third is also answered, though not by raising anything.** A run holds
+> one of `MAX_REMOTE` for its whole duration where a blocking run held none,
+> which is an exhaustion with evidence, so that table went 2 to 3. The
+> client-session table is untouched: nothing has exhausted it.
+>
+> **Session-scoped authentication remains open and is now unblocked.** It was
+> held because changing the concurrency model and the auth model at once is
+> two risky things at once; the concurrency half is settled.
+
 ~~**A stack-depth limitation on the ledger, found by the PR review.**~~
 **Closed 2026-09-20 (#147): measured, then refused.** The claim
 stood as analysis: the 40 KB stack is sized for the top-level session path
