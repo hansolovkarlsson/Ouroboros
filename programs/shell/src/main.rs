@@ -109,6 +109,16 @@ struct Env {
     /// Rides in `Env` because it's already threaded `&mut` through the whole
     /// dispatch path, and the shell can't use a mutable static (PIE/.bss).
     logout: bool,
+    /// Whether the "environment too large to export" warning has already been
+    /// given for the environment AS IT STANDS. `spawn_path` is the shared tail
+    /// of every spawn, so without this the warning prints once per command and
+    /// once per PIPELINE STAGE - three lines for `a | b | c`, and one per
+    /// iteration of any loop. That is the shape of the `xhci::report` flood
+    /// that had to be deleted for drowning the Parallels console, and it would
+    /// also perturb the driven rigs, which match exact shell output. A `Cell`
+    /// so `spawn_path`'s `&Env` can still record it; cleared by `set`/`unset`,
+    /// so a changed environment warns again.
+    warned_truncated: core::cell::Cell<bool>,
 }
 
 impl Env {
@@ -120,6 +130,7 @@ impl Env {
             val_lens: [0; MAX_ENV_VARS],
             count: 0,
             logout: false,
+            warned_truncated: core::cell::Cell::new(false),
         };
         e.set("PATH", DEFAULT_PATH.as_bytes());
         e
@@ -136,6 +147,8 @@ impl Env {
     /// Set (or replace) `name`; `false` if the name/value is too long or the
     /// table is full.
     fn set(&mut self, name: &str, value: &[u8]) -> bool {
+        // The environment changed, so a previous warning no longer describes it.
+        self.warned_truncated.set(false);
         let nb = name.as_bytes();
         if nb.is_empty() || nb.len() > ENV_NAME_SIZE || value.len() > ENV_VALUE_SIZE {
             return false;
@@ -159,6 +172,7 @@ impl Env {
 
     /// Remove `name` (swap-remove); `false` if it wasn't set.
     fn unset(&mut self, name: &[u8]) -> bool {
+        self.warned_truncated.set(false);
         let Some(i) = self.index_of(name) else {
             return false;
         };
@@ -2631,7 +2645,7 @@ fn spawn_path(path: &str, argv: &[&str], cwd: &[u8; CWD_SIZE], cwd_len: usize, e
         let staged = u32::from_le_bytes([env_buf[0], env_buf[1], env_buf[2], env_buf[3]]) as usize;
         if syscall4(syscall_abi::ENV_STAGE, env_buf.as_ptr() as u64, env_len as u64, 0, 0) != 0 {
             print_line("sh: the environment was refused, so this command gets none");
-        } else if staged < env.count {
+        } else if staged < env.count && !env.warned_truncated.replace(true) {
             let mut m = [0u8; 96];
             let mut n = 0;
             emit(&mut m, &mut n, b"sh: environment too large to export in full (");
