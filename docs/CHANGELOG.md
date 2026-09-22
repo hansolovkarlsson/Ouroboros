@@ -103,6 +103,21 @@ can hand the pages back. The plan's ledger has the detail; `make
 test-async-rmount` gained a session check and a latency-boundary check, each
 with a measured control.
 
+**A staging call is bounded by its own limit, and the shell says when the
+environment is lost.** `ENV_STAGE` published a 2048-byte maximum and enforced
+512: every staging call ran the blanket `valid_user_range` first, which is at
+or above the argv, cwd and namespace limits but left the environment's own
+check dead above 512. Because the environment travels as ONE blob, a larger one
+was refused outright and the child inherited **nothing**, not a truncated set,
+and the shell discarded the result so nothing said so. Measured: with five
+variables set, `printenv` in a spawned child printed no variables at all, not
+even `PATH`. `valid_stage_range` now checks each staging call against its own
+maximum, with containment in the caller's region unchanged, so all four
+constants mean what they say; and the shell reports both a refusal and a
+`serialize` truncation instead of swallowing them. Found by a review of the
+syscall-table documentation, which is to say by writing down what the code was
+supposed to do.
+
 **The `cpu` run goes asynchronous too, step 3, and the arc's concurrency half
 is done.** `netd` no longer blocks its event loop for a remote **mount, fid
 verb or run** - the three paths this arc set out to move. ARP, DNS, ICMP and

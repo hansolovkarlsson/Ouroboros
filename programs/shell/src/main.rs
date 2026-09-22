@@ -109,6 +109,16 @@ struct Env {
     /// Rides in `Env` because it's already threaded `&mut` through the whole
     /// dispatch path, and the shell can't use a mutable static (PIE/.bss).
     logout: bool,
+    /// Whether the "environment too large to export" warning has already been
+    /// given for the environment AS IT STANDS. `spawn_path` is the shared tail
+    /// of every spawn, so without this the warning prints once per command and
+    /// once per PIPELINE STAGE - three lines for `a | b | c`, and one per
+    /// iteration of any loop. That is the shape of the `xhci::report` flood
+    /// that had to be deleted for drowning the Parallels console, and it would
+    /// also perturb the driven rigs, which match exact shell output. A `Cell`
+    /// so `spawn_path`'s `&Env` can still record it; cleared by `set`/`unset`,
+    /// so a changed environment warns again.
+    warned_truncated: core::cell::Cell<bool>,
 }
 
 impl Env {
@@ -120,6 +130,7 @@ impl Env {
             val_lens: [0; MAX_ENV_VARS],
             count: 0,
             logout: false,
+            warned_truncated: core::cell::Cell::new(false),
         };
         e.set("PATH", DEFAULT_PATH.as_bytes());
         e
@@ -136,6 +147,8 @@ impl Env {
     /// Set (or replace) `name`; `false` if the name/value is too long or the
     /// table is full.
     fn set(&mut self, name: &str, value: &[u8]) -> bool {
+        // The environment changed, so a previous warning no longer describes it.
+        self.warned_truncated.set(false);
         let nb = name.as_bytes();
         if nb.is_empty() || nb.len() > ENV_NAME_SIZE || value.len() > ENV_VALUE_SIZE {
             return false;
@@ -159,6 +172,7 @@ impl Env {
 
     /// Remove `name` (swap-remove); `false` if it wasn't set.
     fn unset(&mut self, name: &[u8]) -> bool {
+        self.warned_truncated.set(false);
         let Some(i) = self.index_of(name) else {
             return false;
         };
@@ -2615,7 +2629,32 @@ fn spawn_path(path: &str, argv: &[&str], cwd: &[u8; CWD_SIZE], cwd_len: usize, e
     let mut env_buf = [0u8; syscall_abi::ENV_MAX as usize];
     let env_len = env.serialize(&mut env_buf);
     if env_len > 4 {
-        let _ = syscall4(syscall_abi::ENV_STAGE, env_buf.as_ptr() as u64, env_len as u64, 0, 0);
+        // The result is CHECKED, like `ARGS_STAGE`'s and `CWD_STAGE`'s above.
+        // It used to be discarded, and that is what made a real bug invisible:
+        // the environment travels as ONE blob, so a refusal costs the child
+        // its whole environment rather than a variable or two, and it did so
+        // without a word. (The refusal itself was the kernel applying the
+        // blanket 512-byte pointer cap to a call whose own limit is
+        // `ENV_MAX`; fixed in `valid_stage_range`, but a staging call can
+        // still legitimately refuse, and then the user should hear it.)
+        //
+        // `serialize` TRUNCATES rather than overflowing when the table does
+        // not fit `ENV_MAX`, adjusting the count it encodes, so a short count
+        // means variables were dropped. Both losses are reported, and neither
+        // is fatal: the command still runs, with what could be passed.
+        let staged = u32::from_le_bytes([env_buf[0], env_buf[1], env_buf[2], env_buf[3]]) as usize;
+        if syscall4(syscall_abi::ENV_STAGE, env_buf.as_ptr() as u64, env_len as u64, 0, 0) != 0 {
+            print_line("sh: the environment was refused, so this command gets none");
+        } else if staged < env.count && !env.warned_truncated.replace(true) {
+            let mut m = [0u8; 96];
+            let mut n = 0;
+            emit(&mut m, &mut n, b"sh: environment too large to export in full (");
+            emit_dec(&mut m, &mut n, staged as u64);
+            emit(&mut m, &mut n, b" of ");
+            emit_dec(&mut m, &mut n, env.count as u64);
+            emit(&mut m, &mut n, b" variables passed)\r\n");
+            con_write(&m[..n]);
+        }
     }
     match syscall4(syscall_abi::SPAWN, offset, stdout_target, argv_len, cwd_stage_len) {
         code if code >= FS_ERR_MIN => Err(code),
@@ -2753,6 +2792,34 @@ impl Output<'_> {
 
 fn print_str(s: &str) {
     con_write(s.as_bytes());
+}
+
+/// Append `bytes` to `buf[..*n]`, bounded. The shell's own copy: it does not
+/// link `ulib` (which carries the same pair for the `/bin` programs), and
+/// `core::fmt` is unusable in this userland at all - a runtime-indexed `&str`
+/// slice pulls in relocations a PIE link rejects, the trap `selftest` guards
+/// and `docs/processes.md` documents. Bytes, never `&str`, for that reason.
+fn emit(buf: &mut [u8], n: &mut usize, bytes: &[u8]) {
+    let room = buf.len().saturating_sub(*n);
+    let take = bytes.len().min(room);
+    buf[*n..*n + take].copy_from_slice(&bytes[..take]);
+    *n += take;
+}
+
+/// Append `v` in decimal to `buf[..*n]`, hand-rolled for the same reason.
+fn emit_dec(buf: &mut [u8], n: &mut usize, v: u64) {
+    let mut d = [0u8; 20];
+    let mut i = 20;
+    let mut x = v;
+    loop {
+        i -= 1;
+        d[i] = b'0' + (x % 10) as u8;
+        x /= 10;
+        if x == 0 {
+            break;
+        }
+    }
+    emit(buf, n, &d[i..]);
 }
 
 fn print_line(s: &str) {
