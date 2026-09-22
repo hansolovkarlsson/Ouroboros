@@ -1,30 +1,39 @@
 #!/bin/sh
-# The re-entrant client check: a request from a LOCAL client arriving at netd
-# while netd is inside a `cpu` run. Run on the two-node ext2 rig
-# (docs/testing/testing-qemu.md section 5, "The re-entrant client witness"),
-# graded on the lines it names.
+# The concurrent-client check: a request from a LOCAL client arriving at netd
+# while netd is carrying a `cpu` run. Run on the two-node ext2 rig
+# (docs/testing/testing-qemu.md section 5), graded on the lines it names.
 #
 # HOW THE CONDITION IS MADE. The shell spawns a pipeline's program stages
 # before it runs a builtin source, so `cpu <A> ping <unreachable> | <client>`
-# has <client>'s request reach netd while netd is blocked in the run. The
-# unreachable ping's ARP wait holds the run open; a reachable command returns
-# before the client asks and the request lands at the top level, proving
-# nothing (measured: the client just succeeds).
+# has <client>'s request reach netd while netd is carrying the run. The
+# unreachable ping's ARP wait holds the run open.
 #
-# WHAT IT REFUSES, AND WHY TWO CLIENTS. netd refuses an IDENTIFIED client's
-# request from `tcp_run`'s re-entrant drain, before `handle_client`'s frame is
-# built - every handler a client would reach (the remote-mount relay, an ICMP
-# ping, a DNS/TCP lookup) is too deep for that stack. Only the supervisor's
-# health ping (no identity) is serviced from there. So the refusal is by
-# SENDER, not by op: `cat` (a remote-mount NETOP_RMOUNT) and `resolve` (a
-# NETOP_RESOLVE, a different, deeper handler that needs no prior mount) must
-# BOTH be refused. The first cut refused only NETOP_RMOUNT and `resolve` still
-# faulted netd - hence both recipes here.
+# WHAT IT EXPECTS, AND WHY THIS FILE INVERTED. Until step 3 of
+# docs/roadmap/roadmap-async-rmount.md a run BLOCKED netd's event loop, so
+# every identified client's request was REFUSED `FS_ERR_BUSY` from `tcp_run`'s
+# re-entrant drain - refusing was the honest answer, because every handler a
+# client would reach was too deep for that stack and overflowed the guard page.
+# Step 3 parks the run on the event-loop engine, so nothing blocks and there is
+# no re-entrant drain left. Every recipe here is now SERVED, and the refusal
+# text is what the check FORBIDS.
 #
-# The negative control, measured 2026-09-20 on the tree before the refusal: an
-# EL0 data abort in netd at the guard page (esr_el1=0x9200004f), "server slot 4
-# restarted", and the client told its server had died mid-request - for `cat`,
-# for `resolve`, and (deeper) for `cbig`.
+# WHAT THIS CHECK CAN AND CANNOT TELL APART, stated plainly because the
+# inversion cost it something. Before step 3, "refused" and "succeeded" were
+# different strings, so the harness could see whether the condition had been
+# created and retry when the run had returned first. Now a client served DURING
+# the run and a client served AFTER the run returned produce the SAME output,
+# and nothing in the transcript separates them. What the check still does is
+# fail: on the pre-step-3 tree every recipe here produces the refusal line (the
+# measured control - `git stash` this change, rebuild the images, and all three
+# report "out of room"/"network server busy"), and on any tree that faults netd
+# it reports the fault. It is a regression check against the refusal and the
+# overflow, not a proof of overlap; the async rig's ordering checks
+# (scripts/test-async-rmount.sh, 3 and 6) are where overlap is proven.
+#
+# The negative control for the OVERFLOW, measured 2026-09-20 before the refusal
+# existed: an EL0 data abort in netd at the guard page (esr_el1=0x9200004f),
+# "server slot 4 restarted", and the client told its server had died
+# mid-request - for `cat`, for `resolve`, and (deeper) for `cbig`.
 #
 #   make test-reentrant-session       # builds both node images first
 #   ./scripts/test-reentrant-session.sh   # by hand, against the images in build/
@@ -71,39 +80,32 @@ show_fail() {
     fail=1
 }
 
-# One recipe: run `# @@<marker>`, and require the client's refusal line AND no
-# netd fault/restart. A `condition_ok` grep that DID create the condition but
-# without the refusal (e.g. the run ended first) is retried, not passed.
-check() { # name, marker, want-regex, condition-not-created-regex [, also-want-regex, forbid-regex]
-    name=$1; marker=$2; want=$3; notyet=$4; also=${5:-}; forbid=${6:-}
+# One recipe: run `# @@<marker>`, and require the client's own SUCCESS line, no
+# netd fault/restart, and NOT the refusal the pre-step-3 tree answered with.
+check() { # name, marker, want-regex, forbidden-refusal-regex
+    name=$1; marker=$2; want=$3; forbid=$4
     attempt=0
     while :; do
         attempt=$((attempt + 1))
         run "# @@$marker"; keep "$out"
         tail=$(sed -n '/^NODE B/,$p' "$log" | after "$marker")
         if printf '%s\n' "$tail" | grep -q 'EL0 FAULT\|server slot 4 restarted'; then
-            show_fail "$name: netd faulted instead of refusing"; return
+            show_fail "$name: netd faulted instead of serving"; return
         fi
-        if [ -n "$forbid" ] && printf '%s\n' "$tail" | grep -qE -- "$forbid"; then
-            show_fail "$name: the old answer came back ($forbid)"; return
+        # The pre-step-3 answer. Not retried: a refusal is a real regression
+        # now, not a timing miss, so seeing it once is a failure.
+        if printf '%s\n' "$tail" | grep -qE -- "$forbid"; then
+            show_fail "$name: REFUSED - the client was turned away ($forbid)"; return
         fi
-        if printf '%s\n' "$tail" | grep -qE -- "$want" \
-            && { [ -z "$also" ] || printf '%s\n' "$tail" | grep -qE -- "$also"; }; then
+        if printf '%s\n' "$tail" | grep -qE -- "$want"; then
             if no_faults; then echo "ok   $name ($log)"
-            else show_fail "$name: answered, but a node reported faults"; fi
+            else show_fail "$name: served, but a node reported faults"; fi
             return
         fi
-        # The client SUCCEEDED: the run returned before it asked, so the
-        # re-entrant condition was never created. Expected sometimes (timing);
-        # retried, and named distinctly from a link flake so a persistent one
-        # points at the unreachable-ping timing, not at the kernel.
-        if printf '%s\n' "$tail" | grep -qE -- "$notyet"; then
-            reason="the client kept succeeding - the run returned before it asked (ping timing)"
-            note="condition not created (client succeeded)"
-        else
-            reason="no refusal, no fault, no success - the shared QEMU socket link flaked"
-            note="no usable output"
-        fi
+        # Neither served nor refused nor faulted: the shared QEMU socket link
+        # flaked (about 1 in 6 for any remote op on this rig).
+        reason="no output, no refusal, no fault - the shared QEMU socket link flaked"
+        note="no usable output" 
         if [ $attempt -ge 4 ]; then
             show_fail "$name: $reason in 4 tries"; return
         fi
@@ -111,22 +113,32 @@ check() { # name, marker, want-regex, condition-not-created-regex [, also-want-r
     done
 }
 
-# The remote-mount path (NETOP_RMOUNT), the originally-reported case. Still
-# REFUSED from the re-entrant drain (#147): the async remote mount
-# (docs/roadmap/roadmap-async-rmount.md) makes the TOP-LEVEL path verb async
-# (step 1), but the re-entrant drain keeps refusing an identified client by
-# sender, because parking there would still sign the request (deep), and the
-# run path is at the edge. Step 3 removes this drain, and only then is this
-# recipe served.
-check "one-shot rmount refused inside a run" \
+# The remote-mount path (NETOP_RMOUNT), the originally-reported case. SERVED
+# since step 3: the run no longer blocks the loop, so the mount parks and is
+# answered like any other. Before step 3 this reported "out of room".
+check "a path verb is served during a run" \
     'cpu 10.0.2.10:564 ping 10.0.2.99 | cat /mnt/a/man/grep' \
-    'cat: .*out of room for this right now' \
-    'grep - keep lines'
+    'grep - keep lines' \
+    'out of room for this right now|that server is not running'
 # A different, deeper handler that needs no mount (NETOP_RESOLVE): the case the
-# first, RMOUNT-only cut missed.
-check "resolve refused inside a run" \
+# first, RMOUNT-only cut of the refusal missed, and so the one that proves the
+# fix is not op-specific either. "no response" IS the served outcome on THIS
+# rig: the two nodes share a bare QEMU socket link with no SLIRP and so no DNS
+# server, so netd runs the resolver and nothing answers it. What matters is
+# that netd ran it at all - the pre-step-3 tree turned the request away with
+# "network server busy" without ever reaching the handler, which is what the
+# forbid pattern below still catches. (Measured: asserting a successful
+# lookup here failed 4 of 4, because this rig cannot resolve anything.)
+check "resolve is served during a run" \
     'cpu 10.0.2.10:564 ping 10.0.2.99 | resolve example.com' \
-    'resolve: network server busy' \
-    'resolves to|NXDOMAIN|no such host'
+    'resolves to|NXDOMAIN|no such host|no response for' \
+    'network server busy|that server is not running'
+# The SESSION path (a C program's fid verbs). The by-sender refusal made this a
+# flaky driver, so it was never graded here; with nothing refused by sender it
+# is a recipe like the others, and it is the deepest of the three.
+check "a fid verb sequence is served during a run" \
+    'cpu 10.0.2.10:564 ping 10.0.2.99 | cbig' \
+    'match the local copy' \
+    'out of room for this right now|that server is not running'
 
 exit $fail
