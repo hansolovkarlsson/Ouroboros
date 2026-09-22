@@ -154,16 +154,24 @@ const CONFIG_PATH: &str = "\\EFI\\ORBS\\INIT.CFG";
 // growth once left a second copy of this number behind in `mmu.rs`, which
 // misplaced the guard (docs/postmortems/true-when-written-postmortem.md);
 // there is one copy now, and `guard_page_addr` below is what `mmu.rs` asks.
-// 12 pages (48 KB). Was 10 (40 KB), itself grown from 8 (32 KB) for the
-// held client session (docs/roadmap/roadmap-fid-verbs.md). The async remote
-// mount (docs/roadmap/roadmap-async-rmount.md) puts a ~4 KB parked-request
-// table on netd's `serve` frame, which sits beneath the deep `cpu`-run chain
-// (`handle_run` -> `tcp_run` -> `build_tcp_generic`) that is already at this
-// guard page - the exact chain #147's re-entrant refusal exists for. Two more
-// pages give that table its room with margin; step 3 of the async plan removes
-// the re-entrant run path and can hand these back. Global (every task's stack),
-// which is fine: more headroom everywhere, and a 2 MB slot swallows 48 KB.
-const STACK_PAGES: u64 = 12;
+// 14 pages (56 KB). Was 12 (48 KB), grown from 10 (40 KB) for the async
+// remote mount's parked path-verb table (docs/roadmap/roadmap-async-rmount.md,
+// steps 0-1), itself grown from 8 (32 KB) for the held client session
+// (docs/roadmap/roadmap-fid-verbs.md). Step 2 of the async plan moves the held
+// session onto that same parked engine: each of the three session slots is now
+// a whole `SessionConn` (2896 bytes measured - its send/recv buffers plus the
+// held-verb buffer) RESIDENT on `serve`'s frame, where the old `ClientSession`
+// held no buffers at all (a round trip borrowed the caller's). ~8.5 KB more
+// resident under the deep `cpu`-run chain (`handle_run` -> `tcp_run`) that is
+// already at the guard page - the exact chain #147's re-entrant refusal exists
+// for. Measured on the two-node ext2 rig (scripts/test-reentrant-session.sh),
+// not reasoned (the plan's finding 5 said so): at 48 KB `tcp_run`'s own
+// prologue overflowed 704 bytes into the guard page (far_el1 in the guard, a
+// clean EL0 fault). +2 pages restores the ~7 KB headroom step 1 had. Step 3 of
+// the plan removes the re-entrant run path and can hand these back. Global
+// (every task's stack), which is fine: more headroom everywhere, and a 2 MB
+// slot swallows 56 KB.
+const STACK_PAGES: u64 = 14;
 /// One inaccessible guard page between the heap and the stack. The stack
 /// grows down from the top of the region; an overflow past the
 /// `STACK_PAGES` stack lands in this page, which `mmu.rs` maps EL1-only,
