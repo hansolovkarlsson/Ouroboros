@@ -255,10 +255,33 @@ fn valid_user_range(ptr: u64, len: u64) -> bool {
 /// The message syscalls' own bound - messages grew past
 /// [`MAX_USER_LEN`] when the filesystem protocol's payloads moved
 /// inline (`syscall_abi::MSG_MAX_LEN`, 768), so they can't share the
-/// 512-byte check the sector/staging buffers still use. Same
-/// caller-region containment as [`valid_user_range`].
+/// 512-byte check the sector buffers still use. Same caller-region
+/// containment as [`valid_user_range`].
 fn valid_msg_range(ptr: u64, len: u64) -> bool {
     ptr != 0 && len != 0 && len <= syscall_abi::MSG_MAX_LEN && in_caller_region(ptr, len)
+}
+
+/// A **staging** call's own bound, for the same reason as
+/// [`valid_msg_range`]: each of `ARGS_STAGE`/`CWD_STAGE`/`NS_SET`/`ENV_STAGE`
+/// publishes its own maximum in `syscall-abi` and has a staging buffer sized to
+/// it, so the blanket [`MAX_USER_LEN`] is the wrong question to ask them.
+///
+/// This exists because asking the wrong one was a real, silent bug. All four
+/// used to call [`valid_user_range`] first and then check their own size, and
+/// for three of them that was merely redundant: `ARGV_MAX` is 512, `CWD_MAX`
+/// 128, `NS_MAX` 256, all at or under the blanket cap. `ENV_MAX` is 2048, so
+/// its own check was DEAD above 512 and the documented limit was fiction: an
+/// environment blob over 512 bytes was refused, and because the environment
+/// travels as ONE blob the child inherited nothing rather than a truncated set.
+/// The shell discarded the return value, so it was invisible too. Found by a
+/// review of the syscall-table documentation, 2026-09-22.
+///
+/// `max` is the caller's own constant, so the refusal now means what the ABI
+/// says it means. Containment in the caller's region is unchanged and is the
+/// check that actually matters for safety; `max` only bounds the copy into a
+/// buffer already sized for it.
+fn valid_stage_range(ptr: u64, len: u64, max: usize) -> bool {
+    ptr != 0 && len != 0 && len <= max as u64 && in_caller_region(ptr, len)
 }
 
 /// Sized generously for a real userland program - the default shell is
@@ -639,13 +662,10 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
         syscall_abi::CWD_STAGE => {
             // arg0 = cwd pointer, arg1 = length. Copies the working-directory
             // string into the staging buffer for the next SPAWN (arg3).
-            if !valid_user_range(arg0, arg1) {
+            if !valid_stage_range(arg0, arg1, CWD_STAGING_SIZE) {
                 return SPAWN_ERROR;
             }
             let len = arg1 as usize;
-            if len > CWD_STAGING_SIZE {
-                return SPAWN_ERROR;
-            }
             let staging = unsafe { &mut *CWD_STAGING.get() };
             // SAFETY: range sanity-checked above, same trust model as every
             // other userland pointer argument.
@@ -669,13 +689,10 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
         syscall_abi::NS_SET => {
             // arg0 = namespace-blob pointer, arg1 = length. Sets the calling
             // task's own namespace directly; children inherit it at SPAWN.
-            if !valid_user_range(arg0, arg1) {
+            if !valid_stage_range(arg0, arg1, NS_MAX_SIZE) {
                 return SPAWN_ERROR;
             }
             let len = arg1 as usize;
-            if len > NS_MAX_SIZE {
-                return SPAWN_ERROR;
-            }
             // SAFETY: range sanity-checked above, same trust model as every
             // other userland pointer argument.
             let blob = unsafe { core::slice::from_raw_parts(arg0 as *const u8, len) };
@@ -698,15 +715,12 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
         syscall_abi::ARGS_STAGE => {
             // arg0 = blob pointer, arg1 = blob length. Copies the whole argv
             // blob into the staging buffer (a single call - the blob is small,
-            // bounded by ARGV_MAX / valid_user_range's cap). The next SPAWN
-            // copies arg2 bytes of it into the new task's argv store.
-            if !valid_user_range(arg0, arg1) {
+            // bounded by ARGV_MAX). The next SPAWN copies arg2 bytes of it into
+            // the new task's argv store.
+            if !valid_stage_range(arg0, arg1, ARGS_STAGING_SIZE) {
                 return SPAWN_ERROR;
             }
             let len = arg1 as usize;
-            if len > ARGS_STAGING_SIZE {
-                return SPAWN_ERROR;
-            }
             let staging = unsafe { &mut *ARGS_STAGING.get() };
             // SAFETY: range sanity-checked above, same trust model as every
             // other userland pointer argument.
@@ -738,13 +752,10 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
             // arg0 = blob pointer, arg1 = blob length. Copies the env blob into
             // the env staging buffer and latches its length for the next SPAWN
             // (SPAWN's four args are full, so unlike argv there's no length arg).
-            if !valid_user_range(arg0, arg1) {
+            if !valid_stage_range(arg0, arg1, ENV_STAGING_SIZE) {
                 return SPAWN_ERROR;
             }
             let len = arg1 as usize;
-            if len > ENV_STAGING_SIZE {
-                return SPAWN_ERROR;
-            }
             let staging = unsafe { &mut *ENV_STAGING.get() };
             // SAFETY: range sanity-checked above, same trust model as ARGS_STAGE.
             let blob = unsafe { core::slice::from_raw_parts(arg0 as *const u8, len) };
