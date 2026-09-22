@@ -84,6 +84,25 @@ is step 3's to remove); the held fid session is still synchronous (step 2). The
 plan, its four decisions and the three overflows the arc hit are in
 `docs/roadmap/roadmap-async-rmount.md`; `make test-async-rmount` drives it.
 
+**The held fid session goes asynchronous too, step 2.** A remote fid verb no
+longer runs a blocking round trip on the serve frame: it is parked on a held
+`SessionConn`, the same parked engine as the path table with a third buffer that
+carries the first verb while its `NP_SESSION` opens (a two-phase park, the
+export serving one framed request per session). `service_remotes` signs the
+held verb once the far side accepts, delivers replies to the caller's identity,
+keeps the fid refcount, and closes a session at zero fids. The whole blocking
+client-session path is deleted (`ClientSession`, `client_connect`,
+`client_exchange`, `session_exchange`, `find_or_open_session`, `session_rmount`,
+`reap_client_sessions`, `TcpScratch`), 462 lines out for 339 in. Two fid verbs
+from one user to one endpoint can now overlap, which the blocking path made
+impossible; the second is refused `FS_ERR_BUSY`, a stated limit libc's `read()`
+does not retry. Each held session is now a resident `SessionConn` (2896 bytes)
+on the serve frame where `ClientSession` held no buffers, so `STACK_PAGES` grew
+12 to 14 (measured: `tcp_run`'s prologue over the guard page at 48 KB); step 3
+can hand the pages back. The plan's ledger has the detail; `make
+test-async-rmount` gained a session check and a latency-boundary check, each
+with a measured control.
+
 **Ctrl+C detaches a handed-over shell; `fg` refused from a non-owner** (#151).
 Ctrl+C now tells a foreground COMMAND from a handed-over SESSION: a `/bin`
 program the shell `WAIT`s on is terminated as before, but a nested shell handed
