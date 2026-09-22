@@ -74,7 +74,13 @@ itself sent no signed frame in this run: the counts leave no room for one.
 |---|---|---|---|---|---|
 | all verbs | 39 | 5,206 µs | **6,654 µs** | 7,156 µs | 53,192 µs |
 
+The mean of the same 39 verbs is 11,196 µs (436,660 µs in all).
+
 **The four signature operations are 2.93 ms of a 6.65 ms median verb: 44%.**
+Against the mean verb it is 26%, because seven slow verbs pull the mean up.
+The crypto itself does not vary by verb, so the figure that cannot be moved by
+the choice of statistic is the absolute one, **2,926 µs per verb**, and that is
+the number step 7 compares against.
 On a held session the crypto is the largest single cost of a remote fid verb,
 not a rounding error beside the network. Seven of the 39 verbs took 19 to 53 ms;
 those are not the crypto (it does not vary by verb) and are not this arc's
@@ -173,6 +179,23 @@ one, but the export and both Python peers need the rule written down, and step
 6 tests it. Once a session is keyed, the export refuses an `AUTHNP03` frame on
 it: one connection, one format.
 
+**What a refusal looks like on a keyed session.** Two kinds, kept apart. A
+*verb* that fails (no such file, permission denied, `FS_ERR_BUSY`) is an
+ordinary keyed reply: a status under a valid tag, exactly as a success is. An
+*authentication* failure at the export (a bad tag, a wrong `seq`, an `AUTHNP03`
+frame, a second `NP_SESSION` offering a key) gets **no reply**: the export logs
+it and closes the connection with an RST. It cannot answer in a way the client
+could trust, since the failure means the export no longer knows it is talking
+to the key holder, and an unauthenticated "auth failed" is exactly what an
+attacker could forge to kill sessions. So the client sees its parked verb end
+with the connection, and reports it as it reports a dead peer today. That
+reads as a network fault rather than an auth failure, and it is chosen: the
+export's log is where the reason is. A failure the *client* detects (a reply
+whose tag or `seq` is wrong) is `FS_ERR_AUTH` to the caller, and the client
+closes, as a bad reply signature does today. An `NP_SESSION` with no payload
+sent on a keyed session (inside an `AUTHNP04` frame) is answered `0` under a
+valid tag, which is today's idempotent arm, unchanged.
+
 **Keying happens once, on the first `NP_SESSION` of a fresh connection.** A
 later `NP_SESSION` that offers a key (on a keyed session, or on an unkeyed one
 that would be keyed mid-stream) is refused and the connection closed: there is
@@ -203,9 +226,12 @@ from inputs that do not repeat:
   It is computed in `park_session` **before** the `NP_SESSION` payload is
   built, so it does not depend on the request nonce, which `frame_signed`
   creates later; the signing API is untouched. The 32-byte private scalar is
-  **kept in the session slot** until phase two has derived `K`, then zeroed.
-  It is not re-derived: re-deriving would need every input kept anyway,
-  including the random bytes.
+  **kept in the session slot** until phase two has derived `K`. It is zeroed
+  **wherever the slot is released**, not only on success: a refused or empty
+  `NP_SESSION` answer, an unreachable peer, a low-order close, a reap. Zeroing
+  on the success path alone would leave the secret resident on exactly the
+  paths nobody watches. It is not re-derived: re-deriving would need every
+  input kept anyway, including the random bytes.
 - **export:** `SHA-512(SIG_DOMAIN_EPHEMERAL_E ‖ machine private key ‖ boot ID ‖
   request nonce ‖ MONOTONIC_US at the handshake ‖ boot entropy ‖ RANDOM
   bytes)`, used in the same `NP_SESSION` arm and never stored.
@@ -218,10 +244,22 @@ back before handing it out, preferring a **UEFI non-volatile variable** (it
 lives in firmware storage, so rolling back the disk image does not roll it
 back) and falling back to a file on the ESP. In the same place it asks the
 firmware for `EFI_RNG_PROTOCOL` bytes, the **boot entropy**, if the firmware
-offers them. A new syscall hands both to userland. **If the counter cannot be
-persisted, the syscall says so and the node keys no sessions**: its client
-offers no key and its export answers with an empty result, which is today's
-session, still per-request signed. That is fail-safe, not fail-open.
+offers them. A new syscall hands both to userland.
+
+**A counter is trusted only if it existed before this boot.** A read-back in the
+same boot proves nothing about persistence: firmware with no real variable
+store (edk2 as every QEMU target here boots it, `-bios` and no pflash
+variable file) keeps variables in RAM, so a write succeeds and reads back
+within the boot and is gone at the next. The rule that catches this without a
+second boot is to look before writing: the kernel reads the counter, and only
+a value that was **already there** counts. A store that forgets at every reboot
+never has one, so it is never trusted, and the kernel falls back to the ESP
+file. The ESP file is staged at image build (as `/etc/cluster/id` is), so the
+first boot of a new image already finds one. **If no store yields a counter
+that existed before this boot, and was then incremented, written and read
+back, the syscall says so and the node keys no sessions**: its client offers
+no key and its export answers with an empty result, which is today's session,
+still per-request signed. That is fail-safe, not fail-open.
 
 Two things this does **not** give, stated so nobody has to discover them:
 
@@ -237,8 +275,12 @@ Two things this does **not** give, stated so nobody has to discover them:
   virtio-rng, the machine's private key **alone** recovers past session keys:
   the boot ID is a small number an attacker can count through, and the clock
   inputs can be searched around each handshake in a capture. So there,
-  forward secrecy does not hold, and the plan does not claim it. Where boot
-  entropy or `RANDOM` contributed, it holds. Whether Parallels' and the Pi's
+  forward secrecy does not hold, and the plan does not claim it. And because
+  `K` can be recomputed from **either** side's ephemeral, it holds for a
+  session only when **both** nodes had entropy: a QEMU node with virtio-rng
+  talking to a Pi with none has no forward secrecy for that session, since the
+  Pi's key alone recovers the Pi's ephemeral and, with the other side's public
+  one from the capture, `K`. Whether Parallels' and the Pi's
   firmware offer `EFI_RNG_PROTOCOL` is part of what step 3 measures.
 
 A boot ID would also fix a property of today's `AUTHNP03` nonce, which is the
@@ -257,8 +299,8 @@ change and not part of this arc.
   `roadmap-cluster.md` gates behind leaving a trusted network. It arrives here
   as a side effect, not as a reason; **one-shot requests stay replayable**, so
   that item stays open.
-- **Forward secrecy** for any later encryption, **only where there is
-  entropy** (Decision 6). Nothing is encrypted by this plan, and adding
+- **Forward secrecy** for any later encryption, **only for a session whose
+  two nodes both had entropy** (Decision 6). Nothing is encrypted by this plan, and adding
   encryption later is another key off the same derivation, not a new
   handshake. That is the "not blocking future features" test.
 - **Not** confidentiality, **not** per-user keys, **not** protection against a
@@ -300,37 +342,51 @@ the client, so each side is tested against something that is not itself.
    two in `service_remotes`**, the pump shared by the one-shot and session
    tables, where the reply's signature verify, the scalar multiplication and
    the key derivation run back to back. On the export it is the `NP_SESSION`
-   arm under `handle_9p`, which also computes the export's own ephemeral. The
-   gate adds today's measured peak at those two call sites to the new cost,
-   rather than measuring `park_session`, which only needs a base-point
-   multiply. If it does not fit, stop and re-plan before any wire work.
+   arm under `handle_9p`, which also computes the export's own ephemeral. And
+   `park_session`, which computes the client's ephemeral: a Montgomery ladder
+   costs the same stack whatever the point, so a base-point multiply is not
+   cheaper there. The gate adds today's measured peak at all three call sites
+   to the new cost. If it does not fit, stop and re-plan before any wire work.
    *Control:* a flipped bit in one vector fails its test.
 2. **HMAC-SHA-512 in `ed25519/`.** RFC 4231 vectors (SHA-512 rows) on the host;
    on the guest, time a MAC over a full `NP_NET_MAX` message. **Gate:** it must
    be well under one Ed25519 sign (521 µs). If a MAC costs what a signature
    does, the arc has no point, and this step is where that is found out.
+   *Control:* a flipped bit in one vector's key, message or expected tag fails
+   its test.
 3. **The boot identity, in the kernel.** Before `ExitBootServices`: increment,
    persist and read back the counter (a non-volatile variable where the
    firmware keeps one across a reboot, else a file on the ESP), and ask for
-   `EFI_RNG_PROTOCOL` bytes. A new syscall returns the counter, whether it was
+   `EFI_RNG_PROTOCOL` bytes; the image build (`make image`, `images-2vm*`)
+   stages the ESP counter file. A new syscall returns the counter, whether it was
    persisted, and the boot entropy if any. **Check:** two consecutive QEMU
    boots report two different counters, and the one after reads back the
-   value the one before wrote. **Measured and recorded:** which store works
+   value the one before wrote. QEMU as the Makefile boots it has no pflash
+   variable file, so this is also the check that the RAM-only variable store
+   is refused and the ESP fallback is what serves. **Measured and recorded:** which store works
    and whether `EFI_RNG_PROTOCOL` exists, on QEMU now and on the Pi 4 and
    Parallels when each can be booted; the design has to work with "neither".
    *Controls:* skip the increment and the check fails (the same counter
-   twice); make the persist fail and the syscall reports the counter unusable.
+   twice); make the persist fail and the syscall reports the counter unusable;
+   remove the "existed before this boot" test and the RAM-only variable store
+   is trusted, which the two-boot check then catches as a repeated counter.
 4. **The wire, in `ninep-abi`.** `NP_AUTH_MAGIC_KEYED` (`AUTHNP04`),
    `SIG_DOMAIN_SESSION`, the two ephemeral domain tags, the header and tag
    lengths, the `NP_SESSION` payload and result shapes, the sequence rule and
    the key schedule, all in the normative block, and the `NP_SESSION` doc's
    "No params; no payload", which stops being true.
+   **`SIG_DOMAIN_MAX` is extended over every tag**, the three new ones as well
+   as the two it covers today: `netd` sizes its signing prefix buffers as
+   `SIG_DOMAIN_MAX + …`, and a longer tag hashed through one of them would be a
+   slice-index panic in the `NP_SESSION` arm, reachable before authentication.
    `scripts/check-wire-constants.py` already parses a `u64` hex constant on the
    Rust side, so the gaps are elsewhere: **`AUTHNP03` itself is not in its
-   checked list today**, the Python peers spell a magic as
-   `int.from_bytes(b"AUTHNP03", "big")`, which it does not parse, and a length
-   written as a sum (as `NP_AUTH_HDR_SIGNED` is) does not parse either. This
-   step teaches it those two forms and pins both magics. The C headers carry no
+   checked list today**; the Python peers spell a magic as
+   `int.from_bytes(b"AUTHNP03", "big")`, which it does not parse; and a length
+   written as a sum does not parse **on either side** (the Rust parser matches
+   only `usize = <digits>`, and `NP_AUTH_HDR_SIGNED` is a sum across two
+   lines). This step teaches it both forms, on both sides, and pins both
+   magics and both header lengths. The C headers carry no
    auth constants and gain none. *Control:* for each form the parser learns,
    change one constant in one peer and the check fails.
 5. **Both Python peers.** Pure-Python X25519 (RFC 7748's reference ladder,
@@ -339,7 +395,12 @@ the client, so each side is tested against something that is not itself.
    offers a key; `np9p_client.py` gains a keyed mode. The peer self-test runs
    one keyed session through every verb. This makes a host-to-host keyed
    session work before any guest code changes, so the guest has an
-   independent implementation to be wrong against.
+   independent implementation to be wrong against. *Control:* give the client
+   and server peers different key schedules (one input dropped from one side's
+   derivation) and the self-test fails on its first keyed verb. The server
+   also gains **misbehaving modes** for step 7 to aim at: a flipped reply tag,
+   a reply tagged with the wrong direction's key, and a replayed or skipped
+   reply `seq`.
 6. **The export, in `netd`.** Key a session on an `NP_SESSION` with a payload;
    accept only `AUTHNP04` on it after that. Checked from the host with
    `np9p_client.py`: a keyed `cbig`-shaped run (open, preads, close) is served.
@@ -357,13 +418,22 @@ the client, so each side is tested against something that is not itself.
    and zeroes the private scalar, and later verbs frame `AUTHNP04` into the
    slot. Checked on the two-node ext2 rig: `cbig` and `cwrite` pass over a
    keyed session, and a v0.20.0 export (the unkeyed `NP_SESSION` answer) still
-   works from a new client. `drive-2vm.py`'s auth-format table learns
+   works from a new client. *Controls, each run, aimed at `netd`'s client (not
+   `np9p_client.py`):* `np9p_server.py`'s misbehaving modes from step 5, one at
+   a time (a flipped reply tag, a reply tagged with `k_c2s`, a replayed reply
+   `seq`, a skipped one), and each must end the caller's verb with
+   `FS_ERR_AUTH` and close the session; `cbig` against an honest export in
+   the same run must still pass. Without these, a client that accepted any
+   reply on a keyed session would pass every other check in this step. Stack
+   measured at the client's new peak. `drive-2vm.py`'s auth-format table learns
    `AUTHNP04` in this step, before the measurement: it knows only `AUTHNP03`
    and `AUTHNP02`, so on a keyed run it would count the three `NP_SESSION`s and
    nothing else, and the cross-check that made step 0 trustworthy would go
    blind (the observer is the check nobody updates). **Then the step 0
    measurement is re-run with the same instrumentation**, checked against that
-   count, and the plan records the new crypto share beside the old 44%.
+   count. **Done means the crypto per keyed verb, in absolute µs, is well
+   below 2,926 µs**; the plan also records the new median and mean shares
+   beside the old 44% and 26%, the same statistic against the same statistic.
 8. **Docs, rigs and the release.** The normative block, `docs/architecture.md`
    (the new syscall and the boot identity), `docs/manual.md`'s cluster section,
    `testing-qemu.md`'s session recipes, `roadmap-cluster.md`'s replay item
@@ -373,8 +443,9 @@ the client, so each side is tested against something that is not itself.
 
 1. **`netd`'s stack.** The handshake adds a scalar multiplication to two
    places that already hold deep frames: the `NP_SESSION` arm on the export
-   (two, counting the export's own ephemeral), and phase two in
-   `service_remotes` on the client, right after the reply's signature verify.
+   (two, counting the export's own ephemeral), phase two in `service_remotes`
+   on the client, right after the reply's signature verify, and
+   `park_session`, which computes the client's ephemeral.
    Step 1 measures it before anything is wired, and steps 6 and 7 measure the
    real peak. The async arc's lesson applies: the stack is dominated by
    resident tables now, and `STACK_PAGES` is held at 14 on purpose.
