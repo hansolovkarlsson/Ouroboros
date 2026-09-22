@@ -504,6 +504,45 @@ fn load_auth() -> Auth {
 /// health-ping (its reply, addressed to the kernel's sentinel, is intercepted
 /// as the ack) - and staying `Blocked` in `NET_WAIT` between bursts is what
 /// keeps the passive heartbeat seeing a healthy server.
+// MEASUREMENT ONLY (branch measure/session-auth-cost, never merged).
+mod tm {
+    use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
+    pub static CSIGN: AtomicU64 = AtomicU64::new(0);
+    pub static CSIGN_N: AtomicU64 = AtomicU64::new(0);
+    pub static CVER: AtomicU64 = AtomicU64::new(0);
+    pub static CVER_N: AtomicU64 = AtomicU64::new(0);
+    pub static XVER: AtomicU64 = AtomicU64::new(0);
+    pub static XVER_N: AtomicU64 = AtomicU64::new(0);
+    pub static XSIGN: AtomicU64 = AtomicU64::new(0);
+    pub static XSIGN_N: AtomicU64 = AtomicU64::new(0);
+    pub static TOT: AtomicU64 = AtomicU64::new(0);
+    pub static TOT_N: AtomicU64 = AtomicU64::new(0);
+    pub static SHOWN: AtomicU64 = AtomicU64::new(0);
+    pub fn add(sum: &AtomicU64, n: &AtomicU64, d: u64) {
+        sum.store(sum.load(Relaxed) + d, Relaxed);
+        n.store(n.load(Relaxed) + 1, Relaxed);
+    }
+    pub fn get(a: &AtomicU64) -> u64 { a.load(Relaxed) }
+    pub fn set(a: &AtomicU64, v: u64) { a.store(v, Relaxed) }
+}
+
+#[inline(never)]
+fn tm_dump() {
+    use tm::*;
+    let events = get(&CSIGN_N) + get(&CVER_N) + get(&XVER_N) + get(&XSIGN_N) + get(&TOT_N);
+    if events == get(&SHOWN) {
+        return;
+    }
+    set(&SHOWN, events);
+    log(b"TM csign ");
+    log_dec(get(&CSIGN)); log(b"/"); log_dec(get(&CSIGN_N));
+    log(b" cver "); log_dec(get(&CVER)); log(b"/"); log_dec(get(&CVER_N));
+    log(b" xver "); log_dec(get(&XVER)); log(b"/"); log_dec(get(&XVER_N));
+    log(b" xsign "); log_dec(get(&XSIGN)); log(b"/"); log_dec(get(&XSIGN_N));
+    log(b" tot "); log_dec(get(&TOT)); log(b"/"); log_dec(get(&TOT_N));
+    log(b"\r\n");
+}
+
 fn serve(packed_mac: u64) -> ! {
     let mac = if packed_mac == syscall_abi::NET_ERROR {
         [0u8; 6]
@@ -539,6 +578,7 @@ fn serve(packed_mac: u64) -> ! {
     let mut remotes: [Option<RemoteConn>; MAX_REMOTE] = core::array::from_fn(|_| None);
     let mut pending = PendingRun::new();
     loop {
+        tm_dump();
         // Block until a client message or an incoming frame is pending (or
         // return immediately if either already is). While *any* connection has
         // data unacked (server or dial), use a timeout so we still wake to
@@ -1472,7 +1512,7 @@ fn park_remote(dst_mac: &[u8; 6], ip: [u8; 4], port: u16, verb: u64, caller: u64
     // `service_remotes` both of those things; no extra field is needed.
     // `since: 0` for the reason `park_rmount` gives: the clock starts at the
     // first send, never at the park.
-    wire.parked = Some(Parked { caller, nonce: [0; ninep_abi::NP_NONCE_LEN], expect_key: [0; clusterkeys::KEY_LEN], since: 0, who: [0; ninep_abi::NP_NAME_LEN], verb, opening: false });
+    wire.parked = Some(Parked { caller, nonce: [0; ninep_abi::NP_NONCE_LEN], expect_key: [0; clusterkeys::KEY_LEN], since: 0, who: [0; ninep_abi::NP_NAME_LEN], verb, opening: false, t0: 0 });
     Ok(())
 }
 
@@ -1523,7 +1563,10 @@ fn verify_sealed(resp: &[u8], got: usize, nonce: &[u8; ninep_abi::NP_NONCE_LEN],
     let tag = ninep_abi::SIG_DOMAIN_REPLY;
     pfx[..tag.len()].copy_from_slice(tag);
     pfx[tag.len()..tag.len() + nonce.len()].copy_from_slice(nonce);
-    if !ed25519::verify_prefixed(expect_key, &pfx[..tag.len() + nonce.len()], &body[sl..], &sig) {
+    let tm0 = now_us();
+    let ok = ed25519::verify_prefixed(expect_key, &pfx[..tag.len() + nonce.len()], &body[sl..], &sig);
+    tm::add(&tm::CVER, &tm::CVER_N, now_us() - tm0);
+    if !ok {
         return None;
     }
     Some((body_start + sl, body.len() - sl))
@@ -1576,6 +1619,7 @@ fn park_session(dst_mac: &[u8; 6], ip: [u8; 4], port: u16, uid: u32, verb: u64, 
         if s.parked.is_some() || s.slen != 0 {
             return Err(syscall_abi::FS_ERR_BUSY);
         }
+        let t0 = now_us();
         let (total, nonce) = frame_signed(auth, who, np, &mut s.sbuf);
         if total == 0 {
             return Err(syscall_abi::FS_ERR_AUTH);
@@ -1591,7 +1635,7 @@ fn park_session(dst_mac: &[u8; 6], ip: [u8; 4], port: u16, uid: u32, verb: u64, 
         // parked at `now()` would answer FS_ERROR and destroy a live session's
         // fids over a peer that was never asked (review of #152). This is the
         // same rule, and the same reason, as `park_rmount`'s.
-        s.parked = Some(Parked { caller, nonce, expect_key, since: 0, who: *who, verb, opening: false });
+        s.parked = Some(Parked { caller, nonce, expect_key, since: 0, who: *who, verb, opening: false, t0 });
         return Ok(());
     }
     let Some(slot) = sessions.iter().position(|s| s.is_none()) else {
@@ -1621,7 +1665,7 @@ fn park_session(dst_mac: &[u8; 6], ip: [u8; 4], port: u16, uid: u32, verb: u64, 
     s.state = DialState::Connecting; // the pump sends the SYN
     // since = 0: the deadline clock starts at the first SYN send, in
     // `pump_dials`, for the reason `park_rmount` gives.
-    s.parked = Some(Parked { caller, nonce, expect_key, since: 0, who: *who, verb, opening: true });
+    s.parked = Some(Parked { caller, nonce, expect_key, since: 0, who: *who, verb, opening: true, t0: 0 });
     Ok(())
 }
 
@@ -1765,7 +1809,7 @@ fn park_rmount(dst_mac: &[u8; 6], ip: [u8; 4], port: u16, verb: u64, caller: u64
     // the run to return (review of #149). Once the SYN goes out, it ages
     // normally. (A park whose SYN is sent and is THEN starved by a long run can
     // still age; that residual closes at step 3, which removes the run drain.)
-    wire.parked = Some(Parked { caller, nonce, expect_key, since: 0, who: *who, verb, opening: false });
+    wire.parked = Some(Parked { caller, nonce, expect_key, since: 0, who: *who, verb, opening: false, t0: 0 });
     Ok(())
 }
 
@@ -1906,6 +1950,9 @@ fn service_remotes<const H: usize>(remotes: &mut [Option<Wire<REMOTE_SBUF, REMOT
         } else {
             status_only(&mut r, dead)
         };
+        if verified && parked.t0 != 0 {
+            tm::add(&tm::TOT, &tm::TOT_N, now_us() - parked.t0);
+        }
         // The reply is consumed either way: the buffer is free for the next
         // frame, and a Closed slot with an empty buffer reaps.
         c.rlen = 0;
@@ -1915,12 +1962,13 @@ fn service_remotes<const H: usize>(remotes: &mut [Option<Wire<REMOTE_SBUF, REMOT
             // our NP_SESSION from the send buffer (TCP acks what it answers),
             // so signing over it cannot corrupt a request still in flight; a
             // peer that answered without acking is refused below, not trusted.
+            let t0 = now_us();
             let (total, nonce) = frame_signed(auth, &parked.who, &c.held[..c.held_len], &mut c.sbuf);
             c.held_len = 0;
             if total > 0 {
                 c.slen = total;
                 c.last_activity = t;
-                c.parked = Some(Parked { nonce, since: 0, opening: false, ..parked });
+                c.parked = Some(Parked { nonce, since: 0, opening: false, t0, ..parked });
                 continue;
             }
             // Could not sign: the caller hears so, the session closes below.
@@ -2361,6 +2409,8 @@ struct Parked {
     /// the `NP_SESSION`, and the verb the caller sent waits in `Wire::held`.
     /// Never set on a path slot.
     opening: bool,
+    /// MEASUREMENT ONLY: now_us() before a session verb was signed, 0 otherwise.
+    t0: u64,
 }
 
 /// A `/net/tcp` dial connection: the engine at its original sizes.
@@ -3484,7 +3534,10 @@ fn authenticate_signed<'a>(
     // The crate verifies over `prefix ‖ message` without joining them, so netd
     // does not carry a second buffer the size of the largest message on the
     // frame of its most stack-constrained server.
-    if !ed25519::verify_prefixed(&offered, prefix, np, &sig) {
+    let tm0 = now_us();
+    let ok = ed25519::verify_prefixed(&offered, prefix, np, &sig);
+    tm::add(&tm::XVER, &tm::XVER_N, now_us() - tm0);
+    if !ok {
         return None;
     }
 
@@ -3582,7 +3635,9 @@ fn seal_reply_signed(
     let tag = ninep_abi::SIG_DOMAIN_REPLY;
     pfx[..tag.len()].copy_from_slice(tag);
     pfx[tag.len()..tag.len() + nonce.len()].copy_from_slice(nonce);
+    let tm0 = now_us();
     let sig = ed25519::sign_prefixed(key, &pfx[..tag.len() + nonce.len()], &c.prefix[body_start..n]);
+    tm::add(&tm::XSIGN, &tm::XSIGN_N, now_us() - tm0);
     c.prefix.copy_within(body_start..n, body_start + sl);
     c.prefix[body_start..body_start + sl].copy_from_slice(&sig);
     let new_body = sl + body_len;
@@ -3773,7 +3828,9 @@ fn frame_signed_ed25519(
     prefix[tag.len()..tag.len() + ninep_abi::NP_NONCE_LEN].copy_from_slice(&nonce);
     prefix[tag.len() + ninep_abi::NP_NONCE_LEN..tag.len() + ninep_abi::NP_SIG_PREFIX_LEN]
         .copy_from_slice(who);
+    let tm0 = now_us();
     let sig = ed25519::sign_prefixed(key, &prefix[..tag.len() + ninep_abi::NP_SIG_PREFIX_LEN], np);
+    tm::add(&tm::CSIGN, &tm::CSIGN_N, now_us() - tm0);
     let soff = p + ninep_abi::NP_AUTH_SIG_OFF;
     out[soff..soff + ninep_abi::NP_SIG_LEN].copy_from_slice(&sig);
     (total, nonce)
