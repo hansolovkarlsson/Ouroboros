@@ -7,13 +7,13 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/pos
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
-## Unreleased: the fid verbs reach the export, the keyboard follows a chain, the remote mount goes async
+## v0.20.0: the fid verbs reach the export, the keyboard follows a chain, the remote mount goes async (2026-09-22)
 
-**Not yet released.** Draft notes for the next cut, proposed **v0.20.0**;
-cutting the version tag is deliberately held for a go-ahead. Twenty-one PRs
-since v0.19.0 (#129 to #149): the fid-verb-to-export arc and its held client
-sessions, the keyboard-ownership chain, a run of kernel-hardening primitives,
-and the first two steps of an asynchronous remote mount.
+Thirty-two pull requests since v0.19.0 (#121 to #155): the fid-verb-to-export
+arc and its held client sessions, the keyboard-ownership chain, a run of
+kernel-hardening primitives, and an asynchronous remote mount carried through
+all three of its steps, so no remote mount, fid verb or `cpu` run blocks
+`netd`'s event loop any more.
 
 **Cross-node and ABI changes, read before upgrading one node without the other:**
 
@@ -34,9 +34,11 @@ and the first two steps of an asynchronous remote mount.
 - **An IRQ taken at EL1 halts with `vector=5`** rather than resuming: the
   kernel never runs at EL1 with interrupts unmasked, so that vector is a broken
   invariant now, not a resumable path (see `synccell.rs`, 2026-09-20).
-- **The default per-task stack is 48 KB** (`STACK_PAGES` 10 to 12): the held
-  client session and then the async remote mount's parked-request table each
-  needed room on `netd`'s deep `serve` frame.
+- **The default per-task stack is 56 KB** (`STACK_PAGES` 10 to 14): the held
+  client session, then the async remote mount's parked-request table, then step
+  2's resident session slots each needed room on `netd`'s deep `serve` frame.
+  Step 3 was expected to hand the last two pages back and, measured, cannot:
+  the stack is now dominated by resident tables rather than by call depth.
 - **`fg` (syscall 20) gains a `foreground` argument** and refuses a non-owner
   caller: only the task that currently owns the keyboard may hand it off, and
   the argument selects whether Ctrl+C terminates the task (a command) or
@@ -98,8 +100,9 @@ from one user to one endpoint can now overlap, which the blocking path made
 impossible; the second is refused `FS_ERR_BUSY`, a stated limit libc's `read()`
 does not retry. Each held session is now a resident `SessionConn` (2896 bytes)
 on the serve frame where `ClientSession` held no buffers, so `STACK_PAGES` grew
-12 to 14 (measured: `tcp_run`'s prologue over the guard page at 48 KB); step 3
-can hand the pages back. The plan's ledger has the detail; `make
+12 to 14 (measured: `tcp_run`'s prologue over the guard page at 48 KB). Step 3
+was expected to hand them back and, measured, cannot. The plan's ledger has the
+detail; `make
 test-async-rmount` gained a session check and a latency-boundary check, each
 with a measured control.
 
