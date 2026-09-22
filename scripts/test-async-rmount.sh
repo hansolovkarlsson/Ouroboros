@@ -1,9 +1,10 @@
 #!/bin/sh
 # The async remote-mount checks (docs/roadmap/roadmap-async-rmount.md, steps 0
-# and 1): a guest with SLIRP networking mounts a HOST-run 9P peer
-# (scripts/np9p_server.py at 10.0.2.2) and its path-verb remote mounts are
-# PARKED on netd's event loop instead of blocking it. Three checks, each graded
-# on the lines it names, each with a negative control that was measured:
+# to 2): a guest with SLIRP networking mounts a HOST-run 9P peer
+# (scripts/np9p_server.py at 10.0.2.2) and its remote mounts, path verbs and
+# fid verbs alike, are PARKED on netd's event loop instead of blocking it. Six
+# checks, each graded on the lines it names, each with a negative control that
+# was measured:
 #
 #   1. served     a remote read is answered from the parked slot, and the shell
 #                 gets its prompt back. (Fails on any tree where the park does
@@ -26,11 +27,27 @@
 #                 is parked: its bytes appear BEFORE the first one's failure.
 #                 (On the synchronous tree the event loop is blocked for the
 #                 whole wait and the second read cannot be served first.)
+#   4. refused    a mount to a dead port on the authorized host parks, is RST,
+#                 and fails NO_FS with the prompt back (see its own note below).
+#   5. session    a FID verb sequence (a C program's open, fstat, read, close:
+#                 /bin/cremote against the live peer) is served from a parked
+#                 SESSION slot, held Established between the verbs. Its control
+#                 is the close-after-every-reply mutation (in service_remotes,
+#                 force `c.fids = 0` before the keep-open test): cremote's fstat
+#                 then reaches a clunked fid and fails, measured.
+#   6. boundary   a fid verb parked on a peer that never answers (cremote's
+#                 open against the --delay 30 peer, whose NP_SESSION reply
+#                 never comes) does not stall a concurrent PATH-verb read of
+#                 the live peer: the cat's bytes appear BEFORE cremote's open
+#                 fails. The step-1/step-2 boundary the third review of #149
+#                 named. (On the step-1 tree the session path still ran its
+#                 round trip on the serve frame, blocking the loop for its one
+#                 second of silence, and the cat is served after the failure.)
 #
 #   make test-async-rmount        # rebuilds the image first, then boots
 #   ./scripts/test-async-rmount.sh   # by hand, against build/esp.img
 #
-# Three boots, about a minute each. Not part of `make test` (host only,
+# Six boots, about a minute each. Not part of `make test` (host only,
 # seconds); run it when netd's client paths or the kernel's send arm change.
 set -u
 cd "$(dirname "$0")/.."
@@ -134,5 +151,43 @@ boot '# @@mount -r 10.0.2.2:5599 /mnt/d' '# @@cat /mnt/d/X' '# @@uptime' '# @@'
 grade "a refused connection fails NO_FS, the caller is not hung" "$out" 'cat /mnt/d/X' \
     'no filesystem mounted this boot' 'out of room'
 printf '%s\n' "$out" | tr -d '\r' | after 'uptime' | grep -q 'ticks since boot' || { echo "FAIL the shell never got its prompt back: the parked caller hung"; fail=1; }
+
+# 5. session (step 2). cremote reads /mnt/a/HELLO.TXT through a fid: NP_OPEN,
+# NP_FSTAT, NP_PREAD and NP_CLUNK as four NETOP_RMOUNT calls, which only
+# succeed if netd holds ONE far-side connection across them - now a parked
+# session slot rather than a blocking round trip. The first line names the
+# fid path served; the last says every check in the program passed.
+peer $PEER; sleep 3
+boot '# @@mount -r 10.0.2.2:5641 /mnt/a' '# @@cremote' '# @@uptime' '# @@'
+grade "a fid verb sequence is served from a parked session slot" "$out" 'cremote' \
+    '/mnt/a/HELLO.TXT: fd=[0-9]+ size=[0-9]+ first=' 'HELLO.TXT: (open|fstat|read) failed|out of room|not running'
+printf '%s\n' "$out" | tr -d '\r' | after 'cremote' | grep -q 'cremote: all checks passed' || { echo "FAIL cremote did not pass every check ($log)"; fail=1; }
+stop_peers
+
+# 6. boundary (step 2). The SLOW peer at /mnt/a (cremote's fixed path), the
+# live one at /mnt/h. cremote's open parks a session slot whose NP_SESSION
+# reply never comes; the shell's cat of the live peer must be served while it
+# waits, so its bytes come BEFORE cremote's open fails at the 5 s deadline.
+peer $PEER; peer $SLOW --delay 30; sleep 3
+# cremote's first line (a LOCAL read, SH.BIN is its first bytes) races the
+# prompt `exec` gives back, so the next step waits for that line, not for `# `.
+boot '# @@mount -r 10.0.2.2:5642 /mnt/a' '# @@mount -r 10.0.2.2:5641 /mnt/h' \
+     '# @@exec /bin/cremote' 'SH.BIN@@cat /mnt/h/SUB/NOTE.TXT' '# @@uptime' '# @@'
+n=$((n + 1)); log=build/async-$n.txt
+printf '%s\n' "$out" | tr -d '\r' > "$log"
+# Anchored on the exec line: the cat's own echo has the prompt merged into
+# cremote's first line ahead of it, so it is not a line of its own.
+tail=$(after 'exec /bin/cremote' < "$log")
+served=$(printf '%s\n' "$tail" | grep -n 'a nested file, read remotely' | head -1 | cut -d: -f1)
+failed=$(printf '%s\n' "$tail" | grep -n '/mnt/a/HELLO.TXT: open failed' | head -1 | cut -d: -f1)
+if [ -n "$served" ] && [ -n "$failed" ] && [ "$served" -lt "$failed" ] \
+    && grep -q -- "--- qemu -d int: 0 fault lines" "$log"; then
+    echo "ok   a path verb is served while a fid verb's session is parked on a silent peer ($log)"
+else
+    echo "FAIL a path verb is served while a fid verb's session is parked ($log): served at line ${served:-none}, open failed at line ${failed:-none}"
+    printf '%s\n' "$tail" | head -n 14 | sed 's/^/    | /'
+    fail=1
+fi
+stop_peers
 
 exit $fail
