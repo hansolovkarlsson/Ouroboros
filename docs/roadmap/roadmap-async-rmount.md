@@ -314,7 +314,10 @@ Kept as the steps land, newest first.
 
 - **Step 3 landed 2026-09-22**, the same day as step 2, and with it the arc's
   concurrency half is done: nothing in `netd` blocks its event loop for a
-  remote round trip any more. The detail is in the step 3 note above. The two
+  remote MOUNT, FID VERB or RUN any more. ARP, DNS, ICMP and the HTTP fetch
+  still block, by Decision 4 above, and `arp_resolve` in particular still costs
+  up to half a second on the park path - so "nothing blocks" is the wrong
+  sentence and this is the right one. The detail is in the step 3 note above. The two
   things worth carrying out of it: the overflow #147 called latent was
   reproducible on demand and had broken Phase 4b outright, and a step that was
   planned to RETURN stack instead proved the stack is now dominated by resident

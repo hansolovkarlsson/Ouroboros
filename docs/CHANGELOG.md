@@ -104,7 +104,10 @@ test-async-rmount` gained a session check and a latency-boundary check, each
 with a measured control.
 
 **The `cpu` run goes asynchronous too, step 3, and the arc's concurrency half
-is done.** `netd` no longer blocks its event loop for any remote round trip.
+is done.** `netd` no longer blocks its event loop for a remote **mount, fid
+verb or run** - the three paths this arc set out to move. ARP, DNS, ICMP and
+the HTTP fetch still block, deliberately and by the plan's Decision 4: they are
+bounded, they carry no fid, and none is on the path this arc removed.
 The run parks on the same engine as the mounts, its output is drained into the
 pending buffer as it arrives and delivered on the peer's FIN, and with nothing
 blocking there is no re-entrant drain left: `tcp_run`, `pump_conns`, the

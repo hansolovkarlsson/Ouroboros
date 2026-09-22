@@ -1286,28 +1286,6 @@ fn tcp_get(mac: &[u8; 6], dst_mac: &[u8; 6], target: &[u8; 4], dst_port: u16, re
 
 
 
-/// Serve one `NETOP_RMOUNT` client request (cluster Phase 1c): carry the
-/// embedded `ninep-abi` NP request over a TCP round trip to a remote machine's
-/// 9P export gateway and hand the client the NP reply body verbatim.
-///
-/// `buf[..len]` is `[op:u64][ip:4][port:2 LE][pad:2][NP message...]`. We frame
-/// the NP message with the 4-byte length prefix the export listener expects,
-/// open a client connection to `ip:port` (via [`tcp_get`], which sends the
-/// request and reads the reply until the peer's FIN - the export does one
-/// request/reply then closes, like HTTP `Connection: close`), strip the reply's
-/// length prefix, and copy `[status:u64][data]` into `out`. On any transport
-/// failure (no NIC, no route, timeout, refused) the reply is a bare
-/// [`syscall_abi::NO_FS`] status - a remote mount that can't be reached fails
-/// *cleanly* (the roadmap's stated Phase 1 posture), never hangs or corrupts.
-/// Returns the number of bytes written to `out`.
-/// Serve one `NETOP_RUN` client request (cluster Phase 4a): frame an `NP_RUN` to
-/// the endpoint's export gateway (which spawns the command there and streams its
-/// stdout back), and return that output to the shell's `cpu` builtin. The reply
-/// is the **raw** output bytes (the run response is a stream, not a framed NP
-/// reply), bounded by the caller's `out` (one `MSG_MAX_LEN` for now - small
-/// commands). Request layout is `NETOP_RMOUNT`'s (endpoint + payload), the
-/// payload being the command line rather than an NP message.
-#[allow(clippy::too_many_arguments)]
 /// The collected output of the most recent `cpu` run, delivered to the shell one
 /// `MSG_MAX_LEN` chunk at a time (the shell pulls with `NETOP_RUN_MORE`). netd
 /// holds it here between pull calls - a single pending run at a time, on `serve`'s
@@ -1447,6 +1425,18 @@ fn park_run(packed_mac: u64, buf: &[u8], len: usize, out: &mut [u8], remotes: &m
     // receive buffer into `pending` as it arrives and answers the caller on the
     // peer's FIN. `pending` is cleared here so a previous run's output can
     // never be handed to this caller if this one fails.
+    // ONE run at a time, refused before `pending` is touched. `PendingRun` is a
+    // single buffer with a single owner, and until step 3 two runs could not
+    // coexist: `tcp_run` blocked the loop for the whole first one, and #147's
+    // by-sender refusal turned away the second client's request. Step 3 removed
+    // both, and with `MAX_REMOTE` 2 both runs fit in the table - so without this
+    // the second park would take `pending.owner` from the first, and the first
+    // caller would be answered empty while the second received the first's
+    // bytes prepended to its own (review of #154). Refusing is honest and the
+    // shell retries; sharing the buffer is not.
+    if remotes.iter().any(|r| matches!(r, Some(r) if matches!(&r.parked, Some(pk) if pk.verb == ninep_abi::NP_RUN))) {
+        return fail(out, b"cpu: a run is already in flight (try again)\r\n");
+    }
     pending.active = false;
     pending.len = 0;
     pending.cursor = 0;
@@ -1852,13 +1842,22 @@ fn service_remotes<const H: usize>(remotes: &mut [Option<Wire<REMOTE_SBUF, REMOT
                 continue;
             }
             let parked = c.parked.take().unwrap();
-            let n = if p.len > 0 || finished {
+            // `tcp_run`'s rule exactly: output if anything arrived OR the peer
+            // closed CLEANLY, an error otherwise. The test is `peer_fin`, not
+            // `finished`: `finished` also covers a slot the pump set Closed
+            // after its SYN or data retransmits ran out, and treating that as a
+            // clean end answered a caller whose peer was never reached with an
+            // EMPTY reply - the shell then printed nothing and stopped, where
+            // the blocking path had said "remote run failed" (review of #154).
+            // A clean FIN with no output stays an empty reply, which is correct:
+            // that is a command that printed nothing.
+            let n = if p.len > 0 || c.peer_fin {
                 p.cursor = 0;
                 p.active = true;
                 p.next_chunk(parked.caller, &mut r)
             } else {
-                // Nothing arrived and the peer never closed: the same answer
-                // `tcp_run` gave for NET_FETCH_TIMEOUT.
+                // Never reached, or reached and silent past the deadline: the
+                // answer `tcp_run` gave for NET_FETCH_TIMEOUT.
                 let msg = b"cpu: remote run failed\r\n";
                 r[..msg.len()].copy_from_slice(msg);
                 msg.len()
@@ -2265,9 +2264,19 @@ const DIAL_IDLE_TICKS: u64 = 600;
 /// The remote-mount client's own table of the same engine (Decision 2 of
 /// docs/roadmap/roadmap-async-rmount.md): one slot per parked `NETOP_RMOUNT`,
 /// separate from `dials` so a remote mount never competes with a `/net/tcp`
-/// dial-out for a slot. Two is the smallest number that lets a bystander's
-/// read proceed while a cpu child's is parked; raise it when a rig exhausts it.
-const MAX_REMOTE: usize = 2;
+/// dial-out for a slot. Two was the smallest number that let a bystander's read
+/// proceed while a cpu child's was parked. THREE since step 3 (2026-09-22),
+/// because a parked `cpu` run now HOLDS one of these for the whole run, up to
+/// `RUN_DEADLINE_TICKS`, where the run used to block the loop and take no slot
+/// at all. At two, a run plus one in-flight path verb filled the table, and the
+/// next verb - a `cat` over a remote mount issues them back to back, and a slot
+/// is not reaped until its FIN exchange finishes - would be refused
+/// `FS_ERR_BUSY`. That refusal is indistinguishable, in the client's output,
+/// from the by-sender refusal step 3 deleted, so the re-entrant rig could not
+/// tell a genuine regression from ordinary contention (review of #154). Three
+/// keeps two slots free during a run and costs one `RemoteConn` (~2.1 KB) of
+/// the stack headroom measured for `STACK_PAGES`.
+const MAX_REMOTE: usize = 3;
 /// The NP part of a remote request: a client message is at most `MSG_MAX_LEN`
 /// (768) of which `NETOP_RMOUNT_MSG` (16) is the envelope. It sizes the signed
 /// frame a remote slot sends AND the raw verb a session slot holds while its
