@@ -741,12 +741,23 @@ pub const ENV_MAX: u64 = 2048;
 /// `arg1` = gid (each a `u32` in the low bits). Returns `0` on success, or
 /// [`SET_ID_DENIED`] if the caller isn't root.
 ///
-/// The privilege model is deliberately minimal: **only a task whose current
-/// uid is 0 (root) may change identity.** Root can *drop* to any user (the
-/// mechanism a `login` will use), but a non-root task can't change its uid at
-/// all - no escalation, and `su`-back-to-root needs authentication (the login
-/// step, not this one). Children inherit their parent's identity at [`SPAWN`],
-/// so a command runs as whoever started it.
+/// The privilege model is deliberately minimal, but it is not "root only".
+/// Root may become any user (the mechanism `login` uses). A non-root task may
+/// make exactly ONE move: **back to its own saved identity**, the one it held
+/// before the last change. The kernel's whole refusal is
+/// `!is_root && new != saved_id_of(cur)`, so a non-root task can never reach a
+/// THIRD identity, and there is no escalation to a stranger.
+///
+/// The saved-identity restore is load-bearing, not an oversight: the shell
+/// never dies, so `logout` uses it to return to root for the next login
+/// prompt. It also means the kernel alone does not stop a logged-in user's
+/// shell from calling this with uid 0 once root is its saved identity. What
+/// stops that is the shell's own `su` gate, which is where the authentication
+/// lives - stated here because a reader who took this doc as the whole rule
+/// would look for a kernel check that is deliberately not there.
+///
+/// Children inherit their parent's identity at [`SPAWN`], so a command runs as
+/// whoever started it.
 ///
 /// **Supplementary groups travel with the identity**, in the same call: `arg2` =
 /// pointer to an array of `u32` gids, `arg3` = how many (capped at
