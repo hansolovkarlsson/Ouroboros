@@ -35,7 +35,8 @@ This document is the one to update first when direction changes.
 > variables in RAM, and 32 bytes of `EFI_RNG_PROTOCOL` entropy); the Pi 4 and
 > Parallels measurements are owed. **Step 4 done 2026-09-23** (the keyed wire in
 > `ninep-abi`'s normative block, pinned across Rust and both Python peers).
-> Step 5, keyed sessions in both Python peers, is next.
+> **Step 5 done 2026-09-23** (a keyed session host to host between the two
+> Python peers, checked by `make test`). Step 6, the export in `netd`, is next.
 
 The microkernel arc is largely built — the FAT32 **filesystem** (`fsd`),
 the **console** (`cond`), and the **network** server (`netd`) all run as

@@ -13,6 +13,7 @@ Usage:
     python3 scripts/np9p_client.py <host> <port> run     <command>
     python3 scripts/np9p_client.py <host> <port> noverb  <path> [verb]
     python3 scripts/np9p_client.py <host> <port> session <path>          # readdir+stat+read on ONE connection
+    python3 scripts/np9p_client.py <host> <port> keyed <path>            # the same on a KEYED session (AUTHNP04)
     python3 scripts/np9p_client.py <host> <port> session-gate [hold_s]  # the step-4 checks, PASS/FAIL each
     python3 scripts/np9p_client.py <host> <port> fid-gate [path] [data_path]  # the step-5/6 checks: open/fstat/clunk, and pread to EOF, on a session
     python3 scripts/np9p_client.py <host> <port> path-gate              # the path verbs end to end on a scratch file, plus the console and /net arms
@@ -42,6 +43,10 @@ import os
 import socket
 import struct
 import sys
+import time
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import x25519_ref  # noqa: E402  RFC 7748's ladder, asserted against its vectors on load
 
 # ninep-abi verb numbers (NP_BASE = 0x100).
 NP_BASE = 0x100
@@ -486,6 +491,38 @@ def run_op(host, port, command, timeout=10):
     return out
 
 
+# KEYED SESSIONS (step 5 of docs/roadmap/roadmap-session-auth.md), from
+# ninep-abi's normative block, "Keyed sessions". The client's ephemeral
+# derivation and its key schedule are written HERE, separately from
+# np9p_server.py's: a shared helper would make the plan's control (drop one
+# input from ONE side's derivation) unable to fail.
+
+# This peer's stand-in for a boot ID: fixed for the process, never repeated
+# across runs. The spec: a host peer with no boot ID uses its own
+# non-repeating value in its place.
+CLIENT_BOOT_ID = struct.pack("<Q", time.time_ns()) + os.urandom(8)
+
+
+def client_ephemeral(seed):
+    """The client's ephemeral secret: SIG_DOMAIN_EPHEMERAL_C, the machine key,
+    the boot ID, the clock and fresh entropy, hashed; X25519 clamps it."""
+    h = hashlib.sha512(SIG_DOMAIN_EPHEMERAL_C + seed + CLIENT_BOOT_ID
+                       + struct.pack("<Q", time.monotonic_ns() // 1000) + os.urandom(32))
+    return h.digest()[:32]
+
+
+def derive_session_keys(shared, request_nonce, eph_client, eph_export):
+    """(k_c2s, k_s2c): the two halves of SHA-512(SIG_DOMAIN_SESSION ‖ shared ‖
+    request_nonce ‖ eph_client ‖ eph_export)."""
+    k = hashlib.sha512(SIG_DOMAIN_SESSION + shared + request_nonce + eph_client + eph_export).digest()
+    return k[:NP_SESSION_KEY_LEN], k[NP_SESSION_KEY_LEN:2 * NP_SESSION_KEY_LEN]
+
+
+def tag_of(key, seq, data):
+    """HMAC-SHA-512(key, seq ‖ data), truncated to NP_KEYED_TAG_LEN."""
+    return hmac.new(key, struct.pack("<Q", seq) + data, hashlib.sha512).digest()[:NP_KEYED_TAG_LEN]
+
+
 class Session:
     """One export connection held across requests: the step-4 shape.
 
@@ -499,14 +536,76 @@ class Session:
 
     def __init__(self, host, port, timeout=10):
         self.sock = socket.create_connection((host, port), timeout=timeout)
+        # (k_c2s, k_s2c) once the export has keyed this session, and the seq of
+        # the last keyed request sent.
+        self.keys = None
+        self.seq = 0
 
     def op(self, np_msg, user=None, seed=None):
+        if self.keys is not None:
+            return self._keyed_op(np_msg)
         frame, nonce = request_frame(np_msg, user=user, seed=seed)
         self.sock.sendall(frame)
         return recv_reply(self.sock, nonce, peer_key=peer_key())
 
-    def open(self):
-        return self.op(build_frame(NP_SESSION, 0, [], b""))
+    def open(self, keyed=False):
+        """Send NP_SESSION. With `keyed`, offer an ephemeral X25519 key as its
+        payload: an export that keys answers with its own in the SIGNED reply,
+        and every later op is AUTHNP04; one that does not answers an empty
+        result, and the session stays per-request signed. Either way the
+        answer came in a reply whose signature was checked, so an attacker
+        cannot strip the offer or swap a key."""
+        if not keyed:
+            return self.op(build_frame(NP_SESSION, 0, [], b""))
+        secret = client_ephemeral(SIGN_KEY)
+        eph_client = x25519_ref.public(secret)
+        frame, nonce = request_frame(build_frame(NP_SESSION, 0, [], eph_client))
+        self.sock.sendall(frame)
+        status, data = recv_reply(self.sock, nonce, peer_key=peer_key())
+        if status != 0 or not data:
+            return status, data
+        if len(data) != NP_EPHEMERAL_LEN:
+            self.abort()
+            return FS_ERR_AUTH, b""
+        shared = x25519_ref.shared(secret, data)
+        if shared is None:
+            # An all-zero shared secret: close, never fall back to unkeyed.
+            self.abort()
+            return FS_ERR_AUTH, b""
+        self.keys = derive_session_keys(shared, nonce, eph_client, data)
+        return 0, data
+
+    def _keyed_op(self, np_msg):
+        """One AUTHNP04 request and its reply. A reply whose tag does not
+        verify under k_s2c over THIS request's seq is FS_ERR_AUTH, and the
+        session is closed, as a bad reply signature is. A connection the export
+        closed (its answer to an auth failure) raises, like a short reply."""
+        k_c2s, k_s2c = self.keys
+        self.seq += 1
+        body = (struct.pack("<QQ", NP_AUTH_MAGIC_KEYED, self.seq)
+                + tag_of(k_c2s, self.seq, np_msg) + np_msg)
+        self.sock.sendall(struct.pack("<I", len(body)) + body)
+        hdr = self._read(4)
+        (flen,) = struct.unpack("<I", hdr)
+        if flen > MAX_DECLARED_REPLY or flen < NP_KEYED_TAG_LEN + 8:
+            self.abort()
+            return FS_ERR_AUTH, b""
+        framed = self._read(flen)
+        tag, inner = framed[:NP_KEYED_TAG_LEN], framed[NP_KEYED_TAG_LEN:]
+        if not hmac.compare_digest(tag, tag_of(k_s2c, self.seq, inner)):
+            self.abort()
+            return FS_ERR_AUTH, b""
+        (status,) = struct.unpack("<Q", inner[:8])
+        return status, inner[8:]
+
+    def _read(self, n):
+        out = b""
+        while len(out) < n:
+            chunk = self.sock.recv(min(n - len(out), 65536))
+            if not chunk:
+                raise RuntimeError(f"the export closed the connection ({len(out)} of {n} bytes)")
+            out += chunk
+        return out
 
     def close(self):
         self.sock.close()
@@ -552,6 +651,28 @@ def do_session(host, port, path):
     print(f"[same connection] stat    -> {status_name(st) if st >= ERR_BAND_FLOOR else f'record of {len(data)} bytes'}")
     st, data = s.op(build_frame(NP_READ, 0, [len(pb), 0, 64], pb))
     print(f"[same connection] read    -> {status_name(st) if st >= ERR_BAND_FLOOR else data[:64]!r}")
+    s.close()
+
+
+def do_keyed(host, port, path):
+    """Open a KEYED session and readdir, stat and read `path` on it."""
+    s = Session(host, port)
+    st, eph = s.open(keyed=True)
+    if st != 0:
+        print(f"session refused: {status_name(st)}")
+        s.close()
+        sys.exit(1)
+    if s.keys is None:
+        print("the export answered without a key: an UNKEYED session (a v0.20.0-shaped export)")
+    else:
+        print(f"keyed session: the export's ephemeral key {eph.hex()[:16]}...")
+    pb = path.encode()
+    for label, frame in (("readdir", build_frame(NP_READDIR, 0, [len(pb), 4096], pb)),
+                         ("stat", stat_frame(pb)),
+                         ("read", build_frame(NP_READ, 0, [len(pb), 0, 64], pb))):
+        st, data = s.op(frame)
+        shown = status_name(st) if st >= ERR_BAND_FLOOR else f"{len(data)} bytes"
+        print(f"[{'keyed' if s.keys else 'signed'}] {label:7} -> {shown}")
     s.close()
 
 
@@ -1750,6 +1871,10 @@ def main():
 
     if op == "session":
         do_session(host, port, args[3])
+        return
+
+    if op == "keyed":
+        do_keyed(host, port, args[3])
         return
 
     if op == "dial":
