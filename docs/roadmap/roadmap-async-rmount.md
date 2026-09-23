@@ -313,6 +313,18 @@ and nothing had reported it because no rig ran a `/host` read.
 
 Kept as the steps land, newest first.
 
+- **2026-09-23, after the arc: the parks stopped signing.** The session-auth
+  plan's stack gate measured the depth at every park: each is reached from
+  `drain_client_messages` inside the export's connection pump, ~10 KB below the
+  service pass, and a sign there ran within 80 bytes of the guard page
+  (`park_session`, every fid verb) or 2 KB (`park_rmount`); a 512-byte pad
+  faulted `netd`. So a park now writes its request raw (`Parked::raw`) and
+  `service_remotes` signs it in place, the step-2 two-phase pattern made the
+  rule for every park rather than an instance for one. This is the arc's own
+  lesson about stack cost arriving from the other side: step 2's resident
+  tables had moved the whole tree down, and the parks were the deepest thing
+  standing on it. Measured with and without on branches
+  `measure/x25519-stack-gate` and `measure/x25519-stack-gate-after`.
 - **Step 3 landed 2026-09-22**, the same day as step 2, and with it the arc's
   concurrency half is done: nothing in `netd` blocks its event loop for a
   remote MOUNT, FID VERB or RUN any more. ARP, DNS, ICMP and the HTTP fetch
