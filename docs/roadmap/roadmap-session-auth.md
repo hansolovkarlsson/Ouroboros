@@ -255,7 +255,15 @@ second boot is to look before writing: the kernel reads the counter, and only
 a value that was **already there** counts. A store that forgets at every reboot
 never has one, so it is never trusted, and the kernel falls back to the ESP
 file. The ESP file is staged at image build (as `/etc/cluster/id` is), so the
-first boot of a new image already finds one. **If no store yields a counter
+first boot of a new image already finds one.
+
+**The two stores never hand out the same value twice.** The kernel reads
+both, takes **the larger of the trusted values, plus one**, and writes that to
+both. So when the variable store starts working (its first boot finds no
+variable and uses the file), or stops (an NVRAM reset or a firmware update
+wipes it and the file serves again), the next value is still above every value
+either store has seen, instead of restarting from one store's own history.
+**If no store yields a counter
 that existed before this boot, and was then incremented, written and read
 back, the syscall says so and the node keys no sessions**: its client offers
 no key and its export answers with an empty result, which is today's session,
@@ -265,7 +273,12 @@ Two things this does **not** give, stated so nobody has to discover them:
 
 - **Replay after a rollback.** A VM snapshot revert rolls the non-volatile
   variable back with everything else, and the ESP fallback rolls back with the
-  disk. After that, on a node with no boot entropy, an export ephemeral differs
+  disk. **Rebuilding the image is a rollback too**: `make image` and
+  `images-2vm*` recreate the disk from scratch and stage the file afresh, and
+  the dev keys from `mkclusterkeys.py` are deterministic, so on QEMU every
+  rebuild restarts the boot ID under the same machine key. That is acceptable
+  for a dev rig and would not be for a deployed node, which is never rebuilt
+  in place. After that, on a node with no boot entropy, an export ephemeral differs
   from a recorded one only by the clock reading at the handshake. A replayed
   `NP_SESSION` then reproduces an old `K` only if it is served at the same
   microsecond as the recorded one, and the clock passes each value once per
@@ -360,7 +373,11 @@ the client, so each side is tested against something that is not itself.
    `EFI_RNG_PROTOCOL` bytes; the image build (`make image`, `images-2vm*`)
    stages the ESP counter file. A new syscall returns the counter, whether it was
    persisted, and the boot entropy if any. **Check:** two consecutive QEMU
-   boots report two different counters, and the one after reads back the
+   boots **of the same image file**, driven by `scripts/drive-qemu.py` against
+   `build/esp.img` and not through `make run-image` (which is `.PHONY`,
+   depends on `image`, and recreates the disk and the staged counter every
+   time, so it would report the same counter twice and blame the kernel for
+   the build), report two different counters, and the one after reads back the
    value the one before wrote. QEMU as the Makefile boots it has no pflash
    variable file, so this is also the check that the RAM-only variable store
    is refused and the ESP fallback is what serves. **Measured and recorded:** which store works
@@ -397,7 +414,11 @@ the client, so each side is tested against something that is not itself.
    session work before any guest code changes, so the guest has an
    independent implementation to be wrong against. *Control:* give the client
    and server peers different key schedules (one input dropped from one side's
-   derivation) and the self-test fails on its first keyed verb. The server
+   derivation) and the self-test fails on its first keyed verb; and
+   `np9p_client.py` refuses each of the server's misbehaving replies below,
+   including one tagged with `k_c2s` instead of `k_s2c`. (That control used to
+   sit under step 6, where the export under test is an honest `netd` that never
+   sends such a reply, so it could not fail there.) The server
    also gains **misbehaving modes** for step 7 to aim at: a flipped reply tag,
    a reply tagged with the wrong direction's key, and a replayed or skipped
    reply `seq`.
@@ -406,8 +427,7 @@ the client, so each side is tested against something that is not itself.
    `np9p_client.py`: a keyed `cbig`-shaped run (open, preads, close) is served.
    *Controls, each run:* a tag with one bit flipped is refused and the session
    closes; a replayed `seq` is refused; a skipped `seq` is refused; an
-   `AUTHNP03` frame on a keyed session is refused; a reply MAC'd with `k_c2s`
-   instead of `k_s2c` is refused by the client; a low-order ephemeral closes
+   `AUTHNP03` frame on a keyed session is refused; a low-order ephemeral closes
    the connection; a second `NP_SESSION` offering a key is refused and the
    connection closes; a path verb on a keyed session runs as the session's
    user, not a name of its own. An old-style `NP_SESSION` (no payload) still
@@ -441,7 +461,7 @@ the client, so each side is tested against something that is not itself.
 
 ## Risks, named in advance
 
-1. **`netd`'s stack.** The handshake adds a scalar multiplication to two
+1. **`netd`'s stack.** The handshake adds a scalar multiplication to three
    places that already hold deep frames: the `NP_SESSION` arm on the export
    (two, counting the export's own ephemeral), phase two in `service_remotes`
    on the client, right after the reply's signature verify, and
