@@ -271,6 +271,33 @@ impl Auth {
 
 }
 
+/// Log this boot's identity as netd sees it (step 3 of
+/// docs/roadmap/roadmap-session-auth.md): the counter, and whether the kernel
+/// hands netd the boot entropy, which it hands to nobody else (`/bin/bootid`
+/// checks the refusal; this line is the other half of that gate). The bytes are
+/// read and dropped here; the session handshake (step 7) is their consumer.
+fn report_boot_identity() {
+    let c = syscall(syscall_abi::BOOT_ID, syscall_abi::BOOT_ID_COUNTER);
+    if c == syscall_abi::BOOT_ID_NONE {
+        log(b"netd: boot identity: no counter this boot; sessions will not be keyed\r\n");
+    } else {
+        log(b"netd: boot identity: boot ");
+        log_dec(c);
+        log(b"\r\n");
+    }
+    let mut e = [0u8; 64];
+    let n = syscall4(syscall_abi::BOOT_ID, syscall_abi::BOOT_ID_ENTROPY, e.as_mut_ptr() as u64, e.len() as u64, 0);
+    e = [0u8; 64];
+    core::hint::black_box(&e);
+    if n == syscall_abi::BOOT_ID_NONE {
+        log(b"netd: boot entropy: REFUSED by the kernel\r\n");
+    } else {
+        log(b"netd: boot entropy: ");
+        log_dec(n);
+        log(b" bytes\r\n");
+    }
+}
+
 /// The disk path (FAT 8.3-legal) of the no-exec flag.
 const NOEXEC_PATH: &[u8] = b"/NOEXEC";
 /// The peers this machine accepts, by public key (see
@@ -423,6 +450,8 @@ fn load_auth() -> Auth {
             None => log(b"netd: WARNING /etc/cluster/id is not a key; not signing\r\n"),
         }
     }
+
+    report_boot_identity();
 
     // The authorized-peer list. Absent is not an error: a machine with no peers
     // simply verifies no signatures, which is what a single-machine run wants.
