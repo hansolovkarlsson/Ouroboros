@@ -778,6 +778,11 @@ pub fn proxy_parts(word: u64) -> Option<(u32, u32)> {
 /// Was a `max` of the two header sizes while both formats existed.
 pub const NP_FRAME_MAX: usize = NP_NET_LEN_PREFIX + NP_AUTH_HDR_SIGNED + NP_NET_MAX;
 
+/// A keyed frame's header is smaller than a signed one's, so a buffer sized by
+/// [`NP_FRAME_MAX`] holds either format. At BUILD time, since a test comparing
+/// two constants cannot fail at run time.
+const _: () = assert!(NP_AUTH_HDR_KEYED < NP_AUTH_HDR_SIGNED);
+
 // ---------------------------------------------------------------------------
 // The shared namespace resolver. A namespace is a sequence of bindings
 // `[tree:u8][prefix_len:u8][target_len:u8][prefix][target]`; resolving a path
@@ -1019,9 +1024,6 @@ mod tests {
         assert_eq!(NP_AUTH_HDR_KEYED, 48);
         assert_eq!(NP_EPHEMERAL_LEN, 32);
         assert_eq!(NP_SESSION_KEY_LEN * 2, 64); // the two halves of one SHA-512
-        // A keyed frame is smaller than a signed one, so NP_FRAME_MAX, sized
-        // from the signed header, holds either.
-        assert!(NP_AUTH_HDR_KEYED < NP_AUTH_HDR_SIGNED);
     }
 
     #[test]

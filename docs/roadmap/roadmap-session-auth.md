@@ -473,7 +473,7 @@ the client, so each side is tested against something that is not itself.
    it can read at startup, the allowed half. **Owed:** the same two-boot check
    on the Pi 4 and on Parallels, recording which store serves and whether
    their firmware offers `EFI_RNG_PROTOCOL`.
-4. **The wire, in `ninep-abi`.** `NP_AUTH_MAGIC_KEYED` (`AUTHNP04`),
+4. ✅ **2026-09-23.** **The wire, in `ninep-abi`.** `NP_AUTH_MAGIC_KEYED` (`AUTHNP04`),
    `SIG_DOMAIN_SESSION`, the two ephemeral domain tags, the header and tag
    lengths, the `NP_SESSION` payload and result shapes, the sequence rule and
    the key schedule, all in the normative block, and the `NP_SESSION` doc's
@@ -492,6 +492,23 @@ the client, so each side is tested against something that is not itself.
    magics and both header lengths. The C headers carry no
    auth constants and gain none. *Control:* for each form the parser learns,
    change one constant in one peer and the check fails.
+
+   **What it did.** The normative block gains "Keyed sessions" (the exchange,
+   the key schedule, the `AUTHNP04` request and reply, the sequence rule, and
+   what a failure does on each side), and `NP_SESSION`'s doc describes its
+   optional payload. Eleven constants: the keyed magic, `seq` and tag lengths,
+   the keyed header's offsets and length (48), the ephemeral and session-key
+   lengths, and three tags. **The tags were chosen no longer than the request
+   tag**, so `SIG_DOMAIN_MAX`, now computed over all five, stays 29 and no
+   `netd` frame sized from it grows; a test pins the 29. The checker learned
+   the `int.from_bytes(b"...", "big")` magic and one-line sums in Python and
+   multi-line sums in Rust; both peers declare the keyed constants now, ahead
+   of step 5, so all eleven are pinned from the step that defines them: 136
+   constants agree, up from 115. The controls: a changed magic in the client,
+   a changed sum in the server, a changed multi-line sum in `ninep-abi`, and a
+   changed tag in the server each fail the check with the named disagreement.
+   Counting the per-peer floors found `sys.h`'s already one behind on `main`
+   (37 matched against a floor of 36); it is 37 now.
 5. **Both Python peers.** Pure-Python X25519 (RFC 7748's reference ladder,
    asserted against its vectors on load, as the Ed25519 reference is) and the
    standard library's `hmac`. `np9p_server.py` keys a session when the client
