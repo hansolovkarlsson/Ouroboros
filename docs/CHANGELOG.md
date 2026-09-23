@@ -7,6 +7,28 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/pos
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## Unreleased
+
+**Not yet released.** Changes since v0.20.0, drafted as they land; cutting a
+version is held for a go-ahead.
+
+**A park never signs; the service pass does.** Every remote request `netd`
+parks (a path verb, a fid verb on a live or an opening session, a `cpu` run)
+used to be framed and signed inside the park. Every park is reached from
+`drain_client_messages`, which the export's connection pump calls from inside
+its own loop, and measured on the two-node ext2 rig the sign there ran within
+**80 bytes** of the guard page for a session verb (2 KB for a path verb); a
+512-byte pad at that depth faulted `netd`. The rigs passed only because nothing
+had yet added those bytes. Now a park writes the raw request where its signed
+frame will carry it and records its length (`Parked::raw`), and
+`service_remotes`, at the top of `serve`, signs it in place (`sign_parked`, its
+own frame) before the pump will send it: about 10 KB of headroom there,
+measured. `frame_signed` is a copy plus the same in-place signer, so the format
+is written once; a machine with no identity is still refused at the park,
+before anything is sent. Found by step 1's stack gate of
+`docs/roadmap/roadmap-session-auth.md`, which the plan's session-key sites
+failed at `park_session` before this change and pass after it.
+
 ## v0.20.0: the fid verbs reach the export, the keyboard follows a chain, the remote mount goes async (2026-09-22)
 
 Thirty-two pull requests since v0.19.0 (#121 to #155): the fid-verb-to-export

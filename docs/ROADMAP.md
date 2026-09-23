@@ -698,6 +698,20 @@ record is in [`CHANGELOG.md`](CHANGELOG.md):
 
 The small open tails those arcs deliberately left:
 
+- **libc's `MSG_CALL` does not ride out the delegation window (found
+  2026-09-23).** A C program's first remote op after a mount fails
+  `not allowed to reach that server (capability)` about one boot in three on
+  the two-node ext2 rig (`cbig` right after `mount -r`; the second `cbig` in
+  the same boot always passes), measured on `main` and on a branch alike. It is
+  **Cause B of the 2026-09-03 remote-read flake** (the shell `SPAWN`s, then
+  `DELEGATE`s `TO_NET`, so a child reaching `netd` in between is refused
+  `MSG_ERR_DENIED`), which was fixed in `ulib`'s NP paths (a bounded retry,
+  `ulib/src/lib.rs` around `np_remote`) and in libc's `MSG_SEND` output path,
+  but never in libc's NP call (`libc/src/file.c`, the `SYS_MSG_CALL` in the
+  request builder), whose own comment names the race and returns. The fix is
+  the same bounded retry; its check is the recipe above run until the first
+  `cbig` has failed on the tree without it and passed ten boots with it.
+
 - **ext4.** Much larger (extents, journaling, htree, checksums, 64-bit) and
   the no-alloc fixed-buffer constraint makes a big FS genuinely harder — a
   separate large arc, not a near-term ext2 follow-on.
