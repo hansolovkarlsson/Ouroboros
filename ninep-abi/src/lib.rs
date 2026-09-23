@@ -447,7 +447,12 @@ pub const NP_REMOTE_CHUNK: usize = 512;
 //
 // KEYED SESSIONS (docs/roadmap/roadmap-session-auth.md). A held session can
 // replace the per-request signature with a session key, established by the
-// session's first `NP_SESSION`, which is itself an ordinary signed request:
+// `NP_SESSION` that is the FIRST FRAME on a fresh connection, itself an
+// ordinary signed request. A key offer anywhere else (on a connection that has
+// already carried a frame, keyed or not) is refused and the connection closed:
+// there is no keying mid-stream and no re-keying, since the two ends would then
+// disagree about the format of the next frame. An `NP_SESSION` with NO payload
+// later on keeps today's idempotent `0`:
 //
 // - The client sends `NP_SESSION` in an `AUTHNP03` frame with a payload of its
 //   ephemeral X25519 public key, `eph_client` ([`NP_EPHEMERAL_LEN`] bytes). The
@@ -464,10 +469,19 @@ pub const NP_REMOTE_CHUNK: usize = 512;
 //   `NP_SESSION` request's nonce. `k_c2s = K[0..32]` MACs requests and
 //   `k_s2c = K[32..64]` MACs replies ([`NP_SESSION_KEY_LEN`] each): one key per
 //   direction, so a tag made for one direction never verifies in the other.
-// - Each ephemeral secret is `SHA-512(`[`SIG_DOMAIN_EPHEMERAL_C`] or
-//   [`SIG_DOMAIN_EPHEMERAL_E`]` ‖ …)` over the machine key, the boot identity
-//   and the clock, reduced by X25519's clamp; the inputs are a local choice and
-//   are not on the wire (Decision 6 of the plan).
+// - Each ephemeral secret is a SHA-512, reduced by X25519's clamp, over inputs
+//   that are not on the wire but ARE part of this spec, because leaving one out
+//   passes every wire check and silently loses a property:
+//     client: `SIG_DOMAIN_EPHEMERAL_C ‖ machine private key ‖ boot ID ‖
+//              MONOTONIC_US ‖ boot entropy ‖ RANDOM bytes`
+//     export: `SIG_DOMAIN_EPHEMERAL_E ‖ machine private key ‖ boot ID ‖
+//              request_nonce ‖ MONOTONIC_US ‖ boot entropy ‖ RANDOM bytes`
+//   (see [`SIG_DOMAIN_EPHEMERAL_C`], [`SIG_DOMAIN_EPHEMERAL_E`]). "Boot entropy"
+//   and "RANDOM bytes" are empty where the platform has none; where it has
+//   them, dropping them removes forward secrecy for that node's sessions. The
+//   private key keeps each ephemeral secret; the boot ID and the clock keep it
+//   from repeating across reboots and restarts (Decision 6 of the plan).
+//   A host peer with no boot ID uses its own non-repeating value in its place.
 //
 // After it, every request on that connection is
 //
@@ -658,7 +672,7 @@ const fn max_len(tags: &[&[u8]]) -> usize {
     m
 }
 
-/// Every tag fits the buffer sized from them — trivially true now that
+/// Every tag fits the buffer sized from them: trivially true now that
 /// [`SIG_DOMAIN_MAX`] is computed, and asserted at BUILD time anyway so that
 /// re-transcribing it later fails the build rather than a test nobody ran.
 const _: () = {
