@@ -25,6 +25,10 @@
 //! The primitive is complete. What remains is putting it on the target (step 5)
 //! and then on the wire (steps 6-10).
 //!
+//! - **X25519 key agreement** (step 1 of `docs/roadmap/roadmap-session-auth.md`,
+//!   a later arc on the same field). RFC 7748 section 5, the Montgomery ladder
+//!   on `field.rs`, with an all-zero shared secret refused rather than returned.
+//!
 //! ## House rules for this crate
 //!
 //! - **No heap, no statics that need relocating.** Any lookup table must be an
@@ -45,6 +49,7 @@ mod field;
 mod scalar;
 mod sign;
 mod sha512;
+mod x25519;
 
 pub use curve::{Point, POINT_LEN};
 pub use field::{Fe, ELEM_LEN};
@@ -54,3 +59,4 @@ pub use sign::{
     SECRET_LEN, SIGNATURE_LEN,
 };
 pub use sha512::{sha512, Sha512, DIGEST_LEN};
+pub use x25519::{x25519, x25519_public, x25519_shared, X25519_BASEPOINT, X25519_LEN};

@@ -4,7 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 # Pure, no_std, no I/O, no syscalls, NO HEAP: the signature primitive behind
-# per-machine cluster keypairs (docs/roadmap-cluster-keys.md). Everything is a
+# per-machine cluster keypairs (docs/roadmap-cluster-keys.md), and X25519 key
+# agreement for keyed sessions (docs/roadmap/roadmap-session-auth.md). Everything is a
 # fixed-size array or a scalar, so it links cleanly for aarch64-unknown-none and
 # emits no relocations a -pie link would reject - lookup tables in this crate
 # must stay arrays of plain integers, never of references (see the crate docs).
