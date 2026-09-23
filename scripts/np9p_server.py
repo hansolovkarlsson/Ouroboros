@@ -189,6 +189,19 @@ NP_SIG_LEN = 64
 SIG_DOMAIN_REQUEST = b"ouroboros-cluster-request-v1\0"
 SIG_DOMAIN_REPLY = b"ouroboros-cluster-reply-v1\0"
 
+# Keyed sessions (ninep-abi's normative block, "Keyed sessions"; step 4 of
+# docs/roadmap/roadmap-session-auth.md). Declared here ahead of step 5, which
+# uses them, so check-wire-constants.py pins them from the step that defines them.
+NP_AUTH_MAGIC_KEYED = int.from_bytes(b"AUTHNP04", "big")
+NP_SEQ_LEN = 8
+NP_KEYED_TAG_LEN = 32
+NP_AUTH_HDR_KEYED = 8 + NP_SEQ_LEN + NP_KEYED_TAG_LEN
+NP_EPHEMERAL_LEN = 32
+NP_SESSION_KEY_LEN = 32
+SIG_DOMAIN_SESSION = b"ouroboros-cluster-session-v1\0"
+SIG_DOMAIN_EPHEMERAL_C = b"ouroboros-cluster-eph-c-v1\0"
+SIG_DOMAIN_EPHEMERAL_E = b"ouroboros-cluster-eph-e-v1\0"
+
 # NAMES MATTER HERE, not just values: scripts/check-wire-constants.py compares
 # these against ninep-abi BY NAME, so a constant this file spells differently is
 # silently skipped rather than checked. The public-key length was spelled with a
