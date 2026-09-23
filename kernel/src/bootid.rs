@@ -18,11 +18,20 @@
 //! - **Next = the larger trusted value + 1, written to both.** So when the
 //!   variable store starts or stops working, the next value is still above
 //!   anything either store has handed out.
-//! - **Usable only if the new value is written and read back in a store that
-//!   held one before.** A read-back from the RAM-only variable would otherwise
-//!   pass while the file write failed, and the next boot would hand out the
-//!   same counter again. With no such store, there is no counter this boot,
-//!   and the node keys no sessions: fail-safe, not fail-open.
+//! - **Usable only if EVERY store that held a value before this boot reads
+//!   the new one back.** Not just one of them: a store can hold a value from
+//!   before this boot and still not be durable (some edk2 builds keep their RAM
+//!   variable store across a warm reset, and lose it at power-off), so a
+//!   variable alone vouching for the new value while the file write failed
+//!   would leave the file behind, and a later boot would hand out the same
+//!   counter again (review of #163). Any store that did not take the new value
+//!   means no counter this boot, and the node keys no sessions: fail-safe, not
+//!   fail-open.
+//! - **What the read-back proves, and what it does not.** It shows the
+//!   firmware accepted the write. It does not show the write reached the
+//!   medium: edk2's FAT driver caches, so the read-back of the file can come
+//!   from that cache. Durability is proven only by the NEXT boot finding the
+//!   value "from before this boot", which is what the two-boot check measures.
 //! - **The file is rewritten in place, never deleted.** `uefi::fs`'s `write`
 //!   deletes and recreates, and a reset between the two would lose the only
 //!   copy. The record is fixed width ([`RECORD_LEN`]), so writing it over
@@ -96,13 +105,18 @@ pub(crate) fn establish() {
             let next = v + 1;
             write_var(next);
             write_file(next);
-            let var_ok = var_before.is_some() && read_var() == Some(next);
-            let file_ok = file_before.is_some() && read_file() == Some(next);
-            if var_ok || file_ok {
+            // Every store that held a value from before this boot must now
+            // hold the new one; a store that held none is written but not
+            // required (it has not yet shown it survives a reboot).
+            let var_ok = var_before.is_none() || read_var() == Some(next);
+            let file_ok = file_before.is_none() || read_file() == Some(next);
+            if var_ok && file_ok {
                 Some(next)
             } else {
                 log::warn!(
-                    "Ouroboros kernel: boot identity: counter {next} could not be written and read back in a store that held one before - no counter"
+                    "Ouroboros kernel: boot identity: counter {next} did not read back from every store that held one before (variable {}, file {}) - no counter",
+                    if var_ok { "ok" } else { "FAILED" },
+                    if file_ok { "ok" } else { "FAILED" }
                 );
                 None
             }
@@ -155,8 +169,9 @@ fn write_var(v: u64) {
     }
 }
 
-/// The ESP's root directory, opened afresh each time so a read after a write
-/// goes back to the volume rather than to a handle that wrote it.
+/// The counter file, opened from the ESP's root. Opened afresh for each use,
+/// which is simple rather than protective: a read after a write can still be
+/// served from the firmware's FAT cache (see the module doc).
 fn open_file(mode: FileMode) -> Option<RegularFile> {
     let mut sfs = boot::get_image_file_system(boot::image_handle()).ok()?;
     let mut root = sfs.open_volume().ok()?;
@@ -183,9 +198,11 @@ fn read_file() -> Option<u64> {
     Some(v)
 }
 
-/// Write `v` as the file's one record, in place. A file that exists but is not
-/// one well-formed record is left alone: writing 21 bytes over a longer file
-/// would leave a tail, and a file that is not a record was never trusted.
+/// Write `v` as the file's one record, in place. A file of any length other than
+/// one record (or zero, a file this write creates) is left alone, because
+/// writing 21 bytes over a longer one would leave a tail. A 21-byte file is
+/// written over whatever it holds: if it was not a valid record it was never
+/// trusted, and this repairs it.
 fn write_file(v: u64) {
     let mut rec = [b'0'; RECORD_LEN];
     rec[RECORD_LEN - 1] = b'\n';
@@ -211,18 +228,33 @@ fn write_file(v: u64) {
 }
 
 /// Up to [`ENTROPY_MAX`] bytes from `EFI_RNG_PROTOCOL`, or 0 where the firmware
-/// offers none (the ordinary case on Parallels and the Pi, to be measured).
+/// offers none (on Parallels and the Pi, to be measured). Opened with
+/// `GetProtocol`, not exclusively: an exclusive open fails, or disconnects the
+/// holder, where firmware already has the protocol open, and this would then
+/// report "no entropy" on a platform that has it (review of #163). A protocol
+/// that is present but fails is logged apart from one that is absent, since
+/// which of the two a platform is is what step 3 measures.
 fn boot_entropy(out: &mut [u8; ENTROPY_MAX]) -> usize {
     let Ok(handle) = boot::get_handle_for_protocol::<Rng>() else {
         return 0;
     };
-    let Ok(mut rng) = boot::open_protocol_exclusive::<Rng>(handle) else {
-        return 0;
+    let params = boot::OpenProtocolParams { handle, agent: boot::image_handle(), controller: None };
+    // SAFETY: GetProtocol gives no exclusivity; the protocol is used only
+    // inside this function, before exit_boot_services, and nothing here
+    // uninstalls it.
+    let opened = unsafe { boot::open_protocol::<Rng>(params, boot::OpenProtocolAttributes::GetProtocol) };
+    let mut rng = match opened {
+        Ok(rng) => rng,
+        Err(e) => {
+            log::warn!("Ouroboros kernel: boot identity: EFI_RNG_PROTOCOL present but would not open: {:?}", e.status());
+            return 0;
+        }
     };
     match rng.get_rng(None, out) {
         Ok(()) => ENTROPY_MAX,
-        Err(_) => {
+        Err(e) => {
             *out = [0; ENTROPY_MAX];
+            log::warn!("Ouroboros kernel: boot identity: EFI_RNG_PROTOCOL present but failed: {:?}", e.status());
             0
         }
     }

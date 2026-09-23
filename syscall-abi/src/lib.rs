@@ -886,7 +886,9 @@ pub const TASK_IDENTITY: u64 = 68;
 /// - [`BOOT_ID_ENTROPY`]: `arg1` = out pointer, `arg2` = capacity; copies the
 ///   boot entropy and returns its length. **The network server only** (the
 ///   `CAP_NET` holder): the bytes feed every session key it derives this boot,
-///   so any other caller gets [`BOOT_ID_NONE`], as does a bad buffer.
+///   so any other caller gets [`BOOT_ID_NONE`]. A capacity below the entropy's
+///   length, or a pointer that is not the caller's for that many bytes, gets
+///   [`BOOT_ID_BAD_BUFFER`], so a buffer mistake never reads as the refusal.
 ///
 /// An unknown selector answers [`BOOT_ID_NONE`].
 pub const BOOT_ID: u64 = 69;
@@ -905,6 +907,9 @@ pub const BOOT_ID_STORE_FILE: u64 = 2;
 /// [`BOOT_ID`]'s "no": no usable counter, a refused or bad entropy request, or
 /// an unknown selector. No counter reaches it (it is never raised past it).
 pub const BOOT_ID_NONE: u64 = u64::MAX;
+/// [`BOOT_ID_ENTROPY`] from the network server with a buffer that cannot take
+/// the entropy. Distinct from [`BOOT_ID_NONE`], the refusal.
+pub const BOOT_ID_BAD_BUFFER: u64 = u64::MAX - 1;
 
 /// Width of the slot field in a packed task identity: the slot is the low
 /// [`TASK_ID_SLOT_BITS`] bits, the generation everything above.

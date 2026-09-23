@@ -291,6 +291,8 @@ fn report_boot_identity() {
     core::hint::black_box(&e);
     if n == syscall_abi::BOOT_ID_NONE {
         log(b"netd: boot entropy: REFUSED by the kernel\r\n");
+    } else if n == syscall_abi::BOOT_ID_BAD_BUFFER {
+        log(b"netd: boot entropy: the kernel rejected netd's buffer\r\n");
     } else {
         log(b"netd: boot entropy: ");
         log_dec(n);

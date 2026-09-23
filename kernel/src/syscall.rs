@@ -944,8 +944,16 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
                     // The network server alone: these bytes feed every session
                     // key it derives this boot, so a reader anywhere else would
                     // hold part of the secret behind them.
-                    if !tasks::cap_has(tasks::current_task(), tasks::CAP_NET) || arg2 < id.entropy_len as u64 || !valid_user_range(arg1, arg2) {
+                    if !tasks::cap_has(tasks::current_task(), tasks::CAP_NET) {
                         return syscall_abi::BOOT_ID_NONE;
+                    }
+                    if id.entropy_len == 0 {
+                        return 0;
+                    }
+                    // Only the bytes written are validated, not the whole
+                    // capacity: a large buffer is not a mistake (review of #163).
+                    if arg2 < id.entropy_len as u64 || !valid_user_range(arg1, id.entropy_len as u64) {
+                        return syscall_abi::BOOT_ID_BAD_BUFFER;
                     }
                     // SAFETY: out range validated above.
                     let out = unsafe { core::slice::from_raw_parts_mut(arg1 as *mut u8, id.entropy_len) };

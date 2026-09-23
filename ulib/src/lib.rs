@@ -299,10 +299,10 @@ pub fn boot_entropy_len() -> usize {
 }
 
 /// Copy the boot entropy into `buf`, returning its length, or `None` when the
-/// kernel refuses: it answers the network server alone.
+/// kernel refuses (it answers the network server alone) or `buf` cannot take it.
 pub fn boot_entropy(buf: &mut [u8]) -> Option<usize> {
     let r = syscall4(syscall_abi::BOOT_ID, syscall_abi::BOOT_ID_ENTROPY, buf.as_mut_ptr() as u64, buf.len() as u64, 0);
-    if r == syscall_abi::BOOT_ID_NONE {
+    if r == syscall_abi::BOOT_ID_NONE || r == syscall_abi::BOOT_ID_BAD_BUFFER {
         None
     } else {
         Some(r as usize)

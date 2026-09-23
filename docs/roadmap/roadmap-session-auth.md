@@ -451,11 +451,21 @@ the client, so each side is tested against something that is not itself.
    counter; a failed file write with the pre-existence test removed trusts the
    RAM variable and reports **boot 1 twice**, the repeat the rule exists to
    prevent. Two decisions made while building it, both on the safe side of the
-   text above: a counter is usable only if it reads back from a store that held
-   one **before this boot** (a read-back from the RAM variable alone would
-   otherwise pass while the file write failed), and the file is **rewritten in
-   place** as one fixed-width record, never deleted and recreated as `uefi::fs`
-   would. And one the plan left open: the entropy is readable by the `CAP_NET`
+   text above: a counter is usable only if **every** store that held one
+   **before this boot** reads the new value back (a read-back from the RAM
+   variable alone would otherwise pass while the file write failed; the first
+   version required any one such store, and the review of #163 showed a
+   variable that survives a warm reset but not a power-off defeats that, so a
+   stale value in either store now means no counter), and the file is
+   **rewritten in place** as one fixed-width record, never deleted and
+   recreated as `uefi::fs` would. The read-back shows the firmware accepted a
+   write, not that it reached the medium (edk2's FAT driver caches); only the
+   next boot proves that, which is why the check is two boots. The RNG
+   protocol is opened `GetProtocol`, not exclusively, so firmware that already
+   holds it does not read as having none. On a FAT32 image the counter file is
+   writable by any user through `fsd`, the same caveat as every file there
+   (the machine's private key included); on an ext2 image the ESP is not
+   mounted at all. And one the plan left open: the entropy is readable by the `CAP_NET`
    holder (`netd`) alone, since it feeds every session key `netd` derives,
    while the counter, the stores and the entropy length are for anyone.
    `/bin/bootid` checks the refusal on every run (exit 2 on a leak; removing the
@@ -530,6 +540,15 @@ the client, so each side is tested against something that is not itself.
    count. **Done means the crypto per keyed verb, in absolute µs, is well
    below 2,926 µs**; the plan also records the new median and mean shares
    beside the old 44% and 26%, the same statistic against the same statistic.
+   **Two things step 3's review settled for this step.** (a) The boot entropy
+   is the same for the whole boot, so a `netd` the supervisor restarts reads
+   the same bytes and the same counter as its previous life. Its ephemerals
+   still differ, because Decision 6 hashes `MONOTONIC_US` into each one; that
+   input is what keeps a restarted `netd` from repeating its keys, so it must
+   not be dropped as redundant with the entropy. (b) `make esp` restages the
+   counter at 0 on every build, so a check that keys differ across reboots
+   must boot **the same image file** twice (as step 3's check does), not a
+   `make run-*` target, which rebuilds it and would pass whatever the code does.
 8. **Docs, rigs and the release.** The normative block, `docs/architecture.md`
    (the new syscall and the boot identity), `docs/manual.md`'s cluster section,
    `testing-qemu.md`'s session recipes, `roadmap-cluster.md`'s replay item
