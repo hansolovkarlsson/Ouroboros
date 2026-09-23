@@ -509,7 +509,7 @@ the client, so each side is tested against something that is not itself.
    changed tag in the server each fail the check with the named disagreement.
    Counting the per-peer floors found `sys.h`'s already one behind on `main`
    (37 matched against a floor of 36); it is 37 now.
-5. **Both Python peers.** Pure-Python X25519 (RFC 7748's reference ladder,
+5. ✅ **2026-09-23.** **Both Python peers.** Pure-Python X25519 (RFC 7748's reference ladder,
    asserted against its vectors on load, as the Ed25519 reference is) and the
    standard library's `hmac`. `np9p_server.py` keys a session when the client
    offers a key; `np9p_client.py` gains a keyed mode. The peer self-test runs
@@ -525,6 +525,26 @@ the client, so each side is tested against something that is not itself.
    also gains **misbehaving modes** for step 7 to aim at: a flipped reply tag,
    a reply tagged with the wrong direction's key, and a replayed or skipped
    reply `seq`.
+
+   **What it did.** `scripts/x25519_ref.py` is RFC 7748's ladder in plain
+   integers, asserting sections 5.2 and 6.1 on load. `np9p_server.py` keys a
+   session on a fresh connection's first `NP_SESSION` offering a key, answers
+   with its own in the signed reply, and then serves `AUTHNP04`, closing with
+   an RST on a bad tag, a wrong `seq`, an `AUTHNP03` frame, a key offered
+   mid-stream or an all-zero shared secret; one dispatch serves both formats.
+   `np9p_client.py`'s `Session.open(keyed=True)` offers a key and checks every
+   keyed reply's tag under `k_s2c` over its own `seq`; `keyed <path>` is the
+   command. **Each peer derives its ephemeral and its session keys itself**,
+   so they are two implementations, not one shared helper, which is what lets
+   the control fail. `--misbehave` has the four modes. The self-test (run by
+   `make test`) drives a real keyed session between the two over loopback:
+   every verb in the table, all four misbehaving replies refused by the
+   client, and the export closing on a skipped `seq` and a tampered tag. It
+   costs ~15 s, the pure-Python Ed25519 of seven handshakes. Controls, each
+   failing as it must: the client's key schedule with the request nonce
+   dropped (the session breaks on its first keyed verb), the client not
+   checking reply tags (all four misbehaving replies accepted), and the server
+   not checking `seq` (a skipped `seq` answered).
 6. **The export, in `netd`.** Key a session on an `NP_SESSION` with a payload;
    accept only `AUTHNP04` on it after that. Checked from the host with
    `np9p_client.py`: a keyed `cbig`-shaped run (open, preads, close) is served.

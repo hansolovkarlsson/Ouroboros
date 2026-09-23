@@ -201,7 +201,16 @@ python3 scripts/np9p_client.py localhost 5640 read /EFI/ORBS/INIT.CFG
 python3 scripts/np9p_client.py localhost 5640 stat /EFI/ORBS/INIT.CFG
 python3 scripts/np9p_client.py localhost 5640 mv /A.TXT /B.TXT       # NP_MV, raw paths
 python3 scripts/np9p_client.py localhost 5640 session /EFI/ORBS      # readdir+stat+read on ONE connection (NP_SESSION)
+python3 scripts/np9p_client.py localhost 5640 keyed /EFI/ORBS        # the same, offering a KEY (AUTHNP04 once keyed)
 ```
+
+`keyed` offers an ephemeral X25519 key in its `NP_SESSION` (session-auth step
+5). Against an export that keys (the host peer now; `netd` from step 6) every
+later request is `AUTHNP04`, MACed rather than signed; against one that does
+not, the answer is an empty result and the session stays signed, which the
+command prints. Host to host it runs today:
+`python3 scripts/np9p_server.py 5791 &` then
+`python3 scripts/np9p_client.py 127.0.0.1 5791 keyed /HELLO.TXT --peer=host`.
 
 **The session gate** (step 4 of `docs/roadmap/roadmap-fid-verbs.md`, 2026-09-07):
 `session-gate` runs the plan's checks and negative controls against the live
@@ -388,6 +397,8 @@ no client that could reach it.
 # The GUEST reads a file served by the HOST:
 make run-image-9p-client                            # a NIC, no hostfwd needed
 python3 scripts/np9p_server.py 5641                 # on the host; serves a small tree
+python3 scripts/np9p_server.py 5641 --misbehave bad-tag   # keyed replies a correct client must refuse
+#   (modes: bad-tag, wrong-key, replay-seq, skip-seq; for step 7's guest-client controls)
 #   ...then in the guest shell:
 #   mount -r 10.0.2.2:5641 /mnt/a ; ls /mnt/a ; cat /mnt/a/HELLO.TXT
 ```

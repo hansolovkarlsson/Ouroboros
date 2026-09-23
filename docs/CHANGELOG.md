@@ -29,6 +29,14 @@ before anything is sent. Found by step 1's stack gate of
 `docs/roadmap/roadmap-session-auth.md`, which the plan's session-key sites
 failed at `park_session` before this change and pass after it.
 
+**Keyed sessions between the host peers, session-auth step 5.**
+`np9p_server.py` keys a session when a client offers an ephemeral key and
+serves `AUTHNP04` frames on it; `np9p_client.py` gains `keyed <path>`. Each
+derives its keys itself, from a new pure-Python RFC 7748 reference
+(`scripts/x25519_ref.py`). `--misbehave` makes the server send keyed replies
+a correct client must refuse. `make test`'s peer self-test now runs a keyed
+session between the two over loopback, which is most of the suite's ~20 s.
+
 **The keyed-session wire, session-auth step 4.** `ninep-abi`'s normative block
 specifies keyed sessions: the ephemeral keys in `NP_SESSION`, the key
 schedule, the `AUTHNP04` request and its reply tag, and the sequence rule, with

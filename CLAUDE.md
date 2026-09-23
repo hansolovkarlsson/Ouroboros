@@ -523,7 +523,9 @@ targets too, the cross-language wire-constant check
 (`scripts/check-wire-constants.py`: Rust against the two C headers and the
 two Python peers), the 9P host peer's verb-dispatch self-test
 (`scripts/np9p_server.py --self-test`, one request per verb, added in #99
-after a range test silently swallowed five verbs its docstring claimed), and
+after a range test silently swallowed five verbs its docstring claimed; since
+2026-09-23 also a KEYED session against `np9p_client.py` over loopback, every
+verb plus the refusals on both sides, which is most of the suite's ~20 s), and
 `check-site` (above). It exists because such a crate can otherwise have
 **no build coverage at all**: it is a workspace member but not a
 default-member, so until something depends on it, `cargo build`, `make
