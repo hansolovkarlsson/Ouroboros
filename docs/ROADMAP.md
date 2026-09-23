@@ -33,7 +33,9 @@ This document is the one to update first when direction changes.
 > `NP_NET_MAX` message against 536 µs for a sign). **Step 3 done 2026-09-23**
 > on QEMU (a persisted boot counter, the ESP file serving since edk2 keeps
 > variables in RAM, and 32 bytes of `EFI_RNG_PROTOCOL` entropy); the Pi 4 and
-> Parallels measurements are owed. Step 4, the wire in `ninep-abi`, is next.
+> Parallels measurements are owed. **Step 4 done 2026-09-23** (the keyed wire in
+> `ninep-abi`'s normative block, pinned across Rust and both Python peers).
+> Step 5, keyed sessions in both Python peers, is next.
 
 The microkernel arc is largely built — the FAT32 **filesystem** (`fsd`),
 the **console** (`cond`), and the **network** server (`netd`) all run as

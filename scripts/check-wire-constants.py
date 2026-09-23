@@ -71,7 +71,43 @@ def rust_consts(path):
         out[name] = 1 << int(sh)
     for name, val in re.findall(r"pub const (\w+): u32 = (\d+);", src):
         out[name] = int(val)
+    # A `usize` written as a SUM of literals and earlier constants, on one line
+    # or across several (`NP_AUTH_HDR_SIGNED = \n 8 + NP_NONCE_LEN + ...`). The
+    # plain pattern above wants `= <digits>;` and so saw none of the header
+    # lengths and offsets, whose drift misparses every frame (step 4 of
+    # docs/roadmap/roadmap-session-auth.md). Resolved in passes so a sum may
+    # name another sum; a term that never resolves leaves the constant out
+    # rather than guessed at.
+    sums = re.findall(r"pub const (\w+): usize =\s*([\w\s+]+?);", src)
+    _resolve_sums(sums, out)
     return out
+
+
+def _resolve_sums(sums, out):
+    """Evaluate `a + B + 8` sums whose every term is a literal or a name
+    already in `out`, repeating until no more resolve."""
+    pending = [(n, e) for n, e in sums if n not in out]
+    while True:
+        progressed = False
+        for name, expr in list(pending):
+            terms = [t.strip() for t in expr.split("+")]
+            if not terms or any(not t for t in terms):
+                pending.remove((name, expr))
+                continue
+            vals = []
+            for t in terms:
+                if t.isdigit():
+                    vals.append(int(t))
+                elif t in out:
+                    vals.append(out[t])
+                else:
+                    break
+            else:
+                out[name] = sum(vals)
+                pending.remove((name, expr))
+                progressed = True
+        if not progressed:
+            return
 
 
 def py_consts(path):
@@ -105,6 +141,17 @@ def py_consts(path):
     # ever compared, and it is not one.
     for name, sh in re.findall(r"^(\w+) = 1 << (\d+)\s*(?:#.*)?$", src, re.M):
         out[name] = 1 << int(sh)
+    # A MAGIC, spelled as its ASCII (`int.from_bytes(b"AUTHNP03", "big")`),
+    # which is how both peers write NP_AUTH_MAGIC_*. Invisible until step 4 of
+    # the session-auth plan, so the one constant that tells two formats apart
+    # was compared nowhere.
+    for name, lit in re.findall(
+            r'^(\w+) = int\.from_bytes\((b"[^"\\]*"), "big"\)\s*(?:#.*)?$', src, re.M):
+        out[name] = int.from_bytes(eval(lit), "big")
+    # A SUM of literals and earlier names on one line (`NP_AUTH_HDR_SIGNED = 8 +
+    # NP_NONCE_LEN + ...`), the peers' spelling of the header lengths.
+    sums = re.findall(r"^(\w+) = ((?:\w+\s*\+\s*)+\w+)\s*(?:#.*)?$", src, re.M)
+    _resolve_sums(sums, out)
     return out
 
 
@@ -148,6 +195,21 @@ def c_consts(path):
 CHECKED = [
     "SIG_DOMAIN_REQUEST",
     "SIG_DOMAIN_REPLY",
+    # Step 4 of docs/roadmap/roadmap-session-auth.md: the keyed-session wire.
+    # The two MAGICS and the two HEADER LENGTHS are what tell the formats apart
+    # and where the message starts; the tags are hash inputs whose drift makes
+    # the two ends derive different keys, which surfaces as a bare FS_ERR_AUTH.
+    "NP_AUTH_MAGIC_SIGNED",
+    "NP_AUTH_MAGIC_KEYED",
+    "NP_AUTH_HDR_SIGNED",
+    "NP_AUTH_HDR_KEYED",
+    "SIG_DOMAIN_SESSION",
+    "SIG_DOMAIN_EPHEMERAL_C",
+    "SIG_DOMAIN_EPHEMERAL_E",
+    "NP_SEQ_LEN",
+    "NP_KEYED_TAG_LEN",
+    "NP_EPHEMERAL_LEN",
+    "NP_SESSION_KEY_LEN",
     "NP_NONCE_LEN",
     "NP_NAME_LEN",
     "NP_PUBKEY_LEN",
@@ -332,7 +394,7 @@ CHECKED = [
 # what it is named for. Confirmed, which is why these are numbers and not a
 # truthiness test. Raise a baseline when a peer learns a new constant.
 PEER_BASELINE = {
-    "np9p_client.py": 41,  # counted 2026-09-20: NO_FS pinned by the second review of #145; 40 on 09-12: 31 after step 5 (NP_PREAD/NP_FSTAT/NP_CLUNK, OPEN_READ), then step 6 taught it the path verbs for path-gate, NP_PWRITE, FS_ERR_NOT_SUPPORTED and NP_REMOTE_CHUNK
+    "np9p_client.py": 51,  # counted 2026-09-23: +10 keyed-session names (session-auth step 4); 41 on 09-20: NO_FS pinned by the second review of #145; 40 on 09-12: 31 after step 5 (NP_PREAD/NP_FSTAT/NP_CLUNK, OPEN_READ), then step 6 taught it the path verbs for path-gate, NP_PWRITE, FS_ERR_NOT_SUPPORTED and NP_REMOTE_CHUNK
     # Rose from 10 when the `noverb` probe's status-name table was rebuilt
     # from module constants instead of repeated literals: FS_ERROR,
     # FS_ERR_READ_ONLY, FS_ERR_PERM and FS_ERR_NO_SUCH_VERB became names this
@@ -344,13 +406,13 @@ PEER_BASELINE = {
     # reduced count was recorded as expected. Both now use the shared names; the
     # floor rises with them, or the rename could be undone without this
     # noticing.
-    "np9p_server.py": 32,  # counted 2026-09-20: NO_FS pinned by the second review of #145; 31 on 09-12: 26 on 09-07 with the verbs, then the four OPEN_* flags and MAX_FIDS pinned by step 5
+    "np9p_server.py": 43,  # counted 2026-09-23: +11 keyed-session names and NP_AUTH_HDR_SIGNED, now parsed as a sum (session-auth step 4); 32 on 09-20: NO_FS pinned by the second review of #145; 31 on 09-12: 26 on 09-07 with the verbs, then the four OPEN_* flags and MAX_FIDS pinned by step 5
     # The C header. It spells far more of the ABI than either Python peer; this
     # floor covers the names CHECKED lists today.
     # Raised from 3 when step 3b's constants were pinned. The script's own
     # instruction is to raise a baseline when a peer learns a new constant; it
     # had already learned FS_ERR_NOT_FOUND without the floor moving.
-    "libc/include/sys.h": 36,  # counted 2026-09-20: 31 on 09-13 with the five HEAP_INFO_* field selectors, then the three TASK_ERR_* codes, NO_FS and FS_ERR_BUSY
+    "libc/include/sys.h": 37,  # counted 2026-09-23: it already matched 37 on main, so the floor had fallen one behind; 36 on 09-20: 31 on 09-13 with the five HEAP_INFO_* field selectors, then the three TASK_ERR_* codes, NO_FS and FS_ERR_BUSY
     "libc/include/nsresolve.h": 5,  # + 4 STAT_* offsets, FS_ERR_READ_ONLY, STAT_FLAG_DIR, FS_ERROR, FS_ERR_NO_SUCH_VERB
 }
 

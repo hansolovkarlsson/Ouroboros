@@ -29,6 +29,15 @@ before anything is sent. Found by step 1's stack gate of
 `docs/roadmap/roadmap-session-auth.md`, which the plan's session-key sites
 failed at `park_session` before this change and pass after it.
 
+**The keyed-session wire, session-auth step 4.** `ninep-abi`'s normative block
+specifies keyed sessions: the ephemeral keys in `NP_SESSION`, the key
+schedule, the `AUTHNP04` request and its reply tag, and the sequence rule, with
+the constants for each. Nothing on the wire changes yet; the export and the
+client learn it in steps 6 and 7. `check-wire-constants.py` now reads a magic
+spelled as its ASCII and a length spelled as a sum, so both magics and both
+header lengths are compared across Rust and the Python peers (136 constants,
+up from 115).
+
 **The boot identity, session-auth step 3: a new syscall, `BOOT_ID` (69).**
 Before `ExitBootServices` the kernel raises a per-boot counter, persisted in a
 UEFI non-volatile variable and in `\EFI\ORBS\BOOTID.TXT` on the ESP (staged

@@ -257,8 +257,14 @@ pub const NP_RUN: u64 = NP_BASE + 0x20;
 ///
 /// [`NP_RUN`] is refused on a session connection: its reply is a raw stream
 /// whose only terminator is the FIN, so a run must have a connection of its
-/// own. No params; no payload. Outside `[NP_BASE, NP_LIMIT)` like `NP_RUN`, so
-/// `fsd`'s dispatch never sees it.
+/// own. No params. **The payload is optional**: empty asks for today's session,
+/// per-request signed; [`NP_EPHEMERAL_LEN`] bytes, the client's ephemeral X25519
+/// public key, ask for a KEYED session, and an export that keys it answers with
+/// its own ephemeral public key as the result (see "Keyed sessions" in the
+/// normative block below). An export that predates keying ignores the payload
+/// and answers `0` with an empty result, which is how the client learns which
+/// kind it has, from a reply it can verify. Outside `[NP_BASE, NP_LIMIT)` like
+/// `NP_RUN`, so `fsd`'s dispatch never sees it.
 pub const NP_SESSION: u64 = NP_BASE + 0x21;
 
 // ---------------------------------------------------------------------------
@@ -438,6 +444,70 @@ pub const NP_REMOTE_CHUNK: usize = 512;
 //
 // The retired shared-key MAC format ("AUTHNP02") is refused outright; it
 // survives only as a negative control `np9p_client.py --legacy-mac` can send.
+//
+// KEYED SESSIONS (docs/roadmap/roadmap-session-auth.md). A held session can
+// replace the per-request signature with a session key, established by the
+// `NP_SESSION` that is the FIRST FRAME on a fresh connection, itself an
+// ordinary signed request. A key offer anywhere else (on a connection that has
+// already carried a frame, keyed or not) is refused and the connection closed:
+// there is no keying mid-stream and no re-keying, since the two ends would then
+// disagree about the format of the next frame. An `NP_SESSION` with NO payload
+// later on keeps today's idempotent `0`:
+//
+// - The client sends `NP_SESSION` in an `AUTHNP03` frame with a payload of its
+//   ephemeral X25519 public key, `eph_client` ([`NP_EPHEMERAL_LEN`] bytes). The
+//   export answers in an ordinary signed reply: status 0 and, as the result,
+//   its own ephemeral public key `eph_export`, and the session is keyed. An
+//   empty result means an export that does not key, and today's session
+//   follows. Both public keys are covered by the two machines' signatures, so a
+//   man in the middle can neither substitute one nor strip the offer.
+// - Each side computes `shared = X25519(own ephemeral secret, other's public)`.
+//   An ALL-ZERO `shared` (a small-order key, RFC 7748 section 6.1) closes the
+//   connection on both sides; there is no fallback to an unkeyed session.
+// - Key schedule: `K = SHA-512(`[`SIG_DOMAIN_SESSION`]` ‖ shared ‖
+//   request_nonce ‖ eph_client ‖ eph_export)`, where `request_nonce` is the
+//   `NP_SESSION` request's nonce. `k_c2s = K[0..32]` MACs requests and
+//   `k_s2c = K[32..64]` MACs replies ([`NP_SESSION_KEY_LEN`] each): one key per
+//   direction, so a tag made for one direction never verifies in the other.
+// - Each ephemeral secret is a SHA-512, reduced by X25519's clamp, over inputs
+//   that are not on the wire but ARE part of this spec, because leaving one out
+//   passes every wire check and silently loses a property:
+//     client: `SIG_DOMAIN_EPHEMERAL_C ‖ machine private key ‖ boot ID ‖
+//              MONOTONIC_US ‖ boot entropy ‖ RANDOM bytes`
+//     export: `SIG_DOMAIN_EPHEMERAL_E ‖ machine private key ‖ boot ID ‖
+//              request_nonce ‖ MONOTONIC_US ‖ boot entropy ‖ RANDOM bytes`
+//   (see [`SIG_DOMAIN_EPHEMERAL_C`], [`SIG_DOMAIN_EPHEMERAL_E`]). "Boot entropy"
+//   and "RANDOM bytes" are empty where the platform has none; where it has
+//   them, dropping them removes forward secrecy for that node's sessions. The
+//   private key keeps each ephemeral secret; the boot ID and the clock keep it
+//   from repeating across reboots and restarts (Decision 6 of the plan).
+//   A host peer with no boot ID uses its own non-repeating value in its place.
+//
+// After it, every request on that connection is
+//
+//   keyed request:  [u32 len][magic:8][seq:8][tag:32][NP message...]
+//
+// - `magic` is [`NP_AUTH_MAGIC_KEYED`] ("AUTHNP04"); the header is
+//   [`NP_AUTH_HDR_KEYED`] (48) bytes. There is no name: every verb on a keyed
+//   session runs as the user who signed its `NP_SESSION`.
+// - `seq` is a `u64`, little-endian. It is 1 on the first keyed request and
+//   EXACTLY one more on each after; any other value is an injection or a
+//   replay, and the export closes the connection without a reply.
+// - `tag` is `HMAC-SHA-512(k_c2s, seq ‖ NP message)`, truncated to its first
+//   [`NP_KEYED_TAG_LEN`] bytes (the RFC 4868 truncation).
+//
+// and every reply is
+//
+//   keyed reply:  [u32 len][tag:32][status:u64][result...]
+//
+// with `tag = HMAC-SHA-512(k_s2c, seq ‖ status ‖ result)` truncated likewise,
+// where `seq` is the seq of the request it answers (not sent again). Tags are
+// compared in constant time. A tag or `seq` that does not verify ends the
+// session: the export closes without replying (an unauthenticated "auth
+// failed" is what an attacker would forge), and a client reports `FS_ERR_AUTH`
+// and closes. A keyed connection accepts no `AUTHNP03` frame and no second
+// `NP_SESSION` offering a key. One-shot connections and `NP_RUN` stay
+// `AUTHNP03`, unchanged.
 // ---------------------------------------------------------------------------
 
 
@@ -507,6 +577,27 @@ pub const NP_AUTH_SIG_OFF: usize = NP_AUTH_PUBKEY_OFF + NP_PUBKEY_LEN;
 pub const NP_AUTH_HDR_SIGNED: usize =
     8 + NP_NONCE_LEN + NP_NAME_LEN + NP_PUBKEY_LEN + NP_SIG_LEN;
 
+/// Magic for a request on a KEYED session: `[magic][seq][tag]`, MACed with the
+/// session key instead of signed (see "Keyed sessions" above). Only ever valid
+/// on a connection whose `NP_SESSION` was keyed; everywhere else it is refused.
+pub const NP_AUTH_MAGIC_KEYED: u64 = 0x4155_5448_4E50_3034; // "AUTHNP04"
+/// Bytes of the keyed request's sequence number, a little-endian `u64`.
+pub const NP_SEQ_LEN: usize = 8;
+/// Bytes of a keyed request's or reply's tag: HMAC-SHA-512, truncated.
+pub const NP_KEYED_TAG_LEN: usize = 32;
+/// Offset of `seq` within a keyed request header.
+pub const NP_KEYED_SEQ_OFF: usize = 8;
+/// Offset of `tag` within a keyed request header.
+pub const NP_KEYED_TAG_OFF: usize = 8 + NP_SEQ_LEN;
+/// Size of a keyed request header: `magic`(8) + `seq` + `tag` = 48.
+pub const NP_AUTH_HDR_KEYED: usize = 8 + NP_SEQ_LEN + NP_KEYED_TAG_LEN;
+/// Bytes of an ephemeral X25519 public key: the keyed `NP_SESSION`'s payload,
+/// and its result.
+pub const NP_EPHEMERAL_LEN: usize = 32;
+/// Bytes of each direction's session key, `k_c2s` and `k_s2c`: the two halves
+/// of the SHA-512 key schedule.
+pub const NP_SESSION_KEY_LEN: usize = 32;
+
 /// Domain tag prefixed to the bytes a **request** signature covers.
 ///
 /// Without it a request signature and a reply signature are the same shape -
@@ -528,6 +619,17 @@ pub const SIG_DOMAIN_REQUEST: &[u8] = b"ouroboros-cluster-request-v1\0";
 /// direction open, because the tag would then be forgeable by choosing a nonce.
 pub const SIG_DOMAIN_REPLY: &[u8] = b"ouroboros-cluster-reply-v1\0";
 
+/// Domain tag of a keyed session's KEY SCHEDULE: `K = SHA-512(SIG_DOMAIN_SESSION
+/// ‖ shared ‖ …)`. A hash input, not a signature's, but it lives with the others
+/// so that [`SIG_DOMAIN_MAX`] and the no-prefix test cover every tag.
+pub const SIG_DOMAIN_SESSION: &[u8] = b"ouroboros-cluster-session-v1\0";
+/// Domain tag of the CLIENT's ephemeral secret derivation.
+pub const SIG_DOMAIN_EPHEMERAL_C: &[u8] = b"ouroboros-cluster-eph-c-v1\0";
+/// Domain tag of the EXPORT's ephemeral secret derivation. Distinct from the
+/// client's, so a machine that is client and export at once never derives the
+/// same secret for both roles from the same inputs.
+pub const SIG_DOMAIN_EPHEMERAL_E: &[u8] = b"ouroboros-cluster-eph-e-v1\0";
+
 /// The longest domain tag, so a caller can size a buffer for either.
 ///
 /// COMPUTED, NOT TRANSCRIBED. This was the literal `29`, tied to the tags it
@@ -542,18 +644,43 @@ pub const SIG_DOMAIN_REPLY: &[u8] = b"ouroboros-cluster-reply-v1\0";
 /// Evaluating the definition removes both problems at once — it cannot be
 /// transcribed wrongly, and it cannot be stale. Same move as the small-order-key
 /// table this arc replaced with `[8]P == identity`.
-pub const SIG_DOMAIN_MAX: usize = if SIG_DOMAIN_REQUEST.len() > SIG_DOMAIN_REPLY.len() {
-    SIG_DOMAIN_REQUEST.len()
-} else {
-    SIG_DOMAIN_REPLY.len()
-};
+///
+/// **Over every tag**, the three keyed-session ones included (step 4 of
+/// `docs/roadmap/roadmap-session-auth.md`): a tag hashed through a buffer sized
+/// from a maximum that left it out would be the same panic, in the
+/// `NP_SESSION` arm, before authentication. The new tags were chosen no longer
+/// than [`SIG_DOMAIN_REQUEST`], so the value, and every `netd` frame sized from
+/// it, did not grow.
+pub const SIG_DOMAIN_MAX: usize = max_len(&[
+    SIG_DOMAIN_REQUEST,
+    SIG_DOMAIN_REPLY,
+    SIG_DOMAIN_SESSION,
+    SIG_DOMAIN_EPHEMERAL_C,
+    SIG_DOMAIN_EPHEMERAL_E,
+]);
 
-/// Both tags fit the buffer sized from them — trivially true now that
+/// The longest of `tags`, at compile time.
+const fn max_len(tags: &[&[u8]]) -> usize {
+    let mut m = 0;
+    let mut i = 0;
+    while i < tags.len() {
+        if tags[i].len() > m {
+            m = tags[i].len();
+        }
+        i += 1;
+    }
+    m
+}
+
+/// Every tag fits the buffer sized from them: trivially true now that
 /// [`SIG_DOMAIN_MAX`] is computed, and asserted at BUILD time anyway so that
 /// re-transcribing it later fails the build rather than a test nobody ran.
 const _: () = {
     assert!(SIG_DOMAIN_REQUEST.len() <= SIG_DOMAIN_MAX);
     assert!(SIG_DOMAIN_REPLY.len() <= SIG_DOMAIN_MAX);
+    assert!(SIG_DOMAIN_SESSION.len() <= SIG_DOMAIN_MAX);
+    assert!(SIG_DOMAIN_EPHEMERAL_C.len() <= SIG_DOMAIN_MAX);
+    assert!(SIG_DOMAIN_EPHEMERAL_E.len() <= SIG_DOMAIN_MAX);
 };
 
 /// The bytes an Ed25519 **signature** covers before the NP message:
@@ -664,6 +791,11 @@ pub fn proxy_parts(word: u64) -> Option<(u32, u32)> {
 ///
 /// Was a `max` of the two header sizes while both formats existed.
 pub const NP_FRAME_MAX: usize = NP_NET_LEN_PREFIX + NP_AUTH_HDR_SIGNED + NP_NET_MAX;
+
+/// A keyed frame's header is smaller than a signed one's, so a buffer sized by
+/// [`NP_FRAME_MAX`] holds either format. At BUILD time, since a test comparing
+/// two constants cannot fail at run time.
+const _: () = assert!(NP_AUTH_HDR_KEYED < NP_AUTH_HDR_SIGNED);
 
 // ---------------------------------------------------------------------------
 // The shared namespace resolver. A namespace is a sequence of bindings
@@ -872,6 +1004,40 @@ mod tests {
         assert!(!SIG_DOMAIN_REPLY.starts_with(SIG_DOMAIN_REQUEST));
         assert!(SIG_DOMAIN_REQUEST.len() <= SIG_DOMAIN_MAX);
         assert!(SIG_DOMAIN_REPLY.len() <= SIG_DOMAIN_MAX);
+    }
+
+    /// All five tags, pinned as literals (the same reasoning as the two above),
+    /// pairwise distinct and none a prefix of another: a tag that prefixes
+    /// another lets an input made under one be read as made under the other.
+    #[test]
+    fn every_domain_tag_is_pinned_distinct_and_fits() {
+        assert_eq!(SIG_DOMAIN_SESSION, b"ouroboros-cluster-session-v1\0");
+        assert_eq!(SIG_DOMAIN_EPHEMERAL_C, b"ouroboros-cluster-eph-c-v1\0");
+        assert_eq!(SIG_DOMAIN_EPHEMERAL_E, b"ouroboros-cluster-eph-e-v1\0");
+        let tags = [SIG_DOMAIN_REQUEST, SIG_DOMAIN_REPLY, SIG_DOMAIN_SESSION, SIG_DOMAIN_EPHEMERAL_C, SIG_DOMAIN_EPHEMERAL_E];
+        for (i, a) in tags.iter().enumerate() {
+            assert_eq!(*a.last().expect("non-empty"), 0);
+            assert!(a.len() <= SIG_DOMAIN_MAX);
+            for (j, b) in tags.iter().enumerate() {
+                if i != j {
+                    assert!(!b.starts_with(a), "tag {i} prefixes tag {j}");
+                }
+            }
+        }
+        // Chosen so the maximum did not grow; netd sizes frames from it.
+        assert_eq!(SIG_DOMAIN_MAX, 29);
+    }
+
+    #[test]
+    fn the_keyed_header_lays_out_as_the_spec_says() {
+        assert_eq!(NP_AUTH_MAGIC_KEYED.to_be_bytes(), *b"AUTHNP04");
+        assert_eq!(NP_AUTH_MAGIC_SIGNED.to_be_bytes(), *b"AUTHNP03");
+        assert_eq!(NP_KEYED_SEQ_OFF, 8);
+        assert_eq!(NP_KEYED_TAG_OFF, 16);
+        assert_eq!(NP_AUTH_HDR_KEYED, NP_KEYED_TAG_OFF + NP_KEYED_TAG_LEN);
+        assert_eq!(NP_AUTH_HDR_KEYED, 48);
+        assert_eq!(NP_EPHEMERAL_LEN, 32);
+        assert_eq!(NP_SESSION_KEY_LEN * 2, 64); // the two halves of one SHA-512
     }
 
     #[test]
