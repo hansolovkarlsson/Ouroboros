@@ -530,7 +530,11 @@ fn sg_probe(site: u64) {
     // op 1: the new cost, one X25519 scalar multiplication.
     for op in 0..3u64 {
         if op == 2 && site == 1 {
-            continue; // no 4 KB of room there; site 1 gets its own control build
+            // CONTROL: 512 bytes more than X25519 alone. Predicted to fault.
+            log(b"SG site=1 control: x25519 behind a 512-byte pad\r\n");
+            sg_padded::<512>();
+            log(b"SG site=1 control survived\r\n");
+            continue;
         }
         // SAFETY: [lo, paint_hi) is this task's own stack, below the live frame.
         unsafe {
