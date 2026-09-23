@@ -102,6 +102,7 @@ keyboard↔storage contention, which has real-hardware-only failure modes).
 | **A2** | No-NIC graceful degradation | `ping 10.0.2.2` ; `mount -n /net` then `cat /net/ip` ; `dial /net 1.1.1.1 80` | Each fails with a *clean* "no network" message — **no** `EL0 FAULT`, no hang |
 | **A3** | Shell + core commands | `make test-parallels CMDS="help;echo hi;uptime;ls;env;pwd"` | Screenshots show correct output |
 | **A4** | USB disk + filesystem | With a FAT32 stick passed through: `ls`, `cat FILE`, `mkdir D`, `write F text`, `writeat F 0 x`, then reboot and re-`cat` | Files read/write/persist across reboot; no mid-transfer stall |
+| **A6** | The boot identity (owed by step 3 of [`roadmap-session-auth.md`](../roadmap/roadmap-session-auth.md)) | `bootid`, restart the VM, `bootid` again; read the kernel's `boot identity:` line both times | The counter rises by one; record which store held it from before the boot (UEFI variable or ESP file) and the boot entropy's length, since no entropy means no forward secrecy for that node's sessions |
 | **A5** | Physical keyboard | Type A1–A4 **by hand** on the real USB keyboard (not `send-key-event`) | Interactive typing works; no raw-HID-report flood, no keyboard death during disk I/O |
 
 ### <a name="risk-1--netd-boot-race"></a>Risk #1 — the `netd` boot race (the reason A1 exists)

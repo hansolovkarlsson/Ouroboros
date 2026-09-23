@@ -638,6 +638,7 @@ kernel/              every file annotated in full in `docs/source-map.md`; each 
   src/virtio_blk.rs  virtio-blk: feature negotiation, one virtqueue, polling sector read/write
   src/virtio_console.rs  transmit-only virtio-console - works on QEMU, NOT what Parallels' serial port is
   src/virtio_rng.rs  virtio-rng, backing the RANDOM syscall; absent on Parallels/Pi and that is a supported case
+  src/bootid.rs      the boot identity: a persisted per-boot counter + EFI_RNG boot entropy, before ExitBootServices (BOOT_ID)
   src/virtio_net.rs  virtio-net: rx/tx queues, the 12-byte header, IRQ-driven receive - the DMA-owning half of the net stack
   src/xhci.rs        from-scratch xHCI: rings, multi-device port scan, HID interrupt endpoint, storage endpoint reset
 
@@ -670,7 +671,7 @@ programs/            ALL userland programs, grouped by role. Annotated in full i
   textutils/         the pipeline filters: upper wc grep head tail nl rev uniq sort (sort is the one that
                      cannot stream, so it is the one that uses the heap)
   netutils/          ping resolve fetch dial serve - reach netd via the TO_NET cap the shell delegates at spawn
-  shellutils/        echo uptime clear pwd readkey send recv selftest man printenv id args edtest
+  shellutils/        echo uptime clear pwd readkey send recv selftest bootid man printenv id args edtest
   admin/             passwd useradd groupadd usermod clusterkey - root-only account + cluster-identity tools
   demos/             hello (how a program ends itself), pong (the IPC echo-server shape)
 
