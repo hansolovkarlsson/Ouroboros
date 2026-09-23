@@ -21,13 +21,17 @@
 //! separately, because that figure is what the arc's stack gate adds to `netd`'s
 //! depth at the three places a session key will be computed.
 //!
+//! Since step 2 of the same plan it checks **HMAC-SHA-512** too: RFC 4231's
+//! test case 2 on the target, and the time of one MAC over a full
+//! `NP_NET_MAX` message, which is that step's gate (well under one sign).
+//!
 //! It stays in `/bin` rather than being a throwaway: the Raspberry Pi bring-up
 //! will want exactly this, on a third code generator and real hardware.
 
 #![no_std]
 #![no_main]
 
-use ed25519::{public_key, sign, verify, x25519_public, x25519_shared, SigningKey};
+use ed25519::{hmac_sha512, public_key, sign, verify, x25519_public, x25519_shared, HmacSha512, SigningKey};
 
 /// RFC 8032 §7.1 TEST 1 — the same vector the host tests use, so a disagreement
 /// between host and target is visible as a disagreement about a published value
@@ -79,6 +83,17 @@ const X_K: [u8; 32] = [
     0xe0, 0x7e, 0x21, 0xc9, 0x47, 0xd1, 0x9e, 0x33, 0x76, 0xf0, 0x9b, 0x3c, 0x1e, 0x16, 0x17, 0x42,
 ];
 
+/// RFC 4231 test case 2: key "Jefe", data "what do ya want for nothing?", and
+/// its HMAC-SHA-512. The host tests use the same row.
+const HMAC_KEY2: &[u8] = b"Jefe";
+const HMAC_DATA2: &[u8] = b"what do ya want for nothing?";
+const HMAC_MAC2: [u8; 64] = [
+    0x16, 0x4b, 0x7a, 0x7b, 0xfc, 0xf8, 0x19, 0xe2, 0xe3, 0x95, 0xfb, 0xe7, 0x3b, 0x56, 0xe0, 0xa3,
+    0x87, 0xbd, 0x64, 0x22, 0x2e, 0x83, 0x1f, 0xd6, 0x10, 0x27, 0x0c, 0xd7, 0xea, 0x25, 0x05, 0x54,
+    0x97, 0x58, 0xbf, 0x75, 0xc0, 0x5a, 0x99, 0x4a, 0x6d, 0x03, 0x4f, 0x65, 0xf8, 0xf0, 0xe6, 0xfd,
+    0xca, 0xea, 0xb1, 0xa3, 0x4d, 0x4a, 0x6b, 0x4b, 0x63, 0x6e, 0x07, 0x0a, 0x38, 0xbc, 0xe7, 0x37,
+];
+
 /// Which computation a stack measurement runs.
 #[derive(Clone, Copy)]
 enum Op {
@@ -86,6 +101,8 @@ enum Op {
     SignVerify,
     /// One X25519 shared-secret computation: one scalar multiplication.
     X25519,
+    /// One HMAC-SHA-512 over a full `NP_NET_MAX` message.
+    Hmac,
 }
 
 /// The byte a stack probe is painted with, chosen as an unlikely value to write
@@ -152,6 +169,12 @@ pub extern "C" fn _start() -> ! {
         out(target, b"  [FAIL] X25519 shared secret differs from RFC 7748 6.1\r\n");
         failures += 1;
     }
+    if hmac_sha512(HMAC_KEY2, HMAC_DATA2) == HMAC_MAC2 {
+        out(target, b"  [ok]   HMAC-SHA-512 matches RFC 4231 test case 2\r\n");
+    } else {
+        out(target, b"  [FAIL] HMAC-SHA-512 differs from RFC 4231 test case 2\r\n");
+        failures += 1;
+    }
     if x25519_shared(&X_A, &[0u8; 32]).is_none() {
         out(target, b"  [ok]   X25519 refuses a small-order peer key\r\n");
     } else {
@@ -198,6 +221,10 @@ pub extern "C" fn _start() -> ! {
     core::hint::black_box(k);
     report_us(target, b"    X25519 (scalar mul)    ", t1 - t0);
 
+    // The keyed frame's MAC: the sequence number, then a full-size message,
+    // streamed as netd will. Step 2's gate is this against a sign.
+    report_us(target, b"    HMAC (NP_NET_MAX msg)  ", time_hmac());
+
     // --- 3. how much stack it uses -----------------------------------------
     //
     // First CALIBRATE the instrument. A stack probe that silently measured
@@ -209,6 +236,7 @@ pub extern "C" fn _start() -> ! {
     // other's evidence.
     failures += report_stack(target, Op::SignVerify, b"sign+verify");
     failures += report_stack(target, Op::X25519, b"X25519");
+    failures += report_stack(target, Op::Hmac, b"HMAC");
 
     if failures == 0 {
         out(target, b"\r\nedtest: all checks passed\r\n");
@@ -224,6 +252,22 @@ pub extern "C" fn _start() -> ! {
 /// consumer.
 fn out(target: u64, bytes: &[u8]) {
     ulib::write_out(target, bytes);
+}
+
+/// Microseconds for one HMAC over a full `NP_NET_MAX` message. Its own frame:
+/// the stack readings below are depths from the top of the stack, so a 2 KB
+/// buffer left in `_start` would be counted in every one of them.
+#[inline(never)]
+fn time_hmac() -> u64 {
+    let msg = [0x5au8; ninep_abi::NP_NET_MAX];
+    let t0 = ulib::monotonic_us();
+    let mut h = HmacSha512::new(&SK1);
+    h.update(&1u64.to_le_bytes());
+    h.update(core::hint::black_box(&msg));
+    let mac = h.finalize();
+    let t1 = ulib::monotonic_us();
+    core::hint::black_box(mac);
+    t1 - t0
 }
 
 /// Print a labelled microsecond count.
@@ -355,21 +399,43 @@ fn measure_stack_inner(secret: &[u8; 32], op: Op, pad: bool) -> Option<(usize, u
     Some((stack_hi - lowest, stack_size))
 }
 
-/// The operations being measured.
+/// The operations being measured. Each is its own non-inlined function, so
+/// this frame holds only the dispatch: when the three bodies were arms of one
+/// match, the HMAC arm's message buffer sat in the shared frame and inflated
+/// the OTHER two readings by ~5 KB (sign+verify read 8,960 bytes where it had
+/// read 3,584), the sibling-branch rule of `docs/postmortems/async-rmount-postmortem.md`.
 #[inline(never)]
 fn work(secret: &[u8; 32], op: Op) {
     match op {
-        Op::SignVerify => {
-            let key = SigningKey::from_secret(secret);
-            let sig = key.sign(b"stack measurement");
-            let ok = verify(&key.public(), b"stack measurement", &sig);
-            core::hint::black_box(ok);
-        }
-        Op::X25519 => {
-            let k = x25519_shared(secret, &X_B_PUB);
-            core::hint::black_box(k);
-        }
+        Op::SignVerify => work_sign_verify(secret),
+        Op::X25519 => work_x25519(secret),
+        Op::Hmac => work_hmac(secret),
     }
+}
+
+#[inline(never)]
+fn work_sign_verify(secret: &[u8; 32]) {
+    let key = SigningKey::from_secret(secret);
+    let sig = key.sign(b"stack measurement");
+    let ok = verify(&key.public(), b"stack measurement", &sig);
+    core::hint::black_box(ok);
+}
+
+#[inline(never)]
+fn work_x25519(secret: &[u8; 32]) {
+    let k = x25519_shared(secret, &X_B_PUB);
+    core::hint::black_box(k);
+}
+
+/// The message buffer is part of this reading, which makes it an upper bound:
+/// `netd` MACs a message already in a connection's buffer.
+#[inline(never)]
+fn work_hmac(secret: &[u8; 32]) {
+    let msg = [0x5au8; ninep_abi::NP_NET_MAX];
+    let mut h = HmacSha512::new(secret);
+    h.update(&1u64.to_le_bytes());
+    h.update(core::hint::black_box(&msg));
+    core::hint::black_box(h.finalize());
 }
 
 /// The same work behind a known 4 KB frame, for calibration. The array is

@@ -28,6 +28,8 @@
 //! - **X25519 key agreement** (step 1 of `docs/roadmap/roadmap-session-auth.md`,
 //!   a later arc on the same field). RFC 7748 section 5, the Montgomery ladder
 //!   on `field.rs`, with an all-zero shared secret refused rather than returned.
+//! - **HMAC-SHA-512** (step 2 of the same plan). RFC 2104 over `sha512.rs`,
+//!   streaming, with a constant-time compare for tags.
 //!
 //! ## House rules for this crate
 //!
@@ -46,6 +48,7 @@
 
 mod curve;
 mod field;
+mod hmac;
 mod scalar;
 mod sign;
 mod sha512;
@@ -53,6 +56,7 @@ mod x25519;
 
 pub use curve::{Point, POINT_LEN};
 pub use field::{Fe, ELEM_LEN};
+pub use hmac::{ct_eq, hmac_sha512, HmacSha512, HMAC_LEN};
 pub use scalar::{Scalar, SCALAR_LEN};
 pub use sign::{
     public_key, sign, sign_prefixed, verify, verify_prefixed, SigningKey, PUBLIC_LEN,
