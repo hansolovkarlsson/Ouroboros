@@ -15,13 +15,19 @@
 //! 3. **Time per operation**, so the decision to use bit-by-bit scalar reduction
 //!    and no fixed-base table rests on a number rather than a guess.
 //!
+//! Since step 1 of `docs/roadmap/roadmap-session-auth.md` it checks **X25519**
+//! the same three ways: RFC 7748 section 6.1's exchange on the target, the time
+//! of one scalar multiplication, and its peak stack on its own, calibrated
+//! separately, because that figure is what the arc's stack gate adds to `netd`'s
+//! depth at the three places a session key will be computed.
+//!
 //! It stays in `/bin` rather than being a throwaway: the Raspberry Pi bring-up
 //! will want exactly this, on a third code generator and real hardware.
 
 #![no_std]
 #![no_main]
 
-use ed25519::{public_key, sign, verify, SigningKey};
+use ed25519::{public_key, sign, verify, x25519_public, x25519_shared, SigningKey};
 
 /// RFC 8032 §7.1 TEST 1 — the same vector the host tests use, so a disagreement
 /// between host and target is visible as a disagreement about a published value
@@ -53,6 +59,34 @@ const SIG2: [u8; 64] = [
     0x08, 0x5a, 0xc1, 0xe4, 0x3e, 0x15, 0x99, 0x6e, 0x45, 0x8f, 0x36, 0x13, 0xd0, 0xf1, 0x1d, 0x8c,
     0x38, 0x7b, 0x2e, 0xae, 0xb4, 0x30, 0x2a, 0xee, 0xb0, 0x0d, 0x29, 0x16, 0x12, 0xbb, 0x0c, 0x00,
 ];
+
+/// RFC 7748 section 6.1: Alice's private key, Alice's public key, Bob's public
+/// key and the secret they share. The host tests use the same four values.
+const X_A: [u8; 32] = [
+    0x77, 0x07, 0x6d, 0x0a, 0x73, 0x18, 0xa5, 0x7d, 0x3c, 0x16, 0xc1, 0x72, 0x51, 0xb2, 0x66, 0x45,
+    0xdf, 0x4c, 0x2f, 0x87, 0xeb, 0xc0, 0x99, 0x2a, 0xb1, 0x77, 0xfb, 0xa5, 0x1d, 0xb9, 0x2c, 0x2a,
+];
+const X_A_PUB: [u8; 32] = [
+    0x85, 0x20, 0xf0, 0x09, 0x89, 0x30, 0xa7, 0x54, 0x74, 0x8b, 0x7d, 0xdc, 0xb4, 0x3e, 0xf7, 0x5a,
+    0x0d, 0xbf, 0x3a, 0x0d, 0x26, 0x38, 0x1a, 0xf4, 0xeb, 0xa4, 0xa9, 0x8e, 0xaa, 0x9b, 0x4e, 0x6a,
+];
+const X_B_PUB: [u8; 32] = [
+    0xde, 0x9e, 0xdb, 0x7d, 0x7b, 0x7d, 0xc1, 0xb4, 0xd3, 0x5b, 0x61, 0xc2, 0xec, 0xe4, 0x35, 0x37,
+    0x3f, 0x83, 0x43, 0xc8, 0x5b, 0x78, 0x67, 0x4d, 0xad, 0xfc, 0x7e, 0x14, 0x6f, 0x88, 0x2b, 0x4f,
+];
+const X_K: [u8; 32] = [
+    0x4a, 0x5d, 0x9d, 0x5b, 0xa4, 0xce, 0x2d, 0xe1, 0x72, 0x8e, 0x3b, 0xf4, 0x80, 0x35, 0x0f, 0x25,
+    0xe0, 0x7e, 0x21, 0xc9, 0x47, 0xd1, 0x9e, 0x33, 0x76, 0xf0, 0x9b, 0x3c, 0x1e, 0x16, 0x17, 0x42,
+];
+
+/// Which computation a stack measurement runs.
+#[derive(Clone, Copy)]
+enum Op {
+    /// Key expansion, a sign and a verify: the export's per-request cost today.
+    SignVerify,
+    /// One X25519 shared-secret computation: one scalar multiplication.
+    X25519,
+}
 
 /// The byte a stack probe is painted with, chosen as an unlikely value to write
 /// by accident.
@@ -106,6 +140,24 @@ pub extern "C" fn _start() -> ! {
         out(target, b"  [FAIL] verify accepted a tampered signature\r\n");
         failures += 1;
     }
+    if x25519_public(&X_A) == X_A_PUB {
+        out(target, b"  [ok]   X25519 public key matches RFC 7748 6.1\r\n");
+    } else {
+        out(target, b"  [FAIL] X25519 public key differs from RFC 7748 6.1\r\n");
+        failures += 1;
+    }
+    if x25519_shared(&X_A, &X_B_PUB) == Some(X_K) {
+        out(target, b"  [ok]   X25519 shared secret matches RFC 7748 6.1\r\n");
+    } else {
+        out(target, b"  [FAIL] X25519 shared secret differs from RFC 7748 6.1\r\n");
+        failures += 1;
+    }
+    if x25519_shared(&X_A, &[0u8; 32]).is_none() {
+        out(target, b"  [ok]   X25519 refuses a small-order peer key\r\n");
+    } else {
+        out(target, b"  [FAIL] X25519 accepted a small-order peer key\r\n");
+        failures += 1;
+    }
 
     // --- 2. how long an operation takes ------------------------------------
     //
@@ -140,51 +192,23 @@ pub extern "C" fn _start() -> ! {
     let t1 = ulib::monotonic_us();
     report_us(target, b"    key expansion          ", t1 - t0);
 
+    let t0 = ulib::monotonic_us();
+    let k = x25519_shared(&X_A, &X_B_PUB);
+    let t1 = ulib::monotonic_us();
+    core::hint::black_box(k);
+    report_us(target, b"    X25519 (scalar mul)    ", t1 - t0);
+
     // --- 3. how much stack it uses -----------------------------------------
     //
     // First CALIBRATE the instrument. A stack probe that silently measured
     // nothing would report a small, plausible number, and a plausible number is
     // exactly what this step must not accept on faith - so run the same probe
     // around a function with a KNOWN extra 4 KB frame and check the reading
-    // moves by about that much. If it does not, the number below means nothing.
-    // `plain` is `(peak bytes, stack size)`: the report below divides by
-    // the same extent the probe measured against.
-    let plain = measure_stack(&SK1);
-    let padded = measure_stack_padded(&SK1);
-    match (plain, padded) {
-        (Some((a, _)), Some(b)) if b > a + 3072 && b < a + 8192 => {
-            out(target, b"\r\n  [ok]   stack probe responds to a known 4KB frame (+");
-            put_dec(target, (b - a) as u64);
-            out(target, b" bytes)\r\n");
-        }
-        (Some((a, _)), Some(b)) => {
-            out(target, b"\r\n  [FAIL] stack probe did not respond as expected: ");
-            put_dec(target, a as u64);
-            out(target, b" then ");
-            put_dec(target, b as u64);
-            out(target, b"\r\n");
-            failures += 1;
-        }
-        _ => out(target, b"\r\n  [warn] stack measurement unavailable\r\n"),
-    }
-
-    let calibrated = matches!((plain, padded), (Some((a, _)), Some(b)) if b > a + 3072 && b < a + 8192);
-    match plain {
-        Some((used, stack_size)) if calibrated => {
-            out(target, b"\r\n  peak stack for sign+verify: ");
-            put_dec(target, used as u64);
-            out(target, b" bytes of ");
-            put_dec(target, stack_size as u64);
-            out(target, b" (");
-            put_dec(target, (used as u64 * 100) / stack_size as u64);
-            out(target, b"%)\r\n");
-        }
-        // Deliberately NOT printed in the usual format when the probe did not
-        // calibrate: a plausible-looking number is exactly what gets transcribed
-        // into a document and believed.
-        Some(_) => out(target, b"\r\n  peak stack: NOT REPORTED (probe uncalibrated)\r\n"),
-        None => out(target, b"\r\n  [warn] stack measurement unavailable\r\n"),
-    }
+    // moves by about that much. If it does not, the number means nothing. Each
+    // computation is calibrated on its own, so neither figure borrows the
+    // other's evidence.
+    failures += report_stack(target, Op::SignVerify, b"sign+verify");
+    failures += report_stack(target, Op::X25519, b"X25519");
 
     if failures == 0 {
         out(target, b"\r\nedtest: all checks passed\r\n");
@@ -220,7 +244,52 @@ fn put_dec(target: u64, v: u64) {
     out(target, &buf[..n]);
 }
 
-/// Peak stack bytes used by a sign followed by a verify.
+/// Measure `op`'s peak stack, calibrate the probe against a known 4 KB frame,
+/// and print the figure only if the calibration held. Returns the number of
+/// failures (0 or 1).
+fn report_stack(target: u64, op: Op, label: &[u8]) -> u32 {
+    let plain = measure_stack_inner(&SK1, op, false);
+    let padded = measure_stack_inner(&SK1, op, true).map(|(used, _)| used);
+    let calibrated =
+        matches!((plain, padded), (Some((a, _)), Some(b)) if b > a + 3072 && b < a + 8192);
+    match (plain, padded) {
+        (Some((a, _)), Some(b)) if calibrated => {
+            out(target, b"\r\n  [ok]   stack probe (");
+            out(target, label);
+            out(target, b") responds to a known 4KB frame (+");
+            put_dec(target, (b - a) as u64);
+            out(target, b" bytes)\r\n");
+        }
+        (Some((a, _)), Some(b)) => {
+            out(target, b"\r\n  [FAIL] stack probe (");
+            out(target, label);
+            out(target, b") did not respond as expected: ");
+            put_dec(target, a as u64);
+            out(target, b" then ");
+            put_dec(target, b as u64);
+            out(target, b"\r\n");
+            return 1;
+        }
+        _ => {
+            out(target, b"\r\n  [warn] stack measurement unavailable\r\n");
+            return 0;
+        }
+    }
+    if let Some((used, stack_size)) = plain {
+        out(target, b"  peak stack for ");
+        out(target, label);
+        out(target, b": ");
+        put_dec(target, used as u64);
+        out(target, b" bytes of ");
+        put_dec(target, stack_size as u64);
+        out(target, b" (");
+        put_dec(target, (used as u64 * 100) / stack_size as u64);
+        out(target, b"%)\r\n");
+    }
+    0
+}
+
+/// Peak stack bytes used by `op`.
 ///
 /// Paints the unused stack below the current frame with a known byte, runs the
 /// operations, then finds the lowest painted byte that changed. The stack extent
@@ -230,14 +299,13 @@ fn put_dec(target: u64, v: u64) {
 /// not a measurement. (It used to add a local `STACK_BYTES` to the heap's end
 /// instead, a copy of the loader's page count that went stale when the stack
 /// grew and silently disabled this measurement; the sanity check below is
-/// what refused, and the calibration in `_start` is what made that visible.)
-fn measure_stack(secret: &[u8; 32]) -> Option<(usize, usize)> {
-    measure_stack_inner(secret, false)
-}
-
+/// what refused, and the calibration in `report_stack` is what made that visible.)
+///
 /// `(peak bytes used, stack size)`, or `None` if the probe could not run.
+/// With `pad`, the same work runs behind a deliberate extra 4 KB frame, which
+/// is how `report_stack` proves the probe reacts.
 #[inline(never)]
-fn measure_stack_inner(secret: &[u8; 32], pad: bool) -> Option<(usize, usize)> {
+fn measure_stack_inner(secret: &[u8; 32], op: Op, pad: bool) -> Option<(usize, usize)> {
     let (stack_lo, stack_size) = ulib::stack_extent();
     if stack_lo == 0 || stack_size == 0 {
         return None;
@@ -267,9 +335,9 @@ fn measure_stack_inner(secret: &[u8; 32], pad: bool) -> Option<(usize, usize)> {
     }
 
     if pad {
-        work_with_extra_frame(secret);
+        work_with_extra_frame(secret, op);
     } else {
-        work(secret);
+        work(secret, op);
     }
 
     // The lowest address still painted marks how deep the call went.
@@ -287,31 +355,32 @@ fn measure_stack_inner(secret: &[u8; 32], pad: bool) -> Option<(usize, usize)> {
     Some((stack_hi - lowest, stack_size))
 }
 
-/// The same measurement, with a deliberate extra 4 KB frame in the call path.
-/// Used only to prove the probe reacts - see the calibration in `_start`.
-#[inline(never)]
-fn measure_stack_padded(secret: &[u8; 32]) -> Option<usize> {
-    measure_stack_inner(secret, true).map(|(used, _)| used)
-}
-
 /// The operations being measured.
 #[inline(never)]
-fn work(secret: &[u8; 32]) {
-    let key = SigningKey::from_secret(secret);
-    let sig = key.sign(b"stack measurement");
-    let ok = verify(&key.public(), b"stack measurement", &sig);
-    core::hint::black_box(ok);
+fn work(secret: &[u8; 32], op: Op) {
+    match op {
+        Op::SignVerify => {
+            let key = SigningKey::from_secret(secret);
+            let sig = key.sign(b"stack measurement");
+            let ok = verify(&key.public(), b"stack measurement", &sig);
+            core::hint::black_box(ok);
+        }
+        Op::X25519 => {
+            let k = x25519_shared(secret, &X_B_PUB);
+            core::hint::black_box(k);
+        }
+    }
 }
 
 /// The same work behind a known 4 KB frame, for calibration. The array is
 /// written and read through `black_box` so the optimiser cannot elide it.
 #[inline(never)]
-fn work_with_extra_frame(secret: &[u8; 32]) {
+fn work_with_extra_frame(secret: &[u8; 32], op: Op) {
     let mut pad = [0u8; 4096];
     for (i, b) in pad.iter_mut().enumerate() {
         *b = i as u8;
     }
     core::hint::black_box(&pad);
-    work(secret);
+    work(secret, op);
     core::hint::black_box(&pad);
 }
