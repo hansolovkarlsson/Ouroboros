@@ -302,7 +302,8 @@ and nothing had reported it because no rig ran a `/host` read.
 ## Deliberately not in scope
 
 - **Session-scoped authentication.** Its own plan, after this. The held
-  session step 2 produces is where it will live.
+  session step 2 produces is where it will live. That plan is
+  [`roadmap-session-auth.md`](roadmap-session-auth.md) (2026-09-22).
 - **Async ARP, DNS, ICMP, HTTP fetch.** Decision 4.
 - **Raising any budget.** `MAX_REMOTE` starts at 2, the smallest number that
   lets a bystander's read proceed while a child's is parked; raise it when a

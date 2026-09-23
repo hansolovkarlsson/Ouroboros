@@ -20,6 +20,13 @@ This document is the one to update first when direction changes.
 
 ## What's next (the current frontier)
 
+> **In progress 2026-09-22: session-scoped authentication**, planned in
+> [`roadmap-session-auth.md`](roadmap/roadmap-session-auth.md). On a held
+> session the four Ed25519 operations are 2,926 µs of every fid verb, so the
+> plan replaces them with a session key (X25519 inside `NP_SESSION`, then an
+> HMAC and a sequence number per message). It sits beside item 1 below, not in
+> it: it changes how a session proves each message, not whose keys exist.
+
 The microkernel arc is largely built — the FAT32 **filesystem** (`fsd`),
 the **console** (`cond`), and the **network** server (`netd`) all run as
 supervised, MMU-isolated userland servers, with a capability model, crash

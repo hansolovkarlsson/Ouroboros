@@ -931,6 +931,11 @@ exhausts it, with the exhaustion as evidence).
 > **Session-scoped authentication remains open and is now unblocked.** It was
 > held because changing the concurrency model and the auth model at once is
 > two risky things at once; the concurrency half is settled.
+>
+> **Update 2026-09-22:** it has its own plan,
+> [`roadmap-session-auth.md`](roadmap-session-auth.md), whose step 0 measured
+> the cost on a held session (44% of a fid verb) and whose design is a session
+> key rather than a single signature, for the reason that file opens with.
 
 ~~**A stack-depth limitation on the ledger, found by the PR review.**~~
 **Closed 2026-09-20 (#147): measured, then refused.** The claim
