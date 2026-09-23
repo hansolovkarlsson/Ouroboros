@@ -195,7 +195,7 @@ $ set PATH=/bin ; env           # a real environment; $VAR expansion
   `more`/`less` is the pager; `chmod`/`chown` change mode/owner on ext2 -
   `chmod` takes octal or symbolic modes, `chmod u+x prog`; `chown` takes
   names or ids, `chown alice:staff f`),
-  `echo  pwd  uptime  clear  args  send  recv  selftest  man  printenv  id` (basics/diagnostics;
+  `echo  pwd  uptime  clear  args  send  recv  selftest  bootid  man  printenv  id` (basics/diagnostics;
   `id` prints this session's uid/gid),
   `grep  wc  head  tail  nl  rev  uniq  sort  upper` (pipeline filters),
   `ping  resolve  fetch` (network). You type them the same way (`ls`,

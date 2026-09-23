@@ -23,7 +23,7 @@ members = [
     "programs/netutils/dial", "programs/netutils/serve",
     "programs/shellutils/echo", "programs/shellutils/uptime", "programs/shellutils/clear",
     "programs/shellutils/args", "programs/shellutils/pwd", "programs/shellutils/readkey",
-    "programs/shellutils/send", "programs/shellutils/recv", "programs/shellutils/selftest",
+    "programs/shellutils/send", "programs/shellutils/recv", "programs/shellutils/selftest", "programs/shellutils/bootid",
     "programs/shellutils/man", "programs/shellutils/printenv", "programs/shellutils/id",
     "programs/shellutils/edtest",
     "programs/admin/passwd", "programs/admin/useradd",

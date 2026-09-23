@@ -419,7 +419,7 @@ the client, so each side is tested against something that is not itself.
    top of the stack; each now has its own frame, and sign+verify reads its
    historical 3,584 again (X25519 now reads 2,784, the 2,944 above having
    carried the old dispatch frame).
-3. **The boot identity, in the kernel.** Before `ExitBootServices`: increment,
+3. ✅ **2026-09-23 (QEMU; the Pi 4 and Parallels still to measure).** **The boot identity, in the kernel.** Before `ExitBootServices`: increment,
    persist and read back the counter (a non-volatile variable where the
    firmware keeps one across a reboot, else a file on the ESP), and ask for
    `EFI_RNG_PROTOCOL` bytes; the image build (`make image`, `images-2vm*`)
@@ -439,6 +439,40 @@ the client, so each side is tested against something that is not itself.
    twice); make the persist fail and the syscall reports the counter unusable;
    remove the "existed before this boot" test and the RAM-only variable store
    is trusted, which the two-boot check then catches as a repeated counter.
+
+   **What it measured.** `kernel/src/bootid.rs`, syscall `BOOT_ID` (69) and
+   `/bin/bootid`. Two consecutive boots of one `build/esp.img` report boot 1
+   then boot 2, and the same on the ext2 image (whose ESP is partition 2). On
+   QEMU the variable was absent at every boot, as predicted: edk2 here keeps
+   variables in RAM, the "existed before this boot" rule never trusts it, and
+   the ESP file serves. **`EFI_RNG_PROTOCOL` exists on QEMU's edk2**, 32 bytes
+   per boot, which the plan did not know. All three controls failed as they
+   must: no increment reports boot 0 twice; a failed file write reports no
+   counter; a failed file write with the pre-existence test removed trusts the
+   RAM variable and reports **boot 1 twice**, the repeat the rule exists to
+   prevent. Two decisions made while building it, both on the safe side of the
+   text above: a counter is usable only if **every** store that held one
+   **before this boot** reads the new value back (a read-back from the RAM
+   variable alone would otherwise pass while the file write failed; the first
+   version required any one such store, and the review of #163 showed a
+   variable that survives a warm reset but not a power-off defeats that, so a
+   stale value in either store now means no counter), and the file is
+   **rewritten in place** as one fixed-width record, never deleted and
+   recreated as `uefi::fs` would. The read-back shows the firmware accepted a
+   write, not that it reached the medium (edk2's FAT driver caches); only the
+   next boot proves that, which is why the check is two boots. The RNG
+   protocol is opened `GetProtocol`, not exclusively, so firmware that already
+   holds it does not read as having none. On a FAT32 image the counter file is
+   writable by any user through `fsd`, the same caveat as every file there
+   (the machine's private key included); on an ext2 image the ESP is not
+   mounted at all. And one the plan left open: the entropy is readable by the `CAP_NET`
+   holder (`netd`) alone, since it feeds every session key `netd` derives,
+   while the counter, the stores and the entropy length are for anyone.
+   `/bin/bootid` checks the refusal on every run (exit 2 on a leak; removing the
+   kernel's check made it print `LEAK` and exit 2), and `netd` logs the entropy
+   it can read at startup, the allowed half. **Owed:** the same two-boot check
+   on the Pi 4 and on Parallels, recording which store serves and whether
+   their firmware offers `EFI_RNG_PROTOCOL`.
 4. **The wire, in `ninep-abi`.** `NP_AUTH_MAGIC_KEYED` (`AUTHNP04`),
    `SIG_DOMAIN_SESSION`, the two ephemeral domain tags, the header and tag
    lengths, the `NP_SESSION` payload and result shapes, the sequence rule and
@@ -506,6 +540,15 @@ the client, so each side is tested against something that is not itself.
    count. **Done means the crypto per keyed verb, in absolute µs, is well
    below 2,926 µs**; the plan also records the new median and mean shares
    beside the old 44% and 26%, the same statistic against the same statistic.
+   **Two things step 3's review settled for this step.** (a) The boot entropy
+   is the same for the whole boot, so a `netd` the supervisor restarts reads
+   the same bytes and the same counter as its previous life. Its ephemerals
+   still differ, because Decision 6 hashes `MONOTONIC_US` into each one; that
+   input is what keeps a restarted `netd` from repeating its keys, so it must
+   not be dropped as redundant with the entropy. (b) `make esp` restages the
+   counter at 0 on every build, so a check that keys differ across reboots
+   must boot **the same image file** twice (as step 3's check does), not a
+   `make run-*` target, which rebuilds it and would pass whatever the code does.
 8. **Docs, rigs and the release.** The normative block, `docs/architecture.md`
    (the new syscall and the boot identity), `docs/manual.md`'s cluster section,
    `testing-qemu.md`'s session recipes, `roadmap-cluster.md`'s replay item

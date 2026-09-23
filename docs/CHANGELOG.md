@@ -29,6 +29,18 @@ before anything is sent. Found by step 1's stack gate of
 `docs/roadmap/roadmap-session-auth.md`, which the plan's session-key sites
 failed at `park_session` before this change and pass after it.
 
+**The boot identity, session-auth step 3: a new syscall, `BOOT_ID` (69).**
+Before `ExitBootServices` the kernel raises a per-boot counter, persisted in a
+UEFI non-volatile variable and in `\EFI\ORBS\BOOTID.TXT` on the ESP (staged
+at 0 by `make esp`), and trusts a value only if a store held it from before
+this boot; it also asks `EFI_RNG_PROTOCOL` for 32 bytes of boot entropy.
+`BOOT_ID` hands the counter, the stores and the entropy length to anyone, and
+the entropy itself to `netd` alone. `/bin/bootid` prints them. On QEMU the
+variable store forgets at every reboot (edk2 keeps it in RAM), so the ESP
+file is what serves, and the firmware does offer entropy. **Rebuilding an
+image restages the counter at 0**, which the plan accepts for a dev image and
+names as a rollback.
+
 **HMAC-SHA-512 in `ed25519`, session-auth step 2.** RFC 2104 over the crate's
 SHA-512, streaming, with a constant-time tag compare (`ct_eq`), checked against
 all seven RFC 4231 SHA-512 rows. On the guest one MAC over a full

@@ -273,6 +273,16 @@ localises the failure without any guessing.
 
 8. **Shell prompt**, on serial and on HDMI.
 
+9. **The boot identity, over two boots (owed by step 3 of
+   [`roadmap-session-auth.md`](../roadmap/roadmap-session-auth.md)).** Run
+   `bootid`, reboot the same card, run it again. Record: the two counters
+   (they must differ, the second one higher); which store held the counter
+   from before the boot (the UEFI variable is the preferred store, and the Pi
+   4's firmware keeps its variables in a file on the SD card, so it rolls back
+   with the card); and the boot entropy's length, the kernel log's
+   `boot identity:` line. **No entropy means no forward secrecy for any session
+   this node takes part in**, so that number decides a property of the cluster.
+
 ### The storage surprise, stated plainly
 
 **Ouroboros has no SD-card driver, and will not acquire one by booting from an

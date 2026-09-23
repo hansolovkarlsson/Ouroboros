@@ -5,6 +5,7 @@ extern crate alloc;
 
 mod acpi;
 mod block;
+mod bootid;
 mod console;
 mod devicetree;
 mod exceptions;
@@ -317,6 +318,12 @@ fn main() -> Status {
             None
         }
     };
+
+    // The boot identity (step 3 of docs/roadmap/roadmap-session-auth.md):
+    // the counter's stores are a UEFI variable and an ESP file, and the
+    // entropy is EFI_RNG_PROTOCOL, all boot services, so it is established
+    // here, last, and read by the BOOT_ID syscall afterwards.
+    bootid::establish();
 
     // SAFETY: no boot-services protocol references (console, allocator, or
     // otherwise) are held past this call. Nothing below this point may use

@@ -1,0 +1,34 @@
+NAME
+    bootid - this boot's identity, as the kernel established it
+
+SYNOPSIS
+    bootid
+
+DESCRIPTION
+    Prints the boot counter the kernel raised and persisted before leaving
+    the firmware, which stores held a counter from before this boot (the
+    UEFI non-volatile variable, the file \EFI\ORBS\BOOTID.TXT on the ESP),
+    and how many bytes of boot entropy the firmware supplied.
+
+    A counter counts only if a store held one before this boot. With none,
+    "no boot counter this boot" is printed, and the node keys no cluster
+    sessions.
+
+    It also asks for the boot entropy itself, which the kernel gives to the
+    network server alone, and reports the refusal.
+
+    On a FAT32 disk the counter file is writable by any user, like every
+    file there; on an ext2 disk the boot partition is not mounted at all.
+
+    If the file is damaged (any length but 21 bytes) and no UEFI variable
+    holds the counter, the node has no counter at every boot until the file
+    is restaged as twenty zeros and a newline. That restarts the count, which
+    is a rollback: do it only on a machine whose earlier sessions nobody
+    needs to protect.
+
+EXIT STATUS
+    0 with a counter, 1 without one, 2 if the kernel handed this program
+    the boot entropy.
+
+SEE ALSO
+    edtest - the on-target check of the session-auth crypto
