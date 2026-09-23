@@ -821,7 +821,9 @@ def _client_module():
 
 def _with_server(quiet, mode, client_side):
     """Serve ONE connection on a loopback port, with MISBEHAVE = `mode`, while
-    `client_side(port)` runs against it; return what it returns."""
+    `client_side(port)` runs against it. Returns (what it returns, how the
+    server ended the connection): "refused", "closed", or "CRASHED: <error>"
+    when serve_connection raised, which no check may count as a pass."""
     global MISBEHAVE
     MISBEHAVE = mode
     lsock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -829,18 +831,24 @@ def _with_server(quiet, mode, client_side):
     lsock.listen(1)
     port = lsock.getsockname()[1]
 
+    ended = []
+
     def one():
         conn, addr = lsock.accept()
-        serve_connection(conn, addr)
+        try:
+            ended.append(serve_connection(conn, addr))
+        except Exception as e:  # noqa: BLE001  recorded, then judged by the caller
+            ended.append(f"CRASHED: {type(e).__name__}: {e}")
 
     t = threading.Thread(target=one, daemon=True)
     t.start()
     try:
-        return client_side(port)
+        result = client_side(port)
     finally:
         t.join(timeout=30)
         lsock.close()
         MISBEHAVE = None
+    return result, (ended[0] if ended else "CRASHED: the server thread did not finish")
 
 
 def keyed_self_test(quiet=True):
@@ -883,7 +891,10 @@ def keyed_self_test(quiet=True):
             FIDS.clear()
         return out
 
-    bad += run(None, honest)
+    out, ended = run(None, honest)
+    bad += out
+    if ended.startswith("CRASHED"):
+        bad.append(f"  - keyed: the server {ended}")
 
     # 2. Each misbehaving reply must be REFUSED by the client: FS_ERR_AUTH.
     for mode in MISBEHAVE_MODES:
@@ -899,7 +910,9 @@ def keyed_self_test(quiet=True):
                 return f"broke: {e}"
             finally:
                 s.close()
-        got = run(mode, misbehaving)
+        got, ended = run(mode, misbehaving)
+        if ended.startswith("CRASHED"):
+            bad.append(f"  - keyed '{mode}': the server {ended}")
         if got != FS_ERR_AUTH:
             shown = got if isinstance(got, str) else classify(got)
             bad.append(f"  - keyed: the client did not refuse a '{mode}' reply ({shown})")
@@ -923,9 +936,13 @@ def keyed_self_test(quiet=True):
                 return "closed"
             finally:
                 s.close()
-        got = run(None, refused)
-        if got != "closed":
-            bad.append(f"  - keyed: the export did not close on {label} ({got})")
+        got, ended = run(None, refused)
+        # Both halves: the client saw the connection end, AND the server ended
+        # it on purpose. A crash also ends it, and passed this check until the
+        # review of #165.
+        if got != "closed" or ended != "refused":
+            bad.append(f"  - keyed: the export did not refuse {label} "
+                       f"(client saw: {got}; server: {ended})")
     return bad
 
 
@@ -1057,7 +1074,10 @@ def abort(conn):
 def serve_connection(conn, addr, delay=0.0):
     """One accepted connection: a request and a reply then FIN, or a session
     (NP_SESSION answered 0) held until the peer closes, keyed when its first
-    frame offered a key."""
+    frame offered a key. Returns how it ended: "refused" when this peer closed
+    it with an RST on purpose (a keyed-session refusal), "closed" otherwise.
+    An exception other than a socket error is NOT caught: the self-test must
+    be able to tell a deliberate refusal from a crash (review of #165)."""
     try:
         # A session (NP_SESSION answered 0) keeps this loop reading frames
         # on the same socket; anything else is one request, one reply, FIN.
@@ -1077,7 +1097,7 @@ def serve_connection(conn, addr, delay=0.0):
                 if reply is None:
                     print(f"  [conn {addr}] keyed session: refused frame, closing with RST", flush=True)
                     abort(conn)
-                    return
+                    return "refused"
             elif len(body) >= 8 and struct.unpack("<Q", body[:8])[0] == NP_AUTH_MAGIC_KEYED:
                 # AUTHNP04 on a connection that was never keyed.
                 reply = frame_reply(FS_ERR_AUTH)
@@ -1086,12 +1106,12 @@ def serve_connection(conn, addr, delay=0.0):
                     # Keying happens only on a fresh connection's first frame.
                     print(f"  [conn {addr}] key offered mid-stream: closing with RST", flush=True)
                     abort(conn)
-                    return
+                    return "refused"
                 opened = open_keyed(body)
                 if opened == "close":
                     print(f"  [conn {addr}] all-zero shared secret: closing", flush=True)
                     abort(conn)
-                    return
+                    return "refused"
                 if opened is None:
                     reply = frame_reply(FS_ERR_AUTH)
                 else:
@@ -1109,7 +1129,7 @@ def serve_connection(conn, addr, delay=0.0):
             if not session:
                 break
         if session:
-            return  # the peer closed it; nothing to shut down
+            return "closed"  # the peer closed it; nothing to shut down
         # One request/reply per connection, then FIN.
         #
         # The FIN is TIDY TEARDOWN, NOT A FRAMING SIGNAL - and it stopped
@@ -1127,8 +1147,10 @@ def serve_connection(conn, addr, delay=0.0):
             conn.shutdown(socket.SHUT_WR)
         except OSError:
             pass
+        return "closed"
     except (ConnectionError, OSError) as e:
         print(f"  [conn {addr}] {e}")
+        return "closed"
     finally:
         conn.close()
 
