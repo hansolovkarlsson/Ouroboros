@@ -702,8 +702,12 @@ record is in [`CHANGELOG.md`](CHANGELOG.md):
 
 The small open tails those arcs deliberately left:
 
-- **libc's `MSG_CALL` does not ride out the delegation window (found
-  2026-09-23).** A C program's first remote op after a mount fails
+- ~~**libc's `MSG_CALL` does not ride out the delegation window (found
+  2026-09-23).**~~ **FIXED 2026-09-23**: `np_request` now retries a
+  `MSG_ERR_DENIED` from `netd` for the same 150 ticks as
+  `ulib::net_msg_call`. Twenty boots, first `cbig` after a mount, all clean;
+  the same script on the unfixed libc failed one boot in ten (three in sixteen
+  across the day). The original entry: A C program's first remote op after a mount fails
   `not allowed to reach that server (capability)` about one boot in three on
   the two-node ext2 rig (`cbig` right after `mount -r`; the second `cbig` in
   the same boot always passes), measured on `main` and on a branch alike. It is

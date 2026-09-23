@@ -29,6 +29,14 @@ before anything is sent. Found by step 1's stack gate of
 `docs/roadmap/roadmap-session-auth.md`, which the plan's session-key sites
 failed at `park_session` before this change and pass after it.
 
+**A C program's first remote op no longer loses the delegation race.** The
+shell `SPAWN`s a program and only then `DELEGATE`s it `TO_NET`, so a program
+reaching `netd` in between is refused `MSG_ERR_DENIED`. `ulib` has ridden that
+out since 2026-09-03; libc's NP call did not, so the first `cbig` after a mount
+failed `not allowed to reach that server (capability)` about one boot in three.
+`np_request` now retries it for the same bounded window, for `netd` only.
+Measured: twenty clean boots with the fix, three failures in sixteen without.
+
 ## v0.20.0: the fid verbs reach the export, the keyboard follows a chain, the remote mount goes async (2026-09-22)
 
 Thirty-two pull requests since v0.19.0 (#121 to #155): the fid-verb-to-export
