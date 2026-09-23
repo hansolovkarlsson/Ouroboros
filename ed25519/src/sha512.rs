@@ -16,7 +16,7 @@
 pub const DIGEST_LEN: usize = 64;
 
 /// Bytes in a SHA-512 compression block.
-const BLOCK_LEN: usize = 128;
+pub(crate) const BLOCK_LEN: usize = 128;
 
 /// The first 64 bits of the fractional parts of the cube roots of the first 80
 /// primes (FIPS 180-4 §4.2.3). A plain `u64` array: no references, so no
