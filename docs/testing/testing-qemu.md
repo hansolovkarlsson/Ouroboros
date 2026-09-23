@@ -765,10 +765,13 @@ Its control is the session's whole point: in `service_remotes`, close the
 session after every reply (force `c.fids = 0` just before the keep-open test)
 so it is not held; cbig then FAILS (the second verb reaches a clunked fid),
 measured. (Before async step 2 this control lived in `session_rmount`, closing
-the session after each verb; that whole synchronous path is gone.) **cbig is
-subject to the same ~1/6 socket-link flake as any remote op here** (`cbig:
-remote … read failed`, no fault): re-run rather than reading one failure as a
-regression.
+the session after each verb; that whole synchronous path is gone.) **A
+`capability` failure here is a regression now, not a flake.** Until 2026-09-23
+the first cbig after a mount failed `not allowed to reach that server
+(capability)` about one boot in three: libc's NP call did not ride out the
+window between the shell's `SPAWN` and its `DELEGATE` of `TO_NET`, which `ulib`
+already did. Measured after the fix: twenty clean boots, against three failures
+in sixteen without it.
 
 **The remote-write witness** (step 7 of `roadmap-fid-verbs.md`, `NP_PWRITE`,
 2026-09-12). `/bin/CWRITE` (`libc/cwrite.c`) writes an 800-byte pattern (two
@@ -796,8 +799,8 @@ the plan names, and it is real ONLY on the ext2 pair. FAT32 records no mode, so
 failing:** feed the export's write bridge no data (in `build_9p_reply`'s
 `NP_PWRITE` arm, pass `&[]` to `fsd_pwrite`); `cwrite` then fails every attempt
 rather than reporting success. Against the pre-step-7 tree a remote `write()`
-returned `-1`. cwrite is subject to the same ~1/6 socket flake as any remote op
-(a first-op `capability` denial, no fault); re-run.
+returned `-1`. A first-op `capability` denial here was the libc delegation race
+fixed 2026-09-23 (see the cbig note above); seen again, it is a regression.
 
 **A remote op fails spuriously now and then — know which message is which.**
 Measured 2026-08-31 on this rig: roughly one remote read in six fails on the

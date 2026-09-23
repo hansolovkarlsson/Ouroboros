@@ -146,11 +146,29 @@ static long np_request(unsigned target, const unsigned char *endpoint,
         memcpy(req + base + NP_REQ_PAYLOAD, path, pathlen);
     }
     unsigned char reply[MSG_MAX_LEN];
-    long r = __os_syscall4(SYS_MSG_CALL, dest, (long)req,
-                           (long)(base + NP_REQ_PAYLOAD + pathlen), (long)reply);
+    /* The delegation race, ridden out as ulib::net_msg_call does. The shell
+     * SPAWNs a program and only then DELEGATEs it TO_NET (it cannot delegate
+     * to a slot that does not exist yet), so a C program whose first remote
+     * op reaches netd inside that window is refused MSG_ERR_DENIED. That is
+     * transient by construction: the delegation is already on its way. This
+     * call returned it as a failure instead, and the first cbig after a mount
+     * failed "not allowed to reach that server (capability)" about one boot
+     * in three on the two-node rig (2026-09-23). Only for netd, as in ulib:
+     * a denial from fsd is not this race. The same 150-tick bound. */
+    long deadline = __os_syscall1(SYS_GET_TICKS, 0) + 150;
+    long r;
+    for (;;) {
+        r = __os_syscall4(SYS_MSG_CALL, dest, (long)req,
+                          (long)(base + NP_REQ_PAYLOAD + pathlen), (long)reply);
+        if (dest == NET_TASK && (unsigned long)r == MSG_ERR_DENIED &&
+            __os_syscall1(SYS_GET_TICKS, 0) <= deadline) {
+            continue;
+        }
+        break;
+    }
     if ((unsigned long)r >= FS_ERR_MIN) {
-        /* A transport failure, not a server answer - MSG_ERR_DENIED is the
-         * likely one (netd's send capability is delegated after spawn). */
+        /* A transport failure, not a server answer: a denial that outlived
+         * the delegation window, or any other refusal of the call itself. */
         g_last_status = (unsigned long)r;
         return (long)FS_ERR_MIN;
     }
