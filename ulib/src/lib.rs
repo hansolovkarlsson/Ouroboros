@@ -275,6 +275,40 @@ pub fn getgid() -> u32 {
     (task_id(self_task()) >> 32) as u32
 }
 
+/// This boot's counter (`BOOT_ID`), or `None` when the kernel could not vouch
+/// for one this boot (no store held a counter from before it). See
+/// `syscall_abi::BOOT_ID` for the rules.
+pub fn boot_id() -> Option<u64> {
+    let v = syscall(syscall_abi::BOOT_ID, syscall_abi::BOOT_ID_COUNTER);
+    if v == syscall_abi::BOOT_ID_NONE {
+        None
+    } else {
+        Some(v)
+    }
+}
+
+/// The `BOOT_ID_STORE_*` bits of the stores that held a counter from before
+/// this boot.
+pub fn boot_id_stores() -> u64 {
+    syscall(syscall_abi::BOOT_ID, syscall_abi::BOOT_ID_STORES)
+}
+
+/// Bytes of boot entropy the firmware supplied this boot (0 for none).
+pub fn boot_entropy_len() -> usize {
+    syscall(syscall_abi::BOOT_ID, syscall_abi::BOOT_ID_ENTROPY_LEN) as usize
+}
+
+/// Copy the boot entropy into `buf`, returning its length, or `None` when the
+/// kernel refuses: it answers the network server alone.
+pub fn boot_entropy(buf: &mut [u8]) -> Option<usize> {
+    let r = syscall4(syscall_abi::BOOT_ID, syscall_abi::BOOT_ID_ENTROPY, buf.as_mut_ptr() as u64, buf.len() as u64, 0);
+    if r == syscall_abi::BOOT_ID_NONE {
+        None
+    } else {
+        Some(r as usize)
+    }
+}
+
 /// The preemption tick count since boot (`uptime`'s source).
 pub fn get_ticks() -> u64 {
     syscall(syscall_abi::GET_TICKS, 0)

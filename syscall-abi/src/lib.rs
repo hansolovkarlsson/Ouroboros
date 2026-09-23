@@ -869,6 +869,43 @@ pub const SENDER_TASK: u64 = 67;
 /// spawn returned. Read-only, like [`TASK_STATE`].
 pub const TASK_IDENTITY: u64 = 68;
 
+/// **The boot identity** (step 3 of `docs/roadmap/roadmap-session-auth.md`):
+/// a counter the kernel raises once per boot and persists before
+/// `ExitBootServices`, and the firmware's boot entropy if it offered any. The
+/// selector is `arg0`:
+///
+/// - [`BOOT_ID_COUNTER`]: this boot's counter, or [`BOOT_ID_NONE`] when no store
+///   held a value from before this boot, or the raised value could not be
+///   written and read back in a store that had. A node with no counter keys no
+///   sessions (fail-safe).
+/// - [`BOOT_ID_STORES`]: which stores held a value from before this boot, as
+///   [`BOOT_ID_STORE_VARIABLE`] | [`BOOT_ID_STORE_FILE`] bits: which of them
+///   survives a reboot on this machine. Not secret.
+/// - [`BOOT_ID_ENTROPY_LEN`]: bytes of boot entropy (`EFI_RNG_PROTOCOL`), 0 where
+///   the firmware offers none. Not secret.
+/// - [`BOOT_ID_ENTROPY`]: `arg1` = out pointer, `arg2` = capacity; copies the
+///   boot entropy and returns its length. **The network server only** (the
+///   `CAP_NET` holder): the bytes feed every session key it derives this boot,
+///   so any other caller gets [`BOOT_ID_NONE`], as does a bad buffer.
+///
+/// An unknown selector answers [`BOOT_ID_NONE`].
+pub const BOOT_ID: u64 = 69;
+/// [`BOOT_ID`] selector: this boot's counter.
+pub const BOOT_ID_COUNTER: u64 = 0;
+/// [`BOOT_ID`] selector: the stores that held a value from before this boot.
+pub const BOOT_ID_STORES: u64 = 1;
+/// [`BOOT_ID`] selector: the length of the boot entropy.
+pub const BOOT_ID_ENTROPY_LEN: u64 = 2;
+/// [`BOOT_ID`] selector: copy the boot entropy (network server only).
+pub const BOOT_ID_ENTROPY: u64 = 3;
+/// [`BOOT_ID_STORES`] bit: the UEFI non-volatile variable.
+pub const BOOT_ID_STORE_VARIABLE: u64 = 1;
+/// [`BOOT_ID_STORES`] bit: the counter file on the ESP.
+pub const BOOT_ID_STORE_FILE: u64 = 2;
+/// [`BOOT_ID`]'s "no": no usable counter, a refused or bad entropy request, or
+/// an unknown selector. No counter reaches it (it is never raised past it).
+pub const BOOT_ID_NONE: u64 = u64::MAX;
+
 /// Width of the slot field in a packed task identity: the slot is the low
 /// [`TASK_ID_SLOT_BITS`] bits, the generation everything above.
 pub const TASK_ID_SLOT_BITS: u32 = 8;

@@ -97,6 +97,8 @@ EDTEST_ELF   := target/$(USER_TARGET)/release/edtest
 EDTEST_BIN   := target/$(USER_TARGET)/release/edtest.bin
 SELFTEST_ELF := target/$(USER_TARGET)/release/selftest
 SELFTEST_BIN := target/$(USER_TARGET)/release/selftest.bin
+BOOTID_ELF   := target/$(USER_TARGET)/release/bootid
+BOOTID_BIN   := target/$(USER_TARGET)/release/bootid.bin
 MAN_ELF      := target/$(USER_TARGET)/release/man
 MAN_BIN      := target/$(USER_TARGET)/release/man.bin
 PING_ELF     := target/$(USER_TARGET)/release/ping
@@ -221,7 +223,7 @@ ifeq ($(PROFILE),release)
 CARGO_FLAGS += --release
 endif
 
-.PHONY: all build check-site shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin accountd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin id-bin passwd-bin useradd-bin groupadd-bin usermod-bin clusterkey-bin chello-bin cdemo-bin cfile-bin cleak-bin nsdemo-bin cremote-bin cbig-bin cwrite-bin cpico-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin edtest-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin sort-bin esp run run-virtio-console run-usb-kbd run-usb-multi run-gicv3 image run-image run-image-9p run-image-9p-client run-image-2vm-a run-image-2vm-b run-image-2vm-ext2-a run-image-2vm-ext2-b image-gpt run-image-gpt image-exfat run-image-exfat image-ext2 run-image-ext2 images-2vm images-2vm-ext2 parallels-hdd release test check-relocs test-parallels test-keyboard-chain test-reentrant-session test-async-rmount clean
+.PHONY: all build check-site shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin accountd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin id-bin passwd-bin useradd-bin groupadd-bin usermod-bin clusterkey-bin chello-bin cdemo-bin cfile-bin cleak-bin nsdemo-bin cremote-bin cbig-bin cwrite-bin cpico-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin bootid-bin edtest-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin sort-bin esp run run-virtio-console run-usb-kbd run-usb-multi run-gicv3 image run-image run-image-9p run-image-9p-client run-image-2vm-a run-image-2vm-b run-image-2vm-ext2-a run-image-2vm-ext2-b image-gpt run-image-gpt image-exfat run-image-exfat image-ext2 run-image-ext2 images-2vm images-2vm-ext2 parallels-hdd release test check-relocs test-parallels test-keyboard-chain test-reentrant-session test-async-rmount clean
 
 # Overridable by `make test-parallels VM_NAME=... CMDS=... BOOT_WAIT=...`.
 VM_NAME     ?= Ouroboros
@@ -515,6 +517,10 @@ selftest-bin:
 	cargo build -p selftest --target $(USER_TARGET) --release
 	"$(OBJCOPY)" --strip-all $(SELFTEST_ELF) $(SELFTEST_BIN)
 
+bootid-bin:
+	cargo build -p bootid --target $(USER_TARGET) --release
+	"$(OBJCOPY)" --strip-all $(BOOTID_ELF) $(BOOTID_BIN)
+
 # The ed25519 on-target check (docs/roadmap/roadmap-cluster-keys.md step 5): the same RFC
 # 8032 vectors the host tests run, plus peak-stack and per-operation timing,
 # which only the target can answer.
@@ -618,7 +624,7 @@ serve-bin:
 # below are not, so a BUILD_DIR containing whitespace fails the build noisily
 # (and can leave a stray directory) rather than deleting anything. That is the
 # right trade at 70-odd paths; quoting them all is churn without a hazard.
-esp: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin accountd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin id-bin passwd-bin useradd-bin groupadd-bin usermod-bin clusterkey-bin chello-bin cdemo-bin cfile-bin cleak-bin nsdemo-bin cremote-bin cbig-bin cwrite-bin cpico-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin edtest-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin tail-bin nl-bin rev-bin uniq-bin sort-bin
+esp: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin accountd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin id-bin passwd-bin useradd-bin groupadd-bin usermod-bin clusterkey-bin chello-bin cdemo-bin cfile-bin cleak-bin nsdemo-bin cremote-bin cbig-bin cwrite-bin cpico-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin bootid-bin edtest-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin tail-bin nl-bin rev-bin uniq-bin sort-bin
 	@test ! -e "$(ESP_DIR)" || test -f "$(ESP_DIR)/EFI/ORBS/INIT.CFG" || { \
 		echo "esp: $(ESP_DIR) is not an Ouroboros ESP tree - refusing to delete it"; \
 		echo "esp: (remove it by hand if that is really where you want the ESP staged)"; \
@@ -637,6 +643,12 @@ esp: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin acco
 	cp $(ACCTD_BIN) $(ESP_DIR)/EFI/ORBS/ACCOUNTD.BIN
 	cp $(ARGS_BIN) $(ESP_DIR)/EFI/ORBS/ARGS.BIN
 	printf '\\EFI\\ORBS\\SH.BIN' > $(ESP_DIR)/EFI/ORBS/INIT.CFG
+	# The boot counter's ESP store (kernel/src/bootid.rs): one fixed-width
+	# record, staged at 0 so the first boot of a new image finds a counter
+	# from "before this boot" and raises it to 1. Restaging it is a ROLLBACK of
+	# the counter, accepted for a dev image and stated in Decision 6 of
+	# docs/roadmap/roadmap-session-auth.md.
+	printf '%020d\n' 0 > $(ESP_DIR)/EFI/ORBS/BOOTID.TXT
 	# /bin: programs the shell finds via PATH by bare name (Stage 2 of the
 	# standalone-binaries arc). Named uppercase, no extension (8.3-legal);
 	# fsd's case-insensitive lookup matches a lowercase-typed command. For
@@ -682,6 +694,7 @@ esp: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin acco
 	cp $(SEND_BIN) $(ESP_DIR)/bin/SEND
 	cp $(RECV_BIN) $(ESP_DIR)/bin/RECV
 	cp $(SELFTEST_BIN) $(ESP_DIR)/bin/SELFTEST
+	cp $(BOOTID_BIN) $(ESP_DIR)/bin/BOOTID
 	cp $(EDTEST_BIN) $(ESP_DIR)/bin/EDTEST
 	cp $(MAN_BIN) $(ESP_DIR)/bin/MAN
 	cp $(PING_BIN) $(ESP_DIR)/bin/PING

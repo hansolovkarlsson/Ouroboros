@@ -932,6 +932,29 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
                 }
             }
         }
+        syscall_abi::BOOT_ID => {
+            // arg0 = selector; for BOOT_ID_ENTROPY, arg1 = out pointer and
+            // arg2 = capacity. See the ABI doc for what each selector answers.
+            let id = crate::bootid::get();
+            match arg0 {
+                syscall_abi::BOOT_ID_COUNTER => id.counter.unwrap_or(syscall_abi::BOOT_ID_NONE),
+                syscall_abi::BOOT_ID_STORES => id.stores,
+                syscall_abi::BOOT_ID_ENTROPY_LEN => id.entropy_len as u64,
+                syscall_abi::BOOT_ID_ENTROPY => {
+                    // The network server alone: these bytes feed every session
+                    // key it derives this boot, so a reader anywhere else would
+                    // hold part of the secret behind them.
+                    if !tasks::cap_has(tasks::current_task(), tasks::CAP_NET) || arg2 < id.entropy_len as u64 || !valid_user_range(arg1, arg2) {
+                        return syscall_abi::BOOT_ID_NONE;
+                    }
+                    // SAFETY: out range validated above.
+                    let out = unsafe { core::slice::from_raw_parts_mut(arg1 as *mut u8, id.entropy_len) };
+                    out.copy_from_slice(&id.entropy[..id.entropy_len]);
+                    id.entropy_len as u64
+                }
+                _ => syscall_abi::BOOT_ID_NONE,
+            }
+        }
         syscall_abi::HEAP_INFO => {
             let (base, size) = tasks::task_region(tasks::current_task());
             let (heap_base, heap_size) = loader::heap_area(base, size);
