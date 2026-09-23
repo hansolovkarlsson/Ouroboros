@@ -586,6 +586,13 @@ the client, so each side is tested against something that is not itself.
    counter at 0 on every build, so a check that keys differ across reboots
    must boot **the same image file** twice (as step 3's check does), not a
    `make run-*` target, which rebuilds it and would pass whatever the code does.
+   (c) From the review of #159: phase two's sign in `service_remotes` is the one
+   signing site left in `serve`'s own frame (`service_remotes` is inlined into
+   it), where #159 moved every park's into `sign_parked`. It has 10.5 KB of
+   headroom, so nothing is owed today; but phase two is where this step adds
+   the X25519 and the key derivation, so this step moves that work into its own
+   non-inlined function, as `sign_parked` is, rather than growing `serve`'s
+   frame under every chain.
 8. **Docs, rigs and the release.** The normative block, `docs/architecture.md`
    (the new syscall and the boot identity), `docs/manual.md`'s cluster section,
    `testing-qemu.md`'s session recipes, `roadmap-cluster.md`'s replay item

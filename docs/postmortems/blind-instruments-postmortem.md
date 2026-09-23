@@ -480,3 +480,48 @@ The line is the one this retrospective always ends on. An instrument that
 cannot fail for the reason it was built for, or cannot show why it failed, is
 not measuring; and the first thing to mutate is the instrument.
 
+## Four instruments in one day of building (2026-09-23)
+
+*Added from the day session-scoped authentication went from plan to step 5,
+seven PRs, each with a review.* Four of the day's defects were in the
+instruments, not the code they measured, and each had passed.
+
+**The probe that measured its neighbours.** `/bin/edtest` gained an HMAC arm in
+the same `work` function as sign+verify and X25519, and its timing buffer sat in
+`_start`. The stack probe reads depth from the top of the stack, so both 2 KB
+buffers were counted in every reading: sign+verify read 8,960 bytes, then 6,320
+after the first fix, where it has read 3,584 since 2026-08-31. The calibration
+passed throughout, because a 4 KB pad still moved the reading by 4 KB; the
+calibration proves the probe responds, not that it measures only its subject.
+What caught it was a historical figure to compare against. Each operation has
+its own frame now.
+
+**The restore that ran the mutation.** A Python control flipped a bit in the
+X25519 reference's own vector and was reverted; the reverted file then failed
+the same assertion. Python had reused the mutated bytecode, because the
+mutation and the restore were the same size and landed in the same second. The
+control's result was right and its cleanup lied, which is worse than either
+alone, since it points at the code under test. Python controls run with `-B`.
+
+**The check that passed on a crash.** The keyed self-test's "the export closes
+on a skipped seq" check passed when the client saw the connection end. A server
+that crashed on that frame also ends it, so the check could not tell the
+refusal it was named for from a defect that would kill the server's accept loop
+in production. It was found by review (#165), and its control is exactly that
+crash: the check now requires the server to say it refused.
+
+**The read-back that proved less than its comment.** The boot counter's
+read-back after writing was documented as going "back to the volume". edk2's
+FAT driver caches, so it can be answered from the cache; it proves the firmware
+took the write, and only the next boot proves the medium did. Found by the
+high-effort review of #163; the comment says so now, and the two-boot check is
+what carries the durability claim.
+
+And one entry from this file's last section closed. The 2026-09-20 rig declined
+to grade `cbig` because of a capability race that refused its first request, and
+said so rather than failing on it. That race was the 2026-09-03 delegation fix
+never carried into libc's NP call; a control on `main` reproduced it one boot in
+three, and #161 fixed it (twenty clean boots against three failures in sixteen).
+The ungraded witness was the right call, and naming why it was ungraded is what
+kept it findable.
+

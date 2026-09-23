@@ -183,3 +183,28 @@ stands alone, so nothing can go stale, replay out of order or outlive a
 reboot. A session key and a strict `seq` add exactly that state. The question
 this arc learned to ask about blocking applies unchanged to statelessness:
 list what it was providing for free before replacing it.
+
+## The deepest thing standing on the tables (2026-09-23)
+
+*Added the morning after this was written, from step 1 of
+[`roadmap-session-auth.md`](../roadmap/roadmap-session-auth.md).*
+
+Section 3 ended on resident state being paid by every chain. The next day's
+stack gate measured where that bill had landed. Every park (`park_session`,
+`park_rmount`, `park_run`) is reached from `drain_client_messages`, which the
+export's connection pump calls from inside its own loop, about 10 KB below
+`service_remotes`. The parks signed their requests there, and on the two-node
+rig the sign in `park_session` ran within **80 bytes** of the guard page on every
+fid verb; a 512-byte pad at that depth faulted `netd`. The rigs passed only
+because nothing had yet added those bytes. Nothing in this arc's reviews or
+rigs had looked, because no check measured headroom at a call site: the
+overflows this postmortem records were all found by a fault, and this one had
+not faulted yet.
+
+The fix was this arc's own pattern made a rule rather than an instance: step 2's
+two-phase park, where the held verb is signed later in the service pass, became
+"a park never signs" for every park (#159), and the signing site moved to
+`sign_parked`, with 10 KB of room. Section 1's lesson in a different currency: a
+blocking design had kept the signing shallow for free, because the call and the
+sign happened in the handler, and parking moved the handler under the pump.
+
