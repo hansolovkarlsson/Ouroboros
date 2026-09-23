@@ -528,7 +528,10 @@ fn sg_probe(site: u64) {
     let paint_hi = sp - 256;
     // op 0: today's cost at this site, a sign (what frame_signed runs).
     // op 1: the new cost, one X25519 scalar multiplication.
-    for op in 0..2u64 {
+    for op in 0..3u64 {
+        if op == 2 && site == 1 {
+            continue; // no 4 KB of room there; site 1 gets its own control build
+        }
         // SAFETY: [lo, paint_hi) is this task's own stack, below the live frame.
         unsafe {
             let mut p = lo;
@@ -540,9 +543,11 @@ fn sg_probe(site: u64) {
         if op == 0 {
             let key = ed25519::SigningKey::from_secret(core::hint::black_box(&[0x22u8; 32]));
             core::hint::black_box(key.sign(core::hint::black_box(b"stack gate")));
-        } else {
+        } else if op == 1 {
             let k = ed25519::x25519_shared(core::hint::black_box(&[0x11u8; 32]), &ed25519::X25519_BASEPOINT);
             core::hint::black_box(k);
+        } else {
+            sg_padded::<4096>();
         }
         let mut lowest = paint_hi;
         let mut p = lo;
@@ -556,7 +561,7 @@ fn sg_probe(site: u64) {
         }
         log(b"SG site=");
         log_dec(site);
-        log(if op == 0 { b" sign   " } else { b" x25519 " });
+        log(if op == 0 { b" sign   " } else if op == 1 { b" x25519 " } else { b" pad4k  " });
         log(b" depth=");
         log_dec((hi - sp) as u64);
         log(b" peak=");
@@ -567,6 +572,19 @@ fn sg_probe(site: u64) {
         log_dec(size as u64);
         log(b"\r\n");
     }
+}
+
+/// X25519 behind a known extra frame of `N` bytes: the probe's calibration.
+#[inline(never)]
+fn sg_padded<const N: usize>() {
+    let mut pad = [0u8; N];
+    for (i, b) in pad.iter_mut().enumerate() {
+        *b = i as u8;
+    }
+    core::hint::black_box(&pad);
+    let k = ed25519::x25519_shared(core::hint::black_box(&[0x11u8; 32]), &ed25519::X25519_BASEPOINT);
+    core::hint::black_box(k);
+    core::hint::black_box(&pad);
 }
 
 fn serve(packed_mac: u64) -> ! {
