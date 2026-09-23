@@ -62,12 +62,17 @@ the guest.
 """
 import contextlib
 import hashlib
+import hmac
 import io
 import os
 import socket
 import time
 import struct
 import sys
+import threading
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import x25519_ref  # noqa: E402  RFC 7748's ladder, asserted against its vectors on load
 
 NP_BASE = 0x100
 NP_READDIR = NP_BASE + 0
@@ -469,16 +474,24 @@ def serve_request(body):
     if verified is None:
         return frame_reply(FS_ERR_AUTH)
     body, nonce, name = verified
+    return serve_np(body, name, lambda status, data=b"": seal(nonce, status, data))
 
-    # Every real reply is SEALED (reply-auth): [u32 len][sig:64][status][data],
-    # signed over `domain-tag || request_nonce || [status][data]` with this
-    # peer's own key, which every image's authorized file lists at 10.0.2.2.
-    def sealed(status, data=b""):
-        inner = struct.pack("<Q", status) + data
-        seal = ed().sign(host_seed(), SIG_DOMAIN_REPLY + nonce + inner)
-        framed = seal + inner
-        return struct.pack("<I", len(framed)) + framed
 
+def seal(nonce, status, data=b""):
+    """A SEALED reply (reply-auth): [u32 len][sig:64][status][data], signed over
+    `domain-tag || request_nonce || [status][data]` with this peer's own key,
+    which every image's authorized file lists at 10.0.2.2."""
+    inner = struct.pack("<Q", status) + data
+    sig = ed().sign(host_seed(), SIG_DOMAIN_REPLY + nonce + inner)
+    framed = sig + inner
+    return struct.pack("<I", len(framed)) + framed
+
+
+def serve_np(body, name, sealed):
+    """Serve one NP message as user `name`, answering through `sealed(status,
+    data)`: a signed reply on an ordinary connection, a keyed one on a keyed
+    session. One dispatch for both, so a verb cannot behave differently under
+    the two formats."""
     if len(body) < HDR:
         return sealed(FS_ERROR)
     verb, tree = struct.unpack("<QQ", body[:16])
@@ -778,13 +791,346 @@ def self_test(quiet=True):
     finally:
         verify = real_verify
         FIDS.clear()
-    if bad:
+    keyed_bad = keyed_self_test(quiet)
+    if bad or keyed_bad:
         print("np9p_server --self-test: DISPATCH DISAGREES WITH THE TABLE")
-        print("\n".join(bad))
+        print("\n".join(bad + keyed_bad))
         return 1
     print(f"np9p_server: {len(SELF_TEST_VERBS)} verb(s) dispatch as documented, "
-          f"and a fid round trip reads the file back byte-for-byte")
+          f"and a fid round trip reads the file back byte-for-byte; a KEYED "
+          f"session with np9p_client.py serves every verb, the client refuses "
+          f"all {len(MISBEHAVE_MODES)} misbehaving replies, and the export "
+          f"closes on a skipped seq and a tampered tag")
     return 0
+
+
+def _client_module():
+    """np9p_client.py, loaded as the OTHER implementation: its own ephemeral
+    derivation and key schedule, signing as the dev "host" identity (which this
+    server authorizes) and expecting this server's replies to be signed by it."""
+    import importlib.util
+    here = os.path.dirname(os.path.abspath(__file__))
+    spec = importlib.util.spec_from_file_location("np9p_client", os.path.join(here, "np9p_client.py"))
+    c = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(c)
+    c.SIGN_KEY = c.dev_seed(c.DEV_PEER_LABELS["host"])
+    c.PEER_LABEL = c.DEV_PEER_LABELS["host"]
+    c._PEER_KEY = None
+    return c
+
+
+def _with_server(quiet, mode, client_side):
+    """Serve ONE connection on a loopback port, with MISBEHAVE = `mode`, while
+    `client_side(port)` runs against it; return what it returns."""
+    global MISBEHAVE
+    MISBEHAVE = mode
+    lsock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    lsock.bind(("127.0.0.1", 0))
+    lsock.listen(1)
+    port = lsock.getsockname()[1]
+
+    def one():
+        conn, addr = lsock.accept()
+        serve_connection(conn, addr)
+
+    t = threading.Thread(target=one, daemon=True)
+    t.start()
+    try:
+        return client_side(port)
+    finally:
+        t.join(timeout=30)
+        lsock.close()
+        MISBEHAVE = None
+
+
+def keyed_self_test(quiet=True):
+    """Step 5's check (docs/roadmap/roadmap-session-auth.md): a keyed session
+    between this server and np9p_client.py, two implementations with separate
+    key schedules, over a real socket. Returns a list of failures."""
+    c = _client_module()
+    bad = []
+    sink = io.StringIO()
+
+    def run(mode, fn):
+        if quiet:
+            with contextlib.redirect_stdout(sink):
+                return _with_server(quiet, mode, fn)
+        return _with_server(quiet, mode, fn)
+
+    # 1. The honest server: the whole verb table under AUTHNP04.
+    def honest(port):
+        out = []
+        s = c.Session("127.0.0.1", port)
+        try:
+            st, eph = s.open(keyed=True)
+            if st != 0 or s.keys is None:
+                return [f"  - keyed: NP_SESSION with a key was not keyed (status 0x{st:x}, "
+                        f"{len(eph)}-byte result)"]
+            FIDS.clear()
+            st, _ = s.op(_frame(NP_BASE + 15, (OPEN_READ, "PLEN", 0), b"/HELLO.TXT", 0))
+            if st >= (1 << 64) - 64:
+                return [f"  - keyed: could not open a fid (status 0x{st:x})"]
+            fid = st
+            for name, verb, want, params, path in SELF_TEST_VERBS:
+                st, _ = s.op(_frame(verb, params, path, fid))
+                got = classify(st)
+                if got != want:
+                    out.append(f"  - keyed {name} (0x{verb:x}): got {got}, the table says {want}")
+        except (RuntimeError, OSError) as e:
+            out.append(f"  - keyed: the session broke: {e}")
+        finally:
+            s.close()
+            FIDS.clear()
+        return out
+
+    bad += run(None, honest)
+
+    # 2. Each misbehaving reply must be REFUSED by the client: FS_ERR_AUTH.
+    for mode in MISBEHAVE_MODES:
+        def misbehaving(port):
+            s = c.Session("127.0.0.1", port)
+            try:
+                st, _ = s.open(keyed=True)
+                if st != 0 or s.keys is None:
+                    return f"not keyed (0x{st:x})"
+                st, _ = s.op(_frame(NP_BASE + 12, ("PLEN", 0, 0), b"/HELLO.TXT", 0))
+                return st
+            except (RuntimeError, OSError) as e:
+                return f"broke: {e}"
+            finally:
+                s.close()
+        got = run(mode, misbehaving)
+        if got != FS_ERR_AUTH:
+            shown = got if isinstance(got, str) else classify(got)
+            bad.append(f"  - keyed: the client did not refuse a '{mode}' reply ({shown})")
+
+    # 3. The export must close, with no reply, on a request it cannot trust.
+    for label, tamper in (("a skipped request seq", "seq"), ("a tampered request tag", "tag")):
+        def refused(port, tamper=tamper):
+            s = c.Session("127.0.0.1", port)
+            try:
+                st, _ = s.open(keyed=True)
+                if st != 0 or s.keys is None:
+                    return f"not keyed (0x{st:x})"
+                if tamper == "seq":
+                    s.seq += 1
+                else:
+                    k_c2s, k_s2c = s.keys
+                    s.keys = (bytes([k_c2s[0] ^ 1]) + k_c2s[1:], k_s2c)
+                st, _ = s.op(_frame(NP_BASE + 12, ("PLEN", 0, 0), b"/HELLO.TXT", 0))
+                return f"answered (status 0x{st:x})"
+            except (RuntimeError, OSError):
+                return "closed"
+            finally:
+                s.close()
+        got = run(None, refused)
+        if got != "closed":
+            bad.append(f"  - keyed: the export did not close on {label} ({got})")
+    return bad
+
+
+# ---------------------------------------------------------------------------
+# KEYED SESSIONS (step 5 of docs/roadmap/roadmap-session-auth.md), transcribed
+# from ninep-abi's normative block, "Keyed sessions". The key schedule and the
+# ephemeral derivation are written HERE and again, separately, in
+# np9p_client.py, on purpose: a shared helper would make the plan's control
+# (drop one input from ONE side's derivation) impossible, since both sides would
+# change together and still agree.
+
+# This peer's stand-in for a boot ID: fixed for the process, never repeated
+# across runs (the clock is in it). The spec's own words: a host peer with no
+# boot ID uses its own non-repeating value in its place.
+HOST_BOOT_ID = struct.pack("<Q", time.time_ns()) + os.urandom(8)
+
+# `--misbehave <mode>`: send keyed replies a correct client must REFUSE, for the
+# client-side controls (the self-test here, and step 7's guest client).
+#   bad-tag     the tag with one bit flipped
+#   wrong-key   tagged with k_c2s, the REQUEST direction's key
+#   replay-seq  tagged over seq - 1, a replay of the previous reply's seq
+#   skip-seq    tagged over seq + 1, a reply from the future
+MISBEHAVE_MODES = ("bad-tag", "wrong-key", "replay-seq", "skip-seq")
+MISBEHAVE = None
+
+
+def export_ephemeral(request_nonce):
+    """The export's ephemeral secret: SIG_DOMAIN_EPHEMERAL_E, the machine key,
+    the boot ID, the request nonce, the clock and fresh entropy, hashed; X25519
+    clamps it. Never stored past the handshake."""
+    h = hashlib.sha512(SIG_DOMAIN_EPHEMERAL_E + host_seed() + HOST_BOOT_ID + request_nonce
+                       + struct.pack("<Q", time.monotonic_ns() // 1000) + os.urandom(32))
+    return h.digest()[:32]
+
+
+def session_keys(shared, request_nonce, eph_client, eph_export):
+    """K = SHA-512(SIG_DOMAIN_SESSION ‖ shared ‖ request_nonce ‖ eph_client ‖
+    eph_export); k_c2s is the first half, k_s2c the second."""
+    k = hashlib.sha512(SIG_DOMAIN_SESSION + shared + request_nonce + eph_client + eph_export).digest()
+    return k[:NP_SESSION_KEY_LEN], k[NP_SESSION_KEY_LEN:2 * NP_SESSION_KEY_LEN]
+
+
+def keyed_tag(key, seq, data):
+    """HMAC-SHA-512(key, seq ‖ data), truncated to NP_KEYED_TAG_LEN."""
+    return hmac.new(key, struct.pack("<Q", seq) + data, hashlib.sha512).digest()[:NP_KEYED_TAG_LEN]
+
+
+class Keyed:
+    """One keyed session's state: the two keys, the user its NP_SESSION was
+    signed as (every verb runs as them), and the last seq accepted."""
+
+    def __init__(self, k_c2s, k_s2c, name):
+        self.k_c2s, self.k_s2c, self.name = k_c2s, k_s2c, name
+        self.seq = 0
+
+    def reply(self, seq, status, data=b""):
+        """[u32 len][tag:32][status][result], tagged with k_s2c over the
+        request's seq, or deliberately wrong under --misbehave."""
+        inner = struct.pack("<Q", status) + data
+        key, s = self.k_s2c, seq
+        if MISBEHAVE == "wrong-key":
+            key = self.k_c2s
+        elif MISBEHAVE == "replay-seq":
+            s = seq - 1
+        elif MISBEHAVE == "skip-seq":
+            s = seq + 1
+        tag = bytearray(keyed_tag(key, s, inner))
+        if MISBEHAVE == "bad-tag":
+            tag[0] ^= 1
+        framed = bytes(tag) + inner
+        return struct.pack("<I", len(framed)) + framed
+
+    def serve(self, body):
+        """A keyed request's reply, or None: an AUTHNP03 frame, a bad tag or a
+        seq that is not exactly one more than the last. None means CLOSE
+        WITHOUT REPLYING, since an unauthenticated refusal is what an attacker
+        would forge."""
+        if len(body) < NP_AUTH_HDR_KEYED:
+            return None
+        (magic, seq) = struct.unpack("<QQ", body[:16])
+        if magic != NP_AUTH_MAGIC_KEYED or seq != self.seq + 1:
+            return None
+        tag = body[16:NP_AUTH_HDR_KEYED]
+        np_msg = body[NP_AUTH_HDR_KEYED:]
+        if not hmac.compare_digest(tag, keyed_tag(self.k_c2s, seq, np_msg)):
+            return None
+        self.seq = seq
+        if len(np_msg) >= 8 and struct.unpack("<Q", np_msg[:8])[0] == NP_SESSION:
+            # No payload: today's idempotent 0. A key offer: no re-keying.
+            if len(np_msg) > HDR:
+                return None
+            return self.reply(seq, 0)
+        return serve_np(np_msg, self.name, lambda st, data=b"": self.reply(seq, st, data))
+
+
+def offers_key(body):
+    """Whether a signed frame is an NP_SESSION carrying an ephemeral key."""
+    return (request_verb(body) == NP_SESSION
+            and len(body) == NP_AUTH_HDR_SIGNED + HDR + NP_EPHEMERAL_LEN)
+
+
+def open_keyed(body):
+    """Key a session from a verified NP_SESSION offering `eph_client`: the
+    reply (a SIGNED one, carrying `eph_export`) and the Keyed state, or None
+    for a refusal to send as the unsigned denial, or "close" for an all-zero
+    shared secret, which closes without a reply on both sides."""
+    verified = verify(body)
+    if verified is None:
+        return None
+    np_msg, nonce, name = verified
+    eph_client = np_msg[HDR:HDR + NP_EPHEMERAL_LEN]
+    secret = export_ephemeral(nonce)
+    eph_export = x25519_ref.public(secret)
+    shared = x25519_ref.shared(secret, eph_client)
+    if shared is None:
+        return "close"
+    k_c2s, k_s2c = session_keys(shared, nonce, eph_client, eph_export)
+    return seal(nonce, 0, eph_export), Keyed(k_c2s, k_s2c, name)
+
+
+def abort(conn):
+    """Close with an RST, the keyed session's answer to an auth failure."""
+    try:
+        conn.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+    except OSError:
+        pass
+
+
+def serve_connection(conn, addr, delay=0.0):
+    """One accepted connection: a request and a reply then FIN, or a session
+    (NP_SESSION answered 0) held until the peer closes, keyed when its first
+    frame offered a key."""
+    try:
+        # A session (NP_SESSION answered 0) keeps this loop reading frames
+        # on the same socket; anything else is one request, one reply, FIN.
+        # Single-threaded, so a held session blocks the next accept until
+        # it closes or idles out - fine for the gate this exists for, and
+        # named in the roadmap for the step that makes the guest hold one.
+        conn.settimeout(SESSION_IDLE_S)
+        session = False
+        keyed = None
+        first = True
+        while True:
+            body = read_frame(conn)
+            if body is None:
+                break
+            if keyed is not None:
+                reply = keyed.serve(body)
+                if reply is None:
+                    print(f"  [conn {addr}] keyed session: refused frame, closing with RST", flush=True)
+                    abort(conn)
+                    return
+            elif len(body) >= 8 and struct.unpack("<Q", body[:8])[0] == NP_AUTH_MAGIC_KEYED:
+                # AUTHNP04 on a connection that was never keyed.
+                reply = frame_reply(FS_ERR_AUTH)
+            elif offers_key(body):
+                if not first:
+                    # Keying happens only on a fresh connection's first frame.
+                    print(f"  [conn {addr}] key offered mid-stream: closing with RST", flush=True)
+                    abort(conn)
+                    return
+                opened = open_keyed(body)
+                if opened == "close":
+                    print(f"  [conn {addr}] all-zero shared secret: closing", flush=True)
+                    abort(conn)
+                    return
+                if opened is None:
+                    reply = frame_reply(FS_ERR_AUTH)
+                else:
+                    reply, keyed = opened
+                    session = True
+                    print("  [keyed session opened on this connection]", flush=True)
+            else:
+                reply = serve_request(body)
+                if request_verb(body) == NP_SESSION and reply_status(reply) == 0:
+                    session = True
+            first = False
+            if delay:
+                time.sleep(delay)
+            conn.sendall(reply)
+            if not session:
+                break
+        if session:
+            return  # the peer closed it; nothing to shut down
+        # One request/reply per connection, then FIN.
+        #
+        # The FIN is TIDY TEARDOWN, NOT A FRAMING SIGNAL - and it stopped
+        # being one on 2026-09-05. This used to say "the guest client reads
+        # to EOF", which was true when written and is now false: the guest
+        # stops at `4 + len` from the frame's own header and closes first.
+        # Left as a warning rather than deleted, because the next reader
+        # would otherwise reasonably conclude that `shutdown(SHUT_WR)` is
+        # load-bearing for correctness here. It is not.
+        #
+        # NP_RUN is the exception, and it is a real one: its reply is a raw
+        # stream with NO length prefix, so for that verb EOF genuinely is
+        # the terminator (see np9p_client.py's run_op).
+        try:
+            conn.shutdown(socket.SHUT_WR)
+        except OSError:
+            pass
+    except (ConnectionError, OSError) as e:
+        print(f"  [conn {addr}] {e}")
+    finally:
+        conn.close()
 
 
 def main():
@@ -807,6 +1153,15 @@ def main():
     else:
         delay = 0.0
     args = [a for i, a in enumerate(args) if a != "--delay" and (i == 0 or args[i - 1] != "--delay")]
+    global MISBEHAVE
+    if "--misbehave" in args:
+        mi = args.index("--misbehave")
+        if mi + 1 >= len(args) or args[mi + 1] not in MISBEHAVE_MODES:
+            print(f"np9p_server: --misbehave needs one of {', '.join(MISBEHAVE_MODES)}", file=sys.stderr)
+            sys.exit(2)
+        MISBEHAVE = args[mi + 1]
+        args = args[:mi] + args[mi + 2:]
+        print(f"np9p_server: MISBEHAVING on keyed replies: {MISBEHAVE}")
     port = int(args[0]) if args else 5641
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -820,50 +1175,7 @@ def main():
     print(f"  signing replies as the dev 'host' identity; {len(peers)} peer key(s) authorized")
     while True:
         conn, addr = srv.accept()
-        try:
-            # A session (NP_SESSION answered 0) keeps this loop reading frames
-            # on the same socket; anything else is one request, one reply, FIN.
-            # Single-threaded, so a held session blocks the next accept until
-            # it closes or idles out - fine for the gate this exists for, and
-            # named in the roadmap for the step that makes the guest hold one.
-            conn.settimeout(SESSION_IDLE_S)
-            session = False
-            while True:
-                body = read_frame(conn)
-                if body is None:
-                    break
-                reply = serve_request(body)
-                if delay:
-                    time.sleep(delay)
-                conn.sendall(reply)
-                if request_verb(body) == NP_SESSION and reply_status(reply) == 0:
-                    session = True
-                if not session:
-                    break
-            if session:
-                continue  # the peer closed it; nothing to shut down
-            # One request/reply per connection, then FIN.
-            #
-            # The FIN is TIDY TEARDOWN, NOT A FRAMING SIGNAL - and it stopped
-            # being one on 2026-09-05. This used to say "the guest client reads
-            # to EOF", which was true when written and is now false: the guest
-            # stops at `4 + len` from the frame's own header and closes first.
-            # Left as a warning rather than deleted, because the next reader
-            # would otherwise reasonably conclude that `shutdown(SHUT_WR)` is
-            # load-bearing for correctness here. It is not.
-            #
-            # NP_RUN is the exception, and it is a real one: its reply is a raw
-            # stream with NO length prefix, so for that verb EOF genuinely is
-            # the terminator (see np9p_client.py's run_op).
-            try:
-                conn.shutdown(socket.SHUT_WR)
-            except OSError:
-                pass
-        except (ConnectionError, OSError) as e:
-            print(f"  [conn {addr}] {e}")
-        finally:
-            conn.close()
-
+        serve_connection(conn, addr, delay)
 
 if __name__ == "__main__":
     main()
