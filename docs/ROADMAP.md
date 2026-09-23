@@ -26,6 +26,10 @@ This document is the one to update first when direction changes.
 > plan replaces them with a session key (X25519 inside `NP_SESSION`, then an
 > HMAC and a sequence number per message). It sits beside item 1 below, not in
 > it: it changes how a session proves each message, not whose keys exist.
+> **Step 1 done 2026-09-23** (X25519, 236 µs and 2,944 bytes on the guest);
+> its stack gate failed at `park_session`, 80 bytes from the guard page on
+> `main`, which #159 fixed by moving every park's signing into the service
+> pass. Step 2 (HMAC-SHA-512) is next.
 
 The microkernel arc is largely built — the FAT32 **filesystem** (`fsd`),
 the **console** (`cond`), and the **network** server (`netd`) all run as
