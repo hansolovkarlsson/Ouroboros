@@ -504,6 +504,89 @@ fn load_auth() -> Auth {
 /// health-ping (its reply, addressed to the kernel's sentinel, is intercepted
 /// as the ack) - and staying `Blocked` in `NET_WAIT` between bursts is what
 /// keeps the passive heartbeat seeing a healthy server.
+// MEASUREMENT ONLY (branch measure/x25519-stack-gate-after, never merged): the
+// stack gate of step 1 of docs/roadmap/roadmap-session-auth.md. At each of the
+// three places a session key will be computed, run one X25519 scalar
+// multiplication, and measure the peak it reaches from THAT depth: repaint the
+// stack below this frame, run it, find the lowest byte that changed.
+#[inline(never)]
+fn sg_probe(site: u64) {
+    const PAINT: u8 = 0xA5;
+    let lo = syscall(syscall_abi::HEAP_INFO, syscall_abi::HEAP_INFO_STACK_BASE) as usize;
+    let size = syscall(syscall_abi::HEAP_INFO, syscall_abi::HEAP_INFO_STACK_SIZE) as usize;
+    if lo == 0 || size == 0 {
+        log(b"SG no stack extent\r\n");
+        return;
+    }
+    let hi = lo + size;
+    let probe = 0u64;
+    let sp = core::hint::black_box(&probe) as *const u64 as usize;
+    if sp <= lo || sp > hi {
+        log(b"SG sp outside extent\r\n");
+        return;
+    }
+    let paint_hi = sp - 256;
+    // op 0: today's cost at this site, a sign (what frame_signed runs).
+    // op 1: the new cost, one X25519 scalar multiplication.
+    for op in 0..3u64 {
+        if op == 2 && site == 4 {
+            continue; // no 4 KB of room at the park depth
+        }
+        // SAFETY: [lo, paint_hi) is this task's own stack, below the live frame.
+        unsafe {
+            let mut p = lo;
+            while p < paint_hi {
+                core::ptr::write_volatile(p as *mut u8, PAINT);
+                p += 1;
+            }
+        }
+        if op == 0 {
+            let key = ed25519::SigningKey::from_secret(core::hint::black_box(&[0x22u8; 32]));
+            core::hint::black_box(key.sign(core::hint::black_box(b"stack gate")));
+        } else if op == 1 {
+            let k = ed25519::x25519_shared(core::hint::black_box(&[0x11u8; 32]), &ed25519::X25519_BASEPOINT);
+            core::hint::black_box(k);
+        } else {
+            sg_padded::<4096>();
+        }
+        let mut lowest = paint_hi;
+        let mut p = lo;
+        while p < paint_hi {
+            // SAFETY: the window just painted.
+            if unsafe { core::ptr::read_volatile(p as *const u8) } != PAINT {
+                lowest = p;
+                break;
+            }
+            p += 1;
+        }
+        log(b"SG site=");
+        log_dec(site);
+        log(if op == 0 { b" sign   " } else if op == 1 { b" x25519 " } else { b" pad4k  " });
+        log(b" depth=");
+        log_dec((hi - sp) as u64);
+        log(b" peak=");
+        log_dec((hi - lowest) as u64);
+        log(b" headroom=");
+        log_dec((lowest - lo) as u64);
+        log(b" of ");
+        log_dec(size as u64);
+        log(b"\r\n");
+    }
+}
+
+/// X25519 behind a known extra frame of `N` bytes: the probe's calibration.
+#[inline(never)]
+fn sg_padded<const N: usize>() {
+    let mut pad = [0u8; N];
+    for (i, b) in pad.iter_mut().enumerate() {
+        *b = i as u8;
+    }
+    core::hint::black_box(&pad);
+    let k = ed25519::x25519_shared(core::hint::black_box(&[0x11u8; 32]), &ed25519::X25519_BASEPOINT);
+    core::hint::black_box(k);
+    core::hint::black_box(&pad);
+}
+
 fn serve(packed_mac: u64) -> ! {
     let mac = if packed_mac == syscall_abi::NET_ERROR {
         [0u8; 6]
@@ -1581,6 +1664,7 @@ fn park_session(dst_mac: &[u8; 6], ip: [u8; 4], port: u16, uid: u32, verb: u64, 
         if s.parked.is_some() || s.slen != 0 {
             return Err(syscall_abi::FS_ERR_BUSY);
         }
+        sg_probe(4);
         let Some(raw) = park_raw(&mut s.sbuf, np) else {
             return Err(syscall_abi::FS_ERR_AUTH);
         };
@@ -1945,6 +2029,7 @@ fn service_remotes<const H: usize>(remotes: &mut [Option<Wire<REMOTE_SBUF, REMOT
             // our NP_SESSION from the send buffer (TCP acks what it answers),
             // so signing over it cannot corrupt a request still in flight; a
             // peer that answered without acking is refused below, not trusted.
+            sg_probe(2);
             let (total, nonce) = frame_signed(auth, &parked.who, &c.held[..c.held_len], &mut c.sbuf);
             c.held_len = 0;
             if total > 0 {
@@ -2421,6 +2506,7 @@ fn park_raw(sbuf: &mut [u8], np: &[u8]) -> Option<u16> {
 /// `false` if the request could not be signed.
 #[inline(never)]
 fn sign_parked<const S: usize, const R: usize, const H: usize>(c: &mut Wire<S, R, H>, auth: &Auth) -> bool {
+    sg_probe(1);
     let pk = c.parked.as_mut().unwrap();
     let (total, nonce) = frame_signed_in_place(auth, &pk.who, pk.raw as usize, &mut c.sbuf);
     pk.raw = 0;
@@ -3369,6 +3455,7 @@ fn handle_9p(c: &mut TcpConn, request: &[u8], dials: &mut [Option<DialConn>; MAX
     // Open a session (Decision 3): budgeted against the whole table, and never
     // by evicting a live one. Idempotent on a connection that already is one.
     let n = if verb == ninep_abi::NP_SESSION {
+        sg_probe(3);
         let status = if c.session {
             0
         } else if sessions >= SESSION_MAX {
