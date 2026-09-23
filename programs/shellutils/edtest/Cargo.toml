@@ -10,6 +10,7 @@ edition = "2021"
 syscall-abi = { path = "../../../syscall-abi" }
 ulib = { path = "../../../ulib" }
 ed25519 = { path = "../../../ed25519" }
+ninep-abi = { path = "../../../ninep-abi" }
 
 [[bin]]
 name = "edtest"

@@ -131,6 +131,7 @@ name = "edtest"
 version = "0.1.0"
 dependencies = [
  "ed25519",
+ "ninep-abi",
  "syscall-abi",
  "ulib",
 ]
