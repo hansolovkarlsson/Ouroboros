@@ -29,6 +29,14 @@ before anything is sent. Found by step 1's stack gate of
 `docs/roadmap/roadmap-session-auth.md`, which the plan's session-key sites
 failed at `park_session` before this change and pass after it.
 
+**HMAC-SHA-512 in `ed25519`, session-auth step 2.** RFC 2104 over the crate's
+SHA-512, streaming, with a constant-time tag compare (`ct_eq`), checked against
+all seven RFC 4231 SHA-512 rows. On the guest one MAC over a full
+`NP_NET_MAX` message is 120 to 160 µs against 536 µs for a sign, which is the
+step's gate: session keys replace signatures only if a MAC is much cheaper.
+`/bin/edtest` gives each measured operation its own frame, which it needed:
+the first cut let one reading's buffer inflate the others by up to 5 KB.
+
 **A C program's first remote op no longer loses the delegation race.** The
 shell `SPAWN`s a program and only then `DELEGATE`s it `TO_NET`, so a program
 reaching `netd` in between is refused `MSG_ERR_DENIED`. `ulib` has ridden that

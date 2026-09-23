@@ -393,12 +393,32 @@ the client, so each side is tested against something that is not itself.
    X25519, phase two and the export arm 10,560, all three calibrated. The gate
    passes. The sites in the step's text above are as planned; the ones to
    build at are `sign_parked`, phase two, and the export arm.
-2. **HMAC-SHA-512 in `ed25519/`.** RFC 4231 vectors (SHA-512 rows) on the host;
+2. ✅ **2026-09-23.** **HMAC-SHA-512 in `ed25519/`.** RFC 4231 vectors (SHA-512 rows) on the host;
    on the guest, time a MAC over a full `NP_NET_MAX` message. **Gate:** it must
    be well under one Ed25519 sign (521 µs). If a MAC costs what a signature
    does, the arc has no point, and this step is where that is found out.
    *Control:* a flipped bit in one vector's key, message or expected tag fails
    its test.
+
+   **What it measured.** All seven RFC 4231 SHA-512 rows pass (parsed from the
+   RFC text, each checked against Python's `hmac` first; the RFC's own case 3
+   is missing the `=` after `Key`), plus keys of exactly 128 and 129 bytes,
+   every split of a streamed message, and every flipped bit of a key and a
+   message. The control: a flipped bit in case 3's key, its data, and its
+   expected tag each fails the test. `ct_eq` has no early exit, checked by
+   reading it. On the guest, one MAC over the sequence number plus a full
+   `NP_NET_MAX` message is **120 to 160 µs** across three runs, against **536
+   µs** for a cached sign in the same runs: at most 30% of a sign at the
+   largest message there is. **The gate passes.** Four full-size MACs are at
+   most ~640 µs against step 0's 2,926 µs for the four signature operations,
+   and most verbs are far smaller than `NP_NET_MAX`. Its stack is 5,264 bytes
+   including the 2,096-byte message the probe holds, so ~3.2 KB of its own.
+   Measuring it also caught a fault in `edtest` itself: with the three
+   operations as arms of one function, the HMAC arm's buffer inflated the
+   other two readings by up to 5 KB, because the probe reads depth from the
+   top of the stack; each now has its own frame, and sign+verify reads its
+   historical 3,584 again (X25519 now reads 2,784, the 2,944 above having
+   carried the old dispatch frame).
 3. **The boot identity, in the kernel.** Before `ExitBootServices`: increment,
    persist and read back the counter (a non-volatile variable where the
    firmware keeps one across a reboot, else a file on the ESP), and ask for

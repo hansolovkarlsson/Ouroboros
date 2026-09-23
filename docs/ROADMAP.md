@@ -29,7 +29,9 @@ This document is the one to update first when direction changes.
 > **Step 1 done 2026-09-23** (X25519, 236 µs and 2,944 bytes on the guest);
 > its stack gate failed at `park_session`, 80 bytes from the guard page on
 > `main`, which #159 fixed by moving every park's signing into the service
-> pass. Step 2 (HMAC-SHA-512) is next.
+> pass. **Step 2 done 2026-09-23** (HMAC-SHA-512: 120 to 160 µs over a full
+> `NP_NET_MAX` message against 536 µs for a sign). Step 3, the kernel's boot
+> identity, is next.
 
 The microkernel arc is largely built — the FAT32 **filesystem** (`fsd`),
 the **console** (`cond`), and the **network** server (`netd`) all run as
