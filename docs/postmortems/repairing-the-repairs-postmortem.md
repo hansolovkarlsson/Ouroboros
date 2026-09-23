@@ -335,3 +335,50 @@ the fix, truncated at 11,303 without it. One rig, one measured finding, out of
 an arc of roughly seventy. The recipe is in
 [`testing-qemu.md`](../testing/testing-qemu.md) and it says plainly that the fix
 it measured is not in the tree.
+
+## A plan reviewed four times, and what a plan's rounds converge on (2026-09-22)
+
+*Added from the session-scoped authentication plan,
+[`roadmap-session-auth.md`](../roadmap/roadmap-session-auth.md), #157. A
+document, not code: no rig can reach it, so review is its only instrument,
+which is the condition the 2026-09-07 stopping rule above says to treat with
+suspicion.*
+
+| round | findings | the one that mattered | in the previous round's repair? |
+| --- | --- | --- | --- |
+| 1 | 10 | the ephemerals need entropy, and Parallels and the Pi have none | no: a missing premise |
+| 2 | 10 | round 1's derivation could not be built (three ways) | **yes, all three** |
+| 3 | 10 | a same-boot read-back cannot prove a counter persisted | **yes** |
+| 4 (medium) | 4 | two counter stores could repeat a value | **yes** |
+
+**The spine held again: every round after the first found a defect in the
+previous round's repair**, and each one was in the *mechanism the repair had
+added* (a derivation, then a persistence check, then a second store), never in
+the parts of the design that had not moved. That is the useful observation. The
+X25519 exchange inside `NP_SESSION`, the per-direction keys and the sequenced
+HMAC frame came through all four rounds untouched; the boot counter was new in
+round 1's repair and drew a defect in every round after.
+
+**Why this one merged when 2026-09-07's did not.** The rule above says rounds
+that keep finding defects in the repairs mean the work has no check that can
+fail. A plan never has one, so the rule cannot be applied to it as written. What
+decided it here was two things the 09-07 arc did not have. The severity fell
+every round (a premise, then an unbuildable mechanism, then an undetectable
+failure, then a value that could repeat under a store switch), and **the plan
+itself is a list of checks**: every step names a check and a control that shows
+it can fail, and the boot counter has its own step with a two-boot check and
+three controls. The remaining risk in a plan moves into those checks, which
+will be real code with real rigs, and that is where it should be caught.
+
+**Two of the findings were the cluster-keys spine, caught before any code
+existed.** A persistence check that reads back in the same boot passes on a
+store that forgets at every reboot; a control listed under the step whose
+honest export can never produce the input it tests. Both are checks that
+cannot fail, and both were found in prose. A plan's controls deserve the
+question "what would make this pass when it should not" as much as a test's.
+
+**The rewrite beat the patch once.** Round 2's three defects came from
+patching Decision 6 finding by finding. After it, the decision was rewritten
+whole around the new choice (a kernel boot ID through UEFI), and the next two
+rounds found smaller things in it. A repair that touches one mechanism three
+ways is a redesign of that mechanism, and it is cheaper to review as one.
