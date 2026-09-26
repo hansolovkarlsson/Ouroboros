@@ -181,6 +181,7 @@ DEV_PEER_LABELS = {
     "node-a": "ouroboros-dev-node-a",
     "node-b": "ouroboros-dev-node-b",
     "host": "ouroboros-dev-host-peer",
+    "intruder": "ouroboros-dev-intruder",  # impersonate-gate's hostile peer; no machine
 }
 
 NP_NONCE_LEN = 16  # fresh per-request value the reply signature is bound to
@@ -216,7 +217,7 @@ SIG_DOMAIN_EPHEMERAL_E = b"ouroboros-cluster-eph-e-v1\0"
 # reported "10 constants agree".
 NP_AUTH_HDR_SIGNED = 8 + NP_NONCE_LEN + NP_NAME_LEN + NP_PUBKEY_LEN + NP_SIG_LEN
 
-# Public keys this server accepts, by hex. The dev cluster's three identities,
+# Public keys this server accepts, by hex. The dev cluster's identities,
 # derived the same way scripts/mkclusterkeys.py derives them - so a guest built
 # from this tree is authorized here without any copying.
 #

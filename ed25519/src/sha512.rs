@@ -54,6 +54,12 @@ const H0: [u64; 8] = [
 
 /// An incremental SHA-512. Fixed size, no allocation: one block of buffer, the
 /// eight-word state, and a byte count.
+///
+/// `Clone`, because PBKDF2 (step 2 of `docs/roadmap/roadmap-user-keys.md`)
+/// primes the HMAC's inner and outer hashes with the key pads once and copies
+/// them per iteration, which is what makes an iteration two compressions rather
+/// than four. A copy continues exactly as the original would.
+#[derive(Clone)]
 pub struct Sha512 {
     state: [u64; 8],
     /// Bytes buffered but not yet compressed (always `< BLOCK_LEN`).
@@ -307,6 +313,26 @@ mod tests {
                 h.update(&[*b]);
             }
             assert_eq!(h.finalize(), sha512(msg), "vector {name} byte-at-a-time");
+        }
+    }
+
+    #[test]
+    fn a_clone_continues_as_the_original() {
+        // PBKDF2 clones a hash primed with a key pad and finishes the copy once
+        // per iteration, so the copy must carry the buffered bytes and the
+        // length as well as the state. Split at every point, so the clone is
+        // taken with a partial block buffered as often as with none.
+        for (name, msg, _) in vectors() {
+            let want = sha512(msg);
+            for split in 0..=msg.len() {
+                let mut h = Sha512::new();
+                h.update(&msg[..split]);
+                let mut copy = h.clone();
+                copy.update(&msg[split..]);
+                h.update(b"the original goes on to hash something else");
+                assert_eq!(copy.finalize(), want, "vector {name}, cloned at {split}");
+                assert_ne!(h.finalize(), want, "vector {name}: the copy shares state with the original");
+            }
         }
     }
 

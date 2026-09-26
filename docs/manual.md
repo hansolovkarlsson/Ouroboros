@@ -354,7 +354,9 @@ private one: it requires no key and no account.
 
 In the QEMU images a dev identity is staged automatically
 (`scripts/mkclusterkeys.py`, selected by the Makefile's `CLUSTER_NODE`), so the
-two-VM targets authenticate out of the box. On a real machine: run
+two-VM targets authenticate out of the box. The dev `authorized` also lists
+`intruder`, a test identity no machine holds, which the impersonation gate
+signs as (`docs/testing/testing-qemu.md`). On a real machine: run
 `clusterkey new` on each, `clusterkey line <name> <ip>` on one to print the line
 the other should hold, and paste it into that machine's
 `/etc/cluster/authorized`. `clusterkey peers` lists what a machine currently

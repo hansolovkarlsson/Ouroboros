@@ -224,7 +224,7 @@ $ unmount                    # drop the mounted filesystem</code></pre></div>
 <tr><td><code class="inline">\NOEXEC</code></td><td>Presence-only flag: authenticated peers may still <code class="inline">mount -r</code> the disk, but every remote <code class="inline">cpu</code> is refused.</td></tr>
 </tbody></table></div>
 
-<p>The QEMU images stage a dev identity automatically, so the two-VM targets authenticate out of the box. On a real machine: run <code class="inline">clusterkey new</code> on each, <code class="inline">clusterkey line &lt;name&gt; &lt;ip&gt;</code> on one to print the line the other should hold, and paste it in. <code class="inline">clusterkey peers</code> lists what a machine currently accepts and flags a line that cannot work. Key generation <strong>refuses without real entropy</strong> rather than producing a guessable identity.</p>
+<p>The QEMU images stage a dev identity automatically, so the two-VM targets authenticate out of the box. Their <code class="inline">authorized</code> also lists <code class="inline">intruder</code>, a test identity no machine holds, which the impersonation gate signs as. On a real machine: run <code class="inline">clusterkey new</code> on each, <code class="inline">clusterkey line &lt;name&gt; &lt;ip&gt;</code> on one to print the line the other should hold, and paste it in. <code class="inline">clusterkey peers</code> lists what a machine currently accepts and flags a line that cannot work. Key generation <strong>refuses without real entropy</strong> rather than producing a guessable identity.</p>
 
 <h3>Setting up two machines</h3>
 
