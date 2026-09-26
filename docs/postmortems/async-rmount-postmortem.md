@@ -208,3 +208,33 @@ two-phase park, where the held verb is signed later in the service pass, became
 blocking design had kept the signing shallow for free, because the call and the
 sign happened in the handler, and parking moved the handler under the pump.
 
+
+## The mirror of step 1's inlining, and the bill for sessions (2026-09-26)
+
+*Added from steps 6 and 7 of
+[`roadmap-session-auth.md`](../roadmap/roadmap-session-auth.md), the keyed
+export and client.*
+
+Section 3's first entry was a caller deleted: `session_rmount` became the only
+caller of its path, was inlined, and carried the other path's buffers on every
+mount. Step 6 was the same fact the other way round. The keyed dispatch added a
+second caller of `build_9p_reply`, which had been inlined into `handle_9p`'s host
+frame with its locals sharing that frame's slots; with two callers it got a
+frame of its own, and **every export verb, signed ones included, peaked 1,760
+bytes deeper than on `main`**, on a path the change was not meant to touch. And
+inside that total, 1,320 bytes were `log`'s console buffers inlined into the
+keyed dispatch for refusal lines that almost never print, which two reasoned
+guesses (the HMAC state, the call site) missed and the disassembly showed at
+once. The fix restored one call site for both formats and moved the refusals to
+a cold function. The rule this adds to section 3's: the number of callers is
+part of every frame's size, in both directions, and a change that adds one is a
+stack change even when it adds no code to the deep path.
+
+Section 3's other lesson, residency, came back as the bill it predicted. Step 7
+measured the client's deepest point, which is still the park path, at 3,840
+bytes of headroom on `main`; the keyed client costs exactly 3 × 112 bytes of
+it, the resident key state of three session slots, and nothing else, since its
+crypto runs from the service pass ~10 KB higher. The state was 144 bytes a slot
+until a review made the handshake's secret and the session's keys one enum,
+since they are never live together. Resident bytes are paid by every chain, so
+they were counted, then shrunk, then counted again.

@@ -525,3 +525,30 @@ three, and #161 fixed it (twenty clean boots against three failures in sixteen).
 The ungraded witness was the right call, and naming why it was ungraded is what
 kept it findable.
 
+
+## Two more, from the arc's last day (2026-09-26)
+
+*Added from the day session-scoped authentication closed, steps 6 to 8 and
+v0.21.0.* Both instruments were right about what they were built to measure and
+wrong about something next to it.
+
+**The timing probe that measured its own dump.** Step 7 re-ran step 0's
+counters around the four keyed operations. The per-operation figures were
+sound (169 µs against 2,926, each count matching the packet capture), but the
+round-trip counter read an 18 ms median verb, against step 0's 6.65 ms: taken
+at its word, keying had made every verb slower. The capture of the same kind of
+run showed replies in about 1.4 ms. The probe's dump is a blocking console
+write at the top of `serve`'s loop and fires on every counted event, which puts
+it between framing a request and sending it, inside the interval it timed. Step
+0's probe, re-run the same day, still read 5.9 ms, so the host was not the
+cause. What caught it was an observer that shares no code with `netd`; the verb
+figures in the plan come from the capture, on non-probed builds of both trees,
+and the probe's round trip is recorded as the one figure it got wrong.
+
+**The gate whose hint blamed the wrong thing.** `keyed-gate`'s user check
+fails when a keyed session as a non-root user reads `/etc/shadow`, and when both
+reads are served it added "a FAT32 image enforces no modes". Under the mutation
+that ran every keyed verb as root, on the ext2 image, it printed exactly that
+hint. The check failed correctly and then sent the reader to the image. It names
+both causes now. A diagnostic written for the likely failure is read during the
+unlikely one, which is when it is needed.
