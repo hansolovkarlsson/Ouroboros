@@ -171,6 +171,11 @@ def main() -> int:
 # nothing and looks like "the cluster used neither format".
 AUTH_FORMATS = (
     ("signed", b"AUTHNP03"[::-1]),
+    # A KEYED session's requests (session-auth step 7). Without this row a
+    # keyed run counts only its NP_SESSIONs, and the cross-check that made
+    # step 0's measurement trustworthy goes blind to the frames that replaced
+    # the signed ones: the observer is the check nobody updates.
+    ("keyed", b"AUTHNP04"[::-1]),
     ("MAC'd", b"AUTHNP02"[::-1]),
 )
 

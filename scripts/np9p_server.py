@@ -967,6 +967,10 @@ HOST_BOOT_ID = struct.pack("<Q", time.time_ns()) + os.urandom(8)
 #   skip-seq    tagged over seq + 1, a reply from the future
 MISBEHAVE_MODES = ("bad-tag", "wrong-key", "replay-seq", "skip-seq")
 MISBEHAVE = None
+# `--unkeyed`: behave as an export that PREDATES keying (v0.20.0): ignore a key
+# offer and answer the NP_SESSION 0 with an empty result, so a new client's
+# fallback to today's signed session can be checked (step 7).
+UNKEYED = False
 
 
 def export_ephemeral(request_nonce):
@@ -1101,7 +1105,7 @@ def serve_connection(conn, addr, delay=0.0):
             elif len(body) >= 8 and struct.unpack("<Q", body[:8])[0] == NP_AUTH_MAGIC_KEYED:
                 # AUTHNP04 on a connection that was never keyed.
                 reply = frame_reply(FS_ERR_AUTH)
-            elif offers_key(body):
+            elif offers_key(body) and not UNKEYED:
                 if not first:
                     # Keying happens only on a fresh connection's first frame.
                     print(f"  [conn {addr}] key offered mid-stream: closing with RST", flush=True)
@@ -1184,6 +1188,11 @@ def main():
         MISBEHAVE = args[mi + 1]
         args = args[:mi] + args[mi + 2:]
         print(f"np9p_server: MISBEHAVING on keyed replies: {MISBEHAVE}")
+    global UNKEYED
+    if "--unkeyed" in args:
+        UNKEYED = True
+        args = [a for a in args if a != "--unkeyed"]
+        print("np9p_server: UNKEYED, a v0.20.0-shaped export: key offers are ignored")
     port = int(args[0]) if args else 5641
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
